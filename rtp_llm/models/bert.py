@@ -118,19 +118,6 @@ class Roberta(Bert):
         config.special_tokens.pad_token_id = config_json["pad_token_id"]
         config.position_ids_style = 1
 
-    def create_context_position_ids(self, input_lengths: List[int]):
-        pad_index = self.config.special_tokens.pad_token_id
-        return torch.concat(
-            [
-                torch.arange(
-                    pad_index + 1, input_length + pad_index + 1, dtype=torch.int32
-                )
-                for input_length in input_lengths
-            ],
-            dim=0,
-        )
-
-
 register_model(
     "bert", Bert, ["BertModel", "BertForMaskedLM", "BertForSequenceClassification"]
 )

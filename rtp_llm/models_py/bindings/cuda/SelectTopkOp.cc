@@ -3,14 +3,17 @@
 
 namespace rtp_llm {
 
-SelectTopkOp::SelectTopkOp(const GptInitParameter& gpt_init_parameter):
-    configs_(gpt_init_parameter), moe_plugin_(std::make_unique<trt_plugins::MixtureOfExpertsPlugin>()) {}
+SelectTopkOp::SelectTopkOp(const ModelConfig& model_config):
+    expert_num_(model_config.expert_num_),
+    moe_k_(model_config.moe_k_),
+    has_moe_norm_(model_config.has_moe_norm_),
+    moe_plugin_(std::make_unique<trt_plugins::MixtureOfExpertsPlugin>()) {}
 
 void SelectTopkOp::forward(torch::Tensor router_logits, torch::Tensor expert_ids, torch::Tensor expert_scales) {
     const auto   token_num          = router_logits.sizes()[0];
-    const auto   num_expert         = configs_.expert_num_;
-    const auto   top_k              = configs_.moe_k_;
-    auto         normalization_mode = configs_.has_moe_norm_ ?
+    const auto   num_expert         = expert_num_;
+    const auto   top_k              = moe_k_;
+    auto         normalization_mode = has_moe_norm_ ?
                                           tensorrt_llm::kernels::MOEExpertScaleNormalizationMode::RENORMALIZE :
                                           tensorrt_llm::kernels::MOEExpertScaleNormalizationMode::NONE;
     auto         topk_t             = expert_ids.dtype();
@@ -60,7 +63,7 @@ void SelectTopkOp::forward(torch::Tensor router_logits, torch::Tensor expert_ids
 
 void registerSelectTopkOp(const py::module& m) {
     pybind11::class_<SelectTopkOp>(m, "SelectTopkOp")
-        .def(pybind11::init<GptInitParameter>(), py::arg("gpt_init_parameter"))
+        .def(pybind11::init<const ModelConfig&>(), py::arg("model_config"))
         .def("forward",
              &SelectTopkOp::forward,
              py::arg("router_logits"),

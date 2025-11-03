@@ -4,10 +4,13 @@ from typing import Optional
 
 from rtp_llm.ops import (
     ConcurrencyConfig,
+    EPLBConfig,
     FfnDisAggregateConfig,
     FMHAConfig,
+    HWKernelConfig,
     MiscellaneousConfig,
     ModelSpecificConfig,
+    PDSepConfig,
     ParallelismDistributedConfig,
     ProfilingDebugLoggingConfig,
     RoleType,
@@ -429,45 +432,6 @@ class QuantizationConfig:
         return f"int8_mode: {self.int8_mode}\n" f"quantization: {self.quantization}"
 
 
-class PyEplbConfig:
-    def __init__(self):
-        self.eplb_mode: str = "NONE"
-        self.eplb_update_time: int = 5000
-        self.redundant_expert: int = 0
-        self.hack_ep_single_entry: int = 0
-        self.balance_method: str = "mix"
-        self.eplb_force_repack: int = 0
-        self.eplb_stats_window_size: int = 10
-
-    def update_from_env(self):
-        self.eplb_mode = os.environ.get("EPLB_MODE", self.eplb_mode)
-        self.eplb_update_time = int(
-            os.environ.get("EPLB_UPDATE_TIME", self.eplb_update_time)
-        )
-        self.redundant_expert = int(
-            os.environ.get("REDUNDANT_EXPERT", self.redundant_expert)
-        )
-        self.hack_ep_single_entry = int(
-            os.environ.get("HACK_EP_SINGLE_ENTRY", self.hack_ep_single_entry)
-        )
-        self.balance_method = os.environ.get("BALANCE_METHOD", self.balance_method)
-        self.eplb_force_repack = int(
-            os.environ.get("EPLB_FORCE_REPACK", self.eplb_force_repack)
-        )
-        self.eplb_stats_window_size = int(
-            os.environ.get("EPLB_STATS_WINDOW_SIZE", self.eplb_stats_window_size)
-        )
-
-    def to_string(self):
-        return (
-            f"eplb_mode: {self.eplb_mode}\n"
-            f"eplb_update_time: {self.eplb_update_time}\n"
-            f"redundant_expert: {self.redundant_expert}\n"
-            f"hack_ep_single_entry: {self.hack_ep_single_entry}\n"
-            f"balance_method: {self.balance_method}\n"
-            f"eplb_force_repack: {self.eplb_force_repack}\n"
-            f"eplb_stats_window_size: {self.eplb_stats_window_size}"
-        )
 
 
 class PyKvCacheConfig:
@@ -556,20 +520,6 @@ class PyDeviceResourceConfig:
             f"device_reserve_memory_bytes: {self.device_reserve_memory_bytes}"
         )
 
-
-class SparseConfig:
-    def __init__(self):
-        self.sparse_config_file: Optional[str] = None
-
-    def update_from_env(self):
-        self.sparse_config_file = os.environ.get(
-            "SPARSE_CONFIG_FILE", self.sparse_config_file
-        )
-
-    def to_string(self):
-        return f"sparse_config_file: {self.sparse_config_file}"
-
-
 class EngineConfig:
     def __init__(self):
         self.warm_up: int = 1
@@ -638,73 +588,6 @@ class RoleConfig:
             return RoleType.PDFUSION
 
 
-class PdSeparationConfig:
-    def __init__(self):
-        # Prefill related configuration
-        self.prefill_retry_times: int = 0
-        self.prefill_retry_timeout_ms: int = 20
-        self.prefill_max_wait_timeout_ms: int = 600 * 1000
-
-        # Decode related configuration
-        self.decode_retry_times: int = 100
-        self.decode_retry_timeout_ms: int = 100
-        self.decode_polling_kv_cache_step_ms: int = 30
-        self.decode_entrance: int = 0
-
-        # RDMA related configuration
-        self.rdma_connect_retry_times: int = 0
-        self.load_cache_timeout_ms: int = 5000
-
-    def update_from_env(self):
-        # Prefill related configuration
-        self.prefill_retry_times = int(
-            os.environ.get("PREFILL_RETRY_TIMES", self.prefill_retry_times)
-        )
-        self.prefill_retry_timeout_ms = int(
-            os.environ.get("PREFILL_RETRY_TIMEOUT_MS", self.prefill_retry_timeout_ms)
-        )
-        self.prefill_max_wait_timeout_ms = int(
-            os.environ.get(
-                "PREFILL_MAX_WAIT_TIMEOUT_MS", self.prefill_max_wait_timeout_ms
-            )
-        )
-
-        # Decode related configuration
-        self.decode_retry_times = int(
-            os.environ.get("DECODE_RETRY_TIMES", self.decode_retry_times)
-        )
-        self.decode_retry_timeout_ms = int(
-            os.environ.get("DECODE_RETRY_TIMEOUT_MS", self.decode_retry_timeout_ms)
-        )
-        self.decode_polling_kv_cache_step_ms = int(
-            os.environ.get(
-                "DECODE_POLLING_KV_CACHE_STEP_MS", self.decode_polling_kv_cache_step_ms
-            )
-        )
-        self.decode_entrance = int(
-            os.environ.get("DECODE_ENTRANCE", self.decode_entrance)
-        )
-
-        # RDMA related configuration
-        self.rdma_connect_retry_times = int(
-            os.environ.get("RDMA_CONNECT_RETRY_TIMES", self.rdma_connect_retry_times)
-        )
-        self.load_cache_timeout_ms = int(
-            os.environ.get("LOAD_CACHE_TIMEOUT_MS", self.load_cache_timeout_ms)
-        )
-
-    def to_string(self):
-        return (
-            f"prefill_retry_times: {self.prefill_retry_times}\n"
-            f"prefill_retry_timeout_ms: {self.prefill_retry_timeout_ms}\n"
-            f"prefill_max_wait_timeout_ms: {self.prefill_max_wait_timeout_ms}\n"
-            f"decode_retry_times: {self.decode_retry_times}\n"
-            f"decode_retry_timeout_ms: {self.decode_retry_timeout_ms}\n"
-            f"decode_polling_kv_cache_step_ms: {self.decode_polling_kv_cache_step_ms}\n"
-            f"decode_entrance: {self.decode_entrance}\n"
-            f"rdma_connect_retry_times: {self.rdma_connect_retry_times}\n"
-            f"load_cache_timeout_ms: {self.load_cache_timeout_ms}"
-        )
 
 
 class WorkerConfig:
@@ -734,71 +617,6 @@ class JITConfig:
         return f"remote_jit_dir: {self.remote_jit_dir}"
 
 
-class PyHwKernelConfig:
-    def __init__(self):
-        self.deep_gemm_num_sm: int = -1
-        self.arm_gemm_use_kai: bool = False
-        self.enable_stable_scatter_add: bool = False
-        self.enable_multi_block_mode: bool = True
-        self.ft_disable_custom_ar: bool = True
-        self.rocm_hipblaslt_config: str = "gemm_config.csv"
-        self.use_swizzleA = False
-        self.enable_cuda_graph: bool = False
-        self.enable_cuda_graph_debug_mode: bool = False
-        self.use_aiter_pa: bool = True
-        self.use_asm_pa: bool = True
-        self.enable_native_cuda_graph: bool = False
-        self.num_native_cuda_graph: int = 200
-
-    def update_from_env(self):
-        self.deep_gemm_num_sm = get_env_int("DEEP_GEMM_NUM_SM", self.deep_gemm_num_sm)
-        self.arm_gemm_use_kai = get_env_bool("ARM_GEMM_USE_KAI", self.arm_gemm_use_kai)
-        self.enable_stable_scatter_add = get_env_bool(
-            "ENABLE_STABLE_SCATTER_ADD", self.enable_stable_scatter_add
-        )
-        self.enable_multi_block_mode = get_env_bool(
-            "ENABLE_MULTI_BLOCK_MODE", self.enable_multi_block_mode
-        )
-        self.ft_disable_custom_ar = get_env_bool(
-            "FT_DISABLE_CUSTOM_AR", self.ft_disable_custom_ar
-        )
-        self.rocm_hipblaslt_config = get_env_str(
-            "ROCM_HIPBLASLT_CONFIG", self.rocm_hipblaslt_config
-        )
-        self.use_swizzleA = get_env_bool(
-            "USE_SWIZZLEA", self.use_swizzleA
-        )
-        self.enable_cuda_graph = get_env_bool(
-            "ENABLE_CUDA_GRAPH", self.enable_cuda_graph
-        )
-        self.enable_cuda_graph_debug_mode = get_env_bool(
-            "ENABLE_CUDA_GRAPH_DEBUG_MODE", self.enable_cuda_graph_debug_mode
-        )
-        self.use_aiter_pa = get_env_bool("USE_AITER_PA", self.use_aiter_pa)
-        self.use_asm_pa = get_env_bool("USE_ASM_PA", self.use_asm_pa)
-        self.enable_native_cuda_graph = get_env_bool(
-            "ENABLE_NATIVE_CUDA_GRAPH", self.enable_native_cuda_graph
-        )
-        self.num_native_cuda_graph = get_env_int(
-            "NUM_NATIVE_CUDA_GRAPH", self.num_native_cuda_graph
-        )
-
-    def to_string(self):
-        return (
-            f"deep_gemm_num_sm: {self.deep_gemm_num_sm}\n"
-            f"arm_gemm_use_kai: {self.arm_gemm_use_kai}\n"
-            f"enable_stable_scatter_add: {self.enable_stable_scatter_add}\n"
-            f"enable_multi_block_mode: {self.enable_multi_block_mode}\n"
-            f"ft_disable_custom_ar: {self.ft_disable_custom_ar}\n"
-            f"rocm_hipblaslt_config: {self.rocm_hipblaslt_config}\n"
-            f"use_swizzleA: {self.use_swizzleA}\n"
-            f"enable_cuda_graph: {self.enable_cuda_graph}\n"
-            f"enable_cuda_graph_debug_mode: {self.enable_cuda_graph_debug_mode}\n"
-            f"use_aiter_pa: {self.use_aiter_pa}\n"
-            f"use_asm_pa: {self.use_asm_pa}\n"
-            f"enable_native_cuda_graph: {self.enable_native_cuda_graph}\n"
-            f"num_native_cuda_graph: {self.num_native_cuda_graph}"
-        )
 
 
 class PyEnvConfigs:
@@ -818,17 +636,16 @@ class PyEnvConfigs:
         self.vit_config: VitConfig = VitConfig()
         self.generate_env_config: GenerateEnvConfig = GenerateEnvConfig()
         self.quantization_config: QuantizationConfig = QuantizationConfig()
-        self.py_eplb_config: PyEplbConfig = PyEplbConfig()
+        self.py_eplb_config: EPLBConfig = EPLBConfig()
         self.py_kv_cache_config: PyKvCacheConfig = PyKvCacheConfig()
         self.py_device_resource_config: PyDeviceResourceConfig = (
             PyDeviceResourceConfig()
         )
-        self.sparse_config: SparseConfig = SparseConfig()
         self.engine_config: EngineConfig = EngineConfig()
         self.embedding_config: EmbeddingConfig = EmbeddingConfig()
         self.worker_config: WorkerConfig = WorkerConfig()
         self.role_config: RoleConfig = RoleConfig()
-        self.pd_separation_config: PdSeparationConfig = PdSeparationConfig()
+        self.pd_separation_config: PDSepConfig = PDSepConfig()
         self.parallelism_distributed_config: ParallelismDistributedConfig = (
             ParallelismDistributedConfig()
         )
@@ -838,7 +655,7 @@ class PyEnvConfigs:
         self.misc_config = MiscellaneousConfig()
         self.concurrency_config = ConcurrencyConfig()
         self.jit_config = JITConfig()
-        self.py_hw_kernel_config = PyHwKernelConfig()
+        self.py_hw_kernel_config: HWKernelConfig = HWKernelConfig()
 
     def update_from_env(self):
         self.server_config.update_from_env()
@@ -852,15 +669,14 @@ class PyEnvConfigs:
         self.vit_config.update_from_env()
         self.generate_env_config.update_from_env()
         self.quantization_config.update_from_env()
-        self.py_eplb_config.update_from_env()
+        self.py_eplb_config.update_from_env_for_test()
         self.py_kv_cache_config.update_from_env()
         self.py_device_resource_config.update_from_env()
-        self.sparse_config.update_from_env()
         self.engine_config.update_from_env()
         self.embedding_config.update_from_env()
         self.worker_config.update_from_env()
         self.role_config.update_from_env()
-        self.pd_separation_config.update_from_env()
+        self.pd_separation_config.update_from_env_for_test()
         # in gpt model parameters, we should update it from g_parallel_info
         self.parallelism_distributed_config.update_from_env()
         self.model_specific_config.update_from_env()
@@ -869,7 +685,7 @@ class PyEnvConfigs:
         self.concurrency_config.update_from_env()
         self.ffn_disaggregate_config.update_from_env()
         self.jit_config.update_from_env()
-        self.py_hw_kernel_config.update_from_env()
+        self.py_hw_kernel_config.update_from_env_for_test()
         logging.info(self.to_string())
 
     def to_string(self):

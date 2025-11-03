@@ -22,7 +22,11 @@ class SliceStopWordListTest(TestCase):
         model = FakeModelLoader(
             "llama", ckpt_path, ckpt_path, max_seq_len=1024
         ).load_model()
-        self.pipeline = Pipeline(model.config, model.tokenizer)
+        self.pipeline = Pipeline(
+            model.config.gpt_init_params,
+            model.config.py_model_config,
+            model.tokenizer,
+        )
 
     async def mock_generate(self):
         yield GenerateOutputs(

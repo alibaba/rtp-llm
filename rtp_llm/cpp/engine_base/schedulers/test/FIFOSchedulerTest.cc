@@ -25,9 +25,9 @@ TEST_F(FIFOSchedulerTest, testSimple) {
     resource_context.cache_manager = cache_manager;
 
     GptInitParameter config;
-    config.max_seq_len_             = 8192;
-    config.max_generate_batch_size_ = 100;
-    config.max_batch_tokens_size_   = 8192;
+    config.model_config_.max_seq_len_             = 8192;
+    config.runtime_config.max_generate_batch_size = 100;
+    config.runtime_config.max_batch_tokens_size   = 8192;
     FIFOScheduler                  scheduler(config, cache_manager);
     std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
     query->input_ids                     = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
@@ -60,9 +60,9 @@ TEST_F(FIFOSchedulerTest, testInitKVCacheLackMem) {
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
     GptInitParameter config;
-    config.max_seq_len_             = 8192;
-    config.max_generate_batch_size_ = 100;
-    config.max_batch_tokens_size_   = 8192;
+    config.model_config_.max_seq_len_             = 8192;
+    config.runtime_config.max_generate_batch_size = 100;
+    config.runtime_config.max_batch_tokens_size   = 8192;
     FIFOScheduler                  scheduler(config, cache_manager);
     std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
     query->input_ids                     = createBuffer<int32_t>({3}, {1, 2, 3}, AllocationType::HOST);
@@ -91,9 +91,9 @@ TEST_F(FIFOSchedulerTest, testIncrKVCacheLackMem) {
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
     GptInitParameter config;
-    config.max_seq_len_             = 8192;
-    config.max_generate_batch_size_ = 100;
-    config.max_batch_tokens_size_   = 8192;
+    config.model_config_.max_seq_len_             = 8192;
+    config.runtime_config.max_generate_batch_size = 100;
+    config.runtime_config.max_batch_tokens_size   = 8192;
     FIFOScheduler                  scheduler(config, cache_manager);
     std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
     query->input_ids                     = createBuffer<int32_t>({4}, {1, 2, 3, 4}, AllocationType::HOST);
@@ -132,9 +132,9 @@ TEST_F(FIFOSchedulerTest, testIncrKVCacheFallBackReleaseAllBlocks) {
     resource_context.cache_manager = cache_manager;
     resource_context.reuse_cache   = false;
     GptInitParameter config;
-    config.max_seq_len_             = 8192;
-    config.max_generate_batch_size_ = 100;
-    config.max_batch_tokens_size_   = 8192;
+    config.model_config_.max_seq_len_             = 8192;
+    config.runtime_config.max_generate_batch_size = 100;
+    config.runtime_config.max_batch_tokens_size   = 8192;
     FIFOScheduler scheduler(config, cache_manager);
     scheduler.enable_partial_fallback_    = false;
     std::shared_ptr<GenerateInput> query1 = make_shared<GenerateInput>();
@@ -199,9 +199,9 @@ TEST_F(FIFOSchedulerTest, testIncrKVCacheFallBackReleasePartBlocks) {
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
     GptInitParameter config;
-    config.max_seq_len_             = 8192;
-    config.max_generate_batch_size_ = 100;
-    config.max_batch_tokens_size_   = 8192;
+    config.model_config_.max_seq_len_             = 8192;
+    config.runtime_config.max_generate_batch_size = 100;
+    config.runtime_config.max_batch_tokens_size   = 8192;
     FIFOScheduler scheduler(config, cache_manager);
     scheduler.enable_partial_fallback_   = true;
     std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
@@ -271,9 +271,9 @@ TEST_F(FIFOSchedulerTest, testReuseCache) {
     ASSERT_EQ(cache_manager->freeBlockNums(), 10);
     ResourceContext  resource_context = {cache_manager, nullptr, nullptr, true};
     GptInitParameter config;
-    config.max_seq_len_             = 8192;
-    config.max_generate_batch_size_ = 100;
-    config.max_batch_tokens_size_   = 8192;
+    config.model_config_.max_seq_len_             = 8192;
+    config.runtime_config.max_generate_batch_size = 100;
+    config.runtime_config.max_batch_tokens_size   = 8192;
     FIFOScheduler scheduler(config, cache_manager);
 
     std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
@@ -319,8 +319,8 @@ TEST_F(FIFOSchedulerTest, testMaxContextBatchSize) {
     ASSERT_EQ(cache_manager->freeBlockNums(), 20);
     ResourceContext  resource_context = {cache_manager, nullptr, nullptr, true};
     GptInitParameter config;
-    config.max_seq_len_            = 100;
-    config.max_context_batch_size_ = 1;
+    config.model_config_.max_seq_len_            = 100;
+    config.runtime_config.max_context_batch_size = 1;
     config.max_batch_tokens_size_  = 100;
     FIFOScheduler scheduler(config, cache_manager);
 
@@ -402,9 +402,9 @@ TEST_F(FIFOSchedulerTest, testBatchEnqueue) {
     resource_context.cache_manager = cache_manager;
 
     GptInitParameter config;
-    config.max_seq_len_             = 8192;
-    config.max_generate_batch_size_ = 100;
-    config.max_batch_tokens_size_   = 8192;
+    config.model_config_.max_seq_len_             = 8192;
+    config.runtime_config.max_generate_batch_size = 100;
+    config.runtime_config.max_batch_tokens_size   = 8192;
     FIFOScheduler             scheduler(config, cache_manager);
     vector<GenerateStreamPtr> streams;
     {

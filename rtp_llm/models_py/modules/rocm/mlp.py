@@ -4,7 +4,7 @@ import aiter
 import torch
 from torch import nn
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig as PyModelConfig
 from rtp_llm.models_py.modules import Linear
 from rtp_llm.ops import rtp_llm_ops
 from rtp_llm.utils.model_weight import W
@@ -12,7 +12,7 @@ from rtp_llm.utils.model_weight import W
 
 class DenseMLP(nn.Module):
     def __init__(
-        self, config: GptInitModelParameters, weights: Dict[str, torch.Tensor]
+        self, config: PyModelConfig, weights: Dict[str, torch.Tensor]
     ):
         super().__init__()
 
@@ -44,7 +44,7 @@ class DenseMLP(nn.Module):
 
 class FusedSiluActDenseMLP(nn.Module):
     def __init__(
-        self, config: GptInitModelParameters, weights: Dict[str, torch.Tensor]
+        self, config: PyModelConfig, weights: Dict[str, torch.Tensor]
     ):
         super().__init__()
         assert (

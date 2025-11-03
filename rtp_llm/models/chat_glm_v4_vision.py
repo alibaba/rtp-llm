@@ -35,7 +35,6 @@ class ChatGlmV4Vision(ChatGlmV4, MultiModalMixin):
         config_dict = get_config_from_path(ckpt_path)
         vit_config = config_dict["vision_config"]
         config.mm_related_params.config.update(vit_config)
-        config.build_position_ids = True
         # use initial hidden size for linear_proj and conv layer in eva2clip
         config.mm_related_params.config["use_vision_hidden_size"] = False
         config.mm_related_params.config["boi_token_id"] = config_dict.get(

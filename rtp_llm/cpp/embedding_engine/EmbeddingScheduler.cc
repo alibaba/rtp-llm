@@ -1,15 +1,15 @@
 #include "rtp_llm/cpp/embedding_engine/EmbeddingScheduler.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
-#include "rtp_llm/cpp/config/GptInitParameter.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include <mutex>
 
 using namespace std;
 namespace rtp_llm {
 
-EmbeddingScheduler::EmbeddingScheduler(const rtp_llm::GptInitParameter&   config,
+EmbeddingScheduler::EmbeddingScheduler(const ModelConfig& model_config,
+                                       const ConcurrencyConfig& concurrency_config,
                                        const kmonitor::MetricsReporterPtr metrics_reporter):
-    config_(config), metrics_reporter_(metrics_reporter) {}
+    model_config_(model_config), concurrency_config_(concurrency_config), metrics_reporter_(metrics_reporter) {}
 
 EmbeddingScheduler::~EmbeddingScheduler() {
     (void)stop();
@@ -39,7 +39,7 @@ absl::StatusOr<list<EmbeddingStreamPtr>> EmbeddingScheduler::scheduleNew() {
     auto                          it        = waiting_streams_.begin();
     while (it != waiting_streams_.end()) {
         const auto& stream = *it;
-        if (total_len + stream->inputLength() > config_.max_context_batch_size_ * config_.max_seq_len_) {
+        if (total_len + stream->inputLength() > concurrency_config_.max_context_batch_size * model_config_.max_seq_len_) {
             break;
         }
         stream->setStart();

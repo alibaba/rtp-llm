@@ -48,7 +48,7 @@ public:
             auto model_params = GptModelInitParams(
                 {device_,
                  mtp_params->gpt_weights,
-                 Executor::genModelDescription(mtp_params->gpt_init_parameter),
+                 Executor::genModelDescription(mtp_params->gpt_init_parameter.model_config_, mtp_params->gpt_init_parameter.parallelism_config, mtp_params->gpt_init_parameter.eplb_config),
                  cache_manager ? ((std::optional<KVCacheAllocator::KVCacheBuffer>)cache_manager->kvCacheBuffer()) :
                                  std::nullopt,
                  mtp_params->model_id});

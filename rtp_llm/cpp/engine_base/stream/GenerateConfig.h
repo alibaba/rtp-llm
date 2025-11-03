@@ -6,10 +6,29 @@
 #include <vector>
 
 #include "rtp_llm/cpp/utils/StringUtil.h"
-#include "rtp_llm/cpp/config/GptInitParameter.h"
 #include "autil/legacy/jsonizable.h"
 
 namespace rtp_llm {
+
+
+    enum RoleType {
+        PDFUSION = 0,
+        PREFILL  = 1,
+        DECODE   = 2,
+        VIT      = 3,
+        FRONTEND = 4
+    };
+    
+    class RoleAddr {
+            public:
+                RoleType    role;
+                std::string ip;
+                int         http_port;
+                int         grpc_port;
+            
+                RoleAddr(RoleType type, std::string ip, int http_port, int grpc_port):
+                    role(type), ip(ip), http_port(http_port), grpc_port(grpc_port) {}
+            };
 
 // NOTE: The params in generate config should be splitted into two parts:
 //       1. The params that can be different for a single sampler.

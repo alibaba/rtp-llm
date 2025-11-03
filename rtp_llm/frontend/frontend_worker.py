@@ -60,10 +60,26 @@ class FrontendWorker:
         self.model_config = ModelFactory.create_frontend_config(
             ModelFactory.create_normal_model_config()
         )
-        self.tokenizer = TokenizerFactory.create_from_env()
+        # Get tokenizer parameters from model_config
+        ckpt_path = self.model_config.py_model_config.ckpt_path
+        tokenizer_path = self.model_config.py_model_config.tokenizer_path_
+        if not tokenizer_path:
+            tokenizer_path = ckpt_path
+        # Get model_type from StaticConfig (temporary until we refactor further)
+        from rtp_llm.config.py_config_modules import StaticConfig
+        model_type = StaticConfig.model_config.model_type
+        from rtp_llm.utils.fuser import fetch_remote_file_to_local
+        tokenizer_path = fetch_remote_file_to_local(tokenizer_path)
+        ckpt_path = fetch_remote_file_to_local(ckpt_path)
+        self.tokenizer = TokenizerFactory.create(ckpt_path, tokenizer_path, model_type)
         self.model_config.update_task_prompt_tokens_id(self.tokenizer)
-        self.model_config.update_tokenizer_special_tokens(self.tokenizer)
-        self.pipeline = Pipeline(self.model_config, self.tokenizer, separated_frontend)
+        self.model_config.py_model_config.update_tokenizer_special_tokens(self.tokenizer)
+        self.pipeline = Pipeline(
+            self.model_config.gpt_init_params,
+            self.model_config.py_model_config,
+            self.tokenizer,
+            separated_frontend,
+        )
         self.backend_rpc_server_visitor = self.pipeline.backend_rpc_server_visitor
         logging.info("frontend worker start done.")
 

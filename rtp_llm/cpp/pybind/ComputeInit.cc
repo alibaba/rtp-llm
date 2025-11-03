@@ -1,5 +1,5 @@
 #include <torch/library.h>
-#include "rtp_llm/cpp/config/GptInitParameter.h"
+#include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "rtp_llm/models_py/bindings/RegisterOps.h"

@@ -98,7 +98,9 @@ public:
                  rtp_llm::DeviceBase*               device,
                  bool                               warmup           = false,
                  const kmonitor::MetricsReporterPtr metrics_reporter = nullptr,
-                 const GptInitParameter&            params           = GptInitParameter{});
+                 const KVCacheConfig&               kv_cache_config  = KVCacheConfig{},
+                 const ParallelismConfig&           parallelism_config = ParallelismConfig{},
+                 const RuntimeConfig&                runtime_config = RuntimeConfig{});
     ~CacheManager();
 
     const CacheConfig&                     cacheConfig() const;
@@ -201,7 +203,7 @@ protected:
 
     std::mutex mutex_;
 
-    const GptInitParameter             params_;
+    const KVCacheConfig                kv_cache_config_;
     std::map<std::string, std::string> lora_info_map_;
     bool                               enable_dist_kvcache_{false};
     std::shared_ptr<DistKvCache>       dist_kvcache_;

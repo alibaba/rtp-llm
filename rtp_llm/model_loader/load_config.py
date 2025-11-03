@@ -38,7 +38,6 @@ class LoadConfig(BaseModel):
     ffn_tp_size: int
     ffn_tp_rank: int
     num_nodes: int
-    tp_split_emb_and_lm_head: bool = False
     bit: int = 16
     merge_lora: bool = False
 

@@ -7,7 +7,8 @@
 #include <grpcpp/resource_quota.h>
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
-#include "rtp_llm/cpp/config/GptInitParameter.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/pybind/multi_gpu_gpt/RtpLLMOp.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
@@ -24,21 +25,84 @@ namespace th = torch;
 
 namespace rtp_llm {
 
-std::tuple<GptInitParameter, std::unique_ptr<Weights>> prepareEngineInitParams(
+struct EngineInitConfigParams {
+    ModelConfig model_config_;
+    MMModelConfig mm_model_config_;
+    ParallelismConfig parallelism_config;
+    RuntimeConfig runtime_config;
+    EPLBConfig eplb_config;
+    PDSepConfig pd_sep_config;
+    ConcurrencyConfig concurrency_config;
+    FMHAConfig fmha_config;
+    KVCacheConfig kv_cache_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    HWKernelConfig hw_kernel_config;
+    DeviceResourceConfig device_resource_config;
+    MoeConfig moe_config;
+    ModelSpecificConfig model_specific_config;
+    SpeculativeExecutionConfig sp_config;
+    CacheStoreConfig cache_store_config;
+    MiscellaneousConfig misc_config;
+    ArpcConfig arpc_config;
+    FfnDisAggregateConfig ffn_disaggregate_config;
+};
+
+std::tuple<EngineInitConfigParams, std::unique_ptr<Weights>> prepareEngineInitParams(
     py::object model, bool sp_model)
 {
     if (sp_model) {
         model = model.attr("model");
     }
-    const GptInitParameter& gpt_init_params =
-    model.attr("config").attr("gpt_init_params").cast<GptInitParameter>();
+    py::object config_obj = model.attr("config");
+    // Extract individual config members from Python config object
+    auto model_config = config_obj.attr("py_model_config").cast<ModelConfig>();
+    auto mm_model_config = config_obj.attr("mm_model_config").cast<MMModelConfig>();
+    auto parallelism_config = config_obj.attr("parallelism_config").cast<ParallelismConfig>();
+    auto runtime_config = config_obj.attr("runtime_config").cast<RuntimeConfig>();
+    auto eplb_config = config_obj.attr("eplb_config").cast<EPLBConfig>();
+    auto pd_sep_config = config_obj.attr("pd_sep_config").cast<PDSepConfig>();
+    auto concurrency_config = config_obj.attr("concurrency_config").cast<ConcurrencyConfig>();
+    auto fmha_config = config_obj.attr("fmha_config").cast<FMHAConfig>();
+    auto kv_cache_config = config_obj.attr("kv_cache_config").cast<KVCacheConfig>();
+    auto profiling_debug_logging_config = config_obj.attr("profiling_debug_logging_config").cast<ProfilingDebugLoggingConfig>();
+    auto hw_kernel_config = config_obj.attr("hw_kernel_config").cast<HWKernelConfig>();
+    auto device_resource_config = config_obj.attr("device_resource_config").cast<DeviceResourceConfig>();
+    auto moe_config = config_obj.attr("moe_config").cast<MoeConfig>();
+    auto model_specific_config = config_obj.attr("model_specific_config").cast<ModelSpecificConfig>();
+    auto sp_config = config_obj.attr("sp_config").cast<SpeculativeExecutionConfig>();
+    auto cache_store_config = config_obj.attr("cache_store_config").cast<CacheStoreConfig>();
+    auto misc_config = config_obj.attr("misc_config").cast<MiscellaneousConfig>();
+    auto arpc_config = config_obj.attr("arpc_config").cast<ArpcConfig>();
+    auto ffn_disaggregate_config = config_obj.attr("ffn_disaggregate_config").cast<FfnDisAggregateConfig>();
+    
     py::object py_layers_weights = model.attr("weight").attr("weights");
     py::object py_global_weights = model.attr("weight").attr("global_weights");
     
-    auto convert    = WeightsConverter(false, gpt_init_params.quant_algo_);
+    auto convert    = WeightsConverter(false, model_config.quant_algo_);
     auto gpt_weight = convert.createGptWeights(py_layers_weights, py_global_weights);
     
-    return {gpt_init_params, std::move(gpt_weight)};
+    EngineInitConfigParams config_params;
+    config_params.model_config_ = model_config;
+    config_params.mm_model_config_ = mm_model_config;
+    config_params.parallelism_config = parallelism_config;
+    config_params.runtime_config = runtime_config;
+    config_params.eplb_config = eplb_config;
+    config_params.pd_sep_config = pd_sep_config;
+    config_params.concurrency_config = concurrency_config;
+    config_params.fmha_config = fmha_config;
+    config_params.kv_cache_config = kv_cache_config;
+    config_params.profiling_debug_logging_config = profiling_debug_logging_config;
+    config_params.hw_kernel_config = hw_kernel_config;
+    config_params.device_resource_config = device_resource_config;
+    config_params.moe_config = moe_config;
+    config_params.model_specific_config = model_specific_config;
+    config_params.sp_config = sp_config;
+    config_params.cache_store_config = cache_store_config;
+    config_params.misc_config = misc_config;
+    config_params.arpc_config = arpc_config;
+    config_params.ffn_disaggregate_config = ffn_disaggregate_config;
+    
+    return {config_params, std::move(gpt_weight)};
 }
 
 std::unique_ptr<ProposeModelEngineInitParams> prepareMTPEngineInitParams(size_t model_id, py::object model) {
@@ -49,33 +113,54 @@ std::unique_ptr<ProposeModelEngineInitParams> prepareMTPEngineInitParams(size_t 
 
     std::unique_ptr<std::vector<std::unique_ptr<EngineInitParams>>> mtp_params =
         std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
-    const GptInitParameter& gpt_init_params =
-        sp_model.attr("config").attr("gpt_init_params").cast<GptInitParameter>();
+    py::object config_obj = sp_model.attr("config");
+    // Extract individual config members from Python config object
+    auto model_config = config_obj.attr("py_model_config").cast<ModelConfig>();
+    auto mm_model_config = config_obj.attr("mm_model_config").cast<MMModelConfig>();
+    auto parallelism_config = config_obj.attr("parallelism_config").cast<ParallelismConfig>();
+    auto runtime_config = config_obj.attr("runtime_config").cast<RuntimeConfig>();
+    auto eplb_config = config_obj.attr("eplb_config").cast<EPLBConfig>();
+    auto pd_sep_config = config_obj.attr("pd_sep_config").cast<PDSepConfig>();
+    auto concurrency_config = config_obj.attr("concurrency_config").cast<ConcurrencyConfig>();
+    auto fmha_config = config_obj.attr("fmha_config").cast<FMHAConfig>();
+    auto kv_cache_config = config_obj.attr("kv_cache_config").cast<KVCacheConfig>();
+    auto profiling_debug_logging_config = config_obj.attr("profiling_debug_logging_config").cast<ProfilingDebugLoggingConfig>();
+    auto hw_kernel_config = config_obj.attr("hw_kernel_config").cast<HWKernelConfig>();
+    auto device_resource_config = config_obj.attr("device_resource_config").cast<DeviceResourceConfig>();
+    auto moe_config = config_obj.attr("moe_config").cast<MoeConfig>();
+    auto model_specific_config = config_obj.attr("model_specific_config").cast<ModelSpecificConfig>();
+    auto sp_config = config_obj.attr("sp_config").cast<SpeculativeExecutionConfig>();
+    auto cache_store_config = config_obj.attr("cache_store_config").cast<CacheStoreConfig>();
+    auto misc_config = config_obj.attr("misc_config").cast<MiscellaneousConfig>();
+    auto arpc_config = config_obj.attr("arpc_config").cast<ArpcConfig>();
+    auto ffn_disaggregate_config = config_obj.attr("ffn_disaggregate_config").cast<FfnDisAggregateConfig>();
+    
     py::object py_layers_weights     = sp_model.attr("weight").attr("weights");
     py::object py_global_weights     = sp_model.attr("weight").attr("global_weights");
-    auto       convert               = WeightsConverter(false, gpt_init_params.quant_algo_);
+    auto       convert               = WeightsConverter(false, model_config.quant_algo_);
     auto       py_layers_weights_vec = convertPyObjectToVec(py_layers_weights);
     size_t     model_num             = py_layers_weights_vec.size();
-    if (gpt_init_params.gen_num_per_circle_ > 1 && py_layers_weights_vec.size() == 1) {
-        RTP_LLM_LOG_WARNING("duplicate py_layers_weights_vec from 1 to gpt_init_params.gen_num_per_circle_: %d",
-                            gpt_init_params.gen_num_per_circle_);
-        for (size_t i = 1; i < gpt_init_params.gen_num_per_circle_; i++) {
+    if (runtime_config.gen_num_per_circle > 1 && py_layers_weights_vec.size() == 1) {
+        RTP_LLM_LOG_WARNING("duplicate py_layers_weights_vec from 1 to runtime_config.gen_num_per_circle: %d",
+                            runtime_config.gen_num_per_circle);
+        for (size_t i = 1; i < runtime_config.gen_num_per_circle; i++) {
             py_layers_weights_vec.push_back(py_layers_weights_vec[0]);
         }
-        model_num = gpt_init_params.gen_num_per_circle_;
+        model_num = runtime_config.gen_num_per_circle;
     }
-    if (gpt_init_params.gen_num_per_circle_ != py_layers_weights_vec.size()) {
-        RTP_LLM_LOG_WARNING("gpt_init_params.gen_num_per_circle_: %d  != py_layers_weights_vec.size(): %d",
-                            gpt_init_params.gen_num_per_circle_,
+    if (runtime_config.gen_num_per_circle != py_layers_weights_vec.size()) {
+        RTP_LLM_LOG_WARNING("runtime_config.gen_num_per_circle: %d  != py_layers_weights_vec.size(): %d",
+                            runtime_config.gen_num_per_circle,
                             py_layers_weights_vec.size());
-        model_num = std::min(model_num, size_t(gpt_init_params.gen_num_per_circle_));
+        model_num = std::min(model_num, size_t(runtime_config.gen_num_per_circle));
     }
     if (sp_type == "eagle" || sp_type == "eagle3") {
         model_num = 1;
     }
 
-    auto no_cast_gpt_init_params        = const_cast<GptInitParameter&>(gpt_init_params);
-    no_cast_gpt_init_params.num_layers_ = 1;
+    // Create a temporary ModelConfig with num_layers_ = 1 for MTP
+    ModelConfig temp_model_config = model_config;
+    temp_model_config.num_layers_ = 1;
 
     for (int i = 0; i < model_num; i++) {
         auto     layer_weigths = py_layers_weights_vec[i];
@@ -83,7 +168,28 @@ std::unique_ptr<ProposeModelEngineInitParams> prepareMTPEngineInitParams(size_t 
         tmp.append(layer_weigths);
         auto gpt_weight = convert.createGptWeights(tmp, py_global_weights);
         mtp_params->push_back(
-            std::move(std::make_unique<EngineInitParams>(model_id, gpt_init_params, std::move(*gpt_weight))));
+            std::move(std::make_unique<EngineInitParams>(
+                model_id,
+                temp_model_config,
+                mm_model_config,
+                parallelism_config,
+                runtime_config,
+                eplb_config,
+                pd_sep_config,
+                concurrency_config,
+                fmha_config,
+                kv_cache_config,
+                profiling_debug_logging_config,
+                hw_kernel_config,
+                device_resource_config,
+                moe_config,
+                model_specific_config,
+                sp_config,
+                cache_store_config,
+                misc_config,
+                arpc_config,
+                ffn_disaggregate_config,
+                std::move(*gpt_weight))));
         model_id++;
     }
 
@@ -101,7 +207,7 @@ void RtpLLMOp::init(py::object model,
 
     EngineInitParams params = initModel(model);
     RTP_LLM_LOG_INFO("init engine params success");
-    params.showGptInitParameter();
+    params.showDebugInfo();
     std::unique_ptr<ProposeModelEngineInitParams> propose_params = initProposeModel(propose_model);
     pybind11::gil_scoped_release                           release;
     grpc_server_thread_ = std::thread(&RtpLLMOp::initRPCServer,
@@ -124,11 +230,11 @@ EngineInitParams RtpLLMOp::initModel(py::object model) {
 
         EngineInitParams params(model_id_, gpt_init_params, std::move(*gpt_weight), py_model);
         model_id_++;
-        if (gpt_init_params.tp_rank_ == 0) {
+        if (gpt_init_params.parallelism_config.tp_rank == 0) {
             // kmon metric init
             (void)initKmonitorFactory();
             auto kmon_tags = kmonitor::MetricsTags();
-            kmon_tags.AddTag("dp_rank", std::to_string(gpt_init_params.dp_rank_));
+            kmon_tags.AddTag("dp_rank", std::to_string(gpt_init_params.parallelism_config.dp_rank));
             params.metrics_reporter.reset(new kmonitor::MetricsReporter("", "", kmon_tags));
         }
         return params;
@@ -147,9 +253,29 @@ std::unique_ptr<ProposeModelEngineInitParams> RtpLLMOp::initProposeModel(py::obj
         std::string sp_type            = propose_model.attr("sp_type").cast<std::string>();
         size_t      gen_num_per_circle = propose_model.attr("gen_num_per_circle").cast<size_t>();
         if (sp_type == "vanilla") {
-            auto [gpt_init_params, gpt_weight] = prepareEngineInitParams(propose_model, true);
+            auto [config_params, gpt_weight] = prepareEngineInitParams(propose_model, true);
             params                             = std::make_unique<ProposeModelEngineInitParams>(
-                model_id_, sp_type, gen_num_per_circle, gpt_init_params, std::move(*gpt_weight));
+                model_id_, sp_type, gen_num_per_circle,
+                config_params.model_config_,
+                config_params.mm_model_config_,
+                config_params.parallelism_config,
+                config_params.runtime_config,
+                config_params.eplb_config,
+                config_params.pd_sep_config,
+                config_params.concurrency_config,
+                config_params.fmha_config,
+                config_params.kv_cache_config,
+                config_params.profiling_debug_logging_config,
+                config_params.hw_kernel_config,
+                config_params.device_resource_config,
+                config_params.moe_config,
+                config_params.model_specific_config,
+                config_params.sp_config,
+                config_params.cache_store_config,
+                config_params.misc_config,
+                config_params.arpc_config,
+                config_params.ffn_disaggregate_config,
+                std::move(*gpt_weight));
             model_id_++;
         } else if (sp_type == "mtp") {
             params = prepareMTPEngineInitParams(model_id_, propose_model);
@@ -201,9 +327,9 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
                              py::object                                             mm_process_engine,
                              std::unique_ptr<ProposeModelEngineInitParams> propose_params,
                              py::object                                             token_processor) {
-    auto http_port      = maga_init_params.gpt_init_parameter.http_port_;
-    auto model_rpc_port = maga_init_params.gpt_init_parameter.model_rpc_port_;
-    auto role_type      = maga_init_params.gpt_init_parameter.role_type_;
+    auto http_port      = maga_init_params.parallelism_config.http_port;
+    auto model_rpc_port = maga_init_params.parallelism_config.model_rpc_port;
+    auto role_type      = maga_init_params.pd_sep_config.role_type;
     // NOTE: ip/ip段可自定义为所需范围。
     std::string server_address("0.0.0.0:" + std::to_string(model_rpc_port));
     {

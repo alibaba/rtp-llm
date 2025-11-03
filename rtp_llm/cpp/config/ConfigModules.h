@@ -1,18 +1,37 @@
 #pragma once
 #include <string>
 #include <sstream>
+#include <map>
+#include <vector>
+#include <pybind11/pybind11.h>
+#include "rtp_llm/cpp/models/eplb/EplbConfig.h"
 
 namespace rtp_llm {
 
-struct ParallelismDistributedConfig {
-    int         tp_size          = 1;
-    int         ep_size          = 1;
-    int         dp_size          = 1;
-    int         pp_size          = 1;
-    int         world_size       = 1;
-    int         world_rank       = 0;
-    int         local_world_size = 1;
-    int         ffn_sp_size      = 1;
+struct ParallelismConfig {
+    int64_t     tp_size          = 1;
+    int64_t     ep_size          = 1;
+    int64_t     dp_size          = 1;
+    int64_t     pp_size          = 1;
+    int64_t     world_size       = 1;
+    int64_t     world_rank       = 0;
+    int64_t     local_world_size = 1;
+    int64_t     ffn_sp_size      = 1;
+    int64_t     tp_rank          = 0;
+    int64_t     ep_rank          = 0;
+    int64_t     dp_rank          = 0;
+    int64_t     ffn_tp_size      = 1;
+    int64_t     ffn_tp_rank      = 0;
+    bool        enable_sp        = false;
+
+    std::string nccl_ip          = "";
+    bool        use_all_gather   = false;
+    int64_t     tp_nccl_port     = 0;
+    int64_t     dp_tp_nccl_port  = 0;
+    int64_t     ffn_tp_nccl_port = 0;
+    int64_t     http_port        = 0;
+    int64_t     model_rpc_port   = 0;
+
     std::string to_string() const;
     void        update_from_env_for_test();
 };
@@ -43,6 +62,7 @@ struct KVCacheConfig {
     bool        reuse_cache                        = false;
     std::string multi_task_prompt                  = "";
     std::string multi_task_prompt_str              = "";
+    std::map<std::string, std::vector<int>> multi_task_prompt_tokens;
     bool        enable_3fs                         = false;
     int         match_timeout_ms                   = 1000;
     int         rpc_get_cache_timeout_ms           = 2000;
@@ -54,6 +74,7 @@ struct KVCacheConfig {
     int64_t     threefs_write_iov_size             = 1LL << 32;  // 4GB
     int64_t     memory_block_cache_size_mb         = 0;
     int64_t     memory_block_cache_sync_timeout_ms = 10000;
+    void        insertMultiTaskPromptTokens(std::string task_id, std::vector<int64_t> tokens_id);
     std::string to_string() const;
     void        update_from_env_for_test();
 };
@@ -150,17 +171,6 @@ struct SpeculativeExecutionConfig {
     void        update_from_env_for_test();
 };
 
-struct ServiceDiscoveryConfig {
-    bool        use_local = false;
-    std::string remote_rpc_server_ip;
-    std::string decode_cm2_config;
-    std::string remote_vit_server_ip;
-    std::string multimodal_part_cm2_config;
-    std::string remote_backend_ip;
-    std::string backend_cm2_config;
-    std::string to_string() const;
-    void        update_from_env_for_test();
-};
 
 struct CacheStoreConfig {
     bool        cache_store_rdma_mode        = false;
@@ -175,27 +185,83 @@ struct CacheStoreConfig {
     void        update_from_env_for_test();
 };
 
-struct SchedulerConfig {
-    bool        use_batch_decode_scheduler = false;
-    bool        use_gather_batch_scheduler = false;
-    std::string to_string() const;
-    void        update_from_env_for_test();
-};
+struct RuntimeConfig {
+    int64_t max_generate_batch_size = 1;
+    int64_t max_context_batch_size  = 1;
+    int64_t gen_num_per_circle      = 1;
 
-struct BatchDecodeSchedulerConfig {
+    bool    pre_allocate_op_mem     = true;
+    int64_t max_block_size_per_item = 16;
+
+    int64_t max_batch_tokens_size   = 0;
+
+    int64_t block_nums                       = 0;
+    int64_t scheduler_reserve_resource_ratio = 5;
+    int64_t reserve_runtime_mem_mb           = 0;
+    int64_t kv_cache_mem_mb                  = 0;
+    bool    reuse_cache                      = false;
+    bool    enable_partial_fallback          = false;
+    bool    enable_fast_gen                  = false;
+    bool    warm_up                          = false;
+    bool    warm_up_with_loss                = false;
+    int64_t fast_gen_max_context_len         = 0;
+    int64_t fast_gen_context_budget          = -1;
+
+    // Scheduler configuration (merged from SchedulerConfig, BatchDecodeSchedulerConfig, FIFOSchedulerConfig)
+    bool    use_batch_decode_scheduler = false;
+    bool    use_gather_batch_scheduler = false;
     int64_t batch_decode_scheduler_batch_size = 1;
     // 0: use decode warmup, others: use prefill warmup
-    int64_t     batch_decode_scheduler_warmup_type = 0;
+    int64_t batch_decode_scheduler_warmup_type = 0;
+
+    // 0 for no sep, 1 for server, 2 for client
+    int64_t                      vit_separation              = 0;
+    bool                         enable_speculative_decoding  = false;
+    std::string                  model_name                  = "";
+    std::vector<std::string>     worker_addrs;
+    std::vector<std::string>    worker_grpc_addrs;
+
     std::string to_string() const;
     void        update_from_env_for_test();
 };
 
-struct FIFOSchedulerConfig {
-    int64_t     max_context_batch_size           = 1;
-    int         scheduler_reserve_resource_ratio = 5;
-    bool        enable_fast_gen                  = false;
-    bool        enable_partial_fallback          = false;
-    int64_t     fast_gen_context_budget          = -1;
+struct PDSepConfig {
+    RoleType role_type                       = RoleType::PDFUSION;
+    bool     cache_store_rdma_mode           = true;
+    int64_t  cache_store_listen_port         = 0;
+    int64_t  cache_store_connect_port        = 0;
+    int64_t  cache_store_rdma_listen_port    = 0;
+    int64_t  cache_store_rdma_connect_port   = 0;
+    int64_t  remote_rpc_server_port          = 0;
+    int64_t  prefill_retry_times             = 0;
+    int64_t  prefill_retry_timeout_ms        = 20;
+    int64_t  prefill_max_wait_timeout_ms     = 600 * 1000;
+    int64_t  decode_retry_times              = 100;
+    int64_t  decode_retry_timeout_ms         = 100;
+    int64_t  decode_polling_kv_cache_step_ms = 30;
+    int64_t  decode_polling_call_prefill_ms  = 30;
+    int64_t  rdma_connect_retry_times        = 0;
+    int64_t  load_cache_timeout_ms           = 5000;
+    int64_t  max_rpc_timeout_ms              = 0;
+    int64_t  worker_port_offset              = 0;
+    bool     decode_entrance                 = false;
+
+    std::string to_string() const;
+    void        update_from_env_for_test();
+};
+
+struct EPLBConfig {
+    bool             enable_eplb      = false;
+    int64_t          phy_exp_num      = 0;  // number of physical experts
+    int64_t          eplb_update_time = 5000;
+    EplbMode         eplb_mode        = EplbMode::NONE;
+    pybind11::object py_eplb;
+    int64_t          redundant_expert = 0;
+    int64_t          hack_ep_single_entry = 0;
+    std::string      balance_method = "mix";
+    int64_t          eplb_force_repack = 0;
+    int64_t          eplb_stats_window_size = 10;
+
     std::string to_string() const;
     void        update_from_env_for_test();
 };
@@ -292,16 +358,16 @@ public:
     }
     // only for test
     void reload() {
-        ParallelismDistributedConfig parallelism_distributed_config;
-        parallelism_distributed_config.update_from_env_for_test();
-        tp_size_ = parallelism_distributed_config.tp_size;
+        ParallelismConfig parallelism_config;
+        parallelism_config.update_from_env_for_test();
+        tp_size_ = parallelism_config.tp_size;
         // in fact pipeline parallelism is not supported yet
-        pp_size_          = parallelism_distributed_config.pp_size;
-        ep_size_          = parallelism_distributed_config.ep_size;
-        dp_size_          = parallelism_distributed_config.dp_size;
-        world_size_       = parallelism_distributed_config.world_size;
-        world_rank_       = parallelism_distributed_config.world_rank;
-        local_world_size_ = parallelism_distributed_config.local_world_size;
+        pp_size_          = parallelism_config.pp_size;
+        ep_size_          = parallelism_config.ep_size;
+        dp_size_          = parallelism_config.dp_size;
+        world_size_       = parallelism_config.world_size;
+        world_rank_       = parallelism_config.world_rank;
+        local_world_size_ = parallelism_config.local_world_size;
     }
 
 private:

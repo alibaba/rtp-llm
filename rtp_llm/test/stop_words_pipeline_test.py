@@ -2,8 +2,14 @@ from typing import List
 from unittest import TestCase, main
 
 from rtp_llm.pipeline import Pipeline
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig as PyModelConfig
 from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.ops import (
+    FfnDisAggregateConfig,
+    ModelConfig,
+    PDSepConfig,
+    RuntimeConfig,
+)
 from rtp_llm.utils.base_model_datatypes import GenerateOutput
 from rtp_llm.utils.word_util import get_stop_word_slices
 
@@ -11,14 +17,27 @@ from rtp_llm.utils.word_util import get_stop_word_slices
 class StopWordTest(TestCase):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        # Create C++ config objects
+        model_config = ModelConfig()
+        model_config.num_heads_ = 8
+        model_config.size_per_head_ = 128
+        model_config.num_layers_ = 1
+        model_config.max_seq_len_ = 32
+        model_config.vocab_size_ = 1024
+        
+        pd_sep_config = PDSepConfig()
+        runtime_config = RuntimeConfig()
+        ffn_disaggregate_config = FfnDisAggregateConfig()
+        
+        # Create Python ModelConfig
+        py_model_config = PyModelConfig()
+        
         self.pipeline = Pipeline(
-            GptInitModelParameters(
-                head_num=8,
-                size_per_head=128,
-                layer_num=1,
-                max_seq_len=32,
-                vocab_size=1024,
-            ),
+            model_config,
+            pd_sep_config,
+            runtime_config,
+            ffn_disaggregate_config,
+            py_model_config,
             None,
         )
 

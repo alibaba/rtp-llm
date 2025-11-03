@@ -361,7 +361,7 @@ bool MemoryBlockCache::syncRpcCallForAllRank(const std::vector<int>& gpu_block_i
                                              int                     timeout_ms,
                                              int64_t                 request_id) {
     // 多TP场景，使用gRPC同步所有rank
-    const auto& grpc_workers = gpt_init_params_.worker_grpc_addrs_;
+    const auto& grpc_workers = gpt_init_params_.runtime_config.worker_grpc_addrs;
     if (grpc_workers.empty() || !rpc_pool_) {
         RTP_LLM_LOG_WARNING("sync RPC call for all rank failed, grpc workers empty or rpc pool/thread pool null");
         return false;

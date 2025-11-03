@@ -22,8 +22,8 @@ bool bool_from_env_for_test(std::string env_name, bool default_value) {
     return lower == "1" || lower == "on" || lower == "true";
 }
 
-// ParallelismDistributedConfig
-void ParallelismDistributedConfig::update_from_env_for_test() {
+// ParallelismConfig
+void ParallelismConfig::update_from_env_for_test() {
     tp_size          = autil::EnvUtil::getEnv("TP_SIZE", 1);
     ep_size          = autil::EnvUtil::getEnv("EP_SIZE", 1);
     dp_size          = autil::EnvUtil::getEnv("DP_SIZE", 1);
@@ -32,10 +32,14 @@ void ParallelismDistributedConfig::update_from_env_for_test() {
     world_rank       = autil::EnvUtil::getEnv("WORLD_RANK", 0);
     local_world_size = autil::EnvUtil::getEnv("LOCAL_WORLD_SIZE", 1);
     ffn_sp_size      = autil::EnvUtil::getEnv("FFN_SP_SIZE", 1);
+    ffn_tp_size      = ffn_sp_size;
+    tp_rank          = world_rank % tp_size;
+    ep_rank          = (world_rank / tp_size) % ep_size;
+    dp_rank          = world_rank / (tp_size * ep_size);
 }
 
-// ParallelismDistributedConfig
-std::string ParallelismDistributedConfig::to_string() const {
+// ParallelismConfig
+std::string ParallelismConfig::to_string() const {
     std::ostringstream oss;
     oss << "tp_size: " << tp_size << "\n"
         << "ep_size: " << ep_size << "\n"
@@ -44,7 +48,20 @@ std::string ParallelismDistributedConfig::to_string() const {
         << "world_rank: " << world_rank << "\n"
         << "pp_size: " << pp_size << "\n"
         << "local_world_size: " << local_world_size << "\n"
-        << "ffn_sp_size" << ffn_sp_size;
+        << "ffn_sp_size: " << ffn_sp_size << "\n"
+        << "tp_rank: " << tp_rank << "\n"
+        << "ep_rank: " << ep_rank << "\n"
+        << "dp_rank: " << dp_rank << "\n"
+        << "ffn_tp_size: " << ffn_tp_size << "\n"
+        << "ffn_tp_rank: " << ffn_tp_rank << "\n"
+        << "enable_sp: " << enable_sp << "\n"
+        << "nccl_ip: " << nccl_ip << "\n"
+        << "use_all_gather: " << use_all_gather << "\n"
+        << "tp_nccl_port: " << tp_nccl_port << "\n"
+        << "dp_tp_nccl_port: " << dp_tp_nccl_port << "\n"
+        << "ffn_tp_nccl_port: " << ffn_tp_nccl_port << "\n"
+        << "http_port: " << http_port << "\n"
+        << "model_rpc_port: " << model_rpc_port;
     return oss.str();
 }
 
@@ -108,11 +125,20 @@ void KVCacheConfig::update_from_env_for_test() {
     memory_block_cache_sync_timeout_ms = autil::EnvUtil::getEnv("MEMORY_BLOCK_CACHE_SYNC_TIMEOUT_MS", 10000);
 }
 
+void KVCacheConfig::insertMultiTaskPromptTokens(std::string task_id, std::vector<int64_t> tokens_id) {
+    std::vector<int> new_tokens_id;  // to convert tokens of type int64_t to type int32_t
+    for (auto token_id : tokens_id) {
+        new_tokens_id.push_back(token_id);
+    }
+    multi_task_prompt_tokens[task_id] = new_tokens_id;
+}
+
 std::string KVCacheConfig::to_string() const {
     std::ostringstream oss;
     oss << "reuse_cache: " << reuse_cache << "\n"
         << "multi_task_prompt: " << multi_task_prompt << "\n"
         << "multi_task_prompt_str: " << multi_task_prompt_str << "\n"
+        << "multi_task_prompt_tokens: " << (multi_task_prompt_tokens.empty() ? "empty" : "non-empty") << "\n"
         << "enable_3fs: " << enable_3fs << "\n"
         << "match_timeout_ms: " << match_timeout_ms << "\n"
         << "rpc_get_cache_timeout_ms: " << rpc_get_cache_timeout_ms << "\n"
@@ -199,11 +225,11 @@ std::string HWKernelConfig::to_string() const {
         << "rocm_hipblaslt_config: " << rocm_hipblaslt_config << "\n"
         << "use_swizzleA: " << use_swizzleA << "\n"
         << "enable_cuda_graph: " << enable_cuda_graph << "\n"
-        << "enable_cuda_graph_debug_mode" << enable_cuda_graph_debug_mode << "\n"
+        << "enable_cuda_graph_debug_mode: " << enable_cuda_graph_debug_mode << "\n"
         << "use_aiter_pa: " << use_aiter_pa << "\n"
         << "use_asm_pa: " << use_asm_pa << "\n"
-        << "enable_native_cuda_graph" << enable_native_cuda_graph << "\n"
-        << "num_native_cuda_graph" << num_native_cuda_graph << "\n";
+        << "enable_native_cuda_graph: " << enable_native_cuda_graph << "\n"
+        << "num_native_cuda_graph: " << num_native_cuda_graph;
     return oss.str();
 }
 
@@ -300,27 +326,6 @@ std::string SpeculativeExecutionConfig::to_string() const {
     return oss.str();
 }
 
-// ServiceDiscoveryConfig
-void ServiceDiscoveryConfig::update_from_env_for_test() {
-    use_local                  = bool_from_env_for_test("USE_LOCAL", false);
-    remote_rpc_server_ip       = autil::EnvUtil::getEnv("REMOTE_RPC_SERVER_IP", "");
-    decode_cm2_config          = autil::EnvUtil::getEnv("RTP_LLM_DECODE_CM2_CONFIG", "");
-    remote_vit_server_ip       = autil::EnvUtil::getEnv("REMOTE_VIT_SERVER_IP", "");
-    multimodal_part_cm2_config = autil::EnvUtil::getEnv("RTP_LLM_MULTIMODAL_PART_CM2_CONFIG", "");
-    remote_backend_ip          = autil::EnvUtil::getEnv("REMOTE_BACKEND_IP", "");
-    backend_cm2_config         = autil::EnvUtil::getEnv("BACKEND_CM2_CONFIG", "");
-}
-
-std::string ServiceDiscoveryConfig::to_string() const {
-    std::ostringstream oss;
-    oss << "use_local: " << use_local << "\n"
-        << "remote_rpc_server_ip: " << remote_rpc_server_ip << "\n"
-        << "decode_cm2_config: " << decode_cm2_config << "\n"
-        << "remote_vit_server_ip: " << remote_vit_server_ip << "\n"
-        << "multimodal_part_cm2_config: " << multimodal_part_cm2_config << "\n"
-        << "remote_backend_ip: " << remote_backend_ip << "\n"
-        << "backend_cm2_config: " << backend_cm2_config;
-    return oss.str();
 }
 
 // CacheStoreConfig
@@ -349,47 +354,6 @@ std::string CacheStoreConfig::to_string() const {
     return oss.str();
 }
 
-// SchedulerConfig
-void SchedulerConfig::update_from_env_for_test() {
-    use_batch_decode_scheduler = bool_from_env_for_test("USE_BATCH_DECODE_SCHEDULER", false);
-}
-
-std::string SchedulerConfig::to_string() const {
-    std::ostringstream oss;
-    oss << "use_batch_decode_scheduler: " << use_batch_decode_scheduler << "\n";
-    return oss.str();
-}
-
-// BatchDecodeSchedulerConfig
-void BatchDecodeSchedulerConfig::update_from_env_for_test() {
-    batch_decode_scheduler_batch_size = autil::EnvUtil::getEnv("BATCH_DECODE_SCHEDULER_BATCH_SIZE", 1);
-}
-
-std::string BatchDecodeSchedulerConfig::to_string() const {
-    std::ostringstream oss;
-    oss << "batch_decode_scheduler_batch_size: " << batch_decode_scheduler_batch_size << "\n";
-    return oss.str();
-}
-
-// FIFOSchedulerConfig
-void FIFOSchedulerConfig::update_from_env_for_test() {
-    max_context_batch_size           = autil::EnvUtil::getEnv("MAX_CONTEXT_BATCH_SIZE", 1);
-    scheduler_reserve_resource_ratio = autil::EnvUtil::getEnv("SCHEDULER_RESERVE_RESOURCE_RATIO", 5);
-    enable_fast_gen                  = bool_from_env_for_test("ENABLE_FAST_GEN", false);
-    enable_partial_fallback          = bool_from_env_for_test("ENABLE_PARTIAL_FALLBACK", false);
-    fast_gen_context_budget          = autil::EnvUtil::getEnv("FAST_GEN_MAX_CONTEXT_LEN", -1);
-}
-
-std::string FIFOSchedulerConfig::to_string() const {
-    std::ostringstream oss;
-    oss << "max_context_batch_size: " << max_context_batch_size << "\n"
-        << "scheduler_reserve_resource_ratio: " << scheduler_reserve_resource_ratio << "\n"
-        << "enable_fast_gen: " << enable_fast_gen << "\n"
-        << "enable_partial_fallback: " << enable_partial_fallback << "\n"
-        << "fast_gen_context_budget: " << fast_gen_context_budget;
-    return oss.str();
-}
-
 // MiscellaneousConfig
 void MiscellaneousConfig::update_from_env_for_test() {
     disable_pdl = bool_from_env_for_test("DISABLE_PDL", true);
@@ -400,6 +364,103 @@ std::string MiscellaneousConfig::to_string() const {
     std::ostringstream oss;
     oss << "disable_pdl" << disable_pdl << "\n"
         << "aux_string: " << aux_string << "\n";
+    return oss.str();
+}
+
+// RuntimeConfig
+void RuntimeConfig::update_from_env_for_test() {
+    max_generate_batch_size = autil::EnvUtil::getEnv("MAX_GENERATE_BATCH_SIZE", 1);
+    max_context_batch_size  = autil::EnvUtil::getEnv("MAX_CONTEXT_BATCH_SIZE", 1);
+    gen_num_per_circle      = autil::EnvUtil::getEnv("GEN_NUM_PER_CIRCLE", 1);
+    pre_allocate_op_mem     = bool_from_env_for_test("PRE_ALLOCATE_OP_MEM", true);
+    max_block_size_per_item = autil::EnvUtil::getEnv("MAX_BLOCK_SIZE_PER_ITEM", 16);
+    max_batch_tokens_size   = autil::EnvUtil::getEnv("MAX_BATCH_TOKENS_SIZE", 0);
+    block_nums               = autil::EnvUtil::getEnv("BLOCK_NUMS", 0);
+    scheduler_reserve_resource_ratio = autil::EnvUtil::getEnv("SCHEDULER_RESERVE_RESOURCE_RATIO", 5);
+    reserve_runtime_mem_mb           = autil::EnvUtil::getEnv("RESERVE_RUNTIME_MEM_MB", 0);
+    kv_cache_mem_mb                  = autil::EnvUtil::getEnv("KV_CACHE_MEM_MB", 0);
+    reuse_cache                      = bool_from_env_for_test("REUSE_CACHE", false);
+    enable_partial_fallback          = bool_from_env_for_test("ENABLE_PARTIAL_FALLBACK", false);
+    enable_fast_gen                  = bool_from_env_for_test("ENABLE_FAST_GEN", false);
+    warm_up                          = bool_from_env_for_test("WARM_UP", false);
+    warm_up_with_loss                = bool_from_env_for_test("WARM_UP_WITH_LOSS", false);
+    fast_gen_max_context_len         = autil::EnvUtil::getEnv("FAST_GEN_MAX_CONTEXT_LEN", 0);
+    fast_gen_context_budget          = autil::EnvUtil::getEnv("FAST_GEN_MAX_CONTEXT_LEN", -1);
+    vit_separation                    = autil::EnvUtil::getEnv("VIT_SEPARATION", 0);
+    enable_speculative_decoding      = bool_from_env_for_test("ENABLE_SPECULATIVE_DECODING", false);
+    
+    // Scheduler configuration (merged from SchedulerConfig, BatchDecodeSchedulerConfig, FIFOSchedulerConfig)
+    use_batch_decode_scheduler = bool_from_env_for_test("USE_BATCH_DECODE_SCHEDULER", false);
+    batch_decode_scheduler_batch_size = autil::EnvUtil::getEnv("BATCH_DECODE_SCHEDULER_BATCH_SIZE", 1);
+    // model_name, worker_addrs, worker_grpc_addrs are typically set programmatically, not from env
+}
+
+std::string RuntimeConfig::to_string() const {
+    std::ostringstream oss;
+    oss << "max_generate_batch_size: " << max_generate_batch_size << "\n"
+        << "max_context_batch_size: " << max_context_batch_size << "\n"
+        << "gen_num_per_circle: " << gen_num_per_circle << "\n"
+        << "pre_allocate_op_mem: " << pre_allocate_op_mem << "\n"
+        << "max_block_size_per_item: " << max_block_size_per_item << "\n"
+        << "max_batch_tokens_size: " << max_batch_tokens_size << "\n"
+        << "block_nums: " << block_nums << "\n"
+        << "scheduler_reserve_resource_ratio: " << scheduler_reserve_resource_ratio << "\n"
+        << "reserve_runtime_mem_mb: " << reserve_runtime_mem_mb << "\n"
+        << "kv_cache_mem_mb: " << kv_cache_mem_mb << "\n"
+        << "reuse_cache: " << reuse_cache << "\n"
+        << "enable_partial_fallback: " << enable_partial_fallback << "\n"
+        << "enable_fast_gen: " << enable_fast_gen << "\n"
+        << "warm_up: " << warm_up << "\n"
+        << "warm_up_with_loss: " << warm_up_with_loss << "\n"
+        << "fast_gen_max_context_len: " << fast_gen_max_context_len << "\n"
+        << "fast_gen_context_budget: " << fast_gen_context_budget << "\n"
+        << "use_batch_decode_scheduler: " << use_batch_decode_scheduler << "\n"
+        << "use_gather_batch_scheduler: " << use_gather_batch_scheduler << "\n"
+        << "batch_decode_scheduler_batch_size: " << batch_decode_scheduler_batch_size << "\n"
+        << "batch_decode_scheduler_warmup_type: " << batch_decode_scheduler_warmup_type << "\n"
+        << "vit_separation: " << vit_separation << "\n"
+        << "enable_speculative_decoding: " << enable_speculative_decoding << "\n"
+        << "model_name: " << model_name << "\n"
+        << "worker_addrs: [";
+    for (size_t i = 0; i < worker_addrs.size(); ++i) {
+        oss << worker_addrs[i];
+        if (i < worker_addrs.size() - 1) oss << ", ";
+    }
+    oss << "]\n"
+        << "worker_grpc_addrs: [";
+    for (size_t i = 0; i < worker_grpc_addrs.size(); ++i) {
+        oss << worker_grpc_addrs[i];
+        if (i < worker_grpc_addrs.size() - 1) oss << ", ";
+    }
+    oss << "]";
+    return oss.str();
+}
+
+// EPLBConfig
+void EPLBConfig::update_from_env_for_test() {
+    enable_eplb      = bool_from_env_for_test("ENABLE_EPLB", false);
+    phy_exp_num      = autil::EnvUtil::getEnv("PHY_EXP_NUM", 0);
+    eplb_update_time = autil::EnvUtil::getEnv("EPLB_UPDATE_TIME", 5000);
+    redundant_expert = autil::EnvUtil::getEnv("REDUNDANT_EXPERT", 0);
+    hack_ep_single_entry = autil::EnvUtil::getEnv("HACK_EP_SINGLE_ENTRY", 0);
+    balance_method = autil::EnvUtil::getEnv("BALANCE_METHOD", "mix");
+    eplb_force_repack = autil::EnvUtil::getEnv("EPLB_FORCE_REPACK", 0);
+    eplb_stats_window_size = autil::EnvUtil::getEnv("EPLB_STATS_WINDOW_SIZE", 10);
+    // eplb_mode and py_eplb are typically set programmatically, not from env
+}
+
+std::string EPLBConfig::to_string() const {
+    std::ostringstream oss;
+    oss << "enable_eplb: " << enable_eplb << "\n"
+        << "phy_exp_num: " << phy_exp_num << "\n"
+        << "eplb_update_time: " << eplb_update_time << "\n"
+        << "eplb_mode: " << (int)eplb_mode << "\n"
+        << "py_eplb: " << (py_eplb.is_none() ? "None" : "<pybind11::object>") << "\n"
+        << "redundant_expert: " << redundant_expert << "\n"
+        << "hack_ep_single_entry: " << hack_ep_single_entry << "\n"
+        << "balance_method: " << balance_method << "\n"
+        << "eplb_force_repack: " << eplb_force_repack << "\n"
+        << "eplb_stats_window_size: " << eplb_stats_window_size;
     return oss.str();
 }
 
@@ -430,6 +491,53 @@ std::string FfnDisAggregateConfig::to_string() const {
             << "ffn_tp_size: " << ffn_tp_size << " ffn_dp_size: " << ffn_dp_size << "\n"
             << "is_ffn_rank: " << is_ffn_rank;
     }
+    return oss.str();
+}
+
+// PDSepConfig
+void PDSepConfig::update_from_env_for_test() {
+    // role_type is typically set programmatically based on vit_separation, not from env
+    cache_store_rdma_mode           = bool_from_env_for_test("CACHE_STORE_RDMA_MODE", true);
+    cache_store_listen_port         = autil::EnvUtil::getEnv("CACHE_STORE_LISTEN_PORT", 0);
+    cache_store_connect_port        = autil::EnvUtil::getEnv("CACHE_STORE_CONNECT_PORT", 0);
+    cache_store_rdma_listen_port    = autil::EnvUtil::getEnv("CACHE_STORE_RDMA_LISTEN_PORT", 0);
+    cache_store_rdma_connect_port   = autil::EnvUtil::getEnv("CACHE_STORE_RDMA_CONNECT_PORT", 0);
+    remote_rpc_server_port          = autil::EnvUtil::getEnv("REMOTE_RPC_SERVER_PORT", 0);
+    prefill_retry_times             = autil::EnvUtil::getEnv("PREFILL_RETRY_TIMES", 0);
+    prefill_retry_timeout_ms        = autil::EnvUtil::getEnv("PREFILL_RETRY_TIMEOUT_MS", 20);
+    prefill_max_wait_timeout_ms     = autil::EnvUtil::getEnv("PREFILL_MAX_WAIT_TIMEOUT_MS", 600 * 1000);
+    decode_retry_times              = autil::EnvUtil::getEnv("DECODE_RETRY_TIMES", 100);
+    decode_retry_timeout_ms         = autil::EnvUtil::getEnv("DECODE_RETRY_TIMEOUT_MS", 100);
+    decode_polling_kv_cache_step_ms = autil::EnvUtil::getEnv("DECODE_POLLING_KV_CACHE_STEP_MS", 30);
+    decode_polling_call_prefill_ms  = autil::EnvUtil::getEnv("DECODE_POLLING_CALL_PREFILL_MS", 30);
+    rdma_connect_retry_times        = autil::EnvUtil::getEnv("RDMA_CONNECT_RETRY_TIMES", 0);
+    load_cache_timeout_ms           = autil::EnvUtil::getEnv("LOAD_CACHE_TIMEOUT_MS", 5000);
+    max_rpc_timeout_ms              = autil::EnvUtil::getEnv("MAX_RPC_TIMEOUT_MS", 0);
+    worker_port_offset              = autil::EnvUtil::getEnv("WORKER_PORT_OFFSET", 0);
+    decode_entrance                 = bool_from_env_for_test("DECODE_ENTRANCE", false);
+}
+
+std::string PDSepConfig::to_string() const {
+    std::ostringstream oss;
+    oss << "role_type: " << (int)role_type << "\n"
+        << "cache_store_rdma_mode: " << cache_store_rdma_mode << "\n"
+        << "cache_store_listen_port: " << cache_store_listen_port << "\n"
+        << "cache_store_connect_port: " << cache_store_connect_port << "\n"
+        << "cache_store_rdma_listen_port: " << cache_store_rdma_listen_port << "\n"
+        << "cache_store_rdma_connect_port: " << cache_store_rdma_connect_port << "\n"
+        << "remote_rpc_server_port: " << remote_rpc_server_port << "\n"
+        << "prefill_retry_times: " << prefill_retry_times << "\n"
+        << "prefill_retry_timeout_ms: " << prefill_retry_timeout_ms << "\n"
+        << "prefill_max_wait_timeout_ms: " << prefill_max_wait_timeout_ms << "\n"
+        << "decode_retry_times: " << decode_retry_times << "\n"
+        << "decode_retry_timeout_ms: " << decode_retry_timeout_ms << "\n"
+        << "decode_polling_kv_cache_step_ms: " << decode_polling_kv_cache_step_ms << "\n"
+        << "decode_polling_call_prefill_ms: " << decode_polling_call_prefill_ms << "\n"
+        << "rdma_connect_retry_times: " << rdma_connect_retry_times << "\n"
+        << "load_cache_timeout_ms: " << load_cache_timeout_ms << "\n"
+        << "max_rpc_timeout_ms: " << max_rpc_timeout_ms << "\n"
+        << "worker_port_offset: " << worker_port_offset << "\n"
+        << "decode_entrance: " << decode_entrance;
     return oss.str();
 }
 

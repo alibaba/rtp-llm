@@ -29,26 +29,26 @@ struct CustomConfig {
 
 rtp_llm::EngineInitParams
 createEngineInitParams(DeviceBase* device, const CustomConfig& config, GptInitParameter& params) {
-    params.head_num_                     = 2;
-    params.size_per_head_                = 64;
-    params.num_layers_                   = 2;
-    params.max_seq_len_                  = 20;
-    params.vocab_size_                   = 100;
-    params.hidden_size_                  = 128;
-    params.head_num_kv_                  = 2;
-    params.block_nums_                   = 100;
-    params.reuse_cache_                  = config.reuse_cache;
-    params.multi_task_prompt_tokens_     = config.multi_task_prompt_tokens;
-    params.max_generate_batch_size_      = 128;
-    params.max_context_batch_size_       = 128;
-    params.kv_cache_data_type_           = config.kv_cache_data_type;
-    params.special_tokens_.eos_token_id_ = -1;  // never eos
+    params.model_config_.head_num_                     = 2;
+    params.model_config_.size_per_head_                = 64;
+    params.model_config_.num_layers_                   = 2;
+    params.model_config_.max_seq_len_                  = 20;
+    params.model_config_.vocab_size_                   = 100;
+    params.model_config_.hidden_size_                  = 128;
+    params.model_config_.head_num_kv_                  = 2;
+    params.runtime_config.block_nums                   = 100;
+    params.runtime_config.reuse_cache                  = config.reuse_cache;
+    params.kv_cache_config.multi_task_prompt_tokens     = config.multi_task_prompt_tokens;
+    params.runtime_config.max_generate_batch_size      = 128;
+    params.runtime_config.max_context_batch_size       = 128;
+    params.model_config_.kv_cache_data_type_           = config.kv_cache_data_type;
+    params.model_config_.special_tokens_.eos_token_id_ = -1;  // never eos
 
     const size_t inter_size        = 512;
-    params.inter_size_             = inter_size;
-    params.inter_padding_size_     = inter_size;
-    params.seq_size_per_block_     = 2;
-    params.reserve_runtime_mem_mb_ = 1024;
+    params.model_config_.inter_size_             = inter_size;
+    params.model_config_.inter_padding_size_     = inter_size;
+    params.model_config_.seq_size_per_block_     = 2;
+    params.runtime_config.reserve_runtime_mem_mb = 1024;
     typedef half            T;
     const rtp_llm::DataType data_type    = getTensorType<T>();
     auto                    mem_type     = rtp_llm::MemoryType::MEMORY_GPU;
@@ -60,16 +60,16 @@ createEngineInitParams(DeviceBase* device, const CustomConfig& config, GptInitPa
     device->copy({*data, *buf_host});
 
     auto word_embeddings = make_unique<const Buffer>(
-        mem_type, data_type, vector<size_t>{(size_t)params.vocab_size_, hidden_units}, data->data(), [data](Buffer*) {
+        mem_type, data_type, vector<size_t>{(size_t)params.model_config_.vocab_size_, hidden_units}, data->data(), [data](Buffer*) {
         });
     auto lm_head = make_unique<const rtp_llm::Buffer>(
-        mem_type, data_type, vector<size_t>{(size_t)params.vocab_size_, hidden_units}, data->data());
+        mem_type, data_type, vector<size_t>{(size_t)params.model_config_.vocab_size_, hidden_units}, data->data());
     std::unordered_map<std::string, rtp_llm::ConstBufferPtr> global_weights;
     global_weights.emplace(W::embedding, std::move(word_embeddings));
     global_weights.emplace(W::lm_head, std::move(lm_head));
 
     std::vector<std::unordered_map<std::string, rtp_llm::ConstBufferPtr>> layer_weights;
-    for (int i = 0; i < params.num_layers_; ++i) {
+    for (int i = 0; i < params.model_config_.num_layers_; ++i) {
         auto pre_layernorm_weights =
             make_unique<const rtp_llm::Buffer>(mem_type, data_type, vector<size_t>{hidden_units}, data->data());
         auto pre_layernorm_beta =

@@ -132,7 +132,6 @@ try:
         QuantAlgo,
         RoleType,
         SchedulerConfig,
-        ServiceDiscoveryConfig,
         SpecialTokens,
         SpeculativeExecutionConfig,
     )

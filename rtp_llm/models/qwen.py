@@ -3,7 +3,8 @@ import json
 import os
 from typing import List, Optional
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters, VitParameters
+from rtp_llm.config.model_config import ModelConfig as PyModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, AttnConfig
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, FfnConfig, FfnWeight
@@ -206,32 +207,52 @@ class QWenBase(BaseModel):
         return QWenWeight
 
     def _create_python_model(self) -> Optional[GptModelBase]:
-        if self.config.gpt_init_params.ffn_disaggregate_config.enable_ffn_disaggregate:
-            self.py_model = Qwen3DisaggregateModel(self.config, self.weight)
+        py_model_config = self.config.py_model_config
+        parallelism_config = self.config.gpt_init_params.parallelism_config
+        ffn_disaggregate_config = self.config.gpt_init_params.ffn_disaggregate_config
+        device_resource_config = self.config.gpt_init_params.device_resource_config
+        quant_config = self.config.quant_config
+        
+        if ffn_disaggregate_config.enable_ffn_disaggregate:
+            self.py_model = Qwen3DisaggregateModel(
+                py_model_config, 
+                parallelism_config,
+                ffn_disaggregate_config,
+                device_resource_config,
+                self.weight,
+                quant_config,
+                vocab_size
+            )
         else:
-            self.py_model = Qwen3Model(self.config, self.weight)
+            self.py_model = Qwen3Model(
+                py_model_config,
+                parallelism_config,
+                device_resource_config,
+                self.weight,
+                quant_config,
+                vocab_size
+            )
 
     def support_cuda_graph(self) -> bool:
         return True
 
     @staticmethod
-    def _common_config(config, ckpt_path: str) -> GptInitModelParameters:
-        config.rotary_embedding_dim = 128
-        config.rotary_embedding_style = 1
-        config.activation_type = "SiGLU"
+    def _common_config(config: PyModelConfig, ckpt_path: str) -> PyModelConfig:
+        config.ckpt_path = ckpt_path
+        config.rope_config.dim = 128
+        config.rope_config.style = 1
         config.has_pre_decoder_layernorm = False
-        config.has_post_decoder_layernorm = True
-        config.norm_type = "rmsnorm"
         config.layernorm_eps = 1e-5
         config.special_tokens.bos_token_id = -1
         config.special_tokens.eos_token_id = 151643
         # <|im_start|> and <|im_end|>
         config.special_tokens.stop_words_id_list = [[151645], [151644]]
+        config.mm_related_params = VitParameters()
         QWen._from_hf(config, ckpt_path)
         return config
 
     @staticmethod
-    def _from_hf(config: GptInitModelParameters, ckpt_path: str):
+    def _from_hf(config: PyModelConfig, ckpt_path: str):
         config_path = os.path.join(ckpt_path, "config.json")
         if not os.path.exists(config_path):
             return
@@ -258,43 +279,37 @@ class QWenBase(BaseModel):
         config.layernorm_eps = config_json.get(
             "layer_norm_epsilon", config.layernorm_eps
         )
-        config.layer_num = config_json.get(
-            "num_hidden_layers", config_json.get("n_layer", config.layer_num)
+        config.num_layers = config_json.get(
+            "num_hidden_layers", config_json.get("n_layer", config.num_layers)
         )
         config.vocab_size = config_json.get(
             "vocab_size", config_json.get("padded_vocab_size", config.vocab_size)
         )
-        config.rotary_embedding_base = config_json.get("rotary_emb_base", 10000)
-        config.rotary_embedding_dim = config.size_per_head
+        config.rope_config.base = config_json.get("rotary_emb_base", 10000)
+        config.rope_config.dim = config.size_per_head
         config.special_tokens.eos_token_id = config_json.get(
             "eos_token_id", config.special_tokens.eos_token_id
         )
         config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
 
         if config_json.get("use_dynamic_ntk"):
-            config.rotary_embedding_style = 4
-        config.org_embedding_max_pos = config_json.get("seq_length", 8192)
+            config.rope_config.style = 4
+        config.rope_config.max_pos = config_json.get("seq_length", 8192)
         config.use_logn_attn = config_json.get("use_logn_attn")
 
 
 class QWen(QWenBase):
     @classmethod
-    def _create_config(cls, ckpt_path: str):
-        config = GptInitModelParameters(
-            head_num=0,
-            head_num_kv=0,
-            size_per_head=0,
-            layer_num=0,
-            inter_size=0,  # 13696
-            vocab_size=152064,
-            max_seq_len=8192,
-        )
+    def _create_config(cls, ckpt_path: str) -> PyModelConfig:
+        config = PyModelConfig()
+        config.vocab_size = 152064
+        config.max_seq_len = 8192
         QWenBase._common_config(config, ckpt_path)
         assert (
             config.head_num > 0
             and config.head_num_kv > 0
             and config.size_per_head > 0
-            and config.layer_num > 0
+            and config.num_layers > 0
             and config.inter_size > 0
         ), "error config"
         return config

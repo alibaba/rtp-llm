@@ -30,7 +30,12 @@ class RPCEngine(BaseEngine):
         self.rtp_llm_op_ = RtpLLMOp(
             model, self.mm_engine, propose_model, self.token_processor
         )
-        self.model_rpc_client = ModelRpcClient(self.config)
+        self.model_rpc_client = ModelRpcClient(
+            self.config.gpt_init_params.ffn_disaggregate_config,
+            self.config.py_env_configs,
+            self.config.gpt_init_params.pd_sep_config.max_rpc_timeout_ms,
+            self.config.gpt_init_params.pd_sep_config.decode_entrance,
+        )
 
     @override
     def start(self) -> None:

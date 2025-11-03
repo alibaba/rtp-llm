@@ -8,12 +8,8 @@
 #include "rtp_llm/cpp/model_utils/QuantInfo.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include "rtp_llm/cpp/core/Types.h"
-#include "rtp_llm/cpp/models/eplb/EplbConfig.h"
-#include "rtp_llm/cpp/config/ConfigModules.h"
-#include <pybind11/pybind11.h>
-#include <pybind11/stl.h>
 #include <vector>
-#include <map>
+#include <string>
 
 namespace rtp_llm {
 
@@ -28,9 +24,6 @@ enum TaskType {
     LINEAR_SOFTMAX     = 7,
     BGE_M3             = 8
 };
-
-
-
 
 struct RoleSpecialTokens {
 public:
@@ -178,52 +171,5 @@ public:
     int64_t                           position_id_len_factor_ = 1;
 };
 
-class GptInitParameter {
-public:
-    ModelConfig model_config_;
-    MMModelConfig mm_model_config_;
-
-    EPLBConfig eplb_config;
-
-    // pd separation
-    PDSepConfig pd_sep_config;
-
-    ParallelismConfig parallelism_config;
-    RuntimeConfig runtime_config;
-    ConcurrencyConfig            concurrency_config;
-    FMHAConfig                   fmha_config;
-    KVCacheConfig                kv_cache_config;
-    ProfilingDebugLoggingConfig  profiling_debug_logging_config;
-    HWKernelConfig               hw_kernel_config;
-    DeviceResourceConfig         device_resource_config;
-    MoeConfig                    moe_config;
-    ModelSpecificConfig          model_specific_config;
-    SpeculativeExecutionConfig   sp_config;
-    CacheStoreConfig             cache_store_config;
-    MiscellaneousConfig          misc_config;
-    ArpcConfig                   arpc_config;
-    FfnDisAggregateConfig        ffn_disaggregate_config;
-
-    GptInitParameter() = default;
-
-    void update_from_env_for_test() {
-        parallelism_config.update_from_env_for_test();
-        runtime_config.update_from_env_for_test();
-        eplb_config.update_from_env_for_test();
-        concurrency_config.update_from_env_for_test();
-        fmha_config.update_from_env_for_test();
-        kv_cache_config.update_from_env_for_test();
-        profiling_debug_logging_config.update_from_env_for_test();
-        hw_kernel_config.update_from_env_for_test();
-        device_resource_config.update_from_env_for_test();
-        moe_config.update_from_env_for_test();
-        model_specific_config.update_from_env_for_test();
-        sp_config.update_from_env_for_test();
-        cache_store_config.update_from_env_for_test();
-        misc_config.update_from_env_for_test();
-    }
-
-    void             showDebugInfo() const;
-};
-
 }  // namespace rtp_llm
+

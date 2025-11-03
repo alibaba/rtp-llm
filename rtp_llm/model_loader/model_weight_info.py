@@ -175,7 +175,6 @@ class ModelDeployWeightInfo:
         self._is_sparse_head = config.is_sparse_head
         self._layer_head_num = config.layer_head_num
         self._src_quantization_bit = config.src_quantization_bit
-        self.tp_split_emb_and_lm_head = config.tp_split_emb_and_lm_head
 
         self._is_gated_activation = config.gpt_init_params.isGatedActivation()
         self.expert_num_ = config.gpt_init_params.expert_num
@@ -577,7 +576,6 @@ class ModelDeployWeightInfo:
             num_nodes=self.num_nodes,
             ffn_tp_rank=self.ffn_tp_rank,
             ffn_tp_size=self.ffn_tp_size,
-            tp_split_emb_and_lm_head=self.tp_split_emb_and_lm_head,
             merge_lora=merge_lora,
             vit_separation=self.vit_separation,
             compute_dtype=compute_dtype,

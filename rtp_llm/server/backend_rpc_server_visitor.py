@@ -1,13 +1,14 @@
 import logging
-from typing import AsyncGenerator, List
+from typing import AsyncGenerator, List, Optional
 
 import torch
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleAddr, RoleType
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.config.py_config_modules import StaticConfig
+from rtp_llm.config.model_config import ModelConfig as PyModelConfig
+from rtp_llm.config.py_config_modules import PyEnvConfigs, StaticConfig
 from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient
+from rtp_llm.ops import FfnDisAggregateConfig
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.ops import get_block_cache_keys
@@ -22,36 +23,61 @@ route_logger = logging.getLogger("route_logger")
 
 class BackendRPCServerVisitor:
     def __init__(
-        self, model_config: GptInitModelParameters, separated_frontend: bool = False
+        self,
+        model_config,  # ModelConfig from ops
+        pd_sep_config,  # PDSepConfig from ops
+        runtime_config,  # RuntimeConfig from ops
+        ffn_disaggregate_config: FfnDisAggregateConfig,
+        py_model_config: PyModelConfig,
+        py_env_configs: Optional[PyEnvConfigs] = None,
+        max_rpc_timeout_ms: int = 0,
+        decode_entrance: bool = False,
+        separated_frontend: bool = False,
     ) -> None:
-        self.config = model_config
-        assert self.config.max_seq_len > 0
-        self.model_rpc_client = ModelRpcClient(self.config)
+        self.model_config = model_config
+        self.pd_sep_config = pd_sep_config
+        self.runtime_config = runtime_config
+        self.ffn_disaggregate_config = ffn_disaggregate_config
+        self.py_model_config = py_model_config
+        self.py_env_configs = py_env_configs
+        self.max_rpc_timeout_ms = max_rpc_timeout_ms
+        self.decode_entrance = decode_entrance
+        assert self.model_config.max_seq_len_ > 0
+        
+        self.model_rpc_client = ModelRpcClient(
+            self.ffn_disaggregate_config,
+            self.py_env_configs,
+            self.max_rpc_timeout_ms,
+            self.decode_entrance,
+        )
+        
         host_args = HostServiceArgs.create_from_env()
-        self.backend_role_list = self.get_backend_role_list(self.config, host_args)
+        self.backend_role_list = self.get_backend_role_list(
+            self.pd_sep_config, self.runtime_config, host_args
+        )
         self.host_service = HostService(host_args)
         self.master_client = MasterClient()
         self.separated_frontend = separated_frontend
 
     @staticmethod
     def get_backend_role_list(
-        config: GptInitModelParameters, host_args: HostServiceArgs
+        pd_sep_config, runtime_config, host_args: HostServiceArgs
     ) -> List[RoleType]:
         role_list: List[RoleType] = []
 
         # Convert config.role_type to the correct enum if needed
-        config_role_type = config.role_type
-        if hasattr(config.role_type, "value"):
-            config_role_type = config.role_type.value
+        config_role_type = pd_sep_config.role_type
+        if hasattr(config_role_type, "value"):
+            config_role_type = config_role_type.value
 
-        if config.vit_separation == 2 and host_args.vit_domain:
+        if runtime_config.vit_separation == 2 and host_args.vit_domain:
             role_list.append(RoleType.VIT)
             logging.info("Added VIT role")
 
-        if config_role_type == RoleType.PREFILL.value and not config.decode_entrance:
+        if config_role_type == RoleType.PREFILL.value and not pd_sep_config.decode_entrance:
             role_list.append(RoleType.DECODE)
             logging.info("Added DECODE role for PREFILL type")
-        elif config_role_type == RoleType.DECODE.value and config.decode_entrance:
+        elif config_role_type == RoleType.DECODE.value and pd_sep_config.decode_entrance:
             role_list.append(RoleType.PREFILL)
             logging.info("Added PREFILL role for DECODE type")
         elif config_role_type == RoleType.FRONTEND.value:
@@ -78,7 +104,7 @@ class BackendRPCServerVisitor:
         else:
             token_ids: List[int] = input.token_ids.tolist()  # type: ignore
         block_cache_keys = get_block_cache_keys(
-            token_ids, self.config.seq_size_per_block
+            token_ids, self.model_config.seq_size_per_block_
         )
 
         try:
@@ -221,13 +247,13 @@ class BackendRPCServerVisitor:
         self.check_sp_supported(input)
 
         max_new_tokens = min(
-            self.config.max_seq_len - input.prompt_length,
+            self.model_config.max_seq_len_ - input.prompt_length,
             input.generate_config.max_new_tokens,
         )
         if max_new_tokens <= 0:
             raise FtRuntimeException(
                 ExceptionType.LONG_PROMPT_ERROR,
-                f"model max tokens is {self.config.max_seq_len}, "
+                f"model max tokens is {self.model_config.max_seq_len_}, "
                 f"request length is {input.prompt_length}, max_new_tokens is {max_new_tokens}",
             )
 

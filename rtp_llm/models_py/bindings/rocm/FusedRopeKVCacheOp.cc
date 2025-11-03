@@ -8,8 +8,15 @@
 
 namespace rtp_llm {
 
-FusedRopeKVCachePrefillOp::FusedRopeKVCachePrefillOp(const GptInitParameter& gpt_init_parameter):
-    FMHARocmBase(gpt_init_parameter) {}
+FusedRopeKVCachePrefillOp::FusedRopeKVCachePrefillOp(const ModelConfig& model_config, const ParallelismConfig& parallelism_config, int layer_num, const HWKernelConfig& hw_kernel_config):
+    attn_configs_(model_config.getAttentionConfigs(
+        parallelism_config.tp_size,
+        model_config.seq_size_per_block_,
+        model_config.is_causal_,
+        model_config.use_kvcache_)),
+    layer_num_(layer_num),
+    hw_kernel_config_(hw_kernel_config),
+    device_(dynamic_cast<ROCmDevice*>(DeviceFactory::getDefaultDevice())) {}
 
 CKAttnPtr FusedRopeKVCachePrefillOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
     int       batch_size = attn_inputs.input_lengths.size(0);
@@ -186,8 +193,15 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
     return std::make_tuple(q_output, k_output, v_output);
 }
 
-FusedRopeKVCacheDecodeOp::FusedRopeKVCacheDecodeOp(const GptInitParameter& gpt_init_parameter):
-    FMHARocmBase(gpt_init_parameter) {}
+FusedRopeKVCacheDecodeOp::FusedRopeKVCacheDecodeOp(const ModelConfig& model_config, const ParallelismConfig& parallelism_config, int layer_num, const HWKernelConfig& hw_kernel_config):
+    attn_configs_(model_config.getAttentionConfigs(
+        parallelism_config.tp_size,
+        model_config.seq_size_per_block_,
+        model_config.is_causal_,
+        model_config.use_kvcache_)),
+    layer_num_(layer_num),
+    hw_kernel_config_(hw_kernel_config),
+    device_(dynamic_cast<ROCmDevice*>(DeviceFactory::getDefaultDevice())) {}
 
 CKAttnPtr FusedRopeKVCacheDecodeOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
     int       batch_size = attn_inputs.sequence_lengths.size(0);
@@ -317,7 +331,8 @@ void registerFusedRopeKVCacheOp(const py::module& m) {
     pybind11::class_<KVBlockArray>(m, "KVBlockArray").def(pybind11::init<>());
     pybind11::class_<CKAttn, std::shared_ptr<CKAttn>>(m, "CKAttn").def(pybind11::init<>());
     pybind11::class_<FusedRopeKVCachePrefillOp>(m, "FusedRopeKVCachePrefillOp")
-        .def(pybind11::init<GptInitParameter>(), py::arg("gpt_init_parameter"))
+        .def(pybind11::init<const ModelConfig&, const ParallelismConfig&, int, const HWKernelConfig&>(),
+             py::arg("model_config"), py::arg("parallelism_config"), py::arg("layer_num"), py::arg("hw_kernel_config"))
         .def("prepare", &FusedRopeKVCachePrefillOp::prepare, py::arg("attn_inputs"))
         .def("forward",
              &FusedRopeKVCachePrefillOp::forward,
@@ -326,7 +341,8 @@ void registerFusedRopeKVCacheOp(const py::module& m) {
              py::arg("kv_cache"),
              py::arg("params"));
     pybind11::class_<FusedRopeKVCacheDecodeOp>(m, "FusedRopeKVCacheDecodeOp")
-        .def(pybind11::init<GptInitParameter>(), py::arg("gpt_init_parameter"))
+        .def(pybind11::init<const ModelConfig&, const ParallelismConfig&, int, const HWKernelConfig&>(),
+             py::arg("model_config"), py::arg("parallelism_config"), py::arg("layer_num"), py::arg("hw_kernel_config"))
         .def("prepare", &FusedRopeKVCacheDecodeOp::prepare, py::arg("attn_inputs"))
         .def("forward",
              &FusedRopeKVCacheDecodeOp::forward,

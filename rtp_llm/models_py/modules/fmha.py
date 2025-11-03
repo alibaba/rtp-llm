@@ -20,9 +20,10 @@ try:
 except ImportError:
     logging.info("rope kv cache not available, skipped.")
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig as PyModelConfig
+from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.models_py.modules.kvcache_store import WriteCacheStoreOp
-from rtp_llm.ops import FMHAType, KVCache, ParamsBase, PyAttentionInputs
+from rtp_llm.ops import FMHAType, KVCache, ModelConfig, ParamsBase, ParallelismConfig, PyAttentionInputs
 
 
 class FMHAImplBase(object):
@@ -124,11 +125,12 @@ try:
     class FlashInferPrefillImpl(FMHAPrefillImplBase):
 
         def __init__(
-            self, config: GptInitModelParameters, attn_inputs: PyAttentionInputs
+            self, config: PyModelConfig, parallelism_config: ParallelismConfig, attn_inputs: PyAttentionInputs
         ) -> None:
+            # PyModelConfig inherits from CppModelConfig (ModelConfig), so can be passed directly
             super().__init__(
-                FlashInferPrefillOp(config.gpt_init_params),
-                FusedRopeKVCachePrefillOp(config.gpt_init_params),
+                FlashInferPrefillOp(config, parallelism_config),
+                FusedRopeKVCachePrefillOp(config, parallelism_config),
                 attn_inputs,
             )
             self.support_ = self.support_ and (config.use_mla == False)
@@ -140,13 +142,17 @@ try:
         def support_cuda_graph(self) -> bool:
             return True
 
-    PREFILL_MHA_IMPS.append(FlashInferPrefillImpl)
+    # Check if flash infer is enabled before appending
+    fmha_config = StaticConfig.fmha_config
+    if not fmha_config.disable_flash_infer:
+        PREFILL_MHA_IMPS.append(FlashInferPrefillImpl)
 
     class MlaFlashInferPrefillImpl(FMHAPrefillImplBase):
 
         def __init__(
             self,
-            config: GptInitModelParameters,
+            config: PyModelConfig,
+            parallelism_config: ParallelismConfig,
             attn_inputs: PyAttentionInputs,
             weights: List[Dict[str, torch.Tensor]],
             cos_sin_cache: torch.Tensor,
@@ -155,6 +161,7 @@ try:
             super().__init__(
                 MlaFlashInferPrefillOp(
                     config,
+                    parallelism_config,
                     config.head_num,
                     config.kv_lora_rank,
                     config.rope_head_dim,
@@ -163,6 +170,7 @@ try:
                     config.softmax_extra_scale,
                     config.use_mla,
                     weights,
+                    quant_config=None,  # TODO: pass quant_config if available
                 ),
                 # TrtV2PrefillAttentionOp(
                 #     config,
@@ -226,11 +234,12 @@ try:
     class FlashInferDecodeImpl(FMHADecodeImplBase):
 
         def __init__(
-            self, config: GptInitModelParameters, attn_inputs: PyAttentionInputs
+            self, config: PyModelConfig, parallelism_config: ParallelismConfig, attn_inputs: PyAttentionInputs
         ) -> None:
+            # PyModelConfig inherits from CppModelConfig (ModelConfig), so can be passed directly
             super().__init__(
-                FlashInferDecodeOp(config.gpt_init_params),
-                FusedRopeKVCacheDecodeOp(config.gpt_init_params),
+                FlashInferDecodeOp(config, parallelism_config),
+                FusedRopeKVCacheDecodeOp(config, parallelism_config),
                 attn_inputs,
             )
             self.support_ = self.support_ and (config.use_mla == False)
@@ -242,13 +251,17 @@ try:
         def support_cuda_graph(self) -> bool:
             return True
 
-    DECODE_MHA_IMPS.append(FlashInferDecodeImpl)
+    # Check if flash infer is enabled before appending
+    fmha_config = StaticConfig.fmha_config
+    if not fmha_config.disable_flash_infer:
+        DECODE_MHA_IMPS.append(FlashInferDecodeImpl)
 
     class MlaFlashInferDecodeImpl(FMHADecodeImplBase):
 
         def __init__(
             self,
-            config: GptInitModelParameters,
+            config: PyModelConfig,
+            parallelism_config: ParallelismConfig,
             attn_inputs: PyAttentionInputs,
             weights: List[Dict[str, torch.Tensor]],
             cos_sin_cache: torch.Tensor,
@@ -321,11 +334,12 @@ try:
     class TRTMHAImpl(FMHAPrefillImplBase):
 
         def __init__(
-            self, config: GptInitModelParameters, attn_inputs: PyAttentionInputs
+            self, config: PyModelConfig, parallelism_config: ParallelismConfig, attn_inputs: PyAttentionInputs
         ) -> None:
+            # PyModelConfig inherits from CppModelConfig (ModelConfig), so can be passed directly
             super().__init__(
-                TRTAttnOp(config.gpt_init_params),
-                FusedRopeKVCachePrefillOp(config.gpt_init_params),
+                TRTAttnOp(config, parallelism_config),
+                FusedRopeKVCachePrefillOp(config, parallelism_config),
                 attn_inputs,
             )
 
@@ -336,7 +350,10 @@ try:
         def support_cuda_graph(self) -> bool:
             return True
 
-    PREFILL_MHA_IMPS.append(TRTMHAImpl)
+    # Check if TRT FMHA is enabled before appending
+    fmha_config = StaticConfig.fmha_config
+    if fmha_config.enable_paged_trt_fmha:
+        PREFILL_MHA_IMPS.append(TRTMHAImpl)
     # PREFILL_MHA_IMPS.insert(0, TRTMHAImpl)
 
 except ImportError:
@@ -349,11 +366,12 @@ try:
     class XQAImpl(FMHADecodeImplBase):
 
         def __init__(
-            self, config: GptInitModelParameters, attn_inputs: PyAttentionInputs
+            self, config: PyModelConfig, parallelism_config: ParallelismConfig, attn_inputs: PyAttentionInputs
         ) -> None:
+            # PyModelConfig inherits from CppModelConfig (ModelConfig), so can be passed directly
             super().__init__(
-                XQAAttnOp(config.gpt_init_params),
-                FusedRopeKVCacheDecodeOp(config.gpt_init_params),
+                XQAAttnOp(config, parallelism_config),
+                FusedRopeKVCacheDecodeOp(config, parallelism_config),
                 attn_inputs,
             )
 
@@ -364,6 +382,9 @@ try:
         def support_cuda_graph(self) -> bool:
             return True
 
-    DECODE_MHA_IMPS.append(XQAImpl)
+    # Check if XQA is enabled before appending
+    fmha_config = StaticConfig.fmha_config
+    if fmha_config.enable_xqa:
+        DECODE_MHA_IMPS.append(XQAImpl)
 except ImportError:
     logging.info("XQAAttnOp not available, skipped.")

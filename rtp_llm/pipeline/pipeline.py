@@ -8,7 +8,7 @@ import torch
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig as PyModelConfig
 from rtp_llm.frontend.tokenizer_factory.tokenizer_utils import (
     DecodingState,
     IncrementDecodingUtils,
@@ -16,6 +16,7 @@ from rtp_llm.frontend.tokenizer_factory.tokenizer_utils import (
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.metrics import GaugeMetrics, kmonitor
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
+from rtp_llm.ops import FfnDisAggregateConfig
 from rtp_llm.utils.base_model_datatypes import (
     GenerateInput,
     GenerateOutput,
@@ -39,18 +40,35 @@ request_counter = AtomicCounter()
 class Pipeline(object):
     def __init__(
         self,
-        model_config: GptInitModelParameters,
+        model_config,  # ModelConfig from ops
+        pd_sep_config,  # PDSepConfig from ops
+        runtime_config,  # RuntimeConfig from ops
+        ffn_disaggregate_config: FfnDisAggregateConfig,
+        py_model_config: PyModelConfig,
         tokenizer: Optional[BaseTokenizer],
+        py_env_configs=None,
         separated_frontend: bool = False,
     ):
         self.model_config = model_config
+        self.pd_sep_config = pd_sep_config
+        self.runtime_config = runtime_config
+        self.ffn_disaggregate_config = ffn_disaggregate_config
+        self.py_model_config = py_model_config
         self.tokenizer = tokenizer
         self._special_tokens: int = self.model_config.special_tokens
-        self._mm_token: str = self.model_config.mm_related_params.special_tokens.get(
+        self._mm_token: str = self.py_model_config.mm_related_params.special_tokens.get(
             "default_mm_token", ""
-        )
+        ) if self.py_model_config.mm_related_params and hasattr(self.py_model_config.mm_related_params, 'special_tokens') else ""
         self.backend_rpc_server_visitor = BackendRPCServerVisitor(
-            model_config, separated_frontend
+            model_config,
+            pd_sep_config,
+            runtime_config,
+            ffn_disaggregate_config,
+            py_model_config,
+            py_env_configs=py_env_configs,
+            max_rpc_timeout_ms=pd_sep_config.max_rpc_timeout_ms,
+            decode_entrance=pd_sep_config.decode_entrance,
+            separated_frontend=separated_frontend,
         )
 
     def encode(self, prompt: str):

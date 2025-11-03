@@ -57,11 +57,13 @@ EmbeddingExecutor::EmbeddingExecutor(const EngineInitParams& params, rtp_llm::De
     handler_(handler),
     handler_args_(),
     metrics_reporter_(params.metrics_reporter),
-    params_(params.gpt_init_parameter) {
+    model_config_(params.model_config_),
+    parallelism_config(params.parallelism_config),
+    eplb_config(params.eplb_config) {
     GptModelInitParams model_init_params({
         device_,
         params.gpt_weights,
-        Executor::genModelDescription(params_),
+        Executor::genModelDescription(model_config_, parallelism_config, eplb_config),
         nullopt,  // no kv cache buffer for embedding executor
     });
 
@@ -73,7 +75,7 @@ EmbeddingExecutor::EmbeddingExecutor(const EngineInitParams& params, rtp_llm::De
         model_.reset(new GptModel(model_init_params));
     }
 
-    init_position_ids(params_.max_seq_len_);
+    init_position_ids(model_config_.max_seq_len_);
     std::vector<std::string> handler_args;
     {
         py::gil_scoped_acquire acquire;
@@ -122,8 +124,8 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
     int  token_idx             = 0;
     int  batch_idx             = 0;
     int  position_bias         = 0;
-    if (params_.position_ids_style_ == 1) {
-        position_bias = params_.special_tokens_.pad_token_id_ + 1;
+    if (model_config_.position_ids_style_ == 1) {
+        position_bias = model_config_.special_tokens_.pad_token_id_ + 1;
     }
 
     std::vector<rtp_llm::BufferPtr> gathered_mm_features;

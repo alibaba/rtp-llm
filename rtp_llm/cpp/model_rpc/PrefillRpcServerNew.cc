@@ -175,7 +175,7 @@ ErrorInfo PrefillRpcServerNew::notifyStoreCache(PrefillGenerateContextNew& prefi
 
 void PrefillRpcServerNew::constructRemoteLoadRequest(PrefillGenerateContextNew& prefill_context, int index) {
     auto& request = prefill_context.rpc_contexts[index]->request;
-    request.set_dp_rank(maga_init_params_.gpt_init_parameter.dp_rank_);
+    request.set_dp_rank(maga_init_params_.gpt_init_parameter.parallelism_config.dp_rank);
     request.set_request_id(prefill_context.request_id);
     request.set_request_key(prefill_context.request_key);
     request.set_deadline_us(prefill_context.request->deadline_us());
@@ -288,7 +288,7 @@ ErrorInfo PrefillRpcServerNew::waitStoreCacheForAllRankDone(PrefillGenerateConte
 
         auto once_deadline =
             std::chrono::system_clock::now()
-            + std::chrono::milliseconds(maga_init_params_.gpt_init_parameter.decode_polling_kv_cache_step_ms_);
+            + std::chrono::milliseconds(maga_init_params_.gpt_init_parameter.pd_sep_config.decode_polling_kv_cache_step_ms);
         void* got_tag;
         bool  ok = false;
 

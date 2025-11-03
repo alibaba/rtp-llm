@@ -7,11 +7,11 @@
 namespace rtp_llm {
 
 DefaultDistKvCachePlanner::DefaultDistKvCachePlanner(CacheManager*                       cache_manager,
-                                                     const GptInitParameter&             gpt_init_params,
+                                                     const KVCacheConfig&               kv_cache_config,
                                                      const DistStorage3FSInitParams&     init_params_3fs,
                                                      const kmonitor::MetricsReporterPtr& metrics_reporter):
     cache_manager_(cache_manager),
-    gpt_init_params_(gpt_init_params),
+    kv_cache_config_(kv_cache_config),
     init_params_3fs_(init_params_3fs),
     metrics_reporter_(metrics_reporter) {}
 
@@ -79,7 +79,7 @@ std::vector<DistStorage::Item> DefaultDistKvCachePlanner::layout(const std::vect
         item_block_count++;
         item_keys.push_back(cache_keys[i]);
 
-        if (item_block_count >= gpt_init_params_.kv_cache_config.max_block_size_per_item && item_keys.size() > 0) {
+        if (item_block_count >= kv_cache_config_.max_block_size_per_item && item_keys.size() > 0) {
             item->key = std::to_string(item_keys.front()) + "_" + std::to_string(item_keys.back());
             item->metas["ITEM_KEY"] = item->key;
             RTP_LLM_LOG_DEBUG("push item: %s", item->key.c_str());

@@ -2,7 +2,7 @@
 
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/cache/DistStorage.h"
-#include "rtp_llm/cpp/config/GptInitParameter.h"
+#include "rtp_llm/cpp/config/ModelConfig.h"
 
 namespace rtp_llm {
 
@@ -25,7 +25,7 @@ class CacheManager;
 class DefaultDistKvCachePlanner: public DistKvCachePlanner {
 public:
     DefaultDistKvCachePlanner(CacheManager*                       cache_manager,
-                              const GptInitParameter&             gpt_init_params,
+                              const KVCacheConfig&               kv_cache_config,
                               const DistStorage3FSInitParams&     init_params_3fs,
                               const kmonitor::MetricsReporterPtr& metrics_reporter);
 
@@ -45,7 +45,7 @@ private:
 
 private:
     CacheManager*                  cache_manager_ = nullptr;
-    const GptInitParameter         gpt_init_params_;
+    const KVCacheConfig           kv_cache_config_;
     const DistStorage3FSInitParams init_params_3fs_;
     kmonitor::MetricsReporterPtr   metrics_reporter_;
 };

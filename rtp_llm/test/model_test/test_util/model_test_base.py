@@ -248,7 +248,15 @@ class ModelTestBase(TestCase):
     def simple_test(self, is_fake: bool):
         model = self._load_model()
         try:
-            pipeline = Pipeline(model.config, model.tokenizer)
+            pipeline = Pipeline(
+                model.config.gpt_init_params.model_config,
+                model.config.gpt_init_params.pd_sep_config,
+                model.config.gpt_init_params.runtime_config,
+                model.config.gpt_init_params.ffn_disaggregate_config,
+                model.config.py_model_config,
+                model.tokenizer,
+                py_env_configs=model.config.py_env_configs,
+            )
             if model.config.pre_seq_len > 0:
                 model_str = "/ptuning"
             else:

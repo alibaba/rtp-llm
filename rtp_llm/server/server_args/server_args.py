@@ -51,7 +51,6 @@ from rtp_llm.server.server_args.rpc_discovery_group_args import (
 )
 from rtp_llm.server.server_args.scheduler_group_args import init_scheduler_group_args
 from rtp_llm.server.server_args.server_group_args import init_server_group_args
-from rtp_llm.server.server_args.sparse_group_args import init_sparse_group_args
 from rtp_llm.server.server_args.speculative_decoding_group_args import (
     init_speculative_decoding_group_args,
 )
@@ -242,7 +241,6 @@ def init_all_group_args(parser: EnvArgumentParser) -> None:
     init_rpc_discovery_group_args(parser)
     init_scheduler_group_args(parser)
     init_server_group_args(parser)
-    init_sparse_group_args(parser)
     init_speculative_decoding_group_args(parser)
     init_vit_group_args(parser)
     init_worker_group_args(parser)
@@ -276,4 +274,7 @@ def setup_args():
         logging.info("[MI308X] disable ENABLE_COMM_OVERLAP by default.")
 
     parser.print_env_mappings()
-    StaticConfig.update_from_env()
+
+    py_env_configs: PyEnvConfigs = PyEnvConfigs()
+    py_env_configs.update_from_env()
+    return py_env_configs

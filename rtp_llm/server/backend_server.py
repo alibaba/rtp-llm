@@ -85,7 +85,14 @@ class BackendServer(object):
                 self._embedding_endpoint = EmbeddingEndpoint(self.model)
             else:
                 self.backend_rpc_server_visitor = BackendRPCServerVisitor(
-                    self.model.config
+                    self.model.config.gpt_init_params.model_config,
+                    self.model.config.gpt_init_params.pd_sep_config,
+                    self.model.config.gpt_init_params.runtime_config,
+                    self.model.config.gpt_init_params.ffn_disaggregate_config,
+                    self.model.config.py_model_config,
+                    py_env_configs=self.model.config.py_env_configs,
+                    max_rpc_timeout_ms=self.model.config.gpt_init_params.pd_sep_config.max_rpc_timeout_ms,
+                    decode_entrance=self.model.config.gpt_init_params.pd_sep_config.decode_entrance,
                 )
                 self._openai_endpoint = OpenaiEndpoint(
                     self.model.config,

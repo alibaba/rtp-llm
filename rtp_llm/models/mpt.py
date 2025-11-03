@@ -4,7 +4,7 @@ import os
 
 import torch
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig as PyModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, FfnWeight
@@ -133,15 +133,15 @@ class Mpt(BaseModel):
         return MptWeightInfo
 
     @classmethod
-    def _create_config(cls, ckpt_path: str):
+    def _create_config(cls, ckpt_path: str) -> PyModelConfig:
         config_path = os.path.join(ckpt_path, "config.json")
         with open(config_path) as f:
             config_json = json.load(f)
-        config = GptInitModelParameters(
+        config = PyModelConfig(
             head_num=config_json["n_heads"],
             size_per_head=config_json["d_model"] // config_json["n_heads"],
             inter_size=config_json["d_model"] * 4,
-            layer_num=config_json["n_layers"],
+            num_layers=config_json["n_layers"],
             max_seq_len=8192,
             vocab_size=config_json["vocab_size"],
             activation_type="gelu-none-approximate",

@@ -11,7 +11,7 @@ import torch
 import torch.distributed
 from torch.distributed import Backend, ProcessGroup
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.ops import ParallelismConfig
 
 __all__ = [
     "ProcessGroupState",
@@ -121,16 +121,28 @@ def _destroy_process_group_state(process_group_state: ProcessGroupState) -> None
 
 
 def init_distributed_environment(
-    params: GptInitModelParameters,
+    parallelism_config: ParallelismConfig,
+    nccl_ip: str,
+    th_nccl_port: int,
     backend: str = "nccl",
     timeout: Optional[int] = None,
 ):
+    """
+    Initialize distributed environment.
+    
+    Args:
+        parallelism_config: Parallelism configuration containing rank/size info
+        nccl_ip: NCCL master IP address
+        th_nccl_port: NCCL master port
+        backend: Backend to use (default: "nccl")
+        timeout: Timeout in seconds (optional)
+    """
     assert backend in ["nccl"], "backend current only supports nccl"
-    ip = params.nccl_ip
-    port = params.th_nccl_port
-    rank = params.dp_rank * params.tp_size + params.tp_rank
-    world_size = params.world_size
-    local_rank = params.local_rank
+    ip = nccl_ip
+    port = th_nccl_port
+    rank = parallelism_config.dp_rank * parallelism_config.tp_size + parallelism_config.tp_rank
+    world_size = parallelism_config.world_size
+    local_rank = parallelism_config.local_rank if hasattr(parallelism_config, 'local_rank') else parallelism_config.world_rank % parallelism_config.local_world_size
     os.environ["TORCH_DIST_INIT_BARRIER"] = "1"
     if not torch.distributed.is_initialized():
         print(
@@ -152,7 +164,7 @@ def init_distributed_environment(
             device_id=torch.device(f"cuda:{local_rank}"),
             timeout=timeout,  # pyright: ignore[reportArgumentType]
         )
-    initialize_expert_parallel(params, backend)
+    initialize_expert_parallel(parallelism_config, backend)
 
 
 _EP: Optional[ProcessGroupState] = None
@@ -164,7 +176,7 @@ def get_ep_group() -> ProcessGroupState:
 
 
 def initialize_expert_parallel(
-    params: GptInitModelParameters,
+    parallelism_config: ParallelismConfig,
     backend: str,
 ) -> None:
     """
@@ -172,11 +184,12 @@ def initialize_expert_parallel(
     """
     global _EP
     assert _EP is None, "expert parallel group is already initialized"
-    group_ranks = list(range(params.ep_size))
+    group_ranks = list(range(parallelism_config.ep_size))
+    local_rank = parallelism_config.local_rank if hasattr(parallelism_config, 'local_rank') else parallelism_config.world_rank % parallelism_config.local_world_size
 
     _EP = _init_process_group_state(  # pyright: ignore[reportConstantRedefinition]
         group_ranks=[group_ranks],
-        local_rank=params.local_rank,
+        local_rank=local_rank,
         torch_distributed_backend=backend,
         group_name="ep",
     )

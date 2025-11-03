@@ -10,9 +10,9 @@ from librtp_compute_ops.rtp_llm_ops import (
     FusedRopeKVCachePrefillOp,
 )
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig as PyModelConfig
 from rtp_llm.models_py.modules.fmha import FMHAImplBase
-from rtp_llm.ops import FMHAType, KVCache, PyAttentionInputs
+from rtp_llm.ops import FMHAType, KVCache, ParallelismConfig, PyAttentionInputs
 
 
 # Simple data structure for fmha_params
@@ -40,10 +40,11 @@ class FMHAPrefillImplBase(FMHAImplBase):
         self,
         fmha_impl: Any,
         attn_inputs: PyAttentionInputs,
-        config: GptInitModelParameters,
+        config: PyModelConfig,
+        parallelism_config: ParallelismConfig,
     ) -> None:
         super().__init__(
-            fmha_impl, FusedRopeKVCachePrefillOp(config.gpt_init_params), attn_inputs
+            fmha_impl, FusedRopeKVCachePrefillOp(config, parallelism_config), attn_inputs
         )
 
 
@@ -53,10 +54,11 @@ class FMHADecodeImplBase(FMHAImplBase):
         self,
         fmha_impl: Any,
         attn_inputs: PyAttentionInputs,
-        config: GptInitModelParameters,
+        config: PyModelConfig,
+        parallelism_config: ParallelismConfig,
     ) -> None:
         super().__init__(
-            fmha_impl, FusedRopeKVCacheDecodeOp(config.gpt_init_params), attn_inputs
+            fmha_impl, FusedRopeKVCacheDecodeOp(config, parallelism_config), attn_inputs
         )
 
 
@@ -68,9 +70,9 @@ try:
 
     class AiterPrefillImpl(FMHAPrefillImplBase):
         def __init__(
-            self, config: GptInitModelParameters, attn_inputs: PyAttentionInputs
+            self, config: PyModelConfig, parallelism_config: ParallelismConfig, attn_inputs: PyAttentionInputs
         ) -> None:
-            super().__init__(AiterPrefillAttnOp(config), attn_inputs, config)
+            super().__init__(AiterPrefillAttnOp(config), attn_inputs, config, parallelism_config)
 
         @staticmethod
         def fmha_type() -> FMHAType:
@@ -82,7 +84,7 @@ except ImportError:
 
 
 class AiterPrefillAttnOp:
-    def __init__(self, config: GptInitModelParameters):
+    def __init__(self, config: PyModelConfig):
         self.head_num = config.head_num
         self.head_dim = config.hidden_size // config.head_num
         self.head_num_kv = config.head_num_kv
@@ -147,9 +149,9 @@ try:
 
     class AiterDecodeImpl(FMHADecodeImplBase):
         def __init__(
-            self, config: GptInitModelParameters, attn_inputs: PyAttentionInputs
+            self, config: PyModelConfig, parallelism_config: ParallelismConfig, attn_inputs: PyAttentionInputs
         ) -> None:
-            super().__init__(AiterDecodeAttnOp(config), attn_inputs, config)
+            super().__init__(AiterDecodeAttnOp(config), attn_inputs, config, parallelism_config)
 
     DECODE_MHA_IMPS.append(AiterDecodeImpl)
 except ImportError:
@@ -157,12 +159,13 @@ except ImportError:
 
 
 class AiterDecodeAttnOp:
-    def __init__(self, config: GptInitModelParameters):
+    def __init__(self, config: PyModelConfig):
         self.head_num = config.head_num
         self.head_dim = config.hidden_size // config.head_num
         self.head_num_kv = config.head_num_kv
         self.kv_cache_data_type = config.kv_cache_data_type
-        self.use_asm_pa = config.hw_kernel_config.use_asm_pa
+        from rtp_llm.config.py_config_modules import StaticConfig
+        self.use_asm_pa = StaticConfig.py_hw_kernel_config.use_asm_pa
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
         return True

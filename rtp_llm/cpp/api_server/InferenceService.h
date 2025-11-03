@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
+#include "rtp_llm/cpp/config/ModelConfig.h"
 
 #include "rtp_llm/cpp/api_server/http_server/http_server/HttpResponseWriter.h"
 #include "rtp_llm/cpp/api_server/http_server/http_server/HttpRequest.h"
@@ -20,13 +21,13 @@ namespace rtp_llm {
 
 struct InferenceParsedRequest {
     static InferenceParsedRequest extractRequest(const std::string&                     body,
-                                                 const rtp_llm::GptInitParameter&       params,
+                                                 const ModelConfig&                     model_config,
                                                  const std::shared_ptr<TokenProcessor>& token_processor);
     static void                   extractRequestTexts(const RawRequest& req, InferenceParsedRequest& pr);
     static void                   extractRequestUrls(const RawRequest& req, InferenceParsedRequest& pr);
     static void                   extractRequestGenerateConfigs(RawRequest&                            req,
                                                                 InferenceParsedRequest&                pr,
-                                                                const rtp_llm::GptInitParameter&       params,
+                                                                const ModelConfig&                     model_config,
                                                                 const std::shared_ptr<TokenProcessor>& token_processor);
 
     bool                                         batch_infer;
@@ -45,7 +46,7 @@ public:
                      const std::shared_ptr<autil::AtomicCounter>&    request_counter,
                      const std::shared_ptr<TokenProcessor>&          token_processor,
                      const std::shared_ptr<ConcurrencyController>&   controller,
-                     const rtp_llm::GptInitParameter&                params,
+                     const EngineInitParams&                          params,
                      const std::shared_ptr<ApiServerMetricReporter>& metric_reporter);
     ~InferenceService() = default;
 
@@ -88,7 +89,7 @@ private:
     std::shared_ptr<TokenProcessor>          token_processor_;
     std::shared_ptr<autil::AtomicCounter>    request_counter_;
     std::shared_ptr<ConcurrencyController>   controller_;
-    rtp_llm::GptInitParameter                params_;
+    EngineInitParams                          params_;
     std::shared_ptr<ApiServerMetricReporter> metric_reporter_;
 };
 

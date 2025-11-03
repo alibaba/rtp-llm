@@ -274,9 +274,9 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
         return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "peer ips size not equal to worker size");
     }
 
-    auto load_cache_timeout_ms = maga_init_params_.gpt_init_parameter.load_cache_timeout_ms_;
+    auto load_cache_timeout_ms = maga_init_params_.gpt_init_parameter.pd_sep_config.load_cache_timeout_ms;
     load_cache_timeout_ms      = load_cache_timeout_ms > 0 ? load_cache_timeout_ms : LOAD_TIMEOUT_MS;
-    auto max_rpc_timeout_ms    = maga_init_params_.gpt_init_parameter.max_rpc_timeout_ms_;
+    auto max_rpc_timeout_ms    = maga_init_params_.gpt_init_parameter.pd_sep_config.max_rpc_timeout_ms;
     auto rpc_timeout           = max_rpc_timeout_ms > 0 ? max_rpc_timeout_ms : MAX_GRPC_TIMEOUT_MS;
     auto min_timeout_ms        = std::min(load_cache_timeout_ms, rpc_timeout);
     auto request_timeout_ms    = decode_context.request_timeout_ms;
@@ -295,7 +295,7 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
 
     // Prefill: TP = 1 && Decode: TP = 1
     if (resource_.workers.size() == 1 && decode_context.peer_addrs.size() == 1) {
-        for (size_t i = 0; i < maga_init_params_.gpt_init_parameter.rdma_connect_retry_times_ + 1; i++) {
+        for (size_t i = 0; i < maga_init_params_.gpt_init_parameter.pd_sep_config.rdma_connect_retry_times + 1; i++) {
             auto error_info = loadCache(load_context);
             if (error_info.code() != ErrorCode::CACHE_STORE_LOAD_CONNECT_FAILED
                 && error_info.code() != ErrorCode::CACHE_STORE_LOAD_RDMA_CONNECT_FAILED) {
@@ -379,7 +379,7 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
         }
         auto once_deadline =
             std::chrono::system_clock::now()
-            + std::chrono::milliseconds(maga_init_params_.gpt_init_parameter.decode_polling_kv_cache_step_ms_);
+            + std::chrono::milliseconds(maga_init_params_.gpt_init_parameter.pd_sep_config.decode_polling_kv_cache_step_ms);
         RTP_LLM_LOG_DEBUG("request [%s] start to execute async next", decode_context.request_key.c_str());
         // TODO(xinfei.sxf) There is a problem with complete queue next call delay here, the reason is yet to be
         // investigated
@@ -720,8 +720,8 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
     decode_context.onflight_requests = onflight_requests_;
     decode_context.loading_cache_requests = loading_cache_requests_;
 
-    auto max_retry_times      = maga_init_params_.gpt_init_parameter.decode_retry_times_;
-    auto max_retry_timeout_ms = maga_init_params_.gpt_init_parameter.decode_retry_timeout_ms_;
+    auto max_retry_times      = maga_init_params_.gpt_init_parameter.pd_sep_config.decode_retry_times;
+    auto max_retry_timeout_ms = maga_init_params_.gpt_init_parameter.pd_sep_config.decode_retry_timeout_ms;
 
     try {
         EXECUTE_STAGE_FUNC(prepareGenerateContext, decode_context);

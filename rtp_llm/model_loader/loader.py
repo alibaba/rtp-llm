@@ -226,7 +226,18 @@ class ModelLoader:
         return self._load_from_scratch(device)
     
     def _is_memory_enough_for_fastsafetensor(self):
-        model_size = self._weights_info.config.eval_model_size()
+        # Get task_type from C++ ModelConfig
+        task_type_str = self._weights_info.config.gpt_init_params.model_config.get_task_type()
+        try:
+            from rtp_llm.config.task_type import TaskType
+            task_type = TaskType.from_str(task_type_str)
+        except:
+            task_type = TaskType.LANGUAGE_MODEL
+        model_size = self._weights_info.config.py_model_config.eval_model_size(
+            self._weights_info.config.gpt_init_params.model_config.quant_algo_,
+            task_type,
+            self._weights_info.config.gpt_init_params.model_config.vocab_size_
+        )
         device_mem_info = self._load_config.exported_device.get_mem_info()
         max_file_size = self._load_config.database.get_max_file_size()
         if device_mem_info is None:
@@ -375,7 +386,17 @@ class ModelLoader:
     def _choose_weight_convert_device(self, current_device):
         if "FORCE_CPU_LOAD_WEIGHTS" in os.environ:
             return "cpu"
-        model_size = self._weights_info.config.eval_model_size()
+        # Get task_type from C++ ModelConfig
+        task_type_str = self._weights_info.config.gpt_init_params.model_config.get_task_type()
+        try:
+            task_type = TaskType.from_str(task_type_str)
+        except:
+            task_type = TaskType.LANGUAGE_MODEL
+        model_size = self._weights_info.config.py_model_config.eval_model_size(
+            self._weights_info.config.gpt_init_params.model_config.quant_algo_,
+            task_type,
+            self._weights_info.config.gpt_init_params.model_config.vocab_size_
+        )
         device_mem_info = self._load_config.exported_device.get_mem_info()
         if device_mem_info is None:
             return "cpu"
@@ -442,7 +463,7 @@ class ModelLoader:
                 lm_head_w = weight.steal_global_weight(W.lm_head)
                 if lm_head_w == None:
                     lm_head_w = weight.global_weights[W.embedding]
-                if self._weights_info.config.normalize_lm_head_weight:
+                if self._weights_info.config.py_model_config.normalize_lm_head_weight:
                     lm_head_w = F.normalize(lm_head_w)
                 if self._weights_info.config.logit_scale != 1.0:
                     lm_head_w = self._weights_info.config.scale_logit * lm_head_w
@@ -496,12 +517,12 @@ class ModelLoader:
         self._init_redundant_expert(weights_info.config)
         if weights_info.config.enable_eplb:
             model_path = None
-            if weights_info.config.is_mtp:
-                model_path = weights_info.config.ckpt_path
+            if weights_info.config.py_model_config.is_mtp:
+                model_path = weights_info.config.py_model_config.ckpt_path
             else:
                 path = self.py_env_configs.model_config.original_checkpoint_path
                 if path is None:
-                    path = weights_info.config.ckpt_path
+                    path = weights_info.config.py_model_config.ckpt_path
                 model_path = fetch_remote_file_to_local(path)
 
             ep_lb_database = CkptDatabase(model_path)

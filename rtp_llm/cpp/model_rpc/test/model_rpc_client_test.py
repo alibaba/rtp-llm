@@ -79,6 +79,14 @@ class FakeStub:
 class FakeModelRpcClient(ModelRpcClient):
 
     def __init__(self):
+        # Call parent __init__ with minimal required parameters
+        from rtp_llm.ops import GptInitParameter
+        super().__init__(
+            GptInitParameter(),
+            None,  # py_env_configs
+            0,     # max_rpc_timeout_ms
+            False, # decode_entrance
+        )
         self.stub = FakeStub()
 
     async def enqueue(

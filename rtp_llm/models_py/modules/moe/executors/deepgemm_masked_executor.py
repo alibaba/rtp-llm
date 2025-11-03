@@ -2,7 +2,7 @@ from typing import Any, Dict, Optional
 
 import torch
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.models_py.modules.moe.config_adapter import MoEConfigAdapter
 from rtp_llm.models_py.modules.moe.fused_moe import (
     ExpertForwardPayload,
     FusedMoeExpertExecutor,
@@ -31,7 +31,7 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
 
     def __init__(
         self,
-        config: GptInitModelParameters,
+        config: MoEConfigAdapter,
         weights: Dict[str, torch.Tensor],
         quant_config: FusedMoEQuantConfig,
     ):

@@ -524,7 +524,20 @@ class DeepSeekV2(BaseModel):
         return config
 
     def _create_python_model(self) -> Optional[GptModelBase]:
-        self.py_model = DeepSeekV2Model(self.config, self.weight)
+        py_model_config = self.config.py_model_config
+        parallelism_config = self.config.gpt_init_params.parallelism_config
+        device_resource_config = self.config.gpt_init_params.device_resource_config
+        quant_config = self.config.quant_config
+        vocab_size = self.config.gpt_init_params.model_config.vocab_size_
+        
+        self.py_model = DeepSeekV2Model(
+            py_model_config,
+            parallelism_config,
+            device_resource_config,
+            self.weight,
+            vocab_size,
+            quant_config,
+        )
 
     @staticmethod
     def _from_hf(config: GptInitModelParameters, ckpt_path: str):

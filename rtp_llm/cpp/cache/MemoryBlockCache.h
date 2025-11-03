@@ -19,6 +19,7 @@
 #include "rtp_llm/cpp/model_rpc/RPCPool.h"
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 #include "autil/LockFreeThreadPool.h"
 
 namespace rtp_llm {
@@ -34,7 +35,9 @@ public:
     MemoryBlockCache(const CacheConfig&                  config,
                      rtp_llm::DeviceBase*                device,
                      KVCacheAllocator*                   gpu_kvcache_allocator,
-                     const GptInitParameter&             gpt_init_params,
+                     const ParallelismConfig&            parallelism_config,
+                     const KVCacheConfig&                kv_cache_config,
+                     const RuntimeConfig&                runtime_config,
                      const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr);
     ~MemoryBlockCache();
 
@@ -108,7 +111,9 @@ private:
 
     // 多TP同步相关
     std::shared_ptr<RPCPool> rpc_pool_;
-    GptInitParameter         gpt_init_params_;
+    ParallelismConfig        parallelism_config_;
+    KVCacheConfig            kv_cache_config_;
+    RuntimeConfig            runtime_config_;
 
     // 指标相关
     bool                                       stop_ = false;

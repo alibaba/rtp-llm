@@ -6,8 +6,8 @@ namespace rtp_llm {
 
 OpenaiEndpoint::OpenaiEndpoint(const std::shared_ptr<Tokenizer>&  tokenizer,
                                const std::shared_ptr<ChatRender>& chat_render,
-                               const rtp_llm::GptInitParameter&   params):
-    tokenizer_(tokenizer), chat_render_(chat_render), model_config_(params) {
+                               const ModelConfig&                 model_config):
+    tokenizer_(tokenizer), chat_render_(chat_render), model_config_(model_config) {
 
     max_seq_len_ = model_config_.max_seq_len_;
 

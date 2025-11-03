@@ -21,12 +21,12 @@ public:
                 const std::shared_ptr<autil::AtomicCounter>&    request_counter,
                 const std::shared_ptr<Tokenizer>&               tokenizer,
                 const std::shared_ptr<ChatRender>&              render,
-                rtp_llm::GptInitParameter                       params,
+                const ModelConfig&                             model_config,
                 const std::shared_ptr<ApiServerMetricReporter>& metric_reporter):
         engine_(engine),
         mm_processor_(mm_processor),
         request_counter_(request_counter),
-        openai_endpoint_(new OpenaiEndpoint(tokenizer, render, params)),
+        openai_endpoint_(new OpenaiEndpoint(tokenizer, render, model_config)),
         metric_reporter_(metric_reporter) {}
     ~ChatService() = default;
 

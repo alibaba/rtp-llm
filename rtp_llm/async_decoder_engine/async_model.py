@@ -26,7 +26,7 @@ class AsyncModel:
 
         assert self.config.max_seq_len > 0
         self.tokenizer = model.tokenizer
-        self.decoder_engine_ = create_engine(self.model, self.propose_model)
+        self.decoder_engine_ = create_engine(self.model, self.config, self.propose_model)
         self.decoder_engine_.start()
 
     def is_multimodal(self) -> bool:

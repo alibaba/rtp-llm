@@ -1,12 +1,9 @@
-#include "rtp_llm/cpp/config/GptInitParameter.h"
+#include "rtp_llm/cpp/config/ModelConfig.h"
 #include "autil/Log.h"
 
 namespace rtp_llm {
 
-namespace py = pybind11;
-
 SpecialTokens::SpecialTokens() {}
-
 
 // Getter methods that return string
 std::string ModelConfig::get_layer_norm_type() const {
@@ -127,91 +124,6 @@ bool ModelConfig::isKvCacheQuant() const {
     return kv_cache_data_type_ == DataType::TYPE_FP8_E4M3 || kv_cache_data_type_ == DataType::TYPE_INT8;
 }
 
-void QuantAlgo::setQuantAlgo(const std::string& quant_method, int64_t bits, int64_t group_size) {
-    if (quant_method == "gptq") {
-        quant_method_ = GptQ;
-        weight_bits_  = bits;
-        group_size_   = group_size;
-    } else if (quant_method == "awq") {
-        quant_method_ = Awq;
-        weight_bits_  = bits;
-        group_size_   = group_size;
-    } else if (quant_method == "weight_only_per_col") {
-        quant_method_ = WeightOnlyPerCol;
-        weight_bits_  = bits;
-        if (weight_bits_ != 8) {
-            throw std::invalid_argument("invalid weight_bits: " + std::to_string(weight_bits_));
-        }
-    } else if (quant_method == "smooth_quant") {
-        quant_method_ = SmoothQuant;
-        weight_bits_  = 8;
-    } else if (quant_method == "omni_quant") {
-        quant_method_ = OmniQuant;
-        weight_bits_  = 8;
-    } else if (quant_method == "pertensor_quant") {
-        quant_method_ = PerTensorQuant;
-        weight_bits_  = 8;
-    } else if (quant_method == "fp8" || quant_method == "fp8_dynamic_per_tensor") {
-        quant_method_ = FP8Quant;
-        weight_bits_  = 8;
-        group_size_   = group_size;
-    } else if (quant_method == "fp8-perchannel-compressed-tensors") {
-        quant_method_ = FP8PTPC;
-        weight_bits_  = 8;
-    } else {
-        throw std::invalid_argument("unknown quant_method: " + quant_method);
-    }
-    if (weight_bits_ != 4 && weight_bits_ != 8) {
-        throw std::invalid_argument("invalid weight_bits: " + std::to_string(weight_bits_));
-    }
-    if (group_size_ != 0 && group_size_ != 64 && group_size_ != 128) {
-        throw std::invalid_argument("invalid group_size: " + std::to_string(group_size_));
-    }
-}
-
-void GptInitParameter::showDebugInfo() const {
-    std::ostringstream oss;
-    oss << "\n========== ParallelismConfig ==========\n"
-        << parallelism_config.to_string() << "\n"
-        << "========== RuntimeConfig ==========\n"
-        << runtime_config.to_string() << "\n"
-        << "========== ConcurrencyConfig ==========\n"
-        << concurrency_config.to_string() << "\n"
-        << "========== FMHAConfig ==========\n"
-        << fmha_config.to_string() << "\n"
-        << "========== KVCacheConfig ==========\n"
-        << kv_cache_config.to_string() << "\n"
-        << "========== ProfilingDebugLoggingConfig ==========\n"
-        << profiling_debug_logging_config.to_string() << "\n"
-        << "========== HWKernelConfig ==========\n"
-        << hw_kernel_config.to_string() << "\n"
-        << "========== DeviceResourceConfig ==========\n"
-        << device_resource_config.to_string() << "\n"
-        << "========== MoeConfig ==========\n"
-        << moe_config.to_string() << "\n"
-        << "========== ModelSpecificConfig ==========\n"
-        << model_specific_config.to_string() << "\n"
-        << "========== SpeculativeExecutionConfig ==========\n"
-        << sp_config.to_string() << "\n"
-        << "========== CacheStoreConfig ==========\n"
-        << cache_store_config.to_string() << "\n"
-        << "========== SchedulerConfig ==========\n"
-        << scheduler_config.to_string() << "\n"
-        << "========== BatchDecodeSchedulerConfig ==========\n"
-        << batch_decode_scheduler_config.to_string() << "\n"
-        << "========== FIFOSchedulerConfig ==========\n"
-        << fifo_scheduler_config.to_string() << "\n"
-        << "========== MiscellaneousConfig ==========\n"
-        << misc_config.to_string() << "\n"
-        << "========== ArpcConfig ==========\n"
-        << arpc_config.to_string() << "\n"
-        << "========== FfnDisAggregateConfig ==========\n"
-        << ffn_disaggregate_config.to_string() << "\n"
-        << "========== PDSepConfig ==========\n"
-        << pd_sep_config.to_string() << "\n";
-    RTP_LLM_LOG_INFO(oss.str());
-}
-
 KvCacheDataType loadKvCacheDataTypeFromDataType(rtp_llm::DataType type) {
     if (type == rtp_llm::DataType::TYPE_INT8) {
         return KvCacheDataType::INT8;
@@ -223,9 +135,9 @@ KvCacheDataType loadKvCacheDataTypeFromDataType(rtp_llm::DataType type) {
 }
 
 AttentionConfigs ModelConfig::getAttentionConfigs(int64_t tp_size,
-                                                    int64_t seq_size_per_block,
-                                                    bool    is_causal,
-                                                    bool    use_kvcache) const {
+                                                   int64_t seq_size_per_block,
+                                                   bool    is_causal,
+                                                   bool    use_kvcache) const {
     AttentionConfigs attention_config{head_num_ > 1 ? (size_t)head_num_ / tp_size : 1,
                                       head_num_kv_ > 1 ? (size_t)head_num_kv_ / tp_size : 1,
                                       (size_t)size_per_head_,
@@ -250,3 +162,4 @@ AttentionConfigs ModelConfig::getAttentionConfigs(int64_t tp_size,
 }
 
 }  // namespace rtp_llm
+

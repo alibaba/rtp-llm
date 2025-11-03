@@ -3,17 +3,18 @@ from typing import Dict, Optional
 import torch
 import torch.nn as nn
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig as PyModelConfig
 from rtp_llm.models_py.modules.fmha import FMHAImplBase
-from rtp_llm.ops import KVCache
+from rtp_llm.ops import KVCache, ParallelismConfig
 
 
 class CausalAttentionPure(nn.Module):
     def __init__(
-        self, config: GptInitModelParameters, weights: Dict[str, torch.Tensor]
+        self, config: PyModelConfig, parallelism_config: ParallelismConfig, weights: Dict[str, torch.Tensor]
     ):
         super().__init__()
         self.config = config
+        self.parallelism_config = parallelism_config
         self.head_dim = config.hidden_size // config.head_num
         self.head_num = config.head_num
         self.num_key_value_groups = config.head_num // config.head_num_kv

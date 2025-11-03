@@ -148,12 +148,11 @@ def monitor_and_release_process(backend_process, frontend_process):
 
 
 def main():
-    setup_args()
+    py_env_configs: PyEnvConfigs = setup_args()
+    start_server(py_env_configs)
 
-    start_server()
 
-
-def start_server():
+def start_server(py_env_configs):
     try:
         multiprocessing.set_start_method("spawn")
     except RuntimeError as e:

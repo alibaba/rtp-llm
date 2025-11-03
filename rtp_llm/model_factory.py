@@ -15,9 +15,7 @@ from rtp_llm.config.gpt_init_model_parameters import ConfigMode, GptInitModelPar
 from rtp_llm.distribute.gang_info import get_gang_info
 from rtp_llm.distribute.worker_info import g_parallel_info
 from rtp_llm.model_factory_register import _model_factory
-from rtp_llm.tools.api.hf_model_helper import get_model_info_from_hf
-from rtp_llm.utils.base_model_datatypes import ModelConfig
-from rtp_llm.utils.dump_config_utils import dump_model_to_table
+from rtp_llm.utils.base_model_datatypes import LegacyModelConfig as ModelConfig
 from rtp_llm.utils.fuser import fetch_remote_file_to_local
 from rtp_llm.utils.util import check_with_info
 from rtp_llm.utils.weight_type import WEIGHT_TYPE
@@ -50,7 +48,7 @@ class ModelFactory:
 
     @staticmethod
     def create_frontend_config(model_config: ModelConfig):
-        config = GptInitModelParameters(0, 0, 0, 0, 0)
+        config = GptInitModelParameters()
         config.update_common(
             ckpt_path=model_config.ckpt_path,
             tokenizer_path=model_config.tokenizer_path,
@@ -62,11 +60,8 @@ class ModelFactory:
             gen_num_per_circle=model_config.gen_num_per_circle,
             lora_infos=model_config.lora_infos,
             ptuning_path=model_config.ptuning_path,
-            ref_module=model_config.ref_module,
-            ref_dict=model_config.ref_dict,
             parallel_info=g_parallel_info,
             gang_info=get_gang_info(),
-            config_mode=ConfigMode.SimpleMode,
         )
         config.seq_size_per_block = model_config.seq_size_per_block
 
@@ -81,9 +76,6 @@ class ModelFactory:
         config: GptInitModelParameters = model_cls.create_config(model_config)
         config.model_name = model_cls.__name__
         model = model_cls.from_config(config)
-        dump_model_to_table(
-            ModelFactory.model_config_json(model_cls, model_config, config)
-        )
         return model
 
     @staticmethod
@@ -120,30 +112,12 @@ class ModelFactory:
             model_config.max_seq_len = score_model_gpt_config.max_seq_len
             config: GptInitModelParameters = model_cls.create_config(model_config)
             gpt_model = model_cls.from_config(config)
-            dump_model_to_table(
-                ModelFactory.model_config_json(model_cls, model_config, config)
-            )
             model = ProposeModel(
                 model_config.sp_type, model_config.gen_num_per_circle, gpt_model
             )
         elif model_config.sp_type == "deterministic":
             model = ProposeModel(model_config.sp_type, model_config.gen_num_per_circle)
         return model
-
-    # TODO: remove model_config, get all info from gpt_config
-    @staticmethod
-    def model_config_json(
-        model_cls: Type[Any], model_config: ModelConfig, config: GptInitModelParameters
-    ) -> Dict[str, Any]:
-        config_json = {
-            "model_type": model_cls.__name__,
-            "act_type": str(model_config.act_type),
-            "max_seq_len": config.max_seq_len,
-            "use_sparse_head": config.is_sparse_head,
-            "use_multi_task_prompt": config.multi_task_prompt,
-            "lora_infos": config.lora_infos,
-        }
-        return config_json
 
     @staticmethod
     def from_model_config(
@@ -167,19 +141,6 @@ class ModelFactory:
             logging.info("create propose model done")
         logging.info("create rpc model done")
         return model
-
-    @staticmethod
-    def from_huggingface(
-        model_path_or_name: str,
-        revision: Optional[str] = None,
-        model_config: ModelConfig = ModelConfig(),
-    ):
-        model_path, model_type = get_model_info_from_hf(model_path_or_name, revision)
-        new_model_config = model_config
-        new_model_config = new_model_config._replace(
-            model_type=model_type, ckpt_path=model_path, tokenizer_path=model_path
-        )
-        return ModelFactory.from_model_config(new_model_config)
 
     @staticmethod
     def creat_standalone_py_model_from_huggingface(
@@ -331,20 +292,3 @@ class ModelFactory:
 
         return model
 
-    @staticmethod
-    def create_from_module(ref_module: torch.nn.Module):
-        normal_model_config = ModelFactory.create_normal_model_config()
-        normal_model_config.add_ref_module(ref_module)
-        model = ModelFactory.from_model_config(normal_model_config)
-        ModelFactory.load_default_generate_config(model)
-
-        return model
-
-    @staticmethod
-    def create_from_dict(ref_dict: Dict[str, torch.Tensor]):
-        normal_model_config = ModelFactory.create_normal_model_config()
-        normal_model_config.add_ref_dict(ref_dict)
-        model = ModelFactory.from_model_config(normal_model_config)
-        ModelFactory.load_default_generate_config(model)
-
-        return model

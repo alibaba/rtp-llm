@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
+#include "rtp_llm/cpp/config/ModelConfig.h"
 
 using namespace std;
 
@@ -15,32 +16,138 @@ namespace th = torch;
 
 namespace rtp_llm {
 
-std::tuple<GptInitParameter, std::unique_ptr<Weights>> prepareEngineInitParams(py::object model, bool sp_model);
+struct EngineInitConfigParams {
+    ModelConfig model_config_;
+    MMModelConfig mm_model_config_;
+    ParallelismConfig parallelism_config;
+    RuntimeConfig runtime_config;
+    EPLBConfig eplb_config;
+    PDSepConfig pd_sep_config;
+    ConcurrencyConfig concurrency_config;
+    FMHAConfig fmha_config;
+    KVCacheConfig kv_cache_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    HWKernelConfig hw_kernel_config;
+    DeviceResourceConfig device_resource_config;
+    MoeConfig moe_config;
+    ModelSpecificConfig model_specific_config;
+    SpeculativeExecutionConfig sp_config;
+    CacheStoreConfig cache_store_config;
+    MiscellaneousConfig misc_config;
+    ArpcConfig arpc_config;
+    FfnDisAggregateConfig ffn_disaggregate_config;
+};
+
+std::tuple<EngineInitConfigParams, std::unique_ptr<Weights>> prepareEngineInitParams(py::object model, bool sp_model);
 
 RtpEmbeddingOp::RtpEmbeddingOp() {}
 
+std::tuple<EngineInitConfigParams, std::unique_ptr<Weights>> prepareEngineInitParams(py::object model, bool sp_model) {
+    if (sp_model) {
+        model = model.attr("model");
+    }
+    py::object config_obj = model.attr("config");
+    // Extract individual config members from Python config object
+    auto model_config = config_obj.attr("py_model_config").cast<ModelConfig>();
+    auto mm_model_config = config_obj.attr("mm_model_config").cast<MMModelConfig>();
+    auto parallelism_config = config_obj.attr("parallelism_config").cast<ParallelismConfig>();
+    auto runtime_config = config_obj.attr("runtime_config").cast<RuntimeConfig>();
+    auto eplb_config = config_obj.attr("eplb_config").cast<EPLBConfig>();
+    auto pd_sep_config = config_obj.attr("pd_sep_config").cast<PDSepConfig>();
+    auto concurrency_config = config_obj.attr("concurrency_config").cast<ConcurrencyConfig>();
+    auto fmha_config = config_obj.attr("fmha_config").cast<FMHAConfig>();
+    auto kv_cache_config = config_obj.attr("kv_cache_config").cast<KVCacheConfig>();
+    auto profiling_debug_logging_config = config_obj.attr("profiling_debug_logging_config").cast<ProfilingDebugLoggingConfig>();
+    auto hw_kernel_config = config_obj.attr("hw_kernel_config").cast<HWKernelConfig>();
+    auto device_resource_config = config_obj.attr("device_resource_config").cast<DeviceResourceConfig>();
+    auto moe_config = config_obj.attr("moe_config").cast<MoeConfig>();
+    auto model_specific_config = config_obj.attr("model_specific_config").cast<ModelSpecificConfig>();
+    auto sp_config = config_obj.attr("sp_config").cast<SpeculativeExecutionConfig>();
+    auto cache_store_config = config_obj.attr("cache_store_config").cast<CacheStoreConfig>();
+    auto misc_config = config_obj.attr("misc_config").cast<MiscellaneousConfig>();
+    auto arpc_config = config_obj.attr("arpc_config").cast<ArpcConfig>();
+    auto ffn_disaggregate_config = config_obj.attr("ffn_disaggregate_config").cast<FfnDisAggregateConfig>();
+    
+    py::object py_layers_weights = model.attr("weight").attr("weights");
+    py::object py_global_weights = model.attr("weight").attr("global_weights");
+    
+    auto convert    = WeightsConverter(false, model_config.quant_algo_);
+    auto gpt_weight = convert.createGptWeights(py_layers_weights, py_global_weights);
+    
+    EngineInitConfigParams config_params;
+    config_params.model_config_ = model_config;
+    config_params.mm_model_config_ = mm_model_config;
+    config_params.parallelism_config = parallelism_config;
+    config_params.runtime_config = runtime_config;
+    config_params.eplb_config = eplb_config;
+    config_params.pd_sep_config = pd_sep_config;
+    config_params.concurrency_config = concurrency_config;
+    config_params.fmha_config = fmha_config;
+    config_params.kv_cache_config = kv_cache_config;
+    config_params.profiling_debug_logging_config = profiling_debug_logging_config;
+    config_params.hw_kernel_config = hw_kernel_config;
+    config_params.device_resource_config = device_resource_config;
+    config_params.moe_config = moe_config;
+    config_params.model_specific_config = model_specific_config;
+    config_params.sp_config = sp_config;
+    config_params.cache_store_config = cache_store_config;
+    config_params.misc_config = misc_config;
+    config_params.arpc_config = arpc_config;
+    config_params.ffn_disaggregate_config = ffn_disaggregate_config;
+    
+    return {config_params, std::move(gpt_weight)};
+}
+
 void RtpEmbeddingOp::init(py::object model, py::object mm_process_engine) {
     try {
-        auto [gpt_init_params, gpt_weight] = prepareEngineInitParams(model, false);
+        auto [config_params, gpt_weight] = prepareEngineInitParams(model, false);
         auto                      py_model = model.attr("py_model");
-        EngineInitParams params(0, gpt_init_params, std::move(*gpt_weight), py_model);
+        EngineInitParams params(0,
+                                config_params.model_config_,
+                                config_params.mm_model_config_,
+                                config_params.parallelism_config,
+                                config_params.runtime_config,
+                                config_params.eplb_config,
+                                config_params.pd_sep_config,
+                                config_params.concurrency_config,
+                                config_params.fmha_config,
+                                config_params.kv_cache_config,
+                                config_params.profiling_debug_logging_config,
+                                config_params.hw_kernel_config,
+                                config_params.device_resource_config,
+                                config_params.moe_config,
+                                config_params.model_specific_config,
+                                config_params.sp_config,
+                                config_params.cache_store_config,
+                                config_params.misc_config,
+                                config_params.arpc_config,
+                                config_params.ffn_disaggregate_config,
+                                std::move(*gpt_weight),
+                                py_model);
         py::object                custom_module = model.attr("custom_module");
         py::object                py_render     = model.attr("custom_module").attr("renderer");
         py::object                py_tokenizer  = model.attr("tokenizer");
         py::object                py_handler    = model.attr("custom_module").attr("handler");
 
-        if (gpt_init_params.tp_rank_ == 0) {
+        if (config_params.parallelism_config.tp_rank == 0) {
             // kmon metric init
             (void)initKmonitorFactory();
             auto kmon_tags = kmonitor::MetricsTags();
-            kmon_tags.AddTag("dp_rank", std::to_string(gpt_init_params.dp_rank_));
+            kmon_tags.AddTag("dp_rank", std::to_string(config_params.parallelism_config.dp_rank));
             params.metrics_reporter.reset(new kmonitor::MetricsReporter("", "", kmon_tags));
         }
         embedding_engine_.reset(new EmbeddingEngine(params, py_handler));
         if (!mm_process_engine.is_none()) {
-            mm_processor_.reset(new LocalMultimodalProcessor(mm_process_engine, params.gpt_init_parameter));
+            mm_processor_.reset(new LocalMultimodalProcessor(mm_process_engine, params.mm_model_config_, params.model_config_.max_seq_len_));
         }
-        startRpcServer(gpt_init_params, py_render, py_tokenizer, params.metrics_reporter, mm_processor_);
+        startRpcServer(config_params.parallelism_config.model_rpc_port,
+                       config_params.arpc_config.threadNum,
+                       config_params.arpc_config.queueNum,
+                       config_params.arpc_config.ioThreadNum,
+                       py_render,
+                       py_tokenizer,
+                       params.metrics_reporter,
+                       mm_processor_);
         startHttpServer(embedding_engine_, mm_processor_, params, custom_module);
     } catch (const std::exception& e) {
         RTP_LLM_FAIL("init embedding engine failed, error msg: %s", e.what());
@@ -69,7 +176,7 @@ void RtpEmbeddingOp::startHttpServer(std::shared_ptr<EmbeddingEngine>     embedd
                                      const EngineInitParams&              params,
                                      py::object                                    custom_module) {
     http_server_.reset(new HttpApiServer(embedding_engine, mm_processor, params, custom_module));
-    std::string http_server_address("tcp:0.0.0.0:" + std::to_string(params.gpt_init_parameter.http_port_));
+    std::string http_server_address("tcp:0.0.0.0:" + std::to_string(params.parallelism_config.http_port));
     if (http_server_->start(http_server_address)) {
         RTP_LLM_LOG_INFO("embedding HTTP Server listening on %s", http_server_address.c_str());
     } else {
@@ -77,20 +184,23 @@ void RtpEmbeddingOp::startHttpServer(std::shared_ptr<EmbeddingEngine>     embedd
     }
 }
 
-void RtpEmbeddingOp::startRpcServer(const GptInitParameter&              gpt_init_params,
+void RtpEmbeddingOp::startRpcServer(int64_t model_rpc_port,
+                                    int64_t arpc_thread_num,
+                                    int64_t arpc_queue_num,
+                                    int64_t arpc_io_thread_num,
                                     py::object                                    py_render,
                                     py::object                                    py_tokenizer,
                                     kmonitor::MetricsReporterPtr                  reporter,
                                     std::shared_ptr<MultimodalProcessor> mm_processor) {
     auto arpc_service = std::move(createEmbeddingArpcService(
-        gpt_init_params, py_render, py_tokenizer, mm_processor, embedding_engine_, reporter));
+        model_rpc_port, arpc_thread_num, arpc_queue_num, arpc_io_thread_num, py_render, py_tokenizer, mm_processor, embedding_engine_, reporter));
     if (arpc_service) {
         RTP_LLM_LOG_INFO("creating arpc service");
         embedding_rpc_service_.reset(new ArpcServerWrapper(std::move(arpc_service),
-                                                                    gpt_init_params.arpc_config.threadNum,
-                                                                    gpt_init_params.arpc_config.queueNum,
-                                                                    gpt_init_params.arpc_config.ioThreadNum,
-                                                                    gpt_init_params.model_rpc_port_));
+                                                                    arpc_thread_num,
+                                                                    arpc_queue_num,
+                                                                    arpc_io_thread_num,
+                                                                    model_rpc_port));
         embedding_rpc_service_->start();
     } else {
         RTP_LLM_LOG_INFO("Embedding RPC not supported, skip");

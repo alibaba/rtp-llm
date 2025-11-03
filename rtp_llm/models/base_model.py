@@ -19,6 +19,7 @@ from rtp_llm.models.downstream_modules.custom_module import CustomModule
 from rtp_llm.models.downstream_modules.utils import create_custom_module
 from rtp_llm.models.multimodal.multimodal_mixin import MultiModalMixin
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
+from rtp_llm.config.model_config import ModelConfig as PyModelConfig
 from rtp_llm.utils.base_model_datatypes import (
     AuxInfo,
     EmbeddingOutput,
@@ -27,7 +28,7 @@ from rtp_llm.utils.base_model_datatypes import (
     GenerateOutput,
     GenerateOutputs,
     GenerateResponse,
-    ModelConfig,
+    LegacyModelConfig as ModelConfig,
 )
 from rtp_llm.utils.database import CkptDatabase
 from rtp_llm.utils.multimodal_util import MultimodalInput
@@ -40,7 +41,6 @@ FT_DEFAULT_MAX_NEW_TOKENS = 2048
 class BaseModel(object):
 
     config: GptInitModelParameters
-    vocab_size_padded: int
     device: str
 
     def __init__(self, config: GptInitModelParameters) -> None:
@@ -80,7 +80,7 @@ class BaseModel(object):
 
         if self.config.model_specific_config.load_python_model:
             logging.info(
-                f"Creating python model for {self.config.ckpt_path} on {self.device}"
+                f"Creating python model for {self.config.py_model_config.ckpt_path} on {self.device}"
             )
             self._create_python_model()
         else:
@@ -108,10 +108,20 @@ class BaseModel(object):
         parallel_info: ParallelInfo = g_parallel_info,
         config_mode: ConfigMode = ConfigMode.ComplexMode,
     ) -> GptInitModelParameters:
-        config: GptInitModelParameters = cls._create_config(model_config.ckpt_path)
-        if config.hidden_size == 0:
-            config.hidden_size = config.size_per_head * config.head_num
-        config.update_common(
+        # Call _create_config to get PyModelConfig from checkpoint
+        py_model_config: PyModelConfig = cls._create_config(model_config.ckpt_path)
+        # Update the config with model-specific settings
+        py_model_config = cls._update_config(py_model_config)
+        
+        # Calculate hidden_size if not set
+        if py_model_config.hidden_size == 0 and py_model_config.head_num > 0 and py_model_config.size_per_head > 0:
+            py_model_config.hidden_size = py_model_config.head_num * py_model_config.size_per_head
+        
+        gpt_config = GptInitModelParameters()
+        gpt_config.py_model_config = py_model_config
+        
+        # Update common settings from legacy ModelConfig
+        gpt_config.update_common(
             ckpt_path=model_config.ckpt_path,
             tokenizer_path=model_config.tokenizer_path,
             quantization=model_config.quantization,
@@ -122,22 +132,20 @@ class BaseModel(object):
             gen_num_per_circle=model_config.gen_num_per_circle,
             lora_infos=model_config.lora_infos,
             ptuning_path=model_config.ptuning_path,
-            ref_module=model_config.ref_module,
-            ref_dict=model_config.ref_dict,
             parallel_info=parallel_info,
             gang_info=get_gang_info(),
             config_mode=config_mode,
         )
-        cls._update_config(config)
-        return config
+        
+        return gpt_config
 
     @classmethod
-    def _create_config(cls, ckpt_path: str) -> GptInitModelParameters:
+    def _create_config(cls, ckpt_path: str) -> PyModelConfig:
         raise NotImplementedError()
 
     @classmethod
-    def _update_config(cls, config: GptInitModelParameters):
-        pass
+    def _update_config(cls, model_config: PyModelConfig) -> PyModelConfig:
+        return model_config
 
     @classmethod
     def from_config(
@@ -167,27 +175,58 @@ class BaseModel(object):
     @timer_wrapper(description="init custom_module")
     def _init_misc(self):
         self._may_init_multimodal()
-        self.task_type = self.config.task_type
+        # Get task_type from C++ ModelConfig and convert to enum
+        task_type_str = self.config.gpt_init_params.model_config.get_task_type()
+        try:
+            self.task_type = TaskType.from_str(task_type_str)
+        except:
+            self.task_type = TaskType.LANGUAGE_MODEL
         self.custom_module = self._init_custom_module()
-        self.compute_dtype: torch.dtype = to_torch_dtype(self.config.data_type)
+        self.compute_dtype: torch.dtype = to_torch_dtype(self.config.gpt_init_params.model_config.data_type)
 
     def _init_custom_module(self) -> Optional[CustomModule]:
         return create_custom_module(self.task_type, self.config, self.tokenizer)
 
     def load_tokenizer(self) -> None:
-        if self.config:
-            self.tokenizer = TokenizerFactory.create_from_config(self.config)
-        else:
-            self.tokenizer = TokenizerFactory.create_from_env()
+        # Get tokenizer parameters from config
+        ckpt_path = self.config.py_model_config.ckpt_path
+        tokenizer_path = self.config.py_model_config.tokenizer_path_
+        if not tokenizer_path:
+            tokenizer_path = ckpt_path
+        
+        # Get model_type from config.json
+        import json
+        import os
+        config_json_path = os.path.join(ckpt_path, "config.json")
+        model_type = ""
+        if os.path.exists(config_json_path):
+            with open(config_json_path, "r", encoding="utf-8") as reader:
+                config_json = json.loads(reader.read())
+                # Try to get model_type from architectures field
+                if "architectures" in config_json and config_json["architectures"]:
+                    model_type = config_json["architectures"][0].lower()
+                elif "model_type" in config_json:
+                    model_type = config_json["model_type"].lower()
+        
+        # Fallback to StaticConfig if not found in config.json
+        if not model_type:
+            from rtp_llm.config.py_config_modules import StaticConfig
+            model_type = StaticConfig.model_config.model_type
+        
+        from rtp_llm.utils.fuser import fetch_remote_file_to_local
+        tokenizer_path = fetch_remote_file_to_local(tokenizer_path)
+        ckpt_path = fetch_remote_file_to_local(ckpt_path)
+        
+        self.tokenizer = TokenizerFactory.create(ckpt_path, tokenizer_path, model_type)
         if hasattr(self.tokenizer, "eos_token_id") and self.tokenizer.eos_token_id:
-            self.config.special_tokens.eos_token_id = self.tokenizer.eos_token_id
+            self.config.gpt_init_params.model_config.special_tokens.eos_token_id = self.tokenizer.eos_token_id
             self.config.update_task_prompt_tokens_id(self.tokenizer)
 
     def is_multimodal(self) -> bool:
         return isinstance(self, MultiModalMixin)
 
     def _init_database(self):
-        self.database = CkptDatabase(self.config.ckpt_path, self.config.ptuning_path)
+        self.database = CkptDatabase(self.config.py_model_config.ckpt_path, self.config.py_model_config.ptuning_path)
         # static lora load
         self.static_lora: bool = (
             self.config.lora_infos is not None and len(self.config.lora_infos) == 1
@@ -217,50 +256,8 @@ class BaseModel(object):
                 self.device,
             )
 
-    def dup_dim0_for_beam_search(
-        self, t: torch.Tensor, beam_width: int
-    ) -> torch.Tensor:
-        shape = list(t.shape)
-        return (
-            t.unsqueeze(1)
-            .repeat([1, beam_width] + [1] * len(shape[1:]))
-            .reshape([-1] + shape[1:])
-            .contiguous()
-        )
 
-    def extend_context_combo_token_types(self, token_types: List[int]) -> List[int]:
-        return []
-
-    def extend_generate_combo_token_types(self, combo_tokens: List[int]) -> List[int]:
-        return []
-
-    def create_context_position_ids(
-        self, input_lengths: Union[List[int], torch.Tensor]
-    ):
-        return torch.concat(
-            [
-                torch.arange(int(input_length), dtype=torch.int32)
-                for input_length in input_lengths
-            ],
-            dim=0,
-        )
-
-    def create_context_decoder_mask(self, input_lengths: List[int]):
-        batch_size = len(input_lengths)
-        max_input_length = max(input_lengths)
-        attention_mask = torch.ones(
-            (max_input_length, max_input_length), dtype=torch.bool, device=self.device
-        )
-        if self.config.is_causal:
-            attention_mask = attention_mask.tril()
-        attention_mask = (
-            attention_mask.unsqueeze_(0).tile(batch_size, 1, 1).to(self.dtype)
-        )
-        for b, input_length in enumerate(input_lengths):
-            attention_mask[b, input_length:, ...] = 0
-            if not self.config.is_causal:
-                attention_mask[b, :, input_length:] = 0
-        return attention_mask
+\
 
     def create_model_loader(self, parallel_info: ParallelInfo) -> ModelLoader:
         self.parallel_info = parallel_info
@@ -289,8 +286,16 @@ class BaseModel(object):
 
     @staticmethod
     def eval_model_size(config: GptInitModelParameters):
-        return config.eval_model_size()
+        # Get task_type from C++ ModelConfig
+        task_type_str = config.gpt_init_params.model_config.get_task_type()
+        try:
+            task_type = TaskType.from_str(task_type_str)
+        except:
+            task_type = TaskType.LANGUAGE_MODEL
+        return config.py_model_config.eval_model_size(
+            config.gpt_init_params.model_config.quant_algo_, task_type, config.gpt_init_params.model_config.vocab_size_
+        )
 
     @staticmethod
     def eval_model_param_count(config: GptInitModelParameters):
-        return config.model_param_count
+        return config.py_model_config.model_param_count(config.gpt_init_params.model_config.vocab_size_)

@@ -4,7 +4,8 @@ from typing import Any, Dict, List
 
 from transformers import AutoTokenizer
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters, VitParameters
+from rtp_llm.config.model_config import ModelConfig as PyModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.internvl_vit import InternVLImageEmbedding
@@ -29,23 +30,12 @@ class InternVL(BaseModel, MultiModalMixin):
         return InternVLWeightInfo
 
     @classmethod
-    def _create_config(cls, ckpt_path: str):
-        config = GptInitModelParameters(
-            head_num=0,
-            head_num_kv=0,
-            size_per_head=0,
-            layer_num=0,
-            inter_size=0,
-            vocab_size=0,
-            max_seq_len=0,
-            ckpt_path=ckpt_path,
-            rotary_embedding_dim=128,
-            rotary_embedding_style=1,
-            activation_type="SiGLU",
-            has_pre_decoder_layernorm=False,
-            has_post_decoder_layernorm=True,
-            norm_type="rmsnorm",
-        )
+    def _create_config(cls, ckpt_path: str) -> PyModelConfig:
+        config = PyModelConfig()
+        config.ckpt_path = ckpt_path
+        config.rope_config.dim = 128
+        config.rope_config.style = 1
+        config.has_pre_decoder_layernorm = False
 
         config_path = os.path.join(ckpt_path, "config.json")
         if os.path.exists(config_path):
@@ -70,7 +60,7 @@ class InternVL(BaseModel, MultiModalMixin):
             config.head_num > 0
             and config.head_num_kv > 0
             and config.size_per_head > 0
-            and config.layer_num > 0
+            and config.num_layers > 0
             and config.inter_size > 0
         ), "error config"
         config.mm_related_params.special_tokens.update({"default_mm_token": "<image>"})

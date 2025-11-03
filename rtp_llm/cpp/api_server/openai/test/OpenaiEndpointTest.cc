@@ -39,7 +39,7 @@ TEST_F(OpenaiEndpointTest, Constructor_TokenizerIsNull) {
 
 TEST_F(OpenaiEndpointTest, Constructor_IsPreTrainedTokenizer) {
     rtp_llm::GptInitParameter param;
-    param.special_tokens_.eos_token_id_ = 5;
+    param.model_config_.special_tokens_.eos_token_id_ = 5;
 
     EXPECT_CALL(*mock_tokenizer_, isPreTrainedTokenizer).WillOnce(Return(true));
     EXPECT_CALL(*mock_tokenizer_, getEosTokenId).WillOnce(Return(10));
@@ -52,7 +52,7 @@ TEST_F(OpenaiEndpointTest, Constructor_IsPreTrainedTokenizer) {
 
 TEST_F(OpenaiEndpointTest, Constructor_IsNotPreTrainedTokenizer) {
     rtp_llm::GptInitParameter param;
-    param.special_tokens_.eos_token_id_ = 5;
+    param.model_config_.special_tokens_.eos_token_id_ = 5;
 
     EXPECT_CALL(*mock_tokenizer_, isPreTrainedTokenizer).WillOnce(Return(false));
     EXPECT_CALL(*mock_tokenizer_, getEosTokenId).Times(0);
@@ -65,8 +65,8 @@ TEST_F(OpenaiEndpointTest, Constructor_IsNotPreTrainedTokenizer) {
 
 TEST_F(OpenaiEndpointTest, Constructor_RenderIsNotNull) {
     rtp_llm::GptInitParameter param;
-    param.special_tokens_.eos_token_id_       = 5;
-    param.special_tokens_.stop_words_id_list_ = {{1, 2, 3}, {4, 5, 6}};
+    param.model_config_.special_tokens_.eos_token_id_       = 5;
+    param.model_config_.special_tokens_.stop_words_id_list_ = {{1, 2, 3}, {4, 5, 6}};
 
     EXPECT_CALL(*mock_tokenizer_, isPreTrainedTokenizer).WillOnce(Return(true));
     EXPECT_CALL(*mock_tokenizer_, getEosTokenId).WillOnce(Return(10));
@@ -76,7 +76,7 @@ TEST_F(OpenaiEndpointTest, Constructor_RenderIsNotNull) {
 
     std::vector<std::vector<int>> ids_list;
     {
-        for (const auto& list : param.special_tokens_.stop_words_id_list_) {
+        for (const auto& list : param.model_config_.special_tokens_.stop_words_id_list_) {
             std::vector<int> temp(list.size());
             std::transform(list.begin(), list.end(), temp.begin(), [](int64_t val) { return static_cast<int>(val); });
             ids_list.push_back(temp);

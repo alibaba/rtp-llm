@@ -123,7 +123,36 @@ class WeightsQuantizer:
             tokenizer_path=self.model_path,
         )
         self.config: GptInitModelParameters = self.model_cls.create_config(model_config)
-        self.tokenizer = TokenizerFactory.create_from_env()
+        # Get tokenizer parameters from config
+        ckpt_path = self.config.py_model_config.ckpt_path
+        tokenizer_path = self.config.py_model_config.tokenizer_path_
+        if not tokenizer_path:
+            tokenizer_path = ckpt_path
+        
+        # Get model_type from config.json
+        import json
+        import os
+        config_json_path = os.path.join(ckpt_path, "config.json")
+        model_type = ""
+        if os.path.exists(config_json_path):
+            with open(config_json_path, "r", encoding="utf-8") as reader:
+                config_json = json.loads(reader.read())
+                # Try to get model_type from architectures field
+                if "architectures" in config_json and config_json["architectures"]:
+                    model_type = config_json["architectures"][0].lower()
+                elif "model_type" in config_json:
+                    model_type = config_json["model_type"].lower()
+        
+        # Fallback to StaticConfig if not found in config.json
+        if not model_type:
+            from rtp_llm.config.py_config_modules import StaticConfig
+            model_type = StaticConfig.model_config.model_type
+        
+        from rtp_llm.utils.fuser import fetch_remote_file_to_local
+        tokenizer_path = fetch_remote_file_to_local(tokenizer_path)
+        ckpt_path = fetch_remote_file_to_local(ckpt_path)
+        
+        self.tokenizer = TokenizerFactory.create(ckpt_path, tokenizer_path, model_type)
         self.special_tokens = self.config.special_tokens
         logging.info(f"max_seq_len:{self.tokenizer.model_max_length}")
 

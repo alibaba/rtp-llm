@@ -24,7 +24,15 @@ async def main():
         model = ModelFactory.from_huggingface(
             model_config.ckpt_path, model_config=model_config
         )
-        pipeline = Pipeline(model.config, model.tokenizer)
+        pipeline = Pipeline(
+            model.config.gpt_init_params.model_config,
+            model.config.gpt_init_params.pd_sep_config,
+            model.config.gpt_init_params.runtime_config,
+            model.config.gpt_init_params.ffn_disaggregate_config,
+            model.config.py_model_config,
+            model.tokenizer,
+            py_env_configs=model.config.py_env_configs,
+        )
 
         # usual request
         for res in pipeline(

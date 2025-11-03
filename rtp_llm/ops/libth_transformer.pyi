@@ -40,7 +40,6 @@ __all__ = [
     "RtpEmbeddingOp",
     "RtpLLMOp",
     "SchedulerConfig",
-    "ServiceDiscoveryConfig",
     "SpecialTokens",
     "SpeculativeExecutionConfig",
     "get_block_cache_keys",
@@ -482,7 +481,6 @@ class GptInitParameter:
     nope_head_dim: int
     norm_type: str
     num_layers: int
-    num_valid_layer: int
     org_embedding_max_pos: int
     parallelism_distributed_config: ParallelismDistributedConfig
     phy_exp_num: int
@@ -521,7 +519,6 @@ class GptInitParameter:
     scheduler_reserve_resource_ratio: int
     scoring_func: int
     seq_size_per_block: int
-    service_discovery_config: ServiceDiscoveryConfig
     size_per_head: int
     softmax_extra_scale: float
     sp_config: SpeculativeExecutionConfig
@@ -929,24 +926,6 @@ class RtpLLMOp:
 class SchedulerConfig:
     use_batch_decode_scheduler: bool
     def __init__(self, use_batch_decode_scheduler: bool = False) -> None: ...
-    def to_string(self) -> str: ...
-    def update_from_env(self) -> None: ...
-
-class ServiceDiscoveryConfig:
-    decode_cm2_config: str
-    multimodal_part_cm2_config: str
-    remote_rpc_server_ip: str
-    remote_vit_server_ip: str
-    use_local: bool
-
-    def __init__(
-        self,
-        use_local: bool = False,
-        remote_rpc_server_ip: str = "",
-        decode_cm2_config: str = "",
-        remote_vit_server_ip: str = "",
-        multimodal_part_cm2_config: str = "",
-    ) -> None: ...
     def to_string(self) -> str: ...
     def update_from_env(self) -> None: ...
 

@@ -4,7 +4,8 @@ from typing import Dict, Optional
 import torch
 from torch import nn
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig as PyModelConfig
+from rtp_llm.ops import ParallelismConfig, MoeConfig, RuntimeConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules.attention import CausalAttention
@@ -13,6 +14,7 @@ from rtp_llm.models_py.modules.fmha import FMHAImplBase
 from rtp_llm.models_py.modules.linear import Linear
 from rtp_llm.models_py.modules.mlp import FusedSiluActDenseMLP
 from rtp_llm.models_py.modules.moe import FusedMoe
+from rtp_llm.models_py.modules.moe.config_adapter import MoEConfigAdapter
 from rtp_llm.models_py.modules.moe.fused_moe_factory import FusedMoeFactory
 from rtp_llm.models_py.modules.norm import RMSNorm
 from rtp_llm.ops import KVCache, PyAttentionInputs, PyModelInputs, PyModelOutputs
@@ -28,10 +30,11 @@ class GenericMoeLayer(nn.Module):
     """Generic MoE layer supporting both Qwen3 and internal model."""
 
     def __init__(
-        self, config: GptInitModelParameters, weights: Dict[str, torch.Tensor]
+        self, config: PyModelConfig, parallelism_config: ParallelismConfig, weights: Dict[str, torch.Tensor], quant_config: Optional[object] = None
     ):
         super().__init__()
         self.config = config
+        self.parallelism_config = parallelism_config
 
         self.hidden_dim = config.hidden_size
         self.ffn_dim = config.moe_inter_padding_size
@@ -39,8 +42,22 @@ class GenericMoeLayer(nn.Module):
         self.top_k = config.moe_k
 
         self.gate = Linear(weights[W.moe_gate], None)
+        # PyModelConfig inherits from CppModelConfig (ModelConfig), so can be passed directly
         self.select_topk_op = SelectTopkOp(config)
-        self.fused_moe: FusedMoe = FusedMoeFactory.create_fused_moe(config, weights)
+        
+                # Use MoEConfigAdapter to provide unified interface
+        # Get MoeConfig and RuntimeConfig from ops (they have defaults)
+        moe_config = MoeConfig()
+        runtime_config = RuntimeConfig()
+        # Create adapter that provides shortcut access to config fields
+        config_adapter = MoEConfigAdapter(
+            py_model_config=config,
+            parallelism_config=parallelism_config,
+            moe_config=moe_config,
+            runtime_config=runtime_config,
+            quant_config=quant_config,
+        )
+        self.fused_moe: FusedMoe = FusedMoeFactory.create_fused_moe(config_adapter, weights)
 
         self.w1 = weights.get(W.moe_w1, None)
         self.w2 = weights.get(W.moe_w2, None)
@@ -55,7 +72,7 @@ class GenericMoeLayer(nn.Module):
         num_local_experts = self.num_local_experts
         global_num_experts = self.num_experts
         expert_map = torch.full((global_num_experts,), fill_value=-1, dtype=torch.int32)
-        start_id = self.config.ep_rank * num_local_experts
+        start_id = self.parallelism_config.ep_rank * num_local_experts
         end_id = start_id + num_local_experts
         expert_map[start_id:end_id] = torch.tensor(list(range(num_local_experts)))
         return expert_map.to(device=torch.cuda.current_device(), dtype=torch.int32)
@@ -92,28 +109,32 @@ class GenericMoeDecoderLayer(nn.Module):
 
     def __init__(
         self,
-        config: GptInitModelParameters,
+        config: PyModelConfig,
+        parallelism_config: ParallelismConfig,
         weights: Dict[str, torch.Tensor],
         layer_idx: int,
+        quant_config: Optional[object] = None,
     ):
         super().__init__()
         self.layer_idx = layer_idx
-        self.self_attn = CausalAttention(config, weights)
+        self.self_attn = CausalAttention(config, parallelism_config, weights, quant_config)
 
         # Determine if this is a Dense layer (before first MoE layer or dense only)
-        if layer_idx not in config.moe_layer_index:
+        moe_layer_index = getattr(config, 'moe_layer_index', [])
+        if layer_idx not in moe_layer_index:
             self.is_dense_layer = True
         else:
             self.is_dense_layer = False
-            self.moe_mlp = GenericMoeLayer(config, weights)
+            self.moe_mlp = GenericMoeLayer(config, parallelism_config, weights, quant_config)
 
-        self.add_shared_expert = getattr(config, "moe_style", 1) == 2
+        moe_style = getattr(config, 'moe_style', 1)
+        self.add_shared_expert = moe_style == 2
 
         # Try to create shared_mlp and catch errors if weights don't exist
         self.shared_mlp = None
         if self.is_dense_layer or self.add_shared_expert:
             try:
-                self.shared_mlp = FusedSiluActDenseMLP(config, weights)
+                self.shared_mlp = FusedSiluActDenseMLP(config, parallelism_config, weights, quant_config)
             except (KeyError, AssertionError) as e:
                 # If weights don't exist, shared_mlp remains None
                 logging.warning(
@@ -168,17 +189,25 @@ class GenericMoeDecoderLayer(nn.Module):
 class GenericMoeModel(GptModelBase):
     """Generic MoE model supporting Qwen3-MoE, internal model, and other MoE architectures."""
 
-    def __init__(self, config: GptInitModelParameters, weights: ModelWeights):
-        super().__init__(config, weights)
-        self.embed_tokens = Embedding(config, weights.get_global_weight(W.embedding))
+    def __init__(
+        self,
+        py_model_config: PyModelConfig,
+        parallelism_config: ParallelismConfig,
+        device_resource_config,
+        weights: ModelWeights,
+        vocab_size: int,
+        quant_config: Optional[object] = None,
+    ):
+        super().__init__(py_model_config, parallelism_config, device_resource_config, weights, vocab_size)
+        self.embed_tokens = Embedding(py_model_config, parallelism_config, weights.get_global_weight(W.embedding))
         self.layers = nn.ModuleList(
             [
-                GenericMoeDecoderLayer(config, weights.weights[idx], idx)
+                GenericMoeDecoderLayer(py_model_config, parallelism_config, weights.weights[idx], idx, quant_config)
                 for idx in range(self.layer_num)
             ]
         )
         self.norm = RMSNorm(
-            weights.get_global_weight(W.final_ln_gamma), eps=config.layernorm_eps
+            weights.get_global_weight(W.final_ln_gamma), eps=py_model_config.layernorm_eps
         )
 
     def forward(self, inputs: PyModelInputs) -> PyModelOutputs:

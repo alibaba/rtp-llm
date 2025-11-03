@@ -52,7 +52,11 @@ class FrontendWorkerTest(TestCase):
             max_seq_len=2048,
         )
         model: AsyncModel = self.fake_model_loader.load_model()
-        pipeline = Pipeline(model.config, model.tokenizer)
+        pipeline = Pipeline(
+            model.config.gpt_init_params,
+            model.config.py_model_config,
+            model.tokenizer,
+        )
         return FakeFrontendWorker(model, pipeline)
 
     async def _run(self, frontend_worker, **kwargs):

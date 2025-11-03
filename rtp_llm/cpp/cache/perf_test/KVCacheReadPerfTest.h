@@ -74,7 +74,7 @@ public:
         auto             device   = createDevice();
         auto             reporter = createMetricsReporter();
         GptInitParameter gpt_init_params;
-        gpt_init_params.model_name_ = "TestModel";
+        gpt_init_params.runtime_config.model_name = "TestModel";
         auto cache_manager = std::make_shared<CacheManager>(cache_config, device, false, reporter, gpt_init_params);
         const auto kvcache = cache_manager->kvCacheBuffer();
 

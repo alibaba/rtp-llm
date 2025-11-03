@@ -1,30 +1,30 @@
-from typing import Dict
+from typing import Dict, Optional
 
 import torch
 from torch import nn
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig as PyModelConfig
 from rtp_llm.distribute.collective import Group, all_reduce
 from rtp_llm.models_py.modules.linear_factory import LinearFactory
-from rtp_llm.ops import rtp_llm_ops
+from rtp_llm.ops import ParallelismConfig, rtp_llm_ops
 from rtp_llm.utils.model_weight import W
 
 
 class DenseMLP(nn.Module):
     def __init__(
-        self, config: GptInitModelParameters, weights: Dict[str, torch.Tensor]
+        self, config: PyModelConfig, parallelism_config: ParallelismConfig, weights: Dict[str, torch.Tensor], quant_config: Optional[object] = None
     ):
         super().__init__()
 
         # Create linear layers using LinearFactory
         self.gate_proj = LinearFactory.create_linear_from_weights(
-            weights, W.ffn_w1, W.ffn_s1, W.ffn_b1, config
+            weights, W.ffn_w1, W.ffn_s1, W.ffn_b1, py_model_config=config, gpt_init_params=None, quant_config=quant_config
         )
         self.up_proj = LinearFactory.create_linear_from_weights(
-            weights, W.ffn_w3, W.ffn_s3, W.ffn_b3, config
+            weights, W.ffn_w3, W.ffn_s3, W.ffn_b3, py_model_config=config, gpt_init_params=None, quant_config=quant_config
         )
         self.down_proj = LinearFactory.create_linear_from_weights(
-            weights, W.ffn_w2, W.ffn_s2, W.ffn_b2, config
+            weights, W.ffn_w2, W.ffn_s2, W.ffn_b2, py_model_config=config, gpt_init_params=None, quant_config=quant_config
         )
 
         if config.activation_type == "SiGLU":
@@ -43,7 +43,7 @@ class DenseMLP(nn.Module):
 
 class FusedSiluActDenseMLP(nn.Module):
     def __init__(
-        self, config: GptInitModelParameters, weights: Dict[str, torch.Tensor]
+        self, config: PyModelConfig, parallelism_config: ParallelismConfig, weights: Dict[str, torch.Tensor], quant_config: Optional[object] = None
     ):
         super().__init__()
 
@@ -51,14 +51,15 @@ class FusedSiluActDenseMLP(nn.Module):
             config.activation_type == "SiGLU"
         ), "FusedSiluActDenseMLP only supports SiGLU activation"
         self.config = config
+        self.parallelism_config = parallelism_config
 
         # Handle merged or separate weights
         if W.ffn_w13 in weights:
             self.gate_up_proj = LinearFactory.create_linear_from_weights(
-                weights, W.ffn_w13, W.ffn_s13, W.ffn_b13, config
+                weights, W.ffn_w13, W.ffn_s13, W.ffn_b13, py_model_config=config, gpt_init_params=None, quant_config=quant_config
             )
             self.down_proj = LinearFactory.create_linear_from_weights(
-                weights, W.ffn_w2, W.ffn_s2, W.ffn_b2, config
+                weights, W.ffn_w2, W.ffn_s2, W.ffn_b2, py_model_config=config, gpt_init_params=None, quant_config=quant_config
             )
         else:
             self.gate_up_proj = LinearFactory.create_merged_linear(
@@ -66,11 +67,13 @@ class FusedSiluActDenseMLP(nn.Module):
                 weight_keys=[W.ffn_w1, W.ffn_w3],
                 scale_keys=[W.ffn_s1, W.ffn_s3],
                 bias_keys=[W.ffn_b1, W.ffn_b3],
-                config=config,
+                py_model_config=config,
+                gpt_init_params=None,
+                quant_config=quant_config,
                 dim=-1,
             )
             self.down_proj = LinearFactory.create_linear_from_weights(
-                weights, W.ffn_w2, W.ffn_s2, W.ffn_b2, config
+                weights, W.ffn_w2, W.ffn_s2, W.ffn_b2, py_model_config=config, gpt_init_params=None, quant_config=quant_config
             )
 
     def forward(self, x: torch.Tensor):
@@ -82,24 +85,24 @@ class FusedSiluActDenseMLP(nn.Module):
         stream_id = torch.cuda.current_stream().cuda_stream
         rtp_llm_ops.silu_and_mul(output, gate_up, stream_id)
         down_proj = self.down_proj(output)
-        if self.config.tp_size > 1:
+        if self.parallelism_config.tp_size > 1:
             down_proj = all_reduce(down_proj, group=Group.TP)
         return down_proj
 
 
 class BertGeluActDenseMLP(nn.Module):
     def __init__(
-        self, config: GptInitModelParameters, weights: Dict[str, torch.Tensor]
+        self, config: PyModelConfig, parallelism_config: ParallelismConfig, weights: Dict[str, torch.Tensor], quant_config: Optional[object] = None
     ):
         super().__init__()
 
         # For BERT model, use traditional FFN structure with GeLU activation
         # BERT uses: intermediate_weight3 -> GeLU -> intermediate_weight2
         self.intermediate_proj = LinearFactory.create_linear_from_weights(
-            weights, W.ffn_w3, W.ffn_s3, W.ffn_b3, config
+            weights, W.ffn_w3, W.ffn_s3, W.ffn_b3, py_model_config=config, gpt_init_params=None, quant_config=quant_config
         )
         self.output_proj = LinearFactory.create_linear_from_weights(
-            weights, W.ffn_w2, W.ffn_s2, W.ffn_b2, config
+            weights, W.ffn_w2, W.ffn_s2, W.ffn_b2, py_model_config=config, gpt_init_params=None, quant_config=quant_config
         )
 
         # Use GeLU activation
