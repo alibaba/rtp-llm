@@ -1,6 +1,7 @@
 // message.proto
 syntax = "proto3";
 import "google/protobuf/wrappers.proto";
+import "google/protobuf/any.proto"
 
 
 message TensorPB {
@@ -385,12 +386,12 @@ message MemoryBlockCacheResponsePB {
 }
 
 message BroadcastAllTpRequest {
-    string action_name = 1;
-    string msg = 2;
+    google.protobuf.Any msg = 1;
+    string action = 2;
 }
 
 message BroadcastAllTpResponse {
-    string msg = 1;
+    google.protobuf.Any msg = 1;
 }
 
 service RpcService {
