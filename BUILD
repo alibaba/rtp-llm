@@ -1,5 +1,7 @@
+load("@hedron_compile_commands//:refresh_compile_commands.bzl", "refresh_compile_commands")
 load("//:def.bzl", "copts", "cuda_copts")
-load("//bazel:arch_select.bzl", "torch_deps", "flashinfer_deps", "select_py_bindings")
+load("//bazel:arch_select.bzl", "flashinfer_deps", "select_py_bindings", "torch_deps")
+
 flashinfer_deps()
 
 config_setting(
@@ -19,12 +21,18 @@ config_setting(
 
 config_setting(
     name = "using_cuda12_9_x86",
-    define_values = {"using_cuda12": "true", "using_cuda12_9_x86": "true"},
+    define_values = {
+        "using_cuda12": "true",
+        "using_cuda12_9_x86": "true",
+    },
 )
 
 config_setting(
     name = "cuda_pre_12_9",
-    define_values = {"using_cuda12_9_x86": "false", "using_cuda12_arm": "false"},
+    define_values = {
+        "using_cuda12_9_x86": "false",
+        "using_cuda12_arm": "false",
+    },
 )
 
 config_setting(
@@ -71,25 +79,33 @@ config_setting(
 )
 
 config_setting(
-    name = "using_3fs",
-    define_values = {"use_3fs": "true",},
+    name = "using_remote_kv_cache",
+    define_values = {"use_remote_kv_cache": "true"},
 )
 
 cc_binary(
     name = "th_transformer_config",
-    deps = [
-        "//rtp_llm/cpp/pybind:th_transformer_config_lib",
-    ],
     copts = copts(),
-    linkshared = 1,
     linkopts = [
         "-Wl,-rpath='$$ORIGIN'",
     ],
+    linkshared = 1,
     visibility = ["//visibility:public"],
+    deps = [
+        "//rtp_llm/cpp/pybind:th_transformer_config_lib",
+    ],
 )
 
 cc_binary(
     name = "rtp_compute_ops",
+    copts = copts(),
+    linkopts = [
+        "-Wl,-rpath='$$ORIGIN'",
+        "-Wl,-rpath=$(NVSHMEM_DIR)/lib",
+        "-L$(NVSHMEM_DIR)/lib",
+    ],
+    linkshared = 1,
+    visibility = ["//visibility:public"],
     deps = [
         "//rtp_llm/cpp/pybind:th_compute_lib",
     ] + select({
@@ -98,14 +114,6 @@ cc_binary(
         ],
         "//conditions:default": [],
     }),
-    copts = copts(),
-    linkshared = 1,
-    linkopts = [
-        "-Wl,-rpath='$$ORIGIN'",
-        "-Wl,-rpath=$(NVSHMEM_DIR)/lib",
-        "-L$(NVSHMEM_DIR)/lib",
-    ],
-    visibility = ["//visibility:public"],
 )
 
 cc_binary(
@@ -113,16 +121,16 @@ cc_binary(
     srcs = [
         ":rtp_compute_ops",
     ],
-    deps = [
-        "//rtp_llm/cpp/pybind:th_transformer_lib",
-    ],
     copts = copts(),
-    linkshared = 1,
     linkopts = [
         "-Wl,-rpath='$$ORIGIN'",
         # "-Wl,--exclude-libs,ALL",  # 添加这行，隐藏静态库符号
     ],
+    linkshared = 1,
     visibility = ["//visibility:public"],
+    deps = [
+        "//rtp_llm/cpp/pybind:th_transformer_lib",
+    ],
 )
 
 exports_files(["cc_test_wrapper.sh"])
@@ -130,12 +138,10 @@ exports_files(["cc_test_wrapper.sh"])
 py_runtime(
     name = "python310",
     interpreter_path = "/opt/conda310/bin/python",
-    visibility = ["//visibility:public"],
     python_version = "PY3",
-    stub_shebang = "#!/opt/conda310/bin/python"
+    stub_shebang = "#!/opt/conda310/bin/python",
+    visibility = ["//visibility:public"],
 )
-
-load("@hedron_compile_commands//:refresh_compile_commands.bzl", "refresh_compile_commands")
 
 refresh_compile_commands(
     name = "refresh_compdb",

@@ -1,5 +1,6 @@
-load("//bazel:arch_select.bzl", "kernel_so_deps", "copy_all_so")
+load("//bazel:arch_select.bzl", "copy_all_so", "kernel_so_deps")
 load("//bazel:defs.bzl", "copy_files")
+
 package(default_visibility = ["//rtp_llm:__subpackages__"])
 
 copy_all_so()
@@ -8,7 +9,16 @@ copy_all_so()
 copy_files(
     name = "copy_hf3fs_libs",
     srcs = select({
-        "//:using_3fs": ["//3rdparty/3fs:hf3fs_shared"],
+        "//:using_remote_kv_cache": ["//3rdparty/3fs:hf3fs_shared"],
+        "//conditions:default": [],
+    }),
+    visibility = ["//visibility:public"],
+)
+
+copy_files(
+    name = "copy_remote_kv_cache_manager_client_libs",
+    srcs = select({
+        "//:using_remote_kv_cache": ["//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_client_shared"],
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],
@@ -17,9 +27,18 @@ copy_files(
 filegroup(
     name = "copy_aiter",
     srcs = select({
-        "@//:using_rocm_with_aiter_src": [":aiter_src_copy", ":deep_ep_rocm_copy"],
-        "@//:using_aiter_src": [":aiter_src_copy", ":deep_ep_rocm_copy"],
-        "@//:using_rocm": [":aiter_copy", ":deep_ep_rocm_copy"],
+        "@//:using_rocm_with_aiter_src": [
+            ":aiter_src_copy",
+            ":deep_ep_rocm_copy",
+        ],
+        "@//:using_aiter_src": [
+            ":aiter_src_copy",
+            ":deep_ep_rocm_copy",
+        ],
+        "@//:using_rocm": [
+            ":aiter_copy",
+            ":deep_ep_rocm_copy",
+        ],
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],
@@ -58,7 +77,10 @@ genrule(
             echo "void dummy() {}" | gcc -shared -fPIC -x c - -o $(location libdeep_ep_rocm.so) || touch $(location libdeep_ep_rocm.so);
         """,
     }),
-    tags = ["rocm", "local"],
+    tags = [
+        "local",
+        "rocm",
+    ],
     visibility = ["//visibility:public"],
 )
 
@@ -107,7 +129,10 @@ cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_gemm_a8w8.so $(
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_moe_ck2stages.so $(location libmodule_moe_ck2stages.so);
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_deepgemm.so $(location libmodule_deepgemm.so);
 """,
-    tags = ["rocm", "local"],
+    tags = [
+        "local",
+        "rocm",
+    ],
 )
 
 genrule(
@@ -155,33 +180,37 @@ genrule(
         cp external/aiter/aiter/jit/module_moe_ck2stages.so $(location module_moe_ck2stages.so);
         cp external/aiter/aiter/jit/module_deepgemm.so $(location module_deepgemm.so);
 """,
-    tags = ["rocm", "local"],
+    tags = [
+        "local",
+        "rocm",
+    ],
 )
 
 filegroup(
     name = "frontend_libs",
     srcs = [],
     data = [
-        ":libth_transformer_config_so"
-    ]
+        ":libth_transformer_config_so",
+    ],
 )
 
 filegroup(
     name = "libs",
     srcs = [],
     data = [
-        ":copy_hf3fs_libs",
-        ":copy_aiter",
         ":copy_acclep_libs",
-    ] + kernel_so_deps()
+        ":copy_aiter",
+        ":copy_hf3fs_libs",
+        ":copy_remote_kv_cache_manager_client_libs",
+    ] + kernel_so_deps(),
 )
 
 filegroup(
     name = "whl_package_libs",
     srcs = [],
     data = [
+        ":librtp_compute_ops_so",
         ":libth_transformer_config_so",
         ":libth_transformer_so",
-        ":librtp_compute_ops_so",
-    ]
+    ],
 )

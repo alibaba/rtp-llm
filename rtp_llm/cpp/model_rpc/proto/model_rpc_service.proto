@@ -89,12 +89,12 @@ message GenerateConfigPB {
     float frequency_penalty = 45;
     bool do_sample = 46;
     bool reuse_cache = 47;
-    bool enable_3fs = 48;
-    repeated int32 variable_num_beams = 49;
-    google.protobuf.StringValue trace_id = 50;
-    bool return_all_hidden_states = 51;
-    bool enable_memory_cache = 52;
-    bool enable_device_cache = 53;
+    repeated int32 variable_num_beams = 48;
+    google.protobuf.StringValue trace_id = 49;
+    bool return_all_hidden_states = 50;
+    bool enable_memory_cache = 51;
+    bool enable_device_cache = 52;
+    bool enable_remote_cache = 53;
 }
 
 message MMPreprocessConfigPB {
@@ -427,12 +427,41 @@ message MemoryOperationResponsePB {
 message FunctionRequestPB {
     oneof request {
         MemoryOperationRequestPB mem_request = 1;
+        RemoteOperationRequestPB remote_request = 2;
     }
+}
+
+enum RemoteOpType {
+    REMOTE_OPERATION_UNSPECIFIED = 0;
+    REMOTE_OPERATION_READ = 1;
+    REMOTE_OPERATION_WRITE = 2;
+}
+
+message RemoteBoolMasksTypePB { repeated bool values = 1; }
+message RemoteBlockMaskPB {
+    oneof info {
+        int32 offset = 1;
+        RemoteBoolMasksTypePB bool_masks = 2;
+    }
+}
+
+message RemoteOperationRequestPB {
+    RemoteOpType op = 1;
+    string trace_id = 2;
+    repeated int32 group_ids = 3;
+    repeated int32 block_ids = 4;
+    repeated string uris = 5;
+}
+
+message RemoteOperationResponsePB {
+    RemoteBlockMaskPB succeed_block = 1;  // for read/write, TODO
+    repeated string actual_uris = 2; // only for write
 }
 
 message FunctionResponsePB {
     oneof response {
         MemoryOperationResponsePB mem_response = 1;
+        RemoteOperationResponsePB remote_response = 2;
     }
 }
 

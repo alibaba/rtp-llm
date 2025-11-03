@@ -232,7 +232,11 @@ CacheLayerLayout SingleTypeKVCacheAllocator::allLayerCacheBase() const {
             layout.layers_to_scale_buffer_ptrs[layer_id] = nullptr;
         }
     }
-
+    layout.layer_to_groups.reserve(config_.layer_all_num);
+    int group_id = full_kv_cache_group_->group_id();
+    for (int layed_id = 0; layed_id < config_.layer_all_num; layed_id++) {
+        layout.layer_to_groups.push_back(group_id);
+    }
     return layout;
 }
 
@@ -252,7 +256,8 @@ std::vector<BlockInfo> SingleTypeKVCacheAllocator::convertIndexToBuffer(int laye
 }
 
 std::shared_ptr<KVCacheResource> SingleTypeKVCacheAllocator::incrKVCacheRef(const KVCacheResource& kvcache_resource,
-                                                                            const CacheKeysType&   cache_keys) {
+                                                                            const CacheKeysType&   cache_keys,
+                                                                            bool                   is_connector) {
     if (cache_keys.empty()) {
         return nullptr;
     }
@@ -268,8 +273,8 @@ std::shared_ptr<KVCacheResource> SingleTypeKVCacheAllocator::incrKVCacheRef(cons
     }
 
     auto selected_resource_ptr = new KVCacheResource(kvcache_resource);
-    auto deleter               = [self = shared_from_this()](KVCacheResource* resource) {
-        self->decrKVCacheRef(*resource);
+    auto deleter               = [self = shared_from_this(), is_connector](KVCacheResource* resource) {
+        self->decrKVCacheRef(*resource, is_connector);
         delete resource;
     };
     std::shared_ptr<KVCacheResource> selected_resource(selected_resource_ptr, deleter);
@@ -300,20 +305,28 @@ std::shared_ptr<KVCacheResource> SingleTypeKVCacheAllocator::incrKVCacheRef(cons
         return nullptr;
     }
 
-    block_pool_->requestReference(selected_blocks);
+    if (is_connector) {
+        block_pool_->connectorReference(selected_blocks);
+    } else {
+        block_pool_->requestReference(selected_blocks);
+    }
     selected_resource->blocks(0)   = std::move(selected_blocks);
     selected_resource->cacheKeys() = std::move(selected_cache_keys);
 
     return selected_resource;
 }
 
-void SingleTypeKVCacheAllocator::decrKVCacheRef(const KVCacheResource& kvcache_resource) {
+void SingleTypeKVCacheAllocator::decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector) {
     RTP_LLM_CHECK_WITH_INFO(
         kvcache_resource.groupNums() == 1, "decrKVCacheRef expects groupNums==1, got %d", kvcache_resource.groupNums());
 
     const auto& blocks_to_free = kvcache_resource.blocks(0);
     if (!blocks_to_free.empty()) {
-        block_pool_->requestFree(blocks_to_free);
+        if (is_connector) {
+            block_pool_->connectorFree(blocks_to_free);
+        } else {
+            block_pool_->requestFree(blocks_to_free);
+        }
     }
 }
 

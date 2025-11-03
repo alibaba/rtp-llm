@@ -63,6 +63,8 @@ class ProcessManager:
             if proc.is_alive():
                 logging.info(f"Sending SIGTERM to process {proc.pid}")
                 proc.terminate()
+            else:
+                logging.info(f"proc.name [{proc.name}] pid[{proc.pid}] is not alived")
         self.terminated = True
         self.first_dead_time = time.time()
 

@@ -83,15 +83,7 @@ std::string KVCacheConfig::to_string() const {
         << "multi_task_prompt_str: " << multi_task_prompt_str << "\n"
         << "multi_task_prompt_tokens: " << (multi_task_prompt_tokens.empty() ? "empty" : "non-empty") << "\n"
         << "reserve_block_ratio: " << reserve_block_ratio << "\n"
-        << "enable_3fs: " << enable_3fs << "\n"
-        << "match_timeout_ms: " << match_timeout_ms << "\n"
-        << "rpc_get_cache_timeout_ms: " << rpc_get_cache_timeout_ms << "\n"
-        << "rpc_put_cache_timeout_ms: " << rpc_put_cache_timeout_ms << "\n"
-        << "threefs_read_timeout_ms: " << threefs_read_timeout_ms << "\n"
-        << "threefs_write_timeout_ms: " << threefs_write_timeout_ms << "\n"
         << "max_block_size_per_item: " << max_block_size_per_item << "\n"
-        << "threefs_read_iov_size: " << threefs_read_iov_size << "\n"
-        << "threefs_write_iov_size: " << threefs_write_iov_size << "\n"
         << "memory_cache_size_mb: " << memory_cache_size_mb << "\n"
         << "memory_cache_sync_timeout_ms: " << memory_cache_sync_timeout_ms << "\n"
         << "linear_step: " << linear_step << "\n"
@@ -103,6 +95,7 @@ std::string KVCacheConfig::to_string() const {
         << "use_block_cache: " << use_block_cache << "\n"
         << "enable_device_cache: " << enable_device_cache << "\n"
         << "enable_memory_cache: " << enable_memory_cache << "\n"
+        << "enable_remote_cache: " << enable_remote_cache << "\n"
         << "write_cache_sync: " << write_cache_sync << "\n";
     return oss.str();
 }
