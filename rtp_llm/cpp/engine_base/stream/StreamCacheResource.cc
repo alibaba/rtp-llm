@@ -35,16 +35,33 @@ private:
 
 class MetaImpl: public Meta {
 public:
-    MetaImpl(bool enable_memory_cache): enable_memory_cache_(enable_memory_cache) {}
+    MetaImpl(bool enable_memory_cache, bool enable_remote_cache, std::string trace_id):
+        enable_memory_cache_(enable_memory_cache), enable_remote_cache_(enable_remote_cache), trace_id_(trace_id) {}
     virtual ~MetaImpl() = default;
 
 public:
     bool enableMemoryCache() const override {
         return enable_memory_cache_;
     }
+    bool enableRemoteCache() const override {
+        return enable_remote_cache_;
+    }
+    const std::string& trace_id() const override {
+        return trace_id_;
+    }
+    const std::string& unique_id() const override {
+        return unique_id_;
+    }
+    const std::vector<int64_t>& tokens() const override {
+        return tokens_;
+    }
 
 private:
-    bool enable_memory_cache_{true};
+    bool                 enable_memory_cache_{false};
+    bool                 enable_remote_cache_{false};
+    std::string          trace_id_;
+    std::string          unique_id_ = "";  // TODO : support lora (remote connector)
+    std::vector<int64_t> tokens_;          // TODO : get tokens (remote connector)
 };
 
 // ----------------------------- StreamCacheResource -----------------------------
@@ -193,16 +210,20 @@ bool StreamCacheResource::reuseCache() const {
     return resource_context_.reuse_cache && stream_->reuseCache();
 }
 
-bool StreamCacheResource::enable3FS() const {
-    return resource_context_.enable_3fs && stream_->enable3FS();
+bool StreamCacheResource::enableRemoteCache() const {
+    return resource_context_.enable_remote_cache && stream_->enableRemoteCache();
+}
+
+bool StreamCacheResource::enableMemoryCache() const {
+    return resource_context_.enable_memory_cache && stream_->enableMemoryCache();
 }
 
 bool StreamCacheResource::enableDeviceCache() const {
     return resource_context_.enable_device_cache && stream_->enableDeviceCache();
 }
 
-bool StreamCacheResource::enableMemoryCache() const {
-    return resource_context_.enable_memory_cache && stream_->enableMemoryCache();
+bool StreamCacheResource::syncWaitWrite() const {
+    return resource_context_.sync_wait_write && stream_->syncWaitWrite();
 }
 
 bool StreamCacheResource::asyncLoadCache() {
@@ -214,7 +235,7 @@ bool StreamCacheResource::asyncLoadCache() {
     }
 
     batch_kv_cache_resource_->setSkipLastBlock(true);
-    auto meta              = std::make_shared<MetaImpl>(enableMemoryCache());
+    auto meta              = std::make_shared<MetaImpl>(enableMemoryCache(), enableRemoteCache(), stream_->traceId());
     auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(batch_kv_cache_resource_, meta);
     load_cache_context_    = resource_context_.cache_manager->asyncLoadCache(connector_context);
     return load_cache_context_ != nullptr;
@@ -232,11 +253,14 @@ bool StreamCacheResource::loadCacheDone() {
         if (read_context) {
             const int total_reuse_len  = read_context->resource()->reuseBlockNum() * seqSizePerBlock();
             const int memory_reuse_len = read_context->resource()->memoryReuseBlockNum() * seqSizePerBlock();
+            const int remote_reuse_len = read_context->resource()->remoteReuseBlockNum() * seqSizePerBlock();
+            const int device_reuse_len = read_context->resource()->deviceReuseBlockNum() * seqSizePerBlock();
             stream_->setInitialReuseLength(total_reuse_len);
             stream_->setReuseLength(total_reuse_len);
-            stream_->setLocalReuseLength(total_reuse_len);
+            stream_->setLocalReuseLength(device_reuse_len);
             stream_->setMtpTokenIndex(total_reuse_len);
             stream_->setMemoryReuseLength(memory_reuse_len);
+            stream_->setRemoteReuseLength(remote_reuse_len);
         } else {
             RTP_LLM_LOG_WARNING("load cache success but cast load cache context failed");
         }
@@ -254,7 +278,7 @@ bool StreamCacheResource::asyncStoreCache() {
     }
 
     batch_kv_cache_resource_->setSkipLastBlock(!batch_kv_cache_resource_->last_block_aligned);
-    auto meta              = std::make_shared<MetaImpl>(enableMemoryCache());
+    auto meta              = std::make_shared<MetaImpl>(enableMemoryCache(), enableRemoteCache(), stream_->traceId());
     auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(batch_kv_cache_resource_, meta);
     store_cache_context_   = resource_context_.cache_manager->asyncStoreCache(connector_context);
     return store_cache_context_ != nullptr;
