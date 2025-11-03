@@ -478,11 +478,20 @@ public:
     }
 
     bool enable3FS() const {
+        // TODO : delete this
         return generate_input_->generate_config->enable_3fs;
     }
 
     bool enableMemoryBlockCache() const {
         return generate_input_->generate_config->enable_memory_block_cache;
+    }
+
+    bool enableRemoteCache() const {
+        return generate_input_->generate_config->enable_remote_cache;
+    }
+
+    bool enableDeviceCache() const {
+        return generate_input_->generate_config->enable_device_cache;
     }
 
     bool asyncLoadCache();

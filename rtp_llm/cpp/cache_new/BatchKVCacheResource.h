@@ -34,6 +34,21 @@ typedef std::vector<std::shared_ptr<BlockIds>> LayerBlockIds;
 
 class KVCacheResourceV1 {
 public:
+    KVCacheResourceV1() = default;
+    KVCacheResourceV1(const KVCacheResourceV1& other) {
+        // deep copy
+        layer_block_ids.reserve(other.layer_block_ids.size());
+        for (const auto& block_ids_ptr : other.layer_block_ids) {
+            layer_block_ids.push_back(std::make_shared<BlockIds>(*block_ids_ptr));
+        }
+        group_block_ids.reserve(other.group_block_ids.size());
+        for (const auto& block_ids_ptr : other.group_block_ids) {
+            group_block_ids.push_back(std::make_shared<BlockIds>(*block_ids_ptr));
+        }
+        cache_keys       = other.cache_keys;
+        reuse_blocks_num = other.reuse_blocks_num;
+    }
+
     void initGroups(int group_nums, int layer_num) {
         for (int i = 0; i < group_nums; i++) {
             group_block_ids.push_back(std::make_shared<BlockIds>());

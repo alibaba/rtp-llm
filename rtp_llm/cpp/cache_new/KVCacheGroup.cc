@@ -44,6 +44,10 @@ int KVCacheGroup::seqSizePerBlock() const {
     return seq_size_per_block_;
 }
 
+int KVCacheGroup::group_id() const {
+    return group_id_;
+}
+
 std::unordered_map<int, torch::Tensor> KVCacheGroup::layerCacheBase() const {
     return gloabl_layer_to_kv_tensors;
 }

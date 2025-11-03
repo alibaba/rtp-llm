@@ -91,8 +91,10 @@ public:
     }
 
     bool reuseCache() const;
-    bool enable3FS() const;
+    bool enable3FS() const;  // TODO : delete this
     bool enableMemoryBlockCache() const;
+    bool enableRemoteCache() const;
+    bool enableDeviceCache() const;
 
     bool asyncLoadCache();
     bool loadCacheDone();

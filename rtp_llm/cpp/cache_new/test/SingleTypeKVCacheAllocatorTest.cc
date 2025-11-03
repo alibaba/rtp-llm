@@ -248,7 +248,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InsertIntoCache) {
     MallocInfo malloc_info{batch_resource, complete_token_ids};
     allocator_->malloc(malloc_info);
 
-    InsertInfo insert_info{batch_resource, complete_token_ids, false};
+    InsertInfo insert_info(0, batch_resource, complete_token_ids, false);
     allocator_->insertIntoCache(insert_info);
 }
 
@@ -264,7 +264,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InsertIntoCacheAsResident) {
     MallocInfo malloc_info{batch_resource, complete_token_ids};
     allocator_->malloc(malloc_info);
 
-    InsertInfo insert_info{batch_resource, complete_token_ids, true};
+    InsertInfo insert_info(0, batch_resource, complete_token_ids, true);
     allocator_->insertIntoCache(insert_info);
 }
 
