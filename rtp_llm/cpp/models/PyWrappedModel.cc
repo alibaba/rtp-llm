@@ -219,33 +219,43 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         if (int(device_props_.enable_layer_micro_batch)) {
             return forwardMicroBatched(inputs);
         }
-
+        RTP_LLM_LOG_INFO("PyWrappedModel::forward 1");
         torch::Tensor token_ids = Buffer2torchTensor(inputs.combo_tokens).cuda();
-
-        auto      attention_inputs      = buildPyAttentionInputs(inputs);
-        auto      bert_embedding_inputs = buildBertEmbeddingInputs(inputs);
+        RTP_LLM_LOG_INFO("PyWrappedModel::forward 2");
+        auto attention_inputs = buildPyAttentionInputs(inputs);
+        RTP_LLM_LOG_INFO("PyWrappedModel::forward 3");
+        auto bert_embedding_inputs = buildBertEmbeddingInputs(inputs);
+        RTP_LLM_LOG_INFO("PyWrappedModel::forward 4");
         BufferPtr kv_cache_block_id_device;
         if (!inputs.warmup && inputs.pd_separation) {
             attention_inputs.cache_store_inputs = prepareWriteCacheParams(inputs);
         }
+        RTP_LLM_LOG_INFO("PyWrappedModel::forward 5");
         setupKVCacheForAttentionInputs(attention_inputs, inputs, kv_cache_block_id_device);
+        RTP_LLM_LOG_INFO("PyWrappedModel::forward 6");
         calculatePaddingOffset(attention_inputs);
-
-        auto           py_model_inputs = PyModelInputs({token_ids, attention_inputs, bert_embedding_inputs});
+        RTP_LLM_LOG_INFO("PyWrappedModel::forward 7");
+        auto py_model_inputs = PyModelInputs({token_ids, attention_inputs, bert_embedding_inputs});
+        RTP_LLM_LOG_INFO("PyWrappedModel::forward 8");
         PyModelOutputs py_model_outputs;
         // Cast the Python object to PyModelOutputs and extract hidden states
         if (enable_cuda_graph_) {
             py_model_outputs = graph_runner_->forward(py_model_inputs);
         } else {
+            RTP_LLM_LOG_INFO("PyWrappedModel::forward 8");
             auto py_model_forward = py_model_.attr("forward");
-            auto outputs          = py_model_forward(py_model_inputs);
-            py_model_outputs      = outputs.cast<PyModelOutputs>();
+            RTP_LLM_LOG_INFO("PyWrappedModel::forward 9");
+            auto outputs = py_model_forward(py_model_inputs);
+            RTP_LLM_LOG_INFO("PyWrappedModel::forward 10");
+            py_model_outputs = outputs.cast<PyModelOutputs>();
+            RTP_LLM_LOG_INFO("PyWrappedModel::forward 11");
         }
         auto hidden_states_tensor = py_model_outputs.hidden_states;
-        auto hidden_states        = torchTensor2Buffer(hidden_states_tensor);
-
+        RTP_LLM_LOG_INFO("PyWrappedModel::forward 12");
+        auto hidden_states = torchTensor2Buffer(hidden_states_tensor);
+        RTP_LLM_LOG_INFO("PyWrappedModel::forward 13");
         RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
-
+        RTP_LLM_LOG_INFO("PyWrappedModel::forward 14");
         return callForwardPostLayers(hidden_states, inputs, true);
 
     } catch (const py::error_already_set& e) {
