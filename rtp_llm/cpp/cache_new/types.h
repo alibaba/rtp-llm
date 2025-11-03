@@ -96,37 +96,49 @@ struct FreeInfo {
     FreeInfo(BatchKVCacheResourcePtr batch_kv_cache_resource,
              CompleteTokenIdsPtr     complete_token_ids,
              bool                    reuse_cache         = false,
-             bool                    enable_memory_cache = false):
+             bool                    enable_memory_cache = false,
+             bool                    enable_remote_cache = false,
+             bool                    enable_device_cache = true):
         batch_kv_cache_resource(batch_kv_cache_resource),
         complete_token_ids(complete_token_ids),
         reuse_cache(reuse_cache),
-        enable_memory_cache(enable_memory_cache) {}
+        enable_memory_cache(enable_memory_cache),
+        enable_remote_cache(enable_remote_cache),
+        enable_device_cache(enable_device_cache) {}
 
     BatchKVCacheResourcePtr batch_kv_cache_resource;
     CompleteTokenIdsPtr     complete_token_ids;
     bool                    reuse_cache{false};
     bool                    enable_memory_cache{false};
+    bool                    enable_remote_cache{false};
+    bool                    enable_device_cache{true};
     // Metadata
     int64_t request_id = 0;  // for logging and debugging
 };
 
 struct InsertInfo {
-    InsertInfo(BatchKVCacheResourcePtr batch_kv_cache_resource,
+    InsertInfo(int64_t                 request_id,
+               BatchKVCacheResourcePtr batch_kv_cache_resource,
                CompleteTokenIdsPtr     complete_token_ids,
                bool                    is_resident,
-               bool                    reuse_cache         = true,
-               bool                    enable_memory_cache = false):
+               bool                    enable_device_cache = true,
+               bool                    enable_memory_cache = false,
+               bool                    enable_remote_cache = false):
+        request_id(request_id),
         batch_kv_cache_resource(batch_kv_cache_resource),
         complete_token_ids(complete_token_ids),
         is_resident(is_resident),
-        reuse_cache(reuse_cache),
-        enable_memory_cache(enable_memory_cache) {}
+        enable_device_cache(enable_device_cache),
+        enable_memory_cache(enable_memory_cache),
+        enable_remote_cache(enable_remote_cache) {}
 
+    int64_t                 request_id;
     BatchKVCacheResourcePtr batch_kv_cache_resource;
     CompleteTokenIdsPtr     complete_token_ids;
     bool                    is_resident;
-    bool                    reuse_cache{true};
+    bool                    enable_device_cache{true};
     bool                    enable_memory_cache{false};
+    bool                    enable_remote_cache{false};
 };
 
 struct InsertResult {
