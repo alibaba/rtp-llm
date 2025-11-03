@@ -91,6 +91,7 @@ The core features include:
 
       references/general
       references/developer
+      references/cli/Guide.md
       README.md
 
 
