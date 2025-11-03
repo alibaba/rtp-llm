@@ -137,11 +137,16 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.inter_request_id = input_py.generate_config.inter_request_id
     generate_config_pb.ignore_eos = input_py.generate_config.ignore_eos
     generate_config_pb.reuse_cache = input_py.generate_config.reuse_cache
-    generate_config_pb.enable_3fs = input_py.generate_config.enable_3fs
     generate_config_pb.enable_memory_block_cache = (
         input_py.generate_config.enable_memory_block_cache
     )
-
+    generate_config_pb.enable_remote_cache = (
+        input_py.generate_config.enable_remote_cache
+    )
+    generate_config_pb.enable_device_cache = (
+        input_py.generate_config.enable_device_cache
+    )
+    generate_config_pb.sync_wait_write = input_py.generate_config.sync_wait_write
     trans_option_cast(
         generate_config_pb, input_py.generate_config, "trace_id", functools.partial(str)
     )
