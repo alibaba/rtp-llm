@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/cache/connector/AsyncContext.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/cache/KVCacheConnector.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "kmonitor/client/MetricsReporter.h"
 
@@ -81,7 +82,7 @@ public:
     void clearLocalCache();
 
 private:
-    bool initConnectorCoordinator();
+    bool initConnectsorCoordinator();
 
 private:
     void allocateAndSync();
@@ -96,9 +97,8 @@ private:
     const ParallelismConfig            parallelism_config_;
     const RuntimeConfig                runtime_config_;
 
-    std::atomic<bool> stop_{false};
-    std::thread       metrics_reporter_thread_;
-
+    std::atomic<bool>                            stop_{false};
+    std::thread                                  metrics_reporter_thread_;
     std::shared_ptr<KVCacheConnectorCoordinator> connector_coordinator_;
 };
 

@@ -1,3 +1,4 @@
+import logging
 from typing import Any, List, Tuple, Union
 
 import numpy as np
@@ -146,9 +147,9 @@ def truncate_response_with_stop_words(
     return response
 
 
-def truncate_token_with_stop_word_id(tokens: List[int], stop_word_ids: List[int]):
+def truncate_token_with_stop_word_id(tokens: List[int], stop_word_ids: List[List[int]]):
     for stop_word_id in stop_word_ids:
-        if stop_word_id and tokens[-len(stop_word_id) :] == stop_word_id:
+        if stop_word_id and np.array_equal(tokens[-len(stop_word_id) :], stop_word_id):
             tokens = tokens[: (-len(stop_word_id))]
             break
     return tokens

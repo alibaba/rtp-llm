@@ -89,18 +89,13 @@ struct FMHAConfig {
 
 struct KVCacheConfig {
     bool        reuse_cache                        = false;
+    bool        enable_remote_cache                = false;
+    bool        enable_device_cache                = true;
+    bool        sync_wait_write                    = false;
     std::string multi_task_prompt                  = "";
     std::string multi_task_prompt_str              = "";
     std::map<std::string, std::vector<int>> multi_task_prompt_tokens;
-    bool        enable_3fs                         = false;
-    int         match_timeout_ms                   = 1000;
-    int         rpc_get_cache_timeout_ms           = 2000;
-    int         rpc_put_cache_timeout_ms           = 2000;
-    int         threefs_read_timeout_ms            = 1000;
-    int         threefs_write_timeout_ms           = 2000;
     int         max_block_size_per_item            = 16;
-    int64_t     threefs_read_iov_size              = 1LL << 32;  // 4GB
-    int64_t     threefs_write_iov_size             = 1LL << 32;  // 4GB
     int64_t     memory_block_cache_size_mb         = 0;
     int64_t     memory_block_cache_sync_timeout_ms = 10000;
     // Fields merged from PyKvCacheConfig
