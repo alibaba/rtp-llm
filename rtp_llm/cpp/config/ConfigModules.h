@@ -95,15 +95,7 @@ struct KVCacheConfig {
     std::string                             multi_task_prompt_str = "";
     std::map<std::string, std::vector<int>> multi_task_prompt_tokens;
     int64_t                                 reserve_block_ratio          = 5;
-    bool                                    enable_3fs                   = false;
-    int                                     match_timeout_ms             = 1000;
-    int                                     rpc_get_cache_timeout_ms     = 2000;
-    int                                     rpc_put_cache_timeout_ms     = 2000;
-    int                                     threefs_read_timeout_ms      = 1000;
-    int                                     threefs_write_timeout_ms     = 2000;
     int                                     max_block_size_per_item      = 16;
-    int64_t                                 threefs_read_iov_size        = 1LL << 32;  // 4GB
-    int64_t                                 threefs_write_iov_size       = 1LL << 32;  // 4GB
     int64_t                                 memory_cache_size_mb         = 0;
     int64_t                                 memory_cache_sync_timeout_ms = 10000;
     // Fields merged from PyKvCacheConfig
@@ -115,6 +107,8 @@ struct KVCacheConfig {
     int         use_block_cache     = -1;  // -1 means not set, use Optional<int> equivalent
     bool        enable_device_cache = true;
     bool        enable_memory_cache = false;
+    bool        enable_remote_cache = false;
+    bool        sync_wait_write     = false;
     void        insertMultiTaskPromptTokens(std::string task_id, std::vector<int64_t> tokens_id);
     std::string to_string() const;
 };
@@ -246,8 +240,9 @@ struct BatchDecodeSchedulerConfig {
 };
 
 struct FIFOSchedulerConfig {
-    int64_t     max_context_batch_size = 1;
-    int64_t     max_batch_tokens_size  = 0;
+    int64_t     max_context_batch_size           = 1;
+    int64_t     scheduler_reserve_resource_ratio = 5;
+    int64_t     max_batch_tokens_size            = 0;
     std::string to_string() const;
 };
 

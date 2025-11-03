@@ -212,8 +212,8 @@ absl::Status SpeculativeEngine::initCacheManager(std::optional<WarmUpResult> war
                                                                       metrics_reporter_,
                                                                       score_model_params_.kv_cache_config,
                                                                       score_model_params_.parallelism_config,
-                                                                      score_model_params_.runtime_config);
-
+                                                                      score_model_params_.runtime_config,
+                                                                      score_model_params_.sp_config);
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
         }
@@ -283,10 +283,10 @@ WarmUpResult SpeculativeEngine::warmUp() {
 
 absl::Status SpeculativeEngine::initSystemPrompt() {
     resource_context_.reuse_cache         = score_model_params_.kv_cache_config.reuse_cache;
-    resource_context_.enable_3fs          = score_model_params_.kv_cache_config.enable_3fs;
-    resource_context_.enable_device_cache = score_model_params_.kv_cache_config.enable_device_cache;
     resource_context_.enable_memory_cache = score_model_params_.kv_cache_config.enable_memory_cache;
-
+    resource_context_.enable_remote_cache = score_model_params_.kv_cache_config.enable_remote_cache;
+    resource_context_.enable_device_cache = score_model_params_.kv_cache_config.enable_device_cache;
+    resource_context_.sync_wait_write     = score_model_params_.kv_cache_config.sync_wait_write;
     if (!score_model_params_.kv_cache_config.multi_task_prompt_tokens.empty()) {
         resource_context_.reuse_cache = true;
         CHECK_AND_RETURN_REF(system_prompt_param,

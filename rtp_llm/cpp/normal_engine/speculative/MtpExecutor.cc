@@ -328,11 +328,16 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
 
     // draft model prefill
     {
+        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         tpSyncModelInputs(model_input, device_);
         maybePrintModelInput(model_input, "prefill post draft model");
         const auto& mtp_cache_cfg         = cache_manager_->getMTPModuleCacheConfig(0);
         model_input.kv_block_stride_bytes = mtp_cache_cfg.kv_block_stride_bytes;
         draft_model_output                = std::move(draft_model_->forward(model_input));
+        auto latency                      = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        if (latency > 15000) {
+            RTP_LLM_LOG_INFO("yemu_debug MtpExecutor::prefillStep draft_model_ forward [%ld]", latency);
+        }
     }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
@@ -506,7 +511,6 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             batch_stream_processor_->prepareDecodeDraftModelInput(stream_groups, model_input);
         }
     }
-
     tpSyncModelInputs(model_input, device_);
     if (model_input.skip_run) {
         return absl::OkStatus();
@@ -575,8 +579,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     maybePrintModelInput(model_input, "decode post draft model");
     const auto& mtp_cache_cfg         = cache_manager_->getMTPModuleCacheConfig(0);
     model_input.kv_block_stride_bytes = mtp_cache_cfg.kv_block_stride_bytes;
-
-    draft_prefill_model_output = std::move(draft_model_->forward(model_input));
+    draft_prefill_model_output        = std::move(draft_model_->forward(model_input));
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
         device_->syncAndCheck();
@@ -614,7 +617,6 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         stream_groups,
         speculative_sampler_output,
         {std::move(draft_prefill_model_output), std::move(draft_prefill_sampler_output)});
-
     // clean holder tensors from grpc
     for (auto& stream : streams) {
         stream->getSPOutputBuffer()->tensors_holder.clear();

@@ -92,9 +92,9 @@ public:
     }
 
     bool reuseCache() const;
-    bool enable3FS() const;
-    bool enableDeviceCache() const;
     bool enableMemoryCache() const;
+    bool enableRemoteCache() const;
+    bool enableDeviceCache() const;
 
     std::string debugString() const {
         std::stringstream debug_string;
