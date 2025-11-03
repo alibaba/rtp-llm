@@ -1,5 +1,4 @@
 #include "rtp_llm/cpp/cache_new/BatchKVCacheResource.h"
-#include "rtp_llm/cpp/cache_new/KVCacheManager.h"
 #include <memory>
 #include <sstream>
 #include <cassert>

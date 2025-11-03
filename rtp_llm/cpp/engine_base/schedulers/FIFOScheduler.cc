@@ -293,6 +293,7 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
 
             RTP_LLM_LOG_DEBUG("stream [%ld] add to new queue", stream->streamId());
             // if setRunning fails, it must be in stopped state, evict it in next iteration
+
             if (stream->setRunning()) {
                 new_streams.emplace_back(stream);
                 it = waiting_streams_.erase(it);

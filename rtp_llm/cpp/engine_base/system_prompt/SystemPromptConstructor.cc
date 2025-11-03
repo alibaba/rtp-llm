@@ -39,7 +39,8 @@ absl::StatusOr<std::unordered_map<std::string, SystemPromptParams>> SystemPrompt
             RTP_LLM_CHECK(blocks.size() > 0);
 
             // Use new KVCacheManager insertIntoCache with is_resident=true
-            rtp_llm::InsertInfo insert_info(stream->kvCachePtr(),
+            rtp_llm::InsertInfo insert_info(0,
+                                            stream->kvCachePtr(),
                                             stream->completeTokenIdsPtr(),
                                             true  // is_resident for system prompt
             );

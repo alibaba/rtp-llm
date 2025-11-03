@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <unordered_map>
 #include <set>
+#include <mutex>
 
 #include <torch/torch.h>
 
@@ -85,6 +86,7 @@ private:
     int64_t            mr_cost_time_ms_ = 0;
 
     std::unique_ptr<MemoryLayoutStrategy> layout_strategy_;
+    std::recursive_mutex                  mutex_;
 };
 
 using BlockPoolPtr = std::shared_ptr<BlockPool>;

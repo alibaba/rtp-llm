@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/utils/HashUtil.h"
 #include "rtp_llm/cpp/core/BufferHelper.h"
 #include "rtp_llm/cpp/cache_new/types.h"
+#include "rtp_llm/cpp/cache_new/HybridReadAsyncContext.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 
 using namespace std;
@@ -77,9 +78,14 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
     int release_blocks_num = maxBlockSize();
 
     if (release_blocks_num > 0 && batch_resource_->batchSize() > 0) {
-        if (reuseCache() || enableMemoryBlockCache()) {
-            InsertInfo insert_info(
-                batch_resource_, stream_->completeTokenIdsPtr(), false, reuseCache(), enableMemoryBlockCache());
+        // Insert all blocks into cache
+        if (reuseCache()) {
+            InsertInfo insert_info(stream_->streamId(),
+                                   batch_resource_,
+                                   stream_->completeTokenIdsPtr(),
+                                   false,
+                                   reuseCache(),
+                                   enableMemoryBlockCache());
             resource_context_.cache_manager->insertIntoCache(insert_info);
         } else {
             // Free all blocks using KVCacheManager::free
@@ -233,6 +239,7 @@ bool StreamCacheResource::reuseCache() const {
 }
 
 bool StreamCacheResource::enable3FS() const {
+    // TODO : delete this
     return resource_context_.enable_3fs && stream_->enable3FS();
 }
 
@@ -240,11 +247,20 @@ bool StreamCacheResource::enableMemoryBlockCache() const {
     return resource_context_.enable_memory_block_cache && stream_->enableMemoryBlockCache();
 }
 
+bool StreamCacheResource::enableRemoteCache() const {
+    return resource_context_.enable_remote_cache && stream_->enableRemoteCache();
+}
+
+bool StreamCacheResource::enableDeviceCache() const {
+    return resource_context_.enable_device_cache && stream_->enableDeviceCache();
+}
+
 bool StreamCacheResource::asyncLoadCache() {
-    if (!enableMemoryBlockCache()) {
+    if (!(enableMemoryBlockCache() || enableRemoteCache())) {
+        RTP_LLM_LOG_DEBUG("no connector");
         return false;
     }
-    load_cache_context_ = resource_context_.cache_manager->asyncLoadCache(batch_resource_);
+    load_cache_context_ = resource_context_.cache_manager->asyncLoadCache(stream_->streamId(), batch_resource_);
     return load_cache_context_ != nullptr;
 }
 
@@ -256,12 +272,17 @@ bool StreamCacheResource::loadCacheDone() {
         return false;
     }
     if (load_cache_context_->success()) {
-        auto&     resource  = batch_resource_->batch_resource.at(0);
-        const int reuse_len = resource.reuse_block_num * seqSizePerBlock();
-        stream_->setInitialReuseLength(reuse_len);
-        stream_->setReuseLength(reuse_len);
-        stream_->setLocalReuseLength(reuse_len);
-        stream_->setMtpTokenIndex(reuse_len);
+        auto device_reuse_len = stream_->reuseLength();
+        auto remote_reuse_len =
+            std::static_pointer_cast<HybridReadAsyncContext>(load_cache_context_)->remote_reuse_block_num()
+            * seqSizePerBlock();
+        auto&     resource      = batch_resource_->batch_resource.at(0);
+        const int all_reuse_len = resource.reuse_block_num * seqSizePerBlock();
+        stream_->setInitialReuseLength(all_reuse_len);
+        stream_->setReuseLength(all_reuse_len);
+        stream_->setLocalReuseLength(device_reuse_len);
+        stream_->setMtpTokenIndex(all_reuse_len);
+        stream_->setRemoteReuseLength(remote_reuse_len);
     }
     load_cache_context_.reset();
     return true;
