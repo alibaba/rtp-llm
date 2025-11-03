@@ -16,7 +16,7 @@ sys.path.append(os.path.join(str(CUR_PATH), ".."))
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import setup_and_configure_server
-from rtp_llm.distribute.worker_info import WorkerInfo, g_parallel_info, g_worker_info, update_worker_info
+from rtp_llm.distribute.worker_info import WorkerInfo, g_parallel_info
 from rtp_llm.ops import RoleType
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.utils.concurrency_controller import init_controller
@@ -24,17 +24,20 @@ from rtp_llm.utils.process_manager import ProcessManager
 
 setup_logging()
 
+
 def check_server_health(server_port):
     try:
         response = requests.get(f"http://localhost:{server_port}/health", timeout=60)
-        if response.status_code == 200 and response.json().get("status", "") == "ok":
-            logging.info(
-                f"{server_port}/health, response status_code = {response.status_code}, text = {response.text}, len = {len(response.text)}"
-            )
+        logging.info(
+            f"response status_code = {response.status_code}, text = {response.text}, len = {len(response.text)}"
+        )
+        if response.status_code == 200 and response.text.strip() == '"ok"':
             return True
         else:
+            logging.info(f"health check is not ready")
             return False
     except BaseException as e:
+        logging.debug("health check is not ready, %s", str(e))
         return False
 
 

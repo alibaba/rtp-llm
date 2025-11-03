@@ -64,10 +64,14 @@ class FrontendApp(object):
         self.separated_frontend = separated_frontend
         self.grpc_client = GrpcClientWrapper(g_worker_info.rpc_server_port)
         g_worker_info.server_port = WorkerInfo.server_port_offset(
-            self.server_config.rank_id, g_worker_info.server_port, py_env_configs.server_config.worker_info_port_num
+            self.server_config.rank_id,
+            g_worker_info.server_port,
+            py_env_configs.server_config.worker_info_port_num,
         )
         g_worker_info.backend_server_port = WorkerInfo.server_port_offset(
-            self.server_config.rank_id, g_worker_info.backend_server_port, py_env_configs.server_config.worker_info_port_num
+            self.server_config.rank_id,
+            g_worker_info.backend_server_port,
+            py_env_configs.server_config.worker_info_port_num,
         )
         logging.info(
             f"rank_id = {self.server_config.rank_id}, "
@@ -100,9 +104,7 @@ class FrontendApp(object):
             timeout_keep_alive=timeout_keep_alive,
             h11_max_incomplete_event_size=MAX_INCOMPLETE_EVENT_SIZE,
         )
-        logging.info(
-            f"Starting Uvicorn server on port {g_worker_info.server_port} with timeout_keep_alive={timeout_keep_alive}"
-        )
+
         try:
             server = GracefulShutdownServer(config)
             server.set_server(self.frontend_server)
