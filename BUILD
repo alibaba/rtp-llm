@@ -1,5 +1,6 @@
 load("//:def.bzl", "copts", "cuda_copts")
 load("//bazel:arch_select.bzl", "torch_deps", "flashinfer_deps", "select_py_bindings")
+load("@bazel_skylib//rules:common_settings.bzl", "string_flag")
 flashinfer_deps()
 
 config_setting(
@@ -51,6 +52,18 @@ config_setting(
 config_setting(
     name = "enable_3fs",
     values = {"copt": "-DENABLE_3FS=1"},
+)
+
+string_flag(
+    name = "cuda_config_name",
+    build_setting_default = "none",
+    visibility = ["//visibility:public"],
+)
+
+string_flag(
+    name = "sm_config_name",
+    build_setting_default = "none",
+    visibility = ["//visibility:public"],
 )
 
 cc_binary(
