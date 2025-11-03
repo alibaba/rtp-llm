@@ -33,6 +33,8 @@ public:
     GroupBlockIds group_block_ids;
     // cache_keys and block_id are not consistent at all times
     CacheKeysType cache_keys;
+    // reuse cache key num
+    size_t reuse_len = 0;
 
 public:
     void initGroups(int group_nums) {

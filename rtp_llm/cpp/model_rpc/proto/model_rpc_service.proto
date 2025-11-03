@@ -402,15 +402,45 @@ message MemoryBroadcastTpResponsePB {
     bool success = 1;
 }
 
+enum RemoteBroadcastOp {
+    REMOTE_BROADCAST_UNSPECIFIED = 0;
+    REMOTE_BROADCAST_READ = 1;
+    REMOTE_BROADCAST_WRITE = 2;
+}
+
+message RemoteBoolMasksTypePB { repeated bool values = 1; }
+message RemoteBlockMaskPB {
+    oneof info {
+        int32 offset = 1;
+        RemoteBoolMasksTypePB bool_masks = 2;
+    }
+}
+
+message RemoteBroadcastTpRequestPB {
+    RemoteBroadcastOp op = 1;
+    string trace_id = 2;
+    repeated int32 group_ids = 3;
+    repeated int32 block_ids = 4;
+    repeated string uris = 5;
+}
+
+message RemoteBroadcastTpResponsePB {
+    bool success = 1;
+    RemoteBlockMaskPB succeed_block = 2;  // for read/write, TODO
+    repeated string actual_uris = 3; // only for write
+}
+
 message BroadcastTpRequestPB {
     oneof request {
         MemoryBroadcastTpRequestPB mem_request = 1;
+        RemoteBroadcastTpRequestPB remote_request = 2;
     }
 }
 
 message BroadcastTpResponsePB {
     oneof response {
         MemoryBroadcastTpResponsePB mem_response = 1;
+        RemoteBroadcastTpResponsePB remote_response = 2;
     }
 }
 
