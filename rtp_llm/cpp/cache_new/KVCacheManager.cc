@@ -58,12 +58,13 @@ bool KVCacheManager::init() {
         return false;
     }
 
-    if (params_.kv_cache_config.memory_block_cache_size_mb > 0) {
+    if (params_.kv_cache_config.memory_block_cache_size_mb > 0 || params_.kv_cache_config.enable_remote_cache) {
         if (!initConnectorCoordinator()) {
             RTP_LLM_LOG_ERROR("init connector coordinator failed");
             return false;
         }
     }
+
     return true;
 }
 
@@ -342,7 +343,7 @@ KVCacheManager::asyncStoreCache(const std::shared_ptr<KVCacheConnectorReadWriteC
 }
 
 bool KVCacheManager::copyCache(const CopyCacheRequestPB& request, CopyCacheResponsePB& response) {
-    if (!request.has_mem_request()) {
+    if (!request.has_mem_request() && !request.has_remote_request()) {
         RTP_LLM_LOG_WARNING("copy cache failed, request is invalid, request: [%s]", request.DebugString().c_str());
         return false;
     }

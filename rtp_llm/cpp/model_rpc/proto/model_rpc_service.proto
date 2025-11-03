@@ -89,11 +89,13 @@ message GenerateConfigPB {
     float frequency_penalty = 45;
     bool do_sample = 46;
     bool reuse_cache = 47;
-    bool enable_3fs = 48;
-    repeated int32 variable_num_beams = 49;
-    google.protobuf.StringValue trace_id = 50;
-    bool return_all_hidden_states = 51;
-    bool enable_memory_block_cache = 52;
+    repeated int32 variable_num_beams = 48;
+    google.protobuf.StringValue trace_id = 49;
+    bool return_all_hidden_states = 50;
+    bool enable_memory_block_cache = 51;
+    bool enable_remote_cache = 52;
+    bool enable_device_cache = 53;
+    bool sync_wait_write = 54;
 }
 
 message MMPreprocessConfigPB {
@@ -395,15 +397,44 @@ message MemoryCopyCacheResponsePB {
     bool success = 1;
 }
 
+enum RemoteCopyCacheOp {
+    REMOTE_BROADCAST_UNSPECIFIED = 0;
+    REMOTE_BROADCAST_READ = 1;
+    REMOTE_BROADCAST_WRITE = 2;
+}
+
+message RemoteBoolMasksTypePB { repeated bool values = 1; }
+message RemoteBlockMaskPB {
+    oneof info {
+        int32 offset = 1;
+        RemoteBoolMasksTypePB bool_masks = 2;
+    }
+}
+
+message RemoteCopyCacheRequestPB {
+    RemoteCopyCacheOp op = 1;
+    string trace_id = 2;
+    repeated int32 group_ids = 3;
+    repeated int32 block_ids = 4;
+    repeated string uris = 5;
+}
+
+message RemoteCopyCacheResponsePB {
+    RemoteBlockMaskPB succeed_block = 1;  // for read/write, TODO
+    repeated string actual_uris = 2; // only for write
+}
+
 message CopyCacheRequestPB {
     oneof request {
         MemoryCopyCacheRequestPB mem_request = 1;
+        RemoteCopyCacheRequestPB remote_request = 2;
     }
 }
 
 message CopyCacheResponsePB {
     oneof response {
         MemoryCopyCacheResponsePB mem_response = 1;
+        RemoteCopyCacheResponsePB remote_response = 2;
     }
 }
 

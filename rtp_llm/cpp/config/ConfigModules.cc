@@ -99,17 +99,12 @@ void KVCacheConfig::update_from_env_for_test() {
     reuse_cache                        = bool_from_env_for_test("REUSE_CACHE", false);
     multi_task_prompt                  = autil::EnvUtil::getEnv("MULTI_TASK_PROMPT", "");
     multi_task_prompt_str              = autil::EnvUtil::getEnv("MULTI_TASK_PROMPT_STR", "");
-    enable_3fs                         = bool_from_env_for_test("ENABLE_3FS", false);
-    match_timeout_ms                   = autil::EnvUtil::getEnv("MATCH_TIMEOUT_MS", 1000);
-    rpc_get_cache_timeout_ms           = autil::EnvUtil::getEnv("RPC_GET_CACHE_TIMEOUT_MS", 2000);
-    rpc_put_cache_timeout_ms           = autil::EnvUtil::getEnv("RPC_PUT_CACHE_TIMEOUT_MS", 2000);
-    threefs_read_timeout_ms            = autil::EnvUtil::getEnv("THREEFS_READ_TIMEOUT_MS", 1000);
-    threefs_write_timeout_ms           = autil::EnvUtil::getEnv("THREEFS_WRITE_TIMEOUT_MS", 2000);
     max_block_size_per_item            = autil::EnvUtil::getEnv("MAX_BLOCK_SIZE_PER_ITEM", 16);
-    threefs_read_iov_size              = autil::EnvUtil::getEnv("THREEFS_READ_IOV_SIZE", 1LL << 32);   // 4GB
-    threefs_write_iov_size             = autil::EnvUtil::getEnv("THREEFS_WRITE_IOV_SIZE", 1LL << 32);  // 4GB
     memory_block_cache_size_mb         = autil::EnvUtil::getEnv("MEMORY_BLOCK_CACHE_SIZE_MB", 0);
     memory_block_cache_sync_timeout_ms = autil::EnvUtil::getEnv("MEMORY_BLOCK_CACHE_SYNC_TIMEOUT_MS", 10000);
+    enable_remote_cache                = bool_from_env_for_test("ENABLE_REMOTE_CACHE", false);
+    enable_device_cache                = bool_from_env_for_test("ENABLE_DEVICE_CACHE", true);
+    sync_wait_write                    = bool_from_env_for_test("KVCACHE_CONNECTOR_WRITE_SYNC", false);
 }
 
 std::string KVCacheConfig::to_string() const {
@@ -117,17 +112,12 @@ std::string KVCacheConfig::to_string() const {
     oss << "reuse_cache: " << reuse_cache << "\n"
         << "multi_task_prompt: " << multi_task_prompt << "\n"
         << "multi_task_prompt_str: " << multi_task_prompt_str << "\n"
-        << "enable_3fs: " << enable_3fs << "\n"
-        << "match_timeout_ms: " << match_timeout_ms << "\n"
-        << "rpc_get_cache_timeout_ms: " << rpc_get_cache_timeout_ms << "\n"
-        << "rpc_put_cache_timeout_ms: " << rpc_put_cache_timeout_ms << "\n"
-        << "threefs_read_timeout_ms: " << threefs_read_timeout_ms << "\n"
-        << "threefs_write_timeout_ms: " << threefs_write_timeout_ms << "\n"
         << "max_block_size_per_item: " << max_block_size_per_item << "\n"
-        << "threefs_read_iov_size: " << threefs_read_iov_size << "\n"
-        << "threefs_write_iov_size: " << threefs_write_iov_size << "\n"
         << "memory_block_cache_size_mb: " << memory_block_cache_size_mb << "\n"
-        << "memory_block_cache_sync_timeout_ms: " << memory_block_cache_sync_timeout_ms;
+        << "memory_block_cache_sync_timeout_ms: " << memory_block_cache_sync_timeout_ms << "\n"
+        << "enable_remote_cache: " << enable_remote_cache << "\n"
+        << "enable_device_cache: " << enable_device_cache << "\n"
+        << "sync_wait_write: " << sync_wait_write;
     return oss.str();
 }
 

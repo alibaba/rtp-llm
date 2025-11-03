@@ -173,6 +173,11 @@ CacheLayerLayout SingleTypeKVCacheAllocator::layerCacheBase() const {
             }
         }
     }
+    layout.layer_to_groups.reserve(config_.layer_num);
+    int group_id = full_kv_cache_group_->group_id();
+    for (int layed_id = 0; layed_id < config_.layer_num; layed_id++) {
+        layout.layer_to_groups.push_back(group_id);
+    }
     return layout;
 }
 

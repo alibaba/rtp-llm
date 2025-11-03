@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/cache_new/types.h"
 #include "rtp_llm/cpp/cache_new/CacheConfig.h"
 #include "rtp_llm/cpp/cache_new/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache_new/KVCacheConnector.h"
 #include "rtp_llm/cpp/config/GptInitParameter.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "kmonitor/client/MetricsReporter.h"
@@ -80,7 +81,7 @@ public:
     void clearLocalCache();
 
 private:
-    bool initConnectorCoordinator();
+    bool initConnectsorCoordinator();
 
 private:
     void allocateAndSync();
@@ -93,9 +94,8 @@ private:
     const kmonitor::MetricsReporterPtr metrics_reporter_;
     const GptInitParameter             params_;
 
-    std::atomic<bool> stop_{false};
-    std::thread       metrics_reporter_thread_;
-
+    std::atomic<bool>                            stop_{false};
+    std::thread                                  metrics_reporter_thread_;
     std::shared_ptr<KVCacheConnectorCoordinator> connector_coordinator_;
 };
 

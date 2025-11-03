@@ -186,9 +186,10 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
 
 absl::Status NormalEngine::initSystemPrompt() {
     resource_context_.reuse_cache               = params_.reuse_cache_;
-    resource_context_.enable_3fs                = params_.kv_cache_config.enable_3fs;
     resource_context_.enable_memory_block_cache = params_.kv_cache_config.memory_block_cache_size_mb > 0;
-
+    resource_context_.enable_remote_cache       = params_.kv_cache_config.enable_remote_cache;
+    resource_context_.enable_device_cache       = params_.kv_cache_config.enable_device_cache;
+    resource_context_.sync_wait_write           = params_.kv_cache_config.sync_wait_write;
     if (!params_.multi_task_prompt_tokens_.empty()) {
         resource_context_.reuse_cache = true;
         CHECK_AND_RETURN_REF(

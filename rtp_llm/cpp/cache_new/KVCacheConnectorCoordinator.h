@@ -16,6 +16,7 @@ namespace rtp_llm {
 
 class DeviceBase;
 class KVCacheMemoryConnector;
+class RemoteConnector;
 class KVCacheConnectorReadWriteContext;
 class StreamCacheResource;
 
@@ -45,6 +46,7 @@ public:
 
 private:
     bool initMemoryConnector();
+    bool initRemoteConnector();
     bool initUpdateThread();
     void updateOnce();
 
@@ -56,7 +58,7 @@ private:
     kmonitor::MetricsReporterPtr metrics_reporter_;
 
     std::shared_ptr<KVCacheMemoryConnector> memory_connector_;
-    std::shared_ptr<KVCacheConnector>       remote_connector_;
+    std::shared_ptr<RemoteConnector>        remote_connector_;
     std::shared_ptr<KVCacheConnector>       p2p_connector_;
 
     std::map<KVCacheConnector::ConnectorType, std::shared_ptr<KVCacheConnector>> connectors_;
