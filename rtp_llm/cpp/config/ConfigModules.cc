@@ -9,7 +9,6 @@
 
 namespace rtp_llm {
 
-
 // ParallelismConfig
 std::string ParallelismConfig::to_string() const {
     std::ostringstream oss;
@@ -36,7 +35,8 @@ std::string ParallelismConfig::to_string() const {
         << "http_port: " << http_port << "\n"
         << "model_rpc_port: " << model_rpc_port << "\n"
         << "embedding_rpc_server_port: " << embedding_rpc_server_port << "\n"
-        << "ffn_disaggregate_config: {\n" << ffn_disaggregate_config.to_string() << "\n}";
+        << "ffn_disaggregate_config: {\n"
+        << ffn_disaggregate_config.to_string() << "\n}";
     return oss.str();
 }
 
@@ -80,15 +80,7 @@ std::string KVCacheConfig::to_string() const {
         << "multi_task_prompt: " << multi_task_prompt << "\n"
         << "multi_task_prompt_str: " << multi_task_prompt_str << "\n"
         << "multi_task_prompt_tokens: " << (multi_task_prompt_tokens.empty() ? "empty" : "non-empty") << "\n"
-        << "enable_3fs: " << enable_3fs << "\n"
-        << "match_timeout_ms: " << match_timeout_ms << "\n"
-        << "rpc_get_cache_timeout_ms: " << rpc_get_cache_timeout_ms << "\n"
-        << "rpc_put_cache_timeout_ms: " << rpc_put_cache_timeout_ms << "\n"
-        << "threefs_read_timeout_ms: " << threefs_read_timeout_ms << "\n"
-        << "threefs_write_timeout_ms: " << threefs_write_timeout_ms << "\n"
         << "max_block_size_per_item: " << max_block_size_per_item << "\n"
-        << "threefs_read_iov_size: " << threefs_read_iov_size << "\n"
-        << "threefs_write_iov_size: " << threefs_write_iov_size << "\n"
         << "memory_block_cache_size_mb: " << memory_block_cache_size_mb << "\n"
         << "memory_block_cache_sync_timeout_ms: " << memory_block_cache_sync_timeout_ms << "\n"
         << "int8_kv_cache: " << int8_kv_cache << "\n"
@@ -96,7 +88,11 @@ std::string KVCacheConfig::to_string() const {
         << "kv_cache_mem_mb: " << kv_cache_mem_mb << "\n"
         << "seq_size_per_block: " << seq_size_per_block << "\n"
         << "test_block_num: " << test_block_num << "\n"
-        << "use_block_cache: " << use_block_cache << "\n";
+        << "use_block_cache: " << use_block_cache << "\n"
+        << "enable_remote_cache: " << enable_remote_cache << "\n"
+        << "enable_device_cache: " << enable_device_cache << "\n"
+        << "sync_wait_write: " << sync_wait_write;
+
     return oss.str();
 }
 
@@ -239,7 +235,7 @@ std::string SpeculativeExecutionConfig::to_string() const {
 // VitConfig
 std::string VitConfig::to_string() const {
     std::ostringstream oss;
-    std::string vit_sep_str;
+    std::string        vit_sep_str;
     switch (vit_separation) {
         case VitSeparation::VIT_SEPARATION_LOCAL:
             vit_sep_str = "LOCAL";
@@ -320,19 +316,23 @@ std::string RuntimeConfig::to_string() const {
         << "warm_up_with_loss: " << warm_up_with_loss << "\n"
         << "use_batch_decode_scheduler: " << use_batch_decode_scheduler << "\n"
         << "use_gather_batch_scheduler: " << use_gather_batch_scheduler << "\n"
-        << "batch_decode_scheduler_config: {\n" << batch_decode_scheduler_config.to_string() << "\n}\n"
-        << "fifo_scheduler_config: {\n" << fifo_scheduler_config.to_string() << "\n}\n"
+        << "batch_decode_scheduler_config: {\n"
+        << batch_decode_scheduler_config.to_string() << "\n}\n"
+        << "fifo_scheduler_config: {\n"
+        << fifo_scheduler_config.to_string() << "\n}\n"
         << "model_name: " << model_name << "\n"
         << "worker_grpc_addrs: [";
     for (size_t i = 0; i < worker_grpc_addrs.size(); ++i) {
         oss << worker_grpc_addrs[i];
-        if (i < worker_grpc_addrs.size() - 1) oss << ", ";
+        if (i < worker_grpc_addrs.size() - 1)
+            oss << ", ";
     }
     oss << "]\n"
         << "worker_addrs: [";
     for (size_t i = 0; i < worker_addrs.size(); ++i) {
         oss << worker_addrs[i];
-        if (i < worker_addrs.size() - 1) oss << ", ";
+        if (i < worker_addrs.size() - 1)
+            oss << ", ";
     }
     oss << "]\n"
         << "specify_gpu_arch: " << specify_gpu_arch << "\n"
@@ -370,7 +370,6 @@ std::string GrpcConfig::to_string() const {
 
     return oss.str();
 }
-
 
 void GrpcConfig::from_json(const std::string& json_str) {
     if (json_str.empty()) {

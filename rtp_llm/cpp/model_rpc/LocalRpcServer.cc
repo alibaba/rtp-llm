@@ -19,8 +19,7 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
     meta_.reset(new RpcServerRuntimeMeta());
     maga_init_params_ = maga_init_params;
     metrics_reporter_ = maga_init_params.metrics_reporter;
-    RTP_LLM_LOG_WARNING("LocalRpcServer aux_string %s",
-                        maga_init_params_.misc_config.aux_string.c_str());
+    RTP_LLM_LOG_WARNING("LocalRpcServer aux_string %s", maga_init_params_.misc_config.aux_string.c_str());
     if (propose_params) {
         propose_maga_init_params_ = propose_params.get();
         if (!mm_process_engine.is_none()) {
@@ -47,11 +46,13 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
         if (!mm_process_engine.is_none()) {
             auto vit_separation = maga_init_params.vit_config.vit_separation;
             if (vit_separation == VitSeparation::VIT_SEPARATION_REMOTE) {
-                mm_processor_.reset(
-                    new RemoteMultimodalProcessor(mm_process_engine, maga_init_params.model_config_.mm_model_config, maga_init_params.model_config_.max_seq_len));
+                mm_processor_.reset(new RemoteMultimodalProcessor(mm_process_engine,
+                                                                  maga_init_params.model_config_.mm_model_config,
+                                                                  maga_init_params.model_config_.max_seq_len));
             } else if (vit_separation == VitSeparation::VIT_SEPARATION_LOCAL) {
-                mm_processor_.reset(
-                    new LocalMultimodalProcessor(mm_process_engine, maga_init_params.model_config_.mm_model_config, maga_init_params.model_config_.max_seq_len));
+                mm_processor_.reset(new LocalMultimodalProcessor(mm_process_engine,
+                                                                 maga_init_params.model_config_.mm_model_config,
+                                                                 maga_init_params.model_config_.max_seq_len));
             } else {
                 return grpc::Status(grpc::StatusCode::INTERNAL, "invalid vit separation value in config");
             }
@@ -358,6 +359,7 @@ void LocalRpcServer::reportCacheStatusTime(int64_t request_begin_time_us) {
         RTP_LLM_LOG_WARNING("broadcast tp failed, engine is null");
         return grpc::Status(grpc::StatusCode::INTERNAL, "engine is null");
     }
+
     auto cache_manager = engine_->getCacheManager();
     if (!cache_manager) {
         RTP_LLM_LOG_WARNING("broadcast tp failed, cache manager is null");

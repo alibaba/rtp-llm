@@ -8,7 +8,6 @@ from grpc import StatusCode
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleType
-from rtp_llm.ops import EPLBConfig, FfnDisAggregateConfig
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     ErrorDetailsPB,
     GenerateInputPB,
@@ -18,6 +17,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
 )
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import RpcServiceStub
 from rtp_llm.distribute.worker_info import g_parallel_info, g_worker_info
+from rtp_llm.ops import EPLBConfig, FfnDisAggregateConfig
 from rtp_llm.utils.base_model_datatypes import (
     AuxInfo,
     GenerateConfig,
@@ -136,11 +136,16 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.inter_request_id = input_py.generate_config.inter_request_id
     generate_config_pb.ignore_eos = input_py.generate_config.ignore_eos
     generate_config_pb.reuse_cache = input_py.generate_config.reuse_cache
-    generate_config_pb.enable_3fs = input_py.generate_config.enable_3fs
     generate_config_pb.enable_memory_block_cache = (
         input_py.generate_config.enable_memory_block_cache
     )
-
+    generate_config_pb.enable_remote_cache = (
+        input_py.generate_config.enable_remote_cache
+    )
+    generate_config_pb.enable_device_cache = (
+        input_py.generate_config.enable_device_cache
+    )
+    generate_config_pb.sync_wait_write = input_py.generate_config.sync_wait_write
     trans_option_cast(
         generate_config_pb, input_py.generate_config, "trace_id", functools.partial(str)
     )
@@ -347,7 +352,7 @@ class ModelRpcClient(object):
         decode_entrance: bool = False,
     ):
         """Initialize ModelRpcClient with addresses.
-        
+
         Args:
             addresses: List of RPC addresses for data parallel communication
             max_rpc_timeout_ms: Maximum RPC timeout in milliseconds
@@ -383,20 +388,14 @@ class ModelRpcClient(object):
 
         for role_addr in input_py.generate_config.role_addrs:
             if (
-                (
-                    self._decode_entrance
-                    and role_addr.role == RoleType.DECODE
-                )
+                (self._decode_entrance and role_addr.role == RoleType.DECODE)
                 or role_addr.role == RoleType.PDFUSION
-                or (
-                    not self._decode_entrance
-                    and role_addr.role == RoleType.PREFILL
-                )
+                or (not self._decode_entrance and role_addr.role == RoleType.PREFILL)
             ):
                 if role_addr.ip != "":
                     address_list = [role_addr.ip + ":" + str(role_addr.grpc_port)]
                     break
-        
+
         if not address_list:
             raise ValueError(f"No address found for request: {input_pb.request_id}")
 

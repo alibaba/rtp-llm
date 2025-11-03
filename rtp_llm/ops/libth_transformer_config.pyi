@@ -1,28 +1,30 @@
 from __future__ import annotations
+
 import typing
+
 __all__: list[str] = ['ActivationType', 'ArpcConfig', 'AttentionConfigs', 'BatchDecodeSchedulerConfig', 'CacheStoreConfig', 'ConcurrencyConfig', 'DataType', 'DeviceResourceConfig', 'EPLBConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'FfnDisAggregateConfig', 'GrpcConfig', 'HWKernelConfig', 'KVCacheConfig', 'KvCacheDataType', 'LayerNormType', 'MMModelConfig', 'MiscellaneousConfig', 'MlaOpsType', 'ModelConfig', 'ModelSpecificConfig', 'MoeConfig', 'NormType', 'PDSepConfig', 'ParallelismConfig', 'ProfilingDebugLoggingConfig', 'QuantAlgo', 'QuantMethod', 'RoleSpecialTokens', 'RoleType', 'RopeConfig', 'RopeStyle', 'RuntimeConfig', 'SamplerConfig', 'SpecialTokens', 'SpeculativeExecutionConfig', 'SpeculativeType', 'TaskType', 'VitConfig', 'VitSeparation', 'get_block_cache_keys']
 class ActivationType:
     """
     Members:
-    
+
       Gelu
-    
+
       Relu
-    
+
       Silu
-    
+
       Swiglu
-    
+
       Geglu
-    
+
       Identity
-    
+
       GeluNoneApproximate
-    
+
       GeGluNoneApproximate
-    
+
       Sigmoid
-    
+
       InvalidType
     """
     GeGluNoneApproximate: typing.ClassVar[ActivationType]  # value = <ActivationType.GeGluNoneApproximate: 7>
@@ -137,49 +139,49 @@ class ConcurrencyConfig:
 class DataType:
     """
     Members:
-    
+
       TYPE_INVALID
-    
+
       TYPE_BOOL
-    
+
       TYPE_UINT8
-    
+
       TYPE_UINT16
-    
+
       TYPE_UINT32
-    
+
       TYPE_UINT64
-    
+
       TYPE_INT8
-    
+
       TYPE_INT16
-    
+
       TYPE_INT32
-    
+
       TYPE_INT64
-    
+
       TYPE_FP16
-    
+
       TYPE_FP32
-    
+
       TYPE_FP64
-    
+
       TYPE_BYTES
-    
+
       TYPE_BF16
-    
+
       TYPE_FP8_E4M3
-    
+
       TYPE_STR
-    
+
       TYPE_VOID
-    
+
       TYPE_QINT8
-    
+
       TYPE_INT4X2
-    
+
       TYPE_QINT4X2
-    
+
       TYPE_QFP8_E4M3
     """
     TYPE_BF16: typing.ClassVar[DataType]  # value = <DataType.TYPE_BF16: 14>
@@ -280,46 +282,38 @@ class EPLBConfig:
 class EplbMode:
     """
     Members:
-    
+
       NONE
-    
+
       STATS
-    
+
       EPLB
-    
+
       ALL
     """
+
     ALL: typing.ClassVar[EplbMode]  # value = <EplbMode.ALL: 3>
     EPLB: typing.ClassVar[EplbMode]  # value = <EplbMode.EPLB: 2>
     NONE: typing.ClassVar[EplbMode]  # value = <EplbMode.NONE: 0>
     STATS: typing.ClassVar[EplbMode]  # value = <EplbMode.STATS: 1>
-    __members__: typing.ClassVar[dict[str, EplbMode]]  # value = {'NONE': <EplbMode.NONE: 0>, 'STATS': <EplbMode.STATS: 1>, 'EPLB': <EplbMode.EPLB: 2>, 'ALL': <EplbMode.ALL: 3>}
-    def __eq__(self, other: typing.Any) -> bool:
-        ...
-    def __getstate__(self) -> int:
-        ...
-    def __hash__(self) -> int:
-        ...
-    def __index__(self) -> int:
-        ...
-    def __init__(self, value: int) -> None:
-        ...
-    def __int__(self) -> int:
-        ...
-    def __ne__(self, other: typing.Any) -> bool:
-        ...
-    def __repr__(self) -> str:
-        ...
-    def __setstate__(self, state: int) -> None:
-        ...
-    def __str__(self) -> str:
-        ...
+    __members__: typing.ClassVar[
+        dict[str, EplbMode]
+    ]  # value = {'NONE': <EplbMode.NONE: 0>, 'STATS': <EplbMode.STATS: 1>, 'EPLB': <EplbMode.EPLB: 2>, 'ALL': <EplbMode.ALL: 3>}
+    def __eq__(self, other: typing.Any) -> bool: ...
+    def __getstate__(self) -> int: ...
+    def __hash__(self) -> int: ...
+    def __index__(self) -> int: ...
+    def __init__(self, value: int) -> None: ...
+    def __int__(self) -> int: ...
+    def __ne__(self, other: typing.Any) -> bool: ...
+    def __repr__(self) -> str: ...
+    def __setstate__(self, state: int) -> None: ...
+    def __str__(self) -> str: ...
     @property
-    def name(self) -> str:
-        ...
+    def name(self) -> str: ...
     @property
-    def value(self) -> int:
-        ...
+    def value(self) -> int: ...
+
 class FIFOSchedulerConfig:
     enable_fast_gen: bool
     enable_partial_fallback: bool
@@ -359,29 +353,29 @@ class FMHAConfig:
 class FMHAType:
     """
     Members:
-    
+
       FLASH_INFER
-    
+
       NONE
-    
+
       OPEN_SOURCE
-    
+
       PAGED_OPEN_SOURCE
-    
+
       PAGED_TRT_V2
-    
+
       TRT_V1
-    
+
       TRT_V2
-    
+
       XQA
-    
+
       AITER_PREFILL
-    
+
       AITER_ASM_PREFILL
-    
+
       AITER_DECODE
-    
+
       AITER_ASM_DECODE
     """
     AITER_ASM_DECODE: typing.ClassVar[FMHAType]  # value = <FMHAType.AITER_ASM_DECODE: 11>
@@ -391,7 +385,9 @@ class FMHAType:
     FLASH_INFER: typing.ClassVar[FMHAType]  # value = <FMHAType.FLASH_INFER: 0>
     NONE: typing.ClassVar[FMHAType]  # value = <FMHAType.NONE: 1>
     OPEN_SOURCE: typing.ClassVar[FMHAType]  # value = <FMHAType.OPEN_SOURCE: 2>
-    PAGED_OPEN_SOURCE: typing.ClassVar[FMHAType]  # value = <FMHAType.PAGED_OPEN_SOURCE: 3>
+    PAGED_OPEN_SOURCE: typing.ClassVar[
+        FMHAType
+    ]  # value = <FMHAType.PAGED_OPEN_SOURCE: 3>
     PAGED_TRT_V2: typing.ClassVar[FMHAType]  # value = <FMHAType.PAGED_TRT_V2: 4>
     TRT_V1: typing.ClassVar[FMHAType]  # value = <FMHAType.TRT_V1: 5>
     TRT_V2: typing.ClassVar[FMHAType]  # value = <FMHAType.TRT_V2: 6>
@@ -418,11 +414,10 @@ class FMHAType:
     def __str__(self) -> str:
         ...
     @property
-    def name(self) -> str:
-        ...
+    def name(self) -> str: ...
     @property
-    def value(self) -> int:
-        ...
+    def value(self) -> int: ...
+
 class FfnDisAggregateConfig:
     attention_dp_size: int
     attention_tp_size: int
@@ -485,11 +480,9 @@ class HWKernelConfig:
     def to_string(self) -> str:
         ...
 class KVCacheConfig:
-    enable_3fs: bool
     fp8_kv_cache: int
     int8_kv_cache: int
     kv_cache_mem_mb: int
-    match_timeout_ms: int
     max_block_size_per_item: int
     memory_block_cache_size_mb: int
     memory_block_cache_sync_timeout_ms: int
@@ -497,14 +490,11 @@ class KVCacheConfig:
     multi_task_prompt_str: str
     multi_task_prompt_tokens: dict[str, list[int]]
     reuse_cache: bool
-    rpc_get_cache_timeout_ms: int
-    rpc_put_cache_timeout_ms: int
+    enable_remote_cache: bool
+    enable_device_cache: bool
+    sync_wait_write: bool
     seq_size_per_block: int
     test_block_num: int
-    threefs_read_iov_size: int
-    threefs_read_timeout_ms: int
-    threefs_write_iov_size: int
-    threefs_write_timeout_ms: int
     use_block_cache: int
     def __getstate__(self) -> tuple:
         ...
@@ -519,11 +509,11 @@ class KVCacheConfig:
 class KvCacheDataType:
     """
     Members:
-    
+
       BASE
-    
+
       INT8
-    
+
       FP8
     """
     BASE: typing.ClassVar[KvCacheDataType]  # value = <KvCacheDataType.BASE: 0>
@@ -559,11 +549,11 @@ class KvCacheDataType:
 class LayerNormType:
     """
     Members:
-    
+
       pre_layernorm
-    
+
       post_layernorm
-    
+
       invalid_type
     """
     __members__: typing.ClassVar[dict[str, LayerNormType]]  # value = {'pre_layernorm': <LayerNormType.pre_layernorm: 0>, 'post_layernorm': <LayerNormType.post_layernorm: 1>, 'invalid_type': <LayerNormType.invalid_type: 2>}
@@ -617,43 +607,35 @@ class MiscellaneousConfig:
 class MlaOpsType:
     """
     Members:
-    
+
       AUTO
-    
+
       MHA
-    
+
       FLASH_INFER
-    
+
       FLASH_MLA
     """
+
     AUTO: typing.ClassVar[MlaOpsType]  # value = <MlaOpsType.AUTO: 0>
     FLASH_INFER: typing.ClassVar[MlaOpsType]  # value = <MlaOpsType.FLASH_INFER: 2>
     FLASH_MLA: typing.ClassVar[MlaOpsType]  # value = <MlaOpsType.FLASH_MLA: 3>
     MHA: typing.ClassVar[MlaOpsType]  # value = <MlaOpsType.MHA: 1>
-    __members__: typing.ClassVar[dict[str, MlaOpsType]]  # value = {'AUTO': <MlaOpsType.AUTO: 0>, 'MHA': <MlaOpsType.MHA: 1>, 'FLASH_INFER': <MlaOpsType.FLASH_INFER: 2>, 'FLASH_MLA': <MlaOpsType.FLASH_MLA: 3>}
-    def __eq__(self, other: typing.Any) -> bool:
-        ...
-    def __getstate__(self) -> int:
-        ...
-    def __hash__(self) -> int:
-        ...
-    def __index__(self) -> int:
-        ...
-    def __init__(self, value: int) -> None:
-        ...
-    def __int__(self) -> int:
-        ...
-    def __ne__(self, other: typing.Any) -> bool:
-        ...
-    def __repr__(self) -> str:
-        ...
-    def __setstate__(self, state: int) -> None:
-        ...
-    def __str__(self) -> str:
-        ...
+    __members__: typing.ClassVar[
+        dict[str, MlaOpsType]
+    ]  # value = {'AUTO': <MlaOpsType.AUTO: 0>, 'MHA': <MlaOpsType.MHA: 1>, 'FLASH_INFER': <MlaOpsType.FLASH_INFER: 2>, 'FLASH_MLA': <MlaOpsType.FLASH_MLA: 3>}
+    def __eq__(self, other: typing.Any) -> bool: ...
+    def __getstate__(self) -> int: ...
+    def __hash__(self) -> int: ...
+    def __index__(self) -> int: ...
+    def __init__(self, value: int) -> None: ...
+    def __int__(self) -> int: ...
+    def __ne__(self, other: typing.Any) -> bool: ...
+    def __repr__(self) -> str: ...
+    def __setstate__(self, state: int) -> None: ...
+    def __str__(self) -> str: ...
     @property
-    def name(self) -> str:
-        ...
+    def name(self) -> str: ...
     @property
     def value(self) -> int:
         ...
@@ -787,15 +769,15 @@ class MoeConfig:
 class NormType:
     """
     Members:
-    
+
       layernorm
-    
+
       rmsnorm
-    
+
       alphanorm
-    
+
       add_bias
-    
+
       invalid_type
     """
     __members__: typing.ClassVar[dict[str, NormType]]  # value = {'layernorm': <NormType.layernorm: 0>, 'rmsnorm': <NormType.rmsnorm: 1>, 'alphanorm': <NormType.alphanorm: 2>, 'add_bias': <NormType.add_bias: 3>, 'invalid_type': <NormType.invalid_type: 4>}
@@ -954,23 +936,23 @@ class QuantAlgo:
 class QuantMethod:
     """
     Members:
-    
+
       None
-    
+
       WeightOnlyPerCol
-    
+
       GptQ
-    
+
       Awq
-    
+
       SmoothQuant
-    
+
       OmniQuant
-    
+
       PerTensorQuant
-    
+
       FP8Quant
-    
+
       FP8PTPC
     """
     Awq: typing.ClassVar[QuantMethod]  # value = <QuantMethod.Awq: 3>
@@ -1012,22 +994,23 @@ class QuantMethod:
 class RoleSpecialTokens:
     eos_token_ids: list[int]
     token_ids: list[int]
-    def __init__(self) -> None:
-        ...
+    def __init__(self) -> None: ...
+
 class RoleType:
     """
     Members:
-    
+
       PDFUSION
-    
+
       PREFILL
-    
+
       DECODE
-    
+
       VIT
-    
+
       FRONTEND
     """
+
     DECODE: typing.ClassVar[RoleType]  # value = <RoleType.DECODE: 2>
     FRONTEND: typing.ClassVar[RoleType]  # value = <RoleType.FRONTEND: 4>
     PDFUSION: typing.ClassVar[RoleType]  # value = <RoleType.PDFUSION: 0>
@@ -1055,8 +1038,7 @@ class RoleType:
     def __str__(self) -> str:
         ...
     @property
-    def name(self) -> str:
-        ...
+    def name(self) -> str: ...
     @property
     def value(self) -> int:
         ...
@@ -1090,21 +1072,21 @@ class RopeConfig:
 class RopeStyle:
     """
     Members:
-    
+
       No
-    
+
       Base
-    
+
       Glm2
-    
+
       DynamicNTK
-    
+
       QwenDynamicNTK
-    
+
       Yarn
-    
+
       Llama3
-    
+
       Mrope
     """
     Base: typing.ClassVar[RopeStyle]  # value = <RopeStyle.Base: 1>
@@ -1191,8 +1173,8 @@ class SpecialTokens:
     stop_words_str_list: list[str]
     system: RoleSpecialTokens
     user: RoleSpecialTokens
-    def __init__(self) -> None:
-        ...
+    def __init__(self) -> None: ...
+
 class SpeculativeExecutionConfig:
     checkpoint_path: str
     force_score_context_attention: bool
@@ -1220,17 +1202,17 @@ class SpeculativeExecutionConfig:
 class SpeculativeType:
     """
     Members:
-    
+
       NONE
-    
+
       VANILLA
-    
+
       MTP
-    
+
       EAGLE3
-    
+
       EAGLE
-    
+
       DETERMINISTIC
     """
     DETERMINISTIC: typing.ClassVar[SpeculativeType]  # value = <SpeculativeType.DETERMINISTIC: 5>
@@ -1269,23 +1251,23 @@ class SpeculativeType:
 class TaskType:
     """
     Members:
-    
+
       DENSE_EMBEDDING
-    
+
       ALL_EMBEDDING
-    
+
       SPARSE_EMBEDDING
-    
+
       COLBERT_EMBEDDING
-    
+
       LANGUAGE_MODEL
-    
+
       SEQ_CLASSIFICATION
-    
+
       RERANKER
-    
+
       LINEAR_SOFTMAX
-    
+
       BGE_M3
     """
     ALL_EMBEDDING: typing.ClassVar[TaskType]  # value = <TaskType.ALL_EMBEDDING: 1>
@@ -1337,11 +1319,11 @@ class VitConfig:
 class VitSeparation:
     """
     Members:
-    
+
       VIT_SEPARATION_LOCAL
-    
+
       VIT_SEPARATION_ROLE
-    
+
       VIT_SEPARATION_REMOTE
     """
     VIT_SEPARATION_LOCAL: typing.ClassVar[VitSeparation]  # value = <VitSeparation.VIT_SEPARATION_LOCAL: 0>

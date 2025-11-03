@@ -13,8 +13,9 @@ namespace rtp_llm {
 
 class KVCacheConnectorReadWriteContextImpl: public KVCacheConnectorReadWriteContext {
 public:
-    KVCacheConnectorReadWriteContextImpl(const std::shared_ptr<StreamCacheResource>& stream_cache_resource):
-        stream_cache_resource_(stream_cache_resource) {}
+    KVCacheConnectorReadWriteContextImpl(const std::shared_ptr<StreamCacheResource>& stream_cache_resource,
+                                         long                                        request_id = 0):
+        KVCacheConnectorReadWriteContext(request_id), stream_cache_resource_(stream_cache_resource) {}
     ~KVCacheConnectorReadWriteContextImpl() override = default;
 
 public:
@@ -200,23 +201,33 @@ bool StreamCacheResource::reuseCache() const {
     return resource_context_.reuse_cache && stream_->reuseCache();
 }
 
-bool StreamCacheResource::enable3FS() const {
-    return resource_context_.enable_3fs && stream_->enable3FS();
-}
-
 bool StreamCacheResource::enableMemoryBlockCache() const {
     return resource_context_.enable_memory_block_cache && stream_->enableMemoryBlockCache();
 }
 
+bool StreamCacheResource::enableRemoteCache() const {
+    return resource_context_.enable_remote_cache && stream_->enableRemoteCache();
+}
+
+bool StreamCacheResource::enableDeviceCache() const {
+    return resource_context_.enable_device_cache && stream_->enableDeviceCache();
+}
+
+bool StreamCacheResource::syncWaitWrite() const {
+    return resource_context_.sync_wait_write && stream_->syncWaitWrite();
+}
+
 bool StreamCacheResource::asyncLoadCache() {
-    if (!enableMemoryBlockCache()) {
+    if (!(enableMemoryBlockCache() || enableRemoteCache())) {
+        RTP_LLM_LOG_DEBUG("no connector");
         return false;
     }
     if (load_cache_context_) {
         return true;
     }
-    auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(shared_from_this());
-    load_cache_context_    = resource_context_.cache_manager->asyncLoadCache(connector_context);
+    auto connector_context =
+        std::make_shared<KVCacheConnectorReadWriteContextImpl>(shared_from_this(), stream_->streamId());
+    load_cache_context_ = resource_context_.cache_manager->asyncLoadCache(connector_context);
     return load_cache_context_ != nullptr;
 }
 
@@ -235,6 +246,7 @@ bool StreamCacheResource::loadCacheDone() {
             stream_->setReuseLength(reuse_len);
             stream_->setLocalReuseLength(reuse_len);
             stream_->setMtpTokenIndex(reuse_len);
+            // TODO : set remote reuse len
         } else {
             RTP_LLM_LOG_WARNING("load cache success but cast load cache context failed");
         }
@@ -251,8 +263,9 @@ bool StreamCacheResource::asyncStoreCache() {
         return true;
     }
     dropLastPartialBlock(batch_resource_);
-    auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(shared_from_this());
-    store_cache_context_   = resource_context_.cache_manager->asyncStoreCache(connector_context);
+    auto connector_context =
+        std::make_shared<KVCacheConnectorReadWriteContextImpl>(shared_from_this(), stream_->streamId());
+    store_cache_context_ = resource_context_.cache_manager->asyncStoreCache(connector_context);
     return store_cache_context_ != nullptr;
 }
 
