@@ -31,7 +31,7 @@ SpeculativeEngine::SpeculativeEngine(const EngineInitParams&                    
     metrics_reporter_(engine_init_params.metrics_reporter),
     propose_model_params_(std::move(propose_model_engine_init_params)),
     score_model_params_(std::move(engine_init_params)),
-    sp_type_(SpeculativeExecutionConfig::to_string(propose_model_params_->sp_type)) {};
+    sp_type_(SpeculativeExecutionConfig::to_string(propose_model_params_->sp_type)){};
 
 SpeculativeEngine::~SpeculativeEngine() {
     RTP_LLM_LOG_INFO("destory speculative engine");
@@ -209,7 +209,8 @@ absl::Status SpeculativeEngine::initCacheManager(std::optional<WarmUpResult> war
                                                                       metrics_reporter_,
                                                                       score_model_params_.kv_cache_config,
                                                                       score_model_params_.parallelism_config,
-                                                                      score_model_params_.runtime_config);
+                                                                      score_model_params_.runtime_config,
+                                                                      score_model_params_.sp_config);
         resource_context_.role_type     = score_model_params_.pd_sep_config.role_type;
 
         if (!resource_context_.cache_manager->init()) {
@@ -265,8 +266,8 @@ absl::Status SpeculativeEngine::initCacheManager(std::optional<WarmUpResult> war
 WarmUpResult SpeculativeEngine::warmUp() {
     std::shared_ptr<GenerateInput> fake_input = make_shared<GenerateInput>();
     fake_input->input_ids                     = device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32,
-                                                                         {(size_t)score_model_params_.model_config_.max_seq_len - 1},
-                                                                         rtp_llm::AllocationType::HOST});
+                                                     {(size_t)score_model_params_.model_config_.max_seq_len - 1},
+                                                     rtp_llm::AllocationType::HOST});
     std::memset(fake_input->input_ids->data(), 0, fake_input->input_ids->sizeBytes());
     fake_input->generate_config = make_shared<GenerateConfig>();
     fake_input->generate_config->num_return_sequences =
@@ -302,9 +303,9 @@ WarmUpResult SpeculativeEngine::warmUp() {
 
 absl::Status SpeculativeEngine::initSystemPrompt() {
     resource_context_.reuse_cache         = score_model_params_.kv_cache_config.reuse_cache;
-    resource_context_.enable_3fs          = score_model_params_.kv_cache_config.enable_3fs;
-    resource_context_.enable_device_cache = score_model_params_.kv_cache_config.enable_device_cache;
     resource_context_.enable_memory_cache = score_model_params_.kv_cache_config.enable_memory_cache;
+    resource_context_.enable_remote_cache = score_model_params_.kv_cache_config.enable_remote_cache;
+    resource_context_.enable_device_cache = score_model_params_.kv_cache_config.enable_device_cache;
     resource_context_.write_cache_sync    = score_model_params_.kv_cache_config.write_cache_sync;
 
     if (!score_model_params_.kv_cache_config.multi_task_prompt_tokens.empty()) {

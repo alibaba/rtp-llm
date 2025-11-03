@@ -18,6 +18,7 @@ namespace rtp_llm {
 class DeviceBase;
 class KVCacheAllocator;
 class KVCacheMemoryConnector;
+class RemoteConnector;
 class KVCacheConnectorReadWriteContext;
 
 class KVCacheConnectorCoordinator {
@@ -25,6 +26,8 @@ public:
     KVCacheConnectorCoordinator(const CacheConfig&                       cache_config,
                                 const KVCacheConfig&                     kv_cache_config,
                                 const RuntimeConfig&                     runtime_config,
+                                const ParallelismConfig&                 parallelism_config,
+                                const SpeculativeExecutionConfig&        sp_config,
                                 const std::shared_ptr<KVCacheAllocator>& allocator,
                                 rtp_llm::DeviceBase*                     device,
                                 const kmonitor::MetricsReporterPtr&      metrics_reporter = nullptr);
@@ -46,6 +49,7 @@ public:
 
 private:
     std::shared_ptr<KVCacheMemoryConnector> initMemoryConnector();
+    std::shared_ptr<RemoteConnector>        initRemoteConnector();
     void                                    initUpdateThread();
     void                                    updateOnce();
     void                                    processReadContexts();
@@ -56,13 +60,15 @@ private:
     const CacheConfig                 cache_config_;
     const KVCacheConfig               kv_cache_config_;
     const RuntimeConfig               runtime_config_;
+    const ParallelismConfig           parallelism_config_;
+    const SpeculativeExecutionConfig  sp_config_;
     std::shared_ptr<KVCacheAllocator> allocator_;
     rtp_llm::DeviceBase*              device_{nullptr};
     kmonitor::MetricsReporterPtr      metrics_reporter_;
 
-    std::vector<std::shared_ptr<KVCacheConnector>> connectors_;
-    std::shared_ptr<KVCacheMemoryConnector>        memory_connector_;
-
+    std::vector<std::shared_ptr<KVCacheConnector>>    connectors_;
+    std::shared_ptr<KVCacheMemoryConnector>           memory_connector_;
+    std::shared_ptr<RemoteConnector>                  remote_connector_;
     mutable std::mutex                                update_mutex_;
     std::list<std::shared_ptr<FusedAsyncReadContext>> fused_async_read_context_list_;
     std::list<std::shared_ptr<FusedAsyncContext>>     fused_async_write_context_list_;

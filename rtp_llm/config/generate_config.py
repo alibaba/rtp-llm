@@ -137,12 +137,11 @@ class GenerateConfig(BaseModel):
     # 只有开启环境变量 REUSE_CACHE 时才生效
     reuse_cache: bool = True
 
-    # 只有开启环境变量 ENABLE_3FS 时才生效
-    enable_3fs: bool = True
-
     enable_device_cache: bool = True
 
     enable_memory_cache: bool = True
+
+    enable_remote_cache: bool = True
 
     def gen_hash_value(self):
         cp = copy.copy(self)

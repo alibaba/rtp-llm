@@ -318,6 +318,38 @@ TEST_F(BlockPoolTest, ReferenceAndFree) {
         EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks);
         EXPECT_EQ(block_pool_->availableBlocksNum(), total_blocks);
     }
+
+    {
+        auto blocks = block_pool_->malloc(2);
+        EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks - 2);
+        EXPECT_EQ(block_pool_->availableBlocksNum(), total_blocks - 2);
+
+        block_pool_->blockCacheReference(blocks);
+        EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks - 2);
+        EXPECT_EQ(block_pool_->availableBlocksNum(), total_blocks - 2);
+
+        block_pool_->connectorReference(blocks);
+        EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks - 2);
+        EXPECT_EQ(block_pool_->availableBlocksNum(), total_blocks - 2);
+        EXPECT_EQ(block_pool_->connectorRefBlocksNum(), 2);
+        EXPECT_EQ(block_pool_->requestRefBlocksNum(), 2);
+
+        block_pool_->requestFree(blocks);
+        EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks - 2);
+        EXPECT_EQ(block_pool_->availableBlocksNum(), total_blocks - 2);
+        EXPECT_EQ(block_pool_->connectorRefBlocksNum(), 2);
+        EXPECT_EQ(block_pool_->requestRefBlocksNum(), 0);
+
+        block_pool_->connectorFree(blocks);
+        EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks - 2);
+        EXPECT_EQ(block_pool_->availableBlocksNum(), total_blocks);
+        EXPECT_EQ(block_pool_->connectorRefBlocksNum(), 0);
+        EXPECT_EQ(block_pool_->requestRefBlocksNum(), 0);
+
+        block_pool_->blockCacheFree(blocks);
+        EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks);
+        EXPECT_EQ(block_pool_->availableBlocksNum(), total_blocks);
+    }
 }
 
 TEST_F(BlockPoolTest, MultipleReferencesAndFrees) {

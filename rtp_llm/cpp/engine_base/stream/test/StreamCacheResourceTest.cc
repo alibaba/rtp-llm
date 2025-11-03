@@ -255,30 +255,6 @@ TEST_F(StreamCacheResourceTest, testStreamCacheResourceReuseCacheMethod) {
     ASSERT_FALSE(resource.reuseCache());
 }
 
-TEST_F(StreamCacheResourceTest, testStreamCacheResourceEnable3FSMethod) {
-    // Start with engine=true to test query toggling
-    prepareResource(true);
-    auto& resource = stream_->streamCacheResource();
-
-    // engine=true, query=true -> true
-    resource.resource_context_.enable_3fs                 = true;
-    stream_->generate_input_->generate_config->enable_3fs = true;
-    ASSERT_TRUE(resource.enable3FS());
-
-    // engine=true, query=false -> false
-    stream_->generate_input_->generate_config->enable_3fs = false;
-    ASSERT_FALSE(resource.enable3FS());
-
-    // engine=false, query=true -> false
-    resource.resource_context_.enable_3fs                 = false;
-    stream_->generate_input_->generate_config->enable_3fs = true;
-    ASSERT_FALSE(resource.enable3FS());
-
-    // engine=false, query=false -> false
-    stream_->generate_input_->generate_config->enable_3fs = false;
-    ASSERT_FALSE(resource.enable3FS());
-}
-
 TEST_F(StreamCacheResourceTest, testInitKVBlock_TriggersLoadCacheSync_AndUpdatesReuseLen) {
     // initKVBlock() calls incrKVBlock() then loadCacheSync() internally.
     prepareResource(/*reuse_cache=*/true);

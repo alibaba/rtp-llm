@@ -5,6 +5,7 @@
 #include <set>
 #include <vector>
 #include <unordered_map>
+#include <mutex>
 
 #include <torch/torch.h>
 
@@ -31,23 +32,29 @@ public:
 
     BlockCachePtr blockCache();
 
-    size_t totalBlocksNum() const;
-    size_t freeBlocksNum() const;
-    size_t availableBlocksNum() const;
-
     MemoryType                 where() const;
     std::vector<torch::Tensor> allLayerCacheBase() const;
     std::vector<torch::Tensor> allLayerScaleCacheBase() const;
 
+    // these interfaces are all thread-safe
     std::vector<BlockIdxType> malloc(int num_blocks);
+    size_t                    totalBlocksNum() const;
+    size_t                    freeBlocksNum() const;
+    size_t                    availableBlocksNum() const;
+    size_t                    requestRefBlocksNum() const;
+    size_t                    connectorRefBlocksNum() const;
     void                      requestFree(BlockIdxType block_idx);
     void                      requestFree(const BlockIndicesType& block_indices);
     void                      blockCacheFree(BlockIdxType block_idx);
     void                      blockCacheFree(const BlockIndicesType& block_indices);
+    void                      connectorFree(BlockIdxType block_idx);
+    void                      connectorFree(const BlockIndicesType& block_indices);
     void                      requestReference(BlockIdxType block_idx);
     void                      requestReference(const BlockIndicesType& block_indices);
     void                      blockCacheReference(BlockIdxType block_idx);
     void                      blockCacheReference(const BlockIndicesType& block_indices);
+    void                      connectorReference(BlockIdxType block_idx);
+    void                      connectorReference(const BlockIndicesType& block_indices);
 
     void    regUserMr(size_t model_id);
     void    deregUserMr();
@@ -58,6 +65,13 @@ public:
     std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int block_id) const;
     std::vector<BlockInfo>
     convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const;
+
+    void* getBaseAddress() const {
+        return cache_base_ptr_;
+    }
+    size_t getTotalSizeBytes() const {
+        return config_.total_size_bytes;
+    }
 
 private:
     void initFreeBlocks();
@@ -98,14 +112,19 @@ private:
                                    const std::string&                   buffer_type);
 
 private:
-    BlockPoolConfig        config_;
+    BlockPoolConfig config_;
+
     mutable std::mutex     free_mu_;
-    mutable std::mutex     ref_mu_;
+    mutable std::mutex     all_mu_;
+    mutable std::mutex     req_con_mu_;
     std::set<BlockIdxType> free_block_ids_;
     BlockRefCounter        all_ref_counter_;
     BlockRefCounter        request_ref_counter_;
-    rtp_llm::DeviceBase*   device_;
-    AllocationType         allocation_type_;
+    BlockRefCounter        connector_ref_counter_;
+    BlockRefCounter        req_con_ref_counter_;
+
+    rtp_llm::DeviceBase* device_;
+    AllocationType       allocation_type_;
 
     BlockCachePtr block_cache_;
 
@@ -115,11 +134,11 @@ private:
     int64_t            mr_cost_time_ms_ = 0;
 
     std::vector<std::unique_ptr<MemoryLayoutStrategy>> layout_strategies_;
+    std::vector<std::pair<int, int>>                   global_layer_to_local_;
+    std::vector<torch::Tensor>                         global_layer_kv_tensors_;
+    std::vector<torch::Tensor>                         global_layer_kv_scale_tensors_;
 
-    std::vector<std::pair<int, int>> global_layer_to_local_;
-
-    std::vector<torch::Tensor> global_layer_kv_tensors_;
-    std::vector<torch::Tensor> global_layer_kv_scale_tensors_;
+    mutable std::recursive_mutex mutex_;
 };
 
 using BlockPoolPtr = std::shared_ptr<BlockPool>;
