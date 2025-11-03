@@ -52,7 +52,7 @@ def parse_arguments(json_value):
 
 class Glm4MoeDetector(BaseFormatDetector):
     """
-    Detector for GLM-4.5 models.
+    Detector for GLM-4.5 and GLM-4.6 models.
     Assumes function call format:
       <tool_call>get_weather\n<arg_key>city</arg_key>\n<arg_value>北京</arg_value>\n<arg_key>date</arg_key>\n<arg_value>2024-06-27</arg_value>\n</tool_call>\n<tool_call>get_weather\n<arg_key>city</arg_key>\n<arg_value>上海</arg_value>\n<arg_key>date</arg_key>\n<arg_value>2024-06-27</arg_value>\n</tool_call>
     """
@@ -62,13 +62,16 @@ class Glm4MoeDetector(BaseFormatDetector):
         self.bot_token = "<tool_call>"
         self.eot_token = "</tool_call>"
         self.func_call_regex = r"<tool_call>.*?</tool_call>"
-        self.func_detail_regex = r"<tool_call>(.*?)(?:\\n|\n)(.*)</tool_call>"
-        self.func_arg_regex = (
-            r"<arg_key>(.*?)</arg_key>(?:\\n|\s)*<arg_value>(.*?)</arg_value>"
+        self.func_detail_regex = re.compile(
+            r"<tool_call>(.*?)(?:\\n|\n)(.*)</tool_call>", re.DOTALL
+        )
+        self.func_arg_regex = re.compile(
+            r"<arg_key>(.*?)</arg_key>(?:\\n|\s)*<arg_value>(.*?)</arg_value>",
+            re.DOTALL,
         )
 
     def has_tool_call(self, text: str) -> bool:
-        """Check if the text contains a glm-4.5 format tool call."""
+        """Check if the text contains a glm-4.5 / glm-4.6 format tool call."""
         return self.bot_token in text
 
     def detect_and_parse(self, text: str, tools: List[Tool]) -> StreamingParseResult:
@@ -80,7 +83,7 @@ class Glm4MoeDetector(BaseFormatDetector):
         :return: ParseResult indicating success or failure, consumed text, leftover text, and parsed calls.
         """
         idx = text.find(self.bot_token)
-        normal_text = text[:idx] if idx != -1 else text
+        normal_text = text[:idx].strip() if idx != -1 else text
         if self.bot_token not in text:
             return StreamingParseResult(normal_text=normal_text, calls=[])
         match_result_list = re.findall(self.func_call_regex, text, re.DOTALL)
@@ -88,14 +91,10 @@ class Glm4MoeDetector(BaseFormatDetector):
         try:
             for match_result in match_result_list:
                 # Get function name
-                func_detail = re.search(self.func_detail_regex, match_result, re.DOTALL)
+                func_detail = self.func_detail_regex.search(match_result)
                 func_name = func_detail.group(1)
                 func_args = func_detail.group(2)
-                pairs = re.findall(
-                    self.func_arg_regex,
-                    func_args,
-                    re.DOTALL,
-                )
+                pairs = self.func_arg_regex.findall(func_args)
                 arguments = {}
                 for arg_key, arg_value in pairs:
                     arg_key = arg_key.strip()
@@ -107,7 +106,6 @@ class Glm4MoeDetector(BaseFormatDetector):
                 # construct match_result for parse_base_json
                 match_result = {"name": func_name, "parameters": arguments}
                 calls.extend(self.parse_base_json(match_result, tools))
-
             return StreamingParseResult(normal_text=normal_text, calls=calls)
         except Exception as e:
             logger.error(f"Error in detect_and_parse: {e}")
@@ -118,7 +116,7 @@ class Glm4MoeDetector(BaseFormatDetector):
         self, new_text: str, tools: List[Tool]
     ) -> StreamingParseResult:
         """
-        Streaming incremental parsing tool calls for GLM-4.5 format.
+        Streaming incremental parsing tool calls for GLM-4.5 and GLM-4.6 format.
         """
         self._buffer += new_text
         current_text = self._buffer
@@ -174,7 +172,7 @@ class Glm4MoeDetector(BaseFormatDetector):
             individual_call_end_token=self.eot_token,
             tool_call_separator="\\n",
             function_format="xml",
-            call_rule_fmt='"{name}" "\\n" {arguments_rule} "\\n"',
+            call_rule_fmt='"{name}" "\\n" ( {arguments_rule} "\\n" )?',
             key_value_rule_fmt='"<arg_key>{key}</arg_key>" "\\n" "<arg_value>" {valrule} "</arg_value>"',
-            key_value_separator="\\n",
+            key_value_separator='"\\n"',
         )
