@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/cache_new/types.h"
 #include "rtp_llm/cpp/cache_new/CacheConfig.h"
 #include "rtp_llm/cpp/cache_new/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache_new/KVCacheConnector.h"
 #include "rtp_llm/cpp/config/GptInitParameter.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "kmonitor/client/MetricsReporter.h"
@@ -78,14 +79,16 @@ public:
                        std::vector<BlockIdPair>&      block_update_mapping);
 
     // async load cache from memory to gpu, for all tp
-    std::shared_ptr<AsyncContext> asyncLoadCache(const BatchKVCacheResourcePtr& batch_resource);
+    std::shared_ptr<AsyncContext> asyncLoadCache(int64_t request_id, const BatchKVCacheResourcePtr& batch_resource);
 
     // copy cache between gpu and memory, for single tp
     bool copyCache(const CopyCacheRequestPB& request, CopyCacheResponsePB& response);
     void clearLocalCache();
 
 private:
+    bool tryInitThreadPool();
     bool initMemoryConnector();
+    bool initRemoteConnector();
 
 private:
     CacheConfig          config_;
@@ -96,7 +99,9 @@ private:
     const GptInitParameter&            params_;
 
     std::shared_ptr<KVCacheConnector>          memory_connector_;
+    std::shared_ptr<KVCacheConnector>          remote_connector_;
     std::shared_ptr<autil::LockFreeThreadPool> wait_cache_thread_pool_;
+    bool                                       sync_wait_write_ = false;
 };
 
 }  // namespace rtp_llm
