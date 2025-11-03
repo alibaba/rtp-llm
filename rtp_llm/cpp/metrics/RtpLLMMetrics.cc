@@ -24,6 +24,10 @@ AUTIL_LOG_SETUP(rtp_llm, RtpLLmEplbMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheStoreMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMKVCacheInfoMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMMemoryCacheMetrics);
+AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheMatchMetrics);
+AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheReadMetrics);
+AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheWriteMetrics);
+AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheSDKMetrics);
 
 #define REPORT_QPS(name)                                                                                               \
     if (collector->name) {                                                                                             \
@@ -347,6 +351,73 @@ void RtpLLMCacheMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCacheMe
     REPORT_MUTABLE_METRIC(kv_cache_left_seq_metric, collector->kv_cache_left_seq);
     REPORT_MUTABLE_METRIC(kv_cache_used_ratio_metric, collector->kv_cache_used_ratio);
     REPORT_MUTABLE_METRIC(mr_cost_time_ms_metric, collector->mr_cost_time_ms);
+}
+
+bool RtpLLMRemoteCacheMatchMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_QPS_MUTABLE_METRIC(remote_match_qps_metric, "rtp_llm_remote_match_qps");
+    REGISTER_QPS_MUTABLE_METRIC(remote_match_fail_qps_metric, "rtp_llm_remote_match_fail_qps");
+    REGISTER_GAUGE_MUTABLE_METRIC(remote_match_reuse_block_num_metric, "rtp_llm_remote_match_reuse_block_num");
+    REGISTER_GAUGE_MUTABLE_METRIC(remote_match_time_us_metric, "rtp_llm_remote_match_time_us");
+    return true;
+}
+
+void RtpLLMRemoteCacheMatchMetrics::report(const kmonitor::MetricsTags*            tags,
+                                           RtpLLMRemoteCacheMatchMetricsCollector* collector) {
+    REPORT_QPS(remote_match_qps);
+    REPORT_QPS(remote_match_fail_qps);
+    REPORT_MUTABLE_METRIC(remote_match_reuse_block_num_metric, collector->remote_match_reuse_block_num);
+    REPORT_MUTABLE_METRIC(remote_match_time_us_metric, collector->remote_match_time_us);
+}
+
+bool RtpLLMRemoteCacheReadMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_QPS_MUTABLE_METRIC(remote_read_qps_metric, "rtp_llm_remote_read_qps");
+    REGISTER_QPS_MUTABLE_METRIC(remote_read_fail_qps_metric, "rtp_llm_remote_read_fail_qps");
+    REGISTER_GAUGE_MUTABLE_METRIC(remote_read_task_cost_time_us_metric, "rtp_llm_remote_read_task_cost_time_us");
+    return true;
+}
+
+void RtpLLMRemoteCacheReadMetrics::report(const kmonitor::MetricsTags*           tags,
+                                          RtpLLMRemoteCacheReadMetricsCollector* collector) {
+    REPORT_QPS(remote_read_qps);
+    REPORT_QPS(remote_read_fail_qps);
+    REPORT_MUTABLE_METRIC(remote_read_task_cost_time_us_metric, collector->remote_read_task_cost_time_us);
+}
+
+bool RtpLLMRemoteCacheWriteMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_QPS_MUTABLE_METRIC(remote_write_qps_metric, "rtp_llm_remote_write_qps");
+    REGISTER_QPS_MUTABLE_METRIC(remote_write_fail_qps_metric, "rtp_llm_remote_write_fail_qps");
+    REGISTER_GAUGE_MUTABLE_METRIC(remote_write_cache_block_num_metric, "rtp_llm_remote_write_cache_block_num");
+    REGISTER_GAUGE_MUTABLE_METRIC(remote_write_task_cost_time_us_metric, "rtp_llm_remote_write_task_cost_time_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(remote_get_write_location_time_us_metric,
+                                  "rtp_llm_remote_get_write_location_time_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(remote_write_broadcast_time_us_metric, "rtp_llm_remote_write_broadcast_time_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(remote_finish_write_time_us_metric, "rtp_llm_remote_finish_write_time_us");
+    return true;
+}
+
+void RtpLLMRemoteCacheWriteMetrics::report(const kmonitor::MetricsTags*            tags,
+                                           RtpLLMRemoteCacheWriteMetricsCollector* collector) {
+    REPORT_QPS(remote_write_qps);
+    REPORT_QPS(remote_write_fail_qps);
+    REPORT_MUTABLE_METRIC(remote_write_cache_block_num_metric, collector->remote_write_cache_block_num);
+    REPORT_MUTABLE_METRIC(remote_write_task_cost_time_us_metric, collector->remote_write_task_cost_time_us);
+    REPORT_MUTABLE_METRIC(remote_get_write_location_time_us_metric, collector->remote_get_write_location_time_us);
+    REPORT_MUTABLE_METRIC(remote_write_broadcast_time_us_metric, collector->remote_write_broadcast_time_us);
+    REPORT_MUTABLE_METRIC(remote_finish_write_time_us_metric, collector->remote_finish_write_time_us);
+}
+
+bool RtpLLMRemoteCacheSDKMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_QPS_MUTABLE_METRIC(remote_sdk_fail_qps_metric, "rtp_llm_remote_sdk_fail_qps");
+    REGISTER_GAUGE_MUTABLE_METRIC(remote_sdk_block_num_metric, "rtp_llm_remote_sdk_block_num");
+    REGISTER_GAUGE_MUTABLE_METRIC(remote_sdk_cost_time_us_metric, "rtp_llm_remote_sdk_cost_time_us");
+    return true;
+}
+
+void RtpLLMRemoteCacheSDKMetrics::report(const kmonitor::MetricsTags*          tags,
+                                         RtpLLMRemoteCacheSDKMetricsCollector* collector) {
+    REPORT_QPS(remote_sdk_fail_qps);
+    REPORT_MUTABLE_METRIC(remote_sdk_block_num_metric, collector->remote_sdk_block_num);
+    REPORT_MUTABLE_METRIC(remote_sdk_cost_time_us_metric, collector->remote_sdk_cost_time_us);
 }
 
 bool RtpLLMCacheReuseMetrics::init(kmonitor::MetricsGroupManager* manager) {

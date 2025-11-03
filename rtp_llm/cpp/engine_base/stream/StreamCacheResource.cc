@@ -15,8 +15,14 @@ class KVCacheConnectorReadWriteContextImpl: public KVCacheConnectorReadWriteCont
 public:
     KVCacheConnectorReadWriteContextImpl(const std::shared_ptr<BatchKVCacheResource>&   batch_resource,
                                          const std::shared_ptr<KVCacheConnector::Meta>& meta,
-                                         bool                                           enable_memory_cache):
-        batch_resource_(batch_resource), meta_(meta), enable_memory_cache_(enable_memory_cache) {}
+                                         bool                                           enable_memory_cache,
+                                         bool                                           enable_remote_cache,
+                                         std::string                                    trace_id = ""):
+        batch_resource_(batch_resource),
+        meta_(meta),
+        enable_memory_cache_(enable_memory_cache),
+        enable_remote_cache_(enable_remote_cache),
+        trace_id_(trace_id) {}
     ~KVCacheConnectorReadWriteContextImpl() override = default;
 
 public:
@@ -29,11 +35,19 @@ public:
     bool enableMemoryCache() const override {
         return enable_memory_cache_;
     }
+    bool enableRemoteCache() const override {
+        return enable_remote_cache_;
+    }
+    const std::string& trace_id() const override {
+        return trace_id_;
+    }
 
 private:
     std::shared_ptr<BatchKVCacheResource>   batch_resource_;
     std::shared_ptr<KVCacheConnector::Meta> meta_;
     bool                                    enable_memory_cache_{false};
+    bool                                    enable_remote_cache_{false};
+    std::string                             trace_id_;
 };
 
 void StreamCacheResource::init(int batch_size) {
@@ -180,16 +194,20 @@ bool StreamCacheResource::reuseCache() const {
     return resource_context_.reuse_cache && stream_->reuseCache();
 }
 
-bool StreamCacheResource::enable3FS() const {
-    return resource_context_.enable_3fs && stream_->enable3FS();
+bool StreamCacheResource::enableRemoteCache() const {
+    return resource_context_.enable_remote_cache && stream_->enableRemoteCache();
+}
+
+bool StreamCacheResource::enableMemoryCache() const {
+    return resource_context_.enable_memory_cache && stream_->enableMemoryCache();
 }
 
 bool StreamCacheResource::enableDeviceCache() const {
     return resource_context_.enable_device_cache && stream_->enableDeviceCache();
 }
 
-bool StreamCacheResource::enableMemoryCache() const {
-    return resource_context_.enable_memory_cache && stream_->enableMemoryCache();
+bool StreamCacheResource::syncWaitWrite() const {
+    return resource_context_.sync_wait_write && stream_->syncWaitWrite();
 }
 
 bool StreamCacheResource::asyncLoadCache() {
@@ -206,8 +224,8 @@ bool StreamCacheResource::asyncLoadCache() {
         new_batch_resource->addResource(batch_kv_cache_resource_->cacheResource(0));
         dropLastPartialBlock(new_batch_resource);
     }
-    auto connector_context =
-        std::make_shared<KVCacheConnectorReadWriteContextImpl>(new_batch_resource, nullptr, enableMemoryCache());
+    auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(
+        new_batch_resource, nullptr, enableMemoryCache(), enableRemoteCache(), stream_->traceId());
     load_cache_context_ = resource_context_.cache_manager->asyncLoadCache(connector_context);
     return load_cache_context_ != nullptr;
 }
@@ -219,17 +237,22 @@ bool StreamCacheResource::loadCacheDone() {
     if (!load_cache_context_->done()) {
         return false;
     }
+    // TODO(zhoushipei.zsp) reuse_len to be fixed
     if (load_cache_context_->success()) {
         auto read_context = std::dynamic_pointer_cast<FusedAsyncReadContext>(load_cache_context_);
         if (read_context) {
-            const int total_reuse_len  = read_context->resource()->reuseBlocksNum() * seqSizePerBlock();
-            const int gpu_reuse_len    = stream_->reuseLength();
-            const int memory_reuse_len = std::max(0, total_reuse_len - gpu_reuse_len);
+            const int total_reuse_len = read_context->resource()->reuseBlocksNum() * seqSizePerBlock();
+            // const int gpu_reuse_len    = stream_->reuseLength();
+            // const int memory_reuse_len = std::max(0, total_reuse_len - gpu_reuse_len);
             stream_->setInitialReuseLength(total_reuse_len);
             stream_->setReuseLength(total_reuse_len);
             stream_->setLocalReuseLength(total_reuse_len);
             stream_->setMtpTokenIndex(total_reuse_len);
-            stream_->setMemoryReuseLength(memory_reuse_len);
+            // yemu_debug 临时强制为0
+            stream_->setMemoryReuseLength(0);
+            // yemu: TODO, 这个改掉
+            const int remote_reuse_len = read_context->resource()->remoteReuseBlocksNum() * seqSizePerBlock();
+            stream_->setRemoteReuseLength(remote_reuse_len);
         } else {
             RTP_LLM_LOG_WARNING("load cache success but cast load cache context failed");
         }
@@ -259,8 +282,8 @@ bool StreamCacheResource::asyncStoreCache() {
         new_batch_resource->addResource(batch_kv_cache_resource_->cacheResource(0));
         dropLastPartialBlock(new_batch_resource);
     }
-    auto connector_context =
-        std::make_shared<KVCacheConnectorReadWriteContextImpl>(new_batch_resource, nullptr, enableMemoryCache());
+    auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(
+        new_batch_resource, nullptr, enableMemoryCache(), enableRemoteCache(), stream_->traceId());
     store_cache_context_ = resource_context_.cache_manager->asyncStoreCache(connector_context);
     return store_cache_context_ != nullptr;
 }

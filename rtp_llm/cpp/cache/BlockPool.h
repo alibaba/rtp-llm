@@ -5,6 +5,7 @@
 #include <set>
 #include <vector>
 #include <unordered_map>
+#include <mutex>
 
 #include <torch/torch.h>
 
@@ -64,6 +65,13 @@ public:
     KVCacheBuffer kvCacheBuffer() const;
     KVCacheBuffer getMemoryLayoutKVCacheBuffer(int layout_id) const;
 
+    void* getBaseAddress() const {
+        return cache_base_ptr_;
+    }
+    size_t getTotalSizeBytes() const {
+        return config_.total_size_bytes;
+    }
+
 private:
     void initFreeBlocks();
     void freeImpl(const BlockIndicesType& block_indices);
@@ -89,11 +97,11 @@ private:
     int64_t            mr_cost_time_ms_ = 0;
 
     std::vector<std::unique_ptr<MemoryLayoutStrategy>> layout_strategies_;
+    std::vector<std::pair<int, int>>                   global_layer_to_local_;
+    std::vector<torch::Tensor>                         global_layer_kv_tensors_;
+    std::vector<torch::Tensor>                         global_layer_kv_scale_tensors_;
 
-    std::vector<std::pair<int, int>> global_layer_to_local_;
-
-    std::vector<torch::Tensor> global_layer_kv_tensors_;
-    std::vector<torch::Tensor> global_layer_kv_scale_tensors_;
+    mutable std::recursive_mutex mutex_;
 };
 
 using BlockPoolPtr = std::shared_ptr<BlockPool>;
