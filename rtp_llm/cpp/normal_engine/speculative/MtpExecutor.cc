@@ -164,15 +164,17 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                           param
  * @param streams
  * @return absl::Status
  */
-absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& streams) {
-    StreamGroups                   stream_groups(streams);
-    RtpLLMExecutorMetricsCollector executor_collector;
-    RtpLLMTokenPSMetricsCollector  tps_collector;
-    GptModelInputs                 model_input;
-    GptModelOutputs                model_output;
-    SamplerOutput                  sampler_output;
-    GptModelOutputs                draft_model_output;
-    SamplerOutput                  draft_sampler_output;
+absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& streams,
+                                      MtpMetricsCollector&                metrics_collector) {
+    RtpLLMExecutorMetricsCollector& executor_collector = metrics_collector.executor_collector;
+    RtpLLMTokenPSMetricsCollector&  tps_collector      = metrics_collector.tps_collector;
+
+    StreamGroups    stream_groups(streams);
+    GptModelInputs  model_input;
+    GptModelOutputs model_output;
+    SamplerOutput   sampler_output;
+    GptModelOutputs draft_model_output;
+    SamplerOutput   draft_sampler_output;
 
     // placeholder for some tensors
     torch::Tensor draft_probs;
@@ -194,6 +196,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         }
         executor_collector.tp_sync_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
+
+    metrics_collector.not_skip = true;
 
     // TODO(yinzhi): consider beam search & lora
 
@@ -232,14 +236,26 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     // draft model sample
     draftModelSample(draft_model_output.logits, draft_sampler_output, draft_probs, draft_token_ids);
 
+    // collect metrics
+    if (metrics_reporter_) {
+        executor_collector.context_batch_size = stream_groups.totalContextBatchSize();
+        executor_collector.execute_token_size = stream_groups.modelExecuteTokenSize();
+        executor_collector.max_seq_len        = stream_groups.maxSeqLen();
+
+        executor_collector.context_batch_size_when_has_context = executor_collector.context_batch_size;
+        executor_collector.execute_token_size_when_has_context = executor_collector.execute_token_size;
+        executor_collector.max_seq_len_when_has_context        = executor_collector.max_seq_len;
+
+        tps_collector.context_tps = stream_groups.modelExecuteTokenSize();
+        tps_collector.total_tps   = tps_collector.context_tps;
+    }
+
     // dispatch
     {
-        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        auto    result =
+        auto result =
             batch_stream_processor_->dispatchPrefill(stream_groups,
                                                      {std::move(model_output), std::move(sampler_output)},
                                                      {std::move(draft_model_output), std::move(draft_sampler_output)});
-        executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
         RTP_LLM_LOG_DEBUG("dispatch done");
         return result;
     }
@@ -300,13 +316,16 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
 +-------------------------------+
 */
 
-absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams) {
-    StreamGroups                   stream_groups(streams);
-    RtpLLMExecutorMetricsCollector executor_collector;
-    RtpLLMTokenPSMetricsCollector  tps_collector;
-    GptModelInputs                 model_input;
-    GptModelOutputs                model_output;
-    SamplerOutput                  sampler_output;
+absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams,
+                                     MtpMetricsCollector&                metrics_collector) {
+    RtpLLMExecutorMetricsCollector&          executor_collector  = metrics_collector.executor_collector;
+    RtpLLMTokenPSMetricsCollector&           tps_collector       = metrics_collector.tps_collector;
+    RtpLLMSpeculativeEngineMetricsCollector& sp_engine_collector = metrics_collector.sp_engine_collector;
+
+    StreamGroups    stream_groups(streams);
+    GptModelInputs  model_input;
+    GptModelOutputs model_output;
+    SamplerOutput   sampler_output;
 
     GptModelOutputs                       draft_model_output;
     SamplerOutput                         draft_sampler_output;
@@ -319,23 +338,28 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     torch::Tensor hidden_states_d_t;
     torch::Tensor draft_probs_t;
     torch::Tensor draft_token_ids_t;
+    size_t        total_accept_len = 0;
 
     const size_t batch_size = streams.size();
     {
         int64_t start_time_us      = autil::TimeUtility::currentTimeInMicroSeconds();
         auto    model_input_status = batch_stream_processor_->gatherDecodeModelInput(stream_groups);
         RETURN_IF_STATUS_OR_ERROR(model_input_status);
-        model_input                              = std::move(model_input_status.value());
-        executor_collector.gather_model_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        model_input = std::move(model_input_status.value());
+        executor_collector.gather_model_input_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
     if (isTpRank0()) {
-        model_input.skip_run = streams.empty() && !enable_ffn_disaggregate_;
+        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        model_input.skip_run  = streams.empty() && !enable_ffn_disaggregate_;
         if (model_input.skip_run) {
             tpSyncModelInputs(model_input, device_);
             return absl::OkStatus();
         }
+        executor_collector.tp_sync_input_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
+
+    metrics_collector.not_skip = true;
 
     // TODO(yinzhi): consider beam search & lora
 
@@ -385,7 +409,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
         // update model_input
         updateDecodePostDraftModelInput(
-            model_input, model_output, speculative_sampler_output, batch_size, hidden_states_d_t);
+            model_input, model_output, speculative_sampler_output, batch_size, hidden_states_d_t, total_accept_len);
     }
 
     tpSyncModelInputs(model_input, device_);
@@ -400,9 +424,28 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     // draft model sample
     draftModelSample(draft_prefill_model_output.logits, draft_prefill_sampler_output, draft_probs_t, draft_token_ids_t);
 
+    // collect metrics
+    if (metrics_reporter_) {
+        executor_collector.generate_batch_size = stream_groups.totalContextBatchSize();
+        executor_collector.execute_token_size += total_accept_len;
+        executor_collector.max_seq_len = stream_groups.maxSeqLen();
+
+        executor_collector.context_batch_size_when_has_context = executor_collector.context_batch_size;
+        executor_collector.execute_token_size_when_has_context = executor_collector.execute_token_size;
+        executor_collector.max_seq_len_when_has_context        = executor_collector.max_seq_len;
+
+        tps_collector.generate_tps = total_accept_len;
+        tps_collector.total_tps += total_accept_len;
+
+        sp_engine_collector.total_accepted_token_num = total_accept_len;
+        sp_engine_collector.total_stream_num         = stream_groups.size();
+        sp_engine_collector.total_propose_token_num  = stream_groups.size() * (propose_step_ + 1);
+    }
+
     // dispatch
     auto result = batch_stream_processor_->dispatchDecode(
         stream_groups, speculative_sampler_output, {std::move(model_output), std::move(draft_prefill_sampler_output)});
+
     return result;
 }
 
@@ -437,9 +480,10 @@ void MtpExecutor::updateDecodePostDraftModelInput(GptModelInputs&               
                                                   GptModelOutputs&                       model_output,
                                                   speculative::SpeculativeSamplerOutput& speculative_sampler_output,
                                                   size_t                                 batch_size,
-                                                  torch::Tensor&                         hidden_states_d_t) {
-    auto&  accept_lens      = speculative_sampler_output.accept_len;
-    size_t total_accept_len = std::accumulate(accept_lens.begin(), accept_lens.end(), 0);
+                                                  torch::Tensor&                         hidden_states_d_t,
+                                                  size_t&                                total_accept_len) {
+    auto& accept_lens = speculative_sampler_output.accept_len;
+    total_accept_len  = std::accumulate(accept_lens.begin(), accept_lens.end(), 0);
 
     auto last_hidden_states = device_->allocateBuffer({model_output.all_hidden_states->type(),
                                                        {total_accept_len, model_output.all_hidden_states->shape()[1]},
@@ -502,9 +546,12 @@ void MtpExecutor::updateOneStepDraftSamplerOutput(const StreamGroups& stream_gro
 }
 
 absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams) {
+    MtpMetricsCollector metrics_collector;
+
     std::list<GenerateStreamPtr> prefill_streams;
     std::list<GenerateStreamPtr> decode_streams;
 
+    // prepare streams
     for (auto& stream : streams) {
         if (stream->isSpDecodeStream()) {
             decode_streams.push_back(stream);
@@ -523,8 +570,22 @@ absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams) {
         }
     }
 
-    THROW_IF_STATUS_ERROR(prefillStep(prefill_streams));
-    THROW_IF_STATUS_ERROR(decodeStep(decode_streams));
+    // step forward
+    int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+    THROW_IF_STATUS_ERROR(prefillStep(prefill_streams, metrics_collector));
+    THROW_IF_STATUS_ERROR(decodeStep(decode_streams, metrics_collector));
+    metrics_collector.sp_engine_collector.step_latency_us =
+        autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+
+    // report metrics
+    if (isTpRank0() && metrics_reporter_ && metrics_collector.not_skip) {
+        metrics_reporter_->report<RtpLLMExecutorMetrics, RtpLLMExecutorMetricsCollector>(
+            nullptr, &metrics_collector.executor_collector);
+        metrics_reporter_->report<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(
+            nullptr, &metrics_collector.tps_collector);
+        metrics_reporter_->report<RtpLLMSpeculativeEngineMetrics, RtpLLMSpeculativeEngineMetricsCollector>(
+            nullptr, &metrics_collector.sp_engine_collector);
+    }
 
     return absl::OkStatus();
 }

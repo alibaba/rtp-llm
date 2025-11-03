@@ -14,6 +14,14 @@
 
 namespace rtp_llm {
 
+struct MtpMetricsCollector {
+    RtpLLMExecutorMetricsCollector          executor_collector;
+    RtpLLMTokenPSMetricsCollector           tps_collector;
+    RtpLLMSpeculativeEngineMetricsCollector sp_engine_collector;
+
+    bool not_skip = false;
+};
+
 class MtpExecutor: public Executor {
 public:
     explicit MtpExecutor(const EngineInitParams&                           params,
@@ -44,9 +52,9 @@ protected:
 
     void maybePrintModelInput(const GptModelInputs& model_input, const std::string& prefix) const;
 
-    absl::Status prefillStep(const std::list<GenerateStreamPtr>& streams);
+    absl::Status prefillStep(const std::list<GenerateStreamPtr>& streams, MtpMetricsCollector& metrics_collector);
 
-    absl::Status decodeStep(const std::list<GenerateStreamPtr>& streams);
+    absl::Status decodeStep(const std::list<GenerateStreamPtr>& streams, MtpMetricsCollector& metrics_collector);
 
     void draftModelSample(const BufferPtr& logits,
                           SamplerOutput&   sampler_output,
@@ -63,7 +71,8 @@ protected:
                                          GptModelOutputs&                       model_output,
                                          speculative::SpeculativeSamplerOutput& speculative_sampler_output,
                                          size_t                                 batch_size,
-                                         torch::Tensor&                         hidden_states_d_t);
+                                         torch::Tensor&                         hidden_states_d_t,
+                                         size_t&                                total_accept_len);
 
     void updateOneStepDraftSamplerOutput(const StreamGroups& stream_groups,
                                          SamplerOutput&      draft_sampler_output,
