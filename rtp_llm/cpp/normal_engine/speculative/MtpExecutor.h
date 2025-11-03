@@ -61,23 +61,6 @@ protected:
                           torch::Tensor&   draft_probs,
                           torch::Tensor&   draft_token_ids);
 
-    void prepareOneStepSpecDecodeModelInput(const StreamGroups& stream_groups, GptModelInputs& model_input);
-
-    void updatePrefillPostDraftModelInput(GptModelInputs&  model_input,
-                                          GptModelOutputs& model_output,
-                                          SamplerOutput&   sampler_output);
-
-    void updateDecodePostDraftModelInput(GptModelInputs&                        model_input,
-                                         GptModelOutputs&                       model_output,
-                                         speculative::SpeculativeSamplerOutput& speculative_sampler_output,
-                                         size_t                                 batch_size,
-                                         torch::Tensor&                         hidden_states_d_t,
-                                         size_t&                                total_accept_len);
-
-    void updateOneStepDraftSamplerOutput(const StreamGroups& stream_groups,
-                                         SamplerOutput&      draft_sampler_output,
-                                         torch::Tensor&      draft_token_probs_d_t);
-
     std::tuple<torch::Tensor, torch::Tensor> fastTopK(const torch::Tensor& probs, int top_k, int dim);
 
 private:
