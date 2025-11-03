@@ -5,18 +5,23 @@
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
 #include "rtp_llm/cpp/cache/connector/memory/KVCacheMemoryConnector.h"
+#include "rtp_llm/cpp/cache/connector/remote_connector/RemoteConnector.h"
 
 namespace rtp_llm {
 
 KVCacheConnectorCoordinator::KVCacheConnectorCoordinator(const CacheConfig&                       cache_config,
                                                          const KVCacheConfig&                     kv_cache_config,
                                                          const RuntimeConfig&                     runtime_config,
+                                                         const ParallelismConfig&                 parallelism_config,
+                                                         const SpeculativeExecutionConfig&        sp_config,
                                                          const std::shared_ptr<KVCacheAllocator>& allocator,
                                                          rtp_llm::DeviceBase*                     device,
                                                          const kmonitor::MetricsReporterPtr&      metrics_reporter):
     cache_config_(cache_config),
     kv_cache_config_(kv_cache_config),
     runtime_config_(runtime_config),
+    parallelism_config_(parallelism_config),
+    sp_config_(sp_config),
     allocator_(allocator),
     device_(device),
     metrics_reporter_(metrics_reporter) {}
@@ -49,15 +54,12 @@ bool KVCacheConnectorCoordinator::init() {
         auto memory_connector = initMemoryConnector();
         connectors_.emplace_back(memory_connector);
     }
+    if (kv_cache_config_.reuse_cache && kv_cache_config_.enable_remote_cache) {
+        auto remote_connector = initRemoteConnector();
+        connectors_.emplace_back(remote_connector);
+    }
     initUpdateThread();
     return true;
-}
-
-std::shared_ptr<KVCacheConnector> KVCacheConnectorCoordinator::initMemoryConnector() {
-    auto memory_connector = std::make_shared<KVCacheMemoryConnector>(
-        cache_config_, kv_cache_config_, allocator_, device_, runtime_config_.worker_grpc_addrs, metrics_reporter_);
-    RTP_LLM_CHECK_WITH_INFO(memory_connector->init(), "memory connector init failed");
-    return memory_connector;
 }
 
 void KVCacheConnectorCoordinator::initUpdateThread() {
@@ -82,7 +84,7 @@ KVCacheConnectorCoordinator::asyncRead(const std::shared_ptr<KVCacheConnectorRea
         return nullptr;
     }
 
-    auto resource = allocator_->incrKVCacheRef(kvcache_resource, kvcache_resource.cacheKeys());
+    auto resource = allocator_->incrKVCacheRef(kvcache_resource, kvcache_resource.cacheKeys(), true);
     if (!resource) {
         RTP_LLM_LOG_WARNING("async read failed, incr kvcache ref failed, resource: [%s]",
                             kvcache_resource.debugString().c_str());
@@ -123,7 +125,7 @@ KVCacheConnectorCoordinator::asyncWrite(const std::shared_ptr<KVCacheConnectorRe
         return nullptr;
     }
 
-    auto resource = allocator_->incrKVCacheRef(kvcache_resource, kvcache_resource.cacheKeys());
+    auto resource = allocator_->incrKVCacheRef(kvcache_resource, kvcache_resource.cacheKeys(), true);
     if (!resource) {
         RTP_LLM_LOG_WARNING("async write failed, incr kvcache ref failed, resource: [%s]",
                             kvcache_resource.debugString().c_str());
@@ -149,6 +151,34 @@ KVCacheConnectorCoordinator::asyncWrite(const std::shared_ptr<KVCacheConnectorRe
 std::shared_ptr<AsyncContext> KVCacheConnectorCoordinator::asyncWriteByLayer(
     int layer_id, const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context) {
     RTP_LLM_FAIL("async write by layer is not implemented");
+}
+
+std::shared_ptr<KVCacheConnector> KVCacheConnectorCoordinator::initMemoryConnector() {
+    auto memory_connector = std::make_shared<KVCacheMemoryConnector>(
+        cache_config_, kv_cache_config_, allocator_, device_, runtime_config_.worker_grpc_addrs, metrics_reporter_);
+    RTP_LLM_CHECK_WITH_INFO(memory_connector->init(), "memory connector init failed");
+    return memory_connector;
+}
+
+std::shared_ptr<KVCacheConnector> KVCacheConnectorCoordinator::initRemoteConnector() {
+    // TODO : get lora info map
+    // TODO : support different group mode
+    auto remote_connector = std::make_shared<RemoteConnector>(cache_config_,
+                                                              kv_cache_config_,
+                                                              runtime_config_,
+                                                              parallelism_config_,
+                                                              sp_config_,
+                                                              device_,
+                                                              allocator_->getBlockPool()->getBaseAddress(),
+                                                              allocator_->getBlockPool()->getTotalSizeBytes(),
+                                                              allocator_,
+                                                              RemoteConnectorGroupMode::RCGM_ONLY_FULL_LAYER,
+                                                              std::vector<int32_t>({0}),
+                                                              std::vector<int32_t>({}),
+                                                              metrics_reporter_);
+
+    RTP_LLM_CHECK_WITH_INFO(remote_connector->init(), "remote connector init failed");
+    return remote_connector;
 }
 
 void KVCacheConnectorCoordinator::updateOnce() {
@@ -249,6 +279,13 @@ bool KVCacheConnectorCoordinator::executeFunction(const FunctionRequestPB& reque
             return false;
         }
         return memory_connector->copyCache(request.mem_request(), *(response.mutable_mem_response()));
+    } else if (request.has_remote_request()) {
+        auto remote_connector = std::dynamic_pointer_cast<RemoteConnector>(connectors_.back());
+        if (!remote_connector) {
+            RTP_LLM_LOG_WARNING("execute function failed, remote connector is null, request: [%s]",
+                                request.DebugString().c_str());
+        }
+        return remote_connector->copyCache(request.remote_request(), *(response.mutable_remote_response()));
     } else {
         RTP_LLM_LOG_WARNING("execute function failed, request is invalid, request: [%s]",
                             request.DebugString().c_str());

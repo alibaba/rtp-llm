@@ -9,7 +9,6 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
-
 class BatchKVCacheResource {
 public:
     BatchKVCacheResource() {}

@@ -303,8 +303,13 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
 
     // target model prefill
     {
+        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         maybePrintModelInput(model_input, "prefill target model");
         model_output = std::move(model_->forward(model_input));
+        auto latency = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        if (latency > 15000) {
+            RTP_LLM_LOG_INFO("yemu_debug MtpExecutor::prefillStep forward [%ld]", latency);
+        }
     }
 
     // eplb
@@ -316,6 +321,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
 
     // target model sample
     if (isTpRank0()) {
+        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         if (model_input.is_fake_stream) {
             model_input.last_hidden_states = model_output.all_hidden_states;
         } else {
@@ -324,28 +330,47 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
             sampler_output = std::move(sampler_->forward(sampler_input));
             batch_stream_processor_->updatePrefillPostDraftModelInput(model_input, model_output, sampler_output);
         }
+        auto latency = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        if (latency > 15000) {
+            RTP_LLM_LOG_INFO("yemu_debug MtpExecutor::prefillStep isTpRank0 forward [%ld]", latency);
+        }
     }
 
     // draft model prefill
     {
+        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         tpSyncModelInputs(model_input, device_);
         maybePrintModelInput(model_input, "prefill post draft model");
         const auto& mtp_cache_cfg         = cache_manager_->getMTPModuleCacheConfig(0);
         model_input.kv_block_stride_bytes = mtp_cache_cfg.kv_block_stride_bytes;
         draft_model_output                = std::move(draft_model_->forward(model_input));
+        auto latency                      = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        if (latency > 15000) {
+            RTP_LLM_LOG_INFO("yemu_debug MtpExecutor::prefillStep draft_model_ forward [%ld]", latency);
+        }
     }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
+        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         device_->syncAndCheck();
         model_->releaseBuffers();
         draft_model_->releaseBuffers();
+        auto latency = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        if (latency > 15000) {
+            RTP_LLM_LOG_INFO("yemu_debug MtpExecutor::prefillStep syncAndCheck1 [%ld]", latency);
+        }
         return absl::OkStatus();
     }
 
     // draft model sample
+    int64_t start_time_us          = autil::TimeUtility::currentTimeInMicroSeconds();
     auto fast_topk_sampler_output  = fast_topk_sampler_->forward(Buffer2torchTensor(*draft_model_output.logits, false));
     draft_sampler_output.all_probs = torchTensor2Buffer(fast_topk_sampler_output.all_probs);
     draft_sampler_output.token_ids = torchTensor2Buffer(fast_topk_sampler_output.token_ids);
+    auto latency                   = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+    if (latency > 15000) {
+        RTP_LLM_LOG_INFO("yemu_debug MtpExecutor::prefillStep fast_topk_sampler_->forward [%ld]", latency);
+    }
 
     // collect metrics
     if (metrics_reporter_) {
@@ -363,7 +388,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
 
     // dispatch
     {
-        auto result =
+        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        auto    result =
             batch_stream_processor_->dispatchPrefill(stream_groups,
                                                      {std::move(model_output), std::move(sampler_output)},
                                                      {std::move(draft_model_output), std::move(draft_sampler_output)});
@@ -371,6 +397,10 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
 
         model_->releaseBuffers();
         draft_model_->releaseBuffers();
+        auto latency = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        if (latency > 15000) {
+            RTP_LLM_LOG_INFO("yemu_debug MtpExecutor::prefillStep dispatch [%ld]", latency);
+        }
 
         return result;
     }
@@ -464,6 +494,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     size_t total_accept_len = 0;
 
     // clone tensors from grpc
+    int64_t start_time_us1 = autil::TimeUtility::currentTimeInMicroSeconds();
     for (auto& stream : streams) {
         auto        sp_output_buffer = stream->getSPOutputBuffer();
         auto const& tensors_holder   = sp_output_buffer->tensors_holder;
@@ -474,6 +505,10 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             sp_output_buffer->hidden_states =
                 device_->clone({*torchTensor2Buffer(propose_hidden), AllocationType::DEVICE});
         }
+    }
+    auto latency = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us1;
+    if (latency > 15000) {
+        RTP_LLM_LOG_INFO("yemu_debug MtpExecutor::decodeStep dispatch [%ld]", latency);
     }
 
     size_t batch_size = streams.size();
@@ -500,16 +535,25 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     // TODO(yinzhi): consider beam search & lora
 
     if (isTpRank0()) {
+        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         if (propose_step_ == 1) {
             batch_stream_processor_->prepareOneStepSpecDecodeModelInput(stream_groups, model_input);
         } else {
             batch_stream_processor_->prepareDecodeDraftModelInput(stream_groups, model_input);
         }
+        auto latency = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        if (latency > 15000) {
+            RTP_LLM_LOG_INFO("yemu_debug MtpExecutor::decodeStep prepare input [%ld]", latency);
+        }
     }
-
+    int64_t start_time_us2 = autil::TimeUtility::currentTimeInMicroSeconds();
     tpSyncModelInputs(model_input, device_);
     if (model_input.skip_run) {
         return absl::OkStatus();
+    }
+    latency = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us2;
+    if (latency > 15000) {
+        RTP_LLM_LOG_INFO("yemu_debug MtpExecutor::decodeStep tpSyncModelInputs [%ld]", latency);
     }
 
     // release hold buffers before draft model forward
@@ -517,7 +561,12 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     model_->releaseBuffers();
 
     if (propose_step_ > 1) {
+        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         draftModelDecode(model_input, stream_groups, draft_probs_list, draft_token_ids_t);
+        latency = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        if (latency > 15000) {
+            RTP_LLM_LOG_INFO("yemu_debug MtpExecutor::decodeStep draftModelDecode [%ld]", latency);
+        }
     }
 
     maybePrintModelInput(model_input, "decode target model");
@@ -525,6 +574,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     // trick: update draft sampler output after spec decode to avoid kernel launch overhead
     if (isTpRank0()) {
+        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         if (!model_input.is_fake_stream) {
             if (propose_step_ == 1) {
                 batch_stream_processor_->updateOneStepDraftSamplerOutput(
@@ -538,6 +588,10 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                                                                            draft_probs_list);
             }
         }
+        latency = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        if (latency > 15000) {
+            RTP_LLM_LOG_INFO("yemu_debug MtpExecutor::decodeStep DraftSamplerOutput [%ld]", latency);
+        }
     }
 
     // eplb
@@ -548,6 +602,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     }
 
     if (isTpRank0()) {
+        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         if (model_input.is_fake_stream) {
             BufferPtr accept_tokens = device_->allocateBuffer({DataType::TYPE_INT32, {1, 1}, AllocationType::HOST});
             *accept_tokens->dataWithOffset<int32_t>(0) = 0;
@@ -568,28 +623,51 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         // NOTE: here will have cuda device sync before update model input
         batch_stream_processor_->updateDecodePostDraftModelInput(
             model_input, model_output, speculative_sampler_output, batch_size, hidden_states_d_t, total_accept_len);
+        latency = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        if (latency > 15000) {
+            RTP_LLM_LOG_INFO("yemu_debug MtpExecutor::decodeStep sampler_forward  [%ld]", latency);
+        }
     }
 
+    int64_t start_time_us3 = autil::TimeUtility::currentTimeInMicroSeconds();
     tpSyncModelInputs(model_input, device_);
+    latency = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us3;
+    if (latency > 15000) {
+        RTP_LLM_LOG_INFO("yemu_debug MtpExecutor::decodeStep tpSyncModelInputs  [%ld]", latency);
+    }
 
     maybePrintModelInput(model_input, "decode post draft model");
     const auto& mtp_cache_cfg         = cache_manager_->getMTPModuleCacheConfig(0);
     model_input.kv_block_stride_bytes = mtp_cache_cfg.kv_block_stride_bytes;
-
-    draft_prefill_model_output = std::move(draft_model_->forward(model_input));
+    int64_t start_time_us4            = autil::TimeUtility::currentTimeInMicroSeconds();
+    draft_prefill_model_output        = std::move(draft_model_->forward(model_input));
+    latency                           = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us4;
+    if (latency > 15000) {
+        RTP_LLM_LOG_INFO("yemu_debug MtpExecutor::decodeStep draft_model_->forward  [%ld]", latency);
+    }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
+        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         device_->syncAndCheck();
         draft_model_->releaseBuffers();
         model_->releaseBuffers();
+        auto latency = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        if (latency > 15000) {
+            RTP_LLM_LOG_INFO("yemu_debug MtpExecutor::decodeStep device_->syncAndCheck  [%ld]", latency);
+        }
         return absl::OkStatus();
     }
 
     // draft model sample
-    auto fast_topk_sampler_output =
+    int64_t start_time_us5 = autil::TimeUtility::currentTimeInMicroSeconds();
+    auto    fast_topk_sampler_output =
         fast_topk_sampler_->forward(Buffer2torchTensor(*draft_prefill_model_output.logits, false));
     draft_prefill_sampler_output.all_probs = torchTensor2Buffer(fast_topk_sampler_output.all_probs);
     draft_prefill_sampler_output.token_ids = torchTensor2Buffer(fast_topk_sampler_output.token_ids);
+    latency                                = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us5;
+    if (latency > 15000) {
+        RTP_LLM_LOG_INFO("yemu_debug MtpExecutor::decodeStep fast_topk_sampler_->forward [%ld]", latency);
+    }
 
     // collect metrics
     if (metrics_reporter_) {
@@ -610,11 +688,15 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     }
 
     // dispatch
-    auto result = batch_stream_processor_->dispatchDecode(
+    int64_t start_time_us6 = autil::TimeUtility::currentTimeInMicroSeconds();
+    auto    result         = batch_stream_processor_->dispatchDecode(
         stream_groups,
         speculative_sampler_output,
         {std::move(draft_prefill_model_output), std::move(draft_prefill_sampler_output)});
-
+    latency = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us6;
+    if (latency > 15000) {
+        RTP_LLM_LOG_INFO("yemu_debug MtpExecutor::decodeStep dispatch [%ld]", latency);
+    }
     // clean holder tensors from grpc
     for (auto& stream : streams) {
         stream->getSPOutputBuffer()->tensors_holder.clear();

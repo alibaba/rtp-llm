@@ -90,10 +90,10 @@ public:
     }
 
     bool reuseCache() const;
-    bool enable3FS() const;
-    bool enableDeviceCache() const;
     bool enableMemoryCache() const;
-
+    bool enableRemoteCache() const;
+    bool enableDeviceCache() const;
+    bool syncWaitWrite() const;
     bool asyncLoadCache();
     bool loadCacheDone();
     bool asyncStoreCache();

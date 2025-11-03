@@ -84,7 +84,8 @@ public:
                                         status.error_message().c_str(),
                                         ctx->server_addr.c_str());
                     all_request_success = false;
-                    cancelAllRequests();
+                    // yemu : TODO
+                    // cancelAllRequests();
                 }
             }
         }
