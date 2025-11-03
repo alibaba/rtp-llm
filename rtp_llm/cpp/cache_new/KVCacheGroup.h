@@ -47,6 +47,7 @@ public:
     size_t freeBlocksNum() const;
     bool   ensureFreeBlocks(int need_blocks);
     int    seqSizePerBlock() const;
+    int    group_id() const;
 
 protected:
     LayerIdsType    layer_ids_;

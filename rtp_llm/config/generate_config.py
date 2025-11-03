@@ -134,6 +134,11 @@ class GenerateConfig(BaseModel):
     # 是否启用 memory block cache
     enable_memory_block_cache: bool = True
 
+    enable_remote_cache: bool = True
+
+    # close device cache manually, only use memory_cache or remote_cache(only for debug and test)
+    enable_device_cache: bool = True
+
     def gen_hash_value(self):
         cp = copy.copy(self)
         cp.max_new_tokens = 0

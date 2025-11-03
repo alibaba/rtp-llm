@@ -4,6 +4,7 @@
 #include <set>
 #include <vector>
 #include <unordered_map>
+#include <mutex>
 
 #include <torch/torch.h>
 
@@ -82,6 +83,7 @@ private:
     int64_t            mr_cost_time_ms_ = 0;
 
     std::unique_ptr<MemoryLayoutStrategy> layout_strategy_;
+    mutable std::recursive_mutex          mutex_;
 };
 
 using BlockPoolPtr = std::shared_ptr<BlockPool>;
