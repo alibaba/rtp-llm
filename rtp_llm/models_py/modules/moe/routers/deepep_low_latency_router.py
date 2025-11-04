@@ -50,6 +50,7 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         self._return_recv_hook = return_recv_hook
         self._opt_level = int(os.environ.get("ACCL_LOW_LATENCY_OPTIMIZE", 1))
         self._handle: Optional[Tuple[Any, ...]] = None
+        self._use_GB_deepep = "GB200" in torch.cuda.get_device_name(0)
 
     @property
     def handle(self) -> Optional[Tuple[Any, ...]]:
@@ -114,17 +115,21 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         tp_expert_ids = torch.narrow(topk_ids, 0, slice_begin, slice_size)
         tp_expert_scales = torch.narrow(topk_weights, 0, slice_begin, slice_size)
 
+        dispatch_args = {
+            "x": tp_expert_input,
+            "topk_idx": tp_expert_ids,
+            "num_max_dispatch_tokens_per_rank": self._num_max_dispatch_tokens_per_rank,
+            "num_experts": num_experts,
+            "use_fp8": self._use_fp8_dispatch,
+            "async_finish": self._async_finish,
+            "return_recv_hook": self._return_recv_hook,
+        }
+
+        if not self._use_GB_deepep:
+            dispatch_args["pertoken_quant"] = quant_config.is_per_act_token
+
         expert_x, expert_num_tokens, self._handle, _, _ = (
-            self._buffer.low_latency_dispatch(
-                tp_expert_input,
-                tp_expert_ids,
-                self._num_max_dispatch_tokens_per_rank,
-                num_experts,
-                use_fp8=self._use_fp8_dispatch,
-                async_finish=self._async_finish,
-                return_recv_hook=self._return_recv_hook,
-                pertoken_quant=quant_config.is_per_act_token,
-            )
+            self._buffer.low_latency_dispatch(**dispatch_args)
         )
 
         if quant_config.is_per_act_token:
@@ -165,16 +170,19 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
 
         # combine
         topk_ids = topk_ids.to(torch.int64)
-        combined_x, _, _ = self._buffer.low_latency_combine(
-            fused_expert_output,
-            topk_ids,
-            topk_weights,
-            self._handle,
-            zero_copy=self._zero_copy,
-            async_finish=self._async_finish,
-            return_recv_hook=self._return_recv_hook,
-            opt_level=self._opt_level,
-        )
+        combine_args = {
+            "x": fused_expert_output,
+            "topk_idx": topk_ids,
+            "topk_weights": topk_weights,
+            "handle": self._handle,
+            "zero_copy": self._zero_copy,
+            "async_finish": self._async_finish,
+            "return_recv_hook": self._return_recv_hook,
+        }
+        if not self._use_GB_deepep:
+            combine_args["opt_level"] = self._opt_level
+
+        combined_x, _, _ = self._buffer.low_latency_combine(**combine_args)
         # reset handle
         self._handle = None
 
