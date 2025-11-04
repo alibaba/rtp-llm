@@ -3,10 +3,14 @@ from concurrent import futures
 import grpc
 
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
+    CacheStatusPB,
+    CacheVersionPB,
     MMPreprocessConfigPB,
     MultimodalInputsPB,
     MultimodalOutputPB,
     MultimodalOutputsPB,
+    StatusVersionPB,
+    WorkerStatusPB,
 )
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
     MultimodalRpcServiceServicer,
@@ -44,6 +48,18 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
     def RemoteMultimodalEmbedding(self, multimodal_inputs: MultimodalInputsPB, context):
         res: MMEmbeddingRes = self.engine.mm_embedding_rpc(multimodal_inputs)
         return trans_output(res)
+
+    def GetWorkerStatus(self, request: StatusVersionPB, context):
+        worker_status = WorkerStatusPB()
+        worker_status.role = "VIT"
+        worker_status.status_version = 1
+        worker_status.alive = True
+        return worker_status
+        # return self.engine.get_worker_status(request.latest_finished_version)
+
+    def GetCacheStatus(self, request: CacheVersionPB, context):
+        return CacheStatusPB()
+        # return self.engine.get_cache_status(request.latest_cache_version)
 
     def stop(self):
         self.engine.stop()
