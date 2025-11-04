@@ -98,6 +98,7 @@ build:sm10x --config=cuda12_9
 build:sm10x --action_env  TF_CUDA_COMPUTE_CAPABILITIES="10.0"
 
 build:cuda12_9_arm --config=cuda12_9
+build:cuda12_9_arm --config=sm10x
 build:cuda12_9_arm --copt=-Wno-tautological-compare
 build:cuda12_9_arm --copt=-Wno-array-bounds
 build:cuda12_9_arm --copt=-Wno-unused-result
