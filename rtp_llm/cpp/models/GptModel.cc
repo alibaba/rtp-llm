@@ -653,25 +653,32 @@ GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
         printBufferData(*mm_feature_locs, "mm_feature_locs");
     if (inputs.multimodal_features) {
         std::vector<rtp_llm::BufferPtr> mm_features;
-        bool features_need_quantize = false;
+        bool                            features_need_quantize = false;
         if (inputs.multimodal_features.value()[0]->type() != hidden->type() && hidden->isQBuffer()) {
-            features_need_quantize = true;
+            features_need_quantize                 = true;
             ConstBufferPtr static_scale_reciprocal = nullptr;
             if (description_.act_qscheme == QScheme::Qint8PerTensor && weights_.pre_decoder_layernorm) {
-                auto norm_weight = weights_.pre_decoder_layernorm;
+                auto norm_weight        = weights_.pre_decoder_layernorm;
                 static_scale_reciprocal = norm_weight->static_scale_reciprocal;
             }
             for (auto& mm_feature : inputs.multimodal_features.value()) {
-                auto quantized_feature = device_->quantize({*mm_feature, hidden->type(), 1, description_.act_qscheme,
-                               nullopt, nullopt, nullopt,
-                               static_scale_reciprocal ? (OptionalConstBufferRef)*static_scale_reciprocal : nullopt});
+                auto quantized_feature = device_->quantize(
+                    {*mm_feature,
+                     hidden->type(),
+                     1,
+                     description_.act_qscheme,
+                     nullopt,
+                     nullopt,
+                     nullopt,
+                     static_scale_reciprocal ? (OptionalConstBufferRef)*static_scale_reciprocal : nullopt});
                 if (quantized_feature->isQBuffer()) {
-                    quantized_feature->updateTypeAndShape(QBufferDtype2BufferDtype(quantized_feature->type()), quantized_feature->shape());
+                    quantized_feature->updateTypeAndShape(QBufferDtype2BufferDtype(quantized_feature->type()),
+                                                          quantized_feature->shape());
                 }
                 mm_features.emplace_back(quantized_feature);
             }
         }
-        bool hidden_is_qbuffer = false;
+        bool     hidden_is_qbuffer = false;
         DataType hidden_qbuffer_dt = hidden->type();
         if (hidden->isQBuffer()) {
             hidden_is_qbuffer = true;
@@ -679,20 +686,27 @@ GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
         }
 
         hidden = device_->multimodalEmbedding({hidden,
-            features_need_quantize ? (OptionalConstVecBufferPtrRef)mm_features :
-                                     (OptionalConstVecBufferPtrRef)inputs.multimodal_features,
-            mm_feature_locs ? (OptionalConstBufferRef)*mm_feature_locs : nullopt});
+                                               features_need_quantize ?
+                                                   (OptionalConstVecBufferPtrRef)mm_features :
+                                                   (OptionalConstVecBufferPtrRef)inputs.multimodal_features,
+                                               mm_feature_locs ? (OptionalConstBufferRef)*mm_feature_locs : nullopt});
         if (hidden_is_qbuffer) {
             hidden->updateTypeAndShape(hidden_qbuffer_dt, hidden->shape());
         }
     }
 
     if (description_.act_qscheme == QScheme::Qint8PerTensor && !(hidden->isQBuffer())) {
-        auto norm_weight = weights_.pre_decoder_layernorm;
+        auto norm_weight             = weights_.pre_decoder_layernorm;
         auto static_scale_reciprocal = norm_weight->static_scale_reciprocal;
-        hidden = device_->quantize({*hidden, DataType::TYPE_INT8, 1,
-                     description_.act_qscheme, nullopt, nullopt, nullopt,
-                     static_scale_reciprocal ? (OptionalConstBufferRef)*static_scale_reciprocal : nullopt});
+        hidden =
+            device_->quantize({*hidden,
+                               DataType::TYPE_INT8,
+                               1,
+                               description_.act_qscheme,
+                               nullopt,
+                               nullopt,
+                               nullopt,
+                               static_scale_reciprocal ? (OptionalConstBufferRef)*static_scale_reciprocal : nullopt});
     }
 
     device_->checkError();
@@ -1187,8 +1201,8 @@ GptLayerOutputs GptModel::forwardGptLayer(GptLayerInputs                        
     printBufferData(*hidden, "layer_" + to_string(layer_id) + "_ffn_output");
 
     // TODO: maybe move this layernorm to ffn layer
-    auto ffn_act_qscheme = ((layer_id == layer_num_ - 1) || (!layer.post_ffn_layernorm)) ?
-                              QScheme::NoQuantize : description_.act_qscheme;
+    auto ffn_act_qscheme =
+        ((layer_id == layer_num_ - 1) || (!layer.post_ffn_layernorm)) ? QScheme::NoQuantize : description_.act_qscheme;
     auto ffn_layernorm_output = device_->layernorm(
         LayernormParams(hidden,
                         pre_decoder_residual,
@@ -1202,13 +1216,19 @@ GptLayerOutputs GptModel::forwardGptLayer(GptLayerInputs                        
                         description_.post_layernorm,
                         description_.norm_type,
                         ffn_act_qscheme));
-    if (layer.post_ffn_layernorm && ffn_act_qscheme == QScheme::Qint8PerTensor &&
-        !(ffn_layernorm_output.output->isQBuffer())) {
-        auto norm_weight = layer.post_ffn_layernorm;
+    if (layer.post_ffn_layernorm && ffn_act_qscheme == QScheme::Qint8PerTensor
+        && !(ffn_layernorm_output.output->isQBuffer())) {
+        auto norm_weight             = layer.post_ffn_layernorm;
         auto static_scale_reciprocal = norm_weight->static_scale_reciprocal;
-        ffn_layernorm_output.output = device_->quantize({*ffn_layernorm_output.output, DataType::TYPE_INT8, 1,
-                     description_.act_qscheme, nullopt, nullopt, nullopt,
-                     static_scale_reciprocal ? (OptionalConstBufferRef)*static_scale_reciprocal : nullopt});
+        ffn_layernorm_output.output =
+            device_->quantize({*ffn_layernorm_output.output,
+                               DataType::TYPE_INT8,
+                               1,
+                               description_.act_qscheme,
+                               nullopt,
+                               nullopt,
+                               nullopt,
+                               static_scale_reciprocal ? (OptionalConstBufferRef)*static_scale_reciprocal : nullopt});
     }
     device_->checkError();
     hidden = std::move(ffn_layernorm_output.output);
@@ -1323,11 +1343,17 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(const GptLayerInputs&     
             }
         }
         if (description_.act_qscheme == QScheme::Qint8PerTensor && !(pre_layernorm_output.output->isQBuffer())) {
-            auto norm_weight = layer.pre_layernorm;
+            auto norm_weight             = layer.pre_layernorm;
             auto static_scale_reciprocal = norm_weight->static_scale_reciprocal;
-            pre_layernorm_output.output = device_->quantize({*pre_layernorm_output.output, DataType::TYPE_INT8, 1,
-                         description_.act_qscheme, nullopt, nullopt, nullopt,
-                         static_scale_reciprocal ? (OptionalConstBufferRef)*static_scale_reciprocal : nullopt});
+            pre_layernorm_output.output  = device_->quantize(
+                {*pre_layernorm_output.output,
+                  DataType::TYPE_INT8,
+                  1,
+                  description_.act_qscheme,
+                  nullopt,
+                  nullopt,
+                  nullopt,
+                 static_scale_reciprocal ? (OptionalConstBufferRef)*static_scale_reciprocal : nullopt});
         }
         hidden = std::move(pre_layernorm_output.output);
     } else if (last_layer_defered_params.residual || last_layer_defered_params.shared_expert_output) {
@@ -1417,11 +1443,17 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(const GptLayerInputs&     
 
         auto post_layernorm_output = device_->layernorm(post_layernorm_params);
         if (description_.act_qscheme == QScheme::Qint8PerTensor && !(post_layernorm_output.output->isQBuffer())) {
-            auto norm_weight = layer.post_layernorm;
+            auto norm_weight             = layer.post_layernorm;
             auto static_scale_reciprocal = norm_weight->static_scale_reciprocal;
-            post_layernorm_output.output = device_->quantize({*post_layernorm_output.output, DataType::TYPE_INT8, 1,
-                         description_.act_qscheme, nullopt, nullopt, nullopt,
-                         static_scale_reciprocal ? (OptionalConstBufferRef)*static_scale_reciprocal : nullopt});
+            post_layernorm_output.output = device_->quantize(
+                {*post_layernorm_output.output,
+                 DataType::TYPE_INT8,
+                 1,
+                 description_.act_qscheme,
+                 nullopt,
+                 nullopt,
+                 nullopt,
+                 static_scale_reciprocal ? (OptionalConstBufferRef)*static_scale_reciprocal : nullopt});
         }
         device_->checkError();
         hidden      = std::move(post_layernorm_output.output);
@@ -1619,12 +1651,19 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     if (inputs.need_moe_gating) {
         moe_gating.reserve(layer_num_);
     }
+    static int fwd = 0;
+    ++fwd;
     if (int(device_props_.enable_layer_micro_batch) && layer_inputs.micro_batch_inputs.size() > 0) {
         // TODO(zhangjianning.zjn) support return moe_gating in micro batch
         layer_outputs = forwardMicroBatchedLayers(layer_inputs, inputs, eagle3_selected_hidden);
     } else {
         layer_inputs.need_moe_gating = inputs.need_moe_gating;
         for (int32_t i = 0; i < layer_num_; ++i) {
+            if (std::getenv("XBJ_DUMP")) {
+                std::stringstream ss;
+                ss << std::getenv("XBJ_DUMP") << "/fwd" << fwd << "_layer" << i << ".pt";
+                saveTorchDataTofile(Buffer2torchTensor(layer_inputs.hidden, false), ss.str());
+            }
             layer_outputs                     = forwardGptLayer(layer_inputs, i, inputs.lora_model_input);
             layer_inputs.hidden               = layer_outputs.hidden;
             layer_inputs.pre_decoder_residual = layer_outputs.pre_decoder_residual;
@@ -1642,6 +1681,11 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     if (device_->initParams().profile_debug_logging_config.check_nan) {
         (void)device_->checkNAN(*layer_outputs.hidden);
     }
+    if (std::getenv("XBJ_DUMP")) {
+        std::stringstream ss;
+        ss << std::getenv("XBJ_DUMP") << "/fwd" << fwd << "_last_layer" << ".pt";
+        saveTorchDataTofile(Buffer2torchTensor(layer_outputs.hidden, false), ss.str());
+    }
     auto outputs = forwardPostLayers(layer_outputs.hidden,
                                      inputs.input_lengths->shape()[0] != inputs.sequence_lengths->shape()[0],
                                      inputs.need_all_logits,
@@ -1650,6 +1694,11 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
                                      layer_inputs.token_num,
                                      inputs,
                                      merged_eagle3_hidden);
+    // if (std::getenv("XBJ_DUMP")) {
+    //     std::stringstream ss;
+    //     ss << std::getenv("XBJ_DUMP") << "/fwd" << fwd << "_output" << ".pt";
+    //     saveTorchDataTofile(Buffer2torchTensor(layer_outputs.hidden, false), ss.str());
+    // }
 
     // make sure cpu buffers out lives gpu exec
     outputs.captured_values = make_shared<GptLayerInputs>(layer_inputs);

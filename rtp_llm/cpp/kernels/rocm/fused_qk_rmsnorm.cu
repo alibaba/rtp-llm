@@ -1,3 +1,4 @@
+#include <iostream>
 #include "rtp_llm/cpp/cuda/cuda_type_utils.cuh"
 #include "rtp_llm/cpp/cuda/reduce_kernel_utils.cuh"
 #include "rtp_llm/cpp/kernels/rocm/fused_qk_rmsnorm.h"
@@ -30,13 +31,13 @@ __device__ __forceinline__ Tf compute_rmsnorm(Tf val, float s_variance, const Tf
 
 template<typename T, int warpSize = 64>
 __device__ __forceinline__ T warpReduceSum(T val) {
-  for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
-    val = add(val, __shfl_xor(val, offset, warpSize));
-  }
-  return val;
+    for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+        val = add(val, __shfl_xor(val, offset, warpSize));
+    }
+    return val;
 }
 
-}
+}  // namespace functor
 
 template<typename T, bool IS_BIAS>
 __global__ void fusedQkRmsNorm(T* __restrict input,
@@ -93,36 +94,36 @@ __global__ void fusedQkRmsNorm(T* __restrict input,
 
 template<typename T, bool IS_BIAS>
 __global__ void fusedQkRmsNormOpt(T* __restrict input,
-                               const T* __restrict q_gamma,
-                               const T* __restrict q_bias,
-                               const T* __restrict k_gamma,
-                               const T* __restrict k_bias,
-                               const int   q_group_num,
-                               const int   k_group_num,
-                               const float eps,
-                               const int   n,
-                               const int   norm_size,
-                               const float inv_norm_size) {
-    constexpr auto num_elems_T        = num_elems<T>::value;
-    using float_packed_t              = typename packed_as<float, num_elems_T>::type;
-    constexpr int vec_size            = num_elems<T>::value;
+                                  const T* __restrict q_gamma,
+                                  const T* __restrict q_bias,
+                                  const T* __restrict k_gamma,
+                                  const T* __restrict k_bias,
+                                  const int   q_group_num,
+                                  const int   k_group_num,
+                                  const float eps,
+                                  const int   n,
+                                  const int   norm_size,
+                                  const float inv_norm_size) {
+    constexpr auto num_elems_T = num_elems<T>::value;
+    using float_packed_t       = typename packed_as<float, num_elems_T>::type;
+    constexpr int vec_size     = num_elems<T>::value;
 
-    const int elem_idx   = threadIdx.x;
+    const int elem_idx    = threadIdx.x;
     const int sample_idx  = blockIdx.y;
     const int group_idx   = blockIdx.x;
     T*        group_start = input + sample_idx * (n / vec_size) + group_idx * (norm_size / vec_size);
 
-    const T* gamma_ptr = group_idx < q_group_num ? q_gamma : k_gamma;
-    const T* bias_ptr  = group_idx < q_group_num ? q_bias : k_bias;
-    const auto gamma = cuda_cast<float_packed_t>(gamma_ptr[elem_idx]);
+    const T*   gamma_ptr = group_idx < q_group_num ? q_gamma : k_gamma;
+    const T*   bias_ptr  = group_idx < q_group_num ? q_bias : k_bias;
+    const auto gamma     = cuda_cast<float_packed_t>(gamma_ptr[elem_idx]);
 
     float square_sum = 0.0f;
-    T         packed_val = group_start[elem_idx];
-    auto      val        = cuda_cast<float_packed_t>(packed_val);
+    T     packed_val = group_start[elem_idx];
+    auto  val        = cuda_cast<float_packed_t>(packed_val);
     square_sum += cuda_sum<float>(val * val);
 
     float variance = functor::warpReduceSum(square_sum) * inv_norm_size;
-    float scale = rsqrtf(variance + eps);
+    float scale    = rsqrtf(variance + eps);
 
     const float_packed_t val_f = cuda_cast<float_packed_t>(packed_val);
     const T              out =
@@ -132,17 +133,17 @@ __global__ void fusedQkRmsNormOpt(T* __restrict input,
 
 template<typename T>
 void invokeFusedQkRmsNormOpt(T* __restrict input,
-                          const T* __restrict q_gamma,
-                          const T* __restrict q_bias,
-                          const T* __restrict k_gamma,
-                          const T* __restrict k_bias,
-                          const float  layernorm_eps,
-                          const int    q_group_num,
-                          const int    k_group_num,
-                          const int    m,
-                          const int    n,
-                          const int    norm_size,
-                          cudaStream_t stream) {
+                             const T* __restrict q_gamma,
+                             const T* __restrict q_bias,
+                             const T* __restrict k_gamma,
+                             const T* __restrict k_bias,
+                             const float  layernorm_eps,
+                             const int    q_group_num,
+                             const int    k_group_num,
+                             const int    m,
+                             const int    n,
+                             const int    norm_size,
+                             cudaStream_t stream) {
     constexpr size_t vec_size  = 2;
     constexpr size_t warp_size = 64;
 
@@ -160,47 +161,49 @@ void invokeFusedQkRmsNormOpt(T* __restrict input,
     bool is_bias = k_bias != nullptr && q_bias != nullptr;
     if (is_bias) {
         fusedQkRmsNormOpt<Tp, true><<<grid, block, 0, stream>>>(reinterpret_cast<Tp*>(input),
-                                                             reinterpret_cast<const Tp*>(q_gamma),
-                                                             reinterpret_cast<const Tp*>(q_bias),
-                                                             reinterpret_cast<const Tp*>(k_gamma),
-                                                             reinterpret_cast<const Tp*>(k_bias),
-                                                             q_group_num,
-                                                             k_group_num,
-                                                             layernorm_eps,
-                                                             n,
-                                                             norm_size,
-                                                             1.0f / norm_size);
+                                                                reinterpret_cast<const Tp*>(q_gamma),
+                                                                reinterpret_cast<const Tp*>(q_bias),
+                                                                reinterpret_cast<const Tp*>(k_gamma),
+                                                                reinterpret_cast<const Tp*>(k_bias),
+                                                                q_group_num,
+                                                                k_group_num,
+                                                                layernorm_eps,
+                                                                n,
+                                                                norm_size,
+                                                                1.0f / norm_size);
     } else {
         fusedQkRmsNormOpt<Tp, false><<<grid, block, 0, stream>>>(reinterpret_cast<Tp*>(input),
-                                                              reinterpret_cast<const Tp*>(q_gamma),
-                                                              nullptr,
-                                                              reinterpret_cast<const Tp*>(k_gamma),
-                                                              nullptr,
-                                                              q_group_num,
-                                                              k_group_num,
-                                                              layernorm_eps,
-                                                              n,
-                                                              norm_size,
-                                                              1.0f / norm_size);
+                                                                 reinterpret_cast<const Tp*>(q_gamma),
+                                                                 nullptr,
+                                                                 reinterpret_cast<const Tp*>(k_gamma),
+                                                                 nullptr,
+                                                                 q_group_num,
+                                                                 k_group_num,
+                                                                 layernorm_eps,
+                                                                 n,
+                                                                 norm_size,
+                                                                 1.0f / norm_size);
     }
 }
 
 template<typename T>
-void invokeFusedQkRmsNorm(T* __restrict input,
-                          const T* __restrict q_gamma,
-                          const T* __restrict q_bias,
-                          const T* __restrict k_gamma,
-                          const T* __restrict k_bias,
-                          const float  layernorm_eps,
-                          const int    q_group_num,
-                          const int    k_group_num,
-                          const int    m,
-                          const int    n,
-                          const int    norm_size,
-                          cudaStream_t stream) {
+void invokeFusedQkRmsNormAMD(T* __restrict input,
+                             const T* __restrict q_gamma,
+                             const T* __restrict q_bias,
+                             const T* __restrict k_gamma,
+                             const T* __restrict k_bias,
+                             const float  layernorm_eps,
+                             const int    q_group_num,
+                             const int    k_group_num,
+                             const int    m,
+                             const int    n,
+                             const int    norm_size,
+                             cudaStream_t stream) {
+    // std::cout << "XBJ: rocm qk norm " << norm_size << std::endl;
+
     if (norm_size == 128) {
-        invokeFusedQkRmsNormOpt(input, q_gamma, q_bias, k_gamma, k_bias, layernorm_eps,
-                q_group_num, k_group_num, m, n, norm_size, stream);
+        invokeFusedQkRmsNormOpt(
+            input, q_gamma, q_bias, k_gamma, k_bias, layernorm_eps, q_group_num, k_group_num, m, n, norm_size, stream);
         return;
     }
     constexpr size_t vec_size  = 2;
@@ -245,18 +248,18 @@ void invokeFusedQkRmsNorm(T* __restrict input,
 }
 
 #define INSTANTIATE_FUSED_QK_RMSNORM(T)                                                                                \
-    template void invokeFusedQkRmsNorm(T* __restrict input,                                                            \
-                                       const T* __restrict q_gamma,                                                    \
-                                       const T* __restrict q_bias,                                                     \
-                                       const T* __restrict k_gamma,                                                    \
-                                       const T* __restrict k_bias,                                                     \
-                                       const float  layernorm_eps,                                                     \
-                                       const int    q_group_num,                                                       \
-                                       const int    k_group_num,                                                       \
-                                       const int    m,                                                                 \
-                                       const int    n,                                                                 \
-                                       const int    norm_size,                                                         \
-                                       cudaStream_t stream);
+    template void invokeFusedQkRmsNormAMD(T* __restrict input,                                                         \
+                                          const T* __restrict q_gamma,                                                 \
+                                          const T* __restrict q_bias,                                                  \
+                                          const T* __restrict k_gamma,                                                 \
+                                          const T* __restrict k_bias,                                                  \
+                                          const float  layernorm_eps,                                                  \
+                                          const int    q_group_num,                                                    \
+                                          const int    k_group_num,                                                    \
+                                          const int    m,                                                              \
+                                          const int    n,                                                              \
+                                          const int    norm_size,                                                      \
+                                          cudaStream_t stream);
 INSTANTIATE_FUSED_QK_RMSNORM(float);
 INSTANTIATE_FUSED_QK_RMSNORM(half);
 #ifdef ENABLE_BF16

@@ -1,3 +1,4 @@
+#include <iostream>
 #include "rtp_llm/cpp/cuda/cuda_type_utils.cuh"
 #include "rtp_llm/cpp/cuda/reduce_kernel_utils.cuh"
 #include "rtp_llm/cpp/kernels/fused_qk_rmsnorm.h"
@@ -87,6 +88,8 @@ void invokeFusedQkRmsNorm(T* __restrict input,
                           const int    n,
                           const int    norm_size,
                           cudaStream_t stream) {
+    // std::cout << "XBJ: cuda qk norm" << std::endl;
+
     constexpr size_t vec_size  = 2;
     constexpr size_t warp_size = 32;
 

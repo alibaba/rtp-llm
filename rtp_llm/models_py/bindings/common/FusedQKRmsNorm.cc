@@ -33,18 +33,18 @@ void FusedQKRMSNorm(at::Tensor&   input,
     StreamType stream = GET_CURRENT_STREAM();
 
     DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FP16(input.scalar_type(), c_type, [&] {
-        invokeFusedQkRmsNorm(static_cast<c_type*>(input.data_ptr()),
-                             static_cast<c_type*>(q_gamma.data_ptr()),
-                             static_cast<c_type*>(nullptr),
-                             static_cast<c_type*>(k_gamma.data_ptr()),
-                             static_cast<c_type*>(nullptr),
-                             float(layernorm_eps),
-                             q_group_num,
-                             k_group_num,
-                             m,
-                             n,
-                             norm_size,
-                             stream);
+        invokeFusedQkRmsNormAMD(static_cast<c_type*>(input.data_ptr()),
+                                static_cast<c_type*>(q_gamma.data_ptr()),
+                                static_cast<c_type*>(nullptr),
+                                static_cast<c_type*>(k_gamma.data_ptr()),
+                                static_cast<c_type*>(nullptr),
+                                float(layernorm_eps),
+                                q_group_num,
+                                k_group_num,
+                                m,
+                                n,
+                                norm_size,
+                                stream);
         return true;
     });
 }
