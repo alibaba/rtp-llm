@@ -6,7 +6,6 @@ namespace rtp_llm {
 
 
 // LayerFirstLayoutStrategy 
-
 bool LayerFirstLayoutStrategy::init(const BlockPoolConfig& config, 
                                    torch::Tensor& cache_buffer,
                                    void* cache_base_ptr) {
@@ -78,7 +77,6 @@ void* LayerFirstLayoutStrategy::getVCacheAddr(int layer_id, int block_id) const 
 
 
 // KVFirstLayoutStrategy 
-
 bool KVFirstLayoutStrategy::init(const BlockPoolConfig& config, 
                                  torch::Tensor& cache_buffer,
                                  void* cache_base_ptr) {
@@ -90,31 +88,49 @@ bool KVFirstLayoutStrategy::init(const BlockPoolConfig& config,
         return false;
     }
     
-    torch::Tensor reshaped_tensor = cache_buffer.reshape({
-        2,
+    size_t k_total_size = config_.layer_num * config_.block_num * config_.k_block_size;
+    size_t v_total_size = config_.layer_num * config_.block_num * config_.v_block_size;
+    size_t expected_total = k_total_size + v_total_size;
+    
+    if (cache_buffer.numel() != static_cast<int64_t>(expected_total)) {
+        RTP_LLM_LOG_ERROR("Cache buffer size mismatch: expected %zu, got %ld", 
+                         expected_total, cache_buffer.numel());
+        return false;
+    }
+
+    // Layout: [K cache: layer_num * block_num * k_block_size][V cache: layer_num * block_num * v_block_size]
+    torch::Tensor k_buffer = cache_buffer.narrow(0, 0, k_total_size);
+    torch::Tensor v_buffer = cache_buffer.narrow(0, k_total_size, v_total_size);
+    
+    k_cache_tensor_ = k_buffer.reshape({
         static_cast<int64_t>(config_.layer_num),
         static_cast<int64_t>(config_.block_num),
-        static_cast<int64_t>(config_.k_block_size)  // assume k and v block size are the same
+        static_cast<int64_t>(config_.k_block_size)
     });
     
-
-    k_cache_tensor_ = reshaped_tensor[0];  
-    v_cache_tensor_ = reshaped_tensor[1];  // [layer_num, block_num, kv_block_size]
+    v_cache_tensor_ = v_buffer.reshape({
+        static_cast<int64_t>(config_.layer_num),
+        static_cast<int64_t>(config_.block_num),
+        static_cast<int64_t>(config_.v_block_size)
+    });
     
     layer_kv_tensors_.clear();
     layer_kv_tensors_.reserve(config_.layer_num);
     
     for (uint32_t layer_id = 0; layer_id < config_.layer_num; ++layer_id) {
         torch::Tensor k_layer_tensor = k_cache_tensor_[layer_id];
-        layer_kv_tensors_.push_back(k_layer_tensor);  // return k cache tensor
+        layer_kv_tensors_.push_back(k_layer_tensor);
         
-        RTP_LLM_LOG_DEBUG("Layer %d K tensor shape: [%s], elements: %ld", 
+        RTP_LLM_LOG_DEBUG("Layer %d K tensor shape: [%s], elements: %ld, V tensor shape: [%s], elements: %ld", 
                          layer_id, 
                          torch::str(k_layer_tensor.sizes()).c_str(),
-                         k_layer_tensor.numel());
+                         k_layer_tensor.numel(),
+                         torch::str(v_cache_tensor_[layer_id].sizes()).c_str(),
+                         v_cache_tensor_[layer_id].numel());
     }
     
-    RTP_LLM_LOG_INFO("KVFirstLayoutStrategy initialized successfully");
+    RTP_LLM_LOG_INFO("KVFirstLayoutStrategy initialized successfully with k_block_size=%zu, v_block_size=%zu",
+                     config_.k_block_size, config_.v_block_size);
     return true;
 }
 
@@ -123,7 +139,6 @@ std::vector<torch::Tensor> KVFirstLayoutStrategy::getLayerCacheTensors() const {
 }
 
 BlockAddrInfo KVFirstLayoutStrategy::convertIndexToAddr(int layer_id, int block_id) const {
-    // return k address and v address 
     if (layer_id >= config_.layer_num) {
         RTP_LLM_LOG_ERROR("Layer ID %d out of range (max: %d)", layer_id, config_.layer_num);
         return {nullptr, nullptr, nullptr, nullptr};
