@@ -4,6 +4,7 @@ import enum
 import gc
 import logging
 import time
+import uuid
 from multiprocessing import Lock, Manager, Process
 from queue import Queue
 from typing import Any, List, Optional, Union
@@ -58,7 +59,13 @@ class MMWorkItem:
 
         self.preprocess_result = None
         self.embedding_result = None
+
+        self.work_item_id: str = str(uuid.uuid4())
         # self.check_cache()
+
+    @property
+    def id(self):
+        return self.id
 
     @property
     def finished(self):
@@ -84,8 +91,7 @@ class MMWorkItem:
     ):
         with Timer() as route_timer:
             res = preprocess_func(mm_inputs, **preprocess_params)
-        kmonitor.report(GaugeMetrics.VIT_PREPROCESS_RT_METRIC, route_timer.cost_ms())
-        return res
+        return res, route_timer.cost_ms()
 
     def may_submit_preprocess(
         self,
@@ -108,9 +114,11 @@ class MMWorkItem:
             if future == None:
                 return
             try:
-                self.preprocess_result = future.result(
+                self.preprocess_result, preprocess_time = future.result(
                     timeout=self.mm_timeout_ms / 1000
                 )
+
+                kmonitor.report(GaugeMetrics.VIT_PREPROCESS_RT_METRIC, preprocess_time)
                 self.set_status(MMWorkItemStatus.PREPROCESSED)
             except Exception as e:
                 future.cancel()

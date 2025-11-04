@@ -20,6 +20,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
     add_MultimodalRpcServiceServicer_to_server,
 )
 from rtp_llm.distribute.worker_info import WorkerInfo
+from rtp_llm.metrics import kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.models.multimodal.mm_process_engine import MMProcessEngine
 from rtp_llm.server.vit_rpc_server import MultimodalRpcServer, create_rpc_server
@@ -110,6 +111,7 @@ class VitEndpointServer:
         self.mm_rpc_server = MultimodalRpcServer(self.mm_process_engine)
         self.rpc_server = create_rpc_server()
         add_MultimodalRpcServiceServicer_to_server(self.mm_rpc_server, self.rpc_server)
+        kmonitor.init()
 
     def start(self, worker_info: WorkerInfo):
         self.rpc_server.add_insecure_port(f"0.0.0.0:{worker_info.rpc_server_port}")

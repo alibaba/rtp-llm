@@ -47,9 +47,6 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
         if (vit_separation == 2) {
             mm_processor_.reset(new RemoteMultimodalProcessor(maga_init_params.gpt_init_parameter));
         } else if (vit_separation == 0) {
-            if (mm_process_engine.is_none()) {
-                return grpc::Status(grpc::StatusCode::INTERNAL, "mm_process_engine is not set");
-            }
             mm_processor_.reset(new LocalMultimodalProcessor(mm_process_engine, maga_init_params.gpt_init_parameter));
         }
     }
