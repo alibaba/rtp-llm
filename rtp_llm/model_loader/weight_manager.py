@@ -16,75 +16,6 @@ from rtp_llm.model_loader.weight_module import WeightModule
 
 from .tipc import CudaIpcHelper, SharedMemIpcMeta, SharedMemoryIPCHelper
 
-# Dictionary for renaming specific layer weight names from an external format
-# (e.g., 'verl') to the internal 'rtp-llm' format.
-RENAME_DICTIONARY = {
-    # verl
-    "embed_tokens.weight": "embedding",
-    "norm.weight": "final_layernorm.gamma",
-    "norm.bias": "final_layernorm.beta",
-    "lm_head.weight": "lm_head",
-    "input_layernorm.weight": "pre_layernorm_weights.gamma",
-    "post_attention_layernorm.weight": "post_layernorm_weights.gamma",
-    "self_attn.qkv_proj.weight": "self_attention_weights.query_weight.kernel",
-    "self_attn.qkv_proj.bias": "self_attention_weights.query_weight.bias",
-    "self_attn.o_proj.weight": "self_attention_weights.attention_output_weight.kernel",
-    "mlp.gate_proj.weight": "ffn_weights.intermediate_weight.kernel",
-    "mlp.up_proj.weight": "ffn_weights.intermediate_weight3.kernel",
-    "mlp.down_proj.weight": "ffn_weights.intermediate_weight2.kernel",
-    # roll - megatron
-    "mbedding.word_embeddings.weight": "embedding",
-    "self_attention.linear_proj.weight": "self_attention_weights.attention_output_weight.kernel",
-    "self_attention.linear_proj.bias": "self_attention_weights.attention_output_weight.bias",
-    "self_attention.linear_qkv.weight": "self_attention_weights.query_weight.kernel",
-    "self_attention.linear_qkv.bias": "self_attention_weights.query_weight.bias",
-    "mlp.linear_fc1.layer_norm_weight": "post_layernorm_weights.gamma",
-    # ???
-    "mlp.linear_fc1.weight": "",
-}
-
-
-def rename_function(layer_name: str) -> str:
-    """
-    Transforms a layer weight name from an external format (e.g., 'verl')
-    into the format required by 'rtp-llm'.
-    The input format is expected to be like 'model.layers.1.self_attn_qkv_proj.bias'.
-    Args:
-        layer_name: The layer weight name string from an external source.
-    Returns:
-        The transformed layer weight name in 'rtp-llm's internal format.
-        For example, 'model.layers.1.self_attn_qkv_proj.bias' might become
-        'self_attention_weights.query_weight.bias' if it matches a pattern
-        and is in the RENAME_DICTIONARY.
-    Error Handling:
-        This function does not explicitly raise errors but performs string manipulations
-        and dictionary lookups. If an unexpected `layer_name` format is provided,
-        it might return a string that is not correctly transformed or recognized
-        by downstream components.
-    """
-    # Remove the "model." prefix
-    if layer_name.startswith("model."):
-        name: str = layer_name[len("model.") :]
-    elif layer_name.startswith("decoder."):
-        name: str = layer_name[len("decoder.") :]
-    else:
-        name: str = layer_name
-    if "layers" in layer_name:
-        # Remove "layers." prefix
-        name = name[len("layers.") :]
-        # Remove the layer number and the dot following it (e.g., "1." from "1.self_attn...")
-        # This assumes the format "layers.<number>.<rest_of_name>"
-        first_dot_after_layers = name.find(".")
-        if first_dot_after_layers != -1:
-            name = name[first_dot_after_layers + 1 :]
-        if name in RENAME_DICTIONARY:
-            return RENAME_DICTIONARY[name]
-        return name
-    else:
-        if name in RENAME_DICTIONARY:
-            return RENAME_DICTIONARY[name]
-        return name
-
 
 class WeightManager:
     """
@@ -141,6 +72,112 @@ class WeightManager:
         else:
             return None
 
+    def mount(self, name: str, tensor: torch.Tensor) -> None:
+
+        logging.info(
+            f"update weight request: {name}, shape: {tensor.shape}, device: {tensor.device}, dtype: {tensor.dtype}"
+        )
+        with torch.cuda.stream(self._working_stream):
+            tensor = tensor.to(self._device)
+            config = self._weights_loader.get_load_config()
+
+            if "layers" in name:
+                # This is a layer-specific weight
+                layer_id: int | None = self.extract_layer_number(name)
+                if layer_id is None:
+                    raise ValueError(
+                        f"Invalid layer weight name format: '{name}'. "
+                        "Could not extract layer number. Expected format like 'model.layers.<id>...'"
+                    )
+                if layer_id > len(self._weight_module.layer_weights):
+                    raise IndexError("layer index out of range.")
+
+                fail: bool = True
+                for receptor in self._weight_module.layer_weights[layer_id]:
+                    if name.startswith(f"model.layers.{layer_id}.{receptor.name}"):
+                        # 这里需要使用 start with 判断, 因为可以出现 ffn_weights, moe_weights 这样的组合权重
+                        # 这些权重在 rtp 里面的名字是 model.layers.0.__ffn_weights__
+                        # 但输入的权重是 model.layers.0.__ffn_weights__.intermediate_weights
+                        # 这些权重需要被对应的 receptor 处理
+
+                        assert isinstance(receptor, WeightModule)
+                        # split tensor into shards
+                        _config = config.copy()
+                        _config.use_stack_weight = True
+
+                        shard = receptor.update(
+                            tensor=tensor,
+                            device=self._device,
+                            load_config=_config,
+                            module_name=name,
+                        )
+                        if isinstance(shard, dict):
+                            shard = next(iter(shard.values()))
+
+                        if "__ffn_weights__" == receptor.name:
+                            # 这里需要按照一定规则更换输入的权重名字
+                            name = name.replace("__ffn_weights__", "ffn_weights")
+                            name = name[name.find("ffn_weights") :]
+                            self._weights.update_layer_weight(
+                                layer_id=layer_id,
+                                name=name,
+                                data=shard,
+                                is_master=(config.dp_rank == 0 and config.tp_rank == 0),
+                            )
+                        elif "__moe_weights__" == receptor.name:
+                            # 这里需要按照一定规则更换输入的权重名字
+                            name = name.replace(
+                                "__moe_weights__", "partial_moe_weights"
+                            )
+                            name = name[name.find("partial_moe_weights") :]
+                            self._weights.update_layer_weight(
+                                layer_id=layer_id,
+                                name=name,
+                                data=shard,
+                                is_master=(config.dp_rank == 0 and config.tp_rank == 0),
+                            )
+                        else:
+                            # update tensor weight
+                            self._weights.update_layer_weight(
+                                layer_id=layer_id,
+                                name=receptor.name,
+                                data=shard,
+                                is_master=(config.dp_rank == 0 and config.tp_rank == 0),
+                            )
+                        fail = False
+
+                if fail:
+                    raise KeyError(
+                        f"{name} not found. wanted name list is {[f'model.layers.{layer_id}.{w.name}' for w in self._weight_module.layer_weights[layer_id]]}"
+                    )
+
+            else:
+                # weight is global weight
+                fail: bool = True
+                for weight in self._weight_module.weights:
+                    if f"model.{weight.name}" == name:
+                        shard: dict = weight.update(
+                            tensor,
+                            self._device,
+                            load_config=self._weights_loader.get_load_config(),
+                        )
+                        if isinstance(shard, dict):
+                            shard = next(iter(shard.values()))
+                        self._weights.update_global_weight(
+                            name=weight.name,
+                            data=shard,
+                            is_master=(config.dp_rank == 0 and config.tp_rank == 0),
+                        )
+                        fail = False
+
+                if fail:
+                    raise KeyError(
+                        f"{name} not found. wanted name list is {[f'model.{w.name}' for w in self._weight_module.weights]}"
+                    )
+
+            logging.info(f"RtpLLM Finish Weights Update: {name}.")
+            self._working_stream.synchronize()
+
     def update(self, req: Mapping[str, Any]) -> None:
         """
         Receives an Inter-Process Communication (IPC) tensor description and
@@ -151,18 +188,15 @@ class WeightManager:
         rtp-llm's specific model parallelism configuration.
         Args:
             req: A dictionary containing the IPC request details. Expected keys are:
-                 - "desc": A string describing the tensor's IPC metadata
+                 - "desc": A list of string describing the tensor's IPC metadatas
                            (e.g., `CuIpcTensorMeta` or `SharedMemIpcMeta` encoded string).
-                 - "name": A string representing the original name of the weight
-                           (e.g., 'model.layers.1.self_attn_qkv_proj.bias').
                  - "method": A string indicating the IPC method used ("cuda_ipc" or "shm").
         Returns:
             None. The method updates internal model weights directly.
         Error Handling:
-            - `KeyError`: If "desc", "name", or "method" fields are missing from `req`.
+            - `KeyError`: If "desc", or "method" fields are missing from `req`.
             - `ValueError`: If the "method" is invalid (not "cuda_ipc" or "shm"),
                             or if a layer weight name is invalid and its ID cannot be extracted.
-            - `NotImplementedError`: If "cuda_ipc" method is attempted (currently disallowed).
             - `Exception`: If the tensor cannot be built from the IPC metadata (e.g., invalid descriptor).
                           This is a general catch-all for unexpected failures in `_t_helper.build_from_meta`.
         """
@@ -172,110 +206,34 @@ class WeightManager:
                 "Update request is missing the 'desc' field. "
                 "It must contain IPC tensor metadata."
             )
-        if "name" not in req:
-            raise KeyError(
-                "Update request is missing the 'name' field. "
-                "It must specify the weight name to update."
-            )
         if "method" not in req:
             raise KeyError(
                 "Update request is missing the 'method' field. "
                 "It must specify the IPC method (e.g., 'cuda_ipc' or 'shm')."
             )
         method: str = str(req["method"])
-        desc: str = str(req["desc"])
-        name: str = str(req["name"])
-        stored_name: str = name
-
         if method not in {"cuda_ipc", "shm"}:
             raise ValueError(
                 f"Invalid IPC method '{method}' provided. Only 'cuda_ipc' and 'shm' are allowed."
             )
-        tensor: torch.Tensor | None = None
 
-        if method == "cuda_ipc":
-            helper = CudaIpcHelper()
-            tensor = helper.build_from_meta(bytes.fromhex(desc))
-        else:  # method == "shm"
-            sm_meta: SharedMemIpcMeta = SharedMemIpcMeta.decode(desc)
-            tensor = self._s_helper.build_from_meta(sm_meta)
+        if method == "shm":
+            desc: list[str] = req["desc"]
+            if desc is None:
+                raise KeyError("Empty tensor meta array.")
+            if not isinstance(desc, list):
+                raise TypeError("Unexpected desc type.")
+            if len(desc) == 0:
+                raise ValueError("Empty tensor meta array.")
 
-        if tensor is None:
-            logging.error(
-                f"Fail to build tensor from ipc description {desc}, method: {method}"
-            )
-            # This should ideally not be reached if build_from_meta consistently returns a tensor or raises an error.
-            raise Exception(
-                f"Failed to build tensor from IPC description '{desc}' using method '{method}'. Tensor is None."
-            )
-        logging.info(
-            f"RtpLLM Updating Weights: {name}, shape: {tensor.shape}, device: {tensor.device}, method: {method}"
-        )
+            for raw in desc:
+                meta: SharedMemIpcMeta = SharedMemIpcMeta.decode(raw)
+                tensor = self._s_helper.build_from_meta(meta)
 
-        logging.info(
-            f"update weight request: {name}, shape: {tensor.shape}, device: {tensor.device}, dtype: {tensor.dtype}"
-        )
-        with torch.cuda.stream(self._working_stream):
-            config = self._weights_loader.get_load_config()
-            tensor = tensor.to(self._device)
+                logging.info(
+                    f"Ipc received tensor: {meta.name}, {tensor.shape}, {tensor.dtype}"
+                )
 
-            if "layers" in name:
-                # This is a layer-specific weight
-                layer_id: int | None = self.extract_layer_number(name)
-                if layer_id is None:
-                    raise ValueError(
-                        f"Invalid layer weight name format: '{name}'. "
-                        "Could not extract layer number. Expected format like 'model.layers.<id>...'"
-                    )
-                name: str = rename_function(name)
-                fail: bool = True
-
-                for receptor in self._weight_module.layer_weights[layer_id]:
-                    if receptor.name == name or (
-                        "ffn_weights" in name and receptor.name == "__ffn_weights__"
-                    ):
-                        assert isinstance(receptor, WeightModule)
-
-                        # split tensor into shards
-                        shard = receptor.update(
-                            tensor=tensor,
-                            device=self._device,
-                            load_config=config,
-                            module_name=name,
-                        )
-                        if isinstance(shard, dict):
-                            shard = next(iter(shard.values()))
-
-                        # update tensor weight
-                        self._weights.update_layer_weight(
-                            layer_id=layer_id, name=name, data=shard
-                        )
-                        fail = False
-
-                if fail:
-                    raise KeyError(
-                        f"{stored_name} not found. wanted name list is {[w.name for w in self._weight_module.layer_weights[layer_id]]}"
-                    )
-
-            else:
-                # weight is global weight
-                name: str = rename_function(name)
-                fail: bool = True
-                for weight in self._weight_module.weights:
-                    if weight.name == name:
-                        shard: dict = weight.update(
-                            tensor,
-                            self._device,
-                            load_config=self._weights_loader.get_load_config(),
-                        )
-                        if isinstance(shard, dict):
-                            shard = next(iter(shard.values()))
-                        self._weights.update_global_weight(name=name, data=shard)
-                        fail = False
-
-                if fail:
-                    raise KeyError(
-                        f"{stored_name} not found. wanted name list is {[w.name for w in self._weight_module.weights]}"
-                    )
-
-            self._working_stream.synchronize()
+                self.mount(meta.name, tensor)
+        else:
+            raise NotImplementedError("cuda ipc is not implemented.")

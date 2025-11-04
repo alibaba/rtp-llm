@@ -8,13 +8,13 @@ from pydantic import BaseModel
 
 from rtp_llm.config.quant_config import QuantizationConfig
 from rtp_llm.model_loader.load_config import LoadConfig
+from rtp_llm.model_loader.tensor_source import TensorSource
 from rtp_llm.model_loader.weight_module import (
     AtomicWeight,
     CompositeWeight,
     QuantWeight,
     WeightModule,
 )
-from rtp_llm.model_loader.tensor_source import TensorSource
 from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity
 from rtp_llm.utils.util import check_with_info
 
@@ -254,11 +254,20 @@ class FfnWeight(CompositeWeight):
         return False
 
     @torch.inference_mode()
-    def update(self, tensor: torch.Tensor, device: str, load_config: LoadConfig, **kwargs):
+    def update(
+        self, tensor: torch.Tensor, device: str, load_config: LoadConfig, **kwargs
+    ):
         if "module_name" in kwargs:
             name: str = kwargs["module_name"]
+            if "__ffn_weights__" not in name:
+                raise KeyError("tensor name should contains __ffn_weights__")
+            name = name[name.find("__ffn_weights__") :].replace(
+                "__ffn_weights__", "ffn_weights"
+            )
             if name not in self.sub_weights:
-                raise KeyError(f"can not find key: {name} in ffn weights, allow key names are {[name for name in self.sub_weights]}")
+                raise KeyError(
+                    f"can not find key: {name} in ffn weights, allow key names are {[name for name in self.sub_weights]}"
+                )
             return self.sub_weights[name].update(tensor, device, load_config)
         else:
             return super().update(tensor, device, load_config)
@@ -307,7 +316,9 @@ class MoeAtomicWeight(AtomicWeight):
         load_config: LoadConfig,
     ):
         if self.config.weight_stack:
-            return super()._load_raw_tensor(tensor_source, layer_id, device, load_config)
+            return super()._load_raw_tensor(
+                tensor_source, layer_id, device, load_config
+            )
 
         # weight should be expand by experts
         before_merge_tensors = []
@@ -341,7 +352,7 @@ class MoeAtomicWeight(AtomicWeight):
         after_merge_tensor = self.process_fun(before_merge_tensors).to(convert_type)
         logging.debug("load weight :%s, %s ", self.name, after_merge_tensor.shape)
         return {self.name: after_merge_tensor}
-    
+
     def get_tensor_names(
         self, layer_id: Optional[int], load_config: LoadConfig
     ) -> set[str]:
@@ -384,6 +395,20 @@ class MoeWeight(CompositeWeight):
     ) -> bool:
         return False
 
+    def _split(
+        self,
+        tensor: Union[torch.Tensor, Dict[str, torch.Tensor]],
+        load_config: LoadConfig,
+    ):
+        if (
+            load_config.tp_size <= 1
+            and load_config.dp_size <= 1
+            and load_config.ep_size <= 1
+        ):
+            if self.name not in [W.moe_w1, W.moe_w2]:
+                return tensor
+        return super()._split(tensor, load_config)
+
     def _shuff_moe_weight(
         self,
         name: str,
@@ -417,6 +442,25 @@ class MoeWeight(CompositeWeight):
             else:
                 self._shuff_moe_weight(keys[0], tensor, load_config)
         return super()._postprocess(tensor, device, load_config)
+
+    @torch.inference_mode()
+    def update(
+        self, tensor: torch.Tensor, device: str, load_config: LoadConfig, **kwargs
+    ):
+        if "module_name" in kwargs:
+            name: str = kwargs["module_name"]
+            if "__moe_weights__" not in name:
+                raise KeyError("tensor name should contains __moe_weights__")
+            name = name[name.find("__moe_weights__") :].replace(
+                "__moe_weights__", "partial_moe_weights"
+            )
+            if name not in self.sub_weights:
+                raise KeyError(
+                    f"can not find key: {name} in moe weights, allow key names are {[name for name in self.sub_weights]}"
+                )
+            return self.sub_weights[name].update(tensor, device, load_config)
+        else:
+            return super().update(tensor, device, load_config)
 
 
 class SharedMoeConfig(FfnConfig, MoeConfig):

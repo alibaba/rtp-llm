@@ -605,7 +605,9 @@ class ModelWeights:
     def set_layer_weight(self, layer_id: int, name: str, tensor: torch.Tensor):
         self.weights[layer_id][name] = tensor
 
-    def update_layer_weight(self, layer_id: int, name: str, data: torch.Tensor):
+    def update_layer_weight(
+        self, layer_id: int, name: str, data: torch.Tensor, is_master: bool
+    ):
         if not isinstance(layer_id, int):
             raise TypeError(
                 f"Invalid 'layer_id' type. Expected an integer, but received {type(layer_id).__name__}.\n"
@@ -628,14 +630,16 @@ class ModelWeights:
             raise KeyError(
                 f"Weight name '{name}' not found within layer {layer_id}.\n"
                 f"Available weights in layer {layer_id}: {list(layer_weight_dict.keys())}\n"
-                "Please check the provided weight 'name'."
+                "Please check the provided weight name."
             )
         ori_tensor = layer_weight_dict[name]
         self.check_data(
             ori_tensor, data
         )  # This will raise errors if shape, device, or dtype mismatch
         with torch.inference_mode():
-            ori_tensor.copy_(data.to(ori_tensor.device))
+            if is_master:
+                print(name, self._similarity(ori_tensor, data).item())
+            ori_tensor.copy_(data)
 
     def set_global_weight(self, name: str, tensor: torch.Tensor):
         self.global_weights[name] = tensor
@@ -646,17 +650,11 @@ class ModelWeights:
     def get_global_weight(self, name: str) -> torch.Tensor:
         return self.global_weights[name]
 
-    def update_global_weight(self, name: str, data: torch.Tensor):
+    def update_global_weight(self, name: str, data: torch.Tensor, is_master: bool):
         if not isinstance(name, str):
             raise TypeError(
                 f"Invalid 'name' type. Expected a string, but received {type(name).__name__}.\n"
                 "Please provide the name of the global weight as a string."
-            )
-        if name not in self.global_weights:
-            raise KeyError(
-                f"Global weight with name '{name}' not found.\n"
-                f"Available global weights: {list(self.global_weights.keys())}\n"
-                "Please check the provided global weight name."
             )
         if not isinstance(data, torch.Tensor):
             raise TypeError(
@@ -664,11 +662,13 @@ class ModelWeights:
                 f"Expected 'torch.Tensor', but found {type(data).__name__}.\n"
                 "If 'data' is a dictionary, its values must be PyTorch tensors."
             )
-        original_global_tensor = self.global_weights[name]
+        ori_tensor = self.global_weights[name]
         # Use the check_data method to validate shape, device, and dtype
-        self.check_data(original_global_tensor, data)
+        self.check_data(ori_tensor, data)
         with torch.inference_mode():
-            original_global_tensor.copy_(data.to(original_global_tensor.device))
+            if is_master:
+                print(name, self._similarity(ori_tensor, data).item())
+            ori_tensor.copy_(data)
 
     def steal_global_weight(self, name: str):
         if name not in self.global_weights:
@@ -702,3 +702,8 @@ class ModelWeights:
                 f"Input tensor dtype: {update_tensor.dtype}\n"
                 f"Original tensor dtype: {ori_tensor.dtype}"
             )
+
+    def _similarity(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        a = a.float()
+        b = b.float()
+        return torch.square(a - b).sum() / (torch.square(b).sum() + 1e-7)

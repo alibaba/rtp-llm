@@ -7,17 +7,17 @@ from time import time
 from typing import Any, Dict
 
 import httpx
-import torch
 from safetensors.torch import load_file
-from tipc import CudaIpcHelper, IPCTransportClient, SharedMemoryIPCHelper
+from tipc import CudaIpcHelper, SharedMemoryIPCHelper, TensorTransportClient
 from tqdm import tqdm
 
-PATH = "/mnt/nas1/hf/Qwen2___5-0___5B-Instruct"
+PATH = "/root/hf/Qwen3-30B-A3B"
+# PATH = "/root/hf/Qwen2-0.5B-Instruct"
 
 
-class RtpLLMHttpClient(IPCTransportClient):
+class RtpLLMHttpClient(TensorTransportClient):
     def __init__(self, address: str, frentend_port: int, backend_port: int):
-        super().__init__()
+        super().__init__(url=f"http://{address}:{backend_port}/update_weight")
         self.client1 = httpx.AsyncClient(
             base_url=f"http://{address}:{frentend_port}", timeout=30.0
         )
@@ -35,12 +35,13 @@ class RtpLLMHttpClient(IPCTransportClient):
         await self.client1.aclose()
         await self.client2.aclose()
 
-    async def _handle_response(self, response: httpx.Response) -> Dict[str, Any]:
-        print(response.status_code, response.json())
+    def _handle_response(self, response: httpx.Response) -> Dict[str, Any]:
         response.raise_for_status()
         response = response.json()
-        if response and "error" in response:
-            raise Exception(f"server internal error: {response}")
+
+        if response is not None and "status" in response:
+            if response["status"] == "error":
+                raise Exception(f"server internal error: {response}")
         return response
 
     async def chat_completion(self, name: str, prompt: str) -> None:
@@ -53,7 +54,7 @@ class RtpLLMHttpClient(IPCTransportClient):
             "stream": False,
         }
         response = await self.client1.post("/v1/chat/completions", json=payload)
-        content = await self._handle_response(response)
+        content = self._handle_response(response)
         self.records[name] = {
             "content": content["choices"][0]["message"],
             "end_time": time(),
@@ -69,40 +70,19 @@ class RtpLLMHttpClient(IPCTransportClient):
             part = load_file(fn, device="cpu")
             weights.update(part)
 
-        for name, tensor in tqdm(weights.items(), "updating weights"):
-            await self.update(tensor, name, method)
-
-    async def update(
-        self, tensor: torch.Tensor, name: str, method: str = "cuda_ipc"
-    ) -> None:
-        if method == "cuda_ipc":
-            tensor = tensor.cuda()
-            meta = self.cuipc_helper.build_tensor_meta(tensor)
-            payload = {
-                "name": name,
-                "time": time(),
-                "method": "cuda_ipc",
-                "desc": meta.hex(),
-            }
-        else:  # shm memory
-            tensor = tensor.cpu()
-            meta = self.shipc_helper.build_tensor_meta(tensor, shm=self.shm)
-            payload = {
-                "name": name,
-                "time": time(),
-                "method": "shm",
-                "desc": meta.encode(),
-            }
-        response = await self.client2.post("/update_weight", json=payload)
-        await self._handle_response(response)
+        # sort weight is necessary
+        weights = [(name, tensor) for name, tensor in tqdm(weights.items())]
+        for name, tensor in tqdm(sorted(weights), "updating weights"):
+            self.write(name, tensor)
+        self.flush()
 
     async def pause(self) -> None:
         response = await self.client2.post("/pause")
-        await self._handle_response(response)
+        self._handle_response(response)
 
     async def restart(self) -> None:
         response = await self.client2.post("/restart")
-        await self._handle_response(response)
+        self._handle_response(response)
 
 
 class TestRtpClient(unittest.IsolatedAsyncioTestCase):
@@ -127,7 +107,8 @@ class TestRtpClient(unittest.IsolatedAsyncioTestCase):
             )
 
             await client.pause()
-            await client.update_model_weight(path=PATH, method="shm")
+            asyncio.gather(client.chat_completion("_", "hello qwen."))
+            await client.update_model_weight(path=PATH, method="cu_ipc")
             await client.restart()
 
             await client.chat_completion(
@@ -138,6 +119,13 @@ class TestRtpClient(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(client.records["chat_2"]["end_time"], timestamp)
         self.assertGreater(client.records["chat_3"]["end_time"], timestamp)
         self.assertGreater(client.records["chat_4"]["end_time"], timestamp)
+
+        print(client.records["chat_1"]["content"])
+        print(client.records["chat_2"]["content"])
+        print(client.records["chat_3"]["content"])
+        print(client.records["chat_4"]["content"])
+        print(client.records["chat_5"]["content"])
+        print(client.records["chat_6"]["content"])
 
         self.assertEqual(
             str(client.records["chat_1"]["content"]),
