@@ -579,13 +579,62 @@ rename_wheel(
     src = ":rtp_llm_frontend_whl",
 )
 
+# 检测 CUDA 版本
+config_setting(
+    name = "cuda12_6",
+    flag_values = {"//:cuda_config_name": "cuda12_6"},
+)
+config_setting(
+    name = "cuda12_2",
+    flag_values = {"//:cuda_config_name": "cuda12_2"},
+)
+
+# 检测 ROCM、ARM、PPU
+config_setting(
+    name = "rocm",
+    flag_values = {"//:cuda_config_name": "rocm"},
+)
+config_setting(
+    name = "arm",
+    flag_values = {"//:cuda_config_name": "arm"},
+)
+config_setting(
+    name = "cpu",
+    flag_values = {"//:cuda_config_name": "cpu"},
+)
+
+# 检测 SM 架构
+config_setting(
+    name = "sm7x",
+    flag_values = {"//:sm_config_name": "7x"},
+)
+config_setting(
+    name = "sm8x",
+    flag_values = {"//:sm_config_name": "8x"},
+)
+config_setting(
+    name = "sm9x",
+    flag_values = {"//:sm_config_name": "9x"},
+)
+
+
 # target for wheel
 py_wheel(
     name = "rtp_llm_whl",
     distribution = "rtp_llm",
-    python_tag = "py3",
-    tags = ["manual", "local", "no-remote"],
-    version = RELEASE_VERSION,
+    version = RELEASE_VERSION + select({
+        ":cuda12_6": "+cu126",
+        ":cuda12_2": "+cu122",
+        ":rocm": "+rocm",
+        ":arm": "+arm",
+        ":cpu": "+cpu",
+        "//conditions:default": "none",
+    }) + select({
+        ":sm7x": "_sm7x",
+        ":sm8x": "_sm8x",
+        ":sm9x": "_sm9x",
+        "//conditions:default": "none",
+    }),
     entry_points = {
         "console_scripts": [
             "rtp-llm = rtp_llm.cli.main:main",
