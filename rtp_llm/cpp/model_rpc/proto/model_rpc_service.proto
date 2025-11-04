@@ -1,7 +1,6 @@
 // message.proto
 syntax = "proto3";
 import "google/protobuf/wrappers.proto";
-import "google/protobuf/any.proto"
 
 
 message TensorPB {
@@ -385,13 +384,26 @@ message MemoryBlockCacheResponsePB {
     bool success = 1;
 }
 
-message BroadcastAllTpRequest {
-    google.protobuf.Any msg = 1;
-    string action = 2;
+message MemoryBroadcastAllTpRequestPB {
+
 }
 
-message BroadcastAllTpResponse {
-    google.protobuf.Any msg = 1;
+message MemoryBroadcastAllTpResponsePB {
+    
+}
+
+message BroadcastAllTpRequestPB {
+    string action = 1;
+    oneof msg {
+        MemoryBroadcastAllTpRequestPB mem_msg = 2;
+    }
+}
+
+message BroadcastAllTpResponsePB {
+    bool success = 1;
+    oneof msg {
+        MemoryBroadcastAllTpResponsePB mem_msg = 2;
+    }
 }
 
 service RpcService {
@@ -410,7 +422,7 @@ service RpcService {
     rpc DistKvCache(DistKvCacheRequestPB) returns (DistKvCacheResponsePB);
     rpc MemoryBlockCache(MemoryBlockCacheRequestPB) returns (MemoryBlockCacheResponsePB);
 
-    rpc BroadcastAllTp(BroadcastAllTpRequest) returns (BroadcastAllTpResponse);
+    rpc BroadcastAllTp(BroadcastAllTpRequestPB) returns (BroadcastAllTpResponsePB);
 }
 
 service MultimodalRpcService {

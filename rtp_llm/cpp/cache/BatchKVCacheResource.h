@@ -8,7 +8,6 @@ namespace rtp_llm {
 
 struct BlockIds {
     std::vector<int> block_indices;
-    // TODO(LXQ): maybe need RAII to manage block ref counter
 };
 
 class BatchKVCacheResource {
@@ -27,6 +26,13 @@ public:
     const std::vector<int>& blocks(int batch_id) const;
     void                    clear();
     void                    check() const;
+    
+    int32_t gpuReuseLen() const {
+        return gpu_reuse_len;
+    }
+    int32_t memReuseLen() const {
+        return mem_reuse_len;
+    }
 
     std::string debugString() const;
 
@@ -38,8 +44,6 @@ public:
     std::vector<std::vector<int32_t>> batch_block_id;
 
 
-
-    
     // batch_id -> layer_id -> block_indices
     std::vector<std::vector<std::shared_ptr<BlockIds>>> batch_cache_layer_layouts;
     std::vector<std::vector<std::shared_ptr<BlockIds>>> group_id_to_block_ids;
@@ -52,6 +56,10 @@ public:
 
     // cache_keys and batch_block_id are not consistent at all times
     std::vector<std::vector<int64_t>> cache_keys;
+
+private:
+    int32_t gpu_reuse_len{0};  // reuse cache key num of gpu
+    int32_t mem_reuse_len{0};  // reuse cache key num of memory
 };
 
 using BatchKVCacheResourcePtr = std::shared_ptr<BatchKVCacheResource>;
