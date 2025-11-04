@@ -618,6 +618,11 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
         printBufferData(*params.common.cu_kv_seqlens, "cu_kv_seqlens");
     }
 
+    if (datatype == DataType::TYPE_FP16) {
+        // TODO: FP8 FMHA currently does not support FP16 output.
+        //       Please run with BF16 activation instead (set environment variable ACT_TYPE=bf16)
+        use_fmha_fp8 = false;
+    }
     BufferPtr qkv_buf_fp8 = nullptr;
     if (use_fmha_fp8) {
         qkv_buf_fp8 = allocateBuffer({DataType::TYPE_FP8_E4M3, params.input.shape(), AllocationType::DEVICE},
