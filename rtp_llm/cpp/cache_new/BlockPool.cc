@@ -25,14 +25,13 @@ bool BlockPool::init() {
     }
     kv_cache_.kv_blocks = Buffer2torchTensor(cache_aligned_buffer_, false);
 
-    // 创建布局策略
+
     layout_strategy_ = MemoryLayoutStrategyFactory::create(config_.layout);
     if (!layout_strategy_) {
         RTP_LLM_LOG_ERROR("Failed to create memory layout strategy");
         return false;
     }
 
-    // 初始化布局策略
     if (!layout_strategy_->init(config_, kv_cache_.kv_blocks, cache_base_ptr_)) {
         RTP_LLM_LOG_ERROR("Failed to initialize memory layout strategy");
         return false;
@@ -45,7 +44,6 @@ bool BlockPool::init() {
     return true;
 }
 
-// 初始化空闲块列表
 void BlockPool::initFreeBlocks() {
     for (BlockIdxType i = 0; i < static_cast<BlockIdxType>(config_.block_num); ++i) {
         free_block_ids.insert(i);
@@ -75,6 +73,7 @@ std::vector<BlockIdxType> BlockPool::alloc(int num_blocks) {
         block_ids.push_back(*it);
         free_block_ids.erase(it);
     }
+    reference(block_ids);
     return block_ids;
 }
 
