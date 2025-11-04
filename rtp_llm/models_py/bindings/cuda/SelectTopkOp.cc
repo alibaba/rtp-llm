@@ -53,8 +53,27 @@ void SelectTopkOp::forward(torch::Tensor router_logits, torch::Tensor expert_ids
                                                      0,
                                                      normalization_mode,
                                                      current_stream);
+
     } else {
         throw std::runtime_error("Unimplemented dtype for SelectTopkOp: " + std::string(topk_t.name()));
+    }
+
+    if (configs_.moe_config.fake_balance_expert) {
+        if (expert_ids.dtype() == torch::kInt64) {
+            fake_balance_expert(expert_ids.data_ptr<int64_t>(),
+                                expert_scales.data_ptr<float>(),
+                                configs_.dp_rank_,
+                                num_expert,
+                                token_num * top_k,
+                                current_stream);
+        } else if (expert_ids.dtype() == torch::kInt32) {
+            fake_balance_expert(expert_ids.data_ptr<int32_t>(),
+                                expert_scales.data_ptr<float>(),
+                                configs_.dp_rank_,
+                                num_expert,
+                                token_num * top_k,
+                                current_stream);
+        }
     }
 }
 
