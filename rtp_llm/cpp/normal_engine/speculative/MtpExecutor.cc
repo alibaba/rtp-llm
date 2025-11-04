@@ -445,7 +445,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     // dispatch
     auto result = batch_stream_processor_->dispatchDecode(
-        stream_groups, speculative_sampler_output, {std::move(model_output), std::move(draft_prefill_sampler_output)});
+        stream_groups,
+        speculative_sampler_output,
+        {std::move(draft_prefill_model_output), std::move(draft_prefill_sampler_output)});
 
     return result;
 }

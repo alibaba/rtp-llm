@@ -38,8 +38,14 @@ absl::Status MtpBatchStreamProcessor::dispatchPrefill(const StreamGroups& stream
         dispatchSingleStream(
             stream, prefill_output, batch_idx_in, batch_idx_out, token_offset, return_all_probs, new_tokens_all);
 
-        dispatchProposePrefillSingleStream(
-            stream, propose_output, batch_idx_in, batch_idx_out, token_offset, return_all_probs, new_tokens_all);
+        dispatchProposePrefillSingleStream(stream,
+                                           propose_output,
+                                           batch_idx_in,
+                                           batch_idx_out,
+                                           token_offset,
+                                           token_size,
+                                           return_all_probs,
+                                           new_tokens_all);
 
         stream->setSpDecodeStream();
         stream->setScoreLen(propose_step_ + 1);
@@ -74,12 +80,12 @@ absl::Status MtpBatchStreamProcessor::dispatchDecode(const StreamGroups&        
     for (auto& stream : stream_groups.allStreams()) {
         auto cur_batch_size  = stream->currentBatchSize();
         auto next_batch_size = stream->nextBatchSize();
-        auto token_size      = stream->currentExecuteTokenSize();
 
         new_tokens_all->data<int32_t>()[batch_idx_out] =
             accept_tokens[batch_idx_out]->data<int32_t>()[accept_len[batch_idx_out] - 1];
 
         // TODO(yinzhi): mtp not support extra sample control for now
+
         stream->update({accept_tokens[batch_idx_out],
                         accept_len[batch_idx_out],
                         nullptr,
@@ -91,12 +97,18 @@ absl::Status MtpBatchStreamProcessor::dispatchDecode(const StreamGroups&        
                         nullptr,
                         nullptr});
 
-        dispatchProposePrefillSingleStream(
-            stream, draft_prefill_output, batch_idx_in, batch_idx_out, token_offset, return_all_probs, new_tokens_all);
+        dispatchProposePrefillSingleStream(stream,
+                                           draft_prefill_output,
+                                           batch_idx_in,
+                                           batch_idx_out,
+                                           token_offset,
+                                           accept_len[batch_idx_out],
+                                           return_all_probs,
+                                           new_tokens_all);
 
+        token_offset += accept_len[batch_idx_out];
         batch_idx_in += cur_batch_size;
         batch_idx_out += next_batch_size;
-        token_offset += token_size;
     }
 
     // to avoid cuda sync, we need to set propose token in extra loop
@@ -110,6 +122,7 @@ void MtpBatchStreamProcessor::dispatchProposePrefillSingleStream(GenerateStreamP
                                                                  int                       batch_idx_in,
                                                                  int                       batch_idx_out,
                                                                  int                       token_offset,
+                                                                 int                       accept_len,
                                                                  bool                      return_all_probs,
                                                                  const rtp_llm::BufferPtr& new_tokens_all) const {
     const auto& draft_model_output   = propose_output.model_output;
@@ -124,28 +137,28 @@ void MtpBatchStreamProcessor::dispatchProposePrefillSingleStream(GenerateStreamP
 
     // only update last hidden states for mtp method
     BufferPtr last_hidden_states = nullptr;
-    auto      token_size         = stream->currentExecuteTokenSize();
 
     RTP_LLM_LOG_DEBUG("batch_idx_in: %d, batch_idx_out: %d, token_offset: %d, token_size: %d",
                       batch_idx_in,
                       batch_idx_out,
                       token_offset,
-                      token_size);
+                      accept_len);
 
-    last_hidden_states = draft_model_output.all_hidden_states->slice(token_offset + token_size - 1, 1, false);
-    last_hidden_states->updateParent(draft_model_output.all_hidden_states);
+    if (propose_step_ > 1) {
+        last_hidden_states = draft_model_output.all_hidden_states->slice(token_offset + accept_len - 1, 1, false);
+        last_hidden_states->updateParent(draft_model_output.all_hidden_states);
+    }
 
     // update speculative info
     stream->setLastHiddenStates(last_hidden_states);
-    auto   sp_output_buffer = stream->getSPOutputBuffer();
-    size_t propose_step     = sp_output_buffer->propose_step;
+    auto sp_output_buffer = stream->getSPOutputBuffer();
 
     if (propose_all_probs) {
         // lazy allocate buffer
         if (!sp_output_buffer->all_probs) {
             size_t vocab_size           = propose_all_probs->shape()[1];
             sp_output_buffer->all_probs = device_->allocateBuffer(
-                {rtp_llm::DataType::TYPE_FP32, {propose_step, vocab_size}, rtp_llm::AllocationType::DEVICE},
+                {rtp_llm::DataType::TYPE_FP32, {(size_t)propose_step_, vocab_size}, rtp_llm::AllocationType::DEVICE},
                 {"mtp_all_probs"});
         }
         device_->copy({sp_output_buffer->all_probs->view(0, 1), *propose_all_probs});
@@ -155,7 +168,13 @@ void MtpBatchStreamProcessor::dispatchProposePrefillSingleStream(GenerateStreamP
 absl::StatusOr<GptModelInputs>
 MtpBatchStreamProcessor::gatherDecodeModelInput(const StreamGroups& stream_groups) const {
     auto model_input = NormalBatchStreamProcessor::gatherModelInput(stream_groups);
+
     RTP_LLM_CHECK(model_input.ok());
+
+    if (propose_step_ == 1) {
+        return model_input;
+    }
+
     auto              all_streams = stream_groups.allStreams();
     rtp_llm::DataType type        = rtp_llm::DataType::TYPE_INVALID;
     size_t            hidden_size = 0;

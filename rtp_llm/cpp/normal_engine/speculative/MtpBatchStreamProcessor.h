@@ -48,6 +48,7 @@ protected:
                                             int                       batch_idx_in,
                                             int                       batch_idx_out,
                                             int                       token_offset,
+                                            int                       accept_len,
                                             bool                      return_all_probs,
                                             const rtp_llm::BufferPtr& new_tokens_all) const;
 

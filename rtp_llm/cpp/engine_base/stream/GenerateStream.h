@@ -366,20 +366,12 @@ public:
         sp_edit_first_time_ = sp_edit_first_time;
     }
 
-    void setProposeToken(std::vector<int>& propose_token) {
+    void setProposeToken(const std::vector<int>& propose_token) {
         propose_token_ = propose_token;
     }
 
     std::vector<int>& getProposeToken() {
         return propose_token_;
-    }
-
-    void setProposeProbs(rtp_llm::BufferPtr propose_probs) {
-        propose_probs_ = propose_probs;
-    }
-
-    rtp_llm::BufferPtr getProposeProbs() const {
-        return propose_probs_;
     }
 
     void setContainProposeToken(bool contain_propose_token) {
@@ -583,7 +575,6 @@ protected:
     bool                               sp_edit_first_time_   = true;
     bool                               sp_edit_run_          = false;
     std::vector<int>                   propose_token_;
-    rtp_llm::BufferPtr                 propose_probs_         = nullptr;
     bool                               contain_propose_token_ = false;
     int                                mtp_token_index_       = 0;
     SpeculativeExecutorStreamOutputPtr sp_output_buffer_      = nullptr;
