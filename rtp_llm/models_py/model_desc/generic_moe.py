@@ -7,6 +7,7 @@ from torch import nn
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
+from rtp_llm.models_py.modules import RMSNorm, SelectTopk
 from rtp_llm.models_py.modules.attention import CausalAttention
 from rtp_llm.models_py.modules.embedding import Embedding
 from rtp_llm.models_py.modules.fmha import FMHAImplBase
@@ -15,10 +16,14 @@ from rtp_llm.models_py.modules.mla.mla_attention import MlaAttention
 from rtp_llm.models_py.modules.mlp import FusedSiluActDenseMLP
 from rtp_llm.models_py.modules.moe import FusedMoe
 from rtp_llm.models_py.modules.moe.fused_moe_factory import FusedMoeFactory
-from rtp_llm.models_py.modules import RMSNorm
-from rtp_llm.models_py.modules import SelectTopk
-from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, PyModelInputs, PyModelOutputs
+from rtp_llm.ops.compute_ops import (
+    KVCache,
+    PyAttentionInputs,
+    PyModelInputs,
+    PyModelOutputs,
+)
 from rtp_llm.utils.model_weight import W
+
 
 class AttentionFactory:
     """Factory class for creating attention modules based on key_str."""
@@ -201,7 +206,7 @@ class GenericMoeLayer(nn.Module):
             dtype=torch.int64,
             device=hidden_states.device,
         )
-        
+
         self.select_topk(router_logits_fp32, topk_ids, topk_weights)
 
         return self.fused_moe(
@@ -322,7 +327,6 @@ class GenericMoeModel(GptModelBase):
         input_ids: torch.Tensor = inputs.input_ids
         inputs_embeds = self.embed_tokens(input_ids)
         hidden_states = inputs_embeds
-
         attention_inputs: PyAttentionInputs = inputs.attention_inputs
         impl_method = FMHAImplFactory.get_fmha_impl_method(self.attention_type)
         fmha_impl = getattr(self, impl_method)(attention_inputs)

@@ -20,7 +20,7 @@ from rtp_llm.models.rotary_embedding.deepseek_rotary_embedding import (
     DeepseekV3YarnRotaryEmbedding,
 )
 from rtp_llm.models_py.modules.fmha import MlaFlashInferPrefillImpl
-from rtp_llm.ops import KVCache, PyAttentionInputs
+from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs
 from rtp_llm.utils.model_weight import W
 
 
@@ -352,11 +352,11 @@ class MLABenchmark(TestCase):
         """小规模基准测试"""
         results = []
         for params in itertools.product(
-            [1, 128, 144, 160, 176, 192, 256, 512, 1024, 2048],
+            [1, 64, 128, 144, 160, 176, 192, 256, 512, 1024, 2048],
             [2048],
             [64],
             [1],
-            [0, 64, 128, 256, 512, 1024, 2048, 4096],
+            [0, 64, 128, 256, 512, 1024, 2048, 4096, 8192],
             [1, MAX_ITERATIONS],
             ["forward"],
         ):
