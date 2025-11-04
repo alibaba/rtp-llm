@@ -288,8 +288,6 @@ void fake_balance_expert(
 __global__ void
 genSourceRowKernelRevert(int64_t* expert_rows, int* expert_rows_dst, int token_num, int top_k, int start_expert) {
     int const idx       = blockIdx.x * blockDim.x + threadIdx.x;
-    int const token_idx = idx / top_k;
-    int const k_idx     = idx % top_k;
     if (idx < token_num * top_k) {
         if (expert_rows[idx] >= 0) {
             expert_rows_dst[idx] = expert_rows[idx] + start_expert;

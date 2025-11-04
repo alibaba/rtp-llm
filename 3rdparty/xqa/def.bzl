@@ -39,6 +39,7 @@ def build_lib(head_dim, page_size, group_size, xqa_name, xqa_kernel_name, input_
         ],
         copts = cuda_copts() + addition_cuda_copts,
         visibility = ["//visibility:public"],
+        tags = ["local"],
     )
 
 

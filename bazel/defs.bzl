@@ -1,6 +1,3 @@
-load("@pip_gpu_cuda12_torch//:requirements.bzl", requirement_gpu_cuda12="requirement")
-load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm="requirement")
-
 def copy_so(target):
     name = 'lib' + target.split(':')[1] + '_so'
     so_name = 'lib' + target.split(':')[1] + '.so'
