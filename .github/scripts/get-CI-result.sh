@@ -18,18 +18,18 @@ while true; do
 
     response=$(curl -s  -H "Content-Type: application/json" \
                         -H "Authorization: Basic ${SECURITY}" \
-                        -d "{\"type\": \"RETRIEVE-TASK-STATUS\", \"commitId\": \"${COMMIT_ID}\"}" "https://get-tasend-back-twkvcdsbpj.cn-hangzhou.fcapp.run")
+                        -d "{\"type\": \"RETRIEVE-TASK-STATUS\", \"commitId\": \"${COMMIT_ID}\"}" "https://get-tasend-back-twkvcdsbpj.cn-hangzhou-vpc.fcapp.run")
     echo "Response: $response"
 
     # 检查curl是否成功
     if [ $? -ne 0 ]; then
-        echo "Error: Failed to query CI status"
+        echo "Error: Failed to query CI status!"
         exit 1
     fi
 
     # 检查响应是否为空
     if [ -z "$response" ]; then
-        echo "Error: Empty response from CI service"
+        echo "Error: Empty response from CI service!"
         exit 1
     fi
 
