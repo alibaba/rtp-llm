@@ -32,6 +32,7 @@ RTP-LLM First Release Version:0.2.0(2025.09)
 ### Bug Fixs
 * P/D Disaggregation dead lock casuse by request cancel/failed before remote running
 * Raw Request stream stop_words cause fake hang
+* some speculative decoding bugs
 
 ## Question of omission
 * In 3fs Case need more MEM or set FRONTEND_SERVER_COUNT=1 to reduce frontend_server mem usage in P/D when Use Frontend Disaggregation.

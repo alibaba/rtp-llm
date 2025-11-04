@@ -29,4 +29,5 @@ cc_library(
         '-res-usage',
     ],
     visibility = ["//visibility:public"],
+    tags = ["local"],
 )
