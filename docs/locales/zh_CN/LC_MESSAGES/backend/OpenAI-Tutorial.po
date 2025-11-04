@@ -21,31 +21,33 @@ msgstr ""
 
 #: ../../backend/OpenAI-Tutorial.md:1
 msgid "Usage Guide"
-msgstr ""
+msgstr "使用指南"
 
 #: ../../backend/OpenAI-Tutorial.md:3
 msgid ""
 "RTP-LLM supports OpenAI chat format API calls and can be used as a "
 "seamless drop-in replacement for OpenAI interface services."
 msgstr ""
+"RTP-LLM支持OpenAI聊天格式的API调用，可以作为OpenAI接口服务的无缝替换方案。"
 
 #: ../../backend/OpenAI-Tutorial.md:5
 msgid "Getting Started"
-msgstr ""
+msgstr "快速开始"
 
 #: ../../backend/OpenAI-Tutorial.md:14
 msgid ""
 "After the server starts, we provide an OpenAI client compatible chat "
 "interface. Usage examples are as follows:"
 msgstr ""
+"服务器启动后，我们提供与OpenAI客户端兼容的聊天接口。使用示例如下："
 
 #: ../../backend/OpenAI-Tutorial.md:45
 msgid "use curl to get result, Usage example:"
-msgstr ""
+msgstr "使用curl获取结果，使用示例："
 
 #: ../../backend/OpenAI-Tutorial.md:63
 msgid "Chat Template Configuration"
-msgstr ""
+msgstr "聊天模板配置"
 
 #: ../../backend/OpenAI-Tutorial.md:65
 msgid ""

@@ -21,5 +21,5 @@ msgstr ""
 
 #: ../../references/hardware.rst:2
 msgid "Hardware Supports"
-msgstr ""
+msgstr "硬件支持"
 

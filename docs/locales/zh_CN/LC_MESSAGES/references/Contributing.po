@@ -21,7 +21,7 @@ msgstr ""
 
 #: ../../references/Contributing.md:1
 msgid "Contributing Guide"
-msgstr ""
+msgstr "贡献指南"
 
 #: ../../references/Contributing.md:3
 msgid ""
@@ -30,43 +30,46 @@ msgid ""
 " proposing new features, or becoming a maintainer, we warmly welcome your"
 " participation!"
 msgstr ""
+"我们鼓励每个成员为项目做出贡献。无论是通过报告问题、讨论代码当前状态、"
+"提交修复、提出新功能，还是成为维护者，我们都热烈欢迎您的参与！"
 
 #: ../../references/Contributing.md:5
 msgid "Here are several ways you can contribute:"
-msgstr ""
+msgstr "您可以通过以下几种方式做出贡献："
 
 #: ../../references/Contributing.md:7
 msgid "**Report bugs**: If you find an error, please let us know."
-msgstr ""
+msgstr "**报告错误**：如果您发现错误，请告诉我们。"
 
 #: ../../references/Contributing.md:8
 msgid ""
 "**Discuss code status**: Participate in discussions and reviews of "
 "existing code."
-msgstr ""
+msgstr "**讨论代码状态**：参与现有代码的讨论和审查。"
 
 #: ../../references/Contributing.md:9
 msgid "**Submit fixes**: If you can fix a problem, please submit your code."
-msgstr ""
+msgstr "**提交修复**：如果您能修复问题，请提交您的代码。"
 
 #: ../../references/Contributing.md:10
 msgid "**Propose new features**: We welcome any innovative ideas and suggestions."
-msgstr ""
+msgstr "**提出新功能**：我们欢迎任何创新的想法和建议。"
 
 #: ../../references/Contributing.md:11
 msgid ""
 "**Become a maintainer**: If you're willing to commit long-term to the "
 "project, you can become a project maintainer."
-msgstr ""
+msgstr "**成为维护者**：如果您愿意长期投入项目，您可以成为项目维护者。"
 
 #: ../../references/Contributing.md:12
 msgid ""
 "**Discussion**: If you want to discuss anything, feel free to express "
 "your views, opinions, or other relevant comments in the discussion area."
-msgstr ""
+msgstr "**讨论**：如果您想讨论任何事情，请在讨论区域自由表达您的观点、意见或其他相关评论。"
 
 #: ../../references/Contributing.md:14
 msgid "Contribution Process"
+msgstr "贡献流程"
 msgstr ""
 
 #: ../../references/Contributing.md:16

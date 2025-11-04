@@ -21,7 +21,7 @@ msgstr ""
 
 #: ../../backend/quantization.md:1
 msgid "Quantization"
-msgstr ""
+msgstr "量化"
 
 #: ../../backend/quantization.md:2
 msgid ""
@@ -31,10 +31,12 @@ msgid ""
 " cause performance degradation for long sequences during the Prefill "
 "phase Currently, all quantization methods are supported in SM70 and above"
 msgstr ""
+"RTP-LLM目前支持仅权重量化，包括int8和int4。它可以显著减少显存占用并加速解码阶段。"
+"已知问题：仅权重量化可能在Prefill阶段对长序列造成性能下降。目前，所有量化方法在SM70及以上版本中受支持。"
 
 #: ../../backend/quantization.md:6
 msgid "Support Quant"
-msgstr ""
+msgstr "支持的量化"
 
 #: ../../backend/quantization.md
 msgid "**CardType**"

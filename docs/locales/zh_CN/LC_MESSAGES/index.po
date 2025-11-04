@@ -48,11 +48,11 @@ msgstr "高级功能"
 
 #: ../../index.rst:76
 msgid "RTP-LLM Router"
-msgstr "RTP-LLM 路由器"
+msgstr "RTP-LLM 负载均衡"
 
 #: ../../index.rst:82
 msgid "Benchmark"
-msgstr ""
+msgstr "基准测试"
 
 #: ../../index.rst:88
 msgid "References"

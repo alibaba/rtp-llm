@@ -21,5 +21,5 @@ msgstr ""
 
 #: ../../release/index.rst:2
 msgid "Release Version"
-msgstr ""
+msgstr "发布版本"
 

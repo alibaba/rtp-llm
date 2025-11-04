@@ -21,11 +21,11 @@ msgstr ""
 
 #: ../../start/install.md:1
 msgid "Install RTP-LLM"
-msgstr ""
+msgstr "安装RTP-LLM"
 
 #: ../../start/install.md:3
 msgid "We provide multiple ways to install RTP-LLM."
-msgstr ""
+msgstr "我们提供多种安装RTP-LLM的方式。"
 
 #: ../../start/install.md:4
 msgid ""
@@ -33,31 +33,39 @@ msgid ""
 "[DeepSeek V3/R1 Support](../references/deepseek/index.rst) and use Docker"
 " to run"
 msgstr ""
+"如果您需要运行**DeepSeek V3/R1**，建议参考[DeepSeek V3/R1支持]"
+"(../references/deepseek/index.rst)并使用Docker运行"
 
 #: ../../start/install.md:5
 msgid ""
 "If you need to run **Kimi-K2**, it is recommended to refer to [Kimi-K2 "
 "Support](../references/kimi/index.rst) and use Docker to run"
 msgstr ""
+"如果您需要运行**Kimi-K2**，建议参考[Kimi-K2支持]"
+"(../references/kimi/index.rst)并使用Docker运行"
 
 #: ../../start/install.md:6
 msgid ""
 "If you need to run **QwenMoE**, it is recommended to refer to [Qwen MoE "
 "Support](../references/qwen/index.rst) and use Docker to run"
 msgstr ""
+"如果您需要运行**QwenMoE**，建议参考[Qwen MoE支持]"
+"(../references/qwen/index.rst)并使用Docker运行"
 
 #: ../../start/install.md:9
 msgid ""
 "To speed up installation, it is recommended to use pip to install "
 "dependencies:"
 msgstr ""
+"为加快安装速度，建议使用pip安装依赖："
 
 #: ../../start/install.md:11
 msgid "Method 1: With pip"
-msgstr ""
+msgstr "方法1：使用pip"
 
 #: ../../start/install.md:19
 msgid "Method 2: From source"
+msgstr "方法2：从源代码"
 msgstr ""
 
 #: ../../start/install.md

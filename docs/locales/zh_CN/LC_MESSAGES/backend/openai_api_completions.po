@@ -21,7 +21,7 @@ msgstr ""
 
 #: ../../backend/openai_api_completions.ipynb:9
 msgid "OpenAI APIs - Completions"
-msgstr ""
+msgstr "OpenAI API - 补全"
 
 #: ../../backend/openai_api_completions.ipynb:11
 msgid ""
@@ -29,10 +29,12 @@ msgid ""
 "from OpenAI services to self-hosted local models. This tutorial covers "
 "the following popular APIs:"
 msgstr ""
+"RTP-LLM提供与OpenAI兼容的API，实现从OpenAI服务到自托管本地模型的平滑过渡。"
+"本教程涵盖以下流行的API："
 
 #: ../../backend/openai_api_completions.ipynb:13
 msgid "``v1/chat/completions``"
-msgstr ""
+msgstr "``v1/chat/completions``"
 
 #: ../../backend/openai_api_completions.ipynb:15
 msgid ""
@@ -40,14 +42,16 @@ msgid ""
 "<./openai_api_vision.ipynb>`__ for vision-language models and `embedding "
 "APIs <./openai_api_embeddings.ipynb>`__ for embedding models."
 msgstr ""
+"查看其他教程，了解视觉语言模型的`视觉API <./openai_api_vision.ipynb>`__和"
+"嵌入模型的`嵌入API <./openai_api_embeddings.ipynb>`__。"
 
 #: ../../backend/openai_api_completions.ipynb:27
 msgid "Launch A Server"
-msgstr ""
+msgstr "启动服务器"
 
 #: ../../backend/openai_api_completions.ipynb:29
 msgid "Launch the server in your terminal and wait for it to initialize."
-msgstr ""
+msgstr "在终端中启动服务器并等待其初始化。"
 
 #: ../../backend/openai_api_completions.ipynb:31
 msgid "export CUDA_VISIBLE_DEVICES=1"

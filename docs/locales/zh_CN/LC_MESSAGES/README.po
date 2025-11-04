@@ -21,19 +21,19 @@ msgstr ""
 
 #: ../../README.md:1
 msgid "Documentation Manual"
-msgstr ""
+msgstr "文档手册"
 
 #: ../../README.md:2
 msgid "Prepare Docs Requirements"
-msgstr ""
+msgstr "准备文档要求"
 
 #: ../../README.md:13
 msgid "Add Documentation"
-msgstr ""
+msgstr "添加文档"
 
 #: ../../README.md:15
 msgid "1. Add Documentation File"
-msgstr ""
+msgstr "1. 添加文档文件"
 
 #: ../../README.md:16
 msgid ""
@@ -41,16 +41,19 @@ msgid ""
 "documentation that can be executed, consider adding Jupyter Notebook "
 "(`.ipynb`) files."
 msgstr ""
+"对于设计相关的内容，添加MD（Markdown）文件。对于可执行的用法文档，"
+"考虑添加Jupyter Notebook（`.ipynb`）文件。"
 
 #: ../../README.md:17
 msgid ""
 "If images are included, it is recommended to place them in the "
 "`docs/pics/` directory."
 msgstr ""
+"如果包含图片，建议将它们放在`docs/pics/`目录中。"
 
 #: ../../README.md:19
 msgid "2. Add Index"
-msgstr ""
+msgstr "2. 添加索引"
 
 #: ../../README.md:20
 msgid ""
@@ -58,20 +61,23 @@ msgid ""
 "documentation, organize files into the appropriate directory structure "
 "based on their purpose."
 msgstr ""
+"文档索引是从`.rst`文件构建的。添加文档后，根据文件用途将它们组织到合适的"
+"目录结构中。"
 
 #: ../../README.md:22
 msgid "3. Add Chinese Support"
-msgstr ""
+msgstr "3. 添加中文支持"
 
 #: ../../README.md:23
 msgid "Navigate to the `docs` directory."
-msgstr ""
+msgstr "导航到`docs`目录。"
 
 #: ../../README.md:24
 msgid ""
 "Run the command `make update`. This command extracts all translatable "
 "messages and updates the PO translation files."
 msgstr ""
+"运行命令`make update`。此命令提取所有可翻译的消息并更新PO翻译文件。"
 
 #: ../../README.md:25
 msgid ""
@@ -79,6 +85,8 @@ msgid ""
 "`docs/locales/zh_CN/LC_MESSAGES`, filling in the `msgstr` fields for the "
 "target language."
 msgstr ""
+"手动更新`docs/locales/zh_CN/LC_MESSAGES`下新生成的翻译文件，为目标语言"
+"填写`msgstr`字段。"
 
 #: ../../README.md:26 ../../README.md:31
 msgid ""
@@ -86,10 +94,12 @@ msgid ""
 "Alternatively, run `make html-zh` or `make html-en` separately to build "
 "specific language versions."
 msgstr ""
+"运行`make html`生成中文和英文HTML版本。或者，分别运行`make html-zh`或"
+"`make html-en`来构建特定语言版本。"
 
 #: ../../README.md:28
 msgid "Modify Documentation"
-msgstr ""
+msgstr "修改文档"
 
 #: ../../README.md:29
 msgid ""
@@ -97,6 +107,8 @@ msgid ""
 "ensure to update the corresponding Chinese PO files and regenerate HTML "
 "output by running `make html`."
 msgstr ""
+"与添加文档类似，如果修改现有文档，确保更新相应的中文PO文件并通过运行"
+"`make html`重新生成HTML输出。"
 
 #: ../../README.md:30
 msgid ""
@@ -104,4 +116,6 @@ msgid ""
 "under `docs/locales/zh_CN/LC_MESSAGES`, filling in the `msgstr` fields "
 "for the target language."
 msgstr ""
+"运行`make update`，手动更新`docs/locales/zh_CN/LC_MESSAGES`下新生成的翻译文件，"
+"为目标语言填写`msgstr`字段。"
 

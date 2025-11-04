@@ -21,7 +21,7 @@ msgstr ""
 
 #: ../../supported_models/generative_models.md:1
 msgid "Large Language Models"
-msgstr ""
+msgstr "大语言模型"
 
 #: ../../supported_models/generative_models.md:3
 msgid ""
@@ -29,18 +29,19 @@ msgid ""
 "completions). They are primarily large language models (LLMs), some with "
 "mixture-of-experts (MoE) architectures for scaling."
 msgstr ""
+"这些模型接受文本输入并产生文本输出（例如聊天补全）。它们主要是大语言模型（LLM），一些采用专家混合（MoE）架构进行扩展。"
 
 #: ../../supported_models/generative_models.md:5
 msgid "Example launch Command"
-msgstr ""
+msgstr "示例启动命令"
 
 #: ../../supported_models/generative_models.md:15
 msgid "Supported models"
-msgstr ""
+msgstr "支持的模型"
 
 #: ../../supported_models/generative_models.md:17
 msgid "Below the supported models are summarized in a table."
-msgstr ""
+msgstr "以下是支持的模型汇总表。"
 
 #: ../../supported_models/generative_models.md:19
 msgid ""

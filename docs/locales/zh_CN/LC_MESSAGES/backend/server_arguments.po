@@ -21,7 +21,7 @@ msgstr ""
 
 #: ../../backend/server_arguments.md:1
 msgid "ServerArgs"
-msgstr ""
+msgstr "服务器参数"
 
 #: ../../backend/server_arguments.md:3
 msgid ""
@@ -31,22 +31,25 @@ msgid ""
 " model selection, parallel strategies, memory management, and "
 "optimization techniques."
 msgstr ""
+"本页面列出了用于通过命令行配置语言模型服务器行为和性能的服务器参数。"
+"这些参数允许用户自定义关键的服务器功能，包括模型选择、并行策略、"
+"内存管理和优化技术。"
 
 #: ../../backend/server_arguments.md:5
 msgid "Parallelism and Distributed Setup Configuration"
-msgstr ""
+msgstr "并行和分布式设置配置"
 
 #: ../../backend/server_arguments.md
 msgid "Arguments"
-msgstr ""
+msgstr "参数"
 
 #: ../../backend/server_arguments.md
 msgid "Description"
-msgstr ""
+msgstr "描述"
 
 #: ../../backend/server_arguments.md
 msgid "Defaults"
-msgstr ""
+msgstr "默认值"
 
 #: ../../backend/server_arguments.md
 msgid "`--tp-size`"
