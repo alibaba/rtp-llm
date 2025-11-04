@@ -156,7 +156,7 @@ test:rocm --test_env="/opt/rocm/lib/:/opt/taobao/java/jre/lib/amd64/server/:/opt
 
 build:arm --copt="-DENABLE_BF16=1"
 build:arm --define=using_cuda=false --define=using_cuda_nvcc=false
-build:arm --define=using_arm=false
+build:arm --define=using_arm=true
 build:arm --copt="-DBUILDING_ARM_ONLY=1"
 build:arm --action_env TF_NEED_CUDA="0"
 build:arm --host_action_env TF_NEED_CUDA="0"

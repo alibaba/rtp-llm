@@ -97,7 +97,7 @@ requirement([
     "av",
     "pyrsmi",
     "amdsmi",
-    # "fast-safetensors",
+    "fast-safetensors",
     "setproctitle",
     "bitsandbytes",
     "portalocker",
