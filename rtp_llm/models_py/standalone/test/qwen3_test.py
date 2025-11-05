@@ -1,46 +1,42 @@
-import os
+# if you haven't installed the rtp-llm wheel, you need to add the dev directory to the python path
 import sys
+from pathlib import Path
 
-os.environ["LOAD_PYTHON_MODEL"] = "1"
+rtp_opensouce_path = Path(__file__).resolve().parent.parent.parent.parent.parent
+print(f"rtp_opensouce_path: {rtp_opensouce_path}")
+sys.path.append(str(rtp_opensouce_path))
 
-sys.path.append("/home/wangyin.yx/workspace/FasterTransformer")
+# only need to import the rtp_simple_model
+from rtp_llm.models_py.standalone.rtp_simple_model import RtpSimplePyModel
 
-import rtp_llm.models
-from rtp_llm.config.py_config_modules import StaticConfig
-from rtp_llm.distribute.worker_info import g_worker_info, update_master_info
-from rtp_llm.model_factory import ModelFactory
-from rtp_llm.models_py.model_desc.qwen3 import Qwen3Model
-from rtp_llm.openai.api_datatype import ChatCompletionRequest, ChatMessage, RoleEnum
-from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
-from rtp_llm.pipeline import Pipeline
-from rtp_llm.test.utils.port_util import PortsContext
-
-start_port = 23345
-StaticConfig.server_config.start_port = start_port
-update_master_info("127.0.0.1", start_port)
-g_worker_info.reload()
-StaticConfig.model_config.model_type = "qwen_3"
-StaticConfig.model_config.checkpoint_path = "Qwen/Qwen3-0.6B"
-os.environ["DEVICE_RESERVE_MEMORY_BYTES"] = str(3 * 1024 * 1024 * 1024)
-model_config = ModelFactory.create_normal_model_config()
-model = ModelFactory.creat_standalone_py_model_from_huggingface(
-    model_config.ckpt_path, model_config=model_config
+# create simplemodel
+my_model = RtpSimplePyModel(
+    model_type="qwen_3",
+    model_path="/home/lvjiang.lj/models/qwen3-0.6B",
+    act_type="FP16",
 )
 
-
-import torch
-
-from rtp_llm.ops.compute_ops import (
-    KVCache,
-    PyAttentionInputs,
-    PyModelInputs,
-    PyModelOutputs,
+# generate text and token_ids
+messages = [{"role": "user", "content": "你好，请用较长篇幅介绍一下自己"}]
+input_text = my_model.tokenizer.apply_chat_template(
+    messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
 )
+input_ids = my_model.tokenizer.encode(input_text)
 
-attention_inputs = PyAttentionInputs()
-inputs = PyModelInputs(
-    input_ids=torch.randint(0, 10, (1, 10)), attention_inputs=attention_inputs
+# generate token_ids and text
+output_ids = my_model.generate(input_ids, max_new_tokens=1000)
+output_text = my_model.tokenizer.decode(output_ids)
+print(f"\nanswer of Q1:\n\n {output_text}")
+
+
+# generate text and token_ids
+messages = [{"role": "user", "content": "3.9和3.11哪个大"}]
+input_text = my_model.tokenizer.apply_chat_template(
+    messages, tokenize=False, add_generation_prompt=True, enable_thinking=True
 )
+input_ids = my_model.tokenizer.encode(input_text)
 
-qwen3_model = Qwen3Model(model.config, model.weight)
-qwen3_model.forward(model.input)
+# generate token_ids and text
+output_ids = my_model.generate(input_ids, max_new_tokens=1000)
+output_text = my_model.tokenizer.decode(output_ids)
+print(f"\nanswer of Q2:\n\n {output_text}")
