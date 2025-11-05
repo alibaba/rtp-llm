@@ -36,7 +36,7 @@ TEST_F(BlockPoolTest, ConstructorAndInit) {
     bool init_result = block_pool_->init();
     EXPECT_TRUE(init_result);
 
-    EXPECT_EQ(block_pool_->freeBlockNums(), config.block_num);
+    EXPECT_EQ(block_pool_->freeBlockNums(), config.block_num - 1);
 }
 
 TEST_F(BlockPoolTest, InitWithKVFirstLayout) {
@@ -47,7 +47,7 @@ TEST_F(BlockPoolTest, InitWithKVFirstLayout) {
     bool init_result = block_pool_->init();
     EXPECT_TRUE(init_result);
 
-    EXPECT_EQ(block_pool_->freeBlockNums(), config.block_num);
+    EXPECT_EQ(block_pool_->freeBlockNums(), config.block_num - 1);
 }
 
 // Allocation Test
@@ -60,7 +60,7 @@ TEST_F(BlockPoolTest, AllocSingleBlock) {
     EXPECT_EQ(blocks.size(), 1);
     EXPECT_GE(blocks[0], 0);
     EXPECT_LT(blocks[0], static_cast<BlockIdxType>(config.block_num));
-    EXPECT_EQ(block_pool_->freeBlockNums(), config.block_num - 1);
+    EXPECT_EQ(block_pool_->freeBlockNums(), config.block_num - 2);
 }
 
 TEST_F(BlockPoolTest, AllocMultipleBlocks) {
@@ -71,7 +71,7 @@ TEST_F(BlockPoolTest, AllocMultipleBlocks) {
     int  alloc_count = 5;
     auto blocks      = block_pool_->malloc(alloc_count);
     EXPECT_EQ(blocks.size(), alloc_count);
-    EXPECT_EQ(block_pool_->freeBlockNums(), config.block_num - alloc_count);
+    EXPECT_EQ(block_pool_->freeBlockNums(), config.block_num - alloc_count - 1);
 
     std::set<BlockIdxType> unique_blocks(blocks.begin(), blocks.end());
     EXPECT_EQ(unique_blocks.size(), alloc_count);
@@ -82,7 +82,7 @@ TEST_F(BlockPoolTest, AllocAllBlocks) {
     block_pool_ = std::make_shared<BlockPool>(config, device_);
     block_pool_->init();
 
-    auto blocks = block_pool_->malloc(config.block_num);
+    auto blocks = block_pool_->malloc(config.block_num - 1);
     EXPECT_EQ(blocks.size(), config.block_num);
     EXPECT_EQ(block_pool_->freeBlockNums(), 0);
 }
@@ -97,7 +97,7 @@ TEST_F(BlockPoolTest, AllocMoreThanAvailable) {
 
     auto blocks2 = block_pool_->malloc(10);
     EXPECT_EQ(blocks2.size(), 0);
-    EXPECT_EQ(block_pool_->freeBlockNums(), config.block_num - 5);
+    EXPECT_EQ(block_pool_->freeBlockNums(), config.block_num - 6);
 }
 
 // Free Test
@@ -107,10 +107,10 @@ TEST_F(BlockPoolTest, FreeBlocks) {
     block_pool_->init();
 
     auto blocks = block_pool_->malloc(5);
-    EXPECT_EQ(block_pool_->freeBlockNums(), config.block_num - 5);
+    EXPECT_EQ(block_pool_->freeBlockNums(), config.block_num - 6);
 
     block_pool_->free(blocks);
-    EXPECT_EQ(block_pool_->freeBlockNums(), config.block_num);
+    EXPECT_EQ(block_pool_->freeBlockNums(), config.block_num - 1);
 }
 
 TEST_F(BlockPoolTest, FreePartialBlocks) {
@@ -119,11 +119,11 @@ TEST_F(BlockPoolTest, FreePartialBlocks) {
     block_pool_->init();
 
     auto blocks = block_pool_->malloc(5);
-    EXPECT_EQ(block_pool_->freeBlockNums(), config.block_num - 5);
+    EXPECT_EQ(block_pool_->freeBlockNums(), config.block_num - 6);
 
     std::vector<BlockIdxType> partial_blocks(blocks.begin(), blocks.begin() + 3);
     block_pool_->free(partial_blocks);
-    EXPECT_EQ(block_pool_->freeBlockNums(), config.block_num - 2);
+    EXPECT_EQ(block_pool_->freeBlockNums(), config.block_num - 3);
 }
 
 // Reference and Free Test
@@ -133,15 +133,15 @@ TEST_F(BlockPoolTest, ReferenceAndFree) {
     block_pool_->init();
 
     auto blocks = block_pool_->malloc(3);
-    EXPECT_EQ(block_pool_->freeBlockNums(), config.block_num - 3);
+    EXPECT_EQ(block_pool_->freeBlockNums(), config.block_num - 4);
 
     block_pool_->reference(blocks);
 
     block_pool_->free(blocks);
-    EXPECT_EQ(block_pool_->freeBlockNums(), config.block_num - 3);
+    EXPECT_EQ(block_pool_->freeBlockNums(), config.block_num - 4);
 
     block_pool_->free(blocks);
-    EXPECT_EQ(block_pool_->freeBlockNums(), config.block_num);
+    EXPECT_EQ(block_pool_->freeBlockNums(), config.block_num - 1);
 }
 
 TEST_F(BlockPoolTest, MultipleReferencesAndFrees) {
@@ -157,16 +157,16 @@ TEST_F(BlockPoolTest, MultipleReferencesAndFrees) {
 
     // free for 4 times (1 + 3)
     block_pool_->free(blocks);
-    EXPECT_EQ(block_pool_->freeBlockNums(), config.block_num - 2);
+    EXPECT_EQ(block_pool_->freeBlockNums(), config.block_num - 3);
 
     block_pool_->free(blocks);
-    EXPECT_EQ(block_pool_->freeBlockNums(), config.block_num - 2);
+    EXPECT_EQ(block_pool_->freeBlockNums(), config.block_num - 3);
 
     block_pool_->free(blocks);
-    EXPECT_EQ(block_pool_->freeBlockNums(), config.block_num - 2);
+    EXPECT_EQ(block_pool_->freeBlockNums(), config.block_num - 3);
 
     block_pool_->free(blocks);
-    EXPECT_EQ(block_pool_->freeBlockNums(), config.block_num);
+    EXPECT_EQ(block_pool_->freeBlockNums(), config.block_num - 1);
 }
 
 // Convert Index to Addr Test
@@ -266,7 +266,7 @@ TEST_F(BlockPoolTest, AllocZeroBlocks) {
 
     auto blocks = block_pool_->malloc(0);
     EXPECT_EQ(blocks.size(), 0);
-    EXPECT_EQ(block_pool_->freeBlockNums(), config.block_num);
+    EXPECT_EQ(block_pool_->freeBlockNums(), config.block_num - 1);
 }
 
 TEST_F(BlockPoolTest, FreeEmptyVector) {
@@ -276,7 +276,7 @@ TEST_F(BlockPoolTest, FreeEmptyVector) {
 
     std::vector<BlockIdxType> empty_blocks;
     block_pool_->free(empty_blocks);
-    EXPECT_EQ(block_pool_->freeBlockNums(), config.block_num);
+    EXPECT_EQ(block_pool_->freeBlockNums(), config.block_num - 1);
 }
 
 TEST_F(BlockPoolTest, OutOfRangeLayerId) {
@@ -298,10 +298,10 @@ TEST_F(BlockPoolTest, AllocFreeAllocCycle) {
     for (int i = 0; i < 5; ++i) {
         auto blocks = block_pool_->malloc(5);
         EXPECT_EQ(blocks.size(), 5);
-        EXPECT_EQ(block_pool_->freeBlockNums(), config.block_num - 5);
+        EXPECT_EQ(block_pool_->freeBlockNums(), config.block_num - 6);
 
         block_pool_->free(blocks);
-        EXPECT_EQ(block_pool_->freeBlockNums(), config.block_num);
+        EXPECT_EQ(block_pool_->freeBlockNums(), config.block_num - 1);
     }
 }
 
@@ -313,20 +313,20 @@ TEST_F(BlockPoolTest, MixedAllocFreeOperations) {
     std::vector<std::vector<BlockIdxType>> allocated_blocks;
 
     allocated_blocks.push_back(block_pool_->malloc(2));
-    EXPECT_EQ(block_pool_->freeBlockNums(), 8);
-
-    allocated_blocks.push_back(block_pool_->malloc(3));
-    EXPECT_EQ(block_pool_->freeBlockNums(), 5);
-
-    block_pool_->free(allocated_blocks[0]);
     EXPECT_EQ(block_pool_->freeBlockNums(), 7);
 
+    allocated_blocks.push_back(block_pool_->malloc(3));
+    EXPECT_EQ(block_pool_->freeBlockNums(), 4);
+
+    block_pool_->free(allocated_blocks[0]);
+    EXPECT_EQ(block_pool_->freeBlockNums(), 6);
+
     allocated_blocks.push_back(block_pool_->malloc(4));
-    EXPECT_EQ(block_pool_->freeBlockNums(), 3);
+    EXPECT_EQ(block_pool_->freeBlockNums(), 2);
 
     block_pool_->free(allocated_blocks[1]);
     block_pool_->free(allocated_blocks[2]);
-    EXPECT_EQ(block_pool_->freeBlockNums(), 10);
+    EXPECT_EQ(block_pool_->freeBlockNums(), 9);
 }
 
 }  // namespace test
