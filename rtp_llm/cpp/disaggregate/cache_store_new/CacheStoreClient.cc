@@ -22,8 +22,8 @@ void CacheStoreClientClosure::Run() {
 }
 
 // TODO: fill ip and port
-CacheStoreClient::CacheStoreClient(const std::shared_ptr<TcpClient>& tcp_client, int tp_size, int tp_rank):
-    tcp_client_(tcp_client), tp_size_(tp_size), tp_rank_(tp_rank), ip_(""), port_(0) {}
+CacheStoreClient::CacheStoreClient(const std::shared_ptr<TcpClient>& tcp_client):
+    tcp_client_(tcp_client), ip_(""), port_(0) {}
 
 CacheStoreClient::~CacheStoreClient() {}
 
@@ -32,8 +32,8 @@ CacheStoreClient::asyncLoad(const std::vector<std::shared_ptr<LayerCacheBuffer>>
                             int64_t                                               timeout_ms,
                             const std::string&                                    ip,
                             uint32_t                                              port,
-                            int                                                   tp_size,
-                            int                                                   tp_rank) {
+                            int                                                   partition_count,
+                            int                                                   partition_id) {
     auto channel = tcp_client_->getChannel(ip, port);
     if (channel == nullptr) {
         return nullptr;
@@ -45,7 +45,8 @@ CacheStoreClient::asyncLoad(const std::vector<std::shared_ptr<LayerCacheBuffer>>
     auto    context_id  = generateContextId();
 
     std::shared_ptr<CacheLoadRequest> cache_load_request(new CacheLoadRequest());
-    if (!generateCacheLoadRequest(layer_cache_buffers, deadline_ms, context_id, cache_load_request)) {
+    if (!generateCacheLoadRequest(
+            layer_cache_buffers, deadline_ms, context_id, partition_count, partition_id, cache_load_request)) {
         RTP_LLM_LOG_ERROR("generate cache load request failed");
         return nullptr;
     }
@@ -71,11 +72,13 @@ bool CacheStoreClient::generateCacheLoadRequest(
     const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers,
     int64_t                                               deadline_ms,
     int64_t                                               context_id,
+    int                                                   partition_count,
+    int                                                   partition_id,
     const std::shared_ptr<CacheLoadRequest>&              cache_load_request) {
 
     cache_load_request->set_deadline_ms(deadline_ms);
-    cache_load_request->set_tp_size(tp_size_);
-    cache_load_request->set_tp_rank(tp_rank_);
+    cache_load_request->set_partition_count(partition_count);
+    cache_load_request->set_partition_id(partition_id);
     cache_load_request->set_ip(ip_);
     cache_load_request->set_port(port_);
     cache_load_request->set_context_id(context_id);

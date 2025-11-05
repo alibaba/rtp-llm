@@ -40,7 +40,11 @@ void SingleLayerCacheBufferStore::notifyAllWatchers(const std::shared_ptr<LayerC
         }
     }
     for (auto& watcher : watchers) {
-        watcher->notify(layer_cache_buffer, this);
+        if (watcher->notify(layer_cache_buffer)) {
+            delLayerCacheBufferWatchFunc(watcher);
+            delLayerCacheBuffer(layer_cache_buffer);
+            break;
+        }
     }
 }
 
@@ -67,7 +71,11 @@ void SingleLayerCacheBufferStore::watchAllCacheBuffers(const std::shared_ptr<Wat
         }
     }
     for (auto& layer_cache_buffer : layer_cache_buffers) {
-        watcher->notify(layer_cache_buffer, this);
+        if (watcher->notify(layer_cache_buffer)) {
+            delLayerCacheBufferWatchFunc(watcher);
+            delLayerCacheBuffer(layer_cache_buffer);
+            break;
+        }
     }
 }
 

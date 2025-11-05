@@ -16,8 +16,8 @@ message LayerCacheBlockInfo {
 message CacheLoadRequest {
     repeated LayerCacheBlockInfo layer_cache_load_infos = 1;
     optional int64 deadline_ms = 2;
-    optional uint32 tp_size = 3;
-    optional uint32 tp_rank = 4;
+    optional uint32 partition_count = 3;
+    optional uint32 partition_id = 4;
     optional string ip = 5;
     optional uint32 port = 6;
     optional uint32 rdma_port = 7;
@@ -35,7 +35,6 @@ service CacheStoreService {
     rpc load(CacheLoadRequest) returns (CacheLoadResponse) {
         option (arpc.local_method_id) = 10088;
     }
-
 }
 
 message RdmaNicRKey {

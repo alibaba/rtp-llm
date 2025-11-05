@@ -31,7 +31,7 @@ private:
 
 class CacheStoreClient {
 public:
-    CacheStoreClient(const std::shared_ptr<TcpClient>& tcp_client, int tp_size, int tp_rank);
+    CacheStoreClient(const std::shared_ptr<TcpClient>& tcp_client);
     ~CacheStoreClient();
 
 public:
@@ -39,20 +39,20 @@ public:
                                            int64_t                                               timeout_ms,
                                            const std::string&                                    ip,
                                            uint32_t                                              port,
-                                           int                                                   tp_size,
-                                           int                                                   tp_rank);
+                                           int                                                   partition_count,
+                                           int                                                   partition_id);
 
 private:
     int64_t generateContextId();
     bool    generateCacheLoadRequest(const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers,
                                      int64_t                                               deadline_ms,
                                      int64_t                                               context_id,
+                                     int                                                   partition_count,
+                                     int                                                   partition_id,
                                      const std::shared_ptr<CacheLoadRequest>&              cache_load_request);
 
 private:
     std::shared_ptr<TcpClient> tcp_client_;
-    int                        tp_size_;
-    int                        tp_rank_;
     std::string                ip_;
     uint32_t                   port_;
 

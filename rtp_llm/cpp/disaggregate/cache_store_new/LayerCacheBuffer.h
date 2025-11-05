@@ -51,28 +51,27 @@ public:
         ~Watcher() = default;
 
     public:
-        virtual void notify(const std::shared_ptr<LayerCacheBuffer>& layer_cache_buffer,
-                            SingleLayerCacheBufferStore*             layer_cache_buffer_store) = 0;
+        virtual bool notify(const std::shared_ptr<LayerCacheBuffer>& layer_cache_buffer) = 0;
         int          layerId() const {
             return layer_id_;
         }
 
-    private:
+    protected:
         int layer_id_;
     };
 
 public:
     bool setLayerCacheBuffer(const std::shared_ptr<LayerCacheBuffer>& layer_cache_buffer, int64_t deadline_ms);
-    void delLayerCacheBuffer(const std::shared_ptr<LayerCacheBuffer>& layer_cache_buffer);
 
     void setLayerCacheBufferWatchFunc(std::shared_ptr<Watcher> watcher, int64_t deadline_ms);
-    void delLayerCacheBufferWatchFunc(std::shared_ptr<Watcher> watcher);
 
     void checkTimeout();
 
 private:
     void notifyAllWatchers(const std::shared_ptr<LayerCacheBuffer>& layer_cache_buffer);
     void watchAllCacheBuffers(const std::shared_ptr<Watcher>& watcher);
+    void delLayerCacheBuffer(const std::shared_ptr<LayerCacheBuffer>& layer_cache_buffer);
+    void delLayerCacheBufferWatchFunc(std::shared_ptr<Watcher> watcher);
 
 private:
     int layer_id_;
