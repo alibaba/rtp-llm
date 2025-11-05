@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/cuda/cutlass/cutlass_kernels/fp8_group_gemm/fp8_group_gemm.h"
 #include "rtp_llm/cpp/kernels/scaled_fp8_quant.h"
 #include "rtp_llm/cpp/kernels/moe/ep_utils.h"
+#include "rtp_llm/cpp/kernels/atex/ops/f16/rmsnorm.h"
 
 namespace rtp_llm {
 
@@ -92,6 +93,36 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
                   py::arg("expert_first_token_offset") = py::none(),
                   py::arg("topk"),
                   py::arg("hidden_states"));
+
+    rtp_ops_m.def("atex_rmsnorm_fp16",
+                  &atex::impl::launch_rmsnorm_fp16,
+                  "rmsnorm float16",
+                  py::arg("x"),
+                  py::arg("w"),
+                  py::arg("eps"));
+
+    rtp_ops_m.def("atex_rmsnorm_bf16",
+                  &atex::impl::launch_rmsnorm_bf16,
+                  "rmsnorm bfloat16",
+                  py::arg("x"),
+                  py::arg("w"),
+                  py::arg("eps"));
+
+    rtp_ops_m.def("atex_skiprmsnorm_fp16",
+                  &atex::impl::launch_skiprmsnorm_fp16,
+                  "skip rmsnorm bfloat16",
+                  py::arg("x"),
+                  py::arg("r"),
+                  py::arg("w"),
+                  py::arg("eps"));
+
+    rtp_ops_m.def("atex_skiprmsnorm_bf16",
+                  &atex::impl::launch_skiprmsnorm_bf16,
+                  "skip rmsnorm bfloat16",
+                  py::arg("x"),
+                  py::arg("r"),
+                  py::arg("w"),
+                  py::arg("eps"));
 
     registerBaseCudaBindings(rtp_ops_m);
     registerAttnOpBindings(rtp_ops_m);

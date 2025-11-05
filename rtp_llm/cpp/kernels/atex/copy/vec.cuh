@@ -1,4 +1,4 @@
-#progma once
+#pragma once
 
 namespace atex {
 

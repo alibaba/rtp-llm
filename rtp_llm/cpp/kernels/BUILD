@@ -584,3 +584,24 @@ cc_library(
     include_prefix = "src",
     visibility = ["//visibility:public"],
 )
+
+# =============================================================================
+# ATEX
+# =============================================================================
+
+cc_library(
+    name= "atex",
+    srcs = glob([
+        "atex/**/*.cu",
+    ]),
+    hdrs = glob([
+        "atex/**/*.h",
+        "atex/**/*.cuh",
+    ]),
+    deps = [
+        "//rtp_llm/cpp/cuda:cuda_host_utils",
+        "//rtp_llm/cpp/utils:core_utils",
+    ] + torch_deps(),
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)

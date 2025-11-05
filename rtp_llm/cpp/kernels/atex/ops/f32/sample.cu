@@ -1,4 +1,5 @@
-#include "kernels/f32/sample.h"
+#include "rtp_llm/cpp/kernels/atex/ops/f32/sample.h"
+#include "rtp_llm/cpp/kernels/atex/copy/vec.cuh"
 
 namespace atex {
 namespace impl {
@@ -27,16 +28,20 @@ __global__ void DeviceRandomSample(const Dtype* x, Dtype* y, const uint32_t nume
     copy<sizeof(Dtype)>(x + seed, y + tid);
 }
 
-Tensor RandomSample(const Tensor x, const uint32_t num_of_sample, ) {
+Tensor RandomSample(const Tensor x, const uint32_t num_of_sample) {
     TORCH_CHECK(x.is_cuda(), "Input Tensor is not on CUDA device.");
+    TORCH_CHECK(x.scalar_type() == c10::ScalarType::Float, "Input Tensor x must be a fp32 Tensor.");
 
-    const auto numel = x.nueml();
+    const auto numel = x.numel();
     TORCH_CHECK(numel > 0, "Empty tensor can not use random sample kernel.");
 
-    constexpr int32_t TPB   = 256;
-    const auto        BLOCK = numel / TPB + (nueml % TPB != 0) ? 1 : 0;
+    Tensor output = at::empty({num_of_sample}, x.options());
 
-    DeviceRandomSample<TPB, x.element_type><<<BLOCK, TPB, 0, at::cuda::getCurrentCUDAStream()>>>(PTR<int32_t>(x), PTR);
+    constexpr int32_t TPB   = 256;
+    const auto        BLOCK = numel / TPB + (numel % TPB != 0) ? 1 : 0;
+
+    DeviceRandomSample<TPB, fp32_t><<<BLOCK, TPB, 0, at::cuda::getCurrentCUDAStream()>>>(
+        PTR<fp32_t>(x), PTR<fp32_t>(output), numel, num_of_sample);
     return output;
 }
 

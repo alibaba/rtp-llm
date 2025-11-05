@@ -24,6 +24,15 @@ flashinfer = ["flashinfer-python"]
 requirement(flashinfer)
 
 py_library(
+    name = "kernels",
+    srcs = glob([
+        "kernels/*.py",
+        "kernels/**/*.py",
+    ]),
+    visibility = ["//visibility:public"],
+)
+
+py_library(
     name = "modules",
     srcs = glob([
         "modules/*.py",
@@ -31,6 +40,7 @@ py_library(
     ]),
     deps = [
         ":utils",
+        ":kernels",
         "//rtp_llm/models_py/triton_kernels:triton_kernels",
         ":distributed",
     ] + select({
