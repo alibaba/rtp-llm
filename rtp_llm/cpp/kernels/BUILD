@@ -47,6 +47,20 @@ cc_library(
 # =============================================================================
 
 cc_library(
+    name = "cuda_fused_qk_rmsnorm",
+    srcs = ["fused_qk_rmsnorm.cu"],
+    hdrs = ["fused_qk_rmsnorm.h"],
+    deps = any_cuda_deps + [
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/cuda:cuda_utils_cu",
+        "//rtp_llm/cpp/cuda:launch_utils",
+    ],
+    copts = any_cuda_copts(), 
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "cuda_no_aux_tc",
     srcs = [
         "no_aux_tc_kernels.cu",
@@ -140,6 +154,7 @@ cc_library(
         ":cuda_quantization",
         ":cuda_moe",
         ":cuda_comm",
+        ":cuda_fused_qk_rmsnorm",
     ],
     visibility = ["//visibility:public"],
 )
@@ -266,7 +281,7 @@ cc_library(
     srcs = [
         "layernorm_kernels.cu",
         "rmsnormKernels.cu",
-        "fused_qk_rmsnorm.cu",
+        #"fused_qk_rmsnorm.cu",
     ],
     hdrs = [
         "layernorm_kernels.h",

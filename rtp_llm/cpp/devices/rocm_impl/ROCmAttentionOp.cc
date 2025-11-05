@@ -585,16 +585,12 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
 
     auto q_output = allocateBuffer(
         {params.input.type(), {batch_size, head_num, seq_len, size_per_head}, AllocationType::DEVICE}, {"q_output"});
-    bufMemset(*q_output, 0);
-
     auto k_output = allocateBuffer(
         {params.input.type(), {batch_size, kv_head_num, seq_len_with_prefix, size_per_head}, AllocationType::DEVICE},
         {"k_output"});
-    bufMemset(*k_output, 0);
     auto v_output = allocateBuffer(
         {params.input.type(), {batch_size, kv_head_num, seq_len_with_prefix, size_per_head}, AllocationType::DEVICE},
         {"v_output"});
-    bufMemset(*v_output, 0);
     BufferPtr kv_cache_block_id = nullptr;
 
     KVBlockArray                  kv_block_array;
