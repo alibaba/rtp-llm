@@ -187,15 +187,9 @@ class ModelFactory:
 
     @staticmethod
     def creat_standalone_py_model_from_huggingface(
-        model_path_or_name: str,
-        revision: Optional[str] = None,
         model_config: ModelConfig = ModelConfig(),
     ):
         assert os.environ["LOAD_PYTHON_MODEL"] == "1"
-        new_model_config = model_config
-        new_model_config = new_model_config._replace(
-            model_type=model_type, ckpt_path=model_path, tokenizer_path=model_path
-        )
         model = ModelFactory._create_model(model_config)
         return model
 
