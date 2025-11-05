@@ -572,7 +572,6 @@ ParamsPtr ROCmDevice::PrepareCKAttn(const AttentionConfigs& configs,
 static std::once_flag rope_cache_flag;
 
 AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& params) {
-    aiter_wrapper_->mtp();
     auto datatype            = params.input.type();
     auto token_num           = params.input.shape()[0];
     auto batch_size          = params.common.context_batch_size;
@@ -586,6 +585,11 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
 
     auto q_output = allocateBuffer(
         {params.input.type(), {batch_size, head_num, seq_len, size_per_head}, AllocationType::DEVICE}, {"q_output"});
+    bufMemset(*q_output, 0);
+
+    auto q_mtp_output = allocateBuffer(
+        {params.input.type(), {token_num, head_num, size_per_head}, AllocationType::DEVICE}, {"q_mtp_output"});
+
     auto k_output = allocateBuffer(
         {params.input.type(), {batch_size, kv_head_num, seq_len_with_prefix, size_per_head}, AllocationType::DEVICE},
         {"k_output"});
@@ -673,7 +677,8 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
     }
 
     bool store_qkv   = true;
-    bool store_q     = true;
+    bool store_q     = !use_mtp_pa_;
+    bool store_q_mtp = use_mtp_pa_;
     bool store_kv    = true;
     bool store_cache = params.common.kv_cache.has_value();
 
@@ -697,6 +702,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                 DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
                                              invokeAddFusedQKVBiasTransposePrefill,
                                              q_output->data(),
+                                             q_mtp_output->data(),
                                              k_output->data(),
                                              v_output->data(),
                                              &prefix_prompt_param,
@@ -724,6 +730,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                                              false,
                                              store_qkv,
                                              store_q,
+                                             store_q_mtp,
                                              store_kv,
                                              store_cache,
                                              use_rope_cache && rope_cache.defined() ? static_cast<float2*>(rope_cache.data_ptr()) :
@@ -733,6 +740,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                 DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
                                              invokeAddFusedQKVBiasTransposePrefillV1,
                                              q_output->data(),
+                                             q_mtp_output->data(),
                                              k_output->data(),
                                              v_output->data(),
                                              &prefix_prompt_param,
@@ -760,6 +768,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                                              false,
                                              store_qkv,
                                              store_q,
+                                             store_q_mtp,
                                              store_kv,
                                              store_cache,
                                              use_rope_cache && rope_cache.defined() ? static_cast<float2*>(rope_cache.data_ptr()) :
@@ -831,6 +840,11 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
     printBufferData(*k_output, "run_ck_k_output");
     printBufferData(*v_output, "run_ck_v_output");
     printBufferData(params.input, "run_ck_input");
+
+    if (use_mtp_pa_) {
+        aiter_wrapper_->mtp(params, this, *q_mtp_output);
+        return;
+    }
     if (skip_add_bias_transpose || prefix_prompt_param.max_prefix_prompt_length <= 0) {
         // not implemented reuse cache for this branch
         fmha_runner_->runCKFmha(params.input.data(),

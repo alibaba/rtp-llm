@@ -78,6 +78,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(torchDTypeToDataType(qkv.dtype()),
                                          invokeAddFusedQKVBiasTransposePrefillV1,
                                          q_output.data_ptr(),
+                                         nullptr,
                                          k_output.data_ptr(),
                                          v_output.data_ptr(),
                                          &prefix_prompt_param,
@@ -100,6 +101,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
                                          false,        // use_paged_fmha
                                          store_qkv,    // store_qkv
                                          store_q,      // store_q
+                                         false,        // store_q_mtp
                                          store_kv,     // store_kv
                                          store_cache,  // store_cache
                                          nullptr,
