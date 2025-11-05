@@ -143,18 +143,18 @@ TEST_F(FullKVCacheGroupTest, InsertIntoCacheTest) {
 
     group1.insertIntoCache(cache_keys, block_indices, false);
 
-    CacheKeysType cache_keys1   = {105, 106};
+    CacheKeysType cache_keys1   = {107, 108};
     auto          match_result1 = group1.match(cache_keys1);
     ASSERT_EQ(match_result1.reuse_length, 0);
 
-    CacheKeysType cache_keys2   = {103, 104, 106};
-    auto          match_result2 = group1.match(cache_keys);
+    CacheKeysType cache_keys2   = {103, 104, 107};
+    auto          match_result2 = group1.match(cache_keys2);
     ASSERT_EQ(match_result2.reuse_length, 2 * 2);
-    BlockIndicesType expected_result2 = {1, 2, 5};
+    BlockIndicesType expected_result2 = {1, 2};
     ASSERT_EQ(match_result2.block_indices, expected_result2);
 
     CacheKeysType cache_keys3   = {103, 104, 105, 106};
-    auto          match_result3 = group1.match(cache_keys);
+    auto          match_result3 = group1.match(cache_keys3);
     ASSERT_EQ(match_result3.reuse_length, 4 * 2);
     BlockIndicesType expected_result3 = {1, 2, 3, 4};
     ASSERT_EQ(match_result3.block_indices, expected_result3);
