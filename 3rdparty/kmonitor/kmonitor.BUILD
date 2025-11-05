@@ -4,3 +4,8 @@ config_setting(
     visibility=['//visibility:public']
 )
 
+config_setting(
+    name = "using_cuda12_arm",
+    values = {"define": "using_cuda12_arm=true"},
+)
+
