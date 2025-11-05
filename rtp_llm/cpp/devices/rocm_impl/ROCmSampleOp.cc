@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/kernels/sampling_topp_kernels.h"
 #include "rtp_llm/cpp/kernels/sampling_penalty_kernels.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
+#include "rtp_llm/cpp/kernels/rocm/sampling/sampling.h"
 
 using namespace std;
 
@@ -19,6 +20,7 @@ using SamplerT = float;
 // topk should has higher proirity than topp.
 
 GreedyOutput ROCmDevice::sampleGreedy(const GreedyParams& params) {
+    bool enable_flashinfer = init_params_.sampler_config.enable_flashinfer_sample_kernel;
     const auto& logits     = params.logits;
     const auto  batch_size = logits.shape()[0];
     RUNTIME_ASSERT_OP_ARG(batch_size < init_params_.max_batch_size,
@@ -236,6 +238,81 @@ GreedyOutput ROCmDevice::sampleGreedy(const GreedyParams& params) {
         auto output_tokens = transpose({*transposed_tokens});
         copy({params.token_ids, *output_tokens});
 
+        return GreedyOutput{};
+    }
+
+    if (enable_flashinfer) {
+        const auto batch_size = params.logits.shape()[0];
+        auto&      top_k      = params.top_k;
+        auto&      top_p      = params.top_p;
+
+        auto      logits_ref = params.logits.slice(0, params.logits.shape()[0]);
+        auto      probs   = softmax({logits_ref, std::nullopt, std::nullopt, 1.0f, DataType::TYPE_INVALID, std::nullopt});
+        auto      samples = transposed_tokens->view(transposed_tokens->shape()[0] - 1, 1);
+        torch::TensorOptions options =
+            torch::TensorOptions(dataTypeToTorchType(probs->type())).device(torch::Device(torch::kCUDA));
+        bool deterministic = false;
+        bool          need_output_all_probs = params.output_all_probs.has_value();
+        torch::Tensor probs_t               = Buffer2torchTensor(probs, false);
+        torch::Tensor samples_t             = Buffer2torchTensor(samples, false).flatten();
+        torch::Tensor top_k_t               = Buffer2torchTensor(top_k, false);
+        torch::Tensor top_p_t               = Buffer2torchTensor(top_p, false);
+        torch::Tensor output_all_probs_t;
+        if (need_output_all_probs) {
+            output_all_probs_t = Buffer2torchTensor(params.output_all_probs.value().get(), false);
+        }
+        std::transform(top_p.data<float>(), top_p.data<float>() + batch_size, top_p.data<float>(), [&](auto t) {
+            return std::abs(t) < 1e-7 ? 1.0 : t;
+        });
+        if (std::all_of(top_k.data<uint32_t>(), top_k.data<uint32_t>() + batch_size, [&](auto t) { return t == 1; })) {
+            torch::Tensor selected_tokens = torch::argmax(probs_t, -1, /*keepdim=*/false);
+            samples_t.copy_(selected_tokens);
+            if (need_output_all_probs) {
+                top_k_renorm_probs(probs_t, output_all_probs_t, top_k_t, 0, reinterpret_cast<uintptr_t>(stream_));
+            }
+        } else if (std::all_of(
+                       top_k.data<uint32_t>(), top_k.data<uint32_t>() + batch_size, [&](auto t) { return t <= 0; })) {
+            top_p_sampling_from_probs(probs_t, samples_t, std::nullopt, top_p_t, 1.0, deterministic, 0, 0, reinterpret_cast<uintptr_t>(stream_));
+            if (need_output_all_probs) {
+                top_p_renorm_probs(probs_t, output_all_probs_t, top_p_t, 1.0, reinterpret_cast<uintptr_t>(stream_));
+            }
+        } else if (std::all_of(top_p.data<float>(), top_p.data<float>() + batch_size, [&](auto t) {
+                       return std::abs(t - 1.0f) < 1e-7;
+                   })) {
+            std::transform(top_k.data<uint32_t>(),
+                           top_k.data<uint32_t>() + batch_size,
+                           top_k.data<uint32_t>(),
+                           [&](auto t) { return t <= 0 ? 1 << 30 : t; });
+            top_k_sampling_from_probs(
+                probs_t, samples_t, std::nullopt, top_k_t, 0, deterministic, 0, 0, reinterpret_cast<uintptr_t>(stream_));
+            if (need_output_all_probs) {
+                top_k_renorm_probs(probs_t, output_all_probs_t, top_k_t, 0, reinterpret_cast<uintptr_t>(stream_));
+            }
+        } else {
+            std::transform(top_k.data<uint32_t>(),
+                           top_k.data<uint32_t>() + batch_size,
+                           top_k.data<uint32_t>(),
+                           [&](auto t) { return t <= 0 ? 1 << 30 : t; });
+            top_k_top_p_sampling_from_probs(probs_t,
+                                            samples_t,
+                                            std::nullopt,
+                                            top_k_t,
+                                            0,
+                                            top_p_t,
+                                            1.0,
+                                            deterministic,
+                                            0,
+                                            0,
+                                            reinterpret_cast<uintptr_t>(stream_));
+            if (need_output_all_probs) {
+                torch::Tensor temp_t = torch::zeros_like(output_all_probs_t);
+                top_k_renorm_probs(probs_t, temp_t, top_k_t, 1.0, reinterpret_cast<uintptr_t>(stream_));
+                top_p_renorm_probs(temp_t, output_all_probs_t, top_p_t, 1.0, reinterpret_cast<uintptr_t>(stream_));
+            }
+        }
+        auto output_tokens = transpose({*transposed_tokens});
+        copy({params.token_ids, *output_tokens});
+        check_cuda_error();
         return GreedyOutput{};
     }
 
