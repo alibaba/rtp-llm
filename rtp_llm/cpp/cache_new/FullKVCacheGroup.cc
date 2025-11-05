@@ -98,12 +98,22 @@ std::unordered_map<int, torch::Tensor> FullKVCacheGroup::layerCacheBase() const 
 }
 
 BlockAddrInfo FullKVCacheGroup::convertIndexToAddr(int layer_id, int block_id) const {
-    int local_layer_id = gloabl_layer_to_local_layer.at(layer_id);
+    auto it = gloabl_layer_to_local_layer.find(layer_id);
+    if (it == gloabl_layer_to_local_layer.end()) {
+        RTP_LLM_LOG_ERROR("Invalid layer_id: %d", layer_id);
+        return {nullptr, nullptr, nullptr, nullptr};
+    }
+    int local_layer_id = it->second;
     return block_pool_->convertIndexToAddr(local_layer_id, block_id);
 }
 
 BlockBufferInfo FullKVCacheGroup::convertIndexToBuffer(int layer_id, int block_id) const {
-    int local_layer_id = gloabl_layer_to_local_layer.at(layer_id);
+    auto it = gloabl_layer_to_local_layer.find(layer_id);
+    if (it == gloabl_layer_to_local_layer.end()) {
+        RTP_LLM_LOG_ERROR("Invalid layer_id: %d", layer_id);
+        return {nullptr, nullptr};
+    }
+    int local_layer_id = it->second;
     return block_pool_->convertIndexToBuffer(local_layer_id, block_id);
 }
 
