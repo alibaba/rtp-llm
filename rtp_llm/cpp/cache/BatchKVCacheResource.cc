@@ -93,4 +93,13 @@ std::string BatchKVCacheResource::debugString() const {
     return debug_string.str();
 }
 
+const std::vector<std::shared_ptr<BlockIds>>& BatchKVCacheResource::layerBlockIds(int batch_id) const {
+    RTP_LLM_CHECK(batch_cache_layer_layouts.size() > batch_id);
+    return batch_cache_layer_layouts[batch_id];
+}
+
+const std::vector<int64_t>& BatchKVCacheResource::cacheKeys(int batch_id) const {
+    RTP_LLM_CHECK(cache_keys.size() > batch_id);
+    return cache_keys[batch_id];
+}
 }  // namespace rtp_llm

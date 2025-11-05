@@ -1,0 +1,80 @@
+syntax = "proto2";
+
+import "arpc/proto/rpc_extensions.proto";
+option cc_generic_services = true;
+
+message CacheBlockInfo {
+    optional int64 cache_key = 1;
+    repeated uint32 block_size = 2;
+}
+
+message LayerCacheBlockInfo {
+    optional uint32 layer_id = 1;
+    repeated CacheBlockInfo blocks = 2;
+}
+
+message CacheLoadRequest {
+    repeated LayerCacheBlockInfo layer_cache_load_infos = 1;
+    optional int64 deadline_ms = 2;
+    optional uint32 tp_size = 3;
+    optional uint32 tp_rank = 4;
+    optional string ip = 5;
+    optional uint32 port = 6;
+    optional uint32 rdma_port = 7;
+    optional int64 context_id = 8;
+}
+
+message CacheLoadResponse {
+    optional bool success = 1;
+    optional string info = 2;
+}
+
+service CacheStoreService {
+    option (arpc.global_service_id) = 10086;
+
+    rpc load(CacheLoadRequest) returns (CacheLoadResponse) {
+        option (arpc.local_method_id) = 10088;
+    }
+
+}
+
+message RdmaNicRKey {
+    optional uint32 nicid = 1;
+    optional uint32 rkey = 2;
+}
+
+message RdmaBlockBufferAddrInfo {
+    optional uint64 addr = 1;
+    repeated RdmaNicRKey nic_rkeys = 2;
+};
+
+message BlockBufferInfo {
+    optional int64 key = 1;
+    optional uint32 len = 2;
+    optional RdmaBlockBufferAddrInfo rdma_info = 3; // use only rdma mode
+    optional bytes content = 4[ctype = RAW_STRING]; // use only tcp mode
+    optional int64 addr = 5; // 使用TCP做Read, 需要指定addr
+}
+
+message LayerBlockBufferInfo {
+    optional int64 layer_id = 1;
+    repeated BlockBufferInfo blocks = 2;
+}
+
+message TransferRequest {
+    repeated LayerBlockBufferInfo layer_blocks = 1;
+    optional int64 context_id = 2;
+}
+
+message TransferResponse {
+    optional bool success = 1;
+    optional string info = 2;
+}
+
+service TransferService {
+    option (arpc.global_service_id) = 10009;
+
+    rpc transfer(TransferRequest) returns (TransferResponse) {
+        option (arpc.local_method_id) = 10010;
+    }
+}
