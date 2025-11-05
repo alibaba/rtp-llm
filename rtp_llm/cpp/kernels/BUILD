@@ -255,6 +255,7 @@ cc_library(
     deps = [
         ":rocm_basic",
         ":rocm_mla",
+        "//rtp_llm/cpp/kernels/rocm/sampling:sampling",
     ],
     visibility = ["//visibility:public"],
 )
