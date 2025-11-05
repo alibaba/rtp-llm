@@ -23,7 +23,7 @@ void CacheStoreClientClosure::Run() {
 
 // TODO: fill ip and port
 CacheStoreClient::CacheStoreClient(const std::shared_ptr<TcpClient>& tcp_client):
-    tcp_client_(tcp_client), ip_(""), port_(0) {}
+    tcp_client_(tcp_client), ip_(""), port_(0), load_context_store_(new LoadContextStore()) {}
 
 CacheStoreClient::~CacheStoreClient() {}
 
@@ -52,10 +52,7 @@ CacheStoreClient::asyncLoad(const std::vector<std::shared_ptr<LayerCacheBuffer>>
     }
 
     auto load_context = std::make_shared<LoadContext>(layer_cache_buffers, context_id);
-    {
-        std::lock_guard<std::mutex> lock(load_context_map_mutex_);
-        load_context_map_[context_id] = load_context;
-    }
+    load_context_store_->addLoadContext(load_context);
 
     std::shared_ptr<CacheLoadResponse> cache_load_response(new CacheLoadResponse());
 

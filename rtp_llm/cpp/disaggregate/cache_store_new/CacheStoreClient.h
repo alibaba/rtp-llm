@@ -56,8 +56,7 @@ private:
     std::string                ip_;
     uint32_t                   port_;
 
-    std::mutex                                                load_context_map_mutex_;
-    std::unordered_map<int64_t, std::shared_ptr<LoadContext>> load_context_map_;
+    std::shared_ptr<LoadContextStore> load_context_store_;
 };
 
 }  // namespace rtp_llm
