@@ -18,6 +18,7 @@
 #include "rtp_llm/cpp/cache_new/BlockCacheV1.h"
 #include "rtp_llm/cpp/cache_new/MemoryLayoutStrategy.h"
 
+
 namespace rtp_llm {
 
 // TODO, 0 号block不能算作free
@@ -37,8 +38,10 @@ public:
     BlockCacheV1Ptr blockCache();
 
     // size_t totalBlocks() const;
+    size_t totalBlockNums() const;
     size_t freeBlockNums() const;
 
+    MemoryType where() const;
     std::vector<torch::Tensor> layerCacheBase() const;
 
     std::vector<BlockIdxType> malloc(int num_blocks);
@@ -83,7 +86,6 @@ private:
     bool               kvcache_reg_mr_  = false;
     int64_t            mr_cost_time_ms_ = 0;
 
-    // 新增：布局策略
     std::unique_ptr<MemoryLayoutStrategy> layout_strategy_;
 };
 

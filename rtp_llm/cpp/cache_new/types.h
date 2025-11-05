@@ -48,6 +48,20 @@ struct CacheLayerLayout {
     std::vector<torch::Tensor> layers_to_buffer_ptrs;
 };
 
+
+struct KVCacheInfo {
+    size_t               available_kv_cache = 0;
+    size_t               total_kv_cache     = 0;
+    size_t               block_size         = 0;
+    std::vector<int64_t> cached_keys;
+    int64_t              version = -1;
+};
+
+struct BlockIdPair {
+    BlockIdxType src;
+    BlockIdxType dst;
+};
+
 struct MatchResult {
     size_t           reuse_length;
     BlockIndicesType block_indices;

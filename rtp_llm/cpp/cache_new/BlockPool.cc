@@ -156,6 +156,10 @@ size_t BlockPool::freeBlockNums() const {
     return free_block_ids_.size();
 }
 
+size_t BlockPool::totalBlockNums() const {
+    return config_.block_num;
+}
+
 BlockAddrInfo BlockPool::convertIndexToAddr(int layer_id, int block_id) const {
     if (!layout_strategy_) {
         RTP_LLM_LOG_ERROR("Layout strategy not initialized");
@@ -186,6 +190,11 @@ BlockBufferInfo BlockPool::convertIndexToBuffer(int layer_id, int block_id) cons
         return {nullptr, nullptr};
     }
     return layout_strategy_->convertIndexToBuffer(layer_id, block_id);
+}
+
+
+MemoryType BlockPool::where() const {
+    return cache_aligned_buffer_->where();
 }
 
 }  // namespace rtp_llm
