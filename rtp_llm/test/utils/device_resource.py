@@ -37,6 +37,9 @@ def get_cuda_info():
     result = subprocess.run(
         [sys.executable, "-c", python_code], capture_output=True, text=True, check=False
     )
+    logging.info(f"cuda info result: {result.stdout}, return code: {result.returncode}")
+    if result.returncode != 0:
+        raise Exception(f"get cuda info returncode error, self ip: {get_ip()}")
     cuda_info = json.loads(result.stdout)
     if not cuda_info:
         return None
