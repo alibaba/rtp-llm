@@ -51,8 +51,8 @@ public:
     virtual BlockAddrInfo                          convertIndexToAddr(int layer_id, int block_id) const   = 0;
     virtual BlockBufferInfo                        convertIndexToBuffer(int layer_id, int block_id) const = 0;
 
-    virtual size_t freeBlockNums() const     = 0;
-    virtual bool   evict(int need_evict_len) = 0;
+    virtual size_t freeBlockNums() const = 0;
+    bool           ensureFreeBlocks(int need_blocks);
 
     int seqSizePerBlock() const {
         return seq_size_per_block_;
