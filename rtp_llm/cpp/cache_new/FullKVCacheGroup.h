@@ -23,13 +23,11 @@ public:
     void        insertIntoCache(CacheKeysType& cache_keys, BlockIndicesType& block_indices, bool is_resident) override;
     void        removeSkippedBlocks(BlockIndicesType& block_indices) override;
     int         needBlocksNum(int seq_len, int current_blocks) const override;
+    size_t      freeBlockNums() const override;
 
     std::unordered_map<int, torch::Tensor> layerCacheBase() const override;
     BlockAddrInfo                          convertIndexToAddr(int layer_id, int block_id) const override;
     BlockBufferInfo                        convertIndexToBuffer(int layer_id, int block_id) const override;
-
-    size_t freeBlockNums() const override;
-    bool   evict(int need_evict_len) override;
 
 private:
 };

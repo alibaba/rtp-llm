@@ -41,6 +41,8 @@ MatchResult FullKVCacheGroup::match(CacheKeysType& cache_keys) {
         }
     }
 
+    final_result.reuse_length *= seqSizePerBlock();
+
     return final_result;
 }
 
@@ -89,22 +91,6 @@ void FullKVCacheGroup::removeSkippedBlocks(BlockIndicesType& block_indices) {}
 
 size_t FullKVCacheGroup::freeBlockNums() const {
     return block_pool_->freeBlockNums();
-}
-
-bool FullKVCacheGroup::evict(int need_evict_len) {
-    if (need_evict_len <= 0) {
-        return true;
-    }
-
-    // blocks popped by block_cache_ might be occupied by other query
-    // it's necessary to checkout whether free blocks are enough
-    while (block_pool_->freeBlockNums() < need_evict_len) {
-        int  need_evict_len_cur = need_evict_len - block_pool_->freeBlockNums();
-        auto evicted_blocks     = block_cache_->pop(need_evict_len_cur);
-        block_pool_->free(evicted_blocks);
-    }
-
-    return true;
 }
 
 std::unordered_map<int, torch::Tensor> FullKVCacheGroup::layerCacheBase() const {

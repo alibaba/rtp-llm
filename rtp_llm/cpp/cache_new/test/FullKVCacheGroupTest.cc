@@ -77,7 +77,7 @@ TEST_F(FullKVCacheGroupTest, MatchTest) {
     // part match
     cache_keys         = {101, 102, 103, 1046};
     auto match_result1 = group1.match(cache_keys);
-    ASSERT_EQ(match_result1.reuse_length, 2);
+    ASSERT_EQ(match_result1.reuse_length, 2 * 4);
     expected_result = {1, 2};
     ASSERT_EQ(match_result1.block_indices, expected_result);
 
@@ -92,7 +92,7 @@ TEST_F(FullKVCacheGroupTest, MatchTest) {
 
     cache_keys         = {101, 102, 103, 104};
     auto match_result3 = group1.match(cache_keys);
-    ASSERT_EQ(match_result3.reuse_length, 4);
+    ASSERT_EQ(match_result3.reuse_length, 4 * 4);
 
     expected_result = {1, 2, 3, 4};
     ASSERT_EQ(match_result3.block_indices, expected_result);
@@ -122,7 +122,54 @@ TEST_F(FullKVCacheGroupTest, MallocFreeTest) {
     ASSERT_EQ(block_pool->freeBlockNums(), 9);
 }
 
-TEST_F(FullKVCacheGroupTest, InsertIntoCacheTest) {}
+TEST_F(FullKVCacheGroupTest, InsertIntoCacheTest) {
+    auto block_pool = createBlockPool();
+    block_pool->init();
+    ASSERT_EQ(block_pool->freeBlockNums(), 9);
+
+    auto spec                = make_shared<MHAKVCacheSpec>();
+    spec->seq_size_per_block = 2;
+
+    FullKVCacheGroup group1({}, spec, block_pool);
+
+    CacheKeysType    cache_keys = {103, 104, 105, 106};
+    BlockIndicesType block_indices;
+
+    group1.malloc(cache_keys, block_indices, 8);
+    ASSERT_EQ(block_pool->freeBlockNums(), 5);
+    ASSERT_EQ(block_indices.size(), 4);
+    BlockIndicesType expected_result = {1, 2, 3, 4};
+    ASSERT_EQ(block_indices, expected_result);
+
+    group1.insertIntoCache(cache_keys, block_indices, false);
+
+    CacheKeysType cache_keys1   = {105, 106};
+    auto          match_result1 = group1.match(cache_keys1);
+    ASSERT_EQ(match_result1.reuse_length, 0);
+
+    CacheKeysType cache_keys2   = {103, 104, 106};
+    auto          match_result2 = group1.match(cache_keys);
+    ASSERT_EQ(match_result2.reuse_length, 2 * 2);
+    BlockIndicesType expected_result2 = {1, 2, 5};
+    ASSERT_EQ(match_result2.block_indices, expected_result2);
+
+    CacheKeysType cache_keys3   = {103, 104, 105, 106};
+    auto          match_result3 = group1.match(cache_keys);
+    ASSERT_EQ(match_result3.reuse_length, 4 * 2);
+    BlockIndicesType expected_result3 = {1, 2, 3, 4};
+    ASSERT_EQ(match_result3.block_indices, expected_result3);
+}
+
+// TODO, modify these ut after block cache not ref blocks
+// TEST_F(FullKVCacheGroupTest, EnsureFreeBlocksTest) {
+//     auto block_pool = createBlockPool();
+//     block_pool->init();
+//     auto block_cache = block_pool->blockCache();
+//     ASSERT_EQ(block_pool->freeBlockNums(), 9);
+
+//     FullKVCacheGroup group1({}, spec, block_pool);
+//     ASSERT_EQ(2, group1.ensureFreeBlocks(5));
+// }
 
 }  // namespace test
 }  // namespace rtp_llm
