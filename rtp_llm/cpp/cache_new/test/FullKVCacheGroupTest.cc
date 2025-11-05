@@ -101,7 +101,7 @@ TEST_F(FullKVCacheGroupTest, MatchTest) {
 TEST_F(FullKVCacheGroupTest, MallocFreeTest) {
     auto block_pool = createBlockPool();
     block_pool->init();
-    ASSERT_EQ(block_pool->freeBlockNums(), 10);
+    ASSERT_EQ(block_pool->freeBlockNums(), 9);
 
     auto spec                = make_shared<MHAKVCacheSpec>();
     spec->seq_size_per_block = 2;
@@ -112,14 +112,14 @@ TEST_F(FullKVCacheGroupTest, MallocFreeTest) {
     BlockIndicesType block_indices;
 
     group1.malloc(cache_keys, block_indices, 7);
-    ASSERT_EQ(block_pool->freeBlockNums(), 6);
+    ASSERT_EQ(block_pool->freeBlockNums(), 5);
     ASSERT_EQ(block_indices.size(), 4);
 
-    BlockIndicesType expected_result = {0, 1, 2, 3};
+    BlockIndicesType expected_result = {1, 2, 3, 4};
     ASSERT_EQ(block_indices, expected_result);
 
     group1.free(block_indices);
-    ASSERT_EQ(block_pool->freeBlockNums(), 10);
+    ASSERT_EQ(block_pool->freeBlockNums(), 9);
 }
 
 TEST_F(FullKVCacheGroupTest, InsertIntoCacheTest) {}

@@ -49,7 +49,8 @@ BlockCacheV1Ptr BlockPool::blockCache() {
 }
 
 void BlockPool::initFreeBlocks() {
-    for (BlockIdxType i = 0; i < static_cast<BlockIdxType>(config_.block_num); ++i) {
+    // block 0 is reserved
+    for (BlockIdxType i = 1; i < static_cast<BlockIdxType>(config_.block_num); ++i) {
         free_block_ids_.insert(i);
     }
     block_ref_counter_.init(config_.block_num);
