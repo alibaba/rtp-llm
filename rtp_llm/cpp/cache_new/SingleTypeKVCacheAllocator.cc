@@ -94,7 +94,7 @@ MallocResult SingleTypeKVCacheAllocator::malloc(const MallocInfo& malloc_info) {
         auto free_blocks_num = full_kv_cache_group_->freeBlockNums();
         if (free_blocks_num < need_blocks_num) {
             // TODO, check error
-            full_kv_cache_group_->evict(need_blocks_num - free_blocks_num);
+            full_kv_cache_group_->ensureFreeBlocks(need_blocks_num - free_blocks_num);
         }
 
         // TODO，check error
