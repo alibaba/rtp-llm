@@ -3,6 +3,7 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 import aiter
+from aiter import ActivationType, QuantType
 import logging
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
@@ -24,14 +25,18 @@ class FusedMoeExecutor(FusedMoeExpertExecutor):
         self,
         config: GptInitModelParameters,
         weights: Dict[str, torch.Tensor],
+        quant_config: FusedMoEQuantConfig,
     ):
-        super().__init__(FusedMoEQuantConfig())
-        
+        super().__init__(quant_config=quant_config)
         self.ep_size = config.ep_size
         self.ep_rank = config.ep_rank
         
-        self.w13_weight = weights[W.moe_w1]
-        self.w2_weight = weights[W.moe_w2]
+        self.w13_weight = weights.get(W.moe_w1, None)
+        self.w2_weight = weights.get(W.moe_w2, None)
+        assert self.w13_weight is not None, "moe w13_weight is None"
+        assert self.w2_weight is not None, "moe w2_weight is None"
+        self.w13_weight_scale_inv = weights.get(W.moe_s1, None)
+        self.w2_weight_scale_inv = weights.get(W.moe_s2, None)
 
     def finalize_weight_and_reduce_impl(self) -> TopKWeightAndReduce:
         return TopKWeightAndReduceDelegate()
@@ -122,15 +127,19 @@ class FusedMoeExecutor(FusedMoeExpertExecutor):
         assert payload.expert_topk_weights is not None, "expert_topk_weights is None"
         
         a1 = payload.expert_x
+        a1_scale = payload.expert_x_scale
         topk_ids = payload.expert_topk_ids.to(torch.int32)
         topk_weights = payload.expert_topk_weights.to(torch.float32)
         
+        if self.quant_config.quant_dtype is None:
+            dtype = a1.dtype
+        else: 
+            dtype = torch.bfloat16
+        device = a1.device
         M, topk = topk_ids.shape
         if M == 0:
-            return torch.empty((0, a1.shape[-1]), dtype=a1.dtype, device=a1.device)
-        
-        dtype = a1.dtype
-        device = topk_ids.device
+            return torch.empty((0, a1.shape[-1]), dtype=dtype, device=device)
+
         model_dim = a1.shape[-1]
         inter_dim = self.w13_weight.shape[1]
         
@@ -163,35 +172,54 @@ class FusedMoeExecutor(FusedMoeExpertExecutor):
             block_size=block_size,
             expert_mask=expert_mask,
         )
-
+        
         # === Stage 1: Up/Gate Projection + Activation ===
         a2 = torch.empty((M, topk, inter_dim//2), dtype=dtype, device=device)
-        fc1_scale = None
-        a1_scale = None
-        # act_op = 1 if activation == "silu" else 0  # 1 = silu_and_mul
+        if self.quant_config.quant_dtype is not None and a1_scale is None:
+            a1, a1_scale = aiter.pertoken_quant(a1, quant_dtype=self.quant_config.quant_dtype)
         
-        aiter.ck_moe_stage1(
-            hidden_states=a1,
-            w1=self.w13_weight,
-            w2=self.w2_weight,
-            sorted_token_ids=sorted_ids,
-            sorted_expert_ids=sorted_expert_ids,
-            num_valid_ids=num_valid_ids,
-            out=a2,
-            topk=topk,
-            kernelName="",
-            w1_scale=fc1_scale,
-            a1_scale=a1_scale,     
-            block_m=block_size,
-            sorted_weights=sorted_weights if apply_router_weight_on_input else None,
-        )
-        
-        # Reshape for stage2
-        a2 = a2.view(M, topk, -1)
+        if self.quant_config.quant_dtype is not None:
+            aiter.moe_stage1_g1u1(
+                a1,
+                self.w13_weight,
+                self.w2_weight,
+                sorted_ids,
+                sorted_expert_ids,
+                num_valid_ids,
+                a2,
+                inter_dim // 2,
+                "", # empty kernelName
+                block_size,
+                0, # 0 ksplit
+                ActivationType.Silu,
+                QuantType.per_Token,
+                a1_scale,
+                self.w13_weight_scale_inv,
+                None, # doweight_stage1 is false
+            )
+        else:
+            aiter.ck_moe_stage1(
+                hidden_states=a1,
+                w1=self.w13_weight,
+                w2=self.w2_weight,
+                sorted_token_ids=sorted_ids,
+                sorted_expert_ids=sorted_expert_ids,
+                num_valid_ids=num_valid_ids,
+                out=a2,
+                topk=topk,
+                kernelName="",
+                w1_scale=self.w13_weight_scale_inv,
+                a1_scale=a1_scale,
+                block_m=block_size,
+                sorted_weights=sorted_weights if apply_router_weight_on_input else None,
+            )
 
-        # === Stage 2: Down Projection + Weighted Combine ===
-        fc2_scale = None
+        # === Stage 2: Down Projection ===
         a2_scale = None
+        if self.quant_config.quant_dtype is not None:
+            a2 = a2.view(M, -1)
+            a2, a2_scale = aiter.pertoken_quant(a2, quant_dtype=self.quant_config.quant_dtype)
+        a2 = a2.view(M, topk, -1)
         
         aiter.ck_moe_stage2(
             inter_states=a2,  # [M*topk, inter_dim//2]
@@ -203,7 +231,7 @@ class FusedMoeExecutor(FusedMoeExpertExecutor):
             out=moe_buf,  # [M, D]
             topk=topk,
             kernelName="",
-            w2_scale=fc2_scale,
+            w2_scale=self.w2_weight_scale_inv,
             a2_scale=a2_scale,
             block_m=block_size,
             sorted_weights=sorted_weights if not apply_router_weight_on_input else None,

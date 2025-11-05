@@ -167,7 +167,7 @@ class FusedMoeFactory(object):
                 )
 
                 router = DeepepNormalRouter(config)
-                executor = FusedMoeExecutor(config, weights)
+                executor = FusedMoeExecutor(config, weights, quant_config=FusedMoEQuantConfig(quant_dtype=None))
                 return FusedMoe(router, executor, config.expert_num)
             else:
                 raise ValueError(
@@ -194,6 +194,32 @@ class FusedMoeFactory(object):
                 w2=weights[W.moe_w2],
             )
             return FusedMoe(router, experts, expert_num=config.expert_num)
+        
+    @staticmethod
+    def create_amd_fp8_ptpc_fused_moe(
+        config: GptInitModelParameters, weights: Dict[str, torch.Tensor]
+    ) -> FusedMoe:
+        if config.ep_size > 1:
+            if config.moe_config.use_deepep_low_latency == False:
+                init_deepep_env_once(config)
+                from rtp_llm.models_py.modules.rocm.moe.executors.deepep_normal_fused_moe_executor import (
+                    FusedMoeExecutor,
+                )
+                from rtp_llm.models_py.modules.rocm.moe.routers.deepep_normal_router import (
+                    DeepepNormalRouter,
+                )
+
+                router = DeepepNormalRouter(config)
+                executor = FusedMoeExecutor(config, weights, quant_config=FusedMoEQuantConfig(quant_dtype=torch.float8_e4m3fnuz, per_act_token_quant=True))
+                return FusedMoe(router, executor, config.expert_num)
+            else:
+                raise ValueError(
+                    f"deepep_low_latency for rocm moe is not yet supported"
+                )
+        else:
+            raise ValueError(
+                f"quantization for {config.ep_size} = 1 is not yet supported"
+            )
 
     @staticmethod
     def create_fused_moe(
@@ -205,7 +231,7 @@ class FusedMoeFactory(object):
             if config.quant_config is None:
                 return FusedMoeFactory.create_amd_fused_moe(config, weights)
             else:
-                raise ValueError(f"Quantization for rocm moe is not yet supported")
+                return FusedMoeFactory.create_amd_fp8_ptpc_fused_moe(config, weights)
         else:
             if config.quant_config is None:
                 if config.ep_size > 1 and config.moe_config.use_deepep_low_latency:

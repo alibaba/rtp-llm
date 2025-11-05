@@ -8,6 +8,8 @@ from rtp_llm.models_py.modules.moe import ExpertForwardPayload
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.utils.model_weight import W
 from aiter.ops.shuffle import shuffle_weight
+from rtp_llm.models_py.modules.moe.utils import FusedMoEQuantConfig
+import aiter
 
 class FusedMoeTest(TestCase):
     DTYPES = [torch.bfloat16]
@@ -16,13 +18,14 @@ class FusedMoeTest(TestCase):
     EXPERT_NUM = [32]
     INTER_DIM = [1024]
     TOP_K = [4]
+    IS_QUANT = [False, True]
 
     def setUp(self) -> None:
         if not torch.cuda.is_available():
             raise SkipTest("CUDA is not available")
         torch.set_default_device("cuda")
 
-    def _run_fused_moe_test(self, dtype: _dtype, token_num: int, hidden_dim: int, expert_num: int, inter_dim: int, top_k: int):
+    def _run_fused_moe_test(self, dtype: _dtype, token_num: int, hidden_dim: int, expert_num: int, inter_dim: int, top_k: int, is_quant: bool,):
 
         torch.manual_seed(42) 
         hidden_states = torch.randn(token_num, hidden_dim).to(dtype) * 0.03
@@ -74,12 +77,24 @@ class FusedMoeTest(TestCase):
         w1 = shuffle_weight(w1, layout=(16, 16))
         w2 = shuffle_weight(w2, layout=(16, 16))
         
+        if is_quant:
+            w1, w1_scale = aiter.pertoken_quant(w1, quant_dtype=torch.float8_e4m3fnuz)
+            w2, w2_scale = aiter.pertoken_quant(w2, quant_dtype=torch.float8_e4m3fnuz)
+        else:
+            w1_scale = None
+            w2_scale = None            
+        
         weights = {
             W.moe_w1 : w1,
-            W.moe_w2 : w2
+            W.moe_w2 : w2,
+            W.moe_s1 : w1_scale,
+            W.moe_s2 : w2_scale,
         }
         
-        fused_moe_executors = FusedMoeExecutor(model_param, weights)
+        if is_quant:
+            fused_moe_executors = FusedMoeExecutor(model_param, weights, quant_config=FusedMoEQuantConfig(quant_dtype=torch.float8_e4m3fnuz, per_act_token_quant=True))
+        else:
+            fused_moe_executors = FusedMoeExecutor(model_param, weights, quant_config=None)
         
         exec_out = fused_moe_executors.execute(
             payload=payload,
@@ -102,9 +117,10 @@ class FusedMoeTest(TestCase):
             self.EXPERT_NUM,
             self.INTER_DIM,
             self.TOP_K,
+            self.IS_QUANT,
         ):
             with self.subTest(
-                dype=params[0], token_num=params[1], hidden_dim=params[2], expert_num=params[3], inter_dim=params[4], top_k=params[5]
+                dype=params[0], token_num=params[1], hidden_dim=params[2], expert_num=params[3], inter_dim=params[4], top_k=params[5], is_quant=params[6],
             ):
                 self._run_fused_moe_test(*params)
 
