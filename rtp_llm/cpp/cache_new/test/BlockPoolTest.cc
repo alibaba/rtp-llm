@@ -83,7 +83,7 @@ TEST_F(BlockPoolTest, AllocAllBlocks) {
     block_pool_->init();
 
     auto blocks = block_pool_->malloc(config.block_num - 1);
-    EXPECT_EQ(blocks.size(), config.block_num);
+    EXPECT_EQ(blocks.size(), config.block_num - 1);
     EXPECT_EQ(block_pool_->freeBlockNums(), 0);
 }
 
