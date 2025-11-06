@@ -2,21 +2,22 @@ from typing import Optional
 
 import torch
 
-from rtp_llm.models_py.modules.flashinfer_python import flashinfer_python
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.models_py.modules.flashinfer_python import flashinfer_python
 
 # from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs
 
+
 class FlashInferPythonParams(object):
     def __init__(
-            self,
-            batch_size: int,
-            max_seq_len: int,
-            seq_lens: Optional[torch.Tensor] = None,
-            block_tables: Optional[torch.Tensor] = None,
-            cu_seqlens: Optional[torch.Tensor] = None,
-            cu_kv_seqlens: Optional[torch.Tensor] = None,
+        self,
+        batch_size: int,
+        max_seq_len: int,
+        seq_lens: Optional[torch.Tensor] = None,
+        block_tables: Optional[torch.Tensor] = None,
+        cu_seqlens: Optional[torch.Tensor] = None,
+        cu_kv_seqlens: Optional[torch.Tensor] = None,
     ):
 
         self.batch_size = batch_size
@@ -25,7 +26,8 @@ class FlashInferPythonParams(object):
         self.block_tables = block_tables
         self.cu_seqlens = cu_seqlens
         self.cu_kv_seqlens = cu_kv_seqlens
-    
+
+
 # Constants
 DEFAULT_WORKSPACE_SIZE_MB = (
     512  # Memory workspace size in MB, todo(Yingyi): read from config
@@ -34,9 +36,10 @@ DEFAULT_WORKSPACE_SIZE_MB = (
 # Reuse this workspace buffer across all TRTLLM MHA wrappers
 g_zero_workspace_buffer = None
 
-def create_g_workspace_buffer(device: str='cuda:0'):
+
+def create_g_workspace_buffer(device: str = "cuda:0"):
     global g_zero_workspace_buffer, g_empty_workspace_buffer
-    if g_zero_workspace_buffer is None:        
+    if g_zero_workspace_buffer is None:
         g_zero_workspace_buffer = torch.zeros(
             DEFAULT_WORKSPACE_SIZE_MB * 1024 * 1024,
             dtype=torch.uint8,
@@ -50,6 +53,7 @@ def create_g_workspace_buffer(device: str='cuda:0'):
     #     )
     return g_zero_workspace_buffer
 
+
 class FlashInferPythonPrefillOp(object):
     def __init__(
         self,
@@ -58,7 +62,7 @@ class FlashInferPythonPrefillOp(object):
         self.config = config
         self.head_dim = config.hidden_size // config.head_num
         self.head_num = config.head_num
-        self.scaling = self.head_dim**-0.5        
+        self.scaling = self.head_dim**-0.5
         self.local_head_num = config.head_num // config.tp_size
         self.workspace_buffer = create_g_workspace_buffer()
 
@@ -72,11 +76,16 @@ class FlashInferPythonPrefillOp(object):
             seq_lens=attention_inputs.input_lengths,
             block_tables=attention_inputs.kv_cache_block_id_device,
             cu_seqlens=attention_inputs.cu_seqlens,
-            cu_kv_seqlens=attention_inputs.cu_kv_seqlens
+            cu_kv_seqlens=attention_inputs.cu_kv_seqlens,
         )
 
-    def forward(self, q: torch.Tensor, kv_cache: Optional[KVCache], fmha_params: FlashInferPythonParams) -> torch.Tensor:
-        q_type = q.dtype        
+    def forward(
+        self,
+        q: torch.Tensor,
+        kv_cache: Optional[KVCache],
+        fmha_params: FlashInferPythonParams,
+    ) -> torch.Tensor:
+        q_type = q.dtype
         q = q.to(torch.float8_e4m3fn)
         o_type = torch.float8_e4m3fn
         q = q.contiguous().view(-1, self.local_head_num, self.head_dim)
@@ -105,7 +114,7 @@ class FlashInferPythonPrefillOp(object):
         )
 
         return o.view(-1, self.local_head_num * self.head_dim).to(q_type)
-        
+
 
 class FlashInferPythonDecodeOp(object):
     def __init__(
@@ -115,7 +124,7 @@ class FlashInferPythonDecodeOp(object):
         self.config = config
         self.head_dim = config.hidden_size // config.head_num
         self.head_num = config.head_num
-        self.scaling = self.head_dim**-0.5        
+        self.scaling = self.head_dim**-0.5
         self.local_head_num = config.head_num // config.tp_size
         self.workspace_buffer = create_g_workspace_buffer()
 
@@ -129,14 +138,19 @@ class FlashInferPythonDecodeOp(object):
             seq_lens=attention_inputs.sequence_lengths,
             block_tables=attention_inputs.kv_cache_block_id_device,
             cu_seqlens=attention_inputs.cu_seqlens,
-            cu_kv_seqlens=attention_inputs.cu_kv_seqlens
+            cu_kv_seqlens=attention_inputs.cu_kv_seqlens,
         )
 
-    def forward(self, q: torch.Tensor, kv_cache: Optional[KVCache], fmha_params: FlashInferPythonParams) -> torch.Tensor:
+    def forward(
+        self,
+        q: torch.Tensor,
+        kv_cache: Optional[KVCache],
+        fmha_params: FlashInferPythonParams,
+    ) -> torch.Tensor:
         q_type = q.dtype
         q = q.to(torch.float8_e4m3fn)
         o_type = torch.float8_e4m3fn
-        
+
         q = q.contiguous().view(-1, self.local_head_num, self.head_dim)
         q_scale = 1.0
         k_scale = 1.0
@@ -148,7 +162,7 @@ class FlashInferPythonDecodeOp(object):
         # raw_out: like q, [bs, acc_q_len, num_q_heads, head_dim] but with output dtype
         o = flashinfer_python.decode.trtllm_batch_decode_with_kv_cache(
             query=q,
-            kv_cache=kv_cache,
+            kv_cache=(kv_cache.k_cache_base, kv_cache.v_cache_base),
             workspace_buffer=self.workspace_buffer,
             block_tables=fmha_params.block_tables,
             seq_lens=fmha_params.seq_lens,

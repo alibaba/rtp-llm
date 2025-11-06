@@ -1,4 +1,4 @@
-from rtp_llm.models_py.modules.mla.flashinfer_mla import (
+from rtp_llm.models_py.modules.flashinfer_python import (
     MlaFlashInferDecodeOp,
     MlaFlashInferPrefillOp,
     TrtV2PrefillAttentionOp,
