@@ -414,7 +414,7 @@ void StreamCacheResource::fakeInitKVBlock() {
     fake_inited_ = true;
     batch_resource_.resize(stream_->maxBatchSize());
     for (size_t i = 0; i < stream_->maxBatchSize(); i++) {
-        batch_resource_.resize(i, stream_->seqLength(), true);
+        batch_resource_.resize(i, stream_->seqLength(), 0);
     }
 }
 

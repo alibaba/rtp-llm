@@ -123,3 +123,18 @@ cc_test(
     env = {},
     exec_properties = {'gpu':'A10'},
 )
+
+cc_test(
+    name = "hybrid_layer_kv_cache_allocator_test",
+    srcs = [
+        "HybridLayerKVCacheAllocatorTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps + [
+        ":block_pool_test_helper",
+        "//rtp_llm/cpp/cache:cache",
+    ],
+    env = {},
+    exec_properties = {'gpu':'A10'},
+)

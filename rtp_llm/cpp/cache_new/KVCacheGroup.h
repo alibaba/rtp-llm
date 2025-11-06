@@ -37,25 +37,24 @@ public:
 
     virtual ~KVCacheGroup() = default;
 
-    virtual bool init()                                                                          = 0;
-    virtual bool malloc(CacheKeysType& cache_keys, BlockIndicesType& block_indices, int seq_len) = 0;
+    bool         init();
+    virtual bool malloc(const CacheKeysType& cache_keys, BlockIndicesType& block_indices, int seq_len) = 0;
     // TODO, match 替换为try match，和touch
-    virtual MatchResult match(CacheKeysType& cache_keys)                                                       = 0;
-    virtual void        free(const BlockIndicesType& block_indices)                                            = 0;
-    virtual void insertIntoCache(CacheKeysType& cache_keys, BlockIndicesType& block_indices, bool is_resident) = 0;
-    virtual void removeSkippedBlocks(BlockIndicesType& block_indices)                                          = 0;
-    virtual int  needBlocksNum(int seq_len, int current_blocks) const                                          = 0;
+    virtual MatchResult match(const CacheKeysType& cache_keys) = 0;
+    MatchResult         matchSingleKey(CacheKeyType cache_key);
+    virtual void        free(const BlockIndicesType& block_indices) = 0;
+    virtual void
+    insertIntoCache(const CacheKeysType& cache_keys, const BlockIndicesType& block_indices, bool is_resident) = 0;
+    virtual void removeSkippedBlocks(BlockIndicesType& block_indices)                                         = 0;
+    virtual int  needBlocksNum(int seq_len, int current_blocks) const                                         = 0;
 
-    virtual std::unordered_map<int, torch::Tensor> layerCacheBase() const                                 = 0;
-    virtual BlockAddrInfo                          convertIndexToAddr(int layer_id, int block_id) const   = 0;
-    virtual BlockBufferInfo                        convertIndexToBuffer(int layer_id, int block_id) const = 0;
+    std::unordered_map<int, torch::Tensor> layerCacheBase() const;
+    BlockAddrInfo                          convertIndexToAddr(int layer_id, int block_id) const;
+    BlockBufferInfo                        convertIndexToBuffer(int layer_id, int block_id) const;
 
-    virtual size_t freeBlockNums() const = 0;
-    bool           ensureFreeBlocks(int need_blocks);
-
-    int seqSizePerBlock() const {
-        return seq_size_per_block_;
-    }
+    size_t freeBlockNums() const;
+    bool   ensureFreeBlocks(int need_blocks);
+    int    seqSizePerBlock() const;
 
 protected:
     LayerIdsType                 layer_ids_;

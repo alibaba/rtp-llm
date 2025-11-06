@@ -16,18 +16,13 @@ public:
     FullKVCacheGroup(const LayerIdsType& layer_ids, std::shared_ptr<KVCacheSpec> group_spec, BlockPoolPtr block_pool):
         KVCacheGroup(layer_ids, group_spec, block_pool) {}
 
-    bool        init() override;
-    bool        malloc(CacheKeysType& cache_keys, BlockIndicesType& block_indices, int seq_len) override;
-    MatchResult match(CacheKeysType& cache_keys) override;
+    bool        malloc(const CacheKeysType& cache_keys, BlockIndicesType& block_indices, int seq_len) override;
+    MatchResult match(const CacheKeysType& cache_keys) override;
     void        free(const BlockIndicesType& block_indices) override;
-    void        insertIntoCache(CacheKeysType& cache_keys, BlockIndicesType& block_indices, bool is_resident) override;
-    void        removeSkippedBlocks(BlockIndicesType& block_indices) override;
-    int         needBlocksNum(int seq_len, int current_blocks) const override;
-    size_t      freeBlockNums() const override;
-
-    std::unordered_map<int, torch::Tensor> layerCacheBase() const override;
-    BlockAddrInfo                          convertIndexToAddr(int layer_id, int block_id) const override;
-    BlockBufferInfo                        convertIndexToBuffer(int layer_id, int block_id) const override;
+    void
+    insertIntoCache(const CacheKeysType& cache_keys, const BlockIndicesType& block_indices, bool is_resident) override;
+    void removeSkippedBlocks(BlockIndicesType& block_indices) override;
+    int  needBlocksNum(int seq_len, int current_blocks) const override;
 
 private:
 };
