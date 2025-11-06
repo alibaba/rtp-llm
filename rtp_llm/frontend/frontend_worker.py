@@ -144,18 +144,20 @@ class FrontendWorker:
     ) -> Dict[str, Any]:
         generate_texts = gen_responses.generate_texts
         finished = gen_responses.generate_outputs.generate_outputs[0].finished
-        aux_info = gen_responses.generate_outputs.generate_outputs[0].aux_info
+        if generate_config.aux_info:
+            aux_info = gen_responses.generate_outputs.generate_outputs[0].aux_info
+            if generate_config.has_num_beams():
+                aux_info.beam_responses = generate_texts
         hidden_states = gen_responses.generate_outputs.generate_outputs[0].hidden_states
         output_ids = gen_responses.generate_outputs.generate_outputs[0].output_ids
         input_ids = gen_responses.generate_outputs.generate_outputs[0].input_ids
         loss = gen_responses.generate_outputs.generate_outputs[0].loss
         logits = gen_responses.generate_outputs.generate_outputs[0].logits
-        if generate_config.has_num_beams():
-            aux_info.beam_responses = generate_texts
+
         response = PipelineResponse(
             response=generate_texts[0],
             finished=finished,
-            aux_info=asdict(aux_info),
+            aux_info=asdict(aux_info) if generate_config.aux_info else {},
             hidden_states=(
                 hidden_states.tolist()
                 if generate_config.return_hidden_states and hidden_states is not None
