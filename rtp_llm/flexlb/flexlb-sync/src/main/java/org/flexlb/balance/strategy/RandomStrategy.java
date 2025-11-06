@@ -13,6 +13,8 @@ import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.util.CommonUtils;
 import org.flexlb.util.LoggingUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -27,6 +29,7 @@ import java.util.concurrent.ThreadLocalRandom;
  */
 @Component("randomStrategy")
 public class RandomStrategy implements LoadBalancer {
+    private static final Logger logger = LoggerFactory.getLogger(RandomStrategy.class);
 
     private final EngineWorkerStatus engineWorkerStatus;
 
@@ -41,16 +44,19 @@ public class RandomStrategy implements LoadBalancer {
 
     @Override
     public ServerStatus select(BalanceContext balanceContext, RoleType roleType, String group) {
+        String modelName = balanceContext.getMasterRequest().getModel();
+        logger.debug("Selecting worker for model: {}, role: {}, group: {}", modelName, roleType, group);
 
-        MasterRequest masterRequest = balanceContext.getMasterRequest();
-        String modelName = masterRequest.getModel();
         Map<String/*ip*/, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(modelName, roleType, group);
 
         if (MapUtils.isEmpty(workerStatusMap)) {
+            logger.warn("No worker status map found for model: {}", modelName);
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
         }
+        
         List<WorkerStatus> workerStatuses = new ArrayList<>(workerStatusMap.values());
         if (CollectionUtils.isEmpty(workerStatuses)) {
+            logger.warn("No available workers for model: {}", modelName);
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
         }
 

@@ -23,4 +23,9 @@ public class WhaleMasterConfig {
      * 建议范围：0.001-0.01 (针对缓存使用量数值范围优化)
      */
     private double weightedCacheDecayFactor = 0.001;
+
+    /**
+     * VIT角色的负载均衡策略
+     */
+    private LoadBalanceStrategyEnum vitLoadBalanceStrategy = LoadBalanceStrategyEnum.RANDOM;
 }

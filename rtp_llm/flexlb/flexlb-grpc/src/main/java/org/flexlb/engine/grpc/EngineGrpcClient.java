@@ -29,7 +29,7 @@ import java.util.function.Function;
  */
 @Component
 @Slf4j
-public class EngineGrpcClient extends AbstractGrpcClient<RpcServiceGrpc.RpcServiceBlockingStub> {
+public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.GrpcStubWrapper> {
 
     @Getter
     private final Executor executor;
@@ -55,7 +55,7 @@ public class EngineGrpcClient extends AbstractGrpcClient<RpcServiceGrpc.RpcServi
      * @param serviceType      the service type for channel selection
      */
     private <R> R executeGrpcCall(String ip, int port,
-                                  Function<RpcServiceGrpc.RpcServiceBlockingStub, R> grpcCall,
+                                  Function<GrpcStubWrapper, R> grpcCall,
                                   long requestTimeoutMs,
                                   ServiceType serviceType) {
 
@@ -76,14 +76,13 @@ public class EngineGrpcClient extends AbstractGrpcClient<RpcServiceGrpc.RpcServi
 
         try {
             invoker.updateLastUsedTime();
-            RpcServiceGrpc.RpcServiceBlockingStub rpcServiceStub = invoker.getRpcServiceStub()
+            GrpcStubWrapper stubWrapper = invoker.getRpcServiceStub()
                     .withDeadlineAfter(requestTimeoutMs, TimeUnit.MILLISECONDS);
 
             long startTime = System.nanoTime() / 1000;
-            R response = grpcCall.apply(rpcServiceStub);
+            R response = grpcCall.apply(stubWrapper);
             long endTime = System.nanoTime() / 1000;
-            
-            // 计算响应体字节大小
+
             int responseSize = 0;
             if (response instanceof MessageLite messageLite) {
                 responseSize = messageLite.getSerializedSize();
@@ -122,7 +121,7 @@ public class EngineGrpcClient extends AbstractGrpcClient<RpcServiceGrpc.RpcServi
     }
 
     private <R> R retryWithNewChannel(String channelKey,
-                                      Function<RpcServiceGrpc.RpcServiceBlockingStub, R> grpcCall,
+                                      Function<GrpcStubWrapper, R> grpcCall,
                                       long requestTimeoutMs,
                                       String ip, int port,
                                       ServiceType serviceType) {
@@ -132,11 +131,11 @@ public class EngineGrpcClient extends AbstractGrpcClient<RpcServiceGrpc.RpcServi
         
         log.info("Retrying gRPC call with new channel for {}:{} {}", ip, port, serviceType);
         
-        RpcServiceGrpc.RpcServiceBlockingStub rpcServiceStub = newInvoker.getRpcServiceStub()
+        GrpcStubWrapper stubWrapper = newInvoker.getRpcServiceStub()
                 .withDeadlineAfter(requestTimeoutMs, TimeUnit.MILLISECONDS);
         
         long startTime = System.nanoTime() / 1000;
-        R response = grpcCall.apply(rpcServiceStub);
+        R response = grpcCall.apply(stubWrapper);
         long endTime = System.nanoTime() / 1000;
         
         // 计算响应体字节大小
@@ -156,14 +155,28 @@ public class EngineGrpcClient extends AbstractGrpcClient<RpcServiceGrpc.RpcServi
      * Get worker status via gRPC
      */
     public EngineRpcService.WorkerStatusPB getWorkerStatus(String ip, int port, EngineRpcService.StatusVersionPB request, long requestTimeoutMs) {
-        return executeGrpcCall(ip, port, stub -> stub.getWorkerStatus(request), requestTimeoutMs, ServiceType.WORKER_STATUS);
+        return executeGrpcCall(ip, port, stub -> stub.getRpcServiceStub().getWorkerStatus(request), requestTimeoutMs, ServiceType.WORKER_STATUS);
     }
 
     /**
      * Get cache status via gRPC
      */
     public EngineRpcService.CacheStatusPB getCacheStatus(String ip, int port, EngineRpcService.CacheVersionPB request, long requestTimeoutMs) {
-        return executeGrpcCall(ip, port, stub -> stub.getCacheStatus(request), requestTimeoutMs, ServiceType.CACHE_STATUS);
+        return executeGrpcCall(ip, port, stub -> stub.getRpcServiceStub().getCacheStatus(request), requestTimeoutMs, ServiceType.CACHE_STATUS);
+    }
+
+    /**
+     * Get multimodal worker status via gRPC
+     */
+    public EngineRpcService.WorkerStatusPB getMultimodalWorkerStatus(String ip, int port, EngineRpcService.StatusVersionPB request, long requestTimeoutMs) {
+        return executeGrpcCall(ip, port, stub -> stub.getMultimodalRpcServiceStub().getWorkerStatus(request), requestTimeoutMs, ServiceType.MULTIMODAL_WORKER_STATUS);
+    }
+
+    /**
+     * Get multimodal cache status via gRPC
+     */
+    public EngineRpcService.CacheStatusPB getMultimodalCacheStatus(String ip, int port, EngineRpcService.CacheVersionPB request, long requestTimeoutMs) {
+        return executeGrpcCall(ip, port, stub -> stub.getMultimodalRpcServiceStub().getCacheStatus(request), requestTimeoutMs, ServiceType.MULTIMODAL_CACHE_STATUS);
     }
 
     @Override
@@ -201,7 +214,10 @@ public class EngineGrpcClient extends AbstractGrpcClient<RpcServiceGrpc.RpcServi
     }
 
     @Override
-    protected RpcServiceGrpc.RpcServiceBlockingStub createStub(ManagedChannel channel) {
-        return RpcServiceGrpc.newBlockingStub(channel);
+    protected GrpcStubWrapper createStub(ManagedChannel channel) {
+        return new GrpcStubWrapper(
+                RpcServiceGrpc.newBlockingStub(channel),
+                MultimodalRpcServiceGrpc.newBlockingStub(channel)
+        );
     }
 }

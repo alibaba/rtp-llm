@@ -99,7 +99,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
         try {
             WorkerStatus workerStatus = getOrCreateWorkerStatus();
             EngineRpcService.CacheStatusPB cacheStatus = engineGrpcService.getCacheStatus(
-                ip, grpcPort, workerStatus, cacheVersion, requestTimeoutMs);
+                ip, grpcPort, workerStatus, cacheVersion, requestTimeoutMs, roleType);
             logger.info("gRPC Cache Status Response - handled for {}, role:{}, cache_key_size:{}, cache_version:{}, "
                             + "available_kv_cache:{}, total_kv_cache:{}, block_size:{}",
                     ipPort, roleType.name(), cacheStatus.getCacheKeysMap().size(), cacheStatus.getVersion(),

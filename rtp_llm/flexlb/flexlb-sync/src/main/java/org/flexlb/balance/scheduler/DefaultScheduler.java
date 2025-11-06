@@ -42,7 +42,7 @@ public class DefaultScheduler implements Scheduler {
                 configService.loadBalanceConfig().getLoadBalanceStrategy());
         decodeLoadBalancer = LoadBalanceStrategyFactory.getLoadBalanceStrategy(LoadBalanceStrategyEnum.WEIGHTED_CACHE);
         vitLoadBalancer = LoadBalanceStrategyFactory.getLoadBalanceStrategy(
-                configService.loadBalanceConfig().getLoadBalanceStrategy());
+                configService.loadBalanceConfig().getVitLoadBalanceStrategy());
         fusionLoadBalancer = LoadBalanceStrategyFactory.getLoadBalanceStrategy(
                 configService.loadBalanceConfig().getLoadBalanceStrategy());
     }

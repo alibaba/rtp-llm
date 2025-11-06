@@ -2,6 +2,7 @@ package org.flexlb.sync.runner;
 
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.domain.worker.WorkerStatusResponse;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.enums.BalanceStatusEnum;
@@ -37,12 +38,14 @@ public class GrpcWorkerStatusRunner implements Runnable {
     private final long startTime = System.nanoTime() / 1000;
     private final String id = IdUtils.fastUuid();
     private final long syncRequestTimeoutMs;
+    private final RoleType roleType;
 
     public GrpcWorkerStatusRunner(String modelName, String ipPort, String site, String group,
                                   Map<String/*ip*/, WorkerStatus> workerStatuses,
                                   EngineHealthReporter engineHealthReporter,
                                   EngineGrpcService engineGrpcService,
-                                  long syncRequestTimeoutMs) {
+                                  long syncRequestTimeoutMs,
+                                  RoleType roleType) {
         this.ipPort = ipPort;
         String[] split = ipPort.split(":");
         this.ip = split[0];
@@ -55,6 +58,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
         this.engineHealthReporter = engineHealthReporter;
         this.engineGrpcService = engineGrpcService;
         this.syncRequestTimeoutMs = syncRequestTimeoutMs;
+        this.roleType = roleType;
     }
 
     @Override
@@ -75,7 +79,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
 
     private WorkerStatusResponse launchGrpcStatusCheck(String ip, int grpcPort, long latestFinishedTaskVersion) {
         try {
-            EngineRpcService.WorkerStatusPB workerStatusPB = engineGrpcService.getWorkerStatus(ip, grpcPort, latestFinishedTaskVersion, syncRequestTimeoutMs);
+            EngineRpcService.WorkerStatusPB workerStatusPB = engineGrpcService.getWorkerStatus(ip, grpcPort, latestFinishedTaskVersion, syncRequestTimeoutMs, roleType);
             return EngineStatusConverter.convertToWorkerStatusResponse(workerStatusPB);
         } catch (Throwable throwable) {
             handleException(throwable);
@@ -126,6 +130,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 workerStatus.updateTaskStates(runningTaskInfo, finishedTaskList);
                 logger.info("query engine worker status via gRPC, version is not updated, currentVersion: {}, responseVersion: {}",
                         currentVersion, responseVersion);
+                // Update basic worker status even when version is not updated
                 return;
             }
 
