@@ -42,6 +42,7 @@ ParamsBasePtr FlashInferPrefillOp::prepare(torch_ext::PyAttentionInputs attn_inp
     if (attn_configs_.kv_cache_dtype == KvCacheDataType::FP8) {
         dtype = DataType::TYPE_FP8_E4M3;
     }
+    std::cout << attn_configs_.DebugAttentionConfigStr() << std::endl;
     auto                    params = FlashInferAttnParams::prepare(device_,
                                                 attn_configs_,
                                                 prefix_lengths_host,
@@ -73,6 +74,8 @@ torch::Tensor FlashInferPrefillOp::forward(const torch::Tensor&              q,
         k_cache = kv_cache.value().k_cache_base;
         v_cache = kv_cache.value().v_cache_base;
     }
+    std::cout << "k_cache dtype: " << k_cache.dtype() << ", v_cache dtype: " << v_cache.dtype()
+              << ", q dtype: " << q.dtype() << std::endl;
     BatchPrefillWithPagedKVCacheRun(params->float_workspace_d,         // float_workspace_buffer
                                     params->int_workspace_d,           // int_workspace_buffer
                                     params->plan,                      // plan_info_vec
