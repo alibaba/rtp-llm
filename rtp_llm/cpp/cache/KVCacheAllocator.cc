@@ -122,8 +122,9 @@ void KVCacheAllocator::initKvCacheMla() {
                                                                                (size_t)config_.seq_size_per_block,
                                                                                (size_t)config_.rope_head_dim},
                                                            (int8_t*)cache_base_ptr_ + kv_cache_.k_blocks->sizeBytes());
-    // memset k_blocks and v_blocks
-#ifdef USING_ROCM
+// memset k_blocks and v_blocks for cuda or rocm
+// since warmup produce nan maybe influence kvcache
+#if (defined(USING_ROCM) && USING_ROCM) || (defined(USING_CUDA) && USING_CUDA)
     device_->bufMemset(*kv_cache_.k_blocks, 0);
     device_->bufMemset(*kv_cache_.v_blocks, 0);
 #endif
@@ -147,8 +148,9 @@ void KVCacheAllocator::initKvCacheNormal() {
                                                                                (size_t)config_.seq_size_per_block,
                                                                                (size_t)config_.size_per_head},
                                                            (int8_t*)cache_base_ptr_ + kv_cache_.k_blocks->sizeBytes());
-    // memset k_blocks and v_blocks
-#ifdef USING_ROCM
+// memset k_blocks and v_blocks for cuda or rocm
+// since warmup produce nan maybe influence kvcache
+#if (defined(USING_ROCM) && USING_ROCM) || (defined(USING_CUDA) && USING_CUDA)
     device_->bufMemset(*kv_cache_.k_blocks, 0);
     device_->bufMemset(*kv_cache_.v_blocks, 0);
 #endif
