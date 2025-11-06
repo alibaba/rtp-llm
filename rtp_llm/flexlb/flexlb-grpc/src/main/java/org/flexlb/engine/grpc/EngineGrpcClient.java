@@ -26,7 +26,7 @@ import org.springframework.stereotype.Component;
  * Engine gRPC client for worker status queries
  */
 @Component
-public class EngineGrpcClient extends AbstractGrpcClient<RpcServiceGrpc.RpcServiceBlockingStub> {
+public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.GrpcStubWrapper> {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(EngineGrpcClient.class);
 
@@ -54,7 +54,7 @@ public class EngineGrpcClient extends AbstractGrpcClient<RpcServiceGrpc.RpcServi
      * @param serviceType      the service type for channel selection
      */
     private <R> R executeGrpcCall(String ip, int port,
-                                  Function<RpcServiceGrpc.RpcServiceBlockingStub, R> grpcCall,
+                                  Function<GrpcStubWrapper, R> grpcCall,
                                   long requestTimeoutMs,
                                   ServiceType serviceType) {
 
@@ -73,10 +73,10 @@ public class EngineGrpcClient extends AbstractGrpcClient<RpcServiceGrpc.RpcServi
         }
 
         try {
-            RpcServiceGrpc.RpcServiceBlockingStub rpcServiceStub = invoker.getRpcServiceStub()
+            GrpcStubWrapper stubWrapper = invoker.getRpcServiceStub()
                     .withDeadlineAfter(requestTimeoutMs, TimeUnit.MILLISECONDS);
 
-            R result = grpcCall.apply(rpcServiceStub);
+            R result = grpcCall.apply(stubWrapper);
 
             if (shutdownAfterInvoke) {
                 invoker.shutdown();
@@ -93,14 +93,28 @@ public class EngineGrpcClient extends AbstractGrpcClient<RpcServiceGrpc.RpcServi
      * Get worker status via gRPC
      */
     public EngineRpcService.WorkerStatusPB getWorkerStatus(String ip, int port, EngineRpcService.StatusVersionPB request, long requestTimeoutMs) {
-        return executeGrpcCall(ip, port, stub -> stub.getWorkerStatus(request), requestTimeoutMs, ServiceType.WORKER_STATUS);
+        return executeGrpcCall(ip, port, stub -> stub.getRpcServiceStub().getWorkerStatus(request), requestTimeoutMs, ServiceType.WORKER_STATUS);
     }
 
     /**
      * Get cache status via gRPC
      */
     public EngineRpcService.CacheStatusPB getCacheStatus(String ip, int port, EngineRpcService.CacheVersionPB request, long requestTimeoutMs) {
-        return executeGrpcCall(ip, port, stub -> stub.getCacheStatus(request), requestTimeoutMs, ServiceType.CACHE_STATUS);
+        return executeGrpcCall(ip, port, stub -> stub.getRpcServiceStub().getCacheStatus(request), requestTimeoutMs, ServiceType.CACHE_STATUS);
+    }
+
+    /**
+     * Get multimodal worker status via gRPC
+     */
+    public EngineRpcService.WorkerStatusPB getMultimodalWorkerStatus(String ip, int port, EngineRpcService.StatusVersionPB request, long requestTimeoutMs) {
+        return executeGrpcCall(ip, port, stub -> stub.getMultimodalRpcServiceStub().getWorkerStatus(request), requestTimeoutMs, ServiceType.MULTIMODAL_WORKER_STATUS);
+    }
+
+    /**
+     * Get multimodal cache status via gRPC
+     */
+    public EngineRpcService.CacheStatusPB getMultimodalCacheStatus(String ip, int port, EngineRpcService.CacheVersionPB request, long requestTimeoutMs) {
+        return executeGrpcCall(ip, port, stub -> stub.getMultimodalRpcServiceStub().getCacheStatus(request), requestTimeoutMs, ServiceType.MULTIMODAL_CACHE_STATUS);
     }
 
     @Override
@@ -125,7 +139,10 @@ public class EngineGrpcClient extends AbstractGrpcClient<RpcServiceGrpc.RpcServi
     }
 
     @Override
-    protected RpcServiceGrpc.RpcServiceBlockingStub createStub(ManagedChannel channel) {
-        return RpcServiceGrpc.newBlockingStub(channel);
+    protected GrpcStubWrapper createStub(ManagedChannel channel) {
+        return new GrpcStubWrapper(
+                RpcServiceGrpc.newBlockingStub(channel),
+                MultimodalRpcServiceGrpc.newBlockingStub(channel)
+        );
     }
 }

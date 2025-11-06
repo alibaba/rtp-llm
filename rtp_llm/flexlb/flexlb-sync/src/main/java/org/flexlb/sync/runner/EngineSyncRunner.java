@@ -130,7 +130,7 @@ public class EngineSyncRunner implements Runnable {
                     logger.debug("Submitting GrpcWorkerStatusRunner for worker: {}, site: {}", workerIpPort, site);
                     GrpcWorkerStatusRunner grpcWorkerStatusRunner
                             = new GrpcWorkerStatusRunner(modelName, workerIpPort, site, host.getGroup(),
-                        cachedWorkerStatuses, engineHealthReporter, engineGrpcService, syncRequestTimeoutMs);
+                        cachedWorkerStatuses, engineHealthReporter, engineGrpcService, syncRequestTimeoutMs, roleType);
                     statusCheckExecutor.submit(grpcWorkerStatusRunner);
                 } else {
                     logger.debug("Submitting HttpStatusCheckRunner (HTTP) for worker: {}, site: {}, model: {}", workerIpPort, site, modelName);

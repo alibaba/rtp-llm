@@ -1,6 +1,7 @@
 package org.flexlb.sync.runner;
 
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
@@ -51,7 +52,7 @@ class GrpcWorkerStatusCheckRunnerTest {
 
         // Act
         GrpcWorkerStatusRunner runner = new GrpcWorkerStatusRunner(
-                modelName, ipPort, site, group, workerStatuses, engineHealthReporter, engineGrpcService, 20);
+                modelName, ipPort, site, group, workerStatuses, engineHealthReporter, engineGrpcService, 20, RoleType.PDFUSION);
         runner.run();
 
         // Assert

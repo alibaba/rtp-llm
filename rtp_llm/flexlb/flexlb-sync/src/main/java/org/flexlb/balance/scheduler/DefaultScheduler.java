@@ -40,9 +40,10 @@ public class DefaultScheduler implements Scheduler {
         this.engineWorkerStatus = engineWorkerStatus;
         prefillLoadBalancer = LoadBalanceStrategyFactory.getLoadBalanceStrategy(
                 configService.loadBalanceConfig().getLoadBalanceStrategy());
-        decodeLoadBalancer = LoadBalanceStrategyFactory.getLoadBalanceStrategy(LoadBalanceStrategyEnum.LOWEST_CACHE_USED);
+        decodeLoadBalancer = LoadBalanceStrategyFactory.getLoadBalanceStrategy(
+                configService.loadBalanceConfig().getDecodeLoadBalanceStrategy());
         vitLoadBalancer = LoadBalanceStrategyFactory.getLoadBalanceStrategy(
-                configService.loadBalanceConfig().getLoadBalanceStrategy());
+                configService.loadBalanceConfig().getVitLoadBalanceStrategy());
         fusionLoadBalancer = LoadBalanceStrategyFactory.getLoadBalanceStrategy(
                 configService.loadBalanceConfig().getLoadBalanceStrategy());
         SchedulerFactory.register(ScheduleType.DEFAULT, this);

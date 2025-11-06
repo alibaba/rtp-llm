@@ -36,7 +36,10 @@ public class EngineWorkerStatus {
         if (group != null) {
             Map<String, WorkerStatus> filterMap = roleStatusMap.entrySet()
                 .stream()
-                .filter(entry -> entry.getValue().getGroup().equals(group))
+                .filter(entry -> {
+                    WorkerStatus workerStatus = entry.getValue();
+                    return workerStatus != null && group != null && group.equals(workerStatus.getGroup());
+                })
                 .collect(Collectors.toConcurrentMap(Map.Entry::getKey, Map.Entry::getValue));
             roleStatusMap.clear();
             roleStatusMap.putAll(filterMap);
