@@ -3,8 +3,12 @@
 #include <vector>
 #include <memory>
 #include <atomic>
+#include <set>
+#include <unordered_map>
+#include <mutex>
 
-#include "rtp_llm/cpp/disaggregate/cache_store_new/LayerCacheBuffer.h"
+#include "rtp_llm/cpp/cache_new/p2p_connector/LayerCacheBuffer.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 
 namespace rtp_llm {
 
@@ -17,6 +21,8 @@ public:
     bool success() const;
     void cancel();
     void waitDone();
+
+    void setFailed(ErrorCode ec, const std::string& error_info);
 
     bool                              isDone() const;
     std::shared_ptr<LayerCacheBuffer> getLayerCacheBuffer(int layer_id) const;

@@ -1,9 +1,12 @@
 #pragma once
 
-#include "rtp_llm/cpp/disaggregate/cache_store_new/LayerCacheBuffer.h"
-#include "rtp_llm/cpp/disaggregate/cache_store_new/proto/service.pb.h"
-#include "rtp_llm/cpp/disaggregate/cache_store_new/LoadContext.h"
-#include "rtp_llm/cpp/disaggregate/cache_store_new/TcpClient.h"
+#include "rtp_llm/cpp/cache_new/p2p_connector/LayerCacheBuffer.h"
+#include "rtp_llm/cpp/cache_new/p2p_connector/proto/service.pb.h"
+#include "rtp_llm/cpp/cache_new/p2p_connector/LoadContext.h"
+#include "rtp_llm/cpp/cache_new/p2p_connector/TcpClient.h"
+#include "rtp_llm/cpp/cache_new/p2p_connector/TcpServer.h"
+#include "rtp_llm/cpp/cache_new/p2p_connector/CacheStoreClientService.h"
+#include "rtp_llm/cpp/cache_new/p2p_connector/CommonDefs.h"
 
 namespace rtp_llm {
 
@@ -31,10 +34,14 @@ private:
 
 class CacheStoreClient {
 public:
-    CacheStoreClient(const std::shared_ptr<TcpClient>& tcp_client);
+    CacheStoreClient(const std::shared_ptr<TcpClient>& tcp_client, const std::shared_ptr<TcpServer>& tcp_server);
     ~CacheStoreClient();
 
 public:
+    bool init();
+
+    std::vector<CacheStoreServerWorker> getPeerWorkerInfo(const std::string& ip, uint32_t port);
+
     std::shared_ptr<LoadContext> asyncLoad(const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers,
                                            int64_t                                               timeout_ms,
                                            const std::string&                                    ip,
@@ -53,10 +60,11 @@ private:
 
 private:
     std::shared_ptr<TcpClient> tcp_client_;
-    std::string                ip_;
-    uint32_t                   port_;
+    std::shared_ptr<TcpServer> tcp_server_;
 
     std::shared_ptr<LoadContextStore> load_context_store_;
+
+    std::unique_ptr<CacheStoreClientService> cache_store_client_service_;
 };
 
 }  // namespace rtp_llm

@@ -1,4 +1,5 @@
-#include "rtp_llm/cpp/disaggregate/cache_store_new/LayerCacheBuffer.h"
+#include "rtp_llm/cpp/cache_new/p2p_connector/LayerCacheBuffer.h"
+
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
@@ -6,16 +7,8 @@ namespace rtp_llm {
 
 LayerCacheBuffer::LayerCacheBuffer(int layer_id): layer_id_(layer_id) {}
 
-void LayerCacheBuffer::addBlockCacheBuffer(int64_t key, BufferPtr k_buffer, BufferPtr v_buffer) {
-    block_cache_buffers_[key] = std::make_shared<BlockCacheBuffer>(key, k_buffer, v_buffer);
-}
-
-std::shared_ptr<BlockCacheBuffer> LayerCacheBuffer::getBlockCacheBuffer(int64_t key) {
-    auto iter = block_cache_buffers_.find(key);
-    if (iter != block_cache_buffers_.end()) {
-        return iter->second;
-    }
-    return nullptr;
+void LayerCacheBuffer::addBlockCacheBuffer(int64_t key, int block_id) {
+    block_cache_buffers_[key] = std::make_shared<BlockCacheBuffer>(key, block_id);
 }
 
 SingleLayerCacheBufferStore::SingleLayerCacheBufferStore(int layer_id): layer_id_(layer_id) {}

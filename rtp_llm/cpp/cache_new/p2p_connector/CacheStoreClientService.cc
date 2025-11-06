@@ -1,4 +1,6 @@
-#include "rtp_llm/cpp/disaggregate/cache_store_new/CacheStoreClientService.h"
+#include "rtp_llm/cpp/cache_new/p2p_connector/CacheStoreClientService.h"
+
+#include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 
@@ -8,8 +10,8 @@ CacheStoreClientService::CacheStoreClientService(const std::shared_ptr<LoadConte
 CacheStoreClientService::~CacheStoreClientService() {}
 
 void CacheStoreClientService::transfer(::google::protobuf::RpcController* controller,
-                                       const ::TransferRequest*           request,
-                                       ::TransferResponse*                response,
+                                       const ::LayerBlockTransferRequest* request,
+                                       ::LayerBlockTransferResponse*      response,
                                        ::google::protobuf::Closure*       done) {
     auto load_context = load_context_store_->getLoadContext(request->context_id());
     if (!load_context) {
@@ -44,8 +46,8 @@ void CacheStoreClientService::transfer(::google::protobuf::RpcController* contro
 }
 
 void CacheStoreClientService::loadLayerBlocks(const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers,
-                                              const ::TransferRequest*                              request,
-                                              ::TransferResponse*                                   response,
+                                              const ::LayerBlockTransferRequest*                    request,
+                                              ::LayerBlockTransferResponse*                         response,
                                               ::google::protobuf::Closure*                          done) {
     // TODO: TCP Load : copy content to buffer
     // TODO: RDMA Load : call read

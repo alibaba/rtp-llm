@@ -1,7 +1,7 @@
 #pragma once
 
-#include "rtp_llm/cpp/disaggregate/cache_store_new/proto/service.pb.h"
-#include "rtp_llm/cpp/disaggregate/cache_store_new/LoadContext.h"
+#include "rtp_llm/cpp/cache_new/p2p_connector/proto/service.pb.h"
+#include "rtp_llm/cpp/cache_new/p2p_connector/LoadContext.h"
 
 namespace rtp_llm {
 
@@ -12,14 +12,14 @@ public:
 
 public:
     void transfer(::google::protobuf::RpcController* controller,
-                  const ::TransferRequest*           request,
-                  ::TransferResponse*                response,
+                  const ::LayerBlockTransferRequest* request,
+                  ::LayerBlockTransferResponse*      response,
                   ::google::protobuf::Closure*       done) override;
 
 private:
     void loadLayerBlocks(const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers,
-                         const ::TransferRequest*                              request,
-                         ::TransferResponse*                                   response,
+                         const ::LayerBlockTransferRequest*                    request,
+                         ::LayerBlockTransferResponse*                         response,
                          ::google::protobuf::Closure*                          done);
 
 private:

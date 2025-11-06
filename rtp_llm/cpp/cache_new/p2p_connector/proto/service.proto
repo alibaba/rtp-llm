@@ -3,14 +3,9 @@ syntax = "proto2";
 import "arpc/proto/rpc_extensions.proto";
 option cc_generic_services = true;
 
-message CacheBlockInfo {
-    optional int64 cache_key = 1;
-    repeated uint32 block_size = 2;
-}
-
 message LayerCacheBlockInfo {
     optional uint32 layer_id = 1;
-    repeated CacheBlockInfo blocks = 2;
+    repeated int64 cache_keys = 2;
 }
 
 message CacheLoadRequest {
@@ -29,8 +24,24 @@ message CacheLoadResponse {
     optional string info = 2;
 }
 
+message WorkerInfoRequest {}
+
+message WorkerInfo {
+    optional string ip = 1;
+    optional uint32 port = 2;
+    optional uint32 rdma_port = 3;
+}
+
+message WorkerInfoResponse {
+    repeated WorkerInfo worker_infos = 1;
+}
+
 service CacheStoreService {
     option (arpc.global_service_id) = 10086;
+
+    rpc workerinfo(WorkerInfoRequest) returns (WorkerInfoResponse) {
+        option (arpc.local_method_id) = 10087;
+    }
 
     rpc load(CacheLoadRequest) returns (CacheLoadResponse) {
         option (arpc.local_method_id) = 10088;
@@ -60,12 +71,12 @@ message LayerBlockBufferInfo {
     repeated BlockBufferInfo blocks = 2;
 }
 
-message TransferRequest {
+message LayerBlockTransferRequest {
     repeated LayerBlockBufferInfo layer_blocks = 1;
     optional int64 context_id = 2;
 }
 
-message TransferResponse {
+message LayerBlockTransferResponse {
     optional bool success = 1;
     optional string info = 2;
 }
@@ -73,7 +84,7 @@ message TransferResponse {
 service TransferService {
     option (arpc.global_service_id) = 10009;
 
-    rpc transfer(TransferRequest) returns (TransferResponse) {
+    rpc transfer(LayerBlockTransferRequest) returns (LayerBlockTransferResponse) {
         option (arpc.local_method_id) = 10010;
     }
 }

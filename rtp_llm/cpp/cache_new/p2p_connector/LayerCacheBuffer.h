@@ -1,6 +1,5 @@
 #pragma once
 
-#include "rtp_llm/cpp/core/Buffer.h"
 #include "autil/Thread.h"
 #include <mutex>
 #include <thread>
@@ -12,11 +11,9 @@ namespace rtp_llm {
 
 struct BlockCacheBuffer {
     int64_t key;
-    // avoid std::vector<BufferPtr>
-    BufferPtr k_buffer;
-    BufferPtr v_buffer;
-    BlockCacheBuffer(int64_t key, BufferPtr k_buffer, BufferPtr v_buffer):
-        key(key), k_buffer(k_buffer), v_buffer(v_buffer) {}
+    // not sure how to divide buffer according to layer type, will call allocator
+    int block_id;
+    BlockCacheBuffer(int64_t key, int block_id): key(key), block_id(block_id) {}
 };
 
 class LayerCacheBuffer {
@@ -25,7 +22,7 @@ public:
     ~LayerCacheBuffer() = default;
 
 public:
-    void                              addBlockCacheBuffer(int64_t key, BufferPtr k_buffer, BufferPtr v_buffer);
+    void                              addBlockCacheBuffer(int64_t key, int block_id);
     std::shared_ptr<BlockCacheBuffer> getBlockCacheBuffer(int64_t key);
     int                               layerId() const {
         return layer_id_;

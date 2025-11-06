@@ -56,6 +56,7 @@ enum class ErrorCode {
     CACHE_STORE_LOAD_BUFFER_TIMEOUT      = 8307,
     CACHE_STORE_LOAD_UNKNOWN_ERROR       = 8308,
     CACHE_STORE_STORE_FAILED             = 8309,
+    CACHE_STORE_LOAD_RESPONSE_FAILED     = 8310,
 
     // load balance error
     GET_PART_NODE_STATUS_FAILED = 8400,

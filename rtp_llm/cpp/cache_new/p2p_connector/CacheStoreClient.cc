@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/disaggregate/cache_store_new/CacheStoreClient.h"
+#include "rtp_llm/cpp/cache_new/p2p_connector/CacheStoreClient.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
@@ -14,18 +14,66 @@ CacheStoreClientClosure::CacheStoreClientClosure(const std::shared_ptr<CacheLoad
     load_context_(load_context) {}
 
 void CacheStoreClientClosure::Run() {
-    // TODO: if rpc failed
+    if (controller_->Failed()) {
+        load_context_->setFailed(ErrorCode::CACHE_STORE_LOAD_SEND_REQUEST_FAILED, controller_->ErrorText());
+        RTP_LLM_LOG_ERROR("cache load request failed, controller err is %s", controller_->ErrorText().c_str());
+        return;
+    }
 
-    // TODO: if response error code
+    if (!cache_load_response_->success()) {
+        load_context_->setFailed(ErrorCode::CACHE_STORE_LOAD_RESPONSE_FAILED, cache_load_response_->info());
+        RTP_LLM_LOG_ERROR("cache load response failed, response err is %s", cache_load_response_->info().c_str());
+        return;
+    }
 
     delete this;
 }
 
-// TODO: fill ip and port
-CacheStoreClient::CacheStoreClient(const std::shared_ptr<TcpClient>& tcp_client):
-    tcp_client_(tcp_client), ip_(""), port_(0), load_context_store_(new LoadContextStore()) {}
+CacheStoreClient::CacheStoreClient(const std::shared_ptr<TcpClient>& tcp_client,
+                                   const std::shared_ptr<TcpServer>& tcp_server):
+    tcp_client_(tcp_client), tcp_server_(tcp_server), load_context_store_(new LoadContextStore()) {
+    cache_store_client_service_ = std::make_unique<CacheStoreClientService>(load_context_store_);
+}
 
 CacheStoreClient::~CacheStoreClient() {}
+
+bool CacheStoreClient::init() {
+    if (!tcp_server_->registerService(cache_store_client_service_.get())) {
+        RTP_LLM_LOG_ERROR("cache store client init failed : register service failed");
+        return false;
+    }
+    RTP_LLM_LOG_INFO("cache store client init success, server port %u", tcp_server_->getPort());
+    return true;
+}
+
+std::vector<CacheStoreServerWorker> CacheStoreClient::getPeerWorkerInfo(const std::string& ip, uint32_t port) {
+    auto channel = tcp_client_->getChannel(ip, port);
+    if (channel == nullptr) {
+        return std::vector<CacheStoreServerWorker>();
+    }
+    CacheStoreService_Stub stub((::google::protobuf::RpcChannel*)(channel.get()),
+                                ::google::protobuf::Service::STUB_DOESNT_OWN_CHANNEL);
+
+    WorkerInfoRequest  request;
+    WorkerInfoResponse response;
+
+    arpc::ANetRPCController controller;
+    controller.SetExpireTime(100);
+
+    // TODO(yujing.zc): may need to change to async
+    stub.workerinfo(&controller, &request, &response, nullptr);
+
+    if (controller.Failed()) {
+        RTP_LLM_LOG_ERROR("get peer worker info failed, controller err is %s", controller.ErrorText().c_str());
+        return std::vector<CacheStoreServerWorker>();
+    }
+
+    std::vector<CacheStoreServerWorker> worker_info;
+    for (auto& worker : response.worker_infos()) {
+        worker_info.push_back(CacheStoreServerWorker(worker.ip(), worker.port(), worker.rdma_port()));
+    }
+    return worker_info;
+}
 
 std::shared_ptr<LoadContext>
 CacheStoreClient::asyncLoad(const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers,
@@ -76,22 +124,15 @@ bool CacheStoreClient::generateCacheLoadRequest(
     cache_load_request->set_deadline_ms(deadline_ms);
     cache_load_request->set_partition_count(partition_count);
     cache_load_request->set_partition_id(partition_id);
-    cache_load_request->set_ip(ip_);
-    cache_load_request->set_port(port_);
+    cache_load_request->set_ip(tcp_server_->getIP());
+    cache_load_request->set_port(tcp_server_->getPort());
     cache_load_request->set_context_id(context_id);
 
     for (auto& layer_cache_buffer : layer_cache_buffers) {
         auto layer_cache_load_info = cache_load_request->add_layer_cache_load_infos();
         layer_cache_load_info->set_layer_id(layer_cache_buffer->layerId());
         for (auto& [key, block] : layer_cache_buffer->blockCacheBuffers()) {
-            auto cache_block_info = layer_cache_load_info->add_blocks();
-            cache_block_info->set_cache_key(key);
-            if (block->k_buffer) {
-                cache_block_info->add_block_size(block->k_buffer->size());
-            }
-            if (block->v_buffer) {
-                cache_block_info->add_block_size(block->v_buffer->size());
-            }
+            layer_cache_load_info->add_cache_keys(key);
         }
     }
     return true;
