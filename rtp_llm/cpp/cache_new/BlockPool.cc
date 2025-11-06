@@ -11,7 +11,6 @@ namespace rtp_llm {
 BlockPool::BlockPool(const BlockPoolConfig& config, rtp_llm::DeviceBase* device, AllocationType atype):
     config_(config), device_(device), atype_(atype) {}
 
-
 BlockPool::~BlockPool() {
     cache_aligned_buffer_.reset();
 }
@@ -40,7 +39,7 @@ bool BlockPool::init() {
 
     initFreeBlocks();
 
-    RTP_LLM_LOG_INFO("block pool init success with layout: %s", 
+    RTP_LLM_LOG_INFO("block pool init success with layout: %s",
                      config_.layout == LAYER_FIRST ? "LAYER_FIRST" : "KV_FIRST");
     return true;
 }
@@ -52,7 +51,6 @@ void BlockPool::initFreeBlocks() {
     }
     block_ref_counter_.init(config_.block_num);
 }
-
 
 std::vector<torch::Tensor> BlockPool::layerCacheBase() const {
     if (!layout_strategy_) {
@@ -66,18 +64,19 @@ std::vector<BlockIdxType> BlockPool::alloc(int num_blocks) {
     std::vector<BlockIdxType> block_ids;
     block_ids.reserve(num_blocks);
     if (free_block_ids.size() < static_cast<size_t>(num_blocks)) {
-        RTP_LLM_LOG_DEBUG("Block pool only has %zu free blocks, cannot allocate %d blocks", free_block_ids.size(), num_blocks);
+        RTP_LLM_LOG_DEBUG(
+            "Block pool only has %zu free blocks, cannot allocate %d blocks", free_block_ids.size(), num_blocks);
         return {};
     }
     for (int i = 0; i < num_blocks; ++i) {
         auto it = free_block_ids.begin();
-        if (it == free_block_ids.end()) break;
+        if (it == free_block_ids.end())
+            break;
         block_ids.push_back(*it);
         free_block_ids.erase(it);
     }
     return block_ids;
 }
-
 
 void BlockPool::free(const std::vector<BlockIdxType>& block_ids) {
     block_ref_counter_.decrementRefCounter(block_ids);
@@ -91,64 +90,6 @@ void BlockPool::free(const std::vector<BlockIdxType>& block_ids) {
 void BlockPool::reference(const std::vector<BlockIdxType>& block_ids) {
     block_ref_counter_.incrementRefCounter(block_ids);
 }
-
-void BlockPool::regUserMr(size_t model_id) {
-    if (device_->cacheStore() && !kvcache_reg_mr_) {
-        RTP_LLM_LOG_INFO("start to register user mr");
-        auto memory_util = std::static_pointer_cast<NormalCacheStore>(device_->cacheStore())->getMemoryUtil();
-        
-        auto start_time_us = currentTimeUs();
-        size_t total_memory_size = config_.layer_num * config_.block_num * config_.block_size;
-        
-        if (!memory_util->regUserMr(cache_base_ptr_, config_.total_size, true, config_.block_size)) {
-            RTP_LLM_FAIL("register user mr for block pool cache buffer failed");
-        }
-        
-        auto cost_time_ms = (currentTimeUs() - start_time_us) / 1000;        
-        RTP_LLM_LOG_INFO(
-            "register user mr for block pool cache buffer success: cost %ld ms, cache base address %p, len %lu",
-            cost_time_ms,
-            cache_base_ptr_,
-            total_memory_size);
-        mr_cost_time_ms_ += cost_time_ms;
-        kvcache_reg_mr_ = true;
-        
-        // // register user buffer by block_index for decode entrance scenario
-        // if(config_.layout == LAYER_FIRST) {
-        //     std::vector<std::shared_ptr<BlockBuffer>> buffers;
-        //     for (int block_index = 0; block_index < config_.block_num; ++block_index) {
-        //         for (int layer_index = 0; layer_index < config_.layer_num; ++layer_index) {
-        //             auto block_key = makeCacheKey(model_id, std::to_string(layer_index), block_index);
-        //             auto addr_info = convertIndexToAddr(layer_index, block_index);
-        //             auto kv_buffer = std::make_shared<BlockBuffer>(
-        //                 "kv_" + block_key, 
-        //                 std::shared_ptr<void>(addr_info.k_addr, [](void*) {}), 
-        //                 config_.block_size, 
-        //                 true, 
-        //                 true);
-        //             buffers.push_back(kv_buffer);
-        //         }
-        //     }
-        //     device_->cacheStore()->regUserBuffers(buffers);
-        //  } else if (config_.layout == KV_FIRST) {
-        //      // TODO: implement kv first layout
-        //  }
-    }
-}
-
-
-void BlockPool::deregUserMr() {
-    if (device_->cacheStore() && kvcache_reg_mr_) {
-        RTP_LLM_LOG_INFO("start to deregister user mr");
-        auto memory_util = std::static_pointer_cast<NormalCacheStore>(device_->cacheStore())->getMemoryUtil();
-        if (!memory_util->deregUserMr(cache_base_ptr_, true)) {
-            RTP_LLM_FAIL("deregister user mr for block pool cache buffer failed");
-        }
-        RTP_LLM_LOG_INFO("deregister user mr for block pool cache buffer success");
-        kvcache_reg_mr_ = false;
-    }
-}
-
 
 size_t BlockPool::freeBlockNums() const {
     return free_block_ids.size();
@@ -184,6 +125,10 @@ BlockBufferInfo BlockPool::convertIndexToBuffer(int layer_id, int block_id) cons
         return {nullptr, nullptr};
     }
     return layout_strategy_->convertIndexToBuffer(layer_id, block_id);
+}
+
+BufferPtr BlockPool::cacheBuffer() const {
+    return cache_aligned_buffer_;
 }
 
 }  // namespace rtp_llm

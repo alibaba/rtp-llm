@@ -6,26 +6,22 @@
 
 namespace rtp_llm {
 
-SingleTypeKVCacheAllocator::SingleTypeKVCacheAllocator(const CacheConfig& config, 
-                                                       rtp_llm::DeviceBase* device, 
-                                                       AllocationType atype)
-    : KVCacheAllocator(config, device, atype) {
-}
+SingleTypeKVCacheAllocator::SingleTypeKVCacheAllocator(const CacheConfig&   config,
+                                                       rtp_llm::DeviceBase* device,
+                                                       AllocationType       atype):
+    KVCacheAllocator(config, device, atype) {}
 
 bool SingleTypeKVCacheAllocator::init() {
-    auto block_size = config_.layer_type_params[0]->block_size();
-    BlockPoolConfig pool_config = BlockPoolConfigHelper::createKVFirstConfig(
-        config_.layer_num,
-        config_.block_num,
-        block_size
-    );
-    
+    auto            block_size = config_.layer_type_params[0]->block_size();
+    BlockPoolConfig pool_config =
+        BlockPoolConfigHelper::createKVFirstConfig(config_.layer_num, config_.block_num, block_size);
+
     block_pool_ = std::make_shared<BlockPool>(pool_config, device_, atype_);
     if (!block_pool_->init()) {
         RTP_LLM_LOG_ERROR("Failed to initialize block pool for SingleTypeKVCacheAllocator");
         return false;
     }
-    
+
     std::vector<int> layer_ids(config_.layer_ids[0]);
     if (config_.layer_type_params.empty()) {
         RTP_LLM_LOG_ERROR("no layer_type_params found in CacheConfig");
@@ -36,10 +32,7 @@ bool SingleTypeKVCacheAllocator::init() {
 
     auto block_cache = std::make_shared<BlockCacheV1>(static_cast<size_t>(config_.seq_size_per_block));
 
-    full_kv_cache_group_ = std::make_shared<FullKVCacheGroup>(
-        layer_ids, spec, block_cache, block_pool_
-    );
-
+    full_kv_cache_group_ = std::make_shared<FullKVCacheGroup>(layer_ids, spec, block_cache, block_pool_);
 
     // if (cache_type == KVCacheType::MultiHeadLatentAttention) {
     //     // Use MLA specialization (fields remain default for now)
@@ -63,14 +56,14 @@ bool SingleTypeKVCacheAllocator::init() {
     //     RTP_LLM_LOG_ERROR("SingleTypeKVCacheAllocator only supports MHA/MLA full attention");
     //     return false;
     // }
-    
+
     if (!full_kv_cache_group_->init()) {
         RTP_LLM_LOG_ERROR("Failed to initialize FullKVCacheGroup");
         return false;
     }
-    
+
     // kv_cache_groups_.push_back(full_kv_cache_group_);
-    
+
     RTP_LLM_LOG_INFO("SingleTypeKVCacheAllocator initialized successfully with KV_FIRST layout");
     return true;
 }
@@ -81,22 +74,23 @@ MallocResult SingleTypeKVCacheAllocator::malloc(const MallocInfo& malloc_info) {
         return {false, 0};
     }
 
-    int batch_size = malloc_info.batch_kv_cache_resource->batchSize();
-    int total_reuse_len = 0; 
+    int batch_size      = malloc_info.batch_kv_cache_resource->batchSize();
+    int total_reuse_len = 0;
 
-    int seq_len = malloc_info.complete_token_ids->seqLength();
+    int seq_len            = malloc_info.complete_token_ids->seqLength();
     int seq_size_per_block = full_kv_cache_group_->seqSizePerBlock();
 
     for (int batch_id = 0; batch_id < batch_size; ++batch_id) {
         auto& cache_keys = malloc_info.batch_kv_cache_resource->cache_keys[batch_id];
-        auto& block_ids = malloc_info.batch_kv_cache_resource->batch_block_id[batch_id];
+        auto& block_ids  = malloc_info.batch_kv_cache_resource->batch_block_id[batch_id];
 
-        int need_block_num = std::max((seq_len + seq_size_per_block - 1) / seq_size_per_block - static_cast<int>(block_ids.size()), 0);
+        int need_block_num =
+            std::max((seq_len + seq_size_per_block - 1) / seq_size_per_block - static_cast<int>(block_ids.size()), 0);
 
         int reuse_len = 0;
         if (malloc_info.batch_kv_cache_resource->enable_reuse_cache && block_ids.size() < cache_keys.size()) {
             auto match_result = full_kv_cache_group_->match(cache_keys);
-            reuse_len = static_cast<int>(match_result.reuse_length);
+            reuse_len         = static_cast<int>(match_result.reuse_length);
             need_block_num -= reuse_len;
 
             block_ids.insert(block_ids.end(), match_result.block_indices.begin(), match_result.block_indices.end());
@@ -130,7 +124,7 @@ FreeResult SingleTypeKVCacheAllocator::free(const FreeInfo& free_info) {
         RTP_LLM_LOG_ERROR("BatchKVCacheResource is null");
         return {false};
     }
-    
+
     std::vector<BlockIdxType> blocks_to_free;
     for (int batch_id = 0; batch_id < free_info.batch_kv_cache_resource->batchSize(); ++batch_id) {
         const auto& blocks = free_info.batch_kv_cache_resource->blocks(batch_id);
@@ -146,20 +140,20 @@ InsertResult SingleTypeKVCacheAllocator::insertIntoCache(const InsertInfo& inser
         return {false};
     }
 
-    int batch_size = insert_info.batch_kv_cache_resource->batchSize();
+    int batch_size         = insert_info.batch_kv_cache_resource->batchSize();
     int seq_size_per_block = full_kv_cache_group_->seqSizePerBlock();
 
     for (int batch_id = 0; batch_id < batch_size; ++batch_id) {
         auto& cache_keys = insert_info.batch_kv_cache_resource->cache_keys[batch_id];
-        auto& block_ids = insert_info.batch_kv_cache_resource->batch_block_id[batch_id];
+        auto& block_ids  = insert_info.batch_kv_cache_resource->batch_block_id[batch_id];
 
         auto token_ids = insert_info.complete_token_ids->completeTokenIdsVec(batch_id);
         if (token_ids.size() <= 1) {
             continue;
         }
-        size_t token_len = token_ids.size() - 1;
+        size_t token_len     = token_ids.size() - 1;
         size_t max_by_tokens = token_len / static_cast<size_t>(seq_size_per_block);
-        size_t block_len = std::min({cache_keys.size(), block_ids.size(), max_by_tokens});
+        size_t block_len     = std::min({cache_keys.size(), block_ids.size(), max_by_tokens});
         if (block_len == 0) {
             continue;
         }
@@ -172,7 +166,7 @@ InsertResult SingleTypeKVCacheAllocator::insertIntoCache(const InsertInfo& inser
             size_t effective_loss_len = std::min(insert_info.loss.size(), token_len);
             for (size_t block_idx = 0; block_idx < block_len; ++block_idx) {
                 size_t start = block_idx * static_cast<size_t>(seq_size_per_block);
-                size_t end = std::min(start + static_cast<size_t>(seq_size_per_block), effective_loss_len);
+                size_t end   = std::min(start + static_cast<size_t>(seq_size_per_block), effective_loss_len);
                 for (size_t idx = start; idx < end; ++idx) {
                     put_loss[block_idx][idx - start] = insert_info.loss[idx];
                 }
@@ -187,7 +181,7 @@ InsertResult SingleTypeKVCacheAllocator::insertIntoCache(const InsertInfo& inser
 
 CacheLayerLayout SingleTypeKVCacheAllocator::layerCacheBase() const {
     CacheLayerLayout layout;
-    auto layer_tensors = full_kv_cache_group_->layerCacheBase();
+    auto             layer_tensors = full_kv_cache_group_->layerCacheBase();
     layout.layers_to_buffer_ptrs.clear();
     layout.layers_to_buffer_ptrs.resize(config_.layer_num);
     for (const auto& kv : layer_tensors) {
@@ -203,8 +197,24 @@ BlockAddrInfo SingleTypeKVCacheAllocator::convertIndexToAddr(int layer_id, int b
     return full_kv_cache_group_->convertIndexToAddr(layer_id, block_id);
 }
 
-BlockBufferInfo SingleTypeKVCacheAllocator::convertIndexToBuffer(int layer_id, int block_id) const {
+BlockBufferInfo SingleTypeKVCacheAllocator::convertIndexToBuffer(int layer_id,
+                                                                 int block_id,
+                                                                 int partition_count,
+                                                                 int partition_id) const {
+    // TODO: implement this
     return full_kv_cache_group_->convertIndexToBuffer(layer_id, block_id);
+}
+
+size_t SingleTypeKVCacheAllocator::blockSize() const {
+    // 从 config 获取块大小
+    if (!config_.layer_type_params.empty()) {
+        return config_.layer_type_params[0]->block_size();
+    }
+    return 0;
+}
+
+std::vector<BufferPtr> SingleTypeKVCacheAllocator::cacheBuffers() const {
+    return {block_pool_->cacheBuffer()};
 }
 
 }  // namespace rtp_llm
