@@ -94,10 +94,10 @@ TEST_F(QueryConverterTest, testTransOutput) {
     outputs.generate_outputs.push_back(res);
 
     GenerateOutputsPB outputs_pb;
-    QueryConverter::transResponse(&outputs_pb, &outputs, "");
+    QueryConverter::transResponse(&outputs_pb, &outputs, true, "", 10000);
 
-    auto& output_pb   = outputs_pb.generate_outputs(0);
-    auto  aux_info_pb = output_pb.aux_info();
+    auto& output_pb   = outputs_pb.generate_outputs();
+    auto  aux_info_pb = output_pb.aux_info(0);
     EXPECT_EQ(aux_info_pb.cost_time_us(), 1000);
     EXPECT_EQ(aux_info_pb.iter_count(), 9);
     EXPECT_EQ(aux_info_pb.input_len(), 8);

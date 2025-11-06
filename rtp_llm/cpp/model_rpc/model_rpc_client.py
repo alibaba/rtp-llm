@@ -3,6 +3,7 @@ import logging
 from typing import AsyncGenerator, Optional
 
 import grpc
+import numpy as np
 from grpc import StatusCode
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
@@ -191,76 +192,148 @@ def trans_multimodal_input(
         input_pb.multimodal_inputs.append(mm_input_pb)
 
 
+# 假设 trans_tensor 函数将 Protobuf 的 TensorPB 转换为 numpy array
+# from .utils import trans_tensor
+
+
 def trans_output(
     input_py: GenerateInput, outputs_pb: GenerateOutputsPB, stream_state: StreamState
 ) -> GenerateOutputs:
     logging.debug("outputs_pb = %s", outputs_pb)
+    output_pb = outputs_pb.generate_outputs
+    num_outputs = len(output_pb.finished)
+
+    if num_outputs == 0:
+        return GenerateOutputs()
+
     logits_index = input_py.generate_config.logits_index
-    aux_info = input_py.generate_config.aux_info
+    aux_info_flag = input_py.generate_config.aux_info
+
+    all_output_ids = (
+        trans_tensor(output_pb.output_ids)
+        if output_pb.HasField("output_ids")
+        and (len(output_pb.output_ids.shape) > 0 and output_pb.output_ids.shape[0] > 0)
+        else None
+    )
+    all_hidden_states = (
+        trans_tensor(output_pb.hidden_states)
+        if output_pb.HasField("hidden_states")
+        and len(output_pb.hidden_states.shape) > 0
+        and output_pb.hidden_states.shape[0] > 0
+        else None
+    )
+    all_all_hidden_states = (
+        trans_tensor(output_pb.all_hidden_states)
+        if output_pb.HasField("all_hidden_states")
+        and len(output_pb.all_hidden_states.shape) > 0
+        and output_pb.all_hidden_states.shape[0] > 0
+        else None
+    )
+    all_loss = (
+        trans_tensor(output_pb.loss)
+        if output_pb.HasField("loss")
+        and len(output_pb.loss.shape) > 0
+        and output_pb.loss.shape[0] > 0
+        else None
+    )
+    all_logits = (
+        trans_tensor(output_pb.logits)
+        if output_pb.HasField("logits")
+        and len(output_pb.logits.shape) > 0
+        and output_pb.logits.shape[0] > 0
+        else None
+    )
+    all_all_probs = (
+        trans_tensor(output_pb.all_probs)
+        if output_pb.HasField("all_probs")
+        and len(output_pb.all_probs.shape) > 0
+        and output_pb.all_probs.shape[0] > 0
+        else None
+    )
+
     outputs_py = GenerateOutputs()
-    for i, output_pb in enumerate(outputs_pb.generate_outputs):
+    input_token_ids = input_py.token_ids.reshape(1, -1)
+
+    # 遍历每个 beam/output
+    for i in range(num_outputs):
         output_py = GenerateOutput()
-        output_py.finished = output_pb.finished
-        if aux_info:
-            output_py.aux_info = AuxInfo(
-                cost_time=output_pb.aux_info.cost_time_us / 1000.0,
-                first_token_cost_time=output_pb.aux_info.first_token_cost_time_us
-                / 1000.0,
-                wait_time=output_pb.aux_info.wait_time_us / 1000.0,
-                iter_count=output_pb.aux_info.iter_count,
-                input_len=output_pb.aux_info.input_len,
-                prefix_len=output_pb.aux_info.prefix_len,
-                output_len=output_pb.aux_info.output_len,
-                step_output_len=output_pb.aux_info.step_output_len,
-                fallback_tokens=output_pb.aux_info.fallback_tokens,
-                fallback_times=output_pb.aux_info.fallback_times,
-                pd_sep=output_pb.aux_info.pd_sep,
-                reuse_len=output_pb.aux_info.total_reuse_len,
-                local_reuse_len=output_pb.aux_info.local_reuse_len,
-                remote_reuse_len=output_pb.aux_info.remote_reuse_len,
-                prefill_total_reuse_len=output_pb.aux_info.prefill_total_reuse_len,
-                prefill_local_reuse_len=output_pb.aux_info.prefill_local_reuse_len,
-                prefill_remote_reuse_len=output_pb.aux_info.prefill_remote_reuse_len,
-                decode_total_reuse_len=output_pb.aux_info.decode_total_reuse_len,
-                decode_local_reuse_len=output_pb.aux_info.decode_local_reuse_len,
-                decode_remote_reuse_len=output_pb.aux_info.decode_remote_reuse_len,
-                aux_string=output_pb.aux_info.aux_string,
+        output_py.finished = output_pb.finished[i]
+        current_aux_info = None
+        if aux_info_flag and len(output_pb.aux_info) > i:
+            aux_info_pb = output_pb.aux_info[i]
+            current_aux_info = AuxInfo(
+                cost_time=aux_info_pb.cost_time_us / 1000.0,
+                first_token_cost_time=aux_info_pb.first_token_cost_time_us / 1000.0,
+                wait_time=aux_info_pb.wait_time_us / 1000.0,
+                iter_count=aux_info_pb.iter_count,
+                input_len=aux_info_pb.input_len,
+                prefix_len=aux_info_pb.prefix_len,
+                output_len=aux_info_pb.output_len,
+                step_output_len=aux_info_pb.step_output_len,
+                fallback_tokens=aux_info_pb.fallback_tokens,
+                fallback_times=aux_info_pb.fallback_times,
+                pd_sep=aux_info_pb.pd_sep,
+                reuse_len=aux_info_pb.total_reuse_len,
+                local_reuse_len=aux_info_pb.local_reuse_len,
+                remote_reuse_len=aux_info_pb.remote_reuse_len,
+                prefill_total_reuse_len=aux_info_pb.prefill_total_reuse_len,
+                prefill_local_reuse_len=aux_info_pb.prefill_local_reuse_len,
+                prefill_remote_reuse_len=aux_info_pb.prefill_remote_reuse_len,
+                decode_total_reuse_len=aux_info_pb.decode_total_reuse_len,
+                decode_local_reuse_len=aux_info_pb.decode_local_reuse_len,
+                decode_remote_reuse_len=aux_info_pb.decode_remote_reuse_len,
+                aux_string=aux_info_pb.aux_string,
                 role_addrs=input_py.generate_config.role_addrs,
             )
-            # TODO(xinfei.sxf) cum_log_probs is not right, ignore it temporarily
-            if output_pb.aux_info.HasField("cum_log_probs"):
-                output_py.aux_info.cum_log_probs = trans_tensor(
-                    output_pb.aux_info.cum_log_probs
+            if aux_info_pb.HasField("cum_log_probs"):
+                current_aux_info.cum_log_probs = trans_tensor(
+                    aux_info_pb.cum_log_probs
                 ).tolist()
-            if output_pb.aux_info.HasField("softmax_probs"):
-                output_py.aux_info.softmax_probs = trans_tensor(
-                    output_pb.aux_info.softmax_probs
+            if aux_info_pb.HasField("softmax_probs"):
+                current_aux_info.softmax_probs = trans_tensor(
+                    aux_info_pb.softmax_probs
                 ).tolist()
-        output_py.output_ids = trans_tensor(output_pb.output_ids)
-        output_py.input_ids = input_py.token_ids.reshape(1, -1)
-        if output_pb.HasField("hidden_states"):
-            output_py.hidden_states = trans_tensor(output_pb.hidden_states)
-        if output_pb.HasField("all_hidden_states"):
-            output_py.all_hidden_states = trans_tensor(output_pb.all_hidden_states)
-        if output_pb.HasField("loss"):
-            # when calculate_loss 1, result should be one element
+
+            output_py.aux_info = current_aux_info
+
+        if all_output_ids is not None:
+            output_py.output_ids = all_output_ids[i]
+        output_py.input_ids = input_token_ids
+
+        if all_hidden_states is not None:
+            output_py.hidden_states = all_hidden_states[i]
+
+        if all_all_hidden_states is not None:
+            output_py.all_hidden_states = all_all_hidden_states[i]
+
+        if all_loss is not None:
+            loss_slice = all_loss[i]
             if input_py.generate_config.calculate_loss == 1:
-                output_py.loss = trans_tensor(output_pb.loss)[0]
+                output_py.loss = (
+                    loss_slice[0]
+                    if hasattr(loss_slice, "__len__") and len(loss_slice) > 0
+                    else loss_slice
+                )
             else:
-                output_py.loss = trans_tensor(output_pb.loss)
-        if output_pb.HasField("logits"):
-            output_py.logits = trans_tensor(output_pb.logits)
-        if output_pb.HasField("all_probs"):
-            output_py.all_probs = trans_tensor(output_pb.all_probs)
+                output_py.loss = loss_slice
+
+        if all_logits is not None:
+            output_py.logits = all_logits[i]
+
+        if all_all_probs is not None:
+            output_py.all_probs = all_all_probs[i]
+
         if (
             logits_index is not None
-            and output_pb.HasField("logits")
-            and output_pb.aux_info.output_len == logits_index
+            and all_logits is not None
+            and current_aux_info
+            and current_aux_info.output_len == logits_index
         ):
             stream_state.cached_logits_dict[i] = output_py.logits
 
         if output_py.finished and i in stream_state.cached_logits_dict:
             output_py.logits = stream_state.cached_logits_dict[i]
+
         outputs_py.generate_outputs.append(output_py)
 
     return outputs_py
