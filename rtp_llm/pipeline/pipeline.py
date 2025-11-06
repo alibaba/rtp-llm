@@ -409,7 +409,7 @@ class Pipeline(object):
         return (
             final_texts,
             output_lens,
-            decoding_stales,
+            decoding_states,
             token_buffers,
             ouput_tokens_list,
         )
