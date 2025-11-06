@@ -1,4 +1,5 @@
 import os
+import platform
 from typing import Any, Optional, Tuple
 
 import torch
@@ -50,7 +51,7 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         self._return_recv_hook = return_recv_hook
         self._opt_level = int(os.environ.get("ACCL_LOW_LATENCY_OPTIMIZE", 1))
         self._handle: Optional[Tuple[Any, ...]] = None
-        self._use_GB_deepep = "GB200" in torch.cuda.get_device_name(0)
+        self._use_GB_deepep = "aarch64" in platform.machine()
 
     @property
     def handle(self) -> Optional[Tuple[Any, ...]]:
