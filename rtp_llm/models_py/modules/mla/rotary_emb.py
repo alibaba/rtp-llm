@@ -3,7 +3,7 @@ from typing import Any, Optional
 
 import torch
 
-from rtp_llm.models_py.modules.mla.flashinfer_mla import (
+from rtp_llm.models_py.modules.flashinfer_python import (
     check_attention_inputs,
     flashinfer_python,
 )
