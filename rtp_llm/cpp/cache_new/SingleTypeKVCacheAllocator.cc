@@ -90,20 +90,20 @@ MallocResult SingleTypeKVCacheAllocator::malloc(const MallocInfo& malloc_info) {
         if (malloc_info.batch_kv_cache_resource->enable_reuse_cache && block_indices.size() < cache_keys.size()) {
             auto match_result = full_kv_cache_group_->match(cache_keys);
             reuse_len         = static_cast<int>(match_result.reuse_length);
-            // need_block_num -= reuse_len;
-
-            // TODO, touch matched blocks, set block ids for group
         }
 
         auto need_blocks_num = full_kv_cache_group_->needBlocksNum(seq_len, block_indices.size());
         auto free_blocks_num = full_kv_cache_group_->freeBlockNums();
         if (free_blocks_num < need_blocks_num) {
-            // TODO, check error
-            full_kv_cache_group_->ensureFreeBlocks(need_blocks_num - free_blocks_num);
+            if (!full_kv_cache_group_->ensureFreeBlocks(need_blocks_num - free_blocks_num)) {
+                return {false, 0};
+            }
         }
 
-        // TODO，check error
-        full_kv_cache_group_->malloc(cache_keys, block_indices, seq_len);
+        if (!full_kv_cache_group_->malloc(cache_keys, block_indices, seq_len)) {
+            // TODO，回滚已经成功的batch的资源。
+            return {false, 0};
+        }
 
         // TODO: fix this : use batch[0] reuse_len as total_reuse_len now
         if (batch_id == 0) {
