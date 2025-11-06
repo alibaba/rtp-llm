@@ -18,7 +18,7 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
     meta_.reset(new RpcServerRuntimeMeta());
     maga_init_params_ = maga_init_params;
     metrics_reporter_ = maga_init_params.metrics_reporter;
-    RTP_LLM_LOG_WARNING("LocalRpcServer aux_string %s",
+    RTP_LLM_LOG_INFO("LocalRpcServer aux_string %s",
                         maga_init_params_.gpt_init_parameter.misc_config.aux_string.c_str());
     if (propose_params) {
         propose_maga_init_params_ = propose_params.get();
