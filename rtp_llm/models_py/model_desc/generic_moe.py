@@ -7,16 +7,18 @@ from torch import nn
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
+from rtp_llm.models_py.modules import FusedSiluActDenseMLP, Linear, RMSNorm, SelectTopk
 from rtp_llm.models_py.modules.attention import CausalAttention
 from rtp_llm.models_py.modules.embedding import Embedding
 from rtp_llm.models_py.modules.fmha import FMHAImplBase
-from rtp_llm.models_py.modules import Linear
-from rtp_llm.models_py.modules import FusedSiluActDenseMLP
 from rtp_llm.models_py.modules.moe import FusedMoe
 from rtp_llm.models_py.modules.moe.fused_moe_factory import FusedMoeFactory
-from rtp_llm.models_py.modules import RMSNorm
-from rtp_llm.models_py.modules import SelectTopk
-from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, PyModelInputs, PyModelOutputs
+from rtp_llm.ops.compute_ops import (
+    KVCache,
+    PyAttentionInputs,
+    PyModelInputs,
+    PyModelOutputs,
+)
 from rtp_llm.utils.model_weight import W
 
 
@@ -71,7 +73,7 @@ class GenericMoeLayer(nn.Module):
             dtype=torch.int64,
             device=hidden_states.device,
         )
-        
+
         self.select_topk(router_logits_fp32, topk_ids, topk_weights)
 
         return self.fused_moe(
@@ -165,36 +167,56 @@ class GenericMoeModel(GptModelBase):
     """Generic MoE model supporting Qwen3-MoE, internal model, and other MoE architectures."""
 
     def __init__(self, config: GptInitModelParameters, weights: ModelWeights):
-        super().__init__(config, weights)
-        self.embed_tokens = Embedding(config, weights.get_global_weight(W.embedding))
-        self.layers = nn.ModuleList(
-            [
-                GenericMoeDecoderLayer(config, weights.weights[idx], idx)
-                for idx in range(self.layer_num)
-            ]
-        )
-        self.norm = RMSNorm(
-            weights.get_global_weight(W.final_ln_gamma), eps=config.layernorm_eps
-        )
+        try:
+            super().__init__(config, weights)
+            self.embed_tokens = Embedding(
+                config, weights.get_global_weight(W.embedding)
+            )
+            self.layers = nn.ModuleList(
+                [
+                    GenericMoeDecoderLayer(config, weights.weights[idx], idx)
+                    for idx in range(self.layer_num)
+                ]
+            )
+            self.norm = RMSNorm(
+                weights.get_global_weight(W.final_ln_gamma), eps=config.layernorm_eps
+            )
+        except BaseException as e:
+            import traceback
+
+            trace_str = traceback.format_exc()
+            print(f"[GenericMoeModel] Initialization failed: {e} \n{trace_str}")
+            logging.error(f"[GenericMoeModel] Initialization failed: {e} \n{trace_str}")
+            raise e
 
     def forward(self, inputs: PyModelInputs) -> PyModelOutputs:
-        input_ids: torch.Tensor = inputs.input_ids
-        inputs_embeds = self.embed_tokens(input_ids)
-        hidden_states = inputs_embeds
+        try:
+            input_ids: torch.Tensor = inputs.input_ids
+            inputs_embeds = self.embed_tokens(input_ids)
+            hidden_states = inputs_embeds
 
-        attention_inputs: PyAttentionInputs = inputs.attention_inputs
-        fmha_impl = self.get_fmha_impl(attention_inputs)
+            attention_inputs: PyAttentionInputs = inputs.attention_inputs
+            fmha_impl = self.get_fmha_impl(attention_inputs)
 
-        for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
-            hidden_states = decoder_layer(
-                hidden_states,
-                fmha_impl,
-                kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
-            )
+            for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
+                hidden_states = decoder_layer(
+                    hidden_states,
+                    fmha_impl,
+                    kv_cache=(
+                        self.kv_cache.get_layer_cache(i) if self.kv_cache else None
+                    ),
+                )
 
-        hidden_states = self.norm(hidden_states)
+            hidden_states = self.norm(hidden_states)
 
-        return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
+            return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
+        except BaseException as e:
+            import traceback
+
+            trace_str = traceback.format_exc()
+            print(f"[GenericMoeModel] Forward failed: {e} \n{trace_str}")
+            logging.error(f"[GenericMoeModel] Forward failed: {e} \n{trace_str}")
+            raise e
 
 
 __all__ = [
