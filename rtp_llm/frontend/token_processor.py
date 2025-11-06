@@ -116,9 +116,12 @@ class TokenProcessorPerStream:
         stop_word_id_slices = get_stop_word_slices(stop_word_ids)
         for i, tokens in enumerate(batch_token_ids):
             if not self.has_num_beams:
-                self.ouput_tokens_list[i] = np.concatenate(
-                    (self.ouput_tokens_list[i], tokens), axis=1
-                )
+                if len(self.ouput_tokens_list[i]) == 0:
+                    self.ouput_tokens_list[i] = tokens
+                else:
+                    self.ouput_tokens_list[i] = np.concatenate(
+                        (self.ouput_tokens_list[i], tokens), axis=1
+                    )
                 tokens = self.ouput_tokens_list[i]
             tokens = remove_padding_eos_with_numpy(
                 tokens, self.special_tokens.eos_token_id
@@ -141,7 +144,7 @@ class TokenProcessorPerStream:
             texts_to_process = all_texts_batch
             all_texts_for_stop_words = all_texts_batch
         else:
-            for i, all_text in enumerate(all_texts_batch):
+            for i, tokens in enumerate(batch_token_ids):
                 decoding_state = self.decoding_states[i]
                 new_text, all_text = self.tokenids_decode(
                     tokens, decoding_state, return_incremental=True

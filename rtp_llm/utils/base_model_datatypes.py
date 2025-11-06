@@ -93,7 +93,7 @@ class GenerateOutput:
     output_ids: Optional[torch.Tensor] = None
     input_ids: Optional[torch.Tensor] = None
     finished: bool = False
-    aux_info: AuxInfo = AuxInfo()
+    aux_info: Optional[AuxInfo] = None
     loss: Optional[torch.Tensor] = None
     logits: Optional[torch.Tensor] = None
     all_probs: Optional[torch.Tensor] = None
