@@ -268,10 +268,13 @@ class Pipeline(object):
                     for _ in range(len(generate_outputs.generate_outputs))
                 ]
             for i, generate_output in enumerate(generate_outputs.generate_outputs):
-                ouput_tokens_list[i] = torch.cat(
-                    (ouput_tokens_list[i], generate_output.output_ids), dim=1
-                )
-                generate_output.output_ids = ouput_tokens_list[i]
+                if len(ouput_tokens_list[i]) == 0:
+                    ouput_tokens_list[i] = generate_output.output_ids
+                else:
+                    ouput_tokens_list[i] = torch.cat(
+                        (ouput_tokens_list[i], generate_output.output_ids), dim=1
+                    )
+                    generate_output.output_ids = ouput_tokens_list[i]
                 tokens = generate_output.output_ids.cpu().numpy().flatten()
                 if not generate_config.ignore_eos:
                     tokens = remove_padding_eos_with_numpy(
@@ -406,7 +409,7 @@ class Pipeline(object):
         return (
             final_texts,
             output_lens,
-            decoding_stales,
+            decoding_states,
             token_buffers,
             ouput_tokens_list,
         )
@@ -507,8 +510,12 @@ class Pipeline(object):
             yield GenerateResponse(
                 generate_outputs=generate_outputs_cache, generate_texts=generate_texts
             )
-            if all(
-                output.finished for output in generate_outputs_cache.generate_outputs
+            if (
+                all(
+                    output.finished
+                    for output in generate_outputs_cache.generate_outputs
+                )
+                and generate_config.aux_info
             ):
                 kmonitor.report(
                     GaugeMetrics.FT_ITERATE_COUNT_METRIC,
