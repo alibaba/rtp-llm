@@ -8,6 +8,8 @@ fi
 
 COMMIT_ID=$1
 SECURITY=$2
+PIPELINE_ID="1346"
+PROJECT_ID="2654816"
 
 # 设置最大等待时间
 MAX_WAIT_TIME=7200
@@ -18,7 +20,7 @@ while true; do
 
     response=$(curl -s  -H "Content-Type: application/json" \
                         -H "Authorization: Basic ${SECURITY}" \
-                        -d "{\"type\": \"RETRIEVE-TASK-STATUS\", \"commitId\": \"${COMMIT_ID}\"}" "https://get-tasend-back-twkvcdsbpj.cn-hangzhou-vpc.fcapp.run")
+                        -d "{\"type\": \"RETRIEVE-TASK-STATUS\", \"aone\": { \"projectId\": \"${PROJECT_ID}\", \"pipelineId\": \"${PIPELINE_ID}\"}, \"commitId\": \"${COMMIT_ID}\"}" "https://get-tasend-back-twkvcdsbpj.cn-hangzhou-vpc.fcapp.run")
     echo "Response: $response"
 
     # 检查curl是否成功
@@ -42,6 +44,9 @@ while true; do
     fi
 
     status_raw=$(echo "$response" | jq -r '.status')
+    commitId=$(echo "$response" | jq -r '.commitId')
+    taskId=$(echo "$response" | jq -r '.taskId')
+    echo "Current commitId: $commitId, taskId: $taskId"
 
     # 判断 status_raw 是否为合法 JSON 对象
     if echo "$status_raw" | jq empty 2>/dev/null; then
@@ -88,11 +93,11 @@ while true; do
             echo "CI completed successfully"
             exit 0
         else
-            echo "CI failed with status: $status_summary"
+            echo "CI failed with commitId: ${COMMIT_ID}, status: $status_summary, task link: https://code.alibaba-inc.com/foundation_models/RTP-LLM/ci/jobs?pipelineId=${PIPELINE_ID}&pipelineRunId=${taskId}&createType=yaml"
             exit 1
         fi
         break
     fi
 
-    sleep 120
+    sleep 20
 done

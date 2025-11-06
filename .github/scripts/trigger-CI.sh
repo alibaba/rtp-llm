@@ -1,5 +1,6 @@
 #!/bin/bash
 
+set -x
 # Check if two arguments are provided
 if [ $# -ne 4 ]; then
     echo "Usage: $0 <COMMIT_ID> <SECURITY> <GITHUB_SOURCE_REPO> <GITHUB_PR_ID>"
@@ -18,6 +19,14 @@ GITHUB_COMMIT_ID="${COMMIT_ID}"
 GITHUB_SOURCE_REPO=$3
 GITHUB_PR_ID=$4
 BRANCH_NAME="open_merge/${GITHUB_PR_ID}"
+CURRENT_INTERNAL_COMMITID="UNKNOWN"
+
+# Call get-branch-info.sh to get CURRENT_INTERNAL_COMMITID
+BRANCH_INFO=$(sh ./get-branch-info.sh "${BRANCH_NAME}")
+if [ $? -eq 0 ]; then
+    CURRENT_INTERNAL_COMMITID=$(echo "$BRANCH_INFO" | jq -r '.commit.id')
+fi
+
 
 # Get current timestamp
 timestamp=$(date +%s)
@@ -37,9 +46,10 @@ curl -v -H "Content-Type: application/json" \
      -d "{
             \"type\": \"CREATE-TASK\",
             \"commitId\": \"${COMMIT_ID}\",
+            \"currentInternalCommitId\": \"${CURRENT_INTERNAL_COMMITID}\",
             \"repositoryUrl\": \"${REPO_URL}\",
             \"aone\": { \"projectId\": \"${PROJECT_ID}\", \"pipelineId\": \"${PIPELINE_ID}\"},
-            \"newBranch\": { \"name\": \"${BRANCH_NAME}\", \"ref\": \"${BRANCH_REF}\" },  
+            \"newBranch\": { \"name\": \"${BRANCH_NAME}\", \"ref\": \"${BRANCH_REF}\", \"head\": \"UNKNOWN\" },
             \"params\": {\"cancel-in-progress\": \"${CANCEL_IN_PROGRESS}\", \"github_commit\":\"${GITHUB_COMMIT_ID}\", \"github_source_repo\": \"${GITHUB_SOURCE_REPO}\"}
          }" \
      "https://triggerid-to-mq-wjrdhcgbie.cn-hangzhou-vpc.fcapp.run"
