@@ -36,11 +36,10 @@
 
 --- aiter/jit/core.py
 +++ aiter/jit/core.py
-@@ -66,37 +66,18 @@
- AITER_ROOT_DIR = os.path.abspath(f"{this_dir}/../../")
- AITER_LOG_MORE = int(os.getenv("AITER_LOG_MORE", 0))
+@@ -168,36 +168,18 @@
+ # config_env end here
  
--find_aiter = importlib.util.find_spec("aiter")
+ find_aiter = importlib.util.find_spec("aiter")
 -if find_aiter is not None:
 -    if find_aiter.submodule_search_locations:
 -        package_path = find_aiter.submodule_search_locations[0]
@@ -82,4 +81,27 @@
  )
  
 
+--- aiter/__init__.py	
++++ aiter/__init__.py
+@@ -77,3 +77,4 @@
+ from .ops.trans_ragged_layout import *
+ from .ops.sample import *
+ from . import mla
++from . import paged_attn
+
+--- aiter/ops/gemm_op_a8w8.py
++++ aiter/ops/gemm_op_a8w8.py
+@@ -425,9 +425,11 @@
+     WQ: Tensor,
+     x_scale: Tensor,
+     w_scale: Tensor,
+-    dtype: torch.dtype = dtypes.bf16,
++    dtype: torch.dtype = None,
+     isBpreshuffled: bool = False,
+ ) -> torch.Tensor:
++    if dtype is None:
++        dtype = torch.bfloat16
+     assert dtype in [
+         dtypes.bf16,
+         dtypes.fp16,
 
