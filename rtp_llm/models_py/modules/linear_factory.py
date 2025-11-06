@@ -46,9 +46,6 @@ class LinearFactory:
         weight_key: str,
     ) -> bool:
         """Check if FP8 linear layer should be used."""
-        if not FP8_LINEAR_AVAILABLE:
-            return False
-
         if not hasattr(config, "quant_config") or config.quant_config is None:
             return False
 
@@ -96,12 +93,19 @@ class LinearFactory:
                 raise ValueError("FP8 linear layer requires config")
             else:
                 quant_config = config.quant_config
-                if quant_config.get_method() in [
+                if quant_config.get_method() == "FP8_PER_BLOCK":
+                    if has_deep_gemm():
+                        return Fp8PerBlockLinear(weight, weight_scales, bias)
+                    else:
+                        raise RuntimeError(
+                            "No available fp8 gemm backend for Fp8PerBlockLinear"
+                        )
+                elif quant_config.get_method() in [
                     "FP8_PER_TENSOR_COMPRESSED",
                     "FP8_DYNAMIC_PER_TENSOR",
                 ]:
                     return Fp8PerTensorLinear(
-                        config.quant_config, weight, weight_scales, input_scales, bias
+                        weight, weight_scales, input_scales, bias, config.quant_config
                     )
                 else:
                     if not FP8_LINEAR_AVAILABLE:
