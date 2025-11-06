@@ -70,6 +70,7 @@ class FlashInferPythonPrefillOp(object):
             batch_size=attention_inputs.input_lengths.size(0),
             max_seq_len=attention_inputs.input_lengths.max().item(),
             seq_lens=attention_inputs.input_lengths,
+            block_tables=attention_inputs.kv_cache_block_id_device,
             cu_seqlens=attention_inputs.cu_seqlens,
             cu_kv_seqlens=attention_inputs.cu_kv_seqlens
         )
@@ -126,6 +127,7 @@ class FlashInferPythonDecodeOp(object):
             batch_size=attention_inputs.sequence_lengths.size(0),
             max_seq_len=attention_inputs.sequence_lengths.max().item(),
             seq_lens=attention_inputs.sequence_lengths,
+            block_tables=attention_inputs.kv_cache_block_id_device,
             cu_seqlens=attention_inputs.cu_seqlens,
             cu_kv_seqlens=attention_inputs.cu_kv_seqlens
         )

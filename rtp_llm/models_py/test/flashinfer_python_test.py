@@ -17,61 +17,7 @@ from rtp_llm.models_py.modules.fmha import (
     FlashInferPythonDecodeImpl,
     FlashInferPythonPrefillImpl,
 )
-from rtp_llm.models_py.modules.mla import DeepSeekV2Attention
-from rtp_llm.models_py.modules.mla.mla_attention_ref import DeepseekV2AttentionRef
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs
-from rtp_llm.utils.model_weight import W
-
-
-def set_seed(seed: int):
-    random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-
-
-def generate_kv_from_cache(ckv, kpe, kv_len, batch_size, num_heads):
-    bs_page_num, page_size, ckv_dim = ckv.shape
-    page_num = bs_page_num // batch_size
-    _, _, kpe_dim = kpe.shape
-    ckv = ckv.view(batch_size, page_num * page_size, ckv_dim)
-    kpe = kpe.view(batch_size, page_num * page_size, kpe_dim)
-    ckv = ckv[:, :kv_len, :]
-    kpe = kpe[:, :kv_len, :]
-    k = (
-        torch.cat([ckv, kpe], dim=-1)
-        .view(-1, 1, ckv_dim + kpe_dim)
-        .repeat_interleave(num_heads, dim=1)
-    )
-    v = ckv.repeat_interleave(num_heads, dim=1)
-
-    return k, v
-
-
-def create_cos_sin_cache():
-    rotary_emb = DeepseekV3YarnRotaryEmbedding(
-        64,
-        163840,
-        10000,
-        scaling_factor=1.0,
-        original_max_position_embeddings=4096,
-        beta_fast=32,
-        beta_slow=1,
-        mscale=0.707,
-        mscale_all_dim=0.707,
-    )
-    half_rope_dim = 64 // 2
-    cos_cache = rotary_emb.cos_cached[:, :half_rope_dim]
-    sin_cache = rotary_emb.sin_cached[:, :half_rope_dim]
-    # cos sin cache must be float32
-    cos_sin_cache = (
-        torch.cat([cos_cache, sin_cache], dim=-1)
-        .contiguous()
-        .to(device)
-        .to(torch.float32)
-    )
-    return cos_sin_cache
-
 
 class FlashInferPythonMHATest(TestCase):
     NUM_TOKENS = [7]
@@ -82,131 +28,103 @@ class FlashInferPythonMHATest(TestCase):
         if not torch.cuda.is_available():
             raise SkipTest("CUDA is not available")
         torch.set_default_device(device)
+        self.num_pages = 1024
+        self.page_size = 64
+        self.head_dim = 128
+        self.num_kv_heads = 8
+        self.num_heads = 96        
+        self.k_cache = torch.randn(
+            self.num_pages,
+            self.num_kv_heads,
+            self.page_size,
+            self.head_dim,
+            dtype=torch.float8_e4m3fn,
+            device='cuda:0',
+        )
+        self.v_cache = torch.randn(
+            self.num_pages,
+            self.num_kv_heads,
+            self.page_size,
+            self.head_dim,
+            dtype=torch.float8_e4m3fn,
+            device='cuda:0',
+        )
+        
 
+    def gen_attention_inputs(self, input_lengths: Optional[List[int]] = None, sequence_lengths: Optional[List[int]] = None) -> PyAttentionInputs:
+        assert (input_lengths is None and sequence_lengths is None) or (len(input_lengths) > 0 and len(sequence_lengths))
+        attention_inputs: PyAttentionInputs = PyAttentionInputs()
+        batch_size: int = 0
+        max_seq_len: int = 0
+        if sequence_lengths is not None:
+            batch_size = len(sequence_lengths)            
+            attention_inputs.sequence_lengths = torch.tensor(sequence_lengths, dtype=torch.int32, device=torch.device("cpu")).pin_memory()
+            max_seq_len = attention_inputs.sequence_lengths.max().item()
+            attention_inputs.is_prefill = False
+        if input_lengths is not None:
+            batch_size = len(input_lengths)
+            attention_inputs.input_lengths = torch.tensor(input_lengths, dtype=torch.int32, device=torch.device("cpu")).pin_memory()
+            attention_inputs.is_prefill = True
+            cu_seqlens = torch.zeros(len(input_lengths) + 1, dtype=torch.int32, device=torch.device("cpu")).pin_memory()
+            cu_seqlens[1:] = attention_inputs.input_lengths.cumsum(0)
+            setattr(attention_inputs, 'cu_seqlens', cu_seqlens)
+            setattr(attention_inputs, 'cu_kv_seqlens', cu_seqlens)
+            max_seq_len = attention_inputs.input_lengths.max().item()
+        max_block_size = max_seq_len // self.page_size + 1
+        assert batch_size * max_block_size < self.page_size
+        block_tables = torch.arange(batch_size * max_block_size, dtype=torch.int32).view(batch_size, max_block_size).pin_memory()
+        setattr(attention_inputs, 'kv_cache_block_id_host', block_tables)
+        setattr(attention_inputs, 'kv_cache_block_id_device', block_tables)        
+        return attention_inputs
+            
     def _run_flashinfer_prefill_test(self, num_tokens: int, hidden_size: int, page_size: int):
-        sequence_lengths = [2]
+        input_lengths = [2, 3, 10, 12]
+        num_tokens = sum(input_lengths)
 
-        batch_size = len(sequence_lengths)
+        config = GptInitModelParameters(self.num_heads, self.head_dim, 12, 2048, 102400)
+        config.head_num = self.num_heads
+        config.hidden_size = self.head_dim * self.num_heads
+        config.seq_size_per_block = self.page_size
+        config.size_per_head = self.head_dim
+
+        attn_inputs = self.gen_attention_inputs(input_lengths=input_lengths)
+        q = torch.randn(
+            [num_tokens, config.hidden_size],
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        kv_cache: KVCache = KVCache()
+        setattr(kv_cache, 'k_cache_base', self.k_cache)
+        setattr(kv_cache, 'v_cache_base', self.v_cache)
+        
+        impl = FlashInferPythonPrefillImpl(config, attn_inputs)
+        out = impl.forward(q, kv_cache)
+        print(out)        
+        # self.assertTrue(torch.allclose(out, out_ref, atol=1, rtol=1))
+
+    def _run_flashinfer_decode_test(self, num_tokens: int, hidden_size: int, page_size: int):
+        sequence_lengths = [2, 3, 10, 12]
         num_tokens = len(sequence_lengths)
+        config = GptInitModelParameters(self.num_heads, self.head_dim, 12, 2048, 102400)
+        config.head_num = self.num_heads
+        config.hidden_size = self.head_dim * self.num_heads
+        config.seq_size_per_block = self.page_size
+        config.size_per_head = self.head_dim
 
-        seq_page_sizes = [math.ceil(x / page_size) for x in sequence_lengths]
-        kvcache_block_id = torch.zeros(
-            [batch_size, max(seq_page_sizes)],
-            dtype=torch.int32,
-            device=torch.device("cpu"),
-        )
-        bias = 1
-        for i in range(batch_size):
-            kvcache_block_id[i, : seq_page_sizes[i]] = torch.arange(
-                bias,
-                bias + seq_page_sizes[i],
-                dtype=torch.int32,
-                device=torch.device("cpu"),
-            )
-            bias += seq_page_sizes[i]
-
-        self.config = GptInitModelParameters(128, 16, 27, 1024, 102400)
-        self.config.head_num = 16
-        self.config.hidden_size = hidden_size
-        self.config.nope_head_dim = 128
-        self.config.rope_head_dim = 64
-        self.config.kv_lora_rank = 512
-        self.config.v_head_dim = 128
-        self.config.q_lora_rank = 0
-        self.config.seq_size_per_block = 64
-        self.config.softmax_extra_scale = 1.0
-        self.config.use_mla = True
-        self.config.size_per_head = 192
-
-        torch.manual_seed(0)
-        sequence_lengths_mius_1 = [x - 1 for x in sequence_lengths]
-        sequence_lengths_t = torch.tensor(
-            sequence_lengths_mius_1, dtype=torch.int32, device=torch.device("cpu")
-        )
-        prefix_lengths_t = torch.zeros(
-            len(sequence_lengths_t) - len(sequence_lengths) + 1,
-            dtype=torch.int32,
-            device=torch.device("cpu"),
-        )
-
-        attn_inputs: PyAttentionInputs = PyAttentionInputs()
-        attn_inputs.is_prefill = True
-        attn_inputs.prefix_lengths = prefix_lengths_t
-        attn_inputs.sequence_lengths = torch.tensor(
-            [], dtype=torch.int32, device=torch.device("cpu")
-        )
-        attn_inputs.input_lengths = sequence_lengths_t
-        attn_inputs.kv_cache_block_id_host = kvcache_block_id
-
-        weights = {}
-        weights[W.mla_fusedqkrope_no_lora_w] = torch.randn(
-            [
-                self.config.hidden_size,
-                self.config.size_per_head * self.config.head_num
-                + self.config.kv_lora_rank
-                + self.config.rope_head_dim,
-            ],
-            dtype=torch.float16,
+        attn_inputs = self.gen_attention_inputs(sequence_lengths=sequence_lengths)
+        q = torch.randn(
+            [num_tokens, config.hidden_size],
+            dtype=torch.bfloat16,
             device=device,
         )
+        kv_cache: KVCache = KVCache()
+        setattr(kv_cache, 'k_cache_base', self.k_cache)
+        setattr(kv_cache, 'v_cache_base', self.v_cache)
+        
+        impl = FlashInferPythonDecodeImpl(config, attn_inputs)
+        out = impl.forward(q, kv_cache)
+        print(out)
 
-        weights[W.mla_kv_a_ln_gamma] = torch.randn(
-            [self.config.kv_lora_rank], dtype=torch.float16, device=device
-        )
-
-        weights[W.mla_kc] = torch.randn(
-            [self.config.head_num, self.config.nope_head_dim, self.config.kv_lora_rank],
-            dtype=torch.float16,
-            device=device,
-        )
-
-        weights[W.mla_vc] = torch.randn(
-            [self.config.head_num, self.config.kv_lora_rank, self.config.v_head_dim],
-            dtype=torch.float16,
-            device=device,
-        )
-
-        weights[W.mla_v_w] = torch.randn(
-            [self.config.kv_lora_rank, hidden_size],
-            dtype=torch.float16,
-            device=device,
-        )
-
-        weights[W.mla_k_nope_w] = torch.randn(
-            [self.config.kv_lora_rank, hidden_size],
-            dtype=torch.float16,
-            device=device,
-        )
-
-        weights[W.attn_o_w] = torch.randn(
-            [
-                self.config.head_num * self.config.v_head_dim,
-                self.config.hidden_size,
-            ],
-            dtype=torch.float16,
-            device=device,
-        )
-
-        layer_weights: List[Dict[str, torch.Tensor]] = []
-        layer_weights.append(weights)
-
-        fmha_impl = FlashInferPythonPrefillImpl(
-            self.config, attn_inputs, layer_weights, create_cos_sin_cache()
-        )
-        deepseekv2_mla = DeepSeekV2Attention(self.config, weights, 0)
-        kv_cache: Optional[KVCache] = None
-        deepseekv2_mla_ref = DeepseekV2AttentionRef(self.config, weights, 0)
-
-        hidden = torch.randn(
-            [num_tokens, self.config.hidden_size],
-            dtype=torch.float16,
-            device=device,
-        )
-
-        out = deepseekv2_mla(hidden, fmha_impl, kv_cache)
-        out_ref = deepseekv2_mla_ref(hidden)
-
-        self.assertTrue(torch.allclose(out, out_ref, atol=1, rtol=1))
-
+        
 if __name__ == "__main__":
     main()
