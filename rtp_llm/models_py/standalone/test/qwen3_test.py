@@ -28,6 +28,7 @@ input_ids = my_model.tokenizer.encode(input_text)
 output_ids = my_model.generate(input_ids, max_new_tokens=1000)
 output_text = my_model.tokenizer.decode(output_ids)
 print(f"\nanswer of Q1:\n\n {output_text}")
+assert output_text[110:120] == "息查询**：我可以回"
 
 
 # generate text and token_ids
@@ -41,3 +42,4 @@ input_ids = my_model.tokenizer.encode(input_text)
 output_ids = my_model.generate(input_ids, max_new_tokens=1000)
 output_text = my_model.tokenizer.decode(output_ids)
 print(f"\nanswer of Q2:\n\n {output_text}")
+assert output_text[110:120] == "部分是0.9，而3."
