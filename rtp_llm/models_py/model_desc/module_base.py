@@ -96,9 +96,9 @@ class GptModelBase(nn.Module):
         mha_impls = PREFILL_MHA_IMPS if attn_inputs.is_prefill else DECODE_MHA_IMPS
         for fmha_impl in mha_impls:
             impl = fmha_impl(self.config, attn_inputs)
-            print(
-                f"checking fmha impl: {impl.__class__.__name__}, support={impl.support()}"
-            )
+            # print(
+            #     f"checking fmha impl: {impl.__class__.__name__}, support={impl.support()}"
+            # )
             if impl.support():
                 return impl
         raise Exception(f"can not find fmha type")
