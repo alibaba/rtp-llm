@@ -37,10 +37,11 @@ protected:
 
     void testGeneralLayernorm(DataType data_type, NormType norm_type, uint16_t m, uint16_t n) {
         const auto torch_dtype     = dataTypeToTorchType(data_type);
-        auto       input_tensor    = (torch::arange(m * n, m * n * 2) / (n * n)).reshape({m, n}).to(torch_dtype);
-        auto       gamma_tensor    = (torch::ones({n}) / 2).to(torch_dtype);
-        auto       beta_tensor     = (torch::zeros({n})).to(torch_dtype);
-        auto       residual_tensor = torch::arange(m * n, -m * n, -2).reshape({m, n}).to(torch_dtype);
+        auto       input_tensor    = torch::rand({m, n}).to(torch_dtype);
+        auto       gamma_tensor    = torch::rand({n}).to(torch_dtype);
+        auto       beta_tensor     = torch::zeros({n}).to(torch_dtype);
+        auto       residual_tensor = torch::rand({m, n}).to(torch_dtype);
+        auto       bias_tensor     = torch::randn({n}).to(torch_dtype);
 
         auto      input   = tensorToBuffer(input_tensor);
         auto      gamma   = tensorToBuffer(gamma_tensor);
@@ -50,8 +51,9 @@ protected:
         gamma                   = tensorToBuffer(gamma_tensor);
         auto gamma_only_weights = LayerNormWeights(gamma, empty);
         auto residual           = tensorToBuffer(residual_tensor);
+        auto bias               = tensorToBuffer(bias_tensor);
 
-        // test case 1: general layer norm without residual
+        // test case 1: general layer norm without residual nor bias
         auto testcase1_output = device_->layernorm(LayernormParams(input,
                                                                    nullptr,
                                                                    weights,
@@ -84,10 +86,10 @@ protected:
                                                                         false,
                                                                         NormType::layernorm));
 
-        // test case 2: general layer norm with residual and add_bias output
-        auto add_bias_output  = createBuffer({m, n}, data_type);
+        // test case 2: general layer norm with residual, without bias
+        auto add_residual_output  = createBuffer({m, n}, data_type);
         auto testcase2_output = device_->layernorm(LayernormParams(input,
-                                                                   add_bias_output,
+                                                                   add_residual_output,
                                                                    weights,
                                                                    *residual,
                                                                    std::nullopt,
@@ -103,11 +105,11 @@ protected:
                                             gamma_tensor.to(torch::kFloat32),
                                             beta_tensor.to(torch::kFloat32),
                                             1e-6);
-        auto expected_add_bias_output = input_tensor + residual_tensor;
+        auto expected_add_residual_output = input_tensor + residual_tensor;
+        assertTensorClose(expected_add_residual_output, bufferToTensor(*testcase2_output.before_norm_output));
         assertTensorClose(expected_output, bufferToTensor(*testcase2_output.output));
-        assertTensorClose(expected_add_bias_output, bufferToTensor(*testcase2_output.before_norm_output));
 
-        // test case 3: rms norm without residual
+        // test case 3: rms norm without residual nor bias
         auto testcase3_output = device_->layernorm(LayernormParams(input,
                                                                    nullptr,
                                                                    weights,
@@ -137,10 +139,10 @@ protected:
                                                                          false,
                                                                          NormType::rmsnorm));
 
-        // test case 4: rms norm with residual and add_bias output
-        add_bias_output       = createBuffer({m, n}, data_type);
+        // test case 4: rms norm with residual, without bias
+        add_residual_output       = createBuffer({m, n}, data_type);
         auto testcase4_output = device_->layernorm(LayernormParams(input,
-                                                                   add_bias_output,
+                                                                   add_residual_output,
                                                                    weights,
                                                                    *residual,
                                                                    std::nullopt,
@@ -154,8 +156,8 @@ protected:
         expected_output = rmsNorm((input_tensor + residual_tensor).to(torch::kFloat32),
                                   gamma_tensor.to(torch::kFloat32),
                                   beta_tensor.to(torch::kFloat32));
+        assertTensorClose(expected_add_residual_output, bufferToTensor(*testcase4_output.before_norm_output));
         assertTensorClose(expected_output, bufferToTensor(*testcase4_output.output));
-        assertTensorClose(expected_add_bias_output, bufferToTensor(*testcase4_output.before_norm_output));
 
         // test case 5: general layer norm with quantize
         auto testcase5_output = device_->layernorm(LayernormParams(input,
@@ -178,6 +180,72 @@ protected:
                                             gamma_tensor.to(torch::kFloat32),
                                             beta_tensor.to(torch::kFloat32),
                                             1e-6);
+
+        // test case 6: general layer norm without residual with bias
+        auto add_bias_output  = createBuffer({m, n}, data_type);
+        auto testcase6_output = device_->layernorm(LayernormParams(input,
+                                                                   add_bias_output,
+                                                                   weights,
+                                                                   std::nullopt,
+                                                                   std::nullopt,
+                                                                   *bias,
+                                                                   0.f,
+                                                                   1e-6,
+                                                                   false,
+                                                                   false,
+                                                                   NormType::layernorm));
+
+        expected_output               = torch::layer_norm((input_tensor + bias_tensor).to(torch::kFloat32),
+                                                          {n},
+                                            gamma_tensor.to(torch::kFloat32),
+                                            beta_tensor.to(torch::kFloat32),
+                                            1e-6);
+        assertTensorClose(expected_output, bufferToTensor(*testcase6_output.output));
+
+        // test case 7: general layer norm with residual with bias
+        auto add_residual_bias_output  = createBuffer({m, n}, data_type);
+        auto testcase7_output = device_->layernorm(LayernormParams(input,
+                                                                   add_residual_bias_output,
+                                                                   weights,
+                                                                   *residual,
+                                                                   std::nullopt,
+                                                                   *bias,
+                                                                   0.f,
+                                                                   1e-6,
+                                                                   false,
+                                                                   false,
+                                                                   NormType::layernorm));
+
+        expected_output               = torch::layer_norm((input_tensor + residual_tensor + bias_tensor).to(torch::kFloat32),
+                                                          {n},
+                                            gamma_tensor.to(torch::kFloat32),
+                                            beta_tensor.to(torch::kFloat32),
+                                            1e-6);
+        auto expected_add_residual_bias_output = input_tensor + residual_tensor + bias_tensor;
+        assertTensorClose(expected_add_residual_bias_output, bufferToTensor(*testcase7_output.before_norm_output));
+        assertTensorClose(expected_output, bufferToTensor(*testcase7_output.output));
+
+        // test case 8: with residual with bias and return_normed_output = true
+        auto norm_output = createBuffer({m, n}, data_type);
+        auto testcase8_output = device_->layernorm(LayernormParams(input,
+                                                                   norm_output,
+                                                                   weights,
+                                                                   *residual,
+                                                                   std::nullopt,
+                                                                   *bias,
+                                                                   0.f,
+                                                                   1e-6,
+                                                                   false,
+                                                                   true, // return_normed_output
+                                                                   NormType::layernorm));
+
+        expected_output               = torch::layer_norm((input_tensor + residual_tensor + bias_tensor).to(torch::kFloat32),
+                                                          {n},
+                                            gamma_tensor.to(torch::kFloat32),
+                                            beta_tensor.to(torch::kFloat32),
+                                            1e-6);
+        assertTensorClose(expected_output, bufferToTensor(*testcase8_output.before_norm_output));
+        assertTensorClose(expected_output, bufferToTensor(*testcase8_output.output));
     }
 
     void

@@ -30,8 +30,14 @@ void StreamCacheResource::freeBatchBlocks(size_t batch_id, vector<int>& blocks) 
             loss = rtp_llm::buffer2vector<float>(*(stream_->getLoss()));
         }
         // TODO(xinfei.sxf) 一些场景调用了cancel的地方，是否应该free with cache
-        CacheManager::FreeInfo free_info(
-            stream_->streamId(), tokens_id, cache_keys, blocks, loss, adapter_name_, enable3FS());
+        CacheManager::FreeInfo free_info(stream_->streamId(),
+                                         tokens_id,
+                                         cache_keys,
+                                         blocks,
+                                         loss,
+                                         adapter_name_,
+                                         enable3FS(),
+                                         enableMemoryBlockCache());
         resource_context_.cache_manager->freeWithCache(free_info);
     } else {
         resource_context_.cache_manager->free(blocks);
@@ -55,7 +61,14 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
     RTP_LLM_LOG_DEBUG("stream [%ld] try release [%lu] blocks", stream_->streamId(), nums);
     size_t release_blocks_num = 0;
     size_t reserved_blocks    = 0;
-
+    if (fake_inited_) {
+        int max_block_size = maxBlockSize();
+        int batch_size     = batch_resource_.batchSize();
+        batch_resource_.clear();
+        batch_resource_.resize(batch_size);
+        fake_inited_ = false;
+        return max_block_size;
+    }
     // NOTE: all batch has same number of blocks
     for (size_t batch_id = 0; batch_id < batch_resource_.batchSize(); batch_id++) {
         const auto& blocks = batch_resource_.blocks(batch_id);
@@ -116,7 +129,8 @@ absl::StatusOr<int> StreamCacheResource::initKVBlock(int token_capacity, size_t 
                                                      false,
                                                      false,
                                                      adapter_name_,
-                                                     enable3FS());
+                                                     enable3FS(),
+                                                     enableMemoryBlockCache());
         auto                             match_info = resource_context_.cache_manager->mallocWithCache(malloc_info);
         if (stream_->calculateLoss() && match_info.loss.empty()) {
             match_info = CacheManager::MatchInfo{0, {}, {}};
@@ -141,6 +155,9 @@ absl::StatusOr<int> StreamCacheResource::initKVBlock(int token_capacity, size_t 
 absl::StatusOr<int> StreamCacheResource::incrKVBlock(int token_capacity, size_t reserve_step) {
     // TODO(xinfei.sxf) rollback token_capacity
     // TODO(xinfei.sxf) add reserver_blocks
+    if (fake_inited_) {
+        return absl::InternalError("fake inited not allow to incr block");
+    }
     int real_occupy = 0;
     if (stream_->enable_fast_gen_) {
         if (stream_->isChunkStream() || !stream_->isContextStream()) {
@@ -393,6 +410,7 @@ const std::vector<int64_t>& StreamCacheResource::cacheKeys(int32_t batch_id) con
 }
 
 void StreamCacheResource::fakeInitKVBlock() {
+    fake_inited_ = true;
     batch_resource_.resize(stream_->maxBatchSize());
     for (size_t i = 0; i < stream_->maxBatchSize(); i++) {
         batch_resource_.resize(i, stream_->seqLength(), true);
@@ -409,6 +427,10 @@ bool StreamCacheResource::reuseCache() const {
 
 bool StreamCacheResource::enable3FS() const {
     return resource_context_.enable_3fs && stream_->enable3FS();
+}
+
+bool StreamCacheResource::enableMemoryBlockCache() const {
+    return resource_context_.enable_memory_block_cache && stream_->enableMemoryBlockCache();
 }
 
 }  // namespace rtp_llm

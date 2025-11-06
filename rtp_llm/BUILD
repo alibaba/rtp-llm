@@ -22,23 +22,29 @@ tensorrt = [
     "tensorrt-cu12-libs",
 ]
 
+flashinfer = [
+    "flashinfer-python",
+]
+
 xft_dep = select({
     "@//:using_arm": [],
     "//:xft_use_icx": [
-        "xfastertransformer_devel_icx",
+        # "xfastertransformer_devel_icx",
     ],
     "//conditions:default": [
-        "xfastertransformer_devel",
+        # "xfastertransformer_devel",
     ],
 })
 
 arch_dep = select({
     "@//:using_arm": [],
+    "@//:using_cuda12_arm": [],
     "//conditions:default": [":decord"],
 })
 
 arch_with_version_dep = select({
     "@//:using_arm": [],
+    "@//:using_cuda12_arm": [],
     "//conditions:default": ["decord==0.6.0"],
 })
 
@@ -98,7 +104,7 @@ requirement([
     "concurrent_log_handler",
     "aiter",
     "fastsafetensors",
-] + tensorrt)
+] + tensorrt + flashinfer)
 
 filegroup(
     name = "cutlass_config",
@@ -210,13 +216,15 @@ py_library(
         "//rtp_llm/model_loader:loader",
         "//rtp_llm/models_py:models",
     ] + arch_dep + select({
-        "@//:using_cuda12": tensorrt,
+        "@//:using_cuda12_9_x86": tensorrt + flashinfer,
+        "@//:cuda_pre_12_9": tensorrt + flashinfer,
         "//conditions:default": []
     }) + select({
         "@//:using_arm": [],
-        "//:xft_use_icx": [
-            "xfastertransformer_devel_icx",
-        ],
+        "@//:using_cuda12_arm": [],
+        # "//:xft_use_icx": [
+        #     "xfastertransformer_devel_icx",
+        # ],
         "//conditions:default": [
             "xfastertransformer_devel",
         ],
@@ -224,6 +232,7 @@ py_library(
         "@//:using_arm": [],
 	    "@//:using_rocm": ["pyrsmi", "amdsmi"],
         "@//:using_cpu": [],
+        "@//:using_cuda12_arm": [],
         "//conditions:default": ["flash_attn"]
     }),
 )
@@ -271,6 +280,17 @@ py_library(
     name = "structure",
     srcs = glob([
         "structure/*.py",
+    ])
+)
+
+py_library(
+    name = "cli",
+    deps = [
+        ":config",
+        ":release_version"
+    ],
+    srcs = glob([
+        "cli/*.py",
     ])
 )
 
@@ -404,6 +424,7 @@ py_library(
         ":ops",
         ":pipeline",
         ":device",
+        ":cli",
         ":config",
         ":structure",
         "//rtp_llm/server:server",
@@ -479,6 +500,7 @@ py_package(
     ] + jit_deps(),
     packages = [
         "rtp_llm",
+        "fla",
     ] + select({
         "@//:using_cuda12": ["deep_gemm"],
         "//conditions:default": [],
@@ -518,8 +540,8 @@ whl_reqs = [
     "timm==0.9.12",
     "onnx",
     "sentence-transformers==2.7.0",
-    "xfastertransformer_devel==1.8.1.1",
-    "xfastertransformer_devel_icx==1.8.1.1",
+    # "xfastertransformer_devel==1.8.1.1",
+    # "xfastertransformer_devel_icx==1.8.1.1",
     "grpcio==1.62.0",
     #"decord==0.6.0",
     "accelerate==0.25.0",
@@ -540,6 +562,7 @@ whl_reqs = [
     "bitsandbytes",
     "portalocker",
     "concurrent_log_handler",
+    "flashinfer-python==0.2.5",
 ] + whl_deps() + platform_deps() + xft_dep
 
 py_wheel(
@@ -568,6 +591,11 @@ py_wheel(
     python_tag = "py3",
     tags = ["manual", "local", "no-remote"],
     version = RELEASE_VERSION,
+    entry_points = {
+        "console_scripts": [
+            "rtp-llm = rtp_llm.cli.main:main",
+        ]
+    },
     deps = [
         ":rtp_llm_package",
         "//deps:extension_package"

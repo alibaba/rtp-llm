@@ -30,7 +30,7 @@
 namespace rtp_llm {
 
 template<typename Tf, typename T, bool IS_BETA>
-__inline__ __device__ Tf compute_rmsnorm(Tf val, float s_variance, const T* gamma, const T* beta, int i) {
+__inline__ __device__ Tf compute_rmsnorm(Tf val, float s_variance, const T* gamma, const T* beta, size_t i) {
     Tf ret = val * s_variance * cuda_cast<Tf>(gamma[i]);
     if (IS_BETA) {
         ret = ret + cuda_cast<Tf>(beta[i]);
@@ -61,14 +61,13 @@ __global__ void generalRmsNorm(T*           output,
                                const T*     gamma,
                                const T*     beta,
                                const float  eps,
-                               int          tokens,
-                               int          hidden_dim,
+                               size_t       tokens,
+                               size_t       hidden_dim,
                                const float* scale_orig_quant_per_tensor,
                                float*       scale_orig_quant_per_token,
                                QUANT_OUT_T* normed_output_quant) {
     constexpr auto num_elems_T = num_elems<T>::value;
     using quant_packed_t       = typename packed_as<QUANT_OUT_T, num_elems_T>::type;
-    using Int32_Packed_T       = typename packed_as<int32_t, num_elems<T>::value>::type;
     using float_packed_t       = typename packed_as<float, num_elems_T>::type;
     using T_scalar             = typename packed_as<T, 1>::type;
 
@@ -77,13 +76,13 @@ __global__ void generalRmsNorm(T*           output,
 
     __shared__ float s_variance;
 
-    const int tidx = threadIdx.x;
-    const int bidx = blockIdx.x;
+    const size_t tidx = threadIdx.x;
+    const size_t bidx = blockIdx.x;
 
     float variance      = 0.0f;
     float local_var_sum = 0.0f;
 
-    const int n_elems = hidden_dim / num_elems_T;
+    const size_t n_elems = hidden_dim / num_elems_T;
 
     const bool           with_per_token_scaling  = scale_orig_quant_per_token != nullptr;
     const bool           with_per_tensor_scaling = scale_orig_quant_per_tensor != nullptr;
@@ -92,12 +91,12 @@ __global__ void generalRmsNorm(T*           output,
         cuda_cast<float_packed_t>(with_per_tensor_scaling ? *scale_orig_quant_per_tensor : 0.0f);
     T_scalar amax = getAmax<QUANT_OUT_T>();
 
-    for (int i = tidx; i < n_elems; i += blockDim.x) {
+    for (size_t i = tidx; i < n_elems; i += blockDim.x) {
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
         asm volatile("griddepcontrol.wait;");
 #endif
-        const int index = bidx * n_elems + i;
-        T         val   = cuda_cast<T>(0.0f);
+        const size_t index = bidx * n_elems + i;
+        T            val   = cuda_cast<T>(0.0f);
         // const T val = input[index];
         if (IS_BIAS) {
             val = add(val, ldg(&bias[i]));
@@ -133,8 +132,8 @@ __global__ void generalRmsNorm(T*           output,
     }
     __syncthreads();
     const float scale_factor = getScaleFactor<QUANT_OUT_T>();
-    for (int i = tidx; i < n_elems; i += blockDim.x) {
-        const int            index = bidx * n_elems + i;
+    for (size_t i = tidx; i < n_elems; i += blockDim.x) {
+        const size_t         index = bidx * n_elems + i;
         const float_packed_t val_f = cuda_cast<float_packed_t>(shmem[i]);
         const T val = cuda_cast<T>(compute_rmsnorm<float_packed_t, T, IS_BETA>(val_f, s_variance, gamma, beta, i));
 
@@ -152,8 +151,8 @@ __global__ void generalRmsNorm(T*           output,
     if (with_per_token_scaling) {
         float       abs_max_f               = blockAllReduceMax(cuda_cast<float>(amax));
         const float dynamic_per_token_scale = scale_factor / abs_max_f;
-        for (int i = tidx; i < n_elems; i += blockDim.x) {
-            const int      index = bidx * n_elems + i;
+        for (size_t i = tidx; i < n_elems; i += blockDim.x) {
+            const size_t   index = bidx * n_elems + i;
             float_packed_t val_f = cuda_cast<float_packed_t>(shmem[i]);
             reinterpret_cast<quant_packed_t*>(normed_output_quant)[index] =
                 cuda_cast<quant_packed_t>(val_f * cuda_cast<float_packed_t>(dynamic_per_token_scale));
@@ -169,32 +168,32 @@ __global__ void generalRmsNorm(T*           output,
 
 template<typename T, bool IS_BIAS>
 __global__ void rmsNormWithStride(T* __restrict output,
-                                  const int out_stride,
+                                  const size_t out_stride,
                                   const T* __restrict input,
-                                  const int in_stride,
+                                  const size_t in_stride,
                                   const T* __restrict gamma,
                                   const T* __restrict bias,
-                                  const float eps,
-                                  const int   n,
-                                  const int   norm_size) {
-    constexpr auto num_elems_T        = num_elems<T>::value;
-    using float_packed_t              = typename packed_as<float, num_elems_T>::type;
-    constexpr int vec_size            = num_elems<T>::value;
-    constexpr int warp_size           = 32;
-    const int     elements_per_thread = norm_size / (warp_size * vec_size);
+                                  const float  eps,
+                                  const size_t n,
+                                  const size_t norm_size) {
+    constexpr auto num_elems_T           = num_elems<T>::value;
+    using float_packed_t                 = typename packed_as<float, num_elems_T>::type;
+    constexpr size_t vec_size            = num_elems<T>::value;
+    constexpr size_t warp_size           = 32;
+    const size_t     elements_per_thread = norm_size / (warp_size * vec_size);
 
-    const int sample_idx  = blockIdx.x / (n / norm_size);
-    const int group_idx   = blockIdx.x % (n / norm_size);
-    const T*  group_start = input + sample_idx * (in_stride / vec_size) + group_idx * (norm_size / vec_size);
-    T*        dest_start  = output + sample_idx * (out_stride / vec_size) + group_idx * (norm_size / vec_size);
+    const size_t sample_idx  = blockIdx.x / (n / norm_size);
+    const size_t group_idx   = blockIdx.x % (n / norm_size);
+    const T*     group_start = input + sample_idx * (in_stride / vec_size) + group_idx * (norm_size / vec_size);
+    T*           dest_start  = output + sample_idx * (out_stride / vec_size) + group_idx * (norm_size / vec_size);
 
     __shared__ float smem_scale;
 
     float square_sum = 0.0f;
-    for (int i = 0; i < elements_per_thread; ++i) {
-        const int elem_idx   = i * warp_size + threadIdx.x;
-        T         packed_val = group_start[elem_idx];
-        auto      val        = cuda_cast<float_packed_t>(packed_val);
+    for (size_t i = 0; i < elements_per_thread; ++i) {
+        const size_t elem_idx   = i * warp_size + threadIdx.x;
+        T            packed_val = group_start[elem_idx];
+        auto         val        = cuda_cast<float_packed_t>(packed_val);
 
         square_sum += cuda_sum<float>(val * val);
     }
@@ -206,9 +205,9 @@ __global__ void rmsNormWithStride(T* __restrict output,
     }
     __syncthreads();
 
-    for (int i = 0; i < elements_per_thread; ++i) {
-        const int elem_idx   = i * warp_size + threadIdx.x;
-        T         packed_val = group_start[elem_idx];
+    for (size_t i = 0; i < elements_per_thread; ++i) {
+        const size_t elem_idx   = i * warp_size + threadIdx.x;
+        T            packed_val = group_start[elem_idx];
 
         const float_packed_t val_f = cuda_cast<float_packed_t>(packed_val);
         const T              val =
@@ -227,8 +226,8 @@ void dispatch_rmsnorm_type_square_method(T*           output,
                                          const T*     gamma,
                                          const T*     beta,
                                          const float  eps,
-                                         int          tokens,
-                                         int          hidden_dim,
+                                         size_t       tokens,
+                                         size_t       hidden_dim,
                                          const float* scale_orig_quant_per_tensor,
                                          float*       scale_orig_quant_per_token,
                                          QUANT_OUT_T* normed_output_quant,
@@ -238,9 +237,9 @@ void dispatch_rmsnorm_type_square_method(T*           output,
                                          cudaStream_t stream) {
     if (shmem_size >= (48 << 10)) {
 #if USING_CUDA
-        cudaError_t ret = cudaFuncSetAttribute(generalRmsNorm<T, IS_OUTPUT, IS_BIAS, RESIDUAL, IS_BETA, QUANT_OUT_T>,
-                                               cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                               shmem_size);
+        check_cuda_value(cudaFuncSetAttribute(generalRmsNorm<T, IS_OUTPUT, IS_BIAS, RESIDUAL, IS_BETA, QUANT_OUT_T>,
+                                              cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                              shmem_size));
 #endif
     }
     LAUNCH_KERNEL_WITH_PDL((generalRmsNorm<T, IS_OUTPUT, IS_BIAS, RESIDUAL, IS_BETA, QUANT_OUT_T>),
@@ -262,6 +261,10 @@ void dispatch_rmsnorm_type_square_method(T*           output,
                            scale_orig_quant_per_tensor,
                            scale_orig_quant_per_token,
                            normed_output_quant);
+#if USING_CUDA
+    check_cuda_value(cudaPeekAtLastError());
+    check_cuda_error();
+#endif
 }
 
 template<typename T, bool IS_OUTPUT, bool IS_BIAS, bool RESIDUAL, typename QUANT_OUT_T = int8_t>
@@ -274,8 +277,8 @@ void dispatch_rmsnorm_beta(T*           output,
                            const T*     gamma,
                            const T*     beta,
                            const float  eps,
-                           int          tokens,
-                           int          hidden_dim,
+                           size_t       tokens,
+                           size_t       hidden_dim,
                            const float* scale_orig_quant_per_tensor,
                            float*       scale_orig_quant_per_token,
                            QUANT_OUT_T* normed_output_quant,
@@ -338,8 +341,8 @@ void dispatch_rmsnorm_residual(T*           output,
                                const T*     gamma,
                                const T*     beta,
                                const float  eps,
-                               int          tokens,
-                               int          hidden_dim,
+                               size_t       tokens,
+                               size_t       hidden_dim,
                                const float* scale_orig_quant_per_tensor,
                                float*       scale_orig_quant_per_token,
                                QUANT_OUT_T* normed_output_quant,
@@ -400,8 +403,8 @@ void dispatch_rmsnorm_bias(T*           output,
                            const T*     gamma,
                            const T*     beta,
                            const float  eps,
-                           int          tokens,
-                           int          hidden_dim,
+                           size_t       tokens,
+                           size_t       hidden_dim,
                            const float* scale_orig_quant_per_tensor,
                            float*       scale_orig_quant_per_token,
                            QUANT_OUT_T* normed_output_quant,
@@ -462,8 +465,8 @@ void dispatch_rmsnorm_output(T*           output,
                              const T*     gamma,
                              const T*     beta,
                              const float  eps,
-                             int          tokens,
-                             int          hidden_dim,
+                             size_t       tokens,
+                             size_t       hidden_dim,
                              const float* scale_orig_quant_per_tensor,
                              float*       scale_orig_quant_per_token,
                              QUANT_OUT_T* normed_output_quant,
@@ -520,8 +523,8 @@ void invokeGeneralRmsNorm(T*           out,
                           const T*     gamma,
                           const T*     beta,
                           const float  eps,
-                          const int    tokens,
-                          const int    hidden_dim,
+                          const size_t tokens,
+                          const size_t hidden_dim,
                           cudaStream_t stream,
                           const float* scale,
                           float*       dynamic_scale,
@@ -535,9 +538,9 @@ void invokeGeneralRmsNorm(T*           out,
                               );
 
     dim3 grid(tokens);
-    dim3 block(min((int)hidden_dim, (int)1024));
+    dim3 block(std::min(hidden_dim, 1024ul));
     if (use_vec_type) {
-        block.x = min((int)(hidden_dim / vec_size), (int)1024);
+        block.x = std::min(hidden_dim / vec_size, 1024ul);
     }
     // Make sure block.x is multiple of 32 for warp shuffle to work
     block.x = 32 * ((block.x + 31) / 32);
@@ -590,15 +593,15 @@ void invokeGeneralRmsNorm(T*           out,
 
 template<typename T>
 void invokeRmsNormWithStride(T* __restrict output,
-                             const int out_stride,
+                             const size_t out_stride,
                              const T* __restrict input,
-                             const int in_stride,
+                             const size_t in_stride,
                              const T* __restrict gamma,
                              const T* __restrict beta,
                              const float  layernorm_eps,
-                             const int    m,
-                             const int    n,
-                             const int    norm_size,
+                             const size_t m,
+                             const size_t n,
+                             const size_t norm_size,
                              cudaStream_t stream) {
     constexpr size_t vec_size  = 2;
     constexpr size_t warp_size = 32;
@@ -611,9 +614,9 @@ void invokeRmsNormWithStride(T* __restrict output,
         throw std::invalid_argument("norm_size must be multiple of " + std::to_string(warp_size * vec_size));
     }
 
-    const int num_heads = n / norm_size;
-    dim3      grid(m * num_heads);  // 每个block处理一个样本的一个头
-    dim3      block(warp_size);
+    const size_t num_heads = n / norm_size;
+    dim3         grid(m * num_heads);  // 每个block处理一个样本的一个头
+    dim3         block(warp_size);
 
     using Tp     = typename packed_as<T, vec_size>::type;
     bool is_bias = beta != nullptr;
@@ -638,6 +641,10 @@ void invokeRmsNormWithStride(T* __restrict output,
                                                                  n,
                                                                  norm_size);
     }
+#if USING_CUDA
+    check_cuda_value(cudaPeekAtLastError());
+    check_cuda_error();
+#endif
 }
 
 template<typename T, typename QUANT_OUT_T>
@@ -650,14 +657,14 @@ void invokeAddBiasResidualRmsNorm(T*           output,
                                   const T*     gamma,
                                   const T*     beta,
                                   const float  eps,
-                                  const int    tokens,
-                                  const int    hidden_dim,
+                                  const size_t tokens,
+                                  const size_t hidden_dim,
                                   cudaStream_t stream,
                                   const float* scale,
                                   float*       dynamic_scale,
                                   QUANT_OUT_T* normed_output_quant) {
     dim3 grid(tokens);
-    dim3 block(min(hidden_dim, 1024));
+    dim3 block(std::min(hidden_dim, 1024ul));
     // Make sure block.x is multiple of 32 for warp shuffle to work
     block.x = 32 * ((block.x + 31) / 32);
 
@@ -720,8 +727,8 @@ void invokeAddBiasResidualRmsNorm(T*           output,
                                        const T*     gamma,                                                             \
                                        const T*     beta,                                                              \
                                        const float  eps,                                                               \
-                                       const int    tokens,                                                            \
-                                       const int    hidden_dim,                                                        \
+                                       const size_t tokens,                                                            \
+                                       const size_t hidden_dim,                                                        \
                                        cudaStream_t stream,                                                            \
                                        const float* scale,                                                             \
                                        float*       dynamic_scale,                                                     \
@@ -752,8 +759,8 @@ INSTANTIATE_GENERAL_RMSNORM(__nv_bfloat16, __nv_fp8_e4m3);
                                                const T*     gamma,                                                     \
                                                const T*     beta,                                                      \
                                                const float  eps,                                                       \
-                                               const int    tokens,                                                    \
-                                               const int    hidden_dim,                                                \
+                                               const size_t tokens,                                                    \
+                                               const size_t hidden_dim,                                                \
                                                cudaStream_t stream,                                                    \
                                                const float* scale,                                                     \
                                                float*       dynamic_scale,                                             \
@@ -775,15 +782,15 @@ INSTANTIATE_ADD_BIAS_RESL_RMSNORM(__nv_bfloat16, __nv_fp8_e4m3);
 
 #define INSTANTIATE_STRIDED_RMSNORM(T)                                                                                 \
     template void invokeRmsNormWithStride(T* __restrict output,                                                        \
-                                          const int out_stride,                                                        \
+                                          const size_t out_stride,                                                     \
                                           const T* __restrict input,                                                   \
-                                          const int in_stride,                                                         \
+                                          const size_t in_stride,                                                      \
                                           const T* __restrict gamma,                                                   \
                                           const T* __restrict beta,                                                    \
                                           const float  layernorm_eps,                                                  \
-                                          const int    m,                                                              \
-                                          const int    n,                                                              \
-                                          const int    norm_size,                                                      \
+                                          const size_t m,                                                              \
+                                          const size_t n,                                                              \
+                                          const size_t norm_size,                                                      \
                                           cudaStream_t stream);
 INSTANTIATE_STRIDED_RMSNORM(float);
 INSTANTIATE_STRIDED_RMSNORM(half);

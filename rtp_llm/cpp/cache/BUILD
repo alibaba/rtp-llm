@@ -21,6 +21,7 @@ cc_library(
         "KVCacheAllocator.h",
         "BlockLRUCache.h",
         "WarmUpResult.h",
+        "MemoryBlockCache.h",
     ],
     srcs = [
         "BatchKVCacheResource.cc",
@@ -34,19 +35,25 @@ cc_library(
         "DistKvCache.cc",
         "KVCacheAllocator.cc",
         "BlockLRUCache.cc",
+        "MemoryBlockCache.cc",
     ],
     deps = [
         "//rtp_llm/cpp/model_rpc:model_rpc_pool",
         "//rtp_llm/cpp/model_rpc:rpc_error_code",
         "//rtp_llm/cpp/utils:lru_cache",
+        "//rtp_llm/cpp/metrics:metrics",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "//:rtp_compute_ops",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store",
     ] + select({
-        "//:enable_3fs": [
+        "//:using_3fs": [
             ":storage_3fs",
         ],
+        "//conditions:default": [],
+    }),
+    copts = copts() + select({
+        "//:using_3fs": ["-DENABLE_3FS=1"],
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],

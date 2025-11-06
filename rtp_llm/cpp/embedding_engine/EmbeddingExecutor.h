@@ -39,12 +39,13 @@ public:
 
     absl::Status process(const std::list<EmbeddingStreamPtr>& streams);
 
+    rtp_llm::DeviceBase*            device_;
+
 private:
     std::unique_ptr<GptModel>       model_;
     py::object                      handler_;
     HandlerArgs::Flag               handler_args_;
     py::handle                      torch_type_;
-    rtp_llm::DeviceBase*            device_;
     rtp_llm::BufferPtr              max_position_ids_buf_;
     kmonitor::MetricsReporterPtr    metrics_reporter_ = nullptr;
     const rtp_llm::GptInitParameter params_;

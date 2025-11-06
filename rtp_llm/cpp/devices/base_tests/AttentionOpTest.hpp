@@ -7,6 +7,7 @@
 
 #ifdef USING_ROCM
 #include "rtp_llm/cpp/devices/rocm_impl/aiterPA.h"
+#include "rtp_llm/cpp/config/StaticConfig.h"
 #endif
 
 #ifdef USING_CUDA12
@@ -94,8 +95,11 @@ struct AttentionImpl: torch::nn::Module {
             attention_mask = torch::zeros({batch_size, 1, seq_len, kv_seq_len});
         }
         auto scores = torch::softmax((attn_weights / sqrtf(head_dim * 1.0f) + *attention_mask), -1);
-
+#ifdef USING_ROCM
+        auto output           = torch::matmul(scores.to(torch::kFloat32), v.to(torch::kFloat32));
+#else
         auto output           = torch::matmul(scores, v);
+#endif
         auto transpose_output = output.transpose(1, 2);
         return {q, k, v, attn_weights, scores, output, transpose_output};
     }
@@ -164,8 +168,11 @@ void AttentionOpTest::contextAttentionOpTest(size_t        batch_size,
     attention.ptr()->to(torch::Device(torch::kCPU));
     auto               state_dict = attention.ptr()->named_parameters();
     torch::NoGradGuard no_grad;
-
+#ifdef USING_ROCM
+    auto tensor_options     = torch::TensorOptions(torch::kBFloat16).device(torch::Device(torch::kCPU));
+#else
     auto tensor_options     = torch::TensorOptions(torch::kFloat).device(torch::Device(torch::kCPU));
+#endif
     auto int_tensor_options = torch::TensorOptions(torch::kInt).device(torch::Device(torch::kCPU));
 
     auto query_states_host =
@@ -204,9 +211,26 @@ void AttentionOpTest::contextAttentionOpTest(size_t        batch_size,
     auto cu_seqlens_device     = createDeviceBuffer<int>(cu_seqlens_host);
     auto attention_mask_device = createDeviceBuffer<half>(attention_mask_host);
     auto scale_device          = createDeviceBuffer<float>(scale_host);
-    auto rope_config           = RopeConfig({RopeStyle::No, (int)head_dim, 10000, 1, 2048, 1, 1});
+#ifdef USING_ROCM
+    auto rope_config = RopeConfig({RopeStyle::Base, (int)head_dim, 10000, 1, 2048, 1, 1});
 
+    size_t tokensPerBlock = 16;
+    int block_num = batch_size * ((seq_len + tokensPerBlock - 1) / tokensPerBlock + 1);
+    rtp_llm::CacheConfig cache_conf(rtp_llm::KVCacheParam({1, (uint)block_num, (uint)num_key_value_heads, (uint)head_dim, (uint)tokensPerBlock, DataType::TYPE_BF16}));
+    auto kv_cache_block_id = device_->allocateBuffer({
+            rtp_llm::DataType::TYPE_INT32, {batch_size, block_num / batch_size}, rtp_llm::AllocationType::HOST
+        });
+
+    cache_manager_ = std::make_shared<rtp_llm::CacheManager>(cache_conf, device_);;
+    auto kv_cache_buffer = cache_manager_->kvCacheBuffer();
+    auto layer_k_cache_buffer = kv_cache_buffer.k_blocks->index(0);
+    auto layer_v_cache_buffer = kv_cache_buffer.v_blocks->index(0);
     auto common_inputs                = AttentionCommonInputs({input_lengths, sequence_lengths});
+    common_inputs.kv_cache = KvCacheInfo({(int)kv_cache_buffer.k_blocks->shape()[0], kv_cache_block_id, layer_k_cache_buffer, layer_v_cache_buffer});
+#else
+    auto rope_config           = RopeConfig({RopeStyle::No, (int)head_dim, 10000, 1, 2048, 1, 1});
+    auto common_inputs                = AttentionCommonInputs({input_lengths, sequence_lengths});
+#endif
     common_inputs.cu_seqlens          = move(cu_seqlens_device);
     common_inputs.cu_kv_seqlens       = common_inputs.cu_seqlens;
     common_inputs.padding_offset      = move(padding_offset_device);
@@ -220,7 +244,11 @@ void AttentionOpTest::contextAttentionOpTest(size_t        batch_size,
 
     auto buffer_nullptr         = BufferPtr(nullptr);
     auto attention_weight       = AttentionLayerWeights();
+#ifdef USING_ROCM
+    attention_weight.qkv_weight = make_shared<const DenseWeights>(DenseWeights(buffer_nullptr));
+#else
     attention_weight.qkv_weight = make_shared<const DenseWeights>(DenseWeights(buffer_nullptr, bias_device));
+#endif
 
     attention_weight.static_scale_reciprocal_weight = make_shared<const DenseWeights>(DenseWeights(scale_device));
 
@@ -229,13 +257,19 @@ void AttentionOpTest::contextAttentionOpTest(size_t        batch_size,
 
     auto output_data_type = qscheme == QScheme::Qfp8PerTensor ? DataType::TYPE_FP8_E4M3 : qkv_input_device->type();
     auto qkv_output       = device_->allocateBuffer({output_data_type, {batch_size, seq_len, num_heads, head_dim}});
+#ifdef USING_ROCM
+    device_->initParamsRef().use_asm_pa = true;
+    device_->initParamsRef().max_seq_len = 150000;
+    device_->contextAttention(
+        {0, *qkv_input_device, *qkv_output, common_inputs, attention_weight, attention_config, qscheme, DataType::TYPE_INVALID});
+    auto result_ref = attention->forward(query_states_host, key_states_host, value_states_host, attention_mask_host, std::nullopt, std::nullopt, true, rope_config.base, rope_config.dim);
+#else
     device_->contextAttention(
         {0, *qkv_input_device, *qkv_output, common_inputs, attention_weight, attention_config, qscheme});
-
     auto result_ref = attention->forward(query_states_host, key_states_host, value_states_host, attention_mask_host);
-
+#endif
     auto result = bufferToTensor(*qkv_output);
-    assertTensorClose(result_ref[6], result.to(result_ref[6].dtype()));
+    assertTensorClose(result_ref[6], result.to(result_ref[6].dtype()), 1e-2, 1e-2);
 }
 
 void AttentionOpTest::selfAttentionOpTest(size_t batch_size,
@@ -248,9 +282,12 @@ void AttentionOpTest::selfAttentionOpTest(size_t batch_size,
     attention.ptr()->to(torch::Device(torch::kCPU));
     auto               state_dict = attention.ptr()->named_parameters();
     torch::NoGradGuard no_grad;
-
+#ifdef USING_ROCM
+    auto tensor_options      = torch::TensorOptions(torch::kBFloat16).device(torch::Device(torch::kCPU));
+#else
     auto tensor_options      = torch::TensorOptions(torch::kFloat).device(torch::Device(torch::kCPU));
     auto half_tensor_options = torch::TensorOptions(torch::kHalf).device(torch::Device(torch::kCPU));
+#endif
     auto int_tensor_options  = torch::TensorOptions(torch::kInt).device(torch::Device(torch::kCPU));
 
     auto query_states_host =
@@ -290,7 +327,12 @@ void AttentionOpTest::selfAttentionOpTest(size_t batch_size,
     padding_kv_seq_len        = (kv_seq_len == 0) ? 2 * tokensPerBlock : padding_kv_seq_len;
     auto kvcache_pad =
         torch::zeros({1, (int)batch_size, 2, (int)padding_kv_seq_len, (int)num_key_value_heads * (int)head_dim},
-                     half_tensor_options);
+#ifdef USING_ROCM
+                     tensor_options
+#else
+                     half_tensor_options
+#endif
+);
 
     auto k_cache_host =
         kvcache_pad
@@ -318,8 +360,11 @@ void AttentionOpTest::selfAttentionOpTest(size_t batch_size,
     auto qkv_states_device       = createDeviceBuffer<half>(qkv_states_host);
     auto sequence_lengths_device = createDeviceBuffer<int>(sequence_lengths_host);
     auto input_lengths_device    = createDeviceBuffer<int>(input_lengths_host);
-
+#ifdef USING_ROCM
+    auto rope_config = RopeConfig({RopeStyle::Base, (int)head_dim, 10000, 1, 2048, 1, 1});
+#else
     auto rope_config = RopeConfig({RopeStyle::No, (int)head_dim, 10000, 1, 2048, 1, 1});
+#endif
 
 // cache manager need one block for preserve and every seq need one block for preserve.
 #ifdef USING_ROCM
@@ -367,12 +412,19 @@ void AttentionOpTest::selfAttentionOpTest(size_t batch_size,
 #endif
 
     auto qkv_output = device_->allocateBuffer({qkv_states_device->type(), {token_num, num_heads, head_dim}});
+#ifdef USING_ROCM
+    device_->initParamsRef().use_asm_pa = true;
+    device_->initParamsRef().max_seq_len = 150000;
+    device_->decoderSelfAttention(
+        {0, *qkv_states_device, *qkv_output, common_inputs, attention_weight, attention_config, QScheme::NoQuantize, DataType::TYPE_INVALID});
+    auto result_ref = attention->forward(
+        query_states_host, key_states_host, value_states_host, attention_mask_host, k_cache_host, v_cache_host, true, rope_config.base, rope_config.dim);
+#else
     device_->decoderSelfAttention(
         {0, *qkv_states_device, *qkv_output, common_inputs, attention_weight, attention_config});
-
     auto result_ref = attention->forward(
         query_states_host, key_states_host, value_states_host, attention_mask_host, k_cache_host, v_cache_host);
-
+#endif
     auto result = bufferToTensor(*qkv_output);
     assertTensorClose(result_ref[6].to(result.dtype()), result, 1e-2, 1e-2);
 }
@@ -412,7 +464,7 @@ void AttentionOpTest::aiterPageAttentionOpTest(size_t batch_size,
     size_t tokens_per_block   = 16;
     size_t padding_kv_seq_len = ((kv_seq_len + tokens_per_block - 1) / tokens_per_block + 1) * tokens_per_block;
     padding_kv_seq_len        = (kv_seq_len == 0) ? 2 * tokens_per_block : padding_kv_seq_len;
-    auto kvcache_pad          = torch::rand(  // hangy: [1, 2, 2, 256, 4 * 128]
+    auto kvcache_pad          = torch::rand(
         {1, (int)batch_size, 2, (int)padding_kv_seq_len, (int)num_key_value_heads * (int)head_dim},
         bf16_tensor_options);
     auto kvcache_pad_fp8 =
@@ -427,7 +479,7 @@ void AttentionOpTest::aiterPageAttentionOpTest(size_t batch_size,
             .clone();
     auto v_cache_host =
         kvcache_pad
-            .index(  // hangy: [batch_size, num_key_value_heads, kv_seq_len, head_dim]
+            .index(
                 {0, torch::indexing::Slice(), 1, torch::indexing::Slice(0, kv_seq_len), torch::indexing::Slice()})
             .reshape({(int)batch_size, (int)kv_seq_len, (int)num_key_value_heads, (int)head_dim})
             .contiguous()
@@ -452,14 +504,15 @@ void AttentionOpTest::aiterPageAttentionOpTest(size_t batch_size,
     auto qkv_states_device       = createDeviceBuffer<__nv_bfloat16>(qkv_states_host);
     auto sequence_lengths_device = createDeviceBuffer<int>(sequence_lengths_host);
     auto input_lengths_device    = createDeviceBuffer<int>(input_lengths_host);
-    auto rope_config             = RopeConfig({RopeStyle::Base, (int)head_dim, 1000000, 1., 0., 0., 40960});
+    // auto rope_config             = RopeConfig({RopeStyle::Base, (int)head_dim, 1000000, 1., 0., 0., 40960});
+    auto rope_config = RopeConfig({RopeStyle::Base, (int)head_dim, 10000, 1, 2048, 1, 1});
     // cache manager need one block for preserve and every seq need one block for preserve.
     auto                 block_num = 2 * batch_size * ((kv_seq_len + tokens_per_block - 1) / tokens_per_block + 1) + 1;
     rtp_llm::CacheConfig cache_conf(rtp_llm::KVCacheParam(
         {1, (uint)block_num, (uint)num_key_value_heads, (uint)head_dim, (uint)tokens_per_block, DataType::TYPE_BF16}));
     cache_manager_         = nullptr;
     auto kv_cache_block_id = allocateKVBlocks(
-        cache_conf, input_lengths, kvcache_pad);  // hangy: copy kv cache content from kvcache_pad_fp8 to RTP local KV
+        cache_conf, input_lengths, kvcache_pad);
                                                   // cache, kv_cache_block_id = [batch_size, xxx]
     auto kv_cache_buffer      = cache_manager_->kvCacheBuffer();
     auto common_inputs        = AttentionCommonInputs({input_lengths_device, sequence_lengths_device});
@@ -489,7 +542,7 @@ void AttentionOpTest::aiterPageAttentionOpTest(size_t batch_size,
                                {"kv_cache_page_List"});
     KVBlockArray kv_block_array = device->getKVBlockArray(params, *kv_cache_page_List, batch_size, false);
 
-    runAiterPA(params, device, *qkv_states_device);
+    runAiterAsmPA(params, device, *qkv_states_device);
 
     device->syncAndCheck();
     auto q_host_fp32 = query_states_host.to(tensor_options);

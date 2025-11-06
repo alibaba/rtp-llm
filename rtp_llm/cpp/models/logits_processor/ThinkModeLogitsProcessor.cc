@@ -45,16 +45,15 @@ void ThinkModeLogitsProcessor::setVocabMask(std::shared_ptr<StringContainDFA<siz
     }
 }
 
-void ThinkModeLogitsProcessor::beamSearchLogitProcessorUpdate(const std::vector<int>& beam_idx_vec) {
+void ThinkModeLogitsProcessor::updateMultiSeqStatus(const std::vector<int>& src_batch_indices) {
     std::vector<StreamThinkInfo> new_think_infos;
-    for (auto beam_idx : beam_idx_vec) {
-        new_think_infos.push_back(think_infos_[beam_idx].copy());
+    for (auto src_batch_idx : src_batch_indices) {
+        new_think_infos.push_back(think_infos_[src_batch_idx].copy());
     }
     think_infos_ = new_think_infos;
 }
 
-void ThinkModeLogitsProcessor::updateLogitProcessorStatus(const rtp_llm::BufferPtr& new_tokens,
-                                                          int32_t                   num_new_tokens) {
+void ThinkModeLogitsProcessor::updateStatus(const rtp_llm::BufferPtr& new_tokens, int32_t num_new_tokens) {
     RTP_LLM_CHECK(2 == new_tokens->shape().size());
     RTP_LLM_CHECK(size() == new_tokens->shape()[0]);
 

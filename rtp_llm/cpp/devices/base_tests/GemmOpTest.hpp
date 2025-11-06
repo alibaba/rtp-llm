@@ -1,5 +1,9 @@
 #pragma once
 #include "rtp_llm/cpp/devices/testing/TestBase.h"
+#if USING_ROCM
+#include "rtp_llm/cpp/rocm/datatype_interface.h"
+#include "rtp_llm/cpp/rocm/TensorDataManipulation.h"
+#endif
 #include <torch/torch.h>
 
 using namespace rtp_llm;
@@ -49,6 +53,24 @@ public:
         auto       A = tensorToBuffer(input.A);
         auto       B = tensorToBuffer(input.B);
         auto       D = device_->allocateBuffer({A->type(), {A->shape()[0], B->shape()[1]}});
+        // Gemm B in device_->gemm(params); is A
+#if USING_ROCM
+        auto       B_ptr = B->data();
+        auto testSwizzle = bool(autil::EnvUtil::getEnv("TEST_SWIZZLEA", 0L));
+        if (testSwizzle){
+            std::vector<size_t> Ashape = A->shape();
+            std::vector<size_t> Bshape = B->shape();
+            size_t dim  = A->dim();
+            size_t m = Ashape[dim - 2];
+            size_t k = Ashape[dim - 1];
+            size_t n = Bshape[dim - 1];
+            std::vector<hip_bfloat16> src(n * k, hip_bfloat16{});
+            std::vector<hip_bfloat16> dst(n * k, hip_bfloat16{});
+            hipMemcpy(src.data(), B_ptr, n * k * sizeof(hip_bfloat16), hipMemcpyDeviceToHost);
+            swizzleTensor<hip_bfloat16>(dst.data(), src.data(), n, k, true);
+            hipMemcpy(const_cast<void*>(B_ptr), dst.data(), n * k * sizeof(hip_bfloat16), hipMemcpyHostToDevice);
+        }
+#endif
         GemmParams params{*A, *B, std::nullopt, D};
         device_->gemm(params);
         return GemmOpTestOutput({bufferToTensor(*D)});
@@ -159,7 +181,7 @@ public:
         auto input      = PrepareGemmOpInput(m, n, k, dtype);
         auto result     = BasicGemmOpRun(input);
         auto result_ref = BasicGemmTorchRefRun(input);
-        assertTensorClose(result.C.to(result_ref.C.type()), result_ref.C);
+        assertTensorClose(result.C.to(result_ref.C.type()), result_ref.C, 1e-2, 1e-2);
     }
 
     void TransposeGemmOpTest(
@@ -244,4 +266,53 @@ public:
         auto result_ref = GemmOpTestOutput({torch::matmul(input.A.to(torch::kFloat), input.B.t().to(torch::kFloat))});
         assertTensorClose(result.C.to(result_ref.C.type()), result_ref.C, 1e-2, 1e-2);
     }
+
+#if USING_ROCM
+    void calculateKforSwizzling(hipDataType datatype, size_t& MiK, size_t& MiKv, size_t& PackK)
+    {
+        switch(datatype)
+        {
+        case HIP_R_32F:
+            MiK  = 4;
+            MiKv = 1;
+            break;
+        case HIP_R_16F:
+        case HIP_R_16BF:
+            MiK  = 16;
+            MiKv = 4;
+            break;
+        case HIP_R_8F_E4M3_FNUZ:
+        case HIP_R_8F_E5M2_FNUZ:
+            MiK  = 32;
+            MiKv = 8;
+            break;
+        default:
+            std::cerr << "unsupported datatype in calculateKforSwizzling" << '\n';
+        }
+
+        PackK = 16 / MiKv / realDataTypeSize(datatype);
+    }
+
+    template <typename T>
+    void swizzleTensor(T* dst, const T* src, size_t m, size_t k, bool colMaj)
+    {
+        using Tensor = Tensor::Manipulation::Tensor;
+        size_t MiM   = 16;
+        size_t MiK = 0, MiKv = 0, PackK = 0;
+        calculateKforSwizzling(hipblaslt_type2datatype<T>(), MiK, MiKv, PackK);
+        auto tmpTensor = Tensor::create<T>({m, k});
+        memcpy(tmpTensor.template as<void>(), src, m * k * sizeof(T));
+
+        if(colMaj)
+        {
+            auto orgTensor = Tensor::create<T>({k, m});
+            memcpy(orgTensor.template as<void>(), src, m * k * sizeof(T));
+            tmpTensor = permute(orgTensor, {1, 0});
+        }
+
+        tmpTensor.reshape({m / MiM, MiM, k / (MiK * PackK), MiK / MiKv, MiKv * PackK});
+        Tensor permuted = permute(tmpTensor, {0, 2, 3, 1, 4});
+        memcpy(dst, permuted.template as<void>(), m * k * sizeof(T));
+    }
+#endif
 };

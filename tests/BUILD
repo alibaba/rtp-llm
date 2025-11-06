@@ -38,9 +38,11 @@ cc_library(
 
 cc_binary(
     name = "test_ops",
-    deps = [
-        ":test_ops_libs",
-    ],
+    deps = select({
+        "@//:using_cuda12":[":test_ops_libs"],
+        "@//:using_rocm": [":rocm_test_ops_libs"],
+        "//conditions:default": [],
+    }),
     data = [
         "//:rtp_compute_ops",
     ],
@@ -193,7 +195,9 @@ cc_library(
         "mla/mla_context_attention.cc",
         "gemm/gemm_op_test.cc",
         "ffn/rocm_ffn_moe_fp8_test.cc",
+        "ffn/rocm_ffn_moe_fp8_ptpc_test.cc",
         "ffn/rocm_ffn_moe_bf16_test.cc",
+        "layernorm/fusedQkRmsNorm.cpp"
     ]),
     deps = torch_deps() + [
         "//rtp_llm/cpp/devices/rocm_impl:rocm_impl",
@@ -231,6 +235,7 @@ py_test(
     tags = [
         "rocm",
     ],
+    timeout = "eternal",
 )
 
 py_test(
@@ -295,6 +300,28 @@ py_test(
 #        "rocm",
 #    ],
 #)
+
+#ToDo: fix aiter import issue
+# py_test(
+#     name = "rocm_ffn_moe_fp8_ptpc_test",
+#     srcs = [
+#         "ffn/rocm_ffn_moe_fp8_ptpc_test.py"
+#     ],
+#     data = [
+#         "//:th_transformer",
+#         ":rocm_test_ops",
+#     ],
+#     deps = [
+#         "//rtp_llm:torch",
+#         "//rtp_llm:rtp_llm_lib",
+#     ],
+#     env = {
+#         "DEVICE_RESERVE_MEMORY_BYTES": "1024000",
+#     },
+#     tags = [
+#         "rocm",
+#     ],
+# )
 
 #ToDo: fix aiter import issue
 #py_test(
@@ -415,4 +442,25 @@ py_test(
         "//rtp_llm:rtp_llm_lib",
     ],
     exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "rocm_pertensor_int8_gemm_op_test",
+    srcs = [
+        "gemm/rocm_pertensor_int8_gemm_op_test.py"
+    ],
+    data = [
+        "//:th_transformer",
+        ":rocm_test_ops",
+    ],
+    deps = [
+        "//rtp_llm:torch",
+        "//rtp_llm:rtp_llm_lib",
+    ],
+    env = {
+        "DEVICE_RESERVE_MEMORY_BYTES": "1024000",
+    },
+    tags = [
+        "rocm",
+    ],
 )

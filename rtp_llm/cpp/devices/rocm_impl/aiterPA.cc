@@ -10,6 +10,43 @@ inline torch::Tensor Buffer2torchTensorCustom(const Buffer& buf, std::vector<int
     return torch::from_blob((void*)((char*)(buf.data()) + offset), shape, option);
 }
 
+void runAiterAsmPA(const AttentionModuleParams& params,
+		rtp_llm::DeviceBase*         device,
+		Buffer&                      q_tmp) {
+    auto out   = Buffer2torchTensor(params.output,false);
+    auto query = Buffer2torchTensor(q_tmp,false);
+    
+    if (q_tmp.shape().size() < 3) {
+        throw std::runtime_error("aiter_paged_attention only support 3-dim input");
+    } else if (q_tmp.shape().size() > 3) {
+        query = query.reshape({query.size(0), query.size(1), -1});
+    }
+
+    size_t num_heads = params.configs.head_num;
+    int64_t partition_size = 256;
+    int64_t max_seq_len = params.common.decoder_max_seq_len + 1;
+
+    auto key_cache   = Buffer2torchTensor(params.common.kv_cache->k_cache_buffer,false);
+    auto value_cache = Buffer2torchTensor(params.common.kv_cache->v_cache_buffer,false);
+
+    auto block_tables = Buffer2torchTensor(params.common.kv_cache->kv_cache_block_id,false);
+
+    auto context_lens = Buffer2torchTensor(params.common.sequence_lengths,false);
+    context_lens = context_lens + 1;
+    
+    int max_num_blocks = block_tables.size(1);
+    std::optional<torch::Tensor> K_QScale = std::nullopt;
+    std::optional<torch::Tensor> V_QScale = std::nullopt;
+    std::optional<torch::Tensor> out_opt = out;
+    if (key_cache.dtype() == at::kFloat8_e4m3fnuz) {
+        K_QScale = Buffer2torchTensor(params.common.kv_cache->k_scale_buffer,false);
+        V_QScale = Buffer2torchTensor(params.common.kv_cache->v_scale_buffer,false);
+        pa_fwd(query, key_cache, value_cache, block_tables, context_lens, max_num_blocks, max_seq_len, K_QScale, V_QScale, out_opt, std::nullopt, 0);
+    } else {
+        pa_fwd(query, key_cache, value_cache, block_tables, context_lens, max_num_blocks, max_seq_len, K_QScale, V_QScale, out_opt);
+    }
+}
+
 void runAiterPA(const AttentionModuleParams& params, rtp_llm::DeviceBase* device, Buffer& q_tmp) {
     auto out   = Buffer2torchTensor(params.output, false);
     auto query = Buffer2torchTensor(q_tmp, false);
@@ -56,7 +93,7 @@ void runAiterPA(const AttentionModuleParams& params, rtp_llm::DeviceBase* device
 
     int64_t block_size = params.configs.tokens_per_block;
 
-    std::string kv_cache_dtype = "auto";
+    std::string kv_cache_dtype = key_cache.dtype() == at::kFloat8_e4m3fnuz ? "fp8" : "auto";
 
     double k_scale = 1.0;
     double v_scale = 1.0;
@@ -99,4 +136,5 @@ void runAiterPA(const AttentionModuleParams& params, rtp_llm::DeviceBase* device
                     partition_size);
     return;
 }
-}  // namespace rtp_llm
+
+} // namespace rtp_llm

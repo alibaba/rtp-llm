@@ -7,7 +7,7 @@ on:
 
 jobs:
   trigger-on-merge:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux]
     defaults:
       run:
         working-directory: .github/scripts

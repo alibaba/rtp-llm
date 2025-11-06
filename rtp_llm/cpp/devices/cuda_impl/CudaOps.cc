@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/kernels/copy_utils.h"
 #include "rtp_llm/cpp/kernels/moe_kernels.h"
 #include "rtp_llm/cpp/kernels/tensor_ops_kernels.h"
+#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 #include "rtp_llm/cpp/cuda/nccl/nccl_utils_torch.h"
 #include "rtp_llm/cpp/cuda/nccl/nccl_utils.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
@@ -57,12 +58,11 @@ void CudaDevice::copy(const CopyParams& params) {
     if (copyType == cudaMemcpyHostToHost) {
         std::memcpy(dst.data(), src.data(), src.sizeBytes());
     } else {
-        cudaMemcpyAsync(dst.data(), src.data(), src.sizeBytes(), copyType, stream);
+        check_cuda_value(cudaMemcpyAsync(dst.data(), src.data(), src.sizeBytes(), copyType, stream));
     }
 
     if (copyType == cudaMemcpyDeviceToHost) {
-        cudaStreamSynchronize(stream);
-        check_cuda_value(cudaGetLastError());
+        check_cuda_value(cudaStreamSynchronize(stream));
     }
 
     check_cuda_error();
@@ -129,22 +129,24 @@ void CudaDevice::batchCopy(const BatchCopyParams& params) {
                 auto sizes    = reinterpret_cast<uint64_t*>(workspace->data<char>() + src_ptrs_bytes + dst_ptrs_bytes);
 
                 // copy params to workspace
-                cudaMemcpyAsync(src_ptrs, buffers.src_ptr.data(), org_src_ptrs_bytes, cudaMemcpyHostToDevice, stream);
-                cudaMemcpyAsync(dst_ptrs, buffers.dst_ptr.data(), org_dst_ptrs_bytes, cudaMemcpyHostToDevice, stream);
-                cudaMemcpyAsync(sizes, buffers.sizes.data(), org_sizes_bytes, cudaMemcpyHostToDevice, stream);
+                check_cuda_value(cudaMemcpyAsync(
+                    src_ptrs, buffers.src_ptr.data(), org_src_ptrs_bytes, cudaMemcpyHostToDevice, stream));
+                check_cuda_value(cudaMemcpyAsync(
+                    dst_ptrs, buffers.dst_ptr.data(), org_dst_ptrs_bytes, cudaMemcpyHostToDevice, stream));
+                check_cuda_value(
+                    cudaMemcpyAsync(sizes, buffers.sizes.data(), org_sizes_bytes, cudaMemcpyHostToDevice, stream));
 
                 // copy workspace to device
                 cudaEvent_t copy_params_done;
-                cudaEventCreate(&copy_params_done);
-                cudaEventRecord(copy_params_done, stream);
+                check_cuda_value(cudaEventCreate(&copy_params_done));
+                check_cuda_value(cudaEventRecord(copy_params_done, stream));
 
                 // do batch copy
                 auto config = kernels::getBatchCopyConfig(buffers.sizes.data(), copy_batch_size);
                 kernels::invokeBatchCopy(dst_ptrs, src_ptrs, sizes, copy_batch_size, config, stream);
 
-                cudaEventSynchronize(copy_params_done);
-                cudaEventDestroy(copy_params_done);
-                check_cuda_value(cudaGetLastError());
+                check_cuda_value(cudaEventSynchronize(copy_params_done));
+                check_cuda_value(cudaEventDestroy(copy_params_done));
 
                 check_cuda_error();
             } break;
@@ -173,7 +175,22 @@ void CudaDevice::noBlockCopy(const CopyParams& params) {
     params.check();
     const auto& src = params.src;
     const auto& dst = params.dst;
-    cudaMemcpyAsync(dst.data(), src.data(), src.sizeBytes(), cudaMemcpyDefault, no_block_copy_stream_);
+    check_cuda_value(
+        cudaMemcpyAsync(dst.data(), src.data(), src.sizeBytes(), cudaMemcpyDefault, no_block_copy_stream_));
+    check_cuda_value(cudaStreamSynchronize(no_block_copy_stream_));
+    check_cuda_error();
+}
+
+void CudaDevice::noBlockCopy(const MultiCopyParams& params) {
+    RUNTIME_ASSERT_OP_ARG(params.multi_src.size() == params.multi_dst.size(),
+                          "multi_src and multi_dst must have the same size");
+    for (size_t i = 0; i < params.multi_src.size(); i++) {
+        cudaMemcpyAsync(params.multi_dst[i]->data(),
+                        params.multi_src[i]->data(),
+                        params.multi_src[i]->sizeBytes(),
+                        cudaMemcpyDefault,
+                        no_block_copy_stream_);
+    }
     cudaStreamSynchronize(no_block_copy_stream_);
     check_cuda_error();
 }
@@ -282,7 +299,7 @@ SelectOutput CudaDevice::select(const SelectParams& params) {
                                         output->data(),
                                         input.data(),
                                         (int*)params.index.data(),
-                                        (int)params.index.size(),
+                                        params.index.size(),
                                         num_selected_element,
                                         0,
                                         stream_);
@@ -749,15 +766,15 @@ void CudaDevice::allGather(const AllGatherParams& params) {
     }
     NCCLCHECK(ncclGroupStart());
     for (auto i = 0; i < params.recv_buffers.size(); ++i) {
-        auto&      recv_buffer    = params.recv_buffers[i];
-        const auto nccl_data_type = getNcclDataType(recv_buffer->type());
-        const auto data_num       = recv_buffer->size() / nccl_param.world_size_;
-        RUNTIME_ASSERT_OP_ARG(data_num * nccl_param.world_size_ == recv_buffer->size(),
-                              "Buffer size %ld must be divisible by world size %d",
+        auto&        recv_buffer    = params.recv_buffers[i];
+        const auto   nccl_data_type = getNcclDataType(recv_buffer->type());
+        const size_t data_num       = recv_buffer->size() / static_cast<size_t>(nccl_param.world_size_);
+        RUNTIME_ASSERT_OP_ARG(data_num * static_cast<size_t>(nccl_param.world_size_) == recv_buffer->size(),
+                              "Buffer size %zu must be divisible by world size %d",
                               recv_buffer->size(),
                               nccl_param.world_size_);
         if (params.inplace) {
-            const auto data_size = data_num * recv_buffer->typeSize();
+            const size_t data_size = data_num * recv_buffer->typeSize();
             NCCLCHECK(ncclAllGather((char*)(recv_buffer->data()) + nccl_param.rank_ * data_size,
                                     recv_buffer->data(),
                                     data_num,
@@ -803,6 +820,19 @@ void CudaDevice::reduceScatter(const ReduceScatterParams& params) {
                                 nccl_op,
                                 nccl_param.nccl_comm_,
                                 stream));
+}
+
+bool CudaDevice::checkNAN(const Buffer& input) {
+    // every grid deal with 512 element
+    if (input.size() < 512) {
+        return true;
+    }
+    check_cuda_value(cudaStreamSynchronize(stream_));
+    check_cuda_value(cudaGetLastError());
+    DISPATCH_CUDA_FUNCTION_DATA_TYPE(input.type(), invokeCheckNAN, input.data(), input.size(), stream_);
+    check_cuda_value(cudaStreamSynchronize(stream_));
+    check_cuda_value(cudaGetLastError());
+    return true;
 }
 
 }  // namespace rtp_llm

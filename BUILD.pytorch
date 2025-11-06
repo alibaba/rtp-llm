@@ -53,7 +53,7 @@ cc_library(
         "torch/include/**/*.h",
         "torch/include/**/*.cuh",
         "torch/include/**/*.hpp",
-    ]),
+    ], exclude=["torch/include/google/**"]),
     deps = [
         "@local_config_python//:python_headers",
         "@local_config_python//:python_lib",
@@ -83,14 +83,23 @@ cc_library(
         "torch.libs/libopenblasp*.so",
     ]),
     linkopts = select({
-        "@//:using_cuda": [
+        "@//:cuda_pre_12_9": [
             "-L/usr/local/cuda/lib64",
             "-L/usr/local/cuda/extras/CUPTI/lib64",
             "-lcupti",
             "-lcudart",
             "-lnccl",
-            "-lnvToolsExt",
             "-lcudnn",
+            "-lnvToolsExt",
+        ],
+        "@//:using_cuda12_9_x86": [
+            "-L/usr/local/cuda/lib64",
+            "-L/usr/local/cuda/extras/CUPTI/lib64",
+            "-lcupti",
+            "-lcudart",
+            "-lnccl",
+            "-lcudnn",
+            "-lnvtx3interop",
         ],
         "//conditions:default": [],
     }),

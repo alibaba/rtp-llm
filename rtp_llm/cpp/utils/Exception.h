@@ -23,17 +23,17 @@
 
 #include "rtp_llm/cpp/utils/StringUtil.h"
 
-#define FT_EXCEPTION(...) rtp_llm::FTException(__FILE__, __LINE__, rtp_llm::fmtstr(__VA_ARGS__))
+#define RTP_EXCEPTION(...) rtp_llm::RTPException(__FILE__, __LINE__, rtp_llm::fmtstr(__VA_ARGS__))
 
 namespace rtp_llm {
 
-class FTException: public std::runtime_error {
+class RTPException: public std::runtime_error {
 public:
     static auto constexpr MAX_FRAMES = 128;
 
-    explicit FTException(char const* file, std::size_t line, std::string const& msg);
+    explicit RTPException(char const* file, std::size_t line, std::string const& msg);
 
-    ~FTException() noexcept override;
+    ~RTPException() noexcept override;
 
     [[nodiscard]] std::string getTrace() const;
 

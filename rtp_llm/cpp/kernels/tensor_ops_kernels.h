@@ -31,24 +31,27 @@ namespace rtp_llm {
 
 // Tensor transpose operations
 template<typename T>
-void invokeTransposeAxis012(T* out, T* in, const int dim0, const int dim1, const int dim2, cudaStream_t stream);
+void invokeTransposeAxis012(T* out, T* in, const size_t dim0, const size_t dim1, const size_t dim2, cudaStream_t stream);
 
 // from [b, s, h, d] to [b, h, s, d]
 template<typename T>
 void invokeTransposeAxis12(
-    T* out, T* in, const int dim0, const int dim1, const int dim2, const int dim_3, cudaStream_t stream);
+    T* out, T* in, const size_t dim0, const size_t dim1, const size_t dim2, const size_t dim_3, cudaStream_t stream);
 
 template<typename T>
-void invokeTransposeAxis01(T* out, T* in, const int dim0, const int dim1, cudaStream_t stream);
+void invokeTransposeAxis01(T* out, T* in, const size_t dim0, const size_t dim1, cudaStream_t stream);
 
 // Sequence operations
 template<typename T>
 void invokeLookupHiddenStateOfLastToken(T*           from_tensor,
                                         const T*     hidden_state,
                                         const int*   input_lengths,
-                                        const int    batch_size,
-                                        const int    hidden_units,
-                                        const int    idx_offset,
+                                        const size_t    batch_size,
+                                        const size_t    hidden_units,
+                                        const size_t    idx_offset,
                                         cudaStream_t stream);
+
+template<typename T>
+void invokeCheckNAN(T* input, size_t nums, cudaStream_t stream);
 
 }  // namespace rtp_llm

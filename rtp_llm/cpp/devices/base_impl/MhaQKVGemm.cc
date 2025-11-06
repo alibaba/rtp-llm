@@ -8,7 +8,7 @@ BufferPtr DeviceBase::mhaQKVGemm(const AttentionLayerParams& params) {
     const auto& input      = params.input;
     const auto& qkv_weight = params.weights.qkv_weight;
 
-#if defined(__aarch64__)
+#if BUILDING_ARM_ONLY
     // Arm attention op only support fp32 data type
     auto qkv_gemm_params = GemmParams(input, *(qkv_weight->kernel), std::nullopt, nullptr, DataType::TYPE_FP32);
 #else
@@ -24,7 +24,10 @@ BufferPtr DeviceBase::mhaQKVGemm(const AttentionLayerParams& params) {
                                     mayGetRef(params.weights.qkv_weight->bias),
                                     std::nullopt,
                                     std::nullopt,
-                                    std::nullopt);
+                                    std::nullopt,
+                                    nullptr,
+                                    false,
+                                    params.qscheme);
         qkv = loraLinearWithActivation(LoraLinearWithActivationParams(lora_linear_params, act_params));
     } else {
         qkv = loraLinear(LoraLinearParams(qkv_gemm_params, params.common.lora_input.qkv_lora_input)).output;

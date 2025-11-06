@@ -1,0 +1,85 @@
+--- aiter/jit/optCompilerConfig.json
++++ aiter/jit/optCompilerConfig.json
+@@ -619,6 +619,7 @@
+         "verbose": "False",
+         "hip_clang_path": "os.environ.get('MHA_HIP_CLANG_PATH')",
+         "blob_gen_cmd": [
++            "f'{get_asm_dir()}/fmha_v3_fwd/codegen.py --output_dir {{}}'",
+             "f'{CK_DIR}/example/ck_tile/01_fmha/generate.py -d fwd --receipt 600 --output_dir {{}}'",
+             "f'{AITER_CSRC_DIR}/cpp_itfs/mha_fwd_generate.py --receipt 3 --output_dir {{}}'"
+         ]
+
+--- csrc/cpp_itfs/mha_fwd_generate.py
++++ csrc/cpp_itfs/mha_fwd_generate.py
+@@ -150,7 +150,7 @@ COMBINED_API = """t = fmha_fwd_v3(traits, args, stream_config);
+ API_MAP = {
+     1: FMHA_FWD_API.format(F_inner_dispatch=V3_API),
+     2: FMHA_FWD_API.format(F_inner_dispatch=V2_API),
+-    3: FMHA_FWD_API.format(F_inner_dispatch=V2_API) + FMHA_FWD_SPLITKV_API,
++    3: FMHA_FWD_API.format(F_inner_dispatch=COMBINED_API),
+     4: FMHA_BATCH_PREFILL_API,
+     5: FMHA_FWD_API.format(F_inner_dispatch=COMBINED_API)
+     + FMHA_FWD_SPLITKV_API
+
+--- csrc/py_itfs_cu/asm_pa.cu
++++ csrc/py_itfs_cu/asm_pa.cu
+@@ -115,7 +115,7 @@
+     int num_heads       = Q.size(1);
+     int head_size       = Q.size(2);
+     int num_kv_heads    = K.size(1);
+-    int block_size      = K.size(3);
++    int block_size      = K.size(2);
+     const int gqa_ratio = num_heads / num_kv_heads;
+ 
+     int dim            = head_size;
+
+
+--- aiter/jit/core.py
++++ aiter/jit/core.py
+@@ -66,37 +66,18 @@
+ AITER_ROOT_DIR = os.path.abspath(f"{this_dir}/../../")
+ AITER_LOG_MORE = int(os.getenv("AITER_LOG_MORE", 0))
+ 
+-find_aiter = importlib.util.find_spec("aiter")
+-if find_aiter is not None:
+-    if find_aiter.submodule_search_locations:
+-        package_path = find_aiter.submodule_search_locations[0]
+-    elif find_aiter.origin:
+-        package_path = find_aiter.origin
+-    package_path = os.path.dirname(package_path)
+-    package_parent_path = os.path.dirname(package_path)
+-
+-    try:
+-        with open(f"{this_dir}/../install_mode", "r") as f:
+-            # develop mode
+-            isDevelopMode = f.read().strip() == "develop"
+-    except FileNotFoundError:
+-        # pip install -e
+-        isDevelopMode = True
+-
+-    if isDevelopMode:
+-        AITER_META_DIR = AITER_ROOT_DIR
+-    # install mode
+-    else:
+-        AITER_META_DIR = os.path.abspath(f"{AITER_ROOT_DIR}/aiter_meta/")
++meta_path = os.path.abspath(f"{AITER_ROOT_DIR}/aiter_meta")
++if os.path.exists(meta_path):
++    AITER_META_DIR = meta_path
+ else:
+-    AITER_META_DIR = AITER_ROOT_DIR
+-    logger.warning("aiter is not installed.")
++    AITER_META_DIR = os.path.abspath(AITER_ROOT_DIR)
+ sys.path.insert(0, AITER_META_DIR)
+ AITER_CSRC_DIR = f"{AITER_META_DIR}/csrc"
+ AITER_GRADLIB_DIR = f"{AITER_META_DIR}/gradlib"
+ gfx = get_gfx()
+ AITER_ASM_DIR = f"{AITER_META_DIR}/hsa/{gfx}/"
+-os.environ["AITER_ASM_DIR"] = AITER_ASM_DIR
++if "AITER_ASM_DIR" not in os.environ:
++    os.environ["AITER_ASM_DIR"] = AITER_ASM_DIR
+ CK_3RDPARTY_DIR = os.environ.get(
+     "CK_DIR", f"{AITER_META_DIR}/3rdparty/composable_kernel"
+ )
+ 
+
+

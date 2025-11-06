@@ -194,6 +194,7 @@ cc_library(
     deps = torch_deps() + select({
         "@//:using_cuda": [
             ":cuda_host_utils",
+            "//rtp_llm/cpp/utils:stack_trace",
             "@local_config_cuda//cuda:cuda_headers",
             "@local_config_cuda//cuda:cudart",
         ],

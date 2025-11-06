@@ -8,7 +8,7 @@
 #include "rtp_llm/cpp/models/Sampler.h"
 #include "rtp_llm/cpp/models/logits_processor/ThinkModeLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/TreeLogitsProcessor.h"
-#include "rtp_llm/cpp/models/logits_processor/BeamSearchLogitsProcessor.h"
+#include "rtp_llm/cpp/models/logits_processor/MultiSeqLogitsProcessor.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPrompt.h"
@@ -222,7 +222,7 @@ public:
     void         cancelIfNotRunning();
     void         setFinishedWithoutLock();
     bool         needRemoteGenerate() const;
-    void         setRemoteGenerate();
+    bool         setRemoteGenerate();
     size_t       iterCount() const;
     size_t       spIterCount() const;
     void         setSpIterCount(int sp_iter_count);
@@ -272,7 +272,7 @@ public:
         return return_all_probs_;
     }
 
-    void beamSearchLogitProcessorUpdate(const rtp_llm::BufferPtr& beam_idx);
+    void updateLogitProcessorMultiSeqStatus(const rtp_llm::BufferPtr& src_batch_indices);
     void updateLogitProcessorStatus(const StreamUpdateInfo& update_info);
 
     rtp_llm::BufferPtr generateContextPositionIds(rtp_llm::DeviceBase* device);
@@ -417,8 +417,8 @@ public:
         return tree_logits_processor_ptr_;
     }
 
-    BeamSearchLogitsProcessorPtr getBeamSearchLogitsProcessor() {
-        return beam_search_logits_processor_ptr_;
+    MultiSeqLogitsProcessorPtr getMultiSeqLogitsProcessor() {
+        return multi_seq_logits_processor_ptr_;
     }
 
     void                                initializeLogitsProcessorList();
@@ -478,6 +478,10 @@ public:
 
     bool enable3FS() const {
         return generate_input_->generate_config->enable_3fs;
+    }
+
+    bool enableMemoryBlockCache() const {
+        return generate_input_->generate_config->enable_memory_block_cache;
     }
 
     void fillSubGenerateStatus(StreamState state);
@@ -573,7 +577,7 @@ protected:
 
     ThinkModeLogitsProcessorPtr         think_logits_processor_ptr_;
     TreeLogitsProcessorPtr              tree_logits_processor_ptr_;
-    BeamSearchLogitsProcessorPtr        beam_search_logits_processor_ptr_;
+    MultiSeqLogitsProcessorPtr          multi_seq_logits_processor_ptr_;
     std::vector<BaseLogitsProcessorPtr> logits_processor_list_;
 
     // just for bool test

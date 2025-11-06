@@ -14,7 +14,7 @@ from rtp_llm.models_py.modules.embedding import Embedding
 from rtp_llm.models_py.modules.linear import Linear
 from rtp_llm.models_py.modules.mlp import FusedSiluActDenseMLP
 from rtp_llm.models_py.modules.norm import FusedQKRMSNorm, RMSNorm
-from rtp_llm.ops import PyModelInitResources, PyModelInputs, PyModelOutputs
+from rtp_llm.ops.compute_ops import PyModelInitResources, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
 from rtp_llm.utils.util import check_with_info
 

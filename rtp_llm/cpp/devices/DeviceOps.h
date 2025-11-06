@@ -100,10 +100,14 @@ public:
 
     // for multi thread no block copy
     virtual void noBlockCopy(const CopyParams& params);
+    virtual void noBlockCopy(const MultiCopyParams& params);
 
     // for perf
     virtual void perfRangePush(const std::string& name) const;
     virtual void perfRangePop() const;
+
+    // for check
+    virtual bool checkNAN(const Buffer& input);
 
     // for device-specific weights preprocess
     static torch::Tensor

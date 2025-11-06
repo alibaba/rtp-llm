@@ -7,11 +7,13 @@ from unittest.mock import MagicMock
 mock_ops = MagicMock()
 mock_comm = MagicMock()
 mock_nccl_op = MagicMock()
+mock_compute_ops = MagicMock()
 mock_comm.nccl_op = mock_nccl_op
 mock_ops.comm = mock_comm
-
+mock_ops.compute_ops = mock_compute_ops
 sys.modules["rtp_llm.ops"] = mock_ops
 sys.modules["rtp_llm.ops.comm"] = mock_comm
+sys.modules["rtp_llm.ops.compute_ops"] = mock_compute_ops
 sys.modules["rtp_llm.ops.comm.nccl_op"] = mock_nccl_op
 
 import asyncio

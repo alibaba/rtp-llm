@@ -1,30 +1,86 @@
 #!/bin/sh
-mkdir -p rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/kimi_k2/tokenizer/;
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/kimi_k2/tokenizer/chat_template.jinja" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/kimi_k2/tokenizer/chat_template.jinja &
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/kimi_k2/tokenizer/tiktoken.model" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/kimi_k2/tokenizer/tiktoken.model &
-mkdir -p rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/llama/fake/hf_source/
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/llama/fake/hf_source/pytorch_model.bin" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/llama/fake/hf_source/pytorch_model.bin &
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/llama/fake/hf_source/tokenizer.model" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/llama/fake/hf_source/tokenizer.model &
-mkdir -p rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_0.pt" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_0.pt &
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_1.pt" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_1.pt &
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_2.pt" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_2.pt
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_3.pt" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_3.pt &
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_4.pt" -o rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_4.pt &
-mkdir -p rtp_llm/test-data/rtp_llm/test/tokenizer_test/testdata/chatglm3_tokenizer
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/tokenizer_test/testdata/chatglm3_tokenizer/tokenizer.model" -o rtp_llm/test-data/rtp_llm/test/tokenizer_test/testdata/chatglm3_tokenizer/tokenizer.model &
-mkdir -p rtp_llm/test-data/rtp_llm/utils/test/testdata/ckpt_database_testdata/bin_testdata
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/utils/test/testdata/ckpt_database_testdata/bin_testdata/pytorch_model.bin" -o rtp_llm/test-data/rtp_llm/utils/test/testdata/ckpt_database_testdata/bin_testdata/pytorch_model.bin &
-mkdir -p rtp_llm/test-data/rtp_llm/utils/test/testdata/ckpt_database_testdata/lora_testdata
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/utils/test/testdata/ckpt_database_testdata/lora_testdata/adapter_model.bin" -o rtp_llm/test-data/rtp_llm/utils/test/testdata/ckpt_database_testdata/lora_testdata/adapter_model.bin &
-mkdir -p rtp_llm/test-data/rtp_llm/utils/test/testdata/ckpt_database_testdata/lora_testdata_safetensor
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/utils/test/testdata/ckpt_database_testdata/lora_testdata_safetensor/adapter_model.safetensors" -o rtp_llm/test-data/rtp_llm/utils/test/testdata/ckpt_database_testdata/lora_testdata_safetensor/adapter_model.safetensors &
-mkdir -p rtp_llm/test-data/rtp_llm/utils/test/testdata/ckpt_database_testdata/pt_testdata
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/utils/test/testdata/ckpt_database_testdata/pt_testdata/test.pt" -o rtp_llm/test-data/rtp_llm/utils/test/testdata/ckpt_database_testdata/pt_testdata/test.pt &
-mkdir -p rtp_llm/test-data/rtp_llm/utils/test/testdata/ckpt_database_testdata/safetensor_testdata
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/utils/test/testdata/ckpt_database_testdata/safetensor_testdata/test.safetensors" -o rtp_llm/test-data/rtp_llm/utils/test/testdata/ckpt_database_testdata/safetensor_testdata/test.safetensors &
-mkdir -p rtp_llm/test-data/rtp_llm/utils/test/testdata/ckpt_database_testdata/mixture_testdata
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/utils/test/testdata/ckpt_database_testdata/mixture_testdata/pytorch_model.bin" -o rtp_llm/test-data/rtp_llm/utils/test/testdata/ckpt_database_testdata/mixture_testdata/pytorch_model.bin
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/utils/test/testdata/ckpt_database_testdata/mixture_testdata/test.pt" -o rtp_llm/test-data/rtp_llm/utils/test/testdata/ckpt_database_testdata/mixture_testdata/test.pt
-curl "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/utils/test/testdata/ckpt_database_testdata/mixture_testdata/test.safetensors" -o rtp_llm/test-data/rtp_llm/utils/test/testdata/ckpt_database_testdata/mixture_testdata/test.safetensors
+
+# Function to download file with MD5 check
+download_with_check() {
+    local url="$1"
+    local filepath="$2"
+    local expected_md5="$3"
+
+    # Create directory if not exists
+    mkdir -p "$(dirname "$filepath")"
+
+    # Check if file exists
+    if [ -f "$filepath" ]; then
+        # If no MD5 provided, skip download
+        if [ -z "$expected_md5" ]; then
+            echo "File $filepath already exists, skipping download (no MD5 check)"
+            return 0
+        fi
+
+        # Calculate current file MD5
+        if command -v md5sum >/dev/null 2>&1; then
+            current_md5=$(md5sum "$filepath" | cut -d' ' -f1)
+        else
+            current_md5=$(md5 -q "$filepath")
+        fi
+
+        # Compare MD5
+        if [ "$current_md5" = "$expected_md5" ]; then
+            echo "File $filepath already exists with correct MD5, skipping download"
+            return 0
+        else
+            echo "File $filepath exists but MD5 mismatch, re-downloading"
+        fi
+    fi
+
+    # Download file
+    echo "Downloading $url to $filepath"
+    if curl -s "$url" -o "$filepath"; then
+        # Verify MD5 if provided
+        if [ -n "$expected_md5" ]; then
+            if command -v md5sum >/dev/null 2>&1; then
+                actual_md5=$(md5sum "$filepath" | cut -d' ' -f1)
+            else
+                actual_md5=$(md5 -q "$filepath")
+            fi
+
+            if [ "$actual_md5" = "$expected_md5" ]; then
+                echo "Downloaded $filepath successfully with verified MD5"
+                return 0
+            else
+                echo "WARNING: MD5 mismatch for $filepath. Expected: $expected_md5, Got: $actual_md5"
+                return 1
+            fi
+        else
+            echo "Downloaded $filepath successfully (no MD5 verification)"
+            return 0
+        fi
+    else
+        echo "Failed to download $url"
+        return 1
+    fi
+}
+
+# Download all files (without MD5 checks since we don't have the expected values)
+download_with_check "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/kimi_k2/tokenizer/chat_template.jinja" "rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/kimi_k2/tokenizer/chat_template.jinja" "d2808097139bbafbdb4431584854255f" &
+download_with_check "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/kimi_k2/tokenizer/tiktoken.model" "rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/kimi_k2/tokenizer/tiktoken.model" "d94182879fdcd560c79fdc346afc20b6"&
+download_with_check "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/llama/fake/hf_source/pytorch_model.bin" "rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/llama/fake/hf_source/pytorch_model.bin" "1f995a8786e30013f167e140fdf51c21"&
+download_with_check "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/llama/fake/hf_source/tokenizer.model" "rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/llama/fake/hf_source/tokenizer.model" "eeec4125e9c7560836b4873b6f8e3025"&
+download_with_check "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_0.pt" "rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_0.pt" "b0fb8d6c6258e23d487c077b26774de6"&
+download_with_check "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_1.pt" "rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_1.pt" "3ce2375c6a442f0595df4dce35c5c411"&
+download_with_check "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_2.pt" "rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_2.pt" "6d2bace17f34703f7cebe3093c43619a"&
+download_with_check "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_3.pt" "rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_3.pt" "f3093ca5e9699f0b8527057887592908"&
+download_with_check "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_4.pt" "rtp_llm/test-data/rtp_llm/test/model_test/fake_test/testdata/qwen_0.5b/layer_4.pt" "72fcc64c5b2e0fffa5b8123164d0a877"&
+download_with_check "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/test/tokenizer_test/testdata/chatglm3_tokenizer/tokenizer.model" "rtp_llm/test-data/rtp_llm/test/tokenizer_test/testdata/chatglm3_tokenizer/tokenizer.model" "fbfb43d1e57fb2f4ea0f6c179878db6c"&
+download_with_check "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/utils/test/testdata/ckpt_database_testdata/bin_testdata/pytorch_model.bin" "rtp_llm/test-data/rtp_llm/utils/test/testdata/ckpt_database_testdata/bin_testdata/pytorch_model.bin" "1f995a8786e30013f167e140fdf51c21"&
+download_with_check "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/utils/test/testdata/ckpt_database_testdata/lora_testdata/adapter_model.bin" "rtp_llm/test-data/rtp_llm/utils/test/testdata/ckpt_database_testdata/lora_testdata/adapter_model.bin" "741277a50b59cf365b2aa70e6bd3b541"&
+download_with_check "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/utils/test/testdata/ckpt_database_testdata/lora_testdata_safetensor/adapter_model.safetensors" "rtp_llm/test-data/rtp_llm/utils/test/testdata/ckpt_database_testdata/lora_testdata_safetensor/adapter_model.safetensors" "8ae588b0e49017807cf0994d3a9cfa39"&
+download_with_check "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/utils/test/testdata/ckpt_database_testdata/pt_testdata/test.pt" "rtp_llm/test-data/rtp_llm/utils/test/testdata/ckpt_database_testdata/pt_testdata/test.pt" "879041448bf109c6512c084ab6cb92ba"&
+download_with_check "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/utils/test/testdata/ckpt_database_testdata/safetensor_testdata/test.safetensors" "rtp_llm/test-data/rtp_llm/utils/test/testdata/ckpt_database_testdata/safetensor_testdata/test.safetensors" "5fa4a5b8a059aba61d89feed69a2fde7"&
+download_with_check "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/utils/test/testdata/ckpt_database_testdata/mixture_testdata/pytorch_model.bin" "rtp_llm/test-data/rtp_llm/utils/test/testdata/ckpt_database_testdata/mixture_testdata/pytorch_model.bin" "1f995a8786e30013f167e140fdf51c21"&
+download_with_check "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/utils/test/testdata/ckpt_database_testdata/mixture_testdata/test.pt" "rtp_llm/test-data/rtp_llm/utils/test/testdata/ckpt_database_testdata/mixture_testdata/test.pt" "879041448bf109c6512c084ab6cb92ba"&
+download_with_check "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/utils/test/testdata/ckpt_database_testdata/mixture_testdata/test.safetensors" "rtp_llm/test-data/rtp_llm/utils/test/testdata/ckpt_database_testdata/mixture_testdata/test.safetensors" "5fa4a5b8a059aba61d89feed69a2fde7"&
+
+# Wait for all downloads to complete
 wait
+echo "All downloads completed"

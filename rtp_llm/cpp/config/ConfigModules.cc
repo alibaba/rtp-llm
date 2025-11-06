@@ -92,18 +92,20 @@ std::string FMHAConfig::to_string() const {
 
 // KVCacheConfig
 void KVCacheConfig::update_from_env_for_test() {
-    reuse_cache              = bool_from_env_for_test("REUSE_CACHE", false);
-    multi_task_prompt        = autil::EnvUtil::getEnv("MULTI_TASK_PROMPT", "");
-    multi_task_prompt_str    = autil::EnvUtil::getEnv("MULTI_TASK_PROMPT_STR", "");
-    enable_3fs               = bool_from_env_for_test("ENABLE_3FS", false);
-    match_timeout_ms         = autil::EnvUtil::getEnv("MATCH_TIMEOUT_MS", 1000);
-    rpc_get_cache_timeout_ms = autil::EnvUtil::getEnv("RPC_GET_CACHE_TIMEOUT_MS", 2000);
-    rpc_put_cache_timeout_ms = autil::EnvUtil::getEnv("RPC_PUT_CACHE_TIMEOUT_MS", 2000);
-    threefs_read_timeout_ms  = autil::EnvUtil::getEnv("THREEFS_READ_TIMEOUT_MS", 1000);
-    threefs_write_timeout_ms = autil::EnvUtil::getEnv("THREEFS_WRITE_TIMEOUT_MS", 2000);
-    max_block_size_per_item  = autil::EnvUtil::getEnv("MAX_BLOCK_SIZE_PER_ITEM", 16);
-    threefs_read_iov_size    = autil::EnvUtil::getEnv("THREEFS_READ_IOV_SIZE", 1LL << 32);   // 4GB
-    threefs_write_iov_size   = autil::EnvUtil::getEnv("THREEFS_WRITE_IOV_SIZE", 1LL << 32);  // 4GB
+    reuse_cache                        = bool_from_env_for_test("REUSE_CACHE", false);
+    multi_task_prompt                  = autil::EnvUtil::getEnv("MULTI_TASK_PROMPT", "");
+    multi_task_prompt_str              = autil::EnvUtil::getEnv("MULTI_TASK_PROMPT_STR", "");
+    enable_3fs                         = bool_from_env_for_test("ENABLE_3FS", false);
+    match_timeout_ms                   = autil::EnvUtil::getEnv("MATCH_TIMEOUT_MS", 1000);
+    rpc_get_cache_timeout_ms           = autil::EnvUtil::getEnv("RPC_GET_CACHE_TIMEOUT_MS", 2000);
+    rpc_put_cache_timeout_ms           = autil::EnvUtil::getEnv("RPC_PUT_CACHE_TIMEOUT_MS", 2000);
+    threefs_read_timeout_ms            = autil::EnvUtil::getEnv("THREEFS_READ_TIMEOUT_MS", 1000);
+    threefs_write_timeout_ms           = autil::EnvUtil::getEnv("THREEFS_WRITE_TIMEOUT_MS", 2000);
+    max_block_size_per_item            = autil::EnvUtil::getEnv("MAX_BLOCK_SIZE_PER_ITEM", 16);
+    threefs_read_iov_size              = autil::EnvUtil::getEnv("THREEFS_READ_IOV_SIZE", 1LL << 32);   // 4GB
+    threefs_write_iov_size             = autil::EnvUtil::getEnv("THREEFS_WRITE_IOV_SIZE", 1LL << 32);  // 4GB
+    memory_block_cache_size_mb         = autil::EnvUtil::getEnv("MEMORY_BLOCK_CACHE_SIZE_MB", 0);
+    memory_block_cache_sync_timeout_ms = autil::EnvUtil::getEnv("MEMORY_BLOCK_CACHE_SYNC_TIMEOUT_MS", 10000);
 }
 
 std::string KVCacheConfig::to_string() const {
@@ -119,7 +121,9 @@ std::string KVCacheConfig::to_string() const {
         << "threefs_write_timeout_ms: " << threefs_write_timeout_ms << "\n"
         << "max_block_size_per_item: " << max_block_size_per_item << "\n"
         << "threefs_read_iov_size: " << threefs_read_iov_size << "\n"
-        << "threefs_write_iov_size: " << threefs_write_iov_size;
+        << "threefs_write_iov_size: " << threefs_write_iov_size << "\n"
+        << "memory_block_cache_size_mb: " << memory_block_cache_size_mb << "\n"
+        << "memory_block_cache_sync_timeout_ms: " << memory_block_cache_sync_timeout_ms;
     return oss.str();
 }
 
@@ -142,6 +146,7 @@ void ProfilingDebugLoggingConfig::update_from_env_for_test() {
     dg_print_reg_reuse        = bool_from_env_for_test("DG_PRINT_REG_REUSE", false);
     qwen_agent_debug          = bool_from_env_for_test("QWEN_AGENT_DEBUG", false);
     disable_dpc_random        = bool_from_env_for_test("DISABLE_DPC_RANDOM", false);
+    check_nan                 = bool_from_env_for_test("CHECK_NAN", false);
 }
 
 std::string ProfilingDebugLoggingConfig::to_string() const {
@@ -162,7 +167,8 @@ std::string ProfilingDebugLoggingConfig::to_string() const {
         << "debug_start_fake_process: " << debug_start_fake_process << "\n"
         << "dg_print_reg_reuse: " << dg_print_reg_reuse << "\n"
         << "qwen_agent_debug" << qwen_agent_debug << "\n"
-        << "disable_dpc_random" << disable_dpc_random << "\n";
+        << "disable_dpc_random" << disable_dpc_random << "\n"
+        << "check_nan" << check_nan << "\n";
     return oss.str();
 }
 
@@ -174,9 +180,11 @@ void HWKernelConfig::update_from_env_for_test() {
     enable_multi_block_mode      = bool_from_env_for_test("ENABLE_MULTI_BLOCK_MODE", true);
     ft_disable_custom_ar         = bool_from_env_for_test("FT_DISABLE_CUSTOM_AR", true);
     rocm_hipblaslt_config        = autil::EnvUtil::getEnv("ROCM_HIPBLASLT_CONFIG", "gemm_config.csv");
+    use_swizzleA                 = bool_from_env_for_test("USE_SWIZZLEA", false);
     enable_cuda_graph            = bool_from_env_for_test("ENABLE_CUDA_GRAPH", false);
     enable_cuda_graph_debug_mode = bool_from_env_for_test("ENABLE_CUDA_GRAPH_DEBUG_MODE", false);
     use_aiter_pa                 = bool_from_env_for_test("USE_AITER_PA", true);
+    use_asm_pa                   = bool_from_env_for_test("USE_ASM_PA", true);
     enable_native_cuda_graph     = bool_from_env_for_test("ENABLE_NATIVE_CUDA_GRAPH", false);
     num_native_cuda_graph        = autil::EnvUtil::getEnv("NUM_NATIVE_CUDA_GRAPH", 200);
 }
@@ -189,9 +197,11 @@ std::string HWKernelConfig::to_string() const {
         << "enable_multi_block_mode: " << enable_multi_block_mode << "\n"
         << "ft_disable_custom_ar: " << ft_disable_custom_ar << "\n"
         << "rocm_hipblaslt_config: " << rocm_hipblaslt_config << "\n"
+        << "use_swizzleA: " << use_swizzleA << "\n"
         << "enable_cuda_graph: " << enable_cuda_graph << "\n"
         << "enable_cuda_graph_debug_mode" << enable_cuda_graph_debug_mode << "\n"
-        << "use_aiter_pa" << use_aiter_pa << "\n"
+        << "use_aiter_pa: " << use_aiter_pa << "\n"
+        << "use_asm_pa: " << use_asm_pa << "\n"
         << "enable_native_cuda_graph" << enable_native_cuda_graph << "\n"
         << "num_native_cuda_graph" << num_native_cuda_graph << "\n";
     return oss.str();
@@ -395,8 +405,8 @@ std::string FIFOSchedulerConfig::to_string() const {
 
 // MiscellaneousConfig
 void MiscellaneousConfig::update_from_env_for_test() {
-    disable_pdl             = bool_from_env_for_test("DISABLE_PDL", true);
-    aux_string              = autil::EnvUtil::getEnv("AUX_STRING", "");
+    disable_pdl = bool_from_env_for_test("DISABLE_PDL", true);
+    aux_string  = autil::EnvUtil::getEnv("AUX_STRING", "");
 }
 
 std::string MiscellaneousConfig::to_string() const {

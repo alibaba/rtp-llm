@@ -102,7 +102,7 @@ uint32_t Logger::getLevelfromstr(const char* s) {
         if (level != name_to_level.end()) {
             return level->second;
         } else {
-            throw std::runtime_error("[FT][WARNING] Invalid logger level for env: " + std::string(s)
+            throw std::runtime_error("[WARNING] Invalid logger level for env: " + std::string(s)
                                      + " with value: " + std::string(level_name));
             level_name = nullptr;
         }

@@ -1,4 +1,4 @@
-from typing import Any, List, Union
+from typing import Any, List, Tuple, Union
 
 import numpy as np
 import torch
@@ -133,11 +133,31 @@ def truncate_token_with_stop_word_id(tokens: List[int], stop_word_ids: List[int]
     return tokens
 
 
-def match_stop_words(response: str, stop_word_strs: List[str]) -> bool:
+def match_stop_words(response: str, stop_word_strs: List[str]) -> Tuple[int, int]:
+    """
+    Finds the first occurrence of any stop word in the response string.
+
+    Args:
+        response (str): The string to search for stop words.
+        stop_word_strs (List[str]): A list of stop word strings to search for.
+
+    Returns:
+        Tuple[int, int]: A tuple (position, length) where:
+            - position is the index of the first matching stop word in the response,
+              or -1 if no stop word is found.
+            - length is the length of the matched stop word, or 0 if none is found.
+    """
+    min_idx = len(response)
+    stop_len = 0
     for stop_word in stop_word_strs:
-        if stop_word and response.endswith(stop_word):
-            return True
-    return False
+        if stop_word:
+            stop_idx = response.find(stop_word)
+            if stop_idx != -1 and stop_idx < min_idx:
+                min_idx = stop_idx
+                stop_len = len(stop_word)
+    if min_idx == len(response):
+        return -1, 0
+    return min_idx, stop_len
 
 
 # main

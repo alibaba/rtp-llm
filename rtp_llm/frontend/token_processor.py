@@ -120,34 +120,29 @@ class TokenProcessorPerStream:
         stop_word_str_list: List[str],
         token_buffer: str,
     ):
+        if return_incremental:
+            text = token_buffer + text
 
-        if (
-            stop_word_str_list
-            and not finished
-            and match_stop_words(all_text, stop_word_str_list)
-        ):
-            finished = True
+        if stop_word_str_list:
+            stop_idx, stop_len = match_stop_words(text, stop_word_str_list)
+            if stop_idx != -1:
+                if not print_stop_words:
+                    text = text[:stop_idx]
+                else:
+                    text = text[:stop_idx + stop_len]
+                token_buffer = ""
+                finished = True
+
+        if finished:
+            return text, token_buffer
 
         stop_word_str_slices = get_stop_word_slices(stop_word_str_list)
 
-        if not print_stop_words:
-            if not return_incremental:
-                if not finished:
-                    text = truncate_response_with_stop_words(text, stop_word_str_slices)
-                else:
-                    text = truncate_response_with_stop_words(text, stop_word_str_list)
-            else:
-                if not finished:
-                    text = token_buffer + text
-                    trunc_text = truncate_response_with_stop_words(
-                        text, stop_word_str_slices
-                    )
-                    token_buffer = text[len(trunc_text) :]
-                    text = trunc_text
-                else:
-                    text = truncate_response_with_stop_words(
-                        token_buffer + text, stop_word_str_list
-                    )
+        if return_incremental or not print_stop_words:
+            trunc_text = truncate_response_with_stop_words(text, stop_word_str_slices, True, True)
+            if return_incremental:
+                token_buffer = text[len(trunc_text) :]
+            text = trunc_text
         return text, token_buffer
 
     def tokenids_decode(

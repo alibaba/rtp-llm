@@ -93,9 +93,10 @@ message GenerateConfigPB {
     repeated int32 variable_num_beams = 49;
     google.protobuf.StringValue trace_id = 50;
     bool return_all_hidden_states = 51;
-    bool return_mtp_hidden_states = 52;
-    int32 mtp_input_len = 53;
-    string mtp_hidden_states_saved_path = 54;
+    bool enable_memory_block_cache = 52;
+    bool return_mtp_hidden_states = 53;
+    int32 mtp_input_len = 54;
+    string mtp_hidden_states_saved_path = 55;
 }
 
 message MMPreprocessConfigPB {
@@ -370,6 +371,22 @@ message WorkerStatusPB {
   string precision = 14;
 }
 
+enum MemoryBlockCacheOp {
+    MEMORY_CACHE_COPY_FROM_GPU = 0;
+    MEMORY_CACHE_COPY_TO_GPU = 1;
+}
+
+message MemoryBlockCacheRequestPB {
+    repeated int32 gpu_block_ids = 1;
+    repeated int32 memory_block_ids = 2;
+    MemoryBlockCacheOp op = 3;
+    int64 request_id = 4;
+}
+
+message MemoryBlockCacheResponsePB {
+    bool success = 1;
+}
+
 service RpcService {
     rpc GetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
     rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
@@ -384,6 +401,7 @@ service RpcService {
     rpc RemoteStore(RemoteStoreRequestPB) returns (RemoteStoreResponsePB);
 
     rpc DistKvCache(DistKvCacheRequestPB) returns (DistKvCacheResponsePB);
+    rpc MemoryBlockCache(MemoryBlockCacheRequestPB) returns (MemoryBlockCacheResponsePB);
 }
 
 service MultimodalRpcService {

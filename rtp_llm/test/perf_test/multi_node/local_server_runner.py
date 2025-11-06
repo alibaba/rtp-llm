@@ -153,9 +153,12 @@ if __name__ == "__main__":
     py_env_configs.update_from_env()
     port = py_env_configs.server_config.start_port
     world_rank = py_env_configs.parallelism_distributed_config.world_rank
-    log_dir_path = os.path.abspath(
-        f"{py_env_configs.model_config.model_type}_{py_env_configs.parallelism_distributed_config.dp_size}_{py_env_configs.parallelism_distributed_config.tp_size}_{py_env_configs.parallelism_distributed_config.world_rank}_{time.strftime('%Y%m%d_%H%M%S')}".upper()
-    )
+    log_dir_name = (
+        f"test_output_{py_env_configs.model_config.model_type}_{py_env_configs.parallelism_distributed_config.dp_size}"
+        f"_{py_env_configs.parallelism_distributed_config.tp_size}_{py_env_configs.parallelism_distributed_config.world_rank}"
+        f"_{time.strftime('%Y%m%d_%H%M%S')}"
+    ).upper()
+    log_dir_path = os.path.abspath(log_dir_name)
     os.makedirs(log_dir_path, exist_ok=True)
     os.environ["TORCH_CUDA_PROFILER_DIR"] = log_dir_path
     # for maga server files

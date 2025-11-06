@@ -3,9 +3,19 @@
 namespace torch_ext {
 
 void registerPyOpDefs(pybind11::module& m) {
+    pybind11::class_<MlaParams>(m, "MlaParams")
+        .def(pybind11::init<>())
+        .def_readonly("batch_indice", &MlaParams::batch_indice)
+        .def_readonly("positions", &MlaParams::positions)
+        .def_readonly("paged_kv_last_page_len", &MlaParams::paged_kv_last_page_len)
+        .def_readonly("kvlen", &MlaParams::kvlen)
+        .def_readonly("page_indice", &MlaParams::page_indice)
+        .def_readonly("page_indptr", &MlaParams::page_indptr)
+        .def_readonly("qo_indptr", &MlaParams::qo_indptr);
+
     pybind11::class_<KVCache>(m, "KVCache")
         .def(pybind11::init<>())
-        .def_readonly("k_cache_base", &KVCache::k_cache_base, "Key cache base tensor")
+        .def_readwrite("k_cache_base", &KVCache::k_cache_base, "Key cache base tensor")
         .def_readonly("v_cache_base", &KVCache::v_cache_base, "Value cache base tensor")
         .def_readonly("k_scale_base", &KVCache::k_scale_base, "Key cache scale tensor")
         .def_readonly("v_scale_base", &KVCache::v_scale_base, "Value cache scale tensor")
@@ -43,18 +53,19 @@ void registerPyOpDefs(pybind11::module& m) {
 
     pybind11::class_<PyAttentionInputs>(m, "PyAttentionInputs")
         .def(pybind11::init<>())
-        .def_readonly("is_prefill", &PyAttentionInputs::is_prefill)
-        .def_readonly("prefix_lengths", &PyAttentionInputs::prefix_lengths)
-        .def_readonly("sequence_lengths", &PyAttentionInputs::sequence_lengths)
-        .def_readonly("input_lengths", &PyAttentionInputs::input_lengths)
+        .def_readwrite("is_prefill", &PyAttentionInputs::is_prefill)
+        .def_readwrite("prefix_lengths", &PyAttentionInputs::prefix_lengths)
+        .def_readwrite("sequence_lengths", &PyAttentionInputs::sequence_lengths)
+        .def_readwrite("input_lengths", &PyAttentionInputs::input_lengths)
         .def_readonly("cu_seqlens", &PyAttentionInputs::cu_seqlens)
-        .def_readonly("kv_cache_block_id_host", &PyAttentionInputs::kv_cache_block_id_host)
+        .def_readwrite("kv_cache_block_id_host", &PyAttentionInputs::kv_cache_block_id_host)
         .def_readonly("kv_cache_block_id_device", &PyAttentionInputs::kv_cache_block_id_device)
         .def_readonly("dtype", &PyAttentionInputs::dtype)
         .def_readonly("kv_block_offset", &PyAttentionInputs::kv_block_offset)
         .def_readonly("cu_seqlens", &PyAttentionInputs::cu_seqlens)
         .def_readonly("padding_offset", &PyAttentionInputs::padding_offset)
-        .def_readonly("cache_store_inputs", &PyAttentionInputs::cache_store_inputs);
+        .def_readonly("cache_store_inputs", &PyAttentionInputs::cache_store_inputs)
+        .def("__repr__", [](const PyAttentionInputs& self) { return "PyAttentionInputs"; });
 
     pybind11::class_<BertEmbeddingInputs>(m, "BertEmbeddingInputs")
         .def(pybind11::init<>())
@@ -71,7 +82,8 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite(
             "token_type_embedding", &BertEmbeddingInputs::token_type_embedding, "Token type embedding tensor")
         .def_readwrite(
-            "input_embedding_scalar", &BertEmbeddingInputs::input_embedding_scalar, "Input embedding scalar value");
+            "input_embedding_scalar", &BertEmbeddingInputs::input_embedding_scalar, "Input embedding scalar value")
+        .def("__repr__", [](const BertEmbeddingInputs& self) { return "BertEmbeddingInputs"; });
 
     pybind11::class_<PyModelInputs>(m, "PyModelInputs")
         .def(pybind11::init<>())

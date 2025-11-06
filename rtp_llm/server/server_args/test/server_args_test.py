@@ -60,6 +60,8 @@ class ServerArgsDefaultTest(TestCase):
         self.assertEqual(env.get("MAX_BLOCK_SIZE_PER_ITEM"), "16")
         self.assertEqual(env.get("THREEFS_READ_IOV_SIZE"), "4294967296")
         self.assertEqual(env.get("THREEFS_WRITE_IOV_SIZE"), "4294967296")
+        self.assertEqual(env.get("MEMORY_BLOCK_CACHE_SIZE_MB"), "0")
+        self.assertEqual(env.get("MEMORY_BLOCK_CACHE_SYNC_TIMEOUT_MS"), "10000")
 
         # 5. Profiling、Debugging、Logging
         self.assertEqual(env.get("RTP_LLM_TRACE_MEMORY"), "0")
@@ -86,10 +88,12 @@ class ServerArgsDefaultTest(TestCase):
         self.assertEqual(env.get("ENABLE_STABLE_SCATTER_ADD"), "0")
         self.assertEqual(env.get("ENABLE_MULTI_BLOCK_MODE"), "1")
         self.assertEqual(env.get("ROCM_HIPBLASLT_CONFIG"), "gemm_config.csv")
+        self.assertEqual(env.get("USE_SWIZZLEA"), "0")
         # self.assertIsNone(env.get("FT_DISABLE_CUSTOM_AR"))
         self.assertEqual(env.get("ENABLE_CUDA_GRAPH"), "0")
         self.assertEqual(env.get("ENABLE_CUDA_GRAPH_DEBUG_MODE"), "0")
         self.assertEqual(env.get("USE_AITER_PA"), "1")
+        self.assertEqual(env.get("USE_ASM_PA"), "1")
         self.assertEqual(env.get("ENABLE_NATIVE_CUDA_GRAPH"), "0")
         self.assertEqual(env.get("NUM_NATIVE_CUDA_GRAPH"), "200")
 
@@ -353,6 +357,10 @@ class ServerArgsSetTest(TestCase):
             "1073741824",
             "--threefs_write_iov_size",
             "1073741824",
+            "--memory_block_cache_size_mb",
+            "10",
+            "--memory_block_cache_sync_timeout_ms",
+            "5000",
             # 5. Profiling、Debugging、Logging
             "--trace_memory",
             "True",
@@ -399,6 +407,8 @@ class ServerArgsSetTest(TestCase):
             "False",
             "--rocm_hipblaslt_config",
             "another_gemm_config.csv",
+            "--use_swizzleA",
+            "False",
             "--ft_disable_custom_ar",
             "False",
             "--enable_cuda_graph",
@@ -406,6 +416,8 @@ class ServerArgsSetTest(TestCase):
             "--enable_cuda_graph_debug_mode",
             "True",
             "--use_aiter_pa",
+            "False",
+            "--use_asm_pa",
             "False",
             "--enable_native_cuda_graph",
             "True",
@@ -745,6 +757,8 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(env.get("THREEFS_WRITE_TIMEOUT_MS"), "5000")
         self.assertEqual(env.get("THREEFS_READ_IOV_SIZE"), "1073741824")
         self.assertEqual(env.get("THREEFS_WRITE_IOV_SIZE"), "1073741824")
+        self.assertEqual(env.get("MEMORY_BLOCK_CACHE_SIZE_MB"), "10")
+        self.assertEqual(env.get("MEMORY_BLOCK_CACHE_SYNC_TIMEOUT_MS"), "5000")
 
         # 5. Profiling、Debugging、Logging
         self.assertEqual(env["RTP_LLM_TRACE_MEMORY"], "1")
@@ -771,10 +785,12 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(env["ENABLE_STABLE_SCATTER_ADD"], "1")
         self.assertEqual(env["ENABLE_MULTI_BLOCK_MODE"], "0")
         self.assertEqual(env["ROCM_HIPBLASLT_CONFIG"], "another_gemm_config.csv")
+        self.assertEqual(env["USE_SWIZZLEA"], "0")
         self.assertEqual(env["FT_DISABLE_CUSTOM_AR"], "0")
         self.assertEqual(env.get("ENABLE_CUDA_GRAPH"), "1")
         self.assertEqual(env.get("ENABLE_CUDA_GRAPH_DEBUG_MODE"), "1")
         self.assertEqual(env.get("USE_AITER_PA"), "0")
+        self.assertEqual(env.get("USE_ASM_PA"), "0")
         self.assertEqual(env.get("ENABLE_NATIVE_CUDA_GRAPH"), "1")
         self.assertEqual(env.get("NUM_NATIVE_CUDA_GRAPH"), "100")
 

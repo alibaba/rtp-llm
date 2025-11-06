@@ -214,6 +214,7 @@ class LoadConfig:
         self.tokenizers_parallelism: bool = False
         # seem like it's a third-party pkg environment, but we reserve it temporar
         self.load_ckpt_num_process: int = 0
+        self.load_method: str = "auto"
 
     def update_from_env(self):
         self.phy2log_path = os.environ.get("PHY2LOG_PATH", self.phy2log_path)
@@ -226,13 +227,15 @@ class LoadConfig:
         self.load_ckpt_num_process = int(
             os.environ.get("LOAD_CKPT_NUM_PROCESS", self.load_ckpt_num_process)
         )
+        self.load_method = str(os.environ.get("LOAD_METHOD", self.load_method)).lower()
 
     def to_string(self):
         return (
             f"phy2log_path: {self.phy2log_path}\n"
             f"converter_num_per_gpu: {self.converter_num_per_gpu}\n"
             f"tokenizers_parallelism: {self.tokenizers_parallelism}\n"
-            f"load_ckpt_num_process: {self.load_ckpt_num_process}"
+            f"load_ckpt_num_process: {self.load_ckpt_num_process}\n"
+            f"load_method: {self.load_method}"
         )
 
 
@@ -648,6 +651,7 @@ class PdSeparationConfig:
         # Decode related configuration
         self.decode_retry_times: int = 100
         self.decode_retry_timeout_ms: int = 100
+        self.decode_retry_interval_ms: int = 1
         self.decode_polling_kv_cache_step_ms: int = 30
         self.decode_entrance: int = 0
 
@@ -676,6 +680,9 @@ class PdSeparationConfig:
         self.decode_retry_timeout_ms = int(
             os.environ.get("DECODE_RETRY_TIMEOUT_MS", self.decode_retry_timeout_ms)
         )
+        self.decode_retry_interval_ms = int(
+            os.environ.get("DECODE_RETRY_INTERVAL_MS", self.decode_retry_interval_ms)
+        )
         self.decode_polling_kv_cache_step_ms = int(
             os.environ.get(
                 "DECODE_POLLING_KV_CACHE_STEP_MS", self.decode_polling_kv_cache_step_ms
@@ -700,6 +707,7 @@ class PdSeparationConfig:
             f"prefill_max_wait_timeout_ms: {self.prefill_max_wait_timeout_ms}\n"
             f"decode_retry_times: {self.decode_retry_times}\n"
             f"decode_retry_timeout_ms: {self.decode_retry_timeout_ms}\n"
+            f"decode_retry_interval_ms: {self.decode_retry_interval_ms}\n"
             f"decode_polling_kv_cache_step_ms: {self.decode_polling_kv_cache_step_ms}\n"
             f"decode_entrance: {self.decode_entrance}\n"
             f"rdma_connect_retry_times: {self.rdma_connect_retry_times}\n"
@@ -742,9 +750,11 @@ class PyHwKernelConfig:
         self.enable_multi_block_mode: bool = True
         self.ft_disable_custom_ar: bool = True
         self.rocm_hipblaslt_config: str = "gemm_config.csv"
+        self.use_swizzleA = False
         self.enable_cuda_graph: bool = False
         self.enable_cuda_graph_debug_mode: bool = False
         self.use_aiter_pa: bool = True
+        self.use_asm_pa: bool = True
         self.enable_native_cuda_graph: bool = False
         self.num_native_cuda_graph: int = 200
 
@@ -763,6 +773,7 @@ class PyHwKernelConfig:
         self.rocm_hipblaslt_config = get_env_str(
             "ROCM_HIPBLASLT_CONFIG", self.rocm_hipblaslt_config
         )
+        self.use_swizzleA = get_env_bool("USE_SWIZZLEA", self.use_swizzleA)
         self.enable_cuda_graph = get_env_bool(
             "ENABLE_CUDA_GRAPH", self.enable_cuda_graph
         )
@@ -770,6 +781,7 @@ class PyHwKernelConfig:
             "ENABLE_CUDA_GRAPH_DEBUG_MODE", self.enable_cuda_graph_debug_mode
         )
         self.use_aiter_pa = get_env_bool("USE_AITER_PA", self.use_aiter_pa)
+        self.use_asm_pa = get_env_bool("USE_ASM_PA", self.use_asm_pa)
         self.enable_native_cuda_graph = get_env_bool(
             "ENABLE_NATIVE_CUDA_GRAPH", self.enable_native_cuda_graph
         )
@@ -785,9 +797,11 @@ class PyHwKernelConfig:
             f"enable_multi_block_mode: {self.enable_multi_block_mode}\n"
             f"ft_disable_custom_ar: {self.ft_disable_custom_ar}\n"
             f"rocm_hipblaslt_config: {self.rocm_hipblaslt_config}\n"
+            f"use_swizzleA: {self.use_swizzleA}\n"
             f"enable_cuda_graph: {self.enable_cuda_graph}\n"
             f"enable_cuda_graph_debug_mode: {self.enable_cuda_graph_debug_mode}\n"
             f"use_aiter_pa: {self.use_aiter_pa}\n"
+            f"use_asm_pa: {self.use_asm_pa}\n"
             f"enable_native_cuda_graph: {self.enable_native_cuda_graph}\n"
             f"num_native_cuda_graph: {self.num_native_cuda_graph}"
         )

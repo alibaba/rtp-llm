@@ -34,7 +34,7 @@ public:
                                              preRunMode                            mode) override;
     absl::Status                      stop() override;
 
-    KVCacheInfo                     getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) const override;
+    KVCacheInfo                     getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) override;
     absl::Status                    step();
     absl::Status                    startLoop();
     int64_t                         getLastScheduleTime() override;
@@ -48,7 +48,7 @@ public:
 
 private:
     void                            initScheduler();
-    std::shared_ptr<GenerateStream> enqueueMinFakeQuery(int32_t max_new_tokens);
+    std::shared_ptr<GenerateStream> createMinFakeStream(int32_t max_new_tokens);
     WarmUpResult                    warmUp(const EngineInitParams& params);
     WarmUpResult                    prefillWarmUp(const EngineInitParams& params);
     WarmUpResult                    decodeWarmUp(const EngineInitParams& params);

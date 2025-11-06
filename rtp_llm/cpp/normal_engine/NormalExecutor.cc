@@ -125,7 +125,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         if (force) {
             RTP_LLM_LOG_INFO("model_input: %s", model_input.debugString(force).c_str());
         } else {
-            RTP_LLM_LOG_DEBUG("model_input: %s", model_input.debugString(force).c_str());
+            RTP_LLM_LOG_TRACE("model_input: %s", model_input.debugString(force).c_str());
         }
         int64_t start_time_us               = autil::TimeUtility::currentTimeInMicroSeconds();
         model_output                        = std::move(model_->forward(model_input));

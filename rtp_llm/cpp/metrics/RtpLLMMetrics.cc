@@ -23,6 +23,7 @@ AUTIL_LOG_SETUP(rtp_llm, RtpLLMSpeculativeEngineMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLmEplbMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheStoreMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMKVCacheInfoMetrics);
+AUTIL_LOG_SETUP(rtp_llm, RtpLLMMemoryBlockCacheMetrics);
 
 #define REPORT_QPS(name)                                                                                               \
     if (collector->name) {                                                                                             \
@@ -42,6 +43,7 @@ bool RpcMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(total_rt_us_metric, "rtp_llm_rpc_total_rt_us");
 
     REGISTER_GAUGE_MUTABLE_METRIC(retry_times_metric, "rtp_llm_rpc_retry_times");
+    REGISTER_GAUGE_MUTABLE_METRIC(retry_cost_time_ms_metric, "rtp_llm_rpc_retry_cost_time_ms");
     REGISTER_GAUGE_MUTABLE_METRIC(loading_cache_request_metric, "rtp_llm_rpc_loading_cache_request");
 
     REGISTER_GAUGE_MUTABLE_METRIC(get_rpc_connection_rt_us_metric, "rtp_llm_rpc_get_rpc_connection_rt_us");
@@ -101,6 +103,7 @@ void RpcMetrics::report(const kmonitor::MetricsTags* tags, RpcMetricsCollector* 
     REPORT_GAUGE(total_rt_us);
 
     REPORT_GAUGE(retry_times);
+    REPORT_GAUGE(retry_cost_time_ms);
     REPORT_GAUGE(loading_cache_request);
 
     REPORT_GAUGE(get_rpc_connection_rt_us);
@@ -566,6 +569,114 @@ void RtpLLMCacheStoreMetrics::report(const kmonitor::MetricsTags*              t
     REPORT_NON_ZERO_MUTABLE_METRIC(transfer_block_count_metric, collector->block_count);
     REPORT_NON_ZERO_MUTABLE_METRIC(transfer_total_block_size_metric, collector->total_block_size);
     REPORT_NON_ZERO_MUTABLE_METRIC(transfer_latency_us_metric, collector->latency_us);
+}
+
+bool RtpLLMMemoryBlockCacheMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    // Match 相关指标
+    REGISTER_QPS_MUTABLE_METRIC(kv_cache_memory_cache_match_qps_metric, "rtp_llm_kv_cache_memory_cache_match_qps");
+    REGISTER_QPS_MUTABLE_METRIC(kv_cache_memory_cache_match_none_qps_metric,
+                                "rtp_llm_kv_cache_memory_cache_match_none_qps");
+    REGISTER_QPS_MUTABLE_METRIC(kv_cache_memory_cache_match_failed_qps_metric,
+                                "rtp_llm_kv_cache_memory_cache_match_failed_qps");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_match_latency_metric,
+                                  "rtp_llm_kv_cache_memory_cache_match_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_match_input_token_metric,
+                                  "rtp_llm_kv_cache_memory_cache_match_input_token");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_match_matched_token_metric,
+                                  "rtp_llm_kv_cache_memory_cache_match_matched_token");
+
+    // Put 相关指标
+    REGISTER_QPS_MUTABLE_METRIC(kv_cache_memory_cache_put_qps_metric, "rtp_llm_kv_cache_memory_cache_put_qps");
+    REGISTER_QPS_MUTABLE_METRIC(kv_cache_memory_cache_put_none_qps_metric,
+                                "rtp_llm_kv_cache_memory_cache_put_none_qps");
+    REGISTER_QPS_MUTABLE_METRIC(kv_cache_memory_cache_put_failed_qps_metric,
+                                "rtp_llm_kv_cache_memory_cache_put_failed_qps");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_put_latency_metric,
+                                  "rtp_llm_kv_cache_memory_cache_put_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_put_input_token_metric,
+                                  "rtp_llm_kv_cache_memory_cache_put_input_token");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_put_put_token_metric,
+                                  "rtp_llm_kv_cache_memory_cache_put_put_token");
+
+    // Copy 相关指标
+    REGISTER_QPS_MUTABLE_METRIC(kv_cache_memory_cache_copy_qps_metric, "rtp_llm_kv_cache_memory_cache_copy_qps");
+    REGISTER_QPS_MUTABLE_METRIC(kv_cache_memory_cache_copy_failed_qps_metric,
+                                "rtp_llm_kv_cache_memory_cache_copy_failed_qps");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_copy_latency_metric,
+                                  "rtp_llm_kv_cache_memory_cache_copy_latency_us");
+
+    // Status 相关指标
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_status_total_block_num_metric,
+                                  "rtp_llm_kv_cache_memory_cache_status_total_block_num");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_status_allocated_block_num_metric,
+                                  "rtp_llm_kv_cache_memory_cache_status_allocated_block_num");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_status_available_block_num_metric,
+                                  "rtp_llm_kv_cache_memory_cache_status_available_block_num");
+
+    return true;
+}
+
+void RtpLLMMemoryBlockCacheMetrics::report(const kmonitor::MetricsTags*                 tags,
+                                           RtpLLMMemoryBlockCacheMatchMetricsCollector* collector) {
+    // 总是上报 QPS 指标和input_token
+    REPORT_MUTABLE_QPS(kv_cache_memory_cache_match_qps_metric);
+    REPORT_MUTABLE_METRIC(kv_cache_memory_cache_match_input_token_metric, collector->input_token);
+
+    if (collector->failed) {
+        // 如果失败，上报失败 QPS 和 latency
+        REPORT_MUTABLE_QPS(kv_cache_memory_cache_match_failed_qps_metric);
+        REPORT_MUTABLE_METRIC(kv_cache_memory_cache_match_latency_metric, collector->latency_us);
+        return;
+    }
+    if (collector->matched_token == 0) {
+        // 没有匹配到 不要汇报latency
+        REPORT_MUTABLE_QPS(kv_cache_memory_cache_match_none_qps_metric);
+        return;
+    }
+    REPORT_MUTABLE_METRIC(kv_cache_memory_cache_match_latency_metric, collector->latency_us);
+    REPORT_MUTABLE_METRIC(kv_cache_memory_cache_match_matched_token_metric, collector->matched_token);
+}
+
+void RtpLLMMemoryBlockCacheMetrics::report(const kmonitor::MetricsTags*               tags,
+                                           RtpLLMMemoryBlockCachePutMetricsCollector* collector) {
+    // 总是上报 QPS 指标
+    REPORT_MUTABLE_QPS(kv_cache_memory_cache_put_qps_metric);
+    REPORT_MUTABLE_METRIC(kv_cache_memory_cache_put_input_token_metric, collector->input_token);
+
+    // 如果失败，上报失败 QPS
+    if (collector->failed) {
+        REPORT_MUTABLE_QPS(kv_cache_memory_cache_put_failed_qps_metric);
+        REPORT_MUTABLE_METRIC(kv_cache_memory_cache_put_latency_metric, collector->latency_us);
+        return;
+    }
+    if (collector->put_token == 0) {
+        REPORT_MUTABLE_QPS(kv_cache_memory_cache_put_none_qps_metric);
+        return;
+    }
+
+    REPORT_MUTABLE_METRIC(kv_cache_memory_cache_put_latency_metric, collector->latency_us);
+    REPORT_MUTABLE_METRIC(kv_cache_memory_cache_put_put_token_metric, collector->put_token);
+}
+
+void RtpLLMMemoryBlockCacheMetrics::report(const kmonitor::MetricsTags*                tags,
+                                           RtpLLMMemoryBlockCacheCopyMetricsCollector* collector) {
+    kmonitor::MetricsTags copy_tag("copy_direction", collector->from_gpu ? "FROM_GPU" : "TO_GPU");
+
+    // 总是上报 QPS 指标
+    kv_cache_memory_cache_copy_qps_metric->Report(&copy_tag, 1);
+    kv_cache_memory_cache_copy_latency_metric->Report(&copy_tag, collector->latency_us);
+
+    // 如果失败，上报失败 QPS
+    if (collector->failed) {
+        kv_cache_memory_cache_copy_failed_qps_metric->Report(&copy_tag, 1);
+    }
+}
+
+void RtpLLMMemoryBlockCacheMetrics::report(const kmonitor::MetricsTags*                  tags,
+                                           RtpLLMMemoryBlockCacheStatusMetricsCollector* collector) {
+    REPORT_MUTABLE_METRIC(kv_cache_memory_cache_status_total_block_num_metric, collector->total_block_num);
+    REPORT_MUTABLE_METRIC(kv_cache_memory_cache_status_allocated_block_num_metric, collector->allocated_block_num);
+    REPORT_MUTABLE_METRIC(kv_cache_memory_cache_status_available_block_num_metric, collector->available_block_num);
 }
 
 #undef REPORT_NON_ZERO_MUTABLE_METRIC

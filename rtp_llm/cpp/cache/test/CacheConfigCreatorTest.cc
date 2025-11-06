@@ -46,7 +46,7 @@ TEST_F(CacheConfigCreatorTest, testGetKVCacheMemorySize) {
         exception = e.what();
         printf("exception: %s", e.what());
     }
-    ASSERT_STREQ("[FT][ERROR] device reserved memory", exception.substr(0, 34).c_str());
+    ASSERT_STREQ("[ERROR] device reserved memory", exception.substr(0, 30).c_str());
 }
 
 TEST_F(CacheConfigCreatorTest, testCreateConfig) {

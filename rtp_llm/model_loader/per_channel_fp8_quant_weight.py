@@ -1,11 +1,12 @@
 import copy
 import functools
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Optional, Union
 
 import torch
 
 from rtp_llm.config.quant_config import (
     Fp8PerChannelCompressedQuantConfig,
+    Fp8PerChannelQuarkQuantConfig,
     QuantizationConfig,
 )
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight
@@ -17,7 +18,9 @@ from rtp_llm.model_loader.weight_module import (
     QuantWeight,
     WeightModule,
 )
+from rtp_llm.utils.database import BaseDatabase
 from rtp_llm.utils.model_weight import (
+    FP8_E4M3_MAX,
     CkptWeightInfo,
     W,
     concat_0,
@@ -40,6 +43,32 @@ B_SUFFIX = ".bias"
 QW_SUFFIX = ".weight"
 QS_SUFFIX = ".weight_scale"
 
+def cast_to_fp8(x: torch.Tensor):
+    """Convert tensor to FP8 format."""
+    return x.to(torch.float8_e4m3fn)
+
+def per_channel_cast_to_fp8(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Per-channel FP8 quantization.
+    Args:
+        x: Input tensor to be quantized
+    Returns:
+        tuple[torch.Tensor, torch.Tensor]: Quantized tensor and channel-wise scales
+    """
+    assert x.dim() in [2, 3], f"weight dim=2 or dim=3 supported, but got shape {x.shape}"
+    if x.dim() == 3:
+        channel_max = x.abs().amax(dim=-1, keepdim=True).clamp(1e-4)
+        scales = (channel_max / FP8_E4M3_MAX).to(torch.float32)
+        quantized = (x / scales).to(torch.float8_e4m3fn)
+        return quantized.contiguous(), scales.contiguous()
+    x = x.T
+    # Calculate per-channel maximum absolute values
+    channel_max = x.abs().amax(dim=-1, keepdim=True).clamp(1e-4)
+    # Compute scaling factors
+    scales = (channel_max / FP8_E4M3_MAX).to(torch.float32)
+    # Quantize the tensor
+    quantized = (x / scales).to(torch.float8_e4m3fn)
+    return (quantized.T).contiguous(), (scales.T).contiguous()
 
 def gemm_channel_fp8_gpt_style_tp_strategy():
     gemm_channel_fp8_weight_tp_strategy: Dict[str, Any] = {
@@ -119,7 +148,7 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
         cls, quant_config: QuantizationConfig, src_weight_info: WeightModule
     ) -> bool:
         if not quant_config.is_quanted() or not isinstance(
-            quant_config, Fp8PerChannelCompressedQuantConfig
+            quant_config, (Fp8PerChannelCompressedQuantConfig, Fp8PerChannelQuarkQuantConfig)
         ):
             return False
         name = src_weight_info.name
@@ -365,10 +394,6 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
         # need reshape for kernel weight
         processed_res = super()._postprocess(tensor, device, load_config)
         kernel_weight = processed_res[self.kernel.name]
-        if self.kernel.name not in [W.moe_w1, W.moe_w2]:
-            kernel_weight = load_config.exported_device.shuffle_gemm_weight(
-                kernel_weight
-            )
         kernel_weight = (
             kernel_weight.reshape(kernel_weight.shape[-1], -1)
             if kernel_weight.dim() == 2
@@ -391,3 +416,101 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
             processed_res[self.kernel.name] = kernel_weight
 
         return processed_res
+
+class LoadQuantPerChannelFp8Weight(PerChannelFp8Weight):
+    """
+    LoadQuantPerChannelFp8Weight class for dynamic per-channel FP8 quantization.
+
+    This class performs per-channel quantization during loading time, similar to
+    vLLM's PTPC approach but with per-channel granularity instead of per-token.
+    """
+
+    @classmethod
+    def support(
+        cls, quant_config: QuantizationConfig, src_weight_info: WeightModule
+    ) -> bool:
+        if quant_config.is_quanted() or not isinstance(
+            quant_config, Fp8PerChannelCompressedQuantConfig
+        ):
+            return False
+        name = src_weight_info.name
+        return name in cls.w8a8_weight_list
+
+    def __init__(
+        self,
+        src_weight_info: AtomicWeight,
+        quant_config: QuantizationConfig,
+        *args,
+        **kwargs,
+    ):
+        # Extract parameters from source weight info
+        params = src_weight_info.extract_params(
+            src_weight_info.__class__, src_weight_info, quant_config
+        )
+
+        # Create kernel weight component
+        kernel: AtomicWeight = create_w8a8_fp8_per_channel_weight(
+            src_weight_info, **params
+        )
+        sub_weights = {kernel.name: kernel}
+
+        # Create scale component if needed
+        scale_name = self.w8a8_weight_list.get(src_weight_info.name)
+        scale = None
+        if scale_name:
+            scale_params = copy.deepcopy(params)
+            scale_params["name"] = scale_name
+            scale: AtomicWeight = create_w8a8_fp8_per_channel_weight(
+                src_weight_info, **scale_params
+            )
+            sub_weights.update({scale.name: scale})
+
+        # Initialize composite weight
+        CompositeWeight.__init__(
+            self, sub_weights, quant_config=quant_config, *args, **kwargs
+        )
+        self.kernel = kernel
+        self.scale = scale
+
+    def _load_raw_tensor(
+        self,
+        database: BaseDatabase,
+        layer_id: Optional[int],
+        device: str,
+        load_config: LoadConfig,
+    ):
+        """
+        Load raw tensor and perform per-channel quantization.
+
+        This method implements dynamic per-channel quantization similar to vLLM's PTPC
+        but with channel-wise granularity instead of token-wise.
+        """
+        # Load the original weight tensor
+        kernel = self.kernel._load_raw_tensor(database, layer_id, device, load_config)
+
+        res = {}
+        scale = None
+
+        if self.scale:
+            # Perform per-channel quantization
+            quant_kernel, scale = per_channel_cast_to_fp8(kernel.get(self.kernel.name))
+
+            # Reshape scale if needed
+            if quant_kernel.dim() == 2:
+                scale = scale.reshape([scale.shape[0], -1])
+        else:
+            # Simple cast to FP8 without scaling
+            quant_kernel = cast_to_fp8(kernel.get(self.kernel.name))
+
+        # Prepare result dictionary
+        if self.kernel.name == W.moe_w1 or self.kernel.name == W.moe_w2:
+            pass
+        elif quant_kernel.dim() == 2:
+            quant_kernel = quant_kernel.T
+
+        res = {self.kernel.name: quant_kernel.contiguous().to(device)}
+        if self.scale:
+            scale = scale.T if scale.dim() == 2 else scale
+            res.update({self.scale.name: scale.contiguous().to(device)})
+
+        return res

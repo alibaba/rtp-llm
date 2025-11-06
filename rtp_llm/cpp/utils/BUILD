@@ -24,12 +24,12 @@ cc_library(
         "StringUtil.h",
         "StatusUtil.h",
         "Exception.h",
-        "utils.h",
+        "utils.h"
     ],
     srcs = [
         "AssertUtils.cc",
         "Logger.cc",
-        "Exception.cc",
+        "Exception.cc"
     ],
     deps = [
         "@havenask//aios/alog:alog",
@@ -142,5 +142,3 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
 )
-
-

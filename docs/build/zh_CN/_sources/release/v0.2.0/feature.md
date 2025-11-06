@@ -37,7 +37,8 @@ RTP-LLM First Release Version:0.2.0(2025.09)
 * too many dynamic lora need more **reserver_runtime_mem_mb**
 * AMD not support MoE models
 * MoE model without shared_experter cannot use enable-layer-micro-batch
-
+* P/D Disaggregation with EPLB and MTP step > 1 may cause Prefill Hang
+* Embedding of VL Model is not ok cause by position id is wrong
 
 ## Performance
 

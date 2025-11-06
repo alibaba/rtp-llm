@@ -16,7 +16,7 @@ public:
     RtpProcessGroup(RtpProcessGroupType type);
     ~RtpProcessGroup() = default;
 
-    void broadcast(std::vector<torch::Tensor>& input, const c10d::BroadcastOptions& opts = c10d::BroadcastOptions());
+    void                       broadcast(std::vector<torch::Tensor>& input, int rootRank = 0);
     std::vector<torch::Tensor> all_reduce(std::vector<torch::Tensor>& input);
 
     void                       send(std::vector<torch::Tensor>& input, int dst_rank);

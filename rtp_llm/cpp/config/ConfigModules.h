@@ -40,18 +40,20 @@ struct FMHAConfig {
 };
 
 struct KVCacheConfig {
-    bool        reuse_cache              = false;
-    std::string multi_task_prompt        = "";
-    std::string multi_task_prompt_str    = "";
-    bool        enable_3fs               = false;
-    int         match_timeout_ms         = 1000;
-    int         rpc_get_cache_timeout_ms = 2000;
-    int         rpc_put_cache_timeout_ms = 2000;
-    int         threefs_read_timeout_ms  = 1000;
-    int         threefs_write_timeout_ms = 2000;
-    int         max_block_size_per_item  = 16;
-    int64_t     threefs_read_iov_size    = 1LL << 32;  // 4GB
-    int64_t     threefs_write_iov_size   = 1LL << 32;  // 4GB
+    bool        reuse_cache                        = false;
+    std::string multi_task_prompt                  = "";
+    std::string multi_task_prompt_str              = "";
+    bool        enable_3fs                         = false;
+    int         match_timeout_ms                   = 1000;
+    int         rpc_get_cache_timeout_ms           = 2000;
+    int         rpc_put_cache_timeout_ms           = 2000;
+    int         threefs_read_timeout_ms            = 1000;
+    int         threefs_write_timeout_ms           = 2000;
+    int         max_block_size_per_item            = 16;
+    int64_t     threefs_read_iov_size              = 1LL << 32;  // 4GB
+    int64_t     threefs_write_iov_size             = 1LL << 32;  // 4GB
+    int64_t     memory_block_cache_size_mb         = 0;
+    int64_t     memory_block_cache_sync_timeout_ms = 10000;
     std::string to_string() const;
     void        update_from_env_for_test();
 };
@@ -75,6 +77,7 @@ struct ProfilingDebugLoggingConfig {
     bool        qwen_agent_debug          = false;
     bool        disable_dpc_random        = false;
     bool        enable_detail_log         = false;
+    bool        check_nan                 = false;
 
     std::string to_string() const;
     void        update_from_env_for_test();
@@ -87,9 +90,11 @@ struct HWKernelConfig {
     bool        enable_multi_block_mode      = true;
     bool        ft_disable_custom_ar         = true;
     std::string rocm_hipblaslt_config        = "gemm_config.csv";
+    bool        use_swizzleA                 = false;
     bool        enable_cuda_graph            = false;
     bool        enable_cuda_graph_debug_mode = false;
     bool        use_aiter_pa                 = true;
+    bool        use_asm_pa                   = true;
     bool        enable_native_cuda_graph     = false;
     int         num_native_cuda_graph        = 200;
     std::string to_string() const;
@@ -193,18 +198,19 @@ struct BatchDecodeSchedulerConfig {
 };
 
 struct FIFOSchedulerConfig {
-    int64_t     max_context_batch_size           = 1;
-    int         scheduler_reserve_resource_ratio = 5;
-    bool        enable_fast_gen                  = false;
-    bool        enable_partial_fallback          = false;
-    int64_t     fast_gen_context_budget          = -1;
+    int64_t max_context_batch_size           = 1;
+    int     scheduler_reserve_resource_ratio = 5;
+    bool    enable_fast_gen                  = false;
+    bool    enable_partial_fallback          = false;
+    int64_t fast_gen_context_budget          = -1;
+
     std::string to_string() const;
     void        update_from_env_for_test();
 };
 
 struct MiscellaneousConfig {
-    bool        disable_pdl             = true;
-    std::string aux_string              = "";
+    bool        disable_pdl = true;
+    std::string aux_string  = "";
     std::string to_string() const;
     void        update_from_env_for_test();
 };

@@ -38,15 +38,15 @@ void TreeLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx,
     maskLogits(batch_logits, batch_vocab_mask);
 }
 
-void TreeLogitsProcessor::beamSearchLogitProcessorUpdate(const std::vector<int>& beam_idx_vec) {
+void TreeLogitsProcessor::updateMultiSeqStatus(const std::vector<int>& src_batch_indices) {
     std::vector<StreamTreeInfo> new_tree_infos;
-    for (auto beam_idx : beam_idx_vec) {
-        new_tree_infos.push_back(tree_infos_[beam_idx].copy());
+    for (auto src_batch_idx : src_batch_indices) {
+        new_tree_infos.push_back(tree_infos_[src_batch_idx].copy());
     }
     tree_infos_ = std::move(new_tree_infos);
 }
 
-void TreeLogitsProcessor::updateLogitProcessorStatus(const rtp_llm::BufferPtr& new_tokens, int32_t num_new_tokens) {
+void TreeLogitsProcessor::updateStatus(const rtp_llm::BufferPtr& new_tokens, int32_t num_new_tokens) {
     RTP_LLM_CHECK(2 == new_tokens->shape().size());
     RTP_LLM_CHECK(size() == new_tokens->shape()[0]);
 

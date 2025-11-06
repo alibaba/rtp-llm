@@ -77,6 +77,10 @@ public:
 
     void reportCacheStatusTime(int64_t request_begin_time_us);
 
+    ::grpc::Status MemoryBlockCache(::grpc::ServerContext*             context,
+                                    const ::MemoryBlockCacheRequestPB* request,
+                                    ::MemoryBlockCacheResponsePB*      response);
+
 public:
     typedef grpc::internal::WriterInterface<GenerateOutputsPB> WriterInterface;
 

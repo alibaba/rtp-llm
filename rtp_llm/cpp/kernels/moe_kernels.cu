@@ -101,6 +101,10 @@ void invokeScatterAddStable(T const* src, int N, int K, int32_t const* index, T*
     } else {
         throw std::invalid_argument("scatter add unsupport type or K [%d]" + std::to_string(K));
     }
+#if USING_CUDA
+    check_cuda_value(cudaPeekAtLastError());
+    check_cuda_error();
+#endif
 }
 
 template<typename T, int ELEM_PER_THREAD>
@@ -155,6 +159,10 @@ void invokeScatterAdd(
     } else {
         throw std::invalid_argument("scatter add unsupport type or K [%d]" + std::to_string(K));
     }
+#if USING_CUDA
+    check_cuda_value(cudaPeekAtLastError());
+    check_cuda_error();
+#endif
 }
 
 #define INSTANTIATE_INVOKE_SCATTER_ADD(T)                                                                              \
@@ -221,6 +229,10 @@ void invokeSliceDim1Copy(T const* src, int dim0, int dim1, int dim1_start, int d
         dim3      block(512);
         sliceDim1CopyKernel<T><<<grid, block, 0, stream>>>(src, dim0, dim1, dim1_start, dim1_size, out);
     }
+#if USING_CUDA
+    check_cuda_value(cudaPeekAtLastError());
+    check_cuda_error();
+#endif
 }
 
 #define INSTANTIATE_INVOKE_SlICE_DIM1_COPTY(T)                                                                         \
@@ -256,36 +268,46 @@ __global__ void fakeBalanceExpertKernel(T* expert, float* expert_scales, int sta
 void fake_balance_expert(int* expert, float* expert_scales, int start, int expert_num, int size, cudaStream_t stream) {
     fakeBalanceExpertKernel<int>
         <<<(size + 255) / 256, 256, 0, stream>>>(expert, expert_scales, start, expert_num, size);
+#if USING_CUDA
+    check_cuda_value(cudaPeekAtLastError());
+    check_cuda_error();
+#endif
 }
 
 void fake_balance_expert(
     int64_t* expert, float* expert_scales, int start, int expert_num, int size, cudaStream_t stream) {
     fakeBalanceExpertKernel<int64_t>
         <<<(size + 255) / 256, 256, 0, stream>>>(expert, expert_scales, start, expert_num, size);
+#if USING_CUDA
+    check_cuda_value(cudaPeekAtLastError());
+    check_cuda_error();
+#endif
 }
 
 // Expert indexing operations
 __global__ void
-genSourceRowKernelRevert(int64_t* expert_rows, int* expert_rows_dst, int token_num, int top_k, int start_expert) {
-    int const idx       = blockIdx.x * blockDim.x + threadIdx.x;
-    int const token_idx = idx / top_k;
-    int const k_idx     = idx % top_k;
+genSourceRowKernelRevert(int64_t* expert_rows, int* expert_rows_dst, size_t token_num, size_t top_k, int start_expert) {
+    size_t const idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < token_num * top_k) {
         if (expert_rows[idx] >= 0) {
-            expert_rows_dst[idx] = expert_rows[idx] + start_expert;
+            expert_rows_dst[idx] = static_cast<int>(expert_rows[idx] + start_expert);
         } else {
-            expert_rows_dst[idx] = expert_rows[idx];
+            expert_rows_dst[idx] = static_cast<int>(expert_rows[idx]);
         }
     }
 }
 
 void genSourceRowRevert(
-    int64_t* expert_rows, int* expert_rows_dst, int token_num, int top_k, int start_expert, cudaStream_t stream) {
-    int const threads = 256;
-    int const blocks  = token_num * top_k / 256 + 1;
+    int64_t* expert_rows, int* expert_rows_dst, size_t token_num, size_t top_k, int start_expert, cudaStream_t stream) {
+    size_t const threads = 256;
+    size_t const blocks  = token_num * top_k / 256 + 1;
 
     genSourceRowKernelRevert<<<blocks, threads, 0, stream>>>(
         expert_rows, expert_rows_dst, token_num, top_k, start_expert);
+#if USING_CUDA
+    check_cuda_value(cudaPeekAtLastError());
+    check_cuda_error();
+#endif
 }
 
 }  // namespace rtp_llm

@@ -172,6 +172,7 @@ public:
     void                          multiCopy(const MultiCopyParams& params) override;
     void                          batchCopy(const BatchCopyParams& params) override;
     void                          noBlockCopy(const CopyParams& params) override;
+    void                          noBlockCopy(const MultiCopyParams& params) override;
     void                          bufMemset(Buffer& buf, int val, DeviceStream stream = DeviceStream::DEFAULT) override;
     TransposeOutput               transpose(const TransposeParams& params) override;
     AddBiasOutput                 addbias(const AddBiasParams& params) override;
@@ -212,19 +213,19 @@ public:
     BeamSearchOutput       sampleBeamSearch(const BeamSearchParams& params) override;
     BufferPtr              quantize(const QuantizeParams& params) override;
     void                   preRun() override;
-
-    void              moeGateSelectWithBias(const FfnLayerParams& params,
-                                            BufferPtr             gate,
-                                            BufferPtr             gate_with_bias,
-                                            BufferPtr             expert_scales,
-                                            BufferPtr             expert_for_source_row,
-                                            int                   normalization_mode);
-    void              prepareMoEGate(const FfnLayerParams& params, BufferPtr gate);
-    void              mlaAbsorbAttention(const MlaAttentionModuleParams& params) override;
-    void              mlaContextAttention(const MlaAttentionModuleParams& params) override;
-    MoeDispatchOutput epDispatch(const MoeDispatchParams& params) override;
-    MoeCombineOutput  epCombine(const MoeCombineParams& params) override;
-    FfnLayerOutput    gatherCombineOutput(const MoeCombineOutput& params) override;
+    bool                   checkNAN(const Buffer& input) override;
+    void                   moeGateSelectWithBias(const FfnLayerParams& params,
+                                                 BufferPtr             gate,
+                                                 BufferPtr             gate_with_bias,
+                                                 BufferPtr             expert_scales,
+                                                 BufferPtr             expert_for_source_row,
+                                                 int                   normalization_mode);
+    void                   prepareMoEGate(const FfnLayerParams& params, BufferPtr gate);
+    void                   mlaAbsorbAttention(const MlaAttentionModuleParams& params) override;
+    void                   mlaContextAttention(const MlaAttentionModuleParams& params) override;
+    MoeDispatchOutput      epDispatch(const MoeDispatchParams& params) override;
+    MoeCombineOutput       epCombine(const MoeCombineParams& params) override;
+    FfnLayerOutput         gatherCombineOutput(const MoeCombineOutput& params) override;
 
     void QInputBatchMatmulWrapper(torch::Tensor& fused_q_input_t, const MlaAttentionModuleParams& params);
     void DecoderOutputGemmWrapper(torch::Tensor&                  qkv_output_t,
@@ -378,7 +379,5 @@ protected:
     bool                                        hack_moe_expert_ = false;
     std::shared_ptr<c10::cuda::CUDAStreamGuard> guard_;
 };
-
-torch::Tensor getRopeCache(const RopeConfig& rope_config, int max_position_embeddings);
 
 }  // namespace rtp_llm

@@ -18,8 +18,9 @@
 #include "rtp_llm/cpp/rocm/hipblasMMWrapper.h"
 #include "rtp_llm/cpp/rocm/rocmFmhaWrapper.h"
 #include "rtp_llm/cpp/rocm/quantizePreprocessors.h"
-#include "rtp_llm/cpp/rocm/rocmMoeWrapper.h"
+//#include "rtp_llm/cpp/rocm/rocmMoeWrapper.h"
 #include "rtp_llm/cpp/rocm/rocmCKGemmWrapper.h"
+#include "rtp_llm/cpp/rocm/rocmCKW8A8GeluGemmWrapper.h"
 #include "rtp_llm/cpp/kernels/kv_cache/kv_cache_utils.h"
 #include "rtp_llm/cpp/rocm/custom_ar/custom_ar_comm.h"
 
@@ -189,6 +190,7 @@ public:
     AttentionModuleOutput  decoderSelfAttention(const AttentionModuleParams& params) override;
     MoeGateSelectOutput    moeGateSelect(const FfnLayerParams& params) override;
     FfnLayerOutput         moeFfn(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs) override;
+    FfnLayerOutput         ffnLayer(const FfnLayerParams& params) override;
     MoeDispatchOutput      epDispatch(const MoeDispatchParams& params) override;
     MoeCombineOutput       epCombine(const MoeCombineParams& params) override;
     FfnLayerOutput         gatherCombineOutput(const MoeCombineOutput& params) override;
@@ -196,6 +198,7 @@ public:
     GreedyOutput           sampleGreedy(const GreedyParams& params) override;
     MemoryStatus           getDeviceMemoryStatus() override;
     BufferPtr              loraLinearWithActivation(const LoraLinearWithActivationParams& params) override;
+    BufferPtr              mhaQKVGemm(const AttentionLayerParams& params) override;
     void                   syncCommunication(bool timeout = true) override;
     void                   broadcast(const BroadcastParams& params) override;
     AllReduceOutput        allReduce(const AllReduceParams& params) override;
@@ -242,6 +245,8 @@ public:
 protected:
     void InvokeROCmDeepGemm(const GemmParams& params, BufferPtr output);
     void InvokeROCmPTPCGemm(const GemmParams& params, BufferPtr output);
+    void HipblasltPTPCGemm(const GemmParams& params, BufferPtr output);
+    void InvokeROCmDeepGemmWi8Ai8(const GemmParams& params, BufferPtr output);
     // void prepareCommBuffer(const PrepareCommBufferParams& params) override;
 
 public:
@@ -303,7 +308,7 @@ private:
                             NcclParam&         nccl_param);
     NcclParam getNcclParam(ParallelMode mode);
     // moe
-    std::unique_ptr<rocmMoeWrapper> moe_runner_;
+    //std::unique_ptr<rocmMoeWrapper> moe_runner_;
 
     // for custom allreduce use
     std::unique_ptr<CustomAllReduceComm> custom_allreduce_comm_ = nullptr;
@@ -319,6 +324,9 @@ private:
 
     // CK gemm
     std::unique_ptr<rocmCKGemmWrapper> ck_gemm_runner_;
+
+    //CK W8A8 Gelu gemm
+    std::unique_ptr<rocmCKW8A8GeluGemmWrapper> ck_w8a8_gelu_gemm_runner_;
 
 protected:
     bool use_multi_block_mode = false;

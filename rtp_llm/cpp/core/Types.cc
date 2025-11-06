@@ -4,7 +4,7 @@
 
 #if defined(__x86_64__)
 #include <immintrin.h>
-#elif defined(__aarch64__)
+#elif BUILDING_ARM_ONLY
 #include "rtp_llm/cpp/devices/arm_impl/type_bf16/hie_bfloat16.hpp"
 #endif
 
@@ -42,7 +42,7 @@ namespace rtp_llm {
     F(DataType::TYPE_FP16, half);                                                                                      \
     F(DataType::TYPE_BF16, __nv_bfloat16);
 
-#elif defined(__aarch64__)
+#elif BUILDING_ARM_ONLY
 #define FT_FOREACH_DEVICE_TYPE(F)                                                                                      \
     F(DataType::TYPE_FP16, __fp16);                                                                                    \
     F(DataType::TYPE_BF16, hie::bfloat16);

@@ -23,6 +23,9 @@ protected:
     hipDataType Ctype_;
     hipDataType computeType_;
 
+    bool        use_swizzleA_;
+    bool        test_swizzleA_;
+
     hipStream_t          stream_;
     rocm::hipblasAlgoMap hipblas_algo_map_;
 
@@ -69,6 +72,24 @@ public:
               const int          ldc,
               float              alpha_ = float(1.0f),
               float              beta_  = float(0.0f));
+    
+    void FP8_Gemm(hipblasOperation_t transa,
+              hipblasOperation_t transb,
+              const int          m,
+              const int          n,
+              const int          k,
+              const void*        A,
+              const int          lda,
+              const void*        B,
+              const int          ldb,
+              void*              C,
+              const int          ldc,
+              const float*       d_scale_a,
+              const float*       d_scale_b,
+              const void*        bias = nullptr,
+              const hipblasLtEpilogue_t epilogue = HIPBLASLT_EPILOGUE_DEFAULT,
+              float              alpha_ = float(1.0f),
+              float              beta_  = float(0.0f));
 
     void GemmBiasAct(hipblasOperation_t        transa,
                      hipblasOperation_t        transb,
@@ -82,7 +103,9 @@ public:
                      void*                     C,
                      const int                 ldc,
                      const void*               bias,
-                     const hipblasLtEpilogue_t epilogue);
+                     const hipblasLtEpilogue_t epilogue,
+                     const float*              scale_A = nullptr,
+                     const float*              scale_B = nullptr);
 
     void setFP32GemmConfig();
     void setFP16GemmConfig();
@@ -119,6 +142,9 @@ public:
         stream_ = stream;
         hipblasSetStream(hipblas_handle_, stream_);
     }
+
+    bool use_swizzleA();
+    bool test_swizzleA();
 };
 }  // namespace rocm
 }  // namespace rtp_llm

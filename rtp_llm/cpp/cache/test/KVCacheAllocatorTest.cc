@@ -195,7 +195,7 @@ TEST_F(KVCacheAllocatorTest, testDoubleFree) {
     EXPECT_EQ(allocator->freeBlockNums(), 9);
 
     // 重复释放，应该失败
-    EXPECT_THROW(allocator->free({resource}), rtp_llm::FTException);
+    EXPECT_THROW(allocator->free({resource}), rtp_llm::RTPException);
     EXPECT_EQ(allocator->freeBlockNums(), 9);
 }
 
@@ -358,7 +358,7 @@ TEST_F(KVCacheAllocatorTest, testMlaDoubleFree) {
     EXPECT_EQ(allocator->freeBlockNums(), 7);
 
     // 重复释放，应该失败
-    EXPECT_THROW(allocator->free({resource}), rtp_llm::FTException);
+    EXPECT_THROW(allocator->free({resource}), rtp_llm::RTPException);
     EXPECT_EQ(allocator->freeBlockNums(), 7);
 }
 

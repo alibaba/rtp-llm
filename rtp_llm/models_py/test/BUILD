@@ -26,6 +26,21 @@ py_test (
 )
 
 py_test (
+    name = "rocm_fused_moe_test",
+    srcs = ["rocm_fused_moe_test.py"],
+    deps = [
+        "//rtp_llm/models_py:models",
+        "//rtp_llm:config",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/model_test/test_util:test_util"
+    ],
+    timeout = "eternal",
+    env = test_envs,
+    tags = ["rocm"],
+    exec_properties = {'gpu':'MI308X'},
+)
+
+py_test (
     name = "rocm_layer_norm_test",
     srcs = ["rocm_layer_norm_test.py"],
     deps = py_test_deps,
@@ -244,3 +259,14 @@ py_test (
     exec_properties = {'gpu':'H20'},
 )
 
+
+py_test (
+    name = "mla_attention_test",
+    srcs = ["mla_attention_test.py"],
+    deps = py_test_deps + [
+        "//rtp_llm:testlib",
+    ],
+    env = test_envs,
+    tags = ["open_skip", "H20"],
+    exec_properties = {'gpu':'H20'},
+)

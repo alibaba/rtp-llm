@@ -76,7 +76,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
     if (hw_kernel_config_.use_aiter_pa) {
         hipStream_t stream_ = device_->getStream();
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(torchDTypeToDataType(qkv.dtype()),
-                                         invokeAddFusedQKVBiasTransposePrefill,
+                                         invokeAddFusedQKVBiasTransposePrefillV1,
                                          q_output.data_ptr(),
                                          k_output.data_ptr(),
                                          v_output.data_ptr(),
@@ -97,11 +97,12 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
                                          attn_configs_.use_logn_attn,
                                          nullptr,
                                          0,
-                                         false,                // use_paged_fmha
-                                         store_qkv,            // store_qkv
-                                         store_q,              // store_q
-                                         store_kv,             // store_kv
-                                         store_cache,          // store_cache
+                                         false,        // use_paged_fmha
+                                         store_qkv,    // store_qkv
+                                         store_q,      // store_q
+                                         store_kv,     // store_kv
+                                         store_cache,  // store_cache
+                                         nullptr,
                                          device_->getStream()  // 必须作为最后一个参数
         );
     } else {
@@ -273,7 +274,7 @@ torch::Tensor FusedRopeKVCacheDecodeOp::forward(const torch::Tensor&            
 
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(
             torchDTypeToDataType(qkv.dtype()),
-            invokeAddFusedQKVBiasTransposeDecode,
+            invokeAddFusedQKVBiasTransposeDecodeV1,
             q_output.data_ptr(),
             nullptr,
             nullptr,
@@ -303,6 +304,7 @@ torch::Tensor FusedRopeKVCacheDecodeOp::forward(const torch::Tensor&            
             store_q,
             store_kv,
             store_cache,
+            nullptr,
             device_->getStream());
     } else {
         assert(false && "not implemented");

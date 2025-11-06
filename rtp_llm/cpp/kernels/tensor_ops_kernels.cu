@@ -18,7 +18,9 @@
 #include <type_traits>
 #include "rtp_llm/cpp/cuda/cuda_type_utils.cuh"
 #include "rtp_llm/cpp/cuda/cuda_fp8_utils.h"
+#include "rtp_llm/cpp/utils/math_utils.h"
 #if USING_CUDA
+#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 #ifndef CUDART_VERSION
 #error CUDART_VERSION Undefined!
 #elif (CUDART_VERSION >= 11050)
@@ -29,59 +31,88 @@
 #endif
 #include "rtp_llm/cpp/kernels/tensor_ops_kernels.h"
 
+#if USING_CUDA
+#include "rtp_llm/cpp/kernels/vec_dtypes.cuh"
+#endif
+
+#if USING_ROCM
+#include "rtp_llm/cpp/kernels/rocm_utils/vec_dtypes_hip.h"
+#endif
+
 namespace rtp_llm {
 
 // Transpose operations
 template<typename T>
-__global__ void transposeAxis01(T* out, T* in, const int dim0, const int dim1, const int dim2) {
-    int index = threadIdx.x + blockIdx.x * blockDim.x;
-    if (index < dim0 * dim1 * dim2) {
-        const int input_dim2_index = index % dim2;
-        index                      = (index - input_dim2_index) / dim2;
-        const int input_dim1_index = index % dim1;
-        index                      = (index - input_dim1_index) / dim1;
-        const int input_dim0_index = index % dim0;
+__global__ void
+transposeAxis01(T* out, T* in, const size_t dim0, const size_t dim1, const size_t dim2, const size_t elem_num) {
+    size_t index = static_cast<size_t>(threadIdx.x) + static_cast<size_t>(blockIdx.x) * static_cast<size_t>(blockDim.x);
+    if (index < elem_num) {
+        const size_t input_dim2_index = index % dim2;
+        index                         = (index - input_dim2_index) / dim2;
+        const size_t input_dim1_index = index % dim1;
+        index                         = (index - input_dim1_index) / dim1;
+        const size_t input_dim0_index = index % dim0;
 
-        out[input_dim1_index * dim0 * dim2 + input_dim0_index * dim2 + input_dim2_index] =
-            in[input_dim0_index * dim1 * dim2 + input_dim1_index * dim2 + input_dim2_index];
+        const size_t src_idx = input_dim0_index * dim1 * dim2 + input_dim1_index * dim2 + input_dim2_index;
+        const size_t dst_idx = input_dim1_index * dim0 * dim2 + input_dim0_index * dim2 + input_dim2_index;
+        out[dst_idx]         = in[src_idx];
     }
 }
 
 template<typename T>
-void invokeTransposeAxis012(T* out, T* in, const int dim0, const int dim1, const int dim2, cudaStream_t stream) {
-    dim3 block(512);
-    dim3 grid((int)(ceil(dim0 * dim1 * dim2 / 512.)));
-    transposeAxis01<<<grid, block, 0, stream>>>(out, in, dim0, dim1, dim2);
+void invokeTransposeAxis012(
+    T* out, T* in, const size_t dim0, const size_t dim1, const size_t dim2, cudaStream_t stream) {
+    const size_t elem_num   = dim0 * dim1 * dim2;
+    const size_t thread_num = 512;
+    const size_t block_num  = ceil_div<size_t>(elem_num, thread_num);
+    dim3         block(thread_num);
+    dim3         grid(block_num);
+    transposeAxis01<<<grid, block, 0, stream>>>(out, in, dim0, dim1, dim2, elem_num);
+#if USING_CUDA
+    check_cuda_value(cudaPeekAtLastError());
+    check_cuda_error();
+#endif
 }
 
 template<typename T>
-__global__ void transposeAxis01(T* out, T* in, const int* in_skipping_dim1, const int dim0, const int dim1) {
+__global__ void transposeAxis01(
+    T* out, T* in, const int* in_skipping_dim1, const size_t dim0, const size_t dim1, const size_t elem_num) {
     // out: [dim1, dim0]
     // in: [dim0, dim1]
     // in_skipping_dim1: [dim1]
 
-    int index = threadIdx.x + blockIdx.x * blockDim.x;
-    if (index < dim0 * dim1) {
-        const int input_dim1_index = index % dim1;
-        index                      = (index - input_dim1_index) / dim1;
-        const int input_dim0_index = index % dim0;
-        const int in_offset        = in_skipping_dim1 == nullptr ? 0 : in_skipping_dim1[input_dim1_index] * dim1;
+    size_t index = static_cast<size_t>(threadIdx.x) + static_cast<size_t>(blockIdx.x) * static_cast<size_t>(blockDim.x);
+    if (index < elem_num) {
+        const size_t input_dim1_index = index % dim1;
+        index                         = (index - input_dim1_index) / dim1;
+        const size_t input_dim0_index = index % dim0;
+        const size_t in_offset =
+            in_skipping_dim1 == nullptr ? 0 : static_cast<size_t>(in_skipping_dim1[input_dim1_index]) * dim1;
 
-        out[input_dim1_index * dim0 + input_dim0_index] = in[in_offset + input_dim0_index * dim1 + input_dim1_index];
+        const size_t src_idx = in_offset + input_dim0_index * dim1 + input_dim1_index;
+        const size_t dst_idx = input_dim1_index * dim0 + input_dim0_index;
+        out[dst_idx]         = in[src_idx];
     }
 }
 
 template<typename T>
-void invokeTransposeAxis01(T* out, T* in, const int dim0, const int dim1, cudaStream_t stream) {
-    dim3 block(512);
-    dim3 grid((int)(ceil(dim0 * dim1 / 512.)));
-    transposeAxis01<<<grid, block, 0, stream>>>(out, in, nullptr, dim0, dim1);
+void invokeTransposeAxis01(T* out, T* in, const size_t dim0, const size_t dim1, cudaStream_t stream) {
+    const size_t elem_num   = dim0 * dim1;
+    const size_t thread_num = 512;
+    const size_t block_num  = ceil_div<size_t>(elem_num, thread_num);
+    dim3         block(thread_num);
+    dim3         grid(block_num);
+    transposeAxis01<<<grid, block, 0, stream>>>(out, in, nullptr, dim0, dim1, elem_num);
+#if USING_CUDA
+    check_cuda_value(cudaPeekAtLastError());
+    check_cuda_error();
+#endif
 }
 
 #define DEFINE_INVOKETRANSPOSE(T)                                                                                      \
-    template void invokeTransposeAxis01(T* out, T* in, const int dim0, const int dim1, cudaStream_t stream);           \
+    template void invokeTransposeAxis01(T* out, T* in, const size_t dim0, const size_t dim1, cudaStream_t stream);     \
     template void invokeTransposeAxis012(                                                                              \
-        T* out, T* in, const int dim0, const int dim1, const int dim2, cudaStream_t stream)
+        T* out, T* in, const size_t dim0, const size_t dim1, const size_t dim2, cudaStream_t stream)
 
 DEFINE_INVOKETRANSPOSE(int32_t);
 DEFINE_INVOKETRANSPOSE(int8_t);
@@ -100,62 +131,88 @@ DEFINE_INVOKETRANSPOSE(__nv_fp8_e4m3);
 #endif
 
 template<typename T>
-__global__ void transposeAxis12(T* out, T* in, const int dim0, const int dim1, const int dim2, const int dim3) {
-    int index = threadIdx.x + blockIdx.x * blockDim.x;
-    if (index < dim0 * dim1 * dim2 * dim3) {
-        const int input_dim3_index = index % dim3;
-        index                      = (index - input_dim3_index) / dim3;
-        const int input_dim2_index = index % dim2;
-        index                      = (index - input_dim2_index) / dim2;
-        const int input_dim1_index = index % dim1;
-        index                      = (index - input_dim1_index) / dim1;
-        const int input_dim0_index = index % dim0;
-        out[input_dim0_index * dim1 * dim2 * dim3 + input_dim2_index * dim1 * dim3 + input_dim1_index * dim3
-            + input_dim3_index]    = in[input_dim0_index * dim1 * dim2 * dim3 + input_dim1_index * dim2 * dim3
-                                     + input_dim2_index * dim3 + input_dim3_index];
+__global__ void transposeAxis12(
+    T* out, T* in, const size_t dim0, const size_t dim1, const size_t dim2, const size_t dim3, const size_t elem_num) {
+    size_t index = static_cast<size_t>(threadIdx.x) + static_cast<size_t>(blockIdx.x) * static_cast<size_t>(blockDim.x);
+    if (index < elem_num) {
+        const size_t input_dim3_index = index % dim3;
+        index                         = (index - input_dim3_index) / dim3;
+        const size_t input_dim2_index = index % dim2;
+        index                         = (index - input_dim2_index) / dim2;
+        const size_t input_dim1_index = index % dim1;
+        index                         = (index - input_dim1_index) / dim1;
+        const size_t input_dim0_index = index % dim0;
+
+        const size_t src_idx = input_dim0_index * dim1 * dim2 * dim3 + input_dim1_index * dim2 * dim3
+                               + input_dim2_index * dim3 + input_dim3_index;
+        const size_t dst_idx = input_dim0_index * dim1 * dim2 * dim3 + input_dim2_index * dim1 * dim3
+                               + input_dim1_index * dim3 + input_dim3_index;
+        out[dst_idx] = in[src_idx];
     }
 }
 
 template<typename T>
 void invokeTransposeAxis12(
-    T* out, T* in, const int dim0, const int dim1, const int dim2, const int dim_3, cudaStream_t stream) {
-    dim3 block(512);
-    dim3 grid((int)(ceil(dim0 * dim1 * dim2 * dim_3 / 512.)));
-    transposeAxis12<<<grid, block, 0, stream>>>(out, in, dim0, dim1, dim2, dim_3);
+    T* out, T* in, const size_t dim0, const size_t dim1, const size_t dim2, const size_t dim_3, cudaStream_t stream) {
+    const size_t elem_num   = dim0 * dim1 * dim2 * dim_3;
+    const size_t thread_num = 512;
+    const size_t block_num  = ceil_div<size_t>(elem_num, thread_num);
+    dim3         block(thread_num);
+    dim3         grid(block_num);
+    transposeAxis12<<<grid, block, 0, stream>>>(out, in, dim0, dim1, dim2, dim_3, elem_num);
+#if USING_CUDA
+    check_cuda_value(cudaPeekAtLastError());
+    check_cuda_error();
+#endif
 }
 
-template void invokeTransposeAxis12(
-    float* out, float* in, const int dim0, const int dim1, const int dim2, const int dim_3, cudaStream_t stream);
+template void invokeTransposeAxis12(float*       out,
+                                    float*       in,
+                                    const size_t dim0,
+                                    const size_t dim1,
+                                    const size_t dim2,
+                                    const size_t dim_3,
+                                    cudaStream_t stream);
 
-template void invokeTransposeAxis12(
-    half* out, half* in, const int dim0, const int dim1, const int dim2, const int dim_3, cudaStream_t stream);
+template void invokeTransposeAxis12(half*        out,
+                                    half*        in,
+                                    const size_t dim0,
+                                    const size_t dim1,
+                                    const size_t dim2,
+                                    const size_t dim_3,
+                                    cudaStream_t stream);
 
-template void invokeTransposeAxis12(
-    int* out, int* in, const int dim0, const int dim1, const int dim2, const int dim_3, cudaStream_t stream);
+template void invokeTransposeAxis12(size_t*      out,
+                                    size_t*      in,
+                                    const size_t dim0,
+                                    const size_t dim1,
+                                    const size_t dim2,
+                                    const size_t dim_3,
+                                    cudaStream_t stream);
 
 #ifdef ENABLE_BF16
 template void invokeTransposeAxis12(__nv_bfloat16* out,
                                     __nv_bfloat16* in,
-                                    const int      dim0,
-                                    const int      dim1,
-                                    const int      dim2,
-                                    const int      dim_3,
+                                    const size_t   dim0,
+                                    const size_t   dim1,
+                                    const size_t   dim2,
+                                    const size_t   dim_3,
                                     cudaStream_t   stream);
 #endif
 
 // Sequence operations
 template<typename T>
-__launch_bounds__(1024, 1) __global__ void lookupHiddenStateOfLastToken(T*         from_tensor,
-                                                                        const T*   hidden_state,
-                                                                        const int* input_lengths,
-                                                                        const int  batch_size,
-                                                                        const int  hidden_units,
-                                                                        const int  idx_offset) {
-    for (int64_t index = (int64_t)blockIdx.x * blockDim.x + threadIdx.x; index < (int64_t)batch_size * hidden_units;
-         index += (int64_t)blockDim.x * gridDim.x) {
-        const int64_t col_index = index % hidden_units;
-        const int64_t batch_id  = index / hidden_units;
-        from_tensor[index] = hidden_state[((int64_t)input_lengths[batch_id] + idx_offset) * hidden_units + col_index];
+__launch_bounds__(1024, 1) __global__ void lookupHiddenStateOfLastToken(T*           from_tensor,
+                                                                        const T*     hidden_state,
+                                                                        const int*   input_lengths,
+                                                                        const size_t batch_size,
+                                                                        const size_t hidden_units,
+                                                                        const size_t idx_offset) {
+    for (size_t index = (size_t)blockIdx.x * blockDim.x + threadIdx.x; index < (size_t)batch_size * hidden_units;
+         index += (size_t)blockDim.x * gridDim.x) {
+        const size_t col_index = index % hidden_units;
+        const size_t batch_id  = index / hidden_units;
+        from_tensor[index] = hidden_state[((size_t)input_lengths[batch_id] + idx_offset) * hidden_units + col_index];
     }
 }
 
@@ -163,24 +220,28 @@ template<typename T>
 void invokeLookupHiddenStateOfLastToken(T*           from_tensor,
                                         const T*     hidden_state,
                                         const int*   input_lengths,
-                                        const int    batch_size,
-                                        const int    hidden_units,
-                                        const int    idx_offset,
+                                        const size_t batch_size,
+                                        const size_t hidden_units,
+                                        const size_t idx_offset,
                                         cudaStream_t stream) {
-    const int grid_size = (int)(ceil(batch_size * hidden_units / 1024.));
-    dim3      grid(min(grid_size, 65536));
-    dim3      block(min(hidden_units, 1024));
+    const size_t grid_size = ceil_div<size_t>(batch_size * hidden_units, 1024ul);
+    dim3         grid(std::min(grid_size, 65536ul));
+    dim3         block(std::min(hidden_units, 1024ul));
     lookupHiddenStateOfLastToken<T>
         <<<grid, block, 0, stream>>>(from_tensor, hidden_state, input_lengths, batch_size, hidden_units, idx_offset);
+#if USING_CUDA
+    check_cuda_value(cudaPeekAtLastError());
+    check_cuda_error();
+#endif
 }
 
 #define INSTANTIATE_INVOKE_LOOKUP_HIDDEN_OF_LAST(T)                                                                    \
     template void invokeLookupHiddenStateOfLastToken(T*           from_tensor,                                         \
                                                      const T*     hidden_state,                                        \
                                                      const int*   input_lengths,                                       \
-                                                     const int    batch_size,                                          \
-                                                     const int    hidden_units,                                        \
-                                                     const int    idx_offset,                                          \
+                                                     const size_t batch_size,                                          \
+                                                     const size_t hidden_units,                                        \
+                                                     const size_t idx_offset,                                          \
                                                      cudaStream_t stream)
 
 INSTANTIATE_INVOKE_LOOKUP_HIDDEN_OF_LAST(float);
@@ -197,6 +258,43 @@ INSTANTIATE_INVOKE_LOOKUP_HIDDEN_OF_LAST(__nv_bfloat16);
 
 #ifdef ENABLE_FP8
 INSTANTIATE_INVOKE_LOOKUP_HIDDEN_OF_LAST(__nv_fp8_e4m3);
+#endif
+
+template<typename T, size_t vec_size>
+__global__ void checkNANKernel(T* input, size_t nums, size_t circle) {
+    size_t index =
+        (static_cast<size_t>(threadIdx.x) + static_cast<size_t>(blockIdx.x) * static_cast<size_t>(blockDim.x))
+        * vec_size * circle;
+    vec_t<T, vec_size> inputs;
+    size_t             max_index = min(index + vec_size * circle, nums - vec_size);
+    for (size_t i = index; i < max_index; i += vec_size) {
+        inputs.load(input + i);
+        for (size_t j = 0; j < vec_size; ++j)
+            if (isnan(float(inputs[j]))) {
+                // 触发非法内存访问以生成core dump
+                volatile int* ptr = nullptr;
+                *ptr              = 0;
+                break;  // 检测到NaN后立即跳出循环
+            }
+    }
+}
+
+template<typename T>
+void invokeCheckNAN(T* input, size_t nums, cudaStream_t stream) {
+    constexpr size_t vec_size = 16 / sizeof(T);
+    size_t           circle   = nums / 512 / 65536 + 1;
+    dim3             grid(nums / circle / 512);
+    dim3             block(512);
+    checkNANKernel<T, vec_size><<<grid, block, 0, stream>>>(input, nums, circle);
+}
+
+template void invokeCheckNAN(float* input, size_t nums, cudaStream_t stream);
+template void invokeCheckNAN(half* input, size_t nums, cudaStream_t stream);
+#ifdef ENABLE_BF16
+template void invokeCheckNAN(nv_bfloat16* input, size_t nums, cudaStream_t stream);
+#endif
+#ifdef ENABLE_FP8
+template void invokeCheckNAN(__nv_fp8_e4m3* input, size_t nums, cudaStream_t stream);
 #endif
 
 }  // namespace rtp_llm

@@ -8,7 +8,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
-    <title>Overview &#8212; RTP-LLM</title>
+    <title>概述 &#8212; RTP-LLM</title>
   
   
   
@@ -16,13 +16,13 @@
     document.documentElement.dataset.mode = localStorage.getItem("mode") || "";
     document.documentElement.dataset.theme = localStorage.getItem("theme") || "";
   </script>
-  
+
   <!-- Loaded before other Sphinx assets -->
   <link href="../../_static/styles/theme.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
 <link href="../../_static/styles/bootstrap.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
 <link href="../../_static/styles/pydata-sphinx-theme.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
 
-  
+
   <link href="../../_static/vendor/fontawesome/6.5.2/css/all.min.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
   <link rel="preload" as="font" type="font/woff2" crossorigin href="../../_static/vendor/fontawesome/6.5.2/webfonts/fa-solid-900.woff2" />
 <link rel="preload" as="font" type="font/woff2" crossorigin href="../../_static/vendor/fontawesome/6.5.2/webfonts/fa-brands-400.woff2" />
@@ -35,7 +35,7 @@
     <link rel="stylesheet" type="text/css" href="../../_static/css/language-switcher.css?v=943557c0" />
     <link rel="stylesheet" type="text/css" href="../../_static/css/custom_log.css" />
     <link rel="stylesheet" type="text/css" href="../../_static/css/language-switcher.css?v=943557c0" />
-  
+
   <!-- Pre-loaded scripts that we'll load fully later -->
   <link rel="preload" as="script" href="../../_static/scripts/bootstrap.js?digest=dfe6caa3a7d634c4db9b" />
 <link rel="preload" as="script" href="../../_static/scripts/pydata-sphinx-theme.js?digest=dfe6caa3a7d634c4db9b" />
@@ -55,11 +55,11 @@
     <link rel="icon" href="../../_static/logo.ico"/>
     <link rel="index" title="索引" href="../../genindex.html" />
     <link rel="search" title="搜索" href="../../search.html" />
-    <link rel="next" title="package" href="package.html" />
-    <link rel="prev" title="RTP-LLM 0.2.0" href="release.html" /> 
+    <link rel="next" title="包" href="package.html" />
+    <link rel="prev" title="RTP-LLM 0.2.0" href="release.html" />
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="zh-CN"/>
-    <meta name="docbuild:last-update" content="2025 年 10 月 20 日"/>
+    <meta name="docbuild:last-update" content="2025 年 11 月 04 日"/>
 <link
   rel="stylesheet"
   href="../../_static/css/language-switcher.css"
@@ -67,30 +67,30 @@
 <script src="../../_static/js/language-switcher.js"></script>
 
   </head>
-  
-  
+
+
   <body data-bs-spy="scroll" data-bs-target=".bd-toc-nav" data-offset="180" data-bs-root-margin="0px 0px -60%" data-default-mode="">
 
-  
-  
+
+
   <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">Skip to main content</a></div>
-  
+
   <div id="pst-scroll-pixel-helper"></div>
-  
+
   <button type="button" class="btn rounded-pill" id="pst-back-to-top">
     <i class="fa-solid fa-arrow-up"></i>Back to top</button>
 
-  
+
   <input type="checkbox"
           class="sidebar-toggle"
           id="pst-primary-sidebar-checkbox"/>
   <label class="overlay overlay-primary" for="pst-primary-sidebar-checkbox"></label>
-  
+
   <input type="checkbox"
           class="sidebar-toggle"
           id="pst-secondary-sidebar-checkbox"/>
   <label class="overlay overlay-secondary" for="pst-secondary-sidebar-checkbox"></label>
-  
+
   <div class="search-button__wrapper">
     <div class="search-button__overlay"></div>
     <div class="search-button__search-container">
@@ -116,49 +116,49 @@
   <aside id="bd-header-version-warning" class="d-none d-print-none" aria-label="Version warning"></aside>
 </div>
 
-  
+
     <header class="bd-header navbar navbar-expand-lg bd-navbar d-print-none">
     </header>
-  
+
 
   <div class="bd-container">
     <div class="bd-container__inner bd-page-width">
-      
-      
-      
-      <div class="bd-sidebar-primary bd-sidebar">
-        
 
-  
+
+
+      <div class="bd-sidebar-primary bd-sidebar">
+
+
+
   <div class="sidebar-header-items sidebar-primary__section">
-    
-    
-    
-    
+
+
+
+
   </div>
-  
+
     <div class="sidebar-primary-items__start sidebar-primary__section">
         <div class="sidebar-primary-item">
 
-  
-    
-  
+
+
+
 
 <a class="navbar-brand logo" href="../../index.html">
-  
-  
-  
-  
-  
-    
-    
-      
-    
-    
+
+
+
+
+
+
+
+
+
+
     <img src="../../_static/logo.png" class="logo__image only-light" alt="RTP-LLM - Home"/>
     <script>document.write(`<img src="../../_static/logo.png" class="logo__image only-dark" alt="RTP-LLM - Home"/>`);</script>
-  
-  
+
+
 </a></div>
         <div class="sidebar-primary-item">
 
@@ -173,23 +173,23 @@
  </script></div>
         <div class="sidebar-primary-item"><nav class="bd-links bd-docs-nav" aria-label="Main">
     <div class="bd-toc-item navbar-nav active">
-        <p aria-level="2" class="caption" role="heading"><span class="caption-text">Installation</span></p>
+        <p aria-level="2" class="caption" role="heading"><span class="caption-text">安装</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../../start/install.html">Install RTP-LLM</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">Release Version</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">发布版本</span></p>
 <ul class="current nav bd-sidenav">
 <li class="toctree-l1 current active has-children"><a class="reference internal" href="release.html">RTP-LLM 0.2.0</a><details open="open"><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul class="current">
-<li class="toctree-l2 current active"><a class="current reference internal" href="#">Overview</a></li>
+<li class="toctree-l2 current active"><a class="current reference internal" href="#">概述</a></li>
 
 
 
 
-<li class="toctree-l2"><a class="reference internal" href="package.html">package</a></li>
+<li class="toctree-l2"><a class="reference internal" href="package.html">包</a></li>
 </ul>
 </details></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">Basic Usage</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">基本用法</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../../backend/send_request.html">Sending Requests</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../backend/openai_api_completions.html">OpenAI APIs - Completions</a></li>
@@ -197,26 +197,26 @@
 <li class="toctree-l1"><a class="reference internal" href="../../backend/openai_api_embeddings.html">OpenAI APIs - Embedding</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../backend/native_api.html">RTP-LLM Native APIs</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">Backend Tutorial</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">后端教程</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../../references/deepseek/index.html">deepseek</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../references/qwen/index.html">qwen-moe</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../references/kimi/index.html">kimi</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">Advanced Backend Configurations</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">高级后端配置</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../../backend/server_arguments.html">ServerArgs</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../backend/sampling_params.html">Sampling Config</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../backend/attention_backend.html">Attention Backend</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">Supported Models</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">支持的模型</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../../supported_models/generative_models.html">Large Language Models</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../supported_models/multimodal_language_models.html">Multimodal Language Models</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../supported_models/embedding_models.html">Embedding Models</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../supported_models/support_new_models.html">How to Support New Models</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">Advanced Features</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">高级功能</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../../backend/speculative_decoding.html">Speculative Decoding</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../backend/reuse_kv_cache.html">ReuseCache</a></li>
@@ -226,7 +226,7 @@
 <li class="toctree-l1"><a class="reference internal" href="../../backend/lora.html">LoRA Serving</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../backend/pd_disaggregation.html">PD Disaggregation</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">RTP-LLM Router</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">RTP-LLM 路由器</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../../backend/flexlb.html">FlexLB (Flexible Load Balancer) - Master Role</a></li>
 </ul>
@@ -234,49 +234,50 @@
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../../benchmark/benchmark.html">RTP-LLM Performance Benchmark Tool</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">References</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">参考文献</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../../references/general.html">General Guidance</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../references/developer.html">Developer Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../references/cli/Guide.html">CLI 使用指南</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../README.html">Documentation Manual</a></li>
 </ul>
 
     </div>
 </nav></div>
     </div>
-  
-  
+
+
   <div class="sidebar-primary-items__end sidebar-primary__section">
   </div>
-  
+
   <div id="rtd-footer-container"></div>
 
 
       </div>
-      
+
       <main id="main-content" class="bd-main" role="main">
-        
-        
+
+
 
 <div class="sbt-scroll-pixel-helper"></div>
 
           <div class="bd-content">
             <div class="bd-article-container">
-              
+
               <div class="bd-header-article d-print-none">
 <div class="header-article-items header-article__inner">
-  
+
     <div class="header-article-items__start">
-      
+
         <div class="header-article-item"><button class="sidebar-toggle primary-toggle btn btn-sm" title="Toggle primary sidebar" data-bs-placement="bottom" data-bs-toggle="tooltip">
   <span class="fa-solid fa-bars"></span>
 </button></div>
-      
+
     </div>
-  
-  
+
+
     <div class="header-article-items__end">
-      
+
         <div class="header-article-item">
 
 <div class="article-header-buttons">
@@ -290,15 +291,15 @@
     <i class="fab fa-github"></i>
   </button>
   <ul class="dropdown-menu">
-      
-      
-      
+
+
+
       <li><a href="https://github.com/alibaba/rtp-llm" target="_blank"
    class="btn btn-sm btn-source-repository-button dropdown-item"
    title="源码库"
    data-bs-placement="left" data-bs-toggle="tooltip"
 >
-  
+
 
 <span class="btn__icon-container">
   <i class="fab fa-github"></i>
@@ -306,16 +307,16 @@
 <span class="btn__text-container">Repository</span>
 </a>
 </li>
-      
-      
-      
-      
+
+
+
+
       <li><a href="https://github.com/alibaba/rtp-llm/blob/main/release/v0.2.0/feature.md?plain=1" target="_blank"
    class="btn btn-sm btn-source-file-button dropdown-item"
    title="Show source"
    data-bs-placement="left" data-bs-toggle="tooltip"
 >
-  
+
 
 <span class="btn__icon-container">
   <i class="fas fa-code"></i>
@@ -323,16 +324,16 @@
 <span class="btn__text-container">Show source</span>
 </a>
 </li>
-      
-      
-      
-      
+
+
+
+
       <li><a href="https://github.com/alibaba/rtp-llm/edit/main/release/v0.2.0/feature.md" target="_blank"
    class="btn btn-sm btn-source-edit-button dropdown-item"
    title="Suggest edit"
    data-bs-placement="left" data-bs-toggle="tooltip"
 >
-  
+
 
 <span class="btn__icon-container">
   <i class="fas fa-pencil-alt"></i>
@@ -340,16 +341,16 @@
 <span class="btn__text-container">Suggest edit</span>
 </a>
 </li>
-      
-      
-      
-      
+
+
+
+
       <li><a href="https://github.com/alibaba/rtp-llm/issues/new?title=Issue%20on%20page%20%2Frelease/v0.2.0/feature.html&body=Your%20issue%20content%20here." target="_blank"
    class="btn btn-sm btn-source-issues-button dropdown-item"
    title="创建议题"
    data-bs-placement="left" data-bs-toggle="tooltip"
 >
-  
+
 
 <span class="btn__icon-container">
   <i class="fas fa-lightbulb"></i>
@@ -357,7 +358,7 @@
 <span class="btn__text-container">Open issue</span>
 </a>
 </li>
-      
+
   </ul>
 </div>
 
@@ -371,15 +372,15 @@
     <i class="fas fa-download"></i>
   </button>
   <ul class="dropdown-menu">
-      
-      
-      
+
+
+
       <li><a href="../../_sources/release/v0.2.0/feature.md" target="_blank"
    class="btn btn-sm btn-download-source-button dropdown-item"
    title="下载源文件"
    data-bs-placement="left" data-bs-toggle="tooltip"
 >
-  
+
 
 <span class="btn__icon-container">
   <i class="fas fa-file"></i>
@@ -387,17 +388,17 @@
 <span class="btn__text-container">.md</span>
 </a>
 </li>
-      
-      
-      
-      
+
+
+
+
       <li>
 <button onclick="window.print()"
   class="btn btn-sm btn-download-pdf-button dropdown-item"
   title="列印成 PDF"
   data-bs-placement="left" data-bs-toggle="tooltip"
 >
-  
+
 
 <span class="btn__icon-container">
   <i class="fas fa-file-pdf"></i>
@@ -405,7 +406,7 @@
 <span class="btn__text-container">.pdf</span>
 </button>
 </li>
-      
+
   </ul>
 </div>
 
@@ -417,7 +418,7 @@
   title="全屏模式"
   data-bs-placement="bottom" data-bs-toggle="tooltip"
 >
-  
+
 
 <span class="btn__icon-container">
   <i class="fas fa-expand"></i>
@@ -449,35 +450,35 @@ document.write(`
     <span class="fa-solid fa-list"></span>
 </button>
 </div></div>
-      
+
     </div>
-  
+
 </div>
 </div>
-              
-              
+
+
 
 <div id="jb-print-docs-body" class="onlyprint">
-    <h1>Overview</h1>
+    <h1>概述</h1>
     <!-- Table of contents -->
     <div id="print-main-content">
         <div id="jb-print-toc">
-            
+
             <div>
                 <h2> 目录 </h2>
             </div>
             <nav aria-label="Page">
                 <ul class="visible nav section-nav flex-column">
-<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#">Overview</a></li>
-<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#features">Features</a><ul class="visible nav section-nav flex-column">
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#framkework-advanced-feature">Framkework  Advanced Feature</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#new-models">New Models</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#bug-fixs">Bug Fixs</a></li>
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#">概述</a></li>
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#features">特性</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#framkework-advanced-feature">框架高级特性</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#new-models">新模型</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#bug-fixs">错误修复</a></li>
 </ul>
 </li>
-<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#question-of-omission">Question of omission</a></li>
-<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#performance">Performance</a></li>
-<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#compatibility">Compatibility</a></li>
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#question-of-omission">遗漏问题</a></li>
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#performance">性能</a></li>
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#compatibility">兼容性</a></li>
 </ul>
 
             </nav>
@@ -485,79 +486,79 @@ document.write(`
     </div>
 </div>
 
-              
-                
+
+
 <div id="searchbox"></div>
                 <article class="bd-article">
-                  
+
   <section id="overview">
-<h1>Overview<a class="headerlink" href="#overview" title="Link to this heading">#</a></h1>
-<p>RTP-LLM First Release Version:0.2.0(2025.09)</p>
+<h1>概述<a class="headerlink" href="#overview" title="Link to this heading">#</a></h1>
+<p>RTP-LLM 首发版本：0.2.0 (2025.09)</p>
 </section>
 <section id="features">
-<h1>Features<a class="headerlink" href="#features" title="Link to this heading">#</a></h1>
+<h1>特性<a class="headerlink" href="#features" title="Link to this heading">#</a></h1>
 <section id="framkework-advanced-feature">
-<h2>Framkework  Advanced Feature<a class="headerlink" href="#framkework-advanced-feature" title="Link to this heading">#</a></h2>
+<h2>框架高级特性<a class="headerlink" href="#framkework-advanced-feature" title="Link to this heading">#</a></h2>
 <ul class="simple">
-<li><p><a class="reference internal" href="../../backend/pd_disaggregation.html"><span class="std std-doc">PD Disaggregation</span></a> &amp;&amp; <a class="reference internal" href="../../backend/pd_entrance_transpose.html"><span class="std std-doc">PD Entrance Transpose</span></a></p></li>
-<li><p><a class="reference internal" href="../../backend/attention_backend.html"><span class="std std-doc">Attention Support more Backend</span></a>: XQA, FlashInfer</p></li>
-<li><p><a class="reference internal" href="../../backend/speculative_decoding.html"><span class="std std-doc">Speculative Decoding</span></a></p></li>
+<li><p><a class="reference internal" href="../../backend/pd_disaggregation.html"><span class="std std-doc">PD 分离架构</span></a> &amp;&amp; <a class="reference internal" href="../../backend/pd_entrance_transpose.html"><span class="std std-doc">PD 入口转置</span></a></p></li>
+<li><p><a class="reference internal" href="../../backend/attention_backend.html"><span class="std std-doc">注意力机制支持更多后端</span></a>: XQA, FlashInfer</p></li>
+<li><p><a class="reference internal" href="../../backend/speculative_decoding.html"><span class="std std-doc">推测解码</span></a></p></li>
 <li><p><a class="reference internal" href="../../references/deepseek/reporter.html#eplb"><span class="std std-ref">EPLB</span></a></p></li>
-<li><p><a class="reference internal" href="../../references/deepseek/reporter.html#microbatch-overlapping"><span class="std std-ref">MicroBatch &amp; Overlapping</span></a></p></li>
+<li><p><a class="reference internal" href="../../references/deepseek/reporter.html#microbatch-overlapping"><span class="std std-ref">微批处理与重叠</span></a></p></li>
 <li><p><a class="reference internal" href="../../references/deepseek/reporter.html#mtp"><span class="std std-ref">MTP</span></a></p></li>
 <li><p><a class="reference internal" href="../../references/deepseek/reporter.html#deepep-network"><span class="std std-ref">DeepEP</span></a></p></li>
-<li><p><a class="reference internal" href="../../backend/flexlb.html"><span class="std std-doc">LoadBalance</span></a></p></li>
+<li><p><a class="reference internal" href="../../backend/flexlb.html"><span class="std std-doc">负载均衡</span></a></p></li>
 <li><p><a class="reference internal" href="../../backend/3fs.html"><span class="std std-doc">3FS</span></a></p></li>
-<li><p><a class="reference internal" href="../../backend/KvCache.html"><span class="std std-doc">FP8 KVCache</span></a></p></li>
-<li><p><a class="reference internal" href="../../backend/reuse_kv_cache.html"><span class="std std-doc">REUSE KV CACHE</span></a></p></li>
-<li><p><a class="reference internal" href="../../backend/quantization.html"><span class="std std-doc">Quantization</span></a></p></li>
-<li><p><a class="reference internal" href="../../backend/lora.html"><span class="std std-doc">MultiLoRA</span></a></p></li>
-<li><p><a class="reference internal" href="../../backend/af_disaggregation.html"><span class="std std-doc">Attention FFN Disaggregation</span></a></p></li>
-<li><p><a class="reference internal" href="../../backend/Frontend.html"><span class="std std-doc">Frontend/Backend Disaggregation</span></a></p></li>
+<li><p><a class="reference internal" href="../../backend/KvCache.html"><span class="std std-doc">FP8 KV缓存</span></a></p></li>
+<li><p><a class="reference internal" href="../../backend/reuse_kv_cache.html"><span class="std std-doc">KV缓存重用</span></a></p></li>
+<li><p><a class="reference internal" href="../../backend/quantization.html"><span class="std std-doc">量化</span></a></p></li>
+<li><p><a class="reference internal" href="../../backend/lora.html"><span class="std std-doc">多LoRA</span></a></p></li>
+<li><p><a class="reference internal" href="../../backend/af_disaggregation.html"><span class="std std-doc">注意力FFN分离架构</span></a></p></li>
+<li><p><a class="reference internal" href="../../backend/Frontend.html"><span class="std std-doc">前端/后端分离架构</span></a></p></li>
 </ul>
 </section>
 <section id="new-models">
-<h2>New Models<a class="headerlink" href="#new-models" title="Link to this heading">#</a></h2>
+<h2>新模型<a class="headerlink" href="#new-models" title="Link to this heading">#</a></h2>
 <div class="pst-scrollable-table-container"><table class="table">
 <thead>
-<tr class="row-odd"><th class="head"><p><strong>Model Family (Variants)</strong></p></th>
-<th class="head"><p><strong>Example HuggingFace Identifier</strong></p></th>
-<th class="head"><p><strong>Description</strong></p></th>
-<th class="head"><p><strong>Support CardType</strong></p></th>
+<tr class="row-odd"><th class="head"><p><strong>模型系列（变体）</strong></p></th>
+<th class="head"><p><strong>HuggingFace标识符示例</strong></p></th>
+<th class="head"><p><strong>描述</strong></p></th>
+<th class="head"><p><strong>支持的卡类型</strong></p></th>
 </tr>
 </thead>
 <tbody>
 <tr class="row-even"><td><p><strong>DeepSeek</strong> (v1, v2, v3/R1)</p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">deepseek-ai/DeepSeek-R1</span></code></p></td>
-<td><p>Series of advanced reasoning-optimized models (including a 671B MoE) trained with reinforcement learning; <br>top performance on complex reasoning, math, and code tasks.<br> <a class="reference internal" href="../../references/deepseek/reporter.html"><span class="std std-doc">RTP-LLM provides Deepseek v3/R1 model-specific optimizations</span></a></p></td>
-<td><p>NV ✅<br> AMD ✅</p></td>
+<td><p>通过强化学习训练的高级推理优化模型系列（包括671B MoE）；<br>在复杂推理、数学和代码任务上表现卓越。<br> <a class="reference internal" href="../../references/deepseek/reporter.html"><span class="std std-doc">RTP-LLM为Deepseek v3/R1模型提供特定优化</span></a></p></td>
+<td><p>英伟达 ✅<br> AMD ✅</p></td>
 </tr>
 <tr class="row-odd"><td><p><strong>Kimi</strong> (Kimi-K2)</p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">moonshotai/Kimi-K2-Instruct</span></code></p></td>
-<td><p>Moonshot's MoE LLMs with 1 trillion parameters, exceptional on agentic intellegence</p></td>
-<td><p>NV ✅<br> AMD ✅</p></td>
+<td><p>月之暗面拥有1万亿参数的MoE大语言模型，在智能代理方面表现卓越</p></td>
+<td><p>英伟达 ✅<br> AMD ✅</p></td>
 </tr>
 <tr class="row-even"><td><p><strong>Qwen</strong> (v1, v1.5, v2, v2.5, v3, QWQ, Qwen3-Coder)</p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">Qwen/Qwen3-235B-A22B</span></code></p></td>
 <td><p>Series of advanced reasoning-optimized models, <br>Significantly improved performance on reasoning tasks,<br> including logical reasoning, mathematics, science, coding, and academic benchmarks that typically require human expertise — achieving state-of-the-art results among open-source thinking models.<br>Markedly better general capabilities, such as instruction following, tool usage, text generation, and alignment with human preferences.<br>Enhanced 256K long-context understanding capabilities.</p></td>
-<td><p>NV ✅<br> AMD ✅</p></td>
+<td><p>英伟达 ✅<br> AMD ✅</p></td>
 </tr>
 <tr class="row-odd"><td><p><strong>QwenVL</strong> (VL2, VL2.5, VL3)</p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">Qwen/Qwen2-VL-2B</span></code></p></td>
-<td><p>Series of advanced  Vision-language model series based on Qwen2.5/Qwen3</p></td>
-<td><p>NV ✅<br> AMD ❌</p></td>
+<td><p>基于Qwen2.5/Qwen3的高级视觉语言模型系列</p></td>
+<td><p>英伟达 ✅<br> AMD ❌</p></td>
 </tr>
 <tr class="row-even"><td><p><strong>Llama</strong></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">meta-llama/Llama-4-Scout-17B-16E-Instruct</span></code></p></td>
-<td><p>Meta’s open LLM series, spanning 7B to 400B parameters (Llama 2, 3, and new Llama 4) with well-recognized performance.</p></td>
-<td><p>NV ✅<br> AMD ✅</p></td>
+<td><p>Meta的开放大语言模型系列，参数规模从7B到400B（Llama 2、3和新Llama 4），具有广受认可的性能。</p></td>
+<td><p>英伟达 ✅<br> AMD ✅</p></td>
 </tr>
 </tbody>
 </table>
 </div>
 </section>
 <section id="bug-fixs">
-<h2>Bug Fixs<a class="headerlink" href="#bug-fixs" title="Link to this heading">#</a></h2>
+<h2>错误修复<a class="headerlink" href="#bug-fixs" title="Link to this heading">#</a></h2>
 <ul class="simple">
 <li><p>metrics of cache is not work</p></li>
 <li><p>P/D Disaggregation dead lock</p></li>
@@ -565,30 +566,32 @@ document.write(`
 </section>
 </section>
 <section id="question-of-omission">
-<h1>Question of omission<a class="headerlink" href="#question-of-omission" title="Link to this heading">#</a></h1>
+<h1>遗漏问题<a class="headerlink" href="#question-of-omission" title="Link to this heading">#</a></h1>
 <ul class="simple">
-<li><p>too many dynamic lora need more <strong>reserver_runtime_mem_mb</strong></p></li>
-<li><p>AMD not support MoE models</p></li>
-<li><p>MoE model without shared_experter cannot use enable-layer-micro-batch</p></li>
+<li><p>过多动态lora需要更多 <strong>reserver_runtime_mem_mb</strong></p></li>
+<li><p>AMD不支持MoE模型</p></li>
+<li><p>没有shared_experter的MoE模型无法使用enable-layer-micro-batch</p></li>
+<li><p>带有EPLB和MTP step &gt; 1的P/D分离架构可能导致Prefill挂起</p></li>
+<li><p>Embedding of VL Model is not ok cause by position id is wrong</p></li>
 </ul>
 </section>
 <section id="performance">
-<h1>Performance<a class="headerlink" href="#performance" title="Link to this heading">#</a></h1>
+<h1>性能<a class="headerlink" href="#performance" title="Link to this heading">#</a></h1>
 </section>
 <section id="compatibility">
-<h1>Compatibility<a class="headerlink" href="#compatibility" title="Link to this heading">#</a></h1>
+<h1>兼容性<a class="headerlink" href="#compatibility" title="Link to this heading">#</a></h1>
 </section>
 
 
                 </article>
-              
 
-              
-              
-              
-              
+
+
+
+
+
                 <footer class="prev-next-footer d-print-none">
-                  
+
 <div class="prev-next-area">
     <a class="left-prev"
        href="release.html"
@@ -604,17 +607,17 @@ document.write(`
        title="next page">
       <div class="prev-next-info">
         <p class="prev-next-subtitle">下一页</p>
-        <p class="prev-next-title">package</p>
+        <p class="prev-next-title">包</p>
       </div>
       <i class="fa-solid fa-angle-right"></i>
     </a>
 </div>
                 </footer>
-              
+
             </div>
-            
-            
-              
+
+
+
                 <div class="bd-sidebar-secondary bd-toc"><div class="sidebar-secondary-items sidebar-secondary__inner">
 
 
@@ -624,67 +627,67 @@ document.write(`
   </div>
   <nav class="bd-toc-nav page-toc">
     <ul class="visible nav section-nav flex-column">
-<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#">Overview</a></li>
-<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#features">Features</a><ul class="visible nav section-nav flex-column">
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#framkework-advanced-feature">Framkework  Advanced Feature</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#new-models">New Models</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#bug-fixs">Bug Fixs</a></li>
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#">概述</a></li>
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#features">特性</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#framkework-advanced-feature">框架高级特性</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#new-models">新模型</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#bug-fixs">错误修复</a></li>
 </ul>
 </li>
-<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#question-of-omission">Question of omission</a></li>
-<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#performance">Performance</a></li>
-<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#compatibility">Compatibility</a></li>
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#question-of-omission">遗漏问题</a></li>
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#performance">性能</a></li>
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#compatibility">兼容性</a></li>
 </ul>
 
   </nav></div>
 
 </div></div>
-              
-            
+
+
           </div>
           <footer class="bd-footer-content">
-            
+
 <div class="bd-footer-content__inner container">
-  
+
   <div class="footer-item">
-    
+
 <p class="component-author">
 作者： RTP-LLM Team
 </p>
 
   </div>
-  
+
   <div class="footer-item">
-    
+
 
   <p class="copyright">
-    
+
       © Copyright 2023-2025, RTP-LLM.
       <br/>
-    
+
   </p>
 
   </div>
-  
+
   <div class="footer-item">
     <p class="last-updated">
-  最后更新于 2025 年 10 月 20 日.
+  最后更新于 2025 年 11 月 04 日.
   <br/>
 </p>
   </div>
-  
+
   <div class="footer-item">
-    
+
   </div>
-  
+
 </div>
           </footer>
-        
+
 
       </main>
     </div>
   </div>
-  
+
   <!-- Scripts loaded after <body> so the DOM is not blocked -->
   <script src="../../_static/scripts/bootstrap.js?digest=dfe6caa3a7d634c4db9b"></script>
 <script src="../../_static/scripts/pydata-sphinx-theme.js?digest=dfe6caa3a7d634c4db9b"></script>

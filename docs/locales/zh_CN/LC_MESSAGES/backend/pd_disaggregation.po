@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-10-20 10:08+0800\n"
+"POT-Creation-Date: 2025-10-15 19:12+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -126,7 +126,7 @@ msgid "Timeout for remote KVCache loading (milliseconds)"
 msgstr ""
 
 #: ../../backend/pd_disaggregation.ipynb:137
-#: ../../backend/pd_disaggregation.ipynb:143
+#: ../../backend/pd_disaggregation.ipynb:145
 msgid "``5000``"
 msgstr ""
 
@@ -152,34 +152,64 @@ msgid "Total timeout for decode process retries (milliseconds)"
 msgstr ""
 
 #: ../../backend/pd_disaggregation.ipynb:143
+msgid "**DECODE_RETRY_INTERVAL_MS**"
+msgstr "**DECODE_RETRY_INTERVAL_MS**"
+
+#: ../../backend/pd_disaggregation.ipynb:143
+msgid "interval for decode process retries (milliseconds)"
+msgstr "解码进程重试间隔（毫秒）"
+
+#: ../../backend/pd_disaggregation.ipynb:143
+msgid "``1``"
+msgstr ""
+
+#: ../../backend/pd_disaggregation.ipynb:145
 msgid "**RDMA_CONNECT_RETRY_TIMES**"
 msgstr ""
 
-#: ../../backend/pd_disaggregation.ipynb:143
-msgid "Number of retries for RDMA connection establishment"
-msgstr ""
-
 #: ../../backend/pd_disaggregation.ipynb:145
+msgid "Number of retries for RDMA connection establishment"
+msgstr "RDMA连接建立的重试次数"
+
+#: ../../backend/pd_disaggregation.ipynb:147
 msgid "**DECODE_POLLING_KV_CACHE_STEP_MS**"
 msgstr ""
 
-#: ../../backend/pd_disaggregation.ipynb:145
+#: ../../backend/pd_disaggregation.ipynb:147
 msgid "Interval time for polling KV loading status (milliseconds)"
-msgstr ""
+msgstr "KV负载状态轮询间隔时间（毫秒）"
 
-#: ../../backend/pd_disaggregation.ipynb:145
+#: ../../backend/pd_disaggregation.ipynb:147
 msgid "``30``"
 msgstr ""
 
-#: ../../backend/pd_disaggregation.ipynb:147
+#: ../../backend/pd_disaggregation.ipynb:149
 msgid "**DECODE_ENTRANCE**"
 msgstr ""
 
-#: ../../backend/pd_disaggregation.ipynb:147
+#: ../../backend/pd_disaggregation.ipynb:149
 msgid "Whether Decode serves as traffic entry point"
-msgstr ""
+msgstr "是否Decode作为流量入口点"
 
-#: ../../backend/pd_disaggregation.ipynb:147
+#: ../../backend/pd_disaggregation.ipynb:149
 msgid "``false``"
-msgstr ""
+msgstr "``false``"
+
+#~ msgid "**LOAD_BALANCE_POLICY_NAME**"
+#~ msgstr "**LOAD_BALANCE_POLICY_NAME**"
+
+#~ msgid "Load balancing policy: RR (round-robin) or WRR (weighted round-robin)"
+#~ msgstr "负载均衡策略：RR（轮询）或WRR（加权轮询）"
+
+#~ msgid "``RR``"
+#~ msgstr "``RR``"
+
+#~ msgid "**SYNC_STATUS_INTERVAL_MS**"
+#~ msgstr "**SYNC_STATUS_INTERVAL_MS**"
+
+#~ msgid "Status synchronization interval between PDs (milliseconds)"
+#~ msgstr "PD之间状态同步的时间间隔（毫秒）"
+
+#~ msgid "``50``"
+#~ msgstr "``50``"
 

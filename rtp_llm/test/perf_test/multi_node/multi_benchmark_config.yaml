@@ -1,6 +1,41 @@
 # RTP-LLM Multi-Benchmark Configuration
 # This file defines various benchmark configurations for distributed inference testing
 
+experiment_name: "H20_Node4"
+
+test_config:
+  num_retry_times: 3
+  build_from_scratch: 2
+  copy_test_result: true
+
+machine_config:
+  ip_lists:
+    - "33.105.178.103"
+    - "33.110.169.117"
+    - "33.105.178.172"
+    - "33.105.47.221"
+  run_user: "admin"
+  ssh_port: 2222
+
+build_config:
+  git_repo_url: "git@gitlab.alibaba-inc.com:foundation_models/RTP-LLM.git"
+  git_checkout_ref: "origin/main-internal"
+  # open_source_url: "git@github.com:alibaba/rtp-llm.git"
+  open_source_ref: "origin/main"
+  ft_sub_dir: "rtp_llm_perf_test"
+  bazel_build_args: '" --jobs 64 --verbose_failures --config=cuda12_6 "'
+
+common_config:
+  warm_up: true
+  act_type: "bf16"
+  hack_layer_num: 4
+  start_port: 12333
+  decode_test_length: 2048
+  max_context_batch_size: 1
+  load_ckpt_num_process: 64
+  reserver_runtime_mem_mb: 0
+  device_reserve_memory_bytes: 0
+
 benchmarks:
   - name: "H20_Deepseek-R1_Decode_EP32_4K"
     # git config

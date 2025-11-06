@@ -22,6 +22,7 @@ from rtp_llm.config.quant_config import (
     Fp8BlockWiseQuantConfig,
     Fp8PerChannelCompressedQuantConfig,
     Fp8PerTensorCompressedQuantConfig,
+    Fp8PerChannelQuarkQuantConfig,
     QuantizationConfig,
     init_quant_config,
 )
@@ -240,6 +241,7 @@ class GptInitModelParameters:
     decode_polling_kv_cache_step_ms: int
     decode_retry_timeout_ms: int
     decode_retry_times: int
+    decode_retry_interval: int
     deepseek_mscale_all_dim: float
     deepseek_rope_mscale: float
     dp_rank: int
@@ -606,6 +608,10 @@ class GptInitModelParameters:
             max_block_size_per_item=get_env_int("MAX_BLOCK_SIZE_PER_ITEM", 16),
             threefs_read_iov_size=get_env_int("THREEFS_READ_IOV_SIZE", 1 << 32),
             threefs_write_iov_size=get_env_int("THREEFS_WRITE_IOV_SIZE", 1 << 32),
+            memory_block_cache_size_mb=get_env_int("MEMORY_BLOCK_CACHE_SIZE_MB", 0),
+            memory_block_cache_sync_timeout_ms=get_env_int(
+                "MEMORY_BLOCK_CACHE_SYNC_TIMEOUT_MS", 10000
+            ),
         )
 
         enable_detail_log = get_env_bool("ENABLE_DETAIL_LOG", False)
@@ -636,6 +642,7 @@ class GptInitModelParameters:
                 qwen_agent_debug=get_env_bool("QWEN_AGENT_DEBUG", False),
                 disable_dpc_random=get_env_bool("DISABLE_DPC_RANDOM", False),
                 enable_detail_log=get_env_bool("ENABLE_DETAIL_LOG", False),
+                check_nan=get_env_bool("CHECK_NAN", False),
             )
         )
         # HWKernelConfig
@@ -647,12 +654,16 @@ class GptInitModelParameters:
             rocm_hipblaslt_config=get_env_str(
                 "ROCM_HIPBLASLT_CONFIG", "gemm_config.csv"
             ),
+            use_swizzleA = (
+                get_env_bool("USE_SWIZZLEA", False)
+            ),
             ft_disable_custom_ar=get_env_bool("FT_DISABLE_CUSTOM_AR", True),
             enable_cuda_graph=get_env_bool("ENABLE_CUDA_GRAPH", False),
             enable_cuda_graph_debug_mode=get_env_bool(
                 "ENABLE_CUDA_GRAPH_DEBUG_MODE", False
             ),
             use_aiter_pa=get_env_bool("USE_AITER_PA", True),
+            use_asm_pa=get_env_bool("USE_ASM_PA", True),
             enable_native_cuda_graph=get_env_bool("ENABLE_NATIVE_CUDA_GRAPH", False),
             num_native_cuda_graph=get_env_int("NUM_NATIVE_CUDA_GRAPH", 200),
         )
@@ -715,8 +726,13 @@ class GptInitModelParameters:
             use_batch_decode_scheduler=get_env_bool("USE_BATCH_DECODE_SCHEDULER"),
             use_gather_batch_scheduler=get_env_bool("USE_GATHER_BATCH_SCHEDULER"),
         )
-        if self.gpt_init_params.scheduler_config.use_gather_batch_scheduler and self.gpt_init_params.scheduler_config.use_batch_decode_scheduler:
-            raise ValueError("use_gather_batch_scheduler and use_batch_decode_scheduler cannot be true at the same time")
+        if (
+            self.gpt_init_params.scheduler_config.use_gather_batch_scheduler
+            and self.gpt_init_params.scheduler_config.use_batch_decode_scheduler
+        ):
+            raise ValueError(
+                "use_gather_batch_scheduler and use_batch_decode_scheduler cannot be true at the same time"
+            )
 
         # BatchDecodeSchedulerConfig
         self.gpt_init_params.batch_decode_scheduler_config = BatchDecodeSchedulerConfig(
@@ -810,6 +826,8 @@ class GptInitModelParameters:
         else:
             align_size = tp_size * 64
             moe_align_size = 64
+            if self.quant_algo.isFp8PTPC():
+                moe_align_size = 128
         if self.layer_inter_size:
             layer_inter_padding_size = []
             for idx in range(len(self.layer_inter_size)):
@@ -818,14 +836,14 @@ class GptInitModelParameters:
                     inter_size
                     + (
                         get_pad_size(inter_size, align_size)
-                        if self.quant_algo.isQuant()
+                        if (self.quant_algo.isQuant() or self.gpt_init_params.hw_kernel_config.use_swizzleA)
                         else 0
                     )
                 )
             self.layer_inter_padding_size = layer_inter_padding_size
         self.inter_padding_size = self.inter_size + (
             get_pad_size(self.inter_size, align_size)
-            if self.quant_algo.isQuant()
+            if (self.quant_algo.isQuant() or self.gpt_init_params.hw_kernel_config.use_swizzleA)
             else 0
         )
         if self.head_num_kv <= 0:
@@ -1086,6 +1104,10 @@ class GptInitModelParameters:
                 self.py_env_configs.pd_separation_config.decode_retry_timeout_ms
             )
             logging.info(f"decode_retry_timeout_ms: {self.decode_retry_timeout_ms}")
+            self.decode_retry_interval_ms = (
+                self.py_env_configs.pd_separation_config.decode_retry_interval_ms
+            )
+            logging.info(f"decode_retry_interval_ms: {self.decode_retry_interval_ms}")
 
             self.rdma_connect_retry_times = (
                 self.py_env_configs.pd_separation_config.rdma_connect_retry_times
@@ -1117,6 +1139,7 @@ class GptInitModelParameters:
         logging.info(
             f"scheduler_reserve_resource_ratio: {self.scheduler_reserve_resource_ratio}"
         )
+
         self.reuse_cache = self.py_env_configs.py_kv_cache_config.reuse_cache
         logging.info(f"reuse_cache: {self.reuse_cache}")
         self.pre_allocate_op_mem = bool(int(os.environ.get("PRE_ALLOCATE_OP_MEM", 1)))
@@ -1149,33 +1172,61 @@ class GptInitModelParameters:
             f" stop_words_id_list [{self.special_tokens.stop_words_id_list}]"
         )
 
-        model_override_args = json.loads(StaticConfig.model_config.json_model_override_args)
+        model_override_args = json.loads(
+            StaticConfig.model_config.json_model_override_args
+        )
         if model_override_args:
             if "rope_scaling" in model_override_args:
                 # be consistent with RopeStyle
-                rope_type = {"no": 0, "base": 1, "glm2": 2, "dynamicntk": 3,
-                             "qwendynamicntk": 4, "yarn": 5, "llama3": 6, "mrope": 7}
+                rope_type = {
+                    "no": 0,
+                    "base": 1,
+                    "glm2": 2,
+                    "dynamicntk": 3,
+                    "qwendynamicntk": 4,
+                    "yarn": 5,
+                    "llama3": 6,
+                    "mrope": 7,
+                }
                 rope_override_args = model_override_args["rope_scaling"]
-                assert "type" in rope_override_args and rope_override_args["type"] in rope_type
+                assert (
+                    "type" in rope_override_args
+                    and rope_override_args["type"] in rope_type
+                )
                 self.rotary_embedding_style = rope_type[rope_override_args["type"]]
                 if rope_override_args["type"] == "yarn":
-                    assert "factor" in rope_override_args and "original_max_position_embeddings" in rope_override_args
+                    assert (
+                        "factor" in rope_override_args
+                        and "original_max_position_embeddings" in rope_override_args
+                    )
                     self.rotary_embedding_scale = rope_override_args["factor"]
-                    self.org_embedding_max_pos = rope_override_args["original_max_position_embeddings"]
+                    self.org_embedding_max_pos = rope_override_args[
+                        "original_max_position_embeddings"
+                    ]
                     self.rotary_factor1 = rope_override_args.get("beta_slow", 1.0)
                     self.rotary_factor2 = rope_override_args.get("beta_fast", 1.0)
                     mscale = rope_override_args.get("mscale", 1.0)
                     self.rotary_embedding_mscale = float(
-                        (1.0 if self.rotary_embedding_scale <= 1 else 0.1 * math.log(self.rotary_embedding_scale) + 1.0) * mscale)
-                    self.rotary_embedding_extrapolation_factor = rope_override_args.get("extrapolation_factor", 1.0)
+                        (
+                            1.0
+                            if self.rotary_embedding_scale <= 1
+                            else 0.1 * math.log(self.rotary_embedding_scale) + 1.0
+                        )
+                        * mscale
+                    )
+                    self.rotary_embedding_extrapolation_factor = rope_override_args.get(
+                        "extrapolation_factor", 1.0
+                    )
 
-                logging.info(f"rotary_embedding_style: {self.rotary_embedding_style}, "
-                             f"rotary_embedding_scale: {self.rotary_embedding_scale}, "
-                             f"org_embedding_max_pos: {self.org_embedding_max_pos}, "
-                             f"rotary_factor1: {self.rotary_factor1}, "
-                             f"rotary_factor2: {self.rotary_factor2}, "
-                             f"rotary_embedding_mscale: {self.rotary_embedding_mscale}, "
-                             f"rotary_embedding_extrapolation_factor: {self.rotary_embedding_extrapolation_factor}")
+                logging.info(
+                    f"rotary_embedding_style: {self.rotary_embedding_style}, "
+                    f"rotary_embedding_scale: {self.rotary_embedding_scale}, "
+                    f"org_embedding_max_pos: {self.org_embedding_max_pos}, "
+                    f"rotary_factor1: {self.rotary_factor1}, "
+                    f"rotary_factor2: {self.rotary_factor2}, "
+                    f"rotary_embedding_mscale: {self.rotary_embedding_mscale}, "
+                    f"rotary_embedding_extrapolation_factor: {self.rotary_embedding_extrapolation_factor}"
+                )
 
     def _init_precision_config(
         self,
@@ -1289,7 +1340,15 @@ class GptInitModelParameters:
                         "weight_scale_suffix": ".weight_scale",
                     }
                 )
-
+        if quant_method == "quark":
+            quark_weights_config = quant_config["global_quant_config"]["weight"]
+            if quark_weights_config["dtype"] == "fp8_e4m3":
+                bits = 8
+            if (
+                quark_weights_config["dtype"] == "fp8_e4m3"
+                and quark_weights_config["qscheme"] == "per_channel"
+            ):
+                quant_method = Fp8PerChannelQuarkQuantConfig.get_method()
         return QuantizationConfig.from_config(
             {
                 "bits": bits,

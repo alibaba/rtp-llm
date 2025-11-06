@@ -31,11 +31,24 @@ py_test(
     exec_properties = {'gpu':'A10'},
 )
 
-
 py_test(
     name = "stop_words_test",
     srcs = [
         "stop_words_test.py",
+    ],
+    data = [],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/model_test/test_util",
+    ],
+    imports = [],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "stop_words_pipeline_test",
+    srcs = [
+        "stop_words_pipeline_test.py",
     ],
     data = [],
     deps = [

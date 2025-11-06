@@ -84,6 +84,12 @@ public:
         }
     }
 
+    ::grpc::Status MemoryBlockCache(::grpc::ServerContext*             context,
+                                    const ::MemoryBlockCacheRequestPB* request,
+                                    ::MemoryBlockCacheResponsePB*      response) override {
+        return local_server_->MemoryBlockCache(context, request, response);
+    }
+
 protected:
     std::shared_ptr<LocalRpcServer> local_server_;
 };

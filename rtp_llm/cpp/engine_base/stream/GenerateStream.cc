@@ -90,8 +90,8 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
 
     think_logits_processor_ptr_ = ThinkModeLogitsProcessor::fromGenerateInput(device_, generate_input_, maxBatchSize());
     tree_logits_processor_ptr_  = TreeLogitsProcessor::fromGenerateInput(device_, generate_input_, init_batch_size);
-    beam_search_logits_processor_ptr_ =
-        BeamSearchLogitsProcessor::fromGenerateInput(device_, generate_input_, special_tokens_.eos_token_id_);
+    multi_seq_logits_processor_ptr_ =
+        MultiSeqLogitsProcessor::fromGenerateInput(device_, generate_input_, special_tokens_.eos_token_id_);
 
     initializeLogitsProcessorList();
 }
@@ -103,9 +103,9 @@ void GenerateStream::initializeLogitsProcessorList() {
     if (tree_logits_processor_ptr_ != nullptr) {
         logits_processor_list_.push_back(std::static_pointer_cast<BaseLogitsProcessor>(tree_logits_processor_ptr_));
     }
-    if (beam_search_logits_processor_ptr_ != nullptr) {
+    if (multi_seq_logits_processor_ptr_ != nullptr) {
         logits_processor_list_.push_back(
-            std::static_pointer_cast<BaseLogitsProcessor>(beam_search_logits_processor_ptr_));
+            std::static_pointer_cast<BaseLogitsProcessor>(multi_seq_logits_processor_ptr_));
     }
 }
 
@@ -172,7 +172,8 @@ absl::StatusOr<int> GenerateStream::incrKVBlock(int token_capacity, size_t reser
 
 int GenerateStream::tryReleaseKVBlock(int nums) {
     std::lock_guard<std::mutex> lock(*output_mutex_);
-    auto                        release_blocks = stream_cache_resource_->tryReleaseKVBlock(nums);
+    RTP_LLM_CHECK_WITH_INFO(nums >= 0, "release block nums is < 0");
+    auto release_blocks = stream_cache_resource_->tryReleaseKVBlock(nums);
     incrFallbackBlock(release_blocks);
     return release_blocks;
 }
@@ -684,8 +685,13 @@ bool GenerateStream::needRemoteGenerate() const {
     return need_remote_generate_;
 }
 
-void GenerateStream::setRemoteGenerate() {
+bool GenerateStream::setRemoteGenerate() {
+    std::lock_guard<std::mutex> lock(*output_mutex_);
+    if (stoppedWithoutLock() || finishedWithoutLock()) {
+        return false;
+    }
     generate_status_->status = StreamState::REMOTE_RUNNING;
+    return true;
 }
 
 size_t GenerateStream::iterCount() const {
@@ -870,28 +876,28 @@ bool GenerateStream::updateKvCacheBlocks(const rtp_llm::BufferPtr& src_batch_ind
     return stream_cache_resource_->updateKVBlock(block_src_batch, is_seq_len_misaligned);
 }
 
-void GenerateStream::beamSearchLogitProcessorUpdate(const rtp_llm::BufferPtr& beam_idx) {
-    if (beam_idx == nullptr || !hasNumBeams()) {
+void GenerateStream::updateLogitProcessorMultiSeqStatus(const rtp_llm::BufferPtr& src_batch_indices) {
+    if (src_batch_indices == nullptr || !hasNumBeams()) {
         return;
     }
 
-    auto beam_idx_vec = rtp_llm::buffer2vector<int>(*beam_idx);
-    RTP_LLM_CHECK(beam_idx_vec.size() == currentBatchSize());
+    auto src_batch_indices_vec = rtp_llm::buffer2vector<int>(*src_batch_indices);
+    RTP_LLM_CHECK(src_batch_indices_vec.size() == currentBatchSize());
 
     for (auto logit_processor_ptr : getAllLogitsProcessorPtr()) {
-        logit_processor_ptr->beamSearchLogitProcessorUpdate(beam_idx_vec);
+        logit_processor_ptr->updateMultiSeqStatus(src_batch_indices_vec);
     }
 }
 
 void GenerateStream::updateLogitProcessorStatus(const StreamUpdateInfo& update_info) {
-    beamSearchLogitProcessorUpdate(update_info.src_batch_indices);
+    updateLogitProcessorMultiSeqStatus(update_info.src_batch_indices);
 
     const auto& new_tokens = update_info.new_tokens;
     RTP_LLM_CHECK(new_tokens->shape()[0] == currentBatchSize());
     auto num_new_tokens = update_info.num_new_tokens;
 
     for (auto logit_processor_ptr : getAllLogitsProcessorPtr()) {
-        logit_processor_ptr->updateLogitProcessorStatus(new_tokens, num_new_tokens);
+        logit_processor_ptr->updateStatus(new_tokens, num_new_tokens);
     }
 }
 
