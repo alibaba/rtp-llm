@@ -5,19 +5,15 @@ import torch
 import torch.nn.functional as F
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.models_py.modules.kvcache_store import WriteCacheStoreOp
-from rtp_llm.models_py.modules.mla import (
-    MlaFlashInferDecodeOp,
-    MlaFlashInferPrefillOp,
-    MlaRotaryEmbeddingOp,
-    TrtV2PrefillAttentionOp,
-)
 from rtp_llm.models_py.modules.flashinfer_python import (
+    FlashInferPythonDecodeOp,
     FlashInferPythonParams,
     FlashInferPythonPrefillOp,
-    FlashInferPythonDecodeOp
+    MlaFlashInferDecodeOp,
+    MlaFlashInferPrefillOp,
 )
-
+from rtp_llm.models_py.modules.kvcache_store import WriteCacheStoreOp
+from rtp_llm.models_py.modules.mla import MlaRotaryEmbeddingOp, TrtV2PrefillAttentionOp
 from rtp_llm.ops import FMHAType
 from rtp_llm.ops.compute_ops import KVCache, ParamsBase, PyAttentionInputs
 from rtp_llm.utils.model_weight import W
@@ -129,7 +125,6 @@ try:
                 FusedRopeKVCachePrefillOp(config.gpt_init_params),
                 attn_inputs,
             )
-            self.support_ = self.support_ and (config.use_mla == False)
 
         @staticmethod
         def fmha_type() -> FMHAType:
@@ -139,7 +134,7 @@ try:
             return True
 
     PREFILL_MHA_IMPS.append(FlashInferPythonPrefillImpl)
-    
+
     class FlashInferPrefillImpl(FMHAPrefillImplBase):
 
         def __init__(
