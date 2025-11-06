@@ -6,8 +6,8 @@ import lombok.Getter;
 public enum BalanceStatusEnum {
     SUCCESS(0, "Success"),
     UNKNOWN_ERROR(1000, "Unknown error!"),
-    VIPSERVER_ERROR(1001, "Vip server error!"),
-    VIPSERVER_TIMEOUT(1002, "Vip server timeout!"),
+    SERVICE_DISCOVERY_ERROR(1001, "Vip server error!"),
+    SERVICE_DISCOVERY_TIMEOUT(1002, "Vip server timeout!"),
     RESPONSE_NULL(1004, "Response null!"),
 
     // Cache related errors (3000-3099)

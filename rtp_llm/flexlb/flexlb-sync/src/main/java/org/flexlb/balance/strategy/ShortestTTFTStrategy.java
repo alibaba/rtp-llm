@@ -1,23 +1,5 @@
 package org.flexlb.balance.strategy;
 
-import java.time.LocalDateTime;
-import java.time.format.DateTimeFormatter;
-import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.List;
-import java.util.Map;
-import java.util.Optional;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.SynchronousQueue;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
-import java.util.stream.Collectors;
-
-import com.github.benmanes.caffeine.cache.Cache;
-import com.github.benmanes.caffeine.cache.Caffeine;
-import io.micrometer.core.instrument.util.NamedThreadFactory;
-import lombok.AccessLevel;
-import lombok.Getter;
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.collections4.MapUtils;
 import org.flexlb.balance.LoadBalanceStrategyFactory;
@@ -28,7 +10,6 @@ import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.domain.balance.BalanceContext;
-import org.flexlb.domain.batch.RequestBatchMeta;
 import org.flexlb.domain.monitor.SelectMonitorContext;
 import org.flexlb.domain.worker.ScoredWorker;
 import org.flexlb.domain.worker.WorkerTTFT;
@@ -38,7 +19,15 @@ import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.util.CommonUtils;
 import org.flexlb.utils.LoggingUtils;
 import org.springframework.stereotype.Component;
-import reactor.core.scheduler.Schedulers;
+
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.stream.Collectors;
 
 /**
  * @author zjw
@@ -51,63 +40,28 @@ public class ShortestTTFTStrategy implements LoadBalancer {
     private final EngineWorkerStatus engineWorkerStatus;
 
     private final EngineHealthReporter engineHealthReporter;
-    
+
     private final CacheAwareService cacheAwareService;
-
-    // trigger by expireEviction or qps checking
-    @Getter(AccessLevel.PUBLIC)
-    private Cache<String, RequestBatchMeta> batchMetaCache;
-
-    // TODO optimize this workerStatusUpdateTs
-    @Getter(AccessLevel.PUBLIC)
-    private Cache<String, Long> workerStatusUpdateTs;
-
-    @Getter(AccessLevel.PUBLIC)
-    private Cache<String, List<Long>> IdListCache;
-
-    @Getter(AccessLevel.PUBLIC)
-    private Cache<Long, RequestBatchMeta> RequestCache;
 
     private static final int TOP_K = 1;
 
     public ShortestTTFTStrategy(
-                                EngineWorkerStatus engineWorkerStatus,
-                                EngineHealthReporter engineHealthReporter,
-                                CacheAwareService cacheAwareService) {
+            EngineWorkerStatus engineWorkerStatus,
+            EngineHealthReporter engineHealthReporter,
+            CacheAwareService cacheAwareService) {
 
         this.engineWorkerStatus = engineWorkerStatus;
         this.engineHealthReporter = engineHealthReporter;
         this.cacheAwareService = cacheAwareService;
-        init();
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.SHORTEST_TTFT, this);
     }
 
-    private void init() {
-        ExecutorService executorService = new ThreadPoolExecutor(200, 500, 60L, TimeUnit.SECONDS,
-            new SynchronousQueue<>(), new NamedThreadFactory("worker-match-thread"),
-            new ThreadPoolExecutor.CallerRunsPolicy());
-        Schedulers.fromExecutorService(executorService);
-        batchMetaCache = Caffeine.newBuilder()
-                .maximumSize(10 * 1000)
-                .expireAfterWrite(120, TimeUnit.SECONDS)
-                .build();
-        workerStatusUpdateTs = Caffeine.newBuilder()
-                .maximumSize(2000)
-                .expireAfterWrite(5, TimeUnit.SECONDS)
-                .build();
-        IdListCache = Caffeine.newBuilder()
-                .maximumSize(10 * 1000)
-                .expireAfterWrite(120, TimeUnit.SECONDS)
-                .build();
-    }
-
-    public boolean releaseLocalCache(String modelName, String ip, Long interRequestId) {
+    public void releaseLocalCache(String modelName, String ip, Long interRequestId) {
         Map<String/*ip*/, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(modelName, RoleType.PREFILL, null);
         LoggingUtils.debug("releaseLocalCache, ip: {}, interRequestId: {}", modelName, ip, interRequestId);
-        LoggingUtils.debug(workerStatusMap.keySet().stream().collect(Collectors.joining(",")));
+        LoggingUtils.debug(String.join(",", workerStatusMap.keySet()));
         WorkerStatus workerStatus = workerStatusMap.get(ip);
         workerStatus.removeLocalTask(interRequestId);
-        return true;
     }
 
     public ServerStatus select(BalanceContext balanceContext, RoleType roleType, String group) {
@@ -167,7 +121,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
         // 调用 Local KV-Cache 匹配引擎
         List<Long> blockCacheKeys = balanceContext.getMasterRequest().getBlockCacheKeys();
         Map<String/*engineIpPort*/, Integer/*prefixMatchLength*/> matchResultsMap =
-            cacheAwareService.findMatchingEngines(blockCacheKeys, modelName, roleType, group);
+                cacheAwareService.findMatchingEngines(blockCacheKeys, modelName, roleType, group);
 
         // 使用全局锁方式选择最优Worker，避免复杂的并发控制
         synchronized (ShortestTTFTStrategy.class) {
@@ -192,7 +146,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
             String formattedDateTime = now.format(formatter);
             LoggingUtils.debug("");
             LoggingUtils.debug("select time: {}, inter req id : {}", formattedDateTime, interRequestId);
-            for(WorkerStatus worker : workerStatusList) {
+            for (WorkerStatus worker : workerStatusList) {
                 LoggingUtils.debug("worker: {}", worker.getIp());
                 for (TaskInfo task : worker.getRunningTaskList()) {
                     LoggingUtils.debug("remote task inter req id : {}, input len: {}, prefix len: {}", task.getInterRequestId(), task.getInputLength(), task.getPrefixLength());
@@ -206,8 +160,8 @@ public class ShortestTTFTStrategy implements LoadBalancer {
             WorkerStatus workerStatus = selectedWorker.worker();
             LoggingUtils.debug("selected worker ip: {}", workerStatus.getIp());
             engineHealthReporter.reportCacheHitMetrics(modelName, roleType, workerStatus.getIp(),
-                selectedWorker.getWorkerTTFT().getHitCacheTokens(),
-                selectedWorker.getWorkerTTFT().getHitCacheTokens() / (double) seqLen);
+                    selectedWorker.getWorkerTTFT().getHitCacheTokens(),
+                    selectedWorker.getWorkerTTFT().getHitCacheTokens() / (double) seqLen);
 
             TaskInfo task = new TaskInfo();
             task.setEnqueueTimeMs(System.currentTimeMillis());
@@ -218,9 +172,9 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                     roleType.toString(), workerStatus.getIp(), workerStatus.getPort(),
                     selectedWorker.getWorkerTTFT().getPrefillTime(),
                     selectedWorker.ttft()
-                    );
+            );
             workerStatus.putLocalTask(interRequestId, task);
-            
+
             return buildServerStatus(workerStatus, bestWorker.get().getWorkerTTFT(), roleType, interRequestId);
         }
     }
@@ -301,7 +255,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
         return result;
     }
 
-    private WorkerTTFT calcWorkerTTFT(WorkerStatus workerStatus, Map<String,Integer> matchResultsMap, long seqLength) {
+    private WorkerTTFT calcWorkerTTFT(WorkerStatus workerStatus, Map<String, Integer> matchResultsMap, long seqLength) {
 
         // 获取最长前缀匹配长度
         long hitCacheTokens = calcPrefixMatchLength(workerStatus, matchResultsMap);

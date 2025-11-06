@@ -1,6 +1,5 @@
 package org.flexlb.dao;
 
-import com.taobao.eagleeye.RpcContext_inner;
 import lombok.Data;
 import lombok.ToString;
 import lombok.extern.slf4j.Slf4j;
@@ -32,27 +31,17 @@ public class RequestContext {
 
     private boolean privateRequest;
 
+    private Integer resBufferLength;
+
+    private Long reqContentLength;
+
     //======================== Route ========================//
 
     private ServiceRoute serviceRoute;
 
     //===================== trace and log ===================//
 
-    private RpcContext_inner eagleTraceCtx;
-
     private WhaleSpan span = NOOP_SPAN;
-    /**
-     * the traceId passed from the upstream application
-     */
-    private String originTraceId;
-
-    private Integer resBufferLength;
-
-    private Long reqContentLength;
-
-    private String traceUserData;
-
-    private String rpcId;
 
     private String otlpTraceParent;
 
