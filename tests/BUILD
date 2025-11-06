@@ -95,6 +95,22 @@ py_binary(
     exec_properties = {'gpu':'H20'}
 )
 
+py_binary(
+    name="fp8_quant_benchmark",
+    srcs=[
+        "quant/fp8_quant_benchmark.py"
+    ],
+    data = [
+        "//:rtp_compute_ops",
+    ],
+    deps = [
+        "//rtp_llm:torch",
+        "//rtp_llm:rtp_llm_lib",
+    ],
+    tags = ["H20"],
+    exec_properties = {'gpu':'H20'}
+)
+
 py_test(
     name="rmsnorm_test",
     srcs=[

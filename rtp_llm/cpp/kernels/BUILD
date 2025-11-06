@@ -602,6 +602,6 @@ cc_library(
         "//rtp_llm/cpp/cuda:cuda_host_utils",
         "//rtp_llm/cpp/utils:core_utils",
     ] + torch_deps(),
-    copts = cuda_copts(),
+    copts = cuda_copts() + ["-nvcc_options=use_fast_math"],
     visibility = ["//visibility:public"],
 )

@@ -1,10 +1,15 @@
 #pragma once
-#include <cuda_runtime.h>
-#include <cuda_fp16.h>
+
 #include <cuda_bf16.h>  // requires sm 80+
+#include <cuda_fp16.h>
+#include <cuda_runtime.h>
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <math.h>
+
+#ifdef ENABLE_FP8
+#include <cuda_fp8.h>
+#endif
 
 namespace atex {
 
@@ -30,6 +35,12 @@ using int8x4_t = char4;
 
 using uint8x2_t = uchar2;
 using uint8x4_t = uchar4;
+
+#ifdef ENABLE_FP8
+using fp8_e4m3_t   = __nv_fp8_e4m3;
+using fp8x2_e4m3_t = __nv_fp8x2_e4m3;
+using fp8x4_e4m3_t = __nv_fp8x4_e4m3;
+#endif
 
 __device__ inline fp32_t cvt_f16_to_f32(fp16_t x) {
     return __half2float(x);

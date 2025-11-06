@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/kernels/scaled_fp8_quant.h"
 #include "rtp_llm/cpp/kernels/moe/ep_utils.h"
 #include "rtp_llm/cpp/kernels/atex/ops/f16/rmsnorm.h"
+#include "rtp_llm/cpp/kernels/atex/ops/f8/quant.h"
 
 namespace rtp_llm {
 
@@ -123,6 +124,16 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
                   py::arg("r"),
                   py::arg("w"),
                   py::arg("eps"));
+
+    rtp_ops_m.def("atex_minmax_pertensor_quant_fp16_fp8",
+                  &atex::impl::launch_minmax_pertensor_quant_fp16_fp8e4m3,
+                  "fp8e4m3 pertensor quantization function",
+                  py::arg("x"));
+
+    rtp_ops_m.def("atex_minmax_pertensor_quant_fp16_fp8",
+                  &atex::impl::launch_minmax_pertensor_quant_bf16_fp8e4m3,
+                  "fp8e4m3 pertensor quantization function",
+                  py::arg("x"));
 
     registerBaseCudaBindings(rtp_ops_m);
     registerAttnOpBindings(rtp_ops_m);
