@@ -248,7 +248,7 @@ class Pipeline(object):
         output_lens = []
         token_lists_to_decode = []
         if generate_config.has_num_beams():
-            all_output_ids = torch.cat(
+            all_output_ids = torch.stack(
                 [go.output_ids for go in generate_outputs.generate_outputs], dim=0
             )
             all_output_ids_np = all_output_ids.cpu().numpy()
@@ -268,10 +268,17 @@ class Pipeline(object):
                     for _ in range(len(generate_outputs.generate_outputs))
                 ]
             for i, generate_output in enumerate(generate_outputs.generate_outputs):
-                ouput_tokens_list[i] = torch.cat(
-                    (ouput_tokens_list[i], generate_output.output_ids), dim=1
-                )
-                generate_output.output_ids = ouput_tokens_list[i]
+                if len(ouput_tokens_list[i]) == 0:
+                    ouput_tokens_list[i] = generate_output.output_ids
+                else:
+                    logging.info(
+                        "ouput_tokens_list[i]: %s, generate_output.output_ids: %s"
+                        % (ouput_tokens_list, generate_output.output_ids)
+                    )
+                    ouput_tokens_list[i] = torch.cat(
+                        (ouput_tokens_list[i], generate_output.output_ids), dim=0
+                    )
+                    generate_output.output_ids = ouput_tokens_list[i]
                 tokens = generate_output.output_ids.cpu().numpy().flatten()
                 if not generate_config.ignore_eos:
                     tokens = remove_padding_eos_with_numpy(
@@ -352,7 +359,7 @@ class Pipeline(object):
         ignore_eos = generate_config.ignore_eos
         for i, generate_output in enumerate(generate_outputs.generate_outputs):
             ouput_tokens_list[i] = torch.cat(
-                (ouput_tokens_list[i], generate_output.output_ids), dim=1
+                (ouput_tokens_list[i], generate_output.output_ids), dim=0
             )
             full_tokens_tensor = ouput_tokens_list[i]
             tokens_np = full_tokens_tensor.cpu().numpy().flatten()
