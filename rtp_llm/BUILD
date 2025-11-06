@@ -617,6 +617,29 @@ py_wheel(
     ] + xft_dep + arch_with_version_dep,
 )
 
+py_package(
+    name = "rtp_llm_deepgemm_pkg",
+    deps = select({
+        "@//:using_cuda12": ["@deep_gemm_ext//:deep_gemm"],
+        "//conditions:default": [],
+    }),
+    packages = [
+        "deep_gemm",
+    ],
+)
+
+py_wheel(
+    name = "rtp_llm_deepgemm_whl",
+    distribution = "rtp_llm_deep_gemm",
+    python_tag = "py3",
+    tags = ["manual", "local", "no-remote"],
+    version = RELEASE_VERSION,
+    deps = [
+        ":rtp_llm_deepgemm_pkg",
+    ],
+    requires = [],
+)
+
 rename_wheel_aarch64(
     name = "rtp_llm_aarch64",
     package_name = "rtp_llm-%s" % RELEASE_VERSION,
