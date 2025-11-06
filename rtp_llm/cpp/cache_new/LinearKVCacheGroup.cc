@@ -13,24 +13,28 @@ using namespace std;
 
 namespace rtp_llm {
 
-MatchResult LinearKVCacheGroup::match(CacheKeysType& cache_keys) {
-    MatchResult match_result;
-    match_result.block_indices.resize(cache_keys.size());
+MatchResult LinearKVCacheGroup::match(const CacheKeysType& cache_keys) {
+    MatchResult final_result;
+    final_result.block_indices.resize(cache_keys.size(), NULL_BLOCK_IDX);
 
-    int pos = cache_keys.size() - 1;
-    for (auto it = cache_keys.rbegin(); it != cache_keys.rend(); ++it) {
+    int pos = cache_keys.size();
+    for (auto it = cache_keys.rbegin(); it != cache_keys.rend(); ++it, pos--) {
         auto result = block_cache_->match(*it);
         if (isNullBlockIdx(result.matched_index)) {
             continue;
         }
-        match_result.block_indices[pos] = result.matched_index;
-        match_result.reuse_length       = pos + 1;
+        final_result.block_indices[pos - 1] = result.matched_index;
+        final_result.reuse_blocks           = pos;
         break;
     }
-    return match_result;
+    final_result.block_indices.resize(pos);
+
+    final_result.reuse_length = final_result.reuse_blocks * seqSizePerBlock();
+
+    return final_result;
 }
 
-// 保留一个有效的block即可。优化下效率，及时退出
+// TODO, 保留一个有效的block即可。优化下效率，提前退出
 void LinearKVCacheGroup::removeSkippedBlocks(BlockIndicesType& block_indices) {
     if (block_indices.empty()) {
         return;
@@ -44,6 +48,7 @@ void LinearKVCacheGroup::removeSkippedBlocks(BlockIndicesType& block_indices) {
             } else {
                 BlockIndicesType blocks = {block_indices[i]};
                 block_pool_->free(blocks);
+                block_indices[i] = NULL_BLOCK_IDX;
             }
         }
     }
@@ -57,7 +62,7 @@ int LinearKVCacheGroup::needBlocksNum(int seq_len, int current_blocks) const {
     return std::max((seq_len + seq_size_per_block_ - 1) / seq_size_per_block_ - current_blocks, 0);
 }
 
-bool LinearKVCacheGroup::malloc(CacheKeysType& cache_keys, BlockIndicesType& block_indices, int seq_len) {
+bool LinearKVCacheGroup::malloc(const CacheKeysType& cache_keys, BlockIndicesType& block_indices, int seq_len) {
     int new_blocks = needBlocksNum(seq_len, block_indices.size());
     if (new_blocks == 0) {
         return true;
@@ -82,7 +87,9 @@ void LinearKVCacheGroup::free(const BlockIndicesType& block_indices) {
     block_pool_->free(block_indices);
 }
 
-void LinearKVCacheGroup::insertIntoCache(CacheKeysType& cache_keys, BlockIndicesType& block_indices, bool is_resident) {
+void LinearKVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
+                                         const BlockIndicesType& block_indices,
+                                         bool                    is_resident) {
     RTP_LLM_CHECK_WITH_INFO(cache_keys.size() == block_indices.size(),
                             "cache keys size is " + std::to_string(cache_keys.size()) + ", block indices size is "
                                 + std::to_string(block_indices.size()));
