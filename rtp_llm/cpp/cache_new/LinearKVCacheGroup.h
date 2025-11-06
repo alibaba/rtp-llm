@@ -17,7 +17,7 @@ public:
         KVCacheGroup(layer_ids, group_spec, block_pool) {}
 
     MatchResult match(CacheKeysType& cache_keys) override;
-    void        malloc(CacheKeysType& cache_keys, BlockIndicesType& block_indices, int seq_len) override;
+    bool        malloc(CacheKeysType& cache_keys, BlockIndicesType& block_indices, int seq_len) override;
     void        insertIntoCache(CacheKeysType& cache_keys, BlockIndicesType& block_indices, bool is_resident) override;
 
     void removeSkippedBlocks(BlockIndicesType& block_indices) override;

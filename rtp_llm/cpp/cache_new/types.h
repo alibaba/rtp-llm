@@ -77,9 +77,8 @@ struct MallocInfo {
 };
 
 struct MallocResult {
-    bool               success;
-    int                reuse_len;
-    std::vector<float> loss;  // TODO(chanyin): remove this in future
+    bool success;
+    int  reuse_len;
 };
 
 // fallback

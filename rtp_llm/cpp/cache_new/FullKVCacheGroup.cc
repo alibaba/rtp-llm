@@ -19,14 +19,18 @@ int FullKVCacheGroup::needBlocksNum(int seq_len, int current_blocks) const {
     return std::max((seq_len + seq_size_per_block_ - 1) / seq_size_per_block_ - current_blocks, 0);
 }
 
-void FullKVCacheGroup::malloc(CacheKeysType& cache_keys, BlockIndicesType& block_indices, int seq_len) {
+bool FullKVCacheGroup::malloc(CacheKeysType& cache_keys, BlockIndicesType& block_indices, int seq_len) {
     int new_blocks = needBlocksNum(seq_len, block_indices.size());
 
     auto result = block_pool_->malloc(new_blocks);
-    // check aloc error
+    if (result.empty()) {
+        return false;
+    }
     block_indices.insert(block_indices.end(), result.begin(), result.end());
 
-    // insert to cache right row, for reuse in batch query
+    // TODO, insert to cache right row, for reuse in batch query
+
+    return true;
 }
 
 MatchResult FullKVCacheGroup::match(CacheKeysType& cache_keys) {

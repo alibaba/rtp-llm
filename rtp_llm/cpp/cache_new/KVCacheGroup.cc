@@ -13,7 +13,12 @@ bool KVCacheGroup::ensureFreeBlocks(int required_blocks) {
     while (block_pool_->freeBlockNums() < required_blocks) {
         int  need_evict     = required_blocks - block_pool_->freeBlockNums();
         auto evicted_blocks = block_cache_->pop(need_evict);
-        // check error, return false
+        if (evicted_blocks.empty()) {
+            RTP_LLM_LOG_WARNING("ensure free blocks failed, free blocks : %d, need evict blocks : %d",
+                                block_pool_->freeBlockNums(),
+                                need_evict);
+            return false;
+        }
         block_pool_->free(evicted_blocks);
     }
 

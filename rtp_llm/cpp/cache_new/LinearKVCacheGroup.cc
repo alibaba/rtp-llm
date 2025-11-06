@@ -57,19 +57,25 @@ int LinearKVCacheGroup::needBlocksNum(int seq_len, int current_blocks) const {
     return std::max((seq_len + seq_size_per_block_ - 1) / seq_size_per_block_ - current_blocks, 0);
 }
 
-void LinearKVCacheGroup::malloc(CacheKeysType& cache_keys, BlockIndicesType& block_indices, int seq_len) {
-    // block_indices
+bool LinearKVCacheGroup::malloc(CacheKeysType& cache_keys, BlockIndicesType& block_indices, int seq_len) {
     int new_blocks = needBlocksNum(seq_len, block_indices.size());
+    if (new_blocks == 0) {
+        return true;
+    }
 
     auto result = block_pool_->malloc(new_blocks);
-    // check aloc error
+    if (result.empty()) {
+        return false;
+    }
 
-    // set blocks to position, not append
+    // TODO, set blocks to position, not append
     for (int i = 0; i < result.size(); i++) {
         block_indices.push_back(result[i]);
     }
 
-    // insert new allocate blocks to block cache?
+    // TODO< insert new allocate blocks to block cache?
+
+    return true;
 }
 
 void LinearKVCacheGroup::free(const BlockIndicesType& block_indices) {
