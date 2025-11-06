@@ -1,8 +1,7 @@
 import os
 import sys
-
-# if you haven't installed the rtp-llm wheel, you need to add the dev directory to the python path
 from pathlib import Path
+from typing import Optional
 
 import torch
 from transformers import AutoTokenizer
@@ -30,7 +29,8 @@ class RtpSimplePyModel:
     def __init__(
         self,
         model_type: str,
-        model_path: str,
+        model_path_or_name: str,
+        revision: Optional[str] = None,
         act_type: str = "FP16",
         max_total_tokens: int = 4096,
         tokens_per_block: int = 64,
@@ -39,18 +39,22 @@ class RtpSimplePyModel:
         # set some env and config
         self._set_env()
         StaticConfig.model_config.model_type = model_type
-        StaticConfig.model_config.checkpoint_path = model_path
+        StaticConfig.model_config.checkpoint_path = model_path_or_name
         StaticConfig.model_config.act_type = act_type
 
         # init C++ logger
-        alog_conf_path = os.environ.get("FT_ALOG_CONF_PATH", "")
-        print(f"  alog_conf_path: '{alog_conf_path}'")
-        torch.ops.rtp_llm.init_engine(alog_conf_path)
+        # Note: In standalone mode, libth_transformer is not loaded,
+        # so torch.ops.rtp_llm.init_engine is not available.
+        # alog_conf_path = os.environ.get("FT_ALOG_CONF_PATH", "")
+        # print(f"  alog_conf_path: '{alog_conf_path}'")
+        # torch.ops.rtp_llm.init_engine(alog_conf_path)
 
         # load model
         self.factory_model_config = ModelFactory.create_normal_model_config()
         self.gpt_model = ModelFactory.creat_standalone_py_model_from_huggingface(
-            model_config=self.factory_model_config
+            model_path_or_name=model_path_or_name,
+            revision=revision,
+            model_config=self.factory_model_config,
         )
         self.model = self.gpt_model.py_model
         self.model_config = self.model.config
@@ -67,7 +71,7 @@ class RtpSimplePyModel:
         self.model.kv_cache = self.kv_cache
 
         # init tokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained(model_path)
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_config.ckpt_path)
 
         # add eos_token_id to stop_id_list
         self.stop_id_list = stop_id_list.copy() if stop_id_list else []
@@ -199,7 +203,7 @@ class RtpSimplePyModel:
         model_outputs = self.model.forward(model_inputs)
         next_token_id = self._sample_next_token(model_outputs, sampling_params)
         next_token_id_cpu = next_token_id.cpu().item()
-        # 检查是否遇到停止token
+        # check if the next token is a stop token
         if next_token_id_cpu in self.stop_id_list:
             return output_ids
         output_ids.append(next_token_id_cpu)
@@ -218,7 +222,7 @@ class RtpSimplePyModel:
             next_token_id = self._sample_next_token(model_outputs, sampling_params)
             next_token_id_cpu = next_token_id.cpu().item()
             gen_tokens += 1
-            # 检查是否遇到停止token
+            # check if the next token is a stop token
             if next_token_id_cpu in self.stop_id_list:
                 break
             output_ids.append(next_token_id_cpu)
