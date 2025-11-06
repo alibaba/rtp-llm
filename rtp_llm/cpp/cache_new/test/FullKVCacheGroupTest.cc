@@ -111,7 +111,7 @@ TEST_F(FullKVCacheGroupTest, MallocFreeTest) {
     CacheKeysType    cache_keys = {101, 102, 103};
     BlockIndicesType block_indices;
 
-    group1.malloc(cache_keys, block_indices, 7);
+    ASSERT_TRUE(group1.malloc(cache_keys, block_indices, 7));
     ASSERT_EQ(block_pool->freeBlockNums(), 5);
     ASSERT_EQ(block_indices.size(), 4);
 
@@ -120,6 +120,8 @@ TEST_F(FullKVCacheGroupTest, MallocFreeTest) {
 
     group1.free(block_indices);
     ASSERT_EQ(block_pool->freeBlockNums(), 9);
+
+    ASSERT_FALSE(group1.malloc(cache_keys, block_indices, 180));
 }
 
 TEST_F(FullKVCacheGroupTest, InsertIntoCacheTest) {
