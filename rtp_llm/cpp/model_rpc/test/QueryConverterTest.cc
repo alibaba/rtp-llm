@@ -94,19 +94,20 @@ TEST_F(QueryConverterTest, testTransOutput) {
     outputs.generate_outputs.push_back(res);
 
     GenerateOutputsPB outputs_pb;
-    QueryConverter::transResponse(&outputs_pb, &outputs, "");
+    QueryConverter::transResponse(&outputs_pb, &outputs, true, "", 10000);
 
-    auto& output_pb   = outputs_pb.generate_outputs(0);
-    auto  aux_info_pb = output_pb.aux_info();
+    auto& output_pb   = outputs_pb.generate_outputs();
+    auto  aux_info_pb = output_pb.aux_info(0);
     EXPECT_EQ(aux_info_pb.cost_time_us(), 1000);
     EXPECT_EQ(aux_info_pb.iter_count(), 9);
     EXPECT_EQ(aux_info_pb.input_len(), 8);
     EXPECT_EQ(aux_info_pb.output_len(), 7);
     auto output_ids_pb = output_pb.output_ids();
     ASSERT_EQ(output_ids_pb.data_type(), TensorPB_DataType::TensorPB_DataType_INT32);
-    ASSERT_EQ(output_ids_pb.shape_size(), 2);
+    ASSERT_EQ(output_ids_pb.shape_size(), 3);
     ASSERT_EQ(output_ids_pb.shape(0), 1);
-    ASSERT_EQ(output_ids_pb.shape(1), 3);
+    ASSERT_EQ(output_ids_pb.shape(1), 1);
+    ASSERT_EQ(output_ids_pb.shape(2), 3);
     auto            output_ids_string = output_ids_pb.int32_data();
     vector<int32_t> output_ids_vector;
     output_ids_vector.resize(output_ids_string.size() / sizeof(int32_t));
@@ -117,9 +118,10 @@ TEST_F(QueryConverterTest, testTransOutput) {
     ASSERT_TRUE(output_pb.has_hidden_states());
     auto hidden_states_pb = output_pb.hidden_states();
     ASSERT_EQ(hidden_states_pb.data_type(), TensorPB_DataType::TensorPB_DataType_FP32);
-    ASSERT_EQ(hidden_states_pb.shape_size(), 2);
-    ASSERT_EQ(hidden_states_pb.shape(0), 3);
-    ASSERT_EQ(hidden_states_pb.shape(1), 2);
+    ASSERT_EQ(hidden_states_pb.shape_size(), 3);
+    ASSERT_EQ(hidden_states_pb.shape(0), 1);
+    ASSERT_EQ(hidden_states_pb.shape(1), 3);
+    ASSERT_EQ(hidden_states_pb.shape(2), 2);
     auto          hidden_states_string = hidden_states_pb.fp32_data();
     vector<float> hidden_states_vector;
     hidden_states_vector.resize(hidden_states_string.size() / sizeof(float));

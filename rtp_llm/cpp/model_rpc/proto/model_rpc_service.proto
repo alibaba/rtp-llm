@@ -163,8 +163,8 @@ message AuxInfoPB {
 }
 
 message GenerateOutputPB {
-    bool finished = 1;
-    AuxInfoPB aux_info = 2;
+    repeated bool finished = 1;
+    repeated AuxInfoPB aux_info = 2;
     TensorPB output_ids = 3;
     TensorPB hidden_states = 4;
     TensorPB loss = 5;
@@ -175,7 +175,7 @@ message GenerateOutputPB {
 
 message GenerateOutputsPB {
     int64 request_id = 1;
-    repeated GenerateOutputPB generate_outputs = 2;
+    GenerateOutputPB generate_outputs = 2;
     int64 receive_load_time = 3;
     int64 start_load_time = 4;
     int64 receive_generate_time = 5;

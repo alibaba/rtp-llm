@@ -214,6 +214,7 @@ public:
         JSONIZE(reuse_cache);
         JSONIZE(enable_3fs);
         JSONIZE(enable_memory_block_cache);
+        JSONIZE(aux_info);
 #undef JSONIZE
 #undef JSONIZE_OPTIONAL
     }

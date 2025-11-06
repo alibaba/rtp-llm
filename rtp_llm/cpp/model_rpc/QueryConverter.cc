@@ -1,8 +1,10 @@
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 
+#include "RPCPool.h"
 #include "rtp_llm/cpp/core/Buffer.h"
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
+#include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 
 namespace rtp_llm {
 #define TRANS_OPTIONAL(name)                                                                                           \
@@ -247,54 +249,152 @@ void QueryConverter::transTensorPB(TensorPB* t, const rtp_llm::Buffer* buffer) {
     t->set_data_type(data_type);
 }
 
-void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
-                                   const GenerateOutputs* responses,
-                                   const std::string&     aux_string) {
-    RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
-    outputs->set_request_id(responses->request_id);
-    for (size_t i = 0; i < responses->generate_outputs.size(); i++) {
-        const auto&       response = responses->generate_outputs[i];
-        GenerateOutputPB* output   = outputs->add_generate_outputs();
-        output->set_finished(response.finished);
-        auto aux_info = output->mutable_aux_info();
-        aux_info->set_cost_time_us(response.aux_info.cost_time_us);
-        aux_info->set_first_token_cost_time_us(response.aux_info.first_token_cost_time_us);
-        aux_info->set_wait_time_us(response.aux_info.wait_time_us);
-        aux_info->set_iter_count(response.aux_info.iter_count);
-        aux_info->set_fallback_tokens(response.aux_info.fallback_tokens);
-        aux_info->set_fallback_times(response.aux_info.fallback_times);
-        aux_info->set_input_len(response.aux_info.input_len);
-        aux_info->set_prefix_len(response.aux_info.prefix_len);
-        aux_info->set_output_len(response.aux_info.output_len);
-        aux_info->set_step_output_len(response.aux_info.step_output_len);
-        aux_info->set_pd_sep(response.aux_info.pd_sep);
-        aux_info->set_total_reuse_len(response.aux_info.reuse_len);
-        aux_info->set_local_reuse_len(response.aux_info.local_reuse_len);
-        aux_info->set_remote_reuse_len(response.aux_info.remote_reuse_len);
-        aux_info->set_aux_string(aux_string);
-        if (response.aux_info.cum_log_probs.has_value()) {
-            transTensorPB(aux_info->mutable_cum_log_probs(), response.aux_info.cum_log_probs.value().get());
-        }
-        if (response.aux_info.softmax_probs.has_value()) {
-            transTensorPB(aux_info->mutable_softmax_probs(), response.aux_info.softmax_probs.value().get());
-        }
-        if (response.aux_info.all_probs.has_value()) {
-            transTensorPB(output->mutable_all_probs(), response.aux_info.all_probs.value().get());
-        }
-        transTensorPB(output->mutable_output_ids(), response.output_ids.get());
-        if (response.hidden_states.has_value()) {
-            transTensorPB(output->mutable_hidden_states(), response.hidden_states.value().get());
-        }
-        if (response.loss.has_value()) {
-            transTensorPB(output->mutable_loss(), response.loss.value().get());
-        }
-        if (response.logits.has_value()) {
-            transTensorPB(output->mutable_logits(), response.logits.value().get());
-        }
-        if (response.all_hidden_states.has_value()) {
-            transTensorPB(output->mutable_all_hidden_states(), response.all_hidden_states.value().get());
+template<typename T>
+void QueryConverter::mergeAndPadBuffersToTensorPB(TensorPB*                                   target_pb,
+                                                  const std::vector<rtp_llm::ConstBufferPtr>& buffers,
+                                                  T                                           pad_value) {
+    if (buffers.empty()) {
+        return;
+    }
+
+    size_t max_len = 0;
+    for (const auto& buffer : buffers) {
+        RTP_LLM_CHECK(buffer->dim() == 2 && buffer->shape()[0] == 1);
+        if (buffer->shape()[1] > max_len) {
+            max_len = buffer->shape()[1];
         }
     }
+
+    const size_t        batch_size  = buffers.size();
+    std::vector<size_t> final_shape = {batch_size, 1, max_len};
+
+    const auto   mem_type       = buffers[0]->where();
+    const auto   data_type      = buffers[0]->type();
+    const size_t total_elements = batch_size * max_len;
+    T*           new_data       = new T[total_elements];
+    std::fill(new_data, new_data + total_elements, pad_value);
+
+    for (size_t i = 0; i < batch_size; ++i) {
+        const auto&  src_buffer = buffers[i];
+        T*           dst_ptr    = new_data + i * max_len;
+        const T*     src_ptr    = src_buffer->data<T>();
+        const size_t src_len    = src_buffer->shape()[1];
+        memcpy(dst_ptr, src_ptr, src_len * sizeof(T));
+    }
+
+    auto deleter       = [=](rtp_llm::Buffer* b) { delete[] b->data<T>(); };
+    auto merged_buffer = std::make_shared<rtp_llm::Buffer>(mem_type, data_type, final_shape, new_data, deleter);
+    transTensorPB(target_pb, merged_buffer.get());
+}
+
+template<typename Container, typename Accessor>
+void QueryConverter::stackBuffersToTensorPB(TensorPB*        target_pb,
+                                            const Container& source_container,
+                                            Accessor         tensor_accessor) {
+    rtp_llm::ConstBufferPtr ref_buffer = nullptr;
+    for (const auto& item : source_container) {
+        auto buffer_opt = std::invoke(tensor_accessor, item);
+        if (buffer_opt.has_value()) {
+            ref_buffer = *buffer_opt;
+            break;
+        }
+    }
+
+    if (!ref_buffer) {
+        return;
+    }
+
+    const auto&  ref_shape                = ref_buffer->shape();
+    const size_t single_buffer_size_bytes = ref_buffer->sizeBytes();
+    const size_t batch_size               = source_container.size();
+
+    std::vector<size_t> final_shape = {batch_size};
+    final_shape.insert(final_shape.end(), ref_shape.begin(), ref_shape.end());
+
+    const auto   mem_type    = ref_buffer->where();
+    const auto   data_type   = ref_buffer->type();
+    const size_t total_bytes = batch_size * single_buffer_size_bytes;
+    char*        new_data    = new char[total_bytes];
+
+    char* current_dst_ptr = new_data;
+    for (const auto& item : source_container) {
+        auto buffer_opt = std::invoke(tensor_accessor, item);
+        RTP_LLM_CHECK_WITH_INFO(buffer_opt.has_value(), "Inconsistent tensor presence in a batch for stacking.");
+        auto current_buffer = *buffer_opt;
+
+        RTP_LLM_CHECK_WITH_INFO(current_buffer->shape() == ref_shape,
+                                "All buffers must have the same shape for stacking.");
+
+        memcpy(current_dst_ptr, current_buffer->data(), single_buffer_size_bytes);
+        current_dst_ptr += single_buffer_size_bytes;
+    }
+
+    auto deleter        = [=](rtp_llm::Buffer* b) { delete[] static_cast<char*>(b->data()); };
+    auto stacked_buffer = std::make_shared<rtp_llm::Buffer>(mem_type, data_type, final_shape, new_data, deleter);
+    QueryConverter::transTensorPB(target_pb, stacked_buffer.get());
+}
+
+void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
+                                   const GenerateOutputs* responses,
+                                   bool                   dump_aux_info,
+                                   const std::string&     aux_string,
+                                   const int32_t          eos_token_id) {
+    RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
+    outputs->set_request_id(responses->request_id);
+    const auto& source_outputs = responses->generate_outputs;
+    if (source_outputs.empty()) {
+        return;
+    }
+    GenerateOutputPB* merged_output = outputs->mutable_generate_outputs();
+    for (const auto& response : source_outputs) {
+        merged_output->add_finished(response.finished);
+        if (dump_aux_info) {
+            auto* aux_info = merged_output->add_aux_info();
+            aux_info->set_cost_time_us(response.aux_info.cost_time_us);
+            aux_info->set_first_token_cost_time_us(response.aux_info.first_token_cost_time_us);
+            aux_info->set_wait_time_us(response.aux_info.wait_time_us);
+            aux_info->set_iter_count(response.aux_info.iter_count);
+            aux_info->set_fallback_tokens(response.aux_info.fallback_tokens);
+            aux_info->set_fallback_times(response.aux_info.fallback_times);
+            aux_info->set_input_len(response.aux_info.input_len);
+            aux_info->set_prefix_len(response.aux_info.prefix_len);
+            aux_info->set_output_len(response.aux_info.output_len);
+            aux_info->set_step_output_len(response.aux_info.step_output_len);
+            aux_info->set_pd_sep(response.aux_info.pd_sep);
+            aux_info->set_total_reuse_len(response.aux_info.reuse_len);
+            aux_info->set_local_reuse_len(response.aux_info.local_reuse_len);
+            aux_info->set_remote_reuse_len(response.aux_info.remote_reuse_len);
+            aux_info->set_aux_string(aux_string);
+            if (response.aux_info.cum_log_probs.has_value()) {
+                transTensorPB(aux_info->mutable_cum_log_probs(), response.aux_info.cum_log_probs.value().get());
+            }
+            if (response.aux_info.softmax_probs.has_value()) {
+                transTensorPB(aux_info->mutable_softmax_probs(), response.aux_info.softmax_probs.value().get());
+            }
+        }
+    }
+
+    std::vector<rtp_llm::ConstBufferPtr> output_id_buffers;
+    output_id_buffers.reserve(source_outputs.size());
+    for (const auto& resp : source_outputs) {
+        if (resp.output_ids) {
+            output_id_buffers.push_back(resp.output_ids);
+        }
+    }
+    if (!output_id_buffers.empty()) {
+        mergeAndPadBuffersToTensorPB<int32_t>(merged_output->mutable_output_ids(), output_id_buffers, eos_token_id);
+    }
+
+    stackBuffersToTensorPB(
+        merged_output->mutable_hidden_states(), source_outputs, [](const auto& r) { return r.hidden_states; });
+
+    stackBuffersToTensorPB(merged_output->mutable_loss(), source_outputs, [](const auto& r) { return r.loss; });
+
+    stackBuffersToTensorPB(merged_output->mutable_logits(), source_outputs, [](const auto& r) { return r.logits; });
+
+    stackBuffersToTensorPB(
+        merged_output->mutable_all_hidden_states(), source_outputs, [](const auto& r) { return r.all_hidden_states; });
+
     RTP_LLM_LOG_DEBUG("transResponse done");
 }
 
