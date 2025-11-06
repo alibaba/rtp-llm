@@ -32,6 +32,7 @@ cc_library(
         "LayerCacheBuffer.cc",
     ],
     deps = [
+        "//rtp_llm/cpp/core:buffer",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:time_util",
         "@havenask//aios/autil:thread",
@@ -41,12 +42,12 @@ cc_library(
 cc_library(
     name = "client",
     hdrs = [
-        "LoadContext.h",
+        "CacheStoreClientLoadContext.h",
         "CacheStoreClientService.h",
         "CacheStoreClient.h",
     ],
     srcs = [
-        "LoadContext.cc",
+        "CacheStoreClientLoadContext.cc",
         "CacheStoreClientService.cc",
         "CacheStoreClient.cc",
     ],
@@ -62,41 +63,29 @@ cc_library(
     name = "server",
     hdrs = [
         "CacheStoreServerService.h",
-        #"CacheStoreServer.h",
+        "CacheStoreServer.h",
     ],
     srcs = [
         "CacheStoreServerService.cc",
-        #"CacheStoreServer.cc",
+        "CacheStoreServer.cc",
     ],
     deps = [
         ":basic_types",
         ":arpc_dep",
         "//rtp_llm/cpp/cache_new/p2p_connector/proto:service_cc_proto",
         "//rtp_llm/cpp/cache_new:cache_new",
+        "//rtp_llm/cpp/core:event",
+        "@havenask//aios/autil:thread",
     ],
-)
-
-cc_library(
-    name = "cache_store_new",
-    hdrs = [
-        #"CacheStoreClient.h",
-        #"CacheStoreServerService.h",
-        #"CacheStoreServer.h",
-    ],
-    srcs = [
-        #"LayerCacheBuffer.cc",
-        #"CacheStoreClient.cc",
-        #"CacheStoreServerService.cc",
-        #"CacheStoreServer.cc",
-    ],
-    deps = [
-        "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
-    ],
-    visibility=['//visibility:public'],
 )
 
 cc_library(
     name = "connector",
-    hdrs = ["KVCacheConnector.h"],
-    deps = [],
+    hdrs = ["KVCacheP2PConnector.h"],
+    srcs = ["KVCacheP2PConnector.cc"],
+    deps = [
+        ":client",
+        ":server",
+        "//rtp_llm/cpp/cache_new:cache_new",
+    ],
 )

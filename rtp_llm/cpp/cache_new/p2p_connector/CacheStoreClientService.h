@@ -1,7 +1,7 @@
 #pragma once
 
 #include "rtp_llm/cpp/cache_new/p2p_connector/proto/service.pb.h"
-#include "rtp_llm/cpp/cache_new/p2p_connector/LoadContext.h"
+#include "rtp_llm/cpp/cache_new/p2p_connector/CacheStoreClientLoadContext.h"
 
 namespace rtp_llm {
 

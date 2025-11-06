@@ -1,38 +1,39 @@
-#include "rtp_llm/cpp/cache_new/p2p_connector/LoadContext.h"
+#include "rtp_llm/cpp/cache_new/p2p_connector/CacheStoreClientLoadContext.h"
 
 namespace rtp_llm {
 
-LoadContext::LoadContext(const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers, int64_t context_id):
+CacheStoreClientLoadContext::CacheStoreClientLoadContext(
+    const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers, int64_t context_id):
     layer_cache_buffers_(layer_cache_buffers), context_id_(context_id) {}
 
-LoadContext::~LoadContext() = default;
+CacheStoreClientLoadContext::~CacheStoreClientLoadContext() = default;
 
-bool LoadContext::success() const {
+bool CacheStoreClientLoadContext::success() const {
     // TODO: implement
     return true;
 }
 
-void LoadContext::cancel() {
+void CacheStoreClientLoadContext::cancel() {
     // TODO: implement
 }
 
-void LoadContext::waitDone() {
+void CacheStoreClientLoadContext::waitDone() {
     // TODO: implement
 }
 
-int64_t LoadContext::contextId() const {
+int64_t CacheStoreClientLoadContext::contextId() const {
     return context_id_;
 }
 
-void LoadContext::notifyLayerLoadDone(int layer_id) {
+void CacheStoreClientLoadContext::notifyLayerLoadDone(int layer_id) {
     done_layer_ids_.insert(layer_id);
 }
 
-bool LoadContext::isDone() const {
+bool CacheStoreClientLoadContext::isDone() const {
     return done_layer_ids_.size() == layer_cache_buffers_.size();
 }
 
-std::shared_ptr<LayerCacheBuffer> LoadContext::getLayerCacheBuffer(int layer_id) const {
+std::shared_ptr<LayerCacheBuffer> CacheStoreClientLoadContext::getLayerCacheBuffer(int layer_id) const {
     for (auto& layer_cache_buffer : layer_cache_buffers_) {
         if (layer_cache_buffer->layerId() == layer_id) {
             return layer_cache_buffer;
@@ -45,12 +46,12 @@ LoadContextStore::LoadContextStore() {}
 
 LoadContextStore::~LoadContextStore() {}
 
-std::shared_ptr<LoadContext> LoadContextStore::getLoadContext(int64_t context_id) const {
+std::shared_ptr<CacheStoreClientLoadContext> LoadContextStore::getLoadContext(int64_t context_id) const {
     std::lock_guard<std::mutex> lock(load_context_map_mutex_);
     return load_context_map_.at(context_id);
 }
 
-void LoadContextStore::addLoadContext(const std::shared_ptr<LoadContext>& load_context) {
+void LoadContextStore::addLoadContext(const std::shared_ptr<CacheStoreClientLoadContext>& load_context) {
     std::lock_guard<std::mutex> lock(load_context_map_mutex_);
     load_context_map_[load_context->contextId()] = load_context;
 }

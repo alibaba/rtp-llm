@@ -2,7 +2,7 @@
 
 #include "rtp_llm/cpp/cache_new/p2p_connector/LayerCacheBuffer.h"
 #include "rtp_llm/cpp/cache_new/p2p_connector/proto/service.pb.h"
-#include "rtp_llm/cpp/cache_new/p2p_connector/LoadContext.h"
+#include "rtp_llm/cpp/cache_new/p2p_connector/CacheStoreClientLoadContext.h"
 #include "rtp_llm/cpp/cache_new/p2p_connector/TcpClient.h"
 #include "rtp_llm/cpp/cache_new/p2p_connector/TcpServer.h"
 #include "rtp_llm/cpp/cache_new/p2p_connector/CacheStoreClientService.h"
@@ -12,10 +12,10 @@ namespace rtp_llm {
 
 class CacheStoreClientClosure: public google::protobuf::Closure {
 public:
-    CacheStoreClientClosure(const std::shared_ptr<CacheLoadRequest>&  cache_load_request,
-                            const std::shared_ptr<CacheLoadResponse>& cache_load_response,
-                            arpc::ANetRPCController*                  controller,
-                            const std::shared_ptr<LoadContext>&       load_context);
+    CacheStoreClientClosure(const std::shared_ptr<CacheLoadRequest>&            cache_load_request,
+                            const std::shared_ptr<CacheLoadResponse>&           cache_load_response,
+                            arpc::ANetRPCController*                            controller,
+                            const std::shared_ptr<CacheStoreClientLoadContext>& load_context);
     ~CacheStoreClientClosure() {
         if (controller_) {
             delete controller_;
@@ -26,10 +26,10 @@ public:
     void Run() override;
 
 private:
-    std::shared_ptr<CacheLoadRequest>  cache_load_request_;
-    std::shared_ptr<CacheLoadResponse> cache_load_response_;
-    arpc::ANetRPCController*           controller_ = nullptr;
-    std::shared_ptr<LoadContext>       load_context_;
+    std::shared_ptr<CacheLoadRequest>            cache_load_request_;
+    std::shared_ptr<CacheLoadResponse>           cache_load_response_;
+    arpc::ANetRPCController*                     controller_ = nullptr;
+    std::shared_ptr<CacheStoreClientLoadContext> load_context_;
 };
 
 class CacheStoreClient {
@@ -42,12 +42,13 @@ public:
 
     std::vector<CacheStoreServerWorker> getPeerWorkerInfo(const std::string& ip, uint32_t port);
 
-    std::shared_ptr<LoadContext> asyncLoad(const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers,
-                                           int64_t                                               timeout_ms,
-                                           const std::string&                                    ip,
-                                           uint32_t                                              port,
-                                           int                                                   partition_count,
-                                           int                                                   partition_id);
+    std::shared_ptr<CacheStoreClientLoadContext>
+    asyncLoad(const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers,
+              int64_t                                               timeout_ms,
+              const std::string&                                    ip,
+              uint32_t                                              port,
+              int                                                   partition_count,
+              int                                                   partition_id);
 
 private:
     int64_t generateContextId();

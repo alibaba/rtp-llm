@@ -12,10 +12,11 @@
 
 namespace rtp_llm {
 
-class LoadContext {
+class CacheStoreClientLoadContext {
 public:
-    LoadContext(const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers, int64_t context_id);
-    ~LoadContext();
+    CacheStoreClientLoadContext(const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers,
+                                int64_t                                               context_id);
+    ~CacheStoreClientLoadContext();
 
 public:
     bool success() const;
@@ -43,14 +44,14 @@ public:
     ~LoadContextStore();
 
 public:
-    std::shared_ptr<LoadContext> getLoadContext(int64_t context_id) const;
-    void                         addLoadContext(const std::shared_ptr<LoadContext>& load_context);
-    int64_t                      generateContextId();
+    std::shared_ptr<CacheStoreClientLoadContext> getLoadContext(int64_t context_id) const;
+    void    addLoadContext(const std::shared_ptr<CacheStoreClientLoadContext>& load_context);
+    int64_t generateContextId();
 
 private:
-    std::atomic_int64_t                                       context_id_generator_ = 0;
-    mutable std::mutex                                        load_context_map_mutex_;
-    std::unordered_map<int64_t, std::shared_ptr<LoadContext>> load_context_map_;
+    std::atomic_int64_t                                                       context_id_generator_ = 0;
+    mutable std::mutex                                                        load_context_map_mutex_;
+    std::unordered_map<int64_t, std::shared_ptr<CacheStoreClientLoadContext>> load_context_map_;
 };
 
 }  // namespace rtp_llm

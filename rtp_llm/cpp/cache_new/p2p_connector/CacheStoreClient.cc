@@ -7,7 +7,7 @@ namespace rtp_llm {
 CacheStoreClientClosure::CacheStoreClientClosure(const std::shared_ptr<CacheLoadRequest>&  cache_load_request,
                                                  const std::shared_ptr<CacheLoadResponse>& cache_load_response,
                                                  arpc::ANetRPCController*                  controller,
-                                                 const std::shared_ptr<LoadContext>&       load_context):
+                                                 const std::shared_ptr<CacheStoreClientLoadContext>& load_context):
     cache_load_request_(cache_load_request),
     cache_load_response_(cache_load_response),
     controller_(controller),
@@ -75,7 +75,7 @@ std::vector<CacheStoreServerWorker> CacheStoreClient::getPeerWorkerInfo(const st
     return worker_info;
 }
 
-std::shared_ptr<LoadContext>
+std::shared_ptr<CacheStoreClientLoadContext>
 CacheStoreClient::asyncLoad(const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers,
                             int64_t                                               timeout_ms,
                             const std::string&                                    ip,
@@ -99,7 +99,7 @@ CacheStoreClient::asyncLoad(const std::vector<std::shared_ptr<LayerCacheBuffer>>
         return nullptr;
     }
 
-    auto load_context = std::make_shared<LoadContext>(layer_cache_buffers, context_id);
+    auto load_context = std::make_shared<CacheStoreClientLoadContext>(layer_cache_buffers, context_id);
     load_context_store_->addLoadContext(load_context);
 
     std::shared_ptr<CacheLoadResponse> cache_load_response(new CacheLoadResponse());

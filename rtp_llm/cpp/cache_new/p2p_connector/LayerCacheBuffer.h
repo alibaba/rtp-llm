@@ -7,13 +7,21 @@
 #include <vector>
 #include <memory>
 
+#include "rtp_llm/cpp/core/Buffer.h"
+
 namespace rtp_llm {
 
 struct BlockCacheBuffer {
     int64_t key;
     // not sure how to divide buffer according to layer type, will call allocator
     int block_id;
+
+    BufferPtr buffer1;
+    BufferPtr buffer2;
+
     BlockCacheBuffer(int64_t key, int block_id): key(key), block_id(block_id) {}
+    BlockCacheBuffer(int64_t key, int block_id, BufferPtr buffer1, BufferPtr buffer2):
+        key(key), block_id(block_id), buffer1(buffer1), buffer2(buffer2) {}
 };
 
 class LayerCacheBuffer {
@@ -22,7 +30,8 @@ public:
     ~LayerCacheBuffer() = default;
 
 public:
-    void                              addBlockCacheBuffer(int64_t key, int block_id);
+    void addBlockCacheBuffer(int64_t key, int block_id);
+    void addBlockCacheBuffer(int64_t key, int block_id, BufferPtr buffer1, BufferPtr buffer2);
     std::shared_ptr<BlockCacheBuffer> getBlockCacheBuffer(int64_t key);
     int                               layerId() const {
         return layer_id_;

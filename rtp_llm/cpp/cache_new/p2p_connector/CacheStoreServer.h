@@ -1,12 +1,11 @@
 #pragma once
 
 #include "rtp_llm/cpp/cache_new/p2p_connector/LayerCacheBuffer.h"
-#include "autil/ThreadPoolBase.h"
 #include "rtp_llm/cpp/cache_new/p2p_connector/TcpClient.h"
 #include "rtp_llm/cpp/cache_new/p2p_connector/TcpServer.h"
-#include "rtp_llm/cpp/cache_new/p2p_connector/LayerCacheBufferStore.h"
 #include "rtp_llm/cpp/cache_new/p2p_connector/CacheStoreServerService.h"
-#include "rtp_llm/cpp/cache_new/p2p_connector/DeviceEvent.h"
+#include "rtp_llm/cpp/core/Event.h"
+#include "autil/LockFreeThreadPool.h"
 
 namespace rtp_llm {
 
@@ -15,6 +14,7 @@ public:
     CacheStoreServer(const std::shared_ptr<TcpClient>&          tcp_client,
                      const std::shared_ptr<TcpServer>&          tcp_server,
                      int                                        layer_num,
+                     const std::shared_ptr<KVCacheAllocator>&   kv_cache_allocator,
                      const std::vector<CacheStoreServerWorker>& worker_addrs);
     ~CacheStoreServer();
 
@@ -31,6 +31,7 @@ private:
     std::shared_ptr<TcpClient>          tcp_client_;
     std::shared_ptr<TcpServer>          tcp_server_;
     int                                 layer_num_;
+    std::shared_ptr<KVCacheAllocator>   kv_cache_allocator_;
     std::vector<CacheStoreServerWorker> worker_addrs_;
 
     autil::ThreadPoolBasePtr               thread_pool_;  // task executor
