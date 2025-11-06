@@ -634,7 +634,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, FreeWithNullBatchResource) {
 // ==================== 压力测试 ====================
 
 TEST_F(SingleTypeKVCacheAllocatorTest, MixedOperations) {
-    auto config = createSingleTypeTestConfig(4, 20);
+    auto config = createSingleTypeTestConfig(4, 30);
     allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config, device_);
     allocator_->init();
 
