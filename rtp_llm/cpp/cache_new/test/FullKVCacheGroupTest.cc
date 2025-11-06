@@ -69,17 +69,19 @@ TEST_F(FullKVCacheGroupTest, MatchTest) {
 
     // zero math
     CacheKeysType cache_keys    = {103, 104, 105, 106};
-    auto          match_result2 = group1.match(cache_keys);
-    ASSERT_EQ(match_result2.reuse_length, 0);
+    auto          match_result1 = group1.match(cache_keys);
+    ASSERT_EQ(match_result1.reuse_blocks, 0);
+    ASSERT_EQ(match_result1.reuse_length, 0);
     BlockIndicesType expected_result = {};
-    ASSERT_EQ(match_result2.block_indices, expected_result);
+    ASSERT_EQ(match_result1.block_indices, expected_result);
 
     // part match
     cache_keys         = {101, 102, 103, 1046};
-    auto match_result1 = group1.match(cache_keys);
-    ASSERT_EQ(match_result1.reuse_length, 2 * 4);
+    auto match_result2 = group1.match(cache_keys);
+    ASSERT_EQ(match_result2.reuse_blocks, 2);
+    ASSERT_EQ(match_result2.reuse_length, 2 * 4);
     expected_result = {1, 2};
-    ASSERT_EQ(match_result1.block_indices, expected_result);
+    ASSERT_EQ(match_result2.block_indices, expected_result);
 
     // all match
     BlockCacheV1::CacheItem item3   = {103, 3, false};
@@ -92,6 +94,7 @@ TEST_F(FullKVCacheGroupTest, MatchTest) {
 
     cache_keys         = {101, 102, 103, 104};
     auto match_result3 = group1.match(cache_keys);
+    ASSERT_EQ(match_result3.reuse_blocks, 4);
     ASSERT_EQ(match_result3.reuse_length, 4 * 4);
 
     expected_result = {1, 2, 3, 4};

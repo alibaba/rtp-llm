@@ -71,7 +71,7 @@ MallocResult SingleTypeKVCacheAllocator::malloc(const MallocInfo& malloc_info) {
         RTP_LLM_LOG_ERROR("BatchKVCacheResource is null");
         return {false, 0};
     }
-    
+
     if (!malloc_info.complete_token_ids) {
         RTP_LLM_LOG_ERROR("CompleteTokenIds is null");
         return {false, 0};
@@ -86,10 +86,13 @@ MallocResult SingleTypeKVCacheAllocator::malloc(const MallocInfo& malloc_info) {
         auto& cache_keys    = malloc_info.batch_kv_cache_resource->cache_keys[batch_id];
         auto& block_indices = malloc_info.batch_kv_cache_resource->batch_block_id[batch_id];
 
-        int reuse_len = 0;
+        int reuse_blocks = 0;
+        // TODO, match is only in prefill
         if (malloc_info.batch_kv_cache_resource->enable_reuse_cache && block_indices.size() < cache_keys.size()) {
             auto match_result = full_kv_cache_group_->match(cache_keys);
-            reuse_len         = static_cast<int>(match_result.reuse_length);
+            // TODO, modify blocks
+            reuse_blocks  = static_cast<int>(match_result.reuse_blocks);
+            block_indices = match_result.block_indices;
         }
 
         auto need_blocks_num = full_kv_cache_group_->needBlocksNum(seq_len, block_indices.size());
@@ -107,7 +110,7 @@ MallocResult SingleTypeKVCacheAllocator::malloc(const MallocInfo& malloc_info) {
 
         // TODO: fix this : use batch[0] reuse_len as total_reuse_len now
         if (batch_id == 0) {
-            total_reuse_len = reuse_len;
+            total_reuse_len = reuse_blocks * full_kv_cache_group_->seqSizePerBlock();
         }
     }
 
@@ -183,7 +186,6 @@ BlockBufferInfo SingleTypeKVCacheAllocator::convertIndexToBuffer(int layer_id, i
     return full_kv_cache_group_->convertIndexToBuffer(layer_id, block_id);
 }
 
-
 size_t SingleTypeKVCacheAllocator::freeBlocksNums() const {
     return block_pool_->freeBlockNums();
 }
@@ -200,75 +202,5 @@ size_t SingleTypeKVCacheAllocator::totalBlocksNums() const {
 size_t SingleTypeKVCacheAllocator::maxSeqLen() const {
     return block_pool_->totalBlockNums() * full_kv_cache_group_->seqSizePerBlock();
 }
-
-
-void SingleTypeKVCacheAllocator::blockCopy(int src_block_index, int dest_block_index) {
-    BlockIdPair copy_mapping{src_block_index, dest_block_index};
-    blockBatchCopy(&copy_mapping, &copy_mapping + 1);
-}
-
-void SingleTypeKVCacheAllocator::blockBatchCopy(const std::vector<BlockIdPair>& copy_mapping) {
-    blockBatchCopy(copy_mapping.data(), copy_mapping.data() + copy_mapping.size());
-}
-
-void SingleTypeKVCacheAllocator::blockBatchCopy(const Buffer& copy_mapping) {
-    RTP_LLM_CHECK(copy_mapping.dim() == 2 && copy_mapping.shape()[1] == 2);
-    const auto* begin_ptr = (const BlockIdPair*)copy_mapping.data();
-    size_t      copy_num  = copy_mapping.shape()[0];
-    blockBatchCopy(begin_ptr, begin_ptr + copy_num);
-}
-
-
-void SingleTypeKVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, const BlockIdPair* end_ptr) {
-    using CopyType = BatchCopyParams::CopyType;
-
-    if (end_ptr == begin_ptr) {
-        return;
-    }
-
-    if (!full_kv_cache_group_) {
-        RTP_LLM_LOG_ERROR("KV cache group is not initialized");
-        return;
-    }
-
-    BatchCopyParams copy_params;
-
-    const size_t copy_num = (end_ptr - begin_ptr) * config_.layer_num;
-
-    size_t copy_nums[CopyType::TYPE_SIZE] = {};
-    auto copy_type = BatchCopyParams::get_copy_type(atype_ == AllocationType::DEVICE ? rtp_llm::MEMORY_GPU : rtp_llm::MEMORY_CPU,
-                                                     atype_ == AllocationType::DEVICE ? rtp_llm::MEMORY_GPU : rtp_llm::MEMORY_CPU);
-    copy_nums[copy_type] += copy_num * 2; // for k and v 
-
-    for (size_t i = 0; i < CopyType::TYPE_SIZE; ++i) {
-        copy_params.reserve(static_cast<CopyType>(i), copy_nums[i]);
-    }
-
-    auto& spec = config_.layer_type_params[0];
-    size_t k_block_size = spec->k_block_size();
-    size_t v_block_size = spec->v_block_size();
-
-    for (auto it = begin_ptr; it != end_ptr; ++it) {
-        auto [src_block_index, dest_block_index] = *it;
-        
-        for (int layer_id = 0; layer_id < config_.layer_num; layer_id++) {
-            auto src_addr_info = full_kv_cache_group_->convertIndexToAddr(layer_id, src_block_index);
-            auto dst_addr_info = full_kv_cache_group_->convertIndexToAddr(layer_id, dest_block_index);
-
-            if (!src_addr_info.k_addr || !dst_addr_info.k_addr || 
-                !src_addr_info.v_addr || !dst_addr_info.v_addr) {
-                RTP_LLM_LOG_ERROR("Failed to get block address for layer %d, src_block %d, dst_block %d",
-                                 layer_id, src_block_index, dest_block_index);
-                continue;
-            }
-
-            copy_params.add(dst_addr_info.k_addr, src_addr_info.k_addr, k_block_size, copy_type);
-            copy_params.add(dst_addr_info.v_addr, src_addr_info.v_addr, v_block_size, copy_type);
-        }
-    }
-
-    device_->batchCopy(copy_params);
-}
-
 
 }  // namespace rtp_llm
