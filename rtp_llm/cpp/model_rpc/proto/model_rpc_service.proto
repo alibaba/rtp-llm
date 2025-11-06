@@ -384,6 +384,34 @@ message MemoryBlockCacheResponsePB {
     bool success = 1;
 }
 
+message LayerCacheBlock {
+    uint32 layer_id = 1;
+    repeated uint32 block_ids = 2;
+}
+
+message CacheStoreWorker {
+    string ip = 1;
+    uint32 port = 2;
+    uint32 rdma_port = 3;
+}
+
+message P2PConnectorLoadBroadcastInfoPB {
+    repeated int64 cache_keys = 1;
+    repeated LayerCacheBlock layer_blocks = 2;
+    repeated CacheStoreWorker peer_workers = 3;
+}
+
+message BroadcastAllTpRequestPB {
+    oneof msg {
+        P2PConnectorLoadBroadcastInfoPB p2p_info = 1;
+    }
+}
+
+message BroadcastAllTpResponsePB {
+    bool success = 1;
+    string error_info = 2;
+}
+
 service RpcService {
     rpc GetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
     rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
@@ -399,6 +427,8 @@ service RpcService {
 
     rpc DistKvCache(DistKvCacheRequestPB) returns (DistKvCacheResponsePB);
     rpc MemoryBlockCache(MemoryBlockCacheRequestPB) returns (MemoryBlockCacheResponsePB);
+
+    rpc BroadcastAllTp(BroadcastAllTpRequestPB) returns (BroadcastAllTpResponsePB);
 }
 
 service MultimodalRpcService {
