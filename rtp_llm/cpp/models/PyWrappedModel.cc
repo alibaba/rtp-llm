@@ -40,17 +40,21 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     py_attn_inputs.sequence_lengths = Buffer2torchTensor(inputs.sequence_lengths, false);
     py_attn_inputs.input_lengths    = Buffer2torchTensor(inputs.input_lengths);
 
+    printf("tag 1\n");
+
     if (k_cache_buffer_) {
         py_attn_inputs.kv_cache_block_id_host = Buffer2torchTensor(inputs.kv_cache_block_id);
         py_attn_inputs.kv_block_offset =
             k_cache_buffer_ ? k_cache_buffer_->shape()[0] * k_cache_buffer_->shape()[1] : 0;
     }
+    printf("tag 2\n");
 
     // Calculate cu_seqlens
-    torch::Tensor cu_seqlens = torch::zeros({device_->initParams().concurrency_config.concurrency_limit + 1},
+    torch::Tensor cu_seqlens    = torch::zeros({device_->initParams().concurrency_config.concurrency_limit + 1},
                                             torch::TensorOptions(torch::kInt32).device(torch::kCPU));
     torch::Tensor cu_kv_seqlens = torch::zeros({device_->initParams().concurrency_config.concurrency_limit + 1},
                                                torch::TensorOptions(torch::kInt32).device(torch::kCPU));
+    printf("tag 3\n");
 
     size_t batch_size         = py_attn_inputs.input_lengths.size(0);
     size_t context_batch_size = py_attn_inputs.prefix_lengths.size(0);
@@ -63,12 +67,15 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         context_batch_size,
         decode_batch_size,
         batch_size);
+    printf("tag 4\n");
     cu_seqlens.slice(0, 1, context_batch_size + 1) = py_attn_inputs.input_lengths.cumsum(0);
     cu_kv_seqlens.slice(0, 1, context_batch_size + 1) =
         py_attn_inputs.input_lengths.add(py_attn_inputs.prefix_lengths).cumsum(0);
+    printf("tag 5\n");
     py_attn_inputs.context_total_kv_length = cu_kv_seqlens[context_batch_size].item<int>();
     py_attn_inputs.cu_seqlens              = cu_seqlens.cuda();
     py_attn_inputs.cu_kv_seqlens           = cu_kv_seqlens.cuda();
+    printf("tag 6\n");
 
     py_attn_inputs.sequence_lengths.pin_memory();
     return py_attn_inputs;
