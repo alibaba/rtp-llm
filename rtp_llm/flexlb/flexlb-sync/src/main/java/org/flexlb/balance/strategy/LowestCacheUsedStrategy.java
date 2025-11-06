@@ -1,14 +1,5 @@
 package org.flexlb.balance.strategy;
 
-import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.List;
-import java.util.Map;
-import java.util.Optional;
-import java.util.Set;
-import java.util.UUID;
-import java.util.stream.Collectors;
-
 import org.apache.commons.collections4.MapUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.flexlb.balance.LoadBalanceStrategyFactory;
@@ -25,6 +16,15 @@ import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.util.CommonUtils;
 import org.flexlb.utils.LoggingUtils;
 import org.springframework.stereotype.Component;
+
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
+import java.util.stream.Collectors;
 
 /**
  * @author zjw
@@ -50,20 +50,21 @@ public class LowestCacheUsedStrategy implements LoadBalancer {
             this.needKvCacheLen = needKvCacheLen;
         }
     }
+
     @Override
-    public boolean releaseLocalCache(String modelName, String ip, Long interRequestId) {
-        return true;
+    public void releaseLocalCache(String modelName, String ip, Long interRequestId) {
     }
+
     @Override
     public ServerStatus select(BalanceContext balanceContext, RoleType roleType, String group) {
         MasterRequest masterRequest = balanceContext.getMasterRequest();
         long seqLen = masterRequest.getSeqLen();
         Map<String/*ipPort*/, WorkerStatus> workerStatusMap;
         if (StringUtils.isNotEmpty(group)) {
-            workerStatusMap =  Optional.ofNullable(engineWorkerStatus.getModelRoleWorkerStatusMap().get(balanceContext.getMasterRequest().getModel()))
+            workerStatusMap = Optional.ofNullable(engineWorkerStatus.getModelRoleWorkerStatusMap().get(balanceContext.getMasterRequest().getModel()))
                     .map(entry -> entry.getRoleStatusMap(roleType, group))
                     .orElse(null);
-        }  else {
+        } else {
             workerStatusMap = Optional.ofNullable(engineWorkerStatus.getModelRoleWorkerStatusMap().get(balanceContext.getMasterRequest().getModel()))
                     .map(entry -> entry.getRoleStatusMap(roleType))
                     .orElse(null);
@@ -77,14 +78,14 @@ public class LowestCacheUsedStrategy implements LoadBalancer {
         // 这样可以避免多个线程都选择同一个Worker的问题
         synchronized (LowestCacheUsedStrategy.class) {
             List<WorkerStatus> candidateWorkerStatus = new ArrayList<>();
-            for(String ipPort : workerStatusMap.keySet()) {
+            for (String ipPort : workerStatusMap.keySet()) {
                 WorkerStatus workerStatus = workerStatusMap.get(ipPort);
                 if (workerStatus.isAlive()) {
                     candidateWorkerStatus.add(workerStatus);
                 }
             }
             LoggingUtils.info("candidateWorkerStatus size: {}", candidateWorkerStatus.size());
-            if(candidateWorkerStatus.isEmpty()){
+            if (candidateWorkerStatus.isEmpty()) {
                 return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
             }
             // 直接选择缓存使用量最少且满足条件的Worker
@@ -94,7 +95,7 @@ public class LowestCacheUsedStrategy implements LoadBalancer {
                             seqLen - calcPrefixMatchLength(ws.getCacheStatus(),
                                     balanceContext.getMasterRequest().getBlockCacheKeys())))
                     .collect(Collectors.toList());
-            
+
             Optional<ScoredWorker> bestWorker = candidates.stream()
                     .min(Comparator.comparingLong(candidate -> candidate.w.getKvCacheUsed().get()))
                     .map(minCacheUsed -> {
@@ -105,18 +106,18 @@ public class LowestCacheUsedStrategy implements LoadBalancer {
                         int randomIndex = new java.util.Random().nextInt(bestCandidates.size());
                         return bestCandidates.get(randomIndex);
                     });
-            
+
             if (bestWorker.isPresent()) {
                 ScoredWorker candidate = bestWorker.get();
                 WorkerStatus worker = candidate.w;
                 long needKvCacheLen = candidate.needKvCacheLen;
-                
+
                 // 更新其他状态
                 LoggingUtils.info("成功选择{} Worker, ip:{}, port: {} need mem:{}, kvCache Used:{}, free:{}",
                         roleType.toString(), worker.getIp(), worker.getPort(), seqLen - needKvCacheLen, worker.getKvCacheUsed().get(), worker.getKvCacheFree().get());
                 return buildServerStatus(worker, seqLen, needKvCacheLen, roleType, balanceContext.getInterRequestId());
             }
-            
+
             // 如果没有找到合适的Worker，返回失败
             LoggingUtils.warn("选择Worker失败，没有找到合适的Worker");
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
@@ -125,7 +126,7 @@ public class LowestCacheUsedStrategy implements LoadBalancer {
 
     private long calcPrefixMatchLength(CacheStatus cacheStatus, List<Long> blockCacheKeys) {
         // 计算 prefix match length
-        if(cacheStatus == null){
+        if (cacheStatus == null) {
             return 0;
         }
         long blockSize = cacheStatus.getBlockSize();
@@ -133,17 +134,17 @@ public class LowestCacheUsedStrategy implements LoadBalancer {
         if (blockCacheKeys == null || cachePrefixHash == null) {
             return 0;
         }
-        for(int index = blockCacheKeys.size()-1; index >= 0; index-- ){
+        for (int index = blockCacheKeys.size() - 1; index >= 0; index--) {
             long hash = blockCacheKeys.get(index);
             // 将Long转换为BigInteger进行比较
-            if(cachePrefixHash.contains(hash)){
+            if (cachePrefixHash.contains(hash)) {
                 return blockSize * (index + 1);
             }
         }
         return 0;
     }
 
-    
+
     private ServerStatus buildServerStatus(WorkerStatus optimalWorker, long seqLen, long prefixLength, RoleType roleType, long interRequestId) {
         ServerStatus result = new ServerStatus();
         try {
@@ -164,7 +165,6 @@ public class LowestCacheUsedStrategy implements LoadBalancer {
 
             result.setSuccess(true);
             result.setRole(roleType);
-            result.setBatchId(batchId);
             result.setServerIp(optimalWorker.getIp());
             result.setHttpPort(optimalWorker.getPort());
             result.setGrpcPort(CommonUtils.toGrpcPort(optimalWorker.getPort()));

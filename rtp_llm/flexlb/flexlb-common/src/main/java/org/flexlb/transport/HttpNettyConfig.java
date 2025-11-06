@@ -14,7 +14,6 @@ import io.netty.util.concurrent.DefaultEventExecutorGroup;
 import io.netty.util.concurrent.DefaultThreadFactory;
 import io.netty.util.concurrent.EventExecutorGroup;
 import io.netty.util.concurrent.RejectedExecutionHandlers;
-import org.flexlb.config.WhaleApiBackendConfig;
 import org.flexlb.constant.CommonConstants;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -27,26 +26,23 @@ import java.util.concurrent.TimeUnit;
 @Configuration
 public class HttpNettyConfig {
 
-    private final WhaleApiBackendConfig config;
-
-    public HttpNettyConfig(WhaleApiBackendConfig config) {
-        this.config = config;
-    }
+    private final int responseTimeoutSeconds = 120;
+    private final int nettyMaxChunkSize = 8192;
+    private final int eventExecuteThreads = 10 * Runtime.getRuntime().availableProcessors();
 
     @Bean(name = "nettyClient")
     public HttpNettyClientHandler createNettyClientHandler() {
         Bootstrap bootstrap = new Bootstrap();
         EventLoopGroup group = new NioEventLoopGroup(Runtime.getRuntime().availableProcessors());
         HttpNettyClientHandler handler = new HttpNettyClientHandler(bootstrap);
-
-        EventExecutorGroup defaultEventExecutorGroup = new DefaultEventExecutorGroup(config.getEventExecuteThreads(),
+        EventExecutorGroup defaultEventExecutorGroup = new DefaultEventExecutorGroup(eventExecuteThreads,
                 new DefaultThreadFactory("default-custom-executor"),
                 // 使用有界队列，容量为1000
                 1000, RejectedExecutionHandlers.reject());
-
+        int requestTimeoutMillis = 500;
         bootstrap.group(group)
                 .channel(NioSocketChannel.class)
-                .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, config.getRequestTimeoutMillis())
+                .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, requestTimeoutMillis)
                 .option(ChannelOption.TCP_NODELAY, true)
                 .option(ChannelOption.ALLOCATOR, PooledByteBufAllocator.DEFAULT)
                 .handler(new ChannelInitializer<SocketChannel>() {
@@ -54,9 +50,8 @@ public class HttpNettyConfig {
                     protected void initChannel(SocketChannel ch) {
                         // pipeline里面的ChannelHandler顺序很重要
                         ch.pipeline()
-                                .addLast(CommonConstants.CODEC, new HttpClientCodec(8192, 8192,
-                                        config.getNettyMaxChunkSize()))
-                                .addLast("timeoutHandler", new ReadTimeoutHandler(config.getResponseTimeoutSeconds(),
+                                .addLast(CommonConstants.CODEC, new HttpClientCodec(8192, 8192, nettyMaxChunkSize))
+                                .addLast("timeoutHandler", new ReadTimeoutHandler(responseTimeoutSeconds,
                                         TimeUnit.SECONDS))
                                 .addLast(defaultEventExecutorGroup, "inboundHandler", handler);
                         handler.channelEnhance(ch);
@@ -74,12 +69,10 @@ public class HttpNettyConfig {
         Bootstrap bootstrap = new Bootstrap();
         EventLoopGroup group = new NioEventLoopGroup(Runtime.getRuntime().availableProcessors());
         HttpNettyClientHandler handler = new HttpNettyClientHandler(bootstrap);
-
-        EventExecutorGroup defaultEventExecutorGroup = new DefaultEventExecutorGroup(config.getEventExecuteThreads(),
+        EventExecutorGroup defaultEventExecutorGroup = new DefaultEventExecutorGroup(eventExecuteThreads,
                 new DefaultThreadFactory("default-custom-executor-sync"),
                 // 使用有界队列，容量为1000
                 1000, RejectedExecutionHandlers.reject());
-
         bootstrap.group(group)
                 .channel(NioSocketChannel.class)
                 .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 1000)
@@ -90,8 +83,7 @@ public class HttpNettyConfig {
                     protected void initChannel(SocketChannel ch) {
                         // pipeline里面的ChannelHandler顺序很重要
                         ch.pipeline()
-                                .addLast(CommonConstants.CODEC, new HttpClientCodec(8192, 8192,
-                                        config.getNettyMaxChunkSize()))
+                                .addLast(CommonConstants.CODEC, new HttpClientCodec(8192, 8192, nettyMaxChunkSize))
                                 .addLast(CommonConstants.TIMEOUT_HANDLER, new ReadTimeoutHandler(3, TimeUnit.SECONDS))
                                 .addLast(defaultEventExecutorGroup, "inboundHandler", handler);
                         handler.channelEnhance(ch);
@@ -100,4 +92,3 @@ public class HttpNettyConfig {
         return handler;
     }
 }
-

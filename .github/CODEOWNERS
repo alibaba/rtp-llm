@@ -1,1 +1,5 @@
+# Default owner for all files
 *   @LLLLKKKK
+
+# FlexLB module specific owners
+rtp_llm/flexlb/   @gavin-hgy @jianglan89 @sunmiaozju

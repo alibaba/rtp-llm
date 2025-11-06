@@ -1,9 +1,8 @@
 package org.flexlb.dao.route;
 
-
-import com.alibaba.fastjson.JSON;
-import com.alibaba.fastjson.TypeReference;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.flexlb.util.JsonUtils;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
@@ -13,7 +12,7 @@ class ServiceRouteTest {
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Test
-    public void testConfigLoader() throws Exception {
+    void testConfigLoader() throws Exception {
         String TEST_JSON = "{\n" +
                 "\t\"service_id\": \"aigc.text-generation.generation.engine_service\",\n" +
                 "\t\"prefill_endpoint\": {\n" +
@@ -62,7 +61,7 @@ class ServiceRouteTest {
     }
 
     @Test
-    public void testConfigLoaderList() throws Exception {
+    void testConfigLoaderList() throws Exception {
         String TEST_JSON = "[{\n" +
                 "\t\"service_id\": \"aigc.text-generation.generation.engine_service\",\n" +
                 "\t\"prefill_endpoint\": {\n" +
@@ -93,7 +92,7 @@ class ServiceRouteTest {
                 "\t\t}\n" +
                 "\t}]\n" +
                 "}]";
-        List<ServiceRoute> serviceRoutes = JSON.parseObject(TEST_JSON, new TypeReference<List<ServiceRoute>>() {
+        List<ServiceRoute> serviceRoutes = JsonUtils.toObject(TEST_JSON, new TypeReference<List<ServiceRoute>>() {
         });
         ServiceRoute serviceRoute = serviceRoutes.get(0);
         Assertions.assertEquals(1, serviceRoute.getRoleEndpoints().size());
