@@ -64,7 +64,9 @@ class RtpSimplePyModel:
         self.device = get_device().get_device_type().name.lower()
 
         # init kv cache and bind it to py model
-        self.block_nums = (max_total_tokens + tokens_per_block - 1) // tokens_per_block
+        self.block_nums = (
+            max_total_tokens + tokens_per_block - 1
+        ) // tokens_per_block + 1
         self.tokens_per_block = tokens_per_block
         self.kv_cache = KVCache()
         self._init_kv_cache()
