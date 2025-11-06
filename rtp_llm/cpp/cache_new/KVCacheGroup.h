@@ -37,10 +37,9 @@ public:
 
     virtual ~KVCacheGroup() = default;
 
-    virtual bool init() = 0;
-    // TODO, add error status
-    virtual void malloc(CacheKeysType& cache_keys, BlockIndicesType& block_indices, int seq_len) = 0;
-    // TODO, add error status for remote.
+    virtual bool init()                                                                          = 0;
+    virtual bool malloc(CacheKeysType& cache_keys, BlockIndicesType& block_indices, int seq_len) = 0;
+    // TODO, match 替换为try match，和touch
     virtual MatchResult match(CacheKeysType& cache_keys)                                                       = 0;
     virtual void        free(const BlockIndicesType& block_indices)                                            = 0;
     virtual void insertIntoCache(CacheKeysType& cache_keys, BlockIndicesType& block_indices, bool is_resident) = 0;

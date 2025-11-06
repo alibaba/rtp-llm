@@ -68,17 +68,17 @@ BlockIndicesType BlockPool::malloc(int num_blocks) {
     BlockIndicesType block_ids;
     block_ids.reserve(num_blocks);
     if (free_block_ids_.size() < static_cast<size_t>(num_blocks)) {
-        RTP_LLM_LOG_DEBUG(
+        RTP_LLM_LOG_WARNING(
             "Block pool only has %zu free blocks, cannot allocate %d blocks", free_block_ids_.size(), num_blocks);
         return {};
     }
-    for (int i = 0; i < num_blocks; ++i) {
-        auto it = free_block_ids_.begin();
-        if (it == free_block_ids_.end())
-            break;
+    auto first = free_block_ids_.begin();
+    auto last  = first;
+    std::advance(last, num_blocks);
+    for (auto it = first; it != last; ++it) {
         block_ids.push_back(*it);
-        free_block_ids_.erase(it);
     }
+    free_block_ids_.erase(first, last);
     reference(block_ids);
     return block_ids;
 }
