@@ -78,7 +78,7 @@ class WeightManager:
             f"update weight request: {name}, shape: {tensor.shape}, device: {tensor.device}, dtype: {tensor.dtype}"
         )
         with torch.cuda.stream(self._working_stream):
-            tensor = tensor.to(self._device)
+            tensor = tensor.to(self._device, non_blocking=True)
             config = self._weights_loader.get_load_config()
 
             if "layers" in name:

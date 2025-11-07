@@ -11,8 +11,8 @@ from safetensors.torch import load_file
 from tipc import CudaIpcHelper, SharedMemoryIPCHelper, TensorTransportClient
 from tqdm import tqdm
 
-PATH = "/root/hf/Qwen3-30B-A3B"
-# PATH = "/root/hf/Qwen2-0.5B-Instruct"
+# PATH = "/root/hf/Qwen3-30B-A3B"
+PATH = "/root/hf/Qwen2-0.5B-Instruct"
 
 
 class RtpLLMHttpClient(TensorTransportClient):
@@ -107,8 +107,7 @@ class TestRtpClient(unittest.IsolatedAsyncioTestCase):
             )
 
             await client.pause()
-            asyncio.gather(client.chat_completion("_", "hello qwen."))
-            await client.update_model_weight(path=PATH, method="cu_ipc")
+            await client.update_model_weight(path=PATH, method="shm")
             await client.restart()
 
             await client.chat_completion(

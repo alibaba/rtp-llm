@@ -637,8 +637,6 @@ class ModelWeights:
             ori_tensor, data
         )  # This will raise errors if shape, device, or dtype mismatch
         with torch.inference_mode():
-            if is_master:
-                print(name, self._similarity(ori_tensor, data).item())
             ori_tensor.copy_(data)
 
     def set_global_weight(self, name: str, tensor: torch.Tensor):
@@ -666,8 +664,6 @@ class ModelWeights:
         # Use the check_data method to validate shape, device, and dtype
         self.check_data(ori_tensor, data)
         with torch.inference_mode():
-            if is_master:
-                print(name, self._similarity(ori_tensor, data).item())
             ori_tensor.copy_(data)
 
     def steal_global_weight(self, name: str):
@@ -702,8 +698,3 @@ class ModelWeights:
                 f"Input tensor dtype: {update_tensor.dtype}\n"
                 f"Original tensor dtype: {ori_tensor.dtype}"
             )
-
-    def _similarity(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-        a = a.float()
-        b = b.float()
-        return torch.square(a - b).sum() / (torch.square(b).sum() + 1e-7)
