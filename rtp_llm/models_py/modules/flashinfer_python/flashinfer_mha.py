@@ -60,7 +60,7 @@ class FlashInferPythonPrefillOp(object):
         config: GptInitModelParameters,
     ):
         self.config = config
-        self.head_dim = config.hidden_size // config.head_num
+        self.head_dim = config.size_per_head
         self.head_num = config.head_num
         self.scaling = self.head_dim**-0.5
         self.local_head_num = config.head_num // config.tp_size
@@ -93,7 +93,6 @@ class FlashInferPythonPrefillOp(object):
         k_scale = 1.0
         bmm1_scale = q_scale * k_scale * self.scaling
         bmm2_scale = 1.0
-
         o = flashinfer_python.prefill.trtllm_batch_context_with_kv_cache(
             query=q,
             kv_cache=(kv_cache.k_cache_base, kv_cache.v_cache_base),
@@ -122,7 +121,7 @@ class FlashInferPythonDecodeOp(object):
         config: GptInitModelParameters,
     ):
         self.config = config
-        self.head_dim = config.hidden_size // config.head_num
+        self.head_dim = config.size_per_head
         self.head_num = config.head_num
         self.scaling = self.head_dim**-0.5
         self.local_head_num = config.head_num // config.tp_size
