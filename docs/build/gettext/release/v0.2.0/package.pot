@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-10-15 19:12+0800\n"
+"POT-Creation-Date: 2025-11-07 12:59+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -41,18 +41,6 @@ msgid "**tag**"
 msgstr ""
 
 #: ../../release/v0.2.0/package.md:0
-msgid "**CUDA-SM9x**"
-msgstr ""
-
-#: ../../release/v0.2.0/package.md:0
-msgid "ali-hangzhou-hub-registry.cn-hangzhou.cr.aliyuncs.com/isearch/rtp_llm_sm9x_opensource"
-msgstr ""
-
-#: ../../release/v0.2.0/package.md:0
-msgid "0.2.0_0.2.0_2025_10_20_10_42_2b7b389a0"
-msgstr ""
-
-#: ../../release/v0.2.0/package.md:0
 msgid "**CUDA-SM8x**"
 msgstr ""
 
@@ -64,16 +52,20 @@ msgstr ""
 msgid "0.2.0_0.2.0_2025_10_09_17_35_8fa289f5"
 msgstr ""
 
-#: ../../release/v0.2.0/package.md:15
+#: ../../release/v0.2.0/package.md:12
 msgid "Images of SM9x,SM7x,AMD,Frontend,Master is comming soon"
 msgstr ""
 
-#: ../../release/v0.2.0/package.md:18
+#: ../../release/v0.2.0/package.md:15
 msgid "Wheel"
 msgstr ""
 
 #: ../../release/v0.2.0/package.md:0
 msgid "**wheel**"
+msgstr ""
+
+#: ../../release/v0.2.0/package.md:0
+msgid "**CUDA-SM9x**"
 msgstr ""
 
 #: ../../release/v0.2.0/package.md:0
@@ -85,11 +77,23 @@ msgid "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/package/daily/2025_10
 msgstr ""
 
 #: ../../release/v0.2.0/package.md:0
+msgid "**CUDA-SM7x**"
+msgstr ""
+
+#: ../../release/v0.2.0/package.md:0
 msgid "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/package/daily/2025_10_16/rtp_llm-0.2.0-0.2.0-2025_10_20_10_42_2b7b389a0-sm7x-cp310-cp310-manylinux1_x86_64.whl"
 msgstr ""
 
 #: ../../release/v0.2.0/package.md:0
+msgid "**Frontend**"
+msgstr ""
+
+#: ../../release/v0.2.0/package.md:0
 msgid "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/package/daily/2025_10_20/rtp_llm-0.2.0-0.2.0-2025_10_20_10_42_2b7b389a0-frontend-cp310-cp310-manylinux1_x86_64.whl"
+msgstr ""
+
+#: ../../release/v0.2.0/package.md:0
+msgid "**AMD**"
 msgstr ""
 
 #: ../../release/v0.2.0/package.md:0

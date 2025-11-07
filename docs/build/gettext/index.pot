@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-10-20 10:08+0800\n"
+"POT-Creation-Date: 2025-11-07 12:59+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -44,15 +44,15 @@ msgstr ""
 msgid "Advanced Features"
 msgstr ""
 
-#: ../../index.rst:76
+#: ../../index.rst:77
 msgid "RTP-LLM Router"
 msgstr ""
 
-#: ../../index.rst:82
+#: ../../index.rst:83
 msgid "Benchmark"
 msgstr ""
 
-#: ../../index.rst:88
+#: ../../index.rst:89
 msgid "References"
 msgstr ""
 
