@@ -1,5 +1,6 @@
 import gc
 import os
+import platform
 from enum import IntEnum, auto
 from typing import Optional, Tuple
 
@@ -43,6 +44,7 @@ class DeepEPWrapper:
     _ll_num_max_token_per_rank: int = 0
     _num_sms: int = 24
     _use_accl_ep: bool = True
+    _use_GB_deepep: bool = False
     _mode: DeepEPMode = DeepEPMode.NORMAL
 
     def __init__(self, group: ProcessGroup, params: GptInitModelParameters) -> None:
@@ -52,8 +54,9 @@ class DeepEPWrapper:
         self._num_experts = params.expert_num
         self._num_topk = params.moe_k
         self._num_sms = params.moe_config.deep_ep_num_sm
+        self._use_GB_deepep = "aarch64" in platform.machine()
         device_type = get_device().get_device_type()
-        if device_type == DeviceType.ROCm:
+        if (device_type == DeviceType.ROCm) or (self._use_GB_deepep):
             # use deep_ep_rocm in rocm
             self._use_accl_ep = False
         else:
