@@ -253,6 +253,7 @@ class DeepEPWrapper:
         if self._use_accl_ep:
             init_kwargs["allow_nvlink_for_low_latency_mode"] = True
             init_kwargs["allow_mnnvl"] = False
+        print(f"deep ep args: {init_kwargs} envs: {os.environ}", flush=True)
         return DeepEPBuffer(**init_kwargs)  # type: ignore
 
     def _init_low_latency_m2n_buffer(

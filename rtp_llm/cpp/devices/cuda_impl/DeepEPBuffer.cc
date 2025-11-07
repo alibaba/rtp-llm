@@ -49,6 +49,8 @@ bool DeepEPBuffer::init() {
 }
 
 void DeepEPBuffer::setAcclEPLowLatencyEnv(int ll_opt_level, int num_nodes) {
+    printf("setAcclEPLowLatencyEnv called");
+    RTP_LLM_LOG_ERROR("setAcclEPLowLatencyEnv ll_opt_level=%d, num_nodes=%d", ll_opt_level, num_nodes);
     if (low_latency_mode_ || autil::EnvUtil::getEnv("ACCL_NORMAL_MODE", "IBRC") == "IBGDA") {
         RTP_LLM_CHECK(num_qps_per_rank_ > 0);
 
@@ -93,9 +95,9 @@ void DeepEPBuffer::setAcclEPLowLatencyEnv(int ll_opt_level, int num_nodes) {
     //! NVSHMEM initialization requires at least 256 MiB
     std::string nvshmem_cumem_granularity_str = std::to_string(1 << 29);  // 2^29 = 536870912 (512 MiB)
     setenv("NVSHMEM_CUMEM_GRANULARITY", nvshmem_cumem_granularity_str.c_str(), 1);
-    if (!allow_mnnvl_) {
-        setenv("NVSHMEM_DISABLE_MNNVL", "1", 1);
-    }
+    // if (!allow_mnnvl_) {
+    //     setenv("NVSHMEM_DISABLE_MNNVL", "1", 1);
+    // }
 }
 
 void DeepEPBuffer::setLowLatencyEnv() {
