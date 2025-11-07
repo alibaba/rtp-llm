@@ -1,5 +1,6 @@
 from typing import Any, Dict, Optional
 
+import aiter
 import torch
 
 from rtp_llm.models_py.distributed.deepep_wrapper import (
@@ -71,11 +72,16 @@ class DeepepNormalRouter(FusedMoeDataRouter):
     ) -> ExpertForwardPayload:
         if a1_scale is not None or a2_scale is not None:
             raise ValueError("DeepEPNormal a1_scale or a2_scale should be None")
-        # if self.use_fp8:
-        #    a1, a1_scale = trt_fp8_quantize_128(a1, False)
-        #    input = (a1, a1_scale)
-        # else:
-        input = a1
+        if self.use_fp8:
+            if self.quant_config.is_per_act_token:
+                a1, a1_scale = aiter.pertoken_quant(
+                    a1, quant_dtype=self.quant_config.quant_dtype
+                )
+                input = (a1, a1_scale)
+            else:
+                raise NotImplementedError("rocm only support per_act_token quant")
+        else:
+            input = a1
         # pre dispatch
         # topk_ids = topk_ids.long()
         (
@@ -106,11 +112,14 @@ class DeepepNormalRouter(FusedMoeDataRouter):
             topk_weights,
             expert_alignment=self.expert_alignment,
         )
-        # if self.use_fp8:
-        #    expert_x, expert_x_scale = output
-        # else:
-        expert_x = output
-        expert_x_scale = None
+        if self.use_fp8:
+            if self.quant_config.is_per_act_token:
+                expert_x, expert_x_scale = output
+            else:
+                raise NotImplementedError("rocm only support per_act_token quant")
+        else:
+            expert_x = output
+            expert_x_scale = None
         self.handle = handle
         return ExpertForwardPayload(
             expert_x=expert_x,
