@@ -1,6 +1,6 @@
 -r requirements_base.txt
 auto_gptq
-autoawq
+autoawq>=0.2.9
 datasets
 https://mirrors.aliyun.com/pytorch-wheels/cu126/torch-2.6.0%2Bcu126-cp310-cp310-manylinux_2_28_x86_64.whl#sha256=c55280b4da58e565d8a25e0e844dc27d0c96aaada7b90b4de70a45397faf604e
 https://mirrors.aliyun.com/pytorch-wheels/cu126/torchvision-0.21.0%2Bcu126-cp310-cp310-linux_x86_64.whl#sha256=db4369a89b866b319c8dd73931c3e5f314aa535f7035ae2336ce9a26d7ace15a
