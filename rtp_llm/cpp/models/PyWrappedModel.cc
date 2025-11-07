@@ -47,7 +47,7 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     }
 
     // Calculate cu_seqlens
-    torch::Tensor cu_seqlens = torch::zeros({device_->initParams().concurrency_config.concurrency_limit + 1},
+    torch::Tensor cu_seqlens    = torch::zeros({device_->initParams().concurrency_config.concurrency_limit + 1},
                                             torch::TensorOptions(torch::kInt32).device(torch::kCPU));
     torch::Tensor cu_kv_seqlens = torch::zeros({device_->initParams().concurrency_config.concurrency_limit + 1},
                                                torch::TensorOptions(torch::kInt32).device(torch::kCPU));
@@ -63,9 +63,11 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         context_batch_size,
         decode_batch_size,
         batch_size);
-    cu_seqlens.slice(0, 1, context_batch_size + 1) = py_attn_inputs.input_lengths.cumsum(0);
-    cu_kv_seqlens.slice(0, 1, context_batch_size + 1) =
-        py_attn_inputs.input_lengths.add(py_attn_inputs.prefix_lengths).cumsum(0);
+    if (context_batch_size > 1) {
+        cu_seqlens.slice(0, 1, context_batch_size + 1) = py_attn_inputs.input_lengths.cumsum(0);
+        cu_kv_seqlens.slice(0, 1, context_batch_size + 1) =
+            py_attn_inputs.input_lengths.add(py_attn_inputs.prefix_lengths).cumsum(0);
+    }
     py_attn_inputs.context_total_kv_length = cu_kv_seqlens[context_batch_size].item<int>();
     py_attn_inputs.cu_seqlens              = cu_seqlens.cuda();
     py_attn_inputs.cu_kv_seqlens           = cu_kv_seqlens.cuda();
