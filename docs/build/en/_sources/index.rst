@@ -71,6 +71,7 @@ The core features include:
    backend/quantization.md
    backend/lora.ipynb
    backend/pd_disaggregation.ipynb
+   backend/logits_processor.md
 
 
 .. toctree::

@@ -30,11 +30,13 @@ RTP-LLM First Release Version:0.2.0(2025.09)
 | **Llama**         | `meta-llama/Llama-4-Scout-17B-16E-Instruct`  | Meta’s open LLM series, spanning 7B to 400B parameters (Llama 2, 3, and new Llama 4) with well-recognized performance.  | NV ✅<br> AMD ✅ |
 
 ### Bug Fixs
-* metrics of cache is not work
-* P/D Disaggregation dead lock
+* P/D Disaggregation dead lock casuse by request cancel/failed before remote running
+* Raw Request stream stop_words cause fake hang
+* some speculative decoding bugs
 
 ## Question of omission
-* too many dynamic lora need more **reserver_runtime_mem_mb**
+* In 3fs Case need more MEM or set FRONTEND_SERVER_COUNT=1 to reduce frontend_server mem usage in P/D when Use Frontend Disaggregation.
+* too many dynamic lora need more reserver_runtime_mem_mb
 * AMD not support MoE models
 * MoE model without shared_experter cannot use enable-layer-micro-batch
 * P/D Disaggregation with EPLB and MTP step > 1 may cause Prefill Hang

@@ -62,7 +62,7 @@
     <link rel="prev" title="Sending Requests" href="send_request.html" />
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="zh-CN"/>
-    <meta name="docbuild:last-update" content="2025 年 11 月 04 日"/>
+    <meta name="docbuild:last-update" content="2025 年 11 月 07 日"/>
 <link
   rel="stylesheet"
   href="../_static/css/language-switcher.css"
@@ -176,15 +176,15 @@
  </script></div>
         <div class="sidebar-primary-item"><nav class="bd-links bd-docs-nav" aria-label="Main">
     <div class="bd-toc-item navbar-nav active">
-        <p aria-level="2" class="caption" role="heading"><span class="caption-text">Installation</span></p>
+        <p aria-level="2" class="caption" role="heading"><span class="caption-text">安装</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../start/install.html">Install RTP-LLM</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">Release Version</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">发布版本</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../release/v0.2.0/release.html">RTP-LLM 0.2.0</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">Basic Usage</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">基本用法</span></p>
 <ul class="current nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="send_request.html">Sending Requests</a></li>
 <li class="toctree-l1 current active"><a class="current reference internal" href="#">OpenAI APIs - Completions</a></li>
@@ -192,26 +192,26 @@
 <li class="toctree-l1"><a class="reference internal" href="openai_api_embeddings.html">OpenAI APIs - Embedding</a></li>
 <li class="toctree-l1"><a class="reference internal" href="native_api.html">RTP-LLM Native APIs</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">Backend Tutorial</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">后端教程</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../references/deepseek/index.html">deepseek</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../references/qwen/index.html">qwen-moe</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../references/kimi/index.html">kimi</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">Advanced Backend Configurations</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">高级后端配置</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="server_arguments.html">ServerArgs</a></li>
 <li class="toctree-l1"><a class="reference internal" href="sampling_params.html">Sampling Config</a></li>
 <li class="toctree-l1"><a class="reference internal" href="attention_backend.html">Attention Backend</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">Supported Models</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">支持的模型</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../supported_models/generative_models.html">Large Language Models</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../supported_models/multimodal_language_models.html">Multimodal Language Models</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../supported_models/embedding_models.html">Embedding Models</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../supported_models/support_new_models.html">How to Support New Models</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">Advanced Features</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">高级功能</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="speculative_decoding.html">Speculative Decoding</a></li>
 <li class="toctree-l1"><a class="reference internal" href="reuse_kv_cache.html">ReuseCache</a></li>
@@ -220,8 +220,14 @@
 <li class="toctree-l1"><a class="reference internal" href="quantization.html">Quantization</a></li>
 <li class="toctree-l1"><a class="reference internal" href="lora.html">LoRA Serving</a></li>
 <li class="toctree-l1"><a class="reference internal" href="pd_disaggregation.html">PD Disaggregation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="logits_processor.html">LogitsProcessor</a></li>
+
+
+
+
+
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">RTP-LLM Router</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">RTP-LLM 路由器</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="flexlb.html">FlexLB (Flexible Load Balancer) - Master Role</a></li>
 </ul>
@@ -229,10 +235,11 @@
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../benchmark/benchmark.html">RTP-LLM Performance Benchmark Tool</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">References</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">参考文献</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../references/general.html">General Guidance</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../references/developer.html">Developer Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../references/cli/Guide.html">CLI 使用指南</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../README.html">Documentation Manual</a></li>
 </ul>
 
@@ -751,7 +758,7 @@ document.write(`
 
   <div class="footer-item">
     <p class="last-updated">
-  最后更新于 2025 年 11 月 04 日.
+  最后更新于 2025 年 11 月 07 日.
   <br/>
 </p>
   </div>
