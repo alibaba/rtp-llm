@@ -63,37 +63,37 @@ CudaDevice::CudaDevice(const DeviceInitParams& params): DeviceBase(params) {
         hack_moe_expert_ = true;
     }
 
-    if (!init_params_.model_specific_config.load_python_model) {
-        if (params.tp_size > 1) {
-            auto master_ip = params.master_ip;
-            if (params.dp_size > 1) {
-                master_ip = "127.0.0.1";
-            }
-            initNcclParam(
-                params.tp_rank, params.tp_size, master_ip, params.tp_master_port, "RTP_LLM_TP_GROUP_", tp_nccl_param_);
+    // if (!init_params_.model_specific_config.load_python_model) {
+    if (params.tp_size > 1) {
+        auto master_ip = params.master_ip;
+        if (params.dp_size > 1) {
+            master_ip = "127.0.0.1";
         }
-        if (params.ffn_tp_size > 1) {
-            if (params.ffn_tp_size != params.tp_size) {
-                initNcclParam(params.ffn_tp_rank,
-                              params.ffn_tp_size,
-                              params.master_ip,
-                              params.ffn_tp_master_port - params.tp_rank / params.ffn_tp_size,
-                              "RTP_LLM_FFN_TP_GROUP_",
-                              ffn_tp_nccl_param_);
-            } else {
-                ffn_tp_nccl_param_ = tp_nccl_param_;
-            }
-        }
-
-        if (params.ep_size > 1) {
-            initNcclParam(params.dp_rank * params.tp_size + params.tp_rank,
-                          params.dp_size * params.tp_size,
+        initNcclParam(
+            params.tp_rank, params.tp_size, master_ip, params.tp_master_port, "RTP_LLM_TP_GROUP_", tp_nccl_param_);
+    }
+    if (params.ffn_tp_size > 1) {
+        if (params.ffn_tp_size != params.tp_size) {
+            initNcclParam(params.ffn_tp_rank,
+                          params.ffn_tp_size,
                           params.master_ip,
-                          params.dp_tp_master_port,
-                          "RTP_LLM_DP_TP_GROUP_",
-                          dp_tp_nccl_param_);
+                          params.ffn_tp_master_port - params.tp_rank / params.ffn_tp_size,
+                          "RTP_LLM_FFN_TP_GROUP_",
+                          ffn_tp_nccl_param_);
+        } else {
+            ffn_tp_nccl_param_ = tp_nccl_param_;
         }
     }
+
+    if (params.ep_size > 1) {
+        initNcclParam(params.dp_rank * params.tp_size + params.tp_rank,
+                      params.dp_size * params.tp_size,
+                      params.master_ip,
+                      params.dp_tp_master_port,
+                      "RTP_LLM_DP_TP_GROUP_",
+                      dp_tp_nccl_param_);
+    }
+    // }
 
     cuggemm_runner_.reset(new cuggemm());
     cuggemm_runner_->init(stream_);
