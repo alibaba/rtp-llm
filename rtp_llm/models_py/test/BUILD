@@ -291,3 +291,12 @@ py_test (
     tags = ["open_skip", "H20"],
     exec_properties = {'gpu':'H20'},
 )
+
+py_test (
+    name = "group_topk_test",
+    srcs = ["group_topk_test.py"],
+    deps = py_test_deps,
+    env = test_envs,
+    tags = ["open_skip", "H20"],
+    exec_properties = {'gpu':'H20'},
+)

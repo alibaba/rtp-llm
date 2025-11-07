@@ -39,8 +39,10 @@ flashinfer_python = load_flashinfer_python()
 
 def warmup_flashinfer_python():
     modules = []
-    for backend in ["fa2"]:
-        if not flashinfer_python.utils.is_sm90a_supported(torch.device("cuda")):
+    for backend in ["fa2", "fa3"]:
+        if backend == "fa3" and not flashinfer_python.utils.is_sm90a_supported(
+            torch.device("cuda")
+        ):
             continue
         modules.append(
             flashinfer_python.jit.gen_batch_prefill_module(
@@ -58,8 +60,10 @@ def warmup_flashinfer_python():
             )
         )
 
-    for backend in ["fa2"]:
-        if not flashinfer_python.utils.is_sm90a_supported(torch.device("cuda")):
+    for backend in ["fa2", "fa3"]:
+        if backend == "fa3" and not flashinfer_python.utils.is_sm90a_supported(
+            torch.device("cuda")
+        ):
             continue
         modules.append(
             flashinfer_python.jit.gen_batch_mla_module(
@@ -146,7 +150,7 @@ class MlaFlashInferPrefillOp(object):
 
         self.prefill_wrapper = (
             flashinfer_python.prefill.BatchPrefillWithRaggedKVCacheWrapper(
-                g_workspace_buffer, "NHD", backend="fa2"
+                g_workspace_buffer, "NHD", backend="auto"
             )
         )
 
@@ -161,6 +165,19 @@ class MlaFlashInferPrefillOp(object):
             attention_inputs.input_lengths,
             attention_inputs.kv_cache_block_id_host,
             self.token_per_block,
+        )
+        self.prefill_wrapper.plan(
+            mla_params.qo_indptr,
+            mla_params.prefill_page_indptr,
+            self.num_heads,
+            self.num_heads,
+            self.qk_rope_head_dim + self.qk_nope_head_dim,
+            self.qk_nope_head_dim,
+            sm_scale=(1.0 / (self.qk_rope_head_dim + self.qk_nope_head_dim) ** 0.5)
+            * self.softmax_extra_scale,
+            causal=True,
+            q_data_type=torch.bfloat16,
+            kv_data_type=torch.bfloat16,
         )
         # for reuse cache indexed batched
         self.reuse_cache_page_indice = mla_params.reuse_cache_page_indice
@@ -319,20 +336,6 @@ class MlaFlashInferPrefillOp(object):
 
             return attn_output
 
-        self.prefill_wrapper.plan(
-            fmha_params.qo_indptr,
-            fmha_params.prefill_page_indptr,
-            self.num_heads,
-            self.num_heads,
-            self.qk_rope_head_dim + self.qk_nope_head_dim,
-            self.qk_nope_head_dim,
-            sm_scale=(1.0 / (self.qk_rope_head_dim + self.qk_nope_head_dim) ** 0.5)
-            * self.softmax_extra_scale,
-            causal=True,
-            q_data_type=q.dtype,
-            kv_data_type=k.dtype,
-        )
-
         attn_output = self.prefill_wrapper.run(q, k, value_states)
         attn_output = attn_output.view(-1, self.num_heads, self.qk_nope_head_dim)
         return attn_output
@@ -370,7 +373,7 @@ class MlaFlashInferDecodeOp(object):
                 device=self.weights[0].get(W.mla_vc).device,
             )
         self.mla_wrapper = flashinfer_python.mla.BatchMLAPagedAttentionWrapper(
-            g_workspace_buffer, backend="fa2"
+            g_workspace_buffer, backend="auto"
         )
 
     def support(self, attention_inputs: PyAttentionInputs):
@@ -378,13 +381,28 @@ class MlaFlashInferDecodeOp(object):
 
     def prepare(self, attention_inputs: PyAttentionInputs):
         check_attention_inputs(attention_inputs)
-        return rtp_llm_ops.fill_mla_params(
+        fmha_params = rtp_llm_ops.fill_mla_params(
             attention_inputs.prefix_lengths,
             attention_inputs.sequence_lengths,
             attention_inputs.input_lengths,
             attention_inputs.kv_cache_block_id_host,
             self.token_per_block,
         )
+        self.mla_wrapper.plan(
+            fmha_params.qo_indptr,
+            fmha_params.decode_page_indptr,
+            fmha_params.page_indice,
+            fmha_params.kvlen,
+            self.num_heads,
+            self.kv_lora_rank,
+            self.qk_rope_head_dim,
+            self.token_per_block,
+            False,  # causal
+            self.scale,
+            torch.bfloat16,
+            torch.bfloat16,
+        )
+        return fmha_params
 
     def forward(
         self,
@@ -400,20 +418,6 @@ class MlaFlashInferDecodeOp(object):
 
         compressed_kv = kv_cache.k_cache_base
 
-        self.mla_wrapper.plan(
-            fmha_params.qo_indptr,
-            fmha_params.decode_page_indptr,
-            fmha_params.page_indice,
-            fmha_params.kvlen,
-            self.num_heads,
-            self.kv_lora_rank,
-            self.qk_rope_head_dim,
-            self.token_per_block,
-            False,  # causal
-            self.scale,
-            q_nope.dtype,
-            compressed_kv.dtype,
-        )
         q_nope = q_nope.view(-1, self.num_heads, self.qk_nope_head_dim)
         q_pe = q_pe.view(-1, self.num_heads, self.qk_rope_head_dim)
 
