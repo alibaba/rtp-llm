@@ -3,6 +3,7 @@ import os
 import random
 from typing import List
 
+import aiter
 import torch
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
@@ -20,8 +21,6 @@ from rtp_llm.models_py.modules.rocm.moe.routers.deepep_normal_router import (
 from rtp_llm.test.utils.port_util import PortsContext
 
 import rtp_llm.ops  # isort:skip
-
-# from libth_transformer.rtp_llm_ops import trt_fp8_quantize_128  # isort:skip
 
 
 def init_router(rank: int, use_fp8: bool):
@@ -48,18 +47,12 @@ def init_router(rank: int, use_fp8: bool):
 
 
 # payload.expert_x: [token, dim], type: fp8
-# payload.expert_x_scale: [token, dim / 128], type: fp32
+# payload.expert_x_scale(per token): [token, 1], type: fp32
 def dequant_to_bf16(expert_x: torch.Tensor, expert_x_scale: torch.Tensor):
-    # 需要将scale转置后扩展成[token, dim]，然后和expert_x相乘
-    # 转置scale: [dim / 128, token] -> [token, dim / 128]
-    # 扩展scale: [token, dim / 128] -> [token, dim]
-    # 每个128维的块重复128次
-    scale_expanded = expert_x_scale.repeat_interleave(128, dim=1)
-
     # 将expert_x转换为fp32进行乘法运算
     expert_x_fp32 = expert_x.float()
     # 相乘得到最终的combine_x
-    combine_x = expert_x_fp32 * scale_expanded
+    combine_x = expert_x_fp32 * expert_x_scale
     return combine_x.bfloat16()
 
 
@@ -82,10 +75,8 @@ def worker_function(rank: int, use_fp8: bool, token_num_per_rank: List[int]):
                 token_num, 1
             )
             quant_config = FusedMoEQuantConfig(
-                quant_dtype=torch.float8_e4m3fn,
-                per_act_token_quant=False,
-                per_out_ch_quant=False,
-                block_shape=[128, 128],
+                quant_dtype=torch.float8_e4m3fnuz,
+                per_act_token_quant=True,
             )
             payload = router.prepare(
                 a1,
@@ -105,7 +96,7 @@ def worker_function(rank: int, use_fp8: bool, token_num_per_rank: List[int]):
                 combine_x = payload.expert_x
             a2 = router.finalize(combine_x, topk_weights, topk_ids, False, None, None)
             if router.use_fp8:
-                x, scale = trt_fp8_quantize_128(a1, False)
+                x, scale = aiter.pertoken_quant(a1, quant_dtype=torch.float8_e4m3fnuz)
                 ref_a2 = dequant_to_bf16(x, scale) * config.world_size
             else:
                 ref_a2 = a1 * config.world_size
@@ -163,6 +154,6 @@ if __name__ == "__main__":
     print(f"可用的world_size: {available_world_sizes}")
 
     # 为每个world_size运行test_single函数
-    for use_fp8 in [False]:
+    for use_fp8 in [False, True]:
         for world_size in available_world_sizes:
             test_single(world_size, use_fp8)
