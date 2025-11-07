@@ -43,7 +43,7 @@ class RPCEngine(BaseEngine):
 
         # Start HTTP server for language model tasks
         if (
-            self.model.task_type.value == "language_model"
+            self.model.task_type == TaskType.LANGUAGE_MODEL
             and self.gang_info is not None
         ):
             self.rtp_llm_op_.ft_op.start_http_server(
