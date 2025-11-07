@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-11-07 16:54+0800\n"
+"POT-Creation-Date: 2025-11-07 20:45+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -148,14 +148,15 @@ msgstr ""
 "-sm8x-cp310-cp310-manylinux1_x86_64.whl"
 
 #: ../../release/v0.2.0/package.md
+#, fuzzy
 msgid ""
 "https://rtp-opensource.oss-cn-"
-"hangzhou.aliyuncs.com/package/daily/2025_10_16/rtp_llm-0.2.0-0.2.0-2025_10_20_10_42_2b7b389a0"
+"hangzhou.aliyuncs.com/package/daily/2025_11_03/rtp_llm-0.2.0-0.2.0-2025_10_31_10_23_d1e93ce12"
 "-sm7x-cp310-cp310-manylinux1_x86_64.whl"
 msgstr ""
 "https://rtp-opensource.oss-cn-"
-"hangzhou.aliyuncs.com/package/daily/2025_10_16/rtp_llm-0.2.0-0.2.0-2025_10_20_10_42_2b7b389a0"
-"-sm7x-cp310-cp310-manylinux1_x86_64.whl"
+"hangzhou.aliyuncs.com/package/daily/2025_10_20/rtp_llm-0.2.0-0.2.0-2025_10_20_10_42_2b7b389a0"
+"-sm9x-cp310-cp310-manylinux1_x86_64.whl"
 
 #: ../../release/v0.2.0/package.md
 #, fuzzy
@@ -249,4 +250,13 @@ msgstr "Master 镜像我们将尽快发布"
 
 #~ msgid "Images of SM9x,SM7x,AMD,Frontend,Master is comming soon"
 #~ msgstr "SM9x,SM7x,AMD,Frontend,Master 的image 我们会尽快提供"
+
+#~ msgid ""
+#~ "https://rtp-opensource.oss-cn-"
+#~ "hangzhou.aliyuncs.com/package/daily/2025_10_16/rtp_llm-0.2.0-0.2.0-2025_10_20_10_42_2b7b389a0"
+#~ "-sm7x-cp310-cp310-manylinux1_x86_64.whl"
+#~ msgstr ""
+#~ "https://rtp-opensource.oss-cn-"
+#~ "hangzhou.aliyuncs.com/package/daily/2025_10_16/rtp_llm-0.2.0-0.2.0-2025_10_20_10_42_2b7b389a0"
+#~ "-sm7x-cp310-cp310-manylinux1_x86_64.whl"
 

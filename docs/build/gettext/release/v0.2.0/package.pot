@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-11-07 16:54+0800\n"
+"POT-Creation-Date: 2025-11-07 20:45+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -101,7 +101,7 @@ msgid "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/package/daily/2025_11
 msgstr ""
 
 #: ../../release/v0.2.0/package.md:0
-msgid "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/package/daily/2025_10_16/rtp_llm-0.2.0-0.2.0-2025_10_20_10_42_2b7b389a0-sm7x-cp310-cp310-manylinux1_x86_64.whl"
+msgid "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/package/daily/2025_11_03/rtp_llm-0.2.0-0.2.0-2025_10_31_10_23_d1e93ce12-sm7x-cp310-cp310-manylinux1_x86_64.whl"
 msgstr ""
 
 #: ../../release/v0.2.0/package.md:0
