@@ -7,7 +7,7 @@ from torch import nn
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
-from rtp_llm.models_py.modules import RMSNorm, SelectTopk
+from rtp_llm.models_py.modules import GroupTopK, RMSNorm, SelectTopk
 from rtp_llm.models_py.modules.attention import CausalAttention
 from rtp_llm.models_py.modules.embedding import Embedding
 from rtp_llm.models_py.modules.fmha import FMHAImplBase
@@ -159,7 +159,9 @@ class GenericMoeLayer(nn.Module):
     """Generic MoE layer supporting both Qwen3 and internal model."""
 
     def __init__(
-        self, config: GptInitModelParameters, weights: Dict[str, torch.Tensor]
+        self,
+        config: GptInitModelParameters,
+        weights: Dict[str, torch.Tensor],
     ):
         super().__init__()
         self.config = config
@@ -171,6 +173,7 @@ class GenericMoeLayer(nn.Module):
 
         self.gate = Linear(weights[W.moe_gate], None)
         self.select_topk = SelectTopk(config)
+        self.group_topk = GroupTopK()
         self.fused_moe: FusedMoe = FusedMoeFactory.create_fused_moe(config, weights)
         self.w1 = weights.get(W.moe_w1, None)
         self.w2 = weights.get(W.moe_w2, None)
@@ -179,6 +182,25 @@ class GenericMoeLayer(nn.Module):
         ), "Weights w1 and w2 must be provided"
         self.num_local_experts = self.w1.shape[0]
         self.expert_map = self.build_expert_map()
+
+        # for group topk
+        self.use_deepep_moe = config.moe_config.use_deepep_moe
+        self.qscheme = (
+            None if config.quant_config is None else config.quant_config.get_method()
+        )
+        self.topk_id_dtype = (
+            torch.int64
+            if self.qscheme == "FP8_PER_BLOCK" and self.use_deepep_moe
+            else torch.int32
+        )
+        self.renormalize = config.has_moe_norm
+        self.num_expert_group = config.moe_n_group
+
+        self.topk_group = config.moe_topk_group
+        self.n_routed_experts = config.expert_num  # config.n_routed_experts
+
+        self.correction_bias = weights.get(W.e_score_correction_b, None)
+        self.routed_scaling_factor = config.routed_scaling_factor
 
     def build_expert_map(self):
         """Build expert mapping for EP (Expert Parallelism)."""
@@ -193,9 +215,8 @@ class GenericMoeLayer(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, _ = hidden_states.shape
         router_logits = self.gate(hidden_states)
-
-        # Top-K selection using C++ SelectTopkOp
         router_logits_fp32 = router_logits.float()
+
         topk_weights = torch.zeros(
             (num_tokens, self.top_k),
             dtype=torch.float32,
@@ -203,11 +224,25 @@ class GenericMoeLayer(nn.Module):
         )
         topk_ids = torch.zeros(
             (num_tokens, self.top_k),
-            dtype=torch.int64,
+            dtype=self.topk_id_dtype,
             device=hidden_states.device,
         )
 
-        self.select_topk(router_logits_fp32, topk_ids, topk_weights)
+        if self.correction_bias is not None:
+            self.group_topk(
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                scores=router_logits_fp32,
+                correction_bias=self.correction_bias,
+                n_group=self.num_expert_group,
+                topk_group=self.topk_group,
+                topk=self.top_k,
+                renormalize=self.renormalize,
+                routed_scaling_factor=self.routed_scaling_factor,
+            )
+        else:
+            # Top-K selection using C++ SelectTopkOp
+            self.select_topk(router_logits_fp32, topk_ids, topk_weights)
 
         return self.fused_moe(
             hidden_states=hidden_states,
