@@ -68,7 +68,18 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         decode_batch_size,
         batch_size);
     printf("tag 4\n");
+    printf("context batch size: %ld\n ", context_batch_size);
+    std::cout << "input lengths: " << py_attn_inputs.input_lengths << std::endl;
+    std::cout << "input lengths cumsum: " << py_attn_inputs.input_lengths.cumsum(0) << std::endl;
+    std::cout << "cu_seqlens before slice: " << cu_seqlens << std::endl;
+    std::cout << "cu_seqlens sliced: " << cu_seqlens.slice(0, 1, context_batch_size + 1) << std::endl;
     cu_seqlens.slice(0, 1, context_batch_size + 1) = py_attn_inputs.input_lengths.cumsum(0);
+    printf("tag 4.5\n");
+    std::cout << "prefix lengths: " << py_attn_inputs.prefix_lengths << std::endl;
+    std::cout << "input lengths + prefix lengths: " << py_attn_inputs.input_lengths.add(py_attn_inputs.prefix_lengths)
+              << std::endl;
+    std::cout << "cu_kv_seqlens before slice: " << cu_kv_seqlens << std::endl;
+    std::cout << "cu_kv_seqlens sliced: " << cu_kv_seqlens.slice(0, 1, context_batch_size + 1) << std::endl;
     cu_kv_seqlens.slice(0, 1, context_batch_size + 1) =
         py_attn_inputs.input_lengths.add(py_attn_inputs.prefix_lengths).cumsum(0);
     printf("tag 5\n");
