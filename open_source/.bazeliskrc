@@ -1,1 +1,2 @@
 USE_BAZEL_VERSION=6.4.0
+BAZELISK_BASE_URL=https://mirrors.huaweicloud.com/bazel/
