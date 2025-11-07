@@ -1,0 +1,89 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2023-2025, RTP-LLM
+# This file is distributed under the same license as the RTP-LLM package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: RTP-LLM 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-11-07 12:59+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: ../../references/cli/Guide.md:1
+msgid "CLI Guide"
+msgstr ""
+
+#: ../../references/cli/Guide.md:2
+msgid "The rtp-llm command-line tool is used to run and manage RTP-LLM. You can start by viewing the help message with:"
+msgstr ""
+
+#: ../../references/cli/Guide.md:4
+msgid "rtp-llm --help"
+msgstr ""
+
+#: ../../references/cli/Guide.md:6
+msgid "Available Commands:"
+msgstr ""
+
+#: ../../references/cli/Guide.md:8
+msgid "rtp-llm {serve}"
+msgstr ""
+
+#: ../../references/cli/Guide.md:11
+msgid "serve"
+msgstr ""
+
+#: ../../references/cli/Guide.md:13
+msgid "Starts the RTP-LLM OpenAI Compatible API server."
+msgstr ""
+
+#: ../../references/cli/Guide.md:15
+msgid "Start with a model:"
+msgstr ""
+
+#: ../../references/cli/Guide.md:17
+msgid "rtp-llm serve /mnt/nas1/hf/bge-reranker-base"
+msgstr ""
+
+#: ../../references/cli/Guide.md:19
+msgid "Specify the port:"
+msgstr ""
+
+#: ../../references/cli/Guide.md:21
+msgid "rtp-llm serve /mnt/nas1/hf/bge-reranker-base --start_port 26000"
+msgstr ""
+
+#: ../../references/cli/Guide.md:23
+msgid "Check with --help for more options:"
+msgstr ""
+
+#: ../../references/cli/Guide.md:25
+msgid "**rtp-llm serve --help=listgroup**: To list all groups"
+msgstr ""
+
+#: ../../references/cli/Guide.md:26
+msgid "**rtp-llm serve --help=Concurrent**: To view a argument group"
+msgstr ""
+
+#: ../../references/cli/Guide.md:27
+msgid "**rtp-llm serve --help=concurrency_limit**: To view a single argument"
+msgstr ""
+
+#: ../../references/cli/Guide.md:28
+msgid "**rtp-llm serve --help=max**: To search by keyword"
+msgstr ""
+
+#: ../../references/cli/Guide.md:29
+msgid "**rtp-llm serve --help=page**: To view full help with pager (less/more)"
+msgstr ""
+
+#: ../../references/cli/Guide.md:32
+msgid "See rtp-llm [serve](./../../backend/server_arguments.md) for the full reference of all available serve arguments."
+msgstr ""

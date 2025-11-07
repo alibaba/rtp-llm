@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-11-07 12:59+0800\n"
+"POT-Creation-Date: 2025-11-07 16:54+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -17,11 +17,11 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 
 #: ../../release/v0.2.0/package.md:1
-msgid "package"
+msgid "Package"
 msgstr ""
 
 #: ../../release/v0.2.0/package.md:4
-msgid "docker"
+msgid "Docker Image"
 msgstr ""
 
 #: ../../release/v0.2.0/package.md:5
@@ -41,6 +41,18 @@ msgid "**tag**"
 msgstr ""
 
 #: ../../release/v0.2.0/package.md:0
+msgid "**CUDA-SM9x**"
+msgstr ""
+
+#: ../../release/v0.2.0/package.md:0
+msgid "ali-hangzhou-hub-registry.cn-hangzhou.cr.aliyuncs.com/isearch/rtp_llm_sm9x_opensource"
+msgstr ""
+
+#: ../../release/v0.2.0/package.md:0
+msgid "0.2.0_0.2.0.2.0_0.2.0_2025_10_31_10_23_d1e93ce12"
+msgstr ""
+
+#: ../../release/v0.2.0/package.md:0
 msgid "**CUDA-SM8x**"
 msgstr ""
 
@@ -49,11 +61,27 @@ msgid "ali-hangzhou-hub-registry.cn-hangzhou.cr.aliyuncs.com/isearch/rtp_llm_sm8
 msgstr ""
 
 #: ../../release/v0.2.0/package.md:0
-msgid "0.2.0_0.2.0_2025_10_09_17_35_8fa289f5"
+msgid "**CUDA-SM7x**"
 msgstr ""
 
-#: ../../release/v0.2.0/package.md:12
-msgid "Images of SM9x,SM7x,AMD,Frontend,Master is comming soon"
+#: ../../release/v0.2.0/package.md:0
+msgid "ali-hangzhou-hub-registry.cn-hangzhou.cr.aliyuncs.com/isearch/rtp_llm_sm7x_opensource"
+msgstr ""
+
+#: ../../release/v0.2.0/package.md:0
+msgid "**Frontend**"
+msgstr ""
+
+#: ../../release/v0.2.0/package.md:0
+msgid "ali-hangzhou-hub-registry.cn-hangzhou.cr.aliyuncs.com/isearch/rtp_llm_frontend-opensource"
+msgstr ""
+
+#: ../../release/v0.2.0/package.md:0
+msgid "**AMD**"
+msgstr ""
+
+#: ../../release/v0.2.0/package.md:0
+msgid "ali-hangzhou-hub-registry.cn-hangzhou.cr.aliyuncs.com/isearch/rtp_llm_rocm_opensource"
 msgstr ""
 
 #: ../../release/v0.2.0/package.md:15
@@ -65,19 +93,11 @@ msgid "**wheel**"
 msgstr ""
 
 #: ../../release/v0.2.0/package.md:0
-msgid "**CUDA-SM9x**"
+msgid "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/package/daily/2025_11_03/rtp_llm-0.2.0-0.2.0-2025_10_31_10_23_d1e93ce12-sm9x-cp310-cp310-manylinux1_x86_64.whl"
 msgstr ""
 
 #: ../../release/v0.2.0/package.md:0
-msgid "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/package/daily/2025_10_20/rtp_llm-0.2.0-0.2.0-2025_10_20_10_42_2b7b389a0-sm9x-cp310-cp310-manylinux1_x86_64.whl"
-msgstr ""
-
-#: ../../release/v0.2.0/package.md:0
-msgid "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/package/daily/2025_10_20/rtp_llm-0.2.0-0.2.0-2025_10_20_10_42_2b7b389a0-sm8x-cp310-cp310-manylinux1_x86_64.whl"
-msgstr ""
-
-#: ../../release/v0.2.0/package.md:0
-msgid "**CUDA-SM7x**"
+msgid "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/package/daily/2025_11_03/rtp_llm-0.2.0-0.2.0-2025_10_31_10_23_d1e93ce12-sm8x-cp310-cp310-manylinux1_x86_64.whl"
 msgstr ""
 
 #: ../../release/v0.2.0/package.md:0
@@ -85,19 +105,11 @@ msgid "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/package/daily/2025_10
 msgstr ""
 
 #: ../../release/v0.2.0/package.md:0
-msgid "**Frontend**"
+msgid "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/package/daily/2025_11_03/rtp_llm-0.2.0-0.2.0-2025_10_31_10_23_d1e93ce12-frontend-cp310-cp310-manylinux1_x86_64.whl"
 msgstr ""
 
 #: ../../release/v0.2.0/package.md:0
-msgid "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/package/daily/2025_10_20/rtp_llm-0.2.0-0.2.0-2025_10_20_10_42_2b7b389a0-frontend-cp310-cp310-manylinux1_x86_64.whl"
-msgstr ""
-
-#: ../../release/v0.2.0/package.md:0
-msgid "**AMD**"
-msgstr ""
-
-#: ../../release/v0.2.0/package.md:0
-msgid "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/package/daily/2025_10_20/rtp_llm-0.2.0-0.2.0-2025_10_20_10_42_2b7b389a0-rocm-cp310-cp310-manylinux1_x86_64.whl"
+msgid "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/package/daily/2025_11_03/rtp_llm-0.2.0-0.2.0-2025_10_31_10_23_d1e93ce12-rocm-cp310-cp310-manylinux1_x86_64.whl"
 msgstr ""
 
 #: ../../release/v0.2.0/package.md:26
