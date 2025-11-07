@@ -36,6 +36,19 @@ class RPCEngine(BaseEngine):
     def start(self) -> None:
         self.rtp_llm_op_.start()
 
+        # Start HTTP server for language model tasks
+        if (
+            self.model.task_type == TaskType.LANGUAGE_MODEL
+            and self.gang_info is not None
+        ):
+            self.rtp_llm_op_.ft_op.start_http_server(
+                self.model.model_weights_loader,
+                self.model.config.lora_infos,
+                self.gang_info,
+                self.tokenizer,
+                None,  # chat_renderer is not needed for HTTP server startup
+            )
+
     @override
     def stop(self) -> None:
         self.rtp_llm_op_.stop()
