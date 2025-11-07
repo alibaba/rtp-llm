@@ -7,7 +7,7 @@ from rtp_llm.models_py.kernels import QuantizeFp8Tensor, atex_minmax_pertensor_q
 
 M = [1, 3, 9, 15, 32, 256, 512, 1039]
 N = [256, 512, 768, 1024, 1536, 2048, 4096, 8192, 16384]
-ITER = 128
+ITER = 100
 
 
 def tensor_size(tensor: torch.Tensor) -> int:
@@ -33,7 +33,7 @@ for m in M:
         )
         bandwidth = bandwidth / 1024 / 1024 / 1024 * ITER
         bandwidth = bandwidth / (tok - tik)
-        print(f"Rmsnorm Benchmark: M={m}, N={n}, bandwidth={bandwidth:.2f} GB/s")
+        print(f"FP8 Quant Benchmark: M={m}, N={n}, bandwidth={bandwidth:.2f} GB/s")
         f.write(f"{m},{n},{bandwidth}\n")
 
 for m in M:
@@ -54,5 +54,5 @@ for m in M:
         )
         bandwidth = bandwidth / 1024 / 1024 / 1024 * ITER
         bandwidth = bandwidth / (tok - tik)
-        print(f"Rmsnorm Benchmark: M={m}, N={n}, bandwidth={bandwidth:.2f} GB/s")
+        print(f"FP8 Quant Benchmark: M={m}, N={n}, bandwidth={bandwidth:.2f} GB/s")
         f.write(f"{m},{n},{bandwidth}\n")

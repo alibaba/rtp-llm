@@ -30,13 +30,12 @@ device_minmax_pertensor_quant_f16_fp8e4m3(const f16x2_t* const x, const uint32_t
         local_max = atex::thread::reduce_absmax<VPT>(local_max, local_x);
     }
 
-    fp32_t            local_max_ = cvt_f16_to_f32(__hmax(local_max.x, local_max.y));
+    fp32_t local_max_ = fmaxf(cvt_f16_to_f32(__hmax(local_max.x, local_max.y)) / atex::FP8_E4M3_MAX, atex::SCALE_MIN);
     __shared__ fp32_t smem[TPB / warpSize];
 
-    // reduce acorss blocks
+    // reduce acorss blocks, global reduce will write global max into scale pointer.
     fp32_t global_max = atex::cooperative::reduce_max<TPB>(local_max_, smem, scale);
-    fp32_t scale_     = fmaxf(global_max / atex::FP8_E4M3_MAX, atex::SCALE_MIN);
-    fp32_t inv_scale  = 1 / scale_;
+    fp32_t inv_scale  = 1 / *scale;
 
     for (uint32_t i = tid * VPT; i < numel; i += n_threads * VPT) {
         atex::copy<sizeof(f16x2_t) * VPT>(x + i, local_x);
@@ -59,7 +58,7 @@ std::tuple<Tensor, Tensor> launch_minmax_pertensor_quant_fp16_fp8e4m3(const Tens
     TORCH_CHECK(x.is_cuda(), "Input tensor x must be a Cuda Tensor.");
     TORCH_CHECK(x.scalar_type() == at::ScalarType::Half, "Input tensor x must be a FP16 Tensor.");
 
-    const uint32_t numel = (uint32_t)x.numel();
+    const uint32_t numel = (uint32_t)x.numel() / 2;
     TORCH_CHECK(numel > 0, "Input tensor x is empty.");
     TORCH_CHECK(numel % 8 == 0, "Elements of tensor x must be a multiple of 8.");
 
@@ -95,9 +94,9 @@ std::tuple<Tensor, Tensor> launch_minmax_pertensor_quant_bf16_fp8e4m3(const Tens
     TORCH_CHECK(x.is_cuda(), "Input tensor x must be a Cuda Tensor.");
     TORCH_CHECK(x.scalar_type() == at::ScalarType::BFloat16, "Input tensor x must be a BF16 Tensor.");
 
-    const uint32_t numel = (uint32_t)x.numel();
+    const uint32_t numel = (uint32_t)x.numel() / 2;
     TORCH_CHECK(numel > 0, "Input tensor x is empty.");
-    TORCH_CHECK(numel % 8 == 0, "Elements of tensor x must be a multiple of 8.");
+    TORCH_CHECK(numel % 4 == 0, "Elements of tensor x must be a multiple of 8.");
 
     Tensor output_y     = at::empty(x.sizes(), x.options().dtype(at::kChar));
     Tensor output_scale = at::empty({1}, x.options().dtype(at::kFloat));

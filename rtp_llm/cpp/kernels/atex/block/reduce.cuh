@@ -68,7 +68,7 @@ __device__ __forceinline__ fp32_t reduce_max(fp32_t local_max, fp32_t* smem) {
     fp32_t global_max;
     if (warp_idx == 0) {
         local_max  = warp_lane < num_of_warp ? smem[warp_lane] : std::numeric_limits<fp32_t>::lowest();
-        global_max = atex::warp::reduce_sum(local_max);
+        global_max = atex::warp::reduce_max(local_max);
     }
 
     if constexpr (boardcast) {

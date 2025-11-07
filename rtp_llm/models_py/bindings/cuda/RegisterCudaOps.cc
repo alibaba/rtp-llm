@@ -130,7 +130,7 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
                   "fp8e4m3 pertensor quantization function",
                   py::arg("x"));
 
-    rtp_ops_m.def("atex_minmax_pertensor_quant_fp16_fp8",
+    rtp_ops_m.def("atex_minmax_pertensor_quant_bf16_fp8",
                   &atex::impl::launch_minmax_pertensor_quant_bf16_fp8e4m3,
                   "fp8e4m3 pertensor quantization function",
                   py::arg("x"));
