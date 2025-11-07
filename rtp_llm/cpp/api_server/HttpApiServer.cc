@@ -65,7 +65,9 @@ bool HttpApiServer::start(py::object model_weights_loader,
     weights_loader_.reset(new WeightsLoader(model_weights_loader));
     gang_server_.reset(new GangServer(gang_info));
     tokenizer_.reset(new Tokenizer(tokenizer));
-    render_.reset(new ChatRender(render));
+    if (render.is_none() == false) {
+        render_.reset(new ChatRender(render));
+    }
     return start(addr_);
 }
 
@@ -152,8 +154,7 @@ bool HttpApiServer::registerWorkerStatusService() {
         return false;
     }
 
-    worker_status_service_.reset(
-        new WorkerStatusService(engine_, controller_));
+    worker_status_service_.reset(new WorkerStatusService(engine_, controller_));
     auto callback = [worker_status_service =
                          worker_status_service_](std::unique_ptr<http_server::HttpResponseWriter> writer,
                                                  const http_server::HttpRequest&                  request) -> void {
