@@ -65,7 +65,7 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         decode_batch_size,
         batch_size);
     printf("tag 4.0\n");
-    printf("context batch size: %ld, cu_seqlens_shape: %d, input_lengths: %s\n ",
+    printf("context batch size: %ld, cu_seqlens_shape: %d, np: %s\n ",
            context_batch_size,
            device_->initParams().concurrency_config.concurrency_limit + 1,
            inputs.input_lengths->debugString().c_str());
@@ -73,17 +73,19 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     // std::cout << "input lengths cumsum: " << py_attn_inputs.input_lengths.cumsum(0) << std::endl;
     // std::cout << "cu_seqlens before slice: " << cu_seqlens << std::endl;
     // std::cout << "cu_seqlens sliced: " << cu_seqlens.slice(0, 1, context_batch_size + 1) << std::endl;
-    cu_seqlens.slice(0, 1, context_batch_size + 1) = py_attn_inputs.input_lengths.cumsum(0);
-    printf("tag 4.5\n");
-    // std::cout << "prefix lengths: " << py_attn_inputs.prefix_lengths << std::endl;
-    // std::cout << "input lengths + prefix lengths: " <<
-    // py_attn_inputs.input_lengths.add(py_attn_inputs.prefix_lengths)
-    //   << std::endl;
-    // std::cout << "cu_kv_seqlens before slice: " << cu_kv_seqlens << std::endl;
-    // std::cout << "cu_kv_seqlens sliced: " << cu_kv_seqlens.slice(0, 1, context_batch_size + 1) << std::endl;
-    cu_kv_seqlens.slice(0, 1, context_batch_size + 1) =
-        py_attn_inputs.input_lengths.add(py_attn_inputs.prefix_lengths).cumsum(0);
-    printf("tag 5\n");
+    if (context_batch_size > 0) {
+        cu_seqlens.slice(0, 1, context_batch_size + 1) = py_attn_inputs.input_lengths.cumsum(0);
+        printf("tag 4.5\n");
+        // std::cout << "prefix lengths: " << py_attn_inputs.prefix_lengths << std::endl;
+        // std::cout << "input lengths + prefix lengths: " <<
+        // py_attn_inputs.input_lengths.add(py_attn_inputs.prefix_lengths)
+        //   << std::endl;
+        // std::cout << "cu_kv_seqlens before slice: " << cu_kv_seqlens << std::endl;
+        // std::cout << "cu_kv_seqlens sliced: " << cu_kv_seqlens.slice(0, 1, context_batch_size + 1) << std::endl;
+        cu_kv_seqlens.slice(0, 1, context_batch_size + 1) =
+            py_attn_inputs.input_lengths.add(py_attn_inputs.prefix_lengths).cumsum(0);
+        printf("tag 5\n");
+    }
     py_attn_inputs.context_total_kv_length = cu_kv_seqlens[context_batch_size].item<int>();
     py_attn_inputs.cu_seqlens              = cu_seqlens.cuda();
     py_attn_inputs.cu_kv_seqlens           = cu_kv_seqlens.cuda();
