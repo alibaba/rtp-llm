@@ -14,10 +14,10 @@ struct GatherBatchSchedulerConfigLocal: public autil::legacy::Jsonizable {
 // Currently it is only used in CI with prompt_batch input, which may occur unstable result
 class GatherBatchScheduler: virtual public FIFOScheduler {
 public:
-    explicit GatherBatchScheduler(const rtp_llm::GptInitParameter&     params,
-                                  const std::shared_ptr<CacheManager>& cache_manager,
-                                  const kmonitor::MetricsReporterPtr   metrics_reporter,
-                                  const int                            max_score_len = 1):
+    explicit GatherBatchScheduler(const rtp_llm::GptInitParameter&        params,
+                                  const std::shared_ptr<KVCacheManager>& cache_manager,
+                                  const kmonitor::MetricsReporterPtr      metrics_reporter,
+                                  const int                               max_score_len = 1):
         FIFOScheduler(params, cache_manager, metrics_reporter, max_score_len) {
         RTP_LLM_LOG_INFO("GatherBatchScheduler init");
         gather_batch_size_ = 1;

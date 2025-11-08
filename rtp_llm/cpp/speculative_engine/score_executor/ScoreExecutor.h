@@ -5,7 +5,7 @@
 #include "absl/status/status.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
-#include "rtp_llm/cpp/cache/CacheManager.h"
+#include "rtp_llm/cpp/cache_new/KVCacheManager.h"
 #include "rtp_llm/cpp/engine_base/Executor.h"
 #include "rtp_llm/cpp/models/lora/LoraManager.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
@@ -19,7 +19,7 @@ class ScoreExecutor {
 public:
     explicit ScoreExecutor(const EngineInitParams&                   params,
                            rtp_llm::DeviceBase*                      device,
-                           const std::shared_ptr<CacheManager>&      cache_manager,
+                           const std::shared_ptr<KVCacheManager>&    cache_manager,
                            const std::shared_ptr<lora::LoraManager>& lora_manager,
                            bool                                      warm_up = false):
         device_(device),

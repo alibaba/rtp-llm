@@ -109,6 +109,12 @@ struct CacheConfig {
 
     // for adpation to MLA
     bool                          use_mla = false;
+    std::string                   mtp_model_type = "default_model";
+
+    // for backward compatibility with old NormalBatchStreamProcessor
+    size_t                        k_block_stride = 0;
+    size_t                        v_block_stride = 0;
+    size_t                        kv_scale_block_stride = 0;
 
     CacheConfig() {}
 };
@@ -120,6 +126,7 @@ struct BlockPoolConfig {
     uint32_t          block_size;
     
     MemoryLayout      layout = LAYER_FIRST;
+    rtp_llm::DataType dtype = rtp_llm::TYPE_INVALID;
     
     size_t total_size;
 
