@@ -13,7 +13,7 @@ using namespace std;
 namespace rtp_llm {
 
 NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
-                               const std::shared_ptr<CacheManager>&      cache_manager,
+                               const std::shared_ptr<KVCacheManager>&    cache_manager,
                                rtp_llm::DeviceBase*                      device,
                                const std::shared_ptr<lora::LoraManager>& lora_manager,
                                bool                                      warm_up):
@@ -60,7 +60,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
         {device_,
          params.gpt_weights,
          genModelDescription(params.gpt_init_parameter),
-         cache_manager ? ((optional<KVCacheAllocator::KVCacheBuffer>)cache_manager->kvCacheBuffer()) : nullopt,
+         cache_manager ? std::make_optional(cache_manager->kvCacheBuffer()) : std::nullopt,
          params.model_id});
 
     if (params.gpt_init_parameter.ffn_disaggregate_config.enable_ffn_disaggregate) {
