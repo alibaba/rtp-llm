@@ -98,6 +98,7 @@ cc_library(
         ":logits_processor",
         ":dfa_utils",
         "//:rtp_compute_ops",
+        "//rtp_llm/cpp/cache_new:cache_new_types",
     ],
     visibility = ["//visibility:public"],
 )
@@ -135,6 +136,7 @@ cc_library(
         ":models",
         ":dfa_utils",
         "//rtp_llm/cpp/pybind:py_utils",
+        "//rtp_llm/cpp/cache_new:cache_new_types",
     ],
     visibility = ["//visibility:public"],
 )

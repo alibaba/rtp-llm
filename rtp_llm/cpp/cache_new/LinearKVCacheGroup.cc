@@ -83,6 +83,10 @@ bool LinearKVCacheGroup::malloc(const CacheKeysType& cache_keys, BlockIndicesTyp
     return true;
 }
 
+void LinearKVCacheGroup::reference(const BlockIndicesType& block_indices) {
+    // TODO: implement if needed, or keep empty for linear attention
+}
+
 void LinearKVCacheGroup::free(const BlockIndicesType& block_indices) {
     block_pool_->free(block_indices);
 }

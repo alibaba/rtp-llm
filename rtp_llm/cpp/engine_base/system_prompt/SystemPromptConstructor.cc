@@ -3,7 +3,8 @@
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateConfig.h"
-#include "rtp_llm/cpp/cache/CacheManager.h"
+#include "rtp_llm/cpp/cache_new/KVCacheManager.h"
+#include "rtp_llm/cpp/cache_new/types.h"
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPrompt.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
@@ -12,7 +13,7 @@
 namespace rtp_llm {
 
 absl::StatusOr<std::unordered_map<std::string, SystemPromptParams>> SystemPromptConstructor::construct(
-    const rtp_llm::GptInitParameter& params, EngineBase* engine, CacheManager* cache_manager, bool insert_kv_cache) {
+    const rtp_llm::GptInitParameter& params, EngineBase* engine, KVCacheManager* cache_manager, bool insert_kv_cache) {
     std::unordered_map<std::string, SystemPromptParams> multi_task_prompt_args;
     for (const auto& item : params.multi_task_prompt_tokens_) {
         const auto& task_id   = item.first;
@@ -32,12 +33,18 @@ absl::StatusOr<std::unordered_map<std::string, SystemPromptParams>> SystemPrompt
 
         if (insert_kv_cache) {
             const auto& kv_cache   = stream->kvCache();
-            const auto& cache_keys = stream->cacheKeys(0);
+            // const auto& cache_keys = stream->cacheKeys(0);  // Unused in new cache system
             const auto& all_blocks = kv_cache.batch_block_id;
             const auto& blocks     = all_blocks[0];
             RTP_LLM_CHECK(blocks.size() > 0);
-            CacheManager::FreeInfo free_info(stream->streamId(), tokens_id, cache_keys, blocks);
-            cache_manager->insertResidentCache(free_info);
+            
+            // Use new KVCacheManager insertIntoCache with is_resident=true
+            rtp_llm::InsertInfo insert_info(
+                stream->kvCachePtr(),
+                stream->completeTokenIdsPtr(),
+                true  // is_resident for system prompt
+            );
+            cache_manager->insertIntoCache(insert_info);
             multi_task_prompt_args[task_id] = SystemPromptParams(tokens_id, blocks);
         }
     }

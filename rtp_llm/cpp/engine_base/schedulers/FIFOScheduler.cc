@@ -1,6 +1,8 @@
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/cache_new/KVCacheManager.h"
+#include "rtp_llm/cpp/cache_new/types.h"
 #include <chrono>
 #include <memory>
 #include <mutex>
@@ -8,10 +10,10 @@
 using namespace std;
 namespace rtp_llm {
 
-FIFOScheduler::FIFOScheduler(const rtp_llm::GptInitParameter&     params,
-                             const std::shared_ptr<CacheManager>& cache_manager,
-                             const kmonitor::MetricsReporterPtr   metrics_reporter,
-                             const int                            max_score_len):
+FIFOScheduler::FIFOScheduler(const rtp_llm::GptInitParameter&        params,
+                             const std::shared_ptr<KVCacheManager>& cache_manager,
+                             const kmonitor::MetricsReporterPtr      metrics_reporter,
+                             const int                               max_score_len):
     params_(params),
     cache_manager_(cache_manager),
     max_seq_len_(params.max_seq_len_),
@@ -24,7 +26,7 @@ FIFOScheduler::FIFOScheduler(const rtp_llm::GptInitParameter&     params,
     need_fill_fake_stream_(params.dp_size_ > 1 && params.tp_rank_ == 0),
     fast_gen_max_context_len_(params.fast_gen_max_context_len_),
     metrics_reporter_(metrics_reporter) {
-    reserve_block_num_ = params.fifo_scheduler_config.scheduler_reserve_resource_ratio * cache_manager->availableBlockNums() / 100;
+    reserve_block_num_ = params.fifo_scheduler_config.scheduler_reserve_resource_ratio * cache_manager->availableBlocksNums() / 100;
     RTP_LLM_LOG_INFO("max_generate_batch_size is [%d], max_batch_tokens_size is [%d], reserve_block_num is [%d]",
                      max_generate_batch_size_,
                      max_batch_tokens_size_,
@@ -120,7 +122,7 @@ tuple<int, int> FIFOScheduler::evaluateRunningNext(size_t reserve_step) {
 
     if (enable_partial_fallback_) {
         for (auto& stream : waiting_streams_) {
-            int need_block_num = (int)runningNextBlockNum(reserve_step) - (int)cache_manager_->availableBlockNums();
+            int need_block_num = (int)runningNextBlockNum(reserve_step) - (int)cache_manager_->availableBlocksNums();
             if (need_block_num <= 0) {
                 break;
             }
@@ -146,7 +148,7 @@ tuple<int, int> FIFOScheduler::evaluateRunningNext(size_t reserve_step) {
 
     if (enable_whole_fallback_) {
         while (!running_streams_.empty()) {
-            int need_block_num = (int)runningNextBlockNum(reserve_step) - (int)cache_manager_->availableBlockNums();
+            int need_block_num = (int)runningNextBlockNum(reserve_step) - (int)cache_manager_->availableBlocksNums();
             if (need_block_num <= 0) {
                 break;
             }
@@ -194,6 +196,7 @@ tuple<int, int> FIFOScheduler::evaluateRunningNext(size_t reserve_step) {
             it++;
         }
     }
+
     return {fallback_streams, error_streams};
 }
 
@@ -243,12 +246,12 @@ bool FIFOScheduler::evaluateNewStream(const list<GenerateStreamPtr>& streams,
             "after stream [%ld] acquireCapacity, token_capacity is %d", new_stream->streamId(), token_capacity_);
     }
     if (result.ok()) {
-        if (cache_manager_->availableBlockNums() >= reserve_block_num_) {
+        if (cache_manager_->availableBlocksNums() >= reserve_block_num_) {
             return true;
         } else {
             RTP_LLM_LOG_INFO(
-                "current availableBlockNums is [%ld], reserve_block_num is [%ld], so stream [%ld] malloc failed",
-                cache_manager_->availableBlockNums(),
+                "current availableBlocksNums is [%ld], reserve_block_num is [%ld], so stream [%ld] malloc failed",
+                cache_manager_->availableBlocksNums(),
                 reserve_block_num_,
                 new_stream->streamId());
             new_stream->tryReleaseKVBlock(new_stream->maxBlockSize() - old_blocks);

@@ -90,8 +90,8 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
 
     auto cache_manager = engine_->resourceContext().cache_manager;
     auto reserve_block_num =
-        maga_init_params_.gpt_init_parameter.fifo_scheduler_config.scheduler_reserve_resource_ratio * cache_manager->totalBlocks() / 100;
-    auto current_blocks = cache_manager->availableBlockNums();
+        maga_init_params_.gpt_init_parameter.fifo_scheduler_config.scheduler_reserve_resource_ratio * cache_manager->totalBlocksNums() / 100;
+    auto current_blocks = cache_manager->availableBlocksNums();
     if (current_blocks < reserve_block_num) {
         string error_msg = "request: [" + decode_context.request_key + "] malloc kv cache block failed at decode node, "
                            + "current_blocks = " + std::to_string(current_blocks)
@@ -658,9 +658,9 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
         return grpc::Status::OK;
     }
 
-    std::vector<int64_t>     cache_keys(request->cache_keys().begin(), request->cache_keys().end());
-    std::vector<int32_t>     block_ids(request->block_ids().begin(), request->block_ids().end());
-    std::vector<std::string> peer_addrs(request->peer_addrs().begin(), request->peer_addrs().end());
+    std::vector<CacheKeyType> cache_keys(request->cache_keys().begin(), request->cache_keys().end());
+    std::vector<BlockIdxType> block_ids(request->block_ids().begin(), request->block_ids().end());
+    std::vector<std::string>  peer_addrs(request->peer_addrs().begin(), request->peer_addrs().end());
 
     // TODO(xinfei.sxf) add retry
     auto error_info = loadCache({request->request_id(),

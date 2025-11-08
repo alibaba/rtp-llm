@@ -12,10 +12,10 @@ struct SpeculativeGatherBatchSchedulerConfigLocal: public autil::legacy::Jsoniza
 
 class SpeculativeGatherBatchScheduler: public SpeculativeScheduler, public GatherBatchScheduler {
 public:
-    explicit SpeculativeGatherBatchScheduler(const rtp_llm::GptInitParameter&     params,
-                                             const std::shared_ptr<CacheManager>& cache_manager,
-                                             const kmonitor::MetricsReporterPtr   metrics_reporter = nullptr,
-                                             const int                            max_score_len    = 1):
+    explicit SpeculativeGatherBatchScheduler(const rtp_llm::GptInitParameter&        params,
+                                             const std::shared_ptr<KVCacheManager>& cache_manager,
+                                             const kmonitor::MetricsReporterPtr      metrics_reporter = nullptr,
+                                             const int                               max_score_len    = 1):
         FIFOScheduler(params, cache_manager, metrics_reporter, max_score_len),
         SpeculativeScheduler(params, cache_manager, metrics_reporter, max_score_len),
         GatherBatchScheduler(params, cache_manager, metrics_reporter, max_score_len) {}

@@ -6,8 +6,8 @@
 #include "rtp_llm/cpp/devices/OpData.h"
 #include "rtp_llm/cpp/devices/Weights.h"
 #include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
-#include "rtp_llm/cpp/cache/CacheManager.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
+#include "rtp_llm/cpp/cache_new/types.h"
 #include <string>
 #include <utility>
 
@@ -29,11 +29,11 @@ struct GptModelDescription {
 };
 
 struct GptModelInitParams {
-    rtp_llm::DeviceBase*                                 device;
-    const rtp_llm::Weights                               weights;
-    const GptModelDescription                            description;
-    const std::optional<KVCacheAllocator::KVCacheBuffer> kv_cache_buffer;
-    size_t                                               model_id;
+    rtp_llm::DeviceBase*                     device;
+    const rtp_llm::Weights                   weights;
+    const GptModelDescription                description;
+    const std::optional<KVCacheBuffer>       kv_cache_buffer;
+    size_t                                   model_id;
 };
 
 struct EmbeddingPostOutput {

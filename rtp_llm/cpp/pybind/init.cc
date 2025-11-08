@@ -1,5 +1,5 @@
 #include "rtp_llm/cpp/multimodal_processor/MultimodalTypes.h"
-#include "rtp_llm/cpp/cache/KvCacheInfo.h"
+#include "rtp_llm/cpp/cache_new/types.h"
 #include "rtp_llm/cpp/engine_base/WorkerStatusInfo.h"
 #include "rtp_llm/cpp/engine_base/schedulers/EngineScheduleInfo.h"
 #include "rtp_llm/cpp/pybind/multi_gpu_gpt/RtpLLMOp.h"

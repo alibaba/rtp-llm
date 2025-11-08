@@ -22,7 +22,7 @@ bool BlockPool::init() {
         RTP_LLM_LOG_ERROR("block pool allocate cache aligned buffer is null");
         return false;
     }
-    kv_cache_.kv_blocks = Buffer2torchTensor(cache_aligned_buffer_, false);
+    torch::Tensor kv_cache_tensor = Buffer2torchTensor(cache_aligned_buffer_, false);
 
     layout_strategy_ = MemoryLayoutStrategyFactory::create(config_.layout);
     if (!layout_strategy_) {
@@ -30,7 +30,7 @@ bool BlockPool::init() {
         return false;
     }
 
-    if (!layout_strategy_->init(config_, kv_cache_.kv_blocks, cache_base_ptr_)) {
+    if (!layout_strategy_->init(config_, kv_cache_tensor, cache_base_ptr_, config_.dtype)) {
         RTP_LLM_LOG_ERROR("Failed to initialize memory layout strategy");
         return false;
     }
@@ -192,6 +192,13 @@ BlockBufferInfo BlockPool::convertIndexToBuffer(int layer_id, int block_id) cons
     return layout_strategy_->convertIndexToBuffer(layer_id, block_id);
 }
 
+KVCacheBuffer BlockPool::kvCacheBuffer() const {
+    if (!layout_strategy_) {
+        RTP_LLM_LOG_ERROR("Layout strategy not initialized for kvCacheBuffer");
+        return KVCacheBuffer{nullptr, nullptr, nullptr, nullptr};
+    }
+    return layout_strategy_->kvCacheBuffer();
+}
 
 MemoryType BlockPool::where() const {
     return cache_aligned_buffer_->where();

@@ -30,6 +30,8 @@ public:
     virtual BlockBufferInfo  convertIndexToBuffer(int layer_id, int block_id) const = 0;
     virtual CacheLayerLayout layerCacheBase() const                                 = 0;
 
+    virtual void regUserMr(size_t model_id) = 0;
+
     virtual size_t freeBlocksNums() const      = 0;
     virtual size_t availableBlocksNums() const = 0;
     virtual size_t totalBlocksNums() const     = 0;
@@ -40,11 +42,18 @@ public:
     void blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end);
     void blockBatchCopy(const rtp_llm::Buffer& copy_mapping);
 
+    virtual KVCacheBuffer kvCacheBuffer() const = 0;
+
 protected:
     CacheConfig          config_;
     rtp_llm::DeviceBase* device_;
     AllocationType       atype_;
     // std::vector<std::shared_ptr<KVCacheGroup>> kv_cache_groups_;
+
+    int singleBatchNeedBlocks(int seq_len, int current_blocks) const {
+        return std::max<int>((seq_len + config_.seq_size_per_block - 1) / config_.seq_size_per_block - current_blocks,
+                             0);
+    }
 };
 
 using KVCacheAllocatorPtr = std::shared_ptr<KVCacheAllocator>;

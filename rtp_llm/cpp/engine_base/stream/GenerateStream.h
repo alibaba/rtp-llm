@@ -188,11 +188,12 @@ public:
     bool                      isChunkStream() const;
     const rtp_llm::BufferPtr& cumLogProbs() const;
 
-    const rtp_llm::BufferPtr& completeTokenIds();
-    std::vector<int>          completeTokenIdsVec(int batch_idx = 0);
-    std::vector<int>          commonCompleteTokenIdsVec(int batch_idx = 0);
-    int                       currentExecuteTokenSize();
-    std::vector<int>          currentExecuteTokens(int batch_idx = 0) const;
+    const rtp_llm::BufferPtr&         completeTokenIds();
+    std::shared_ptr<CompleteTokenIds> completeTokenIdsPtr() const { return complete_token_ids_; }
+    std::vector<int>                  completeTokenIdsVec(int batch_idx = 0);
+    std::vector<int>                  commonCompleteTokenIdsVec(int batch_idx = 0);
+    int                               currentExecuteTokenSize();
+    std::vector<int>                  currentExecuteTokens(int batch_idx = 0) const;
 
     void step();
     void spStep();
@@ -229,11 +230,13 @@ public:
     void         setSpIterCount(int sp_iter_count);
 
     const ResourceContext&      resourceContext() const;
-    void                        setKVCache(const BatchKVCacheResource& kv_cache_resource);
-    void                        setLoss(const rtp_llm::Buffer& loss);
-    void                        setSoftmaxProbs(const rtp_llm::Buffer& softmax_probs, int start_pos);
-    const BatchKVCacheResource& kvCache() const;
-    size_t                      maxBlockSize() const;
+    void                              setKVCache(const BatchKVCacheResource& kv_cache_resource);
+    void                              setLoss(const rtp_llm::Buffer& loss);
+    void                              setSoftmaxProbs(const rtp_llm::Buffer& softmax_probs, int start_pos);
+    const BatchKVCacheResource&       kvCache() const;
+    BatchKVCacheResource&             kvCacheMutable();
+    BatchKVCacheResourcePtr           kvCachePtr();
+    size_t                            maxBlockSize() const;
 
     bool needFinish();
     bool needFinishBySPTokens();

@@ -166,7 +166,7 @@ size_t KVCacheAllocator::freeBlockNums() const {
     return free_blocks_index_.size();
 }
 
-const KVCacheAllocator::KVCacheBuffer& KVCacheAllocator::kvCacheBuffer() const {
+const KVCacheBuffer& KVCacheAllocator::kvCacheBuffer() const {
     return kv_cache_;
 }
 
@@ -453,7 +453,7 @@ void KVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, const BlockI
     device_->batchCopy(copy_params);
 }
 
-KVCacheAllocator::BlockAddrInfo KVCacheAllocator::convertIndexToAddr(int block_index, int layer_id) const {
+BlockAddrInfo KVCacheAllocator::convertIndexToAddr(int block_index, int layer_id) const {
     if (block_index < 0 || block_index >= config_.block_nums) {
         RTP_LLM_LOG_WARNING("Invalid block_index: %d, valid range: [0, %d)", block_index, config_.block_nums);
         return {nullptr, nullptr, nullptr, nullptr};

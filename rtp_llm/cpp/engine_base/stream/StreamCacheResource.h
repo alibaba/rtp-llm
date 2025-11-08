@@ -3,8 +3,8 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPrompt.h"
-#include "rtp_llm/cpp/cache/CacheManager.h"
-#include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache_new/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache_new/KVCacheManager.h"
 #include <memory>
 
 namespace rtp_llm {
@@ -12,14 +12,16 @@ namespace rtp_llm {
 class GenerateStream;
 
 struct ResourceContext {
-    std::shared_ptr<CacheManager>              cache_manager         = nullptr;
-    std::shared_ptr<CacheManager>              propose_cache_manager = nullptr;
-    std::shared_ptr<SystemPrompt>              system_prompt         = nullptr;
-    bool                                       reuse_cache{false};
-    bool                                       enable_3fs{false};
-    bool                                       enable_memory_block_cache{false};
-    bool                                       use_cache_store{false};
-    std::vector<std::shared_ptr<CacheManager>> mtp_cache_managers;
+    // KV Cache Manager
+    std::shared_ptr<KVCacheManager>              cache_manager      = nullptr;
+    std::shared_ptr<KVCacheManager>              propose_cache_manager = nullptr;
+    
+    std::shared_ptr<SystemPrompt>                system_prompt         = nullptr;
+    bool                                         reuse_cache{false};
+    bool                                         enable_3fs{false};
+    bool                                         enable_memory_block_cache{false};
+    bool                                         use_cache_store{false};
+    std::vector<std::shared_ptr<KVCacheManager>> mtp_cache_managers;
 };
 
 class StreamCacheResource {
@@ -29,6 +31,7 @@ public:
                         bool                   need_release_resource = true,
                         const std::string&     adapter_name          = ""):
         stream_(stream),
+        batch_resource_(std::make_shared<BatchKVCacheResource>()),
         resource_context_(resource_context),
         block_update_mapping_(),
         need_release_resource_(need_release_resource),
@@ -53,6 +56,7 @@ public:
     int                        mallocFailedTimes() const;
 
     const BatchKVCacheResource& kvCache() const;
+    BatchKVCacheResource&       kvCacheMutable();
     void                        setKVCache(const BatchKVCacheResource& kv_cache_resource);
 
     // update kv block based on the source of new batches and generate block copy mapping.
@@ -64,7 +68,7 @@ public:
     //
     // Note: This method may allocate and free KV cache blocks, but the caller must
     // execute the block copy maunually (e.g., via `getKVBlockUpdateMapping` and
-    // `CacheManager::blockBatchCopy`) before using the cache
+    // `KVCacheManager::blockBatchCopy`) before using the cache
     //
     // Example: given old batch size 3, block_src_batch = [1, 2, 2, 2], the copy mapping of
     // old blocks to new blocks is
@@ -113,10 +117,10 @@ public:
         debug_string << "StreamCacheResource {"
                      << "need_release_resource: " << need_release_resource_ << ", batch_resource: [";
 
-        for (size_t i = 0; i < batch_resource_.batchSize(); i++) {
+        for (size_t i = 0; i < batch_resource_->batchSize(); i++) {
             debug_string << " [";
-            for (size_t j = 0; j < batch_resource_.batch_block_id[i].size(); j++) {
-                debug_string << batch_resource_.batch_block_id[i][j] << " ";
+            for (size_t j = 0; j < batch_resource_->batch_block_id[i].size(); j++) {
+                debug_string << batch_resource_->batch_block_id[i][j] << " ";
             }
             debug_string << "],";
         }
@@ -127,7 +131,7 @@ public:
 
 private:
     GenerateStream*          stream_;
-    BatchKVCacheResource     batch_resource_;
+    BatchKVCacheResourcePtr  batch_resource_;
     ResourceContext          resource_context_;
     std::vector<BlockIdPair> block_update_mapping_;
     bool                     last_block_aligned_    = false;
