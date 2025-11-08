@@ -232,4 +232,11 @@ size_t HybridLayerKVCacheAllocator::maxSeqLen() const {
     return block_pool_->totalBlockNums() * full_kv_cache_group_->seqSizePerBlock();
 }
 
+KVCacheBuffer HybridLayerKVCacheAllocator::kvCacheBuffer() const {
+    if (!block_pool_) {
+        return KVCacheBuffer{nullptr, nullptr, nullptr, nullptr};
+    }
+    return block_pool_->kvCacheBuffer();
+}
+
 }  // namespace rtp_llm

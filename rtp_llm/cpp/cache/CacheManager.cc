@@ -190,7 +190,7 @@ size_t CacheManager::cacheItemNum() const {
     return block_cache_.size();
 }
 
-const KVCacheAllocator::KVCacheBuffer& CacheManager::kvCacheBuffer() const {
+const KVCacheBuffer& CacheManager::kvCacheBuffer() const {
     return allocator_->kvCacheBuffer();
 }
 
@@ -457,7 +457,7 @@ void CacheManager::blockBatchCopy(const BlockIdPair* begin_ptr, const BlockIdPai
     return allocator_->blockBatchCopy(begin_ptr, end_ptr);
 }
 
-KVCacheAllocator::BlockAddrInfo CacheManager::convertIndexToAddr(int block_index, int layer_id) const {
+BlockAddrInfo CacheManager::convertIndexToAddr(int block_index, int layer_id) const {
     return allocator_->convertIndexToAddr(block_index, layer_id);
 }
 
