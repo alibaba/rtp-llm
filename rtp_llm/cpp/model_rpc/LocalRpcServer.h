@@ -8,7 +8,7 @@
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/utils/AtomicUtil.h"
 #include "rtp_llm/cpp/engine_base/WorkerStatusInfo.h"
-#include "rtp_llm/cpp/cache/KvCacheInfo.h"
+#include "rtp_llm/cpp/cache_new/types.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"

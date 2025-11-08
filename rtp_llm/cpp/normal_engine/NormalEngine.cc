@@ -8,7 +8,7 @@
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/GatherBatchScheduler.h"
-#include "rtp_llm/cpp/cache/CacheConfigCreator.h"
+#include "rtp_llm/cpp/cache_new/CacheConfigCreator.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -146,10 +146,10 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     fake_input->generate_config->calculate_loss       = int(params_.warm_up_with_loss_);
     device_->setTraceMemory(true);
 
-    auto cache_config               = CacheConfigCreator::createBasicConfig(params_);
+    auto cache_config               = rtp_llm::CacheConfigCreator::createBasicConfig(params_);
     cache_config.seq_size_per_block = params_.seq_size_per_block_;
-    cache_config.block_nums         = 5;
-    auto cache_manager              = make_shared<CacheManager>(cache_config, device_, true);
+    cache_config.block_num          = 5;
+    auto cache_manager              = make_shared<KVCacheManager>(cache_config, device_);
     executor_.reset(new NormalExecutor(params, cache_manager, device_, nullptr, true));
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
     const auto device_status = device_->getDeviceStatus();
@@ -172,10 +172,10 @@ std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_ne
 }
 
 void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) {
-    auto result = CacheConfigCreator::createConfig(params_, warm_up_result);
+    auto result = rtp_llm::CacheConfigCreator::createConfig(params_, warm_up_result);
     RTP_LLM_LOG_INFO(
-        "create cache manager with block nums %d, block size %ld KB", result.block_nums, result.block_size / 1024);
-    resource_context_.cache_manager = make_shared<CacheManager>(result, device_, false, metrics_reporter_, params_);
+        "create kv cache manager with block nums %d, block size %ld KB", result.block_num, result.block_size / 1024);
+    resource_context_.cache_manager = make_shared<KVCacheManager>(result, device_);
 }
 
 absl::Status NormalEngine::initSystemPrompt() {
