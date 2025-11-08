@@ -1,5 +1,5 @@
-#include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
-#include "rtp_llm/cpp/cache/CacheManager.h"
+#include "rtp_llm/cpp/cache_new/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache_new/KVCacheGroup.h"
 #include <memory>
 #include <sstream>
 #include <cassert>
@@ -36,11 +36,11 @@ void BatchKVCacheResource::pushBack(const KVCacheResource& addr) {
     batch_block_id.push_back(addr.block_id);
 }
 
-void BatchKVCacheResource::appendClone(const KVCacheResource& addr, std::shared_ptr<CacheManager>& cache_manager) {
+void BatchKVCacheResource::appendClone(const KVCacheResource& addr, KVCacheGroup& kv_cache_group) {
     append(0, addr);
     for (uint32_t i = 1; i < batch_block_id.size(); i++) {
         // clone increased block reference count
-        append(i, addr.clone(cache_manager));
+        append(i, addr.clone(kv_cache_group));
     }
 }
 
@@ -95,3 +95,5 @@ std::string BatchKVCacheResource::debugString() const {
 }
 
 }  // namespace rtp_llm
+
+

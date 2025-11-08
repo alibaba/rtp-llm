@@ -176,7 +176,7 @@ InsertResult HybridLayerKVCacheAllocator::insertIntoCache(const InsertInfo& inse
         }
         size_t token_len     = token_ids.size() - 1;
         size_t max_by_tokens = token_len / static_cast<size_t>(seq_size_per_block);
-        size_t block_len     = std::min({cache_keys.size(), block_ids.size(), max_by_tokens});
+        size_t block_len     = std::min(std::min(cache_keys.size(), block_ids.size()), max_by_tokens);
         if (block_len == 0) {
             continue;
         }
@@ -229,6 +229,13 @@ size_t HybridLayerKVCacheAllocator::totalBlocksNums() const {
 
 size_t HybridLayerKVCacheAllocator::maxSeqLen() const {
     return block_pool_->totalBlockNums() * full_kv_cache_group_->seqSizePerBlock();
+}
+
+KVCacheBuffer HybridLayerKVCacheAllocator::kvCacheBuffer() const {
+    if (!block_pool_) {
+        return KVCacheBuffer{nullptr, nullptr, nullptr, nullptr};
+    }
+    return block_pool_->kvCacheBuffer();
 }
 
 }  // namespace rtp_llm

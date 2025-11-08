@@ -2,16 +2,22 @@ load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_library(
+    name = "kv_cache_info",
+    hdrs = ["KvCacheInfo.h"],
+    deps = ["//rtp_llm/cpp/cache_new:cache_new_types"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "cache",
     hdrs = [
+        "KVCacheResource.h",
         "BatchKVCacheResource.h",
         "BlockCache.h",
         "BlockRefCounter.h",
         "CacheConfigCreator.h",
         "CacheConfig.h",
         "CacheManager.h",
-        "KVCacheResource.h",
-        "KvCacheInfo.h",
         "DistStorage.h",
         "DistStorageLocalMem.h",
         "DistStorageManager.h",
@@ -24,11 +30,9 @@ cc_library(
         "MemoryBlockCache.h",
     ],
     srcs = [
-        "BatchKVCacheResource.cc",
         "BlockCache.cc",
         "CacheConfigCreator.cc",
         "CacheManager.cc",
-        "KVCacheResource.cc",
         "DistStorageLocalMem.cc",
         "DistStorageManager.cc",
         "DistKvCachePlanner.cc",
@@ -38,6 +42,9 @@ cc_library(
         "MemoryBlockCache.cc",
     ],
     deps = [
+        "//rtp_llm/cpp/cache_new:cache_new_types",
+        "//rtp_llm/cpp/cache_new:kv_cache_resource",
+        "//rtp_llm/cpp/cache_new:batch_kv_cache_resource",
         "//rtp_llm/cpp/model_rpc:model_rpc_pool",
         "//rtp_llm/cpp/model_rpc:rpc_error_code",
         "//rtp_llm/cpp/utils:lru_cache",

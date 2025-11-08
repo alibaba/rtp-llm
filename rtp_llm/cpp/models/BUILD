@@ -98,6 +98,7 @@ cc_library(
         ":logits_processor",
         ":dfa_utils",
         "//:rtp_compute_ops",
+        "//rtp_llm/cpp/cache_new:cache_new_types",
     ],
     visibility = ["//visibility:public"],
 )

@@ -28,6 +28,8 @@ public:
     size_t totalBlocksNums() const override;
     size_t maxSeqLen() const override;
 
+    KVCacheBuffer kvCacheBuffer() const override;
+    
 private:
     BlockPoolPtr                      block_pool_;
     std::shared_ptr<FullKVCacheGroup> full_kv_cache_group_;

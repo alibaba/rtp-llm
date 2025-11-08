@@ -19,7 +19,7 @@
 #include "rtp_llm/cpp/config/GptInitParameter.h"
 #include "rtp_llm/cpp/cache/CacheManager.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
-#include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache_new/BatchKVCacheResource.h"
 #include "autil/EnvUtil.h"
 
 using namespace rtp_llm;

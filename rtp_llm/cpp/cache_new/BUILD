@@ -2,14 +2,53 @@ load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_library(
+    name = "cache_new_types",
+    hdrs = [
+        "types.h",
+        "CacheConfig.h",
+    ],
+    deps = [
+        "//rtp_llm/cpp/core:buffer",
+        "//rtp_llm/cpp/core:types",
+        "//:rtp_compute_ops",
+    ] + torch_deps(),
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+
+cc_library(
+    name = "kv_cache_resource",
+    hdrs = ["KVCacheResource.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "batch_kv_cache_resource",
+    hdrs = ["BatchKVCacheResource.h"],
+    deps = [
+        ":kv_cache_resource",
+        "//rtp_llm/cpp/utils:core_utils",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "cache_new",
     hdrs = glob([
         "*.h",
-    ]),
+    ], exclude = ["types.h", "CacheConfig.h", "KVCacheResource.h", "BatchKVCacheResource.h"]),
     srcs = glob([
         "*.cc",
     ]),
     deps = [
+        ":cache_new_types",
+        ":kv_cache_resource",
+        ":batch_kv_cache_resource",
+        "//rtp_llm/cpp/cache:cache",
+        "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
         "//rtp_llm/cpp/model_rpc:model_rpc_pool",
         "//rtp_llm/cpp/model_rpc:rpc_error_code",
         "//rtp_llm/cpp/utils:lru_cache",
@@ -17,7 +56,6 @@ cc_library(
         "//:rtp_compute_ops",
         "//rtp_llm/cpp/config:gpt_init_params",
         "//rtp_llm/cpp/devices:devices_base",
-        "//rtp_llm/cpp/engine_base/stream:stream",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:hash_util",
         "//rtp_llm/cpp/utils:kv_cache_utils",
