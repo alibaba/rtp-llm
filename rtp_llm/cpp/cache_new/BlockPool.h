@@ -24,10 +24,6 @@ namespace rtp_llm {
 // TODO, 0 号block不能算作free
 class BlockPool {
 public:
-    struct KVCacheBuffer {
-        torch::Tensor kv_blocks;
-    };
-
     BlockPool(const BlockPoolConfig& config,
               rtp_llm::DeviceBase*   device,
               AllocationType         atype = AllocationType::DEVICE);
@@ -54,6 +50,9 @@ public:
 
     void* getKCacheAddr(int layer_id, int block_id) const;
     void* getVCacheAddr(int layer_id, int block_id) const;
+    
+    // For backward compatibility with old cache system
+    KVCacheBuffer kvCacheBuffer() const;
 
     void incrBlockRefCounter(const BlockIndicesType& blocks) {}
     void decrBlockRefCounter(const BlockIndicesType& blocks) {}
@@ -74,7 +73,6 @@ private:
     BlockPoolConfig                        config_;
     std::set<BlockIdxType>                 free_block_ids_;
     std::unordered_map<int, torch::Tensor> layer_kv_tensors_;  // global_layer_id -> kv cache addresses
-    KVCacheBuffer                          kv_cache_;
     BlockRefCounter                        block_ref_counter_;
     rtp_llm::DeviceBase*                   device_;
     AllocationType                         atype_;

@@ -51,6 +51,11 @@ void FullKVCacheGroup::free(const BlockIndicesType& block_indices) {
     RTP_LLM_LOG_DEBUG("Freed %zu blocks", block_indices.size());
 }
 
+
+void FullKVCacheGroup::reference(const BlockIndicesType& block_indices) {
+    block_pool_->reference(block_indices);
+}
+
 void FullKVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
                                        const BlockIndicesType& block_indices,
                                        bool                    is_resident) {

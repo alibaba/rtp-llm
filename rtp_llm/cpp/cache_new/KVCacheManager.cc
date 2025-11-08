@@ -5,6 +5,8 @@
 #include "rtp_llm/cpp/cache_new/SingleTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/HashUtil.h"
+#include "rtp_llm/cpp/cache_new/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 
 namespace rtp_llm {
 
@@ -63,6 +65,25 @@ CacheLayerLayout KVCacheManager::layerCacheBase() const {
     return allocator_->layerCacheBase();
 }
 
+KVCacheBuffer KVCacheManager::kvCacheBuffer() const {
+    // Delegate to allocator implementation
+    return allocator_->kvCacheBuffer();
+}
+
+void KVCacheManager::regUserMr(size_t model_id) {
+    if (!allocator_) {
+        return;
+    }
+    allocator_->regUserMr(model_id);
+}
+
+BlockAddrInfo KVCacheManager::convertIndexToAddr(int block_index, int layer_id) const {
+    if (!allocator_) {
+        return {};
+    }
+    return allocator_->convertIndexToAddr(layer_id, block_index);
+}
+
 MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
     if (!malloc_info.batch_kv_cache_resource || !malloc_info.complete_token_ids) {
         RTP_LLM_LOG_ERROR("malloc_info is invalid: batch_kv_cache_resource or complete_token_ids is null");
@@ -103,6 +124,66 @@ FreeResult KVCacheManager::free(const FreeInfo& free_info) {
 
 InsertResult KVCacheManager::insertIntoCache(const InsertInfo& insert_info) {
     return allocator_->insertIntoCache(insert_info);
+}
+
+KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const {
+    // return allocator_->getKVCacheInfo(latest_version, need_cache_keys);
+    return {0, 0, 0, {}, latest_version};
+}
+
+size_t KVCacheManager::freeBlocksNums() const {
+    return allocator_->freeBlocksNums();
+}
+
+size_t KVCacheManager::availableBlocksNums() const {
+    return allocator_->availableBlocksNums();
+}
+
+size_t KVCacheManager::totalBlocksNums() const {
+    return allocator_->totalBlocksNums();
+}
+
+size_t KVCacheManager::maxSeqLen() const {
+    return allocator_->maxSeqLen();
+}
+
+void KVCacheManager::blockCopy(int src_block_index, int dest_block_index) {
+    return allocator_->blockCopy(src_block_index, dest_block_index);
+}
+
+void KVCacheManager::blockBatchCopy(const std::vector<BlockIdPair>& copy_mapping) {
+    return allocator_->blockBatchCopy(copy_mapping);
+}
+
+void KVCacheManager::blockBatchCopy(const rtp_llm::Buffer& copy_mapping) {
+    return allocator_->blockBatchCopy(copy_mapping);
+}
+
+void KVCacheManager::blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end) {
+    return allocator_->blockBatchCopy(copy_mapping_begin, copy_mapping_end);
+}
+
+bool KVCacheManager::getCacheForRank(const std::vector<size_t>&                cache_keys,
+                                     const std::vector<int32_t>&               block_indices,
+                                     size_t                                    ignore_block_num,
+                                     int64_t                                   request_id,
+                                     const std::map<std::string, std::string>& extra_metas) const {
+    RTP_LLM_LOG_WARNING("getCacheForRank is not implemented in new KVCacheManager yet");
+    return false;
+}
+
+bool KVCacheManager::putCacheForRank(const std::vector<size_t>&                cache_keys,
+                                     const std::vector<int32_t>&               block_indices,
+                                     size_t                                    ignore_block_num,
+                                     int64_t                                   request_id,
+                                     const std::map<std::string, std::string>& extra_metas) const {
+    RTP_LLM_LOG_WARNING("putCacheForRank is not implemented in new KVCacheManager yet");
+    return false;
+}
+
+std::shared_ptr<MemoryBlockCache> KVCacheManager::memoryBlockCache() const {
+    RTP_LLM_LOG_WARNING("memoryBlockCache is not implemented in new KVCacheManager yet");
+    return nullptr;
 }
 
 }  // namespace rtp_llm

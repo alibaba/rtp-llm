@@ -8,9 +8,11 @@ namespace rtp_llm {
 // LayerFirstLayoutStrategy 
 bool LayerFirstLayoutStrategy::init(const BlockPoolConfig& config, 
                                    torch::Tensor& cache_buffer,
-                                   void* cache_base_ptr) {
+                                   void* cache_base_ptr,
+                                   rtp_llm::DataType data_type) {
     config_ = config;
     cache_base_ptr_ = cache_base_ptr;
+    data_type_ = data_type;
     
     if (cache_buffer.numel() == 0) {
         RTP_LLM_LOG_ERROR("Cache buffer tensor is empty, cannot split by layers");
@@ -75,13 +77,27 @@ void* LayerFirstLayoutStrategy::getVCacheAddr(int layer_id, int block_id) const 
     return addr_info.v_addr;
 }
 
+KVCacheBuffer LayerFirstLayoutStrategy::kvCacheBuffer() const {
+    // LayerFirst layout does not support K/V separation
+    // Return empty buffer with all fields as nullptr
+    KVCacheBuffer buffer;
+    buffer.k_blocks = nullptr;
+    buffer.v_blocks = nullptr;
+    buffer.k_scale = nullptr;
+    buffer.v_scale = nullptr;
+    RTP_LLM_LOG_DEBUG("LayerFirstLayoutStrategy does not support kvCacheBuffer, returning empty buffer");
+    return buffer;
+}
+
 
 // KVFirstLayoutStrategy 
 bool KVFirstLayoutStrategy::init(const BlockPoolConfig& config, 
                                  torch::Tensor& cache_buffer,
-                                 void* cache_base_ptr) {
+                                 void* cache_base_ptr,
+                                 rtp_llm::DataType data_type) {
     config_ = config;
     cache_base_ptr_ = cache_base_ptr;
+    data_type_ = data_type;
     
     if (cache_buffer.numel() == 0) {
         RTP_LLM_LOG_ERROR("Cache buffer tensor is empty, cannot split by KV layout");
@@ -178,6 +194,52 @@ void* KVFirstLayoutStrategy::getVCacheAddr(int layer_id, int block_id) const {
     
     torch::Tensor v_tensor = v_cache_tensor_[layer_id][block_id];
     return v_tensor.data_ptr();
+}
+
+KVCacheBuffer KVFirstLayoutStrategy::kvCacheBuffer() const {
+    KVCacheBuffer buffer;
+    
+    if (!k_cache_tensor_.defined() || !v_cache_tensor_.defined() || 
+        k_cache_tensor_.numel() == 0 || v_cache_tensor_.numel() == 0) {
+        RTP_LLM_LOG_WARNING("KV cache tensors are not initialized");
+        return buffer;
+    }
+    
+    std::vector<size_t> k_shape;
+    for (int i = 0; i < k_cache_tensor_.dim(); ++i) {
+        k_shape.push_back(k_cache_tensor_.size(i));
+    }
+    
+    std::vector<size_t> v_shape;
+    for (int i = 0; i < v_cache_tensor_.dim(); ++i) {
+        v_shape.push_back(v_cache_tensor_.size(i));
+    }
+    
+    auto memory_type = k_cache_tensor_.is_cuda() ? rtp_llm::MEMORY_GPU : rtp_llm::MEMORY_CPU;
+    
+    if (data_type_ == rtp_llm::TYPE_INVALID) {
+        RTP_LLM_LOG_WARNING("DataType not initialized in KVFirstLayoutStrategy");
+        return buffer;
+    }
+    
+    buffer.k_blocks = std::make_shared<rtp_llm::Buffer>(
+        memory_type, data_type_, k_shape, k_cache_tensor_.data_ptr());
+    buffer.v_blocks = std::make_shared<rtp_llm::Buffer>(
+        memory_type, data_type_, v_shape, v_cache_tensor_.data_ptr());
+    
+    buffer.k_scale = nullptr;
+    buffer.v_scale = nullptr;
+    
+    RTP_LLM_LOG_DEBUG("KVFirstLayoutStrategy created kvCacheBuffer: K shape [%zu, %zu, %zu], V shape [%zu, %zu, %zu], dtype=%d",
+                     k_shape.size() > 0 ? k_shape[0] : 0,
+                     k_shape.size() > 1 ? k_shape[1] : 0,
+                     k_shape.size() > 2 ? k_shape[2] : 0,
+                     v_shape.size() > 0 ? v_shape[0] : 0,
+                     v_shape.size() > 1 ? v_shape[1] : 0,
+                     v_shape.size() > 2 ? v_shape[2] : 0,
+                     static_cast<int>(data_type_));
+    
+    return buffer;
 }
 
 std::unique_ptr<MemoryLayoutStrategy> MemoryLayoutStrategyFactory::create(MemoryLayout layout) {

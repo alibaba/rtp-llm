@@ -107,7 +107,7 @@ public:
     size_t                                 totalBlocks() const;
     size_t                                 maxSeqLen() const;
     KVCacheInfo                            getKVCacheInfo(int64_t latest_version, bool need_cache_keys);
-    const KVCacheAllocator::KVCacheBuffer& kvCacheBuffer() const;
+    const KVCacheBuffer& kvCacheBuffer() const;
 
     std::tuple<bool, KVCacheResource> malloc(const KVCacheAllocator::SimpleMallocInfo& malloc_info);
     MatchInfo                         mallocWithCache(const AdvancedMallocInfo& malloc_info);
@@ -131,7 +131,7 @@ public:
     void blockBatchCopy(const rtp_llm::Buffer& copy_mapping);
     void blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end);
 
-    KVCacheAllocator::BlockAddrInfo convertIndexToAddr(int block_index, int layer_id) const;
+    BlockAddrInfo convertIndexToAddr(int block_index, int layer_id) const;
 
     void regUserMr(size_t model_id);
 

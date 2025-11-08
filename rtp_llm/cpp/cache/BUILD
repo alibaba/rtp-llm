@@ -46,6 +46,7 @@ cc_library(
         "@com_google_absl//absl/status:statusor",
         "//:rtp_compute_ops",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store",
+        "//rtp_llm/cpp/cache_new:cache_new_types",
     ] + select({
         "//:using_3fs": [
             ":storage_3fs",

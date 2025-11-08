@@ -1,6 +1,5 @@
 #pragma once
 
-#include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include <memory>
 
@@ -47,10 +46,6 @@ public:
     void                    resize(size_t batch_size);
     void                    resize(size_t batch_id, int reserver_blocks, int value);
     void                    shrink(size_t batch_id, int reserver_blocks);
-    void                    pushBack(const KVCacheResource& addr);
-    void                    append(size_t batch_id, const KVCacheResource& addr);
-    void                    appendClone(const KVCacheResource& addr, std::shared_ptr<CacheManager>& cache_manager);
-    void                    append(const std::vector<KVCacheResource>& resource);
     int                     maxBlockSize() const;
     const std::vector<int>& blocks(int batch_id) const;
     void                    clear();

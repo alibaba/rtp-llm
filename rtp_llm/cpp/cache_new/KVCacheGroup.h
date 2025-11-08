@@ -47,6 +47,7 @@ public:
     insertIntoCache(const CacheKeysType& cache_keys, const BlockIndicesType& block_indices, bool is_resident) = 0;
     virtual void removeSkippedBlocks(BlockIndicesType& block_indices)                                         = 0;
     virtual int  needBlocksNum(int seq_len, int current_blocks) const                                         = 0;
+    virtual void reference(const BlockIndicesType& block_indices)                                             = 0;
 
     std::unordered_map<int, torch::Tensor> layerCacheBase() const;
     BlockAddrInfo                          convertIndexToAddr(int layer_id, int block_id) const;

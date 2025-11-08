@@ -33,29 +33,6 @@ void BatchKVCacheResource::shrink(size_t batch_id, int reserver_blocks) {
     batch_block_id[batch_id].resize(reserver_blocks);
 }
 
-void BatchKVCacheResource::pushBack(const KVCacheResource& addr) {
-    batch_block_id.push_back(addr.block_id);
-}
-
-void BatchKVCacheResource::appendClone(const KVCacheResource& addr, std::shared_ptr<CacheManager>& cache_manager) {
-    append(0, addr);
-    for (uint32_t i = 1; i < batch_block_id.size(); i++) {
-        // clone increased block reference count
-        append(i, addr.clone(cache_manager));
-    }
-}
-
-void BatchKVCacheResource::append(const std::vector<KVCacheResource>& resource) {
-    for (int i = 0; i < batch_block_id.size(); i++) {
-        append(i, resource[i]);
-    }
-}
-
-void BatchKVCacheResource::append(size_t batch_id, const KVCacheResource& addr) {
-    RTP_LLM_CHECK(batch_block_id.size() > batch_id);
-    batch_block_id[batch_id].insert(batch_block_id[batch_id].end(), addr.block_id.begin(), addr.block_id.end());
-}
-
 int BatchKVCacheResource::maxBlockSize() const {
     size_t max_block_size = 0;
     for (const auto& blocks : batch_block_id) {

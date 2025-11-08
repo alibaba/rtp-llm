@@ -10,7 +10,7 @@
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "rtp_llm/cpp/config/GptInitParameter.h"
 #include "rtp_llm/cpp/cache_new/test/BlockPoolTestHelper.h"
-#include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache_new/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 
 namespace rtp_llm {
@@ -149,13 +149,16 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MallocMultipleBatches) {
     auto complete_token_ids = createCompleteTokenIds(batch_size, seq_length);
 
     MallocInfo malloc_info(batch_resource, complete_token_ids);
+    malloc_info.common_seq_len = seq_length;
+    malloc_info.total_seq_len = seq_length+1;
+
     auto       result = allocator_->malloc(malloc_info);
 
     EXPECT_TRUE(result.success);
     for (int i = 0; i < batch_size; ++i) {
-        EXPECT_EQ(batch_resource->batch_block_id[i].size(), 2);
+        EXPECT_EQ(batch_resource->batch_block_id[i].size(), 3);
     }
-    EXPECT_EQ(allocator_->freeBlocksNums(), config.block_num - 7);  // 3 batches * 2 blocks + 1 reserved
+    EXPECT_EQ(allocator_->freeBlocksNums(), config.block_num - 6);  //2 shared + 3 batches * 1 blocks + 1 reserved
 }
 
 // TEST_F(SingleTypeKVCacheAllocatorTest, MallocWithInsufficientBlocks) {

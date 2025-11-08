@@ -4,7 +4,7 @@
 #include <tuple>
 #include <vector>
 #include <atomic>
-#include "rtp_llm/cpp/cache/CacheManager.h"
+#include "rtp_llm/cpp/cache_new/KVCacheManager.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h"
 #include "kmonitor/client/MetricsReporter.h"
@@ -14,10 +14,10 @@ namespace rtp_llm {
 
 class FIFOScheduler: public SchedulerBase {
 public:
-    explicit FIFOScheduler(const rtp_llm::GptInitParameter&     params,
-                           const std::shared_ptr<CacheManager>& cache_manager,
-                           const kmonitor::MetricsReporterPtr   metrics_reporter = nullptr,
-                           const int                            max_score_len    = 1);
+    explicit FIFOScheduler(const rtp_llm::GptInitParameter&        params,
+                           const std::shared_ptr<KVCacheManager>& cache_manager,
+                           const kmonitor::MetricsReporterPtr      metrics_reporter = nullptr,
+                           const int                               max_score_len    = 1);
 
     ~FIFOScheduler() override;
 
@@ -55,11 +55,11 @@ private:
     bool                         waitPredicate();
 
 protected:
-    rtp_llm::GptInitParameter     params_;
-    std::list<GenerateStreamPtr>  waiting_streams_;
-    std::list<GenerateStreamPtr>  running_streams_;
-    std::list<GenerateStreamPtr>  remote_running_streams_;
-    std::shared_ptr<CacheManager> cache_manager_;
+    rtp_llm::GptInitParameter        params_;
+    std::list<GenerateStreamPtr>     waiting_streams_;
+    std::list<GenerateStreamPtr>     running_streams_;
+    std::list<GenerateStreamPtr>     remote_running_streams_;
+    std::shared_ptr<KVCacheManager>  cache_manager_;
     std::atomic<int64_t>          last_schedule_time_       = autil::TimeUtility::currentTimeInMilliSeconds();
     size_t                        max_seq_len_              = 0;
     size_t                        max_batch_tokens_size_    = 0;

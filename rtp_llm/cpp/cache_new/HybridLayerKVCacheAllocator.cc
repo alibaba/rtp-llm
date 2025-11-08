@@ -207,6 +207,12 @@ CacheLayerLayout HybridLayerKVCacheAllocator::layerCacheBase() const {
     return layout;
 }
 
+void HybridLayerKVCacheAllocator::regUserMr(size_t model_id) {
+    if (block_pool_) {
+        block_pool_->regUserMr(model_id);
+    }
+}
+
 BlockAddrInfo HybridLayerKVCacheAllocator::convertIndexToAddr(int layer_id, int block_id) const {
     return full_kv_cache_group_->convertIndexToAddr(layer_id, block_id);
 }
@@ -230,6 +236,13 @@ size_t HybridLayerKVCacheAllocator::totalBlocksNums() const {
 
 size_t HybridLayerKVCacheAllocator::maxSeqLen() const {
     return block_pool_->totalBlockNums() * full_kv_cache_group_->seqSizePerBlock();
+}
+
+KVCacheBuffer HybridLayerKVCacheAllocator::kvCacheBuffer() const {
+    if (!block_pool_) {
+        return KVCacheBuffer{nullptr, nullptr, nullptr, nullptr};
+    }
+    return block_pool_->kvCacheBuffer();
 }
 
 }  // namespace rtp_llm
