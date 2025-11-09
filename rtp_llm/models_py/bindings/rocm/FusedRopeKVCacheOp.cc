@@ -102,7 +102,6 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
                                          store_q,      // store_q
                                          store_kv,     // store_kv
                                          store_cache,  // store_cache
-                                         nullptr,
                                          device_->getStream()  // 必须作为最后一个参数
         );
     } else {
