@@ -10,18 +10,34 @@ struct BlockIds {
     std::vector<int> block_indices;
 };
 
-// struct KVCacheResource {
-//     std::vector<std::shared_ptr<BlockIds>>& batch_layer_block_ids;
-//     std::vector<std::shared_ptr<BlockIds>>& batch_group_block_ids;
-//     KVCacheResource(std::vector<std::shared_ptr<BlockIds>>& batch_layer_block_ids,
-//     std::vector<std::shared_ptr<BlockIds>>& batch_group_block_ids):
-//         batch_layer_block_ids(batch_layer_block_ids), batch_group_block_ids(batch_group_block_ids) {}
-// };
+typedef size_t  CacheKeyType;
+typedef int32_t BlockIdxType;
+
+typedef std::vector<CacheKeyType> CacheKeysType;
+typedef std::vector<BlockIdxType> BlockIndicesType;
 
 typedef std::vector<std::shared_ptr<BlockIds>> GroupBlockIds;
 typedef std::vector<std::shared_ptr<BlockIds>> LayerBlockIds;
-typedef std::vector<GroupBlockIds>             BatchGroupBlockIds;
-typedef std::vector<LayerBlockIds>             BatchLayerBlockIds;
+// typedef std::vector<GroupBlockIds>             BatchGroupBlockIds;
+// typedef std::vector<LayerBlockIds>             BatchLayerBlockIds;
+// typedef std::vector<CacheKeyType>              BatchCacheKeys;
+
+class KVCacheResourceV1 {
+public:
+    // layer_id -> block_indices
+    LayerBlockIds layer_block_ids;
+    // group_id -> block_indices
+    GroupBlockIds group_block_ids;
+    // cache_keys and block_id are not consistent at all times
+    CacheKeysType cache_keys;
+
+public:
+    void resize(int reserver_blocks, int value) {
+        for (auto& group : group_block_ids) {
+            group->block_indices.resize(reserver_blocks, value);
+        }
+    }
+};
 
 class BatchKVCacheResource {
 public:
@@ -45,17 +61,11 @@ public:
 public:
     bool enable_reuse_cache = true;
 
-    // batch_id -> block_indices
+    // this two member will be deleted soon
     std::vector<std::vector<int32_t>> batch_block_id;
+    std::vector<std::vector<size_t>>  cache_keys;
 
-    // batch_id -> layer_id -> block_indices
-    BatchLayerBlockIds batch_layer_block_ids;
-
-    // batch_id -> group_id -> block_indices
-    BatchGroupBlockIds batch_group_block_ids;
-
-    // cache_keys and batch_block_id are not consistent at all times
-    std::vector<std::vector<size_t>> cache_keys;
+    std::vector<KVCacheResourceV1> batch_resource;
 };
 
 using BatchKVCacheResourcePtr = std::shared_ptr<BatchKVCacheResource>;
