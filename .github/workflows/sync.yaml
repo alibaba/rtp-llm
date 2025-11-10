@@ -48,7 +48,7 @@ jobs:
       run: |
         git fetch origin main
         git checkout main
-        check if it needs to sync
+        git reset --hard origin/main
     
     - name: Create and checkout main if not exists
       if: steps.check_main.outputs.exists == 'false'
