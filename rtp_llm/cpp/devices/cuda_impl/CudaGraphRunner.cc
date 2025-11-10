@@ -48,7 +48,7 @@ void CudaGraphRunner::captureOneBatchSize(int bs) {
         auto outputs                        = py_outputs_obj.cast<PyModelOutputs>();
         graph_instances_[bs].mem_hold_.decoder_layer_hidden_states_.copy_(outputs.hidden_states);
         graph.capture_end();
-        RTP_LLM_LOG_INFO("Capture for batch size %d end.", bs);
+        RTP_LLM_LOG_INFO("Capture for batch size %d end. params_ptr: %p", bs, outputs.params_ptr.get());
         CaptureCheck::in_cuda_graph_capture = false;
         if (outputs.params_ptr->check_recycle()) {
             graph_instances_[bs].mem_hold_.params_ptr =
