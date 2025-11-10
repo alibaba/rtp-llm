@@ -3,16 +3,16 @@
 #include "grpc++/grpc++.h"
 
 #include "autil/NetUtil.h"
-#include "rtp_llm/cpp/cache_new/TPBroadcastManager.h"
+#include "rtp_llm/cpp/model_rpc/TpBroadcastManager.h"
 
 namespace rtp_llm::test {
 
 // 测试用RpcService，用于模拟RPC服务
 class TestRpcService final: public RpcService::Service {
 public:
-    ::grpc::Status BroadcastTp(::grpc::ServerContext*        context,
-                               const ::BroadcastTpRequestPB* request,
-                               ::BroadcastTpResponsePB*      response) override {
+    ::grpc::Status CopyCache(::grpc::ServerContext*      context,
+                             const ::CopyCacheRequestPB* request,
+                             ::CopyCacheResponsePB*      response) override {
         if (sleep_millis_ > 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(sleep_millis_));
         }
@@ -127,8 +127,12 @@ TEST_F(TpBroadcastManagerTest, Init_ReturnTrue_ValidWorkerAddrs) {
 // ---------------------------- broadcast ----------------------------
 
 TEST_F(TpBroadcastManagerTest, Broadcast_ReturnNull_RequestsSizeMismatch) {
-    std::vector<BroadcastTpRequestPB> requests(1);
-    auto                              result = manager_->broadcast(requests, /*timeout_ms=*/100);
+    std::vector<CopyCacheRequestPB> requests(1);
+    auto                            rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
+                       const std::shared_ptr<grpc::ClientContext>& ctx,
+                       const CopyCacheRequestPB&                   req,
+                       grpc::CompletionQueue* cq) { return stub->AsyncCopyCache(ctx.get(), req, cq); };
+    auto result = manager_->broadcast<CopyCacheRequestPB, CopyCacheResponsePB>(requests, /*timeout_ms=*/100, rpc_call);
     EXPECT_EQ(result, nullptr);
 }
 
@@ -136,17 +140,12 @@ TEST_F(TpBroadcastManagerTest, Broadcast_ReturnNull_GetConnectionFailed) {
     std::vector<std::string> empty_addrs;
     auto                     manager = std::make_unique<TPBroadcastManager>(empty_addrs);
 
-    std::vector<BroadcastTpRequestPB> requests(3);
-    for (size_t i = 0; i < requests.size(); ++i) {
-        auto mem_request = requests[i].mutable_mem_request();
-        mem_request->set_direction(MemoryBroadcastTpRequestPB::H2D);
-        auto* group = mem_request->add_groups();
-        group->set_group_id(i);
-        group->add_gpu_block_ids(i);
-        group->add_memory_block_ids(i);
-    }
-
-    auto result = manager->broadcast(requests, /*timeout_ms=*/500);
+    std::vector<CopyCacheRequestPB> requests(3);
+    auto                            rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
+                       const std::shared_ptr<grpc::ClientContext>& ctx,
+                       const CopyCacheRequestPB&                   req,
+                       grpc::CompletionQueue* cq) { return stub->AsyncCopyCache(ctx.get(), req, cq); };
+    auto result = manager->broadcast<CopyCacheRequestPB, CopyCacheResponsePB>(requests, /*timeout_ms=*/500, rpc_call);
     ASSERT_EQ(result, nullptr);
 }
 
@@ -165,17 +164,12 @@ TEST_F(TpBroadcastManagerTest, Broadcast_ReturnNotNull_AllRequestsSuccess) {
     ASSERT_TRUE(manager->init());
     ASSERT_EQ(manager->workerNum(), server_addrs.size());
 
-    std::vector<BroadcastTpRequestPB> requests(manager->workerNum());
-    for (size_t i = 0; i < requests.size(); ++i) {
-        auto mem_request = requests[i].mutable_mem_request();
-        mem_request->set_direction(MemoryBroadcastTpRequestPB::H2D);
-        auto* group = mem_request->add_groups();
-        group->set_group_id(i);
-        group->add_gpu_block_ids(i);
-        group->add_memory_block_ids(i);
-    }
-
-    auto result = manager->broadcast(requests, /*timeout_ms=*/500);
+    std::vector<CopyCacheRequestPB> requests(manager->workerNum());
+    auto                            rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
+                       const std::shared_ptr<grpc::ClientContext>& ctx,
+                       const CopyCacheRequestPB&                   req,
+                       grpc::CompletionQueue* cq) { return stub->AsyncCopyCache(ctx.get(), req, cq); };
+    auto result = manager->broadcast<CopyCacheRequestPB, CopyCacheResponsePB>(requests, /*timeout_ms=*/500, rpc_call);
     ASSERT_NE(result, nullptr);
 
     result->waitDone();
@@ -211,14 +205,13 @@ TEST_F(TpBroadcastManagerTest, Broadcast_ReturnNotNull_AllRequestsTimeout) {
     ASSERT_TRUE(manager->init());
     ASSERT_EQ(manager->workerNum(), server_addrs.size());
 
-    std::vector<BroadcastTpRequestPB> requests(manager->workerNum());
-    for (size_t i = 0; i < requests.size(); ++i) {
-        auto mem_request = requests[i].mutable_mem_request();
-        mem_request->set_direction(MemoryBroadcastTpRequestPB::H2D);
-    }
-
+    std::vector<CopyCacheRequestPB> requests(manager->workerNum());
     // set timeout to 50ms, so the request should timeout
-    auto result = manager->broadcast(requests, /*timeout_ms=*/50);
+    auto rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
+                       const std::shared_ptr<grpc::ClientContext>& ctx,
+                       const CopyCacheRequestPB&                   req,
+                       grpc::CompletionQueue* cq) { return stub->AsyncCopyCache(ctx.get(), req, cq); };
+    auto result   = manager->broadcast<CopyCacheRequestPB, CopyCacheResponsePB>(requests, /*timeout_ms=*/50, rpc_call);
     ASSERT_NE(result, nullptr);
 
     EXPECT_THROW(result->waitDone(), rtp_llm::RTPException);
@@ -230,7 +223,7 @@ TEST_F(TpBroadcastManagerTest, Broadcast_ReturnNotNull_AllRequestsTimeout) {
     //     EXPECT_FALSE(responses[i].has_mem_response());
     //     EXPECT_FALSE(responses[i].mem_response().success());
 
-    //     const auto& ctx = result->worker_rpc_contexts_[i];
+    //     const auto& ctx = result->worker_contexts_[i];
     //     EXPECT_EQ(ctx->status.error_code(), grpc::StatusCode::DEADLINE_EXCEEDED);
     // }
 
@@ -259,14 +252,13 @@ TEST_F(TpBroadcastManagerTest, Broadcast_ReturnNotNull_PartialRequestsTimeout) {
     ASSERT_TRUE(manager->init());
     ASSERT_EQ(manager->workerNum(), server_addrs.size());
 
-    std::vector<BroadcastTpRequestPB> requests(manager->workerNum());
-    for (size_t i = 0; i < requests.size(); ++i) {
-        auto mem_request = requests[i].mutable_mem_request();
-        mem_request->set_direction(MemoryBroadcastTpRequestPB::H2D);
-    }
-
+    std::vector<CopyCacheRequestPB> requests(manager->workerNum());
     // set timeout to 50ms, so the request should timeout
-    auto result = manager->broadcast(requests, /*timeout_ms=*/50);
+    auto rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
+                       const std::shared_ptr<grpc::ClientContext>& ctx,
+                       const CopyCacheRequestPB&                   req,
+                       grpc::CompletionQueue* cq) { return stub->AsyncCopyCache(ctx.get(), req, cq); };
+    auto result   = manager->broadcast<CopyCacheRequestPB, CopyCacheResponsePB>(requests, /*timeout_ms=*/50, rpc_call);
     ASSERT_NE(result, nullptr);
 
     EXPECT_THROW(result->waitDone(), rtp_llm::RTPException);
@@ -275,7 +267,7 @@ TEST_F(TpBroadcastManagerTest, Broadcast_ReturnNotNull_PartialRequestsTimeout) {
     // const auto& responses = result->responses();
     // EXPECT_EQ(responses.size(), server_addrs.size());
     // for (size_t i = 0; i < responses.size(); ++i) {
-    //     const auto& ctx = result->worker_rpc_contexts_[i];
+    //     const auto& ctx = result->worker_contexts_[i];
     //     if (i == 0) {
     //         EXPECT_EQ(ctx->status.error_code(), grpc::StatusCode::DEADLINE_EXCEEDED);
     //         EXPECT_FALSE(responses[i].has_mem_response());
@@ -314,13 +306,12 @@ TEST_F(TpBroadcastManagerTest, Broadcast_ReturnNotNull_PartialResponseRpcStatusF
     ASSERT_TRUE(manager->init());
     ASSERT_EQ(manager->workerNum(), server_addrs.size());
 
-    std::vector<BroadcastTpRequestPB> requests(manager->workerNum());
-    for (size_t i = 0; i < requests.size(); ++i) {
-        auto mem_request = requests[i].mutable_mem_request();
-        mem_request->set_direction(MemoryBroadcastTpRequestPB::H2D);
-    }
-
-    auto result = manager->broadcast(requests, /*timeout_ms=*/100);
+    std::vector<CopyCacheRequestPB> requests(manager->workerNum());
+    auto                            rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
+                       const std::shared_ptr<grpc::ClientContext>& ctx,
+                       const CopyCacheRequestPB&                   req,
+                       grpc::CompletionQueue* cq) { return stub->AsyncCopyCache(ctx.get(), req, cq); };
+    auto result = manager->broadcast<CopyCacheRequestPB, CopyCacheResponsePB>(requests, /*timeout_ms=*/100, rpc_call);
     ASSERT_NE(result, nullptr);
 
     result->waitDone();
@@ -329,7 +320,7 @@ TEST_F(TpBroadcastManagerTest, Broadcast_ReturnNotNull_PartialResponseRpcStatusF
     const auto& responses = result->responses();
     EXPECT_EQ(responses.size(), server_addrs.size());
     for (size_t i = 0; i < responses.size(); ++i) {
-        const auto& ctx = result->worker_rpc_contexts_[i];
+        const auto& ctx = result->worker_contexts_[i];
         if (i == 0) {
             EXPECT_EQ(ctx->status.error_code(), grpc::StatusCode::INTERNAL);
             EXPECT_FALSE(responses[i].has_mem_response());
@@ -366,13 +357,12 @@ TEST_F(TpBroadcastManagerTest, Broadcast_ReturnNotNull_ResponseStatusOkButMemRes
     ASSERT_TRUE(manager->init());
     ASSERT_EQ(manager->workerNum(), server_addrs.size());
 
-    std::vector<BroadcastTpRequestPB> requests(manager->workerNum());
-    for (size_t i = 0; i < requests.size(); ++i) {
-        auto mem_request = requests[i].mutable_mem_request();
-        mem_request->set_direction(MemoryBroadcastTpRequestPB::H2D);
-    }
-
-    auto result = manager->broadcast(requests, /*timeout_ms=*/100);
+    std::vector<CopyCacheRequestPB> requests(manager->workerNum());
+    auto                            rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
+                       const std::shared_ptr<grpc::ClientContext>& ctx,
+                       const CopyCacheRequestPB&                   req,
+                       grpc::CompletionQueue* cq) { return stub->AsyncCopyCache(ctx.get(), req, cq); };
+    auto result = manager->broadcast<CopyCacheRequestPB, CopyCacheResponsePB>(requests, /*timeout_ms=*/100, rpc_call);
     ASSERT_NE(result, nullptr);
 
     result->waitDone();
@@ -381,7 +371,7 @@ TEST_F(TpBroadcastManagerTest, Broadcast_ReturnNotNull_ResponseStatusOkButMemRes
     const auto& responses = result->responses();
     EXPECT_EQ(responses.size(), server_addrs.size());
     for (size_t i = 0; i < responses.size(); ++i) {
-        const auto& ctx = result->worker_rpc_contexts_[i];
+        const auto& ctx = result->worker_contexts_[i];
         EXPECT_EQ(ctx->status.error_code(), grpc::StatusCode::OK);
         EXPECT_TRUE(responses[i].has_mem_response());
         if (i == 0) {
@@ -406,6 +396,7 @@ TEST_F(TpBroadcastManagerTest, WorkerNum) {
 }  // namespace rtp_llm::test
 
 int main(int argc, char** argv) {
+    rtp_llm::initLogger();
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }
