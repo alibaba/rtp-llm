@@ -53,7 +53,7 @@ public:
 public:
     class Watcher {
     public:
-        Watcher(int layer_id);
+        Watcher(int layer_id): layer_id_(layer_id) {}
         ~Watcher() = default;
 
     public:
@@ -72,6 +72,14 @@ public:
     void setLayerCacheBufferWatchFunc(std::shared_ptr<Watcher> watcher, int64_t deadline_ms);
 
     void checkTimeout();
+
+    uint32_t layerCacheBufferMapSize() const {
+        return layer_cache_buffer_map_.size();
+    }
+
+    uint32_t layerCacheBufferWatcherMapSize() const {
+        return layer_cache_buffer_watcher_map_.size();
+    }
 
 private:
     void notifyAllWatchers(const std::shared_ptr<LayerCacheBuffer>& layer_cache_buffer);
