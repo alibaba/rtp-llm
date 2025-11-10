@@ -10,19 +10,18 @@
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/cache_new/BatchKVCacheResource.h"
 
-
 namespace rtp_llm {
 
 class CompleteTokenIds;
 using CompleteTokenIdsPtr = std::shared_ptr<CompleteTokenIds>;
 
-
 class BatchKVCacheResource;
 using BatchKVCacheResourcePtr = std::shared_ptr<BatchKVCacheResource>;
 
-typedef std::vector<float>        LossType;
-typedef std::vector<LossType>     LossesType;
-typedef std::vector<int>          LayerIdsType;
+typedef int32_t               GroupIdType;
+typedef std::vector<float>    LossType;
+typedef std::vector<LossType> LossesType;
+typedef std::vector<int>      LayerIdsType;
 
 constexpr int32_t NULL_BLOCK_IDX = -1;
 
@@ -51,11 +50,11 @@ struct CacheLayerLayout {
 };
 
 struct KVCacheInfo {
-    size_t                      available_kv_cache = 0;
-    size_t                      total_kv_cache     = 0;
-    size_t                      block_size         = 0;
-    std::vector<CacheKeyType>   cached_keys;
-    int64_t                     version = -1;
+    size_t                    available_kv_cache = 0;
+    size_t                    total_kv_cache     = 0;
+    size_t                    block_size         = 0;
+    std::vector<CacheKeyType> cached_keys;
+    int64_t                   version = -1;
 };
 
 // For backward compatibility with old cache system (same as GptModel.h definition)
@@ -83,15 +82,14 @@ struct MallocInfo {
 
     BatchKVCacheResourcePtr batch_kv_cache_resource;
     CompleteTokenIdsPtr     complete_token_ids;
-    BufferPtr               loss = nullptr;
+    BufferPtr               loss       = nullptr;
     int64_t                 request_id = 0;  // for logging and debugging
-    bool                    verbose = true;
-    
-    // For common/extra blocks allocation strategy
-    int                     common_seq_len = -1;  // -1 means no distinction between common and extra
-    int                     total_seq_len = -1;   // -1 means use complete_token_ids->seqLength()
-};
+    bool                    verbose    = true;
 
+    // For common/extra blocks allocation strategy
+    int common_seq_len = -1;  // -1 means no distinction between common and extra
+    int total_seq_len  = -1;  // -1 means use complete_token_ids->seqLength()
+};
 
 struct MallocResult {
     bool success;
@@ -104,9 +102,9 @@ struct FreeInfo {
 
     BatchKVCacheResourcePtr batch_kv_cache_resource;
     CompleteTokenIdsPtr     complete_token_ids;
-    
+
     // Metadata
-    int64_t                 request_id = 0;  // for logging and debugging
+    int64_t request_id = 0;  // for logging and debugging
 };
 
 struct FreeResult {
@@ -119,7 +117,7 @@ struct InsertInfo {
                bool                    is_resident):
         batch_kv_cache_resource(batch_kv_cache_resource),
         complete_token_ids(complete_token_ids),
-        is_resident(is_resident){}
+        is_resident(is_resident) {}
 
     BatchKVCacheResourcePtr batch_kv_cache_resource;
     CompleteTokenIdsPtr     complete_token_ids;
