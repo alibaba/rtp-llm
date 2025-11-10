@@ -11,15 +11,17 @@ import torch
 
 MAX_ITERATIONS = 100000
 
-CUR_PATH = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(os.path.join(str(CUR_PATH), "../../../"))
+# CUR_PATH = os.path.dirname(os.path.abspath(__file__))
+# sys.path.append(os.path.join(str(CUR_PATH), "../../../"))
 device = torch.device(f"cuda")
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.models.rotary_embedding.deepseek_rotary_embedding import (
     DeepseekV3YarnRotaryEmbedding,
 )
-from rtp_llm.models_py.modules.fmha import MlaFlashInferPrefillImpl
+from rtp_llm.models_py.modules.mla.flashinfer_mla_wrapper import (
+    MlaFlashInferPrefillImpl,
+)
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs
 from rtp_llm.utils.model_weight import W
 
@@ -90,16 +92,12 @@ class MLABenchmark(TestCase):
         # 创建函数映射字典
         self.fmha_function_map = {
             "forward": self._call_forward,
-            "reuse_kv_cache": self._call_reuse_kv_cache,
-            "collect_reuse_blocks": self._call_collect_reuse_blocks,
             "reuse_kv_cache_indexed": self._call_reuse_kv_cache_indexed,
         }
 
         # 函数描述映射
         self.fmha_function_descriptions = {
             "forward": "Forward pass only",
-            "reuse_kv_cache": "_reuse_kv_cache function only",
-            "collect_reuse_blocks": "_collect_reuse_blocks function only",
             "reuse_kv_cache_indexed": "_reuse_kv_cache_indexed function only",
         }
 
@@ -116,23 +114,13 @@ class MLABenchmark(TestCase):
         """调用forward函数"""
         fmha_impl.forward(q, compressed_kv, k_pe, kv_cache, 0)
 
-    def _call_reuse_kv_cache(
-        self, fmha_impl, q, compressed_kv, k_pe, kv_cache, reuse_len, config
-    ):
-        """调用_reuse_kv_cache函数"""
-        fmha_impl._reuse_kv_cache(compressed_kv, k_pe, kv_cache)
-
     def _call_reuse_kv_cache_indexed(
         self, fmha_impl, q, compressed_kv, k_pe, kv_cache, reuse_len, config
     ):
         """调用_reuse_kv_cache_indexed函数"""
-        fmha_impl._reuse_kv_cache_indexed_batched(compressed_kv, k_pe, kv_cache)
-
-    def _call_collect_reuse_blocks(
-        self, fmha_impl, q, compressed_kv, k_pe, kv_cache, reuse_len, config
-    ):
-        """调用_collect_reuse_blocks函数"""
-        fmha_impl._collect_reuse_blocks(reuse_len, config.kv_lora_rank, kv_cache)
+        fmha_impl.fmha_impl._reuse_kv_cache_indexed_batched(
+            compressed_kv, k_pe, kv_cache
+        )
 
     def _benchmark_mla_implementation(
         self,
@@ -202,25 +190,25 @@ class MLABenchmark(TestCase):
         # 创建输入数据
         q = torch.randn(
             [num_tokens, config.head_num, config.nope_head_dim + config.rope_head_dim],
-            dtype=torch.float16,
+            dtype=torch.bfloat16,
             device=device,
         )
 
         compressed_kv = torch.randn(
             [num_tokens, config.kv_lora_rank],
-            dtype=torch.float16,
+            dtype=torch.bfloat16,
             device=device,
         )
 
         k_pe = torch.randn(
             [num_tokens, config.rope_head_dim],
-            dtype=torch.float16,
+            dtype=torch.bfloat16,
             device=device,
         )
 
         cache = torch.randn(
             [mock_page_num, page_size, config.kv_lora_rank + config.rope_head_dim],
-            dtype=torch.float16,
+            dtype=torch.bfloat16,
             device=device,
         )
 
@@ -305,35 +293,35 @@ class MLABenchmark(TestCase):
                 + config.kv_lora_rank
                 + config.rope_head_dim,
             ],
-            dtype=torch.float16,
+            dtype=torch.bfloat16,
             device=device,
         )
 
         weights[W.mla_kv_a_ln_gamma] = torch.randn(
-            [config.kv_lora_rank], dtype=torch.float16, device=device
+            [config.kv_lora_rank], dtype=torch.bfloat16, device=device
         )
 
         weights[W.mla_kc] = torch.randn(
             [config.head_num, config.nope_head_dim, config.kv_lora_rank],
-            dtype=torch.float16,
+            dtype=torch.bfloat16,
             device=device,
         )
 
         weights[W.mla_vc] = torch.randn(
             [config.head_num, config.kv_lora_rank, config.v_head_dim],
-            dtype=torch.float16,
+            dtype=torch.bfloat16,
             device=device,
         )
 
         weights[W.mla_v_w] = torch.randn(
             [config.kv_lora_rank, hidden_size],
-            dtype=torch.float16,
+            dtype=torch.bfloat16,
             device=device,
         )
 
         weights[W.mla_k_nope_w] = torch.randn(
             [config.kv_lora_rank, hidden_size],
-            dtype=torch.float16,
+            dtype=torch.bfloat16,
             device=device,
         )
 
@@ -342,7 +330,7 @@ class MLABenchmark(TestCase):
                 config.head_num * config.v_head_dim,
                 config.hidden_size,
             ],
-            dtype=torch.float16,
+            dtype=torch.bfloat16,
             device=device,
         )
 
@@ -352,11 +340,26 @@ class MLABenchmark(TestCase):
         """小规模基准测试"""
         results = []
         for params in itertools.product(
-            [1, 64, 128, 144, 160, 176, 192, 256, 512, 1024, 2048],
+            [1, 64, 128, 144, 160, 176, 192, 256, 512, 1024, 2048, 4096, 8192, 10240],
             [2048],
             [64],
             [1],
-            [0, 64, 128, 256, 512, 1024, 2048, 4096, 8192],
+            [
+                0,
+                64,
+                128,
+                256,
+                512,
+                1024,
+                2048,
+                4096,
+                8192,
+                10240,
+                20480,
+                40960,
+                81920,
+                102400,
+            ],
             [1, MAX_ITERATIONS],
             ["forward"],
         ):
@@ -383,7 +386,22 @@ class MLABenchmark(TestCase):
             [2048],
             [64],
             [1],
-            [0, 64, 128, 256, 512, 1024, 2048, 4096],
+            [
+                0,
+                64,
+                128,
+                256,
+                512,
+                1024,
+                2048,
+                4096,
+                8192,
+                10240,
+                20480,
+                40960,
+                81920,
+                102400,
+            ],
             [1],
             ["reuse_kv_cache_indexed"],
         ):
@@ -401,46 +419,6 @@ class MLABenchmark(TestCase):
             results.append(result)
 
         self._print_summary(results, "reuse_kv_cache_indexed Benchmark")
-
-    '''
-    def test_mla_benchmark_reuse_kv_cache(self):
-        """小规模基准测试"""
-        results = []
-        for params in itertools.product(
-            [4096], [2048], [64], [1], [0,64,128,256,512,1024,2048,4096], [1], ['reuse_kv_cache']
-        ):
-            result = self._benchmark_mla_implementation(*params)
-            result.update({
-                'num_tokens': params[0],
-                'hidden_size': params[1],
-                'page_size': params[2],
-                'batch_size': params[3],
-                'reuse_len': params[4],
-                'absorb_opt_len': params[5]
-            })
-            results.append(result)
-
-        self._print_summary(results, "reuse_kv_cache Benchmark")
-
-    def test_mla_benchmark_collect_reuse_blocks(self):
-        """小规模基准测试"""
-        results = []
-        for params in itertools.product(
-            [4096], [2048], [64], [1], [0,64,128,256,512,1024,2048,4096], [1], ['collect_reuse_blocks']
-        ):
-            result = self._benchmark_mla_implementation(*params)
-            result.update({
-                'num_tokens': params[0],
-                'hidden_size': params[1],
-                'page_size': params[2],
-                'batch_size': params[3],
-                'reuse_len': params[4],
-                'absorb_opt_len': params[5]
-            })
-            results.append(result)
-
-        self._print_summary(results, "collect_reuse_blocks Benchmark")
-    '''
 
     def test_mla_benchmark_focused(self):
         """针对特定配置的详细基准测试"""

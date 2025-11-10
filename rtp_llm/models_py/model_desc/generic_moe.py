@@ -7,7 +7,7 @@ from torch import nn
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
-from rtp_llm.models_py.modules import GroupTopK, RMSNorm, SelectTopk
+from rtp_llm.models_py.modules import RMSNorm, SelectTopk
 from rtp_llm.models_py.modules.attention import CausalAttention
 from rtp_llm.models_py.modules.embedding import Embedding
 from rtp_llm.models_py.modules.fmha import FMHAImplBase
@@ -173,7 +173,6 @@ class GenericMoeLayer(nn.Module):
 
         self.gate = Linear(weights[W.moe_gate], None)
         self.select_topk = SelectTopk(config)
-        self.group_topk = GroupTopK()
         self.fused_moe: FusedMoe = FusedMoeFactory.create_fused_moe(config, weights)
         self.w1 = weights.get(W.moe_w1, None)
         self.w2 = weights.get(W.moe_w2, None)
@@ -184,23 +183,7 @@ class GenericMoeLayer(nn.Module):
         self.expert_map = self.build_expert_map()
 
         # for group topk
-        self.use_deepep_moe = config.moe_config.use_deepep_moe
-        self.qscheme = (
-            None if config.quant_config is None else config.quant_config.get_method()
-        )
-        self.topk_id_dtype = (
-            torch.int64
-            if self.qscheme == "FP8_PER_BLOCK" and self.use_deepep_moe
-            else torch.int32
-        )
-        self.renormalize = config.has_moe_norm
-        self.num_expert_group = config.moe_n_group
-
-        self.topk_group = config.moe_topk_group
-        self.n_routed_experts = config.expert_num  # config.n_routed_experts
-
         self.correction_bias = weights.get(W.e_score_correction_b, None)
-        self.routed_scaling_factor = config.routed_scaling_factor
 
     def build_expert_map(self):
         """Build expert mapping for EP (Expert Parallelism)."""
@@ -224,11 +207,20 @@ class GenericMoeLayer(nn.Module):
         )
         topk_ids = torch.zeros(
             (num_tokens, self.top_k),
-            dtype=self.topk_id_dtype,
+            dtype=torch.int64,
             device=hidden_states.device,
         )
 
         if self.correction_bias is not None:
+            from rtp_llm.models_py.modules.select_topk import GroupTopK
+
+            self.group_topk = GroupTopK()
+            self.renormalize = self.config.has_moe_norm
+            self.num_expert_group = self.config.moe_n_group
+
+            self.topk_group = self.config.moe_topk_group
+            self.n_routed_experts = self.config.expert_num  # config.n_routed_experts
+            self.routed_scaling_factor = self.config.routed_scaling_factor
             self.group_topk(
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
