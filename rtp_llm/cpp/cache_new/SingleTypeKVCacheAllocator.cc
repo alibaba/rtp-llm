@@ -267,7 +267,7 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& kv
         auto&     fork_count    = batch_fork_count[old_batch_idx];
         RTP_LLM_CHECK_WITH_INFO(fork_count > 0, "old batch %d has been forked too many times", old_batch_idx);
 
-        kv_cache_resource->initGroups(1);
+        kv_cache_resource->initGroups(1, config_.layer_num);
 
         if (fork_count == 1) {
             auto& br       = kv_cache_resource->batch_resource[new_batch_idx];
@@ -297,6 +297,12 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& kv
         --fork_count;
     }
     return true;
+}
+
+void SingleTypeKVCacheAllocator::clearCache() {
+    if (block_pool_) {
+        block_pool_->clearCache();
+    }
 }
 
 }  // namespace rtp_llm
