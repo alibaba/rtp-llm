@@ -61,4 +61,6 @@ class FusedSiluActDenseMLP(nn.Module):
         output = torch.empty(output_shape, dtype=gate_up.dtype, device=gate_up.device)
         aiter.silu_and_mul(output, gate_up)
         down_proj = self.down_proj(output)
+        if self.config.tp_size > 1:
+            down_proj = all_reduce(down_proj, group=Group.TP)
         return down_proj
