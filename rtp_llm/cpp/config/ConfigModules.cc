@@ -190,7 +190,7 @@ std::string MoeConfig::to_string() const {
 std::string ModelSpecificConfig::to_string() const {
     std::ostringstream oss;
     oss << "max_lora_model_size: " << max_lora_model_size << "\n";
-    oss << "load_python_model:" << load_python_model << "\n";
+    oss << "load_python_model: " << load_python_model << "\n";
     return oss.str();
 }
 

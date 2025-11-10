@@ -5,6 +5,7 @@
 
 #include "autil/AtomicCounter.h"
 
+#include "rtp_llm/cpp/api_server/AccessLogWrapper.h"
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
 #include "rtp_llm/cpp/embedding_engine/EmbeddingEngine.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalProcessor.h"
@@ -40,7 +41,8 @@ public:
         params_(params),
         token_processor_(new TokenProcessor(token_processor)),
         metrics_reporter_(params.metrics_reporter) {
-        is_embedding_ = false;
+        is_embedding_                             = false;
+        AccessLogWrapper::default_private_request = params.gpt_init_parameter.misc_config.disable_access_log;
         active_request_count_.reset(new autil::AtomicCounter());
         request_counter_.reset(new autil::AtomicCounter());
         init_controller(params_.concurrency_config, params_.parallelism_config);

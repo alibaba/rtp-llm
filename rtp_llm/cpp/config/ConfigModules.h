@@ -308,8 +308,9 @@ struct PDSepConfig {
 };
 
 struct MiscellaneousConfig {
-    bool        disable_pdl = true;
-    std::string aux_string  = "";
+    bool        disable_pdl        = true;
+    bool        disable_access_log = false;
+    std::string aux_string         = "";
     std::string to_string() const;
 };
 
