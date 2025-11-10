@@ -27,10 +27,10 @@ class EmbeddingRequest: public autil::legacy::Jsonizable {
 public:
     void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override {
         json.Jsonize("source", source, "unknown");
-        json.Jsonize("private_request", private_request, false);
+        JSONIZE_OPTIONAL(private_request);
     }
-    std::string source;
-    bool        private_request;
+    std::string         source;
+    std::optional<bool> private_request;
 };
 
 class RawRequest: public autil::legacy::Jsonizable {
@@ -38,7 +38,7 @@ public:
     void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override {
         json.Jsonize("source", source, "unknown");
         json.Jsonize("yield_generator", yield_generator, false);
-        json.Jsonize("private_request", private_request, false);
+        JSONIZE_OPTIONAL(private_request);
         JSONIZE_OPTIONAL(prompt);
         try {
             std::string text;
@@ -69,7 +69,7 @@ public:
         JSONIZE_OPTIONAL(generate_config);
     }
     std::string                                          source;
-    bool                                                 private_request;
+    std::optional<bool>                                  private_request;
     bool                                                 yield_generator;
     std::optional<std::string>                           prompt;
     std::optional<std::vector<std::string>>              prompt_batch;
@@ -103,18 +103,18 @@ public:
         AuxInfo();
     }
     AuxInfoAdapter(const AuxInfo& base) {
-        cost_time_us    = base.cost_time_us;
-        iter_count      = base.iter_count;
-        input_len       = base.input_len;
-        prefix_len      = base.prefix_len;
-        reuse_len       = base.reuse_len;
-        output_len      = base.output_len;
-        fallback_tokens = base.fallback_tokens;
-        fallback_times  = base.fallback_times;
-        step_output_len = base.step_output_len;
-        pd_sep          = base.pd_sep;
-        cum_log_probs   = base.cum_log_probs;
-        local_reuse_len = base.local_reuse_len;
+        cost_time_us     = base.cost_time_us;
+        iter_count       = base.iter_count;
+        input_len        = base.input_len;
+        prefix_len       = base.prefix_len;
+        reuse_len        = base.reuse_len;
+        output_len       = base.output_len;
+        fallback_tokens  = base.fallback_tokens;
+        fallback_times   = base.fallback_times;
+        step_output_len  = base.step_output_len;
+        pd_sep           = base.pd_sep;
+        cum_log_probs    = base.cum_log_probs;
+        local_reuse_len  = base.local_reuse_len;
         remote_reuse_len = base.remote_reuse_len;
 
         cost_time_ms = cost_time_us / 1000.0;

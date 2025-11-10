@@ -4,6 +4,7 @@ from typing import Any, Dict
 from rtp_llm.access_logger.json_util import dump_json
 from rtp_llm.access_logger.log_utils import get_handler
 from rtp_llm.access_logger.py_access_log import PyAccessLog, RequestLog, ResponseLog
+from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.structure.request_extractor import request_id_field_name
 
 ACCESS_LOGGER_NAME = "access_logger"
@@ -41,7 +42,9 @@ class AccessLogger:
 
     @staticmethod
     def is_private_request(request: Dict[str, Any]):
-        return request.get("private_request", False)
+        return request.get(
+            "private_request", StaticConfig.misc_config.disable_access_log
+        )
 
     def log_access(self, request: Dict[str, Any], response: ResponseLog) -> None:
         request_log = RequestLog.from_request(request)

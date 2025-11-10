@@ -270,6 +270,7 @@ class ServerArgsDefaultTest(TestCase):
 
         # 30. Miscellaneous Configuration
         self.assertEqual(env.get("DISABLE_PDL"), "1")
+        self.assertEqual(env.get("DISABLE_ACCESS_LOG"), "0")
 
 
 class ServerArgsSetTest(TestCase):
@@ -701,6 +702,8 @@ class ServerArgsSetTest(TestCase):
             # 30. Miscellaneous Configuration
             "--disable_pdl",
             "True",
+            "--disable_access_log",
+            "True",
             # 31. PD-Separation Configuration
             "--prefill_retry_times",
             "2",
@@ -972,6 +975,7 @@ class ServerArgsSetTest(TestCase):
 
         # 30. Miscellaneous Configuration
         self.assertEqual(env["DISABLE_PDL"], "1")
+        self.assertEqual(env["DISABLE_ACCESS_LOG"], "1")
         self.assertEqual(env["AUX_STRING"], "")
 
         # 31. PD-Separation Configuration

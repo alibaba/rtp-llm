@@ -109,7 +109,7 @@ public:
 
     // These params are hacked for our framework, not standard.
     std::optional<GenerateConfig>                     extra_configs;
-    bool                                              private_request = false;
+    std::optional<bool>                               private_request;
     std::optional<std::string>                        trace_id;
     std::optional<std::string>                        chat_id;
     std::optional<std::string>                        template_key;

@@ -405,13 +405,15 @@ std::string FIFOSchedulerConfig::to_string() const {
 
 // MiscellaneousConfig
 void MiscellaneousConfig::update_from_env_for_test() {
-    disable_pdl = bool_from_env_for_test("DISABLE_PDL", true);
-    aux_string  = autil::EnvUtil::getEnv("AUX_STRING", "");
+    disable_pdl        = bool_from_env_for_test("DISABLE_PDL", true);
+    disable_access_log = bool_from_env_for_test("DISABLE_ACCESS_LOG", false);
+    aux_string         = autil::EnvUtil::getEnv("AUX_STRING", "");
 }
 
 std::string MiscellaneousConfig::to_string() const {
     std::ostringstream oss;
     oss << "disable_pdl" << disable_pdl << "\n"
+        << "disable_access_log" << disable_access_log << "\n"
         << "aux_string: " << aux_string << "\n";
     return oss.str();
 }
