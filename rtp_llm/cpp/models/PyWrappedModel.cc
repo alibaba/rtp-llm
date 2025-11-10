@@ -63,7 +63,7 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         context_batch_size,
         decode_batch_size,
         batch_size);
-    if (context_batch_size > 1) {
+    if (context_batch_size > 0) {
         cu_seqlens.slice(0, 1, context_batch_size + 1) = py_attn_inputs.input_lengths.cumsum(0);
         cu_kv_seqlens.slice(0, 1, context_batch_size + 1) =
             py_attn_inputs.input_lengths.add(py_attn_inputs.prefix_lengths).cumsum(0);
