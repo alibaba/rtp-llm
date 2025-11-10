@@ -106,6 +106,8 @@ jobs:
         echo "the branch of rtp-llm is ${branch}, short commit sha is ${commit_sha}"  
         target_subdir=${branch}/${commit_sha}
         echo "target_subdir=${target_subdir}" >> ${GITHUB_OUTPUT}
+        # Filter out special characters that are not safe for URLs/paths
+        target_subdir=$(echo "${target_subdir}" | tr -d '#?&=% ')
         cd gh-pages
         if [ -d ${target_subdir} ]; then
           rm -rf ${target_subdir}
