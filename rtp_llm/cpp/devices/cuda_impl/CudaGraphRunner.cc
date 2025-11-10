@@ -67,7 +67,8 @@ void CudaGraphRunner::capture() {
     RTP_LLM_LOG_INFO("Capture Start");
     int capture_range_size = capture_range_.size();
     for (int i = 0; i <= capture_range_size - 1; i++) {
-        int           bs = capture_range_[i];
+        int bs = capture_range_[i];
+        RTP_LLM_LOG_INFO("init capture inputs for batch size: %d", bs);
         PyModelInputs inputs;
         inputs.input_ids        = capture_mem_hold_.py_model_inputs_.input_ids.slice(0, 0, bs * num_tokens_per_bs_);
         auto options_cpu_int32  = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
@@ -368,6 +369,7 @@ void CudaGraphRunner::initCapture() {
         max_num_token_          = max_bs_ * num_tokens_per_bs_;
         auto options_cuda_int32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
         PyModelInputs inputs;
+        RTP_LLM_LOG_INFO("init capture inputs for max_bs_: %d, num_tokens_per_bs_: %d", max_bs_, num_tokens_per_bs_);
         // input_ids [tokens_nums] = [batch_size * num_tokens_per_bs]
         inputs.input_ids = torch::zeros({max_num_token_}, options_cuda_int32);
         // input_lengths [batch_size, int32] (decode only)

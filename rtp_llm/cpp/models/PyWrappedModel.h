@@ -78,12 +78,18 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     if (enable_cuda_graph_) {
         int kv_cache_offset =
             is_prefill_cuda_graph_mode ? 0 : k_cache_buffer_->shape()[0] * k_cache_buffer_->shape()[1];
+        RTP_LLM_LOG_INFO("get device graph runner, kv_cache_offset=%d, is_prefill_cuda_graph_mode=%d",
+                         kv_cache_offset,
+                         is_prefill_cuda_graph_mode);
         graph_runner_ = device_->getDeviceGraphRunner(
             params.device->initParams(), py_instance, kv_cache_offset, is_prefill_cuda_graph_mode);
+        RTP_LLM_LOG_INFO("Device graph runner created successfully.");
         if (weights_.position_encoding) {
+            RTP_LLM_LOG_INFO("Setting position encoding in graph runner.");
             graph_runner_->setPositionEncoding(Buffer2torchTensor(weights_.position_encoding->kernel, false).cuda());
         }
         if (weights_.token_type_embedding) {
+            RTP_LLM_LOG_INFO("Setting token type embedding in graph runner.");
             graph_runner_->setTokenTypeEmbedding(
                 Buffer2torchTensor(weights_.token_type_embedding->kernel, false).cuda());
         }
@@ -93,7 +99,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can't be null");
         auto py_initialize_method = py_instance.attr("initialize");
         py_init_result            = py_initialize_method(init_resources);
+        RTP_LLM_LOG_INFO("Calling cuda graph init capture");
         graph_runner_->initCapture();
+        RTP_LLM_LOG_INFO("Cuda graph init capture done.");
     } else {
         py_model_                 = std::move(py_instance);
         auto py_initialize_method = py_model_.attr("initialize");

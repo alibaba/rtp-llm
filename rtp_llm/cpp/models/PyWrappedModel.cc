@@ -253,7 +253,9 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         PyModelOutputs py_model_outputs;
         // Cast the Python object to PyModelOutputs and extract hidden states
         if (enable_cuda_graph_) {
+            RTP_LLM_LOG_INFO("calling cuda graph forward");
             py_model_outputs = graph_runner_->forward(py_model_inputs);
+            RTP_LLM_LOG_INFO("calling cuda graph done");
         } else {
             auto py_model_forward = py_model_.attr("forward");
             auto outputs          = py_model_forward(py_model_inputs);
