@@ -1,27 +1,16 @@
 import logging
 from typing import Optional, Any, List
 from rtp_llm.models_py.modules.fmha import FMHAImplBase
-from rtp_llm.ops import PyAttentionInputs, FMHAType, KVCache, ParamsBase
+from rtp_llm.ops.compute_ops import KVCache, ParamsBase, PyAttentionInputs
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from librtp_compute_ops.rtp_llm_ops import FusedRopeKVCachePrefillOp, FusedRopeKVCacheDecodeOp
 import aiter
-import os
-from typing import Any, List, Optional
-
-import aiter
 import torch
-from aiter import dtypes
-
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.models_py.modules.fmha import FMHAImplBase
-from rtp_llm.ops import FMHAType
-from rtp_llm.ops.compute_ops import (
+from librtp_compute_ops.rtp_llm_ops import (
     FusedRopeKVCacheDecodeOp,
     FusedRopeKVCachePrefillOp,
-    KVCache,
-    PyAttentionInputs,
 )
-
+from rtp_llm.ops import FMHAType
 
 # Simple data structure for fmha_params
 class FMHAParams(ParamsBase):
