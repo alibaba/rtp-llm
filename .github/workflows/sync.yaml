@@ -23,6 +23,7 @@ jobs:
       uses: actions/checkout@v4
       with:
         token: ${{ secrets.PUSH_TO_MAIN }}
+        fetch-depth: 10
     
     - name: Configure Git
       run: |
@@ -71,7 +72,7 @@ jobs:
         fi
         
         # Check if current HEAD is upstream/main + one CI commit
-        PARENT_COMMIT=$(git rev-parse HEAD^)
+        PARENT_COMMIT=$(git rev-parse --verify HEAD^ 2>/dev/null || echo "")
         echo "PARENT_COMMIT: $PARENT_COMMIT"
         if [ "$PARENT_COMMIT" = "$UPSTREAM_COMMIT" ]; then
           echo "PARENT_COMMIT is the same as UPSTREAM_COMMIT"
