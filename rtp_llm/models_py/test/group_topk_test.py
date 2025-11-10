@@ -5,11 +5,11 @@ from unittest import SkipTest, TestCase, main
 
 import torch
 
-CUR_PATH = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(os.path.join(str(CUR_PATH), "../../../"))
+# CUR_PATH = os.path.dirname(os.path.abspath(__file__))
+# sys.path.append(os.path.join(str(CUR_PATH), "../../../"))
 device = torch.device(f"cuda")
-from rtp_llm.models_py.modules import GroupTopK
 from rtp_llm.models_py.modules.ep.topk import select_experts
+from rtp_llm.models_py.modules.select_topk import GroupTopK
 
 
 class MLATest(TestCase):

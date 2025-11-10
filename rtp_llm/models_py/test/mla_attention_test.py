@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 from unittest import SkipTest, TestCase, main
 
 import torch
+import torch.nn.functional as F
 
 # CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 # sys.path.append(os.path.join(str(CUR_PATH), "../../../"))
@@ -16,11 +17,11 @@ from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.models.rotary_embedding.deepseek_rotary_embedding import (
     DeepseekV3YarnRotaryEmbedding,
 )
-from rtp_llm.models_py.modules.fmha import (
+from rtp_llm.models_py.modules.mla import MlaAttention
+from rtp_llm.models_py.modules.mla.flashinfer_mla_wrapper import (
     MlaFlashInferDecodeImpl,
     MlaFlashInferPrefillImpl,
 )
-from rtp_llm.models_py.modules.mla import MlaAttention
 from rtp_llm.models_py.modules.mla.mla_attention_ref import MlaAttentionRef
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs
 from rtp_llm.utils.model_weight import W
@@ -149,35 +150,35 @@ class MLATest(TestCase):
                 + self.config.kv_lora_rank
                 + self.config.rope_head_dim,
             ],
-            dtype=torch.float16,
+            dtype=torch.bfloat16,
             device=device,
         )
 
         weights[W.mla_kv_a_ln_gamma] = torch.randn(
-            [self.config.kv_lora_rank], dtype=torch.float16, device=device
+            [self.config.kv_lora_rank], dtype=torch.bfloat16, device=device
         )
 
         weights[W.mla_kc] = torch.randn(
             [self.config.head_num, self.config.nope_head_dim, self.config.kv_lora_rank],
-            dtype=torch.float16,
+            dtype=torch.bfloat16,
             device=device,
         )
 
         weights[W.mla_vc] = torch.randn(
             [self.config.head_num, self.config.kv_lora_rank, self.config.v_head_dim],
-            dtype=torch.float16,
+            dtype=torch.bfloat16,
             device=device,
         )
 
         weights[W.mla_v_w] = torch.randn(
             [self.config.kv_lora_rank, hidden_size],
-            dtype=torch.float16,
+            dtype=torch.bfloat16,
             device=device,
         )
 
         weights[W.mla_k_nope_w] = torch.randn(
             [self.config.kv_lora_rank, hidden_size],
-            dtype=torch.float16,
+            dtype=torch.bfloat16,
             device=device,
         )
 
@@ -186,7 +187,7 @@ class MLATest(TestCase):
                 self.config.head_num * self.config.v_head_dim,
                 self.config.hidden_size,
             ],
-            dtype=torch.float16,
+            dtype=torch.bfloat16,
             device=device,
         )
 
@@ -202,14 +203,31 @@ class MLATest(TestCase):
 
         hidden = torch.randn(
             [num_tokens, self.config.hidden_size],
-            dtype=torch.float16,
+            dtype=torch.bfloat16,
             device=device,
         )
 
         out = deepseekv2_mla(hidden, fmha_impl, kv_cache)
         out_ref = deepseekv2_mla_ref(hidden)
 
-        self.assertTrue(torch.allclose(out, out_ref, atol=1, rtol=1))
+        out_norm = out / (torch.norm(out) + 1e-8)
+        out_ref_norm = out_ref / (torch.norm(out_ref) + 1e-8)
+        self.assertTrue(torch.allclose(out_norm, out_ref_norm, atol=0.01, rtol=0.01))
+
+        out_flat = out.flatten()
+        out_ref_flat = out_ref.flatten()
+        # 计算余弦相似度
+        cosine_sim = F.cosine_similarity(
+            out_flat.unsqueeze(0), out_ref_flat.unsqueeze(0), dim=1
+        )
+        self.assertTrue(
+            torch.allclose(
+                torch.tensor(1.0).to(device).to(cosine_sim.dtype),
+                cosine_sim,
+                atol=0.01,
+                rtol=0.01,
+            )
+        )
 
     def test_mlp(self):
         for params in itertools.product(

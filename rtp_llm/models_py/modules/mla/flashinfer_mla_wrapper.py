@@ -69,6 +69,7 @@ try:
                 config.use_mla,
                 weights,
             )
+            self.aborb_fmha.prepare(attn_inputs)
 
         @staticmethod
         def fmha_type() -> FMHAType:
