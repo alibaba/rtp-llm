@@ -37,9 +37,12 @@ public:
                        bool                           copy_last_block,
                        std::vector<BlockIdPair>&      block_update_mapping) override;
 
+    void clearCache() override;
+
 private:
     MallocResult incrMalloc(const MallocInfo& malloc_info);
     MallocResult initMallocForCommonLen(const MallocInfo& malloc_info);
+    void         makeLayerBlockIds(KVCacheResourceV1& resource) const;
 
 private:
     BlockPoolPtr                      block_pool_;
