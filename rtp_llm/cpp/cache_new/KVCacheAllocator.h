@@ -56,6 +56,8 @@ public:
     size_t        maxAvailableTokensNum() const;
     KVCacheBuffer kvCacheBuffer() const;
 
+    virtual void clearCache() = 0;
+
 protected:
     MallocResult         initMalloc(const MallocInfo& malloc_info);
     virtual MallocResult incrMalloc(const MallocInfo& malloc_info)             = 0;

@@ -89,7 +89,7 @@ grpc::Status PrefillRpcServer::init(const EngineInitParams&                     
 ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> stream) {
     static int max_wait_timeout_us = maga_init_params_.gpt_init_parameter.prefill_max_wait_timeout_ms_ * 1000;
     auto       begin_time_us       = currentTimeUs();
-    while (stream->waiting()) {
+    while (stream->waiting() || stream->loadingCache()) {
         usleep(100);
         auto current_time_us = currentTimeUs();
         auto cost_time_us    = current_time_us - begin_time_us;
@@ -340,10 +340,8 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
             response.mutable_flatten_output()->mutable_aux_info(i)->set_prefill_remote_reuse_len(
                 prefill_remote_reuse_len);
 
-            response.mutable_flatten_output()->mutable_aux_info(i)->set_decode_total_reuse_len(
-                decode_total_reuse_len);
-            response.mutable_flatten_output()->mutable_aux_info(i)->set_decode_local_reuse_len(
-                decode_local_reuse_len);
+            response.mutable_flatten_output()->mutable_aux_info(i)->set_decode_total_reuse_len(decode_total_reuse_len);
+            response.mutable_flatten_output()->mutable_aux_info(i)->set_decode_local_reuse_len(decode_local_reuse_len);
             response.mutable_flatten_output()->mutable_aux_info(i)->set_decode_remote_reuse_len(
                 decode_remote_reuse_len);
         }

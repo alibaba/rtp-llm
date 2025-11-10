@@ -486,6 +486,10 @@ public:
         return generate_input_->generate_config->enable_memory_block_cache;
     }
 
+    bool asyncLoadCache();
+    bool loadCacheDone() const;
+    bool loadingCache() const;
+
     void fillSubGenerateStatus(StreamState state);
     void resizeSubGenerateStatus(size_t new_size);
 

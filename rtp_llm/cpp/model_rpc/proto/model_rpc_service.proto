@@ -373,33 +373,35 @@ service EmbeddingRpcService {
     rpc health(EmbeddingHealthRequestPB) returns (EmptyPB);
 }
 
-message MemoryBroadcastTpRequestPB {
+message MemoryCopyCacheRequestPB {
     message Group {
         int32 group_id = 1;
         repeated int32 gpu_block_ids = 2;
         repeated int32 memory_block_ids = 3;
     }
-    enum Direction {
+    enum CopyDirection {
         H2D = 0;
         D2H = 1;
     }
-    repeated Group groups = 1;
-    Direction direction = 2;
+    repeated GpuBlock gpu_blocks = 1;   // 数量是cache_key个数
+    repeated int32 mem_block_ids = 2;   // 数量是cache_key个数
+    repeated int64 mem_block_sizes = 3; // 数量是cache_key个数
+    CopyDirection copy_direction = 4;
 }
 
-message MemoryBroadcastTpResponsePB {
+message MemoryCopyCacheResponsePB {
     bool success = 1;
 }
 
-message BroadcastTpRequestPB {
+message CopyCacheRequestPB {
     oneof request {
-        MemoryBroadcastTpRequestPB mem_request = 1;
+        MemoryCopyCacheRequestPB mem_request = 1;
     }
 }
 
-message BroadcastTpResponsePB {
+message CopyCacheResponsePB {
     oneof response {
-        MemoryBroadcastTpResponsePB mem_response = 1;
+        MemoryCopyCacheResponsePB mem_response = 1;
     }
 }
 
@@ -416,7 +418,7 @@ service RpcService {
     rpc RemoteGenerateNew(RemoteGenerateRequestPBNew) returns (RemoteGenerateResponsePBNew);
     rpc RemoteStore(RemoteStoreRequestPB) returns (RemoteStoreResponsePB);
 
-    rpc BroadcastTp(BroadcastTpRequestPB) returns (BroadcastTpResponsePB);
+    rpc CopyCache(CopyCacheRequestPB) returns (CopyCacheResponsePB);
 }
 
 service MultimodalRpcService {
