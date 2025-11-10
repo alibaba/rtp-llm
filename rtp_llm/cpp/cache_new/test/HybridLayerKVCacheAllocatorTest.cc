@@ -89,18 +89,17 @@ protected:
     std::shared_ptr<HybridLayerKVCacheAllocator> allocator_;
 };
 
-// Test init
-// TEST_F(HybridLayerKVCacheAllocatorTest, ConstructorAndInit) {
-//     auto config = createHybridLayerTestConfig();
-//     allocator_  = std::make_shared<HybridLayerKVCacheAllocator>(config, device_);
-//     ASSERT_NE(allocator_, nullptr);
+TEST_F(HybridLayerKVCacheAllocatorTest, ConstructorAndInit) {
+    auto config = createHybridLayerTestConfig();
+    allocator_  = std::make_shared<HybridLayerKVCacheAllocator>(config, device_);
+    ASSERT_NE(allocator_, nullptr);
 
-//     bool init_result = allocator_->init();
-//     EXPECT_TRUE(init_result);
+    bool init_result = allocator_->init();
+    EXPECT_TRUE(init_result);
 
-//     EXPECT_EQ(allocator_->totalBlocksNums(), config.block_num);
-//     EXPECT_EQ(allocator_->freeBlocksNums(), config.block_num - 1);  // reserve 1 block
-// }
+    EXPECT_EQ(allocator_->totalBlocksNums(), config.block_num);
+    EXPECT_EQ(allocator_->freeBlocksNums(), config.block_num - 1);  // reserve 1 block
+}
 
 // TEST_F(HybridLayerKVCacheAllocatorTest, InitWithDifferentLayerNum) {
 //     auto config = createHybridLayerTestConfig(8, 20, 16);
@@ -110,6 +109,30 @@ protected:
 //     EXPECT_TRUE(init_result);
 
 //     EXPECT_EQ(allocator_->totalBlocksNums(), 20);
+// }
+
+// Test reuseCache
+// TEST_F(HybridLayerKVCacheAllocatorTest, ReuseCache) {
+//     auto config = createHybridLayerTestConfig();
+//     allocator_  = std::make_shared<HybridLayerKVCacheAllocator>(config, device_);
+//     allocator_->init();
+//     auto block_pool = allocator_->getBlockPool();
+//     auto block_cache = block_pool->blockCache();
+
+//     BlockCacheV1::CacheItem item    = {101, 1, false};
+//     auto                    result1 = block_cache->put(item);
+//     EXPECT_TRUE(result1);
+
+//     BlockCacheV1::CacheItem item2   = {102, 2, false};
+//     auto                    result2 = block_cache->put(item2);
+//     EXPECT_TRUE(result2);
+
+//     int  seq_length         = 16;
+//     auto batch_resource     = createBatchKVCacheResource(1);
+//     auto complete_token_ids = createCompleteTokenIds(1, seq_length);
+
+//     MallocInfo malloc_info(batch_resource, complete_token_ids);
+//     auto       result = allocator_->malloc(malloc_info);
 // }
 
 // // Test malloc
