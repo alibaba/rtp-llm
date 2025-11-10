@@ -85,6 +85,16 @@ int HybridLayerKVCacheAllocator::reuseCache(const CacheKeysType& cache_keys, Gro
     return reuse_blocks;
 }
 
+MallocResult HybridLayerKVCacheAllocator::initMalloc(const MallocInfo& malloc_info) {
+    return {true, 0};
+}
+MallocResult HybridLayerKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
+    return {true, 0};
+}
+MallocResult HybridLayerKVCacheAllocator::initMallocForCommonLen(const MallocInfo& malloc_info) {
+    return {true, 0};
+}
+
 MallocResult HybridLayerKVCacheAllocator::malloc(const MallocInfo& malloc_info) {
     if (!malloc_info.batch_kv_cache_resource) {
         RTP_LLM_LOG_ERROR("BatchKVCacheResource is null");

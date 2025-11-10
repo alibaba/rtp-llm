@@ -78,13 +78,14 @@ bool LinearKVCacheGroup::malloc(const CacheKeysType& cache_keys, BlockIndicesTyp
         block_indices.push_back(result[i]);
     }
 
-    // TODO< insert new allocate blocks to block cache?
+    // TODO, insert new allocate blocks to block cache?
 
     return true;
 }
 
-void LinearKVCacheGroup::reference(const BlockIndicesType& block_indices) {
-    // TODO: implement if needed, or keep empty for linear attention
+void LinearKVCacheGroup::reference(BlockIndicesType& block_indices, const BlockIndicesType& new_block_indices) {
+    block_indices.insert(block_indices.end(), new_block_indices.begin(), new_block_indices.end());
+    block_pool_->reference(new_block_indices);
 }
 
 void LinearKVCacheGroup::free(const BlockIndicesType& block_indices) {

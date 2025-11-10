@@ -33,7 +33,15 @@ public:
 
     KVCacheBuffer kvCacheBuffer() const override;
 
+    BlockPoolPtr getBlockPool() const {
+        return block_pool_;
+    }
+
 private:
+    MallocResult initMalloc(const MallocInfo& malloc_info);
+    MallocResult incrMalloc(const MallocInfo& malloc_info);
+    MallocResult initMallocForCommonLen(const MallocInfo& malloc_info);
+
     int reuseCache(const CacheKeysType& cache_keys, GroupBlockIds& group_block_ids);
 
     BlockPoolPtr                                     block_pool_;

@@ -69,6 +69,72 @@ bool SingleTypeKVCacheAllocator::init() {
     return true;
 }
 
+MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo& malloc_info) {
+    int batch_size = malloc_info.batch_kv_cache_resource->batchSize();
+    int reuse_len  = 0;
+
+    // TODO, 这里是啥含义呢？在外围做掉？
+    int seq_len =
+        (malloc_info.total_seq_len >= 0) ? malloc_info.total_seq_len : malloc_info.complete_token_ids->seqLength();
+    bool  has_common_len  = (malloc_info.common_seq_len >= 0) && (malloc_info.common_seq_len <= seq_len);
+    int   common_seq_len  = has_common_len ? malloc_info.common_seq_len : seq_len;
+    auto& cache_keys_0    = malloc_info.batch_kv_cache_resource->cache_keys[0];
+    auto& block_indices_0 = malloc_info.batch_kv_cache_resource->batch_block_id[0];
+    if (malloc_info.batch_kv_cache_resource->enable_reuse_cache && block_indices_0.size() < cache_keys_0.size()) {
+        auto match_result = full_kv_cache_group_->match(cache_keys_0);
+        reuse_len         = static_cast<int>(match_result.reuse_length);
+        full_kv_cache_group_->reference(block_indices_0, match_result.block_indices);
+    }
+
+    if (!full_kv_cache_group_->malloc(cache_keys_0, block_indices_0, common_seq_len)) {
+        return {false, 0};
+    }
+
+    for (int batch_id = 1; batch_id < batch_size; ++batch_id) {
+        auto& block_indices_other = malloc_info.batch_kv_cache_resource->batch_block_id[batch_id];
+        full_kv_cache_group_->reference(block_indices_other, block_indices_0);
+    }
+
+    return {true, reuse_len};
+    ;
+}
+
+// TODO, 在失败的时候，回滚资源，保证原子性？
+MallocResult SingleTypeKVCacheAllocator::initMalloc(const MallocInfo& malloc_info) {
+    auto init_result = initMallocForCommonLen(malloc_info);
+    if (!init_result.success) {
+        return init_result;
+    }
+
+    auto incr_result = incrMalloc(malloc_info);
+    if (!incr_result.success) {
+        return incr_result;
+    } else {
+        return init_result;
+    }
+}
+
+MallocResult SingleTypeKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
+    int seq_len =
+        (malloc_info.total_seq_len >= 0) ? malloc_info.total_seq_len : malloc_info.complete_token_ids->seqLength();
+
+    int  batch_size     = malloc_info.batch_kv_cache_resource->batchSize();
+    int  current_blocks = malloc_info.batch_kv_cache_resource->maxBlockSize();
+    auto need_blocks    = full_kv_cache_group_->needBlocksNum(seq_len, current_blocks);
+    if (need_blocks == 0) {
+        return {true, 0};
+    }
+    for (int batch_id = 0; batch_id < batch_size; ++batch_id) {
+        auto& cache_keys    = malloc_info.batch_kv_cache_resource->cache_keys[batch_id];
+        auto& block_indices = malloc_info.batch_kv_cache_resource->batch_block_id[batch_id];
+        if (!full_kv_cache_group_->malloc(cache_keys, block_indices, seq_len)) {
+            // TODO，回滚已经malloc的资源。
+            return {false, 0};
+        }
+    }
+    return {true, 0};
+}
+
 MallocResult SingleTypeKVCacheAllocator::malloc(const MallocInfo& malloc_info) {
     if (!malloc_info.batch_kv_cache_resource) {
         RTP_LLM_LOG_ERROR("BatchKVCacheResource is null");
@@ -80,107 +146,11 @@ MallocResult SingleTypeKVCacheAllocator::malloc(const MallocInfo& malloc_info) {
         return {false, 0};
     }
 
-    int batch_size      = malloc_info.batch_kv_cache_resource->batchSize();
-    int total_reuse_len = 0;
-
-    // Include reserved steps
-    int seq_len =
-        (malloc_info.total_seq_len >= 0) ? malloc_info.total_seq_len : malloc_info.complete_token_ids->seqLength();
-
-    // int reuse_blocks = 0;
-    // // TODO, match is only in prefill
-    // if (malloc_info.batch_kv_cache_resource->enable_reuse_cache && block_indices.size() < cache_keys.size()) {
-    //     auto match_result = full_kv_cache_group_->match(cache_keys);
-    //     // TODO, modify blocks
-    //     reuse_blocks  = static_cast<int>(match_result.reuse_blocks);
-    //     block_indices = match_result.block_indices;
-
-    // Determine if we need to handle common/extra blocks separately
-    bool has_common_extra_split = (malloc_info.common_seq_len >= 0) && (malloc_info.common_seq_len < seq_len);
-    int  common_seq_len         = has_common_extra_split ? malloc_info.common_seq_len : seq_len;
-
-    int current_blocks     = malloc_info.batch_kv_cache_resource->maxBlockSize();
-    int common_blocks_need = singleBatchNeedBlocks(common_seq_len, current_blocks);
-
-    // 1. Allocate and clone common blocks (shared across all batches)
-    if (common_blocks_need > 0) {
-        auto& cache_keys_0    = malloc_info.batch_kv_cache_resource->cache_keys[0];
-        auto& block_indices_0 = malloc_info.batch_kv_cache_resource->batch_block_id[0];
-
-        int reuse_len = 0;
-        if (malloc_info.batch_kv_cache_resource->enable_reuse_cache && block_indices_0.size() < cache_keys_0.size()) {
-            auto match_result = full_kv_cache_group_->match(cache_keys_0);
-            reuse_len         = static_cast<int>(match_result.reuse_length);
-
-            // Insert matched blocks into block_indices_0
-            // Note: skip blocks that are already in block_indices_0
-            for (int i = block_indices_0.size(); i < match_result.block_indices.size(); i++) {
-                block_indices_0.push_back(match_result.block_indices[i]);
-            }
-        }
-
-        int  need_blocks_num = common_blocks_need - static_cast<int>(block_indices_0.size());
-        auto free_blocks_num = full_kv_cache_group_->freeBlockNums();
-        if (free_blocks_num < need_blocks_num) {
-            if (!full_kv_cache_group_->ensureFreeBlocks(need_blocks_num - free_blocks_num)) {
-                return {false, 0};
-            }
-        }
-
-        if (free_blocks_num < static_cast<size_t>(common_blocks_need)) {
-            RTP_LLM_LOG_WARNING(
-                "Insufficient free blocks for common part: need %d, have %zu", common_blocks_need, free_blocks_num);
-        }
-
-        // Allocate common blocks
-        if (!full_kv_cache_group_->malloc(cache_keys_0, block_indices_0, common_seq_len)) {
-            // TODO，回滚已经成功的batch的资源。
-            return {false, 0};
-        }
-
-        // Clone common blocks to other batches (increase reference count)
-        int newly_allocated_blocks = block_indices_0.size() - current_blocks;
-        if (newly_allocated_blocks > 0 && batch_size > 1) {
-            std::vector<int> new_common_blocks(block_indices_0.end() - newly_allocated_blocks, block_indices_0.end());
-
-            for (int batch_id = 1; batch_id < batch_size; ++batch_id) {
-                // Increase reference count for shared blocks
-                full_kv_cache_group_->reference(new_common_blocks);
-
-                // Append to batch_block_id
-                auto& batch_blocks = malloc_info.batch_kv_cache_resource->batch_block_id[batch_id];
-                batch_blocks.insert(batch_blocks.end(), new_common_blocks.begin(), new_common_blocks.end());
-            }
-        }
-
-        total_reuse_len = reuse_len;
+    if (malloc_info.batch_kv_cache_resource->maxBlockSize() == 0) {
+        return initMalloc(malloc_info);
+    } else {
+        return incrMalloc(malloc_info);
     }
-
-    // 2. Allocate extra blocks (per-batch independent blocks)
-    if (has_common_extra_split) {
-        int total_blocks_for_seq        = singleBatchNeedBlocks(seq_len, 0);
-        int common_blocks               = singleBatchNeedBlocks(common_seq_len, 0);
-        int extra_blocks_need_per_batch = total_blocks_for_seq - common_blocks;
-
-        if (extra_blocks_need_per_batch > 0) {
-            int  total_extra_blocks = extra_blocks_need_per_batch * batch_size;
-            auto free_blocks_num    = full_kv_cache_group_->freeBlockNums();
-            if (free_blocks_num < static_cast<size_t>(total_extra_blocks)) {
-                RTP_LLM_LOG_WARNING(
-                    "Insufficient free blocks for extra part: need %d, have %zu", total_extra_blocks, free_blocks_num);
-                return {false, total_reuse_len};
-            }
-
-            // Allocate extra blocks for each batch
-            for (int batch_id = 0; batch_id < batch_size; ++batch_id) {
-                auto& cache_keys    = malloc_info.batch_kv_cache_resource->cache_keys[batch_id];
-                auto& block_indices = malloc_info.batch_kv_cache_resource->batch_block_id[batch_id];
-                full_kv_cache_group_->malloc(cache_keys, block_indices, seq_len);
-            }
-        }
-    }
-
-    return {true, total_reuse_len};
 }
 
 FreeResult SingleTypeKVCacheAllocator::free(const FreeInfo& free_info) {
