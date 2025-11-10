@@ -68,9 +68,11 @@ BatchKVCacheResourcePtr createBatchKVCacheResource(int batch_size, int block_num
     auto resource = std::make_shared<BatchKVCacheResource>();
     resource->batch_block_id.resize(batch_size);
     resource->cache_keys.resize(batch_size);
+    resource->batch_resource.resize(batch_size);
     for (int i = 0; i < batch_size; ++i) {
-        resource->batch_block_id[i] = std::vector<int>(block_num_per_batch);
-        resource->cache_keys[i]     = std::vector<size_t>(block_num_per_batch, i * 100);
+        resource->batch_block_id[i]            = std::vector<int>(block_num_per_batch);
+        resource->cache_keys[i]                = std::vector<size_t>(block_num_per_batch, i * 100);
+        resource->batch_resource[i].cache_keys = std::vector<size_t>(block_num_per_batch, i * 100);
     }
     return resource;
 }
