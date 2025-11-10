@@ -411,6 +411,36 @@ service EmbeddingRpcService {
     rpc health(EmbeddingHealthRequestPB) returns (EmptyPB);
 }
 
+message MemoryBroadcastTpRequestPB {
+    message Group {
+        int32 group_id = 1;
+        repeated int32 gpu_block_ids = 2;
+        repeated int32 memory_block_ids = 3;
+    }
+    enum Direction {
+        H2D = 0;
+        D2H = 1;
+    }
+    repeated Group groups = 1;
+    Direction direction = 2;
+}
+
+message MemoryBroadcastTpResponsePB {
+    bool success = 1;
+}
+
+message BroadcastTpRequestPB {
+    oneof request {
+        MemoryBroadcastTpRequestPB mem_request = 1;
+    }
+}
+
+message BroadcastTpResponsePB {
+    oneof response {
+        MemoryBroadcastTpResponsePB mem_response = 1;
+    }
+}
+
 service RpcService {
     rpc GetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
     rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
@@ -426,6 +456,8 @@ service RpcService {
 
     rpc DistKvCache(DistKvCacheRequestPB) returns (DistKvCacheResponsePB);
     rpc MemoryBlockCache(MemoryBlockCacheRequestPB) returns (MemoryBlockCacheResponsePB);
+
+    rpc BroadcastTp(BroadcastTpRequestPB) returns (BroadcastTpResponsePB);
 }
 
 service MultimodalRpcService {
