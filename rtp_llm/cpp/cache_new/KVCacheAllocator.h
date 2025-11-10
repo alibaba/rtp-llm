@@ -45,6 +45,10 @@ public:
     virtual KVCacheBuffer kvCacheBuffer() const = 0;
 
 protected:
+    virtual MallocResult initMalloc(const MallocInfo& malloc_info)             = 0;
+    virtual MallocResult incrMalloc(const MallocInfo& malloc_info)             = 0;
+    virtual MallocResult initMallocForCommonLen(const MallocInfo& malloc_info) = 0;
+
     CacheConfig          config_;
     rtp_llm::DeviceBase* device_;
     AllocationType       atype_;

@@ -8,9 +8,17 @@ int FullKVCacheGroup::needBlocksNum(int seq_len, int current_blocks) const {
 }
 
 bool FullKVCacheGroup::malloc(const CacheKeysType& cache_keys, BlockIndicesType& block_indices, int seq_len) {
-    int new_blocks = needBlocksNum(seq_len, block_indices.size());
+    int  need_blocks_num = needBlocksNum(seq_len, block_indices.size());
+    auto free_blocks_num = freeBlockNums();
+    if (free_blocks_num < need_blocks_num) {
+        if (!ensureFreeBlocks(need_blocks_num - free_blocks_num)) {
+            RTP_LLM_LOG_WARNING(
+                "Insufficient free blocks for common part: need %d, have %zu", need_blocks_num, free_blocks_num);
+            return false;
+        }
+    }
 
-    auto result = block_pool_->malloc(new_blocks);
+    auto result = block_pool_->malloc(need_blocks_num);
     if (result.empty()) {
         return false;
     }
@@ -51,9 +59,9 @@ void FullKVCacheGroup::free(const BlockIndicesType& block_indices) {
     RTP_LLM_LOG_DEBUG("Freed %zu blocks", block_indices.size());
 }
 
-
-void FullKVCacheGroup::reference(const BlockIndicesType& block_indices) {
-    block_pool_->reference(block_indices);
+void FullKVCacheGroup::reference(BlockIndicesType& block_indices, const BlockIndicesType& new_block_indices) {
+    block_indices.insert(block_indices.end(), new_block_indices.begin(), new_block_indices.end());
+    block_pool_->reference(new_block_indices);
 }
 
 void FullKVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,

@@ -23,7 +23,7 @@ public:
 
     void removeSkippedBlocks(BlockIndicesType& block_indices) override;
     void free(const BlockIndicesType& block_indices) override;
-    void reference(const BlockIndicesType& block_indices) override;
+    void reference(BlockIndicesType& block_indices, const BlockIndicesType& new_block_indices) override;
 
 private:
     int needBlocksNum(int seq_len, int current_blocks) const override;
