@@ -102,8 +102,8 @@ MallocResult HybridLayerKVCacheAllocator::malloc(const MallocInfo& malloc_info) 
     int seq_len = malloc_info.complete_token_ids->seqLength();
 
     for (int batch_id = 0; batch_id < batch_size; ++batch_id) {
-        auto& cache_keys      = malloc_info.batch_kv_cache_resource->cache_keys[batch_id];
-        auto& group_block_ids = malloc_info.batch_kv_cache_resource->batch_group_block_ids[batch_id];
+        auto& cache_keys      = malloc_info.batch_kv_cache_resource->batch_resource[batch_id].cache_keys;
+        auto& group_block_ids = malloc_info.batch_kv_cache_resource->batch_resource[batch_id].group_block_ids;
         auto  block_nums      = group_block_ids[0]->block_indices.size();
 
         auto all_blocks_num = full_kv_cache_group_->needBlocksNum(seq_len, block_nums);
@@ -112,7 +112,7 @@ MallocResult HybridLayerKVCacheAllocator::malloc(const MallocInfo& malloc_info) 
         int reuse_blocks = 0;
         // TODO, match is only in prefill
         if (malloc_info.batch_kv_cache_resource->enable_reuse_cache && block_nums < cache_keys.size()) {
-            reuse_blocks = reuseCache(cache_keys, malloc_info.batch_kv_cache_resource->batch_group_block_ids[batch_id]);
+            reuse_blocks = reuseCache(cache_keys, group_block_ids);
         }
 
         for (int group_id = 0; group_id < all_kv_cache_groups_.size(); group_id++) {
@@ -148,9 +148,9 @@ FreeResult HybridLayerKVCacheAllocator::free(const FreeInfo& free_info) {
     }
 
     for (int batch_id = 0; batch_id < free_info.batch_kv_cache_resource->batchSize(); ++batch_id) {
-        auto& batch_blocks = free_info.batch_kv_cache_resource->batch_group_block_ids[batch_id];
-        for (int group_id = 0; group_id < batch_blocks.size(); group_id++) {
-            all_kv_cache_groups_[group_id]->free(batch_blocks[group_id]->block_indices);
+        auto& group_block_ids = free_info.batch_kv_cache_resource->batch_resource[batch_id].group_block_ids;
+        for (int group_id = 0; group_id < group_block_ids.size(); group_id++) {
+            all_kv_cache_groups_[group_id]->free(group_block_ids[group_id]->block_indices);
         }
     }
 
@@ -167,8 +167,9 @@ InsertResult HybridLayerKVCacheAllocator::insertIntoCache(const InsertInfo& inse
     int seq_size_per_block = full_kv_cache_group_->seqSizePerBlock();
 
     for (int batch_id = 0; batch_id < batch_size; ++batch_id) {
-        auto& cache_keys = insert_info.batch_kv_cache_resource->cache_keys[batch_id];
-        auto& block_ids  = insert_info.batch_kv_cache_resource->batch_block_id[batch_id];
+        auto& cache_keys      = insert_info.batch_kv_cache_resource->batch_resource[batch_id].cache_keys;
+        auto& group_block_ids = insert_info.batch_kv_cache_resource->batch_resource[batch_id].group_block_ids;
+        auto  blocks_num      = group_block_ids[0]->block_indices.size();
 
         auto token_ids = insert_info.complete_token_ids->completeTokenIdsVec(batch_id);
         if (token_ids.size() <= 1) {
@@ -176,15 +177,15 @@ InsertResult HybridLayerKVCacheAllocator::insertIntoCache(const InsertInfo& inse
         }
         size_t token_len     = token_ids.size() - 1;
         size_t max_by_tokens = token_len / static_cast<size_t>(seq_size_per_block);
-        size_t block_len     = std::min({cache_keys.size(), block_ids.size(), max_by_tokens});
-        if (block_len == 0) {
+        blocks_num           = std::min({cache_keys.size(), blocks_num, max_by_tokens});
+        if (blocks_num == 0) {
             continue;
         }
 
-        std::vector<CacheKeyType> put_cache_keys(cache_keys.begin(), cache_keys.begin() + block_len);
-        std::vector<BlockIdxType> put_block_ids(block_ids.begin(), block_ids.begin() + block_len);
-
+        std::vector<CacheKeyType> put_cache_keys(cache_keys.begin(), cache_keys.begin() + blocks_num);
         for (int group_id = 0; group_id < all_kv_cache_groups_.size(); group_id++) {
+            const auto&               block_ids = group_block_ids[group_id]->block_indices;
+            std::vector<BlockIdxType> put_block_ids(block_ids.begin(), block_ids.begin() + blocks_num);
             all_kv_cache_groups_[group_id]->insertIntoCache(put_cache_keys, put_block_ids, insert_info.is_resident);
         }
     }

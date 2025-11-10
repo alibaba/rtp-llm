@@ -8,12 +8,12 @@
 
 namespace rtp_llm {
 
-KVCacheManager::KVCacheManager(const CacheConfig&      config,
-                               rtp_llm::DeviceBase*    device,
-                               bool                    warmup,
+KVCacheManager::KVCacheManager(const CacheConfig&                 config,
+                               rtp_llm::DeviceBase*               device,
+                               bool                               warmup,
                                const kmonitor::MetricsReporterPtr metrics_reporter,
-                               const GptInitParameter& params)
-    : config_(config), device_(device), metrics_reporter_(metrics_reporter), params_(params) {}
+                               const GptInitParameter&            params):
+    config_(config), device_(device), metrics_reporter_(metrics_reporter), params_(params) {}
 
 KVCacheManager::~KVCacheManager() {}
 
@@ -34,7 +34,8 @@ bool KVCacheManager::init() {
     }
 
     auto& spec = config_.layer_type_params[0];
-    if (spec->type == rtp_llm::KVCacheType::MultiHeadAttention || spec->type == rtp_llm::KVCacheType::MultiHeadLatentAttention) {
+    if (spec->type == rtp_llm::KVCacheType::MultiHeadAttention
+        || spec->type == rtp_llm::KVCacheType::MultiHeadLatentAttention) {
         allocator_ = std::make_shared<rtp_llm::SingleTypeKVCacheAllocator>(config_, device_, AllocationType::DEVICE);
         if (!allocator_->init()) {
             RTP_LLM_LOG_ERROR("SingleTypeKVCacheAllocator init failed");
@@ -49,13 +50,14 @@ bool KVCacheManager::init() {
     return false;
 }
 
-
 size_t KVCacheManager::availableTokenNums() const {
     // TODO(chanyin): implement this
     return 0;
 }
 
-const CacheConfig& KVCacheManager::cacheConfig() const { return config_; }
+const CacheConfig& KVCacheManager::cacheConfig() const {
+    return config_;
+}
 
 CacheLayerLayout KVCacheManager::layerCacheBase() const {
     return allocator_->layerCacheBase();
@@ -67,28 +69,26 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
         return {false, 0};
     }
 
-
-    int batch_size = malloc_info.batch_kv_cache_resource->batchSize();
+    int batch_size         = malloc_info.batch_kv_cache_resource->batchSize();
     int seq_size_per_block = config_.seq_size_per_block;
-    int seq_len = malloc_info.complete_token_ids->seqLength();
-    int desired_blocks = seq_len / (int)seq_size_per_block;
+    int seq_len            = malloc_info.complete_token_ids->seqLength();
+    int desired_blocks     = seq_len / (int)seq_size_per_block;
 
     // append cache_keys for eache batch
     for (int i = 0; i < batch_size; ++i) {
-        auto& keys = malloc_info.batch_kv_cache_resource->cache_keys[i];
+        auto& keys = malloc_info.batch_kv_cache_resource->batch_resource[i].cache_keys;
         if ((int)keys.size() > desired_blocks) {
             keys.resize(desired_blocks);
         }
 
         int64_t rolling_hash = keys.empty() ? 0 : keys.back();
-        int start_index = (int)keys.size();
+        int     start_index  = (int)keys.size();
         if (start_index < desired_blocks) {
             auto* token_ids = malloc_info.complete_token_ids->data(i);
             for (int index = start_index; index < desired_blocks; ++index) {
                 int pos = index * seq_size_per_block;
-                rolling_hash = rtp_llm::hashInt64Array(rolling_hash,
-                                                token_ids + pos,
-                                                token_ids + pos + (int)seq_size_per_block);
+                rolling_hash =
+                    rtp_llm::hashInt64Array(rolling_hash, token_ids + pos, token_ids + pos + (int)seq_size_per_block);
                 keys.push_back(rolling_hash);
             }
         }
@@ -106,5 +106,3 @@ InsertResult KVCacheManager::insertIntoCache(const InsertInfo& insert_info) {
 }
 
 }  // namespace rtp_llm
-
-

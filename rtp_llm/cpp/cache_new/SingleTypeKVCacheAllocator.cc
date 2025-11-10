@@ -83,7 +83,7 @@ MallocResult SingleTypeKVCacheAllocator::malloc(const MallocInfo& malloc_info) {
     int seq_len = malloc_info.complete_token_ids->seqLength();
 
     for (int batch_id = 0; batch_id < batch_size; ++batch_id) {
-        auto& cache_keys    = malloc_info.batch_kv_cache_resource->cache_keys[batch_id];
+        auto& cache_keys    = malloc_info.batch_kv_cache_resource->batch_resource[batch_id].cache_keys;
         auto& block_indices = malloc_info.batch_kv_cache_resource->batch_block_id[batch_id];
 
         int reuse_blocks = 0;
@@ -141,7 +141,7 @@ InsertResult SingleTypeKVCacheAllocator::insertIntoCache(const InsertInfo& inser
     int seq_size_per_block = full_kv_cache_group_->seqSizePerBlock();
 
     for (int batch_id = 0; batch_id < batch_size; ++batch_id) {
-        auto& cache_keys = insert_info.batch_kv_cache_resource->cache_keys[batch_id];
+        auto& cache_keys = insert_info.batch_kv_cache_resource->batch_resource[batch_id].cache_keys;
         auto& block_ids  = insert_info.batch_kv_cache_resource->batch_block_id[batch_id];
 
         auto token_ids = insert_info.complete_token_ids->completeTokenIdsVec(batch_id);
