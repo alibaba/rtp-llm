@@ -335,6 +335,7 @@ std::string CacheStoreConfig::to_string() const {
 std::string MiscellaneousConfig::to_string() const {
     std::ostringstream oss;
     oss << "disable_pdl: " << disable_pdl << "\n"
+        << "disable_access_log: " << disable_access_log << "\n"
         << "aux_string: " << aux_string << "\n";
     return oss.str();
 }
