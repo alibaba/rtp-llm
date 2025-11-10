@@ -1,11 +1,11 @@
-#include "rtp_llm/models_py/bindings/cuda/RtpProcessGroup.h"
+#include "rtp_llm/models_py/bindings/common/RtpProcessGroup.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 
 namespace rtp_llm {
 
 RtpProcessGroup::RtpProcessGroup(RtpProcessGroupType type) {
-    device_ = dynamic_cast<CudaDevice*>(DeviceFactory::getDefaultDevice());
+    device_ = dynamic_cast<DefaultDeviceType*>(DeviceFactory::getDefaultDevice());
     if (!device_) {
         RTP_LLM_LOG_ERROR("DeviceFactory::getDefaultDevice() return type is not CudaDevice !");
         throw std::runtime_error("DeviceFactory::getDefaultDevice() return type is not CudaDevice !");

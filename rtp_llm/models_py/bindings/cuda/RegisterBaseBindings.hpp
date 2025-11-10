@@ -8,7 +8,7 @@
 #include "rtp_llm/models_py/bindings/cuda/FlashInferMlaParams.h"
 #include "rtp_llm/models_py/bindings/cuda/FusedMoEOp.h"
 #include "rtp_llm/models_py/bindings/cuda/SelectTopkOp.h"
-#include "rtp_llm/models_py/bindings/cuda/RtpProcessGroup.h"
+#include "rtp_llm/models_py/bindings/common/RtpProcessGroup.h"
 #include "rtp_llm/models_py/bindings/cuda/PerTokenGroupQuantFp8.h"
 #include "rtp_llm/models_py/bindings/cuda/MoETopkSoftmax.h"
 #include "3rdparty/flashinfer/flashinfer.h"

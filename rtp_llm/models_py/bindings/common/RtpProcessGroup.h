@@ -1,7 +1,10 @@
 #pragma once
+
 #include <torch/csrc/distributed/c10d/Types.hpp>
 #include <torch/csrc/distributed/c10d/Backend.hpp>
-#include "rtp_llm/cpp/devices/rocm_impl/ROCmDevice.h"
+#include <vector>
+#include "rtp_llm/cpp/core/Types.h"  // for ParallelMode
+#include "rtp_llm/models_py/bindings/common/Torch_ext.h"  // for DefaultDeviceType
 
 namespace rtp_llm {
 
@@ -16,18 +19,17 @@ public:
     RtpProcessGroup(RtpProcessGroupType type);
     ~RtpProcessGroup() = default;
 
-    void broadcast(std::vector<torch::Tensor>& input, const c10d::BroadcastOptions& opts = c10d::BroadcastOptions());
+    void broadcast(std::vector<torch::Tensor>& input, int rootRank = 0);
     std::vector<torch::Tensor> all_reduce(std::vector<torch::Tensor>& input);
-
-    void                       send(std::vector<torch::Tensor>& input, int dst_rank);
+    void send(std::vector<torch::Tensor>& input, int dst_rank);
+    void recv(std::vector<torch::Tensor>& input, int src_rank);
     std::vector<torch::Tensor> all_gather(std::vector<torch::Tensor>& input);
-    void                       recv(std::vector<torch::Tensor>& input, int src_rank);
 
 private:
-    ROCmDevice*  device_;
+    DefaultDeviceType* device_;
     ParallelMode mode_;
-    int          rank_;
-    int          world_size_;
+    int rank_;
+    int world_size_;
 };
 
 void registerRtpProcessGroup(const py::module& m);
