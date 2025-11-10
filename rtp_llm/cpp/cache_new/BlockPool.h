@@ -59,6 +59,8 @@ public:
     void incrBlockRefCounter(const BlockIndicesType& blocks) {}
     void decrBlockRefCounter(const BlockIndicesType& blocks) {}
 
+    void clearCache();
+
 private:
     void initFreeBlocks();
     void freeImpl(const BlockIndicesType& block_indices);

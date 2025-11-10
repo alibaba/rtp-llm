@@ -136,16 +136,47 @@ cc_test(
     exec_properties = {'gpu':'A10'},
 )
 
+filegroup(
+    name = "mock_files",
+    srcs = glob(["mock/*"]),
+    visibility = ["//visibility:public"],
+)
+
 cc_test(
-    name = "tp_broadcast_manager_test",
+    name = "memory_connector_test",
     srcs = [
-        "TpBroadcastManagerTest.cc",
+        "KVCacheMemoryConnectorTest.cc",
+    ] + [
+        ":mock_files",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps + [],
+    env = {},
+    exec_properties = {'gpu':'A10'},
+)
+
+cc_test(
+    name = "memory_block_cache_test",
+    srcs = [
+        "MemoryBlockCacheTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps + [],
+    env = {},
+    exec_properties = {'gpu':'A10'},
+)
+
+cc_test(
+    name = "kv_cache_manager_test",
+    srcs = [
+        "KVCacheManagerTest.cc",
     ],
     data = [],
     copts = test_copts,
     deps = test_deps + [
-        "//rtp_llm/cpp/model_rpc:model_rpc_pool",
-        "@havenask//aios/autil:net",
+        "//rtp_llm/cpp/devices/testing:device_test_utils",
     ],
     env = {},
     exec_properties = {'gpu':'A10'},

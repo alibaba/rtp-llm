@@ -34,9 +34,14 @@ typedef std::vector<std::shared_ptr<BlockIds>> LayerBlockIds;
 
 class KVCacheResourceV1 {
 public:
-    void initGroups(int group_nums) {
+    void initGroups(int group_nums, int layer_num) {
         for (int i = 0; i < group_nums; i++) {
             group_block_ids.push_back(std::make_shared<BlockIds>());
+        }
+
+        layer_block_ids.resize(layer_num);
+        for (int i = 0; i < layer_num; ++i) {
+            layer_block_ids[i] = group_block_ids.front();
         }
     }
 
@@ -64,8 +69,20 @@ public:
         return group_block_ids;
     }
 
+    LayerBlockIds& layerBlockIds() {
+        return layer_block_ids;
+    }
+
     CacheKeysType& cacheKeys() {
         return cache_keys;
+    }
+
+    size_t reuseBlocksNum() const {
+        return reuse_blocks_num;
+    }
+
+    void setReuseBlocksNum(size_t reuse_blocks_num) {
+        this->reuse_blocks_num = reuse_blocks_num;
     }
 
     std::string debugString() const {
@@ -88,6 +105,8 @@ private:
     // group_id -> block_indices
     GroupBlockIds group_block_ids;
     CacheKeysType cache_keys;
+    // reuse blocks num
+    size_t reuse_blocks_num{0};
 };
 
 class BatchKVCacheResource {
@@ -102,9 +121,9 @@ public:
         batch_resource.resize(batch_size);
     }
 
-    void initGroups(int group_nums) {
+    void initGroups(int group_nums, int layer_num) {
         for (auto& batch : batch_resource) {
-            batch.initGroups(group_nums);
+            batch.initGroups(group_nums, layer_num);
         }
     }
 
