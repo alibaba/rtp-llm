@@ -61,6 +61,7 @@ jobs:
         git fetch upstream main
         UPSTREAM_COMMIT=$(git rev-parse upstream/main)
         CURRENT_COMMIT=$(git rev-parse HEAD)
+        echo "UPSTREAM_COMMIT: $UPSTREAM_COMMIT"
         
         # Check if current HEAD is already at upstream/main
         if [ "$CURRENT_COMMIT" = "$UPSTREAM_COMMIT" ]; then
@@ -71,7 +72,9 @@ jobs:
         
         # Check if current HEAD is upstream/main + one CI commit
         PARENT_COMMIT=$(git rev-parse HEAD^ 2>/dev/null || echo "")
+        echo "PARENT_COMMIT: $PARENT_COMMIT"
         if [ "$PARENT_COMMIT" = "$UPSTREAM_COMMIT" ]; then
+          echo "PARENT_COMMIT is the same as UPSTREAM_COMMIT"
           # Check if the commit message matches our CI commit
           COMMIT_MSG=$(git log -1 --pretty=%B)
           if echo "$COMMIT_MSG" | grep -q "\[CI\]\[AMD\] add workflows"; then
