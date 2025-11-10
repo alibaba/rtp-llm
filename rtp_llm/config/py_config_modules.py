@@ -16,8 +16,10 @@ from rtp_llm.utils.fuser import MountRwMode, fetch_remote_file_to_local
 from rtp_llm.utils.weight_type import WEIGHT_TYPE
 
 DEFAULT_START_PORT = 8088
+DEFAULT_SSL_CERTFILE = ""
+DEFAULT_SSL_KEYFILE = ""
 MASTER_INFO_PORT_NUM = 11
-MIN_WORKER_INFO_PORT_NUM = 7
+MIN_WORKER_INFO_PORT_NUM = 8
 WORKER_INFO_PORT_NUM = MIN_WORKER_INFO_PORT_NUM
 
 
@@ -43,6 +45,8 @@ class ServerConfig:
     def __init__(self):
         self.frontend_server_count = 4
         self.start_port = DEFAULT_START_PORT
+        self.ssl_certfile = DEFAULT_SSL_CERTFILE
+        self.ssl_keyfile = DEFAULT_SSL_KEYFILE
         self.timeout_keep_alive = 5
         self.frontend_server_id = 0
         self.rank_id = 0
@@ -52,6 +56,8 @@ class ServerConfig:
             os.environ.get("FRONTEND_SERVER_COUNT", self.frontend_server_count)
         )
         self.start_port = int(os.environ.get("START_PORT", self.start_port))
+        self.ssl_certfile = os.environ.get("SSL_CERTFILE", self.ssl_certfile)
+        self.ssl_keyfile = os.environ.get("SSL_KEYFILE", self.ssl_keyfile)
         self.timeout_keep_alive = int(
             os.environ.get("TIMEOUT_KEEP_ALIVE", self.timeout_keep_alive)
         )

@@ -12,6 +12,7 @@ from rtp_llm.config.py_config_modules import ServerConfig, StaticConfig
 from rtp_llm.metrics import kmonitor
 from rtp_llm.ops import ProfilingDebugLoggingConfig
 from rtp_llm.tools.api.hf_model_helper import get_hf_model_info
+from rtp_llm.config.py_config_modules import PyEnvConfigs
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
@@ -99,6 +100,8 @@ def start_frontend_server_impl(global_controller, backend_process):
             f"multi rank starts with default local world size: {local_world_size}, world size = {g_parallel_info.world_size}"
         )
 
+    py_env_configs = PyEnvConfigs()
+    py_env_configs.update_from_env()
     for rank in range(local_world_size):
         for i in range(frontend_server_count):
             process = multiprocessing.Process(
@@ -108,6 +111,17 @@ def start_frontend_server_impl(global_controller, backend_process):
             )
             frontend_processes.append(process)
             process.start()
+            if py_env_configs.server_config.ssl_certfile != "" and py_env_configs.server_config.ssl_keyfile != "":
+                sslprocess = multiprocessing.Process(
+                    target=start_frontend_server,
+                    args=(rank, i, global_controller, True),
+                    name=f"frontend_server_ssl_{i}",
+                )
+                frontend_processes.append(sslprocess)
+                sslprocess.start()
+                logging.info(
+                    f"start ssl frontend_server_{i} rank = {rank}, local world size = {local_world_size}, world size = {g_parallel_info.world_size}"
+                )
 
     retry_interval_seconds = 5
     start_port = server_config.start_port

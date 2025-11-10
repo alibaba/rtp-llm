@@ -51,6 +51,7 @@ class FrontendApp(object):
         self,
         py_env_configs: PyEnvConfigs = StaticConfig,
         separated_frontend: bool = False,
+        ssl: bool = False,
     ):
         self.py_env_configs = py_env_configs
         self.frontend_server = FrontendServer(
@@ -59,6 +60,7 @@ class FrontendApp(object):
             py_env_configs.server_config.frontend_server_id,
         )
         self.separated_frontend = separated_frontend
+        self.ssl = ssl
         g_worker_info.server_port = WorkerInfo.server_port_offset(
             self.py_env_configs.server_config.rank_id, g_worker_info.server_port
         )
@@ -81,9 +83,13 @@ class FrontendApp(object):
             auto_loop_setup()
             asyncio.set_event_loop(asyncio.new_event_loop())
 
+        port = g_worker_info.server_port
+        if self.ssl:
+            port = g_worker_info.ssl_server_port_offset(self.py_env_configs.server_config.rank_id, g_worker_info.server_port)
+        logging.info(f"start frontend server on port {port}, ssl = {self.ssl}")
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-        sock.bind(("0.0.0.0", g_worker_info.server_port))
+        sock.bind(("0.0.0.0", port))
         sock.listen()
         fd = sock.fileno()
         timeout_keep_alive = self.py_env_configs.server_config.timeout_keep_alive
@@ -96,6 +102,9 @@ class FrontendApp(object):
             timeout_keep_alive=timeout_keep_alive,
             h11_max_incomplete_event_size=MAX_INCOMPLETE_EVENT_SIZE,
         )
+        if self.ssl:
+            config.ssl_keyfile = self.py_env_configs.server_config.ssl_keyfile
+            config.ssl_certfile = self.py_env_configs.server_config.ssl_certfile
 
         try:
             server = GracefulShutdownServer(config)
