@@ -91,7 +91,7 @@ def run_single(
     decode_test_length: int = 10,
 ) -> List[MetricState]:
     title = "Decode Result" if is_decode else "Prefill Result"
-    batch_size_list = [1] if not is_decode else batch_size_list
+    # batch_size_list = [1] if not is_decode else batch_size_list
     base_port = port
     logging.info(
         f"in warmup, base_port: {base_port}, dp_size: {dp_size}, tp_size: {tp_size}, batch_size: {1 * dp_size}, input_len: {input_len_list[0]}"
