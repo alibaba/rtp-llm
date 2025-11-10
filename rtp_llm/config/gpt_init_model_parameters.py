@@ -1016,6 +1016,7 @@ class GptInitModelParameters:
         # MiscellaneousConfig
         self.gpt_init_params.misc_config = MiscellaneousConfig(
             disable_pdl=get_env_bool("DISABLE_PDL", True),
+            disable_access_log=get_env_bool("DISABLE_ACCESS_LOG", False),
             aux_string=get_env_str("AUX_STRING", ""),
         )
 

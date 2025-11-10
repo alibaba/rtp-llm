@@ -18,7 +18,7 @@ TEST(InferenceDataTypeTest, RawRequest) {
     RawRequest req2;
     FromJsonString(req2, jsonStr);
     ASSERT_EQ(req2.source, "alibaba");
-    ASSERT_EQ(req2.private_request, false);
+    ASSERT_EQ(req2.private_request, std::nullopt);
 
     jsonStr = R"({"private_request": true})";
     RawRequest req3;

@@ -473,7 +473,7 @@ class ChatCompletionRequest(BaseModel):
 
   # ---- These params are hacked for our framework, not standard.
   extra_configs: Optional[GenerateConfig] = None
-  private_request: bool = False
+  private_request: Optional[bool] = None
   trace_id: Optional[str] = None
   chat_id: Optional[str] = None
   template_key: Optional[str] = None

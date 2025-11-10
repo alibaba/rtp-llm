@@ -473,10 +473,14 @@ void register_fifo_scheduler_config(pybind11::module& m) {
 // MiscellaneousConfig
 void register_misc_config(pybind11::module& m) {
     pybind11::class_<MiscellaneousConfig>(m, "MiscellaneousConfig")
-        .def(pybind11::init<bool, std::string>(), pybind11::arg("disable_pdl") = true, pybind11::arg("aux_string") = "")
+        .def(pybind11::init<bool, bool, std::string>(),
+             pybind11::arg("disable_pdl")        = true,
+             pybind11::arg("disable_access_log") = false,
+             pybind11::arg("aux_string")         = "")
         .def("to_string", &MiscellaneousConfig::to_string)
         .def("update_from_env", &MiscellaneousConfig::update_from_env_for_test)
         .def_readwrite("disable_pdl", &MiscellaneousConfig::disable_pdl)
+        .def_readwrite("disable_access_log", &MiscellaneousConfig::disable_access_log)
         .def_readwrite("aux_string", &MiscellaneousConfig::aux_string);
 }
 
