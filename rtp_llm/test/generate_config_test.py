@@ -1,5 +1,5 @@
 import os
-from typing import Any
+from typing import Any, List, Optional
 from unittest import TestCase, main
 
 from transformers import AutoTokenizer
@@ -9,6 +9,8 @@ from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.frontend.tokenizer_factory.tokenizers.tokenization_qwen import (
     QWenTokenizer,
 )
+from rtp_llm.openai.api_datatype import ChatCompletionRequest, GenerateConfig
+from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.pipeline.pipeline import Pipeline
 
 
@@ -213,6 +215,270 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(generate_config.max_thinking_tokens, 20)
         self.assertEqual(generate_config.in_think_mode, True)
         self.assertEqual(generate_config.end_think_token_ids, [151649, 271])
+
+
+class OpenaiGenerateConfigTest(TestCase):
+    def __init__(self, *args: Any, **kwargs: Any):
+        super().__init__(*args, **kwargs)
+        self.test_data_path = os.path.join(
+            os.getcwd(), "rtp_llm/test/model_test/fake_test/testdata"
+        )
+        self.tokenizer = QWenTokenizer(
+            os.path.join(self.test_data_path, "qwen_7b/tokenizer/qwen.tiktoken"),
+            *args,
+            **kwargs,
+        )
+
+    def _get_model_config(self, model_config=None):
+        model_config = model_config if model_config is not None else {}
+        model_config = {
+            "head_num": 1024,
+            "size_per_head": 1024,
+            "layer_num": 1024,
+            "max_seq_len": 1024,
+            "vocab_size": 1024,
+            **model_config,
+        }
+        return GptInitModelParameters(**model_config)
+
+    def _generate_config_with_stop_word(
+        self,
+        model_stop_word_str: Optional[List[str]] = None,
+        model_stop_word_list: Optional[List[str]] = None,
+        env_stop_word_str: Optional[str] = None,
+        env_stop_word_list: Optional[str] = None,
+        req_stop: Optional[List[str]] = None,
+        req_config_stop_word_str: Optional[List[str]] = None,
+        req_config_stop_word_list: Optional[List[List[int]]] = None,
+    ):
+        model_config = self._get_model_config()
+        if model_stop_word_str is not None:
+            model_config.special_tokens.stop_words_str_list = model_stop_word_str
+        if model_stop_word_list is not None:
+            model_config.special_tokens.stop_words_id_list = model_stop_word_list
+        if env_stop_word_str is not None:
+            model_config.py_env_configs.generate_env_config.stop_words_str = (
+                env_stop_word_str
+            )
+        if env_stop_word_list is not None:
+            model_config.py_env_configs.generate_env_config.stop_words_list = (
+                env_stop_word_list
+            )
+
+        openai_endpoint = OpenaiEndpoint(model_config, self.tokenizer, None)
+
+        request = ChatCompletionRequest(messages=[])
+        if req_stop is not None:
+            request.stop = req_stop
+        if req_config_stop_word_str is not None:
+            if request.extra_configs is None:
+                request.extra_configs = GenerateConfig()
+            request.extra_configs.stop_words_str = req_config_stop_word_str
+        if req_config_stop_word_list is not None:
+            if request.extra_configs is None:
+                request.extra_configs = GenerateConfig()
+            request.extra_configs.stop_words_list = req_config_stop_word_list
+
+        return openai_endpoint._extract_generation_config(request)
+
+    def assert_config_stop_word(
+        self,
+        expect_stop_word_str: Optional[List[str]] = None,
+        expect_stop_word_list: Optional[List[List[str]]] = None,
+        **kwargs,
+    ):
+        config = self._generate_config_with_stop_word(**kwargs)
+        if expect_stop_word_str is not None:
+            self.assertEqual(
+                sorted(config.stop_words_str), sorted(expect_stop_word_str)
+            )
+        if expect_stop_word_list is not None:
+            self.assertEqual(
+                sorted(config.stop_words_list), sorted(expect_stop_word_list)
+            )
+
+    def test_stop_word_config(self):
+        self.assert_config_stop_word(
+            expect_stop_word_str=["<|im_end|>", "<|endoftext|>"],
+            expect_stop_word_list=[[151643], [151645]],
+        )
+
+        self.assert_config_stop_word(
+            expect_stop_word_str=[
+                "<|im_end|>",
+                "<|endoftext|>",
+                "model stop word",
+                "another model stop word",
+            ],
+            expect_stop_word_list=[
+                [151643],
+                [151645],
+                [2528, 2936, 3409],
+                [41963, 1614, 2936, 3409],
+            ],
+            model_stop_word_str=["model stop word", "another model stop word"],
+        )
+
+        self.assert_config_stop_word(
+            expect_stop_word_str=[
+                "<|im_end|>",
+                "<|endoftext|>",
+                "model stop list",
+                "another model stop list",
+            ],
+            expect_stop_word_list=[
+                [151643],
+                [151645],
+                [2528, 2936, 1140],
+                [41963, 1614, 2936, 1140],
+            ],
+            model_stop_word_list=[[2528, 2936, 1140], [41963, 1614, 2936, 1140]],
+        )
+
+        self.assert_config_stop_word(
+            expect_stop_word_str=[
+                "<|im_end|>",
+                "<|endoftext|>",
+                "env stop word",
+                "another env stop word",
+            ],
+            expect_stop_word_list=[
+                [151643],
+                [151645],
+                [3160, 2936, 3409],
+                [41963, 6105, 2936, 3409],
+            ],
+            env_stop_word_str='["env stop word", "another env stop word"]',
+        )
+
+        self.assert_config_stop_word(
+            expect_stop_word_str=[
+                "<|im_end|>",
+                "<|endoftext|>",
+                "env stop list",
+                "another env stop list",
+            ],
+            expect_stop_word_list=[
+                [151643],
+                [151645],
+                [3160, 2936, 1140],
+                [41963, 6105, 2936, 1140],
+            ],
+            env_stop_word_list="[[3160, 2936, 1140], [41963, 6105, 2936, 1140]]",
+        )
+
+        self.assert_config_stop_word(
+            expect_stop_word_str=[
+                "<|im_end|>",
+                "<|endoftext|>",
+                "req stop word",
+                "another req stop word",
+            ],
+            expect_stop_word_list=[
+                [151643],
+                [151645],
+                [2958, 2936, 3409],
+                [41963, 4232, 2936, 3409],
+            ],
+            req_stop=["req stop word", "another req stop word"],
+        )
+
+        self.assert_config_stop_word(
+            expect_stop_word_str=[
+                "<|im_end|>",
+                "<|endoftext|>",
+                "req config stop word",
+                "another config req stop word",
+            ],
+            expect_stop_word_list=[
+                [151643],
+                [151645],
+                [2958, 2193, 2936, 3409],
+                [41963, 2193, 4232, 2936, 3409],
+            ],
+            req_config_stop_word_str=[
+                "req config stop word",
+                "another config req stop word",
+            ],
+        )
+
+        self.assert_config_stop_word(
+            expect_stop_word_str=["<|im_end|>", "<|endoftext|>"],
+            expect_stop_word_list=[
+                [151643],
+                [151645],
+                [2958, 2193, 2936, 1140],
+                [41963, 2193, 4232, 2936, 1140],
+            ],
+            req_config_stop_word_list=[
+                [2958, 2193, 2936, 1140],
+                [41963, 2193, 4232, 2936, 1140],
+            ],
+        )
+
+        self.assert_config_stop_word(
+            expect_stop_word_str=[
+                "<|im_end|>",
+                "<|endoftext|>",  # default stop word
+                "model stop word",
+                "another model stop word",  # model_stop_word_str
+                "model stop list",
+                "another model stop list",  # model_stop_word_list
+                "env stop word",
+                "another env stop word",  # env_stop_word_str
+                "env stop list",
+                "another env stop list",  # env_stop_word_list
+                "req stop word",
+                "another req stop word",  # req_stop
+                "req config stop word",
+                "another config req stop word",  # req_config_stop_word_str
+                "dup stop word",
+                "dup stop list",  # duplicate stop word
+            ],
+            expect_stop_word_list=[
+                [151643],
+                [151645],  # default stop word list
+                [2528, 2936, 3409],
+                [41963, 1614, 2936, 3409],  # model_stop_word_str
+                [2528, 2936, 1140],
+                [41963, 1614, 2936, 1140],  # model_stop_word_list
+                [3160, 2936, 3409],
+                [41963, 6105, 2936, 3409],  # env_stop_word_str
+                [3160, 2936, 1140],
+                [41963, 6105, 2936, 1140],  # env_stop_word_list
+                [2958, 2936, 3409],
+                [41963, 4232, 2936, 3409],  # req_stop
+                [2958, 2193, 2936, 3409],
+                [41963, 2193, 4232, 2936, 3409],  # req_config_stop_word_str
+                [2958, 2193, 2936, 1140],
+                [41963, 2193, 4232, 2936, 1140],  # req_config_stop_word_list
+                [21912, 2936, 1140],
+                [21912, 2936, 3409],  # duplicate stop word
+            ],
+            model_stop_word_str=[
+                "model stop word",
+                "another model stop word",
+                "dup stop word",
+            ],
+            model_stop_word_list=[
+                [2528, 2936, 1140],
+                [41963, 1614, 2936, 1140],
+                [21912, 2936, 1140],
+            ],
+            env_stop_word_str='["env stop word", "another env stop word", "dup stop word"]',
+            env_stop_word_list="[[3160, 2936, 1140], [41963, 6105, 2936, 1140], [21912, 2936, 1140]]",
+            req_stop=["req stop word", "another req stop word", "dup stop word"],
+            req_config_stop_word_str=[
+                "req config stop word",
+                "another config req stop word",
+                "dup stop word",
+            ],
+            req_config_stop_word_list=[
+                [2958, 2193, 2936, 1140],
+                [41963, 2193, 4232, 2936, 1140],
+                [21912, 2936, 1140],
+            ],
+        )
 
 
 if __name__ == "__main__":

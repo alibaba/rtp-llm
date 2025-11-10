@@ -1,3 +1,4 @@
+import itertools
 import json
 import logging
 from functools import partial
@@ -78,11 +79,7 @@ class OpenaiEndpoint(object):
         logging.info(f"chat_renderer [{self.chat_renderer}] is created.")
         extra_stop_word_ids_list = self.chat_renderer.get_all_extra_stop_word_ids_list()
         self.stop_words_id_list.extend(extra_stop_word_ids_list)
-        self.stop_words_str_list = []
-        for stop_word_ids in self.stop_words_id_list:
-            word = self.tokenizer.decode(stop_word_ids)
-            if len(word):
-                self.stop_words_str_list.append(word)
+        self.stop_words_str_list = self.model_config.special_tokens.stop_words_str_list
 
         env_stop_words_str = (
             self.model_config.py_env_configs.generate_env_config.stop_words_str
@@ -108,6 +105,26 @@ class OpenaiEndpoint(object):
             )
             self.stop_words_id_list = self.stop_words_id_list + env_stop_words_id_list
 
+        # sync between stop word id str and stop words id list
+        stop_words_str_list_from_id = []
+        for stop_word_ids in self.stop_words_id_list:
+            word = self.tokenizer.decode(stop_word_ids)
+            if len(word):
+                stop_words_str_list_from_id.append(word)
+
+        stop_words_id_list_from_str = []
+        for stop_word_str in self.stop_words_str_list:
+            ids = self.tokenizer.encode(stop_word_str)
+            if len(ids):
+                stop_words_id_list_from_str.append(ids)
+
+        self.stop_words_str_list += stop_words_str_list_from_id
+        self.stop_words_id_list += stop_words_id_list_from_str
+
+        # dedup stop words
+        self.stop_words_str_list = list(set(self.stop_words_str_list))
+        self.stop_words_id_list = self._dedup_stop_words_list(self.stop_words_id_list)
+
         logging.info(
             f"use stop_words_str_list [{self.stop_words_str_list}], "
             f"stop_words_id_list [{self.stop_words_id_list}]"
@@ -117,6 +134,11 @@ class OpenaiEndpoint(object):
         global model_args
         model_card = ModelCard(id=self.model_config.model_name)
         return ModelList(data=[model_card])
+
+    def _dedup_stop_words_list(
+        self, stop_words_list: List[List[int]]
+    ) -> List[List[int]]:
+        return [i for i, _ in itertools.groupby(sorted(stop_words_list))]
 
     def _extract_generation_config(
         self, request: ChatCompletionRequest
@@ -138,10 +160,17 @@ class OpenaiEndpoint(object):
         request_stop_words_list = request.stop if request.stop != None else []
         if isinstance(request_stop_words_list, str):
             request_stop_words_list = [request_stop_words_list]
-        config.stop_words_str = self.stop_words_str_list + request_stop_words_list
-        config.stop_words_list = (
+        config.stop_words_str = list(
+            set(
+                self.stop_words_str_list
+                + request_stop_words_list
+                + config.stop_words_str
+            )
+        )
+        config.stop_words_list = self._dedup_stop_words_list(
             self.stop_words_id_list
-            + self.chat_renderer.tokenize_words(request_stop_words_list)
+            + self.chat_renderer.tokenize_words(config.stop_words_str)
+            + config.stop_words_list
         )
         if request.chat_id != None:
             config.chat_id = request.chat_id
@@ -151,7 +180,6 @@ class OpenaiEndpoint(object):
             config.return_all_probs = request.logprobs
         if request.logprobs or request.functions:
             config.is_streaming = True
-        config.add_special_tokens(self.model_config.special_tokens)
         config.convert_select_tokens(len(self.tokenizer), self.tokenizer)
         if (
             request.extra_configs
