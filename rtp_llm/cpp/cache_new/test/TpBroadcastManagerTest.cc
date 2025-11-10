@@ -137,16 +137,7 @@ TEST_F(TpBroadcastManagerTest, Broadcast_ReturnNull_GetConnectionFailed) {
     auto                     manager = std::make_unique<TpBroadcastManager>(empty_addrs);
 
     std::vector<BroadcastTpRequestPB> requests(3);
-    for (size_t i = 0; i < requests.size(); ++i) {
-        auto mem_request = requests[i].mutable_mem_request();
-        mem_request->set_direction(MemoryBroadcastTpRequestPB::H2D);
-        auto* group = mem_request->add_groups();
-        group->set_group_id(i);
-        group->add_gpu_block_ids(i);
-        group->add_memory_block_ids(i);
-    }
-
-    auto result = manager->broadcast(requests, /*timeout_ms=*/500);
+    auto                              result = manager->broadcast(requests, /*timeout_ms=*/500);
     ASSERT_EQ(result, nullptr);
 }
 
@@ -166,16 +157,7 @@ TEST_F(TpBroadcastManagerTest, Broadcast_ReturnNotNull_AllRequestsSuccess) {
     ASSERT_EQ(manager->workerNum(), server_addrs.size());
 
     std::vector<BroadcastTpRequestPB> requests(manager->workerNum());
-    for (size_t i = 0; i < requests.size(); ++i) {
-        auto mem_request = requests[i].mutable_mem_request();
-        mem_request->set_direction(MemoryBroadcastTpRequestPB::H2D);
-        auto* group = mem_request->add_groups();
-        group->set_group_id(i);
-        group->add_gpu_block_ids(i);
-        group->add_memory_block_ids(i);
-    }
-
-    auto result = manager->broadcast(requests, /*timeout_ms=*/500);
+    auto                              result = manager->broadcast(requests, /*timeout_ms=*/500);
     ASSERT_NE(result, nullptr);
 
     result->waitDone();
@@ -212,11 +194,6 @@ TEST_F(TpBroadcastManagerTest, Broadcast_ReturnNotNull_AllRequestsTimeout) {
     ASSERT_EQ(manager->workerNum(), server_addrs.size());
 
     std::vector<BroadcastTpRequestPB> requests(manager->workerNum());
-    for (size_t i = 0; i < requests.size(); ++i) {
-        auto mem_request = requests[i].mutable_mem_request();
-        mem_request->set_direction(MemoryBroadcastTpRequestPB::H2D);
-    }
-
     // set timeout to 50ms, so the request should timeout
     auto result = manager->broadcast(requests, /*timeout_ms=*/50);
     ASSERT_NE(result, nullptr);
@@ -260,11 +237,6 @@ TEST_F(TpBroadcastManagerTest, Broadcast_ReturnNotNull_PartialRequestsTimeout) {
     ASSERT_EQ(manager->workerNum(), server_addrs.size());
 
     std::vector<BroadcastTpRequestPB> requests(manager->workerNum());
-    for (size_t i = 0; i < requests.size(); ++i) {
-        auto mem_request = requests[i].mutable_mem_request();
-        mem_request->set_direction(MemoryBroadcastTpRequestPB::H2D);
-    }
-
     // set timeout to 50ms, so the request should timeout
     auto result = manager->broadcast(requests, /*timeout_ms=*/50);
     ASSERT_NE(result, nullptr);
@@ -315,12 +287,7 @@ TEST_F(TpBroadcastManagerTest, Broadcast_ReturnNotNull_PartialResponseRpcStatusF
     ASSERT_EQ(manager->workerNum(), server_addrs.size());
 
     std::vector<BroadcastTpRequestPB> requests(manager->workerNum());
-    for (size_t i = 0; i < requests.size(); ++i) {
-        auto mem_request = requests[i].mutable_mem_request();
-        mem_request->set_direction(MemoryBroadcastTpRequestPB::H2D);
-    }
-
-    auto result = manager->broadcast(requests, /*timeout_ms=*/100);
+    auto                              result = manager->broadcast(requests, /*timeout_ms=*/100);
     ASSERT_NE(result, nullptr);
 
     result->waitDone();
@@ -367,12 +334,7 @@ TEST_F(TpBroadcastManagerTest, Broadcast_ReturnNotNull_ResponseStatusOkButMemRes
     ASSERT_EQ(manager->workerNum(), server_addrs.size());
 
     std::vector<BroadcastTpRequestPB> requests(manager->workerNum());
-    for (size_t i = 0; i < requests.size(); ++i) {
-        auto mem_request = requests[i].mutable_mem_request();
-        mem_request->set_direction(MemoryBroadcastTpRequestPB::H2D);
-    }
-
-    auto result = manager->broadcast(requests, /*timeout_ms=*/100);
+    auto                              result = manager->broadcast(requests, /*timeout_ms=*/100);
     ASSERT_NE(result, nullptr);
 
     result->waitDone();

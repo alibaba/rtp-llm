@@ -151,3 +151,35 @@ cc_test(
     env = {},
     exec_properties = {'gpu':'A10'},
 )
+
+filegroup(
+    name = "mock_files",
+    srcs = glob(["mock/*"]),
+    visibility = ["//visibility:public"],
+)
+
+cc_test(
+    name = "memory_connector_test",
+    srcs = [
+        "KVCacheMemoryConnectorTest.cc",
+    ] + [
+        ":mock_files",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps + [],
+    env = {},
+    exec_properties = {'gpu':'A10'},
+)
+
+cc_test(
+    name = "memory_block_cache_test",
+    srcs = [
+        "MemoryBlockCacheTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps + [],
+    env = {},
+    exec_properties = {'gpu':'A10'},
+)
