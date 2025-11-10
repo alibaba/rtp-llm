@@ -216,6 +216,16 @@ py_test (
     exec_properties = {'gpu':'H20'},
 )
 
+py_test (
+    name = "rocm_fp8_linear_test",
+    srcs = ["rocm_fp8_linear_test.py"],
+    deps = py_test_deps,
+    timeout = "eternal",
+    env = test_envs,
+    tags = ["rocm"],
+    exec_properties = {'gpu':'MI308X'},
+)
+
 
 py_test (
     name = "cutlass_fp8_grouped_gemm_test",
