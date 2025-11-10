@@ -1,9 +1,5 @@
 package org.flexlb.sync.status;
 
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.stream.Collectors;
-
 import lombok.Getter;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
@@ -12,6 +8,10 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.springframework.stereotype.Component;
 import reactor.core.Disposable;
+
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
 
 @Slf4j
 @Getter
@@ -28,16 +28,16 @@ public class EngineWorkerStatus {
     }
 
     public ConcurrentHashMap<String/*ipPort*/, WorkerStatus> selectModelWorkerStatus(
-        String modelName, RoleType roleType, String group) {
+            String modelName, RoleType roleType, String group) {
 
         ModelWorkerStatus modelWorkerStatus = modelRoleWorkerStatusMap.get(modelName);
         ConcurrentHashMap<String/*ip:port*/, WorkerStatus> roleStatusMap = modelWorkerStatus.getRoleStatusMap(roleType);
 
         if (group != null) {
             Map<String, WorkerStatus> filterMap = roleStatusMap.entrySet()
-                .stream()
-                .filter(entry -> entry.getValue().getGroup().equals(group))
-                .collect(Collectors.toConcurrentMap(Map.Entry::getKey, Map.Entry::getValue));
+                    .stream()
+                    .filter(entry -> entry.getValue().getGroup().equals(group))
+                    .collect(Collectors.toConcurrentMap(Map.Entry::getKey, Map.Entry::getValue));
             roleStatusMap.clear();
             roleStatusMap.putAll(filterMap);
         }

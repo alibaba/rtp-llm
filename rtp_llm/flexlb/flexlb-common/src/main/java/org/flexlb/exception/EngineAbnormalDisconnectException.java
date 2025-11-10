@@ -2,8 +2,8 @@ package org.flexlb.exception;
 
 import org.flexlb.enums.StatusEnum;
 
-@SuppressWarnings("unused")
-public class EngineAbnormalDisconnectException extends WhaleException {
+public class EngineAbnormalDisconnectException extends FlexLBException {
+
     public EngineAbnormalDisconnectException(int code, String name, String message, Throwable cause) {
         super(code, name, message, cause);
     }

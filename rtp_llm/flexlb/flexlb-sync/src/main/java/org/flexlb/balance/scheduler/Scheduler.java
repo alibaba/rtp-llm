@@ -1,6 +1,5 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.strategy.LoadBalancer;
 import org.flexlb.dao.loadbalance.MasterResponse;
 import org.flexlb.domain.balance.BalanceContext;
 
@@ -12,7 +11,4 @@ import org.flexlb.domain.balance.BalanceContext;
 public interface Scheduler {
 
     MasterResponse select(BalanceContext balanceContext);
-
-    LoadBalancer getPrefillLoadBalancer();
-
 }

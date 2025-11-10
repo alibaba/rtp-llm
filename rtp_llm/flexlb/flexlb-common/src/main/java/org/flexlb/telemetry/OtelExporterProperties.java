@@ -8,7 +8,7 @@ import java.util.HashMap;
 import java.util.Map;
 
 @Data
-@ConfigurationProperties(prefix = "tpp.otel.exporter")
+@ConfigurationProperties(prefix = "trace.otel.exporter")
 public class OtelExporterProperties {
 
     @NestedConfigurationProperty

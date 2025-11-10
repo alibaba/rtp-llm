@@ -1,13 +1,12 @@
 package org.flexlb.sync.synchronizer;
 
-import com.alibaba.fastjson.JSON;
 import io.micrometer.core.instrument.util.NamedThreadFactory;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.domain.balance.WhaleMasterConfig;
 import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
-import org.flexlb.transport.HttpNettyClientHandler;
+import org.flexlb.util.JsonUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -44,21 +43,17 @@ public abstract class AbstractEngineStatusSynchronizer {
      */
     public static ExecutorService engineSyncExecutor;
 
-    protected final HttpNettyClientHandler syncNettyClient;
-
     protected final ModelMetaConfig modelMetaConfig;
 
     protected final WhaleMasterConfig whaleMasterConfig;
 
-    public AbstractEngineStatusSynchronizer(WorkerAddressService workerAddressService,
-                                            EngineHealthReporter engineHealthReporter,
-                                            EngineWorkerStatus engineWorkerStatus,
-                                            HttpNettyClientHandler syncNettyClient,
-                                            ModelMetaConfig modelMetaConfig) {
+    protected AbstractEngineStatusSynchronizer(WorkerAddressService workerAddressService,
+                                               EngineHealthReporter engineHealthReporter,
+                                               EngineWorkerStatus engineWorkerStatus,
+                                               ModelMetaConfig modelMetaConfig) {
         this.workerAddressService = workerAddressService;
         this.engineHealthReporter = engineHealthReporter;
         this.engineWorkerStatus = engineWorkerStatus;
-        this.syncNettyClient = syncNettyClient;
         this.modelMetaConfig = modelMetaConfig;
         int corePoolSize = 500;
         int maximumPoolSize = 1000;
@@ -75,7 +70,7 @@ public abstract class AbstractEngineStatusSynchronizer {
         logger.warn("WHALE_MASTER_CONFIG = {}", masterConfigStr);
         WhaleMasterConfig masterConfig;
         if (masterConfigStr != null) {
-            masterConfig = JSON.parseObject(masterConfigStr, WhaleMasterConfig.class);
+            masterConfig = JsonUtils.toObject(masterConfigStr, WhaleMasterConfig.class);
         } else {
             masterConfig = new WhaleMasterConfig();
         }

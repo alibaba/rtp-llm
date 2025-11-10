@@ -19,13 +19,29 @@ import static org.flexlb.constant.HttpHeaderNames.TRACE_STATE;
 @Component
 public class WhaleSpanUtils {
 
-    public WhaleSpan buildTraceSpan(RequestContext ctx) {
+    private static final String TRACE_SPAN_ENABLED_ENV = "WHALE_TRACE_SPAN_ENABLED";
+    private static final boolean TRACE_SPAN_ENABLED;
+
+    static {
+        String envValue = System.getenv(TRACE_SPAN_ENABLED_ENV);
+        if (envValue == null) {
+            TRACE_SPAN_ENABLED = true;
+        } else {
+            TRACE_SPAN_ENABLED = "1".equals(envValue);
+        }
+        log.info("TraceSpan enabled: {}", TRACE_SPAN_ENABLED);
+    }
+
+    public void buildTraceSpan(RequestContext ctx) {
         WhaleSpan whaleSpan = createSpan(ctx);
         ctx.setSpan(whaleSpan);
-        return whaleSpan;
     }
 
     public static WhaleSpan createSpan(RequestContext ctx) {
+
+        if (!TRACE_SPAN_ENABLED) {
+            return new NoopSpanImpl();
+        }
 
         boolean isNotRecord = checkNotRecordSpan(ctx);
         if (isNotRecord) {
@@ -49,9 +65,6 @@ public class WhaleSpanUtils {
     }
 
     private static boolean checkNotRecordSpan(RequestContext ctx) {
-        if (ctx.isPrivateRequest()) {
-            return true;
-        }
-        return false;
+        return ctx.isPrivateRequest();
     }
 }

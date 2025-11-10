@@ -1,9 +1,9 @@
 package org.flexlb.service.config;
 
-import com.alibaba.fastjson.JSON;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.domain.balance.WhaleMasterConfig;
+import org.flexlb.util.JsonUtils;
 import org.springframework.stereotype.Component;
 
 @Getter
@@ -18,7 +18,7 @@ public class SystemEnvConfigService implements ConfigService {
         log.warn("WHALE_MASTER_CONFIG = {}", lbConfigStr);
         WhaleMasterConfig config;
         if (lbConfigStr != null) {
-            config = JSON.parseObject(lbConfigStr, WhaleMasterConfig.class);
+            config = JsonUtils.toObject(lbConfigStr, WhaleMasterConfig.class);
         } else {
             config = new WhaleMasterConfig();
         }

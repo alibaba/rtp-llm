@@ -19,9 +19,6 @@ public class WhaleMasterConfig {
      */
     private LoadBalanceStrategyEnum loadBalanceStrategy = LoadBalanceStrategyEnum.SHORTEST_TTFT;
 
-    private boolean enableGrpcEngineStatus = true;
-    private boolean enableGrpcCacheStatus = true;
-
     @Getter
     @Setter
     private static LogLevel logLevel;

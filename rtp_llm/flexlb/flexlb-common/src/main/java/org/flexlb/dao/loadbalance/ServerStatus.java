@@ -31,9 +31,6 @@ public class ServerStatus {
     @JsonProperty("group")
     private String group;
 
-    @JsonProperty("batch_id")
-    private String batchId;
-
     @JsonProperty("debug_info")
     private DebugInfo debugInfo;
 

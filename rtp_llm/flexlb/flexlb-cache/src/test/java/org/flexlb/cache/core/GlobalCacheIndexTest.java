@@ -1,47 +1,48 @@
 package org.flexlb.cache.core;
 
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.junit.jupiter.MockitoExtension;
+
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
-import org.junit.Before;
-import org.junit.Test;
-import org.mockito.MockitoAnnotations;
-
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * GlobalCacheIndex 单元测试
  */
-public class GlobalCacheIndexTest {
+@ExtendWith(MockitoExtension.class)
+class GlobalCacheIndexTest {
 
     private GlobalCacheIndex globalCacheIndex;
 
-    @Before
-    public void setUp() {
-        MockitoAnnotations.initMocks(this);
+    @BeforeEach
+    void setUp() {
         globalCacheIndex = new GlobalCacheIndex();
     }
 
     @Test
-    public void testEmptyInput() {
+    void testEmptyInput() {
         // 测试空输入情况
         Map<String, Integer> result = globalCacheIndex.batchCalculatePrefixMatchLength(
                 Collections.emptyList(), Arrays.asList(1L, 2L, 3L));
-        assertTrue("Empty engines should return empty result", result.isEmpty());
+        assertTrue(result.isEmpty(), "Empty engines should return empty result");
 
         result = globalCacheIndex.batchCalculatePrefixMatchLength(
                 Arrays.asList("engine1", "engine2"), Collections.emptyList());
-        assertTrue("Empty blocks should return empty result", result.isEmpty());
+        assertTrue(result.isEmpty(), "Empty blocks should return empty result");
 
         result = globalCacheIndex.batchCalculatePrefixMatchLength(null, null);
-        assertTrue("Null inputs should return empty result", result.isEmpty());
+        assertTrue(result.isEmpty(), "Null inputs should return empty result");
     }
 
     @Test
-    public void testBasicPrefixMatching() {
+    void testBasicPrefixMatching() {
         // 设置测试数据
         // Block 1L: engine1, engine2, engine3
         // Block 2L: engine1, engine3  
@@ -59,13 +60,13 @@ public class GlobalCacheIndexTest {
         Map<String, Integer> result = globalCacheIndex.batchCalculatePrefixMatchLength(engines, blocks);
 
         // 验证结果
-        assertEquals("Engine1 should match all 3 blocks", 3, result.get("engine1").intValue());
-        assertEquals("Engine2 should match only first block", 1, result.get("engine2").intValue());
-        assertEquals("Engine3 should match first 2 blocks", 2, result.get("engine3").intValue());
+        assertEquals(3, result.get("engine1").intValue(), "Engine1 should match all 3 blocks");
+        assertEquals(1, result.get("engine2").intValue(), "Engine2 should match only first block");
+        assertEquals(2, result.get("engine3").intValue(), "Engine3 should match first 2 blocks");
     }
 
     @Test
-    public void testNoMatchingEngines() {
+    void testNoMatchingEngines() {
         // 测试没有引擎匹配任何block的情况
         globalCacheIndex.addCacheBlock(1L, "other_engine");
         globalCacheIndex.addCacheBlock(2L, "another_engine");
@@ -75,12 +76,12 @@ public class GlobalCacheIndexTest {
 
         Map<String, Integer> result = globalCacheIndex.batchCalculatePrefixMatchLength(engines, blocks);
 
-        assertEquals("Engine1 should have 0 prefix match", 0, result.get("engine1").intValue());
-        assertEquals("Engine2 should have 0 prefix match", 0, result.get("engine2").intValue());
+        assertEquals(0, result.get("engine1").intValue(), "Engine1 should have 0 prefix match");
+        assertEquals(0, result.get("engine2").intValue(), "Engine2 should have 0 prefix match");
     }
 
     @Test
-    public void testAllEnginesMatchAllBlocks() {
+    void testAllEnginesMatchAllBlocks() {
         // 测试所有引擎都匹配所有block的情况
         List<String> engines = Arrays.asList("engine1", "engine2", "engine3");
         List<Long> blocks = Arrays.asList(1L, 2L, 3L, 4L);
@@ -95,30 +96,30 @@ public class GlobalCacheIndexTest {
         Map<String, Integer> result = globalCacheIndex.batchCalculatePrefixMatchLength(engines, blocks);
 
         for (String engine : engines) {
-            assertEquals("All engines should match all 4 blocks", 4, result.get(engine).intValue());
+            assertEquals(4, result.get(engine).intValue(), "All engines should match all 4 blocks");
         }
     }
 
     @Test
-    public void testEarlyTermination() {
+    void testEarlyTermination() {
         // 测试提前终止的情况
         // 设置数据使得在第2个block后没有候选引擎了
         globalCacheIndex.addCacheBlock(1L, "engine1");
         globalCacheIndex.addCacheBlock(1L, "engine2");
         globalCacheIndex.addCacheBlock(2L, "engine1");
         // block 3L 和 4L 没有任何引擎
-        
+
         List<String> engines = Arrays.asList("engine1", "engine2");
         List<Long> blocks = Arrays.asList(1L, 2L, 3L, 4L);
 
         Map<String, Integer> result = globalCacheIndex.batchCalculatePrefixMatchLength(engines, blocks);
 
-        assertEquals("Engine1 should match 2 blocks before termination", 2, result.get("engine1").intValue());
-        assertEquals("Engine2 should match 1 block before termination", 1, result.get("engine2").intValue());
+        assertEquals(2, result.get("engine1").intValue(), "Engine1 should match 2 blocks before termination");
+        assertEquals(1, result.get("engine2").intValue(), "Engine2 should match 1 block before termination");
     }
 
     @Test
-    public void testPartialMatching() {
+    void testPartialMatching() {
         // 测试部分匹配的复杂场景
         globalCacheIndex.addCacheBlock(1L, "engine1");
         globalCacheIndex.addCacheBlock(1L, "engine2");
@@ -139,25 +140,25 @@ public class GlobalCacheIndexTest {
 
         Map<String, Integer> result = globalCacheIndex.batchCalculatePrefixMatchLength(engines, blocks);
 
-        assertEquals("Engine1 should match all blocks", 4, result.get("engine1").intValue());
-        assertEquals("Engine2 should match first 3 blocks", 3, result.get("engine2").intValue());
-        assertEquals("Engine3 should match first 2 blocks", 2, result.get("engine3").intValue());
-        assertEquals("Engine4 should match first block only", 1, result.get("engine4").intValue());
+        assertEquals(4, result.get("engine1").intValue(), "Engine1 should match all blocks");
+        assertEquals(3, result.get("engine2").intValue(), "Engine2 should match first 3 blocks");
+        assertEquals(2, result.get("engine3").intValue(), "Engine3 should match first 2 blocks");
+        assertEquals(1, result.get("engine4").intValue(), "Engine4 should match first block only");
     }
 
     @Test
-    public void testSingleBlockSingleEngine() {
+    void testSingleBlockSingleEngine() {
         // 测试单个block单个引擎的情况
         globalCacheIndex.addCacheBlock(1L, "engine1");
 
         Map<String, Integer> result = globalCacheIndex.batchCalculatePrefixMatchLength(
-            Collections.singletonList("engine1"), Collections.singletonList(1L));
+                Collections.singletonList("engine1"), Collections.singletonList(1L));
 
-        assertEquals("Single engine should match single block", 1, result.get("engine1").intValue());
+        assertEquals(1, result.get("engine1").intValue(), "Single engine should match single block");
     }
 
     @Test
-    public void testNonExistentBlocks() {
+    void testNonExistentBlocks() {
         // 测试不存在的block
         globalCacheIndex.addCacheBlock(1L, "engine1");
 
@@ -166,12 +167,12 @@ public class GlobalCacheIndexTest {
 
         Map<String, Integer> result = globalCacheIndex.batchCalculatePrefixMatchLength(engines, blocks);
 
-        assertEquals("Engine1 should match first block only", 1, result.get("engine1").intValue());
-        assertEquals("Engine2 should have no matches", 0, result.get("engine2").intValue());
+        assertEquals(1, result.get("engine1").intValue(), "Engine1 should match first block only");
+        assertEquals(0, result.get("engine2").intValue(), "Engine2 should have no matches");
     }
 
     @Test
-    public void testEngineRemoval() {
+    void testEngineRemoval() {
         // 测试引擎移除后的匹配情况
         globalCacheIndex.addCacheBlock(1L, "engine1");
         globalCacheIndex.addCacheBlock(1L, "engine2");
@@ -186,12 +187,12 @@ public class GlobalCacheIndexTest {
 
         Map<String, Integer> result = globalCacheIndex.batchCalculatePrefixMatchLength(engines, blocks);
 
-        assertEquals("Engine1 should still match both blocks", 2, result.get("engine1").intValue());
-        assertEquals("Engine2 should match only first block after removal", 1, result.get("engine2").intValue());
+        assertEquals(2, result.get("engine1").intValue(), "Engine1 should still match both blocks");
+        assertEquals(1, result.get("engine2").intValue(), "Engine2 should match only first block after removal");
     }
 
     @Test
-    public void testLargeScaleScenario() {
+    void testLargeScaleScenario() {
         // 测试大规模场景以验证性能优化
         List<String> engines = Arrays.asList("engine1", "engine2", "engine3", "engine4", "engine5");
         List<Long> blocks = Arrays.asList(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L, 10L);
@@ -206,10 +207,10 @@ public class GlobalCacheIndexTest {
 
         Map<String, Integer> result = globalCacheIndex.batchCalculatePrefixMatchLength(engines, blocks);
 
-        assertEquals("Engine1 should match 10 blocks", 10, result.get("engine1").intValue());
-        assertEquals("Engine2 should match 9 blocks", 9, result.get("engine2").intValue());
-        assertEquals("Engine3 should match 8 blocks", 8, result.get("engine3").intValue());
-        assertEquals("Engine4 should match 7 blocks", 7, result.get("engine4").intValue());
-        assertEquals("Engine5 should match 6 blocks", 6, result.get("engine5").intValue());
+        assertEquals(10, result.get("engine1").intValue(), "Engine1 should match 10 blocks");
+        assertEquals(9, result.get("engine2").intValue(), "Engine2 should match 9 blocks");
+        assertEquals(8, result.get("engine3").intValue(), "Engine3 should match 8 blocks");
+        assertEquals(7, result.get("engine4").intValue(), "Engine4 should match 7 blocks");
+        assertEquals(6, result.get("engine5").intValue(), "Engine5 should match 6 blocks");
     }
 }

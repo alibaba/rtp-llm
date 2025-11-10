@@ -13,5 +13,5 @@ public interface LoadBalancer {
 
     ServerStatus select(BalanceContext context, RoleType roleType, String group);
 
-    boolean releaseLocalCache(String modelName, String ip, Long interRequestId);
+    void releaseLocalCache(String modelName, String ip, Long interRequestId);
 }

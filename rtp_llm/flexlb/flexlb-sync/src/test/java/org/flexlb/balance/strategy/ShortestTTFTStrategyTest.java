@@ -1,9 +1,5 @@
 package org.flexlb.balance.strategy;
 
-import java.util.ArrayList;
-import java.util.List;
-import java.util.concurrent.ConcurrentHashMap;
-
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.loadbalance.MasterRequest;
@@ -14,8 +10,6 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.domain.balance.BalanceContext;
 import org.flexlb.domain.balance.WhaleMasterConfig;
-import org.flexlb.domain.batch.SubmitBatchResponse;
-import org.flexlb.service.batch.BatchService;
 import org.flexlb.service.config.ConfigService;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
@@ -24,28 +18,31 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
+
 /**
  * @author zjw
  * description:
  * date: 2025/3/11
  */
-
-public class ShortestTTFTStrategyTest {
+class ShortestTTFTStrategyTest {
 
     @Test
-    public void test() {
+    void test() {
 
         EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig());
         engineWorkerStatus.getModelRoleWorkerStatusMap().put("test-model", new ModelWorkerStatus());
         ConcurrentHashMap<String/*ip*/, WorkerStatus> prefillStatusMap = engineWorkerStatus.getModelRoleWorkerStatusMap().get("test-model").getPrefillStatusMap();
         List<TaskInfo> runningTaskList = new ArrayList<>();
         List<TaskInfo> finishedTaskList = new ArrayList<>();
-        ConcurrentHashMap <Long, TaskInfo> localTaskList = new ConcurrentHashMap<>();
+        ConcurrentHashMap<Long, TaskInfo> localTaskList = new ConcurrentHashMap<>();
         WorkerStatus workerStatus = createWorkerStatus("127.0.0.1", 200, runningTaskList, finishedTaskList, localTaskList);
 
         List<TaskInfo> runningTaskList1 = new ArrayList<>();
         List<TaskInfo> finishedTaskList1 = new ArrayList<>();
-        ConcurrentHashMap <Long, TaskInfo> localTaskList1 = new ConcurrentHashMap<>();
+        ConcurrentHashMap<Long, TaskInfo> localTaskList1 = new ConcurrentHashMap<>();
         WorkerStatus workerStatus1 = createWorkerStatus("127.0.0.2", 100, runningTaskList1, finishedTaskList1, localTaskList1);
 
         prefillStatusMap.put("127.0.0.1:8080", workerStatus);
@@ -60,8 +57,6 @@ public class ShortestTTFTStrategyTest {
 
         EngineHealthReporter engineHealthReporter = Mockito.mock(EngineHealthReporter.class);
         CacheAwareService cacheAwareService = Mockito.mock(CacheAwareService.class);
-        BatchService batchService = Mockito.mock(BatchService.class);
-        Mockito.when(batchService.submitBatch(Mockito.any())).thenReturn(SubmitBatchResponse.success());
         ConfigService configService = Mockito.mock(ConfigService.class);
         Mockito.when(configService.loadBalanceConfig()).thenReturn(new WhaleMasterConfig());
 

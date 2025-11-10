@@ -1,11 +1,5 @@
 package org.flexlb.balance.strategy;
 
-import java.util.ArrayList;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.loadbalance.MasterRequest;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -14,8 +8,6 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.domain.balance.BalanceContext;
 import org.flexlb.domain.balance.WhaleMasterConfig;
-import org.flexlb.domain.batch.SubmitBatchResponse;
-import org.flexlb.service.batch.BatchService;
 import org.flexlb.service.config.ConfigService;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.sync.status.ModelWorkerStatus;
@@ -23,7 +15,13 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
-public class LowestCacheUseStrategyTest {
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+
+class LowestCacheUseStrategyTest {
 
     WorkerStatus createWorkerStatus(String ip) {
 
@@ -37,7 +35,7 @@ public class LowestCacheUseStrategyTest {
     }
 
     @Test
-    void test(){
+    void test() {
         EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig());
         engineWorkerStatus.getModelRoleWorkerStatusMap().put("test-model", new ModelWorkerStatus());
         Set<Long> blockCacheKeys = new HashSet<>();
@@ -49,13 +47,13 @@ public class LowestCacheUseStrategyTest {
         cacheStatus0.setVersion(1);
 
         Set<Long> blockCacheKeys2 = new HashSet<>();
-        CacheStatus  cacheStatus1 = new CacheStatus();
+        CacheStatus cacheStatus1 = new CacheStatus();
         cacheStatus1.setAvailableKvCache(1200);
         cacheStatus1.setBlockSize(64);
         cacheStatus1.setCachedKeys(blockCacheKeys2);
         cacheStatus1.setTotalKvCache(2000);
         cacheStatus1.setVersion(1);
-        ConcurrentHashMap<String/*ip*/, WorkerStatus> decodemap = engineWorkerStatus.getModelRoleWorkerStatusMap().get("test-model").getDecodeStatusMap();
+        ConcurrentHashMap<String/*ip*/, WorkerStatus> decodeMap = engineWorkerStatus.getModelRoleWorkerStatusMap().get("test-model").getDecodeStatusMap();
 
         WorkerStatus workerStatus = createWorkerStatus("127.0.0.1");
         workerStatus.getKvCacheUsed().set(1999);
@@ -63,8 +61,8 @@ public class LowestCacheUseStrategyTest {
         WorkerStatus workerStatus1 = createWorkerStatus("127.0.0.2");
         workerStatus1.getKvCacheUsed().set(2000);
         workerStatus1.getKvCacheFree().set(20000);
-        decodemap.put("127.0.0.1:8080", workerStatus);
-        decodemap.put("127.0.0.2:8080", workerStatus1);
+        decodeMap.put("127.0.0.1:8080", workerStatus);
+        decodeMap.put("127.0.0.2:8080", workerStatus1);
 
 
         MasterRequest req = new MasterRequest();
@@ -78,8 +76,6 @@ public class LowestCacheUseStrategyTest {
         req.setModel("test-model");
         req.setSeqLen(1000);
 
-        BatchService batchService = Mockito.mock(BatchService.class);
-        Mockito.when(batchService.submitBatch(Mockito.any())).thenReturn(SubmitBatchResponse.success());
         ConfigService configService = Mockito.mock(ConfigService.class);
         Mockito.when(configService.loadBalanceConfig()).thenReturn(new WhaleMasterConfig());
         LowestCacheUsedStrategy lowestCacheUsedStrategy =

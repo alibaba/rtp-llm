@@ -1,24 +1,18 @@
 package org.flexlb.consistency;
 
-import com.alibaba.apm.common.factory.NamedThreadFactory;
-import com.alibaba.fastjson.JSON;
-import com.alibaba.metrics.StringUtils;
-import org.flexlb.balance.LoadBalanceWrapper;
+import io.micrometer.core.instrument.util.NamedThreadFactory;
+import org.apache.commons.lang3.StringUtils;
 import org.flexlb.domain.consistency.LBConsistencyConfig;
 import org.flexlb.domain.consistency.MasterChangeNotifyReq;
 import org.flexlb.domain.consistency.MasterChangeNotifyResp;
-import org.flexlb.domain.consistency.SyncLBStatusReq;
 import org.flexlb.domain.consistency.SyncLBStatusResp;
-import org.flexlb.transport.GeneralHttpNettyService;
+import org.flexlb.util.JsonUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
-import reactor.core.publisher.Mono;
 
 import java.net.InetAddress;
-import java.net.URI;
 import java.net.UnknownHostException;
-import java.time.Duration;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -34,25 +28,19 @@ public class LBStatusConsistencyService implements MasterElectService {
 
     private static final Logger LOGGER = LoggerFactory.getLogger("syncConsistencyLogger");
     public static final String MASTER_CHANGE_NOTIFY_PATH = "/rtp_llm/notify_master";
-    public static final String LB_STATUS_SYNC_PATH = "/rtp_llm/schedule_snapshot";
-
-    private final LoadBalanceWrapper loadBalanceWrapper;
-    private final GeneralHttpNettyService generalHttpNettyService;
-    public static ScheduledExecutorService scheduledExecutorService = new ScheduledThreadPoolExecutor(4,
+    public static final ScheduledExecutorService scheduledExecutorService = new ScheduledThreadPoolExecutor(
+            4,
             new NamedThreadFactory("LBStatusConsistencyService-Schedule-Thread"),
-            new ThreadPoolExecutor.AbortPolicy());
+            new ThreadPoolExecutor.AbortPolicy()
+    );
+
     private final MasterElectService masterElectService;
     private LBConsistencyConfig lbConsistencyConfig;
     private String hostIp;
     private String serverPort;
     private String roleId;
 
-    public LBStatusConsistencyService(LoadBalanceWrapper loadBalanceWrapper,
-                                      GeneralHttpNettyService generalHttpNettyService,
-                                      ZookeeperMasterElectService zookeeperMasterElectService) {
-
-        this.loadBalanceWrapper = loadBalanceWrapper;
-        this.generalHttpNettyService = generalHttpNettyService;
+    public LBStatusConsistencyService(ZookeeperMasterElectService zookeeperMasterElectService) {
         this.masterElectService = zookeeperMasterElectService;
         this.init();
     }
@@ -75,7 +63,7 @@ public class LBStatusConsistencyService implements MasterElectService {
         if (configStr == null) {
             lbConsistencyConfig = new LBConsistencyConfig();
         } else {
-            lbConsistencyConfig = JSON.parseObject(configStr, LBConsistencyConfig.class);
+            lbConsistencyConfig = JsonUtils.toObject(configStr, LBConsistencyConfig.class);
         }
         if (!lbConsistencyConfig.isNeedConsistency()) {
             LOGGER.warn("LBStatusConsistencyService is not need.");
@@ -132,6 +120,7 @@ public class LBStatusConsistencyService implements MasterElectService {
 
     /**
      * 处理master变更
+     *
      * @param req MasterChangeNotifyReq
      * @return MasterChangeNotifyResp
      */
@@ -149,11 +138,10 @@ public class LBStatusConsistencyService implements MasterElectService {
         return resp;
     }
 
-    public SyncLBStatusResp dumpLBStatus(SyncLBStatusReq syncLBStatusReq) {
+    public SyncLBStatusResp dumpLBStatus() {
         SyncLBStatusResp resp = new SyncLBStatusResp();
         resp.setSuccess(true);
-        // TODO(saichen) 获取master status
-        /*resp.setLbStatus(loadBalanceWrapper.getMasterStatusSerializer().dump());*/
+        // TODO 获取master status
         return resp;
     }
 
@@ -161,13 +149,6 @@ public class LBStatusConsistencyService implements MasterElectService {
      * 从节点从主节点同步LB状态
      */
     private void syncLBStatusFromMaster() {
-        String masterHost = null;
-        try {
-            // TODO(saichen) 获取master status
-
-        } catch (Exception e) {
-            LOGGER.error("syncLBStatusFromMaster {} error.", masterHost, e);
-        }
+        // TODO 获取master status
     }
-
 }
