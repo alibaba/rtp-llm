@@ -3,16 +3,17 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
+namespace cache_store {
 
 CacheStoreClientService::CacheStoreClientService(const std::shared_ptr<LoadContextStore>& load_context_store):
     load_context_store_(load_context_store) {}
 
 CacheStoreClientService::~CacheStoreClientService() {}
 
-void CacheStoreClientService::transfer(::google::protobuf::RpcController* controller,
-                                       const ::LayerBlockTransferRequest* request,
-                                       ::LayerBlockTransferResponse*      response,
-                                       ::google::protobuf::Closure*       done) {
+void CacheStoreClientService::transfer(::google::protobuf::RpcController*                  controller,
+                                       const cache_store_proto::LayerBlockTransferRequest* request,
+                                       cache_store_proto::LayerBlockTransferResponse*      response,
+                                       ::google::protobuf::Closure*                        done) {
     auto load_context = load_context_store_->getLoadContext(request->context_id());
     if (!load_context) {
         response->set_success(false);
@@ -46,11 +47,12 @@ void CacheStoreClientService::transfer(::google::protobuf::RpcController* contro
 }
 
 void CacheStoreClientService::loadLayerBlocks(const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers,
-                                              const ::LayerBlockTransferRequest*                    request,
-                                              ::LayerBlockTransferResponse*                         response,
+                                              const cache_store_proto::LayerBlockTransferRequest*   request,
+                                              cache_store_proto::LayerBlockTransferResponse*        response,
                                               ::google::protobuf::Closure*                          done) {
     // TODO: TCP Load : copy content to buffer
     // TODO: RDMA Load : call read
 }
 
+}  // namespace cache_store
 }  // namespace rtp_llm

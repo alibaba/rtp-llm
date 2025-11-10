@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache_new/p2p_connector/CacheStoreServerService.h"
 
 namespace rtp_llm {
+namespace cache_store {
 
 CacheStoreServerServiceLayerWatcher::CacheStoreServerServiceLayerWatcher(
     const std::shared_ptr<TcpClient>&        tcp_client,
@@ -47,10 +48,10 @@ bool CacheStoreServerServiceLayerWatcher::notify(const std::shared_ptr<LayerCach
     return true;
 }
 
-std::shared_ptr<LayerBlockTransferRequest>
+std::shared_ptr<cache_store_proto::LayerBlockTransferRequest>
 CacheStoreServerServiceLayerWatcher::makeTransferRequest(const std::shared_ptr<LayerCacheBuffer>& layer_cache_buffer) {
     // generate transfer request according to layer_cache_buffer and cache_keys_
-    auto transfer_request = std::make_shared<LayerBlockTransferRequest>();
+    auto transfer_request = std::make_shared<cache_store_proto::LayerBlockTransferRequest>();
     transfer_request->set_context_id(context_id_);
 
     auto layer_block_info = transfer_request->add_layer_blocks();
@@ -75,8 +76,8 @@ CacheStoreServerServiceLayerWatcher::makeTransferRequest(const std::shared_ptr<L
 }
 
 void CacheStoreServerServiceLayerWatcher::loadToRemote(
-    const std::shared_ptr<LayerCacheBuffer>&          layer_cache_buffer,
-    const std::shared_ptr<LayerBlockTransferRequest>& transfer_request) {
+    const std::shared_ptr<LayerCacheBuffer>&                             layer_cache_buffer,
+    const std::shared_ptr<cache_store_proto::LayerBlockTransferRequest>& transfer_request) {
     // send layer block transfer request to remote
     auto channel = tcp_client_->getChannel(ip_, port_);
     if (channel == nullptr) {
@@ -84,7 +85,7 @@ void CacheStoreServerServiceLayerWatcher::loadToRemote(
         return;
     }
 
-    auto transfer_response = std::make_shared<LayerBlockTransferResponse>();
+    auto transfer_response = std::make_shared<cache_store_proto::LayerBlockTransferResponse>();
     auto controller        = new arpc::ANetRPCController();
     // TODO: timeout to config
     controller->SetExpireTime(100);
@@ -92,17 +93,17 @@ void CacheStoreServerServiceLayerWatcher::loadToRemote(
     auto closure = new LayerKVCacheTransferClosure(
         layer_cache_buffer, shared_from_this(), transfer_request, transfer_response, controller);
 
-    TransferService_Stub stub((::google::protobuf::RpcChannel*)(channel.get()),
-                              ::google::protobuf::Service::STUB_DOESNT_OWN_CHANNEL);
+    cache_store_proto::TransferService_Stub stub((::google::protobuf::RpcChannel*)(channel.get()),
+                                                 ::google::protobuf::Service::STUB_DOESNT_OWN_CHANNEL);
     stub.transfer(controller, transfer_request.get(), transfer_response.get(), closure);
 }
 
 LayerKVCacheTransferClosure::LayerKVCacheTransferClosure(
-    const std::shared_ptr<LayerCacheBuffer>&                    layer_cache_buffer,
-    const std::shared_ptr<CacheStoreServerServiceLayerWatcher>& layer_watcher,
-    const std::shared_ptr<LayerBlockTransferRequest>&           transfer_request,
-    const std::shared_ptr<LayerBlockTransferResponse>&          transfer_response,
-    arpc::ANetRPCController*                                    controller):
+    const std::shared_ptr<LayerCacheBuffer>&                              layer_cache_buffer,
+    const std::shared_ptr<CacheStoreServerServiceLayerWatcher>&           layer_watcher,
+    const std::shared_ptr<cache_store_proto::LayerBlockTransferRequest>&  transfer_request,
+    const std::shared_ptr<cache_store_proto::LayerBlockTransferResponse>& transfer_response,
+    arpc::ANetRPCController*                                              controller):
     layer_cache_buffer_(layer_cache_buffer),
     watcher_(layer_watcher),
     transfer_request_(transfer_request),
@@ -144,10 +145,10 @@ CacheStoreServerService::CacheStoreServerService(const std::shared_ptr<TcpClient
 
 CacheStoreServerService::~CacheStoreServerService() {}
 
-void CacheStoreServerService::load(::google::protobuf::RpcController* controller,
-                                   const ::CacheLoadRequest*          request,
-                                   ::CacheLoadResponse*               response,
-                                   ::google::protobuf::Closure*       done) {
+void CacheStoreServerService::load(::google::protobuf::RpcController*           controller,
+                                   const ::cache_store_proto::CacheLoadRequest* request,
+                                   ::cache_store_proto::CacheLoadResponse*      response,
+                                   ::google::protobuf::Closure*                 done) {
     auto context_id      = request->context_id();
     auto partition_count = request->partition_count();
     auto partition_id    = request->partition_id();
@@ -187,10 +188,11 @@ void CacheStoreServerService::load(::google::protobuf::RpcController* controller
     done->Run();
 }
 
-void CacheStoreServerService::workerinfo(::google::protobuf::RpcController* controller,
-                                         const ::WorkerInfoRequest*         request,
-                                         ::WorkerInfoResponse*              response,
-                                         ::google::protobuf::Closure*       done) {
+void CacheStoreServerService::workerinfo(::google::protobuf::RpcController*            controller,
+                                         const ::cache_store_proto::WorkerInfoRequest* request,
+                                         ::cache_store_proto::WorkerInfoResponse*      response,
+                                         ::google::protobuf::Closure*                  done) {
+    RTP_LLM_LOG_ERROR("workerinfo request, worker addrs size: %d", worker_addrs_.size());
     for (auto& worker_addr : worker_addrs_) {
         auto worker_info = response->add_worker_infos();
         worker_info->set_ip(worker_addr.ip);
@@ -200,4 +202,5 @@ void CacheStoreServerService::workerinfo(::google::protobuf::RpcController* cont
     done->Run();
 }
 
+}  // namespace cache_store
 }  // namespace rtp_llm

@@ -10,12 +10,14 @@
 
 namespace rtp_llm {
 
+namespace cache_store {
+
 class CacheStoreClientClosure: public google::protobuf::Closure {
 public:
-    CacheStoreClientClosure(const std::shared_ptr<CacheLoadRequest>&            cache_load_request,
-                            const std::shared_ptr<CacheLoadResponse>&           cache_load_response,
-                            arpc::ANetRPCController*                            controller,
-                            const std::shared_ptr<CacheStoreClientLoadContext>& load_context);
+    CacheStoreClientClosure(const std::shared_ptr<cache_store_proto::CacheLoadRequest>&  cache_load_request,
+                            const std::shared_ptr<cache_store_proto::CacheLoadResponse>& cache_load_response,
+                            arpc::ANetRPCController*                                     controller,
+                            const std::shared_ptr<CacheStoreClientLoadContext>&          load_context);
     ~CacheStoreClientClosure() {
         if (controller_) {
             delete controller_;
@@ -26,10 +28,10 @@ public:
     void Run() override;
 
 private:
-    std::shared_ptr<CacheLoadRequest>            cache_load_request_;
-    std::shared_ptr<CacheLoadResponse>           cache_load_response_;
-    arpc::ANetRPCController*                     controller_ = nullptr;
-    std::shared_ptr<CacheStoreClientLoadContext> load_context_;
+    std::shared_ptr<cache_store_proto::CacheLoadRequest>  cache_load_request_;
+    std::shared_ptr<cache_store_proto::CacheLoadResponse> cache_load_response_;
+    arpc::ANetRPCController*                              controller_ = nullptr;
+    std::shared_ptr<CacheStoreClientLoadContext>          load_context_;
 };
 
 class CacheStoreClient {
@@ -40,7 +42,7 @@ public:
 public:
     bool init();
 
-    std::vector<CacheStoreServerWorker> getPeerWorkerInfo(const std::string& ip, uint32_t port);
+    std::vector<cache_store::CacheStoreServerWorker> getPeerWorkerInfo(const std::string& ip, uint32_t port);
 
     std::shared_ptr<CacheStoreClientLoadContext>
     asyncLoad(const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers,
@@ -52,20 +54,21 @@ public:
 
 private:
     int64_t generateContextId();
-    bool    generateCacheLoadRequest(const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers,
-                                     int64_t                                               deadline_ms,
-                                     int64_t                                               context_id,
-                                     int                                                   partition_count,
-                                     int                                                   partition_id,
-                                     const std::shared_ptr<CacheLoadRequest>&              cache_load_request);
+    bool    generateCacheLoadRequest(const std::vector<std::shared_ptr<LayerCacheBuffer>>&       layer_cache_buffers,
+                                     int64_t                                                     deadline_ms,
+                                     int64_t                                                     context_id,
+                                     int                                                         partition_count,
+                                     int                                                         partition_id,
+                                     const std::shared_ptr<cache_store_proto::CacheLoadRequest>& cache_load_request);
 
 private:
     std::shared_ptr<TcpClient> tcp_client_;
     std::shared_ptr<TcpServer> tcp_server_;
 
-    std::shared_ptr<LoadContextStore> load_context_store_;
+    std::shared_ptr<cache_store::LoadContextStore> load_context_store_;
 
     std::unique_ptr<CacheStoreClientService> cache_store_client_service_;
 };
 
+}  // namespace cache_store
 }  // namespace rtp_llm

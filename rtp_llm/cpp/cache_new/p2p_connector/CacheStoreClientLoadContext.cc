@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache_new/p2p_connector/CacheStoreClientLoadContext.h"
 
 namespace rtp_llm {
+namespace cache_store {
 
 CacheStoreClientLoadContext::CacheStoreClientLoadContext(
     const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers, int64_t context_id):
@@ -11,6 +12,10 @@ CacheStoreClientLoadContext::~CacheStoreClientLoadContext() = default;
 bool CacheStoreClientLoadContext::success() const {
     // TODO: implement
     return true;
+}
+
+void CacheStoreClientLoadContext::setFailed(ErrorCode ec, const std::string& error_info) {
+    // TODO: implement
 }
 
 void CacheStoreClientLoadContext::cancel() {
@@ -41,7 +46,6 @@ std::shared_ptr<LayerCacheBuffer> CacheStoreClientLoadContext::getLayerCacheBuff
     }
     return nullptr;
 }
-
 LoadContextStore::LoadContextStore() {}
 
 LoadContextStore::~LoadContextStore() {}
@@ -61,4 +65,5 @@ int64_t LoadContextStore::generateContextId() {
     return context_id_generator.fetch_add(1, std::memory_order_relaxed);
 }
 
+}  // namespace cache_store
 }  // namespace rtp_llm

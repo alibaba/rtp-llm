@@ -3,6 +3,8 @@ syntax = "proto2";
 import "arpc/proto/rpc_extensions.proto";
 option cc_generic_services = true;
 
+package cache_store_proto;
+
 message LayerCacheBlockInfo {
     optional uint32 layer_id = 1;
     repeated int64 cache_keys = 2;

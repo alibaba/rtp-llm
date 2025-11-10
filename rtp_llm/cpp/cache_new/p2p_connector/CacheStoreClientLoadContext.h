@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 
 namespace rtp_llm {
+namespace cache_store {
 
 class CacheStoreClientLoadContext {
 public:
@@ -54,4 +55,5 @@ private:
     std::unordered_map<int64_t, std::shared_ptr<CacheStoreClientLoadContext>> load_context_map_;
 };
 
+}  // namespace cache_store
 }  // namespace rtp_llm

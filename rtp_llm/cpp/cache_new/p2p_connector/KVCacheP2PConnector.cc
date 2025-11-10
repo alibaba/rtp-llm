@@ -5,6 +5,8 @@
 #include "autil/StringUtil.h"
 #include <set>
 
+using namespace rtp_llm::cache_store;
+
 namespace rtp_llm {
 
 KVCacheP2PLoadAsyncContext::KVCacheP2PLoadAsyncContext() {}

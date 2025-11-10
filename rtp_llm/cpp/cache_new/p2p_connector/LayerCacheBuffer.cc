@@ -4,11 +4,20 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
+namespace cache_store {
 
 LayerCacheBuffer::LayerCacheBuffer(int layer_id): layer_id_(layer_id) {}
 
 void LayerCacheBuffer::addBlockCacheBuffer(int64_t key, int block_id) {
     block_cache_buffers_[key] = std::make_shared<BlockCacheBuffer>(key, block_id);
+}
+
+std::shared_ptr<BlockCacheBuffer> LayerCacheBuffer::getBlockCacheBuffer(int64_t key) const {
+    auto it = block_cache_buffers_.find(key);
+    if (it == block_cache_buffers_.end()) {
+        return nullptr;
+    }
+    return it->second;
 }
 
 SingleLayerCacheBufferStore::SingleLayerCacheBufferStore(int layer_id): layer_id_(layer_id) {}
@@ -107,6 +116,7 @@ LayerCacheBufferStore::LayerCacheBufferStore(int layer_num): layer_num_(layer_nu
     for (int i = 0; i < layer_num; ++i) {
         single_layer_cache_buffer_stores_.push_back(std::make_shared<SingleLayerCacheBufferStore>(i));
     }
+    check_timeout_thread_ = std::thread([this]() { checkTimeoutThread(); });
 }
 
 std::shared_ptr<SingleLayerCacheBufferStore> LayerCacheBufferStore::getSingleLayerCacheBufferStore(int layer_id) const {
@@ -123,4 +133,5 @@ void LayerCacheBufferStore::checkTimeoutThread() {
     }
 }
 
+}  // namespace cache_store
 }  // namespace rtp_llm

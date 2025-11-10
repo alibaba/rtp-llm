@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
+namespace cache_store {
 
 TcpServer::~TcpServer() {
     stop();
@@ -85,4 +86,5 @@ void TcpServer::stop() {
     rpc_server_transport_.reset();
 }
 
+}  // namespace cache_store
 }  // namespace rtp_llm

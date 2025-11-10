@@ -56,6 +56,8 @@ cc_library(
         ":arpc_dep",
         "//rtp_llm/cpp/cache_new/p2p_connector/proto:service_cc_proto",
         "//rtp_llm/cpp/cache_new:cache_new",
+        "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
+        "//rtp_llm/cpp/metrics:metrics",
     ],
 )
 
@@ -76,6 +78,8 @@ cc_library(
         "//rtp_llm/cpp/cache_new:cache_new",
         "//rtp_llm/cpp/core:event",
         "@havenask//aios/autil:thread",
+        "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
+        "//rtp_llm/cpp/metrics:metrics",
     ],
 )
 

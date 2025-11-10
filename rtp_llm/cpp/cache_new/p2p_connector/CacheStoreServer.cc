@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache_new/p2p_connector/CacheStoreServer.h"
 
 namespace rtp_llm {
+namespace cache_store {
 
 CacheStoreServer::CacheStoreServer(const std::shared_ptr<TcpClient>&          tcp_client,
                                    const std::shared_ptr<TcpServer>&          tcp_server,
@@ -72,4 +73,9 @@ void CacheStoreServer::storeWaitThread() {
     }
 }
 
+const std::shared_ptr<LayerCacheBufferStore>& CacheStoreServer::getLayerCacheBufferStore() const {
+    return layer_cache_buffer_store_;
+}
+
+}  // namespace cache_store
 }  // namespace rtp_llm

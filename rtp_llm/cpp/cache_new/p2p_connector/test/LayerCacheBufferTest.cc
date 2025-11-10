@@ -8,7 +8,7 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
-namespace test {
+namespace cache_store {
 
 // Mock Watcher 用于测试观察者功能
 class MockWatcher: public SingleLayerCacheBufferStore::Watcher {
@@ -216,10 +216,77 @@ TEST_F(SingleLayerCacheBufferStoreTest, CheckTimeoutNoExpiredBuffers) {
     EXPECT_EQ(1, store_->layerCacheBufferWatcherMapSize());
 }
 
-}  // namespace test
-}  // namespace rtp_llm
+// ==================== LayerCacheBufferStore 测试 ====================
 
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
+class LayerCacheBufferStoreTest: public ::testing::Test {
+protected:
+    void SetUp() override {
+        layer_num_ = 3;
+        store_     = std::make_unique<LayerCacheBufferStore>(layer_num_);
+    }
+
+    void TearDown() override {
+        // LayerCacheBufferStore 析构时会自动停止线程
+        store_.reset();
+    }
+
+    int64_t getCurrentTimeUs() {
+        return currentTimeUs();
+    }
+
+    int64_t getFutureTimeUs(int64_t delay_ms) {
+        return getCurrentTimeUs() + delay_ms * 1000;
+    }
+
+    int64_t getPastTimeUs(int64_t delay_ms) {
+        return getCurrentTimeUs() - delay_ms * 1000;
+    }
+
+    std::shared_ptr<LayerCacheBuffer> createLayerCacheBuffer(int layer_id) {
+        return std::make_shared<LayerCacheBuffer>(layer_id);
+    }
+
+    int                                    layer_num_;
+    std::unique_ptr<LayerCacheBufferStore> store_;
+};
+
+TEST_F(LayerCacheBufferStoreTest, CheckTimeoutThreadMixedExpiredAndValid) {
+    // 测试混合过期和有效 buffer/watcher 的情况
+    for (int i = 0; i < layer_num_; ++i) {
+        auto layer_store = store_->getSingleLayerCacheBufferStore(i);
+        ASSERT_NE(layer_store, nullptr);
+
+        // 设置过期的 buffer
+        auto    expired_buffer   = createLayerCacheBuffer(i);
+        int64_t past_deadline_us = getPastTimeUs(100);
+        layer_store->setLayerCacheBuffer(expired_buffer, past_deadline_us);
+
+        // 设置有效的 buffer
+        auto    valid_buffer       = createLayerCacheBuffer(i);
+        int64_t future_deadline_us = getFutureTimeUs(1000);
+        layer_store->setLayerCacheBuffer(valid_buffer, future_deadline_us);
+
+        // 设置过期的 watcher
+        auto    expired_watcher          = std::make_shared<MockWatcher>(i, false);
+        int64_t past_watcher_deadline_us = getPastTimeUs(100);
+        layer_store->setLayerCacheBufferWatchFunc(expired_watcher, past_watcher_deadline_us);
+
+        // 设置有效的 watcher
+        auto    valid_watcher              = std::make_shared<MockWatcher>(i, false);
+        int64_t future_watcher_deadline_us = getFutureTimeUs(1000);
+        layer_store->setLayerCacheBufferWatchFunc(valid_watcher, future_watcher_deadline_us);
+    }
+
+    // 等待 checkTimeoutThread 处理
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    // 验证只有有效的 buffer 和 watcher 保留
+    for (int i = 0; i < layer_num_; ++i) {
+        auto layer_store = store_->getSingleLayerCacheBufferStore(i);
+        EXPECT_EQ(1, layer_store->layerCacheBufferMapSize());
+        EXPECT_EQ(1, layer_store->layerCacheBufferWatcherMapSize());
+    }
 }
+
+}  // namespace cache_store
+}  // namespace rtp_llm

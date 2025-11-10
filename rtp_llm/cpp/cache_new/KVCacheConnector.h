@@ -24,11 +24,10 @@ public:
 public:
     virtual bool init() = 0;
     virtual std::shared_ptr<AsyncContext>
-    asyncRead(const BatchKVCacheResourcePtr& resource, const std::string& ip, uint32_t port)                        = 0;
+    asyncRead(const BatchKVCacheResourcePtr& resource, const std::string& ip, uint32_t port) = 0;  // Meta
     virtual std::shared_ptr<AsyncContext> asyncWrite(const BatchKVCacheResourcePtr& resource, DeviceEventPtr event) = 0;
     virtual std::shared_ptr<AsyncContext>
-                   asyncWriteByLayer(const BatchKVCacheResourcePtr& resource, int layer_id, DeviceEventPtr event) = 0;
-    virtual size_t match(const std::vector<int64_t>& keys) const                                                  = 0;
+    asyncWriteByLayer(const BatchKVCacheResourcePtr& resource, int layer_id, DeviceEventPtr event) = 0;
 };
 
 }  // namespace rtp_llm

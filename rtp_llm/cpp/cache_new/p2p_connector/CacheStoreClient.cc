@@ -4,10 +4,13 @@
 
 namespace rtp_llm {
 
-CacheStoreClientClosure::CacheStoreClientClosure(const std::shared_ptr<CacheLoadRequest>&  cache_load_request,
-                                                 const std::shared_ptr<CacheLoadResponse>& cache_load_response,
-                                                 arpc::ANetRPCController*                  controller,
-                                                 const std::shared_ptr<CacheStoreClientLoadContext>& load_context):
+namespace cache_store {
+
+CacheStoreClientClosure::CacheStoreClientClosure(
+    const std::shared_ptr<cache_store_proto::CacheLoadRequest>&  cache_load_request,
+    const std::shared_ptr<cache_store_proto::CacheLoadResponse>& cache_load_response,
+    arpc::ANetRPCController*                                     controller,
+    const std::shared_ptr<CacheStoreClientLoadContext>&          load_context):
     cache_load_request_(cache_load_request),
     cache_load_response_(cache_load_response),
     controller_(controller),
@@ -49,13 +52,14 @@ bool CacheStoreClient::init() {
 std::vector<CacheStoreServerWorker> CacheStoreClient::getPeerWorkerInfo(const std::string& ip, uint32_t port) {
     auto channel = tcp_client_->getChannel(ip, port);
     if (channel == nullptr) {
+        RTP_LLM_LOG_WARNING("get channel failed, ip: %s, port: %u", ip.c_str(), port);
         return std::vector<CacheStoreServerWorker>();
     }
-    CacheStoreService_Stub stub((::google::protobuf::RpcChannel*)(channel.get()),
-                                ::google::protobuf::Service::STUB_DOESNT_OWN_CHANNEL);
+    cache_store_proto::CacheStoreService_Stub stub((::google::protobuf::RpcChannel*)(channel.get()),
+                                                   ::google::protobuf::Service::STUB_DOESNT_OWN_CHANNEL);
 
-    WorkerInfoRequest  request;
-    WorkerInfoResponse response;
+    cache_store_proto::WorkerInfoRequest  request;
+    cache_store_proto::WorkerInfoResponse response;
 
     arpc::ANetRPCController controller;
     controller.SetExpireTime(100);
@@ -64,7 +68,7 @@ std::vector<CacheStoreServerWorker> CacheStoreClient::getPeerWorkerInfo(const st
     stub.workerinfo(&controller, &request, &response, nullptr);
 
     if (controller.Failed()) {
-        RTP_LLM_LOG_ERROR("get peer worker info failed, controller err is %s", controller.ErrorText().c_str());
+        RTP_LLM_LOG_WARNING("get peer worker info failed, controller err is %s", controller.ErrorText().c_str());
         return std::vector<CacheStoreServerWorker>();
     }
 
@@ -86,13 +90,13 @@ CacheStoreClient::asyncLoad(const std::vector<std::shared_ptr<LayerCacheBuffer>>
     if (channel == nullptr) {
         return nullptr;
     }
-    CacheStoreService_Stub stub((::google::protobuf::RpcChannel*)(channel.get()),
-                                ::google::protobuf::Service::STUB_DOESNT_OWN_CHANNEL);
+    cache_store_proto::CacheStoreService_Stub stub((::google::protobuf::RpcChannel*)(channel.get()),
+                                                   ::google::protobuf::Service::STUB_DOESNT_OWN_CHANNEL);
 
     int64_t deadline_ms = currentTimeMs() + timeout_ms;
     auto    context_id  = generateContextId();
 
-    std::shared_ptr<CacheLoadRequest> cache_load_request(new CacheLoadRequest());
+    std::shared_ptr<cache_store_proto::CacheLoadRequest> cache_load_request(new cache_store_proto::CacheLoadRequest());
     if (!generateCacheLoadRequest(
             layer_cache_buffers, deadline_ms, context_id, partition_count, partition_id, cache_load_request)) {
         RTP_LLM_LOG_ERROR("generate cache load request failed");
@@ -102,7 +106,8 @@ CacheStoreClient::asyncLoad(const std::vector<std::shared_ptr<LayerCacheBuffer>>
     auto load_context = std::make_shared<CacheStoreClientLoadContext>(layer_cache_buffers, context_id);
     load_context_store_->addLoadContext(load_context);
 
-    std::shared_ptr<CacheLoadResponse> cache_load_response(new CacheLoadResponse());
+    std::shared_ptr<cache_store_proto::CacheLoadResponse> cache_load_response(
+        new cache_store_proto::CacheLoadResponse());
 
     arpc::ANetRPCController* controller = new arpc::ANetRPCController();
     controller->SetExpireTime(timeout_ms);
@@ -114,12 +119,12 @@ CacheStoreClient::asyncLoad(const std::vector<std::shared_ptr<LayerCacheBuffer>>
 }
 
 bool CacheStoreClient::generateCacheLoadRequest(
-    const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers,
-    int64_t                                               deadline_ms,
-    int64_t                                               context_id,
-    int                                                   partition_count,
-    int                                                   partition_id,
-    const std::shared_ptr<CacheLoadRequest>&              cache_load_request) {
+    const std::vector<std::shared_ptr<LayerCacheBuffer>>&       layer_cache_buffers,
+    int64_t                                                     deadline_ms,
+    int64_t                                                     context_id,
+    int                                                         partition_count,
+    int                                                         partition_id,
+    const std::shared_ptr<cache_store_proto::CacheLoadRequest>& cache_load_request) {
 
     cache_load_request->set_deadline_ms(deadline_ms);
     cache_load_request->set_partition_count(partition_count);
@@ -143,4 +148,5 @@ int64_t CacheStoreClient::generateContextId() {
     return context_id_generator.fetch_add(1, std::memory_order_relaxed);
 }
 
+}  // namespace cache_store
 }  // namespace rtp_llm

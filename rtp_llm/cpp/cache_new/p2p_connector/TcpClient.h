@@ -4,6 +4,7 @@
 #include "aios/network/arpc/arpc/ANetRPCChannelManager.h"
 
 namespace rtp_llm {
+namespace cache_store {
 
 class TcpClient {
 public:
@@ -27,4 +28,5 @@ private:
     std::shared_ptr<arpc::ANetRPCChannelManager> rpc_channel_manager_;
 };
 
+}  // namespace cache_store
 }  // namespace rtp_llm

@@ -95,15 +95,15 @@ private:
     std::vector<CacheStoreServerWorker> local_worker_infos_;
     int                                 tp_rank_;
 
-    std::shared_ptr<MemoryUtil>  memory_util_;
-    std::shared_ptr<TcpClient>   tcp_client_;
-    std::shared_ptr<TcpServer>   tcp_server_;
-    autil::ThreadPoolBasePtr     thread_pool_;  // task executor
-    std::shared_ptr<TPBroadcast> tp_broadcast_;
+    std::shared_ptr<MemoryUtil>             memory_util_;
+    std::shared_ptr<cache_store::TcpClient> tcp_client_;
+    std::shared_ptr<cache_store::TcpServer> tcp_server_;
+    autil::ThreadPoolBasePtr                thread_pool_;  // task executor
+    std::shared_ptr<TPBroadcast>            tp_broadcast_;
 
-    std::shared_ptr<CacheStoreClient> cache_store_client_;
-    std::shared_ptr<CacheStoreServer> cache_store_server_;
-    bool                              kvcache_reg_mr_ = false;
+    std::shared_ptr<cache_store::CacheStoreClient> cache_store_client_;
+    std::shared_ptr<cache_store::CacheStoreServer> cache_store_server_;
+    bool                                           kvcache_reg_mr_ = false;
 };
 
 }  // namespace rtp_llm

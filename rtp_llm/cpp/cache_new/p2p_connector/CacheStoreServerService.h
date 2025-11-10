@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/cache_new/KVCacheAllocator.h"
 
 namespace rtp_llm {
+namespace cache_store {
 
 class CacheStoreServerServiceLayerWatcher:
     public SingleLayerCacheBufferStore::Watcher,
@@ -28,10 +29,10 @@ public:
     bool notify(const std::shared_ptr<LayerCacheBuffer>& layer_cache_buffer) override;
 
 private:
-    std::shared_ptr<LayerBlockTransferRequest>
+    std::shared_ptr<cache_store_proto::LayerBlockTransferRequest>
          makeTransferRequest(const std::shared_ptr<LayerCacheBuffer>& layer_cache_buffer);
-    void loadToRemote(const std::shared_ptr<LayerCacheBuffer>&          layer_cache_buffer,
-                      const std::shared_ptr<LayerBlockTransferRequest>& transfer_request);
+    void loadToRemote(const std::shared_ptr<LayerCacheBuffer>&                             layer_cache_buffer,
+                      const std::shared_ptr<cache_store_proto::LayerBlockTransferRequest>& transfer_request);
 
 private:
     std::shared_ptr<TcpClient> tcp_client_;
@@ -49,11 +50,11 @@ private:
 
 class LayerKVCacheTransferClosure: public ::google::protobuf::Closure {
 public:
-    LayerKVCacheTransferClosure(const std::shared_ptr<LayerCacheBuffer>&                    layer_cache_buffer,
-                                const std::shared_ptr<CacheStoreServerServiceLayerWatcher>& layer_watcher,
-                                const std::shared_ptr<LayerBlockTransferRequest>&           transfer_request,
-                                const std::shared_ptr<LayerBlockTransferResponse>&          transfer_response,
-                                arpc::ANetRPCController*                                    controller);
+    LayerKVCacheTransferClosure(const std::shared_ptr<LayerCacheBuffer>&                             layer_cache_buffer,
+                                const std::shared_ptr<CacheStoreServerServiceLayerWatcher>&          layer_watcher,
+                                const std::shared_ptr<cache_store_proto::LayerBlockTransferRequest>& transfer_request,
+                                const std::shared_ptr<cache_store_proto::LayerBlockTransferResponse>& transfer_response,
+                                arpc::ANetRPCController*                                              controller);
 
     ~LayerKVCacheTransferClosure();
 
@@ -61,14 +62,14 @@ public:
     void Run() override;
 
 private:
-    std::shared_ptr<LayerCacheBuffer>                    layer_cache_buffer_;
-    std::shared_ptr<CacheStoreServerServiceLayerWatcher> watcher_;
-    std::shared_ptr<LayerBlockTransferRequest>           transfer_request_;
-    std::shared_ptr<LayerBlockTransferResponse>          transfer_response_;
-    arpc::ANetRPCController*                             controller_;
+    std::shared_ptr<LayerCacheBuffer>                              layer_cache_buffer_;
+    std::shared_ptr<CacheStoreServerServiceLayerWatcher>           watcher_;
+    std::shared_ptr<cache_store_proto::LayerBlockTransferRequest>  transfer_request_;
+    std::shared_ptr<cache_store_proto::LayerBlockTransferResponse> transfer_response_;
+    arpc::ANetRPCController*                                       controller_;
 };
 
-class CacheStoreServerService: public CacheStoreService {
+class CacheStoreServerService: public cache_store_proto::CacheStoreService {
 public:
     CacheStoreServerService(const std::shared_ptr<TcpClient>&             tcp_client,
                             const std::shared_ptr<KVCacheAllocator>&      kv_cache_allocator,
@@ -77,15 +78,15 @@ public:
     ~CacheStoreServerService();
 
 public:
-    void load(::google::protobuf::RpcController* controller,
-              const ::CacheLoadRequest*          request,
-              ::CacheLoadResponse*               response,
-              ::google::protobuf::Closure*       done) override;
+    void load(::google::protobuf::RpcController*           controller,
+              const ::cache_store_proto::CacheLoadRequest* request,
+              ::cache_store_proto::CacheLoadResponse*      response,
+              ::google::protobuf::Closure*                 done) override;
 
-    void workerinfo(::google::protobuf::RpcController* controller,
-                    const ::WorkerInfoRequest*         request,
-                    ::WorkerInfoResponse*              response,
-                    ::google::protobuf::Closure*       done) override;
+    void workerinfo(::google::protobuf::RpcController*            controller,
+                    const ::cache_store_proto::WorkerInfoRequest* request,
+                    ::cache_store_proto::WorkerInfoResponse*      response,
+                    ::google::protobuf::Closure*                  done) override;
 
 private:
     std::shared_ptr<TcpClient>             tcp_client_;
@@ -94,4 +95,5 @@ private:
     std::vector<CacheStoreServerWorker>    worker_addrs_;
 };
 
+}  // namespace cache_store
 }  // namespace rtp_llm

@@ -5,6 +5,7 @@
 #include "autil/NetUtil.h"
 
 namespace rtp_llm {
+namespace cache_store {
 
 class TcpServer {
 public:
@@ -33,4 +34,5 @@ private:
     std::shared_ptr<autil::ThreadPoolBase> rpc_worker_threadpool_;
 };
 
+}  // namespace cache_store
 }  // namespace rtp_llm

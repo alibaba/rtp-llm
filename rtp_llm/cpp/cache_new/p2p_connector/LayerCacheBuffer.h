@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/core/Buffer.h"
 
 namespace rtp_llm {
+namespace cache_store {
 
 struct BlockCacheBuffer {
     int64_t key;
@@ -32,7 +33,7 @@ public:
 public:
     void addBlockCacheBuffer(int64_t key, int block_id);
     void addBlockCacheBuffer(int64_t key, int block_id, BufferPtr buffer1, BufferPtr buffer2);
-    std::shared_ptr<BlockCacheBuffer> getBlockCacheBuffer(int64_t key);
+    std::shared_ptr<BlockCacheBuffer> getBlockCacheBuffer(int64_t key) const;
     int                               layerId() const {
         return layer_id_;
     }
@@ -105,7 +106,9 @@ public:
     LayerCacheBufferStore(int layer_num);
     ~LayerCacheBufferStore() {
         check_timeout_thread_stop_ = true;
-        check_timeout_thread_.join();
+        if (check_timeout_thread_.joinable()) {
+            check_timeout_thread_.join();
+        }
     }
 
 public:
@@ -121,4 +124,5 @@ private:
     std::thread                                               check_timeout_thread_;
 };
 
+}  // namespace cache_store
 }  // namespace rtp_llm

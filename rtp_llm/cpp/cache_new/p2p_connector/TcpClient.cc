@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
+namespace cache_store {
 
 TcpClient::~TcpClient() {
     stop();
@@ -77,4 +78,5 @@ std::shared_ptr<arpc::RPCChannelBase> TcpClient::openChannel(const std::string& 
         dynamic_cast<arpc::RPCChannelBase*>(rpc_channel_manager_->OpenChannel(spec, false, 1000ul)));
 }
 
+}  // namespace cache_store
 }  // namespace rtp_llm

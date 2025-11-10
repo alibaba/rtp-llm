@@ -8,6 +8,7 @@
 #include "autil/LockFreeThreadPool.h"
 
 namespace rtp_llm {
+namespace cache_store {
 
 class CacheStoreServer {
 public:
@@ -25,7 +26,8 @@ public:
                     int64_t                                  timeout_ms);
 
 private:
-    void storeWaitThread();
+    void                                          storeWaitThread();
+    const std::shared_ptr<LayerCacheBufferStore>& getLayerCacheBufferStore() const;
 
 private:
     std::shared_ptr<TcpClient>          tcp_client_;
@@ -46,4 +48,5 @@ private:
     std::thread                                                                         store_wait_thread_;
 };
 
+}  // namespace cache_store
 }  // namespace rtp_llm
