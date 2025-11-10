@@ -2,6 +2,7 @@
 
 #include <algorithm>
 
+#include "rtp_llm/cpp/cache_new/KVCacheMemoryConnector.h"
 #include "rtp_llm/cpp/cache_new/SingleTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/HashUtil.h"
@@ -49,7 +50,14 @@ bool KVCacheManager::init() {
         RTP_LLM_LOG_ERROR("SingleTypeKVCacheAllocator only support Full Attention");
         return false;
     }
-    return false;
+
+    if (enableMemoryConnector()) {
+        if (!initMemoryConnector()) {
+            RTP_LLM_LOG_ERROR("init memory connector failed");
+            return false;
+        }
+    }
+    return true;
 }
 
 size_t KVCacheManager::availableTokenNums() const {
@@ -202,7 +210,20 @@ FreeResult KVCacheManager::free(const FreeInfo& free_info) {
 }
 
 InsertResult KVCacheManager::insertIntoCache(const InsertInfo& insert_info) {
-    return allocator_->insertIntoCache(insert_info);
+    // insert to gpu
+    auto gpu_result = allocator_->insertIntoCache(insert_info);
+
+    if (enableMemoryConnector()) {
+        // insert to cpu
+        auto resource_batch0 = insert_info.batch_kv_cache_resource->batch_resource.at(0);
+        auto resource        = std::make_shared<KVCacheResourceV1>(resource_batch0);
+        auto async_context   = memory_connector_->asyncWrite(resource, nullptr);
+        if (async_context) {
+            write_cache_thread_pool_->pushTask([async_context]() { async_context->waitDone(); });
+        }
+    }
+
+    return gpu_result;
 }
 
 KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const {
@@ -267,9 +288,57 @@ bool KVCacheManager::updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache
     return allocator_->updateKVBlock(batch_kv_cache_resource, block_src_batch, copy_last_block, block_update_mapping);
 }
 
-std::shared_ptr<MemoryBlockCache> KVCacheManager::memoryBlockCache() const {
-    RTP_LLM_LOG_WARNING("memoryBlockCache is not implemented in new KVCacheManager yet");
-    return nullptr;
+bool KVCacheManager::enableMemoryConnector() const {
+    return params_.kv_cache_config.memory_block_cache_size_mb > 0;
+}
+
+bool KVCacheManager::initMemoryConnector() {
+    auto config                               = config_;
+    config.memory_block_cache_size_mb         = params_.kv_cache_config.memory_block_cache_size_mb;
+    config.memory_block_cache_sync_timeout_ms = params_.kv_cache_config.memory_block_cache_sync_timeout_ms;
+
+    memory_connector_ =
+        std::make_shared<KVCacheMemoryConnector>(config_, allocator_, device_, params_.worker_grpc_addrs_);
+    if (!memory_connector_->init()) {
+        RTP_LLM_LOG_ERROR("kvcache memory connector init failed");
+        memory_connector_.reset();
+        return false;
+    }
+
+    write_cache_thread_pool_ = std::make_shared<autil::LockFreeThreadPool>(8, 1000, nullptr, "WriteCacheThreadPool");
+    if (!write_cache_thread_pool_->start()) {
+        RTP_LLM_LOG_ERROR("write cache thread pool start failed");
+        write_cache_thread_pool_.reset();
+        return false;
+    }
+
+    return true;
+}
+
+std::shared_ptr<AsyncContext> KVCacheManager::asyncLoadCache(const std::shared_ptr<KVCacheResourceV1>& resource) {
+    if (!memory_connector_ || !resource) {
+        RTP_LLM_LOG_WARNING(
+            "async load cache failed, memory connector or resource is null, memory connector: %p, resource: %p",
+            memory_connector_.get(),
+            resource.get());
+        return nullptr;
+    }
+    return memory_connector_->asyncRead(resource, nullptr);
+}
+
+bool KVCacheManager::copyCache(const CopyCacheRequestPB& request, CopyCacheResponsePB& response) {
+    if (request.has_mem_request()) {
+        if (!memory_connector_) {
+            RTP_LLM_LOG_WARNING("copy cache failed, memory connector is null, request: [%s]",
+                                request.DebugString().c_str());
+            response.mutable_mem_response()->set_success(false);
+            return false;
+        }
+        return memory_connector_->copyCache(request.mem_request(), *(response.mutable_mem_response()));
+    } else {
+        RTP_LLM_LOG_WARNING("copy cache failed, request is invalid, request: [%s]", request.DebugString().c_str());
+        return false;
+    }
 }
 
 }  // namespace rtp_llm

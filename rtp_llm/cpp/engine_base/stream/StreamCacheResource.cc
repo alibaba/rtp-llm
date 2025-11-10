@@ -63,6 +63,10 @@ void StreamCacheResource::releaseResource() {
 int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
     RTP_LLM_LOG_DEBUG("stream [%ld] try release [%lu] blocks", stream_->streamId(), nums);
 
+    if (isLoadingCache()) {
+        load_cache_context_->cancel();
+    }
+
     if (fake_inited_) {
         int max_block_size = maxBlockSize();
         int batch_size     = batch_resource_->batchSize();
@@ -226,6 +230,26 @@ bool StreamCacheResource::enable3FS() const {
 
 bool StreamCacheResource::enableMemoryBlockCache() const {
     return resource_context_.enable_memory_block_cache && stream_->enableMemoryBlockCache();
+}
+
+bool StreamCacheResource::asyncLoadCache() {
+    if (enableMemoryBlockCache()) {
+        // TODO(LXQ): only support batch0 now, need to support all batch in the future?
+        auto resource       = std::make_shared<KVCacheResourceV1>(batch_resource_->batch_resource.at(0));
+        load_cache_context_ = resource_context_.cache_manager->asyncLoadCache(resource);
+        return load_cache_context_ != nullptr;
+    }
+    return false;
+}
+bool StreamCacheResource::loadCacheDone() const {
+    if (!load_cache_context_) {
+        return true;
+    }
+    return load_cache_context_->done();
+}
+
+bool StreamCacheResource::isLoadingCache() const {
+    return load_cache_context_ != nullptr && !(load_cache_context_->done());
 }
 
 }  // namespace rtp_llm

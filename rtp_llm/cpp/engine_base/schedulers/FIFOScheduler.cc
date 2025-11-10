@@ -265,7 +265,31 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
     list<GenerateStreamPtr> new_streams;
     for (auto it = waiting_streams_.begin(); it != waiting_streams_.end();) {
         auto& stream = *it;
+        if (stream->isLoadingCache()) {
+            if (!stream->loadCacheDone()) {
+                it = std::next(it);
+                continue;
+            }
+
+            RTP_LLM_LOG_DEBUG("stream [%ld] cache load finished, move to running", stream->streamId());
+            if (stream->setRunning()) {
+                new_streams.emplace_back(stream);
+                it = waiting_streams_.erase(it);
+            } else {
+                RTP_LLM_LOG_WARNING("stream [%ld] set running failed after cache load", stream->streamId());
+                stream->releaseResource();
+                it = std::next(it);
+            }
+            continue;
+        }
+
         if (evaluateNewStream(new_streams, *it, reserve_step)) {
+            // load cache from memory to gpu
+            if (stream->asyncLoadCache()) {
+                it = std::next(it);
+                continue;
+            }
+
             RTP_LLM_LOG_DEBUG("stream [%ld] add to new queue", stream->streamId());
             // if setRunning fails, it must be in stopped state, evict it in next iteration
             if (stream->setRunning()) {
@@ -274,8 +298,9 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
             } else {
                 RTP_LLM_LOG_WARNING("stream [%ld] set running failed", stream->streamId());
                 stream->releaseResource();
-                it++;
+                it = std::next(it);
             }
+            continue;
         } else if (running_streams_.empty() && new_streams.empty() && remote_running_streams_.empty()) {
             // TODO(xinfei.sxf) At this time, we can also release the blocks held by other waiting streams
             RTP_LLM_LOG_WARNING("stream [%ld] can not add to new queue", stream->streamId());

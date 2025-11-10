@@ -1078,4 +1078,16 @@ void GenerateStream::resizeSubGenerateStatus(size_t new_size) {
     }
 }
 
+bool GenerateStream::asyncLoadCache() {
+    return stream_cache_resource_->asyncLoadCache();
+}
+
+bool GenerateStream::loadCacheDone() const {
+    return stream_cache_resource_->loadCacheDone();
+}
+
+bool GenerateStream::isLoadingCache() const {
+    return stream_cache_resource_->isLoadingCache();
+}
+
 }  // namespace rtp_llm

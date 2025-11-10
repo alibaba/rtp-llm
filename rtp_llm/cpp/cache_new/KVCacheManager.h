@@ -5,13 +5,18 @@
 #include <set>
 #include <vector>
 
+#include "autil/LockFreeThreadPool.h"
+#include "rtp_llm/cpp/cache_new/AsyncContext.h"
 #include "rtp_llm/cpp/cache_new/types.h"
 #include "rtp_llm/cpp/cache_new/CacheConfig.h"
 #include "rtp_llm/cpp/cache_new/KVCacheAllocator.h"
 #include "rtp_llm/cpp/config/GptInitParameter.h"
+#include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "kmonitor/client/MetricsReporter.h"
 
 namespace rtp_llm {
+
+class KVCacheMemoryConnector;
 
 class KVCacheManager {
 public:
@@ -70,11 +75,20 @@ public:
                          int64_t                                   request_id,
                          const std::map<std::string, std::string>& extra_metas) const;
 
-    bool                                    updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
-                                                          const std::vector<int>&        block_src_batch,
-                                                          bool                           copy_last_block,
-                                                          std::vector<BlockIdPair>&      block_update_mapping);
-    std::shared_ptr<class MemoryBlockCache> memoryBlockCache() const;
+    bool updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                       const std::vector<int>&        block_src_batch,
+                       bool                           copy_last_block,
+                       std::vector<BlockIdPair>&      block_update_mapping);
+
+    // async load cache from memory to gpu, for all tp
+    std::shared_ptr<AsyncContext> asyncLoadCache(const std::shared_ptr<KVCacheResourceV1>& resource);
+
+    // copy cache between gpu and memory, for single tp
+    bool copyCache(const CopyCacheRequestPB& request, CopyCacheResponsePB& response);
+
+private:
+    bool enableMemoryConnector() const;
+    bool initMemoryConnector();
 
 private:
     CacheConfig          config_;
@@ -83,6 +97,9 @@ private:
 
     const kmonitor::MetricsReporterPtr metrics_reporter_;
     const GptInitParameter&            params_;
+
+    std::shared_ptr<KVCacheMemoryConnector>    memory_connector_;
+    std::shared_ptr<autil::LockFreeThreadPool> write_cache_thread_pool_;
 };
 
 }  // namespace rtp_llm
