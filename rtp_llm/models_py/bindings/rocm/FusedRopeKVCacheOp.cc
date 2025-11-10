@@ -75,113 +75,74 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
     bool store_cache = kv_cache.has_value();
     if (hw_kernel_config_.use_aiter_pa) {
         hipStream_t stream_ = device_->getStream();
-        DISPATCH_CUDA_FUNCTION_DATA_TYPE(torchDTypeToDataType(qkv.dtype()),
-                                         invokeAddFusedQKVBiasTransposePrefillV1,
-                                         q_output.data_ptr(),
-                                         k_output.data_ptr(),
-                                         v_output.data_ptr(),
-                                         &prefix_prompt_param,
-                                         qkv.data_ptr(),
-                                         nullptr,
-                                         nullptr,
-                                         nullptr,
-                                         nullptr,
-                                         params->cu_seqlens.data_ptr<int>(),
-                                         batch_size,
-                                         seq_len,
-                                         token_num,
-                                         local_head_num,
-                                         local_head_num_kv,
-                                         size_per_head,
-                                         attn_configs_.rope_config,
-                                         attn_configs_.use_logn_attn,
-                                         nullptr,
-                                         0,
-                                         false,        // use_paged_fmha
-                                         store_qkv,    // store_qkv
-                                         store_q,      // store_q
-                                         store_kv,     // store_kv
-                                         store_cache,  // store_cache
-                                         nullptr,
-                                         device_->getStream()  // 必须作为最后一个参数
-        );
-    } else {
-        DISPATCH_CUDA_FUNCTION_DATA_TYPE(
-            torchDTypeToDataType(qkv.dtype()),
-            invokeAddFusedQKVBiasTranspose,
-            nullptr,
-            q_output.data_ptr(),
-            k_output.data_ptr(),
-            v_output.data_ptr(),
-            &prefix_prompt_param,
-            qkv.data_ptr(),
-            nullptr,  // qkv_buf_fp8 != nullptr ? qkv_buf_fp8->data() : nullptr,
-            nullptr,  // params.common.position_ids ? params.common.position_ids->dataWithOffset<int>(decoder_batch_size
-                      // * params.configs.rope_config.index_factor): nullptr,
-            nullptr,  // params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias ?
-                      // params.weights.qkv_weight->bias->data() : nullptr,
-            nullptr,  // params.common.padding_offset->data<int>(),
-            params->cu_seqlens.data_ptr<int>(),
-            batch_size,
-            seq_len,  // 使用 seq_len 而不是 params->max_seq_len
-            token_num,
-            local_head_num,
-            local_head_num_kv,
-            size_per_head,
-            attn_configs_.rope_config,
-            attn_configs_.use_logn_attn,
-            nullptr,  // scale_out_ptr,
-            0,        // int8_mode,
-            false,
-            store_qkv,
-            false,  // store_q_no_transpose
-            store_q,
-            store_kv,
-            store_cache,
-            device_->getStream());
-        check_cuda_error();
+        if (hw_kernel_config_.use_asm_pa) {
+            DISPATCH_CUDA_FUNCTION_DATA_TYPE(torchDTypeToDataType(qkv.dtype()),
+                                             invokeAddFusedQKVBiasTransposePrefill,
+                                             q_output.data_ptr(),
+                                             k_output.data_ptr(),
+                                             v_output.data_ptr(),
+                                             &prefix_prompt_param,
+                                             qkv.data_ptr(),
+                                             nullptr,
+                                             nullptr,
+                                             nullptr,
+                                             nullptr,
+                                             params->cu_seqlens.data_ptr<int>(),
+                                             batch_size,
+                                             seq_len,
+                                             token_num,
+                                             local_head_num,
+                                             local_head_num_kv,
+                                             size_per_head,
+                                             attn_configs_.rope_config,
+                                             attn_configs_.use_logn_attn,
+                                             nullptr,
+                                             0,
+                                             false,        // use_paged_fmha
+                                             store_qkv,    // store_qkv
+                                             store_q,      // store_q
+                                             store_kv,     // store_kv
+                                             store_cache,  // store_cache
+                                             nullptr,
+                                             stream_  // 必须作为最后一个参数
+            );
+        }
+        else {
+            DISPATCH_CUDA_FUNCTION_DATA_TYPE(torchDTypeToDataType(qkv.dtype()),
+                                             invokeAddFusedQKVBiasTransposePrefillV1,
+                                             q_output.data_ptr(),
+                                             k_output.data_ptr(),
+                                             v_output.data_ptr(),
+                                             &prefix_prompt_param,
+                                             qkv.data_ptr(),
+                                             nullptr,
+                                             nullptr,
+                                             nullptr,
+                                             nullptr,
+                                             params->cu_seqlens.data_ptr<int>(),
+                                             batch_size,
+                                             seq_len,
+                                             token_num,
+                                             local_head_num,
+                                             local_head_num_kv,
+                                             size_per_head,
+                                             attn_configs_.rope_config,
+                                             attn_configs_.use_logn_attn,
+                                             nullptr,
+                                             0,
+                                             false,        // use_paged_fmha
+                                             store_qkv,    // store_qkv
+                                             store_q,      // store_q
+                                             store_kv,     // store_kv
+                                             store_cache,  // store_cache
+                                             nullptr,
+                                             stream_  // 必须作为最后一个参数
+            );
+        }
     }
-
     // 根据 cu_seqlens 对每个 batch 超出实际长度的部分进行0填充
     // cu_seqlens 格式: [0, len1, len1+len2, len1+len2+len3, ...]
     // 每个 batch 的实际长度为: cu_seqlens[i+1] - cu_seqlens[i]
-    auto cu_seqlens_cpu  = params->cu_seqlens.cpu();
-    auto cu_seqlens_data = cu_seqlens_cpu.data_ptr<int>();
-
-    for (int batch_idx = 0; batch_idx < batch_size; batch_idx++) {
-        int actual_len = cu_seqlens_data[batch_idx + 1] - cu_seqlens_data[batch_idx];
-
-        // 对 Q tensor 进行填充：只处理超出实际长度的部分
-        if (actual_len < seq_len) {
-            // q_output: {batch_size, head_num, seq_len, head_dim}
-            // 将 [batch_idx, :, actual_len:, :] 设置为0
-            q_output
-                .index({batch_idx,
-                        torch::indexing::Slice(),
-                        torch::indexing::Slice(actual_len, torch::indexing::None),
-                        torch::indexing::Slice()})
-                .zero_();
-        }
-
-        // 对 K 和 V tensor 进行填充
-        if (actual_len < seq_len_with_prefix) {
-            // k_output, v_output: {batch_size, head_num_kv, seq_len_with_prefix, head_dim}
-            // 将 [batch_idx, :, actual_len:, :] 设置为0
-            k_output
-                .index({batch_idx,
-                        torch::indexing::Slice(),
-                        torch::indexing::Slice(actual_len, torch::indexing::None),
-                        torch::indexing::Slice()})
-                .zero_();
-            v_output
-                .index({batch_idx,
-                        torch::indexing::Slice(),
-                        torch::indexing::Slice(actual_len, torch::indexing::None),
-                        torch::indexing::Slice()})
-                .zero_();
-        }
-    }
-
     // 返回4维格式的 Q、K、V tensor
     return std::make_tuple(q_output, k_output, v_output);
 }
@@ -248,8 +209,9 @@ torch::Tensor FusedRopeKVCacheDecodeOp::forward(const torch::Tensor&            
         (rtp_llm::KVBlockArrayForContextFMHA::DataType*)params->kv_cache_block_id_device.data_ptr(),
         kv_cache.value().k_cache_base.size(0) * layer_num_);
     prefix_prompt_param.offset_kv_block_array = offset_kv_block_array;
-
-    // prefix_prompt_param.kv_block_array = kv_block_array;
+    if (hw_kernel_config_.use_asm_pa) {
+        prefix_prompt_param.kv_block_array = kv_block_array;
+    }
     // if (params->prefix_lengths.defined() && params->prefix_lengths.numel() > 0) {
     //     prefix_prompt_param.d_prefix_prompt_lengths =params->prefix_lengths.data_ptr<int>();
     //     prefix_prompt_param.max_prefix_prompt_length =params->prefix_lengths.max().item<int>();
@@ -271,45 +233,79 @@ torch::Tensor FusedRopeKVCacheDecodeOp::forward(const torch::Tensor&            
         }
 
         size_t seq_len = 1;
-
-        DISPATCH_CUDA_FUNCTION_DATA_TYPE(
-            torchDTypeToDataType(qkv.dtype()),
-            invokeAddFusedQKVBiasTransposeDecodeV1,
-            q_output.data_ptr(),
-            nullptr,
-            nullptr,
-            &prefix_prompt_param,
-            params->input_lengths.data_ptr<int>(),
-            qkv.data_ptr(),
-            nullptr,
-            /*params.common.position_ids*/ nullptr,
-            /*qkv_bias*/ nullptr,  //                params.configs.fuse_qkv_add_bias &&
-                                   //                params.weights.qkv_weight->bias?
-                                   //                params.weights.qkv_weight->bias->data(): nullptr,???
-            /*params.common.padding_offset->data<int>(),*/ nullptr,
-            /*params.common.cu_seqlens->data<int>(),*/ nullptr,
-            params->sequence_lengths.data_ptr<int>(),
-            batch_size,
-            seq_len,
-            token_num,
-            local_head_num,
-            local_head_num_kv,
-            size_per_head,
-            attn_configs_.rope_config,
-            attn_configs_.use_logn_attn,
-            nullptr,
-            0,
-            false,
-            store_qkv,
-            store_q,
-            store_kv,
-            store_cache,
-            nullptr,
-            device_->getStream());
+        if (hw_kernel_config_.use_asm_pa) {
+            DISPATCH_CUDA_FUNCTION_DATA_TYPE(
+                torchDTypeToDataType(qkv.dtype()),
+                invokeAddFusedQKVBiasTransposeDecode,
+                q_output.data_ptr(),
+                nullptr,
+                nullptr,
+                &prefix_prompt_param,
+                params->input_lengths.data_ptr<int>(),
+                qkv.data_ptr(),
+                nullptr,
+                /*params.common.position_ids*/ nullptr,
+                /*qkv_bias*/ nullptr,  //                params.configs.fuse_qkv_add_bias &&
+                                    //                params.weights.qkv_weight->bias?
+                                      //                params.weights.qkv_weight->bias->data(): nullptr,???
+                /*params.common.padding_offset->data<int>(),*/ nullptr,
+                /*params.common.cu_seqlens->data<int>(),*/ nullptr,
+                params->sequence_lengths.data_ptr<int>(),
+                batch_size,
+                seq_len,
+                token_num,
+                local_head_num,
+                local_head_num_kv,
+                size_per_head,
+                attn_configs_.rope_config,
+                attn_configs_.use_logn_attn,
+                nullptr,
+                0,
+                false,
+                store_qkv,
+                store_q,
+                store_kv,
+                store_cache,
+                nullptr,
+                device_->getStream());
+        } else {
+            DISPATCH_CUDA_FUNCTION_DATA_TYPE(
+                torchDTypeToDataType(qkv.dtype()),
+                invokeAddFusedQKVBiasTransposeDecodeV1,
+                q_output.data_ptr(),
+                nullptr,
+                nullptr,
+                &prefix_prompt_param,
+                params->input_lengths.data_ptr<int>(),
+                qkv.data_ptr(),
+                nullptr,
+                /*params.common.position_ids*/ nullptr,
+                /*qkv_bias*/ nullptr,  //                params.configs.fuse_qkv_add_bias &&
+                                    //                params.weights.qkv_weight->bias?
+                                      //                params.weights.qkv_weight->bias->data(): nullptr,???
+                /*params.common.padding_offset->data<int>(),*/ nullptr,
+                /*params.common.cu_seqlens->data<int>(),*/ nullptr,
+                params->sequence_lengths.data_ptr<int>(),
+                batch_size,
+                seq_len,
+                token_num,
+                local_head_num,
+                local_head_num_kv,
+                size_per_head,
+                attn_configs_.rope_config,
+                attn_configs_.use_logn_attn,
+                nullptr,
+                0,
+                false,
+                store_qkv,
+                store_q,
+                store_kv,
+                store_cache,
+                device_->getStream());
+        }
     } else {
         assert(false && "not implemented");
     }
-
     return q_output;
 }
 
