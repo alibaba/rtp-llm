@@ -141,7 +141,7 @@ void ChatCompletionRequest::Jsonize(Jsonizable::JsonWrapper& json) {
     JSONIZE_OPTIONAL(logprobs);
     JSONIZE_OPTIONAL(top_logprobs);
     JSONIZE_OPTIONAL(extra_configs);
-    json.Jsonize("private_request", private_request, private_request);
+    JSONIZE_OPTIONAL(private_request);
     JSONIZE_OPTIONAL(trace_id);
     JSONIZE_OPTIONAL(chat_id);
     JSONIZE_OPTIONAL(template_key);

@@ -230,7 +230,7 @@ std::string MoeConfig::to_string() const {
 // ModelSpecificConfig
 std::string ModelSpecificConfig::to_string() const {
     std::ostringstream oss;
-    oss << "load_python_model:" << load_python_model << "\n";
+    oss << "load_python_model: " << load_python_model << "\n";
     return oss.str();
 }
 
@@ -329,6 +329,7 @@ std::string CacheStoreConfig::to_string() const {
 std::string MiscellaneousConfig::to_string() const {
     std::ostringstream oss;
     oss << "disable_pdl: " << disable_pdl << "\n"
+        << "disable_access_log: " << disable_access_log << "\n"
         << "aux_string: " << aux_string << "\n";
     return oss.str();
 }

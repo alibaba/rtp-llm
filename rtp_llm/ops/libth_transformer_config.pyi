@@ -961,6 +961,7 @@ class MMModelConfig:
 
 class MiscellaneousConfig:
     aux_string: str
+    disable_access_log: bool
     disable_pdl: bool
 
     def __getstate__(self) -> tuple:
