@@ -4,7 +4,7 @@
 #include "rtp_llm/models_py/bindings/common/WriteCacheStoreOp.h"
 #include "rtp_llm/models_py/bindings/rocm/Gemm.h"
 #include "rtp_llm/models_py/bindings/rocm/FusedRopeKVCacheOp.h"
-#include "rtp_llm/models_py/bindings/rocm/RtpProcessGroup.h"
+#include "rtp_llm/models_py/bindings/common/RtpProcessGroup.h"
 
 using namespace rtp_llm;
 

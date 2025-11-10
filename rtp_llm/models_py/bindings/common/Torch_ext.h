@@ -12,6 +12,7 @@
 #include "rtp_llm/cpp/kernels/rocm/layernorm_kernels.h"
 using bf16_type  = amd_bfloat16;
 using StreamType = hipStream_t;
+using DefaultDeviceType = rtp_llm::ROCmDevice;
 #define GET_CURRENT_STREAM() at::hip::getCurrentHIPStream().stream()
 #elif USING_CUDA
 #include <cuda_runtime_api.h>
@@ -21,11 +22,13 @@ using StreamType = hipStream_t;
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
+#include "rtp_llm/cpp/devices/cuda_impl/CudaDevice.h"
 #include "rtp_llm/cpp/kernels/layernorm_kernels.h"
 #include "rtp_llm/cpp/kernels/fused_qk_rmsnorm.h"
 #include "rtp_llm/cpp/kernels/rmsnormKernels.h"
 using bf16_type  = nv_bfloat16;
 using StreamType = cudaStream_t;
+using DefaultDeviceType = rtp_llm::CudaDevice;
 #define GET_CURRENT_STREAM() at::cuda::getCurrentCUDAStream(at::cuda::current_device()).stream()
 #endif
 
