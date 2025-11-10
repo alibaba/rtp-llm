@@ -50,6 +50,8 @@ public:
                                bool                           copy_last_block,
                                std::vector<BlockIdPair>&      block_update_mapping) = 0;
 
+    virtual void clearCache() = 0;
+
 protected:
     MallocResult         initMalloc(const MallocInfo& malloc_info);
     virtual MallocResult incrMalloc(const MallocInfo& malloc_info)             = 0;

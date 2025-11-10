@@ -98,6 +98,9 @@ public:
     bool enable3FS() const;
     bool enableMemoryBlockCache() const;
 
+    bool asyncLoadCache();
+    bool loadCacheDone();
+
     std::string debugString() const {
         std::stringstream debug_string;
         debug_string << "StreamCacheResource {"
@@ -119,6 +122,9 @@ private:
     int                      malloc_failed_times_   = 0;
     bool                     fake_inited_           = false;
     const std::string        adapter_name_;
+
+    // async load cache context
+    std::shared_ptr<AsyncContext> load_cache_context_;
 };
 
 }  // namespace rtp_llm
