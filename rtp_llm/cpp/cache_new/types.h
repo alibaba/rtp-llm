@@ -45,9 +45,16 @@ struct BlockBufferInfo {
     // BufferPtr v_scale_addr;
 };
 
+enum class GroupType {
+    Invalid,
+    Full,
+    Linear
+};
+
 struct CacheLayerLayout {
     std::vector<int>           layer_to_groups;
     std::vector<torch::Tensor> layers_to_buffer_ptrs;
+    std::map<int, GroupType>   group_id_to_type;
 };
 
 struct KVCacheInfo {
