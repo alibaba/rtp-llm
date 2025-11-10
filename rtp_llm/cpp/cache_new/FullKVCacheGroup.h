@@ -23,7 +23,7 @@ public:
     insertIntoCache(const CacheKeysType& cache_keys, const BlockIndicesType& block_indices, bool is_resident) override;
     void removeSkippedBlocks(BlockIndicesType& block_indices) override;
     int  needBlocksNum(int seq_len, int current_blocks) const override;
-    void reference(const BlockIndicesType& block_indices) override;
+    void reference(BlockIndicesType& block_indices, const BlockIndicesType& new_block_indices) override;
 
 private:
 };

@@ -33,6 +33,11 @@ public:
     KVCacheBuffer kvCacheBuffer() const override;
 
 private:
+    MallocResult initMalloc(const MallocInfo& malloc_info);
+    MallocResult incrMalloc(const MallocInfo& malloc_info);
+    MallocResult initMallocForCommonLen(const MallocInfo& malloc_info);
+
+private:
     BlockPoolPtr                      block_pool_;
     std::shared_ptr<FullKVCacheGroup> full_kv_cache_group_;
 };
