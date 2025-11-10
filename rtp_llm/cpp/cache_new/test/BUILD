@@ -138,3 +138,18 @@ cc_test(
     env = {},
     exec_properties = {'gpu':'A10'},
 )
+
+cc_test(
+    name = "tp_broadcast_manager_test",
+    srcs = [
+        "TpBroadcastManagerTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps + [
+        "//rtp_llm/cpp/model_rpc:model_rpc_pool",
+        "@havenask//aios/autil:net",
+    ],
+    env = {},
+    exec_properties = {'gpu':'A10'},
+)

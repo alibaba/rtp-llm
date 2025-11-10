@@ -81,6 +81,10 @@ public:
                                     const ::MemoryBlockCacheRequestPB* request,
                                     ::MemoryBlockCacheResponsePB*      response);
 
+    ::grpc::Status BroadcastTp(::grpc::ServerContext*        context,
+                               const ::BroadcastTpRequestPB* request,
+                               ::BroadcastTpResponsePB*      response);
+
 public:
     typedef grpc::internal::WriterInterface<GenerateOutputsPB> WriterInterface;
 
