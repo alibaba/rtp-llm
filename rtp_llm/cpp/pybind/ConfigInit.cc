@@ -738,20 +738,24 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     py::class_<MiscellaneousConfig>(m, "MiscellaneousConfig")
         .def(py::init<>())
         .def_readwrite("disable_pdl", &MiscellaneousConfig::disable_pdl)
+        .def_readwrite("disable_access_log", &MiscellaneousConfig::disable_access_log)
         .def_property(
             "aux_string",
             [](const MiscellaneousConfig& self) { return self.aux_string; },
             [](MiscellaneousConfig& self, const std::string& value) { self.aux_string = value; })
         .def("to_string", &MiscellaneousConfig::to_string)
         .def(py::pickle(
-            [](const MiscellaneousConfig& self) { return py::make_tuple(self.disable_pdl, self.aux_string); },
+            [](const MiscellaneousConfig& self) {
+                return py::make_tuple(self.disable_pdl, self.disable_access_log, self.aux_string);
+            },
             [](py::tuple t) {
-                if (t.size() != 2)
+                if (t.size() != 3)
                     throw std::runtime_error("Invalid state!");
                 MiscellaneousConfig c;
                 try {
-                    c.disable_pdl = t[0].cast<bool>();
-                    c.aux_string  = t[1].cast<std::string>();
+                    c.disable_pdl        = t[0].cast<bool>();
+                    c.disable_access_log = t[1].cast<bool>();
+                    c.aux_string         = t[2].cast<std::string>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("MiscellaneousConfig unpickle error: ") + e.what());
                 }

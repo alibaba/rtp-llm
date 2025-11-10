@@ -109,8 +109,12 @@ private:
     std::string     log_time_;
 };
 
-void AccessLogWrapper::logQueryAccess(const std::string& raw_request, int64_t request_id, bool private_request) {
-    if (private_request) {
+bool AccessLogWrapper::default_private_request = false;
+
+void AccessLogWrapper::logQueryAccess(const std::string&  raw_request,
+                                      int64_t             request_id,
+                                      std::optional<bool> private_request) {
+    if (private_request.value_or(default_private_request)) {
         return;
     }
 
@@ -194,8 +198,8 @@ void AccessLogWrapper::logSuccessAccess(const std::string&                raw_re
                                         int64_t                           request_id,
                                         int64_t                           start_time_us,
                                         const std::optional<std::string>& logable_response,
-                                        bool                              private_request) {
-    if (private_request) {
+                                        std::optional<bool>               private_request) {
+    if (private_request.value_or(default_private_request)) {
         return;
     }
     if (logable_response.has_value() == false) {
@@ -219,8 +223,8 @@ void AccessLogWrapper::logSuccessAccess(const std::string&                raw_re
 void AccessLogWrapper::logSuccessAccess(const std::string&              raw_request,
                                         int64_t                         request_id,
                                         const std::vector<std::string>& complete_response,
-                                        bool                            private_request) {
-    if (private_request) {
+                                        std::optional<bool>             private_request) {
+    if (private_request.value_or(default_private_request)) {
         return;
     }
 
@@ -237,8 +241,8 @@ void AccessLogWrapper::logSuccessAccess(const std::string&              raw_requ
     }
 }
 
-bool isPrivate(const std::string& raw_request) {
-    bool private_request = false;
+static bool isPrivate(const std::string& raw_request) {
+    bool private_request = AccessLogWrapper::default_private_request;
     try {
         auto body    = ParseJson(raw_request);
         auto bodyMap = AnyCast<JsonMap>(body);
