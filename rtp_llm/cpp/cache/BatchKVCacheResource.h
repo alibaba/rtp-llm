@@ -10,13 +10,34 @@ struct BlockIds {
     std::vector<int> block_indices;
 };
 
-// struct KVCacheResource {
-//     std::vector<std::shared_ptr<BlockIds>>& batch_cache_layer_layouts;
-//     std::vector<std::shared_ptr<BlockIds>>& group_id_to_block_ids;
-//     KVCacheResource(std::vector<std::shared_ptr<BlockIds>>& batch_cache_layer_layouts,
-//     std::vector<std::shared_ptr<BlockIds>>& group_id_to_block_ids):
-//         batch_cache_layer_layouts(batch_cache_layer_layouts), group_id_to_block_ids(group_id_to_block_ids) {}
-// };
+typedef size_t  CacheKeyType;
+typedef int32_t BlockIdxType;
+
+typedef std::vector<CacheKeyType> CacheKeysType;
+typedef std::vector<BlockIdxType> BlockIndicesType;
+
+typedef std::vector<std::shared_ptr<BlockIds>> GroupBlockIds;
+typedef std::vector<std::shared_ptr<BlockIds>> LayerBlockIds;
+// typedef std::vector<GroupBlockIds>             BatchGroupBlockIds;
+// typedef std::vector<LayerBlockIds>             BatchLayerBlockIds;
+// typedef std::vector<CacheKeyType>              BatchCacheKeys;
+
+class KVCacheResourceV1 {
+public:
+    // layer_id -> block_indices
+    LayerBlockIds layer_block_ids;
+    // group_id -> block_indices
+    GroupBlockIds group_block_ids;
+    // cache_keys and block_id are not consistent at all times
+    CacheKeysType cache_keys;
+
+public:
+    void resize(int reserver_blocks, int value) {
+        for (auto& group : group_block_ids) {
+            group->block_indices.resize(reserver_blocks, value);
+        }
+    }
+};
 
 class BatchKVCacheResource {
 public:
@@ -24,7 +45,7 @@ public:
     int                     batchSize() const;
     int                     blockSize(int batch_id) const;
     void                    resize(size_t batch_size);
-    void                    resize(size_t batch_id, int reserver_blocks, bool clear = false);
+    void                    resize(size_t batch_id, int reserver_blocks, int value);
     void                    shrink(size_t batch_id, int reserver_blocks);
     void                    pushBack(const KVCacheResource& addr);
     void                    append(size_t batch_id, const KVCacheResource& addr);
@@ -38,18 +59,13 @@ public:
     std::string debugString() const;
 
 public:
-    // bool is_allocated_blocks = false;
     bool enable_reuse_cache = true;
 
-    // [batch_size, max_block_per_seq]
+    // this two member will be deleted soon
     std::vector<std::vector<int32_t>> batch_block_id;
+    std::vector<std::vector<size_t>>  cache_keys;
 
-    // batch_id -> layer_id -> block_indices
-    std::vector<std::vector<std::shared_ptr<BlockIds>>> batch_cache_layer_layouts;
-    std::vector<std::vector<std::shared_ptr<BlockIds>>> group_id_to_block_ids;
-
-    // cache_keys and batch_block_id are not consistent at all times
-    std::vector<std::vector<size_t>> cache_keys;
+    std::vector<KVCacheResourceV1> batch_resource;
 };
 
 using BatchKVCacheResourcePtr = std::shared_ptr<BatchKVCacheResource>;

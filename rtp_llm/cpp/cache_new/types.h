@@ -13,14 +13,9 @@
 
 namespace rtp_llm {
 
-typedef size_t  CacheKeyType;
-typedef int32_t BlockIdxType;
-
-typedef std::vector<CacheKeyType> CacheKeysType;
-typedef std::vector<BlockIdxType> BlockIndicesType;
-typedef std::vector<float>        LossType;
-typedef std::vector<LossType>     LossesType;
-typedef std::vector<int>          LayerIdsType;
+typedef std::vector<float>    LossType;
+typedef std::vector<LossType> LossesType;
+typedef std::vector<int>      LayerIdsType;
 
 constexpr int32_t NULL_BLOCK_IDX = -1;
 
@@ -48,7 +43,6 @@ struct CacheLayerLayout {
     std::vector<torch::Tensor> layers_to_buffer_ptrs;
 };
 
-
 struct KVCacheInfo {
     size_t               available_kv_cache = 0;
     size_t               total_kv_cache     = 0;
@@ -63,7 +57,8 @@ struct BlockIdPair {
 };
 
 struct MatchResult {
-    size_t           reuse_length;
+    size_t           reuse_length = 0;
+    size_t           reuse_blocks = 0;
     BlockIndicesType block_indices;
 };
 

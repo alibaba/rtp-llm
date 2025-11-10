@@ -16,14 +16,16 @@ int BatchKVCacheResource::blockSize(int batch_id) const {
 
 void BatchKVCacheResource::resize(size_t batch_size) {
     batch_block_id.resize(batch_size);
+
+    batch_resource.resize(batch_size);
 }
 
-void BatchKVCacheResource::resize(size_t batch_id, int reserver_blocks, bool clear) {
+// TODO, fix name
+void BatchKVCacheResource::resize(size_t batch_id, int reserver_blocks, int value) {
     RTP_LLM_CHECK(batch_block_id.size() > batch_id);
-    batch_block_id[batch_id].resize(reserver_blocks);
-    if (clear) {
-        batch_block_id[batch_id].assign(batch_block_id[batch_id].size(), 0);
-    }
+    batch_block_id[batch_id].resize(reserver_blocks, value);
+
+    batch_resource[batch_id].resize(reserver_blocks, value);
 }
 
 void BatchKVCacheResource::shrink(size_t batch_id, int reserver_blocks) {

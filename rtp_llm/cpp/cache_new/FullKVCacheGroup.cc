@@ -3,23 +3,11 @@
 
 namespace rtp_llm {
 
-bool FullKVCacheGroup::init() {
-    auto layer_tensors = block_pool_->layerCacheBase();
-
-    // TODO(chanyin): layer_ids might not be set in sequence, move to basic class
-    for (int i = 0; i < layer_ids_.size(); ++i) {
-        gloabl_layer_to_kv_tensors[layer_ids_[i]]  = layer_tensors[i];
-        gloabl_layer_to_local_layer[layer_ids_[i]] = i;
-    }
-
-    return true;
-}
-
 int FullKVCacheGroup::needBlocksNum(int seq_len, int current_blocks) const {
     return std::max((seq_len + seq_size_per_block_ - 1) / seq_size_per_block_ - current_blocks, 0);
 }
 
-bool FullKVCacheGroup::malloc(CacheKeysType& cache_keys, BlockIndicesType& block_indices, int seq_len) {
+bool FullKVCacheGroup::malloc(const CacheKeysType& cache_keys, BlockIndicesType& block_indices, int seq_len) {
     int new_blocks = needBlocksNum(seq_len, block_indices.size());
 
     auto result = block_pool_->malloc(new_blocks);
@@ -33,19 +21,18 @@ bool FullKVCacheGroup::malloc(CacheKeysType& cache_keys, BlockIndicesType& block
     return true;
 }
 
-MatchResult FullKVCacheGroup::match(CacheKeysType& cache_keys) {
+MatchResult FullKVCacheGroup::match(const CacheKeysType& cache_keys) {
     MatchResult final_result;
-    final_result.reuse_length = 0;
 
     for (auto& cache_key : cache_keys) {
         auto result = block_cache_->match(cache_key);
         if (!isNullBlockIdx(result.matched_index)) {
-            final_result.reuse_length++;
+            final_result.reuse_blocks++;
             final_result.block_indices.push_back(result.matched_index);
         }
     }
 
-    final_result.reuse_length *= seqSizePerBlock();
+    final_result.reuse_length = final_result.reuse_blocks * seqSizePerBlock();
 
     return final_result;
 }
@@ -64,7 +51,9 @@ void FullKVCacheGroup::free(const BlockIndicesType& block_indices) {
     RTP_LLM_LOG_DEBUG("Freed %zu blocks", block_indices.size());
 }
 
-void FullKVCacheGroup::insertIntoCache(CacheKeysType& cache_keys, BlockIndicesType& block_indices, bool is_resident) {
+void FullKVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
+                                       const BlockIndicesType& block_indices,
+                                       bool                    is_resident) {
     if (!block_cache_) {
         RTP_LLM_LOG_DEBUG("Block cache is not initialized, skip insertion");
         return;
@@ -92,33 +81,5 @@ void FullKVCacheGroup::insertIntoCache(CacheKeysType& cache_keys, BlockIndicesTy
 }
 
 void FullKVCacheGroup::removeSkippedBlocks(BlockIndicesType& block_indices) {}
-
-size_t FullKVCacheGroup::freeBlockNums() const {
-    return block_pool_->freeBlockNums();
-}
-
-std::unordered_map<int, torch::Tensor> FullKVCacheGroup::layerCacheBase() const {
-    return gloabl_layer_to_kv_tensors;
-}
-
-BlockAddrInfo FullKVCacheGroup::convertIndexToAddr(int layer_id, int block_id) const {
-    auto it = gloabl_layer_to_local_layer.find(layer_id);
-    if (it == gloabl_layer_to_local_layer.end()) {
-        RTP_LLM_LOG_ERROR("Invalid layer_id: %d", layer_id);
-        return {nullptr, nullptr, nullptr, nullptr};
-    }
-    int local_layer_id = it->second;
-    return block_pool_->convertIndexToAddr(local_layer_id, block_id);
-}
-
-BlockBufferInfo FullKVCacheGroup::convertIndexToBuffer(int layer_id, int block_id) const {
-    auto it = gloabl_layer_to_local_layer.find(layer_id);
-    if (it == gloabl_layer_to_local_layer.end()) {
-        RTP_LLM_LOG_ERROR("Invalid layer_id: %d", layer_id);
-        return {nullptr, nullptr};
-    }
-    int local_layer_id = it->second;
-    return block_pool_->convertIndexToBuffer(local_layer_id, block_id);
-}
 
 }  // namespace rtp_llm
