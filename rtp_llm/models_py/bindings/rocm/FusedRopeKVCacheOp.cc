@@ -301,6 +301,7 @@ torch::Tensor FusedRopeKVCacheDecodeOp::forward(const torch::Tensor&            
                 store_q,
                 store_kv,
                 store_cache,
+                nullptr,
                 device_->getStream());
         }
     } else {
