@@ -1980,7 +1980,7 @@ class DeepEPTest(TestCase):
             num_ranks // 2
         )
         params.gpt_init_params.ffn_disaggregate_config.attention_tp_size = 1
-        params.gpt_init_params.ffn_disaggregate_config.ffn_dp_size = num_ranks // 2
+        params.gpt_init_params.ffn_disaggregate_config.ffn_ep_size = num_ranks // 2
         params.gpt_init_params.ffn_disaggregate_config.ffn_tp_size = 1
         # init distributed environment
         torch.cuda.set_device(params.local_rank)
@@ -1995,7 +1995,7 @@ class DeepEPTest(TestCase):
             * params.gpt_init_params.ffn_disaggregate_config.attention_tp_size
         )
         num_n = (
-            params.gpt_init_params.ffn_disaggregate_config.ffn_dp_size
+            params.gpt_init_params.ffn_disaggregate_config.ffn_ep_size
             * params.gpt_init_params.ffn_disaggregate_config.ffn_tp_size
         )
         scale = num_ranks / num_n

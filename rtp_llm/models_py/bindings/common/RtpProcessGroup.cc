@@ -79,6 +79,8 @@ void RtpProcessGroup::send(std::vector<torch::Tensor>& input, int dst_rank) {
 }
 
 void RtpProcessGroup::recv(std::vector<torch::Tensor>& input, int src_rank) {
+    // in AFD: FFN rank always recv from Attn rank, should release gil to avoid deadlock
+    pybind11::gil_scoped_release release;
     RTP_LLM_CHECK_WITH_INFO(input.size() == 1, "Send input size must be 1 , but got %d", input.size());
     BatchSendRecvParams params;
     params.p2p_params.push_back({SendRecvType::kRecv, torchTensor2Buffer(input[0]), src_rank});

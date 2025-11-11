@@ -14,8 +14,12 @@ public:
     virtual absl::Status process(const std::list<GenerateStreamPtr>& streams) = 0;
 
     static GptModelDescription genModelDescription(const rtp_llm::GptInitParameter& params) {
-        AttentionConfigs attention_config = params.getAttentionConfigs();
-        int              moe_tp_size      = params.tp_size_ * params.dp_size_ / params.ep_size_;
+        AttentionConfigs attention_config        = params.getAttentionConfigs();
+        int              moe_tp_size             = params.tp_size_ * params.dp_size_ / params.ep_size_;
+        bool             enable_ffn_disaggregate = params.ffn_disaggregate_config.enable_ffn_disaggregate;
+        if (enable_ffn_disaggregate) {
+            moe_tp_size = 1;
+        }
         // TP在init的时候处理，认为每个MOE Plugin只看到一个TP rank；EP在MOE Plugin中处理；
         auto                moe_configs = params.moe_style_ ? (std::optional<rtp_llm::MoeConfigs>)rtp_llm::MoeConfigs(
                                                    {(size_t)params.expert_num_,

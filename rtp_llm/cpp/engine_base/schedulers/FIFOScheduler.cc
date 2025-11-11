@@ -21,7 +21,10 @@ FIFOScheduler::FIFOScheduler(const rtp_llm::GptInitParameter&     params,
     enable_partial_fallback_(params.enable_partial_fallback_ && params.role_type_ == RoleType::PDFUSION),
     enable_whole_fallback_(params.role_type_ == RoleType::PDFUSION),
     enable_fast_gen_(params.enable_fast_gen_),
-    need_fill_fake_stream_(params.dp_size_ > 1 && params.tp_rank_ == 0),
+    need_fill_fake_stream_((params.dp_size_ > 1
+                            || (params.ffn_disaggregate_config.attention_dp_size > 1
+                                && params.ffn_disaggregate_config.enable_ffn_disaggregate))
+                           && params.tp_rank_ == 0 && !params.ffn_disaggregate_config.is_ffn_service()),
     fast_gen_max_context_len_(params.fast_gen_max_context_len_),
     metrics_reporter_(metrics_reporter) {
     reserve_block_num_ = params.scheduler_reserve_resource_ratio_ * cache_manager->availableBlockNums() / 100;
