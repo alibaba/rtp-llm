@@ -25,7 +25,7 @@ void BatchKVCacheResource::resize(size_t batch_id, int reserver_blocks, int valu
     RTP_LLM_CHECK(batch_block_id.size() > batch_id);
     batch_block_id[batch_id].resize(reserver_blocks, value);
 
-    batch_resource[batch_id].resize(reserver_blocks, value);
+    batch_resource[batch_id].resizeBlocks(reserver_blocks, value);
 }
 
 void BatchKVCacheResource::shrink(size_t batch_id, int reserver_blocks) {

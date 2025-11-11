@@ -54,11 +54,11 @@ TEST_F(FullKVCacheGroupTest, MatchTest) {
     block_pool->init();
     auto block_cache = block_pool->blockCache();
 
-    BlockCacheV1::CacheItem item    = {101, 1, false};
+    BlockCacheV1::CacheItem item    = {101, 0, 1, false};
     auto                    result1 = block_cache->put(item);
     EXPECT_TRUE(result1);
 
-    BlockCacheV1::CacheItem item2   = {102, 2, false};
+    BlockCacheV1::CacheItem item2   = {102, 0, 2, false};
     auto                    result2 = block_cache->put(item2);
     EXPECT_TRUE(result2);
 
@@ -84,11 +84,11 @@ TEST_F(FullKVCacheGroupTest, MatchTest) {
     ASSERT_EQ(match_result2.block_indices, expected_result);
 
     // all match
-    BlockCacheV1::CacheItem item3   = {103, 3, false};
+    BlockCacheV1::CacheItem item3   = {103, 0, 3, false};
     auto                    result3 = block_cache->put(item3);
     EXPECT_TRUE(result3);
 
-    BlockCacheV1::CacheItem item4   = {104, 4, false};
+    BlockCacheV1::CacheItem item4   = {104, 0, 4, false};
     auto                    result4 = block_cache->put(item4);
     EXPECT_TRUE(result4);
 

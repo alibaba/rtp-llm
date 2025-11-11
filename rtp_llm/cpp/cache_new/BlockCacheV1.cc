@@ -12,8 +12,9 @@ using namespace std;
 
 namespace rtp_llm {
 
-BlockCacheV1::MatchResult BlockCacheV1::match(CacheKeyType cache_key) {
-    const auto& [success, item] = lru_cache_.get(cache_key);
+BlockCacheV1::MatchResult BlockCacheV1::match(size_t cache_key, int group_id) {
+    CacheKeyGroupPair key{cache_key, group_id};
+    auto [success, item] = lru_cache_.get(key);
     if (success) {
         return {item.block_index};
     } else {
@@ -21,44 +22,40 @@ BlockCacheV1::MatchResult BlockCacheV1::match(CacheKeyType cache_key) {
     }
 }
 
-bool BlockCacheV1::contains(CacheKeyType cache_key) {
-    return lru_cache_.contains(cache_key);
+bool BlockCacheV1::contains(size_t cache_key, int group_id) {
+    CacheKeyGroupPair key{cache_key, group_id};
+    return lru_cache_.contains(key);
 }
 
-// TODO, 如果有重复的，怎么办。
 bool BlockCacheV1::put(CacheItem& item) {
     RTP_LLM_CHECK_WITH_INFO(!isNullBlockIdx(item.block_index), "put block id should not be null block");
 
-    if (lru_cache_.contains(item.cache_key)) {
-        // Increase old matched item's popularity
-        lru_cache_.get(item.cache_key);
-        return false;
+    CacheKeyGroupPair key{item.cache_key, item.group_id};
+
+    if (lru_cache_.contains(key)) {
+        // 提升热度
+        lru_cache_.get(key);
+        return false;  // 已存在
     }
 
-    lru_cache_.put(item.cache_key, item);
-
+    lru_cache_.put(key, item);
     return true;
 }
 
 std::vector<BlockIdxType> BlockCacheV1::pop(int nums) {
     RTP_LLM_CHECK_WITH_INFO(nums > 0, "pop nums should > 0, nums = " + std::to_string(nums));
-    vector<BlockIdxType>   pop_blocks;
-    std::vector<CacheItem> resident_list;
+    std::vector<BlockIdxType> pop_blocks;
 
     std::lock_guard<std::mutex> lock(mutex_);
 
-    auto cond = [&](const CacheKeyType& key, const CacheItem& item) { return !item.is_resident; };
+    auto cond = [&](const CacheKeyGroupPair& key, const CacheItem& item) { return !item.is_resident; };
 
-    while (!lru_cache_.empty()) {
-        auto [success, cache_item] = lru_cache_.popWithCond(cond);
-        if (!success) {
+    while (nums > 0 && !lru_cache_.empty()) {
+        auto [success, item] = lru_cache_.popWithCond(cond);
+        if (!success)
             break;
-        }
-        pop_blocks.push_back(cache_item.block_index);
+        pop_blocks.push_back(item.block_index);
         nums--;
-        if (nums == 0) {
-            break;
-        }
     }
 
     return pop_blocks;

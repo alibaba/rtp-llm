@@ -48,6 +48,7 @@ public:
     virtual void removeSkippedBlocks(BlockIndicesType& block_indices)                                         = 0;
     virtual int  needBlocksNum(int seq_len, int current_blocks) const                                         = 0;
     virtual void reference(BlockIndicesType& block_indices, const BlockIndicesType& new_block_indices)        = 0;
+    void         reference(const BlockIndicesType& new_block_indices);
 
     std::unordered_map<int, torch::Tensor> layerCacheBase() const;
     BlockAddrInfo                          convertIndexToAddr(int layer_id, int block_id) const;
@@ -57,11 +58,18 @@ public:
     bool   ensureFreeBlocks(int need_blocks);
     int    seqSizePerBlock() const;
 
+    // TODO, optimize this
+    void setGroupId(int group_id) {
+        group_id_ = group_id;
+    }
+
 protected:
     LayerIdsType                 layer_ids_;
     std::shared_ptr<KVCacheSpec> group_spec_;
     BlockPoolPtr                 block_pool_;
     BlockCacheV1Ptr              block_cache_;
+    // TODO，放在哪里比较合适。
+    int group_id_ = 0;
 
     int                                    seq_size_per_block_;
     std::unordered_map<int, torch::Tensor> gloabl_layer_to_kv_tensors;
