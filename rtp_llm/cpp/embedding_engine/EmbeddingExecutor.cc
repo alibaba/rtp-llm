@@ -10,7 +10,7 @@
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/engine_base/Executor.h"
-#include "rtp_llm/cpp/engine_base/ExecutorBase/HandlerArgs.h" 
+#include "rtp_llm/cpp/engine_base/executor_base/HandlerArgs.h"
 #include <ATen/TensorIndexing.h>
 #include <torch/extension.h>
 #include <pybind11/pybind11.h>
@@ -52,7 +52,7 @@ EmbeddingExecutor::EmbeddingExecutor(const EngineInitParams& params, rtp_llm::De
     }
 
     for (const auto& name : handler_args) {
-        if (!HandlerArgs::set_by_str(handler_args_, name)) {
+        if (!HandlerArgs::set_by_str(handler_args_, name.c_str())) {
             RTP_LLM_LOG_WARNING("unknown handler arg: \"%s\", ignored", name.c_str());
         }
     }

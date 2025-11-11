@@ -12,7 +12,7 @@
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/cpp/embedding_engine/ModelRequest.h"
 #include "rtp_llm/cpp/engine_base/Executor.h"
-#include "rtp_llm/cpp/engine_base/ExecutorBase/HandlerArgs.h" 
+#include "rtp_llm/cpp/engine_base/executor_base/HandlerArgs.h"
 
 namespace rtp_llm {
 
@@ -22,7 +22,7 @@ public:
 
     absl::Status process(const std::list<EmbeddingStreamPtr>& streams);
 
-    rtp_llm::DeviceBase*            device_;
+    rtp_llm::DeviceBase* device_;
 
 private:
     std::unique_ptr<GptModel>       model_;

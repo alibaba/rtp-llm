@@ -577,10 +577,10 @@ protected:
     int                                mtp_token_index_       = 0;
     SpeculativeExecutorStreamOutputPtr sp_output_buffer_      = nullptr;
 
-    bool return_all_hidden_states_ = false;
-
-    std::optional<rtp_llm::BufferPtr> context_position_ids_;
-    PositionIdsStyle                  mm_position_ids_style_;
+    bool                               return_all_hidden_states_ = false;
+    rtp_llm::BufferPtr                 final_embedding_          = nullptr;
+    std::optional<rtp_llm::BufferPtr>  context_position_ids_;
+    PositionIdsStyle                   mm_position_ids_style_;
 
     rtp_llm::DataType dtype_;
     size_t            hidden_size_;

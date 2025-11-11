@@ -15,21 +15,19 @@
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
+#include "rtp_llm/cpp/normal_engine/PostProcessor.h"
 
 using namespace std;
 
 namespace rtp_llm {
 namespace py = pybind11;
 
-void NormalBatchStreamProcessor::setPostprocessHandler(pybind11::object handler, HandlerArgs::Flag handler_args) {
-    if (!handler || handler.is_none()) {
-        postprocess_handler_ = pybind11::object();
-        has_postprocess_handler_ = false;
-    } else {
-        postprocess_handler_      = handler;
-        postprocess_handler_args_ = handler_args;
-        has_postprocess_handler_  = true;
-    }
+void NormalBatchStreamProcessor::setPostProcessor(std::shared_ptr<PostProcessor> post_processor) {
+    post_processor_ = std::move(post_processor);
+}
+
+bool NormalBatchStreamProcessor::needsPostprocessArg(HandlerArgs::Arg arg) const {
+    return post_processor_ && post_processor_->hasArg(arg);
 }
 
 absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(const StreamGroups& stream_groups) const {
@@ -575,47 +573,9 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_gro
             "stream [%ld], new_tokens = [%s]", stream->streamId(), new_tokens->debugStringWithData<int32_t>().c_str());
 
         StreamUpdateInfo::PostprocessCallback postprocess_callback;
-
-        if (has_postprocess_handler_) {
-            postprocess_callback = [hidden_states = batch_hidden_states,
-                                    handler = postprocess_handler_,
-                                    handler_args = postprocess_handler_args_,
-                                    gating_buffers = merge_outputs.model_output.moe_gating,
-                                    token_offset,
-                                    token_size,
-                                    cur_batch_size,
-                                    stream_capture = stream](const StreamUpdateInfo& info) {
-                py::gil_scoped_acquire gil;
-                py::dict kwargs;
-
-                if (HandlerArgs::has_arg(handler_args, HandlerArgs::Arg::LAST_HIDDEN_STATES)) {
-                    kwargs[py::str(HandlerArgs::get_name(HandlerArgs::Arg::LAST_HIDDEN_STATES))] =
-                        Buffer2torchTensor(hidden_states, false);
-                }
-
-                if (HandlerArgs::has_arg(handler_args, HandlerArgs::Arg::LAST_MOE_GATING)) {
-                    py::list gating_list;
-                    for (const auto& gating : gating_buffers) {
-                        if (gating) {
-                            auto gating_view = gating->slice(token_offset, token_size, false);
-                            gating_list.append(Buffer2torchTensor(gating_view, false));
-                        } else {
-                            gating_list.append(py::none());
-                        }
-                    }
-                    kwargs[py::str(HandlerArgs::get_name(HandlerArgs::Arg::LAST_MOE_GATING))] = gating_list;
-                }
-
-                if (HandlerArgs::has_arg(handler_args, HandlerArgs::Arg::TOKEN_LENGTHS) && stream_capture) {
-                    py::list lengths;
-                    for (int i = 0; i < cur_batch_size; ++i) {
-                        lengths.append(static_cast<int64_t>(stream_capture->currentExecuteTokens(i).size()));
-                    }
-                    kwargs[py::str(HandlerArgs::get_name(HandlerArgs::Arg::TOKEN_LENGTHS))] = lengths;
-                }
-
-                return handler.attr("extend_forward")(**kwargs).cast<torch::Tensor>();
-            };
+        if (post_processor_) {
+            postprocess_callback = post_processor_->buildCallback(
+                batch_hidden_states, merge_outputs.model_output.moe_gating, token_offset, token_size, cur_batch_size, stream);
         }
 
         StreamUpdateInfo update_info{has_beam_search ? batch_new_all_token_ids : new_tokens,

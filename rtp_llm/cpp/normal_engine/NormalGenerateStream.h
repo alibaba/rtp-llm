@@ -2,8 +2,6 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include <cstdint>
 #include <functional>
-#include <optional>
-#include <torch/torch.h>
 
 namespace rtp_llm {
 
@@ -40,6 +38,5 @@ private:
     int64_t                                   request_id_{0};
     bool                                      finished_{false};
     autil::SynchronizedQueue<GenerateOutputs> generate_outputs_queue_;
-    std::optional<torch::Tensor> final_embedding_;
 };
 }  // namespace rtp_llm

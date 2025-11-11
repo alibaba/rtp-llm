@@ -1,6 +1,5 @@
 #pragma once
 
-#include <string>
 #include <bitset>
 #include <cstdint>
 
@@ -27,9 +26,9 @@ constexpr size_t NUM_ARG_TYPES = static_cast<size_t>(Arg::NUM_ARG_TYPES);
 
 using Flag = std::bitset<NUM_ARG_TYPES>;
 
-bool set_by_str(Flag& flag, const std::string& name);
+bool        set_by_str(Flag& flag, const char* name);
 const char* get_name(Arg arg);
-bool has_arg(const Flag& flag, Arg arg);
+bool        has_arg(const Flag& flag, Arg arg);
 
 }  // namespace HandlerArgs
 }  // namespace rtp_llm

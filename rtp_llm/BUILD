@@ -56,7 +56,6 @@ requirement([
     "protobuf",
     "grpcio-tools",
     "setuptools",
-    "debugpy",
     "Pillow",
     "pillow-heif",
     "pillow-avif-plugin",
@@ -66,6 +65,7 @@ requirement([
     "fastapi",
     "psutil",
     "pyodps",
+    "triton",
     "thrift",
     "torch",
     "torchvision",
@@ -204,7 +204,6 @@ py_library(
         ":pillow-avif-plugin",
         ":torch",
         ":torchvision",
-        ":debugpy",
         ":pyOpenSSL",
         ":einops",
         ":utils",
@@ -217,6 +216,7 @@ py_library(
         ":av",
         "//rtp_llm/model_loader:loader",
         "//rtp_llm/models_py:models",
+        ":triton",
     ] + arch_dep + select({
         "@//:using_cuda12_9_x86": tensorrt + flashinfer,
         "@//:cuda_pre_12_9": tensorrt + flashinfer,
@@ -653,4 +653,16 @@ py_library(
         "//rtp_llm/test/utils:stream_util",
         ":aiohttp",
     ]
+)
+
+py_library(
+    name = "triton",
+    deps = select({
+        "@//:using_cuda12_9_x86": [requirement_gpu_cuda12_9("triton")],
+        "@//:cuda_pre_12_9": [requirement_gpu_cuda12("triton")],
+        "@//:using_rocm": [requirement_gpu_rocm("triton")],
+        "@//:using_arm": [requirement_arm("triton")],
+        "//conditions:default": [requirement_cpu("triton")],
+    }),
+    visibility = ["//visibility:public"],
 )

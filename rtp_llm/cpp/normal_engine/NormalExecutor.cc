@@ -10,7 +10,7 @@
 #include "rtp_llm/cpp/models/Sampler.h"
 #include "rtp_llm/cpp/config/GptInitParameter.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
-#include "rtp_llm/cpp/engine_base/ExecutorBase/HandlerArgs.h"
+#include "rtp_llm/cpp/engine_base/executor_base/HandlerArgs.h"
 #include <torch/torch.h>
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 
@@ -29,7 +29,6 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
     lora_manager_(lora_manager),
     warm_up_(warm_up),
     use_all_gather_(params.gpt_init_parameter.use_all_gather_),
-    handler_args_(),
     metrics_reporter_(params.metrics_reporter),
     tps_reporter_(MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(metrics_reporter_)) {
     auto& gpt_param    = params.gpt_init_parameter;
@@ -88,27 +87,14 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
 
     // when warmup, cache manager maybe nullptr
     const auto& cache_config = cache_manager ? cache_manager->cacheConfig() : CacheConfig();
-    batch_stream_processor_.reset(new NormalBatchStreamProcessor(params.gpt_init_parameter, cache_config, warm_up_));
+    batch_stream_processor_ =
+        std::make_unique<NormalBatchStreamProcessor>(params.gpt_init_parameter, cache_config, warm_up_);
     PrefixToCandidateTokens::instance()->reloadPrefixDictWithPrefix(
         params.gpt_init_parameter.ckpt_path_, params.gpt_init_parameter.sp_config.tree_decode_config);
     device_->profileStart();
 
-    if (handler && !handler.is_none()) {
-        py::gil_scoped_acquire gil;
-        handler_    = handler;
-        std::vector<std::string> handler_args;
-        { handler_args = py::cast<std::vector<std::string>>(handler_.attr("extend_forward_args")()); }
-
-        for (const auto& name : handler_args) {
-            if (!HandlerArgs::set_by_str(handler_args_, name)) {
-                RTP_LLM_LOG_WARNING("unknown handler arg: \"%s\", ignored", name.c_str());
-            }
-        }
-        batch_stream_processor_->setPostprocessHandler(handler_, handler_args_);
-    } else {
-        py::gil_scoped_acquire gil;
-        batch_stream_processor_->setPostprocessHandler(py::object(), HandlerArgs::Flag{});
-    }
+    post_processor_ = std::make_shared<PostProcessor>();
+    setPostprocessHandler(std::move(handler));
 }
 
 absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams) {
@@ -123,7 +109,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         auto    model_input_status = batch_stream_processor_->gatherModelInput(stream_groups);
         RETURN_IF_STATUS_OR_ERROR(model_input_status);
         model_input = std::move(model_input_status.value());
-        if (HandlerArgs::has_arg(handler_args_, HandlerArgs::Arg::LAST_MOE_GATING)) {
+        if (post_processor_ && post_processor_->hasArg(HandlerArgs::Arg::LAST_MOE_GATING)) {
             model_input.need_moe_gating = true;
         }
         executor_collector.gather_model_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;

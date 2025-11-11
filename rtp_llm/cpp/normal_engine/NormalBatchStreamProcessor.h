@@ -3,13 +3,15 @@
 #include "rtp_llm/cpp/devices/DeviceBase.h"
 #include "rtp_llm/cpp/config/GptInitParameter.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
+#include <memory>
 #include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
-#include "rtp_llm/cpp/engine_base/ExecutorBase/HandlerArgs.h"
+#include "rtp_llm/cpp/engine_base/executor_base/HandlerArgs.h"
 #include "absl/status/statusor.h"
 #include "absl/status/status.h"
 #include <pybind11/pybind11.h>
 
 namespace rtp_llm {
+class PostProcessor;
 
 class NormalBatchStreamProcessor {
 public:
@@ -36,7 +38,8 @@ public:
     virtual absl::StatusOr<SamplerInputs>  gatherSamplerInput(const StreamGroups&    stream_groups,
                                                               const GptModelInputs&  model_inputs,
                                                               const GptModelOutputs& model_output) const;
-    void setPostprocessHandler(pybind11::object handler, HandlerArgs::Flag handler_args);
+    void                                   setPostProcessor(std::shared_ptr<PostProcessor> post_processor);
+    bool                                   needsPostprocessArg(HandlerArgs::Arg arg) const;
 
 protected:
     SamplerInputs allocateSamplerInputs(const StreamGroups&       stream_groups,
@@ -69,10 +72,8 @@ protected:
     bool   warm_up_;
     bool   enable_detail_log_;
 
-    rtp_llm::DeviceBase* device_;
-    mutable bool                 has_postprocess_handler_ = false;
-    mutable pybind11::object     postprocess_handler_;
-    mutable HandlerArgs::Flag    postprocess_handler_args_{};
+    rtp_llm::DeviceBase*           device_;
+    std::shared_ptr<PostProcessor> post_processor_;
 };
 
 }  // namespace rtp_llm
