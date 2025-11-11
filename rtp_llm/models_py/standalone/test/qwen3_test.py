@@ -1,6 +1,7 @@
 import logging
-import sys
 from unittest import TestCase, main
+
+import torch
 
 from rtp_llm.models_py.standalone.rtp_simple_model import RtpSimplePyModel
 
@@ -13,50 +14,63 @@ logging.basicConfig(
 
 class Qwen3SimplePyModelTest(TestCase):
 
-    def test_qwen3_simple_py_model(self):
-        qwen3_simple_py_model = self._create_qwen3_simple_py_model()
-        logging.info(f"qwen3_simple_py_model created")
+    def setUp(self):
+        # test_msg1 consist of 20 tokens
+        self.test_msg1 = [{"role": "user", "content": "你好，请用较长篇幅介绍自己"}]
+        self.max_new_tokens1 = 45
+        self.expected_output_text1 = "你好！我是你的AI助手，我是一个基于深度学习的多模态语言模型，专为用户提供自然、流畅的对话体验。我能够理解多种语言，并且能够处理各种类型的查询，包括文字、"
 
-        msg1 = [{"role": "user", "content": "你好，请用较长篇幅介绍自己"}]
-        output_text1 = self._run_message(qwen3_simple_py_model, msg1, max_new_tokens=20)
-        logging.info(f"output_text1: {output_text1}")
-        assert (
-            output_text1
-            == "你好！我是你的虚拟助手，一个专注于帮助你解决问题和提供支持的AI助手。我"
+        self.test_msg2 = [{"role": "user", "content": "3.9和3.11哪个大"}]
+        self.max_new_tokens2 = 20
+        self.expected_output_text2 = "3.9 和 3.11 都是小数，比较它们的大小可以通过"
+
+        self.max_total_tokens = 64  # max_total_tokens is about kv_cache capacity
+        self.tokens_per_block = 2
+        self.model = RtpSimplePyModel(
+            model_path_or_name="Qwen/Qwen3-0.6B",
+            max_total_tokens=self.max_total_tokens,
+            tokens_per_block=self.tokens_per_block,
         )
+        logging.info(f"model created")
 
-        msg2 = [{"role": "user", "content": "3.9和3.11哪个大"}]
-        output_text2 = self._run_message(qwen3_simple_py_model, msg2, max_new_tokens=10)
+    def test_simple(self):
+        # test compute_dtype
+        self.assertEqual(self.model.compute_dtype, torch.bfloat16)
+
+        # test simple message
+        output_text1 = self._run_message(
+            self.test_msg1, max_new_tokens=self.max_new_tokens1
+        )
+        logging.info(f"output_text1: {output_text1}")
+        self.assertEqual(output_text1, self.expected_output_text1)
+
+        output_text2 = self._run_message(
+            self.test_msg2, max_new_tokens=self.max_new_tokens2
+        )
         logging.info(f"output_text2: {output_text2}")
-        assert output_text2 == "3.9 和 3.11 中"
+        self.assertEqual(output_text2, self.expected_output_text2)
+
+        # test max_mew_tokens exceed max_total_tokens
+        with self.assertRaises(AssertionError) as context:
+            self._run_message(self.test_msg1, max_new_tokens=self.max_new_tokens1 + 1)
+        self.assertEqual("sequence_length is too long", str(context.exception))
 
     def _run_message(
         self,
-        model: RtpSimplePyModel,
         message: list[dict[str, str]],
         max_new_tokens: int = 1000,
     ) -> str:
-        input_text = model.tokenizer.apply_chat_template(
+        input_text = self.model.tokenizer.apply_chat_template(
             message, tokenize=False, add_generation_prompt=True, enable_thinking=False
         )
-        output_text = self._run_raw_text(model, input_text, max_new_tokens)
+        output_text = self._run_raw_text(input_text, max_new_tokens)
         return output_text
 
-    def _run_raw_text(
-        self, model: RtpSimplePyModel, text: str, max_new_tokens: int
-    ) -> str:
-        input_ids = model.tokenizer.encode(text)
-        output_ids = model.generate(input_ids, max_new_tokens=max_new_tokens)
-        output_text = model.tokenizer.decode(output_ids)
+    def _run_raw_text(self, text: str, max_new_tokens: int) -> str:
+        input_ids = self.model.tokenizer.encode(text)
+        output_ids = self.model.generate(input_ids, max_new_tokens=max_new_tokens)
+        output_text = self.model.tokenizer.decode(output_ids)
         return output_text
-
-    def _create_qwen3_simple_py_model(self) -> RtpSimplePyModel:
-        qwen3_simple_py_model = RtpSimplePyModel(
-            model_type="qwen_3",
-            model_path_or_name="Qwen/Qwen3-0.6B",
-            act_type="FP16",
-        )
-        return qwen3_simple_py_model
 
 
 if __name__ == "__main__":

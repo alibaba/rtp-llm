@@ -197,7 +197,7 @@ class ModelFactory:
         new_model_config = new_model_config._replace(
             model_type=model_type, ckpt_path=model_path, tokenizer_path=model_path
         )
-        model = ModelFactory._create_model(model_config)
+        model = ModelFactory._create_model(new_model_config)
         return model
 
     @staticmethod
