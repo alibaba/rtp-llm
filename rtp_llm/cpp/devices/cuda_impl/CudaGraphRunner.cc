@@ -207,9 +207,9 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
                 .copy_(inputs.attention_inputs.sequence_lengths.slice(0, 0, current_batch_size_));
             RTP_LLM_LOG_INFO("tag 5.2 done");
             auto src_block_tables = inputs.attention_inputs.kv_cache_block_id_device;
-            auto dst_block_tables = py_attn_params.attr("block_tables").cast<torch::Tensor>();
-            auto sliced_src_block =
-                src_block_tables.slice(0, 0, dst_block_tables.size(0)).slice(1, 0, dst_block_tables.size(1));
+            auto sliced_src_block = src_block_tables.slice(0, 0, dst_block_tables.size(0));
+            auto dst_block_tables =
+                py_attn_params.attr("block_tables").cast<torch::Tensor>().slice(1, 0, src_block_tables.size(1));
             RTP_LLM_LOG_INFO(
                 "sliced src block tables size: [%d][%d]", sliced_src_block.size(0), sliced_src_block.size(1));
             dst_block_tables.copy_(sliced_src_block);
