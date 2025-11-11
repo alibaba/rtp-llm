@@ -435,12 +435,12 @@ class FfnDisAggregateConfig:
     attention_dp_size: int
     attention_tp_size: int
     enable_ffn_disaggregate: bool
-    ffn_dp_size: int
+    ffn_ep_size: int
     ffn_tp_size: int
     is_ffn_rank: bool
     def __getstate__(self) -> tuple:
         ...
-    def __init__(self) -> None:
+    def __init__(self, enable_ffn_disaggregate: bool = False, attention_tp_size: int = 1, attention_dp_size: int = 1, ffn_tp_size: int = 1, ffn_ep_size: int = 1, is_ffn_rank: bool = False) -> None:
         ...
     def __setstate__(self, arg0: tuple) -> None:
         ...

@@ -69,9 +69,9 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
              std::nullopt,
          params.model_id});
 
-    if (params.ffn_disaggregate_config.enable_ffn_disaggregate) {
+    if (params.gpt_init_parameter.ffn_disaggregate_config.is_ffn_service()) {
         RTP_LLM_LOG_INFO("using ffn as service");
-        enable_ffn_disaggregate_ = true;
+        is_ffn_service_ = true;
     }
     if (!params.py_model.is_none()) {
         RTP_LLM_LOG_INFO("init executor with python model");
@@ -112,7 +112,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     }
     {
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        model_input.skip_run  = streams.empty() && !enable_ffn_disaggregate_;
+        model_input.skip_run  = streams.empty() && !is_ffn_service_;
         tpSyncModelInputs(model_input, device_);
         if (model_input.skip_run) {
             return absl::OkStatus();

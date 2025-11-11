@@ -60,7 +60,7 @@ CudaDevice::CudaDevice(const DeviceInitParams& params): DeviceBase(params) {
         hack_moe_expert_ = true;
     }
 
-    if (params.tp_size > 1) {
+    if (params.tp_size > 1 && !params.ffn_as_service) {
         auto master_ip = params.master_ip;
         if (params.dp_size > 1) {
             master_ip = "127.0.0.1";
@@ -81,7 +81,7 @@ CudaDevice::CudaDevice(const DeviceInitParams& params): DeviceBase(params) {
         }
     }
 
-    if (params.ep_size > 1 || params.dp_size > 1) {
+    if (params.tp_size * params.dp_size > 1 && !params.ffn_as_service) {
         initNcclParam(params.dp_rank * params.tp_size + params.tp_rank,
                       params.dp_size * params.tp_size,
                       params.master_ip,

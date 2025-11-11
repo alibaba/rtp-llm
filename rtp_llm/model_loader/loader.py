@@ -316,7 +316,7 @@ class ModelLoader:
 
     def prepare_weights(self, device: str):
         if (
-            self._load_config.vit_separation != VitSeparation.VIT_SEPARATION_ROLE
+            self._load_config.vit_separation != 1
             and not self._is_attn_model
         ):
             for id in range(self._load_config.num_layers):

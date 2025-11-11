@@ -10,6 +10,7 @@ import torch
 from rtp_llm.config.py_config_modules import (
     MASTER_INFO_PORT_NUM,
     MIN_WORKER_INFO_PORT_NUM,
+    get_env_bool,
 )
 
 
@@ -57,6 +58,9 @@ class ParallelInfo(object):
             f"ParallelInfo:[ tp_size={self.tp_size} ep_size={self.ep_size} pp_size={self.pp_size} world_size={self.world_size} world_rank={self.world_rank} local_world_size={self.local_world_size} ffn_sp_size={self.ffn_sp_size} ffn_tp_size={self.ffn_tp_size}]"
         )
         assert (
+            tp_size % ffn_sp_size == 0
+        ), f"tp_size:{self.tp_size} % ffn_sp_size:{self.ffn_sp_size} != 0"
+        assert (
             ep_size <= world_size and world_size % ep_size == 0
         ), f"ep_size:{self.ep_size} <= world_size:{self.world_size} and world_size:{self.world_size} % ep_size:{self.ep_size} != 0"
         assert (
@@ -101,19 +105,35 @@ class ParallelInfo(object):
             local_world_size = int(params["LOCAL_WORLD_SIZE"])
         else:
             local_world_size = min(torch.cuda.device_count(), world_size)
-        local_world_size = max(local_world_size, 1)  # make sure local_world_size >= 1
 
-        info = ParallelInfo(
-            tp_size=int(params.get("TP_SIZE", "1")),
-            ep_size=int(params.get("EP_SIZE", params.get("WORLD_SIZE", "1"))),
-            pp_size=int(params.get("PP_SIZE", "1")),
-            dp_size=int(params.get("DP_SIZE", 1)),
-            ffn_sp_size=int(params.get("FFN_SP_SIZE", "1")),
-            world_size=world_size,
-            world_rank=int(params.get("WORLD_RANK", "0")),
-            local_world_size=local_world_size,
-            worker_info_port_num=worker_info_port_num,
-        )
+        local_world_size = max(local_world_size, 1)  # make sure local_world_size >= 1
+        enable_ffn_disaggregate = get_env_bool("ENABLE_FFN_DISAGGREGATE")
+
+        if enable_ffn_disaggregate:
+            info = AFDParallelInfo(
+                attention_tp_size=int(params.get("ATTENTION_TP_SIZE", "1")),
+                attention_dp_size=int(params.get("ATTENTION_DP_SIZE", "1")),
+                ffn_tp_size=int(params.get("FFN_TP_SIZE", "1")),
+                ffn_ep_size=int(params.get("FFN_EP_SIZE", "1")),
+                pp_size=int(params.get("PP_SIZE", "1")),
+                ffn_sp_size=int(params.get("FFN_SP_SIZE", "1")),
+                world_size=int(params.get("WORLD_SIZE", "2")),
+                world_rank=int(params.get("WORLD_RANK", "0")),
+                local_world_size=local_world_size,
+                worker_info_port_num=worker_info_port_num,
+            )
+        else:
+            info = ParallelInfo(
+                tp_size=int(params.get("TP_SIZE", "1")),
+                ep_size=int(params.get("EP_SIZE", params.get("WORLD_SIZE", "1"))),
+                pp_size=int(params.get("PP_SIZE", "1")),
+                dp_size=int(params.get("DP_SIZE", 1)),
+                ffn_sp_size=int(params.get("FFN_SP_SIZE", "1")),
+                world_size=world_size,
+                world_rank=int(params.get("WORLD_RANK", "0")),
+                local_world_size=local_world_size,
+                worker_info_port_num=worker_info_port_num,
+            )
         if ("WORLD_INDEX" in params) and ("WORLD_RANK" not in params):
             world_index = int(params["WORLD_INDEX"])
             world_rank = world_index * info.local_world_size
@@ -124,13 +144,9 @@ class ParallelInfo(object):
             raise Exception(
                 f"local_world_size:{info.local_world_size} > cuda device count:{torch.cuda.device_count()}"
             )
-        if (
-            info.tp_size * info.pp_size * info.dp_size != info.world_size
-            or info.world_rank >= info.world_size
-            or (info.tp_size % info.ffn_sp_size != 0)
-        ):
+        if info.world_rank >= info.world_size:
             raise Exception(
-                f"tp_size:{info.tp_size}, ep_size:{info.ep_size}, pp_size:{info.pp_size}, world_size:{info.world_size}, world_rank:{info.world_rank} ffn_sp_size: {info.ffn_sp_size} invalid world config"
+                f"world_size:{info.world_size}, world_rank:{info.world_rank} invalid world config"
             )
         # 假设 GPU 均匀分布，可以整除
         if info.world_size % info.local_world_size != 0:
@@ -200,6 +216,85 @@ class ParallelInfo(object):
 
     def __str__(self):
         return f"ParallelInfo:[ tp_size={self.tp_size} pp_size={self.pp_size} world_size={self.world_size} world_rank={self.world_rank} local_world_size={self.local_world_size} tp_rank={self.tp_rank} dp_rank={self.dp_rank} ep_size={self.ep_size} dp_size={self.dp_size} ep_rank={self.ep_rank} local_rank={self.local_rank} ffn_sp_size={self.ffn_sp_size} worker_info_port_num={self.worker_info_port_num}]"
+
+
+class AFDParallelInfo(ParallelInfo):
+    """
+    AFDParallelInfo is used for AFD, it is a subclass of ParallelInfo.
+    It is used to store the parallel information for AFD.
+    """
+
+    def __init__(
+        self,
+        world_size: int,
+        world_rank: int,
+        local_world_size: int,
+        attention_dp_size: int,
+        attention_tp_size: int,
+        ffn_ep_size: int,
+        ffn_tp_size: int,
+        ffn_sp_size: int,
+        pp_size: int,
+        worker_info_port_num: int,
+    ):
+        self.tp_size = attention_tp_size
+        self.dp_size = attention_dp_size
+        self.ep_size = ffn_ep_size
+        self.ffn_tp_size = ffn_tp_size  # now FFN TP size is always 1
+        self.ffn_sp_size = ffn_sp_size  # now AFD don't support sp
+        self.pp_size = pp_size
+        self.world_size = world_size
+        self.world_rank = world_rank
+        self.local_world_size = local_world_size
+        self.worker_info_port_num = int(worker_info_port_num)
+
+        logging.info(f"ParallelInfo worker_info_port_num: {self.worker_info_port_num}")
+
+        if self.worker_info_port_num < MIN_WORKER_INFO_PORT_NUM:
+            raise Exception(
+                f"worker info port num {self.worker_info_port_num} "
+                f"is smaller than min worker info port num {MIN_WORKER_INFO_PORT_NUM}"
+            )
+
+        logging.info(
+            f"AFDParallelInfo:[ tp_size={self.tp_size} dp_size={self.dp_size} ep_size={self.ep_size} ffn_tp_size={self.ffn_tp_size} ffn_sp_size={self.ffn_sp_size} pp_size={self.pp_size}  world_size={self.world_size} world_rank={self.world_rank} local_world_size={self.local_world_size}]"
+        )
+
+        assert (
+            self.world_size
+            == self.dp_size * self.tp_size + self.ep_size * self.ffn_tp_size
+        ), f"world_size:{self.world_size} != dp_size:{self.dp_size} * tp_size:{self.tp_size} + ep_size:{self.ep_size} * ffn_tp_size:{self.ffn_tp_size}"
+
+        if torch.cuda.is_available():
+            self.device = "cuda:" + str(self.world_rank % self.local_world_size)
+        else:
+            self.device = "cpu"
+
+    @property
+    def tp_rank(self) -> int:
+        num_attention_ranks = self.tp_size * self.dp_size
+        return (
+            self.world_rank % self.tp_size
+            if self.world_rank < num_attention_ranks
+            else 0
+        )
+
+    @property
+    def dp_rank(self) -> int:
+        num_attention_ranks = self.tp_size * self.dp_size
+        return (
+            self.world_rank // self.tp_size
+            if self.world_rank < num_attention_ranks
+            else 0
+        )
+
+    @property
+    def ep_rank(self) -> int:
+        rank_offset = self.world_rank - self.tp_size * self.dp_size
+        return max(0, rank_offset) % self.ep_size
+
+    def __str__(self):
+        return f"AFDParallelInfo:[ tp_size={self.tp_size} dp_size={self.dp_size} ep_size={self.ep_size} ffn_tp_size={self.ffn_tp_size} ffn_sp_size={self.ffn_sp_size} pp_size={self.pp_size}  world_size={self.world_size} world_rank={self.world_rank} local_world_size={self.local_world_size}]"
 
 
 class WorkerInfo(object):

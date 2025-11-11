@@ -1,5 +1,6 @@
 """CUDA MOE strategies"""
 
+from .af_disaggregate import CudaAfDisaggregateStrategy
 from .fp8_per_block import (
     CudaFp8PerBlockEpLowLatencyStrategy,
     CudaFp8PerBlockEpNormalStrategy,
@@ -24,4 +25,5 @@ __all__ = [
     "CudaFp8PerTensorNoDPStrategy",
     "CudaFp8PerTensorEpLowLatencyStrategy",
     "CudaFp8PerTensorEpNormalStrategy",
+    "CudaAfDisaggregateStrategy",
 ]

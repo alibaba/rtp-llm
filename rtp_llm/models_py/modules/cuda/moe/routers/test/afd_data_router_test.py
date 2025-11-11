@@ -6,7 +6,7 @@ from unittest import TestCase, main
 import torch
 import torch.distributed as dist
 
-from rtp_llm.models_py.modules.moe.afd_data_router import (
+from rtp_llm.models_py.modules.cuda.moe.routers.afd_data_router import (
     AfdDataRouterAttn,
     AfdDataRouterFfn,
 )
