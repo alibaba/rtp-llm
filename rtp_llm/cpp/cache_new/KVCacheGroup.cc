@@ -74,4 +74,8 @@ MatchResult KVCacheGroup::matchSingleKey(CacheKeyType cache_key) {
     return match(cache_keys);
 }
 
+void KVCacheGroup::reference(const BlockIndicesType& new_block_indices) {
+    block_pool_->reference(new_block_indices);
+}
+
 }  // namespace rtp_llm
