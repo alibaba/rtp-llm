@@ -8,6 +8,7 @@ namespace rtp_llm {
 
 PYBIND11_MODULE(bind, m) {
     m.doc() = "sampling c++ api for test";
+    m.def("get_seed_and_offset", &get_seed_and_offset, py::arg(), py::arg("generator") = std::nullopt, "get_seed_and_offset");
     m.def("top_p_renorm_probs", &top_p_renorm_probs, py::arg(), py::arg(), py::arg(), py::arg(), py::arg("stream") = 0, "top_p_renorm_probs");
     m.def("top_k_renorm_probs", &top_k_renorm_probs, py::arg(), py::arg(), py::arg(), py::arg(), py::arg("stream") = 0, "top_k_renorm_probs");
     m.def("top_p_sampling_from_probs", &top_p_sampling_from_probs, py::arg(), py::arg(), py::arg(), py::arg(), py::arg(), py::arg(), py::arg(), py::arg(), py::arg("stream") = 0, "top_p_sampling_from_probs");
