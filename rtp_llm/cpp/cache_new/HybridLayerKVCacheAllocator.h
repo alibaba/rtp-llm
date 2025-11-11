@@ -17,7 +17,6 @@ public:
                                 AllocationType       atype = AllocationType::DEVICE);
 
     bool             init() override;
-    MallocResult     malloc(const MallocInfo& malloc_info) override;
     FreeResult       free(const FreeInfo& free_info) override;
     InsertResult     insertIntoCache(const InsertInfo& insert_info) override;
     BlockAddrInfo    convertIndexToAddr(int layer_id, int block_id) const override;
@@ -37,7 +36,8 @@ public:
         return block_pool_;
     }
 
-private:
+    // TODO, friend class test
+public:
     MallocResult initMalloc(const MallocInfo& malloc_info);
     MallocResult incrMalloc(const MallocInfo& malloc_info);
     MallocResult initMallocForCommonLen(const MallocInfo& malloc_info);

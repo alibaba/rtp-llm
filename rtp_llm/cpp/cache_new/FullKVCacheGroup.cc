@@ -8,7 +8,10 @@ int FullKVCacheGroup::needBlocksNum(int seq_len, int current_blocks) const {
 }
 
 bool FullKVCacheGroup::malloc(const CacheKeysType& cache_keys, BlockIndicesType& block_indices, int seq_len) {
-    int  need_blocks_num = needBlocksNum(seq_len, block_indices.size());
+    int need_blocks_num = needBlocksNum(seq_len, block_indices.size());
+    if (need_blocks_num == 0) {
+        return true;
+    }
     auto free_blocks_num = freeBlockNums();
     if (free_blocks_num < need_blocks_num) {
         if (!ensureFreeBlocks(need_blocks_num - free_blocks_num)) {
@@ -33,7 +36,7 @@ MatchResult FullKVCacheGroup::match(const CacheKeysType& cache_keys) {
     MatchResult final_result;
 
     for (auto& cache_key : cache_keys) {
-        auto result = block_cache_->match(cache_key);
+        auto result = block_cache_->match(cache_key, group_id_);
         if (!isNullBlockIdx(result.matched_index)) {
             final_result.reuse_blocks++;
             final_result.block_indices.push_back(result.matched_index);
@@ -85,6 +88,7 @@ void FullKVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
     for (size_t i = 0; i < cache_keys.size(); ++i) {
         BlockCacheV1::CacheItem item;
         item.cache_key   = cache_keys[i];
+        item.group_id    = group_id_;
         item.block_index = block_indices[i];
         item.is_resident = is_resident;
         block_cache_->put(item);

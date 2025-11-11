@@ -7,6 +7,10 @@
 namespace rtp_llm {
 
 struct BlockIds {
+    size_t size() {
+        return block_indices.size();
+    }
+
     std::vector<int> block_indices;
 };
 
@@ -32,7 +36,13 @@ public:
     CacheKeysType cache_keys;
 
 public:
-    void resize(int reserver_blocks, int value) {
+    void initGroups(int group_nums) {
+        for (int i = 0; i < group_nums; i++) {
+            group_block_ids.push_back(std::make_shared<BlockIds>());
+        }
+    }
+
+    void resizeBlocks(int reserver_blocks, int value) {
         for (auto& group : group_block_ids) {
             group->block_indices.resize(reserver_blocks, value);
         }

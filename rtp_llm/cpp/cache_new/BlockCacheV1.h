@@ -12,10 +12,13 @@ namespace rtp_llm {
 
 const size_t kCacheMaxCapacity = 10000000;
 
+using CacheKeyGroupPair = std::pair<CacheKeyType, GroupIdType>;  // <cache_key, group_id>
+
 class BlockCacheV1 {
 public:
     struct CacheItem {
         CacheKeyType cache_key;
+        GroupIdType  group_id;
         BlockIdxType block_index;
         bool         is_resident = false;
     };
@@ -28,14 +31,18 @@ public:
         BlockIdxType matched_index;
     };
 
-    using CacheSnapshot = typename LRUCache<CacheKeyType, CacheItem>::CacheSnapshot;
+    using LRUCacheType  = LRUCache<CacheKeyGroupPair,
+                                   CacheItem,
+                                   PairFirstHash<CacheKeyType, GroupIdType>,
+                                   PairBothEqual<CacheKeyType, GroupIdType>>;
+    using CacheSnapshot = typename LRUCacheType::CacheSnapshot;
 
 public:
     explicit BlockCacheV1(): lru_cache_(kCacheMaxCapacity) {}
 
-    MatchResult match(CacheKeyType cache_key);
+    MatchResult match(size_t cache_key, int group_id = 0);
 
-    bool contains(CacheKeyType cache_key);
+    bool contains(size_t cache_key, int group_id = 0);
 
     bool put(CacheItem& cache_item);
 
@@ -51,8 +58,8 @@ public:
     CacheSnapshot cacheSnapshot(int64_t latest_version) const;
 
 private:
-    size_t                                    seq_size_per_block_;
-    mutable LRUCache<CacheKeyType, CacheItem> lru_cache_;
+    size_t               seq_size_per_block_;
+    mutable LRUCacheType lru_cache_;
 
     // 先不用锁看下，否则再看并发问题。
     mutable std::mutex mutex_;
