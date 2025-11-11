@@ -5,9 +5,15 @@ option cc_generic_services = true;
 
 package cache_store_proto;
 
+// TODO: make all size unit same
+message CacheBlockInfo {
+    optional int64 key = 1;
+    repeated int32 buffer_size = 2;
+}
+
 message LayerCacheBlockInfo {
     optional uint32 layer_id = 1;
-    repeated int64 cache_keys = 2;
+    repeated CacheBlockInfo block_infos = 2;
 }
 
 message CacheLoadRequest {
@@ -61,16 +67,19 @@ message RdmaBlockBufferAddrInfo {
 };
 
 message BlockBufferInfo {
+    optional uint32 len = 1;
+    optional RdmaBlockBufferAddrInfo rdma_info = 2; // use only rdma mode
+    optional bytes content = 3; // use only tcp mode
+}
+
+message CacheKeyBlockBufferInfo {
     optional int64 key = 1;
-    optional uint32 len = 2;
-    optional RdmaBlockBufferAddrInfo rdma_info = 3; // use only rdma mode
-    optional bytes content = 4[ctype = RAW_STRING]; // use only tcp mode
-    optional int64 addr = 5; // 使用TCP做Read, 需要指定addr
+    repeated BlockBufferInfo blocks = 2;
 }
 
 message LayerBlockBufferInfo {
     optional int64 layer_id = 1;
-    repeated BlockBufferInfo blocks = 2;
+    repeated CacheKeyBlockBufferInfo blocks = 2;
 }
 
 message LayerBlockTransferRequest {

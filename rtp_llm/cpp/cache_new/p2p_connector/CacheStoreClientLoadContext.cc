@@ -1,29 +1,36 @@
 #include "rtp_llm/cpp/cache_new/p2p_connector/CacheStoreClientLoadContext.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
 namespace cache_store {
 
 CacheStoreClientLoadContext::CacheStoreClientLoadContext(
-    const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers, int64_t context_id):
-    layer_cache_buffers_(layer_cache_buffers), context_id_(context_id) {}
+    const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers, int64_t context_id, int64_t deadline_ms):
+    layer_cache_buffers_(layer_cache_buffers), context_id_(context_id), deadline_ms_(deadline_ms) {}
 
 CacheStoreClientLoadContext::~CacheStoreClientLoadContext() = default;
 
 bool CacheStoreClientLoadContext::success() const {
-    // TODO: implement
-    return true;
+    std::lock_guard<std::mutex> lock(done_layer_ids_mutex_);
+    return done_layer_ids_.size() == layer_cache_buffers_.size();
 }
 
-void CacheStoreClientLoadContext::setFailed(ErrorCode ec, const std::string& error_info) {
-    // TODO: implement
-}
-
-void CacheStoreClientLoadContext::cancel() {
-    // TODO: implement
+void CacheStoreClientLoadContext::setFailed() {
+    is_failed_ = true;
 }
 
 void CacheStoreClientLoadContext::waitDone() {
-    // TODO: implement
+    while (!is_failed_) {
+        // sleep 1ms
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        if (done_layer_ids_.size() == layer_cache_buffers_.size()) {
+            return;
+        }
+        if (currentTimeMs() >= deadline_ms_) {
+            is_failed_ = true;
+            return;
+        }
+    }
 }
 
 int64_t CacheStoreClientLoadContext::contextId() const {
@@ -31,6 +38,7 @@ int64_t CacheStoreClientLoadContext::contextId() const {
 }
 
 void CacheStoreClientLoadContext::notifyLayerLoadDone(int layer_id) {
+    std::lock_guard<std::mutex> lock(done_layer_ids_mutex_);
     done_layer_ids_.insert(layer_id);
 }
 

@@ -17,7 +17,7 @@ public:
     bool registerService(RPCService* rpc_service);
     bool start();
 
-    const std::string& getIP() const {
+    std::string getIP() const {
         return autil::NetUtil::getBindIp();
     }
     uint32_t getPort() const {

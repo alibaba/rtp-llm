@@ -18,13 +18,13 @@ CacheStoreClientClosure::CacheStoreClientClosure(
 
 void CacheStoreClientClosure::Run() {
     if (controller_->Failed()) {
-        load_context_->setFailed(ErrorCode::CACHE_STORE_LOAD_SEND_REQUEST_FAILED, controller_->ErrorText());
+        load_context_->setFailed();
         RTP_LLM_LOG_ERROR("cache load request failed, controller err is %s", controller_->ErrorText().c_str());
         return;
     }
 
     if (!cache_load_response_->success()) {
-        load_context_->setFailed(ErrorCode::CACHE_STORE_LOAD_RESPONSE_FAILED, cache_load_response_->info());
+        load_context_->setFailed();
         RTP_LLM_LOG_ERROR("cache load response failed, response err is %s", cache_load_response_->info().c_str());
         return;
     }
@@ -33,9 +33,10 @@ void CacheStoreClientClosure::Run() {
 }
 
 CacheStoreClient::CacheStoreClient(const std::shared_ptr<TcpClient>& tcp_client,
-                                   const std::shared_ptr<TcpServer>& tcp_server):
-    tcp_client_(tcp_client), tcp_server_(tcp_server), load_context_store_(new LoadContextStore()) {
-    cache_store_client_service_ = std::make_unique<CacheStoreClientService>(load_context_store_);
+                                   const std::shared_ptr<TcpServer>& tcp_server,
+                                   rtp_llm::DeviceBase*              device):
+    tcp_client_(tcp_client), tcp_server_(tcp_server), device_(device), load_context_store_(new LoadContextStore()) {
+    cache_store_client_service_ = std::make_unique<CacheStoreClientService>(load_context_store_, device_);
 }
 
 CacheStoreClient::~CacheStoreClient() {}
@@ -103,7 +104,7 @@ CacheStoreClient::asyncLoad(const std::vector<std::shared_ptr<LayerCacheBuffer>>
         return nullptr;
     }
 
-    auto load_context = std::make_shared<CacheStoreClientLoadContext>(layer_cache_buffers, context_id);
+    auto load_context = std::make_shared<CacheStoreClientLoadContext>(layer_cache_buffers, context_id, deadline_ms);
     load_context_store_->addLoadContext(load_context);
 
     std::shared_ptr<cache_store_proto::CacheLoadResponse> cache_load_response(
@@ -137,7 +138,14 @@ bool CacheStoreClient::generateCacheLoadRequest(
         auto layer_cache_load_info = cache_load_request->add_layer_cache_load_infos();
         layer_cache_load_info->set_layer_id(layer_cache_buffer->layerId());
         for (auto& [key, block] : layer_cache_buffer->blockCacheBuffers()) {
-            layer_cache_load_info->add_cache_keys(key);
+            auto block_info = layer_cache_load_info->add_block_infos();
+            block_info->set_key(key);
+            if (block->buffer1 != nullptr) {
+                block_info->add_buffer_size(block->buffer1->size());
+            }
+            if (block->buffer2 != nullptr) {
+                block_info->add_buffer_size(block->buffer2->size());
+            }
         }
     }
     return true;

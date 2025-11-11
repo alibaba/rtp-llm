@@ -16,15 +16,15 @@ namespace cache_store {
 class CacheStoreClientLoadContext {
 public:
     CacheStoreClientLoadContext(const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers,
-                                int64_t                                               context_id);
+                                int64_t                                               context_id,
+                                int64_t                                               deadline_ms);
     ~CacheStoreClientLoadContext();
 
 public:
     bool success() const;
-    void cancel();
     void waitDone();
 
-    void setFailed(ErrorCode ec, const std::string& error_info);
+    void setFailed();
 
     bool                              isDone() const;
     std::shared_ptr<LayerCacheBuffer> getLayerCacheBuffer(int layer_id) const;
@@ -36,7 +36,11 @@ public:
 private:
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers_;
     int64_t                                        context_id_;
-    std::set<int>                                  done_layer_ids_;
+    int64_t                                        deadline_ms_;
+
+    bool               is_failed_ = false;
+    mutable std::mutex done_layer_ids_mutex_;
+    std::set<int>      done_layer_ids_;
 };
 
 class LoadContextStore {

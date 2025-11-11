@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/cache_new/p2p_connector/CommonDefs.h"
 #include "rtp_llm/cpp/cache_new/p2p_connector/LayerCacheBuffer.h"
 #include "rtp_llm/cpp/cache_new/p2p_connector/test/MockKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache_new/p2p_connector/test/DeviceUtil.h"
 #include "rtp_llm/cpp/core/Event.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
@@ -32,6 +33,7 @@ protected:
     std::shared_ptr<TcpServer>        tcp_server_;
     std::shared_ptr<CacheStoreClient> cache_store_client_;
     std::shared_ptr<CacheStoreServer> cache_store_server_;
+    std::shared_ptr<DeviceUtil>       device_util_;
     std::string                       server_ip_   = "127.0.0.1";
     uint32_t                          server_port_ = 12345;
 };
@@ -39,17 +41,18 @@ protected:
 void CacheStoreTest::SetUp() {
     server_port_ = autil::NetUtil::randomPort();
 
+    device_util_        = std::make_shared<DeviceUtil>();
     kv_cache_allocator_ = std::make_shared<MockKVCacheAllocator>();
     tcp_client_         = std::make_shared<TcpClient>();
     tcp_server_         = std::make_shared<TcpServer>();
     ASSERT_TRUE(tcp_client_->init(1));
     ASSERT_TRUE(tcp_server_->init(1, 1, server_port_, false));
-    cache_store_client_ = std::make_shared<CacheStoreClient>(tcp_client_, tcp_server_);
+    cache_store_client_ = std::make_shared<CacheStoreClient>(tcp_client_, tcp_server_, device_util_->device_);
     ASSERT_TRUE(cache_store_client_->init());
 
     std::vector<CacheStoreServerWorker> worker_addrs = {CacheStoreServerWorker(server_ip_, server_port_, 0)};
-    cache_store_server_ =
-        std::make_shared<CacheStoreServer>(tcp_client_, tcp_server_, 1, kv_cache_allocator_, worker_addrs);
+    cache_store_server_                              = std::make_shared<CacheStoreServer>(
+        tcp_client_, tcp_server_, 1, kv_cache_allocator_, worker_addrs, device_util_->device_);
     ASSERT_TRUE(cache_store_server_->init());
     ASSERT_TRUE(tcp_server_->start());
 }
@@ -59,6 +62,7 @@ CacheStoreTest::~CacheStoreTest() {
     cache_store_client_.reset();
     tcp_server_.reset();
     tcp_client_.reset();
+    device_util_.reset();
 }
 
 class CacheStoreGetPeerWorkerInfoTest: public CacheStoreTest {
@@ -167,7 +171,7 @@ TEST_F(CacheStoreAsyncStoreTest, AsyncStoreWithNullEvent) {
     auto layer_store              = layer_cache_buffer_store->getSingleLayerCacheBufferStore(layer_id_);
     ASSERT_NE(layer_store, nullptr);
 
-    int64_t deadline_us = currentTimeUs() + 5000 * 1000;
+    int64_t deadline_us = currentTimeMs() + 5000;
     layer_store->setLayerCacheBufferWatchFunc(watcher, deadline_us);
 
     cache_store_server_->asyncStore(buffer, null_event, 1000);
@@ -187,7 +191,7 @@ TEST_F(CacheStoreAsyncStoreTest, AsyncStoreWithNotReadyEvent) {
     auto layer_cache_buffer_store = cache_store_server_->getLayerCacheBufferStore();
     auto layer_store              = layer_cache_buffer_store->getSingleLayerCacheBufferStore(layer_id_);
     ASSERT_NE(layer_store, nullptr);
-    int64_t deadline_us = currentTimeUs() + 5000 * 1000;
+    int64_t deadline_us = currentTimeMs() + 5000;
     layer_store->setLayerCacheBufferWatchFunc(watcher, deadline_us);
 
     cache_store_server_->asyncStore(buffer, event, 1000);

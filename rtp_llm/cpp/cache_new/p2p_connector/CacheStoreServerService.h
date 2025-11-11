@@ -13,22 +13,24 @@ class CacheStoreServerServiceLayerWatcher:
     public SingleLayerCacheBufferStore::Watcher,
     public std::enable_shared_from_this<CacheStoreServerServiceLayerWatcher> {
 public:
-    CacheStoreServerServiceLayerWatcher(const std::shared_ptr<TcpClient>&        tcp_client,
-                                        const std::shared_ptr<KVCacheAllocator>& kv_cache_allocator,
-                                        int                                      layer_id,
-                                        int                                      partition_count,
-                                        int                                      partition_id,
-                                        std::string                              ip,
-                                        uint32_t                                 port,
-                                        uint32_t                                 rdma_port,
-                                        int                                      context_id,
-                                        const std::vector<int64_t>&              cache_keys);
+    CacheStoreServerServiceLayerWatcher(const std::shared_ptr<TcpClient>&          tcp_client,
+                                        const std::shared_ptr<KVCacheAllocator>&   kv_cache_allocator,
+                                        rtp_llm::DeviceBase*                       device,
+                                        int                                        layer_id,
+                                        int                                        partition_count,
+                                        int                                        partition_id,
+                                        std::string                                ip,
+                                        uint32_t                                   port,
+                                        uint32_t                                   rdma_port,
+                                        int                                        context_id,
+                                        const std::map<int64_t, std::vector<int>>& cache_key_blocks);
     ~CacheStoreServerServiceLayerWatcher();
 
 public:
     bool notify(const std::shared_ptr<LayerCacheBuffer>& layer_cache_buffer) override;
 
-private:
+protected:
+    void setBlockBufferInfo(cache_store_proto::BlockBufferInfo* block_buffer_info, int64_t key, BufferPtr buffer);
     std::shared_ptr<cache_store_proto::LayerBlockTransferRequest>
          makeTransferRequest(const std::shared_ptr<LayerCacheBuffer>& layer_cache_buffer);
     void loadToRemote(const std::shared_ptr<LayerCacheBuffer>&                             layer_cache_buffer,
@@ -38,14 +40,15 @@ private:
     std::shared_ptr<TcpClient> tcp_client_;
     // 用kvcache allocator 来做 [block_id, partition_id] -> buffer 的映射
     std::shared_ptr<KVCacheAllocator> kv_cache_allocator_;
+    rtp_llm::DeviceBase*              device_;
 
-    int                  partition_count_;
-    int                  partition_id_;
-    std::string          ip_;
-    uint32_t             port_;
-    uint32_t             rdma_port_;
-    int                  context_id_;
-    std::vector<int64_t> cache_keys_;
+    int                                 partition_count_;
+    int                                 partition_id_;
+    std::string                         ip_;
+    uint32_t                            port_;
+    uint32_t                            rdma_port_;
+    int                                 context_id_;
+    std::map<int64_t, std::vector<int>> cache_key_blocks_;
 };
 
 class LayerKVCacheTransferClosure: public ::google::protobuf::Closure {
@@ -74,7 +77,8 @@ public:
     CacheStoreServerService(const std::shared_ptr<TcpClient>&             tcp_client,
                             const std::shared_ptr<KVCacheAllocator>&      kv_cache_allocator,
                             const std::shared_ptr<LayerCacheBufferStore>& layer_cache_buffer_store,
-                            const std::vector<CacheStoreServerWorker>&    worker_addrs);
+                            const std::vector<CacheStoreServerWorker>&    worker_addrs,
+                            rtp_llm::DeviceBase*                          device);
     ~CacheStoreServerService();
 
 public:
@@ -93,6 +97,7 @@ private:
     std::shared_ptr<KVCacheAllocator>      kv_cache_allocator_;
     std::shared_ptr<LayerCacheBufferStore> layer_cache_buffer_store_;
     std::vector<CacheStoreServerWorker>    worker_addrs_;
+    rtp_llm::DeviceBase*                   device_;
 };
 
 }  // namespace cache_store

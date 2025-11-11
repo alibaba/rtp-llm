@@ -36,7 +36,9 @@ private:
 
 class CacheStoreClient {
 public:
-    CacheStoreClient(const std::shared_ptr<TcpClient>& tcp_client, const std::shared_ptr<TcpServer>& tcp_server);
+    CacheStoreClient(const std::shared_ptr<TcpClient>& tcp_client,
+                     const std::shared_ptr<TcpServer>& tcp_server,
+                     rtp_llm::DeviceBase*              device);
     ~CacheStoreClient();
 
 public:
@@ -64,6 +66,7 @@ private:
 private:
     std::shared_ptr<TcpClient> tcp_client_;
     std::shared_ptr<TcpServer> tcp_server_;
+    rtp_llm::DeviceBase*       device_;
 
     std::shared_ptr<cache_store::LoadContextStore> load_context_store_;
 

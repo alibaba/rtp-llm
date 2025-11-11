@@ -7,12 +7,14 @@ CacheStoreServer::CacheStoreServer(const std::shared_ptr<TcpClient>&          tc
                                    const std::shared_ptr<TcpServer>&          tcp_server,
                                    int                                        layer_num,
                                    const std::shared_ptr<KVCacheAllocator>&   kv_cache_allocator,
-                                   const std::vector<CacheStoreServerWorker>& worker_addrs):
+                                   const std::vector<CacheStoreServerWorker>& worker_addrs,
+                                   rtp_llm::DeviceBase*                       device):
     tcp_client_(tcp_client),
     tcp_server_(tcp_server),
     layer_num_(layer_num),
     kv_cache_allocator_(kv_cache_allocator),
-    worker_addrs_(worker_addrs) {}
+    worker_addrs_(worker_addrs),
+    device_(device) {}
 
 CacheStoreServer::~CacheStoreServer() {
     store_wait_thread_stop_ = true;
@@ -22,7 +24,7 @@ CacheStoreServer::~CacheStoreServer() {
 bool CacheStoreServer::init() {
     layer_cache_buffer_store_   = std::make_shared<LayerCacheBufferStore>(layer_num_);
     cache_store_server_service_ = std::make_unique<CacheStoreServerService>(
-        tcp_client_, kv_cache_allocator_, layer_cache_buffer_store_, worker_addrs_);
+        tcp_client_, kv_cache_allocator_, layer_cache_buffer_store_, worker_addrs_, device_);
 
     if (!tcp_server_->registerService(cache_store_server_service_.get())) {
         RTP_LLM_LOG_ERROR("cache store server init failed : register service failed");

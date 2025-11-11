@@ -16,7 +16,8 @@ public:
                      const std::shared_ptr<TcpServer>&          tcp_server,
                      int                                        layer_num,
                      const std::shared_ptr<KVCacheAllocator>&   kv_cache_allocator,
-                     const std::vector<CacheStoreServerWorker>& worker_addrs);
+                     const std::vector<CacheStoreServerWorker>& worker_addrs,
+                     rtp_llm::DeviceBase*                       device);
     ~CacheStoreServer();
 
 public:
@@ -35,6 +36,7 @@ private:
     int                                 layer_num_;
     std::shared_ptr<KVCacheAllocator>   kv_cache_allocator_;
     std::vector<CacheStoreServerWorker> worker_addrs_;
+    rtp_llm::DeviceBase*                device_;
 
     autil::ThreadPoolBasePtr               thread_pool_;  // task executor
     std::shared_ptr<LayerCacheBufferStore> layer_cache_buffer_store_;

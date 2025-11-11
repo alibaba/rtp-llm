@@ -18,6 +18,19 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+cc_library(
+    name = "device_util",
+    srcs = [
+        "DeviceUtil.cpp",
+    ],
+    hdrs = [
+        "DeviceUtil.h",
+    ],
+    deps = [
+        "//rtp_llm/cpp/devices:devices_base",
+    ],
+)
+
 cc_test(
     name = "layer_cache_buffer_test",
     srcs = [
@@ -46,6 +59,27 @@ cc_test(
     copts = test_copts,
     deps = [
         ":mock_kv_cache_allocator",
+        ":device_util",
+        "//rtp_llm/cpp/cache_new/p2p_connector:client",
+        "//rtp_llm/cpp/cache_new/p2p_connector:server",
+        "//rtp_llm/cpp/cache_new/p2p_connector:basic_types",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    env = {},
+)
+
+cc_test(
+    name = "cache_store_transfer_test",
+    srcs = [
+        "CacheStoreTransferTest.cc",
+        "main.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = [
+        ":mock_kv_cache_allocator",
+        ":device_util",
         "//rtp_llm/cpp/cache_new/p2p_connector:client",
         "//rtp_llm/cpp/cache_new/p2p_connector:server",
         "//rtp_llm/cpp/cache_new/p2p_connector:basic_types",

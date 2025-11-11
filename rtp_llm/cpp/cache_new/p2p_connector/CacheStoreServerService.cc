@@ -4,47 +4,59 @@ namespace rtp_llm {
 namespace cache_store {
 
 CacheStoreServerServiceLayerWatcher::CacheStoreServerServiceLayerWatcher(
-    const std::shared_ptr<TcpClient>&        tcp_client,
-    const std::shared_ptr<KVCacheAllocator>& kv_cache_allocator,
-    int                                      layer_id,
-    int                                      partition_count,
-    int                                      partition_id,
-    std::string                              ip,
-    uint32_t                                 port,
-    uint32_t                                 rdma_port,
-    int                                      context_id,
-    const std::vector<int64_t>&              cache_keys):
+    const std::shared_ptr<TcpClient>&          tcp_client,
+    const std::shared_ptr<KVCacheAllocator>&   kv_cache_allocator,
+    rtp_llm::DeviceBase*                       device,
+    int                                        layer_id,
+    int                                        partition_count,
+    int                                        partition_id,
+    std::string                                ip,
+    uint32_t                                   port,
+    uint32_t                                   rdma_port,
+    int                                        context_id,
+    const std::map<int64_t, std::vector<int>>& cache_key_blocks):
     SingleLayerCacheBufferStore::Watcher(layer_id),
     tcp_client_(tcp_client),
     kv_cache_allocator_(kv_cache_allocator),
+    device_(device),
     partition_count_(partition_count),
     partition_id_(partition_id),
     ip_(ip),
     port_(port),
     rdma_port_(rdma_port),
     context_id_(context_id),
-    cache_keys_(cache_keys) {}
+    cache_key_blocks_(cache_key_blocks) {}
 
 CacheStoreServerServiceLayerWatcher::~CacheStoreServerServiceLayerWatcher() {}
 
 bool CacheStoreServerServiceLayerWatcher::notify(const std::shared_ptr<LayerCacheBuffer>& layer_cache_buffer) {
+    RTP_LLM_LOG_WARNING("notify, layer id: %d", layer_cache_buffer->layerId());
     if (layer_cache_buffer->layerId() != layer_id_) {
+        RTP_LLM_LOG_WARNING("layer id is not equal to watcher layer id, watcher layer id: %d, layer id: %d",
+                            layer_id_,
+                            layer_cache_buffer->layerId());
         return false;
     }
 
     // TODO: optimize: 现在只会要么一层全部load, 要么不load, 不支持部分load, 不然淘汰策略不好实现.
     auto& block_cache_buffers = layer_cache_buffer->blockCacheBuffers();
-    if (block_cache_buffers.size() != cache_keys_.size()) {
+    if (block_cache_buffers.size() != cache_key_blocks_.size()) {
+        RTP_LLM_LOG_WARNING(
+            "block cache buffers size is not equal to cache key blocks size, block cache buffers size: %d, cache key blocks size: %d",
+            block_cache_buffers.size(),
+            cache_key_blocks_.size());
         return false;
     }
 
     auto request = makeTransferRequest(layer_cache_buffer);
     if (request == nullptr) {
+        RTP_LLM_LOG_WARNING("make transfer request failed, layer id: %d", layer_cache_buffer->layerId());
         return false;
     }
 
     // load to remote
     loadToRemote(layer_cache_buffer, request);
+    RTP_LLM_LOG_WARNING("load to remote success, layer id: %d", layer_cache_buffer->layerId());
     return true;
 }
 
@@ -57,7 +69,7 @@ CacheStoreServerServiceLayerWatcher::makeTransferRequest(const std::shared_ptr<L
     auto layer_block_info = transfer_request->add_layer_blocks();
     layer_block_info->set_layer_id(layer_cache_buffer->layerId());
 
-    for (auto& key : cache_keys_) {
+    for (auto& [key, block_sizes] : cache_key_blocks_) {
         auto block = layer_cache_buffer->getBlockCacheBuffer(key);
         if (block == nullptr) {
             return nullptr;
@@ -65,14 +77,50 @@ CacheStoreServerServiceLayerWatcher::makeTransferRequest(const std::shared_ptr<L
 
         auto kv_buffer = kv_cache_allocator_->convertIndexToBuffer(
             layer_cache_buffer->layerId(), block->block_id, partition_count_, partition_id_);
-        if (kv_buffer.k_addr != nullptr) {
-            auto block_buffer_info = layer_block_info->add_blocks();
-            block_buffer_info->set_key(key);
-            block_buffer_info->set_len(kv_buffer.k_addr->size());
-            // TODO: set content for tcp or rdma info for rdma
+
+        if (kv_buffer.k_addr == nullptr) {
+            RTP_LLM_LOG_WARNING("convert index to buffer failed, layer id: %d, block id: %d",
+                                layer_cache_buffer->layerId(),
+                                block->block_id);
+            return nullptr;
+        }
+        if (kv_buffer.k_addr->size() != block_sizes[0]) {
+            RTP_LLM_LOG_WARNING("block sizes is not equal to buffer size, layer id: %d, block id: %d",
+                                layer_cache_buffer->layerId(),
+                                block->block_id);
+            return nullptr;
+        }
+        auto block_info = layer_block_info->add_blocks();
+        block_info->set_key(key);
+
+        auto block_buffer_info = block_info->add_blocks();
+        setBlockBufferInfo(block_buffer_info, key, kv_buffer.k_addr);
+
+        if (kv_buffer.v_addr != nullptr) {
+            if (block_sizes.size() != 2 || block_sizes[1] != kv_buffer.v_addr->size()) {
+                RTP_LLM_LOG_WARNING("block sizes is not equal to buffer size, layer id: %d, block id: %d",
+                                    layer_cache_buffer->layerId(),
+                                    block->block_id);
+                return nullptr;
+            }
+            auto block_buffer_info = block_info->add_blocks();
+            setBlockBufferInfo(block_buffer_info, key, kv_buffer.v_addr);
         }
     }
     return transfer_request;
+}
+
+void CacheStoreServerServiceLayerWatcher::setBlockBufferInfo(cache_store_proto::BlockBufferInfo* block_buffer_info,
+                                                             int64_t                             key,
+                                                             BufferPtr                           buffer) {
+    block_buffer_info->set_len(buffer->size());
+    auto tmp_buffer = static_cast<char*>(malloc(buffer->size()));
+    auto dst_buffer =
+        rtp_llm::Buffer(rtp_llm::MemoryType::MEMORY_CPU, rtp_llm::DataType::TYPE_UINT8, {buffer->size()}, tmp_buffer);
+
+    device_->noBlockCopy({dst_buffer, *buffer});
+    block_buffer_info->set_content(tmp_buffer, buffer->size());
+    free(tmp_buffer);
 }
 
 void CacheStoreServerServiceLayerWatcher::loadToRemote(
@@ -117,9 +165,6 @@ LayerKVCacheTransferClosure::~LayerKVCacheTransferClosure() {
 }
 
 void LayerKVCacheTransferClosure::Run() {
-    // TODO: if rpc failed
-    // TODO: if response error code
-
     if (controller_->Failed()) {
         RTP_LLM_LOG_WARNING("transfer request failed, controller err is %d", controller_->GetErrorCode());
         return;
@@ -137,11 +182,13 @@ void LayerKVCacheTransferClosure::Run() {
 CacheStoreServerService::CacheStoreServerService(const std::shared_ptr<TcpClient>&             tcp_client,
                                                  const std::shared_ptr<KVCacheAllocator>&      kv_cache_allocator,
                                                  const std::shared_ptr<LayerCacheBufferStore>& layer_cache_buffer_store,
-                                                 const std::vector<CacheStoreServerWorker>&    worker_addrs):
+                                                 const std::vector<CacheStoreServerWorker>&    worker_addrs,
+                                                 rtp_llm::DeviceBase*                          device):
     tcp_client_(tcp_client),
     kv_cache_allocator_(kv_cache_allocator),
     layer_cache_buffer_store_(layer_cache_buffer_store),
-    worker_addrs_(worker_addrs) {}
+    worker_addrs_(worker_addrs),
+    device_(device) {}
 
 CacheStoreServerService::~CacheStoreServerService() {}
 
@@ -158,13 +205,26 @@ void CacheStoreServerService::load(::google::protobuf::RpcController*           
     auto deadline_ms     = request->deadline_ms();
 
     for (auto& layer_cache_load_info : request->layer_cache_load_infos()) {
-        auto                 layer_id = layer_cache_load_info.layer_id();
-        std::vector<int64_t> cache_keys;
-        for (auto& key : layer_cache_load_info.cache_keys()) {
-            cache_keys.push_back(key);
+        auto                                layer_id = layer_cache_load_info.layer_id();
+        std::map<int64_t, std::vector<int>> cache_key_blocks;
+        for (auto& block_info : layer_cache_load_info.block_infos()) {
+            std::vector<int> block_sizes;
+            for (auto& buffer_size : block_info.buffer_size()) {
+                block_sizes.push_back(buffer_size);
+            }
+            if (block_sizes.size() == 0) {
+                RTP_LLM_LOG_WARNING("block sizes is empty, layer id: %d, cache key: %lld", layer_id, block_info.key());
+                continue;
+            }
+            cache_key_blocks[block_info.key()] = block_sizes;
+        }
+        if (cache_key_blocks.size() == 0) {
+            RTP_LLM_LOG_WARNING("cache key blocks is empty, layer id: %d", layer_id);
+            continue;
         }
         auto watcher = std::make_shared<CacheStoreServerServiceLayerWatcher>(tcp_client_,
                                                                              kv_cache_allocator_,
+                                                                             device_,
                                                                              layer_id,
                                                                              partition_count,
                                                                              partition_id,
@@ -172,7 +232,7 @@ void CacheStoreServerService::load(::google::protobuf::RpcController*           
                                                                              port,
                                                                              rdma_port,
                                                                              context_id,
-                                                                             cache_keys);
+                                                                             cache_key_blocks);
         auto store   = layer_cache_buffer_store_->getSingleLayerCacheBufferStore(layer_id);
         if (store == nullptr) {
             RTP_LLM_LOG_WARNING("get single layer cache buffer store failed, layer id: %d", layer_id);

@@ -87,28 +87,39 @@ void SingleLayerCacheBufferStore::delLayerCacheBufferWatchFunc(std::shared_ptr<W
 }
 
 void SingleLayerCacheBufferStore::checkTimeout() {
-    auto current_time_us = currentTimeUs();
+    size_t deleted_buffers_size = 0;
+    auto   current_time_ms      = currentTimeMs();
     {
         std::unique_lock<std::mutex> lock(layer_cache_buffers_mutex_);
         auto                         it = layer_cache_buffer_map_.begin();
         while (it != layer_cache_buffer_map_.end()) {
-            if (current_time_us >= it->second) {
+            if (current_time_ms >= it->second) {
                 it = layer_cache_buffer_map_.erase(it);
+                deleted_buffers_size++;
             } else {
                 ++it;
             }
         }
     }
+    size_t deleted_watchers_size = 0;
     {
         std::unique_lock<std::mutex> lock(layer_cache_buffer_watchers_mutex_);
         auto                         it = layer_cache_buffer_watcher_map_.begin();
         while (it != layer_cache_buffer_watcher_map_.end()) {
-            if (current_time_us >= it->second) {
+            if (current_time_ms >= it->second) {
                 it = layer_cache_buffer_watcher_map_.erase(it);
+                deleted_watchers_size++;
             } else {
                 ++it;
             }
         }
+    }
+    if (deleted_buffers_size > 0 || deleted_watchers_size > 0) {
+        RTP_LLM_LOG_WARNING("check timeout, layer id: %d, this %p, deleted buffers size: %d, deleted watchers size: %d",
+                            layer_id_,
+                            this,
+                            deleted_buffers_size,
+                            deleted_watchers_size);
     }
 }
 
