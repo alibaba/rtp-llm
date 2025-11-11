@@ -416,6 +416,21 @@ std::string MiscellaneousConfig::to_string() const {
     return oss.str();
 }
 
+// RpcAccessLogConfig
+void RpcAccessLogConfig::update_from_env_for_test() {
+    enable_rpc_access_log = bool_from_env_for_test("ENABLE_RPC_ACCESS_LOG", false);
+    access_log_interval   = autil::EnvUtil::getEnv("RPC_ACCESS_LOG_INTERVAL", 100);
+    log_plaintext         = bool_from_env_for_test("RPC_LOG_PLAINTEXT", true);
+}
+
+std::string RpcAccessLogConfig::to_string() const {
+    std::ostringstream oss;
+    oss << "enable_rpc_access_log: " << enable_rpc_access_log << "\n"
+        << "access_log_interval: " << access_log_interval << "\n"
+        << "log_plaintext: " << log_plaintext;
+    return oss.str();
+}
+
 // ArpcConfig
 std::string ArpcConfig::to_string() const {
     std::ostringstream oss;

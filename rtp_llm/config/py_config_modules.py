@@ -574,6 +574,29 @@ class SparseConfig:
         return f"sparse_config_file: {self.sparse_config_file}"
 
 
+class RpcAccessLogConfig:
+    def __init__(self):
+        self.enable_rpc_access_log: bool = False
+        self.access_log_interval: int = 100
+        self.log_plaintext: bool = True
+
+    def update_from_env(self):
+        self.enable_rpc_access_log = (
+            os.environ.get("ENABLE_RPC_ACCESS_LOG", "false").lower() == "true"
+        )
+        self.access_log_interval = int(os.environ.get("RPC_ACCESS_LOG_INTERVAL", "100"))
+        self.log_plaintext = (
+            os.environ.get("RPC_LOG_PLAINTEXT", "true").lower() == "true"
+        )
+
+    def to_string(self):
+        return (
+            f"enable_rpc_access_log: {self.enable_rpc_access_log}, "
+            f"access_log_interval: {self.access_log_interval}, "
+            f"log_plaintext: {self.log_plaintext}"
+        )
+
+
 class EngineConfig:
     def __init__(self):
         self.warm_up: int = 1
@@ -846,6 +869,7 @@ class PyEnvConfigs:
         self.concurrency_config = ConcurrencyConfig()
         self.jit_config = JITConfig()
         self.py_hw_kernel_config = PyHwKernelConfig()
+        self.rpc_access_log_config = RpcAccessLogConfig()
 
     def update_from_env(self):
         self.server_config.update_from_env()
@@ -877,6 +901,7 @@ class PyEnvConfigs:
         self.ffn_disaggregate_config.update_from_env()
         self.jit_config.update_from_env()
         self.py_hw_kernel_config.update_from_env()
+        self.rpc_access_log_config.update_from_env()
         logging.info(self.to_string())
 
     def to_string(self):
@@ -918,6 +943,9 @@ class PyEnvConfigs:
             "[concurrency_config]\n" + self.concurrency_config.to_string() + "\n\n"
             "[jit_config]\n" + self.jit_config.to_string() + "\n\n"
             "[py_hw_kernel_config]\n" + self.py_hw_kernel_config.to_string() + "\n\n"
+            "[rpc_access_log_config]\n"
+            + self.rpc_access_log_config.to_string()
+            + "\n\n"
         )
 
 

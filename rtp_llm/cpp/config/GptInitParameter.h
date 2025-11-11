@@ -293,6 +293,7 @@ public:
     MiscellaneousConfig          misc_config;
     ArpcConfig                   arpc_config;
     FfnDisAggregateConfig        ffn_disaggregate_config;
+    RpcAccessLogConfig           rpc_access_log_config;
 
     GptInitParameter();
 
@@ -321,6 +322,7 @@ public:
         batch_decode_scheduler_config.update_from_env_for_test();
         fifo_scheduler_config.update_from_env_for_test();
         misc_config.update_from_env_for_test();
+        rpc_access_log_config.update_from_env_for_test();
     }
 
     void             showDebugInfo() const;

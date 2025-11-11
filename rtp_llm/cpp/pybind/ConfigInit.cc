@@ -448,6 +448,20 @@ void register_misc_config(pybind11::module& m) {
         .def_readwrite("aux_string", &MiscellaneousConfig::aux_string);
 }
 
+// RpcAccessLogConfig
+void register_rpc_access_log_config(pybind11::module& m) {
+    pybind11::class_<RpcAccessLogConfig>(m, "RpcAccessLogConfig")
+        .def(pybind11::init<bool, int, bool>(),
+             pybind11::arg("enable_rpc_access_log") = false,
+             pybind11::arg("access_log_interval")   = 100,
+             pybind11::arg("log_plaintext")         = true)
+        .def("to_string", &RpcAccessLogConfig::to_string)
+        .def("update_from_env", &RpcAccessLogConfig::update_from_env_for_test)
+        .def_readwrite("enable_rpc_access_log", &RpcAccessLogConfig::enable_rpc_access_log)
+        .def_readwrite("access_log_interval", &RpcAccessLogConfig::access_log_interval)
+        .def_readwrite("log_plaintext", &RpcAccessLogConfig::log_plaintext);
+}
+
 void registerGptInitParameter(py::module m) {
     py::enum_<MlaOpsType>(m, "MlaOpsType")
         .value("AUTO", MlaOpsType::AUTO)
@@ -755,7 +769,8 @@ void registerGptInitParameter(py::module m) {
         .def_readwrite("fifo_scheduler_config", &GptInitParameter::fifo_scheduler_config)
         .def_readwrite("misc_config", &GptInitParameter::misc_config)
         .def_readwrite("arpc_config", &GptInitParameter::arpc_config)
-        .def_readwrite("ffn_disaggregate_config", &GptInitParameter::ffn_disaggregate_config) REGISTER_PROPERTYS;
+        .def_readwrite("ffn_disaggregate_config", &GptInitParameter::ffn_disaggregate_config)
+        .def_readwrite("rpc_access_log_config", &GptInitParameter::rpc_access_log_config) REGISTER_PROPERTYS;
 }
 
 PYBIND11_MODULE(libth_transformer_config, m) {
@@ -777,6 +792,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     register_fifo_scheduler_config(m);
     register_misc_config(m);
     register_arpc_config(m);
+    register_rpc_access_log_config(m);
     registerFMHAType(m);
     register_ffn_disaggregate_config(m);
     registerGptInitParameter(m);

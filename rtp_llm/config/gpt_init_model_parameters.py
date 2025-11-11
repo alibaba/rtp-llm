@@ -55,6 +55,7 @@ from rtp_llm.ops import (
     ProfilingDebugLoggingConfig,
     QuantAlgo,
     RoleType,
+    RpcAccessLogConfig,
     SamplerConfig,
     SchedulerConfig,
     ServiceDiscoveryConfig,
@@ -222,6 +223,7 @@ class GptInitModelParameters:
         "py_env_configs",
         "config_dtype",
         "th_nccl_port",
+        "rpc_access_log_config",
     }
 
     # copy from rtp_llm/ops/libth_transformer.pyi for python intelligence
@@ -786,6 +788,13 @@ class GptInitModelParameters:
             threadNum=get_env_int("ARPC_THREAD_NUM", 10),
             queueNum=get_env_int("ARPC_QUEUE_NUM", 50),
             ioThreadNum=get_env_int("ARPC_IO_THREAD_NUM", 2),
+        )
+
+        # RpcAccessLogConfig
+        self.gpt_init_params.rpc_access_log_config = RpcAccessLogConfig(
+            StaticConfig.rpc_access_log_config.enable_rpc_access_log,
+            StaticConfig.rpc_access_log_config.access_log_interval,
+            StaticConfig.rpc_access_log_config.log_plaintext,
         )
 
         # PD Seperation
