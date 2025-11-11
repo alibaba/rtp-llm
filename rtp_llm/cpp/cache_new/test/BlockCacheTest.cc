@@ -32,19 +32,15 @@ TEST_F(BlockCacheV1Test, ConstructorTest) {
     BlockCacheV1 cache1;
     EXPECT_TRUE(cache1.empty());
     EXPECT_EQ(cache1.size(), 0);
-
-    BlockCacheV1 cache2;
-    EXPECT_TRUE(cache2.empty());
-    EXPECT_EQ(cache2.size(), 0);
 }
 
 TEST_F(BlockCacheV1Test, MatchBasicTest) {
     // 测试put和match的基本功能
     // 空匹配
-    auto result0 = cache_->match({1});
+    auto result0 = cache_->match(1);
     EXPECT_TRUE(isNullBlockIdx(result0.matched_index));
 
-    CacheItem item    = {101, 1, false};
+    CacheItem item    = {101, 0, 1, false};
     auto      result1 = cache_->put(item);
     EXPECT_TRUE(result1);
 
@@ -64,19 +60,19 @@ TEST_F(BlockCacheV1Test, PopBasicTest) {
     std::vector<int64_t> cache_keys = {101, 102, 103, 104, 105};
     std::vector<int>     block_ids  = {1, 2, 3, 4, 5};
 
-    CacheItem item1   = {101, 1, false};
+    CacheItem item1   = {101, 0, 1, false};
     auto      result1 = cache_->put(item1);
     EXPECT_TRUE(result1);
-    CacheItem item2   = {102, 2, false};
+    CacheItem item2   = {102, 0, 2, false};
     auto      result2 = cache_->put(item2);
     EXPECT_TRUE(result2);
-    CacheItem item3   = {103, 3, false};
+    CacheItem item3   = {103, 0, 3, false};
     auto      result3 = cache_->put(item3);
     EXPECT_TRUE(result3);
-    CacheItem item4   = {104, 4, false};
+    CacheItem item4   = {104, 0, 4, false};
     auto      result4 = cache_->put(item4);
     EXPECT_TRUE(result4);
-    CacheItem item5   = {105, 5, false};
+    CacheItem item5   = {105, 0, 5, false};
     auto      result5 = cache_->put(item5);
     EXPECT_TRUE(result5);
 
@@ -103,7 +99,7 @@ TEST_F(BlockCacheV1Test, PopBasicTest) {
     EXPECT_EQ(cache_->size(), 0);
 
     // 设置resident
-    CacheItem item6   = {101, 1, true};
+    CacheItem item6   = {101, 0, 1, true};
     auto      result6 = cache_->put(item6);
     EXPECT_TRUE(result6);
     EXPECT_EQ(cache_->size(), 1);
