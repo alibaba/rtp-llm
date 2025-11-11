@@ -168,12 +168,17 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
         } else if (graph_instances_[current_real_graph_bs_].mem_hold_.py_attn_params) {
             RTP_LLM_LOG_INFO("filling py attn params");
             auto& py_attn_params = graph_instances_[current_real_graph_bs_].mem_hold_.py_attn_params;
-            try {
-                py_attn_params.attr("batch_size").cast<int>()  = current_batch_size_;
-                py_attn_params.attr("max_seq_len").cast<int>() = max_seq_len_;
-                RTP_LLM_LOG_INFO("tag 5.1");
-                auto& param_seq_lens = py_attn_params.attr("seq_lens").cast<torch::Tensor>();
-            }
+            // try {
+            auto params_bs          = py_attn_params.attr("batch_size").cast<int>();
+            auto params_max_seq_len = py_attn_params.attr("max_seq_len").cast<int>();
+            RTP_LLM_LOG_INFO("tag 5.1, %d %d", params_bs, params_max_seq_len);
+            auto param_seq_lens = py_attn_params.attr("seq_lens").cast<torch::Tensor>();
+            std::cout << "param_seq_lens sizes: " << param_seq_lens << std::endl;
+            // } catch (const py::error_already_set& e) {
+            //     RTP_LLM_LOG_ERROR("Python error during accessing py_attn_params: %s", e.what());
+            //     throw std::runtime_error(
+            //         std::string("pybind11 error during accessing py_attn_params: ") + e.what());
+            // }
         }
         RTP_LLM_LOG_INFO("tag 5");
     } else {
