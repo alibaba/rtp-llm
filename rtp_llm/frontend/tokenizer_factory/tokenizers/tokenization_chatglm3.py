@@ -187,7 +187,13 @@ class ChatGLMTokenizer(PreTrainedTokenizer):
 
     def get_vocab(self):
         """Returns vocab as a dict"""
-        vocab = {self._convert_id_to_token(i): i for i in range(self.vocab_size)}
+        # transformer from 4.46 -> 4.52 之后需要确保get_vocab返回完整的词汇表，可以参考Lamma的实现
+        # transformer 4.46 里面有注释说明：# Sanitize AddedTokens in special_tokens_map
+        # kept for forward compatibility, will be removed in transoformers 5. Typefields are not saved for FC, special should not be save either
+        vocab = {}
+        for i in range(self.tokenizer.sp_model.vocab_size()):
+            vocab[self.tokenizer.sp_model.IdToPiece(i)] = i
+        vocab.update(self.tokenizer.special_tokens)
         vocab.update(self.added_tokens_encoder)
         return vocab
 
@@ -202,6 +208,8 @@ class ChatGLMTokenizer(PreTrainedTokenizer):
 
     def _convert_id_to_token(self, index):
         """Converts an index (integer) in a token (str) using the vocab."""
+        if index in self.tokenizer.index_special_tokens:
+            return self.tokenizer.index_special_tokens[index]
         return self.tokenizer.convert_id_to_token(index)
 
     def convert_tokens_to_string(self, tokens: List[str]) -> str:
