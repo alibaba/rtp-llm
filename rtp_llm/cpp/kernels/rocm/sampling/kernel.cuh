@@ -313,11 +313,11 @@ template <uint32_t BLOCK_THREADS, BlockScanAlgorithm SCAN_ALGORITHM,
           typename DType, typename IdType>
 __global__ void TopKSamplingFromProbKernel(DType* probs, IdType* output, IdType* indices,
                                            IdType* top_k_arr, uint32_t top_k_val, uint32_t d,
-                                           uint64_t philox_seed, uint64_t philox_offset) {
+                                           uint64_t* philox_seed, uint64_t* philox_offset) {
   const uint32_t batch_size = gridDim.x;
   const uint32_t bx = blockIdx.x, tx = threadIdx.x;
   hiprandStatePhilox4_32_10_t state;
-  hiprand_init(philox_seed, bx, philox_offset, &state);
+  hiprand_init(philox_seed[bx], bx, philox_offset[bx], &state);
   const uint32_t k = top_k_arr == nullptr ? top_k_val : top_k_arr[bx];
   const uint32_t row_idx = indices == nullptr ? bx : indices[bx];
 
@@ -428,11 +428,11 @@ template <uint32_t BLOCK_THREADS, BlockScanAlgorithm SCAN_ALGORITHM,
           typename DType, typename IdType>
 __global__ void TopPSamplingFromProbKernel(DType* probs, IdType* output, IdType* indices,
                                            float* top_p_arr, float top_p_val, uint32_t d,
-                                           uint64_t philox_seed, uint64_t philox_offset) {
+                                           uint64_t* philox_seed, uint64_t* philox_offset) {
   const uint32_t batch_size = gridDim.x;
   const uint32_t bx = blockIdx.x, tx = threadIdx.x;
   hiprandStatePhilox4_32_10_t state;
-  hiprand_init(philox_seed, bx, philox_offset, &state);
+  hiprand_init(philox_seed[bx], bx, philox_offset[bx], &state);
   const uint32_t row_idx = indices == nullptr ? bx : indices[bx];
   float top_p = (top_p_arr == nullptr) ? top_p_val : top_p_arr[row_idx];
 
@@ -535,12 +535,12 @@ template <uint32_t BLOCK_THREADS, BlockScanAlgorithm SCAN_ALGORITHM,
           typename DType, typename IdType>
 __global__ void TopKTopPSamplingFromProbKernel(DType* probs, IdType* top_k_arr, float* top_p_arr,
                                                IdType* output, IdType* indices, IdType top_k_val,
-                                               float top_p_val, uint32_t d, uint64_t philox_seed,
-                                               uint64_t philox_offset) {
+                                               float top_p_val, uint32_t d, uint64_t* philox_seed,
+                                               uint64_t* philox_offset) {
   const uint32_t batch_size = gridDim.x;
   const uint32_t bx = blockIdx.x, tx = threadIdx.x;
   hiprandStatePhilox4_32_10_t state;
-  hiprand_init(philox_seed, bx, philox_offset, &state);
+  hiprand_init(philox_seed[bx], bx, philox_offset[bx], &state);
   const uint32_t row_idx = indices == nullptr ? bx : indices[bx];
   const uint32_t k = top_k_arr == nullptr ? top_k_val : top_k_arr[row_idx];
   const float p = top_p_arr == nullptr ? top_p_val : top_p_arr[row_idx];
@@ -648,7 +648,7 @@ __global__ void TopKTopPSamplingFromProbKernel(DType* probs, IdType* top_k_arr, 
 template <typename T, typename IdType>
 hipError_t TopKSamplingFromProb(T* probs, IdType* output, IdType* indices, T* top_k_arr,
                                  uint32_t batch_size, uint32_t top_k_val, uint32_t d,
-                                 bool deterministic, uint64_t philox_seed, uint64_t philox_offset,
+                                 bool deterministic, uint64_t* philox_seed, uint64_t* philox_offset,
                                  hipStream_t stream = 0) {
   const uint32_t vec_size = std::gcd(16 / sizeof(T), d);
 
@@ -676,7 +676,7 @@ hipError_t TopKSamplingFromProb(T* probs, IdType* output, IdType* indices, T* to
 template <typename T, typename IdType>
 hipError_t TopPSamplingFromProb(T* probs, IdType* output, IdType* indices, T* top_p_arr,
                                  uint32_t batch_size, T top_p_val, uint32_t d, bool deterministic,
-                                 uint64_t philox_seed, uint64_t philox_offset,
+                                 uint64_t* philox_seed, uint64_t* philox_offset,
                                  hipStream_t stream = 0) {
   const uint32_t vec_size = std::gcd(16 / sizeof(T), d);
 
@@ -696,7 +696,6 @@ hipError_t TopPSamplingFromProb(T* probs, IdType* output, IdType* indices, T* to
               hipFuncSetAttribute(reinterpret_cast<const void*>(kernel), hipFuncAttributeMaxDynamicSharedMemorySize, smem_size));
           CUDA_CALL(
               hipLaunchKernel((void*)kernel, nblks, nthrs, args, smem_size, stream));
-    // kernel<<<nblks, nthrs, smem_size, stream>>>(reinterpret_cast<float*>(probs), reinterpret_cast<int*>(output), reinterpret_cast<int*>(indices), reinterpret_cast<float*>(top_p_arr), top_p_val, {{d}}, static_cast<uint64_t>(philox_seed), static_cast<uint64_t>(philox_offset));
 
         })});
     return hipSuccess;
@@ -707,7 +706,7 @@ template <typename T, typename IdType>
 hipError_t TopKTopPSamplingFromProb(T* probs, IdType* top_k_arr, T* top_p_arr, IdType* output,
                                      IdType* indices, uint32_t batch_size, IdType top_k_val,
                                      T top_p_val, uint32_t d, bool deterministic,
-                                     uint64_t philox_seed, uint64_t philox_offset,
+                                     uint64_t* philox_seed, uint64_t* philox_offset,
                                      hipStream_t stream = 0) {
   const uint32_t vec_size = std::gcd(16 / sizeof(T), d);
 
