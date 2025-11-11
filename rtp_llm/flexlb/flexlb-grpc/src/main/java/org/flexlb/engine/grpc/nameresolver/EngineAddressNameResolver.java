@@ -8,7 +8,6 @@ import org.flexlb.dao.route.Endpoint;
 import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.discovery.ServiceDiscovery;
 import org.flexlb.discovery.ServiceHostListener;
-import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.util.JsonUtils;
 import org.springframework.stereotype.Component;
 
@@ -54,11 +53,10 @@ public class EngineAddressNameResolver implements CustomNameResolver {
                 .filter(StringUtils::isNotBlank)
                 .map(json -> JsonUtils.toObject(modelConfigJson, ServiceRoute.class))
                 .map(serviceRoute -> serviceRoute.getAllEndpoints().stream()
-                        .filter(endpoint -> LoadBalanceStrategyEnum.SERVICE_DISCOVERY.getName().equals(endpoint.getType()))
                         .map(Endpoint::getAddress)
                         .collect(Collectors.toList()))
                 .filter(CollectionUtils::isNotEmpty)
-                .orElseThrow(() -> new IllegalArgumentException("serviceAddressList cannot be null, please config 'MODEL_SERVICE_CONFIG' environment variable."));
+                .orElseThrow(() -> new IllegalArgumentException("serviceAddressList cannot be null, please config 'MODEL_SERVICE_CONFIG' environment variable, modelConfigJson=" + modelConfigJson));
     }
 
     @Override

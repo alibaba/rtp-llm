@@ -33,10 +33,31 @@
         </dependency>
     </dependencies>
 
+    <profiles>
+        <!-- Internal profile - automatically activated when internal dependencies exists -->
+        <profile>
+            <id>internal</id>
+            <activation>
+                <file>
+                    <exists>../../../../internal_source</exists>
+                </file>
+            </activation>
+            <dependencies>
+                <!-- KMonitor integration - provides real monitoring implementation -->
+                <dependency>
+                    <groupId>org.flexlb</groupId>
+                    <artifactId>kmonitor</artifactId>
+                </dependency>
+                <!-- VipServer integration - provides service discovery implementation -->
+                <dependency>
+                    <groupId>org.flexlb</groupId>
+                    <artifactId>vipserver</artifactId>
+                </dependency>
+            </dependencies>
+        </profile>
+    </profiles>
+
     <build>
-        <filters>
-            <filter>${project.basedir}/../antx.properties</filter>
-        </filters>
         <resources>
             <resource>
                 <directory>src/main/resources</directory>

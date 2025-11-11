@@ -10,10 +10,8 @@ import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.discovery.ServiceDiscovery;
 import org.flexlb.enums.BackendServiceProtocolEnum;
 import org.flexlb.enums.BalanceStatusEnum;
-import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.util.IdUtils;
-import org.flexlb.util.JsonUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -78,25 +76,8 @@ public class WorkerAddressService {
                 logger.info("modelName={} endpoint is null, endpointType={}", modelName, modelEndpointType);
                 continue;
             }
-            String type = endpoint.getType();
-            if (LoadBalanceStrategyEnum.SERVICE_DISCOVERY.getName().equals(type)) {
-                String address = endpoint.getAddress();
-                workerHosts.addAll(convertServiceDiscoveryHosts(getServiceHosts(modelName, address), endpoint.getProtocol(), groupName));
-            } else if (LoadBalanceStrategyEnum.SPECIFIED_IP_PORT_LIST.getName().equals(type)) {
-                String address = endpoint.getAddress();
-                List<String> ipPortList = JsonUtils.toObject(address, new com.fasterxml.jackson.core.type.TypeReference<List<String>>() {
-                });
-                ipPortList.forEach(ipPort -> {
-                    String ip = ipPort.split(":")[0];
-                    int port = Integer.parseInt(ipPort.split(":")[1]);
-                    if (BackendServiceProtocolEnum.GRPC.getName().equals(endpoint.getProtocol())) {
-                        workerHosts.add(new WorkerHost(ip, port - 1, port, port + 4, "", groupName));
-                    } else {
-                        workerHosts.add(new WorkerHost(ip, port, port + 1, port + 5, "", groupName));
-                    }
-                });
-            }
-            logger.info("modelName={}, endpoint type is not support, type={}", modelName, type);
+            String address = endpoint.getAddress();
+            workerHosts.addAll(convertServiceDiscoveryHosts(getServiceHosts(modelName, address), endpoint.getProtocol(), groupName));
         }
         return workerHosts;
     }

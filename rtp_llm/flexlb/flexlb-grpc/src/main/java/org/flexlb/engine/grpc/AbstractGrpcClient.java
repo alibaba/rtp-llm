@@ -15,6 +15,7 @@ import org.flexlb.cache.core.GlobalCacheIndex;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
 import org.flexlb.engine.grpc.nameresolver.CustomNameResolver;
 import org.flexlb.util.CommonUtils;
+import org.springframework.scheduling.annotation.Scheduled;
 
 /**
  * @author zjw
@@ -98,7 +99,10 @@ public abstract class AbstractGrpcClient<STUB> implements CustomNameResolver.Lis
             engineLocalView.removeAllCacheBlockOfEngine(ipPort);
             globalCacheIndex.removeAllCacheBlockOfEngine(ipPort);
         }
+    }
 
+    @Scheduled(fixedRate = 2000)
+    public void reportChannelPoolSize() {
         grpcReporter.reportChannelPoolSize(channelPool.size());
     }
 

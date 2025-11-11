@@ -6,7 +6,7 @@ spring:
   main:
     web-application-type: reactive
   codec:
-    max-in-memory-size: @whale.max.in.memory.size@
+    max-in-memory-size: ${MAX_IN_MEMORY_SIZE:5MB}
 logging:
   level:
     root: info
