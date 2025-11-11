@@ -21,8 +21,8 @@ from rtp_llm.config.py_config_modules import (
 from rtp_llm.config.quant_config import (
     Fp8BlockWiseQuantConfig,
     Fp8PerChannelCompressedQuantConfig,
-    Fp8PerTensorCompressedQuantConfig,
     Fp8PerChannelQuarkQuantConfig,
+    Fp8PerTensorCompressedQuantConfig,
     QuantizationConfig,
     init_quant_config,
 )
@@ -55,6 +55,7 @@ from rtp_llm.ops import (
     ProfilingDebugLoggingConfig,
     QuantAlgo,
     RoleType,
+    RpcAccessLogConfig,
     SamplerConfig,
     SchedulerConfig,
     ServiceDiscoveryConfig,
@@ -222,6 +223,7 @@ class GptInitModelParameters:
         "py_env_configs",
         "config_dtype",
         "th_nccl_port",
+        "rpc_access_log_config",
     }
 
     # copy from rtp_llm/ops/libth_transformer.pyi for python intelligence
@@ -654,9 +656,7 @@ class GptInitModelParameters:
             rocm_hipblaslt_config=get_env_str(
                 "ROCM_HIPBLASLT_CONFIG", "gemm_config.csv"
             ),
-            use_swizzleA = (
-                get_env_bool("USE_SWIZZLEA", False)
-            ),
+            use_swizzleA=(get_env_bool("USE_SWIZZLEA", False)),
             ft_disable_custom_ar=get_env_bool("FT_DISABLE_CUSTOM_AR", True),
             enable_cuda_graph=get_env_bool("ENABLE_CUDA_GRAPH", False),
             enable_cuda_graph_debug_mode=get_env_bool(
@@ -790,6 +790,13 @@ class GptInitModelParameters:
             ioThreadNum=get_env_int("ARPC_IO_THREAD_NUM", 2),
         )
 
+        # RpcAccessLogConfig
+        self.gpt_init_params.rpc_access_log_config = RpcAccessLogConfig(
+            StaticConfig.rpc_access_log_config.enable_rpc_access_log,
+            StaticConfig.rpc_access_log_config.access_log_interval,
+            StaticConfig.rpc_access_log_config.log_plaintext,
+        )
+
         # PD Seperation
         self.decode_entrance = get_env_bool("DECODE_ENTRANCE", False)
 
@@ -836,14 +843,20 @@ class GptInitModelParameters:
                     inter_size
                     + (
                         get_pad_size(inter_size, align_size)
-                        if (self.quant_algo.isQuant() or self.gpt_init_params.hw_kernel_config.use_swizzleA)
+                        if (
+                            self.quant_algo.isQuant()
+                            or self.gpt_init_params.hw_kernel_config.use_swizzleA
+                        )
                         else 0
                     )
                 )
             self.layer_inter_padding_size = layer_inter_padding_size
         self.inter_padding_size = self.inter_size + (
             get_pad_size(self.inter_size, align_size)
-            if (self.quant_algo.isQuant() or self.gpt_init_params.hw_kernel_config.use_swizzleA)
+            if (
+                self.quant_algo.isQuant()
+                or self.gpt_init_params.hw_kernel_config.use_swizzleA
+            )
             else 0
         )
         if self.head_num_kv <= 0:

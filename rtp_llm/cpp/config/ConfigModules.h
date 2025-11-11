@@ -336,6 +336,14 @@ struct FfnDisAggregateConfig {
     }
 };
 
+struct RpcAccessLogConfig {
+    bool        enable_rpc_access_log = false;
+    int         access_log_interval   = 100;   // 每100个请求记录一次
+    bool        log_plaintext         = true;  // true: 明文, false: pb格式
+    std::string to_string() const;
+    void        update_from_env_for_test();
+};
+
 struct ArpcConfig {
     int         threadNum   = 10;
     int         queueNum    = 50;

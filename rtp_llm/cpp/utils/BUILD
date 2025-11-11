@@ -142,3 +142,22 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
 )
+
+cc_library(
+    name = "rpc_access_log_wrapper",
+    hdrs = [
+        "RpcAccessLogWrapper.h",
+    ],
+    srcs = [
+        "RpcAccessLogWrapper.cc",
+    ],
+    deps = [
+        ":core_utils",
+        "//rtp_llm/cpp/config:config_modules",
+        "@com_google_protobuf//:protobuf",
+        "@havenask//aios/autil:json",
+        "@havenask//aios/autil:thread",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)

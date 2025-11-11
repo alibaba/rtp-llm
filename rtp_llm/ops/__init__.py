@@ -124,6 +124,7 @@ try:
         HWKernelConfig,
         KVCacheConfig,
         MiscellaneousConfig,
+        RpcAccessLogConfig,
         MlaOpsType,
         ModelSpecificConfig,
         MoeConfig,
@@ -135,7 +136,7 @@ try:
         SchedulerConfig,
         ServiceDiscoveryConfig,
         SpecialTokens,
-        SpeculativeExecutionConfig,
+        SpeculativeExecutionConfig
     )
     from libth_transformer_config import (
         get_block_cache_keys as cpp_get_block_cache_keys,

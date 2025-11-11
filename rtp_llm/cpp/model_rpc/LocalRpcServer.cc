@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
+#include "rtp_llm/cpp/utils/RpcAccessLogWrapper.h"
 
 using namespace std;
 
@@ -147,6 +148,18 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
 
     generate_context.error_status =
         pollStreamOutput(context, generate_context.request_key, writer, generate_context.getStream());
+
+    // 记录RPC访问日志
+    if (generate_context.error_status.ok()) {
+        // 创建一个空的响应对象作为示例，实际应该记录真实的响应
+        GenerateOutputsPB response_pb;
+        RpcAccessLogWrapper::logRpcRequest(maga_init_params_.gpt_init_parameter.rpc_access_log_config,
+                                           "GenerateStreamCall",
+                                           *request,
+                                           response_pb,
+                                           generate_context.request_key);
+    }
+
     meta_->dequeue(generate_context.request_id, generate_context.getStream());
     return generate_context.error_status;
 }

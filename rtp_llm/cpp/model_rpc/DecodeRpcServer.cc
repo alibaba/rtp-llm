@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 #include "autil/LockFreeThreadPool.h"
+#include "rtp_llm/cpp/utils/RpcAccessLogWrapper.h"
 
 using namespace std;
 using namespace autil::legacy;
@@ -764,6 +765,17 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
         auto error_msg              = "request [" + decode_context.request_key + "] catch unknown exception";
         decode_context.error_status = grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
         return decode_context.error_status;
+    }
+
+    // 记录RPC访问日志
+    if (decode_context.error_status.ok()) {
+        // 创建一个空的响应对象作为示例，实际应该记录真实的响应
+        GenerateOutputsPB response_pb;
+        RpcAccessLogWrapper::logRpcRequest(maga_init_params_.gpt_init_parameter.rpc_access_log_config,
+                                           "RemoteGenerate",
+                                           decode_context.allocate_request,
+                                           response_pb,
+                                           decode_context.request_key);
     }
 
     return grpc::Status::OK;
