@@ -143,19 +143,18 @@ void CudaGraphRunner::copySmallerIntoLarger(const torch::Tensor& source_tensor, 
 }
 
 void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
+    RTP_LLM_LOG_INFO("tag 1");
     auto& py_model_inputs_ = graph_instances_[current_real_graph_bs_].mem_hold_.py_model_inputs_;
     py_model_inputs_.attention_inputs.input_lengths.slice(0, 0, current_batch_size_) =
         inputs.attention_inputs.input_lengths;
     // pinned memory
-    py_model_inputs_.attention_inputs.cu_seqlens.slice(0, 0, current_batch_size_ + 1) =
-        inputs.attention_inputs.cu_seqlens.slice(0, 0, current_batch_size_ + 1);
-    py_model_inputs_.attention_inputs.cu_kv_seqlens.slice(0, 0, current_batch_size_ + 1) =
-        inputs.attention_inputs.cu_kv_seqlens.slice(0, 0, current_batch_size_ + 1);
+    RTP_LLM_LOG_INFO("tag 2");
     if (!is_prefill_cuda_graph_mode_) {
         py_model_inputs_.input_ids.fill_(0);
         py_model_inputs_.input_ids.slice(0, 0, inputs.input_ids.size(0)) = inputs.input_ids;
         py_model_inputs_.attention_inputs.sequence_lengths.slice(0, 0, current_batch_size_) =
             inputs.attention_inputs.sequence_lengths;
+        RTP_LLM_LOG_INFO("tag 4");
         copySmallerIntoLarger(inputs.attention_inputs.kv_cache_block_id_device,
                               py_model_inputs_.attention_inputs.kv_cache_block_id_device);
         graph_instances_[current_real_graph_bs_].mem_hold_.params_ptr->fillParams(
@@ -164,7 +163,12 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
             inputs.attention_inputs.kv_cache_block_id_host,
             current_batch_size_,
             seq_size_per_block_);
+        RTP_LLM_LOG_INFO("tag 5");
     } else {
+        py_model_inputs_.attention_inputs.cu_seqlens.slice(0, 0, current_batch_size_ + 1) =
+            inputs.attention_inputs.cu_seqlens.slice(0, 0, current_batch_size_ + 1);
+        py_model_inputs_.attention_inputs.cu_kv_seqlens.slice(0, 0, current_batch_size_ + 1) =
+            inputs.attention_inputs.cu_kv_seqlens.slice(0, 0, current_batch_size_ + 1);
 
         auto input_lengths_ptr  = inputs.attention_inputs.input_lengths.data_ptr<int32_t>();
         auto padding_offset_ptr = py_model_inputs_.attention_inputs.padding_offset.data_ptr<int32_t>();
