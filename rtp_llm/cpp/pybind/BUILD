@@ -11,7 +11,9 @@ cc_library(
     srcs = [
         "PyUtils.cc",
     ],
-    deps = torch_deps(),
+    deps = [
+        "//:rtp_compute_ops",
+    ],
     copts = copts(),
     visibility = ["//visibility:public"],
 )
@@ -29,9 +31,26 @@ cc_library(
         ":py_utils",
         "//rtp_llm/cpp/config:gpt_init_params",
         "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/utils:signal_utils",
         "//rtp_llm/cpp/utils:hash_util",
-    ] + torch_deps(),
+    ],
+    copts = copts(),
+    alwayslink = True,
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "th_compute_lib",
+    srcs = [
+        "ComputeInit.cc",
+    ],
+    hdrs = [],
+    deps = [
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/devices:devices_base",
+        "//rtp_llm/cpp/devices:device_utils",
+        "@havenask//aios/autil:base64",
+        "@havenask//aios/autil:zlib",
+    ] + torch_deps() + select_py_bindings(),
     copts = copts(),
     alwayslink = True,
     visibility = ["//visibility:public"],
@@ -48,6 +67,9 @@ cc_library(
         "@//:using_cuda12": [
             "common/NcclOp.cc",
         ],
+        "@//:using_cuda": [
+            "common/NcclOp.cc",
+        ],
         "@//:using_rocm": [
             "common/NcclOp.cc",
         ],
@@ -61,12 +83,12 @@ cc_library(
         "multi_gpu_gpt/RtpLLMOp.h",
     ],
     deps = [
-        "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/devices:device_py_export",
-        "//rtp_llm/cpp/devices:devices_base",
         "//rtp_llm/cpp/api_server:http_api_server",
         "//rtp_llm/cpp/model_rpc:model_rpc_server",
-    ] + torch_deps() + select_py_bindings(),
+        "//rtp_llm/cpp/engine_base/schedulers:schedulers",
+        "//rtp_llm/cpp/cache:cache",
+        "//:rtp_compute_ops",
+    ] + torch_deps(),
     copts = copts(),
     alwayslink = True,
     visibility = ["//visibility:public"],

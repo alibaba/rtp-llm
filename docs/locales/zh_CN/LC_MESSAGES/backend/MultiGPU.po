@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-09-12 17:38+0800\n"
+"POT-Creation-Date: 2025-10-20 10:08+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -21,18 +21,18 @@ msgstr ""
 
 #: ../../backend/MultiGPU.md:1
 msgid "Multi-GPU Parallelism"
-msgstr "多GPU并行"
+msgstr ""
 
 #: ../../backend/MultiGPU.md:2
 msgid ""
 "rtp-llm supports single-node multi-GPU, multi-node single-GPU, and multi-"
 "node multi-GPU parallel strategies. Multi-node parallelism requires rtp-"
 "llm version >= `0.1.11`."
-msgstr "rtp-llm 支持单节点多GPU、多节点单GPU和多节点多GPU并行策略。多节点并行需要 rtp-llm 版本 >= `0.1.11`。"
+msgstr ""
 
 #: ../../backend/MultiGPU.md:5
 msgid "Single-Node Multi-GPU"
-msgstr "单节点多GPU"
+msgstr ""
 
 #: ../../backend/MultiGPU.md:6
 msgid ""
@@ -40,11 +40,11 @@ msgid ""
 "variables `TP_SIZE` and `WORLD_SIZE` when starting the service. The "
 "request logic is consistent with single-GPU, refer to the following "
 "command:"
-msgstr "要使用单节点多GPU并行，您需要在启动服务时添加环境变量 `TP_SIZE` 和 `WORLD_SIZE`。请求逻辑与单GPU一致，请参考以下命令："
+msgstr ""
 
 #: ../../backend/MultiGPU.md:11
 msgid "Multi-Node Single/Multi-GPU"
-msgstr "多节点单/多GPU"
+msgstr ""
 
 #: ../../backend/MultiGPU.md:12
 msgid ""
@@ -52,7 +52,7 @@ msgid ""
 " `DISTRIBUTE_CONFIG_FILE=/path/to/file`. The configuration content is "
 "JSON with the following format. The port is optional; if not filled, it "
 "is considered the same as the master port:"
-msgstr "启动服务时，您需要配置环境变量 `DISTRIBUTE_CONFIG_FILE=/path/to/file`。配置内容是 JSON 格式，如下所示。端口是可选的；如果未填写，则认为与主端口相同："
+msgstr ""
 
 #: ../../backend/MultiGPU.md:28
 msgid ""
@@ -60,23 +60,23 @@ msgid ""
 "service will establish collective communication with the machine suffixed"
 " with `_part0` as rank0. At the same time, you need to configure "
 "`WORLD_SIZE`, `TP_SIZE`, and `TP_RANK`."
-msgstr "JSON 中的键和值中的名称应保持一致。服务将与后缀为 `_part0` 的机器建立集合通信作为 rank0。同时，您需要配置 `WORLD_SIZE`、`TP_SIZE` 和 `TP_RANK`。"
+msgstr ""
 
 #: ../../backend/MultiGPU.md:30
 msgid "Multi-Node Single-GPU Startup Command"
-msgstr "多节点单GPU启动命令"
+msgstr ""
 
 #: ../../backend/MultiGPU.md:31
 msgid "rank0:"
-msgstr "rank0:"
+msgstr ""
 
 #: ../../backend/MultiGPU.md:35 ../../backend/MultiGPU.md:47
 msgid "rank1:"
-msgstr "rank1:"
+msgstr ""
 
 #: ../../backend/MultiGPU.md:40
 msgid "Multi-Node Multi-GPU Startup Command"
-msgstr "多节点多GPU启动命令"
+msgstr ""
 
 #: ../../backend/MultiGPU.md:41
 msgid ""
@@ -84,40 +84,40 @@ msgid ""
 "required. At this time, `LOCAL_WORLD_SIZE` GPUs will be used for "
 "inference on each machine. When setting `WORLD_RANK` for machines, it "
 "needs to be multiplied by `LOCAL_WORLD_SIZE`."
-msgstr "当 `LOCAL_WORLD_SIZE` > 1 时，需要满足 `WORLD_SIZE` % `LOCAL_WORLD_SIZE` == 0。此时，每台机器将使用 `LOCAL_WORLD_SIZE` 个 GPU 进行推理。在为机器设置 `WORLD_RANK` 时，需要乘以 `LOCAL_WORLD_SIZE`。"
+msgstr ""
 
 #: ../../backend/MultiGPU.md:43
 msgid "rank0"
-msgstr "rank0"
+msgstr ""
 
 #: ../../backend/MultiGPU.md:52
 msgid "Accessing the Service"
-msgstr "访问服务"
+msgstr ""
 
 #: ../../backend/MultiGPU.md:53
 msgid ""
 "The service endpoint is the Uvicorn Server address of rank0, i.e., "
 "http://0.0.0.0:10000"
-msgstr "服务端点是 rank0 的 Uvicorn Server 地址，即 http://0.0.0.0:10000"
+msgstr ""
 
 #: ../../backend/MultiGPU.md:55
 msgid "Common Issues and Solutions"
-msgstr "常见问题与解决方案"
+msgstr ""
 
 #: ../../backend/MultiGPU.md:56
 msgid ""
 "Startup error `Caught signal 7 (Bus error: nonexistent physical address)`"
 " Single-node multi-GPU communication uses shared memory, and this error "
 "is due to insufficient shared memory."
-msgstr "启动错误 `Caught signal 7 (Bus error: nonexistent physical address)` 单节点多GPU通信使用共享内存，此错误是由于共享内存不足导致的。"
+msgstr ""
 
 #: ../../backend/MultiGPU.md:58
 msgid "If started via Docker, add the `--shm-size=2g` parameter"
-msgstr "如果通过 Docker 启动，请添加 `--shm-size=2g` 参数"
+msgstr ""
 
 #: ../../backend/MultiGPU.md:59
 msgid ""
 "If deployed via K8s, shared memory can be set by adding a Memory-type "
 "volume to the container."
-msgstr "如果通过 K8s 部署，可以通过向容器添加 Memory-type 卷来设置共享内存。"
+msgstr ""
 

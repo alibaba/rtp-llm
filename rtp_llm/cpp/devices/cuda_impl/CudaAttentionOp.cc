@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/devices/CommonDefines.h"
 #include "rtp_llm/cpp/core/Dispatch.h"
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
+#include "rtp_llm/cpp/devices/utils/RopeCache.h"
 #include "rtp_llm/cpp/kernels/layernorm_kernels.h"
 #include "rtp_llm/cpp/kernels/activation_kernels.h"
 #include "rtp_llm/cpp/kernels/unfused_attention_kernels.h"
@@ -23,55 +24,6 @@ using namespace std;
 using namespace rtp_llm;
 
 namespace rtp_llm {
-
-torch::Tensor genNormalCosSin(int rope_dim, int rope_theta, float rope_scale, int max_position_embeddings) {
-    auto inv_freq =
-        1.0 / torch::pow(rope_theta, torch::arange(0, rope_dim, 2, torch::kInt64).to(torch::kFloat32) / rope_dim);
-    auto t = torch::arange(max_position_embeddings, torch::kInt64).to(torch::kFloat32);
-    t.div_(rope_scale);
-    auto freqs   = torch::outer(t, inv_freq);
-    auto cos     = freqs.cos().to(torch::kFloat32);
-    auto sin     = freqs.sin().to(torch::kFloat32);
-    auto cos_sin = torch::stack({cos, sin}, 0).permute({1, 2, 0}).reshape({cos.size(0), -1}).contiguous();
-    return cos_sin.cuda();
-}
-
-/**
- * @brief Get the Rope Cos Sin object, TODO: move to python
- *
- * @param device
- * @param rope_style
- * @param rope_dim
- * @param rope_theta
- * @param rope_scale
- * @param max_position_embeddings
- * @return BufferPtr
- */
-torch::Tensor
-getRopeCosSin(RopeStyle rope_style, int rope_dim, int rope_theta, float rope_scale, int max_position_embeddings) {
-    RTP_LLM_LOG_INFO("rope: style = %d, dim = %d, theta = %d, scale = %f, max_position_embeddings = %d",
-                     rope_style,
-                     rope_dim,
-                     rope_theta,
-                     rope_scale,
-                     max_position_embeddings);
-    torch::Tensor cos_sin;
-
-    switch (rope_style) {
-        case RopeStyle::No:
-            break;
-
-        case RopeStyle::Base:
-            cos_sin = genNormalCosSin(rope_dim, rope_theta, rope_scale, max_position_embeddings);
-            break;
-
-        default:
-            RTP_LLM_LOG_WARNING("unsupported rope_style = %d, not use rope_cache", rope_style);
-            break;
-    }
-
-    return cos_sin;
-}
 
 ParamsPtr CudaDevice::prepareTrtAttn(const AttentionConfigs& configs,
                                      const BufferPtr&        k_cache,
@@ -187,13 +139,13 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
                                       {batch_size, (head_num + kv_head_num * 2), seq_len_with_prefix, size_per_head},
                                       AllocationType::DEVICE},
                                      {"qkv_fp8_output"});
-        cudaMemsetAsync(qkv_buf_fp8->data(), 0, qkv_buf_fp8->sizeBytes(), stream_);
+        check_cuda_value(cudaMemsetAsync(qkv_buf_fp8->data(), 0, qkv_buf_fp8->sizeBytes(), stream_));
     }
 
     if (fmha_type_ == FMHAType::NONE) {
-        cudaMemsetAsync(q_output->data(), 0, q_output->sizeBytes(), stream_);
-        cudaMemsetAsync(k_output->data(), 0, k_output->sizeBytes(), stream_);
-        cudaMemsetAsync(v_output->data(), 0, v_output->sizeBytes(), stream_);
+        check_cuda_value(cudaMemsetAsync(q_output->data(), 0, q_output->sizeBytes(), stream_));
+        check_cuda_value(cudaMemsetAsync(k_output->data(), 0, k_output->sizeBytes(), stream_));
+        check_cuda_value(cudaMemsetAsync(v_output->data(), 0, v_output->sizeBytes(), stream_));
     }
 
     PrefixPromptBatchWeightsParam prefix_prompt_param;
@@ -400,6 +352,8 @@ void selfAttentionwrapper(const AttentionModuleParams params,
     check_cuda_error();
 }
 
+static std::once_flag rope_cache_flag;
+
 AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModuleParams& params) {
 
     // TODO: refactor QBuffer to suppport view and return QBuffer
@@ -431,11 +385,14 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
         q_output = allocateBuffer(
             {params.input.type(), {batch_size, local_head_num, size_per_head}, AllocationType::DEVICE}, {"q_output"});
 
-        static torch::Tensor cos_sin_cache = getRopeCosSin(params.configs.rope_config.style,
-                                                           params.configs.rope_config.dim,
-                                                           params.configs.rope_config.base,
-                                                           params.configs.rope_config.scale,
-                                                           init_params_.max_seq_len);
+        bool use_rope_cache =
+            params.configs.rope_config.style == RopeStyle::Base || params.configs.rope_config.style == RopeStyle::Yarn;
+        static torch::Tensor rope_cache;
+        std::call_once(rope_cache_flag, [&]() {
+            if (use_rope_cache) {
+                rope_cache = getRopeCache(params.configs.rope_config, init_params_.max_seq_len);
+            }
+        });
 
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(params.input.type(),
                                          invokeDecodeAddFusedQKVBiasTranspose,
@@ -449,7 +406,8 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
                                          params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias ?
                                              params.weights.qkv_weight->bias->data() :
                                              nullptr,
-                                         cos_sin_cache.defined() ? cos_sin_cache.data_ptr<float>() : nullptr,
+                                         use_rope_cache && rope_cache.defined() ? rope_cache.data_ptr<float>() :
+                                                                                  nullptr,
                                          batch_size,
                                          local_head_num,
                                          local_kv_head_num,

@@ -15,7 +15,7 @@ FlashInferPrefillOp::FlashInferPrefillOp(const GptInitParameter& gpt_init_parame
     FMHACudaBase(gpt_init_parameter) {}
 
 bool FlashInferPrefillOp::support(torch_ext::PyAttentionInputs attn_inputs) {
-    if (fmha_config_.disable_flash_infer || attn_configs_.kv_cache_dtype != KvCacheDataType::BASE) {
+    if (fmha_config_.disable_flash_infer || attn_configs_.kv_cache_dtype == KvCacheDataType::INT8) {
         return false;
     }
     auto     prefix_lengths_host   = torchTensor2Buffer(attn_inputs.prefix_lengths);
@@ -102,7 +102,11 @@ torch::Tensor FlashInferPrefillOp::forward(const torch::Tensor&              q,
 FlashInferDecodeOp::FlashInferDecodeOp(const GptInitParameter& gpt_init_parameter): FMHACudaBase(gpt_init_parameter) {}
 
 bool FlashInferDecodeOp::support(torch_ext::PyAttentionInputs attn_inputs) {
-    if (fmha_config_.disable_flash_infer || attn_configs_.kv_cache_dtype != KvCacheDataType::BASE) {
+    if (fmha_config_.disable_flash_infer || attn_configs_.kv_cache_dtype == KvCacheDataType::INT8) {
+        return false;
+    }
+    // FIXME: FlashInferDecodeOp causes crash in this case, temporarily bypassing it here
+    if (attn_configs_.head_num / attn_configs_.kv_head_num == 12) {
         return false;
     }
     return FlashInferAttnParams::checkDecode(device_, attn_configs_, torchDTypeToDataType(attn_inputs.dtype));

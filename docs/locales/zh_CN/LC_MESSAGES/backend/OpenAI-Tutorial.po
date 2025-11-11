@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-09-12 17:38+0800\n"
+"POT-Creation-Date: 2025-10-20 10:08+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -21,31 +21,31 @@ msgstr ""
 
 #: ../../backend/OpenAI-Tutorial.md:1
 msgid "Usage Guide"
-msgstr "使用指南"
+msgstr ""
 
 #: ../../backend/OpenAI-Tutorial.md:3
 msgid ""
 "RTP-LLM supports OpenAI chat format API calls and can be used as a "
 "seamless drop-in replacement for OpenAI interface services."
-msgstr "RTP-LLM 支持 OpenAI 聊天格式 API 调用，可以作为 OpenAI 接口服务的无缝替代品。"
+msgstr ""
 
 #: ../../backend/OpenAI-Tutorial.md:5
 msgid "Getting Started"
-msgstr "入门指南"
+msgstr ""
 
 #: ../../backend/OpenAI-Tutorial.md:14
 msgid ""
 "After the server starts, we provide an OpenAI client compatible chat "
 "interface. Usage examples are as follows:"
-msgstr "服务器启动后，我们提供与 OpenAI 客户端兼容的聊天接口。使用示例如下："
+msgstr ""
 
 #: ../../backend/OpenAI-Tutorial.md:45
 msgid "use curl to get result, Usage example:"
-msgstr "使用 curl 获取结果，使用示例："
+msgstr ""
 
 #: ../../backend/OpenAI-Tutorial.md:63
 msgid "Chat Template Configuration"
-msgstr "聊天模板配置"
+msgstr ""
 
 #: ../../backend/OpenAI-Tutorial.md:65
 msgid ""
@@ -54,19 +54,19 @@ msgid ""
 " config, it will be rendered according to this template. See "
 "https://huggingface.co/docs/transformers/chat_templating for "
 "chat_template documentation."
-msgstr "对于使用 transformers tokenizer 的模型，服务将从 tokenizer_config.json 中读取 chat_template。如果配置中存在此字段，将根据此模板进行渲染。有关 chat_template 的文档，请参见 https://huggingface.co/docs/transformers/chat_templating。"
+msgstr ""
 
 #: ../../backend/OpenAI-Tutorial.md:67
 msgid "Function Call"
-msgstr "函数调用"
+msgstr ""
 
 #: ../../backend/OpenAI-Tutorial.md:69
 msgid "The OpenAI interface can implement function calling. Usage example:"
-msgstr "OpenAI 接口可以实现函数调用。使用示例："
+msgstr ""
 
 #: ../../backend/OpenAI-Tutorial.md:154
 msgid ""
 "Currently, the function call feature only supports qwen series models, "
 "with support for other models coming soon."
-msgstr "目前，函数调用功能仅支持 qwen 系列模型，对其他模型的支持即将推出。"
+msgstr ""
 

@@ -32,7 +32,7 @@ def get_env_str(name: str, default: str = ""):
 
 
 def get_env_bool(name: str, default: bool = False):
-    ## in fact, we can always get value from env, if that's not specified, we return default value
+    # in fact, we can always get value from env, if that's not specified, we return default value
     v = os.environ.get(name, None)
     if v is None or v == "":
         return default
@@ -78,7 +78,6 @@ class ModelConfig:
         self.use_float32: bool = False
         self.original_checkpoint_path: Optional[str] = None
         self.mla_ops_type: str = "AUTO"
-        self.parallel_batch: bool = False
         self.ft_plugin_path: Optional[str] = None
         self.weight_type: Optional[str] = None
 
@@ -93,6 +92,7 @@ class ModelConfig:
         self.dashscope_api_key: str = "EMPTY"
         self.dashscope_http_url: Optional[str] = None
         self.dashscope_websocket_url: Optional[str] = None
+        self.json_model_override_args: str = "{}"
 
     def update_from_env(self):
         self.extra_data_path = os.environ.get("EXTRA_DATA_PATH", self.extra_data_path)
@@ -110,7 +110,6 @@ class ModelConfig:
             "ORIGINAL_CHECKPOINT_PATH", self.original_checkpoint_path
         )
         self.mla_ops_type = os.environ.get("MLA_OPS_TYPE", self.mla_ops_type)
-        self.parallel_batch = get_env_bool("PARALLEL_BATCH", self.parallel_batch)
         self.ft_plugin_path = os.environ.get("FT_PLUGIN_PATH", self.ft_plugin_path)
         self.weight_type = os.environ.get("WEIGHT_TYPE", self.weight_type)
         self.task_type = os.environ.get("TASK_TYPE", self.task_type)
@@ -129,6 +128,9 @@ class ModelConfig:
         self.dashscope_websocket_url = os.environ.get(
             "DASHSCOPE_WEBSOCKET_URL", self.dashscope_websocket_url
         )
+        self.json_model_override_args = os.environ.get(
+            "JSON_MODEL_OVERRIDE_ARGS", self.json_model_override_args
+        )
 
     def to_string(self):
         return (
@@ -139,7 +141,6 @@ class ModelConfig:
             f"use_float32: {self.use_float32}\n"
             f"original_checkpoint_path: {self.original_checkpoint_path}\n"
             f"mla_ops_type: {self.mla_ops_type}\n"
-            f"parallel_batch: {self.parallel_batch}\n"
             f"ft_plugin_path: {self.ft_plugin_path}\n"
             f"weight_type: {self.weight_type}\n"
             f"task_type: {self.task_type}\n"
@@ -150,7 +151,8 @@ class ModelConfig:
             f"openai_api_key: {self.openai_api_key}\n"
             f"dashscope_api_key: {self.dashscope_api_key}\n"
             f"dashscope_http_url: {self.dashscope_http_url}\n"
-            f"dashscope_websocket_url: {self.dashscope_websocket_url}"
+            f"dashscope_websocket_url: {self.dashscope_websocket_url}\n"
+            f"json_model_override_args: {self.json_model_override_args}"
         )
 
 
@@ -210,8 +212,9 @@ class LoadConfig:
         self.phy2log_path: str = ""
         self.converter_num_per_gpu: int = 4
         self.tokenizers_parallelism: bool = False
-        ## seem like it's a third-party pkg environment, but we reserve it temporar
+        # seem like it's a third-party pkg environment, but we reserve it temporar
         self.load_ckpt_num_process: int = 0
+        self.load_method: str = "auto"
 
     def update_from_env(self):
         self.phy2log_path = os.environ.get("PHY2LOG_PATH", self.phy2log_path)
@@ -224,13 +227,15 @@ class LoadConfig:
         self.load_ckpt_num_process = int(
             os.environ.get("LOAD_CKPT_NUM_PROCESS", self.load_ckpt_num_process)
         )
+        self.load_method = str(os.environ.get("LOAD_METHOD", self.load_method)).lower()
 
     def to_string(self):
         return (
             f"phy2log_path: {self.phy2log_path}\n"
             f"converter_num_per_gpu: {self.converter_num_per_gpu}\n"
             f"tokenizers_parallelism: {self.tokenizers_parallelism}\n"
-            f"load_ckpt_num_process: {self.load_ckpt_num_process}"
+            f"load_ckpt_num_process: {self.load_ckpt_num_process}\n"
+            f"load_method: {self.load_method}"
         )
 
 
@@ -646,16 +651,13 @@ class PdSeparationConfig:
         # Decode related configuration
         self.decode_retry_times: int = 100
         self.decode_retry_timeout_ms: int = 100
+        self.decode_retry_interval_ms: int = 1
         self.decode_polling_kv_cache_step_ms: int = 30
         self.decode_entrance: int = 0
 
         # RDMA related configuration
         self.rdma_connect_retry_times: int = 0
         self.load_cache_timeout_ms: int = 5000
-
-        # Load balance configuration
-        self.load_balance_policy_name: str = "RR"
-        self.sync_status_interval_ms: int = 50
 
     def update_from_env(self):
         # Prefill related configuration
@@ -678,6 +680,9 @@ class PdSeparationConfig:
         self.decode_retry_timeout_ms = int(
             os.environ.get("DECODE_RETRY_TIMEOUT_MS", self.decode_retry_timeout_ms)
         )
+        self.decode_retry_interval_ms = int(
+            os.environ.get("DECODE_RETRY_INTERVAL_MS", self.decode_retry_interval_ms)
+        )
         self.decode_polling_kv_cache_step_ms = int(
             os.environ.get(
                 "DECODE_POLLING_KV_CACHE_STEP_MS", self.decode_polling_kv_cache_step_ms
@@ -695,14 +700,6 @@ class PdSeparationConfig:
             os.environ.get("LOAD_CACHE_TIMEOUT_MS", self.load_cache_timeout_ms)
         )
 
-        # Load balance configuration
-        self.load_balance_policy_name = os.environ.get(
-            "LOAD_BALANCE_POLICY_NAME", self.load_balance_policy_name
-        )
-        self.sync_status_interval_ms = int(
-            os.environ.get("SYNC_STATUS_INTERVAL_MS", self.sync_status_interval_ms)
-        )
-
     def to_string(self):
         return (
             f"prefill_retry_times: {self.prefill_retry_times}\n"
@@ -710,12 +707,11 @@ class PdSeparationConfig:
             f"prefill_max_wait_timeout_ms: {self.prefill_max_wait_timeout_ms}\n"
             f"decode_retry_times: {self.decode_retry_times}\n"
             f"decode_retry_timeout_ms: {self.decode_retry_timeout_ms}\n"
+            f"decode_retry_interval_ms: {self.decode_retry_interval_ms}\n"
             f"decode_polling_kv_cache_step_ms: {self.decode_polling_kv_cache_step_ms}\n"
             f"decode_entrance: {self.decode_entrance}\n"
             f"rdma_connect_retry_times: {self.rdma_connect_retry_times}\n"
-            f"load_cache_timeout_ms: {self.load_cache_timeout_ms}\n"
-            f"load_balance_policy_name: {self.load_balance_policy_name}\n"
-            f"sync_status_interval_ms: {self.sync_status_interval_ms}"
+            f"load_cache_timeout_ms: {self.load_cache_timeout_ms}"
         )
 
 
@@ -754,9 +750,11 @@ class PyHwKernelConfig:
         self.enable_multi_block_mode: bool = True
         self.ft_disable_custom_ar: bool = True
         self.rocm_hipblaslt_config: str = "gemm_config.csv"
+        self.use_swizzleA = False
         self.enable_cuda_graph: bool = False
         self.enable_cuda_graph_debug_mode: bool = False
         self.use_aiter_pa: bool = True
+        self.use_asm_pa: bool = True
         self.enable_native_cuda_graph: bool = False
         self.num_native_cuda_graph: int = 200
 
@@ -775,6 +773,7 @@ class PyHwKernelConfig:
         self.rocm_hipblaslt_config = get_env_str(
             "ROCM_HIPBLASLT_CONFIG", self.rocm_hipblaslt_config
         )
+        self.use_swizzleA = get_env_bool("USE_SWIZZLEA", self.use_swizzleA)
         self.enable_cuda_graph = get_env_bool(
             "ENABLE_CUDA_GRAPH", self.enable_cuda_graph
         )
@@ -782,6 +781,7 @@ class PyHwKernelConfig:
             "ENABLE_CUDA_GRAPH_DEBUG_MODE", self.enable_cuda_graph_debug_mode
         )
         self.use_aiter_pa = get_env_bool("USE_AITER_PA", self.use_aiter_pa)
+        self.use_asm_pa = get_env_bool("USE_ASM_PA", self.use_asm_pa)
         self.enable_native_cuda_graph = get_env_bool(
             "ENABLE_NATIVE_CUDA_GRAPH", self.enable_native_cuda_graph
         )
@@ -797,9 +797,11 @@ class PyHwKernelConfig:
             f"enable_multi_block_mode: {self.enable_multi_block_mode}\n"
             f"ft_disable_custom_ar: {self.ft_disable_custom_ar}\n"
             f"rocm_hipblaslt_config: {self.rocm_hipblaslt_config}\n"
+            f"use_swizzleA: {self.use_swizzleA}\n"
             f"enable_cuda_graph: {self.enable_cuda_graph}\n"
             f"enable_cuda_graph_debug_mode: {self.enable_cuda_graph_debug_mode}\n"
             f"use_aiter_pa: {self.use_aiter_pa}\n"
+            f"use_asm_pa: {self.use_asm_pa}\n"
             f"enable_native_cuda_graph: {self.enable_native_cuda_graph}\n"
             f"num_native_cuda_graph: {self.num_native_cuda_graph}"
         )
@@ -865,7 +867,7 @@ class PyEnvConfigs:
         self.worker_config.update_from_env()
         self.role_config.update_from_env()
         self.pd_separation_config.update_from_env()
-        ## in gpt model parameters, we should update it from g_parallel_info
+        # in gpt model parameters, we should update it from g_parallel_info
         self.parallelism_distributed_config.update_from_env()
         self.model_specific_config.update_from_env()
         self.fmha_config.update_from_env()
@@ -918,13 +920,13 @@ class PyEnvConfigs:
         )
 
 
-## some configs are from static method or global method, etc, we collect them in `StaticConfig`, but in-none-static methods,
-## we should use configs alone. This design can make the codes of this project more clear. All configs
-## should be retrived from `StaticConfig` or a top-down `PyEnvConfigs`. Notably, we don't modify smoke
-## test envs and that's necessary.
+# some configs are from static method or global method, etc, we collect them in `StaticConfig`, but in-none-static methods,
+# we should use configs alone. This design can make the codes of this project more clear. All configs
+# should be retrived from `StaticConfig` or a top-down `PyEnvConfigs`. Notably, we don't modify smoke
+# test envs and that's necessary.
 StaticConfig = PyEnvConfigs()
 StaticConfig.update_from_env()
 
-#### The envs we reserve below:
-#### 1. weights convert: because we don't use it in our project.
-#### 2. smoke test.
+# The envs we reserve below:
+# 1. weights convert: because we don't use it in our project.
+# 2. smoke test.

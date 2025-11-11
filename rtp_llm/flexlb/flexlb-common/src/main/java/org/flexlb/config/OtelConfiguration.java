@@ -8,7 +8,11 @@ import io.opentelemetry.api.trace.Tracer;
 import io.opentelemetry.context.propagation.ContextPropagators;
 import io.opentelemetry.sdk.OpenTelemetrySdk;
 import io.opentelemetry.sdk.resources.Resource;
-import io.opentelemetry.sdk.trace.*;
+import io.opentelemetry.sdk.trace.IdGenerator;
+import io.opentelemetry.sdk.trace.SdkTracerProvider;
+import io.opentelemetry.sdk.trace.SdkTracerProviderBuilder;
+import io.opentelemetry.sdk.trace.SpanLimits;
+import io.opentelemetry.sdk.trace.SpanProcessor;
 import io.opentelemetry.sdk.trace.export.BatchSpanProcessor;
 import io.opentelemetry.sdk.trace.export.BatchSpanProcessorBuilder;
 import io.opentelemetry.sdk.trace.export.SpanExporter;
@@ -20,7 +24,7 @@ import org.flexlb.telemetry.OtelProcessorProperties;
 import org.flexlb.telemetry.OtelProperties;
 import org.flexlb.telemetry.OtelResourceProperties;
 import org.flexlb.telemetry.autoconfig.SpanProcessorProvider;
-import org.flexlb.telemetry.extension.eagleeye.EagleEyeIdGenerator;
+import org.flexlb.telemetry.extension.CustomIdGenerator;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -29,6 +33,7 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
 import org.springframework.core.env.Environment;
+
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
@@ -57,7 +62,7 @@ public class OtelConfiguration {
 
     @Bean
     IdGenerator otelIdGenerator() {
-        return new EagleEyeIdGenerator();
+        return new CustomIdGenerator();
     }
 
     @Bean
@@ -105,15 +110,11 @@ public class OtelConfiguration {
         String environment = "";
         if (StringUtils.isNotBlank(otelResourceProperties.getEnv())) {
             environment = StringUtils.trim(otelResourceProperties.getEnv());
-        } else {
-//            String environment = EnvironmentUtils.getEnvironment();
         }
         return Resource.empty()
                 .merge(Resource.builder()
                         .put(AttributeKey.stringKey("service.name"), applicationName)
-//                        .put("ip", EnvironmentUtils.getIp())
                         .put("role", System.getenv(otelResourceProperties.getRoleEnv()))
-//                        .put("idc", EnvironmentUtils.getTagIdc())
                         .put("env", environment)
                         .put("platform", "whale-wave")
                         .build());

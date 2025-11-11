@@ -8,8 +8,8 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-09-17 10:23+0800\n"
-"PO-Revision-Date: 2025-09-17 15:05+0800\n"
+"POT-Creation-Date: 2025-10-20 10:08+0800\n"
+"PO-Revision-Date: 2025-10-20 10:08+0800\n"
 "Last-Translator: 来羽 <xj226049@alibaba-inc.com>\n"
 "Language: zh_CN\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -21,36 +21,36 @@ msgstr ""
 
 #: ../../references/Update-whl-Deps.md:1
 msgid "Update whl Deps"
-msgstr "更新 whl 依赖"
+msgstr ""
 
 #: ../../references/Update-whl-Deps.md:3
 msgid ""
 "To ensure that Python dependencies are correctly referenced by code and "
 "test cases, and properly resolved during packaging, the following three "
 "steps need to be completed:"
-msgstr "为确保 Python 依赖项被代码和测试用例正确引用，并在打包过程中正确解析，需要完成以下三个步骤："
+msgstr ""
 
 #: ../../references/Update-whl-Deps.md:5
 msgid ""
 "Add the required dependency libraries and their version numbers to the "
 "requirements description file"
-msgstr "将所需的依赖库及其版本号添加到 requirements 描述文件中"
+msgstr ""
 
 #: ../../references/Update-whl-Deps.md:7
 msgid ""
 "Generate a hardware-specific locked-version requirements_lock file based "
 "on the requirements file"
-msgstr "基于 requirements 文件生成硬件特定的锁定版本 requirements_lock 文件"
+msgstr ""
 
 #: ../../references/Update-whl-Deps.md:9
 msgid ""
 "Add the corresponding pip package dependencies to the py_library targets "
 "that use the relevant libraries in the Bazel BUILD file"
-msgstr "在 Bazel BUILD 文件中，将相应的 pip 包依赖项添加到使用相关库的 py_library 目标中"
+msgstr ""
 
 #: ../../references/Update-whl-Deps.md:11
 msgid "1. Add the required libraries to the requirements description file"
-msgstr "1. 将所需库添加到 requirements 描述文件中"
+msgstr ""
 
 #: ../../references/Update-whl-Deps.md:13
 msgid ""
@@ -60,8 +60,6 @@ msgid ""
 " to all hardware (such as fundamental libraries like transformers), you "
 "should add them in this file. For example:"
 msgstr ""
-"所有硬件依赖都基于 `open_source/deps/requirements_base.txt` "
-"作为基础依赖配置。如果您需要添加或更新适用于所有硬件的基础依赖项（如 transformers 等基础库），应在此文件中添加。例如："
 
 #: ../../references/Update-whl-Deps.md:21
 msgid ""
@@ -69,28 +67,28 @@ msgid ""
 "as torch packages, hardware computation libraries, etc.), you must add "
 "these dependencies in the corresponding hardware-specific requirements "
 "files."
-msgstr "如果您需要为特定硬件添加专用依赖项（如 torch 包、硬件计算库等），必须在相应的硬件特定 requirements 文件中添加这些依赖项。"
+msgstr ""
 
 #: ../../references/Update-whl-Deps.md:24
 msgid "2. Generate requirements_lock file"
-msgstr "2. 生成 requirements_lock 文件"
+msgstr ""
 
 #: ../../references/Update-whl-Deps.md:26
 msgid ""
 "Lock files must not be manually modified and can only be automatically "
 "generated through relevant commands from the base dependency description "
 "files."
-msgstr "锁定文件不得手动修改，只能通过相关命令从基础依赖描述文件自动生成。"
+msgstr ""
 
 #: ../../references/Update-whl-Deps.md:28
 msgid ""
 "When opening any dependency file starting with requirements_lock, you "
 "will typically find the generation command at the top of the file:"
-msgstr "当打开任何以 requirements_lock 开头的依赖文件时，通常会在文件顶部找到生成命令："
+msgstr ""
 
 #: ../../references/Update-whl-Deps.md:50
 msgid "Note that in actual execution, `bazel` should be replaced with `bazelisk`."
-msgstr "注意，在实际执行中，`bazel` 应替换为 `bazelisk`。"
+msgstr ""
 
 #: ../../references/Update-whl-Deps.md:52
 msgid ""
@@ -99,47 +97,44 @@ msgid ""
 "those in both open-source and closed-source directories), you need to run"
 " the update command specified in the lock file to refresh it."
 msgstr ""
-"对于受依赖配置更改影响的每个锁定文件（修改 requirements_base.txt "
-"将影响所有锁定文件，包括开源和闭源目录中的文件），您需要运行锁定文件中指定的更新命令来刷新它。"
 
 #: ../../references/Update-whl-Deps.md:54
 msgid ""
 "**Important note**: If lock file conflicts occur during code merging, do "
 "not directly merge the conflicting content manually. Instead, re-run the "
 "lock file generation command."
-msgstr "**重要提示**：如果在代码合并过程中出现锁定文件冲突，请不要手动直接合并冲突内容。相反，应重新运行锁定文件生成命令。"
+msgstr ""
 
 #: ../../references/Update-whl-Deps.md:56
 msgid "3. Add the dependencies to the Bazel BUILD file"
-msgstr "3. 将依赖项添加到 Bazel BUILD 文件中"
+msgstr ""
 
 #: ../../references/Update-whl-Deps.md:59
 msgid ""
 "At this point, the dependencies can be installed correctly, but Python "
 "files still cannot properly reference these Python libraries. We also "
 "need to declare the dependencies in the Bazel BUILD files."
-msgstr "此时，依赖项可以正确安装，但 Python 文件仍无法正确引用这些 Python 库。我们还需要在 Bazel BUILD 文件中声明依赖项。"
+msgstr ""
 
 #: ../../references/Update-whl-Deps.md:62
 msgid ""
 "In the `rtp_llm/BUILD` file, locate the requirement() function and add "
 "the new dependency to its internal list to declare the existence of the "
 "dependency."
-msgstr "在 `rtp_llm/BUILD` 文件中，找到 requirement() 函数并将新依赖项添加到其内部列表中，以声明依赖项的存在。"
+msgstr ""
 
 #: ../../references/Update-whl-Deps.md:75
-#, fuzzy
 msgid ""
 "In the py_library targets that use the corresponding dependency "
 "libraries, add the declared dependencies, for example:"
-msgstr "在使用相应依赖库的 py_library 目标中，添加声明的依赖项，例如："
+msgstr ""
 
 #: ../../references/Update-whl-Deps.md:95
 msgid ""
 "Add the corresponding pip dependencies in the whl_reqs section of the "
 "`rtp_llm/BUILD` file to ensure that dependencies are included during "
 "packaging."
-msgstr "在 `rtp_llm/BUILD` 文件的 whl_reqs 部分中添加相应的 pip 依赖项，以确保在打包过程中包含依赖项。"
+msgstr ""
 
 #: ../../references/Update-whl-Deps.md:110
 msgid ""
@@ -147,6 +142,4 @@ msgid ""
 "appropriate packages based on hardware type in the whl_deps function in "
 "the `open_source/bazel/arch_select.bzl` file."
 msgstr ""
-"注意：对于硬件相关的包，您需要在 `open_source/bazel/arch_select.bzl` 文件的 whl_deps "
-"函数中根据硬件类型进行分支并选择适当的包。"
 

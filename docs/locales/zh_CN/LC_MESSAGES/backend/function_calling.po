@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-09-19 11:21+0800\n"
+"POT-Creation-Date: 2025-10-20 10:08+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -21,7 +21,7 @@ msgstr ""
 
 #: ../../backend/function_calling.ipynb:9
 msgid "Tool and Function Calling"
-msgstr "工具和函数调用"
+msgstr ""
 
 #: ../../backend/function_calling.ipynb:11
 msgid ""
@@ -29,63 +29,58 @@ msgid ""
 "<https://platform.openai.com/docs/guides/function-calling>`__ "
 "functionality."
 msgstr ""
-"本指南演示如何使用RTP-LLM的`函数调用<https://platform.openai.com/docs/guides/function-"
-"calling>`__功能。"
 
 #: ../../backend/function_calling.ipynb:23
 msgid "OpenAI Compatible API"
-msgstr "OpenAI兼容API"
+msgstr ""
 
 #: ../../backend/function_calling.ipynb:34
 msgid ""
 "Currently, RTP-LLM supports Function Calling capabilities for the "
 "following models:"
-msgstr "目前，RTP-LLM支持以下模型的函数调用功能："
+msgstr ""
 
 #: ../../backend/function_calling.ipynb:36
 msgid ""
 "qwen25/qwen3: Qwen 2.5 (e.g. Qwen/Qwen2.5-1.5B-Instruct, Qwen/Qwen2.5-7B-"
 "Instruct) and QwQ (i.e. Qwen/QwQ-32B), Qwen3-235B-A22B, etc."
 msgstr ""
-"qwen25/qwen3：Qwen 2.5（例如 Qwen/Qwen2.5-1.5B-Instruct、Qwen/Qwen2.5-7B-"
-"Instruct）和 QwQ（即 Qwen/QwQ-32B）、Qwen3-235B-A22B 等。"
 
 #: ../../backend/function_calling.ipynb:37
-#, fuzzy
 msgid "Kimi_k2"
-msgstr "Kimi_k2"
+msgstr ""
 
 #: ../../backend/function_calling.ipynb:38
 msgid "Qwen3-Coder"
-msgstr "Qwen3-Coder"
+msgstr ""
 
 #: ../../backend/function_calling.ipynb:50
 msgid "Define Tools for Function Call"
-msgstr "定义函数调用的工具"
+msgstr ""
 
 #: ../../backend/function_calling.ipynb:52
 msgid ""
 "Below is a Python snippet that shows how to define a tool as a "
 "dictionary. The dictionary includes a tool name, a description, and "
 "property defined Parameters."
-msgstr "下面是一个Python代码片段，展示如何将工具定义为字典。该字典包括工具名称、描述和属性定义的参数。"
+msgstr ""
 
 #: ../../backend/function_calling.ipynb:102
 msgid "Define Messages"
-msgstr "定义消息"
+msgstr ""
 
 #: ../../backend/function_calling.ipynb:132
 msgid "Initialize the Client"
-msgstr "初始化客户端"
+msgstr ""
 
 #: ../../backend/function_calling.ipynb:155
 msgid "Non-Streaming Request"
-msgstr "非流式请求"
+msgstr ""
 
 #: ../../backend/function_calling.ipynb:191
 #: ../../backend/function_calling.ipynb:267
 msgid "Handle Tools"
-msgstr "处理工具"
+msgstr ""
 
 #: ../../backend/function_calling.ipynb:193
 #: ../../backend/function_calling.ipynb:269
@@ -93,21 +88,21 @@ msgid ""
 "When the engine determines it should call a particular tool, it will "
 "return arguments or partial arguments through the response. You can parse"
 " these arguments and later invoke the tool accordingly."
-msgstr "当引擎确定应该调用某个特定工具时，它将通过响应返回参数或部分参数。您可以解析这些参数，然后相应地调用工具。"
+msgstr ""
 
 #: ../../backend/function_calling.ipynb:220
 msgid "Streaming Request"
-msgstr "流式请求"
+msgstr ""
 
 #: ../../backend/function_calling.ipynb:301
 msgid "Define a Tool Function"
-msgstr "定义工具函数"
+msgstr ""
 
 #: ../../backend/function_calling.ipynb:330
 msgid "Execute the Tool"
-msgstr "执行工具"
+msgstr ""
 
 #: ../../backend/function_calling.ipynb:369
 msgid "Send Results Back to Model"
-msgstr "将结果发送回模型"
+msgstr ""
 

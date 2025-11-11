@@ -31,13 +31,44 @@ FlexLB consists of four main modules:
 ### Prerequisites
 
 - Java 8 or higher
-- Maven 3.6+
+- Maven 3.6+ (optional, project includes Maven Wrapper)
 - ZooKeeper (optional, for master election)
 
 ### Build
 
+This project includes Maven Wrapper, so you don't need to install Maven separately.
+
+#### Using Maven Wrapper (Recommended)
+
+**Unix/Linux/macOS:**
+```bash
+./mvnw clean package -DskipTests
+```
+
+**Windows:**
+```bash
+mvnw.cmd clean package -DskipTests
+```
+
+#### Using System Maven
 ```bash
 mvn clean package -DskipTests
+```
+
+#### Maven Wrapper Benefits
+- **Environment Consistency**: Ensures all developers use the same Maven version
+- **Simplified CI/CD**: No need to pre-install Maven in build environments
+- **Version Lock**: Project specifies the exact Maven version, avoiding compatibility issues
+
+#### Maven Wrapper Files
+The following Maven Wrapper files are included in the project (do not delete):
+```
+├── mvnw              # Unix/Linux/macOS script
+├── mvnw.cmd          # Windows script
+└── .mvn/
+    └── wrapper/
+        ├── maven-wrapper.jar        # Core Maven Wrapper JAR
+        └── maven-wrapper.properties # Configuration file
 ```
 
 ### Configuration
@@ -116,8 +147,6 @@ FlexLB supports various configuration options through environment variables and 
 - **Load Balancing Strategy**: Configure through `WHALE_MASTER_CONFIG`
 - **Backend Services**: Configure through `MODEL_SERVICE_CONFIG`
 - **ZooKeeper Settings**: Configure through `WHALE_SYNC_LB_CONSISTENCY_CONFIG`
-
-See [Configuration Guide](docs/configuration.md) for detailed configuration options.
 
 ## Monitoring
 

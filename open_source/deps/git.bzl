@@ -10,9 +10,9 @@ def git_deps():
     git_repository(
         name = "aiter_src",
         remote = "https://github.com/ROCm/aiter.git",
-        commit = "0884818336b46c458440cb7572c9ecff02b7034e", # MLA merge to main (#496)
+        commit = "007fe7aa070d827bbdad398a578f403057a34e87", # add several ds shapes to fp4 tuned config (#1131)
         recursive_init_submodules = True,
-        patches = ["//3rdparty/aiter:rtp-llm.patch", "//3rdparty/aiter:0003-gemm_tune.patch"],
+        patches = ["//3rdparty/aiter:aiter.patch", "//3rdparty/aiter:gemm_a8w8.patch"],
         patch_cmds = [
             "echo 'from aiter.jit.core import compile_ops, get_args_of_build, build_module, get_module' >> build_aiter_module.py",
             "echo 'from typing import Dict' >> build_aiter_module.py",
@@ -52,17 +52,22 @@ def git_deps():
             "echo '                         torch_exclude,' >> build_aiter_module.py",
             "echo '    )' >> build_aiter_module.py",
             "echo 'if __name__ == \"__main__\":' >> build_aiter_module.py",
+            "echo '    build_aiter_module(\"module_aiter_enum\")' >> build_aiter_module.py",
             "echo '    build_aiter_module(\"module_custom_all_reduce\")' >> build_aiter_module.py",
-            "echo '    # build_aiter_module(\"module_attention\")' >> build_aiter_module.py",
-            "echo '    # build_aiter_module(\"module_norm\")' >> build_aiter_module.py",
-            "echo '    # build_aiter_module(\"module_cache\")' >> build_aiter_module.py",
-            "echo '    # build_aiter_module(\"module_mha_fwd\")' >> build_aiter_module.py",
+            "echo '    build_aiter_module(\"module_norm\")' >> build_aiter_module.py",
+            "echo '    build_aiter_module(\"module_rmsnorm\")' >> build_aiter_module.py",
+            "echo '    build_aiter_module(\"module_mha_fwd\")' >> build_aiter_module.py",
             "echo '    build_aiter_module(\"module_gemm_a8w8_blockscale\")' >> build_aiter_module.py",
             "echo '    build_aiter_module(\"module_quant\")' >> build_aiter_module.py",
+            "echo '    build_aiter_module(\"module_smoothquant\")' >> build_aiter_module.py",
             "echo '    build_aiter_module(\"module_moe_sorting\")' >> build_aiter_module.py",
             "echo '    build_aiter_module(\"module_moe_asm\")' >> build_aiter_module.py",
             "echo '    build_aiter_module(\"module_pa\")' >> build_aiter_module.py",
-            "echo '    build_aiter_module(\"module_moe\")' >> build_aiter_module.py",
+            "echo '    build_aiter_module(\"module_attention_asm\")' >> build_aiter_module.py",
+            "echo '    build_aiter_module(\"module_activation\")' >> build_aiter_module.py",
+            "echo '    build_aiter_module(\"module_gemm_a8w8_bpreshuffle\")' >> build_aiter_module.py",
+            "echo '    build_aiter_module(\"module_gemm_a8w8\")' >> build_aiter_module.py",
+            "echo '    build_aiter_module(\"module_moe_ck2stages\")' >> build_aiter_module.py",
             "echo 'echo \"building mla kernel\"' >> build_mla_kernel.sh",
             "echo 'so_file=\"./csrc/cpp_itfs/mla/asm_mla_decode_fwd_torch_lib.so\"' >> build_mla_kernel.sh",
             "echo 'if [ -f $so_file ]; then' >> build_mla_kernel.sh",
@@ -90,6 +95,7 @@ def git_deps():
         patches = [
             "//patches/rules_python:0001-add-extra-data.patch",
             "//patches/rules_python:0002-remove-import-from-rules_cc.patch",
+            "//patches/rules_python:0001-xx.patch",
         ],
     )
 
@@ -386,4 +392,14 @@ def git_deps():
             "if [ -d deep_gemm/include/deep_gemm ]; then cp -r deep_gemm/include/deep_gemm/* deep_gemm_headers_temp/deep_gemm/; fi || true",
             "rm -rf deep_gemm/include && mv deep_gemm_headers_temp deep_gemm/include",
         ],
+    )
+
+    new_git_repository(
+        name = "flash-linear-attention",
+        remote = "https://github.com/fla-org/flash-linear-attention.git",
+        commit = "0d3e202a9c5a1a829ac3fe7c0a0c5fec0bf8f00b",
+        patches = [
+            "//3rdparty/flash_linear_attention:0001-modify-init.patch",
+        ],
+        build_file = str(Label("//3rdparty/flash_linear_attention:fla.BUILD")),
     )

@@ -67,7 +67,6 @@ FrontendWorker.inference = fake_inference
 
 BackendServer.start = fake_start
 BackendServer.ready = fake_ready
-BackendServer.model_runtime_meta = lambda x: "fake_model"
 
 OpenaiEndpoint.__init__ = fake_init
 OpenaiEndpoint.chat_completion = fake_inference
@@ -180,7 +179,6 @@ class ConcurrencyLimitTest(TestCase):
         time.sleep(10)
         self.assertEqual(self.get_available_concurrency(), 16)
 
-        os.environ["LOAD_BALANCE"] = "1"
         self.assertEqual(self.get_backend_available_concurrency(), 60)
         excepted = {
             "available_kv_cache": 0,

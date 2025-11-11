@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-09-12 17:38+0800\n"
+"POT-Creation-Date: 2025-10-20 10:08+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -21,7 +21,7 @@ msgstr ""
 
 #: ../../backend/quantization.md:1
 msgid "Quantization"
-msgstr "量化"
+msgstr ""
 
 #: ../../backend/quantization.md:2
 msgid ""
@@ -30,59 +30,59 @@ msgid ""
 "accelerate the decoding phase. Known issues: Weight Only quantization may"
 " cause performance degradation for long sequences during the Prefill "
 "phase Currently, all quantization methods are supported in SM70 and above"
-msgstr "RTP-LLM目前支持仅权重量化，包括int8和int4。它可以显著减少显存占用并加速解码阶段。已知问题：仅权重量化可能会在Prefill阶段对长序列造成性能下降。目前，所有量化方法都支持SM70及以上版本。"
+msgstr ""
 
 #: ../../backend/quantization.md:6
 msgid "Support Quant"
-msgstr "支持量化"
+msgstr ""
 
 #: ../../backend/quantization.md
 msgid "**CardType**"
-msgstr "**卡类型**"
+msgstr ""
 
 #: ../../backend/quantization.md
 msgid "**Int8WeightOnly**"
-msgstr "**Int8仅权重**"
+msgstr ""
 
 #: ../../backend/quantization.md
 msgid "**Int8W8A8**"
-msgstr "**Int8W8A8**"
+msgstr ""
 
 #: ../../backend/quantization.md
 msgid "**BlockWiseFp8**"
-msgstr "**BlockWiseFp8**"
+msgstr ""
 
 #: ../../backend/quantization.md
 msgid "**PerTensorFp8**"
-msgstr "**PerTensorFp8**"
+msgstr ""
 
 #: ../../backend/quantization.md
 msgid "**INT4**"
-msgstr "**INT4**"
+msgstr ""
 
 #: ../../backend/quantization.md
 msgid "**PTPC**"
-msgstr "**PTPC**"
+msgstr ""
 
 #: ../../backend/quantization.md
 msgid "**CUDA**"
-msgstr "**CUDA**"
+msgstr ""
 
 #: ../../backend/quantization.md
 msgid "✅"
-msgstr "✅"
+msgstr ""
 
 #: ../../backend/quantization.md
 msgid "❌"
-msgstr "❌"
+msgstr ""
 
 #: ../../backend/quantization.md
 msgid "**AMD**"
-msgstr "**AMD**"
+msgstr ""
 
 #: ../../backend/quantization.md:13
 msgid "GPTQ/AWQ"
-msgstr "GPTQ/AWQ"
+msgstr ""
 
 #: ../../backend/quantization.md:14
 msgid ""
@@ -90,59 +90,59 @@ msgid ""
 "advance(use AutoGPTQForCausalLM/AutoAWQForCausalLM).<br> The model config"
 " needs to contain quantization related config, containing bits, "
 "group_size, quant_method.<br> GPTQ config example:"
-msgstr "支持int4和int8。模型权重需要预先量化（使用AutoGPTQForCausalLM/AutoAWQForCausalLM）。<br>模型配置需要包含量化相关配置，包括bits、group_size、quant_method。<br> GPTQ配置示例:"
+msgstr ""
 
 #: ../../backend/quantization.md:24
 msgid "Example AWQ config:"
-msgstr "AWQ配置示例:"
+msgstr ""
 
 #: ../../backend/quantization.md:33
 msgid "W8A8"
-msgstr "W8A8"
+msgstr ""
 
 #: ../../backend/quantization.md:34
 msgid ""
 "smoothquant and omniquant are supported You need to include a file called"
 " \"smoothquant.ini\" under the ckpt path, or write config"
-msgstr "支持smoothquant和omniquant。您需要在ckpt路径下包含一个名为\"smoothquant.ini\"的文件，或编写配置"
+msgstr ""
 
 #: ../../backend/quantization.md:43
 msgid ""
 "Supports llama, qwen, starcoder. The name of the tensor stored in ckpt is"
 " referred to the associated model file."
-msgstr "支持llama、qwen、starcoder。ckpt中存储的张量名称请参考相关的模型文件。"
+msgstr ""
 
 #: ../../backend/quantization.md:46
 msgid "BlockWiseFp8"
-msgstr "BlockWiseFp8"
+msgstr ""
 
 #: ../../backend/quantization.md:47
 msgid ""
 "Support Load Quant or PreQuantified.<br> You can use Load Quant by set "
 "args, Example<br>"
-msgstr "支持加载量化或预量化。<br>您可以通过设置参数来使用加载量化，例如<br>"
+msgstr ""
 
 #: ../../backend/quantization.md:53 ../../backend/quantization.md:75
 msgid ""
 "You can Provide PreQuantified Model Weight, The model config needs to "
 "contain quantization related config<br>"
-msgstr "您可以提供预量化的模型权重，模型配置需要包含量化相关配置<br>"
+msgstr ""
 
 #: ../../backend/quantization.md:68
 msgid "PerTensorFp8"
-msgstr "PerTensorFp8"
+msgstr ""
 
 #: ../../backend/quantization.md:69
 msgid ""
 "Support Load Quant or PreQuantified by TRT-LLM/TransformerEngine.<br> You"
 " can use Load Quant by set args, Example<br>"
-msgstr "支持通过TRT-LLM/TransformerEngine进行加载量化或预量化。<br>您可以通过设置参数来使用加载量化，例如<br>"
+msgstr ""
 
 #: ../../backend/quantization.md:84
 msgid "Int8WeightOnly"
-msgstr "Int8仅权重"
+msgstr ""
 
 #: ../../backend/quantization.md:85
 msgid "Support Load Quant.You can use Load Quant by set args, Example<br>"
-msgstr "支持加载量化。您可以通过设置参数来使用加载量化，例如<br>"
+msgstr ""
 

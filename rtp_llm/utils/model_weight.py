@@ -27,8 +27,13 @@ def w_half2(ts: List[torch.Tensor], inter_size: int):
 def concat_0(ts: List[torch.Tensor]) -> torch.Tensor:
     if len(ts) == 1:
         return ts[0]
-
-    return torch.concat(ts, dim=0).contiguous()
+    # torch.concat() dose not support fp8 in current rocm torch version
+    if ts[0].dtype in [torch.float8_e4m3fn, torch.float8_e4m3fnuz, torch.float8_e5m2, torch.float8_e5m2fnuz]:
+        dtype = ts[0].dtype
+        out_u8 = torch.concat([x.view(torch.uint8) for x in ts], dim=0).contiguous()
+        return out_u8.view(dtype)
+    else:
+        return torch.concat(ts, dim=0).contiguous()
 
 
 def concat_1(ts: List[torch.Tensor]) -> torch.Tensor:
@@ -38,7 +43,7 @@ def concat_1(ts: List[torch.Tensor]) -> torch.Tensor:
 
 
 def pad(ts: List[torch.Tensor], inter_padding_size: int, dim: int):
-    logging.debug(f"inter_padding_size: {inter_padding_size}, dim: {dim}")
+    logging.debug("inter_padding_size: %s, dim: %s", inter_padding_size, dim)
     if dim == 0:
         pad_shape = [inter_padding_size - ts[0].shape[0], ts[0].shape[1]]
     elif dim == 1:
@@ -268,7 +273,7 @@ def sp_moe_w1(
 
 
 def stack_(ts: List[torch.Tensor]):
-    return torch.stack(ts, dim=0)
+    return stack_0(ts)
 
 
 def stack_pad(ts: List[torch.Tensor], moe_inter_padding_size: int, dim: int):
@@ -297,15 +302,25 @@ def stack_moe_w1_pad(ts: List[torch.Tensor], moe_inter_padding_size: int, dim: i
         return x
     else:
         raise Exception("moe unknown padding dim: " + str(dim))
-
+    
+def stack_0(ts: List[torch.Tensor]) -> torch.Tensor:
+    if len(ts) == 1:
+        return ts[0].unsqueeze(0)
+    # torch.stack() does not support fp8 in current rocm torch version
+    if ts[0].dtype in [torch.float8_e4m3fn, torch.float8_e4m3fnuz, torch.float8_e5m2, torch.float8_e5m2fnuz]:
+        dtype = ts[0].dtype
+        out_u8 = torch.concat([x.view(torch.uint8).unsqueeze(0) for x in ts], dim=0).contiguous()
+        return out_u8.view(dtype)
+    else:
+        return torch.stack(ts, dim=0).contiguous()
 
 def stack_moe_w1(ts: List[torch.Tensor]):
     gate = ts[: len(ts) // 2]
     up = ts[len(ts) // 2 :]
     ws = []
     for w1, w3 in zip(gate, up):
-        ws.append(torch.concat([w1, w3], dim=0))
-    x = torch.stack(ws, dim=0)
+        ws.append(concat_0([w1, w3]))
+    x = stack_0(ws)
     return x
 
 
@@ -810,7 +825,12 @@ def transpose_q_rope(
 def pad_w13(ts: List[torch.Tensor], inter_padding_size: int, dim: int):
     w1 = pad([ts[0]], inter_padding_size, dim)
     w3 = pad([ts[1]], inter_padding_size, dim)
-    return torch.concat([w1, w3], dim=dim).contiguous()
+    if w1.dtype in [torch.float8_e4m3fn, torch.float8_e4m3fnuz, torch.float8_e5m2, torch.float8_e5m2fnuz]:
+        dtype = w1.dtype
+        out_u8 = torch.concat([w1.view(torch.uint8), w3.view(torch.uint8)], dim=dim).contiguous()
+        return out_u8.view(dtype)
+    else:
+        return torch.concat([w1, w3], dim=dim).contiguous()
 
 
 def transpose_w13(ts: List[torch.Tensor]):
@@ -830,7 +850,13 @@ def concat_w13(ts: List[torch.Tensor]):
 
 
 def concat_w13_2(ts: List[torch.Tensor]):
-    return torch.concat(ts, dim=0).contiguous()
+    # torch.concat() dose not support fp8 in current rocm torch version
+    if ts[0].dtype in [torch.float8_e4m3fn, torch.float8_e4m3fnuz, torch.float8_e5m2, torch.float8_e5m2fnuz]:
+        dtype = ts[0].dtype
+        out_u8 = torch.concat([x.view(torch.uint8) for x in ts], dim=0).contiguous()
+        return out_u8.view(dtype)
+    else:
+        return torch.concat(ts, dim=0).contiguous()
 
 
 def ffn_sp_neg1_w13(

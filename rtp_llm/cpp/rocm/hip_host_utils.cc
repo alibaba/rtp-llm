@@ -58,7 +58,7 @@ void throwRocmError(const char* const file, int const line, std::string const& i
     if (rtp_llm::StaticConfig::user_ft_core_dump_on_exception) {
         abort();
     }
-    throw FT_EXCEPTION(error_msg);
+    throw RTP_EXCEPTION(error_msg);
 }
 
 template<typename T>

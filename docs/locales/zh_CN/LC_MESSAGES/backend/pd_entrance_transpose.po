@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-09-12 17:38+0800\n"
+"POT-Creation-Date: 2025-10-20 10:08+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -21,11 +21,11 @@ msgstr ""
 
 #: ../../backend/pd_entrance_transpose.md:1
 msgid "PD Disaggregation Transpose"
-msgstr "PD分离反转"
+msgstr ""
 
 #: ../../backend/pd_entrance_transpose.md:3
 msgid "Background"
-msgstr "背景"
+msgstr ""
 
 #: ../../backend/pd_entrance_transpose.md:5
 msgid ""
@@ -39,7 +39,7 @@ msgid ""
 "the scenario where Prefill is the front-end stream receiver, the instance"
 " still needs to act as a relay to return the tokens output by the Decode "
 "instance to the user."
-msgstr "PD分离实现默认使用Prefill节点作为请求入口点。Prefill实例计算出第一个token后，需要将KV缓存传输到Decode实例。后续的token生成在Decode实例上完成，结果通过Prefill实例流式返回给用户。实际上，Prefill推理工作在计算出第一个token并将KV缓存传输到Decode实例后就完成了。然而，在Prefill作为前端流接收器的场景中，该实例仍需要充当中继，将Decode实例输出的token返回给用户。"
+msgstr ""
 
 #: ../../backend/pd_entrance_transpose.md:7
 msgid ""
@@ -56,11 +56,11 @@ msgid ""
 "Prefill instance. After the KV Cache is fully loaded, the Decode instance"
 " will compute subsequent tokens locally and stream the results back to "
 "the user."
-msgstr "为了解决这个问题，RTP-LLM提供了PD分离流接收器反转的功能，即将Decode实例作为请求入口点。在Decode前端流接收实现中，Decode实例会向Prefill实例发送异步loadCache RPC请求。Prefill实例接收到请求后，将开始计算第一个token，生成的KV缓存将按模型层为单位进行传输。每当一层的KV缓存计算完成时，Prefill实例将调用Decode实例的传输RPC接口，让其使用RDMA读取从Prefill实例读取相应的KV缓存块。KV缓存完全加载后，Decode实例将在本地计算后续token，并将结果流式返回给用户。"
+msgstr ""
 
 #: ../../backend/pd_entrance_transpose.md:9
 msgid "Configuration"
-msgstr "配置"
+msgstr ""
 
 #: ../../backend/pd_entrance_transpose.md:11
 msgid ""
@@ -68,4 +68,5 @@ msgid ""
 " to enable the PD inversion stream receiving capability, you need to "
 "configure the following environment variables when starting the "
 "Decode/Prefill instances:"
-msgstr "目前，PD反转在生产环境中默认是禁用的。如果您需要启用PD反转流接收功能，需要在启动Decode/Prefill实例时配置以下环境变量："
+msgstr ""
+

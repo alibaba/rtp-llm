@@ -14,6 +14,9 @@
 #include "rtp_llm/cpp/cuda/nccl/nccl_utils_torch.h"
 #include "rtp_llm/cpp/cuda/nccl/nccl_utils.h"
 
+#include "rtp_llm/cpp/devices/utils/DebugUtils.h"
+#include "rtp_llm/cpp/core/BufferHelper.h"
+
 // TODO(rocm): Idealy we just link compiler_rt for this symbol.
 extern "C" half __truncdfhf2(double a) {
     return (half)(float)a;
@@ -123,8 +126,9 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
     hipblas_mm_wrapper_->setStream(stream_);
     fmha_runner_.reset(new rocmFmhaWrapper());
     fmha_runner_->init(stream_);
-    moe_runner_.reset(new rocmMoeWrapper());
+    //moe_runner_.reset(new rocmMoeWrapper());
     ck_gemm_runner_.reset(new rocmCKGemmWrapper());
+    ck_w8a8_gelu_gemm_runner_.reset(new rocmCKW8A8GeluGemmWrapper());
 
     // select mla type
     if (params.mla_ops_type != MlaOpsType::AUTO) {
@@ -215,7 +219,7 @@ DevicePrepOutput ROCmDevice::prepareModelRun(const DevicePrepParams& params) {
 
 void ROCmDevice::copy(const CopyParams& params) {
     ROCM_CHECK_VALUE(params.src.type() == params.dst.type(),
-                     "copy dst[%d] and src[%d] need has same type.",
+                     "copy src[%d] and dst[%d] need has same type.",
                      params.src.type(),
                      params.dst.type());
 
@@ -421,7 +425,7 @@ SelectOutput ROCmDevice::select(const SelectParams& params) {
                                         output->data(),
                                         input.data(),
                                         (int*)params.index.data(),
-                                        (int)params.index.size(),
+                                        params.index.size(),
                                         num_selected_element,
                                         0,
                                         stream_);
@@ -641,5 +645,54 @@ void ROCmCommHook::hook_sync() const {
 //         }
 //     }
 // }
+
+BufferPtr ROCmDevice::mhaQKVGemm(const AttentionLayerParams& params) {
+    const auto& input      = params.input;
+    const auto& qkv_weight = params.weights.qkv_weight;
+
+    // typically local_head_num * size_per_head + 2 * local_head_num_kv * size_per_head
+    const auto qkv_merged_size = qkv_weight->kernel->shape()[1];
+
+    BufferPtr qkv;
+    if (!params.configs.fuse_qkv_add_bias && params.weights.qkv_weight && params.qscheme == QScheme::Qint8PerTensor) {        
+        BufferPtr D = allocateBuffer({DataType::TYPE_FP16, {input.shape()[0], qkv_weight->kernel->shape()[1]}});
+        OptionalConstBufferRef bias = std::nullopt;
+        if (qkv_weight->bias) {
+            bias = *(qkv_weight->bias);
+        }
+        GemmParams qkv_gemm_params{input, *(qkv_weight->kernel), bias, D, DataType::TYPE_FP16,
+                                   DataType::TYPE_FP16, TransposeOperation::NONE, TransposeOperation::NONE};
+        qkv = loraLinear(LoraLinearParams(qkv_gemm_params, params.common.lora_input.qkv_lora_input)).output;  
+    } else if (!params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias) {
+        ActivationParams act_params(ActivationType::Identity,
+                                    nullptr,
+                                    mayGetRef(params.weights.qkv_weight->bias),
+                                    std::nullopt,
+                                    std::nullopt,
+                                    std::nullopt, nullptr, false,
+                                    params.qscheme);
+        auto qkv_gemm_params = GemmParams(input, *(qkv_weight->kernel));                            
+        auto lora_linear_params = LoraLinearParams(qkv_gemm_params, params.common.lora_input.qkv_lora_input);                                                  
+        qkv = loraLinearWithActivation(LoraLinearWithActivationParams(lora_linear_params, act_params));     
+    } else {
+        auto qkv_gemm_params = GemmParams(input, *(qkv_weight->kernel));    
+        qkv = loraLinear(LoraLinearParams(qkv_gemm_params, params.common.lora_input.qkv_lora_input)).output;
+    }
+    printBufferData(*qkv, "qkv");
+    if (params.weights.q_norm_weight) {
+        RTP_LLM_CHECK_WITH_INFO(params.weights.k_norm_weight != nullptr,
+                                "q_norm_weight and k_norm_weight should both be provided");
+        RTP_LLM_CHECK_WITH_INFO(params.ln_params.norm_type == NormType::rmsnorm, "qkRmsNorm only support rmsnorm");
+        auto qk_rmsnorm_output = qkRmsNorm(QkRmsNormParams({qkv,
+                                                            *params.weights.q_norm_weight,
+                                                            *params.weights.k_norm_weight,
+                                                            params.ln_params.eps,
+                                                            params.configs.head_num,
+                                                            params.configs.kv_head_num,
+                                                            params.configs.size_per_head}));
+        printBufferData(*qkv, "qkv_after_qk_norm");
+    }
+    return qkv;
+}
 
 }  // namespace rtp_llm

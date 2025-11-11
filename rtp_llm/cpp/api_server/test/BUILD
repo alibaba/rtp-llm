@@ -61,6 +61,7 @@ cc_binary(
     srcs = [],
     deps = [
         ":api_server_unittest_lib",
+        "//rtp_llm/cpp/pybind:th_compute_lib",
     ],
     linkshared = 1,
 )

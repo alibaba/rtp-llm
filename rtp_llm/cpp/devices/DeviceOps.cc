@@ -283,6 +283,10 @@ void DeviceOps::noBlockCopy(const CopyParams& params) {
     copy(params);
 }
 
+void DeviceOps::noBlockCopy(const MultiCopyParams& params) {
+    multiCopy(params);
+}
+
 void DeviceOps::multiMergeCopy(const MultiMergeCopyParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
@@ -325,6 +329,10 @@ void DeviceOps::perfRangePop() const {}
 
 void DeviceOps::prepareCommBuffer(const PrepareCommBufferParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
+bool DeviceOps::checkNAN(const Buffer& input) {
+    return false;
 }
 
 }  // namespace rtp_llm

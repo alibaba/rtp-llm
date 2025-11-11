@@ -8,21 +8,21 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
-    <title>如何支持新模型 &#8212; RTP-LLM</title>
-  
-  
-  
+    <title>How to Support New Models &#8212; RTP-LLM</title>
+
+
+
   <script data-cfasync="false">
     document.documentElement.dataset.mode = localStorage.getItem("mode") || "";
     document.documentElement.dataset.theme = localStorage.getItem("theme") || "";
   </script>
-  
+
   <!-- Loaded before other Sphinx assets -->
   <link href="../_static/styles/theme.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
 <link href="../_static/styles/bootstrap.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
 <link href="../_static/styles/pydata-sphinx-theme.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
 
-  
+
   <link href="../_static/vendor/fontawesome/6.5.2/css/all.min.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
   <link rel="preload" as="font" type="font/woff2" crossorigin href="../_static/vendor/fontawesome/6.5.2/webfonts/fa-solid-900.woff2" />
 <link rel="preload" as="font" type="font/woff2" crossorigin href="../_static/vendor/fontawesome/6.5.2/webfonts/fa-brands-400.woff2" />
@@ -35,7 +35,7 @@
     <link rel="stylesheet" type="text/css" href="../_static/css/language-switcher.css?v=943557c0" />
     <link rel="stylesheet" type="text/css" href="../_static/css/custom_log.css" />
     <link rel="stylesheet" type="text/css" href="../_static/css/language-switcher.css?v=943557c0" />
-  
+
   <!-- Pre-loaded scripts that we'll load fully later -->
   <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=dfe6caa3a7d634c4db9b" />
 <link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=dfe6caa3a7d634c4db9b" />
@@ -55,11 +55,11 @@
     <link rel="icon" href="../_static/logo.ico"/>
     <link rel="index" title="索引" href="../genindex.html" />
     <link rel="search" title="搜索" href="../search.html" />
-    <link rel="next" title="推测解码" href="../backend/speculative_decoding.html" />
-    <link rel="prev" title="Embedding 模型" href="embedding_models.html" /> 
+    <link rel="next" title="Speculative Decoding" href="../backend/speculative_decoding.html" />
+    <link rel="prev" title="Embedding Models" href="embedding_models.html" />
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="zh-CN"/>
-    <meta name="docbuild:last-update" content="2025 年 09 月 25 日"/>
+    <meta name="docbuild:last-update" content="2025 年 11 月 09 日"/>
 <link
   rel="stylesheet"
   href="../_static/css/language-switcher.css"
@@ -67,30 +67,30 @@
 <script src="../_static/js/language-switcher.js"></script>
 
   </head>
-  
-  
+
+
   <body data-bs-spy="scroll" data-bs-target=".bd-toc-nav" data-offset="180" data-bs-root-margin="0px 0px -60%" data-default-mode="">
 
-  
-  
+
+
   <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">Skip to main content</a></div>
-  
+
   <div id="pst-scroll-pixel-helper"></div>
-  
+
   <button type="button" class="btn rounded-pill" id="pst-back-to-top">
     <i class="fa-solid fa-arrow-up"></i>Back to top</button>
 
-  
+
   <input type="checkbox"
           class="sidebar-toggle"
           id="pst-primary-sidebar-checkbox"/>
   <label class="overlay overlay-primary" for="pst-primary-sidebar-checkbox"></label>
-  
+
   <input type="checkbox"
           class="sidebar-toggle"
           id="pst-secondary-sidebar-checkbox"/>
   <label class="overlay overlay-secondary" for="pst-secondary-sidebar-checkbox"></label>
-  
+
   <div class="search-button__wrapper">
     <div class="search-button__overlay"></div>
     <div class="search-button__search-container">
@@ -116,49 +116,49 @@
   <aside id="bd-header-version-warning" class="d-none d-print-none" aria-label="Version warning"></aside>
 </div>
 
-  
+
     <header class="bd-header navbar navbar-expand-lg bd-navbar d-print-none">
     </header>
-  
+
 
   <div class="bd-container">
     <div class="bd-container__inner bd-page-width">
-      
-      
-      
-      <div class="bd-sidebar-primary bd-sidebar">
-        
 
-  
+
+
+      <div class="bd-sidebar-primary bd-sidebar">
+
+
+
   <div class="sidebar-header-items sidebar-primary__section">
-    
-    
-    
-    
+
+
+
+
   </div>
-  
+
     <div class="sidebar-primary-items__start sidebar-primary__section">
         <div class="sidebar-primary-item">
 
-  
-    
-  
+
+
+
 
 <a class="navbar-brand logo" href="../index.html">
-  
-  
-  
-  
-  
-    
-    
-      
-    
-    
+
+
+
+
+
+
+
+
+
+
     <img src="../_static/logo.png" class="logo__image only-light" alt="RTP-LLM - Home"/>
     <script>document.write(`<img src="../_static/logo.png" class="logo__image only-dark" alt="RTP-LLM - Home"/>`);</script>
-  
-  
+
+
 </a></div>
         <div class="sidebar-primary-item">
 
@@ -175,7 +175,7 @@
     <div class="bd-toc-item navbar-nav active">
         <p aria-level="2" class="caption" role="heading"><span class="caption-text">安装</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../start/install.html">安装 RTP-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../start/install.html">Install RTP-LLM</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">发布版本</span></p>
 <ul class="nav bd-sidenav">
@@ -183,11 +183,11 @@
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">基本用法</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../backend/send_request.html">发送请求</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../backend/openai_api_completions.html">OpenAI API - 文本生成/会话</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../backend/openai_api_vision.html">OpenAI API - 多模态</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../backend/openai_api_embeddings.html">OpenAI API - Embedding</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../backend/native_api.html">RTP-LLM Native API</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/send_request.html">Sending Requests</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/openai_api_completions.html">OpenAI APIs - Completions</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/openai_api_vision.html">OpenAI APIs - Vision</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/openai_api_embeddings.html">OpenAI APIs - Embedding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/native_api.html">RTP-LLM Native APIs</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">后端教程</span></p>
 <ul class="nav bd-sidenav">
@@ -197,77 +197,85 @@
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">高级后端配置</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../backend/server_arguments.html">服务器参数</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../backend/sampling_params.html">采样配置</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../backend/attention_backend.html">注意力后端</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/server_arguments.html">ServerArgs</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/sampling_params.html">Sampling Config</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/attention_backend.html">Attention Backend</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">支持的模型</span></p>
 <ul class="current nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="generative_models.html">大语言模型</a></li>
-<li class="toctree-l1"><a class="reference internal" href="multimodal_language_models.html">多模态语言模型</a></li>
-<li class="toctree-l1"><a class="reference internal" href="embedding_models.html">Embedding 模型</a></li>
-<li class="toctree-l1 current active"><a class="current reference internal" href="#">如何支持新模型</a></li>
+<li class="toctree-l1"><a class="reference internal" href="generative_models.html">Large Language Models</a></li>
+<li class="toctree-l1"><a class="reference internal" href="multimodal_language_models.html">Multimodal Language Models</a></li>
+<li class="toctree-l1"><a class="reference internal" href="embedding_models.html">Embedding Models</a></li>
+<li class="toctree-l1 current active"><a class="current reference internal" href="#">How to Support New Models</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">高级功能</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../backend/speculative_decoding.html">推测解码</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../backend/reuse_kv_cache.html">重用缓存</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/reuse_kv_cache.html">ReuseCache</a></li>
 
-<li class="toctree-l1"><a class="reference internal" href="../backend/function_calling.html">工具和函数调用</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../backend/quantization.html">量化</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../backend/lora.html">LoRA 服务</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../backend/pd_disaggregation.html">PD分离</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/function_calling.html">Tool and Function Calling</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/quantization.html">Quantization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/lora.html">LoRA Serving</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/pd_disaggregation.html">PD Disaggregation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/logits_processor.html">LogitsProcessor</a></li>
+
+
+
+
+
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">RTP-LLM 路由器</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../backend/flexlb.html">FlexLB（弹性负载均衡器）- 主节点</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../backend/flexlb.html">FlexLB (Flexible Load Balancer) - Master Role</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Benchmark</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../benchmark/benchmark.html">RTP-LLM 性能基准测试工具</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../benchmark/benchmark.html">RTP-LLM Performance Benchmark Tool</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">参考文献</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../references/general.html">通用指南</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../references/developer.html">开发者参考</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../references/general.html">General Guidance</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../references/developer.html">Developer Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../references/cli/Guide.html">CLI 使用指南</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../README.html">Documentation Manual</a></li>
 </ul>
 
     </div>
 </nav></div>
     </div>
-  
-  
+
+
   <div class="sidebar-primary-items__end sidebar-primary__section">
   </div>
-  
+
   <div id="rtd-footer-container"></div>
 
 
       </div>
-      
+
       <main id="main-content" class="bd-main" role="main">
-        
-        
+
+
 
 <div class="sbt-scroll-pixel-helper"></div>
 
           <div class="bd-content">
             <div class="bd-article-container">
-              
+
               <div class="bd-header-article d-print-none">
 <div class="header-article-items header-article__inner">
-  
+
     <div class="header-article-items__start">
-      
+
         <div class="header-article-item"><button class="sidebar-toggle primary-toggle btn btn-sm" title="Toggle primary sidebar" data-bs-placement="bottom" data-bs-toggle="tooltip">
   <span class="fa-solid fa-bars"></span>
 </button></div>
-      
+
     </div>
-  
-  
+
+
     <div class="header-article-items__end">
-      
+
         <div class="header-article-item">
 
 <div class="article-header-buttons">
@@ -281,15 +289,15 @@
     <i class="fab fa-github"></i>
   </button>
   <ul class="dropdown-menu">
-      
-      
-      
+
+
+
       <li><a href="https://github.com/alibaba/rtp-llm" target="_blank"
    class="btn btn-sm btn-source-repository-button dropdown-item"
    title="源码库"
    data-bs-placement="left" data-bs-toggle="tooltip"
 >
-  
+
 
 <span class="btn__icon-container">
   <i class="fab fa-github"></i>
@@ -297,16 +305,16 @@
 <span class="btn__text-container">Repository</span>
 </a>
 </li>
-      
-      
-      
-      
+
+
+
+
       <li><a href="https://github.com/alibaba/rtp-llm/blob/main/supported_models/support_new_models.md?plain=1" target="_blank"
    class="btn btn-sm btn-source-file-button dropdown-item"
    title="Show source"
    data-bs-placement="left" data-bs-toggle="tooltip"
 >
-  
+
 
 <span class="btn__icon-container">
   <i class="fas fa-code"></i>
@@ -314,16 +322,16 @@
 <span class="btn__text-container">Show source</span>
 </a>
 </li>
-      
-      
-      
-      
+
+
+
+
       <li><a href="https://github.com/alibaba/rtp-llm/edit/main/supported_models/support_new_models.md" target="_blank"
    class="btn btn-sm btn-source-edit-button dropdown-item"
    title="Suggest edit"
    data-bs-placement="left" data-bs-toggle="tooltip"
 >
-  
+
 
 <span class="btn__icon-container">
   <i class="fas fa-pencil-alt"></i>
@@ -331,16 +339,16 @@
 <span class="btn__text-container">Suggest edit</span>
 </a>
 </li>
-      
-      
-      
-      
+
+
+
+
       <li><a href="https://github.com/alibaba/rtp-llm/issues/new?title=Issue%20on%20page%20%2Fsupported_models/support_new_models.html&body=Your%20issue%20content%20here." target="_blank"
    class="btn btn-sm btn-source-issues-button dropdown-item"
    title="创建议题"
    data-bs-placement="left" data-bs-toggle="tooltip"
 >
-  
+
 
 <span class="btn__icon-container">
   <i class="fas fa-lightbulb"></i>
@@ -348,7 +356,7 @@
 <span class="btn__text-container">Open issue</span>
 </a>
 </li>
-      
+
   </ul>
 </div>
 
@@ -362,15 +370,15 @@
     <i class="fas fa-download"></i>
   </button>
   <ul class="dropdown-menu">
-      
-      
-      
+
+
+
       <li><a href="../_sources/supported_models/support_new_models.md" target="_blank"
    class="btn btn-sm btn-download-source-button dropdown-item"
    title="下载源文件"
    data-bs-placement="left" data-bs-toggle="tooltip"
 >
-  
+
 
 <span class="btn__icon-container">
   <i class="fas fa-file"></i>
@@ -378,17 +386,17 @@
 <span class="btn__text-container">.md</span>
 </a>
 </li>
-      
-      
-      
-      
+
+
+
+
       <li>
 <button onclick="window.print()"
   class="btn btn-sm btn-download-pdf-button dropdown-item"
   title="列印成 PDF"
   data-bs-placement="left" data-bs-toggle="tooltip"
 >
-  
+
 
 <span class="btn__icon-container">
   <i class="fas fa-file-pdf"></i>
@@ -396,7 +404,7 @@
 <span class="btn__text-container">.pdf</span>
 </button>
 </li>
-      
+
   </ul>
 </div>
 
@@ -408,7 +416,7 @@
   title="全屏模式"
   data-bs-placement="bottom" data-bs-toggle="tooltip"
 >
-  
+
 
 <span class="btn__icon-container">
   <i class="fas fa-expand"></i>
@@ -440,77 +448,98 @@ document.write(`
     <span class="fa-solid fa-list"></span>
 </button>
 </div></div>
-      
+
     </div>
-  
+
 </div>
 </div>
-              
-              
+
+
 
 <div id="jb-print-docs-body" class="onlyprint">
-    <h1>如何支持新模型</h1>
+    <h1>How to Support New Models</h1>
     <!-- Table of contents -->
     <div id="print-main-content">
         <div id="jb-print-toc">
-            
+
             <div>
                 <h2> 目录 </h2>
             </div>
             <nav aria-label="Page">
                 <ul class="visible nav section-nav flex-column">
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#how-to-support-a-new-language-model">如何支持新语言模型</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#how-to-support-a-new-multimodal-large-language-model">如何支持新的多模态大语言模型</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#test-the-correctness">测试正确性</a><ul class="visible nav section-nav flex-column">
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#interactive-debugging">交互式调试</a></li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#add-the-model-to-the-test-suite">将模型添加到测试套件</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#how-to-support-a-new-language-model">How to Support a New Language Model</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#how-to-support-a-new-multimodal-large-language-model">How to Support a New Multimodal Large Language Model</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#test-the-correctness">Test the Correctness</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#interactive-debugging">Interactive Debugging</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#add-the-model-to-the-test-suite">Add the Model to the Test Suite</a></li>
 </ul>
 </li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#port-a-model-from-vllm-to-rtp-llm">将模型从vLLM移植到RTP-LLM</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#registering-an-external-model-implementation">注册外部模型实现</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#port-a-model-from-vllm-to-rtp-llm">Port a Model from vLLM to RTP-LLM</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#registering-an-external-model-implementation">Registering an External Model Implementation</a></li>
 </ul>
             </nav>
         </div>
     </div>
 </div>
 
-              
-                
+
+
 <div id="searchbox"></div>
                 <article class="bd-article">
-                  
+
   <section class="tex2jax_ignore mathjax_ignore" id="how-to-support-new-models">
-<h1>如何支持新模型<a class="headerlink" href="#how-to-support-new-models" title="Link to this heading">#</a></h1>
-<p>本文档解释了如何在RTP-LLM中添加对新语言模型和多模态大语言模型(MLLMs)的支持。它还涵盖了如何测试新模型和注册外部实现。</p>
+<h1>How to Support New Models<a class="headerlink" href="#how-to-support-new-models" title="Link to this heading">#</a></h1>
+<p>This document explains how to add support for new language models and multimodal large language models (MLLMs) in
+RTP-LLM. It also covers how to test new models and register external implementations.</p>
 <section id="how-to-support-a-new-language-model">
-<h2>如何支持新语言模型<a class="headerlink" href="#how-to-support-a-new-language-model" title="Link to this heading">#</a></h2>
-<p>要在RTP-LLM中支持新模型，您只需要在<a class="reference external" href="http://gitlab.alibaba-inc.com/foundation_models/RTP-LLM/tree/main/rtp_llm/models_py/">RTP-LLM模型目录</a>下添加一个文件。您可以从现有的模型实现中学习，并为您的模型创建一个新文件。对于大多数模型，您应该能够找到一个类似的模型作为起点（例如，从Llama开始）。另请参考<a class="reference internal" href="#port-a-model-from-vllm-to-rtp-llm"><span class="std std-ref">如何将模型从vLLM移植到RTP-LLM</span></a></p>
+<h2>How to Support a New Language Model<a class="headerlink" href="#how-to-support-a-new-language-model" title="Link to this heading">#</a></h2>
+<p>To support a new model in RTP-LLM, you only need to add a single file under
+the <a class="reference external" href="http://gitlab.alibaba-inc.com/foundation_models/RTP-LLM/tree/main/rtp_llm/models_py/">RTP-LLM Models Directory</a>. You can learn
+from existing model implementations and create a new file for your model. For most models, you should be able to find a
+similar model to start with (e.g., starting from Llama). Also refer how
+to <a class="reference internal" href="#port-a-model-from-vllm-to-rtp-llm"><span class="std std-ref">port a Model from vLLM to RTP-LLM</span></a></p>
 </section>
 <section id="how-to-support-a-new-multimodal-large-language-model">
-<h2>如何支持新的多模态大语言模型<a class="headerlink" href="#how-to-support-a-new-multimodal-large-language-model" title="Link to this heading">#</a></h2>
-<p>在RTP-LLM中支持新的多模态大语言模型(MLLM)，除了标准的LLM支持外，还有几个关键组件：</p>
+<h2>How to Support a New Multimodal Large Language Model<a class="headerlink" href="#how-to-support-a-new-multimodal-large-language-model" title="Link to this heading">#</a></h2>
+<p>To support a new multimodal large language model (MLLM) in RTP-LLM, there are several key components in addition to the
+standard LLM support:</p>
 <ol class="arabic simple">
-<li><p><strong>将您的新模型注册为多模态模型</strong>：扩展<a class="reference external" href="http://gitlab.alibaba-inc.com/foundation_models/RTP-LLM/blob/0ab3f437aba729b348a683ab32b35b214456efc7/python/RTP-LLM/srt/configs/model_config.py#L561">model_config.py</a>中的<code class="docutils literal notranslate"><span class="pre">is_multimodal_model</span></code>函数，使您的模型返回<code class="docutils literal notranslate"><span class="pre">True</span></code>。</p></li>
-<li><p><strong>注册新的聊天模板</strong> 请参见<a class="reference external" href="http://gitlab.alibaba-inc.com/foundation_models/RTP-LLM/blob/86a779dbe9e815c02f71ea82574608f6eae016b5/python/RTP-LLM/srt/conversation.py">conversation.py</a></p></li>
-<li><p><strong>多模态数据处理器</strong>：定义一个继承自<code class="docutils literal notranslate"><span class="pre">BaseMultimodalProcessor</span></code>的新<code class="docutils literal notranslate"><span class="pre">Processor</span></code>类，并将此处理器注册为您的模型的专用处理器。详见<a class="reference external" href="http://gitlab.alibaba-inc.com/foundation_models/RTP-LLM/blob/main/python/RTP-LLM/srt/managers/multimodal_processor.py">multimodal_processor.py</a>。</p></li>
-<li><p><strong>处理多模态token</strong>：为您的新模型实现一个<code class="docutils literal notranslate"><span class="pre">pad_input_ids</span></code>函数。在此函数中，提示中的多模态token应被扩展（如有必要）并用多模态数据哈希填充，以便RTP-LLM能够通过<code class="docutils literal notranslate"><span class="pre">RadixAttention</span></code>识别不同的多模态数据。</p></li>
-<li><p><strong>适应视觉注意力</strong>：使用RTP-LLM的<code class="docutils literal notranslate"><span class="pre">VisionAttention</span></code>来适配ViT的多头<code class="docutils literal notranslate"><span class="pre">Attention</span></code>。</p></li>
+<li><p><strong>Register your new model as multimodal</strong>:
+Extend <code class="docutils literal notranslate"><span class="pre">is_multimodal_model</span></code>
+in <a class="reference external" href="http://gitlab.alibaba-inc.com/foundation_models/RTP-LLM/blob/0ab3f437aba729b348a683ab32b35b214456efc7/python/RTP-LLM/srt/configs/model_config.py#L561">model_config.py</a>
+to return <code class="docutils literal notranslate"><span class="pre">True</span></code> for your model.</p></li>
+<li><p><strong>Register a new chat-template</strong>
+See <a class="reference external" href="http://gitlab.alibaba-inc.com/foundation_models/RTP-LLM/blob/86a779dbe9e815c02f71ea82574608f6eae016b5/python/RTP-LLM/srt/conversation.py">conversation.py</a></p></li>
+<li><p><strong>Multimodal Data Processor</strong>:
+Define a new <code class="docutils literal notranslate"><span class="pre">Processor</span></code> class that inherits from <code class="docutils literal notranslate"><span class="pre">BaseMultimodalProcessor</span></code> and register this processor as your
+model’s dedicated processor.
+See <a class="reference external" href="http://gitlab.alibaba-inc.com/foundation_models/RTP-LLM/blob/main/python/RTP-LLM/srt/managers/multimodal_processor.py">multimodal_processor.py</a>
+for more details.</p></li>
+<li><p><strong>Handle Multimodal Tokens</strong>:
+Implement a <code class="docutils literal notranslate"><span class="pre">pad_input_ids</span></code> function for your new model. In this function, multimodal tokens in the prompt should be
+expanded (if necessary) and padded with multimodal-data-hashes so that RTP-LLM can recognize different multimodal data
+with <code class="docutils literal notranslate"><span class="pre">RadixAttention</span></code>.</p></li>
+<li><p><strong>Adapt to Vision Attention</strong>:
+Adapt the multi-headed <code class="docutils literal notranslate"><span class="pre">Attention</span></code> of ViT with RTP-LLM’s <code class="docutils literal notranslate"><span class="pre">VisionAttention</span></code>.</p></li>
 </ol>
-<p>您可以参考<a class="reference external" href="http://gitlab.alibaba-inc.com/foundation_models/RTP-LLM/blob/main/python/RTP-LLM/srt/models/qwen2_vl.py">Qwen2VL</a>或其他mllm实现。这些模型演示了如何正确处理多模态和文本输入。</p>
-<p>您应该在本地将新的MLLM与Hugging Face模型进行测试。请参见<a class="reference external" href="http://gitlab.alibaba-inc.com/foundation_models/RTP-LLM/tree/main/benchmark/mmmu">mmmu</a>基准测试作为示例。</p>
+<p>You can refer to <a class="reference external" href="http://gitlab.alibaba-inc.com/foundation_models/RTP-LLM/blob/main/python/RTP-LLM/srt/models/qwen2_vl.py">Qwen2VL</a> or
+other mllm implementations. These models demonstrate how to correctly handle both multimodal and textual inputs.</p>
+<p>You should test the new MLLM locally against Hugging Face models. See the <a class="reference external" href="http://gitlab.alibaba-inc.com/foundation_models/RTP-LLM/tree/main/benchmark/mmmu">
+<code class="docutils literal notranslate"><span class="pre">mmmu</span></code></a> benchmark for an example.</p>
 </section>
 <section id="test-the-correctness">
-<h2>测试正确性<a class="headerlink" href="#test-the-correctness" title="Link to this heading">#</a></h2>
+<h2>Test the Correctness<a class="headerlink" href="#test-the-correctness" title="Link to this heading">#</a></h2>
 <section id="interactive-debugging">
-<h3>交互式调试<a class="headerlink" href="#interactive-debugging" title="Link to this heading">#</a></h3>
-<p>对于交互式调试，请比较Hugging Face/Transformers和RTP-LLM的输出。以下两个命令应产生相同的文本输出和非常相似的预填充logits：</p>
+<h3>Interactive Debugging<a class="headerlink" href="#interactive-debugging" title="Link to this heading">#</a></h3>
+<p>For interactive debugging, compare the outputs of Hugging Face/Transformers and RTP-LLM. The following two commands
+should give the same text output and very similar prefill logits:</p>
 <ul>
-<li><p>获取参考输出：</p>
+<li><p>Get the reference output:</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python3<span class="w"> </span>scripts/playground/reference_hf.py<span class="w"> </span>--model-path<span class="w"> </span><span class="o">[</span>new<span class="w"> </span>model<span class="o">]</span><span class="w"> </span>--model-type<span class="w"> </span><span class="o">{</span>text,mllm<span class="o">}</span>
 </pre></div>
 </div>
 </li>
-<li><p>获取RTP-LLM输出：</p>
+<li><p>Get the RTP-LLM output:</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python3<span class="w"> </span>-m<span class="w"> </span>RTP-LLM.bench_one_batch<span class="w"> </span>--correct<span class="w"> </span>--model<span class="w"> </span><span class="o">[</span>new<span class="w"> </span>model<span class="o">]</span>
 </pre></div>
 </div>
@@ -518,44 +547,50 @@ document.write(`
 </ul>
 </section>
 <section id="add-the-model-to-the-test-suite">
-<h3>将模型添加到测试套件<a class="headerlink" href="#add-the-model-to-the-test-suite" title="Link to this heading">#</a></h3>
-<p>为确保新模型得到良好维护，请通过在<a class="reference external" href="http://gitlab.alibaba-inc.com/foundation_models/RTP-LLM/blob/main/test/srt/models/test_generation_models.py">test_generation_models.py</a>文件中的<code class="docutils literal notranslate"><span class="pre">ALL_OTHER_MODELS</span></code>列表中包含该模型来将其添加到测试套件中，在本地机器上测试新模型，并在您的PR中报告在示范基准测试（GSM8K、MMLU、MMMU、MMMU-Pro等）上的结果。</p>
-<p>这是在本地机器上测试新模型的命令：</p>
+<h3>Add the Model to the Test Suite<a class="headerlink" href="#add-the-model-to-the-test-suite" title="Link to this heading">#</a></h3>
+<p>To ensure the new model is well maintained, add it to the test suite by including it in the <code class="docutils literal notranslate"><span class="pre">ALL_OTHER_MODELS</span></code> list in
+the <a class="reference external" href="http://gitlab.alibaba-inc.com/foundation_models/RTP-LLM/blob/main/test/srt/models/test_generation_models.py">test_generation_models.py</a>
+file, test the new model on your local machine and report the results on demonstrative benchmarks (GSM8K, MMLU, MMMU,
+MMMU-Pro, etc.) in your PR.</p>
+<p>This is the command to test a new model on your local machine:</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="nv">ONLY_RUN</span><span class="o">=</span>Qwen/Qwen2-1.5B<span class="w"> </span>python3<span class="w"> </span>-m<span class="w"> </span>unittest<span class="w"> </span>test_generation_models.TestGenerationModels.test_others
 </pre></div>
 </div>
 </section>
 </section>
 <section id="port-a-model-from-vllm-to-rtp-llm">
-<h2>将模型从vLLM移植到RTP-LLM<a class="headerlink" href="#port-a-model-from-vllm-to-rtp-llm" title="Link to this heading">#</a></h2>
-<p><a class="reference external" href="https://github.com/vllm-project/vllm/tree/main/vllm/model_executor/models">vLLM模型目录</a>是一个宝贵的资源，因为vLLM涵盖了众多模型。RTP-LLM重用了vLLM的接口和一些层，使得从vLLM移植模型到RTP-LLM变得更加容易。</p>
-<p>将模型从vLLM移植到RTP-LLM：</p>
+<h2>Port a Model from vLLM to RTP-LLM<a class="headerlink" href="#port-a-model-from-vllm-to-rtp-llm" title="Link to this heading">#</a></h2>
+<p>The <a class="reference external" href="https://github.com/vllm-project/vllm/tree/main/vllm/model_executor/models">vLLM Models Directory</a> is a valuable
+resource, as vLLM covers many models. RTP-LLM reuses vLLM’s interface and some layers, making it easier to port models
+from vLLM to RTP-LLM.</p>
+<p>To port a model from vLLM to RTP-LLM:</p>
 <ul class="simple">
-<li><p>比较这两个文件以获取指导：</p>
+<li><p>Compare these two files for guidance:</p>
 <ul>
-<li><p><a class="reference external" href="http://gitlab.alibaba-inc.com/foundation_models/RTP-LLM/blob/main/python/RTP-LLM/srt/models/llama.py">RTP-LLM Llama实现</a></p></li>
-<li><p><a class="reference external" href="https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/llama.py">vLLM Llama实现</a></p></li>
+<li><p><a class="reference external" href="http://gitlab.alibaba-inc.com/foundation_models/RTP-LLM/blob/main/python/RTP-LLM/srt/models/llama.py">RTP-LLM Llama Implementation</a></p></li>
+<li><p><a class="reference external" href="https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/llama.py">vLLM Llama Implementation</a></p></li>
 </ul>
 </li>
-<li><p>主要差异包括：</p>
+<li><p>The major differences include:</p>
 <ul>
-<li><p><strong>将vLLM的<code class="docutils literal notranslate"><span class="pre">Attention</span></code>替换为<code class="docutils literal notranslate"><span class="pre">RadixAttention</span></code></strong>（确保将<code class="docutils literal notranslate"><span class="pre">layer_id</span></code>传递给<code class="docutils literal notranslate"><span class="pre">RadixAttention</span></code>）。</p></li>
-<li><p><strong>将vLLM的<code class="docutils literal notranslate"><span class="pre">LogitsProcessor</span></code>替换为RTP-LLM的<code class="docutils literal notranslate"><span class="pre">LogitsProcessor</span></code>。</strong></p></li>
-<li><p><strong>将ViT的多头<code class="docutils literal notranslate"><span class="pre">Attention</span></code>替换为RTP-LLM的<code class="docutils literal notranslate"><span class="pre">VisionAttention</span></code>。</strong></p></li>
-<li><p><strong>替换其他vLLM层</strong>（如<code class="docutils literal notranslate"><span class="pre">RMSNorm</span></code>、<code class="docutils literal notranslate"><span class="pre">SiluAndMul</span></code>）为RTP-LLM层。</p></li>
-<li><p><strong>移除<code class="docutils literal notranslate"><span class="pre">Sample</span></code>。</strong></p></li>
-<li><p><strong>更改<code class="docutils literal notranslate"><span class="pre">forward()</span></code>函数</strong>并添加<code class="docutils literal notranslate"><span class="pre">forward_batch()</span></code>方法。</p></li>
-<li><p><strong>在末尾添加<code class="docutils literal notranslate"><span class="pre">EntryClass</span></code>。</strong></p></li>
-<li><p><strong>确保新实现仅使用RTP-LLM组件</strong>，不依赖任何vLLM组件。</p></li>
+<li><p><strong>Replace vLLM’s <code class="docutils literal notranslate"><span class="pre">Attention</span></code> with <code class="docutils literal notranslate"><span class="pre">RadixAttention</span></code></strong> (ensure you pass <code class="docutils literal notranslate"><span class="pre">layer_id</span></code> to <code class="docutils literal notranslate"><span class="pre">RadixAttention</span></code>).</p></li>
+<li><p><strong>Replace vLLM’s <code class="docutils literal notranslate"><span class="pre">LogitsProcessor</span></code> with RTP-LLM’s <code class="docutils literal notranslate"><span class="pre">LogitsProcessor</span></code>.</strong></p></li>
+<li><p><strong>Replace the multi-headed <code class="docutils literal notranslate"><span class="pre">Attention</span></code> of ViT with RTP-LLM’s <code class="docutils literal notranslate"><span class="pre">VisionAttention</span></code>.</strong></p></li>
+<li><p><strong>Replace other vLLM layers</strong> (such as <code class="docutils literal notranslate"><span class="pre">RMSNorm</span></code>, <code class="docutils literal notranslate"><span class="pre">SiluAndMul</span></code>) with RTP-LLM layers.</p></li>
+<li><p><strong>Remove <code class="docutils literal notranslate"><span class="pre">Sample</span></code>.</strong></p></li>
+<li><p><strong>Change the <code class="docutils literal notranslate"><span class="pre">forward()</span></code> functions</strong> and add a <code class="docutils literal notranslate"><span class="pre">forward_batch()</span></code> method.</p></li>
+<li><p><strong>Add <code class="docutils literal notranslate"><span class="pre">EntryClass</span></code></strong> at the end.</p></li>
+<li><p><strong>Ensure that the new implementation uses only RTP-LLM components</strong> and does not rely on any vLLM components.</p></li>
 </ul>
 </li>
 </ul>
-<p>注意：请确保将您的新模型添加到支持的模型文档中的支持模型列表中。</p>
+<p>Note: make sure you add your new model to the supported models list in the supported models documentation.</p>
 </section>
 <section id="registering-an-external-model-implementation">
-<h2>注册外部模型实现<a class="headerlink" href="#registering-an-external-model-implementation" title="Link to this heading">#</a></h2>
-<p>除了上述方法外，您还可以在启动服务器之前使用<code class="docutils literal notranslate"><span class="pre">ModelRegistry</span></code>注册您的新模型。这样您就可以在不修改源代码的情况下集成您的模型。</p>
-<p>例如：</p>
+<h2>Registering an External Model Implementation<a class="headerlink" href="#registering-an-external-model-implementation" title="Link to this heading">#</a></h2>
+<p>In addition to the methods above, you can register your new model with the <code class="docutils literal notranslate"><span class="pre">ModelRegistry</span></code> before launching the server.
+This allows you to integrate your model without modifying the source code.</p>
+<p>For example:</p>
 <div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">RTP</span><span class="o">-</span><span class="n">LLM</span><span class="o">.</span><span class="n">srt</span><span class="o">.</span><span class="n">models</span><span class="o">.</span><span class="n">registry</span> <span class="kn">import</span><span class="w"> </span><span class="nn">ModelRegistry</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">RTP</span><span class="o">-</span><span class="n">LLM</span><span class="o">.</span><span class="n">srt</span><span class="o">.</span><span class="n">entrypoints</span><span class="o">.</span><span class="n">http_server</span> <span class="kn">import</span><span class="w"> </span><span class="nn">launch_server</span>
 
@@ -579,20 +614,21 @@ document.write(`
 </pre></div>
 </div>
 <hr class="docutils" />
-<p>通过遵循这些指南，您可以为RTP-LLM添加对新语言模型和多模态大语言模型的支持，并确保它们经过充分测试且易于集成到系统中。</p>
+<p>By following these guidelines, you can add support for new language models and multimodal large language models in
+RTP-LLM and ensure they are thoroughly tested and easily integrated into the system.</p>
 </section>
 </section>
 
 
                 </article>
-              
 
-              
-              
-              
-              
+
+
+
+
+
                 <footer class="prev-next-footer d-print-none">
-                  
+
 <div class="prev-next-area">
     <a class="left-prev"
        href="embedding_models.html"
@@ -600,7 +636,7 @@ document.write(`
       <i class="fa-solid fa-angle-left"></i>
       <div class="prev-next-info">
         <p class="prev-next-subtitle">上一页</p>
-        <p class="prev-next-title">Embedding 模型</p>
+        <p class="prev-next-title">Embedding Models</p>
       </div>
     </a>
     <a class="right-next"
@@ -608,17 +644,17 @@ document.write(`
        title="next page">
       <div class="prev-next-info">
         <p class="prev-next-subtitle">下一页</p>
-        <p class="prev-next-title">推测解码</p>
+        <p class="prev-next-title">Speculative Decoding</p>
       </div>
       <i class="fa-solid fa-angle-right"></i>
     </a>
 </div>
                 </footer>
-              
+
             </div>
-            
-            
-              
+
+
+
                 <div class="bd-sidebar-secondary bd-toc"><div class="sidebar-secondary-items sidebar-secondary__inner">
 
 
@@ -628,65 +664,65 @@ document.write(`
   </div>
   <nav class="bd-toc-nav page-toc">
     <ul class="visible nav section-nav flex-column">
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#how-to-support-a-new-language-model">如何支持新语言模型</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#how-to-support-a-new-multimodal-large-language-model">如何支持新的多模态大语言模型</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#test-the-correctness">测试正确性</a><ul class="visible nav section-nav flex-column">
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#interactive-debugging">交互式调试</a></li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#add-the-model-to-the-test-suite">将模型添加到测试套件</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#how-to-support-a-new-language-model">How to Support a New Language Model</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#how-to-support-a-new-multimodal-large-language-model">How to Support a New Multimodal Large Language Model</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#test-the-correctness">Test the Correctness</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#interactive-debugging">Interactive Debugging</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#add-the-model-to-the-test-suite">Add the Model to the Test Suite</a></li>
 </ul>
 </li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#port-a-model-from-vllm-to-rtp-llm">将模型从vLLM移植到RTP-LLM</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#registering-an-external-model-implementation">注册外部模型实现</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#port-a-model-from-vllm-to-rtp-llm">Port a Model from vLLM to RTP-LLM</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#registering-an-external-model-implementation">Registering an External Model Implementation</a></li>
 </ul>
   </nav></div>
 
 </div></div>
-              
-            
+
+
           </div>
           <footer class="bd-footer-content">
-            
+
 <div class="bd-footer-content__inner container">
-  
+
   <div class="footer-item">
-    
+
 <p class="component-author">
 作者： RTP-LLM Team
 </p>
 
   </div>
-  
+
   <div class="footer-item">
-    
+
 
   <p class="copyright">
-    
+
       © Copyright 2023-2025, RTP-LLM.
       <br/>
-    
+
   </p>
 
   </div>
-  
+
   <div class="footer-item">
     <p class="last-updated">
-  最后更新于 2025 年 09 月 25 日.
+  最后更新于 2025 年 11 月 09 日.
   <br/>
 </p>
   </div>
-  
+
   <div class="footer-item">
-    
+
   </div>
-  
+
 </div>
           </footer>
-        
+
 
       </main>
     </div>
   </div>
-  
+
   <!-- Scripts loaded after <body> so the DOM is not blocked -->
   <script src="../_static/scripts/bootstrap.js?digest=dfe6caa3a7d634c4db9b"></script>
 <script src="../_static/scripts/pydata-sphinx-theme.js?digest=dfe6caa3a7d634c4db9b"></script>

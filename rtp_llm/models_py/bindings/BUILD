@@ -7,6 +7,7 @@ cc_library(
         "OpDefs.h",
         "OpDefsUtils.h",
         "ParamsBase.h",
+        "MlaParamsBase.h",
     ],
     srcs = [
         "OpDefs.cc",
@@ -17,6 +18,7 @@ cc_library(
         "//rtp_llm/cpp/utils:core_utils",
     ],
     visibility = ["//visibility:public"],
+    alwayslink = 1,
 )
 
 cc_library(

@@ -13,8 +13,8 @@ cc_library(
         "tokenizer/Tokenizer.cc",
     ],
     deps = [
-        "//rtp_llm/cpp/devices:devices_base", # for pybind11
         "//rtp_llm/cpp/pybind:py_utils",
+        "//:rtp_compute_ops",
     ],
     visibility = ["//visibility:public"],
 )
@@ -33,16 +33,14 @@ cc_library(
         "openai/OpenaiEndpoint.cc",
     ],
     deps = [
-        "@havenask//aios/autil:json",
-        "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/utils:error_code",
-        "//rtp_llm/cpp/dataclass:dataclass",
+        ":tokenizer",
+        "//rtp_llm/cpp/engine_base/stream:generate_config",
         "//rtp_llm/cpp/engine_base/stream:generate_types",
         "//rtp_llm/cpp/normal_engine:normal_engine",
         "//rtp_llm/cpp/embedding_engine:embedding_engine",
         ":embedding_arpc_deps",
-        "//rtp_llm/cpp/devices:devices_base",
         "//rtp_llm/cpp/multimodal_processor:multimodal_processor",
+        "//:rtp_compute_ops",
     ],
     visibility = ["//visibility:public"],
 )
@@ -56,10 +54,10 @@ cc_library(
         "*.h",
     ]),
     deps = [
-        "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/utils:error_code",
         ":openai",
-        "//rtp_llm/cpp/dataclass:dataclass",
+        "//rtp_llm/cpp/engine_base:engine_base",
+        "//rtp_llm/cpp/engine_base:weights_converter",
+        "//rtp_llm/cpp/engine_base/stream:generate_config",
         "//rtp_llm/cpp/normal_engine:normal_engine",
         "//rtp_llm/cpp/embedding_engine:embedding_engine",
         "//rtp_llm/cpp/engine_base/stream:stream",
@@ -68,8 +66,6 @@ cc_library(
         ":http_server",
         ":http_client",
         ":embedding_arpc_deps",
-        "@havenask//aios/autil:net",
-        "@havenask//aios/autil:time",
         "//rtp_llm/cpp/api_server/common:common_service",
     ],
     visibility = ["//visibility:public"],
@@ -84,11 +80,8 @@ cc_library(
     strip_include_prefix = "http_server/http_server",
     visibility = ["//visibility:public"],
     deps = [
-        "@havenask//aios/autil:log",
-        "@havenask//aios/autil:string_helper",
-        "@havenask//aios/autil:lock_free",
-        "@havenask//aios/autil:json",
-        "@havenask//aios/network/anet",
+        "//:rtp_compute_ops",
+        "@havenask//aios/network/arpc:arpc",
     ],
 )
 
@@ -100,9 +93,8 @@ cc_library(
     strip_include_prefix = "http_server/http_client",
     visibility = ["//visibility:public"],
     deps = [
-        "@havenask//aios/autil:log",
-        "@havenask//aios/network/anet",
-        "//rtp_llm/cpp/utils:core_utils",
+        "//:rtp_compute_ops",
+        "@havenask//aios/network/arpc:arpc",
     ],
 )
 
@@ -116,9 +108,11 @@ cc_test(
     deps = [
         ":http_client",
         ":http_server",
+        "@havenask//aios/autil:net",
+        "//rtp_llm/cpp/utils:core_utils",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
-        "@havenask//aios/autil:net",
+        "@havenask//aios/network/arpc:arpc",
     ],
     copts = ["-fno-access-control",],
 )

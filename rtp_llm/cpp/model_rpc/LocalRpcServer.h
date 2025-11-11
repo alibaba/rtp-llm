@@ -7,15 +7,15 @@
 #include "grpc++/grpc++.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/utils/AtomicUtil.h"
-#include "rtp_llm/cpp/dataclass/WorkerStatusInfo.h"
-#include "rtp_llm/cpp/dataclass/KvCacheInfo.h"
+#include "rtp_llm/cpp/engine_base/WorkerStatusInfo.h"
+#include "rtp_llm/cpp/cache/KvCacheInfo.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/model_rpc/GenerateContext.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
-#include "rtp_llm/cpp/dataclass/EngineScheduleInfo.h"
+#include "rtp_llm/cpp/engine_base/schedulers/EngineScheduleInfo.h"
 #include "rtp_llm/cpp/multimodal_processor/LocalMultimodalProcessor.h"
 #include "rtp_llm/cpp/multimodal_processor/RemoteMultimodalProcessor.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
@@ -77,6 +77,10 @@ public:
     void reportWorkerStatusTime(int64_t request_begin_time_us, int64_t request_after_lb_time_us);
 
     void reportCacheStatusTime(int64_t request_begin_time_us);
+
+    ::grpc::Status MemoryBlockCache(::grpc::ServerContext*             context,
+                                    const ::MemoryBlockCacheRequestPB* request,
+                                    ::MemoryBlockCacheResponsePB*      response);
 
 public:
     typedef grpc::internal::WriterInterface<GenerateOutputsPB> WriterInterface;

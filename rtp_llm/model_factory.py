@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional, Type, Union
 
 import torch
 
+from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 from rtp_llm.config.py_config_modules import StaticConfig
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
@@ -147,9 +148,11 @@ class ModelFactory:
 
     @staticmethod
     def from_model_config(
-        model_config: ModelConfig, propose_model_config: Optional[ModelConfig] = None
-    ):
-        from rtp_llm.async_decoder_engine.async_model import AsyncModel
+        model_config: ModelConfig,
+        propose_model_config: Optional[ModelConfig] = None,
+        gang_info=None,
+    ) -> BaseEngine:
+        from rtp_llm.async_decoder_engine.engine_creator import create_engine
 
         model = ModelFactory._create_model(model_config)
         if model_config.model_type == "fake_model" or model.config.vit_separation == 1:
@@ -162,11 +165,12 @@ class ModelFactory:
         if propose_model:
             logging.info("set enable_speculative_decoding")
             model.config.enable_speculative_decoding = True
-        model = AsyncModel(model, propose_model)
+        engine = create_engine(model, propose_model, gang_info)
+        engine.start()
         if propose_model:
             logging.info("create propose model done")
-        logging.info("create rpc model done")
-        return model
+        logging.info("create engine done")
+        return engine
 
     @staticmethod
     def from_huggingface(
@@ -180,6 +184,20 @@ class ModelFactory:
             model_type=model_type, ckpt_path=model_path, tokenizer_path=model_path
         )
         return ModelFactory.from_model_config(new_model_config)
+
+    @staticmethod
+    def creat_standalone_py_model_from_huggingface(
+        model_path_or_name: str,
+        revision: Optional[str] = None,
+        model_config: ModelConfig = ModelConfig(),
+    ):
+        assert os.environ["LOAD_PYTHON_MODEL"] == "1"
+        new_model_config = model_config
+        new_model_config = new_model_config._replace(
+            model_type=model_type, ckpt_path=model_path, tokenizer_path=model_path
+        )
+        model = ModelFactory._create_model(model_config)
+        return model
 
     @staticmethod
     def create_normal_model_config():
@@ -291,46 +309,50 @@ class ModelFactory:
         return propose_model_config
 
     @staticmethod
-    def load_default_generate_config(model):
+    def load_default_generate_config(engine):
         generation_config_path = StaticConfig.generate_env_config.generation_config_path
         if generation_config_path:
-            model.default_generate_config.update(
+            engine.default_generate_config.update(
                 json.load(
                     open(os.path.join(generation_config_path, "generation_config.json"))
                 )
             )
             logging.info(
                 f"load generate config:{generation_config_path}/generation_config.json: \n\
-                         {json.dumps(model.default_generate_config.model_dump(), indent=4)}"
+                         {json.dumps(engine.default_generate_config.model_dump(), indent=4)}"
             )
 
     @staticmethod
-    def create_from_env():
+    def create_from_env(gang_info=None) -> BaseEngine:
+        from rtp_llm.distribute.gang_info import get_gang_info
+
         normal_model_config = ModelFactory.create_normal_model_config()
         propose_model_config = ModelFactory.create_propose_model_config(
             normal_model_config
         )
-        model = ModelFactory.from_model_config(
-            normal_model_config, propose_model_config
+        if gang_info is None:
+            gang_info = get_gang_info()
+        engine = ModelFactory.from_model_config(
+            normal_model_config, propose_model_config, gang_info
         )
-        ModelFactory.load_default_generate_config(model)
+        ModelFactory.load_default_generate_config(engine)
 
-        return model
+        return engine
 
     @staticmethod
-    def create_from_module(ref_module: torch.nn.Module):
+    def create_from_module(ref_module: torch.nn.Module) -> BaseEngine:
         normal_model_config = ModelFactory.create_normal_model_config()
         normal_model_config.add_ref_module(ref_module)
-        model = ModelFactory.from_model_config(normal_model_config)
-        ModelFactory.load_default_generate_config(model)
+        engine = ModelFactory.from_model_config(normal_model_config)
+        ModelFactory.load_default_generate_config(engine)
 
-        return model
+        return engine
 
     @staticmethod
     def create_from_dict(ref_dict: Dict[str, torch.Tensor]):
         normal_model_config = ModelFactory.create_normal_model_config()
         normal_model_config.add_ref_dict(ref_dict)
-        model = ModelFactory.from_model_config(normal_model_config)
-        ModelFactory.load_default_generate_config(model)
+        engine = ModelFactory.from_model_config(normal_model_config)
+        ModelFactory.load_default_generate_config(engine)
 
-        return model
+        return engine

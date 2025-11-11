@@ -106,11 +106,14 @@ void QuantAlgo::setQuantAlgo(const std::string& quant_method, int64_t bits, int6
     } else if (quant_method == "pertensor_quant") {
         quant_method_ = PerTensorQuant;
         weight_bits_  = 8;
-    } else if (quant_method == "fp8") {
+    } else if (quant_method == "fp8" || quant_method == "fp8_dynamic_per_tensor") {
         quant_method_ = FP8Quant;
         weight_bits_  = 8;
         group_size_   = group_size;
     } else if (quant_method == "fp8-perchannel-compressed-tensors") {
+        quant_method_ = FP8PTPC;
+        weight_bits_  = 8;
+    } else if (quant_method == "fp8-perchannel-quark") {
         quant_method_ = FP8PTPC;
         weight_bits_  = 8;
     } else {
@@ -169,16 +172,17 @@ void GptInitParameter::showDebugInfo() const {
 
 RopeConfig GptInitParameter::getRopeConfig() const {
     RopeConfig rope_config;
-    rope_config.style        = (RopeStyle)rotary_embedding_style_;
-    rope_config.dim          = rotary_embedding_dim_;
-    rope_config.base         = rotary_embedding_base_;
-    rope_config.scale        = rotary_embedding_scale_;
-    rope_config.max_pos      = org_embedding_max_pos_;
-    rope_config.factor1      = rotary_factor1_;
-    rope_config.factor2      = rotary_factor2_;
-    rope_config.mscale       = rotary_embedding_mscale_;
-    rope_config.offset       = rotary_embedding_offset_;
-    rope_config.index_factor = position_id_len_factor_;
+    rope_config.style                = (RopeStyle)rotary_embedding_style_;
+    rope_config.dim                  = rotary_embedding_dim_;
+    rope_config.base                 = rotary_embedding_base_;
+    rope_config.scale                = rotary_embedding_scale_;
+    rope_config.max_pos              = org_embedding_max_pos_;
+    rope_config.factor1              = rotary_factor1_;
+    rope_config.factor2              = rotary_factor2_;
+    rope_config.mscale               = rotary_embedding_mscale_;
+    rope_config.offset               = rotary_embedding_offset_;
+    rope_config.index_factor         = position_id_len_factor_;
+    rope_config.extrapolation_factor = rotary_embedding_extrapolation_factor_;
     if (rope_config.style == RopeStyle::Mrope) {
         rope_config.mrope_dim1 = mrope_section_[0];
         rope_config.mrope_dim2 = mrope_section_[1];

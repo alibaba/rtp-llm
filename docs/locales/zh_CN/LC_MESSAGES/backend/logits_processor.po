@@ -1,0 +1,260 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2023-2025, RTP-LLM
+# This file is distributed under the same license as the RTP-LLM package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: RTP-LLM 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-11-07 12:59+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../backend/logits_processor.md:1
+msgid "LogitsProcessor"
+msgstr ""
+
+#: ../../backend/logits_processor.md:3
+msgid "Overview"
+msgstr ""
+
+#: ../../backend/logits_processor.md:4
+msgid ""
+"LogitsProcessor is the preprocessing chain that constrains/masks logits "
+"before sampling, enabling hard-constrained decoding or special modes "
+"(e.g., think mode). In RTP-LLM, LogitsProcessors work together with the "
+"Sampler: they first mask the vocabulary distribution, then regular "
+"sampling strategies (top-k, top-p, temperature, etc.) are applied."
+msgstr ""
+
+#: ../../backend/logits_processor.md:6
+msgid "Built-in processors"
+msgstr ""
+
+#: ../../backend/logits_processor.md:7
+msgid ""
+"**MultiSeqLogitsProcessor**: For finished sequences, only keeps the "
+"`eos_token` valid to prevent further generation."
+msgstr ""
+
+#: ../../backend/logits_processor.md:8
+msgid ""
+"**ThinkModeLogitsProcessor**: Think-mode control. Combined with "
+"templates/end markers, it constrains tokens within the “thinking” segment"
+" by set max_thinking_tokens (internally uses a string-contain DFA)."
+msgstr ""
+
+#: ../../backend/logits_processor.md:9
+msgid ""
+"**TreeLogitsProcessor (highlight)**: Enforces hard decoding constraints "
+"based on a prefix → candidate-token-set mapping (tree-structured DFA). "
+"Only tokens within the candidate set are allowed."
+msgstr ""
+
+#: ../../backend/logits_processor.md:13
+msgid "Tree Decode: How it works"
+msgstr ""
+
+#: ../../backend/logits_processor.md:14
+msgid ""
+"Tree Decode maintains a tree-shaped DFA (`TreeDFA<std::string, int>`) at "
+"runtime, driven by a mapping of “prefix → candidate tokens”:"
+msgstr ""
+
+#: ../../backend/logits_processor.md:16
+msgid ""
+"**State representation**: a string key concatenating the start token id "
+"and the generated token ids with a separator, e.g., "
+"`\"225_64000_64001\"`."
+msgstr ""
+
+#: ../../backend/logits_processor.md:17
+msgid ""
+"**Candidate set**: for the current `status`, lookup the allowed candidate"
+" tokens from the mapping; the logits processor builds a vocabulary mask "
+"from this set and sets non-candidate positions to `-inf`."
+msgstr ""
+
+#: ../../backend/logits_processor.md:18
+msgid ""
+"**Fallback**: if the mapping does not contain the current key, only "
+"`end_token_id` is allowed (forces early termination), ensuring safety and"
+" validity of constraints."
+msgstr ""
+
+#: ../../backend/logits_processor.md:19
+msgid ""
+"**Beam/multi-seq**: supports beam search and `num_return_sequences`. Each"
+" beam/sequence maintains its own DFA state and updates it after each "
+"generated token."
+msgstr ""
+
+#: ../../backend/logits_processor.md:21
+msgid "Simplified steps:"
+msgstr ""
+
+#: ../../backend/logits_processor.md:22
+msgid "Initialize DFA: `status = str(start_token_id)`;"
+msgstr ""
+
+#: ../../backend/logits_processor.md:23
+msgid ""
+"At each step, get candidates by `status` → build mask → set non-"
+"candidates to `-inf`;"
+msgstr ""
+
+#: ../../backend/logits_processor.md:24
+msgid ""
+"After sampling a new token `t`, update DFA: `status = status + sep + "
+"str(t)`;"
+msgstr ""
+
+#: ../../backend/logits_processor.md:25
+msgid "If no candidates exist for the new status, fallback to `[end_token_id]`."
+msgstr ""
+
+#: ../../backend/logits_processor.md:27
+msgid ""
+"Note: Ensure that the token_id corresponding to the last token of the "
+"input is the root of the tree. If using a prompt string, make sure the "
+"last token of the prompt is the tree's root. If using messages, this must"
+" be ensured via the chat template."
+msgstr ""
+
+#: ../../backend/logits_processor.md:31
+msgid "JSON configuration format"
+msgstr ""
+
+#: ../../backend/logits_processor.md:32
+msgid "The prefix mapping for Tree Decode is provided via a JSON file:"
+msgstr ""
+
+#: ../../backend/logits_processor.md:46
+msgid "**start_token_id**: start token id."
+msgstr ""
+
+#: ../../backend/logits_processor.md:47
+msgid "**end_token_id**: end token id."
+msgstr ""
+
+#: ../../backend/logits_processor.md:48
+msgid "**sep**: separator for keys, default `_`."
+msgstr ""
+
+#: ../../backend/logits_processor.md:49
+msgid ""
+"**prefix_dict**: key is the concatenation string of `start` and already "
+"generated token ids; value is the allowed candidate token list under that"
+" prefix."
+msgstr ""
+
+#: ../../backend/logits_processor.md:51
+#, python-brace-format
+msgid ""
+"Note: Keys should start from `start_token_id`. For example, the key for "
+"the first-step candidates is `\"{start}_{t0}\"`, the second step is "
+"`\"{start}_{t0}_{t1}\"`, and so on."
+msgstr ""
+
+#: ../../backend/logits_processor.md:55
+msgid "Enabling Tree Decode"
+msgstr ""
+
+#: ../../backend/logits_processor.md:56
+msgid ""
+"Tree Decode is enabled when the model loads a valid config file (global "
+"effect; disabled if not configured):"
+msgstr ""
+
+#: ../../backend/logits_processor.md:58
+msgid "**Service arg / environment variable** (recommended):"
+msgstr ""
+
+#: ../../backend/logits_processor.md:59
+msgid "Arg: `--tree_decode_config <file_name>`"
+msgstr ""
+
+#: ../../backend/logits_processor.md:60
+msgid "Env: `TREE_DECODE_CONFIG=<file_name>`"
+msgstr ""
+
+#: ../../backend/logits_processor.md:61
+msgid "Resolution rule: the file path is resolved as `<ckpt_path>/<file_name>`."
+msgstr ""
+
+#: ../../backend/logits_processor.md:63
+msgid "**C++ direct call (dev/test)**:"
+msgstr ""
+
+#: ../../backend/logits_processor.md:64
+msgid "`PrefixToCandidateTokens::instance()->reloadPrefixDict(\"/abs/path/to/tree.json\");`"
+msgstr ""
+
+#: ../../backend/logits_processor.md:66
+msgid ""
+"If loaded successfully, you will see: `PrefixToCandidateTokens load "
+"[path] successfully` in logs. If not configured or failed to load, Tree "
+"Decode is disabled."
+msgstr ""
+
+#: ../../backend/logits_processor.md:70
+msgid "Design and best practices"
+msgstr ""
+
+#: ../../backend/logits_processor.md:71
+msgid ""
+"**Vocab alignment**: `start_token_id`/`end_token_id` must be valid ids of"
+" the current model."
+msgstr ""
+
+#: ../../backend/logits_processor.md:72
+msgid ""
+"**Key convention**: keys start with `start_token_id`; the separator is "
+"controlled by `sep` (default `_`)."
+msgstr ""
+
+#: ../../backend/logits_processor.md:73
+msgid ""
+"**Performance**: keep candidate sets as small as possible to reduce "
+"masking overhead; build large mappings offline and load per scenario when"
+" necessary."
+msgstr ""
+
+#: ../../backend/logits_processor.md:74
+msgid ""
+"**Composition**: Tree Decode masks first, then regular sampling "
+"(top-k/top-p/temperature) applies; they are compatible."
+msgstr ""
+
+#: ../../backend/logits_processor.md:78
+msgid "Related source files"
+msgstr ""
+
+#: ../../backend/logits_processor.md:79
+msgid ""
+"Entry: `rtp_llm/cpp/engine_base/stream/GenerateStream.cc` (build and "
+"register logits processors)"
+msgstr ""
+
+#: ../../backend/logits_processor.md:80
+#, python-brace-format
+msgid ""
+"Tree Decode: "
+"`rtp_llm/cpp/models/logits_processor/TreeLogitsProcessor.{h,cc}`"
+msgstr ""
+
+#: ../../backend/logits_processor.md:81
+msgid ""
+"DFA/Mapping: `rtp_llm/cpp/models/logits_processor/DFAUtil.h`, "
+"`PrefixToCandidateTokens.h`"
+msgstr ""
+

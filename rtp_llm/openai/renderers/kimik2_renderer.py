@@ -129,7 +129,7 @@ class KimiK2Renderer(ReasoningToolBaseRenderer):
         text = text.strip()
 
         if original_text != text:
-            logging.debug(f"清理停止词: '{original_text}' -> '{text}'")
+            logging.debug("清理停止词: '%s' -> '%s'", original_text, text)
 
         return text
 

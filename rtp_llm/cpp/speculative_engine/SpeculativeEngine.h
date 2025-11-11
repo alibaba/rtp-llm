@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
+#include "rtp_llm/cpp/cache/WarmUpResult.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/speculative_engine/propose_executor/MTPStream.h"
 #include "rtp_llm/cpp/speculative_engine/propose_executor/EagleStream.h"
@@ -74,17 +75,13 @@ public:
     absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>& generate_input,
                                              preRunMode                            mode) override;
     absl::Status                      stop() override;
-    KVCacheInfo                       getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) const override;
+    KVCacheInfo                       getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) override;
     GenerateStreamPtr                 makeMTPStream(const GenerateStreamPtr& stream, size_t propose_step) {
         if (isEagle()) {
             return std::make_shared<EagleStream>(*stream, propose_step);
         } else {
             return std::make_shared<MTPStream>(*stream, propose_step);
         }
-    }
-
-    const ResourceContext& resourceContext() const {
-        return resource_context_;
     }
 
     bool isMTPEagle() override {
@@ -137,7 +134,7 @@ private:
     void         tpSyncDisableSPRun(bool& all_streams_disable_sp_run);
     void         reportMetrics();
 
-    std::shared_ptr<GenerateStream> enqueueMinFakeQuery(int32_t max_new_tokens, bool fake_hidden_states = false);
+    std::shared_ptr<GenerateStream> createMinFakeStream(int32_t max_new_tokens, bool fake_hidden_states = false);
 
     std::list<GenerateStreamPtr> extractFirstPrefillStreams(std::list<GenerateStreamPtr>& streams);
 
@@ -158,8 +155,6 @@ private:
     const std::string               sp_type_;
     std::thread                     loop_thread_;
     std::atomic<bool>               running_{false};
-    ResourceContext                 resource_context_;
-    StepRecorder                    step_recorder_;
     std::shared_ptr<CudaProfiler_E> profiler_;
     int                             profiler_step_ = 0;
 };

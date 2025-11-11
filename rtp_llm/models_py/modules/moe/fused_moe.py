@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional, Union, final
 import torch
 
 from rtp_llm.models_py.modules.moe.utils import FusedMoEQuantConfig
+import logging
 
 
 @dataclass
@@ -64,7 +65,7 @@ class FusedMoeDataRouter(ABC):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
-        weight_and_reduce_impl: TopKWeightAndReduce,
+        weight_and_reduce_impl: Union[TopKWeightAndReduce, None],
         extra_finalize_args: Optional[Dict[str, Any]],
     ) -> torch.Tensor:
         raise NotImplementedError
@@ -84,7 +85,7 @@ class FusedMoeExpertExecutor(ABC):
     def local_num_experts(self) -> int:
         raise NotImplementedError
 
-    def finalize_weight_and_reduce_impl(self) -> TopKWeightAndReduce:
+    def finalize_weight_and_reduce_impl(self) -> Union[TopKWeightAndReduce, None]:
         raise NotImplementedError
 
     @abstractmethod
@@ -128,8 +129,9 @@ class FusedMoe(torch.nn.Module):
         extra_expert_args: Optional[Dict[str, Any]] = None,
         extra_finalize_args: Optional[Dict[str, Any]] = None,
     ) -> torch.Tensor:
+        
         a1 = hidden_states
-
+        
         payload = self.router.prepare(
             a1,
             a1_scale,
@@ -145,7 +147,7 @@ class FusedMoe(torch.nn.Module):
         if payload.expert_topk_weights is None:
             payload.expert_topk_weights = topk_weights
 
-        fused_out = None
+        fused_out = None     
 
         if payload.expert_x.numel() == 0:
             # This happens when none of the tokens from the all2all reach this
@@ -172,15 +174,21 @@ class FusedMoe(torch.nn.Module):
         else:
             extra_finalize_args.update({"a1_shape": a1.shape})
 
+        extra_finalize_args.update({"original_num_tokens": hidden_states.size(0)})
+
         output = self.router.finalize(
             fused_out,
             payload.expert_topk_weights,
             payload.expert_topk_ids,
             apply_router_weight_on_input,
-            self.fused_experts.finalize_weight_and_reduce_impl(),
+            (
+                None
+                if self.fused_experts.finalize_weight_and_reduce_impl is None
+                else self.fused_experts.finalize_weight_and_reduce_impl()
+            ),
             extra_finalize_args,
         )
 
-        assert output.shape == hidden_states.shape
+        assert output.shape == hidden_states.shape, f"output batch size mismatch: expected {hidden_states.shape}, got {output.shape}"
 
         return output

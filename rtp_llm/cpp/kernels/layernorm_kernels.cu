@@ -22,6 +22,10 @@
 #include "rtp_llm/cpp/kernels/triton/layernorm_kernels.h"
 #endif
 
+#if USING_CUDA
+#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
+#endif
+
 #if USING_ROCM
 #include "rtp_llm/cpp/rocm/cuda_shims.h"
 #endif
@@ -191,6 +195,10 @@ void invokeQkLayerNorm(T* __restrict qkv,
     using Tp           = typename packed_as<T, vec_size>::type;
     qkLayerNorm<Tp><<<grid, block, 0, stream>>>(
         reinterpret_cast<Tp*>(qkv), reinterpret_cast<const Tp*>(gamma), layernorm_eps, total_head_num, size_per_head);
+#if USING_CUDA
+    check_cuda_value(cudaPeekAtLastError());
+    check_cuda_error();
+#endif
 }
 
 template<typename T>
@@ -244,6 +252,10 @@ void invokeLayerNormWithStride(T* __restrict output,
                                                                    n,
                                                                    norm_size);
     }
+#if USING_CUDA
+    check_cuda_value(cudaPeekAtLastError());
+    check_cuda_error();
+#endif
 }
 
 #define INSTANTIATE_QK_LAYERNORM(T)                                                                                    \
@@ -478,16 +490,16 @@ void dispatch_layernorm_type_square_method(T*           output,
                                            cudaStream_t stream) {
     if (shmem_size >= (48 << 10)) {
 #if USING_CUDA
-        cudaError_t ret = cudaFuncSetAttribute(generalLayerNorm<T,
-                                                                QUANT_OUT_T,
-                                                                IS_OUTPUT,
-                                                                IS_BIAS,
-                                                                RESIDUAL,
-                                                                IS_BETA,
-                                                                RETURN_NORMED_OUTPUT,
-                                                                USE_DIFF_OF_SQUARES>,
-                                               cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                               shmem_size);
+        check_cuda_value(cudaFuncSetAttribute(generalLayerNorm<T,
+                                                               QUANT_OUT_T,
+                                                               IS_OUTPUT,
+                                                               IS_BIAS,
+                                                               RESIDUAL,
+                                                               IS_BETA,
+                                                               RETURN_NORMED_OUTPUT,
+                                                               USE_DIFF_OF_SQUARES>,
+                                              cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                              shmem_size));
 #endif
     }
     generalLayerNorm<T, QUANT_OUT_T, IS_OUTPUT, IS_BIAS, RESIDUAL, IS_BETA, RETURN_NORMED_OUTPUT, USE_DIFF_OF_SQUARES>
@@ -504,6 +516,10 @@ void dispatch_layernorm_type_square_method(T*           output,
                                               scale_orig_quant_per_tensor,
                                               scale_orig_quant_per_token,
                                               normed_output_quant);
+#if USING_CUDA
+    check_cuda_value(cudaPeekAtLastError());
+    check_cuda_error();
+#endif
 }
 
 template<typename T,

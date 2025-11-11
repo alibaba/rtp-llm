@@ -8,6 +8,7 @@ from deep_ep import Config as DeepEPConfig
 from torch.distributed import ProcessGroup
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.ops.compute_ops import DeviceType, get_device
 
 __all__ = [
     "DeepEPBuffer",
@@ -51,7 +52,13 @@ class DeepEPWrapper:
         self._num_experts = params.expert_num
         self._num_topk = params.moe_k
         self._num_sms = params.moe_config.deep_ep_num_sm
-        self._use_accl_ep = True
+        device_type = get_device().get_device_type()
+        if device_type == DeviceType.ROCm:
+            # use deep_ep_rocm in rocm
+            self._use_accl_ep = False
+        else:
+            # use accl_ep in cuda
+            self._use_accl_ep = True
         self._mode, self._buffer = self._init_deepep_buffer(group, params)
 
     @property

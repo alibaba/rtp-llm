@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-09-12 17:38+0800\n"
+"POT-Creation-Date: 2025-10-20 10:08+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -23,7 +23,7 @@ msgstr ""
 msgid ""
 "RTP LLM supports using 3FS for persistent caching of KVCache, providing a"
 " secondary cache for KVCache."
-msgstr "RTP-LLM 支持使用 3FS 对 KVCache 进行持久化缓存，为 KVCache 提供二级缓存。"
+msgstr ""
 
 #: ../../backend/3fs.md:3
 msgid ""
@@ -32,34 +32,34 @@ msgid ""
 "reused in subsequent inference from the KVCache stored in 3FS, reducing "
 "TTFT (Time To First Token); at the same time, GPU memory computing "
 "resources can also be freed up for other uses."
-msgstr "当模型计算复杂度较高或 GPU 内存不足时，已计算的 KVCache 可以卸载到 3FS 中，并在后续推理中复用 3FS 中存储的 KVCache，从而减少 TTFT（首 token 生成时间）；同时，GPU 内存计算资源也可以释放用于其他用途。"
+msgstr ""
 
 #: ../../backend/3fs.md:5
 msgid ""
 "The framework integrates using the 3FS Native Client (USRBIO API) "
 "approach to improve KVCache read and write performance."
-msgstr "框架集成了 3FS Native Client (USRBIO API) 方式，以提升 KVCache 的读写性能。"
+msgstr ""
 
 #: ../../backend/3fs.md:9
 msgid "Usage"
-msgstr "使用方法"
+msgstr ""
 
 #: ../../backend/3fs.md:11
 msgid ""
 "Currently, 3FS is disabled by default in production. You can enable 3FS "
 "by following these steps:"
-msgstr "目前，3FS 在生产环境中默认关闭。您可以通过以下步骤启用 3FS："
+msgstr ""
 
 #: ../../backend/3fs.md:15
 msgid ""
 "3FS is currently only used in CUDA environments. During compilation, 3FS "
 "needs to be actively compiled, and 3FS needs to be actively enabled at "
 "runtime."
-msgstr "3FS 目前仅在 CUDA 环境中使用。在编译时需要主动编译 3FS，并且在运行时需要主动启用 3FS。"
+msgstr ""
 
 #: ../../backend/3fs.md:23
 msgid "Business containers need to add the following configuration:"
-msgstr "业务容器需要添加以下配置："
+msgstr ""
 
 #: ../../backend/3fs.md:39
 msgid ""
@@ -68,50 +68,50 @@ msgid ""
 "services also occupy some shm, so it's set to 40GB here. Additionally, "
 "the memory size applied for by the business cannot be lower than this shm"
 " size."
-msgstr "注意：shm 大小需要计算。一个 TP 需要 8GB（4GB 用于读取，4GB 用于写入）。对于 4TP，3FS 需要 32GB 的 shm。其他服务也会占用一些 shm，因此这里设置为 40GB。此外，业务申请的内存大小不能低于此 shm 大小。"
+msgstr ""
 
 #: ../../backend/3fs.md:43
 msgid "Add RDMA loopback prevention label:"
-msgstr "添加 RDMA 回环预防标签："
+msgstr ""
 
 #: ../../backend/3fs.md:55
 msgid "Add environment variables or args at startup:"
-msgstr "在启动时添加环境变量或参数："
+msgstr ""
 
 #: ../../backend/3fs.md:67
 msgid "Perform some validation after the container starts:"
-msgstr "容器启动后执行一些验证："
+msgstr ""
 
 #: ../../backend/3fs.md:69
 msgid "After the container is up, verify that the 3fs directory exists:"
-msgstr "容器启动后，验证 3fs 目录是否存在："
+msgstr ""
 
 #: ../../backend/3fs.md:75
 msgid "Verify that the shm size is correct:"
-msgstr "验证 shm 大小是否正确："
+msgstr ""
 
 #: ../../backend/3fs.md:81
 msgid ""
 "Check if /dev/shm is the requested size, such as 40GB. If not, confirm "
 "that the total memory requested is not less than 40GB, as shm cannot be "
 "smaller than the total memory requested by the pod."
-msgstr "检查 /dev/shm 是否为申请的大小，例如 40GB。如果不是，请确认申请的总内存不少于 40GB，因为 shm 不能小于 pod 申请的总内存。"
+msgstr ""
 
 #: ../../backend/3fs.md:85
 msgid "Deployment Method"
-msgstr "部署方式"
+msgstr ""
 
 #: ../../backend/3fs.md:87
 msgid ""
 "Considering the group's RDMA network architecture, there will be RDMA "
 "performance loss when communicating between different network clusters, "
 "so currently one network cluster deploys a separate 3FS storage cluster."
-msgstr "考虑到集团的 RDMA 网络架构，在不同网络集群之间通信时会有 RDMA 性能损失，因此目前每个网络集群部署独立的 3FS 存储集群。"
+msgstr ""
 
 #: ../../backend/3fs.md:89
 msgid ""
 "3FS has already been deployed in HPAI NA61, NA175, Kingsoft Cloud, and "
 "Beijing Lingjun data centers. Deployment in other data centers is "
 "ongoing."
-msgstr "3FS 已在 HPAI NA61、NA175、金山云和北京灵骏数据中心部署。其他数据中心的部署正在进行中。"
+msgstr ""
 

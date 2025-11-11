@@ -68,6 +68,45 @@ The Master role automatically handles load distribution, prefix-aware routing, a
 
 ## Startup Commands
 
+### 0. Set Up Environment Variables
+
+FlexLB requires some environment variables to be set:
+
+```bash
+# Load balancing configuration
+export WHALE_MASTER_CONFIG='{
+    "deploy":"DISAGGREGATED",
+    "loadBalanceStrategy":"ROUND_ROBIN_LOWEST_CONCURRENCY",
+    "prefillBatchWaitTimeMs":100,
+    "kvCache":"LOCAL_STATIC",
+    "staticCacheBlockSize":500,
+    "batchSize":1,
+    "prefillLbTimeoutMs":300,
+    "prefillGenerateTimeoutMs": 5000,
+    "enableGrpcPrefillMaster": false
+}'
+
+# ZooKeeper consistency configuration
+# Set needConsistency to true if you want to test with ZooKeeper (requires ZK on localhost:2181)
+export WHALE_SYNC_LB_CONSISTENCY_CONFIG='{
+    "needConsistency":false,
+    "masterElectType":"ZOOKEEPER",
+    "zookeeperConfig":{"zkHost":"127.0.0.1:2181","zkTimeoutMs":10000}
+}'
+
+# Backend model service configuration
+# Update the address to point to your actual model service endpoints
+export MODEL_SERVICE_CONFIG='{
+    "prefill_endpoint": {
+        "path": "/",
+        "protocol": "http",
+        "type": "SpecifiedIpPortList",
+        "address": "[\"localhost:8080\"]"
+    },
+    "service_id": "aigc.text-generation.generation.engine_service"
+}'
+```
+
 ### 1. Build FlexLB
 
 Navigate to the FlexLB module directory from the project root:
@@ -82,14 +121,30 @@ cd rtp_llm/flexlb
 mvn -B test \
   -Dmaven.test.failure.ignore=true \
   -Derror-prone.skip=true \
-  -Dautoconfig.skip=true \
-  -T 1C
+  -Dautoconfig.skip=true
 ```
 
 #### Build Package
 
 ```bash
-mvn clean package -DskipTests -T 1C
+mvn clean package -DskipTests
+```
+
+#### Run Locally
+
+If you want to start FlexLB locally, you can run the following command after build package:
+
+```bash
+java -jar flexlb-api/target/flexlb-api-1.0.0-SNAPSHOT.jar
+```
+
+#### Run with Spring Boot Maven Plugin
+
+FlexLB is built upon Spring Boot, users can use `spring-boot-maven-plugin` to run it directly without build and start. After setting all environment variables, you can start FlexLB directly by running:
+
+```bash
+cd flexlb-api
+mvn spring-boot:run
 ```
 
 ### 2. Docker Image Build
@@ -112,14 +167,14 @@ Base image build:
 
 ```bash
 docker build ./ -f rtp_llm/flexlb/APP-META/docker-config/Dockerfile_base \
-  -t xx_docs.com/rtp_llm_flexlb_base
+  -t hub.docker.alibaba-inc.com/isearch/rtp_llm_flexlb_base
 ```
 
 Production environment image build:
 
 ```bash
 docker build ./ -f rtp_llm/flexlb/APP-META/docker-config/Dockerfile_production \
-  -t xx_docs.com/flexlb:latest
+  -t hub.docker.alibaba-inc.com/aone/flexlb:latest
 ```
 
 ### 3. Run FlexLB
@@ -130,7 +185,7 @@ Start the FlexLB service using the built Docker image:
 docker run -d \
   --name flexlb-master \
   -p 8080:8080 \
-  xx_docs.com/flexlb:latest
+  hub.docker.alibaba-inc.com/aone/flexlb:latest
 ```
 
 ### 4. Complete Build Script
@@ -169,11 +224,11 @@ fi
 echo "=== Step 4: Building Docker Images ==="
 # Build base image
 docker build ./ -f APP-META/docker-config/Dockerfile_base \
-  -t xx_docs.com/rtp_llm_flexlb_base
+  -t hub.docker.alibaba-inc.com/isearch/rtp_llm_flexlb_base
 
 # Build production image
 docker build ./ -f APP-META/docker-config/Dockerfile_production \
-  -t xx_docs.com/flexlb:latest
+  -t hub.docker.alibaba-inc.com/isearch/flexlb:latest
 
 echo "=== FlexLB Build Complete ==="
 ```

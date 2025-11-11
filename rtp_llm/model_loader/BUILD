@@ -1,4 +1,4 @@
-package(default_visibility = ["//rtp_llm:__subpackages__", "//internal_source:__subpackages__"])
+package(default_visibility = ["//:__subpackages__"])
 
 py_library(
     name = "loader",
@@ -7,5 +7,6 @@ py_library(
     ]),
     deps = [
         "//rtp_llm:utils",
+        "//rtp_llm/model_loader/tipc:tipc"
     ]
 )

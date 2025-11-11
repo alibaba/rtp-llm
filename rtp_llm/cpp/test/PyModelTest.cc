@@ -16,7 +16,7 @@ TEST_F(PyModelTest, testSimple) {
     auto       weights = loadWeightsFromDir(path);
     RTP_LLM_CHECK(weights->lm_head->kernel != nullptr);
     RTP_LLM_CHECK(weights->embedding != nullptr);
-    RTP_LLM_CHECK(weights->layers.size() == 24);
+    RTP_LLM_CHECK(weights->layers.size() == 4);
 
     const auto py_path = test_data_path_ + "python/fake_gpt_model.py";
     RTP_LLM_LOG_INFO("Using python model path: %s", py_path.c_str());

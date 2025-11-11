@@ -24,12 +24,12 @@ cc_library(
         "StringUtil.h",
         "StatusUtil.h",
         "Exception.h",
-        "utils.h",
+        "utils.h"
     ],
     srcs = [
         "AssertUtils.cc",
         "Logger.cc",
-        "Exception.cc",
+        "Exception.cc"
     ],
     deps = [
         "@havenask//aios/alog:alog",
@@ -66,10 +66,10 @@ cc_library(
         ":core_utils",
         ":stack_trace",
         "@havenask//aios/autil:env_util",
-        "@havenask//aios/autil:net",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
+    alwayslink = True,
 )
 
 # Stack trace utilities
@@ -142,5 +142,3 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
 )
-
-

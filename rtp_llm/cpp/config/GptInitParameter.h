@@ -120,17 +120,18 @@ public:
     DataType       data_type_              = DataType::TYPE_FP16;
     DataType       kv_cache_data_type_     = DataType::TYPE_FP16;
 
-    int64_t rotary_embedding_dim_    = 0;
-    int64_t rotary_embedding_style_  = 0;
-    int64_t position_ids_style_      = 0;
-    float   rotary_embedding_base_   = 10000.f;
-    double  rotary_embedding_scale_  = 1.0;
-    double  rotary_factor1_          = 0;
-    double  rotary_factor2_          = 0;
-    double  partial_rotary_factor_   = 1.0;
-    int64_t org_embedding_max_pos_   = 0;
-    double  rotary_embedding_mscale_ = 1.0;
-    int64_t rotary_embedding_offset_ = 0;
+    int64_t rotary_embedding_dim_                  = 0;
+    int64_t rotary_embedding_style_                = 0;
+    int64_t position_ids_style_                    = 0;
+    float   rotary_embedding_base_                 = 10000.f;
+    double  rotary_embedding_scale_                = 1.0;
+    double  rotary_factor1_                        = 1.0;
+    double  rotary_factor2_                        = 1.0;
+    double  partial_rotary_factor_                 = 1.0;
+    int64_t org_embedding_max_pos_                 = 0;
+    double  rotary_embedding_mscale_               = 1.0;
+    int64_t rotary_embedding_offset_               = 0;
+    double  rotary_embedding_extrapolation_factor_ = 1.0;
     // for Gemma, hidden_states = hidden_states * (hidden_size**0.5)
     double               input_embedding_scalar_ = 1;
     double               residual_scalar_        = 1;
@@ -239,27 +240,26 @@ public:
     int64_t world_size_ = 1;
 
     // pd speration
-    RoleType    role_type_                       = RoleType::PDFUSION;
-    bool        cache_store_rdma_mode_           = true;
-    int64_t     cache_store_listen_port_         = 0;
-    int64_t     cache_store_connect_port_        = 0;
-    int64_t     cache_store_rdma_listen_port_    = 0;
-    int64_t     cache_store_rdma_connect_port_   = 0;
-    int64_t     remote_rpc_server_port_          = 0;
-    int64_t     prefill_retry_times_             = 0;
-    int64_t     prefill_retry_timeout_ms_        = 0;
-    int64_t     prefill_max_wait_timeout_ms_     = 0;
-    int64_t     decode_retry_times_              = 0;
-    int64_t     decode_retry_timeout_ms_         = 0;
-    int64_t     decode_polling_kv_cache_step_ms_ = 0;
-    int64_t     decode_polling_call_prefill_ms_  = 0;
-    int64_t     rdma_connect_retry_times_        = 0;
-    std::string load_balance_policy_name_        = "";
-    int64_t     sync_status_interval_ms_         = 0;
-    int64_t     load_cache_timeout_ms_           = 0;
-    int64_t     max_rpc_timeout_ms_              = 0;
-    int64_t     worker_port_offset_              = 0;
-    bool        decode_entrance_                 = false;
+    RoleType role_type_                       = RoleType::PDFUSION;
+    bool     cache_store_rdma_mode_           = true;
+    int64_t  cache_store_listen_port_         = 0;
+    int64_t  cache_store_connect_port_        = 0;
+    int64_t  cache_store_rdma_listen_port_    = 0;
+    int64_t  cache_store_rdma_connect_port_   = 0;
+    int64_t  remote_rpc_server_port_          = 0;
+    int64_t  prefill_retry_times_             = 0;
+    int64_t  prefill_retry_timeout_ms_        = 0;
+    int64_t  prefill_max_wait_timeout_ms_     = 0;
+    int64_t  decode_retry_times_              = 0;
+    int64_t  decode_retry_timeout_ms_         = 0;
+    int64_t  decode_retry_interval_ms_        = 1;
+    int64_t  decode_polling_kv_cache_step_ms_ = 0;
+    int64_t  decode_polling_call_prefill_ms_  = 0;
+    int64_t  rdma_connect_retry_times_        = 0;
+    int64_t  load_cache_timeout_ms_           = 0;
+    int64_t  max_rpc_timeout_ms_              = 0;
+    int64_t  worker_port_offset_              = 0;
+    bool     decode_entrance_                 = false;
 
     std::map<std::string, std::vector<int>> multi_task_prompt_tokens_;
 

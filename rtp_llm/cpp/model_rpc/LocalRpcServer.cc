@@ -19,7 +19,8 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
     meta_.reset(new RpcServerRuntimeMeta());
     maga_init_params_ = maga_init_params;
     metrics_reporter_ = maga_init_params.metrics_reporter;
-
+    RTP_LLM_LOG_INFO("LocalRpcServer aux_string %s",
+                        maga_init_params_.gpt_init_parameter.misc_config.aux_string.c_str());
     if (propose_params) {
         propose_maga_init_params_ = propose_params.get();
         if (!mm_process_engine.is_none()) {
@@ -96,7 +97,8 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
         }
         RTP_LLM_LOG_DEBUG("request [%s] generate next output success", request_key.c_str());
         GenerateOutputsPB outputs_pb;
-        QueryConverter::transResponse(&outputs_pb, &(result.value()));
+        QueryConverter::transResponse(
+            &outputs_pb, &(result.value()), maga_init_params_.gpt_init_parameter.misc_config.aux_string);
         if (context->IsCancelled()) {
             stream->cancel();
             RTP_LLM_LOG_WARNING("request [%s] cancelled by user", request_key.c_str());
@@ -388,6 +390,58 @@ void LocalRpcServer::reportCacheStatusTime(int64_t request_begin_time_us) {
     if (metrics_reporter_) {
         metrics_reporter_->report<RpcCacheStatusMetrics, RpcCacheStatusMetricsCollector>(nullptr, &collector);
     }
+}
+
+::grpc::Status LocalRpcServer::MemoryBlockCache(::grpc::ServerContext*             context,
+                                                const ::MemoryBlockCacheRequestPB* request,
+                                                ::MemoryBlockCacheResponsePB*      response) {
+    const int64_t request_id = request->request_id();
+    const auto    op_code    = request->op();
+    if (!engine_) {
+        RTP_LLM_LOG_WARNING("memory block service failed, engine is null, request: %ld", request_id);
+        response->set_success(false);
+        return grpc::Status::OK;
+    }
+    auto cache_manager = engine_->getCacheManager();
+    if (!cache_manager) {
+        RTP_LLM_LOG_WARNING("memory block service failed, cache manager is null, request: %ld, op: %s",
+                            request_id,
+                            ::MemoryBlockCacheOp_Name(op_code).c_str());
+        response->set_success(false);
+        return grpc::Status::OK;
+    }
+    auto memory_block_cache = cache_manager->memoryBlockCache();
+    if (!memory_block_cache) {
+        response->set_success(false);
+        RTP_LLM_LOG_WARNING("memory block service failed, memory block cache is null, request: %ld", request_id);
+        return grpc::Status::OK;
+    }
+
+    std::vector<int32_t> gpu_block_ids(request->gpu_block_ids().begin(), request->gpu_block_ids().end());
+    std::vector<int32_t> memory_block_ids(request->memory_block_ids().begin(), request->memory_block_ids().end());
+    if (gpu_block_ids.empty() || memory_block_ids.empty() || gpu_block_ids.size() != memory_block_ids.size()) {
+        response->set_success(false);
+        RTP_LLM_LOG_WARNING("memory block cache failed, gpu block ids or memory block ids is empty, request: %ld",
+                            request_id);
+        return grpc::Status::OK;
+    }
+
+    bool result = false;
+    if (op_code == ::MemoryBlockCacheOp::MEMORY_CACHE_COPY_FROM_GPU) {
+        result = memory_block_cache->copyKVData(
+            memory_block_ids, gpu_block_ids, MemoryBlockCache::CopyDirection::FROM_GPU, request_id);
+    } else {
+        result = memory_block_cache->copyKVData(
+            memory_block_ids, gpu_block_ids, MemoryBlockCache::CopyDirection::TO_GPU, request_id);
+    }
+    response->set_success(result);
+
+    if (!result) {
+        RTP_LLM_LOG_WARNING("memory block cache failed, %s copy failed, request: %ld",
+                            ::MemoryBlockCacheOp_Name(op_code).c_str(),
+                            request_id);
+    }
+    return grpc::Status::OK;
 }
 
 }  // namespace rtp_llm

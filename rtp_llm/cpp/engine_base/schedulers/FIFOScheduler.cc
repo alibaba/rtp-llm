@@ -17,7 +17,6 @@ FIFOScheduler::FIFOScheduler(const rtp_llm::GptInitParameter&     params,
     max_seq_len_(params.max_seq_len_),
     max_batch_tokens_size_(params.max_batch_tokens_size_),
     max_generate_batch_size_(params.max_generate_batch_size_),
-    reserve_block_num_(params.scheduler_reserve_resource_ratio_ * cache_manager->availableBlockNums() / 100),
     // not support fallback when use pd_speration:use_cache_store
     enable_partial_fallback_(params.enable_partial_fallback_ && params.role_type_ == RoleType::PDFUSION),
     enable_whole_fallback_(params.role_type_ == RoleType::PDFUSION),
@@ -25,8 +24,16 @@ FIFOScheduler::FIFOScheduler(const rtp_llm::GptInitParameter&     params,
     need_fill_fake_stream_(params.dp_size_ > 1 && params.tp_rank_ == 0),
     fast_gen_max_context_len_(params.fast_gen_max_context_len_),
     metrics_reporter_(metrics_reporter) {
-    RTP_LLM_LOG_INFO("max_generate_batch_size %d", max_generate_batch_size_);
-    RTP_LLM_LOG_INFO("max_batch_tokens_size %d", max_batch_tokens_size_);
+    reserve_block_num_ = params.scheduler_reserve_resource_ratio_ * cache_manager->availableBlockNums() / 100;
+    RTP_LLM_LOG_INFO("max_generate_batch_size is [%d], max_batch_tokens_size is [%d], reserve_block_num is [%d]",
+                     max_generate_batch_size_,
+                     max_batch_tokens_size_,
+                     reserve_block_num_);
+    if (!params.sp_config.sp_type.empty()) {
+        RTP_LLM_LOG_INFO("using sp, disable fallback strategy");
+        enable_partial_fallback_ = false;
+        enable_whole_fallback_   = false;
+    }
 }
 
 FIFOScheduler::~FIFOScheduler() {
@@ -51,8 +58,7 @@ absl::Status FIFOScheduler::stop() {
 
 void FIFOScheduler::evaluateRunningRemote() {
     for (auto it = running_streams_.begin(); it != running_streams_.end();) {
-        if ((*it)->needRemoteGenerate()) {
-            (*it)->setRemoteGenerate();
+        if ((*it)->needRemoteGenerate() && (*it)->setRemoteGenerate()) {
             remote_running_streams_.emplace_back(*it);
             RTP_LLM_LOG_DEBUG("stream [%ld] move to remote running streams", (*it)->streamId());
             it = running_streams_.erase(it);
@@ -83,10 +89,6 @@ void FIFOScheduler::evictDoneStreams(list<GenerateStreamPtr>& streams) {
 absl::Status FIFOScheduler::enqueue(const GenerateStreamPtr& stream) {
     {
         std::lock_guard<std::mutex> lock(lock_);
-        if (stream->isDummyStream() && !waiting_streams_.empty() && waiting_streams_.back()->isDummyStream()) {
-            stream->stopAndRelease(ErrorCode::UNKNOWN_ERROR, "multi fake query");
-            return absl::OkStatus();
-        }
         waiting_streams_.emplace_back(stream);
     }
     cond_.notify_all();
@@ -233,25 +235,33 @@ bool FIFOScheduler::evaluateNewStream(const list<GenerateStreamPtr>& streams,
         return false;
     }
 
-    auto result = new_stream->initKVBlock(token_capacity_, reserve_step);
+    auto old_blocks = new_stream->maxBlockSize();
+    auto result     = new_stream->initKVBlock(token_capacity_, reserve_step);
     if (result.ok() && enable_fast_gen_) {
         token_capacity_ -= result.value();
         RTP_LLM_LOG_DEBUG(
             "after stream [%ld] acquireCapacity, token_capacity is %d", new_stream->streamId(), token_capacity_);
     }
-    return result.ok() && cache_manager_->availableBlockNums() >= reserve_block_num_;
+    if (result.ok()) {
+        if (cache_manager_->availableBlockNums() >= reserve_block_num_) {
+            return true;
+        } else {
+            RTP_LLM_LOG_INFO(
+                "current availableBlockNums is [%ld], reserve_block_num is [%ld], so stream [%ld] malloc failed",
+                cache_manager_->availableBlockNums(),
+                reserve_block_num_,
+                new_stream->streamId());
+            new_stream->tryReleaseKVBlock(new_stream->maxBlockSize() - old_blocks);
+            return false;
+        }
+    }
+    return false;
 }
 
 list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
     list<GenerateStreamPtr> new_streams;
     for (auto it = waiting_streams_.begin(); it != waiting_streams_.end();) {
         auto& stream = *it;
-        if (stream->isDummyStream() && (waiting_streams_.size() > 1 || new_streams.size() > 0)) {
-            stream->stopAndRelease(ErrorCode::UNKNOWN_ERROR, "multi fake query");
-            RTP_LLM_LOG_WARNING("waiting streams should has just one fake query");
-            it = waiting_streams_.erase(it);
-            continue;
-        }
         if (evaluateNewStream(new_streams, *it, reserve_step)) {
             RTP_LLM_LOG_DEBUG("stream [%ld] add to new queue", stream->streamId());
             // if setRunning fails, it must be in stopped state, evict it in next iteration
@@ -283,15 +293,6 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
             }
             it++;
         } else {
-            // for dp run must out one fake query
-            if (need_fill_fake_stream_ && !waiting_streams_.empty() && waiting_streams_.back()->isDummyStream()) {
-                auto& fake_stream = waiting_streams_.back();
-                if (evaluateNewStream(new_streams, fake_stream, 0)) {
-                    new_streams.emplace_back(fake_stream);
-                    waiting_streams_.pop_back();
-                }
-            }
-            // try to join new streams in the next schedule cycle
             break;
         }
     }

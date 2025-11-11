@@ -105,6 +105,9 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.return_hidden_states = (
         input_py.generate_config.return_hidden_states
     )
+    generate_config_pb.return_all_hidden_states = (
+        input_py.generate_config.return_all_hidden_states
+    )
     generate_config_pb.hidden_states_cut_dim = (
         input_py.generate_config.hidden_states_cut_dim
     )
@@ -134,6 +137,9 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.ignore_eos = input_py.generate_config.ignore_eos
     generate_config_pb.reuse_cache = input_py.generate_config.reuse_cache
     generate_config_pb.enable_3fs = input_py.generate_config.enable_3fs
+    generate_config_pb.enable_memory_block_cache = (
+        input_py.generate_config.enable_memory_block_cache
+    )
 
     trans_option_cast(
         generate_config_pb, input_py.generate_config, "trace_id", functools.partial(str)
@@ -215,6 +221,7 @@ def trans_output(
             decode_total_reuse_len=output_pb.aux_info.decode_total_reuse_len,
             decode_local_reuse_len=output_pb.aux_info.decode_local_reuse_len,
             decode_remote_reuse_len=output_pb.aux_info.decode_remote_reuse_len,
+            aux_string=output_pb.aux_info.aux_string,
             role_addrs=input_py.generate_config.role_addrs,
         )
         # TODO(xinfei.sxf) cum_log_probs is not right, ignore it temporarily
@@ -230,6 +237,8 @@ def trans_output(
         output_py.input_ids = input_py.token_ids.reshape(1, -1)
         if output_pb.HasField("hidden_states"):
             output_py.hidden_states = trans_tensor(output_pb.hidden_states)
+        if output_pb.HasField("all_hidden_states"):
+            output_py.all_hidden_states = trans_tensor(output_pb.all_hidden_states)
         if output_pb.HasField("loss"):
             # when calculate_loss 1, result should be one element
             if input_py.generate_config.calculate_loss == 1:

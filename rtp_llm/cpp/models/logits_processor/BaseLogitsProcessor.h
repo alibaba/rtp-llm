@@ -14,9 +14,9 @@ public:
     static const float neg_inf;
 
 public:
-    virtual void       process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx)                = 0;
-    virtual void       beamSearchLogitProcessorUpdate(const std::vector<int>& beam_idx_vec)                     = 0;
-    virtual void       updateLogitProcessorStatus(const rtp_llm::BufferPtr& new_tokens, int32_t num_new_tokens) = 0;
+    virtual void       process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx)  = 0;
+    virtual void       updateMultiSeqStatus(const std::vector<int>& src_batch_indices)            = 0;
+    virtual void       updateStatus(const rtp_llm::BufferPtr& new_tokens, int32_t num_new_tokens) = 0;
     void               memFill(const rtp_llm::BufferPtr& new_tokens_logits, size_t vocab_size, size_t index);
     void               maskLogits(const rtp_llm::BufferPtr& new_token_logits, const rtp_llm::BufferPtr& vocab_mask);
     rtp_llm::BufferPtr generateVocabMask(size_t                                  batch_size,

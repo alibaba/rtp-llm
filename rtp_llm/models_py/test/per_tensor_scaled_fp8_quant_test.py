@@ -6,7 +6,7 @@ import torch
 from torch import dtype as _dtype
 
 import rtp_llm.ops  # isort:skip
-from libth_transformer.rtp_llm_ops import per_tensor_quant_fp8  # isort:skip
+from rtp_llm.ops.compute_ops import per_tensor_quant_fp8  # isort:skip
 
 
 class PerTensorFp8QuantTest(TestCase):
@@ -50,12 +50,12 @@ class PerTensorFp8QuantTest(TestCase):
         q_out, scale = self.call_per_tensor_quant_fp8(x)
         torch_out = self.torch_scaled_fp8_quant(x, scale)
 
-        torch.equal(q_out.float(), torch_out.float())
+        self.assertTrue(torch.equal(q_out.float(), torch_out.float()))
         # static quant
         scale = torch.rand(1, dtype=torch.float32, device=device)
         q_out, scale = self.call_per_tensor_quant_fp8(x, scale)
         torch_out = self.torch_scaled_fp8_quant(x, scale)
-        torch.equal(q_out.float(), torch_out.float())
+        self.assertTrue(torch.equal(q_out.float(), torch_out.float()))
 
     def _run_per_tensor_fp8_static_quant_precision_test(self):
         test_scales = [0.1, 2.5, 22.5, 222, 5012]
@@ -82,13 +82,13 @@ class PerTensorFp8QuantTest(TestCase):
                 scale = torch.tensor(scale, device=device, dtype=torch.float32)
                 q_out, scale = self.call_per_tensor_quant_fp8(x, scale)
                 torch_out = self.torch_scaled_fp8_quant(x, scale)
-                torch.equal(q_out.float(), torch_out.float())
+                self.assertTrue(torch.equal(q_out.float(), torch_out.float()))
 
         x = torch.tensor([2**31, -(2**31)], dtype=torch.float32, device=device)
         scale = torch.tensor([1.0], device=device, dtype=torch.float32)
         q_out, scale = self.call_per_tensor_quant_fp8(x, scale)
         torch_out = self.torch_scaled_fp8_quant(x, scale)
-        torch.equal(q_out.float(), torch_out.float())
+        self.assertTrue(torch.equal(q_out.float(), torch_out.float()))
 
     def test_per_tensor_fp8_quant(self):
         for params in itertools.product(

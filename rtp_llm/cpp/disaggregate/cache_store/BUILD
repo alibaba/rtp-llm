@@ -22,7 +22,6 @@ cc_library(
     srcs = [],
     hdrs = [],
     deps = [
-        "@havenask//aios/kmonitor:kmonitor_client_cpp",
         "@havenask//aios/network/arpc:arpc",
         "@havenask//aios/network/arpc/arpc/metric:kmonitor_anet_metric",
     ],
@@ -38,6 +37,7 @@ interface_includes = [
     "LoadContext.h",
     "RemoteStoreTask.h",
     "MessagerRequest.h",
+    "ErrorCodeUtil.h",
 ]
 
 interface_sources = [
@@ -55,12 +55,13 @@ cc_library(
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:error_code",
         "//rtp_llm/cpp/utils:time_util",
-        "//rtp_llm/cpp/model_rpc:rpc_error_code",
+        # "//rtp_llm/cpp/model_rpc:rpc_error_code",
         "//rtp_llm/cpp/metrics:metrics",
         "//rtp_llm/cpp/core:buffer",
         "//rtp_llm/cpp/core:event",
     ],
     visibility=['//visibility:public'],
+    alwayslink = True,
 )
 
 cc_library(
@@ -68,13 +69,10 @@ cc_library(
     srcs = glob(["*.cpp"], exclude = ["Impl.cpp"] + interface_sources),
     hdrs = glob(["*.h"], exclude = interface_includes),
     deps = [
-        ":cache_store_interface",
         "//rtp_llm/cpp/disaggregate/cache_store/proto:cache_store_service_cc_proto",
-        "//rtp_llm/cpp/devices:devices_base",
-        "//rtp_llm/cpp/config:config_modules",
-        "@havenask//aios/autil:thread",
-        "@havenask//aios/autil:net",
+        "//:rtp_compute_ops",
         ":arpc_dep",
     ],
     visibility=['//visibility:public'],
+    alwayslink = True,
 )

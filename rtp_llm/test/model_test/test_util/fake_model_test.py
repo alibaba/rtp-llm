@@ -1,5 +1,6 @@
 from typing import Any, Dict
 
+from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 from rtp_llm.test.model_test.test_util.fake_model_loader import FakeModelLoader
 from rtp_llm.test.model_test.test_util.model_test_base import ModelTestBase
 
@@ -24,15 +25,6 @@ class FakeModelTest(ModelTestBase):
             test_loss,
             fake_name,
         )
-
-    def _load_model(self):
-        fake_model_loader = FakeModelLoader(
-            self.model_type,
-            self.tokenizer_path,
-            self.ckpt_path,
-            quantization=self.quantization,
-        )
-        return fake_model_loader.load_model()
 
 
 def single_fake_test(

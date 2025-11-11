@@ -1,3 +1,4 @@
+#include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/embedding_engine/EmbeddingEngine.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -80,11 +81,16 @@ absl::Status EmbeddingEngine::enqueue(EmbeddingStreamPtr streams) {
 }
 
 absl::Status EmbeddingEngine::step() {
+    executor_->device_->syncAndCheck();
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     CHECK_AND_RETURN_REF(streams, scheduler_->scheduleNew());
     if (streams.empty()) {
         RTP_LLM_LOG_INFO("no query run and sleep");
         return absl::OkStatus();
+    }
+    if (autil::EnvUtil::getEnv("GEN_TIMELINE", "False") == "True") {
+        profiler_ = std::make_shared<CudaProfiler>("embedding_profiler_");
+        profiler_->start();
     }
     try {
         auto status = executor_->process(streams);
@@ -107,6 +113,8 @@ absl::Status EmbeddingEngine::step() {
             abort();
         }
     }
+    executor_->device_->syncAndCheck();
+    profiler_.reset();
     return absl::OkStatus();
 }
 

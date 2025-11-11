@@ -7,11 +7,8 @@ cc_library(
         "*.h",
     ]),
     deps = [
-        "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/dataclass:dataclass",
+        "//:rtp_compute_ops",
         "//rtp_llm/cpp/api_server:http_server",
-        "@havenask//aios/autil:net",
-        "@havenask//aios/autil:time",
     ],
     visibility = ["//visibility:public"]
 )

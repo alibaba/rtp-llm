@@ -877,7 +877,7 @@ def ep_gather(
     input_index: torch.Tensor,
     output_tensor: torch.Tensor,
 ):
-    BLOCK_D = 1024  # block size of quantization
+    BLOCK_D = 512  # block size of quantization
     num_warps = 2
     num_tokens = output_tensor.shape[0]
     hidden_size = input_tensor.shape[1]
@@ -985,29 +985,25 @@ def recompute_topk_ids_triton_kernel(
     expert_count_ptr,
     current_expert_start_id,
     num_local_experts,
-    num_tokens,
-    topk: tl.constexpr,
+    num_total,
     BLOCK_SIZE: tl.constexpr,
 ):
-    pid = tl.program_id(0)
-    token_start = pid * BLOCK_SIZE
-    token_end = min(token_start + BLOCK_SIZE, num_tokens)
+    token_indices = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = token_indices < num_total  # Mask out-of-bounds threads
 
-    for token_idx in range(token_start, token_end):
-        offset = token_idx * topk
-        # 向量加载
-        expert_ids = tl.load(topk_ids_ptr + offset + tl.arange(0, topk))
+    # 1. Load
+    expert_id = tl.load(topk_ids_ptr + token_indices, mask=mask, other=-1)
 
-        # 计算局部编号与合法性掩码
-        adjusted = expert_ids - current_expert_start_id
-        valid = (adjusted >= 0) & (adjusted < num_local_experts)
+    # 2. Adjust expert index
+    adjusted = expert_id - current_expert_start_id
+    valid = mask & (adjusted >= 0) & (adjusted < num_local_experts)
 
-        # 写回局部编号：合法位置写 adjusted，非法写 -1
-        out_ids = tl.where(valid, adjusted, -1)
-        tl.store(adjusted_topk_ids_ptr + offset + tl.arange(0, topk), out_ids)
+    # 3. Store
+    out = tl.where(valid, adjusted, -1)
+    tl.store(adjusted_topk_ids_ptr + token_indices, out, mask=mask)
 
-        # 按掩码原子加计数器
-        tl.atomic_add(expert_count_ptr + adjusted, 1, mask=valid)
+    # 4. Atomic add - use scalar value for efficiency
+    tl.atomic_add(expert_count_ptr + adjusted, 1, mask=valid)
 
 
 def recompute_topk_ids_sum_expert_count(
@@ -1026,6 +1022,7 @@ def recompute_topk_ids_sum_expert_count(
     """
     device = topk_ids.device
     num_tokens, topk = topk_ids.shape
+    num_total = num_tokens * topk
 
     # Create output tensors
     adjusted_topk_ids = torch.empty_like(topk_ids)
@@ -1033,18 +1030,19 @@ def recompute_topk_ids_sum_expert_count(
 
     # Configure triton kernel parameters
     # Use smaller block size for better vectorization when topk is large
-    BLOCK_SIZE = min(256, 1024 // max(topk, 1))
+    # Ensure BLOCK_SIZE is a power of 2 for triton compatibility
+    base_block_size = min(256, 1024 // max(topk, 1))
+    BLOCK_SIZE = triton.next_power_of_2(base_block_size)
 
     # Launch recompute kernel
-    grid_recompute = (triton.cdiv(num_tokens, BLOCK_SIZE),)
+    grid_recompute = (triton.cdiv(num_total, BLOCK_SIZE),)
     recompute_topk_ids_triton_kernel[grid_recompute](
         topk_ids,
         adjusted_topk_ids,
         expert_count,
         current_expert_start_id,
         num_local_experts,
-        num_tokens,
-        topk=topk,
+        num_total,
         BLOCK_SIZE=BLOCK_SIZE,
     )
 

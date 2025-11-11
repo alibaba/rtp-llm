@@ -13,7 +13,7 @@ class Group(Enum):
 
 
 try:
-    from libth_transformer.rtp_llm_ops import RtpProcessGroup, RtpProcessGroupType
+    from rtp_llm.ops.compute_ops import RtpProcessGroup, RtpProcessGroupType
 
     _group_map: Dict[Group, RtpProcessGroup] = {}
 

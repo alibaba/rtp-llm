@@ -14,7 +14,7 @@ from rtp_llm.model_loader.weight_module import (
     QuantWeight,
     WeightModule,
 )
-from rtp_llm.utils.database import BaseDatabase
+from rtp_llm.model_loader.tensor_source import TensorSource
 from rtp_llm.utils.model_weight import W
 
 
@@ -78,12 +78,12 @@ class WeightOnlyPerColWeight(CompositeWeight, QuantWeight):
 
     def _load_raw_tensor(
         self,
-        database: BaseDatabase,
+        tensor_source: TensorSource,
         layer_id: Optional[int],
         device: str,
         load_config: LoadConfig,
     ):
-        kernel = self.kernel._load_raw_tensor(database, layer_id, device, load_config)
+        kernel = self.kernel._load_raw_tensor(tensor_source, layer_id, device, load_config)
         return kernel
 
     def _split(self, tensor: torch.Tensor, load_config: LoadConfig):
@@ -102,3 +102,8 @@ class WeightOnlyPerColWeight(CompositeWeight, QuantWeight):
         else:
             weight, scale = load_config.exported_device.apply_int8(kernel, device)
         return {self.kernel.name: weight, self.scale.name: scale}
+    
+    def get_tensor_names(
+        self, layer_id: Optional[int], load_config: LoadConfig
+    ) -> set[str]:
+        return self.kernel.get_tensor_names(layer_id, load_config)

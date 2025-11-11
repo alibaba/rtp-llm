@@ -2,6 +2,7 @@
 
 #include <torch/torch.h>
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
+#include "rtp_llm/cpp/devices/utils/RopeCache.h"
 #include "rtp_llm/cpp/devices/testing/TestBase.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/kernels/unfused_attention_kernels.h"
@@ -13,17 +14,6 @@
 
 using namespace std;
 using namespace rtp_llm;
-
-inline torch::Tensor genRopeCosSin(int rope_dim, int rope_theta, int max_position_embeddings) {
-    auto inv_freq =
-        1.0 / torch::pow(rope_theta, torch::arange(0, rope_dim, 2, torch::kInt64).to(torch::kFloat32) / rope_dim);
-    auto t             = torch::arange(max_position_embeddings, torch::kInt64).to(torch::kFloat32);
-    auto freqs         = torch::outer(t, inv_freq);
-    auto cos           = freqs.cos().to(torch::kFloat32);
-    auto sin           = freqs.sin().to(torch::kFloat32);
-    auto cos_sin_cache = torch::stack({cos, sin}, 0).permute({1, 2, 0}).reshape({cos.size(0), -1}).contiguous();
-    return cos_sin_cache;
-}
 
 inline torch::Tensor create_position_ids(const std::vector<int>& input_lengths) {
     std::vector<torch::Tensor> tensors;
@@ -51,16 +41,16 @@ inline std::tuple<torch::Tensor, torch::Tensor> apply_rotary_emb(const torch::Te
                                                                  int                  rope_theta) {
     auto inv_freq =
         1.0 / torch::pow(rope_theta, torch::arange(0, rope_dim, 2, torch::kInt64).to(torch::kFloat32) / rope_dim);
-    auto t             = torch::arange(cache_len, torch::kInt64).to(torch::kFloat32);
-    auto freqs         = torch::outer(t, inv_freq);
-    auto cos           = freqs.cos().to(torch::kFloat32);
-    auto sin           = freqs.sin().to(torch::kFloat32);
-    auto cos_sin_cache = torch::cat({cos, sin}, -1);
+    auto t          = torch::arange(cache_len, torch::kInt64).to(torch::kFloat32);
+    auto freqs      = torch::outer(t, inv_freq);
+    auto cos        = freqs.cos().to(torch::kFloat32);
+    auto sin        = freqs.sin().to(torch::kFloat32);
+    auto rope_cache = torch::cat({cos, sin}, -1);
 
-    auto pos         = positions.flatten();
-    auto cos_sin_pos = cos_sin_cache.index_select(0, pos).reshape({q.size(0), q.size(1), -1});
+    auto pos      = positions.flatten();
+    auto rope_pos = rope_cache.index_select(0, pos).reshape({q.size(0), q.size(1), -1});
 
-    auto cache = torch::chunk(cos_sin_pos, 2, -1);
+    auto cache = torch::chunk(rope_pos, 2, -1);
 
     auto q_rope = do_rotary_emb(q, cache[0], cache[1]);
     auto k_rope = do_rotary_emb(k, cache[0], cache[1]);
@@ -547,15 +537,7 @@ void UnfusedAttentionTest::decodeAddFusedQKVBiasTransposeTest(size_t batch_size,
         {params.input.type(), {batch_size, num_key_value_heads, seq_len, head_dim}, AllocationType::DEVICE},
         {"v_output"});
 
-    auto cos_sin       = genRopeCosSin(rope_dim, rope_theta, max_position_embeddings);
-    auto cos_sin_cache = device->allocateBuffer(
-        {DataType::TYPE_FP32, {(uint)(rope_dim * max_position_embeddings)}, AllocationType::DEVICE}, {"cos_sin_cache"});
-
-    check_cuda_value(cudaMemcpyAsync(cos_sin_cache->data(),
-                                     cos_sin.data_ptr(),
-                                     rope_dim * max_position_embeddings * sizeof(float),
-                                     cudaMemcpyHostToDevice,
-                                     device->getStream()));
+    auto rope_cache = getRopeCache(rope_config, max_position_embeddings);
 
     if (is_perf) {
         bool store_q     = true;
@@ -577,7 +559,7 @@ void UnfusedAttentionTest::decodeAddFusedQKVBiasTransposeTest(size_t batch_size,
                                              params.input.data(),
                                              params.common.position_ids->data<int>(),
                                              params.weights.qkv_weight->bias->data(),
-                                             cos_sin_cache->data<float>(),
+                                             rope_cache.data_ptr<float>(),
                                              batch_size,
                                              num_heads,
                                              num_key_value_heads,
@@ -606,7 +588,7 @@ void UnfusedAttentionTest::decodeAddFusedQKVBiasTransposeTest(size_t batch_size,
                                              params.input.data(),
                                              params.common.position_ids->data<int>(),
                                              params.weights.qkv_weight->bias->data(),
-                                             cos_sin_cache->data<float>(),
+                                             rope_cache.data_ptr<float>(),
                                              batch_size,
                                              num_heads,
                                              num_key_value_heads,
@@ -646,7 +628,7 @@ void UnfusedAttentionTest::decodeAddFusedQKVBiasTransposeTest(size_t batch_size,
                                          params.input.data(),
                                          params.common.position_ids->data<int>(),
                                          params.weights.qkv_weight->bias->data(),
-                                         cos_sin_cache->data<float>(),
+                                         rope_cache.data_ptr<float>(),
                                          batch_size,
                                          num_heads,
                                          num_key_value_heads,

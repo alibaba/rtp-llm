@@ -5,6 +5,7 @@
 #include "gtest/gtest.h"
 
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
+#include "rtp_llm/cpp/engine_base/WeightsConverter.h"
 #include "rtp_llm/cpp/devices/testing/TestBase.h"
 
 using namespace std;

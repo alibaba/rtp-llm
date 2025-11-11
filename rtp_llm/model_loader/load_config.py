@@ -1,3 +1,4 @@
+import enum
 import json
 import logging
 from typing import Any, List, Optional, Union
@@ -10,6 +11,12 @@ from rtp_llm.device.device_base import DeviceBase
 from rtp_llm.utils.database import BaseDatabase
 from rtp_llm.utils.fuser import fetch_remote_file_to_local
 from rtp_llm.utils.util import check_with_info
+
+
+class LoadMethod(str, enum.Enum):
+    AUTO = "auto"
+    FASTSAFETENSORS = "fastsafetensors"
+    SCRATCH = "scratch"
 
 
 class LoadConfig(BaseModel):
@@ -52,6 +59,8 @@ class LoadConfig(BaseModel):
     exported_device: Optional[Any] = None
 
     phy2log: Optional[List[List[int]]] = None
+    use_swizzleA: bool = False
+    load_method: LoadMethod = LoadMethod.AUTO
 
     @field_validator("database", "compute_dtype", "quant_algo", "exported_device")
     @classmethod
@@ -118,7 +127,7 @@ class LoadConfig(BaseModel):
             f"layer_id:{layer_id} muse less than num_layers:{self.num_layers} and phy2log len(self.phy2log[layer_id]) must equal to {self.phy_exp_num}",
         )
         self.phy2log[layer_id] = experts
-        logging.debug(f"update layer {layer_id} phy2log {layer_phy2log}")
+        logging.debug("update layer %s phy2log %s", layer_id, layer_phy2log)
 
     @staticmethod
     def create_redundant_expert(
@@ -186,5 +195,5 @@ class LoadConfig(BaseModel):
                 layer_phy2log.extend(list(range(redundant_expert)))
                 phy2log.append(layer_phy2log)
 
-        logging.debug(f"phy2log: {phy2log}")
+        logging.debug("phy2log: %s", phy2log)
         return phy2log

@@ -1,8 +1,11 @@
 # copy from tensorflow
 load("@com_google_protobuf//:protobuf.bzl", "proto_gen")
 
-def if_static(extra_deps, otherwise = []):
-    return extra_deps
+def if_static(static, extra_deps, otherwise = []):
+    if static:
+        return extra_deps
+    else:
+        return otherwise
 
 def if_not_windows(a):
     return a
@@ -57,6 +60,7 @@ def cc_proto_library(
         use_grpc_namespace = False,
         default_header = False,
         protolib_deps = [],
+        static = True,
         **kargs):
     """Bazel rule to create a C++ protobuf library from proto source files.
 
@@ -151,7 +155,7 @@ def cc_proto_library(
     )
     native.cc_library(
         name = header_only_name,
-        deps = ["@com_google_protobuf//:protobuf_headers"] + if_static([impl_name]),
+        deps = ["@com_google_protobuf//:protobuf_headers"] + if_static(static, [impl_name]),
         hdrs = gen_hdrs,
         **kargs
     )
@@ -248,7 +252,9 @@ def tf_proto_library_cc(
         py_api_version = 2,
         js_api_version = 2,
         js_codegen = "jspb",
-        default_header = False):
+        default_header = False,
+        static = True
+    ):
     js_codegen = js_codegen  # unused argument
     js_api_version = js_api_version  # unused argument
     native.filegroup(
@@ -276,7 +282,7 @@ def tf_proto_library_cc(
         native.cc_library(
             name = cc_name,
             deps = cc_deps + ["@com_google_protobuf//:protobuf_headers"] +
-                   if_static([name + "_cc_impl"]),
+                   if_static(static, [name + "_cc_impl"]),
             testonly = testonly,
             visibility = visibility,
         )
@@ -291,7 +297,7 @@ def tf_proto_library_cc(
         srcs = srcs,
         protolib_deps = protodeps,
         deps = cc_deps + ["@com_google_protobuf//:cc_wkt_protos"],
-        cc_libs = cc_libs + if_static(
+        cc_libs = cc_libs + if_static(static,
             ["@com_google_protobuf//:protobuf"],
             ["@com_google_protobuf//:protobuf_headers"],
         ),
@@ -365,7 +371,8 @@ def tf_proto_library(
         js_api_version = 2,
         js_codegen = "jspb",
         provide_cc_alias = False,
-        default_header = False):
+        default_header = False,
+        static = True):
     """Make a proto library, possibly depending on other proto libraries."""
     _ignore = (js_api_version, js_codegen, provide_cc_alias)
 
@@ -378,6 +385,7 @@ def tf_proto_library(
         testonly = testonly,
         visibility = visibility,
         default_header = default_header,
+        static = static,
     )
 
     tf_proto_library_py(
@@ -400,7 +408,8 @@ def cc_proto(
         use_grpc_plugin=False,
         cc_compile_grpc=True,
         py_compile_grpc=True,
-        default_header = True,):
+        default_header = True,
+        static=True):
     cc_compile_grpc = cc_compile_grpc if use_grpc_plugin else False
     py_compile_grpc = py_compile_grpc if use_grpc_plugin else False
     tf_proto_library(
@@ -411,6 +420,7 @@ def cc_proto(
         cc_grpc_version = cc_compile_grpc,
         has_services = py_compile_grpc,
         default_header = default_header,
+        static=static,
     )
     native.cc_library(
         name = name + "_cc_proto",

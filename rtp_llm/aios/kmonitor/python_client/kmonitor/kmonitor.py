@@ -33,7 +33,7 @@ class KMonitor(object):
         self.report_worker.register_metric(metric)
         with self.lock:
             self.metrics[name] = metric
-        logging.debug(f"kmonitor registered metric [{type}][{name}]")
+        logging.debug("kmonitor registered metric [%s][%s]", type, name)
         return metric
 
     def register_gauge_metric(self, name: str, tags: Dict[str, str] = {}) -> MetricBase:

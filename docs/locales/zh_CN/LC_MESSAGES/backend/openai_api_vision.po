@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-09-12 17:38+0800\n"
+"POT-Creation-Date: 2025-10-20 10:08+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -21,7 +21,7 @@ msgstr ""
 
 #: ../../backend/openai_api_vision.ipynb:9
 msgid "OpenAI APIs - Vision"
-msgstr "OpenAI API - 多模态"
+msgstr ""
 
 #: ../../backend/openai_api_vision.ipynb:11
 msgid ""
@@ -29,21 +29,21 @@ msgid ""
 "from OpenAI services to self-hosted local models. A complete reference "
 "for the API is available in the `OpenAI API Reference "
 "<https://platform.openai.com/docs/guides/vision>`__."
-msgstr "RTP-LLM提供与OpenAI兼容的API，以实现从OpenAI服务到自托管本地模型的平稳过渡。API的完整参考可在`OpenAI API参考<https://platform.openai.com/docs/guides/vision>`__中找到。"
+msgstr ""
 
 #: ../../backend/openai_api_vision.ipynb:23
 msgid "Launch A Server"
-msgstr "启动服务器"
+msgstr ""
 
 #: ../../backend/openai_api_vision.ipynb:25
 msgid "Launch the server in your terminal and wait for it to initialize."
-msgstr "在终端中启动服务器并等待其初始化完成。"
+msgstr ""
 
 #: ../../backend/openai_api_vision.ipynb:56
 msgid "Using Python Requests"
-msgstr "使用Python Requests"
+msgstr ""
 
 #: ../../backend/openai_api_vision.ipynb:104
 msgid "Using OpenAI Python Client"
-msgstr "使用OpenAI Python客户端"
+msgstr ""
 

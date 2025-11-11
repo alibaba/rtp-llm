@@ -4,10 +4,12 @@ import torch
 import triton.language as tl
 
 import rtp_llm.models_py.modules.moe.fused_moe as mm
-from rtp_llm.models_py.kernels.activation import silu_and_mul
-from rtp_llm.models_py.kernels.grouped_gemm import invoke_moe_batched_triton_kernel
 from rtp_llm.models_py.modules.moe import TopKWeightAndReduceDelegate
 from rtp_llm.models_py.modules.moe.utils import FusedMoEQuantConfig, resize_cache
+from rtp_llm.models_py.triton_kernels.common.activation import silu_and_mul
+from rtp_llm.models_py.triton_kernels.moe.grouped_gemm import (
+    invoke_moe_batched_triton_kernel,
+)
 
 
 class NaiveBatchedExperts(mm.FusedMoeExpertExecutor):

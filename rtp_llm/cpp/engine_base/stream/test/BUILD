@@ -7,7 +7,7 @@ test_copts = [
 
 test_deps = [
     "//rtp_llm/cpp/normal_engine:normal_engine",
-    "//rtp_llm/cpp/dataclass:dataclass",
+    "//rtp_llm/cpp/engine_base:engine_base",
     "//rtp_llm/cpp/engine_base/stream:stream",
     "//rtp_llm/cpp/devices/testing:device_test_utils",
     "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",

@@ -110,7 +110,7 @@ void* Allocator<AllocatorType::CUDA>::doMallocSync(size_t size) {
 void Allocator<AllocatorType::CUDA>::doFree(void* address) {
     // tmp sync to avoid memory free before kernel run. cudaFree will not perform any implicit synchronization when the
     // pointer was allocated with cudaMallocAsync or cudaMallocFromPoolAsync
-    cudaStreamSynchronize(stream_);
+    check_cuda_value(cudaStreamSynchronize(stream_));
     check_cuda_value(cudaFree(address));
     return;
 }

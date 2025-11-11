@@ -1,12 +1,5 @@
 package org.flexlb.balance.strategy;
 
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
-import java.util.Optional;
-import java.util.UUID;
-import java.util.concurrent.ThreadLocalRandom;
-
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.collections4.MapUtils;
 import org.flexlb.balance.LoadBalanceStrategyFactory;
@@ -18,7 +11,14 @@ import org.flexlb.domain.balance.BalanceContext;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.sync.status.ModelWorkerStatus;
+import org.flexlb.util.CommonUtils;
 import org.springframework.stereotype.Component;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.ThreadLocalRandom;
 
 /**
  * @author zjw
@@ -35,10 +35,11 @@ public class RandomStrategy implements LoadBalancer {
         this.engineWorkerStatus = engineWorkerStatus;
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.RANDOM, this);
     }
+
     @Override
-    public boolean releaseLocalCache(String modelName, String ip, Long interRequestId) {
-        return true;
+    public void releaseLocalCache(String modelName, String ip, Long interRequestId) {
     }
+
     @Override
     public ServerStatus select(BalanceContext balanceContext, RoleType roleType, String group) {
 
@@ -54,10 +55,17 @@ public class RandomStrategy implements LoadBalancer {
         if (CollectionUtils.isEmpty(workerStatuses)) {
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
         }
-        ThreadLocalRandom.current().nextInt(workerStatuses.size());
+        int randomIndex = ThreadLocalRandom.current().nextInt(workerStatuses.size());
+        WorkerStatus selectedWorker = workerStatuses.get(randomIndex);
         ServerStatus result = new ServerStatus();
         result.setSuccess(true);
-        result.setBatchId(UUID.randomUUID().toString());
+        result.setRole(roleType);
+        result.setServerIp(selectedWorker.getIp());
+        result.setHttpPort(selectedWorker.getPort());
+        result.setGrpcPort(CommonUtils.toGrpcPort(selectedWorker.getPort()));
+        result.setGroup(selectedWorker.getGroup());
+        result.setInterRequestId(balanceContext.getInterRequestId());
+
         return result;
     }
 

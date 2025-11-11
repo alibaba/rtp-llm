@@ -8,9 +8,9 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-09-17 10:23+0800\n"
-"PO-Revision-Date: 2025-09-17 15:00+0800\n"
-"Last-Translator: 来羽 <xj226049@alibaba-inc.com>\n"
+"POT-Creation-Date: 2025-10-20 10:08+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
 "Language-Team: zh_CN <LL@li.org>\n"
 "Plural-Forms: nplurals=1; plural=0;\n"
@@ -21,93 +21,93 @@ msgstr ""
 
 #: ../../backend/Frontend.md:1
 msgid "Frontend"
-msgstr "前端"
+msgstr ""
 
 #: ../../backend/Frontend.md:3
 msgid "Overview"
-msgstr "概述"
+msgstr ""
 
 #: ../../backend/Frontend.md:4
 msgid ""
 "RTP_LLM currently comprises three core components: Frontend, Backend, and"
 " Master."
-msgstr "RTP_LLM 目前包含三个核心组件：前端(Frontend)、后端(Backend)和主控(Master)。"
+msgstr ""
 
 #: ../../backend/Frontend.md:6
 msgid "Frontend Workflow:"
-msgstr "前端工作流程："
+msgstr ""
 
 #: ../../backend/Frontend.md:7
 msgid "Accepts incoming requests"
-msgstr "接收传入请求"
+msgstr ""
 
 #: ../../backend/Frontend.md:8
 msgid ""
 "Converts inputs to token IDs (includes tokenizer decoding and OpenAI "
 "request rendering)"
-msgstr "将输入转换为 token ID（包括分词器解码和 OpenAI 请求渲染）"
+msgstr ""
 
 #: ../../backend/Frontend.md:9
 msgid "Queries the Master to obtain Backend IP"
-msgstr "查询主控以获取后端 IP"
+msgstr ""
 
 #: ../../backend/Frontend.md:10
 msgid "Submits requests to Backend and awaits responses"
-msgstr "向后端提交请求并等待响应"
+msgstr ""
 
 #: ../../backend/Frontend.md:11
 msgid ""
 "Processes responses (includes tokenizer encoding and function call "
 "rendering)"
-msgstr "处理响应（包括分词器编码和函数调用渲染）"
+msgstr ""
 
 #: ../../backend/Frontend.md:12
 msgid "Role Initialization"
-msgstr "角色初始化"
+msgstr ""
 
 #: ../../backend/Frontend.md:22
 msgid ""
 "The active role is determined by the ROLE_TYPE environment variable "
 "(default: PDFUSION). Other roles only launch the corresponding component."
-msgstr "活动角色由 ROLE_TYPE 环境变量确定（默认：PDFUSION）。其他角色仅启动相应的组件。"
+msgstr ""
 
 #: ../../backend/Frontend.md:24
 msgid ""
 "In frontend only deployments, engine initialization is skipped for rapid "
 "tokenizer/renderer debugging."
-msgstr "在仅前端部署中，为快速调试分词器/渲染器而跳过引擎初始化。"
+msgstr ""
 
 #: ../../backend/Frontend.md:26
 msgid "Backend servers still host Frontend apps (for health checks/debugging)."
-msgstr "后端服务器仍然托管前端应用程序（用于健康检查/调试）。"
+msgstr ""
 
 #: ../../backend/Frontend.md:28
 msgid ""
 "*Italicized* APIs below are only usable when locally paired with a "
 "Backend server."
-msgstr "下面的*斜体*API 仅在与后端服务器本地配对时可用。"
+msgstr ""
 
 #: ../../backend/Frontend.md:32
 msgid "Frontend Debugging Related"
-msgstr "前端调试相关"
+msgstr ""
 
 #: ../../backend/Frontend.md:34
 msgid "Add chat template / tool parser"
-msgstr "添加聊天模板/工具解析器"
+msgstr ""
 
 #: ../../backend/Frontend.md:36
 msgid "Add chat template for models"
-msgstr "为模型添加聊天模板"
+msgstr ""
 
 #: ../../backend/Frontend.md:38
 msgid "Locate the Renderer:"
-msgstr "定位渲染器："
+msgstr ""
 
 #: ../../backend/Frontend.md:40
 msgid ""
 "Go to the `rtp_llm/openai/renderers` directory and find the renderer used"
 " by the model."
-msgstr "进入 `rtp_llm/openai/renderers` 目录并找到模型使用的渲染器。"
+msgstr ""
 
 #: ../../backend/Frontend.md:42
 msgid ""
@@ -115,12 +115,10 @@ msgid ""
 " the case of BasicRenderer, the chat template can be applied by adding "
 "`user_template` key in the request."
 msgstr ""
-"检查渲染器如何应用聊天模板逻辑。例如，在 BasicRenderer 的情况下，可以通过在请求中添加 `user_template` "
-"键来应用聊天模板。"
 
 #: ../../backend/Frontend.md:92
 msgid "For more complex custom chat template rendering"
-msgstr "对于更复杂的自定义聊天模板渲染"
+msgstr ""
 
 #: ../../backend/Frontend.md:94
 msgid ""
@@ -128,8 +126,6 @@ msgid ""
 " a new renderer class that inherits from CustomChatRenderer and "
 "implements the `render_chat` interface."
 msgstr ""
-"在 `rtp_llm/openai/renderers/` 目录下创建新的渲染器，创建一个继承自 CustomChatRenderer 并实现 "
-"`render_chat` 接口的新渲染器类。"
 
 #: ../../backend/Frontend.md:96
 msgid ""
@@ -138,12 +134,10 @@ msgid ""
 "MODEL_TYPE, so related renderers should also be registered to same model "
 "type with models."
 msgstr ""
-"使用 `register_renderer` 注册渲染器并在 `rtp_llm/openai/renderers/__init__.py` "
-"中导入渲染器。渲染器基于 MODEL_TYPE 进行选择，因此相关渲染器也应该与模型注册到相同的模型类型。"
 
 #: ../../backend/Frontend.md:103
 msgid "Add tool parser for models"
-msgstr "为模型添加工具解析器"
+msgstr ""
 
 #: ../../backend/Frontend.md:105
 msgid ""
@@ -151,7 +145,7 @@ msgid ""
 "implementing the `render_response_stream` interface. The engine's "
 "response is streamed by default, and the output should also be stream-"
 "compatible."
-msgstr "后处理逻辑也在渲染器中通过实现 `render_response_stream` 接口来处理。引擎的响应默认是流式的，输出也应该与流兼容。"
+msgstr ""
 
 #: ../../backend/Frontend.md:107
 msgid ""
@@ -160,125 +154,121 @@ msgid ""
 "character, incomplete characters are buffered and emitted only when "
 "complete."
 msgstr ""
-"在默认实现中，函数 `_update_single_status` 跟踪每个流的增量状态。如果多个 token ID "
-"解码为单个字符，则不完整的字符会被缓冲，只有在完整时才会发出。"
 
 #: ../../backend/Frontend.md:109
 msgid ""
 "Advanced Post-Processing: For `function_call` or other structured "
 "outputs, refer to `qwen_agent_renderer`'s implementation."
-msgstr "高级后处理：对于 `function_call` 或其他结构化输出，请参考 `qwen_agent_renderer` 的实现。"
+msgstr ""
 
 #: ../../backend/Frontend.md:111
 msgid "Debug"
-msgstr "调试"
+msgstr ""
 
 #: ../../backend/Frontend.md:113
 msgid "Frontend start server"
-msgstr "前端启动服务器"
+msgstr ""
 
 #: ../../backend/Frontend.md:125
 msgid ""
 "No ckpt_path required. Test tokenizers/renderers via prompt processing "
 "APIs."
-msgstr "无需 ckpt_path。通过提示处理 API 测试分词器/渲染器。"
+msgstr ""
 
 #: ../../backend/Frontend.md:127
 msgid ""
 "Directly curl `/v1/chat/render` or `/chat/render` to get the renderered "
 "result of openai renderer."
-msgstr "直接 curl `/v1/chat/render` 或 `/chat/render` 来获取 openai 渲染器的渲染结果。"
+msgstr ""
 
 #: ../../backend/Frontend.md:129
 msgid "Post-Processing Debugging"
-msgstr "后处理调试"
+msgstr ""
 
 #: ../../backend/Frontend.md:131
 msgid "Frontend defaults use localhost:start_port+1 for gRPC call."
-msgstr "前端默认使用 localhost:start_port+1 进行 gRPC 调用。"
+msgstr ""
 
 #: ../../backend/Frontend.md:133
 msgid "Mock a backend server to return output ids:"
-msgstr "模拟后端服务器返回输出 ID："
+msgstr ""
 
 #: ../../backend/Frontend.md:204
 msgid ""
 "If need, mock a master server to routing, ensure ports alignment is "
 "maintained:"
-msgstr "如果需要，模拟主服务器进行路由，确保端口对齐得到维护："
+msgstr ""
 
 #: ../../backend/Frontend.md:308
 msgid ""
 "Also, you can start server with ROLE_TYPE=PDFUSION to start backend "
 "server engine."
-msgstr "此外，您可以使用 ROLE_TYPE=PDFUSION 启动服务器以启动后端服务器引擎。"
+msgstr ""
 
 #: ../../backend/Frontend.md:310
 msgid ""
 "In this way, debugging the tokenizer and openai renderer related code "
 "only requires restarting frontend (lightweight)."
-msgstr "这样，调试分词器和 openai 渲染器相关代码只需重启前端（轻量级）。"
+msgstr ""
 
 #: ../../backend/Frontend.md:314
 msgid "Public APIs"
-msgstr "公共 API"
+msgstr ""
 
 #: ../../backend/Frontend.md:315
 msgid "Health Check Endpoints"
-msgstr "健康检查端点"
+msgstr ""
 
 #: ../../backend/Frontend.md:316
 msgid ""
 "Verifies Backend status (returns ok/error). Call same endpoints in "
 "Backend."
-msgstr "验证后端状态（返回 ok/error）。在后端调用相同的端点。"
+msgstr ""
 
 #: ../../backend/Frontend.md:330
 msgid "*Debug Endpoints*"
-msgstr "*调试端点*"
+msgstr ""
 
 #: ../../backend/Frontend.md:331 ../../backend/Frontend.md:385
 #: ../../backend/Frontend.md:423
 msgid "Proxied to same endpoints in Backend."
-msgstr "代理到后端的相同端点。"
+msgstr ""
 
 #: ../../backend/Frontend.md:384
 msgid "*Dynamic Update Endpoints*"
-msgstr "*动态更新端点*"
+msgstr ""
 
 #: ../../backend/Frontend.md:422
 msgid "*Embedding APIs*"
-msgstr "*嵌入 API*"
+msgstr ""
 
 #: ../../backend/Frontend.md:436
-#, fuzzy
 msgid "Inference APIs"
-msgstr "推理 API"
+msgstr ""
 
 #: ../../backend/Frontend.md:492
-#, fuzzy
 msgid "Prompt Processing APIs"
-msgstr "提示处理 API"
+msgstr ""
 
 #: ../../backend/Frontend.md:538
 msgid "Internal Communication"
-msgstr "内部通信"
+msgstr ""
 
 #: ../../backend/Frontend.md:540
 msgid "Frontend → Master: HTTP call to obtain Backend IP."
-msgstr "前端 → 主控：HTTP 调用以获取后端 IP。"
+msgstr ""
 
 #: ../../backend/Frontend.md:542
 msgid "Frontend → Backend: gRPC call for inference (see model_rpc_service.proto)."
-msgstr "前端 → 后端：用于推理的 gRPC 调用（参见 model_rpc_service.proto）。"
+msgstr ""
 
 #: ../../backend/Frontend.md:544
 msgid "Master APIs"
-msgstr "主控 APIs"
+msgstr ""
 
 #: ../../backend/Frontend.md:580
 msgid "Backend grpc APIs"
-msgstr "后端 grpc APIs"
+msgstr ""
 
 #: ../../backend/Frontend.md:581
 msgid "Reference `rtp_llm/cpp/proto/model_rpc/service.proto`"

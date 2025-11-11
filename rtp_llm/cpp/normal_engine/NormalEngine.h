@@ -10,7 +10,9 @@
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
 #include "rtp_llm/cpp/engine_base/TorchProfiler.h"
 #include "rtp_llm/cpp/cache/CacheManager.h"
-#include "rtp_llm/cpp/dataclass/EngineInitParameter.h"
+#include "rtp_llm/cpp/engine_base/EngineInitParams.h"
+#include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
+#include "rtp_llm/cpp/cache/WarmUpResult.h"
 #include "rtp_llm/cpp/engine_base/Executor.h"
 #include "rtp_llm/cpp/models/GptModel.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h"
@@ -32,7 +34,7 @@ public:
                                              preRunMode                            mode) override;
     absl::Status                      stop() override;
 
-    KVCacheInfo                     getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) const override;
+    KVCacheInfo                     getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) override;
     absl::Status                    step();
     absl::Status                    startLoop();
     int64_t                         getLastScheduleTime() override;
@@ -46,7 +48,7 @@ public:
 
 private:
     void                            initScheduler();
-    std::shared_ptr<GenerateStream> enqueueMinFakeQuery(int32_t max_new_tokens);
+    std::shared_ptr<GenerateStream> createMinFakeStream(int32_t max_new_tokens);
     WarmUpResult                    warmUp(const EngineInitParams& params);
     WarmUpResult                    prefillWarmUp(const EngineInitParams& params);
     WarmUpResult                    decodeWarmUp(const EngineInitParams& params);
@@ -62,7 +64,6 @@ private:
     std::atomic<bool>               running_{false};
     std::unique_ptr<Executor>       executor_;
     const rtp_llm::GptInitParameter params_;
-    StepRecorder                    step_recorder_;
     kmonitor::MetricsReporterPtr    metrics_reporter_;
     std::shared_ptr<CudaProfiler>   profiler_;
     int                             profiler_step_     = 0;

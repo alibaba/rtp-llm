@@ -182,7 +182,7 @@ void setBuffer(rtp_llm::BufferPtr buf, std::vector<std::vector<Dtype>> content) 
     }
 }
 
-TEST_F(TreeLogitsProcessorTest, testUpdateLogitProcessorStatus) {
+TEST_F(TreeLogitsProcessorTest, testUpdateStatus) {
     {
         SamplerDataBuilder     builder;
         std::string            file_path  = "./rtp_llm/cpp/models/logits_processor/test/gir_prefix_dict.json";
@@ -198,7 +198,7 @@ TEST_F(TreeLogitsProcessorTest, testUpdateLogitProcessorStatus) {
         std::vector<std::vector<int>> new_token_ids = {{64000}, {64003}, {64006}, {64008}};
         setBuffer(new_token, new_token_ids);
 
-        processor->updateLogitProcessorStatus(new_token, 1);
+        processor->updateStatus(new_token, 1);
 
         auto                     proc        = std::dynamic_pointer_cast<TreeLogitsProcessor>(processor);
         std::vector<std::string> status_list = proc->getStatus();
@@ -210,7 +210,7 @@ TEST_F(TreeLogitsProcessorTest, testUpdateLogitProcessorStatus) {
         std::vector<std::vector<int>> token_ids_2 = {{64001}, {64001}, {64004}, {64001}};
         setBuffer(new_token, token_ids_2);
 
-        processor->updateLogitProcessorStatus(new_token, 1);
+        processor->updateStatus(new_token, 1);
 
         status_list = proc->getStatus();
         EXPECT_EQ("225_64000_64001", status_list[0]);
@@ -221,7 +221,7 @@ TEST_F(TreeLogitsProcessorTest, testUpdateLogitProcessorStatus) {
         std::vector<std::vector<int>> token_ids_3 = {{2}, {2}, {2}, {2}};
         setBuffer(new_token, token_ids_3);
 
-        processor->updateLogitProcessorStatus(new_token, 1);
+        processor->updateStatus(new_token, 1);
 
         status_list = proc->getStatus();
         EXPECT_EQ("225_64000_64001_2", status_list[0]);
@@ -232,7 +232,7 @@ TEST_F(TreeLogitsProcessorTest, testUpdateLogitProcessorStatus) {
         std::vector<std::vector<int>> token_ids_4 = {{1}, {1}, {1}, {1}};
         setBuffer(new_token, token_ids_4);
 
-        processor->updateLogitProcessorStatus(new_token, 1);
+        processor->updateStatus(new_token, 1);
 
         status_list = proc->getStatus();
         EXPECT_EQ("225_64000_64001_2", status_list[0]);

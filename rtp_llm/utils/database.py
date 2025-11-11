@@ -2,10 +2,12 @@ import json
 import logging
 import os
 import re
+import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Generator, List, Optional
 
 import torch
+from tqdm.auto import tqdm
 
 from rtp_llm.lora.lora_file import LoraCkpt
 from rtp_llm.utils.ckpt_file_info import CkptFileInfo, FinetuneType
@@ -29,6 +31,13 @@ class BaseDatabase:
 
     def get_tensor_type(self, name: str) -> torch.dtype:
         raise NotImplementedError
+    
+    def get_max_file_size(self) -> int:
+        raise NotImplementedError
+    
+    @property
+    def is_safetensor(self) -> bool:
+        return False
 
     @property
     def is_ft_style(self) -> bool:
@@ -76,10 +85,17 @@ class CkptDatabase(BaseDatabase):
     @property
     def is_ft_style(self) -> bool:
         return self._is_ft_style
+    
+    @property
+    def is_safetensor(self) -> bool:
+        return all(map(lambda file: file.is_safetensor(), self.pretrain_file_list))
 
     @property
     def ft_weight_params(self) -> Optional[Dict[str, Any]]:
         return self._ft_weight_params
+    
+    def get_max_file_size(self) -> int:
+        return max([file.file_size for file in self.pretrain_file_list])
 
     def load_hf_meta(self, path: str):
         # avoid consolidated.safetensors in Mistral-Nemo-Instruct-2407
@@ -171,12 +187,19 @@ class CkptDatabase(BaseDatabase):
     def load_tensors_by_prefix(
         self, prefix_list: List[str], device: str, direct_io: bool
     ) -> dict[str, List[torch.Tensor]]:
+        try:
+            from fast_safetensors import LoadWithShm
+            loader = LoadWithShm(2 * 1024 * 1024 * 1024, device, direct_io)
+            load_tensors = lambda ckptfile: loader.load_safetensors_to_device(ckptfile.file_name)
+        except (ModuleNotFoundError, ImportError):
+            load_tensors = lambda ckptfile: ckptfile.load_tensors(device, direct_io)
+
         res = {}
         for ckptfile in self.pretrain_file_list:
             if any(
                 tensor.startswith(prefix_list) for tensor in ckptfile.get_tensor_names()
             ):
-                tensors = ckptfile.load_tensors(device, direct_io)
+                tensors = load_tensors(ckptfile)
                 for k, v in tensors.items():
                     if not k.startswith(prefix_list):
                         continue
@@ -185,6 +208,36 @@ class CkptDatabase(BaseDatabase):
                     else:
                         res[k].append(v)
         return res
+    
+    def fastsafetensors_weights_iterator(self, device: str, use_tqdm_on_load: bool):
+        from fastsafetensors import ParallelLoader, SingleGroup
+        def iterator(device: str, use_tqdm_on_load: bool):
+            if torch.distributed.is_initialized():
+                pg = torch.distributed.group.WORLD
+            else:
+                pg = SingleGroup()
+
+            hf_weights_files = sorted(
+                [file.file_name for file in self.pretrain_file_list]
+            )
+            if device == "cuda":
+                device = f"cuda:{pg.rank()}"
+                logging.debug(f"origin device is cuda, set to {device}")
+            # Create loader
+            iterator = ParallelLoader(
+                pg,
+                hf_weights_files=hf_weights_files,
+                use_tqdm_on_load=use_tqdm_on_load,
+                device=device,
+                bbuf_size_kb=1024 * 1024 * 2,
+                use_shm=True,
+            )
+            try:
+                # Execute parallel iteration
+                yield from iterator.iterate_weights()
+            finally:
+                iterator.loader.close()
+        return iterator(device, use_tqdm_on_load)
 
     def get_lora_tensor_names(self, config_name: str) -> List[str]:
         return self.lora_ckpt.get_lora_tensor_names(config_name)

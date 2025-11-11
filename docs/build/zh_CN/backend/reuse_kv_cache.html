@@ -8,21 +8,21 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
-    <title>重用缓存 &#8212; RTP-LLM</title>
-  
-  
-  
+    <title>ReuseCache &#8212; RTP-LLM</title>
+
+
+
   <script data-cfasync="false">
     document.documentElement.dataset.mode = localStorage.getItem("mode") || "";
     document.documentElement.dataset.theme = localStorage.getItem("theme") || "";
   </script>
-  
+
   <!-- Loaded before other Sphinx assets -->
   <link href="../_static/styles/theme.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
 <link href="../_static/styles/bootstrap.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
 <link href="../_static/styles/pydata-sphinx-theme.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
 
-  
+
   <link href="../_static/vendor/fontawesome/6.5.2/css/all.min.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
   <link rel="preload" as="font" type="font/woff2" crossorigin href="../_static/vendor/fontawesome/6.5.2/webfonts/fa-solid-900.woff2" />
 <link rel="preload" as="font" type="font/woff2" crossorigin href="../_static/vendor/fontawesome/6.5.2/webfonts/fa-brands-400.woff2" />
@@ -35,7 +35,7 @@
     <link rel="stylesheet" type="text/css" href="../_static/css/language-switcher.css?v=943557c0" />
     <link rel="stylesheet" type="text/css" href="../_static/css/custom_log.css" />
     <link rel="stylesheet" type="text/css" href="../_static/css/language-switcher.css?v=943557c0" />
-  
+
   <!-- Pre-loaded scripts that we'll load fully later -->
   <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=dfe6caa3a7d634c4db9b" />
 <link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=dfe6caa3a7d634c4db9b" />
@@ -55,11 +55,11 @@
     <link rel="icon" href="../_static/logo.ico"/>
     <link rel="index" title="索引" href="../genindex.html" />
     <link rel="search" title="搜索" href="../search.html" />
-    <link rel="next" title="工具和函数调用" href="function_calling.html" />
-    <link rel="prev" title="推测解码" href="speculative_decoding.html" /> 
+    <link rel="next" title="Tool and Function Calling" href="function_calling.html" />
+    <link rel="prev" title="Speculative Decoding" href="speculative_decoding.html" />
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="zh-CN"/>
-    <meta name="docbuild:last-update" content="2025 年 09 月 25 日"/>
+    <meta name="docbuild:last-update" content="2025 年 11 月 09 日"/>
 <link
   rel="stylesheet"
   href="../_static/css/language-switcher.css"
@@ -67,30 +67,30 @@
 <script src="../_static/js/language-switcher.js"></script>
 
   </head>
-  
-  
+
+
   <body data-bs-spy="scroll" data-bs-target=".bd-toc-nav" data-offset="180" data-bs-root-margin="0px 0px -60%" data-default-mode="">
 
-  
-  
+
+
   <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">Skip to main content</a></div>
-  
+
   <div id="pst-scroll-pixel-helper"></div>
-  
+
   <button type="button" class="btn rounded-pill" id="pst-back-to-top">
     <i class="fa-solid fa-arrow-up"></i>Back to top</button>
 
-  
+
   <input type="checkbox"
           class="sidebar-toggle"
           id="pst-primary-sidebar-checkbox"/>
   <label class="overlay overlay-primary" for="pst-primary-sidebar-checkbox"></label>
-  
+
   <input type="checkbox"
           class="sidebar-toggle"
           id="pst-secondary-sidebar-checkbox"/>
   <label class="overlay overlay-secondary" for="pst-secondary-sidebar-checkbox"></label>
-  
+
   <div class="search-button__wrapper">
     <div class="search-button__overlay"></div>
     <div class="search-button__search-container">
@@ -116,49 +116,49 @@
   <aside id="bd-header-version-warning" class="d-none d-print-none" aria-label="Version warning"></aside>
 </div>
 
-  
+
     <header class="bd-header navbar navbar-expand-lg bd-navbar d-print-none">
     </header>
-  
+
 
   <div class="bd-container">
     <div class="bd-container__inner bd-page-width">
-      
-      
-      
-      <div class="bd-sidebar-primary bd-sidebar">
-        
 
-  
+
+
+      <div class="bd-sidebar-primary bd-sidebar">
+
+
+
   <div class="sidebar-header-items sidebar-primary__section">
-    
-    
-    
-    
+
+
+
+
   </div>
-  
+
     <div class="sidebar-primary-items__start sidebar-primary__section">
         <div class="sidebar-primary-item">
 
-  
-    
-  
+
+
+
 
 <a class="navbar-brand logo" href="../index.html">
-  
-  
-  
-  
-  
-    
-    
-      
-    
-    
+
+
+
+
+
+
+
+
+
+
     <img src="../_static/logo.png" class="logo__image only-light" alt="RTP-LLM - Home"/>
     <script>document.write(`<img src="../_static/logo.png" class="logo__image only-dark" alt="RTP-LLM - Home"/>`);</script>
-  
-  
+
+
 </a></div>
         <div class="sidebar-primary-item">
 
@@ -175,7 +175,7 @@
     <div class="bd-toc-item navbar-nav active">
         <p aria-level="2" class="caption" role="heading"><span class="caption-text">安装</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../start/install.html">安装 RTP-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../start/install.html">Install RTP-LLM</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">发布版本</span></p>
 <ul class="nav bd-sidenav">
@@ -183,11 +183,11 @@
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">基本用法</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="send_request.html">发送请求</a></li>
-<li class="toctree-l1"><a class="reference internal" href="openai_api_completions.html">OpenAI API - 文本生成/会话</a></li>
-<li class="toctree-l1"><a class="reference internal" href="openai_api_vision.html">OpenAI API - 多模态</a></li>
-<li class="toctree-l1"><a class="reference internal" href="openai_api_embeddings.html">OpenAI API - Embedding</a></li>
-<li class="toctree-l1"><a class="reference internal" href="native_api.html">RTP-LLM Native API</a></li>
+<li class="toctree-l1"><a class="reference internal" href="send_request.html">Sending Requests</a></li>
+<li class="toctree-l1"><a class="reference internal" href="openai_api_completions.html">OpenAI APIs - Completions</a></li>
+<li class="toctree-l1"><a class="reference internal" href="openai_api_vision.html">OpenAI APIs - Vision</a></li>
+<li class="toctree-l1"><a class="reference internal" href="openai_api_embeddings.html">OpenAI APIs - Embedding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="native_api.html">RTP-LLM Native APIs</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">后端教程</span></p>
 <ul class="nav bd-sidenav">
@@ -197,77 +197,85 @@
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">高级后端配置</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="server_arguments.html">服务器参数</a></li>
-<li class="toctree-l1"><a class="reference internal" href="sampling_params.html">采样配置</a></li>
-<li class="toctree-l1"><a class="reference internal" href="attention_backend.html">注意力后端</a></li>
+<li class="toctree-l1"><a class="reference internal" href="server_arguments.html">ServerArgs</a></li>
+<li class="toctree-l1"><a class="reference internal" href="sampling_params.html">Sampling Config</a></li>
+<li class="toctree-l1"><a class="reference internal" href="attention_backend.html">Attention Backend</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">支持的模型</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../supported_models/generative_models.html">大语言模型</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../supported_models/multimodal_language_models.html">多模态语言模型</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../supported_models/embedding_models.html">Embedding 模型</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../supported_models/support_new_models.html">如何支持新模型</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/generative_models.html">Large Language Models</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/multimodal_language_models.html">Multimodal Language Models</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/embedding_models.html">Embedding Models</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../supported_models/support_new_models.html">How to Support New Models</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">高级功能</span></p>
 <ul class="current nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="speculative_decoding.html">推测解码</a></li>
-<li class="toctree-l1 current active"><a class="current reference internal" href="#">重用缓存</a></li>
+<li class="toctree-l1"><a class="reference internal" href="speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1 current active"><a class="current reference internal" href="#">ReuseCache</a></li>
 
-<li class="toctree-l1"><a class="reference internal" href="function_calling.html">工具和函数调用</a></li>
-<li class="toctree-l1"><a class="reference internal" href="quantization.html">量化</a></li>
-<li class="toctree-l1"><a class="reference internal" href="lora.html">LoRA 服务</a></li>
-<li class="toctree-l1"><a class="reference internal" href="pd_disaggregation.html">PD分离</a></li>
+<li class="toctree-l1"><a class="reference internal" href="function_calling.html">Tool and Function Calling</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quantization.html">Quantization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="lora.html">LoRA Serving</a></li>
+<li class="toctree-l1"><a class="reference internal" href="pd_disaggregation.html">PD Disaggregation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="logits_processor.html">LogitsProcessor</a></li>
+
+
+
+
+
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">RTP-LLM 路由器</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="flexlb.html">FlexLB（弹性负载均衡器）- 主节点</a></li>
+<li class="toctree-l1"><a class="reference internal" href="flexlb.html">FlexLB (Flexible Load Balancer) - Master Role</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Benchmark</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../benchmark/benchmark.html">RTP-LLM 性能基准测试工具</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../benchmark/benchmark.html">RTP-LLM Performance Benchmark Tool</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">参考文献</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../references/general.html">通用指南</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../references/developer.html">开发者参考</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../references/general.html">General Guidance</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../references/developer.html">Developer Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../references/cli/Guide.html">CLI 使用指南</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../README.html">Documentation Manual</a></li>
 </ul>
 
     </div>
 </nav></div>
     </div>
-  
-  
+
+
   <div class="sidebar-primary-items__end sidebar-primary__section">
   </div>
-  
+
   <div id="rtd-footer-container"></div>
 
 
       </div>
-      
+
       <main id="main-content" class="bd-main" role="main">
-        
-        
+
+
 
 <div class="sbt-scroll-pixel-helper"></div>
 
           <div class="bd-content">
             <div class="bd-article-container">
-              
+
               <div class="bd-header-article d-print-none">
 <div class="header-article-items header-article__inner">
-  
+
     <div class="header-article-items__start">
-      
+
         <div class="header-article-item"><button class="sidebar-toggle primary-toggle btn btn-sm" title="Toggle primary sidebar" data-bs-placement="bottom" data-bs-toggle="tooltip">
   <span class="fa-solid fa-bars"></span>
 </button></div>
-      
+
     </div>
-  
-  
+
+
     <div class="header-article-items__end">
-      
+
         <div class="header-article-item">
 
 <div class="article-header-buttons">
@@ -281,15 +289,15 @@
     <i class="fab fa-github"></i>
   </button>
   <ul class="dropdown-menu">
-      
-      
-      
+
+
+
       <li><a href="https://github.com/alibaba/rtp-llm" target="_blank"
    class="btn btn-sm btn-source-repository-button dropdown-item"
    title="源码库"
    data-bs-placement="left" data-bs-toggle="tooltip"
 >
-  
+
 
 <span class="btn__icon-container">
   <i class="fab fa-github"></i>
@@ -297,16 +305,16 @@
 <span class="btn__text-container">Repository</span>
 </a>
 </li>
-      
-      
-      
-      
+
+
+
+
       <li><a href="https://github.com/alibaba/rtp-llm/blob/main/backend/reuse_kv_cache.md?plain=1" target="_blank"
    class="btn btn-sm btn-source-file-button dropdown-item"
    title="Show source"
    data-bs-placement="left" data-bs-toggle="tooltip"
 >
-  
+
 
 <span class="btn__icon-container">
   <i class="fas fa-code"></i>
@@ -314,16 +322,16 @@
 <span class="btn__text-container">Show source</span>
 </a>
 </li>
-      
-      
-      
-      
+
+
+
+
       <li><a href="https://github.com/alibaba/rtp-llm/edit/main/backend/reuse_kv_cache.md" target="_blank"
    class="btn btn-sm btn-source-edit-button dropdown-item"
    title="Suggest edit"
    data-bs-placement="left" data-bs-toggle="tooltip"
 >
-  
+
 
 <span class="btn__icon-container">
   <i class="fas fa-pencil-alt"></i>
@@ -331,16 +339,16 @@
 <span class="btn__text-container">Suggest edit</span>
 </a>
 </li>
-      
-      
-      
-      
+
+
+
+
       <li><a href="https://github.com/alibaba/rtp-llm/issues/new?title=Issue%20on%20page%20%2Fbackend/reuse_kv_cache.html&body=Your%20issue%20content%20here." target="_blank"
    class="btn btn-sm btn-source-issues-button dropdown-item"
    title="创建议题"
    data-bs-placement="left" data-bs-toggle="tooltip"
 >
-  
+
 
 <span class="btn__icon-container">
   <i class="fas fa-lightbulb"></i>
@@ -348,7 +356,7 @@
 <span class="btn__text-container">Open issue</span>
 </a>
 </li>
-      
+
   </ul>
 </div>
 
@@ -362,15 +370,15 @@
     <i class="fas fa-download"></i>
   </button>
   <ul class="dropdown-menu">
-      
-      
-      
+
+
+
       <li><a href="../_sources/backend/reuse_kv_cache.md" target="_blank"
    class="btn btn-sm btn-download-source-button dropdown-item"
    title="下载源文件"
    data-bs-placement="left" data-bs-toggle="tooltip"
 >
-  
+
 
 <span class="btn__icon-container">
   <i class="fas fa-file"></i>
@@ -378,17 +386,17 @@
 <span class="btn__text-container">.md</span>
 </a>
 </li>
-      
-      
-      
-      
+
+
+
+
       <li>
 <button onclick="window.print()"
   class="btn btn-sm btn-download-pdf-button dropdown-item"
   title="列印成 PDF"
   data-bs-placement="left" data-bs-toggle="tooltip"
 >
-  
+
 
 <span class="btn__icon-container">
   <i class="fas fa-file-pdf"></i>
@@ -396,7 +404,7 @@
 <span class="btn__text-container">.pdf</span>
 </button>
 </li>
-      
+
   </ul>
 </div>
 
@@ -408,7 +416,7 @@
   title="全屏模式"
   data-bs-placement="bottom" data-bs-toggle="tooltip"
 >
-  
+
 
 <span class="btn__icon-container">
   <i class="fas fa-expand"></i>
@@ -440,30 +448,30 @@ document.write(`
     <span class="fa-solid fa-list"></span>
 </button>
 </div></div>
-      
+
     </div>
-  
+
 </div>
 </div>
-              
-              
+
+
 
 <div id="jb-print-docs-body" class="onlyprint">
-    <h1>重用缓存</h1>
+    <h1>ReuseCache</h1>
     <!-- Table of contents -->
     <div id="print-main-content">
         <div id="jb-print-toc">
-            
+
             <div>
                 <h2> 目录 </h2>
             </div>
             <nav aria-label="Page">
                 <ul class="visible nav section-nav flex-column">
-<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#">重用缓存</a></li>
-<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#multitaskprompt">多任务提示</a><ul class="visible nav section-nav flex-column">
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#usage">用法</a><ul class="visible nav section-nav flex-column">
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#id1">多任务提示</a></li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#note">注意:</a></li>
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#">ReuseCache</a></li>
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#multitaskprompt">MultiTaskPrompt</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#usage">Usage</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#id1">MultiTaskPrompt</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#note">Note:</a></li>
 </ul>
 </li>
 </ul>
@@ -475,14 +483,16 @@ document.write(`
     </div>
 </div>
 
-              
-                
+
+
 <div id="searchbox"></div>
                 <article class="bd-article">
-                  
+
   <section id="reusecache">
-<h1>重用缓存<a class="headerlink" href="#reusecache" title="Link to this heading">#</a></h1>
-<p>在多轮对话场景中，多个提示通常共享公共前缀。这些前缀token对应的KV缓存是相同的，重用KV缓存可以减少这些重复部分的计算时间，降低首token延迟。通过设置环境变量<code class="docutils literal notranslate"><span class="pre">REUSE_CACHE=1</span></code>启用KV缓存重用。启用时，启动日志将显示&quot;reuse_cache: True&quot;。环境变量<code class="docutils literal notranslate"><span class="pre">SEQ_SIZE_PER_BLOCK</span></code>指定每个KV缓存块对应的序列数量。<strong>注意：由于Q和KV之间的长度不匹配，ReuseCache目前无法使用flash attention，需要在CMD中添加<code class="docutils literal notranslate"><span class="pre">--reuse_cache</span> <span class="pre">true</span></code></strong></p>
+<h1>ReuseCache<a class="headerlink" href="#reusecache" title="Link to this heading">#</a></h1>
+<p>In multi-turn conversation scenarios, multiple prompts often share common prefixes. The KV cache corresponding to these prefix tokens is identical, and reusing KV cache can reduce computation time for these repeated parts, lowering First Token Latency. Enable KV cache reuse by setting the environment variable <code class="docutils literal notranslate"><span class="pre">REUSE_CACHE=1</span></code>. The startup logs will show &quot;reuse_cache: True&quot; when enabled.
+The environment variable <code class="docutils literal notranslate"><span class="pre">SEQ_SIZE_PER_BLOCK</span></code> specifies the number of sequences corresponding to each KV cache block.
+<strong>Note: ReuseCache cannot currently use flash attention due to mismatched lengths between Q and KV, requiring <code class="docutils literal notranslate"><span class="pre">--reuse_cache</span> <span class="pre">true</span></code> to be added in the CMD</strong></p>
 <div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">os</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">rtp_llm.pipeline</span><span class="w"> </span><span class="kn">import</span> <span class="n">Pipeline</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">rtp_llm.model_factory</span><span class="w"> </span><span class="kn">import</span> <span class="n">ModelFactory</span><span class="p">,</span> <span class="n">ModelConfig</span>
@@ -511,21 +521,22 @@ document.write(`
 </div>
 </section>
 <section class="tex2jax_ignore mathjax_ignore" id="multitaskprompt">
-<h1>多任务提示<a class="headerlink" href="#multitaskprompt" title="Link to this heading">#</a></h1>
-<p>为长文本系统提示创建静态缓存，在每个请求中直接从静态缓存读取KV缓存而不是重新计算。这种方法可以显著减少模型的首token延迟。</p>
+<h1>MultiTaskPrompt<a class="headerlink" href="#multitaskprompt" title="Link to this heading">#</a></h1>
+<p>Create static cache for long-text System Prompts, directly reading KV cache from static cache in each request instead of recomputing. This method can significantly reduce the model's First Token Latency.</p>
 <section id="usage">
-<h2>用法<a class="headerlink" href="#usage" title="Link to this heading">#</a></h2>
+<h2>Usage<a class="headerlink" href="#usage" title="Link to this heading">#</a></h2>
 <section id="id1">
-<h3>多任务提示<a class="headerlink" href="#id1" title="Link to this heading">#</a></h3>
-<p>rtp-llm通过<code class="docutils literal notranslate"><span class="pre">--multi_task_prompt</span></code>参数指定需要静态缓存的系统提示信息文件。格式如下：</p>
+<h3>MultiTaskPrompt<a class="headerlink" href="#id1" title="Link to this heading">#</a></h3>
+<p>rtp-llm specifies the system prompt information file that needs static caching through the <code class="docutils literal notranslate"><span class="pre">--multi_task_prompt</span></code> parameter. The format is similar to the following:</p>
 <div class="highlight-json notranslate"><div class="highlight"><pre><span></span><span class="p">[</span>
 <span class="w">    </span><span class="p">{</span><span class="nt">&quot;task_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;prompt&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot; &lt;|im_start|&gt;system\nYou are a helpful assistant.&lt;|im_end|&gt;\n&lt;|im_start|&gt;&quot;</span><span class="p">},</span>
 <span class="w">    </span><span class="p">{</span><span class="nt">&quot;task_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;prompt&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;你是一个严谨的程序员，你接下来需要非常谨慎的思考并回答以下问题:&quot;</span><span class="p">}</span>
 <span class="p">]</span>
 </pre></div>
 </div>
-<p>您也可以通过<code class="docutils literal notranslate"><span class="pre">multi_task_prompt_str</span></code>环境变量传递上述JSON。</p>
-<p>启动后，模型将运行上述系统提示并将KV缓存缓存在GPU内存中。在后续运行中，如果指定了task_id，则可以使用此前缀。示例如下：<strong>注意：由于Q和KV之间的长度不匹配，MultiTaskPrompt目前无法使用flash attention，需要在运行代码前配置环境变量<code class="docutils literal notranslate"><span class="pre">export</span> <span class="pre">ENABLE_FMHA=OFF</span></code></strong></p>
+<p>You can also pass the above JSON through the <code class="docutils literal notranslate"><span class="pre">multi_task_prompt_str</span></code> environment variable.</p>
+<p>After startup, the model will run the above system prompts and cache the KV cache in GPU memory. During subsequent runs, if a task_id is specified, this prefix can be used. Demo is as follows:
+<strong>Note: MultiTaskPrompt cannot currently use flash attention due to mismatched lengths between Q and KV, requiring the environment variable <code class="docutils literal notranslate"><span class="pre">export</span> <span class="pre">ENABLE_FMHA=OFF</span></code> to be configured before running the code</strong></p>
 <div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">os</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">rtp_llm.pipeline</span><span class="w"> </span><span class="kn">import</span> <span class="n">Pipeline</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">rtp_llm.model_factory</span><span class="w"> </span><span class="kn">import</span> <span class="n">ModelFactory</span><span class="p">,</span> <span class="n">ModelConfig</span>
@@ -562,22 +573,24 @@ document.write(`
 </div>
 </section>
 <section id="note">
-<h3>注意:<a class="headerlink" href="#note" title="Link to this heading">#</a></h3>
-<p>使用MULTI_TASK_PROMPT时，如果启用了REUSE_CACHE功能，则可以重用KV缓存。请参考文档<a class="reference internal" href="#docs/ReuseKVCache-Tutorial.md"><span class="xref myst">ReuseKVCache</span></a>。当指定任务ID时，使用task_id的系统提示来连接请求，并在KV缓存中找到最长匹配的历史请求以重用KV缓存。当未指定任务ID时，使用用户的提示在KV缓存中找到最长匹配的历史请求以重用KV缓存。</p>
+<h3>Note:<a class="headerlink" href="#note" title="Link to this heading">#</a></h3>
+<p>When using MULTI_TASK_PROMPT, if the REUSE_CACHE function is enabled, then KV cache can be reused. Refer to the document <a class="reference internal" href="#docs/ReuseKVCache-Tutorial.md"><span class="xref myst">ReuseKVCache</span></a>.
+When a task ID is specified, the system prompt of the task_id is used to concatenate the request, and the longest matching historical request is found in the KV cache to reuse the KV cache.
+When no task ID is specified, the user's prompt is used to find the longest matching historical request in the KV cache to reuse the KV cache.</p>
 </section>
 </section>
 </section>
 
 
                 </article>
-              
 
-              
-              
-              
-              
+
+
+
+
+
                 <footer class="prev-next-footer d-print-none">
-                  
+
 <div class="prev-next-area">
     <a class="left-prev"
        href="speculative_decoding.html"
@@ -585,7 +598,7 @@ document.write(`
       <i class="fa-solid fa-angle-left"></i>
       <div class="prev-next-info">
         <p class="prev-next-subtitle">上一页</p>
-        <p class="prev-next-title">推测解码</p>
+        <p class="prev-next-title">Speculative Decoding</p>
       </div>
     </a>
     <a class="right-next"
@@ -593,17 +606,17 @@ document.write(`
        title="next page">
       <div class="prev-next-info">
         <p class="prev-next-subtitle">下一页</p>
-        <p class="prev-next-title">工具和函数调用</p>
+        <p class="prev-next-title">Tool and Function Calling</p>
       </div>
       <i class="fa-solid fa-angle-right"></i>
     </a>
 </div>
                 </footer>
-              
+
             </div>
-            
-            
-              
+
+
+
                 <div class="bd-sidebar-secondary bd-toc"><div class="sidebar-secondary-items sidebar-secondary__inner">
 
 
@@ -613,11 +626,11 @@ document.write(`
   </div>
   <nav class="bd-toc-nav page-toc">
     <ul class="visible nav section-nav flex-column">
-<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#">重用缓存</a></li>
-<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#multitaskprompt">多任务提示</a><ul class="visible nav section-nav flex-column">
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#usage">用法</a><ul class="visible nav section-nav flex-column">
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#id1">多任务提示</a></li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#note">注意:</a></li>
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#">ReuseCache</a></li>
+<li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#multitaskprompt">MultiTaskPrompt</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#usage">Usage</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#id1">MultiTaskPrompt</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#note">Note:</a></li>
 </ul>
 </li>
 </ul>
@@ -627,52 +640,52 @@ document.write(`
   </nav></div>
 
 </div></div>
-              
-            
+
+
           </div>
           <footer class="bd-footer-content">
-            
+
 <div class="bd-footer-content__inner container">
-  
+
   <div class="footer-item">
-    
+
 <p class="component-author">
 作者： RTP-LLM Team
 </p>
 
   </div>
-  
+
   <div class="footer-item">
-    
+
 
   <p class="copyright">
-    
+
       © Copyright 2023-2025, RTP-LLM.
       <br/>
-    
+
   </p>
 
   </div>
-  
+
   <div class="footer-item">
     <p class="last-updated">
-  最后更新于 2025 年 09 月 25 日.
+  最后更新于 2025 年 11 月 09 日.
   <br/>
 </p>
   </div>
-  
+
   <div class="footer-item">
-    
+
   </div>
-  
+
 </div>
           </footer>
-        
+
 
       </main>
     </div>
   </div>
-  
+
   <!-- Scripts loaded after <body> so the DOM is not blocked -->
   <script src="../_static/scripts/bootstrap.js?digest=dfe6caa3a7d634c4db9b"></script>
 <script src="../_static/scripts/pydata-sphinx-theme.js?digest=dfe6caa3a7d634c4db9b"></script>

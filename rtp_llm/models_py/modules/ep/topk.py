@@ -9,15 +9,11 @@ import torch
 import torch.nn.functional as F
 
 import rtp_llm.models_py.modules.utils as utils
+import rtp_llm.ops.compute_ops as compute_ops
 from rtp_llm.models_py.modules.ep.expert_location_dispatch import (
     ExpertLocationDispatchInfo,
     topk_ids_logical_to_physical,
 )
-
-if utils.is_cuda():
-    from libth_transformer.rtp_llm_ops import moe_topk_softmax
-else:
-    logging.warning("can't import from rtp_llm_ops, only support cuda!")
 
 
 def fused_topk_native(
@@ -60,7 +56,7 @@ def fused_topk(
         M, topk, dtype=torch.int32, device=hidden_states.device
     )
 
-    moe_topk_softmax(
+    compute_ops.moe_topk_softmax(
         topk_weights,
         topk_ids,
         token_expert_indicies,

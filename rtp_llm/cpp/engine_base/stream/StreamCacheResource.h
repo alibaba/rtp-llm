@@ -17,6 +17,7 @@ struct ResourceContext {
     std::shared_ptr<SystemPrompt>              system_prompt         = nullptr;
     bool                                       reuse_cache{false};
     bool                                       enable_3fs{false};
+    bool                                       enable_memory_block_cache{false};
     bool                                       use_cache_store{false};
     std::vector<std::shared_ptr<CacheManager>> mtp_cache_managers;
 };
@@ -105,6 +106,7 @@ public:
 
     bool reuseCache() const;
     bool enable3FS() const;
+    bool enableMemoryBlockCache() const;
 
     std::string debugString() const {
         std::stringstream debug_string;
@@ -131,6 +133,7 @@ private:
     bool                     last_block_aligned_    = false;
     bool                     need_release_resource_ = true;
     int                      malloc_failed_times_   = 0;
+    bool                     fake_inited_           = false;
     const std::string        adapter_name_;
 };
 

@@ -1,17 +1,17 @@
 package org.flexlb.balance;
 
-import java.util.concurrent.atomic.AtomicLong;
-
+import org.flexlb.balance.scheduler.DefaultScheduler;
 import org.flexlb.balance.scheduler.Scheduler;
 import org.flexlb.dao.loadbalance.MasterRequest;
 import org.flexlb.dao.loadbalance.MasterResponse;
 import org.flexlb.domain.balance.BalanceContext;
 import org.flexlb.domain.balance.WhaleMasterConfig;
-import org.flexlb.enums.ScheduleType;
 import org.flexlb.service.config.ConfigService;
 import org.flexlb.utils.LoggingUtils;
 import org.springframework.context.annotation.DependsOn;
 import org.springframework.stereotype.Component;
+
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * @author zjw
@@ -27,12 +27,10 @@ public class LoadBalanceWrapper {
 
     private static final AtomicLong IncNum = new AtomicLong(1);
 
-    public LoadBalanceWrapper(ConfigService configService) {
-        this.configService = configService;
+    public LoadBalanceWrapper(ConfigService configService, DefaultScheduler defaultScheduler) {
         LoggingUtils.warn("do LoadBalanceWrapper init.");
-
-        this.roleScheduler = SchedulerFactory.getScheduler(ScheduleType.DEFAULT);
-        LoggingUtils.warn("LoadBalanceWrapper init success, prefillScheduler:{} lb.", roleScheduler.getClass().getName());
+        this.configService = configService;
+        this.roleScheduler = defaultScheduler;
     }
 
     public MasterResponse selectEngineWorker(BalanceContext balanceContext) {

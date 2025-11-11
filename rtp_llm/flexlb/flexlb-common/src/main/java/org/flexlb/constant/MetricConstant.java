@@ -23,9 +23,9 @@ public class MetricConstant {
     public static final String ENGINE_DECODE_WORKER_NUMBER = "app.engine.health.check.engine.decode.worker.number";
 
     /**
-     * VipServer Client 请求结果
+     * 服务发现 Client 请求结果
      */
-    public static final String ENGINE_NUMBER_VIP_RESULT = "app.engine.health.check.engine.worker.number.vipserver.result";
+    public static final String ENGINE_NUMBER_SERVICE_DISCOVERY_RESULT = "app.engine.health.check.engine.worker.number.service.discovery.result";
 
     /**
      * 引擎worker剩余可用并发数

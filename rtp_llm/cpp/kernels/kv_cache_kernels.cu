@@ -19,6 +19,7 @@
 #include "rtp_llm/cpp/cuda/cuda_type_utils.cuh"
 #include "rtp_llm/cpp/cuda/cuda_fp8_utils.h"
 #if USING_CUDA
+#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 #ifndef CUDART_VERSION
 #error CUDART_VERSION Undefined!
 #elif (CUDART_VERSION >= 11050)
@@ -61,6 +62,10 @@ void invokeConvertOffsetToBlockArrayData(int32_t*     offset_addr,  // [b, 2, m]
                                                               batch_size,
                                                               max_block_num,
                                                               kv_block_offset);
+#if USING_CUDA
+    check_cuda_value(cudaPeekAtLastError());
+    check_cuda_error();
+#endif
 }
 
 }  // namespace rtp_llm

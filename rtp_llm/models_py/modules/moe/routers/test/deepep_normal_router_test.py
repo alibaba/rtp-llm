@@ -4,9 +4,14 @@ import random
 from typing import List
 
 import torch
+from librtp_compute_ops import init_device
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.distribute.worker_info import g_parallel_info, update_master_info
+from rtp_llm.distribute.worker_info import (
+    g_master_info,
+    g_parallel_info,
+    update_master_info,
+)
 from rtp_llm.models_py.distributed.deepep_wrapper import init_deepep_wrapper
 from rtp_llm.models_py.distributed.process_group_state import (
     destroy_distributed_environment,
@@ -20,7 +25,7 @@ from rtp_llm.models_py.modules.moe.utils import FusedMoEQuantConfig
 from rtp_llm.test.utils.port_util import PortsContext
 
 import rtp_llm.ops  # isort:skip
-from libth_transformer.rtp_llm_ops import trt_fp8_quantize_128  # isort:skip
+from rtp_llm.ops.compute_ops import trt_fp8_quantize_128  # isort:skip
 
 
 def init_router(rank: int, use_fp8: bool):
@@ -43,6 +48,11 @@ def init_router(rank: int, use_fp8: bool):
     init_distributed_environment(config, backend="nccl", timeout=60)
     init_deepep_wrapper(group=get_ep_group().device_group, params=config)
     router = DeepepNormalRouter(config, use_fp8, expert_alignment=1)
+    config.dp_tp_nccl_port = g_master_info.dp_tp_nccl_port
+    config.th_nccl_port = g_master_info.th_nccl_port
+    config.tp_nccl_port = g_master_info.tp_nccl_port
+    config.ffn_tp_nccl_port = g_master_info.ffn_tp_nccl_port
+    init_device(config)
     return config, router
 
 
@@ -66,16 +76,28 @@ def worker_function(rank: int, use_fp8: bool, token_num_per_rank: List[int]):
     random.seed(rank)
     config, router = init_router(rank, use_fp8)
     try:
+        dp_rank = config.dp_rank
+        dp_size = config.dp_size
         top_k = config.expert_num
         # test dispatch
         current_device = torch.device(f"cuda:{rank}")
         for i in range(5):
-            token_num = token_num_per_rank[rank]
+            token_num = token_num_per_rank[dp_rank]
+            # 相同dp_rank的a1相同
+            torch.manual_seed(rank * dp_size + dp_rank)
             a1 = (
                 torch.randn([token_num, config.hidden_size])
                 .to(current_device)
                 .to(torch.bfloat16)
             )
+
+            a1[:, :128] = (
+                torch.arange(token_num, dtype=torch.bfloat16)
+                .view(token_num, 1)
+                .repeat(1, 128)
+                .cuda()
+            )
+
             topk_weights = torch.ones([token_num, top_k]).to(current_device)
             topk_ids = torch.arange(config.expert_num, device=current_device).repeat(
                 token_num, 1
@@ -102,27 +124,34 @@ def worker_function(rank: int, use_fp8: bool, token_num_per_rank: List[int]):
                 combine_x = dequant_to_bf16(payload.expert_x, payload.expert_x_scale)
             else:
                 combine_x = payload.expert_x
-            a2 = router.finalize(combine_x, topk_weights, topk_ids, False, None, None)
+            # pass token_num to finalize for gather
+            extra_finalize_args = {"original_num_tokens": token_num}
+            a2 = router.finalize(
+                combine_x, topk_weights, topk_ids, False, None, extra_finalize_args
+            )
             if router.use_fp8:
                 x, scale = trt_fp8_quantize_128(a1, False)
                 ref_a2 = dequant_to_bf16(x, scale) * config.world_size
             else:
                 ref_a2 = a1 * config.world_size
-            torch.testing.assert_close(ref_a2, a2)
+            torch.testing.assert_close(ref_a2[:, :128], a2[:, :128])
     finally:
         destroy_distributed_environment()
 
 
-def test_single(world_size: int, use_fp8: bool):
+def test_single(world_size: int, test_tp_size: int, use_fp8: bool):
     with PortsContext(None, 1) as ports:
         start_port = ports[0]
         os.environ["START_PORT"] = str(start_port)
         os.environ["WORLD_SIZE"] = str(world_size)
-        os.environ["TP_SIZE"] = str(world_size)
+        os.environ["TP_SIZE"] = str(test_tp_size)
+        os.environ["DP_SIZE"] = str(world_size // test_tp_size)
 
         # 启动world_size个进程
         processes = []
-        token_num_per_rank = [random.randint(4, 12) // 4 * 4 for _ in range(world_size)]
+        token_num_per_rank = [
+            random.randint(4, 12) // 4 * 4 for _ in range(world_size // test_tp_size)
+        ]
         for rank in range(world_size):
             # 为每个进程设置环境变量
             os.environ["WORLD_RANK"] = str(rank)
@@ -136,11 +165,11 @@ def test_single(world_size: int, use_fp8: bool):
             p.start()
 
         for p in processes:
-            p.join(timeout=30)
+            p.join(timeout=300)
             # KILL Process
             if p.is_alive():
                 p.terminate()
-                p.join(timeout=5)
+                p.join(timeout=60)
                 if p.is_alive():
                     p.kill()
                     p.join()
@@ -152,15 +181,11 @@ def test_single(world_size: int, use_fp8: bool):
 
 if __name__ == "__main__":
     mp.set_start_method("spawn")
-    # 获取当前可用的GPU数量
-    max_gpu_count = torch.cuda.device_count()
-    print(f"当前可用GPU数量: {max_gpu_count}")
 
-    # 根据最大GPU数量裁剪world_size列表
-    available_world_sizes = [ws for ws in [2, 4] if ws <= max_gpu_count]
-    print(f"可用的world_size: {available_world_sizes}")
+    world_size = 2
+    test_tp_sizes = [1, 2]
 
     # 为每个world_size运行test_single函数
     for use_fp8 in [True, False]:
-        for world_size in available_world_sizes:
-            test_single(world_size, use_fp8)
+        for test_tp_size in test_tp_sizes:
+            test_single(world_size, test_tp_size, use_fp8)

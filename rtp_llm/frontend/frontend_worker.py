@@ -122,25 +122,11 @@ class FrontendWorker:
                         **kwargs,
                     )
                 )
-            has_num_beams = any(
-                config.has_num_beams() for config in request.generate_configs
+            return self._parallel_batch_async_generators(
+                request.incremental,
+                generators,
+                request.batch_infer,
             )
-            in_test = bool(int(os.environ.get("FT_SERVER_TEST", 0)))
-            parallel_batch = StaticConfig.model_config.parallel_batch
-            if has_num_beams or (in_test and not parallel_batch):
-                return self._batch_async_generators(
-                    request.incremental,
-                    num_return_sequences,
-                    generators,
-                    request.batch_infer,
-                )
-            else:
-                return self._parallel_batch_async_generators(
-                    request.incremental,
-                    num_return_sequences,
-                    generators,
-                    request.batch_infer,
-                )
         else:
             return self._yield_generate(
                 request.request_id,
@@ -240,39 +226,10 @@ class FrontendWorker:
     def is_streaming(self, req: Dict[str, Any]):
         return RequestExtractor.is_streaming(req) or req.get("stream", False)
 
-    async def _batch_async_generators(
-        self,
-        incremental: bool,
-        num_return_sequences: int,
-        generators: List[AsyncGenerator[Dict[str, Any], None]],
-        batch_infer: bool,
-    ) -> AsyncGenerator[Dict[str, Any], None]:
-        iterators = [gen.__aiter__() for gen in generators]
-        done_idxs: Set[int] = set()
-        batch_state: List[Any] = [None] * len(iterators)
-        while True:
-            for idx, itr in enumerate(iterators):
-                try:
-                    batch_state[idx] = await itr.__anext__()
-                except StopAsyncIteration:
-                    done_idxs.add(idx)
-                if idx in done_idxs:
-                    if batch_state[idx] is None:
-                        batch_state[idx] = PipelineResponse()
-                    if incremental:
-                        batch_state[idx] = PipelineResponse()
-            if len(done_idxs) == len(iterators):
-                break
-            batch = batch_state
-            if batch_infer:
-                yield BatchPipelineResponse(response_batch=batch)
-            else:
-                yield batch[0]
 
     async def _parallel_batch_async_generators(
         self,
         incremental: bool,
-        num_return_sequences: int,
         generators: List[AsyncGenerator[Dict[str, Any], None]],
         batch_infer: bool,
     ) -> AsyncGenerator[Dict[str, Any], None]:

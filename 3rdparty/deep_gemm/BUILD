@@ -10,12 +10,12 @@ requirement([
     "setuptools",
 ])
 
-# DeepGEMM headers 
+# DeepGEMM headers
 cc_library(
     name = "deep_gemm_hdrs",
     hdrs = glob([
         "deep_gemm/include/**/*.h",
-        "deep_gemm/include/**/*.hpp", 
+        "deep_gemm/include/**/*.hpp",
         "deep_gemm/include/**/*.cuh",
         "third-party/cutlass/include/**/*.h",
         "third-party/cutlass/include/**/*.hpp",
@@ -28,7 +28,7 @@ cc_library(
         "deep_gemm/include",
         "third-party/cutlass/include",
         "third-party/fmt/include",
-        "third-party/pybind11/include", 
+        "third-party/pybind11/include",
         "csrc",
         ".",
     ],
@@ -40,7 +40,7 @@ cc_library(
         "-DCUDA_VERSION=12060",
         "-Wno-deprecated-declarations",
         "-Wno-unused-function",
-        "-Wno-reorder", 
+        "-Wno-reorder",
         "-Wno-unused-variable",
     ],
     visibility = ["//visibility:public"],
@@ -63,7 +63,7 @@ cc_binary(
         "csrc/python_api.cpp",
     ] + glob([
         "csrc/jit/*.hpp",
-        "csrc/jit_kernels/**/*.hpp", 
+        "csrc/jit_kernels/**/*.hpp",
         "csrc/utils/*.hpp",
         "csrc/indexing/*.cu",
     ]),
@@ -94,10 +94,10 @@ cc_binary(
     linkopts = select({
         "@//:using_cuda": [
             "-lcuda",
-            "-lcudart",
-            "-lcublas", 
+            # "-lcudart",
+            "-lcublas",
             "-lnvrtc",
-            "-lcupti",
+            # "-lcupti",
         ],
         "//conditions:default": [],
     }),
@@ -145,7 +145,7 @@ filegroup(
     ], exclude = [
         "**/*.o",
         "**/*.so",
-        "**/*.a", 
+        "**/*.a",
         "**/BUILD*",
     ]),
     visibility = ["//visibility:public"],

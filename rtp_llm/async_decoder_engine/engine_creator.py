@@ -24,14 +24,14 @@ def check_exeutor_type(model: BaseModel):
 
 
 def create_engine(
-    model: BaseModel, propose_model: Optional[ProposeModel] = None
+    model: BaseModel, propose_model: Optional[ProposeModel] = None, gang_info=None
 ) -> BaseEngine:
     torch.ops.rtp_llm.init_engine(
         model.config.gpt_init_params.profiling_debug_logging_config.ft_alog_conf_path
     )
     executor_type = check_exeutor_type(model)
     if executor_type == ExecutorType.Normal:
-        return RPCEngine(model, propose_model)
+        return RPCEngine(model, propose_model, gang_info)
     elif executor_type == ExecutorType.Embedding:
         return EmbeddingCppEngine(model)
     else:

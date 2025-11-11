@@ -206,37 +206,28 @@ class Pipeline(object):
         token_buffer: str,
         **kwargs: Any
     ):
-        if (
-            stop_word_str_list
-            and not generate_output.finished
-            and match_stop_words(all_text, stop_word_str_list)
-        ):
-            generate_output.finished = True
+        if generate_config.return_incremental:
+            text = token_buffer + text
 
-        if not generate_config.print_stop_words:
-            if not generate_config.return_incremental:
-                if not generate_output.finished:
-                    text = truncate_response_with_stop_words(
-                        text, stop_word_str_slices, generate_config.is_streaming
-                    )
+        if stop_word_str_list:
+            stop_idx, stop_len = match_stop_words(text, stop_word_str_list)
+            if stop_idx != -1:
+                if not generate_config.print_stop_words:
+                    text = text[:stop_idx]
                 else:
-                    text = truncate_response_with_stop_words(
-                        text, stop_word_str_list, generate_config.is_streaming
-                    )
-            else:
-                if not generate_output.finished:
-                    text = token_buffer + text
-                    trunc_text = truncate_response_with_stop_words(
-                        text, stop_word_str_slices, generate_config.is_streaming
-                    )
-                    token_buffer = text[len(trunc_text) :]
-                    text = trunc_text
-                else:
-                    text = truncate_response_with_stop_words(
-                        token_buffer + text,
-                        stop_word_str_list,
-                        generate_config.is_streaming,
-                    )
+                    text = text[:stop_idx + stop_len]
+                token_buffer = ""
+                generate_output.finished = True
+
+        if generate_output.finished:
+            return text, token_buffer
+
+        if generate_config.return_incremental or not generate_config.print_stop_words:
+            trunc_text = truncate_response_with_stop_words(text, stop_word_str_slices, generate_config.is_streaming, True)
+            if generate_config.return_incremental:
+                token_buffer = text[len(trunc_text) :]
+            text = trunc_text
+
         return text, token_buffer
 
     def decode_tokens(

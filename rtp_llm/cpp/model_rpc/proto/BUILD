@@ -7,6 +7,7 @@ tf_proto_library_cc(
     has_services = True,
     cc_grpc_version = True,
     default_header = True,
+    # static = False,
 )
 
 py_binary(

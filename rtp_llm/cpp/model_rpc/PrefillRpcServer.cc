@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/engine_base/Host.h"
 #include <cstring>
 #include <memory>
 #include <unistd.h>
@@ -385,9 +386,11 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
     prefill_context.loading_cache_requests = loading_cache_requests_;
     auto max_retry_times                   = maga_init_params_.gpt_init_parameter.prefill_retry_times_;
     auto max_retry_timeout_ms              = maga_init_params_.gpt_init_parameter.prefill_retry_timeout_ms_;
+    int  retry_interval_ms                 = 1;
 
     try {
-        EXECUTE_WITH_RETRY(prepareAllocateResource, prefill_context, max_retry_times, max_retry_timeout_ms);
+        EXECUTE_WITH_RETRY(
+            prepareAllocateResource, prefill_context, max_retry_times, max_retry_timeout_ms, retry_interval_ms);
         if (prefill_context.hasError()) {
             RTP_LLM_LOG_WARNING(
                 "request [%ld] prepare allocate resource failed after retry [%d] times, cost time ms [%ld], "

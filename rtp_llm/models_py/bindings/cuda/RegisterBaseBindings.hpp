@@ -5,9 +5,10 @@
 #include "rtp_llm/models_py/bindings/common/FusedQKRmsNorm.h"
 #include "rtp_llm/models_py/bindings/common/WriteCacheStoreOp.h"
 #include "rtp_llm/models_py/bindings/cuda/FlashInferOp.h"
+#include "rtp_llm/models_py/bindings/cuda/FlashInferMlaParams.h"
 #include "rtp_llm/models_py/bindings/cuda/FusedMoEOp.h"
 #include "rtp_llm/models_py/bindings/cuda/SelectTopkOp.h"
-#include "rtp_llm/models_py/bindings/cuda/RtpProcessGroup.h"
+#include "rtp_llm/models_py/bindings/common/RtpProcessGroup.h"
 #include "rtp_llm/models_py/bindings/cuda/PerTokenGroupQuantFp8.h"
 #include "rtp_llm/models_py/bindings/cuda/MoETopkSoftmax.h"
 #include "3rdparty/flashinfer/flashinfer.h"
@@ -118,6 +119,17 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
 
     rtp_ops_m.def(
         "embedding", &embedding, "Embedding lookup kernel", py::arg("output"), py::arg("input"), py::arg("weight"));
+    rtp_ops_m.def("embedding_bert",
+                  &embeddingBert,
+                  "EmbeddingBert lookup kernel",
+                  py::arg("output"),
+                  py::arg("input"),
+                  py::arg("weight"),
+                  py::arg("combo_position_ids"),
+                  py::arg("position_encoding"),
+                  py::arg("combo_tokens_type_ids"),
+                  py::arg("token_type_embedding"),
+                  py::arg("input_embedding_scalar") = 1.0f);
 }
 
 void registerBaseCudaBindings(py::module& rtp_ops_m) {

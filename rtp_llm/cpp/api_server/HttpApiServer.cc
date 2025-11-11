@@ -153,7 +153,7 @@ bool HttpApiServer::registerWorkerStatusService() {
     }
 
     worker_status_service_.reset(
-        new WorkerStatusService(engine_, controller_, engine_init_param_.gpt_init_parameter.misc_config.load_balance));
+        new WorkerStatusService(engine_, controller_));
     auto callback = [worker_status_service =
                          worker_status_service_](std::unique_ptr<http_server::HttpResponseWriter> writer,
                                                  const http_server::HttpRequest&                  request) -> void {

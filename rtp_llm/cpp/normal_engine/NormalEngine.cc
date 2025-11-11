@@ -7,9 +7,9 @@
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
+#include "rtp_llm/cpp/engine_base/schedulers/GatherBatchScheduler.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
-#include "rtp_llm/cpp/dataclass/LoadBalance.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "autil/TimeUtility.h"
@@ -51,10 +51,6 @@ NormalEngine::NormalEngine(const EngineInitParams& params, py::object handler):
     RTP_LLM_LOG_INFO("create normal executor done");
     initScheduler();
     (void)startLoop();
-    if (device_->getDeviceProperties().tp_rank == 0 && !params_.ffn_disaggregate_config.is_ffn_service()
-        && scheduler_->canLoadBalance()) {
-        initLoadBalance();
-    }
 }
 
 void NormalEngine::initScheduler() {
@@ -62,6 +58,9 @@ void NormalEngine::initScheduler() {
         scheduler_.reset(
             new BatchDecodeScheduler(params_, resource_context_.cache_manager, metrics_reporter_, device_));
         RTP_LLM_LOG_INFO("create batch decode scheduler done");
+    } else if (params_.scheduler_config.use_gather_batch_scheduler) {
+        scheduler_.reset(new GatherBatchScheduler(params_, resource_context_.cache_manager, metrics_reporter_));
+        RTP_LLM_LOG_INFO("create gather batch scheduler done");
     } else {
         scheduler_.reset(new FIFOScheduler(params_, resource_context_.cache_manager, metrics_reporter_));
         RTP_LLM_LOG_INFO("create fifo scheduler done");
@@ -115,7 +114,8 @@ std::shared_ptr<GenerateInput> NormalEngine::makeFakeInput(size_t seq_len) {
     fake_input->generate_config               = make_shared<GenerateConfig>();
     fake_input->input_ids =
         device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {seq_len}, rtp_llm::AllocationType::HOST});
-
+    fake_input->begin_time_us          = autil::TimeUtility::currentTimeInMicroSeconds();
+    fake_input->generate_config->top_k = 1;
     std::default_random_engine generator;
     size_t                     token_size =
         params_.embedding_size_ ? std::min(params_.embedding_size_, params_.vocab_size_) : params_.vocab_size_;
@@ -131,7 +131,6 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
     auto fake_input                                   = makeFakeInput((size_t)params_.max_seq_len_ - 1);
     fake_input->generate_config->num_return_sequences = params_.max_context_batch_size_;
     fake_input->generate_config->calculate_loss       = int(params_.warm_up_with_loss_);
-    fake_input->begin_time_us                         = autil::TimeUtility::currentTimeInMicroSeconds();
     device_->setTraceMemory(true);
     executor_.reset(new NormalExecutor(params, nullptr, device_, nullptr, true));
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::prefill_warm_up));
@@ -146,7 +145,6 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     auto fake_input                                   = makeFakeInput((size_t)params_.max_seq_len_ - 1);
     fake_input->generate_config->num_return_sequences = params_.max_generate_batch_size_;
     fake_input->generate_config->calculate_loss       = int(params_.warm_up_with_loss_);
-    fake_input->begin_time_us                         = autil::TimeUtility::currentTimeInMicroSeconds();
     device_->setTraceMemory(true);
 
     auto cache_config               = CacheConfigCreator::createBasicConfig(params_);
@@ -162,30 +160,16 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
         {device_status.device_memory_status.preserved_bytes, device_status.device_memory_status.max_consumed_bytes});
 }
 
-std::shared_ptr<GenerateStream> NormalEngine::enqueueMinFakeQuery(int32_t max_new_tokens) {
-    RTP_LLM_LOG_DEBUG("enqueue min fake query");
+std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_new_tokens) {
+    RTP_LLM_LOG_DEBUG("create min fake query");
     auto fake_input                             = makeFakeInput(1);
     fake_input->generate_config->max_new_tokens = max_new_tokens;
-    fake_input->generate_config->top_k          = 1;
-    fake_input->begin_time_us                   = autil::TimeUtility::currentTimeInMicroSeconds();
     fake_input->fake_query                      = true;
     auto stream                                 = makeStream(fake_input);
     stream->setIsDummyStream(true);
     stream->setMetricsReporter(nullptr);
-    enqueue(stream);
+    stream->fakeInitKVBlock();
     return stream;
-}
-
-void NormalEngine::initLoadBalance() {
-    RTP_LLM_LOG_INFO("init load balance start");
-    auto stream = enqueueMinFakeQuery(3);
-    while (!stream->finished() && !stream->stopped()) {
-        RTP_LLM_LOG_DEBUG("wait load balance init run over for 1s");
-        this_thread::sleep_for(std::chrono::seconds(1));
-    }
-    RTP_LLM_LOG_INFO("init load balance done and (StepPerMin: %ld , StepLatencyUs: %ld)",
-                     step_recorder_.getStepPerMin(),
-                     step_recorder_.getStepLatency());
 }
 
 void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) {
@@ -196,8 +180,9 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
 }
 
 absl::Status NormalEngine::initSystemPrompt() {
-    resource_context_.reuse_cache = params_.reuse_cache_;
-    resource_context_.enable_3fs  = params_.kv_cache_config.enable_3fs;
+    resource_context_.reuse_cache               = params_.reuse_cache_;
+    resource_context_.enable_3fs                = params_.kv_cache_config.enable_3fs;
+    resource_context_.enable_memory_block_cache = params_.kv_cache_config.memory_block_cache_size_mb > 0;
 
     if (!params_.multi_task_prompt_tokens_.empty()) {
         resource_context_.reuse_cache = true;
@@ -211,7 +196,7 @@ absl::Status NormalEngine::initSystemPrompt() {
     return absl::OkStatus();
 }
 
-KVCacheInfo NormalEngine::getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) const {
+KVCacheInfo NormalEngine::getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) {
     return resource_context_.cache_manager->getKVCacheInfo(latest_version, need_cache_keys);
 }
 
@@ -286,17 +271,12 @@ absl::Status NormalEngine::step() {
 
     list<GenerateStreamPtr> streams;
     if (device_->getDeviceProperties().tp_rank == 0 && !params_.ffn_disaggregate_config.is_ffn_service()) {
-        if (scheduler_->empty() || step_recorder_.empty()) {
-            step_recorder_.reset();
-            step_recorder_.registerStep(autil::TimeUtility::currentTimeInMicroSeconds());
-        }
         CHECK_AND_ASSIGN(streams, scheduler_->schedule());
         if (streams.empty()) {
             if (params_.dp_size_ > 1) {
                 CHECK_AND_ASSIGN(streams, scheduler_->schedule());
                 if (streams.empty()) {
-                    enqueueMinFakeQuery(1);
-                    return absl::OkStatus();
+                    streams.emplace_back(createMinFakeStream(1));
                 }
             } else {
                 return absl::OkStatus();
@@ -336,7 +316,8 @@ absl::Status NormalEngine::step() {
                                                                stream_group.totalModelBatchSize(),
                                                                stream_group.maxSeqLen(),
                                                                int(stream_group.totalContextBatchSize() > 0));
-        profiler_            = std::make_shared<CudaProfiler>(profiler_prefix);
+        profiler_            = std::make_shared<CudaProfiler>(profiler_prefix,
+                                                   params_.profiling_debug_logging_config.torch_cuda_profiler_dir);
         profiler_->start();
     }
     int64_t      step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -354,12 +335,6 @@ absl::Status NormalEngine::step() {
     if (device_->getDeviceProperties().tp_rank == 0) {
         auto step_latency = autil::TimeUtility::currentTimeInMicroSeconds() - step_begin_time_us;
         reportMetrics({false, false, step_latency});
-        for (auto& stream : streams) {
-            if (stream->finished()) {
-                step_recorder_.addStepCount(stream->iterCount());
-            }
-        }
-        step_recorder_.registerStep(autil::TimeUtility::currentTimeInMicroSeconds());
     }
 
     return status;

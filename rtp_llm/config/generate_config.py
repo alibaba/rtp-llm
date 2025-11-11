@@ -80,6 +80,7 @@ class GenerateConfig(BaseModel):
     logits_index: Optional[int] = None
     return_incremental: bool = False
     return_hidden_states: bool = False
+    return_all_hidden_states: bool = False
     hidden_states_cut_dim: int = 0
     normalized_hidden_states: bool = False
     select_tokens_str: List[str] = []
@@ -129,6 +130,9 @@ class GenerateConfig(BaseModel):
 
     # 只有开启环境变量 ENABLE_3FS 时才生效
     enable_3fs: bool = True
+
+    # 是否启用 memory block cache
+    enable_memory_block_cache: bool = True
 
     def gen_hash_value(self):
         cp = copy.copy(self)

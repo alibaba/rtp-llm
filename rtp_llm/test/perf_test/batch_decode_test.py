@@ -106,6 +106,7 @@ def run_single(
         is_decode,
         1000,
         decode_test_length,
+        False,
     ).run()
     logging.info(f"start to run perf test")
     metrics_list: List[MetricState] = []

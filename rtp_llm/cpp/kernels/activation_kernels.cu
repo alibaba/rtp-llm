@@ -17,6 +17,10 @@
 #include "rtp_llm/cpp/kernels/activation_kernels.h"
 #include "rtp_llm/cpp/cuda/cuda_type_utils.cuh"
 
+#if USING_CUDA
+#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
+#endif
+
 #if USING_ROCM
 #include "rtp_llm/cpp/rocm/cuda_shims.h"
 #endif
@@ -435,6 +439,10 @@ void invokeAddBiasTanh(T* out, const T* bias, const int m, const int n, cudaStre
         grid.x  = ceil(m * n / 1024.);
     }
     add_bias_tanh<T><<<grid, block, 0, stream>>>(out, bias, m, n / data_type_factor);
+#if USING_CUDA
+    check_cuda_value(cudaPeekAtLastError());
+    check_cuda_error();
+#endif
 }
 
 template void invokeAddBiasTanh(float* out, const float* bias, const int m, const int n, cudaStream_t stream);
@@ -616,6 +624,10 @@ void invokeAddBiasGeluV2(T*           out,
                                                 seq_len,
                                                 stream);
     }
+#if USING_CUDA
+    check_cuda_value(cudaPeekAtLastError());
+    check_cuda_error();
+#endif
 }
 
 #undef ADD_BIAS_GELU
@@ -704,6 +716,10 @@ void invokeSigmoid(T* data, const int size, const float scale, cudaStream_t stre
         dim3 grid((size + 127) / 128);
         sigmoid_kernel<<<grid, block, 0, stream>>>(data, size, scale);
     }
+#if USING_CUDA
+    check_cuda_value(cudaPeekAtLastError());
+    check_cuda_error();
+#endif
 }
 
 template void invokeSigmoid(float* data, const int size, const float scale, cudaStream_t stream);
@@ -737,6 +753,10 @@ void invokeScaledDot(T* out, const T* input, const T* scale, const int m, const 
         grid.x  = ceil(m * temp_n / 1024.);
     }
     scaledot_kernel<<<grid, block, 0, stream>>>(out, input, scale, m, n);
+#if USING_CUDA
+    check_cuda_value(cudaPeekAtLastError());
+    check_cuda_error();
+#endif
 }
 
 template void

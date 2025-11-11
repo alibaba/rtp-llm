@@ -55,6 +55,14 @@ def init_pd_separation_group_args(parser):
     )
 
     pd_separation_group.add_argument(
+        "--decode_retry_interval_ms",
+        env_name="DECODE_RETRY_INTERVAL_MS",
+        type=int,
+        default=100,
+        help="Decode流程重试的区间间隔（毫秒）",
+    )
+
+    pd_separation_group.add_argument(
         "--rdma_connect_retry_times",
         env_name="RDMA_CONNECT_RETRY_TIMES",
         type=int,
@@ -76,21 +84,4 @@ def init_pd_separation_group_args(parser):
         type=str2bool,
         default=False,
         help="Decode 是否作为流量的入口点",
-    )
-
-    pd_separation_group.add_argument(
-        "--load_balance_policy_name",
-        env_name="LOAD_BALANCE_POLICY_NAME",
-        type=str,
-        default="RR",
-        choices=["RR", "WRR"],
-        help="负载均衡策略：RR（轮询）或 WRR（加权轮询）",
-    )
-
-    pd_separation_group.add_argument(
-        "--sync_status_interval_ms",
-        env_name="SYNC_STATUS_INTERVAL_MS",
-        type=int,
-        default=50,
-        help="PD之间状态同步间隔时间（毫秒）",
     )

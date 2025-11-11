@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-09-12 17:38+0800\n"
+"POT-Creation-Date: 2025-10-20 10:08+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -21,105 +21,101 @@ msgstr ""
 
 #: ../../references/kimi/deploy.md:1
 msgid "KiMi-K2 Recommended Deployment"
-msgstr "KiMi-K2推荐部署"
+msgstr ""
 
 #: ../../references/kimi/deploy.md:3
 msgid ""
 "It is recommended to use PD (Prefill-Decode) separation for optimal "
 "performance."
-msgstr "建议使用PD（预填充-解码）分离以获得最佳性能。"
+msgstr ""
 
 #: ../../references/kimi/deploy.md:5
 msgid "Framework version: v0.2.0"
-msgstr "框架版本：v0.2.0"
+msgstr ""
 
 #: ../../references/kimi/deploy.md:7
 msgid "Advanced Configuration"
-msgstr "高级配置"
+msgstr ""
 
 #: ../../references/kimi/deploy.md:9
 msgid ""
 "The resource requirements and startup parameters for prefill and decode "
 "are described separately below."
-msgstr "预填充和解码的资源需求及启动参数分别在下面描述。"
+msgstr ""
 
 #: ../../references/kimi/deploy.md:11
 msgid "Prefill"
-msgstr "预填充"
+msgstr ""
 
-#: ../../references/kimi/deploy.md:13 ../../references/kimi/deploy.md:74
+#: ../../references/kimi/deploy.md:13 ../../references/kimi/deploy.md:71
 msgid "Resource Requirements"
-msgstr "资源需求"
+msgstr ""
 
 #: ../../references/kimi/deploy.md:15
 msgid ""
 "Single-node resource specifications requiring 4 nodes for multi-node "
 "deployment:"
-msgstr "单节点资源规格，多节点部署需要4个节点："
+msgstr ""
 
 #: ../../references/kimi/deploy.md
 msgid "CPU Cores"
-msgstr "CPU核心"
+msgstr ""
 
 #: ../../references/kimi/deploy.md
 msgid "Memory"
-msgstr "内存"
+msgstr ""
 
 #: ../../references/kimi/deploy.md
 msgid "GPU Cards"
-msgstr "GPU卡"
+msgstr ""
 
 #: ../../references/kimi/deploy.md
 msgid "GPU Count"
-msgstr "GPU数量"
+msgstr ""
 
 #: ../../references/kimi/deploy.md
 msgid "Disk Space"
-msgstr "磁盘空间"
+msgstr ""
 
 #: ../../references/kimi/deploy.md
 msgid "RDMA NICs"
-msgstr "RDMA网卡"
+msgstr ""
 
 #: ../../references/kimi/deploy.md
 msgid "96"
-msgstr "96"
+msgstr ""
 
 #: ../../references/kimi/deploy.md
 msgid "960GB"
-msgstr "960GB"
+msgstr ""
 
 #: ../../references/kimi/deploy.md
 msgid "H20"
-msgstr "H20"
+msgstr ""
 
 #: ../../references/kimi/deploy.md
 msgid "8"
-msgstr "8"
+msgstr ""
 
 #: ../../references/kimi/deploy.md
 msgid "180GB"
-msgstr "180GB"
+msgstr ""
 
-#: ../../references/kimi/deploy.md:20 ../../references/kimi/deploy.md:81
+#: ../../references/kimi/deploy.md:20 ../../references/kimi/deploy.md:78
 msgid "Advanced Arguments"
-msgstr "高级参数"
+msgstr ""
 
-#: ../../references/kimi/deploy.md:72
+#: ../../references/kimi/deploy.md:69
 msgid "Decode"
-msgstr "解码"
+msgstr ""
 
-#: ../../references/kimi/deploy.md:76
+#: ../../references/kimi/deploy.md:73
 msgid ""
 "Single-node resource specifications requiring 27 nodes for multi-node "
 "deployment:"
-msgstr "单节点资源规格，多节点部署需要27个节点："
+msgstr ""
 
 #: ../../references/kimi/deploy.md
 msgid "250GB"
-msgstr "250GB"
-
-#: ../../references/kimi/deploy.md
-msgid "H20"
-msgstr "H20"
+msgstr ""
 

@@ -16,7 +16,7 @@ config_setting(
 config_setting(
     name = "use_accl_ep",
     values = {
-        "copt": "-DUSE_ACCL_EP=1",
+        "define": "use_accl_ep=1",
     },
 )
 
@@ -41,7 +41,10 @@ cc_library(
         ],
         "//conditions:default": [":deep_ep",],
     }) + torch_deps(),
-    copts = cuda_copts(),
+    copts = cuda_copts() + select({
+        ":use_accl_ep": ["-DUSE_ACCL_EP=1"],
+        "//conditions:default": ["-DUSE_ACCL_EP=0"],
+    }),
     visibility = ["//visibility:public"],
 )
 
@@ -92,13 +95,12 @@ cc_library(
         "//rtp_llm/cpp/core:torch_event",
         "//rtp_llm/cpp/kernels:kernels_cu",
         "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/utils:signal_utils",
         "//rtp_llm/cpp/cuda/deep_gemm:deep_gemm_plugins_impl",
         "//rtp_llm/cpp/pybind:th_utils",
         "//rtp_llm/cpp/cuda:trt_plugins",
         "@havenask//aios/autil:string_helper",
         "@local_config_cuda//cuda:cuda_headers",
-        "//rtp_llm/cpp/disaggregate/cache_store:cache_store",
+        "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
         ":flashinfer",
         "//3rdparty/flashinfer:flashinfer",
         ":flashmla",

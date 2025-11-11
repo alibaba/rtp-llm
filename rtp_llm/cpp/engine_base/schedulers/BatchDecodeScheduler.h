@@ -134,11 +134,7 @@ public:
         evictAllDoneStreams();
         return running_streams_;
     }
-
-    bool canLoadBalance() override {
-        return false;
-    }
-
+    
     absl::Status stop() override {
         // Not implemented
         return absl::UnimplementedError("BatchDecodeScheduler::stop not implemented");
@@ -163,9 +159,8 @@ private:
     std::condition_variable      cond_;
     std::list<GenerateStreamPtr> waiting_streams_;
     std::list<GenerateStreamPtr> running_streams_;
-
     uint32_t batch_size_;
-
+    bool                         reorder_request_;
     uint32_t current_step_ = 0;
 
     std::shared_ptr<CacheManager> cache_manager_;

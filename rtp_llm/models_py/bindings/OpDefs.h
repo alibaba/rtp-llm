@@ -7,6 +7,18 @@
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 namespace torch_ext {
+struct MlaParams {
+    torch::Tensor batch_indice;
+    torch::Tensor positions;
+    torch::Tensor paged_kv_last_page_len;
+    torch::Tensor kvlen;
+    torch::Tensor page_indice;
+    torch::Tensor reuse_cache_page_indice;
+    torch::Tensor decode_page_indptr;
+    torch::Tensor prefill_page_indptr;
+    torch::Tensor qo_indptr;
+    torch::Tensor batch_reuse_info_vec;
+};
 
 struct KVCache {
     torch::Tensor k_cache_base;
@@ -70,9 +82,18 @@ struct PyAttentionInputs {
     std::optional<PyCacheStoreInputs> cache_store_inputs;
 };
 
+struct BertEmbeddingInputs {
+    torch::Tensor combo_position_ids;
+    torch::Tensor position_encoding;
+    torch::Tensor combo_tokens_type_ids;
+    torch::Tensor token_type_embedding;
+    float         input_embedding_scalar{1.0};
+};
+
 struct PyModelInputs {
-    torch::Tensor     input_ids;
-    PyAttentionInputs attention_inputs;
+    torch::Tensor       input_ids;
+    PyAttentionInputs   attention_inputs;
+    BertEmbeddingInputs bert_embedding_inputs;
 };
 
 struct PyModelOutputs {

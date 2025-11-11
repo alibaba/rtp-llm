@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-09-12 17:38+0800\n"
+"POT-Creation-Date: 2025-10-20 10:08+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -21,45 +21,45 @@ msgstr ""
 
 #: ../../references/profiling.md:1
 msgid "Performance Profiling"
-msgstr "性能分析"
+msgstr ""
 
 #: ../../references/profiling.md:3
 msgid ""
 "This document introduces how to do performance profiling for the "
 "framework."
-msgstr "本文档介绍了如何对框架进行性能分析。"
+msgstr ""
 
 #: ../../references/profiling.md:5
 msgid "Model Timeline"
-msgstr "模型时间线"
+msgstr ""
 
 #: ../../references/profiling.md:7
 msgid ""
 "The most straightforward way of analyzing model performance is to print "
 "the execution timeline of the model. RTP-LLM provides functionality to "
 "directly dump model execution timeline into perfetto trace json."
-msgstr "分析模型性能最直接的方法是打印模型的执行时间线。RTP-LLM提供了将模型执行时间线直接转储为perfetto跟踪json的功能。"
+msgstr ""
 
 #: ../../references/profiling.md:9
 msgid "Per Request Timeline"
-msgstr "每个请求的时间线"
+msgstr ""
 
 #: ../../references/profiling.md:11
 msgid ""
 "Add option `\"gen_timeline\": True,` in `generate_config` of request "
 "could generate timeline for current request. The complete request looks "
 "like"
-msgstr "在请求的`generate_config`中添加选项`\"gen_timeline\": True,`可以为当前请求生成时间线。完整的请求如下所示"
+msgstr ""
 
 #: ../../references/profiling.md:21
 msgid ""
 "The generated timeline json file is located at the workdir where you "
 "started rtp-llm."
-msgstr "生成的时间线json文件位于启动rtp-llm的工作目录中。"
+msgstr ""
 
 #: ../../references/profiling.md:23
 msgid "Service-Wide Timeline"
-msgstr "服务级时间线"
+msgstr ""
 
 #: ../../references/profiling.md:25
 msgid ""
@@ -67,58 +67,58 @@ msgid ""
 "`GEN_TIMELINE_SYNC=1` to enable service level timeline profiling. When "
 "this option is used, every model request would generate a profiling "
 "timeline."
-msgstr "您可以使用启动参数`--gen_timeline_sync`或指定环境变量`GEN_TIMELINE_SYNC=1`来启用服务级时间线分析。当使用此选项时，每个模型请求都会生成一个分析时间线。"
+msgstr ""
 
 #: ../../references/profiling.md:27
 msgid "How to visualize timeline"
-msgstr "如何可视化时间线"
+msgstr ""
 
 #: ../../references/profiling.md:29
 msgid ""
 "Open [perfetto ui](https://ui.perfetto.dev/) to load the timeline json "
 "and visualize. You may also use perfetto sql to perform quantized "
 "analyzation."
-msgstr "打开[perfetto ui](https://ui.perfetto.dev/)加载时间线json并进行可视化。您也可以使用perfetto sql进行量化分析。"
+msgstr ""
 
 #: ../../references/profiling.md:31
 msgid "Query SQLs Example"
-msgstr "查询SQL示例"
+msgstr ""
 
 #: ../../references/profiling.md:33
 msgid "Here are some query sqls that are useful for performance analyze."
-msgstr "以下是一些对性能分析有用的查询sql。"
+msgstr ""
 
 #: ../../references/profiling.md:35
 msgid "stat are kernel latencies"
-msgstr "统计内核延迟"
+msgstr ""
 
 #: ../../references/profiling.md:57
 msgid "analyze empty time slots"
-msgstr "分析空闲时间槽"
+msgstr ""
 
 #: ../../references/profiling.md:74
 msgid "sum up all empty slots on timeline"
-msgstr "汇总时间线上的所有空闲时间槽"
+msgstr ""
 
 #: ../../references/profiling.md:96
 msgid "use nsight"
-msgstr "使用nsight"
+msgstr ""
 
 #: ../../references/profiling.md:98
 msgid ""
 "You may also use NVIDIA Nsight or other hardware-manufacturer provided "
 "profiling tools."
-msgstr "您也可以使用NVIDIA Nsight或其他硬件制造商提供的分析工具。"
+msgstr ""
 
 #: ../../references/profiling.md:100
 msgid ""
 "To enable nsight profiling with rtp-llm, you could add nsys binary and "
 "options before the start command you actually execut:"
-msgstr "要使用rtp-llm启用nsight分析，您可以在实际执行的启动命令前添加nsys二进制文件和选项："
+msgstr ""
 
 #: ../../references/profiling.md:114
 msgid ""
 "or use bazel `--run_under` option to run a bazel target with nsight "
 "profiling"
-msgstr "或使用bazel `--run_under`选项运行带有nsight分析的bazel目标"
+msgstr ""
 

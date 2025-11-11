@@ -209,7 +209,7 @@ class MagaServerManager(object):
                 logging.info(f"{url} {query}")
                 response = requests.post(url, json=query)
                 if response.status_code == 200:
-                    logging.debug(f"{response.text}")
+                    logging.debug("%s", response.text)
                 else:
                     logging.warning(
                         f"POST请求失败，状态码：{response.status_code}, 错误信息{response.text}"

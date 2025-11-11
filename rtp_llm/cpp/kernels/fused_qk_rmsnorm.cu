@@ -126,6 +126,10 @@ void invokeFusedQkRmsNorm(T* __restrict input,
                                                               n,
                                                               norm_size);
     }
+#if USING_CUDA
+    check_cuda_value(cudaPeekAtLastError());
+    check_cuda_error();
+#endif
 }
 
 #define INSTANTIATE_FUSED_QK_RMSNORM(T)                                                                                \

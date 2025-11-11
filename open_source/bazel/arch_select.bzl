@@ -2,6 +2,7 @@
 load("@pip_cpu_torch//:requirements.bzl", requirement_cpu="requirement")
 load("@pip_arm_torch//:requirements.bzl", requirement_arm="requirement")
 load("@pip_gpu_cuda12_torch//:requirements.bzl", requirement_gpu_cuda12="requirement")
+load("@pip_gpu_cuda12_9_torch//:requirements.bzl", requirement_gpu_cuda12_9="requirement")
 load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm="requirement")
 load("//bazel:defs.bzl", "copy_so", "copy_so_inst")
 load("//rtp_llm/cpp/cuda/deep_gemm:template.bzl", "dpsk_gemm_so_num", "qwen_gemm_so_num")
@@ -9,6 +10,7 @@ load("//rtp_llm/cpp/cuda/deep_gemm:template.bzl", "dpsk_gemm_so_num", "qwen_gemm
 def copy_all_so():
     copy_so("//:th_transformer")
     copy_so("//:th_transformer_config")
+    copy_so("//:rtp_compute_ops")
     copy_so("//rtp_llm/cpp/kernels/decoder_masked_multihead_attention:mmha1")
     copy_so("//rtp_llm/cpp/kernels/decoder_masked_multihead_attention:mmha2")
     copy_so("//rtp_llm/cpp/kernels/decoder_masked_multihead_attention:dmmha")
@@ -33,7 +35,8 @@ def requirement(names):
         native.py_library(
             name = name,
             deps = select({
-                "@//:using_cuda12": [requirement_gpu_cuda12(name)],
+                "@//:cuda_pre_12_9": [requirement_gpu_cuda12(name)],
+                "@//:using_cuda12_9_x86": [requirement_gpu_cuda12_9(name)],
                 "@//:using_rocm": [requirement_gpu_rocm(name)],
                 "@//:using_arm": [requirement_arm(name)],
                 "//conditions:default": [requirement_cpu(name)],
@@ -61,14 +64,15 @@ def subscribe_deps():
 
 def whl_deps():
     return select({
-        "@//:using_cuda12": ["torch==2.1.2+cu121"],
-        "@//:using_rocm": ["torch==2.1.2", "pyyaml"],
+        "@//:using_cuda12": ["torch==2.6.0+cu126"],
+        "@//:using_rocm": ["pyrsmi", "amdsmi@https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis%2FAMD%2Famd_smi%2Fali%2Famd_smi.tar", "aiter@https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/RTP/aiter-0.1.5%2Bgit.007fe7aa.date.202510272053-py3-none-any.whl"],
         "//conditions:default": ["torch==2.1.2"],
     })
 
 def platform_deps():
     return select({
         "@//:using_arm": [],
+        "@//:using_cuda12_arm": [],
         "@//:using_rocm": ["pyyaml","decord==0.6.0"],
         "//conditions:default": ["decord==0.6.0"],
     })
@@ -85,10 +89,15 @@ def torch_deps():
             "@torch_2.3_py310_cpu_aarch64//:torch",
             "@torch_2.3_py310_cpu_aarch64//:torch_libs",
         ],
-        "@//:using_cuda": [
+        "@//:cuda_pre_12_9": [
             "@torch_2.6_py310_cuda//:torch_api",
             "@torch_2.6_py310_cuda//:torch",
             "@torch_2.6_py310_cuda//:torch_libs",
+        ],
+        "@//:using_cuda12_9_x86": [
+            "@torch_2.8_py310_cuda//:torch_api",
+            "@torch_2.8_py310_cuda//:torch",
+            "@torch_2.8_py310_cuda//:torch_libs",
         ],
         "//conditions:default": [
             "@torch_2.1_py310_cpu//:torch_api",
@@ -143,7 +152,7 @@ def deep_gemm_deps():
 def kernel_so_deps():
     return select({
         "@//:using_cuda": [":libmmha1_so", ":libmmha2_so", ":libdmmha_so", ":libfa_so", ":libfpA_intB_so", ":libint8_gemm_so", ":libmoe_so", ":libmoe_sm90_so", ":libflashinfer_single_prefill_so", ":libflashinfer_single_decode_so", ":libflashinfer_batch_paged_prefill_so", ":libflashinfer_batch_paged_decode_so", ":libflashinfer_batch_ragged_prefill_so", ":libflashinfer_sm90_so", ":libdeepgemm_dpsk_inst_so", ":libdeepgemm_qwen_inst_so"],
-        "@//:using_rocm": [":libmmha1_so", ":libmmha2_so", ":libdmmha_so", ":ck_copy"],
+        "@//:using_rocm": [":libmmha1_so", ":libmmha2_so", ":libdmmha_so"],
         "//conditions:default":[],
     })
 
@@ -188,7 +197,12 @@ def select_py_bindings():
         "//:using_rocm": [
             "//rtp_llm/models_py/bindings/rocm:rocm_bindings_register"
         ],
+        "@//:using_arm": [
+            "//rtp_llm/cpp/devices/arm_impl:arm_cpu_impl",
+            "//rtp_llm/models_py/bindings:dummy_register",
+        ],
         "//conditions:default": [
+            "//rtp_llm/cpp/devices/cpu_impl:cpu_impl",
             "//rtp_llm/models_py/bindings:dummy_register",
         ],
     })

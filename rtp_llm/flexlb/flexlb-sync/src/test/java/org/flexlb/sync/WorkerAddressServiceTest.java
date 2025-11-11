@@ -1,36 +1,34 @@
 package org.flexlb.sync;
 
-import com.taobao.vipserver.client.core.Host;
+import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.junit.jupiter.api.Assertions;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.Mockito;
-import org.mockito.MockitoAnnotations;
+import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
 
-@SuppressWarnings("unchecked")
+@ExtendWith(MockitoExtension.class)
 class WorkerAddressServiceTest {
 
     @Mock
-    private WorkerAddressService.VipserverRunner vipserverRunner;
+    private WorkerAddressService.ServiceDiscoveryRunner serviceDiscoveryRunner;
 
     @Mock
-    private ExecutorService vipServerExecutor;
+    private ExecutorService serviceDiscoveryExecutor;
 
     @Mock
     private EngineHealthReporter engineHealthReporter;
@@ -38,29 +36,22 @@ class WorkerAddressServiceTest {
     @InjectMocks
     private WorkerAddressService workerAddressService;
 
-    @BeforeEach
-    public void setup() {
-        MockitoAnnotations.initMocks(this);
-    }
-
     @Test
-    public void testGetHosts_Timeout() throws Exception {
+    @SuppressWarnings("unchecked")
+    void testGetHosts_Timeout() throws Exception {
         // Arrange
         String modelName = "TestModel";
         String address = "TestAddress";
-        Future<List<Host>> future = mock(Future.class);
-        when(vipServerExecutor.submit(any(WorkerAddressService.VipserverRunner.class))).thenReturn(future);
-        when(future.get(500, TimeUnit.MILLISECONDS)).thenThrow(new TimeoutException());
+        Future<List<WorkerHost>> future = mock(Future.class);
         Mockito.doNothing().when(engineHealthReporter).reportStatusCheckerFail(any(), any());
 
         // Act
-        List<Host> actualHosts = workerAddressService.agetVIPHosts(modelName, address);
+        List<WorkerHost> actualHosts = workerAddressService.getServiceHosts(modelName, address);
 
         // Assertions
         Assertions.assertTrue(actualHosts.isEmpty());
-        verify(vipserverRunner, times(0)).call();
-        verify(vipServerExecutor, times(0)).submit(any(WorkerAddressService.VipserverRunner.class));
+        verify(serviceDiscoveryRunner, times(0)).call();
+        verify(serviceDiscoveryExecutor, times(0)).submit(any(WorkerAddressService.ServiceDiscoveryRunner.class));
         verify(future, times(0)).get(500, TimeUnit.MILLISECONDS);
-
     }
 }

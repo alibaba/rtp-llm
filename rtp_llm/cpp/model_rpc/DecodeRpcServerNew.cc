@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServerNew.h"
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
+#include "rtp_llm/cpp/engine_base/Host.h"
 
 namespace rtp_llm {
 

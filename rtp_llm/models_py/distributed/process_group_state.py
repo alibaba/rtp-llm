@@ -12,6 +12,7 @@ import torch.distributed
 from torch.distributed import Backend, ProcessGroup
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.ops.compute_ops import DeviceType, get_device
 
 __all__ = [
     "ProcessGroupState",
@@ -74,11 +75,18 @@ def _init_process_group_state(
 
     for ranks in group_ranks:
         # create a new group for the ranks
-        device_group = torch.distributed.new_group(
-            ranks,
-            backend=torch_distributed_backend,
-            device_id=torch.device(f"cuda:{local_rank}"),
-        )
+        device_type = get_device().get_device_type()
+        if device_type == DeviceType.ROCm:
+            device_group = torch.distributed.new_group(
+                ranks,
+                backend=torch_distributed_backend,
+            )
+        else:
+            device_group = torch.distributed.new_group(
+                ranks,
+                backend=torch_distributed_backend,
+                device_id=torch.device(f"cuda:{local_rank}"),
+            )
         if rank in ranks:
             # set the world size, ranks, group size, rank in group
             world_size = torch.distributed.get_world_size()
@@ -152,7 +160,7 @@ def init_distributed_environment(
             device_id=torch.device(f"cuda:{local_rank}"),
             timeout=timeout,  # pyright: ignore[reportArgumentType]
         )
-        initialize_expert_parallel(params, backend)
+    initialize_expert_parallel(params, backend)
 
 
 _EP: Optional[ProcessGroupState] = None

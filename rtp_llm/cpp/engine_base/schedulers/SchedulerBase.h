@@ -8,7 +8,7 @@
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
-#include "rtp_llm/cpp/dataclass/EngineScheduleInfo.h"
+#include "rtp_llm/cpp/engine_base/schedulers/EngineScheduleInfo.h"
 
 namespace rtp_llm {
 
@@ -28,9 +28,6 @@ public:
     }
     virtual std::vector<EngineScheduleInfo::TaskInfo> runningTaskList() {
         return {};
-    }
-    virtual bool canLoadBalance() {
-        return true;
     }
     virtual void updateSchedulerInfo(const std::string& scheduler_info) {}
 };

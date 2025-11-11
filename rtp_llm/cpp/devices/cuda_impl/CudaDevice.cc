@@ -12,7 +12,6 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/core/torch_utils/torch_cuda_allocator.h"
 #include "rtp_llm/cpp/core/torch_utils/TorchEvent.h"
-#include "rtp_llm/cpp/disaggregate/cache_store/NormalCacheStore.h"
 #include "rtp_llm/cpp/kernels/mask_logits.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include <cuda_runtime.h>
@@ -213,13 +212,13 @@ CudaDevice::~CudaDevice() {
     check_cuda_value(cublasDestroy(cublas_handle_));
     check_cuda_value(cublasLtDestroy(cublaslt_handle_));
     if (ffn_tp_nccl_param_ != tp_nccl_param_ && ffn_tp_nccl_param_.nccl_comm_) {
-        ncclCommDestroy(ffn_tp_nccl_param_.nccl_comm_);
+        NCCLCHECK(ncclCommDestroy(ffn_tp_nccl_param_.nccl_comm_));
     }
     if (tp_nccl_param_.nccl_comm_) {
-        ncclCommDestroy(tp_nccl_param_.nccl_comm_);
+        NCCLCHECK(ncclCommDestroy(tp_nccl_param_.nccl_comm_));
     }
     if (dp_tp_nccl_param_.nccl_comm_) {
-        ncclCommDestroy(dp_tp_nccl_param_.nccl_comm_);
+        NCCLCHECK(ncclCommDestroy(dp_tp_nccl_param_.nccl_comm_));
     }
     cache_store_.reset();
 }
@@ -250,7 +249,7 @@ void CudaDevice::commBarrier(const NcclParam& nccl_param) {
     check_cuda_value(cudaMalloc(&tmpBuffer, 32));
     check_cuda_value(cudaMemset(tmpBuffer, 0, 32));
     ftNcclAllReduceSum((float*)tmpBuffer, (float*)tmpBuffer, 32, nccl_param, stream_);
-    cudaStreamSynchronize(stream_);
+    check_cuda_value(cudaStreamSynchronize(stream_));
     check_cuda_value(cudaFree(tmpBuffer));
 }
 
@@ -287,9 +286,9 @@ void CudaDevice::checkError() {
 
 void CudaDevice::syncAndCheck() {
     syncCommunication();
-    cudaStreamSynchronize(stream_);
-    cudaStreamSynchronize(communication_stream_);
-    cudaStreamSynchronize(no_block_copy_stream_);
+    check_cuda_value(cudaStreamSynchronize(stream_));
+    check_cuda_value(cudaStreamSynchronize(communication_stream_));
+    check_cuda_value(cudaStreamSynchronize(no_block_copy_stream_));
     check_cuda_error();
 }
 
@@ -496,7 +495,7 @@ DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
                 if (use_trtv2_fmha_paged && cufmha_runner_->trtV2FmhaPagedSupport()) {
                     fmha_type_ = FMHAType::PAGED_TRT_V2;
                 } else if (use_open_source_fmha_paged && cufmha_runner_->openSourceFmhaSupport()
-                        && params.configs.tokens_per_block % 256 == 0) {
+                           && params.configs.tokens_per_block % 256 == 0) {
                     fmha_type_ = FMHAType::PAGED_OPEN_SOURCE;
                 }
             }
@@ -641,8 +640,8 @@ void CudaDevice::checkUseTrtV2FMHA() {
 }
 
 void CudaDevice::checkUseXQA() {
-    if (!(is_sm90() || is_sm100())) {
-        RTP_LLM_LOG_WARNING("not use xqa: unsupported sm %d (90 or 100)", get_sm());
+    if (!is_sm90()) {
+        RTP_LLM_LOG_WARNING("not use xqa: unsupported sm %d (90)", get_sm());
         return;
     }
     if (!init_params_.fmha_config.enable_xqa) {

@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Union
 import requests
 import uvicorn
 from fastapi import FastAPI
+import torch.distributed
 
 from rtp_llm.config.py_config_modules import PyEnvConfigs, StaticConfig
 from rtp_llm.config.uvicorn_config import UVICORN_LOGGING_CONFIG
@@ -97,7 +98,7 @@ class GangServer:
             name = req["name"]
             ip = req["ip"]
             if not self._initialized:
-                logging.debug(f"server member recv: {name} {ip}")
+                logging.debug("server member recv: %s %s", name, ip)
                 self._gang_status[name] = ip
                 last_underscore_index = name.rfind("_")
                 if last_underscore_index != -1:
@@ -109,7 +110,7 @@ class GangServer:
 
         @app.post("/broadcast_parts")
         def broadcast_parts(req: Dict[str, Any]):
-            logging.debug(f"broadcast parts recv: {json.dumps(req)}")
+            logging.debug("broadcast parts recv: %s", json.dumps(req))
             StaticConfig.gang_config.json_gang_parts = json.dumps(req)
 
         @app.post("/report_failure")
@@ -182,12 +183,12 @@ class GangServer:
                     timeout=1,
                 )
             except Exception as e:
-                logging.debug(f"request {url} failed, {str(e)}")
+                logging.debug("request %s failed, %s", url, str(e))
                 continue
             if result.status_code == 200:
                 response = result.json()
                 if response["initializing"] == True:
-                    logging.debug(f"client member recv: {member.name} {member.ip}")
+                    logging.debug("client member recv: %s %s", member.name, member.ip)
                     self._gang_status[member.name] = member.ip
             self._broadcast_parts(gang_info)
 
@@ -297,7 +298,7 @@ class GangServer:
                     try:
                         result = requests.post(broadcast_url, json=parts, timeout=1)
                     except:
-                        logging.debug(f"request {broadcast_url} failed")
+                        logging.debug("request %s failed", broadcast_url)
 
     def _health_check_impl(self):
         failed_member = None
@@ -423,9 +424,16 @@ class GangServer:
         master_url = (
             f"tcp://{g_master_info.ip}:{self._gang_info.master.server_port - 1}"
         )
-        logging.info(f"gang worker {g_parallel_info} memory_barrier {master_url}")
+        logging.info(f"gang worker {g_parallel_info} init_process_group {master_url}")
         init_process_timeout = self.py_env_configs.gang_config.dist_barrier_timeout
-        self.memory_barrier(master_url, timeout=init_process_timeout)
+        os.environ["TORCH_DIST_INIT_BARRIER"] = "1"
+        torch.distributed.init_process_group(
+            backend=torch.distributed.Backend.NCCL,
+            init_method=master_url,
+            rank=g_parallel_info.world_rank,
+            world_size=g_parallel_info.world_size,
+            timeout=timedelta(seconds=init_process_timeout),
+        )
 
         logging.info(f"gang worker {g_parallel_info} start_health_check")
         self.start_health_check()

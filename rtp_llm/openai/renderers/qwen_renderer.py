@@ -217,7 +217,9 @@ class QwenRenderer(CustomChatRenderer):
         query, history, system = self.parse_messages(
             request.messages, request.functions
         )
-        logging.debug(f"parsed query: {query}, history: {history}, system: {system}")
+        logging.debug(
+            "parsed query: %s, history: %s, system: %s", query, history, system
+        )
         prompt = ""
         input_ids = []
         if query == _TEXT_COMPLETION_CMD:
@@ -423,7 +425,6 @@ class QwenRenderer(CustomChatRenderer):
             return await self._create_empty_delta(status.output.aux_info)
         status.update_output(
             output,
-            self._clean_output_ids,
             functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens),
             self._remove_stop_word_ids,
         )
@@ -563,7 +564,6 @@ class QwenRenderer(CustomChatRenderer):
         status.update_output_sync(
             output_ids,
             input_len,
-            self._clean_output_ids,
             functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens),
             self._remove_stop_word_ids,
         )

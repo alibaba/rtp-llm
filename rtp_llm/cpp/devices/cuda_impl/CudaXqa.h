@@ -19,8 +19,7 @@ using XQAParamsPtr = std::shared_ptr<XQAParams>;
  *
  * @param input_type bf16, fp16
  * @param output_type bf16, fp16, fp8e4m3
- * @param kv_cache_type sm90: bf16, fp16, fp8e4m3
- *                      sm100: fp8e4m3
+ * @param kv_cache_type bf16, fp16, fp8e4m3
  * @param group_size 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16
  * @param head_dim 64, 128, 256
  * @param page_size 16, 32, 64, 128

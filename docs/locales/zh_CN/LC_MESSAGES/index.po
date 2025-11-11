@@ -108,4 +108,3 @@ msgid ""
 "**Active Community**: RTP-LLM is open-source and backed by an active "
 "community with industry adoption."
 msgstr "**活跃的社区支持**：RTP-LLM 是开源项目，拥有活跃的开发者社区，并已在工业界广泛应用。"
-

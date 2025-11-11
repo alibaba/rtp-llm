@@ -5,9 +5,10 @@ import psutil
 import torch
 
 from rtp_llm.device.device_base import DeviceBase, MemInfo
-from rtp_llm.ops import DeviceExporter
+from rtp_llm.ops.compute_ops import DeviceExporter
 from rtp_llm.utils.model_weight import W
-
+from rtp_llm.utils.swizzle_utils import swizzle_tensor
+from typing import List
 
 class CpuImpl(DeviceBase):
     def __init__(self, exported_device: DeviceExporter):
@@ -325,13 +326,25 @@ class RocmImpl(GpuImpl):
         except Exception as e:
             logging.warn(f"no rocm smi found: " + str(e))
 
+    @staticmethod
+    def cat_0(ts: List[torch.Tensor], dim: int = 0) -> torch.Tensor:
+        if len(ts) == 1:
+            return ts[0]
+        # torch.cat() does not support fp8 in current rocm torch version
+        if ts[0].dtype in [torch.float8_e4m3fn, torch.float8_e4m3fnuz, torch.float8_e5m2, torch.float8_e5m2fnuz]:
+            dtype = ts[0].dtype
+            out_u8 = torch.cat([x.view(torch.uint8) for x in ts], dim=dim).contiguous()
+            return out_u8.view(dtype)
+        else:
+            return torch.cat(ts, dim=dim).contiguous()
+
     def _get_mem_info(self) -> MemInfo:
         from pyrsmi import rocml
 
         id = self.get_device_id()
         used = rocml.smi_get_device_memory_used(id)
         total = rocml.smi_get_device_memory_total(id)
-        return MemInfo(total - used, used)
+        return MemInfo(free=total - used, used=used)
 
     @property
     def arch(self) -> str:
@@ -503,8 +516,10 @@ class RocmImpl(GpuImpl):
 
         is_gate = name in [W.moe_w1, W.moe_s1]
         do_shuffle = name in [W.moe_w1, W.moe_w2]
+        if x.dim() == 2:
+            x = x.unsqueeze(-1)
         x_ = (
-            torch.cat([x[:, x.shape[1] // 2 :, :], x[:, : x.shape[1] // 2, :]], dim=1)
+            self.cat_0([x[:, x.shape[1] // 2 :, :], x[:, : x.shape[1] // 2, :]], dim=1)
             if is_gate
             else x
         )  # swap from [up, gate] to [gate, up]
@@ -526,6 +541,12 @@ class RocmImpl(GpuImpl):
             weight = weight_as_int8.view(torch.float8_e4m3fnuz)
         elif key == "scale":
             weight = weight * 2.0
+
+        if key in [W.attn_qkv_w, W.attn_o_w, W.ffn_w2, W.ffn_w13, W.ffn_w3]:
+            if self.py_env_configs.py_hw_kernel_config.use_swizzleA:
+                weight = swizzle_tensor(weight, weight.dtype != torch.float8_e4m3fn)
+            elif weight.dtype == torch.float8_e4m3fn:
+                weight = self.shuffle_gemm_weight(weight)
 
         return weight
 

@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 #include <torch/python.h>
-#include "rtp_llm/cpp/dataclass/GenerateConfig.h"
+#include "rtp_llm/cpp/engine_base/stream/GenerateConfig.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/models/position_ids/PositionIdsGenerator.h"
 #include "rtp_llm/cpp/core/Buffer.h"
@@ -60,27 +60,27 @@ public:
 };
 
 struct AuxInfo {
-    int32_t cost_time_us = 0;
-    int32_t iter_count = 0;
-    int32_t input_len = 0;
-    int32_t total_reuse_len = 0;
-    int32_t reuse_len = 0;
-    int32_t prefix_len = 0;
-    int32_t output_len = 0;
-    int32_t fallback_tokens = 0;
-    int32_t fallback_times = 0;
-    int32_t step_output_len = 0;
-    bool pd_sep = false;
-    int32_t first_token_cost_time_us = 0;
-    int32_t wait_time_us = 0;
-    int32_t local_reuse_len = 0;
-    int32_t remote_reuse_len = 0;
-    int32_t prefill_total_reuse_len = 0;
-    int32_t prefill_local_reuse_len = 0;
-    int32_t prefill_remote_reuse_len = 0;
-    int32_t decode_total_reuse_len = 0;
-    int32_t decode_local_reuse_len = 0;
-    int32_t decode_remote_reuse_len = 0;
+    int32_t                                cost_time_us             = 0;
+    int32_t                                iter_count               = 0;
+    int32_t                                input_len                = 0;
+    int32_t                                total_reuse_len          = 0;
+    int32_t                                reuse_len                = 0;
+    int32_t                                prefix_len               = 0;
+    int32_t                                output_len               = 0;
+    int32_t                                fallback_tokens          = 0;
+    int32_t                                fallback_times           = 0;
+    int32_t                                step_output_len          = 0;
+    bool                                   pd_sep                   = false;
+    int32_t                                first_token_cost_time_us = 0;
+    int32_t                                wait_time_us             = 0;
+    int32_t                                local_reuse_len          = 0;
+    int32_t                                remote_reuse_len         = 0;
+    int32_t                                prefill_total_reuse_len  = 0;
+    int32_t                                prefill_local_reuse_len  = 0;
+    int32_t                                prefill_remote_reuse_len = 0;
+    int32_t                                decode_total_reuse_len   = 0;
+    int32_t                                decode_local_reuse_len   = 0;
+    int32_t                                decode_remote_reuse_len  = 0;
     std::optional<rtp_llm::ConstBufferPtr> cum_log_probs;
     std::optional<rtp_llm::ConstBufferPtr> all_probs;
     std::optional<rtp_llm::ConstBufferPtr> softmax_probs;
@@ -94,6 +94,7 @@ public:
     ErrorInfo               error_info;
 
     std::optional<rtp_llm::ConstBufferPtr> hidden_states;
+    std::optional<rtp_llm::ConstBufferPtr> all_hidden_states;
     std::optional<rtp_llm::ConstBufferPtr> logits;
     std::optional<rtp_llm::ConstBufferPtr> loss;
 };

@@ -122,19 +122,22 @@ void register_fmha_config(pybind11::module& m) {
 // KVCacheConfig
 void register_kvcache_config(pybind11::module& m) {
     pybind11::class_<KVCacheConfig>(m, "KVCacheConfig")
-        .def(pybind11::init<bool, std::string, std::string, bool, int, int, int, int, int, int, int64_t, int64_t>(),
-             pybind11::arg("reuse_cache")              = false,
-             pybind11::arg("multi_task_prompt")        = "",
-             pybind11::arg("multi_task_prompt_str")    = "",
-             pybind11::arg("enable_3fs")               = false,
-             pybind11::arg("match_timeout_ms")         = 1000,
-             pybind11::arg("rpc_get_cache_timeout_ms") = 2000,
-             pybind11::arg("rpc_put_cache_timeout_ms") = 2000,
-             pybind11::arg("threefs_read_timeout_ms")  = 1000,
-             pybind11::arg("threefs_write_timeout_ms") = 2000,
-             pybind11::arg("max_block_size_per_item")  = 16,
-             pybind11::arg("threefs_read_iov_size")    = 1LL << 32,
-             pybind11::arg("threefs_write_iov_size")   = 1LL << 32)
+        .def(pybind11::
+                 init<bool, std::string, std::string, bool, int, int, int, int, int, int, int64_t, int64_t, int, int>(),
+             pybind11::arg("reuse_cache")                        = false,
+             pybind11::arg("multi_task_prompt")                  = "",
+             pybind11::arg("multi_task_prompt_str")              = "",
+             pybind11::arg("enable_3fs")                         = false,
+             pybind11::arg("match_timeout_ms")                   = 1000,
+             pybind11::arg("rpc_get_cache_timeout_ms")           = 2000,
+             pybind11::arg("rpc_put_cache_timeout_ms")           = 2000,
+             pybind11::arg("threefs_read_timeout_ms")            = 1000,
+             pybind11::arg("threefs_write_timeout_ms")           = 2000,
+             pybind11::arg("max_block_size_per_item")            = 16,
+             pybind11::arg("threefs_read_iov_size")              = 1LL << 32,
+             pybind11::arg("threefs_write_iov_size")             = 1LL << 32,
+             pybind11::arg("memory_block_cache_size_mb")         = 0,
+             pybind11::arg("memory_block_cache_sync_timeout_ms") = 10000)
         .def("to_string", &KVCacheConfig::to_string)
         .def("update_from_env", &KVCacheConfig::update_from_env_for_test)
         .def_readwrite("reuse_cache", &KVCacheConfig::reuse_cache)
@@ -148,7 +151,9 @@ void register_kvcache_config(pybind11::module& m) {
         .def_readwrite("threefs_write_timeout_ms", &KVCacheConfig::threefs_write_timeout_ms)
         .def_readwrite("max_block_size_per_item", &KVCacheConfig::max_block_size_per_item)
         .def_readwrite("threefs_read_iov_size", &KVCacheConfig::threefs_read_iov_size)
-        .def_readwrite("threefs_write_iov_size", &KVCacheConfig::threefs_write_iov_size);
+        .def_readwrite("threefs_write_iov_size", &KVCacheConfig::threefs_write_iov_size)
+        .def_readwrite("memory_block_cache_size_mb", &KVCacheConfig::memory_block_cache_size_mb)
+        .def_readwrite("memory_block_cache_sync_timeout_ms", &KVCacheConfig::memory_block_cache_sync_timeout_ms);
 }
 
 // ProfilingDebugLoggingConfig
@@ -171,6 +176,7 @@ void register_profiling_debug_logging_config(pybind11::module& m) {
                             bool,
                             bool,
                             bool,
+                            bool,
                             bool>(),
              pybind11::arg("trace_memory")              = false,
              pybind11::arg("trace_malloc_stack")        = false,
@@ -189,7 +195,8 @@ void register_profiling_debug_logging_config(pybind11::module& m) {
              pybind11::arg("dg_print_reg_reuse")        = false,
              pybind11::arg("qwen_agent_debug")          = false,
              pybind11::arg("disable_dpc_random")        = false,
-             pybind11::arg("enable_detail_log")         = false)
+             pybind11::arg("enable_detail_log")         = false,
+             pybind11::arg("check_nan")                 = false)
         .def("to_string", &ProfilingDebugLoggingConfig::to_string)
         .def("update_from_env", &ProfilingDebugLoggingConfig::update_from_env_for_test)
         .def_readwrite("trace_memory", &ProfilingDebugLoggingConfig::trace_memory)
@@ -209,21 +216,24 @@ void register_profiling_debug_logging_config(pybind11::module& m) {
         .def_readwrite("dg_print_reg_reuse", &ProfilingDebugLoggingConfig::dg_print_reg_reuse)
         .def_readwrite("qwen_agent_debug", &ProfilingDebugLoggingConfig::qwen_agent_debug)
         .def_readwrite("disable_dpc_random", &ProfilingDebugLoggingConfig::disable_dpc_random)
-        .def_readwrite("enable_detail_log", &ProfilingDebugLoggingConfig::enable_detail_log);
+        .def_readwrite("enable_detail_log", &ProfilingDebugLoggingConfig::enable_detail_log)
+        .def_readwrite("check_nan", &ProfilingDebugLoggingConfig::check_nan);
 }
 
 void register_hwkernel_config(pybind11::module& m) {
     pybind11::class_<HWKernelConfig>(m, "HWKernelConfig")
-        .def(pybind11::init<int, bool, bool, bool, bool, std::string, bool, bool, bool, bool, int>(),
+        .def(pybind11::init<int, bool, bool, bool, bool, std::string, bool, bool, bool, bool, bool, bool, int>(),
              pybind11::arg("deep_gemm_num_sm")             = -1,
              pybind11::arg("arm_gemm_use_kai")             = false,
              pybind11::arg("enable_stable_scatter_add")    = false,
              pybind11::arg("enable_multi_block_mode")      = true,
              pybind11::arg("ft_disable_custom_ar")         = true,
              pybind11::arg("rocm_hipblaslt_config")        = "gemm_config.csv",
+             pybind11::arg("use_swizzleA")                 = false,
              pybind11::arg("enable_cuda_graph")            = false,
              pybind11::arg("enable_cuda_graph_debug_mode") = false,
              pybind11::arg("use_aiter_pa")                 = true,
+             pybind11::arg("use_asm_pa")                   = true,
              pybind11::arg("enable_native_cuda_graph")     = false,
              pybind11::arg("num_native_cuda_graph")        = 200)
         .def("to_string", &HWKernelConfig::to_string)
@@ -234,9 +244,11 @@ void register_hwkernel_config(pybind11::module& m) {
         .def_readwrite("enable_multi_block_mode", &HWKernelConfig::enable_multi_block_mode)
         .def_readwrite("ft_disable_custom_ar", &HWKernelConfig::ft_disable_custom_ar)
         .def_readwrite("rocm_hipblaslt_config", &HWKernelConfig::rocm_hipblaslt_config)
+        .def_readwrite("use_swizzleA", &HWKernelConfig::use_swizzleA)
         .def_readwrite("enable_cuda_graph", &HWKernelConfig::enable_cuda_graph)
         .def_readwrite("enable_cuda_graph_debug_mode", &HWKernelConfig::enable_cuda_graph_debug_mode)
         .def_readwrite("use_aiter_pa", &HWKernelConfig::use_aiter_pa)
+        .def_readwrite("use_asm_pa", &HWKernelConfig::use_asm_pa)
         .def_readwrite("enable_native_cuda_graph", &HWKernelConfig::enable_native_cuda_graph)
         .def_readwrite("num_native_cuda_graph", &HWKernelConfig::num_native_cuda_graph);
 }
@@ -387,10 +399,13 @@ void register_cache_store_config(pybind11::module& m) {
 // SchedulerConfig
 void register_scheduler_config(pybind11::module& m) {
     pybind11::class_<SchedulerConfig>(m, "SchedulerConfig")
-        .def(pybind11::init<bool>(), pybind11::arg("use_batch_decode_scheduler") = false)
+        .def(pybind11::init<bool, bool>(),
+             pybind11::arg("use_batch_decode_scheduler") = false,
+             pybind11::arg("use_gather_batch_scheduler") = false)
         .def("to_string", &SchedulerConfig::to_string)
         .def("update_from_env", &SchedulerConfig::update_from_env_for_test)
-        .def_readwrite("use_batch_decode_scheduler", &SchedulerConfig::use_batch_decode_scheduler);
+        .def_readwrite("use_batch_decode_scheduler", &SchedulerConfig::use_batch_decode_scheduler)
+        .def_readwrite("use_gather_batch_scheduler", &SchedulerConfig::use_gather_batch_scheduler);
 }
 
 // BatchDecodeSchedulerConfig
@@ -426,19 +441,12 @@ void register_fifo_scheduler_config(pybind11::module& m) {
 // MiscellaneousConfig
 void register_misc_config(pybind11::module& m) {
     pybind11::class_<MiscellaneousConfig>(m, "MiscellaneousConfig")
-        .def(pybind11::init<int, int, int, bool>(),
-             pybind11::arg("load_balance")            = 0,
-             pybind11::arg("step_records_time_range") = 60 * 1000 * 1000,
-             pybind11::arg("step_records_max_size")   = 1000,
-             pybind11::arg("disable_pdl")             = true)
+        .def(pybind11::init<bool, std::string>(), pybind11::arg("disable_pdl") = true, pybind11::arg("aux_string") = "")
         .def("to_string", &MiscellaneousConfig::to_string)
         .def("update_from_env", &MiscellaneousConfig::update_from_env_for_test)
-        .def_readwrite("load_balance", &MiscellaneousConfig::load_balance)
-        .def_readwrite("step_records_time_range", &MiscellaneousConfig::step_records_time_range)
-        .def_readwrite("step_records_max_size", &MiscellaneousConfig::step_records_max_size)
-        .def_readwrite("disable_pdl", &MiscellaneousConfig::disable_pdl);
+        .def_readwrite("disable_pdl", &MiscellaneousConfig::disable_pdl)
+        .def_readwrite("aux_string", &MiscellaneousConfig::aux_string);
 }
-
 
 void registerGptInitParameter(py::module m) {
     py::enum_<MlaOpsType>(m, "MlaOpsType")
@@ -664,12 +672,11 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(prefill_max_wait_timeout_ms, prefill_max_wait_timeout_ms_)                                            \
     DEF_PROPERTY(decode_retry_times, decode_retry_times_)                                                              \
     DEF_PROPERTY(decode_retry_timeout_ms, decode_retry_timeout_ms_)                                                    \
+    DEF_PROPERTY(decode_retry_interval_ms, decode_retry_interval_ms_)                                                  \
     DEF_PROPERTY(decode_polling_kv_cache_step_ms, decode_polling_kv_cache_step_ms_)                                    \
     DEF_PROPERTY(decode_polling_call_prefill_ms, decode_polling_call_prefill_ms_)                                      \
     DEF_PROPERTY(rdma_connect_retry_times, rdma_connect_retry_times_)                                                  \
     DEF_PROPERTY(decode_entrance, decode_entrance_)                                                                    \
-    DEF_PROPERTY(load_balance_policy_name, load_balance_policy_name_)                                                  \
-    DEF_PROPERTY(sync_status_interval_ms, sync_status_interval_ms_)                                                    \
     DEF_PROPERTY(load_cache_timeout_ms, load_cache_timeout_ms_)                                                        \
     DEF_PROPERTY(max_rpc_timeout_ms, max_rpc_timeout_ms_)                                                              \
     DEF_PROPERTY(ep_size, ep_size_)                                                                                    \
@@ -678,6 +685,7 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(local_rank, local_rank_)                                                                              \
     DEF_PROPERTY(rotary_embedding_mscale, rotary_embedding_mscale_)                                                    \
     DEF_PROPERTY(rotary_embedding_offset, rotary_embedding_offset_)                                                    \
+    DEF_PROPERTY(rotary_embedding_extrapolation_factor, rotary_embedding_extrapolation_factor_)                        \
     DEF_PROPERTY(use_mla, use_mla_)                                                                                    \
     DEF_PROPERTY(mla_ops_type, mla_ops_type_)                                                                          \
     DEF_PROPERTY(q_lora_rank, q_lora_rank_)                                                                            \
@@ -776,4 +784,4 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     registerCommon(m);
 }
 
-}  // namespace torch_ext
+}  // namespace rtp_llm

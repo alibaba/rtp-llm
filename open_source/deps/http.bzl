@@ -1,5 +1,4 @@
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive", "http_file")
-load("//3rdparty/composable_kernel:repo.bzl", "ck_repo")
 
 def clean_dep(dep):
     return str(Label(dep))
@@ -33,7 +32,7 @@ def http_deps():
         name = "torch_2.1_py310_cpu",
         sha256 = "bf3ca897f8c7c218dd6c4b1cc5eec57b4f4e71106b0b8120e92f5fdaf4acf6cd",
         urls = [
-            "https://download.pytorch.org/whl/cpu/torch-2.6.0%2Bcpu-cp310-cp310-linux_x86_64.whl",
+            "https://mirrors.aliyun.com/pytorch-wheels/cpu/torch-2.6.0%2Bcpu-cp310-cp310-linux_x86_64.whl",
         ],
         type = "zip",
         build_file = clean_dep("//:BUILD.pytorch"),
@@ -43,27 +42,17 @@ def http_deps():
         name = "torch_2.6_py310_cuda",
         sha256 = "c55280b4da58e565d8a25e0e844dc27d0c96aaada7b90b4de70a45397faf604e",
         urls = [
-            "https://download.pytorch.org/whl/cu126/torch-2.6.0%2Bcu126-cp310-cp310-manylinux_2_28_x86_64.whl",
+            "https://mirrors.aliyun.com/pytorch-wheels/cu126/torch-2.6.0%2Bcu126-cp310-cp310-manylinux_2_28_x86_64.whl",
         ],
         type = "zip",
         build_file = clean_dep("//:BUILD.pytorch"),
     )
 
     http_archive(
-        name = "composable_kernel_archive",
-        sha256 = "b31d8b9b1ebf6d1937198b257a2c36c18c394895bce6325630669f957d583094",
-        urls = [
-	        "https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/amd_pkgs/composable_kernel_archive.tar.gz",
-	    ],
-        build_file = clean_dep("//3rdparty/composable_kernel:ck.BUILD"),
-        strip_prefix = "composable_kernel_archive",
-    )
-
-    http_archive(
         name = "torch_rocm",
-        sha256 = "8ccd35611d0f761e570f7904ecbbe27cfa4f48253abc48884b95e7bfaa936e7c",
+        sha256 = "39287cb8d52e4a71eb7194727365aa6be767da614fa5e44468155c90ba4a4e0c",
         urls = [
-            "https://repo.radeon.com/rocm/manylinux/rocm-rel-6.3/torch-2.4.0%2Brocm6.3.0-cp310-cp310-linux_x86_64.whl"
+            "https://repo.radeon.com/rocm/manylinux/rocm-rel-6.4.1/torch-2.4.1%2Brocm6.4.1.git4e7ae583-cp310-cp310-linux_x86_64.whl"
         ],
         type = "zip",
         build_file = clean_dep("//:BUILD.pytorch"),
@@ -71,9 +60,9 @@ def http_deps():
 
     http_archive(
         name = "aiter",
-        sha256 = "88178ba538a58fd82e2fbccfd9dcb3dbcc85eb5d75814ea5b4243b048beb5898",
+        sha256 = "236197b1e55e546ab80a19a2f42cfb69075ff058c8b33341b70bc513e488febd",
         urls = [
-	        "https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/amd_pkgs/aiter-0.1.0-py3-none-any.whl",
+	        "https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/RTP/aiter-0.1.5%2Bgit.007fe7aa.date.202510272053-py3-none-any.whl",
 	    ],
         type = "zip",
         build_file = clean_dep("//:BUILD.aiter"),
@@ -105,7 +94,7 @@ def http_deps():
         name = "torch_2.3_py310_cpu_aarch64",
         sha256 = "bef6996c27d8f6e92ea4e13a772d89611da0e103b48790de78131e308cf73076",
         urls = [
-            "https://download.pytorch.org/whl/cpu/torch-2.1.2-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl#sha256=bef6996c27d8f6e92ea4e13a772d89611da0e103b48790de78131e308cf73076"
+            "https://mirrors.aliyun.com/pytorch-wheels/cpu/torch-2.1.2-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl#sha256=bef6996c27d8f6e92ea4e13a772d89611da0e103b48790de78131e308cf73076"
         ],
         type = "zip",
         build_file = clean_dep("//:BUILD.pytorch"),
@@ -128,8 +117,6 @@ def http_deps():
 
     http_file(
         name = "hf3fs_rpm",
-        urls = ["http://search-ad.oss-cn-hangzhou-zmf.aliyuncs.com/pkg%2F3fs%2Fhf3fs-1.2.0-1.alios7.x86_64.rpm"],
-        sha256 = "d5c9ce8474f6bf2177c11c4dc36acf633b5d4763353cd70156b0a0b2d54b8316"
+        urls = ["https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/package/3fs/hf3fs-1.3.0-1.alios7.x86_64.rpm"],
+        sha256 = "dd375f794557a1135934b40b23a7435569644922c5c7116cb69dd36f699ad5a4"
     )
-
-    ck_repo(name = "composable_kernel")

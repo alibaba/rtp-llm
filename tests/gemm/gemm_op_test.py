@@ -146,7 +146,8 @@ class TestGemmOp(unittest.TestCase):
             )
 
             custom_output = torch.zeros(m, n, device="cuda", dtype=torch.bfloat16)
-            self.gemm_op.forward(input_fp, b_quant, b_scales, custom_output)
+            bias = None
+            self.gemm_op.forward(input_fp, b_quant, b_scales, custom_output, bias)
             custom_output = custom_output.to("cpu")
             assert_close(
                 custom_output,
@@ -181,7 +182,8 @@ class TestGemmOp(unittest.TestCase):
             )
 
             custom_output = torch.zeros(m, n, device="cuda", dtype=torch.bfloat16)
-            self.gemm_op.forward(input_fp, b_quant, b_scales, custom_output)
+            bias = None
+            self.gemm_op.forward(input_fp, b_quant, b_scales, custom_output, bias)
             custom_output = custom_output.to("cpu")
             assert_close(
                 custom_output,

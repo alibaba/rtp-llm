@@ -3,9 +3,9 @@
 #include "absl/status/status.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h"
-#include "rtp_llm/cpp/dataclass/EngineInitParameter.h"
-#include "rtp_llm/cpp/dataclass/LoadBalance.h"
-#include "rtp_llm/cpp/dataclass/KvCacheInfo.h"
+#include "rtp_llm/cpp/engine_base/EngineInitParams.h"
+#include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
+#include "rtp_llm/cpp/cache/KvCacheInfo.h"
 #include "rtp_llm/cpp/models/eplb/EplbConfig.h"
 #include "rtp_llm/cpp/models/lora/LoraManager.h"
 #include "rtp_llm/cpp/devices/DeviceBase.h"
@@ -83,7 +83,7 @@ public:
     virtual absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>& generate_input,
                                                      preRunMode                            mode) = 0;
 
-    virtual KVCacheInfo getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) const = 0;
+    virtual KVCacheInfo getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) = 0;
 
     virtual const ResourceContext& resourceContext() const {
         return resource_context_;

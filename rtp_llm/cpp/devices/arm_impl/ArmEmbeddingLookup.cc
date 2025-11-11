@@ -1,13 +1,13 @@
 #include "rtp_llm/cpp/devices/arm_impl/ArmDevice.h"
 
-#if defined(__aarch64__)
+#if BUILDING_ARM_ONLY
 #include <arm_neon.h>  // for convert_embedding_fp16_to_float
 #include <omp.h>
 #endif
 
 namespace rtp_llm {
 
-#if defined(__aarch64__)
+#if BUILDING_ARM_ONLY
 void convert_embedding_fp16_to_float(const __fp16* input, float* output, int length) {
     int d = 0;
     for (; d <= length - 32; d += 32) {
@@ -94,7 +94,7 @@ BufferPtr ArmCpuDevice::embeddingLookup(const EmbeddingLookupParams& params) {
         }
     }
 
-#if defined(__aarch64__)
+#if BUILDING_ARM_ONLY
     [[maybe_unused]] int numThreads = omp_get_num_threads();
     if (embeddings->type() == DataType::TYPE_FP16 && position_table.has_value() && token_type_table.has_value()) {
         size_t embeddings_m = embeddings->shape()[0];

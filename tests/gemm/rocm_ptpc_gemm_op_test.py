@@ -36,6 +36,46 @@ def shuffle_weight(x, layout=(16, 16), use_int4=False):
     x_ = x_.view(*x.shape)
     return x_
 
+def calculate_k_for_swizzling(dtype: torch.dtype):
+    if dtype == torch.float32:
+        MiK, MiKv = 4, 1
+    elif dtype in (torch.float16, torch.half, torch.bfloat16):
+        MiK, MiKv = 16, 4
+    elif dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz, torch.float8_e5m2, torch.float8_e5m2fnuz):
+        MiK, MiKv = 32, 8
+    else:
+        raise ValueError(f"unsupported datatype in calculateKforSwizzling: {dtype}")
+    elem_size = torch.zeros((), dtype=dtype).element_size()
+    PackK = 16 // MiKv // elem_size
+    return MiK, MiKv, PackK
+
+def swizzle_tensor(
+    src: torch.Tensor,
+    col_maj: bool = False,
+    MiM: int = 16) -> torch.Tensor:
+    tmp = src.clone()
+
+    if col_maj:
+        k, m = src.shape
+        tmp = tmp.view(k, m).permute(1, 0).contiguous()
+    else:
+        m, k = src.shape
+
+    MiK, MiKv, PackK = calculate_k_for_swizzling(src.dtype)
+
+    if (MiK == 16):
+        assert m % 16 == 0, f"swizzle shape m = {m} must be divisible by 16"
+        assert k % 32 == 0, f"swizzle shape k = {k} must be divisible by 32"
+    elif (MiK == 32):
+        assert m % 16 == 0, f"swizzle shape m = {m} must be divisible by 16"
+        assert k % 64 == 0, f"swizzle shape k = {k} must be divisible by 64"
+
+    tmp = tmp.view(m // MiM, MiM, k // (MiK * PackK), MiK // MiKv, MiKv * PackK)
+    tmp = tmp.permute(0, 2, 3, 1, 4).contiguous()
+
+    dst = tmp.clone()
+    return dst.view(src.shape)
+    
 
 def detailed_assert_close(a, b, rtol, atol, msg=""):
     mismatch_mask = ~torch.isclose(a, b, rtol=rtol, atol=atol)
@@ -55,19 +95,23 @@ def detailed_assert_close(a, b, rtol, atol, msg=""):
 
 
 class TestGemmOp(unittest.TestCase):
+
+    using_swizzle = (os.environ.get("USE_SWIZZLEA", None) == "1" or 
+                     os.environ.get("TEST_SWIZZLEA", None) == "1")
+    using_bias = os.environ.get("TEST_BIAS", None) == "1"
     def setUp(self):
         torch.classes.load_library(
             os.environ["TEST_SRCDIR"] + "/rtp_llm/tests/librocm_test_ops.so"
         )
         self.gemm_op = torch.classes.unittest.GemmOp()
 
-    def _fp8_gemm_ref(self, input, weight_quant, weight_scale):
+    def _fp8_gemm_ref(self, input, weight_quant, weight_scale, bias):
         # quant and dequant input
         input_quant, input_scale = per_token_quant_fp8(input)
         input_ = input_quant.to(torch.float32) * input_scale
 
         weight = weight_quant.to(torch.float32) * weight_scale
-        out = F.linear(input_, weight)
+        out = F.linear(input_, weight, bias.to(torch.float32) if bias is not None else None)
         return out
 
     def test_ptpc_gemm(self):
@@ -78,19 +122,34 @@ class TestGemmOp(unittest.TestCase):
             for m in [1, 2, 4, 8, 16, 32, 64, 128, 256, 1024, 2048, 4096, 16384, 32768]:
                 input = torch.randn(m, k, device="cuda", dtype=torch.bfloat16) * 0.1
                 weight = torch.randn(n, k, device="cuda", dtype=torch.bfloat16) * 0.1
+                if self.using_swizzle and self.using_bias:
+                    bias = torch.randn(n, device="cuda", dtype=torch.bfloat16) * 0.1
+                else:
+                    bias = None
                 weight_quant, weight_scale = per_token_quant_fp8(weight)
 
-                torch_output = self._fp8_gemm_ref(input, weight_quant, weight_scale).to(
+                torch_output = self._fp8_gemm_ref(input, weight_quant, weight_scale, bias).to(
                     "cpu"
                 )
+                if self.using_swizzle:
+                    weight_quant_swizzle = swizzle_tensor(weight_quant, False)
+                    weight_quant_swizzle = weight_quant_swizzle.t()
+                    weight_scale = weight_scale.t()
+                    custom_output = torch.zeros((m, n), device="cuda", dtype=torch.bfloat16)
 
-                weight_quant_shuffle = shuffle_weight(weight_quant)
-                weight_quant_shuffle = weight_quant_shuffle.t()  # k,n
-                weight_scale = weight_scale.t()  # 1,n
-                custom_output = torch.zeros((m, n), device="cuda", dtype=torch.bfloat16)
-                self.gemm_op.forward(
-                    input, weight_quant_shuffle, weight_scale, custom_output
-                )
+                    self.gemm_op.forward(
+                        input, weight_quant_swizzle, weight_scale, custom_output, bias
+                    )
+                else:
+                    weight_quant_shuffle = shuffle_weight(weight_quant)
+                    weight_quant_shuffle = weight_quant_shuffle.t()  # k,n
+
+                    weight_scale = weight_scale.t()  # 1,n
+                    custom_output = torch.zeros((m, n), device="cuda", dtype=torch.bfloat16)
+
+                    self.gemm_op.forward(
+                        input, weight_quant_shuffle, weight_scale, custom_output, bias
+                    )
                 custom_output = custom_output.to(torch.float32).to("cpu")
 
                 detailed_assert_close(
