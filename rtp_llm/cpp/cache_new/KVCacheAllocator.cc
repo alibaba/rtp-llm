@@ -6,6 +6,38 @@
 
 namespace rtp_llm {
 
+MallocResult KVCacheAllocator::initMalloc(const MallocInfo& malloc_info) {
+    auto init_result = initMallocForCommonLen(malloc_info);
+    if (!init_result.success) {
+        return init_result;
+    }
+
+    auto incr_result = incrMalloc(malloc_info);
+    if (!incr_result.success) {
+        return incr_result;
+    } else {
+        return init_result;
+    }
+}
+
+MallocResult KVCacheAllocator::malloc(const MallocInfo& malloc_info) {
+    if (!malloc_info.batch_kv_cache_resource) {
+        RTP_LLM_LOG_ERROR("BatchKVCacheResource is null");
+        return {false, 0};
+    }
+
+    if (!malloc_info.complete_token_ids) {
+        RTP_LLM_LOG_ERROR("CompleteTokenIds is null");
+        return {false, 0};
+    }
+
+    if (malloc_info.batch_kv_cache_resource->maxBlockSize() == 0) {
+        return initMalloc(malloc_info);
+    } else {
+        return incrMalloc(malloc_info);
+    }
+}
+
 void KVCacheAllocator::blockCopy(int src_block_index, int dest_block_index) {
     BlockIdPair copy_mapping{src_block_index, dest_block_index};
     blockBatchCopy(&copy_mapping, &copy_mapping + 1);

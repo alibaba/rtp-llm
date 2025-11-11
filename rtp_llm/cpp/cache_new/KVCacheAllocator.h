@@ -23,7 +23,6 @@ public:
     virtual ~KVCacheAllocator() = default;
 
     virtual bool             init()                                                 = 0;
-    virtual MallocResult     malloc(const MallocInfo& malloc_info)                  = 0;
     virtual FreeResult       free(const FreeInfo& free_info)                        = 0;
     virtual InsertResult     insertIntoCache(const InsertInfo& insert_info)         = 0;
     virtual BlockAddrInfo    convertIndexToAddr(int layer_id, int block_id) const   = 0;
@@ -37,15 +36,16 @@ public:
     virtual size_t totalBlocksNums() const     = 0;
     virtual size_t maxSeqLen() const           = 0;
 
-    void blockCopy(int src_block_index, int dest_block_index);
-    void blockBatchCopy(const std::vector<BlockIdPair>& copy_mapping);
-    void blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end);
-    void blockBatchCopy(const rtp_llm::Buffer& copy_mapping);
+    MallocResult malloc(const MallocInfo& malloc_info);
+    void         blockCopy(int src_block_index, int dest_block_index);
+    void         blockBatchCopy(const std::vector<BlockIdPair>& copy_mapping);
+    void         blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end);
+    void         blockBatchCopy(const rtp_llm::Buffer& copy_mapping);
 
     virtual KVCacheBuffer kvCacheBuffer() const = 0;
 
 protected:
-    virtual MallocResult initMalloc(const MallocInfo& malloc_info)             = 0;
+    MallocResult         initMalloc(const MallocInfo& malloc_info);
     virtual MallocResult incrMalloc(const MallocInfo& malloc_info)             = 0;
     virtual MallocResult initMallocForCommonLen(const MallocInfo& malloc_info) = 0;
 
