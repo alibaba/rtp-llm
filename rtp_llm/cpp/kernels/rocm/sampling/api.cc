@@ -14,16 +14,29 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+#include <ATen/hip/HIPGeneratorImpl.h>
+
 #include "sampling.h"
 #include "utils.h"
 #include "kernel.cuh"
 
 namespace rtp_llm {
 
+std::tuple<uint64_t, uint64_t> get_seed_and_offset(int increment_size, std::optional<at::Generator> generator) {
+  uint64_t philox_seed, philox_offset;
+  auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
+      generator, at::cuda::detail::getDefaultCUDAGenerator());
+  std::lock_guard<std::mutex> lock(gen->mutex_);
+  at::PhiloxCudaState rng_engine_inputs = gen->philox_cuda_state(increment_size);
+  philox_seed = rng_engine_inputs.seed_.val;
+  philox_offset = rng_engine_inputs.offset_.val;
+  return std::make_tuple(philox_seed, philox_offset);
+}
+
 void top_p_sampling_from_probs(torch::Tensor probs, torch::Tensor output,
                                std::optional<torch::Tensor> maybe_indices,
                                std::optional<torch::Tensor> maybe_top_p_arr, double top_p_val,
-                               bool deterministic, uint64_t philox_seed, uint64_t philox_offset, uintptr_t stream) {
+                               bool deterministic, torch::Tensor philox_seed, torch::Tensor philox_offset, uintptr_t stream) {
   CHECK_INPUT(probs);
   CHECK_DIM(2, probs);  // probs: (batch_size, vocab_size)
   unsigned int batch_size = output.sizes()[0];
@@ -35,14 +48,14 @@ void top_p_sampling_from_probs(torch::Tensor probs, torch::Tensor output,
       static_cast<float*>(probs.data_ptr()), static_cast<int*>(output.data_ptr()),
       maybe_indices.has_value() ? static_cast<int*>(maybe_indices->data_ptr()) : nullptr,
       has_top_p_arr ? static_cast<float*>(maybe_top_p_arr->data_ptr()) : nullptr, batch_size,
-      top_p_val, vocab_size, deterministic, philox_seed, philox_offset, reinterpret_cast<hipStream_t>(stream));
+      top_p_val, vocab_size, deterministic, static_cast<uint64_t*>(philox_seed.data_ptr()), static_cast<uint64_t*>(philox_offset.data_ptr()), reinterpret_cast<hipStream_t>(stream));
   TORCH_CHECK(status == hipSuccess, "TopPSamplingFromProbs failed with error code " + std::string(hipGetErrorString(status)));
 }
 
 void top_k_sampling_from_probs(torch::Tensor probs, torch::Tensor output,
                                std::optional<torch::Tensor> maybe_indices,
                                std::optional<torch::Tensor> maybe_top_k_arr, int64_t top_k_val,
-                               bool deterministic, uint64_t philox_seed, uint64_t philox_offset, uintptr_t stream) {
+                               bool deterministic, torch::Tensor philox_seed, torch::Tensor philox_offset, uintptr_t stream) {
   CHECK_INPUT(probs);
   CHECK_INPUT(output);
   CHECK_DEVICE(output, probs);
@@ -57,7 +70,7 @@ void top_k_sampling_from_probs(torch::Tensor probs, torch::Tensor output,
       static_cast<float*>(probs.data_ptr()), static_cast<int*>(output.data_ptr()),
       maybe_indices.has_value() ? static_cast<int*>(maybe_indices->data_ptr()) : nullptr,
       has_top_k_arr ? static_cast<float*>(maybe_top_k_arr->data_ptr()) : nullptr, batch_size,
-      top_k_val, vocab_size, deterministic, philox_seed, philox_offset, reinterpret_cast<hipStream_t>(stream));
+      top_k_val, vocab_size, deterministic, static_cast<uint64_t*>(philox_seed.data_ptr()), static_cast<uint64_t*>(philox_offset.data_ptr()), reinterpret_cast<hipStream_t>(stream));
   TORCH_CHECK(status == hipSuccess, "TopKSamplingFromProbs failed with error code " + std::string(hipGetErrorString(status)));
 }
 
@@ -65,8 +78,8 @@ void top_k_top_p_sampling_from_probs(torch::Tensor probs, torch::Tensor output,
                                      std::optional<torch::Tensor> maybe_indices,
                                      std::optional<torch::Tensor> maybe_top_k_arr, double top_k_val,
                                      std::optional<torch::Tensor> maybe_top_p_arr, double top_p_val,
-                                     bool deterministic, uint64_t philox_seed,
-                                     uint64_t philox_offset, uintptr_t stream) {
+                                     bool deterministic, torch::Tensor philox_seed,
+                                     torch::Tensor philox_offset, uintptr_t stream) {
   CHECK_INPUT(probs);
   CHECK_INPUT(output);
   CHECK_DEVICE(output, probs);
@@ -84,7 +97,7 @@ void top_k_top_p_sampling_from_probs(torch::Tensor probs, torch::Tensor output,
       has_top_p_arr ? static_cast<float*>(maybe_top_p_arr->data_ptr()) : nullptr,
       static_cast<int*>(output.data_ptr()),
       maybe_indices.has_value() ? static_cast<int*>(maybe_indices->data_ptr()) : nullptr,
-      batch_size, top_k_val, top_p_val, vocab_size, deterministic, philox_seed, philox_offset,
+      batch_size, top_k_val, top_p_val, vocab_size, deterministic, static_cast<uint64_t*>(philox_seed.data_ptr()), static_cast<uint64_t*>(philox_offset.data_ptr()),
       reinterpret_cast<hipStream_t>(stream));
   TORCH_CHECK(status == hipSuccess, "TopKTopPSamplingFromProb failed with error code " + std::string(hipGetErrorString(status)));
 }
