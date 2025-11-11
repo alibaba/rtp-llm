@@ -40,13 +40,13 @@ private:
     bool                               success_{false};
 };
 
-class MemoryConnector final: public KVCacheConnector {
+class KVCacheMemoryConnector final: public KVCacheConnector {
 public:
-    MemoryConnector(const CacheConfig&                       cache_config,
-                    const std::shared_ptr<KVCacheAllocator>& allocator,
-                    rtp_llm::DeviceBase*                     device,
-                    const std::vector<std::string>&          tp_addrs);
-    ~MemoryConnector() override;
+    KVCacheMemoryConnector(const CacheConfig&                       cache_config,
+                           const std::shared_ptr<KVCacheAllocator>& allocator,
+                           rtp_llm::DeviceBase*                     device,
+                           const std::vector<std::string>&          tp_addrs);
+    ~KVCacheMemoryConnector() override;
 
 public:
     struct GroupCopyInfo {
@@ -67,7 +67,7 @@ public:
     std::shared_ptr<AsyncContext> asyncWriteByLayer(int                                       layer_id,
                                                     const std::shared_ptr<KVCacheResourceV1>& resource,
                                                     const std::shared_ptr<Meta>&              meta) override {
-        throw std::runtime_error("MemoryConnector asyncWriteByLayer is not implemented");
+        throw std::runtime_error("KVCacheMemoryConnector asyncWriteByLayer is not implemented");
     }
 
     // 拷贝KVCache(单TP)
@@ -82,13 +82,15 @@ private:
 
     size_t match(const std::vector<size_t>& keys) const;
     size_t prefixMatch(const std::vector<size_t>& keys) const;
-    size_t prefixMatch(const std::shared_ptr<BlockCacheV1>& block_cache, const std::vector<size_t>& keys) const;
+    size_t
+    prefixMatch(const std::shared_ptr<BlockCacheV1>& block_cache, const std::vector<size_t>& keys, int group_idx) const;
     std::vector<bool> hashMatch(const std::vector<size_t>& keys) const;
-    std::vector<bool> hashMatch(const std::shared_ptr<BlockCacheV1>& block_cache,
-                                const std::vector<size_t>&           keys) const;
+    std::vector<bool>
+    hashMatch(const std::shared_ptr<BlockCacheV1>& block_cache, const std::vector<size_t>& keys, int group_idx) const;
 
-    void copyBuffers(const std::vector<BufferPtr>& dst, const std::vector<BufferPtr>& src) const;
-    bool ensureEnoughFreeBlocks(const std::shared_ptr<BlockPool>& block_pool, int need_blocks) const;
+    void   copyBuffers(const std::vector<BufferPtr>& dst, const std::vector<BufferPtr>& src) const;
+    bool   ensureEnoughFreeBlocks(const std::shared_ptr<BlockPool>& block_pool, int need_blocks) const;
+    size_t makeHashKey(size_t cache_key, int group_idx) const;
 
 private:
     const CacheConfig&                  cache_config_;
@@ -106,7 +108,7 @@ private:
     // group_id->group
     std::map<int, Group> groups_;
     // layer_id->group_id, 表示这个层属于哪个group
-    std::map<int, int> layer_to_group_;
+    // std::map<int, int> layer_to_group_;
 
     // full每1个block存一个cache, 如果linear每3个block存一个cache, 则group_block_stride_为3
     int group_block_stride_{1};

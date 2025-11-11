@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/cache_new/MemoryConnector.h"
+#include "rtp_llm/cpp/cache_new/KVCacheMemoryConnector.h"
 
 #include "rtp_llm/cpp/cache_new/BlockCacheV1.h"
 #include "rtp_llm/cpp/cache_new/BlockPool.h"
@@ -50,25 +50,25 @@ bool MemoryConnectorAsyncContext::allResponseSuccess() const {
     }
     return true;
 }
-// ----------------------------- MemoryConnector ---------------------------------
+// ----------------------------- KVCacheMemoryConnector ---------------------------------
 
-MemoryConnector::MemoryConnector(const CacheConfig&                       cache_config,
-                                 const std::shared_ptr<KVCacheAllocator>& allocator,
-                                 rtp_llm::DeviceBase*                     device,
-                                 const std::vector<std::string>&          tp_addrs):
+KVCacheMemoryConnector::KVCacheMemoryConnector(const CacheConfig&                       cache_config,
+                                               const std::shared_ptr<KVCacheAllocator>& allocator,
+                                               rtp_llm::DeviceBase*                     device,
+                                               const std::vector<std::string>&          tp_addrs):
     cache_config_(cache_config), allocator_(allocator), device_(device), tp_addrs_(tp_addrs) {}
 
-MemoryConnector::~MemoryConnector() {
-    RTP_LLM_LOG_INFO("MemoryConnector destructor");
+KVCacheMemoryConnector::~KVCacheMemoryConnector() {
+    RTP_LLM_LOG_INFO("KVCacheMemoryConnector destructor");
     broadcast_manager_.reset();
     device_ = nullptr;
     allocator_.reset();
 }
 
-bool MemoryConnector::init() {
-    const auto block_size = cache_config_.layer_type_params.at(0)->block_size();
-    const auto pool_config =
-        BlockPoolConfigHelper::createKVFirstConfig(cache_config_.layer_num, cache_config_.block_num, block_size);
+bool KVCacheMemoryConnector::init() {
+    // 内存可以只使用 layer first layout, 并且只有一层
+    const auto pool_config = BlockPoolConfigHelper::createLayerFirstConfig(
+        cache_config_.layer_num, cache_config_.block_num, cache_config_.block_size);
     const auto block_pool = std::make_shared<BlockPool>(pool_config, device_, AllocationType::HOST);
     if (!block_pool->init()) {
         RTP_LLM_LOG_ERROR("failed to init block pool");
@@ -77,8 +77,8 @@ bool MemoryConnector::init() {
 
     const auto layer_layout = allocator_->layerCacheBase();
     for (int layer = 0; layer < static_cast<int>(layer_layout.layer_to_groups.size()); ++layer) {
-        const int group_idx    = layer_layout.layer_to_groups.at(layer);
-        layer_to_group_[layer] = group_idx;
+        const int group_idx = layer_layout.layer_to_groups.at(layer);
+        // layer_to_group_[layer] = group_idx;
         if (groups_.count(group_idx) == 0) {
             groups_[group_idx] = Group{GroupType::Invalid, {}, nullptr};
         }
@@ -103,7 +103,8 @@ bool MemoryConnector::init() {
 }
 
 std::shared_ptr<KVCacheConnector::AsyncContext>
-MemoryConnector::asyncRead(const std::shared_ptr<KVCacheResourceV1>& resource, const std::shared_ptr<Meta>& meta) {
+KVCacheMemoryConnector::asyncRead(const std::shared_ptr<KVCacheResourceV1>& resource,
+                                  const std::shared_ptr<Meta>&              meta) {
     if (!resource || resource->cache_keys.empty() || resource->group_block_ids.empty()) {
         return nullptr;
     }
@@ -136,7 +137,8 @@ MemoryConnector::asyncRead(const std::shared_ptr<KVCacheResourceV1>& resource, c
                 continue;
             }
 
-            const auto match_result = block_cache->match(static_cast<CacheKeyType>(cache_key));
+            const auto hash_key     = makeHashKey(cache_key, group_idx);
+            const auto match_result = block_cache->match(static_cast<CacheKeyType>(hash_key));
             if (isNullBlockIdx(match_result.matched_index)) {
                 RTP_LLM_LOG_WARNING(
                     "memory connector get cache failed, match failed, group: %d, cache key: %zu", group_idx, cache_key);
@@ -173,7 +175,8 @@ MemoryConnector::asyncRead(const std::shared_ptr<KVCacheResourceV1>& resource, c
 }
 
 std::shared_ptr<KVCacheConnector::AsyncContext>
-MemoryConnector::asyncWrite(const std::shared_ptr<KVCacheResourceV1>& resource, const std::shared_ptr<Meta>& meta) {
+KVCacheMemoryConnector::asyncWrite(const std::shared_ptr<KVCacheResourceV1>& resource,
+                                   const std::shared_ptr<Meta>&              meta) {
     if (!resource || resource->cache_keys.empty() || resource->group_block_ids.empty()) {
         return nullptr;
     }
@@ -272,7 +275,7 @@ MemoryConnector::asyncWrite(const std::shared_ptr<KVCacheResourceV1>& resource, 
                     const auto cache_key     = cache_keys.at(i);
 
                     BlockCacheV1::CacheItem item;
-                    item.cache_key   = static_cast<CacheKeyType>(cache_key);
+                    item.cache_key   = static_cast<CacheKeyType>(makeHashKey(cache_key, group_copy_info.group_id));
                     item.block_index = static_cast<BlockIdxType>(mem_block_idx);
                     item.is_resident = false;
                     block_pool->blockCache()->put(item);
@@ -285,8 +288,9 @@ MemoryConnector::asyncWrite(const std::shared_ptr<KVCacheResourceV1>& resource, 
     return std::make_shared<MemoryConnectorAsyncContext>(broadcast_result, done);
 }
 
-std::shared_ptr<TPBroadcastResult> MemoryConnector::asyncCopyCache(const std::vector<GroupCopyInfo>& group_copy_infos,
-                                                                   CopyDirection                     direction) const {
+std::shared_ptr<TPBroadcastResult>
+KVCacheMemoryConnector::asyncCopyCache(const std::vector<GroupCopyInfo>& group_copy_infos,
+                                       CopyDirection                     direction) const {
     if (!broadcast_manager_) {
         RTP_LLM_LOG_WARNING("memory connector sync rpc call failed, broadcast manager is null");
         return nullptr;
@@ -323,18 +327,18 @@ std::shared_ptr<TPBroadcastResult> MemoryConnector::asyncCopyCache(const std::ve
     return broadcast_manager_->broadcast(requests, timeout_ms);
 }
 
-void MemoryConnector::copyCache(const MemoryBroadcastTpRequestPB& request,
-                                MemoryBroadcastTpResponsePB&      response) const {
+void KVCacheMemoryConnector::copyCache(const MemoryBroadcastTpRequestPB& request,
+                                       MemoryBroadcastTpResponsePB&      response) const {
     if (request.groups().empty()) {
         RTP_LLM_LOG_WARNING("copy cache failed, groups is empty");
         response.set_success(false);
         return;
     }
 
-    std::vector<MemoryConnector::GroupCopyInfo> group_copy_infos;
+    std::vector<KVCacheMemoryConnector::GroupCopyInfo> group_copy_infos;
     group_copy_infos.reserve(request.groups().size());
     for (const auto& group : request.groups()) {
-        MemoryConnector::GroupCopyInfo group_copy_info;
+        KVCacheMemoryConnector::GroupCopyInfo group_copy_info;
         group_copy_info.group_id = group.group_id();
         group_copy_info.gpu_block_indices.assign(group.gpu_block_ids().begin(), group.gpu_block_ids().end());
         group_copy_info.memory_block_indices.assign(group.memory_block_ids().begin(), group.memory_block_ids().end());
@@ -342,8 +346,8 @@ void MemoryConnector::copyCache(const MemoryBroadcastTpRequestPB& request,
     }
 
     const auto direction = request.direction() == MemoryBroadcastTpRequestPB::H2D ?
-                               MemoryConnector::CopyDirection::H2D :
-                               MemoryConnector::CopyDirection::D2H;
+                               KVCacheMemoryConnector::CopyDirection::H2D :
+                               KVCacheMemoryConnector::CopyDirection::D2H;
     if (!copyCache(group_copy_infos, direction)) {
         RTP_LLM_LOG_WARNING("copy cache failed, copy cache for rank failed");
         response.set_success(false);
@@ -353,7 +357,8 @@ void MemoryConnector::copyCache(const MemoryBroadcastTpRequestPB& request,
     response.set_success(true);
 }
 
-bool MemoryConnector::copyCache(const std::vector<GroupCopyInfo>& group_copy_infos, CopyDirection direction) const {
+bool KVCacheMemoryConnector::copyCache(const std::vector<GroupCopyInfo>& group_copy_infos,
+                                       CopyDirection                     direction) const {
     std::vector<BufferPtr> src_buffers;
     std::vector<BufferPtr> dst_buffers;
 
@@ -438,7 +443,7 @@ bool MemoryConnector::copyCache(const std::vector<GroupCopyInfo>& group_copy_inf
     return true;
 }
 
-size_t MemoryConnector::match(const std::vector<size_t>& keys) const {
+size_t KVCacheMemoryConnector::match(const std::vector<size_t>& keys) const {
     size_t match_len = prefixMatch(keys);
     if (match_len == 0) {
         return 0;
@@ -455,12 +460,12 @@ size_t MemoryConnector::match(const std::vector<size_t>& keys) const {
     return match_len;
 }
 
-size_t MemoryConnector::prefixMatch(const std::vector<size_t>& keys) const {
+size_t KVCacheMemoryConnector::prefixMatch(const std::vector<size_t>& keys) const {
     size_t match_len = keys.size();
-    for (const auto& [_, group] : groups_) {
+    for (const auto& [group_idx, group] : groups_) {
         if (group.type == GroupType::Full) {
             std::vector<size_t> keys_to_match(keys.begin(), keys.begin() + match_len);
-            const auto          prefix_match_len = prefixMatch(group.block_pool->blockCache(), keys_to_match);
+            const auto prefix_match_len = prefixMatch(group.block_pool->blockCache(), keys_to_match, group_idx);
             if (prefix_match_len < match_len) {
                 match_len = prefix_match_len;
             }
@@ -472,21 +477,23 @@ size_t MemoryConnector::prefixMatch(const std::vector<size_t>& keys) const {
     return match_len;
 }
 
-size_t MemoryConnector::prefixMatch(const std::shared_ptr<BlockCacheV1>& block_cache,
-                                    const std::vector<size_t>&           keys) const {
+size_t KVCacheMemoryConnector::prefixMatch(const std::shared_ptr<BlockCacheV1>& block_cache,
+                                           const std::vector<size_t>&           keys,
+                                           int                                  group_idx) const {
     for (size_t i = 0; i < keys.size(); i++) {
-        if (!block_cache->contains(static_cast<CacheKeyType>(keys[i]))) {
+        const auto hash_key = makeHashKey(keys[i], group_idx);
+        if (!block_cache->contains(static_cast<CacheKeyType>(hash_key))) {
             return i;
         }
     }
     return keys.size();
 }
 
-std::vector<bool> MemoryConnector::hashMatch(const std::vector<size_t>& keys) const {
+std::vector<bool> KVCacheMemoryConnector::hashMatch(const std::vector<size_t>& keys) const {
     std::vector<bool> match_result(keys.size(), true);
-    for (const auto& [_, group] : groups_) {
+    for (const auto& [group_idx, group] : groups_) {
         if (group.type == GroupType::Linear) {
-            const auto& hash_match_result = hashMatch(group.block_pool->blockCache(), keys);
+            const auto& hash_match_result = hashMatch(group.block_pool->blockCache(), keys, group_idx);
             for (size_t i = 0; i < match_result.size(); i++) {
                 match_result[i] = match_result[i] && hash_match_result[i];
             }
@@ -495,20 +502,23 @@ std::vector<bool> MemoryConnector::hashMatch(const std::vector<size_t>& keys) co
     return match_result;
 }
 
-std::vector<bool> MemoryConnector::hashMatch(const std::shared_ptr<BlockCacheV1>& block_cache,
-                                             const std::vector<size_t>&           keys) const {
+std::vector<bool> KVCacheMemoryConnector::hashMatch(const std::shared_ptr<BlockCacheV1>& block_cache,
+                                                    const std::vector<size_t>&           keys,
+                                                    int                                  group_idx) const {
     std::vector<bool> match_result(keys.size(), false);
     for (size_t i = 0; i < keys.size(); i++) {
-        match_result[i] = block_cache->contains(static_cast<CacheKeyType>(keys[i]));
+        const auto hash_key = makeHashKey(keys[i], group_idx);
+        match_result[i]     = block_cache->contains(static_cast<CacheKeyType>(hash_key));
     }
     return match_result;
 }
 
-void MemoryConnector::copyBuffers(const std::vector<BufferPtr>& dst, const std::vector<BufferPtr>& src) const {
+void KVCacheMemoryConnector::copyBuffers(const std::vector<BufferPtr>& dst, const std::vector<BufferPtr>& src) const {
     device_->noBlockCopy(MultiCopyParams{dst, src});
 }
 
-bool MemoryConnector::ensureEnoughFreeBlocks(const std::shared_ptr<BlockPool>& block_pool, int need_blocks) const {
+bool KVCacheMemoryConnector::ensureEnoughFreeBlocks(const std::shared_ptr<BlockPool>& block_pool,
+                                                    int                               need_blocks) const {
     if (!block_pool) {
         RTP_LLM_LOG_WARNING("ensure enough free blocks failed, block pool is null, need blocks: %d", need_blocks);
         return false;
@@ -538,6 +548,10 @@ bool MemoryConnector::ensureEnoughFreeBlocks(const std::shared_ptr<BlockPool>& b
     }
 
     return block_pool->freeBlockNums() >= need_blocks;
+}
+
+size_t KVCacheMemoryConnector::makeHashKey(size_t cache_key, int group_idx) const {
+    return rtp_llm::hashInt64Func(std::hash<size_t>(), cache_key, group_idx);
 }
 
 }  // namespace rtp_llm
