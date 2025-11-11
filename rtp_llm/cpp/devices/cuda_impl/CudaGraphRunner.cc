@@ -173,8 +173,8 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
             py_attn_params.attr("batch_size")  = current_batch_size_;
             py_attn_params.attr("max_seq_len") = max_seq_len_;
 
-            auto params_bs          = py_attn_params.attr("batch_size").cast<int>();
-            auto params_max_seq_len = py_attn_params.attr("max_seq_len").cast<int>();
+            // auto params_bs          = py_attn_params.attr("batch_size").cast<int>();
+            // auto params_max_seq_len = py_attn_params.attr("max_seq_len").cast<int>();
 
             // auto param_seq_lens = py_attn_params.attr("seq_lens").cast<torch::Tensor>();
             // auto t1_ptr         = param_seq_lens.data_ptr();
