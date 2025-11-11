@@ -62,6 +62,7 @@ bool SingleTypeKVCacheAllocator::init() {
         RTP_LLM_LOG_ERROR("Failed to initialize FullKVCacheGroup");
         return false;
     }
+    full_kv_cache_group_->setGroupId(0);
 
     // kv_cache_groups_.push_back(full_kv_cache_group_);
 
@@ -96,22 +97,6 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     }
 
     return {true, reuse_len};
-    ;
-}
-
-// TODO, 在失败的时候，回滚资源，保证原子性？
-MallocResult SingleTypeKVCacheAllocator::initMalloc(const MallocInfo& malloc_info) {
-    auto init_result = initMallocForCommonLen(malloc_info);
-    if (!init_result.success) {
-        return init_result;
-    }
-
-    auto incr_result = incrMalloc(malloc_info);
-    if (!incr_result.success) {
-        return incr_result;
-    } else {
-        return init_result;
-    }
 }
 
 MallocResult SingleTypeKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
@@ -135,26 +120,7 @@ MallocResult SingleTypeKVCacheAllocator::incrMalloc(const MallocInfo& malloc_inf
     return {true, 0};
 }
 
-MallocResult SingleTypeKVCacheAllocator::malloc(const MallocInfo& malloc_info) {
-    if (!malloc_info.batch_kv_cache_resource) {
-        RTP_LLM_LOG_ERROR("BatchKVCacheResource is null");
-        return {false, 0};
-    }
-
-    if (!malloc_info.complete_token_ids) {
-        RTP_LLM_LOG_ERROR("CompleteTokenIds is null");
-        return {false, 0};
-    }
-
-    if (malloc_info.batch_kv_cache_resource->maxBlockSize() == 0) {
-        return initMalloc(malloc_info);
-    } else {
-        return incrMalloc(malloc_info);
-    }
-}
-
 FreeResult SingleTypeKVCacheAllocator::free(const FreeInfo& free_info) {
-
     if (!free_info.batch_kv_cache_resource) {
         RTP_LLM_LOG_ERROR("BatchKVCacheResource is null");
         return {false};

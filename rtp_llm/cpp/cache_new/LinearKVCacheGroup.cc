@@ -19,7 +19,7 @@ MatchResult LinearKVCacheGroup::match(const CacheKeysType& cache_keys) {
 
     int pos = cache_keys.size();
     for (auto it = cache_keys.rbegin(); it != cache_keys.rend(); ++it, pos--) {
-        auto result = block_cache_->match(*it);
+        auto result = block_cache_->match(*it, group_id_);
         if (isNullBlockIdx(result.matched_index)) {
             continue;
         }
@@ -100,7 +100,7 @@ void LinearKVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
                                 + std::to_string(block_indices.size()));
 
     for (int i = 0; i < cache_keys.size(); i++) {
-        BlockCacheV1::CacheItem item{cache_keys[i], block_indices[i], is_resident};
+        BlockCacheV1::CacheItem item{cache_keys[i], group_id_, block_indices[i], is_resident};
         if (block_cache_->put(item)) {
             block_pool_->incrBlockRefCounter({block_indices[i]});
         }

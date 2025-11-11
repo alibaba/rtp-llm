@@ -61,7 +61,7 @@ void StreamCacheResource::releaseResource() {
 
 int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
     RTP_LLM_LOG_DEBUG("stream [%ld] try release [%lu] blocks", stream_->streamId(), nums);
-    
+
     if (fake_inited_) {
         int max_block_size = maxBlockSize();
         int batch_size     = batch_resource_->batchSize();
@@ -70,23 +70,23 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
         fake_inited_ = false;
         return max_block_size;
     }
-    
+
     // NOTE: Currently only support releasing all blocks
     // Partial release (shrink) is not supported yet
     int release_blocks_num = maxBlockSize();
-    
+
     if (release_blocks_num > 0 && batch_resource_->batchSize() > 0) {
         // Free all blocks using KVCacheManager::free
         FreeInfo free_info(batch_resource_, stream_->completeTokenIdsPtr());
         free_info.request_id = stream_->streamId();
-        
+
         // TODO(chanyin): Handle cache insertion for reuse_cache case
-        
+
         resource_context_.cache_manager->free(free_info);
 
         // batch_resource_ is modified directly by KVCacheManager::free
     }
-    
+
     // After releasing all blocks, reserved_blocks = 0
     stream_->setFallbackPrefixLength(0);
     if (stream_->enable_fast_gen_) {
@@ -139,17 +139,17 @@ absl::StatusOr<int> StreamCacheResource::incrKVBlock(int token_capacity, size_t 
             real_occupy = result.value();
         }
     }
-    
+
     auto seq_len = stream_->isChunkStream() ? stream_->currentChunkLen() : (stream_->seqLength() + (int)reserve_step);
     auto common_seq_len = std::min(seq_len, stream_->adjustedCommonLen());
 
     // Prepare MallocInfo for KVCacheManager
     MallocInfo malloc_info(batch_resource_, stream_->completeTokenIdsPtr());
-    malloc_info.request_id = stream_->streamId();
-    malloc_info.verbose = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
+    malloc_info.request_id     = stream_->streamId();
+    malloc_info.verbose        = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
     malloc_info.common_seq_len = common_seq_len;
-    malloc_info.total_seq_len = seq_len;
-    
+    malloc_info.total_seq_len  = seq_len;
+
     // Call KVCacheManager::malloc which will handle batch_resource_ updates internally
     auto result = resource_context_.cache_manager->malloc(malloc_info);
     if (!result.success) {
@@ -178,12 +178,10 @@ void StreamCacheResource::setKVCache(const BatchKVCacheResource& kv_cache_resour
     *batch_resource_ = kv_cache_resource;
 }
 
-
 // TODO(chanyin): move  kv blocks update for beam search to kv cache manager
 bool StreamCacheResource::updateKVBlock(const std::vector<int>& block_src_batch, bool copy_last_block) {
     return true;
 }
-
 
 // bool StreamCacheResource::updateKVBlock(const std::vector<int>& block_src_batch, bool copy_last_block) {
 //     block_update_mapping_.clear();
