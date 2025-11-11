@@ -89,8 +89,10 @@ void CudaGraphRunner::capture() {
         inputs.attention_inputs.sequence_lengths = inputs.attention_inputs.sequence_lengths.pin_memory();
         // kv_cache_block_id_device [batch_size, block_num]
         RTP_LLM_LOG_INFO("zeros bs=%d, max_seq_len=%d, seq_size_per_block_=%d", bs, max_seq_len_, seq_size_per_block_);
+        cudaDeviceSynchronize();
         inputs.attention_inputs.kv_cache_block_id_device = torch::zeros(
             {int(bs), ((max_seq_len_ + seq_size_per_block_ - 1) / seq_size_per_block_)}, options_cuda_int32);
+        cudaDeviceSynchronize();
         inputs.attention_inputs.kv_cache_block_id_host =
             capture_mem_hold_.py_model_inputs_.attention_inputs.kv_cache_block_id_host.slice(0, 0, bs);
         // pinned memory
@@ -188,7 +190,7 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
             auto t2_shape_0   = block_tables.sizes()[0];
             auto t2_shape_1   = block_tables.sizes()[1];
 
-            RTP_LLM_LOG_INFO("tag 5.1, %d %d [%s][%p] [%d][%d][%d]. [%s][%p] [%d][%d][%d].",
+            RTP_LLM_LOG_INFO("tag 5.1, %d %d [%s][%p] [%d][%d][%d]. [%s][%p] [%d][%d][%d]. [%p][%p]",
                              params_bs,
                              params_max_seq_len,
                              std::string(t1_type_str).c_str(),
@@ -200,7 +202,9 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
                              t2_ptr,
                              t2_shape_len,
                              t2_shape_0,
-                             t2_shape_1);
+                             t2_shape_1,
+                             py_model_inputs_.attention_inputs.sequence_lengths.data_ptr(),
+                             py_model_inputs_.attention_inputs.kv_cache_block_id_device.data_ptr());
 
             py_attn_params.attr("seq_lens")
                 .cast<torch::Tensor>()
