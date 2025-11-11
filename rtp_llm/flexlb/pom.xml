@@ -163,6 +163,18 @@
                 <version>${project.version}</version>
             </dependency>
 
+            <!-- Internal dependencies - only available when internal profile is activated -->
+            <dependency>
+                <groupId>org.flexlb</groupId>
+                <artifactId>kmonitor</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.flexlb</groupId>
+                <artifactId>vipserver</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+
             <!-- util tools 依赖 start -->
             <dependency>
                 <groupId>com.google.guava</groupId>
@@ -220,6 +232,32 @@
         </dependencies>
 
     </dependencyManagement>
+
+    <profiles>
+        <!-- Internal profile - automatically activated when internal dependencies exists -->
+        <profile>
+            <id>internal</id>
+            <activation>
+                <file>
+                    <exists>../../../internal_source</exists>
+                </file>
+            </activation>
+            <properties>
+                <internal.modules.enabled>true</internal.modules.enabled>
+            </properties>
+        </profile>
+
+        <!-- Default profile -->
+        <profile>
+            <id>opensource</id>
+            <activation>
+                <activeByDefault>true</activeByDefault>
+            </activation>
+            <properties>
+                <internal.modules.enabled>false</internal.modules.enabled>
+            </properties>
+        </profile>
+    </profiles>
 
     <build>
         <pluginManagement>

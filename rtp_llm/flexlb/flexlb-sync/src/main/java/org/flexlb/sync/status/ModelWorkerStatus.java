@@ -31,8 +31,6 @@ public class ModelWorkerStatus {
 
     private ConcurrentHashMap<String/*ipPort*/, WorkerStatus> vitStatusMap = new ConcurrentHashMap<>();
 
-    private EngineMetric engineMetric;
-
     public ConcurrentHashMap<String, WorkerStatus> getRoleStatusMap(RoleType roleType) {
         if (roleType == RoleType.DECODE) {
             return decodeStatusMap;

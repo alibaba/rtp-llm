@@ -16,25 +16,21 @@ import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
 import org.flexlb.metric.FlexStatisticsType;
 import org.flexlb.service.address.WorkerAddressService;
-import org.flexlb.sync.status.EngineMetric;
 import org.flexlb.sync.status.EngineWorkerStatus;
-import org.flexlb.sync.status.ModelWorkerStatus;
 import org.flexlb.sync.synchronizer.AbstractEngineStatusSynchronizer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
-import javax.annotation.PreDestroy;
+
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
 
 import static org.flexlb.constant.MetricConstant.CACHE_BLOCK_SIZE;
 import static org.flexlb.constant.MetricConstant.CACHE_STATUS_CHECK_FAIL;
@@ -71,8 +67,6 @@ import static org.flexlb.constant.MetricConstant.PREFILL_MASTER_NODE;
 @Component
 public class EngineHealthReporter {
 
-    private final ScheduledExecutorService scheduler;
-
     private final FlexMonitor monitor;
 
     private final EngineWorkerStatus engineWorkerStatus;
@@ -83,20 +77,15 @@ public class EngineHealthReporter {
 
     private Set<String/*modelName*/> proxyEngineSet = ConcurrentHashMap.newKeySet();
 
-    private long syncMetricPeriodInMs;
-
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
 
     @Autowired
-    public EngineHealthReporter(@Qualifier("engineStatusSyncScheduler") ScheduledExecutorService scheduler,
-                                FlexMonitor monitor,
+    public EngineHealthReporter(FlexMonitor monitor,
                                 CacheMetricsReporter cacheMetricsReporter,
                                 EngineWorkerStatus engineWorkerStatus,
                                 EngineGrpcClient engineGrpcClient) {
 
-        this.scheduler = scheduler;
         this.monitor = monitor;
-        this.syncMetricPeriodInMs = 1000;
         this.engineWorkerStatus = engineWorkerStatus;
         this.cacheMetricsReporter = cacheMetricsReporter;
         this.engineGrpcClient = engineGrpcClient;
@@ -137,7 +126,6 @@ public class EngineHealthReporter {
         this.monitor.register(CACHE_STATUS_CHECK_SUCCESS_PERIOD, FlexMetricType.GAUGE);
         this.monitor.register(CACHE_STATUS_CHECK_FAIL, FlexMetricType.QPS);
         this.monitor.register(CACHE_BLOCK_SIZE, FlexMetricType.GAUGE);
-        this.scheduler.scheduleAtFixedRate(this::reportEngineMetric, 0, syncMetricPeriodInMs, TimeUnit.MILLISECONDS);
     }
 
     public void reportLatencyMetric(String modelName, String role, double result, double result2) {
@@ -147,22 +135,10 @@ public class EngineHealthReporter {
         logger.debug("Latency metric - model: {}, role: {}, stepLatency: {}, queryLen: {}", modelName, role, result, result2);
     }
 
+    @Scheduled(fixedRate = 2000)
     private void reportEngineMetric() {
-        for (Map.Entry<String, ModelWorkerStatus> entry :
-                engineWorkerStatus.getModelRoleWorkerStatusMap().entrySet()) {
-            String modelName = entry.getKey();
-            FlexMetricTags tags = FlexMetricTags.of("model", modelName);
-            EngineMetric engineMetric = entry.getValue().getEngineMetric();
-            monitor.report(ENGINE_WORKER_NUMBER, tags, engineMetric.getTotal());
-            monitor.report(ENGINE_PREFILL_WORKER_NUMBER, tags, engineMetric.getPrefill());
-            monitor.report(ENGINE_DECODE_WORKER_NUMBER, tags, engineMetric.getDecode());
-            logger.debug("Engine metric - model: {}, total: {}, prefill: {}, decode: {}",
-                    modelName, engineMetric.getTotal(), engineMetric.getPrefill(), engineMetric.getDecode());
-        }
 
-        if (AbstractEngineStatusSynchronizer.engineSyncExecutor != null
-                && AbstractEngineStatusSynchronizer.statusCheckExecutor != null
-                && WorkerAddressService.serviceDiscoveryExecutor != null) {
+        if (AbstractEngineStatusSynchronizer.engineSyncExecutor != null && AbstractEngineStatusSynchronizer.statusCheckExecutor != null) {
             reportThreadPoolInfo(ENGINE_BALANCING_THREAD_POOL_INFO, "engineSyncExecutor",
                     (ThreadPoolExecutor) AbstractEngineStatusSynchronizer.engineSyncExecutor);
             reportThreadPoolInfo(ENGINE_BALANCING_THREAD_POOL_INFO, "statusCheckExecutor",
@@ -178,11 +154,6 @@ public class EngineHealthReporter {
     public void reportServiceDiscoveryResult(String modelName, int result, String role) {
         FlexMetricTags metricTags = FlexMetricTags.of("model", modelName, "role", role);
         monitor.report(ENGINE_NUMBER_SERVICE_DISCOVERY_RESULT, metricTags, result);
-    }
-
-    @PreDestroy
-    public void destroy() {
-        scheduler.shutdown();
     }
 
     public void reportStatusCheckRemoteInfo(String modelName, String engineIp, String role, Long startTime) {

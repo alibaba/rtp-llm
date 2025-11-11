@@ -7,13 +7,11 @@
     <property name="LOG_PATH" value="${user.home}/${APP_NAME}/logs" />
     <property name="LOG_FILE" value="${LOG_PATH}/application.log" />
     <property name="PV_LOG_FILE" value="${LOG_PATH}/pv.log" />
-    <property name="TRACE_LOG_FILE" value="${LOG_PATH}/trace.log" />
     <property name="SYNC_LOG_FILE" value="${LOG_PATH}/sync.log" />
     <property name="SYNC_CONSISTENCY_LOG_FILE" value="${LOG_PATH}/sync_consistency.log" />
 
-    <property name="PV_SINGLE_LOG_PATTERN" value="[p] %d{yyyy-MM-dd HH:mm:ss.SSS} %m%n"/>
-    <property name="SYNC_SINGLE_LOG_PATTERN" value="%d{yyyy-MM-dd HH:mm:ss.SSS} %5p : %m%n"/>
-
+    <!-- 标准化日志格式 - 包含级别、线程、类名等关键信息 -->
+    <property name="LOG_PATTERN" value="%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"/>
 
     <appender name="APPLICATION" class="ch.qos.logback.core.rolling.RollingFileAppender">
         <file>${LOG_FILE}</file>
@@ -38,7 +36,7 @@
     <appender name="PV" class="ch.qos.logback.core.rolling.RollingFileAppender">
         <file>${PV_LOG_FILE}</file>
         <encoder>
-            <pattern>${PV_SINGLE_LOG_PATTERN}</pattern>
+            <pattern>${LOG_PATTERN}</pattern>
         </encoder>
         <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
             <fileNamePattern>${PV_LOG_FILE}.%d{yyyy-MM-dd}.%i.log</fileNamePattern>
@@ -55,30 +53,10 @@
         <appender-ref ref="PV"/>
     </appender>
 
-    <appender name="trace" class="ch.qos.logback.core.rolling.RollingFileAppender">
-        <file>${TRACE_LOG_FILE}</file>
-        <encoder>
-            <pattern>${FILE_LOG_PATTERN}</pattern>
-        </encoder>
-        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
-            <fileNamePattern>${TRACE_LOG_FILE}.%d{yyyy-MM-dd}.%i.log</fileNamePattern>
-            <maxHistory>5</maxHistory>
-            <maxFileSize>50MB</maxFileSize>
-            <totalSizeCap>2GB</totalSizeCap>
-        </rollingPolicy>
-    </appender>
-
-    <appender name="trace-async" class="ch.qos.logback.classic.AsyncAppender">
-        <discardingThreshold>0</discardingThreshold>
-        <queueSize>512</queueSize>
-        <neverBlock>true</neverBlock>
-        <appender-ref ref="trace"/>
-    </appender>
-
     <appender name="sync" class="ch.qos.logback.core.rolling.RollingFileAppender">
         <file>${SYNC_LOG_FILE}</file>
         <encoder>
-            <pattern>${SYNC_SINGLE_LOG_PATTERN}</pattern>
+            <pattern>${LOG_PATTERN}</pattern>
         </encoder>
         <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
             <fileNamePattern>${SYNC_LOG_FILE}.%d{yyyy-MM-dd}.%i.log</fileNamePattern>
@@ -95,11 +73,10 @@
         <appender-ref ref="sync"/>
     </appender>
 
-
     <appender name="sync_consistency" class="ch.qos.logback.core.rolling.RollingFileAppender">
         <file>${SYNC_CONSISTENCY_LOG_FILE}</file>
         <encoder>
-            <pattern>${SYNC_SINGLE_LOG_PATTERN}</pattern>
+            <pattern>${LOG_PATTERN}</pattern>
         </encoder>
         <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
             <fileNamePattern>${SYNC_CONSISTENCY_LOG_FILE}.%d{yyyy-MM-dd}.%i.log</fileNamePattern>
@@ -134,10 +111,6 @@
         <appender-ref ref="PV-async"/>
     </logger>
 
-    <logger name="traceLogger" level="INFO" additivity="false">
-        <appender-ref ref="trace-async"/>
-    </logger>
-
     <logger name="syncLogger" level="INFO" additivity="false">
         <appender-ref ref="sync-async"/>
     </logger>
@@ -154,29 +127,18 @@
         <appender-ref ref="APPLICATION-async" />
     </logger>
 
-    <logger name="com.alibaba.tpp.apm.telemetry.exporter.LogHouseSpanExporter" level="OFF">
-        <appender-ref ref="APPLICATION-async" />
-    </logger>
-
-    <springProfile name="pre">
-        <!-- 开发环境时激活 -->
-        <logger name="com" level="INFO" additivity="false">
-            <appender-ref ref="CONSOLE-async"/>
-        </logger>
+    <springProfile name="pre,test">
+        <!-- 开发/测试环境：同时输出到控制台和文件 -->
+        <root level="INFO">
+            <appender-ref ref="APPLICATION-async" />
+            <appender-ref ref="CONSOLE-async" />
+        </root>
     </springProfile>
 
-    <springProfile name="test">
-        <!-- 测试环境时激活 -->
-        <logger name="com" level="INFO" additivity="false">
-            <appender-ref ref="CONSOLE-async"/>
-        </logger>
+    <springProfile name="!pre,!test">
+        <!-- 生产环境：只输出到文件 -->
+        <root level="INFO">
+            <appender-ref ref="APPLICATION-async" />
+        </root>
     </springProfile>
-
-    <root level="INFO">
-        <appender-ref ref="APPLICATION-async" />
-    </root>
-
-    <root level="ERROR">
-        <appender-ref ref="APPLICATION-async" />
-    </root>
 </configuration>
