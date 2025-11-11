@@ -167,18 +167,40 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
                 seq_size_per_block_);
         } else if (graph_instances_[current_real_graph_bs_].mem_hold_.py_attn_params) {
             RTP_LLM_LOG_INFO("filling py attn params");
-            auto& py_attn_params = graph_instances_[current_real_graph_bs_].mem_hold_.py_attn_params;
-            // try {
+            auto& py_attn_params               = graph_instances_[current_real_graph_bs_].mem_hold_.py_attn_params;
+            py_attn_params.attr("batch_size")  = current_batch_size_;
+            py_attn_params.attr("max_seq_len") = max_seq_len_;
+
             auto params_bs          = py_attn_params.attr("batch_size").cast<int>();
             auto params_max_seq_len = py_attn_params.attr("max_seq_len").cast<int>();
-            RTP_LLM_LOG_INFO("tag 5.1, %d %d", params_bs, params_max_seq_len);
+
             auto param_seq_lens = py_attn_params.attr("seq_lens").cast<torch::Tensor>();
-            std::cout << "param_seq_lens sizes: " << param_seq_lens << std::endl;
-            // } catch (const py::error_already_set& e) {
-            //     RTP_LLM_LOG_ERROR("Python error during accessing py_attn_params: %s", e.what());
-            //     throw std::runtime_error(
-            //         std::string("pybind11 error during accessing py_attn_params: ") + e.what());
-            // }
+            auto t1_ptr         = param_seq_lens.data_ptr();
+            auto t1_type_str    = param_seq_lens.dtype().name();
+            auto t1_shape_len   = param_seq_lens.sizes().size();
+            auto t1_shape_0     = param_seq_lens.sizes()[0];
+            auto t1_shape_1     = param_seq_lens.sizes()[1];
+
+            auto block_tables = py_attn_params.attr("block_tables").cast<torch::Tensor>();
+            auto t2_ptr       = block_tables.data_ptr();
+            auto t2_type_str  = block_tables.dtype().name();
+            auto t2_shape_len = block_tables.sizes().size();
+            auto t2_shape_0   = block_tables.sizes()[0];
+            auto t2_shape_1   = block_tables.sizes()[1];
+
+            RTP_LLM_LOG_INFO("tag 5.1, %d %d [%s][%p] [%d][%d][%d]. [%s][%p] [%d][%d][%d].",
+                             params_bs,
+                             params_max_seq_len,
+                             std::string(t1_type_str).c_str(),
+                             t1_ptr,
+                             t1_shape_len,
+                             t1_shape_0,
+                             t1_shape_1,
+                             std::string(t2_type_str).c_str(),
+                             t2_ptr,
+                             t2_shape_len,
+                             t2_shape_0,
+                             t2_shape_1);
         }
         RTP_LLM_LOG_INFO("tag 5");
     } else {
