@@ -146,18 +146,18 @@ void CudaGraphRunner::copySmallerIntoLarger(const torch::Tensor& source_tensor, 
 }
 
 void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
-    RTP_LLM_LOG_INFO("tag 1");
+    // RTP_LLM_LOG_INFO("tag 1");
     auto& py_model_inputs_ = graph_instances_[current_real_graph_bs_].mem_hold_.py_model_inputs_;
     py_model_inputs_.attention_inputs.input_lengths.slice(0, 0, current_batch_size_) =
         inputs.attention_inputs.input_lengths;
     // pinned memory
-    RTP_LLM_LOG_INFO("tag 2");
+    // RTP_LLM_LOG_INFO("tag 2");
     if (!is_prefill_cuda_graph_mode_) {
         py_model_inputs_.input_ids.fill_(0);
         py_model_inputs_.input_ids.slice(0, 0, inputs.input_ids.size(0)) = inputs.input_ids;
         py_model_inputs_.attention_inputs.sequence_lengths.slice(0, 0, current_batch_size_) =
             inputs.attention_inputs.sequence_lengths;
-        RTP_LLM_LOG_INFO("tag 4");
+        // RTP_LLM_LOG_INFO("tag 4");
         copySmallerIntoLarger(inputs.attention_inputs.kv_cache_block_id_device,
                               py_model_inputs_.attention_inputs.kv_cache_block_id_device);
         if (graph_instances_[current_real_graph_bs_].mem_hold_.params_ptr) {
@@ -168,7 +168,7 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
                 current_batch_size_,
                 seq_size_per_block_);
         } else if (graph_instances_[current_real_graph_bs_].mem_hold_.py_attn_params) {
-            RTP_LLM_LOG_INFO("filling py attn params");
+            // RTP_LLM_LOG_INFO("filling py attn params");
             auto& py_attn_params               = graph_instances_[current_real_graph_bs_].mem_hold_.py_attn_params;
             py_attn_params.attr("batch_size")  = current_batch_size_;
             py_attn_params.attr("max_seq_len") = max_seq_len_;
@@ -218,7 +218,7 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
             //     "sliced src block tables size: [%d][%d]", sliced_src_block.size(0), sliced_src_block.size(1));
             // dst_block_tables.copy_(sliced_src_block);
         }
-        RTP_LLM_LOG_INFO("tag 5");
+        // RTP_LLM_LOG_INFO("tag 5");
     } else {
         py_model_inputs_.attention_inputs.cu_seqlens.slice(0, 0, current_batch_size_ + 1) =
             inputs.attention_inputs.cu_seqlens.slice(0, 0, current_batch_size_ + 1);
@@ -292,7 +292,7 @@ PyModelOutputs CudaGraphRunner::forward(PyModelInputs& inputs) {
                 graph_instances_[current_real_graph_bs_].mem_hold_.decoder_layer_hidden_states_.slice(
                     0, 0, seq_len_sum_);
         }
-        RTP_LLM_LOG_INFO("Replay End");
+        // RTP_LLM_LOG_INFO("Replay End");
     } else {
         auto py_outputs_obj = normalForward(inputs);
         // Cast the Python object to PyModelOutputs and extract hidden states
@@ -309,13 +309,13 @@ void CudaGraphRunner::replay(int bs) {
 bool CudaGraphRunner::tryGetRealGraphBatchSize(PyModelInputs& inputs) {
     int cuda_graph_bs   = inputs.attention_inputs.input_lengths.size(0);
     current_batch_size_ = cuda_graph_bs;
-    RTP_LLM_LOG_INFO("canRun judge for batch size: %d", cuda_graph_bs);
+    // RTP_LLM_LOG_INFO("canRun judge for batch size: %d", cuda_graph_bs);
     bool is_bs_supported   = (cuda_graph_bs <= max_bs_);
     auto it                = std::lower_bound(capture_range_.begin(), capture_range_.end(), current_batch_size_);
     current_real_graph_bs_ = *it;
     RTP_LLM_CHECK_WITH_INFO(it != capture_range_.end(), "batch size used in replay: %d", current_real_graph_bs_);
     seq_len_sum_ = inputs.attention_inputs.input_lengths.sum(0).item<int>();
-    RTP_LLM_LOG_INFO("can run cuda graph: %d", is_bs_supported);
+    // RTP_LLM_LOG_INFO("can run cuda graph: %d", is_bs_supported);
     return is_bs_supported;
 }
 
