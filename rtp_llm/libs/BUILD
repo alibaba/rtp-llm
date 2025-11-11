@@ -87,7 +87,7 @@ tags = ["rocm", "local"],
 
 genrule(
     name = "aiter_copy",
-    srcs = ["@aiter//:aiter_so"],
+    srcs = ["@aiter//:aiter_so", "@deep_ep_rocm//:cpp_libraries"],
     outs = [
         "module_aiter_enum.so",
         "module_custom_all_reduce.so",
@@ -108,6 +108,8 @@ genrule(
         "module_gemm_a8w8.so",
         "module_moe_ck2stages.so",
         "module_quick_all_reduce.so",
+        "module_deepgemm.so",
+        "deep_ep_rocm.so",
     ],
     cmd = """
         cp external/aiter/aiter/jit/module_aiter_enum.so $(location module_aiter_enum.so);
@@ -129,8 +131,10 @@ genrule(
         cp external/aiter/aiter/jit/module_gemm_a8w8.so $(location module_gemm_a8w8.so);
         cp external/aiter/aiter/jit/module_moe_ck2stages.so $(location module_moe_ck2stages.so);
         cp external/aiter/aiter/jit/module_quick_all_reduce.so $(location module_quick_all_reduce.so);
+        cp external/aiter/aiter/jit/module_deepgemm.so $(location module_deepgemm.so);
+        cp ./bazel-out/k8-opt/bin/external/deep_ep_rocm/libdeep_ep_rocm.so $(location deep_ep_rocm.so);
 """,
-tags = ["rocm", "local"],
+    tags = ["rocm", "local"],
 )
 
 filegroup(

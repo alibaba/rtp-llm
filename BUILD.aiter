@@ -121,6 +121,30 @@ cc_library(
     tags = ["rocm"],
 )
 
+# Library for py_itfs_common.h header
+cc_library(
+    name = "py_itfs_common_headers",
+    hdrs = ["aiter_meta/csrc/include/py_itfs_common.h"],
+    strip_include_prefix = "aiter_meta/csrc/include/",
+    visibility = ["//visibility:public"],
+    tags = ["rocm"],
+)
+
+cc_library(
+    name = "ck_deepgemm_example_headers",
+    hdrs = glob([
+        "aiter_meta/3rdparty/composable_kernel/example/ck_tile/18_flatmm/*.hpp",
+    ]),
+    copts = rocm_default_copts() + ["-std=c++20"],
+    deps = [
+        ":ck_headers_real",
+        ":ck_library_headers",
+        ":py_itfs_common_headers",
+    ],
+    strip_include_prefix = "aiter_meta/3rdparty/composable_kernel/example/ck_tile/18_flatmm",
+    visibility = ["//visibility:public"],
+)
+
 cc_library(
     name = "module_custom_all_reduce",
     srcs = ["aiter/jit/module_custom_all_reduce.so"],
@@ -384,6 +408,21 @@ cc_library(
     ],
     copts = [],
     strip_include_prefix = "aiter_meta/csrc/include/",
+    visibility = ["//visibility:public"],
+    tags = ["rocm"],
+)
+
+cc_library(
+    name = "module_m_grouped_gemm",
+    srcs = ["aiter/jit/module_deepgemm.so"],
+    hdrs = ["aiter_meta/csrc/ck_deepgemm/include/deepgemm.h"],
+    deps = [
+        ":aiter_so",
+        ":aiter_headers",
+        ":ck_deepgemm_example_headers"
+    ],
+    copts = [],
+    strip_include_prefix = "aiter_meta/csrc/ck_deepgemm/include",
     visibility = ["//visibility:public"],
     tags = ["rocm"],
 )
