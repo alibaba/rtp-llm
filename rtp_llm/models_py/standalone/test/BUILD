@@ -11,6 +11,6 @@ py_test (
         "//rtp_llm/models_py/standalone:rtp_simple_model",
     ],
     env = test_envs,
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
 )
 

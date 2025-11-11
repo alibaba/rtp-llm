@@ -30,7 +30,7 @@ from rtp_llm.utils.model_weight import W
 class RtpSimplePyModel:
     def __init__(
         self,
-        model_path_or_name: str,
+        model_path: str,
         revision: Optional[str] = None,
         max_total_tokens: int = 4096,
         tokens_per_block: int = 64,
@@ -38,7 +38,7 @@ class RtpSimplePyModel:
     ):
         # set some env and config
         self._set_env()
-        StaticConfig.model_config.checkpoint_path = model_path_or_name
+        StaticConfig.model_config.checkpoint_path = model_path
         StaticConfig.update_from_env()
         # hf_model_info = get_hf_model_info(model_path_or_name)
 
