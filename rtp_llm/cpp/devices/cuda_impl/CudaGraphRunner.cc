@@ -173,12 +173,6 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
 
             auto params_bs          = py_attn_params.attr("batch_size").cast<int>();
             auto params_max_seq_len = py_attn_params.attr("max_seq_len").cast<int>();
-            py_attn_params.attr("seq_lens")
-                .cast<torch::Tensor>()
-                .copy_(inputs.attention_inputs.sequence_lengths.slice(0, 0, current_batch_size_));
-            py_attn_params.attr("block_tables")
-                .cast<torch::Tensor>()
-                .copy_(inputs.attention_inputs.kv_cache_block_id_device.slice(0, 0, current_batch_size_));
 
             auto param_seq_lens = py_attn_params.attr("seq_lens").cast<torch::Tensor>();
             auto t1_ptr         = param_seq_lens.data_ptr();
@@ -207,6 +201,14 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
                              t2_shape_len,
                              t2_shape_0,
                              t2_shape_1);
+
+            py_attn_params.attr("seq_lens")
+                .cast<torch::Tensor>()
+                .copy_(inputs.attention_inputs.sequence_lengths.slice(0, 0, current_batch_size_));
+            auto src_block_tables = inputs.attention_inputs.kv_cache_block_id_device;
+            auto dst_block_tables = py_attn_params.attr("block_tables").cast<torch::Tensor>();
+            dst_block_tables.copy_(inputs.attention_inputs.kv_cache_block_id_device.slice(0, 0, current_batch_size_)
+                                       .slice(1, 0, dst_block_tables.size(1)));
         }
         RTP_LLM_LOG_INFO("tag 5");
     } else {
