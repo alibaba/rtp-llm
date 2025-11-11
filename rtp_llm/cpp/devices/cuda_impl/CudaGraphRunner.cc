@@ -88,6 +88,7 @@ void CudaGraphRunner::capture() {
         inputs.attention_inputs.sequence_lengths = torch::ones({int(bs)}, options_cpu_int32);
         inputs.attention_inputs.sequence_lengths = inputs.attention_inputs.sequence_lengths.pin_memory();
         // kv_cache_block_id_device [batch_size, block_num]
+        RTP_LLM_LOG_INFO("zeros bs=%d, max_seq_len=%d, seq_size_per_block_=%d", bs, max_seq_len_, seq_size_per_block_);
         inputs.attention_inputs.kv_cache_block_id_device = torch::zeros(
             {int(bs), ((max_seq_len_ + seq_size_per_block_ - 1) / seq_size_per_block_)}, options_cuda_int32);
         inputs.attention_inputs.kv_cache_block_id_host =
