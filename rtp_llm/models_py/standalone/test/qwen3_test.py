@@ -27,7 +27,7 @@ class Qwen3SimplePyModelTest(TestCase):
         self.max_total_tokens = 64  # max_total_tokens is about kv_cache capacity
         self.tokens_per_block = 2
         self.model = RtpSimplePyModel(
-            model_path_or_name="Qwen/Qwen3-0.6B",
+            model_path="Qwen/Qwen3-0.6B",
             max_total_tokens=self.max_total_tokens,
             tokens_per_block=self.tokens_per_block,
         )
