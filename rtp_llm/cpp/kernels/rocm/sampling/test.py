@@ -19,6 +19,7 @@ import pytest
 import torch
 
 from bind import (
+    get_seed_and_offset,
     top_p_renorm_probs,
     top_k_renorm_probs,
     top_p_sampling_from_probs,
@@ -47,6 +48,26 @@ def gumbel_distribution(beta):
     gumbel_noise.__name__ = f"gumbel_distribution(beta={beta})"
     return gumbel_noise
 
+@pytest.mark.parametrize("batch_size", [1, 2, 10])
+def test_get_seed_and_offset(batch_size):
+    def get_seed_and_offset_ref(increment, generator = None):
+        if generator is None:
+            generator = torch.Generator("cuda:0")
+        state = generator.get_state()
+        seed, offset = state.view(torch.int64)
+        generator.set_state(
+            torch.tensor([seed, offset + (increment + 3) // 4 * 4], dtype=torch.int64).view(torch.uint8)
+        )
+        return int(seed), int(offset)
+
+    gen1 = torch.Generator("cuda:0")
+    gen2 = gen1.clone_state()
+    increment = 32 * batch_size
+
+    seed_ref, offset_ref = get_seed_and_offset_ref(increment, gen1)
+    seed, offset = get_seed_and_offset(increment, gen2)
+    assert seed == seed_ref, f"seed={seed}, seed_ref={seed_ref}"
+    assert offset == offset_ref, f"offset={offset}, offset_ref={offset_ref}"
 
 @pytest.mark.parametrize("vocab_size", [111, 32000, 128256])
 @pytest.mark.parametrize(
@@ -80,8 +101,8 @@ def test_top_p_sampling_freq(vocab_size, distribution, p):
         None,
         p,
         False,
-        0,
-        0,
+        torch.zeros(num_trials, dtype=torch.uint64, device="cuda:0"),
+        torch.zeros(num_trials, dtype=torch.uint64, device="cuda:0"),
     )
     counter.scatter_add_(0, samples.long(), torch.ones_like(samples))
     freq = counter.float() / num_trials
@@ -122,8 +143,8 @@ def test_top_k_sampling_freq(vocab_size, distribution, k):
         None,
         k,
         False,
-        0,
-        0,
+        torch.zeros(num_trials, dtype=torch.uint64, device="cuda:0"),
+        torch.zeros(num_trials, dtype=torch.uint64, device="cuda:0"),
     )
     counter.scatter_add_(0, samples.long(), torch.ones_like(samples))
     freq = counter.float() / num_trials
@@ -162,11 +183,20 @@ def test_top_p_sampling(batch_size, vocab_size, p):
       file = Path(file)
       with file.open("w") as f:
           json.dump(info, f, ensure_ascii=False, indent=4)
-    num_trails = 1000
+    num_trials = 1000
     info["out"] = []
-    for _ in range(num_trails):
+    for _ in range(num_trials):
         samples = torch.empty(batch_size, dtype=torch.int32, device="cuda:0")
-        top_p_sampling_from_probs(normalized_prob, samples, None, None, p, False, 0, 0)
+        top_p_sampling_from_probs(
+            normalized_prob,
+            samples,
+            None,
+            None,
+            p,
+            False,
+            torch.zeros(batch_size, dtype=torch.uint64, device="cuda:0"),
+            torch.zeros(batch_size, dtype=torch.uint64, device="cuda:0"),
+        )
         assert torch.all(samples < vocab_size) and torch.all(samples >= 0)
         assert torch.all(mask[torch.arange(batch_size), samples] == 1)
         info["out"].append(samples.cpu().numpy().tolist())
@@ -188,10 +218,19 @@ def test_top_k_sampling(batch_size, vocab_size, k):
     pivot = sorted_prob[:, k - 1]
     mask = (normalized_prob >= pivot.unsqueeze(-1)).int()
 
-    num_trails = 1000
-    for _ in range(num_trails):
+    num_trials = 1000
+    for _ in range(num_trials):
         samples = torch.empty(batch_size, dtype=torch.int32, device="cuda:0")
-        top_k_sampling_from_probs(normalized_prob, samples, None, None, k, False, 0, 0)
+        top_k_sampling_from_probs(
+            normalized_prob,
+            samples,
+            None,
+            None,
+            k,
+            False,
+            torch.zeros(batch_size, dtype=torch.uint64, device="cuda:0"),
+            torch.zeros(batch_size, dtype=torch.uint64, device="cuda:0"),
+        )
         assert torch.all(samples < vocab_size) and torch.all(samples >= 0)
         assert torch.all(mask[torch.arange(batch_size), samples] == 1), normalized_prob[
             torch.arange(batch_size), samples
@@ -212,10 +251,19 @@ def test_top_k_sampling_with_variable_k(batch_size, vocab_size, k):
     pivot = sorted_prob[torch.arange(batch_size), k - 1]
     mask = (normalized_prob >= pivot.unsqueeze(-1)).int()
 
-    num_trails = 1000
-    for _ in range(num_trails):
+    num_trials = 1000
+    for _ in range(num_trials):
         samples = torch.empty(batch_size, dtype=torch.int32, device="cuda:0")
-        top_k_sampling_from_probs(normalized_prob, samples, None, k, 0, False, 0, 0)
+        top_k_sampling_from_probs(
+            normalized_prob,
+            samples,
+            None,
+            k,
+            0,
+            False,
+            torch.zeros(batch_size, dtype=torch.uint64, device="cuda:0"),
+            torch.zeros(batch_size, dtype=torch.uint64, device="cuda:0"),
+        )
         assert torch.all(samples < vocab_size) and torch.all(samples >= 0)
         assert torch.all(mask[torch.arange(batch_size), samples] == 1), normalized_prob[
             torch.arange(batch_size), samples
@@ -250,8 +298,8 @@ def test_top_k_top_p_joint_sampling_from_probs(batch_size, vocab_size, p):
     top_p_tensor = torch.full((batch_size,), p, device="cuda:0")
     top_k_tensor = torch.full((batch_size,), k, device="cuda:0", dtype=torch.int32)
 
-    num_trails = 1000
-    for _ in range(num_trails):
+    num_trials = 1000
+    for _ in range(num_trials):
         samples = torch.empty(batch_size, dtype=torch.int32, device="cuda:0")
         top_k_top_p_sampling_from_probs(
             normalized_prob,
@@ -261,9 +309,9 @@ def test_top_k_top_p_joint_sampling_from_probs(batch_size, vocab_size, p):
             0,
             top_p_tensor,
             0,
-            True,
-            0,
-            0,
+            False,
+            torch.zeros(batch_size, dtype=torch.uint64, device="cuda:0"),
+            torch.zeros(batch_size, dtype=torch.uint64, device="cuda:0"),
         )
         assert torch.all(samples < vocab_size) and torch.all(samples >= 0)
         assert torch.all(mask[torch.arange(batch_size), samples] == 1), normalized_prob[

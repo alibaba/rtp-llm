@@ -175,8 +175,9 @@ ROCmDevice::~ROCmDevice() {
 
 void ROCmDevice::init() {
     DeviceBase::init();
-    RTP_LLM_LOG_INFO("max batch size: %d", init_params_.max_batch_size);
-    curandstate_buf_ = allocateBuffer({init_params_.max_batch_size * sizeof(curandState_t)}, {"curandstate"});
+    int max_batch_size_deprecated = 128;
+    RTP_LLM_LOG_INFO("max batch size: %d", max_batch_size_deprecated);
+    curandstate_buf_ = allocateBuffer({max_batch_size_deprecated * sizeof(curandState_t)}, {"curandstate"});
 #ifdef ENABLE_DEEP_EP
     if (init_params_.use_deepep_moe) {
         if (!initDeepEPBuffer()) {

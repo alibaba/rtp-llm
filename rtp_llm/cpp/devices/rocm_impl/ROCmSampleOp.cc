@@ -20,15 +20,11 @@ using SamplerT = float;
 // topk should has higher proirity than topp.
 
 GreedyOutput ROCmDevice::sampleGreedy(const GreedyParams& params) {
-    bool enable_flashinfer = init_params_.sampler_config.enable_flashinfer_sample_kernel;
-    const auto& logits     = params.logits;
-    const auto  batch_size = logits.shape()[0];
-    RUNTIME_ASSERT_OP_ARG(batch_size < init_params_.max_batch_size,
-                          "batch_size exceeded device limit %d: %d",
-                          init_params_.max_batch_size,
-                          batch_size);
-    const auto vocab_size_padded = logits.shape()[1];
-    const auto step              = params.step;
+    bool        disable_dprs      = std::getenv("DISABLE_ROCM_DPRS") && std::string(std::getenv("DISABLE_ROCM_DPRS")) == "1";
+    const auto& logits            = params.logits;
+    const auto  batch_size        = logits.shape()[0];
+    const auto  vocab_size_padded = logits.shape()[1];
+    const auto  step              = params.step;
     RUNTIME_ASSERT_OP_ARG(batch_size == params.token_ids.shape()[0],
                           "logits.shape[0] should equal to token_ids.shape[0], but %d vs %d",
                           batch_size,
@@ -44,7 +40,7 @@ GreedyOutput ROCmDevice::sampleGreedy(const GreedyParams& params) {
     auto& top_k       = params.top_k;
     auto& top_p       = params.top_p;
     auto& temperature = params.temperature;
-    auto& random_seed = params.random_seed;
+    // auto& random_seed = params.random_seed;
     ROCM_CHECK_VALUE(top_k.size() == batch_size, "top_k.size() != batch_size");
     ROCM_CHECK_VALUE(top_p.size() == batch_size, "top_p.size() != batch_size");
     ROCM_CHECK_VALUE(temperature.size() == batch_size, "temperature.size() != batch_size");
@@ -133,24 +129,24 @@ GreedyOutput ROCmDevice::sampleGreedy(const GreedyParams& params) {
     // 3. prepare common inputs
 
     // 3.1. setup random seeds
-    if (random_seed) {
-        auto& seeds = random_seed.value().get();
-        if (seeds.size() == 1) {
-            invokeCurandInitialize(
-                (curandState_t*)curandstate_buf_->data(), batch_size, seeds.data<uint64_t>()[0], stream_);
-        } else {
-            auto random_seeds_buf = allocateBuffer({DataType::TYPE_UINT64, {batch_size}});
-            RUNTIME_ASSERT_OP_ARG((seeds.size() == batch_size),
-                                  "random_seed.size() should equal to batch_size, but %d vs %d",
-                                  seeds.size(),
-                                  batch_size);
-            copy({*random_seeds_buf, seeds});
-            invokeCurandBatchInitialize((curandState_t*)curandstate_buf_->data(),
-                                        batch_size,
-                                        (unsigned long long*)random_seeds_buf->data(),
-                                        stream_);
-        }
-    }
+    // if (random_seed) {
+    //     auto& seeds = random_seed.value().get();
+    //     if (seeds.size() == 1) {
+    //         invokeCurandInitialize(
+    //             (curandState_t*)curandstate_buf_->data(), batch_size, seeds.data<uint64_t>()[0], stream_);
+    //     } else {
+    //         auto random_seeds_buf = allocateBuffer({DataType::TYPE_UINT64, {batch_size}});
+    //         RUNTIME_ASSERT_OP_ARG((seeds.size() == batch_size),
+    //                               "random_seed.size() should equal to batch_size, but %d vs %d",
+    //                               seeds.size(),
+    //                               batch_size);
+    //         copy({*random_seeds_buf, seeds});
+    //         invokeCurandBatchInitialize((curandState_t*)curandstate_buf_->data(),
+    //                                     batch_size,
+    //                                     (unsigned long long*)random_seeds_buf->data(),
+    //                                     stream_);
+    //     }
+    // }
 
     // 3.2. compute logits penalty
     if (std::any_of(
@@ -241,17 +237,32 @@ GreedyOutput ROCmDevice::sampleGreedy(const GreedyParams& params) {
         return GreedyOutput{};
     }
 
-    if (enable_flashinfer) {
+    if (!disable_dprs) {
         const auto batch_size = params.logits.shape()[0];
         auto&      top_k      = params.top_k;
         auto&      top_p      = params.top_p;
 
-        auto      logits_ref = params.logits.slice(0, params.logits.shape()[0]);
-        auto      probs   = softmax({logits_ref, std::nullopt, std::nullopt, 1.0f, DataType::TYPE_INVALID, std::nullopt});
-        auto      samples = transposed_tokens->view(transposed_tokens->shape()[0] - 1, 1);
-        torch::TensorOptions options =
-            torch::TensorOptions(dataTypeToTorchType(probs->type())).device(torch::Device(torch::kCUDA));
-        bool deterministic = false;
+        auto logits_ref = params.logits.slice(0, params.logits.shape()[0]);
+        auto probs      = softmax({logits_ref, std::nullopt, std::nullopt, 1.0f, DataType::TYPE_INVALID, std::nullopt});
+        auto samples    = transposed_tokens->view(transposed_tokens->shape()[0] - 1, 1);
+
+        bool                  deterministic = true;
+        std::vector<uint64_t> seed_v;
+        std::vector<uint64_t> offset_v;
+        for (int i = 0; i < batch_size; i++) {
+            if (params.generator[i].defined()) {
+                auto [sd, ofst] = get_seed_and_offset(batch_size * 32, params.generator[i]);
+                seed_v.push_back(sd);
+                offset_v.push_back(ofst);
+            } else {
+                seed_v.push_back(0);
+                offset_v.push_back(0);
+            }
+        }
+        auto seed = torch::from_blob(seed_v.data(), {static_cast<long>(batch_size)}, torch::kUInt64).to(torch::kCUDA);
+        auto offset =
+            torch::from_blob(offset_v.data(), {static_cast<long>(batch_size)}, torch::kUInt64).to(torch::kCUDA);
+
         bool          need_output_all_probs = params.output_all_probs.has_value();
         torch::Tensor probs_t               = Buffer2torchTensor(probs, false);
         torch::Tensor samples_t             = Buffer2torchTensor(samples, false).flatten();
@@ -272,7 +283,15 @@ GreedyOutput ROCmDevice::sampleGreedy(const GreedyParams& params) {
             }
         } else if (std::all_of(
                        top_k.data<uint32_t>(), top_k.data<uint32_t>() + batch_size, [&](auto t) { return t <= 0; })) {
-            top_p_sampling_from_probs(probs_t, samples_t, std::nullopt, top_p_t, 1.0, deterministic, 0, 0, reinterpret_cast<uintptr_t>(stream_));
+            top_p_sampling_from_probs(probs_t,
+                                      samples_t,
+                                      std::nullopt,
+                                      top_p_t,
+                                      1.0,
+                                      deterministic,
+                                      seed,
+                                      offset,
+                                      reinterpret_cast<uintptr_t>(stream_));
             if (need_output_all_probs) {
                 top_p_renorm_probs(probs_t, output_all_probs_t, top_p_t, 1.0, reinterpret_cast<uintptr_t>(stream_));
             }
@@ -283,8 +302,15 @@ GreedyOutput ROCmDevice::sampleGreedy(const GreedyParams& params) {
                            top_k.data<uint32_t>() + batch_size,
                            top_k.data<uint32_t>(),
                            [&](auto t) { return t <= 0 ? 1 << 30 : t; });
-            top_k_sampling_from_probs(
-                probs_t, samples_t, std::nullopt, top_k_t, 0, deterministic, 0, 0, reinterpret_cast<uintptr_t>(stream_));
+            top_k_sampling_from_probs(probs_t,
+                                      samples_t,
+                                      std::nullopt,
+                                      top_k_t,
+                                      0,
+                                      deterministic,
+                                      seed,
+                                      offset,
+                                      reinterpret_cast<uintptr_t>(stream_));
             if (need_output_all_probs) {
                 top_k_renorm_probs(probs_t, output_all_probs_t, top_k_t, 0, reinterpret_cast<uintptr_t>(stream_));
             }
@@ -301,8 +327,8 @@ GreedyOutput ROCmDevice::sampleGreedy(const GreedyParams& params) {
                                             top_p_t,
                                             1.0,
                                             deterministic,
-                                            0,
-                                            0,
+                                            seed,
+                                            offset,
                                             reinterpret_cast<uintptr_t>(stream_));
             if (need_output_all_probs) {
                 torch::Tensor temp_t = torch::zeros_like(output_all_probs_t);
