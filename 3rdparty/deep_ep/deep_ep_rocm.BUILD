@@ -52,7 +52,7 @@ cc_library(
         ":csrc/kernels/configs_hip.cuh",
         ":csrc/kernels/api_hip.cuh",
         ":csrc/kernels/launch_hip.cuh"],
-    deps = [":cpp_libraries"],
+    deps = [":cpp_libraries"] + torch_deps(),
     copts = [],
     linkopts = [],
     strip_include_prefix = "csrc/",
