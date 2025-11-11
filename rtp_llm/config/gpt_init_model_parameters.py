@@ -42,6 +42,7 @@ from rtp_llm.ops import (
     ConcurrencyConfig,
     DeviceResourceConfig,
     EplbMode,
+    FfnDisAggregateConfig,
     FIFOSchedulerConfig,
     FMHAConfig,
     GptInitParameter,
@@ -393,6 +394,7 @@ class GptInitModelParameters:
     kv_cache_config: KVCacheConfig
     misc_config: MiscellaneousConfig
     arpc_config: ArpcConfig
+    ffn_disaggregate_config: FfnDisAggregateConfig
     model_specific_config: ModelSpecificConfig
     moe_config: MoeConfig
     parallelism_distributed_config: ParallelismDistributedConfig
@@ -791,6 +793,16 @@ class GptInitModelParameters:
         # PD Seperation
         self.decode_entrance = get_env_bool("DECODE_ENTRANCE", False)
 
+        # FfnDisAggregateConfig
+        self.gpt_init_params.ffn_disaggregate_config = FfnDisAggregateConfig(
+            enable_ffn_disaggregate=get_env_bool("ENABLE_FFN_DISAGGREGATE", False),
+            attention_tp_size=get_env_int("ATTENTION_TP_SIZE", 1),
+            attention_dp_size=get_env_int("ATTENTION_DP_SIZE", 1),
+            ffn_tp_size=get_env_int("FFN_TP_SIZE", 1),
+            ffn_ep_size=get_env_int("FFN_EP_SIZE", 1),
+            is_ffn_rank=get_env_bool("IS_FFN_RANK", False),
+        )
+
     def update_config_with_sparse_config(self, ckpt_path: str):
         sparse_config_file = None
         sparse_config = None
@@ -981,50 +993,22 @@ class GptInitModelParameters:
         self.update_task_type_use_kvcache()
 
         if StaticConfig.ffn_disaggregate_config.enable_ffn_disaggregate:
-            # 暂时先限制tp=1, 更多支持在python版本实现
+            # TODO moe ADF FFN 支持 sp,tp 并行
+            # TODO dense module ADF ffn 支持 tp,sp 并行
             assert (
-                g_parallel_info.tp_size == 1 and g_parallel_info.world_size > 1
-            ), "enable_ffn_disaggregate must be used in tp = 1 world_size > 1"
-            attention_dp_size = StaticConfig.ffn_disaggregate_config.attention_dp_size
-            attention_tp_size = StaticConfig.ffn_disaggregate_config.attention_tp_size
+                StaticConfig.ffn_disaggregate_config.ffn_tp_size == 1
+            ), "ffn_tp_size must be 1 in current version"
             assert (
-                attention_tp_size == 1
-            ), "attention_tp_size must be 1 in current version"
+                g_parallel_info.world_size
+                == StaticConfig.ffn_disaggregate_config.attention_dp_size
+                * StaticConfig.ffn_disaggregate_config.attention_tp_size
+                + StaticConfig.ffn_disaggregate_config.ffn_ep_size
+            ), f"g_parallel_info.world_size:{g_parallel_info.world_size} != attention_dp_size:{StaticConfig.ffn_disaggregate_config.attention_dp_size} * attention_tp_size:{StaticConfig.ffn_disaggregate_config.attention_tp_size} + ffn_ep_size:{StaticConfig.ffn_disaggregate_config.ffn_ep_size}"
 
-            ffn_tp_size = 1
-            assert (
-                attention_tp_size == ffn_tp_size
-            ), "attention_tp_size must be equal to ffn_tp_size"
-
-            ffn_ep_size = StaticConfig.ffn_disaggregate_config.ffn_ep_size
-            expected_ffn_ep_size = (
-                g_parallel_info.world_size - attention_dp_size * attention_tp_size
-            ) // ffn_tp_size
-            if ffn_ep_size > 1:
-                assert (
-                    ffn_ep_size == expected_ffn_ep_size
-                ), f"ffn_ep_size must be {expected_ffn_ep_size} in current version"
-            else:
-                ffn_ep_size = expected_ffn_ep_size
-
-            self.gpt_init_params.ffn_disaggregate_config.enable_ffn_disaggregate = True
-            self.gpt_init_params.ffn_disaggregate_config.attention_tp_size = (
-                attention_tp_size
-            )
-            self.gpt_init_params.ffn_disaggregate_config.attention_dp_size = (
-                attention_dp_size
-            )
-            self.gpt_init_params.ffn_disaggregate_config.ffn_tp_size = ffn_tp_size
-            self.gpt_init_params.ffn_disaggregate_config.ffn_ep_size = ffn_ep_size
             self.gpt_init_params.ffn_disaggregate_config.is_ffn_rank = (
-                g_parallel_info.world_rank >= attention_tp_size * attention_dp_size
+                g_parallel_info.world_rank
+                >= g_parallel_info.attention_tp_size * g_parallel_info.attention_dp_size
             )
-            # TODO:
-            self.ep_rank = (
-                g_parallel_info.world_rank - attention_tp_size * attention_dp_size
-            )
-            self.ep_rank = max(0, self.ep_rank)
-            self.ep_size = ffn_ep_size
 
         logging.info(f"config_mode = {config_mode}")
         if config_mode == ConfigMode.SimpleMode:

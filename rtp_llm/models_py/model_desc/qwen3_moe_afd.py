@@ -326,7 +326,7 @@ class Qwen3MoeAfdModel(GptModelBase):
         afd_master_addr = "127.0.0.1"
 
         world_size = config.world_size
-        rank = config.dp_rank
+        rank = config.gpt_init_params.parallelism_distributed_config.world_rank
         self.rank = rank
 
         logging.info(

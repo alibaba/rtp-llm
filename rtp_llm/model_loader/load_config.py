@@ -61,6 +61,7 @@ class LoadConfig(BaseModel):
     phy2log: Optional[List[List[int]]] = None
     use_swizzleA: bool = False
     load_method: LoadMethod = LoadMethod.AUTO
+    enable_ffn_disaggregate: bool = False
 
     @field_validator("database", "compute_dtype", "quant_algo", "exported_device")
     @classmethod

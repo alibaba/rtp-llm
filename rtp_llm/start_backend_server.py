@@ -40,6 +40,9 @@ def local_rank_start(global_controller: ConcurrencyController):
         # reload for multiprocessing.start_method == fork
         g_parallel_info.reload()
         g_worker_info.reload()
+        world_rank = os.environ["WORLD_RANK"]
+        print(f"local_rank_start, world_rank: {world_rank}", flush=True)
+        print(g_parallel_info.__str__(), flush=True)
         if g_parallel_info.world_size > 1:
             setproctitle(f"rtp_llm_rank-{g_parallel_info.local_rank}")
         logging.info(f"start local {g_worker_info}, {g_parallel_info}")

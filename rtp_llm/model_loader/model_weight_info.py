@@ -275,8 +275,12 @@ class ModelDeployWeightInfo:
 
         self.kv_cache_data_type = config.kv_cache_data_type
 
+        # for AFD
         self.is_ffn_service = (
             config.gpt_init_params.ffn_disaggregate_config.is_ffn_service()
+        )
+        self.enable_ffn_disaggregate = (
+            config.ffn_disaggregate_config.enable_ffn_disaggregate
         )
 
     @property
@@ -657,6 +661,7 @@ class ModelDeployWeightInfo:
             exported_device=exported_device,
             use_swizzleA=self._use_swizzleA,
             load_method=LoadMethod(StaticConfig.load_config.load_method),
+            enable_ffn_disaggregate=self.enable_ffn_disaggregate,
         )
         return load_config
 

@@ -13,6 +13,7 @@ from rtp_llm.config.py_config_modules import (
     WORKER_INFO_PORT_NUM,
     StaticConfig,
 )
+from rtp_llm.config.py_config_modules import get_env_bool
 
 
 def get_worker_port_num():
@@ -50,6 +51,11 @@ class ParallelInfo(object):
         world_size: int,
         world_rank: int,
         local_world_size: int,
+        enable_ffn_disaggregate: bool,
+        attention_dp_size: int,
+        attention_tp_size: int,
+        ffn_ep_size: int,
+        ffn_tp_size: int,
     ):
         self.tp_size = tp_size
         self.ep_size = ep_size
@@ -60,15 +66,41 @@ class ParallelInfo(object):
         self.world_size = world_size
         self.world_rank = world_rank
         self.local_world_size = local_world_size
+        # AFD related
+        self.enable_ffn_disaggregate = enable_ffn_disaggregate
+        self.attention_dp_size = attention_dp_size
+        self.attention_tp_size = attention_tp_size
+        self.ffn_ep_size = ffn_ep_size
+
+        if self.enable_ffn_disaggregate:
+            # TODO now dense AFD FFN can only support TP, moe AFD FFN can only support EP
+            self.tp_size = self.attention_tp_size
+            self.dp_size = self.attention_dp_size
+            self.ep_size = self.ffn_ep_size
+            self.ffn_tp_size = ffn_tp_size
+
         logging.info(
-            f"ParallelInfo:[ tp_size={self.tp_size} ep_size={self.ep_size} pp_size={self.pp_size} world_size={self.world_size} world_rank={self.world_rank} local_world_size={self.local_world_size} ffn_sp_size={self.ffn_sp_size} ffn_tp_size={self.ffn_tp_size}]"
+            f"ParallelInfo:[ tp_size={self.tp_size} ep_size={self.ep_size} pp_size={self.pp_size} world_size={self.world_size} "
+            f"world_rank={self.world_rank} local_world_size={self.local_world_size} ffn_sp_size={self.ffn_sp_size} ffn_tp_size={self.ffn_tp_size} "
+            f"enable_ffn_disaggregate={self.enable_ffn_disaggregate} attention_dp_size={self.attention_dp_size} attention_tp_size={self.attention_tp_size} ffn_ep_size={self.ffn_ep_size} ]"
         )
-        assert (
-            ep_size <= world_size and world_size % ep_size == 0
-        ), f"ep_size:{self.ep_size} <= world_size:{self.world_size} and world_size:{self.world_size} % ep_size:{self.ep_size} != 0"
-        assert (
-            self.world_size == self.tp_size * self.dp_size * self.pp_size
-        ), f"world_size:{self.world_size} != tp_size:{self.tp_size} * dp_size:{self.dp_size} * pp_size:{self.pp_size}"
+
+        if self.enable_ffn_disaggregate:
+            assert (
+                self.world_size
+                == self.attention_dp_size * self.attention_tp_size + self.ffn_ep_size * self.ffn_tp_size
+            ), f"world_size:{self.world_size} != attention_dp_size:{self.attention_dp_size} * attention_tp_size:{self.attention_tp_size} + ffn_ep_size:{self.ffn_ep_size} * ffn_tp_size:{self.ffn_tp_size}"
+        else:
+            assert (
+                ep_size <= world_size and world_size % ep_size == 0
+            ), f"ep_size:{self.ep_size} <= world_size:{self.world_size} and world_size:{self.world_size} % ep_size:{self.ep_size} != 0"
+            assert (
+                self.world_size == self.tp_size * self.dp_size * self.pp_size
+            ), f"world_size:{self.world_size} != tp_size:{self.tp_size} * dp_size:{self.dp_size} * pp_size:{self.pp_size}"
+            assert (
+                self.tp_size % self.ffn_sp_size == 0
+            ), f"tp_size:{self.tp_size} % ffn_sp_size:{self.ffn_sp_size} != 0"
+
         if torch.cuda.is_available():
             self.device = "cuda:" + str(self.world_rank % self.local_world_size)
         else:
@@ -76,16 +108,38 @@ class ParallelInfo(object):
 
     @property
     def tp_rank(self) -> int:
-        return self.world_rank % self.tp_size
+        if self.enable_ffn_disaggregate:
+            num_attention_ranks = self.attention_tp_size * self.attention_dp_size
+            return (
+                self.world_rank % self.tp_size
+                if self.world_rank < num_attention_ranks
+                else 0
+            )
+        else:
+            return self.world_rank % self.tp_size
 
     @property
     def dp_rank(self) -> int:
-        return self.world_rank // self.tp_size
+        if self.enable_ffn_disaggregate:
+            num_attention_ranks = self.attention_tp_size * self.attention_dp_size
+            return (
+                self.world_rank // self.tp_size
+                if self.world_rank < num_attention_ranks
+                else 0
+            )
+        else:
+            return self.world_rank // self.tp_size
 
     # ep_rank只在MOE plugin生效
     @property
     def ep_rank(self) -> int:
-        return self.world_rank % self.ep_size
+        if self.enable_ffn_disaggregate:
+            rank_offset = (
+                self.world_rank - self.attention_tp_size * self.attention_dp_size
+            )
+            return max(0, rank_offset) % self.ffn_ep_size
+        else:
+            return self.world_rank % self.ep_size
 
     @property
     def ffn_tp_rank(self) -> int:
@@ -122,6 +176,11 @@ class ParallelInfo(object):
             world_size=world_size,
             world_rank=int(params.get("WORLD_RANK", "0")),
             local_world_size=local_world_size,
+            enable_ffn_disaggregate=get_env_bool("ENABLE_FFN_DISAGGREGATE"),
+            attention_dp_size=int(params.get("ATTENTION_DP_SIZE", "1")),
+            attention_tp_size=int(params.get("ATTENTION_TP_SIZE", "0")),
+            ffn_ep_size=int(params.get("FFN_EP_SIZE", "1")),
+            ffn_tp_size=int(params.get("FFN_TP_SIZE", "1")),
         )
         if ("WORLD_INDEX" in params) and ("WORLD_RANK" not in params):
             world_index = int(params["WORLD_INDEX"])
@@ -133,13 +192,9 @@ class ParallelInfo(object):
             raise Exception(
                 f"local_world_size:{info.local_world_size} > cuda device count:{torch.cuda.device_count()}"
             )
-        if (
-            info.tp_size * info.pp_size * info.dp_size != info.world_size
-            or info.world_rank >= info.world_size
-            or (info.tp_size % info.ffn_sp_size != 0)
-        ):
+        if info.world_rank >= info.world_size:
             raise Exception(
-                f"tp_size:{info.tp_size}, ep_size:{info.ep_size}, pp_size:{info.pp_size}, world_size:{info.world_size}, world_rank:{info.world_rank} ffn_sp_size: {info.ffn_sp_size} invalid world config"
+                f"world_rank:{info.world_rank} >= world_size:{info.world_size} invalid world config"
             )
         # 假设 GPU 均匀分布，可以整除
         if info.world_size % info.local_world_size != 0:

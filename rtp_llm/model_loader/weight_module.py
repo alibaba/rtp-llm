@@ -426,6 +426,7 @@ class AtomicWeight(WeightModule):
             size_per_head=load_config.size_per_head,
             use_stack_weight=load_config.use_stack_weight,
             bits=load_config.bit,
+            enable_ffn_disaggregate=load_config.enable_ffn_disaggregate,
         )
 
     def _load_lora_a(
