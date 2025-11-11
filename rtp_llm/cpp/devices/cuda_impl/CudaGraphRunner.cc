@@ -167,13 +167,13 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
                 seq_size_per_block_);
         } else if (graph_instances_[current_real_graph_bs_].mem_hold_.py_attn_params) {
             RTP_LLM_LOG_INFO("filling py attn params");
-            // auto& py_attn_params = graph_instances_[current_real_graph_bs_].mem_hold_.py_attn_params;
-            // try {
-            //     py_attn_params.attr("batch_size").cast<int>() = current_batch_size_;
-            //     py_attn_params.attr("max_seq_len").cast<int>()  = max_seq_len_;
-            //     RTP_LLM_LOG_INFO("tag 5.1");
-            //     auto& param_seq_lens = py_attn_params.attr("seq_lens").cast<torch::Tensor>();
-            // }
+            auto& py_attn_params = graph_instances_[current_real_graph_bs_].mem_hold_.py_attn_params;
+            try {
+                py_attn_params.attr("batch_size").cast<int>()  = current_batch_size_;
+                py_attn_params.attr("max_seq_len").cast<int>() = max_seq_len_;
+                RTP_LLM_LOG_INFO("tag 5.1");
+                auto& param_seq_lens = py_attn_params.attr("seq_lens").cast<torch::Tensor>();
+            }
         }
         RTP_LLM_LOG_INFO("tag 5");
     } else {
