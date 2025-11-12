@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
+#include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 
 namespace rtp_llm {
 namespace speculative {
@@ -30,8 +31,14 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     auto draft_token_probs  = draft_sampler_output.all_probs;
     auto target_token_probs = target_sampler_output.all_probs;
 
-    auto draft_token_ids_d  = device_->clone({*draft_token_ids, AllocationType::DEVICE});
-    auto target_token_ids_d = device_->clone({*target_token_ids, AllocationType::DEVICE});
+    auto      draft_token_ids_d = device_->clone({*draft_token_ids, AllocationType::DEVICE});
+    BufferPtr target_token_ids_d;
+
+    if (target_token_ids->where() == MemoryType::MEMORY_CPU) {
+        target_token_ids_d = device_->clone({*target_token_ids, AllocationType::DEVICE});
+    } else {
+        target_token_ids_d = target_token_ids;
+    }
 
     // note target token probs is already on device
     auto target_token_probs_d = target_token_probs;

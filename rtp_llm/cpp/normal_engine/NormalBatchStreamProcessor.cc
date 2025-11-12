@@ -334,10 +334,11 @@ absl::StatusOr<SamplerInputs> NormalBatchStreamProcessor::gatherSamplerInput(
 SamplerInputs NormalBatchStreamProcessor::allocateSamplerInputs(const StreamGroups&       stream_groups,
                                                                 size_t                    total_batch_size_in,
                                                                 size_t                    total_batch_size_out,
-                                                                const rtp_llm::BufferPtr& sequence_lengths) const {
+                                                                const rtp_llm::BufferPtr& sequence_lengths,
+                                                                size_t                    propose_step) const {
     // TODO(xinfei.sxf) don't sample for chunk stream
     SamplerInputs sampler_inputs;
-    sampler_inputs.step             = stream_groups.maxSeqLen();
+    sampler_inputs.step             = stream_groups.maxSeqLen() + propose_step;
     sampler_inputs.batch_size       = total_batch_size_in;
     sampler_inputs.batch_size_out   = total_batch_size_out;
     sampler_inputs.sequence_lengths = CACHED_HOST_BUF(TYPE_INT32, {total_batch_size_in});
@@ -368,7 +369,8 @@ SamplerInputs NormalBatchStreamProcessor::allocateSamplerInputs(const StreamGrou
 
 void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs&                sampler_inputs,
                                                         std::list<GenerateStreamPtr>& all_streams,
-                                                        bool                          score_batch) const {
+                                                        bool                          score_batch,
+                                                        size_t                        propose_step) const {
     int*      input_lengths        = sampler_inputs.input_lengths->data<int32_t>();
     int*      sequence_lengths     = sampler_inputs.sequence_lengths->data<int32_t>();
     uint64_t* num_beams_in         = sampler_inputs.num_beams_in->data<uint64_t>();
@@ -403,7 +405,7 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs&          
         }
         for (int i = 0; i < sampler_batch_size; ++i) {
             input_lengths[batch_idx]      = stream->inputLength();
-            sequence_lengths[batch_idx]   = stream->seqLength();
+            sequence_lengths[batch_idx]   = stream->seqLength() + propose_step;
             num_beams_in[batch_idx]       = stream->currentNumBeams();
             num_beams_out[batch_idx]      = stream->nextNumBeams();
             top_k[batch_idx]              = stream->generateConfig()->top_k;

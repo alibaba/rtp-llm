@@ -25,22 +25,34 @@ public:
                                                          const GptModelInputs&  model_inputs,
                                                          const GptModelOutputs& model_output) const;
 
+    void prepareDecodeDraftModelInput(const StreamGroups& stream_groups, GptModelInputs& model_input);
+
     void prepareOneStepSpecDecodeModelInput(const StreamGroups& stream_groups, GptModelInputs& model_input);
 
-    void updatePrefillPostDraftModelInput(GptModelInputs&  model_input,
-                                          GptModelOutputs& model_output,
-                                          SamplerOutput&   sampler_output);
+    void updateDecodeDraftModelInput(GptModelInputs&        model_input,
+                                     const GptModelOutputs& model_output,
+                                     const torch::Tensor&   draft_token_ids);
 
-    void updateDecodePostDraftModelInput(GptModelInputs&                        model_input,
-                                         GptModelOutputs&                       model_output,
-                                         speculative::SpeculativeSamplerOutput& speculative_sampler_output,
-                                         size_t                                 batch_size,
-                                         torch::Tensor&                         hidden_states_d_t,
-                                         size_t&                                total_accept_len);
+    void updatePrefillPostDraftModelInput(GptModelInputs&        model_input,
+                                          const GptModelOutputs& model_output,
+                                          const SamplerOutput&   sampler_output);
+
+    void updateDecodePostDraftModelInput(GptModelInputs&                              model_input,
+                                         const GptModelOutputs&                       model_output,
+                                         const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
+                                         const size_t                                 batch_size,
+                                         torch::Tensor&                               hidden_states_d_t,
+                                         size_t&                                      total_accept_len);
 
     void updateOneStepDraftSamplerOutput(const StreamGroups& stream_groups,
                                          SamplerOutput&      draft_sampler_output,
                                          torch::Tensor&      draft_token_probs_d_t);
+
+    void updateMultiStepDraftSamplerOutput(const StreamGroups&         stream_groups,
+                                           SamplerOutput&              draft_sampler_output,
+                                           torch::Tensor&              draft_token_ids_d_t,
+                                           torch::Tensor&              draft_token_probs_d_t,
+                                           std::vector<torch::Tensor>& draft_token_probs_list);
 
 protected:
     void dispatchProposePrefillSingleStream(GenerateStreamPtr         stream,

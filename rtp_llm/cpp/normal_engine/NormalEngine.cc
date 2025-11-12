@@ -324,15 +324,10 @@ absl::Status NormalEngine::step() {
     list<GenerateStreamPtr> streams;
     if (device_->getDeviceProperties().tp_rank == 0 && !params_.ffn_disaggregate_config.is_ffn_service()) {
         CHECK_AND_ASSIGN(streams, scheduler_->schedule(reserve_step_));
-        if (streams.empty()) {
-            if (params_.dp_size_ > 1) {
-                CHECK_AND_ASSIGN(streams, scheduler_->schedule(reserve_step_));
-                if (streams.empty()) {
-                    streams.emplace_back(createMinFakeStream(1));
-                }
-            } else {
-                return absl::OkStatus();
-            }
+        if (params_.dp_size_ > 1) {
+            mayAddFakeStream(streams);
+        } else {
+            return absl::OkStatus();
         }
     }
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
@@ -415,6 +410,53 @@ bool NormalEngine::isEagle() {
         return propose_params_->sp_type == "eagle";
     }
     return false;
+}
+
+void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
+    if (isMTPEagle()) {
+        int propose_step = params_.sp_config.gen_num_per_cycle;
+        switch (params_.role_type_) {
+            case RoleType::PREFILL:
+                if (streams.empty()) {
+                    streams.emplace_back(
+                        MtpExecutor::createMinFakePrefillStream(propose_step, params_, resource_context_, device_));
+                }
+                break;
+            case RoleType::DECODE:
+                if (streams.empty()) {
+                    streams.emplace_back(
+                        MtpExecutor::createMinFakeDecodeStream(propose_step, params_, resource_context_, device_));
+                }
+                break;
+            case RoleType::PDFUSION: {
+                bool has_perfill = false;
+                bool has_decode  = false;
+                for (auto& stream : streams) {
+                    if (stream->isContextStream()) {
+                        has_perfill = true;
+                    } else {
+                        has_decode = true;
+                    }
+                }
+                if (!has_perfill) {
+                    streams.emplace_back(
+                        MtpExecutor::createMinFakePrefillStream(propose_step, params_, resource_context_, device_));
+                }
+                if (!has_decode) {
+                    streams.emplace_back(
+                        MtpExecutor::createMinFakeDecodeStream(propose_step, params_, resource_context_, device_));
+                }
+                break;
+            }
+            default:
+                RTP_LLM_CHECK_WITH_INFO(false, "invalid role type");
+                break;
+        }
+    } else {
+        if (streams.empty()) {
+            streams.emplace_back(createMinFakeStream(1));
+        }
+    }
 }
 
 }  // namespace rtp_llm

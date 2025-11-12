@@ -39,10 +39,12 @@ protected:
     SamplerInputs allocateSamplerInputs(const StreamGroups&       stream_groups,
                                         size_t                    total_batch_size_in,
                                         size_t                    total_batch_size_out,
-                                        const rtp_llm::BufferPtr& sequence_length) const;
+                                        const rtp_llm::BufferPtr& sequence_length,
+                                        size_t                    propose_step = 0) const;
     void          setCommonSamplerInputs(SamplerInputs&                sampler_inputs,
                                          std::list<GenerateStreamPtr>& all_streams,
-                                         bool                          score_batch = false) const;
+                                         bool                          score_batch  = false,
+                                         size_t                        propose_step = 0) const;
     void          setLogitsProcessorInputs(SamplerInputs&                sampler_inputs,
                                            std::list<GenerateStreamPtr>& all_streams,
                                            bool                          score_batch = false) const;

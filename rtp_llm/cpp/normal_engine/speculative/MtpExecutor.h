@@ -47,6 +47,16 @@ public:
         batch_stream_processor_ = std::move(processor);
     }
 
+public:
+    static GenerateStreamPtr createMinFakePrefillStream(int                     max_new_tokens,
+                                                        const GptInitParameter& params,
+                                                        const ResourceContext&  resource_context,
+                                                        DeviceBase*             device);
+    static GenerateStreamPtr createMinFakeDecodeStream(int                     max_new_tokens,
+                                                       const GptInitParameter& params,
+                                                       const ResourceContext&  resource_context,
+                                                       DeviceBase*             device);
+
 protected:
     bool isTpRank0() const;
 
@@ -60,6 +70,11 @@ protected:
                           SamplerOutput&   sampler_output,
                           torch::Tensor&   draft_probs,
                           torch::Tensor&   draft_token_ids);
+
+    void draftModelDecode(GptModelInputs&             model_input,
+                          const StreamGroups&         stream_groups,
+                          std::vector<torch::Tensor>& draft_probs_list,
+                          torch::Tensor&              draft_token_ids_t);
 
     std::tuple<torch::Tensor, torch::Tensor> fastTopK(const torch::Tensor& probs, int top_k, int dim);
 

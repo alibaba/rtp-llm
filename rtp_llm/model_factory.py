@@ -270,15 +270,6 @@ class ModelFactory:
                     f"use_new_sp_engine only support mtp and eagle, but got {sp_type}"
                 )
 
-            # only support 1 step propose
-            if gen_num_per_circle != 1:
-                logging.error(
-                    f"use_new_sp_engine only support 1 step propose, but got {gen_num_per_circle}"
-                )
-                raise ValueError(
-                    f"use_new_sp_engine only support 1 step propose, but got {gen_num_per_circle}"
-                )
-
         if (
             sp_type == "vanilla"
             or sp_type == "mtp"

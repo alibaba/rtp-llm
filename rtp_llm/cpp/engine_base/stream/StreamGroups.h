@@ -17,6 +17,9 @@ public:
         for (auto& stream : streams) {
             auto cur_batch_size  = stream->currentBatchSize();
             auto next_batch_size = stream->nextBatchSize();
+            if (!stream->isDummyStream()) {
+                is_fake_stream_ = false;
+            }
             if (stream->isContextStream()) {
                 context_streams_.push_back(stream);
                 total_context_batch_size_ += cur_batch_size;
@@ -147,6 +150,10 @@ public:
         return gen_timeline_;
     }
 
+    bool isFakeStream() const {
+        return is_fake_stream_;
+    }
+
     std::string debugString() const {
         std::stringstream debug_string, context_stream_ids, decode_stream_ids;
         for (auto& stream : context_streams_) {
@@ -166,7 +173,7 @@ public:
                      << ", total_block_update_copy_num: " << total_block_update_copy_num_
                      << ", max_block_size: " << max_block_size_
                      << ", model_execute_token_size: " << model_execute_token_size_ << ", max_seq_len: " << max_seq_len_
-                     << "}";
+                     << ", is_fake_stream: " << is_fake_stream_ << "}";
         return debug_string.str();
     }
 
@@ -188,6 +195,7 @@ private:
     size_t                       total_score_batch_size_       = 0;
     bool                         has_multimodal_input_         = false;
     bool                         gen_timeline_                 = false;
+    bool                         is_fake_stream_               = true;
     std::list<std::string>       adapter_names;
 };
 
