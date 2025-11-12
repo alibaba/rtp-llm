@@ -161,8 +161,14 @@ public:
         swap_ab(swap_ab) {}
 };
 
-DeepGemmConfig
-getBestConfig(int m, int n, int k, int num_groups, int num_sms, DeepGemmType gemm_type, int expected_m = -1) {
+DeepGemmConfig getBestConfig(int          m,
+                             int          n,
+                             int          k,
+                             int          num_groups,
+                             int          num_sms,
+                             DeepGemmType gemm_type,
+                             int          expected_m     = -1,
+                             bool         use_64_padding = false) {
     static std::unordered_map<DeepGemmConfigKey, DeepGemmConfig, DeepGemmConfigKeyHasher> best_configs;
 
     DeepGemmConfigKey key{m, n, k, num_groups, num_sms, gemm_type, expected_m};
@@ -214,6 +220,10 @@ getBestConfig(int m, int n, int k, int num_groups, int num_sms, DeepGemmType gem
             block_m = 64;
         } else {
             block_m = 128;
+        }
+
+        if (gemm_type == DeepGemmType::GroupedContiguous && use_64_padding) {
+            block_m = 64;
         }
 
         // For some reason, m64n8k32 is not used in deep gemm.

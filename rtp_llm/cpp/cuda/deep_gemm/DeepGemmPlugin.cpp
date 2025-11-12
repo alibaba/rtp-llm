@@ -164,6 +164,7 @@ void DeepGemmPlugin::groupedGemmFp8Contiguous(const Buffer& lhs,
                                               Buffer&       output,
                                               const Buffer& m_indices,
                                               int           user_deep_gemm_num_sm,
+                                              bool          use_64_padding,
                                               cudaStream_t  stream) {
 #ifdef ENABLE_FP8
     // lhs.fp8 e4m3, [m_sum, k]; scales -> fp32, [m_sum, k / 128]
@@ -180,7 +181,7 @@ void DeepGemmPlugin::groupedGemmFp8Contiguous(const Buffer& lhs,
     auto lhs_scales = getColMajorTmaAlignedTensor(reinterpret_cast<const QBuffer&>(lhs).scales());
     int  num_sms    = getNumSms(user_deep_gemm_num_sm);
 
-    auto best_config = getBestConfig(m, n, k, 1, num_sms, DeepGemmType::GroupedContiguous);
+    auto best_config = getBestConfig(m, n, k, 1, num_sms, DeepGemmType::GroupedContiguous, -1, use_64_padding);
 
     runDeepGemm(output.data<__nv_bfloat16>(),
                 reinterpret_cast<const QBuffer&>(lhs).kernel().data<__nv_fp8_e4m3>(),

@@ -105,7 +105,7 @@ public:
         BufferPtr output = device_->allocateBuffer(
             {DataType::TYPE_BF16, {(unsigned long)m * num_groups, (unsigned long)n}, AllocationType::DEVICE});
 
-        DeepGemmPlugin::groupedGemmFp8Contiguous(*lhs, *rhs, *output, *(torchTensor2Buffer(m_indices)), -1, 0);
+        DeepGemmPlugin::groupedGemmFp8Contiguous(*lhs, *rhs, *output, *(torchTensor2Buffer(m_indices)), -1, 0, 0);
         auto gemm_output = torch::from_blob(output->data(),
                                             {(int64_t)m * num_groups, (int64_t)n},
                                             torch::TensorOptions().dtype(torch::kBFloat16).device(torch::kCUDA));
