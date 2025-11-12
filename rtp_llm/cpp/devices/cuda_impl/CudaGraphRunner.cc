@@ -268,7 +268,7 @@ PyModelOutputs CudaGraphRunner::forward(PyModelInputs& inputs) {
     PyModelOutputs outputs;
     // decode or embedding model only
     if (canRun(inputs)) {
-        RTP_LLM_LOG_INFO("Replay Start");
+        // RTP_LLM_LOG_INFO("Replay Start");
         prepareInputs(inputs);
         replay(current_real_graph_bs_);
         if (is_prefill_cuda_graph_mode_) {
