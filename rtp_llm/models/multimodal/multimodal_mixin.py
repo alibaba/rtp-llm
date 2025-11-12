@@ -8,10 +8,11 @@ import torch
 from rtp_llm.config.model_config import VitParameters
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import VitConfig
-from rtp_llm.model_loader.model_weight_info import (
-    ModelWeightInfo,
-)
 from rtp_llm.model_loader.weight_module import MMAtomicWeight
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from rtp_llm.model_loader.model_weight_info import ModelWeightInfo
 from rtp_llm.models.multimodal.multimodal_common import MultiModalEmbeddingInterface
 from rtp_llm.models.multimodal.multimodal_trt_engine import MultiModalTRTEngine
 from rtp_llm.ops.comm.nccl_op import NcclOp
@@ -64,7 +65,7 @@ class BaseMultiModalWeightInfo:
     ):
         self.vit_weights: Optional[BaseVitWeights] = vit_weights
 
-    def _get_vit_info(self, llm_weights: ModelWeightInfo) -> ModelWeightInfo:
+    def _get_vit_info(self, llm_weights: "ModelWeightInfo") -> "ModelWeightInfo":
         if self.vit_weights is not None:
             weight_names = self.vit_weights.weight_names
             ckpt_prefix = self.vit_weights.ckpt_prefix
