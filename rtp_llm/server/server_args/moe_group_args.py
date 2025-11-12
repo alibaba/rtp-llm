@@ -103,13 +103,6 @@ def init_moe_group_args(parser, py_eplb_config):
         help="冗余专家个数",
     )
     moe_group.add_argument(
-        "--hack_ep_single_entry",
-        env_name="HACK_EP_SINGLE_ENTRY",
-        type=int,
-        default=0,
-        help="HACK_EP_SINGLE_ENTRY",
-    )
-    moe_group.add_argument(
         "--balance_method",
         env_name="BALANCE_METHOD",
         type=str,

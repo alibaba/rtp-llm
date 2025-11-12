@@ -7,18 +7,20 @@ from typing import Any, Optional
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
-from rtp_llm.config.engine_config import EngineConfig
-from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.async_decoder_engine.async_model import AsyncModel
+from rtp_llm.config.engine_config import EngineConfig, finalize_scheduler_config
+from rtp_llm.config.model_config import ModelConfig, build_py_model_config
 from rtp_llm.config.model_args import ModelArgs
 from rtp_llm.config.py_config_modules import (
+    GangConfig,
     PyEnvConfigs,
     VitConfig,
     LoraConfig,
     GenerateEnvConfig,
     EmbeddingConfig,
 )
-from rtp_llm.config.model_config import build_py_model_config
-from rtp_llm.model_factory_register import _model_factory
+from rtp_llm.model_factory_register import ModelDict, _model_factory
+from rtp_llm.models.propose_model.propose_model import ProposeModel
 from rtp_llm.ops import MMModelConfig
 from rtp_llm.utils.util import check_with_info
 
@@ -102,8 +104,6 @@ class ModelFactory:
         Returns:
             ProposeModel instance or None if no propose model needed
         """
-        from rtp_llm.models.propose_model.propose_model import ProposeModel
-        
         if not propose_model_config:
             return None
             
@@ -167,6 +167,7 @@ class ModelFactory:
         model_config: ModelConfig,
         mm_model_config: MMModelConfig,
         engine_config: EngineConfig,
+        gang_config: "GangConfig",
         vit_config: Optional[VitConfig] = None,
         merge_lora: bool = False,
         propose_model_config: Optional[ModelConfig] = None,
@@ -181,12 +182,11 @@ class ModelFactory:
             model_config: Model configuration
             mm_model_config: Multimodal model configuration
             engine_config: Engine configuration
+            gang_config: GangConfig for distributed communication
             vit_config: Optional VitConfig (needed for multimodal models)
             merge_lora: Whether to merge LoRA weights
             propose_model_config: Optional propose model configuration
         """
-        from rtp_llm.async_decoder_engine.async_model import AsyncModel
-
         model = ModelFactory._create_model(
             model_config=model_config,
             mm_model_config=mm_model_config,
@@ -205,7 +205,7 @@ class ModelFactory:
             engine_config=engine_config,
         )
 
-        model = AsyncModel(model, propose_model)
+        model = AsyncModel(model, gang_config, propose_model)
         logging.info("create rpc model done")
         return model
 
@@ -267,7 +267,6 @@ class ModelFactory:
         # Step 1.5: Infer model_type from checkpoint if not provided
         if not model_args.model_type and model_args.ckpt_path:
             try:
-                from rtp_llm.model_factory_register import ModelDict
                 config_json = ModelFactory.get_config_json(model_args.ckpt_path)
                 inferred_model_type = ModelDict.get_ft_model_type_by_config(config_json)
                 if inferred_model_type:
@@ -317,12 +316,10 @@ class ModelFactory:
         # Set model_name (default to model class name)
         model_config.model_name = model_cls.__name__
         
-        # Update EngineConfig based on ModelConfig (only once, for main model)
-        from rtp_llm.config.engine_config import update_engine_config_from_py_model_config
-        update_engine_config_from_py_model_config(
-            engine_config=engine_config,
-            model_config=model_config,
-            max_context_batch_size=engine_config.runtime_config.fifo_scheduler_config.max_context_batch_size,
+        # Finalize scheduler config based on ModelConfig (only once, for main model)
+        finalize_scheduler_config(
+            fifo_scheduler_config=engine_config.runtime_config.fifo_scheduler_config,
+            max_seq_len=model_config.max_seq_len,
         )
         
         # Set model_name to engine_config.runtime_config.model_name (for backward compatibility)
@@ -356,7 +353,7 @@ class ModelFactory:
                     f"ckpt_path: {propose_model_config.ckpt_path}, quantization: {propose_model_config.quantization}"
                 )
                 
-                # Build propose model config (no update_engine_config_from_py_model_config for propose model)
+                # Build propose model config (no finalize_scheduler_config for propose model)
                 build_py_model_config(
                     py_model_config=propose_model_config,
                     model_args=propose_model_args,

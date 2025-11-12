@@ -48,3 +48,11 @@ def init_fifo_scheduler_group_args(parser, fifo_scheduler_config):
         default=False,
         help="若为 True，则允许默认调度器在系统内存不足以满足活动请求时，从某些请求中回收一部分 KV cache blocks。这可以在高负载下提高系统利用率，但可能会影响那些资源被回收的请求的公平性。注意：在使用默认调度器时有效。",
     )
+    fifo_scheduler_group.add_argument(
+        "--max_batch_tokens_size",
+        env_name="MAX_BATCH_TOKENS_SIZE",
+        bind_to=[(fifo_scheduler_config, 'max_batch_tokens_size')],
+        type=int,
+        default=0,
+        help="最大 batch tokens 大小。",
+    )

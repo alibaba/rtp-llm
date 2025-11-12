@@ -33,7 +33,7 @@ def local_rank_start(global_controller: ConcurrencyController, py_env_configs: P
     app = None
     try:
         # avoid multiprocessing load failed
-        update_worker_info(py_env_configs.server_config.start_port, py_env_configs.worker_config.worker_info_port_num)
+        update_worker_info(py_env_configs.server_config.start_port, py_env_configs.server_config.worker_info_port_num)
         if g_parallel_info.world_size > 1:
             setproctitle(f"rtp_llm_rank-{g_parallel_info.local_rank}")
         logging.info(f"start local {g_worker_info}, {g_parallel_info}")
@@ -177,7 +177,7 @@ def start_backend_server(global_controller: ConcurrencyController, py_env_config
 
     clear_jit_filelock()
 
-    update_worker_info(py_env_configs.server_config.start_port, py_env_configs.worker_config.worker_info_port_num)
+    update_worker_info(py_env_configs.server_config.start_port, py_env_configs.server_config.worker_info_port_num)
 
     # TODO(xinfei.sxf) fix this
     if py_env_configs.vit_config.vit_separation == 1:

@@ -29,7 +29,7 @@ TEST_F(FIFOSchedulerTest, testSimple) {
     model_config.max_seq_len             = 8192;
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size = 100;
-    runtime_config.max_batch_tokens_size   = 8192;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size   = 8192;
     PDSepConfig pd_sep_config;
     ParallelismConfig parallelism_config;
     ModelSpecificConfig model_specific_config;
@@ -68,7 +68,7 @@ TEST_F(FIFOSchedulerTest, testInitKVCacheLackMem) {
     model_config.max_seq_len             = 8192;
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size = 100;
-    runtime_config.max_batch_tokens_size   = 8192;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size   = 8192;
     PDSepConfig pd_sep_config;
     ParallelismConfig parallelism_config;
     ModelSpecificConfig model_specific_config;
@@ -103,7 +103,7 @@ TEST_F(FIFOSchedulerTest, testIncrKVCacheLackMem) {
     model_config.max_seq_len             = 8192;
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size = 100;
-    runtime_config.max_batch_tokens_size   = 8192;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size   = 8192;
     PDSepConfig pd_sep_config;
     ParallelismConfig parallelism_config;
     ModelSpecificConfig model_specific_config;
@@ -148,7 +148,7 @@ TEST_F(FIFOSchedulerTest, testIncrKVCacheFallBackReleaseAllBlocks) {
     model_config.max_seq_len             = 8192;
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size = 100;
-    runtime_config.max_batch_tokens_size   = 8192;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size   = 8192;
     PDSepConfig pd_sep_config;
     ParallelismConfig parallelism_config;
     ModelSpecificConfig model_specific_config;
@@ -219,7 +219,7 @@ TEST_F(FIFOSchedulerTest, testIncrKVCacheFallBackReleasePartBlocks) {
     model_config.max_seq_len             = 8192;
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size = 100;
-    runtime_config.max_batch_tokens_size   = 8192;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size   = 8192;
     PDSepConfig pd_sep_config;
     ParallelismConfig parallelism_config;
     ModelSpecificConfig model_specific_config;
@@ -295,7 +295,7 @@ TEST_F(FIFOSchedulerTest, testReuseCache) {
     model_config.max_seq_len             = 8192;
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size = 100;
-    runtime_config.max_batch_tokens_size   = 8192;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size   = 8192;
     PDSepConfig pd_sep_config;
     ParallelismConfig parallelism_config;
     ModelSpecificConfig model_specific_config;
@@ -347,7 +347,7 @@ TEST_F(FIFOSchedulerTest, testMaxContextBatchSize) {
     model_config.max_seq_len            = 100;
     RuntimeConfig runtime_config;
     runtime_config.fifo_scheduler_config.max_context_batch_size = 1;
-    runtime_config.max_batch_tokens_size  = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size  = 100;
     PDSepConfig pd_sep_config;
     ParallelismConfig parallelism_config;
     ModelSpecificConfig model_specific_config;
@@ -434,7 +434,7 @@ TEST_F(FIFOSchedulerTest, testBatchEnqueue) {
     model_config.max_seq_len             = 8192;
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size = 100;
-    runtime_config.max_batch_tokens_size   = 8192;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size   = 8192;
     PDSepConfig pd_sep_config;
     ParallelismConfig parallelism_config;
     ModelSpecificConfig model_specific_config;

@@ -37,6 +37,7 @@ class ServerConfig:
         self.timeout_keep_alive = 5
         self.frontend_server_id = 0
         self.rank_id = 0
+        self.worker_info_port_num: int = MIN_WORKER_INFO_PORT_NUM
 
     # update_from_args 方法已不再需要
     # 配置绑定现在通过声明式 bind_to 参数在 add_argument 时自动处理
@@ -47,7 +48,8 @@ class ServerConfig:
             f"start_port: {self.start_port}\n"
             f"timeout_keep_alive: {self.timeout_keep_alive}\n"
             f"frontend_server_id: {self.frontend_server_id}\n"
-            f"rank_id: {self.rank_id}"
+            f"rank_id: {self.rank_id}\n"
+            f"worker_info_port_num: {self.worker_info_port_num}"
         )
 
 
@@ -255,13 +257,6 @@ class RoleConfig:
         else:
             return RoleType.PDFUSION
 
-class WorkerConfig:
-    def __init__(self):
-        self.worker_info_port_num: int = MIN_WORKER_INFO_PORT_NUM
-
-    def to_string(self):
-        return f"worker_info_port_num: {self.worker_info_port_num}"
-
 class JITConfig:
     def __init__(self):
         self.remote_jit_dir: str = ""
@@ -291,7 +286,6 @@ class PyEnvConfigs:
         # warm_up and warm_up_with_loss are in RuntimeConfig
         # max_seq_len is in ModelConfig
         self.embedding_config: EmbeddingConfig = EmbeddingConfig()
-        self.worker_config: WorkerConfig = WorkerConfig()
         self.role_config: RoleConfig = RoleConfig()
         self.pd_separation_config: PDSepConfig = PDSepConfig()
         self.parallelism_config: ParallelismConfig = (
@@ -336,7 +330,6 @@ class PyEnvConfigs:
             + "\n\n"
             "[sparse_config]\n" + self.sparse_config.to_string() + "\n\n"
             "[embedding_config]\n" + self.embedding_config.to_string() + "\n\n"
-            "[worker_config]\n" + self.worker_config.to_string() + "\n\n"
             "[role_config]\n" + self.role_config.to_string() + "\n\n"
             "[pd_separation_config]\n" + self.pd_separation_config.to_string() + "\n\n"
             "[parallelism_distributed_config]\n"

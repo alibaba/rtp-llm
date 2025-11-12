@@ -10,8 +10,6 @@ import torch
 from rtp_llm.async_decoder_engine.async_model import AsyncModel
 from rtp_llm.model_factory import ModelConfig, ModelFactory
 from rtp_llm.pipeline.pipeline import Pipeline
-from rtp_llm.utils.ft_plugin import plguin_loader
-
 
 class ModelTestBase(TestCase):
     """
@@ -36,11 +34,6 @@ class ModelTestBase(TestCase):
         self.quantization = quantization
         self.test_loss = test_loss
         self.fake_name = fake_name
-
-        os.environ["FT_PLUGIN_PATH"] = os.path.join(
-            os.getcwd(), "rtp_llm/plugins/ret_hidden_states.py"
-        )
-        plguin_loader.reload()
 
         logging.info(f"model_type: {self.model_type}")
         logging.info(f"tokenizer path: {self.tokenizer_path}")

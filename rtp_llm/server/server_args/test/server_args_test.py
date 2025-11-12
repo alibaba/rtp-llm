@@ -239,7 +239,6 @@ class ServerArgsDefaultTest(TestCase):
         self.assertEqual(env.get("USE_FLOAT32"), "0")
         self.assertIsNone(env.get("ORIGINAL_CHECKPOINT_PATH"))
         self.assertEqual(env.get("MLA_OPS_TYPE"), "AUTO")
-        self.assertIsNone(env.get("FT_PLUGIN_PATH"))
         self.assertIsNone(env.get("WEIGHT_TYPE"))
         self.assertIsNone(env.get("TASK_TYPE"))
         self.assertIsNone(env.get("MODEL_TYPE"))
@@ -471,8 +470,6 @@ class ServerArgsSetTest(TestCase):
             "9999",
             "--redundant_expert",
             "2",
-            "--hack_ep_single_entry",
-            "1",
             "--balance_method",
             "greedy",
             "--eplb_force_repack",
@@ -922,7 +919,6 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(env["USE_FLOAT32"], "1")
         self.assertEqual(env["ORIGINAL_CHECKPOINT_PATH"], "/path/to/original/ckpt")
         self.assertEqual(env["MLA_OPS_TYPE"], "CUSTOM")
-        self.assertEqual(env["FT_PLUGIN_PATH"], "/path/to/plugin")
         self.assertEqual(env["WEIGHT_TYPE"], "FP16")
         self.assertEqual(env["TASK_TYPE"], "generation")
         self.assertEqual(env["MODEL_TYPE"], "qwen")

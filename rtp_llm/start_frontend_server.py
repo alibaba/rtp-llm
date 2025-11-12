@@ -26,7 +26,7 @@ def start_frontend_server(rank_id: int, server_id: int, global_controller: Concu
     g_frontend_server_info = FrontendServerInfo(
         py_env_configs.server_config.frontend_server_id
     )
-    update_worker_info(py_env_configs.server_config.start_port, py_env_configs.worker_config.worker_info_port_num)
+    update_worker_info(py_env_configs.server_config.start_port, py_env_configs.server_config.worker_info_port_num)
     try:
         logging.info(f"g_frontend_server_info = {g_frontend_server_info}")
         set_global_controller(global_controller)

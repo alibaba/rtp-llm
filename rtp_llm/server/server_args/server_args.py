@@ -56,7 +56,6 @@ from rtp_llm.server.server_args.speculative_decoding_group_args import (
 )
 from rtp_llm.server.server_args.threefs_group_args import init_threefs_group_args
 from rtp_llm.server.server_args.vit_group_args import init_vit_group_args
-from rtp_llm.server.server_args.worker_group_args import init_worker_group_args
 
 _T = TypeVar("_T")
 
@@ -441,7 +440,6 @@ def init_all_group_args(parser: EnvArgumentParser, py_env_configs: PyEnvConfigs)
     init_server_group_args(parser, py_env_configs.server_config)
     init_speculative_decoding_group_args(parser)
     init_vit_group_args(parser, py_env_configs.vit_config)
-    init_worker_group_args(parser, py_env_configs.worker_config)
     init_jit_group_args(parser, py_env_configs.jit_config)
     init_pd_separation_group_args(parser)
 

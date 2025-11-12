@@ -200,7 +200,7 @@ def monitor_and_release_process(backend_process, frontend_process):
 def main():
     py_env_configs: PyEnvConfigs = setup_args()
     fetch_model_files_to_local(py_env_configs)
-    update_worker_info(py_env_configs.server_config.start_port, py_env_configs.worker_config.worker_info_port_num)
+    update_worker_info(py_env_configs.server_config.start_port, py_env_configs.server_config.worker_info_port_num)
 
     start_server(py_env_configs)
 

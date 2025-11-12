@@ -33,6 +33,7 @@ from rtp_llm.utils.multimodal_util import (
     MMDataCache,
     MMUrlType,
     get_bytes_io_from_url,
+    vit_emb_cache_,
 )
 
 
@@ -64,14 +65,12 @@ class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
         return self.vpm.device
 
     @torch.inference_mode()
-    def mm_embedding(self, url: str, mm_type: MMUrlType, vit_emb_cache: MMDataCache = None, **kwargs):
+    def mm_embedding(self, url: str, mm_type: MMUrlType, **kwargs):
         dtype = self._data_type
         if g_parallel_info.tp_rank > 0:
             return torch.Tensor([])
-        # Create cache if not provided
-        if vit_emb_cache is None:
-            vit_emb_cache = MMDataCache(10)
-        cached_res = vit_emb_cache.check_cache(url)
+        # Use global vit_emb_cache_ instead of parameter
+        cached_res = vit_emb_cache_.check_cache(url)
         if cached_res is None:
             cached_url_res = get_bytes_io_from_url(url)
             cached_url_res = self._mm_preprocess(cached_url_res, mm_type)
@@ -79,7 +78,7 @@ class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
                 features = self.mm_process(cached_url_res, mm_type=mm_type, **kwargs)
             if isinstance(features, list):
                 features = torch.stack(features).to(dtype).contiguous()
-            vit_emb_cache.insert_cache(url, features)
+            vit_emb_cache_.insert_cache(url, features)
             return (features, None)
         else:
             return (cached_res, None)

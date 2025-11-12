@@ -63,14 +63,6 @@ def init_model_group_args(parser, model_args):
         help="Multi Latent Attention的操作类型（将自动转换为枚举）",
     )
     model_group.add_argument(
-        "--ft_plugin_path",
-        env_name="FT_PLUGIN_PATH",
-        bind_to=(model_args, 'ft_plugin_path'),
-        type=str,
-        default=None,
-        help="插件路径",
-    )
-    model_group.add_argument(
         "--task_type",
         env_name="TASK_TYPE",
         bind_to=(model_args, 'task_type'),

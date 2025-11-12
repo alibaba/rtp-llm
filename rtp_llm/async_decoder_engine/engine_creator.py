@@ -7,6 +7,7 @@ import torch
 from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 from rtp_llm.async_decoder_engine.embedding.embedding_engine import EmbeddingCppEngine
 from rtp_llm.async_decoder_engine.rpc_engine import RPCEngine
+from rtp_llm.config.py_config_modules import GangConfig
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.propose_model.propose_model import ProposeModel
 
@@ -25,6 +26,7 @@ def check_exeutor_type(model: BaseModel):
 def create_engine(
     model: BaseModel, 
     config: object,
+    gang_config: GangConfig,
     propose_model: Optional[ProposeModel] = None
 ) -> BaseEngine:
     """
@@ -33,6 +35,7 @@ def create_engine(
     Args:
         model: The BaseModel instance
         config: Configuration object containing profiling_debug_logging_config and other configs
+        gang_config: GangConfig for distributed communication
         propose_model: Optional propose model for speculative decoding
     
     Returns:
@@ -43,7 +46,7 @@ def create_engine(
     executor_type = check_exeutor_type(model)
     logging.info(f"executor_type: {executor_type}")
     if executor_type == ExecutorType.Normal:
-        return RPCEngine(model, propose_model)
+        return RPCEngine(model, gang_config, propose_model)
     elif executor_type == ExecutorType.Embedding:
         return EmbeddingCppEngine(model)
     else:

@@ -740,17 +740,18 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("max_context_batch_size", &FIFOSchedulerConfig::max_context_batch_size)
         .def_readwrite("scheduler_reserve_resource_ratio", &FIFOSchedulerConfig::scheduler_reserve_resource_ratio)
         .def_readwrite("fast_gen_max_context_len", &FIFOSchedulerConfig::fast_gen_max_context_len)
+        .def_readwrite("max_batch_tokens_size", &FIFOSchedulerConfig::max_batch_tokens_size)
         .def("to_string", &FIFOSchedulerConfig::to_string)
         .def(py::pickle(
             [](const FIFOSchedulerConfig& self) {
                 return py::make_tuple(
                     self.enable_fast_gen, self.enable_partial_fallback, self.fast_gen_context_budget,
                     self.max_context_batch_size, self.scheduler_reserve_resource_ratio,
-                    self.fast_gen_max_context_len
+                    self.fast_gen_max_context_len, self.max_batch_tokens_size
                 );
             },
             [](py::tuple t) {
-                if (t.size() != 6) throw std::runtime_error("Invalid state!");
+                if (t.size() != 7) throw std::runtime_error("Invalid state!");
                 FIFOSchedulerConfig c;
                 try {
                     c.enable_fast_gen = t[0].cast<bool>();
@@ -759,6 +760,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.max_context_batch_size = t[3].cast<int64_t>();
                     c.scheduler_reserve_resource_ratio = t[4].cast<int64_t>();
                     c.fast_gen_max_context_len = t[5].cast<int64_t>();
+                    c.max_batch_tokens_size = t[6].cast<int64_t>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("FIFOSchedulerConfig unpickle error: ") + e.what());
                 }
@@ -773,17 +775,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("max_generate_batch_size", &RuntimeConfig::max_generate_batch_size)
         .def_readwrite("pre_allocate_op_mem", &RuntimeConfig::pre_allocate_op_mem)
         .def_readwrite("max_block_size_per_item", &RuntimeConfig::max_block_size_per_item)
-        .def_readwrite("max_batch_tokens_size", &RuntimeConfig::max_batch_tokens_size)
         .def_readwrite("reserve_runtime_mem_mb", &RuntimeConfig::reserve_runtime_mem_mb)
         .def_readwrite("warm_up", &RuntimeConfig::warm_up)
         .def_readwrite("warm_up_with_loss", &RuntimeConfig::warm_up_with_loss)
         .def_readwrite("use_batch_decode_scheduler", &RuntimeConfig::use_batch_decode_scheduler)
         .def_readwrite("use_gather_batch_scheduler", &RuntimeConfig::use_gather_batch_scheduler)
-        .def_readwrite("vit_separation", &RuntimeConfig::vit_separation)
-        .def_readwrite("enable_speculative_decoding", &RuntimeConfig::enable_speculative_decoding)
         .def_readwrite("model_name", &RuntimeConfig::model_name)
-        .def_readwrite("vit_run_batch", &RuntimeConfig::vit_run_batch)
-        .def_readwrite("worker_addrs", &RuntimeConfig::worker_addrs)
         .def_readwrite("worker_grpc_addrs", &RuntimeConfig::worker_grpc_addrs)
         // Fields merged from PyDeviceResourceConfig
         .def_readwrite("specify_gpu_arch", &RuntimeConfig::specify_gpu_arch)
@@ -800,38 +797,31 @@ PYBIND11_MODULE(libth_transformer_config, m) {
             [](const RuntimeConfig& self) {
                 return py::make_tuple(
                     self.max_generate_batch_size, self.pre_allocate_op_mem,
-                    self.max_block_size_per_item, self.max_batch_tokens_size,
-                    self.reserve_runtime_mem_mb,
+                    self.max_block_size_per_item, self.reserve_runtime_mem_mb,
                     self.warm_up, self.warm_up_with_loss, self.use_batch_decode_scheduler,
                     self.use_gather_batch_scheduler, self.batch_decode_scheduler_config,
-                    self.fifo_scheduler_config, self.vit_separation, self.enable_speculative_decoding,
-                    self.model_name, self.vit_run_batch, self.worker_addrs, self.worker_grpc_addrs,
+                    self.fifo_scheduler_config, self.model_name, self.worker_grpc_addrs,
                     self.specify_gpu_arch, self.acext_gemm_config_dir
                 );
             },
             [](py::tuple t) {
-                if (t.size() != 19) throw std::runtime_error("Invalid state!");
+                if (t.size() != 14) throw std::runtime_error("Invalid state!");
                 RuntimeConfig c;
                 try {
                     c.max_generate_batch_size = t[0].cast<int64_t>();
                     c.pre_allocate_op_mem = t[1].cast<bool>();
                     c.max_block_size_per_item = t[2].cast<int64_t>();
-                    c.max_batch_tokens_size = t[3].cast<int64_t>();
-                    c.reserve_runtime_mem_mb = t[4].cast<int64_t>();
-                    c.warm_up = t[5].cast<bool>();
-                    c.warm_up_with_loss = t[6].cast<bool>();
-                    c.use_batch_decode_scheduler = t[7].cast<bool>();
-                    c.use_gather_batch_scheduler = t[8].cast<bool>();
-                    c.batch_decode_scheduler_config = t[9].cast<BatchDecodeSchedulerConfig>();
-                    c.fifo_scheduler_config = t[10].cast<FIFOSchedulerConfig>();
-                    c.vit_separation = t[11].cast<int64_t>();
-                    c.enable_speculative_decoding = t[12].cast<bool>();
-                    c.model_name = t[13].cast<std::string>();
-                    c.vit_run_batch = t[14].cast<int64_t>();
-                    c.worker_addrs = t[15].cast<std::vector<std::string>>();
-                    c.worker_grpc_addrs = t[16].cast<std::vector<std::string>>();
-                    c.specify_gpu_arch = t[17].cast<std::string>();
-                    c.acext_gemm_config_dir = t[18].cast<std::string>();
+                    c.reserve_runtime_mem_mb = t[3].cast<int64_t>();
+                    c.warm_up = t[4].cast<bool>();
+                    c.warm_up_with_loss = t[5].cast<bool>();
+                    c.use_batch_decode_scheduler = t[6].cast<bool>();
+                    c.use_gather_batch_scheduler = t[7].cast<bool>();
+                    c.batch_decode_scheduler_config = t[8].cast<BatchDecodeSchedulerConfig>();
+                    c.fifo_scheduler_config = t[9].cast<FIFOSchedulerConfig>();
+                    c.model_name = t[10].cast<std::string>();
+                    c.worker_grpc_addrs = t[11].cast<std::vector<std::string>>();
+                    c.specify_gpu_arch = t[12].cast<std::string>();
+                    c.acext_gemm_config_dir = t[13].cast<std::string>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("RuntimeConfig unpickle error: ") + e.what());
                 }
@@ -1075,7 +1065,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("eplb_update_time", &EPLBConfig::eplb_update_time)
         .def_readwrite("eplb_mode", &EPLBConfig::eplb_mode)
         .def_readwrite("redundant_expert", &EPLBConfig::redundant_expert)
-        .def_readwrite("hack_ep_single_entry", &EPLBConfig::hack_ep_single_entry)
         .def_readwrite("balance_method", &EPLBConfig::balance_method)
         .def_readwrite("eplb_force_repack", &EPLBConfig::eplb_force_repack)
         .def_readwrite("eplb_stats_window_size", &EPLBConfig::eplb_stats_window_size)
@@ -1088,25 +1077,24 @@ PYBIND11_MODULE(libth_transformer_config, m) {
             [](const EPLBConfig& self) {
                 return py::make_tuple(
                     self.eplb_update_time, self.eplb_mode, self.redundant_expert,
-                    self.hack_ep_single_entry, self.balance_method, self.eplb_force_repack,
+                    self.balance_method, self.eplb_force_repack,
                     self.eplb_stats_window_size, self.eplb_control_step, self.eplb_test_mode,
                     self.eplb_balance_layer_per_step
                 );
             },
             [](py::tuple t) {
-                if (t.size() != 10) throw std::runtime_error("Invalid state!");
+                if (t.size() != 9) throw std::runtime_error("Invalid state!");
                 EPLBConfig c;
                 try {
                     c.eplb_update_time = t[0].cast<int64_t>();
                     c.eplb_mode = t[1].cast<EplbMode>();
                     c.redundant_expert = t[2].cast<int64_t>();
-                    c.hack_ep_single_entry = t[3].cast<int64_t>();
-                    c.balance_method = t[4].cast<std::string>();
-                    c.eplb_force_repack = t[5].cast<int64_t>();
-                    c.eplb_stats_window_size = t[6].cast<int64_t>();
-                    c.eplb_control_step = t[7].cast<int>();
-                    c.eplb_test_mode = t[8].cast<bool>();
-                    c.eplb_balance_layer_per_step = t[9].cast<int>();
+                    c.balance_method = t[3].cast<std::string>();
+                    c.eplb_force_repack = t[4].cast<int64_t>();
+                    c.eplb_stats_window_size = t[5].cast<int64_t>();
+                    c.eplb_control_step = t[6].cast<int>();
+                    c.eplb_test_mode = t[7].cast<bool>();
+                    c.eplb_balance_layer_per_step = t[8].cast<int>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("EPLBConfig unpickle error: ") + e.what());
                 }

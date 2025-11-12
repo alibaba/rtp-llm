@@ -27,7 +27,7 @@ class EmbeddingCppEngine(BaseEngine):
     @override
     def start(self):
         if self.model.is_multimodal():
-            self.mm_engine = MMProcessEngine(self.model)
+            self.mm_engine = MMProcessEngine(self.model, self.model.vit_config)
         else:
             self.mm_engine = None
         self.cpp_engine.init(self.model, self.mm_engine)

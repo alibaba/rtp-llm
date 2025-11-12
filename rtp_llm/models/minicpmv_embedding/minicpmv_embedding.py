@@ -41,6 +41,7 @@ from rtp_llm.utils.multimodal_util import (
     MMDataCache,
     MMUrlType,
     get_bytes_io_from_url,
+    vit_emb_cache_,
 )
 
 
@@ -108,7 +109,6 @@ class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
         download_headers: str = "",
         url_cache_size: int = 10,
         mm_cache_size: int = 10,
-        vit_emb_cache: MMDataCache = None,
         url_data_cache: MMDataCache = None,
         **kwargs
     ):
@@ -116,13 +116,11 @@ class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
         if self.config.tp_rank > 0:
             return torch.Tensor([])
         
-        # Create cache if not provided
-        if vit_emb_cache is None:
-            vit_emb_cache = MMDataCache(mm_cache_size)
+        # Use global vit_emb_cache_ instead of parameter
         if url_data_cache is None:
             url_data_cache = MMDataCache(url_cache_size)
         
-        cached_res = vit_emb_cache.check_cache(url)
+        cached_res = vit_emb_cache_.check_cache(url)
         if cached_res is None:
             cached_url_res = get_bytes_io_from_url(url, download_headers=download_headers, url_cache_size=url_cache_size, url_data_cache=url_data_cache)
             cached_url_res = self._mm_preprocess(cached_url_res, mm_type)
@@ -130,7 +128,7 @@ class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
                 features = self.mm_process(cached_url_res, mm_type=mm_type, **kwargs)
             if isinstance(features, list):
                 features = torch.stack(features).to(dtype).contiguous()
-            vit_emb_cache.insert_cache(url, features)
+            vit_emb_cache_.insert_cache(url, features)
             return (features, None)
         else:
             return (cached_res, None)

@@ -3,6 +3,7 @@ from typing import AsyncGenerator, Dict, Optional
 from typing_extensions import override
 
 from rtp_llm.async_decoder_engine.base_engine import BaseEngine
+from rtp_llm.config.py_config_modules import GangConfig
 from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient
 from rtp_llm.frontend.token_processor import TokenProcessor
 from rtp_llm.models.base_model import BaseModel
@@ -15,7 +16,7 @@ from rtp_llm.utils.mm_process_engine import MMProcessEngine
 
 class RPCEngine(BaseEngine):
     def __init__(
-        self, model: BaseModel, propose_model: Optional[ProposeModel] = None
+        self, model: BaseModel, gang_config: GangConfig, propose_model: Optional[ProposeModel] = None
     ) -> None:
         self.model = model
         self.propose_model = propose_model
@@ -25,7 +26,7 @@ class RPCEngine(BaseEngine):
             self.tokenizer, self.model.config.special_tokens
         )
         if self.model.is_multimodal():
-            self.mm_engine = MMProcessEngine(self.model)
+            self.mm_engine = MMProcessEngine(self.model, self.model.vit_config)
         else:
             self.mm_engine = None
         self.rtp_llm_op_ = RtpLLMOp(
@@ -33,8 +34,7 @@ class RPCEngine(BaseEngine):
         )
         self.model_rpc_client = ModelRpcClient(
             self.model.engine_config.parallelism_config.ffn_disaggregate_config,
-            None,  # gang_config - optional, will use get_gang_info() if None
-            None,  # eplb_config - optional
+            gang_config,
             self.model.engine_config.pd_sep_config.max_rpc_timeout_ms,
             self.model.engine_config.pd_sep_config.decode_entrance,
         )

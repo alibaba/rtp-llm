@@ -20,7 +20,7 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                 runtime_config
     model_specific_config_(model_specific_config),
     cache_manager_(cache_manager),
     max_seq_len_(model_config.max_seq_len),
-    max_batch_tokens_size_(runtime_config.max_batch_tokens_size),
+    max_batch_tokens_size_(runtime_config.fifo_scheduler_config.max_batch_tokens_size),
     max_generate_batch_size_(runtime_config.max_generate_batch_size),
     reserve_block_num_(runtime_config.fifo_scheduler_config.scheduler_reserve_resource_ratio * cache_manager->availableBlockNums() / 100),
     // not support fallback when use pd_speration:use_cache_store

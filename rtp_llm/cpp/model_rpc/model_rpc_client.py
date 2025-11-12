@@ -269,8 +269,7 @@ class ModelRpcClient(object):
     def __init__(
         self,
         ffn_disaggregate_config: FfnDisAggregateConfig,
-        gang_config: Optional[GangConfig] = None,
-        eplb_config: Optional[EPLBConfig] = None,
+        gang_config: GangConfig,
         max_rpc_timeout_ms: int = 0,
         decode_entrance: bool = False,
         address: Optional[str] = None,
@@ -282,30 +281,20 @@ class ModelRpcClient(object):
         self.ffn_disaggregate_config = ffn_disaggregate_config
         self.max_rpc_timeout_ms = max_rpc_timeout_ms
         self.decode_entrance = decode_entrance
-        # for test usage
-        hack_ep_single_entry = (
-            eplb_config.hack_ep_single_entry
-            if eplb_config
-            else False
-        )
-        logging.info(f"hack ep single entry: {hack_ep_single_entry}")
-        if (g_parallel_info.dp_size > 1) and (not hack_ep_single_entry):
+        if g_parallel_info.dp_size > 1:
             members_info_str = (
                 f"[world_rank: {g_parallel_info.world_rank}]"
                 + f"[tp_size: {g_parallel_info.tp_size}] all members: "
                 + "{"
             )
-            if gang_config:
-                members = get_gang_info(
-                    distribute_config_file=gang_config.distribute_config_file,
-                    gang_config_string=gang_config.gang_config_string,
-                    json_gang_parts=gang_config.json_gang_parts,
-                    leader_address=gang_config.leader_address,
-                    gang_annocation_path=gang_config.gang_annocation_path,
-                    zone_name=gang_config.zone_name,
-                ).members
-            else:
-                members = get_gang_info().members
+            members = get_gang_info(
+                distribute_config_file=gang_config.distribute_config_file,
+                gang_config_string=gang_config.gang_config_string,
+                json_gang_parts=gang_config.json_gang_parts,
+                leader_address=gang_config.leader_address,
+                gang_annocation_path=gang_config.gang_annocation_path,
+                zone_name=gang_config.zone_name,
+            ).members
             for member in members:
                 members_info_str += f"{member}\n"
                 if member.local_rank % g_parallel_info.tp_size == 0:

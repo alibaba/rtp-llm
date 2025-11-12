@@ -99,6 +99,7 @@ class BackendServer(object):
                 model_config=py_model_config,
                 mm_model_config=mm_model_config,
                 engine_config=engine_config,
+                gang_config=py_env_configs.gang_config,
                 vit_config=py_env_configs.vit_config,
                 propose_model_config=propose_py_model_config,
             )

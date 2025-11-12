@@ -15,7 +15,6 @@ struct EPLBConfig {
     int64_t          eplb_update_time = 5000;
     EplbMode         eplb_mode        = EplbMode::NONE;
     int64_t          redundant_expert = 0;
-    int64_t          hack_ep_single_entry = 0;
     std::string      balance_method = "mix";
     int64_t          eplb_force_repack = 0;
     int64_t          eplb_stats_window_size = 10;
@@ -56,7 +55,6 @@ struct EPLBConfig {
             << "eplb_update_time: " << eplb_update_time << "\n"
             << "eplb_mode: " << (int)eplb_mode << "\n"
             << "redundant_expert: " << redundant_expert << "\n"
-            << "hack_ep_single_entry: " << hack_ep_single_entry << "\n"
             << "balance_method: " << balance_method << "\n"
             << "eplb_force_repack: " << eplb_force_repack << "\n"
             << "eplb_stats_window_size: " << eplb_stats_window_size << "\n"

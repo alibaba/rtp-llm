@@ -98,7 +98,7 @@ class EngineConfig:
         arpc_config = py_env_configs.arpc_config
         
         # Setup pd_sep_config role_type
-        from rtp_llm.ops import RoleType
+
         if py_env_configs.vit_config.vit_separation == 1:
             pd_sep_config.role_type = RoleType.VIT
         else:
@@ -124,19 +124,13 @@ class EngineConfig:
             arpc_config=arpc_config,
         )
         
-        # Setup RuntimeConfig (from build_engine_config logic)
-        # Note: gen_num_per_cycle is now in SpeculativeExecutionConfig, not RuntimeConfig
-        setup_runtime_config(
-            engine_config.runtime_config,
-            py_env_configs.vit_config,
-            concurrency_config,
-        )
+
+        runtime_config.max_generate_batch_size = concurrency_config.concurrency_limit
         
         # Update worker addresses (needs parallelism_config)
         update_worker_addrs(
             engine_config.runtime_config,
             engine_config.parallelism_config,
-            engine_config.moe_config,
         )
         
         # Setup PD separation config
@@ -193,8 +187,7 @@ def setup_parallelism_config(
     # Setup FfnDisAggregateConfig if it's a member of ParallelismConfig
     # Note: This assumes ParallelismConfig has ffn_disaggregate_config as a member
     # If not, the C++ code needs to be updated first
-    if py_ffn_disaggregate_config and hasattr(parallelism_config, 'ffn_disaggregate_config'):
-        if py_ffn_disaggregate_config.enable_ffn_disaggregate:
+    if py_ffn_disaggregate_config and py_ffn_disaggregate_config.enable_ffn_disaggregate:
             # 暂时先限制tp=1, 更多支持在python版本实现
             assert (
                 parallel_info.tp_size == 1 and parallel_info.world_size > 1
@@ -216,30 +209,11 @@ def setup_parallelism_config(
             )
     
     logging.info(f"th_nccl_port: {parallelism_config.th_nccl_port}")
-
-
-def setup_runtime_config(
-    runtime_config: RuntimeConfig,
-    vit_config: Any,  # VitConfig
-    concurrency_config: ConcurrencyConfig,
-) -> None:
-    """Setup RuntimeConfig from specific config objects.
-    
-    Args:
-        runtime_config: RuntimeConfig instance to setup
-        vit_config: VitConfig for VIT-related settings
-        concurrency_config: ConcurrencyConfig for batch size settings
-    """
-    runtime_config.vit_separation = vit_config.vit_separation
-    runtime_config.vit_run_batch = vit_config.vit_run_batch
-    runtime_config.max_generate_batch_size = concurrency_config.concurrency_limit
     
 
 def update_worker_addrs(
     runtime_config: RuntimeConfig,
-    parallelism_config: ParallelismConfig,
-    moe_config: Any,  # MoeConfig for use_all_gather
-) -> None:
+    parallelism_config: ParallelismConfig) -> None:
     """Update worker addresses in runtime_config based on gang info."""
     import logging
     worker_addrs = []
@@ -249,7 +223,7 @@ def update_worker_addrs(
     for member in gang_info.members:
         logging.info(
             f"member world rank: {member.world_rank}, member local rank: {member.local_rank}, local rank: {local_rank}, "
-            f"tp_size: {parallelism_config.tp_size}, dp_size: {parallelism_config.dp_size}, dp_rank: {parallelism_config.dp_rank}, use_all_gather: {moe_config.use_all_gather}"
+            f"tp_size: {parallelism_config.tp_size}, dp_size: {parallelism_config.dp_size}, dp_rank: {parallelism_config.dp_rank}"
         )
         if int((member.world_rank / parallelism_config.tp_size) % parallelism_config.dp_size) == parallelism_config.dp_rank:
             worker_addrs.append(
@@ -285,49 +259,27 @@ def setup_pd_sep_config(
         )
 
 
-def finalize_runtime_config(
-    runtime_config: RuntimeConfig,
+def finalize_scheduler_config(
+    fifo_scheduler_config: Any,  # FIFOSchedulerConfig
     max_seq_len: int,
-    max_context_batch_size: int,
 ) -> None:
-    """Finalize runtime_config with computed values."""
-    import logging
-    # fast_gen_max_context_len uses fast_gen_context_budget from runtime_config.fifo_scheduler_config
-    if runtime_config.fifo_scheduler_config.fast_gen_context_budget == -1:
-        runtime_config.fifo_scheduler_config.fast_gen_max_context_len = 1024
-    else:
-        runtime_config.fifo_scheduler_config.fast_gen_max_context_len = runtime_config.fifo_scheduler_config.fast_gen_context_budget
-    logging.info(f"fast_gen_max_context_len: {runtime_config.fifo_scheduler_config.fast_gen_max_context_len}")
-
-    # Set max_batch_tokens_size if not set from py_runtime_config
-    if runtime_config.max_batch_tokens_size == 0:
-        runtime_config.max_batch_tokens_size = (
-            max_context_batch_size * max_seq_len
-        )
-    logging.info(f"max_batch_tokens_size: {runtime_config.max_batch_tokens_size}")
-
-
-def update_engine_config_from_py_model_config(
-    engine_config: 'EngineConfig',
-    model_config,
-    max_context_batch_size: int,
-) -> None:
-    """Update EngineConfig and PyModelConfig based on information from PyModelConfig.
-    
-    This function updates EngineConfig members that depend on PyModelConfig values.
-    It also sets up EPLBConfig in py_model_config.eplb_config.
-    Called after both EngineConfig and PyModelConfig are initialized.
+    """Finalize fifo_scheduler_config with computed values.
     
     Args:
-        engine_config: EngineConfig instance to update
-        model_config: ModelConfig instance (already initialized)
-        max_context_batch_size: Maximum context batch size
+        fifo_scheduler_config: FIFOSchedulerConfig instance to finalize
+        max_seq_len: Maximum sequence length from model config
     """
-    # Finalize runtime_config (needs max_seq_len from py_model_config)
-    finalize_runtime_config(
-        engine_config.runtime_config,
-        model_config.max_seq_len,
-        max_context_batch_size,
-    )
+    # fast_gen_max_context_len uses fast_gen_context_budget from fifo_scheduler_config
+    if fifo_scheduler_config.fast_gen_context_budget == -1:
+        fifo_scheduler_config.fast_gen_max_context_len = 1024
+    else:
+        fifo_scheduler_config.fast_gen_max_context_len = fifo_scheduler_config.fast_gen_context_budget
+    logging.info(f"fast_gen_max_context_len: {fifo_scheduler_config.fast_gen_max_context_len}")
 
+    # Set max_batch_tokens_size if not set from py_runtime_config
+    if fifo_scheduler_config.max_batch_tokens_size == 0:
+        fifo_scheduler_config.max_batch_tokens_size = (
+            fifo_scheduler_config.max_context_batch_size * max_seq_len
+        )
+    logging.info(f"max_batch_tokens_size: {fifo_scheduler_config.max_batch_tokens_size}")
 

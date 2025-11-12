@@ -20,18 +20,14 @@ class MMEmbeddingRes:
 
 
 class MMProcessEngine:
-    def __init__(self, model):
+    def __init__(self, model, vit_config):
         self.model = model
+        self.vit_config = vit_config
         self.contains_pos: bool = self.model.config.mm_position_ids_style != 0
-        self.run_batch: bool = self.model.config.vit_run_batch
-        # Get vit_config from model if available
-        self.download_headers = ""
-        self.url_cache_size = 10
-        self.mm_cache_size = 10
-        if hasattr(self.model, 'vit_config') and self.model.vit_config:
-            self.download_headers = self.model.vit_config.download_headers if hasattr(self.model.vit_config, 'download_headers') else ""
-            self.url_cache_size = self.model.vit_config.url_cache_item_num if hasattr(self.model.vit_config, 'url_cache_item_num') else 10
-            self.mm_cache_size = self.model.vit_config.mm_cache_item_num if hasattr(self.model.vit_config, 'mm_cache_item_num') else 10
+        self.run_batch: bool = self.vit_config.vit_run_batch
+        self.download_headers = self.vit_config.download_headers
+        self.url_cache_size = self.vit_config.url_cache_item_num
+        self.mm_cache_size = self.vit_config.mm_cache_item_num
 
     def _maybe_tensor_to_list(self, tensor: torch.Tensor):
         if len(tensor.shape) > 2:

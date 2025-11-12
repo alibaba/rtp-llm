@@ -227,7 +227,8 @@ std::string FIFOSchedulerConfig::to_string() const {
         << "fast_gen_context_budget: " << fast_gen_context_budget << "\n"
         << "max_context_batch_size: " << max_context_batch_size << "\n"
         << "scheduler_reserve_resource_ratio: " << scheduler_reserve_resource_ratio << "\n"
-        << "fast_gen_max_context_len: " << fast_gen_max_context_len;
+        << "fast_gen_max_context_len: " << fast_gen_max_context_len << "\n"
+        << "max_batch_tokens_size: " << max_batch_tokens_size;
     return oss.str();
 }
 
@@ -237,7 +238,6 @@ std::string RuntimeConfig::to_string() const {
     oss << "max_generate_batch_size: " << max_generate_batch_size << "\n"
         << "pre_allocate_op_mem: " << pre_allocate_op_mem << "\n"
         << "max_block_size_per_item: " << max_block_size_per_item << "\n"
-        << "max_batch_tokens_size: " << max_batch_tokens_size << "\n"
         << "reserve_runtime_mem_mb: " << reserve_runtime_mem_mb << "\n"
         << "warm_up: " << warm_up << "\n"
         << "warm_up_with_loss: " << warm_up_with_loss << "\n"
@@ -245,16 +245,7 @@ std::string RuntimeConfig::to_string() const {
         << "use_gather_batch_scheduler: " << use_gather_batch_scheduler << "\n"
         << "batch_decode_scheduler_config: {\n" << batch_decode_scheduler_config.to_string() << "\n}\n"
         << "fifo_scheduler_config: {\n" << fifo_scheduler_config.to_string() << "\n}\n"
-        << "vit_separation: " << vit_separation << "\n"
-        << "enable_speculative_decoding: " << enable_speculative_decoding << "\n"
         << "model_name: " << model_name << "\n"
-        << "vit_run_batch: " << vit_run_batch << "\n"
-        << "worker_addrs: [";
-    for (size_t i = 0; i < worker_addrs.size(); ++i) {
-        oss << worker_addrs[i];
-        if (i < worker_addrs.size() - 1) oss << ", ";
-    }
-    oss << "]\n"
         << "worker_grpc_addrs: [";
     for (size_t i = 0; i < worker_grpc_addrs.size(); ++i) {
         oss << worker_grpc_addrs[i];

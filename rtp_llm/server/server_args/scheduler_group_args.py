@@ -46,11 +46,3 @@ def init_scheduler_group_args(parser, runtime_config):
         default=16,
         help="每个 item 的最大 block 大小。",
     )
-    scheduler_group.add_argument(
-        "--max_batch_tokens_size",
-        env_name="MAX_BATCH_TOKENS_SIZE",
-        bind_to=(runtime_config, 'max_batch_tokens_size'),
-        type=int,
-        default=0,
-        help="最大 batch tokens 大小。",
-    )

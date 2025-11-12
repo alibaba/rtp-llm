@@ -26,6 +26,7 @@ from rtp_llm.utils.multimodal_util import (
     MMUrlType,
     get_bytes_io_from_url,
     get_vit_compute_dtype,
+    vit_emb_cache_,
 )
 
 
@@ -95,7 +96,6 @@ class MultiModalEmbeddingInterface:
         download_headers: str = "",
         url_cache_size: int = 10,
         mm_cache_size: int = 10,
-        vit_emb_cache: MMDataCache = None,
         url_data_cache: MMDataCache = None,
         **kwargs: Any
     ):
@@ -103,13 +103,11 @@ class MultiModalEmbeddingInterface:
         if g_parallel_info.tp_rank > 0:
             return torch.Tensor([])
         
-        # Create cache if not provided
-        if vit_emb_cache is None:
-            vit_emb_cache = MMDataCache(mm_cache_size)
+        # Use global vit_emb_cache_ instead of parameter
         if url_data_cache is None:
             url_data_cache = MMDataCache(url_cache_size)
         
-        cached_res = vit_emb_cache.check_cache(url)
+        cached_res = vit_emb_cache_.check_cache(url)
         if cached_res is not None:
             return cached_res
         bytes_io = get_bytes_io_from_url(url, download_headers=download_headers, url_cache_size=url_cache_size, url_data_cache=url_data_cache)
@@ -120,7 +118,7 @@ class MultiModalEmbeddingInterface:
             features = (features[0].to(dtype).contiguous(), features[1].contiguous())
         else:
             features = (features.to(dtype).contiguous(), None)
-        vit_emb_cache.insert_cache(url, features)
+        vit_emb_cache_.insert_cache(url, features)
         return features
 
     @timeout_decorator(10)

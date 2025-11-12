@@ -35,3 +35,11 @@ def init_server_group_args(parser, server_config):
         default=0,
         help="前端服务器序号",
     )
+    server_group.add_argument(
+        "--worker_info_port_num",
+        env_name="WORKER_INFO_PORT_NUM",
+        bind_to=(server_config, 'worker_info_port_num'),
+        type=int,
+        default=7,
+        help="worker的总的端口的数量",
+    )

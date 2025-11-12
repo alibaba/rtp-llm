@@ -211,6 +211,7 @@ struct FIFOSchedulerConfig {
     int64_t max_context_batch_size           = 1;
     int64_t scheduler_reserve_resource_ratio = 5;
     int64_t fast_gen_max_context_len         = 0;
+    int64_t max_batch_tokens_size            = 0;
     std::string to_string() const;
 };
 
@@ -219,8 +220,6 @@ struct RuntimeConfig {
 
     bool    pre_allocate_op_mem     = true;
     int64_t max_block_size_per_item = 16;
-
-    int64_t max_batch_tokens_size   = 0;
 
     int64_t reserve_runtime_mem_mb           = 0;
     bool    warm_up                          = false;
@@ -232,12 +231,7 @@ struct RuntimeConfig {
     BatchDecodeSchedulerConfig batch_decode_scheduler_config;
     FIFOSchedulerConfig fifo_scheduler_config;
 
-    // 0 for no sep, 1 for server, 2 for client
-    int64_t                      vit_separation              = 0;
-    bool                         enable_speculative_decoding  = false;
     std::string                  model_name                  = "";
-    int64_t                      vit_run_batch               = 1;  // Batch size for VIT processing
-    std::vector<std::string>     worker_addrs;
     std::vector<std::string>    worker_grpc_addrs;
 
     // Fields merged from PyDeviceResourceConfig

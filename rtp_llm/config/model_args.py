@@ -24,7 +24,6 @@ class ModelArgs:
         self.extra_data_path: str = ""
         self.local_extra_data_path: Optional[str] = None
         self.original_checkpoint_path: Optional[str] = None
-        self.ft_plugin_path: Optional[str] = None
         
         # Model type and task
         self.model_type: str = ""
@@ -66,8 +65,6 @@ def apply_model_args_to_config(model_args: ModelArgs, model_config) -> None:
         model_config.local_extra_data_path = model_args.local_extra_data_path
     if model_args.original_checkpoint_path is not None:
         model_config.original_checkpoint_path = model_args.original_checkpoint_path
-    if model_args.ft_plugin_path is not None:
-        model_config.ft_plugin_path = model_args.ft_plugin_path
     
     # Set model type and task type
     if model_args.model_type:

@@ -182,13 +182,10 @@ class ModelDeployWeightInfo:
         if self._head_num_kv == -1:
             self._head_num_kv = self._head_num
         self._quant_algo = py_model_config.quant_algo
-        self._quant_config = getattr(py_model_config, 'quant_config', None)
+        self._quant_config = py_model_config.quant_config
         self._num_layers = py_model_config.num_layers
-        self._layer_head_num = getattr(py_model_config, 'layer_head_num', None)
-        self._layer_inter_padding_size = getattr(py_model_config, 'layer_inter_padding_size', None)
         self._has_prefix_encoder = False
-        self._is_sparse_head = getattr(py_model_config, 'is_sparse_head', False)
-        self._src_quantization_bit = getattr(py_model_config, 'src_quantization_bit', None)
+        self._src_quantization_bit = py_model_config.src_quantization_bit
 
         self._is_gated_activation = py_model_config.isGatedActivation()
         self.expert_num_ = py_model_config.expert_num
@@ -214,8 +211,7 @@ class ModelDeployWeightInfo:
         # for eplb
         # phy2log should be loaded from LoadConfig, not from config
         self.phy2log = None  # Will be set in create_load_config
-        # py_eplb will be set separately, not in eplb_config
-        self.py_eplb = None
+
         # for moe
         self._use_stack_weight = False
 
@@ -230,7 +226,6 @@ class ModelDeployWeightInfo:
             def __init__(self, py_model_config, engine_config):
                 self.py_model_config = py_model_config
                 self.engine_config = engine_config
-                self.py_eplb = None  # Will be set separately
         
         self.config = ConfigWrapper(py_model_config, engine_config)
 
@@ -267,7 +262,7 @@ class ModelDeployWeightInfo:
 
     def get_weight_info(self) -> ModelWeightInfo:
         weight_info = self._get_weight_info()
-        use_fp32 = getattr(self.py_model_config, 'use_float32', False)
+        use_fp32 = self.py_model_config.use_float32
         if use_fp32:
             weight_info = weight_info.set_weight_dtype(torch.float32)
 
@@ -297,10 +292,6 @@ class ModelDeployWeightInfo:
         if self.tie_word_embeddings:
             logging.info("fix tie_word_embeddings")
             weight_info = self._fix_tie_lm_head(weight_info)
-        if self._is_sparse_head:
-            logging.info("Skiping load empty weight for head_num == 0")
-            weight_info = self._process_sparse_weight(weight_info)
-
         return weight_info
 
     def _fix_weight_style_layer_weight(self, origin_weight_info: ModelWeightInfo):
@@ -460,34 +451,6 @@ class ModelDeployWeightInfo:
         )
         origin_weight_info.weights[lm_head_idx] = lm_head
         return origin_weight_info
-
-    def _process_sparse_weight(
-        self, origin_weight_info: ModelWeightInfo
-    ) -> ModelWeightInfo:
-        if not isinstance(origin_weight_info.layer_weights[0], list):
-            raise Exception("model weight use sparse config should be list(list())")
-        new_layer_weights = []
-
-        skip_weights_list = [
-            W.attn_qkv_w,
-            W.attn_qkv_b,
-            W.attn_ln_gamma,
-            W.attn_ln_beta,
-            W.qk_ln_gamma,
-            W.attn_o_w,
-        ]
-
-        for i, layer_weight in enumerate(origin_weight_info.layer_weights):
-            if self._layer_head_num[i] == 0:
-                new_weights = [
-                    weight
-                    for weight in layer_weight
-                    if weight.name not in skip_weights_list
-                ]
-            else:
-                new_weights = layer_weight
-            new_layer_weights.append(new_weights)
-        return ModelWeightInfo(origin_weight_info.weights, new_layer_weights)
 
     def _get_weight_info(self) -> ModelWeightInfo:
         raise NotImplementedError()
