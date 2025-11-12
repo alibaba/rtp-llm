@@ -133,8 +133,8 @@ class FlashInferPythonDecodeOp(object):
     def prepare(self, attention_inputs: PyAttentionInputs) -> FlashInferPythonParams:
         return FlashInferPythonParams(
             batch_size=attention_inputs.sequence_lengths.size(0),
-            max_seq_len=attention_inputs.sequence_lengths.max().item(),
-            seq_lens=attention_inputs.sequence_lengths,
+            max_seq_len=attention_inputs.sequence_lengths.max().item() + 1,
+            seq_lens=attention_inputs.sequence_lengths + 1,
             block_tables=attention_inputs.kv_cache_block_id_device,
             cu_seqlens=attention_inputs.cu_seqlens,
             cu_kv_seqlens=attention_inputs.cu_kv_seqlens,
