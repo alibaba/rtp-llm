@@ -226,26 +226,20 @@ GreedyOutput ROCmDevice::sampleGreedy(const GreedyParams& params) {
         auto&      top_k      = params.top_k;
         auto&      top_p      = params.top_p;
 
+        bool                  deterministic = true;
+        auto seed_h   = allocateBuffer({DataType::TYPE_UINT64, {batch_size}, AllocationType::HOST});
+        auto offset_h = allocateBuffer({DataType::TYPE_UINT64, {batch_size}, AllocationType::HOST});
+        for (int i = 0; i < batch_size; i++) {
+            std::tie(seed_h->data<uint64_t>()[i], offset_h->data<uint64_t>()[i]) = params.generator[i].defined() ?
+                get_seed_and_offset(batch_size * 32, params.generator[i]) :
+                std::make_pair(0ULL, 0ULL);
+        }
+        auto seed = Buffer2torchTensor(clone({*seed_h, AllocationType::DEVICE}), false);
+        auto offset = Buffer2torchTensor(clone({*offset_h, AllocationType::DEVICE}), false);
+
         auto logits_ref = params.logits.slice(0, params.logits.shape()[0]);
         auto probs      = softmax({logits_ref, std::nullopt, std::nullopt, 1.0f, DataType::TYPE_INVALID, std::nullopt});
         auto samples    = transposed_tokens->view(transposed_tokens->shape()[0] - 1, 1);
-
-        bool                  deterministic = true;
-        std::vector<uint64_t> seed_v;
-        std::vector<uint64_t> offset_v;
-        for (int i = 0; i < batch_size; i++) {
-            if (params.generator[i].defined()) {
-                auto [sd, ofst] = get_seed_and_offset(batch_size * 32, params.generator[i]);
-                seed_v.push_back(sd);
-                offset_v.push_back(ofst);
-            } else {
-                seed_v.push_back(0);
-                offset_v.push_back(0);
-            }
-        }
-        auto seed = torch::from_blob(seed_v.data(), {static_cast<long>(batch_size)}, torch::kUInt64).to(torch::kCUDA);
-        auto offset =
-            torch::from_blob(offset_v.data(), {static_cast<long>(batch_size)}, torch::kUInt64).to(torch::kCUDA);
 
         bool          need_output_all_probs = params.output_all_probs.has_value();
         torch::Tensor probs_t               = Buffer2torchTensor(probs, false);
