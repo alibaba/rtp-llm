@@ -130,7 +130,7 @@ jobs:
         fi
 
     - name: (Pull Request) send results link into PR comments
-      if: always()
+      if: success() || failure()
       run: |
         if [ ${{ github.event_name }} == 'pull_request' ]; then
           comment_body="The unit test result of this PR is: https://yuzho-amd.github.io/${{ github.event.repository.name }}/${{ steps.deploy_logs.outputs.target_subdir }}/"
