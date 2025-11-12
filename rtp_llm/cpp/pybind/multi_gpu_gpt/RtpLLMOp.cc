@@ -262,6 +262,13 @@ std::unique_ptr<ProposeModelEngineInitParams> RtpLLMOp::initProposeModel(py::obj
             auto misc_config = config_obj.attr("misc_config").cast<MiscellaneousConfig>();
             auto arpc_config = config_obj.attr("arpc_config").cast<ArpcConfig>();
             auto ffn_disaggregate_config = config_obj.attr("ffn_disaggregate_config").cast<FfnDisAggregateConfig>();
+            VitConfig vit_config;
+            if (py::hasattr(config_obj, "vit_config")) {
+                py::object py_vit_config = config_obj.attr("vit_config");
+                if (!py_vit_config.is_none()) {
+                    vit_config.vit_separation = py_vit_config.attr("vit_separation").cast<VitSeparation>();
+                }
+            }
             
             py::object py_layers_weights = sp_model.attr("weight").attr("weights");
             py::object py_global_weights = sp_model.attr("weight").attr("global_weights");
@@ -296,6 +303,7 @@ std::unique_ptr<ProposeModelEngineInitParams> RtpLLMOp::initProposeModel(py::obj
                 misc_config,
                 arpc_config,
                 ffn_disaggregate_config,
+                vit_config,
                 std::move(*gpt_weight));
             model_id_++;
         } else if (sp_type == "mtp") {
