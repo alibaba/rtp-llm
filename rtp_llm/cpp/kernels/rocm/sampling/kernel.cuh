@@ -58,14 +58,7 @@ using namespace hipcub;
     __VA_ARGS__                                                                \
   }
 
-#define DISPATCH_SOFTMAX_CACHE_INPUT(cache_input, CACHE_INPUT, ...) \
-  if (cache_input) {                                                \
-    constexpr bool CACHE_INPUT = true;                              \
-    __VA_ARGS__                                                     \
-  } else {                                                          \
-    constexpr bool CACHE_INPUT = false;                             \
-    __VA_ARGS__                                                     \
-  }
+#define VEC_BYTES 64
 
 constexpr BlockScanAlgorithm SCAN_ALGO = BLOCK_SCAN_WARP_SCANS;
 constexpr BlockReduceAlgorithm REDUCE_ALGO = BLOCK_REDUCE_WARP_REDUCTIONS;
@@ -650,7 +643,7 @@ hipError_t TopKSamplingFromProb(T* probs, IdType* output, IdType* indices, T* to
                                  uint32_t batch_size, uint32_t top_k_val, uint32_t d,
                                  bool deterministic, uint64_t* philox_seed, uint64_t* philox_offset,
                                  hipStream_t stream = 0) {
-  const uint32_t vec_size = std::gcd(16 / sizeof(T), d);
+  const uint32_t vec_size = std::gcd(VEC_BYTES / sizeof(T), d);
 
   auto compute_capacity = GetCudaComputeCapability();
   DISPATCH_COMPUTE_CAP_NUM_THREADS(compute_capacity, BLOCK_THREADS, {
@@ -678,7 +671,7 @@ hipError_t TopPSamplingFromProb(T* probs, IdType* output, IdType* indices, T* to
                                  uint32_t batch_size, T top_p_val, uint32_t d, bool deterministic,
                                  uint64_t* philox_seed, uint64_t* philox_offset,
                                  hipStream_t stream = 0) {
-  const uint32_t vec_size = std::gcd(16 / sizeof(T), d);
+  const uint32_t vec_size = std::gcd(VEC_BYTES / sizeof(T), d);
 
   auto compute_capacity = GetCudaComputeCapability();
   DISPATCH_COMPUTE_CAP_NUM_THREADS(compute_capacity, BLOCK_THREADS, {
@@ -708,7 +701,7 @@ hipError_t TopKTopPSamplingFromProb(T* probs, IdType* top_k_arr, T* top_p_arr, I
                                      T top_p_val, uint32_t d, bool deterministic,
                                      uint64_t* philox_seed, uint64_t* philox_offset,
                                      hipStream_t stream = 0) {
-  const uint32_t vec_size = std::gcd(16 / sizeof(T), d);
+  const uint32_t vec_size = std::gcd(VEC_BYTES / sizeof(T), d);
 
   auto compute_capacity = GetCudaComputeCapability();
   DISPATCH_COMPUTE_CAP_NUM_THREADS(compute_capacity, BLOCK_THREADS, {
@@ -1053,7 +1046,7 @@ template <typename DType>
 hipError_t TopPRenormProb(DType* probs, DType* renormed_prob, float* top_p_arr,
                            uint32_t batch_size, float top_p_val, uint32_t d,
                            hipStream_t stream = 0) {
-  const uint32_t vec_size = std::gcd(16 / sizeof(DType), d);
+  const uint32_t vec_size = std::gcd(VEC_BYTES / sizeof(DType), d);
 
   auto compute_capacity = GetCudaComputeCapability();
   DISPATCH_COMPUTE_CAP_NUM_THREADS(compute_capacity, BLOCK_THREADS, {
@@ -1075,7 +1068,7 @@ template <typename DType, typename IdType>
 hipError_t TopKRenormProb(DType* probs, DType* renormed_prob, IdType* top_k_arr,
                            uint32_t batch_size, uint32_t top_k_val, uint32_t d,
                            hipStream_t stream = 0) {
-  const uint32_t vec_size = std::gcd(16 / sizeof(DType), d);
+  const uint32_t vec_size = std::gcd(VEC_BYTES / sizeof(DType), d);
 
   auto compute_capacity = GetCudaComputeCapability();
   DISPATCH_COMPUTE_CAP_NUM_THREADS(compute_capacity, BLOCK_THREADS, {
