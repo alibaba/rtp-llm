@@ -185,6 +185,10 @@ def test_top_p_sampling(batch_size, vocab_size, p):
           json.dump(info, f, ensure_ascii=False, indent=4)
     num_trials = 1000
     info["out"] = []
+
+    # start_event = torch.cuda.Event(enable_timing=True)
+    # end_event = torch.cuda.Event(enable_timing=True)
+    # start_event.record()
     for _ in range(num_trials):
         samples = torch.empty(batch_size, dtype=torch.int32, device="cuda:0")
         top_p_sampling_from_probs(
@@ -200,6 +204,12 @@ def test_top_p_sampling(batch_size, vocab_size, p):
         assert torch.all(samples < vocab_size) and torch.all(samples >= 0)
         assert torch.all(mask[torch.arange(batch_size), samples] == 1)
         info["out"].append(samples.cpu().numpy().tolist())
+    # end_event.record()
+    # torch.cuda.synchronize()
+    # elapsed_time = start_event.elapsed_time(end_event) / num_trials
+    # print(f"elapsed_time: {elapsed_time} ms")
+    # return elapsed_time
+
     if file:
         with file.open("w") as f:
             json.dump(info, f, ensure_ascii=False, indent=4)
