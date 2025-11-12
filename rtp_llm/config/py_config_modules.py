@@ -22,6 +22,7 @@ from rtp_llm.ops import (
     SpeculativeExecutionConfig,
     CacheStoreConfig,
     ArpcConfig,
+    VitSeparation,
 )
 
 DEFAULT_START_PORT = 8088
@@ -147,8 +148,7 @@ class GangConfig:
 
 class VitConfig:
     def __init__(self):
-        from rtp_llm.ops import VitSeparation
-        self.vit_separation_value: VitSeparation = VitSeparation.VIT_SEPARATION_LOCAL
+        self.vit_separation: VitSeparation = VitSeparation.VIT_SEPARATION_LOCAL
         self.vit_run_batch: int = 1  # Batch size for VIT processing
         self.vit_trt: int = 0
         self.trt_cache_enabled: int = 0
@@ -161,26 +161,6 @@ class VitConfig:
         self.igraph_vipserver: int = 0
         self.igraph_table_name: str = ""
         self.default_key: Optional[str] = None
-    
-    @property
-    def vit_separation(self) -> "VitSeparation":
-        return self.vit_separation_value
-    
-    @vit_separation.setter
-    def vit_separation(self, value):
-        from rtp_llm.ops import VitSeparation
-        if isinstance(value, int):
-            # Convert int to enum
-            if value == 0:
-                self.vit_separation_value = VitSeparation.VIT_SEPARATION_LOCAL
-            elif value == 1:
-                self.vit_separation_value = VitSeparation.VIT_SEPARATION_ROLE
-            elif value == 2:
-                self.vit_separation_value = VitSeparation.VIT_SEPARATION_REMOTE
-            else:
-                raise ValueError(f"Invalid vit_separation value: {value}")
-        else:
-            self.vit_separation_value = value
 
     def to_string(self):
         return (

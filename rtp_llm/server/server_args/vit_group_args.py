@@ -1,6 +1,21 @@
 import os
 
 
+def _convert_vit_separation(value):
+    """Convert int to VitSeparation enum."""
+    from rtp_llm.ops import VitSeparation
+    if isinstance(value, int):
+        if value == 0:
+            return VitSeparation.VIT_SEPARATION_LOCAL
+        elif value == 1:
+            return VitSeparation.VIT_SEPARATION_ROLE
+        elif value == 2:
+            return VitSeparation.VIT_SEPARATION_REMOTE
+        else:
+            raise ValueError(f"Invalid vit_separation value: {value}")
+    return value
+
+
 def init_vit_group_args(parser, vit_config):
     ##############################################################################################################
     # Vit Configuration
@@ -10,8 +25,8 @@ def init_vit_group_args(parser, vit_config):
         "--vit_separation",
         env_name="VIT_SEPARATION",
         bind_to=(vit_config, 'vit_separation'),
-        type=int,
-        default=0,
+        type=_convert_vit_separation,
+        default=_convert_vit_separation(0),  # Convert default to enum
         help="VIT是否和主进程进行分离",
     )
     vit_group.add_argument(

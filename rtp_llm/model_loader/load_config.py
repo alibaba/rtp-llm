@@ -10,7 +10,7 @@ from rtp_llm.device.device_base import DeviceBase
 from rtp_llm.utils.database import BaseDatabase
 from rtp_llm.utils.fuser import fetch_remote_file_to_local
 from rtp_llm.utils.util import check_with_info
-
+from rtp_llm.ops import VitSeparation
 
 class LoadConfig(BaseModel):
     database: Any
@@ -41,7 +41,7 @@ class LoadConfig(BaseModel):
     bit: int = 16
     merge_lora: bool = False
 
-    vit_separation: int = 0
+    vit_separation: VitSeparation = VitSeparation.VIT_SEPARATION_LOCAL  # VitSeparation enum
     compute_dtype: Any = torch.float16
 
     quant_algo: Any = None
@@ -53,10 +53,30 @@ class LoadConfig(BaseModel):
     phy2log: Optional[List[List[int]]] = None
     use_swizzleA: bool = False
 
-    @field_validator("database", "compute_dtype", "quant_algo", "exported_device")
+    @field_validator("database", "compute_dtype", "quant_algo", "exported_device", "vit_separation")
     @classmethod
     def validate_custom_types(cls, value: Any, info) -> Any:
         field_name = info.field_name
+        if field_name == "vit_separation":
+            from rtp_llm.ops import VitSeparation
+            if value is None:
+                return VitSeparation.VIT_SEPARATION_LOCAL
+            if isinstance(value, int):
+                # Convert int to enum for backward compatibility
+                if value == 0:
+                    return VitSeparation.VIT_SEPARATION_LOCAL
+                elif value == 1:
+                    return VitSeparation.VIT_SEPARATION_ROLE
+                elif value == 2:
+                    return VitSeparation.VIT_SEPARATION_REMOTE
+                else:
+                    raise ValueError(f"Invalid vit_separation value: {value}")
+            if not isinstance(value, VitSeparation):
+                raise TypeError(
+                    f"Field 'vit_separation' expects type VitSeparation, got {type(value)}"
+                )
+            return value
+        
         expected_types = {
             "database": BaseDatabase,
             "compute_dtype": torch.dtype,
