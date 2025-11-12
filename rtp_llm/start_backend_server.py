@@ -180,7 +180,8 @@ def start_backend_server(global_controller: ConcurrencyController, py_env_config
     update_worker_info(py_env_configs.server_config.start_port, py_env_configs.server_config.worker_info_port_num)
 
     # TODO(xinfei.sxf) fix this
-    if py_env_configs.vit_config.vit_separation == 1:
+    from rtp_llm.ops import VitSeparation
+    if py_env_configs.vit_config.vit_separation == VitSeparation.VIT_SEPARATION_ROLE:
         return vit_start_server()
 
     if not torch.cuda.is_available():

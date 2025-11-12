@@ -184,6 +184,10 @@ struct SpeculativeExecutionConfig {
     std::string to_string() const;
 };
 
+struct VitConfig {
+    VitSeparation vit_separation = VitSeparation::VIT_SEPARATION_LOCAL;
+    std::string to_string() const;
+};
 
 struct CacheStoreConfig {
     bool        cache_store_rdma_mode        = false;

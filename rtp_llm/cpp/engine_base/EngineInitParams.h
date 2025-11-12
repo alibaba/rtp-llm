@@ -42,6 +42,7 @@ struct EngineInitParams {
                      const MiscellaneousConfig&         misc_config,
                      const ArpcConfig&                 arpc_config,
                      const FfnDisAggregateConfig&      ffn_disaggregate_config,
+                     const VitConfig&                  vit_config,
                      rtp_llm::Weights&&               gpt_weights,
                      py::object                       py_model = py::none(),
                      py::object                       py_eplb = py::none()):
@@ -65,6 +66,7 @@ struct EngineInitParams {
         misc_config(misc_config),
         arpc_config(arpc_config),
         ffn_disaggregate_config(ffn_disaggregate_config),
+        vit_config(vit_config),
         gpt_weights(std::move(gpt_weights)),
         py_model(py_model),
         py_eplb(py_eplb) {
@@ -104,6 +106,7 @@ struct EngineInitParams {
     MiscellaneousConfig       misc_config;
     ArpcConfig                arpc_config;
     FfnDisAggregateConfig     ffn_disaggregate_config;
+    VitConfig                 vit_config;
     rtp_llm::Weights          gpt_weights;
     py::object                py_model;
     py::object                py_eplb;

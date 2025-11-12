@@ -20,8 +20,8 @@ from rtp_llm.utils.model_weight import (
 
 
 class QWenV3MoeWeight(QWenV2MoeWeight):
-    def __init__(self, *args: Any, **kwargs: Any):
-        super().__init__(*args, **kwargs)
+    def __init__(self, py_model_config, engine_config, merge_lora=False, tp_size=1, tp_rank=0, vit_config=None, prefix="", **kwargs: Any):
+        super().__init__(py_model_config, engine_config, merge_lora, tp_size, tp_rank, vit_config, prefix=prefix, **kwargs)
         self.bias = False
 
     def _get_hf_ffn_layer_weight_info(self, layer_id: int):

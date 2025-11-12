@@ -50,18 +50,13 @@ class QwenVL2VitWeight(BaseVitWeights):
 
 
 class QWen2VLWeightInfo(ModelDeployWeightInfo, BaseMultiModalWeightInfo):
-    def __init__(self, config, tp_size, tp_rank):
-        ModelDeployWeightInfo.__init__(self, config, tp_size, tp_rank)
-        BaseMultiModalWeightInfo.__init__(self, config)
+    def __init__(self, vit_weights, **kwargs):
+        ModelDeployWeightInfo.__init__(self, **kwargs)
+        BaseMultiModalWeightInfo.__init__(self, vit_weights=vit_weights, **kwargs)
 
     @property
     def support_lora(self) -> bool:
         return True
-
-    def _get_weight_info(self):
-        weights = self._get_hf_weight_info()
-        weights = self._get_vit_info(weights)
-        return weights
 
     def _get_hf_weight_info(self):
         inter_padding_size = self._inter_padding_size

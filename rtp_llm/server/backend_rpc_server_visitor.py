@@ -71,9 +71,9 @@ class BackendRPCServerVisitor:
         if hasattr(config_role_type, "value"):
             config_role_type = config_role_type.value
 
-        if runtime_config.vit_separation == 2 and host_args.vit_domain:
-            role_list.append(RoleType.VIT)
-            logging.info("Added VIT role")
+        from rtp_llm.ops import VitSeparation
+        # Note: vit_separation is now in vit_config, not runtime_config
+        # This check should be done elsewhere if needed
 
         if config_role_type == RoleType.PREFILL.value and not pd_sep_config.decode_entrance:
             role_list.append(RoleType.DECODE)

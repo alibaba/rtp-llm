@@ -13,7 +13,6 @@ from rtp_llm.config.model_config import ModelConfig, build_py_model_config
 from rtp_llm.config.model_args import ModelArgs
 from rtp_llm.config.py_config_modules import (
     GangConfig,
-    PyEnvConfigs,
     VitConfig,
     LoraConfig,
     GenerateEnvConfig,
@@ -194,8 +193,9 @@ class ModelFactory:
             vit_config=vit_config,
             merge_lora=merge_lora,
         )
+        from rtp_llm.ops import VitSeparation
         model_type = model_config.model_type
-        if model_type == "fake_model" or engine_config.runtime_config.vit_separation == 1:
+        if model_type == "fake_model" or (vit_config is not None and vit_config.vit_separation == VitSeparation.VIT_SEPARATION_ROLE):
             return model
         
         # Create propose model if provided

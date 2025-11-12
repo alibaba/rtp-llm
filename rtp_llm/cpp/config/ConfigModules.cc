@@ -189,6 +189,28 @@ std::string SpeculativeExecutionConfig::to_string() const {
     return oss.str();
 }
 
+// VitConfig
+std::string VitConfig::to_string() const {
+    std::ostringstream oss;
+    std::string vit_sep_str;
+    switch (vit_separation) {
+        case VitSeparation::VIT_SEPARATION_LOCAL:
+            vit_sep_str = "LOCAL";
+            break;
+        case VitSeparation::VIT_SEPARATION_ROLE:
+            vit_sep_str = "ROLE";
+            break;
+        case VitSeparation::VIT_SEPARATION_REMOTE:
+            vit_sep_str = "REMOTE";
+            break;
+        default:
+            vit_sep_str = "UNKNOWN(" + std::to_string(static_cast<int>(vit_separation)) + ")";
+            break;
+    }
+    oss << "vit_separation: " << vit_sep_str;
+    return oss.str();
+}
+
 // CacheStoreConfig
 std::string CacheStoreConfig::to_string() const {
     std::ostringstream oss;

@@ -193,9 +193,10 @@ class BaseModel(object):
             if self.parallel_info.tp_rank == 0:
                 if self.vit_config is None:
                     raise ValueError("vit_config is required for multimodal models")
-                # Only initialize multimodal if vit_separation != 2
-                vit_separation = self.engine_config.runtime_config.vit_separation
-                if vit_separation != 2:
+                # Only initialize multimodal if vit_separation != REMOTE
+                from rtp_llm.ops import VitSeparation
+                vit_separation = self.vit_config.vit_separation
+                if vit_separation != VitSeparation.VIT_SEPARATION_REMOTE:
                     self.init_multimodal(
                         mm_model_config=self.mm_model_config,
                         vit_config=self.vit_config,
@@ -285,7 +286,8 @@ class BaseModel(object):
 
     @timer_wrapper(description="load multimodal")
     def _load_multimodal(self):
-        if self.engine_config.runtime_config.vit_separation != 2 and self.is_multimodal():
+        from rtp_llm.ops import VitSeparation
+        if self.vit_config is not None and self.vit_config.vit_separation != VitSeparation.VIT_SEPARATION_REMOTE and self.is_multimodal():
             assert isinstance(self, MultiModalMixin)  # for syntax check
             # Convert torch.dtype to string for load_mm_weight
             dtype_str = self.py_model_config.data_type
@@ -308,7 +310,7 @@ class BaseModel(object):
         tp_size = self.parallel_info.tp_size
 
         weights_info: ModelDeployWeightInfo = self.get_weight_cls()(
-            self.py_model_config, self.engine_config, self.merge_lora, tp_size, tp_rank
+            self.py_model_config, self.engine_config, self.merge_lora, tp_size, tp_rank, self.vit_config
         )
         misc_weights_info = (
             self.custom_module.get_custom_weight_info() if self.custom_module else []

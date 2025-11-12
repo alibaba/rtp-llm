@@ -13,15 +13,9 @@ from rtp_llm.utils.util import get_config_from_path
 
 
 class QWenV2AudioWeightinfo(QWenV2Weight, BaseMultiModalWeightInfo):
-    def __init__(self, config: ModelConfig, tp_size: int, tp_rank: int):
-        QWenV2Weight.__init__(self, config, tp_size, tp_rank)
-        BaseMultiModalWeightInfo.__init__(self, config)
-
-    def _get_weight_info(self):
-        qwen_weight = super()._get_weight_info()
-        qwen_weight = self._get_vit_info(qwen_weight)
-        return qwen_weight
-
+    def __init__(self, vit_weights, **kwargs):
+        QWenV2Weight.__init__(self, **kwargs)
+        BaseMultiModalWeightInfo.__init__(self, vit_weights=vit_weights, **kwargs)
 
 class QWenV2Audio(QWenV2, MultiModalMixin):
     def _init_multimodal(

@@ -40,12 +40,9 @@ void RemoteRpcServer::initLocalPeerInfo() {
         return;
     }
     // worker 0 is master (rank 0)
-    for (auto& worker_addr : maga_init_params_.runtime_config.worker_addrs) {
-        RTP_LLM_LOG_INFO("In gpt init params: worker address is %s", worker_addr.c_str());
-        resource_.workers.push_back(worker_addr);
-    }
     for (auto& worker_grpc_addr : maga_init_params_.runtime_config.worker_grpc_addrs) {
         RTP_LLM_LOG_INFO("In gpt init params: worker grpc address is %s", worker_grpc_addr.c_str());
+        resource_.workers.push_back(worker_grpc_addr);
         resource_.grpc_workers.push_back(worker_grpc_addr);
     }
     string worker_info = "worker address is ";

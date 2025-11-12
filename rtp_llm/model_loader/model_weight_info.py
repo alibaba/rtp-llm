@@ -24,6 +24,7 @@ from rtp_llm.utils.model_weight import (
     tolerate_failed,
 )
 from rtp_llm.utils.weight_type import WEIGHT_TYPE
+from rtp_llm.ops import VitSeparation
 
 # Forward references for type hints
 from typing import TYPE_CHECKING
@@ -154,6 +155,7 @@ class ModelDeployWeightInfo:
         merge_lora: bool = False,
         tp_size: int = 1,
         tp_rank: int = 0,
+        vit_config: Optional["VitConfig"] = None,
     ):
         """Initialize ModelDeployWeightInfo with independent configuration objects."""
         self.py_model_config = py_model_config
@@ -205,8 +207,7 @@ class ModelDeployWeightInfo:
         self.nope_head_dim = py_model_config.attn_config.nope_head_dim
         self.rope_head_dim = py_model_config.attn_config.rope_head_dim
         self.v_head_dim = py_model_config.attn_config.v_head_dim
-        # for vit sep
-        self.vit_separation = engine_config.runtime_config.vit_separation
+        self.vit_separation = vit_config.vit_separation
 
         # for eplb
         # phy2log should be loaded from LoadConfig, not from config
@@ -226,6 +227,8 @@ class ModelDeployWeightInfo:
             def __init__(self, py_model_config, engine_config):
                 self.py_model_config = py_model_config
                 self.engine_config = engine_config
+                self.py_env_configs = None  # Will be set if needed
+                self.py_eplb = None  # Will be set if needed
         
         self.config = ConfigWrapper(py_model_config, engine_config)
 
@@ -262,6 +265,10 @@ class ModelDeployWeightInfo:
 
     def get_weight_info(self) -> ModelWeightInfo:
         weight_info = self._get_weight_info()
+        if (isinstance(self, BaseMultiModalWeightInfo) and
+            self.vit_separation != VitSeparation.VIT_SEPARATION_REMOTE and
+            self.tp_rank == 0):
+            weight_info.weights.extend(self._get_vit_info())
         use_fp32 = self.py_model_config.use_float32
         if use_fp32:
             weight_info = weight_info.set_weight_dtype(torch.float32)
@@ -529,7 +536,7 @@ class ModelDeployWeightInfo:
         if (
             database.is_ft_style
             and database.ft_weight_params
-            and self.vit_separation != 1
+            and self.vit_separation != VitSeparation.VIT_SEPARATION_ROLE
         ):
             # check ft_style ParallelInfo is match weight's ParallelInfo
             src_tp_size = int(database.ft_weight_params.get("TP_SIZE", self.tp_size))

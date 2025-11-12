@@ -235,15 +235,9 @@ class MiniCPMVVitWeight(BaseVitWeights):
 
 class MiniCPMVWeightInfo(LlamaWeightInfo, BaseMultiModalWeightInfo):
 
-    def __init__(self, config, tp_size, tp_rank):
-        LlamaWeightInfo.__init__(self, config, tp_size, tp_rank, prefix="llm.")
-        BaseMultiModalWeightInfo.__init__(self, config)
-
-    def _get_weight_info(self):
-        llama_vl_weight = super()._get_weight_info()
-        self._get_vit_info(llama_vl_weight)
-        return llama_vl_weight
-
+    def __init__(self, vit_weights, **kwargs):
+        LlamaWeightInfo.__init__(self, prefix="llm.", **kwargs)
+        BaseMultiModalWeightInfo.__init__(self, vit_weights=vit_weights, **kwargs)
 
 class MiniCPMVEmbedding(Llama, MultiModalMixin):
 

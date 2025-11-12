@@ -27,6 +27,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("VIT", RoleType::VIT)
         .value("FRONTEND", RoleType::FRONTEND);
 
+    py::enum_<VitSeparation>(m, "VitSeparation")
+        .value("VIT_SEPARATION_LOCAL", VitSeparation::VIT_SEPARATION_LOCAL)
+        .value("VIT_SEPARATION_ROLE", VitSeparation::VIT_SEPARATION_ROLE)
+        .value("VIT_SEPARATION_REMOTE", VitSeparation::VIT_SEPARATION_REMOTE);
+
     py::enum_<EplbMode>(m, "EplbMode")
         .value("NONE", EplbMode::NONE)
         .value("STATS", EplbMode::STATS)
@@ -992,6 +997,27 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("include_sep_tokens", &MMModelConfig::include_sep_tokens)
         .def_readwrite("mm_position_ids_style", &MMModelConfig::mm_position_ids_style)
         .def_readwrite("position_id_len_factor", &MMModelConfig::position_id_len_factor);
+
+    // Register VitConfig
+    py::class_<VitConfig>(m, "VitConfig")
+        .def(py::init<>())
+        .def_readwrite("vit_separation", &VitConfig::vit_separation)
+        .def("to_string", &VitConfig::to_string)
+        .def(py::pickle(
+            [](const VitConfig& self) {
+                return py::make_tuple(self.vit_separation);
+            },
+            [](py::tuple t) {
+                if (t.size() != 1) throw std::runtime_error("Invalid state!");
+                VitConfig c;
+                try {
+                    c.vit_separation = t[0].cast<VitSeparation>();
+                } catch (const std::exception& e) {
+                    throw std::runtime_error(std::string("VitConfig unpickle error: ") + e.what());
+                }
+                return c;
+            }
+        ));
 
     // Register PDSepConfig
     py::class_<PDSepConfig>(m, "PDSepConfig")

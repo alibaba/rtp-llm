@@ -38,7 +38,8 @@ public:
 private:
     static size_t getDefaultRuntimeMemorySize(const RuntimeConfig& runtime_config,
                                                const ParallelismConfig& parallelism_config,
-                                               const MMModelConfig& mm_model_config);
+                                               const MMModelConfig& mm_model_config,
+                                               const SpeculativeExecutionConfig* sp_config = nullptr);
     static size_t getKVCacheMemorySize(const RuntimeConfig& runtime_config,
                                        const KVCacheConfig& kv_cache_config,
                                        const ModelConfig& model_config,

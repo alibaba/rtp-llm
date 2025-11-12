@@ -11,6 +11,12 @@ enum RoleType {
     FRONTEND = 4
 };
 
+enum VitSeparation {
+    VIT_SEPARATION_LOCAL  = 0,  // Local multimodal processing
+    VIT_SEPARATION_ROLE   = 1,  // VIT role (separated VIT process)
+    VIT_SEPARATION_REMOTE = 2   // Remote multimodal processing
+};
+
 class RoleAddr {
 public:
     RoleType    role;

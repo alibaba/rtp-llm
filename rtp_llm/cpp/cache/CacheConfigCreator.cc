@@ -38,7 +38,8 @@ CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig& model_confi
 
 size_t CacheConfigCreator::getDefaultRuntimeMemorySize(const RuntimeConfig& runtime_config,
                                                        const ParallelismConfig& parallelism_config,
-                                                       const MMModelConfig& mm_model_config) {
+                                                       const MMModelConfig& mm_model_config,
+                                                       const SpeculativeExecutionConfig* sp_config) {
     auto reserve_runtime_mem_bytes = runtime_config.reserve_runtime_mem_mb * 1024 * 1024;
     RTP_LLM_LOG_INFO("RuntimeConfig has reserve_runtime_mem_mb=%ld", runtime_config.reserve_runtime_mem_mb);
 
@@ -63,7 +64,7 @@ size_t CacheConfigCreator::getDefaultRuntimeMemorySize(const RuntimeConfig& runt
         }
     }
 
-    if (runtime_config.enable_speculative_decoding) {
+    if (sp_config && sp_config->sp_type != "none" && !sp_config->sp_type.empty()) {
         const auto minimal_runtime_required = 2L * 1024 * 1024 * 1024;  // 2 GiB
         if (reserve_runtime_mem_bytes < minimal_runtime_required) {
             reserve_runtime_mem_bytes = minimal_runtime_required;
@@ -102,7 +103,7 @@ size_t CacheConfigCreator::getKVCacheMemorySize(const RuntimeConfig& runtime_con
                 std::min(device_reserved_memory_bytes, warm_up_result->device_reserved_bytes);
         }
 
-        size_t env_runtime_required_bytes = getDefaultRuntimeMemorySize(runtime_config, parallelism_config, mm_model_config);
+        size_t env_runtime_required_bytes = getDefaultRuntimeMemorySize(runtime_config, parallelism_config, mm_model_config, nullptr);
         runtime_required_bytes            = std::max(env_runtime_required_bytes, warm_up_result->max_used_memory);
 
         RTP_LLM_LOG_INFO(
@@ -112,7 +113,7 @@ size_t CacheConfigCreator::getKVCacheMemorySize(const RuntimeConfig& runtime_con
             env_runtime_required_bytes / 1024 / 1024,
             runtime_required_bytes / 1024 / 1024);
     } else {
-        runtime_required_bytes = getDefaultRuntimeMemorySize(runtime_config, parallelism_config, mm_model_config);
+        runtime_required_bytes = getDefaultRuntimeMemorySize(runtime_config, parallelism_config, mm_model_config, nullptr);
         RTP_LLM_LOG_INFO("warm up result not available, use default runtime memory size %ld MiB",
                          runtime_required_bytes / 1024 / 1024);
     }

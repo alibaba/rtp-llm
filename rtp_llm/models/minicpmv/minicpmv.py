@@ -194,9 +194,9 @@ class MiniCPMVVitWeight(BaseVitWeights):
 
 class MiniCPMVWeightInfo(QWenV2Weight, BaseMultiModalWeightInfo):
 
-    def __init__(self, config, tp_size, tp_rank):
-        QWenV2Weight.__init__(self, config, tp_size, tp_rank, prefix="llm.")
-        BaseMultiModalWeightInfo.__init__(self, config)
+    def __init__(self, vit_weights, **kwargs):
+        QWenV2Weight.__init__(self, prefix="llm.", **kwargs)
+        BaseMultiModalWeightInfo.__init__(self, vit_weights=vit_weights, **kwargs)
 
     def _get_weight_info(self):
         weights = super()._get_weight_info()

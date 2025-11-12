@@ -131,6 +131,8 @@ try:
         ParallelismConfig,
         ProfilingDebugLoggingConfig,
         TaskType,
+        VitConfig,
+        VitSeparation,
     )
     # Alias for backward compatibility
     from libth_transformer_config import (

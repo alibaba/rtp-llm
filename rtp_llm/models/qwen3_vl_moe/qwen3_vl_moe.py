@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 from transformers.activations import ACT2FN
 
-from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.config.model_config import VitParameters
 from rtp_llm.model_factory_register import register_model
@@ -60,20 +59,15 @@ class Qwen3_VisionMlp(nn.Module):
 
 
 class QWenV3VLWeightInfo(QWenV3MoeWeight, BaseMultiModalWeightInfo):
-    def __init__(self, config, tp_size, tp_rank):
-        QWenV3MoeWeight.__init__(self, config, tp_size, tp_rank)
-        BaseMultiModalWeightInfo.__init__(self, config)
+    def __init__(self, vit_weights, **kwargs):
+        QWenV3MoeWeight.__init__(self, **kwargs)
+        BaseMultiModalWeightInfo.__init__(self, vit_weights=vit_weights, **kwargs)
         self.bias = False
         self.use_qk_norm = True
 
     @property
     def support_lora(self) -> bool:
         return True
-
-    def _get_weight_info(self):
-        weights = self._get_hf_weight_info()
-        weights = self._get_vit_info(weights)
-        return weights
 
 
 class QWen3_VL_MOE(QWen2_5_VL):

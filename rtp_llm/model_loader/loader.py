@@ -298,7 +298,8 @@ class ModelLoader:
         return model_weights
 
     def prepare_weights(self, device: str):
-        if self._load_config.vit_separation != 1 and not self._is_attn_model:
+        from rtp_llm.ops import VitSeparation
+        if self._load_config.vit_separation != int(VitSeparation.VIT_SEPARATION_ROLE) and not self._is_attn_model:
             for id in range(self._load_config.num_layers):
                 results = self._load_layer_weights(id, device)
                 for name, tensor in results.items():
@@ -325,7 +326,8 @@ class ModelLoader:
         WeightInfo = ModelLoader.WeightInfo
         tensor_to_weight_map: Dict[str, WeightInfo] = {}
         weight_info_list: List[WeightInfo] = []
-        if self._load_config.vit_separation != 1:
+        from rtp_llm.ops import VitSeparation
+        if self._load_config.vit_separation != int(VitSeparation.VIT_SEPARATION_ROLE):
             for layer_id in range(self._load_config.num_layers):
                 layer_weights = self._model_weights_info.layer_weights[layer_id]
                 if isinstance(layer_weights, WeightModule):
@@ -407,7 +409,8 @@ class ModelLoader:
         for layer_id, name, tensor in self.prepare_weights(convert_device):
             if convert_device != device:
                 tensor = tensor.to(device)
-            if layer_id is not None and self._load_config.vit_separation != 1:
+            from rtp_llm.ops import VitSeparation
+            if layer_id is not None and self._load_config.vit_separation != int(VitSeparation.VIT_SEPARATION_ROLE):
                 weights.set_layer_weight(layer_id, name, tensor)
             else:
                 weights.set_global_weight(name, tensor)
@@ -450,7 +453,8 @@ class ModelLoader:
                 f"embedding_size is {self._weights_info.config.py_model_config.embedding_size_}, vocab size is {self._weights_info.config.py_model_config.vocab_size}"
             )
 
-        if self._load_config.vit_separation != 1:
+        from rtp_llm.ops import VitSeparation
+        if self._load_config.vit_separation != int(VitSeparation.VIT_SEPARATION_ROLE):
             if self._task_type == TaskType.LANGUAGE_MODEL:
                 lm_head_w = weight.steal_global_weight(W.lm_head)
                 if lm_head_w == None:

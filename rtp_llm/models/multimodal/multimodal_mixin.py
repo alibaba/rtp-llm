@@ -9,7 +9,6 @@ from rtp_llm.config.model_config import VitParameters
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.model_loader.model_weight_info import (
-    ModelDeployWeightInfo,
     ModelWeightInfo,
 )
 from rtp_llm.model_loader.weight_module import MMAtomicWeight
@@ -60,38 +59,25 @@ class BaseVitWeights:
 class BaseMultiModalWeightInfo:
     def __init__(
         self,
-        mm_model_config: Any,  # MMModelConfig
-        vit_separation: int,
-        tp_rank: int,
+        vit_weights: Optional[BaseVitWeights],
+        **kwargs,
     ):
-        self.vit_weights: Optional[BaseVitWeights] = None
-        if hasattr(mm_model_config, 'mm_related_params') and mm_model_config.mm_related_params:
-            self.vit_weights = mm_model_config.mm_related_params.vit_weights
-        self.vit_separation: int = vit_separation
-        self.tp_rank = tp_rank
+        self.vit_weights: Optional[BaseVitWeights] = vit_weights
 
-    def _get_vit_info(self, llm_weights: ModelDeployWeightInfo):
-        # Currently, the multimodel network isn't split between devices. Only Rank 0 loads the weights.
-        # After supporting TP mm network, we will remove the check here.
-        if self.vit_separation == 1:
-            llm_weights = ModelWeightInfo(layer_weights=[], weights=[])
-
-        if self.vit_separation != 2:
-            if self.vit_weights is not None and self.tp_rank == 0:
-                weight_names = self.vit_weights.weight_names
-                ckpt_prefix = self.vit_weights.ckpt_prefix
-
-                for w in weight_names:
-                    w_name = ckpt_prefix + w
-                    llm_weights.weights.append(
-                        MMAtomicWeight(
-                            w,
-                            [CkptWeightInfo(w_name, identity)],
-                            identity,
-                            split_func=sp_id,
-                        )
+    def _get_vit_info(self, llm_weights: ModelWeightInfo) -> ModelWeightInfo:
+        if self.vit_weights is not None:
+            weight_names = self.vit_weights.weight_names
+            ckpt_prefix = self.vit_weights.ckpt_prefix
+            for w in weight_names:
+                w_name = ckpt_prefix + w
+                llm_weights.weights.append(
+                    MMAtomicWeight(
+                        w,
+                        [CkptWeightInfo(w_name, identity)],
+                        identity,
+                        split_func=sp_id,
                     )
-
+                )
         return llm_weights
 
 

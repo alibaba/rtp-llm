@@ -97,9 +97,9 @@ class EngineConfig:
         cache_store_config = py_env_configs.cache_store_config
         arpc_config = py_env_configs.arpc_config
         
-        # Setup pd_sep_config role_type
-
-        if py_env_configs.vit_config.vit_separation == 1:
+        # Setup pd_sep_config role_type based on vit_separation
+        from rtp_llm.ops import VitSeparation
+        if py_env_configs.vit_config.vit_separation == VitSeparation.VIT_SEPARATION_ROLE:
             pd_sep_config.role_type = RoleType.VIT
         else:
             # role_config.role_type property automatically converts string to RoleType enum
@@ -236,7 +236,6 @@ def update_worker_addrs(
                 f"{member.cache_store_rdma_listen_port} to local rank {local_rank}, world rank {member.world_rank}"
             )
     runtime_config.worker_grpc_addrs = worker_grpc_addrs
-    runtime_config.worker_addrs = worker_addrs
 
 
 def setup_pd_sep_config(

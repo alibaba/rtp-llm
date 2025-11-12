@@ -147,7 +147,8 @@ class GangConfig:
 
 class VitConfig:
     def __init__(self):
-        self.vit_separation: int = 0
+        from rtp_llm.ops import VitSeparation
+        self.vit_separation: VitSeparation = VitSeparation.VIT_SEPARATION_LOCAL
         self.vit_run_batch: int = 1  # Batch size for VIT processing
         self.vit_trt: int = 0
         self.trt_cache_enabled: int = 0

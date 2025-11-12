@@ -13,11 +13,6 @@ class ChatGlmV4VisionVitWeights(BaseVitWeights):
 
 
 class ChatGlmV4VisionWeightInfo(GlmV2WeightInfo, BaseMultiModalWeightInfo):
-    def __init__(self, config: ModelConfig, tp_size: int, tp_rank: int):
-        GlmV2WeightInfo.__init__(self, config, tp_size, tp_rank)
-        BaseMultiModalWeightInfo.__init__(self, config)
-
-    def _get_weight_info(self):
-        glm_4v_weight = super()._get_weight_info()
-        glm_4v_weight = self._get_vit_info(glm_4v_weight)
-        return glm_4v_weight
+    def __init__(self, vit_weights, **kwargs):
+        GlmV2WeightInfo.__init__(self, **kwargs)
+        BaseMultiModalWeightInfo.__init__(self, vit_weights=vit_weights, **kwargs)

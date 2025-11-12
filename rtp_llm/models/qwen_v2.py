@@ -47,7 +47,6 @@ class QWenV2Weight(ModelDeployWeightInfo):
         self.model_prefix: str = "model."
         self.bias = True
         self.strip_model_prefix = False
-        super().__init__(*args, **kwargs)
 
     @property
     def support_lora(self):

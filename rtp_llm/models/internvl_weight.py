@@ -66,9 +66,9 @@ class InternVLVitWeight(BaseVitWeights):
 
 
 class InternVLWeightInfo(ModelDeployWeightInfo, BaseMultiModalWeightInfo):
-    def __init__(self, config, tp_size, tp_rank):
-        ModelDeployWeightInfo.__init__(self, config, tp_size, tp_rank)
-        BaseMultiModalWeightInfo.__init__(self, config)
+    def __init__(self, vit_weights, **kwargs):
+        ModelDeployWeightInfo.__init__(self, **kwargs)
+        BaseMultiModalWeightInfo.__init__(self, vit_weights=vit_weights, **kwargs)
         self._names = None
         self._merge_qkv = None
         self._merge_qkv_b = None
@@ -196,5 +196,4 @@ class InternVLWeightInfo(ModelDeployWeightInfo, BaseMultiModalWeightInfo):
             layer_weights.append(layer_weight)
 
         model_weights = ModelWeightInfo(layer_weights=layer_weights, weights=weights)
-        model_weights = self._get_vit_info(model_weights)
         return model_weights
