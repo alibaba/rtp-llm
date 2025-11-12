@@ -308,8 +308,6 @@ private:
     hipStream_t     current_stream_ = nullptr;
     hipDeviceProp_t device_prop_;
 
-    BufferPtr curandstate_buf_;  // for sampler use.
-
     rocm::hipblasMMWrapper* hipblasMMWrapperPtr() const {
         return hipblas_mm_wrapper_.get();
     }
