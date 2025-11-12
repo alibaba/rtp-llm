@@ -279,7 +279,7 @@ class QWen2_VL(QWen_VL, MultiModalMixin):
     @staticmethod
     def _from_hf(config: ModelConfig, config_json: Dict[str, Any]):
         config.vocab_size = config_json["vocab_size"]
-        config.attn_config.rope_config.base = config_json["rope_theta"]
+        config.attn_config.rope_config.base = int(config_json["rope_theta"])
         config.max_seq_len = 10240
         config.activation_type = "SiGLU"
         config.head_num_ = config_json["num_attention_heads"]
