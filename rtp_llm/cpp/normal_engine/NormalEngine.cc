@@ -23,7 +23,6 @@ namespace rtp_llm {
 NormalEngine::NormalEngine(const EngineInitParams& params):
     EngineBase(params),
     model_config_(params.model_config_),
-    mm_model_config_(params.mm_model_config_),
     parallelism_config(params.parallelism_config),
     runtime_config(params.runtime_config),
     eplb_config(params.eplb_config),
@@ -38,7 +37,7 @@ NormalEngine::NormalEngine(const EngineInitParams& params):
     gen_timeline_sync_(params.profiling_debug_logging_config.gen_timeline_sync) {
     RTP_LLM_LOG_INFO(__PRETTY_FUNCTION__);
     std::optional<WarmUpResult> warm_up_result = std::nullopt;
-    if (runtime_config.warm_up && (!mm_model_config_.is_multimodal) && !ffn_disaggregate_config.enable_ffn_disaggregate) {
+    if (runtime_config.warm_up && (!model_config_.mm_model_config.is_multimodal) && !ffn_disaggregate_config.enable_ffn_disaggregate) {
         // warm up
         RTP_LLM_LOG_INFO("warm up (max_context_batch_size %d, max_seq_len %d calculate_loss %d) query begin",
                          runtime_config.fifo_scheduler_config.max_context_batch_size,
@@ -188,7 +187,7 @@ std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_ne
 }
 
 void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) {
-    auto result = CacheConfigCreator::createConfig(model_config_, mm_model_config_, parallelism_config, runtime_config, kv_cache_config, warm_up_result);
+    auto result = CacheConfigCreator::createConfig(model_config_, parallelism_config, runtime_config, kv_cache_config, warm_up_result);
     RTP_LLM_LOG_INFO(
         "create cache manager with block nums %d, block size %ld KB", result.block_nums, result.block_size / 1024);
     resource_context_.cache_manager = make_shared<CacheManager>(result, device_, false, metrics_reporter_, kv_cache_config, parallelism_config, runtime_config);

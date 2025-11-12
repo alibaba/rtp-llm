@@ -6,7 +6,6 @@ import torch
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleAddr, RoleType
 from rtp_llm.config.model_config import ModelConfig as PyModelConfig
-from rtp_llm.config.py_config_modules import GangConfig
 from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient
 from rtp_llm.ops import FfnDisAggregateConfig, SpeculativeExecutionConfig
 from rtp_llm.metrics import kmonitor
@@ -29,11 +28,11 @@ class BackendRPCServerVisitor:
         pd_sep_config,  # PDSepConfig from ops
         runtime_config,  # RuntimeConfig from ops
         ffn_disaggregate_config: FfnDisAggregateConfig,
-        gang_config: GangConfig,
         sp_config: Optional[SpeculativeExecutionConfig] = None,
         max_rpc_timeout_ms: int = 0,
         decode_entrance: bool = False,
         separated_frontend: bool = False,
+        gang_info=None,
     ) -> None:
         self.max_seq_len = max_seq_len
         self.seq_size_per_block = seq_size_per_block
@@ -47,14 +46,14 @@ class BackendRPCServerVisitor:
         
         self.model_rpc_client = ModelRpcClient(
             self.ffn_disaggregate_config,
-            gang_config,
             max_rpc_timeout_ms=self.max_rpc_timeout_ms,
             decode_entrance=self.decode_entrance,
+            gang_info=gang_info,
         )
         
         host_args = HostServiceArgs.create_from_env()
         self.backend_role_list = self.get_backend_role_list(
-            self.pd_sep_config, self.runtime_config, host_args
+            self.pd_sep_config, host_args
         )
         self.host_service = HostService(host_args)
         self.master_client = MasterClient()
@@ -62,7 +61,7 @@ class BackendRPCServerVisitor:
 
     @staticmethod
     def get_backend_role_list(
-        pd_sep_config, runtime_config, host_args: HostServiceArgs
+        pd_sep_config, host_args: HostServiceArgs
     ) -> List[RoleType]:
         role_list: List[RoleType] = []
 
@@ -70,10 +69,6 @@ class BackendRPCServerVisitor:
         config_role_type = pd_sep_config.role_type
         if hasattr(config_role_type, "value"):
             config_role_type = config_role_type.value
-
-        from rtp_llm.ops import VitSeparation
-        # Note: vit_separation is now in vit_config, not runtime_config
-        # This check should be done elsewhere if needed
 
         if config_role_type == RoleType.PREFILL.value and not pd_sep_config.decode_entrance:
             role_list.append(RoleType.DECODE)

@@ -12,7 +12,6 @@ namespace rtp_llm {
 class NormalBatchStreamProcessor {
 public:
     NormalBatchStreamProcessor(const ModelConfig& model_config,
-                               const MMModelConfig& mm_model_config,
                                const PDSepConfig& pd_sep_config,
                                const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
                                const CacheConfig& cache_config,
@@ -22,9 +21,9 @@ public:
         input_vocab_size_(model_config.input_vocab_size),
         use_int8_kv_cache_(model_config.attn_config.kv_cache_dtype == rtp_llm::KvCacheDataType::INT8),
         has_positional_encoding_(model_config.has_positional_encoding),
-        is_multimodal_(mm_model_config.is_multimodal),
-        mm_position_ids_style_((PositionIdsStyle)mm_model_config.mm_position_ids_style),
-        position_id_len_factor_(mm_model_config.position_id_len_factor),
+        is_multimodal_(model_config.mm_model_config.is_multimodal),
+        mm_position_ids_style_((PositionIdsStyle)model_config.mm_model_config.mm_position_ids_style),
+        position_id_len_factor_(model_config.attn_config.rope_config.index_factor),
         role_type_(pd_sep_config.role_type),
         decode_entrance_(pd_sep_config.decode_entrance),
         k_block_size_(cache_config.k_block_stride),

@@ -197,13 +197,11 @@ absl::Status SpeculativeEngine::initCacheManager(std::optional<WarmUpResult> war
         const auto& propose_params = propose_model_params_->getEngineInitParams();
         const auto& config                 = CacheConfigCreator::createSpConfig(
                                                                 score_model_params_.model_config_,
-                                                                score_model_params_.mm_model_config_,
                                                                 score_model_params_.parallelism_config,
                                                                 score_model_params_.runtime_config,
                                                                 score_model_params_.kv_cache_config,
                                                                 score_model_params_.sp_config,
                                                                 propose_params.model_config_,
-                                                                propose_params.mm_model_config_,
                                                                 propose_params.parallelism_config,
                                                                 propose_params.runtime_config,
                                                                 propose_params.kv_cache_config,
@@ -235,7 +233,6 @@ absl::Status SpeculativeEngine::initCacheManager(std::optional<WarmUpResult> war
     } else {
         const auto& config = CacheConfigCreator::createConfig(
                                     score_model_params_.model_config_,
-                                    score_model_params_.mm_model_config_,
                                     score_model_params_.parallelism_config,
                                     score_model_params_.runtime_config,
                                     score_model_params_.kv_cache_config,

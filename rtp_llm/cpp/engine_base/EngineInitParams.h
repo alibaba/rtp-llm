@@ -25,7 +25,6 @@ struct EngineInitParams {
     // This class is the only one that holds gpt_weights object globally.
     EngineInitParams(size_t                           model_id,
                      const ModelConfig&               model_config,
-                     const MMModelConfig&             mm_model_config,
                      const ParallelismConfig&         parallelism_config,
                      const RuntimeConfig&              runtime_config,
                      const PDSepConfig&               pd_sep_config,
@@ -48,7 +47,6 @@ struct EngineInitParams {
                      py::object                       py_eplb = py::none()):
         model_id(model_id),
         model_config_(model_config),
-        mm_model_config_(mm_model_config),
         parallelism_config(parallelism_config),
         runtime_config(runtime_config),
         eplb_config(model_config.eplb_config),
@@ -88,7 +86,6 @@ struct EngineInitParams {
 
     size_t                    model_id;
     ModelConfig               model_config_;
-    MMModelConfig             mm_model_config_;
     ParallelismConfig         parallelism_config;
     RuntimeConfig             runtime_config;
     EPLBConfig                eplb_config;

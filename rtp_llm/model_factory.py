@@ -12,7 +12,6 @@ from rtp_llm.config.engine_config import EngineConfig, finalize_scheduler_config
 from rtp_llm.config.model_config import ModelConfig, build_py_model_config
 from rtp_llm.config.model_args import ModelArgs
 from rtp_llm.config.py_config_modules import (
-    GangConfig,
     VitConfig,
     LoraConfig,
     GenerateEnvConfig,
@@ -166,7 +165,7 @@ class ModelFactory:
         model_config: ModelConfig,
         mm_model_config: MMModelConfig,
         engine_config: EngineConfig,
-        gang_config: "GangConfig",
+        gang_info,
         vit_config: Optional[VitConfig] = None,
         merge_lora: bool = False,
         propose_model_config: Optional[ModelConfig] = None,
@@ -181,7 +180,7 @@ class ModelFactory:
             model_config: Model configuration
             mm_model_config: Multimodal model configuration
             engine_config: Engine configuration
-            gang_config: GangConfig for distributed communication
+            gang_info: GangInfo instance from GangServer
             vit_config: Optional VitConfig (needed for multimodal models)
             merge_lora: Whether to merge LoRA weights
             propose_model_config: Optional propose model configuration
@@ -205,7 +204,7 @@ class ModelFactory:
             engine_config=engine_config,
         )
 
-        model = AsyncModel(model, gang_config, propose_model)
+        model = AsyncModel(model, gang_info, propose_model)
         logging.info("create rpc model done")
         return model
 

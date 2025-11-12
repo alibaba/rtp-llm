@@ -17,7 +17,6 @@ struct ProposeModelEngineInitParams {
                                  std::string                      sp_type,
                                  size_t                           gen_num_per_circle,
                                  const ModelConfig&               model_config,
-                                 const MMModelConfig&             mm_model_config,
                                  const ParallelismConfig&         parallelism_config,
                                  const RuntimeConfig&              runtime_config,
                                  const PDSepConfig&               pd_sep_config,
@@ -40,7 +39,7 @@ struct ProposeModelEngineInitParams {
                                  py::object                       py_eplb = py::none()):
         sp_type(sp_type),
         gen_num_per_circle(gen_num_per_circle),
-        vanilla_model_params(new EngineInitParams(model_id, model_config, mm_model_config, parallelism_config, runtime_config, pd_sep_config, concurrency_config, fmha_config, kv_cache_config, profiling_debug_logging_config, hw_kernel_config, device_resource_config, moe_config, model_specific_config, sp_config, cache_store_config, misc_config, arpc_config, ffn_disaggregate_config, vit_config, std::move(gpt_weights), py_model, py_eplb)) {}
+        vanilla_model_params(new EngineInitParams(model_id, model_config, parallelism_config, runtime_config, pd_sep_config, concurrency_config, fmha_config, kv_cache_config, profiling_debug_logging_config, hw_kernel_config, device_resource_config, moe_config, model_specific_config, sp_config, cache_store_config, misc_config, arpc_config, ffn_disaggregate_config, vit_config, std::move(gpt_weights), py_model, py_eplb)) {}
 
     // Consturctor for deterministic propose model
     ProposeModelEngineInitParams(std::string sp_type, size_t gen_num_per_circle):

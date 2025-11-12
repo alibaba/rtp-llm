@@ -63,7 +63,6 @@ private:
     std::atomic<bool>               running_{false};
     std::unique_ptr<Executor>       executor_;
     ModelConfig                     model_config_;
-    MMModelConfig                   mm_model_config_;
     ParallelismConfig               parallelism_config;
     RuntimeConfig                   runtime_config;
     EPLBConfig                      eplb_config;

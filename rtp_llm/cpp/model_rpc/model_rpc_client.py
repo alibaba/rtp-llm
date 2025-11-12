@@ -7,7 +7,6 @@ from grpc import StatusCode
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleType
-from rtp_llm.config.py_config_modules import GangConfig
 from rtp_llm.ops import EPLBConfig, FfnDisAggregateConfig
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     ErrorDetailsPB,
@@ -17,7 +16,6 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     RoleAddrPB,
 )
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import RpcServiceStub
-from rtp_llm.distribute.gang_info import get_gang_info
 from rtp_llm.distribute.worker_info import g_parallel_info, g_worker_info
 from rtp_llm.utils.base_model_datatypes import (
     AuxInfo,
@@ -269,10 +267,10 @@ class ModelRpcClient(object):
     def __init__(
         self,
         ffn_disaggregate_config: FfnDisAggregateConfig,
-        gang_config: GangConfig,
         max_rpc_timeout_ms: int = 0,
         decode_entrance: bool = False,
         address: Optional[str] = None,
+        gang_info=None,
     ):
         # 创建到服务器的连接
         if not address:
@@ -287,14 +285,7 @@ class ModelRpcClient(object):
                 + f"[tp_size: {g_parallel_info.tp_size}] all members: "
                 + "{"
             )
-            members = get_gang_info(
-                distribute_config_file=gang_config.distribute_config_file,
-                gang_config_string=gang_config.gang_config_string,
-                json_gang_parts=gang_config.json_gang_parts,
-                leader_address=gang_config.leader_address,
-                gang_annocation_path=gang_config.gang_annocation_path,
-                zone_name=gang_config.zone_name,
-            ).members
+            members = gang_info.members
             for member in members:
                 members_info_str += f"{member}\n"
                 if member.local_rank % g_parallel_info.tp_size == 0:

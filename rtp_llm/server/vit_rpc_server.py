@@ -14,6 +14,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
 )
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.distribute.gang_server import GangServer
 from rtp_llm.distribute.worker_info import g_worker_info
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.ops import MMModelConfig
@@ -75,8 +76,13 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
 def vit_start_server():
     py_env_configs = setup_args()
     
+    # Create GangServer and get gang_info
+    gang_server = GangServer(py_env_configs.gang_config, py_env_configs.server_config)
+    gang_server.start()
+    gang_info = gang_server._gang_info
+    
     # Create and fully initialize engine config (global singleton)
-    engine_config = EngineConfig.create(py_env_configs)
+    engine_config = EngineConfig.create(py_env_configs, gang_info=gang_info)
     
     # Create model configs (ModelConfig construction is handled in ModelFactory)
     # All model metadata (lora_infos, multi_task_prompt, model_name, template_type)
@@ -98,7 +104,7 @@ def vit_start_server():
         model_config=py_model_config,
         mm_model_config=mm_model_config,
         engine_config=engine_config,
-        gang_config=py_env_configs.gang_config,
+        gang_info=gang_info,
         vit_config=py_env_configs.vit_config,
         propose_model_config=propose_py_model_config,
     )

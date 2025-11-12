@@ -76,8 +76,11 @@ class BackendServer(object):
             # for debug online
             logging.info("DEBUG_START_FAKE_PROCESS is set, start fake backend server")
         else:
+            # Get gang_info from gang_server after start()
+            gang_info = self._gang_server._gang_info
+            
             # Create and fully initialize EngineConfig from py_env_configs
-            engine_config = EngineConfig.create(py_env_configs)
+            engine_config = EngineConfig.create(py_env_configs, gang_info=gang_info)
             
             # Create model configs (ModelConfig construction is handled in ModelFactory)
             py_model_config, propose_py_model_config = ModelFactory.create_model_configs(
@@ -99,7 +102,7 @@ class BackendServer(object):
                 model_config=py_model_config,
                 mm_model_config=mm_model_config,
                 engine_config=engine_config,
-                gang_config=py_env_configs.gang_config,
+                gang_info=gang_info,
                 vit_config=py_env_configs.vit_config,
                 propose_model_config=propose_py_model_config,
             )
@@ -120,10 +123,10 @@ class BackendServer(object):
                     pd_sep_config=engine_config.pd_sep_config,
                     runtime_config=engine_config.runtime_config,
                     ffn_disaggregate_config=engine_config.parallelism_config.ffn_disaggregate_config,
-                    gang_config=py_env_configs.gang_config,
                     sp_config=engine_config.sp_config,
                     max_rpc_timeout_ms=engine_config.pd_sep_config.max_rpc_timeout_ms,
                     decode_entrance=engine_config.pd_sep_config.decode_entrance,
+                    gang_info=gang_info,
                 )
                 # Get values from py_model_config for OpenaiEndpoint
                 template_type = py_model_config.template_type

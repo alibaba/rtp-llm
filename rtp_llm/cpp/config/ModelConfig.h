@@ -112,6 +112,9 @@ public:
     // EPLB configuration
     EPLBConfig eplb_config;
 
+    // Multimodal model configuration
+    MMModelConfig mm_model_config;
+
     // Fields merged from PyModelConfig
     std::string extra_data_path            = "";
     std::string local_extra_data_path      = "";
@@ -145,7 +148,7 @@ public:
     std::vector<std::vector<int64_t>> mm_sep_tokens          = {};
     bool                              include_sep_tokens     = false;
     int64_t                           mm_position_ids_style  = 0;  // 0 for default; 1 for chatglm4v; 2 for qwen2 vl
-    int64_t                           position_id_len_factor = 1;
+    // position_id_len_factor removed, use model_config.attn_config.rope_config.index_factor instead
 };
 
 }  // namespace rtp_llm

@@ -6,7 +6,6 @@ import torch
 from rtp_llm.async_decoder_engine.engine_creator import create_engine
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
-from rtp_llm.config.py_config_modules import GangConfig
 from rtp_llm.distribute.worker_info import g_parallel_info
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.propose_model.propose_model import ProposeModel
@@ -17,7 +16,7 @@ from rtp_llm.utils.gemm_utils.device_map import get_device
 
 class AsyncModel:
     def __init__(
-        self, model: BaseModel, gang_config: GangConfig, propose_model: Optional[ProposeModel] = None
+        self, model: BaseModel, gang_info, propose_model: Optional[ProposeModel] = None
     ) -> None:
         self.model = model
         self.propose_model = propose_model
@@ -27,7 +26,7 @@ class AsyncModel:
 
         assert self.config.max_seq_len > 0
         self.tokenizer = model.tokenizer
-        self.decoder_engine_ = create_engine(self.model, self.config, gang_config, self.propose_model)
+        self.decoder_engine_ = create_engine(self.model, self.config, gang_info, self.propose_model)
         self.decoder_engine_.start()
 
     def is_multimodal(self) -> bool:

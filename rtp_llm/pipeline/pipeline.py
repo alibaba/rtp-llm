@@ -15,7 +15,6 @@ from rtp_llm.frontend.tokenizer_factory.tokenizer_utils import (
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.metrics import GaugeMetrics, kmonitor
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
-from rtp_llm.config.py_config_modules import GangConfig
 from rtp_llm.ops import FfnDisAggregateConfig, SpecialTokens, SpeculativeExecutionConfig
 from rtp_llm.utils.base_model_datatypes import (
     GenerateInput,
@@ -47,10 +46,10 @@ class Pipeline(object):
         max_seq_len: int,  # max_seq_len_ from ModelConfig
         seq_size_per_block: int,  # seq_size_per_block_ from ModelConfig
         tokenizer: Optional[BaseTokenizer],
-        gang_config: GangConfig,
         sp_config: Optional[SpeculativeExecutionConfig] = None,
         separated_frontend: bool = False,
         mm_related_params: Optional[Any] = None,  # mm_related_params from ModelConfig (optional)
+        gang_info=None,
     ):
         self.pd_sep_config = pd_sep_config
         self.runtime_config = runtime_config
@@ -67,11 +66,11 @@ class Pipeline(object):
             pd_sep_config=pd_sep_config,
             runtime_config=runtime_config,
             ffn_disaggregate_config=ffn_disaggregate_config,
-            gang_config=gang_config,
             sp_config=sp_config,
             max_rpc_timeout_ms=pd_sep_config.max_rpc_timeout_ms,
             decode_entrance=pd_sep_config.decode_entrance,
             separated_frontend=separated_frontend,
+            gang_info=gang_info,
         )
 
     def encode(self, prompt: str):

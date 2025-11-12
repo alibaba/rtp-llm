@@ -16,8 +16,6 @@ from rtp_llm.model_loader.model_weight_info import (
     ModelWeightInfo,
 )
 from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
-from rtp_llm.models.base_model import BaseModel
-from rtp_llm.utils.multimodal_util import MultimodalInput
 from rtp_llm.models.multimodal.multimodal_mixin import (
     BaseMultiModalWeightInfo,
     BaseVitWeights,
@@ -279,7 +277,6 @@ class QWen2_VL(QWen_VL, MultiModalMixin):
     @staticmethod
     def _from_hf(config: ModelConfig, config_json: Dict[str, Any]):
         config.vocab_size = config_json["vocab_size"]
-        config.attn_config.rope_config.base = int(config_json["rope_theta"])
         config.max_seq_len = 10240
         config.activation_type = "SiGLU"
         config.head_num_ = config_json["num_attention_heads"]
@@ -295,20 +292,20 @@ class QWen2_VL(QWen_VL, MultiModalMixin):
         config.norm_type = "rmsnorm"
         config.layernorm_eps_ = config_json["rms_norm_eps"]
         config.has_post_decoder_layernorm_ = True
-        if config.special_tokens is None:
-            from rtp_llm.config.model_config import SpecialTokens
-            config.special_tokens = SpecialTokens()
         config.special_tokens.bos_token_id = config_json.get("bos_token_id", -1)
         config.special_tokens.eos_token_id = config_json.get("eos_token_id", 0)
         config.tie_word_embeddings_ = config_json.get("tie_word_embeddings", False)
-
-        config.attn_config.rope_config.style = 7
-        config.attn_config.rope_config.mrope_section = config_json["rope_scaling"].get(
-            "mrope_section", [16, 24, 24]
-        )
-        config.mm_position_ids_style_ = 2
-        config.position_id_len_factor_ = len(config.attn_config.rope_config.mrope_section)
-        config.attn_config.rope_config.dim = 128
+        config.mm_model_config.mm_position_ids_style = 2
+        rope_config = config.attn_config
+        rope_config.style = 7
+        rope_config.base = int(config_json["rope_theta"])
+        # mrope_section is not available in RopeConfig, using default value
+        mrope_section = config_json["rope_scaling"].get("mrope_section", [16, 24, 24])
+        rope_config.index_factor = len(mrope_section)
+        rope_config.mrope_dim1 = mrope_section[0]
+        rope_config.mrope_dim2 = mrope_section[1]
+        rope_config.mrope_dim3 = mrope_section[2]
+        rope_config.dim = 128
 
     @staticmethod
     def get_weight_cls():

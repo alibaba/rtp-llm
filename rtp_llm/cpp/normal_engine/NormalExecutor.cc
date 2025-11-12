@@ -75,7 +75,6 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
     const auto& cache_config = cache_manager ? cache_manager->cacheConfig() : CacheConfig();
     batch_stream_processor_.reset(new NormalBatchStreamProcessor(
         params.model_config_,
-        params.mm_model_config_,
         params.pd_sep_config,
         params.profiling_debug_logging_config,
         cache_config,

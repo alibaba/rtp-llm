@@ -38,7 +38,7 @@ CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig& model_confi
 
 size_t CacheConfigCreator::getDefaultRuntimeMemorySize(const RuntimeConfig& runtime_config,
                                                        const ParallelismConfig& parallelism_config,
-                                                       const MMModelConfig& mm_model_config,
+                                                       const ModelConfig& model_config,
                                                        const SpeculativeExecutionConfig* sp_config) {
     auto reserve_runtime_mem_bytes = runtime_config.reserve_runtime_mem_mb * 1024 * 1024;
     RTP_LLM_LOG_INFO("RuntimeConfig has reserve_runtime_mem_mb=%ld", runtime_config.reserve_runtime_mem_mb);
@@ -53,7 +53,7 @@ size_t CacheConfigCreator::getDefaultRuntimeMemorySize(const RuntimeConfig& runt
         reserve_runtime_mem_bytes = minimal_runtime_bytes;
     }
 
-    if (mm_model_config.is_multimodal) {
+    if (model_config.mm_model_config.is_multimodal) {
         const auto minimal_runtime_required = 2L * 1024 * 1024 * 1024;  // 2 GiB
         if (reserve_runtime_mem_bytes < minimal_runtime_required) {
             reserve_runtime_mem_bytes = minimal_runtime_required;
@@ -82,7 +82,6 @@ size_t CacheConfigCreator::getKVCacheMemorySize(const RuntimeConfig& runtime_con
                                                 const KVCacheConfig& kv_cache_config,
                                                 const ModelConfig& model_config,
                                                 const ParallelismConfig& parallelism_config,
-                                                const MMModelConfig& mm_model_config,
                                                 const std::optional<WarmUpResult>& warm_up_result) {
     const auto device                       = rtp_llm::DeviceFactory::getDefaultDevice();
     size_t     device_reserved_memory_bytes = device->getDeviceStatus().device_memory_status.preserved_bytes;
@@ -103,7 +102,7 @@ size_t CacheConfigCreator::getKVCacheMemorySize(const RuntimeConfig& runtime_con
                 std::min(device_reserved_memory_bytes, warm_up_result->device_reserved_bytes);
         }
 
-        size_t env_runtime_required_bytes = getDefaultRuntimeMemorySize(runtime_config, parallelism_config, mm_model_config, nullptr);
+        size_t env_runtime_required_bytes = getDefaultRuntimeMemorySize(runtime_config, parallelism_config, model_config, nullptr);
         runtime_required_bytes            = std::max(env_runtime_required_bytes, warm_up_result->max_used_memory);
 
         RTP_LLM_LOG_INFO(
@@ -113,7 +112,7 @@ size_t CacheConfigCreator::getKVCacheMemorySize(const RuntimeConfig& runtime_con
             env_runtime_required_bytes / 1024 / 1024,
             runtime_required_bytes / 1024 / 1024);
     } else {
-        runtime_required_bytes = getDefaultRuntimeMemorySize(runtime_config, parallelism_config, mm_model_config, nullptr);
+        runtime_required_bytes = getDefaultRuntimeMemorySize(runtime_config, parallelism_config, model_config, nullptr);
         RTP_LLM_LOG_INFO("warm up result not available, use default runtime memory size %ld MiB",
                          runtime_required_bytes / 1024 / 1024);
     }
@@ -136,7 +135,6 @@ size_t CacheConfigCreator::getKVCacheMemorySize(const RuntimeConfig& runtime_con
 }
 
 CacheConfig CacheConfigCreator::createConfig(const ModelConfig& model_config,
-                                             const MMModelConfig& mm_model_config,
                                              const ParallelismConfig& parallelism_config,
                                              const RuntimeConfig& runtime_config,
                                              const KVCacheConfig& kv_cache_config,
@@ -148,7 +146,7 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig& model_config,
         RTP_LLM_LOG_INFO("KVCacheConfig explicitly specified kv cache block num %d", kv_cache_config.test_block_num);
         block_nums = kv_cache_config.test_block_num;
     } else {
-        const auto kv_cache_mem_size = getKVCacheMemorySize(runtime_config, kv_cache_config, model_config, parallelism_config, mm_model_config, warm_up_result);
+        const auto kv_cache_mem_size = getKVCacheMemorySize(runtime_config, kv_cache_config, model_config, parallelism_config, warm_up_result);
         block_nums                   = kv_cache_mem_size / config.block_size;
     }
     RTP_LLM_CHECK_WITH_INFO(block_nums > 0,
@@ -171,13 +169,11 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig& model_config,
 
 std::tuple<CacheConfig, CacheConfig>
 CacheConfigCreator::createSpConfig(const ModelConfig& score_model_config,
-                                   const MMModelConfig& score_mm_model_config,
                                    const ParallelismConfig& score_parallelism_config,
                                    const RuntimeConfig& score_runtime_config,
                                    const KVCacheConfig& score_kv_cache_config,
                                    const SpeculativeExecutionConfig& sp_config,
                                    const ModelConfig& propose_model_config,
-                                   const MMModelConfig& propose_mm_model_config,
                                    const ParallelismConfig& propose_parallelism_config,
                                    const RuntimeConfig& propose_runtime_config,
                                    const KVCacheConfig& propose_kv_cache_config,
@@ -191,7 +187,7 @@ CacheConfigCreator::createSpConfig(const ModelConfig& score_model_config,
     if (score_kv_cache_config.test_block_num > 0) {
         block_nums = score_kv_cache_config.test_block_num;
     } else {
-        const auto kv_cache_mem_size = CacheConfigCreator::getKVCacheMemorySize(score_runtime_config, score_kv_cache_config, score_model_config, score_parallelism_config, score_mm_model_config, warm_up_result);
+        const auto kv_cache_mem_size = CacheConfigCreator::getKVCacheMemorySize(score_runtime_config, score_kv_cache_config, score_model_config, score_parallelism_config, warm_up_result);
         if (is_mtp) {
             auto cache_num = sp_config.gen_num_per_cycle;
             if (is_eagle) {

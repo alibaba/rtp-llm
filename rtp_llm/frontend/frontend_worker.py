@@ -66,9 +66,8 @@ class FrontendWorker:
         # Get model_type from py_env_configs
         model_type = py_env_configs.model_args.model_type
         # Paths should already be local after fetch_model_files_to_local()
-        self.tokenizer = TokenizerFactory.create(ckpt_path, tokenizer_path, model_type)
-        
-        engine_config = EngineConfig.create(py_env_configs)
+        self.tokenizer = TokenizerFactory.create(ckpt_path, tokenizer_path, model_type)   
+        engine_config = EngineConfig.create(py_env_configs, gang_info=None)
         
         # Use provided special_tokens or create new one
         if special_tokens is None:
@@ -89,10 +88,10 @@ class FrontendWorker:
             max_seq_len=max_seq_len,
             seq_size_per_block=seq_size_per_block,
             tokenizer=self.tokenizer,
-            gang_config=py_env_configs.gang_config,
             sp_config=py_env_configs.sp_config,
             separated_frontend=separated_frontend,
             mm_related_params=None,  # Frontend doesn't need mm_related_params
+            gang_info=None,
         )
         self.backend_rpc_server_visitor = self.pipeline.backend_rpc_server_visitor
         self.generate_env_config = py_env_configs.generate_env_config

@@ -4,7 +4,6 @@ import logging
 
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.py_config_modules import PyEnvConfigs, WORKER_INFO_PORT_NUM
-from rtp_llm.distribute.gang_info import get_gang_info
 from rtp_llm.distribute.worker_info import (
     g_master_info,
     g_parallel_info,
@@ -57,7 +56,7 @@ class EngineConfig:
     arpc_config: ArpcConfig
     
     @staticmethod
-    def create(py_env_configs: PyEnvConfigs) -> 'EngineConfig':
+    def create(py_env_configs: PyEnvConfigs, gang_info) -> 'EngineConfig':
         """Create and fully initialize EngineConfig from py_env_configs.
         
         This method creates the EngineConfig dataclass and performs all necessary
@@ -66,7 +65,7 @@ class EngineConfig:
         
         Args:
             py_env_configs: PyEnvConfigs instance containing all configuration
-            tokenizer: Optional tokenizer for updating task prompt tokens
+            gang_info: GangInfo instance from GangServer.
         
         Returns:
             Fully initialized EngineConfig instance
@@ -127,11 +126,13 @@ class EngineConfig:
 
         runtime_config.max_generate_batch_size = concurrency_config.concurrency_limit
         
-        # Update worker addresses (needs parallelism_config)
-        update_worker_addrs(
-            engine_config.runtime_config,
-            engine_config.parallelism_config,
-        )
+        # Update worker addresses (needs parallelism_config and gang_info)
+        if gang_info is not None:
+            update_worker_addrs(
+                engine_config.runtime_config,
+                engine_config.parallelism_config,
+                gang_info,
+            )
         
         # Setup PD separation config
         setup_pd_sep_config(
@@ -213,13 +214,12 @@ def setup_parallelism_config(
 
 def update_worker_addrs(
     runtime_config: RuntimeConfig,
-    parallelism_config: ParallelismConfig) -> None:
+    parallelism_config: ParallelismConfig,
+    gang_info) -> None:
     """Update worker addresses in runtime_config based on gang info."""
-    import logging
     worker_addrs = []
     worker_grpc_addrs = []
-    gang_info = get_gang_info(None)
-    local_rank = g_parallel_info.local_rank if g_parallel_info is not None else "N/A"
+    local_rank = parallelism_config.local_rank
     for member in gang_info.members:
         logging.info(
             f"member world rank: {member.world_rank}, member local rank: {member.local_rank}, local rank: {local_rank}, "

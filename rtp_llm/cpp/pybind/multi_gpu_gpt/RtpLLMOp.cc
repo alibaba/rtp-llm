@@ -35,7 +35,8 @@ std::unique_ptr<ProposeModelEngineInitParams> prepareMTPEngineInitParams(size_t 
     py::object config_obj = sp_model.attr("config");
     // Extract individual config members from Python config object
     auto model_config = config_obj.attr("py_model_config").cast<ModelConfig>();
-    auto mm_model_config = config_obj.attr("mm_model_config").cast<MMModelConfig>();
+    // Assign mm_model_config to model_config.mm_model_config
+    model_config.mm_model_config = config_obj.attr("mm_model_config").cast<MMModelConfig>();
     auto parallelism_config = config_obj.attr("parallelism_config").cast<ParallelismConfig>();
     auto runtime_config = config_obj.attr("runtime_config").cast<RuntimeConfig>();
     auto pd_sep_config = config_obj.attr("pd_sep_config").cast<PDSepConfig>();
@@ -97,7 +98,6 @@ std::unique_ptr<ProposeModelEngineInitParams> prepareMTPEngineInitParams(size_t 
             std::move(std::make_unique<EngineInitParams>(
                 model_id,
                 temp_model_config,
-                mm_model_config,
                 parallelism_config,
                 runtime_config,
                 pd_sep_config,
@@ -155,7 +155,8 @@ EngineInitParams RtpLLMOp::initModel(py::object model) {
         py::object config_obj = model.attr("config");
         // Extract individual config members from Python config object
         auto model_config = config_obj.attr("py_model_config").cast<ModelConfig>();
-        auto mm_model_config = config_obj.attr("mm_model_config").cast<MMModelConfig>();
+        // Assign mm_model_config to model_config.mm_model_config
+        model_config.mm_model_config = config_obj.attr("mm_model_config").cast<MMModelConfig>();
         auto parallelism_config = config_obj.attr("parallelism_config").cast<ParallelismConfig>();
         auto runtime_config = config_obj.attr("runtime_config").cast<RuntimeConfig>();
         auto pd_sep_config = config_obj.attr("pd_sep_config").cast<PDSepConfig>();
@@ -197,7 +198,6 @@ EngineInitParams RtpLLMOp::initModel(py::object model) {
 
         EngineInitParams params(model_id_,
                                 model_config,
-                                mm_model_config,
                                 parallelism_config,
                                 runtime_config,
                                 pd_sep_config,
@@ -245,7 +245,8 @@ std::unique_ptr<ProposeModelEngineInitParams> RtpLLMOp::initProposeModel(py::obj
             py::object config_obj = sp_model.attr("config");
             // Extract individual config members from Python config object
             auto model_config = config_obj.attr("py_model_config").cast<ModelConfig>();
-            auto mm_model_config = config_obj.attr("mm_model_config").cast<MMModelConfig>();
+            // Assign mm_model_config to model_config.mm_model_config
+            model_config.mm_model_config = config_obj.attr("mm_model_config").cast<MMModelConfig>();
             auto parallelism_config = config_obj.attr("parallelism_config").cast<ParallelismConfig>();
             auto runtime_config = config_obj.attr("runtime_config").cast<RuntimeConfig>();
             auto pd_sep_config = config_obj.attr("pd_sep_config").cast<PDSepConfig>();
@@ -286,7 +287,6 @@ std::unique_ptr<ProposeModelEngineInitParams> RtpLLMOp::initProposeModel(py::obj
             params                             = std::make_unique<ProposeModelEngineInitParams>(
                 model_id_, sp_type, gen_num_per_cycle,
                 model_config,
-                mm_model_config,
                 parallelism_config,
                 runtime_config,
                 pd_sep_config,
