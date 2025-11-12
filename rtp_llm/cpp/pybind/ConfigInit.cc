@@ -995,8 +995,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("is_multimodal", &MMModelConfig::is_multimodal)
         .def_readwrite("mm_sep_tokens", &MMModelConfig::mm_sep_tokens)
         .def_readwrite("include_sep_tokens", &MMModelConfig::include_sep_tokens)
-        .def_readwrite("mm_position_ids_style", &MMModelConfig::mm_position_ids_style)
-        .def_readwrite("position_id_len_factor", &MMModelConfig::position_id_len_factor);
+        .def_readwrite("mm_position_ids_style", &MMModelConfig::mm_position_ids_style);
 
     // Register VitConfig
     py::class_<VitConfig>(m, "VitConfig")

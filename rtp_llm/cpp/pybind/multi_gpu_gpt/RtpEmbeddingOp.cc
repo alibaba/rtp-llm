@@ -26,7 +26,6 @@ void RtpEmbeddingOp::init(py::object model, py::object mm_process_engine) {
         py::object config_obj = model.attr("config");
         // Extract individual config members from Python config object
         auto model_config = config_obj.attr("py_model_config").cast<ModelConfig>();
-        auto mm_model_config = config_obj.attr("mm_model_config").cast<MMModelConfig>();
         auto parallelism_config = config_obj.attr("parallelism_config").cast<ParallelismConfig>();
         auto runtime_config = config_obj.attr("runtime_config").cast<RuntimeConfig>();
         auto pd_sep_config = config_obj.attr("pd_sep_config").cast<PDSepConfig>();
@@ -60,7 +59,6 @@ void RtpEmbeddingOp::init(py::object model, py::object mm_process_engine) {
         auto py_model = model.attr("py_model");
         EngineInitParams params(0,
                                 model_config,
-                                mm_model_config,
                                 parallelism_config,
                                 runtime_config,
                                 pd_sep_config,
@@ -94,7 +92,7 @@ void RtpEmbeddingOp::init(py::object model, py::object mm_process_engine) {
         }
         embedding_engine_.reset(new EmbeddingEngine(params, py_handler));
         if (!mm_process_engine.is_none()) {
-            mm_processor_.reset(new LocalMultimodalProcessor(mm_process_engine, params.mm_model_config_, params.model_config_.max_seq_len));
+            mm_processor_.reset(new LocalMultimodalProcessor(mm_process_engine, params.model_config_.mm_model_config, params.model_config_.max_seq_len));
         }
         startRpcServer(parallelism_config.model_rpc_port,
                        arpc_config.threadNum,

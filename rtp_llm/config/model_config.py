@@ -13,7 +13,6 @@ from libth_transformer_config import ModelConfig as CppModelConfig
 from rtp_llm.utils.weight_type import WEIGHT_TYPE
 from rtp_llm.utils.gemm_utils.cutlass_config import load_cutlass_gemm_config
 
-
 class VitParameters:
     """Vit parameters for multimodal models."""
     # config includes origin vit config in ckpt/config.json
@@ -22,14 +21,9 @@ class VitParameters:
     special_tokens: Dict[str, Any] = {}
     vit_weights: Any = None
 
-# Import for type hints
-if False:
-    from rtp_llm.config.py_config_modules import GenerateEnvConfig
-
 def get_pad_size(size: int, align_size: int):
     """Calculate padding size to align to align_size."""
     return (align_size - (size % align_size)) % align_size
-
 
 class ModelConfig(CppModelConfig):
     def eval_model_size(self) -> float:

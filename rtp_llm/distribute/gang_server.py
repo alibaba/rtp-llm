@@ -215,7 +215,14 @@ class GangServer:
         retry_time = 0
         while True:
             try:
-                self._gang_info = get_gang_info()
+                self._gang_info = get_gang_info(
+                    distribute_config_file=self.gang_config.distribute_config_file,
+                    gang_config_string=self.gang_config.gang_config_string,
+                    json_gang_parts=self.gang_config.json_gang_parts,
+                    leader_address=self.gang_config.leader_address,
+                    gang_annocation_path=self.gang_config.gang_annocation_path,
+                    zone_name=self.gang_config.zone_name,
+                )
                 if self._gang_info.only_leader:
                     self._exchange_gang_info(self._gang_info)
                     self._check_gang_info(self._gang_info)

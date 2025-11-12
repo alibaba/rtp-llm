@@ -29,6 +29,14 @@ enum TaskType {
     BGE_M3             = 8
 };
 
+class MMModelConfig {
+public:
+    bool                              is_multimodal          = false;
+    std::vector<std::vector<int64_t>> mm_sep_tokens          = {};
+    bool                              include_sep_tokens     = false;
+    int64_t                           mm_position_ids_style  = 0;  // 0 for default; 1 for chatglm4v; 2 for qwen2 vl
+};
+    
 class ModelConfig {
 public:
     // model variant params used in ft
@@ -140,15 +148,6 @@ public:
     AttentionConfigs getAttentionConfigs(int64_t tp_size) const;
     bool             isKvCacheQuant() const;
     std::string      to_string() const;
-};
-
-class MMModelConfig {
-public:
-    bool                              is_multimodal          = false;
-    std::vector<std::vector<int64_t>> mm_sep_tokens          = {};
-    bool                              include_sep_tokens     = false;
-    int64_t                           mm_position_ids_style  = 0;  // 0 for default; 1 for chatglm4v; 2 for qwen2 vl
-    // position_id_len_factor removed, use model_config.attn_config.rope_config.index_factor instead
 };
 
 }  // namespace rtp_llm
