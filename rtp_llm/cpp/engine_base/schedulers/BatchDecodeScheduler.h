@@ -117,7 +117,7 @@ public:
 
     absl::StatusOr<std::list<GenerateStreamPtr>> schedule(size_t reserve_step = 0) override {
         std::unique_lock<std::mutex> lock(lock_);
-        cond_.wait_for(lock, std::chrono::seconds(300), [this] {
+        cond_.wait_for(lock, std::chrono::seconds(30), [this] {
             return waiting_streams_.size() >= batch_size_ || running_streams_.size() > 0;
         });
         if (running_streams_.size() == 0 && waiting_streams_.size() >= batch_size_) {
@@ -134,7 +134,7 @@ public:
         evictAllDoneStreams();
         return running_streams_;
     }
-    
+
     absl::Status stop() override {
         // Not implemented
         return absl::UnimplementedError("BatchDecodeScheduler::stop not implemented");
@@ -159,9 +159,9 @@ private:
     std::condition_variable      cond_;
     std::list<GenerateStreamPtr> waiting_streams_;
     std::list<GenerateStreamPtr> running_streams_;
-    uint32_t batch_size_;
+    uint32_t                     batch_size_;
     bool                         reorder_request_;
-    uint32_t current_step_ = 0;
+    uint32_t                     current_step_ = 0;
 
     std::shared_ptr<CacheManager> cache_manager_;
     kmonitor::MetricsReporterPtr  metrics_reporter_;
