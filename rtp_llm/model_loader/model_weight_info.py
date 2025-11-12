@@ -28,6 +28,9 @@ from rtp_llm.ops import VitSeparation
 
 # Forward references for type hints
 from typing import TYPE_CHECKING
+
+# Import BaseMultiModalWeightInfo for isinstance check
+from rtp_llm.models.multimodal.multimodal_mixin import BaseMultiModalWeightInfo
 if TYPE_CHECKING:
     from rtp_llm.config.model_config import ModelConfig
     from rtp_llm.config.engine_config import EngineConfig
@@ -268,7 +271,7 @@ class ModelDeployWeightInfo:
         if (isinstance(self, BaseMultiModalWeightInfo) and
             self.vit_separation != VitSeparation.VIT_SEPARATION_REMOTE and
             self.tp_rank == 0):
-            weight_info.weights.extend(self._get_vit_info())
+            weight_info = self._get_vit_info(weight_info)
         use_fp32 = self.py_model_config.use_float32
         if use_fp32:
             weight_info = weight_info.set_weight_dtype(torch.float32)
