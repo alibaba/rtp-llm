@@ -24,8 +24,8 @@ index b36145f..73b548e 100644
 +  } else if (group_size == 9) {                              \
 +    constexpr size_t GROUP_SIZE = 9;                         \
 +    __VA_ARGS__                                              \
-+  } else if (group_size == 10) {                             \
-+    constexpr size_t GROUP_SIZE = 10;                        \
++  } else if (group_size == 12) {                             \
++    constexpr size_t GROUP_SIZE = 12;                        \
 +    __VA_ARGS__                                              \
 +  } else if (group_size == 16) {                             \
 +    constexpr size_t GROUP_SIZE = 16;                        \

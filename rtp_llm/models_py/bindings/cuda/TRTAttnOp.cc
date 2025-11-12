@@ -24,8 +24,6 @@ ParamsBasePtr TRTPrefillOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
         kv_cache_block_id_device = torchTensor2Buffer(attn_inputs.kv_cache_block_id_device);
     }
 
-    auto          cu_seqlens    = attn_inputs.cu_seqlens;
-    torch::Tensor cu_kv_seqlens = cu_seqlens;
     TRTAttnPtr    attn_params;
     auto          params = device_->prepareTrtAttn(
         attn_configs_, attn_inputs.kv_block_offset, kv_cache_block_id_device, attn_inputs.input_lengths.size(0));
@@ -35,9 +33,11 @@ ParamsBasePtr TRTPrefillOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
         attn_params = std::make_shared<TRTAttn>();
     }
     attn_params->attn_type     = torchDTypeToDataType(attn_inputs.dtype);
-    attn_params->cu_seqlens    = cu_seqlens;
-    attn_params->cu_kv_seqlens = cu_kv_seqlens;
+    attn_params->cu_seqlens              = attn_inputs.cu_seqlens;
+    attn_params->cu_kv_seqlens           = attn_inputs.cu_kv_seqlens;
     attn_params->max_seq_len   = attn_inputs.input_lengths.max().item<int32_t>();
+    attn_params->max_prefix_length       = attn_inputs.prefix_lengths.max().item<int32_t>();
+    attn_params->context_total_kv_length = attn_inputs.context_total_kv_length;
     attn_params->input_lengths = attn_inputs.input_lengths;
     // not support has_alibi_slopes
     DataType attn_dtype = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8 ?
@@ -121,16 +121,15 @@ torch::Tensor TRTPrefillOp::forward(const torch::Tensor&              input,
 
     const int            local_head_num = attn_configs_.head_num;
     const int            size_per_head  = attn_configs_.size_per_head;
-    const int            token_num      = input.size(0);
     const int            batch_size     = params->input_lengths.size(0);
     torch::TensorOptions options        = torch::TensorOptions(input.dtype()).device(input.device());
 
-    torch::Tensor output        = torch::zeros({token_num, local_head_num * size_per_head}, options);
-    torch::Tensor tiled_counter = torch::zeros({1}, torch::TensorOptions(torch::kUInt32).device(input.device()));
-    bool          use_fp8_fmha  = kv_block_array.cache_type == KvCacheDataType::FP8;
-    float*        attention_output_orig_quant_scale = use_fp8_fmha ? static_scale_.data_ptr<float>() : nullptr;
-    if (kv_cache.has_value() && kv_block_array.cache_type == KvCacheDataType::BASE) {
-        // TODO@miji: fix params
+    torch::Tensor        tiled_counter = torch::zeros({1}, torch::TensorOptions(torch::kUInt32).device(input.device()));
+    bool                 use_fp8_fmha  = kv_block_array.cache_type == KvCacheDataType::FP8;
+    float*               attention_output_orig_quant_scale = use_fp8_fmha ? static_scale_.data_ptr<float>() : nullptr;
+    if (kv_cache.has_value() && kv_block_array.cache_type == KvCacheDataType::BASE && params->max_prefix_length > 0) {
+        const int            token_num      = input.size(1);
+        torch::Tensor        output         = torch::empty({token_num, local_head_num * size_per_head}, options);
         cufmha_runner_->runTrtV2FmhaPaged(input.data_ptr(),
                                           params->cu_seqlens.data_ptr(),
                                           params->cu_kv_seqlens.data_ptr(),
@@ -139,11 +138,14 @@ torch::Tensor TRTPrefillOp::forward(const torch::Tensor&              input,
                                           attention_output_orig_quant_scale,
                                           batch_size,  // batch_size,
                                           params->max_seq_len,
-                                          params->max_seq_len,  // seq_len_with_prefix,
+                                          params->max_seq_len + params->max_prefix_length,  // seq_len_with_prefix,                                          
                                           token_num,
-                                          token_num,  // token_num_kv,
+                                          params->context_total_kv_length,  // token_num_kv,
                                           kv_block_array);
+        return output;
     } else {
+        const int            token_num      = input.size(0);
+        torch::Tensor        output         = torch::empty({token_num, local_head_num * size_per_head}, options);
         torch::Tensor tmp_fmha_input, tmp_fmha_output;
         void*         fmha_input_ptr  = input.data_ptr();
         void*         fmha_output_ptr = output.data_ptr();
@@ -169,9 +171,8 @@ torch::Tensor TRTPrefillOp::forward(const torch::Tensor&              input,
         if (use_fp8_fmha) {
             output = tmp_fmha_output.to(output.dtype());
         }
+        return output;
     }
-
-    return output;
 }
 
 void registerTRTAttnOp(const py::module& m) {
