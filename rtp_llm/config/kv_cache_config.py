@@ -22,21 +22,18 @@ class KVCacheConfig(CppKVCacheConfig):
                      will update task prompt tokens from the loaded configuration.
         """
         # Load task prompt configuration
-        prompt_file_path = self.multi_task_prompt
-        if prompt_file_path != "":
-            with open(prompt_file_path, "r") as reader:
-                self.multi_task_prompt_config = json.loads(reader.read(), strict=False)
+        if self.multi_task_prompt:
+            with open(self.multi_task_prompt, "r") as reader:
+                multi_task_prompt_config = json.loads(reader.read(), strict=False)
         elif self.multi_task_prompt_str != "":
-            self.multi_task_prompt_config = json.loads(self.multi_task_prompt_str, strict=False)
+            multi_task_prompt_config = json.loads(self.multi_task_prompt_str, strict=False)
         else:
-            self.multi_task_prompt_config = None
             return
         
         # Update task prompt tokens if tokenizer is provided
-        if tokenizer and self.multi_task_prompt_config:
-            multi_task_prompt = self.multi_task_prompt_config
-            if isinstance(multi_task_prompt, list):
-                for info in multi_task_prompt:
+        if tokenizer and multi_task_prompt_config:
+            if isinstance(multi_task_prompt_config, list):
+                for info in multi_task_prompt_config:
                     task_id: str = str(info["task_id"])
                     prompt: str = info["prompt"]
                     tokens_id = tokenizer.encode(prompt)

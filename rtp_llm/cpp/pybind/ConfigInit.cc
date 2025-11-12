@@ -980,7 +980,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("act_type", &ModelConfig::act_type)
         .def_readwrite("use_float32", &ModelConfig::use_float32)
         .def_readwrite("original_checkpoint_path", &ModelConfig::original_checkpoint_path)
-        .def_readwrite("ft_plugin_path", &ModelConfig::ft_plugin_path)
         .def_readwrite("model_type", &ModelConfig::model_type)
         .def_readwrite("ptuning_path", &ModelConfig::ptuning_path)
         .def_readwrite("json_model_override_args", &ModelConfig::json_model_override_args)

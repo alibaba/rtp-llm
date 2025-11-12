@@ -639,8 +639,6 @@ class ServerArgsSetTest(TestCase):
             "/path/to/original/ckpt",
             "--mla_ops_type",
             "CUSTOM",
-            "--ft_plugin_path",
-            "/path/to/plugin",
             "--weight_type",
             "FP16",
             "--task_type",

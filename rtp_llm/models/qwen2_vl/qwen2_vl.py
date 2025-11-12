@@ -296,7 +296,7 @@ class QWen2_VL(QWen_VL, MultiModalMixin):
         config.special_tokens.eos_token_id = config_json.get("eos_token_id", 0)
         config.tie_word_embeddings_ = config_json.get("tie_word_embeddings", False)
         config.mm_model_config.mm_position_ids_style = 2
-        rope_config = config.attn_config
+        rope_config = config.attn_config.rope_config
         rope_config.style = 7
         rope_config.base = int(config_json["rope_theta"])
         # mrope_section is not available in RopeConfig, using default value

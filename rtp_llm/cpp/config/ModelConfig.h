@@ -129,7 +129,6 @@ public:
     std::string act_type                   = "";
     bool        use_float32                = false;
     std::string original_checkpoint_path   = "";
-    std::string ft_plugin_path             = "";
     std::string model_type                 = "";
     std::string ptuning_path               = "";
     std::string json_model_override_args   = "{}";

@@ -274,7 +274,6 @@ std::string ModelConfig::to_string() const {
         << "act_type: " << act_type << "\n"
         << "use_float32: " << use_float32 << "\n"
         << "original_checkpoint_path: " << original_checkpoint_path << "\n"
-        << "ft_plugin_path: " << ft_plugin_path << "\n"
         << "model_type: " << model_type << "\n"
         << "ptuning_path: " << ptuning_path << "\n"
         << "json_model_override_args: " << json_model_override_args;
