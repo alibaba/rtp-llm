@@ -120,9 +120,8 @@ class BackendServer(object):
                     pd_sep_config=engine_config.pd_sep_config,
                     runtime_config=engine_config.runtime_config,
                     ffn_disaggregate_config=engine_config.parallelism_config.ffn_disaggregate_config,
-                    sp_config=engine_config.sp_config,
                     gang_config=py_env_configs.gang_config,
-                    eplb_config=py_env_configs.py_eplb_config,
+                    sp_config=engine_config.sp_config,
                     max_rpc_timeout_ms=engine_config.pd_sep_config.max_rpc_timeout_ms,
                     decode_entrance=engine_config.pd_sep_config.decode_entrance,
                 )

@@ -241,6 +241,8 @@ class ModelTestBase(TestCase):
     def simple_test(self, is_fake: bool):
         model = self._load_model()
         try:
+            from rtp_llm.config.py_config_modules import GangConfig
+            gang_config = GangConfig()
             pipeline = Pipeline(
                 special_tokens=model.model.py_model_config.special_tokens,
                 pd_sep_config=model.model.engine_config.pd_sep_config,
@@ -249,9 +251,8 @@ class ModelTestBase(TestCase):
                 max_seq_len=model.model.py_model_config.max_seq_len,
                 seq_size_per_block=model.model.engine_config.kv_cache_config.seq_size_per_block,
                 tokenizer=model.tokenizer,
+                gang_config=gang_config,
                 sp_config=model.model.engine_config.sp_config,
-                gang_config=None,  # Optional, not available in test environment
-                eplb_config=None,  # Optional, not available in test environment
             )
             if model.model.py_model_config.pre_seq_len > 0:
                 model_str = "/ptuning"

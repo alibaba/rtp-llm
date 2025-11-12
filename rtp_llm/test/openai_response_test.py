@@ -268,12 +268,15 @@ class BaseToolCallTestSuite:
         special_tokens = OpsSpecialTokens()
         if hasattr(self.parent.model.config, 'special_tokens') and self.parent.model.config.special_tokens:
             special_tokens = self.parent.model.config.special_tokens
+        from rtp_llm.config.py_config_modules import GangConfig
+        gang_config = GangConfig()
         backend_rpc_server_visitor = BackendRPCServerVisitor(
             max_seq_len=self.parent.model.config.max_seq_len,
             seq_size_per_block=64,
             pd_sep_config=None,
             runtime_config=None,
             ffn_disaggregate_config=None,
+            gang_config=gang_config,
         )
         self.parent.endpoint = OpenaiEndpoint(
             model_args=model_args,

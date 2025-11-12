@@ -89,9 +89,8 @@ class FrontendWorker:
             max_seq_len=max_seq_len,
             seq_size_per_block=seq_size_per_block,
             tokenizer=self.tokenizer,
-            sp_config=py_env_configs.sp_config,
             gang_config=py_env_configs.gang_config,
-            eplb_config=py_env_configs.py_eplb_config,
+            sp_config=py_env_configs.sp_config,
             separated_frontend=separated_frontend,
             mm_related_params=None,  # Frontend doesn't need mm_related_params
         )

@@ -8,7 +8,7 @@ from rtp_llm.config.generate_config import RoleAddr, RoleType
 from rtp_llm.config.model_config import ModelConfig as PyModelConfig
 from rtp_llm.config.py_config_modules import GangConfig
 from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient
-from rtp_llm.ops import EPLBConfig, FfnDisAggregateConfig, SpeculativeExecutionConfig
+from rtp_llm.ops import FfnDisAggregateConfig, SpeculativeExecutionConfig
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.ops import get_block_cache_keys
@@ -29,9 +29,8 @@ class BackendRPCServerVisitor:
         pd_sep_config,  # PDSepConfig from ops
         runtime_config,  # RuntimeConfig from ops
         ffn_disaggregate_config: FfnDisAggregateConfig,
+        gang_config: GangConfig,
         sp_config: Optional[SpeculativeExecutionConfig] = None,
-        gang_config: Optional[GangConfig] = None,
-        eplb_config: Optional[EPLBConfig] = None,
         max_rpc_timeout_ms: int = 0,
         decode_entrance: bool = False,
         separated_frontend: bool = False,
@@ -48,8 +47,7 @@ class BackendRPCServerVisitor:
         
         self.model_rpc_client = ModelRpcClient(
             self.ffn_disaggregate_config,
-            gang_config=gang_config,
-            eplb_config=eplb_config,
+            gang_config,
             max_rpc_timeout_ms=self.max_rpc_timeout_ms,
             decode_entrance=self.decode_entrance,
         )
