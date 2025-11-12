@@ -3,7 +3,7 @@ import logging
 from typing import Any, List, Optional, Union
 
 import torch
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from rtp_llm.config.py_config_modules import LoadConfig as PyLoadConfig
 from rtp_llm.device.device_base import DeviceBase
@@ -13,6 +13,8 @@ from rtp_llm.utils.util import check_with_info
 from rtp_llm.ops import VitSeparation
 
 class LoadConfig(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    
     database: Any
     num_layers: int
     hidden_size: int

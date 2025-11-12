@@ -27,7 +27,7 @@ from rtp_llm.utils.fuser import fetch_remote_file_to_local
 from rtp_llm.utils.model_weight import W, WeightStyle
 from rtp_llm.utils.time_util import timer_wrapper
 from rtp_llm.utils.util import check_with_info
-
+from rtp_llm.ops import VitSeparation
 
 class ModelLoader:
     WeightInfo = NamedTuple("WeightInfo", [("weight", WeightModule), ("layer_id", Optional[int]), ("collector", TensorCollector)])
@@ -407,7 +407,6 @@ class ModelLoader:
         for layer_id, name, tensor in self.prepare_weights(convert_device):
             if convert_device != device:
                 tensor = tensor.to(device)
-            from rtp_llm.ops import VitSeparation
             if layer_id is not None and self._load_config.vit_separation != VitSeparation.VIT_SEPARATION_ROLE:
                 weights.set_layer_weight(layer_id, name, tensor)
             else:
@@ -451,7 +450,6 @@ class ModelLoader:
                 f"embedding_size is {self._weights_info.config.py_model_config.embedding_size_}, vocab size is {self._weights_info.config.py_model_config.vocab_size}"
             )
 
-        from rtp_llm.ops import VitSeparation
         if self._load_config.vit_separation != VitSeparation.VIT_SEPARATION_ROLE:
             if self._task_type == TaskType.LANGUAGE_MODEL:
                 lm_head_w = weight.steal_global_weight(W.lm_head)
