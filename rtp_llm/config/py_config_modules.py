@@ -148,7 +148,7 @@ class GangConfig:
 class VitConfig:
     def __init__(self):
         from rtp_llm.ops import VitSeparation
-        self._vit_separation: VitSeparation = VitSeparation.VIT_SEPARATION_LOCAL
+        self.vit_separation_value: VitSeparation = VitSeparation.VIT_SEPARATION_LOCAL
         self.vit_run_batch: int = 1  # Batch size for VIT processing
         self.vit_trt: int = 0
         self.trt_cache_enabled: int = 0
@@ -164,7 +164,7 @@ class VitConfig:
     
     @property
     def vit_separation(self) -> "VitSeparation":
-        return self._vit_separation
+        return self.vit_separation_value
     
     @vit_separation.setter
     def vit_separation(self, value):
@@ -172,15 +172,15 @@ class VitConfig:
         if isinstance(value, int):
             # Convert int to enum
             if value == 0:
-                self._vit_separation = VitSeparation.VIT_SEPARATION_LOCAL
+                self.vit_separation_value = VitSeparation.VIT_SEPARATION_LOCAL
             elif value == 1:
-                self._vit_separation = VitSeparation.VIT_SEPARATION_ROLE
+                self.vit_separation_value = VitSeparation.VIT_SEPARATION_ROLE
             elif value == 2:
-                self._vit_separation = VitSeparation.VIT_SEPARATION_REMOTE
+                self.vit_separation_value = VitSeparation.VIT_SEPARATION_REMOTE
             else:
                 raise ValueError(f"Invalid vit_separation value: {value}")
         else:
-            self._vit_separation = value
+            self.vit_separation_value = value
 
     def to_string(self):
         return (
