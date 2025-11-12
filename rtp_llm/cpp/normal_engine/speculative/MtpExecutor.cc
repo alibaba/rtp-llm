@@ -334,13 +334,15 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     speculative::SpeculativeSamplerOutput speculative_sampler_output;
 
     // placeholder for some tensors
-    torch::Tensor draft_token_probs_d_t;
-    torch::Tensor hidden_states_d_t;
-    torch::Tensor draft_probs_t;
-    torch::Tensor draft_token_ids_t;
-    size_t        total_accept_len = 0;
+    torch::Tensor              draft_token_probs_d_t;
+    torch::Tensor              hidden_states_d_t;
+    torch::Tensor              draft_probs_t;
+    torch::Tensor              draft_token_ids_t;
+    std::vector<torch::Tensor> draft_probs_list;
 
-    const size_t batch_size = streams.size();
+    size_t total_accept_len = 0;
+
+    size_t batch_size = streams.size();
     {
         int64_t start_time_us      = autil::TimeUtility::currentTimeInMicroSeconds();
         auto    model_input_status = batch_stream_processor_->gatherDecodeModelInput(stream_groups);
@@ -373,9 +375,16 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             return absl::OkStatus();
         }
     } else {
-        // TODO(yinzhi): prepare draft model input
-        // TODO(yinzhi): draft model decode
-        // TODO(yinzhi): prepare spec decode input
+        // prepare draft model input
+        if (isTpRank0()) {
+            batch_stream_processor_->prepareDecodeDraftModelInput(stream_groups, model_input);
+        }
+        tpSyncModelInputs(model_input, device_);
+        if (model_input.skip_run) {
+            return absl::OkStatus();
+        }
+
+        draftModelDecode(model_input, stream_groups, draft_probs_list, draft_token_ids_t);
     }
 
     maybePrintModelInput(model_input, "decode target model");
@@ -387,7 +396,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             batch_stream_processor_->updateOneStepDraftSamplerOutput(
                 stream_groups, draft_sampler_output, draft_token_probs_d_t);
         } else {
-            // TODO(yinzhi): support multi step MTP
+            batch_stream_processor_->updateMultiStepDraftSamplerOutput(
+                stream_groups, draft_sampler_output, draft_token_ids_t, draft_token_probs_d_t, draft_probs_list);
         }
     }
 
@@ -427,7 +437,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     // collect metrics
     if (metrics_reporter_) {
-        executor_collector.generate_batch_size = stream_groups.totalContextBatchSize();
+        executor_collector.generate_batch_size = stream_groups.totalModelBatchSize();
         executor_collector.execute_token_size += total_accept_len;
         executor_collector.max_seq_len = stream_groups.maxSeqLen();
 
@@ -523,6 +533,78 @@ void MtpExecutor::draftModelSample(const BufferPtr& logits,
 
     sampler_output.all_probs = torchTensor2Buffer(draft_probs);
     sampler_output.token_ids = torchTensor2Buffer(draft_token_ids);
+}
+
+void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
+                                   const StreamGroups&         stream_groups,
+                                   std::vector<torch::Tensor>& draft_probs_list,
+                                   torch::Tensor&              draft_token_ids_t) {
+    GptModelOutputs            draft_decode_model_output;
+    std::vector<torch::Tensor> draft_token_ids_list;
+    BufferPtr                  spec_prefix_lengths;
+
+    // update TP > 0 batch_size
+    size_t batch_size      = model_input.combo_tokens->shape()[0];
+    spec_prefix_lengths    = device_->clone({*model_input.sequence_lengths, AllocationType::HOST});
+    auto pre_propose_token = device_->clone({*model_input.combo_tokens, AllocationType::DEVICE});
+
+    auto pre_target_token = device_->allocateBuffer({DataType::TYPE_INT32, {batch_size}, AllocationType::HOST});
+    int  batch_idx        = 0;
+    for (const auto& stream : stream_groups.allStreams()) {
+        auto& propose_tokens                     = stream->getProposeToken();
+        pre_target_token->data<int>()[batch_idx] = propose_tokens[0];
+        batch_idx++;
+    }
+
+    auto pre_target_token_d         = device_->clone({*pre_target_token, AllocationType::DEVICE});
+    auto pre_target_token_t         = Buffer2torchTensor(pre_target_token_d, false);
+    auto pre_target_token_t_reshape = pre_target_token_t.reshape({(int)batch_size, 1});
+    draft_token_ids_list.push_back(pre_target_token_t_reshape);
+
+    auto pre_propose_token_t         = Buffer2torchTensor(pre_propose_token, false);
+    auto pre_propose_token_t_reshape = pre_propose_token_t.reshape({(int)batch_size, 1});
+    draft_token_ids_list.push_back(pre_propose_token_t_reshape);
+
+    // n-1 steps draft model decode
+    for (int i = 0; i < propose_step_ - 1; i++) {
+        draft_decode_model_output = std::move(draft_model_->forward(model_input));
+
+        // sample
+        auto draft_probs         = torch::softmax(Buffer2torchTensor(*draft_decode_model_output.logits, false), -1);
+        auto draft_probs_reshape = draft_probs.reshape({(int)batch_size, 1, -1});
+        auto [draft_token_probs, draft_token_ids] = fastTopK(draft_probs, 1, -1);
+        draft_token_ids                           = draft_token_ids.to(torch::kInt32);
+        draft_token_ids_list.push_back(draft_token_ids);
+        draft_probs_list.push_back(draft_probs_reshape);
+
+        // update model input
+        if (i != propose_step_ - 2) {
+            batch_stream_processor_->updateDecodeDraftModelInput(
+                model_input, draft_decode_model_output, draft_token_ids);
+        }
+    }
+
+    // prepare spec decode input
+    if (isTpRank0()) {
+        draft_token_ids_t =
+            torch::cat(draft_token_ids_list, 1).reshape({(int)batch_size, (int)(propose_step_ + 1)}).contiguous();
+
+        auto lm_output_indexes = device_->allocateBuffer(
+            {rtp_llm::DataType::TYPE_INT32, {batch_size * (propose_step_ + 1)}, rtp_llm::AllocationType::HOST}, {});
+        for (int i = 0; i < batch_size; i++) {
+            model_input.input_lengths->data<int>()[i] = propose_step_ + 1;
+        }
+        for (int i = 0; i < batch_size * (propose_step_ + 1); i++) {
+            lm_output_indexes->data<int>()[i] = i;
+        }
+        model_input.lm_output_indexes = lm_output_indexes;
+        model_input.prefix_lengths    = spec_prefix_lengths;
+        model_input.combo_tokens      = torchTensor2Buffer(draft_token_ids_t);
+        model_input.combo_tokens->updateShape({batch_size * (propose_step_ + 1)});
+        model_input.sequence_lengths   = device_->allocateBuffer({DataType::TYPE_INT32, {0}, AllocationType::HOST});
+        model_input.last_hidden_states = nullptr;
+    }
+    tpSyncModelInputs(model_input, device_);
 }
 
 }  // namespace rtp_llm

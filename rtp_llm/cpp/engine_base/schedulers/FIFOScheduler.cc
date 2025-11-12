@@ -29,6 +29,11 @@ FIFOScheduler::FIFOScheduler(const rtp_llm::GptInitParameter&     params,
                      max_generate_batch_size_,
                      max_batch_tokens_size_,
                      reserve_block_num_);
+    if (!params.sp_config.sp_type.empty()) {
+        RTP_LLM_LOG_INFO("using sp, disable fallback strategy");
+        enable_partial_fallback_ = false;
+        enable_whole_fallback_   = false;
+    }
 }
 
 FIFOScheduler::~FIFOScheduler() {

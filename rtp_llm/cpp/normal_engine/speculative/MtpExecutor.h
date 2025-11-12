@@ -61,6 +61,11 @@ protected:
                           torch::Tensor&   draft_probs,
                           torch::Tensor&   draft_token_ids);
 
+    void draftModelDecode(GptModelInputs&             model_input,
+                          const StreamGroups&         stream_groups,
+                          std::vector<torch::Tensor>& draft_probs_list,
+                          torch::Tensor&              draft_token_ids_t);
+
     std::tuple<torch::Tensor, torch::Tensor> fastTopK(const torch::Tensor& probs, int top_k, int dim);
 
 private:
