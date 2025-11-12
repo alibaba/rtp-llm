@@ -46,6 +46,10 @@ inline size_t pad_to_multiple_of_16(const size_t& input) {
     return pad(input, 16);
 }
 
+inline size_t pad_to_multiple_of_64(const size_t& input) {
+    return pad(input, 64);
+}
+
 inline size_t pad_to_multiple_of_128(const size_t& input) {
     return pad(input, 128);
 }

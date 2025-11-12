@@ -18,6 +18,7 @@ public:
                                          Buffer&       output,
                                          const Buffer& m_indices,
                                          int           user_deep_gemm_num_sm,
+                                         bool          use_64_padding,
                                          cudaStream_t  stream);
     static void groupedGemmFp8Masked(const Buffer& lhs,
                                      const Buffer& rhs,
