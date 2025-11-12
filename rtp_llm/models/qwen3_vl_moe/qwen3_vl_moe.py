@@ -69,6 +69,10 @@ class QWenV3VLWeightInfo(QWenV3MoeWeight, BaseMultiModalWeightInfo):
     def support_lora(self) -> bool:
         return True
 
+    def _get_weight_info(self):
+        weights = self._get_hf_weight_info()
+        return weights
+
 
 class QWen3_VL_MOE(QWen2_5_VL):
     def _init_multimodal(
