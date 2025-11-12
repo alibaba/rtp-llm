@@ -19,7 +19,7 @@ cc_library(
         "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
         "//rtp_llm/cpp/normal_engine:normal_engine",
         "//rtp_llm/cpp/models:models",
-        "//rtp_llm/cpp/config:gpt_init_params",
+        "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/engine_base:weights_converter",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",

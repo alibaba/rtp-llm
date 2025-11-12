@@ -6,9 +6,10 @@ import torch
 from rtp_llm.async_decoder_engine.engine_creator import create_engine
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
-from rtp_llm.config.task_type import TaskType
+from rtp_llm.ops import TaskType
 from rtp_llm.distribute.worker_info import g_parallel_info
-from rtp_llm.models.base_model import BaseModel, GenerateInput
+from rtp_llm.models.base_model import BaseModel
+from rtp_llm.utils.base_model_datatypes import GenerateInput
 from rtp_llm.models.propose_model.propose_model import ProposeModel
 from rtp_llm.ops import EngineScheduleInfo, KVCacheInfo, WorkerStatusInfo
 from rtp_llm.utils.gemm_utils.device_map import get_device
@@ -26,7 +27,7 @@ class AsyncModel:
 
         assert self.config.max_seq_len > 0
         self.tokenizer = model.tokenizer
-        self.decoder_engine_ = create_engine(self.model, self.propose_model)
+        self.decoder_engine_ = create_engine(self.model, self.config, self.propose_model)
         self.decoder_engine_.start()
 
     def is_multimodal(self) -> bool:
@@ -40,7 +41,8 @@ class AsyncModel:
             logging.info(f"error get device name with error: {e}")
             manchine_name = "unknown"
         parallel_info = f"TP{g_parallel_info.tp_size}_PP{g_parallel_info.pp_size}_EP{g_parallel_info.ep_size}"
-        weight_info = f"W{self.config.gpt_init_params.quant_algo.getWeightBits()}A{self.config.gpt_init_params.quant_algo.getActivationBits()}"
+        quant_algo = self.model.py_model_config.quant_algo
+        weight_info = f"W{quant_algo.getWeightBits()}A{quant_algo.getActivationBits()}"
         return "_".join([manchine_name, parallel_info, weight_info])
 
     @property
@@ -49,7 +51,7 @@ class AsyncModel:
 
     @property
     def task_type(self) -> TaskType:
-        return self.model.task_type
+        return self.model.py_model_config.task_type
 
     def stop(self):
         self.decoder_engine_.stop()

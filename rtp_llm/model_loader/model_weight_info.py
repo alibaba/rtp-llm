@@ -1,12 +1,9 @@
 import functools
-import gc
 import logging
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.config.quant_config import QuantizationConfig
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, AttnConfig
 from rtp_llm.model_loader.ffn_weight import FfnConfig, FfnWeight, MoeWithSharedWeight
@@ -27,6 +24,12 @@ from rtp_llm.utils.model_weight import (
     tolerate_failed,
 )
 from rtp_llm.utils.weight_type import WEIGHT_TYPE
+
+# Forward references for type hints
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from rtp_llm.config.model_config import ModelConfig
+    from rtp_llm.config.engine_config import EngineConfig
 
 
 def create_scalar_ones(ts: List[torch.Tensor]):
@@ -144,71 +147,92 @@ class ModelDeployWeightInfo:
         W.post_ln_beta: "transformer.layers.{i}.post_layernorm.bias",
     }
 
-    def __init__(self, config: GptInitModelParameters, tp_size: int, tp_rank: int):
-        self.config = config
-        self._use_swizzleA = config.hw_kernel_config.use_swizzleA
-        self._use_qk_norm = config.qk_norm
-        self._hidden_size = config.hidden_size
-        self._inter_size = config.inter_size
-        self._inter_padding_size = config.inter_padding_size
-        self._moe_inter_padding_size = config.moe_inter_padding_size
-        self._head_num = config.head_num
-        self._head_num_kv = config.head_num_kv
+    def __init__(
+        self,
+        py_model_config: "ModelConfig",
+        engine_config: "EngineConfig",
+        merge_lora: bool = False,
+        tp_size: int = 1,
+        tp_rank: int = 0,
+    ):
+        """Initialize ModelDeployWeightInfo with independent configuration objects."""
+        self.py_model_config = py_model_config
+        self.engine_config = engine_config
+        self.merge_lora = merge_lora
+        
+        self._use_swizzleA = engine_config.hw_kernel_config.use_swizzleA
+        self._use_qk_norm = py_model_config.qk_norm
+        self._hidden_size = py_model_config.hidden_size
+        self._inter_size = py_model_config.inter_size
+        self._inter_padding_size = py_model_config.inter_padding_size
+        self._moe_inter_padding_size = py_model_config.moe_inter_padding_size
+        self._head_num = py_model_config.attn_config.head_num
+        self._head_num_kv = py_model_config.attn_config.kv_head_num
         self.tp_size = tp_size
         self.tp_rank = tp_rank
-        self.ep_size = config.ep_size
-        self.ep_rank = config.ep_rank
-        self.dp_size = config.dp_size
-        self.dp_rank = config.dp_rank
-        self.num_nodes: int = config.num_nodes
-        self.ffn_tp_rank = config.ffn_tp_rank
-        self.ffn_tp_size = config.ffn_tp_size
-        self._size_per_head = config.size_per_head
+        self.ep_size = engine_config.parallelism_config.ep_size
+        self.ep_rank = engine_config.parallelism_config.ep_rank
+        self.dp_size = engine_config.parallelism_config.dp_size
+        self.dp_rank = engine_config.parallelism_config.dp_rank
+        # num_nodes should come from gang_info, not from config
+        self.num_nodes: int = 1  # Will be set from gang_info later
+        self.ffn_tp_rank = engine_config.parallelism_config.ffn_tp_rank
+        self.ffn_tp_size = engine_config.parallelism_config.ffn_tp_size
+        self._size_per_head = py_model_config.attn_config.size_per_head
         if self._head_num_kv == -1:
             self._head_num_kv = self._head_num
-        self._quant_algo = config.quant_algo
-        self._quant_config = config.quant_config
-        self._num_layers = config.num_layers
-        self._layer_head_num = config.layer_head_num
-        self._layer_inter_padding_size = config.layer_inter_padding_size
+        self._quant_algo = py_model_config.quant_algo
+        self._quant_config = getattr(py_model_config, 'quant_config', None)
+        self._num_layers = py_model_config.num_layers
+        self._layer_head_num = getattr(py_model_config, 'layer_head_num', None)
+        self._layer_inter_padding_size = getattr(py_model_config, 'layer_inter_padding_size', None)
         self._has_prefix_encoder = False
-        self._is_sparse_head = config.is_sparse_head
-        self._layer_head_num = config.layer_head_num
-        self._src_quantization_bit = config.src_quantization_bit
-        self.tp_split_emb_and_lm_head = config.tp_split_emb_and_lm_head
+        self._is_sparse_head = getattr(py_model_config, 'is_sparse_head', False)
+        self._src_quantization_bit = getattr(py_model_config, 'src_quantization_bit', None)
 
-        self._is_gated_activation = config.gpt_init_params.isGatedActivation()
-        self.expert_num_ = config.gpt_init_params.expert_num
-        self.moe_n_group_ = config.moe_n_group
-        self.enable_eplb_ = config.enable_eplb
-        self.phy_exp_num_ = config.phy_exp_num
-        self.moe_k_ = config.gpt_init_params.moe_k
-        self.moe_layer_index_ = config.gpt_init_params.moe_layer_index
-        self.moe_style_ = config.gpt_init_params.moe_style
-        self._moe_inter_padding_size = config.moe_inter_padding_size
+        self._is_gated_activation = py_model_config.isGatedActivation()
+        self.expert_num_ = py_model_config.expert_num
+        self.moe_n_group_ = py_model_config.moe_n_group
+        self.enable_eplb_ = py_model_config.eplb_config.enable_eplb()
+        self.phy_exp_num_ = py_model_config.eplb_config.phy_exp_num(py_model_config.expert_num)
+        self.moe_k_ = py_model_config.moe_k
+        self.moe_layer_index_ = py_model_config.moe_layer_index
+        self.moe_style_ = py_model_config.moe_style
+        self._moe_inter_padding_size = py_model_config.moe_inter_padding_size
 
-        self.tie_word_embeddings = config.tie_word_embeddings
+        self.tie_word_embeddings = py_model_config.tie_word_embeddings
         self.weight_style = WeightStyle.NONE
 
         # for mla
-        self.kv_lora_rank = config.kv_lora_rank
-        self.nope_head_dim = config.nope_head_dim
-        self.rope_head_dim = config.rope_head_dim
-        self.v_head_dim = config.v_head_dim
-
+        self.kv_lora_rank = py_model_config.attn_config.kv_lora_rank
+        self.nope_head_dim = py_model_config.attn_config.nope_head_dim
+        self.rope_head_dim = py_model_config.attn_config.rope_head_dim
+        self.v_head_dim = py_model_config.attn_config.v_head_dim
         # for vit sep
-        self.vit_separation = config.vit_separation
+        self.vit_separation = engine_config.runtime_config.vit_separation
 
         # for eplb
-        self.phy2log = config.phy2log
+        # phy2log should be loaded from LoadConfig, not from config
+        self.phy2log = None  # Will be set in create_load_config
+        # py_eplb will be set separately, not in eplb_config
+        self.py_eplb = None
         # for moe
         self._use_stack_weight = False
 
-        self.kv_cache_data_type = config.kv_cache_data_type
+        self.kv_cache_data_type = py_model_config.kv_cache_data_type
 
         self.is_ffn_service = (
-            config.gpt_init_params.ffn_disaggregate_config.is_ffn_service()
+            engine_config.parallelism_config.ffn_disaggregate_config.is_ffn_service()
         )
+        
+        # Create a config wrapper for backward compatibility
+        class ConfigWrapper:
+            def __init__(self, py_model_config, engine_config):
+                self.py_model_config = py_model_config
+                self.engine_config = engine_config
+                self.py_eplb = None  # Will be set separately
+        
+        self.config = ConfigWrapper(py_model_config, engine_config)
 
     @property
     def support_lora(self):
@@ -216,13 +240,19 @@ class ModelDeployWeightInfo:
 
     @property
     def attn_config(self):
+        use_fp8_kv_cache = False
+        kv_cache_config = self.engine_config.kv_cache_config
+        if kv_cache_config:
+            use_fp8_kv_cache = (
+                self.kv_cache_data_type == WEIGHT_TYPE.FP8.to_str()
+                and kv_cache_config.blockwise_use_fp8_kv_cache == 1
+            )        
         attn_config = AttnConfig(
             hidden_size=self._hidden_size,
             size_per_head=self._size_per_head,
             head_num=self._head_num,
             head_num_kv=self._head_num_kv,
-            use_fp8_kv_cache=self.kv_cache_data_type == WEIGHT_TYPE.FP8.to_str()
-            and StaticConfig.py_kv_cache_config.blockwise_use_fp8_kv_cache == 1,
+            use_fp8_kv_cache=use_fp8_kv_cache,
         )
         return attn_config
 
@@ -237,7 +267,7 @@ class ModelDeployWeightInfo:
 
     def get_weight_info(self) -> ModelWeightInfo:
         weight_info = self._get_weight_info()
-        use_fp32 = self.config.py_env_configs.model_config.use_float32
+        use_fp32 = getattr(self.py_model_config, 'use_float32', False)
         if use_fp32:
             weight_info = weight_info.set_weight_dtype(torch.float32)
 
@@ -525,7 +555,7 @@ class ModelDeployWeightInfo:
         if not database.is_ft_style:
             merge_lora = (
                 database.has_lora()
-                and self.config.py_env_configs.lora_config.merge_lora
+                and self.merge_lora
             )
 
         if database.has_lora() and not self.support_lora:
@@ -577,14 +607,13 @@ class ModelDeployWeightInfo:
             num_nodes=self.num_nodes,
             ffn_tp_rank=self.ffn_tp_rank,
             ffn_tp_size=self.ffn_tp_size,
-            tp_split_emb_and_lm_head=self.tp_split_emb_and_lm_head,
             merge_lora=merge_lora,
             vit_separation=self.vit_separation,
             compute_dtype=compute_dtype,
             quant_algo=self._quant_algo,
             bit=self._quant_algo.getWeightBits(),
             is_ft_style_weight=database.is_ft_style,
-            phy2log=self.config.phy2log,  # Notice use config, because phy2log init after ModelDeployWeightInfo.__init__
+            phy2log=self.phy2log,  # phy2log should be set before create_load_config is called
             exported_device=exported_device,
             use_swizzleA=self._use_swizzleA
         )

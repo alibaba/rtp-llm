@@ -3,7 +3,8 @@ from typing import Dict, Optional
 import torch
 from torch import nn
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.quant_config import QuantizationConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules.embedding import Embedding
@@ -13,23 +14,29 @@ from rtp_llm.models_py.modules.linear_factory import LinearFactory
 from rtp_llm.models_py.modules.mla import DeepSeekV2Attention
 from rtp_llm.models_py.modules.mlp import FusedSiluActDenseMLP
 from rtp_llm.models_py.modules.moe import FusedMoe
+from rtp_llm.models_py.modules.moe.config_adapter import MoEConfigAdapter
 from rtp_llm.models_py.modules.moe.fused_moe_factory import FusedMoeFactory
 from rtp_llm.models_py.modules.norm import RMSNorm
-from rtp_llm.ops import KVCache, PyAttentionInputs, PyModelInputs, PyModelOutputs
+from rtp_llm.ops import KVCache, MoeConfig, ParallelismConfig, PyAttentionInputs, PyModelInputs, PyModelOutputs, RuntimeConfig
 from rtp_llm.utils.model_weight import W
 
 
 class DeepSeekV2NormalMoeLayer(nn.Module):
     def __init__(
-        self, config: GptInitModelParameters, weights: Dict[str, torch.Tensor]
+        self,
+        config: ModelConfig,
+        parallelism_config: ParallelismConfig,
+        weights: Dict[str, torch.Tensor],
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         self.config = config
         self.top_k = config.moe_k
         self.gate = LinearFactory.create_linear_from_weights(
-            weights, W.moe_gate, None, None, config
+            weights, W.moe_gate, None, None,
+            py_model_config=config, quant_config=quant_config
         )
-        self.fused_moe = FusedMoE(config, weights, layer_id=0)
+        self.fused_moe = FusedMoE(config, parallelism_config, weights, layer_id=0)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         router_logits = self.gate(hidden_states)
@@ -41,13 +48,17 @@ class DeepSeekV2NormalMoeLayer(nn.Module):
 
 class DeepSeekV2MoeLayer(nn.Module):
     def __init__(
-        self, config: GptInitModelParameters, weights: Dict[str, torch.Tensor]
+        self,
+        config: ModelConfig,
+        parallelism_config: ParallelismConfig,
+        weights: Dict[str, torch.Tensor],
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         self.config = config
         self.top_k = config.moe_k
         # Create gate layer
-        use_fp8_path = self._should_use_fp8_linear(config, weights)
+        use_fp8_path = self._should_use_fp8_linear(quant_config, weights)
         if use_fp8_path:
             gate_scale_key = "partial_moe_weights.gate.weight_only_quant_scale"
             has_gate_scale = gate_scale_key in weights
@@ -57,22 +68,34 @@ class DeepSeekV2MoeLayer(nn.Module):
                     weight=weights[W.moe_gate],
                     weight_scales=weights[gate_scale_key],
                     bias=None,
-                    config=config,
+                    py_model_config=config,
+                    quant_config=quant_config,
                     force_fp8=True,
                 )
             else:
                 # Create regular gate layer
                 self.gate = LinearFactory.create_linear_from_weights(
-                    weights, W.moe_gate, None, None, config
+                    weights, W.moe_gate, None, None,
+                    py_model_config=config, quant_config=quant_config
                 )
         else:
             # Create regular gate layer
             self.gate = LinearFactory.create_linear_from_weights(
-                weights, W.moe_gate, None, None, config
+                weights, W.moe_gate, None, None,
+                py_model_config=config, quant_config=quant_config
             )
 
-        # Always use FusedMoeFactory.create_fused_moe
-        self.fused_moe: FusedMoe = FusedMoeFactory.create_fused_moe(config, weights)
+        # Create adapter and use FusedMoeFactory.create_fused_moe
+        moe_config = MoeConfig()
+        runtime_config = RuntimeConfig()
+        config_adapter = MoEConfigAdapter(
+            py_model_config=config,
+            parallelism_config=parallelism_config,
+            moe_config=moe_config,
+            runtime_config=runtime_config,
+            quant_config=quant_config,
+        )
+        self.fused_moe: FusedMoe = FusedMoeFactory.create_fused_moe(config_adapter, weights)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Forward pass for FusedMoE implementation."""
@@ -99,10 +122,10 @@ class DeepSeekV2MoeLayer(nn.Module):
         )
 
     def _should_use_fp8_linear(
-        self, config: GptInitModelParameters, weights: Dict[str, torch.Tensor]
+        self, quant_config: Optional[QuantizationConfig], weights: Dict[str, torch.Tensor]
     ) -> bool:
         """Check if FP8 linear layers should be used."""
-        if not hasattr(config, "quant_config"):
+        if quant_config is None:
             return False
 
         # Check if any MoE weights are FP8
@@ -121,21 +144,25 @@ class DeepSeekV2MoeLayer(nn.Module):
 class DeepSeekV2DecoderLayer(nn.Module):
     def __init__(
         self,
-        config: GptInitModelParameters,
+        config: ModelConfig,
+        parallelism_config: ParallelismConfig,
         weights: Dict[str, torch.Tensor],
         layer_idx: int,
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
 
         self.layer_idx = layer_idx
-        self.self_attn = DeepSeekV2Attention(config, weights, layer_idx)
+        self.self_attn = DeepSeekV2Attention(config, parallelism_config, weights, layer_idx, quant_config)
 
-        if len(config.moe_layer_index) > 0 and layer_idx < config.moe_layer_index[0]:
+        moe_layer_index = config.moe_layer_index
+        if len(moe_layer_index) > 0 and layer_idx < moe_layer_index[0]:
             self.is_dense_layer = True
         else:
             self.is_dense_layer = False
-            self.moe_mlp = DeepSeekV2NormalMoeLayer(config, weights)
-        self.add_shared_expert = config.moe_style == 2
+            self.moe_mlp = DeepSeekV2NormalMoeLayer(config, parallelism_config, weights, quant_config)
+        moe_style = config.moe_style
+        self.add_shared_expert = moe_style == 2
 
         if self.add_shared_expert:
             self.shared_mlp = FusedSiluActDenseMLP(config, weights)
@@ -179,19 +206,32 @@ class DeepSeekV2DecoderLayer(nn.Module):
 
 
 class DeepSeekV2Model(GptModelBase):
-    def __init__(self, config: GptInitModelParameters, weights: ModelWeights):
-        config.head_num = config.head_num // config.tp_size
-        super().__init__(config, weights)
-        self.layer_num = config.layer_num
-        self.vocab_size = config.vocab_size
-        self.embed_tokens = Embedding(config, weights.get_global_weight(W.embedding))
+    def __init__(
+        self,
+        config: ModelConfig,
+        parallelism_config: ParallelismConfig,
+        device_resource_config,
+        weights: ModelWeights,
+        vocab_size: int,
+        quant_config: Optional[QuantizationConfig] = None,
+        fmha_config=None,
+        py_hw_kernel_config=None,
+    ):
+        # Adjust head_num for tensor parallelism
+        config.head_num = config.head_num // parallelism_config.tp_size
+        super().__init__(config, parallelism_config, device_resource_config, weights, vocab_size, fmha_config=fmha_config, py_hw_kernel_config=py_hw_kernel_config)
+        self.layer_num = config.num_layers
+        self.vocab_size = vocab_size
+        self.embed_tokens = Embedding(config, parallelism_config, weights.get_global_weight(W.embedding))
 
         self.layers = nn.ModuleList(
             [
                 DeepSeekV2DecoderLayer(
                     config,
+                    parallelism_config,
                     weights.weights[idx],
                     idx,
+                    quant_config,
                 )
                 for idx in range(self.layer_num)
             ]

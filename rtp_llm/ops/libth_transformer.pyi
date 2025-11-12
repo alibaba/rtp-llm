@@ -21,7 +21,6 @@ __all__ = [
     "FMHAConfig",
     "FlashInferOp",
     "FfnDisAggregateConfig",
-    "GptInitParameter",
     "HWKernelConfig",
     "Host",
     "KVCacheConfig",
@@ -32,15 +31,14 @@ __all__ = [
     "ModelSpecificConfig",
     "MoeConfig",
     "MultimodalInput",
-    "ParallelismDistributedConfig",
+    "ParallelismConfig",
     "ProfilingDebugLoggingConfig",
     "QuantAlgo",
     "RoleSpecialTokens",
     "RoleType",
     "RtpEmbeddingOp",
     "RtpLLMOp",
-    "SchedulerConfig",
-    "ServiceDiscoveryConfig",
+    "RuntimeConfig",
     "SpecialTokens",
     "SpeculativeExecutionConfig",
     "get_block_cache_keys",
@@ -69,7 +67,6 @@ class BatchDecodeSchedulerConfig:
         batch_decode_scheduler_warmup_type: int = 0,
     ) -> None: ...
     def to_string(self) -> str: ...
-    def update_from_env(self) -> None: ...
 
 class CacheStoreConfig:
     cache_store_rdma_mode: bool
@@ -93,7 +90,6 @@ class CacheStoreConfig:
         messager_worker_thread_count: int = 16,
     ) -> None: ...
     def to_string(self) -> str: ...
-    def update_from_env(self) -> None: ...
 
 class ConcurrencyConfig:
     concurrency_limit: int
@@ -103,7 +99,6 @@ class ConcurrencyConfig:
         self, concurrency_with_block: bool = False, concurrency_limit: int = 32
     ) -> None: ...
     def to_string(self) -> str: ...
-    def update_from_env(self) -> None: ...
 
 class DeviceExporter:
     def get_device_id(self) -> int: ...
@@ -144,7 +139,6 @@ class DeviceResourceConfig:
         not_use_default_stream: bool = False,
     ) -> None: ...
     def to_string(self) -> str: ...
-    def update_from_env(self) -> None: ...
 
 class DeviceType:
     """
@@ -263,7 +257,6 @@ class FIFOSchedulerConfig:
         fast_gen_context_budget: int = -1,
     ) -> None: ...
     def to_string(self) -> str: ...
-    def update_from_env(self) -> None: ...
 
 class FMHAConfig:
     disable_flash_infer: bool
@@ -291,10 +284,9 @@ class FMHAConfig:
         enable_xqa: bool = True,
     ) -> None: ...
     def to_string(self) -> str: ...
-    def update_from_env(self) -> None: ...
 
 class FlashInferOp:
-    def __init__(self, gpt_init_parameter: GptInitParameter) -> None: ...
+    def __init__(self, attn_configs: typing.Any) -> None: ...
     def forward(
         self,
         input: torch.Tensor,
@@ -323,7 +315,6 @@ class FfnDisAggregateConfig:
     ) -> None: ...
     def is_ffn_service(self) -> bool: ...
     def to_string(self) -> str: ...
-    def update_from_env(self) -> None: ...
 
 class FMHAType:
     """
@@ -381,196 +372,6 @@ class FMHAType:
     @property
     def value(self) -> int: ...
 
-class GptInitParameter:
-    activation_type: str
-    add_bias_linear: bool
-    batch_decode_scheduler_config: BatchDecodeSchedulerConfig
-    block_nums: int
-    cache_store_config: CacheStoreConfig
-    cache_store_connect_port: int
-    cache_store_listen_port: int
-    cache_store_rdma_connect_port: int
-    cache_store_rdma_listen_port: int
-    cache_store_rdma_mode: bool
-    ckpt_path: str
-    concurrency_config: ConcurrencyConfig
-    cross_attn_input_len: int
-    data_type: str
-    decode_polling_kv_cache_step_ms: int
-    decode_retry_timeout_ms: int
-    decode_retry_times: int
-    deepseek_mscale_all_dim: float
-    deepseek_rope_mscale: float
-    device_resource_config: DeviceResourceConfig
-    dp_rank: int
-    dp_size: int
-    dp_tp_nccl_port: int
-    embedding_size: int
-    enable_3fs: bool
-    enable_eplb: bool
-    enable_fast_gen: bool
-    enable_partial_fallback: bool
-    enable_sp: bool
-    enable_speculative_decoding: bool
-    ep_rank: int
-    ep_size: int
-    eplb_mode: EplbMode
-    eplb_update_time: int
-    expert_num: int
-    fast_gen_max_context_len: int
-    ffn_disaggregate_config: FfnDisAggregateConfig
-    ffn_tp_nccl_port: int
-    ffn_tp_rank: int
-    ffn_tp_size: int
-    fifo_scheduler_config: FIFOSchedulerConfig
-    fmha_config: FMHAConfig
-    gen_num_per_circle: int
-    has_lm_head: bool
-    has_moe_norm: bool
-    has_positional_encoding: bool
-    has_post_decoder_layernorm: bool
-    has_pre_decoder_layernorm: bool
-    head_num: int
-    head_num_kv: int
-    hidden_size: int
-    http_port: int
-    hw_kernel_config: HWKernelConfig
-    include_sep_tokens: bool
-    input_embedding_scalar: float
-    input_vocab_size: int
-    inter_padding_size: int
-    inter_size: int
-    is_causal: bool
-    is_multimodal: bool
-    is_sparse_head: bool
-    kv_cache_config: KVCacheConfig
-    kv_cache_data_type: str
-    kv_cache_mem_mb: int
-    kv_lora_rank: int
-    layer_head_num: list[int]
-    layer_head_num_kv: list[int]
-    layer_inter_padding_size: list[int]
-    layer_inter_size: list[int]
-    layer_num: int
-    layernorm_eps: float
-    layernorm_type: str
-    load_cache_timeout_ms: int
-    local_rank: int
-    logit_scale: float
-    max_context_batch_size: int
-    max_generate_batch_size: int
-    max_rpc_timeout_ms: int
-    max_seq_len: int
-    misc_config: MiscellaneousConfig
-    mla_ops_type: MlaOpsType
-    mm_position_ids_style: int
-    mm_sep_tokens: list[list[int]]
-    model_name: str
-    model_rpc_port: int
-    model_specific_config: ModelSpecificConfig
-    moe_config: MoeConfig
-    moe_inter_padding_size: int
-    moe_k: int
-    moe_layer_index: list[int]
-    moe_n_group: int
-    moe_normalize_expert_scale: bool
-    moe_style: int
-    moe_topk_group: int
-    routed_scaling_factor: float
-    mrope_section: list[int]
-    nccl_ip: str
-    nope_head_dim: int
-    norm_type: str
-    num_layers: int
-    num_valid_layer: int
-    org_embedding_max_pos: int
-    parallelism_distributed_config: ParallelismDistributedConfig
-    phy_exp_num: int
-    position_id_len_factor: int
-    position_ids_style: int
-    pre_allocate_op_mem: bool
-    pre_seq_len: int
-    prefill_max_wait_timeout_ms: int
-    prefill_retry_timeout_ms: int
-    prefill_retry_times: int
-    prefix_projection: bool
-    profiling_debug_logging_config: ProfilingDebugLoggingConfig
-    py_eplb: typing.Any
-    q_lora_rank: int
-    q_scaling: float
-    qk_norm: bool
-    quant_algo: QuantAlgo
-    rdma_connect_retry_times: int
-    remote_rpc_server_port: int
-    reserve_runtime_mem_mb: int
-    residual_scalar: float
-    reuse_cache: bool
-    reverse_e_h_norm: bool
-    role_type: RoleType
-    rope_head_dim: int
-    rotary_embedding_base: float
-    rotary_embedding_dim: int
-    rotary_embedding_mscale: float
-    rotary_embedding_offset: int
-    rotary_embedding_scale: float
-    rotary_embedding_style: int
-    rotary_factor1: float
-    rotary_factor2: float
-    partial_rotary_factor: float
-    scheduler_config: SchedulerConfig
-    scheduler_reserve_resource_ratio: int
-    scoring_func: int
-    seq_size_per_block: int
-    service_discovery_config: ServiceDiscoveryConfig
-    size_per_head: int
-    softmax_extra_scale: float
-    sp_config: SpeculativeExecutionConfig
-    special_tokens: SpecialTokens
-    tokenizer_path: str
-    tp_nccl_port: int
-    tp_rank: int
-    tp_size: int
-    type_vocab_size: int
-    use_all_gather: bool
-    use_attention_linear_bias: bool
-    use_cross_attn: bool
-    use_fp32_to_compute_logit: bool
-    use_kvcache: bool
-    use_logn_attn: bool
-    use_mla: bool
-    use_norm_attn_out_residual: bool
-    use_norm_input_residual: bool
-    using_hf_sampling: bool
-    v_head_dim: int
-    vit_separation: int
-    vocab_size: int
-    warm_up: bool
-    warm_up_with_loss: bool
-    worker_addrs: list[str]
-    worker_grpc_addrs: list[str]
-    worker_port_offset: int
-    world_size: int
-
-    def __init__(
-        self,
-        head_num: int,
-        size_per_head: int,
-        num_layers: int,
-        max_seq_len: int,
-        vocab_size: int,
-        hidden_size: int,
-    ) -> None: ...
-    def insertMultiTaskPromptTokens(
-        self, task_id: str, tokens_id: list[int]
-    ) -> None: ...
-    def isGatedActivation(self) -> bool: ...
-    def isKvCacheQuant(self) -> bool: ...
-    def setActivationType(self) -> None: ...
-    def setKvCacheDataType(self) -> None: ...
-    def setLayerNormType(self) -> None: ...
-    def setNormType(self) -> None: ...
-    def setTaskType(self, task: str) -> None: ...
-    def showDebugInfo(self) -> None: ...
 
 class HWKernelConfig:
     arm_gemm_use_kai: bool
@@ -603,7 +404,6 @@ class HWKernelConfig:
         num_native_cuda_graph: int = 200,
     ) -> None: ...
     def to_string(self) -> str: ...
-    def update_from_env(self) -> None: ...
 
 class Host:
     http_port: int
@@ -642,7 +442,6 @@ class KVCacheConfig:
         threefs_write_iov_size: int = 1 << 32,
     ) -> None: ...
     def to_string(self) -> str: ...
-    def update_from_env(self) -> None: ...
 
 class KVCacheInfo:
     available_kv_cache: int
@@ -673,7 +472,6 @@ class MiscellaneousConfig:
         aux_string: str = "",
     ) -> None: ...
     def to_string(self) -> str: ...
-    def update_from_env(self) -> None: ...
 
 class MlaOpsType:
     """
@@ -718,7 +516,6 @@ class ModelSpecificConfig:
         self, max_lora_model_size: int = -1, load_python_model: bool = False
     ) -> None: ...
     def to_string(self) -> str: ...
-    def update_from_env(self) -> None: ...
 
 class MoeConfig:
     deep_ep_num_sm: int
@@ -748,7 +545,6 @@ class MoeConfig:
         max_moe_normal_masked_token_num: int = 1024,
     ) -> None: ...
     def to_string(self) -> str: ...
-    def update_from_env(self) -> None: ...
 
 class MultimodalInput:
     mm_type: int
@@ -756,7 +552,7 @@ class MultimodalInput:
     url: str
     def __init__(self, url: str, tensor: torch.Tensor, mm_type: int) -> None: ...
 
-class ParallelismDistributedConfig:
+class ParallelismConfig:
     dp_size: int
     ep_size: int
     ffn_sp_size: int
@@ -778,7 +574,6 @@ class ParallelismDistributedConfig:
         ffn_sp_size: int = 1,
     ) -> None: ...
     def to_string(self) -> str: ...
-    def update_from_env(self) -> None: ...
 
 class ProfilingDebugLoggingConfig:
     trace_memory: bool
@@ -822,7 +617,6 @@ class ProfilingDebugLoggingConfig:
         enable_detail_log: bool = False,
     ) -> None: ...
     def to_string(self) -> str: ...
-    def update_from_env(self) -> None: ...
 
 class QuantAlgo:
     def __getstate__(self) -> tuple: ...
@@ -926,30 +720,6 @@ class RtpLLMOp:
     def update_eplb_config(self, config: EplbConfig) -> bool: ...
     def update_scheduler_info(self, arg0: str) -> None: ...
 
-class SchedulerConfig:
-    use_batch_decode_scheduler: bool
-    def __init__(self, use_batch_decode_scheduler: bool = False) -> None: ...
-    def to_string(self) -> str: ...
-    def update_from_env(self) -> None: ...
-
-class ServiceDiscoveryConfig:
-    decode_cm2_config: str
-    multimodal_part_cm2_config: str
-    remote_rpc_server_ip: str
-    remote_vit_server_ip: str
-    use_local: bool
-
-    def __init__(
-        self,
-        use_local: bool = False,
-        remote_rpc_server_ip: str = "",
-        decode_cm2_config: str = "",
-        remote_vit_server_ip: str = "",
-        multimodal_part_cm2_config: str = "",
-    ) -> None: ...
-    def to_string(self) -> str: ...
-    def update_from_env(self) -> None: ...
-
 class SpecialTokens:
     assistant: RoleSpecialTokens
     bos_token_id: int
@@ -982,7 +752,6 @@ class SpeculativeExecutionConfig:
         force_score_context_attention: bool = True,
     ) -> None: ...
     def to_string(self) -> str: ...
-    def update_from_env(self) -> None: ...
 
 def get_block_cache_keys(token_ids_list: list[list[int]]) -> list[int]: ...
 def get_device() -> DeviceExporter: ...

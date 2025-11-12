@@ -44,7 +44,7 @@ class FrontendWorkerTest(TestCase):
         port_list, _ = PortManager().get_consecutive_ports(1)
         os.environ["START_PORT"] = str(port_list[0])
         update_master_info("0.0.0.0", int(port_list[0]))
-        g_worker_info.reload()
+        g_worker_info.reload(port_list[0])
         self.fake_model_loader = FakeModelLoader(
             model_type="llama",
             tokenizer_path=self.tokenizer_path,
@@ -52,7 +52,16 @@ class FrontendWorkerTest(TestCase):
             max_seq_len=2048,
         )
         model: AsyncModel = self.fake_model_loader.load_model()
-        pipeline = Pipeline(model.config, model.tokenizer)
+        pipeline = Pipeline(
+            special_tokens=model.model.py_model_config.special_tokens,
+            pd_sep_config=model.model.engine_config.pd_sep_config,
+            runtime_config=model.model.engine_config.runtime_config,
+            ffn_disaggregate_config=model.model.engine_config.parallelism_config.ffn_disaggregate_config,
+            max_seq_len=model.model.py_model_config.max_seq_len,
+            seq_size_per_block=model.model.engine_config.kv_cache_config.seq_size_per_block,
+            tokenizer=model.tokenizer,
+            py_env_configs=model.model.py_env_configs,
+        )
         return FakeFrontendWorker(model, pipeline)
 
     async def _run(self, frontend_worker, **kwargs):

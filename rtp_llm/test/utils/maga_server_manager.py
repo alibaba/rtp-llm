@@ -206,7 +206,7 @@ class MagaServerManager(object):
 
         for _ in range(retry_times):
             try:
-                logging.info(f"{url} {query}")
+                logging.info(f"curl {url} -d {json.dumps(query)}")
                 response = requests.post(url, json=query)
                 if response.status_code == 200:
                     logging.debug("%s", response.text)

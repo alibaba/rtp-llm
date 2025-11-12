@@ -5,7 +5,8 @@ from typing_extensions import override
 from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient
 from rtp_llm.frontend.token_processor import TokenProcessor
-from rtp_llm.models.base_model import BaseModel, GenerateInput, GenerateOutputs
+from rtp_llm.models.base_model import BaseModel
+from rtp_llm.utils.base_model_datatypes import GenerateInput, GenerateOutputs
 from rtp_llm.models.propose_model.propose_model import ProposeModel
 from rtp_llm.ops import EngineScheduleInfo, KVCacheInfo, WorkerStatusInfo
 from rtp_llm.ops.rtp_llm.rtp_llm_op import RtpLLMOp
@@ -30,7 +31,13 @@ class RPCEngine(BaseEngine):
         self.rtp_llm_op_ = RtpLLMOp(
             model, self.mm_engine, propose_model, self.token_processor
         )
-        self.model_rpc_client = ModelRpcClient(self.config)
+        self.model_rpc_client = ModelRpcClient(
+            self.model.engine_config.parallelism_config.ffn_disaggregate_config,
+            None,  # gang_config - optional, will use get_gang_info() if None
+            None,  # eplb_config - optional
+            self.model.engine_config.pd_sep_config.max_rpc_timeout_ms,
+            self.model.engine_config.pd_sep_config.decode_entrance,
+        )
 
     @override
     def start(self) -> None:

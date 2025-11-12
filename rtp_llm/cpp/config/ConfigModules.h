@@ -1,27 +1,58 @@
 #pragma once
 #include <string>
 #include <sstream>
+#include <map>
+#include <vector>
+#include "rtp_llm/cpp/config/RoleTypes.h"
 
 namespace rtp_llm {
 
-struct ParallelismDistributedConfig {
-    int         tp_size          = 1;
-    int         ep_size          = 1;
-    int         dp_size          = 1;
-    int         pp_size          = 1;
-    int         world_size       = 1;
-    int         world_rank       = 0;
-    int         local_world_size = 1;
-    int         ffn_sp_size      = 1;
+struct FfnDisAggregateConfig {
+    bool        enable_ffn_disaggregate = false;
+    int         attention_tp_size       = 1;
+    int         attention_dp_size       = 1;
+    int         ffn_tp_size             = 1;
+    int         ffn_dp_size             = 1;
+    bool        is_ffn_rank             = false;
     std::string to_string() const;
-    void        update_from_env_for_test();
+    bool        is_ffn_service() const {
+        return enable_ffn_disaggregate && is_ffn_rank;
+    }
+};
+
+struct ParallelismConfig {
+    int64_t     tp_size          = 1;
+    int64_t     ep_size          = 1;
+    int64_t     dp_size          = 1;
+    int64_t     pp_size          = 1;
+    int64_t     world_size       = 1;
+    int64_t     world_rank       = 0;
+    int64_t     local_world_size = 1;
+    int64_t     ffn_sp_size      = 1;
+    int64_t     tp_rank          = 0;
+    int64_t     ep_rank          = 0;
+    int64_t     dp_rank          = 0;
+    int64_t     ffn_tp_size      = 1;
+    int64_t     ffn_tp_rank      = 0;
+    bool        enable_sp        = false;
+
+    std::string nccl_ip          = "";
+    int64_t     tp_nccl_port     = 0;
+    int64_t     dp_tp_nccl_port  = 0;
+    int64_t     ffn_tp_nccl_port = 0;
+    int64_t     th_nccl_port     = 0;  // General NCCL port for compatibility
+    int64_t     http_port        = 0;
+    int64_t     model_rpc_port   = 0;
+
+    FfnDisAggregateConfig ffn_disaggregate_config;  // FFN disaggregate configuration
+
+    std::string to_string() const;
 };
 
 struct ConcurrencyConfig {
     bool        concurrency_with_block = false;
     int         concurrency_limit      = 32;
     std::string to_string() const;
-    void        update_from_env_for_test();
 };
 
 struct FMHAConfig {
@@ -36,13 +67,13 @@ struct FMHAConfig {
     bool        disable_flash_infer           = false;
     bool        enable_xqa                    = true;
     std::string to_string() const;
-    void        update_from_env_for_test();
 };
 
 struct KVCacheConfig {
     bool        reuse_cache                        = false;
     std::string multi_task_prompt                  = "";
     std::string multi_task_prompt_str              = "";
+    std::map<std::string, std::vector<int>> multi_task_prompt_tokens;
     bool        enable_3fs                         = false;
     int         match_timeout_ms                   = 1000;
     int         rpc_get_cache_timeout_ms           = 2000;
@@ -54,8 +85,16 @@ struct KVCacheConfig {
     int64_t     threefs_write_iov_size             = 1LL << 32;  // 4GB
     int64_t     memory_block_cache_size_mb         = 0;
     int64_t     memory_block_cache_sync_timeout_ms = 10000;
+    // Fields merged from PyKvCacheConfig
+    int         int8_kv_cache                      = 0;
+    int         fp8_kv_cache                      = 0;
+    int64_t     kv_cache_mem_mb                    = -1;
+    int         seq_size_per_block                 = 64;
+    int         test_block_num                     = 0;
+    int         use_block_cache                    = -1;  // -1 means not set, use Optional<int> equivalent
+    int         blockwise_use_fp8_kv_cache         = 0;
+    void        insertMultiTaskPromptTokens(std::string task_id, std::vector<int64_t> tokens_id);
     std::string to_string() const;
-    void        update_from_env_for_test();
 };
 
 struct ProfilingDebugLoggingConfig {
@@ -80,7 +119,6 @@ struct ProfilingDebugLoggingConfig {
     bool        check_nan                 = false;
 
     std::string to_string() const;
-    void        update_from_env_for_test();
 };
 
 struct HWKernelConfig {
@@ -98,7 +136,6 @@ struct HWKernelConfig {
     bool        enable_native_cuda_graph     = false;
     int         num_native_cuda_graph        = 200;
     std::string to_string() const;
-    void        update_from_env_for_test();
 };
 
 struct DeviceResourceConfig {
@@ -111,7 +148,6 @@ struct DeviceResourceConfig {
     int         enable_layer_micro_batch    = 0;
     bool        not_use_default_stream      = false;
     std::string to_string() const;
-    void        update_from_env_for_test();
 };
 
 struct MoeConfig {
@@ -120,21 +156,17 @@ struct MoeConfig {
     bool        use_deepep_low_latency          = true;
     bool        use_deepep_p2p_low_latency      = false;
     bool        fake_balance_expert             = false;
-    int         eplb_control_step               = 100;
-    bool        eplb_test_mode                  = false;
     bool        hack_moe_expert                 = false;
-    int         eplb_balance_layer_per_step     = 1;
     int         deep_ep_num_sm                  = 0;
     int         max_moe_normal_masked_token_num = 1024;
+    bool        use_all_gather                  = false;
     std::string to_string() const;
-    void        update_from_env_for_test();
 };
 
 struct ModelSpecificConfig {
     int64_t     max_lora_model_size = -1;
     bool        load_python_model   = false;
     std::string to_string() const;
-    void        update_from_env_for_test();
 };
 
 struct SpeculativeExecutionConfig {
@@ -146,21 +178,12 @@ struct SpeculativeExecutionConfig {
     int64_t     gen_num_per_cycle             = 1;
     bool        force_stream_sample           = false;
     bool        force_score_context_attention = true;
+    // Fields merged from PySpeculativeExecutionConfig
+    std::string sp_quantization               = "";
+    std::string sp_checkpoint_path            = "";
     std::string to_string() const;
-    void        update_from_env_for_test();
 };
 
-struct ServiceDiscoveryConfig {
-    bool        use_local = false;
-    std::string remote_rpc_server_ip;
-    std::string decode_cm2_config;
-    std::string remote_vit_server_ip;
-    std::string multimodal_part_cm2_config;
-    std::string remote_backend_ip;
-    std::string backend_cm2_config;
-    std::string to_string() const;
-    void        update_from_env_for_test();
-};
 
 struct CacheStoreConfig {
     bool        cache_store_rdma_mode        = false;
@@ -172,39 +195,86 @@ struct CacheStoreConfig {
     int         messager_io_thread_count     = 2;
     int         messager_worker_thread_count = 16;
     std::string to_string() const;
-    void        update_from_env_for_test();
-};
-
-struct SchedulerConfig {
-    bool        use_batch_decode_scheduler = false;
-    bool        use_gather_batch_scheduler = false;
-    std::string to_string() const;
-    void        update_from_env_for_test();
 };
 
 struct BatchDecodeSchedulerConfig {
     int64_t batch_decode_scheduler_batch_size = 1;
     // 0: use decode warmup, others: use prefill warmup
-    int64_t     batch_decode_scheduler_warmup_type = 0;
+    int64_t batch_decode_scheduler_warmup_type = 0;
     std::string to_string() const;
-    void        update_from_env_for_test();
 };
 
 struct FIFOSchedulerConfig {
-    int64_t     max_context_batch_size           = 1;
-    int         scheduler_reserve_resource_ratio = 5;
-    bool        enable_fast_gen                  = false;
-    bool        enable_partial_fallback          = false;
-    int64_t     fast_gen_context_budget          = -1;
+    bool    enable_fast_gen                  = false;
+    bool    enable_partial_fallback          = false;
+    int64_t fast_gen_context_budget          = -1;
+    int64_t max_context_batch_size           = 1;
+    int64_t scheduler_reserve_resource_ratio = 5;
+    int64_t fast_gen_max_context_len         = 0;
     std::string to_string() const;
-    void        update_from_env_for_test();
+};
+
+struct RuntimeConfig {
+    int64_t max_generate_batch_size = 1;
+
+    bool    pre_allocate_op_mem     = true;
+    int64_t max_block_size_per_item = 16;
+
+    int64_t max_batch_tokens_size   = 0;
+
+    int64_t reserve_runtime_mem_mb           = 0;
+    bool    warm_up                          = false;
+    bool    warm_up_with_loss                = false;
+
+    // Scheduler configuration
+    bool    use_batch_decode_scheduler = false;
+    bool    use_gather_batch_scheduler = false;
+    BatchDecodeSchedulerConfig batch_decode_scheduler_config;
+    FIFOSchedulerConfig fifo_scheduler_config;
+
+    // 0 for no sep, 1 for server, 2 for client
+    int64_t                      vit_separation              = 0;
+    bool                         enable_speculative_decoding  = false;
+    std::string                  model_name                  = "";
+    int64_t                      vit_run_batch               = 1;  // Batch size for VIT processing
+    std::vector<std::string>     worker_addrs;
+    std::vector<std::string>    worker_grpc_addrs;
+
+    // Fields merged from PyDeviceResourceConfig
+    std::string specify_gpu_arch      = "";
+    std::string acext_gemm_config_dir = "";
+
+    std::string to_string() const;
+};
+
+struct PDSepConfig {
+    RoleType role_type                       = RoleType::PDFUSION;
+    bool     cache_store_rdma_mode           = true;
+    int64_t  cache_store_listen_port         = 0;
+    int64_t  cache_store_connect_port        = 0;
+    int64_t  cache_store_rdma_listen_port    = 0;
+    int64_t  cache_store_rdma_connect_port   = 0;
+    int64_t  remote_rpc_server_port          = 0;
+    int64_t  prefill_retry_times             = 0;
+    int64_t  prefill_retry_timeout_ms        = 20;
+    int64_t  prefill_max_wait_timeout_ms     = 600 * 1000;
+    int64_t  decode_retry_times              = 100;
+    int64_t  decode_retry_timeout_ms         = 100;
+    int64_t  decode_polling_kv_cache_step_ms = 30;
+    int64_t  decode_polling_call_prefill_ms  = 30;
+    int64_t  rdma_connect_retry_times        = 0;
+    int64_t  load_cache_timeout_ms           = 5000;
+    int64_t  max_rpc_timeout_ms              = 0;
+    int64_t  worker_port_offset              = 0;
+    bool     decode_entrance                 = false;
+
+    std::string to_string() const;
 };
 
 struct MiscellaneousConfig {
     bool        disable_pdl = true;
     std::string aux_string  = "";
     std::string to_string() const;
-    void        update_from_env_for_test();
 };
 
 class ParallelInfo final {
@@ -292,16 +362,15 @@ public:
     }
     // only for test
     void reload() {
-        ParallelismDistributedConfig parallelism_distributed_config;
-        parallelism_distributed_config.update_from_env_for_test();
-        tp_size_ = parallelism_distributed_config.tp_size;
+        ParallelismConfig parallelism_config;
+        tp_size_ = parallelism_config.tp_size;
         // in fact pipeline parallelism is not supported yet
-        pp_size_          = parallelism_distributed_config.pp_size;
-        ep_size_          = parallelism_distributed_config.ep_size;
-        dp_size_          = parallelism_distributed_config.dp_size;
-        world_size_       = parallelism_distributed_config.world_size;
-        world_rank_       = parallelism_distributed_config.world_rank;
-        local_world_size_ = parallelism_distributed_config.local_world_size;
+        pp_size_          = parallelism_config.pp_size;
+        ep_size_          = parallelism_config.ep_size;
+        dp_size_          = parallelism_config.dp_size;
+        world_size_       = parallelism_config.world_size;
+        world_rank_       = parallelism_config.world_rank;
+        local_world_size_ = parallelism_config.local_world_size;
     }
 
 private:
@@ -314,28 +383,11 @@ private:
     int local_world_size_;
 };
 
-struct FfnDisAggregateConfig {
-    bool        enable_ffn_disaggregate = false;
-    int         attention_tp_size       = 1;
-    int         attention_dp_size       = 1;
-    int         ffn_tp_size             = 1;
-    int         ffn_dp_size             = 1;
-    bool        is_ffn_rank             = false;
-    std::string to_string() const;
-    void        update_from_env_for_test();
-    bool        is_ffn_service() const {
-        return enable_ffn_disaggregate && is_ffn_rank;
-    }
-};
-
 struct ArpcConfig {
     int         threadNum   = 10;
     int         queueNum    = 50;
     int         ioThreadNum = 2;
     std::string to_string() const;
 };
-
-std::string to_lower(const std::string& s);
-bool        bool_from_env_for_test(std::string env_name, bool default_value);
 
 }  // namespace rtp_llm

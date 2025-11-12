@@ -2,25 +2,25 @@ import json
 import logging
 import os
 import sys
-from typing import Any, Dict, Optional, Type, Union
-
-import torch
-
-from rtp_llm.config.py_config_modules import StaticConfig
+from typing import Any, Optional
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
-from rtp_llm.config.gpt_init_model_parameters import ConfigMode, GptInitModelParameters
-from rtp_llm.distribute.gang_info import get_gang_info
-from rtp_llm.distribute.worker_info import g_parallel_info
+from rtp_llm.config.engine_config import EngineConfig
+from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.model_args import ModelArgs
+from rtp_llm.config.py_config_modules import (
+    PyEnvConfigs,
+    VitConfig,
+    LoraConfig,
+    GenerateEnvConfig,
+    EmbeddingConfig,
+)
+from rtp_llm.config.model_config import build_py_model_config
 from rtp_llm.model_factory_register import _model_factory
-from rtp_llm.tools.api.hf_model_helper import get_model_info_from_hf
-from rtp_llm.utils.base_model_datatypes import ModelConfig
-from rtp_llm.utils.dump_config_utils import dump_model_to_table
-from rtp_llm.utils.fuser import fetch_remote_file_to_local
+from rtp_llm.ops import MMModelConfig
 from rtp_llm.utils.util import check_with_info
-from rtp_llm.utils.weight_type import WEIGHT_TYPE
 
 
 class ModelFactory:
@@ -49,264 +49,177 @@ class ModelFactory:
         return model_cls
 
     @staticmethod
-    def create_frontend_config(model_config: ModelConfig):
-        config = GptInitModelParameters(0, 0, 0, 0, 0)
-        config.update_common(
-            ckpt_path=model_config.ckpt_path,
-            tokenizer_path=model_config.tokenizer_path,
-            quantization=model_config.quantization,
-            data_type=model_config.act_type,
-            kv_cache_type=model_config.kv_cache_type,
-            max_seq_len=model_config.max_seq_len,
-            seq_size_per_block=model_config.seq_size_per_block,
-            gen_num_per_circle=model_config.gen_num_per_circle,
-            lora_infos=model_config.lora_infos,
-            ptuning_path=model_config.ptuning_path,
-            ref_module=model_config.ref_module,
-            ref_dict=model_config.ref_dict,
-            parallel_info=g_parallel_info,
-            gang_info=get_gang_info(),
-            config_mode=ConfigMode.SimpleMode,
-        )
-        config.seq_size_per_block = model_config.seq_size_per_block
-
-        return config
-
-    @staticmethod
-    def _create_model(model_config: ModelConfig):
-        global _model_factory
-        if model_config.model_type not in _model_factory:
-            raise Exception(f"model type {model_config.model_type} not registered!")
-        model_cls = _model_factory[model_config.model_type]
-        config: GptInitModelParameters = model_cls.create_config(model_config)
-        config.model_name = model_cls.__name__
-        model = model_cls.from_config(config)
-        dump_model_to_table(
-            ModelFactory.model_config_json(model_cls, model_config, config)
+    def _create_model(
+        model_config: ModelConfig,
+        mm_model_config: MMModelConfig,
+        engine_config: EngineConfig,
+        vit_config: Optional[VitConfig] = None,
+        merge_lora: bool = False,
+    ):
+        """Create model from independent config objects.
+        
+        All model metadata (template_type, model_name, lora_infos) is now stored in model_config.
+        
+        Args:
+            model_config: Model configuration
+            mm_model_config: Multimodal model configuration
+            engine_config: Engine configuration
+            vit_config: Optional VitConfig (needed for multimodal models)
+            merge_lora: Whether to merge LoRA weights
+        """
+        model_type = model_config.model_type
+        model_cls = ModelFactory.get_model_cls(model_type)
+        
+        # Get model_name from model_config (default to model class name if not set)
+        model_name = model_config.model_name or model_cls.__name__
+        model_config.model_name = model_name
+        engine_config.runtime_config.model_name = model_name
+        
+        model = model_cls.from_config(
+            py_model_config=model_config,
+            mm_model_config=mm_model_config,
+            engine_config=engine_config,
+            vit_config=vit_config,
+            merge_lora=merge_lora,
         )
         return model
 
     @staticmethod
-    def _create_sp_model(
-        score_model_gpt_config: GptInitModelParameters, model_config: ModelConfig
-    ):
+    def get_sp_model(
+        model_config: ModelConfig,
+        propose_model_config: Optional[ModelConfig],
+        engine_config: EngineConfig,
+    ) -> Optional[Any]:
+        """Get and create ProposeModel from engine_config and propose_model_config.
+        
+        This function handles sp_type determination and ProposeModel creation logic.
+        
+        Args:
+            model_config: Main ModelConfig (for max_seq_len alignment)
+            propose_model_config: Optional propose ModelConfig
+            engine_config: EngineConfig containing sp_config
+            
+        Returns:
+            ProposeModel instance or None if no propose model needed
+        """
         from rtp_llm.models.propose_model.propose_model import ProposeModel
-
-        model = None
-        global _model_factory
-        if (
-            model_config.sp_type == "vanilla"
-            or model_config.sp_type == "mtp"
-            or model_config.sp_type == "eagle3"
-            or model_config.sp_type == "eagle"
-        ):
-            if model_config.model_type not in _model_factory:
-                raise Exception(f"model type {model_config.model_type} not registered!")
-            if (
-                model_config.model_type == "deepseek-v3-mtp"
-                or model_config.model_type == "mixtbstars-mtp"
-            ):
-                logging.warning(
-                    f"create sp model type is {model_config.model_type}, so change the sp type to mtp"
-                )
-                model_config.sp_type = "mtp"
-            if model_config.model_type == "qwen_3_moe-mtp":
-                logging.warning(
-                    f"create sp model type is {model_config.model_type}, so change the sp type to eagle3"
-                )
-                model_config.sp_type = "eagle3"
-            model_cls = _model_factory[model_config.model_type]
-            # propose model's max seq len must be equal to score model's max seq len
-            model_config.max_seq_len = score_model_gpt_config.max_seq_len
-            config: GptInitModelParameters = model_cls.create_config(model_config)
-            gpt_model = model_cls.from_config(config)
-            dump_model_to_table(
-                ModelFactory.model_config_json(model_cls, model_config, config)
-            )
-            model = ProposeModel(
-                model_config.sp_type, model_config.gen_num_per_circle, gpt_model
-            )
-        elif model_config.sp_type == "deterministic":
-            model = ProposeModel(model_config.sp_type, model_config.gen_num_per_circle)
-        return model
-
-    # TODO: remove model_config, get all info from gpt_config
-    @staticmethod
-    def model_config_json(
-        model_cls: Type[Any], model_config: ModelConfig, config: GptInitModelParameters
-    ) -> Dict[str, Any]:
-        config_json = {
-            "model_type": model_cls.__name__,
-            "act_type": str(model_config.act_type),
-            "max_seq_len": config.max_seq_len,
-            "use_sparse_head": config.is_sparse_head,
-            "use_multi_task_prompt": config.multi_task_prompt,
-            "lora_infos": config.lora_infos,
-        }
-        return config_json
-
-    @staticmethod
-    def from_model_config(
-        model_config: ModelConfig, propose_model_config: Optional[ModelConfig] = None
-    ):
-        from rtp_llm.async_decoder_engine.async_model import AsyncModel
-
-        model = ModelFactory._create_model(model_config)
-        if model_config.model_type == "fake_model" or model.config.vit_separation == 1:
-            return model
-        propose_model = (
-            None
-            if propose_model_config is None
-            else ModelFactory._create_sp_model(model.config, propose_model_config)
-        )
-        if propose_model:
-            logging.info("set enable_speculative_decoding")
-            model.config.enable_speculative_decoding = True
-        model = AsyncModel(model, propose_model)
-        if propose_model:
-            logging.info("create propose model done")
-        logging.info("create rpc model done")
-        return model
-
-    @staticmethod
-    def from_huggingface(
-        model_path_or_name: str,
-        revision: Optional[str] = None,
-        model_config: ModelConfig = ModelConfig(),
-    ):
-        model_path, model_type = get_model_info_from_hf(model_path_or_name, revision)
-        new_model_config = model_config
-        new_model_config = new_model_config._replace(
-            model_type=model_type, ckpt_path=model_path, tokenizer_path=model_path
-        )
-        return ModelFactory.from_model_config(new_model_config)
-
-    @staticmethod
-    def creat_standalone_py_model_from_huggingface(
-        model_path_or_name: str,
-        revision: Optional[str] = None,
-        model_config: ModelConfig = ModelConfig(),
-    ):
-        assert os.environ["LOAD_PYTHON_MODEL"] == "1"
-        new_model_config = model_config
-        new_model_config = new_model_config._replace(
-            model_type=model_type, ckpt_path=model_path, tokenizer_path=model_path
-        )
-        model = ModelFactory._create_model(model_config)
-        return model
-
-    @staticmethod
-    def create_normal_model_config():
-        model_type = StaticConfig.model_config.model_type
-        ckpt_path = StaticConfig.model_config.checkpoint_path
-        tokenizer_path = StaticConfig.model_config.tokenizer_path
-        if tokenizer_path == "":
-            tokenizer_path = ckpt_path
-        lora_infos = StaticConfig.lora_config.lora_info
-        max_seq_len = StaticConfig.engine_config.max_seq_len
-        seq_size_per_block = StaticConfig.py_kv_cache_config.seq_size_per_block
-
-        tokenizer_path = fetch_remote_file_to_local(tokenizer_path)
-        ckpt_path = fetch_remote_file_to_local(ckpt_path)
-
-        extra_data_path = StaticConfig.model_config.extra_data_path
-        if extra_data_path:
-            extra_data_path = fetch_remote_file_to_local(extra_data_path)
-            StaticConfig.model_config.local_extra_data_path = extra_data_path
-
-        ptuning_path = StaticConfig.model_config.ptuning_path
-        if ptuning_path is not None:
-            ptuning_path = fetch_remote_file_to_local(ptuning_path)
-
-        lora_infos = json.loads(lora_infos)
-        for lora_name, lora_path in lora_infos.items():
-            lora_infos[lora_name] = fetch_remote_file_to_local(lora_path)
-
-        logging.info(
-            f"load model from tokenizer_path: {tokenizer_path}, ckpt_path: {ckpt_path}, lora_infos: {lora_infos}, ptuning_path: {ptuning_path}"
-        )
-
-        act_type = None
-        # TODO(xinfei.sxf) fix this
-        act_type = StaticConfig.model_config.act_type
-        kv_cache_type = StaticConfig.py_kv_cache_config.kv_cache_dtype
-        quantization = StaticConfig.quantization_config.quantization
-        model_config = ModelConfig(
-            model_type=model_type,
-            ckpt_path=ckpt_path,
-            tokenizer_path=tokenizer_path,
-            act_type=act_type,
-            kv_cache_type=kv_cache_type,
-            max_seq_len=max_seq_len,
-            seq_size_per_block=seq_size_per_block,
-            lora_infos=lora_infos,
-            ptuning_path=ptuning_path,
-            quantization=quantization,
-        )
-
-        return model_config
-
-    @staticmethod
-    def create_propose_model_config(normal_model_config: ModelConfig):
-        propose_model_config = None
-
-        sp_type = StaticConfig.py_speculative_execution_config.sp_type
+        
+        if not propose_model_config:
+            return None
+            
+        sp_type = engine_config.sp_config.sp_type
+        if sp_type == "none" or not sp_type:
+            return None
+        
+        # Adjust sp_type based on propose model type if needed
         if (
             sp_type == "vanilla"
             or sp_type == "mtp"
             or sp_type == "eagle3"
             or sp_type == "eagle"
         ):
-            logging.info("use vanilla speculative model")
-            propose_model_type = (
-                StaticConfig.py_speculative_execution_config.sp_model_type
+            model_type = propose_model_config.model_type
+            if (
+                model_type == "deepseek-v3-mtp"
+                or model_type == "mixtbstars-mtp"
+            ):
+                logging.warning(
+                    f"create sp model type is {model_type}, so change the sp type to mtp"
+                )
+                engine_config.sp_config.sp_type = "mtp"
+                sp_type = "mtp"
+            elif model_type == "qwen_3_moe-mtp":
+                logging.warning(
+                    f"create sp model type is {model_type}, so change the sp type to eagle3"
+                )
+                engine_config.sp_config.sp_type = "eagle3"
+                sp_type = "eagle3"
+        
+        gen_num_per_circle = engine_config.sp_config.gen_num_per_cycle
+        
+        if (
+            sp_type == "vanilla"
+            or sp_type == "mtp"
+            or sp_type == "eagle3"
+            or sp_type == "eagle"
+        ):
+            # Need to create GPT model for propose model
+            model_cls = ModelFactory.get_model_cls(propose_model_config.model_type)
+            # propose model's max seq len must be equal to score model's max seq len
+            propose_model_config.max_seq_len = model_config.max_seq_len
+            # Create MMModelConfig for propose model
+            propose_mm_model_config = MMModelConfig()
+            gpt_model = model_cls.from_config(
+                py_model_config=propose_model_config,
+                mm_model_config=propose_mm_model_config,
+                engine_config=engine_config,
+                vit_config=None,  # Propose model doesn't need vit_config
+                merge_lora=False,  # Propose model doesn't need merge_lora
             )
-            gen_num_per_circle = (
-                StaticConfig.py_speculative_execution_config.gen_num_per_circle
-            )
-            origin_ckpt_path = (
-                StaticConfig.py_speculative_execution_config.sp_checkpoint_path
-            )
-            if origin_ckpt_path is None:
-                logging.error("sp is disabled since SP_CHECKPOINT_PATH is not set")
-                return None
-            propose_ckpt_path = fetch_remote_file_to_local(origin_ckpt_path)
-            logging.info(f"load propose model from ckpt_path: {propose_ckpt_path}")
-
-            propose_act_type = WEIGHT_TYPE.from_str(
-                StaticConfig.model_config.act_type
-            ).to_str()
-            quantization = StaticConfig.py_speculative_execution_config.sp_quantization
-            kv_cache_type = (
-                StaticConfig.py_speculative_execution_config.sp_kv_cache_dtype
-            )
-
-            propose_model_config = ModelConfig(
-                model_type=propose_model_type,
-                ckpt_path=propose_ckpt_path,
-                tokenizer_path=normal_model_config.tokenizer_path,
-                lora_infos=None,
-                act_type=propose_act_type,
-                kv_cache_type=kv_cache_type,
-                max_seq_len=normal_model_config.max_seq_len,
-                gen_num_per_circle=gen_num_per_circle,
-                sp_type=sp_type,
-                quantization=quantization,
-            )
+            return ProposeModel(sp_type, gen_num_per_circle, gpt_model)
         elif sp_type == "deterministic":
-            gen_num_per_circle = (
-                StaticConfig.py_speculative_execution_config.gen_num_per_circle
-            )
-            propose_model_config = ModelConfig(
-                sp_type=sp_type, gen_num_per_circle=gen_num_per_circle
-            )
-            logging.info("use deterministic speculative model")
-
-        return propose_model_config
+            return ProposeModel(sp_type, gen_num_per_circle)
+        
+        return None
 
     @staticmethod
-    def load_default_generate_config(model):
-        generation_config_path = StaticConfig.generate_env_config.generation_config_path
+    def from_model_configs(
+        model_config: ModelConfig,
+        mm_model_config: MMModelConfig,
+        engine_config: EngineConfig,
+        vit_config: Optional[VitConfig] = None,
+        merge_lora: bool = False,
+        propose_model_config: Optional[ModelConfig] = None,
+    ):
+        """Create model from independent config objects, with optional propose model.
+        
+        All model metadata (template_type, model_name, lora_infos) should be set in model_config before calling this method.
+        
+        This replaces from_gpt_config().
+        
+        Args:
+            model_config: Model configuration
+            mm_model_config: Multimodal model configuration
+            engine_config: Engine configuration
+            vit_config: Optional VitConfig (needed for multimodal models)
+            merge_lora: Whether to merge LoRA weights
+            propose_model_config: Optional propose model configuration
+        """
+        from rtp_llm.async_decoder_engine.async_model import AsyncModel
+
+        model = ModelFactory._create_model(
+            model_config=model_config,
+            mm_model_config=mm_model_config,
+            engine_config=engine_config,
+            vit_config=vit_config,
+            merge_lora=merge_lora,
+        )
+        model_type = model_config.model_type
+        if model_type == "fake_model" or engine_config.runtime_config.vit_separation == 1:
+            return model
+        
+        # Create propose model if provided
+        propose_model = ModelFactory.get_sp_model(
+            model_config=model_config,
+            propose_model_config=propose_model_config,
+            engine_config=engine_config,
+        )
+
+        model = AsyncModel(model, propose_model)
+        logging.info("create rpc model done")
+        return model
+
+    @staticmethod
+    def load_default_generate_config(model, generate_env_config: Optional[Any] = None):
+        """Load default generate config from GenerateEnvConfig.
+        
+        Args:
+            model: Model instance to update
+            generate_env_config: Optional GenerateEnvConfig object
+        """
+        if generate_env_config is None:
+            return
+        generation_config_path = generate_env_config.generation_config_path
         if generation_config_path:
             model.default_generate_config.update(
                 json.load(
@@ -318,33 +231,141 @@ class ModelFactory:
                          {json.dumps(model.default_generate_config.model_dump(), indent=4)}"
             )
 
+
     @staticmethod
-    def create_from_env():
-        normal_model_config = ModelFactory.create_normal_model_config()
-        propose_model_config = ModelFactory.create_propose_model_config(
-            normal_model_config
+    def create_model_configs(
+        engine_config: EngineConfig,
+        model_args: ModelArgs,
+        lora_config: LoraConfig,
+        generate_env_config: Optional[GenerateEnvConfig] = None,
+        embedding_config: Optional[EmbeddingConfig] = None,
+    ) -> tuple[ModelConfig, Optional[ModelConfig]]:
+        """Create ModelConfig and optional propose ModelConfig from configuration objects.
+        
+        This method handles all ModelConfig construction and initialization logic.
+        EngineConfig should already be built before calling this method.
+        
+        The flow is:
+        1. Use provided ModelArgs (already populated by server_args)
+        2. Call model's _create_config to create ModelConfig with model architecture
+        3. Apply ModelArgs to ModelConfig (overwrite with user-provided values)
+        4. Build ModelConfig with build_py_model_config
+        
+        Args:
+            engine_config: Already built EngineConfig
+            model_args: ModelArgs containing model configuration
+            lora_config: LoraConfig containing LoRA configuration
+            generate_env_config: Optional GenerateEnvConfig for generation settings
+            embedding_config: Optional EmbeddingConfig for embedding settings
+            
+        Returns:
+            Tuple of (model_config, propose_model_config)
+            propose_py_model_config will be None if not needed
+        """
+        # Step 1: Use provided ModelArgs (already populated by server_args)
+        
+        # Step 1.5: Infer model_type from checkpoint if not provided
+        if not model_args.model_type and model_args.ckpt_path:
+            try:
+                from rtp_llm.model_factory_register import ModelDict
+                config_json = ModelFactory.get_config_json(model_args.ckpt_path)
+                inferred_model_type = ModelDict.get_ft_model_type_by_config(config_json)
+                if inferred_model_type:
+                    model_args.model_type = inferred_model_type
+                    logging.info(f"Inferred model_type '{inferred_model_type}' from checkpoint path: {model_args.ckpt_path}")
+                else:
+                    # Try to get from architectures field directly
+                    if "architectures" in config_json and config_json["architectures"]:
+                        architecture = config_json["architectures"][0]
+                        # Try to map architecture to model_type
+                        inferred_model_type = ModelDict.get_ft_model_type_by_hf_architectures(architecture)
+                        if inferred_model_type:
+                            model_args.model_type = inferred_model_type
+                            logging.info(f"Inferred model_type '{inferred_model_type}' from architecture '{architecture}'")
+            except Exception as e:
+                logging.warning(f"Failed to infer model_type from checkpoint: {e}")
+        
+        # Check if model_type is still empty
+        if not model_args.model_type:
+            raise ValueError(
+                f"model_type is not set and could not be inferred from checkpoint path: {model_args.ckpt_path}. "
+                f"Please provide --model_type or MODEL_TYPE environment variable."
+            )
+        
+        # Step 2: Get model class and create ModelConfig with model architecture
+        model_cls = ModelFactory.get_model_cls(model_args.model_type)
+
+        # Call _create_config to get model architecture config
+        model_config = model_cls._create_config(model_args.ckpt_path)
+        # Step 4: Build ModelConfig (setup paths, quantization, etc.)
+        build_py_model_config(
+            py_model_config=model_config,
+            model_args=model_args,
+            kv_cache_config=engine_config.kv_cache_config,
+            py_hw_kernel_config=engine_config.hw_kernel_config,
+            profiling_debug_logging_config=engine_config.profiling_debug_logging_config,
+            parallelism_config=engine_config.parallelism_config,
+            embedding_config=embedding_config,
         )
-        model = ModelFactory.from_model_config(
-            normal_model_config, propose_model_config
+         
+        # Set model metadata fields
+        # Set lora_infos from lora_config (direct assignment)
+        if lora_config.lora_info:
+            lora_infos = json.loads(lora_config.lora_info)
+            model_config.lora_infos = lora_infos if lora_infos else {}
+        
+        # Set model_name (default to model class name)
+        model_config.model_name = model_cls.__name__
+        
+        # Update EngineConfig based on ModelConfig (only once, for main model)
+        from rtp_llm.config.engine_config import update_engine_config_from_py_model_config
+        update_engine_config_from_py_model_config(
+            engine_config=engine_config,
+            model_config=model_config,
+            max_context_batch_size=engine_config.runtime_config.fifo_scheduler_config.max_context_batch_size,
         )
-        ModelFactory.load_default_generate_config(model)
+        
+        # Set model_name to engine_config.runtime_config.model_name (for backward compatibility)
+        engine_config.runtime_config.model_name = model_config.model_name
+        
+        # Create propose model config if needed
+        propose_model_config = None
+        sp_type = engine_config.sp_config.sp_type
+        if sp_type and sp_type != "none":
+            propose_model_type = engine_config.sp_config.sp_model_type
+            propose_ckpt_path = engine_config.sp_config.sp_checkpoint_path
+            if propose_ckpt_path:
+                # Create ModelArgs for propose model (reuse main model args, but override ckpt_path)
+                propose_model_args = ModelArgs()
+                propose_model_args.ckpt_path = propose_ckpt_path
+                propose_model_args.tokenizer_path = model_args.tokenizer_path
+                propose_model_args.model_type = propose_model_type
+                propose_model_args.act_type = model_args.act_type
+                propose_model_args.use_float32 = model_args.use_float32
+                propose_model_args.mla_ops_type = model_args.mla_ops_type
+                
+                # Create propose ModelConfig using _create_config
+                propose_model_cls = ModelFactory.get_model_cls(propose_model_type)
+                propose_model_config = propose_model_cls._create_config(propose_ckpt_path)
+                # Ensure max_seq_len matches main model
+                propose_model_config.max_seq_len = model_config.max_seq_len
+                propose_model_config.quantization = engine_config.sp_config.sp_quantization
+                
+                logging.info(
+                    f"load propose model from tokenizer_path: {propose_model_config.tokenizer_path}, "
+                    f"ckpt_path: {propose_model_config.ckpt_path}, quantization: {propose_model_config.quantization}"
+                )
+                
+                # Build propose model config (no update_engine_config_from_py_model_config for propose model)
+                build_py_model_config(
+                    py_model_config=propose_model_config,
+                    model_args=propose_model_args,
+                    kv_cache_config=engine_config.kv_cache_config,
+                    py_hw_kernel_config=engine_config.hw_kernel_config,
+                    profiling_debug_logging_config=engine_config.profiling_debug_logging_config,
+                    parallelism_config=engine_config.parallelism_config,
+                    embedding_config=None,  # Propose model doesn't need embedding_config
+                )
+        
+        return model_config, propose_model_config
 
-        return model
-
-    @staticmethod
-    def create_from_module(ref_module: torch.nn.Module):
-        normal_model_config = ModelFactory.create_normal_model_config()
-        normal_model_config.add_ref_module(ref_module)
-        model = ModelFactory.from_model_config(normal_model_config)
-        ModelFactory.load_default_generate_config(model)
-
-        return model
-
-    @staticmethod
-    def create_from_dict(ref_dict: Dict[str, torch.Tensor]):
-        normal_model_config = ModelFactory.create_normal_model_config()
-        normal_model_config.add_ref_dict(ref_dict)
-        model = ModelFactory.from_model_config(normal_model_config)
-        ModelFactory.load_default_generate_config(model)
-
-        return model

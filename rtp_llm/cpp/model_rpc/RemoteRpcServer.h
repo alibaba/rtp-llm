@@ -21,7 +21,7 @@ public:
 private:
     void initLocalHostInfo();
     void initLocalPeerInfo();
-    void initCacheStore(const rtp_llm::GptInitParameter& params, rtp_llm::ProposeModelEngineInitParams* propose_params);
+    void initCacheStore(const EngineInitParams& params, rtp_llm::ProposeModelEngineInitParams* propose_params);
 
 protected:
     std::string                 process_id_;

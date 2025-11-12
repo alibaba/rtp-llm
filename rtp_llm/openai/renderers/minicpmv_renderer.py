@@ -70,7 +70,7 @@ class MiniCPMVConversation:
                     elif content_part.type == ContentPartTypeEnum.image_url:
                         assert content_part.image_url != None
                         urls.append(content_part.image_url.url)
-                        data = get_bytes_io_from_url(content_part.image_url.url)
+                        data = get_bytes_io_from_url(content_part.image_url.url, download_headers=self.download_headers, url_cache_size=self.url_cache_size)
                         data = Image.open(data).convert("RGB")
                         images.append(data)
                         cur_msgs.append("(<image>./</image>)")
@@ -78,7 +78,7 @@ class MiniCPMVConversation:
                     elif content_part.type == ContentPartTypeEnum.video_url:
                         assert content_part.video_url != None
                         urls.append(content_part.video_url.url)
-                        data = get_bytes_io_from_url(content_part.video_url.url)
+                        data = get_bytes_io_from_url(content_part.video_url.url, download_headers=self.download_headers, url_cache_size=self.url_cache_size)
                         data = encode_video(data)
                         images.extend(data)
                         cur_msgs.extend(
@@ -91,12 +91,27 @@ class MiniCPMVConversation:
 
 class MiniCPMVRenderer(CustomChatRenderer):
 
-    def __init__(self, tokenizer: BaseTokenizer, renderer_params: RendererParams):
-        super().__init__(tokenizer, renderer_params)
+    def __init__(
+        self, 
+        tokenizer: BaseTokenizer, 
+        renderer_params: RendererParams,
+        generate_env_config,
+        render_config=None,
+        ckpt_path=None,
+        misc_config=None,
+        vit_config=None,
+    ):
+        super().__init__(tokenizer, renderer_params, generate_env_config, render_config, ckpt_path, misc_config, vit_config)
         self.processor = AutoProcessor.from_pretrained(
             self.ckpt_path, trust_remote_code=True
         )
-        self.conv_template = MiniCPMVConversation()
+        # Get vit_config if available
+        download_headers = ""
+        url_cache_size = 10
+        if vit_config is not None:
+            download_headers = vit_config.download_headers
+            url_cache_size = vit_config.url_cache_item_num
+        self.conv_template = MiniCPMVConversation(download_headers=download_headers, url_cache_size=url_cache_size)
 
     def _render_messages(self, messages: List[ChatMessage]) -> RenderedInputs:
         msgs, urls, types, images = self.conv_template.render_messages(messages)

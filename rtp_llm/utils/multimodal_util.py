@@ -11,7 +11,6 @@ from typing import Optional
 import requests
 import torch
 
-from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.utils.lru_dict import LruDict
 from rtp_llm.utils.oss_util import get_bytes_io_from_oss_path
 
@@ -34,17 +33,21 @@ def request_get(url, headers):
     return REQUEST_GET(url, headers)
 
 
-if StaticConfig.vit_config.download_headers != "":
-    HTTP_HEADS = json.loads(StaticConfig.vit_config.download_headers)
-else:
-    HTTP_HEADS = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-    }
+def _get_http_heads(download_headers: str = ""):
+    """Get HTTP headers from download_headers string.
+    
+    Args:
+        download_headers: JSON string containing HTTP headers. If empty, returns default headers.
+    """
+    if download_headers != "":
+        return json.loads(download_headers)
+    else:
+        return {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+        }
 
-BASE64_PREFIX = "data:image/jpeg;base64,"
-URL_CACHE_SIZE = StaticConfig.vit_config.url_cache_item_num
-MM_CACHE_SIZE = StaticConfig.vit_config.mm_cache_item_num
+
 
 
 def get_base64_prefix(s):
@@ -130,10 +133,17 @@ def retry_on_assertion_error(retries: int = 3):
     return decorator
 
 
-def get_json_result_from_url(url: str):
+def get_json_result_from_url(url: str, download_headers: str = ""):
+    """Get JSON result from URL.
+    
+    Args:
+        url: URL to fetch from.
+        download_headers: JSON string containing HTTP headers. If empty, uses default headers.
+    """
+    headers = _get_http_heads(download_headers)
     try:
         if url.startswith("http") or url.startswith("https"):
-            response = requests.get(url, stream=True, headers=HTTP_HEADS, timeout=10)
+            response = requests.get(url, stream=True, headers=headers, timeout=10)
             if response.status_code == 200:
                 res = response.content.decode("utf-8")
             else:
@@ -151,12 +161,24 @@ def get_json_result_from_url(url: str):
     return res
 
 
-def get_bytes_io_from_url(url: str):
-    cached_res = url_data_cache_.check_cache(url)
+def get_bytes_io_from_url(url: str, download_headers: str = "", url_cache_size: int = 10, url_data_cache=None):
+    """Get BytesIO from URL.
+    
+    Args:
+        url: URL to fetch from.
+        download_headers: JSON string containing HTTP headers. If empty, uses default headers.
+        url_cache_size: Size of URL data cache. Default is 10.
+        url_data_cache: Optional MMDataCache object. If None, creates a new one with url_cache_size.
+    """
+    if url_data_cache is None:
+        url_data_cache = MMDataCache(url_cache_size)
+    
+    cached_res = url_data_cache.check_cache(url)
     if cached_res is None:
+        headers = _get_http_heads(download_headers)
         try:
             if url.startswith("http") or url.startswith("https"):
-                response = request_get(url, HTTP_HEADS)
+                response = request_get(url, headers)
                 if response.status_code == 200:
                     res = BytesIO(response.content)
                 else:
@@ -174,7 +196,7 @@ def get_bytes_io_from_url(url: str):
                 res = buf
         except Exception as e:
             raise Exception(f"download and load {url} error, exception {e}")
-        url_data_cache_.insert_cache(url, res)
+        url_data_cache.insert_cache(url, res)
         return res
     else:
         cached_res.seek(0)
@@ -204,5 +226,5 @@ class MMDataCache(object):
             self.mm_data_cache[url] = data
 
 
-vit_emb_cache_ = MMDataCache(MM_CACHE_SIZE)
-url_data_cache_ = MMDataCache(URL_CACHE_SIZE)
+# Global cache instance for VIT embeddings
+vit_emb_cache_ = MMDataCache(cache_size=10)

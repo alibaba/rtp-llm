@@ -71,9 +71,8 @@ class ServerArgsDefaultTest(TestCase):
         # self.assertIsNone(env.get("FT_ALOG_CONF_PATH"))
         self.assertEqual(env.get("LOG_LEVEL"), "INFO")
         self.assertEqual(env.get("GEN_TIMELINE_SYNC"), "0")
-        self.assertEqual(env.get("TORCH_CUDA_PROFILER_DIR"), "")
-        self.assertEqual(env.get("LOG_PATH"), "logs")
-        self.assertEqual(env.get("LOG_FILE_BACKUP_COUNT"), "16")
+        # TORCH_CUDA_PROFILER_DIR has default="", so it won't be set unless explicitly provided
+        self.assertIsNone(env.get("TORCH_CUDA_PROFILER_DIR"))
         # self.assertIsNone(env.get("NCCL_DEBUG_FILE"))
         self.assertEqual(env.get("DEBUG_LOAD_SERVER"), "0")
         self.assertEqual(env.get("HACK_LAYER_NUM"), "0")
@@ -107,7 +106,8 @@ class ServerArgsDefaultTest(TestCase):
         self.assertEqual(env.get("ENABLE_LAYER_MICRO_BATCH"), "0")
         self.assertEqual(env.get("NOT_USE_DEFAULT_STREAM"), "0")
         self.assertEqual(env.get("RESERVER_RUNTIME_MEM_MB"), "1024")
-        self.assertEqual(env.get("SPECIFY_GPU_ARCH"), "")
+        # SPECIFY_GPU_ARCH has default="", so it won't be set unless explicitly provided
+        self.assertIsNone(env.get("SPECIFY_GPU_ARCH"))
         self.assertIsNone(env.get("ACEXT_GEMM_CONFIG_DIR"))
         self.assertEqual(env.get("DEVICE_RESERVE_MEMORY_BYTES"), "0")
 
@@ -134,11 +134,13 @@ class ServerArgsDefaultTest(TestCase):
         self.assertEqual(env.get("MAX_LORA_MODEL_SIZE"), "-1")
 
         # 11. 投机采样配置
-        self.assertEqual(env.get("SP_MODEL_TYPE"), "")
-        self.assertEqual(env.get("SP_TYPE"), "")
+        # SP_MODEL_TYPE and SP_TYPE have default="", so they won't be set unless explicitly provided
+        self.assertIsNone(env.get("SP_MODEL_TYPE"))
+        self.assertIsNone(env.get("SP_TYPE"))
         self.assertEqual(env.get("SP_MIN_TOKEN_MATCH"), "2")
         self.assertEqual(env.get("SP_MAX_TOKEN_MATCH"), "2")
-        self.assertEqual(env.get("TREE_DECODE_CONFIG"), "")
+        # TREE_DECODE_CONFIG has default="", so it won't be set unless explicitly provided
+        self.assertIsNone(env.get("TREE_DECODE_CONFIG"))
         self.assertEqual(env.get("GEN_NUM_PER_CIRCLE"), "1")
         self.assertIsNone(env.get("SP_ACT_TYPE"))
         self.assertIsNone(env.get("SP_QUANTIZATION"))
@@ -175,7 +177,8 @@ class ServerArgsDefaultTest(TestCase):
         self.assertEqual(env.get("FAKE_GANG_ENV"), "0")
         self.assertEqual(env.get("GANG_ANNOCATION_PATH"), "/etc/podinfo/annotations")
         self.assertIsNone(env.get("GANG_CONFIG_STRING"))
-        self.assertEqual(env.get("ZONE_NAME"), "")
+        # ZONE_NAME has default="", so it won't be set unless explicitly provided
+        self.assertIsNone(env.get("ZONE_NAME"))
         self.assertIsNone(env.get("DISTRIBUTE_CONFIG_FILE"))
         self.assertEqual(env.get("DIST_BARRIER_TIMEOUT"), "45")
         self.assertEqual(env.get("GANG_SLEEP_TIME"), "10")
@@ -188,7 +191,8 @@ class ServerArgsDefaultTest(TestCase):
         self.assertEqual(
             env.get("TRT_CACHE_PATH"), os.path.join(os.getcwd(), "trt_cache")
         )
-        self.assertEqual(env.get("DOWNLOAD_HEADERS"), "")
+        # DOWNLOAD_HEADERS has default="", so it won't be set unless explicitly provided
+        self.assertIsNone(env.get("DOWNLOAD_HEADERS"))
         self.assertEqual(env.get("MM_CACHE_ITEM_NUM"), "10")
         self.assertEqual(env.get("URL_CACHE_ITEM_NUM"), "100")
 
@@ -212,13 +216,13 @@ class ServerArgsDefaultTest(TestCase):
         self.assertEqual(env.get("INT8_MODE"), "0")
         self.assertIsNone(env.get("QUANTIZATION"))
 
-        # 22. Sparse Configuration
-        self.assertIsNone(env.get("SPARSE_CONFIG_FILE"))
+        # 22. Sparse Configuration (deprecated)
 
         # 23. Engine Configuration
         self.assertEqual(env.get("WARM_UP"), "1")
         self.assertEqual(env.get("WARM_UP_WITH_LOSS"), "0")
-        self.assertEqual(env.get("MAX_SEQ_LEN"), "0")
+        # MAX_SEQ_LEN is in ModelConfig, not server_args, so it won't be set here
+        self.assertIsNone(env.get("MAX_SEQ_LEN"))
 
         # 24. Embedding Configuration
         self.assertEqual(env.get("EMBEDDING_MODEL"), "0")
@@ -253,7 +257,8 @@ class ServerArgsDefaultTest(TestCase):
         self.assertEqual(env.get("MERGE_LORA"), "1")
 
         # 28. Load Configuration
-        self.assertEqual(env.get("PHY2LOG_PATH"), "")
+        # PHY2LOG_PATH has default="", so it won't be set unless explicitly provided
+        self.assertIsNone(env.get("PHY2LOG_PATH"))
         self.assertEqual(env.get("CONVERTER_NUM_PER_GPU"), "4")
         self.assertEqual(env.get("TOKENIZERS_PARALLELISM"), "0")
         self.assertEqual(env.get("LOAD_CKPT_NUM_PROCESS"), "0")
@@ -262,7 +267,8 @@ class ServerArgsDefaultTest(TestCase):
         self.assertIsNone(env.get("MODEL_TEMPLATE_TYPE"))
         self.assertEqual(env.get("DEFAULT_CHAT_TEMPLATE_KEY"), "default")
         self.assertEqual(env.get("DEFAULT_TOOL_USE_TEMPLATE_KEY"), "tool_use")
-        self.assertEqual(env.get("LLAVA_CHAT_TEMPLATE"), "")
+        # LLAVA_CHAT_TEMPLATE has default="", so it won't be set unless explicitly provided
+        self.assertIsNone(env.get("LLAVA_CHAT_TEMPLATE"))
 
         # 30. Miscellaneous Configuration
         self.assertEqual(env.get("DISABLE_PDL"), "1")
@@ -374,10 +380,8 @@ class ServerArgsSetTest(TestCase):
             "True",
             "--torch_cuda_profiler_dir",
             "/path/to/dir",
-            "--log_path",
-            "/tmp/logs",
-            "--log_file_backup_count",
-            "32",
+            # Note: log_path and log_file_backup_count are in ProfilingDebugLoggingConfig
+            # They are not command-line arguments, but are set via environment variables
             "--nccl_debug_file",
             "/tmp/nccl.log",
             "--debug_load_server",
@@ -607,16 +611,14 @@ class ServerArgsSetTest(TestCase):
             "1",
             "--quantization",
             "w8a8",
-            # 22. Sparse Configuration
-            "--sparse_config_file",
-            "/path/to/sparse.conf",
+            # 22. Sparse Configuration (deprecated)
             # 23. Engine Configuration
             "--warm_up",
             "0",
             "--warm_up_with_loss",
             "1",
-            "--max_seq_len",
-            "8192",
+            # Note: max_seq_len is in ModelConfig, not ModelArgs
+            # It will be set when ModelConfig is created from model_args
             # 24. Embedding Configuration
             "--embedding_model",
             "1",
@@ -760,8 +762,6 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(env["LOG_LEVEL"], "ERROR")
         self.assertEqual(env["GEN_TIMELINE_SYNC"], "1")
         self.assertEqual(env["TORCH_CUDA_PROFILER_DIR"], "/path/to/dir")
-        self.assertEqual(env["LOG_PATH"], "/tmp/logs")
-        self.assertEqual(env["LOG_FILE_BACKUP_COUNT"], "32")
         self.assertEqual(env["NCCL_DEBUG_FILE"], "/tmp/nccl.log")
         self.assertEqual(env["DEBUG_LOAD_SERVER"], "1")
         self.assertEqual(env["HACK_LAYER_NUM"], "2")
@@ -899,13 +899,13 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(env["INT8_MODE"], "1")
         self.assertEqual(env["QUANTIZATION"], "w8a8")
 
-        # 22. Sparse Configuration
-        self.assertEqual(env["SPARSE_CONFIG_FILE"], "/path/to/sparse.conf")
+        # 22. Sparse Configuration (deprecated)
 
         # 23. Engine Configuration
         self.assertEqual(env["WARM_UP"], "0")
         self.assertEqual(env["WARM_UP_WITH_LOSS"], "1")
-        self.assertEqual(env["MAX_SEQ_LEN"], "8192")
+        # MAX_SEQ_LEN is in ModelConfig, not server_args, so it won't be set here
+        # Note: The test sets --max_seq_len 8192, but it's handled by ModelConfig, not server_args
 
         # 24. Embedding Configuration
         self.assertEqual(env["EMBEDDING_MODEL"], "1")
@@ -954,9 +954,8 @@ class ServerArgsSetTest(TestCase):
 
         # 30. Miscellaneous Configuration
         self.assertEqual(env["DISABLE_PDL"], "1")
-        self.assertEqual(
-            env["AUX_STRING"], ""
-        )
+        # AUX_STRING has default="", so it won't be set unless explicitly provided
+        self.assertIsNone(env.get("AUX_STRING"))
 
         # 31. PD-Separation Configuration
         self.assertEqual(env["PREFILL_RETRY_TIMES"], "2")
@@ -964,6 +963,195 @@ class ServerArgsSetTest(TestCase):
 
         # 32. jit
         self.assertEqual(env["REMOTE_JIT_DIR"], "/home/admin/jit_dir")
+
+
+class ServerArgsPyEnvConfigsTest(TestCase):
+    """Test that environment variables and command line arguments are correctly set to py_env_configs structure."""
+    
+    def setUp(self):
+        self._environ_backup = os.environ.copy()
+        self._argv_backup = sys.argv.copy()
+        os.environ.clear()
+    
+    def tearDown(self):
+        os.environ.clear()
+        os.environ.update(self._environ_backup)
+        sys.argv = self._argv_backup
+    
+    def test_env_vars_set_to_py_env_configs(self):
+        """Test that environment variables are correctly set to py_env_configs."""
+        # Set environment variables
+        os.environ["MODEL_TYPE"] = "qwen"
+        os.environ["CHECKPOINT_PATH"] = "/path/to/checkpoint"
+        os.environ["ACT_TYPE"] = "BF16"
+        os.environ["TP_SIZE"] = "4"
+        os.environ["DP_SIZE"] = "2"
+        os.environ["WORLD_SIZE"] = "8"
+        os.environ["CONCURRENCY_LIMIT"] = "64"
+        os.environ["MAX_CONTEXT_BATCH_SIZE"] = "32"
+        os.environ["WARM_UP"] = "1"
+        os.environ["MAX_SEQ_LEN"] = "4096"
+        
+        sys.argv = ["prog"]
+        
+        # Import and setup args
+        import rtp_llm.server.server_args.server_args
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+        
+        # Verify model_args
+        self.assertEqual(py_env_configs.model_args.model_type, "qwen")
+        self.assertEqual(py_env_configs.model_args.ckpt_path, "/path/to/checkpoint")
+        self.assertEqual(py_env_configs.model_args.act_type, "BF16")
+        
+        # Verify parallelism_config
+        self.assertEqual(py_env_configs.parallelism_config.tp_size, 4)
+        self.assertEqual(py_env_configs.parallelism_config.dp_size, 2)
+        self.assertEqual(py_env_configs.parallelism_config.world_size, 8)
+        
+        # Verify concurrency_config
+        self.assertEqual(py_env_configs.concurrency_config.concurrency_limit, 64)
+        
+        # Verify fifo_scheduler_config
+        self.assertEqual(py_env_configs.runtime_config.fifo_scheduler_config.max_context_batch_size, 32)
+        
+        # Verify runtime_config (warm_up is now in RuntimeConfig)
+        self.assertEqual(py_env_configs.runtime_config.warm_up, True)  # bool in C++
+        # Note: max_seq_len is in ModelConfig, not RuntimeConfig or EngineConfig
+        # It will be set when ModelConfig is created from model_args
+    
+    def test_cmd_args_set_to_py_env_configs(self):
+        """Test that command line arguments are correctly set to py_env_configs."""
+        sys.argv = [
+            "prog",
+            "--model_type", "llama",
+            "--checkpoint_path", "/path/to/llama/checkpoint",
+            "--act_type", "FP16",
+            "--tp_size", "8",
+            "--dp_size", "4",
+            "--world_size", "32",
+            "--concurrency_limit", "128",
+            "--max_context_batch_size", "64",
+            "--warm_up", "0",
+            # Note: max_seq_len is in ModelConfig, not ModelArgs
+            # It will be set when ModelConfig is created from model_args
+        ]
+        
+        # Import and setup args
+        import rtp_llm.server.server_args.server_args
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+        
+        # Verify model_args
+        self.assertEqual(py_env_configs.model_args.model_type, "llama")
+        self.assertEqual(py_env_configs.model_args.ckpt_path, "/path/to/llama/checkpoint")
+        self.assertEqual(py_env_configs.model_args.act_type, "FP16")
+        
+        # Verify parallelism_config
+        self.assertEqual(py_env_configs.parallelism_config.tp_size, 8)
+        self.assertEqual(py_env_configs.parallelism_config.dp_size, 4)
+        self.assertEqual(py_env_configs.parallelism_config.world_size, 32)
+        
+        # Verify concurrency_config
+        self.assertEqual(py_env_configs.concurrency_config.concurrency_limit, 128)
+        
+        # Verify fifo_scheduler_config
+        self.assertEqual(py_env_configs.runtime_config.fifo_scheduler_config.max_context_batch_size, 64)
+        
+        # Verify runtime_config (warm_up is now in RuntimeConfig)
+        self.assertEqual(py_env_configs.runtime_config.warm_up, False)  # bool in C++
+        # Note: max_seq_len is in ModelConfig, not RuntimeConfig or EngineConfig
+        # It will be set when ModelConfig is created from model_args
+    
+    def test_cmd_args_override_env_vars(self):
+        """Test that command line arguments override environment variables."""
+        # Set environment variables
+        os.environ["MODEL_TYPE"] = "qwen"
+        os.environ["CHECKPOINT_PATH"] = "/path/to/qwen/checkpoint"
+        os.environ["ACT_TYPE"] = "BF16"
+        os.environ["TP_SIZE"] = "4"
+        os.environ["CONCURRENCY_LIMIT"] = "32"
+        
+        # Set command line arguments (should override env vars)
+        sys.argv = [
+            "prog",
+            "--model_type", "llama",
+            "--checkpoint_path", "/path/to/llama/checkpoint",
+            "--act_type", "FP16",
+            "--tp_size", "8",
+            "--concurrency_limit", "64",
+        ]
+        
+        # Import and setup args
+        import rtp_llm.server.server_args.server_args
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+        
+        # Verify that command line arguments override environment variables
+        self.assertEqual(py_env_configs.model_args.model_type, "llama")  # Overridden
+        self.assertEqual(py_env_configs.model_args.ckpt_path, "/path/to/llama/checkpoint")  # Overridden
+        self.assertEqual(py_env_configs.model_args.act_type, "FP16")  # Overridden
+        self.assertEqual(py_env_configs.parallelism_config.tp_size, 8)  # Overridden
+        self.assertEqual(py_env_configs.concurrency_config.concurrency_limit, 64)  # Overridden
+    
+    def test_mixed_env_and_cmd_args(self):
+        """Test mixed environment variables and command line arguments."""
+        # Set some environment variables
+        os.environ["MODEL_TYPE"] = "qwen"
+        os.environ["CHECKPOINT_PATH"] = "/path/to/qwen/checkpoint"
+        os.environ["ACT_TYPE"] = "BF16"
+        os.environ["DP_SIZE"] = "2"
+        os.environ["WORLD_SIZE"] = "8"
+        
+        # Set some command line arguments
+        sys.argv = [
+            "prog",
+            "--tp_size", "4",
+            "--concurrency_limit", "64",
+            "--max_context_batch_size", "32",
+        ]
+        
+        # Import and setup args
+        import rtp_llm.server.server_args.server_args
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+        
+        # Verify values from environment variables
+        self.assertEqual(py_env_configs.model_args.model_type, "qwen")
+        self.assertEqual(py_env_configs.model_args.ckpt_path, "/path/to/qwen/checkpoint")
+        self.assertEqual(py_env_configs.model_args.act_type, "BF16")
+        self.assertEqual(py_env_configs.parallelism_config.dp_size, 2)
+        self.assertEqual(py_env_configs.parallelism_config.world_size, 8)
+        
+        # Verify values from command line arguments
+        self.assertEqual(py_env_configs.parallelism_config.tp_size, 4)
+        self.assertEqual(py_env_configs.concurrency_config.concurrency_limit, 64)
+        self.assertEqual(py_env_configs.runtime_config.fifo_scheduler_config.max_context_batch_size, 32)
+    
+    def test_batch_decode_scheduler_config(self):
+        """Test that batch_decode_scheduler_config is correctly set."""
+        sys.argv = [
+            "prog",
+            "--use_batch_decode_scheduler", "1",
+            "--batch_decode_scheduler_batch_size", "16",
+            "--batch_decode_scheduler_warmup_type", "1",
+        ]
+        
+        # Import and setup args
+        import rtp_llm.server.server_args.server_args
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+        
+        # Verify batch_decode_scheduler_config
+        self.assertEqual(py_env_configs.runtime_config.use_batch_decode_scheduler, True)
+        self.assertEqual(py_env_configs.runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size, 16)
+        self.assertEqual(py_env_configs.runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_warmup_type, 1)
+        
+        # Verify it's also set in the C++ binding object
+        runtime_config = py_env_configs.runtime_config
+        self.assertEqual(runtime_config.use_batch_decode_scheduler, True)
+        self.assertEqual(runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size, 16)
+        self.assertEqual(runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_warmup_type, 1)
 
 
 if __name__ == "__main__":

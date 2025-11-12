@@ -84,7 +84,7 @@ void AttentionLayerTest<T>::testAttentionLayer(const CacheConfig&          cache
     const auto prefix_lengths = std::vector<int32_t>(context_lengths.size(), 0);
 
     const auto mask_tensor =
-        create_context_mask(context_lengths, attention_conf.mask_type == AttentionMaskType::causalMask)
+        create_context_mask(context_lengths, attention_conf.is_causal)
             .to(dataTypeToTorchType(dtype));
     std::cout << "mask: " << mask_tensor << std::endl;
     const auto input_buffer = tensorToBuffer(input_tensor.to(dataTypeToTorchType(dtype)));

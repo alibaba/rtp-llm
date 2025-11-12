@@ -114,28 +114,35 @@ try:
         CacheStoreConfig,
         ConcurrencyConfig,
         DeviceResourceConfig,
-        EplbConfig,
         EplbMode,
         FfnDisAggregateConfig,
         FIFOSchedulerConfig,
         FMHAConfig,
         FMHAType,
-        GptInitParameter,
         HWKernelConfig,
         KVCacheConfig,
         MiscellaneousConfig,
         MlaOpsType,
+        ModelConfig,
         ModelSpecificConfig,
+        MMModelConfig,
         MoeConfig,
-        ParallelismDistributedConfig,
+        PDSepConfig,
+        ParallelismConfig,
         ProfilingDebugLoggingConfig,
+        TaskType,
+    )
+    # Alias for backward compatibility
+    from libth_transformer_config import (
         QuantAlgo,
         RoleType,
-        SchedulerConfig,
-        ServiceDiscoveryConfig,
+        RuntimeConfig,
         SpecialTokens,
         SpeculativeExecutionConfig,
+        EPLBConfig,
     )
+    # Alias for backward compatibility
+    EplbConfig = EPLBConfig
     from libth_transformer_config import (
         get_block_cache_keys as cpp_get_block_cache_keys,
     )

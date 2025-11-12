@@ -12,8 +12,11 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
     MultimodalRpcServiceServicer,
     add_MultimodalRpcServiceServicer_to_server,
 )
+from rtp_llm.config.engine_config import EngineConfig
+from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.distribute.worker_info import g_worker_info
 from rtp_llm.model_factory import ModelFactory
+from rtp_llm.ops import MMModelConfig
 from rtp_llm.utils.grpc_util import trans_from_tensor, trans_tensor
 from rtp_llm.utils.mm_process_engine import MMEmbeddingRes, MMProcessEngine
 from rtp_llm.utils.multimodal_util import MMUrlType
@@ -69,7 +72,41 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
 
 
 def vit_start_server():
-    model = ModelFactory.create_from_env()
+    from rtp_llm.server.server_args.server_args import setup_args
+    
+    py_env_configs = setup_args()
+    
+    # Create and fully initialize engine config (global singleton)
+    engine_config = EngineConfig.create(py_env_configs)
+    
+    # Create model configs (ModelConfig construction is handled in ModelFactory)
+    # All model metadata (lora_infos, multi_task_prompt, model_name, template_type)
+    # is set in py_model_config by create_model_configs()
+    py_model_config, propose_py_model_config = ModelFactory.create_model_configs(
+        engine_config=engine_config,
+        model_args=py_env_configs.model_args,
+        lora_config=py_env_configs.lora_config,
+        generate_env_config=py_env_configs.generate_env_config,
+        embedding_config=py_env_configs.embedding_config,
+    )
+    
+    mm_model_config = MMModelConfig()
+    
+    # Create model using new API
+    # All metadata is already in py_model_config
+    # vit_config is needed for multimodal models
+    model = ModelFactory.from_model_configs(
+        model_config=py_model_config,
+        mm_model_config=mm_model_config,
+        engine_config=engine_config,
+        vit_config=py_env_configs.vit_config,
+        propose_model_config=propose_py_model_config,
+    )
+    
+    # Load default generate config if needed
+    if py_env_configs.generate_env_config:
+        ModelFactory.load_default_generate_config(model, py_env_configs.generate_env_config)
+    
     server = grpc.server(
         futures.ThreadPoolExecutor(max_workers=200),
         options=[

@@ -11,7 +11,6 @@ import torch
 from PIL import Image
 from torch import nn
 
-from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.models.multimodal.multimodal_common import (
     AudioEmbeddingInterface,
     ImageEmbeddingInterface,
@@ -85,8 +84,13 @@ class MultiModalTRTEngine(nn.Module, ImageEmbeddingInterface, AudioEmbeddingInte
         return MultiModalTRTEngine.completion_file_path(model_name, dtype).exists()
 
     @staticmethod
-    def cache_path(model_name: str, dtype: torch.dtype) -> str:
-        trt_cache_path = StaticConfig.vit_config.trt_cache_path
+    def cache_path(model_name: str, dtype: torch.dtype, vit_config) -> str:
+        """Get cache path for TRT engine.
+        
+        Args:
+            model_name: Model name.
+            dtype: Torch dtype.        """
+        trt_cache_path = vit_config.trt_cache_path
         if trt_cache_path is None:
             trt_cache_path = os.path.join(os.getcwd(), "trt_cache")
         return os.path.join(

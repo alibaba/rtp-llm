@@ -5,9 +5,10 @@ import torch
 import torch.nn.functional as F
 from torch import dtype as _dtype
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models_py.modules.moe import BatchedDataRouter, FusedMoe
 from rtp_llm.models_py.modules.moe.fused_batched_moe import BatchedTritonExperts
+from rtp_llm.ops import MoeConfig, ParallelismConfig, RuntimeConfig
 
 
 def torch_sparse_block_forward(
@@ -83,23 +84,34 @@ class FusedMoeBatchedTest(TestCase):
     ):
         torch.manual_seed(0)
 
-        # Model configuration
-        model_param = GptInitModelParameters(
-            head_num=4,
-            size_per_head=64,
-            layer_num=2,
-            max_seq_len=2048,
-            vocab_size=32000,
-            hidden_size=hidden_size,
-            max_generate_batch_size=num_tokens,
-        )
-        model_param.expert_num = num_experts
-        model_param.moe_k = top_k
-        model_param.moe_inter_padding_size = inter_size
-        model_param.has_moe_norm = True
-        model_param.activation_type = "SiGLU"
-        model_param.ep_size = 1
-        model_param.ep_rank = 0
+        # Create model configuration objects
+        py_model_config = ModelConfig()
+        py_model_config.head_num = 4
+        py_model_config.size_per_head = 64
+        py_model_config.num_layers = 2
+        py_model_config.max_seq_len = 2048
+        py_model_config.vocab_size = 32000
+        py_model_config.hidden_size = hidden_size
+        py_model_config.expert_num = num_experts
+        py_model_config.moe_k = top_k
+        py_model_config.moe_inter_padding_size = inter_size
+        py_model_config.has_moe_norm = True
+        py_model_config.activation_type = "SiGLU"
+        
+        parallelism_config = ParallelismConfig()
+        parallelism_config.ep_size = 1
+        parallelism_config.ep_rank = 0
+        parallelism_config.tp_size = 1
+        parallelism_config.tp_rank = 0
+        parallelism_config.dp_size = 1
+        parallelism_config.dp_rank = 0
+        parallelism_config.world_size = 1
+        parallelism_config.world_rank = 0
+        parallelism_config.local_world_size = 1
+        
+        moe_config = MoeConfig()
+        runtime_config = RuntimeConfig()
+        runtime_config.max_generate_batch_size = num_tokens
 
         # Create router and experts
         router = BatchedDataRouter(

@@ -14,8 +14,9 @@ from pydantic import BaseModel
 
 from rtp_llm.access_logger.access_logger import AccessLogger
 from rtp_llm.async_decoder_engine.async_model import AsyncModel
-from rtp_llm.config.py_config_modules import PyEnvConfigs, StaticConfig
-from rtp_llm.config.task_type import TaskType
+from rtp_llm.config.engine_config import EngineConfig
+from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.ops import TaskType
 from rtp_llm.distribute.gang_server import GangServer
 from rtp_llm.distribute.worker_info import g_parallel_info
 from rtp_llm.embedding.embedding_endpoint import EmbeddingEndpoint
@@ -23,7 +24,7 @@ from rtp_llm.lora.lora_manager import LoraManager
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
-from rtp_llm.ops import EngineScheduleInfo, KVCacheInfo, WorkerStatusInfo
+from rtp_llm.ops import EngineScheduleInfo, KVCacheInfo, MMModelConfig, WorkerStatusInfo
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.server.misc import format_exception
 from rtp_llm.model_loader.weight_manager import WeightManager
@@ -53,8 +54,8 @@ class BackendServer(object):
                 os.environ["NCCL_P2P_DISABLE"] = "1"
         else:
             os.environ["NCCL_P2P_DISABLE"] = "1"
-        self._access_logger = AccessLogger()
-        self._gang_server = GangServer(py_env_configs)
+        self._access_logger = AccessLogger(py_env_configs.profiling_debug_config.log_path, py_env_configs.profiling_debug_config.log_file_backup_count)
+        self._gang_server = GangServer(py_env_configs.gang_config, py_env_configs.server_config)
         self._openai_endpoint = None
         self._lora_manager = None
         self.thread_lock_ = threading.Lock()
@@ -65,8 +66,6 @@ class BackendServer(object):
         self.model = None
         self._openai_endpoint = None
         self._embedding_endpoint = None
-        self.py_env_configs = py_env_configs
-        self.dp_rank = g_parallel_info.dp_rank
         self.dp_size = g_parallel_info.dp_size
         self.tp_size = g_parallel_info.tp_size
         self._weight_manager = None
@@ -77,31 +76,85 @@ class BackendServer(object):
             # for debug online
             logging.info("DEBUG_START_FAKE_PROCESS is set, start fake backend server")
         else:
-            self.model: AsyncModel = ModelFactory.create_from_env()
+            # Create and fully initialize EngineConfig from py_env_configs
+            engine_config = EngineConfig.create(py_env_configs)
+            
+            # Create model configs (ModelConfig construction is handled in ModelFactory)
+            py_model_config, propose_py_model_config = ModelFactory.create_model_configs(
+                engine_config=engine_config,
+                model_args=py_env_configs.model_args,
+                lora_config=py_env_configs.lora_config,
+                generate_env_config=py_env_configs.generate_env_config,
+                embedding_config=py_env_configs.embedding_config,
+            )
+            
+            # All model metadata (lora_infos, multi_task_prompt, model_name, template_type)
+            # is now set in py_model_config by create_model_configs()
+            mm_model_config = MMModelConfig()
+            
+            # Create model using new API
+            # All metadata is already in py_model_config
+            # vit_config is needed for multimodal models
+            self.model: AsyncModel = ModelFactory.from_model_configs(
+                model_config=py_model_config,
+                mm_model_config=mm_model_config,
+                engine_config=engine_config,
+                vit_config=py_env_configs.vit_config,
+                propose_model_config=propose_py_model_config,
+            )
+            
+            # Load default generate config if needed
+            if py_env_configs.generate_env_config:
+                ModelFactory.load_default_generate_config(self.model, py_env_configs.generate_env_config)
+             
             if (
                 self.model is not None
-                and self.model.task_type != TaskType.LANGUAGE_MODEL
+                and self.model.model.py_model_config.task_type != TaskType.LANGUAGE_MODEL
             ):
                 self._embedding_endpoint = EmbeddingEndpoint(self.model)
             else:
                 self.backend_rpc_server_visitor = BackendRPCServerVisitor(
-                    self.model.config
+                    max_seq_len=py_model_config.max_seq_len,
+                    seq_size_per_block=engine_config.kv_cache_config.seq_size_per_block,
+                    pd_sep_config=engine_config.pd_sep_config,
+                    runtime_config=engine_config.runtime_config,
+                    ffn_disaggregate_config=engine_config.parallelism_config.ffn_disaggregate_config,
+                    sp_config=engine_config.sp_config,
+                    gang_config=py_env_configs.gang_config,
+                    eplb_config=py_env_configs.py_eplb_config,
+                    max_rpc_timeout_ms=engine_config.pd_sep_config.max_rpc_timeout_ms,
+                    decode_entrance=engine_config.pd_sep_config.decode_entrance,
                 )
+                # Get values from py_model_config for OpenaiEndpoint
+                template_type = py_model_config.template_type
+                model_name = py_model_config.model_name
+                ckpt_path = py_model_config.ckpt_path or ""
+
                 self._openai_endpoint = OpenaiEndpoint(
-                    self.model.config,
-                    self.model.tokenizer,
-                    self.backend_rpc_server_visitor,
+                    model_args=py_env_configs.model_args,
+                    generate_env_config=py_env_configs.generate_env_config,
+                    render_config=py_env_configs.render_config,
+                    misc_config=py_env_configs.misc_config,
+                    vit_config=py_env_configs.vit_config,
+                    special_tokens=py_model_config.special_tokens,
+                    max_seq_len=py_model_config.max_seq_len,
+                    template_type=template_type,
+                    model_name=model_name,
+                    ckpt_path=ckpt_path,
+                    tokenizer=self.model.tokenizer,
+                    backend_rpc_server_visitor=self.backend_rpc_server_visitor,
                 )
                 if isinstance(self.model, AsyncModel):
                     # uply hack :(
                     self.model.decoder_engine_.rtp_llm_op_.ft_op.start_http_server(
                         self.model.model.model_weights_loader,
-                        self.model.model.config.lora_infos,
+                        py_model_config.lora_infos,
                         self._gang_server._gang_info,
                         self._openai_endpoint.tokenizer,
                         self._openai_endpoint.chat_renderer,
                     )
-                    self._lora_manager = LoraManager(self.model)
+                    max_lora_model_size = self.model.config.model_specific_config.max_lora_model_size
+                    self._lora_manager = LoraManager(self.model, max_lora_model_size=max_lora_model_size)
                     self._weight_manager = WeightManager(self.model)
 
     def model_runtime_meta(self) -> str:

@@ -4,7 +4,6 @@ from typing_extensions import override
 
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.openai.renderer_factory_register import register_renderer
-from rtp_llm.openai.renderers.custom_renderer import THINK_START_TAG
 from rtp_llm.openai.renderers.reasoning_tool_base_renderer import (
     ReasoningToolBaseRenderer,
 )
@@ -33,7 +32,7 @@ class QwenReasoningToolRenderer(ReasoningToolBaseRenderer):
             # 对于qwen3-thinking的模型，注意到tool_call_separator需要设置为"\n\n"
             try:
                 rendered_result = self.render_chat(request)
-                if rendered_result.rendered_prompt.endswith(THINK_START_TAG):
+                if rendered_result.rendered_prompt.endswith(self.think_start_tag):
                     detector.tool_call_separator = "\n\n"
             except Exception:
                 pass
@@ -52,7 +51,7 @@ class QwenReasoningToolRenderer(ReasoningToolBaseRenderer):
         model_type = "qwen3"
         try:
             rendered_result = self.render_chat(request)
-            if rendered_result.rendered_prompt.endswith(THINK_START_TAG):
+            if rendered_result.rendered_prompt.endswith(self.think_start_tag):
                 model_type = "qwen3-thinking"
         except Exception:
             pass

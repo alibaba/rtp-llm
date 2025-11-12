@@ -7,7 +7,8 @@ from typing import Any, Dict, List
 import torch
 from transformers import AutoTokenizer
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import VitParameters
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, AttnConfig
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, FfnConfig, FfnWeight
@@ -346,39 +347,32 @@ class QWenV2Weight(ModelDeployWeightInfo):
 
 class QWenV2(QWen):
     @classmethod
-    def _create_config(cls, ckpt_path: str):
-        config = GptInitModelParameters(
-            head_num=0,
-            head_num_kv=0,
-            size_per_head=0,
-            layer_num=0,
-            inter_size=0,  # 13696
-            vocab_size=152064,
-            max_seq_len=8192,
-        )
-        config.rotary_embedding_dim = 128
-        config.rotary_embedding_style = 1
-        config.activation_type = "SiGLU"
+    def _create_config(cls, ckpt_path: str) -> ModelConfig:
+        config = ModelConfig()
+        config.ckpt_path = ckpt_path
+        config.vocab_size = 152064
+        config.max_seq_len = 8192
+        config.rope_config.dim = 128
+        config.rope_config.style = 1
         config.has_pre_decoder_layernorm = False
-        config.has_post_decoder_layernorm = True
-        config.norm_type = "rmsnorm"
         config.special_tokens.bos_token_id = -1
         config.special_tokens.eos_token_id = 151643
         # <|im_start|> and <|im_end|>
         config.special_tokens.stop_words_id_list = [[151645], [151644]]
+        config.mm_related_params = VitParameters()
 
         cls._from_hf(config, ckpt_path)
         assert (
             config.head_num > 0
             and config.head_num_kv > 0
             and config.size_per_head > 0
-            and config.layer_num > 0
+            and config.num_layers > 0
             and config.inter_size > 0
-        ), f"error config config.head_num={config.head_num} config.head_num_kv={config.head_num_kv} config.size_per_head={config.size_per_head} config.layer_num={config.layer_num} config.inter_size={config.inter_size}"
+        ), f"error config config.head_num={config.head_num} config.head_num_kv={config.head_num_kv} config.size_per_head={config.size_per_head} config.num_layers={config.num_layers} config.inter_size={config.inter_size}"
         return config
 
     @classmethod
-    def _from_hf(cls, config: GptInitModelParameters, ckpt_path: str):
+    def _from_hf(cls, config: "ModelConfig", ckpt_path: str):
         config_path = os.path.join(ckpt_path, "config.json")
 
         if not os.path.exists(config_path):
@@ -390,7 +384,7 @@ class QWenV2(QWen):
         return config
 
     @staticmethod
-    def _from_config_json(config: GptInitModelParameters, config_json: Dict[str, Any]):
+    def _from_config_json(config: "ModelConfig", config_json: Dict[str, Any]):
         # config.activation_type = config_json["hidden_act"]
         config.inter_size = config_json["intermediate_size"]
         config.head_num = config_json["num_attention_heads"]
@@ -402,12 +396,10 @@ class QWenV2(QWen):
         )
         if config_json.get("hidden_size") is not None:
             config.hidden_size = config_json["hidden_size"]
-        config.layer_num = config_json["num_hidden_layers"]
-        config.rotary_embedding_base = config_json.get(
-            "rope_theta", config.rotary_embedding_base
-        )
+        config.num_layers = config_json["num_hidden_layers"]
+        config.rope_config.base = config_json.get("rope_theta", config.rope_config.base)
         config.vocab_size = config_json["vocab_size"]
-        config.rotary_embedding_dim = config.size_per_head
+        config.rope_config.dim = config.size_per_head
         config.layernorm_eps = config_json.get("rms_norm_eps", 1e-06)
         config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
         config.config_dtype = config_json.get("torch_dtype", None)
@@ -419,15 +411,15 @@ class QWenV2(QWen):
 
 class QWenV2Embedding(QWenV2):
     @classmethod
-    def _create_config(cls, ckpt_path: str):
+    def _create_config(cls, ckpt_path: str) -> ModelConfig:
         config = QWenV2._create_config(ckpt_path)
         config.is_causal = False
         return config
 
 
 class QwenV2MTPWeight(QWenV2Weight):
-    def __init__(self, config: GptInitModelParameters, tp_size: int, tp_rank: int):
-        super().__init__(config, tp_size, tp_rank)
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
 
     def _get_weight_info(self):
         weights = [
@@ -498,9 +490,9 @@ class QwenV2MTPWeight(QWenV2Weight):
 
 class QwenV2MTP(QWenV2):
     @classmethod
-    def _create_config(cls, ckpt_path: str):
+    def _create_config(cls, ckpt_path: str) -> ModelConfig:
         config = super()._create_config(ckpt_path)
-        config.moe_layer_index = [i for i in range(config.layer_num)]
+        config.moe_layer_index = [i for i in range(config.num_layers)]
         config.is_mtp = True
         return config
 

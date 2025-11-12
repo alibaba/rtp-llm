@@ -248,8 +248,19 @@ class ModelTestBase(TestCase):
     def simple_test(self, is_fake: bool):
         model = self._load_model()
         try:
-            pipeline = Pipeline(model.config, model.tokenizer)
-            if model.config.pre_seq_len > 0:
+            pipeline = Pipeline(
+                special_tokens=model.model.py_model_config.special_tokens,
+                pd_sep_config=model.model.engine_config.pd_sep_config,
+                runtime_config=model.model.engine_config.runtime_config,
+                ffn_disaggregate_config=model.model.engine_config.parallelism_config.ffn_disaggregate_config,
+                max_seq_len=model.model.py_model_config.max_seq_len,
+                seq_size_per_block=model.model.engine_config.kv_cache_config.seq_size_per_block,
+                tokenizer=model.tokenizer,
+                sp_config=model.model.engine_config.sp_config,
+                gang_config=None,  # Optional, not available in test environment
+                eplb_config=None,  # Optional, not available in test environment
+            )
+            if model.model.py_model_config.pre_seq_len > 0:
                 model_str = "/ptuning"
             else:
                 model_str = ""

@@ -3,7 +3,6 @@ from typing import Any, Optional
 import torch
 from librtp_compute_ops.rtp_llm_ops import trt_fp8_quantize_128
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.distribute.collective import Group, all_reduce
 from rtp_llm.models_py.modules.ep.kernels import recompute_topk_ids_sum_expert_count
 from rtp_llm.models_py.modules.moe import (
@@ -12,12 +11,13 @@ from rtp_llm.models_py.modules.moe import (
     FusedMoeDataRouter,
     FusedMoEQuantConfig,
 )
+from rtp_llm.models_py.modules.moe.config_adapter import MoEConfigAdapter
 
 
 class DeepGemmCountinousRouter(FusedMoeDataRouter):
     def __init__(
         self,
-        config: GptInitModelParameters,
+        config: MoEConfigAdapter,
         use_fp8: bool = True,
         async_mode: bool = False,
         expert_alignment: int = 128,

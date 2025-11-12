@@ -19,13 +19,12 @@ class LoraManager:
     database_: CkptDatabase
     weights_loader_: ModelLoader
 
-    def __init__(self, model: AsyncModel) -> None:
+    def __init__(self, model: AsyncModel, max_lora_model_size: int = -1) -> None:
         self.model_ = model
         self.lora_infos_ = {}
-        self.max_lora_model_size_ = (
-            model.config.py_env_configs.model_specific_config.max_lora_model_size
-        )
-        self.device: str = self.model_.model.device
+        self.max_lora_model_size_ = max_lora_model_size
+        from rtp_llm.distribute.worker_info import g_parallel_info
+        self.device: str = g_parallel_info.device
         assert isinstance(self.model_.decoder_engine_, RPCEngine)
         self.lora_cpp_wrapper_ = self.model_.decoder_engine_.rtp_llm_op_.ft_op
         assert isinstance(self.model_.model.database, CkptDatabase)
@@ -33,7 +32,7 @@ class LoraManager:
         assert isinstance(self.model_.model.model_weights_loader, ModelLoader)
         self.weights_loader_ = self.model_.model.model_weights_loader
         with Timer() as timer:
-            model_lora_infos = self.model_.model.config.lora_infos
+            model_lora_infos = self.model_.model.py_model_config.lora_infos
             if model_lora_infos is not None and len(model_lora_infos) > 1:
                 logging.info(f"model_lora_infos is {model_lora_infos}")
                 for key, value in model_lora_infos.items():

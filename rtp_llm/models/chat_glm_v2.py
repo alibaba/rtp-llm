@@ -1,6 +1,6 @@
 from typing import Any, Dict
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.glm_v2_weight import GlmV2WeightInfo
@@ -21,75 +21,79 @@ class ChatGlmV2(BaseModel):
         "fp32_residual_connection": false,
         "original_rope": true,
         """
-        config = GptInitModelParameters(
-            head_num=32,
-            size_per_head=128,
-            layer_num=32,
-            max_seq_len=8192,
-            vocab_size=65024,
-        )
-        config.head_num = config_json["num_attention_heads"]
+        config = ModelConfig()
+        config.head_num_ = 32
+        config.size_per_head_ = 128
+        config.layer_num_ = 32
+        config.max_seq_len = 8192
+        config.vocab_size = 65024
+        config.head_num_ = config_json["num_attention_heads"]
         if config_json.get("multi_query_attention", False):
-            config.head_num_kv = config_json["multi_query_group_num"]
+            config.head_num_kv_ = config_json["multi_query_group_num"]
         else:
-            config.head_num_kv = config.head_num
-        config.size_per_head = (
+            config.head_num_kv_ = config.head_num_
+        config.size_per_head_ = (
             config_json["hidden_size"] // config_json["num_attention_heads"]
         )
-        config.layer_num = config_json["num_layers"]
+        config.layer_num_ = config_json["num_layers"]
         config.max_seq_len = config_json.get("seq_length", 8192)
         config.vocab_size = config_json["padded_vocab_size"]
-        config.layernorm_eps = config_json["layernorm_epsilon"]
+        config.layernorm_eps_ = config_json["layernorm_epsilon"]
         config.inter_size = config_json["ffn_hidden_size"]
-        config.add_bias_linear = config_json["add_bias_linear"]
-        config.has_post_decoder_layernorm = config_json["post_layer_norm"]
+        config.add_bias_linear_ = config_json["add_bias_linear"]
+        config.has_post_decoder_layernorm_ = config_json["post_layer_norm"]
         if "pre_seq_len" in config_json:
             config.pre_seq_len = config_json["pre_seq_len"]
         if "prefix_projection" in config_json:
-            config.prefix_projection = config_json["prefix_projection"]
-        config.src_quantization_bit = config_json.get("quantization_bit", 0)
-        config.rotary_embedding_dim = config.size_per_head
-        config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
+            config.prefix_projection_ = config_json["prefix_projection"]
+        config.src_quantization_bit_ = config_json.get("quantization_bit", 0)
+        config.rope_config.dim = config.size_per_head_
+        config.tie_word_embeddings_ = config_json.get("tie_word_embeddings", False)
+        if config.special_tokens is None:
+            from rtp_llm.config.model_config import SpecialTokens
+            config.special_tokens = SpecialTokens()
         config.special_tokens.pad_token_id = config_json.get("pad_token_id", 0)
         config = cls.get_rotary_embedding_scale(config, config_json)
         cls.update_stop_words(config, config_json)
-        config.config_dtype = config_json.get("torch_dtype", None)
+        config.config_dtype_ = config_json.get("torch_dtype", None)
         return config
 
     @classmethod
     def update_stop_words(
-        cls, config: GptInitModelParameters, config_json: Dict[str, Any]
+        cls, config: ModelConfig, config_json: Dict[str, Any]
     ):
+        if config.special_tokens is None:
+            from rtp_llm.config.model_config import SpecialTokens
+            config.special_tokens = SpecialTokens()
         config.special_tokens.eos_token_id = config_json.get("eos_token_id", 2)
 
     @staticmethod
-    def get_rotary_embedding_scale(config, config_json):
-        config.rotary_embedding_scale = config_json.get("rope_ratio", 1)
+    def get_rotary_embedding_scale(config: ModelConfig, config_json):
+        config.rope_config.scale = config_json.get("rope_ratio", 1)
         return config
 
     @staticmethod
     def default_config():
-        config = GptInitModelParameters(
-            head_num=32,
-            head_num_kv=2,
-            size_per_head=128,
-            layer_num=32,
-            max_seq_len=8192,
-            vocab_size=65024,
-            layernorm_eps=1e-5,
-            inter_size=13696,
-            add_bias_linear=False,
-            has_post_decoder_layernorm=False,
-        )
+        config = ModelConfig()
+        config.head_num_ = 32
+        config.head_num_kv_ = 2
+        config.size_per_head_ = 128
+        config.layer_num_ = 32
+        config.max_seq_len = 8192
+        config.vocab_size = 65024
+        config.layernorm_eps_ = 1e-5
+        config.inter_size = 13696
+        config.add_bias_linear_ = False
+        config.has_post_decoder_layernorm_ = False
         return config
 
     @staticmethod
-    def modify_config(config):
-        config.use_attention_linear_bias = False
+    def modify_config(config: ModelConfig):
+        config.use_attention_linear_bias_ = False
         config.activation_type = "SiGLU"
         config.norm_type = "rmsnorm"
-        config.rotary_embedding_dim = 128
-        config.rotary_embedding_style = 2
+        config.rope_config.dim = 128
+        config.rope_config.style = 2
 
         return config
 

@@ -46,7 +46,7 @@ bool CudaDevice::initDeepEPBuffer() {
     auto   nccl_param       = getNcclParam(ParallelMode::DP_AND_TP);
     size_t world_rank       = nccl_param.rank_;
     size_t world_size       = nccl_param.world_size_;
-    size_t local_world_size = init_params_.parallelism_distributed_config.local_world_size;
+    size_t local_world_size = init_params_.parallelism_config.local_world_size;
 
     int num_experts    = init_params_.num_experts + init_params_.extra_experts;
     int deep_ep_num_sm = init_params_.moe_config.deep_ep_num_sm > 0 ? init_params_.moe_config.deep_ep_num_sm : 24;

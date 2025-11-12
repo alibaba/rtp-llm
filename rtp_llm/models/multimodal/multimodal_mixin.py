@@ -1,18 +1,13 @@
 import gc
-import json
 import os
 import re
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 
-from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.config.generate_config import RequestFormat
-from rtp_llm.config.gpt_init_model_parameters import (
-    GptInitModelParameters,
-    VitParameters,
-)
-from rtp_llm.config.py_config_modules import StaticConfig
+from rtp_llm.config.model_config import VitParameters
+from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.model_loader.model_weight_info import (
     ModelDeployWeightInfo,
     ModelWeightInfo,
@@ -22,7 +17,7 @@ from rtp_llm.models.multimodal.multimodal_common import MultiModalEmbeddingInter
 from rtp_llm.models.multimodal.multimodal_trt_engine import MultiModalTRTEngine
 from rtp_llm.ops.comm.nccl_op import NcclOp
 from rtp_llm.utils.model_weight import CkptWeightInfo, identity, sp_id
-from rtp_llm.utils.multimodal_util import MultimodalInput, get_vit_compute_dtype
+from rtp_llm.utils.multimodal_util import get_vit_compute_dtype
 
 
 class BaseVitWeights:
@@ -63,12 +58,17 @@ class BaseVitWeights:
 
 
 class BaseMultiModalWeightInfo:
-    def __init__(self, config: GptInitModelParameters):
-        self.vit_weights: Optional[BaseVitWeights] = (
-            config.mm_related_params.vit_weights
-        )
-        self.vit_separation: int = config.vit_separation
-        self.tp_rank = config.tp_rank
+    def __init__(
+        self,
+        mm_model_config: Any,  # MMModelConfig
+        vit_separation: int,
+        tp_rank: int,
+    ):
+        self.vit_weights: Optional[BaseVitWeights] = None
+        if hasattr(mm_model_config, 'mm_related_params') and mm_model_config.mm_related_params:
+            self.vit_weights = mm_model_config.mm_related_params.vit_weights
+        self.vit_separation: int = vit_separation
+        self.tp_rank = tp_rank
 
     def _get_vit_info(self, llm_weights: ModelDeployWeightInfo):
         # Currently, the multimodel network isn't split between devices. Only Rank 0 loads the weights.
@@ -101,18 +101,29 @@ class MultiModalMixin:
 
     @property
     def vit_data_type(self):
-        return get_vit_compute_dtype(self.config.data_type)
+        return get_vit_compute_dtype(self.py_model_config.data_type)
 
-    def init_multimodal(self, config: GptInitModelParameters, device: str) -> None:
-        self.vit_config = config.py_env_configs.vit_config
-        if config.vit_separation != 2:
-            with torch.device(device):
-                torch_default_dtype = torch.get_default_dtype()
-                torch.set_default_dtype(self.vit_data_type)
-                self._init_multimodal(config)
-                torch.set_default_dtype(torch_default_dtype)
+    def init_multimodal(
+        self,
+        mm_model_config: Any,  # MMModelConfig
+        vit_config: VitConfig,
+        device: str,
+    ) -> None:
+        self.vit_config = vit_config
+        with torch.device(device):
+            torch_default_dtype = torch.get_default_dtype()
+            torch.set_default_dtype(self.vit_data_type)
+            self._init_multimodal(
+                mm_model_config=mm_model_config,
+                vit_config=vit_config,
+            )
+            torch.set_default_dtype(torch_default_dtype)
 
-    def _init_multimodal(self, config: GptInitModelParameters) -> None:
+    def _init_multimodal(
+        self,
+        mm_model_config: Any,  # MMModelConfig
+        vit_config: VitConfig,
+    ) -> None:
         raise NotImplementedError
 
     def _load_mm_weight(self, vit_params: VitParameters, ctype: str, device: str):
@@ -172,7 +183,7 @@ class MultiModalMixin:
                 self._load_mm_weight(vit_params, dtype, device)
 
                 # create cached dir if not exists
-                output_dir = MultiModalTRTEngine.cache_path(model_name_path, dtype)
+                output_dir = MultiModalTRTEngine.cache_path(model_name_path, dtype, self.vit_config)
                 if not os.path.exists(output_dir):
                     os.makedirs(output_dir)
 
@@ -207,12 +218,22 @@ class MultiModalMixin:
         gc.collect()
         torch.cuda.empty_cache()
 
-    def load_mm_weight(self, ctype: str, tp_size: int, tp_rank: int, device: str):
-
-        if StaticConfig.vit_config.vit_trt == 1:
+    def load_mm_weight(
+        self,
+        py_model_config: ModelConfig,
+        mm_model_config: Any,  # MMModelConfig
+        ctype: str,
+        tp_size: int,
+        tp_rank: int,
+        device: str,
+    ):
+        vit_trt = self.vit_config.vit_trt
+        
+        if vit_trt == 1:
+            mm_related_params = mm_model_config.mm_related_params if hasattr(mm_model_config, 'mm_related_params') else None
             self.init_mm_trt(
-                self.config.ckpt_path,
-                self.config.mm_related_params,
+                py_model_config.ckpt_path,
+                mm_related_params,
                 tp_size,
                 tp_rank,
                 device,
@@ -232,4 +253,5 @@ class MultiModalMixin:
         if isinstance(self.mm_part, MultiModalTRTEngine):
             return
 
-        self._load_mm_weight(self.config.mm_related_params, ctype, device)
+        mm_related_params = mm_model_config.mm_related_params if hasattr(mm_model_config, 'mm_related_params') else None
+        self._load_mm_weight(mm_related_params, ctype, device)

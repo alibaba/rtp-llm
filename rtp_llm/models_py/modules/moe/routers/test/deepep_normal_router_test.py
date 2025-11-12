@@ -5,7 +5,7 @@ from typing import List
 
 import torch
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.distribute.worker_info import g_parallel_info, update_master_info
 from rtp_llm.models_py.distributed.deepep_wrapper import init_deepep_wrapper
 from rtp_llm.models_py.distributed.process_group_state import (
@@ -13,9 +13,11 @@ from rtp_llm.models_py.distributed.process_group_state import (
     get_ep_group,
     init_distributed_environment,
 )
+from rtp_llm.models_py.modules.moe.config_adapter import MoEConfigAdapter
 from rtp_llm.models_py.modules.moe.routers.deepep_normal_router import (
     DeepepNormalRouter,
 )
+from rtp_llm.ops import MoeConfig, ParallelismConfig, RuntimeConfig
 from rtp_llm.models_py.modules.moe.utils import FusedMoEQuantConfig
 from rtp_llm.test.utils.port_util import PortsContext
 
@@ -24,24 +26,60 @@ from librtp_compute_ops.rtp_llm_ops import trt_fp8_quantize_128  # isort:skip
 
 
 def init_router(rank: int, use_fp8: bool):
-    g_parallel_info.reload()
+    from rtp_llm.config.py_config_modules import MIN_WORKER_INFO_PORT_NUM
+    worker_info_port_num = int(os.environ.get("WORKER_INFO_PORT_NUM", str(MIN_WORKER_INFO_PORT_NUM)))
+    g_parallel_info.reload(worker_info_port_num)
     update_master_info(f"0.0.0.0", int(os.environ["START_PORT"]))
     print(f"rank {rank}, {g_parallel_info}")
-    config = GptInitModelParameters(0, 0, 0, 0, 0)
-    config.moe_config.use_deepep_low_latency = False
-    config.expert_num = 16
-    config.hidden_size = 1024
-    config.tp_size = g_parallel_info.tp_size
-    config.tp_rank = g_parallel_info.tp_rank
-    config.ep_size = g_parallel_info.ep_size
-    config.ep_rank = g_parallel_info.ep_rank
-    config.dp_size = g_parallel_info.dp_size
-    config.dp_rank = g_parallel_info.dp_rank
-    config.ffn_tp_rank = g_parallel_info.ffn_tp_rank
-    config.ffn_tp_size = g_parallel_info.ffn_tp_size
-    config.local_rank = rank
-    init_distributed_environment(config, backend="nccl", timeout=60)
-    init_deepep_wrapper(group=get_ep_group().device_group, params=config)
+    
+    py_model_config = ModelConfig()
+    py_model_config.expert_num = 16
+    py_model_config.hidden_size = 1024
+    py_model_config.moe_k = 16
+    
+    parallelism_config = ParallelismConfig()
+    parallelism_config.tp_size = g_parallel_info.tp_size
+    parallelism_config.tp_rank = g_parallel_info.tp_rank
+    parallelism_config.ep_size = g_parallel_info.ep_size
+    parallelism_config.ep_rank = g_parallel_info.ep_rank
+    parallelism_config.dp_size = g_parallel_info.dp_size
+    parallelism_config.dp_rank = g_parallel_info.dp_rank
+    parallelism_config.ffn_tp_rank = g_parallel_info.ffn_tp_rank
+    parallelism_config.ffn_tp_size = g_parallel_info.ffn_tp_size
+    parallelism_config.world_size = g_parallel_info.world_size
+    parallelism_config.world_rank = g_parallel_info.world_rank
+    parallelism_config.local_world_size = g_parallel_info.local_world_size
+    parallelism_config.local_rank = rank
+    parallelism_config.nccl_ip = "0.0.0.0"
+    parallelism_config.tp_nccl_port = int(os.environ["START_PORT"])
+    
+    moe_config = MoeConfig()
+    moe_config.use_deepep_low_latency = False
+    
+    runtime_config = RuntimeConfig()
+    
+    config = MoEConfigAdapter(
+        py_model_config=py_model_config,
+        parallelism_config=parallelism_config,
+        moe_config=moe_config,
+        runtime_config=runtime_config,
+    )
+    
+    init_distributed_environment(
+        parallelism_config=parallelism_config,
+        nccl_ip=parallelism_config.nccl_ip,
+        th_nccl_port=parallelism_config.tp_nccl_port,
+        backend="nccl",
+        timeout=60
+    )
+    init_deepep_wrapper(
+        group=get_ep_group().device_group,
+        py_model_config=py_model_config,
+        parallelism_config=parallelism_config,
+        moe_config=moe_config,
+        runtime_config=runtime_config,
+        ffn_disaggregate_config=None,
+    )
     router = DeepepNormalRouter(config, use_fp8, expert_alignment=1)
     return config, router
 

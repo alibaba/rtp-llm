@@ -92,13 +92,11 @@ uint32_t rocmFmhaWrapper::runCKFmha(void*  q,
     auto lse           = softmax_lse_ ? true : false;
 
     std::string msk_str;
-    if (mtype_ == AttentionMaskType::noMask) {
+    if (!is_causal_) {
         msk_str = "0";
-    } else if (mtype_ == AttentionMaskType::causalMask) {
+    } else {
         msk_str = "b";
         // RTP_LLM_LOG_INFO("Using causal_bottom_right Mask");
-    } else {
-        RTP_LLM_LOG_ERROR("Mask type not supported");
     }
 
     bias_info bias = bias_info::decode(linear_bias_slopes ? "a" : "n");
@@ -357,13 +355,11 @@ uint32_t rocmFmhaWrapper::runCKFmhaV2(void*  q,
     auto lse           = softmax_lse_ ? true : false;
 
     std::string msk_str;
-    if (mtype_ == AttentionMaskType::noMask) {
+    if (!is_causal_) {
         msk_str = "0";
-    } else if (mtype_ == AttentionMaskType::causalMask) {
+    } else {
         msk_str = "b";
         // RTP_LLM_LOG_INFO("Using causal_bottom_right Mask");
-    } else {
-        RTP_LLM_LOG_ERROR("Mask type not supported");
     }
 
     bias_info bias = bias_info::decode(linear_bias_slopes ? "a" : "n");
@@ -622,13 +618,11 @@ uint32_t rocmFmhaWrapper::runCKFmhaMLA(void*  q,
     auto lse           = softmax_lse_ ? true : false;
 
     std::string msk_str;
-    if (mtype_ == AttentionMaskType::noMask) {
+    if (!is_causal_) {
         msk_str = "0";
-    } else if (mtype_ == AttentionMaskType::causalMask) {
+    } else {
         msk_str = "b";
         // RTP_LLM_LOG_INFO("Using causal_bottom_right Mask");
-    } else {
-        RTP_LLM_LOG_ERROR("Mask type not supported");
     }
 
     bias_info bias = bias_info::decode(linear_bias_slopes ? "a" : "n");

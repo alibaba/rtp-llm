@@ -10,9 +10,9 @@ from librtp_compute_ops.rtp_llm_ops import (
     FusedRopeKVCachePrefillOp,
 )
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models_py.modules.fmha import FMHAImplBase
-from rtp_llm.ops import FMHAType, KVCache, PyAttentionInputs
+from rtp_llm.ops import FMHAType, KVCache, ParallelismConfig, PyAttentionInputs
 
 
 # Simple data structure for fmha_params
@@ -40,10 +40,14 @@ class FMHAPrefillImplBase(FMHAImplBase):
         self,
         fmha_impl: Any,
         attn_inputs: PyAttentionInputs,
-        config: GptInitModelParameters,
+        config: ModelConfig,
+        parallelism_config: ParallelismConfig,
+        py_hw_kernel_config=None,
     ) -> None:
+        attn_configs = config.getAttentionConfigs(parallelism_config.tp_size)
+        layer_num = 0  # Default layer_num, should be passed from caller if needed
         super().__init__(
-            fmha_impl, FusedRopeKVCachePrefillOp(config.gpt_init_params), attn_inputs
+            fmha_impl, FusedRopeKVCachePrefillOp(attn_configs, layer_num, py_hw_kernel_config), attn_inputs
         )
 
 
@@ -53,10 +57,14 @@ class FMHADecodeImplBase(FMHAImplBase):
         self,
         fmha_impl: Any,
         attn_inputs: PyAttentionInputs,
-        config: GptInitModelParameters,
+        config: ModelConfig,
+        parallelism_config: ParallelismConfig,
+        py_hw_kernel_config=None,
     ) -> None:
+        attn_configs = config.getAttentionConfigs(parallelism_config.tp_size)
+        layer_num = 0  # Default layer_num, should be passed from caller if needed
         super().__init__(
-            fmha_impl, FusedRopeKVCacheDecodeOp(config.gpt_init_params), attn_inputs
+            fmha_impl, FusedRopeKVCacheDecodeOp(attn_configs, layer_num, py_hw_kernel_config), attn_inputs
         )
 
 
@@ -68,9 +76,11 @@ try:
 
     class AiterPrefillImpl(FMHAPrefillImplBase):
         def __init__(
-            self, config: GptInitModelParameters, attn_inputs: PyAttentionInputs
+            self, config: ModelConfig, parallelism_config: ParallelismConfig, attn_inputs: PyAttentionInputs,
+            py_hw_kernel_config=None, **kwargs  # Accept py_hw_kernel_config and ignore other kwargs
         ) -> None:
-            super().__init__(AiterPrefillAttnOp(config), attn_inputs, config)
+            # py_hw_kernel_config is not used by AiterPrefillAttnOp, but we accept it for consistency
+            super().__init__(AiterPrefillAttnOp(config), attn_inputs, config, parallelism_config, py_hw_kernel_config)
 
         @staticmethod
         def fmha_type() -> FMHAType:
@@ -82,7 +92,7 @@ except ImportError:
 
 
 class AiterPrefillAttnOp:
-    def __init__(self, config: GptInitModelParameters):
+    def __init__(self, config: ModelConfig):
         self.head_num = config.head_num
         self.head_dim = config.hidden_size // config.head_num
         self.head_num_kv = config.head_num_kv
@@ -147,9 +157,10 @@ try:
 
     class AiterDecodeImpl(FMHADecodeImplBase):
         def __init__(
-            self, config: GptInitModelParameters, attn_inputs: PyAttentionInputs
+            self, config: ModelConfig, parallelism_config: ParallelismConfig, attn_inputs: PyAttentionInputs,
+            py_hw_kernel_config, **kwargs
         ) -> None:
-            super().__init__(AiterDecodeAttnOp(config), attn_inputs, config)
+            super().__init__(AiterDecodeAttnOp(config, py_hw_kernel_config), attn_inputs, config, parallelism_config, py_hw_kernel_config)
 
     DECODE_MHA_IMPS.append(AiterDecodeImpl)
 except ImportError:
@@ -157,12 +168,12 @@ except ImportError:
 
 
 class AiterDecodeAttnOp:
-    def __init__(self, config: GptInitModelParameters):
+    def __init__(self, config: ModelConfig, py_hw_kernel_config):
         self.head_num = config.head_num
         self.head_dim = config.hidden_size // config.head_num
         self.head_num_kv = config.head_num_kv
         self.kv_cache_data_type = config.kv_cache_data_type
-        self.use_asm_pa = config.hw_kernel_config.use_asm_pa
+        self.use_asm_pa = py_hw_kernel_config.use_asm_pa
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
         return True

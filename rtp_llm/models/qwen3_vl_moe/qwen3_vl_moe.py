@@ -2,7 +2,9 @@ import torch
 import torch.nn as nn
 from transformers.activations import ACT2FN
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.py_config_modules import VitConfig
+from rtp_llm.config.model_config import VitParameters
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.multimodal.multimodal_mixin import BaseMultiModalWeightInfo
 from rtp_llm.models.qwen2_5_vl.qwen2_5_vl import QWen2_5_VL, Qwen2_5_VLImageEmbedding
@@ -75,17 +77,23 @@ class QWenV3VLWeightInfo(QWenV3MoeWeight, BaseMultiModalWeightInfo):
 
 
 class QWen3_VL_MOE(QWen2_5_VL):
-    def _init_multimodal(self, config: GptInitModelParameters):
-        self.mm_part = Qwen2_5_VLImageEmbedding(config)
+    def _init_multimodal(
+        self,
+        mm_model_config,
+        vit_config: VitConfig,
+    ):
+        if mm_model_config.mm_related_params is None:
+            mm_model_config.mm_related_params = VitParameters()
+        self.mm_part = Qwen2_5_VLImageEmbedding(mm_model_config.mm_related_params)
         self.mm_part.visual = Qwen3_VL_MOEVisionTransformerPretrainedModel(
-            config.mm_related_params.config
+            mm_model_config.mm_related_params.config
         )
-        # vl_config = Qwen2_5_VLVisionConfig(**config.mm_related_params.config)
+        # vl_config = Qwen2_5_VLVisionConfig(**mm_model_config.mm_related_params.config)
 
         # for i in range(len(self.mm_part.visual.blocks)):
         #     self.mm_part.visual.blocks[i].mlp = Qwen3_VisionMlp(vl_config, bias=True)
 
-        config.mm_related_params.vit_weights = QwenVL2VitWeight(
+        mm_model_config.mm_related_params.vit_weights = QwenVL2VitWeight(
             {"vit": self.mm_part.visual}
         )
 

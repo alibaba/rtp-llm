@@ -6,7 +6,8 @@ import torch
 from PIL import Image
 from transformers import AutoProcessor, AutoTokenizer
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.model_config import VitParameters
 from rtp_llm.distribute.worker_info import g_parallel_info
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.minicpmv.modeling_navit_siglip import (
@@ -29,17 +30,19 @@ from rtp_llm.models.qwen_v2 import QWenV2, QWenV2Weight
 # minicpmv need to calculate num of frames to renderer input prompt, it must be preprocess first in frontend
 from rtp_llm.openai.renderers.minicpmv_renderer import encode_video
 from rtp_llm.utils.multimodal_util import (
+    MMDataCache,
     MMUrlType,
     get_bytes_io_from_url,
-    vit_emb_cache_,
 )
 
 
 class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
 
-    def __init__(self, config: GptInitModelParameters):
-        self.config = config
-        config = config.mm_related_params.config
+    def __init__(self, mm_related_params: VitParameters):
+        if mm_related_params is None or mm_related_params.config is None:
+            raise ValueError("mm_related_params.config is required for ImageEmbeddingInterface")
+        self.mm_related_params = mm_related_params
+        config = mm_related_params.config
         self.vision_config = SiglipVisionConfig(**config)
         self.processor = AutoProcessor.from_pretrained(
             config["ckpt_path"], trust_remote_code=True
@@ -61,11 +64,14 @@ class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
         return self.vpm.device
 
     @torch.inference_mode()
-    def mm_embedding(self, url: str, mm_type: MMUrlType, **kwargs):
+    def mm_embedding(self, url: str, mm_type: MMUrlType, vit_emb_cache: MMDataCache = None, **kwargs):
         dtype = self._data_type
         if g_parallel_info.tp_rank > 0:
             return torch.Tensor([])
-        cached_res = vit_emb_cache_.check_cache(url)
+        # Create cache if not provided
+        if vit_emb_cache is None:
+            vit_emb_cache = MMDataCache(10)
+        cached_res = vit_emb_cache.check_cache(url)
         if cached_res is None:
             cached_url_res = get_bytes_io_from_url(url)
             cached_url_res = self._mm_preprocess(cached_url_res, mm_type)
@@ -73,7 +79,7 @@ class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
                 features = self.mm_process(cached_url_res, mm_type=mm_type, **kwargs)
             if isinstance(features, list):
                 features = torch.stack(features).to(dtype).contiguous()
-            vit_emb_cache_.insert_cache(url, features)
+            vit_emb_cache.insert_cache(url, features)
             return (features, None)
         else:
             return (cached_res, None)
@@ -201,16 +207,34 @@ class MiniCPMVWeightInfo(QWenV2Weight, BaseMultiModalWeightInfo):
 
 class MiniCPMV(QWenV2, MultiModalMixin):
 
-    def __init__(self, config: GptInitModelParameters):
-        QWenV2.__init__(self, config)
-        self.config.mm_sep_tokens = [
+    def __init__(
+        self,
+        py_model_config,
+        mm_model_config,
+        engine_config,
+        vit_config=None,
+        merge_lora=False,
+    ):
+        QWenV2.__init__(
+            self,
+            py_model_config=py_model_config,
+            mm_model_config=mm_model_config,
+            engine_config=engine_config,
+            vit_config=vit_config,
+            merge_lora=merge_lora,
+        )
+        if self.py_model_config.mm_sep_tokens is None:
+            self.py_model_config.mm_sep_tokens = []
+        self.py_model_config.mm_sep_tokens = [
             [self.tokenizer.im_start_id, self.tokenizer.im_end_id],
             [self.tokenizer.slice_start_id, self.tokenizer.slice_end_id],
         ]
 
-    def _init_multimodal(self, config: GptInitModelParameters):
-        self.mm_part = ImageEmbeddingInterface(config)
-        config.mm_related_params.vit_weights = MiniCPMVVitWeight(
+    def _init_multimodal(self, mm_model_config, vit_config):
+        if mm_model_config.mm_related_params is None:
+            raise ValueError("mm_model_config.mm_related_params is required for MiniCPMV")
+        self.mm_part = ImageEmbeddingInterface(mm_model_config.mm_related_params)
+        mm_model_config.mm_related_params.vit_weights = MiniCPMVVitWeight(
             {"vpm": self.mm_part.vpm, "resampler": self.mm_part.resampler}
         )
 
@@ -220,22 +244,24 @@ class MiniCPMV(QWenV2, MultiModalMixin):
 
     @classmethod
     def _create_config(cls, ckpt_path: str):
-        config = GptInitModelParameters(
-            head_num=0,
-            head_num_kv=0,
-            size_per_head=0,
-            layer_num=0,
-            inter_size=0,
-            vocab_size=0,
-            max_seq_len=8192,
-            ckpt_path=ckpt_path,
-            rotary_embedding_dim=128,
-            rotary_embedding_style=1,
-            activation_type="SiGLU",
-            has_pre_decoder_layernorm=False,
-            has_post_decoder_layernorm=True,
-            norm_type="rmsnorm",
-        )
+        from rtp_llm.config.model_config import VitParameters
+        config = ModelConfig()
+        config.head_num_ = 0
+        config.head_num_kv_ = 0
+        config.size_per_head_ = 0
+        config.num_layers = 0
+        config.inter_size = 0
+        config.vocab_size = 0
+        config.max_seq_len = 8192
+        config.ckpt_path = ckpt_path
+        config.rope_config.dim = 128
+        config.rope_config.style = 1
+        config.activation_type = "SiGLU"
+        config.has_pre_decoder_layernorm = False
+        config.has_post_decoder_layernorm = True
+        config.norm_type = "rmsnorm"
+        if config.mm_related_params is None:
+            config.mm_related_params = VitParameters()
         config_path = os.path.join(ckpt_path, "config.json")
         if os.path.exists(config_path):
             with open(config_path) as reader:
@@ -248,7 +274,12 @@ class MiniCPMV(QWenV2, MultiModalMixin):
         return config
 
     @staticmethod
-    def _init_vit_params(config: GptInitModelParameters, config_json: Dict[str, Any]):
+    def _init_vit_params(config: ModelConfig, config_json: Dict[str, Any]):
+        if config.mm_related_params is None:
+            from rtp_llm.config.model_config import VitParameters
+            config.mm_related_params = VitParameters()
+        if config.mm_related_params.config is None:
+            config.mm_related_params.config = {}
         config.mm_related_params.config = config_json["vision_config"]
         config.mm_related_params.config["llm_hidden_size"] = config_json["hidden_size"]
         config.mm_related_params.config["query_num"] = config_json["query_num"]

@@ -3,10 +3,9 @@ import logging
 import logging.config
 from typing import Any, Dict, Union
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.quant_config import init_quant_config
 from rtp_llm.model_factory import ModelFactory
-from rtp_llm.models.base_model import ModelConfig
 from rtp_llm.tools.api.hf_model_helper import HfStyleModelInfo, get_hf_model_info
 from rtp_llm.tools.api.utils import handler_error
 from rtp_llm.utils.fuser import fetch_remote_file_to_local, umount_file
@@ -25,7 +24,14 @@ def eval_model_size(env_params, model_type, model_path, ptuning_path):
         tokenizer_path=None,
         quantization=quantization,
     )
-    config: GptInitModelParameters = model_cls.create_config(model_config)
+    config: ModelConfig = model_cls._create_config(model_path)
+    # Apply model_config settings to config
+    config.ckpt_path = model_config.ckpt_path
+    config.tokenizer_path = model_config.tokenizer_path or model_config.ckpt_path
+    config.max_seq_len = model_config.max_seq_len or 0
+    config.quantization = model_config.quantization
+    config.act_type = model_config.act_type
+    config.model_type = model_type
     return model_cls.eval_model_size(config), model_cls.eval_model_param_count(config)
 
 

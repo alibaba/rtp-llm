@@ -1,7 +1,7 @@
 import json
 import os
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.ffn_weight import (
     FfnAtomicWeight,
@@ -141,7 +141,7 @@ class Qwen2Moe(QWenV2):
         return config
 
     @classmethod
-    def load_moe_config(cls, ckpt_path: str, config: GptInitModelParameters):
+    def load_moe_config(cls, ckpt_path: str, config: ModelConfig):
         config_path = os.path.join(ckpt_path, "config.json")
         if not os.path.exists(config_path):
             raise Exception("qwen2 moe should have config.json")

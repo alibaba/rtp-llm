@@ -8,19 +8,20 @@ from typing import Any, Dict, Optional
 import torch
 from torch import nn
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models_py.modules.moe.fused_moe import (
     ExpertForwardPayload,
     FusedMoeDataRouter,
     FusedMoeExpertExecutor,
     TopKWeightAndReduce,
 )
+from rtp_llm.ops import ParallelismConfig
 
 
 class EPDataRouter(FusedMoeDataRouter):
     """EP implementation of data router for expert selection and data dispatch."""
 
-    def __init__(self, config: GptInitModelParameters):
+    def __init__(self, config: ModelConfig):
         self.config = config
         self.top_k = config.moe_k
 
@@ -59,13 +60,21 @@ class EPDataRouter(FusedMoeDataRouter):
 class EPExpertExecutor(FusedMoeExpertExecutor):
     """EP implementation of expert executor."""
 
-    def __init__(self, config: GptInitModelParameters, weights, layer_idx: int):
+    def __init__(
+        self,
+        config: ModelConfig,
+        parallelism_config: ParallelismConfig,
+        weights,
+        layer_idx: int,
+        quant_config=None,
+    ):
         super().__init__(None)
         self.config = config
+        self.parallelism_config = parallelism_config
         # Use the proven legacy implementation for computation
         from rtp_llm.models_py.modules.ep.layers import LegacyEPMoE
 
-        self.legacy_ep_moe = LegacyEPMoE(config, weights, layer_idx)
+        self.legacy_ep_moe = LegacyEPMoE(config, parallelism_config, weights, layer_idx, quant_config)
 
     @property
     def local_num_experts(self) -> int:
@@ -152,19 +161,25 @@ class EPMoE(nn.Module):
 
 
 def create_ep_moe_instance(
-    config: GptInitModelParameters, weights, layer_idx: int
+    config: ModelConfig,
+    parallelism_config: ParallelismConfig,
+    weights,
+    layer_idx: int,
+    quant_config: Optional[object] = None,
 ) -> EPMoE:
     """
     Factory function for creating EP MoE instances.
 
     Args:
-        config: Model configuration parameters
+        config: Model configuration (ModelConfig)
+        parallelism_config: Parallelism configuration
         weights: Model weights
         layer_idx: Layer index
+        quant_config: Optional quantization configuration
 
     Returns:
         EPMoE instance with router and executor
     """
     router = EPDataRouter(config)
-    executor = EPExpertExecutor(config, weights, layer_idx)
+    executor = EPExpertExecutor(config, parallelism_config, weights, layer_idx, quant_config)
     return EPMoE(router=router, executor=executor)

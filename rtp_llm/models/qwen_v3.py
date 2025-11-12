@@ -1,7 +1,7 @@
 import logging
 from typing import Optional
 
-from rtp_llm.config.task_type import TaskType
+from rtp_llm.ops import TaskType
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.downstream_modules.custom_module import CustomModule
 from rtp_llm.models.downstream_modules.reranker.qwen3_reranker import (

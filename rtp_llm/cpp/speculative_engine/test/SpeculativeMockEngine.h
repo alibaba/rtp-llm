@@ -10,11 +10,21 @@ using namespace std;
 namespace rtp_llm {
 
 std::shared_ptr<SpeculativeEngine>
-createVanillaSpeculativeEngine(DeviceBase* device, const CustomConfig& config, GptInitParameter& params) {
-    EngineInitParams                              score_params   = createEngineInitParams(device, config, params);
-    EngineInitParams                              vanilla_params = createEngineInitParams(device, config, params);
+createVanillaSpeculativeEngine(DeviceBase* device, const CustomConfig& config) {
+    rtp_llm::ModelConfig model_config;
+    rtp_llm::RuntimeConfig runtime_config;
+    rtp_llm::KVCacheConfig kv_cache_config;
+    EngineInitParams                              score_params   = createEngineInitParams(device, config, model_config, runtime_config, kv_cache_config);
+    EngineInitParams                              vanilla_params = createEngineInitParams(device, config, model_config, runtime_config, kv_cache_config);
     std::unique_ptr<ProposeModelEngineInitParams> propose_params = std::make_unique<ProposeModelEngineInitParams>(
-        0, "vanilla", 1, vanilla_params.gpt_init_parameter, std::move(vanilla_params.gpt_weights));
+        0, "vanilla", 1, vanilla_params.model_config_, vanilla_params.mm_model_config_, vanilla_params.parallelism_config,
+        vanilla_params.runtime_config, vanilla_params.pd_sep_config,
+        vanilla_params.concurrency_config, vanilla_params.fmha_config, vanilla_params.kv_cache_config,
+        vanilla_params.profiling_debug_logging_config, vanilla_params.hw_kernel_config,
+        vanilla_params.device_resource_config, vanilla_params.moe_config, vanilla_params.model_specific_config,
+        vanilla_params.sp_config, vanilla_params.cache_store_config, vanilla_params.misc_config,
+        vanilla_params.arpc_config, vanilla_params.ffn_disaggregate_config, std::move(vanilla_params.gpt_weights),
+        py::none(), vanilla_params.py_eplb);
     std::shared_ptr<SpeculativeEngine> engine = make_shared<SpeculativeEngine>(score_params, std::move(propose_params));
     THROW_IF_STATUS_ERROR(engine->init());
     return engine;

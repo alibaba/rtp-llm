@@ -3,11 +3,11 @@ from typing import Any, Dict, Optional
 import torch
 from torch import nn
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.distribute.collective import Group, all_reduce
 from rtp_llm.models_py.modules.linear_factory import LinearFactory
 from rtp_llm.models_py.modules.norm import RMSNorm
-from rtp_llm.ops import KVCache
+from rtp_llm.ops import KVCache, ParallelismConfig
 from rtp_llm.utils.model_weight import W
 
 
@@ -16,32 +16,37 @@ class DeepSeekV2Attention(nn.Module):
 
     def __init__(
         self,
-        config: GptInitModelParameters,
+        config: ModelConfig,
+        parallelism_config: ParallelismConfig,
         weights: Dict[str, torch.Tensor],
         layer_idx: int,
+        quant_config: Optional[object] = None,
     ):
         super().__init__()
         self.config = config
-        self.num_heads = self.config.head_num
-        self.qk_nope_head_dim = self.config.nope_head_dim
-        self.qk_rope_head_dim = self.config.rope_head_dim
+        self.parallelism_config = parallelism_config
+        self.num_heads = config.head_num
+        self.qk_nope_head_dim = config.nope_head_dim
+        self.qk_rope_head_dim = config.rope_head_dim
         self.q_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
-        self.kv_lora_rank = self.config.kv_lora_rank
-        self.v_head_dim = self.config.v_head_dim
-        self.q_lora_rank = self.config.q_lora_rank
+        self.kv_lora_rank = config.kv_lora_rank
+        self.v_head_dim = config.v_head_dim
+        self.q_lora_rank = config.q_lora_rank
         self.softmax_scale = self.q_head_dim ** (-0.5)
         self.layer_idx = layer_idx
-        self.token_per_block = self.config.seq_size_per_block
+        self.token_per_block = config.seq_size_per_block
 
         if self.q_lora_rank > 0:
             self.fused_qkv_a_proj = LinearFactory.create_linear_from_weights(
-                weights, W.mla_fusedqkrope_w, W.mla_fusedqkrope_s, None, config
+                weights, W.mla_fusedqkrope_w, W.mla_fusedqkrope_s, None,
+                py_model_config=config, quant_config=quant_config
             )
             self.q_a_layernorm = RMSNorm(
                 weights.get(W.mla_q_a_ln_gamma, None), eps=config.layernorm_eps
             )
             self.q_b_proj = LinearFactory.create_linear_from_weights(
-                weights, W.mla_q_b_w, W.mla_q_b_s, None, config
+                weights, W.mla_q_b_w, W.mla_q_b_s, None,
+                py_model_config=config, quant_config=quant_config
             )
         else:
             self.fused_qkv_proj = LinearFactory.create_linear_from_weights(
@@ -49,7 +54,7 @@ class DeepSeekV2Attention(nn.Module):
                 W.mla_fusedqkrope_no_lora_w,
                 W.mla_fusedqkrope_no_lora_s,
                 None,
-                config,
+                py_model_config=config, quant_config=quant_config
             )
 
         self.kv_a_layernorm = RMSNorm(
@@ -57,7 +62,8 @@ class DeepSeekV2Attention(nn.Module):
         )
 
         self.o_proj = LinearFactory.create_linear_from_weights(
-            weights, W.attn_o_w, W.attn_o_s, W.attn_o_b, config
+            weights, W.attn_o_w, W.attn_o_s, W.attn_o_b,
+            py_model_config=config, quant_config=quant_config
         )
 
     def forward(
@@ -69,7 +75,7 @@ class DeepSeekV2Attention(nn.Module):
         input_shape = hidden_states.shape[:-1]
         if self.q_lora_rank > 0:
             fused_qkv = self.fused_qkv_a_proj(hidden_states)
-            kv_offset = self.config.q_lora_rank
+            kv_offset = self.q_lora_rank
             q, compressed_kv = torch.split(
                 fused_qkv,
                 [
@@ -105,6 +111,6 @@ class DeepSeekV2Attention(nn.Module):
 
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
-        if self.config.tp_size > 1:
+        if self.parallelism_config.tp_size > 1:
             attn_output = all_reduce(attn_output, group=Group.TP)
         return attn_output

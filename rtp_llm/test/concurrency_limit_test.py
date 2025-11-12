@@ -79,7 +79,7 @@ class ConcurrencyLimitTest(TestCase):
         self.port = random.randint(20000, 30000)
         os.environ["CONCURRENCY_LIMIT"] = "16"
         os.environ["START_PORT"] = str(self.port)
-        g_worker_info.reload()
+        g_worker_info.reload(self.port)
         self.frontend_app = FrontendApp()
         self.backend_app = BackendApp()
 

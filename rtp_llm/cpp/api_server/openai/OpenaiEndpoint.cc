@@ -6,18 +6,18 @@ namespace rtp_llm {
 
 OpenaiEndpoint::OpenaiEndpoint(const std::shared_ptr<Tokenizer>&  tokenizer,
                                const std::shared_ptr<ChatRender>& chat_render,
-                               const rtp_llm::GptInitParameter&   params):
-    tokenizer_(tokenizer), chat_render_(chat_render), model_config_(params) {
+                               const ModelConfig&                 model_config):
+    tokenizer_(tokenizer), chat_render_(chat_render), model_config_(model_config) {
 
-    max_seq_len_ = model_config_.max_seq_len_;
+    max_seq_len_ = model_config_.max_seq_len;
 
     std::optional<int> res;
     if (tokenizer_ && tokenizer_->isPreTrainedTokenizer()) {
         res = tokenizer_->getEosTokenId();
     }
-    eos_token_id_ = res.value_or(model_config_.special_tokens_.eos_token_id_);
+    eos_token_id_ = res.value_or(model_config_.special_tokens.eos_token_id);
 
-    for (const auto& vec : model_config_.special_tokens_.stop_words_id_list_) {
+    for (const auto& vec : model_config_.special_tokens.stop_words_id_list) {
         std::vector<int> tmpVec;
         for (int64_t val : vec) {
             tmpVec.push_back(static_cast<int>(val));
@@ -86,9 +86,9 @@ std::shared_ptr<GenerateConfig> OpenaiEndpoint::extract_generation_config(const 
     if (req.logprobs.has_value()) {
         config.return_all_probs = req.logprobs.value();
     }
-    config.addSpecialTokens(model_config_.special_tokens_);
+    config.addSpecialTokens(model_config_.special_tokens);
 
-    auto select_tokens_id = tokenizer_->convertSelectTokens(config.select_tokens_str, model_config_.vocab_size_);
+    auto select_tokens_id = tokenizer_->convertSelectTokens(config.select_tokens_str, model_config_.vocab_size);
     config.select_tokens_id.insert(config.select_tokens_id.begin(), select_tokens_id.begin(), select_tokens_id.end());
     if (config.sp_advice_prompt.empty() == false) {
         config.sp_advice_prompt_token_ids = tokenizer_->encode(config.sp_advice_prompt);

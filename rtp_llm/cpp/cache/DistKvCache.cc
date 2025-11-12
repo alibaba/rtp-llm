@@ -17,9 +17,10 @@ inline std::size_t hashString(const std::string& str) {
 }
 
 DistKvCache::DistKvCache(CacheManager*                       cache_manager,
-                         const GptInitParameter&             gpt_init_params,
+                         const ParallelismConfig&            parallelism_config,
+                         const RuntimeConfig&                 runtime_config,
                          const kmonitor::MetricsReporterPtr& metrics_reporter):
-    cache_manager_(cache_manager), gpt_init_params_(gpt_init_params), metrics_reporter_(metrics_reporter) {}
+    cache_manager_(cache_manager), parallelism_config_(parallelism_config), runtime_config_(runtime_config), metrics_reporter_(metrics_reporter) {}
 
 DistKvCache::~DistKvCache() {
     RTP_LLM_LOG_INFO("DistKvCache destructor");
@@ -52,7 +53,7 @@ bool DistKvCache::init(const DistKvCacheInitParams& init_params) {
     }
     const auto& init_params_3fs = storage_params.init_params_3fs.value();
     planner_                    = std::make_unique<DefaultDistKvCachePlanner>(
-        cache_manager_, gpt_init_params_, init_params_3fs, metrics_reporter_);
+        cache_manager_, cache_manager_->kvCacheConfig(), init_params_3fs, metrics_reporter_);
 
     storage_params.lookup_timeout_ms = init_params.match_timeout_ms;
     storage_params.get_timeout_ms    = init_params.rpc_get_cache_timeout_ms;
@@ -98,8 +99,8 @@ bool DistKvCache::initDefaultMetas() {
     default_metas_["SEQ_SIZE_PER_BLOCK"] = std::to_string(cache_config.seq_size_per_block);
     default_metas_["DTYPE"]              = std::to_string(static_cast<int>(cache_config.dtype));
     default_metas_["USE_MLA"]            = std::to_string(static_cast<int>(cache_config.use_mla));
-    default_metas_["TP_SIZE"]            = std::to_string(gpt_init_params_.tp_size_);
-    default_metas_["TP_RANK"]            = std::to_string(gpt_init_params_.tp_rank_);
+    default_metas_["TP_SIZE"]            = std::to_string(parallelism_config_.tp_size);
+    default_metas_["TP_RANK"]            = std::to_string(parallelism_config_.tp_rank);
     default_metas_["LAYOUT_VERSION"]     = "v2";
 
     auto biz_name = autil::EnvUtil::getEnv("BIZ_NAME", std::string(""));
@@ -158,7 +159,7 @@ int32_t DistKvCache::matchForAllRank(const std::vector<int64_t>&        cache_ke
 
         int32_t match_len = static_cast<int32_t>(cache_keys.size());
         auto    metas     = extra_metas;
-        for (int i = 0; i < shared_this->gpt_init_params_.tp_size_; i++) {
+        for (int i = 0; i < shared_this->parallelism_config_.tp_size; i++) {
             metas["TP_RANK"] = std::to_string(i);
             auto ret         = shared_this->match(cache_keys, ignore_block_num, request_id, metas, stop);
             if (ret < match_len) {
@@ -457,7 +458,7 @@ bool DistKvCache::syncCallAllRank(const std::vector<int64_t>&        cache_keys,
                                   int64_t                            request_id,
                                   std::map<std::string, std::string> extra_metas,
                                   DistKvCache::OpType                op_type) const {
-    const auto& grpc_workers = gpt_init_params_.worker_grpc_addrs_;
+    const auto& grpc_workers = runtime_config_.worker_grpc_addrs;
     if (grpc_workers.empty()) {
         RTP_LLM_LOG_WARNING("rpc get cache failed, grpc workers is empty, request: %ld", request_id);
         return false;

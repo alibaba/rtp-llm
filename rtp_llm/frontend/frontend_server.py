@@ -10,9 +10,8 @@ from fastapi.responses import ORJSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from rtp_llm.access_logger.access_logger import AccessLogger
-from rtp_llm.config.generate_config import RoleType
-from rtp_llm.config.py_config_modules import StaticConfig
-from rtp_llm.config.task_type import TaskType
+from rtp_llm.config.model_config import get_task_type_from_ckpt_path
+from rtp_llm.ops import TaskType
 from rtp_llm.frontend.frontend_worker import FrontendWorker, TokenizerEncodeResponse
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
@@ -34,9 +33,10 @@ USAGE_HEADER = "USAGE"
 
 class FrontendServer(object):
     def __init__(
-        self, separated_frontend: bool = False, rank_id: int = 0, server_id: int = 0
+        self, separated_frontend: bool = False, rank_id: int = 0, server_id: int = 0, py_env_configs = None
     ):
-        self._access_logger = AccessLogger()
+        self.py_env_configs = py_env_configs
+        self._access_logger = AccessLogger(py_env_configs.profiling_debug_config.log_path, py_env_configs.profiling_debug_config.log_file_backup_count)
         self._frontend_worker = None
         self._openai_endpoint = None
         self.thread_lock_ = threading.Lock()
@@ -47,26 +47,59 @@ class FrontendServer(object):
         kmonitor.init()
 
     def start(self):
-        if StaticConfig.profiling_debug_config.debug_start_fake_process == 1:
+        if self.py_env_configs.profiling_debug_config.debug_start_fake_process == 1:
             # for debug online
             logging.info("DEBUG_START_FAKE_PROCESS is set, start fake server")
             self._frontend_worker = None
-        else:
-            self._frontend_worker = FrontendWorker(self.separated_frontend)
-            self._openai_endpoint = None
-            self.is_embedding = False
-            if (
-                self._frontend_worker.model_config is not None
-                and self._frontend_worker.model_config.task_type
-                != TaskType.LANGUAGE_MODEL
-            ):
-                self.is_embedding = True
-            else:
-                self._openai_endpoint = OpenaiEndpoint(
-                    self._frontend_worker.model_config,
-                    self._frontend_worker.tokenizer,
-                    self._frontend_worker.backend_rpc_server_visitor,
-                )
+            return
+
+        # Initialize SpecialTokens before creating FrontendWorker
+        # This will be reused by both FrontendWorker and OpenaiEndpoint
+        from rtp_llm.ops import SpecialTokens
+        from rtp_llm.config.model_config import (
+            update_stop_words_from_env,
+            update_tokenizer_special_tokens,
+        )
+        
+        # Create a temporary tokenizer to initialize special_tokens
+        # We'll update it with the actual tokenizer after FrontendWorker is created
+        special_tokens = SpecialTokens()
+        if self.py_env_configs.generate_env_config:
+            update_stop_words_from_env(special_tokens, self.py_env_configs.generate_env_config)
+        
+        # Create FrontendWorker with special_tokens
+        self._frontend_worker = FrontendWorker(self.separated_frontend, self.py_env_configs, special_tokens)
+        
+        # Update special_tokens with actual tokenizer
+        update_tokenizer_special_tokens(special_tokens, self._frontend_worker.tokenizer)
+        
+        self._openai_endpoint = None
+        self.is_embedding = False
+        
+        # Get task_type from ckpt_path
+        ckpt_path = self.py_env_configs.model_args.ckpt_path
+        task_type = get_task_type_from_ckpt_path(
+            ckpt_path,
+            self.py_env_configs.embedding_config,
+        )
+        
+        # Only initialize OpenaiEndpoint for LANGUAGE_MODEL task type
+        if task_type == TaskType.LANGUAGE_MODEL:
+            
+            self._openai_endpoint = OpenaiEndpoint(
+                model_args=self.py_env_configs.model_args,
+                generate_env_config=self.py_env_configs.generate_env_config,
+                render_config=self.py_env_configs.render_config,
+                misc_config=self.py_env_configs.misc_config,
+                vit_config=self.py_env_configs.vit_config,
+                special_tokens=special_tokens,
+                max_seq_len=self.py_env_configs.model_args.max_seq_len,
+                template_type=None,
+                model_name=self.py_env_configs.model_args.model_type,
+                ckpt_path=ckpt_path,
+                tokenizer=self._frontend_worker.tokenizer,
+                backend_rpc_server_visitor=self._frontend_worker.backend_rpc_server_visitor,
+            )
 
     def stop(self):
         if self._frontend_worker is not None:

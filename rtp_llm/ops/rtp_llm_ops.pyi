@@ -39,7 +39,7 @@ class FlashInferMlaAttnParams:
 
 class FlashInferOp:
     def __init__(
-        self, gpt_init_parameter: libth_transformer.GptInitParameter
+        self, attn_configs: typing.Any
     ) -> None: ...
     def forward(
         self,
@@ -54,7 +54,7 @@ class FlashInferOp:
 
 class FusedMoEOp:
     def __init__(
-        self, gpt_init_parameter: libth_transformer.GptInitParameter
+        self, attn_configs: typing.Any
     ) -> None: ...
     def forward(
         self,
@@ -68,7 +68,7 @@ class FusedMoEOp:
 
 class SelectTopkOp:
     def __init__(
-        self, gpt_init_parameter: libth_transformer.GptInitParameter
+        self, attn_configs: typing.Any
     ) -> None: ...
     def forward(
         self,
@@ -82,7 +82,7 @@ class TRTAttn:
 
 class TRTAttnOp:
     def __init__(
-        self, gpt_init_parameter: libth_transformer.GptInitParameter
+        self, attn_configs: typing.Any
     ) -> None: ...
     def forward(
         self,
@@ -95,7 +95,7 @@ class TRTAttnOp:
 
 class XQAAttnOp:
     def __init__(
-        self, gpt_init_parameter: libth_transformer.GptInitParameter
+        self, attn_configs: typing.Any
     ) -> None: ...
     def forward(
         self,

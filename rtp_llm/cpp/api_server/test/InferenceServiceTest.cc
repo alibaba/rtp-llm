@@ -33,12 +33,12 @@ protected:
         mock_metric_reporter_ = std::make_shared<MockApiServerMetricReporter>();
         auto metric_reporter  = std::dynamic_pointer_cast<ApiServerMetricReporter>(mock_metric_reporter_);
 
-        rtp_llm::GptInitParameter params;
+        ModelConfig model_config;
         auto                      request_counter = std::make_shared<autil::AtomicCounter>();
         auto                      controller      = std::make_shared<ConcurrencyController>(1, false);
 
         inference_service_ = std::make_shared<InferenceService>(
-            engine, nullptr, request_counter, token_processor, controller, params, metric_reporter);
+            engine, nullptr, request_counter, token_processor, controller, model_config, metric_reporter);
     }
     void TearDown() override {}
 
@@ -60,10 +60,11 @@ protected:
         input->input_ids = std::make_shared<rtp_llm::Buffer>(
             rtp_llm::MemoryType::MEMORY_CPU, rtp_llm::DataType::TYPE_INT32, shape, data_.data());
 
-        rtp_llm::GptInitParameter param;
-        param.max_seq_len_ = data_.size();
+        ModelConfig model_config;
+        RuntimeConfig runtime_config;
+        model_config.max_seq_len = data_.size();
 
-        auto mock_stream = std::make_shared<MockGenerateStream>(input, param);
+        auto mock_stream = std::make_shared<MockGenerateStream>(input, model_config, runtime_config);
         return mock_stream;
     }
 

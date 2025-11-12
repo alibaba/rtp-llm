@@ -32,7 +32,7 @@ public:
     KVCacheInfo        getCacheStatusInfo(int64_t latest_cache_version);
     // currently only used in BatchDecodeScheduler
     void updateSchedulerInfo(const std::string& scheduler_info);
-    bool updateEplbConfig(const EplbConfig& config);
+    bool updateEplbConfig(const EPLBConfig& config);
     void pause();
     void restart();
 

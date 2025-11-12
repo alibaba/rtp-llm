@@ -5,7 +5,7 @@ from typing import Any, List, Optional, Union
 import torch
 from pydantic import BaseModel, field_validator, model_validator
 
-from rtp_llm.config.py_config_modules import StaticConfig
+from rtp_llm.config.py_config_modules import LoadConfig as PyLoadConfig
 from rtp_llm.device.device_base import DeviceBase
 from rtp_llm.utils.database import BaseDatabase
 from rtp_llm.utils.fuser import fetch_remote_file_to_local
@@ -38,7 +38,6 @@ class LoadConfig(BaseModel):
     ffn_tp_size: int
     ffn_tp_rank: int
     num_nodes: int
-    tp_split_emb_and_lm_head: bool = False
     bit: int = 16
     merge_lora: bool = False
 
@@ -74,16 +73,8 @@ class LoadConfig(BaseModel):
 
     @model_validator(mode="after")
     def _set_default_phy2log(self) -> "LoadConfig":
-        if self.phy2log is None and self.expert_num > 0:
-            phy2log = self.create_redundant_expert(
-                layer_num=self.num_layers,
-                expert_num=self.expert_num,
-                phy_exp_num=self.phy_exp_num,
-                ep_size=self.ep_size,
-                num_nodes=self.num_nodes,
-                PHY2LOG_PATH_KEY="PHY2LOG_PATH",
-            )
-            return self.model_copy(update={"phy2log": phy2log})
+        # phy2log should be set during LoadConfig creation, not in validator
+        # Validator removed - phy2log must be provided explicitly
         return self
 
     def get_selected_experts(self, layer_id: int, expert_num):
@@ -125,6 +116,7 @@ class LoadConfig(BaseModel):
     def create_redundant_expert(
         layer_num: int,
         expert_num: int,
+        load_config: PyLoadConfig,
         phy_exp_num: int,
         ep_size: int,
         num_nodes: int,
@@ -149,7 +141,7 @@ class LoadConfig(BaseModel):
         layer_num = layer_num
 
         phy2log: List[List[int]] = []
-        phy2log_path = fetch_remote_file_to_local(StaticConfig.load_config.phy2log_path)
+        phy2log_path = fetch_remote_file_to_local(load_config.phy2log_path) if load_config.phy2log_path else None
 
         if phy2log_path:
             with open(phy2log_path, "r") as f:

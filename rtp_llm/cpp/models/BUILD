@@ -134,6 +134,7 @@ cc_library(
     deps = [
         ":models",
         ":dfa_utils",
+        "//rtp_llm/cpp/config:eplb_config",
         "//rtp_llm/cpp/pybind:py_utils",
     ],
     visibility = ["//visibility:public"],

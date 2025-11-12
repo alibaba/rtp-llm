@@ -1,4 +1,4 @@
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models.glm_v2_weight import GlmV2WeightInfo
 from rtp_llm.models.multimodal.multimodal_mixin import (
     BaseMultiModalWeightInfo,
@@ -13,7 +13,7 @@ class ChatGlmV4VisionVitWeights(BaseVitWeights):
 
 
 class ChatGlmV4VisionWeightInfo(GlmV2WeightInfo, BaseMultiModalWeightInfo):
-    def __init__(self, config: GptInitModelParameters, tp_size: int, tp_rank: int):
+    def __init__(self, config: ModelConfig, tp_size: int, tp_rank: int):
         GlmV2WeightInfo.__init__(self, config, tp_size, tp_rank)
         BaseMultiModalWeightInfo.__init__(self, config)
 

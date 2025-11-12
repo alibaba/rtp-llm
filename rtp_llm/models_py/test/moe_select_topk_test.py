@@ -1,7 +1,6 @@
 import torch
 import itertools
 from unittest import TestCase, main, SkipTest
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.utils.model_weight import W
 from rtp_llm.models_py.modules.ep.topk import select_experts
 from torch import dtype as _dtype

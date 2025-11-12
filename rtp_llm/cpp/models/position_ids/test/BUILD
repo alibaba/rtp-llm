@@ -19,7 +19,7 @@ cc_test(
         "//rtp_llm/cpp/models:position_ids_generator",
         "//rtp_llm/cpp/models:models",
         "//rtp_llm/cpp/engine_base/stream:stream",
-        "//rtp_llm/cpp/config:gpt_init_params",
+        "//rtp_llm/cpp/config:config_modules",
     ],
     env = {
         "TEST_USING_DEVICE": "CUDA",

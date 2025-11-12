@@ -3,7 +3,8 @@ from typing import Any, Dict
 
 import torch
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import VitParameters
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight
@@ -187,53 +188,54 @@ class Bloom(BaseModel):
     @staticmethod
     def from_huggingface(config_json: Dict[str, Any]):
         model_type = config_json["model_type"]
-        config = GptInitModelParameters(
-            head_num=32,
-            size_per_head=128,
-            layer_num=30,
-            max_seq_len=2048,
-            vocab_size=250682,
-        )
+        config = ModelConfig()
+        config.head_num_ = 32
+        config.size_per_head_ = 128
+        config.layer_num_ = 30
+        config.max_seq_len = 2048
+        config.vocab_size = 250682
         if model_type != "bloom":
             raise BaseException(f"model type is not bloom: {model_type}")
-        config.head_num = config_json.get(
+        config.head_num_ = config_json.get(
             "num_attention_heads", config_json.get("n_head")
         )
-        config.head_num_kv = config.head_num
+        config.head_num_kv_ = config.head_num_
         config.hidden_size = config_json.get("n_embed", config_json.get("hidden_size"))
-        config.size_per_head = config.hidden_size // config.head_num
-        config.layer_num = config_json["n_layer"]
+        config.size_per_head_ = config.hidden_size // config.head_num_
+        config.layer_num_ = config_json["n_layer"]
         config.max_seq_len = config_json.get("seq_length", 2048)
         config.vocab_size = config_json["vocab_size"]
-        config.layernorm_eps = config_json["layer_norm_epsilon"]
+        config.layernorm_eps_ = config_json["layer_norm_epsilon"]
         config.inter_size = config.hidden_size * 4
+        if config.special_tokens is None:
+            from rtp_llm.config.model_config import SpecialTokens
+            config.special_tokens = SpecialTokens()
         config.special_tokens.eos_token_id = config_json.get("eos_token_id", 0)
-        config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
-        config.config_dtype = config_json.get("torch_dtype", None)
+        config.tie_word_embeddings_ = config_json.get("tie_word_embeddings", False)
+        config.config_dtype_ = config_json.get("torch_dtype", None)
         return config
 
     @classmethod
-    def _create_config(cls, ckpt_path: str):
+    def _create_config(cls, ckpt_path: str) -> ModelConfig:
         config_dict = get_config_from_path(ckpt_path)
         if config_dict:
             config = Bloom.from_huggingface(config_dict)
         else:
-            config = GptInitModelParameters(
-                head_num=32,
-                head_num_kv=32,
-                size_per_head=128,
-                inter_size=4 * 32 * 128,
-                layer_num=30,
-                max_seq_len=2048,
-                vocab_size=250880,
-            )
-        config.layernorm_eps = 1e-5
+            config = ModelConfig()
+            config.head_num_ = 32
+            config.head_num_kv_ = 32
+            config.size_per_head_ = 128
+            config.inter_size = 4 * 32 * 128
+            config.layer_num_ = 30
+            config.max_seq_len = 2048
+            config.vocab_size = 250880
+        config.layernorm_eps_ = 1e-5
         config.layernorm_type = "pre_layernorm"
         config.activation_type = "gelu"
-        config.has_positional_encoding = False
-        config.has_pre_decoder_layernorm = True
-        config.has_post_decoder_layernorm = True
-        config.use_attention_linear_bias = True
+        config.has_positional_encoding_ = False
+        config.has_pre_decoder_layernorm_ = True
+        config.has_post_decoder_layernorm_ = True
+        config.use_attention_linear_bias_ = True
         return config
 
 

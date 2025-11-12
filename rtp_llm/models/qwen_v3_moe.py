@@ -1,6 +1,6 @@
 from typing import Any, List, Optional
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.ffn_weight import MoeAtomicWeight, MoeConfig, MoeWeight
 from rtp_llm.model_loader.model_weight_info import ModelWeightInfo
@@ -89,12 +89,29 @@ class Qwen3Moe(Qwen2Moe):
         return config
 
     def _create_python_model(self) -> Optional[GptModelBase]:
-        self.py_model = GenericMoeModel(self.config, self.weight)
+        model_config = self.model_config
+        parallelism_config = self.engine_config.parallelism_config
+        device_resource_config = self.engine_config.device_resource_config
+        quant_config = self.model_config.quant_config
+        vocab_size = self.model_config.vocab_size
+        fmha_config = self.engine_config.fmha_config
+        py_hw_kernel_config = self.engine_config.hw_kernel_config
+        
+        self.py_model = GenericMoeModel(
+            model_config,
+            parallelism_config,
+            device_resource_config,
+            self.weight,
+            vocab_size,
+            quant_config,
+            fmha_config=fmha_config,
+            py_hw_kernel_config=py_hw_kernel_config,
+        )
         return self.py_model
 
 
 class Qwen3MoeEagle3Weight(QWenV2Weight):
-    def __init__(self, config: GptInitModelParameters, tp_size: int, tp_rank: int):
+    def __init__(self, config: ModelConfig, tp_size: int, tp_rank: int):
         super().__init__(config, tp_size, tp_rank)
         self.bias = False
         self._use_qk_norm = True

@@ -48,7 +48,6 @@ MlaContextAttnOp::MlaContextAttnOp(int64_t mla_type,
 
     auto gpt_params          = GptInitParameter();
     gpt_params.mla_ops_type_ = MlaOpsType(mla_type);
-    gpt_params.update_from_env_for_test();
     rtp_llm::DeviceFactory::initDevices(gpt_params);
     device_ = rtp_llm::DeviceFactory::getDefaultDevice();
     ;
@@ -59,7 +58,7 @@ MlaContextAttnOp::MlaContextAttnOp(int64_t mla_type,
         static_cast<size_t>(hidden_size),
         RopeConfig(),
         64,
-        AttentionMaskType::causalMask,
+        true,
         1.0f,
         true,
         false,
