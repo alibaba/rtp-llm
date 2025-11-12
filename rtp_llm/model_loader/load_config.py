@@ -61,16 +61,6 @@ class LoadConfig(BaseModel):
             from rtp_llm.ops import VitSeparation
             if value is None:
                 return VitSeparation.VIT_SEPARATION_LOCAL
-            if isinstance(value, int):
-                # Convert int to enum for backward compatibility
-                if value == 0:
-                    return VitSeparation.VIT_SEPARATION_LOCAL
-                elif value == 1:
-                    return VitSeparation.VIT_SEPARATION_ROLE
-                elif value == 2:
-                    return VitSeparation.VIT_SEPARATION_REMOTE
-                else:
-                    raise ValueError(f"Invalid vit_separation value: {value}")
             if not isinstance(value, VitSeparation):
                 raise TypeError(
                     f"Field 'vit_separation' expects type VitSeparation, got {type(value)}"
