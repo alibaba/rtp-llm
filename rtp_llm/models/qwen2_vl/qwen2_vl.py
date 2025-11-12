@@ -302,13 +302,13 @@ class QWen2_VL(QWen_VL, MultiModalMixin):
         config.special_tokens.eos_token_id = config_json.get("eos_token_id", 0)
         config.tie_word_embeddings_ = config_json.get("tie_word_embeddings", False)
 
-        config.rope_config.style = 7
-        config.rope_config.mrope_section = config_json["rope_scaling"].get(
+        config.attn_config.rope_config.style = 7
+        config.attn_config.rope_config.mrope_section = config_json["rope_scaling"].get(
             "mrope_section", [16, 24, 24]
         )
         config.mm_position_ids_style_ = 2
-        config.position_id_len_factor_ = len(config.rope_config.mrope_section)
-        config.rope_config.dim = 128
+        config.position_id_len_factor_ = len(config.attn_config.rope_config.mrope_section)
+        config.attn_config.rope_config.dim = 128
 
     @staticmethod
     def get_weight_cls():
