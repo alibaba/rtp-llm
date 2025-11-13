@@ -209,7 +209,7 @@ std::string HWKernelConfig::to_string() const {
 
 // DeviceResourceConfig
 void DeviceResourceConfig::update_from_env_for_test() {
-    device_reserve_memory_bytes = autil::EnvUtil::getEnv("DEVICE_RESERVE_MEMORY_BYTES", 0);
+    device_reserve_memory_bytes = autil::EnvUtil::getEnv("DEVICE_RESERVE_MEMORY_BYTES", -1073741824);
     host_reserve_memory_bytes   = autil::EnvUtil::getEnv("HOST_RESERVE_MEMORY_BYTES", 4LL * 1024 * 1024 * 1024);
     overlap_math_sm_count       = autil::EnvUtil::getEnv("OVERLAP_MATH_SM_COUNT", 0);
     overlap_comm_type           = autil::EnvUtil::getEnv("OVERLAP_COMM_TYPE", 0);

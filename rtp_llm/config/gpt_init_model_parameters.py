@@ -668,7 +668,7 @@ class GptInitModelParameters:
 
         # DeviceResourceConfig
         self.gpt_init_params.device_resource_config = DeviceResourceConfig(
-            device_reserve_memory_bytes=get_env_int("DEVICE_RESERVE_MEMORY_BYTES", 0),
+            device_reserve_memory_bytes=get_env_int("DEVICE_RESERVE_MEMORY_BYTES", -1073741824),
             host_reserve_memory_bytes=get_env_int(
                 "HOST_RESERVE_MEMORY_BYTES", 4 * 1024 * 1024 * 1024
             ),

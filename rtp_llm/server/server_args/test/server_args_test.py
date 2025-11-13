@@ -102,7 +102,7 @@ class ServerArgsDefaultTest(TestCase):
         self.assertEqual(env.get("ENABLE_FLASHINFER_SAMPLE_KERNEL"), "1")
 
         # 8. 设备和资源管理
-        self.assertEqual(env.get("DEVICE_RESERVE_MEMORY_BYTES"), "0")
+        self.assertEqual(env.get("DEVICE_RESERVE_MEMORY_BYTES"), "-1073741824")
         self.assertEqual(env.get("HOST_RESERVE_MEMORY_BYTES"), "4294967296")
         self.assertEqual(env.get("OVERLAP_MATH_SM_COUNT"), "0")
         self.assertEqual(env.get("OVERLAP_COMM_TYPE"), "0")
@@ -113,7 +113,6 @@ class ServerArgsDefaultTest(TestCase):
         self.assertEqual(env.get("RESERVER_RUNTIME_MEM_MB"), "1024")
         self.assertEqual(env.get("SPECIFY_GPU_ARCH"), "")
         self.assertIsNone(env.get("ACEXT_GEMM_CONFIG_DIR"))
-        self.assertEqual(env.get("DEVICE_RESERVE_MEMORY_BYTES"), "0")
 
         # 9. MOE 专家并行
         self.assertEqual(env.get("USE_DEEPEP_MOE"), "0")

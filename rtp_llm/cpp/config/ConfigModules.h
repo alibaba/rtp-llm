@@ -102,7 +102,7 @@ struct HWKernelConfig {
 };
 
 struct DeviceResourceConfig {
-    int64_t     device_reserve_memory_bytes = 0;
+    int64_t     device_reserve_memory_bytes = -1073741824;
     int64_t     host_reserve_memory_bytes   = 4LL * 1024 * 1024 * 1024;
     int         overlap_math_sm_count       = 0;
     int         overlap_comm_type           = 0;

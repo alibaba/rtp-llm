@@ -257,7 +257,7 @@ void register_hwkernel_config(pybind11::module& m) {
 void register_device_resource_config(pybind11::module& m) {
     pybind11::class_<DeviceResourceConfig>(m, "DeviceResourceConfig")
         .def(pybind11::init<int64_t, int64_t, int, int, int, bool, int, bool>(),
-             pybind11::arg("device_reserve_memory_bytes") = 0,
+             pybind11::arg("device_reserve_memory_bytes") = -1073741824,
              pybind11::arg("host_reserve_memory_bytes")   = 4LL * 1024 * 1024 * 1024,
              pybind11::arg("overlap_math_sm_count")       = 0,
              pybind11::arg("overlap_comm_type")           = 0,

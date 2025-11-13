@@ -28,7 +28,7 @@ constexpr auto TNone = torch::indexing::None;
 
 static const int MIN_CACHE_BATCH_SIZE      = 256;
 static const int MIN_CACHE_INPUT_TOKEN_NUM = 512;
-static const int MIN_CACHE_PAGE_NUM        = 128 * 1024;
+static const int MIN_CACHE_PAGE_NUM        = 1024 * 1024;
 
 bool FlashInferAttnParams::isDecode(int input_token_num) {
     return input_token_num <= MIN_CACHE_INPUT_TOKEN_NUM * 2;

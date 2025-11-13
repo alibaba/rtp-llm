@@ -11,7 +11,7 @@ def init_device_resource_group_args(parser):
         "--device_reserve_memory_bytes",
         env_name="DEVICE_RESERVE_MEMORY_BYTES",
         type=int,
-        default=0,
+        default=-1024 * 1024 * 1024,  # -1GB, prevent oom
         help="指定在GPU设备上预留的内存量（单位：字节）。此内存不会被常规操作使用，可用于应对突发需求或特定驱动/内核开销。",
     )
 
