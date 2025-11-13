@@ -24,7 +24,7 @@ def check_exeutor_type(model: BaseModel):
 
 def create_engine(
     model: BaseModel, 
-    config: object,
+    alog_conf_path: str,
     gang_info,
     propose_model: Optional[ProposeModel] = None
 ) -> BaseEngine:
@@ -33,14 +33,14 @@ def create_engine(
     
     Args:
         model: The BaseModel instance
-        config: Configuration object containing profiling_debug_logging_config and other configs
+        alog_conf_path: Path to the alog configuration file
         gang_info: GangInfo instance from GangServer
         propose_model: Optional propose model for speculative decoding
     
     Returns:
         BaseEngine instance
     """
-    torch.ops.rtp_llm.init_engine(config.profiling_debug_logging_config.ft_alog_conf_path)
+    torch.ops.rtp_llm.init_engine(alog_conf_path)
     
     executor_type = check_exeutor_type(model)
     logging.info(f"executor_type: {executor_type}")

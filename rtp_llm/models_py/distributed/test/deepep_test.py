@@ -1546,16 +1546,16 @@ class DeepEPTest(TestCase):
         deep_ep_num_sm: int = 24,
     ):
         """Helper function to create configuration objects for DeepEP tests."""
-        py_model_config = ModelConfig()
-        py_model_config.head_num = 2
-        py_model_config.size_per_head = 128
-        py_model_config.num_layers = 2
-        py_model_config.max_seq_len = 2048
-        py_model_config.vocab_size = 500000
+        model_config = ModelConfig()
+        model_config.head_num = 2
+        model_config.size_per_head = 128
+        model_config.num_layers = 2
+        model_config.max_seq_len = 2048
+        model_config.vocab_size = 500000
         if args:
-            py_model_config.moe_k = args.get("moe_k", 2)
-            py_model_config.expert_num = args.get("expert_num", 4)
-            py_model_config.hidden_size = args.get("hidden_size", 128)
+            model_config.moe_k = args.get("moe_k", 2)
+            model_config.expert_num = args.get("expert_num", 4)
+            model_config.hidden_size = args.get("hidden_size", 128)
         
         parallelism_config = ParallelismConfig()
         parallelism_config.nccl_ip = "127.0.0.1"
@@ -1588,14 +1588,14 @@ class DeepEPTest(TestCase):
             ffn_disaggregate_config.ffn_dp_size = num_ranks // 2
             ffn_disaggregate_config.ffn_tp_size = 1
         
-        return py_model_config, parallelism_config, moe_config, runtime_config, ffn_disaggregate_config
+        return model_config, parallelism_config, moe_config, runtime_config, ffn_disaggregate_config
 
     @staticmethod
     def _run_deepep_intranode_test(rank: int, num_ranks: int, args: Dict[str, Any]):
         # set env
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in range(num_ranks))
         # init params
-        py_model_config, parallelism_config, moe_config, runtime_config, ffn_disaggregate_config = \
+        model_config, parallelism_config, moe_config, runtime_config, ffn_disaggregate_config = \
             DeepEPTest._create_deepep_config(rank, num_ranks, args, use_deepep_low_latency=False, enable_ffn_disaggregate=False)
         # init distributed environment
         torch.cuda.set_device(parallelism_config.local_rank)
@@ -1610,7 +1610,7 @@ class DeepEPTest(TestCase):
         group = get_ep_group().device_group
         init_deepep_wrapper(
             group=group,
-            py_model_config=py_model_config,
+            model_config=model_config,
             parallelism_config=parallelism_config,
             moe_config=moe_config,
             runtime_config=runtime_config,
@@ -1644,7 +1644,7 @@ class DeepEPTest(TestCase):
         os.environ["ACCL_TOPO_FIX"] = "1"
         os.environ["ACCL_LOAD_BALANCE"] = "1"
         # init params
-        py_model_config, parallelism_config, moe_config, runtime_config, ffn_disaggregate_config = \
+        model_config, parallelism_config, moe_config, runtime_config, ffn_disaggregate_config = \
             DeepEPTest._create_deepep_config(rank, num_ranks, args, use_deepep_low_latency=True, enable_ffn_disaggregate=False)
         # init distributed environment
         torch.cuda.set_device(parallelism_config.local_rank)
@@ -1659,7 +1659,7 @@ class DeepEPTest(TestCase):
         group = get_ep_group().device_group
         init_deepep_wrapper(
             group=group,
-            py_model_config=py_model_config,
+            model_config=model_config,
             parallelism_config=parallelism_config,
             moe_config=moe_config,
             runtime_config=runtime_config,
@@ -1692,7 +1692,7 @@ class DeepEPTest(TestCase):
         os.environ["ACCL_TOPO_FIX"] = "1"
         os.environ["ACCL_LOAD_BALANCE"] = "1"
         # init params
-        py_model_config, parallelism_config, moe_config, runtime_config, ffn_disaggregate_config = \
+        model_config, parallelism_config, moe_config, runtime_config, ffn_disaggregate_config = \
             DeepEPTest._create_deepep_config(rank, num_ranks, args, use_deepep_low_latency=True, enable_ffn_disaggregate=True)
         # init distributed environment
         torch.cuda.set_device(parallelism_config.local_rank)
@@ -1707,7 +1707,7 @@ class DeepEPTest(TestCase):
         group = get_ep_group().device_group
         init_deepep_wrapper(
             group=group,
-            py_model_config=py_model_config,
+            model_config=model_config,
             parallelism_config=parallelism_config,
             moe_config=moe_config,
             runtime_config=runtime_config,
@@ -1740,7 +1740,7 @@ class DeepEPTest(TestCase):
         os.environ["ACCL_TOPO_FIX"] = "1"
         os.environ["ACCL_LOAD_BALANCE"] = "1"
         # init params
-        py_model_config, parallelism_config, moe_config, runtime_config, ffn_disaggregate_config = \
+        model_config, parallelism_config, moe_config, runtime_config, ffn_disaggregate_config = \
             DeepEPTest._create_deepep_config(rank, num_ranks, args, use_deepep_low_latency=True, enable_ffn_disaggregate=True)
         # init distributed environment
         torch.cuda.set_device(parallelism_config.local_rank)
@@ -1755,7 +1755,7 @@ class DeepEPTest(TestCase):
         group = get_ep_group().device_group
         init_deepep_wrapper(
             group=group,
-            py_model_config=py_model_config,
+            model_config=model_config,
             parallelism_config=parallelism_config,
             moe_config=moe_config,
             runtime_config=runtime_config,
@@ -1797,7 +1797,7 @@ class DeepEPTest(TestCase):
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in range(num_ranks))
         # init params
         args = {"moe_k": 2, "expert_num": 4, "hidden_size": 128}
-        py_model_config, parallelism_config, moe_config, runtime_config, ffn_disaggregate_config = \
+        model_config, parallelism_config, moe_config, runtime_config, ffn_disaggregate_config = \
             DeepEPTest._create_deepep_config(rank, num_ranks, args, use_deepep_low_latency=False, enable_ffn_disaggregate=False)
         # init distributed environment
         torch.cuda.set_device(parallelism_config.local_rank)
@@ -1812,7 +1812,7 @@ class DeepEPTest(TestCase):
         group = get_ep_group().device_group
         init_deepep_wrapper(
             group=group,
-            py_model_config=py_model_config,
+            model_config=model_config,
             parallelism_config=parallelism_config,
             moe_config=moe_config,
             runtime_config=runtime_config,
@@ -1845,7 +1845,7 @@ class DeepEPTest(TestCase):
         os.environ["ACCL_TOPO_FIX"] = "1"
         os.environ["ACCL_LOAD_BALANCE"] = "1"
         # init params
-        py_model_config, parallelism_config, moe_config, runtime_config, ffn_disaggregate_config = \
+        model_config, parallelism_config, moe_config, runtime_config, ffn_disaggregate_config = \
             DeepEPTest._create_deepep_config(rank, num_ranks, args, use_deepep_low_latency=True, enable_ffn_disaggregate=False)
         # init distributed environment
         torch.cuda.set_device(parallelism_config.local_rank)
@@ -1860,7 +1860,7 @@ class DeepEPTest(TestCase):
         group = get_ep_group().device_group
         init_deepep_wrapper(
             group=group,
-            py_model_config=py_model_config,
+            model_config=model_config,
             parallelism_config=parallelism_config,
             moe_config=moe_config,
             runtime_config=runtime_config,

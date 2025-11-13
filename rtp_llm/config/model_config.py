@@ -8,6 +8,7 @@ from rtp_llm.config.quant_config import (
     QuantizationConfig,
     init_quant_config,
 )
+from rtp_llm.config.model_args import apply_model_args_to_config
 from rtp_llm.ops import TaskType
 from libth_transformer_config import ModelConfig as CppModelConfig, MMModelConfig
 from rtp_llm.utils.weight_type import WEIGHT_TYPE
@@ -365,7 +366,7 @@ class ModelConfig(CppModelConfig):
         """
         model_override_args = json.loads(json_model_override_args)
         if model_override_args:
-            # Apply rope_scaling override via py_model_config
+            # Apply rope_scaling override via model_config
             self.apply_rope_scaling_override(model_override_args)
 
     def init_precision_config(self, kv_cache_config: Optional[Any] = None):
@@ -592,44 +593,48 @@ def update_tokenizer_special_tokens(special_tokens, tokenizer: Any) -> None:
 # ModelConfig setup and initialization functions
 # ============================================================================
 
-def build_py_model_config(
-    py_model_config: ModelConfig,  # ModelConfig instance to build
+def build_model_config(
+    model_config: ModelConfig,  # ModelConfig instance to build
     model_args: Any,  # ModelArgs from py_env_configs
     kv_cache_config,
     py_hw_kernel_config: Any,  # HWKernelConfig
     profiling_debug_logging_config: Any,  # ProfilingDebugLoggingConfig
     parallelism_config,
     embedding_config: Optional[Any] = None,  # EmbeddingConfig (optional, for check_task_type)
+    quantization_config: Optional[Any] = None,  # QuantizationConfig (optional, for quantization)
 ) -> None:
     """Build and initialize ModelConfig from model_args.
     
     This function initializes ModelConfig after EngineConfig is initialized.
-    It copies values from model_args to py_model_config, then sets up model-specific fields.
+    It copies values from model_args to model_config, then sets up model-specific fields.
     
-    Args:
-        py_model_config: ModelConfig instance to build
+        Args:
+        model_config: ModelConfig instance to build
         model_args: ModelArgs instance from py_env_configs (contains user-provided arguments)
         kv_cache_config: KVCacheConfig for task_type and use_kvcache
         py_hw_kernel_config: HWKernelConfig for inter_padding_size
         profiling_debug_logging_config: ProfilingDebugLoggingConfig for hack_layer_num
         parallelism_config: ParallelismConfig for inter_padding_size
         embedding_config: Optional EmbeddingConfig (for check_task_type)
+        quantization_config: Optional QuantizationConfig (for quantization settings)
     """
-    from rtp_llm.config.model_args import apply_model_args_to_config
     
-    # Apply model_args to py_model_config
-    apply_model_args_to_config(model_args, py_model_config)
+    # Apply model_args to model_config
+    apply_model_args_to_config(model_args, model_config)
+    # Set quantization from quantization_config
+    if quantization_config is not None:
+        model_config.quantization = quantization_config.get_quantization()
     
     # Initialize precision configuration (uses self.ckpt_path and self.quantization)
     # This will initialize data_type from act_type (or config_dtype), set attn_config.kv_cache_dtype
     # from kv_cache_config, and validate with quant_config
-    py_model_config.init_precision_config(kv_cache_config=kv_cache_config)
+    model_config.init_precision_config(kv_cache_config=kv_cache_config)
     
-    ckpt_path = py_model_config.ckpt_path
-    tokenizer_path = py_model_config.tokenizer_path
-    ptuning_path = py_model_config.ptuning_path
-    max_seq_len = py_model_config.max_seq_len
-    py_model_config.setup_paths(
+    ckpt_path = model_config.ckpt_path
+    tokenizer_path = model_config.tokenizer_path
+    ptuning_path = model_config.ptuning_path
+    max_seq_len = model_config.max_seq_len
+    model_config.setup_paths(
         ckpt_path,
         tokenizer_path,
         ptuning_path,
@@ -637,18 +642,18 @@ def build_py_model_config(
     )
     
     task_type = get_task_type_from_ckpt_path(
-        py_model_config.ckpt_path,
+        model_config.ckpt_path,
         embedding_config)
     # Convert TaskType enum to string for C++ binding (setter expects string)
     task_type_str = task_type.name if hasattr(task_type, 'name') else str(task_type)
-    py_model_config.task_type = task_type_str
-    py_model_config.use_kvcache = task_type == TaskType.LANGUAGE_MODEL
+    model_config.task_type = task_type_str
+    model_config.use_kvcache = task_type == TaskType.LANGUAGE_MODEL
     logging.info(
-        f"model task type: {task_type}, use_kvcache: {py_model_config.use_kvcache}"
+        f"model task type: {task_type}, use_kvcache: {model_config.use_kvcache}"
     )
     
     # Update inter_padding_size (needs parallelism_config)
-    py_model_config.update_inter_padding_size(
+    model_config.update_inter_padding_size(
         parallelism_config.tp_size,
         parallelism_config.ep_size,
         parallelism_config.dp_size,
@@ -656,45 +661,17 @@ def build_py_model_config(
     )
 
     # Load cutlass gemm config
-    load_cutlass_gemm_config(py_model_config.quant_algo)
+    load_cutlass_gemm_config(model_config.quant_algo)
     
     # Apply hack_layer_num if needed
     hack_layer_num = profiling_debug_logging_config.hack_layer_num
     if hack_layer_num:
         logging.info(f"hack layernum to {hack_layer_num}")
-        py_model_config.num_layers = hack_layer_num
+        model_config.num_layers = hack_layer_num
     
     # Apply model override args
-    if py_model_config.json_model_override_args:
-        py_model_config.apply_override_args(py_model_config.json_model_override_args)
+    if model_config.json_model_override_args:
+        model_config.apply_override_args(model_config.json_model_override_args)
 
-    logging.info("py_model_config: %s", py_model_config.to_string())
-
-def get_quantization_from_params(env_params: Dict[str, str]) -> Optional[str]:
-    """Get quantization setting from environment parameters.
-    
-    Replaces LegacyModelConfig.get_quantization_from_params().
-    
-    Args:
-        env_params: Dictionary of environment parameters
-        
-    Returns:
-        Quantization string or None
-    """
-    QUANTIZATION_KEY = "QUANTIZATION"
-    WEIGHT_TYPE = "WEIGHT_TYPE"
-    INT8_MODE = "INT8_MODE"
-    
-    if (not env_params.get(QUANTIZATION_KEY)) and (
-        env_params.get(WEIGHT_TYPE, "").upper() == "INT8"
-        or int(env_params.get(INT8_MODE, "0")) == 1
-    ):
-        quantization = "INT8"
-    else:
-        quantization = env_params.get(QUANTIZATION_KEY)
-    return quantization
-
-
-# Add as a static method to ModelConfig for backward compatibility
-ModelConfig.get_quantization_from_params = staticmethod(get_quantization_from_params)
+    logging.info("model_config: %s", model_config.to_string())
 

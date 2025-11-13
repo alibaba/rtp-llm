@@ -83,26 +83,27 @@ class BackendServer(object):
             engine_config = EngineConfig.create(py_env_configs, gang_info=gang_info)
             
             # Create model configs (ModelConfig construction is handled in ModelFactory)
-            py_model_config, propose_py_model_config = ModelFactory.create_model_configs(
+            model_config, propose_model_config = ModelFactory.create_model_configs(
                 engine_config=engine_config,
                 model_args=py_env_configs.model_args,
                 lora_config=py_env_configs.lora_config,
                 generate_env_config=py_env_configs.generate_env_config,
                 embedding_config=py_env_configs.embedding_config,
+                quantization_config=py_env_configs.quantization_config,
             )
             
             # All model metadata (lora_infos, multi_task_prompt, model_name, template_type, mm_model_config)
-            # is now set in py_model_config by create_model_configs()
+            # is now set in model_config by create_model_configs()
             
             # Create model using new API
-            # All metadata is already in py_model_config (including mm_model_config)
+            # All metadata is already in model_config (including mm_model_config)
             # vit_config is needed for multimodal models
             self.model: AsyncModel = ModelFactory.from_model_configs(
-                model_config=py_model_config,
+                model_config=model_config,
                 engine_config=engine_config,
                 gang_info=gang_info,
                 vit_config=py_env_configs.vit_config,
-                propose_model_config=propose_py_model_config,
+                propose_model_config=propose_model_config,
             )
             
             # Load default generate config if needed
@@ -111,12 +112,12 @@ class BackendServer(object):
              
             if (
                 self.model is not None
-                and self.model.model.py_model_config.task_type != TaskType.LANGUAGE_MODEL
+                and self.model.model.model_config.task_type != TaskType.LANGUAGE_MODEL
             ):
                 self._embedding_endpoint = EmbeddingEndpoint(self.model)
             else:
                 self.backend_rpc_server_visitor = BackendRPCServerVisitor(
-                    max_seq_len=py_model_config.max_seq_len,
+                    max_seq_len=model_config.max_seq_len,
                     seq_size_per_block=engine_config.kv_cache_config.seq_size_per_block,
                     pd_sep_config=engine_config.pd_sep_config,
                     runtime_config=engine_config.runtime_config,
@@ -126,10 +127,10 @@ class BackendServer(object):
                     decode_entrance=engine_config.pd_sep_config.decode_entrance,
                     gang_info=gang_info,
                 )
-                # Get values from py_model_config for OpenaiEndpoint
-                template_type = py_model_config.template_type
-                model_name = py_model_config.model_name
-                ckpt_path = py_model_config.ckpt_path or ""
+                # Get values from model_config for OpenaiEndpoint
+                template_type = model_config.template_type
+                model_name = model_config.model_name
+                ckpt_path = model_config.ckpt_path or ""
 
                 self._openai_endpoint = OpenaiEndpoint(
                     model_args=py_env_configs.model_args,
@@ -137,8 +138,8 @@ class BackendServer(object):
                     render_config=py_env_configs.render_config,
                     misc_config=py_env_configs.misc_config,
                     vit_config=py_env_configs.vit_config,
-                    special_tokens=py_model_config.special_tokens,
-                    max_seq_len=py_model_config.max_seq_len,
+                    special_tokens=model_config.special_tokens,
+                    max_seq_len=model_config.max_seq_len,
                     template_type=template_type,
                     model_name=model_name,
                     ckpt_path=ckpt_path,
@@ -149,12 +150,12 @@ class BackendServer(object):
                     # uply hack :(
                     self.model.decoder_engine_.rtp_llm_op_.ft_op.start_http_server(
                         self.model.model.model_weights_loader,
-                        py_model_config.lora_infos,
+                        model_config.lora_infos,
                         self._gang_server._gang_info,
                         self._openai_endpoint.tokenizer,
                         self._openai_endpoint.chat_renderer,
                     )
-                    max_lora_model_size = self.model.config.model_specific_config.max_lora_model_size
+                    max_lora_model_size = self.model.engine_config.model_specific_config.max_lora_model_size
                     self._lora_manager = LoraManager(self.model, max_lora_model_size=max_lora_model_size)
                     self._weight_manager = WeightManager(self.model)
 

@@ -243,16 +243,14 @@ class MiniCPMVEmbedding(Llama, MultiModalMixin):
 
     def __init__(
         self,
-        py_model_config,
-        mm_model_config,
+        model_config,
         engine_config,
         vit_config=None,
         merge_lora=False,
     ):
         Llama.__init__(
             self,
-            py_model_config=py_model_config,
-            mm_model_config=mm_model_config,
+            model_config=model_config,
             engine_config=engine_config,
             vit_config=vit_config,
             merge_lora=merge_lora,
@@ -271,19 +269,19 @@ class MiniCPMVEmbedding(Llama, MultiModalMixin):
         self.slice_start_id = self.tokenizer._convert_token_to_id(self.slice_start)
         self.slice_end_id = self.tokenizer._convert_token_to_id(self.slice_end)
 
-        if self.py_model_config.mm_sep_tokens is None:
-            self.py_model_config.mm_sep_tokens = []
-        self.py_model_config.mm_sep_tokens = [
+        if self.model_config.mm_sep_tokens is None:
+            self.model_config.mm_sep_tokens = []
+        self.model_config.mm_sep_tokens = [
             [self.im_start_id, self.im_end_id]
             # [self.slice_start_id, self.slice_end_id]
         ]
 
     def _init_multimodal(self, mm_model_config, vit_config):
-        # mm_related_params is in py_model_config, not mm_model_config
-        if self.py_model_config.mm_related_params is None:
-            raise ValueError("py_model_config.mm_related_params is required for MiniCPMVEmbedding")
-        self.mm_part = ImageEmbeddingInterface(self.py_model_config.mm_related_params)
-        self.py_model_config.mm_related_params.vit_weights = MiniCPMVVitWeight(
+        # mm_related_params is in model_config, not mm_model_config
+        if self.model_config.mm_related_params is None:
+            raise ValueError("model_config.mm_related_params is required for MiniCPMVEmbedding")
+        self.mm_part = ImageEmbeddingInterface(self.model_config.mm_related_params)
+        self.model_config.mm_related_params.vit_weights = MiniCPMVVitWeight(
             {"vpm": self.mm_part.vpm, "resampler": self.mm_part.resampler}
         )
 

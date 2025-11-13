@@ -50,7 +50,7 @@ class DeepEPWrapper:
     def __init__(
         self,
         group: ProcessGroup,
-        py_model_config: ModelConfig,
+        model_config: ModelConfig,
         parallelism_config,
         moe_config: MoeConfig,
         runtime_config: RuntimeConfig,
@@ -58,12 +58,12 @@ class DeepEPWrapper:
     ) -> None:
         self._ep_rank = parallelism_config.ep_rank
         self._ep_size = parallelism_config.ep_size
-        self._hidden_size = py_model_config.hidden_size
-        self._num_experts = py_model_config.expert_num
-        self._num_topk = py_model_config.moe_k
+        self._hidden_size = model_config.hidden_size
+        self._num_experts = model_config.expert_num
+        self._num_topk = model_config.moe_k
         self._num_sms = moe_config.deep_ep_num_sm
         self._use_accl_ep = True
-        self._py_model_config = py_model_config
+        self._model_config = model_config
         self._parallelism_config = parallelism_config
         self._moe_config = moe_config
         self._runtime_config = runtime_config
@@ -348,7 +348,7 @@ def get_deepep_wrapper() -> DeepEPWrapper:
 
 def init_deepep_wrapper(
     group: ProcessGroup,
-    py_model_config: ModelConfig,
+    model_config: ModelConfig,
     parallelism_config,
     moe_config: MoeConfig,
     runtime_config: RuntimeConfig,
@@ -356,7 +356,7 @@ def init_deepep_wrapper(
 ) -> None:
     global _DEEP_EP
     _DEEP_EP = DeepEPWrapper(
-        group, py_model_config, parallelism_config, moe_config, runtime_config, ffn_disaggregate_config
+        group, model_config, parallelism_config, moe_config, runtime_config, ffn_disaggregate_config
     )  # pyright: ignore[reportConstantRedefinition]
 
 

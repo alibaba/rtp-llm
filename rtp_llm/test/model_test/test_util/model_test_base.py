@@ -244,17 +244,17 @@ class ModelTestBase(TestCase):
             from rtp_llm.config.py_config_modules import GangConfig
             gang_config = GangConfig()
             pipeline = Pipeline(
-                special_tokens=model.model.py_model_config.special_tokens,
+                special_tokens=model.model.model_config.special_tokens,
                 pd_sep_config=model.model.engine_config.pd_sep_config,
                 runtime_config=model.model.engine_config.runtime_config,
                 ffn_disaggregate_config=model.model.engine_config.parallelism_config.ffn_disaggregate_config,
-                max_seq_len=model.model.py_model_config.max_seq_len,
+                max_seq_len=model.model.model_config.max_seq_len,
                 seq_size_per_block=model.model.engine_config.kv_cache_config.seq_size_per_block,
                 tokenizer=model.tokenizer,
                 gang_config=gang_config,
                 sp_config=model.model.engine_config.sp_config,
             )
-            if model.model.py_model_config.pre_seq_len > 0:
+            if model.model.model_config.pre_seq_len > 0:
                 model_str = "/ptuning"
             else:
                 model_str = ""

@@ -393,8 +393,8 @@ class LlavaImageEmbedding(MultiModalEmbeddingInterface):
         return image_feature
 
     def build_vision_tower(self, vision_tower_cfg: Dict[str, Any], **kwargs: Any):
-        vision_tower_name = self.py_model_config.extra_data_path
-        vision_tower = self.py_model_config.local_extra_data_path
+        vision_tower_name = self.model_config.extra_data_path
+        vision_tower = self.model_config.local_extra_data_path
         if vision_tower is None:
             vision_tower_name = vision_tower_cfg["vit_tower_path"]
             vision_tower = vision_tower_cfg["vit_tower_path"]

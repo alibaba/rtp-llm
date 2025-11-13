@@ -216,6 +216,7 @@ class GangServer:
         while True:
             try:
                 self._gang_info = get_gang_info(
+                    start_port=self.server_config.start_port,
                     distribute_config_file=self.gang_config.distribute_config_file,
                     gang_config_string=self.gang_config.gang_config_string,
                     json_gang_parts=self.gang_config.json_gang_parts,

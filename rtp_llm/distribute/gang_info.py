@@ -231,6 +231,7 @@ class GangInfo(NamedTuple):
 
 
 def get_gang_info(
+    start_port: int,
     distribute_config_file: Optional[str] = None,
     gang_config_string: Optional[str] = None,
     json_gang_parts: Optional[str] = None,
@@ -281,7 +282,7 @@ def get_gang_info(
         members = [
             WorkerInfo(
                 socket.gethostbyname(socket.gethostname()),
-                -1,
+                start_port,
                 -1,
                 -1,
                 -1,

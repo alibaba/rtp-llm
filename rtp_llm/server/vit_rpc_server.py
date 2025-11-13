@@ -85,24 +85,25 @@ def vit_start_server():
     
     # Create model configs (ModelConfig construction is handled in ModelFactory)
     # All model metadata (lora_infos, multi_task_prompt, model_name, template_type, mm_model_config)
-    # is set in py_model_config by create_model_configs()
-    py_model_config, propose_py_model_config = ModelFactory.create_model_configs(
+    # is set in model_config by create_model_configs()
+    model_config, propose_model_config = ModelFactory.create_model_configs(
         engine_config=engine_config,
         model_args=py_env_configs.model_args,
         lora_config=py_env_configs.lora_config,
         generate_env_config=py_env_configs.generate_env_config,
         embedding_config=py_env_configs.embedding_config,
+        quantization_config=py_env_configs.quantization_config,
     )
     
     # Create model using new API
-    # All metadata is already in py_model_config (including mm_model_config)
+    # All metadata is already in model_config (including mm_model_config)
     # vit_config is needed for multimodal models
     model = ModelFactory.from_model_configs(
-        model_config=py_model_config,
+        model_config=model_config,
         engine_config=engine_config,
         gang_info=gang_info,
         vit_config=py_env_configs.vit_config,
-        propose_model_config=propose_py_model_config,
+        propose_model_config=propose_model_config,
     )
     
     # Load default generate config if needed

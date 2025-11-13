@@ -17,13 +17,13 @@ class MoEConfigAdapter:
     
     def __init__(
         self,
-        py_model_config: ModelConfig,
+        model_config: ModelConfig,
         parallelism_config: ParallelismConfig,
         moe_config: Optional[MoeConfig] = None,
         runtime_config: Optional[RuntimeConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ):
-        self.py_model_config = py_model_config
+        self.model_config = model_config
         self.parallelism_config = parallelism_config
         self.moe_config = moe_config or MoeConfig()
         self.runtime_config = runtime_config or RuntimeConfig()
@@ -40,12 +40,12 @@ class MoEConfigAdapter:
         # Calculate local_rank from world_rank and local_world_size
         self.local_rank = parallelism_config.local_rank
         
-        self.expert_num = py_model_config.expert_num
-        self.moe_k = py_model_config.moe_k
-        self.moe_topk_group = py_model_config.moe_topk_group
-        self.moe_inter_padding_size = py_model_config.moe_inter_padding_size
-        self.activation_type = py_model_config.activation_type
-        self.hidden_size = py_model_config.hidden_size
+        self.expert_num = model_config.expert_num
+        self.moe_k = model_config.moe_k
+        self.moe_topk_group = model_config.moe_topk_group
+        self.moe_inter_padding_size = model_config.moe_inter_padding_size
+        self.activation_type = model_config.activation_type
+        self.hidden_size = model_config.hidden_size
         
         self.max_generate_batch_size = runtime_config.max_generate_batch_size if runtime_config else 0
         

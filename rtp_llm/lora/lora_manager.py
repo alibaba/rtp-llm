@@ -32,7 +32,7 @@ class LoraManager:
         assert isinstance(self.model_.model.model_weights_loader, ModelLoader)
         self.weights_loader_ = self.model_.model.model_weights_loader
         with Timer() as timer:
-            model_lora_infos = self.model_.model.py_model_config.lora_infos
+            model_lora_infos = self.model_.model.model_config.lora_infos
             if model_lora_infos is not None and len(model_lora_infos) > 1:
                 logging.info(f"model_lora_infos is {model_lora_infos}")
                 for key, value in model_lora_infos.items():

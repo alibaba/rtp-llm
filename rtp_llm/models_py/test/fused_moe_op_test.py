@@ -98,25 +98,25 @@ class FusedMoEOpTest(TestCase):
         inter_dim: int,
     ):
         torch.manual_seed(0)
-        py_model_config = ModelConfig()
-        py_model_config.head_num = 1
-        py_model_config.size_per_head = 128
-        py_model_config.num_layers = 1
-        py_model_config.max_seq_len = 1
-        py_model_config.vocab_size = 5120
-        py_model_config.expert_num = num_expert
-        py_model_config.moe_k = top_k
-        py_model_config.has_moe_norm = True
-        py_model_config.hidden_size = hidden_dim
-        py_model_config.moe_inter_padding_size = inter_dim
-        py_model_config.moe_normalize_expert_scale = 0
-        py_model_config.activation_type = "SiGLU"
+        model_config = ModelConfig()
+        model_config.head_num = 1
+        model_config.size_per_head = 128
+        model_config.num_layers = 1
+        model_config.max_seq_len = 1
+        model_config.vocab_size = 5120
+        model_config.expert_num = num_expert
+        model_config.moe_k = top_k
+        model_config.has_moe_norm = True
+        model_config.hidden_size = hidden_dim
+        model_config.moe_inter_padding_size = inter_dim
+        model_config.moe_normalize_expert_scale = 0
+        model_config.activation_type = "SiGLU"
         
         parallelism_config = ParallelismConfig()
         parallelism_config.ep_size = 1
         parallelism_config.ep_rank = 0
         
-        fused_moe_op = FusedMoEOp(py_model_config, parallelism_config)
+        fused_moe_op = FusedMoEOp(model_config, parallelism_config)
 
         hidden_states = (
             torch.rand(num_tokens, hidden_dim, dtype=dtype).to("cuda") * 2 - 1

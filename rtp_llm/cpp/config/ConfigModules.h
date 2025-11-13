@@ -28,6 +28,7 @@ struct ParallelismConfig {
     int64_t     world_size       = 1;
     int64_t     world_rank       = 0;
     int64_t     local_world_size = 1;
+    int64_t     local_rank       = 0;
     int64_t     ffn_sp_size      = 1;
     int64_t     tp_rank          = 0;
     int64_t     ep_rank          = 0;

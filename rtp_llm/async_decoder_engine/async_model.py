@@ -16,21 +16,27 @@ from rtp_llm.utils.gemm_utils.device_map import get_device
 
 class AsyncModel:
     def __init__(
-        self, model: BaseModel, gang_info, propose_model: Optional[ProposeModel] = None
+        self, 
+        model: BaseModel, 
+        gang_info, 
+        max_seq_len: int,
+        is_multimodal: bool,
+        alog_conf_path: str,
+        propose_model: Optional[ProposeModel] = None
     ) -> None:
         self.model = model
         self.propose_model = propose_model
-        self.config = model.config
+        self.max_seq_len = max_seq_len
+        self.is_multimodal_ = is_multimodal
         self.model_runtime_meta = self._model_runtime_meta()
-        self.role_type = str(model.config.role_type)
 
-        assert self.config.max_seq_len > 0
+        assert self.max_seq_len > 0
         self.tokenizer = model.tokenizer
-        self.decoder_engine_ = create_engine(self.model, self.config, gang_info, self.propose_model)
+        self.decoder_engine_ = create_engine(self.model, alog_conf_path, gang_info, self.propose_model)
         self.decoder_engine_.start()
 
     def is_multimodal(self) -> bool:
-        return self.config.is_multimodal
+        return self.is_multimodal_
 
     def _model_runtime_meta(self) -> str:
         try:
@@ -40,7 +46,7 @@ class AsyncModel:
             logging.info(f"error get device name with error: {e}")
             manchine_name = "unknown"
         parallel_info = f"TP{g_parallel_info.tp_size}_PP{g_parallel_info.pp_size}_EP{g_parallel_info.ep_size}"
-        quant_algo = self.model.py_model_config.quant_algo
+        quant_algo = self.model.model_config.quant_algo
         weight_info = f"W{quant_algo.getWeightBits()}A{quant_algo.getActivationBits()}"
         return "_".join([manchine_name, parallel_info, weight_info])
 
@@ -50,7 +56,7 @@ class AsyncModel:
 
     @property
     def task_type(self) -> TaskType:
-        return self.model.py_model_config.task_type
+        return self.model.model_config.task_type
 
     def stop(self):
         self.decoder_engine_.stop()
@@ -65,13 +71,13 @@ class AsyncModel:
                 f"model tokens can not be empty, request length is {input.prompt_length}",
             )
         max_new_tokens = min(
-            self.config.max_seq_len - input.prompt_length,
+            self.max_seq_len - input.prompt_length,
             input.generate_config.max_new_tokens,
         )
         if max_new_tokens <= 0:
             raise FtRuntimeException(
                 ExceptionType.LONG_PROMPT_ERROR,
-                f"model max tokens is {self.config.max_seq_len}, "
+                f"model max tokens is {self.max_seq_len}, "
                 f"request length is {input.prompt_length}, max_new_tokens is {max_new_tokens}",
             )
         return self.decoder_engine_.decode(input)

@@ -11,9 +11,36 @@ from rtp_llm.tools.api.utils import handler_error
 from rtp_llm.utils.fuser import fetch_remote_file_to_local, umount_file
 
 
+def _get_quantization_from_env_params(env_params: Dict[str, str]) -> str:
+    """Get quantization setting from environment parameters.
+    
+    Compatibility function for tools that need to extract quantization from env_params.
+    
+    Args:
+        env_params: Dictionary of environment parameters
+        
+    Returns:
+        Quantization string or empty string
+    """
+    QUANTIZATION_KEY = "QUANTIZATION"
+    WEIGHT_TYPE = "WEIGHT_TYPE"
+    INT8_MODE = "INT8_MODE"
+    
+    quantization = env_params.get(QUANTIZATION_KEY, "")
+    
+    # Compatibility logic: if int8_mode == 1 or weight_type is INT8, set quantization to INT8
+    if not quantization:
+        int8_mode = env_params.get(INT8_MODE, "0")
+        weight_type = env_params.get(WEIGHT_TYPE, "").upper()
+        if int(int8_mode) == 1 or weight_type == "INT8":
+            quantization = "INT8"
+    
+    return quantization or ""
+
+
 def eval_model_size(env_params, model_type, model_path, ptuning_path):
     model_cls = ModelFactory.get_model_cls(model_type)
-    quantization = ModelConfig.get_quantization_from_params(env_params)
+    quantization = _get_quantization_from_env_params(env_params)
     logging.info(f"env_params: {env_params}, quantization: {quantization}")
     model_config = ModelConfig(
         model_type=model_type,
@@ -53,7 +80,7 @@ def calc_hf_model_size(req: Dict[str, Any]):
 
     param_count = hf_model_info.param_count
     total_size = hf_model_info.total_size
-    quantization = ModelConfig.get_quantization_from_params(env_params)
+    quantization = _get_quantization_from_env_params(env_params)
 
     logging.info(f"req: {req}, quantization: {quantization}")
     if param_count:

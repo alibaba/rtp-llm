@@ -18,13 +18,13 @@ class DenseMLP(nn.Module):
 
         # Create linear layers using LinearFactory
         self.gate_proj = LinearFactory.create_linear_from_weights(
-            weights, W.ffn_w1, W.ffn_s1, W.ffn_b1, py_model_config=config, gpt_init_params=None, quant_config=quant_config
+            weights, W.ffn_w1, W.ffn_s1, W.ffn_b1, model_config=config, gpt_init_params=None, quant_config=quant_config
         )
         self.up_proj = LinearFactory.create_linear_from_weights(
-            weights, W.ffn_w3, W.ffn_s3, W.ffn_b3, py_model_config=config, gpt_init_params=None, quant_config=quant_config
+            weights, W.ffn_w3, W.ffn_s3, W.ffn_b3, model_config=config, gpt_init_params=None, quant_config=quant_config
         )
         self.down_proj = LinearFactory.create_linear_from_weights(
-            weights, W.ffn_w2, W.ffn_s2, W.ffn_b2, py_model_config=config, gpt_init_params=None, quant_config=quant_config
+            weights, W.ffn_w2, W.ffn_s2, W.ffn_b2, model_config=config, gpt_init_params=None, quant_config=quant_config
         )
 
         if config.activation_type == "SiGLU":
@@ -56,10 +56,10 @@ class FusedSiluActDenseMLP(nn.Module):
         # Handle merged or separate weights
         if W.ffn_w13 in weights:
             self.gate_up_proj = LinearFactory.create_linear_from_weights(
-                weights, W.ffn_w13, W.ffn_s13, W.ffn_b13, py_model_config=config, gpt_init_params=None, quant_config=quant_config
+                weights, W.ffn_w13, W.ffn_s13, W.ffn_b13, model_config=config, gpt_init_params=None, quant_config=quant_config
             )
             self.down_proj = LinearFactory.create_linear_from_weights(
-                weights, W.ffn_w2, W.ffn_s2, W.ffn_b2, py_model_config=config, gpt_init_params=None, quant_config=quant_config
+                weights, W.ffn_w2, W.ffn_s2, W.ffn_b2, model_config=config, gpt_init_params=None, quant_config=quant_config
             )
         else:
             self.gate_up_proj = LinearFactory.create_merged_linear(
@@ -67,13 +67,13 @@ class FusedSiluActDenseMLP(nn.Module):
                 weight_keys=[W.ffn_w1, W.ffn_w3],
                 scale_keys=[W.ffn_s1, W.ffn_s3],
                 bias_keys=[W.ffn_b1, W.ffn_b3],
-                py_model_config=config,
+                model_config=config,
                 gpt_init_params=None,
                 quant_config=quant_config,
                 dim=-1,
             )
             self.down_proj = LinearFactory.create_linear_from_weights(
-                weights, W.ffn_w2, W.ffn_s2, W.ffn_b2, py_model_config=config, gpt_init_params=None, quant_config=quant_config
+                weights, W.ffn_w2, W.ffn_s2, W.ffn_b2, model_config=config, gpt_init_params=None, quant_config=quant_config
             )
 
     def forward(self, x: torch.Tensor):
@@ -99,10 +99,10 @@ class BertGeluActDenseMLP(nn.Module):
         # For BERT model, use traditional FFN structure with GeLU activation
         # BERT uses: intermediate_weight3 -> GeLU -> intermediate_weight2
         self.intermediate_proj = LinearFactory.create_linear_from_weights(
-            weights, W.ffn_w3, W.ffn_s3, W.ffn_b3, py_model_config=config, gpt_init_params=None, quant_config=quant_config
+            weights, W.ffn_w3, W.ffn_s3, W.ffn_b3, model_config=config, gpt_init_params=None, quant_config=quant_config
         )
         self.output_proj = LinearFactory.create_linear_from_weights(
-            weights, W.ffn_w2, W.ffn_s2, W.ffn_b2, py_model_config=config, gpt_init_params=None, quant_config=quant_config
+            weights, W.ffn_w2, W.ffn_s2, W.ffn_b2, model_config=config, gpt_init_params=None, quant_config=quant_config
         )
 
         # Use GeLU activation

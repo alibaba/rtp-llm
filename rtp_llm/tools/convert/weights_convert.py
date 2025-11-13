@@ -114,7 +114,13 @@ class WeightConverter:
                 model_size_mb = self.model_basic_info.model_size / ONE_MB
 
                 env_params = copy.deepcopy(self.env_params)
-                quantization = ModelConfig.get_quantization_from_params(env_params)
+                # Get quantization from env_params (compatibility logic)
+                quantization = env_params.get("QUANTIZATION", "")
+                if not quantization:
+                    int8_mode = env_params.get("INT8_MODE", "0")
+                    weight_type = env_params.get("WEIGHT_TYPE", "").upper()
+                    if int(int8_mode) == 1 or weight_type == "INT8":
+                        quantization = "INT8"
                 model_config = ModelConfig(
                     model_type=self.model_type,
                     ckpt_path=self.model_path,
@@ -159,7 +165,13 @@ class WeightConverter:
         env_params.update({"DP_RANK": dp_rank})
         env_params.update({"TP_RANK": tp_rank})
 
-        quantization = ModelConfig.get_quantization_from_params(env_params)
+        # Get quantization from env_params (compatibility logic)
+        quantization = env_params.get("QUANTIZATION", "")
+        if not quantization:
+            int8_mode = env_params.get("INT8_MODE", "0")
+            weight_type = env_params.get("WEIGHT_TYPE", "").upper()
+            if int(int8_mode) == 1 or weight_type == "INT8":
+                quantization = "INT8"
         # Get kv_cache_dtype from environment variable, default to empty string (auto)
         kv_cache_dtype = env_params.get("KV_CACHE_DTYPE", os.environ.get("KV_CACHE_DTYPE", ""))
         model_config = ModelConfig(
@@ -175,28 +187,28 @@ class WeightConverter:
         paralle_info = ParallelInfo.from_params(env_params)
         logging.info(f"begin convert model rank:{paralle_info}")
         # Create config using _create_config
-        py_model_config: ModelConfig = self.model_cls._create_config(self.model_path)
+        model_config: ModelConfig = self.model_cls._create_config(self.model_path)
         # Apply model_config settings
-        py_model_config.ckpt_path = model_config.ckpt_path
-        py_model_config.tokenizer_path = model_config.tokenizer_path or model_config.ckpt_path
-        py_model_config.max_seq_len = model_config.max_seq_len or 0
-        py_model_config.quantization = model_config.quantization
-        py_model_config.act_type = model_config.act_type
-        py_model_config.model_type = self.model_type
+        model_config.ckpt_path = model_config.ckpt_path
+        model_config.tokenizer_path = model_config.tokenizer_path or model_config.ckpt_path
+        model_config.max_seq_len = model_config.max_seq_len or 0
+        model_config.quantization = model_config.quantization
+        model_config.act_type = model_config.act_type
+        model_config.model_type = self.model_type
         
         # Initialize precision config
-        py_model_config.init_precision_config(
-            py_model_config.act_type,
+        model_config.init_precision_config(
+            model_config.act_type,
             model_config.kv_cache_type if hasattr(model_config, 'kv_cache_type') else "",
             None
         )
         
         # Setup paths
-        py_model_config.setup_paths(
-            py_model_config.ckpt_path,
-            py_model_config.tokenizer_path,
+        model_config.setup_paths(
+            model_config.ckpt_path,
+            model_config.tokenizer_path,
             model_config.ptuning_path,
-            py_model_config.max_seq_len,
+            model_config.max_seq_len,
         )
         
         # Create minimal configs for model instantiation
@@ -205,7 +217,7 @@ class WeightConverter:
         engine_config = EngineConfig()
         
         model = self.model_cls.from_config(
-            py_model_config=py_model_config,
+            model_config=model_config,
             engine_config=engine_config,
             parallel_info=paralle_info,
         )

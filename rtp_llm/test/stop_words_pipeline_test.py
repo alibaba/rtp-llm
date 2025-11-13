@@ -30,14 +30,14 @@ class StopWordTest(TestCase):
         ffn_disaggregate_config = FfnDisAggregateConfig()
         
         # Create Python ModelConfig
-        py_model_config = PyModelConfig()
+        model_config = PyModelConfig()
         
         self.pipeline = Pipeline(
             model_config,
             pd_sep_config,
             runtime_config,
             ffn_disaggregate_config,
-            py_model_config,
+            model_config,
             None,
         )
 

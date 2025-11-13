@@ -173,6 +173,7 @@ def setup_parallelism_config(
     parallelism_config.world_size = parallel_info.world_size
     parallelism_config.world_rank = parallel_info.world_rank
     parallelism_config.local_world_size = parallel_info.local_world_size
+    parallelism_config.local_rank = parallel_info.local_rank
     parallelism_config.pp_size = parallel_info.pp_size
     parallelism_config.ffn_sp_size = parallel_info.ffn_sp_size
     
@@ -189,25 +190,25 @@ def setup_parallelism_config(
     # Note: This assumes ParallelismConfig has ffn_disaggregate_config as a member
     # If not, the C++ code needs to be updated first
     if py_ffn_disaggregate_config and py_ffn_disaggregate_config.enable_ffn_disaggregate:
-            # 暂时先限制tp=1, 更多支持在python版本实现
-            assert (
-                parallel_info.tp_size == 1 and parallel_info.world_size > 1
-            ), "enable_ffn_disaggregate must be used in dp = 1 world_size > 1"
-            attention_dp_size = parallel_info.world_size - 1
-            attention_tp_size = 1
-            ffn_tp_size = 1
-            assert (
-                attention_tp_size == ffn_tp_size
-            ), "attention_tp_size must be equal to ffn_tp_size"
-            parallelism_config.ffn_disaggregate_config.enable_ffn_disaggregate = True
-            parallelism_config.ffn_disaggregate_config.attention_tp_size = attention_tp_size
-            parallelism_config.ffn_disaggregate_config.attention_dp_size = attention_dp_size
-            parallelism_config.ffn_disaggregate_config.ffn_tp_size = ffn_tp_size
-            # TODO: remove it, ffn dp is stupid
-            parallelism_config.ffn_disaggregate_config.ffn_dp_size = 1
-            parallelism_config.ffn_disaggregate_config.is_ffn_rank = (
-                parallel_info.world_rank >= attention_tp_size * attention_dp_size
-            )
+        # 暂时先限制tp=1, 更多支持在python版本实现
+        assert (
+            parallel_info.tp_size == 1 and parallel_info.world_size > 1
+        ), "enable_ffn_disaggregate must be used in dp = 1 world_size > 1"
+        attention_dp_size = parallel_info.world_size - 1
+        attention_tp_size = 1
+        ffn_tp_size = 1
+        assert (
+            attention_tp_size == ffn_tp_size
+        ), "attention_tp_size must be equal to ffn_tp_size"
+        parallelism_config.ffn_disaggregate_config.enable_ffn_disaggregate = True
+        parallelism_config.ffn_disaggregate_config.attention_tp_size = attention_tp_size
+        parallelism_config.ffn_disaggregate_config.attention_dp_size = attention_dp_size
+        parallelism_config.ffn_disaggregate_config.ffn_tp_size = ffn_tp_size
+        # TODO: remove it, ffn dp is stupid
+        parallelism_config.ffn_disaggregate_config.ffn_dp_size = 1
+        parallelism_config.ffn_disaggregate_config.is_ffn_rank = (
+            parallel_info.world_rank >= attention_tp_size * attention_dp_size
+        )
     
     logging.info(f"th_nccl_port: {parallelism_config.th_nccl_port}")
     

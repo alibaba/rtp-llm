@@ -71,10 +71,10 @@ class Bert(BaseModel):
         )
 
     def _init_custom_module(self) -> Optional[CustomModule]:
-        if self.py_model_config.task_type == TaskType.SEQ_CLASSIFICATION:
+        if self.model_config.task_type == TaskType.SEQ_CLASSIFICATION:
             logging.info("using BertClassifierModule as custom module")
             return BertClassifierModule(self.model_config, self.tokenizer)
-        if self.py_model_config.task_type == TaskType.RERANKER:
+        if self.model_config.task_type == TaskType.RERANKER:
             logging.info("using BertRerankerModule as custom module")
             return BertRerankerModule(self.model_config, self.tokenizer)
         return super()._init_custom_module()
@@ -106,11 +106,11 @@ class Roberta(Bert):
         return RobertaWeightInfo
 
     def _init_custom_module(self) -> Optional[CustomModule]:
-        logging.info(f"task_type : {self.py_model_config.task_type}")
-        if self.py_model_config.task_type == TaskType.SEQ_CLASSIFICATION:
+        logging.info(f"task_type : {self.model_config.task_type}")
+        if self.model_config.task_type == TaskType.SEQ_CLASSIFICATION:
             logging.info("using RobertaClassifierModule as custom module")
             return RobertaClassifierModule(self.model_config, self.tokenizer)
-        elif self.py_model_config.task_type == TaskType.RERANKER:
+        elif self.model_config.task_type == TaskType.RERANKER:
             logging.info("using RobertaRerankerModule as custom module")
             return RobertaRerankerModule(self.model_config, self.tokenizer)
         return super()._init_custom_module()

@@ -28,13 +28,13 @@ class MLPTest(TestCase):
 
     def _run_mlp_test(self, num_tokens: int, hidden_size: int, dtype: _dtype):
         torch.manual_seed(0)
-        py_model_config = ModelConfig()
-        py_model_config.head_num = 1
-        py_model_config.size_per_head = 128
-        py_model_config.num_layers = 1
-        py_model_config.max_seq_len = 1
-        py_model_config.vocab_size = 5120
-        py_model_config.activation_type = "SiGLU"
+        model_config = ModelConfig()
+        model_config.head_num = 1
+        model_config.size_per_head = 128
+        model_config.num_layers = 1
+        model_config.max_seq_len = 1
+        model_config.vocab_size = 5120
+        model_config.activation_type = "SiGLU"
         
         parallelism_config = ParallelismConfig()
         parallelism_config.tp_size = 1
@@ -48,8 +48,8 @@ class MLPTest(TestCase):
         weights[W.ffn_w2] = torch.randn(4 * hidden_size, hidden_size, dtype=dtype)
         torch.nn.init.xavier_uniform_(weights[W.ffn_w2])
 
-        qwen3_mlp = DenseMLP(py_model_config, parallelism_config, weights)
-        qwen3_mlp_fused = FusedSiluActDenseMLP(py_model_config, parallelism_config, weights)
+        qwen3_mlp = DenseMLP(model_config, parallelism_config, weights)
+        qwen3_mlp_fused = FusedSiluActDenseMLP(model_config, parallelism_config, weights)
 
         x = torch.randn(num_tokens, hidden_size, dtype=dtype)
 

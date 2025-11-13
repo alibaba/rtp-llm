@@ -32,7 +32,7 @@ def init_deepep_env_once(config: MoEConfigAdapter):
     from rtp_llm.ops import FfnDisAggregateConfig
     
     # Extract config parameters from adapter
-    py_model_config = config.py_model_config
+    model_config = config.model_config
     parallelism_config = config.parallelism_config
     moe_config = config.moe_config
     runtime_config = config.runtime_config
@@ -51,7 +51,7 @@ def init_deepep_env_once(config: MoEConfigAdapter):
     assert ep_group.device_group is not None, "ep group device group is not initialized"
     init_deepep_wrapper(
         group=ep_group.device_group,
-        py_model_config=py_model_config,
+        model_config=model_config,
         parallelism_config=parallelism_config,
         moe_config=moe_config,
         runtime_config=runtime_config,

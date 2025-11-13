@@ -43,7 +43,7 @@ os.environ["DEVICE_RESERVE_MEMORY_BYTES"] = str(3 * 1024 * 1024 * 1024)
 
 # Create model configuration from checkpoint path
 model_cls = ModelFactory.get_model_cls(MODEL_TYPE)
-py_model_config = model_cls._create_config(CHECKPOINT_PATH)
+model_config = model_cls._create_config(CHECKPOINT_PATH)
 
 # Create ModelConfig for ModelLoader
 from rtp_llm.model_factory import ModelConfig as ModelConfigType
@@ -51,7 +51,7 @@ model_config_for_loader = ModelConfigType(
     model_type=MODEL_TYPE,
     ckpt_path=CHECKPOINT_PATH,
     tokenizer_path=CHECKPOINT_PATH,
-    max_seq_len=py_model_config.max_seq_len,
+    max_seq_len=model_config.max_seq_len,
     seq_size_per_block=1,
     gen_num_per_circle=1,
     quantization="",

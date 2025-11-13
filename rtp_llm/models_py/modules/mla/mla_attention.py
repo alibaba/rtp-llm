@@ -39,14 +39,14 @@ class DeepSeekV2Attention(nn.Module):
         if self.q_lora_rank > 0:
             self.fused_qkv_a_proj = LinearFactory.create_linear_from_weights(
                 weights, W.mla_fusedqkrope_w, W.mla_fusedqkrope_s, None,
-                py_model_config=config, quant_config=quant_config
+                model_config=config, quant_config=quant_config
             )
             self.q_a_layernorm = RMSNorm(
                 weights.get(W.mla_q_a_ln_gamma, None), eps=config.layernorm_eps
             )
             self.q_b_proj = LinearFactory.create_linear_from_weights(
                 weights, W.mla_q_b_w, W.mla_q_b_s, None,
-                py_model_config=config, quant_config=quant_config
+                model_config=config, quant_config=quant_config
             )
         else:
             self.fused_qkv_proj = LinearFactory.create_linear_from_weights(
@@ -54,7 +54,7 @@ class DeepSeekV2Attention(nn.Module):
                 W.mla_fusedqkrope_no_lora_w,
                 W.mla_fusedqkrope_no_lora_s,
                 None,
-                py_model_config=config, quant_config=quant_config
+                model_config=config, quant_config=quant_config
             )
 
         self.kv_a_layernorm = RMSNorm(
@@ -63,7 +63,7 @@ class DeepSeekV2Attention(nn.Module):
 
         self.o_proj = LinearFactory.create_linear_from_weights(
             weights, W.attn_o_w, W.attn_o_s, W.attn_o_b,
-            py_model_config=config, quant_config=quant_config
+            model_config=config, quant_config=quant_config
         )
 
     def forward(

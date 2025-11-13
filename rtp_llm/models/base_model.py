@@ -241,7 +241,6 @@ class BaseModel(object):
             dtype_str = self.model_config.data_type
             self.load_mm_weight(
                 model_config=self.model_config,
-                mm_model_config=self.model_config.mm_model_config,
                 ctype=dtype_str,
                 tp_size=self.engine_config.parallelism_config.tp_size,
                 tp_rank=self.engine_config.parallelism_config.tp_rank,

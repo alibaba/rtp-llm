@@ -154,7 +154,13 @@ def _load_as_ft_style(
         hf_model_info = get_hf_model_info(model_path)
         if hf_model_info and hf_model_info.model_config_file is not None:
             model_path = os.path.dirname(hf_model_info.model_config_file)
-    quantization = ModelConfig.get_quantization_from_params(env_params)
+    # Get quantization from env_params (compatibility logic)
+    quantization = env_params.get("QUANTIZATION", "")
+    if not quantization:
+        int8_mode = env_params.get("INT8_MODE", "0")
+        weight_type = env_params.get("WEIGHT_TYPE", "").upper()
+        if int(int8_mode) == 1 or weight_type == "INT8":
+            quantization = "INT8"
     model_config = ModelConfig(
         model_type=ft_model_type,
         ckpt_path=model_path,
@@ -216,7 +222,7 @@ def _load_as_ft_style(
         ft_model_type=ft_model_type,
         param_count=param_count,
         model_size=total_size,
-        hidden_size=config.py_model_config.hidden_size,
+        hidden_size=config.model_config.hidden_size,
         architectures=raw_config_dict.get("architectures", None),
         llm_architectures=None,
         is_quant_weight=is_quant_weight,

@@ -23,18 +23,18 @@ class QWenV2Audio(QWenV2, MultiModalMixin):
         mm_model_config,
         vit_config: VitConfig,
     ):
-        # mm_related_params is in py_model_config, not mm_model_config
-        if self.py_model_config.mm_related_params is None:
-            self.py_model_config.mm_related_params = VitParameters()
-        self.mm_part = Processor(self.py_model_config.mm_related_params, self.py_model_config.ckpt_path)
-        self.py_model_config.mm_related_params.vit_weights = BaseVitWeights(
+        # mm_related_params is in model_config, not mm_model_config
+        if self.model_config.mm_related_params is None:
+            self.model_config.mm_related_params = VitParameters()
+        self.mm_part = Processor(self.model_config.mm_related_params, self.model_config.ckpt_path)
+        self.model_config.mm_related_params.vit_weights = BaseVitWeights(
             {
                 "multi_modal_projector": self.mm_part.multi_modal_projector,
                 "audio_tower": self.mm_part.audio_tower,
             },
             with_prefix=True,
         )
-        self.py_model_config.mm_related_params.vit_weights._ckpt_prefix = ""
+        self.model_config.mm_related_params.vit_weights._ckpt_prefix = ""
 
     @classmethod
     def _create_config(cls, ckpt_path: str):

@@ -88,7 +88,7 @@ class MultiModalMixin:
 
     @property
     def vit_data_type(self):
-        return get_vit_compute_dtype(self.py_model_config.data_type)
+        return get_vit_compute_dtype(self.model_config.data_type)
 
     def init_multimodal(
         self,
@@ -207,8 +207,7 @@ class MultiModalMixin:
 
     def load_mm_weight(
         self,
-        py_model_config: ModelConfig,
-        mm_model_config: Any,  # MMModelConfig
+        model_config: ModelConfig,
         ctype: str,
         tp_size: int,
         tp_rank: int,
@@ -217,10 +216,10 @@ class MultiModalMixin:
         vit_trt = self.vit_config.vit_trt
         
         if vit_trt == 1:
-            # mm_related_params is in py_model_config, not mm_model_config
-            mm_related_params = py_model_config.mm_related_params
+            # mm_related_params is in model_config, not mm_model_config
+            mm_related_params = model_config.mm_related_params
             self.init_mm_trt(
-                py_model_config.ckpt_path,
+                model_config.ckpt_path,
                 mm_related_params,
                 tp_size,
                 tp_rank,
@@ -241,6 +240,6 @@ class MultiModalMixin:
         if isinstance(self.mm_part, MultiModalTRTEngine):
             return
 
-        # mm_related_params is in py_model_config, not mm_model_config
-        mm_related_params = py_model_config.mm_related_params
+        # mm_related_params is in model_config, not mm_model_config
+        mm_related_params = model_config.mm_related_params
         self._load_mm_weight(mm_related_params, ctype, device)

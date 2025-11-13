@@ -210,6 +210,23 @@ class QuantizationConfig:
     def to_string(self):
         return f"int8_mode: {self.int8_mode}\n" f"quantization: {self.quantization}"
 
+    def get_quantization(self):
+        """Get quantization string with compatibility logic.
+        
+        Returns quantization from self.quantization, or "INT8" if int8_mode == 1
+        or weight_type is INT8 (from environment variable).
+        """
+        if self.quantization:
+            return self.quantization
+        if self.int8_mode == 1:
+            return "INT8"
+        # Check weight_type from environment variable (compatibility logic)
+        import os
+        weight_type = os.environ.get("WEIGHT_TYPE", "").upper()
+        if weight_type == "INT8":
+            return "INT8"
+        return ""
+
 class EmbeddingConfig:
     def __init__(self):
         self.embedding_model: int = 0

@@ -85,18 +85,18 @@ class FusedMoeBatchedTest(TestCase):
         torch.manual_seed(0)
 
         # Create model configuration objects
-        py_model_config = ModelConfig()
-        py_model_config.head_num = 4
-        py_model_config.size_per_head = 64
-        py_model_config.num_layers = 2
-        py_model_config.max_seq_len = 2048
-        py_model_config.vocab_size = 32000
-        py_model_config.hidden_size = hidden_size
-        py_model_config.expert_num = num_experts
-        py_model_config.moe_k = top_k
-        py_model_config.moe_inter_padding_size = inter_size
-        py_model_config.has_moe_norm = True
-        py_model_config.activation_type = "SiGLU"
+        model_config = ModelConfig()
+        model_config.head_num = 4
+        model_config.size_per_head = 64
+        model_config.num_layers = 2
+        model_config.max_seq_len = 2048
+        model_config.vocab_size = 32000
+        model_config.hidden_size = hidden_size
+        model_config.expert_num = num_experts
+        model_config.moe_k = top_k
+        model_config.moe_inter_padding_size = inter_size
+        model_config.has_moe_norm = True
+        model_config.activation_type = "SiGLU"
         
         parallelism_config = ParallelismConfig()
         parallelism_config.ep_size = 1

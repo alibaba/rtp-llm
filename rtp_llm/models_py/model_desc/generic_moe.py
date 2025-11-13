@@ -51,7 +51,7 @@ class GenericMoeLayer(nn.Module):
         runtime_config = RuntimeConfig()
         # Create adapter that provides shortcut access to config fields
         config_adapter = MoEConfigAdapter(
-            py_model_config=config,
+            model_config=config,
             parallelism_config=parallelism_config,
             moe_config=moe_config,
             runtime_config=runtime_config,
@@ -189,7 +189,7 @@ class GenericMoeModel(GptModelBase):
 
     def __init__(
         self,
-        py_model_config: ModelConfig,
+        model_config: ModelConfig,
         parallelism_config: ParallelismConfig,
         device_resource_config,
         weights: ModelWeights,
@@ -198,16 +198,16 @@ class GenericMoeModel(GptModelBase):
         fmha_config=None,
         py_hw_kernel_config=None,
     ):
-        super().__init__(py_model_config, parallelism_config, device_resource_config, weights, vocab_size, fmha_config=fmha_config, py_hw_kernel_config=py_hw_kernel_config)
-        self.embed_tokens = Embedding(py_model_config, parallelism_config, weights.get_global_weight(W.embedding))
+        super().__init__(model_config, parallelism_config, device_resource_config, weights, vocab_size, fmha_config=fmha_config, py_hw_kernel_config=py_hw_kernel_config)
+        self.embed_tokens = Embedding(model_config, parallelism_config, weights.get_global_weight(W.embedding))
         self.layers = nn.ModuleList(
             [
-                GenericMoeDecoderLayer(py_model_config, parallelism_config, weights.weights[idx], idx, quant_config)
+                GenericMoeDecoderLayer(model_config, parallelism_config, weights.weights[idx], idx, quant_config)
                 for idx in range(self.layer_num)
             ]
         )
         self.norm = RMSNorm(
-            weights.get_global_weight(W.final_ln_gamma), eps=py_model_config.layernorm_eps
+            weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
 
     def forward(self, inputs: PyModelInputs) -> PyModelOutputs:

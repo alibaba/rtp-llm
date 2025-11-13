@@ -25,7 +25,7 @@ void RtpEmbeddingOp::init(py::object model, py::object mm_process_engine) {
     try {
         py::object config_obj = model.attr("config");
         // Extract individual config members from Python config object
-        auto model_config = config_obj.attr("py_model_config").cast<ModelConfig>();
+        auto model_config = config_obj.attr("model_config").cast<ModelConfig>();
         auto parallelism_config = config_obj.attr("parallelism_config").cast<ParallelismConfig>();
         auto runtime_config = config_obj.attr("runtime_config").cast<RuntimeConfig>();
         auto pd_sep_config = config_obj.attr("pd_sep_config").cast<PDSepConfig>();

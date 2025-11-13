@@ -168,7 +168,7 @@ class Baichuan2(Baichuan):
 class Gemma(Llama):
     def __init__(
         self,
-        py_model_config: PyModelConfig,
+        model_config: PyModelConfig,
         engine_config: EngineConfig,
         vit_config: Optional[Any] = None,
         merge_lora: bool = False,
@@ -179,7 +179,7 @@ class Gemma(Llama):
             )
             os.environ["ENABLE_OPENSOURCE_FMHA"] = "OFF"
         super().__init__(
-            py_model_config=py_model_config,
+            model_config=model_config,
             engine_config=engine_config,
             vit_config=vit_config,
             merge_lora=merge_lora,

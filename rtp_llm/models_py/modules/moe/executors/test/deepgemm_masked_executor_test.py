@@ -31,16 +31,16 @@ N = MOE_INTERMEDIATE_SIZE * 2
 
 
 def _generate_config() -> MoEConfigAdapter:
-    py_model_config = ModelConfig()
-    py_model_config.head_num = 2
-    py_model_config.size_per_head = 128
-    py_model_config.num_layers = 2
-    py_model_config.max_seq_len = 2048
-    py_model_config.vocab_size = 500000
-    py_model_config.expert_num = NUM_EXPERTS
-    py_model_config.hidden_size = HIDDEN_SIZE
-    py_model_config.moe_inter_padding_size = MOE_INTERMEDIATE_SIZE
-    py_model_config.moe_k = TOPK if 'TOPK' in globals() else 8
+    model_config = ModelConfig()
+    model_config.head_num = 2
+    model_config.size_per_head = 128
+    model_config.num_layers = 2
+    model_config.max_seq_len = 2048
+    model_config.vocab_size = 500000
+    model_config.expert_num = NUM_EXPERTS
+    model_config.hidden_size = HIDDEN_SIZE
+    model_config.moe_inter_padding_size = MOE_INTERMEDIATE_SIZE
+    model_config.moe_k = TOPK if 'TOPK' in globals() else 8
     
     parallelism_config = ParallelismConfig()
     parallelism_config.world_size = DP_SIZE * EP_SIZE
@@ -58,7 +58,7 @@ def _generate_config() -> MoEConfigAdapter:
     runtime_config.max_generate_batch_size = MAX_GENERATE_BATCH_SIZE
     
     return MoEConfigAdapter(
-        py_model_config=py_model_config,
+        model_config=model_config,
         parallelism_config=parallelism_config,
         moe_config=moe_config,
         runtime_config=runtime_config,

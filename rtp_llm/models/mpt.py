@@ -42,12 +42,12 @@ class MptWeightInfo(ModelDeployWeightInfo):
             ),
         ]
 
-        if self.py_model_config.use_attention_linear_bias:
+        if self.model_config.use_attention_linear_bias:
             weights.append(
                 AtomicWeight(
                     W.linear_bias_slopes,
                     [],
-                    functools.partial(slopes, n=self.py_model_config.head_num_),
+                    functools.partial(slopes, n=self.model_config.head_num_),
                     data_type=torch.float,
                 )
             )

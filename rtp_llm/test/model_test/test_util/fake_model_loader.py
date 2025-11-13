@@ -95,10 +95,10 @@ class FakeModelLoader(object):
         raw_config.pre_seq_len = config_json.get("pre_seq_len", raw_config.pre_seq_len)
         raw_config.is_causal_ = self.is_causal
         
-        # Create ModelArgs for build_py_model_config
+        # Create ModelArgs for build_model_config
         from rtp_llm.config.model_args import ModelArgs
         from rtp_llm.config.engine_config import EngineConfig
-        from rtp_llm.config.model_config import build_py_model_config
+        from rtp_llm.config.model_config import build_model_config
         from rtp_llm.config.kv_cache_config import KVCacheConfig
         from rtp_llm.ops import HWKernelConfig, ProfilingDebugLoggingConfig, ParallelismConfig
         
@@ -123,9 +123,9 @@ class FakeModelLoader(object):
         engine_config.parallelism_config = parallelism_config
         
         # Build model config
-        py_model_config = raw_config
-        build_py_model_config(
-            py_model_config=py_model_config,
+        model_config = raw_config
+        build_model_config(
+            model_config=model_config,
             model_args=model_args,
             kv_cache_config=kv_cache_config,
             py_hw_kernel_config=py_hw_kernel_config,
@@ -134,9 +134,23 @@ class FakeModelLoader(object):
         )
 
         model = model_cls(
-            py_model_config=py_model_config,
-            mm_model_config=mm_model_config,
+            model_config=model_config,
             engine_config=engine_config,
+            vit_config=None,
+            merge_lora=False,
         )
-        model = AsyncModel(model, None)
+        
+        # Extract specific parameters needed for AsyncModel
+        max_seq_len = model_config.max_seq_len
+        is_multimodal = model.is_multimodal()
+        alog_conf_path = profiling_debug_logging_config.ft_alog_conf_path
+        
+        model = AsyncModel(
+            model, 
+            gang_info=None,
+            max_seq_len=max_seq_len,
+            is_multimodal=is_multimodal,
+            alog_conf_path=alog_conf_path,
+            propose_model=None
+        )
         return model

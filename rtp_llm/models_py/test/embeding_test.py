@@ -22,18 +22,18 @@ class EmbedingTest(TestCase):
     def _run_embeding_test(self, num_tokens: int, hidden_size: int, dtype: _dtype):
         torch.manual_seed(0)
         w = torch.randn(131072, hidden_size, dtype=dtype)
-        py_model_config = ModelConfig()
-        py_model_config.head_num = 1
-        py_model_config.size_per_head = 1
-        py_model_config.num_layers = 1
-        py_model_config.max_seq_len = 1
-        py_model_config.vocab_size = 1
+        model_config = ModelConfig()
+        model_config.head_num = 1
+        model_config.size_per_head = 1
+        model_config.num_layers = 1
+        model_config.max_seq_len = 1
+        model_config.vocab_size = 1
         
         parallelism_config = ParallelismConfig()
         parallelism_config.tp_size = 1
         parallelism_config.tp_rank = 0
         
-        embeding = Embedding(py_model_config, parallelism_config, w)
+        embeding = Embedding(model_config, parallelism_config, w)
         embeding_torch = EmbeddingTorch(w)
         x = torch.randint(0, hidden_size, (num_tokens,), dtype=torch.int32)
         # with profile(activities=[ProfilerActivity.CUDA], record_shapes=True) as prof:

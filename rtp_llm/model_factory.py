@@ -9,13 +9,14 @@ sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
 from rtp_llm.async_decoder_engine.async_model import AsyncModel
 from rtp_llm.config.engine_config import EngineConfig, finalize_scheduler_config
-from rtp_llm.config.model_config import ModelConfig, build_py_model_config
+from rtp_llm.config.model_config import ModelConfig, build_model_config
 from rtp_llm.config.model_args import ModelArgs
 from rtp_llm.config.py_config_modules import (
     VitConfig,
     LoraConfig,
     GenerateEnvConfig,
     EmbeddingConfig,
+    QuantizationConfig,
 )
 from rtp_llm.model_factory_register import ModelDict, _model_factory
 from rtp_llm.models.propose_model.propose_model import ProposeModel
@@ -142,7 +143,7 @@ class ModelFactory:
             # propose model's max seq len must be equal to score model's max seq len
             propose_model_config.max_seq_len = model_config.max_seq_len
             gpt_model = model_cls.from_config(
-                py_model_config=propose_model_config,
+                model_config=propose_model_config,
                 engine_config=engine_config,
                 vit_config=None,  # Propose model doesn't need vit_config
                 merge_lora=False,  # Propose model doesn't need merge_lora
@@ -194,7 +195,19 @@ class ModelFactory:
             engine_config=engine_config,
         )
 
-        model = AsyncModel(model, gang_info, propose_model)
+        # Extract specific parameters needed for AsyncModel
+        max_seq_len = model_config.max_seq_len
+        is_multimodal = model.is_multimodal()
+        alog_conf_path = engine_config.profiling_debug_logging_config.ft_alog_conf_path
+
+        model = AsyncModel(
+            model, 
+            gang_info, 
+            max_seq_len=max_seq_len,
+            is_multimodal=is_multimodal,
+            alog_conf_path=alog_conf_path,
+            propose_model=propose_model
+        )
         logging.info("create rpc model done")
         return model
 
@@ -228,6 +241,7 @@ class ModelFactory:
         lora_config: LoraConfig,
         generate_env_config: Optional[GenerateEnvConfig] = None,
         embedding_config: Optional[EmbeddingConfig] = None,
+        quantization_config: Optional[QuantizationConfig] = None,
     ) -> tuple[ModelConfig, Optional[ModelConfig]]:
         """Create ModelConfig and optional propose ModelConfig from configuration objects.
         
@@ -238,7 +252,7 @@ class ModelFactory:
         1. Use provided ModelArgs (already populated by server_args)
         2. Call model's _create_config to create ModelConfig with model architecture
         3. Apply ModelArgs to ModelConfig (overwrite with user-provided values)
-        4. Build ModelConfig with build_py_model_config
+        4. Build ModelConfig with build_model_config
         
         Args:
             engine_config: Already built EngineConfig
@@ -246,10 +260,11 @@ class ModelFactory:
             lora_config: LoraConfig containing LoRA configuration
             generate_env_config: Optional GenerateEnvConfig for generation settings
             embedding_config: Optional EmbeddingConfig for embedding settings
+            quantization_config: Optional QuantizationConfig for quantization settings
             
         Returns:
             Tuple of (model_config, propose_model_config)
-            propose_py_model_config will be None if not needed
+            propose_model_config will be None if not needed
         """
         # Step 1: Use provided ModelArgs (already populated by server_args)
         
@@ -286,14 +301,15 @@ class ModelFactory:
         # Call _create_config to get model architecture config
         model_config = model_cls._create_config(model_args.ckpt_path)
         # Step 4: Build ModelConfig (setup paths, quantization, etc.)
-        build_py_model_config(
-            py_model_config=model_config,
+        build_model_config(
+            model_config=model_config,
             model_args=model_args,
             kv_cache_config=engine_config.kv_cache_config,
             py_hw_kernel_config=engine_config.hw_kernel_config,
             profiling_debug_logging_config=engine_config.profiling_debug_logging_config,
             parallelism_config=engine_config.parallelism_config,
             embedding_config=embedding_config,
+            quantization_config=quantization_config,
         )
          
         # Set model metadata fields
@@ -343,14 +359,15 @@ class ModelFactory:
                 )
                 
                 # Build propose model config (no finalize_scheduler_config for propose model)
-                build_py_model_config(
-                    py_model_config=propose_model_config,
+                build_model_config(
+                    model_config=propose_model_config,
                     model_args=propose_model_args,
                     kv_cache_config=engine_config.kv_cache_config,
                     py_hw_kernel_config=engine_config.hw_kernel_config,
                     profiling_debug_logging_config=engine_config.profiling_debug_logging_config,
                     parallelism_config=engine_config.parallelism_config,
                     embedding_config=None,  # Propose model doesn't need embedding_config
+                    quantization_config=quantization_config,
                 )
         
         return model_config, propose_model_config

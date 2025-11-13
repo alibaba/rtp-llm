@@ -20,8 +20,8 @@ class Llava(Llama, MultiModalMixin):
         mm_model_config: Any,  # MMModelConfig
         vit_config: VitConfig,
     ):
-        # mm_related_params is in py_model_config, not mm_model_config
-        mm_related_params = self.py_model_config.mm_related_params
+        # mm_related_params is in model_config, not mm_model_config
+        mm_related_params = self.model_config.mm_related_params
         if mm_related_params is None:
             raise ValueError("mm_related_params is required for Llava")
         self.mm_part = LlavaImageEmbedding(mm_related_params)
@@ -33,7 +33,7 @@ class Llava(Llama, MultiModalMixin):
             vit_weight_dict["vision_tower"] = self.mm_part.vision_tower
         if "unpad" in mm_related_params.config.get("mm_patch_merge_type", "flat"):
             vit_weight_dict["image_newline"] = self.mm_part.image_newline
-        self.py_model_config.mm_related_params.vit_weights = BaseVitWeights(vit_weight_dict, True)
+        self.model_config.mm_related_params.vit_weights = BaseVitWeights(vit_weight_dict, True)
 
     @staticmethod
     def _create_config(ckpt_path: str) -> ModelConfig:

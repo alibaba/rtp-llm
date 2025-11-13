@@ -159,6 +159,7 @@ class ModelDeployWeightInfo:
         tp_size: int = 1,
         tp_rank: int = 0,
         vit_config: Optional["VitConfig"] = None,
+        **kwargs,
     ):
         """Initialize ModelDeployWeightInfo with independent configuration objects."""
         self.model_config = model_config

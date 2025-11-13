@@ -125,12 +125,12 @@ class MlaFlashInferPrefillOp(object):
         k_pe = k_pe.view(-1, 1, self.qk_rope_head_dim)
         self.k_nope_proj = LinearFactory.create_linear_from_weights(
             self.weights[layer_id], W.mla_k_nope_w, W.mla_k_nope_s, None,
-            py_model_config=self.config, gpt_init_params=None, quant_config=self.quant_config
+            model_config=self.config, gpt_init_params=None, quant_config=self.quant_config
         )
 
         self.v_proj = LinearFactory.create_linear_from_weights(
             self.weights[layer_id], W.mla_v_w, W.mla_v_s, None,
-            py_model_config=self.config, gpt_init_params=None, quant_config=self.quant_config
+            model_config=self.config, gpt_init_params=None, quant_config=self.quant_config
         )
 
         k_nope = self.k_nope_proj(compressed_kv)
@@ -335,12 +335,12 @@ class TrtV2PrefillAttentionOp(object):
         k_pe = k_pe.view(-1, 1, self.qk_rope_head_dim)
         self.k_nope_proj = LinearFactory.create_linear_from_weights(
             self.weights[layer_id], W.mla_k_nope_w, W.mla_k_nope_s, None,
-            py_model_config=self.config, gpt_init_params=None, quant_config=self.quant_config
+            model_config=self.config, gpt_init_params=None, quant_config=self.quant_config
         )
 
         self.v_proj = LinearFactory.create_linear_from_weights(
             self.weights[layer_id], W.mla_v_w, W.mla_v_s, None,
-            py_model_config=self.config, gpt_init_params=None, quant_config=self.quant_config
+            model_config=self.config, gpt_init_params=None, quant_config=self.quant_config
         )
 
         k_nope = self.k_nope_proj(compressed_kv)

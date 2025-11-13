@@ -207,19 +207,19 @@ class QWenBase(BaseModel):
         return QWenWeight
 
     def _create_python_model(self) -> Optional[GptModelBase]:
-        py_model_config = self.py_model_config
+        model_config = self.model_config
         parallelism_config = self.engine_config.parallelism_config
         ffn_disaggregate_config = self.engine_config.parallelism_config.ffn_disaggregate_config
         device_resource_config = self.engine_config.device_resource_config
-        quant_config = self.py_model_config.quant_config
+        quant_config = self.model_config.quant_config
         
-        vocab_size = self.py_model_config.vocab_size
+        vocab_size = self.model_config.vocab_size
         fmha_config = self.engine_config.fmha_config
         py_hw_kernel_config = self.engine_config.hw_kernel_config
         
         if ffn_disaggregate_config.enable_ffn_disaggregate:
             self.py_model = Qwen3DisaggregateModel(
-                py_model_config, 
+                model_config, 
                 parallelism_config,
                 ffn_disaggregate_config,
                 device_resource_config,
@@ -231,7 +231,7 @@ class QWenBase(BaseModel):
             )
         else:
             self.py_model = Qwen3Model(
-                py_model_config,
+                model_config,
                 parallelism_config,
                 device_resource_config,
                 self.weight,

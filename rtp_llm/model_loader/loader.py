@@ -57,7 +57,7 @@ class ModelLoader:
         logging.info(f'load use type {compute_dtype}')
         
         # Get is_attn_model from engine_config
-        engine_config = weights_info.config.engine_config
+        engine_config = weights_info.engine_config
         ffn_config = engine_config.parallelism_config.ffn_disaggregate_config
         self._is_attn_model = (
             ffn_config.enable_ffn_disaggregate
@@ -236,8 +236,8 @@ class ModelLoader:
     
     def _is_memory_enough_for_fastsafetensor(self):
         # Get task_type from C++ ModelConfig (enum)
-        task_type = self._weights_info.config.py_model_config.task_type
-        model_size = self._weights_info.config.py_model_config.eval_model_size()
+        task_type = self._weights_info.model_config.task_type
+        model_size = self._weights_info.model_config.eval_model_size()
         device_mem_info = self._load_config.exported_device.get_mem_info()
         max_file_size = self._load_config.database.get_max_file_size()
         if device_mem_info is None:
@@ -387,8 +387,8 @@ class ModelLoader:
         if "FORCE_CPU_LOAD_WEIGHTS" in os.environ:
             return "cpu"
         # Get task_type from C++ ModelConfig (enum)
-        task_type = self._weights_info.config.py_model_config.task_type
-        model_size = self._weights_info.config.py_model_config.eval_model_size()
+        task_type = self._weights_info.model_config.task_type
+        model_size = self._weights_info.model_config.eval_model_size()
         device_mem_info = self._load_config.exported_device.get_mem_info()
         if device_mem_info is None:
             return "cpu"
@@ -445,9 +445,9 @@ class ModelLoader:
 
         embedding_weight = weight.global_weights.get(W.embedding, None)
         if embedding_weight != None:
-            self._weights_info.config.py_model_config.embedding_size_ = embedding_weight.shape[0]
+            self._weights_info.model_config.embedding_size_ = embedding_weight.shape[0]
             logging.info(
-                f"embedding_size is {self._weights_info.config.py_model_config.embedding_size_}, vocab size is {self._weights_info.config.py_model_config.vocab_size}"
+                f"embedding_size is {self._weights_info.model_config.embedding_size_}, vocab size is {self._weights_info.model_config.vocab_size}"
             )
 
         if self._load_config.vit_separation != VitSeparation.VIT_SEPARATION_ROLE:
@@ -455,9 +455,9 @@ class ModelLoader:
                 lm_head_w = weight.steal_global_weight(W.lm_head)
                 if lm_head_w == None:
                     lm_head_w = weight.global_weights[W.embedding]
-                if self._weights_info.config.py_model_config.normalize_lm_head_weight:
+                if self._weights_info.model_config.normalize_lm_head_weight:
                     lm_head_w = F.normalize(lm_head_w)
-                logit_scale = self._weights_info.config.py_model_config.logit_scale
+                logit_scale = self._weights_info.model_config.logit_scale
                 if logit_scale != 1.0:
                     lm_head_w = logit_scale * lm_head_w
                 weight.set_global_weight(W.lm_head, lm_head_w)
@@ -467,7 +467,7 @@ class ModelLoader:
 
             pos_weight = weight.global_weights.get(W.positional_embedding, None)
             if pos_weight != None:
-                max_seq_len = self._weights_info.config.py_model_config.max_seq_len
+                max_seq_len = self._weights_info.model_config.max_seq_len
                 if pos_weight.shape[0] < max_seq_len:
                     raise Exception(
                         f"positon_weight has shape: {pos_weight.shape}, but max_seq_len is: {max_seq_len} > {pos_weight.shape[0]}"
@@ -496,14 +496,9 @@ class ModelLoader:
         layer_num = weights_info._num_layers
         phy_exp_num = weights_info.phy_exp_num_
 
-        # Get load_config from py_env_configs
-        from rtp_llm.config.py_config_modules import PyEnvConfigs
-        py_env_configs = weights_info.config.py_env_configs
-        load_config = py_env_configs.load_config if isinstance(py_env_configs, PyEnvConfigs) else None
-        if load_config is None:
-            # Fallback: create a minimal LoadConfig object if py_env_configs is not available
-            from rtp_llm.config.py_config_modules import LoadConfig as PyLoadConfig
-            load_config = PyLoadConfig()
+        # Create a minimal LoadConfig object (py_env_configs is not available in ModelDeployWeightInfo)
+        from rtp_llm.config.py_config_modules import LoadConfig as PyLoadConfig
+        load_config = PyLoadConfig()
         
         phy2log = LoadConfig.create_redundant_expert(
             layer_num=layer_num,
@@ -521,15 +516,11 @@ class ModelLoader:
         self._init_redundant_expert(weights_info)
         if weights_info.enable_eplb_:
             model_path = None
-            if weights_info.config.py_model_config.is_mtp:
-                model_path = weights_info.config.py_model_config.ckpt_path
+            if weights_info.model_config.is_mtp:
+                model_path = weights_info.model_config.ckpt_path
             else:
-                # Get original_checkpoint_path from model_config or use ckpt_path
-                path = None
-                if weights_info.config.py_env_configs and weights_info.config.py_env_configs.model_args:
-                    path = weights_info.config.py_env_configs.model_args.original_checkpoint_path
-                if path is None:
-                    path = weights_info.config.py_model_config.ckpt_path
+                # Use ckpt_path from model_config (py_env_configs is not available in ModelDeployWeightInfo)
+                path = weights_info.model_config.ckpt_path
                 model_path = fetch_remote_file_to_local(path)
 
             ep_lb_database = CkptDatabase(model_path)
@@ -542,7 +533,6 @@ class ModelLoader:
                 model_config=self.model_config,
             )
             weights_info.py_eplb = self.ep_balancer
-            weights_info.config.py_eplb = self.ep_balancer
 
     def _init_eplb_weight(self, weight: ModelWeights, device: str):
         expert_num = self._load_config.expert_num

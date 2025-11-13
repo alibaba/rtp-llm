@@ -54,8 +54,8 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
     q_use_lora = False
     has_e_score_correction_bias = False
 
-    def __init__(self, py_model_config: ModelConfig, engine_config, merge_lora: bool = False, tp_size: int = 1, tp_rank: int = 0):
-        super().__init__(py_model_config, engine_config, merge_lora=merge_lora, tp_size=tp_size, tp_rank=tp_rank)
+    def __init__(self, model_config: ModelConfig, engine_config, merge_lora: bool = False, tp_size: int = 1, tp_rank: int = 0):
+        super().__init__(model_config, engine_config, merge_lora=merge_lora, tp_size=tp_size, tp_rank=tp_rank)
 
     def _process_meta(self, meta_dict, weight_keys):
         if "model.layers.0.self_attn.q_a_proj.weight" in weight_keys:
@@ -76,7 +76,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
             kv_lora_rank=self.kv_lora_rank,
             ope_head_dim=self.nope_head_dim,
             v_head_dim=self.v_head_dim,
-            use_mla=self.py_model_config.use_mla_ and self.py_model_config.mla_ops_type != MlaOpsType.MHA,
+            use_mla=self.model_config.use_mla_ and self.model_config.mla_ops_type != MlaOpsType.MHA,
             q_use_lora=self.q_use_lora,
         )
         layer_weights = [
@@ -228,7 +228,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                 )
             )
 
-        if self.py_model_config.use_mla_ and self.py_model_config.mla_ops_type != MlaOpsType.MHA:
+        if self.model_config.use_mla_ and self.model_config.mla_ops_type != MlaOpsType.MHA:
             mla_layer_weights.append(
                 MlaAttnAtomicWeight(
                     W.mla_kc,
@@ -446,9 +446,9 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
             ]
 
     def _create_rope_w(self) -> Optional[AtomicWeight]:
-        if self.py_model_config.mla_ops_type == MlaOpsType.MHA:
+        if self.model_config.mla_ops_type == MlaOpsType.MHA:
             return None
-        config = self.py_model_config
+        config = self.model_config
 
         def __create_rope_w(ts: List[torch.Tensor], config: ModelConfig):
             logging.info(
@@ -524,14 +524,14 @@ class DeepSeekV2(BaseModel):
 
     def _create_python_model(self) -> Optional[GptModelBase]:
         from rtp_llm.config.engine_config import EngineConfig
-        py_model_config = self.py_model_config
+        model_config = self.model_config
         parallelism_config = self.engine_config.parallelism_config
         device_resource_config = self.engine_config.device_resource_config
-        quant_config = py_model_config.quant_config
-        vocab_size = py_model_config.vocab_size
+        quant_config = model_config.quant_config
+        vocab_size = model_config.vocab_size
         
         self.py_model = DeepSeekV2Model(
-            py_model_config,
+            model_config,
             parallelism_config,
             device_resource_config,
             self.weight,
@@ -645,8 +645,8 @@ class DeepSeekV2(BaseModel):
 
 class DeepSeekV3MtpWeight(DeepSeekV2Weight):
 
-    def __init__(self, py_model_config: ModelConfig, engine_config, merge_lora: bool = False, tp_size: int = 1, tp_rank: int = 0):
-        super().__init__(py_model_config, engine_config, merge_lora=merge_lora, tp_size=tp_size, tp_rank=tp_rank)
+    def __init__(self, model_config: ModelConfig, engine_config, merge_lora: bool = False, tp_size: int = 1, tp_rank: int = 0):
+        super().__init__(model_config, engine_config, merge_lora=merge_lora, tp_size=tp_size, tp_rank=tp_rank)
 
     def _get_weight_info(self):
         layer_weights: List[List[WeightModule]] = []

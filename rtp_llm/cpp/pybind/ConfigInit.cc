@@ -652,6 +652,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("world_size", &ParallelismConfig::world_size)
         .def_readwrite("world_rank", &ParallelismConfig::world_rank)
         .def_readwrite("local_world_size", &ParallelismConfig::local_world_size)
+        .def_readwrite("local_rank", &ParallelismConfig::local_rank)
         .def_readwrite("ffn_sp_size", &ParallelismConfig::ffn_sp_size)
         .def_readwrite("tp_rank", &ParallelismConfig::tp_rank)
         .def_readwrite("ep_rank", &ParallelismConfig::ep_rank)

@@ -101,7 +101,7 @@ class LinearFactory:
         weight_key: str,
         scale_key: Optional[str] = None,
         bias_key: Optional[str] = None,
-        py_model_config: Optional[ModelConfig] = None,
+        model_config: Optional[ModelConfig] = None,
         quant_config: Optional[object] = None,  # QuantizationConfig for quantization settings
     ) -> nn.Module:
         """Create Linear layer from weight dictionary."""
@@ -126,7 +126,7 @@ class LinearFactory:
         weight_keys: list,
         scale_keys: Optional[list] = None,
         bias_keys: Optional[list] = None,
-        py_model_config: Optional[ModelConfig] = None,
+        model_config: Optional[ModelConfig] = None,
         quant_config: Optional[object] = None,
         dim: int = -1,
     ) -> nn.Module:

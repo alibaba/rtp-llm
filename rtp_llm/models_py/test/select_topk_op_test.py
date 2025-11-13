@@ -31,16 +31,16 @@ class SelectTopkOpTest(TestCase):
         self, num_tokens: int, num_expert: int, top_k: int, dtype: _dtype
     ):
         torch.manual_seed(1)
-        py_model_config = ModelConfig()
-        py_model_config.head_num = 1
-        py_model_config.size_per_head = 128
-        py_model_config.num_layers = 1
-        py_model_config.max_seq_len = 1
-        py_model_config.vocab_size = 5120
-        py_model_config.expert_num = num_expert
-        py_model_config.moe_k = top_k
-        py_model_config.has_moe_norm = True
-        select_topk_op = SelectTopkOp(py_model_config)
+        model_config = ModelConfig()
+        model_config.head_num = 1
+        model_config.size_per_head = 128
+        model_config.num_layers = 1
+        model_config.max_seq_len = 1
+        model_config.vocab_size = 5120
+        model_config.expert_num = num_expert
+        model_config.moe_k = top_k
+        model_config.has_moe_norm = True
+        select_topk_op = SelectTopkOp(model_config)
 
         router_logits = torch.randn(num_tokens, num_expert, dtype=dtype).to("cuda")
         router_logits_fp32 = router_logits.float()

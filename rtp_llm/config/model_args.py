@@ -4,7 +4,7 @@ This class is a simple container for user-provided model configuration arguments
 that are parsed from command-line arguments and environment variables.
 """
 
-from typing import Optional
+from typing import Optional, Any
 
 
 class ModelArgs:

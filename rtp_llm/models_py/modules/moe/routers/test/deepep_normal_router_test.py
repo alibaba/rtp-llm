@@ -32,10 +32,10 @@ def init_router(rank: int, use_fp8: bool):
     update_master_info(f"0.0.0.0", int(os.environ["START_PORT"]))
     print(f"rank {rank}, {g_parallel_info}")
     
-    py_model_config = ModelConfig()
-    py_model_config.expert_num = 16
-    py_model_config.hidden_size = 1024
-    py_model_config.moe_k = 16
+    model_config = ModelConfig()
+    model_config.expert_num = 16
+    model_config.hidden_size = 1024
+    model_config.moe_k = 16
     
     parallelism_config = ParallelismConfig()
     parallelism_config.tp_size = g_parallel_info.tp_size
@@ -59,7 +59,7 @@ def init_router(rank: int, use_fp8: bool):
     runtime_config = RuntimeConfig()
     
     config = MoEConfigAdapter(
-        py_model_config=py_model_config,
+        model_config=model_config,
         parallelism_config=parallelism_config,
         moe_config=moe_config,
         runtime_config=runtime_config,
@@ -74,7 +74,7 @@ def init_router(rank: int, use_fp8: bool):
     )
     init_deepep_wrapper(
         group=get_ep_group().device_group,
-        py_model_config=py_model_config,
+        model_config=model_config,
         parallelism_config=parallelism_config,
         moe_config=moe_config,
         runtime_config=runtime_config,

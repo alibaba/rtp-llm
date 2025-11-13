@@ -34,7 +34,7 @@ class DeepSeekV2NormalMoeLayer(nn.Module):
         self.top_k = config.moe_k
         self.gate = LinearFactory.create_linear_from_weights(
             weights, W.moe_gate, None, None,
-            py_model_config=config, quant_config=quant_config
+            model_config=config, quant_config=quant_config
         )
         self.fused_moe = FusedMoE(config, parallelism_config, weights, layer_id=0)
 
@@ -68,7 +68,7 @@ class DeepSeekV2MoeLayer(nn.Module):
                     weight=weights[W.moe_gate],
                     weight_scales=weights[gate_scale_key],
                     bias=None,
-                    py_model_config=config,
+                    model_config=config,
                     quant_config=quant_config,
                     force_fp8=True,
                 )
@@ -76,20 +76,20 @@ class DeepSeekV2MoeLayer(nn.Module):
                 # Create regular gate layer
                 self.gate = LinearFactory.create_linear_from_weights(
                     weights, W.moe_gate, None, None,
-                    py_model_config=config, quant_config=quant_config
+                    model_config=config, quant_config=quant_config
                 )
         else:
             # Create regular gate layer
             self.gate = LinearFactory.create_linear_from_weights(
                 weights, W.moe_gate, None, None,
-                py_model_config=config, quant_config=quant_config
+                model_config=config, quant_config=quant_config
             )
 
         # Create adapter and use FusedMoeFactory.create_fused_moe
         moe_config = MoeConfig()
         runtime_config = RuntimeConfig()
         config_adapter = MoEConfigAdapter(
-            py_model_config=config,
+            model_config=config,
             parallelism_config=parallelism_config,
             moe_config=moe_config,
             runtime_config=runtime_config,

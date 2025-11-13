@@ -29,11 +29,11 @@ class CausalAttention(nn.Module):
         # Note: quant_config needs to be passed separately if available
         self.qkv_proj = LinearFactory.create_linear_from_weights(
             weights, W.attn_qkv_w, W.attn_qkv_s, W.attn_qkv_b, 
-            py_model_config=config, gpt_init_params=None, quant_config=quant_config
+            model_config=config, gpt_init_params=None, quant_config=quant_config
         )
         self.o_proj = LinearFactory.create_linear_from_weights(
             weights, W.attn_o_w, W.attn_o_s, W.attn_o_b,
-            py_model_config=config, gpt_init_params=None, quant_config=quant_config
+            model_config=config, gpt_init_params=None, quant_config=quant_config
         )
         self.qk_fuse_norm = None
         if W.q_ln_gamma in weights and W.k_ln_gamma in weights:
