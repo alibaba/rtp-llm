@@ -136,7 +136,6 @@ TEST_F(CudaSamplerTest, testTopP) {
     ASSERT_NEAR(cum_log_probs_host[2], -5.02131, 1e-3);
     ASSERT_NEAR(cum_log_probs_host[3], -5.2682, 1e-3);
 
-    params.random_seed = nullopt;
     for (int i = 0; i < 100; i++) {
         device_->sampleGreedy(params);
         // printBuffer<int32_t>(*output_token_ids, "output_token_ids");
