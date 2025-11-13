@@ -68,6 +68,7 @@ CudaDevice::CudaDevice(const DeviceInitParams& params): DeviceBase(params) {
         initNcclParam(
             params.tp_rank, params.tp_size, master_ip, params.tp_master_port, "RTP_LLM_TP_GROUP_", tp_nccl_param_);
     }
+
     if (params.ffn_tp_size > 1) {
         if (params.ffn_tp_size != params.tp_size) {
             initNcclParam(params.ffn_tp_rank,
@@ -88,6 +89,16 @@ CudaDevice::CudaDevice(const DeviceInitParams& params): DeviceBase(params) {
                       params.dp_tp_master_port,
                       "RTP_LLM_DP_TP_GROUP_",
                       dp_tp_nccl_param_);
+    }
+
+    // include all attention and ffn ranks
+    if (params.enable_ffn_disaggregate) {
+        initNcclParam(params.world_rank,
+                      params.world_size,
+                      params.master_ip,
+                      params.afd_master_port,
+                      "RTP_LLM_AFD_GROUP_",
+                      afd_nccl_param_);
     }
 
     cuggemm_runner_.reset(new cuggemm());
@@ -370,6 +381,8 @@ DeviceProperties CudaDevice::getDeviceProperties() {
         prop->is_mtp                   = init_params_.is_mtp;
         prop->is_eagle3                = init_params_.is_eagle3;
         prop->ffn_as_service           = init_params_.ffn_as_service;
+        prop->world_rank               = init_params_.world_rank;
+        prop->world_size               = init_params_.world_size;
     }
     return *prop;
 }

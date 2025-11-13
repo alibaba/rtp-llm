@@ -122,6 +122,7 @@ void DeviceFactory::initDevices(const ParallelismConfig& parallelism_config,
     device_params.profile_debug_logging_config   = profiling_debug_logging_config;
     device_params.hw_kernel_config               = hw_kernel_config;
     device_params.concurrency_config             = concurrency_config;
+    device_params.enable_ffn_disaggregate        = ffn_disaggregate_config.enable_ffn_disaggregate;
     device_params.ffn_as_service = ffn_disaggregate_config.is_ffn_service();
     device_params.max_seq_len    = model_config.max_seq_len;
     RTP_LLM_LOG_INFO("set overlap type to be %d", device_params.device_resource_config.overlap_comm_type);

@@ -72,3 +72,31 @@ def init_parallel_group_args(parser, parallelism_config, ffn_disaggregate_config
         default=False,
         help="启用AF分离功能。",
     )
+    parallel_group.add_argument(
+        "--attention_tp_size",
+        env_name="ATTENTION_TP_SIZE",
+        type=int,
+        default=None,
+        help="AF分离设置中，Attention层张量并行大小。",
+    )
+    parallel_group.add_argument(
+        "--attention_dp_size",
+        env_name="ATTENTION_DP_SIZE",
+        type=int,
+        default=None,
+        help="AF分离设置中，Attention层数据并行大小。",
+    )
+    parallel_group.add_argument(
+        "--ffn_tp_size",
+        env_name="FFN_TP_SIZE",
+        type=int,
+        default=None,
+        help="AF分离设置中，FFN层张量并行大小。",
+    )
+    parallel_group.add_argument(
+        "--ffn_ep_size",
+        env_name="FFN_EP_SIZE",
+        type=int,
+        default=None,
+        help="AF分离设置中，FFN层专家并行大小。",
+    )

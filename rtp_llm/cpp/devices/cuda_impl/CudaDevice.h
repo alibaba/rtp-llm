@@ -295,6 +295,7 @@ private:
     NcclParam tp_nccl_param_;
     NcclParam dp_tp_nccl_param_;
     NcclParam ffn_tp_nccl_param_;
+    NcclParam afd_nccl_param_;
 
     std::unique_ptr<CustomAllReduceComm> custom_allreduce_comm_ = nullptr;  // for custom allreduce use
 
