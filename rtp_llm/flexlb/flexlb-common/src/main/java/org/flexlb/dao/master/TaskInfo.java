@@ -25,8 +25,8 @@ public class TaskInfo {
     private long endTimeMs;
     @JsonProperty("dp_rank")
     private long dpRank;
-    @JsonProperty("enqueue_time_ms")
-    private long enqueueTimeMs;
+    @JsonProperty("last_active_time_ms")
+    private long lastActiveTimeMs;
 
     public long estimatePrefillTime() {
         return estimatePrefillTimeMs(inputLength, prefixLength);

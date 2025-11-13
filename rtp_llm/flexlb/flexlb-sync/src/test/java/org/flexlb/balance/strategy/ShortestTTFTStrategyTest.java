@@ -87,7 +87,7 @@ class ShortestTTFTStrategyTest {
         cacheStatus.setAvailableKvCache(10000);
         workerStatus.setCacheStatus(cacheStatus);
         workerStatus.getRunningQueueTime().getAndSet(runningQueueTime);
-        workerStatus.clearFinishedTaskAndTimeoutTask(finishedTaskList);
+        workerStatus.clearFinishedTask(finishedTaskList);
         workerStatus.setRunningTaskList(runningTaslList);
         workerStatus.setLocalTaskMap(localTaskList);
         return workerStatus;
