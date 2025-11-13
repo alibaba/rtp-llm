@@ -226,7 +226,7 @@ class ModelLoader:
         return self._load_from_scratch(device)
     
     def _is_memory_enough_for_fastsafetensor(self):
-        model_size = self._weights_info.config.eval_model_size()
+        model_size = self._weights_info.config.eval_model_weight_size()
         device_mem_info = self._load_config.exported_device.get_mem_info()
         max_file_size = self._load_config.database.get_max_file_size()
         if device_mem_info is None:
@@ -375,7 +375,7 @@ class ModelLoader:
     def _choose_weight_convert_device(self, current_device):
         if "FORCE_CPU_LOAD_WEIGHTS" in os.environ:
             return "cpu"
-        model_size = self._weights_info.config.eval_model_size()
+        model_size = self._weights_info.config.eval_model_weight_size()
         device_mem_info = self._load_config.exported_device.get_mem_info()
         if device_mem_info is None:
             return "cpu"
