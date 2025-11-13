@@ -195,16 +195,21 @@ jobs:
         
         # Create the PR in upstream repo (from forked repo)
         # Note: head format is "fork_owner:branch" for cross-repository PRs
+        # Properly escape JSON values to avoid shell parsing issues
+        TITLE_JSON=$(echo "${PR_TITLE}" | jq -Rs .)
+        BODY_JSON=$(echo "${PR_BODY}" | jq -Rs .)
+        HEAD_VALUE="${{ github.repository }}:${SOURCE_BRANCH}"
+        
         response=$(curl -s -X POST \
           -H "Authorization: token ${GITHUB_TOKEN}" \
           -H "Accept: application/vnd.github.v3+json" \
           "https://api.github.com/repos/${UPSTREAM_REPO}/pulls" \
-          -d "{
-            \"title\": $(echo "${PR_TITLE}" | jq -Rs .),
-            \"body\": $(echo "${PR_BODY}" | jq -Rs .),
-            \"head\": \""${{ github.repository }}:${SOURCE_BRANCH}\",
-            \"base\": \"${BASE_BRANCH}\"
-          }")
+          -d "$(jq -n \
+            --argjson title "${TITLE_JSON}" \
+            --argjson body "${BODY_JSON}" \
+            --arg head "${HEAD_VALUE}" \
+            --arg base "${BASE_BRANCH}" \
+            '{title: $title, body: $body, head: $head, base: $base}')")
         
         # Check if PR was created successfully
         pr_number=$(echo "${response}" | jq -r '.number')
