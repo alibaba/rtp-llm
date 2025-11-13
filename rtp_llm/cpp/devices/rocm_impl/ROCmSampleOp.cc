@@ -38,7 +38,6 @@ GreedyOutput ROCmDevice::sampleGreedy(const GreedyParams& params) {
     auto& top_k       = params.top_k;
     auto& top_p       = params.top_p;
     auto& temperature = params.temperature;
-    // auto& random_seed = params.random_seed;
     ROCM_CHECK_VALUE(top_k.size() == batch_size, "top_k.size() != batch_size");
     ROCM_CHECK_VALUE(top_p.size() == batch_size, "top_p.size() != batch_size");
     ROCM_CHECK_VALUE(temperature.size() == batch_size, "temperature.size() != batch_size");
@@ -116,12 +115,14 @@ GreedyOutput ROCmDevice::sampleGreedy(const GreedyParams& params) {
     }
 
     bool deterministic = true;
-    auto seed_h   = allocateBuffer({DataType::TYPE_UINT64, {batch_size}, AllocationType::HOST});
-    auto offset_h = allocateBuffer({DataType::TYPE_UINT64, {batch_size}, AllocationType::HOST});
+    auto seed_h   = allocateBuffer({DataType::TYPE_INT64, {batch_size}, AllocationType::HOST});
+    auto offset_h = allocateBuffer({DataType::TYPE_INT64, {batch_size}, AllocationType::HOST});
     for (int i = 0; i < batch_size; i++) {
-        std::tie(seed_h->data<uint64_t>()[i], offset_h->data<uint64_t>()[i]) = params.generator[i].defined() ?
+        auto [sd, ofst] = params.generator[i].defined() ?
             get_seed_and_offset(batch_size * 32, params.generator[i]) :
             std::make_pair(0ULL, 0ULL);
+        seed_h->data<int64_t>()[i]   = static_cast<int64_t>(sd);
+        offset_h->data<int64_t>()[i] = static_cast<int64_t>(ofst);
     }
     auto seed = Buffer2torchTensor(clone({*seed_h, AllocationType::DEVICE}), false);
     auto offset = Buffer2torchTensor(clone({*offset_h, AllocationType::DEVICE}), false);
