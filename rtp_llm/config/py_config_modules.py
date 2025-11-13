@@ -530,7 +530,7 @@ class PyDeviceResourceConfig:
         self.reserver_runtime_mem_mb: int = 1024
         self.specify_gpu_arch: str = ""
         self.acext_gemm_config_dir: Optional[str] = None
-        self.device_reserve_memory_bytes: int = 0
+        self.device_reserve_memory_bytes: int = -1073741824
 
     def update_from_env(self):
         self.reserver_runtime_mem_mb = int(

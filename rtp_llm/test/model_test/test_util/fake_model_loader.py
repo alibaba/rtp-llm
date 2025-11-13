@@ -20,7 +20,7 @@ class FakeModelLoader(object):
         data_type: str = WEIGHT_TYPE.AUTO.to_str(),
         kv_cache_type: str = WEIGHT_TYPE.AUTO.to_str(),
         load_py_model: bool = False,
-        device_reserve_memory_bytes: int = 0,
+        device_reserve_memory_bytes: int = -1073741824,
         warm_up: bool = False,
         is_causal: bool = True,
     ) -> None:
