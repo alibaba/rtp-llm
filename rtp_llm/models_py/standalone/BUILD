@@ -1,12 +1,12 @@
 load("//bazel:arch_select.bzl", get_triton_deps = "triton_deps")
 
 py_library(
-    name = "rtp_simple_model",
-    srcs = ["rtp_simple_model.py"],
+    name = "rtp_auto_model",
+    srcs = ["rtp_auto_model.py"],
     deps = [
         ":py_standalone_testlib",
 
-        # rtp_simple_model extra deps
+        # rtp_auto_model extra deps
         "//rtp_llm:async_model",           # async_decoder_engine
         "//rtp_llm:embedding",             # embedding
         "//rtp_llm:models",                # rtp_llm.models
