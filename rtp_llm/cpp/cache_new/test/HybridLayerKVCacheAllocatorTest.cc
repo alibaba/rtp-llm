@@ -631,7 +631,7 @@ protected:
 //     EXPECT_FALSE(result.success);
 // }
 
-// // ==================== 压力测试 ====================
+// // ==================== Stress tests ====================
 
 // TEST_F(HybridLayerKVCacheAllocatorTest, MixedOperations) {
 //     auto config = createHybridLayerTestConfig(4, 20);

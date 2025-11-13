@@ -93,6 +93,12 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     GptModelInputs                 model_input;
     GptModelOutputs                model_output;
     SamplerOutput                  sampler_output;
+    // stage markers for crash triage
+    RTP_LLM_LOG_INFO("executor.process begin: streams=%zu, context_batch=%zu, decode_batch=%zu, model_tokens=%zu",
+                     streams.size(),
+                     stream_groups.totalContextBatchSize(),
+                     stream_groups.totalDecodeBatchSize(),
+                     stream_groups.modelExecuteTokenSize());
     {
         int64_t start_time_us      = autil::TimeUtility::currentTimeInMicroSeconds();
         auto    model_input_status = batch_stream_processor_->gatherModelInput(stream_groups);
