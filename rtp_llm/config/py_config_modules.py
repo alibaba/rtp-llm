@@ -17,7 +17,7 @@ from rtp_llm.utils.fuser import MountRwMode, fetch_remote_file_to_local
 from rtp_llm.utils.weight_type import WEIGHT_TYPE
 
 DEFAULT_START_PORT = 8088
-MASTER_INFO_PORT_NUM = 11
+MASTER_INFO_PORT_NUM = 12
 MIN_WORKER_INFO_PORT_NUM = 8
 WORKER_INFO_PORT_NUM = MIN_WORKER_INFO_PORT_NUM
 
@@ -964,6 +964,9 @@ class PyEnvConfigs:
             "[moe_config]\n" + self.moe_config.to_string() + "\n\n"
             "[jit_config]\n" + self.jit_config.to_string() + "\n\n"
             "[py_hw_kernel_config]\n" + self.py_hw_kernel_config.to_string() + "\n\n"
+            "[ffn_disaggregate_config]\n"
+            + self.ffn_disaggregate_config.to_string()
+            + "\n\n"
         )
 
 

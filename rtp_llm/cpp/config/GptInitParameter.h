@@ -223,6 +223,7 @@ public:
     std::string nccl_ip_            = "";
     bool        use_all_gather_     = false;
     int64_t     tp_nccl_port_       = 0;
+    int64_t     afd_nccl_port_    = 0;
     int64_t     dp_tp_nccl_port_    = 0;
     int64_t     ffn_tp_nccl_port_   = 0;
     int64_t     http_port_          = 0;

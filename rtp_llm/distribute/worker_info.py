@@ -433,6 +433,7 @@ g_worker_info = WorkerInfo.from_env()
 class MasterInfo:
     ip: str
     th_nccl_port: int
+    afd_nccl_port: int
     tp_nccl_port: int
     nccl_op_port: int
     sp_gpt_nccl_port: int
@@ -443,6 +444,7 @@ class MasterInfo:
 g_master_info = MasterInfo(
     ip="",
     th_nccl_port=0,
+    afd_nccl_port=0,
     tp_nccl_port=0,
     nccl_op_port=0,
     sp_gpt_nccl_port=0,
@@ -455,6 +457,7 @@ def update_master_info(ip: str, base_port: int):
     g_master_info.ip = ip
     g_master_info.dp_tp_nccl_port = base_port - 10
     g_master_info.th_nccl_port = base_port - 11
+    g_master_info.afd_nccl_port = base_port - 12
     base_port -= g_parallel_info.dp_rank * MASTER_INFO_PORT_NUM
     g_master_info.tp_nccl_port = base_port - 2
     g_master_info.nccl_op_port = base_port - 3

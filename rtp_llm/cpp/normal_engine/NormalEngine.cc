@@ -272,9 +272,7 @@ absl::Status NormalEngine::step() {
     if (device_->getDeviceProperties().tp_rank == 0 && !params_.ffn_disaggregate_config.is_ffn_service()) {
         CHECK_AND_ASSIGN(streams, scheduler_->schedule());
         if (streams.empty()) {
-            if (params_.dp_size_ > 1
-                || (params_.ffn_disaggregate_config.attention_dp_size > 1
-                    && params_.ffn_disaggregate_config.enable_ffn_disaggregate)) {
+            if (params_.dp_size_ > 1) {
                 CHECK_AND_ASSIGN(streams, scheduler_->schedule());
                 if (streams.empty()) {
                     streams.emplace_back(createMinFakeStream(1));

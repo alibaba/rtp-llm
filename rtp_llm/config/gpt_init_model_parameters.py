@@ -251,6 +251,7 @@ class GptInitModelParameters:
     dp_size: int
     dp_tp_nccl_port: int
     th_nccl_port: int
+    afd_nccl_port: int
     embedding_size: int
     enable_eplb: bool
     enable_fast_gen: bool
@@ -448,6 +449,7 @@ class GptInitModelParameters:
         self.tp_nccl_port = g_master_info.tp_nccl_port
         self.dp_tp_nccl_port = g_master_info.dp_tp_nccl_port
         self.th_nccl_port = g_master_info.th_nccl_port
+        self.afd_nccl_port = g_master_info.afd_nccl_port
         self.ffn_tp_nccl_port = g_master_info.ffn_tp_nccl_port
         self.model_rpc_port = g_worker_info.rpc_server_port
         self.embedding_rpc_port = g_worker_info.embedding_rpc_server_port

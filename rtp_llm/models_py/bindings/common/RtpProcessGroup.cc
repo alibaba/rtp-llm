@@ -26,6 +26,11 @@ RtpProcessGroup::RtpProcessGroup(RtpProcessGroupType type) {
         world_size_ = device_properties.dp_size * device_properties.tp_size;
         RTP_LLM_LOG_INFO("Create dp and tp group: rank = %d, world_size = %d", rank_, world_size_);
         mode_ = ParallelMode::DP_AND_TP;
+    } else if (type == RtpProcessGroupType::AFD_GROUP) {
+        rank_       = device_properties.world_rank;
+        world_size_ = device_properties.world_size;
+        RTP_LLM_LOG_INFO("Create afd group: rank = %d, world_size = %d", rank_, world_size_);
+        mode_ = ParallelMode::AFD;
     } else {
         RTP_LLM_LOG_ERROR("Invalid RtpProcessGroupType !");
         throw std::runtime_error("Invalid RtpProcessGroupType !");
@@ -100,7 +105,8 @@ void registerRtpProcessGroup(const py::module& m) {
     py::enum_<RtpProcessGroupType>(m, "RtpProcessGroupType")
         .value("DP_GROUP", RtpProcessGroupType::DP_GROUP)
         .value("TP_GROUP", RtpProcessGroupType::TP_GROUP)
-        .value("DP_AND_TP_GROUP", RtpProcessGroupType::DP_AND_TP_GROUP);
+        .value("DP_AND_TP_GROUP", RtpProcessGroupType::DP_AND_TP_GROUP)
+        .value("AFD_GROUP", RtpProcessGroupType::AFD_GROUP);
 
     // 注册RtpProcessGroup类
     py::class_<RtpProcessGroup>(m, "RtpProcessGroup")

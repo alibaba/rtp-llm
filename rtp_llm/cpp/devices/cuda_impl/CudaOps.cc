@@ -445,6 +445,8 @@ NcclParam CudaDevice::getNcclParam(ParallelMode mode) {
             return dp_tp_nccl_param_;
         case ParallelMode::FFN_TP:
             return ffn_tp_nccl_param_;
+        case ParallelMode::AFD:
+            return afd_nccl_param_;
         default:
             RTP_LLM_CHECK_WITH_INFO(false, "all reduce not support mode [%d]", mode);
             // avoid compile error
@@ -567,29 +569,30 @@ void computeLengthsAndOffsets(const std::vector<size_t>& split_sizes,
 }
 
 void CudaDevice::batchSendRecv(const BatchSendRecvParams& params, const ParallelMode& mode) {
-    RTP_LLM_CHECK_WITH_INFO(mode == ParallelMode::DP_AND_TP,
-                            "batch send recv just support ParallelMode::DP_AND_TP but got [%d]",
+    RTP_LLM_CHECK_WITH_INFO(mode == ParallelMode::DP_AND_TP || mode == ParallelMode::AFD,
+                            "batch send recv just support ParallelMode::DP_AND_TP or ParallelMode::AFD but got [%d]",
                             int(mode));
     RTP_LLM_CHECK_WITH_INFO(params.p2p_params.size() > 0, "send_params is empty");
+    NcclParam used_nccl_param = mode == ParallelMode::DP_AND_TP ? dp_tp_nccl_param_ : afd_nccl_param_;
     NCCLCHECK(ncclGroupStart());
     for (const auto& params : params.p2p_params) {
-        RTP_LLM_CHECK_WITH_INFO(params.dest_rank >= 0 && params.dest_rank < dp_tp_nccl_param_.world_size_,
+        RTP_LLM_CHECK_WITH_INFO(params.dest_rank >= 0 && params.dest_rank < used_nccl_param.world_size_,
                                 "dest_rank [%d] must be in range [0, %d)",
                                 params.dest_rank,
-                                dp_tp_nccl_param_.world_size_);
+                                used_nccl_param.world_size_);
         if (params.type == SendRecvType::kSend) {
             NCCLCHECK(ncclSend(params.buffer->data(),
                                params.buffer->size(),
                                getNcclDataType(params.buffer->type()),
                                params.dest_rank,
-                               dp_tp_nccl_param_.nccl_comm_,
+                               used_nccl_param.nccl_comm_,
                                stream_));
         } else if (params.type == SendRecvType::kRecv) {
             NCCLCHECK(ncclRecv(params.buffer->data(),
                                params.buffer->size(),
                                getNcclDataType(params.buffer->type()),
                                params.dest_rank,
-                               dp_tp_nccl_param_.nccl_comm_,
+                               used_nccl_param.nccl_comm_,
                                stream_));
         } else {
             RTP_LLM_CHECK_WITH_INFO(false, "invalid send_param type: %d", int(params.type));

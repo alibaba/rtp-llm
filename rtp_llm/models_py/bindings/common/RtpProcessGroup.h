@@ -12,6 +12,7 @@ enum class RtpProcessGroupType {
     DP_GROUP        = 0,
     TP_GROUP        = 1,
     DP_AND_TP_GROUP = 2,
+    AFD_GROUP       = 3,
 };
 
 class RtpProcessGroup {
