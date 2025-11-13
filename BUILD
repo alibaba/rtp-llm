@@ -9,7 +9,7 @@ config_setting(
 
 config_setting(
     name = "using_cuda",
-    values = {"define": "using_cuda=true"},
+    define_values = {"using_cuda": "true"},
 )
 
 config_setting(
@@ -17,6 +17,25 @@ config_setting(
     values = {"define": "using_cuda12=true"},
 )
 
+config_setting(
+    name = "using_cuda12_9_x86",
+    define_values = {"using_cuda12": "true", "using_cuda12_9_x86": "true"},
+)
+
+config_setting(
+    name = "cuda_pre_12_9",
+    define_values = {"using_cuda12_9_x86": "false", "using_cuda12_arm": "false"},
+)
+
+config_setting(
+    name = "using_cuda12_arm",
+    values = {"define": "using_cuda12_arm=true"},
+)
+
+config_setting(
+    name = "using_cuda12_x86",
+    values = {"define": "using_cuda12_x86=true"},
+)
 
 config_setting(
     name = "using_rocm",
@@ -46,11 +65,6 @@ config_setting(
 config_setting(
     name = "using_3fs",
     define_values = {"use_3fs": "true",},
-)
-
-config_setting(
-    name = "enable_3fs",
-    values = {"copt": "-DENABLE_3FS=1"},
 )
 
 cc_binary(

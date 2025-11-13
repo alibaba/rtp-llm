@@ -6,7 +6,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.NestedConfigurationProperty;
 
 @Data
-@ConfigurationProperties(prefix = "tpp.otel.processor")
+@ConfigurationProperties(prefix = "trace.otel.processor")
 public class OtelProcessorProperties {
 
     @NestedConfigurationProperty

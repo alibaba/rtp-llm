@@ -18,7 +18,7 @@
 #include "rtp_llm/cpp/rocm/hipblasMMWrapper.h"
 #include "rtp_llm/cpp/rocm/rocmFmhaWrapper.h"
 #include "rtp_llm/cpp/rocm/quantizePreprocessors.h"
-//#include "rtp_llm/cpp/rocm/rocmMoeWrapper.h"
+// #include "rtp_llm/cpp/rocm/rocmMoeWrapper.h"
 #include "rtp_llm/cpp/rocm/rocmCKGemmWrapper.h"
 #include "rtp_llm/cpp/rocm/rocmCKW8A8GeluGemmWrapper.h"
 #include "rtp_llm/cpp/kernels/kv_cache/kv_cache_utils.h"
@@ -139,6 +139,7 @@ struct CKAttn {
     torch::Tensor cu_kv_seqlens;
     torch::Tensor input_lengths;
     torch::Tensor sequence_lengths;
+    torch::Tensor padding_offset;
     int           max_seq_len;
     bool          decode_plan;
 
@@ -225,7 +226,7 @@ public:
                                   const torch::Tensor&            mla_out_t,
                                   const MlaAttentionModuleParams& params);
 
-    void                  mlaAbsorbAttention(const MlaAttentionModuleParams& params) override;
+    void         mlaAbsorbAttention(const MlaAttentionModuleParams& params) override;
     void         mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params) override;
     SliceOutput  slice(const SliceParams& params) override;
     KVBlockArray getKVBlockArray(const AttentionModuleParams& params,
@@ -250,7 +251,7 @@ protected:
     // void prepareCommBuffer(const PrepareCommBufferParams& params) override;
 
 public:
-    void      setStream(hipStream_t stream) {
+    void setStream(hipStream_t stream) {
         current_stream_ = stream;
         stream_         = stream;
         hipblas_mm_wrapper_->setStream(stream);
@@ -306,7 +307,7 @@ private:
                             NcclParam&         nccl_param);
     NcclParam getNcclParam(ParallelMode mode);
     // moe
-    //std::unique_ptr<rocmMoeWrapper> moe_runner_;
+    // std::unique_ptr<rocmMoeWrapper> moe_runner_;
 
     // for custom allreduce use
     std::unique_ptr<CustomAllReduceComm> custom_allreduce_comm_ = nullptr;
@@ -323,7 +324,7 @@ private:
     // CK gemm
     std::unique_ptr<rocmCKGemmWrapper> ck_gemm_runner_;
 
-    //CK W8A8 Gelu gemm
+    // CK W8A8 Gelu gemm
     std::unique_ptr<rocmCKW8A8GeluGemmWrapper> ck_w8a8_gelu_gemm_runner_;
 
 protected:

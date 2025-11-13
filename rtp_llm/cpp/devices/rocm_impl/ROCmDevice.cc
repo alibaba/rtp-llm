@@ -677,26 +677,17 @@ BufferPtr ROCmDevice::mhaQKVGemm(const AttentionLayerParams& params) {
     }
     printBufferData(*qkv, "qkv");
     if (params.weights.q_norm_weight) {
-        auto after_q_norm = layernormWithStride(LayernormWithStrideParams({qkv, 
-                                                      *params.weights.q_norm_weight, 
-                                                      params.ln_params.eps, 
-                                                      params.ln_params.norm_type, 
-                                                      0, 
-                                                      params.configs.size_per_head * params.configs.head_num}));
-        qkv = std::move(after_q_norm.output);
-        printBufferData(*qkv, "qkv_after_q_norm");
-    }
-
-    if (params.weights.k_norm_weight) {
-        auto after_k_norm = layernormWithStride(LayernormWithStrideParams({qkv,
-                                                      *params.weights.k_norm_weight,
-                                                      params.ln_params.eps,
-                                                      params.ln_params.norm_type,
-                                                      params.configs.size_per_head * params.configs.head_num,
-                                                      params.configs.size_per_head * params.configs.kv_head_num}));
-
-        qkv = std::move(after_k_norm.output);
-        printBufferData(*qkv, "qkv_after_k_norm");
+        RTP_LLM_CHECK_WITH_INFO(params.weights.k_norm_weight != nullptr,
+                                "q_norm_weight and k_norm_weight should both be provided");
+        RTP_LLM_CHECK_WITH_INFO(params.ln_params.norm_type == NormType::rmsnorm, "qkRmsNorm only support rmsnorm");
+        auto qk_rmsnorm_output = qkRmsNorm(QkRmsNormParams({qkv,
+                                                            *params.weights.q_norm_weight,
+                                                            *params.weights.k_norm_weight,
+                                                            params.ln_params.eps,
+                                                            params.configs.head_num,
+                                                            params.configs.kv_head_num,
+                                                            params.configs.size_per_head}));
+        printBufferData(*qkv, "qkv_after_qk_norm");
     }
     return qkv;
 }

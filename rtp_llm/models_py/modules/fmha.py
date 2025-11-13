@@ -4,25 +4,17 @@ from typing import Any, Dict, List, Optional
 import torch
 import torch.nn.functional as F
 
+from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.models_py.modules.kvcache_store import WriteCacheStoreOp
 from rtp_llm.models_py.modules.mla import (
     MlaFlashInferDecodeOp,
     MlaFlashInferPrefillOp,
     MlaRotaryEmbeddingOp,
-    TrtV2PrefillAttentionOp,
 )
+from rtp_llm.models_py.modules.mla.flashinfer_mla import warmup_flashinfer_python
+from rtp_llm.ops import FMHAType
+from rtp_llm.ops.compute_ops import KVCache, ParamsBase, PyAttentionInputs
 from rtp_llm.utils.model_weight import W
-
-try:
-    from librtp_compute_ops.rtp_llm_ops import (
-        FusedRopeKVCacheDecodeOp,
-        FusedRopeKVCachePrefillOp,
-    )
-except ImportError:
-    logging.info("rope kv cache not available, skipped.")
-
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.models_py.modules.kvcache_store import WriteCacheStoreOp
-from rtp_llm.ops import FMHAType, KVCache, ParamsBase, PyAttentionInputs
 
 
 class FMHAImplBase(object):
@@ -119,7 +111,7 @@ PREFILL_MLA_IMPS: List[type[FMHAPrefillImplBase]] = []
 DECODE_MLA_IMPS: List[type[FMHADecodeImplBase]] = []
 
 try:
-    from librtp_compute_ops.rtp_llm_ops import FlashInferPrefillOp
+    from rtp_llm.ops.compute_ops import FlashInferPrefillOp, FusedRopeKVCachePrefillOp
 
     class FlashInferPrefillImpl(FMHAPrefillImplBase):
 
@@ -150,12 +142,14 @@ try:
             attn_inputs: PyAttentionInputs,
             weights: List[Dict[str, torch.Tensor]],
             cos_sin_cache: torch.Tensor,
+            absorb_opt_len: int = 1024,
+            use_trt_fmha: bool = False,
         ) -> None:
-
+            # trt prefill not support reuse cache yet
             super().__init__(
                 MlaFlashInferPrefillOp(
                     config,
-                    config.head_num,
+                    config.head_num // config.tp_size,
                     config.kv_lora_rank,
                     config.rope_head_dim,
                     config.nope_head_dim,
@@ -163,16 +157,8 @@ try:
                     config.softmax_extra_scale,
                     config.use_mla,
                     weights,
+                    use_trt_fmha,
                 ),
-                # TrtV2PrefillAttentionOp(
-                #     config,
-                #     config.head_num,
-                #     config.kv_lora_rank,
-                #     config.rope_head_dim,
-                #     config.nope_head_dim,
-                #     config.use_mla,
-                #     weights,
-                # ),
                 MlaRotaryEmbeddingOp(
                     head_size=config.nope_head_dim,
                     cos_sin_cache=cos_sin_cache,
@@ -183,10 +169,75 @@ try:
                 ),
                 attn_inputs,
             )
+            self.warm_up = config.warm_up
+            self.has_reuse_cache = False
+            if attn_inputs.prefix_lengths is not None:
+                self.has_reuse_cache = attn_inputs.prefix_lengths.max().item() > 0
+
+            self.absorb_opt_len = absorb_opt_len
+            self.aborb_fmha = MlaFlashInferDecodeOp(
+                config.head_num // config.tp_size,
+                config.kv_lora_rank,
+                config.rope_head_dim,
+                config.nope_head_dim,
+                config.seq_size_per_block,
+                config.softmax_extra_scale,
+                config.use_mla,
+                weights,
+            )
 
         @staticmethod
         def fmha_type() -> FMHAType:
             return FMHAType.FLASH_INFER
+
+        def compute_prefill_context(
+            self,
+            q: torch.Tensor,
+            compressed_kv: torch.Tensor,
+            k_pe: torch.Tensor,
+            kv_cache: Optional[KVCache],
+            layer_id: int,
+        ):
+            """Compute prefill context with optimized cache reuse logic."""
+            if self.warm_up:
+                self.warm_up = False
+                warmup_flashinfer_python()
+
+            if q.size(0) < self.absorb_opt_len and self.has_reuse_cache:
+                return self._handle_short_sequence(q, kv_cache, layer_id)
+            else:
+                return self._handle_long_sequence(
+                    q, compressed_kv, k_pe, kv_cache, layer_id
+                )
+
+        def _handle_long_sequence(
+            self,
+            q: torch.Tensor,
+            compressed_kv: torch.Tensor,
+            k_pe: torch.Tensor,
+            kv_cache: Optional[KVCache],
+            layer_id: int,
+        ):
+            """Handle long sequences using cache reuse operation."""
+            # Handle cache reuse for longer sequences
+            return self.fmha_impl.forward(
+                q, compressed_kv, k_pe, kv_cache, self.fmha_params, layer_id
+            )
+
+        def _handle_short_sequence(
+            self, q: torch.Tensor, kv_cache: Optional[KVCache], layer_id: int
+        ) -> torch.Tensor:
+            """Handle short sequences using absorb operation."""
+            # Split query into nope and pe components
+            q_nope, q_pe = torch.split(
+                q,
+                [self.aborb_fmha.qk_nope_head_dim, self.aborb_fmha.qk_rope_head_dim],
+                dim=-1,
+            )
+
+            return self.aborb_fmha.forward(
+                q_nope, q_pe, kv_cache, self.fmha_params, layer_id
+            )
 
         def forward(
             self,
@@ -209,10 +260,9 @@ try:
             ):
                 self.write_cache_store_impl(kv_cache)
             assert self.fmha_impl is not None
-            res = self.fmha_impl.forward(
-                q, compressed_kv, k_pe, self.fmha_params, layer_id
+            return self.compute_prefill_context(
+                q, compressed_kv, k_pe, kv_cache, layer_id
             )
-            return res
 
     PREFILL_MLA_IMPS.append(MlaFlashInferPrefillImpl)
 
@@ -221,7 +271,7 @@ except ImportError:
 
 
 try:
-    from librtp_compute_ops.rtp_llm_ops import FlashInferDecodeOp
+    from rtp_llm.ops.compute_ops import FlashInferDecodeOp, FusedRopeKVCacheDecodeOp
 
     class FlashInferDecodeImpl(FMHADecodeImplBase):
 
@@ -255,7 +305,7 @@ try:
         ) -> None:
             super().__init__(
                 MlaFlashInferDecodeOp(
-                    config.head_num,
+                    config.head_num // config.tp_size,
                     config.kv_lora_rank,
                     config.rope_head_dim,
                     config.nope_head_dim,
@@ -316,7 +366,7 @@ except ImportError:
     logging.info("FlashInferDecodeOp not available, skipped.")
 
 try:
-    from librtp_compute_ops.rtp_llm_ops import TRTAttnOp
+    from rtp_llm.ops.compute_ops import TRTAttnOp
 
     class TRTMHAImpl(FMHAPrefillImplBase):
 
@@ -344,7 +394,7 @@ except ImportError:
 
 
 try:
-    from librtp_compute_ops.rtp_llm_ops import XQAAttnOp
+    from rtp_llm.ops.compute_ops import FusedRopeKVCacheDecodeOp, XQAAttnOp
 
     class XQAImpl(FMHADecodeImplBase):
 

@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-10-20 16:18+0800\n"
+"POT-Creation-Date: 2025-11-09 16:56+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -20,11 +20,13 @@ msgstr ""
 "Generated-By: Babel 2.17.0\n"
 
 #: ../../release/v0.2.0/package.md:1
-msgid "package"
+#, fuzzy
+msgid "Package"
 msgstr "包"
 
 #: ../../release/v0.2.0/package.md:4
-msgid "docker"
+#, fuzzy
+msgid "Docker Image"
 msgstr "docker镜像"
 
 #: ../../release/v0.2.0/package.md:5
@@ -44,134 +46,204 @@ msgid "**tag**"
 msgstr "**标签**"
 
 #: ../../release/v0.2.0/package.md
+#, fuzzy
 msgid "**CUDA-SM9x**"
 msgstr "**CUDA-SM9x**"
 
 #: ../../release/v0.2.0/package.md
-msgid ""
-"ali-hangzhou-hub-registry.cn-"
-"hangzhou.cr.aliyuncs.com/isearch/rtp_llm_sm9x_opensource"
-msgstr ""
-"ali-hangzhou-hub-registry.cn-"
-"hangzhou.cr.aliyuncs.com/isearch/rtp_llm_sm9x_opensource"
+#, fuzzy
+msgid "rtp-llm-registry.cn-hangzhou.cr.aliyuncs.com/rtp-llm/rtp-llm"
+msgstr "rtp-llm-registry.cn-hangzhou.cr.aliyuncs.com/rtp-llm/rtp-llm"
 
 #: ../../release/v0.2.0/package.md
-msgid "0.2.0_0.2.0_2025_10_20_10_42_2b7b389a0"
-msgstr "0.2.0_0.2.0_2025_10_20_10_42_2b7b389a0"
+msgid "0.2.0_0.2.0_2025_11_09_12_30_b348b3482_sm9x_opensource"
+msgstr "0.2.0_0.2.0_2025_11_09_12_30_b348b3482_sm9x_opensource"
 
 #: ../../release/v0.2.0/package.md
 msgid "**CUDA-SM8x**"
 msgstr "**CUDA-SM8x**"
 
 #: ../../release/v0.2.0/package.md
-msgid ""
-"ali-hangzhou-hub-registry.cn-"
-"hangzhou.cr.aliyuncs.com/isearch/rtp_llm_sm8x_opensource"
-msgstr ""
-"ali-hangzhou-hub-registry.cn-"
-"hangzhou.cr.aliyuncs.com/isearch/rtp_llm_sm8x_opensource"
+msgid "0.2.0_0.2.0_2025_11_09_12_30_b348b3482_sm8x_opensource"
+msgstr "0.2.0_0.2.0_2025_11_09_12_30_b348b3482_sm8x_opensource"
 
 #: ../../release/v0.2.0/package.md
+#, fuzzy
 msgid "**CUDA-SM7x**"
-msgstr "**CUDA-SM7x**"
+msgstr "**CUDA-SM9x**"
 
 #: ../../release/v0.2.0/package.md
-msgid ""
-"ali-hangzhou-hub-registry.cn-"
-"hangzhou.cr.aliyuncs.com/isearch/rtp_llm_sm7x_opensource"
-msgstr ""
-"ali-hangzhou-hub-registry.cn-"
-"hangzhou.cr.aliyuncs.com/isearch/rtp_llm_sm7x_opensource"
+msgid "0.2.0_0.2.0_2025_11_09_12_30_b348b3482_sm7x_opensource"
+msgstr "0.2.0_0.2.0_2025_11_09_12_30_b348b3482_sm7x_opensource"
 
 #: ../../release/v0.2.0/package.md
 msgid "**Frontend**"
 msgstr "**Frontend**"
 
 #: ../../release/v0.2.0/package.md
-msgid ""
-"ali-hangzhou-hub-registry.cn-hangzhou.cr.aliyuncs.com/isearch"
-"/rtp_llm_frontend-opensource"
-msgstr ""
-"ali-hangzhou-hub-registry.cn-hangzhou.cr.aliyuncs.com/isearch"
-"/rtp_llm_frontend-opensource"
+msgid "0.2.0_0.2.0_2025_11_09_12_30_b348b3482_frontend-opensource"
+msgstr "0.2.0_0.2.0_2025_11_09_12_30_b348b3482_frontend-opensource"
 
 #: ../../release/v0.2.0/package.md
 msgid "**AMD**"
 msgstr "**AMD**"
 
 #: ../../release/v0.2.0/package.md
-msgid ""
-"ali-hangzhou-hub-registry.cn-"
-"hangzhou.cr.aliyuncs.com/isearch/rtp_llm_rocm_opensource"
-msgstr ""
-"ali-hangzhou-hub-registry.cn-"
-"hangzhou.cr.aliyuncs.com/isearch/rtp_llm_rocm_opensource"
+msgid "0.2.0_0.2.0_2025_11_09_12_30_b348b3482_rocm_opensource"
+msgstr "0.2.0_0.2.0_2025_11_09_12_30_b348b3482_rocm_opensource"
 
 #: ../../release/v0.2.0/package.md:15
+#, fuzzy
 msgid "Wheel"
-msgstr "Wheel包"
+msgstr "whl包"
 
 #: ../../release/v0.2.0/package.md
+#, fuzzy
 msgid "**wheel**"
-msgstr "**wheel**"
+msgstr "whl包"
 
 #: ../../release/v0.2.0/package.md
+#, fuzzy
 msgid ""
 "https://rtp-opensource.oss-cn-"
-"hangzhou.aliyuncs.com/package/daily/2025_10_20/rtp_llm-0.2.0-0.2.0-2025_10_20_10_42_2b7b389a0"
-"-sm9x-cp310-cp310-manylinux1_x86_64.whl"
+"hangzhou.aliyuncs.com/package/daily/2025_11_09/rtp_llm-0.2.0-0.2"
+".0_2025_11_09_12_30_b348b3482_sm9x-cp310-cp310-manylinux1_x86_64.whl"
 msgstr ""
 "https://rtp-opensource.oss-cn-"
-"hangzhou.aliyuncs.com/package/daily/2025_10_20/rtp_llm-0.2.0-0.2.0-2025_10_20_10_42_2b7b389a0"
-"-sm9x-cp310-cp310-manylinux1_x86_64.whl"
+"hangzhou.aliyuncs.com/package/daily/2025_11_09/rtp_llm-0.2.0-0.2"
+".0_2025_11_09_12_30_b348b3482_sm9x-cp310-cp310-manylinux1_x86_64.whl"
 
 #: ../../release/v0.2.0/package.md
+#, fuzzy
 msgid ""
 "https://rtp-opensource.oss-cn-"
-"hangzhou.aliyuncs.com/package/daily/2025_10_20/rtp_llm-0.2.0-0.2.0-2025_10_20_10_42_2b7b389a0"
-"-sm8x-cp310-cp310-manylinux1_x86_64.whl"
+"hangzhou.aliyuncs.com/package/daily/2025_11_09/rtp_llm-0.2.0-0.2"
+".0_2025_11_09_12_30_b348b3482_sm8x-cp310-cp310-manylinux1_x86_64.whl"
 msgstr ""
 "https://rtp-opensource.oss-cn-"
-"hangzhou.aliyuncs.com/package/daily/2025_10_20/rtp_llm-0.2.0-0.2.0-2025_10_20_10_42_2b7b389a0"
-"-sm8x-cp310-cp310-manylinux1_x86_64.whl"
+"hangzhou.aliyuncs.com/package/daily/2025_11_09/rtp_llm-0.2.0-0.2"
+".0_2025_11_09_12_30_b348b3482_sm8x-cp310-cp310-manylinux1_x86_64.whl"
 
 #: ../../release/v0.2.0/package.md
+#, fuzzy
 msgid ""
 "https://rtp-opensource.oss-cn-"
-"hangzhou.aliyuncs.com/package/daily/2025_10_16/rtp_llm-0.2.0-0.2.0-2025_10_20_10_42_2b7b389a0"
-"-sm7x-cp310-cp310-manylinux1_x86_64.whl"
+"hangzhou.aliyuncs.com/package/daily/2025_11_09/rtp_llm-0.2.0-0.2"
+".0_2025_11_09_12_30_b348b3482_sm7x-cp310-cp310-manylinux1_x86_64.whl"
 msgstr ""
 "https://rtp-opensource.oss-cn-"
-"hangzhou.aliyuncs.com/package/daily/2025_10_16/rtp_llm-0.2.0-0.2.0-2025_10_20_10_42_2b7b389a0"
-"-sm7x-cp310-cp310-manylinux1_x86_64.whl"
+"hangzhou.aliyuncs.com/package/daily/2025_11_09/rtp_llm-0.2.0-0.2"
+".0_2025_11_09_12_30_b348b3482_sm7x-cp310-cp310-manylinux1_x86_64.whl"
 
 #: ../../release/v0.2.0/package.md
+#, fuzzy
 msgid ""
 "https://rtp-opensource.oss-cn-"
-"hangzhou.aliyuncs.com/package/daily/2025_10_20/rtp_llm-0.2.0-0.2.0-2025_10_20_10_42_2b7b389a0"
-"-frontend-cp310-cp310-manylinux1_x86_64.whl"
+"hangzhou.aliyuncs.com/package/daily/2025_11_09/rtp_llm-0.2.0-0.2"
+".0_2025_11_09_12_30_b348b3482_frontend-cp310-cp310-manylinux1_x86_64.whl"
 msgstr ""
 "https://rtp-opensource.oss-cn-"
-"hangzhou.aliyuncs.com/package/daily/2025_10_20/rtp_llm-0.2.0-0.2.0-2025_10_20_10_42_2b7b389a0"
-"-frontend-cp310-cp310-manylinux1_x86_64.whl"
+"hangzhou.aliyuncs.com/package/daily/2025_11_09/rtp_llm-0.2.0-0.2"
+".0_2025_11_09_12_30_b348b3482_frontend-cp310-cp310-manylinux1_x86_64.whl"
 
 #: ../../release/v0.2.0/package.md
+#, fuzzy
 msgid ""
 "https://rtp-opensource.oss-cn-"
-"hangzhou.aliyuncs.com/package/daily/2025_10_20/rtp_llm-0.2.0-0.2.0-2025_10_20_10_42_2b7b389a0"
-"-rocm-cp310-cp310-manylinux1_x86_64.whl"
+"hangzhou.aliyuncs.com/package/daily/2025_11_09/rtp_llm-0.2.0-0.2"
+".0_2025_11_09_12_30_b348b3482_rocm-cp310-cp310-manylinux1_x86_64.whl"
 msgstr ""
 "https://rtp-opensource.oss-cn-"
-"hangzhou.aliyuncs.com/package/daily/2025_10_20/rtp_llm-0.2.0-0.2.0-2025_10_20_10_42_2b7b389a0"
-"-rocm-cp310-cp310-manylinux1_x86_64.whl"
+"hangzhou.aliyuncs.com/package/daily/2025_11_09/rtp_llm-0.2.0-0.2"
+".0_2025_11_09_12_30_b348b3482_rocm-cp310-cp310-manylinux1_x86_64.whl"
 
 #: ../../release/v0.2.0/package.md:26
 msgid "Images of Master is comming soon"
 msgstr "Master 镜像我们将尽快发布"
 
 #~ msgid "0.2.0_0.2.0_2025_10_09_17_35_8fa289f5"
-#~ msgstr "0.2.0_0.2.0_2025_10_09_17_35_8fa289f5"
+#~ msgstr ""
 
 #~ msgid "whl"
 #~ msgstr "wheel包"
+
+#~ msgid "Images of SM9x,SM7x,AMD is comming soon"
+#~ msgstr ""
+
+#~ msgid "Others"
+#~ msgstr ""
+
+#~ msgid "**Role**"
+#~ msgstr "**卡类型**"
+
+#~ msgid "**Frontend**"
+#~ msgstr ""
+
+#~ msgid "hub.docker.alibaba-inc.com/isearch/rtp_llm_frontend"
+#~ msgstr "hub.docker.alibaba-inc.com/isearch/rtp_llm_rocm"
+
+#~ msgid "0.2.0_2025_09_24_21_00_615e568_accelerated"
+#~ msgstr "hub.docker.alibaba-inc.com/isearch/rtp_llm_gpu_cuda12"
+
+#~ msgid "**Master**"
+#~ msgstr "**镜像**"
+
+#~ msgid "hub.docker.alibaba-inc.com/aone/flexlb"
+#~ msgstr ""
+
+#~ msgid "0.2.0_2025_09_19_11_16_3b779f1_accelerated"
+#~ msgstr ""
+
+#~ msgid ""
+#~ "ali-hangzhou-hub-registry.cn-"
+#~ "hangzhou.cr.aliyuncs.com/isearch/rtp_llm_sm9x_opensource"
+#~ msgstr ""
+#~ "ali-hangzhou-hub-registry.cn-"
+#~ "hangzhou.cr.aliyuncs.com/isearch/rtp_llm_sm9x_opensource"
+
+#~ msgid "0.2.0_0.2.0_2025_10_20_10_42_2b7b389a0"
+#~ msgstr "0.2.0_0.2.0_2025_10_20_10_42_2b7b389a0"
+
+#~ msgid ""
+#~ "ali-hangzhou-hub-registry.cn-"
+#~ "hangzhou.cr.aliyuncs.com/isearch/rtp_llm_sm7x_opensource"
+#~ msgstr ""
+#~ "ali-hangzhou-hub-registry.cn-"
+#~ "hangzhou.cr.aliyuncs.com/isearch/rtp_llm_sm8x_opensource"
+
+#~ msgid ""
+#~ "ali-hangzhou-hub-registry.cn-"
+#~ "hangzhou.cr.aliyuncs.com/isearch/rtp_llm_frontend-opensource"
+#~ msgstr ""
+#~ "ali-hangzhou-hub-registry.cn-"
+#~ "hangzhou.cr.aliyuncs.com/isearch/rtp_llm_sm8x_opensource"
+
+#~ msgid ""
+#~ "ali-hangzhou-hub-registry.cn-"
+#~ "hangzhou.cr.aliyuncs.com/isearch/rtp_llm_rocm_opensource"
+#~ msgstr ""
+#~ "ali-hangzhou-hub-registry.cn-"
+#~ "hangzhou.cr.aliyuncs.com/isearch/rtp_llm_sm8x_opensource"
+
+#~ msgid "Images of SM9x,SM7x,AMD,Frontend,Master is comming soon"
+#~ msgstr "SM9x,SM7x,AMD,Frontend,Master 的image 我们会尽快提供"
+
+#~ msgid ""
+#~ "https://rtp-opensource.oss-cn-"
+#~ "hangzhou.aliyuncs.com/package/daily/2025_10_16/rtp_llm-0.2.0-0.2.0-2025_10_20_10_42_2b7b389a0"
+#~ "-sm7x-cp310-cp310-manylinux1_x86_64.whl"
+#~ msgstr ""
+#~ "https://rtp-opensource.oss-cn-"
+#~ "hangzhou.aliyuncs.com/package/daily/2025_10_16/rtp_llm-0.2.0-0.2.0-2025_10_20_10_42_2b7b389a0"
+#~ "-sm7x-cp310-cp310-manylinux1_x86_64.whl"
+
+#~ msgid "0.2.0_0.2.0.2.0_0.2.0_2025_10_31_10_23_d1e93ce12"
+#~ msgstr ""
+
+#~ msgid ""
+#~ "ali-hangzhou-hub-registry.cn-"
+#~ "hangzhou.cr.aliyuncs.com/isearch/rtp_llm_sm8x_opensource"
+#~ msgstr ""
+#~ "ali-hangzhou-hub-registry.cn-"
+#~ "hangzhou.cr.aliyuncs.com/isearch/rtp_llm_sm8x_opensource"
 

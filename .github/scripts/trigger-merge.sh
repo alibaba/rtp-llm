@@ -57,4 +57,4 @@ echo "Sending MERGE-TASK for commitId: ${COMMIT_ID} ${JSON_BODY} "
 curl -v -H "Content-Type: application/json" \
      -H "Authorization: Basic ${SECURITY}" \
      -d "${JSON_BODY}" \
-     "https://triggerid-to-mq-wjrdhcgbie.cn-hangzhou.fcapp.run"
+     "https://triggerid-to-mq-wjrdhcgbie.cn-hangzhou-vpc.fcapp.run"

@@ -11,6 +11,7 @@ import org.springframework.web.reactive.function.server.ServerRequest;
 import org.springframework.web.reactive.function.server.ServerResponse;
 import reactor.core.publisher.Mono;
 
+import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 import static org.springframework.web.reactive.function.server.RequestPredicates.accept;
@@ -24,7 +25,7 @@ import static org.springframework.web.reactive.function.server.RouterFunctions.r
 @Component
 public class AppStateHookServer {
 
-    private final CopyOnWriteArrayList<OnlineListener> onlineListeners = new CopyOnWriteArrayList<>();
+    private final List<OnlineListener> onlineListeners = new CopyOnWriteArrayList<>();
 
     public AppStateHookServer() {
     }

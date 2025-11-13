@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-10-20 10:08+0800\n"
+"POT-Creation-Date: 2025-11-07 16:47+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -185,33 +185,53 @@ msgid "Bug Fixs"
 msgstr ""
 
 #: ../../release/v0.2.0/feature.md:33
-msgid "metrics of cache is not work"
+msgid "P/D Disaggregation dead lock casuse by request cancel/failed before remote running"
 msgstr ""
 
 #: ../../release/v0.2.0/feature.md:34
-msgid "P/D Disaggregation dead lock"
+msgid "Raw Request stream stop_words cause fake hang"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:35
+msgid "some speculative decoding bugs"
 msgstr ""
 
 #: ../../release/v0.2.0/feature.md:36
-msgid "Question of omission"
-msgstr ""
-
-#: ../../release/v0.2.0/feature.md:37
-msgid "too many dynamic lora need more **reserver_runtime_mem_mb**"
+msgid "Warmup produce nan maybe influence kvcache"
 msgstr ""
 
 #: ../../release/v0.2.0/feature.md:38
-msgid "AMD not support MoE models"
+msgid "Question of omission"
 msgstr ""
 
 #: ../../release/v0.2.0/feature.md:39
-msgid "MoE model without shared_experter cannot use enable-layer-micro-batch"
+msgid "In 3fs Case need more MEM or set FRONTEND_SERVER_COUNT=1 to reduce frontend_server mem usage in P/D when Use Frontend Disaggregation."
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:40
+msgid "too many dynamic lora need more reserver_runtime_mem_mb"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:41
+msgid "AMD not support MoE models"
 msgstr ""
 
 #: ../../release/v0.2.0/feature.md:42
-msgid "Performance"
+msgid "MoE model without shared_experter cannot use enable-layer-micro-batch"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:43
+msgid "P/D Disaggregation with EPLB and MTP step > 1 may cause Prefill Hang"
 msgstr ""
 
 #: ../../release/v0.2.0/feature.md:44
+msgid "Embedding of VL Model is not ok cause by position id is wrong"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:46
+msgid "Performance"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:48
 msgid "Compatibility"
 msgstr ""

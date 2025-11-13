@@ -3,7 +3,7 @@ import logging
 import os
 import time
 from collections import OrderedDict
-from typing import Dict, Optional, NamedTuple, List, Tuple
+from typing import Dict, List, NamedTuple, Optional, Tuple
 
 import safetensors
 import torch
@@ -15,23 +15,31 @@ from rtp_llm.config.task_type import TaskType
 from rtp_llm.device import get_current_device
 from rtp_llm.eplb.ep_balancer import ExpertBalancer
 from rtp_llm.lora.lora_weights import LoRAWeights
-from rtp_llm.model_loader.load_config import LoadConfig
+from rtp_llm.model_loader.load_config import LoadConfig, LoadMethod
 from rtp_llm.model_loader.model_weight_info import (
     ModelDeployWeightInfo,
     ModelWeightInfo,
     ModelWeights,
 )
+from rtp_llm.model_loader.tensor_source import DatabaseTensorSource, TensorCollector
 from rtp_llm.model_loader.weight_module import CustomAtomicWeight, WeightModule
-from rtp_llm.model_loader.tensor_source import TensorCollector, DatabaseTensorSource
 from rtp_llm.utils.database import BaseDatabase, CkptDatabase
 from rtp_llm.utils.fuser import fetch_remote_file_to_local
 from rtp_llm.utils.model_weight import W, WeightStyle
+from rtp_llm.utils.module_util import has_module
 from rtp_llm.utils.time_util import timer_wrapper
 from rtp_llm.utils.util import check_with_info
 
 
 class ModelLoader:
-    WeightInfo = NamedTuple("WeightInfo", [("weight", WeightModule), ("layer_id", Optional[int]), ("collector", TensorCollector)])
+    WeightInfo = NamedTuple(
+        "WeightInfo",
+        [
+            ("weight", WeightModule),
+            ("layer_id", Optional[int]),
+            ("collector", TensorCollector),
+        ],
+    )
 
     def __init__(
         self,
@@ -212,19 +220,33 @@ class ModelLoader:
         return model_weights
 
     def _load_weight(self, device: str):
-        is_safetensor = self._load_config.database.is_safetensor
-        convert_device = self._choose_weight_convert_device(device)
-        if is_safetensor and convert_device != "cpu" and self._is_memory_enough_for_fastsafetensor():
-            try:
-                return self._load_from_fastsafetensor(device)
-            except Exception as e:
-                logging.warning(f"Failed to load from fastsafetensors: {e}")
-        
+        load_method = self._load_config.load_method
+        if load_method == LoadMethod.AUTO:
+            is_safetensor = self._load_config.database.is_safetensor
+            convert_device = self._choose_weight_convert_device(device)
+            tensors_name = self._load_config.database.get_pretrain_tensor_names()
+            not_same_name_tensors = len(set(tensors_name)) == len(tensors_name)
+            if (
+                is_safetensor
+                and convert_device != "cpu"
+                and not_same_name_tensors
+                and self._is_memory_enough_for_fastsafetensor()
+                and has_module("fastsafetensors")
+            ):
+                load_method = LoadMethod.FASTSAFETENSORS
+            else:
+                load_method = LoadMethod.SCRATCH
+
         logging.info(
-            f"database is safetensor: {is_safetensor}, device: {device}, choose devie: {convert_device}"
+            f"load method: {self._load_config.load_method}, finally choose load method: {load_method}"
         )
-        return self._load_from_scratch(device)
-    
+        if load_method == LoadMethod.FASTSAFETENSORS:
+            return self._load_from_fastsafetensor(device)
+        elif load_method == LoadMethod.SCRATCH:
+            return self._load_from_scratch(device)
+        else:
+            raise ValueError(f"Unknown load method: {load_method}")
+
     def _is_memory_enough_for_fastsafetensor(self):
         model_size = self._weights_info.config.eval_model_size()
         device_mem_info = self._load_config.exported_device.get_mem_info()
@@ -235,9 +257,11 @@ class ModelLoader:
             free_mem = device_mem_info.free / (1024.0**2)
         model_mem = model_size / self._load_config.tp_size / (1024.0**2)
         max_file_mem = max_file_size / (1024.0**2)
-        logging.debug(f"free mem: {free_mem}, model mem: {model_mem}, max file mem: {max_file_mem}")
+        logging.debug(
+            f"free mem: {free_mem}, model mem: {model_mem}, max file mem: {max_file_mem}"
+        )
         return (free_mem - model_mem) > (3 * max_file_mem)
-    
+
     def _load_from_fastsafetensor(self, device: str):
         all_tensors = self._load_config.database.fastsafetensors_weights_iterator(
             device, True
@@ -254,30 +278,32 @@ class ModelLoader:
             if complete:
                 start = time.time()
                 tensors = weight_info.weight.load(
-                    tensor_source=weight_info.collector, 
-                    layer_id=weight_info.layer_id, 
-                    device=device, 
+                    tensor_source=weight_info.collector,
+                    layer_id=weight_info.layer_id,
+                    device=device,
                     load_config=self._load_config,
                 )
                 for name, tensor in tensors.items():
                     if weight_info.layer_id is not None:
-                        model_weights.set_layer_weight(weight_info.layer_id, name, tensor)
+                        model_weights.set_layer_weight(
+                            weight_info.layer_id, name, tensor
+                        )
                     else:
                         model_weights.set_global_weight(name, tensor)
                 logging.debug(
                     f"weight: {type(weight_info.weight).__name__} load cost {time.time() - start}"
                 )
                 weight_info.collector.clear()
-        
+
         for weight_info in weight_info_list:
             weight_info.collector.clear()
             if weight_info.collector.is_collection_complete():
                 continue
             tensors = weight_info.weight.load(
-                tensor_source=DatabaseTensorSource(self._load_config.database), 
-                layer_id=weight_info.layer_id, 
-                device=device, 
-                load_config=self._load_config
+                tensor_source=DatabaseTensorSource(self._load_config.database),
+                layer_id=weight_info.layer_id,
+                device=device,
+                load_config=self._load_config,
             )
             for name, tensor in tensors.items():
                 if weight_info.layer_id is not None:
@@ -297,18 +323,24 @@ class ModelLoader:
             if self._maybe_skip_weight(weight):
                 continue
             weights = weight.load(
-                DatabaseTensorSource(self._load_config.database), None, device, self._load_config
+                DatabaseTensorSource(self._load_config.database),
+                None,
+                device,
+                self._load_config,
             )
             for name, tensor in weights.items():
                 yield (None, name, tensor)
 
         for weight in self._misc_weights_info:
             weights = weight.load(
-                DatabaseTensorSource(self._load_config.database), None, device, self._load_config
+                DatabaseTensorSource(self._load_config.database),
+                None,
+                device,
+                self._load_config,
             )
             for name, tensor in weights.items():
                 yield (None, name, tensor)
-    
+
     def _generate_weight_info(self) -> Tuple[Dict[str, WeightInfo], List[WeightInfo]]:
         # WeightInfo = namedtuple("WeightInfo", ["weight", "layer_id", "collector"])
         WeightInfo = ModelLoader.WeightInfo
@@ -320,19 +352,19 @@ class ModelLoader:
                 if isinstance(layer_weights, WeightModule):
                     names = layer_weights.get_tensor_names(layer_id, self._load_config)
                     collector = TensorCollector(names, self._load_config.database)
-                    weight_info = WeightInfo(weight=layer_weights, layer_id=layer_id, collector=collector)
-                    tensor_to_weight_map.update(
-                        {k: weight_info for k in names}
+                    weight_info = WeightInfo(
+                        weight=layer_weights, layer_id=layer_id, collector=collector
                     )
+                    tensor_to_weight_map.update({k: weight_info for k in names})
                     weight_info_list.append(weight_info)
                 else:
                     for weight in layer_weights:
                         names = weight.get_tensor_names(layer_id, self._load_config)
                         collector = TensorCollector(names, self._load_config.database)
-                        weight_info = WeightInfo(weight=weight, layer_id=layer_id, collector=collector)
-                        tensor_to_weight_map.update(
-                            {k: weight_info for k in names}
+                        weight_info = WeightInfo(
+                            weight=weight, layer_id=layer_id, collector=collector
                         )
+                        tensor_to_weight_map.update({k: weight_info for k in names})
                         weight_info_list.append(weight_info)
         for weight in self._model_weights_info.weights:
             if self._maybe_skip_weight(weight):
@@ -340,17 +372,13 @@ class ModelLoader:
             names = weight.get_tensor_names(None, self._load_config)
             collector = TensorCollector(names, self._load_config.database)
             weight_info = WeightInfo(weight=weight, layer_id=None, collector=collector)
-            tensor_to_weight_map.update(
-                {k: weight_info for k in names}
-            )
+            tensor_to_weight_map.update({k: weight_info for k in names})
             weight_info_list.append(weight_info)
         for weight in self._misc_weights_info:
             names = weight.get_tensor_names(None, self._load_config)
             collector = TensorCollector(names, self._load_config.database)
             weight_info = WeightInfo(weight=weight, layer_id=None, collector=collector)
-            tensor_to_weight_map.update(
-                {k: weight_info for k in names}
-            )
+            tensor_to_weight_map.update({k: weight_info for k in names})
             weight_info_list.append(weight_info)
         return tensor_to_weight_map, weight_info_list
 
@@ -407,7 +435,10 @@ class ModelLoader:
         weights = {}
         for weight in layer_weights:
             res = weight.load(
-                DatabaseTensorSource(self._load_config.database), layer_id, device, self._load_config
+                DatabaseTensorSource(self._load_config.database),
+                layer_id,
+                device,
+                self._load_config,
             )
             weights.update(res)
         return weights
@@ -466,7 +497,10 @@ class ModelLoader:
             if dynamic_weights:
                 for dynamic_weight in dynamic_weights:
                     dynamic_w = dynamic_weight.load(
-                        DatabaseTensorSource(self._load_config.database), None, device, self._load_config
+                        DatabaseTensorSource(self._load_config.database),
+                        None,
+                        device,
+                        self._load_config,
                     )
                     weight.set_global_weight(
                         dynamic_weight.name, dynamic_w.get(dynamic_weight.name)

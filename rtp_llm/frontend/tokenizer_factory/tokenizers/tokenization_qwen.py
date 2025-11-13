@@ -90,8 +90,7 @@ class QWenTokenizer(PreTrainedTokenizer):
         errors="replace",
         **kwargs,
     ):
-        super().__init__(**kwargs)
-
+        super().__init__(eos_token=ENDOFTEXT, **kwargs)
         self.errors = errors  # how to handle errors in decoding
 
         self.mergeable_ranks = _load_tiktoken_bpe(vocab_file)  # type: dict[bytes, int]

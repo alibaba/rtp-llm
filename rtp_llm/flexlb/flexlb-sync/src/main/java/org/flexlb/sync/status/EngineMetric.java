@@ -4,6 +4,7 @@ import lombok.Data;
 
 @Data
 public class EngineMetric {
+
     private int prefill;
     private int decode;
     private int pdFusion;

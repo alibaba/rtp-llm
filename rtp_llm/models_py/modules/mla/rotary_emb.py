@@ -1,4 +1,5 @@
 import logging
+import math
 from typing import Any, Optional
 
 import torch
@@ -7,7 +8,7 @@ from rtp_llm.models_py.modules.mla.flashinfer_mla import (
     check_attention_inputs,
     flashinfer_python,
 )
-from rtp_llm.ops import KVCache, PyAttentionInputs, rtp_llm_ops
+from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
 
 
 class MlaRotaryEmbeddingOp(object):
@@ -74,6 +75,86 @@ class MlaRotaryEmbeddingOp(object):
                 k_cache,
                 v_cache,
                 rope_params.page_indice,
-                rope_params.page_indptr,
+                rope_params.decode_page_indptr,
                 rope_params.paged_kv_last_page_len,
+            )
+        else:
+            # for warm up jit
+            kv_len = [append_ckv_t.size(0)]
+            num_pages_per_req = torch.tensor(
+                [math.ceil(len / self.token_per_block) for len in kv_len],
+                dtype=torch.int32,
+                device=append_ckv_t.device,
+            )
+            kv_append_length = torch.tensor(
+                kv_len, dtype=torch.int32, device=append_ckv_t.device
+            )
+            kv_append_indptr = (
+                torch.cat(
+                    [
+                        torch.zeros(1).int().to(append_ckv_t.device),
+                        torch.cumsum(kv_append_length, dim=0),
+                    ],
+                )
+                .int()
+                .to(append_ckv_t.device)
+            )
+
+            max_num_pages = sum(num_pages_per_req)
+            kv_page_indptr = (
+                torch.cat(
+                    [
+                        torch.zeros(1).int().to(append_ckv_t.device),
+                        torch.cumsum(num_pages_per_req, dim=0),
+                    ],
+                )
+                .int()
+                .to(append_ckv_t.device)
+            )
+            kv_page_indices = torch.arange(
+                sum(num_pages_per_req), dtype=torch.int32, device=append_ckv_t.device
+            )
+
+            kv_last_page_len = torch.tensor(
+                [
+                    (
+                        len % self.token_per_block
+                        if len % self.token_per_block != 0
+                        else self.token_per_block
+                    )
+                    for len in kv_len
+                ],
+                dtype=torch.int32,
+                device=append_ckv_t.device,
+            )
+            batch_indices, positions = flashinfer_python.get_batch_indices_positions(
+                kv_append_indptr,
+                flashinfer_python.get_seq_lens(
+                    kv_page_indptr, kv_last_page_len, self.token_per_block
+                ),
+                append_ckv_t.size(0),
+            )
+            cache = torch.empty(
+                [
+                    max_num_pages,
+                    self.token_per_block,
+                    self.kv_lora_rank + self.rope_head_dim,
+                ],
+                dtype=append_ckv_t.dtype,
+                device=append_ckv_t.device,
+            )
+            k_cache, v_cache = torch.split(
+                cache, [self.kv_lora_rank, self.rope_head_dim], dim=-1
+            )
+
+            flashinfer_python.page.append_paged_mla_kv_cache(
+                append_ckv_t,
+                key,
+                batch_indices,
+                positions,
+                k_cache,
+                v_cache,
+                kv_page_indices,
+                kv_page_indptr,
+                kv_last_page_len,
             )

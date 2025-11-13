@@ -15,12 +15,6 @@ from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.pipeline import Pipeline
 from rtp_llm.test.utils.port_util import PortsContext
 
-# import pdb
-# pdb.set_trace()
-
-# from librtp_compute_ops.rtp_llm_ops import ParamsBase
-
-
 start_port = 23345
 StaticConfig.server_config.start_port = start_port
 update_master_info("127.0.0.1", start_port)
@@ -34,7 +28,14 @@ model = ModelFactory.creat_standalone_py_model_from_huggingface(
 )
 
 
-from rtp_llm.ops import KVCache, PyAttentionInputs, PyModelInputs, PyModelOutputs
+import torch
+
+from rtp_llm.ops.compute_ops import (
+    KVCache,
+    PyAttentionInputs,
+    PyModelInputs,
+    PyModelOutputs,
+)
 
 attention_inputs = PyAttentionInputs()
 inputs = PyModelInputs(

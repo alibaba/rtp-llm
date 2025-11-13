@@ -7,7 +7,7 @@ from unittest import TestCase, main
 import pynvml
 import torch
 
-from rtp_llm.async_decoder_engine.async_model import AsyncModel
+from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 from rtp_llm.model_factory import ModelConfig, ModelFactory
 from rtp_llm.pipeline.pipeline import Pipeline
 from rtp_llm.utils.ft_plugin import plguin_loader
@@ -232,8 +232,8 @@ class ModelTestBase(TestCase):
             all(self.flat(self.close(expect_result[1], batch_loss).tolist()))
         )
 
-    def _load_model(self):
-        model = ModelFactory.from_model_config(
+    def _load_engine(self):
+        engine = ModelFactory.from_model_config(
             ModelConfig(
                 model_type=self.model_type,
                 tokenizer_path=self.tokenizer_path,
@@ -243,13 +243,13 @@ class ModelTestBase(TestCase):
                 quantization=self.quantization,
             )
         )
-        return model
+        return engine
 
     def simple_test(self, is_fake: bool):
-        model = self._load_model()
+        engine: BaseEngine = self._load_engine()
         try:
-            pipeline = Pipeline(model.config, model.tokenizer)
-            if model.config.pre_seq_len > 0:
+            pipeline = Pipeline(engine.config, engine.model.tokenizer)
+            if engine.config.pre_seq_len > 0:
                 model_str = "/ptuning"
             else:
                 model_str = ""
@@ -291,8 +291,8 @@ class ModelTestBase(TestCase):
                 expected_path += "/expect.pt"
                 self._test_ft_async_score(pipeline, expected_path)
         finally:
-            if isinstance(model, AsyncModel):
-                model.stop()
+            if isinstance(engine, BaseEngine):
+                engine.stop()
 
 
 if __name__ == "__main__":

@@ -1,7 +1,6 @@
 import json
 from typing import Any, Dict, Optional, Tuple
 
-from rtp_llm.async_decoder_engine.async_model import AsyncModel
 from rtp_llm.async_decoder_engine.embedding.embedding_engine import EmbeddingCppEngine
 from rtp_llm.async_decoder_engine.embedding.interface import EngineOutputs
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
@@ -10,11 +9,10 @@ from rtp_llm.models.downstream_modules.custom_module import CustomModule
 
 
 class EmbeddingEndpoint(object):
-    def __init__(self, model: AsyncModel):
-        assert isinstance(model.decoder_engine_, EmbeddingCppEngine)
-        self.decoder_engine_: EmbeddingCppEngine = model.decoder_engine_
-        assert model.model.custom_module is not None, "custom model should not be None"
-        self.custom_model_: CustomModule = model.model.custom_module
+    def __init__(self, engine: EmbeddingCppEngine):
+        self.engine = engine
+        assert engine.model.custom_module is not None, "custom model should not be None"
+        self.custom_model_: CustomModule = engine.model.custom_module
 
     async def handle(
         self, request: Dict[str, Any]
@@ -29,7 +27,7 @@ class EmbeddingEndpoint(object):
         except Exception as e:
             raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, str(e))
         try:
-            batch_output = await self.decoder_engine_.decode(batch_input)
+            batch_output = await self.engine.decode(batch_input)
             batch_output = handler.post_process(formated_request, batch_output)
             response = await renderer.render_response(
                 formated_request, batch_input, batch_output

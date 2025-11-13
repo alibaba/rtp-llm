@@ -8,10 +8,19 @@ import torch
 from torch import nn
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.models_py.modules import utils
-from rtp_llm.models_py.modules.linear import Linear
+from rtp_llm.models_py.modules import Linear, utils
 
-if utils.is_cuda():
+if utils.is_hip():
+    from rtp_llm.models_py.modules.rocm.fp8_linear import (
+        Fp8DeepGEMMLinear,
+        Fp8PTPCLinear,
+    )
+
+    FP8_LINEAR_AVAILABLE = True
+    FP8_PTPC_AVAILABLE = True
+
+
+elif utils.is_cuda():
     from rtp_llm.models_py.modules.fp8_linear import Fp8PerTensorLinear
 
     try:
@@ -24,6 +33,7 @@ if utils.is_cuda():
 else:
     Fp8DeepGEMMLinear = None
     FP8_LINEAR_AVAILABLE = False
+    FP8_PTPC_AVAILABLE = False
 
 
 class LinearFactory:
@@ -59,7 +69,9 @@ class LinearFactory:
         if weight is None:
             return False
 
-        return weight.dtype == torch.float8_e4m3fn
+        return (
+            weight.dtype == torch.float8_e4m3fn or weight.dtype == torch.float8_e4m3fnuz
+        )
 
     @staticmethod
     def create_linear(
@@ -72,7 +84,11 @@ class LinearFactory:
     ) -> nn.Module:
         """Create Linear layer (FP8 or regular)."""
         if force_fp8 or (
-            weight_scales is not None and weight.dtype == torch.float8_e4m3fn
+            weight_scales is not None
+            and (
+                weight.dtype == torch.float8_e4m3fn
+                or weight.dtype == torch.float8_e4m3fnuz
+            )
         ):
             if weight_scales is None:
                 raise ValueError("FP8 linear layer requires weight_scales")
@@ -92,7 +108,14 @@ class LinearFactory:
                         raise RuntimeError(
                             "FP8 DeepGEMMLinear layer requested but not available"
                         )
-                    return Fp8DeepGEMMLinear(weight, weight_scales, bias, config)
+
+                    if (
+                        quant_config
+                        and quant_config.get_method() == "FP8_PER_CHANNEL_COMPRESSED"
+                    ):
+                        return Fp8PTPCLinear(weight, weight_scales, bias, config)
+                    else:
+                        return Fp8DeepGEMMLinear(weight, weight_scales, bias, config)
         else:
             return Linear(weight, bias)
 

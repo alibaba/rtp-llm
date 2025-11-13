@@ -4,7 +4,7 @@ from torch.nn import functional as F
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.distribute.collective import Group, all_gather
-from rtp_llm.ops import rtp_llm_ops
+from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 
 class EmbeddingTorch(nn.Module):

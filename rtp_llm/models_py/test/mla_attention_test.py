@@ -20,9 +20,9 @@ from rtp_llm.models_py.modules.fmha import (
     MlaFlashInferDecodeImpl,
     MlaFlashInferPrefillImpl,
 )
-from rtp_llm.models_py.modules.mla import DeepSeekV2Attention
-from rtp_llm.models_py.modules.mla.mla_attention_ref import DeepseekV2AttentionRef
-from rtp_llm.ops import KVCache, PyAttentionInputs
+from rtp_llm.models_py.modules.mla import MlaAttention
+from rtp_llm.models_py.modules.mla.mla_attention_ref import MlaAttentionRef
+from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs
 from rtp_llm.utils.model_weight import W
 
 
@@ -196,9 +196,9 @@ class MLATest(TestCase):
         fmha_impl = MlaFlashInferPrefillImpl(
             self.config, attn_inputs, layer_weights, create_cos_sin_cache()
         )
-        deepseekv2_mla = DeepSeekV2Attention(self.config, weights, 0)
+        deepseekv2_mla = MlaAttention(self.config, weights, 0)
         kv_cache: Optional[KVCache] = None
-        deepseekv2_mla_ref = DeepseekV2AttentionRef(self.config, weights, 0)
+        deepseekv2_mla_ref = MlaAttentionRef(self.config, weights, 0)
 
         hidden = torch.randn(
             [num_tokens, self.config.hidden_size],

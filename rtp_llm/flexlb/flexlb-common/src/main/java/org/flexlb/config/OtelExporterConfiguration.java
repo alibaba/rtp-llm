@@ -1,6 +1,5 @@
 package org.flexlb.config;
 
-
 import io.opentelemetry.exporter.otlp.trace.OtlpGrpcSpanExporter;
 import io.opentelemetry.exporter.otlp.trace.OtlpGrpcSpanExporterBuilder;
 import org.flexlb.telemetry.OtelExporterProperties;
@@ -19,7 +18,7 @@ import java.util.concurrent.TimeUnit;
 public class OtelExporterConfiguration {
 
     @Bean
-    @ConditionalOnProperty(value = "tpp.otel.exporter.otlp.enabled", matchIfMissing = true)
+    @ConditionalOnProperty(value = "trace.otel.exporter.otlp.enabled", matchIfMissing = true)
     OtlpGrpcSpanExporter otelOtlpGrpcSpanExporter(OtelExporterProperties properties) {
         OtlpGrpcSpanExporterBuilder builder = OtlpGrpcSpanExporter.builder();
         String endpoint = properties.getOtlp().getEndpoint();
@@ -38,7 +37,7 @@ public class OtelExporterConfiguration {
     }
 
     @Bean
-    @ConditionalOnProperty(value = "tpp.otel.exporter.logging.enabled", matchIfMissing = true)
+    @ConditionalOnProperty(value = "trace.otel.exporter.logging.enabled", matchIfMissing = true)
     LoggingSpanExporter otelOtlpLoggingSpanExporter(OtelExporterProperties properties) {
         return LoggingSpanExporter.create();
     }

@@ -114,8 +114,8 @@ aiosignal==1.3.1 \
     --hash=sha256:54cd96e15e1649b75d6c87526a6ff0b6c1b0dd3459f43d9ca11d48c339b68cfc \
     --hash=sha256:f8376fb07dd1e86a584e4fcdec80b36b7f81aac666ebc724e2c090300dd83b17
     # via aiohttp
-aiter @ https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/RTP/aiter-0.1.0%2Bgit.94934e7d.date.202508252342-py3-none-any.whl \
-    --hash=sha256:b89328e61855aba0ee3e96f800dbd9c1f8f400adee596978652d3891483bca51
+aiter @ https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/RTP/aiter-0.1.5%2Bgit.007fe7aa.date.202510272053-py3-none-any.whl \
+    --hash=sha256:236197b1e55e546ab80a19a2f42cfb69075ff058c8b33341b70bc513e488febd
     # via -r open_source/deps/requirements_rocm.txt
 aliyun-python-sdk-core==2.15.2 \
     --hash=sha256:54f66a53e193c61c5e16ea4505a0cab43543f8ad2ef22833f69c4d5e5151c17d
@@ -1977,6 +1977,7 @@ psutil==6.0.0 \
     # via
     #   -r open_source/deps/requirements_base.txt
     #   accelerate
+    #   aiter
 py-spy==0.3.14 \
     --hash=sha256:3e8e48032e71c94c3dd51694c39e762e4bbfec250df5bf514adcdd64e79371e0 \
     --hash=sha256:590905447241d789d9de36cff9f52067b6f18d8b5e9fb399242041568d414461 \
@@ -2024,9 +2025,9 @@ pyarrow==17.0.0 \
     --hash=sha256:f7ae2de664e0b158d1607699a16a488de3d008ba99b3a7aa5de1cbc13574d047 \
     --hash=sha256:fa3c246cc58cb5a4a5cb407a18f193354ea47dd0648194e6265bd24177982fe8
     # via pyodps
-pybind11==2.13.6 \
-    --hash=sha256:237c41e29157b962835d356b370ededd57594a26d5894a795960f0047cb5caf5 \
-    --hash=sha256:ba6af10348c12b24e92fa086b39cfba0eff619b61ac77c406167d813b096d39a
+pybind11==3.0.1 \
+    --hash=sha256:9c0f40056a016da59bab516efb523089139fcc6f2ba7e4930854c61efb932051 \
+    --hash=sha256:aa8f0aa6e0a94d3b64adfc38f560f33f15e589be2175e103c0a33c6bce55ee89
     # via aiter
 pycparser==2.22 \
     --hash=sha256:491c8be9c040f5390f5bf44a5b07752bd07f56edf992381b05c701439eec10f6 \

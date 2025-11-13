@@ -34,3 +34,10 @@ def init_load_group_args(parser):
         default=0,
         help="加载Checkpoint的进程数量",
     )
+    load_group.add_argument(
+        "--load_method",
+        env_name="LOAD_METHOD",
+        type=str,
+        default="auto",
+        help="模型权重加载方法",
+    )

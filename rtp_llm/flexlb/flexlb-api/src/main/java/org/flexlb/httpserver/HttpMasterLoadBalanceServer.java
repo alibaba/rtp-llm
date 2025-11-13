@@ -1,21 +1,8 @@
 package org.flexlb.httpserver;
 
-import java.net.URI;
-import java.time.Duration;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.concurrent.TimeoutException;
-import java.util.function.BiConsumer;
-import java.util.function.Function;
-
-import com.taobao.eagleeye.EagleEye;
-import com.taobao.eagleeye.RpcContext_inner;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.commons.lang3.StringUtils;
 import org.flexlb.balance.LoadBalanceWrapper;
 import org.flexlb.consistency.LBStatusConsistencyService;
-import org.flexlb.constant.CommonConstants;
 import org.flexlb.dao.RequestContext;
 import org.flexlb.dao.loadbalance.LogLevelUpdateRequest;
 import org.flexlb.dao.loadbalance.MasterRequest;
@@ -49,18 +36,25 @@ import org.springframework.web.reactive.function.server.ServerRequest;
 import org.springframework.web.reactive.function.server.ServerResponse;
 import reactor.core.publisher.Mono;
 
+import java.net.URI;
+import java.time.Duration;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.TimeoutException;
+import java.util.function.BiConsumer;
+import java.util.function.Function;
+
 import static org.springframework.web.reactive.function.server.RequestPredicates.accept;
 import static org.springframework.web.reactive.function.server.RouterFunctions.route;
 
 /**
- * @author zjw
+ * @author saichen
  * description:
  * date: 2025/3/16
  */
 @Slf4j
 @Component
 public class HttpMasterLoadBalanceServer implements ShutdownListener, OnlineListener {
-
     private static final Logger pvLogger = LoggerFactory.getLogger("pvLogger");
     private final GeneralHttpNettyService generalHttpNettyService;
     private final LoadBalanceWrapper loadBalanceWrapper;
@@ -126,7 +120,6 @@ public class HttpMasterLoadBalanceServer implements ShutdownListener, OnlineList
                     return ServerResponse.ok()
                             .contentType(MediaType.APPLICATION_JSON)
                             .body(Mono.just(result), MasterResponse.class);
-
                 }).onErrorResume(e -> {
                     LoggingUtils.error("selectBestWorker error", e);
                     balanceContext.setSuccess(false);
@@ -185,7 +178,6 @@ public class HttpMasterLoadBalanceServer implements ShutdownListener, OnlineList
                     }
                     // role list
                     MasterResponse result = loadBalanceWrapper.selectEngineWorker(balanceContext);
-
                     result.setRealMasterHost(lbStatusConsistencyService.getMasterHostIpPort());
                     if (result.isSuccess()) {
                         balanceContext.setPvLogData(PvLogData.success(req, result));
@@ -211,7 +203,6 @@ public class HttpMasterLoadBalanceServer implements ShutdownListener, OnlineList
                             .body(Mono.just(e.getMessage()), String.class);
                 })
                 .doFinally(s -> {
-                    ctx.getSpan().addEvent(CommonConstants.DONE_INFO);
                     // 汇报监控
                     engineHealthReporter.reportBalancingService(balanceContext);
                     // 记录PV日志
@@ -233,7 +224,6 @@ public class HttpMasterLoadBalanceServer implements ShutdownListener, OnlineList
                 });
     }
 
-
     public Mono<ServerResponse> notifyParticipant(ServerRequest request) {
         return request.bodyToMono(MasterChangeNotifyReq.class)
                 .flatMap(masterChangeNotifyReq -> {
@@ -249,10 +239,11 @@ public class HttpMasterLoadBalanceServer implements ShutdownListener, OnlineList
                 });
     }
 
+
     public Mono<ServerResponse> dumpLBStatus(ServerRequest request) {
         return request.bodyToMono(SyncLBStatusReq.class)
                 .flatMap(syncLBStatusReq -> {
-                    SyncLBStatusResp resp = lbStatusConsistencyService.dumpLBStatus(syncLBStatusReq);
+                    SyncLBStatusResp resp = lbStatusConsistencyService.dumpLBStatus();
                     return ServerResponse.ok()
                             .contentType(MediaType.APPLICATION_JSON)
                             .body(Mono.just(resp), SyncLBStatusResp.class);
@@ -291,7 +282,6 @@ public class HttpMasterLoadBalanceServer implements ShutdownListener, OnlineList
         for (Map.Entry<String, List<String>> entry : httpHeaders.asHttpHeaders().entrySet()) {
             String headerName = entry.getKey();
             List<String> values = entry.getValue();
-
             if (values == null || values.isEmpty()) {
                 continue;
             }
@@ -302,37 +292,7 @@ public class HttpMasterLoadBalanceServer implements ShutdownListener, OnlineList
                 processor.accept(ctx, headerValue);
             }
         }
-        RpcContext_inner rpcContextInner = buildEagleTraceCtx(ctx);
-        ctx.setEagleTraceCtx(rpcContextInner);
         ctx.setRequestId(IdUtils.fastUuid());
         return ctx;
-    }
-
-    public RpcContext_inner buildEagleTraceCtx(RequestContext ctx) {
-        String traceId = ctx.getOriginTraceId();
-        String rpcId = ctx.getRpcId();
-        String userData = ctx.getTraceUserData();
-        // 如果没有上下文，需要生成新的
-        if (traceId == null) {
-            traceId = EagleEye.generateTraceId(null);
-        }
-        if (rpcId == null) {
-            rpcId = EagleEye.MAL_ROOT_RPC_ID;
-        }
-        // 重新构建上下文
-        Map<String, String> context = new HashMap<>();
-        context.put(EagleEye.TRACE_ID_KEY, traceId);
-        context.put(EagleEye.RPC_ID_KEY, rpcId);
-        if (userData != null) {
-            context.put(EagleEye.USER_DATA_KEY, userData);
-        }
-        EagleEye.setRpcContext(context);
-        if (StringUtils.isEmpty(EagleEye.exportUserData())) {
-            // 按照& =（明文格式）再次导入UserData
-            EagleEye.importPrintableUserData(userData);
-        }
-        EagleEye.rpcServerRecv("com.alibaba.whale.server.HttpWhaleApiServer",
-                 "master@" + ctx.getModel(), EagleEye.TYPE_CUSTOM_SERVER);
-        return EagleEye.getRpcContext();
     }
 }

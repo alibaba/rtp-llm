@@ -2,7 +2,7 @@ package(default_visibility = ["//visibility:public"])
 load("@rules_python//python:packaging.bzl", "py_package", "py_wheel")
 # make different torch for different device when in compiling
 load("//bazel:defs.bzl", "upload_pkg", "copy_target_to", "upload_wheel", "rename_wheel", "rename_wheel_aarch64")
-load("//bazel:arch_select.bzl", "requirement", "whl_deps", "internal_deps", "jit_deps")
+load("//bazel:arch_select.bzl", "requirement", "whl_deps", "internal_deps", "jit_deps", "triton_deps")
 load("//open_source/bazel:arch_select.bzl", "platform_deps")
 load("//bazel:bundle.bzl", "bundle_files", "bundle_tar")
 
@@ -29,20 +29,22 @@ flashinfer = [
 xft_dep = select({
     "@//:using_arm": [],
     "//:xft_use_icx": [
-        "xfastertransformer_devel_icx",
+        # "xfastertransformer_devel_icx",
     ],
     "//conditions:default": [
-        "xfastertransformer_devel",
+        # "xfastertransformer_devel",
     ],
 })
 
 arch_dep = select({
     "@//:using_arm": [],
+    "@//:using_cuda12_arm": [],
     "//conditions:default": [":decord"],
 })
 
 arch_with_version_dep = select({
     "@//:using_arm": [],
+    "@//:using_cuda12_arm": [],
     "//conditions:default": ["decord==0.6.0"],
 })
 
@@ -214,13 +216,15 @@ py_library(
         "//rtp_llm/model_loader:loader",
         "//rtp_llm/models_py:models",
     ] + arch_dep + select({
-        "@//:using_cuda12": tensorrt + flashinfer,
+        "@//:using_cuda12_9_x86": tensorrt + flashinfer,
+        "@//:cuda_pre_12_9": tensorrt + flashinfer,
         "//conditions:default": []
     }) + select({
         "@//:using_arm": [],
-        "//:xft_use_icx": [
-            "xfastertransformer_devel_icx",
-        ],
+        "@//:using_cuda12_arm": [],
+        # "//:xft_use_icx": [
+        #     "xfastertransformer_devel_icx",
+        # ],
         "//conditions:default": [
             "xfastertransformer_devel",
         ],
@@ -228,8 +232,9 @@ py_library(
         "@//:using_arm": [],
 	    "@//:using_rocm": ["pyrsmi", "amdsmi"],
         "@//:using_cpu": [],
+        "@//:using_cuda12_arm": [],
         "//conditions:default": ["flash_attn"]
-    }),
+    }) + triton_deps(["triton"]),
 )
 
 py_library(
@@ -503,12 +508,12 @@ py_package(
 )
 
 whl_reqs = [
-    "filelock==3.13.1",
+    "filelock>=3.20.0",
     "jinja2",
     "sympy",
     "typing-extensions",
     "importlib_metadata",
-    "transformers==4.46.2",
+    "transformers==4.51.2",
     "sentencepiece==0.2.0",
     "fastapi==0.115.6",
     "grpcio-tools==1.57.0",
@@ -517,7 +522,7 @@ whl_reqs = [
     "dacite",
     "pynvml",
     "thrift",
-    "numpy==1.24.1",
+    "numpy<2.0a0,>=1.25",
     "psutil",
     "tiktoken==0.7.0",
     "lru-dict",
@@ -531,15 +536,14 @@ whl_reqs = [
     "protobuf==4.25",
     "einops",
     "prettytable",
-    "pydantic==2.7.0",
+    "pydantic",
     "timm==0.9.12",
     "onnx",
     "sentence-transformers==2.7.0",
-    "xfastertransformer_devel==1.8.1.1",
-    "xfastertransformer_devel_icx==1.8.1.1",
+    # "xfastertransformer_devel==1.8.1.1",
+    # "xfastertransformer_devel_icx==1.8.1.1",
     "grpcio==1.62.0",
     #"decord==0.6.0",
-    "accelerate==0.25.0",
     "oss2",
     "orjson",
     "aiohttp",
