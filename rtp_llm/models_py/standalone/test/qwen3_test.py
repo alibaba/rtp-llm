@@ -3,7 +3,7 @@ from unittest import TestCase, main
 
 import torch
 
-from rtp_llm.models_py.standalone.rtp_simple_model import RtpSimplePyModel
+from rtp_llm.models_py.standalone.rtp_auto_model import AutoModel
 
 logging.basicConfig(
     level="INFO",
@@ -12,7 +12,7 @@ logging.basicConfig(
 )
 
 
-class Qwen3SimplePyModelTest(TestCase):
+class Qwen3AutoPyModelTest(TestCase):
 
     def setUp(self):
         # test_msg1 consist of 20 tokens
@@ -26,14 +26,14 @@ class Qwen3SimplePyModelTest(TestCase):
 
         self.max_total_tokens = 64  # max_total_tokens is about kv_cache capacity
         self.tokens_per_block = 2
-        self.model = RtpSimplePyModel(
+        self.model = AutoModel.from_pretrained(
             model_path_or_name="Qwen/Qwen3-0.6B",
             max_total_tokens=self.max_total_tokens,
             tokens_per_block=self.tokens_per_block,
         )
         logging.info(f"model created")
 
-    def test_simple(self):
+    def test_qwen3_auto_model(self):
         # test compute_dtype
         self.assertEqual(self.model.compute_dtype, torch.bfloat16)
 
