@@ -1433,6 +1433,16 @@ class GptInitModelParameters:
         return res
 
     def eval_model_size(self):
+        model_size = self.eval_model_weight_size()
+        kv_cache_mem_size = self._eval_kv_cache_mem_size()
+        runtime_buffer = self._eval_runtime_buffer_mem_size()
+        total_size = model_size + kv_cache_mem_size + runtime_buffer
+        logging.info(
+            f"total_size(Bytes): {total_size}, model_size:{model_size}, kv_cache_mem_size:{kv_cache_mem_size}, runtime_buffer:{runtime_buffer}"
+        )
+        return total_size
+
+    def eval_model_weight_size(self):
         layer_param_bytes = 2
         if self.quant_algo.getWeightBits() == 8:
             layer_param_bytes = 1
@@ -1445,14 +1455,7 @@ class GptInitModelParameters:
             + self.gpt_init_params.hidden_size * layer_param_bytes
             + self.word_emb_param_count * 2
         )  # maybe some model donot have lm_head
-
-        kv_cache_mem_size = self._eval_kv_cache_mem_size()
-        runtime_buffer = self._eval_runtime_buffer_mem_size()
-        total_size = model_size + kv_cache_mem_size + runtime_buffer
-        logging.info(
-            f"total_size(Bytes): {total_size}, model_size:{model_size}, kv_cache_mem_size:{kv_cache_mem_size}, runtime_buffer:{runtime_buffer}"
-        )
-        return total_size
+        return model_size
 
     def _eval_kv_cache_mem_size(self):
         if self.task_type != TaskType.LANGUAGE_MODEL:
