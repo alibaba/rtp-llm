@@ -63,7 +63,6 @@ inline std::vector<int64_t> bufferShapeToTorchShape(const Buffer& buffer) {
     F(TYPE_INT16, torch::kShort)                                                                                       \
     F(TYPE_INT32, torch::kInt)                                                                                         \
     F(TYPE_INT64, torch::kLong)                                                                                        \
-    F(TYPE_UINT64, torch::kUInt64)                                                                                        \
     F(TYPE_FP16, torch::kHalf)                                                                                         \
     F(TYPE_FP32, torch::kFloat)                                                                                        \
     F(TYPE_FP64, torch::kDouble)                                                                                       \
