@@ -38,4 +38,5 @@ py_test(
     ],
     imports = ["."],
     python_version = "PY3",
+    # tags = ["rocm"],
 )
