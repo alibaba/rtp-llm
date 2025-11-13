@@ -167,8 +167,24 @@ class CohereWeightNames:
 
 
 class LlamaWeightInfo(ModelDeployWeightInfo):
-    def __init__(self, config, tp_size, tp_rank, prefix=""):
-        super().__init__(config, tp_size, tp_rank)
+    def __init__(self, model_config=None, engine_config=None, prefix="", **kwargs):
+        # Support both old and new calling conventions
+        if model_config is None and 'config' in kwargs:
+            # Old calling convention: config, tp_size, tp_rank, prefix
+            config = kwargs.pop('config')
+            tp_size = kwargs.pop('tp_size', 1)
+            tp_rank = kwargs.pop('tp_rank', 0)
+            prefix = kwargs.pop('prefix', prefix)
+            super().__init__(
+                model_config=config,
+                engine_config=kwargs.pop('engine_config', None),
+                tp_size=tp_size,
+                tp_rank=tp_rank,
+                **kwargs
+            )
+        else:
+            # New calling convention: model_config, engine_config, ...
+            super().__init__(model_config=model_config, engine_config=engine_config, **kwargs)
         self._names = None
         self._merge_qkv = None
         self._merge_qkv_b = None
@@ -235,12 +251,12 @@ class LlamaWeightInfo(ModelDeployWeightInfo):
                 W.final_ln_beta, [], functools.partial(zeros, shape=[self._hidden_size])
             ),
         ]
-        if self.config.use_attention_linear_bias:
+        if self.model_config.use_attention_linear_bias:
             weights.append(
                 AtomicWeight(
                     W.linear_bias_slopes,
                     [],
-                    functools.partial(slopes, n=self.config.head_num),
+                    functools.partial(slopes, n=self.model_config.attn_config.head_num),
                     data_type=torch.float,
                 )
             )

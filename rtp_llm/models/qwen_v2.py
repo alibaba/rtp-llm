@@ -47,6 +47,7 @@ class QWenV2Weight(ModelDeployWeightInfo):
         self.model_prefix: str = "model."
         self.bias = True
         self.strip_model_prefix = False
+        super().__init__(*args, **kwargs)
 
     @property
     def support_lora(self):
@@ -73,11 +74,7 @@ class QWenV2Weight(ModelDeployWeightInfo):
             is_moe=False,
         )
 
-        inter_padding_size = (
-            self._layer_inter_padding_size[layer_id]
-            if self._layer_inter_padding_size
-            else self._inter_padding_size
-        )
+        inter_padding_size = self._inter_padding_size
         return [
             FfnWeight(
                 sub_weights=[
@@ -351,8 +348,8 @@ class QWenV2(QWen):
         config.ckpt_path = ckpt_path
         config.vocab_size = 152064
         config.max_seq_len = 8192
-        config.rope_config.dim = 128
-        config.rope_config.style = 1
+        config.attn_config.rope_config.dim = 128
+        config.attn_config.rope_config.style = 1
         config.has_pre_decoder_layernorm = False
         config.special_tokens.bos_token_id = -1
         config.special_tokens.eos_token_id = 151643
@@ -362,12 +359,12 @@ class QWenV2(QWen):
 
         cls._from_hf(config, ckpt_path)
         assert (
-            config.head_num > 0
-            and config.head_num_kv > 0
-            and config.size_per_head > 0
+            config.attn_config.head_num > 0
+            and config.attn_config.kv_head_num > 0
+            and config.attn_config.size_per_head > 0
             and config.num_layers > 0
             and config.inter_size > 0
-        ), f"error config config.head_num={config.head_num} config.head_num_kv={config.head_num_kv} config.size_per_head={config.size_per_head} config.num_layers={config.num_layers} config.inter_size={config.inter_size}"
+        ), f"error config config.attn_config.head_num={config.attn_config.head_num} config.attn_config.kv_head_num={config.attn_config.kv_head_num} config.attn_config.size_per_head={config.attn_config.size_per_head} config.num_layers={config.num_layers} config.inter_size={config.inter_size}"
         return config
 
     @classmethod
@@ -386,19 +383,19 @@ class QWenV2(QWen):
     def _from_config_json(config: "ModelConfig", config_json: Dict[str, Any]):
         # config.activation_type = config_json["hidden_act"]
         config.inter_size = config_json["intermediate_size"]
-        config.head_num = config_json["num_attention_heads"]
-        config.head_num_kv = config_json.get("num_key_value_heads", config.head_num)
-        config.size_per_head = (
+        config.attn_config.head_num = config_json["num_attention_heads"]
+        config.attn_config.kv_head_num = config_json.get("num_key_value_heads", config.attn_config.head_num)
+        config.attn_config.size_per_head = (
             int(config_json.get("head_dim"))
             if "head_dim" in config_json
-            else config_json["hidden_size"] // config.head_num
+            else config_json["hidden_size"] // config.attn_config.head_num
         )
         if config_json.get("hidden_size") is not None:
             config.hidden_size = config_json["hidden_size"]
         config.num_layers = config_json["num_hidden_layers"]
-        config.rope_config.base = config_json.get("rope_theta", config.rope_config.base)
+        config.attn_config.rope_config.base = int(config_json.get("rope_theta", config.attn_config.rope_config.base))
         config.vocab_size = config_json["vocab_size"]
-        config.rope_config.dim = config.size_per_head
+        config.attn_config.rope_config.dim = config.attn_config.size_per_head
         config.layernorm_eps = config_json.get("rms_norm_eps", 1e-06)
         config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
         config.config_dtype = config_json.get("torch_dtype", None)

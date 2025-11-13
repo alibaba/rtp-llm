@@ -252,8 +252,8 @@ class MiniCPMV(QWenV2, MultiModalMixin):
         config.vocab_size = 0
         config.max_seq_len = 8192
         config.ckpt_path = ckpt_path
-        config.rope_config.dim = 128
-        config.rope_config.style = 1
+        config.attn_config.rope_config.dim = 128
+        config.attn_config.rope_config.style = 1
         config.activation_type = "SiGLU"
         config.has_pre_decoder_layernorm = False
         config.has_post_decoder_layernorm = True

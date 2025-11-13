@@ -83,7 +83,7 @@ class QWen3_VL_MOE(QWen2_5_VL):
         # mm_related_params is in model_config, not mm_model_config
         if self.model_config.mm_related_params is None:
             self.model_config.mm_related_params = VitParameters()
-        self.mm_part = Qwen2_5_VLImageEmbedding(self.model_config.mm_related_params)
+        self.mm_part = Qwen2_5_VLImageEmbedding(self.model_config.mm_related_params, model_config=self.model_config)
         self.mm_part.visual = Qwen3_VL_MOEVisionTransformerPretrainedModel(
             self.model_config.mm_related_params.config
         )

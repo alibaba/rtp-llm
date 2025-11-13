@@ -85,8 +85,9 @@ def smart_resize(
 
 
 class Qwen2VLImageEmbedding(MultiModalEmbeddingInterface):
-    def __init__(self, mm_related_params: VitParameters):
+    def __init__(self, mm_related_params: VitParameters, model_config=None):
         self.mm_related_params = mm_related_params
+        self.config = model_config  # Store model_config for _data_type property
         self.image_processor = Qwen2VLImageProcessor.from_pretrained(
             mm_related_params.config["ckpt_path"]
         )

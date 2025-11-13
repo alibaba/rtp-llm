@@ -302,8 +302,8 @@ class MiniCPMVEmbedding(Llama, MultiModalMixin):
         config.ckpt_path = ckpt_path
         config.activation_type = "SiGLU"
         config.norm_type = "rmsnorm"
-        config.rope_config.dim = 128
-        config.rope_config.style = 1
+        config.attn_config.rope_config.dim = 128
+        config.attn_config.rope_config.style = 1
         config.has_post_decoder_layernorm = True
         if config.mm_related_params is None:
             config.mm_related_params = VitParameters()

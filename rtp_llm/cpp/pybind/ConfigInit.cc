@@ -893,7 +893,17 @@ PYBIND11_MODULE(libth_transformer_config, m) {
             },
             py::return_value_policy::reference_internal)
         .def_readwrite("dim", &RopeConfig::dim)
-        .def_readwrite("base", &RopeConfig::base)
+        .def_property("base",
+            [](const RopeConfig& self) { return self.base; },
+            [](RopeConfig& self, py::object value) {
+                if (py::isinstance<py::int_>(value)) {
+                    self.base = value.cast<int>();
+                } else if (py::isinstance<py::float_>(value)) {
+                    self.base = static_cast<int>(value.cast<double>());
+                } else {
+                    throw std::runtime_error("base must be int or float");
+                }
+            })
         .def_readwrite("scale", &RopeConfig::scale)
         .def_readwrite("factor1", &RopeConfig::factor1)
         .def_readwrite("factor2", &RopeConfig::factor2)

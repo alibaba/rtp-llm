@@ -200,14 +200,14 @@ class StarCoder2(BaseModel):
     def from_huggingface(config_json: Dict[str, Any]) -> ModelConfig:
         model_type = config_json["model_type"]
         config = ModelConfig()
-        config.head_num = config_json["num_attention_heads"]
-        config.head_num_kv = config_json["num_key_value_heads"]
-        config.size_per_head = config_json["hidden_size"] // config_json["num_attention_heads"]
+        config.attn_config.head_num = config_json["num_attention_heads"]
+        config.attn_config.kv_head_num = config_json["num_key_value_heads"]
+        config.attn_config.size_per_head = config_json["hidden_size"] // config_json["num_attention_heads"]
         config.num_layers = config_json["num_hidden_layers"]
         config.max_seq_len = config_json.get("max_position_embeddings", 8192)
         config.vocab_size = config_json["vocab_size"]
-        config.rope_config.dim = 128
-        config.rope_config.style = 1
+        config.attn_config.rope_config.dim = 128
+        config.attn_config.rope_config.style = 1
         if model_type != "starcoder2":
             raise BaseException(f"model type is not starcoder: {model_type}")
         config.layernorm_eps = config_json["layer_norm_epsilon"]
@@ -215,11 +215,10 @@ class StarCoder2(BaseModel):
         config.special_tokens.eos_token_id = config_json.get("eos_token_id", 0)
         config.special_tokens.bos_token_id = config_json.get("bos_token_id", -1)
         config.activation_type = config_json["activation_function"]
-        config.rope_config.base = config_json.get("rope_theta", 1000000)
-        config.rope_config.dim = config.size_per_head
+        config.attn_config.rope_config.base = int(config_json.get("rope_theta", 1000000))
+        config.attn_config.rope_config.dim = config.attn_config.size_per_head
         config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
         config.config_dtype = config_json.get("torch_dtype", None)
-        config.mm_related_params = VitParameters()
         return config
 
     @classmethod
@@ -229,18 +228,17 @@ class StarCoder2(BaseModel):
             config = StarCoder2.from_huggingface(config_dict)
         else:
             config = ModelConfig()
-            config.head_num = 36
-            config.head_num_kv = 4
-            config.size_per_head = 128
+            config.attn_config.head_num = 36
+            config.attn_config.kv_head_num = 4
+            config.attn_config.size_per_head = 128
             config.inter_size = 4 * 4608
             config.num_layers = 32
             config.max_seq_len = 16384
             config.vocab_size = 49152
             config.special_tokens.bos_token_id = 0
             config.special_tokens.eos_token_id = 0
-            config.rope_config.dim = 128
-            config.rope_config.style = 1
-            config.mm_related_params = VitParameters()
+            config.attn_config.rope_config.dim = 128
+            config.attn_config.rope_config.style = 1
         return config
 
 

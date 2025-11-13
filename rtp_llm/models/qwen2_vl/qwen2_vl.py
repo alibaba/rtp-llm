@@ -89,11 +89,7 @@ class QWen2VLWeightInfo(ModelDeployWeightInfo, BaseMultiModalWeightInfo):
         return ModelWeightInfo(layer_weights=layer_weights, weights=weights)
 
     def _get_hf_layer_weight_info(self, layer_id):
-        inter_padding_size = (
-            self._layer_inter_padding_size[layer_id]
-            if self._layer_inter_padding_size
-            else self._inter_padding_size
-        )
+        inter_padding_size = self._inter_padding_size
         attn_config: AttnConfig = self.attn_config
         ffn_config: FfnConfig = self.ffn_config
         layer_weights = [
@@ -237,7 +233,10 @@ class QWen2_VL(QWen_VL, MultiModalMixin):
         # mm_related_params is in model_config, not mm_model_config
         if self.model_config.mm_related_params is None:
             self.model_config.mm_related_params = VitParameters()
-        self.mm_part = Qwen2VLImageEmbedding(self.model_config.mm_related_params)
+        self.mm_part = Qwen2VLImageEmbedding(
+            self.model_config.mm_related_params,
+            model_config=self.model_config
+        )
         self.model_config.mm_related_params.vit_weights = QwenVL2VitWeight(
             {"vit": self.mm_part.visual}
         )

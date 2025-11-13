@@ -271,11 +271,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
         return layer_weights
 
     def _get_hf_ffn_layer_weight_info(self, layer_id: int):
-        inter_padding_size = (
-            self._layer_inter_padding_size[layer_id]
-            if self._layer_inter_padding_size
-            else self._inter_padding_size
-        )
+        inter_padding_size = self._inter_padding_size
 
         ffn_config = FfnConfig(
             inter_padding_size=inter_padding_size,
@@ -455,17 +451,17 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                 f"initialize rope cos sin cache with seq_len: {config.max_seq_len}"
             )
             rotary_emb = DeepseekV3YarnRotaryEmbedding(
-                config.rope_config.dim,
+                config.attn_config.rope_config.dim,
                 config.max_seq_len,
-                config.rope_config.base,
-                scaling_factor=config.rope_config.scale,
+                config.attn_config.rope_config.base,
+                scaling_factor=config.attn_config.rope_config.scale,
                 original_max_position_embeddings=config.org_embedding_max_pos,
                 beta_fast=config.rotary_factor2,
                 beta_slow=config.rotary_factor1,
                 mscale=config.deepseek_rope_mscale,
                 mscale_all_dim=config.deepseek_mscale_all_dim,
             )
-            half_rope_dim = config.rope_config.dim // 2
+            half_rope_dim = config.attn_config.rope_config.dim // 2
             cos_cache = rotary_emb.cos_cached[:, :half_rope_dim]
             sin_cache = rotary_emb.sin_cached[:, :half_rope_dim]
             # cos sin cache must be float32
@@ -551,9 +547,9 @@ class DeepSeekV2(BaseModel):
             config.attn_config.head_num = config_json["num_attention_heads"]
             config.attn_config.kv_head_num = config_json.get("num_key_value_heads", config.attn_config.head_num)
             config.num_layers = config_json["num_hidden_layers"]
-            config.rope_config.base = config_json.get(
-                "rope_theta", config.rope_config.base
-            )
+            config.attn_config.rope_config.base = int(config_json.get(
+                "rope_theta", config.attn_config.rope_config.base
+            ))
             config.vocab_size = config_json["vocab_size"]
             config.layernorm_eps = config_json.get("rms_norm_eps", 1e-06)
             config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
@@ -567,15 +563,15 @@ class DeepSeekV2(BaseModel):
             config.rope_head_dim = config_json["qk_rope_head_dim"]
             config.v_head_dim = config_json["v_head_dim"]
             config.attn_config.size_per_head = config.nope_head_dim + config.rope_head_dim
-            config.rope_config.dim = config.rope_head_dim
+            config.attn_config.rope_config.dim = config.rope_head_dim
 
             # yarn rotary config
             if config.mla_ops_type != MlaOpsType.MHA:
-                config.rope_config.style = 0
+                config.attn_config.rope_config.style = 0
             else:
-                config.rope_config.style = 5
+                config.attn_config.rope_config.style = 5
             rope_scaling = config_json.get("rope_scaling")
-            config.rope_config.scale = rope_scaling["factor"]
+            config.attn_config.rope_config.scale = rope_scaling["factor"]
             config.rotary_factor1 = float(rope_scaling.get("beta_slow", 1))
             config.rotary_factor2 = float(rope_scaling.get("beta_fast", 32))
             config.org_embedding_max_pos = rope_scaling[
@@ -587,10 +583,10 @@ class DeepSeekV2(BaseModel):
             mscale_all_dim = rope_scaling["mscale_all_dim"]
             config.deepseek_rope_mscale = mscale
             config.deepseek_mscale_all_dim = mscale_all_dim
-            config.rotary_embedding_mscale = yarn_get_mscale(
+            config.attn_config.rope_config.mscale = yarn_get_mscale(
                 scaling_factor, mscale
             ) / yarn_get_mscale(scaling_factor, mscale_all_dim)
-            config.rotary_embedding_offset = config.nope_head_dim
+            config.attn_config.rope_config.offset = config.nope_head_dim
 
             # softmax scale config
             softmax_mscale = yarn_get_mscale(scaling_factor, mscale_all_dim)
@@ -708,7 +704,7 @@ class DeepSeekV3Mtp(DeepSeekV2):
     @classmethod
     def _create_config(cls, ckpt_path: str):
         config = super()._create_config(ckpt_path)
-        config.moe_layer_index = [i for i in range(config.layer_num)]
+        config.moe_layer_index = [i for i in range(config.num_layers)]
         config.reverse_e_h_norm = True
         config.is_mtp = True
         return config

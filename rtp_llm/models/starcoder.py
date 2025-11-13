@@ -214,9 +214,9 @@ class StarCoder(BaseModel):
             config = StarCoder.from_huggingface(ckpt_path, config_dict)
         else:
             config = ModelConfig()
-            config.head_num = 48
-            config.head_num_kv = 1
-            config.size_per_head = 128
+            config.attn_config.head_num = 48
+            config.attn_config.kv_head_num = 1
+            config.attn_config.size_per_head = 128
             config.inter_size = 4 * 6144
             config.num_layers = 40
             config.max_seq_len = 8192

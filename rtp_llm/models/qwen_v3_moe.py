@@ -27,11 +27,7 @@ class QWenV3MoeWeight(QWenV2MoeWeight):
     def _get_hf_ffn_layer_weight_info(self, layer_id: int):
         moe_config = MoeConfig(
             expert_num=self.expert_num_,
-            inter_padding_size=(
-                self._layer_inter_padding_size[layer_id]
-                if self._layer_inter_padding_size
-                else self._inter_padding_size
-            ),
+            inter_padding_size=self._inter_padding_size,
             routed_scaling_factor=1.0,
         )
         return [
@@ -111,8 +107,23 @@ class Qwen3Moe(Qwen2Moe):
 
 
 class Qwen3MoeEagle3Weight(QWenV2Weight):
-    def __init__(self, config: ModelConfig, tp_size: int, tp_rank: int):
-        super().__init__(config, tp_size, tp_rank)
+    def __init__(self, model_config=None, engine_config=None, **kwargs):
+        # Support both old and new calling conventions
+        if model_config is None and 'config' in kwargs:
+            # Old calling convention: config, tp_size, tp_rank
+            config = kwargs.pop('config')
+            tp_size = kwargs.pop('tp_size', 1)
+            tp_rank = kwargs.pop('tp_rank', 0)
+            super().__init__(
+                model_config=config,
+                engine_config=kwargs.pop('engine_config', None),
+                tp_size=tp_size,
+                tp_rank=tp_rank,
+                **kwargs
+            )
+        else:
+            # New calling convention: model_config, engine_config, ...
+            super().__init__(model_config=model_config, engine_config=engine_config, **kwargs)
         self.bias = False
         self._use_qk_norm = True
 

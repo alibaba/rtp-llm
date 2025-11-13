@@ -44,8 +44,8 @@ class InternVL(BaseModel, MultiModalMixin):
     def _create_config(cls, ckpt_path: str) -> ModelConfig:
         config = ModelConfig()
         config.ckpt_path = ckpt_path
-        config.rope_config.dim = 128
-        config.rope_config.style = 1
+        config.attn_config.rope_config.dim = 128
+        config.attn_config.rope_config.style = 1
         config.has_pre_decoder_layernorm = False
 
         config_path = os.path.join(ckpt_path, "config.json")

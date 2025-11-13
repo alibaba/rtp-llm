@@ -1,4 +1,5 @@
 import gc
+import logging
 from typing import List, Optional
 
 import torch
@@ -73,6 +74,7 @@ class MMProcessEngine:
                     pos.extend(self._maybe_tensor_to_list(pos_ids))
             return MMEmbeddingRes(res, pos)
         except Exception as e:
+            logging.exception("Exception in MMProcessEngine.submit:")
             torch.cuda.empty_cache()
             gc.collect()
             raise e

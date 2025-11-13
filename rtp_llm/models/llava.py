@@ -5,14 +5,13 @@ from typing import Any, Dict, List, Tuple, Union
 
 from transformers import CLIPVisionConfig
 
-from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.model_config import ModelConfig, VitParameters
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.llama import Llama
 from rtp_llm.models.llava_vit import LlavaImageEmbedding
 from rtp_llm.models.llava_weight import LlavaWeightInfo
 from rtp_llm.models.multimodal.multimodal_mixin import BaseVitWeights, MultiModalMixin
-
 
 class Llava(Llama, MultiModalMixin):
     def _init_multimodal(
@@ -24,7 +23,7 @@ class Llava(Llama, MultiModalMixin):
         mm_related_params = self.model_config.mm_related_params
         if mm_related_params is None:
             raise ValueError("mm_related_params is required for Llava")
-        self.mm_part = LlavaImageEmbedding(mm_related_params)
+        self.mm_part = LlavaImageEmbedding(mm_related_params, model_config=self.model_config)
         vit_weight_dict: Dict[str, Any] = {"mm_projector": self.mm_part.mm_projector}
         if (
             mm_related_params.config.get("unfreeze_mm_vision_tower", False)
@@ -37,20 +36,13 @@ class Llava(Llama, MultiModalMixin):
 
     @staticmethod
     def _create_config(ckpt_path: str) -> ModelConfig:
-        from rtp_llm.config.model_config import ModelConfig
-        config = ModelConfig(
-            head_num=0,
-            size_per_head=0,
-            layer_num=0,
-            max_seq_len=0,
-            vocab_size=0,
-            ckpt_path=ckpt_path,
-            activation_type="SiGLU",
-            norm_type="rmsnorm",
-            rotary_embedding_dim=128,
-            rotary_embedding_style=1,
-            has_post_decoder_layernorm=True,
-        )
+        config = ModelConfig()
+        config.ckpt_path = ckpt_path
+        config.activation_type = "SiGLU"
+        config.norm_type = "rmsnorm"
+        config.attn_config.rope_config.dim = 128
+        config.attn_config.rope_config.style = 1
+        config.has_post_decoder_layernorm = True
         # hugggingface
         config_path = os.path.join(ckpt_path, "config.json")
         param_path = os.path.join(ckpt_path, "params.json")
@@ -69,9 +61,7 @@ class Llava(Llama, MultiModalMixin):
         return LlavaWeightInfo
 
     @staticmethod
-    def from_huggingface(config: ModelConfig, config_json: Dict[str, Any]):
-        from rtp_llm.config.model_config import VitParameters
-        # Initialize mm_related_params if not already initialized
+    def from_huggingface(config: ModelConfig, config_json: Dict[str, Any]):        # Initialize mm_related_params if not already initialized
         if config.mm_related_params is None:
             config.mm_related_params = VitParameters()
         if "text_config" in config_json:

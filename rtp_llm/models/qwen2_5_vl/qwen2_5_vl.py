@@ -68,9 +68,10 @@ def smart_nframes(configs, total_frames, video_fps) -> int:
 
 
 class Qwen2_5_VLImageEmbedding(Qwen2VLImageEmbedding):
-    def __init__(self, mm_related_params: VitParameters):
+    def __init__(self, mm_related_params: VitParameters, model_config=None):
         if mm_related_params is None or not hasattr(mm_related_params, 'config'):
             raise ValueError("mm_related_params.config is required for Qwen2_5_VLImageEmbedding")
+        super().__init__(mm_related_params, model_config=model_config)
         self.mm_related_params = mm_related_params
         self.image_processor = Qwen2VLImageProcessor.from_pretrained(
             mm_related_params.config["ckpt_path"]
@@ -137,7 +138,7 @@ class QWen2_5_VL(QWen2_VL):
         mm_related_params = self.model_config.mm_related_params
         if mm_related_params is None:
             raise ValueError("mm_related_params is required for QWen2_5_VL")
-        self.mm_part = Qwen2_5_VLImageEmbedding(mm_related_params)
+        self.mm_part = Qwen2_5_VLImageEmbedding(mm_related_params, model_config=self.model_config)
         self.model_config.mm_related_params.vit_weights = QwenVL2VitWeight(
             {"vit": self.mm_part.visual}
         )

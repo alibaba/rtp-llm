@@ -19,9 +19,25 @@ from rtp_llm.utils.model_weight import (
 
 
 class GPTNeoxWeight(ModelDeployWeightInfo):
-    def __init__(self, config, tp_size, tp_rank):
-        super().__init__(config, tp_size, tp_rank)
-        self.norm = config.norm_type
+    def __init__(self, model_config=None, engine_config=None, **kwargs):
+        # Support both old and new calling conventions
+        if model_config is None and 'config' in kwargs:
+            # Old calling convention: config, tp_size, tp_rank
+            config = kwargs.pop('config')
+            tp_size = kwargs.pop('tp_size', 1)
+            tp_rank = kwargs.pop('tp_rank', 0)
+            super().__init__(
+                model_config=config,
+                engine_config=kwargs.pop('engine_config', None),
+                tp_size=tp_size,
+                tp_rank=tp_rank,
+                **kwargs
+            )
+            self.norm = config.norm_type
+        else:
+            # New calling convention: model_config, engine_config, ...
+            super().__init__(model_config=model_config, engine_config=engine_config, **kwargs)
+            self.norm = model_config.norm_type
 
     def _get_weight_info(self):
         weights = [

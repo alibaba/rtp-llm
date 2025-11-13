@@ -47,7 +47,7 @@ class ChatGlmV2(BaseModel):
         if "prefix_projection" in config_json:
             config.prefix_projection = config_json["prefix_projection"]
         config.src_quantization_bit = config_json.get("quantization_bit", 0)
-        config.rope_config.dim = config.attn_config.size_per_head
+        config.attn_config.rope_config.dim = config.attn_config.size_per_head
         config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
         if config.special_tokens is None:
             from rtp_llm.config.model_config import SpecialTokens
@@ -69,7 +69,7 @@ class ChatGlmV2(BaseModel):
 
     @staticmethod
     def get_rotary_embedding_scale(config: ModelConfig, config_json):
-        config.rope_config.scale = config_json.get("rope_ratio", 1)
+        config.attn_config.rope_config.scale = config_json.get("rope_ratio", 1)
         return config
 
     @staticmethod
@@ -92,8 +92,8 @@ class ChatGlmV2(BaseModel):
         config.use_attention_linear_bias = False
         config.activation_type = "SiGLU"
         config.norm_type = "rmsnorm"
-        config.rope_config.dim = 128
-        config.rope_config.style = 2
+        config.attn_config.rope_config.dim = 128
+        config.attn_config.rope_config.style = 2
 
         return config
 

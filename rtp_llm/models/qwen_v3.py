@@ -31,7 +31,7 @@ class QwenV3(QWenV2):
         logging.info(f"task_type : {self.task_type}")
         if self.task_type == TaskType.RERANKER:
             logging.info("using Qwen3RerankerModule as custom module")
-            return Qwen3RerankerModule(self.config, self.tokenizer)
+            return Qwen3RerankerModule(self.model_config, self.tokenizer)
         return super()._init_custom_module()
 
 

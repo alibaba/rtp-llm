@@ -62,12 +62,12 @@ class BloomWeightInfo(ModelDeployWeightInfo):
                 W.final_ln_beta, [CkptWeightInfo("ln_f.bias", identity)], identity
             ),
         ]
-        if self.config.use_attention_linear_bias:
+        if self.model_config.use_attention_linear_bias:
             weights.append(
                 AtomicWeight(
                     W.linear_bias_slopes,
                     [],
-                    functools.partial(slopes, n=self.config.head_num),
+                    functools.partial(slopes, n=self.model_config.attn_config.head_num),
                     data_type=torch.float,
                 )
             )

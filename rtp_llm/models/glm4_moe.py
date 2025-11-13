@@ -194,11 +194,7 @@ class Glm4MoeWeight(ModelDeployWeightInfo):
         return layer_weights
 
     def _get_hf_ffn_layer_weight_info(self, layer_id: int):
-        inter_padding_size = (
-            self._layer_inter_padding_size[layer_id]
-            if self._layer_inter_padding_size
-            else self._inter_padding_size
-        )
+        inter_padding_size = self._inter_padding_size
 
         ffn_config = FfnConfig(
             inter_padding_size=inter_padding_size,
@@ -405,7 +401,7 @@ class Glm4Moe(DeepSeekV2):
         config.inter_size = 0  # 13696
         config.vocab_size = 152064
         config.max_seq_len = 8192
-        config.rope_config.style = 1
+        config.attn_config.rope_config.style = 1
         config.activation_type = "SiGLU"
         config.has_pre_decoder_layernorm = False
         config.has_post_decoder_layernorm = True
@@ -449,12 +445,12 @@ class Glm4Moe(DeepSeekV2):
         if config_json.get("hidden_size") is not None:
             config.hidden_size = config_json["hidden_size"]
         config.num_layers = config_json["num_hidden_layers"]
-        config.rope_config.base = config_json.get(
-            "rope_theta", config.rope_config.base
-        )
+        config.attn_config.rope_config.base = int(config_json.get(
+            "rope_theta", config.attn_config.rope_config.base
+        ))
         config.vocab_size = config_json["vocab_size"]
         partial_rotary_factor = config_json.get("partial_rotary_factor", 1.0)
-        config.rope_config.dim = int(
+        config.attn_config.rope_config.dim = int(
             config.attn_config.size_per_head * partial_rotary_factor
         )
         config.layernorm_eps = config_json.get("rms_norm_eps", 1e-06)

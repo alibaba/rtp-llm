@@ -66,11 +66,7 @@ class QWenWeight(ModelDeployWeightInfo):
         return self._get_hf_weight_info()
 
     def _get_hf_layer_weight_info(self, layer_id):
-        inter_padding_size = (
-            self._layer_inter_padding_size[layer_id]
-            if self._layer_inter_padding_size
-            else self._inter_padding_size
-        )
+        inter_padding_size = self._inter_padding_size
         attn_config = AttnConfig(
             hidden_size=self._hidden_size,
             size_per_head=self._size_per_head,
@@ -247,8 +243,8 @@ class QWenBase(BaseModel):
     @staticmethod
     def _common_config(config: ModelConfig, ckpt_path: str) -> ModelConfig:
         config.ckpt_path = ckpt_path
-        config.rope_config.dim = 128
-        config.rope_config.style = 1
+        config.attn_config.rope_config.dim = 128
+        config.attn_config.rope_config.style = 1
         config.has_pre_decoder_layernorm = False
         config.layernorm_eps = 1e-5
         config.special_tokens.bos_token_id = -1
@@ -268,18 +264,18 @@ class QWenBase(BaseModel):
             content = reader.read()
             config_json = json.loads(content)
 
-        config.head_num = config_json.get(
-            "n_head", config_json.get("num_attention_heads", config.head_num)
+        config.attn_config.head_num = config_json.get(
+            "n_head", config_json.get("num_attention_heads", config.attn_config.head_num)
         )  # 如果2者不一致就是 attention sparse场景,headnum不能用attention的heads
-        config.head_num_kv = config.head_num
-        config.size_per_head = config_json.get("kv_channels", config.size_per_head)
+        config.attn_config.kv_head_num = config.attn_config.head_num
+        config.attn_config.size_per_head = config_json.get("kv_channels", config.attn_config.size_per_head)
         config.hidden_size = config_json.get("hidden_size", config.hidden_size)
         config.inter_size = int(
             config_json.get(
                 "intermediate_size",
                 config_json.get(
                     "ffn_hidden_size",
-                    hidden_to_inter(config.head_num * config.size_per_head) * 2,
+                    hidden_to_inter(config.attn_config.head_num * config.attn_config.size_per_head) * 2,
                 ),
             )
             / 2
@@ -293,17 +289,17 @@ class QWenBase(BaseModel):
         config.vocab_size = config_json.get(
             "vocab_size", config_json.get("padded_vocab_size", config.vocab_size)
         )
-        config.rope_config.base = config_json.get("rotary_emb_base", 10000)
-        config.rope_config.dim = config.size_per_head
+        config.attn_config.rope_config.base = config_json.get("rotary_emb_base", 10000)
+        config.attn_config.rope_config.dim = config.attn_config.size_per_head
         config.special_tokens.eos_token_id = config_json.get(
             "eos_token_id", config.special_tokens.eos_token_id
         )
         config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
 
         if config_json.get("use_dynamic_ntk"):
-            config.rope_config.style = 4
-        config.rope_config.max_pos = config_json.get("seq_length", 8192)
-        config.use_logn_attn = config_json.get("use_logn_attn")
+            config.attn_config.rope_config.style = 4
+        config.attn_config.rope_config.max_pos = config_json.get("seq_length", 8192)
+        config.attn_config.use_logn_attn = config_json.get("use_logn_attn")
 
 
 class QWen(QWenBase):

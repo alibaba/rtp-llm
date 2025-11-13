@@ -36,8 +36,8 @@ class Llama(BaseModel):
         config = PyModelConfig()
         # Initialize checkpoint path and rope config
         config.ckpt_path = ckpt_path
-        config.rope_config.dim = 128
-        config.rope_config.style = 1
+        config.attn_config.rope_config.dim = 128
+        config.attn_config.rope_config.style = 1
         
         # hugggingface
         config_path = os.path.join(ckpt_path, "config.json")
@@ -62,13 +62,13 @@ class Llama(BaseModel):
 
     @staticmethod
     def from_huggingface(config: PyModelConfig, config_json: Dict[str, Any]):
-        config.head_num = config_json["num_attention_heads"]
-        config.head_num_kv = config_json.get("num_key_value_heads", config.head_num)
+        config.attn_config.head_num = config_json["num_attention_heads"]
+        config.attn_config.kv_head_num = config_json.get("num_key_value_heads", config.attn_config.head_num)
         config.hidden_size = config_json["hidden_size"]
-        config.size_per_head = (
+        config.attn_config.size_per_head = (
             config_json["hidden_size"] // config_json["num_attention_heads"]
         )
-        config.size_per_head = config_json.get("head_dim", config.size_per_head)
+        config.attn_config.size_per_head = config_json.get("head_dim", config.attn_config.size_per_head)
         config.num_layers = config_json["num_hidden_layers"]
         config.max_seq_len = config_json.get("max_sequence_length", 2048)
         config.vocab_size = config_json["vocab_size"]
@@ -76,36 +76,36 @@ class Llama(BaseModel):
             "rms_norm_eps", config_json.get("layer_norm_eps", 1e-05)
         )
         config.inter_size = config_json["intermediate_size"]
-        config.rope_config.base = config_json.get("rope_theta", 10000)
-        config.rope_config.dim = config.size_per_head
+        config.attn_config.rope_config.base = int(config_json.get("rope_theta", 10000))
+        config.attn_config.rope_config.dim = config.attn_config.size_per_head
         config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
         rope_scaling = config_json.get("rope_scaling")
         if rope_scaling is not None:
             rope_type = rope_scaling.get("type", rope_scaling.get("rope_type"))
             if rope_type == "linear":
-                config.rope_config.scale = rope_scaling["factor"]
-                config.rope_config.max_pos = config_json.get(
+                config.attn_config.rope_config.scale = rope_scaling["factor"]
+                config.attn_config.rope_config.max_pos = config_json.get(
                     "max_position_embeddings", 2048
                 )
             elif rope_type == "dynamic":
-                config.rope_config.style = 3
+                config.attn_config.rope_config.style = 3
             elif rope_type == "yarn":
-                config.rope_config.style = 5
-                config.rope_config.scale = rope_scaling["factor"]
-                config.rope_config.factor1 = rope_scaling.get("beta_slow", 1)
-                config.rope_config.factor2 = rope_scaling.get("beta_fast", 32)
-                config.rope_config.max_pos = rope_scaling[
+                config.attn_config.rope_config.style = 5
+                config.attn_config.rope_config.scale = rope_scaling["factor"]
+                config.attn_config.rope_config.factor1 = rope_scaling.get("beta_slow", 1)
+                config.attn_config.rope_config.factor2 = rope_scaling.get("beta_fast", 32)
+                config.attn_config.rope_config.max_pos = rope_scaling[
                     "original_max_position_embeddings"
                 ]
-                config.rope_config.mscale = Llama.get_mscale(
-                    config.rope_config.scale
+                config.attn_config.rope_config.mscale = Llama.get_mscale(
+                    config.attn_config.rope_config.scale
                 )
             elif rope_type == "llama3":
-                config.rope_config.style = 6
-                config.rope_config.scale = rope_scaling["factor"]
-                config.rope_config.factor1 = rope_scaling["low_freq_factor"]
-                config.rope_config.factor2 = rope_scaling["high_freq_factor"]
-                config.rope_config.max_pos = rope_scaling[
+                config.attn_config.rope_config.style = 6
+                config.attn_config.rope_config.scale = rope_scaling["factor"]
+                config.attn_config.rope_config.factor1 = rope_scaling["low_freq_factor"]
+                config.attn_config.rope_config.factor2 = rope_scaling["high_freq_factor"]
+                config.attn_config.rope_config.max_pos = rope_scaling[
                     "original_max_position_embeddings"
                 ]
             else:
@@ -118,14 +118,14 @@ class Llama(BaseModel):
         #     config.special_tokens.eos_token_id = eos_token_id[0]
         # else:
         #     config.special_tokens.eos_token_id = eos_token_id
-        config.use_logn_attn = config_json.get("use_logn_attn", False)
+        config.attn_config.use_logn_attn = config_json.get("use_logn_attn", False)
         config.config_dtype = config_json.get("torch_dtype", None)
 
     @staticmethod
     def from_params(config: PyModelConfig, params_json: Dict[str, Any]):
-        config.head_num = params_json["n_heads"]
-        config.head_num_kv = params_json.get("n_kv_heads", config.head_num)
-        config.size_per_head = params_json["dim"] // params_json["n_heads"]
+        config.attn_config.head_num = params_json["n_heads"]
+        config.attn_config.kv_head_num = params_json.get("n_kv_heads", config.attn_config.head_num)
+        config.attn_config.size_per_head = params_json["dim"] // params_json["n_heads"]
         config.num_layers = params_json["n_layers"]
         config.max_seq_len = 2048
         config.vocab_size = 32000
@@ -138,7 +138,7 @@ class Llama(BaseModel):
         # Note: special_tokens is not in ModelConfig, this should be handled elsewhere
         # config.special_tokens.bos_token_id = 1
         # config.special_tokens.eos_token_id = 2
-        config.rope_config.dim = config.size_per_head
+        config.attn_config.rope_config.dim = config.attn_config.size_per_head
         config.tie_word_embeddings = params_json.get("tie_word_embeddings", False)
         config.config_dtype = params_json.get("torch_dtype", None)
         return config
@@ -149,8 +149,8 @@ class Baichuan(Llama):
     def _create_config(cls, ckpt_path: str) -> PyModelConfig:
         config = Llama._create_config(ckpt_path)
         if config.num_layers == 40:  # 13B
-            config.rope_config.style = 0
-            config.rope_config.dim = 0
+            config.attn_config.rope_config.style = 0
+            config.attn_config.rope_config.dim = 0
             config.use_attention_linear_bias = True
         # Note: special_tokens is not in ModelConfig, this should be handled elsewhere
         # config.special_tokens.bos_token_id = -1
@@ -194,7 +194,7 @@ class Gemma(Llama):
         config = Llama._create_config(ckpt_path)
         config.has_post_decoder_layernorm = True
         config.input_embedding_scalar = config.hidden_size**0.5
-        config.rope_config.dim = config.size_per_head
+        config.attn_config.rope_config.dim = config.attn_config.size_per_head
         config.activation_type = "gated-gelu"
         return config
 
@@ -203,7 +203,7 @@ class Cohere(Llama):
     @classmethod
     def _create_config(cls, ckpt_path: str) -> PyModelConfig:
         config = Llama._create_config(ckpt_path)
-        config.rope_config.style = 0
+        config.attn_config.rope_config.style = 0
         config.norm_type = "layernorm"
         config.qk_norm = True
         return config

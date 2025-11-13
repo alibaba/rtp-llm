@@ -55,10 +55,11 @@ from transformers.utils import ModelOutput
 
 
 class LlavaImageEmbedding(MultiModalEmbeddingInterface):
-    def __init__(self, mm_related_params: "VitParameters"):
+    def __init__(self, mm_related_params: "VitParameters", model_config=None):
         if mm_related_params is None or not hasattr(mm_related_params, 'config'):
             raise ValueError("mm_related_params.config is required for LlavaImageEmbedding")
         self.mm_related_params = mm_related_params
+        self.model_config = model_config  # Store model_config for build_vision_tower
         if mm_related_params.config.get("vision_config", None) != None:
             raise Exception("llava-hf style config is not implemented yet")
         else:

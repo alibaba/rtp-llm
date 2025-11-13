@@ -291,7 +291,7 @@ class ModelConfig(CppModelConfig):
             and rope_override_args["type"] in rope_type
         ), f"Invalid rope_scaling type: {rope_override_args.get('type')}"
         
-        self.rope_config.style = rope_type[rope_override_args["type"]]
+        self.attn_config.rope_config.style = rope_type[rope_override_args["type"]]
         
         if rope_override_args["type"] == "yarn":
             assert (
@@ -299,36 +299,36 @@ class ModelConfig(CppModelConfig):
                 and "original_max_position_embeddings" in rope_override_args
             ), "yarn rope_scaling requires 'factor' and 'original_max_position_embeddings'"
             
-            self.rope_config.scale = rope_override_args["factor"]
-            self.rope_config.max_pos = rope_override_args["original_max_position_embeddings"]
-            self.rope_config.factor1 = rope_override_args.get("beta_slow", 1.0)
-            self.rope_config.factor2 = rope_override_args.get("beta_fast", 1.0)
+            self.attn_config.rope_config.scale = rope_override_args["factor"]
+            self.attn_config.rope_config.max_pos = rope_override_args["original_max_position_embeddings"]
+            self.attn_config.rope_config.factor1 = rope_override_args.get("beta_slow", 1.0)
+            self.attn_config.rope_config.factor2 = rope_override_args.get("beta_fast", 1.0)
             mscale = rope_override_args.get("mscale", 1.0)
-            self.rope_config.mscale = float(
+            self.attn_config.rope_config.mscale = float(
                 (
                     1.0
-                    if self.rope_config.scale <= 1
-                    else 0.1 * math.log(self.rope_config.scale) + 1.0
+                    if self.attn_config.rope_config.scale <= 1
+                    else 0.1 * math.log(self.attn_config.rope_config.scale) + 1.0
                 )
                 * mscale
             )
-            self.rope_config.extrapolation_factor = rope_override_args.get(
+            self.attn_config.rope_config.extrapolation_factor = rope_override_args.get(
                 "extrapolation_factor", 1.0
             )
             
             logging.info(
                 f"Applied rope_scaling (yarn): "
-                f"style: {self.rope_config.style}, "
-                f"scale: {self.rope_config.scale}, "
-                f"max_pos: {self.rope_config.max_pos}, "
-                f"factor1: {self.rope_config.factor1}, "
-                f"factor2: {self.rope_config.factor2}, "
-                f"mscale: {self.rope_config.mscale}, "
-                f"extrapolation_factor: {self.rope_config.extrapolation_factor}"
+                f"style: {self.attn_config.rope_config.style}, "
+                f"scale: {self.attn_config.rope_config.scale}, "
+                f"max_pos: {self.attn_config.rope_config.max_pos}, "
+                f"factor1: {self.attn_config.rope_config.factor1}, "
+                f"factor2: {self.attn_config.rope_config.factor2}, "
+                f"mscale: {self.attn_config.rope_config.mscale}, "
+                f"extrapolation_factor: {self.attn_config.rope_config.extrapolation_factor}"
             )
         else:
             logging.info(
-                f"Applied rope_scaling: style: {self.rope_config.style}"
+                f"Applied rope_scaling: style: {self.attn_config.rope_config.style}"
             )
 
     def __init__(self, *args, **kwargs):
