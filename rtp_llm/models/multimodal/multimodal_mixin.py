@@ -121,12 +121,15 @@ class MultiModalMixin:
         weight_names = vit_weight.weight_names
 
         def _safe_load_from_module(
-            param: torch.nn.Parameter, fname: str, ctype: torch.dtype
+            param: torch.nn.Parameter, fname: str, ctype
         ):
+            from rtp_llm.utils.util import to_torch_dtype
             t = self.weight.get_global_weight_or_none(fname)
             if t is None:
                 raise Exception(f"failed to get tensor from name {fname}")
-            param.data = t.reshape(param.data.shape).to(ctype).to(device)
+            # Convert ctype (which may be DataType enum or string) to torch.dtype
+            torch_dtype = to_torch_dtype(ctype)
+            param.data = t.reshape(param.data.shape).to(torch_dtype).to(device)
 
         for w in weight_names:
             w_name = ft_prefix + w
