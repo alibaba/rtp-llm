@@ -59,12 +59,13 @@ public class EngineGrpcService {
         if (engineGrpcClient == null) {
             throw new RuntimeException("EngineGrpcService not initialized");
         }
-        boolean isPrefill = RoleType.PREFILL.matches(workerStatus.getRole());
+        // 只在 PD 分离情况下的 Prefill 节点和非 PD 分离情况下需要 cacheKeys
+        boolean needCacheKeys = RoleType.PREFILL.matches(workerStatus.getRole()) || RoleType.PDFUSION.matches(workerStatus.getRole());
         EngineRpcService.CacheVersionPB request = EngineRpcService.CacheVersionPB.newBuilder()
                 .setLatestCacheVersion((int) cacheVersion)
-                .setNeedCacheKeys(isPrefill)
+                .setNeedCacheKeys(needCacheKeys)
                 .build();
-        logger.info("Get cache status Request: {}, cacheVersion: {}, needCacheKeys: {}", ip, cacheVersion, isPrefill);
+        logger.info("Get cache status Request: {}, cacheVersion: {}, needCacheKeys: {}", ip, cacheVersion, needCacheKeys);
         return engineGrpcClient.getCacheStatus(ip, grpcPort, request, requestTimeoutMs);
     }
 }

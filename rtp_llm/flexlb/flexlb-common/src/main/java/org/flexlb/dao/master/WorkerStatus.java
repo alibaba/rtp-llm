@@ -37,46 +37,38 @@ public class WorkerStatus {
     private long dpSize;
     private long tpSize;
 
-    private AtomicLong expirationTime = new AtomicLong(-1);
-    private AtomicLong lastUpdateTime = new AtomicLong(-1);
+    private AtomicLong statusLastUpdateTime = new AtomicLong(-1);
     private AtomicLong cacheLastUpdateTime = new AtomicLong(-1);
     private AtomicLong lastScheduleTime = new AtomicLong(-1);
     private Long statusVersion = -1L;
-    private static long TASK_TIME_OUT_MS = 1000 * 60;
 
+    /**
+     * 添加本地运行队列
+     * @param requestId 请求ID
+     * @param taskInfo 任务信息
+     */
     public void putLocalTask(Long requestId, TaskInfo taskInfo) {
         localTaskMap.put(requestId, taskInfo);
         addRunningQueueTime(taskInfo.estimatePrefillTime());
         lastScheduleTime.set(System.currentTimeMillis());
     }
 
+    /**
+     * 删除本地运行队列
+     * @param requestId 请求ID
+     */
     public void removeLocalTask(Long requestId) {
         TaskInfo taskInfo = localTaskMap.get(requestId);
         addRunningQueueTime(-1 * taskInfo.estimatePrefillTime());
         localTaskMap.remove(requestId);
     }
 
+    /**
+     * 添加运行队列中的预估执行时间
+     * @param len 要添加的任务的预估执行时间
+     */
     public void addRunningQueueTime(long len) {
         runningQueueTime.addAndGet(len);
-    }
-
-    /**
-     * 安全地减少队列中的token数量，确保不会变成负数
-     * 
-     * @param timeToReduce 要减少的time
-     */
-    private void safeDecrementQueueTime(long timeToReduce) {
-        if (timeToReduce <= 0) {
-            logger.warn("Invalid tokens to reduce: {}", timeToReduce);
-            return;
-        }
-        runningQueueTime.accumulateAndGet(timeToReduce, (currentTokens, reductionAmount) -> {
-            // 确保减少量为正数，然后计算新值，但不能小于0
-            long newTokenCount = currentTokens - reductionAmount;
-            
-            // 如果计算结果为负数，则设置为0，保证token数量不会小于0
-            return Math.max(newTokenCount, 0L);
-        });
     }
 
     public void addKvCacheUsed(long len) {
@@ -87,12 +79,25 @@ public class WorkerStatus {
         kvCacheFree.addAndGet(-len);
     }
 
-    public void clearFinishedTaskAndTimeoutTask(List<TaskInfo> finishedTaskList) {
-        handelFinishedTask(finishedTaskList);
-        handleTimeoutTasks(System.currentTimeMillis());
+    public void updateRunningTaskList(List<TaskInfo> runningTaskList) {
+        if (runningTaskList == null) {
+            return;
+        }
+
+        for (TaskInfo taskInfo : runningTaskList) {
+            Long requestId = taskInfo.getInterRequestId();
+            localTaskMap.computeIfPresent(requestId, (k, existingTask) -> {
+                existingTask.setLastActiveTimeMs(System.currentTimeMillis());
+                return taskInfo;
+            });
+        }
     }
 
-    private void handelFinishedTask(List<TaskInfo> finishedTaskList) {
+    /**
+     * 处理已完成任务
+     * @param finishedTaskList 已完成的任务列表
+     */
+    public void clearFinishedTask(List<TaskInfo> finishedTaskList) {
         if (finishedTaskList == null) {
             return;
         }
@@ -109,48 +114,43 @@ public class WorkerStatus {
             latestFinishedTaskVersion.accumulateAndGet(maxEndTime, Math::max);
         }
 
-        // 原子处理每个任务
+        // 在运行队列中删除已完成任务
         for (TaskInfo taskInfo : finishedTaskList) {
             Long requestId = taskInfo.getInterRequestId();
             localTaskMap.computeIfPresent(requestId, (k, existingTask) -> {
-                if (RoleType.PREFILL.matches(role)) {
+                if (RoleType.PREFILL.matches(role) || RoleType.PDFUSION.matches(role)) {
                     long delta = taskInfo.estimatePrefillTime();
-                    safeDecrementQueueTime(delta);
+                    safeDecrementQueueTime(runningQueueTime, delta);
                 }
                 logger.info("Removed task {}", requestId);
-                return null;
+                return null; // 返回null表示删除条目
             });
         }
     }
-    private void handleTimeoutTasks(long currentTime) {
-        // 原子遍历检测超时
-        localTaskMap.forEach((requestId, task) -> {
-            if (isTaskTimeout(task, currentTime)) {
-                localTaskMap.computeIfPresent(requestId, (k, existing) -> {
-                    logger.warn("Removing timeout task: {}", requestId);
-                    return removeAndUpdateQueueTime(existing);
-                });
-            }
-        });
-    }
 
-    private TaskInfo removeAndUpdateQueueTime(TaskInfo task) {
-        if (RoleType.PREFILL.matches(role)) {
-            long delta = task.estimatePrefillTime();
-            safeDecrementQueueTime(delta);
+    /**
+     * 安全地减少运行队列的总排队时间，确保不会变成负数
+     *
+     * @param runningQueueTime 运行队列的总排队时间
+     * @param timeToReduce 要减少的time
+     */
+    public static void safeDecrementQueueTime(AtomicLong runningQueueTime, long timeToReduce) {
+        if (timeToReduce <= 0) {
+            logger.warn("Invalid tokens to reduce: {}", timeToReduce);
+            return;
         }
-        return null; // 返回null表示删除条目
-    }
+        runningQueueTime.accumulateAndGet(timeToReduce, (currentRunningQueueTime, reductionAmount) -> {
+            // 确保减少量为正数，然后计算新值，但不能小于0
+            long newRunningQueueTime = currentRunningQueueTime - reductionAmount;
 
-    private boolean isTaskTimeout(TaskInfo task, long currentTime) {
-        // 使用任务开始时间或创建时间判断超时
-        long taskStartTime = task.getEnqueueTimeMs();
-        return (currentTime - taskStartTime) > TASK_TIME_OUT_MS;
+            // 如果计算结果为负数，则设置为0，保证token数量不会小于0
+            return Math.max(newRunningQueueTime, 0L);
+        });
     }
 
     /**
      * 获取IP:PORT格式的地址
-     * 
+     *
      * @return IP:PORT字符串
      */
     public String getIpPort() {
@@ -159,5 +159,4 @@ public class WorkerStatus {
         }
         return ip + ":" + port;
     }
-
 }

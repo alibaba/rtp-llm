@@ -83,7 +83,8 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
         roundInterval = Math.max(roundInterval, 1);
 
         // Skip prefill cache status check if not in 100ms interval
-        if (RoleType.PREFILL.equals(roleType) && !(syncCount.longValue() % roundInterval == 0)) {
+        if ((RoleType.PREFILL.equals(roleType) || RoleType.PDFUSION.equals(roleType))
+                    && !(syncCount.longValue() % roundInterval == 0)) {
             logger.info("Skip prefill cache status check for {} because not in {}ms interval", ipPort, prefillCacheStatusCheckInterval);
             return;
         }
@@ -101,13 +102,12 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
             WorkerStatus workerStatus = getOrCreateWorkerStatus();
             EngineRpcService.CacheStatusPB cacheStatus = engineGrpcService.getCacheStatus(
                 ip, grpcPort, workerStatus, cacheVersion, requestTimeoutMs);
-
-            CacheStatus cacheStatusRes = EngineStatusConverter.convertToCacheStatus(cacheStatus);
             logger.info("gRPC Cache Status Response - handled for {}, role:{}, cache_key_size:{}, cache_version:{}, "
-                    + "available_kv_cache:{}, total_kv_cache:{}, block_size:{}",
-                ipPort, roleType.name(), cacheStatusRes.getCacheKeySize(), cacheStatusRes.getVersion(),
-                cacheStatusRes.getAvailableKvCache(), cacheStatusRes.getTotalKvCache(), cacheStatusRes.getBlockSize());
-            return cacheStatusRes;
+                            + "available_kv_cache:{}, total_kv_cache:{}, block_size:{}",
+                    ipPort, roleType.name(), cacheStatus.getCacheKeysMap().size(), cacheStatus.getVersion(),
+                    cacheStatus.getAvailableKvCache(), cacheStatus.getTotalKvCache(), cacheStatus.getBlockSize());
+
+            return EngineStatusConverter.convertToCacheStatus(cacheStatus);
         } catch (Throwable throwable) {
             handleException(throwable);
             // Return a default CacheStatus with error information
@@ -126,10 +126,10 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
         try {
 
             WorkerStatus workerStatus = getOrCreateWorkerStatus();
-            logger.info("gRPC Worker Status - handled for {}, role:{}", ipPort, roleType.name());
+            logger.info("gRPC Cache Status - handled for {}, role:{}", ipPort, roleType.name());
 
             if (newCacheStatus.getMessage() != null) {
-                logger.error("gRPC Worker Status - {}, role:{}, message:{}", ipPort, roleType.name(), newCacheStatus.getMessage());
+                logger.error("gRPC Cache Status - {}, role:{}, message:{}", ipPort, roleType.name(), newCacheStatus.getMessage());
                 return;
             }
 
@@ -156,7 +156,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                 newCacheFree -= cacheUsed;
                 workerStatus.getKvCacheUsed().getAndSet(newCacheUse);
                 workerStatus.getKvCacheFree().getAndSet(newCacheFree);
-                if (RoleType.PREFILL.equals(roleType)) {
+                if (RoleType.PREFILL.equals(roleType) || RoleType.PDFUSION.equals(roleType)) {
                     if (workerStatus.getRunningQueueTime().get() > estimateRunningTime) {
                         workerStatus.getRunningQueueTime().getAndSet(estimateRunningTime);
                     }
@@ -221,14 +221,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
 
     private void updateLocalKvCache(WorkerStatus workerStatus) {
         try {
-            if (!RoleType.PREFILL.equals(roleType)) {
-                Long size = Optional.of(workerStatus)
-                        .map(WorkerStatus::getCacheStatus)
-                        .map(CacheStatus::getCacheKeySize)
-                        .orElse(0L);
-                if (size != 0) {
-                    logger.warn("worker cache size is not zero for prefill role, size: {}, ip: {}, role: {}", size, workerStatus.getIp(), roleType.name());
-                }
+            if (!RoleType.PREFILL.equals(roleType) && !RoleType.PDFUSION.equals(roleType)) {
                 return;
             }
             WorkerCacheUpdateResult result = cacheAwareService.updateEngineBlockCache(workerStatus);

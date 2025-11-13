@@ -1,4 +1,4 @@
-package org.flexlb.sync;
+package org.flexlb.sync.schedule;
 
 import io.micrometer.core.instrument.util.NamedThreadFactory;
 import org.flexlb.sync.status.EngineWorkerStatus;
@@ -12,7 +12,6 @@ import java.util.Map;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * 清理异步请求的Disposable，避免内存泄漏问题
@@ -21,8 +20,6 @@ import java.util.concurrent.atomic.AtomicLong;
 public class StatusQueryDisposableCleaner {
 
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
-
-    public static AtomicLong updateTime = new AtomicLong(0);
 
     public static long CLEAN_DISPOSABLE_PERIOD = 3 * 1000;
 

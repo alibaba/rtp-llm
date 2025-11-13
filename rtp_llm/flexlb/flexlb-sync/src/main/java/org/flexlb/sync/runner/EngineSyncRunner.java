@@ -98,7 +98,7 @@ public class EngineSyncRunner implements Runnable {
                 WorkerStatus workerStatus = cachedWorkerStatuses.get(ipPort);
                 logger.info("worker status ip: {} , alive: {}", workerStatus.getIp(), workerStatus.isAlive());
                 if (!latestValidIpPorts.contains(ipPort)) {
-                    long last_time = workerStatus.getLastUpdateTime().get();
+                    long last_time = workerStatus.getStatusLastUpdateTime().get();
                     if (System.currentTimeMillis() - last_time > 1000) {
                         cachedWorkerStatuses.remove(ipPort);
                         logger.info("[remove] engine ip changes, model={}, role={}, ipPort={}", modelName, roleType, ipPort);

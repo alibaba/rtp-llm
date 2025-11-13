@@ -48,6 +48,8 @@ public class MetricConstant {
 
     public static final String ENGINE_BALANCING_MASTER_SCHEDULE_RT = "app.engine.balancing.master.all.rt";
 
+    public static final String ENGINE_BALANCING_MASTER_SELECT_DETAIL = "app.engine.balancing.master.select.detail";
+
     /**
      * Master负载均衡服务的失败qps
      */
@@ -72,6 +74,11 @@ public class MetricConstant {
      * 引擎队列等待时间
      */
     public static final String ENGINE_RUNNING_QUEUE_TIME = "app.engine.health.check.running.queue.time";
+
+    /**
+     * 引擎本地任务缓存大小
+     */
+    public static final String ENGINE_LOCAL_TASK_MAP_SIZE = "app.engine.health.check.local.task.map.size";
 
     /**
      * prefill master节点监控

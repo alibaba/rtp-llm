@@ -164,7 +164,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                     selectedWorker.getWorkerTTFT().getHitCacheTokens() / (double) seqLen);
 
             TaskInfo task = new TaskInfo();
-            task.setEnqueueTimeMs(System.currentTimeMillis());
+            task.setLastActiveTimeMs(System.currentTimeMillis());
             task.setInterRequestId(interRequestId);
             task.setInputLength(balanceContext.getMasterRequest().getSeqLen());
             task.setPrefixLength(selectedWorker.getWorkerTTFT().getHitCacheTokens());
