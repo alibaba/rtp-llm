@@ -79,7 +79,7 @@ class DenseEmbeddingRenderer(EmbeddingRendererBase):
 class NormalHandler(CustomHandler):
     def __init__(self, config: ModelConfig):
         super().__init__(config)
-        self.is_causal = config.is_causal_
+        self.is_causal = config.attn_config.is_causal
 
     def forward(
         self,

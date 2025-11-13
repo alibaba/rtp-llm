@@ -47,7 +47,7 @@ class MptWeightInfo(ModelDeployWeightInfo):
                 AtomicWeight(
                     W.linear_bias_slopes,
                     [],
-                    functools.partial(slopes, n=self.model_config.head_num_),
+                    functools.partial(slopes, n=self.model_config.attn_config.head_num),
                     data_type=torch.float,
                 )
             )

@@ -83,17 +83,10 @@ def apply_model_args_to_config(model_args: ModelArgs, model_config) -> None:
         model_config.act_type = model_args.act_type
     model_config.use_float32 = model_args.use_float32
     
-    # Set sequence length
-    if model_args.max_seq_len is not None and model_args.max_seq_len > 0:
-        model_config.max_seq_len = model_args.max_seq_len
+
+    model_config.max_seq_len = model_args.max_seq_len
 
     # Set MLA ops type (C++ binding handles string to enum conversion)
     if model_args.mla_ops_type:
         model_config.mla_ops_type = model_args.mla_ops_type
-
-    # Apply model override args
-    if model_args.json_model_override_args and model_args.json_model_override_args != "{}":
-        model_config.json_model_override_args = model_args.json_model_override_args
-        # Apply override args to model_config
-        model_config.apply_override_args(model_args.json_model_override_args)
 

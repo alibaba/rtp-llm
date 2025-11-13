@@ -16,7 +16,7 @@ class CosyVoiceQwen(QWenV2):
                 config_json = json.loads(content)
             config.input_vocab_size = config_json.get(
             "input_vocab_size", config.vocab_size + 151938)
-        config.mm_sep_tokens = [[-200]]  # TODO(yinzhi): for SFT support
+        config.mm_model_config.mm_sep_tokens = [[-200]]  # TODO(yinzhi): for SFT support
         return config
 
 register_model("cosyvoice_qwen", CosyVoiceQwen, ["CosyQwen2ForCausalLM"])

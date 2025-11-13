@@ -132,6 +132,21 @@ class BaseModel(object):
     def get_weight_cls() -> ModelDeployWeightInfo:
         raise NotImplementedError
 
+    def get_config(self) -> ConfigWrapper:
+        """Get ConfigWrapper for C++ operations.
+        
+        Returns a ConfigWrapper instance that aggregates model_config and engine_config,
+        providing a unified interface for C++ operations (RtpLLMOp, EmbeddingOp) to access
+        all necessary configuration objects.
+        
+        Returns:
+            ConfigWrapper instance containing all configuration objects
+        """
+        return ConfigWrapper(
+            model_config=self.model_config,
+            engine_config=self.engine_config,
+            vit_config=self.vit_config,
+        )
 
     @property
     def dtype(self) -> Union[str, torch.dtype]:

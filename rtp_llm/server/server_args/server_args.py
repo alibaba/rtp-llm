@@ -548,6 +548,4 @@ def setup_args():
         os.environ["ENABLE_COMM_OVERLAP"] = "0"
         logging.info("[MI308X] disable ENABLE_COMM_OVERLAP by default.")
 
-    parser.print_env_mappings()
-
     return py_env_configs

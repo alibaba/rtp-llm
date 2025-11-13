@@ -309,10 +309,8 @@ std::unique_ptr<ProposeModelEngineInitParams> RtpLLMOp::initProposeModel(py::obj
             params = prepareMTPEngineInitParams(model_id_, propose_model);
             model_id_++;
         } else if (sp_type == "deterministic") {
-            // Get gen_num_per_cycle from sp_config
-            py::object config_obj = propose_model.attr("get_config")();
-            auto sp_config = config_obj.attr("sp_config").cast<SpeculativeExecutionConfig>();
-            size_t gen_num_per_cycle = sp_config.gen_num_per_cycle;
+            // Get gen_num_per_cycle directly from propose_model.gen_num_per_circle
+            size_t gen_num_per_cycle = propose_model.attr("gen_num_per_circle").cast<size_t>();
             params = std::make_unique<ProposeModelEngineInitParams>(sp_type, gen_num_per_cycle);
         } else {
             RTP_LLM_FAIL("sp_type %s not support", sp_type.c_str());

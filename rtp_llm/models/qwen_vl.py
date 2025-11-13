@@ -44,8 +44,8 @@ class QWen_VL(QWen, MultiModalMixin):
     def _create_config(cls, ckpt_path: str):
         from rtp_llm.config.model_config import ModelConfig
         config = ModelConfig()
-        config.head_num_ = 0
-        config.size_per_head_ = 0
+        config.attn_config.head_num = 0
+        config.attn_config.size_per_head = 0
         config.num_layers = 0
         config.max_seq_len = 1024
         config.vocab_size = 0
@@ -89,7 +89,7 @@ class QWen_VL(QWen, MultiModalMixin):
         if config.mm_related_params.special_tokens is None:
             config.mm_related_params.special_tokens = {}
         config.mm_related_params.special_tokens.update({"default_mm_token": "<img/>"})
-        config.mm_sep_tokens = [
+        config.mm_model_config.mm_sep_tokens = [
             [vit_config["image_start_id"], vit_config["image_start_id"] + 1]
         ]
 

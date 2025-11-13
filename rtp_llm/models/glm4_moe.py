@@ -398,9 +398,9 @@ class Glm4Moe(DeepSeekV2):
     def _create_config(cls, ckpt_path: str):
         from rtp_llm.config.model_config import ModelConfig
         config = ModelConfig()
-        config.head_num_ = 0
-        config.head_num_kv_ = 0
-        config.size_per_head_ = 0
+        config.attn_config.head_num = 0
+        config.attn_config.kv_head_num = 0
+        config.attn_config.size_per_head = 0
         config.num_layers = 0
         config.inter_size = 0  # 13696
         config.vocab_size = 152064
@@ -413,12 +413,12 @@ class Glm4Moe(DeepSeekV2):
 
         cls._from_hf(config, ckpt_path)
         assert (
-            config.head_num_ > 0
-            and config.head_num_kv_ > 0
-            and config.size_per_head_ > 0
+            config.attn_config.head_num > 0
+            and config.attn_config.kv_head_num > 0
+            and config.attn_config.size_per_head > 0
             and config.num_layers > 0
             and config.inter_size > 0
-        ), f"error config config.head_num_={config.head_num_} config.head_num_kv_={config.head_num_kv_} config.size_per_head_={config.size_per_head_} config.num_layers={config.num_layers} config.inter_size={config.inter_size}"
+        ), f"error config config.attn_config.head_num={config.attn_config.head_num} config.attn_config.kv_head_num={config.attn_config.kv_head_num} config.attn_config.size_per_head={config.attn_config.size_per_head} config.num_layers={config.num_layers} config.inter_size={config.inter_size}"
         return config
 
     @classmethod
@@ -439,12 +439,12 @@ class Glm4Moe(DeepSeekV2):
     @staticmethod
     def _from_config_json(config: "ModelConfig", config_json: Dict[str, Any]):
         config.inter_size = config_json["intermediate_size"]
-        config.head_num_ = config_json["num_attention_heads"]
-        config.head_num_kv_ = config_json.get("num_key_value_heads", config.head_num_)
-        config.size_per_head_ = (
+        config.attn_config.head_num = config_json["num_attention_heads"]
+        config.attn_config.kv_head_num = config_json.get("num_key_value_heads", config.attn_config.head_num)
+        config.attn_config.size_per_head = (
             int(config_json.get("head_dim", 0))
             if "head_dim" in config_json
-            else config_json["hidden_size"] // config.head_num_
+            else config_json["hidden_size"] // config.attn_config.head_num
         )
         if config_json.get("hidden_size") is not None:
             config.hidden_size = config_json["hidden_size"]
@@ -455,9 +455,9 @@ class Glm4Moe(DeepSeekV2):
         config.vocab_size = config_json["vocab_size"]
         partial_rotary_factor = config_json.get("partial_rotary_factor", 1.0)
         config.rope_config.dim = int(
-            config.size_per_head_ * partial_rotary_factor
+            config.attn_config.size_per_head * partial_rotary_factor
         )
-        config.layernorm_eps_ = config_json.get("rms_norm_eps", 1e-06)
+        config.layernorm_eps = config_json.get("rms_norm_eps", 1e-06)
         config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
 
         config.moe_k = config_json["num_experts_per_tok"]

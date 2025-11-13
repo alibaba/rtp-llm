@@ -31,12 +31,12 @@ class Bert(BaseModel):
         config.ckpt_path = ckpt_path
         config.activation_type = "gelu"
         config.norm_type = "layernorm"
-        config.rotary_embedding_dim_ = 0
-        config.rotary_embedding_style_ = 0
-        config.has_positional_encoding_ = True
-        config.has_pre_decoder_layernorm_ = True
+        config.attn_config.rope_config.dim = 0
+        config.attn_config.rope_config.style = 0
+        config.has_positional_encoding = True
+        config.has_pre_decoder_layernorm = True
         config.layernorm_type = "post_layernorm"
-        config.is_causal_ = False
+        config.is_causal = False
         # hugggingface
         config_path = os.path.join(ckpt_path, "config.json")
         if not os.path.exists(config_path):
@@ -84,20 +84,20 @@ class Bert(BaseModel):
         cls, config: ModelConfig, config_json: Dict[str, Any]
     ):
         # check position_embedding_type == absolute
-        config.head_num_ = config_json["num_attention_heads"]
+        config.attn_config.head_num = config_json["num_attention_heads"]
         # bert has no group attention
-        config.head_num_kv_ = config.head_num_
-        config.size_per_head_ = (
+        config.attn_config.kv_head_num = config.attn_config.head_num
+        config.attn_config.size_per_head = (
             config_json["hidden_size"] // config_json["num_attention_heads"]
         )
         config.hidden_size = config_json["hidden_size"]
         config.num_layers = config_json["num_hidden_layers"]
         config.max_seq_len = config_json.get("max_position_embeddings", 512)
         config.vocab_size = config_json["vocab_size"]
-        config.type_vocab_size_ = config_json.get("type_vocab_size", 0)
-        config.layernorm_eps_ = config_json["layer_norm_eps"]
+        config.type_vocab_size = config_json.get("type_vocab_size", 0)
+        config.layernorm_eps = config_json["layer_norm_eps"]
         config.inter_size = config_json["intermediate_size"]
-        config.config_dtype_ = config_json.get("torch_dtype", None)
+        config.config_dtype = config_json.get("torch_dtype", None)
 
 
 class Roberta(Bert):

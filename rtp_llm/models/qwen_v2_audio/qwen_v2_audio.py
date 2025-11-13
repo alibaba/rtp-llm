@@ -55,20 +55,20 @@ class QWenV2Audio(QWenV2, MultiModalMixin):
 
         # config.activation_type = config_json["hidden_act"]
         config.inter_size = config_json.get("intermediate_size", 11008)
-        config.head_num_ = config_json.get("num_attention_heads", 32)
-        config.head_num_kv_ = config_json.get("num_key_value_heads", config.head_num_)
-        config.size_per_head_ = config_json.get("hidden_size", 4096) // config.head_num_
-        config.layer_num_ = config_json.get("num_hidden_layers", 32)
+        config.attn_config.head_num = config_json.get("num_attention_heads", 32)
+        config.attn_config.kv_head_num = config_json.get("num_key_value_heads", config.attn_config.head_num)
+        config.attn_config.size_per_head = config_json.get("hidden_size", 4096) // config.attn_config.head_num
+        config.num_layers = config_json.get("num_hidden_layers", 32)
         config.rope_config.base = config_json.get(
             "rope_theta", config.rope_config.base
         )
         config.vocab_size = config_json["vocab_size"]
-        config.rope_config.dim = config.size_per_head_
-        config.layernorm_eps_ = config_json.get("rms_norm_eps", 1e-06)
-        config.tie_word_embeddings_ = config_json.get("tie_word_embeddings", False)
+        config.rope_config.dim = config.attn_config.size_per_head
+        config.layernorm_eps = config_json.get("rms_norm_eps", 1e-06)
+        config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
 
-        config.mm_sep_tokens_ = [[sep_token]]  # image_token_index
-        config.config_dtype_ = config_json.get("torch_dtype", None)
+        config.mm_model_config.mm_sep_tokens = [[sep_token]]  # image_token_index
+        config.config_dtype = config_json.get("torch_dtype", None)
 
 
 register_model("qwen_v2_audio", QWenV2Audio)

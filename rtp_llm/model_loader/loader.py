@@ -445,9 +445,9 @@ class ModelLoader:
 
         embedding_weight = weight.global_weights.get(W.embedding, None)
         if embedding_weight != None:
-            self._weights_info.model_config.embedding_size_ = embedding_weight.shape[0]
+            self._weights_info.model_config.embedding_size = embedding_weight.shape[0]
             logging.info(
-                f"embedding_size is {self._weights_info.model_config.embedding_size_}, vocab size is {self._weights_info.model_config.vocab_size}"
+                f"embedding_size is {self._weights_info.model_config.embedding_size}, vocab size is {self._weights_info.model_config.vocab_size}"
             )
 
         if self._load_config.vit_separation != VitSeparation.VIT_SEPARATION_ROLE:

@@ -27,6 +27,75 @@ def get_pad_size(size: int, align_size: int):
     return (align_size - (size % align_size)) % align_size
 
 class ModelConfig(CppModelConfig):
+    # Python-only fields that are allowed to be set
+    _python_fields = {
+        'is_mtp', 'normalize_lm_head_weight', 'has_lm_head_bias', 'tie_word_embeddings',
+        'quantization', 'mm_related_params', 'src_quantization_bit', 'config_dtype',
+        'template_type', 'model_name', 'kv_cache_data_type', 'quant_config',
+    }
+    
+    # Known C++ ModelConfig members (from ModelConfig.h)
+    # These may not be explicitly exposed via pybind11 but exist in C++
+    _cpp_members = {
+        'num_layers', 'max_seq_len', 'vocab_size', 'hidden_size', 'inter_size',
+        'inter_padding_size', 'moe_inter_padding_size', 'attn_config', 'special_tokens',
+        'quant_algo', 'eplb_config', 'ckpt_path', 'tokenizer_path', 'lora_infos',
+        'position_ids_style', 'pre_seq_len', 'use_kvcache', 'logit_scale', 'qk_norm',
+        'expert_num', 'moe_n_group', 'moe_k', 'moe_style', 'moe_layer_index',
+        'data_type', 'activation_type', 'norm_type', 'layernorm_type', 'task_type',
+        'mla_ops_type', 'extra_data_path', 'local_extra_data_path', 'act_type',
+        'use_float32', 'original_checkpoint_path', 'model_type', 'ptuning_path',
+        'json_model_override_args', 'mm_model_config',
+        'deepseek_rope_mscale', 'deepseek_mscale_all_dim', 'moe_topk_group',
+        'routed_scaling_factor', 'layernorm_eps', 'partial_rotary_factor',
+        'input_embedding_scalar', 'residual_scalar', 'use_norm_input_residual',
+        'use_norm_attn_out_residual', 'input_vocab_size', 'type_vocab_size',
+        'embedding_size', 'moe_normalize_expert_scale', 'scoring_func',
+        'has_positional_encoding', 'has_pre_decoder_layernorm',
+        'has_post_decoder_layernorm', 'has_lm_head', 'use_attention_linear_bias',
+        'use_fp32_to_compute_logit', 'add_bias_linear', 'has_moe_norm',
+        'prefix_projection', 'reverse_e_h_norm',
+    }
+    
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Override __setattr__ to prevent assignment of undefined Python attributes.
+        
+        This allows C++ binding attributes (managed by pybind11) to work normally,
+        while preventing assignment of undefined Python attributes.
+        """
+        # Allow setting attributes that are:
+        # 1. In _python_fields (Python-only fields)
+        # 2. Start with underscore (private attributes)
+        # 3. In _cpp_members (known C++ members)
+        if name.startswith('_') or name in self._python_fields or name in self._cpp_members:
+            super().__setattr__(name, value)
+        else:
+            # For other attributes, check if they exist (C++ binding attributes)
+            # Try hasattr first - it catches AttributeError internally
+            # If hasattr returns True or raises TypeError, the attribute exists
+            try:
+                if hasattr(self, name):
+                    # Attribute exists (likely a C++ binding attribute), allow setting
+                    super().__setattr__(name, value)
+                else:
+                    # hasattr returned False, but try accessing anyway in case it's a C++ member
+                    # that pybind11 hasn't exposed yet but exists in C++
+                    try:
+                        # Try to get the attribute - this will work if it exists
+                        getattr(self, name)
+                        # If we get here, attribute exists, allow setting
+                        super().__setattr__(name, value)
+                    except AttributeError:
+                        # Attribute doesn't exist, raise error
+                        raise AttributeError(
+                            f"'{self.__class__.__name__}' object has no attribute '{name}'. "
+                            f"Valid Python-only attributes: {', '.join(sorted(self._python_fields))}"
+                        )
+            except TypeError:
+                # TypeError can occur when property getter returns unregistered C++ type
+                # This means the attribute exists (as a property), so allow setting
+                super().__setattr__(name, value)
+
     def eval_model_size(self) -> float:
         """
         Evaluate total model size including weights, KV cache, and runtime buffers.

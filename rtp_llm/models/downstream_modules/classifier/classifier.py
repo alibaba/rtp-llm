@@ -87,7 +87,7 @@ class ClassifierHandler(CustomHandler):
         input_lengths: torch.Tensor,
     ) -> List[torch.Tensor]:
         # TODO test it
-        if self.config_.is_causal_:
+        if self.config_.attn_config.is_causal:
             last_tokens = get_last_token_from_combo_tokens(hidden_states, input_lengths)
             return self.linear(last_tokens)
         else:

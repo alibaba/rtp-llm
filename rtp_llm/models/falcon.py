@@ -183,23 +183,23 @@ class Falcon(BaseModel):
         head_num = config_json.get("n_head", config_json.get("num_attention_heads"))
         config = ModelConfig()
         config.ckpt_path = ckpt_path
-        config.head_num_ = head_num
-        config.head_num_kv_ = config_json.get(
+        config.attn_config.head_num = head_num
+        config.attn_config.kv_head_num = config_json.get(
             "n_head_kv", config_json.get("num_kv_heads", 1)
         )
-        config.size_per_head_ = config_json["hidden_size"] // head_num
+        config.attn_config.size_per_head = config_json["hidden_size"] // head_num
         config.inter_size = config_json["hidden_size"] * 4
         config.num_layers = config_json.get("n_layer", config_json.get("num_hidden_layers"))
         config.max_seq_len = 2048
         config.vocab_size = config_json["vocab_size"]
         config.activation_type = "gelu-none-approximate"
-        config.has_post_decoder_layernorm_ = True
-        config.rotary_embedding_style_ = 1
+        config.has_post_decoder_layernorm = True
+        config.attn_config.rope_config.style = 1
         config.special_tokens.bos_token_id = config_json.get("bos_token_id", -1)
         config.special_tokens.eos_token_id = config_json.get("eos_token_id", 0)
-        config.rotary_embedding_dim_ = config.size_per_head_
-        config.tie_word_embeddings_ = config_json.get("tie_word_embeddings", False)
-        config.config_dtype_ = config_json.get("torch_dtype", None)
+        config.attn_config.rope_config.dim = config.attn_config.size_per_head
+        config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
+        config.config_dtype = config_json.get("torch_dtype", None)
         return config
 
 

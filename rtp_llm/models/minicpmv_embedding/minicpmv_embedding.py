@@ -269,9 +269,9 @@ class MiniCPMVEmbedding(Llama, MultiModalMixin):
         self.slice_start_id = self.tokenizer._convert_token_to_id(self.slice_start)
         self.slice_end_id = self.tokenizer._convert_token_to_id(self.slice_end)
 
-        if self.model_config.mm_sep_tokens is None:
-            self.model_config.mm_sep_tokens = []
-        self.model_config.mm_sep_tokens = [
+        if self.model_config.mm_model_config.mm_sep_tokens is None:
+            self.model_config.mm_model_config.mm_sep_tokens = []
+        self.model_config.mm_model_config.mm_sep_tokens = [
             [self.im_start_id, self.im_end_id]
             # [self.slice_start_id, self.slice_end_id]
         ]
@@ -294,8 +294,8 @@ class MiniCPMVEmbedding(Llama, MultiModalMixin):
         from rtp_llm.config.model_config import ModelConfig
         from rtp_llm.config.model_config import VitParameters
         config = ModelConfig()
-        config.head_num_ = 0
-        config.size_per_head_ = 0
+        config.attn_config.head_num = 0
+        config.attn_config.size_per_head = 0
         config.num_layers = 0
         config.max_seq_len = 0
         config.vocab_size = 0

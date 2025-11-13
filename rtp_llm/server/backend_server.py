@@ -155,7 +155,7 @@ class BackendServer(object):
                         self._openai_endpoint.tokenizer,
                         self._openai_endpoint.chat_renderer,
                     )
-                    max_lora_model_size = self.model.engine_config.model_specific_config.max_lora_model_size
+                    max_lora_model_size = self.model.model.engine_config.model_specific_config.max_lora_model_size
                     self._lora_manager = LoraManager(self.model, max_lora_model_size=max_lora_model_size)
                     self._weight_manager = WeightManager(self.model)
 

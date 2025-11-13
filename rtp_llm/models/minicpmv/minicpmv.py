@@ -222,9 +222,7 @@ class MiniCPMV(QWenV2, MultiModalMixin):
             vit_config=vit_config,
             merge_lora=merge_lora,
         )
-        if self.model_config.mm_sep_tokens is None:
-            self.model_config.mm_sep_tokens = []
-        self.model_config.mm_sep_tokens = [
+        self.model_config.mm_model_config.mm_sep_tokens = [
             [self.tokenizer.im_start_id, self.tokenizer.im_end_id],
             [self.tokenizer.slice_start_id, self.tokenizer.slice_end_id],
         ]
@@ -246,9 +244,9 @@ class MiniCPMV(QWenV2, MultiModalMixin):
     def _create_config(cls, ckpt_path: str):
         from rtp_llm.config.model_config import VitParameters
         config = ModelConfig()
-        config.head_num_ = 0
-        config.head_num_kv_ = 0
-        config.size_per_head_ = 0
+        config.attn_config.head_num = 0
+        config.attn_config.kv_head_num = 0
+        config.attn_config.size_per_head = 0
         config.num_layers = 0
         config.inter_size = 0
         config.vocab_size = 0

@@ -45,7 +45,7 @@ class ChatGlmV4Vision(ChatGlmV4, MultiModalMixin):
         config.mm_related_params.config["eoi_token_id"] = config_dict.get(
             "eoi_token_id", 0
         )
-        config.mm_sep_tokens = [
+        config.mm_model_config.mm_sep_tokens = [
             [config_dict.get("boi_token_id", 0), config_dict.get("eoi_token_id", 0)]
         ]
         config.include_sep_tokens = True

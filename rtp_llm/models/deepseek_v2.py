@@ -76,7 +76,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
             kv_lora_rank=self.kv_lora_rank,
             ope_head_dim=self.nope_head_dim,
             v_head_dim=self.v_head_dim,
-            use_mla=self.model_config.use_mla_ and self.model_config.mla_ops_type != MlaOpsType.MHA,
+            use_mla=self.model_config.attn_config.use_mla and self.model_config.mla_ops_type != MlaOpsType.MHA,
             q_use_lora=self.q_use_lora,
         )
         layer_weights = [
@@ -228,7 +228,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                 )
             )
 
-        if self.model_config.use_mla_ and self.model_config.mla_ops_type != MlaOpsType.MHA:
+        if self.model_config.attn_config.use_mla and self.model_config.mla_ops_type != MlaOpsType.MHA:
             mla_layer_weights.append(
                 MlaAttnAtomicWeight(
                     W.mla_kc,
@@ -508,9 +508,9 @@ class DeepSeekV2(BaseModel):
     @classmethod
     def _create_config(cls, ckpt_path: str):
         config = ModelConfig()
-        config.head_num_ = 0
-        config.head_num_kv_ = 0
-        config.size_per_head_ = 0
+        config.attn_config.head_num = 0
+        config.attn_config.kv_head_num = 0
+        config.attn_config.size_per_head = 0
         config.num_layers = 0
         config.inter_size = 0
         config.vocab_size = 102400
@@ -548,25 +548,25 @@ class DeepSeekV2(BaseModel):
             content = reader.read()
             config_json = json.loads(content)
             config.inter_size = config_json["intermediate_size"]
-            config.head_num_ = config_json["num_attention_heads"]
-            config.head_num_kv_ = config_json.get("num_key_value_heads", config.head_num_)
+            config.attn_config.head_num = config_json["num_attention_heads"]
+            config.attn_config.kv_head_num = config_json.get("num_key_value_heads", config.attn_config.head_num)
             config.num_layers = config_json["num_hidden_layers"]
             config.rope_config.base = config_json.get(
                 "rope_theta", config.rope_config.base
             )
             config.vocab_size = config_json["vocab_size"]
-            config.layernorm_eps_ = config_json.get("rms_norm_eps", 1e-06)
+            config.layernorm_eps = config_json.get("rms_norm_eps", 1e-06)
             config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
             config.hidden_size = config_json["hidden_size"]
 
             # MLA config
-            config.use_mla_ = True
+            config.use_mla = True
             config.q_lora_rank = config_json["q_lora_rank"]
             config.kv_lora_rank = config_json["kv_lora_rank"]
             config.nope_head_dim = config_json["qk_nope_head_dim"]
             config.rope_head_dim = config_json["qk_rope_head_dim"]
             config.v_head_dim = config_json["v_head_dim"]
-            config.size_per_head_ = config.nope_head_dim + config.rope_head_dim
+            config.attn_config.size_per_head = config.nope_head_dim + config.rope_head_dim
             config.rope_config.dim = config.rope_head_dim
 
             # yarn rotary config
@@ -616,7 +616,7 @@ class DeepSeekV2(BaseModel):
             n_shared_experts = config_json["n_shared_experts"]
             config.inter_size = n_shared_experts * config.moe_inter_padding_size
 
-            config.layernorm_eps_ = config_json.get("rms_norm_eps", 1e-06)
+            config.layernorm_eps = config_json.get("rms_norm_eps", 1e-06)
             config.has_moe_norm = config_json.get("norm_topk_prob", False)
             config.moe_style = 2  # shared + expert
 

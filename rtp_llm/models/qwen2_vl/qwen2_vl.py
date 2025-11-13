@@ -271,7 +271,7 @@ class QWen2_VL(QWen_VL, MultiModalMixin):
             from rtp_llm.config.model_config import SpecialTokens
             config.mm_related_params.special_tokens = SpecialTokens()
         config.mm_related_params.special_tokens.update({"default_mm_token": "<img/>"})
-        config.mm_sep_tokens = [
+        config.mm_model_config.mm_sep_tokens = [
             [config_json["vision_start_token_id"], config_json["vision_end_token_id"]]
         ]
 
@@ -280,22 +280,22 @@ class QWen2_VL(QWen_VL, MultiModalMixin):
         config.vocab_size = config_json["vocab_size"]
         config.max_seq_len = 10240
         config.activation_type = "SiGLU"
-        config.head_num_ = config_json["num_attention_heads"]
-        config.head_num_kv_ = config_json["num_key_value_heads"]
+        config.attn_config.head_num = config_json["num_attention_heads"]
+        config.attn_config.kv_head_num = config_json["num_key_value_heads"]
         config.hidden_size = config_json["hidden_size"]
-        config.size_per_head_ = (
+        config.attn_config.size_per_head = (
             int(config_json.get("head_dim"))
             if "head_dim" in config_json
-            else config_json["hidden_size"] // config.head_num_
+            else config_json["hidden_size"] // config.attn_config.head_num
         )
-        config.layer_num_ = config_json["num_hidden_layers"]
+        config.num_layers = config_json["num_hidden_layers"]
         config.inter_size = config_json["intermediate_size"]
         config.norm_type = "rmsnorm"
-        config.layernorm_eps_ = config_json["rms_norm_eps"]
-        config.has_post_decoder_layernorm_ = True
+        config.layernorm_eps = config_json["rms_norm_eps"]
+        config.has_post_decoder_layernorm = True
         config.special_tokens.bos_token_id = config_json.get("bos_token_id", -1)
         config.special_tokens.eos_token_id = config_json.get("eos_token_id", 0)
-        config.tie_word_embeddings_ = config_json.get("tie_word_embeddings", False)
+        config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
         config.mm_model_config.mm_position_ids_style = 2
         rope_config = config.attn_config.rope_config
         rope_config.style = 7
