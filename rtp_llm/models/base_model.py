@@ -25,6 +25,7 @@ from rtp_llm.ops import VitSeparation
 from rtp_llm.utils.database import CkptDatabase
 from rtp_llm.utils.time_util import timer_wrapper
 from rtp_llm.utils.util import to_torch_dtype
+from rtp_llm.models.config_wrapper import ConfigWrapper
 
 class BaseModel(object):
 

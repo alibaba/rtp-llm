@@ -23,7 +23,7 @@ class MMProcessEngine:
     def __init__(self, model, vit_config):
         self.model = model
         self.vit_config = vit_config
-        self.contains_pos: bool = self.model.config.mm_position_ids_style != 0
+        self.contains_pos: bool = self.model.model_config.mm_model_config.mm_position_ids_style != 0
         self.run_batch: bool = self.vit_config.vit_run_batch
         self.download_headers = self.vit_config.download_headers
         self.url_cache_size = self.vit_config.url_cache_item_num

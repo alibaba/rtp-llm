@@ -23,7 +23,8 @@ RtpEmbeddingOp::RtpEmbeddingOp() {}
 
 void RtpEmbeddingOp::init(py::object model, py::object mm_process_engine) {
     try {
-        py::object config_obj = model.attr("config");
+        // Get ConfigWrapper from model's get_config() method
+        py::object config_obj = model.attr("get_config")();
         // Extract individual config members from Python config object
         auto model_config = config_obj.attr("model_config").cast<ModelConfig>();
         auto parallelism_config = config_obj.attr("parallelism_config").cast<ParallelismConfig>();
@@ -41,7 +42,6 @@ void RtpEmbeddingOp::init(py::object model, py::object mm_process_engine) {
         auto cache_store_config = config_obj.attr("cache_store_config").cast<CacheStoreConfig>();
         auto misc_config = config_obj.attr("misc_config").cast<MiscellaneousConfig>();
         auto arpc_config = config_obj.attr("arpc_config").cast<ArpcConfig>();
-        auto ffn_disaggregate_config = config_obj.attr("ffn_disaggregate_config").cast<FfnDisAggregateConfig>();
         VitConfig vit_config;
         if (py::hasattr(config_obj, "vit_config")) {
             py::object py_vit_config = config_obj.attr("vit_config");
@@ -74,7 +74,7 @@ void RtpEmbeddingOp::init(py::object model, py::object mm_process_engine) {
                                 cache_store_config,
                                 misc_config,
                                 arpc_config,
-                                ffn_disaggregate_config,
+                                parallelism_config.ffn_disaggregate_config,
                                 vit_config,
                                 std::move(*gpt_weight),
                                 py_model);

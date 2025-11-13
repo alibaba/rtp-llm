@@ -32,7 +32,7 @@ std::unique_ptr<ProposeModelEngineInitParams> prepareMTPEngineInitParams(size_t 
 
     std::unique_ptr<std::vector<std::unique_ptr<EngineInitParams>>> mtp_params =
         std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
-    py::object config_obj = sp_model.attr("config");
+    py::object config_obj = sp_model.attr("get_config")();
     // Extract individual config members from Python config object
     auto model_config = config_obj.attr("model_config").cast<ModelConfig>();
     auto parallelism_config = config_obj.attr("parallelism_config").cast<ParallelismConfig>();
@@ -50,7 +50,6 @@ std::unique_ptr<ProposeModelEngineInitParams> prepareMTPEngineInitParams(size_t 
     auto cache_store_config = config_obj.attr("cache_store_config").cast<CacheStoreConfig>();
     auto misc_config = config_obj.attr("misc_config").cast<MiscellaneousConfig>();
     auto arpc_config = config_obj.attr("arpc_config").cast<ArpcConfig>();
-    auto ffn_disaggregate_config = config_obj.attr("ffn_disaggregate_config").cast<FfnDisAggregateConfig>();
     auto vit_config = config_obj.attr("vit_config").cast<VitConfig>();
 
     py::object py_layers_weights     = sp_model.attr("weight").attr("weights");
@@ -111,7 +110,7 @@ std::unique_ptr<ProposeModelEngineInitParams> prepareMTPEngineInitParams(size_t 
                 cache_store_config,
                 misc_config,
                 arpc_config,
-                ffn_disaggregate_config,
+                parallelism_config.ffn_disaggregate_config,
                 vit_config,
                 std::move(*gpt_weight),
                 py::none(),
@@ -150,7 +149,8 @@ void RtpLLMOp::init(py::object model,
 
 EngineInitParams RtpLLMOp::initModel(py::object model) {
     try {
-        py::object config_obj = model.attr("config");
+        // Get ConfigWrapper from model's get_config() method
+        py::object config_obj = model.attr("get_config")();
         // Extract individual config members from Python config object
         auto model_config = config_obj.attr("model_config").cast<ModelConfig>();
         auto parallelism_config = config_obj.attr("parallelism_config").cast<ParallelismConfig>();
@@ -168,7 +168,6 @@ EngineInitParams RtpLLMOp::initModel(py::object model) {
         auto cache_store_config = config_obj.attr("cache_store_config").cast<CacheStoreConfig>();
         auto misc_config = config_obj.attr("misc_config").cast<MiscellaneousConfig>();
         auto arpc_config = config_obj.attr("arpc_config").cast<ArpcConfig>();
-        auto ffn_disaggregate_config = config_obj.attr("ffn_disaggregate_config").cast<FfnDisAggregateConfig>();
         VitConfig vit_config;
         if (py::hasattr(config_obj, "vit_config")) {
             py::object py_vit_config = config_obj.attr("vit_config");
@@ -209,7 +208,7 @@ EngineInitParams RtpLLMOp::initModel(py::object model) {
                                 cache_store_config,
                                 misc_config,
                                 arpc_config,
-                                ffn_disaggregate_config,
+                                parallelism_config.ffn_disaggregate_config,
                                 vit_config,
                                 std::move(*gpt_weight),
                                 py_model,
@@ -238,7 +237,7 @@ std::unique_ptr<ProposeModelEngineInitParams> RtpLLMOp::initProposeModel(py::obj
         std::string sp_type            = propose_model.attr("sp_type").cast<std::string>();
         if (sp_type == "vanilla") {
             py::object sp_model = propose_model.attr("model");
-            py::object config_obj = sp_model.attr("config");
+            py::object config_obj = sp_model.attr("get_config")();
             // Extract individual config members from Python config object
             auto model_config = config_obj.attr("model_config").cast<ModelConfig>();
             auto parallelism_config = config_obj.attr("parallelism_config").cast<ParallelismConfig>();
@@ -256,7 +255,6 @@ std::unique_ptr<ProposeModelEngineInitParams> RtpLLMOp::initProposeModel(py::obj
             auto cache_store_config = config_obj.attr("cache_store_config").cast<CacheStoreConfig>();
             auto misc_config = config_obj.attr("misc_config").cast<MiscellaneousConfig>();
             auto arpc_config = config_obj.attr("arpc_config").cast<ArpcConfig>();
-            auto ffn_disaggregate_config = config_obj.attr("ffn_disaggregate_config").cast<FfnDisAggregateConfig>();
             VitConfig vit_config;
             if (py::hasattr(config_obj, "vit_config")) {
                 py::object py_vit_config = config_obj.attr("vit_config");
@@ -296,14 +294,14 @@ std::unique_ptr<ProposeModelEngineInitParams> RtpLLMOp::initProposeModel(py::obj
                 cache_store_config,
                 misc_config,
                 arpc_config,
-                ffn_disaggregate_config,
+                parallelism_config.ffn_disaggregate_config,
                 vit_config,
                 std::move(*gpt_weight));
             model_id_++;
         } else if (sp_type == "mtp") {
             params = prepareMTPEngineInitParams(model_id_, propose_model);
             // Get gen_num_per_cycle from sp_config
-            py::object config_obj = propose_model.attr("model").attr("config");
+            py::object config_obj = propose_model.attr("model").attr("get_config")();
             auto sp_config = config_obj.attr("sp_config").cast<SpeculativeExecutionConfig>();
             size_t gen_num_per_cycle = sp_config.gen_num_per_cycle;
             model_id_ += gen_num_per_cycle;
@@ -312,7 +310,7 @@ std::unique_ptr<ProposeModelEngineInitParams> RtpLLMOp::initProposeModel(py::obj
             model_id_++;
         } else if (sp_type == "deterministic") {
             // Get gen_num_per_cycle from sp_config
-            py::object config_obj = propose_model.attr("config");
+            py::object config_obj = propose_model.attr("get_config")();
             auto sp_config = config_obj.attr("sp_config").cast<SpeculativeExecutionConfig>();
             size_t gen_num_per_cycle = sp_config.gen_num_per_cycle;
             params = std::make_unique<ProposeModelEngineInitParams>(sp_type, gen_num_per_cycle);
