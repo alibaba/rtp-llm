@@ -20,9 +20,10 @@ class RPCEngine(BaseEngine):
         self.model = model
         self.propose_model = propose_model
         self.tokenizer = model.tokenizer
-        self.config = model.config
+        # BaseModel no longer has config attribute, use model_config instead
+        self.config = model.model_config
         self.token_processor = TokenProcessor(
-            self.tokenizer, self.model.config.special_tokens
+            self.tokenizer, self.model.model_config.special_tokens
         )
         if self.model.is_multimodal():
             self.mm_engine = MMProcessEngine(self.model, self.model.vit_config)
