@@ -69,7 +69,9 @@ void CudaGraphRunner::capture() {
     for (int i = 0; i <= capture_range_size - 1; i++) {
         int           bs = capture_range_[i];
         PyModelInputs inputs;
-        inputs.input_ids        = capture_mem_hold_.py_model_inputs_.input_ids.slice(0, 0, bs * num_tokens_per_bs_);
+        inputs.input_ids     = capture_mem_hold_.py_model_inputs_.input_ids.slice(0, 0, bs * num_tokens_per_bs_);
+        inputs.input_hiddens = capture_mem_hold_.py_model_inputs_.input_hiddens.slice(0, 0, bs * num_tokens_per_bs_);
+
         auto options_cpu_int32  = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
         auto options_cuda_int32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
         // input_lengths [batch_size, int32]
@@ -141,6 +143,9 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
     if (!is_prefill_cuda_graph_mode_) {
         py_model_inputs_.input_ids.fill_(0);
         py_model_inputs_.input_ids.slice(0, 0, inputs.input_ids.size(0)) = inputs.input_ids;
+        if (inputs.input_hiddens.numel() > 0) {
+            py_model_inputs_.input_hiddens.slice(0, 0, inputs.input_hiddens.size(0)) = inputs.input_hiddens;
+        }
         py_model_inputs_.attention_inputs.sequence_lengths.slice(0, 0, current_batch_size_) =
             inputs.attention_inputs.sequence_lengths;
         copySmallerIntoLarger(inputs.attention_inputs.kv_cache_block_id_device,
@@ -362,6 +367,10 @@ void CudaGraphRunner::initCapture() {
         PyModelInputs inputs;
         // input_ids [tokens_nums] = [batch_size * num_tokens_per_bs]
         inputs.input_ids = torch::zeros({max_num_token_}, options_cuda_int32);
+
+        // TODO(yinzhi): get act type
+        inputs.input_hiddens = torch::zeros({max_num_token_, hidden_size_});
+
         // input_lengths [batch_size, int32] (decode only)
         // Setup attention inputs using the extracted function
         initCaptureAttentionInputs(inputs, max_bs_, num_tokens_per_bs_);

@@ -2,7 +2,7 @@ import functools
 import json
 import logging
 import os
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import torch
 from transformers import AutoTokenizer
@@ -17,6 +17,8 @@ from rtp_llm.model_loader.model_weight_info import (
 )
 from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
 from rtp_llm.models.qwen import QWen
+from rtp_llm.models_py.model_desc.module_base import GptModelBase
+from rtp_llm.models_py.model_desc.qwen2_mtp import Qwen2MtpModel
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
@@ -503,6 +505,9 @@ class QwenV2MTP(QWenV2):
         config.moe_layer_index = [i for i in range(config.layer_num)]
         config.is_mtp = True
         return config
+
+    def _create_python_model(self) -> Optional[GptModelBase]:
+        self.py_model = Qwen2MtpModel(self.config, self.weight)
 
     @staticmethod
     def get_weight_cls():

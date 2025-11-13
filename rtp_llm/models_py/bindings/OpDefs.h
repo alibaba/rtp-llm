@@ -92,6 +92,7 @@ struct BertEmbeddingInputs {
 
 struct PyModelInputs {
     torch::Tensor       input_ids;
+    torch::Tensor       input_hiddens;
     PyAttentionInputs   attention_inputs;
     BertEmbeddingInputs bert_embedding_inputs;
 };

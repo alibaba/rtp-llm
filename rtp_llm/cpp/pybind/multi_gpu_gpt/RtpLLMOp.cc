@@ -96,6 +96,11 @@ void RtpLLMOp::init(py::object model,
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
 
     EngineInitParams params = initModel(model);
+
+    if (!propose_model.is_none()) {
+        params.py_sp_model = propose_model.attr("model").attr("py_model");
+    }
+
     RTP_LLM_LOG_INFO("init engine params success");
     params.showGptInitParameter();
     std::unique_ptr<ProposeModelEngineInitParams> propose_params = initProposeModel(propose_model);

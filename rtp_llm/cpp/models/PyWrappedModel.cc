@@ -163,7 +163,9 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
         setupKVCacheForAttentionInputs(py_attn_inputs, micro_inputs, kv_cache_block_ids_device[i]);
         calculatePaddingOffset(py_attn_inputs);
         torch::Tensor token_ids = Buffer2torchTensor(micro_inputs.combo_tokens).cuda();
-        input_list.emplace_back(PyModelInputs{token_ids, py_attn_inputs, bert_embedding_inputs});
+        torch::Tensor input_hiddens =
+            inputs.last_hidden_states ? Buffer2torchTensor(inputs.last_hidden_states, false) : torch::empty({0});
+        input_list.emplace_back(PyModelInputs{token_ids, input_hiddens, py_attn_inputs, bert_embedding_inputs});
     }
 
     py::object py_outputs_obj   = py_forward_method(input_list);
@@ -218,8 +220,15 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         if (int(device_props_.enable_layer_micro_batch)) {
             return forwardMicroBatched(inputs);
         }
+        torch::Tensor token_ids;
+        if (inputs.combo_tokens->where() == MEMORY_GPU) {
+            token_ids = Buffer2torchTensor(inputs.combo_tokens, false).clone();
+        } else {
+            token_ids = Buffer2torchTensor(inputs.combo_tokens).cuda();
+        }
 
-        torch::Tensor token_ids = Buffer2torchTensor(inputs.combo_tokens).cuda();
+        torch::Tensor input_hiddens =
+            inputs.last_hidden_states ? Buffer2torchTensor(inputs.last_hidden_states, false) : torch::empty({0});
 
         auto      attention_inputs      = buildPyAttentionInputs(inputs);
         auto      bert_embedding_inputs = buildBertEmbeddingInputs(inputs);
@@ -230,7 +239,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         setupKVCacheForAttentionInputs(attention_inputs, inputs, kv_cache_block_id_device);
         calculatePaddingOffset(attention_inputs);
 
-        auto           py_model_inputs = PyModelInputs({token_ids, attention_inputs, bert_embedding_inputs});
+        auto py_model_inputs = PyModelInputs({token_ids, input_hiddens, attention_inputs, bert_embedding_inputs});
         PyModelOutputs py_model_outputs;
         // Cast the Python object to PyModelOutputs and extract hidden states
         if (enable_cuda_graph_) {
