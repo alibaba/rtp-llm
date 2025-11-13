@@ -18,13 +18,11 @@ logger = logging.getLogger(__name__)
 
 REQUEST_GET = None
 
-
 def request_get(url, headers):
     global REQUEST_GET
     if REQUEST_GET is None:
         try:
             from internal_source.rtp_llm.utils.ssrf_check import safe_request_get
-
             REQUEST_GET = safe_request_get
         except ImportError:
             REQUEST_GET = lambda url, headers: requests.get(
@@ -47,15 +45,11 @@ def _get_http_heads(download_headers: str = ""):
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
         }
 
-
-
-
 def get_base64_prefix(s):
     match = re.match(r"^data:[^,]*;base64,", s)
     if not match:
         return 0
     return match.end()
-
 
 class MMUrlType(IntEnum):
     DEFAULT = 0
@@ -64,7 +58,6 @@ class MMUrlType(IntEnum):
     AUDIO = 3
     TENSOR = 4
     IGRAPH = 5
-
 
 @dataclass
 class MMPreprocessConfig:
@@ -161,19 +154,15 @@ def get_json_result_from_url(url: str, download_headers: str = ""):
     return res
 
 
-def get_bytes_io_from_url(url: str, download_headers: str = "", url_cache_size: int = 10, url_data_cache=None):
+def get_bytes_io_from_url(url: str, download_headers: str = ""):
     """Get BytesIO from URL.
     
     Args:
         url: URL to fetch from.
         download_headers: JSON string containing HTTP headers. If empty, uses default headers.
-        url_cache_size: Size of URL data cache. Default is 10.
-        url_data_cache: Optional MMDataCache object. If None, creates a new one with url_cache_size.
     """
-    if url_data_cache is None:
-        url_data_cache = MMDataCache(url_cache_size)
-    
-    cached_res = url_data_cache.check_cache(url)
+
+    cached_res = url_data_cache_.check_cache(url)
     if cached_res is None:
         headers = _get_http_heads(download_headers)
         try:
@@ -196,7 +185,7 @@ def get_bytes_io_from_url(url: str, download_headers: str = "", url_cache_size: 
                 res = buf
         except Exception as e:
             raise Exception(f"download and load {url} error, exception {e}")
-        url_data_cache.insert_cache(url, res)
+        url_data_cache_.insert_cache(url, res)
         return res
     else:
         cached_res.seek(0)
@@ -211,20 +200,28 @@ class MMDataCache(object):
             self.mm_data_cache = LruDict(cache_size)
 
     def check_cache(self, url: str):
-        if self.mm_data_cache == None:
-            return None
-        with self.cache_lock:
+         with self.cache_lock:
+            if self.mm_data_cache == None:
+                return None
             if url in self.mm_data_cache:
                 return self.mm_data_cache[url]
             else:
-                return None
+                return None   
 
     def insert_cache(self, url: str, data):
-        if self.mm_data_cache == None:
-            return
-        with self.cache_lock:
+         with self.cache_lock:
+            if self.mm_data_cache == None:  
+                return
             self.mm_data_cache[url] = data
 
+    def resize_cache(self, cache_size: int):
+        with self.cache_lock:
+            new_cache = LruDict(cache_size)
+            if self.mm_data_cache is not None:
+                new_cache.update(self.mm_data_cache)
+            self.mm_data_cache = new_cache
 
 # Global cache instance for VIT embeddings
 vit_emb_cache_ = MMDataCache(cache_size=10)
+url_data_cache_ = MMDataCache(cache_size=10)
+        

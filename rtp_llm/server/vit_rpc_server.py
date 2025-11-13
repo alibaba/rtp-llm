@@ -20,8 +20,7 @@ from rtp_llm.model_factory import ModelFactory
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.utils.grpc_util import trans_from_tensor, trans_tensor
 from rtp_llm.utils.mm_process_engine import MMEmbeddingRes, MMProcessEngine
-from rtp_llm.utils.multimodal_util import MMUrlType
-
+from rtp_llm.utils.multimodal_util import MMUrlType, url_data_cache_, vit_emb_cache_
 
 def trans_config(mm_process_config_pb: MMPreprocessConfigPB):
     return [
@@ -80,6 +79,9 @@ def vit_start_server():
     gang_server.start()
     gang_info = gang_server._gang_info
     
+    url_data_cache_.resize_cache(py_env_configs.vit_config.url_cache_item_num)
+    vit_emb_cache_.resize_cache(py_env_configs.vit_config.mm_cache_item_num)
+
     # Create and fully initialize engine config (global singleton)
     engine_config = EngineConfig.create(py_env_configs, gang_info=gang_info)
     

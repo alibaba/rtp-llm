@@ -217,13 +217,8 @@ class MiniCPMVInputGenerator(object):
 
     def _render_image(self, url: str):
         content = ""
-        # Get vit_config from parameter if available
-        download_headers = ""
-        url_cache_size = 10
-        if self.vit_config_obj is not None:
-            download_headers = getattr(self.vit_config_obj, 'download_headers', "")
-            url_cache_size = getattr(self.vit_config_obj, 'url_cache_item_num', 10)
-        image = get_bytes_io_from_url(url, download_headers=download_headers, url_cache_size=url_cache_size)
+        download_headers = self.vit_config_obj.download_headers
+        image = get_bytes_io_from_url(url, download_headers=download_headers)
         image = Image.open(image).convert("RGB")
         if self.slice_mode:
             _, final_placeholder = self.get_slice_image_placeholder(

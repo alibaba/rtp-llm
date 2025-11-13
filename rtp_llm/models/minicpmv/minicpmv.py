@@ -30,7 +30,6 @@ from rtp_llm.models.qwen_v2 import QWenV2, QWenV2Weight
 # minicpmv need to calculate num of frames to renderer input prompt, it must be preprocess first in frontend
 from rtp_llm.openai.renderers.minicpmv_renderer import encode_video
 from rtp_llm.utils.multimodal_util import (
-    MMDataCache,
     MMUrlType,
     get_bytes_io_from_url,
     vit_emb_cache_,

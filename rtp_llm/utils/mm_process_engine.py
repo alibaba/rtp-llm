@@ -27,8 +27,6 @@ class MMProcessEngine:
         self.contains_pos: bool = self.model.model_config.mm_model_config.mm_position_ids_style != 0
         self.run_batch: bool = self.vit_config.vit_run_batch
         self.download_headers = self.vit_config.download_headers
-        self.url_cache_size = self.vit_config.url_cache_item_num
-        self.mm_cache_size = self.vit_config.mm_cache_item_num
 
     def _maybe_tensor_to_list(self, tensor: torch.Tensor):
         if len(tensor.shape) > 2:
@@ -45,7 +43,7 @@ class MMProcessEngine:
     ):
         if self.run_batch:
             with Timer() as route_timer:
-                res, pos = self.model.mm_part.mm_embedding(urls, types, tensors)
+                res, pos = self.model.mm_part.mm_embedding(urls=urls, mm_types=types, tensors=tensors)
             kmonitor.report(
                 GaugeMetrics.VIT_PREPROCESS_RT_METRIC, route_timer.cost_ms()
             )
@@ -61,11 +59,9 @@ class MMProcessEngine:
             pos: Optional[List[torch.Tensor]] = [] if self.contains_pos else None
             for index in range(len(urls)):
                 embedding, pos_ids = self.model.mm_part.mm_embedding(
-                    urls[index], 
-                    types[index], 
+                    url=urls[index], 
+                    mm_type=types[index], 
                     download_headers=self.download_headers,
-                    url_cache_size=self.url_cache_size,
-                    mm_cache_size=self.mm_cache_size,
                     configs=configs[index]
                 )
                 res.extend(self._maybe_tensor_to_list(embedding))

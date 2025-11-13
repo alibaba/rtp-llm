@@ -22,7 +22,6 @@ from torchvision import transforms
 
 from rtp_llm.distribute.worker_info import g_parallel_info
 from rtp_llm.utils.multimodal_util import (
-    MMDataCache,
     MMUrlType,
     get_bytes_io_from_url,
     get_vit_compute_dtype,
@@ -94,23 +93,16 @@ class MultiModalEmbeddingInterface:
         url: str, 
         mm_type: MMUrlType, 
         download_headers: str = "",
-        url_cache_size: int = 10,
-        mm_cache_size: int = 10,
-        url_data_cache: MMDataCache = None,
         **kwargs: Any
     ):
         dtype = self._data_type
         if g_parallel_info.tp_rank > 0:
             return torch.Tensor([])
-        
-        # Use global vit_emb_cache_ instead of parameter
-        if url_data_cache is None:
-            url_data_cache = MMDataCache(url_cache_size)
-        
+
         cached_res = vit_emb_cache_.check_cache(url)
         if cached_res is not None:
             return cached_res
-        bytes_io = get_bytes_io_from_url(url, download_headers=download_headers, url_cache_size=url_cache_size, url_data_cache=url_data_cache)
+        bytes_io = get_bytes_io_from_url(url, download_headers=download_headers)
         mm_input = self._mm_preprocess(bytes_io, mm_type=mm_type, **kwargs)
         with mm_lock:
             features = self.mm_process(mm_input, mm_type=mm_type, **kwargs)

@@ -38,7 +38,6 @@ from rtp_llm.models.multimodal.multimodal_mixin import (
     MultiModalMixin,
 )
 from rtp_llm.utils.multimodal_util import (
-    MMDataCache,
     MMUrlType,
     get_bytes_io_from_url,
     vit_emb_cache_,
@@ -107,22 +106,15 @@ class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
         url: str, 
         mm_type: MMUrlType, 
         download_headers: str = "",
-        url_cache_size: int = 10,
-        mm_cache_size: int = 10,
-        url_data_cache: MMDataCache = None,
         **kwargs
     ):
         dtype = self._data_type
         if self.config.tp_rank > 0:
             return torch.Tensor([])
         
-        # Use global vit_emb_cache_ instead of parameter
-        if url_data_cache is None:
-            url_data_cache = MMDataCache(url_cache_size)
-        
         cached_res = vit_emb_cache_.check_cache(url)
         if cached_res is None:
-            cached_url_res = get_bytes_io_from_url(url, download_headers=download_headers, url_cache_size=url_cache_size, url_data_cache=url_data_cache)
+            cached_url_res = get_bytes_io_from_url(url, download_headers=download_headers)
             cached_url_res = self._mm_preprocess(cached_url_res, mm_type)
             with mm_lock:
                 features = self.mm_process(cached_url_res, mm_type=mm_type, **kwargs)

@@ -70,7 +70,7 @@ class MiniCPMVConversation:
                     elif content_part.type == ContentPartTypeEnum.image_url:
                         assert content_part.image_url != None
                         urls.append(content_part.image_url.url)
-                        data = get_bytes_io_from_url(content_part.image_url.url, download_headers=self.download_headers, url_cache_size=self.url_cache_size)
+                        data = get_bytes_io_from_url(content_part.image_url.url, download_headers=self.download_headers)
                         data = Image.open(data).convert("RGB")
                         images.append(data)
                         cur_msgs.append("(<image>./</image>)")
@@ -78,7 +78,7 @@ class MiniCPMVConversation:
                     elif content_part.type == ContentPartTypeEnum.video_url:
                         assert content_part.video_url != None
                         urls.append(content_part.video_url.url)
-                        data = get_bytes_io_from_url(content_part.video_url.url, download_headers=self.download_headers, url_cache_size=self.url_cache_size)
+                        data = get_bytes_io_from_url(content_part.video_url.url, download_headers=self.download_headers)
                         data = encode_video(data)
                         images.extend(data)
                         cur_msgs.extend(
@@ -106,12 +106,8 @@ class MiniCPMVRenderer(CustomChatRenderer):
             self.ckpt_path, trust_remote_code=True
         )
         # Get vit_config if available
-        download_headers = ""
-        url_cache_size = 10
-        if vit_config is not None:
-            download_headers = vit_config.download_headers
-            url_cache_size = vit_config.url_cache_item_num
-        self.conv_template = MiniCPMVConversation(download_headers=download_headers, url_cache_size=url_cache_size)
+        download_headers = vit_config.download_headers
+        self.conv_template = MiniCPMVConversation(download_headers=download_headers)
 
     def _render_messages(self, messages: List[ChatMessage]) -> RenderedInputs:
         msgs, urls, types, images = self.conv_template.render_messages(messages)
