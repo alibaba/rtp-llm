@@ -11,9 +11,9 @@ from threading import Thread
 from typing import Any, Dict, List, Union
 
 import requests
+import torch.distributed
 import uvicorn
 from fastapi import FastAPI
-import torch.distributed
 
 from rtp_llm.config.py_config_modules import PyEnvConfigs, StaticConfig
 from rtp_llm.config.uvicorn_config import UVICORN_LOGGING_CONFIG
@@ -426,13 +426,16 @@ class GangServer:
         )
         logging.info(f"gang worker {g_parallel_info} init_process_group {master_url}")
         init_process_timeout = self.py_env_configs.gang_config.dist_barrier_timeout
+        # Default value is 10 minutes for NCCL
+        if init_process_timeout is not None:
+            init_process_timeout = timedelta(seconds=init_process_timeout)
         os.environ["TORCH_DIST_INIT_BARRIER"] = "1"
         torch.distributed.init_process_group(
             backend=torch.distributed.Backend.NCCL,
             init_method=master_url,
             rank=g_parallel_info.world_rank,
             world_size=g_parallel_info.world_size,
-            timeout=timedelta(seconds=init_process_timeout),
+            timeout=init_process_timeout,
         )
 
         logging.info(f"gang worker {g_parallel_info} start_health_check")
