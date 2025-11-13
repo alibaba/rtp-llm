@@ -230,10 +230,11 @@ class MiniCPMV(QWenV2, MultiModalMixin):
         ]
 
     def _init_multimodal(self, mm_model_config, vit_config):
-        if mm_model_config.mm_related_params is None:
-            raise ValueError("mm_model_config.mm_related_params is required for MiniCPMV")
-        self.mm_part = ImageEmbeddingInterface(mm_model_config.mm_related_params)
-        mm_model_config.mm_related_params.vit_weights = MiniCPMVVitWeight(
+        # mm_related_params is in py_model_config, not mm_model_config
+        if self.py_model_config.mm_related_params is None:
+            raise ValueError("py_model_config.mm_related_params is required for MiniCPMV")
+        self.mm_part = ImageEmbeddingInterface(self.py_model_config.mm_related_params)
+        self.py_model_config.mm_related_params.vit_weights = MiniCPMVVitWeight(
             {"vpm": self.mm_part.vpm, "resampler": self.mm_part.resampler}
         )
 

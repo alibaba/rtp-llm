@@ -98,7 +98,6 @@ class FakeModelLoader(object):
         # Create ModelArgs for build_py_model_config
         from rtp_llm.config.model_args import ModelArgs
         from rtp_llm.config.engine_config import EngineConfig
-        from rtp_llm.config.mm_model_config import MMModelConfig
         from rtp_llm.config.model_config import build_py_model_config
         from rtp_llm.config.kv_cache_config import KVCacheConfig
         from rtp_llm.ops import HWKernelConfig, ProfilingDebugLoggingConfig, ParallelismConfig
@@ -133,10 +132,7 @@ class FakeModelLoader(object):
             profiling_debug_logging_config=profiling_debug_logging_config,
             parallelism_config=parallelism_config,
         )
-        
-        # Create MMModelConfig (minimal for testing)
-        mm_model_config = MMModelConfig()
-        
+
         model = model_cls(
             py_model_config=py_model_config,
             mm_model_config=mm_model_config,

@@ -6,7 +6,6 @@ from typing import Any, Dict, List, Optional
 
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.model_config import ModelConfig as PyModelConfig
-from rtp_llm.ops import MMModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.llama_weight import GemmaWeightInfo, LlamaWeightInfo
@@ -170,7 +169,6 @@ class Gemma(Llama):
     def __init__(
         self,
         py_model_config: PyModelConfig,
-        mm_model_config: MMModelConfig,
         engine_config: EngineConfig,
         vit_config: Optional[Any] = None,
         merge_lora: bool = False,
@@ -182,7 +180,6 @@ class Gemma(Llama):
             os.environ["ENABLE_OPENSOURCE_FMHA"] = "OFF"
         super().__init__(
             py_model_config=py_model_config,
-            mm_model_config=mm_model_config,
             engine_config=engine_config,
             vit_config=vit_config,
             merge_lora=merge_lora,

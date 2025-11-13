@@ -125,7 +125,6 @@ try:
         MlaOpsType,
         ModelConfig,
         ModelSpecificConfig,
-        MMModelConfig,
         MoeConfig,
         PDSepConfig,
         ParallelismConfig,

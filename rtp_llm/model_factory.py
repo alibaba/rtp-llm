@@ -19,7 +19,6 @@ from rtp_llm.config.py_config_modules import (
 )
 from rtp_llm.model_factory_register import ModelDict, _model_factory
 from rtp_llm.models.propose_model.propose_model import ProposeModel
-from rtp_llm.ops import MMModelConfig
 from rtp_llm.utils.util import check_with_info
 
 
@@ -51,18 +50,16 @@ class ModelFactory:
     @staticmethod
     def _create_model(
         model_config: ModelConfig,
-        mm_model_config: MMModelConfig,
         engine_config: EngineConfig,
         vit_config: Optional[VitConfig] = None,
         merge_lora: bool = False,
     ):
         """Create model from independent config objects.
         
-        All model metadata (template_type, model_name, lora_infos) is now stored in model_config.
+        All model metadata (template_type, model_name, lora_infos, mm_model_config) is now stored in model_config.
         
         Args:
-            model_config: Model configuration
-            mm_model_config: Multimodal model configuration
+            model_config: Model configuration (contains mm_model_config)
             engine_config: Engine configuration
             vit_config: Optional VitConfig (needed for multimodal models)
             merge_lora: Whether to merge LoRA weights
@@ -76,8 +73,7 @@ class ModelFactory:
         engine_config.runtime_config.model_name = model_name
         
         model = model_cls.from_config(
-            py_model_config=model_config,
-            mm_model_config=mm_model_config,
+            model_config=model_config,
             engine_config=engine_config,
             vit_config=vit_config,
             merge_lora=merge_lora,
@@ -145,11 +141,8 @@ class ModelFactory:
             model_cls = ModelFactory.get_model_cls(propose_model_config.model_type)
             # propose model's max seq len must be equal to score model's max seq len
             propose_model_config.max_seq_len = model_config.max_seq_len
-            # Create MMModelConfig for propose model
-            propose_mm_model_config = MMModelConfig()
             gpt_model = model_cls.from_config(
                 py_model_config=propose_model_config,
-                mm_model_config=propose_mm_model_config,
                 engine_config=engine_config,
                 vit_config=None,  # Propose model doesn't need vit_config
                 merge_lora=False,  # Propose model doesn't need merge_lora
@@ -163,7 +156,6 @@ class ModelFactory:
     @staticmethod
     def from_model_configs(
         model_config: ModelConfig,
-        mm_model_config: MMModelConfig,
         engine_config: EngineConfig,
         gang_info,
         vit_config: Optional[VitConfig] = None,
@@ -172,13 +164,12 @@ class ModelFactory:
     ):
         """Create model from independent config objects, with optional propose model.
         
-        All model metadata (template_type, model_name, lora_infos) should be set in model_config before calling this method.
+        All model metadata (template_type, model_name, lora_infos, mm_model_config) should be set in model_config before calling this method.
         
         This replaces from_gpt_config().
         
         Args:
-            model_config: Model configuration
-            mm_model_config: Multimodal model configuration
+            model_config: Model configuration (contains mm_model_config)
             engine_config: Engine configuration
             gang_info: GangInfo instance from GangServer
             vit_config: Optional VitConfig (needed for multimodal models)
@@ -187,7 +178,6 @@ class ModelFactory:
         """
         model = ModelFactory._create_model(
             model_config=model_config,
-            mm_model_config=mm_model_config,
             engine_config=engine_config,
             vit_config=vit_config,
             merge_lora=merge_lora,

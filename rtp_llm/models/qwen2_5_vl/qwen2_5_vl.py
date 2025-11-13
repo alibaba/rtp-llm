@@ -133,11 +133,12 @@ class QWen2_5_VL(QWen2_VL):
         mm_model_config: Any,  # MMModelConfig
         vit_config: VitConfig,
     ):
-        mm_related_params = mm_model_config.mm_related_params if hasattr(mm_model_config, 'mm_related_params') else None
+        # mm_related_params is in py_model_config, not mm_model_config
+        mm_related_params = self.py_model_config.mm_related_params
         if mm_related_params is None:
             raise ValueError("mm_related_params is required for QWen2_5_VL")
         self.mm_part = Qwen2_5_VLImageEmbedding(mm_related_params)
-        mm_model_config.mm_related_params.vit_weights = QwenVL2VitWeight(
+        self.py_model_config.mm_related_params.vit_weights = QwenVL2VitWeight(
             {"vit": self.mm_part.visual}
         )
 

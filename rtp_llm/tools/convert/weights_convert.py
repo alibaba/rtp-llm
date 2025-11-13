@@ -201,14 +201,11 @@ class WeightConverter:
         
         # Create minimal configs for model instantiation
         from rtp_llm.config.engine_config import EngineConfig
-        from rtp_llm.config.mm_model_config import MMModelConfig
         
-        mm_model_config = MMModelConfig()
         engine_config = EngineConfig()
         
         model = self.model_cls.from_config(
             py_model_config=py_model_config,
-            mm_model_config=mm_model_config,
             engine_config=engine_config,
             parallel_info=paralle_info,
         )

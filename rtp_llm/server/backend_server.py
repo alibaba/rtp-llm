@@ -24,7 +24,7 @@ from rtp_llm.lora.lora_manager import LoraManager
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
-from rtp_llm.ops import EngineScheduleInfo, KVCacheInfo, MMModelConfig, WorkerStatusInfo
+from rtp_llm.ops import EngineScheduleInfo, KVCacheInfo, WorkerStatusInfo
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.server.misc import format_exception
 from rtp_llm.model_loader.weight_manager import WeightManager
@@ -91,16 +91,14 @@ class BackendServer(object):
                 embedding_config=py_env_configs.embedding_config,
             )
             
-            # All model metadata (lora_infos, multi_task_prompt, model_name, template_type)
+            # All model metadata (lora_infos, multi_task_prompt, model_name, template_type, mm_model_config)
             # is now set in py_model_config by create_model_configs()
-            mm_model_config = MMModelConfig()
             
             # Create model using new API
-            # All metadata is already in py_model_config
+            # All metadata is already in py_model_config (including mm_model_config)
             # vit_config is needed for multimodal models
             self.model: AsyncModel = ModelFactory.from_model_configs(
                 model_config=py_model_config,
-                mm_model_config=mm_model_config,
                 engine_config=engine_config,
                 gang_info=gang_info,
                 vit_config=py_env_configs.vit_config,

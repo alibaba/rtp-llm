@@ -80,18 +80,19 @@ class QWen3_VL_MOE(QWen2_5_VL):
         mm_model_config,
         vit_config: VitConfig,
     ):
-        if mm_model_config.mm_related_params is None:
-            mm_model_config.mm_related_params = VitParameters()
-        self.mm_part = Qwen2_5_VLImageEmbedding(mm_model_config.mm_related_params)
+        # mm_related_params is in py_model_config, not mm_model_config
+        if self.py_model_config.mm_related_params is None:
+            self.py_model_config.mm_related_params = VitParameters()
+        self.mm_part = Qwen2_5_VLImageEmbedding(self.py_model_config.mm_related_params)
         self.mm_part.visual = Qwen3_VL_MOEVisionTransformerPretrainedModel(
-            mm_model_config.mm_related_params.config
+            self.py_model_config.mm_related_params.config
         )
-        # vl_config = Qwen2_5_VLVisionConfig(**mm_model_config.mm_related_params.config)
+        # vl_config = Qwen2_5_VLVisionConfig(**self.py_model_config.mm_related_params.config)
 
         # for i in range(len(self.mm_part.visual.blocks)):
         #     self.mm_part.visual.blocks[i].mlp = Qwen3_VisionMlp(vl_config, bias=True)
 
-        mm_model_config.mm_related_params.vit_weights = QwenVL2VitWeight(
+        self.py_model_config.mm_related_params.vit_weights = QwenVL2VitWeight(
             {"vit": self.mm_part.visual}
         )
 

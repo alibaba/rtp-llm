@@ -153,7 +153,7 @@ class ModelDeployWeightInfo:
 
     def __init__(
         self,
-        py_model_config: "ModelConfig",
+        model_config: "ModelConfig",
         engine_config: "EngineConfig",
         merge_lora: bool = False,
         tp_size: int = 1,
@@ -161,18 +161,18 @@ class ModelDeployWeightInfo:
         vit_config: Optional["VitConfig"] = None,
     ):
         """Initialize ModelDeployWeightInfo with independent configuration objects."""
-        self.py_model_config = py_model_config
+        self.model_config = model_config
         self.engine_config = engine_config
         self.merge_lora = merge_lora
         
         self._use_swizzleA = engine_config.hw_kernel_config.use_swizzleA
-        self._use_qk_norm = py_model_config.qk_norm
-        self._hidden_size = py_model_config.hidden_size
-        self._inter_size = py_model_config.inter_size
-        self._inter_padding_size = py_model_config.inter_padding_size
-        self._moe_inter_padding_size = py_model_config.moe_inter_padding_size
-        self._head_num = py_model_config.attn_config.head_num
-        self._head_num_kv = py_model_config.attn_config.kv_head_num
+        self._use_qk_norm = model_config.qk_norm
+        self._hidden_size = model_config.hidden_size
+        self._inter_size = model_config.inter_size
+        self._inter_padding_size = model_config.inter_padding_size
+        self._moe_inter_padding_size = model_config.moe_inter_padding_size
+        self._head_num = model_config.attn_config.head_num
+        self._head_num_kv = model_config.attn_config.kv_head_num
         self.tp_size = tp_size
         self.tp_rank = tp_rank
         self.ep_size = engine_config.parallelism_config.ep_size
@@ -183,33 +183,33 @@ class ModelDeployWeightInfo:
         self.num_nodes: int = 1  # Will be set from gang_info later
         self.ffn_tp_rank = engine_config.parallelism_config.ffn_tp_rank
         self.ffn_tp_size = engine_config.parallelism_config.ffn_tp_size
-        self._size_per_head = py_model_config.attn_config.size_per_head
+        self._size_per_head = model_config.attn_config.size_per_head
         if self._head_num_kv == -1:
             self._head_num_kv = self._head_num
-        self._quant_algo = py_model_config.quant_algo
-        self._quant_config = py_model_config.quant_config
-        self._num_layers = py_model_config.num_layers
+        self._quant_algo = model_config.quant_algo
+        self._quant_config = model_config.quant_config
+        self._num_layers = model_config.num_layers
         self._has_prefix_encoder = False
-        self._src_quantization_bit = py_model_config.src_quantization_bit
+        self._src_quantization_bit = model_config.src_quantization_bit
 
-        self._is_gated_activation = py_model_config.isGatedActivation()
-        self.expert_num_ = py_model_config.expert_num
-        self.moe_n_group_ = py_model_config.moe_n_group
-        self.enable_eplb_ = py_model_config.eplb_config.enable_eplb()
-        self.phy_exp_num_ = py_model_config.eplb_config.phy_exp_num(py_model_config.expert_num)
-        self.moe_k_ = py_model_config.moe_k
-        self.moe_layer_index_ = py_model_config.moe_layer_index
-        self.moe_style_ = py_model_config.moe_style
-        self._moe_inter_padding_size = py_model_config.moe_inter_padding_size
+        self._is_gated_activation = model_config.isGatedActivation()
+        self.expert_num_ = model_config.expert_num
+        self.moe_n_group_ = model_config.moe_n_group
+        self.enable_eplb_ = model_config.eplb_config.enable_eplb()
+        self.phy_exp_num_ = model_config.eplb_config.phy_exp_num(model_config.expert_num)
+        self.moe_k_ = model_config.moe_k
+        self.moe_layer_index_ = model_config.moe_layer_index
+        self.moe_style_ = model_config.moe_style
+        self._moe_inter_padding_size = model_config.moe_inter_padding_size
 
-        self.tie_word_embeddings = py_model_config.tie_word_embeddings
+        self.tie_word_embeddings = model_config.tie_word_embeddings
         self.weight_style = WeightStyle.NONE
 
         # for mla
-        self.kv_lora_rank = py_model_config.attn_config.kv_lora_rank
-        self.nope_head_dim = py_model_config.attn_config.nope_head_dim
-        self.rope_head_dim = py_model_config.attn_config.rope_head_dim
-        self.v_head_dim = py_model_config.attn_config.v_head_dim
+        self.kv_lora_rank = model_config.attn_config.kv_lora_rank
+        self.nope_head_dim = model_config.attn_config.nope_head_dim
+        self.rope_head_dim = model_config.attn_config.rope_head_dim
+        self.v_head_dim = model_config.attn_config.v_head_dim
         self.vit_separation = vit_config.vit_separation
 
         # for eplb
@@ -219,21 +219,11 @@ class ModelDeployWeightInfo:
         # for moe
         self._use_stack_weight = False
 
-        self.kv_cache_data_type = py_model_config.kv_cache_data_type
+        self.kv_cache_data_type = model_config.kv_cache_data_type
 
         self.is_ffn_service = (
             engine_config.parallelism_config.ffn_disaggregate_config.is_ffn_service()
         )
-        
-        # Create a config wrapper for backward compatibility
-        class ConfigWrapper:
-            def __init__(self, py_model_config, engine_config):
-                self.py_model_config = py_model_config
-                self.engine_config = engine_config
-                self.py_env_configs = None  # Will be set if needed
-                self.py_eplb = None  # Will be set if needed
-        
-        self.config = ConfigWrapper(py_model_config, engine_config)
 
     @property
     def support_lora(self):
@@ -272,7 +262,7 @@ class ModelDeployWeightInfo:
             self.vit_separation != VitSeparation.VIT_SEPARATION_REMOTE and
             self.tp_rank == 0):
             weight_info = self._get_vit_info(weight_info)
-        use_fp32 = self.py_model_config.use_float32
+        use_fp32 = self.model_config.use_float32
         if use_fp32:
             weight_info = weight_info.set_weight_dtype(torch.float32)
 

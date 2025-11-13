@@ -234,10 +234,11 @@ class QWen2_VL(QWen_VL, MultiModalMixin):
         mm_model_config,
         vit_config: VitConfig,
     ):
-        if mm_model_config.mm_related_params is None:
-            mm_model_config.mm_related_params = VitParameters()
-        self.mm_part = Qwen2VLImageEmbedding(mm_model_config.mm_related_params)
-        mm_model_config.mm_related_params.vit_weights = QwenVL2VitWeight(
+        # mm_related_params is in py_model_config, not mm_model_config
+        if self.py_model_config.mm_related_params is None:
+            self.py_model_config.mm_related_params = VitParameters()
+        self.mm_part = Qwen2VLImageEmbedding(self.py_model_config.mm_related_params)
+        self.py_model_config.mm_related_params.vit_weights = QwenVL2VitWeight(
             {"vit": self.mm_part.visual}
         )
 

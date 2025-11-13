@@ -33,19 +33,19 @@ TEST_F(CacheConfigCreatorTest, testGetKVCacheMemorySize) {
     kv_cache_config.kv_cache_mem_mb = 10;
     ModelConfig model_config;
     ParallelismConfig parallelism_config;
-    MMModelConfig mm_model_config;
+
     CacheConfigCreator creator;
-    auto               result1 = creator.getKVCacheMemorySize(runtime_config, kv_cache_config, model_config, parallelism_config, mm_model_config);
+    auto               result1 = creator.getKVCacheMemorySize(runtime_config, kv_cache_config, model_config, parallelism_config);
     ASSERT_EQ(10 * 1024 * 1024, result1);
 
     kv_cache_config.kv_cache_mem_mb = 0;
-    auto result2           = creator.getKVCacheMemorySize(runtime_config, kv_cache_config, model_config, parallelism_config, mm_model_config);
+    auto result2           = creator.getKVCacheMemorySize(runtime_config, kv_cache_config, model_config, parallelism_config);
     ASSERT_TRUE(result2 > 0);
 
     runtime_config.reserve_runtime_mem_mb = 200000;
     std::string exception         = "";
     try {
-        creator.getKVCacheMemorySize(runtime_config, kv_cache_config, model_config, parallelism_config, mm_model_config);
+        creator.getKVCacheMemorySize(runtime_config, kv_cache_config, model_config, parallelism_config);
     } catch (const std::exception& e) {
         exception = e.what();
         printf("exception: %s", e.what());
@@ -59,19 +59,18 @@ TEST_F(CacheConfigCreatorTest, testCreateConfig) {
     model_config.attn_config.kv_head_num = 4;
     model_config.attn_config.size_per_head = 128;
     model_config.attn_config.tokens_per_block = 8;
-    MMModelConfig mm_model_config;
     ParallelismConfig parallelism_config;
     RuntimeConfig runtime_config;
     KVCacheConfig kv_cache_config;
     kv_cache_config.kv_cache_mem_mb = 0; // Use default calculation
     CacheConfigCreator creator;
-    auto               result1 = creator.createConfig(model_config, mm_model_config, parallelism_config, runtime_config, kv_cache_config);
+    auto               result1 = creator.createConfig(model_config, parallelism_config, runtime_config, kv_cache_config);
     ASSERT_TRUE(result1.block_nums > 0);
     ASSERT_EQ(result1.local_head_num_kv, 4);
 
     kv_cache_config.kv_cache_mem_mb = 32;
     model_config.attn_config.kv_head_num = 1024;
-    auto result3           = creator.createConfig(model_config, mm_model_config, parallelism_config, runtime_config, kv_cache_config);
+    auto result3           = creator.createConfig(model_config, parallelism_config, runtime_config, kv_cache_config);
     ASSERT_TRUE(result3.block_nums > 0);
 }
 

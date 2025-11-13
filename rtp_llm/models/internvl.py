@@ -22,11 +22,12 @@ class InternVL(BaseModel, MultiModalMixin):
         mm_model_config: Any,  # MMModelConfig
         vit_config: VitConfig,
     ):
-        mm_related_params = mm_model_config.mm_related_params if hasattr(mm_model_config, 'mm_related_params') else None
+        # mm_related_params is in py_model_config, not mm_model_config
+        mm_related_params = self.py_model_config.mm_related_params
         if mm_related_params is None:
             raise ValueError("mm_related_params is required for InternVL")
         self.mm_part = InternVLImageEmbedding(mm_related_params)
-        mm_model_config.mm_related_params.vit_weights = InternVLVitWeight(
+        self.py_model_config.mm_related_params.vit_weights = InternVLVitWeight(
             {"vision_model": self.mm_part.vision_model, "mlp1": self.mm_part.mlp1}, True
         )
         # mm_sep_tokens is stored in mm_model_config or can be set directly

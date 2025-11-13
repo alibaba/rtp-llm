@@ -1,5 +1,7 @@
 import logging
 from typing import Optional, Union
+import json
+import os
 
 import torch
 
@@ -19,7 +21,7 @@ from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.config.kv_cache_config import KVCacheConfig
-from rtp_llm.ops import MMModelConfig
+from rtp_llm.ops import VitSeparation
 from rtp_llm.utils.database import CkptDatabase
 from rtp_llm.utils.time_util import timer_wrapper
 from rtp_llm.utils.util import to_torch_dtype
@@ -27,28 +29,24 @@ from rtp_llm.utils.util import to_torch_dtype
 class BaseModel(object):
 
     # Independent configuration objects
-    py_model_config: ModelConfig
-    mm_model_config: MMModelConfig
+    model_config: ModelConfig
     engine_config: EngineConfig
 
     def __init__(
         self,
-        py_model_config: ModelConfig,
-        mm_model_config: MMModelConfig,
+        model_config: ModelConfig,
         engine_config: EngineConfig,
         vit_config: Optional[VitConfig] = None,
         merge_lora: bool = False,
     ) -> None:
         """Initialize BaseModel with independent configuration objects.
         Args:
-            py_model_config: Model configuration (contains template_type, model_name, lora_infos)
-            mm_model_config: Multimodal model configuration
+            model_config: Model configuration (contains template_type, model_name, lora_infos, mm_model_config)
             engine_config: Engine configuration
             vit_config: Optional VitConfig (needed for multimodal models)
             merge_lora: Whether to merge LoRA weights
         """
-        self.py_model_config = py_model_config
-        self.mm_model_config = mm_model_config
+        self.model_config = model_config
         self.engine_config = engine_config
         self.vit_config = vit_config
         self.merge_lora = merge_lora
@@ -76,7 +74,7 @@ class BaseModel(object):
 
         if self.engine_config.model_specific_config.load_python_model:
             logging.info(
-                f"Creating python model for {self.py_model_config.ckpt_path} on {parallel_info.device}"
+                f"Creating python model for {self.model_config.ckpt_path} on {parallel_info.device}"
             )
             self._create_python_model()
         else:
@@ -104,8 +102,7 @@ class BaseModel(object):
     @classmethod
     def from_config(
         cls,
-        py_model_config: ModelConfig,
-        mm_model_config: MMModelConfig,
+        model_config: ModelConfig,
         engine_config: EngineConfig,
         parallel_info: ParallelInfo = g_parallel_info,
         vit_config: Optional[VitConfig] = None,
@@ -114,71 +111,26 @@ class BaseModel(object):
         """Create model from independent configuration objects.
         
         Args:
-            py_model_config: Model configuration (contains template_type, model_name, lora_infos)
-            mm_model_config: Multimodal model configuration
+            model_config: Model configuration (contains template_type, model_name, lora_infos, mm_model_config)
             engine_config: Engine configuration
             parallel_info: Parallel information for loading
             vit_config: Optional VitConfig (needed for multimodal models)
             merge_lora: Whether to merge LoRA weights
         """
-        # All metadata is in py_model_config
+        # All metadata is in model_config
         model = cls(
-            py_model_config=py_model_config,
-            mm_model_config=mm_model_config,
+            model_config=model_config,
             engine_config=engine_config,
             vit_config=vit_config,
             merge_lora=merge_lora,
         )
         model.load(parallel_info)
         return model
+
     @staticmethod
     def get_weight_cls() -> ModelDeployWeightInfo:
         raise NotImplementedError
 
-    @property
-    def config(self):
-        """Configuration wrapper that combines py_model_config, engine_config, and vit_config.
-        
-        This property provides a unified interface for accessing all configuration objects
-        needed by AsyncModel, RPCEngine, and other components.
-        """
-        # Create a simple wrapper object that combines all configs
-        class ConfigWrapper:
-            def __init__(self, base_model):
-                self.base_model = base_model
-                # Direct access to config objects
-                self.py_model_config = base_model.py_model_config
-                self.mm_model_config = base_model.mm_model_config
-                self.engine_config = base_model.engine_config
-                self.vit_config = base_model.vit_config
-                
-                # Expose engine_config sub-configs for compatibility
-                self.parallelism_config = base_model.engine_config.parallelism_config
-                self.runtime_config = base_model.engine_config.runtime_config
-                self.pd_sep_config = base_model.engine_config.pd_sep_config
-                self.concurrency_config = base_model.engine_config.concurrency_config
-                self.fmha_config = base_model.engine_config.fmha_config
-                self.kv_cache_config = base_model.engine_config.kv_cache_config
-                self.profiling_debug_logging_config = base_model.engine_config.profiling_debug_logging_config
-                self.hw_kernel_config = base_model.engine_config.hw_kernel_config
-                self.device_resource_config = base_model.engine_config.device_resource_config
-                self.moe_config = base_model.engine_config.moe_config
-                self.model_specific_config = base_model.engine_config.model_specific_config
-                self.sp_config = base_model.engine_config.sp_config
-                self.cache_store_config = base_model.engine_config.cache_store_config
-                self.misc_config = base_model.engine_config.misc_config
-                self.arpc_config = base_model.engine_config.arpc_config
-                self.ffn_disaggregate_config = base_model.engine_config.parallelism_config.ffn_disaggregate_config
-                
-                # Expose commonly accessed attributes
-                self.special_tokens = base_model.py_model_config.special_tokens
-                self.max_seq_len = base_model.py_model_config.max_seq_len
-                self.role_type = base_model.engine_config.pd_sep_config.role_type
-                self.is_multimodal = base_model.mm_model_config.is_multimodal
-        
-        if not hasattr(self, '_config_wrapper'):
-            self._config_wrapper = ConfigWrapper(self)
-        return self._config_wrapper
 
     @property
     def dtype(self) -> Union[str, torch.dtype]:
@@ -189,16 +141,15 @@ class BaseModel(object):
     def _may_init_multimodal(self):
         if self.is_multimodal():
             assert isinstance(self, MultiModalMixin)  # for syntax check
-            self.mm_model_config.is_multimodal_ = True
+            self.model_config.mm_model_config.is_multimodal = True
             if self.parallel_info.tp_rank == 0:
                 if self.vit_config is None:
                     raise ValueError("vit_config is required for multimodal models")
                 # Only initialize multimodal if vit_separation != REMOTE
-                from rtp_llm.ops import VitSeparation
                 vit_separation = self.vit_config.vit_separation
                 if vit_separation != VitSeparation.VIT_SEPARATION_REMOTE:
                     self.init_multimodal(
-                        mm_model_config=self.mm_model_config,
+                        mm_model_config=self.model_config.mm_model_config,
                         vit_config=self.vit_config,
                         device=self.parallel_info.device,
                     )
@@ -208,20 +159,18 @@ class BaseModel(object):
         self.custom_module = self._init_custom_module()
 
     def _init_custom_module(self) -> Optional[CustomModule]:
-        return create_custom_module(self.py_model_config.task_type, self, self.tokenizer)
+        return create_custom_module(self.model_config.task_type, self, self.tokenizer)
 
     def load_tokenizer(self) -> None:
         # Get tokenizer parameters from config
-        ckpt_path = self.py_model_config.ckpt_path
-        tokenizer_path = self.py_model_config.tokenizer_path
+        ckpt_path = self.model_config.ckpt_path
+        tokenizer_path = self.model_config.tokenizer_path
         
-        # Get model_type from config.json or py_model_config
-        import json
-        import os
+        # Get model_type from config.json or model_config
         model_type = ""
-        # First try to get from py_model_config.model_type
-        if self.py_model_config.model_type:
-            model_type = self.py_model_config.model_type.lower()
+        # First try to get from model_config.model_type
+        if self.model_config.model_type:
+            model_type = self.model_config.model_type.lower()
         
         # If not found, try to get from config.json
         if not model_type:
@@ -235,7 +184,7 @@ class BaseModel(object):
                     elif "model_type" in config_json:
                         model_type = config_json["model_type"].lower()
         
-        # model_type should be found in config.json or py_model_config
+        # model_type should be found in config.json or model_config
         if not model_type:
             raise ValueError("model_type not found in config.json and cannot be determined")
 
@@ -260,14 +209,14 @@ class BaseModel(object):
             self.engine_config.kv_cache_config.load_and_update_task_prompt_config(self.tokenizer)
 
         if self.tokenizer.eos_token_id:
-            self.py_model_config.special_tokens.eos_token_id = self.tokenizer.eos_token_id
+            self.model_config.special_tokens.eos_token_id = self.tokenizer.eos_token_id
 
     def is_multimodal(self) -> bool:
         return isinstance(self, MultiModalMixin)
 
     def _init_database(self):
-        self.database = CkptDatabase(self.py_model_config.ckpt_path, self.py_model_config.ptuning_path)
-        lora_infos = self.py_model_config.lora_infos
+        self.database = CkptDatabase(self.model_config.ckpt_path, self.model_config.ptuning_path)
+        lora_infos = self.model_config.lora_infos
         self.static_lora: bool = len(lora_infos) == 1
         if self.static_lora:
             for name, path in lora_infos.items():
@@ -286,14 +235,13 @@ class BaseModel(object):
 
     @timer_wrapper(description="load multimodal")
     def _load_multimodal(self):
-        from rtp_llm.ops import VitSeparation
         if self.vit_config is not None and self.vit_config.vit_separation != VitSeparation.VIT_SEPARATION_REMOTE and self.is_multimodal():
             assert isinstance(self, MultiModalMixin)  # for syntax check
             # Convert torch.dtype to string for load_mm_weight
-            dtype_str = self.py_model_config.data_type
+            dtype_str = self.model_config.data_type
             self.load_mm_weight(
-                py_model_config=self.py_model_config,
-                mm_model_config=self.mm_model_config,
+                model_config=self.model_config,
+                mm_model_config=self.model_config.mm_model_config,
                 ctype=dtype_str,
                 tp_size=self.engine_config.parallelism_config.tp_size,
                 tp_rank=self.engine_config.parallelism_config.tp_rank,
@@ -309,17 +257,27 @@ class BaseModel(object):
         tp_rank = self.parallel_info.tp_rank
         tp_size = self.parallel_info.tp_size
 
+        vit_weights = None
+        if self.model_config.mm_related_params is not None:
+            vit_weights = self.model_config.mm_related_params.vit_weights
+
         weights_info: ModelDeployWeightInfo = self.get_weight_cls()(
-            self.py_model_config, self.engine_config, self.merge_lora, tp_size, tp_rank, self.vit_config
+            model_config=self.model_config,
+            engine_config=self.engine_config, 
+            merge_lora=self.merge_lora,
+            tp_size=tp_size, 
+            tp_rank=tp_rank, 
+            vit_config=self.vit_config,
+            vit_weights=vit_weights,
         )
         misc_weights_info = (
             self.custom_module.get_custom_weight_info() if self.custom_module else []
         )
         return get_model_loader(
-            self.py_model_config,
+            self.model_config,
             weights_info,
             misc_weights_info,
-            to_torch_dtype(self.py_model_config.data_type),
+            to_torch_dtype(self.model_config.data_type),
             self.database,
         )
 

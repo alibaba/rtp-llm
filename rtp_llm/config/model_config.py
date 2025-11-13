@@ -9,7 +9,7 @@ from rtp_llm.config.quant_config import (
     init_quant_config,
 )
 from rtp_llm.ops import TaskType
-from libth_transformer_config import ModelConfig as CppModelConfig
+from libth_transformer_config import ModelConfig as CppModelConfig, MMModelConfig
 from rtp_llm.utils.weight_type import WEIGHT_TYPE
 from rtp_llm.utils.gemm_utils.cutlass_config import load_cutlass_gemm_config
 
@@ -276,7 +276,6 @@ class ModelConfig(CppModelConfig):
         self.mm_related_params: Any = None
         self.src_quantization_bit: int = 0
         self.config_dtype: Optional[str] = None
-
         
         # Model metadata fields (merged from function parameters)
         self.template_type: Optional[Any] = None  # TemplateType enum

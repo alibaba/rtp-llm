@@ -32,10 +32,11 @@ class QwenVLImageEmbedding(ImageEmbeddingInterface):
 
 class QWen_VL(QWen, MultiModalMixin):
     def _init_multimodal(self, mm_model_config, vit_config):
-        if mm_model_config.mm_related_params is None:
-            raise ValueError("mm_model_config.mm_related_params is required for QWen_VL")
-        self.mm_part = QwenVLImageEmbedding(mm_model_config.mm_related_params)
-        mm_model_config.mm_related_params.vit_weights = QwenVLVitWeight(
+        # mm_related_params is in py_model_config, not mm_model_config
+        if self.py_model_config.mm_related_params is None:
+            raise ValueError("py_model_config.mm_related_params is required for QWen_VL")
+        self.mm_part = QwenVLImageEmbedding(self.py_model_config.mm_related_params)
+        self.py_model_config.mm_related_params.vit_weights = QwenVLVitWeight(
             {"vit": self.mm_part.vit}
         )
 

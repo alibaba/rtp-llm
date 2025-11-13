@@ -23,10 +23,11 @@ class ChatGlmV4VisionImageEmbedding(EVA2CLIPImageEmbedding):
 
 class ChatGlmV4Vision(ChatGlmV4, MultiModalMixin):
     def _init_multimodal(self, mm_model_config, vit_config):
-        if mm_model_config.mm_related_params is None:
-            raise ValueError("mm_model_config.mm_related_params is required for ChatGlmV4Vision")
-        self.mm_part = ChatGlmV4VisionImageEmbedding(mm_model_config.mm_related_params)
-        mm_model_config.mm_related_params.vit_weights = ChatGlmV4VisionVitWeights(
+        # mm_related_params is in py_model_config, not mm_model_config
+        if self.py_model_config.mm_related_params is None:
+            raise ValueError("py_model_config.mm_related_params is required for ChatGlmV4Vision")
+        self.mm_part = ChatGlmV4VisionImageEmbedding(self.py_model_config.mm_related_params)
+        self.py_model_config.mm_related_params.vit_weights = ChatGlmV4VisionVitWeights(
             {"vit": self.mm_part.vit}
         )
 

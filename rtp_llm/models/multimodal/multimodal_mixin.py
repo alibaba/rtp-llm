@@ -217,7 +217,8 @@ class MultiModalMixin:
         vit_trt = self.vit_config.vit_trt
         
         if vit_trt == 1:
-            mm_related_params = mm_model_config.mm_related_params if hasattr(mm_model_config, 'mm_related_params') else None
+            # mm_related_params is in py_model_config, not mm_model_config
+            mm_related_params = py_model_config.mm_related_params
             self.init_mm_trt(
                 py_model_config.ckpt_path,
                 mm_related_params,
@@ -240,5 +241,6 @@ class MultiModalMixin:
         if isinstance(self.mm_part, MultiModalTRTEngine):
             return
 
-        mm_related_params = mm_model_config.mm_related_params if hasattr(mm_model_config, 'mm_related_params') else None
+        # mm_related_params is in py_model_config, not mm_model_config
+        mm_related_params = py_model_config.mm_related_params
         self._load_mm_weight(mm_related_params, ctype, device)
