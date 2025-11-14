@@ -13,7 +13,8 @@ from timm.data import IMAGENET_INCEPTION_MEAN, IMAGENET_INCEPTION_STD
 from torchvision import transforms
 from transformers import AutoTokenizer, LlamaTokenizer
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import VitParameters
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.downstream_modules.custom_module import CustomModule
 from rtp_llm.models.downstream_modules.embedding.minicpmv_embedding_module import (
@@ -45,9 +46,9 @@ from rtp_llm.utils.multimodal_util import (
 
 class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
 
-    def __init__(self, config: GptInitModelParameters):
-        self.config = config
-        config = config.mm_related_params.config
+    def __init__(self, mm_related_params: VitParameters):
+        self.mm_related_params = mm_related_params
+        config = mm_related_params.config
         self.transform = transforms.Compose(
             [
                 transforms.ToTensor(),
@@ -98,13 +99,20 @@ class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
         return model
 
     @torch.inference_mode()
-    def mm_embedding(self, url: str, mm_type: MMUrlType, **kwargs):
+    def mm_embedding(
+        self, 
+        url: str, 
+        mm_type: MMUrlType, 
+        download_headers: str = "",
+        **kwargs
+    ):
         dtype = self._data_type
         if self.config.tp_rank > 0:
             return torch.Tensor([])
+        
         cached_res = vit_emb_cache_.check_cache(url)
         if cached_res is None:
-            cached_url_res = get_bytes_io_from_url(url)
+            cached_url_res = get_bytes_io_from_url(url, download_headers=download_headers)
             cached_url_res = self._mm_preprocess(cached_url_res, mm_type)
             with mm_lock:
                 features = self.mm_process(cached_url_res, mm_type=mm_type, **kwargs)
@@ -217,20 +225,26 @@ class MiniCPMVVitWeight(BaseVitWeights):
 
 class MiniCPMVWeightInfo(LlamaWeightInfo, BaseMultiModalWeightInfo):
 
-    def __init__(self, config, tp_size, tp_rank):
-        LlamaWeightInfo.__init__(self, config, tp_size, tp_rank, prefix="llm.")
-        BaseMultiModalWeightInfo.__init__(self, config)
-
-    def _get_weight_info(self):
-        llama_vl_weight = super()._get_weight_info()
-        self._get_vit_info(llama_vl_weight)
-        return llama_vl_weight
-
+    def __init__(self, vit_weights, **kwargs):
+        LlamaWeightInfo.__init__(self, prefix="llm.", **kwargs)
+        BaseMultiModalWeightInfo.__init__(self, vit_weights=vit_weights, **kwargs)
 
 class MiniCPMVEmbedding(Llama, MultiModalMixin):
 
-    def __init__(self, config: GptInitModelParameters):
-        Llama.__init__(self, config)
+    def __init__(
+        self,
+        model_config,
+        engine_config,
+        vit_config=None,
+        merge_lora=False,
+    ):
+        Llama.__init__(
+            self,
+            model_config=model_config,
+            engine_config=engine_config,
+            vit_config=vit_config,
+            merge_lora=merge_lora,
+        )
         self.im_start = "<image>"
         self.im_end = "</image>"
         self.slice_start = "<slice>"
@@ -245,14 +259,17 @@ class MiniCPMVEmbedding(Llama, MultiModalMixin):
         self.slice_start_id = self.tokenizer._convert_token_to_id(self.slice_start)
         self.slice_end_id = self.tokenizer._convert_token_to_id(self.slice_end)
 
-        self.config.mm_sep_tokens = [
+        if self.model_config.mm_model_config.mm_sep_tokens is None:
+            self.model_config.mm_model_config.mm_sep_tokens = []
+        self.model_config.mm_model_config.mm_sep_tokens = [
             [self.im_start_id, self.im_end_id]
             # [self.slice_start_id, self.slice_end_id]
         ]
 
-    def _init_multimodal(self, config: GptInitModelParameters):
-        self.mm_part = ImageEmbeddingInterface(config)
-        config.mm_related_params.vit_weights = MiniCPMVVitWeight(
+    def _init_multimodal(self, mm_model_config, vit_config):
+        # mm_related_params is in model_config, not mm_model_config
+        self.mm_part = ImageEmbeddingInterface(self.model_config.mm_related_params)
+        self.model_config.mm_related_params.vit_weights = MiniCPMVVitWeight(
             {"vpm": self.mm_part.vpm, "resampler": self.mm_part.resampler}
         )
 
@@ -262,19 +279,20 @@ class MiniCPMVEmbedding(Llama, MultiModalMixin):
 
     @classmethod
     def _create_config(cls, ckpt_path: str):
-        config = GptInitModelParameters(
-            head_num=0,
-            size_per_head=0,
-            layer_num=0,
-            max_seq_len=0,
-            vocab_size=0,
-            ckpt_path=ckpt_path,
-            activation_type="SiGLU",
-            norm_type="rmsnorm",
-            rotary_embedding_dim=128,
-            rotary_embedding_style=1,
-            has_post_decoder_layernorm=True,
-        )
+        from rtp_llm.config.model_config import ModelConfig
+        from rtp_llm.config.model_config import VitParameters
+        config = ModelConfig()
+        config.attn_config.head_num = 0
+        config.attn_config.size_per_head = 0
+        config.num_layers = 0
+        config.max_seq_len = 0
+        config.vocab_size = 0
+        config.ckpt_path = ckpt_path
+        config.activation_type = "SiGLU"
+        config.norm_type = "rmsnorm"
+        config.attn_config.rope_config.dim = 128
+        config.attn_config.rope_config.style = 1
+        config.has_post_decoder_layernorm = True
         config_path = os.path.join(ckpt_path, "config.json")
         if os.path.exists(config_path):
             with open(config_path) as reader:
@@ -284,7 +302,7 @@ class MiniCPMVEmbedding(Llama, MultiModalMixin):
                 config.input_embedding_scalar = config_json.get("scale_emb", 1)
                 config.residual_scalar = config_json.get(
                     "scale_depth", 1.4
-                ) / math.sqrt(config.layer_num)
+                ) / math.sqrt(config.num_layers)
                 # config.activation_type = config_json["hidden_act"]
                 MiniCPMVEmbedding._init_vit_params(config, config_json)
         else:
@@ -292,7 +310,9 @@ class MiniCPMVEmbedding(Llama, MultiModalMixin):
         return config
 
     @staticmethod
-    def _init_vit_params(config: GptInitModelParameters, config_json: Dict[str, Any]):
+    def _init_vit_params(config: ModelConfig, config_json: Dict[str, Any]):
+        if config.mm_related_params.config is None:
+            config.mm_related_params.config = {}
         # config.mm_related_params.config = config_json["vision_config"]
         config.mm_related_params.config["llm_hidden_size"] = config_json["hidden_size"]
         config.mm_related_params.config["query_num"] = config_json["query_num"]
@@ -313,7 +333,7 @@ class MiniCPMVEmbedding(Llama, MultiModalMixin):
         ]
 
     def _init_custom_module(self) -> Optional[CustomModule]:
-        return MiniCPMVModule(self.config, self.tokenizer)
+        return MiniCPMVModule(self.config, self.tokenizer, vit_config=self.vit_config)
 
 
 register_model("minicpmv_embedding", MiniCPMVEmbedding, ["MiniCPMVEmbedding"])

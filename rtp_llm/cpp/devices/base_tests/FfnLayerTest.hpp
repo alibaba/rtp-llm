@@ -599,7 +599,7 @@ public:
             weights.moe_down_weight   = std::make_unique<DenseWeights>(DenseWeights(down));
             weights.moe_gate_weight   = std::make_unique<DenseWeights>(DenseWeights(gate));
         }
-        MoeConfigs     moe_configs({expertNum, 0, topK, false, (int64_t)inter_size, false});
+        MoeConfigs     moe_configs({expertNum, 0, topK});
         FfnConfigs     ffn_configs({Atype, moe_configs});
         FfnLayerParams Opparams(*input,
                                 ffn_configs,

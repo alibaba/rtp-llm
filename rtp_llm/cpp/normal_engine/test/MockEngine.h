@@ -15,6 +15,7 @@
 #include "rtp_llm/cpp/core/Buffer.h"
 #include "rtp_llm/cpp/devices/testing/TestBase.h"
 #include "rtp_llm/cpp/models/models_weight/W.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 
 using namespace std;
 namespace W = rtp_llm::W;
@@ -28,27 +29,30 @@ struct CustomConfig {
 };
 
 rtp_llm::EngineInitParams
-createEngineInitParams(DeviceBase* device, const CustomConfig& config, GptInitParameter& params) {
-    params.head_num_                     = 2;
-    params.size_per_head_                = 64;
-    params.num_layers_                   = 2;
-    params.max_seq_len_                  = 20;
-    params.vocab_size_                   = 100;
-    params.hidden_size_                  = 128;
-    params.head_num_kv_                  = 2;
-    params.block_nums_                   = 100;
-    params.reuse_cache_                  = config.reuse_cache;
-    params.multi_task_prompt_tokens_     = config.multi_task_prompt_tokens;
-    params.max_generate_batch_size_      = 128;
-    params.max_context_batch_size_       = 128;
-    params.kv_cache_data_type_           = config.kv_cache_data_type;
-    params.special_tokens_.eos_token_id_ = -1;  // never eos
+createEngineInitParams(DeviceBase* device, const CustomConfig& config,
+                      rtp_llm::ModelConfig& model_config,
+                      rtp_llm::RuntimeConfig& runtime_config,
+                      rtp_llm::KVCacheConfig& kv_cache_config) {
+    model_config.attn_config.head_num = 2;
+    model_config.attn_config.size_per_head = 64;
+    model_config.num_layers                   = 2;
+    model_config.max_seq_len                  = 20;
+    model_config.vocab_size                   = 100;
+    model_config.hidden_size                  = 128;
+    model_config.attn_config.kv_head_num = 2;
+    model_config.activation_type = ActivationType::Silu;
+    kv_cache_config.test_block_num                   = 100;
+    kv_cache_config.reuse_cache                  = config.reuse_cache;
+    kv_cache_config.multi_task_prompt_tokens     = config.multi_task_prompt_tokens;
+    runtime_config.max_generate_batch_size      = 128;
+    runtime_config.fifo_scheduler_config.max_context_batch_size       = 128;
+    model_config.attn_config.kv_cache_dtype = config.kv_cache_data_type == DataType::TYPE_INT8 ? KvCacheDataType::INT8 : (config.kv_cache_data_type == DataType::TYPE_FP8_E4M3 ? KvCacheDataType::FP8 : KvCacheDataType::BASE);
+    model_config.special_tokens.eos_token_id = -1;  // never eos
 
     const size_t inter_size        = 512;
-    params.inter_size_             = inter_size;
-    params.inter_padding_size_     = inter_size;
-    params.seq_size_per_block_     = 2;
-    params.reserve_runtime_mem_mb_ = 1024;
+    // inter_size is now calculated in ModelDeployWeightInfo, not in ModelConfig
+    model_config.attn_config.tokens_per_block = 2;
+    runtime_config.reserve_runtime_mem_mb = 1024;
     typedef half            T;
     const rtp_llm::DataType data_type    = getTensorType<T>();
     auto                    mem_type     = rtp_llm::MemoryType::MEMORY_GPU;
@@ -60,16 +64,16 @@ createEngineInitParams(DeviceBase* device, const CustomConfig& config, GptInitPa
     device->copy({*data, *buf_host});
 
     auto word_embeddings = make_unique<const Buffer>(
-        mem_type, data_type, vector<size_t>{(size_t)params.vocab_size_, hidden_units}, data->data(), [data](Buffer*) {
+        mem_type, data_type, vector<size_t>{(size_t)model_config.vocab_size, hidden_units}, data->data(), [data](Buffer*) {
         });
     auto lm_head = make_unique<const rtp_llm::Buffer>(
-        mem_type, data_type, vector<size_t>{(size_t)params.vocab_size_, hidden_units}, data->data());
+        mem_type, data_type, vector<size_t>{(size_t)model_config.vocab_size, hidden_units}, data->data());
     std::unordered_map<std::string, rtp_llm::ConstBufferPtr> global_weights;
     global_weights.emplace(W::embedding, std::move(word_embeddings));
     global_weights.emplace(W::lm_head, std::move(lm_head));
 
     std::vector<std::unordered_map<std::string, rtp_llm::ConstBufferPtr>> layer_weights;
-    for (int i = 0; i < params.num_layers_; ++i) {
+    for (int i = 0; i < model_config.num_layers; ++i) {
         auto pre_layernorm_weights =
             make_unique<const rtp_llm::Buffer>(mem_type, data_type, vector<size_t>{hidden_units}, data->data());
         auto pre_layernorm_beta =
@@ -124,13 +128,57 @@ createEngineInitParams(DeviceBase* device, const CustomConfig& config, GptInitPa
     auto                      convert = rtp_llm::WeightsConverter(false);
     auto                      weights = convert.createGptWeights(std::make_unique<ConstBufferPtrMaps>(layer_weights),
                                             std::make_unique<ConstBufferPtrMap>(global_weights));
-    rtp_llm::EngineInitParams rtp_llm_params(0, params, std::move(*weights));
+    
+    // Create all config objects with defaults
+    rtp_llm::MMModelConfig mm_model_config;
+    model_config.mm_model_config = mm_model_config;
+    rtp_llm::ParallelismConfig parallelism_config;
+    rtp_llm::PDSepConfig pd_sep_config;
+    rtp_llm::ConcurrencyConfig concurrency_config;
+    rtp_llm::FMHAConfig fmha_config;
+    rtp_llm::ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    rtp_llm::HWKernelConfig hw_kernel_config;
+    rtp_llm::DeviceResourceConfig device_resource_config;
+    rtp_llm::MoeConfig moe_config;
+    rtp_llm::ModelSpecificConfig model_specific_config;
+    rtp_llm::SpeculativeExecutionConfig sp_config;
+    rtp_llm::CacheStoreConfig cache_store_config;
+    rtp_llm::MiscellaneousConfig misc_config;
+    rtp_llm::ArpcConfig arpc_config;
+    rtp_llm::GrpcConfig grpc_config;
+    rtp_llm::FfnDisAggregateConfig ffn_disaggregate_config;
+    rtp_llm::VitConfig vit_config;
+    
+    rtp_llm::EngineInitParams rtp_llm_params(0, 
+                                             model_config,
+                                             parallelism_config,
+                                             runtime_config,
+                                             pd_sep_config,
+                                             concurrency_config,
+                                             fmha_config,
+                                             kv_cache_config,
+                                             profiling_debug_logging_config,
+                                             hw_kernel_config,
+                                             device_resource_config,
+                                             moe_config,
+                                             model_specific_config,
+                                             sp_config,
+                                             cache_store_config,
+                                             misc_config,
+                                             arpc_config,
+                                             grpc_config,
+                                             ffn_disaggregate_config,
+                                             vit_config,
+                                             std::move(*weights));
     return rtp_llm_params;
 }
 
 std::shared_ptr<NormalEngine>
-createMockEngine(DeviceBase* device, const CustomConfig& config, GptInitParameter& params) {
-    EngineInitParams              rtp_llm_params = createEngineInitParams(device, config, params);
+createMockEngine(DeviceBase* device, const CustomConfig& config) {
+    rtp_llm::ModelConfig model_config;
+    rtp_llm::RuntimeConfig runtime_config;
+    rtp_llm::KVCacheConfig kv_cache_config;
+    EngineInitParams              rtp_llm_params = createEngineInitParams(device, config, model_config, runtime_config, kv_cache_config);
     std::shared_ptr<NormalEngine> engine         = make_shared<NormalEngine>(rtp_llm_params);
     return engine;
 }

@@ -11,11 +11,23 @@ from typing import Dict, Optional
 import torch
 from safetensors import safe_open
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.config.py_config_modules import StaticConfig
+from rtp_llm.config.engine_config import setup_parallelism_config
+from rtp_llm.config.kv_cache_config import KVCacheConfig
+from rtp_llm.config.model_args import ModelArgs
+from rtp_llm.config.model_config import ModelConfig, build_model_config
+from rtp_llm.config.py_config_modules import (
+    MIN_WORKER_INFO_PORT_NUM,
+    QuantizationConfig,
+)
 from rtp_llm.distribute.worker_info import ParallelInfo
 from rtp_llm.model_factory import ModelFactory
-from rtp_llm.models.base_model import ModelConfig
+from rtp_llm.ops import (
+    FMHAConfig,
+    HWKernelConfig,
+    MoeConfig,
+    ParallelismConfig,
+    ProfilingDebugLoggingConfig,
+)
 from rtp_llm.tools.api.model_basic_info_analyzer import (
     parse_ft_model_type,
     parse_model_basic_info,
@@ -102,7 +114,8 @@ class WeightConverter:
         return self.world_size if max_pool_size > self.world_size else max_pool_size
 
     def _estimate_max_convert_parallel_num(self):
-        converter_num_per_gpu = StaticConfig.load_config.converter_num_per_gpu
+        # Get converter_num_per_gpu from environment variable, default to 4
+        converter_num_per_gpu = int(os.environ.get("CONVERTER_NUM_PER_GPU", "4"))
         try:
             cuda_count = torch.cuda.device_count()
             assert cuda_count >= 1
@@ -115,22 +128,23 @@ class WeightConverter:
                 model_size_mb = self.model_basic_info.model_size / ONE_MB
 
                 env_params = copy.deepcopy(self.env_params)
-                quantization = ModelConfig.get_quantization_from_params(env_params)
-                model_config = ModelConfig(
-                    model_type=self.model_type,
-                    ckpt_path=self.model_path,
-                    act_type=env_params.get(ModelConfig.ACT_TYPE),
-                    ptuning_path=None,
-                    max_seq_len=0,
-                    tokenizer_path=self.model_path,
-                    quantization=quantization,
-                )
-                paralle_info = ParallelInfo.from_params(env_params)
-                config: GptInitModelParameters = self.model_cls.create_config(
-                    model_config, paralle_info
-                )
+                # Get quantization from env_params (compatibility logic)
+                quantization = env_params.get("QUANTIZATION", "")
+                if not quantization:
+                    int8_mode = env_params.get("INT8_MODE", "0")
+                    weight_type = env_params.get("WEIGHT_TYPE", "").upper()
+                    if int(int8_mode) == 1 or weight_type == "INT8":
+                        quantization = "INT8"
+                config: ModelConfig = self.model_cls._create_config(self.model_path)
+                # Apply settings from env_params
+                config.model_type = self.model_type
+                config.ckpt_path = self.model_path
+                config.tokenizer_path = self.model_path
+                config.act_type = env_params.get("ACT_TYPE", "")
+                config.quantization = quantization
+                config.max_seq_len = 0
 
-                one_layer_model_size_mb = model_size_mb / config.layer_num
+                one_layer_model_size_mb = model_size_mb / config.num_layers
                 if model_size_mb < dump_buffer_size_mb:
                     need_size_mb = model_size_mb
                 else:
@@ -161,30 +175,76 @@ class WeightConverter:
         env_params.update({"WORLD_RANK": world_rank})
         env_params.update({"DP_RANK": dp_rank})
         env_params.update({"TP_RANK": tp_rank})
-        StaticConfig.update_from_env()
 
-        quantization = ModelConfig.get_quantization_from_params(env_params)
-        model_config = ModelConfig(
-            model_type=self.model_type,
-            ckpt_path=self.model_path,
-            act_type=env_params.get(ModelConfig.ACT_TYPE),
-            kv_cache_type=StaticConfig.py_kv_cache_config.kv_cache_dtype,
-            ptuning_path=None,
-            max_seq_len=0,
-            tokenizer_path=self.model_path,
-            quantization=quantization,
+        # Get quantization from env_params (compatibility logic)
+        quantization = env_params.get("QUANTIZATION", "")
+        if not quantization:
+            int8_mode = env_params.get("INT8_MODE", "0")
+            weight_type = env_params.get("WEIGHT_TYPE", "").upper()
+            if int(int8_mode) == 1 or weight_type == "INT8":
+                quantization = "INT8"
+
+        # Create config using _create_config
+        model_config: ModelConfig = self.model_cls._create_config(self.model_path)
+
+        # Create ModelArgs from config
+        model_args = ModelArgs()
+        model_args.ckpt_path = self.model_path
+        model_args.tokenizer_path = self.model_path
+        model_args.model_type = self.model_type
+        model_args.act_type = env_params.get("ACT_TYPE", "")
+
+        kv_cache_config = KVCacheConfig()
+        kv_cache_config.seq_size_per_block = 64
+        kv_cache_config.fp8_kv_cache = int(env_params.get("FP8_KV_CACHE", 0))
+        kv_cache_config.int8_kv_cache = int(env_params.get("INT8_KV_CACHE", 0))
+
+        quantization_config = QuantizationConfig()
+        quantization_config.quantization = quantization
+
+        # Build model config
+        build_model_config(
+            model_config=model_config,
+            model_args=model_args,
+            kv_cache_config=kv_cache_config,
+            quantization_config=quantization_config,
+            profiling_debug_logging_config=ProfilingDebugLoggingConfig(),
+            embedding_config=None,  # Fake loader doesn't need embedding_config
         )
-        paralle_info = ParallelInfo.from_params(env_params)
+
+        model_config.num_layers = int(
+            env_params.get("HACK_LAYER_NUM", str(model_config.num_layers))
+        )
+
+        # Create minimal configs for model instantiation
+        paralle_info = ParallelInfo.from_params(env_params, MIN_WORKER_INFO_PORT_NUM)
         logging.info(f"begin convert model rank:{paralle_info}")
-        config: GptInitModelParameters = self.model_cls.create_config(
-            model_config, paralle_info
+        print("here", paralle_info)
+        # Create and setup parallelism_config
+        parallelism_config = ParallelismConfig()
+        setup_parallelism_config(parallelism_config, paralle_info, None)
+
+        # Create other required configs
+        hw_kernel_config = HWKernelConfig()
+        fmha_config = FMHAConfig()
+        moe_config = MoeConfig()
+
+        model = self.model_cls.from_config(
+            model_config=model_config,
+            parallelism_config=parallelism_config,
+            hw_kernel_config=hw_kernel_config,
+            kv_cache_config=kv_cache_config,
+            fmha_config=fmha_config,
+            moe_config=moe_config,
+            load_python_model=False,
+            max_generate_batch_size=0,
         )
-        model = self.model_cls(config)
-        loader = model.create_model_loader(paralle_info)
+        loader = model.create_model_loader()
+        device_str = f"cuda:{parallelism_config.local_rank}"
         max_retry_times = 3
         for i in range(max_retry_times):
             try:
-                loader.dump_weight_as_ft_style(paralle_info.device, output_dir_base)
+                loader.dump_weight_as_ft_style(device_str, output_dir_base)
                 logging.info(f"dump rank:[{world_rank}] done")
                 break
             except Exception as e:

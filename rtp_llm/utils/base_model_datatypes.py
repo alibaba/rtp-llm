@@ -3,10 +3,8 @@ from typing import Any, Dict, List, NamedTuple, Optional
 
 import torch
 
-from rtp_llm.config.generate_config import GenerateConfig, RoleAddr, RoleType
+from rtp_llm.config.generate_config import GenerateConfig, RoleAddr
 from rtp_llm.utils.multimodal_util import MultimodalInput
-from rtp_llm.utils.weight_type import WEIGHT_TYPE
-
 
 class EmbeddingOutput:
     text_embedding: torch.Tensor
@@ -132,82 +130,3 @@ class GenerateContext(NamedTuple):
     all_start_time: Any
     cache_indirection: Any
     output_token_ids: Any
-
-
-class ModelConfig:
-    KV_CACHE_DTYPE = "KV_CACHE_DTYPE"
-    QUANTIZATION_KEY = "QUANTIZATION"
-    ACT_TYPE = "ACT_TYPE"
-    WEIGHT_TYPE = "WEIGHT_TYPE"  # Compatible for old config
-    INT8_MODE = "INT8_MODE"  # Compatible for old config
-
-    SP_KV_CACHE_DTYPE = "SP_KV_CACHE_DTYPE"
-    SP_QUANTIZATION_KEY = "SP_QUANTIZATION"
-    SP_ACT_TYPE = "SP_ACT_TYPE"
-    SP_WEIGHT_TYPE = "SP_WEIGHT_TYPE"  # Compatible for old config
-
-    def __init__(
-        self,
-        model_type: str = "",
-        ckpt_path: str = "",
-        tokenizer_path: str = "",
-        act_type: str = None,
-        kv_cache_type: str = None,
-        max_seq_len: int = 0,
-        seq_size_per_block: int = 8,
-        gen_num_per_circle: int = 1,
-        ptuning_path: Optional[str] = None,
-        lora_infos: Optional[Dict[str, str]] = None,
-        ref_module: Optional[torch.nn.Module] = None,
-        ref_dict: Dict[str, torch.Tensor] = {},
-        sp_type: str = "",
-        quantization: str = "",
-    ):
-        self.model_type: str = model_type
-        self.ckpt_path: str = ckpt_path
-        self.tokenizer_path: str = tokenizer_path
-        self.act_type: str = act_type
-        self.kv_cache_type: str = kv_cache_type
-        self.quantization = quantization
-        self.max_seq_len: int = max_seq_len
-        self.seq_size_per_block: int = seq_size_per_block
-        self.gen_num_per_circle: int = gen_num_per_circle
-        self.ptuning_path: Optional[str] = ptuning_path
-        self.lora_infos: Optional[Dict[str, str]] = lora_infos
-        self.ref_module: Optional[torch.nn.Module] = ref_module
-        self.ref_dict: Dict[str, torch.Tensor] = ref_dict
-        self.sp_type: str = sp_type
-
-    def add_ref_module(self, ref_module: Optional[torch.nn.Module]):
-        self.ref_module = ref_module
-
-    def add_ref_dict(self, ref_dict: Dict[str, torch.Tensor]):
-        self.ref_dict = ref_dict
-
-    def _replace(self, **kwargs: Any):
-        for k, v in kwargs.items():
-            if k in self.__dict__:
-                self.__dict__[k] = v
-        return self
-
-    @staticmethod
-    def get_quantization_from_params(env_params: Dict[str, str]):
-        if (not env_params.get(ModelConfig.QUANTIZATION_KEY)) and (
-            env_params.get(ModelConfig.WEIGHT_TYPE, "").upper() == "INT8"
-            or int(env_params.get(ModelConfig.INT8_MODE, "0")) == 1
-        ):
-            quantization = "INT8"
-        else:
-            quantization = env_params.get(ModelConfig.QUANTIZATION_KEY)
-        return quantization
-
-    @staticmethod
-    def get_sp_quantization_from_params(env_params: Dict[str, str]):
-        if not env_params.get(ModelConfig.SP_QUANTIZATION_KEY) and (
-            env_params.get(ModelConfig.SP_WEIGHT_TYPE, "").upper() == "INT8"
-            or int(env_params.get(ModelConfig.INT8_MODE, "0")) == 1
-        ):
-            quantization = "INT8"
-        else:
-            quantization = env_params.get(ModelConfig.SP_QUANTIZATION_KEY)
-        return quantization

@@ -24,8 +24,10 @@ namespace rtp_llm {
 
 class RemoteMultimodalProcessor: public MultimodalProcessor {
 public:
-    RemoteMultimodalProcessor(py::object mm_process_engine, rtp_llm::GptInitParameter params):
-        MultimodalProcessor(mm_process_engine, params) {
+    RemoteMultimodalProcessor(py::object mm_process_engine,
+                             const MMModelConfig& mm_model_config,
+                             int64_t max_seq_len):
+        MultimodalProcessor(mm_process_engine, mm_model_config, max_seq_len) {
     }
 
 private:

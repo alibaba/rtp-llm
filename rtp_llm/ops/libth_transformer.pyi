@@ -1,6 +1,4 @@
 from __future__ import annotations
-import libth_transformer_config
-import torch
 import typing
 __all__: list[str] = ['EngineScheduleInfo', 'EngineTaskInfo', 'KVCacheInfo', 'MultimodalInput', 'RtpEmbeddingOp', 'RtpLLMOp', 'WorkerStatusInfo', 'EmbeddingCppOutput', 'TypedOutput']
 class EngineScheduleInfo:
@@ -89,7 +87,7 @@ class RtpLLMOp:
         ...
     def stop(self) -> None:
         ...
-    def update_eplb_config(self, config: libth_transformer_config.EplbConfig) -> bool:
+    def update_eplb_config(self, config: ...) -> bool:
         ...
     def update_scheduler_info(self, scheduler_info: str) -> None:
         ...

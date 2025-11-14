@@ -6,7 +6,7 @@ import torch
 from torch import nn
 from transformers.activations import ACT2FN
 
-from rtp_llm.config.py_config_modules import StaticConfig
+from rtp_llm.config.model_config import VitParameters
 from rtp_llm.models.multimodal.multimodal_common import (
     ImageEmbeddingInterface,
     ImageTransform,
@@ -14,12 +14,18 @@ from rtp_llm.models.multimodal.multimodal_common import (
 
 
 class EVA2CLIPImageEmbedding(ImageEmbeddingInterface):
-    def __init__(self, config):
+    def __init__(self, mm_related_params: VitParameters, vit_trt: int = None):
+        """Initialize EVA2CLIPImageEmbedding.
+        
+        Args:
+            mm_related_params: VitParameters object containing vision config.
+        """
+        self.mm_related_params = mm_related_params
         # EVA2CLIPModel is too big, create it in cpu
-        self.config = config
-        self.vit = EVA2CLIPModel(config).cpu()
+        # Pass mm_related_params.config to EVA2CLIPModel
+        self.vit = EVA2CLIPModel(mm_related_params.config, vit_trt).cpu()
         self.image_transform = ImageTransform(
-            config.mm_related_params.config["image_size"]
+            mm_related_params.config["image_size"]
         )
 
     @property
@@ -58,12 +64,18 @@ class PatchEmbedding(nn.Module):
 
 
 class Attention(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, vit_trt: int = None):
+        """Initialize Attention module.
+        
+        Args:
+            config: Vision config object.
+        """
         super().__init__()
         self.num_heads = config.num_heads
         self.query_key_value = nn.Linear(config.hidden_size, config.hidden_size * 3)
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
         self.output_dropout = torch.nn.Dropout(config.dropout_prob)
+        self.vit_trt = vit_trt
 
     def forward(self, x: "tensor(B, L, D)") -> "tensor(B, L, D)":
         B, L, _ = x.shape
@@ -77,7 +89,7 @@ class Attention(nn.Module):
         # Here we maintain two versions of scaled_dot_product_attention, the original math attention is for tensorrt/
         # the optimized scaled_dot_product_attention is for users who don't want to use tensorrt, it's much faster and
         # memory efficient than the original version.
-        if StaticConfig.vit_config.vit_trt == 1:
+        if self.vit_trt == 1:
             attn_weights = torch.matmul(q / math.sqrt(q.shape[-1]), k.transpose(-1, -2))
             attn_weights = attn_weights.softmax(dim=-1)
             attn_out = torch.matmul(attn_weights, v)
@@ -107,12 +119,17 @@ class MLP(nn.Module):
 
 
 class TransformerLayer(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, vit_trt: int = None):
+        """Initialize TransformerLayer.
+        
+        Args:
+            config: Vision config object.
+        """
         super().__init__()
         self.input_layernorm = nn.LayerNorm(
             config.hidden_size, eps=config.layer_norm_eps
         )
-        self.attention = Attention(config)
+        self.attention = Attention(config, vit_trt)
         self.mlp = MLP(config)
         self.post_attention_layernorm = nn.LayerNorm(
             config.hidden_size, eps=config.layer_norm_eps
@@ -129,10 +146,15 @@ class TransformerLayer(nn.Module):
 
 
 class Transformer(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, vit_trt: int = None):
+        """Initialize Transformer.
+        
+        Args:
+            config: Vision config object.
+        """
         super().__init__()
         self.layers = nn.ModuleList(
-            [TransformerLayer(config) for _ in range(config.num_hidden_layers)]
+            [TransformerLayer(config, vit_trt) for _ in range(config.num_hidden_layers)]
         )
 
     def forward(self, hidden_states):
@@ -165,11 +187,16 @@ class GLU(nn.Module):
 
 
 class EVA2CLIPModel(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, vit_trt: int = None):
+        """Initialize EVA2CLIPModel.
+        
+        Args:
+            config: Model config object.
+        """
         super().__init__()
         vision_config = Namespace(**config.mm_related_params.config)
         self.patch_embedding = PatchEmbedding(vision_config)
-        self.transformer = Transformer(vision_config)
+        self.transformer = Transformer(vision_config, vit_trt)
         self.linear_proj = GLU(
             config,
             in_features=(

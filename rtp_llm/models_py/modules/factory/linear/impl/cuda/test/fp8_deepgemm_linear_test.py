@@ -6,6 +6,7 @@ import torch
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear import (
     CudaFp8DeepGEMMLinear,
 )
+from rtp_llm.config.quant_config import init_quant_config
 
 
 class CudaFp8DeepGEMMLinearTest(unittest.TestCase):
@@ -55,7 +56,7 @@ class CudaFp8DeepGEMMLinearTest(unittest.TestCase):
             weight=self.weight,
             weight_scales=self.weight_scales,
             bias=self.bias if with_bias else None,
-            config=None,
+            quant_config=init_quant_config('FP8_PER_BLOCK'),
         )
 
     def test_module_creation(self):

@@ -4,7 +4,7 @@ from typing import Any, Dict
 
 import torch
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
 from rtp_llm.models_py.modules.factory.fused_moe.defs.priority_attributes import (
     StrategyAttributes,
 )
@@ -14,7 +14,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.strategy_base import MoeSt
 class CudaNoQuantEpLowLatencyStrategy(MoeStrategy):
     """CUDA EP low latency mode without quantization strategy"""
 
-    def create_router(self, config: GptInitModelParameters) -> Any:
+    def create_router(self, config: MoEConfigAdapter) -> Any:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_low_latency_router import (
             DeepEpLowLatencyRouter,
         )
@@ -28,7 +28,7 @@ class CudaNoQuantEpLowLatencyStrategy(MoeStrategy):
         )
 
     def create_executor(
-        self, config: GptInitModelParameters, weights: Dict[str, torch.Tensor]
+        self, config: MoEConfigAdapter, weights: Dict[str, torch.Tensor]
     ) -> Any:
         from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
             FusedMoEQuantConfig,

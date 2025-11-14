@@ -6,7 +6,6 @@ from typing import Any, Dict, List
 
 import torch
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, AttnConfig
 from rtp_llm.model_loader.ffn_weight import (
@@ -23,6 +22,7 @@ from rtp_llm.model_loader.model_weight_info import (
 )
 from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
 from rtp_llm.models.deepseek_v2 import DeepSeekV2
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
@@ -195,21 +195,17 @@ class Glm4MoeWeight(ModelDeployWeightInfo):
         return layer_weights
 
     def _get_hf_ffn_layer_weight_info(self, layer_id: int):
-        inter_padding_size = (
-            self._layer_inter_padding_size[layer_id]
-            if self._layer_inter_padding_size
-            else self._inter_padding_size
-        )
+        align_size = self._align_size
 
         ffn_config = FfnConfig(
-            inter_padding_size=inter_padding_size,
+            align_size=align_size,
             is_gated_activation=self._is_gated_activation,
             is_moe=False,
         )
 
         if layer_id in self.moe_layer_index_:
             moe_config = MoeConfig(
-                inter_padding_size=inter_padding_size,
+                align_size=align_size,
                 expert_num=self.expert_num_,
             )
             layer_weights = [
@@ -235,7 +231,7 @@ class Glm4MoeWeight(ModelDeployWeightInfo):
                             ],
                             functools.partial(
                                 transpose_pad,
-                                inter_padding_size=inter_padding_size,
+                                align_size=align_size,
                                 dim=0,
                             ),
                             config=ffn_config,
@@ -250,7 +246,7 @@ class Glm4MoeWeight(ModelDeployWeightInfo):
                             ],
                             functools.partial(
                                 transpose_pad,
-                                inter_padding_size=inter_padding_size,
+                                align_size=align_size,
                                 dim=1,
                             ),
                             config=ffn_config,
@@ -265,7 +261,7 @@ class Glm4MoeWeight(ModelDeployWeightInfo):
                             ],
                             functools.partial(
                                 transpose_pad,
-                                inter_padding_size=inter_padding_size,
+                                align_size=align_size,
                                 dim=0,
                             ),
                             config=ffn_config,
@@ -331,7 +327,7 @@ class Glm4MoeWeight(ModelDeployWeightInfo):
                             ],
                             functools.partial(
                                 transpose_pad,
-                                inter_padding_size=inter_padding_size,
+                                align_size=align_size,
                                 dim=0,
                             ),
                             config=ffn_config,
@@ -345,7 +341,7 @@ class Glm4MoeWeight(ModelDeployWeightInfo):
                             ],
                             functools.partial(
                                 transpose_pad,
-                                inter_padding_size=inter_padding_size,
+                                align_size=align_size,
                                 dim=1,
                             ),
                             config=ffn_config,
@@ -359,7 +355,7 @@ class Glm4MoeWeight(ModelDeployWeightInfo):
                             ],
                             functools.partial(
                                 transpose_pad,
-                                inter_padding_size=inter_padding_size,
+                                align_size=align_size,
                                 dim=0,
                             ),
                             config=ffn_config,
@@ -397,16 +393,15 @@ class Glm4MoeWeight(ModelDeployWeightInfo):
 class Glm4Moe(DeepSeekV2):
     @classmethod
     def _create_config(cls, ckpt_path: str):
-        config = GptInitModelParameters(
-            head_num=0,
-            head_num_kv=0,
-            size_per_head=0,
-            layer_num=0,
-            inter_size=0,  # 13696
-            vocab_size=152064,
-            max_seq_len=8192,
-        )
-        config.rotary_embedding_style = 1
+        config = ModelConfig()
+        config.attn_config.head_num = 0
+        config.attn_config.kv_head_num = 0
+        config.attn_config.size_per_head = 0
+        config.num_layers = 0
+        config.inter_size = 0  # 13696
+        config.vocab_size = 152064
+        config.max_seq_len = 8192
+        config.attn_config.rope_config.style = 1
         config.activation_type = "SiGLU"
         config.has_pre_decoder_layernorm = False
         config.has_post_decoder_layernorm = True
@@ -414,16 +409,16 @@ class Glm4Moe(DeepSeekV2):
 
         cls._from_hf(config, ckpt_path)
         assert (
-            config.head_num > 0
-            and config.head_num_kv > 0
-            and config.size_per_head > 0
-            and config.layer_num > 0
+            config.attn_config.head_num > 0
+            and config.attn_config.kv_head_num > 0
+            and config.attn_config.size_per_head > 0
+            and config.num_layers > 0
             and config.inter_size > 0
-        ), f"error config config.head_num={config.head_num} config.head_num_kv={config.head_num_kv} config.size_per_head={config.size_per_head} config.layer_num={config.layer_num} config.inter_size={config.inter_size}"
+        ), f"error config config.attn_config.head_num={config.attn_config.head_num} config.attn_config.kv_head_num={config.attn_config.kv_head_num} config.attn_config.size_per_head={config.attn_config.size_per_head} config.num_layers={config.num_layers} config.inter_size={config.inter_size}"
         return config
 
     @classmethod
-    def _from_hf(cls, config: GptInitModelParameters, ckpt_path: str):
+    def _from_hf(cls, config: "ModelConfig", ckpt_path: str):
         config_path = os.path.join(ckpt_path, "config.json")
 
         if not os.path.exists(config_path):
@@ -438,35 +433,36 @@ class Glm4Moe(DeepSeekV2):
         return config
 
     @staticmethod
-    def _from_config_json(config: GptInitModelParameters, config_json: Dict[str, Any]):
-        config.use_mla = False
+    def _from_config_json(config: "ModelConfig", config_json: Dict[str, Any]):
         config.inter_size = config_json["intermediate_size"]
-        config.head_num = config_json["num_attention_heads"]
-        config.head_num_kv = config_json.get("num_key_value_heads", config.head_num)
-        config.size_per_head = (
+        config.attn_config.head_num = config_json["num_attention_heads"]
+        config.attn_config.kv_head_num = config_json.get("num_key_value_heads", config.attn_config.head_num)
+        config.attn_config.size_per_head = (
             int(config_json.get("head_dim", 0))
             if "head_dim" in config_json
-            else config_json["hidden_size"] // config.head_num
+            else config_json["hidden_size"] // config.attn_config.head_num
         )
         if config_json.get("hidden_size") is not None:
             config.hidden_size = config_json["hidden_size"]
-        config.layer_num = config_json["num_hidden_layers"]
-        config.rotary_embedding_base = config_json.get(
-            "rope_theta", config.rotary_embedding_base
-        )
+        config.num_layers = config_json["num_hidden_layers"]
+        config.attn_config.rope_config.base = int(config_json.get(
+            "rope_theta", config.attn_config.rope_config.base
+        ))
         config.vocab_size = config_json["vocab_size"]
-        config.partial_rotary_factor = config_json.get("partial_rotary_factor", 1.0)
-        config.rotary_embedding_dim = int(
-            config.size_per_head * config.partial_rotary_factor
+        partial_rotary_factor = config_json.get("partial_rotary_factor", 1.0)
+        config.attn_config.rope_config.dim = int(
+            config.attn_config.size_per_head * partial_rotary_factor
         )
         config.layernorm_eps = config_json.get("rms_norm_eps", 1e-06)
         config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
 
         config.moe_k = config_json["num_experts_per_tok"]
         config.expert_num = config_json["n_routed_experts"]
-        config.moe_inter_padding_size = config_json["moe_intermediate_size"]
+        # Set inter_size and moe_inter_size for hybrid MoE
+        moe_intermediate_size = config_json["moe_intermediate_size"]
         n_shared_experts = config_json["n_shared_experts"]
-        config.inter_size = n_shared_experts * config.moe_inter_padding_size
+        config.moe_inter_size = moe_intermediate_size
+        config.inter_size = n_shared_experts * moe_intermediate_size
         config.has_moe_norm = config_json.get("norm_topk_prob", False)
         config.moe_style = 2  # shared + expert
         # config.use_qk_norm = config_json.get("use_qk_norm", False)
@@ -478,17 +474,8 @@ class Glm4Moe(DeepSeekV2):
 
         first_k_dense_replace = config_json["first_k_dense_replace"]
         config.moe_layer_index = [
-            i for i in range(config.layer_num) if i >= first_k_dense_replace
+            i for i in range(config.num_layers) if i >= first_k_dense_replace
         ]
-
-        ffn_inter_size = config_json.get("intermediate_size", config.inter_size)
-        layer_inter_size = []
-        for i in range(config.layer_num):
-            if i in config.moe_layer_index:
-                layer_inter_size.append(config.inter_size)
-            else:
-                layer_inter_size.append(ffn_inter_size)
-        config.layer_inter_size = layer_inter_size
 
     @staticmethod
     def get_weight_cls() -> type[Glm4MoeWeight]:

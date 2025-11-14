@@ -1,12 +1,11 @@
 import logging
 from typing import Any
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
     FMHADecodeImplBase,
     FMHAPrefillImplBase,
 )
-from rtp_llm.ops import FMHAType
+from rtp_llm.ops import AttentionConfigs, FMHAType
 from rtp_llm.ops.compute_ops import (
     FlashInferDecodeOp,
     FlashInferPrefillOp,
@@ -19,14 +18,16 @@ from rtp_llm.ops.compute_ops import (
 class FlashInferPrefillImpl(FMHAPrefillImplBase):
 
     def __init__(
-        self, config: GptInitModelParameters, attn_inputs: PyAttentionInputs
+        self, 
+        attn_configs: AttentionConfigs,
+        attn_inputs: PyAttentionInputs
     ) -> None:
         super().__init__(
-            FlashInferPrefillOp(config.gpt_init_params),
-            FusedRopeKVCachePrefillOp(config.gpt_init_params),
+            FlashInferPrefillOp(attn_configs),
+            FusedRopeKVCachePrefillOp(attn_configs),
             attn_inputs,
         )
-        self.support_ = self.support_ and (config.use_mla == False)
+        self.support_ = self.support_ and (not attn_configs.use_mla)
 
     @staticmethod
     def fmha_type() -> FMHAType:
@@ -39,14 +40,16 @@ class FlashInferPrefillImpl(FMHAPrefillImplBase):
 class FlashInferDecodeImpl(FMHADecodeImplBase):
 
     def __init__(
-        self, config: GptInitModelParameters, attn_inputs: PyAttentionInputs
+        self,
+        attn_configs: AttentionConfigs,
+        attn_inputs: PyAttentionInputs
     ) -> None:
         super().__init__(
-            FlashInferDecodeOp(config.gpt_init_params),
-            FusedRopeKVCacheDecodeOp(config.gpt_init_params),
+            FlashInferDecodeOp(attn_configs),
+            FusedRopeKVCacheDecodeOp(attn_configs),
             attn_inputs,
         )
-        self.support_ = self.support_ and (config.use_mla == False)
+        self.support_ = self.support_ and (not attn_configs.use_mla)
 
     @staticmethod
     def fmha_type() -> FMHAType:

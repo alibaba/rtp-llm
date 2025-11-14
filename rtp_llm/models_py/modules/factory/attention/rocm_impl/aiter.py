@@ -1,20 +1,20 @@
 import logging
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 import aiter
 import torch
-from aiter import dtypes
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
     FMHADecodeImplBase,
     FMHAImplBase,
     FMHAPrefillImplBase,
 )
-from rtp_llm.ops import FMHAType
+from rtp_llm.ops import AttentionConfigs, FMHAType, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
-    FusedRopeKVCacheDecodeOp,
-    FusedRopeKVCachePrefillOp,
+    FusedRopeKVCacheDecodeOpAsm,
+    FusedRopeKVCacheDecodeOpNonAsm,
+    FusedRopeKVCachePrefillOpAsm,
+    FusedRopeKVCachePrefillOpNonAsm,
     KVCache,
     ParamsBase,
     PyAttentionInputs,
@@ -29,8 +29,10 @@ class FMHAParams(ParamsBase):
         self,
         attn_inputs: PyAttentionInputs,
         is_prefill: bool = True,
+        enable_cuda_graph: bool = True,
     ):
         super().__init__()
+        self.enable_cuda_graph = enable_cuda_graph
 
         # Prefill mode
         if is_prefill:
@@ -82,12 +84,11 @@ class FMHAParams(ParamsBase):
             kv_cache_block_id_device = getattr(
                 attn_inputs, "kv_cache_block_id_device", None
             )
-            enable_cuda_graph = getattr(attn_inputs, "enable_cuda_graph", False)
 
             self.sequence_lengths = sequence_lengths
             self.kv_cache_block_id_device = kv_cache_block_id_device
 
-            if enable_cuda_graph:
+            if self.enable_cuda_graph:
                 self.max_seq_len = 8192
             else:
                 self.max_seq_len = input_lengths.max().item() + 1
@@ -117,11 +118,10 @@ class FMHAParams(ParamsBase):
 
 
 class AiterPrefillAttnOp:
-    def __init__(self, config: GptInitModelParameters):
-        self.head_num = config.head_num // config.tp_size
-        self.head_dim = config.size_per_head
-        self.head_num_kv = config.head_num_kv // config.tp_size
-        self.kv_cache_data_type = config.kv_cache_data_type
+    def __init__(self, attn_configs: AttentionConfigs):
+        self.head_num = attn_configs.head_num
+        self.head_dim = attn_configs.size_per_head
+        self.head_num_kv = attn_configs.kv_head_num
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
         return True
@@ -168,16 +168,13 @@ class AiterPrefillAttnOp:
         return final_result
 
 
-class AiterDecodeAttnOp:
-    def __init__(self, config: GptInitModelParameters):
-        self.head_num = config.head_num // config.tp_size
-        self.head_dim = config.size_per_head
-        self.head_num_kv = config.head_num_kv // config.tp_size
-        self.kv_cache_data_type = config.kv_cache_data_type
-        self.use_asm_pa = config.hw_kernel_config.use_asm_pa
-        self.enable_cuda_graph = (
-            config.gpt_init_params.hw_kernel_config.enable_cuda_graph
-        )
+class AiterDecodeAttnOpBase:
+    """Base class for Aiter decode attention operations."""
+    def __init__(self, attn_configs: AttentionConfigs):
+        self.head_num = attn_configs.head_num
+        self.head_dim = attn_configs.size_per_head
+        self.head_num_kv = attn_configs.kv_head_num
+        self.enable_cuda_graph = True
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
         return True
@@ -187,9 +184,13 @@ class AiterDecodeAttnOp:
         fmha_params = FMHAParams(
             attn_inputs=attn_inputs,
             is_prefill=False,
+            enable_cuda_graph=self.enable_cuda_graph,
         )
         return fmha_params
 
+
+class AiterDecodeAttnOpAsm(AiterDecodeAttnOpBase):
+    """Aiter decode attention operation using ASM paged attention."""
     def forward(
         self, query: torch.Tensor, kv_cache: Optional[KVCache], fmha_params
     ) -> torch.Tensor:
@@ -198,97 +199,124 @@ class AiterDecodeAttnOp:
         value_cache = kv_cache.k_cache_base.select(1, 1)
         block_tables_id_device = fmha_params.kv_cache_block_id_device
         max_num_blocks = block_tables_id_device.shape[1]
-        # for now not support fp8
-        if self.use_asm_pa:
-            output = aiter.pa_fwd_asm(
-                query,  # [num_seqs, num_heads, head_size]
-                key_cache,  # [num_blocks, num_kv_heads, block_size, head_size/x, x]
-                value_cache,  # [num_blocks, num_kv_heads, block_size, head_size/x, x]
-                block_tables_id_device,
-                seq_lens,
-                max_num_blocks,
-            )
-        else:
-            max_seq_len = fmha_params.max_seq_len
-            scale = 1.0 / (self.head_dim**0.5)
-            alibi_slopes = None
-            k_scale = (
-                kv_cache.k_scale_base
-                if kv_cache and kv_cache.k_scale_base is not None
-                else torch.tensor(1.0, device=query.device, dtype=query.dtype)
-            )
-            v_scale = (
-                kv_cache.v_scale_base
-                if kv_cache and kv_cache.v_scale_base is not None
-                else torch.tensor(1.0, device=query.device, dtype=query.dtype)
-            )
-            num_kv_heads = self.head_num_kv
-            num_seqs, num_heads, head_size = query.shape
-            block_size = value_cache.shape[2]
-            _PARTITION_SIZE_ROCM = 256
+        
+        output = aiter.pa_fwd_asm(
+            query,  # [num_seqs, num_heads, head_size]
+            key_cache,  # [num_blocks, num_kv_heads, block_size, head_size/x, x]
+            value_cache,  # [num_blocks, num_kv_heads, block_size, head_size/x, x]
+            block_tables_id_device,
+            seq_lens,
+            max_num_blocks,
+        )
+        output_reshaped = output.view(output.shape[0], -1)
+        return output_reshaped
 
-            # init output
-            output = torch.empty_like(query)
 
-            max_num_partitions = (
-                max_seq_len + _PARTITION_SIZE_ROCM - 1
-            ) // _PARTITION_SIZE_ROCM
-            assert _PARTITION_SIZE_ROCM % block_size == 0
-            # init tmp_output
-            tmp_output = torch.empty(
-                size=(num_seqs, num_heads, max_num_partitions, head_size),
-                dtype=output.dtype,
-                device=output.device,
-            )
+class AiterDecodeAttnOpNonAsm(AiterDecodeAttnOpBase):
+    """Aiter decode attention operation using non-ASM paged attention."""
+    def forward(
+        self, query: torch.Tensor, kv_cache: Optional[KVCache], fmha_params
+    ) -> torch.Tensor:
+        seq_lens = fmha_params.seq_lens
+        key_cache = kv_cache.k_cache_base.select(1, 0)
+        value_cache = kv_cache.k_cache_base.select(1, 1)
+        block_tables_id_device = fmha_params.kv_cache_block_id_device
+        
+        max_seq_len = fmha_params.max_seq_len
+        scale = 1.0 / (self.head_dim**0.5)
+        alibi_slopes = None
+        k_scale = (
+            kv_cache.k_scale_base
+            if kv_cache and kv_cache.k_scale_base is not None
+            else torch.tensor(1.0, device=query.device, dtype=query.dtype)
+        )
+        v_scale = (
+            kv_cache.v_scale_base
+            if kv_cache and kv_cache.v_scale_base is not None
+            else torch.tensor(1.0, device=query.device, dtype=query.dtype)
+        )
+        num_kv_heads = self.head_num_kv
+        num_seqs, num_heads, head_size = query.shape
+        block_size = value_cache.shape[2]
+        _PARTITION_SIZE_ROCM = 256
 
-            # init exp_sums
-            exp_sums = torch.empty(
-                size=(num_seqs, num_heads, max_num_partitions),
-                dtype=torch.float32,
-                device=output.device,
-            )
-            fp8_out_scale = None
-            cpa_fp8_out = False
-            # init max_logits
-            max_logits = torch.ones_like(exp_sums)
+        # init output
+        output = torch.empty_like(query)
 
-            kv_cache_dtype = "auto"
-            # key_cache_reshaped = key_cache.permute(0, 1, 3, 2)
-            # value_cache_reshaped = value_cache.permute(0, 1, 3, 2)
+        max_num_partitions = (
+            max_seq_len + _PARTITION_SIZE_ROCM - 1
+        ) // _PARTITION_SIZE_ROCM
+        assert _PARTITION_SIZE_ROCM % block_size == 0
+        # init tmp_output
+        tmp_output = torch.empty(
+            size=(num_seqs, num_heads, max_num_partitions, head_size),
+            dtype=output.dtype,
+            device=output.device,
+        )
 
-            aiter.paged_attention_rocm(
-                output,
-                exp_sums,
-                max_logits,
-                tmp_output,
-                query,
-                key_cache,
-                value_cache,
-                num_kv_heads,
-                float(scale),
-                block_tables_id_device,
-                seq_lens,
-                block_size,
-                max_seq_len,
-                alibi_slopes,
-                kv_cache_dtype,  # kv_cache_dtype
-                k_scale,
-                v_scale,
-                fp8_out_scale if cpa_fp8_out else None,
-                _PARTITION_SIZE_ROCM,
-            )
+        # init exp_sums
+        exp_sums = torch.empty(
+            size=(num_seqs, num_heads, max_num_partitions),
+            dtype=torch.float32,
+            device=output.device,
+        )
+        fp8_out_scale = None
+        cpa_fp8_out = False
+        # init max_logits
+        max_logits = torch.ones_like(exp_sums)
+
+        kv_cache_dtype = "auto"
+
+        aiter.paged_attention_rocm(
+            output,
+            exp_sums,
+            max_logits,
+            tmp_output,
+            query,
+            key_cache,
+            value_cache,
+            num_kv_heads,
+            float(scale),
+            block_tables_id_device,
+            seq_lens,
+            block_size,
+            max_seq_len,
+            alibi_slopes,
+            kv_cache_dtype,  # kv_cache_dtype
+            k_scale,
+            v_scale,
+            fp8_out_scale if cpa_fp8_out else None,
+            _PARTITION_SIZE_ROCM,
+        )
 
         output_reshaped = output.view(output.shape[0], -1)
         return output_reshaped
 
 
-class AiterPrefillImpl(FMHAPrefillImplBase):
+class AiterPrefillImplAsm(FMHAPrefillImplBase):
+    """Aiter prefill attention implementation using ASM."""
     def __init__(
-        self, config: GptInitModelParameters, attn_inputs: PyAttentionInputs
+        self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> None:
         super().__init__(
-            AiterPrefillAttnOp(config),
-            FusedRopeKVCachePrefillOp(config.gpt_init_params),
+            AiterPrefillAttnOp(attn_configs),
+            FusedRopeKVCachePrefillOpAsm(attn_configs),
+            attn_inputs,
+        )
+
+    @staticmethod
+    def fmha_type() -> FMHAType:
+        return FMHAType.AITER_ASM_PREFILL
+
+
+class AiterPrefillImplNonAsm(FMHAPrefillImplBase):
+    """Aiter prefill attention implementation using non-ASM."""
+    def __init__(
+        self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+    ) -> None:
+        super().__init__(
+            AiterPrefillAttnOp(attn_configs),
+            FusedRopeKVCachePrefillOpNonAsm(attn_configs),
             attn_inputs,
         )
 
@@ -297,12 +325,31 @@ class AiterPrefillImpl(FMHAPrefillImplBase):
         return FMHAType.AITER_PREFILL
 
 
-class AiterDecodeImpl(FMHADecodeImplBase):
+class AiterDecodeImplAsm(FMHADecodeImplBase):
     def __init__(
-        self, config: GptInitModelParameters, attn_inputs: PyAttentionInputs
+        self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> None:
         super().__init__(
-            AiterDecodeAttnOp(config),
-            FusedRopeKVCacheDecodeOp(config.gpt_init_params),
+            AiterDecodeAttnOpAsm(attn_configs),
+            FusedRopeKVCacheDecodeOpAsm(attn_configs),
             attn_inputs,
         )
+
+    @staticmethod
+    def fmha_type() -> FMHAType:
+        return FMHAType.AITER_ASM_DECODE
+
+
+class AiterDecodeImplNonAsm(FMHADecodeImplBase):
+    def __init__(
+        self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+    ) -> None:
+        super().__init__(
+            AiterDecodeAttnOpNonAsm(attn_configs),
+            FusedRopeKVCacheDecodeOpNonAsm(attn_configs),
+            attn_inputs,
+        )
+
+    @staticmethod
+    def fmha_type() -> FMHAType:
+        return FMHAType.AITER_DECODE

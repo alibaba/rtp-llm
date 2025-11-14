@@ -6,10 +6,13 @@ from typing import Any, Dict, Optional
 
 import torch
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
     is_deep_gemm_e8m0_used,
     m_grouped_fp8_gemm_nt_contiguous,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     ExpertForwardPayload,
@@ -28,6 +31,7 @@ from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
 from rtp_llm.models_py.utils.math import ceil_div
 from rtp_llm.ops.compute_ops import trt_fp8_quantize_128
 from rtp_llm.utils.model_weight import W
+from rtp_llm.ops import ActivationType
 
 BLOCK_SIZE = 128
 EXPERT_ALIGNMENT = 128
@@ -47,7 +51,7 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
         return ExecutorType.DEEPGEMM_CONTINUOUS
 
     @classmethod
-    def check_conditions(cls, checker: Any, config: GptInitModelParameters) -> None:
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         """Check if DeepGemmContinousExecutor can handle the configuration"""
         from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import has_deep_gemm
         from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
@@ -61,7 +65,7 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
 
     def __init__(
         self,
-        config: GptInitModelParameters,
+        config: MoEConfigAdapter,
         weights: Dict[str, torch.Tensor],
     ):
         super().__init__(FusedMoEQuantConfig())
@@ -74,8 +78,7 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
         self.start_expert_id = self.ep_rank * self.num_experts_per_partition
         self.end_expert_id = self.start_expert_id + self.num_experts_per_partition - 1
         self.top_k = config.moe_k
-        self.intermediate_size = config.moe_inter_padding_size
-        self.activation = config.activation_type.lower()
+        self.activation = config.activation_type
         self.renormalize = True
         self.use_fp8_w8a8 = True
         self.use_block_quant = True
@@ -102,7 +105,7 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
     def execute(
         self,
         payload: ExpertForwardPayload,
-        activation: str,
+        activation: ActivationType,
         expert_map: Optional[torch.Tensor],
         a2_scale: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,

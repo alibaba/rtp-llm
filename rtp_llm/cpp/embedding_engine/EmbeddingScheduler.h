@@ -2,12 +2,15 @@
 
 #include <queue>
 #include "rtp_llm/cpp/embedding_engine/EmbeddingStream.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 
 namespace rtp_llm {
 
 class EmbeddingScheduler {
 public:
-    explicit EmbeddingScheduler(const rtp_llm::GptInitParameter&   config,
+    explicit EmbeddingScheduler(const ModelConfig& model_config,
+                                const ConcurrencyConfig& concurrency_config,
+                                const RuntimeConfig& runtime_config,
                                 const kmonitor::MetricsReporterPtr metrics_reporter = nullptr);
 
     ~EmbeddingScheduler();
@@ -25,7 +28,9 @@ public:
 private:
     void reportMetrics(size_t new_stream_size);
 
-    const rtp_llm::GptInitParameter config_;
+    const ModelConfig model_config_;
+    const ConcurrencyConfig concurrency_config_;
+    const RuntimeConfig runtime_config_;
     std::list<EmbeddingStreamPtr>   waiting_streams_;
     std::atomic<bool>               stop_ = false;
     std::mutex                      lock_;

@@ -1,9 +1,8 @@
 import copy
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Dict, List
+from typing import Any, Dict, List, Optional
 
-from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
@@ -180,9 +179,20 @@ conv_templates = {
 }
 
 
+from rtp_llm.config.py_config_modules import GenerateEnvConfig, RenderConfig
+
 class LlavaRenderer(CustomChatRenderer):
-    def __init__(self, tokenizer: BaseTokenizer, renderer_params: RendererParams):
-        super().__init__(tokenizer, renderer_params)
+    def __init__(
+        self, 
+        tokenizer: BaseTokenizer, 
+        renderer_params: RendererParams,
+        generate_env_config: GenerateEnvConfig,
+        render_config: Optional[RenderConfig] = None,
+        ckpt_path: Optional[str] = None,
+        misc_config: Optional[Any] = None,
+        vit_config: Optional[Any] = None,
+    ):
+        super().__init__(tokenizer, renderer_params, generate_env_config, render_config, ckpt_path, misc_config, vit_config)
 
     def _get_conv_template(self, model_name: str) -> Conversation:
         if "v1" in model_name.lower():
@@ -196,10 +206,11 @@ class LlavaRenderer(CustomChatRenderer):
         return conv_templates[conv_mode]
 
     def _render_messages(self, messages: List[ChatMessage]) -> PromptWithMMInput:
-        ckpt_path: str = StaticConfig.model_config.checkpoint_path
+        # Use checkpoint path from model_config
+        ckpt_path: str = self.model_config.checkpoint_path
         model_name: str = ckpt_path.split("?")[0]  # oss style path
         model_name = model_name.strip("/").split("/")[-1]
-        llava_template_env: str = self.py_env_configs.render_config.llava_chat_template
+        llava_template_env: str = self.render_config.llava_chat_template
         conv_template = (
             self._get_conv_template(model_name)
             if llava_template_env == ""

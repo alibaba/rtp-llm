@@ -58,7 +58,6 @@ Additionally, if starting as a service:
 export MODEL_TYPE=qwen_vl
 export TOKENIZER_PATH=/path/to/tokenizer
 export CHECKPOINT_PATH=/path/to/model
-export FT_SERVER_TEST=1
 
 python3 -m rtp_llm.start_server
 

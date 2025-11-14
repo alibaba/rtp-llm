@@ -8,6 +8,11 @@ import torch
 from rtp_llm.utils.util import check_with_info
 
 
+def get_pad_size(size: int, align_size: int) -> int:
+    """Calculate padding size to align to align_size."""
+    return (align_size - (size % align_size)) % align_size
+
+
 def w_half1_t(ts: List[torch.Tensor], inter_size: int):
     return ts[0][:inter_size, ...].T.contiguous()
 
@@ -28,7 +33,12 @@ def concat_0(ts: List[torch.Tensor]) -> torch.Tensor:
     if len(ts) == 1:
         return ts[0]
     # torch.concat() dose not support fp8 in current rocm torch version
-    if ts[0].dtype in [torch.float8_e4m3fn, torch.float8_e4m3fnuz, torch.float8_e5m2, torch.float8_e5m2fnuz]:
+    if ts[0].dtype in [
+        torch.float8_e4m3fn,
+        torch.float8_e4m3fnuz,
+        torch.float8_e5m2,
+        torch.float8_e5m2fnuz,
+    ]:
         dtype = ts[0].dtype
         out_u8 = torch.concat([x.view(torch.uint8) for x in ts], dim=0).contiguous()
         return out_u8.view(dtype)
@@ -42,28 +52,64 @@ def concat_1(ts: List[torch.Tensor]) -> torch.Tensor:
     return torch.concat(ts, dim=1).contiguous()
 
 
-def pad(ts: List[torch.Tensor], inter_padding_size: int, dim: int):
-    logging.debug("inter_padding_size: %s, dim: %s", inter_padding_size, dim)
+def pad(ts: List[torch.Tensor], align_size: int, dim: int):
+    """Pad tensor to align_size along the specified dimension.
+    
+    Args:
+        ts: List containing the tensor to pad
+        align_size: Alignment size for padding (0 means no padding needed)
+        dim: Dimension to pad (0 or 1)
+    """
+    if align_size == 0:
+        return ts[0].contiguous()
+    
+    # Calculate padding size based on tensor shape and align_size
+    size_to_align = ts[0].shape[dim]
+    pad_size = get_pad_size(size_to_align, align_size)
+    
+    logging.debug("align_size: %s, size_to_align: %s, pad_size: %s, dim: %s", 
+                  align_size, size_to_align, pad_size, dim)
+    
+    if pad_size == 0:
+        return ts[0].contiguous()
+    
     if dim == 0:
-        pad_shape = [inter_padding_size - ts[0].shape[0], ts[0].shape[1]]
+        pad_shape = [pad_size, ts[0].shape[1]]
     elif dim == 1:
-        pad_shape = [ts[0].shape[0], inter_padding_size - ts[0].shape[1]]
+        pad_shape = [ts[0].shape[0], pad_size]
     else:
         raise Exception("unknown padding dim: " + str(dim))
-    if pad_shape[0] == 0 or pad_shape[1] == 0:
-        return ts[0].contiguous()
+    
     z = torch.zeros(pad_shape, device=ts[0].device).to(ts[0].dtype)
     return torch.cat((ts[0], z), dim).to(ts[0].device).contiguous()
 
 
-def transpose_pad(ts: List[torch.Tensor], inter_padding_size: int, dim: int):
+def transpose_pad(ts: List[torch.Tensor], align_size: int, dim: int):
+    """Pad tensor to align_size along the specified dimension, then transpose.
+    
+    Args:
+        ts: List containing the tensor to pad
+        align_size: Alignment size for padding (0 means no padding needed)
+        dim: Dimension to pad (0 or 1)
+    """
+    if align_size == 0:
+        return ts[0].T.contiguous()
+    
+    # Calculate padding size based on tensor shape and align_size
+    size_to_align = ts[0].shape[dim]
+    pad_size = get_pad_size(size_to_align, align_size)
+    
+    if pad_size == 0:
+        return ts[0].T.contiguous()
+    
     if dim == 0:
-        pad_shape = [inter_padding_size - ts[0].shape[0], ts[0].shape[1]]
+        pad_shape = [pad_size, ts[0].shape[1]]
     elif dim == 1:
-        pad_shape = [ts[0].shape[0], inter_padding_size - ts[0].shape[1]]
+        pad_shape = [ts[0].shape[0], pad_size]
     else:
         raise Exception("unknown padding dim: " + str(dim))
-    z = torch.zeros(pad_shape, device=ts[0].device).half()
+
+    z = torch.zeros(pad_shape, device=ts[0].device).to(ts[0].dtype)
     return torch.cat((ts[0], z), dim).T.to(ts[0].device).contiguous()
 
 
@@ -276,43 +322,86 @@ def stack_(ts: List[torch.Tensor]):
     return stack_0(ts)
 
 
-def stack_pad(ts: List[torch.Tensor], moe_inter_padding_size: int, dim: int):
+def stack_pad(ts: List[torch.Tensor], moe_align_size: int, dim: int):
+    """Stack tensors and pad to moe_align_size along the specified dimension.
+    
+    Args:
+        ts: List of tensors to stack
+        moe_align_size: Alignment size for MoE padding
+        dim: Dimension to pad (1 or 2 after stacking)
+    """
     t = torch.stack(ts, dim=0)
+    
+    # Calculate padding size based on stacked tensor shape and moe_align_size
     if dim == 1:
-        pad_shape = [t.shape[0], moe_inter_padding_size - t.shape[1], t.shape[2]]
+        size_to_align = t.shape[1]
     elif dim == 2:
-        pad_shape = [t.shape[0], t.shape[1], moe_inter_padding_size - t.shape[2]]
+        size_to_align = t.shape[2]
     else:
         raise Exception("moe unknown padding dim: " + str(dim))
+    
+    pad_size = get_pad_size(size_to_align, moe_align_size)
+    
+    if pad_size == 0:
+        return t
+    
+    if dim == 1:
+        pad_shape = [t.shape[0], pad_size, t.shape[2]]
+    elif dim == 2:
+        pad_shape = [t.shape[0], t.shape[1], pad_size]
+    
     z = torch.zeros(pad_shape, device=t.device).half()
     return torch.concat([t, z], dim)
 
 
-def stack_moe_w1_pad(ts: List[torch.Tensor], moe_inter_padding_size: int, dim: int):
+def stack_moe_w1_pad(ts: List[torch.Tensor], moe_align_size: int, dim: int):
+    """Stack MoE w1/w3 (gate/up) tensors and pad to moe_align_size.
+    
+    Args:
+        ts: List of tensors (first half are gate weights, second half are up weights)
+        moe_align_size: Alignment size for MoE padding
+        dim: Dimension to pad (1 after stacking)
+    """
     gate_ = ts[: len(ts) // 2]
     up_ = ts[len(ts) // 2 :]
     w1 = torch.stack(gate_, dim=0)
     w3 = torch.stack(up_, dim=0)
-    if dim == 1:
-        pad_shape = [w1.shape[0], moe_inter_padding_size - w1.shape[1], w1.shape[2]]
+    
+    if dim != 1:
+        raise Exception("moe unknown padding dim: " + str(dim))
+    
+    # Calculate padding size based on stacked tensor shape and moe_align_size
+    size_to_align = w1.shape[1]
+    pad_size = get_pad_size(size_to_align, moe_align_size)
+    
+    if pad_size > 0:
+        pad_shape = [w1.shape[0], pad_size, w1.shape[2]]
         z = torch.zeros(pad_shape, device=w1.device).half()
         w1 = torch.cat((w1, z), dim=1)
         w3 = torch.cat((w3, z), dim=1)
-        x = torch.concat([w1, w3], dim=1)
-        return x
-    else:
-        raise Exception("moe unknown padding dim: " + str(dim))
     
+    x = torch.concat([w1, w3], dim=1)
+    return x
+
+
 def stack_0(ts: List[torch.Tensor]) -> torch.Tensor:
     if len(ts) == 1:
         return ts[0].unsqueeze(0)
     # torch.stack() does not support fp8 in current rocm torch version
-    if ts[0].dtype in [torch.float8_e4m3fn, torch.float8_e4m3fnuz, torch.float8_e5m2, torch.float8_e5m2fnuz]:
+    if ts[0].dtype in [
+        torch.float8_e4m3fn,
+        torch.float8_e4m3fnuz,
+        torch.float8_e5m2,
+        torch.float8_e5m2fnuz,
+    ]:
         dtype = ts[0].dtype
-        out_u8 = torch.concat([x.view(torch.uint8).unsqueeze(0) for x in ts], dim=0).contiguous()
+        out_u8 = torch.concat(
+            [x.view(torch.uint8).unsqueeze(0) for x in ts], dim=0
+        ).contiguous()
         return out_u8.view(dtype)
     else:
         return torch.stack(ts, dim=0).contiguous()
+
 
 def stack_moe_w1(ts: List[torch.Tensor]):
     gate = ts[: len(ts) // 2]
@@ -822,12 +911,26 @@ def transpose_q_rope(
 
 
 # for w1 w3
-def pad_w13(ts: List[torch.Tensor], inter_padding_size: int, dim: int):
-    w1 = pad([ts[0]], inter_padding_size, dim)
-    w3 = pad([ts[1]], inter_padding_size, dim)
-    if w1.dtype in [torch.float8_e4m3fn, torch.float8_e4m3fnuz, torch.float8_e5m2, torch.float8_e5m2fnuz]:
+def pad_w13(ts: List[torch.Tensor], align_size: int, dim: int):
+    """Pad w1 and w3 tensors to align_size and concatenate them.
+    
+    Args:
+        ts: List containing w1 and w3 tensors
+        align_size: Alignment size for padding
+        dim: Dimension to pad and concatenate
+    """
+    w1 = pad([ts[0]], align_size, dim)
+    w3 = pad([ts[1]], align_size, dim)
+    if w1.dtype in [
+        torch.float8_e4m3fn,
+        torch.float8_e4m3fnuz,
+        torch.float8_e5m2,
+        torch.float8_e5m2fnuz,
+    ]:
         dtype = w1.dtype
-        out_u8 = torch.concat([w1.view(torch.uint8), w3.view(torch.uint8)], dim=dim).contiguous()
+        out_u8 = torch.concat(
+            [w1.view(torch.uint8), w3.view(torch.uint8)], dim=dim
+        ).contiguous()
         return out_u8.view(dtype)
     else:
         return torch.concat([w1, w3], dim=dim).contiguous()
@@ -851,7 +954,12 @@ def concat_w13(ts: List[torch.Tensor]):
 
 def concat_w13_2(ts: List[torch.Tensor]):
     # torch.concat() dose not support fp8 in current rocm torch version
-    if ts[0].dtype in [torch.float8_e4m3fn, torch.float8_e4m3fnuz, torch.float8_e5m2, torch.float8_e5m2fnuz]:
+    if ts[0].dtype in [
+        torch.float8_e4m3fn,
+        torch.float8_e4m3fnuz,
+        torch.float8_e5m2,
+        torch.float8_e5m2fnuz,
+    ]:
         dtype = ts[0].dtype
         out_u8 = torch.concat([x.view(torch.uint8) for x in ts], dim=0).contiguous()
         return out_u8.view(dtype)

@@ -57,11 +57,13 @@ EmbeddingExecutor::EmbeddingExecutor(const EngineInitParams& params, rtp_llm::De
     handler_(handler),
     handler_args_(),
     metrics_reporter_(params.metrics_reporter),
-    params_(params.gpt_init_parameter) {
+    model_config_(params.model_config_),
+    parallelism_config(params.parallelism_config),
+    eplb_config(params.eplb_config) {
     GptModelInitParams model_init_params({
         device_,
         params.gpt_weights,
-        Executor::genModelDescription(params_),
+        Executor::genModelDescription(model_config_, parallelism_config, eplb_config, params.moe_config),
         nullopt,  // no kv cache buffer for embedding executor
     });
 
@@ -73,7 +75,7 @@ EmbeddingExecutor::EmbeddingExecutor(const EngineInitParams& params, rtp_llm::De
         model_.reset(new GptModel(model_init_params));
     }
 
-    init_position_ids(params_.max_seq_len_);
+    init_position_ids(model_config_.max_seq_len);
     std::vector<std::string> handler_args;
     {
         py::gil_scoped_acquire acquire;
@@ -122,8 +124,8 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
     int  token_idx             = 0;
     int  batch_idx             = 0;
     int  position_bias         = 0;
-    if (params_.position_ids_style_ == 1) {
-        position_bias = params_.special_tokens_.pad_token_id_ + 1;
+    if (model_config_.position_ids_style == 1) {
+        position_bias = model_config_.special_tokens.pad_token_id + 1;
     }
 
     std::vector<rtp_llm::BufferPtr> gathered_mm_features;
@@ -165,7 +167,8 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
         for (int i = 0; i < batchSize; i++) {
             int seqLen = stream->embeddingInput()->input_lengths->data<int32_t>()[i];
             RTP_LLM_CHECK_WITH_INFO(seqLen + position_bias <= int(max_position_ids_buf_->shape()[0]),
-                                    "position index exceed max_position_length");
+                                    "seqlen(%d) + position_bias(%d) exceed max_position_length(%d)",
+                                    int(seqLen), int(position_bias), int(max_position_ids_buf_->shape()[0]));
             memcpy(merged_positon_ids + token_idx + length_idx,
                    max_position_ids_buf_->data<int32_t>() + position_bias,
                    seqLen * sizeof(int32_t));

@@ -8,6 +8,7 @@ from rtp_llm.lora.lora_exception import LoraCountException, LoraException
 from rtp_llm.model_loader.loader import ModelLoader
 from rtp_llm.utils.database import CkptDatabase
 from rtp_llm.utils.time_util import Timer
+from rtp_llm.distribute.worker_info import g_parallel_info
 
 
 class LoraManager:
@@ -19,13 +20,11 @@ class LoraManager:
     database_: CkptDatabase
     weights_loader_: ModelLoader
 
-    def __init__(self, engine: BaseEngine) -> None:
+    def __init__(self, engine: BaseEngine, max_lora_model_size: int = -1) -> None:
         self.engine_ = engine
         self.lora_infos_ = {}
-        self.max_lora_model_size_ = (
-            engine.config.py_env_configs.model_specific_config.max_lora_model_size
-        )
-        self.device: str = self.engine_.model.device
+        self.max_lora_model_size_ = max_lora_model_size
+        self.device: str = f"cuda:{g_parallel_info.local_rank}"
         assert isinstance(self.engine_, RPCEngine)
         self.lora_cpp_wrapper_ = self.engine_.rtp_llm_op_.ft_op
         assert isinstance(self.engine_.model.database, CkptDatabase)
@@ -33,7 +32,7 @@ class LoraManager:
         assert isinstance(self.engine_.model.model_weights_loader, ModelLoader)
         self.weights_loader_ = self.engine_.model.model_weights_loader
         with Timer() as timer:
-            model_lora_infos = self.engine_.model.config.lora_infos
+            model_lora_infos = self.engine_.model.model_config.lora_infos
             if model_lora_infos is not None and len(model_lora_infos) > 1:
                 logging.info(f"model_lora_infos is {model_lora_infos}")
                 for key, value in model_lora_infos.items():

@@ -5,16 +5,19 @@ import os
 import socket
 from typing import Any, Dict, List, NamedTuple, Optional
 
-from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.distribute.worker_info import WorkerInfo, g_parallel_info, g_worker_info
 
 CONFIG_FILE_ENV = "DISTRIBUTE_CONFIG_FILE"
 JSON_GANG_PARTS_ENV = "JSON_GANG_PARTS"
-from rtp_llm.config.py_config_modules import StaticConfig
-from rtp_llm.distribute.worker_info import WorkerInfo, g_parallel_info, g_worker_info
 
 
-def members_from_json(gang_info_json: Dict[str, Any]) -> List[WorkerInfo]:
+def members_from_json(gang_info_json: Dict[str, Any], zone_name: Optional[str] = None) -> List[WorkerInfo]:
+    """Create members list from JSON gang info.
+    
+    Args:
+        gang_info_json: Dictionary containing gang member information.
+        zone_name: Zone name to filter members. If None, no filtering is applied.
+    """
     members: List[WorkerInfo] = []
     # here is only the fake ip
     for name, info in gang_info_json.items():
@@ -39,7 +42,6 @@ def members_from_json(gang_info_json: Dict[str, Any]) -> List[WorkerInfo]:
                 info=info,
             )
         )
-    zone_name = StaticConfig.gang_config.zone_name
     if zone_name:
         members = [
             member for member in members if member.name.split("_")[-2] == zone_name
@@ -100,12 +102,17 @@ app.c2.io/biz-detail-ganginfo="{\"llama13B_2A10_PCIE_1_inference_part0\":{\"name
 """
 
 
-def get_c2_members():
-    file_name = StaticConfig.gang_config.gang_annocation_path
-    if not os.path.exists(file_name):
-        raise Exception(f"not found file: {file_name}")
+def get_c2_members(gang_annocation_path: str, zone_name: Optional[str] = None) -> List[WorkerInfo]:
+    """Get members from C2 annotation file.
+    
+    Args:
+        gang_annocation_path: Path to gang annotation file.
+        zone_name: Zone name to filter members. If None, no filtering is applied.
+    """
+    if not os.path.exists(gang_annocation_path):
+        raise Exception(f"not found file: {gang_annocation_path}")
 
-    with open(file_name, "r") as reader:
+    with open(gang_annocation_path, "r") as reader:
         content = reader.read()
 
     infos = [x for x in content.split("\n") if "app.c2.io/biz-detail-ganginfo" in x]
@@ -116,7 +123,7 @@ def get_c2_members():
     logging.info(f"gang info: {gang_info[gang_info.index('=') + 2: -1]}")
     gang_info_json = json.loads(gang_info[gang_info.index("=") + 2 : -1])
     logging.info(f"gang info json: {gang_info_json}")
-    return members_from_json(gang_info_json)
+    return members_from_json(gang_info_json, zone_name)
 
 
 def get_leader_ip(leader_address: str) -> str:
@@ -127,10 +134,15 @@ def get_leader_ip(leader_address: str) -> str:
         return socket.gethostbyname(leader_address)
 
 
-def get_leader_members(env_str: str) -> List[WorkerInfo]:
+def get_leader_members(env_str: str, zone_name: Optional[str] = None) -> List[WorkerInfo]:
+    """Get leader members from leader address.
+    
+    Args:
+        env_str: Leader address string.
+        zone_name: Zone name. If None, uses default naming.
+    """
     ip_str = get_leader_ip(env_str)
     members: List[WorkerInfo] = []
-    zone_name = StaticConfig.gang_config.zone_name
     member_info = {}
     member_info["name"] = "part0"
     if zone_name:
@@ -189,15 +201,26 @@ def get_leader_members(env_str: str) -> List[WorkerInfo]:
     return members
 
 
-def get_members_from_file():
-    file = StaticConfig.gang_config.distribute_config_file
-    with open(file, "r") as reader:
+def get_members_from_file(distribute_config_file: str, zone_name: Optional[str] = None) -> List[WorkerInfo]:
+    """Get members from config file.
+    
+    Args:
+        distribute_config_file: Path to distribute config file.
+        zone_name: Zone name to filter members. If None, no filtering is applied.
+    """
+    with open(distribute_config_file, "r") as reader:
         config_json = json.loads(reader.read())
-    return members_from_json(config_json)
+    return members_from_json(config_json, zone_name)
 
 
-def get_members_from_json_env(env_str: str) -> List[WorkerInfo]:
-    return members_from_json(json.loads(env_str))
+def get_members_from_json_env(env_str: str, zone_name: Optional[str] = None) -> List[WorkerInfo]:
+    """Get members from JSON environment string.
+    
+    Args:
+        env_str: JSON string containing gang member information.
+        zone_name: Zone name to filter members. If None, no filtering is applied.
+    """
+    return members_from_json(json.loads(env_str), zone_name)
 
 
 class GangInfo(NamedTuple):
@@ -211,40 +234,58 @@ class GangInfo(NamedTuple):
         return [member for member in self.members if not member.equals(self.master)]
 
 
-def get_gang_info() -> GangInfo:
+def get_gang_info(
+    start_port: int,
+    gang_config,
+) -> GangInfo:
+    """Get gang information from configuration.
+    
+    Args:
+        start_port: Starting port for RPC server.
+        gang_config: GangConfig object containing configuration.
+    """
+    # Get configuration values from gang_config
+    distribute_config_file = gang_config.distribute_config_file
+    gang_config_string = gang_config.gang_config_string
+    json_gang_parts = gang_config.json_gang_parts
+    leader_address = gang_config.leader_address
+    gang_annocation_path = gang_config.gang_annocation_path
+    zone_name = gang_config.zone_name
+    
     only_leader = False
+    
     if g_parallel_info.local_world_size < g_parallel_info.world_size:
         # from config file
-        if StaticConfig.gang_config.distribute_config_file:
-            members = get_members_from_file()
+        if distribute_config_file:
+            members = get_members_from_file(distribute_config_file, zone_name)
         # for distributed test
-        elif StaticConfig.gang_config.gang_config_string:
+        elif gang_config_string:
             logging.info(
-                f"use GANG_CONFIG_STRING: {StaticConfig.gang_config.gang_config_string}"
+                f"use GANG_CONFIG_STRING: {gang_config_string}"
             )
-            members = members_from_test_env(StaticConfig.gang_config.gang_config_string)
+            members = members_from_test_env(gang_config_string)
         # from env json
-        elif StaticConfig.gang_config.json_gang_parts:
+        elif json_gang_parts:
             logging.info(
-                f"use JSON_GANG_PARTS_ENV: {StaticConfig.gang_config.json_gang_parts}"
+                f"use JSON_GANG_PARTS_ENV: {json_gang_parts}"
             )
-            members = get_members_from_json_env(
-                StaticConfig.gang_config.json_gang_parts
-            )
+            members = get_members_from_json_env(json_gang_parts, zone_name)
         # for lws
-        elif StaticConfig.gang_config.leader_address:
+        elif leader_address:
             logging.info(
-                f"use LEADER_ADDRESS: {StaticConfig.gang_config.leader_address}"
+                f"use LEADER_ADDRESS: {leader_address}"
             )
-            members = get_leader_members(StaticConfig.gang_config.leader_address)
+            members = get_leader_members(leader_address, zone_name)
         # from c2 annotation
         else:
-            members = get_c2_members()
+            if gang_annocation_path is None:
+                raise ValueError("gang_annocation_path must be provided when other config options are not set")
+            members = get_c2_members(gang_annocation_path, zone_name)
     else:
         members = [
             WorkerInfo(
                 socket.gethostbyname(socket.gethostname()),
-                -1,
+                start_port,
                 -1,
                 -1,
                 -1,
@@ -261,7 +302,7 @@ def get_gang_info() -> GangInfo:
                 None,
             )
         ]
-    if StaticConfig.gang_config.leader_address:
+    if leader_address:
         only_leader = True
 
     # 假设 GPU 均匀分布，可以整除

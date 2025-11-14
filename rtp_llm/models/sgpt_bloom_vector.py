@@ -4,7 +4,7 @@ import numpy as np
 import torch
 
 from rtp_llm.model_factory_register import register_model
-from rtp_llm.models.base_model import GenerateOutput
+from rtp_llm.utils.base_model_datatypes import GenerateOutput
 from rtp_llm.models.sgpt_bloom import SGPTBloom
 
 

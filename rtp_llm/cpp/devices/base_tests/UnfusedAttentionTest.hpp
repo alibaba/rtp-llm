@@ -214,8 +214,12 @@ void UnfusedAttentionTest::addFusedQKVBiasTransposeTest(size_t batch_size,
     auto attention_weight       = AttentionLayerWeights();
     attention_weight.qkv_weight = std::make_shared<const DenseWeights>(DenseWeights(buffer_nullptr, qkv_bias_device));
 
-    auto attention_config = AttentionConfigs(
-        {num_heads, num_key_value_heads, head_dim, num_heads * head_dim, rope_config, tokens_per_block});
+    AttentionConfigs attention_config;
+    attention_config.head_num = num_heads;
+    attention_config.kv_head_num = num_key_value_heads;
+    attention_config.size_per_head = head_dim;
+    attention_config.rope_config = rope_config;
+    attention_config.tokens_per_block = tokens_per_block;
 
     auto qkv_output = device->allocateBuffer({qkv_states_device->type(), {token_num, num_heads, head_dim}});
 
@@ -533,8 +537,12 @@ void UnfusedAttentionTest::decodeAddFusedQKVBiasTransposeTest(size_t batch_size,
     auto attention_weight       = AttentionLayerWeights();
     attention_weight.qkv_weight = std::make_shared<const DenseWeights>(DenseWeights(buffer_nullptr, qkv_bias_device));
 
-    auto attention_config = AttentionConfigs(
-        {num_heads, num_key_value_heads, head_dim, num_heads * head_dim, rope_config, tokens_per_block});
+    AttentionConfigs attention_config;
+    attention_config.head_num = num_heads;
+    attention_config.kv_head_num = num_key_value_heads;
+    attention_config.size_per_head = head_dim;
+    attention_config.rope_config = rope_config;
+    attention_config.tokens_per_block = tokens_per_block;
 
     auto qkv_output = device->allocateBuffer({qkv_states_device->type(), {token_num, num_heads, head_dim}});
 

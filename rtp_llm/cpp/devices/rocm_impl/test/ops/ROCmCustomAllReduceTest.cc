@@ -52,7 +52,6 @@ public:
             } else if (world_size == 8) {
                 custom_env_vars.push_back("CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7");
             }
-            custom_env_vars.push_back("FT_SERVER_TEST=1");
             std::vector<char*> envp;
             for (const std::string& env_var : custom_env_vars) {
                 envp.push_back(const_cast<char*>(env_var.c_str()));

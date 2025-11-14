@@ -2,7 +2,6 @@ from typing import Any, Optional
 
 import torch
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.distribute.collective import Group, all_reduce
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     ExpertForwardPayload,
@@ -16,6 +15,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.type import RouterType
 from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
     recompute_topk_ids_sum_expert_count,
 )
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
 from rtp_llm.ops.compute_ops import trt_fp8_quantize_128
 
 
@@ -25,7 +25,7 @@ class PureTpRouter(FusedMoeDataRouter):
         return RouterType.PURE_TP
 
     @classmethod
-    def check_conditions(cls, checker: Any, config: GptInitModelParameters) -> None:
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         """Check if PureTpRouter can handle the configuration"""
         from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
             MoeConfigResolver,
@@ -36,7 +36,7 @@ class PureTpRouter(FusedMoeDataRouter):
 
     def __init__(
         self,
-        config: GptInitModelParameters,
+        config: MoEConfigAdapter,
         use_fp8: bool = True,
         async_mode: bool = False,
         expert_alignment: int = 128,

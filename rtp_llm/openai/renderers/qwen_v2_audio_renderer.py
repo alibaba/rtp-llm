@@ -14,7 +14,8 @@ from rtp_llm.utils.util import check_with_info
 
 class QwenV2AudioRenderer(BasicRenderer):
     def __init__(self, *args: Any, **kwargs: Any):
-        CustomChatRenderer.__init__(self, *args, **kwargs)
+        # BasicRenderer.__init__ will call CustomChatRenderer.__init__ with all args
+        super().__init__(*args, **kwargs)
         self.chat_template = self._create_chat_template()
 
     def _create_chat_template(self):

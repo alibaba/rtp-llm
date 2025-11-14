@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/devices/OpData.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 
 using namespace rtp_llm;
 namespace unittest {
@@ -37,7 +38,33 @@ private:
 
 GemmOp::GemmOp() {
     rtp_llm::initLogger();
-    DeviceFactory::initDevices(GptInitParameter());
+    ParallelismConfig parallelism_config;
+    ModelConfig model_config;
+    EPLBConfig eplb_config;
+    FMHAConfig fmha_config;
+    DeviceResourceConfig device_resource_config;
+    MoeConfig moe_config;
+    SpeculativeExecutionConfig sp_config;
+    MiscellaneousConfig misc_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    HWKernelConfig hw_kernel_config;
+    ConcurrencyConfig concurrency_config;
+    FfnDisAggregateConfig ffn_disaggregate_config;
+    RuntimeConfig runtime_config;
+    DeviceFactory::initDevices(
+        parallelism_config,
+        model_config,
+        eplb_config,
+        fmha_config,
+        device_resource_config,
+        moe_config,
+        sp_config,
+        misc_config,
+        profiling_debug_logging_config,
+        hw_kernel_config,
+        concurrency_config,
+        ffn_disaggregate_config,
+        runtime_config);
     device = DeviceFactory::getDefaultDevice();
 }
 

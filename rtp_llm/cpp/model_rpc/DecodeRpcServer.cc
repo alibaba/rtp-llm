@@ -90,7 +90,7 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
 
     auto cache_manager = engine_->resourceContext().cache_manager;
     auto reserve_block_num =
-        maga_init_params_.gpt_init_parameter.fifo_scheduler_config.scheduler_reserve_resource_ratio * cache_manager->totalBlocks() / 100;
+        maga_init_params_.runtime_config.fifo_scheduler_config.scheduler_reserve_resource_ratio * cache_manager->totalBlocks() / 100;
     auto current_blocks = cache_manager->availableBlockNums();
     if (current_blocks < reserve_block_num) {
         string error_msg = "request: [" + decode_context.request_key + "] malloc kv cache block failed at decode node, "
@@ -212,7 +212,7 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
     BroadcastLoadRequestPB request;
     request.set_request_id(load_context.request_id);
     request.set_request_key(load_context.request_key);
-    request.set_dp_rank(maga_init_params_.gpt_init_parameter.dp_rank_);
+    request.set_dp_rank(maga_init_params_.parallelism_config.dp_rank);
     request.set_partition_count(1);
     request.set_partition_id(0);
 
@@ -241,7 +241,7 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
     BroadcastLoadRequestPB request;
     request.set_request_id(load_context.request_id);
     request.set_request_key(load_context.request_key);
-    request.set_dp_rank(maga_init_params_.gpt_init_parameter.dp_rank_);
+    request.set_dp_rank(maga_init_params_.parallelism_config.dp_rank);
 
     if (resource_.workers.size() % peer_addrs.size() == 0) {
         // D >= P, load part block of prefill
@@ -289,9 +289,9 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
         return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "peer ips size not equal to worker size");
     }
 
-    auto load_cache_timeout_ms = maga_init_params_.gpt_init_parameter.load_cache_timeout_ms_;
+    auto load_cache_timeout_ms = maga_init_params_.pd_sep_config.load_cache_timeout_ms;
     load_cache_timeout_ms      = load_cache_timeout_ms > 0 ? load_cache_timeout_ms : LOAD_TIMEOUT_MS;
-    auto max_rpc_timeout_ms    = maga_init_params_.gpt_init_parameter.max_rpc_timeout_ms_;
+    auto max_rpc_timeout_ms    = maga_init_params_.pd_sep_config.max_rpc_timeout_ms;
     auto rpc_timeout           = max_rpc_timeout_ms > 0 ? max_rpc_timeout_ms : MAX_GRPC_TIMEOUT_MS;
     auto min_timeout_ms        = std::min(load_cache_timeout_ms, rpc_timeout);
     auto request_timeout_ms    = decode_context.request_timeout_ms;
@@ -310,7 +310,7 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
 
     // Prefill: TP = 1 && Decode: TP = 1
     if (resource_.workers.size() == 1 && decode_context.peer_addrs.size() == 1) {
-        for (size_t i = 0; i < maga_init_params_.gpt_init_parameter.rdma_connect_retry_times_ + 1; i++) {
+        for (size_t i = 0; i < maga_init_params_.pd_sep_config.rdma_connect_retry_times + 1; i++) {
             auto error_info = loadCache(load_context);
             if (error_info.code() != ErrorCode::CACHE_STORE_LOAD_CONNECT_FAILED
                 && error_info.code() != ErrorCode::CACHE_STORE_LOAD_RDMA_CONNECT_FAILED) {
@@ -394,7 +394,7 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
         }
         auto once_deadline =
             std::chrono::system_clock::now()
-            + std::chrono::milliseconds(maga_init_params_.gpt_init_parameter.decode_polling_kv_cache_step_ms_);
+            + std::chrono::milliseconds(maga_init_params_.pd_sep_config.decode_polling_kv_cache_step_ms);
         RTP_LLM_LOG_DEBUG("request [%s] start to execute async next", decode_context.request_key.c_str());
         // TODO(xinfei.sxf) There is a problem with complete queue next call delay here, the reason is yet to be
         // investigated
@@ -539,7 +539,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     const auto& cache_config     = cache_manager->cacheConfig();
     auto        k_block_size     = cache_config.k_block_stride;
     auto        scale_block_size = cache_config.kv_scale_block_stride;
-    auto        layer_num        = maga_init_params_.gpt_init_parameter.num_layers_;
+    auto        layer_num        = maga_init_params_.model_config_.num_layers;
 
     if (k_block_size % load_context.peer_addrs.size() != 0 || scale_block_size % load_context.peer_addrs.size() != 0) {
         RTP_LLM_LOG_WARNING("k block size [%d] or scale block size [%d] is not divisible by peer ips size [%d]",
@@ -586,7 +586,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                 const auto& sp_cache_manager = engine_->resourceContext().mtp_cache_managers[mtp_model_id];
                 const auto& cache_config     = sp_cache_manager->cacheConfig();
                 const auto  sp_k_block_size  = cache_config.k_block_stride / load_context.peer_addrs.size();
-                size_t      layer_num        = mtp_engine_init_params->gpt_init_parameter.num_layers_;
+                size_t      layer_num        = mtp_engine_init_params->model_config_.num_layers;
                 for (size_t layer_id = 0; layer_id < layer_num; layer_id++) {
                     auto request_key = std::to_string(load_context.request_id) + "-" + std::to_string(layer_id);
                     auto load_layer_cache =
@@ -653,7 +653,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
 grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_context,
                                          const BroadcastLoadRequestPB* request,
                                          BroadcastLoadResponsePB*      response) {
-    if (request->dp_rank() != maga_init_params_.gpt_init_parameter.dp_rank_) {
+    if (request->dp_rank() != maga_init_params_.parallelism_config.dp_rank) {
         RTP_LLM_LOG_WARNING("only load when in dp group, skip load for dp rank %d", request->dp_rank());
         return grpc::Status::OK;
     }
@@ -693,9 +693,9 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
     decode_context.onflight_requests = onflight_requests_;
     decode_context.loading_cache_requests = loading_cache_requests_;
 
-    auto max_retry_times      = maga_init_params_.gpt_init_parameter.decode_retry_times_;
-    auto max_retry_timeout_ms = maga_init_params_.gpt_init_parameter.decode_retry_timeout_ms_;
-    auto retry_interval_ms    = maga_init_params_.gpt_init_parameter.decode_retry_interval_ms_;
+    auto max_retry_times      = maga_init_params_.pd_sep_config.decode_retry_times;
+    auto max_retry_timeout_ms = maga_init_params_.pd_sep_config.decode_retry_timeout_ms;
+    int  retry_interval_ms    = maga_init_params_.pd_sep_config.decode_retry_interval_ms;
 
     try {
         EXECUTE_STAGE_FUNC(prepareGenerateContext, decode_context);

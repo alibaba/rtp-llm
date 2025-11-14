@@ -706,16 +706,15 @@ struct MoeConfigs {
     size_t extra_expert_num = 0;
     size_t top_k;
 
-    bool    normalize_expert_scale = false;
-    int64_t moe_inter_padding_size = 0;
-    bool    has_moe_norm           = false;
-    bool    use_all_gather         = false;
-    size_t  ep_rank                = 0;
-    size_t  ep_size                = 1;
-    size_t  tp_rank                = 0;
-    size_t  tp_size                = 1;
-    size_t  dp_rank                = 0;
-    size_t  dp_size                = 1;
+    bool   normalize_expert_scale = false;
+    bool   has_moe_norm           = false;
+    bool   use_all_gather         = false;
+    size_t ep_rank                = 0;
+    size_t ep_size                = 1;
+    size_t tp_rank                = 0;
+    size_t tp_size                = 1;
+    size_t dp_rank                = 0;
+    size_t dp_size                = 1;
 
     int    scoring_func          = 0;  // 0: softmax, 1: sigmoid
     int    topk_group            = 1;

@@ -2,8 +2,9 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.distribute.collective import Group, all_gather
+from rtp_llm.ops import ParallelismConfig
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 
@@ -17,10 +18,11 @@ class EmbeddingTorch(nn.Module):
 
 
 class Embedding(nn.Module):
-    def __init__(self, config: GptInitModelParameters, weight: torch.Tensor):
+    def __init__(self, config: ModelConfig, parallelism_config: ParallelismConfig, weight: torch.Tensor):
         super().__init__()
         self.weight = weight
         self.config = config
+        self.parallelism_config = parallelism_config
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         tokens = input.size(0)
@@ -29,11 +31,11 @@ class Embedding(nn.Module):
             (tokens, hidden_size), dtype=self.weight.dtype, device=input.device
         )
         rtp_llm_ops.embedding(output, input, self.weight.data)
-        if self.config.tp_size > 1:
+        if self.parallelism_config.tp_size > 1:
             m, n = output.shape
             output = all_gather(output, group=Group.TP)
             output = (
-                output.reshape(self.config.tp_size, m, n)
+                output.reshape(self.parallelism_config.tp_size, m, n)
                 .transpose(0, 1)
                 .contiguous()
                 .reshape(m, -1)
@@ -42,10 +44,11 @@ class Embedding(nn.Module):
 
 
 class EmbeddingBert(nn.Module):
-    def __init__(self, config: GptInitModelParameters, weight: torch.Tensor):
+    def __init__(self, config: ModelConfig, parallelism_config: ParallelismConfig, weight: torch.Tensor):
         super().__init__()
         self.weight = weight
         self.config = config
+        self.parallelism_config = parallelism_config
 
     def forward(
         self,
@@ -73,11 +76,11 @@ class EmbeddingBert(nn.Module):
             input_embedding_scalar,
         )
 
-        if self.config.tp_size > 1:
+        if self.parallelism_config.tp_size > 1:
             m, n = output.shape
             output = all_gather(output, group=Group.TP)
             output = (
-                output.reshape(self.config.tp_size, m, n)
+                output.reshape(self.parallelism_config.tp_size, m, n)
                 .transpose(0, 1)
                 .contiguous()
                 .reshape(m, -1)

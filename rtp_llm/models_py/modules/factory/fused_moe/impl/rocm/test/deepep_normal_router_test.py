@@ -1,49 +1,55 @@
 import multiprocessing as mp
-import os
 import random
 from typing import List
 
 import torch
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.distribute.worker_info import g_parallel_info, update_master_info
+from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.ops import ParallelismConfig, MoeConfig
 from rtp_llm.models_py.distributed.test.process_group_state import (
     destroy_distributed_environment,
     init_distributed_environment,
 )
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.routers.deepep_normal_router import (
     DeepepNormalRouter,
 )
-from rtp_llm.test.utils.port_util import PortsContext
+from rtp_llm.test.utils.port_util import PortManager
 
 import rtp_llm.ops.compute_ops as compute_ops  # isort:skip
 
 # from libth_transformer.rtp_llm_ops import trt_fp8_quantize_128  # isort:skip
 
 
-def init_router(rank: int, use_fp8: bool):
-    g_parallel_info.reload()
-    update_master_info(f"127.0.0.1", int(os.environ["START_PORT"]))
-    print(f"rank {rank}, {g_parallel_info}")
-    config = GptInitModelParameters(0, 0, 0, 0, 0)
-    config.moe_config.use_deepep_low_latency = False
-    config.expert_num = 16
-    config.hidden_size = 1024
-    config.tp_size = g_parallel_info.tp_size
-    config.tp_rank = g_parallel_info.tp_rank
-    config.ep_size = g_parallel_info.ep_size
-    config.ep_rank = g_parallel_info.ep_rank
-    config.dp_size = g_parallel_info.dp_size
-    config.dp_rank = g_parallel_info.dp_rank
-    config.ffn_tp_rank = g_parallel_info.ffn_tp_rank
-    config.ffn_tp_size = g_parallel_info.ffn_tp_size
-    config.local_rank = rank
-    init_distributed_environment(config, backend="nccl", timeout=60)
-    router = DeepepNormalRouter(config, use_fp8, expert_alignment=1)
-    return config, router
+def init_router(rank: int, use_fp8: bool, parallelism_config: ParallelismConfig, nccl_port: int):
+    # Create configuration objects
+    model_config = ModelConfig()
+    model_config.expert_num = 16
+    model_config.hidden_size = 1024
+    
+    # Use the provided parallelism_config directly
+    parallelism_config.world_rank = rank
+    parallelism_config.local_rank = rank
+    parallelism_config.nccl_ip = "127.0.0.1"
+    parallelism_config.tp_nccl_port = nccl_port
+    
+    moe_config = MoeConfig()
+    moe_config.use_deepep_low_latency = False
+
+    # Create MoEConfigAdapter
+    config_adapter = MoEConfigAdapter(
+        model_config=model_config,
+        parallelism_config=parallelism_config,
+        moe_config=moe_config,
+        max_generate_batch_size=0,
+    )
+    
+    init_distributed_environment(parallelism_config, nccl_ip="127.0.0.1", th_nccl_port=nccl_port, backend="nccl", timeout=60)
+    router = DeepepNormalRouter(config_adapter, use_fp8, expert_alignment=1)
+    return config_adapter, router
 
 
 # payload.expert_x: [token, dim], type: fp8
@@ -62,9 +68,9 @@ def dequant_to_bf16(expert_x: torch.Tensor, expert_x_scale: torch.Tensor):
     return combine_x.bfloat16()
 
 
-def worker_function(rank: int, use_fp8: bool, token_num_per_rank: List[int]):
+def worker_function(rank: int, use_fp8: bool, token_num_per_rank: List[int], parallelism_config: ParallelismConfig, nccl_port: int):
     random.seed(rank)
-    config, router = init_router(rank, use_fp8)
+    config, router = init_router(rank, use_fp8, parallelism_config, nccl_port)
     try:
         top_k = config.expert_num
         # test dispatch
@@ -115,40 +121,56 @@ def worker_function(rank: int, use_fp8: bool, token_num_per_rank: List[int]):
 
 
 def test_single(world_size: int, use_fp8: bool):
-    with PortsContext(None, 1) as ports:
-        start_port = ports[0]
-        os.environ["START_PORT"] = str(start_port)
-        os.environ["WORLD_SIZE"] = str(world_size)
-        os.environ["TP_SIZE"] = str(world_size)
+    port_manager = PortManager()
+    ports, locks = port_manager.get_consecutive_ports(1)
+    nccl_port = ports[0]
+    
+    tp_size = world_size  # TP size equals world_size for ROCm normal router
+    dp_size = 1
+    ep_size = world_size  # EP size equals world_size for normal router
+    
+    # 启动world_size个进程
+    processes = []
+    token_num_per_rank = [random.randint(4, 12) // 4 * 4 for _ in range(world_size)]
+    for rank in range(world_size):
+        # Calculate parallelism config for this rank
+        parallelism_config = ParallelismConfig()
+        parallelism_config.tp_size = tp_size
+        parallelism_config.tp_rank = rank % tp_size
+        parallelism_config.ep_size = ep_size
+        parallelism_config.ep_rank = rank % ep_size
+        parallelism_config.dp_size = dp_size
+        parallelism_config.dp_rank = rank // tp_size
+        parallelism_config.world_size = world_size
+        parallelism_config.world_rank = rank
+        parallelism_config.local_world_size = world_size
+        
+        # 创建进程
+        p = mp.Process(
+            target=worker_function,
+            args=(rank, use_fp8, token_num_per_rank, parallelism_config, nccl_port),
+            kwargs={},
+        )
+        processes.append(p)
+        p.start()
+    
+    # Release locks after all processes start
+    for lock in locks:
+        lock.__exit__(None, None, None)
 
-        # 启动world_size个进程
-        processes = []
-        token_num_per_rank = [random.randint(4, 12) // 4 * 4 for _ in range(world_size)]
-        for rank in range(world_size):
-            # 为每个进程设置环境变量
-            os.environ["WORLD_RANK"] = str(rank)
-            # 创建进程，调用函数留空
-            p = mp.Process(
-                target=worker_function,
-                args=(rank, use_fp8, token_num_per_rank),
-                kwargs={},
-            )
-            processes.append(p)
-            p.start()
-
-        for p in processes:
-            p.join(timeout=30)
-            # KILL Process
+    for p in processes:
+        p.join(timeout=30)
+        # KILL Process
+        if p.is_alive():
+            p.terminate()
+            p.join(timeout=5)
             if p.is_alive():
-                p.terminate()
-                p.join(timeout=5)
-                if p.is_alive():
-                    p.kill()
-                    p.join()
-                raise Exception("Process timeout")
-            else:
-                if p.exitcode != 0:
-                    raise RuntimeError(f"子进程异常退出，退出码: {p.exitcode}")
+                p.kill()
+                p.join()
+            raise Exception("Process timeout")
+        else:
+            if p.exitcode != 0:
+                raise RuntimeError(f"子进程异常退出，退出码: {p.exitcode}")
 
 
 if __name__ == "__main__":
