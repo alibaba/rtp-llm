@@ -149,7 +149,9 @@ class BasicRenderer(CustomChatRenderer):
             raise TemplateError(message)
 
         jinja_env = ImmutableSandboxedEnvironment(
-            trim_blocks=True, lstrip_blocks=True, extensions=["jinja2.ext.loopcontrols"]
+            trim_blocks=True,
+            lstrip_blocks=True,
+            extensions=["jinja2.ext.do", "jinja2.ext.loopcontrols"],
         )
         jinja_env.globals["raise_exception"] = raise_exception
         return jinja_env.from_string(chat_template)
