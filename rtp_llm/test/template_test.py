@@ -820,7 +820,9 @@ template ends here"""
                     role=RoleEnum.system,
                     content="You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nCurrent Date: 2024-09-30",
                 ),
-                ChatMessage(role=RoleEnum.user, content="What is 25 * 4? Think step by step."),
+                ChatMessage(
+                    role=RoleEnum.user, content="What is 25 * 4? Think step by step."
+                ),
             ]
 
         def get_messages_with_tool_response(self) -> List[ChatMessage]:
@@ -831,10 +833,12 @@ template ends here"""
                     content="<think>Let me calculate this step by step. 25 * 4 = 25 * 2 * 2 = 50 * 2 = 100</think>The answer is 100.",
                 )
             )
-            messages.append(ChatMessage(role=RoleEnum.user, content="What about 100 / 4?"))
+            messages.append(
+                ChatMessage(role=RoleEnum.user, content="What about 100 / 4?")
+            )
             return messages
 
-        def get_messages_with_final_answer(self) -> List[ChatMessage]:
+        def get_messages_with_follow_up(self) -> List[ChatMessage]:
             messages = self.get_messages_with_tool_response()
             messages.append(
                 ChatMessage(
