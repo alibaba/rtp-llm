@@ -59,8 +59,8 @@ XQAAttnOp::forward(const torch::Tensor& input, std::optional<torch_ext::KVCache>
     torch::TensorOptions options           = torch::TensorOptions(input.dtype()).device(input.device());
 
     torch::Tensor output = torch::empty({batch_size, local_head_num * size_per_head}, options);
-    float*        attention_output_orig_quant_scale = nullptr;
-    KVBlockArray  kv_block_array;
+
+    KVBlockArray kv_block_array;
     if (kv_cache.has_value()) {
         kv_block_array                 = params->kv_block_array;
         kv_block_array.mPrimaryPoolPtr = kv_cache.value().k_cache_base.data_ptr();

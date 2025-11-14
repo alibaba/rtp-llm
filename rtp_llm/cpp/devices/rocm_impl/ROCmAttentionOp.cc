@@ -567,7 +567,14 @@ ParamsPtr ROCmDevice::PrepareCKAttn(const AttentionConfigs& configs,
     return ck_attn;
 }
 
-static std::once_flag rope_cache_flag;
+void ROCmDevice::getRopeCacheOnce(const RopeConfig& rope_config, int max_position_embeddings) {
+    std::call_once(rope_cache_flag_, [&]() {
+        use_rope_cache_ = rope_config.style == RopeStyle::Base;
+        if (use_rope_cache_) {
+            rope_cache_ = getRopeCache(rope_config, max_position_embeddings);
+        }
+    });
+}
 
 AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& params) {
     auto datatype            = params.input.type();
@@ -593,7 +600,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
 
     KVBlockArray                  kv_block_array;
     PrefixPromptBatchWeightsParam prefix_prompt_param;
-    
+
     bool use_fmha_fp8 = false;
     if (params.common.kv_cache) {
         const auto max_blocks_per_batch = params.common.kv_cache->kv_cache_block_id->shape()[1];
@@ -626,8 +633,9 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
     }
     BufferPtr qkv_buf_fp8 = nullptr;
     if (use_fmha_fp8) {
-        qkv_buf_fp8 = allocateBuffer({DataType::TYPE_FP8_E4M3, params.input.shape(), AllocationType::DEVICE},
-                                     {"qkv_buf_fp8"});}
+        qkv_buf_fp8 =
+            allocateBuffer({DataType::TYPE_FP8_E4M3, params.input.shape(), AllocationType::DEVICE}, {"qkv_buf_fp8"});
+    }
 
     // int8
     float* scale_out_ptr = nullptr;
@@ -694,14 +702,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                                     && !params.configs.fuse_qkv_add_bias);
     RTP_LLM_LOG_DEBUG("skip_add_bias_transpose: %d", skip_add_bias_transpose);
     if (!skip_add_bias_transpose) {
-
-        bool                 use_rope_cache = params.configs.rope_config.style == RopeStyle::Base;
-        static torch::Tensor rope_cache;
-        std::call_once(rope_cache_flag, [&]() {
-            if (use_rope_cache) {
-                rope_cache = getRopeCache(params.configs.rope_config, init_params_.max_seq_len);
-            }
-        });
+        getRopeCacheOnce(params.configs.rope_config, init_params_.max_seq_len);
 
         if (init_params_.use_aiter_pa) {
             if (init_params_.use_asm_pa) {
@@ -737,7 +738,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                     store_q,
                     store_kv,
                     store_cache,
-                    use_rope_cache && rope_cache.defined() ? static_cast<float2*>(rope_cache.data_ptr()) : nullptr,
+                    use_rope_cache_ && rope_cache_.defined() ? static_cast<float2*>(rope_cache_.data_ptr()) : nullptr,
                     stream_);
             } else {
                 DISPATCH_CUDA_FUNCTION_DATA_TYPE(
@@ -772,7 +773,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                     store_q,
                     store_kv,
                     store_cache,
-                    use_rope_cache && rope_cache.defined() ? static_cast<float2*>(rope_cache.data_ptr()) : nullptr,
+                    use_rope_cache_ && rope_cache_.defined() ? static_cast<float2*>(rope_cache_.data_ptr()) : nullptr,
                     stream_);
             }
             check_cuda_error();
@@ -817,10 +818,13 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
         writeCacheStore(params);
     }
 
-    
-    if (use_fmha_fp8){
-        fmha_runner_->setup(
-            DataType::TYPE_FP8_E4M3, params.configs.mask_type, head_num, kv_head_num, size_per_head, params.configs.q_scaling);
+    if (use_fmha_fp8) {
+        fmha_runner_->setup(DataType::TYPE_FP8_E4M3,
+                            params.configs.mask_type,
+                            head_num,
+                            kv_head_num,
+                            size_per_head,
+                            params.configs.q_scaling);
     } else {
         fmha_runner_->setup(
             datatype, params.configs.mask_type, head_num, kv_head_num, size_per_head, params.configs.q_scaling);
@@ -844,9 +848,11 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
     printBufferData(params.input, "run_ck_input");
     if (skip_add_bias_transpose || prefix_prompt_param.max_prefix_prompt_length <= 0) {
         // not implemented reuse cache for this branch
-        fmha_runner_->runCKFmha(use_fmha_fp8? qkv_buf_fp8->data(): params.input.data(),
-                                use_fmha_fp8? qkv_buf_fp8->dataWithOffset(hidden_units): params.input.dataWithOffset(hidden_units), 
-                                use_fmha_fp8? qkv_buf_fp8->dataWithOffset(hidden_units + hidden_units_kv): params.input.dataWithOffset(hidden_units + hidden_units_kv),
+        fmha_runner_->runCKFmha(use_fmha_fp8 ? qkv_buf_fp8->data() : params.input.data(),
+                                use_fmha_fp8 ? qkv_buf_fp8->dataWithOffset(hidden_units) :
+                                               params.input.dataWithOffset(hidden_units),
+                                use_fmha_fp8 ? qkv_buf_fp8->dataWithOffset(hidden_units + hidden_units_kv) :
+                                               params.input.dataWithOffset(hidden_units + hidden_units_kv),
                                 params.output.data(),
                                 nullptr,  // buffer for store out softmax_lse, looks like not used by RTP
                                 batch_size,
@@ -1134,14 +1140,7 @@ AttentionModuleOutput ROCmDevice::decoderSelfAttention(const AttentionModulePara
                                         && !params.configs.fuse_qkv_add_bias);
         printBufferData(*params.common.input_lengths, "input_lengths");
         if (!skip_add_bias_transpose) {
-
-            bool                 use_rope_cache = params.configs.rope_config.style == RopeStyle::Base;
-            static torch::Tensor rope_cache;
-            std::call_once(rope_cache_flag, [&]() {
-                if (use_rope_cache) {
-                    rope_cache = getRopeCache(params.configs.rope_config, init_params_.max_seq_len);
-                }
-            });
+            getRopeCacheOnce(params.configs.rope_config, init_params_.max_seq_len);
 
             if (init_params_.use_asm_pa) {
                 DISPATCH_CUDA_FUNCTION_DATA_TYPE(
@@ -1176,7 +1175,7 @@ AttentionModuleOutput ROCmDevice::decoderSelfAttention(const AttentionModulePara
                     store_q,
                     store_kv,
                     store_cache,
-                    use_rope_cache && rope_cache.defined() ? static_cast<float2*>(rope_cache.data_ptr()) : nullptr,
+                    use_rope_cache_ && rope_cache_.defined() ? static_cast<float2*>(rope_cache_.data_ptr()) : nullptr,
                     stream_);
             } else {
                 DISPATCH_CUDA_FUNCTION_DATA_TYPE(
@@ -1211,7 +1210,7 @@ AttentionModuleOutput ROCmDevice::decoderSelfAttention(const AttentionModulePara
                     store_q,
                     store_kv,
                     store_cache,
-                    use_rope_cache && rope_cache.defined() ? static_cast<float2*>(rope_cache.data_ptr()) : nullptr,
+                    use_rope_cache_ && rope_cache_.defined() ? static_cast<float2*>(rope_cache_.data_ptr()) : nullptr,
                     stream_);
             }
             check_cuda_error();
