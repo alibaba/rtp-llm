@@ -8,6 +8,7 @@ cc_library(
         "kernel.cuh",
         "sampling.h",
         "utils.h",
+        "json.hpp",
     ],
     deps = [
         "//rtp_llm/cpp/kernels:rocm_utils",
@@ -35,6 +36,7 @@ py_test(
     srcs = ["test.py"],
     data = [
         ":bind.so",
+        "k0p0t02.pt",
     ],
     imports = ["."],
     python_version = "PY3",

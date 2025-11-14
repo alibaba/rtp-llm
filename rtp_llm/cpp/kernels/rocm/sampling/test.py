@@ -170,6 +170,8 @@ def test_top_p_sampling(batch_size, vocab_size, p):
         realdata = Path(realdata)
         assert realdata.is_file()
         normalized_prob = torch.load(realdata, weights_only=True).to("cuda:0")
+        batch_size, vocab_size = normalized_prob.shape
+        print(f"Update batch_size={batch_size}, vocab_size={vocab_size} from {realdata}")
     
     info["prob"] = normalized_prob.cpu().numpy().tolist()
     sorted_prob, indices = torch.sort(normalized_prob, descending=False)
@@ -183,7 +185,7 @@ def test_top_p_sampling(batch_size, vocab_size, p):
       file = Path(file)
       with file.open("w") as f:
           json.dump(info, f, ensure_ascii=False, indent=4)
-    num_trials = 1000
+    num_trials = 1
     info["out"] = []
 
     # start_event = torch.cuda.Event(enable_timing=True)
@@ -195,11 +197,11 @@ def test_top_p_sampling(batch_size, vocab_size, p):
             normalized_prob,
             samples,
             None,
-            None,
+            torch.tensor([p], dtype=torch.float32, device="cuda:0"),
             p,
-            False,
-            torch.zeros(batch_size, dtype=torch.uint64, device="cuda:0"),
-            torch.zeros(batch_size, dtype=torch.uint64, device="cuda:0"),
+            True,
+            torch.zeros(batch_size, dtype=torch.int64, device="cuda:0"),
+            torch.zeros(batch_size, dtype=torch.int64, device="cuda:0"),
         )
         assert torch.all(samples < vocab_size) and torch.all(samples >= 0)
         assert torch.all(mask[torch.arange(batch_size), samples] == 1)
@@ -384,6 +386,42 @@ def test_top_k_renorm_probs(batch_size, vocab_size, k):
             atol=1e-3,
         )
 
+def test_k0p0t02():
+    # This is a real case where top_p = 1.0, top_k = 0, temperature = 0.2
+    p = 1.0
+    probs = Path(__file__).parent / 'k0p0t02.pt'
+    probs = probs.resolve()
+    print(f"Loading probs from {probs.as_posix()}")
+    probs = torch.load(probs, weights_only=True)
+    probs_list = probs.flatten().numpy().tolist()
+    probs = probs.to("cuda:0")
+    batch_size, vocab_size = probs.shape
+    print(f"batch_size={batch_size}, vocab_size={vocab_size}")
+    samples = torch.empty(batch_size, dtype=torch.int32, device="cuda:0")
+    top_p_sampling_from_probs(
+        probs,
+        samples,
+        None,
+        torch.tensor([p], dtype=torch.float32, device="cuda:0"),
+        p,
+        True,
+        torch.zeros(batch_size, dtype=torch.int64, device="cuda:0"),
+        torch.zeros(batch_size, dtype=torch.int64, device="cuda:0"),
+    )
+    sorted_pairs = sorted(enumerate(probs_list), key=lambda x: x[1])
+    out_prob = probs_list[samples.item()]
+    print(out_prob)
+    assert out_prob > 0.99, f"token with prob {out_prob} should not be chosen"
+    info = dict()
+    info["probs"] = probs_list
+    info["sorted_pairs"] = sorted_pairs
+    json.dump(info, open("/root/k0p0t02.json", "w"), indent=4)
+
 
 if __name__ == "__main__":
+    test_k0p0t02()
+    exit(0)
+    test_top_p_sampling(1, 1, 1)
+    print("pass")
+    exit(0)
     exit(pytest.main([__file__, "-s", "-v"]))

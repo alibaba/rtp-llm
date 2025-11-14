@@ -18,6 +18,13 @@ namespace rtp_llm {
 
 using SamplerT = float;
 
+static inline void _saveTorchDataTofile(const torch::Tensor& tensor, const std::string& fileName) {
+    auto          tensor_cpu = tensor.contiguous().cpu();
+    auto          pickled    = torch::pickle_save(tensor_cpu);
+    std::ofstream fout(fileName, std::ios::out | std::ios::binary);
+    fout.write(pickled.data(), pickled.size());
+    fout.close();
+}
 void CudaDevice::processLogits(const GreedyParams& params,
                                const BufferPtr&    device_tokens,
                                const BufferPtr&    transposed_tokens) {
@@ -110,6 +117,8 @@ void CudaDevice::processLogits(const GreedyParams& params,
 }
 
 GreedyOutput CudaDevice::flashinferSampleGreedy(const GreedyParams& params, const BufferPtr& transposed_tokens) {
+    static int fwd = 0;
+    ++fwd;
     const auto batch_size = params.logits.shape()[0];
     auto&      top_k      = params.top_k;
     auto&      top_p      = params.top_p;
@@ -153,8 +162,17 @@ GreedyOutput CudaDevice::flashinferSampleGreedy(const GreedyParams& params, cons
         }
     } else if (std::all_of(
                    top_k.data<uint32_t>(), top_k.data<uint32_t>() + batch_size, [&](auto t) { return t <= 0; })) {
+                    if (std::getenv("XBJ_DUMP")) {
+                        std::string dir(std::getenv("XBJ_DUMP"));
+                        _saveTorchDataTofile(probs_t, dir + "/fwd" + std::to_string(fwd) + "_probs.pt");
+                        _saveTorchDataTofile(top_p_t, dir + "/fwd" + std::to_string(fwd) + "_top_p.pt");
+                    }
         top_p_sampling_from_probs(
             probs_t, uniform_samples, samples_t, success_t, top_p_t, 1.0, deterministic, (int64_t)stream_);
+                    if (std::getenv("XBJ_DUMP")) {
+                        std::string dir(std::getenv("XBJ_DUMP"));
+                        _saveTorchDataTofile(samples_t, dir + "/fwd" + std::to_string(fwd) + "_samples.pt");
+                    }
         if (output_all_probs_t.defined()) {
             top_p_renorm_probs(probs_t, output_all_probs_t, top_p_t, 1.0, (int64_t)stream_);
         }

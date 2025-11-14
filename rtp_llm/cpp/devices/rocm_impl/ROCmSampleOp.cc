@@ -19,7 +19,16 @@ using SamplerT = float;
 // where "x" are skipped.
 // topk should has higher proirity than topp.
 
+static inline void _saveTorchDataTofile(const torch::Tensor& tensor, const std::string& fileName) {
+    auto          tensor_cpu = tensor.contiguous().cpu();
+    auto          pickled    = torch::pickle_save(tensor_cpu);
+    std::ofstream fout(fileName, std::ios::out | std::ios::binary);
+    fout.write(pickled.data(), pickled.size());
+    fout.close();
+}
 GreedyOutput ROCmDevice::sampleGreedy(const GreedyParams& params) {
+    static int fwd = 0;
+    ++fwd;
     const auto& logits            = params.logits;
     const auto  batch_size        = logits.shape()[0];
     const auto  vocab_size_padded = logits.shape()[1];
@@ -134,8 +143,8 @@ GreedyOutput ROCmDevice::sampleGreedy(const GreedyParams& params) {
     bool          need_output_all_probs = params.output_all_probs.has_value();
     torch::Tensor probs_t               = Buffer2torchTensor(probs, false);
     torch::Tensor samples_t             = Buffer2torchTensor(samples, false).flatten();
-    torch::Tensor top_k_t               = Buffer2torchTensor(top_k, false);
-    torch::Tensor top_p_t               = Buffer2torchTensor(top_p, false);
+    torch::Tensor top_k_t               = Buffer2torchTensor(top_k, false).to(torch::kCUDA, true);
+    torch::Tensor top_p_t               = Buffer2torchTensor(top_p, false).to(torch::kCUDA, true);
     torch::Tensor output_all_probs_t;
     if (need_output_all_probs) {
         output_all_probs_t = Buffer2torchTensor(params.output_all_probs.value().get(), false);
@@ -151,6 +160,11 @@ GreedyOutput ROCmDevice::sampleGreedy(const GreedyParams& params) {
         }
     } else if (std::all_of(
                    top_k.data<uint32_t>(), top_k.data<uint32_t>() + batch_size, [&](auto t) { return t <= 0; })) {
+                    if (std::getenv("XBJ_DUMP")) {
+                        std::string dir(std::getenv("XBJ_DUMP"));
+                        _saveTorchDataTofile(probs_t, dir + "/fwd" + std::to_string(fwd) + "_probs.pt");
+                        _saveTorchDataTofile(top_p_t, dir + "/fwd" + std::to_string(fwd) + "_top_p.pt");
+                    }
         top_p_sampling_from_probs(probs_t,
                                   samples_t,
                                   std::nullopt,
@@ -160,6 +174,10 @@ GreedyOutput ROCmDevice::sampleGreedy(const GreedyParams& params) {
                                   seed,
                                   offset,
                                   reinterpret_cast<uintptr_t>(stream_));
+                    if (std::getenv("XBJ_DUMP")) {
+                        std::string dir(std::getenv("XBJ_DUMP"));
+                        _saveTorchDataTofile(samples_t, dir + "/fwd" + std::to_string(fwd) + "_samples.pt");
+                    }
         if (need_output_all_probs) {
             top_p_renorm_probs(probs_t, output_all_probs_t, top_p_t, 1.0, reinterpret_cast<uintptr_t>(stream_));
         }
