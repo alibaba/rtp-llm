@@ -129,6 +129,7 @@ public:
             RTP_LLM_LOG_INFO("BatchDecodeScheduler::schedule: running_streams_.size() = %d, start run",
                              running_streams_.size());
         } else {
+            RTP_LLM_LOG_INFO("BatchDecodeScheduler::schedule: running default");
             incrRunningStream();
         }
         evictAllDoneStreams();
