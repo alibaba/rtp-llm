@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/devices/OpData.h"
 #include "rtp_llm/cpp/devices/ShapeCheck.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
+#include "rtp_llm/cpp/devices/Weights.h"
 
 #include <optional>
 #include <functional>
@@ -283,6 +284,314 @@ BatchCopyParams& BatchCopyParams::add(void* dst, const void* src, size_t size, C
     }
 
     return *this;
+}
+
+std::string AttentionCommonInputs::DebugString() const {
+    std::ostringstream oss;
+    oss << "AttentionCommonInputs Debug Info:" << std::endl;
+    oss << "  context_batch_size: " << context_batch_size << std::endl;
+    oss << "  decoder_batch_size: " << decoder_batch_size << std::endl;
+    oss << "  context_max_seq_len: " << context_max_seq_len << std::endl;
+    oss << "  decoder_max_seq_len: " << decoder_max_seq_len << std::endl;
+    oss << "  context_token_num: " << context_token_num << std::endl;
+    oss << "  context_total_kv_length: " << context_total_kv_length << std::endl;
+    oss << "  max_prefix_length: " << max_prefix_length << std::endl;
+
+    // Print buffer info if they exist
+    if (input_lengths) {
+        oss << "  input_lengths: " << input_lengths->debugString() << std::endl;
+    }
+    if (sequence_lengths) {
+        oss << "  sequence_lengths: " << sequence_lengths->debugString() << std::endl;
+    }
+    if (cu_seqlens) {
+        oss << "  cu_seqlens: " << cu_seqlens->debugString() << std::endl;
+    }
+    if (cu_kv_seqlens) {
+        oss << "  cu_kv_seqlens: " << cu_kv_seqlens->debugString() << std::endl;
+    }
+    if (kv_seqlens) {
+        oss << "  kv_seqlens: " << kv_seqlens->debugString() << std::endl;
+    }
+    if (padding_offset) {
+        oss << "  padding_offset: " << padding_offset->debugString() << std::endl;
+    }
+    if (position_ids) {
+        oss << "  position_ids: " << position_ids->debugString() << std::endl;
+    }
+    if (attention_mask) {
+        oss << "  attention_mask: " << attention_mask->debugString() << std::endl;
+    }
+    if (linear_bias_slopes) {
+        oss << "  linear_bias_slopes: " << linear_bias_slopes->debugString() << std::endl;
+    }
+    if (prefix_prompt_lengths) {
+        oss << "  prefix_prompt_lengths: " << prefix_prompt_lengths->debugString() << std::endl;
+    }
+
+    return oss.str();
+}
+
+std::string LayerNormWeights::DebugString() const {
+    std::ostringstream oss;
+    oss << "LayerNormWeights Debug Info:" << std::endl;
+
+    if (gamma) {
+        oss << "  gamma: " << gamma->debugString() << std::endl;
+    } else {
+        oss << "  gamma: nullptr" << std::endl;
+    }
+
+    if (beta) {
+        oss << "  beta: " << beta->debugString() << std::endl;
+    } else {
+        oss << "  beta: nullptr" << std::endl;
+    }
+
+    if (static_scale) {
+        oss << "  static_scale: " << static_scale->debugString() << std::endl;
+    } else {
+        oss << "  static_scale: nullptr" << std::endl;
+    }
+
+    if (static_scale_reciprocal) {
+        oss << "  static_scale_reciprocal: " << static_scale_reciprocal->debugString() << std::endl;
+    } else {
+        oss << "  static_scale_reciprocal: nullptr" << std::endl;
+    }
+
+    return oss.str();
+}
+
+std::string DenseWeights::DebugString() const {
+    std::ostringstream oss;
+    oss << "DenseWeights Debug Info:" << std::endl;
+
+    if (kernel) {
+        oss << "  kernel: " << kernel->debugString() << std::endl;
+    } else {
+        oss << "  kernel: nullptr" << std::endl;
+    }
+
+    if (bias) {
+        oss << "  bias: " << bias->debugString() << std::endl;
+    } else {
+        oss << "  bias: nullptr" << std::endl;
+    }
+
+    return oss.str();
+}
+
+std::string AttentionLayerWeights::DebugString() const {
+    std::ostringstream oss;
+    oss << "AttentionLayerWeights Debug Info:" << std::endl;
+
+    if (pre_attention_layernorm) {
+        oss << "  pre_attention_layernorm: " << std::endl << pre_attention_layernorm->DebugString();
+    } else {
+        oss << "  pre_attention_layernorm: nullptr" << std::endl;
+    }
+
+    if (qkv_weight) {
+        oss << "  qkv_weight: " << std::endl << qkv_weight->DebugString();
+    } else {
+        oss << "  qkv_weight: nullptr" << std::endl;
+    }
+
+    if (attention_layernorm) {
+        oss << "  attention_layernorm: " << std::endl << attention_layernorm->DebugString();
+    } else {
+        oss << "  attention_layernorm: nullptr" << std::endl;
+    }
+
+    if (q_norm_weight) {
+        oss << "  q_norm_weight: " << std::endl << q_norm_weight->DebugString();
+    } else {
+        oss << "  q_norm_weight: nullptr" << std::endl;
+    }
+
+    if (k_norm_weight) {
+        oss << "  k_norm_weight: " << std::endl << k_norm_weight->DebugString();
+    } else {
+        oss << "  k_norm_weight: nullptr" << std::endl;
+    }
+
+    if (output_weight) {
+        oss << "  output_weight: " << std::endl << output_weight->DebugString();
+    } else {
+        oss << "  output_weight: nullptr" << std::endl;
+    }
+
+    if (static_quant_weight) {
+        oss << "  static_quant_weight: " << std::endl << static_quant_weight->DebugString();
+    } else {
+        oss << "  static_quant_weight: nullptr" << std::endl;
+    }
+
+    if (static_scale_reciprocal_weight) {
+        oss << "  static_scale_reciprocal_weight: " << std::endl << static_scale_reciprocal_weight->DebugString();
+    } else {
+        oss << "  static_scale_reciprocal_weight: nullptr" << std::endl;
+    }
+
+    if (smoother_weight) {
+        oss << "  smoother_weight: " << std::endl << smoother_weight->DebugString();
+    } else {
+        oss << "  smoother_weight: nullptr" << std::endl;
+    }
+
+    if (shift_weight) {
+        oss << "  shift_weight: " << std::endl << shift_weight->DebugString();
+    } else {
+        oss << "  shift_weight: nullptr" << std::endl;
+    }
+
+    if (linear_bias_slopes_weight) {
+        oss << "  linear_bias_slopes_weight: " << std::endl << linear_bias_slopes_weight->DebugString();
+    } else {
+        oss << "  linear_bias_slopes_weight: nullptr" << std::endl;
+    }
+
+    if (fusedqkrope_weight) {
+        oss << "  fusedqkrope_weight: " << std::endl << fusedqkrope_weight->DebugString();
+    } else {
+        oss << "  fusedqkrope_weight: nullptr" << std::endl;
+    }
+
+    if (fusedqkrope_no_lora_weight) {
+        oss << "  fusedqkrope_no_lora_weight: " << std::endl << fusedqkrope_no_lora_weight->DebugString();
+    } else {
+        oss << "  fusedqkrope_no_lora_weight: nullptr" << std::endl;
+    }
+
+    if (q_b_weight) {
+        oss << "  q_b_weight: " << std::endl << q_b_weight->DebugString();
+    } else {
+        oss << "  q_b_weight: nullptr" << std::endl;
+    }
+
+    if (kv_a_weight) {
+        oss << "  kv_a_weight: " << std::endl << kv_a_weight->DebugString();
+    } else {
+        oss << "  kv_a_weight: nullptr" << std::endl;
+    }
+
+    if (k_nope_weight) {
+        oss << "  k_nope_weight: " << std::endl << k_nope_weight->DebugString();
+    } else {
+        oss << "  k_nope_weight: nullptr" << std::endl;
+    }
+
+    if (k_rope_weight) {
+        oss << "  k_rope_weight: " << std::endl << k_rope_weight->DebugString();
+    } else {
+        oss << "  k_rope_weight: nullptr" << std::endl;
+    }
+
+    if (v_weight) {
+        oss << "  v_weight: " << std::endl << v_weight->DebugString();
+    } else {
+        oss << "  v_weight: nullptr" << std::endl;
+    }
+
+    if (q_a_norm_weight) {
+        oss << "  q_a_norm_weight: " << std::endl << q_a_norm_weight->DebugString();
+    } else {
+        oss << "  q_a_norm_weight: nullptr" << std::endl;
+    }
+
+    if (kv_a_norm_weight) {
+        oss << "  kv_a_norm_weight: " << std::endl << kv_a_norm_weight->DebugString();
+    } else {
+        oss << "  kv_a_norm_weight: nullptr" << std::endl;
+    }
+
+    if (kc_weight) {
+        oss << "  kc_weight: " << std::endl << kc_weight->DebugString();
+    } else {
+        oss << "  kc_weight: nullptr" << std::endl;
+    }
+
+    if (vc_weight) {
+        oss << "  vc_weight: " << std::endl << vc_weight->DebugString();
+    } else {
+        oss << "  vc_weight: nullptr" << std::endl;
+    }
+
+    if (rope_cos_sin_cache) {
+        oss << "  rope_cos_sin_cache: " << rope_cos_sin_cache->debugString() << std::endl;
+    } else {
+        oss << "  rope_cos_sin_cache: nullptr" << std::endl;
+    }
+
+    return oss.str();
+}
+
+std::string AttentionLayerParams::DebugString() const {
+    std::ostringstream oss;
+    oss << "AttentionLayerParams Debug Info:" << std::endl;
+    oss << "  layer_id: " << layer_id << std::endl;
+    oss << "  configs: " << std::endl << configs.DebugAttentionConfigStr();
+    oss << "  ln_params.eps: " << ln_params.eps << std::endl;
+    oss << "  ln_params.norm_type: " << static_cast<int>(ln_params.norm_type) << std::endl;
+    oss << "  qscheme: " << static_cast<int>(qscheme) << std::endl;
+    oss << "  compute_type: " << static_cast<int>(compute_type) << std::endl;
+    oss << "  enable_sp: " << enable_sp << std::endl;
+    oss << "  pad_token_num: " << pad_token_num << std::endl;
+
+    // Print weights info
+    oss << "  weights: " << std::endl << weights.DebugString();
+
+    // Print common inputs info
+    oss << "  common: " << std::endl << common.DebugString();
+
+    // Print residual info if it exists
+    if (residual.has_value()) {
+        oss << "  residual: " << residual.value().get().debugString() << std::endl;
+    } else {
+        oss << "  residual: nullptr" << std::endl;
+    }
+
+    // Print input and output buffer info
+    oss << "  input: " << input.debugString() << std::endl;
+    if (output) {
+        oss << "  output: " << output->debugString() << std::endl;
+    } else {
+        oss << "  output: nullptr" << std::endl;
+    }
+
+    return oss.str();
+}
+
+std::string GemmParams::DebugString() const {
+    std::ostringstream oss;
+    oss << "GemmParams Debug Info:" << std::endl;
+    oss << "  A: " << A.debugString() << std::endl;
+    oss << "  B: " << B.debugString() << std::endl;
+
+    if (C.has_value()) {
+        oss << "  C: " << C.value().get().debugString() << std::endl;
+    } else {
+        oss << "  C: nullptr" << std::endl;
+    }
+
+    if (D) {
+        oss << "  D: " << D->debugString() << std::endl;
+    } else {
+        oss << "  D: nullptr" << std::endl;
+    }
+
+    oss << "  compute_type: " << static_cast<int>(compute_type) << std::endl;
+    oss << "  D_type: " << static_cast<int>(D_type) << std::endl;
+    oss << "  transA: " << enumToString(transA) << std::endl;
+    oss << "  transB: " << enumToString(transB) << std::endl;
+    oss << "  activationType: " << static_cast<int>(activationType) << std::endl;
+    oss << "  alpha: " << alpha << std::endl;
+    oss << "  beta: " << beta << std::endl;
+    oss << "  math_sm_count: " << math_sm_count << std::endl;
+    oss << "  qscheme: " << static_cast<int>(qscheme) << std::endl;
+
+    return oss.str();
 }
 
 }  // namespace rtp_llm

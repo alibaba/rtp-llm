@@ -475,6 +475,9 @@ struct GemmParams {
 
     void     check() const;
     GemmType dispatch() const;
+
+public:
+    std::string DebugString() const;
 };
 
 struct GroupedGemmOutput {
@@ -599,6 +602,9 @@ struct AttentionCommonInputs {
 
     // rocm
     ParamsPtr decode_aiter_attn;
+
+public:
+    std::string DebugString() const;
 };
 
 using AttentionModuleOutput = void;
@@ -698,6 +704,9 @@ struct AttentionLayerParams {
     const DataType               compute_type;
     bool                         enable_sp;
     size_t                       pad_token_num;
+
+public:
+    std::string DebugString() const;
 };
 
 struct MoeConfigs {

@@ -35,6 +35,9 @@ struct LayerNormWeights {
         beta(std::move(beta)),
         static_scale(std::move(static_scale)),
         static_scale_reciprocal(std::move(static_scale_reciprocal)) {}
+
+public:
+    std::string DebugString() const;
 };
 
 typedef std::shared_ptr<const LayerNormWeights> LayerNormWeightsPtr;
@@ -51,6 +54,9 @@ struct DenseWeights {
     DenseWeights(ConstBufferPtr& kernel, ConstBufferPtr& bias): kernel(std::move(kernel)), bias(std::move(bias)) {};
 
     DenseWeights(BufferPtr& kernel, BufferPtr& bias): kernel(std::move(kernel)), bias(std::move(bias)) {};
+
+public:
+    std::string DebugString() const;
 };
 
 typedef std::shared_ptr<DenseWeights> DenseWeightsPtr;
@@ -89,6 +95,9 @@ struct AttentionLayerWeights {
 
     // rope cos sin cache
     ConstBufferPtr rope_cos_sin_cache;
+
+public:
+    std::string DebugString() const;
 };
 
 struct FfnLayerWeights {
