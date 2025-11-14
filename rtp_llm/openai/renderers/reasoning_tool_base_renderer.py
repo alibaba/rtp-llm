@@ -143,7 +143,12 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
             context.update(request.extra_configs.chat_template_kwargs)
 
         # 创建Jinja2环境
-        env = Environment(loader=BaseLoader(), trim_blocks=True, lstrip_blocks=True)
+        env = Environment(
+            loader=BaseLoader(),
+            trim_blocks=True,
+            lstrip_blocks=True,
+            extensions=["jinja2.ext.do", "jinja2.ext.loopcontrols"],
+        )
 
         # 允许子类自定义环境
         self._customize_jinja_env(env)

@@ -328,8 +328,9 @@ class BaseToolCallTestSuite:
 
     def _validate_merged_result(self, merged_result):
         """验证合并后的结果 - 通用验证逻辑"""
-        assert merged_result.choices[0].finish_reason == FinisheReason.tool_calls
-        delta = merged_result.choices[0].delta
+        choice = merged_result.choices[0]
+        assert choice.finish_reason == FinisheReason.tool_calls, f"got finish_reason: {choice.finish_reason}"
+        delta = choice.delta
         assert delta.role == RoleEnum.assistant
         self._assert_tool_call_response(delta)
 
