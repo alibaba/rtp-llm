@@ -32,14 +32,16 @@ def copy_all_so():
 
 def requirement(names):
     for name in names:
+        cpu_dep = [] if name == "triton" else [requirement_cpu(name)]
+        arm_dep = [] if name == "triton" else [requirement_arm(name)]
         native.py_library(
             name = name,
             deps = select({
                 "@//:cuda_pre_12_9": [requirement_gpu_cuda12(name)],
                 "@//:using_cuda12_9_x86": [requirement_gpu_cuda12_9(name)],
                 "@//:using_rocm": [requirement_gpu_rocm(name)],
-                "@//:using_arm": [requirement_arm(name)],
-                "//conditions:default": [requirement_cpu(name)],
+                "@//:using_arm": arm_dep,
+                "//conditions:default": cpu_dep,
             }),
             visibility = ["//visibility:public"],
         )
@@ -176,9 +178,15 @@ def cuda_register():
     )
 
 def triton_deps(names):
-    return select({
-        "//conditions:default": [],
-    })
+    return [
+        select({
+            "@//:cuda_pre_12_9": [requirement_gpu_cuda12(name)],
+            "@//:using_cuda12_9_x86": [requirement_gpu_cuda12_9(name)],
+            "@//:using_rocm": [requirement_gpu_rocm(name)],
+            "//conditions:default": [],
+        })
+        for name in names
+    ]
 
 def internal_deps():
     return []

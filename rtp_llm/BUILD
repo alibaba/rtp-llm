@@ -216,7 +216,6 @@ py_library(
         ":av",
         "//rtp_llm/model_loader:loader",
         "//rtp_llm/models_py:models",
-        ":triton",
     ] + arch_dep + select({
         "@//:using_cuda12_9_x86": tensorrt + flashinfer,
         "@//:cuda_pre_12_9": tensorrt + flashinfer,
