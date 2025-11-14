@@ -1,11 +1,10 @@
 import logging
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 import aiter
 import torch
-from aiter import dtypes
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models_py.modules.common.mha.base import (
     FMHADecodeImplBase,
     FMHAImplBase,
@@ -16,7 +15,6 @@ from rtp_llm.ops.compute_ops import (
     FusedRopeKVCacheDecodeOp,
     FusedRopeKVCachePrefillOp,
     KVCache,
-    ParamsBase,
     PyAttentionInputs,
 )
 
@@ -117,11 +115,11 @@ class FMHAParams(ParamsBase):
 
 
 class AiterPrefillAttnOp:
-    def __init__(self, config: GptInitModelParameters):
-        self.head_num = config.head_num // config.tp_size
+    def __init__(self, config: ModelConfig, parallelism_config: ParallelismConfig):
+        tp_size = parallelism_config.tp_size
+        self.head_num = config.head_num // tp_size
         self.head_dim = config.size_per_head
-        self.head_num_kv = config.head_num_kv // config.tp_size
-        self.kv_cache_data_type = config.kv_cache_data_type
+        self.head_num_kv = config.head_num_kv // tp_size
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
         return True
@@ -169,15 +167,13 @@ class AiterPrefillAttnOp:
 
 
 class AiterDecodeAttnOp:
-    def __init__(self, config: GptInitModelParameters):
-        self.head_num = config.head_num // config.tp_size
+    def __init__(self, config: ModelConfig, py_hw_kernel_config, parallelism_config: ParallelismConfig):
+        tp_size = parallelism_config.tp_size
+        self.head_num = config.head_num // tp_size
         self.head_dim = config.size_per_head
-        self.head_num_kv = config.head_num_kv // config.tp_size
-        self.kv_cache_data_type = config.kv_cache_data_type
-        self.use_asm_pa = config.hw_kernel_config.use_asm_pa
-        self.enable_cuda_graph = (
-            config.gpt_init_params.hw_kernel_config.enable_cuda_graph
-        )
+        self.head_num_kv = config.head_num_kv // tp_size
+        self.use_asm_pa = py_hw_kernel_config.use_asm_pa
+        self.enable_cuda_graph = py_hw_kernel_config.enable_cuda_graph
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
         return True

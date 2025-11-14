@@ -10,7 +10,7 @@ namespace rtp_llm {
 EngineBase::EngineBase(const EngineInitParams& params) {
     initDevices(params);
     lora_manager_ =
-        std::make_shared<lora::LoraManager>(params.gpt_init_parameter.model_specific_config.max_lora_model_size);
+        std::make_shared<lora::LoraManager>(params.model_specific_config.max_lora_model_size);
 }
 
 EngineBase::~EngineBase() {}
@@ -25,10 +25,23 @@ std::shared_ptr<GenerateStream> EngineBase::makeStream(const std::shared_ptr<Gen
 
 void EngineBase::initDevices(const EngineInitParams& params) {
     const auto rank =
-        params.gpt_init_parameter.dp_rank_ * params.gpt_init_parameter.tp_size_ + params.gpt_init_parameter.tp_rank_;
+        params.parallelism_config.dp_rank * params.parallelism_config.tp_size + params.parallelism_config.tp_rank;
     Logger::getEngineLogger().setRank(rank);
     Logger::getEngineLogger().flush();
-    rtp_llm::DeviceFactory::initDevices(params.gpt_init_parameter);
+    rtp_llm::DeviceFactory::initDevices(
+        params.parallelism_config,
+        params.model_config_,
+        params.eplb_config,
+        params.fmha_config,
+        params.device_resource_config,
+        params.moe_config,
+        params.sp_config,
+        params.misc_config,
+        params.profiling_debug_logging_config,
+        params.hw_kernel_config,
+        params.concurrency_config,
+        params.ffn_disaggregate_config,
+        params.runtime_config);
     device_ = rtp_llm::DeviceFactory::getDefaultDevice();
 }
 

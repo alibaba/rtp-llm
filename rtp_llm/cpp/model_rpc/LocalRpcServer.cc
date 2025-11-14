@@ -18,8 +18,8 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
     meta_.reset(new RpcServerRuntimeMeta());
     maga_init_params_ = maga_init_params;
     metrics_reporter_ = maga_init_params.metrics_reporter;
-    RTP_LLM_LOG_INFO("LocalRpcServer aux_string %s",
-                        maga_init_params_.gpt_init_parameter.misc_config.aux_string.c_str());
+    RTP_LLM_LOG_WARNING("LocalRpcServer aux_string %s",
+                        maga_init_params_.misc_config.aux_string.c_str());
     if (propose_params) {
         propose_maga_init_params_ = propose_params.get();
         if (!mm_process_engine.is_none()) {
@@ -44,13 +44,13 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
             engine_.reset(new NormalEngine(maga_init_params));
         }
         if (!mm_process_engine.is_none()) {
-            auto vit_separation = maga_init_params.gpt_init_parameter.vit_separation_;
-            if (vit_separation == 2) {
+            auto vit_separation = maga_init_params.vit_config.vit_separation;
+            if (vit_separation == VitSeparation::VIT_SEPARATION_REMOTE) {
                 mm_processor_.reset(
-                    new RemoteMultimodalProcessor(mm_process_engine, maga_init_params.gpt_init_parameter));
-            } else if (vit_separation == 0) {
+                    new RemoteMultimodalProcessor(mm_process_engine, maga_init_params.model_config_.mm_model_config, maga_init_params.model_config_.max_seq_len));
+            } else if (vit_separation == VitSeparation::VIT_SEPARATION_LOCAL) {
                 mm_processor_.reset(
-                    new LocalMultimodalProcessor(mm_process_engine, maga_init_params.gpt_init_parameter));
+                    new LocalMultimodalProcessor(mm_process_engine, maga_init_params.model_config_.mm_model_config, maga_init_params.model_config_.max_seq_len));
             } else {
                 return grpc::Status(grpc::StatusCode::INTERNAL, "invalid vit separation value in config");
             }
@@ -94,11 +94,12 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
         }
         RTP_LLM_LOG_DEBUG("request [%s] generate next output success", request_key.c_str());
         GenerateOutputsPB outputs_pb;
+
         QueryConverter::transResponse(&outputs_pb,
                                       &(result.value()),
                                       stream->generateConfig()->aux_info,
-                                      maga_init_params_.gpt_init_parameter.misc_config.aux_string,
-                                      stream->specialTokens().eos_token_id_);
+                                      maga_init_params_.misc_config.aux_string,
+                                      stream->specialTokens().eos_token_id);
         if (context->IsCancelled()) {
             stream->cancel();
             RTP_LLM_LOG_WARNING("request [%s] cancelled by user", request_key.c_str());
@@ -180,7 +181,7 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
         "receive workerStatus rpc request from client: %s, latest_finished_version: %ld, config role_type: %d",
         context->peer().c_str(),
         latest_finished_version,
-        maga_init_params_.gpt_init_parameter.role_type_);
+        maga_init_params_.pd_sep_config.role_type);
 
     WorkerStatusInfo status_info              = getWorkerStatusInfo(latest_finished_version);
     int64_t          request_after_ws_time_us = currentTimeUs();
@@ -226,7 +227,7 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
 WorkerStatusInfo LocalRpcServer::getWorkerStatusInfo(int64_t latest_finished_version) {
     WorkerStatusInfo status_info;
     status_info.engine_schedule_info = getEngineScheduleInfo(latest_finished_version);
-    switch (maga_init_params_.gpt_init_parameter.role_type_) {
+    switch (maga_init_params_.pd_sep_config.role_type) {
         case RoleType::PDFUSION:
             status_info.role = "RoleType.PDFUSION";
             break;
@@ -245,12 +246,12 @@ WorkerStatusInfo LocalRpcServer::getWorkerStatusInfo(int64_t latest_finished_ver
         default:
             status_info.role = "RoleType.UNKNOWN";
     }
-    status_info.dp_size        = maga_init_params_.gpt_init_parameter.dp_size_;
-    status_info.tp_size        = maga_init_params_.gpt_init_parameter.tp_size_;
-    status_info.dp_rank        = maga_init_params_.gpt_init_parameter.dp_rank_;
+    status_info.dp_size        = maga_init_params_.parallelism_config.dp_size;
+    status_info.tp_size        = maga_init_params_.parallelism_config.tp_size;
+    status_info.dp_rank        = maga_init_params_.parallelism_config.dp_rank;
     status_info.status_version = currentTimeUs();
     status_info.alive          = true;
-    auto quant_method          = maga_init_params_.gpt_init_parameter.quant_algo_.getQuantMethod();
+    auto quant_method          = maga_init_params_.model_config_.quant_algo.getQuantMethod();
 
     switch (quant_method) {
         case QuantMethod::WeightOnlyPerCol:

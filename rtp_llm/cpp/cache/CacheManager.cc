@@ -15,10 +15,6 @@
 #include "rtp_llm/cpp/core/Buffer.h"
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
-#ifdef ENABLE_FP8
-#include <cuda_fp8.h>
-#endif
-
 using namespace std;
 
 namespace rtp_llm {
@@ -27,13 +23,17 @@ CacheManager::CacheManager(const CacheConfig&                 config,
                            rtp_llm::DeviceBase*               device,
                            bool                               warmup,
                            const kmonitor::MetricsReporterPtr metrics_reporter,
-                           const GptInitParameter&            params):
+                           const KVCacheConfig&                kv_cache_config,
+                           const ParallelismConfig&            parallelism_config,
+                           const RuntimeConfig&                runtime_config):
     config_(config),
     seq_size_per_block_(config.seq_size_per_block),
     block_cache_(config.seq_size_per_block),
     device_(device),
     metrics_reporter_(metrics_reporter),
-    params_(params) {
+    kv_cache_config_(kv_cache_config),
+    parallelism_config_(parallelism_config),
+    runtime_config_(runtime_config) {
 
     if (warmup) {
         config_.block_nums = 1;
@@ -51,18 +51,18 @@ CacheManager::CacheManager(const CacheConfig&                 config,
     if (metrics_reporter_) {
         metrics_reporter_thread_ = std::thread(&CacheManager::reportMetricsLoop, this);
     }
-    if (params_.kv_cache_config.enable_3fs) {
+    if (kv_cache_config_.enable_3fs) {
         enable_dist_kvcache_ = initDistKvCache();
         if (!enable_dist_kvcache_) {
             RTP_LLM_FAIL("dist kv cache init failed");
         }
     }
 
-    if (params_.kv_cache_config.memory_block_cache_size_mb > 0) {
+    if (kv_cache_config_.memory_block_cache_size_mb > 0) {
         int64_t block_nums =
-            (int64_t)params_.kv_cache_config.memory_block_cache_size_mb * 1024 * 1024 / config_.block_size;
+            (int64_t)kv_cache_config_.memory_block_cache_size_mb * 1024 * 1024 / config_.block_size;
         RTP_LLM_LOG_INFO("init memory block cache, size: %d MB, block nums: %ld",
-                         params_.kv_cache_config.memory_block_cache_size_mb,
+                         kv_cache_config_.memory_block_cache_size_mb,
                          block_nums);
 
         auto memory_block_cache_config       = config_;
@@ -70,12 +70,13 @@ CacheManager::CacheManager(const CacheConfig&                 config,
         memory_block_cache_config.refresh();
 
         memory_block_cache_ = std::make_shared<MemoryBlockCache>(
-            memory_block_cache_config, device_, allocator_.get(), params_, metrics_reporter_);
+            memory_block_cache_config, device_, allocator_.get(), parallelism_config_, kv_cache_config_, runtime_config_, metrics_reporter_);
         if (!memory_block_cache_->init()) {
             RTP_LLM_FAIL("memory block cache init failed");
         }
     }
 }
+
 
 void CacheManager::regUserMr(size_t model_id) {
     allocator_->regUserMr(model_id);
@@ -146,6 +147,10 @@ void CacheManager::allocateAndSync() {
 
 const CacheConfig& CacheManager::cacheConfig() const {
     return config_;
+}
+
+const KVCacheConfig& CacheManager::kvCacheConfig() const {
+    return kv_cache_config_;
 }
 
 const BlockCache& CacheManager::blockCache() const {
@@ -463,19 +468,19 @@ KVCacheAllocator::BlockAddrInfo CacheManager::convertIndexToAddr(int block_index
 
 bool CacheManager::initDistKvCache() {
     DistKvCacheInitParams init_params;
-    init_params.match_timeout_ms         = params_.kv_cache_config.match_timeout_ms;
-    init_params.rpc_get_cache_timeout_ms = params_.kv_cache_config.rpc_get_cache_timeout_ms;
-    init_params.rpc_put_cache_timeout_ms = params_.kv_cache_config.rpc_put_cache_timeout_ms;
-    init_params.max_block_size_per_item  = params_.kv_cache_config.max_block_size_per_item;
-    if (params_.kv_cache_config.enable_3fs) {
+    init_params.match_timeout_ms         = kv_cache_config_.match_timeout_ms;
+    init_params.rpc_get_cache_timeout_ms = kv_cache_config_.rpc_get_cache_timeout_ms;
+    init_params.rpc_put_cache_timeout_ms = kv_cache_config_.rpc_put_cache_timeout_ms;
+    init_params.max_block_size_per_item  = kv_cache_config_.max_block_size_per_item;
+    if (kv_cache_config_.enable_3fs) {
         DistStorage3FSInitParams init_params_3fs;
-        init_params_3fs.read_iov_size                      = params_.kv_cache_config.threefs_read_iov_size;
-        init_params_3fs.write_iov_size                     = params_.kv_cache_config.threefs_write_iov_size;
-        init_params_3fs.read_timeout_ms                    = params_.kv_cache_config.threefs_read_timeout_ms;
-        init_params_3fs.write_timeout_ms                   = params_.kv_cache_config.threefs_write_timeout_ms;
+        init_params_3fs.read_iov_size                      = kv_cache_config_.threefs_read_iov_size;
+        init_params_3fs.write_iov_size                     = kv_cache_config_.threefs_write_iov_size;
+        init_params_3fs.read_timeout_ms                    = kv_cache_config_.threefs_read_timeout_ms;
+        init_params_3fs.write_timeout_ms                   = kv_cache_config_.threefs_write_timeout_ms;
         init_params.storage_manager_params.init_params_3fs = init_params_3fs;
     }
-    auto dist_kvcache = std::make_shared<DistKvCache>(this, params_, metrics_reporter_);
+    auto dist_kvcache = std::make_shared<DistKvCache>(this, parallelism_config_, runtime_config_, metrics_reporter_);
     if (!dist_kvcache->init(init_params)) {
         RTP_LLM_LOG_WARNING("dist kvcache init failed!!!");
         return false;

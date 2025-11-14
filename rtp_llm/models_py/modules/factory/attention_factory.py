@@ -4,7 +4,6 @@ from typing import Any, Callable, Dict, List, Type
 import torch
 import torch.nn as nn
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.modules import (
     DECODE_MHA_IMPS,
@@ -13,18 +12,21 @@ from rtp_llm.models_py.modules import (
     PREFILL_MLA_IMPS,
     FMHAImplBase,
 )
+from rtp_llm.ops import AttentionConfigs
 from rtp_llm.ops.compute_ops import PyAttentionInputs
 from rtp_llm.utils.model_weight import W
 
 
 def get_mla_impl(
-    config: GptInitModelParameters, weight: ModelWeights, attn_inputs: PyAttentionInputs
+    attn_configs: AttentionConfigs,
+    weight: ModelWeights,
+    attn_inputs: PyAttentionInputs
 ) -> FMHAImplBase:
     mla_impls = PREFILL_MLA_IMPS if attn_inputs.is_prefill else DECODE_MLA_IMPS
     for impl in mla_impls:
         cos_sin_cache = weight.get_global_weight(W.rope_cos_sin_cache)
         instance = impl(
-            config,
+            attn_configs,
             attn_inputs,
             weight.weights,
             cos_sin_cache,
@@ -35,11 +37,13 @@ def get_mla_impl(
 
 
 def get_fmha_impl(
-    config: GptInitModelParameters, weight: ModelWeights, attn_inputs: PyAttentionInputs
+    attn_configs: AttentionConfigs,
+    weight: ModelWeights,
+    attn_inputs: PyAttentionInputs
 ) -> FMHAImplBase:
     mha_impls = PREFILL_MHA_IMPS if attn_inputs.is_prefill else DECODE_MHA_IMPS
     for impl in mha_impls:
-        instance = impl(config, attn_inputs)
+        instance = impl(attn_configs, attn_inputs)
         if instance.support():
             return instance
     raise Exception(f"can not find mha type")
@@ -52,7 +56,7 @@ class AttnImplFactory(object):
     FMHA_IMPL_REGISTRY: Dict[
         str,
         Callable[
-            [GptInitModelParameters, ModelWeights, PyAttentionInputs], FMHAImplBase
+            [AttentionConfigs, ModelWeights, PyAttentionInputs], FMHAImplBase
         ],
     ] = {
         "mha": get_fmha_impl,
@@ -62,13 +66,16 @@ class AttnImplFactory(object):
     @classmethod
     def get_fmha_impl(
         cls,
-        config: GptInitModelParameters,
+        model_config,  # ModelConfig - kept for backward compatibility, but will extract attn_configs
+        parallelism_config,
         weight: ModelWeights,
         attn_inputs: PyAttentionInputs,
     ) -> FMHAImplBase:
-        key_str = "mla" if config.use_mla else "mha"
+        # Extract AttentionConfigs from ModelConfig
+        attn_configs = model_config.getAttentionConfigs(parallelism_config.tp_size)
+        key_str = "mla" if attn_configs.use_mla else "mha"
         fmha_impl_method = cls.FMHA_IMPL_REGISTRY[key_str]
-        instance = fmha_impl_method(config, weight, attn_inputs)
+        instance = fmha_impl_method(attn_configs, weight, attn_inputs)
         logging.debug(f"get fmha impl: {instance.fmha_type()}")
         return instance
 

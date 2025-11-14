@@ -3,7 +3,7 @@ from typing import Any, Dict, List, Tuple
 import numpy as np
 
 from rtp_llm.async_decoder_engine.embedding.interface import EngineInputs, EngineOutputs
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.models.downstream_modules.classifier.bert_classifier import (
     BertClassifierHandler,
@@ -24,28 +24,28 @@ from rtp_llm.models.downstream_modules.reranker.api_datatype import (
 
 
 class RerankerModule(CustomModule):
-    def __init__(self, config: GptInitModelParameters, tokenizer: BaseTokenizer):
+    def __init__(self, config: ModelConfig, tokenizer: BaseTokenizer):
         super().__init__(config, tokenizer)
         self.renderer = RerankerRenderer(self.config_, self.tokenizer_)
         self.handler = ClassifierHandler(self.config_)
 
 
 class BertRerankerModule(CustomModule):
-    def __init__(self, config: GptInitModelParameters, tokenizer: BaseTokenizer):
+    def __init__(self, config: ModelConfig, tokenizer: BaseTokenizer):
         super().__init__(config, tokenizer)
         self.renderer = RerankerRenderer(self.config_, self.tokenizer_)
         self.handler = BertClassifierHandler(self.config_)
 
 
 class RobertaRerankerModule(CustomModule):
-    def __init__(self, config: GptInitModelParameters, tokenizer: BaseTokenizer):
+    def __init__(self, config: ModelConfig, tokenizer: BaseTokenizer):
         super().__init__(config, tokenizer)
         self.renderer = RerankerRenderer(self.config_, self.tokenizer_)
         self.handler = RobertaClassifierHandler(self.config_)
 
 
 class RerankerRenderer(CustomRenderer):
-    def __init__(self, config: GptInitModelParameters, tokenizer: BaseTokenizer):
+    def __init__(self, config: ModelConfig, tokenizer: BaseTokenizer):
         super().__init__(config, tokenizer)
         self.generator = CommonInputGenerator(tokenizer, config)
 

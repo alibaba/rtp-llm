@@ -45,7 +45,7 @@ absl::Status ScoreExecutor::score(const std::list<GenerateStreamPtr>& streams, b
     return absl::OkStatus();
 }
 
-bool ScoreExecutor::updateEplbConfig(const EplbConfig& config) {
+bool ScoreExecutor::updateEplbConfig(const EPLBConfig& config) {
     score_normal_executor_.updateEplbConfig(config);
     normal_executor_.updateEplbConfig(config);
     return true;

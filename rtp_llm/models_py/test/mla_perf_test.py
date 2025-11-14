@@ -15,7 +15,7 @@ MAX_ITERATIONS = 100000
 # sys.path.append(os.path.join(str(CUR_PATH), "../../../"))
 device = torch.device(f"cuda")
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models.rotary_embedding.deepseek_rotary_embedding import (
     DeepseekV3YarnRotaryEmbedding,
 )
@@ -149,7 +149,7 @@ class MLABenchmark(TestCase):
         )
 
         # 配置参数
-        config = GptInitModelParameters(128, 16, 27, 1024, 102400)
+        config = ModelConfig()
         config.head_num = 16
         config.hidden_size = hidden_size
         config.nope_head_dim = 128
@@ -159,7 +159,7 @@ class MLABenchmark(TestCase):
         config.q_lora_rank = 0
         config.seq_size_per_block = 64
         config.softmax_extra_scale = 1.0
-        config.use_mla = True
+        config.attn_config.use_mla = True
         config.size_per_head = 192
 
         torch.manual_seed(0)

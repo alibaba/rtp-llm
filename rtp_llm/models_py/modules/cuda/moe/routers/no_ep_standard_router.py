@@ -3,7 +3,7 @@ from typing import Any, Optional
 import torch
 
 import rtp_llm.models_py.modules.common.moe.fused_moe as mm
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.models_py.modules.common.moe.router.config_adapter import MoEConfigAdapter
 from rtp_llm.models_py.modules.cuda.moe.executors.util import moe_kernel_quantize_input
 from rtp_llm.models_py.modules.factory.fused_moe.quant_config import FusedMoEQuantConfig
 from rtp_llm.models_py.modules.factory.fused_moe.type import RouterType
@@ -16,7 +16,7 @@ class DataRouterNoEPStandard(mm.FusedMoeDataRouter):
         return RouterType.PURE_TP
 
     @classmethod
-    def check_conditions(cls, checker: Any, config: GptInitModelParameters) -> None:
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         """Check if DataRouterNoEPStandard can handle the configuration"""
         from rtp_llm.models_py.modules.factory.fused_moe.config_resolver import (
             MoeConfigResolver,

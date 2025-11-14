@@ -1,5 +1,6 @@
 #include "rtp_llm/models_py/bindings/cuda/FusedMoEOp.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
+#include "rtp_llm/cpp/model_utils/activation_types.h"
 #include <cstdint>
 
 namespace rtp_llm {
@@ -20,8 +21,15 @@ nvinfer1::DataType nvinfer1DtypeConvert(at::ScalarType dtype) {
     return nvinfer1::DataType::kFLOAT;
 }
 
-FusedMoEOp::FusedMoEOp(const GptInitParameter& gpt_init_parameter):
-    configs_(gpt_init_parameter), moe_plugin_(std::make_unique<trt_plugins::MixtureOfExpertsPlugin>()) {}
+FusedMoEOp::FusedMoEOp(const ModelConfig& model_config, const ParallelismConfig& parallelism_config):
+    expert_num_(model_config.expert_num),
+    moe_k_(model_config.moe_k),
+    moe_normalize_expert_scale_(model_config.moe_normalize_expert_scale),
+    has_moe_norm_(model_config.has_moe_norm),
+    activation_type_(model_config.activation_type),
+    ep_size_(parallelism_config.ep_size),
+    ep_rank_(parallelism_config.ep_rank),
+    moe_plugin_(std::make_unique<trt_plugins::MixtureOfExpertsPlugin>()) {}
 void FusedMoEOp::forward(torch::Tensor hidden_states,
                          torch::Tensor up_proj,
                          torch::Tensor down_proj,
@@ -32,14 +40,14 @@ void FusedMoEOp::forward(torch::Tensor hidden_states,
     const auto weight_type            = down_proj.scalar_type();
     const auto token_num              = hidden_states.sizes()[0];
     const auto hidden_dim             = hidden_states.sizes()[1];
-    const auto num_expert             = configs_.expert_num_;
-    const auto top_k                  = configs_.moe_k_;
-    const auto moe_inter_size         = configs_.moe_inter_padding_size_;
-    const auto normalize_expert_scale = configs_.moe_normalize_expert_scale_;
-    auto       normalization_mode     = configs_.has_moe_norm_ ?
-                                            tensorrt_llm::kernels::MOEExpertScaleNormalizationMode::RENORMALIZE :
-                                            tensorrt_llm::kernels::MOEExpertScaleNormalizationMode::NONE;
-    auto       group_size             = 0;
+    const auto num_expert             = expert_num_;
+    const auto top_k                  = moe_k_;
+    bool       is_gated_activation    = isGatedActivation(activation_type_);
+    const auto moe_inter_size         = is_gated_activation ? up_proj.sizes()[1] / 2 : up_proj.sizes()[1];
+    const auto normalize_expert_scale = moe_normalize_expert_scale_;
+    auto normalization_mode = has_moe_norm_ ? tensorrt_llm::kernels::MOEExpertScaleNormalizationMode::RENORMALIZE :
+                                              tensorrt_llm::kernels::MOEExpertScaleNormalizationMode::NONE;
+    auto group_size         = 0;
     // TODO group_size
     if (token_num == 0) {
         return;
@@ -49,14 +57,14 @@ void FusedMoEOp::forward(torch::Tensor hidden_states,
                       normalize_expert_scale,
                       hidden_dim,
                       moe_inter_size,
-                      configs_.activation_type_,
+                      activation_type_,
                       nvinfer1DtypeConvert(type),
                       nvinfer1DtypeConvert(weight_type),
                       group_size > 0,
                       group_size,
                       normalization_mode,
-                      configs_.ep_size_,
-                      configs_.ep_rank_);
+                      ep_size_,
+                      ep_rank_);
     const auto new_ws_size = moe_plugin_->getWorkspaceSize(token_num);
     const auto new_worksapce =
         torch::zeros({static_cast<int64_t>(new_ws_size)}, hidden_states.options().dtype(torch::kUInt8));
@@ -114,15 +122,17 @@ void FusedMoEOp::forward(torch::Tensor hidden_states,
 
 void registerFusedMoEOp(const py::module& m) {
     pybind11::class_<FusedMoEOp>(m, "FusedMoEOp")
-        .def(pybind11::init<GptInitParameter>(), py::arg("gpt_init_parameter"))
+        .def(pybind11::init<const ModelConfig&, const ParallelismConfig&>(),
+             pybind11::arg("model_config"),
+             pybind11::arg("parallelism_config"))
         .def("forward",
              &FusedMoEOp::forward,
-             py::arg("hidden_states"),
-             py::arg("up_proj"),
-             py::arg("down_proj"),
-             py::arg("expert_scales"),
-             py::arg("expert_ids"),
-             py::arg("outputs"));
+             pybind11::arg("hidden_states"),
+             pybind11::arg("up_proj"),
+             pybind11::arg("down_proj"),
+             pybind11::arg("expert_scales"),
+             pybind11::arg("expert_ids"),
+             pybind11::arg("outputs"));
 }
 
 }  // namespace rtp_llm

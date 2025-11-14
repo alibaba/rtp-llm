@@ -121,8 +121,6 @@ private:
     int64_t mr_cost_time_ms_ = 0;
 
     mutable std::mutex mutex_;
-
-    const GptInitParameter params_;
 };
 
 typedef std::shared_ptr<KVCacheAllocator> KVCacheAllocatorPtr;

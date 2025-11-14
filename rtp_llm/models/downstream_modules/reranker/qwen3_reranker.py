@@ -6,7 +6,7 @@ import torch
 from transformers import PreTrainedTokenizerBase
 
 from rtp_llm.async_decoder_engine.embedding.interface import EngineInputs
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.metrics import GaugeMetrics, kmonitor
 from rtp_llm.model_loader.weight_module import CustomAtomicWeight
 from rtp_llm.models.downstream_modules.custom_module import CustomHandler, CustomModule
@@ -23,7 +23,7 @@ from rtp_llm.utils.util import to_torch_dtype
 class Qwen3RerankerModule(CustomModule):
 
     def __init__(
-        self, config: GptInitModelParameters, tokenizer: PreTrainedTokenizerBase
+        self, config: ModelConfig, tokenizer: PreTrainedTokenizerBase
     ):
         super().__init__(config, tokenizer)
         self.renderer = Qwen3RerankerRenderer(self.config_, self.tokenizer_)
@@ -34,7 +34,7 @@ class Qwen3RerankerModule(CustomModule):
 
 class Qwen3RerankerRenderer(RerankerRenderer):
     def __init__(
-        self, config: GptInitModelParameters, tokenizer: PreTrainedTokenizerBase
+        self, config: ModelConfig, tokenizer: PreTrainedTokenizerBase
     ):
         super().__init__(config, tokenizer)
         prefix = '<|im_start|>system\nJudge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be "yes" or "no".<|im_end|>\n<|im_start|>user\n'
@@ -102,7 +102,7 @@ class Qwen3RerankerRenderer(RerankerRenderer):
 class Qwen3RerankerHandler(CustomHandler):
 
     def __init__(
-        self, config: GptInitModelParameters, token_false_id: int, token_true_id: int
+        self, config: ModelConfig, token_false_id: int, token_true_id: int
     ):
         super().__init__(config)
         self.token_false_id = token_false_id

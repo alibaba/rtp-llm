@@ -17,8 +17,17 @@ from rtp_llm.openai.renderers.custom_renderer import (
 
 
 class ChatGlm4Renderer(CustomChatRenderer):
-    def __init__(self, tokenizer: BaseTokenizer, renderer_params: RendererParams):
-        super().__init__(tokenizer, renderer_params)
+    def __init__(
+        self, 
+        tokenizer: BaseTokenizer, 
+        renderer_params: RendererParams,
+        generate_env_config,
+        render_config=None,
+        ckpt_path=None,
+        misc_config=None,
+        vit_config=None,
+    ):
+        super().__init__(tokenizer, renderer_params, generate_env_config, render_config, ckpt_path, misc_config, vit_config)
 
     def get_renderer_info(self) -> RendererInfo:
         renderer_info = super().get_renderer_info()

@@ -1,4 +1,5 @@
 import logging
+import os
 from typing import Any, Dict
 
 from rtp_llm.access_logger.json_util import dump_json
@@ -10,9 +11,9 @@ ACCESS_LOGGER_NAME = "access_logger"
 QUERY_ACCESS_LOGGER_NAME = "query_access_logger"
 
 
-def init_access_logger() -> None:
+def init_access_logger(log_path: str, backup_count: int) -> None:
     access_logger = logging.getLogger(ACCESS_LOGGER_NAME)
-    handler = get_handler("access.log")
+    handler = get_handler("access.log", log_path, backup_count)
     formatter = logging.Formatter("%(message)s")
     access_logger.handlers.clear()
     access_logger.parent = None
@@ -21,9 +22,9 @@ def init_access_logger() -> None:
         access_logger.addHandler(handler)
 
 
-def init_query_access_logger() -> None:
+def init_query_access_logger(log_path: str, backup_count: int) -> None:
     access_logger = logging.getLogger(QUERY_ACCESS_LOGGER_NAME)
-    handler = get_handler("query_access.log")
+    handler = get_handler("query_access.log", log_path, backup_count)
     formatter = logging.Formatter("%(message)s")
     access_logger.handlers.clear()
     access_logger.parent = None
@@ -33,9 +34,9 @@ def init_query_access_logger() -> None:
 
 
 class AccessLogger:
-    def __init__(self) -> None:
-        init_access_logger()
-        init_query_access_logger()
+    def __init__(self, log_path: str, backup_count: int) -> None:
+        init_access_logger(log_path, backup_count)
+        init_query_access_logger(log_path, backup_count)
         self.logger = logging.getLogger(ACCESS_LOGGER_NAME)
         self.query_logger = logging.getLogger(QUERY_ACCESS_LOGGER_NAME)
 

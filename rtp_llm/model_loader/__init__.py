@@ -9,7 +9,6 @@ from .ffn_weight import (
     MoeWithSharedWeight,
 )
 from .group_wise_quant_weight import GroupWiseWeight
-from .loader import ModelLoader
 from .omni_quant_weight import OmniQuantWeightInfo
 from .per_block_fp8_quant_weight import PerBlockFp8Weight
 from .per_channel_fp8_quant_weight import PerChannelFp8Weight

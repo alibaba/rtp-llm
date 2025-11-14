@@ -28,7 +28,7 @@ TEST_F(GptModelTest, testSimple) {
     attention_conf.rope_config.style     = RopeStyle::Base;
     attention_conf.rope_config.dim       = 64;
     attention_conf.rope_config.base      = 1000000;
-    attention_conf.mask_type             = AttentionMaskType::causalMask;
+    attention_conf.is_causal             = true;
 
     const auto  cache_block_num = 128;
     CacheConfig cache_config(KVCacheParam({static_cast<uint>(weights->layers.size()),

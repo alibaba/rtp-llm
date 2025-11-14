@@ -6,7 +6,9 @@
 
 namespace rtp_llm {
 
-XQAAttnOp::XQAAttnOp(const GptInitParameter& gpt_init_parameter): FMHACudaBase(gpt_init_parameter) {}
+XQAAttnOp::XQAAttnOp(const AttentionConfigs& attn_configs):
+    attn_configs_(attn_configs),
+    device_(dynamic_cast<CudaDevice*>(DeviceFactory::getDefaultDevice())) {}
 
 bool XQAAttnOp::support(torch_ext::PyAttentionInputs attn_inputs) {
     return fmha_config_.enable_xqa && attn_configs_.kv_cache_dtype != KvCacheDataType::INT8
@@ -16,7 +18,10 @@ bool XQAAttnOp::support(torch_ext::PyAttentionInputs attn_inputs) {
                          DataType::TYPE_FP8_E4M3,
                          attn_configs_.head_num / attn_configs_.kv_head_num,
                          attn_configs_.size_per_head,
-                         attn_configs_.tokens_per_block);
+                         attn_configs_.tokens_per_block)) {
+        return true;
+    }
+    return false;
 }
 
 ParamsBasePtr XQAAttnOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
@@ -92,7 +97,8 @@ void registerXQAAttnOp(const py::module& m) {
     pybind11::class_<XQAParams, std::shared_ptr<XQAParams>, rtp_llm::ParamsBase>(m, "XQAParams")
         .def(pybind11::init<>());
     pybind11::class_<XQAAttnOp>(m, "XQAAttnOp")
-        .def(pybind11::init<GptInitParameter>(), py::arg("gpt_init_parameter"))
+        .def(pybind11::init<const AttentionConfigs&>(),
+             py::arg("attn_configs"))
         .def("support", &XQAAttnOp::support, py::arg("attn_inputs").noconvert())
         .def("prepare", &XQAAttnOp::prepare, py::arg("attn_inputs"))
         .def("forward", &XQAAttnOp::forward, py::arg("input"), py::arg("kv_cache"), py::arg("params"));
