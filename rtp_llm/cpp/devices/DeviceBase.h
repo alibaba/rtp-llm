@@ -160,6 +160,14 @@ public:
         return native_graph_capturing_;
     }
 
+    virtual void getRopeCacheOnce(const RopeConfig& rope_config, int max_position_embeddings);
+    bool         useRopeCache() const {
+        return use_rope_cache_;
+    }
+    torch::Tensor ropeCache() const {
+        return rope_cache_;
+    }
+
 public:
     // device-independence op implementations
     void         batchCopy(const BatchCopyParams& params) override;
@@ -216,6 +224,10 @@ protected:
 
     std::unique_ptr<MoEInsertionParams>  moe_insertion_params_;
     std::unique_ptr<MoEInsertionReturns> moe_insertion_ret_;
+
+    std::once_flag rope_cache_flag_;
+    bool           use_rope_cache_ = false;
+    torch::Tensor  rope_cache_;
 
 protected:
     std::unique_ptr<BufferManager> buffer_manager_;
