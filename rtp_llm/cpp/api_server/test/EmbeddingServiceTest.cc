@@ -51,22 +51,24 @@ protected:
     }
 
     void SetToMaster() {
-        autil::EnvGuard tp_size_env("TP_SIZE", "1");
-        autil::EnvGuard pp_size_env("PP_SIZE", "1");
-        autil::EnvGuard world_rank_env("WORLD_RANK", "0");
-        autil::EnvGuard world_size_env("WORLD_SIZE", "1");
-        autil::EnvGuard local_world_size_env("LOCAL_WORLD_SIZE", "1");
-        auto&           parallel_info = ParallelInfo::globalParallelInfo();
-        parallel_info.reload();
+        auto& parallel_info = ParallelInfo::globalParallelInfo();
+        parallel_info.setTpSize(1);
+        parallel_info.setPpSize(1);
+        parallel_info.setWorldRank(0);
+        parallel_info.setWorldSize(1);
+        parallel_info.setLocalWorldSize(1);
+        parallel_info.setDpSize(1);
+        parallel_info.setEpSize(1);
     }
     void SetToWorker() {
-        autil::EnvGuard tp_size_env("TP_SIZE", "1");
-        autil::EnvGuard pp_size_env("PP_SIZE", "2");
-        autil::EnvGuard world_rank_env("WORLD_RANK", "1");
-        autil::EnvGuard world_size_env("WORLD_SIZE", "2");
-        autil::EnvGuard local_world_size_env("LOCAL_WORLD_SIZE", "1");
-        auto&           parallel_info = ParallelInfo::globalParallelInfo();
-        parallel_info.reload();
+        auto& parallel_info = ParallelInfo::globalParallelInfo();
+        parallel_info.setTpSize(1);
+        parallel_info.setPpSize(2);
+        parallel_info.setWorldRank(1);
+        parallel_info.setWorldSize(2);
+        parallel_info.setLocalWorldSize(1);
+        parallel_info.setDpSize(1);
+        parallel_info.setEpSize(1);
     }
 
 protected:

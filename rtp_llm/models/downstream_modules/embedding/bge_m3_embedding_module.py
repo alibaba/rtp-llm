@@ -5,7 +5,7 @@ from pydantic import BaseModel
 
 from rtp_llm.async_decoder_engine.embedding.interface import EngineOutputs
 from rtp_llm.config.base_model_config import PyDanticModelBase
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.model_loader.weight_module import CustomAtomicWeight
@@ -41,7 +41,7 @@ class RequestTuple(PyDanticModelBase):
 
 
 class BgeM3EmbeddingModule(CustomModule):
-    def __init__(self, config: GptInitModelParameters, tokenizer: BaseTokenizer):
+    def __init__(self, config: ModelConfig, tokenizer: BaseTokenizer):
         self._colbert_module = ColBertEmbeddingModule(config, tokenizer)
         self._sparse_module = SparseEmbeddingModule(config, tokenizer)
         self._dense_module = DenseEmbeddingModule(config, tokenizer)

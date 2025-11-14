@@ -1,12 +1,22 @@
 #include "rtp_llm/models_py/bindings/cuda/TRTAttnOp.h"
 #include "rtp_llm/cpp/cuda/cufmha/TrtV2FmhaRunner.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
+#include "rtp_llm/models_py/bindings/common/Torch_ext.h"
+#include "rtp_llm/cpp/devices/DeviceFactory.h"
+#include "rtp_llm/cpp/devices/cuda_impl/CudaDevice.h"
 
 using namespace torch_ext;
 
 namespace rtp_llm {
 
-TRTPrefillOpBase::TRTPrefillOpBase(const GptInitParameter& gpt_init_parameter): FMHACudaBase(gpt_init_parameter) {}
+
+TRTPrefillOpBase::TRTPrefillOpBase(const AttentionConfigs& attn_configs):
+    attn_configs_(attn_configs) {}
+
+bool TRTPrefillOpBase::support(torch_ext::PyAttentionInputs attn_inputs) {
+    // FMHAConfig check will be done in Python layer
+    return attn_configs_.kv_cache_dtype != KvCacheDataType::INT8;
+}
 
 ParamsBasePtr TRTPrefillOpBase::prepare(torch_ext::PyAttentionInputs attn_inputs) {
     static_scale_        = torch::ones({1}, torch::TensorOptions(torch::kFloat32).device(torch::kCUDA));
@@ -20,7 +30,7 @@ ParamsBasePtr TRTPrefillOpBase::prepare(torch_ext::PyAttentionInputs attn_inputs
     auto          cu_seqlens    = attn_inputs.cu_seqlens;
     torch::Tensor cu_kv_seqlens = cu_seqlens;
     TRTAttnPtr    attn_params;
-    auto          run_stream   = at::cuda::getCurrentCUDAStream(at::cuda::current_device()).stream();
+    auto          run_stream   = GET_CURRENT_STREAM();
     bool          use_fp8_fmha = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
     auto          params       = prepareTrtAttnParams(attn_configs_,
                                        attn_inputs.kv_block_offset,
@@ -28,7 +38,7 @@ ParamsBasePtr TRTPrefillOpBase::prepare(torch_ext::PyAttentionInputs attn_inputs
                                        attn_inputs.input_lengths.size(0),
                                        use_fp8_fmha,
                                        run_stream,
-                                       fmha_config_.enable_paged_trt_fmha);
+                                       false);  // enable_paged_trt_fmha check is done in Python layer
     if (params) {
         attn_params = TRTAttnPtr(params, (TRTAttn*)params.get());
     } else {
@@ -56,8 +66,8 @@ bool TRTPagedPrefillOp::support(torch_ext::PyAttentionInputs attn_inputs) {
     bool has_prefix =
         attn_inputs.prefix_lengths.defined() && torch::any(attn_inputs.prefix_lengths.reshape({-1})).item<bool>();
 
-    if (!has_prefix || !fmha_config_.enable_trt_fmha || !fmha_config_.enable_paged_trt_fmha
-        || attn_configs_.kv_cache_dtype == KvCacheDataType::INT8) {
+    // FMHAConfig check is done in Python layer
+    if (!has_prefix || attn_configs_.kv_cache_dtype == KvCacheDataType::INT8) {
         return false;
     }
 
@@ -66,7 +76,7 @@ bool TRTPagedPrefillOp::support(torch_ext::PyAttentionInputs attn_inputs) {
                               DataType::TYPE_FP8_E4M3 :
                               torchDTypeToDataType(attn_inputs.dtype);
 
-    auto run_stream   = at::cuda::getCurrentCUDAStream(at::cuda::current_device()).stream();
+    auto run_stream   = GET_CURRENT_STREAM();
     bool use_fp8_fmha = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
     if (!trt_v2_runner_) {
         auto runner_config = TrtV2FmhaRunnerConfig::fromAttentionConfigs(attn_configs_);
@@ -119,11 +129,12 @@ bool TRTNormalPrefillOp::support(torch_ext::PyAttentionInputs attn_inputs) {
     bool has_prefix =
         attn_inputs.prefix_lengths.defined() && torch::any(attn_inputs.prefix_lengths.reshape({-1})).item<bool>();
 
-    if (has_prefix || !fmha_config_.enable_trt_fmha || attn_configs_.kv_cache_dtype == KvCacheDataType::INT8) {
+    // FMHAConfig check is done in Python layer
+    if (has_prefix || attn_configs_.kv_cache_dtype == KvCacheDataType::INT8) {
         return false;
     }
 
-    auto     run_stream   = at::cuda::getCurrentCUDAStream(at::cuda::current_device()).stream();
+    auto     run_stream   = GET_CURRENT_STREAM();
     bool     use_fp8_fmha = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
     DataType attn_dtype   = use_fp8_fmha ? DataType::TYPE_FP8_E4M3 : torchDTypeToDataType(attn_inputs.dtype);
 
@@ -151,8 +162,9 @@ torch::Tensor TRTNormalPrefillOp::forward(const torch::Tensor&              inpu
     const int size_per_head  = attn_configs_.size_per_head;
     const int token_num      = input.size(0);
     const int batch_size     = params->input_lengths.size(0);
+    auto* device = dynamic_cast<CudaDevice*>(DeviceFactory::getDefaultDevice());
     const int max_token_num =
-        device_->initParams().fifo_scheduler_config.max_context_batch_size * device_->initParams().max_seq_len;
+        device->initParams().runtime_config.fifo_scheduler_config.max_context_batch_size * device->initParams().max_seq_len;
     torch::TensorOptions options = torch::TensorOptions(input.dtype()).device(input.device());
 
     static torch::Tensor static_output = torch::zeros({max_token_num, local_head_num * size_per_head}, options);
@@ -202,13 +214,13 @@ torch::Tensor TRTNormalPrefillOp::forward(const torch::Tensor&              inpu
 
 void registerTRTAttnOp(const py::module& m) {
     pybind11::class_<TRTPagedPrefillOp>(m, "TRTPagedAttnOp")
-        .def(pybind11::init<GptInitParameter>(), py::arg("gpt_init_parameter"))
+        .def(pybind11::init<const AttentionConfigs&>(), py::arg("attn_configs"))
         .def("support", &TRTPagedPrefillOp::support, py::arg("attn_inputs"))
         .def("prepare", &TRTPagedPrefillOp::prepare, py::arg("attn_inputs"))
         .def("forward", &TRTPagedPrefillOp::forward, py::arg("input"), py::arg("kv_cache"), py::arg("params"));
 
     pybind11::class_<TRTNormalPrefillOp>(m, "TRTAttnOp")
-        .def(pybind11::init<GptInitParameter>(), py::arg("gpt_init_parameter"))
+        .def(pybind11::init<const AttentionConfigs&>(), py::arg("attn_configs"))
         .def("support", &TRTNormalPrefillOp::support, py::arg("attn_inputs"))
         .def("prepare", &TRTNormalPrefillOp::prepare, py::arg("attn_inputs"))
         .def("forward", &TRTNormalPrefillOp::forward, py::arg("input"), py::arg("kv_cache"), py::arg("params"));

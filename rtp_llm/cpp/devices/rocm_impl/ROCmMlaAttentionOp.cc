@@ -286,7 +286,7 @@ AttentionModuleOutput ROCmDevice::mlaContextAttention(const MlaAttentionModulePa
     const size_t hidden_units = head_num * nope_rope_dim;
 
     fmha_runner_->setup(
-        datatype, params.configs.mask_type, head_num, head_num, nope_rope_dim, params.configs.q_scaling);
+        datatype, params.configs.is_causal, head_num, head_num, nope_rope_dim, params.configs.q_scaling);
 
     auto lse_acc_buf = allocateBuffer({DataType::TYPE_FP32, {1, 1, 1, 1}, AllocationType::DEVICE}, {"lse_acc_buf"});
 

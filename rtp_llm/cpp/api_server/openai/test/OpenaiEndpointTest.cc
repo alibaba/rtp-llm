@@ -32,41 +32,42 @@ protected:
 };
 
 TEST_F(OpenaiEndpointTest, Constructor_TokenizerIsNull) {
-    auto openai_endpoint = std::make_shared<OpenaiEndpoint>(nullptr, nullptr, rtp_llm::GptInitParameter());
+    ModelConfig model_config;
+    auto openai_endpoint = std::make_shared<OpenaiEndpoint>(nullptr, nullptr, model_config);
     EXPECT_TRUE(openai_endpoint->stop_word_ids_list_.empty());
     EXPECT_TRUE(openai_endpoint->stop_words_list_.empty());
 }
 
 TEST_F(OpenaiEndpointTest, Constructor_IsPreTrainedTokenizer) {
-    rtp_llm::GptInitParameter param;
-    param.special_tokens_.eos_token_id_ = 5;
+    ModelConfig model_config;
+    model_config.special_tokens.eos_token_id = 5;
 
     EXPECT_CALL(*mock_tokenizer_, isPreTrainedTokenizer).WillOnce(Return(true));
     EXPECT_CALL(*mock_tokenizer_, getEosTokenId).WillOnce(Return(10));
 
-    auto openai_endpoint = std::make_shared<OpenaiEndpoint>(tokenizer_, nullptr, param);
+    auto openai_endpoint = std::make_shared<OpenaiEndpoint>(tokenizer_, nullptr, model_config);
     EXPECT_EQ(openai_endpoint->eos_token_id_, 10);
     EXPECT_TRUE(openai_endpoint->stop_word_ids_list_.empty());
     EXPECT_TRUE(openai_endpoint->stop_words_list_.empty());
 }
 
 TEST_F(OpenaiEndpointTest, Constructor_IsNotPreTrainedTokenizer) {
-    rtp_llm::GptInitParameter param;
-    param.special_tokens_.eos_token_id_ = 5;
+    ModelConfig model_config;
+    model_config.special_tokens.eos_token_id = 5;
 
     EXPECT_CALL(*mock_tokenizer_, isPreTrainedTokenizer).WillOnce(Return(false));
     EXPECT_CALL(*mock_tokenizer_, getEosTokenId).Times(0);
 
-    auto openai_endpoint = std::make_shared<OpenaiEndpoint>(tokenizer_, nullptr, param);
+    auto openai_endpoint = std::make_shared<OpenaiEndpoint>(tokenizer_, nullptr, model_config);
     EXPECT_EQ(openai_endpoint->eos_token_id_, 5);
     EXPECT_TRUE(openai_endpoint->stop_word_ids_list_.empty());
     EXPECT_TRUE(openai_endpoint->stop_words_list_.empty());
 }
 
 TEST_F(OpenaiEndpointTest, Constructor_RenderIsNotNull) {
-    rtp_llm::GptInitParameter param;
-    param.special_tokens_.eos_token_id_       = 5;
-    param.special_tokens_.stop_words_id_list_ = {{1, 2, 3}, {4, 5, 6}};
+    ModelConfig model_config;
+    model_config.special_tokens.eos_token_id       = 5;
+    model_config.special_tokens.stop_words_id_list = {{1, 2, 3}, {4, 5, 6}};
 
     EXPECT_CALL(*mock_tokenizer_, isPreTrainedTokenizer).WillOnce(Return(true));
     EXPECT_CALL(*mock_tokenizer_, getEosTokenId).WillOnce(Return(10));
@@ -76,7 +77,7 @@ TEST_F(OpenaiEndpointTest, Constructor_RenderIsNotNull) {
 
     std::vector<std::vector<int>> ids_list;
     {
-        for (const auto& list : param.special_tokens_.stop_words_id_list_) {
+        for (const auto& list : model_config.special_tokens.stop_words_id_list) {
             std::vector<int> temp(list.size());
             std::transform(list.begin(), list.end(), temp.begin(), [](int64_t val) { return static_cast<int>(val); });
             ids_list.push_back(temp);
@@ -90,7 +91,7 @@ TEST_F(OpenaiEndpointTest, Constructor_RenderIsNotNull) {
         word_list.push_back(word);
     }
 
-    auto openai_endpoint = std::make_shared<OpenaiEndpoint>(tokenizer_, render_, param);
+    auto openai_endpoint = std::make_shared<OpenaiEndpoint>(tokenizer_, render_, model_config);
     EXPECT_EQ(openai_endpoint->eos_token_id_, 10);
     EXPECT_EQ(openai_endpoint->stop_word_ids_list_, ids_list);
     EXPECT_EQ(openai_endpoint->stop_words_list_, word_list);
@@ -100,8 +101,8 @@ TEST_F(OpenaiEndpointTest, ExtractGenerationConfig) {
     EXPECT_CALL(*mock_tokenizer_, isPreTrainedTokenizer).WillOnce(Return(false));
     EXPECT_CALL(*mock_render_, get_all_extra_stop_word_ids_list).WillOnce(Return(std::vector<std::vector<int>>()));
 
-    rtp_llm::GptInitParameter param;
-    auto                      openai_endpoint = std::make_shared<OpenaiEndpoint>(tokenizer_, render_, param);
+    ModelConfig model_config;
+    auto                      openai_endpoint = std::make_shared<OpenaiEndpoint>(tokenizer_, render_, model_config);
 
     ChatCompletionRequest req;
     req.stream      = false;
@@ -129,12 +130,14 @@ TEST_F(OpenaiEndpointTest, ExtractGenerationConfig) {
 
 TEST_F(OpenaiEndpointTest, GetChatRender) {
     {
-        auto openai_endpoint = std::make_shared<OpenaiEndpoint>(nullptr, nullptr, rtp_llm::GptInitParameter());
+        ModelConfig model_config;
+        auto openai_endpoint = std::make_shared<OpenaiEndpoint>(nullptr, nullptr, model_config);
         EXPECT_EQ(openai_endpoint->getChatRender(), nullptr);
     }
     {
         EXPECT_CALL(*mock_render_, get_all_extra_stop_word_ids_list).WillOnce(Return(std::vector<std::vector<int>>()));
-        auto openai_endpoint = std::make_shared<OpenaiEndpoint>(nullptr, render_, rtp_llm::GptInitParameter());
+        ModelConfig model_config;
+        auto openai_endpoint = std::make_shared<OpenaiEndpoint>(nullptr, render_, model_config);
         EXPECT_EQ(openai_endpoint->getChatRender(), render_);
     }
 }

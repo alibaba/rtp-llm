@@ -518,9 +518,6 @@ class TrtEngineSmoothQuantWeightInfo(SmoothQuantWeightInfo):
             W.moe_w1,
             W.moe_w2,
         ]
-        inter_padding_size = src_weight.config.inter_padding_size
-        is_gated_activation = src_weight.config.is_gated_activation
-        is_moe = src_weight.config.is_moe
 
         if ffn_w_name in [W.ffn_w2]:
             assert len(weights) == 1

@@ -3,11 +3,16 @@ from typing import Dict, Tuple
 
 import torch
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used
 from rtp_llm.models_py.kernels.cuda.fp8_kernel.fp8_kernel import (
     per_block_cast_to_fp8,
     per_token_cast_to_fp8,
+)
+from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
+from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
+    ExpertForwardPayload,
+    ExpertTokensMetadata,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
@@ -20,6 +25,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.test.fused_
     generate_ref_output,
 )
 from rtp_llm.test.utils.numeric_util import calc_diff
+from rtp_llm.ops import MoeConfig, ParallelismConfig, RuntimeConfig
 from rtp_llm.utils.model_weight import W
 
 DP_SIZE = 4
@@ -36,26 +42,37 @@ K = HIDDEN_SIZE
 N = MOE_INTERMEDIATE_SIZE * 2
 
 
-def _generate_config() -> GptInitModelParameters:
-    config = GptInitModelParameters(
-        head_num=2,
-        size_per_head=128,
-        layer_num=2,
-        max_seq_len=2048,
-        vocab_size=500000,
+def _generate_config() -> MoEConfigAdapter:
+    model_config = ModelConfig()
+    model_config.attn_config.head_num = 2
+    model_config.attn_config.size_per_head = 128
+    model_config.num_layers = 2
+    model_config.max_seq_len = 2048
+    model_config.vocab_size = 500000
+    model_config.expert_num = NUM_EXPERTS
+    model_config.hidden_size = HIDDEN_SIZE
+    model_config.moe_inter_size = MOE_INTERMEDIATE_SIZE
+    model_config.moe_k = TOPK if 'TOPK' in globals() else 8
+    
+    parallelism_config = ParallelismConfig()
+    parallelism_config.world_size = DP_SIZE * EP_SIZE
+    parallelism_config.dp_size = DP_SIZE
+    parallelism_config.tp_size = TP_SIZE
+    parallelism_config.ep_size = EP_SIZE
+    parallelism_config.dp_rank = 0
+    parallelism_config.tp_rank = 0
+    parallelism_config.ep_rank = 0
+    parallelism_config.world_rank = 0
+    parallelism_config.local_world_size = 1
+    
+    moe_config = MoeConfig()
+  
+    return MoEConfigAdapter(
+        model_config=model_config,
+        parallelism_config=parallelism_config,
+        moe_config=moe_config,
+        max_generate_batch_size=MAX_GENERATE_BATCH_SIZE,
     )
-    config.world_size = DP_SIZE * EP_SIZE
-    config.dp_size = DP_SIZE
-    config.tp_size = TP_SIZE
-    config.ep_size = EP_SIZE
-    config.dp_rank = 0
-    config.tp_rank = 0
-    config.ep_rank = 0
-    config.expert_num = NUM_EXPERTS
-    config.hidden_size = HIDDEN_SIZE
-    config.max_generate_batch_size = MAX_GENERATE_BATCH_SIZE
-    config.moe_inter_padding_size = MOE_INTERMEDIATE_SIZE
-    return config
 
 
 def test_deepgemm_masked_executor(use_fp8: bool):

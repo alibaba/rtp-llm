@@ -30,12 +30,16 @@ device_type = get_device().get_device_type()
 if device_type == DeviceType.ROCm:
     # Import to register ROCm FMHA implementations
     from rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter import (
-        AiterDecodeImpl,
-        AiterPrefillImpl,
+        AiterDecodeImplAsm,
+        AiterDecodeImplNonAsm,
+        AiterPrefillImplAsm,
+        AiterPrefillImplNonAsm,
     )
 
-    PREFILL_MHA_IMPS.append(AiterPrefillImpl)
-    DECODE_MHA_IMPS.append(AiterDecodeImpl)
+    PREFILL_MHA_IMPS.append(AiterPrefillImplAsm)
+    PREFILL_MHA_IMPS.append(AiterPrefillImplNonAsm)
+    DECODE_MHA_IMPS.append(AiterDecodeImplAsm)
+    DECODE_MHA_IMPS.append(AiterDecodeImplNonAsm)
 else:
     from rtp_llm.models_py.modules.factory.attention.cuda_impl.flash_infer import (
         FlashInferDecodeImpl,

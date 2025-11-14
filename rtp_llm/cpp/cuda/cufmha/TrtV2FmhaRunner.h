@@ -28,7 +28,7 @@ struct TrtV2FmhaRunnerConfig {
     size_t            kv_head_num;
     size_t            size_per_head;
     size_t            tokens_per_block;
-    AttentionMaskType mask_type;
+    bool              is_causal;
     float             q_scaling;
     float             softmax_extra_scale;
 
@@ -38,7 +38,7 @@ struct TrtV2FmhaRunnerConfig {
                                      configs.kv_head_num,
                                      configs.size_per_head,
                                      configs.tokens_per_block,
-                                     configs.mask_type,
+                                     configs.is_causal,
                                      configs.q_scaling,
                                      configs.softmax_extra_scale};
     }

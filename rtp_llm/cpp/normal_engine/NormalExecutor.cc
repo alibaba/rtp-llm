@@ -6,7 +6,7 @@
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/models/NativeDeviceGraphModel.h"
 #include "rtp_llm/cpp/models/Sampler.h"
-#include "rtp_llm/cpp/config/GptInitParameter.h"
+#include "rtp_llm/cpp/config/ModelConfig.h"
 
 using namespace std;
 
@@ -21,35 +21,37 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
     cache_manager_(cache_manager),
     lora_manager_(lora_manager),
     warm_up_(warm_up),
-    use_all_gather_(params.gpt_init_parameter.use_all_gather_),
+    use_all_gather_(params.moe_config.use_all_gather && !params.moe_config.use_deepep_low_latency),
     metrics_reporter_(params.metrics_reporter),
     tps_reporter_(MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(metrics_reporter_)) {
-    auto& gpt_param    = params.gpt_init_parameter;
-    enable_detail_log_ = gpt_param.profiling_debug_logging_config.enable_detail_log;
+    enable_detail_log_ = params.profiling_debug_logging_config.enable_detail_log;
     RTP_LLM_LOG_INFO("enable_detail_log_ = %d", enable_detail_log_);
 
-    if (gpt_param.enable_eplb_ && gpt_param.moe_style_ != 0) {
+    if (params.eplb_config.enable_eplb() && params.model_config_.moe_style != 0) {
         // use first moe layer weight as moe weight type
-        int  first_moe_layer = gpt_param.moe_layer_index_.front();
+        int  first_moe_layer = params.model_config_.moe_layer_index.front();
         auto moe_weight_type = params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->type();
+        bool is_gated_activation = params.model_config_.isGatedActivation();
+        auto moe_inter_size = is_gated_activation ?
+            params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->shape()[1] / 2 :
+            params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->shape()[1];
 
-        expert_balancer_ = make_shared<ExpertBalancer>(gpt_param.expert_num_,
-                                                       gpt_param.phy_exp_num_,
-                                                       gpt_param.num_layers_,
-                                                       gpt_param.moe_inter_padding_size_,
-                                                       gpt_param.hidden_size_,
-                                                       gpt_param.eplb_update_time_,
-                                                       gpt_param.ep_rank_,
-                                                       gpt_param.ep_size_,
-                                                       gpt_param.py_eplb_,
+        expert_balancer_ = make_shared<ExpertBalancer>(params.model_config_.expert_num,
+                                                       params.eplb_config.phy_exp_num(params.model_config_.expert_num),
+                                                       params.model_config_.num_layers,
+                                                       moe_inter_size,
+                                                       params.model_config_.hidden_size,
+                                                       params.parallelism_config.ep_rank,
+                                                       params.parallelism_config.ep_size,
+                                                       params.py_eplb,
                                                        moe_weight_type,
                                                        device_,
-                                                       gpt_param.eplb_mode_,
-                                                       gpt_param.quant_algo_,
-                                                       metrics_reporter_);
+                                                       params.model_config_.quant_algo,
+                                                       metrics_reporter_,
+                                                       params.eplb_config);
     }
 
-    int               eos_id = params.gpt_init_parameter.special_tokens_.eos_token_id_;
+    int               eos_id = params.model_config_.special_tokens.eos_token_id;
     SamplerInitParams sampler_params{
         device_,
         eos_id,
@@ -59,11 +61,11 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
     GptModelInitParams model_init_params(
         {device_,
          params.gpt_weights,
-         genModelDescription(params.gpt_init_parameter),
+         genModelDescription(params.model_config_, params.parallelism_config, params.eplb_config, params.moe_config),
          cache_manager ? ((optional<KVCacheAllocator::KVCacheBuffer>)cache_manager->kvCacheBuffer()) : nullopt,
          params.model_id});
 
-    if (params.gpt_init_parameter.ffn_disaggregate_config.enable_ffn_disaggregate) {
+    if (params.ffn_disaggregate_config.enable_ffn_disaggregate) {
         RTP_LLM_LOG_INFO("using ffn as service");
         enable_ffn_disaggregate_ = true;
     }
@@ -80,9 +82,10 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
 
     // when warmup, cache manager maybe nullptr
     const auto& cache_config = cache_manager ? cache_manager->cacheConfig() : CacheConfig();
-    batch_stream_processor_.reset(new NormalBatchStreamProcessor(params.gpt_init_parameter, cache_config, warm_up_));
-    PrefixToCandidateTokens::instance()->reloadPrefixDictWithPrefix(
-        params.gpt_init_parameter.ckpt_path_, params.gpt_init_parameter.sp_config.tree_decode_config);
+    batch_stream_processor_.reset(new NormalBatchStreamProcessor(
+        params.model_config_, params.pd_sep_config, params.profiling_debug_logging_config, cache_config, warm_up_));
+    PrefixToCandidateTokens::instance()->reloadPrefixDictWithPrefix(params.model_config_.ckpt_path,
+                                                                    params.sp_config.tree_decode_config);
     device_->profileStart();
 }
 
@@ -193,7 +196,7 @@ void NormalExecutor::reportMetrics(const StreamGroups&             stream_groups
     }
 }
 
-bool NormalExecutor::updateEplbConfig(const EplbConfig& config) {
+bool NormalExecutor::updateEplbConfig(const EPLBConfig& config) {
     if (expert_balancer_) {
         return expert_balancer_->updateEplbConfig(config);
     }

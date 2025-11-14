@@ -77,7 +77,8 @@ using GenerateStreamPtr = std::shared_ptr<GenerateStream>;
 class GenerateStream {
 public:
     GenerateStream(const std::shared_ptr<GenerateInput>& query,
-                   const rtp_llm::GptInitParameter&      params,
+                   const ModelConfig&                    model_config,
+                   const RuntimeConfig&                  runtime_config,
                    const ResourceContext&                resource_context,
                    kmonitor::MetricsReporterPtr          metrics_reporter,
                    size_t                                extra_reserve_token_num = 0,

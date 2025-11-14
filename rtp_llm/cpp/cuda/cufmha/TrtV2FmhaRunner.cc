@@ -43,9 +43,7 @@ bool TrtV2FmhaRunner::initTrtV2FmhaAndCheckSupport() {
     if (get_sm() == tensorrt_llm::kernels::kSM_70) {
         trtv2_sm70_fmha_runner_.reset(new tensorrt_llm::kernels::FusedMHARunnerV2Sm70(
             trtDtypeConvert(attn_dtype_), config_.head_num, config_.size_per_head, q_scaling_));
-        return trtv2_sm70_fmha_runner_->fmha_supported()
-               && (config_.mask_type == AttentionMaskType::causalMask
-                   || config_.mask_type == AttentionMaskType::noMask);
+        return trtv2_sm70_fmha_runner_->fmha_supported();
     }
 
     if (get_sm() < tensorrt_llm::kernels::kSM_80) {
@@ -56,8 +54,7 @@ bool TrtV2FmhaRunner::initTrtV2FmhaAndCheckSupport() {
     auto fixedParams = createMHARunnerFixedParams(false);
     trtv2_fmha_runner_.reset(new tensorrt_llm::kernels::FusedMHARunnerV2(fixedParams));
 
-    return trtv2_fmha_runner_->isFmhaSupported()
-           && (config_.mask_type == AttentionMaskType::causalMask || config_.mask_type == AttentionMaskType::noMask);
+    return trtv2_fmha_runner_->isFmhaSupported();
 }
 
 bool TrtV2FmhaRunner::initTrtV2FmhaPagedAndCheckSupport() {
@@ -69,8 +66,7 @@ bool TrtV2FmhaRunner::initTrtV2FmhaPagedAndCheckSupport() {
     auto fixedParams = createMHARunnerFixedParams(true);
     trtv2_paged_fmha_runner_.reset(new tensorrt_llm::kernels::FusedMHARunnerV2(fixedParams));
 
-    return trtv2_paged_fmha_runner_->isFmhaSupported()
-           && (config_.mask_type == AttentionMaskType::causalMask || config_.mask_type == AttentionMaskType::noMask);
+    return trtv2_paged_fmha_runner_->isFmhaSupported();
 }
 
 tensorrt_llm::kernels::MHARunnerFixedParams TrtV2FmhaRunner::createMHARunnerFixedParams(bool paged) {
@@ -79,7 +75,7 @@ tensorrt_llm::kernels::MHARunnerFixedParams TrtV2FmhaRunner::createMHARunnerFixe
     fixedParams.dataTypeKv                = trtDtypeConvert(attn_dtype_);
     fixedParams.dataTypeOut               = trtDtypeConvert(attn_dtype_);
     fixedParams.forceFp32Acc              = false;
-    fixedParams.attentionMaskType         = config_.mask_type == AttentionMaskType::causalMask ?
+    fixedParams.attentionMaskType         = config_.is_causal ?
                                                 tensorrt_llm::kernels::ContextAttentionMaskType::CAUSAL :
                                                 tensorrt_llm::kernels::ContextAttentionMaskType::PADDING;
     fixedParams.attentionInputLayout      = paged ? tensorrt_llm::kernels::AttentionInputLayout::Q_PAGED_KV :
@@ -173,7 +169,7 @@ void TrtV2FmhaRunner::runTrtV2Fmha(void*        input,
         trtv2_fmha_runner_->run(runnerParams);
     } else if (trtv2_sm70_fmha_runner_) {
         trtv2_sm70_fmha_runner_->setup_flags(
-            false, false, (config_.mask_type == AttentionMaskType::causalMask), config_.kv_head_num);
+            false, false, config_.is_causal, config_.kv_head_num);
         trtv2_sm70_fmha_runner_->setup(batch_size, max_seq_len, max_seq_len, token_num, false, false, 1, 0);
         trtv2_sm70_fmha_runner_->run(input, cu_seqlens, output, stream_);
     }

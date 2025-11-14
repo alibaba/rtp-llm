@@ -18,8 +18,8 @@ class MemInfo:
 class DeviceBase:
     def __init__(self, exported_device: DeviceExporter):
         self.exported_device = exported_device
-        self.py_env_configs = PyEnvConfigs()
-        self.py_env_configs.update_from_env()
+        from rtp_llm.server.server_args.server_args import setup_args
+        self.py_env_configs = setup_args()
 
     def get_device_type(self) -> DeviceType:
         return self.exported_device.get_device_type()

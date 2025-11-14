@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "autil/EnvUtil.h"
 #include <cassert>
+#include <cstdlib>
 
 using namespace std;
 using namespace torch_ext;
@@ -44,7 +45,7 @@ GlobalDeviceParams DeviceFactory::getDefaultGlobalDeviceParams() {
     return params;
 }
 
-int64_t getDefaultDeviceReserveMemoryBytes(const GptInitParameter& params) {
+int64_t getDefaultDeviceReserveMemoryBytes() {
     auto reserve_bytes = -512L * 1024 * 1024;
     RTP_LLM_LOG_INFO("Default device reserve memory bytes: %ld", reserve_bytes);
     return reserve_bytes;
@@ -58,89 +59,108 @@ bool DeviceFactory::isAlreadyInit() {
     }
 }
 
-void DeviceFactory::initDevices(const GptInitParameter& params) {
+void DeviceFactory::initDevices(const ParallelismConfig& parallelism_config,
+                                const ModelConfig& model_config,
+                                const EPLBConfig& eplb_config,
+                                const FMHAConfig& fmha_config,
+                                const DeviceResourceConfig& device_resource_config,
+                                const MoeConfig& moe_config,
+                                const SpeculativeExecutionConfig& sp_config,
+                                const MiscellaneousConfig& misc_config,
+                                const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
+                                const HWKernelConfig& hw_kernel_config,
+                                const ConcurrencyConfig& concurrency_config,
+                                const FfnDisAggregateConfig& ffn_disaggregate_config,
+                                const RuntimeConfig& runtime_config) {
     if (getCurrentDevices().size()) {
         RTP_LLM_LOG_WARNING("Devices are already initialized! will do nothing.");
         return;
     }
     auto  global_params                          = getDefaultGlobalDeviceParams();
     auto& device_params                          = global_params.device_params[0].second;
-    device_params.tp_size                        = params.tp_size_;
-    device_params.dp_size                        = params.dp_size_;
-    device_params.ep_size                        = params.ep_size_;
-    device_params.ep_rank                        = params.ep_rank_;
-    device_params.tp_rank                        = params.tp_rank_;
-    device_params.dp_rank                        = params.dp_rank_;
-    device_params.ffn_tp_size                    = params.ffn_tp_size_;
-    device_params.ffn_tp_rank                    = params.ffn_tp_rank_;
-    device_params.enable_sp                      = params.enable_sp_;
-    device_params.use_all_gather                 = params.use_all_gather_;
-    device_params.device_id                      = params.local_rank_;
-    device_params.master_ip                      = params.nccl_ip_;
-    device_params.tp_master_port                 = params.tp_nccl_port_;
-    device_params.dp_tp_master_port              = params.dp_tp_nccl_port_;
-    device_params.ffn_tp_master_port             = params.ffn_tp_nccl_port_;
-    device_params.tokens_per_block               = params.seq_size_per_block_;
-    device_params.mla_ops_type                   = params.mla_ops_type_;
-    device_params.max_seq_len                    = params.max_seq_len_;
-    device_params.hidden_size                    = params.hidden_size_;
-    device_params.num_experts                    = params.expert_num_;
-    device_params.extra_experts                  = params.phy_exp_num_ - params.expert_num_;
-    device_params.fmha_config                    = params.fmha_config;
-    device_params.device_resource_config         = params.device_resource_config;
-    device_params.sampler_config                 = params.sampler_config;
-    device_params.moe_config                     = params.moe_config;
-    device_params.sp_config                      = params.sp_config;
-    device_params.fifo_scheduler_config          = params.fifo_scheduler_config;
-    device_params.misc_config                    = params.misc_config;
-    device_params.parallelism_distributed_config = params.parallelism_distributed_config;
-    device_params.profile_debug_logging_config   = params.profiling_debug_logging_config;
-    device_params.hw_kernel_config               = params.hw_kernel_config;
-    device_params.concurrency_config             = params.concurrency_config;
-    size_t max_batch_size                        = params.max_context_batch_size_ + params.max_generate_batch_size_
-                            + std::max((long)0, params.gen_num_per_circle_) * 32;
-    device_params.ffn_as_service = params.ffn_disaggregate_config.is_ffn_service();
-    device_params.max_seq_len    = params.max_seq_len_;
-    RTP_LLM_LOG_INFO("set overlap type to be %d", device_params.device_resource_config.overlap_comm_type);
-    device_params.m_split                 = params.device_resource_config.m_split;
-    device_params.max_generate_batch_size = params.max_generate_batch_size_;
-    device_params.max_batch_size          = std::max(
-        static_cast<size_t>(params.sampler_config.max_batch_size),
-        std::max((size_t)1024, max_batch_size * 2));  // set static max batch size to avoid sampler reset memory
 
-    const auto device_mem_reserve_env = params.device_resource_config.device_reserve_memory_bytes;
+    device_params.tp_size                        = parallelism_config.tp_size;
+    device_params.dp_size                        = parallelism_config.dp_size;
+    device_params.ep_size                        = parallelism_config.ep_size;
+    device_params.ep_rank                        = parallelism_config.ep_rank;
+    device_params.tp_rank                        = parallelism_config.tp_rank;
+    device_params.dp_rank                        = parallelism_config.dp_rank;
+    device_params.ffn_tp_size                    = parallelism_config.ffn_tp_size;
+    device_params.ffn_tp_rank                    = parallelism_config.ffn_tp_rank;
+    device_params.enable_sp                      = parallelism_config.enable_sp;
+    // use_all_gather is now in moe_config, but we need to ensure it's not used
+    // when use_deepep_low_latency is True
+    device_params.use_all_gather = moe_config.use_all_gather 
+                                   && !moe_config.use_deepep_low_latency;
+    // local_rank is calculated from parallelism_config
+    device_params.device_id                      = parallelism_config.world_rank % parallelism_config.local_world_size;
+    device_params.master_ip                      = parallelism_config.nccl_ip;
+    device_params.tp_master_port                 = parallelism_config.tp_nccl_port;
+    device_params.dp_tp_master_port              = parallelism_config.dp_tp_nccl_port;
+    device_params.ffn_tp_master_port             = parallelism_config.ffn_tp_nccl_port;
+    device_params.tokens_per_block               = model_config.attn_config.tokens_per_block;
+    device_params.mla_ops_type                   = model_config.mla_ops_type;
+    device_params.max_seq_len                    = model_config.max_seq_len;
+    device_params.hidden_size                    = model_config.hidden_size;
+    device_params.num_experts                    = model_config.expert_num;
+    device_params.extra_experts                  = eplb_config.phy_exp_num(model_config.expert_num) - model_config.expert_num;
+    device_params.fmha_config                    = fmha_config;
+    device_params.device_resource_config         = device_resource_config;
+    device_params.moe_config                     = moe_config;
+    device_params.sp_config                      = sp_config;
+    // FIFOSchedulerConfig fields are now in RuntimeConfig
+    device_params.runtime_config                 = runtime_config;
+    device_params.misc_config                    = misc_config;
+    device_params.parallelism_config.tp_size = parallelism_config.tp_size;
+    device_params.parallelism_config.ep_size = parallelism_config.ep_size;
+    device_params.parallelism_config.dp_size = parallelism_config.dp_size;
+    device_params.parallelism_config.pp_size = parallelism_config.pp_size;
+    device_params.parallelism_config.world_size = parallelism_config.world_size;
+    device_params.parallelism_config.world_rank = parallelism_config.world_rank;
+    device_params.parallelism_config.local_world_size = parallelism_config.local_world_size;
+    device_params.parallelism_config.ffn_sp_size = parallelism_config.ffn_sp_size;
+    device_params.profile_debug_logging_config   = profiling_debug_logging_config;
+    device_params.hw_kernel_config               = hw_kernel_config;
+    device_params.concurrency_config             = concurrency_config;
+    device_params.ffn_as_service = ffn_disaggregate_config.is_ffn_service();
+    device_params.max_seq_len    = model_config.max_seq_len;
+    RTP_LLM_LOG_INFO("set overlap type to be %d", device_params.device_resource_config.overlap_comm_type);
+    device_params.m_split                 = device_resource_config.m_split;
+    device_params.max_generate_batch_size = runtime_config.max_generate_batch_size;
+
+    const auto device_mem_reserve_env = device_resource_config.device_reserve_memory_bytes;
     RTP_LLM_LOG_INFO("Device reserve memory bytes from env: %ld", device_mem_reserve_env);
     device_params.device_reserve_memory_bytes =
-        device_mem_reserve_env ? device_mem_reserve_env : getDefaultDeviceReserveMemoryBytes(params);
+        device_mem_reserve_env ? device_mem_reserve_env : getDefaultDeviceReserveMemoryBytes();
     RTP_LLM_LOG_INFO("Device reserve memory bytes: %ld", device_params.device_reserve_memory_bytes);
 
-    device_params.host_reserve_memory_bytes = params.device_resource_config.host_reserve_memory_bytes;  // 4GB
+    device_params.host_reserve_memory_bytes = device_resource_config.host_reserve_memory_bytes;  // 4GB
     RTP_LLM_LOG_INFO("Host reserve memory bytes: %ld", device_params.host_reserve_memory_bytes);
 
-    device_params.enable_comm_overlap = params.device_resource_config.enable_comm_overlap;
+    device_params.enable_comm_overlap = device_resource_config.enable_comm_overlap;
     device_params.enable_layer_micro_batch =
-        static_cast<MicroBatchType>(params.device_resource_config.enable_layer_micro_batch);
+        static_cast<MicroBatchType>(device_resource_config.enable_layer_micro_batch);
     RTP_LLM_LOG_INFO("enable comm overlap: %d, enable layer micro batch: %d",
                      device_params.enable_comm_overlap,
                      device_params.enable_layer_micro_batch);
-    device_params.user_deep_gemm_num_sm  = params.hw_kernel_config.deep_gemm_num_sm;
-    device_params.use_aiter_pa           = params.hw_kernel_config.use_aiter_pa;
-    device_params.use_asm_pa             = params.hw_kernel_config.use_asm_pa;
-    device_params.use_deepep_moe         = params.moe_config.use_deepep_moe;
-    device_params.use_deepep_internode   = params.moe_config.use_deepep_internode;
-    device_params.use_deepep_low_latency = params.moe_config.use_deepep_low_latency;
-    auto sp_type                         = params.sp_config.sp_type;
-    auto sp_model_type                   = params.sp_config.sp_model_type;
-    RTP_LLM_LOG_INFO("device_params sp_type is %s", sp_type.c_str());
+    device_params.user_deep_gemm_num_sm  = hw_kernel_config.deep_gemm_num_sm;
+    device_params.use_aiter_pa           = fmha_config.use_aiter_pa;
+    device_params.use_asm_pa             = fmha_config.use_asm_pa;
+    device_params.use_deepep_moe         = moe_config.use_deepep_moe;
+    device_params.use_deepep_internode   = moe_config.use_deepep_internode;
+    device_params.use_deepep_low_latency = moe_config.use_deepep_low_latency;
+    auto sp_type_str                     = SpeculativeExecutionConfig::to_string(sp_config.type);
+    auto sp_model_type                   = sp_config.model_type;
+    RTP_LLM_LOG_INFO("device_params sp_type is %s", sp_type_str.c_str());
     RTP_LLM_LOG_INFO("device_params sp_model_type is %s", sp_model_type.c_str());
-    if (((sp_type == "vanilla") && (sp_model_type == "mixtbstars-mtp"))
-        || ((sp_type == "vanilla") && (sp_model_type == "deepseek-v3-mtp")) || (sp_type == "mtp")
-        || (sp_type == "eagle")) {
+    if (((sp_config.type == SP_TYPE_VANILLA) && (sp_model_type == "mixtbstars-mtp"))
+        || ((sp_config.type == SP_TYPE_VANILLA) && (sp_model_type == "deepseek-v3-mtp")) || (sp_config.type == SP_TYPE_MTP)
+        || (sp_config.type == SP_TYPE_EAGLE)) {
         device_params.is_mtp = true;
         RTP_LLM_LOG_INFO("device_params.is_mtp true");
     }
 
-    if (((sp_type == "vanilla") && (sp_model_type == "qwen_3_moe_eagle")) || (sp_type == "eagle3")) {
+    if (((sp_config.type == SP_TYPE_VANILLA) && (sp_model_type == "qwen_3_moe_eagle")) || (sp_config.type == SP_TYPE_EAGLE3)) {
         device_params.is_eagle3 = true;
         RTP_LLM_LOG_INFO("device_params.eagle3 true");
     }
@@ -149,7 +169,7 @@ void DeviceFactory::initDevices(const GptInitParameter& params) {
                      device_params.use_deepep_moe,
                      device_params.use_deepep_low_latency);
 
-    device_params.model_specific_config = params.model_specific_config;
+    // Note: model_specific_config is now passed separately, not needed here
 
     if (!global_params.device_params.size()) {
         RTP_LLM_LOG_ERROR("No device is specified to init !");
@@ -237,7 +257,20 @@ void registerDeviceOps(py::module& m) {
         .def("preprocess_weight_scale", &DeviceExporter::preprocessWeightScale, py::arg("weight"), py::arg("scale"));
 
     m.def("get_device", &DeviceFactory::getDeviceExporter);
-    m.def("init_device", &DeviceFactory::initDevices, py::arg("params"));
+    m.def("init_device", &DeviceFactory::initDevices,
+          py::arg("parallelism_config"),
+          py::arg("model_config"),
+          py::arg("eplb_config"),
+          py::arg("fmha_config"),
+          py::arg("device_resource_config"),
+          py::arg("moe_config"),
+          py::arg("sp_config"),
+          py::arg("misc_config"),
+          py::arg("profiling_debug_logging_config"),
+          py::arg("hw_kernel_config"),
+          py::arg("concurrency_config"),
+          py::arg("ffn_disaggregate_config"),
+          py::arg("runtime_config"));
 }
 
 }  // namespace rtp_llm

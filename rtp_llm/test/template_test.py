@@ -9,6 +9,7 @@ from unittest import TestCase, main
 from transformers import AutoTokenizer
 from typing_extensions import override
 
+from rtp_llm.config.py_config_modules import GenerateEnvConfig, RenderConfig
 from rtp_llm.frontend.tokenizer_factory.tokenizers import (
     BaseTokenizer,
     QWenTokenizer,
@@ -195,7 +196,14 @@ class BaseRendererTestMixin(ABC):
         """运行渲染器测试的通用方法"""
         tokenizer = self.get_tokenizer()
         render_params = self.get_render_params()
-        chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
+        generate_env_config = GenerateEnvConfig()
+        render_config = RenderConfig()
+        chat_renderer = ChatRendererFactory.get_renderer(
+            tokenizer,
+            render_params,
+            generate_env_config=generate_env_config,
+            render_config=render_config,
+        )
         tools = self.get_tools()
 
         # 测试步骤1：初始消息
@@ -246,7 +254,15 @@ class TemplateTest(TestCase):
             eos_token_id=tokenizer.eos_token_id or 0,
             stop_word_ids_list=[],
         )
-        chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
+        generate_env_config = GenerateEnvConfig()
+        render_config = RenderConfig()
+        chat_renderer = ChatRendererFactory.get_renderer(
+            tokenizer,
+            render_params,
+            generate_env_config=generate_env_config,
+            render_config=render_config,
+        )
+
         logging.info(
             f"------- chat_renderer.get_renderer_info(): {chat_renderer.get_renderer_info()}"
         )
@@ -399,7 +415,15 @@ get_current_weather: Get the current weather in a given location. 输入参数�
             eos_token_id=tokenizer.eos_token_id or 0,
             stop_word_ids_list=[],
         )
-        chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
+        generate_env_config = GenerateEnvConfig()
+        render_config = RenderConfig()
+        chat_renderer = ChatRendererFactory.get_renderer(
+            tokenizer,
+            render_params,
+            generate_env_config=generate_env_config,
+            render_config=render_config,
+        )
+
         logging.info(
             f"------- chat_renderer.get_renderer_info(): {chat_renderer.get_renderer_info()}"
         )
@@ -557,7 +581,15 @@ get_current_weather: Get the current weather in a given location. 输入参数�
             eos_token_id=tokenizer.eos_token_id or 0,
             stop_word_ids_list=[],
         )
-        chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
+        generate_env_config = GenerateEnvConfig()
+        render_config = RenderConfig()
+        chat_renderer = ChatRendererFactory.get_renderer(
+            tokenizer,
+            render_params,
+            generate_env_config=generate_env_config,
+            render_config=render_config,
+        )
+
         assert isinstance(chat_renderer, QwenRenderer)
         assert (
             chat_renderer.template_chat_renderer.chat_template
@@ -777,7 +809,14 @@ template ends here"""
             """运行渲染器测试的通用方法"""
             tokenizer = self.get_tokenizer()
             render_params = self.get_render_params()
-            chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
+            generate_env_config = GenerateEnvConfig()
+            render_config = RenderConfig()
+            chat_renderer = ChatRendererFactory.get_renderer(
+                tokenizer,
+                render_params,
+                generate_env_config=generate_env_config,
+                render_config=render_config,
+            )
             tools = self.get_tools()
 
             # 测试步骤1：初始消息

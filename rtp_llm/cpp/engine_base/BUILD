@@ -82,6 +82,7 @@ cc_library(
         "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/models:lora",
         "//rtp_llm/cpp/engine_base/system_prompt:system_prompt",
+        "//rtp_llm/cpp/config:eplb_config",
         "//rtp_llm/cpp/utils:hash_util",
         "//:rtp_compute_ops",
     ],

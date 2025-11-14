@@ -4,6 +4,7 @@ import torch
 import triton.language as tl
 
 import rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe as mm
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
@@ -26,7 +27,7 @@ class BatchedTritonExperts(mm.FusedMoeExpertExecutor):
         return ExecutorType.BATCHED_TRITON
 
     @classmethod
-    def check_conditions(cls, checker: Any, config: Any) -> None:
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         """Check if BatchedTritonExperts can handle the configuration"""
         from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
             MoeConfigResolver,

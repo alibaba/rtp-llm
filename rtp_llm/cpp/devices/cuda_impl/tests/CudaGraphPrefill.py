@@ -4,9 +4,8 @@ import sys
 import unittest
 
 import torch
-from numpy import append
 
-from rtp_llm.async_decoder_engine.base_engine import BaseEngine
+from rtp_llm.models.base_model import BaseModel
 from rtp_llm.cpp.devices.cuda_impl.tests.libtest_cuda_graph_prefill_ops import (
     CudaGraphPrefillOp,
 )
@@ -15,7 +14,6 @@ from rtp_llm.cpp.devices.cuda_impl.tests.libtest_cuda_graph_prefill_ops import (
 from rtp_llm.models_py.model_desc.module_base import (  # load libth_transformer by default
     GptModelBase,
 )
-from rtp_llm.models_py.model_desc.qwen3 import Qwen3Model
 from rtp_llm.test.model_test.test_util.fake_model_loader import FakeModelLoader
 
 
@@ -30,9 +28,8 @@ class TestCudaGraphPrefill(unittest.TestCase):
             data_type="fp16",
             is_causal=False,
         )
-        engine: BaseEngine = loader.init_engine()
-        assert engine.model.py_model is not None
-        return engine.model.py_model
+        model: BaseModel = loader.init_model()
+        return model.py_model
 
     def check_pos(self, outputs1: torch.Tensor, outputs2: torch.Tensor):
         # 精确匹配版本

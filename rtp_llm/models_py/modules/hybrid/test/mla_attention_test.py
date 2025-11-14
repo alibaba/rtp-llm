@@ -11,7 +11,8 @@ import torch.nn.functional as F
 
 device = torch.device(f"cuda")
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.ops import ParallelismConfig
 from rtp_llm.models.rotary_embedding.deepseek_rotary_embedding import (
     DeepseekV3YarnRotaryEmbedding,
 )
@@ -107,18 +108,25 @@ class MLATest(TestCase):
             )
             bias += seq_page_sizes[i]
 
-        self.config = GptInitModelParameters(128, 16, 27, 1024, 102400)
-        self.config.head_num = 16
+        self.config = ModelConfig()
+        self.config.attn_config.head_num = 16
+        self.config.num_layers = 27
+        self.config.max_seq_len = 1024
+        self.config.vocab_size = 102400
+        self.config.attn_config.size_per_head = 192
         self.config.hidden_size = hidden_size
-        self.config.nope_head_dim = 128
-        self.config.rope_head_dim = 64
-        self.config.kv_lora_rank = 512
-        self.config.v_head_dim = 128
-        self.config.q_lora_rank = 0
-        self.config.seq_size_per_block = 64
-        self.config.softmax_extra_scale = 1.0
-        self.config.use_mla = True
-        self.config.size_per_head = 192
+        self.config.attn_config.nope_head_dim = 128
+        self.config.attn_config.rope_head_dim = 64
+        self.config.attn_config.kv_lora_rank = 512
+        self.config.attn_config.v_head_dim = 128
+        self.config.attn_config.q_lora_rank = 0
+        self.config.attn_config.tokens_per_block = 64
+        self.config.attn_config.softmax_extra_scale = 1.0
+        self.config.attn_config.use_mla = True
+        self.config.quant_config = None
+        self.parallelism_config = ParallelismConfig()
+        self.parallelism_config.tp_size = 1
+        self.parallelism_config.tp_rank = 0
 
         torch.manual_seed(0)
         sequence_lengths_mius_1 = [x - 1 for x in sequence_lengths]
@@ -144,45 +152,45 @@ class MLATest(TestCase):
         weights[W.mla_fusedqkrope_no_lora_w] = torch.randn(
             [
                 self.config.hidden_size,
-                self.config.size_per_head * self.config.head_num
-                + self.config.kv_lora_rank
-                + self.config.rope_head_dim,
+                self.config.attn_config.size_per_head * self.config.attn_config.head_num
+                + self.config.attn_config.kv_lora_rank
+                + self.config.attn_config.rope_head_dim,
             ],
             dtype=torch.bfloat16,
             device=device,
         )
 
         weights[W.mla_kv_a_ln_gamma] = torch.randn(
-            [self.config.kv_lora_rank], dtype=torch.bfloat16, device=device
+            [self.config.attn_config.kv_lora_rank], dtype=torch.bfloat16, device=device
         )
 
         weights[W.mla_kc] = torch.randn(
-            [self.config.head_num, self.config.nope_head_dim, self.config.kv_lora_rank],
+            [self.config.attn_config.head_num, self.config.attn_config.nope_head_dim, self.config.attn_config.kv_lora_rank],
             dtype=torch.bfloat16,
             device=device,
         )
 
         weights[W.mla_vc] = torch.randn(
-            [self.config.head_num, self.config.kv_lora_rank, self.config.v_head_dim],
+            [self.config.attn_config.head_num, self.config.attn_config.kv_lora_rank, self.config.attn_config.v_head_dim],
             dtype=torch.bfloat16,
             device=device,
         )
 
         weights[W.mla_v_w] = torch.randn(
-            [self.config.kv_lora_rank, hidden_size],
+            [self.config.attn_config.kv_lora_rank, hidden_size],
             dtype=torch.bfloat16,
             device=device,
         )
 
         weights[W.mla_k_nope_w] = torch.randn(
-            [self.config.kv_lora_rank, hidden_size],
+            [self.config.attn_config.kv_lora_rank, hidden_size],
             dtype=torch.bfloat16,
             device=device,
         )
 
         weights[W.attn_o_w] = torch.randn(
             [
-                self.config.head_num * self.config.v_head_dim,
+                self.config.attn_config.head_num * self.config.attn_config.v_head_dim,
                 self.config.hidden_size,
             ],
             dtype=torch.bfloat16,
@@ -192,12 +200,26 @@ class MLATest(TestCase):
         layer_weights: List[Dict[str, torch.Tensor]] = []
         layer_weights.append(weights)
 
+        attn_configs = self.config.getAttentionConfigs(self.parallelism_config.tp_size)
         fmha_impl = MlaFlashInferPrefillImpl(
-            self.config, attn_inputs, layer_weights, create_cos_sin_cache()
+            attn_configs, attn_inputs, layer_weights, create_cos_sin_cache(), quant_config=self.config.quant_config
         )
-        deepseekv2_mla = MlaAttention(self.config, weights, 0)
+        deepseekv2_mla = MlaAttention(
+            self.config.attn_config, 
+            self.parallelism_config, 
+            weights, 
+            0, 
+            self.config.layernorm_eps, 
+            self.config.quant_config
+        )
         kv_cache: Optional[KVCache] = None
-        deepseekv2_mla_ref = MlaAttentionRef(self.config, weights, 0)
+        deepseekv2_mla_ref = MlaAttentionRef(
+            self.config.attn_config, 
+            weights, 
+            0, 
+            self.config.layernorm_eps, 
+            self.config.quant_config
+        )
 
         hidden = torch.randn(
             [num_tokens, self.config.hidden_size],

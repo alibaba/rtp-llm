@@ -2,7 +2,8 @@ from typing import Any, Dict, List
 
 from transformers.models.gpt2.tokenization_gpt2_fast import GPT2TokenizerFast
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import VitParameters
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, FfnConfig, FfnWeight
@@ -91,7 +92,7 @@ class StarcoderWeightInfo(ModelDeployWeightInfo):
         ffn_config = self.ffn_config
         ffn_w2_config = FfnConfig(
             is_gated_activation=self._is_gated_activation,
-            inter_padding_size=self._inter_padding_size,
+            align_size=self._align_size,
             is_moe=False,
             need_ffn_act_scale=True,
         )
@@ -183,15 +184,15 @@ class StarCoder(BaseModel):
         return StarcoderWeightInfo
 
     @staticmethod
-    def from_huggingface(ckpt_path: str, config_json: Dict[str, Any]):
+    def from_huggingface(ckpt_path: str, config_json: Dict[str, Any]) -> ModelConfig:
         model_type = config_json["model_type"]
-        config = GptInitModelParameters(
-            head_num=config_json["n_head"],
-            size_per_head=config_json["n_embd"] // config_json["n_head"],
-            layer_num=config_json["n_layer"],
-            max_seq_len=config_json.get("n_positions", 8192),
-            vocab_size=config_json["vocab_size"],
-        )
+        config = ModelConfig()
+        config.ckpt_path = ckpt_path
+        config.head_num = config_json["n_head"]
+        config.size_per_head = config_json["n_embd"] // config_json["n_head"]
+        config.num_layers = config_json["n_layer"]
+        config.max_seq_len = config_json.get("n_positions", 8192)
+        config.vocab_size = config_json["vocab_size"]
         if model_type != "gpt_bigcode":
             raise BaseException(f"model type is not starcoder: {model_type}")
         config.head_num_kv = 1
@@ -201,28 +202,25 @@ class StarCoder(BaseModel):
         config.special_tokens.bos_token_id = config_json.get("bos_token_id", -1)
         # config.activation_type = config_json['activation_function']
         config.has_positional_encoding = True
-        config.has_post_decoder_layernorm = True
         config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
         config.config_dtype = config_json.get("torch_dtype", None)
         return config
 
     @classmethod
-    def _create_config(cls, ckpt_path: str):
+    def _create_config(cls, ckpt_path: str) -> ModelConfig:
         config_dict = get_config_from_path(ckpt_path)
         if config_dict:
             config = StarCoder.from_huggingface(ckpt_path, config_dict)
         else:
-            config = GptInitModelParameters(
-                head_num=48,
-                head_num_kv=1,
-                size_per_head=128,
-                inter_size=4 * 6144,
-                layer_num=40,
-                max_seq_len=8192,
-                vocab_size=49152,
-                has_positional_encoding=True,
-                has_post_decoder_layernorm=True,
-            )
+            config = ModelConfig()
+            config.attn_config.head_num = 48
+            config.attn_config.kv_head_num = 1
+            config.attn_config.size_per_head = 128
+            config.inter_size = 4 * 6144
+            config.num_layers = 40
+            config.max_seq_len = 8192
+            config.vocab_size = 49152
+            config.has_positional_encoding = True
             config.special_tokens.bos_token_id = 0
             config.special_tokens.eos_token_id = 0
         return config

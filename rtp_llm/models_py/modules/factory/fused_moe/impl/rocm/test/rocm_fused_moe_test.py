@@ -5,7 +5,8 @@ import torch
 from aiter.ops.shuffle import shuffle_weight
 from torch import dtype as _dtype
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     ExpertForwardPayload,
 )
@@ -13,6 +14,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.executors.deepep_norm
     FusedMoeExecutor,
     torch_moe_ref,
 )
+from rtp_llm.ops import ParallelismConfig, MoeConfig
 from rtp_llm.utils.model_weight import W
 
 
@@ -76,26 +78,45 @@ class FusedMoeTest(TestCase):
         )
 
         # Model configuration
-        model_param = GptInitModelParameters(
-            head_num=4,
-            size_per_head=64,
-            layer_num=2,
-            max_seq_len=2048,
-            vocab_size=32000,
+        model_config = ModelConfig()
+        model_config.attn_config.head_num = 4
+        model_config.attn_config.size_per_head = 64
+        model_config.num_layers = 2
+        model_config.max_seq_len = 2048
+        model_config.vocab_size = 32000
+        model_config.expert_num = expert_num        
+        model_config.moe_k = top_k
+        model_config.inter_size = inter_dim
+        model_config.activation_type = "silu"
+
+        # Create ParallelismConfig
+        parallelism_config = ParallelismConfig()
+        parallelism_config.ep_size = 1
+        parallelism_config.ep_rank = 0
+        parallelism_config.tp_size = 1
+        parallelism_config.tp_rank = 0
+        parallelism_config.dp_size = 1
+        parallelism_config.dp_rank = 0
+        parallelism_config.world_size = 1
+        parallelism_config.world_rank = 0
+        parallelism_config.local_rank = 0
+        parallelism_config.local_world_size = 1
+
+        # Create MoEConfigAdapter
+        moe_config = MoeConfig()
+        config_adapter = MoEConfigAdapter(
+            model_config=model_config,
+            parallelism_config=parallelism_config,
+            moe_config=moe_config,
+            max_generate_batch_size=0,
         )
-        model_param.ep_size = 1
-        model_param.ep_rank = 0
-        model_param.expert_num = expert_num
-        model_param.moe_k = top_k
-        model_param.moe_inter_padding_size = inter_dim
-        model_param.activation_type = "silu"
 
         w1 = shuffle_weight(w1, layout=(16, 16))
         w2 = shuffle_weight(w2, layout=(16, 16))
 
         weights = {W.moe_w1: w1, W.moe_w2: w2}
 
-        fused_moe_executors = FusedMoeExecutor(model_param, weights)
+        fused_moe_executors = FusedMoeExecutor(config_adapter, weights)
 
         exec_out = fused_moe_executors.execute(
             payload=payload,

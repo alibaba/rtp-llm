@@ -11,7 +11,7 @@ import torch
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import VitParameters
 from rtp_llm.models.multimodal.multimodal_common import (
     MultiModalEmbeddingInterface,
     timeout_decorator,
@@ -85,14 +85,15 @@ def smart_resize(
 
 
 class Qwen2VLImageEmbedding(MultiModalEmbeddingInterface):
-    def __init__(self, config: GptInitModelParameters):
+    def __init__(self, mm_related_params: VitParameters, model_config=None):
+        self.mm_related_params = mm_related_params
+        self.config = model_config
         self.image_processor = Qwen2VLImageProcessor.from_pretrained(
-            config.mm_related_params.config["ckpt_path"]
+            mm_related_params.config["ckpt_path"]
         )
         self.visual = Qwen2VisionTransformerPretrainedModel(
-            config.mm_related_params.config
+            mm_related_params.config
         )
-        self.config = config
 
     @property
     def _device(self):
@@ -223,7 +224,7 @@ class Qwen2VLImageEmbedding(MultiModalEmbeddingInterface):
         return embeddings, pos_id
 
     def get_position_ids(self, grid_thw: torch.Tensor = None) -> torch.Tensor:
-        spatial_merge_size = self.config.mm_related_params.config.get(
+        spatial_merge_size = self.mm_related_params.config.get(
             "spatial_merge_size", 2
         )
 

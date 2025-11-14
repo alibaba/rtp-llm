@@ -2,7 +2,6 @@ from typing import Any, Dict, Optional
 
 import torch
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.distribute.collective import Group, all_gather
 from rtp_llm.models_py.distributed.deepep_initializer import DeepEpInitializer
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used
@@ -20,7 +19,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.type import RouterType
 from rtp_llm.ops.compute_ops import trt_fp8_quantize_128
-
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
 
 class DeepepNormalRouter(FusedMoeDataRouter):
     @classmethod
@@ -28,7 +27,7 @@ class DeepepNormalRouter(FusedMoeDataRouter):
         return RouterType.DEEPEP_NORMAL
 
     @classmethod
-    def check_conditions(cls, checker: Any, config: GptInitModelParameters) -> None:
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         """Check if DeepepNormalRouter can handle the configuration"""
         from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
             MoeConfigResolver,
@@ -41,7 +40,7 @@ class DeepepNormalRouter(FusedMoeDataRouter):
 
     def __init__(
         self,
-        config: GptInitModelParameters,
+        config: MoEConfigAdapter,
         use_fp8: bool = True,
         async_mode: bool = False,
         expert_alignment: int = 128,

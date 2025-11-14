@@ -10,15 +10,15 @@
 
 namespace rtp_llm {
 
-void HttpApiServer::init_controller(const rtp_llm::GptInitParameter& params) {
-    bool block = params.concurrency_config.concurrency_with_block;
-    RTP_LLM_LOG_INFO("Get concurrency_with_block: %d from GptInitParameter.",
-                     params.concurrency_config.concurrency_with_block);
-    if (params.tp_rank_ == 0) {
-        int limit = params.concurrency_config.concurrency_limit;
+void HttpApiServer::init_controller(const ConcurrencyConfig& concurrency_config, const ParallelismConfig& parallelism_config) {
+    bool block = concurrency_config.concurrency_with_block;
+    RTP_LLM_LOG_INFO("Get concurrency_with_block: %d from ConcurrencyConfig.",
+                     concurrency_config.concurrency_with_block);
+    if (parallelism_config.tp_rank == 0) {
+        int limit = concurrency_config.concurrency_limit;
         RTP_LLM_LOG_INFO("CONCURRENCY_LIMIT to %d", limit);
         controller_ = std::make_shared<ConcurrencyController>(limit, block);
-    } else /* if (params.tp_size_ != 1) */ {
+    } else /* if (parallelism_config.tp_size != 1) */ {
         RTP_LLM_LOG_INFO("use gang cluster and is worker, set CONCURRENCY_LIMIT to 99");
         controller_ = std::make_shared<ConcurrencyController>(99, block);
     }
@@ -210,7 +210,7 @@ bool HttpApiServer::registerTokenizerService() {
 
 bool HttpApiServer::registerChatService() {
     chat_service_.reset(
-        new ChatService(engine_, mm_processor_, request_counter_, tokenizer_, render_, params_, metric_reporter_));
+        new ChatService(engine_, mm_processor_, request_counter_, tokenizer_, render_, params_.model_config_, metric_reporter_));
     auto chat_completions_callback = [active_request_count = active_request_count_,
                                       chat_service         = chat_service_,
                                       controller           = controller_,
@@ -267,7 +267,7 @@ bool HttpApiServer::registerInferenceService() {
         return false;
     }
     inference_service_.reset(new InferenceService(
-        engine_, mm_processor_, request_counter_, token_processor_, controller_, params_, metric_reporter_));
+        engine_, mm_processor_, request_counter_, token_processor_, controller_, params_.model_config_, metric_reporter_));
     auto inference_internal_callback =
         [active_request_count = active_request_count_, inference_service = inference_service_](
             std::unique_ptr<http_server::HttpResponseWriter> writer, const http_server::HttpRequest& request) -> void {

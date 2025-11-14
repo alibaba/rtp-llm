@@ -7,9 +7,7 @@
 #include "rtp_llm/models_py/bindings/common/RtpProcessGroup.h"
 #include "rtp_llm/models_py/bindings/common/CudaGraphPrefillCopy.h"
 
-using namespace rtp_llm;
-
-namespace torch_ext {
+namespace rtp_llm {
 
 void registerBasicRocmOps(py::module& rtp_ops_m) {
     rtp_ops_m.def("write_cache_store",
@@ -91,4 +89,4 @@ void registerBaseRocmBindings(py::module& rtp_ops_m) {
     registerRtpProcessGroup(rtp_ops_m);
 }
 
-}  // namespace torch_ext
+}  // namespace rtp_llm

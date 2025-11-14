@@ -1,11 +1,11 @@
 import logging
 from typing import Any
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
     FMHADecodeImplBase,
 )
-from rtp_llm.ops import FMHAType
+from rtp_llm.ops import AttentionConfigs, FMHAType
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCacheDecodeOp,
     PyAttentionInputs,
@@ -16,11 +16,13 @@ from rtp_llm.ops.compute_ops import (
 class XQAImpl(FMHADecodeImplBase):
 
     def __init__(
-        self, config: GptInitModelParameters, attn_inputs: PyAttentionInputs
+        self,
+        attn_configs: AttentionConfigs,
+        attn_inputs: PyAttentionInputs
     ) -> None:
         super().__init__(
-            XQAAttnOp(config.gpt_init_params),
-            FusedRopeKVCacheDecodeOp(config.gpt_init_params),
+            XQAAttnOp(attn_configs),
+            FusedRopeKVCacheDecodeOp(attn_configs),
             attn_inputs,
         )
 

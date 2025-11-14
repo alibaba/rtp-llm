@@ -214,7 +214,7 @@ class MagaServerManager(object):
 
         for _ in range(retry_times):
             try:
-                logging.info(f"{url} {query}")
+                logging.info(f"curl {url} -d '{json.dumps(query)}'")
                 response = requests.post(url, json=query)
                 if response.status_code == 200:
                     logging.debug("%s", response.text)
@@ -222,8 +222,8 @@ class MagaServerManager(object):
                     logging.warning(
                         f"POST请求失败，状态码：{response.status_code}, 错误信息{response.text}"
                     )
-                    self.print_process_log()
-                    return False, response.text
+                    time.sleep(1)
+                    continue
 
                 is_streaming = (
                     response.headers.get("Transfer-Encoding", None) == "chunked"
@@ -237,6 +237,7 @@ class MagaServerManager(object):
                 logging.warning(f"请求错误:[{str(e)}]")
             finally:
                 sys.stdout.flush()
+        logging.warning("超过重试次数")
         self.print_process_log()
         return False, None
 

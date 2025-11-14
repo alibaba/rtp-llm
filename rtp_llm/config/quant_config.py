@@ -1,8 +1,9 @@
 import json
+import os
 import weakref
 from abc import ABC, abstractmethod
 from enum import Enum
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import torch
 
@@ -92,6 +93,117 @@ class QuantizationConfig(ABC):
 
     def group_size(self) -> int:
         return self._group_size
+
+    @classmethod
+    def load_from_ckpt(cls, ckpt_path: str) -> Optional["QuantizationConfig"]:
+        """
+        Load quantization config from checkpoint directory.
+        
+        Args:
+            ckpt_path: Path to checkpoint directory
+            
+        Returns:
+            QuantizationConfig instance if found, None otherwise
+        """
+        quant_config_path = os.path.join(ckpt_path, "smoothquant.ini")
+        if os.path.exists(quant_config_path):
+            return cls.from_config(
+                {
+                    "bits": 0,
+                    "method": "smooth_quant",
+                    "group_size": 0,
+                    "is_quanted": True,
+                }
+            )
+
+        per_tensor_config_path = os.path.join(ckpt_path, "pertensorquant.ini")
+
+        if os.path.exists(per_tensor_config_path):
+            return cls.from_config(
+                {
+                    "bits": 0,
+                    "method": "pertensor_quant",
+                    "group_size": 0,
+                    "is_quanted": True,
+                }
+            )
+
+        config_path = os.path.join(ckpt_path, "config.json")
+        if not os.path.exists(config_path):
+            return None
+
+        with open(config_path, "r") as f:
+            config_json = json.load(f)
+        quant_config = None
+        quant_method = None
+        if config_json.get("quantization_config", None):
+            quant_config = config_json["quantization_config"]
+            quant_method = quant_config["quant_method"].lower()
+
+        if config_json.get("quantization", None):
+            quant_config = config_json["quantization"]
+            quant_method = quant_config["quant_algo"].lower()
+        if quant_config is None:
+            return None
+
+        group_size = quant_config["group_size"] if "group_size" in quant_config else 0
+        bits = quant_config["bits"] if "bits" in quant_config else 0
+        if quant_method == "fp8":
+            bits = 8
+            if "weight_block_size" in quant_config:
+                weight_block = quant_config.get("weight_block_size")
+                assert isinstance(weight_block, list) and all(
+                    element == weight_block[0] for element in weight_block
+                ), f"weight_block_size: {weight_block} must be same"
+                group_size = weight_block[0]
+                quant_method = Fp8BlockWiseQuantConfig.get_method()
+        if quant_method == "compressed-tensors":
+            config_groups = quant_config["config_groups"]
+            weights_config = config_groups["group_0"]["weights"]
+            activation_config = config_groups["group_0"]["input_activations"]
+            bits = weights_config["num_bits"]
+            if (
+                weights_config["type"] == "float"
+                and bits == 8
+                and weights_config["strategy"] == "channel"
+            ):
+                quant_method = Fp8PerChannelCompressedQuantConfig.get_method()
+            elif (
+                weights_config["type"] == "float"
+                and bits == 8
+                and weights_config["strategy"] == "tensor"
+            ):
+                quant_method = Fp8PerTensorCompressedQuantConfig.get_method()
+                return Fp8PerTensorCompressedQuantConfig.from_config(
+                    {
+                        "bits": bits,
+                        "method": quant_method,
+                        "group_size": group_size,
+                        "is_quanted": True,
+                        "dynamic": activation_config["dynamic"],
+                        "act_scale_suffix": ".input_scale",
+                        "weight_scale_suffix": ".weight_scale",
+                    }
+                )
+
+        if quant_method == "quark":
+            quark_weights_config = quant_config["global_quant_config"]["weight"]
+            if quark_weights_config["dtype"] == "fp8_e4m3":
+                bits = 8
+            if (
+                quark_weights_config["dtype"] == "fp8_e4m3"
+                and quark_weights_config["qscheme"] == "per_channel"
+            ):
+                quant_method = Fp8PerChannelQuarkQuantConfig.get_method()
+
+        return cls.from_config(
+            {
+                "bits": bits,
+                "method": quant_method,
+                "group_size": group_size,
+                "is_quanted": True,
+            }
+        )
 
 
 class WeightOnlyInt8PerChannelQuantConfig(QuantizationConfig):

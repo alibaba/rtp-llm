@@ -11,7 +11,6 @@ from typing import Optional
 import requests
 import torch
 
-from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.utils.lru_dict import LruDict
 from rtp_llm.utils.oss_util import get_bytes_io_from_oss_path
 
@@ -19,13 +18,11 @@ logger = logging.getLogger(__name__)
 
 REQUEST_GET = None
 
-
 def request_get(url, headers):
     global REQUEST_GET
     if REQUEST_GET is None:
         try:
             from internal_source.rtp_llm.utils.ssrf_check import safe_request_get
-
             REQUEST_GET = safe_request_get
         except ImportError:
             REQUEST_GET = lambda url, headers: requests.get(
@@ -34,25 +31,25 @@ def request_get(url, headers):
     return REQUEST_GET(url, headers)
 
 
-if StaticConfig.vit_config.download_headers != "":
-    HTTP_HEADS = json.loads(StaticConfig.vit_config.download_headers)
-else:
-    HTTP_HEADS = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-    }
-
-BASE64_PREFIX = "data:image/jpeg;base64,"
-URL_CACHE_SIZE = StaticConfig.vit_config.url_cache_item_num
-MM_CACHE_SIZE = StaticConfig.vit_config.mm_cache_item_num
-
+def _get_http_heads(download_headers: str = ""):
+    """Get HTTP headers from download_headers string.
+    
+    Args:
+        download_headers: JSON string containing HTTP headers. If empty, returns default headers.
+    """
+    if download_headers != "":
+        return json.loads(download_headers)
+    else:
+        return {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+        }
 
 def get_base64_prefix(s):
     match = re.match(r"^data:[^,]*;base64,", s)
     if not match:
         return 0
     return match.end()
-
 
 class MMUrlType(IntEnum):
     DEFAULT = 0
@@ -61,7 +58,6 @@ class MMUrlType(IntEnum):
     AUDIO = 3
     TENSOR = 4
     IGRAPH = 5
-
 
 @dataclass
 class MMPreprocessConfig:
@@ -91,14 +87,6 @@ class MultimodalInput:
         self.mm_type = mm_type
         self.config = config
         self.tensor = tensor
-
-
-def get_vit_compute_dtype(dtype: str):
-    if dtype == "bf16":
-        return torch.bfloat16
-    else:
-        return torch.half
-
 
 class IgraphItemKeyCountMismatchError(Exception):
     
@@ -130,10 +118,17 @@ def retry_on_assertion_error(retries: int = 3):
     return decorator
 
 
-def get_json_result_from_url(url: str):
+def get_json_result_from_url(url: str, download_headers: str = ""):
+    """Get JSON result from URL.
+    
+    Args:
+        url: URL to fetch from.
+        download_headers: JSON string containing HTTP headers. If empty, uses default headers.
+    """
+    headers = _get_http_heads(download_headers)
     try:
         if url.startswith("http") or url.startswith("https"):
-            response = requests.get(url, stream=True, headers=HTTP_HEADS, timeout=10)
+            response = requests.get(url, stream=True, headers=headers, timeout=10)
             if response.status_code == 200:
                 res = response.content.decode("utf-8")
             else:
@@ -151,12 +146,20 @@ def get_json_result_from_url(url: str):
     return res
 
 
-def get_bytes_io_from_url(url: str):
+def get_bytes_io_from_url(url: str, download_headers: str = ""):
+    """Get BytesIO from URL.
+    
+    Args:
+        url: URL to fetch from.
+        download_headers: JSON string containing HTTP headers. If empty, uses default headers.
+    """
+
     cached_res = url_data_cache_.check_cache(url)
     if cached_res is None:
+        headers = _get_http_heads(download_headers)
         try:
             if url.startswith("http") or url.startswith("https"):
-                response = request_get(url, HTTP_HEADS)
+                response = request_get(url, headers)
                 if response.status_code == 200:
                     res = BytesIO(response.content)
                 else:
@@ -189,20 +192,25 @@ class MMDataCache(object):
             self.mm_data_cache = LruDict(cache_size)
 
     def check_cache(self, url: str):
-        if self.mm_data_cache == None:
-            return None
-        with self.cache_lock:
+         with self.cache_lock:
+            if self.mm_data_cache == None:
+                return None
             if url in self.mm_data_cache:
                 return self.mm_data_cache[url]
             else:
-                return None
+                return None   
 
     def insert_cache(self, url: str, data):
-        if self.mm_data_cache == None:
-            return
-        with self.cache_lock:
+         with self.cache_lock:
+            if self.mm_data_cache == None:  
+                return
             self.mm_data_cache[url] = data
 
+    def resize_cache(self, cache_size: int):
+        with self.cache_lock:
+            self.mm_data_cache.set_size(cache_size)
 
-vit_emb_cache_ = MMDataCache(MM_CACHE_SIZE)
-url_data_cache_ = MMDataCache(URL_CACHE_SIZE)
+# Global cache instance for VIT embeddings
+vit_emb_cache_ = MMDataCache(cache_size=10)
+url_data_cache_ = MMDataCache(cache_size=10)
+        

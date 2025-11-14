@@ -14,9 +14,9 @@ namespace rtp_llm {
 class cufmha {
 
 public:
-    cufmha(DataType          dtype,
-           AttentionMaskType mtype,
-           size_t            head_num,
+    cufmha(DataType dtype,
+           bool     is_causal,
+           size_t   head_num,
            size_t            kv_head_num,
            size_t            size_per_head,
            size_t            seq_size_per_block,
@@ -112,9 +112,9 @@ public:
     size_t
     getOpenSourceWorkSpaceSize(size_t batch_size, size_t seq_len_q, size_t max_seq_len_kv = 0, bool paged = false);
 
-    bool checkSignature(DataType          dtype,
-                        AttentionMaskType mtype,
-                        size_t            head_num,
+    bool checkSignature(DataType dtype,
+                        bool     is_causal,
+                        size_t   head_num,
                         size_t            kv_head_num,
                         size_t            size_per_head,
                         float             q_scaling,
@@ -151,8 +151,8 @@ private:
 #ifdef USE_OLD_TRT_FMHA
     std::unique_ptr<FusedMHARunnerFP16v2> trtv1_fmha_runner_;
 #endif
-    DataType          dtype_;
-    AttentionMaskType mtype_;
+    DataType dtype_;
+    bool     is_causal_;
 
     size_t       head_num_;
     size_t       kv_head_num_;

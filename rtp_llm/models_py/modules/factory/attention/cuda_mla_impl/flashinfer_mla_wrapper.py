@@ -4,12 +4,11 @@ from typing import Any, Dict, List, Optional
 
 import torch
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
     FMHADecodeImplBase,
     FMHAPrefillImplBase,
 )
-from rtp_llm.ops import FMHAType
+from rtp_llm.ops import AttentionConfigs, FMHAType, FMHAConfig
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs
 
 from .flashinfer_mla import (
@@ -19,56 +18,58 @@ from .flashinfer_mla import (
 )
 from .rotary_emb import MlaRotaryEmbeddingOp
 
+warm_up_done = False
 
 class MlaFlashInferPrefillImpl(FMHAPrefillImplBase):
     def __init__(
         self,
-        config: GptInitModelParameters,
+        attn_configs: AttentionConfigs,
         attn_inputs: PyAttentionInputs,
         weights: List[Dict[str, torch.Tensor]],
         cos_sin_cache: torch.Tensor,
-        absorb_opt_len: int = 1024,
+        fmha_config: Optional[FMHAConfig] = None,
         use_trt_fmha: bool = False,
+        quant_config: Optional[object] = None,
     ) -> None:
         # trt prefill not support reuse cache yet
         super().__init__(
             MlaFlashInferPrefillOp(
-                config,
-                config.head_num // config.tp_size,
-                config.kv_lora_rank,
-                config.rope_head_dim,
-                config.nope_head_dim,
-                config.seq_size_per_block,
-                config.softmax_extra_scale,
-                config.use_mla,
+                attn_configs,
+                attn_configs.head_num,
+                attn_configs.kv_lora_rank,
+                attn_configs.rope_head_dim,
+                attn_configs.nope_head_dim,
+                attn_configs.tokens_per_block,
+                attn_configs.softmax_extra_scale,
+                attn_configs.use_mla,
                 weights,
                 use_trt_fmha,
+                quant_config,
             ),
             MlaRotaryEmbeddingOp(
-                head_size=config.nope_head_dim,
+                head_size=attn_configs.nope_head_dim,
                 cos_sin_cache=cos_sin_cache,
-                kv_lora_rank=config.kv_lora_rank,
-                rope_head_dim=config.rope_head_dim,
-                token_per_block=config.seq_size_per_block,
+                kv_lora_rank=attn_configs.kv_lora_rank,
+                rope_head_dim=attn_configs.rope_head_dim,
+                token_per_block=attn_configs.tokens_per_block,
                 is_neox_style=False,
             ),
             attn_inputs,
         )
         self.rope_params = self.fmha_params
-        self.warm_up = config.warm_up
         self.has_reuse_cache = False
         if attn_inputs.prefix_lengths is not None:
             self.has_reuse_cache = attn_inputs.prefix_lengths.max().item() > 0
 
-        self.absorb_opt_len = config.py_env_configs.py_kv_cache_config.absorb_opt_len
+        self.absorb_opt_len = fmha_config.absorb_opt_len if fmha_config is not None else 1024
         self.aborb_fmha = MlaFlashInferDecodeOp(
-            config.head_num // config.tp_size,
-            config.kv_lora_rank,
-            config.rope_head_dim,
-            config.nope_head_dim,
-            config.seq_size_per_block,
-            config.softmax_extra_scale,
-            config.use_mla,
+            attn_configs.head_num,
+            attn_configs.kv_lora_rank,
+            attn_configs.rope_head_dim,
+            attn_configs.nope_head_dim,
+            attn_configs.tokens_per_block,
+            attn_configs.softmax_extra_scale,
+            attn_configs.use_mla,
             weights,
         )
         self.aborb_fmha.plan(self.fmha_params)
@@ -86,9 +87,10 @@ class MlaFlashInferPrefillImpl(FMHAPrefillImplBase):
         layer_id: int,
     ):
         """Compute prefill context with optimized cache reuse logic."""
-        if self.warm_up:
-            self.warm_up = False
+        global warm_up_done
+        if not warm_up_done:
             warmup_flashinfer_python()
+            warm_up_done = True
 
         if q.size(0) < self.absorb_opt_len and self.has_reuse_cache:
             return self._handle_short_sequence(q, kv_cache, layer_id)
@@ -154,28 +156,30 @@ class MlaFlashInferDecodeImpl(FMHADecodeImplBase):
 
     def __init__(
         self,
-        config: GptInitModelParameters,
+        attn_configs: AttentionConfigs,
         attn_inputs: PyAttentionInputs,
         weights: List[Dict[str, torch.Tensor]],
         cos_sin_cache: torch.Tensor,
+        fmha_config: Optional[FMHAConfig] = None,
+        quant_config: Optional[object] = None,
     ) -> None:
         super().__init__(
             MlaFlashInferDecodeOp(
-                config.head_num // config.tp_size,
-                config.kv_lora_rank,
-                config.rope_head_dim,
-                config.nope_head_dim,
-                config.seq_size_per_block,
-                config.softmax_extra_scale,
-                config.use_mla,
+                attn_configs.head_num,
+                attn_configs.kv_lora_rank,
+                attn_configs.rope_head_dim,
+                attn_configs.nope_head_dim,
+                attn_configs.tokens_per_block,
+                attn_configs.softmax_extra_scale,
+                attn_configs.use_mla,
                 weights,
             ),
             MlaRotaryEmbeddingOp(
-                head_size=config.nope_head_dim,
+                head_size=attn_configs.nope_head_dim,
                 cos_sin_cache=cos_sin_cache,
-                kv_lora_rank=config.kv_lora_rank,
-                rope_head_dim=config.rope_head_dim,
-                token_per_block=config.seq_size_per_block,
+                kv_lora_rank=attn_configs.kv_lora_rank,
+                rope_head_dim=attn_configs.rope_head_dim,
+                token_per_block=attn_configs.tokens_per_block,
                 is_neox_style=False,
             ),
             attn_inputs,

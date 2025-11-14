@@ -2,10 +2,23 @@ import json
 import logging
 import os
 
-from rtp_llm.async_decoder_engine.base_engine import BaseEngine
-from rtp_llm.async_decoder_engine.engine_creator import create_engine
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.model_factory import ModelConfig, ModelFactory
+from rtp_llm.config.kv_cache_config import KVCacheConfig
+from rtp_llm.config.model_args import ModelArgs
+from rtp_llm.config.model_config import ModelConfig, build_model_config
+from rtp_llm.config.py_config_modules import (
+    GenerateEnvConfig,
+    QuantizationConfig,
+    RenderConfig,
+)
+from rtp_llm.model_factory import ModelFactory
+from rtp_llm.models.base_model import BaseModel
+from rtp_llm.ops import (
+    FMHAConfig,
+    HWKernelConfig,
+    MoeConfig,
+    ParallelismConfig,
+    ProfilingDebugLoggingConfig,
+)
 from rtp_llm.utils.weight_type import WEIGHT_TYPE
 
 
@@ -41,7 +54,7 @@ class FakeModelLoader(object):
         logging.info(f"tokenizer path: {self.tokenizer_path}")
         logging.info(f"check point path: {self.ckpt_path}")
 
-    def init_engine(self) -> BaseEngine:
+    def init_model(self) -> BaseModel:
         config_path = os.path.join(self.ckpt_path, "config.json")
         if os.path.exists(config_path):
             with open(config_path) as reader:
@@ -49,62 +62,84 @@ class FakeModelLoader(object):
                 config_json = json.loads(content)
         else:
             raise Exception("not existed config_path ", config_path)
-        os.environ["WARM_UP"] = "0"
         model_cls = ModelFactory.get_model_cls(self.model_type)
-        model_config = ModelConfig(
-            ckpt_path=self.ckpt_path,
-            model_type=self.model_type,
-            tokenizer_path=self.tokenizer_path,
-            act_type=self.act_type,
-            max_seq_len=64,
-            seq_size_per_block=64,
-            gen_num_per_circle=1,
-            quantization=self.quantization,
-        )
 
-        raw_config: GptInitModelParameters = model_cls.create_config(model_config)
-        raw_config.model_specific_config.load_python_model = self.load_py_model
-        raw_config.device_resource_config.device_reserve_memory_bytes = (
-            self.device_reserve_memory_bytes
+        config: ModelConfig = model_cls._create_config(self.ckpt_path)
+        # Apply model_config settings
+        config.ckpt_path = self.ckpt_path
+        config.tokenizer_path = self.tokenizer_path
+        config.max_seq_len = (
+            self.max_seq_len if self.max_seq_len > 0 else config.max_seq_len
         )
-        raw_config.warm_up = self.warm_up
-        raw_config.head_num = config_json.get(
-            "num_attention_heads", raw_config.head_num
+        # Set data_type instead of act_type (act_type is not a direct attribute)
+        if self.act_type:
+            config.data_type = self.act_type
+        config.model_type = self.model_type
+
+        # Update from config.json
+        config.attn_config.head_num = config_json.get(
+            "num_attention_heads", config.attn_config.head_num
         )
-        raw_config.head_num_kv = config_json.get(
-            "num_key_value_heads", raw_config.head_num_kv
+        config.attn_config.kv_head_num = config_json.get(
+            "num_key_value_heads", config.attn_config.kv_head_num
         )
         if config_json.get("multi_query_attention", False):
-            raw_config.head_num_kv = config_json["multi_query_group_num"]
-        raw_config.size_per_head = config_json.get(
-            "kv_channels", raw_config.size_per_head
+            config.attn_config.kv_head_num = config_json["multi_query_group_num"]
+        config.attn_config.size_per_head = config_json.get(
+            "kv_channels", config.attn_config.size_per_head
         )
-        raw_config.inter_size = config_json.get(
-            "ffn_hidden_size", raw_config.inter_size
-        )
-        raw_config.inter_padding_size = config_json.get(
-            "ffn_inter_padding_size", raw_config.inter_padding_size
-        )
-        raw_config.layer_num = config_json.get("num_layers", raw_config.layer_num)
-        raw_config.vocab_size = config_json.get(
-            "padded_vocab_size", raw_config.vocab_size
-        )
-        raw_config.pre_seq_len = config_json.get("pre_seq_len", raw_config.pre_seq_len)
+        config.inter_size = config_json.get("ffn_hidden_size", config.inter_size)
+        config.num_layers = config_json.get("num_layers", config.num_layers)
+        config.vocab_size = config_json.get("padded_vocab_size", config.vocab_size)
+        config.pre_seq_len = config_json.get("pre_seq_len", config.pre_seq_len)
+        config.attn_config.is_causal = self.is_causal
 
-        raw_config.update_common(
-            ckpt_path=self.ckpt_path,
-            lora_infos=None,
-            tokenizer_path=self.tokenizer_path,
-            quantization=model_config.quantization,
-            data_type=self.data_type,
-            kv_cache_type=self.kv_cache_type,
-            max_seq_len=self.max_seq_len,
-            seq_size_per_block=64,
-            gen_num_per_circle=1,
-            ptuning_path=None,
+        # Create ModelArgs from config
+        model_args = ModelArgs()
+        model_args.ckpt_path = self.ckpt_path
+        model_args.tokenizer_path = self.tokenizer_path
+        model_args.model_type = self.model_type
+        model_args.act_type = self.act_type
+        model_args.max_seq_len = self.max_seq_len
+
+        quantization_config = QuantizationConfig()
+        quantization_config.quantization = self.quantization
+
+        # Create minimal configs for testing
+        kv_cache_config = KVCacheConfig()
+        kv_cache_config.seq_size_per_block = (
+            64  # Set seq_size_per_block in KVCacheConfig
         )
-        raw_config.is_causal = self.is_causal
-        model = model_cls.from_config(raw_config)
-        engine = create_engine(model)
-        engine.start()
-        return engine
+
+        # Create minimal config objects for BaseModel
+        parallelism_config = ParallelismConfig()
+        hw_kernel_config = HWKernelConfig()
+        fmha_config = FMHAConfig()
+        moe_config = MoeConfig()
+
+        # Build model config
+        build_model_config(
+            model_config=config,
+            model_args=model_args,
+            kv_cache_config=kv_cache_config,
+            quantization_config=quantization_config,
+            profiling_debug_logging_config=ProfilingDebugLoggingConfig(),
+            embedding_config=None,  # Fake loader doesn't need embedding_config
+        )
+        config.render_config = RenderConfig()
+        config.generate_env_config = GenerateEnvConfig()
+
+        model = model_cls(
+            model_config=config,
+            parallelism_config=parallelism_config,
+            hw_kernel_config=hw_kernel_config,
+            kv_cache_config=kv_cache_config,
+            fmha_config=fmha_config,
+            moe_config=moe_config,
+            load_python_model=self.load_py_model,
+            max_generate_batch_size=0,
+            vit_config=None,
+            merge_lora=False,
+        )
+        model.load()
+        return model

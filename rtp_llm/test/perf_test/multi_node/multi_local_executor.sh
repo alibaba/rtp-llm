@@ -112,7 +112,6 @@ build_code() {
 
 configure_env() {
   # Configure fixed environment variables
-  export FT_SERVER_TEST=1;
   export FT_DISABLE_CUSTOM_AR=1;
   export MLA_OPS_TYPE="AUTO";
   export PYTHONPATH="./";

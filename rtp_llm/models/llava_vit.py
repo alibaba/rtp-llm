@@ -5,16 +5,18 @@ import os
 import re
 from dataclasses import dataclass
 from functools import partial, reduce
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from rtp_llm.config.model_config import VitParameters
 import torch
 import torch.nn as nn
 import torch.utils.checkpoint
 from PIL import Image
 from transformers import CLIPImageProcessor, CLIPVisionConfig, CLIPVisionModel
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.models.llava_utils import (
     expand2square,
     get_anyres_image_grid_shape,
@@ -53,18 +55,17 @@ from transformers.utils import ModelOutput
 
 
 class LlavaImageEmbedding(MultiModalEmbeddingInterface):
-    def __init__(self, config: GptInitModelParameters):
-        self.config = config
-        if config.mm_related_params.config.get("vision_config", None) != None:
+    def __init__(self, mm_related_params: "VitParameters", model_config=None):
+        self.mm_related_params = mm_related_params
+        self.model_config = model_config  # Store model_config for build_vision_tower
+        if mm_related_params.config.get("vision_config", None) != None:
             raise Exception("llava-hf style config is not implemented yet")
         else:
-            self.vision_tower = self.build_vision_tower(config.mm_related_params.config)
-        self.mm_projector = self.build_vision_projector(config.mm_related_params.config)
-        if "unpad" in self.config.mm_related_params.config.get(
-            "mm_patch_merge_type", "flat"
-        ):
+            self.vision_tower = self.build_vision_tower(mm_related_params.config)
+        self.mm_projector = self.build_vision_projector(mm_related_params.config)
+        if "unpad" in mm_related_params.config.get("mm_patch_merge_type", "flat"):
             self.image_newline = nn.Parameter(
-                torch.empty(self.config.mm_related_params.config["hidden_size"])
+                torch.empty(mm_related_params.config["hidden_size"])
             )
 
     @torch.inference_mode()
@@ -138,7 +139,7 @@ class LlavaImageEmbedding(MultiModalEmbeddingInterface):
 
     @torch.no_grad()
     def image_embedding(self, images: List[Image.Image], mm_type=MMUrlType.IMAGE):
-        config = self.config.mm_related_params.config
+        config = self.mm_related_params.config
         image_aspect_ratio = config["image_aspect_ratio"]
         mm_patch_merge_type = config.get("mm_patch_merge_type", "flat")
         mm_newline_position = config.get("mm_newline_position", "one_token")
@@ -174,7 +175,7 @@ class LlavaImageEmbedding(MultiModalEmbeddingInterface):
                 if mm_type == MMUrlType.VIDEO:  # video operations
                     if mm_newline_position == "grid":
                         image_feature = self.add_token_per_grid(image_feature)
-                        if self.config.mm_related_params.config["add_faster_video"]:
+                        if self.mm_related_params.config.get("add_faster_video", False):
                             raise Exception("add_faster_video is not implemented")
                             # faster_video_feature = self.add_token_per_grid(all_faster_video_features[image_idx])
                             # concat_slow_fater_token = []
@@ -354,7 +355,7 @@ class LlavaImageEmbedding(MultiModalEmbeddingInterface):
             ),
             dim=-1,
         )
-        if self.config.mm_related_params.config["add_faster_video"]:
+        if self.mm_related_params.config.get("add_faster_video", False):
             image_feature = image_feature.view(feature_dim, num_frames, resize_h, -1)
             image_feature = image_feature.permute(1, 2, 3, 0).contiguous()
             image_feature = image_feature.flatten(1, 2)
@@ -368,9 +369,9 @@ class LlavaImageEmbedding(MultiModalEmbeddingInterface):
         image_feature = image_feature.view(num_frames, height, width, -1)
         image_feature = image_feature.permute(0, 3, 1, 2).contiguous()
         # image_feature = nn.functional.max_pool2d(image_feature, self.config.mm_spatial_pool_stride)
-        mm_spatial_pool_mode = self.config.mm_related_params.config[
-            "mm_spatial_pool_mode"
-        ]
+        mm_spatial_pool_mode = self.mm_related_params.config.get(
+            "mm_spatial_pool_mode", "none"
+        )
         if mm_spatial_pool_mode == "average":
             image_feature = nn.functional.avg_pool2d(image_feature, stride)
         elif mm_spatial_pool_mode == "max":
@@ -391,8 +392,8 @@ class LlavaImageEmbedding(MultiModalEmbeddingInterface):
         return image_feature
 
     def build_vision_tower(self, vision_tower_cfg: Dict[str, Any], **kwargs: Any):
-        vision_tower_name = self.config.py_env_configs.model_config.extra_data_path
-        vision_tower = self.config.py_env_configs.model_config.local_extra_data_path
+        vision_tower_name = self.model_config.extra_data_path
+        vision_tower = self.model_config.local_extra_data_path
         if vision_tower is None:
             vision_tower_name = vision_tower_cfg["vit_tower_path"]
             vision_tower = vision_tower_cfg["vit_tower_path"]

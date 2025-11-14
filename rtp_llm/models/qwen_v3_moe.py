@@ -1,6 +1,6 @@
 from typing import Any, List, Optional
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.ffn_weight import MoeAtomicWeight, MoeConfig, MoeWeight
 from rtp_llm.model_loader.model_weight_info import ModelWeightInfo
@@ -20,18 +20,14 @@ from rtp_llm.utils.model_weight import (
 
 
 class QWenV3MoeWeight(QWenV2MoeWeight):
-    def __init__(self, *args: Any, **kwargs: Any):
-        super().__init__(*args, **kwargs)
+    def __init__(self, model_config, parallelism_config, hw_kernel_config, kv_cache_config, merge_lora=False, vit_config=None, prefix="", **kwargs: Any):
+        super().__init__(model_config=model_config, parallelism_config=parallelism_config, hw_kernel_config=hw_kernel_config, kv_cache_config=kv_cache_config, merge_lora=merge_lora, vit_config=vit_config, prefix=prefix, **kwargs)
         self.bias = False
 
     def _get_hf_ffn_layer_weight_info(self, layer_id: int):
         moe_config = MoeConfig(
             expert_num=self.expert_num_,
-            inter_padding_size=(
-                self._layer_inter_padding_size[layer_id]
-                if self._layer_inter_padding_size
-                else self._inter_padding_size
-            ),
+            align_size=self._align_size,
             routed_scaling_factor=1.0,
         )
         return [
@@ -89,13 +85,29 @@ class Qwen3Moe(Qwen2Moe):
         return config
 
     def _create_python_model(self) -> Optional[GptModelBase]:
-        self.py_model = GenericMoeModel(self.config, self.weight)
+        model_config = self.model_config
+        parallelism_config = self.parallelism_config
+        fmha_config = self.fmha_config
+        py_hw_kernel_config = self.hw_kernel_config
+        moe_config = self.moe_config
+        max_generate_batch_size = self.max_generate_batch_size
+        
+        self.py_model = GenericMoeModel(
+            model_config,
+            parallelism_config,
+            self.weight,
+            moe_config,
+            max_generate_batch_size=max_generate_batch_size,
+            fmha_config=fmha_config,
+            py_hw_kernel_config=py_hw_kernel_config,
+            device_resource_config=self.device_resource_config,
+        )
         return self.py_model
 
 
 class Qwen3MoeEagle3Weight(QWenV2Weight):
-    def __init__(self, config: GptInitModelParameters, tp_size: int, tp_rank: int):
-        super().__init__(config, tp_size, tp_rank)
+    def __init__(self, **kwargs):
+        super().__init__( **kwargs)
         self.bias = False
         self._use_qk_norm = True
 

@@ -6,8 +6,9 @@
 #include <vector>
 
 #include "rtp_llm/cpp/utils/StringUtil.h"
-#include "rtp_llm/cpp/config/GptInitParameter.h"
 #include "autil/legacy/jsonizable.h"
+#include "rtp_llm/cpp/config/RoleTypes.h"
+#include "rtp_llm/cpp/config/SpecialTokens.h"
 
 namespace rtp_llm {
 
@@ -105,14 +106,14 @@ public:
     }
 
     void addSpecialTokens(const rtp_llm::SpecialTokens& special_tokens) {
-        for (const auto& vec : special_tokens.stop_words_id_list_) {
+        for (const auto& vec : special_tokens.stop_words_id_list) {
             std::vector<int> tmpVec;
             for (int64_t val : vec) {
                 tmpVec.push_back(static_cast<int>(val));
             }
             stop_words_list.push_back(tmpVec);
         }
-        const auto& vec = special_tokens.stop_words_str_list_;
+        const auto& vec = special_tokens.stop_words_str_list;
         stop_words_str.insert(stop_words_str.begin(), vec.begin(), vec.end());
     }
 

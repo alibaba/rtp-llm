@@ -10,7 +10,7 @@ from typing import Optional
 import torch
 import torch.distributed
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
 
 try:
     import rtp_llm.models_py.distributed.deepep_wrapper as deepep_wrapper_module
@@ -31,7 +31,7 @@ class DeepEpInitializer:
 
     @classmethod
     def ensure_initialized(
-        cls, config: GptInitModelParameters, timeout: Optional[int] = None
+        cls, config: MoEConfigAdapter, timeout: Optional[int] = None
     ) -> None:
         """Ensure DeepEP environment is initialized (thread-safe)
 
@@ -51,14 +51,14 @@ class DeepEpInitializer:
             cls._initialized = True
 
     @classmethod
-    def get_deepep_wrapper(cls, config: GptInitModelParameters):
+    def get_deepep_wrapper(cls, config: MoEConfigAdapter):
         cls.ensure_initialized(config)
         assert deepep_wrapper_module is not None
         return deepep_wrapper_module.get_deepep_wrapper()
 
     @classmethod
     def _do_initialization(
-        cls, config: GptInitModelParameters, timeout: Optional[int]
+        cls, config: MoEConfigAdapter, timeout: Optional[int]
     ) -> None:
         """Perform actual initialization logic
 
@@ -71,7 +71,7 @@ class DeepEpInitializer:
         assert deepep_wrapper_module is not None, "deepep_wrapper is not imported"
         default_group = torch.distributed.group.WORLD
         assert default_group is not None, "Default process group is not initialized"
-        deepep_wrapper_module.init_deepep_wrapper(group=default_group, params=config)
+        deepep_wrapper_module.init_deepep_wrapper(group=default_group, config_adapter=config)
 
     @classmethod
     def is_initialized(cls) -> bool:

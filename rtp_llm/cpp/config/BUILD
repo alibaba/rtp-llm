@@ -11,31 +11,50 @@ cc_library(
 )
 
 cc_library(
+    name = "role_types",
+    hdrs = ["RoleTypes.h"],
+    visibility = ["//visibility:public"],
+    copts = copts(),
+)
+
+cc_library(
     name = "config_modules",
     hdrs = ["ConfigModules.h"],
     srcs = ["ConfigModules.cc"],
     deps = [
         "@havenask//aios/autil:env_util",
+        ":role_types",
+        ":eplb_config",
     ],
     copts = copts(),
 )
 
 cc_library(
-    name = "gpt_init_params",
-    srcs = [
-        "GptInitParameter.cc",
-    ],
-    hdrs = [
-        "GptInitParameter.h",
-    ],
-    deps = [
-        "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/core:types",
-        "//rtp_llm/cpp/model_utils:model_utils",
-        "//rtp_llm/cpp/config:config_modules",
-        "//rtp_llm/cpp/models:eplb_config",
-    ] + torch_deps(),
-    copts = copts(),
+    name = "eplb_config",
+    hdrs = ["EplbConfig.h"],
+    srcs = ["EplbConfig.cc"],
     visibility = ["//visibility:public"],
+    copts = copts(),
 )
 
+cc_library(
+    name = "special_tokens",
+    hdrs = ["SpecialTokens.h"],
+    visibility = ["//visibility:public"],
+    copts = copts(),
+)
+
+cc_library(
+    name = "model_config",
+    hdrs = ["ModelConfig.h"],
+    srcs = ["ModelConfig.cc"],
+    deps = [
+        ":eplb_config",
+        ":special_tokens",
+        ":config_modules",
+        "//rtp_llm/cpp/model_utils:model_utils",
+        "//rtp_llm/cpp/core:types",
+    ],
+    visibility = ["//visibility:public"],
+    copts = copts(),
+)

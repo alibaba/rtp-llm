@@ -23,14 +23,14 @@ public:
         kBatchDecode  = 0,
         kBatchPrefill = 1
     };
-    BatchDecodeScheduler(const rtp_llm::GptInitParameter&     params,
+    BatchDecodeScheduler(const RuntimeConfig&                 runtime_config,
                          const std::shared_ptr<CacheManager>& cache_manager,
                          const kmonitor::MetricsReporterPtr   metrics_reporter,
                          rtp_llm::DeviceBase*                 device) {
         cache_manager_    = cache_manager;
         device_           = device;
         metrics_reporter_ = metrics_reporter;
-        batch_size_       = params.batch_decode_scheduler_config.batch_decode_scheduler_batch_size;
+        batch_size_       = runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size;
         scheduler_type_   = SchedulerType::kBatchDecode;
     }
     virtual ~BatchDecodeScheduler() = default;

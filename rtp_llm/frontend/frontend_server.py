@@ -11,17 +11,19 @@ from fastapi.responses import ORJSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from rtp_llm.access_logger.access_logger import AccessLogger
-from rtp_llm.config.generate_config import RoleType
-from rtp_llm.config.gpt_init_model_parameters import ConfigMode, GptInitModelParameters
-from rtp_llm.config.py_config_modules import StaticConfig
-from rtp_llm.config.task_type import TaskType
 from rtp_llm.embedding.embedding_endpoint import EmbeddingEndpoint
+from rtp_llm.config.log_config import get_log_path
+from rtp_llm.config.model_config import (
+    update_stop_words_from_env,
+    update_tokenizer_special_tokens,
+)
 from rtp_llm.frontend.frontend_worker import FrontendWorker, TokenizerEncodeResponse
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.model_factory_register import _model_factory
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
+from rtp_llm.ops import SpecialTokens, TaskType
 from rtp_llm.server.misc import format_exception
 from rtp_llm.structure.request_extractor import request_id_field_name
 from rtp_llm.utils.complete_response_async_generator import (
@@ -39,51 +41,87 @@ USAGE_HEADER = "USAGE"
 
 class FrontendServer(object):
     def __init__(
-        self, separated_frontend: bool = False, rank_id: int = 0, server_id: int = 0
+        self,
+        rank_id: int = 0,
+        server_id: int = 0,
+        py_env_configs=None,
     ):
-        self._access_logger = AccessLogger(rank_id, server_id)
+        self.py_env_configs = py_env_configs
+        self._access_logger = AccessLogger(
+            get_log_path(),
+            py_env_configs.profiling_debug_logging_config.log_file_backup_count,
+            rank_id, server_id,
+        )
         self._frontend_worker = None
         self._openai_endpoint = None
+        self._embedding_endpoint = None
+        self.is_embedding = False
         self.thread_lock_ = threading.Lock()
         self._global_controller = get_global_controller()
-        self.separated_frontend = separated_frontend
         self.rank_id = str(rank_id)
         self.server_id = str(server_id)
         kmonitor.init()
 
     def start(self):
-        if StaticConfig.profiling_debug_config.debug_start_fake_process == 1:
+        if (
+            self.py_env_configs.profiling_debug_logging_config.debug_start_fake_process
+            == 1
+        ):
             # for debug online
             logging.info("DEBUG_START_FAKE_PROCESS is set, start fake server")
             self._frontend_worker = None
+            return
+
+        model_config = ModelFactory.create_model_config(
+            model_args=self.py_env_configs.model_args,
+            lora_config=self.py_env_configs.lora_config,
+            kv_cache_config=self.py_env_configs.kv_cache_config,
+            profiling_debug_logging_config=self.py_env_configs.profiling_debug_logging_config,
+            generate_env_config=self.py_env_configs.generate_env_config,
+            embedding_config=self.py_env_configs.embedding_config,
+            quantization_config=self.py_env_configs.quantization_config,
+            render_config=self.py_env_configs.render_config,
+        )
+        
+        # Create a temporary tokenizer to initialize special_tokens
+        # We'll update it with the actual tokenizer after FrontendWorker is created
+        special_tokens = SpecialTokens()
+        if self.py_env_configs.generate_env_config:
+            update_stop_words_from_env(
+                special_tokens, self.py_env_configs.generate_env_config
+            )
+
+        # Create FrontendWorker with special_tokens
+        self._frontend_worker = FrontendWorker(
+            self.py_env_configs, model_config, special_tokens
+        )
+
+        # Update special_tokens with actual tokenizer
+        update_tokenizer_special_tokens(special_tokens, self._frontend_worker.tokenizer)
+
+        # Only initialize OpenaiEndpoint for LANGUAGE_MODEL task type
+        if model_config.task_type == TaskType.LANGUAGE_MODEL:
+            # Update model_config with the latest values
+            model_config.special_tokens = special_tokens
+            model_config.generate_env_config = self.py_env_configs.generate_env_config
+            model_config.render_config = self.py_env_configs.render_config
+            model_config.model_name = self.py_env_configs.model_args.model_type
+            model_config.template_type = None
+            
+            self._openai_endpoint = OpenaiEndpoint(
+                model_config=model_config,
+                misc_config=self.py_env_configs.misc_config,
+                vit_config=self.py_env_configs.vit_config,
+                tokenizer=self._frontend_worker.tokenizer,
+                backend_rpc_server_visitor=self._frontend_worker.backend_rpc_server_visitor,
+            )
         else:
-            self._frontend_worker = FrontendWorker(self.separated_frontend)
-            self._openai_endpoint = None
-            self.is_embedding = False
-            self._embedding_endpoint = None
-            if (
-                self._frontend_worker.model_config is not None
-                and self._frontend_worker.model_config.task_type
-                != TaskType.LANGUAGE_MODEL
-            ):
-                self.is_embedding = True
-                model_config = ModelFactory.create_normal_model_config()
-                global _model_factory
-                if model_config.model_type not in _model_factory:
-                    raise Exception(
-                        f"model type {model_config.model_type} not registered!"
-                    )
-                model_cls = _model_factory[model_config.model_type]
-                config: GptInitModelParameters = model_cls.create_config(model_config)
-                self._embedding_endpoint = EmbeddingEndpoint(
-                    config, self._frontend_worker.tokenizer
-                )
-            else:
-                self._openai_endpoint = OpenaiEndpoint(
-                    self._frontend_worker.model_config,
-                    self._frontend_worker.tokenizer,
-                    self._frontend_worker.backend_rpc_server_visitor,
-                )
+            self._embedding_endpoint = EmbeddingEndpoint(
+                model_config=model_config,
+                grpc_config=self.py_env_configs.grpc_config,
+                tokenizer=self._frontend_worker.tokenizer
+            )
+            self.is_embedding = True
 
     def stop(self):
         if self._frontend_worker is not None:

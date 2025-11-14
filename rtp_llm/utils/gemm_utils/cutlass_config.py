@@ -73,4 +73,4 @@ def load_cutlass_gemm_config(quant_algo):
                             int(configs[5]),
                         )
     except Exception as e:
-        logging.warn("load cutlass gemm config failed: " + str(e))
+        logging.warning("load cutlass gemm config failed: " + str(e))

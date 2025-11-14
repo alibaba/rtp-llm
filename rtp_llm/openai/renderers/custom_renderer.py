@@ -4,13 +4,13 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import AsyncGenerator, List, Optional, Union
+from enum import Enum
+from typing import Any, AsyncGenerator, List, Optional, Union
 
 import torch
 
 from rtp_llm.config.generate_config import GenerateConfig
-from rtp_llm.config.gpt_init_model_parameters import TemplateType
-from rtp_llm.config.py_config_modules import PyEnvConfigs, StaticConfig
+from rtp_llm.config.py_config_modules import GenerateEnvConfig, RenderConfig
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
     ChatCompletionExtraOutputs,
@@ -46,14 +46,19 @@ from rtp_llm.utils.word_util import (
     truncate_response_with_stop_words,
 )
 
-THINK_MODE = StaticConfig.generate_env_config.think_mode
-
-THINK_START_TAG = StaticConfig.generate_env_config.think_start_tag.encode(
-    "utf-8"
-).decode("unicode_escape")
-THINK_END_TAG = StaticConfig.generate_env_config.think_end_tag.encode("utf-8").decode(
-    "unicode_escape"
-)
+def _get_think_config(generate_env_config):
+    """Get thinking configuration from generate_env_config.
+    
+    Args:
+        generate_env_config: GenerateEnvConfig object.
+        
+    Returns:
+        Tuple of (think_mode, think_start_tag, think_end_tag)
+    """
+    think_mode = generate_env_config.think_mode
+    think_start_tag = generate_env_config.think_start_tag.encode("utf-8").decode("unicode_escape")
+    think_end_tag = generate_env_config.think_end_tag.encode("utf-8").decode("unicode_escape")
+    return think_mode, think_start_tag, think_end_tag
 
 
 class StreamStatus:
@@ -188,6 +193,11 @@ class ResponseObject:
     usage: Optional[UsageInfo] = None
     aux_info: Optional[AuxInfo] = None
 
+class TemplateType(Enum):
+    """Template type for different model types."""
+    chat = "chat"
+    vqa = "vqa"
+    base = "image"
 
 @dataclass
 class RendererParams:
@@ -257,9 +267,33 @@ class CustomChatRenderer:
         self,
         tokenizer: BaseTokenizer,
         renderer_params: RendererParams,
+        generate_env_config: GenerateEnvConfig,
+        render_config: Optional[RenderConfig] = None,
+        ckpt_path: Optional[str] = None,
+        misc_config: Optional[Any] = None,
+        vit_config: Optional[Any] = None,
     ):
-        self.py_env_configs = PyEnvConfigs()
-        self.py_env_configs.update_from_env()
+        # Get think config from generate_env_config
+        self.think_mode, self.think_start_tag, self.think_end_tag = _get_think_config(
+            generate_env_config
+        )
+        
+        # Store configs for subclasses
+        self.ckpt_path = ckpt_path
+        self.misc_config = misc_config
+        self.vit_config = vit_config
+        self.render_config = render_config
+        
+        # Create a minimal model_config-like object for renderers that access self.model_config.checkpoint_path
+        # This is only for backward compatibility with existing renderer code that accesses model_config attributes
+        class MinimalModelConfig:
+            def __init__(self, ckpt_path: str, misc_config: Any, vit_config: Any):
+                self.ckpt_path = ckpt_path
+                self.checkpoint_path = ckpt_path
+                self.misc_config = misc_config
+                self.vit_config = vit_config
+        self.model_config = MinimalModelConfig(ckpt_path or "", misc_config, vit_config)
+        
         self.tokenizer = tokenizer
         self.model_type = renderer_params.model_type
         self.max_seq_len = renderer_params.max_seq_len
@@ -615,20 +649,20 @@ class CustomChatRenderer:
             while processing_index < output_len:
                 if think_status.in_think_mode:
                     think_status.think_buffer += item.output_str[processing_index]
-                    if think_status.think_buffer.startswith(THINK_START_TAG):
+                    if think_status.think_buffer.startswith(self.think_start_tag):
                         think_status.think_buffer = think_status.think_buffer[
-                            len(THINK_START_TAG) :
+                            len(self.think_start_tag) :
                         ]
 
-                    if think_status.think_buffer.endswith(THINK_END_TAG):
+                    if think_status.think_buffer.endswith(self.think_end_tag):
                         reasoning_text = think_status.think_buffer[
-                            : -len(THINK_END_TAG)
+                            : -len(self.think_end_tag)
                         ]
                         think_status.think_buffer = ""
                         think_status.in_think_mode = False
                     elif has_overlap_kmp(
-                        think_status.think_buffer, THINK_END_TAG
-                    ) or THINK_START_TAG.startswith(think_status.think_buffer):
+                        think_status.think_buffer, self.think_end_tag
+                    ) or self.think_start_tag.startswith(think_status.think_buffer):
                         pass
                     else:
                         reasoning_text = think_status.think_buffer
@@ -639,8 +673,8 @@ class CustomChatRenderer:
 
             if think_status.in_think_mode:
                 if has_overlap_kmp(
-                    think_status.think_buffer, THINK_END_TAG
-                ) or THINK_START_TAG.startswith(think_status.think_buffer):
+                    think_status.think_buffer, self.think_end_tag
+                ) or self.think_start_tag.startswith(think_status.think_buffer):
                     reasoning_text = ""
                 else:
                     think_status.think_buffer = ""
@@ -823,8 +857,7 @@ class CustomChatRenderer:
         return [StreamStatus(request) for _ in range(n)]
 
     def in_think_mode(self, request: ChatCompletionRequest):
-        global THINK_MODE
-        return THINK_MODE
+        return self.think_mode
 
     def should_process_think(self, request: ChatCompletionRequest):
         # 留出方法给子类重写, 避免重复的think处理
@@ -1321,7 +1354,7 @@ class CustomChatRenderer:
         def split_think_tag(text: Optional[str]):
             if text is None:
                 return None, None
-            text_results = text.split(THINK_END_TAG, 1)
+            text_results = text.split(self.think_end_tag, 1)
             reasoning_content = text_results[0] if len(text_results) == 2 else None
             content = text_results[1] if len(text_results) == 2 else text
             return content, reasoning_content

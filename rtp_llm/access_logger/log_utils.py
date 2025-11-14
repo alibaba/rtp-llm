@@ -3,10 +3,7 @@ import os
 import shutil
 from typing import Optional
 
-from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.access_logger.async_log_handler import AsyncRotatingFileHandler
-
-LOG_PATH_KEY = "LOG_PATH"
 
 
 def copy_aggregate_logs_script(log_path: str) -> None:
@@ -74,7 +71,7 @@ def get_process_log_filename(base_filename: str, rank_id: Optional[int] = None, 
         return f"{base_filename}_r{rank_id}_s{server_id}"
 
 
-def get_handler(file_name: str, rank_id: Optional[int] = None, server_id: Optional[int] = None, async_mode: bool = True) -> Optional[logging.Handler]:
+def get_handler(file_name: str, log_path: str, backup_count: int, rank_id: Optional[int] = None, server_id: Optional[int] = None, async_mode: bool = True) -> Optional[logging.Handler]:
     """
     Create log handler with process-specific filename.
 
@@ -87,7 +84,6 @@ def get_handler(file_name: str, rank_id: Optional[int] = None, server_id: Option
     Returns:
         RotatingFileHandler or AsyncRotatingFileHandler for process-specific log file
     """
-    log_path = StaticConfig.profiling_debug_config.log_path
     if log_path == "":
         return None
 
@@ -103,7 +99,7 @@ def get_handler(file_name: str, rank_id: Optional[int] = None, server_id: Option
             filename=f"{log_path}/{process_filename}",
             mode="a",
             max_bytes=100 * 1024 * 1024,
-            backup_count=StaticConfig.profiling_debug_config.log_file_backup_count,
+            backup_count=backup_count,
             encoding='utf-8',
             max_queue_size=100000,  # Large queue to handle bursts
             flush_interval=1.0     # Flush every second
@@ -115,6 +111,6 @@ def get_handler(file_name: str, rank_id: Optional[int] = None, server_id: Option
             filename=f"{log_path}/{process_filename}",
             mode="a",
             maxBytes=100 * 1024 * 1024,
-            backupCount=StaticConfig.profiling_debug_config.log_file_backup_count,
-            encoding='utf-8'
+            backupCount=backup_count,
+            use_gzip=True,
         )

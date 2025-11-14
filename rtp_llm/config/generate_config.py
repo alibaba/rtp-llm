@@ -1,15 +1,14 @@
 import copy
 import hashlib
-from enum import Enum
 from typing import Any, Dict, List, Optional, Union
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, field_serializer, field_validator
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.utils.check_util import *
 from rtp_llm.utils.util import check_with_info
+from rtp_llm.ops import RoleType
 
 
 class RequestFormat:
@@ -17,19 +16,29 @@ class RequestFormat:
     CHAT_API = "chatapi"
 
 
-class RoleType(Enum):
-    PDFUSION = 0
-    PREFILL = 1
-    DECODE = 2
-    VIT = 3
-    FRONTEND = 4
-
-
 class RoleAddr(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    
     role: RoleType
     ip: str
     http_port: int
     grpc_port: int
+    
+    @field_validator('role', mode='before')
+    @classmethod
+    def validate_role(cls, v):
+        """Convert string to RoleType enum for deserialization."""
+        if isinstance(v, str):
+            return getattr(RoleType, v)
+        elif isinstance(v, RoleType):
+            return v
+        else:
+            raise ValueError(f"RoleType must be a string or RoleType enum, got {type(v)}")
+    
+    @field_serializer('role')
+    def serialize_role(self, role: RoleType, _info) -> str:
+        """Serialize RoleType enum to its name string for JSON serialization."""
+        return role.name
 
 
 class GenerateConfig(BaseModel):
@@ -201,17 +210,24 @@ class GenerateConfig(BaseModel):
         self.stop_words_list += special_tokens.stop_words_id_list
         self.stop_words_str += special_tokens.stop_words_str_list
 
-    def add_thinking_params(self, tokenizer):
-        end_think_token_id = StaticConfig.generate_env_config.think_end_token_id
+    def add_thinking_params(self, tokenizer, generate_env_config):
+        """Add thinking parameters from generate_env_config.
+        
+        Args:
+            tokenizer: Tokenizer instance.
+            generate_env_config: GenerateEnvConfig object.
+        """
+        
+        end_think_token_id = generate_env_config.think_end_token_id
         self.end_think_token_ids = (
             [end_think_token_id] if end_think_token_id != -1 else []
         )
         if (
-            bool(StaticConfig.generate_env_config.think_mode)
+            bool(generate_env_config.think_mode)
             and tokenizer
             and end_think_token_id == -1
         ):
-            think_end_tag: str = StaticConfig.generate_env_config.think_end_tag.encode(
+            think_end_tag: str = generate_env_config.think_end_tag.encode(
                 "utf-8"
             ).decode("unicode_escape")
             tokenized_result: List[int] = tokenizer.encode(
@@ -219,7 +235,7 @@ class GenerateConfig(BaseModel):
             )
             self.end_think_token_ids = tokenized_result
         self.in_think_mode = (
-            bool(StaticConfig.generate_env_config.think_mode)
+            bool(generate_env_config.think_mode)
             and len(self.end_think_token_ids) >= 0
         )
 

@@ -8,7 +8,11 @@ from transformers import AutoConfig, PretrainedConfig
 
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.model_factory_register import ModelDict
-from rtp_llm.models.base_model import BaseModel, ModelConfig
+from rtp_llm.config.model_config import ModelConfig, build_model_config
+from rtp_llm.config.model_args import ModelArgs
+from rtp_llm.config.py_config_modules import QuantizationConfig
+from rtp_llm.config.kv_cache_config import KVCacheConfig
+from rtp_llm.ops import ProfilingDebugLoggingConfig
 from rtp_llm.tools.api.hf_model_helper import HfStyleModelInfo, get_hf_model_info
 from rtp_llm.utils.fuser import fetch_remote_file_to_local, umount_file
 
@@ -154,17 +158,35 @@ def _load_as_ft_style(
         hf_model_info = get_hf_model_info(model_path)
         if hf_model_info and hf_model_info.model_config_file is not None:
             model_path = os.path.dirname(hf_model_info.model_config_file)
-    quantization = ModelConfig.get_quantization_from_params(env_params)
-    model_config = ModelConfig(
-        model_type=ft_model_type,
-        ckpt_path=model_path,
-        act_type=env_params.get(ModelConfig.ACT_TYPE),
-        ptuning_path=None,
-        max_seq_len=int(env_params.get("MAX_SEQ_LEN", "0")),
-        tokenizer_path=None,
-        quantization=quantization,
-    )
-    config: GptInitModelParameters = model_cls.create_config(model_config)
+    # Get quantization from env_params (compatibility logic)
+    quantization = env_params.get("QUANTIZATION", "")
+    if not quantization:
+        int8_mode = env_params.get("INT8_MODE", "0")
+        weight_type = env_params.get("WEIGHT_TYPE", "").upper()
+        if int(int8_mode) == 1 or weight_type == "INT8":
+            quantization = "INT8"
+    # Use _create_config to get base config from C++
+    config: ModelConfig = model_cls._create_config(model_path)
+
+    model_args = ModelArgs()
+    model_args.model_type = ft_model_type
+    model_args.ckpt_path = model_path
+    model_args.tokenizer_path = model_path
+    model_args.max_seq_len = int(env_params.get("MAX_SEQ_LEN", "0"))
+
+    quantization_config = QuantizationConfig()
+    quantization_config.quantization = quantization
+
+    kv_cache_config = KVCacheConfig()
+    kv_cache_config.int8_kv_cache = int(env_params.get("INT8_KV_CACHE", "0")) == 1
+    kv_cache_config.fp8_kv_cache = int(env_params.get("FP8_KV_CACHE", "0")) == 1
+
+    build_model_config(config,
+                       model_args=model_args,
+                       kv_cache_config=kv_cache_config,
+                       profiling_debug_logging_config=ProfilingDebugLoggingConfig(),
+                       quantization_config=quantization_config)
+
     is_quant_weight = config.quant_algo.isQuant()
     quant_config = None
     if is_quant_weight:
@@ -189,19 +211,8 @@ def _load_as_ft_style(
             quant_algo=quant_method,
         )
 
-    logging.info(f"config:{config}, {config.size_per_head} * {config.head_num}")
-    param_count = None
-    try:
-        param_count = model_cls.eval_model_param_count(config)
-    except Exception as e:
-        param_count = BaseModel.eval_model_param_count(config)
-        logging.error(f"eval model param count failed: {str(e)}")
-    total_size = None
-    try:
-        total_size = model_cls.eval_model_size(config)
-    except Exception as e:
-        total_size = BaseModel.eval_model_size(config)
-        logging.error(f"eval model param count failed: {str(e)}")
+    param_count = config.model_param_count()
+    total_size = config.eval_model_size()
 
     raw_config_dict = _get_raw_config(model_path)
 
@@ -209,7 +220,7 @@ def _load_as_ft_style(
         ft_model_type=ft_model_type,
         param_count=param_count,
         model_size=total_size,
-        hidden_size=config.gpt_init_params.hidden_size,
+        hidden_size=config.hidden_size,
         architectures=raw_config_dict.get("architectures", None),
         llm_architectures=None,
         is_quant_weight=is_quant_weight,

@@ -41,11 +41,12 @@ protected:
         // 所以需要 mock
         MockWhenConstructOpenaiEndPoint();
 
+        ModelConfig model_config;
         chat_service_ = std::make_shared<ChatService>(
-            engine, nullptr, request_counter, tokenizer, render, rtp_llm::GptInitParameter(), metric_reporter);
+            engine, nullptr, request_counter, tokenizer, render, model_config, metric_reporter);
 
         // mock OpenaiEndpoint 方便测试
-        mock_openai_endpoint_ = std::make_shared<MockOpenaiEndpoint>(tokenizer, render, rtp_llm::GptInitParameter());
+        mock_openai_endpoint_ = std::make_shared<MockOpenaiEndpoint>(tokenizer, render, model_config);
         auto openai_endpoint  = std::dynamic_pointer_cast<OpenaiEndpoint>(mock_openai_endpoint_);
         chat_service_->openai_endpoint_ = openai_endpoint;
 
@@ -85,10 +86,11 @@ protected:
         input->input_ids = std::make_shared<rtp_llm::Buffer>(
             rtp_llm::MemoryType::MEMORY_CPU, rtp_llm::DataType::TYPE_INT32, shape, data_.data());
 
-        rtp_llm::GptInitParameter param;
-        param.max_seq_len_ = data_.size();
+        ModelConfig model_config;
+        RuntimeConfig runtime_config;
+        model_config.max_seq_len = data_.size();
 
-        auto mock_stream = std::make_shared<MockGenerateStream>(input, param);
+        auto mock_stream = std::make_shared<MockGenerateStream>(input, model_config, runtime_config);
         return mock_stream;
     }
 

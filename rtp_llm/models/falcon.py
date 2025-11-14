@@ -2,7 +2,7 @@ import functools
 import json
 import os
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, FfnWeight
@@ -176,29 +176,28 @@ class Falcon(BaseModel):
         return FalconWeightInfo
 
     @classmethod
-    def _create_config(cls, ckpt_path: str):
+    def _create_config(cls, ckpt_path: str) -> ModelConfig:
         config_path = os.path.join(ckpt_path, "config.json")
         with open(config_path) as f:
             config_json = json.load(f)
         head_num = config_json.get("n_head", config_json.get("num_attention_heads"))
-        config = GptInitModelParameters(
-            head_num=head_num,
-            head_num_kv=config_json.get(
-                "n_head_kv", config_json.get("num_kv_heads", 1)
-            ),
-            size_per_head=config_json["hidden_size"] // head_num,
-            inter_size=config_json["hidden_size"] * 4,
-            layer_num=config_json.get("n_layer", config_json.get("num_hidden_layers")),
-            max_seq_len=2048,
-            vocab_size=config_json["vocab_size"],
-            activation_type="gelu-none-approximate",
-            has_post_decoder_layernorm=True,
-            rotary_embedding_style=1,
-            ckpt_path=ckpt_path,
+        config = ModelConfig()
+        config.ckpt_path = ckpt_path
+        config.attn_config.head_num = head_num
+        config.attn_config.kv_head_num = config_json.get(
+            "n_head_kv", config_json.get("num_kv_heads", 1)
         )
+        config.attn_config.size_per_head = config_json["hidden_size"] // head_num
+        config.inter_size = config_json["hidden_size"] * 4
+        config.num_layers = config_json.get("n_layer", config_json.get("num_hidden_layers"))
+        config.max_seq_len = 2048
+        config.vocab_size = config_json["vocab_size"]
+        config.activation_type = "gelu-none-approximate"
+        config.has_post_decoder_layernorm = True
+        config.attn_config.rope_config.style = 1
         config.special_tokens.bos_token_id = config_json.get("bos_token_id", -1)
         config.special_tokens.eos_token_id = config_json.get("eos_token_id", 0)
-        config.rotary_embedding_dim = config.size_per_head
+        config.attn_config.rope_config.dim = config.attn_config.size_per_head
         config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
         config.config_dtype = config_json.get("torch_dtype", None)
         return config

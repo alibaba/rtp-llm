@@ -12,7 +12,6 @@ class CacheStoreTestBase: public ::testing::Test {
 public:
     void SetUp() override {
         CacheStoreConfig cache_store_config;
-        cache_store_config.update_from_env_for_test();
         memory_util_       = createMemoryUtilImpl(cache_store_config.cache_store_rdma_mode);
         device_util_       = std::make_shared<DeviceUtil>();
         block_buffer_util_ = std::make_shared<BlockBufferUtil>(memory_util_, device_util_);
@@ -22,7 +21,6 @@ public:
 protected:
     bool initMockMemoryUtil() {
         CacheStoreConfig cache_store_config;
-        cache_store_config.update_from_env_for_test();
         mock_memory_util_ = new MockMemoryUtil(createMemoryUtilImpl(cache_store_config.cache_store_rdma_mode));
         memory_util_.reset(mock_memory_util_);
         block_buffer_util_ = std::make_shared<BlockBufferUtil>(memory_util_, device_util_);

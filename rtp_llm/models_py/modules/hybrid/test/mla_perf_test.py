@@ -13,7 +13,7 @@ MAX_ITERATIONS = 100000
 
 device = torch.device(f"cuda")
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models.rotary_embedding.deepseek_rotary_embedding import (
     DeepseekV3YarnRotaryEmbedding,
 )
@@ -147,18 +147,18 @@ class MLABenchmark(TestCase):
         )
 
         # 配置参数
-        config = GptInitModelParameters(128, 16, 27, 1024, 102400)
-        config.head_num = 16
+        config = ModelConfig()
+        config.attn_config.head_num = 16
         config.hidden_size = hidden_size
-        config.nope_head_dim = 128
-        config.rope_head_dim = 64
-        config.kv_lora_rank = 512
-        config.v_head_dim = 128
-        config.q_lora_rank = 0
-        config.seq_size_per_block = 64
-        config.softmax_extra_scale = 1.0
-        config.use_mla = True
-        config.size_per_head = 192
+        config.attn_config.nope_head_dim = 128
+        config.attn_config.rope_head_dim = 64
+        config.attn_config.kv_lora_rank = 512
+        config.attn_config.v_head_dim = 128
+        config.attn_config.q_lora_rank = 0
+        config.attn_config.tokens_per_block = 64
+        config.attn_config.softmax_extra_scale = 1.0
+        config.attn_config.use_mla = True
+        config.attn_config.size_per_head = 192
 
         torch.manual_seed(0)
         # sequence_lengths_mius_1 = [x for x in sequence_lengths]
@@ -182,30 +182,30 @@ class MLABenchmark(TestCase):
         attn_inputs.kv_cache_block_id_host = kvcache_block_id
 
         # 创建权重
-        weights = self._create_weights(config, hidden_size)
+        weights = self._create_weights(config, config.hidden_size)
         layer_weights: List[Dict[str, torch.Tensor]] = [weights]
 
         # 创建输入数据
         q = torch.randn(
-            [num_tokens, config.head_num, config.nope_head_dim + config.rope_head_dim],
+            [num_tokens, config.attn_config.head_num, config.attn_config.nope_head_dim + config.attn_config.rope_head_dim],
             dtype=torch.bfloat16,
             device=device,
         )
 
         compressed_kv = torch.randn(
-            [num_tokens, config.kv_lora_rank],
+            [num_tokens, config.attn_config.kv_lora_rank],
             dtype=torch.bfloat16,
             device=device,
         )
 
         k_pe = torch.randn(
-            [num_tokens, config.rope_head_dim],
+            [num_tokens, config.attn_config.rope_head_dim],
             dtype=torch.bfloat16,
             device=device,
         )
 
         cache = torch.randn(
-            [mock_page_num, page_size, config.kv_lora_rank + config.rope_head_dim],
+            [mock_page_num, page_size, config.attn_config.kv_lora_rank + config.attn_config.rope_head_dim],
             dtype=torch.bfloat16,
             device=device,
         )
@@ -220,7 +220,7 @@ class MLABenchmark(TestCase):
         # print("Warming up...")
         for i in range(self.WARMUP_ITERATIONS):
             fmha_impl = MlaFlashInferPrefillImpl(
-                config, attn_inputs, layer_weights, cos_sin_cache, absorb_opt_len
+                config.attn_config, attn_inputs, layer_weights, cos_sin_cache, absorb_opt_len, quant_config=config.quant_config
             )
             # fmha_impl.forward(q, compressed_kv, k_pe, kv_cache, 0)
             self.fmha_function_map[function_key](
@@ -235,7 +235,7 @@ class MLABenchmark(TestCase):
         for i in range(self.BENCHMARK_ITERATIONS):
             # 重新创建实现对象以确保公平测试
             fmha_impl = MlaFlashInferPrefillImpl(
-                config, attn_inputs, layer_weights, cos_sin_cache, absorb_opt_len
+                config.attn_config, attn_inputs, layer_weights, cos_sin_cache, absorb_opt_len, quant_config=config.quant_config
             )
             # 开始计时
             torch.cuda.synchronize()
@@ -287,45 +287,45 @@ class MLABenchmark(TestCase):
         weights[W.mla_fusedqkrope_no_lora_w] = torch.randn(
             [
                 config.hidden_size,
-                config.size_per_head * config.head_num
-                + config.kv_lora_rank
-                + config.rope_head_dim,
+                config.attn_config.size_per_head * config.attn_config.head_num
+                + config.attn_config.kv_lora_rank
+                + config.attn_config.rope_head_dim,
             ],
             dtype=torch.bfloat16,
             device=device,
         )
 
         weights[W.mla_kv_a_ln_gamma] = torch.randn(
-            [config.kv_lora_rank], dtype=torch.bfloat16, device=device
+            [config.attn_config.kv_lora_rank], dtype=torch.bfloat16, device=device
         )
 
         weights[W.mla_kc] = torch.randn(
-            [config.head_num, config.nope_head_dim, config.kv_lora_rank],
+            [config.attn_config.head_num, config.attn_config.nope_head_dim, config.attn_config.kv_lora_rank],
             dtype=torch.bfloat16,
             device=device,
         )
 
         weights[W.mla_vc] = torch.randn(
-            [config.head_num, config.kv_lora_rank, config.v_head_dim],
+            [config.attn_config.head_num, config.attn_config.kv_lora_rank, config.attn_config.v_head_dim],
             dtype=torch.bfloat16,
             device=device,
         )
 
         weights[W.mla_v_w] = torch.randn(
-            [config.kv_lora_rank, hidden_size],
+            [config.attn_config.kv_lora_rank, hidden_size],
             dtype=torch.bfloat16,
             device=device,
         )
 
         weights[W.mla_k_nope_w] = torch.randn(
-            [config.kv_lora_rank, hidden_size],
+            [config.attn_config.kv_lora_rank, hidden_size],
             dtype=torch.bfloat16,
             device=device,
         )
 
         weights[W.attn_o_w] = torch.randn(
             [
-                config.head_num * config.v_head_dim,
+                config.attn_config.head_num * config.attn_config.v_head_dim,
                 config.hidden_size,
             ],
             dtype=torch.bfloat16,

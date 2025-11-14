@@ -2,7 +2,7 @@ from typing import Any, Dict
 
 import torch
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
 from rtp_llm.models_py.modules.factory.fused_moe.defs.priority_attributes import (
     StrategyAttributes,
 )
@@ -12,14 +12,14 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.strategy_base import MoeSt
 class BatchedTritonStrategy(MoeStrategy):
     """CUDA single GPU without quantization strategy"""
 
-    def create_router(self, config: GptInitModelParameters) -> Any:
+    def create_router(self, config: MoEConfigAdapter) -> Any:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.common.router.batched_data_router import (
             BatchedDataRouter,
         )
 
         max_num_tokens = (
-            config.max_generate_batch_size + config.tp_size - 1
-        ) // config.tp_size
+            config.max_generate_batch_size + config.parallelism_config.tp_size - 1
+        ) // config.parallelism_config.tp_size
 
         return BatchedDataRouter(
             max_num_tokens=max_num_tokens,
@@ -30,7 +30,7 @@ class BatchedTritonStrategy(MoeStrategy):
         )
 
     def create_executor(
-        self, config: GptInitModelParameters, weights: Dict[str, torch.Tensor]
+        self, config: MoEConfigAdapter, weights: Dict[str, torch.Tensor]
     ) -> Any:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.common.executor.batched_triton_executor import (
             BatchedTritonExperts,
@@ -38,8 +38,8 @@ class BatchedTritonStrategy(MoeStrategy):
         from rtp_llm.utils.model_weight import W
 
         max_num_tokens = (
-            config.max_generate_batch_size + config.tp_size - 1
-        ) // config.tp_size
+            config.max_generate_batch_size + config.parallelism_config.tp_size - 1
+        ) // config.parallelism_config.tp_size
 
         return BatchedTritonExperts(
             max_num_tokens=max_num_tokens,

@@ -27,28 +27,6 @@ TEST(ParallelInfoTest, Constructor) {
     EXPECT_EQ(parallel_info.isWorker(), !parallel_info.isMaster());
 }
 
-TEST(ParallelInfoTest, GlobalParallelInfo) {
-    auto& parallel_info = ParallelInfo::globalParallelInfo();
-    {
-        autil::EnvGuard tp_size_env("TP_SIZE", "2");
-        autil::EnvGuard pp_size_env("PP_SIZE", "2");
-        autil::EnvGuard ep_size_env("EP_SIZE", "2");
-        autil::EnvGuard dp_size_env("DP_SIZE", "2");
-        autil::EnvGuard world_size_env("WORLD_SIZE", "2");
-        autil::EnvGuard world_rank_env("WORLD_RANK", "2");
-        autil::EnvGuard local_world_size_env("LOCAL_WORLD_SIZE", "2");
-        parallel_info.reload();
 
-        EXPECT_EQ(parallel_info.tp_size_, 2);
-        EXPECT_EQ(parallel_info.pp_size_, 2);
-        EXPECT_EQ(parallel_info.ep_size_, 2);
-        EXPECT_EQ(parallel_info.dp_size_, 2);
-        EXPECT_EQ(parallel_info.world_size_, 2);
-        EXPECT_EQ(parallel_info.world_rank_, 2);
-        EXPECT_EQ(parallel_info.local_world_size_, 2);
-    }
-    // 测试完毕后需要改回来, 否则其他地方使用 globalParallelInfo 会出错
-    parallel_info.reload();
-}
 
 }  // namespace rtp_llm

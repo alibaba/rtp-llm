@@ -62,7 +62,7 @@ public:
     }
 
     int64_t tpSize() const {
-        return maga_init_params_.gpt_init_parameter.tp_size_;
+        return maga_init_params_.parallelism_config.tp_size;
     }
 
     virtual size_t onflightRequestNum();

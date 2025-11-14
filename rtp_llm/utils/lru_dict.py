@@ -41,3 +41,6 @@ class LruDict(object):
 
     def __contains__(self, key: Any) -> bool:
         return key in self._dict
+
+    def set_size(self, size: int):
+        self._dict.set_size(size)

@@ -238,7 +238,6 @@ void ArmGemmOpTest::TransposeBatchGemmOP(TransposeOperation op_a,
 
 TEST_F(ArmGemmOpTest, BasicGemmOpTest) {
     HWKernelConfig hw_kernel_config;
-    hw_kernel_config.update_from_env_for_test();
     if (hw_kernel_config.arm_gemm_use_kai) {
         return;
     }
@@ -252,7 +251,6 @@ TEST_F(ArmGemmOpTest, BasicGemmOpTest) {
 
 TEST_F(ArmGemmOpTest, BasicGemmOPKaiTest) {
     HWKernelConfig hw_kernel_config;
-    hw_kernel_config.update_from_env_for_test();
     if (!hw_kernel_config.arm_gemm_use_kai) {
         return;
     }

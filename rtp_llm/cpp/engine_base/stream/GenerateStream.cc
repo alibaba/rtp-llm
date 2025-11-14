@@ -10,33 +10,34 @@
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
-#include "rtp_llm/cpp/config/GptInitParameter.h"
+#include "rtp_llm/cpp/config/ModelConfig.h"
 
 using namespace std;
 
 namespace rtp_llm {
 
 GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
-                               const rtp_llm::GptInitParameter& params,
-                               const ResourceContext&           resource_context,
-                               kmonitor::MetricsReporterPtr     metrics_reporter,
-                               size_t                           extra_reserve_token_num,
-                               bool                             perf_test):
+                               const ModelConfig&                model_config,
+                               const RuntimeConfig&               runtime_config,
+                               const ResourceContext&            resource_context,
+                               kmonitor::MetricsReporterPtr      metrics_reporter,
+                               size_t                             extra_reserve_token_num,
+                               bool                               perf_test):
     generate_input_(input),
-    max_seq_len_(params.max_seq_len_),
-    vocab_size_(params.vocab_size_),
+    max_seq_len_(model_config.max_seq_len),
+    vocab_size_(model_config.vocab_size),
     stream_cache_resource_(std::make_shared<StreamCacheResource>(
         this, resource_context, input->need_release_resource, input->generate_config->adapter_name)),
     need_release_resource_(input->need_release_resource),
-    enable_fast_gen_(params.enable_fast_gen_),
+    enable_fast_gen_(runtime_config.fifo_scheduler_config.enable_fast_gen),
     gen_timeline_(input->generate_config->gen_timeline),
     metrics_reporter_(metrics_reporter),
-    special_tokens_(params.special_tokens_),
+    special_tokens_(model_config.special_tokens),
     output_mutex_(std::make_shared<std::mutex>()),
     cv_(std::make_shared<std::condition_variable>()),
-    mm_position_ids_style_(PositionIdsStyle(params.mm_position_ids_style_)),
-    dtype_(params.data_type_),
-    hidden_size_(params.hidden_size_) {
+    mm_position_ids_style_(PositionIdsStyle(model_config.mm_model_config.mm_position_ids_style)),
+    dtype_(model_config.data_type),
+    hidden_size_(model_config.hidden_size) {
     if (!updatePrefix(resource_context.system_prompt)) {
         return;
     }
@@ -67,7 +68,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
         setReturnLastHiddenStates(true);
     }
     complete_token_ids_ = std::make_shared<CompleteTokenIds>(
-        device_, init_batch_size, maxBatchSize(), max_seq_len_, params.seq_size_per_block_);
+        device_, init_batch_size, maxBatchSize(), max_seq_len_, model_config.attn_config.tokens_per_block);
     complete_token_ids_->init(input, extra_reserve_token_num);
 
     last_output_pos_ = seqLength();
@@ -91,7 +92,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     think_logits_processor_ptr_ = ThinkModeLogitsProcessor::fromGenerateInput(device_, generate_input_, maxBatchSize());
     tree_logits_processor_ptr_  = TreeLogitsProcessor::fromGenerateInput(device_, generate_input_, init_batch_size);
     multi_seq_logits_processor_ptr_ =
-        MultiSeqLogitsProcessor::fromGenerateInput(device_, generate_input_, special_tokens_.eos_token_id_);
+        MultiSeqLogitsProcessor::fromGenerateInput(device_, generate_input_, special_tokens_.eos_token_id);
 
     initializeLogitsProcessorList();
 }
@@ -758,7 +759,7 @@ void GenerateStream::matchEosToken() {
 
 void GenerateStream::matchEosToken(int batch_id) {
     if ((!generate_input_->generate_config->ignore_eos)
-        && complete_token_ids_->matchEosToken(batch_id, special_tokens_.eos_token_id_)) {
+        && complete_token_ids_->matchEosToken(batch_id, special_tokens_.eos_token_id)) {
         sub_generate_status_[batch_id].status = StreamState::FINISHED;
     }
 }
@@ -801,7 +802,7 @@ void GenerateStream::matchStopWordsList(int batch_id) {
     bool match = false;
     for (auto& stop_words : generate_input_->generate_config->stop_words_list) {
         if (generate_input_->generate_config->ignore_eos && stop_words.size() == 1
-            && stop_words[0] == special_tokens_.eos_token_id_) {
+            && stop_words[0] == special_tokens_.eos_token_id) {
             continue;
         }
         if (complete_token_ids_->matchStopWordsList(batch_id, stop_words)) {

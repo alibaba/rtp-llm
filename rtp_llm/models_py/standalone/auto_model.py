@@ -8,9 +8,7 @@ from typing import Optional
 import torch
 from transformers import AutoTokenizer
 
-import rtp_llm.models
-from rtp_llm.config.py_config_modules import StaticConfig
-from rtp_llm.model_factory import ModelFactory
+from rtp_llm.utils.model_weight import W
 from rtp_llm.ops.compute_ops import (
     KVCache,
     PyAttentionInputs,
@@ -20,60 +18,94 @@ from rtp_llm.ops.compute_ops import (
     get_typemeta,
     init_device,
 )
-from rtp_llm.utils.base_model_datatypes import ModelConfig
-from rtp_llm.utils.model_weight import W
-
-rtp_opensouce_path = Path(__file__).resolve().parent.parent.parent.parent
-sys.path.append(str(rtp_opensouce_path))
-
+from rtp_llm.tools.api.hf_model_helper import get_model_info_from_hf
+from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.config.engine_config import EngineConfig
+from rtp_llm.model_factory import ModelFactory
+import rtp_llm.models
 
 class AutoModel:
     def __init__(
         self,
         model_path_or_name: str,
+        revision: Optional[str] = None,
+        max_total_tokens: int = 4096,
+        tokens_per_block: int = 64,
+        stop_id_list: list[int] = [],
         **kwargs,
     ):
-        # get some initial parameters
-        revision: Optional[str] = kwargs.get("revision", None)
-        max_total_tokens: int = kwargs.get("max_total_tokens", 4096)
-        tokens_per_block: int = kwargs.get("tokens_per_block", 64)
-        stop_id_list: list[int] = kwargs.get("stop_id_list", [])
+        # set configs instead of environment variables
+        self._set_configs()
+        
+        model_path, model_type = get_model_info_from_hf(model_path_or_name, revision)
+        self.py_env_configs.model_args.model_type = model_type
+        self.py_env_configs.model_args.ckpt_path = model_path
+        self.py_env_configs.model_args.max_seq_len = max_total_tokens
+        self.py_env_configs.kv_cache_config.seq_size_per_block = tokens_per_block
+        if not self.py_env_configs.model_args.tokenizer_path:
+            self.py_env_configs.model_args.tokenizer_path = model_path
 
-        # set some env and config
-        self._set_env()
-        StaticConfig.model_config.checkpoint_path = model_path_or_name
-        StaticConfig.update_from_env()
-        # hf_model_info = get_hf_model_info(model_path_or_name)
-
-        # init C++ logger
-        # Note: In standalone mode, libth_transformer is not loaded,
-        # so torch.ops.rtp_llm.init_engine is not available.
-        # alog_conf_path = os.environ.get("FT_ALOG_CONF_PATH", "")
-        # print(f"  alog_conf_path: '{alog_conf_path}'")
-        # torch.ops.rtp_llm.init_engine(alog_conf_path)
-
-        # load model
-        self.factory_model_config = ModelFactory.create_normal_model_config()
-        self.gpt_model = ModelFactory.creat_standalone_py_model_from_huggingface(
-            model_path_or_name=model_path_or_name,
-            revision=revision,
-            model_config=self.factory_model_config,
+        # Create EngineConfig from py_env_configs (gang_info can be None for standalone)
+        engine_config = EngineConfig.create(self.py_env_configs, gang_info=None)
+        
+        # Create model configs
+        model_config = ModelFactory.create_model_config(
+            model_args=self.py_env_configs.model_args,
+            lora_config=self.py_env_configs.lora_config,
+            kv_cache_config=engine_config.kv_cache_config,
+            profiling_debug_logging_config=engine_config.profiling_debug_logging_config,
+            generate_env_config=self.py_env_configs.generate_env_config,
+            embedding_config=self.py_env_configs.embedding_config,
+            quantization_config=self.py_env_configs.quantization_config,
+            render_config=self.py_env_configs.render_config,
         )
-        self.compute_dtype = self.gpt_model.compute_dtype
+        
+        # Update engine_config based on model_config
+        ModelFactory.update_engine_config_from_model_config(
+            engine_config=engine_config,
+            model_config=model_config,
+        )
+        
+        # Create model using ModelFactory
+        self.gpt_model = ModelFactory._create_model(
+            model_config=model_config,
+            engine_config=engine_config,
+            vit_config=None,
+            merge_lora=False,
+        )
+        
+        # Load the model
+        self.gpt_model.load()
+        self.compute_dtype = self.gpt_model.weight.dtype
         self.model = self.gpt_model.py_model
-        self.model_config = self.model.config
+        self.model_config = self.gpt_model.model_config
 
-        # init device
-        init_device(self.gpt_model.config)
-        self.device = get_device().get_device_type().name.lower()
+        # init device - use engine_config's configs and model_config's eplb_config
+        init_device(
+            parallelism_config=engine_config.parallelism_config,
+            model_config=model_config,
+            eplb_config=model_config.eplb_config,
+            fmha_config=engine_config.fmha_config,
+            device_resource_config=engine_config.device_resource_config,
+            moe_config=engine_config.moe_config,
+            sp_config=engine_config.sp_config,
+            misc_config=engine_config.misc_config,
+            profiling_debug_logging_config=engine_config.profiling_debug_logging_config,
+            hw_kernel_config=engine_config.hw_kernel_config,
+            concurrency_config=engine_config.concurrency_config,
+            ffn_disaggregate_config=engine_config.parallelism_config.ffn_disaggregate_config,
+            runtime_config=engine_config.runtime_config,
+        )
+        self.device = 'cuda:0'
 
         # init kv cache and bind it to py model
-        self.block_nums = math.ceil(max_total_tokens / tokens_per_block)
+        self.tokens_per_block = self.model_config.attn_config.tokens_per_block
+        self.block_nums = math.ceil(max_total_tokens / self.tokens_per_block)
         # since block_id start from 1, so we should add 1 in the corner case
         self.block_nums += 1
         logging.info(f"total block nums: {self.block_nums}")
-        self.tokens_per_block = tokens_per_block
         self._init_kv_cache()
+
         self.model.kv_cache = self.kv_cache
 
         # init tokenizer
@@ -94,26 +126,25 @@ class AutoModel:
     def from_pretrained(cls, model_path_or_name: str, **kwargs) -> "AutoModel":
         return cls(model_path_or_name, **kwargs)
 
-    def _set_env(self):
-        os.environ["LOAD_PYTHON_MODEL"] = "1"
-
-        if os.getenv("ACT_TYPE") is None:
-            os.environ["ACT_TYPE"] = "AUTO"
-        if os.getenv("DEVICE_RESERVE_MEMORY_BYTES") is None:
-            os.environ["DEVICE_RESERVE_MEMORY_BYTES"] = str(2 * 1024 * 1024 * 1024)
-        # if os.getenv("FT_ALOG_CONF_PATH") is None:
-        #     os.environ["FT_ALOG_CONF_PATH"] = os.path.join(
-        #         str(rtp_opensouce_path), "rtp_llm/test/alog_conf.json"
-        #     )
-        # if os.getenv("RTP_LLM_LOG_LEVEL") is None:
-        #     os.environ["RTP_LLM_LOG_LEVEL"] = "INFO"
+    def _set_configs(self):
+        """Set configuration structures instead of environment variables."""
+        # Create PyEnvConfigs to hold all configurations
+        self.py_env_configs = PyEnvConfigs()
+        
+        # Set ModelSpecificConfig.load_python_model = True (equivalent to LOAD_PYTHON_MODEL=1)
+        self.py_env_configs.model_specific_config.load_python_model = True
+        
+        # Set DeviceResourceConfig.device_reserve_memory_bytes (equivalent to DEVICE_RESERVE_MEMORY_BYTES)
+        # Default: 2GB = 2 * 1024 * 1024 * 1024 bytes
+        if self.py_env_configs.device_resource_config.device_reserve_memory_bytes == 0:
+            self.py_env_configs.device_resource_config.device_reserve_memory_bytes = 2 * 1024 * 1024 * 1024
 
     def _init_kv_cache(self):
         self.kv_cache = KVCache()
-        self.layer_num = self.model_config.gpt_init_params.layer_num
-        self.model_config.gpt_init_params.seq_size_per_block = self.tokens_per_block
-        self.kv_head_num = self.model_config.gpt_init_params.head_num_kv
-        self.size_per_head = self.model_config.gpt_init_params.size_per_head
+        self.layer_num = self.model_config.num_layers
+        self.kv_head_num = self.model_config.attn_config.kv_head_num
+        self.size_per_head = self.model_config.attn_config.size_per_head
+        self.tokens_per_block = self.model_config.attn_config.tokens_per_block
         kv_shape = [
             self.layer_num,
             self.block_nums,
@@ -122,8 +153,8 @@ class AutoModel:
             self.tokens_per_block,
             self.size_per_head,
         ]
-        kv_cache_dtype = self._get_kv_cache_dtype(self.factory_model_config)
-        kv_cache_total = torch.zeros(kv_shape, dtype=kv_cache_dtype, device=self.device)
+
+        kv_cache_total = torch.zeros(kv_shape, dtype=self.compute_dtype, device=self.device)
         k_cache_base = kv_cache_total
         v_cache_base = torch.empty(
             self.layer_num,
@@ -133,21 +164,10 @@ class AutoModel:
             self.size_per_head,
             device=self.device,
         )
+
         self.kv_cache.k_cache_base = k_cache_base
         self.kv_cache.v_cache_base = v_cache_base
 
-    def _get_kv_cache_dtype(self, factory_model_config: ModelConfig) -> torch.dtype:
-        kv_cache_dtype_str = factory_model_config.kv_cache_type
-        if kv_cache_dtype_str == "auto":
-            return self.compute_dtype
-        if kv_cache_dtype_str not in ["FP16", "BF16", "FP32"]:
-            raise ValueError(f"Invalid kv cache dtype: {kv_cache_dtype_str}")
-        str_to_dtype = {
-            "FP16": torch.float16,
-            "BF16": torch.bfloat16,
-            "FP32": torch.float32,
-        }
-        return str_to_dtype[kv_cache_dtype_str]
 
     def _prepare_prefill_attention_inputs(self, input_length: int) -> PyAttentionInputs:
         need_block_nums = self._check_block_nums(input_length)

@@ -5,8 +5,10 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.models_py.modules import LinearFactory, RMSNormTorch
+from rtp_llm.config.quant_config import QuantizationConfig
+from rtp_llm.models_py.modules.factory import LinearFactory
+from rtp_llm.models_py.modules.base.common.norm import RMSNormTorch
+from rtp_llm.ops import AttentionConfigs
 from rtp_llm.utils.model_weight import W
 
 
@@ -28,12 +30,12 @@ class DeepseekV3RotaryEmbedding(nn.Module):
             device=self.inv_freq.device,
             dtype=torch.get_default_dtype(),
         )
-        self.max_seq_len_cached = None
+        self.max_seq_lencached = None
 
     def _set_cos_sin_cache(self, seq_len, device, dtype):
-        self.max_seq_len_cached = seq_len
+        self.max_seq_lencached = seq_len
         t = torch.arange(
-            self.max_seq_len_cached, device=device, dtype=self.inv_freq.dtype
+            self.max_seq_lencached, device=device, dtype=self.inv_freq.dtype
         )
 
         freqs = torch.outer(t, self.inv_freq.to(t.device))
@@ -44,7 +46,7 @@ class DeepseekV3RotaryEmbedding(nn.Module):
 
     def forward(self, x, seq_len=None):
         # x: [bs, num_attention_heads, seq_len, head_size]
-        if self.max_seq_len_cached is None or seq_len > self.max_seq_len_cached:
+        if self.max_seq_lencached is None or seq_len > self.max_seq_lencached:
             self._set_cos_sin_cache(seq_len=seq_len, device=x.device, dtype=x.dtype)
 
         return (
@@ -114,7 +116,7 @@ class DeepseekV3YarnRotaryEmbedding(DeepseekV3RotaryEmbedding):
         super().__init__(dim, max_position_embeddings, base, device)
 
     def _set_cos_sin_cache(self, seq_len, device, dtype):
-        self.max_seq_len_cached = seq_len
+        self.max_seq_lencached = seq_len
         dim = self.dim
 
         freq_extra = 1.0 / (
@@ -250,31 +252,38 @@ class MlaAttentionRef(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
     def __init__(
-        self, config: GptInitModelParameters, weights, layer_idx: Optional[int] = None
+        self,
+        attn_config: AttentionConfigs,
+        weights,
+        layer_idx: Optional[int] = None,
+        layernorm_eps: float = 1e-6,
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
-        self.config = config
+        self.attn_config = attn_config
         self.layer_idx = layer_idx
         self.weights = weights
-        self.num_heads = self.config.head_num
-        self.qk_nope_head_dim = self.config.nope_head_dim
-        self.qk_rope_head_dim = self.config.rope_head_dim
+        self.num_heads = attn_config.head_num
+        self.qk_nope_head_dim = attn_config.nope_head_dim
+        self.qk_rope_head_dim = attn_config.rope_head_dim
         self.qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
-        self.kv_lora_rank = self.config.kv_lora_rank
-        self.v_head_dim = self.config.v_head_dim
-        self.q_lora_rank = self.config.q_lora_rank
+        self.kv_lora_rank = attn_config.kv_lora_rank
+        self.v_head_dim = attn_config.v_head_dim
+        self.q_lora_rank = attn_config.q_lora_rank
         self.softmax_scale = self.qk_head_dim ** (-0.5)
-        self.token_per_block = self.config.seq_size_per_block
+        self.token_per_block = attn_config.tokens_per_block
 
         if self.q_lora_rank > 0:
             self.fused_qkv_a_proj = LinearFactory.create_linear_from_weights(
-                weights, W.mla_fusedqkrope_w, W.mla_fusedqkrope_s, None, config
+                weights, W.mla_fusedqkrope_w, W.mla_fusedqkrope_s, None,
+                quant_config=quant_config
             )
             self.q_a_layernorm = RMSNormTorch(
-                weights.get(W.mla_q_a_ln_gamma, None), eps=config.layernorm_eps
+                weights.get(W.mla_q_a_ln_gamma, None), eps=layernorm_eps
             )
             self.q_b_proj = LinearFactory.create_linear_from_weights(
-                weights, W.mla_q_b_w, W.mla_q_b_s, None, config
+                weights, W.mla_q_b_w, W.mla_q_b_s, None,
+                quant_config=quant_config
             )
         else:
             self.fused_qkv_proj = LinearFactory.create_linear_from_weights(
@@ -282,15 +291,16 @@ class MlaAttentionRef(nn.Module):
                 W.mla_fusedqkrope_no_lora_w,
                 W.mla_fusedqkrope_no_lora_s,
                 None,
-                config,
+                quant_config=quant_config
             )
 
         self.kv_a_layernorm = RMSNormTorch(
-            weights.get(W.mla_kv_a_ln_gamma, None), eps=config.layernorm_eps
+            weights.get(W.mla_kv_a_ln_gamma, None), eps=layernorm_eps
         )
 
         self.o_proj = LinearFactory.create_linear_from_weights(
-            weights, W.attn_o_w, W.attn_o_s, W.attn_o_b, config
+            weights, W.attn_o_w, W.attn_o_s, W.attn_o_b,
+            quant_config=quant_config
         )
 
         self.rotary_emb = DeepseekV3YarnRotaryEmbedding(
@@ -314,7 +324,7 @@ class MlaAttentionRef(nn.Module):
         input_shape = hidden_states.shape[:-1]
         if self.q_lora_rank > 0:
             fused_qkv = self.fused_qkv_a_proj(hidden_states)
-            kv_offset = self.config.q_lora_rank
+            kv_offset = self.attn_config.q_lora_rank
             q, compressed_kv = torch.split(
                 fused_qkv,
                 [
@@ -327,7 +337,7 @@ class MlaAttentionRef(nn.Module):
             q = self.q_b_proj(q)
         else:
             fused_qkv = self.fused_qkv_proj(hidden_states)
-            kv_offset = self.config.head_num * self.config.size_per_head
+            kv_offset = self.num_heads * self.attn_config.size_per_head
             q, compressed_kv = torch.split(
                 fused_qkv,
                 [

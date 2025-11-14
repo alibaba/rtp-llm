@@ -128,8 +128,11 @@ void ArmAttentionOpTest::contextAttentionOpTest(
     auto attention_weight       = AttentionLayerWeights();
     attention_weight.qkv_weight = make_shared<const DenseWeights>(DenseWeights(buffer_nullptr, bias_device));
 
-    auto attention_config =
-        AttentionConfigs({num_heads, num_key_value_heads, head_dim, num_heads * head_dim, rope_config});
+    AttentionConfigs attention_config;
+    attention_config.head_num = num_heads;
+    attention_config.kv_head_num = num_key_value_heads;
+    attention_config.size_per_head = head_dim;
+    attention_config.rope_config = rope_config;
 
     auto qkv_output = device_->allocateBuffer({qkv_input_device->type(), {batch_size, seq_len, num_heads, head_dim}});
     auto result_ref = attention->forward(query_states_host, key_states_host, value_states_host, attention_mask_host);
@@ -241,8 +244,12 @@ void ArmAttentionOpTest::selfAttentionOpTest(size_t batch_size,
     auto attention_weight       = AttentionLayerWeights();
     attention_weight.qkv_weight = make_shared<const DenseWeights>(DenseWeights(buffer_nullptr, bias_device));
 
-    auto attention_config =
-        AttentionConfigs({num_heads, num_key_value_heads, head_dim, num_heads * head_dim, rope_config, tokensPerBlock});
+    AttentionConfigs attention_config;
+    attention_config.head_num = num_heads;
+    attention_config.kv_head_num = num_key_value_heads;
+    attention_config.size_per_head = head_dim;
+    attention_config.rope_config = rope_config;
+    attention_config.tokens_per_block = tokensPerBlock;
 
     auto qkv_output = device_->allocateBuffer({qkv_states_device->type(), {batch_size, seq_len, num_heads, head_dim}});
     auto result_ref = attention->forward(

@@ -39,7 +39,33 @@
 //                            int64_t nope_head_dim,
 //                            int64_t rope_head_dim,
 //                            int64_t v_head_dim) {
-//     DeviceFactory::initDevices(GptInitParameter());
+//     ParallelismConfig parallelism_config;
+//     ModelConfig model_config;
+//     EPLBConfig eplb_config;
+//     FMHAConfig fmha_config;
+//     DeviceResourceConfig device_resource_config;
+//     MoeConfig moe_config;
+//     SpeculativeExecutionConfig sp_config;
+//     MiscellaneousConfig misc_config;
+//     ProfilingDebugLoggingConfig profiling_debug_logging_config;
+//     HWKernelConfig hw_kernel_config;
+//     ConcurrencyConfig concurrency_config;
+//     FfnDisAggregateConfig ffn_disaggregate_config;
+//     RuntimeConfig runtime_config;
+//     DeviceFactory::initDevices(
+//         parallelism_config,
+//         model_config,
+//         eplb_config,
+//         fmha_config,
+//         device_resource_config,
+//         moe_config,
+//         sp_config,
+//         misc_config,
+//         profiling_debug_logging_config,
+//         hw_kernel_config,
+//         concurrency_config,
+//         ffn_disaggregate_config,
+//         runtime_config);
 //     device = DeviceFactory::getDefaultDevice();
 
 //     attention_configs.use_mla       = true;

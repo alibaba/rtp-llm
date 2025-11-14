@@ -8,13 +8,13 @@ import torch
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.frontend.tokenizer_factory.tokenizer_utils import (
     DecodingState,
     IncrementDecodingUtils,
 )
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.metrics import GaugeMetrics, kmonitor
+from rtp_llm.ops import SpecialTokens, SpeculativeExecutionConfig, VitSeparation
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.utils.base_model_datatypes import (
     GenerateInput,
@@ -40,18 +40,34 @@ request_counter = AtomicCounter()
 class Pipeline(object):
     def __init__(
         self,
-        model_config: GptInitModelParameters,
+        special_tokens: SpecialTokens,  # SpecialTokens from ModelConfig
+        pd_sep_config,  # PDSepConfig from ops
+        addresses: list[str],  # RPC addresses for data parallel communication
+        max_seq_len: int,  # max_seq_len_ from ModelConfig
+        seq_size_per_block: int,  # seq_size_per_block_ from ModelConfig
         tokenizer: Optional[BaseTokenizer],
-        separated_frontend: bool = False,
+        sp_config: Optional[SpeculativeExecutionConfig] = None,
+        mm_related_params: Optional[
+            Any
+        ] = None,  # mm_related_params from ModelConfig (optional)
+        vit_separation: Optional[VitSeparation] = None,  # Optional VitSeparation
     ):
-        self.model_config = model_config
+        self.pd_sep_config = pd_sep_config
         self.tokenizer = tokenizer
-        self._special_tokens: int = self.model_config.special_tokens
-        self._mm_token: str = self.model_config.mm_related_params.special_tokens.get(
-            "default_mm_token", ""
-        )
+        self._special_tokens: SpecialTokens = special_tokens
+        self._mm_token: str = ""
+        if mm_related_params:
+            self._mm_token = mm_related_params.special_tokens.get(
+                "default_mm_token", ""
+            )
+
         self.backend_rpc_server_visitor = BackendRPCServerVisitor(
-            model_config, separated_frontend
+            max_seq_len=max_seq_len,
+            seq_size_per_block=seq_size_per_block,
+            pd_sep_config=pd_sep_config,
+            addresses=addresses,
+            sp_config=sp_config,
+            vit_separation=vit_separation,
         )
 
     def encode(self, prompt: str):
@@ -68,6 +84,7 @@ class Pipeline(object):
         vocab_size: int,
         special_tokens: Any,
         tokenizer: BaseTokenizer,
+        generate_env_config,
         **kwargs: Any
     ) -> GenerateConfig:
         if isinstance(generate_config, dict):
@@ -77,7 +94,7 @@ class Pipeline(object):
             config = generate_config
         config.add_special_tokens(special_tokens)
         config.convert_select_tokens(vocab_size, tokenizer)
-        config.add_thinking_params(tokenizer)
+        config.add_thinking_params(tokenizer, generate_env_config)
         config.add_stop_ids_from_str(tokenizer)
         return config
 
@@ -149,7 +166,7 @@ class Pipeline(object):
         generate_config = self.create_generate_config(
             generate_config_json,
             len(self.tokenizer),
-            self.model_config.special_tokens,
+            self._special_tokens,
             self.tokenizer,
             **kwargs
         )
@@ -181,8 +198,8 @@ class Pipeline(object):
             request_id, token_ids, mm_inputs, generate_config, **kwargs
         )
 
+    @staticmethod
     def process_stop_id(
-        self,
         generate_config: GenerateConfig,
         generate_output: GenerateOutput,
         tokens,
@@ -196,8 +213,8 @@ class Pipeline(object):
                 tokens = truncate_token_with_stop_word_id(tokens, stop_word_ids)
         return tokens
 
+    @staticmethod
     def process_stop_str(
-        self,
         generate_config: GenerateConfig,
         generate_output: GenerateOutput,
         text: str,
@@ -286,7 +303,7 @@ class Pipeline(object):
         for i, generate_output in enumerate(generate_outputs.generate_outputs):
             tokens_list = tokens_lists_for_decode_input[i]
             output_lens.append(len(tokens_list))
-            processed_tokens = self.process_stop_id(
+            processed_tokens = Pipeline.process_stop_id(
                 generate_config,
                 generate_output,
                 tokens_list,
@@ -305,7 +322,7 @@ class Pipeline(object):
 
         final_texts = []
         for i in range(len(all_texts)):
-            processed_text, _ = self.process_stop_str(
+            processed_text, _ = Pipeline.process_stop_str(
                 generate_config,
                 generate_outputs.generate_outputs[i],
                 newly_decoded_texts[i],
@@ -368,7 +385,7 @@ class Pipeline(object):
 
             output_lens.append(len(tokens_list))
 
-            processed_tokens = self.process_stop_id(
+            processed_tokens = Pipeline.process_stop_id(
                 generate_config,
                 generate_output,
                 tokens_list,
@@ -390,7 +407,7 @@ class Pipeline(object):
 
         final_texts = []
         for i in range(len(all_texts)):
-            processed_text, token_buffers[i] = self.process_stop_str(
+            processed_text, token_buffers[i] = Pipeline.process_stop_str(
                 generate_config,
                 generate_outputs.generate_outputs[i],
                 newly_decoded_texts[i],

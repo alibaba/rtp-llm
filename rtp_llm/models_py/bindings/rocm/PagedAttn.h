@@ -3,11 +3,11 @@
 #include "rtp_llm/cpp/model_utils/RopeConfig.h"
 #include "rtp_llm/models_py/bindings/rocm/FusedRopeKVCacheOp.h"
 #include "rtp_llm/cpp/kernels/kv_cache/kv_cache_utils.h"
-#include "rtp_llm/models_py/bindings/rocm/FMHARocmBase.h"
-#include "rtp_llm/cpp/config/GptInitParameter.h"
-#include "rtp_llm/cpp/kernels/kv_cache/kv_cache_utils.h"
-#include "rtp_llm/models_py/bindings/OpDefs.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include "rtp_llm/cpp/devices/rocm_impl/ROCmDevice.h"
+#include "rtp_llm/cpp/devices/DeviceFactory.h"
+#include "rtp_llm/models_py/bindings/OpDefs.h"
 #include <pybind11/pybind11.h>
 
 #include "rtp_llm/cpp/devices/DeviceData.h"
@@ -29,11 +29,9 @@ struct forward_param {
     int64_t       max_seq_len;     // Maximum sequence length
     int64_t       partition_size;  // Size of partitions for paged attention
 };
-class PagedAttnDecodeOp: public rtp_llm::FMHARocmBase {
+class PagedAttnDecodeOp {
 public:
-    PagedAttnDecodeOp(const GptInitParameter& gpt_init_parameter
-                      // const DeviceInitParams& device_init_params
-    );
+    PagedAttnDecodeOp(const AttentionConfigs& attn_configs, int layer_num, int64_t block_nums, const FMHAConfig& fmha_config);
     bool support(torch_ext::PyAttentionInputs attn_inputs);
 
     CKAttnPtr     prepare(torch_ext::PyAttentionInputs attn_inputs);
@@ -43,6 +41,10 @@ public:
                           const CKAttnPtr&                  params);
 
 private:
+    AttentionConfigs attn_configs_;
+    int              layer_num_;
+    FMHAConfig       fmha_config_;
+    ROCmDevice*      device_;
     // Offset for KV cache blocks, calculated as num_layers * block_nums
     size_t kv_block_offset_;
     // Flag to control whether to use AITER paged attention, controlled by USE_AITER_PA env var

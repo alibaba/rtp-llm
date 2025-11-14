@@ -7,7 +7,6 @@ RTP-LLM supports OpenAI chat format API calls and can be used as a seamless drop
 ```bash
 export TOKENIZER_PATH=/path/to/tokenizer
 export CHECKPOINT_PATH=/path/to/model
-export FT_SERVER_TEST=1
 python3 -m rtp_llm.start_server
 ```
 

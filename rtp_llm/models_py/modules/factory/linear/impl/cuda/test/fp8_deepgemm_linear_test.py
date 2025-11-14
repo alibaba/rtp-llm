@@ -11,7 +11,8 @@ from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear impo
     CudaFp8DeepGEMMLinear,
 )
 from rtp_llm.test.utils.bench_util import bench
-from rtp_llm.test.utils.numeric_util import calc_diff
+from rtp_llm.test.utils.numeric_util import calc_diff, per_block_cast_to_fp8
+from rtp_llm.config.quant_config import init_quant_config
 
 
 class CudaFp8DeepGEMMLinearTest(unittest.TestCase):
@@ -96,8 +97,8 @@ class CudaFp8DeepGEMMLinearTest(unittest.TestCase):
             weight_scales=self.weight_scales,
             input_scales=None,
             bias=bias if (with_bias or with_bias_2d) else None,
-            config=None,
-        )
+            quant_config=init_quant_config('FP8_PER_BLOCK'),
+       )
 
     def test_dependency_availability(self):
         """Test dependency availability check - should fail if dependencies are missing"""
