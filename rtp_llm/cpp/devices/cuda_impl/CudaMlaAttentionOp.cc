@@ -292,21 +292,32 @@ void CudaDevice::mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params
                                      params.kv_offset);
 
     if (params.common.kv_cache.has_value()) {
-        const auto& k_cache_shape = params.common.kv_cache->k_cache_buffer->shape();
-        auto        k_cache       = Buffer2torchTensorWithStride(
-            *params.common.kv_cache->k_cache_buffer,
+        const auto& kv_cache      = *params.common.kv_cache;
+        const auto& k_cache_shape = kv_cache.k_cache_buffer->shape();
+
+        // 仅支持 fused ckv 布局：k_cache_buffer.last_dim = kv_lora_rank + rope_head_dim，
+        // v_cache_buffer 只作为占位（在 MlaAttentionLayer 中已经做过检查）。
+        RUNTIME_ASSERT_OP_ARG(
+            (k_cache_shape.size() == 3
+             && k_cache_shape[2] == params.configs.kv_lora_rank + params.configs.rope_head_dim),
+            "mlaRotaryWriteKVCache: unexpected fused kv cache layout. k_cache_buffer: %s",
+            kv_cache.k_cache_buffer->debugString().c_str());
+
+        torch::Tensor k_cache_t = Buffer2torchTensorWithStride(
+            *kv_cache.k_cache_buffer,
             {(int64_t)k_cache_shape[0], (int64_t)k_cache_shape[1], (int64_t)params.configs.kv_lora_rank},
             0);
-        auto v_cache = Buffer2torchTensorWithStride(
-            *params.common.kv_cache->k_cache_buffer,
+        torch::Tensor v_cache_t = Buffer2torchTensorWithStride(
+            *kv_cache.k_cache_buffer,
             {(int64_t)k_cache_shape[0], (int64_t)k_cache_shape[1], (int64_t)params.configs.rope_head_dim},
             params.configs.kv_lora_rank);
+
         append_paged_mla_kv_cache(append_ckv_t,
                                   k_rope_t,
                                   flashinfer.batch_indice_d,
                                   flashinfer.positions_d,
-                                  k_cache,
-                                  v_cache,
+                                  k_cache_t,
+                                  v_cache_t,
                                   flashinfer.page_indice_d,
                                   flashinfer.page_indptr_d,
                                   flashinfer.paged_kv_last_page_len_d,

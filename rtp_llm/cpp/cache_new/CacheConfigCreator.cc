@@ -46,6 +46,7 @@ CacheConfig CacheConfigCreator::createBasicConfig(const rtp_llm::GptInitParamete
         spec->block_nums         = 0;
         spec->kv_lora_rank       = static_cast<uint>(param.kv_lora_rank_);
         spec->rope_head_dim      = static_cast<uint>(param.rope_head_dim_);
+        spec->local_head_num_kv  = 1; // mla set local_head_num_kv to 1
         spec->layer_ids_         = all_layer_ids;
 
         config.layer_type_params.push_back(spec);

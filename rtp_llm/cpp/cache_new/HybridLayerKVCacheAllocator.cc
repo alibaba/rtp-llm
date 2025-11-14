@@ -14,7 +14,7 @@ HybridLayerKVCacheAllocator::HybridLayerKVCacheAllocator(const CacheConfig&   co
 bool HybridLayerKVCacheAllocator::init() {
     auto            block_size = config_.layer_type_params[0]->block_size();
     BlockPoolConfig pool_config =
-        BlockPoolConfigHelper::createKVFirstConfig(config_.layer_num, config_.block_num, block_size);
+        BlockPoolConfigHelper::createLayerFirstConfig(config_.layer_num, config_.block_num, block_size);
 
     block_pool_ = std::make_shared<BlockPool>(pool_config, device_, atype_);
     if (!block_pool_->init()) {

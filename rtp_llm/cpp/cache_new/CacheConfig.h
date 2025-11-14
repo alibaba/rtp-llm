@@ -22,6 +22,10 @@ enum MemoryLayout {
 };
 
 struct KVCacheSpec {
+    uint layer_num;
+    uint block_nums;
+    uint local_head_num_kv;
+
     std::vector<int> layer_ids_;
     uint             seq_size_per_block = 1;
 
@@ -31,14 +35,13 @@ struct KVCacheSpec {
     virtual size_t block_size() const   = 0;
     virtual size_t k_block_size() const = 0;
     virtual size_t v_block_size() const = 0;
+    virtual size_t k_token_size() const = 0;
+    virtual size_t v_token_size() const = 0;
 
     virtual ~KVCacheSpec() = default;
 };
 
 struct MHAKVCacheSpec: public KVCacheSpec {
-    uint layer_num;
-    uint block_nums;
-    uint local_head_num_kv;
     uint size_per_head;
     uint scale_size = 0;
 
@@ -54,14 +57,17 @@ struct MHAKVCacheSpec: public KVCacheSpec {
         auto dtype_size = rtp_llm::getTypeSize(dtype);
         return local_head_num_kv * size_per_head * seq_size_per_block * dtype_size;
     }
+    size_t k_token_size() const override {
+        return size_per_head;
+    }
+    size_t v_token_size() const override {
+        return size_per_head;
+    }
 };
 
 struct MLAKVCacheSpec: public KVCacheSpec {
-    uint layer_num;
-    uint block_nums;
     uint kv_lora_rank;
     uint rope_head_dim;
-    uint local_head_num_kv = 1;  // MLA typically uses 1
 
     size_t block_size() const override {
         auto dtype_size = rtp_llm::getTypeSize(dtype);
@@ -69,11 +75,16 @@ struct MLAKVCacheSpec: public KVCacheSpec {
     }
     size_t k_block_size() const override {
         auto dtype_size = rtp_llm::getTypeSize(dtype);
-        return local_head_num_kv * kv_lora_rank * seq_size_per_block * dtype_size;
+        return local_head_num_kv * (kv_lora_rank + rope_head_dim) * seq_size_per_block * dtype_size; 
     }
     size_t v_block_size() const override {
-        auto dtype_size = rtp_llm::getTypeSize(dtype);
-        return local_head_num_kv * rope_head_dim * seq_size_per_block * dtype_size;
+        return 0;
+    }
+    size_t k_token_size() const override {
+        return kv_lora_rank + rope_head_dim;
+    }
+    size_t v_token_size() const override {
+        return 0;
     }
 };
 
@@ -90,6 +101,12 @@ struct LinearKVCacheSpec: public KVCacheSpec {
     }
     size_t v_block_size() const override {
         return temporal_state_size * seq_size_per_block * rtp_llm::getTypeSize(dtype);
+    }
+    size_t k_token_size() const override {
+        return conv_state_size;
+    }
+    size_t v_token_size() const override {
+        return temporal_state_size;
     }
 };
 
@@ -133,14 +150,16 @@ struct BlockPoolConfig {
 
     size_t k_block_stride = 0;
     size_t v_block_stride = 0;
-    size_t k_layer_stride = 0;
-    size_t v_layer_stride = 0;
+
+    size_t k_token_size = 0;
+    size_t v_token_size = 0;
+
+    bool is_mla = false;
 
     // extra meta for exposing logical shape to kernels
     // valid for KV_FIRST layout
-    uint32_t kv_head_num      = 0;  // local kv heads (per layer)
-    uint32_t tokens_per_block = 0;  // seq_size_per_block (elements)
-    uint32_t size_per_head    = 0;  // hidden per head (elements)
+    uint32_t kv_head_num      = 0;
+    uint32_t tokens_per_block = 0;
 };
 
 // struct CacheConfig {

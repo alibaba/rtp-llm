@@ -43,7 +43,7 @@ AttentionLayerOutput DeviceBase::mlaAttentionLayer(const AttentionLayerParams& p
                               "mla kv cache buffer check shape failed. k_cache_buffer: %s, v_cache_buffer: %s",
                               kv_cache.k_cache_buffer->debugString().c_str(),
                               kv_cache.v_cache_buffer->debugString().c_str());
-        if (kv_cache.k_scale_buffer) {
+        if (kv_cache.k_scale_buffer) { 
             const auto& k_scale_shape = kv_cache.k_scale_buffer->shape();
             const auto& v_scale_shape = kv_cache.v_scale_buffer->shape();
             RUNTIME_ASSERT_OP_ARG(((k_scale_shape.size() == 2) && (v_scale_shape.size() == 3)

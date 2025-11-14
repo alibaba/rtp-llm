@@ -60,10 +60,10 @@ struct KVCacheInfo {
 
 // For backward compatibility with old cache system (same as GptModel.h definition)
 struct KVCacheBuffer {
-    rtp_llm::BufferPtr k_blocks;
-    rtp_llm::BufferPtr v_blocks;
-    rtp_llm::BufferPtr k_scale;
-    rtp_llm::BufferPtr v_scale;
+    rtp_llm::BufferPtr k_blocks = nullptr;
+    rtp_llm::BufferPtr v_blocks = nullptr;
+    rtp_llm::BufferPtr k_scale = nullptr;
+    rtp_llm::BufferPtr v_scale = nullptr;
 };
 
 struct BlockIdPair {
