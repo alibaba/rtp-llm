@@ -117,7 +117,6 @@ REDUNDANT_EXPERT=32 \
 --use_deepep_internode 0 \
 --use_deepep_low_latency 1 \
 --use_deepep_moe 1 \
---original_checkpoint_path XXXX \
 --eplb_stats_window_size 10 \
 --eplb_update_time 20 \
 --eplb_mode EPLB \

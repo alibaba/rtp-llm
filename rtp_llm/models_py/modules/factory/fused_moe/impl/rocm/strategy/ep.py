@@ -4,7 +4,7 @@ from typing import Any, Dict
 
 import torch
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
 from rtp_llm.models_py.modules.factory.fused_moe.defs.priority_attributes import (
     StrategyAttributes,
 )
@@ -14,7 +14,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.strategy_base import MoeSt
 class RocmEpNormalStrategy(MoeStrategy):
     """ROCm EP normal mode strategy"""
 
-    def create_router(self, config: GptInitModelParameters) -> Any:
+    def create_router(self, config: MoEConfigAdapter) -> Any:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.routers.deepep_normal_router import (
             DeepepNormalRouter,
         )
@@ -22,7 +22,7 @@ class RocmEpNormalStrategy(MoeStrategy):
         return DeepepNormalRouter(config)
 
     def create_executor(
-        self, config: GptInitModelParameters, weights: Dict[str, torch.Tensor]
+        self, config: MoEConfigAdapter, weights: Dict[str, torch.Tensor]
     ) -> Any:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.executors.deepep_normal_fused_moe_executor import (
             FusedMoeExecutor,
@@ -47,11 +47,11 @@ class RocmEpNormalStrategy(MoeStrategy):
 class RocmEpLowLatencyStrategy(MoeStrategy):
     """ROCm EP low latency strategy (not supported)"""
 
-    def create_router(self, config: GptInitModelParameters) -> Any:
+    def create_router(self, config: MoEConfigAdapter) -> Any:
         raise ValueError("deepep_low_latency for rocm moe is not yet supported")
 
     def create_executor(
-        self, config: GptInitModelParameters, weights: Dict[str, torch.Tensor]
+        self, config: MoEConfigAdapter, weights: Dict[str, torch.Tensor]
     ) -> Any:
         raise ValueError("deepep_low_latency for rocm moe is not yet supported")
 

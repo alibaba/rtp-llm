@@ -9,7 +9,7 @@ using namespace tensorrt_llm::kernels;
 namespace rtp_llm {
 
 cufmha::cufmha(DataType          dtype,
-               AttentionMaskType mtype,
+               bool     is_causal,
                size_t            head_num,
                size_t            kv_head_num,
                size_t            size_per_head,
@@ -23,9 +23,8 @@ cufmha::cufmha(DataType          dtype,
                bool              can_use_open_source_fmha_paged,
                bool              is_s_padded,
                cudaStream_t      stream) {
-
-    dtype_         = dtype;
-    mtype_         = mtype;
+    dtype_      = dtype;
+    is_causal_  = is_causal;
     head_num_      = head_num;
     kv_head_num_   = kv_head_num;
     size_per_head_ = size_per_head;
@@ -49,7 +48,7 @@ cufmha::cufmha(DataType          dtype,
             kv_head_num,
             size_per_head,
             seq_size_per_block,
-            mtype_,
+            is_causal,
             q_scaling_,
             1.0f  // softmax_extra_scale
         };
@@ -67,14 +66,14 @@ cudaStream_t cufmha::getStream() {
     return run_stream;
 }
 
-bool cufmha::checkSignature(DataType          dtype,
-                            AttentionMaskType mtype,
-                            size_t            head_num,
-                            size_t            kv_head_num,
-                            size_t            size_per_head,
-                            float             q_scaling,
-                            bool              use_linear_bias_slopes) {
-    return dtype == dtype_ && mtype == mtype_ && head_num == head_num_ && kv_head_num == kv_head_num_
+bool cufmha::checkSignature(DataType dtype,
+                            bool     is_causal,
+                            size_t   head_num,
+                            size_t   kv_head_num,
+                            size_t   size_per_head,
+                            float    q_scaling,
+                            bool     use_linear_bias_slopes) {
+    return dtype == dtype_ && is_causal == is_causal_ && head_num == head_num_ && kv_head_num == kv_head_num_
            && size_per_head == size_per_head_ && q_scaling == q_scaling_
            && use_linear_bias_slopes == use_linear_bias_slopes_;
 }
@@ -83,7 +82,7 @@ bool cufmha::initTrtV1FmhaAndCheckSupport() {
 #ifdef USE_OLD_TRT_FMHA
     trtv1_fmha_runner_.reset(new FusedMHARunnerFP16v2(head_num_, size_per_head_, get_sm(), q_scaling_));
 
-    return trtv1_fmha_runner_->fmha_supported(mtype_ == AttentionMaskType::causalMask) && (head_num_ == kv_head_num_)
+    return trtv1_fmha_runner_->fmha_supported(is_causal_) && (head_num_ == kv_head_num_)
            && (dtype_ == DataType::TYPE_FP16);
 #else
     return false;
@@ -99,7 +98,7 @@ void cufmha::runTrtV1Fmha(void*  input,
                           size_t token_num) {
 #ifdef USE_OLD_TRT_FMHA
     auto run_stream = getStream();
-    if (mtype_ == AttentionMaskType::causalMask) {
+    if (is_causal_) {
         trtv1_fmha_runner_->setup_causal_masked_fmha(seq_len, batch_size);
         trtv1_fmha_runner_->run_causal_masked_fmha(input, cu_seqlens, output, true, run_stream);
     } else {
@@ -117,7 +116,6 @@ void cufmha::runTrtV1Fmha(void*  input,
 
 bool cufmha::initOpenSourceFmhaAndCheckSupport() {
     return (kv_head_num_ != 0 && head_num_ % kv_head_num_ == 0)
-           && (mtype_ == AttentionMaskType::causalMask || mtype_ == AttentionMaskType::noMask)
            && ((size_per_head_ == 64) || (size_per_head_ == 96) || (size_per_head_ == 128) || (size_per_head_ == 192));
 }
 
@@ -402,7 +400,7 @@ Flash_fwd_params cufmha::genFlashFwdParams(void*  q,
     flash_fwd_params.rp_dropout               = 1.f / flash_fwd_params.p_dropout;
     flash_fwd_params.scale_softmax_rp_dropout = flash_fwd_params.rp_dropout * flash_fwd_params.scale_softmax;
 
-    flash_fwd_params.is_causal = (mtype_ == AttentionMaskType::causalMask);
+    flash_fwd_params.is_causal = is_causal_;
     if (linear_bias_slopes) {
         flash_fwd_params.alibi_slopes_ptr = linear_bias_slopes;
     }

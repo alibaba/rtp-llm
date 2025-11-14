@@ -6,6 +6,8 @@ cc_library(
         "GenerateConfig.h",
     ],
     deps = [
+        "//rtp_llm/cpp/config:role_types",
+        "//rtp_llm/cpp/config:special_tokens",
         "//:rtp_compute_ops",
     ],
     visibility = ["//visibility:public"],

@@ -10,8 +10,8 @@ from anyio.lowlevel import RunVar
 from fastapi import FastAPI
 from fastapi.routing import APIRouter
 
-from rtp_llm.config.log_config import LOGGING_CONFIG
-from rtp_llm.config.uvicorn_config import UVICORN_LOGGING_CONFIG
+from rtp_llm.config.log_config import setup_logging
+from rtp_llm.config.uvicorn_config import get_uvicorn_logging_config
 
 MAX_INCOMPLETE_EVENT_SIZE = 1024 * 1024
 
@@ -26,7 +26,7 @@ class ModelAssistantServer(object):
             app,
             host="0.0.0.0",
             port=self._server_port,
-            log_config=UVICORN_LOGGING_CONFIG,
+            log_config=get_uvicorn_logging_config(),
             h11_max_incomplete_event_size=MAX_INCOMPLETE_EVENT_SIZE,
         )
 
@@ -85,5 +85,5 @@ def main():
 
 
 if __name__ == "__main__":
-    logging.config.dictConfig(LOGGING_CONFIG)
+    setup_logging()
     main()

@@ -9,8 +9,9 @@ from deep_ep import Buffer as DeepEPBuffer
 from deep_ep import Config as DeepEPConfig
 from torch.distributed import ProcessGroup
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from typing import Optional
 from rtp_llm.ops.compute_ops import DeviceType, get_device
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
 
 __all__ = [
     "DeepEPBuffer",
@@ -57,15 +58,36 @@ class DeepEPWrapper:
     _use_accl_ep: bool = True
     _mode: DeepEPMode = DeepEPMode.NORMAL
 
-    def __init__(self, group: ProcessGroup, params: GptInitModelParameters) -> None:
-        self._ep_rank = params.ep_rank
-        self._ep_size = params.ep_size
-        self._hidden_size = params.hidden_size
-        self._num_experts = params.expert_num
-        self._num_topk = params.moe_k
-        self._num_sms = params.moe_config.deep_ep_num_sm
+    def __init__(
+        self,
+        group: ProcessGroup,
+        config_adapter: MoEConfigAdapter,
+    ) -> None:
+        """Initialize DeepEPWrapper with ProcessGroup and MoEConfigAdapter.
+        
+        Args:
+            group: ProcessGroup for distributed communication
+            config_adapter: MoEConfigAdapter containing all necessary configuration
+        """
+        # Extract configurations from MoEConfigAdapter
+        model_config = config_adapter.model_config
+        parallelism_config = config_adapter.parallelism_config
+        moe_config = config_adapter.moe_config
+        
+        self._ep_rank = parallelism_config.ep_rank
+        self._ep_size = parallelism_config.ep_size
+        self._hidden_size = model_config.hidden_size
+        self._num_experts = model_config.expert_num
+        self._num_topk = model_config.moe_k
+        self._num_sms = moe_config.deep_ep_num_sm
         self._use_accl_ep = use_accl_ep()
-        self._mode, self._buffer = self._init_deepep_buffer(group, params)
+        self._model_config = model_config
+        self._parallelism_config = parallelism_config
+        self._moe_config = moe_config
+        self._max_generate_batch_size = config_adapter.max_generate_batch_size
+        self._ffn_disaggregate_config = parallelism_config.ffn_disaggregate_config
+        
+        self._mode, self._buffer = self._init_deepep_buffer(group)
 
     @property
     def buffer(self) -> DeepEPBuffer:
@@ -109,19 +131,19 @@ class DeepEPWrapper:
         return self._use_accl_ep
 
     def _init_deepep_buffer(
-        self, group: ProcessGroup, params: GptInitModelParameters
+        self, group: ProcessGroup
     ) -> Tuple[DeepEPMode, DeepEPBuffer]:
         # init deep_ep buffer
-        ep_rank = params.ep_rank
-        use_deepep_low_latency: bool = params.moe_config.use_deepep_low_latency
+        ep_rank = self._ep_rank
+        use_deepep_low_latency: bool = self._moe_config.use_deepep_low_latency
         enable_ffn_disaggregate: bool = (
-            params.gpt_init_params.ffn_disaggregate_config.enable_ffn_disaggregate
+            self._ffn_disaggregate_config.enable_ffn_disaggregate
+            if self._ffn_disaggregate_config
+            else False
         )
         if use_deepep_low_latency and enable_ffn_disaggregate:
             if self._use_accl_ep:
-                return DeepEPMode.LOW_LATENCY_M2N, self._init_low_latency_m2n_buffer(
-                    group, params
-                )
+                return DeepEPMode.LOW_LATENCY_M2N, self._init_low_latency_m2n_buffer(group)
             else:
                 raise RuntimeError(
                     f"[rank: {ep_rank}] init deep_ep buffer failed, current deep_ep provider "
@@ -129,9 +151,9 @@ class DeepEPWrapper:
                     f"and enable_ffn_disaggregate: {enable_ffn_disaggregate}"
                 )
         elif use_deepep_low_latency and not enable_ffn_disaggregate:
-            return DeepEPMode.LOW_LATENCY, self._init_low_latency_buffer(group, params)
+            return DeepEPMode.LOW_LATENCY, self._init_low_latency_buffer(group)
         elif not use_deepep_low_latency and not enable_ffn_disaggregate:
-            return DeepEPMode.NORMAL, self._init_normal_buffer(group, params)
+            return DeepEPMode.NORMAL, self._init_normal_buffer(group)
         else:
             raise RuntimeError(
                 f"[rank: {ep_rank}] init deep_ep buffer failed, unsupported "
@@ -171,14 +193,14 @@ class DeepEPWrapper:
         return 128
 
     def _init_normal_buffer(
-        self, group: ProcessGroup, params: GptInitModelParameters
+        self, group: ProcessGroup
     ) -> DeepEPBuffer:
         num_nvl_bytes = 0
         num_rdma_bytes = 0
         num_qps_per_rank = 1
-        use_deepep_internode: bool = params.moe_config.use_deepep_internode
-        num_experts: int = params.expert_num
-        ep_size: int = params.ep_size
+        use_deepep_internode: bool = self._moe_config.use_deepep_internode
+        num_experts: int = self._num_experts
+        ep_size: int = self._ep_size
         assert num_experts > 0 and ep_size > 0, "num_experts and ep_size must be set"
         # normal-kernel internode
         if use_deepep_internode:
@@ -213,10 +235,10 @@ class DeepEPWrapper:
         return DeepEPBuffer(**init_kwargs)  # type: ignore
 
     def _init_low_latency_buffer(
-        self, group: ProcessGroup, params: GptInitModelParameters
+        self, group: ProcessGroup
     ) -> DeepEPBuffer:
-        max_generate_batch_size: int = params.max_generate_batch_size
-        tp_size: int = params.tp_size
+        max_generate_batch_size: int = self._max_generate_batch_size
+        tp_size: int = self._parallelism_config.tp_size
         assert (
             max_generate_batch_size > 0 and tp_size > 0
         ), "max_generate_batch_size and tp_size must be set"
@@ -228,9 +250,9 @@ class DeepEPWrapper:
         num_nvl_bytes = 0
         num_rdma_bytes = 0
         num_qps_per_rank = 1
-        hidden_size: int = params.hidden_size
-        ep_size: int = params.ep_size
-        num_experts: int = params.expert_num
+        hidden_size: int = self._hidden_size
+        ep_size: int = self._ep_size
+        num_experts: int = self._num_experts
         assert (
             hidden_size > 0 and ep_size > 0 and num_experts > 0
         ), "hidden_size, ep_size and num_experts must be set"
@@ -240,7 +262,7 @@ class DeepEPWrapper:
             ep_size,
             num_experts,
         )
-        local_rank: int = params.local_rank
+        local_rank: int = self._parallelism_config.local_rank
         if local_rank == 0:
             print(
                 f"Allocating buffer size: {num_rdma_bytes / 1e6} MB, "
@@ -270,12 +292,13 @@ class DeepEPWrapper:
         return DeepEPBuffer(**init_kwargs)  # type: ignore
 
     def _init_low_latency_m2n_buffer(
-        self, group: ProcessGroup, params: GptInitModelParameters
+        self, group: ProcessGroup
     ) -> DeepEPBuffer:
-        max_generate_batch_size: int = params.max_generate_batch_size
-        attention_tp_size: int = (
-            params.gpt_init_params.ffn_disaggregate_config.attention_tp_size
-        )
+        if self._ffn_disaggregate_config is None:
+            raise RuntimeError("ffn_disaggregate_config is required for low-latency m2n mode")
+        
+        max_generate_batch_size: int = self._max_generate_batch_size
+        attention_tp_size: int = self._ffn_disaggregate_config.attention_tp_size
         assert (
             max_generate_batch_size > 0 and attention_tp_size > 0
         ), "max_generate_batch_size and attention_tp_size must be set"
@@ -283,11 +306,9 @@ class DeepEPWrapper:
             max_generate_batch_size, attention_tp_size
         )
 
-        attention_dp_size: int = (
-            params.gpt_init_params.ffn_disaggregate_config.attention_dp_size
-        )
-        ffn_dp_size: int = params.gpt_init_params.ffn_disaggregate_config.ffn_dp_size
-        ffn_tp_size: int = params.gpt_init_params.ffn_disaggregate_config.ffn_tp_size
+        attention_dp_size: int = self._ffn_disaggregate_config.attention_dp_size
+        ffn_dp_size: int = self._ffn_disaggregate_config.ffn_dp_size
+        ffn_tp_size: int = self._ffn_disaggregate_config.ffn_tp_size
         assert (
             attention_dp_size > 0 and ffn_dp_size > 0 and ffn_tp_size > 0
         ), "attention_dp_size, ffn_dp_size and ffn_tp_size must be set"
@@ -301,8 +322,8 @@ class DeepEPWrapper:
             raise RuntimeError(
                 "current deep_ep provider does not support low-latency m2n"
             )
-        hidden_size: int = params.hidden_size
-        num_experts: int = params.expert_num
+        hidden_size: int = self._hidden_size
+        num_experts: int = self._num_experts
         assert (
             hidden_size > 0 and num_experts > 0
         ), "hidden_size and num_experts must be set"
@@ -313,7 +334,7 @@ class DeepEPWrapper:
             num_experts,
             num_m,
         )
-        local_rank: int = params.local_rank
+        local_rank: int = self._parallelism_config.local_rank
         if local_rank == 0:
             print(
                 f"Allocating buffer size: {num_rdma_bytes / 1e6} MB, "
@@ -353,10 +374,19 @@ def get_deepep_wrapper() -> DeepEPWrapper:
     return _DEEP_EP
 
 
-def init_deepep_wrapper(group: ProcessGroup, params: GptInitModelParameters) -> None:
+def init_deepep_wrapper(
+    group: ProcessGroup,
+    config_adapter: MoEConfigAdapter,
+) -> None:
+    """Initialize DeepEP wrapper with ProcessGroup and MoEConfigAdapter.
+    
+    Args:
+        group: ProcessGroup for distributed communication
+        config_adapter: MoEConfigAdapter containing all necessary configuration
+    """
     global _DEEP_EP
     _DEEP_EP = DeepEPWrapper(
-        group, params
+        group, config_adapter
     )  # pyright: ignore[reportConstantRedefinition]
 
 

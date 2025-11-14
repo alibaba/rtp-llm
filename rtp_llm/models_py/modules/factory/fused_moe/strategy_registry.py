@@ -6,7 +6,7 @@ Manages registration and selection of all MOE strategies.
 import logging
 from typing import List
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
 
 from .defs.strategy_base import MoeStrategy
 
@@ -44,14 +44,14 @@ class StrategyRegistry:
         """Clear all registered strategies"""
         self._strategies.clear()
 
-    def get_strategy(self, config: GptInitModelParameters) -> MoeStrategy:
+    def get_strategy(self, config: MoEConfigAdapter) -> MoeStrategy:
         """Get appropriate strategy based on configuration
 
         First finds all strategies that can handle the configuration,
         then selects the one with the highest priority.
 
         Args:
-            config: Model initialization parameters
+            config: MOE configuration adapter
 
         Returns:
             Most appropriate strategy instance (highest priority among candidates)
@@ -71,10 +71,10 @@ class StrategyRegistry:
         if not candidates:
             logger.error(
                 f"No suitable MOE strategy found. Config details: "
-                f"quant_config={config.quant_config}, "
-                f"ep_size={config.ep_size}, "
-                f"world_size={config.world_size}, "
-                f"tp_size={config.tp_size}, "
+                f"quant_config={config.model_config.quant_config}, "
+                f"ep_size={config.parallelism_config.ep_size}, "
+                f"world_size={config.parallelism_config.world_size}, "
+                f"tp_size={config.parallelism_config.tp_size}, "
                 f"use_deepep_low_latency={config.moe_config.use_deepep_low_latency if config.moe_config else False}"
             )
             raise ValueError(

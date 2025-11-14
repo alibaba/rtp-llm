@@ -8,32 +8,32 @@
 using namespace std;
 namespace rtp_llm {
 
-FIFOScheduler::FIFOScheduler(const rtp_llm::GptInitParameter&     params,
+FIFOScheduler::FIFOScheduler(const RuntimeConfig&                 runtime_config,
+                             const ModelConfig&                   model_config,
+                             const PDSepConfig&                  pd_sep_config,
+                             const ParallelismConfig&            parallelism_config,
+                             const ModelSpecificConfig&          model_specific_config,
                              const std::shared_ptr<CacheManager>& cache_manager,
                              const kmonitor::MetricsReporterPtr   metrics_reporter,
                              const int                            max_score_len):
-    params_(params),
+    pd_sep_config_(pd_sep_config),
+    model_specific_config_(model_specific_config),
     cache_manager_(cache_manager),
-    max_seq_len_(params.max_seq_len_),
-    max_batch_tokens_size_(params.max_batch_tokens_size_),
-    max_generate_batch_size_(params.max_generate_batch_size_),
+    max_seq_len_(model_config.max_seq_len),
+    max_batch_tokens_size_(runtime_config.fifo_scheduler_config.max_batch_tokens_size),
+    max_generate_batch_size_(runtime_config.max_generate_batch_size),
     // not support fallback when use pd_speration:use_cache_store
-    enable_partial_fallback_(params.enable_partial_fallback_ && params.role_type_ == RoleType::PDFUSION),
-    enable_whole_fallback_(params.role_type_ == RoleType::PDFUSION),
-    enable_fast_gen_(params.enable_fast_gen_),
-    need_fill_fake_stream_(params.dp_size_ > 1 && params.tp_rank_ == 0),
-    fast_gen_max_context_len_(params.fast_gen_max_context_len_),
+    enable_partial_fallback_(runtime_config.fifo_scheduler_config.enable_partial_fallback && pd_sep_config.role_type == RoleType::PDFUSION),
+    enable_whole_fallback_(pd_sep_config.role_type == RoleType::PDFUSION),
+    enable_fast_gen_(runtime_config.fifo_scheduler_config.enable_fast_gen),
+    need_fill_fake_stream_(parallelism_config.dp_size > 1 && parallelism_config.tp_rank == 0),
+    fast_gen_max_context_len_(runtime_config.fifo_scheduler_config.fast_gen_max_context_len),
     metrics_reporter_(metrics_reporter) {
-    reserve_block_num_ = params.fifo_scheduler_config.scheduler_reserve_resource_ratio * cache_manager->availableBlockNums() / 100;
+    reserve_block_num_ = runtime_config.fifo_scheduler_config.scheduler_reserve_resource_ratio * cache_manager->availableBlockNums() / 100;
     RTP_LLM_LOG_INFO("max_generate_batch_size is [%d], max_batch_tokens_size is [%d], reserve_block_num is [%d]",
                      max_generate_batch_size_,
                      max_batch_tokens_size_,
                      reserve_block_num_);
-    if (!params.sp_config.sp_type.empty()) {
-        RTP_LLM_LOG_INFO("using sp, disable fallback strategy");
-        enable_partial_fallback_ = false;
-        enable_whole_fallback_   = false;
-    }
 }
 
 FIFOScheduler::~FIFOScheduler() {
@@ -199,12 +199,12 @@ tuple<int, int> FIFOScheduler::evaluateRunningNext(size_t reserve_step) {
 
 bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams,
                                           const GenerateStreamPtr&       new_stream) const {
-    if (params_.role_type_ == RoleType::DECODE) {
+    if (pd_sep_config_.role_type == RoleType::DECODE) {
         if (running_streams_.size() + streams.size() + 1 < max_generate_batch_size_) {
             return true;
         }
     }
-    if (params_.model_specific_config.load_python_model) {
+    if (model_specific_config_.load_python_model) {
         // new model py not support prefill and decode togather now
         if (!running_streams_.empty()) {
             return false;

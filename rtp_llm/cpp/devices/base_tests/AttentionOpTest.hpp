@@ -259,8 +259,11 @@ void AttentionOpTest::contextAttentionOpTest(size_t        batch_size,
 
     attention_weight.static_scale_reciprocal_weight = make_shared<const DenseWeights>(DenseWeights(scale_device));
 
-    auto attention_config =
-        AttentionConfigs({num_heads, num_key_value_heads, head_dim, num_heads * head_dim, rope_config});
+    AttentionConfigs attention_config;
+    attention_config.head_num = num_heads;
+    attention_config.kv_head_num = num_key_value_heads;
+    attention_config.size_per_head = head_dim;
+    attention_config.rope_config = rope_config;
 
     auto output_data_type = qscheme == QScheme::Qfp8PerTensor ? DataType::TYPE_FP8_E4M3 : qkv_input_device->type();
     auto qkv_output       = device_->allocateBuffer({output_data_type, {batch_size, seq_len, num_heads, head_dim}});
@@ -417,8 +420,12 @@ void AttentionOpTest::selfAttentionOpTest(size_t batch_size,
 
     auto token_num = batch_size * seq_len;
 
-    auto attention_config =
-        AttentionConfigs({num_heads, num_key_value_heads, head_dim, num_heads * head_dim, rope_config, tokensPerBlock});
+    AttentionConfigs attention_config;
+    attention_config.head_num = num_heads;
+    attention_config.kv_head_num = num_key_value_heads;
+    attention_config.size_per_head = head_dim;
+    attention_config.rope_config = rope_config;
+    attention_config.tokens_per_block = tokensPerBlock;
 
 #ifdef USING_CUDA12
     CudaDevice* device            = dynamic_cast<CudaDevice*>(device_);
@@ -550,8 +557,12 @@ void AttentionOpTest::aiterPageAttentionOpTest(size_t batch_size,
     auto common_inputs        = AttentionCommonInputs({input_lengths_device, sequence_lengths_device});
     auto layer_k_cache_buffer = kv_cache_buffer.k_blocks->index(0);
     auto layer_v_cache_buffer = kv_cache_buffer.v_blocks->index(0);
-    auto attention_config       = AttentionConfigs(
-        {num_heads, num_key_value_heads, head_dim, num_heads * head_dim, rope_config, tokens_per_block});
+    AttentionConfigs attention_config;
+    attention_config.head_num = num_heads;
+    attention_config.kv_head_num = num_key_value_heads;
+    attention_config.size_per_head = head_dim;
+    attention_config.rope_config = rope_config;
+    attention_config.tokens_per_block = tokens_per_block;
     common_inputs.kv_cache    = KvCacheInfo(
         {(int)kv_cache_buffer.k_blocks->shape()[0], kv_cache_block_id, layer_k_cache_buffer, layer_v_cache_buffer});
     common_inputs.context_batch_size  = 0;
@@ -706,8 +717,12 @@ void AttentionOpTest::xqaAttentionOpTest(size_t batch_size,
 
     auto token_num = batch_size * seq_len;
 
-    auto attention_config = AttentionConfigs(
-        {num_heads, num_key_value_heads, head_dim, num_heads * head_dim, rope_config, tokens_per_block});
+    AttentionConfigs attention_config;
+    attention_config.head_num = num_heads;
+    attention_config.kv_head_num = num_key_value_heads;
+    attention_config.size_per_head = head_dim;
+    attention_config.rope_config = rope_config;
+    attention_config.tokens_per_block = tokens_per_block;
 
     auto qkv_output = device->allocateBuffer({query_states_device->type(), {token_num, num_heads, head_dim}});
 
@@ -859,9 +874,13 @@ void AttentionOpTest::flashinferPrefillOpTest(size_t        batch_size,
     cache_manager_         = nullptr;
     auto kv_cache_block_id = allocateKVBlocks(cache_conf, kv_seq_lengths, kvcache_pad, false);
     auto kv_cache_buffer   = cache_manager_->kvCacheBuffer();
-    auto attention_config  = AttentionConfigs(
-        {num_heads, num_key_value_heads, head_dim, num_heads * head_dim, rope_config, tokens_per_block, causalMask});
-    attention_config.kv_cache_dtype         = KvCacheDataType::BASE;
+    AttentionConfigs attention_config;
+    attention_config.head_num = num_heads;
+    attention_config.kv_head_num = num_key_value_heads;
+    attention_config.size_per_head = head_dim;
+    attention_config.rope_config = rope_config;
+    attention_config.tokens_per_block = tokens_per_block;
+    attention_config.kv_cache_dtype = KvCacheDataType::BASE;
     attention_config.skip_append_kv_cache   = true;
     BufferPtr        prefix_lengths_buf     = tensorToBuffer(prefix_lengths_host, AllocationType::HOST);
     BufferPtr        sequence_lengths_buf   = tensorToBuffer(sequence_lengths_host, AllocationType::HOST);
@@ -1016,9 +1035,13 @@ void AttentionOpTest::xqaPrefillOpTest(size_t        batch_size,
     cache_manager_         = nullptr;
     auto kv_cache_block_id = allocateKVBlocks(cache_conf, kv_seq_lengths, kvcache_pad_fp8, false);
     auto kv_cache_buffer   = cache_manager_->kvCacheBuffer();
-    auto attention_config  = AttentionConfigs(
-        {num_heads, num_key_value_heads, head_dim, num_heads * head_dim, rope_config, tokens_per_block, causalMask});
-    attention_config.kv_cache_dtype         = KvCacheDataType::FP8;
+    AttentionConfigs attention_config;
+    attention_config.head_num = num_heads;
+    attention_config.kv_head_num = num_key_value_heads;
+    attention_config.size_per_head = head_dim;
+    attention_config.rope_config = rope_config;
+    attention_config.tokens_per_block = tokens_per_block;
+    attention_config.kv_cache_dtype = KvCacheDataType::FP8;
     attention_config.skip_append_kv_cache   = true;
     BufferPtr        prefix_lengths_buf     = tensorToBuffer(prefix_lengths_host, AllocationType::HOST);
     BufferPtr        sequence_lengths_buf   = tensorToBuffer(sequence_lengths_host, AllocationType::HOST);

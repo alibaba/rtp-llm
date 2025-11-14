@@ -59,7 +59,7 @@ absl::Status MTPExecutor::propose(const std::list<GenerateStreamPtr>& streams, b
     return absl::OkStatus();
 }
 
-bool MTPExecutor::updateEplbConfig(const EplbConfig& config) {
+bool MTPExecutor::updateEplbConfig(const EPLBConfig& config) {
     for (auto& executor : mtp_executors_) {
         if (executor) {
             executor->updateEplbConfig(config);

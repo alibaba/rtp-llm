@@ -190,7 +190,7 @@ class GpuImpl(DeviceBase):
 
     @property
     def specify_gpu_arch(self):
-        return self.py_env_configs.py_device_resource_config.specify_gpu_arch
+        return self.py_env_configs.runtime_config.specify_gpu_arch
 
     def apply_int8(self, tensor: torch.Tensor, device: str):
         shape = tensor.shape
@@ -550,7 +550,7 @@ class RocmImpl(GpuImpl):
                 logging.warn(f"Cannot get ROCm device gfx version: {e}")
         # 如果无法获取，则使用环境变量或默认值
         specify_gpu_arch = (
-            self.py_env_configs.py_device_resource_config.specify_gpu_arch
+            self.py_env_configs.runtime_config.specify_gpu_arch
         )
         return "900" if specify_gpu_arch == "" else specify_gpu_arch
 
@@ -641,7 +641,7 @@ class RocmImpl(GpuImpl):
                 logging.warn(f"Cannot get ROCm device gfx version: {e}")
         # 如果无法获取，则使用环境变量或默认值
         specify_gpu_arch = (
-            self.py_env_configs.py_device_resource_config.specify_gpu_arch
+            self.py_env_configs.runtime_config.specify_gpu_arch
         )
         return "900" if specify_gpu_arch == "" else specify_gpu_arch
 

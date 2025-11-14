@@ -607,17 +607,6 @@ class AtomicWeight(WeightModule):
         ):
             return {self.name: raw_tensor}
 
-        tp_split_emb_and_lm_head = load_config.tp_split_emb_and_lm_head
-
-        if not tp_split_emb_and_lm_head and self.name in [
-            W.lm_head,
-            W.lm_head_b,
-            W.embedding,
-            W.positional_embedding,
-            W.token_type_embedding,
-        ]:
-            return {self.name: raw_tensor}
-
         split_func = self._get_split_func()
 
         ts = (

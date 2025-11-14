@@ -4,10 +4,10 @@
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/core/BufferHelper.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 
-using namespace rtp_llm;
+namespace rtp_llm {
 
-namespace unittest {
 class MlaAttnLayerOp: public torch::jit::CustomClassHolder {
 public:
     MlaAttnLayerOp(int64_t head_num,
@@ -27,7 +27,7 @@ public:
                              torch::Tensor              kvcache_block_id,
                              int64_t                    page_size);
     void             reset_head_num(int64_t head_num);
-    AttentionConfigs attn_configs = AttentionConfigs({});
+    AttentionConfigs attn_configs;
     DeviceBase*      device_;
 };
 MlaAttnLayerOp::MlaAttnLayerOp(int64_t head_num,
@@ -39,30 +39,52 @@ MlaAttnLayerOp::MlaAttnLayerOp(int64_t head_num,
                                int64_t hidden_size,
                                double  softmax_extra_scale) {
     rtp_llm::initLogger();
-    GptInitParameter gpt_init_parameter;
-    gpt_init_parameter.update_from_env_for_test();
-    rtp_llm::DeviceFactory::initDevices(gpt_init_parameter);
+
+    ParallelismConfig parallelism_config;
+    ModelConfig model_config;
+    EPLBConfig eplb_config;
+    FMHAConfig fmha_config;
+    DeviceResourceConfig device_resource_config;
+    MoeConfig moe_config;
+    SpeculativeExecutionConfig sp_config;
+    MiscellaneousConfig misc_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    HWKernelConfig hw_kernel_config;
+    ConcurrencyConfig concurrency_config;
+    FfnDisAggregateConfig ffn_disaggregate_config;
+    RuntimeConfig runtime_config;
+
+    rtp_llm::DeviceFactory::initDevices(
+        parallelism_config,
+        model_config,
+        eplb_config,
+        fmha_config,
+        device_resource_config,
+        moe_config,
+        sp_config,
+        misc_config,
+        profiling_debug_logging_config,
+        hw_kernel_config,
+        concurrency_config,
+        ffn_disaggregate_config,
+        runtime_config);
     device_      = rtp_llm::DeviceFactory::getDefaultDevice();
-    attn_configs = AttentionConfigs({
-        static_cast<size_t>(head_num),
-        static_cast<size_t>(head_num),
-        static_cast<size_t>(nope_head_dim + rope_head_dim),
-        static_cast<size_t>(hidden_size),
-        RopeConfig(),
-        64,
-        AttentionMaskType::causalMask,
-        1.0f,
-        true,
-        false,
-        true,
-        static_cast<size_t>(q_lora_rank),
-        static_cast<size_t>(kv_lora_rank),
-        static_cast<size_t>(nope_head_dim),
-        static_cast<size_t>(rope_head_dim),
-        static_cast<size_t>(v_head_dim),
-        static_cast<float>(softmax_extra_scale),
-        KvCacheDataType::BASE,
-    });
+    attn_configs.head_num = static_cast<size_t>(head_num);
+    attn_configs.kv_head_num = static_cast<size_t>(head_num);
+    attn_configs.size_per_head = static_cast<size_t>(nope_head_dim + rope_head_dim);
+    attn_configs.tokens_per_block = 64;
+    attn_configs.q_scaling = 1.0f;
+    attn_configs.fuse_qkv_add_bias = true;
+    attn_configs.use_logn_attn = false;
+    attn_configs.is_causal = true;
+    attn_configs.use_mla = true;
+    attn_configs.q_lora_rank = static_cast<size_t>(q_lora_rank);
+    attn_configs.kv_lora_rank = static_cast<size_t>(kv_lora_rank);
+    attn_configs.nope_head_dim = static_cast<size_t>(nope_head_dim);
+    attn_configs.rope_head_dim = static_cast<size_t>(rope_head_dim);
+    attn_configs.v_head_dim = static_cast<size_t>(v_head_dim);
+    attn_configs.softmax_extra_scale = static_cast<float>(softmax_extra_scale);
+    attn_configs.kv_cache_dtype = KvCacheDataType::BASE;
 }
 torch::Tensor MlaAttnLayerOp::forward(torch::Tensor              hidden,
                                       std::vector<torch::Tensor> weights,
@@ -162,9 +184,12 @@ void MlaAttnLayerOp::reset_head_num(int64_t head_num) {
     attn_configs.head_num    = static_cast<size_t>(head_num);
     attn_configs.kv_head_num = static_cast<size_t>(head_num);
 }
-}  // namespace unittest
-static auto MlaAttnLayerOp =
-    torch::jit::class_<unittest::MlaAttnLayerOp>("unittest", "MlaAttnLayerOp")
+
+static auto _op_ =
+    torch::jit::class_<MlaAttnLayerOp>("unittest", "MlaAttnLayerOp")
         .def(torch::jit::init<int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, double>())
-        .def("forward", &unittest::MlaAttnLayerOp::forward)
-        .def("reset_head_num", &unittest::MlaAttnLayerOp::reset_head_num);
+        .def("forward", &MlaAttnLayerOp::forward)
+        .def("reset_head_num", &MlaAttnLayerOp::reset_head_num);
+
+}
+

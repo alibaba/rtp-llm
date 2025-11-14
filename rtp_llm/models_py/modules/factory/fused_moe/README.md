@@ -155,7 +155,7 @@ Reusable utility class (`utils/condition_checker.py`) for condition checking wit
 ```python
 class MyRouter(FusedMoeDataRouter):
     @classmethod
-    def check_conditions(cls, checker: ConditionChecker, config: GptInitModelParameters) -> None:
+    def check_conditions(cls, checker: ConditionChecker, config: MoEConfigAdapter) -> None:
         """Check if this router can handle the configuration"""
         resolver = MoeConfigResolver()
         checker.check(resolver.is_ep_enabled(config))
@@ -194,7 +194,7 @@ class MyRouter(FusedMoeDataRouter):
 ```python
 # In rtp_llm/models_py/modules/cuda/moe/routers/my_router.py
 from typing import Any
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import FusedMoeDataRouter
 from rtp_llm.models_py.modules.factory.fused_moe.defs.type import RouterType
 
@@ -204,7 +204,7 @@ class MyRouter(FusedMoeDataRouter):
         return RouterType.DEEPEP_LOW_LATENCY
 
     @classmethod
-    def check_conditions(cls, checker: Any, config: GptInitModelParameters) -> None:
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         """Check if MyRouter can handle the configuration"""
         from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import MoeConfigResolver
         resolver = MoeConfigResolver()
@@ -212,7 +212,7 @@ class MyRouter(FusedMoeDataRouter):
         checker.check(resolver.is_ep_enabled(config))
         checker.check(resolver.use_low_latency(config))
 
-    def __init__(self, config: GptInitModelParameters):
+    def __init__(self, config: ModelConfig):
         # Implementation...
 ```
 
@@ -222,7 +222,7 @@ class MyRouter(FusedMoeDataRouter):
 # In rtp_llm/models_py/modules/cuda/moe/executors/my_executor.py
 from typing import Any, Dict
 import torch
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import FusedMoeExpertExecutor
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import FusedMoEQuantConfig
 from rtp_llm.models_py.modules.factory.fused_moe.defs.type import ExecutorType
@@ -233,7 +233,7 @@ class MyExecutor(FusedMoeExpertExecutor):
         return ExecutorType.CUTLASS_BATCHED_FP8
 
     @classmethod
-    def check_conditions(cls, checker: Any, config: GptInitModelParameters) -> None:
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         """Check if MyExecutor can handle the configuration"""
         from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import MoeConfigResolver
         resolver = MoeConfigResolver()
@@ -241,7 +241,7 @@ class MyExecutor(FusedMoeExpertExecutor):
         quant_method = resolver.get_quant_method(config)
         checker.check(quant_method == "MY_QUANT")
 
-    def __init__(self, config: GptInitModelParameters, weights: Dict[str, torch.Tensor]):
+    def __init__(self, config: ModelConfig, weights: Dict[str, torch.Tensor]):
         super().__init__(FusedMoEQuantConfig())
         # Implementation...
 ```
@@ -252,7 +252,7 @@ class MyExecutor(FusedMoeExpertExecutor):
 # In rtp_llm/models_py/modules/cuda/moe/strategy/my_quant.py
 from typing import Dict
 import torch
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models_py.modules.factory.fused_moe.defs.strategy_base import MoeStrategy
 from rtp_llm.models_py.modules.factory.fused_moe.defs.priority_attributes import StrategyAttributes
 
@@ -260,11 +260,11 @@ class CudaMyQuantStrategy(MoeStrategy):
     # No need to implement can_handle() or _check_conditions()!
     # Conditions are automatically checked via Router and Executor classes
 
-    def create_router(self, config: GptInitModelParameters):
+    def create_router(self, config: ModelConfig):
         from rtp_llm.models_py.modules.cuda.moe.routers.my_router import MyRouter
         return MyRouter(config)
 
-    def create_executor(self, config: GptInitModelParameters,
+    def create_executor(self, config: ModelConfig,
                        weights: Dict[str, torch.Tensor]):
         from rtp_llm.models_py.modules.cuda.moe.executors.my_executor import MyExecutor
         return MyExecutor(config, weights)

@@ -8,11 +8,11 @@ import traceback
 from collections import deque
 from enum import Enum
 from queue import Queue
-from typing import Any, Deque, Sequence
+from typing import Any, Deque, Optional, Sequence
 
 import torch
 
-from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.device import get_current_device
 from rtp_llm.eplb.eplb import rebalance_experts
 from rtp_llm.model_loader.load_config import LoadConfig
@@ -57,19 +57,29 @@ class ExpertBalancer:
         compute_dtype: torch.dtype,
         phy2log: Any,
         database: BaseDatabase,
-        py_env_configs: PyEnvConfigs,
+        model_config: Optional[ModelConfig] = None,
     ):
+        """
+        Initialize ExpertBalancer.
+        
+        Args:
+            weights_info: Model weight information
+            compute_dtype: Compute data type
+            phy2log: Physical to logical expert mapping
+            database: Database for loading weights
+            model_config: Optional ModelConfig (used to get eplb_config)
+        """
         self.database: BaseDatabase = database
         self._weights_info: ModelDeployWeightInfo = weights_info
         self._model_weight_info: ModelWeightInfo = (
             self._weights_info.create_model_weight_info(database)
         )
-        use_fp32 = py_env_configs.model_config.use_float32
-        if use_fp32:
-            compute_dtype = torch.float32
-
+        
         self._load_config: LoadConfig = self._weights_info.create_load_config(
-            compute_dtype, database, get_current_device()
+            compute_dtype=compute_dtype,
+            database=database,
+            phy2log=phy2log,
+            exported_device=get_current_device(),
         )
         self.num_layers = self._load_config.num_layers
         self.num_replicas = self._load_config.phy_exp_num
@@ -81,14 +91,23 @@ class ExpertBalancer:
 
         self.time_prefix = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         self.queue: Queue[int] = Queue()
-        select_layer_method = py_env_configs.py_eplb_config.balance_method
-        self.select_layer_method = SelectLayerMethod(select_layer_method)
+        
+        # Get balance_method from model_config.eplb_config
+        balance_method = "mix"  # default
+        if model_config is not None:
+            balance_method = model_config.eplb_config.balance_method
+        
+        self.select_layer_method = SelectLayerMethod(balance_method)
         self.phy2log = phy2log
         self.update_cnt = 0
 
-        window_size = py_env_configs.py_eplb_config.eplb_stats_window_size
+        # Get window_size from model_config.eplb_config
+        eplb_stats_window_size = 10  # default
+        if model_config is not None:
+            eplb_stats_window_size = model_config.eplb_config.eplb_stats_window_size
+        
         self.history_log_stats = HistoryStats(
-            window_size=window_size,
+            window_size=eplb_stats_window_size,
             shape=(self._load_config.num_layers, self._load_config.expert_num),
         )
 
@@ -100,7 +119,12 @@ class ExpertBalancer:
             dtype=torch.int32,
         )
 
-        self.force_repack = py_env_configs.py_eplb_config.eplb_force_repack == 1
+        # Get force_repack from model_config.eplb_config
+        eplb_force_repack = 0  # default
+        if model_config is not None:
+            eplb_force_repack = model_config.eplb_config.eplb_force_repack
+        
+        self.force_repack = eplb_force_repack == 1
 
     @torch.inference_mode()
     def get_balanced_layer(self, gpu_loads: torch.Tensor) -> int:

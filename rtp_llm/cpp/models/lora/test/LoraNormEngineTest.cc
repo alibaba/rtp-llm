@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 #include "rtp_llm/cpp/engine_base/WeightsConverter.h"
 #include "rtp_llm/cpp/devices/testing/TestBase.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 
 using namespace std;
 
@@ -15,24 +16,42 @@ namespace rtp_llm {
 class LoraNormalEngineTest: public DeviceTestBase {
 protected:
     EngineInitParams createMockEngineInitParams(DeviceBase* device) {
-        auto params                     = GptInitParameter();
-        params.head_num_                = 2;
-        params.size_per_head_           = 64;
-        params.num_layers_              = 2;
-        params.max_seq_len_             = 20;
-        params.vocab_size_              = 20;
-        params.hidden_size_             = 128;
-        params.head_num_kv_             = 2;
-        params.block_nums_              = 100;
-        params.reuse_cache_             = false;
-        params.max_generate_batch_size_ = 128;
-        params.max_context_batch_size_  = 128;
-        params.kv_cache_data_type_      = DataType::TYPE_FP16;
+        ModelConfig model_config;
+        model_config.attn_config.head_num = 2;
+        model_config.attn_config.size_per_head = 64;
+        model_config.num_layers              = 2;
+        model_config.max_seq_len             = 20;
+        model_config.vocab_size              = 20;
+        model_config.hidden_size             = 128;
+        model_config.attn_config.kv_head_num = 2;
+        model_config.attn_config.kv_cache_dtype = KvCacheDataType::BASE;
         const size_t inter_size         = 512;
-        params.inter_size_              = inter_size;
-        params.inter_padding_size_      = inter_size;
-        params.seq_size_per_block_      = 2;
-        params.reserve_runtime_mem_mb_  = 1024;
+        // inter_size is now calculated in ModelDeployWeightInfo, not in ModelConfig
+        model_config.attn_config.tokens_per_block = 2;
+        
+        RuntimeConfig runtime_config;
+        runtime_config.max_generate_batch_size = 128;
+        runtime_config.fifo_scheduler_config.max_context_batch_size  = 128;
+        runtime_config.reserve_runtime_mem_mb  = 1024;
+        
+        ParallelismConfig parallelism_config;
+        PDSepConfig pd_sep_config;
+        ConcurrencyConfig concurrency_config;
+        FMHAConfig fmha_config;
+        KVCacheConfig kv_cache_config;
+        kv_cache_config.test_block_num              = 100;
+        kv_cache_config.reuse_cache             = false;
+        ProfilingDebugLoggingConfig profiling_debug_logging_config;
+        HWKernelConfig hw_kernel_config;
+        DeviceResourceConfig device_resource_config;
+        MoeConfig moe_config;
+        ModelSpecificConfig model_specific_config;
+        SpeculativeExecutionConfig sp_config;
+        CacheStoreConfig cache_store_config;
+        MiscellaneousConfig misc_config;
+        ArpcConfig arpc_config;
+        GrpcConfig grpc_config;
+        FfnDisAggregateConfig ffn_disaggregate_config;
         typedef half            T;
         const rtp_llm::DataType data_type    = getTensorType<T>();
         auto                    mem_type     = rtp_llm::MemoryType::MEMORY_GPU;
@@ -46,7 +65,7 @@ protected:
         global_weights.emplace(W::embedding, std::move(word_embeddings));
         global_weights.emplace(W::lm_head, std::move(lm_head));
         std::vector<std::unordered_map<std::string, rtp_llm::ConstBufferPtr>> layer_weights;
-        for (int i = 0; i < params.num_layers_; ++i) {
+        for (int i = 0; i < model_config.num_layers; ++i) {
             auto pre_layernorm_weights =
                 make_unique<const rtp_llm::Buffer>(mem_type, data_type, vector<size_t>{hidden_units}, data->data());
             auto pre_layernorm_beta =
@@ -99,9 +118,30 @@ protected:
             layer_weights.push_back(std::move(weights));
         }
         auto                      convert = rtp_llm::WeightsConverter(false);
+        rtp_llm::MMModelConfig mm_model_config;
+        model_config.mm_model_config = mm_model_config;
+        rtp_llm::VitConfig vit_config;
         rtp_llm::EngineInitParams rtp_llm_params(
             0,
-            params,
+            model_config,
+            parallelism_config,
+            runtime_config,
+            pd_sep_config,
+            concurrency_config,
+            fmha_config,
+            kv_cache_config,
+            profiling_debug_logging_config,
+            hw_kernel_config,
+            device_resource_config,
+            moe_config,
+            model_specific_config,
+            sp_config,
+            cache_store_config,
+            misc_config,
+            arpc_config,
+            grpc_config,
+            ffn_disaggregate_config,
+            vit_config,
             std::move(*convert.createGptWeights(std::make_unique<ConstBufferPtrMaps>(layer_weights),
                                                 std::make_unique<ConstBufferPtrMap>(global_weights))));
         return rtp_llm_params;

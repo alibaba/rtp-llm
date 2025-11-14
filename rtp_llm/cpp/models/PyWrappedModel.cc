@@ -199,7 +199,7 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
     } else {
         hidden_states =
             device_->allocateBuffer({description_.data_type,
-                                     {inputs.combo_tokens->shape()[0], description_.attention_conf.hidden_size},
+                                     {inputs.combo_tokens->shape()[0], description_.attention_conf.head_num * description_.attention_conf.size_per_head},
                                      AllocationType::DEVICE});
         int offset = 0;
         for (int i = 0; i < py_model_outputs.size(); i++) {

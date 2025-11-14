@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/devices/testing/TestBase.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 
 using namespace std;
 
@@ -12,9 +13,9 @@ namespace rtp_llm {
 
 class GenerateStreamBuilder {
 public:
-    GenerateStreamBuilder(rtp_llm::GptInitParameter params):
-        params_(params), device_(rtp_llm::DeviceFactory::getDefaultDevice()) {
-        params_.max_seq_len_ = 2048;
+    GenerateStreamBuilder():
+        device_(rtp_llm::DeviceFactory::getDefaultDevice()) {
+        model_config_.max_seq_len = 2048;
     }
 
     CacheConfig init_config() {
@@ -28,7 +29,7 @@ public:
         ResourceContext                 resource_context;
         generate_input->generate_config = generate_config;
         generate_input->input_ids       = rtp_llm::vector2Buffer(input_ids);
-        return std::make_shared<NormalGenerateStream>(generate_input, params_, resource_context, nullptr);
+        return std::make_shared<NormalGenerateStream>(generate_input, model_config_, runtime_config_, resource_context, nullptr);
     };
 
     GenerateStreamPtr createComplexContextStream(std::vector<int> input_ids) {
@@ -45,9 +46,10 @@ public:
         generate_config->num_return_sequences = 2;
         generate_input->input_ids             = rtp_llm::vector2Buffer(input_ids);
         generate_input->generate_config       = generate_config;
-        rtp_llm::GptInitParameter params;
-        params.max_seq_len_ = 2048;
-        auto stream         = std::make_shared<NormalGenerateStream>(generate_input, params, resource_context, nullptr);
+        ModelConfig model_config;
+        RuntimeConfig runtime_config;
+        model_config.max_seq_len = 2048;
+        auto stream         = std::make_shared<NormalGenerateStream>(generate_input, model_config, runtime_config, resource_context, nullptr);
 
         return stream;
     }
@@ -58,7 +60,7 @@ public:
         ResourceContext                 resource_context;
         generate_input->generate_config = generate_config;
         generate_input->input_ids       = rtp_llm::vector2Buffer(input_ids);
-        auto stream_ptr = std::make_shared<NormalGenerateStream>(generate_input, params_, resource_context, nullptr);
+        auto stream_ptr = std::make_shared<NormalGenerateStream>(generate_input, model_config_, runtime_config_, resource_context, nullptr);
         stream_ptr->setIsContextStream(false);
         auto new_tokens_ptr = rtp_llm::vector2Buffer(new_token_ids);
         device_->copy(
@@ -69,7 +71,8 @@ public:
     };
 
 private:
-    rtp_llm::GptInitParameter params_;
+    ModelConfig model_config_;
+    RuntimeConfig runtime_config_;
     rtp_llm::DeviceBase*      device_;
 };
 
@@ -78,15 +81,13 @@ protected:
 };
 
 TEST_F(GenerateStreamTest, testConstruct) {
-    rtp_llm::GptInitParameter params;
-    auto                      builder = GenerateStreamBuilder(params);
+    auto                      builder = GenerateStreamBuilder();
     auto                      stream1 = builder.createContextStream({{1, 2, 3, 4, 5}, {}});
     auto                      stream2 = builder.createDecoderStream({1, 2, 3, 4, 5}, {1, 2, 3});
 }
 
 TEST_F(GenerateStreamTest, testConstructCacheKey) {
-    rtp_llm::GptInitParameter params;
-    auto                      builder    = GenerateStreamBuilder(params);
+    auto                      builder    = GenerateStreamBuilder();
     auto                      stream1    = builder.createComplexContextStream({{1, 2, 3, 4, 5}, {}});
     auto&                     cache_key1 = stream1->cacheKeys(0);
     auto&                     cache_key2 = stream1->cacheKeys(1);
@@ -117,8 +118,7 @@ TEST_F(GenerateStreamTest, testConstructCacheKey) {
 }
 
 TEST_F(GenerateStreamTest, testGenerateStreamReuseCacheMethod) {
-    rtp_llm::GptInitParameter params;
-    auto                      builder = GenerateStreamBuilder(params);
+    auto                      builder = GenerateStreamBuilder();
     auto                      stream  = builder.createContextStream({1, 2, 3, 4, 5, 6});
 
     // default true
@@ -134,8 +134,7 @@ TEST_F(GenerateStreamTest, testGenerateStreamReuseCacheMethod) {
 }
 
 TEST_F(GenerateStreamTest, testGenerateStreamEnable3FSMethod) {
-    rtp_llm::GptInitParameter params;
-    auto                      builder = GenerateStreamBuilder(params);
+    auto                      builder = GenerateStreamBuilder();
     auto                      stream  = builder.createContextStream({1, 2, 3, 4, 5, 6});
 
     // default true

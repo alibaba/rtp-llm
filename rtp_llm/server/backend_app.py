@@ -17,8 +17,8 @@ from typing_extensions import override
 from uvicorn import Config, Server
 from uvicorn.loops.auto import auto_loop_setup
 
-from rtp_llm.config.py_config_modules import PyEnvConfigs, StaticConfig
-from rtp_llm.config.uvicorn_config import UVICORN_LOGGING_CONFIG
+from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.config.uvicorn_config import get_uvicorn_logging_config
 from rtp_llm.distribute.worker_info import WorkerInfo
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.server.backend_server import BackendServer
@@ -29,8 +29,6 @@ from rtp_llm.utils.version_info import VersionInfo
 
 # make buffer larger to avoid throw exception "RemoteProtocolError Receive buffer too long"
 MAX_INCOMPLETE_EVENT_SIZE = 1024 * 1024
-
-StreamObjectType = Union[Dict[str, Any], BaseModel]
 
 active_requests = AtomicCounter()
 server_shutdown = False
@@ -55,7 +53,7 @@ class GracefulShutdownServer(Server):
 
 
 class BackendApp(object):
-    def __init__(self, py_env_configs: PyEnvConfigs = StaticConfig):
+    def __init__(self, py_env_configs: PyEnvConfigs):
         self.py_env_configs = py_env_configs
         self.backend_server = BackendServer(py_env_configs)
 
@@ -78,7 +76,7 @@ class BackendApp(object):
             host="0.0.0.0",
             loop=loop,
             port=worker_info.backend_server_port,
-            log_config=UVICORN_LOGGING_CONFIG,
+            log_config=get_uvicorn_logging_config(),
             timeout_keep_alive=timeout_keep_alive,
             h11_max_incomplete_event_size=MAX_INCOMPLETE_EVENT_SIZE,
         )

@@ -5,7 +5,6 @@ from typing import Optional
 
 import torch
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import scaled_fp8_per_tensor_quant
 from rtp_llm.models_py.modules.factory.linear import LinearBase
 
@@ -18,15 +17,12 @@ class CudaFp8PerTensorLinear(LinearBase):
     @classmethod
     def can_handle(
         cls,
-        config: Optional[GptInitModelParameters],
+        quant_config: object,
         weight: torch.Tensor,
         weight_scales: Optional[torch.Tensor],
     ) -> bool:
         """Handle FP8_PER_TENSOR_COMPRESSED and FP8_DYNAMIC_PER_TENSOR"""
-        if weight_scales is None or config is None:
-            return False
-
-        if not hasattr(config, "quant_config") or config.quant_config is None:
+        if weight_scales is None or quant_config is None:
             return False
 
         # Check if weight is FP8 format
@@ -34,14 +30,11 @@ class CudaFp8PerTensorLinear(LinearBase):
             return False
 
         # Check quantization method
-        if hasattr(config.quant_config, "get_method"):
-            quant_method = config.quant_config.get_method()
-            return quant_method in [
-                "FP8_PER_TENSOR_COMPRESSED",
-                "FP8_DYNAMIC_PER_TENSOR",
-            ]
-
-        return False
+        quant_method = quant_config.get_method()
+        return quant_method in [
+            "FP8_PER_TENSOR_COMPRESSED",
+            "FP8_DYNAMIC_PER_TENSOR",
+        ]
 
     def __init__(
         self,
@@ -49,9 +42,9 @@ class CudaFp8PerTensorLinear(LinearBase):
         weight_scales: Optional[torch.Tensor] = None,
         input_scales: Optional[torch.Tensor] = None,
         bias: Optional[torch.Tensor] = None,
-        config: Optional[GptInitModelParameters] = None,
+        quant_config: object = None,
     ):
-        super().__init__(weight, weight_scales, input_scales, bias, config)
+        super().__init__(weight, weight_scales, input_scales, bias, quant_config)
         self.weight = weight.T
         self.weight_scale = weight_scales
         self.input_scale = input_scales

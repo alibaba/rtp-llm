@@ -12,7 +12,6 @@ class AttnConfig(BaseModel):
     size_per_head: int = -1
     head_num: int = -1
     head_num_kv: int = -1
-    use_fp8_kv_cache: bool = False
     need_post_ln: bool = False
 
 

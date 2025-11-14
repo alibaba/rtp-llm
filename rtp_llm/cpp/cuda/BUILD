@@ -133,6 +133,8 @@ cc_library(
         "//rtp_llm/cpp/core:types",
         "//rtp_llm/cpp/core:types_hdr",
         "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/config:model_config",
+        "//rtp_llm/cpp/config:special_tokens",
         "//rtp_llm/cpp/kernels:kernels_tensor_ops",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",

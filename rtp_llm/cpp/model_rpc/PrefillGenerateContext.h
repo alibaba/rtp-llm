@@ -62,10 +62,9 @@ public:
                            std::shared_ptr<RpcServerRuntimeMeta> meta):
         GenerateContext(rpc_context.requestID(), timeout_ms, server_context, metrics_reporter, meta),
         resource(resource),
-        rpc_context(rpc_context) {
-        for (auto& worker : resource->workers) {
-            prefill_worker_cache_store_addrs.push_back(worker);
-        }
+        rpc_context(rpc_context)
+    {
+        prefill_worker_cache_store_addrs = resource->workers;
     }
     ~PrefillGenerateContext();
     void         reset() override;

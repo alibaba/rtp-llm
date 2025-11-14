@@ -3,7 +3,7 @@ from typing import Any, Optional
 
 from torch import Tensor, nn
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.symm_mem import get_symm_mem_communicator
 from rtp_llm.ops.compute_ops import (
@@ -13,33 +13,41 @@ from rtp_llm.ops.compute_ops import (
     PyModelInitResources,
     PyModelInputs,
     PyModelOutputs,
-    get_device,
 )
+from rtp_llm.ops.compute_ops import DeviceType, KVCache, get_device
+from rtp_llm.ops import DeviceResourceConfig
 from rtp_llm.utils.model_weight import W
 
 
 class GptModelBase(nn.Module):
-    def __init__(self, config: GptInitModelParameters, weight: ModelWeights) -> None:
+    def __init__(
+        self, 
+        config: ModelConfig, 
+        parallelism_config,
+        weight: ModelWeights,
+        max_generate_batch_size: int,
+        fmha_config=None,  # Optional FMHAConfig
+        py_hw_kernel_config=None,  # Optional HWKernelConfig
+        device_resource_config: Optional[DeviceResourceConfig] = None,  # Optional DeviceResourceConfig
+    ) -> None:
         super().__init__()
         self.config = config
+        self.parallelism_config = parallelism_config
         self.weight = weight
-
-        self.layer_num: int = config.layer_num
+        self.fmha_config = fmha_config
+        self.py_hw_kernel_config = py_hw_kernel_config
+        self.micro_batch_size: int = (
+            1 if device_resource_config and device_resource_config.enable_layer_micro_batch == 0 else 2
+        )
+        self.layer_num: int = config.num_layers
         self.vocab_size: int = config.vocab_size
 
         self.kv_cache: Optional[KVCache] = None
         self.device_type: DeviceType = get_device().get_device_type()
 
-        self.micro_batch_size: int = (
-            1 if config.device_resource_config.enable_layer_micro_batch == 0 else 2
-        )
         ## (batch_size -> fmha_params)
         self.params_dict: dict[int, Any] = {}
 
-        logging.info(
-            f"GptModelBase initialized with layer_num={self.layer_num}, "
-            f"vocab_size={self.vocab_size}, device_type={self.device_type}"
-        )
 
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         self.kv_cache = init_resource.kv_cache

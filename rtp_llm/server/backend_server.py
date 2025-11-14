@@ -1,7 +1,6 @@
 import asyncio
 import json
 import logging
-import os
 import threading
 import time
 import traceback
@@ -15,17 +14,16 @@ from pydantic import BaseModel
 
 from rtp_llm.access_logger.access_logger import AccessLogger
 from rtp_llm.async_decoder_engine.base_engine import BaseEngine
+from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.py_config_modules import PyEnvConfigs
-from rtp_llm.config.task_type import TaskType
+from rtp_llm.config.log_config import get_log_path
+from rtp_llm.ops import TaskType, EngineScheduleInfo, KVCacheInfo, WorkerStatusInfo
 from rtp_llm.distribute.gang_server import GangServer
 from rtp_llm.distribute.worker_info import g_parallel_info
 from rtp_llm.lora.lora_manager import LoraManager
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.model_loader.weight_manager import WeightManager
-from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
-from rtp_llm.ops import EngineScheduleInfo, KVCacheInfo, WorkerStatusInfo
-from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.server.misc import format_exception
 from rtp_llm.server.worker_status import TaskInfo, WorkStatus
 from rtp_llm.structure.request_extractor import request_id_field_name
@@ -37,59 +35,83 @@ from rtp_llm.utils.fuser import _nfs_manager
 from rtp_llm.utils.time_util import Timer
 from rtp_llm.utils.version_info import VersionInfo
 
-StreamObjectType = Union[Dict[str, Any], BaseModel]
-
-USAGE_HEADER = "USAGE"
-
 
 class BackendServer(object):
     def __init__(self, py_env_configs: PyEnvConfigs):
-        if torch.cuda.is_available():
-            if (
-                "NCCL_P2P_DISABLE" not in os.environ
-                and "RTX" in torch.cuda.get_device_name(0)
-            ):
-                os.environ["NCCL_P2P_DISABLE"] = "1"
-        else:
-            os.environ["NCCL_P2P_DISABLE"] = "1"
-        self._access_logger = AccessLogger(
-            py_env_configs.server_config.rank_id,
-            py_env_configs.server_config.frontend_server_id
-        )
-        self._gang_server = GangServer(py_env_configs)
+        self._access_logger = AccessLogger(get_log_path(),
+                                           py_env_configs.profiling_debug_logging_config.log_file_backup_count,
+                                           py_env_configs.server_config.rank_id,
+                                           py_env_configs.server_config.frontend_server_id)
+        self._gang_server = GangServer(py_env_configs.gang_config, py_env_configs.server_config)
         self._lora_manager = None
+        self._weight_manager = None
         self.thread_lock_ = threading.Lock()
         self._global_controller = get_global_controller()
         # just rank 0 report metric
         if g_parallel_info.world_rank == 0:
             kmonitor.init()
         self.engine: Optional[BaseEngine] = None
-        self._embedding_endpoint = None
-        self.py_env_configs = py_env_configs
-        self.dp_rank = g_parallel_info.dp_rank
-        self.dp_size = g_parallel_info.dp_size
-        self.tp_size = g_parallel_info.tp_size
-        self._weight_manager = None
+        self._role_type: str = "unknown"
 
     def start(self, py_env_configs: PyEnvConfigs):
         self._gang_server.start()
-        if py_env_configs.profiling_debug_config.debug_start_fake_process == 1:
+        if py_env_configs.profiling_debug_logging_config.debug_start_fake_process == 1:
             # for debug online
             logging.info("DEBUG_START_FAKE_PROCESS is set, start fake backend server")
-        else:
-            self.engine = ModelFactory.create_from_env(self._gang_server._gang_info)
-            logging.info(
-                "engine created successfully: self.engine.task_type=%s",
-                self.engine.task_type,
-            )
-            # Initialize endpoints based on task type
-            if self.engine and self.engine.task_type == TaskType.LANGUAGE_MODEL:
-                # For language models
-                self.backend_rpc_server_visitor = BackendRPCServerVisitor(
-                    self.engine.config
-                )
-                self._lora_manager = LoraManager(self.engine)
-                self._weight_manager = WeightManager(self.engine)
+            return
+
+        # Get gang_info from gang_server after start()
+        gang_info = self._gang_server._gang_info
+        
+        # Create and fully initialize EngineConfig from py_env_configs
+        engine_config = EngineConfig.create(py_env_configs, gang_info=gang_info)
+        
+        # Store role_type from engine_config
+        self._role_type = 'RoleType.' + engine_config.pd_sep_config.role_type.name
+        
+        # Create model configs (ModelConfig construction is handled in ModelFactory)
+        model_config = ModelFactory.create_model_config(
+            model_args=py_env_configs.model_args,
+            lora_config=py_env_configs.lora_config,
+            kv_cache_config=engine_config.kv_cache_config,
+            profiling_debug_logging_config=engine_config.profiling_debug_logging_config,
+            generate_env_config=py_env_configs.generate_env_config,
+            embedding_config=py_env_configs.embedding_config,
+            quantization_config=py_env_configs.quantization_config,
+            render_config=py_env_configs.render_config,
+            eplb_config=py_env_configs.eplb_config,
+        )
+        
+        # Update engine_config based on model_config
+        ModelFactory.update_engine_config_from_model_config(
+            engine_config=engine_config,
+            model_config=model_config,
+        )
+        
+        # Create propose model config if needed
+        propose_model_config = ModelFactory.create_propose_model_config(
+            engine_config=engine_config,
+            model_config=model_config,
+            model_args=py_env_configs.model_args,
+        )
+        
+        # Create engine using new API (returns BaseEngine, not AsyncModel)
+        # All metadata is already in model_config (including mm_model_config)
+        # vit_config is needed for multimodal models
+        self.engine = ModelFactory.from_model_configs(
+            model_config=model_config,
+            engine_config=engine_config,
+            gang_info=gang_info,
+            vit_config=py_env_configs.vit_config,
+            propose_model_config=propose_model_config,
+            merge_lora=py_env_configs.lora_config.merge_lora,
+        )
+
+        max_lora_model_size = engine_config.model_specific_config.max_lora_model_size
+        if model_config.task_type == TaskType.LANGUAGE_MODEL:
+            self._lora_manager = LoraManager(self.engine, max_lora_model_size=max_lora_model_size)
+            self._weight_manager = WeightManager(self.engine)
+
 
     def stop(self) -> None:
         if isinstance(self.engine, BaseEngine):
@@ -101,10 +123,6 @@ class BackendServer(object):
         if isinstance(self.engine, BaseEngine):
             return self.engine.ready()
         return True
-
-    @property
-    def role_type(self) -> str:
-        return self.engine.role_type if self.engine else "unknown"
 
     def _handle_exception(self, request: Dict[str, Any], e: BaseException):
         exception_json = format_exception(e)
@@ -168,7 +186,7 @@ class BackendServer(object):
             )
             engine_schedule_info = worker_status_info.engine_schedule_info
             worker_status: WorkStatus = WorkStatus(
-                role=self.role_type,
+                role=self._role_type,
                 running_task_info=[
                     TaskInfo(
                         **{

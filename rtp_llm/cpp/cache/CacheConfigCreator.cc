@@ -4,51 +4,56 @@
 
 namespace rtp_llm {
 
-CacheConfig CacheConfigCreator::createBasicConfig(const rtp_llm::GptInitParameter& param, bool is_mtp) {
-    int        local_head_num_kv = (param.head_num_kv_ > 1) ? param.head_num_kv_ / param.tp_size_ : param.head_num_kv_;
+CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig& model_config,
+                                                  const ParallelismConfig& parallelism_config,
+                                                  bool is_mtp) {
+    int        local_head_num_kv = (model_config.attn_config.kv_head_num > 1) ? model_config.attn_config.kv_head_num / parallelism_config.tp_size : model_config.attn_config.kv_head_num;
     const auto device_prop       = rtp_llm::DeviceFactory::getDefaultDevice()->getDeviceProperties();
-    auto       dtype             = param.kv_cache_data_type_;
+    auto       dtype             = model_config.attn_config.kv_cache_dtype == KvCacheDataType::INT8 ? rtp_llm::DataType::TYPE_INT8 : (model_config.attn_config.kv_cache_dtype == KvCacheDataType::FP8 ? rtp_llm::DataType::TYPE_FP8_E4M3 : model_config.data_type);
     if (device_prop.type == rtp_llm::DeviceType::ArmCpu) {
         // Arm attention operator support FP32 data type only
-        dtype = param.kv_cache_data_type_ == rtp_llm::DataType::TYPE_INT8 ? rtp_llm::TYPE_INT8 : rtp_llm::TYPE_FP32;
+        dtype = model_config.attn_config.kv_cache_dtype == KvCacheDataType::INT8 ? rtp_llm::TYPE_INT8 : rtp_llm::TYPE_FP32;
     }
-    auto layer_num = param.num_layers_;
+    auto layer_num = model_config.num_layers;
     if (is_mtp) {
         layer_num = 1;
     }
 
-    if (param.use_mla_ && param.mla_ops_type_ != rtp_llm::MlaOpsType::MHA) {
-        return CacheConfig(MlaCacheParam{(uint)param.num_layers_,
+    if (model_config.attn_config.use_mla && model_config.mla_ops_type != rtp_llm::MlaOpsType::MHA) {
+        return CacheConfig(MlaCacheParam{(uint)model_config.num_layers,
                                          (uint)0,
-                                         (uint)(param.kv_lora_rank_),
-                                         (uint)(param.rope_head_dim_),
-                                         (uint)param.seq_size_per_block_,
+                                         (uint)model_config.attn_config.kv_lora_rank,
+                                         (uint)model_config.attn_config.rope_head_dim,
+                                         (uint)model_config.attn_config.tokens_per_block,
                                          dtype});
     }
 
     return CacheConfig(KVCacheParam{(uint)layer_num,
                                     (uint)0,
                                     (uint)local_head_num_kv,
-                                    (uint)param.size_per_head_,
-                                    (uint)param.seq_size_per_block_,
+                                    (uint)model_config.attn_config.size_per_head,
+                                    (uint)model_config.attn_config.tokens_per_block,
                                     dtype});
 }
 
-size_t CacheConfigCreator::getDefaultRuntimeMemorySize(const rtp_llm::GptInitParameter& params) {
-    auto reserve_runtime_mem_bytes = params.reserve_runtime_mem_mb_ * 1024 * 1024;
-    RTP_LLM_LOG_INFO("GptInitParameter has reserve_runtime_mem_mb_=%ld", params.reserve_runtime_mem_mb_);
+size_t CacheConfigCreator::getDefaultRuntimeMemorySize(const RuntimeConfig& runtime_config,
+                                                       const ParallelismConfig& parallelism_config,
+                                                       const ModelConfig& model_config,
+                                                       const std::optional<SpeculativeExecutionConfig>& sp_config) {
+    auto reserve_runtime_mem_bytes = runtime_config.reserve_runtime_mem_mb * 1024 * 1024;
+    RTP_LLM_LOG_INFO("RuntimeConfig has reserve_runtime_mem_mb=%ld", runtime_config.reserve_runtime_mem_mb);
 
-    const auto minimal_runtime_bytes = 256L * 1024 * 1024 * std::max(4, 8 / (int)params.tp_size_);
+    const auto minimal_runtime_bytes = 256L * 1024 * 1024 * std::max(4, 8 / (int)parallelism_config.tp_size);
     if (reserve_runtime_mem_bytes < minimal_runtime_bytes) {
         RTP_LLM_LOG_INFO("tp_size %d needs at least %d MiB memory for runtime by default, "
                          "but only %ld MiB reserved memory set by config. adjust to minimal value.",
-                         params.tp_size_,
+                         parallelism_config.tp_size,
                          minimal_runtime_bytes / 1024 / 1024,
                          reserve_runtime_mem_bytes / 1024 / 1024);
         reserve_runtime_mem_bytes = minimal_runtime_bytes;
     }
 
-    if (params.is_multimodal_) {
+    if (model_config.mm_model_config.is_multimodal) {
         const auto minimal_runtime_required = 2L * 1024 * 1024 * 1024;  // 2 GiB
         if (reserve_runtime_mem_bytes < minimal_runtime_required) {
             reserve_runtime_mem_bytes = minimal_runtime_required;
@@ -59,7 +64,7 @@ size_t CacheConfigCreator::getDefaultRuntimeMemorySize(const rtp_llm::GptInitPar
         }
     }
 
-    if (params.enable_speculative_decoding_) {
+    if (sp_config && sp_config->type != SP_TYPE_NONE) {
         const auto minimal_runtime_required = 2L * 1024 * 1024 * 1024;  // 2 GiB
         if (reserve_runtime_mem_bytes < minimal_runtime_required) {
             reserve_runtime_mem_bytes = minimal_runtime_required;
@@ -73,16 +78,23 @@ size_t CacheConfigCreator::getDefaultRuntimeMemorySize(const rtp_llm::GptInitPar
     return reserve_runtime_mem_bytes;
 }
 
-size_t CacheConfigCreator::getKVCacheMemorySize(const rtp_llm::GptInitParameter&   params,
-                                                const std::optional<WarmUpResult>& warm_up_result) {
+size_t CacheConfigCreator::getKVCacheMemorySize(const RuntimeConfig& runtime_config,
+                                                const KVCacheConfig& kv_cache_config,
+                                                const ModelConfig& model_config,
+                                                const ParallelismConfig& parallelism_config,
+                                                const std::optional<WarmUpResult>& warm_up_result,
+                                                const std::optional<SpeculativeExecutionConfig>& sp_config) {
     const auto device                       = rtp_llm::DeviceFactory::getDefaultDevice();
     size_t     device_reserved_memory_bytes = device->getDeviceStatus().device_memory_status.preserved_bytes;
     size_t     runtime_required_bytes       = 0;
 
-    if (params.kv_cache_mem_mb_ > 0) {
-        RTP_LLM_LOG_INFO("GptInitParameter explicitly specified kv cache memory size %ld MiB", params.kv_cache_mem_mb_);
-        return params.kv_cache_mem_mb_ * 1024 * 1024;
+    if (kv_cache_config.kv_cache_mem_mb > 0) {
+        RTP_LLM_LOG_INFO("KVCacheConfig explicitly specified kv cache memory size %ld MiB", kv_cache_config.kv_cache_mem_mb);
+        return kv_cache_config.kv_cache_mem_mb * 1024 * 1024;
     }
+
+    // Unified call to getDefaultRuntimeMemorySize
+    size_t env_runtime_required_bytes = getDefaultRuntimeMemorySize(runtime_config, parallelism_config, model_config, sp_config);
 
     if (warm_up_result) {
         if (device_reserved_memory_bytes != warm_up_result->device_reserved_bytes) {
@@ -94,8 +106,7 @@ size_t CacheConfigCreator::getKVCacheMemorySize(const rtp_llm::GptInitParameter&
                 std::min(device_reserved_memory_bytes, warm_up_result->device_reserved_bytes);
         }
 
-        size_t env_runtime_required_bytes = getDefaultRuntimeMemorySize(params);
-        runtime_required_bytes            = std::max(env_runtime_required_bytes, warm_up_result->max_used_memory);
+        runtime_required_bytes = std::max(env_runtime_required_bytes, warm_up_result->max_used_memory);
 
         RTP_LLM_LOG_INFO(
             "devices reserved %ld MiB memory, warm up consumed %ld MiB max memory, env runtime memory %ld MiB, final runtime memory %ld MiB",
@@ -104,13 +115,13 @@ size_t CacheConfigCreator::getKVCacheMemorySize(const rtp_llm::GptInitParameter&
             env_runtime_required_bytes / 1024 / 1024,
             runtime_required_bytes / 1024 / 1024);
     } else {
-        runtime_required_bytes = getDefaultRuntimeMemorySize(params);
+        runtime_required_bytes = env_runtime_required_bytes;
         RTP_LLM_LOG_INFO("warm up result not available, use default runtime memory size %ld MiB",
                          runtime_required_bytes / 1024 / 1024);
     }
 
     size_t sample_need_mem =
-        (size_t)params.max_generate_batch_size_ * params.vocab_size_ * 4 * 8;  // just estimated value
+        (size_t)runtime_config.max_generate_batch_size * model_config.vocab_size * 4 * 8;  // just estimated value
     RTP_LLM_LOG_INFO("sampler needs %ld MiB memory, model runtime needs %ld MiB memory, take max value.",
                      sample_need_mem / 1024 / 1024,
                      runtime_required_bytes / 1024 / 1024);
@@ -126,16 +137,20 @@ size_t CacheConfigCreator::getKVCacheMemorySize(const rtp_llm::GptInitParameter&
     return kv_cache_mem_size;
 }
 
-CacheConfig CacheConfigCreator::createConfig(const rtp_llm::GptInitParameter&   param,
-                                             const std::optional<WarmUpResult>& warm_up_result) {
-    CacheConfig config     = CacheConfigCreator::createBasicConfig(param);
+CacheConfig CacheConfigCreator::createConfig(const ModelConfig& model_config,
+                                             const ParallelismConfig& parallelism_config,
+                                             const RuntimeConfig& runtime_config,
+                                             const KVCacheConfig& kv_cache_config,
+                                             const std::optional<WarmUpResult>& warm_up_result,
+                                             const std::optional<SpeculativeExecutionConfig>& sp_config) {
+    CacheConfig config     = CacheConfigCreator::createBasicConfig(model_config, parallelism_config);
     uint32_t    block_nums = 0;
 
-    if (param.block_nums_ > 0) {
-        RTP_LLM_LOG_INFO("GptInitParameter explicitly specified kv cache block num %d", param.block_nums_);
-        block_nums = param.block_nums_;
+    if (kv_cache_config.test_block_num > 0) {
+        RTP_LLM_LOG_INFO("KVCacheConfig explicitly specified kv cache block num %d", kv_cache_config.test_block_num);
+        block_nums = kv_cache_config.test_block_num;
     } else {
-        const auto kv_cache_mem_size = getKVCacheMemorySize(param, warm_up_result);
+        const auto kv_cache_mem_size = getKVCacheMemorySize(runtime_config, kv_cache_config, model_config, parallelism_config, warm_up_result, sp_config);
         block_nums                   = kv_cache_mem_size / config.block_size;
     }
     RTP_LLM_CHECK_WITH_INFO(block_nums > 0,
@@ -146,32 +161,36 @@ CacheConfig CacheConfigCreator::createConfig(const rtp_llm::GptInitParameter&   
     const auto kv_cache_seq_len = block_nums * config.seq_size_per_block;
     config.block_nums           = block_nums;
     RTP_LLM_LOG_INFO("kv cache block nums is %u, allows storing %ld tokens", block_nums, kv_cache_seq_len);
-    if (kv_cache_seq_len < param.max_seq_len_) {
+    if (kv_cache_seq_len < model_config.max_seq_len) {
         RTP_LLM_LOG_WARNING("kv cache block nums %u can only store %ld tokens, less than max_seq_len %ld, "
                             "this is dangerous, consider decrease max_seq_len",
                             block_nums,
                             kv_cache_seq_len,
-                            param.max_seq_len_);
+                            model_config.max_seq_len);
     }
     return config;
 }
 
 std::tuple<CacheConfig, CacheConfig>
-CacheConfigCreator::createSpConfig(const rtp_llm::GptInitParameter&   score_param,
-                                   const rtp_llm::GptInitParameter&   propose_param,
+CacheConfigCreator::createSpConfig(const ModelConfig& score_model_config,
+                                   const ModelConfig& propose_model_config,
+                                   const ParallelismConfig& parallelism_config,
+                                   const RuntimeConfig& runtime_config,
+                                   const KVCacheConfig& kv_cache_config,
+                                   const SpeculativeExecutionConfig& sp_config,
                                    const std::optional<WarmUpResult>& warm_up_result,
-                                   bool                               is_mtp   = false,
-                                   bool                               is_eagle = false) {
-    CacheConfig score_config = CacheConfigCreator::createBasicConfig(score_param);
+                                   bool is_mtp,
+                                   bool is_eagle) {
+    CacheConfig score_config = CacheConfigCreator::createBasicConfig(score_model_config, parallelism_config);
 
-    CacheConfig propose_config = CacheConfigCreator::createBasicConfig(propose_param, is_mtp);
+    CacheConfig propose_config = CacheConfigCreator::createBasicConfig(propose_model_config, parallelism_config, is_mtp);
     size_t      block_nums     = 0;
-    if (score_param.block_nums_ > 0) {
-        block_nums = score_param.block_nums_;
+    if (kv_cache_config.test_block_num > 0) {
+        block_nums = kv_cache_config.test_block_num;
     } else {
-        const auto kv_cache_mem_size = CacheConfigCreator::getKVCacheMemorySize(score_param, warm_up_result);
+        const auto kv_cache_mem_size = CacheConfigCreator::getKVCacheMemorySize(runtime_config, kv_cache_config, score_model_config, parallelism_config, warm_up_result, sp_config);
         if (is_mtp) {
-            auto cache_num = propose_param.gen_num_per_circle_;
+            auto cache_num = sp_config.gen_num_per_cycle;
             if (is_eagle) {
                 cache_num = 1;
             }

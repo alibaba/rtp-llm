@@ -16,8 +16,8 @@ from typing_extensions import override
 from uvicorn import Config, Server
 from uvicorn.loops.auto import auto_loop_setup
 
-from rtp_llm.config.py_config_modules import PyEnvConfigs, StaticConfig
-from rtp_llm.config.uvicorn_config import UVICORN_LOGGING_CONFIG
+from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.config.uvicorn_config import get_uvicorn_logging_config
 from rtp_llm.distribute.worker_info import WorkerInfo, g_worker_info
 from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
 from rtp_llm.frontend.frontend_server import FrontendServer
@@ -50,25 +50,25 @@ class GracefulShutdownServer(Server):
 class FrontendApp(object):
     def __init__(
         self,
-        py_env_configs: PyEnvConfigs = StaticConfig,
+        py_env_configs: PyEnvConfigs,
         separated_frontend: bool = False,
     ):
-        self.py_env_configs = py_env_configs
+        self.server_config = py_env_configs.server_config
         self.frontend_server = FrontendServer(
-            separated_frontend,
-            py_env_configs.server_config.rank_id,
-            py_env_configs.server_config.frontend_server_id,
+            self.server_config.rank_id,
+            self.server_config.frontend_server_id,
+            py_env_configs,
         )
         self.separated_frontend = separated_frontend
         g_worker_info.server_port = WorkerInfo.server_port_offset(
-            self.py_env_configs.server_config.rank_id, g_worker_info.server_port
+            self.server_config.rank_id, g_worker_info.server_port
         )
         g_worker_info.backend_server_port = WorkerInfo.server_port_offset(
-            self.py_env_configs.server_config.rank_id, g_worker_info.backend_server_port
+            self.server_config.rank_id, g_worker_info.backend_server_port
         )
         logging.info(
-            f"rank_id = {self.py_env_configs.server_config.rank_id}, "
-            f"server_port = {g_worker_info.server_port}, backend_server_port = {g_worker_info.backend_server_port}, frontend_server_id = {py_env_configs.server_config.frontend_server_id}"
+            f"rank_id = {self.server_config.rank_id}, "
+            f"server_port = {g_worker_info.server_port}, backend_server_port = {g_worker_info.backend_server_port}, frontend_server_id = {self.server_config.frontend_server_id}"
         )
 
     def start(self):
@@ -87,13 +87,13 @@ class FrontendApp(object):
         sock.bind(("0.0.0.0", g_worker_info.server_port))
         sock.listen()
         fd = sock.fileno()
-        timeout_keep_alive = self.py_env_configs.server_config.timeout_keep_alive
+        timeout_keep_alive = self.server_config.timeout_keep_alive
 
         config = Config(
             app,
             fd=fd,
             loop=loop,
-            log_config=UVICORN_LOGGING_CONFIG,
+            log_config=get_uvicorn_logging_config(),
             timeout_keep_alive=timeout_keep_alive,
             h11_max_incomplete_event_size=MAX_INCOMPLETE_EVENT_SIZE,
         )

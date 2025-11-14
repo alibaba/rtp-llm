@@ -13,7 +13,6 @@ print(
     + " "
 )
 
-os.environ["FT_SERVER_TEST"] = "1"
 from rtp_llm.start_server import main as server_main
 
 

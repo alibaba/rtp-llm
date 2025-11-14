@@ -10,8 +10,6 @@ logging.basicConfig(
     format="[process-%(process)d][%(name)s][%(asctime)s.%(msecs)03d][%(filename)s:%(funcName)s():%(lineno)s][%(levelname)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
-
-
 class Qwen3AutoPyModelTest(TestCase):
 
     def setUp(self):
@@ -26,6 +24,7 @@ class Qwen3AutoPyModelTest(TestCase):
 
         self.max_total_tokens = 100  # max_total_tokens is about kv_cache capacity
         self.tokens_per_block = 2
+
         self.model = AutoModel.from_pretrained(
             model_path_or_name="Qwen/Qwen3-0.6B",
             max_total_tokens=self.max_total_tokens,
@@ -75,3 +74,4 @@ class Qwen3AutoPyModelTest(TestCase):
 
 if __name__ == "__main__":
     main()
+

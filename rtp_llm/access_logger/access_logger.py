@@ -10,9 +10,9 @@ ACCESS_LOGGER_NAME = "access_logger"
 QUERY_ACCESS_LOGGER_NAME = "query_access_logger"
 
 
-def init_access_logger(rank_id: Optional[int] = None, server_id: Optional[int] = None, async_mode: bool = True) -> None:
+def init_access_logger(log_path: str, backup_count: int, rank_id: Optional[int] = None, server_id: Optional[int] = None, async_mode: bool = True) -> None:
     access_logger = logging.getLogger(ACCESS_LOGGER_NAME)
-    handler = get_handler("access.log", rank_id, server_id, async_mode)
+    handler = get_handler("access.log", log_path, backup_count, rank_id, server_id, async_mode)
     formatter = logging.Formatter("%(message)s")
     access_logger.handlers.clear()
     access_logger.parent = None
@@ -21,9 +21,9 @@ def init_access_logger(rank_id: Optional[int] = None, server_id: Optional[int] =
         access_logger.addHandler(handler)
 
 
-def init_query_access_logger(rank_id: Optional[int] = None, server_id: Optional[int] = None, async_mode: bool = True) -> None:
+def init_query_access_logger(log_path: str, backup_count: int, rank_id: Optional[int] = None, server_id: Optional[int] = None, async_mode: bool = True) -> None:
     access_logger = logging.getLogger(QUERY_ACCESS_LOGGER_NAME)
-    handler = get_handler("query_access.log", rank_id, server_id, async_mode)
+    handler = get_handler("query_access.log", log_path, backup_count, rank_id, server_id, async_mode)
     formatter = logging.Formatter("%(message)s")
     access_logger.handlers.clear()
     access_logger.parent = None
@@ -33,9 +33,9 @@ def init_query_access_logger(rank_id: Optional[int] = None, server_id: Optional[
 
 
 class AccessLogger:
-    def __init__(self, rank_id: Optional[int] = None, server_id: Optional[int] = None, async_mode: bool = True) -> None:
-        init_access_logger(rank_id, server_id, async_mode)
-        init_query_access_logger(rank_id, server_id, async_mode)
+    def __init__(self, log_path: str, backup_count: int, rank_id: Optional[int] = None, server_id: Optional[int] = None, async_mode: bool = True) -> None:
+        init_access_logger(log_path, backup_count, rank_id, server_id, async_mode)
+        init_query_access_logger(log_path, backup_count, rank_id, server_id, async_mode)
         self.logger = logging.getLogger(ACCESS_LOGGER_NAME)
         self.query_logger = logging.getLogger(QUERY_ACCESS_LOGGER_NAME)
         self.async_mode = async_mode

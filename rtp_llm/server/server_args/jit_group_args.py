@@ -1,4 +1,4 @@
-def init_jit_group_args(parser):
+def init_jit_group_args(parser, jit_config):
     ##############################################################################################################
     # JIT Configuration
     ##############################################################################################################
@@ -6,6 +6,7 @@ def init_jit_group_args(parser):
     jit_group.add_argument(
         "--remote_jit_dir",
         env_name="REMOTE_JIT_DIR",
+        bind_to=(jit_config, 'remote_jit_dir'),
         type=str,
         default="/mnt/nas1",
         help="JIT远程cache目录",

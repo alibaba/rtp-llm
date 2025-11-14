@@ -1,87 +1,148 @@
 import logging
+from typing import Optional, Union, Any
+import json
 import os
-from typing import Any, Dict, List, NamedTuple, Optional, Union
 
 import torch
-from pydantic import BaseModel as PyBaseModel
 
-from rtp_llm.config.generate_config import GenerateConfig, RoleAddr, RoleType
-from rtp_llm.config.gpt_init_model_parameters import ConfigMode, GptInitModelParameters
-from rtp_llm.config.task_type import TaskType
-from rtp_llm.distribute.gang_info import get_gang_info
-from rtp_llm.distribute.worker_info import ParallelInfo, g_parallel_info
+from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import (
     BaseTokenizer,
     TokenizerFactory,
 )
 from rtp_llm.model_loader.loader import ModelLoader, get_model_loader
+from rtp_llm.model_loader.load_config import LoadMethod
 from rtp_llm.model_loader.model_weight_info import ModelDeployWeightInfo, ModelWeights
 from rtp_llm.models.downstream_modules.custom_module import CustomModule
 from rtp_llm.models.downstream_modules.utils import create_custom_module
 from rtp_llm.models.multimodal.multimodal_mixin import MultiModalMixin
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
-from rtp_llm.utils.base_model_datatypes import (
-    AuxInfo,
-    EmbeddingOutput,
-    GenerateContext,
-    GenerateInput,
-    GenerateOutput,
-    GenerateOutputs,
-    GenerateResponse,
-    ModelConfig,
+from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.py_config_modules import VitConfig
+from rtp_llm.ops import (
+    VitSeparation,
+    ParallelismConfig,
+    HWKernelConfig,
+    FMHAConfig,
+    MoeConfig,
+    ProfilingDebugLoggingConfig,
+    DeviceResourceConfig,
 )
 from rtp_llm.utils.database import CkptDatabase
-from rtp_llm.utils.multimodal_util import MultimodalInput
 from rtp_llm.utils.time_util import timer_wrapper
-from rtp_llm.utils.util import to_torch_dtype
-
-FT_DEFAULT_MAX_NEW_TOKENS = 2048
-
 
 class BaseModel(object):
 
-    config: GptInitModelParameters
-    vocab_size_padded: int
-    device: str
+    # Independent configuration objects
+    model_config: ModelConfig
+    parallelism_config: ParallelismConfig
+    hw_kernel_config: HWKernelConfig
+    kv_cache_config: KVCacheConfig
+    fmha_config: FMHAConfig
+    moe_config: MoeConfig
 
-    def __init__(self, config: GptInitModelParameters) -> None:
-        self.config = config
+    def __init__(
+        self,
+        model_config: ModelConfig,
+        parallelism_config: ParallelismConfig,
+        hw_kernel_config: HWKernelConfig,
+        kv_cache_config: KVCacheConfig,
+        fmha_config: FMHAConfig,
+        moe_config: MoeConfig,
+        load_python_model: bool = False,
+        max_generate_batch_size: int = 0,
+        load_method: LoadMethod = LoadMethod.AUTO,
+        vit_config: Optional[VitConfig] = None,
+        merge_lora: bool = False,
+        device_resource_config: Optional[DeviceResourceConfig] = None,
+    ) -> None:
+        """Initialize BaseModel with independent configuration objects.
+        Args:
+            model_config: Model configuration (contains template_type, model_name, lora_infos, mm_model_config)
+            parallelism_config: Parallelism configuration
+            hw_kernel_config: Hardware kernel configuration
+            kv_cache_config: KV cache configuration
+            fmha_config: FMHA configuration
+            moe_config: MoE configuration
+            load_python_model: Whether to load Python model (instead of C++ GptModel)
+            max_generate_batch_size: Maximum batch size for generation
+            vit_config: Optional VitConfig (needed for multimodal models)
+            merge_lora: Whether to merge LoRA weights
+            device_resource_config: Optional DeviceResourceConfig for device resource configuration
+        """
+        self.model_config = model_config
+        self.parallelism_config = parallelism_config
+        self.hw_kernel_config = hw_kernel_config
+        self.kv_cache_config = kv_cache_config
+        self.fmha_config = fmha_config
+        self.moe_config = moe_config
+        self.load_python_model = load_python_model
+        self.max_generate_batch_size = max_generate_batch_size
+        self.load_method = load_method
+        self.vit_config = vit_config
+        self.merge_lora = merge_lora
+        self.device_resource_config = device_resource_config
         self.weight = None
-
-        self.linear_bias_slopes: Optional[torch.Tensor] = None
-        self.prefix_tokens: Optional[torch.Tensor] = None
+        self.py_eplb = None
         self.tokenizer: Optional[BaseTokenizer] = None
-        self.max_input_buffer_len: int = 0
-
-        self.task_type: TaskType = TaskType.LANGUAGE_MODEL
         self.custom_module: Optional[CustomModule] = None
-        self.is_attn_model = False
-        if self.config:
-            self.is_attn_model = (
-                config.gpt_init_params.ffn_disaggregate_config.enable_ffn_disaggregate
-                and not config.gpt_init_params.ffn_disaggregate_config.is_ffn_service()
-            )
-
+        self.py_model: Optional[GptModelBase] = None
         self.default_generate_config: GenerateConfig = GenerateConfig()
         self.load_tokenizer()
 
-        self.py_model: Optional[GptModelBase] = None
+        if self.kv_cache_config.multi_task_prompt or self.kv_cache_config.multi_task_prompt_str:
+            self.kv_cache_config.load_and_update_task_prompt_config(self.tokenizer)
+
+        if self.model_config.generate_env_config:
+            self.load_default_generate_config(self.model_config.generate_env_config)
+        
+
+    def load_default_generate_config(self, generate_env_config: Optional[Any] = None):
+        """Load default generate config from GenerateEnvConfig.
+        
+        Args:
+            generate_env_config: Optional GenerateEnvConfig object
+        """
+        if generate_env_config is None:
+            return
+        generation_config_path = generate_env_config.generation_config_path
+        if generation_config_path:
+            self.default_generate_config.update(
+                json.load(
+                    open(os.path.join(generation_config_path, "generation_config.json"))
+                )
+            )
+            logging.info(
+                f"load generate config:{generation_config_path}/generation_config.json: \n\
+                         {json.dumps(self.default_generate_config.model_dump(), indent=4)}"
+            )
+
+
+    def _get_device_str(self) -> str:
+        """Get device string from parallelism_config."""
+        return f"cuda:{self.parallelism_config.local_rank}"
 
     @timer_wrapper(description="load model")
-    def load(self, parallel_info: ParallelInfo = g_parallel_info):
+    def load(self):
         if (
-            self.config.model_specific_config.load_python_model
-            and self.config.hw_kernel_config.enable_cuda_graph
+            self.load_python_model
+            and self.hw_kernel_config.enable_cuda_graph
             and self.support_cuda_graph() is False
         ):
             raise Exception("current model can't support cuda graph in py model mode")
 
-        self.model_weights_loader = self.create_model_loader(parallel_info)
-        self._load(self.device)
+        self._may_init_multimodal()
+        self.custom_module = self._init_custom_module()        
 
-        if self.config.model_specific_config.load_python_model:
+        self.model_weights_loader = self.create_model_loader()
+        self.py_eplb = self.model_weights_loader._py_eplb
+        device_str = self._get_device_str()
+        self._load(device_str)
+
+        if self.load_python_model:
             logging.info(
-                f"Creating python model for {self.config.ckpt_path} on {self.device}"
+                f"Creating python model for {self.model_config.ckpt_path} on {device_str}"
             )
             remote_jit_dir = os.environ.get("REMOTE_JIT_DIR", None)
             logging.info(f"python model remote_jit_dir for deep_gemm: {remote_jit_dir}")
@@ -102,56 +163,61 @@ class BaseModel(object):
     def _load(self, device: str):
         # set empty weights for attention service
         self.weight: ModelWeights = self.model_weights_loader.load_weights(
-            device=self.device
+            device=device
         )
         self._load_custom_module()
         self._load_multimodal()
         self.model_weights_loader.force_clean_cuda_memory()
 
     @classmethod
-    def create_config(
-        cls,
-        model_config: ModelConfig,
-        parallel_info: ParallelInfo = g_parallel_info,
-        config_mode: ConfigMode = ConfigMode.ComplexMode,
-    ) -> GptInitModelParameters:
-        config: GptInitModelParameters = cls._create_config(model_config.ckpt_path)
-        if config.hidden_size == 0:
-            config.hidden_size = config.size_per_head * config.head_num
-        config.update_common(
-            ckpt_path=model_config.ckpt_path,
-            tokenizer_path=model_config.tokenizer_path,
-            quantization=model_config.quantization,
-            data_type=model_config.act_type,
-            kv_cache_type=model_config.kv_cache_type,
-            max_seq_len=model_config.max_seq_len,
-            seq_size_per_block=model_config.seq_size_per_block,
-            gen_num_per_circle=model_config.gen_num_per_circle,
-            lora_infos=model_config.lora_infos,
-            ptuning_path=model_config.ptuning_path,
-            ref_module=model_config.ref_module,
-            ref_dict=model_config.ref_dict,
-            parallel_info=parallel_info,
-            gang_info=get_gang_info(),
-            config_mode=config_mode,
-        )
-        cls._update_config(config)
-        return config
-
-    @classmethod
-    def _create_config(cls, ckpt_path: str) -> GptInitModelParameters:
+    def _create_config(cls, ckpt_path: str) -> ModelConfig:
         raise NotImplementedError()
 
     @classmethod
-    def _update_config(cls, config: GptInitModelParameters):
-        pass
-
-    @classmethod
     def from_config(
-        cls, config: Any, parallel_info: ParallelInfo = g_parallel_info
+        cls,
+        model_config: ModelConfig,
+        parallelism_config: ParallelismConfig,
+        hw_kernel_config: HWKernelConfig,
+        kv_cache_config: KVCacheConfig,
+        fmha_config: FMHAConfig,
+        moe_config: MoeConfig,
+        load_python_model: bool = False,
+        max_generate_batch_size: int = 0,
+        vit_config: Optional[VitConfig] = None,
+        merge_lora: bool = False,
+        device_resource_config: Optional[DeviceResourceConfig] = None,
     ) -> "BaseModel":
-        model = cls(config)
-        model.load(parallel_info)
+        """Create model from independent configuration objects.
+        
+        Args:
+            model_config: Model configuration (contains template_type, model_name, lora_infos, mm_model_config)
+            parallelism_config: Parallelism configuration
+            hw_kernel_config: Hardware kernel configuration
+            kv_cache_config: KV cache configuration
+            fmha_config: FMHA configuration
+            moe_config: MoE configuration
+            load_python_model: Whether to load Python model (instead of C++ GptModel)
+            max_generate_batch_size: Maximum batch size for generation
+            vit_config: Optional VitConfig (needed for multimodal models)
+            merge_lora: Whether to merge LoRA weights
+            device_resource_config: Optional DeviceResourceConfig for device resource configuration
+        """
+        # All metadata is in model_config
+        model = cls(
+            model_config=model_config,
+            parallelism_config=parallelism_config,
+            hw_kernel_config=hw_kernel_config,
+            kv_cache_config=kv_cache_config,
+            fmha_config=fmha_config,
+            moe_config=moe_config,
+            load_python_model=load_python_model,
+            max_generate_batch_size=max_generate_batch_size,
+            vit_config=vit_config,
+            merge_lora=merge_lora,
+            device_resource_config=device_resource_config,
+        )
+        model.load()
         return model
 
     @staticmethod
@@ -165,48 +231,44 @@ class BaseModel(object):
 
     @timer_wrapper(description="init mutlimodal")
     def _may_init_multimodal(self):
-        if self.is_multimodal():
-            assert isinstance(self, MultiModalMixin)  # for syntax check
-            self.config.is_multimodal = True
-            if self.parallel_info.tp_rank == 0:
-                self.init_multimodal(self.config, self.device)
+        if not self.is_multimodal():
+            return
 
-    @timer_wrapper(description="init custom_module")
-    def _init_misc(self):
-        self._may_init_multimodal()
-        self.task_type = self.config.task_type
-        self.custom_module = self._init_custom_module()
-        self.compute_dtype: torch.dtype = to_torch_dtype(self.config.data_type)
+        assert isinstance(self, MultiModalMixin)  # for syntax check
+        self.model_config.mm_model_config.is_multimodal = True
+        if self.parallelism_config.tp_rank != 0:
+            return
+
+        if self.vit_config is None:
+            raise ValueError("vit_config is required for multimodal models")
+        # Only initialize multimodal if vit_separation != REMOTE
+        vit_separation = self.vit_config.vit_separation
+        if vit_separation != VitSeparation.VIT_SEPARATION_REMOTE:
+            self.init_multimodal(
+                mm_model_config=self.model_config.mm_model_config,
+                vit_config=self.vit_config,
+                device=self._get_device_str(),
+            )
+
 
     def _init_custom_module(self) -> Optional[CustomModule]:
-        return create_custom_module(self.task_type, self.config, self.tokenizer)
+        return create_custom_module(self.model_config, self.tokenizer)
 
     def load_tokenizer(self) -> None:
-        if self.config:
-            self.tokenizer = TokenizerFactory.create_from_config(self.config)
-        else:
-            self.tokenizer = TokenizerFactory.create_from_env()
-        if hasattr(self.tokenizer, "eos_token_id") and self.tokenizer.eos_token_id:
-            self.config.special_tokens.eos_token_id = self.tokenizer.eos_token_id
-            self.config.update_task_prompt_tokens_id(self.tokenizer)
+        # Get tokenizer parameters from config
+        ckpt_path = self.model_config.ckpt_path
+        tokenizer_path = self.model_config.tokenizer_path
+        model_type = self.model_config.model_type
+        self.tokenizer = TokenizerFactory.create(ckpt_path, tokenizer_path, model_type)
+        if self.tokenizer.eos_token_id:
+            self.model_config.special_tokens.eos_token_id = self.tokenizer.eos_token_id
 
     def is_multimodal(self) -> bool:
         return isinstance(self, MultiModalMixin)
 
-    def _init_database(self):
-        self.database = CkptDatabase(self.config.ckpt_path, self.config.ptuning_path)
-        # static lora load
-        self.static_lora: bool = (
-            self.config.lora_infos is not None and len(self.config.lora_infos) == 1
-        )
-        if self.static_lora:
-            for name, path in self.config.lora_infos.items():
-                self.database.load_lora(name, path)
-            self.database.dump_lora_info()
-
     def _load_model_weights(self):
         self.weight: ModelWeights = self.model_weights_loader.load_weights(
-            device=self.device
+            device=self._get_device_str()
         )
 
     @timer_wrapper(description="load custom module")
@@ -216,88 +278,50 @@ class BaseModel(object):
 
     @timer_wrapper(description="load multimodal")
     def _load_multimodal(self):
-        if self.config.vit_separation != 2 and self.is_multimodal():
+        if self.vit_config is not None and self.vit_config.vit_separation != VitSeparation.VIT_SEPARATION_REMOTE and self.is_multimodal():
+            assert isinstance(self, MultiModalMixin)  # for syntax check
+            # Convert torch.dtype to string for load_mm_weight
+            dtype_str = self.model_config.data_type
             self.load_mm_weight(
-                self.compute_dtype,
-                self.config.tp_size,
-                self.config.tp_rank,
-                self.device,
+                model_config=self.model_config,
+                ctype=dtype_str,
+                tp_size=self.parallelism_config.tp_size,
+                tp_rank=self.parallelism_config.tp_rank,
+                device=self._get_device_str(),
             )
 
-    def dup_dim0_for_beam_search(
-        self, t: torch.Tensor, beam_width: int
-    ) -> torch.Tensor:
-        shape = list(t.shape)
-        return (
-            t.unsqueeze(1)
-            .repeat([1, beam_width] + [1] * len(shape[1:]))
-            .reshape([-1] + shape[1:])
-            .contiguous()
-        )
+    def create_model_loader(self) -> ModelLoader:
+        # Create database locally, only used for model loading
+        database = CkptDatabase(self.model_config.ckpt_path, self.model_config.ptuning_path)
+        lora_infos = self.model_config.lora_infos
+        static_lora: bool = len(lora_infos) == 1
+        if static_lora:
+            for name, path in lora_infos.items():
+                database.load_lora(name, path)
+            database.dump_lora_info()
 
-    def extend_context_combo_token_types(self, token_types: List[int]) -> List[int]:
-        return []
-
-    def extend_generate_combo_token_types(self, combo_tokens: List[int]) -> List[int]:
-        return []
-
-    def create_context_position_ids(
-        self, input_lengths: Union[List[int], torch.Tensor]
-    ):
-        return torch.concat(
-            [
-                torch.arange(int(input_length), dtype=torch.int32)
-                for input_length in input_lengths
-            ],
-            dim=0,
-        )
-
-    def create_context_decoder_mask(self, input_lengths: List[int]):
-        batch_size = len(input_lengths)
-        max_input_length = max(input_lengths)
-        attention_mask = torch.ones(
-            (max_input_length, max_input_length), dtype=torch.bool, device=self.device
-        )
-        if self.config.is_causal:
-            attention_mask = attention_mask.tril()
-        attention_mask = (
-            attention_mask.unsqueeze_(0).tile(batch_size, 1, 1).to(self.dtype)
-        )
-        for b, input_length in enumerate(input_lengths):
-            attention_mask[b, input_length:, ...] = 0
-            if not self.config.is_causal:
-                attention_mask[b, :, input_length:] = 0
-        return attention_mask
-
-    def create_model_loader(self, parallel_info: ParallelInfo) -> ModelLoader:
-        self.parallel_info = parallel_info
-        self.device = self.parallel_info.device
-
-        self._init_misc()
-        self._init_database()
-
-        tp_rank = self.parallel_info.tp_rank
-        tp_size = self.parallel_info.tp_size
+        vit_weights = None
+        if self.model_config.mm_related_params is not None:
+            vit_weights = self.model_config.mm_related_params.vit_weights
 
         weights_info: ModelDeployWeightInfo = self.get_weight_cls()(
-            self.config, tp_size, tp_rank
+            model_config=self.model_config,
+            parallelism_config=self.parallelism_config,
+            hw_kernel_config=self.hw_kernel_config,
+            kv_cache_config=self.kv_cache_config,
+            merge_lora=self.merge_lora,
+            vit_config=self.vit_config,
+            vit_weights=vit_weights,
+            load_method=self.load_method,
         )
         misc_weights_info = (
             self.custom_module.get_custom_weight_info() if self.custom_module else []
         )
         return get_model_loader(
-            self.task_type,
+            self.model_config,
             weights_info,
             misc_weights_info,
-            self.compute_dtype,
-            self.database,
-            self.is_attn_model,
+            database,
+            load_method=self.load_method,
         )
 
-    @staticmethod
-    def eval_model_size(config: GptInitModelParameters):
-        return config.eval_model_size()
-
-    @staticmethod
-    def eval_model_param_count(config: GptInitModelParameters):
-        return config.model_param_count

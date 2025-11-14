@@ -167,12 +167,12 @@ class CohereWeightNames:
 
 
 class LlamaWeightInfo(ModelDeployWeightInfo):
-    def __init__(self, config, tp_size, tp_rank, prefix=""):
-        super().__init__(config, tp_size, tp_rank)
+    def __init__(self, prefix="", **kwargs):
+        self._prefix = prefix
         self._names = None
         self._merge_qkv = None
         self._merge_qkv_b = None
-        self._prefix = prefix
+        super().__init__(**kwargs)
 
     @property
     def support_lora(self):
@@ -235,12 +235,12 @@ class LlamaWeightInfo(ModelDeployWeightInfo):
                 W.final_ln_beta, [], functools.partial(zeros, shape=[self._hidden_size])
             ),
         ]
-        if self.config.use_attention_linear_bias:
+        if self.model_config.use_attention_linear_bias:
             weights.append(
                 AtomicWeight(
                     W.linear_bias_slopes,
                     [],
-                    functools.partial(slopes, n=self.config.head_num),
+                    functools.partial(slopes, n=self.model_config.attn_config.head_num),
                     data_type=torch.float,
                 )
             )
@@ -253,7 +253,7 @@ class LlamaWeightInfo(ModelDeployWeightInfo):
         )
         ffn_config = FfnConfig(
             is_gated_activation=self._is_gated_activation,
-            inter_padding_size=self._inter_padding_size,
+            align_size=self._align_size,
             is_moe=False,
         )
 
@@ -528,8 +528,8 @@ class LlamaWeightInfo(ModelDeployWeightInfo):
 
 
 class GemmaWeightInfo(LlamaWeightInfo):
-    def __init__(self, config, tp_size, tp_rank):
-        super().__init__(config, tp_size, tp_rank)
+    def __init__(self, prefix="", **kwargs):
+        super().__init__(prefix=prefix, **kwargs)
 
     def _process_meta(self, meta_dicts, weight_keys):
         logging.info("load gemma style weight")

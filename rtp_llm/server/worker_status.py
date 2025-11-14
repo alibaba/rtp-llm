@@ -1,6 +1,6 @@
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from rtp_llm.config.generate_config import RoleType
 
@@ -61,6 +61,8 @@ class DebugInfo(BaseModel):
 
 
 class ServerStatus(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     role: RoleType
     server_ip: str
     http_port: int

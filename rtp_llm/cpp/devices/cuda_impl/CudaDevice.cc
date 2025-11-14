@@ -388,7 +388,7 @@ CudaDevice::selectCuFMHARunner(const AttentionConfigs& configs, DataType attn_dt
     DataType fmha_datatype       = use_fp8_fmha_ ? DataType::TYPE_FP8_E4M3 : attn_dtype;
     for (auto& runner : cufmha_runner_pool_) {
         if (runner->checkSignature(fmha_datatype,
-                                   configs.mask_type,
+                                   configs.is_causal,
                                    configs.head_num,
                                    configs.kv_head_num,
                                    configs.size_per_head,
@@ -405,7 +405,7 @@ CudaDevice::selectCuFMHARunner(const AttentionConfigs& configs, DataType attn_dt
         bool is_s_padded = (graph_runner_ != nullptr);
         cufmha_runner_pool_.back().reset(
             new cufmha(fmha_datatype,
-                       configs.mask_type,
+                       configs.is_causal,
                        configs.head_num,
                        configs.kv_head_num,
                        configs.size_per_head,

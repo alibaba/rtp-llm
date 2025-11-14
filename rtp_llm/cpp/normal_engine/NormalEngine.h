@@ -38,13 +38,12 @@ public:
     absl::Status                    step();
     absl::Status                    startLoop();
     int64_t                         getLastScheduleTime() override;
-    const rtp_llm::GptInitParameter gptInitParameter() const;
     void                            reportMetrics(RtpLLMEngineMetricsCollector collector) {
         if (metrics_reporter_) {
             metrics_reporter_->report<RtpLLMEngineMetrics, RtpLLMEngineMetricsCollector>(nullptr, &collector);
         }
     }
-    bool updateEplbConfig(const EplbConfig& config) override;
+    bool updateEplbConfig(const EPLBConfig& config) override;
 
 private:
     void                            initScheduler();
@@ -63,7 +62,16 @@ private:
     autil::ThreadPtr                loop_thread_;
     std::atomic<bool>               running_{false};
     std::unique_ptr<Executor>       executor_;
-    const rtp_llm::GptInitParameter params_;
+    ModelConfig                     model_config_;
+    ParallelismConfig               parallelism_config;
+    RuntimeConfig                   runtime_config;
+    EPLBConfig                      eplb_config;
+    PDSepConfig                     pd_sep_config;
+    ProfilingDebugLoggingConfig     profiling_debug_logging_config;
+    KVCacheConfig                   kv_cache_config;
+    FfnDisAggregateConfig           ffn_disaggregate_config;
+    ModelSpecificConfig             model_specific_config;
+    SpeculativeExecutionConfig      sp_config;
     kmonitor::MetricsReporterPtr    metrics_reporter_;
     std::shared_ptr<CudaProfiler>   profiler_;
     int                             profiler_step_     = 0;

@@ -26,8 +26,7 @@ public:
 TEST_F(NormalEngineTest, testInt8KVCache) {
     CustomConfig config;
     config.kv_cache_data_type = DataType::TYPE_INT8;
-    auto gpt_init_params      = rtp_llm::GptInitParameter();
-    auto engine               = createMockEngine(device_, config, gpt_init_params);
+    auto engine               = createMockEngine(device_, config);
 
     std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
     query->input_ids       = createBuffer<int32_t>({7}, {1, 2, 3, 4, 5, 6, 7}, rtp_llm::AllocationType::HOST);
@@ -55,8 +54,7 @@ TEST_F(NormalEngineTest, testInt8KVCache) {
 
 TEST_F(NormalEngineTest, testSimple) {
     CustomConfig config;
-    auto         gpt_init_params = rtp_llm::GptInitParameter();
-    auto         engine          = createMockEngine(device_, config, gpt_init_params);
+    auto         engine          = createMockEngine(device_, config);
 
     ASSERT_TRUE(engine->resourceContext().cache_manager);
     ASSERT_FALSE(engine->resourceContext().system_prompt);
@@ -124,8 +122,7 @@ TEST_F(NormalEngineTest, testSystemPrompt) {
     vector<int>  prompt_1           = {1, 2, 3};
     vector<int>  prompt_2           = {4, 5, 6, 7, 8, 9};
     config.multi_task_prompt_tokens = {{"1", prompt_1}, {"2", prompt_2}};
-    auto gpt_init_params            = rtp_llm::GptInitParameter();
-    auto engine                     = createMockEngine(device_, config, gpt_init_params);
+    auto engine                     = createMockEngine(device_, config);
     ASSERT_TRUE(engine->resourceContext().cache_manager);
     ASSERT_TRUE(engine->resourceContext().system_prompt);
     ASSERT_TRUE(engine->resourceContext().reuse_cache);
@@ -193,21 +190,18 @@ TEST_F(NormalEngineTest, testSystemPrompt) {
 TEST_F(NormalEngineTest, testReuseCacheOption) {
     CustomConfig config;
     config.reuse_cache   = true;
-    auto gpt_init_params = rtp_llm::GptInitParameter();
-    auto engine          = createMockEngine(device_, config, gpt_init_params);
+    auto engine          = createMockEngine(device_, config);
     ASSERT_TRUE(engine->resourceContext().reuse_cache);
 
     config.reuse_cache    = false;
-    auto gpt_init_params2 = rtp_llm::GptInitParameter();
-    auto engine2          = createMockEngine(device_, config, gpt_init_params2);
+    auto engine2          = createMockEngine(device_, config);
     ASSERT_FALSE(engine2->resourceContext().reuse_cache);
 }
 
 TEST_F(NormalEngineTest, testReuseCache) {
     CustomConfig config;
     config.reuse_cache   = true;
-    auto gpt_init_params = rtp_llm::GptInitParameter();
-    auto engine          = createMockEngine(device_, config, gpt_init_params);
+    auto engine          = createMockEngine(device_, config);
     ASSERT_TRUE(engine->resourceContext().reuse_cache);
     {
         std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
@@ -253,8 +247,7 @@ TEST_F(NormalEngineTest, testReuseCache) {
 TEST_F(NormalEngineTest, testQueryReuseCacheWhenSwitchIsOn) {
     CustomConfig config;
     config.reuse_cache   = true;
-    auto gpt_init_params = rtp_llm::GptInitParameter();
-    auto engine          = createMockEngine(device_, config, gpt_init_params);
+    auto engine          = createMockEngine(device_, config);
     ASSERT_TRUE(engine->resourceContext().reuse_cache);
 
     // First query with reuse_cache = true
@@ -329,8 +322,7 @@ TEST_F(NormalEngineTest, testQueryReuseCacheWhenSwitchIsOff) {
     // Test with engine-level reuse_cache = false (master switch off)
     CustomConfig config;
     config.reuse_cache   = false;
-    auto gpt_init_params = rtp_llm::GptInitParameter();
-    auto engine          = createMockEngine(device_, config, gpt_init_params);
+    auto engine          = createMockEngine(device_, config);
     ASSERT_FALSE(engine->resourceContext().reuse_cache);
 
     // Query with reuse_cache = true, but should be ignored because engine-level is false

@@ -1,7 +1,7 @@
 #pragma once
 
 #include <torch/torch.h>
-#include "rtp_llm/cpp/config/GptInitParameter.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 #include "trt_plugins/mixtureOfExperts/mixtureOfExpertsPlugin.h"
 #include "rtp_llm/cpp/devices/cuda_impl/CudaDevice.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
@@ -13,11 +13,15 @@ namespace rtp_llm {
 
 class SelectTopkOp {
 public:
-    SelectTopkOp(const GptInitParameter& gpt_init_parameter);
+    SelectTopkOp(const ModelConfig& model_config, bool fake_balance_expert, int64_t dp_rank);
     void forward(torch::Tensor router_logits, torch::Tensor expert_ids, torch::Tensor expert_scales);
 
 private:
-    GptInitParameter                                     configs_;
+    int64_t                                               expert_num_;
+    int64_t                                               moe_k_;
+    bool                                                  has_moe_norm_;
+    bool                                                  fake_balance_expert_;
+    int64_t                                               dp_rank_;
     std::unique_ptr<trt_plugins::MixtureOfExpertsPlugin> moe_plugin_;
 };
 

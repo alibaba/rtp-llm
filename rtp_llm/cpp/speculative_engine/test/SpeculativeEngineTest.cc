@@ -18,9 +18,7 @@ public:
 
 TEST_F(SpeculativeNormalEngineTest, testSimple) {
     CustomConfig config;
-    auto         gpt_init_params                    = rtp_llm::GptInitParameter();
-    gpt_init_params.fmha_config.disable_flash_infer = true;
-    auto engine                                     = createVanillaSpeculativeEngine(device_, config, gpt_init_params);
+    auto engine = createVanillaSpeculativeEngine(device_, config);
 
     ASSERT_TRUE(engine->resourceContext().cache_manager);
     ASSERT_FALSE(engine->resourceContext().system_prompt);
@@ -83,9 +81,7 @@ TEST_F(SpeculativeNormalEngineTest, testSystemPrompt) {
     vector<int>  prompt_1                           = {1, 2, 3};
     vector<int>  prompt_2                           = {4, 5, 6, 7, 8, 9};
     config.multi_task_prompt_tokens                 = {{"1", prompt_1}, {"2", prompt_2}};
-    auto gpt_init_params                            = rtp_llm::GptInitParameter();
-    gpt_init_params.fmha_config.disable_flash_infer = true;
-    auto engine                                     = createVanillaSpeculativeEngine(device_, config, gpt_init_params);
+    auto engine = createVanillaSpeculativeEngine(device_, config);
     ASSERT_TRUE(engine->resourceContext().cache_manager);
     ASSERT_TRUE(engine->resourceContext().system_prompt);
     ASSERT_TRUE(engine->resourceContext().reuse_cache);
@@ -153,9 +149,7 @@ TEST_F(SpeculativeNormalEngineTest, testSystemPrompt) {
 TEST_F(SpeculativeNormalEngineTest, testReuseCache) {
     CustomConfig config;
     config.reuse_cache                              = true;
-    auto gpt_init_params                            = rtp_llm::GptInitParameter();
-    gpt_init_params.fmha_config.disable_flash_infer = true;
-    auto engine                                     = createVanillaSpeculativeEngine(device_, config, gpt_init_params);
+    auto engine = createVanillaSpeculativeEngine(device_, config);
     ASSERT_TRUE(engine->resourceContext().reuse_cache);
     {
         std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();

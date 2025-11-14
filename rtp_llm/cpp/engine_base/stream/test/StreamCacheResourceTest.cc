@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/devices/testing/TestBase.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 
 #include <chrono>
 #include <memory>
@@ -45,9 +46,10 @@ protected:
         generate_input->input_ids =
             std::make_unique<rtp_llm::Buffer>(rtp_llm::MEMORY_CPU, rtp_llm::TYPE_INT32, shape, (void*)(vec.data()));
         generate_input->generate_config = generate_config;
-        rtp_llm::GptInitParameter params;
-        params.max_seq_len_ = 2048;
-        stream_             = std::make_shared<NormalGenerateStream>(generate_input, params, resource_context, nullptr);
+        ModelConfig model_config;
+        RuntimeConfig runtime_config;
+        model_config.max_seq_len = 2048;
+        stream_             = std::make_shared<NormalGenerateStream>(generate_input, model_config, runtime_config, resource_context, nullptr);
         stream_->setRunning();
     }
 
@@ -335,9 +337,10 @@ TEST_F(StreamCacheResourceTest, testReuseCache) {
     ResourceContext resource_context;
     resource_context.reuse_cache   = true;
     resource_context.cache_manager = cache_manager_;
-    rtp_llm::GptInitParameter params;
-    params.max_seq_len_ = 2048;
-    stream_             = std::make_shared<NormalGenerateStream>(generate_input, params, resource_context, nullptr);
+    ModelConfig model_config;
+    RuntimeConfig runtime_config;
+    model_config.max_seq_len = 2048;
+    stream_             = std::make_shared<NormalGenerateStream>(generate_input, model_config, runtime_config, resource_context, nullptr);
     stream_->setRunning();
 
     auto& resource2 = stream_->streamCacheResource();
@@ -398,9 +401,10 @@ TEST_F(StreamCacheResourceTest, testReuseCacheWithFastGen) {
     ResourceContext resource_context;
     resource_context.reuse_cache   = true;
     resource_context.cache_manager = cache_manager_;
-    rtp_llm::GptInitParameter params;
-    params.max_seq_len_ = 2048;
-    stream_             = std::make_shared<NormalGenerateStream>(generate_input, params, resource_context, nullptr);
+    ModelConfig model_config;
+    RuntimeConfig runtime_config;
+    model_config.max_seq_len = 2048;
+    stream_             = std::make_shared<NormalGenerateStream>(generate_input, model_config, runtime_config, resource_context, nullptr);
     stream_->setRunning();
     stream_->enable_fast_gen_ = true;
 

@@ -9,7 +9,11 @@ class ArpcConfig:
     ioThreadNum: int
     queueNum: int
     threadNum: int
-    def __init__(self, threadNum: int = 10, queueNum: int = 50, ioThreadNum: int = 2) -> None:
+    def __getstate__(self) -> tuple:
+        ...
+    def __init__(self) -> None:
+        ...
+    def __setstate__(self, arg0: tuple) -> None:
         ...
     def to_string(self) -> str:
         ...
@@ -34,9 +38,14 @@ class GrpcConfig:
 
 class BatchDecodeSchedulerConfig:
     batch_decode_scheduler_batch_size: int
-    def to_string(self) -> str:
+    batch_decode_scheduler_warmup_type: int
+    def __getstate__(self) -> tuple:
         ...
-    def update_from_env(self) -> None:
+    def __init__(self) -> None:
+        ...
+    def __setstate__(self, arg0: tuple) -> None:
+        ...
+    def to_string(self) -> str:
         ...
 class CacheStoreConfig:
     cache_store_rdma_mode: bool
@@ -47,20 +56,128 @@ class CacheStoreConfig:
     rdma_qp_count_per_connection: int
     thread_count: int
     wrr_available_ratio: int
-    def __init__(self, cache_store_rdma_mode: bool = False, wrr_available_ratio: int = 80, rank_factor: int = 0, thread_count: int = 16, rdma_connect_timeout_ms: int = 250, rdma_qp_count_per_connection: int = 2, messager_io_thread_count: int = 2, messager_worker_thread_count: int = 16) -> None:
-        ...
-    def to_string(self) -> str:
-        ...
-    def update_from_env(self) -> None:
         ...
 class ConcurrencyConfig:
     concurrency_limit: int
     concurrency_with_block: bool
     def __init__(self, concurrency_with_block: bool = False, concurrency_limit: int = 32) -> None:
         ...
+    def __getstate__(self) -> tuple:
+        ...
+    def __init__(self) -> None:
+        ...
+    def __setstate__(self, arg0: tuple) -> None:
+        ...
     def to_string(self) -> str:
         ...
-    def update_from_env(self) -> None:
+class ConcurrencyConfig:
+    concurrency_limit: int
+    concurrency_with_block: bool
+    def __getstate__(self) -> tuple:
+        ...
+    def __init__(self) -> None:
+        ...
+    def __setstate__(self, arg0: tuple) -> None:
+        ...
+    def to_string(self) -> str:
+        ...
+class DataType:
+    """
+    Members:
+    
+      TYPE_INVALID
+    
+      TYPE_BOOL
+    
+      TYPE_UINT8
+    
+      TYPE_UINT16
+    
+      TYPE_UINT32
+    
+      TYPE_UINT64
+    
+      TYPE_INT8
+    
+      TYPE_INT16
+    
+      TYPE_INT32
+    
+      TYPE_INT64
+    
+      TYPE_FP16
+    
+      TYPE_FP32
+    
+      TYPE_FP64
+    
+      TYPE_BYTES
+    
+      TYPE_BF16
+    
+      TYPE_FP8_E4M3
+    
+      TYPE_STR
+    
+      TYPE_VOID
+    
+      TYPE_QINT8
+    
+      TYPE_INT4X2
+    
+      TYPE_QINT4X2
+    
+      TYPE_QFP8_E4M3
+    """
+    TYPE_BF16: typing.ClassVar[DataType]  # value = <DataType.TYPE_BF16: 14>
+    TYPE_BOOL: typing.ClassVar[DataType]  # value = <DataType.TYPE_BOOL: 1>
+    TYPE_BYTES: typing.ClassVar[DataType]  # value = <DataType.TYPE_BYTES: 13>
+    TYPE_FP16: typing.ClassVar[DataType]  # value = <DataType.TYPE_FP16: 10>
+    TYPE_FP32: typing.ClassVar[DataType]  # value = <DataType.TYPE_FP32: 11>
+    TYPE_FP64: typing.ClassVar[DataType]  # value = <DataType.TYPE_FP64: 12>
+    TYPE_FP8_E4M3: typing.ClassVar[DataType]  # value = <DataType.TYPE_FP8_E4M3: 15>
+    TYPE_INT16: typing.ClassVar[DataType]  # value = <DataType.TYPE_INT16: 7>
+    TYPE_INT32: typing.ClassVar[DataType]  # value = <DataType.TYPE_INT32: 8>
+    TYPE_INT4X2: typing.ClassVar[DataType]  # value = <DataType.TYPE_INT4X2: 19>
+    TYPE_INT64: typing.ClassVar[DataType]  # value = <DataType.TYPE_INT64: 9>
+    TYPE_INT8: typing.ClassVar[DataType]  # value = <DataType.TYPE_INT8: 6>
+    TYPE_INVALID: typing.ClassVar[DataType]  # value = <DataType.TYPE_INVALID: 0>
+    TYPE_QFP8_E4M3: typing.ClassVar[DataType]  # value = <DataType.TYPE_QFP8_E4M3: 21>
+    TYPE_QINT4X2: typing.ClassVar[DataType]  # value = <DataType.TYPE_QINT4X2: 20>
+    TYPE_QINT8: typing.ClassVar[DataType]  # value = <DataType.TYPE_QINT8: 18>
+    TYPE_STR: typing.ClassVar[DataType]  # value = <DataType.TYPE_STR: 16>
+    TYPE_UINT16: typing.ClassVar[DataType]  # value = <DataType.TYPE_UINT16: 3>
+    TYPE_UINT32: typing.ClassVar[DataType]  # value = <DataType.TYPE_UINT32: 4>
+    TYPE_UINT64: typing.ClassVar[DataType]  # value = <DataType.TYPE_UINT64: 5>
+    TYPE_UINT8: typing.ClassVar[DataType]  # value = <DataType.TYPE_UINT8: 2>
+    TYPE_VOID: typing.ClassVar[DataType]  # value = <DataType.TYPE_VOID: 17>
+    __members__: typing.ClassVar[dict[str, DataType]]  # value = {'TYPE_INVALID': <DataType.TYPE_INVALID: 0>, 'TYPE_BOOL': <DataType.TYPE_BOOL: 1>, 'TYPE_UINT8': <DataType.TYPE_UINT8: 2>, 'TYPE_UINT16': <DataType.TYPE_UINT16: 3>, 'TYPE_UINT32': <DataType.TYPE_UINT32: 4>, 'TYPE_UINT64': <DataType.TYPE_UINT64: 5>, 'TYPE_INT8': <DataType.TYPE_INT8: 6>, 'TYPE_INT16': <DataType.TYPE_INT16: 7>, 'TYPE_INT32': <DataType.TYPE_INT32: 8>, 'TYPE_INT64': <DataType.TYPE_INT64: 9>, 'TYPE_FP16': <DataType.TYPE_FP16: 10>, 'TYPE_FP32': <DataType.TYPE_FP32: 11>, 'TYPE_FP64': <DataType.TYPE_FP64: 12>, 'TYPE_BYTES': <DataType.TYPE_BYTES: 13>, 'TYPE_BF16': <DataType.TYPE_BF16: 14>, 'TYPE_FP8_E4M3': <DataType.TYPE_FP8_E4M3: 15>, 'TYPE_STR': <DataType.TYPE_STR: 16>, 'TYPE_VOID': <DataType.TYPE_VOID: 17>, 'TYPE_QINT8': <DataType.TYPE_QINT8: 18>, 'TYPE_INT4X2': <DataType.TYPE_INT4X2: 19>, 'TYPE_QINT4X2': <DataType.TYPE_QINT4X2: 20>, 'TYPE_QFP8_E4M3': <DataType.TYPE_QFP8_E4M3: 21>}
+    def __eq__(self, other: typing.Any) -> bool:
+        ...
+    def __getstate__(self) -> int:
+        ...
+    def __hash__(self) -> int:
+        ...
+    def __index__(self) -> int:
+        ...
+    def __init__(self, value: int) -> None:
+        ...
+    def __int__(self) -> int:
+        ...
+    def __ne__(self, other: typing.Any) -> bool:
+        ...
+    def __repr__(self) -> str:
+        ...
+    def __setstate__(self, state: int) -> None:
+        ...
+    def __str__(self) -> str:
+        ...
+    @property
+    def name(self) -> str:
+        ...
+    @property
+    def value(self) -> int:
+>>>>>>> 817bf47bd (refactor: migrate to new config architecture (EngineConfig, ModelConfig, ModelArgs))
         ...
 class DeviceResourceConfig:
     device_reserve_memory_bytes: int
@@ -71,24 +188,39 @@ class DeviceResourceConfig:
     not_use_default_stream: bool
     overlap_comm_type: int
     overlap_math_sm_count: int
-    def __init__(self, device_reserve_memory_bytes: int = -1073741824, host_reserve_memory_bytes: int = 4294967296, overlap_math_sm_count: int = 0, overlap_comm_type: int = 0, m_split: int = 0, enable_comm_overlap: bool = True, enable_layer_micro_batch: int = 0, not_use_default_stream: bool = False) -> None:
-        ...
-    def to_string(self) -> str:
-        ...
-    def update_from_env(self) -> None:
-        ...
-class EplbConfig:
-    __hash__: typing.ClassVar[None] = None
-    mode: EplbMode
-    update_time: int
-    def __eq__(self, arg0: EplbConfig) -> bool:
+    def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:
         ...
-    def __ne__(self, arg0: EplbConfig) -> bool:
+    def __setstate__(self, arg0: tuple) -> None:
         ...
-    def __str__(self) -> str:
+    def to_string(self) -> str:
         ...
+class EPLBConfig:
+    balance_method: str
+    eplb_balance_layer_per_step: int
+    eplb_control_step: int
+    eplb_force_repack: int
+    eplb_mode: EplbMode
+    eplb_stats_window_size: int
+    eplb_test_mode: bool
+    eplb_update_time: int
+    redundant_expert: int
+    def __getstate__(self) -> tuple:
+        ...
+    def __init__(self) -> None:
+        ...
+    def __setstate__(self, arg0: tuple) -> None:
+        ...
+    def enable_eplb(self) -> bool:
+        """
+        Get enable_eplb status
+        """
+    def phy_exp_num(self, expert_num: int) -> int:
+        """
+        Get physical expert number
+        """
+
 class EplbMode:
     """
     Members:
@@ -136,14 +268,19 @@ class FIFOSchedulerConfig:
     enable_fast_gen: bool
     enable_partial_fallback: bool
     fast_gen_context_budget: int
+    fast_gen_max_context_len: int
+    max_batch_tokens_size: int
     max_context_batch_size: int
     scheduler_reserve_resource_ratio: int
-    def __init__(self, max_context_batch_size: int = 1, scheduler_reserve_resource_ratio: int = 5, enable_fast_gen: bool = False, enable_partial_fallback: bool = False, fast_gen_context_budget: int = -1) -> None:
+    def __getstate__(self) -> tuple:
+        ...
+    def __init__(self) -> None:
+        ...
+    def __setstate__(self, arg0: tuple) -> None:
         ...
     def to_string(self) -> str:
         ...
-    def update_from_env(self) -> None:
-        ...
+
 class FMHAConfig:
     disable_flash_infer: bool
     enable_fmha: bool
@@ -153,14 +290,15 @@ class FMHAConfig:
     enable_trt_fmha: bool
     enable_trtv1_fmha: bool
     enable_xqa: bool
-    fmha_perf_instrument: bool
-    fmha_show_params: bool
-    def __init__(self, enable_fmha: bool = True, enable_trt_fmha: bool = True, enable_paged_trt_fmha: bool = True, enable_open_source_fmha: bool = True, enable_paged_open_source_fmha: bool = True, enable_trtv1_fmha: bool = True, fmha_perf_instrument: bool = False, fmha_show_params: bool = False, disable_flash_infer: bool = False, enable_xqa: bool = True) -> None:
+    def __getstate__(self) -> tuple:
+        ...
+    def __init__(self) -> None:
+        ...
+    def __setstate__(self, arg0: tuple) -> None:
         ...
     def to_string(self) -> str:
         ...
-    def update_from_env(self) -> None:
-        ...
+
 class FMHAType:
     """
     Members:
@@ -195,7 +333,7 @@ class FMHAType:
     TRT_V1: typing.ClassVar[FMHAType]  # value = <FMHAType.TRT_V1: 5>
     TRT_V2: typing.ClassVar[FMHAType]  # value = <FMHAType.TRT_V2: 6>
     XQA: typing.ClassVar[FMHAType]  # value = <FMHAType.XQA: 7>
-    __members__: typing.ClassVar[dict[str, FMHAType]]  # value = {'NONE': <FMHAType.NONE: 1>, 'PAGED_TRT_V2': <FMHAType.PAGED_TRT_V2: 4>, 'TRT_V2': <FMHAType.TRT_V2: 6>, 'PAGED_OPEN_SOURCE': <FMHAType.PAGED_OPEN_SOURCE: 3>, 'OPEN_SOURCE': <FMHAType.OPEN_SOURCE: 2>, 'TRT_V1': <FMHAType.TRT_V1: 5>, 'FLASH_INFER': <FMHAType.FLASH_INFER: 0>, 'XQA': <FMHAType.XQA: 7>, 'AITER_PREFILL': <FMHAType.AITER_PREFILL: 8>, 'AITER_DECODE': <FMHAType.AITER_DECODE: 9>}
+    __members__: typing.ClassVar[dict[str, FMHAType]]  # value = {'FLASH_INFER': <FMHAType.FLASH_INFER: 0>, 'NONE': <FMHAType.NONE: 1>, 'OPEN_SOURCE': <FMHAType.OPEN_SOURCE: 2>, 'PAGED_OPEN_SOURCE': <FMHAType.PAGED_OPEN_SOURCE: 3>, 'PAGED_TRT_V2': <FMHAType.PAGED_TRT_V2: 4>, 'TRT_V1': <FMHAType.TRT_V1: 5>, 'TRT_V2': <FMHAType.TRT_V2: 6>, 'XQA': <FMHAType.XQA: 7>, 'AITER_PREFILL': <FMHAType.AITER_PREFILL: 8>, 'AITER_DECODE': <FMHAType.AITER_DECODE: 9>}
     def __eq__(self, other: typing.Any) -> bool:
         ...
     def __getstate__(self) -> int:
@@ -229,12 +367,18 @@ class FfnDisAggregateConfig:
     ffn_dp_size: int
     ffn_tp_size: int
     is_ffn_rank: bool
-    def __init__(self, enable_ffn_disaggregate: bool = False, attention_tp_size: int = 1, attention_dp_size: int = 1, ffn_tp_size: int = 1, ffn_dp_size: int = 1, is_ffn_rank: bool = False) -> None:
+
+    def __getstate__(self) -> tuple:
+        ...
+    def __init__(self) -> None:
+        ...
+    def __setstate__(self, arg0: tuple) -> None:
         ...
     def is_ffn_service(self) -> bool:
         ...
     def to_string(self) -> str:
         ...
+
     def update_from_env(self) -> None:
         ...
 class GptInitParameter:
@@ -435,10 +579,12 @@ class GptInitParameter:
         ...
     def showDebugInfo(self) -> None:
         ...
+
 class HWKernelConfig:
     arm_gemm_use_kai: bool
     decode_capture_batch_sizes: list[int]
     deep_gemm_num_sm: int
+    disable_dpc_random: bool
     enable_cuda_graph: bool
     enable_cuda_graph_debug_mode: bool
     enable_multi_block_mode: bool
@@ -451,41 +597,109 @@ class HWKernelConfig:
     use_aiter_pa: bool
     use_asm_pa: bool
     use_swizzleA: bool
-    def __init__(self, deep_gemm_num_sm: int = -1, arm_gemm_use_kai: bool = False, enable_stable_scatter_add: bool = False, enable_multi_block_mode: bool = True, ft_disable_custom_ar: bool = True, rocm_hipblaslt_config: str = 'gemm_config.csv', use_swizzleA: bool = False, enable_cuda_graph: bool = False, enable_cuda_graph_debug_mode: bool = False, use_aiter_pa: bool = True, use_asm_pa: bool = True, enable_native_cuda_graph: bool = False, num_native_cuda_graph: int = 200, prefill_capture_seq_lens: list[int] = [], decode_capture_batch_sizes: list[int] = []) -> None:
+
+    def __init__(self, deep_gemm_num_sm: int = -1, arm_gemm_use_kai: bool = False, enable_stable_scatter_add: bool = False, enable_multi_block_mode: bool = True, ft_disable_custom_ar: bool = True, rocm_hipblaslt_config: str = 'gemm_config.csv', use_swizzleA: bool = False, enable_cuda_graph: bool = False, enable_cuda_graph_debug_mode: bool = False, use_aiter_pa: bool = True, use_asm_pa: bool = True, enable_native_cuda_graph: bool = False, num_native_cuda_graph: int = 200, prefill_capture_seq_lens: list[int] = ...) -> None:
+        ...
+    def __getstate__(self) -> tuple:
+        ...
+    def __init__(self) -> None:
+        ...
+    def __setstate__(self, arg0: tuple) -> None:
         ...
     def to_string(self) -> str:
         ...
-    def update_from_env(self) -> None:
-        ...
+
 class KVCacheConfig:
+    blockwise_use_fp8_kv_cache: int
     enable_3fs: bool
+    fp8_kv_cache: int
+    int8_kv_cache: int
+    kv_cache_mem_mb: int
     match_timeout_ms: int
     max_block_size_per_item: int
     memory_block_cache_size_mb: int
     memory_block_cache_sync_timeout_ms: int
     multi_task_prompt: str
     multi_task_prompt_str: str
+    multi_task_prompt_tokens: dict[str, list[int]]
     reuse_cache: bool
     rpc_get_cache_timeout_ms: int
     rpc_put_cache_timeout_ms: int
+    seq_size_per_block: int
+    test_block_num: int
     threefs_read_iov_size: int
     threefs_read_timeout_ms: int
     threefs_write_iov_size: int
     threefs_write_timeout_ms: int
-    def __init__(self, reuse_cache: bool = False, multi_task_prompt: str = '', multi_task_prompt_str: str = '', enable_3fs: bool = False, match_timeout_ms: int = 1000, rpc_get_cache_timeout_ms: int = 2000, rpc_put_cache_timeout_ms: int = 2000, threefs_read_timeout_ms: int = 1000, threefs_write_timeout_ms: int = 2000, max_block_size_per_item: int = 16, threefs_read_iov_size: int = 4294967296, threefs_write_iov_size: int = 4294967296, memory_block_cache_size_mb: int = 0, memory_block_cache_sync_timeout_ms: int = 10000) -> None:
+    use_block_cache: int
+    def __getstate__(self) -> tuple:
+        ...
+    def __init__(self) -> None:
+        ...
+    def __setstate__(self, arg0: tuple) -> None:
+        ...
+    def insertMultiTaskPromptTokens(self, arg0: str, arg1: list[int]) -> None:
         ...
     def to_string(self) -> str:
         ...
-    def update_from_env(self) -> None:
+class KvCacheDataType:
+    """
+    Members:
+    
+      BASE
+    
+      INT8
+    
+      FP8
+    """
+    BASE: typing.ClassVar[KvCacheDataType]  # value = <KvCacheDataType.BASE: 0>
+    FP8: typing.ClassVar[KvCacheDataType]  # value = <KvCacheDataType.FP8: 2>
+    INT8: typing.ClassVar[KvCacheDataType]  # value = <KvCacheDataType.INT8: 1>
+    __members__: typing.ClassVar[dict[str, KvCacheDataType]]  # value = {'BASE': <KvCacheDataType.BASE: 0>, 'INT8': <KvCacheDataType.INT8: 1>, 'FP8': <KvCacheDataType.FP8: 2>}
+    def __eq__(self, other: typing.Any) -> bool:
+        ...
+    def __getstate__(self) -> int:
+        ...
+    def __hash__(self) -> int:
+        ...
+    def __index__(self) -> int:
+        ...
+    def __init__(self, value: int) -> None:
+        ...
+    def __int__(self) -> int:
+        ...
+    def __ne__(self, other: typing.Any) -> bool:
+        ...
+    def __repr__(self) -> str:
+        ...
+    def __setstate__(self, state: int) -> None:
+        ...
+    def __str__(self) -> str:
+        ...
+    @property
+    def name(self) -> str:
+        ...
+    @property
+    def value(self) -> int:
+        ...
+class MMModelConfig:
+    include_sep_tokens: bool
+    is_multimodal: bool
+    mm_position_ids_style: int
+    mm_sep_tokens: list[list[int]]
+    def __init__(self) -> None:
+>>>>>>> 817bf47bd (refactor: migrate to new config architecture (EngineConfig, ModelConfig, ModelArgs))
         ...
 class MiscellaneousConfig:
     aux_string: str
     disable_pdl: bool
-    def __init__(self, disable_pdl: bool = True, aux_string: str = '') -> None:
+    def __getstate__(self) -> tuple:
+        ...
+    def __init__(self) -> None:
+        ...
+    def __setstate__(self, arg0: tuple) -> None:
         ...
     def to_string(self) -> str:
-        ...
-    def update_from_env(self) -> None:
         ...
 class MlaOpsType:
     """
@@ -530,6 +744,7 @@ class MlaOpsType:
     @property
     def value(self) -> int:
         ...
+
 class ModelSpecificConfig:
     load_python_model: bool
     max_lora_model_size: int
@@ -537,16 +752,124 @@ class ModelSpecificConfig:
         ...
     def to_string(self) -> str:
         ...
-    def update_from_env(self) -> None:
+
+
+class ModelConfig:
+    add_bias_linear: bool
+    attn_config: AttentionConfigs
+    ckpt_path: str
+    deepseek_mscale_all_dim: float
+    deepseek_rope_mscale: float
+    embedding_size: int
+    eplb_config: ...
+    expert_num: int
+    extra_data_path: str
+    has_lm_head: bool
+    has_moe_norm: bool
+    has_positional_encoding: bool
+    has_post_decoder_layernorm: bool
+    has_pre_decoder_layernorm: bool
+    hidden_size: int
+    input_embedding_scalar: float
+    input_vocab_size: int
+    json_model_override_args: str
+    layernorm_eps: float
+    local_extra_data_path: str
+    logit_scale: float
+    lora_infos: dict[str, str]
+    max_seq_len: int
+    mm_model_config: ...
+    model_type: str
+    moe_k: int
+    moe_layer_index: list[int]
+    moe_n_group: int
+    moe_normalize_expert_scale: bool
+    moe_style: int
+    moe_topk_group: int
+    num_layers: int
+    partial_rotary_factor: float
+    position_ids_style: int
+    pre_seq_len: int
+    prefix_projection: bool
+    ptuning_path: str
+    qk_norm: bool
+    quant_algo: QuantAlgo
+    residual_scalar: float
+    reverse_e_h_norm: bool
+    routed_scaling_factor: float
+    scoring_func: int
+    special_tokens: SpecialTokens
+    tokenizer_path: str
+    type_vocab_size: int
+    use_attention_linear_bias: bool
+    use_fp32_to_compute_logit: bool
+    use_kvcache: bool
+    use_norm_attn_out_residual: bool
+    use_norm_input_residual: bool
+    vocab_size: int
+    def __init__(self) -> None:
+        ...
+    def getAttentionConfigs(self, arg0: int) -> AttentionConfigs:
+        ...
+    def isGatedActivation(self) -> bool:
+        ...
+    def isKvCacheQuant(self) -> bool:
+        ...
+    def to_string(self) -> str:
+        ...
+    @property
+    def activation_type(self) -> ActivationType:
+        ...
+    @activation_type.setter
+    def activation_type(self, arg1: typing.Any) -> None:
+        ...
+    @property
+    def data_type(self) -> DataType:
+        ...
+    @data_type.setter
+    def data_type(self, arg1: str) -> None:
+        ...
+    @property
+    def layernorm_type(self) -> ...:
+        ...
+    @layernorm_type.setter
+    def layernorm_type(self, arg1: str) -> None:
+        ...
+    @property
+    def mla_ops_type(self) -> MlaOpsType:
+        ...
+    @mla_ops_type.setter
+    def mla_ops_type(self, arg1: str) -> None:
+        ...
+    @property
+    def norm_type(self) -> ...:
+        ...
+    @norm_type.setter
+    def norm_type(self, arg1: str) -> None:
+        ...
+    @property
+    def task_type(self) -> TaskType:
+        ...
+    @task_type.setter
+    def task_type(self, arg1: str) -> None:
+        ...
+class ModelSpecificConfig:
+    load_python_model: bool
+    max_lora_model_size: int
+    def __getstate__(self) -> tuple:
+        ...
+    def __init__(self) -> None:
+        ...
+    def __setstate__(self, arg0: tuple) -> None:
+        ...
+    def to_string(self) -> str:
         ...
 class MoeConfig:
     deep_ep_num_sm: int
-    eplb_balance_layer_per_step: int
-    eplb_control_step: int
-    eplb_test_mode: bool
     fake_balance_expert: bool
     hack_moe_expert: bool
     max_moe_normal_masked_token_num: int
+    use_all_gather: bool
     use_deepep_internode: bool
     use_deepep_low_latency: bool
     use_deepep_moe: bool
@@ -555,30 +878,43 @@ class MoeConfig:
         ...
     def to_string(self) -> str:
         ...
-    def update_from_env(self) -> None:
-        ...
+
 class ParallelismDistributedConfig:
     dp_size: int
+    dp_tp_nccl_port: int
+    enable_sp: bool
+    ep_rank: int
     ep_size: int
+    ffn_disaggregate_config: FfnDisAggregateConfig
     ffn_sp_size: int
+    ffn_tp_nccl_port: int
+    ffn_tp_rank: int
+    ffn_tp_size: int
+    http_port: int
+    local_rank: int
     local_world_size: int
+    model_rpc_port: int
+    nccl_ip: str
     pp_size: int
+    th_nccl_port: int
+    tp_nccl_port: int
+    tp_rank: int
     tp_size: int
     use_all_gather: bool
     world_rank: int
     world_size: int
-    def __init__(self, tp_size: int = 1, ep_size: int = 1, dp_size: int = 1, pp_size: int = 1, world_size: int = 1, world_rank: int = 0, local_world_size: int = 1, ffn_sp_size: int = 1, use_all_gather: bool = True) -> None:
+    def __getstate__(self) -> tuple:
+        ...
+    def __init__(self) -> None:
+        ...
+    def __setstate__(self, arg0: tuple) -> None:
         ...
     def to_string(self) -> str:
-        ...
-    def update_from_env(self) -> None:
         ...
 class ProfilingDebugLoggingConfig:
     check_nan: bool
     debug_load_server: bool
     debug_start_fake_process: bool
-    dg_print_reg_reuse: bool
-    disable_dpc_random: bool
     enable_detail_log: bool
     enable_device_perf: bool
     ft_alog_conf_path: str
@@ -588,28 +924,31 @@ class ProfilingDebugLoggingConfig:
     log_file_backup_count: int
     log_level: str
     log_path: str
-    nccl_debug_file: str
-    qwen_agent_debug: bool
     torch_cuda_profiler_dir: str
     trace_malloc_stack: bool
     trace_memory: bool
-    def __init__(self, trace_memory: bool = False, trace_malloc_stack: bool = False, enable_device_perf: bool = False, ft_core_dump_on_exception: bool = False, ft_alog_conf_path: str = '', log_level: str = 'INFO', gen_timeline_sync: bool = False, torch_cuda_profiler_dir: str = '', log_path: str = 'logs', log_file_backup_count: int = 16, nccl_debug_file: str = '', debug_load_server: bool = False, hack_layer_num: int = 0, debug_start_fake_process: bool = False, dg_print_reg_reuse: bool = False, qwen_agent_debug: bool = False, disable_dpc_random: bool = False, enable_detail_log: bool = False, check_nan: bool = False) -> None:
-        ...
-    def to_string(self) -> str:
-        ...
-    def update_from_env(self) -> None:
-        ...
-class QuantAlgo:
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:
         ...
     def __setstate__(self, arg0: tuple) -> None:
         ...
+    def to_string(self) -> str:
+        ...
+class QuantAlgo:
+    @typing.overload
+    def __init__(self) -> None:
+        ...
+    @typing.overload
+    def __init__(self, method: ..., bits: int, group_size: int) -> None:
+        ...
     def getActivationBits(self) -> int:
         ...
     def getGroupSize(self) -> int:
         ...
+    def getQuantMethod(self) -> ...:
+        ...
+>>>>>>> 817bf47bd (refactor: migrate to new config architecture (EngineConfig, ModelConfig, ModelArgs))
     def getWeightBits(self) -> int:
         ...
     def isAwq(self) -> bool:
@@ -632,7 +971,66 @@ class QuantAlgo:
         ...
     def isWeightOnlyPerCol(self) -> bool:
         ...
-    def setQuantAlgo(self, quant_method: str, bits: int, group_size: int) -> None:
+    def setQuantAlgo(self, arg0: str, arg1: int, arg2: int) -> None:
+        ...
+class QuantMethod:
+    """
+    Members:
+    
+      None
+    
+      WeightOnlyPerCol
+    
+      GptQ
+    
+      Awq
+    
+      SmoothQuant
+    
+      OmniQuant
+    
+      PerTensorQuant
+    
+      FP8Quant
+    
+      FP8PTPC
+    """
+    Awq: typing.ClassVar[QuantMethod]  # value = <QuantMethod.Awq: 3>
+    FP8PTPC: typing.ClassVar[QuantMethod]  # value = <QuantMethod.FP8PTPC: 8>
+    FP8Quant: typing.ClassVar[QuantMethod]  # value = <QuantMethod.FP8Quant: 7>
+    GptQ: typing.ClassVar[QuantMethod]  # value = <QuantMethod.GptQ: 2>
+    None: typing.ClassVar[QuantMethod]  # value = <QuantMethod.None: 0>
+    OmniQuant: typing.ClassVar[QuantMethod]  # value = <QuantMethod.OmniQuant: 5>
+    PerTensorQuant: typing.ClassVar[QuantMethod]  # value = <QuantMethod.PerTensorQuant: 6>
+    SmoothQuant: typing.ClassVar[QuantMethod]  # value = <QuantMethod.SmoothQuant: 4>
+    WeightOnlyPerCol: typing.ClassVar[QuantMethod]  # value = <QuantMethod.WeightOnlyPerCol: 1>
+    __members__: typing.ClassVar[dict[str, QuantMethod]]  # value = {'None': <QuantMethod.None: 0>, 'WeightOnlyPerCol': <QuantMethod.WeightOnlyPerCol: 1>, 'GptQ': <QuantMethod.GptQ: 2>, 'Awq': <QuantMethod.Awq: 3>, 'SmoothQuant': <QuantMethod.SmoothQuant: 4>, 'OmniQuant': <QuantMethod.OmniQuant: 5>, 'PerTensorQuant': <QuantMethod.PerTensorQuant: 6>, 'FP8Quant': <QuantMethod.FP8Quant: 7>, 'FP8PTPC': <QuantMethod.FP8PTPC: 8>}
+    def __eq__(self, other: typing.Any) -> bool:
+        ...
+    def __getstate__(self) -> int:
+        ...
+    def __hash__(self) -> int:
+        ...
+    def __index__(self) -> int:
+        ...
+    def __init__(self, value: int) -> None:
+        ...
+    def __int__(self) -> int:
+        ...
+    def __ne__(self, other: typing.Any) -> bool:
+        ...
+    def __repr__(self) -> str:
+        ...
+    def __setstate__(self, state: int) -> None:
+        ...
+    def __str__(self) -> str:
+        ...
+    @property
+    def name(self) -> str:
+        ...
+    @property
+    def value(self) -> int:
+>>>>>>> 817bf47bd (refactor: migrate to new config architecture (EngineConfig, ModelConfig, ModelArgs))
         ...
 class RoleSpecialTokens:
     eos_token_ids: list[int]
@@ -677,6 +1075,7 @@ class RoleType:
         ...
     def __setstate__(self, state: int) -> None:
         ...
+<<<<<<< HEAD
     @typing.overload
     def __str__(self) -> str:
         ...
@@ -690,24 +1089,6 @@ class RoleType:
     def value(self) -> int:
         ...
 class SamplerConfig:
-    enable_flashinfer_sample_kernel: bool
-    max_batch_size: int
-    def __init__(self, max_batch_size: int = 0, enable_flashinfer_sample_kernel: bool = True) -> None:
-        ...
-    def to_string(self) -> str:
-        ...
-    def update_from_env(self) -> None:
-        ...
-class SchedulerConfig:
-    use_batch_decode_scheduler: bool
-    use_gather_batch_scheduler: bool
-    def __init__(self, use_batch_decode_scheduler: bool = False, use_gather_batch_scheduler: bool = False) -> None:
-        ...
-    def to_string(self) -> str:
-        ...
-    def update_from_env(self) -> None:
-        ...
-class ServiceDiscoveryConfig:
     decode_cm2_config: str
     multimodal_part_cm2_config: str
     remote_rpc_server_ip: str
@@ -718,6 +1099,127 @@ class ServiceDiscoveryConfig:
     def to_string(self) -> str:
         ...
     def update_from_env(self) -> None:
+        ...
+class RopeConfig:
+    dim: int
+    extrapolation_factor: float
+    factor1: float
+    factor2: float
+    index_factor: int
+    max_pos: int
+    mrope_dim1: int
+    mrope_dim2: int
+    mrope_dim3: int
+    mscale: float
+    offset: int
+    scale: float
+    def __init__(self) -> None:
+        ...
+    @property
+    def base(self) -> int:
+        ...
+    @base.setter
+    def base(self, arg1: typing.Any) -> None:
+        ...
+    @property
+    def style(self) -> RopeStyle:
+        ...
+    @style.setter
+    def style(self, arg1: typing.Any) -> None:
+        ...
+class RopeStyle:
+    """
+    Members:
+    
+      No
+    
+      Base
+    
+      Glm2
+    
+      DynamicNTK
+    
+      QwenDynamicNTK
+    
+      Yarn
+    
+      Llama3
+    
+      Mrope
+    """
+    Base: typing.ClassVar[RopeStyle]  # value = <RopeStyle.Base: 1>
+    DynamicNTK: typing.ClassVar[RopeStyle]  # value = <RopeStyle.DynamicNTK: 3>
+    Glm2: typing.ClassVar[RopeStyle]  # value = <RopeStyle.Glm2: 2>
+    Llama3: typing.ClassVar[RopeStyle]  # value = <RopeStyle.Llama3: 6>
+    Mrope: typing.ClassVar[RopeStyle]  # value = <RopeStyle.Mrope: 7>
+    No: typing.ClassVar[RopeStyle]  # value = <RopeStyle.No: 0>
+    QwenDynamicNTK: typing.ClassVar[RopeStyle]  # value = <RopeStyle.QwenDynamicNTK: 4>
+    Yarn: typing.ClassVar[RopeStyle]  # value = <RopeStyle.Yarn: 5>
+    __members__: typing.ClassVar[dict[str, RopeStyle]]  # value = {'No': <RopeStyle.No: 0>, 'Base': <RopeStyle.Base: 1>, 'Glm2': <RopeStyle.Glm2: 2>, 'DynamicNTK': <RopeStyle.DynamicNTK: 3>, 'QwenDynamicNTK': <RopeStyle.QwenDynamicNTK: 4>, 'Yarn': <RopeStyle.Yarn: 5>, 'Llama3': <RopeStyle.Llama3: 6>, 'Mrope': <RopeStyle.Mrope: 7>}
+    def __eq__(self, other: typing.Any) -> bool:
+        ...
+    def __getstate__(self) -> int:
+        ...
+    def __hash__(self) -> int:
+        ...
+    def __index__(self) -> int:
+        ...
+    def __init__(self, value: int) -> None:
+        ...
+    def __int__(self) -> int:
+        ...
+    def __ne__(self, other: typing.Any) -> bool:
+        ...
+    def __repr__(self) -> str:
+        ...
+    def __setstate__(self, state: int) -> None:
+        ...
+    def __str__(self) -> str:
+        ...
+    @property
+    def name(self) -> str:
+        ...
+    @property
+    def value(self) -> int:
+        ...
+class RuntimeConfig:
+    acext_gemm_config_dir: str
+    max_block_size_per_item: int
+    max_generate_batch_size: int
+    model_name: str
+    pre_allocate_op_mem: bool
+    reserve_runtime_mem_mb: int
+    specify_gpu_arch: str
+    use_batch_decode_scheduler: bool
+    use_gather_batch_scheduler: bool
+    warm_up: bool
+    warm_up_with_loss: bool
+    worker_addrs: list[str]
+    worker_grpc_addrs: list[str]
+    def __getstate__(self) -> tuple:
+        ...
+    def __init__(self) -> None:
+        ...
+    def __setstate__(self, arg0: tuple) -> None:
+        ...
+    def to_string(self) -> str:
+        ...
+    @property
+    def batch_decode_scheduler_config(self) -> BatchDecodeSchedulerConfig:
+        ...
+    @property
+    def fifo_scheduler_config(self) -> FIFOSchedulerConfig:
+        ...
+class SamplerConfig:
+    enable_flashinfer_sample_kernel: bool
+    max_batch_size: int
+    def __getstate__(self) -> tuple:
+        ...
+    def __init__(self) -> None:
+        ...
+    def __setstate__(self, arg0: tuple) -> None:
+        ...
+    def to_string(self) -> str:
         ...
 class SpecialTokens:
     assistant: RoleSpecialTokens
@@ -732,19 +1234,181 @@ class SpecialTokens:
     def __init__(self) -> None:
         ...
 class SpeculativeExecutionConfig:
+    checkpoint_path: str
     force_score_context_attention: bool
     force_stream_sample: bool
     gen_num_per_cycle: int
+    model_type: str
+    quantization: str
     sp_max_token_match: int
     sp_min_token_match: int
-    sp_model_type: str
-    sp_type: str
     tree_decode_config: str
-    def __init__(self, sp_model_type: str = '', sp_type: str = '', sp_min_token_match: int = 2, sp_max_token_match: int = 2, tree_decode_config: str = '', gen_num_per_cycle: int = 1, force_stream_sample: bool = False, force_score_context_attention: bool = True) -> None:
+    type: str
+    def __getstate__(self) -> tuple:
+        ...
+    def __init__(self) -> None:
+        ...
+    def __setstate__(self, arg0: tuple) -> None:
         ...
     def to_string(self) -> str:
         ...
-    def update_from_env(self) -> None:
+class SpeculativeType:
+    """
+    Members:
+    
+      NONE
+    
+      VANILLA
+    
+      MTP
+    
+      EAGLE3
+    
+      EAGLE
+    
+      DETERMINISTIC
+    """
+    DETERMINISTIC: typing.ClassVar[SpeculativeType]  # value = <SpeculativeType.DETERMINISTIC: 5>
+    EAGLE: typing.ClassVar[SpeculativeType]  # value = <SpeculativeType.EAGLE: 4>
+    EAGLE3: typing.ClassVar[SpeculativeType]  # value = <SpeculativeType.EAGLE3: 3>
+    MTP: typing.ClassVar[SpeculativeType]  # value = <SpeculativeType.MTP: 2>
+    NONE: typing.ClassVar[SpeculativeType]  # value = <SpeculativeType.NONE: 0>
+    VANILLA: typing.ClassVar[SpeculativeType]  # value = <SpeculativeType.VANILLA: 1>
+    __members__: typing.ClassVar[dict[str, SpeculativeType]]  # value = {'NONE': <SpeculativeType.NONE: 0>, 'VANILLA': <SpeculativeType.VANILLA: 1>, 'MTP': <SpeculativeType.MTP: 2>, 'EAGLE3': <SpeculativeType.EAGLE3: 3>, 'EAGLE': <SpeculativeType.EAGLE: 4>, 'DETERMINISTIC': <SpeculativeType.DETERMINISTIC: 5>}
+    def __eq__(self, other: typing.Any) -> bool:
+        ...
+    def __getstate__(self) -> int:
+        ...
+    def __hash__(self) -> int:
+        ...
+    def __index__(self) -> int:
+        ...
+    def __init__(self, value: int) -> None:
+        ...
+    def __int__(self) -> int:
+        ...
+    def __ne__(self, other: typing.Any) -> bool:
+        ...
+    def __repr__(self) -> str:
+        ...
+    def __setstate__(self, state: int) -> None:
+        ...
+    def __str__(self) -> str:
+        ...
+    @property
+    def name(self) -> str:
+        ...
+    @property
+    def value(self) -> int:
+        ...
+class TaskType:
+    """
+    Members:
+    
+      DENSE_EMBEDDING
+    
+      ALL_EMBEDDING
+    
+      SPARSE_EMBEDDING
+    
+      COLBERT_EMBEDDING
+    
+      LANGUAGE_MODEL
+    
+      SEQ_CLASSIFICATION
+    
+      RERANKER
+    
+      LINEAR_SOFTMAX
+    
+      BGE_M3
+    """
+    ALL_EMBEDDING: typing.ClassVar[TaskType]  # value = <TaskType.ALL_EMBEDDING: 1>
+    BGE_M3: typing.ClassVar[TaskType]  # value = <TaskType.BGE_M3: 8>
+    COLBERT_EMBEDDING: typing.ClassVar[TaskType]  # value = <TaskType.COLBERT_EMBEDDING: 3>
+    DENSE_EMBEDDING: typing.ClassVar[TaskType]  # value = <TaskType.DENSE_EMBEDDING: 0>
+    LANGUAGE_MODEL: typing.ClassVar[TaskType]  # value = <TaskType.LANGUAGE_MODEL: 4>
+    LINEAR_SOFTMAX: typing.ClassVar[TaskType]  # value = <TaskType.LINEAR_SOFTMAX: 7>
+    RERANKER: typing.ClassVar[TaskType]  # value = <TaskType.RERANKER: 6>
+    SEQ_CLASSIFICATION: typing.ClassVar[TaskType]  # value = <TaskType.SEQ_CLASSIFICATION: 5>
+    SPARSE_EMBEDDING: typing.ClassVar[TaskType]  # value = <TaskType.SPARSE_EMBEDDING: 2>
+    __members__: typing.ClassVar[dict[str, TaskType]]  # value = {'DENSE_EMBEDDING': <TaskType.DENSE_EMBEDDING: 0>, 'ALL_EMBEDDING': <TaskType.ALL_EMBEDDING: 1>, 'SPARSE_EMBEDDING': <TaskType.SPARSE_EMBEDDING: 2>, 'COLBERT_EMBEDDING': <TaskType.COLBERT_EMBEDDING: 3>, 'LANGUAGE_MODEL': <TaskType.LANGUAGE_MODEL: 4>, 'SEQ_CLASSIFICATION': <TaskType.SEQ_CLASSIFICATION: 5>, 'RERANKER': <TaskType.RERANKER: 6>, 'LINEAR_SOFTMAX': <TaskType.LINEAR_SOFTMAX: 7>, 'BGE_M3': <TaskType.BGE_M3: 8>}
+    def __eq__(self, other: typing.Any) -> bool:
+        ...
+    def __getstate__(self) -> int:
+        ...
+    def __hash__(self) -> int:
+        ...
+    def __index__(self) -> int:
+        ...
+    def __init__(self, value: int) -> None:
+        ...
+    def __int__(self) -> int:
+        ...
+    def __ne__(self, other: typing.Any) -> bool:
+        ...
+    def __repr__(self) -> str:
+        ...
+    def __setstate__(self, state: int) -> None:
+        ...
+    def __str__(self) -> str:
+        ...
+    @property
+    def name(self) -> str:
+        ...
+    @property
+    def value(self) -> int:
+        ...
+class VitConfig:
+    vit_separation: VitSeparation
+    def __getstate__(self) -> tuple:
+        ...
+    def __init__(self) -> None:
+        ...
+    def __setstate__(self, arg0: tuple) -> None:
+        ...
+    def to_string(self) -> str:
+        ...
+class VitSeparation:
+    """
+    Members:
+    
+      VIT_SEPARATION_LOCAL
+    
+      VIT_SEPARATION_ROLE
+    
+      VIT_SEPARATION_REMOTE
+    """
+    VIT_SEPARATION_LOCAL: typing.ClassVar[VitSeparation]  # value = <VitSeparation.VIT_SEPARATION_LOCAL: 0>
+    VIT_SEPARATION_REMOTE: typing.ClassVar[VitSeparation]  # value = <VitSeparation.VIT_SEPARATION_REMOTE: 2>
+    VIT_SEPARATION_ROLE: typing.ClassVar[VitSeparation]  # value = <VitSeparation.VIT_SEPARATION_ROLE: 1>
+    __members__: typing.ClassVar[dict[str, VitSeparation]]  # value = {'VIT_SEPARATION_LOCAL': <VitSeparation.VIT_SEPARATION_LOCAL: 0>, 'VIT_SEPARATION_ROLE': <VitSeparation.VIT_SEPARATION_ROLE: 1>, 'VIT_SEPARATION_REMOTE': <VitSeparation.VIT_SEPARATION_REMOTE: 2>}
+    def __eq__(self, other: typing.Any) -> bool:
+        ...
+    def __getstate__(self) -> int:
+        ...
+    def __hash__(self) -> int:
+        ...
+    def __index__(self) -> int:
+        ...
+    def __init__(self, value: int) -> None:
+        ...
+    def __int__(self) -> int:
+        ...
+    def __ne__(self, other: typing.Any) -> bool:
+        ...
+    def __repr__(self) -> str:
+        ...
+    def __setstate__(self, state: int) -> None:
+        ...
+    def __str__(self) -> str:
+        ...
+    @property
+    def name(self) -> str:
+        ...
+    @property
+    def value(self) -> int:
+>>>>>>> 817bf47bd (refactor: migrate to new config architecture (EngineConfig, ModelConfig, ModelArgs))
         ...
 def get_block_cache_keys(token_ids_list: list[list[int]]) -> list[int]:
     ...

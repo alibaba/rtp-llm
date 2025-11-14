@@ -5,7 +5,7 @@
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/devices/DeviceBase.h"
 #include "kmonitor/client/MetricsReporter.h"
-#include "rtp_llm/cpp/models/eplb/EplbConfig.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 
 namespace rtp_llm {
 
@@ -69,7 +69,7 @@ enum class EplbPlanStatus {
 class EplbController {
 private:
     std::mutex eplb_control_mutex;
-    EplbConfig eplb_control_data;
+    EPLBConfig eplb_control_data;
 
     BufferPtr eplb_control_data_buf_host;
     BufferPtr eplb_control_data_buf_device;
@@ -78,10 +78,10 @@ private:
     int cur_step     = 0;
 
 public:
-    void       init(const EplbConfig& eplb_control_data, DeviceBase* device);
-    void       setData(const EplbConfig& updated_control_data);
+    void       init(const EPLBConfig& eplb_control_data, DeviceBase* device, const EPLBConfig& eplb_config);
+    void       setData(const EPLBConfig& updated_control_data);
     bool       stepAndCheckSyncStep();
-    EplbConfig getAndSyncData(DeviceBase* device);
+    EPLBConfig getAndSyncData(DeviceBase* device);
 };
 
 class ExpertBalancer {
@@ -92,20 +92,19 @@ public:
                    size_t                       num_layers,
                    size_t                       moe_size,
                    size_t                       hidden_size,
-                   size_t                       update_time,
                    size_t                       ep_rank,
                    size_t                       ep_size,
                    py::object                   py_eplb,
                    DataType                     dtype,
                    DeviceBase*                  device,
-                   EplbMode                     eplb_mode,
                    QuantAlgo                    quant_algo,
-                   kmonitor::MetricsReporterPtr metrics_reporter);
+                   kmonitor::MetricsReporterPtr metrics_reporter,
+                   const EPLBConfig&             eplb_config);
     ~ExpertBalancer();
 
     void stepForward(GptModel& model, RtpLLMExecutorMetricsCollector& executor_collector);
 
-    bool updateEplbConfig(const EplbConfig& config);
+    bool updateEplbConfig(const EPLBConfig& config);
 
 private:
     void syncController();
@@ -151,7 +150,7 @@ private:
     LoadFlags           load_flags_;
 
     EplbController eplb_controller_;
-    EplbConfig     eplb_control_data_;
+    EPLBConfig     eplb_control_data_;
 
     RtpLLmEplbMetricsCollector   executor_collector_;
     kmonitor::MetricsReporterPtr metrics_reporter_;

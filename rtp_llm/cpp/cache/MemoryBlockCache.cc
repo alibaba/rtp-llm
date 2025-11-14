@@ -20,12 +20,16 @@ namespace rtp_llm {
 MemoryBlockCache::MemoryBlockCache(const CacheConfig&                  config,
                                    rtp_llm::DeviceBase*                device,
                                    KVCacheAllocator*                   gpu_kvcache_allocator,
-                                   const GptInitParameter&             gpt_init_params,
+                                   const ParallelismConfig&            parallelism_config,
+                                   const KVCacheConfig&                kv_cache_config,
+                                   const RuntimeConfig&                runtime_config,
                                    const kmonitor::MetricsReporterPtr& metrics_reporter):
     config_(config),
     device_(device),
     gpu_kvcache_allocator_(gpu_kvcache_allocator),
-    gpt_init_params_(gpt_init_params),
+    parallelism_config_(parallelism_config),
+    kv_cache_config_(kv_cache_config),
+    runtime_config_(runtime_config),
     metrics_reporter_(metrics_reporter) {}
 
 MemoryBlockCache::~MemoryBlockCache() {
@@ -52,7 +56,7 @@ bool MemoryBlockCache::init() {
     block_lru_cache_ = std::make_unique<BlockLRUCache>(config_.block_nums, config_.seq_size_per_block);
 
     // 初始化RPC连接池
-    if (gpt_init_params_.tp_size_ > 1) {
+    if (parallelism_config_.tp_size > 1) {
         rpc_pool_ = std::make_shared<RPCPool>();
     }
 
@@ -60,8 +64,8 @@ bool MemoryBlockCache::init() {
         metrics_reporter_thread_ = std::thread(&MemoryBlockCache::reportMetricsLoop, this);
     }
     RTP_LLM_LOG_INFO("memory block cache init success, memory size %d mb, sync timeout %d ms, config: %s",
-                     gpt_init_params_.kv_cache_config.memory_block_cache_size_mb,
-                     gpt_init_params_.kv_cache_config.memory_block_cache_sync_timeout_ms,
+                     kv_cache_config_.memory_block_cache_size_mb,
+                     kv_cache_config_.memory_block_cache_sync_timeout_ms,
                      config_.debugString().c_str());
     return true;
 }
@@ -267,7 +271,7 @@ bool MemoryBlockCache::copyKVData(const std::vector<int>& memory_block_indices,
     device_->noBlockCopy({dst_buffers, src_buffers});
 
     recordCopyMetrics(true, timer.done_us(), direction);
-    if (timer.done_us() / 1000 > gpt_init_params_.kv_cache_config.memory_block_cache_sync_timeout_ms) {
+    if (timer.done_us() / 1000 > kv_cache_config_.memory_block_cache_sync_timeout_ms) {
         RTP_LLM_LOG_INFO(
             "memory block cache done, %s copy timeout, request: %ld, block size: %zu, copy buffer count: %zu, latency: %ld ms",
             direction == CopyDirection::FROM_GPU ? "from GPU" : "to GPU",
@@ -313,7 +317,7 @@ bool MemoryBlockCache::copyKVDataForAllRank(const std::vector<int>& memory_block
                                             const std::vector<int>& gpu_block_indices,
                                             CopyDirection           direction,
                                             int64_t                 request_id) {
-    if (gpt_init_params_.tp_size_ <= 1) {
+    if (parallelism_config_.tp_size <= 1) {
         // 单TP场景，直接调用单TP版本
         auto ret = copyKVData(memory_block_indices, gpu_block_indices, direction, request_id);
         return ret;
@@ -331,7 +335,7 @@ bool MemoryBlockCache::copyKVDataForAllRank(const std::vector<int>& memory_block
     bool success = syncRpcCallForAllRank(gpu_block_indices,
                                          memory_block_indices,
                                          op_type,
-                                         gpt_init_params_.kv_cache_config.memory_block_cache_sync_timeout_ms,
+                                         kv_cache_config_.memory_block_cache_sync_timeout_ms,
                                          request_id);
     if (success) {
         return true;
@@ -361,7 +365,7 @@ bool MemoryBlockCache::syncRpcCallForAllRank(const std::vector<int>& gpu_block_i
                                              int                     timeout_ms,
                                              int64_t                 request_id) {
     // 多TP场景，使用gRPC同步所有rank
-    const auto& grpc_workers = gpt_init_params_.worker_grpc_addrs_;
+    const auto& grpc_workers = runtime_config_.worker_grpc_addrs;
     if (grpc_workers.empty() || !rpc_pool_) {
         RTP_LLM_LOG_WARNING("sync RPC call for all rank failed, grpc workers empty or rpc pool/thread pool null");
         return false;

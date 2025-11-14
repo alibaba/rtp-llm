@@ -1,16 +1,12 @@
 import os
 from unittest import TestCase, main, mock
 
-from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 import torch
 
-from rtp_llm.models.base_model import GenerateOutput, GenerateOutputs
+from rtp_llm.ops import PDSepConfig
 from rtp_llm.pipeline.pipeline import Pipeline
 from rtp_llm.test.model_test.test_util.fake_model_loader import FakeModelLoader
-
-os.environ["KV_CACHE_MEM_MB"] = "100"
-os.environ["RESERVER_RUNTIME_MEM_MB"] = "1"
-os.environ["DEVICE_RESERVE_MEMORY_BYTES"] = str(64 * 1024**2)
+from rtp_llm.utils.base_model_datatypes import GenerateOutput, GenerateOutputs
 
 
 class SliceStopWordListTest(TestCase):
@@ -20,10 +16,16 @@ class SliceStopWordListTest(TestCase):
             os.getcwd(),
             "rtp_llm/test/model_test/fake_test/testdata/llama/fake/hf_source",
         )
-        engine: BaseEngine = FakeModelLoader(
-            "llama", ckpt_path, ckpt_path, max_seq_len=1024
-        ).init_engine()
-        self.pipeline = Pipeline(engine.config, engine.model.tokenizer)
+        pd_sep_config = PDSepConfig()
+        self.pipeline = Pipeline(
+            special_tokens=None,
+            pd_sep_config=pd_sep_config,
+            addresses=["localhost:8080"],  # Default test address
+            max_seq_len=1000,
+            seq_size_per_block=1,
+            tokenizer=None,
+            sp_config=None,
+        )
 
     async def mock_generate(self):
         yield GenerateOutputs(

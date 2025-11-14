@@ -26,7 +26,7 @@ from unittest import TestCase, main
 import torch
 
 from rtp_llm.config.generate_config import GenerateConfig
-from rtp_llm.config.log_config import LOGGING_CONFIG
+from rtp_llm.config.log_config import setup_logging
 from rtp_llm.cpp.model_rpc.model_rpc_client import (
     ModelRpcClient,
     StreamState,
@@ -38,7 +38,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     GenerateOutputsPB,
     TensorPB,
 )
-from rtp_llm.models.base_model import GenerateInput, GenerateOutputs
+from rtp_llm.utils.base_model_datatypes import GenerateInput, GenerateOutputs
 
 
 class FakeStub:
@@ -85,6 +85,13 @@ class FakeStub:
 class FakeModelRpcClient(ModelRpcClient):
 
     def __init__(self):
+        # Call parent __init__ with minimal required parameters
+        super().__init__(
+            [],     # addresses: empty list for fake client
+            {},     # client_config: empty dict for fake client
+            0,      # max_rpc_timeout_ms
+            False,  # decode_entrance
+        )
         self.stub = FakeStub()
 
     async def enqueue(
@@ -176,6 +183,5 @@ class ModelRpcClientTest(TestCase):
 
 
 if __name__ == "__main__":
-    if os.environ.get("FT_SERVER_TEST", None) is None:
-        logging.config.dictConfig(LOGGING_CONFIG)
+    setup_logging()
     main()

@@ -386,7 +386,7 @@ class StaticPerTensorFp8Weight(CompositeWeight, QuantWeight):
                     ],
                     functools.partial(
                         pad_w13,
-                        inter_padding_size=src_weight.config.inter_padding_size,
+                        align_size=src_weight.config.align_size,
                         dim=0,
                     ),
                     data_type=torch.float8_e4m3fn,
@@ -1063,7 +1063,7 @@ class Fp8PerTensorCompressedWeight(CompositeWeight, QuantWeight):
                     ],
                     functools.partial(
                         pad_w13,
-                        inter_padding_size=src_weight.config.inter_padding_size,
+                        align_size=src_weight.config.align_size,
                         dim=0,
                     ),
                     data_type=torch.float8_e4m3fn,
@@ -1167,16 +1167,15 @@ class Fp8PerTensorCompressedWeight(CompositeWeight, QuantWeight):
 
         if isinstance(self.kernel, MoeAtomicWeight):
             if self.kernel.name is W.moe_w1:
-                # handle moe w13 weight
-                num_local_experts, moe_inter_padding_size, _ = kernel_weight.shape
-
-                assert moe_inter_padding_size == (
-                    load_config.moe_inter_padding_size * 2
-                )
+                # handle moe w13 weight (w13 is concatenated, so split in half)
+                num_local_experts, total_padded_size, _ = kernel_weight.shape
                 assert kernel_scale is not None
+                
+                # Total padded size should be 2x the individual w1/w3 padded size
+                half_size = total_padded_size // 2
                 max_kernel_scale = kernel_scale.max(dim=1).values
-                moe_inter_padding_size = moe_inter_padding_size // 2
 
+                # Rescale each expert's w1 and w3 shards if needed
                 for expert_id in range(num_local_experts):
                     start = 0
                     for shard_id in range(2):
@@ -1187,15 +1186,16 @@ class Fp8PerTensorCompressedWeight(CompositeWeight, QuantWeight):
                             # rescale shard
                             dq_weight = (
                                 kernel_weight[expert_id][
-                                    start : start + moe_inter_padding_size, :
+                                    start : start + half_size, :
                                 ].to(torch.float16)
                                 * kernel_scale[expert_id][shard_id]
                             )
                             kernel_weight[expert_id][
-                                start : start + moe_inter_padding_size, :
+                                start : start + half_size, :
                             ] = (dq_weight / max_kernel_scale[expert_id]).to(
                                 torch.float8_e4m3fn
                             )
+
                 processed_res[self.kernel.name] = kernel_weight
                 processed_res[W.moe_s1] = max_kernel_scale
 

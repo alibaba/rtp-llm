@@ -3,7 +3,7 @@ from typing import Dict, Tuple
 
 import torch
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     ExpertForwardPayload,
     ExpertTokensMetadata,
@@ -12,14 +12,14 @@ from rtp_llm.utils.model_weight import W
 
 
 def generate_payload_and_weights(
-    config: GptInitModelParameters,
+    config: MoEConfigAdapter,
 ) -> Tuple[ExpertForwardPayload, Dict[str, torch.Tensor]]:
     M = (
         (config.max_generate_batch_size + config.tp_size - 1)
         // config.tp_size
         * config.ep_size
     )
-    N = config.moe_inter_padding_size * 2
+    N = config.model_config.moe_inter_size * 2
     K = config.hidden_size
     top_k = 8
     torch_dtype = torch.bfloat16
@@ -82,7 +82,7 @@ def generate_payload_and_weights(
 
 
 def generate_ref_output(
-    config: GptInitModelParameters,
+    config: MoEConfigAdapter,
     payload: ExpertForwardPayload,
     weights: Dict[str, torch.Tensor],
 ) -> torch.Tensor:
@@ -91,7 +91,7 @@ def generate_ref_output(
         // config.tp_size
         * config.ep_size
     )
-    N = config.moe_inter_padding_size * 2
+    N = config.model_config.moe_inter_size * 2
     K = config.hidden_size
     num_local_experts = config.expert_num // config.ep_size
     expert_x = payload.expert_x

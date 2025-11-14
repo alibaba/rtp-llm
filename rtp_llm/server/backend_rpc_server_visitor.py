@@ -1,13 +1,13 @@
 import logging
-from typing import AsyncGenerator, List
+from typing import AsyncGenerator, List, Optional
 
 import torch
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleAddr, RoleType
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.config.py_config_modules import StaticConfig
+from rtp_llm.config.model_config import ModelConfig as PyModelConfig
 from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient
+from rtp_llm.ops import SpeculativeExecutionConfig, VitSeparation
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.ops import get_block_cache_keys
@@ -22,39 +22,76 @@ route_logger = logging.getLogger("route_logger")
 
 class BackendRPCServerVisitor:
     def __init__(
-        self, model_config: GptInitModelParameters, separated_frontend: bool = False
+        self,
+        max_seq_len: int,  # max_seq_len_ from ModelConfig
+        seq_size_per_block: int,  # seq_size_per_block_ from ModelConfig
+        pd_sep_config,  # PDSepConfig from ops
+        addresses: list[str],  # RPC addresses for data parallel communication
+        sp_config: Optional[SpeculativeExecutionConfig] = None,
+        grpc_config=None,  # Optional GrpcConfig
+        vit_separation: Optional[VitSeparation] = None,  # Optional VitSeparation
     ) -> None:
-        self.config = model_config
-        assert self.config.max_seq_len > 0
-        self.model_rpc_client = ModelRpcClient(self.config)
+        """Initialize BackendRPCServerVisitor.
+        
+        Args:
+            max_seq_len: Maximum sequence length from ModelConfig
+            seq_size_per_block: Sequence size per block from ModelConfig
+            pd_sep_config: PDSepConfig from ops
+            addresses: List of RPC addresses for data parallel communication
+            sp_config: Optional SpeculativeExecutionConfig
+            grpc_config: Optional GrpcConfig for client configuration
+            vit_separation: Optional VitSeparation for multimodal models
+        """
+        self.max_seq_len = max_seq_len
+        self.seq_size_per_block = seq_size_per_block
+        self.pd_sep_config = pd_sep_config
+        self.sp_config = sp_config
+        assert self.max_seq_len > 0
+        
+        # Get max_rpc_timeout_ms and decode_entrance from pd_sep_config
+        max_rpc_timeout_ms = pd_sep_config.max_rpc_timeout_ms
+        decode_entrance = pd_sep_config.decode_entrance
+        
+        # Get client_config from grpc_config if provided, otherwise use empty dict
+        if grpc_config is not None:
+            client_config = grpc_config.get_client_config()
+        else:
+            client_config = {}
+        
+        self.model_rpc_client = ModelRpcClient(
+            addresses=addresses,
+            client_config=client_config,
+            max_rpc_timeout_ms=max_rpc_timeout_ms,
+            decode_entrance=decode_entrance,
+        )
+        
         host_args = HostServiceArgs.create_from_env()
-        self.backend_role_list = self.get_backend_role_list(self.config, host_args)
+        self.backend_role_list = self.get_backend_role_list(
+            self.pd_sep_config, host_args, vit_separation
+        )
         self.host_service = HostService(host_args)
         self.master_client = MasterClient()
-        self.separated_frontend = separated_frontend
 
     @staticmethod
     def get_backend_role_list(
-        config: GptInitModelParameters, host_args: HostServiceArgs
+        pd_sep_config, host_args: HostServiceArgs, vit_separation: Optional[VitSeparation] = None
     ) -> List[RoleType]:
+        logging.info(f"pd_sep_config: {pd_sep_config.to_string()}")
         role_list: List[RoleType] = []
 
-        # Convert config.role_type to the correct enum if needed
-        config_role_type = config.role_type
-        if hasattr(config.role_type, "value"):
-            config_role_type = config.role_type.value
-
-        if config.vit_separation == 2 and host_args.vit_domain:
+        if vit_separation == VitSeparation.VIT_SEPARATION_REMOTE and host_args.vit_domain:
             role_list.append(RoleType.VIT)
             logging.info("Added VIT role")
 
-        if config_role_type == RoleType.PREFILL.value and not config.decode_entrance:
+        config_role_type = pd_sep_config.role_type
+
+        if config_role_type == RoleType.PREFILL and not pd_sep_config.decode_entrance:
             role_list.append(RoleType.DECODE)
             logging.info("Added DECODE role for PREFILL type")
-        elif config_role_type == RoleType.DECODE.value and config.decode_entrance:
+        elif config_role_type == RoleType.DECODE and pd_sep_config.decode_entrance:
             role_list.append(RoleType.PREFILL)
             logging.info("Added PREFILL role for DECODE type")
-        elif config_role_type == RoleType.FRONTEND.value:
+        elif config_role_type == RoleType.FRONTEND:
             logging.info(
                 f"Checking FRONTEND roles: decode_domain={host_args.decode_domain}, prefill_domain={host_args.prefill_domain}, pdfusion_domain={host_args.pdfusion_domain}"
             )
@@ -78,7 +115,7 @@ class BackendRPCServerVisitor:
         else:
             token_ids: List[int] = input.token_ids.tolist()  # type: ignore
         block_cache_keys = get_block_cache_keys(
-            token_ids, self.config.seq_size_per_block
+            token_ids, self.seq_size_per_block
         )
 
         try:
@@ -135,7 +172,7 @@ class BackendRPCServerVisitor:
                 1,
             )
         else:
-            route_logger.error(f"host service failed, request <{input.request_id}>")
+            route_logger.error(f"host service failed, request <{input.request_id}>, missing roles: {missing_roles}")
 
     async def route_ips(self, input: GenerateInput):
         with Timer() as route_timer:
@@ -181,7 +218,7 @@ class BackendRPCServerVisitor:
             )
 
     def check_sp_supported(self, input: GenerateInput):
-        if not StaticConfig.py_speculative_execution_config.sp_model_type:
+        if not self.sp_config or not self.sp_config.model_type:
             return
         if input.generate_config.force_disable_sp_run:
             return
@@ -221,13 +258,13 @@ class BackendRPCServerVisitor:
         self.check_sp_supported(input)
 
         max_new_tokens = min(
-            self.config.max_seq_len - input.prompt_length,
+            self.max_seq_len - input.prompt_length,
             input.generate_config.max_new_tokens,
         )
         if max_new_tokens <= 0:
             raise FtRuntimeException(
                 ExceptionType.LONG_PROMPT_ERROR,
-                f"model max tokens is {self.config.max_seq_len}, "
+                f"model max tokens is {self.max_seq_len}, "
                 f"request length is {input.prompt_length}, max_new_tokens is {max_new_tokens}",
             )
 

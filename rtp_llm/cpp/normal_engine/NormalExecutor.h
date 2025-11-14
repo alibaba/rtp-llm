@@ -36,7 +36,7 @@ public:
         model_ = std::move(model);
     }
 
-    bool updateEplbConfig(const EplbConfig& config) override;
+    bool updateEplbConfig(const EPLBConfig& config) override;
 
 private:
     std::unique_ptr<GptModel>                                                model_;

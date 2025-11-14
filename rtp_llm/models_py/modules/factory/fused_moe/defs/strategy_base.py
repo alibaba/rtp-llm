@@ -4,11 +4,11 @@ Defines the unified interface for all MOE strategies.
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict
+from typing import Dict, Any
 
 import torch
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     FusedMoeDataRouter,
     FusedMoeExpertExecutor,
@@ -29,7 +29,7 @@ class MoeStrategy(ABC):
     to define which Router and Executor implementations they use.
     """
 
-    def can_handle(self, config: GptInitModelParameters) -> bool:
+    def can_handle(self, config: MoEConfigAdapter) -> bool:
         """Determine whether this strategy can handle the given configuration
 
         This method creates a checker and calls the check_conditions methods
@@ -37,7 +37,7 @@ class MoeStrategy(ABC):
         the given configuration.
 
         Args:
-            config: Model initialization parameters
+            config: MOE configuration adapter
 
         Returns:
             Whether this configuration can be handled
@@ -62,15 +62,15 @@ class MoeStrategy(ABC):
         return checker.all_passed()
 
     @classmethod
-    def check_conditions(cls, checker: Any, config: GptInitModelParameters) -> None:
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         pass
 
     @abstractmethod
-    def create_router(self, config: GptInitModelParameters) -> FusedMoeDataRouter:
+    def create_router(self, config: MoEConfigAdapter) -> FusedMoeDataRouter:
         """Create Router
 
         Args:
-            config: Model initialization parameters
+            config: MOE configuration adapter
 
         Returns:
             Router instance
@@ -79,12 +79,12 @@ class MoeStrategy(ABC):
 
     @abstractmethod
     def create_executor(
-        self, config: GptInitModelParameters, weights: Dict[str, torch.Tensor]
+        self, config: MoEConfigAdapter, weights: Dict[str, torch.Tensor]
     ) -> FusedMoeExpertExecutor:
         """Create Executor
 
         Args:
-            config: Model initialization parameters
+            config: MOE configuration adapter
             weights: Weight dictionary
 
         Returns:

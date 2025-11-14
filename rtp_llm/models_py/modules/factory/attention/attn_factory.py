@@ -1,9 +1,9 @@
 import logging
-from typing import Callable, Dict, List
+from typing import Callable, Dict, List, Optional
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
+from rtp_llm.ops import AttentionConfigs, FMHAType, FMHAConfig
 from rtp_llm.ops.compute_ops import PyAttentionInputs
 from rtp_llm.utils.model_weight import W
 
@@ -15,30 +15,95 @@ DECODE_MLA_IMPS: List[type[FMHAImplBase]] = []
 
 
 def get_mla_impl(
-    config: GptInitModelParameters, weight: ModelWeights, attn_inputs: PyAttentionInputs
+    attn_configs: AttentionConfigs,
+    weight: ModelWeights,
+    attn_inputs: PyAttentionInputs,
+    fmha_config: Optional[FMHAConfig] = None,
+    quant_config: Optional[object] = None,
 ) -> FMHAImplBase:
     mla_impls = PREFILL_MLA_IMPS if attn_inputs.is_prefill else DECODE_MLA_IMPS
     for impl in mla_impls:
         cos_sin_cache = weight.get_global_weight(W.rope_cos_sin_cache)
         instance = impl(
-            config,
+            attn_configs,
             attn_inputs,
             weight.weights,
-            cos_sin_cache,
+            cos_sin_cache=cos_sin_cache,
+            fmha_config=fmha_config,
+            quant_config=quant_config,
         )
         if instance.support():
             return instance
     raise Exception(f"can not find mla type")
 
 
+def _is_fmha_type_disabled(
+    fmha_type: FMHAType, 
+    fmha_config: Optional[FMHAConfig]
+) -> bool:
+    """Check if a FMHA type is disabled in fmha_config.
+    
+    Args:
+        fmha_type: The FMHA type to check
+        fmha_config: The FMHA config, if None, assume not disabled
+        impl_class_name: The implementation class name, used to distinguish between ASM and NonAsm variants
+        
+    Returns:
+        True if the FMHA type is disabled, False otherwise
+    """
+    if fmha_config is None:
+        return False
+    
+    if fmha_type == FMHAType.XQA:
+        return not fmha_config.enable_xqa
+    elif fmha_type == FMHAType.TRT_V2:
+        return not fmha_config.enable_trt_fmha
+    elif fmha_type == FMHAType.PAGED_TRT_V2:
+        return not fmha_config.enable_paged_trt_fmha
+    elif fmha_type == FMHAType.TRT_V1:
+        return not fmha_config.enable_trtv1_fmha
+    elif fmha_type == FMHAType.OPEN_SOURCE:
+        return not fmha_config.enable_open_source_fmha
+    elif fmha_type == FMHAType.PAGED_OPEN_SOURCE:
+        return not fmha_config.enable_paged_open_source_fmha
+    elif fmha_type == FMHAType.FLASH_INFER:
+        return fmha_config.disable_flash_infer
+    elif fmha_type == FMHAType.AITER_ASM_DECODE or fmha_type == FMHAType.AITER_ASM_PREFILL:
+        return not fmha_config.use_asm_pa
+    elif fmha_type == FMHAType.AITER_DECODE or fmha_type == FMHAType.AITER_PREFILL:
+        return not fmha_config.use_aiter_pa
+    # FMHAType.NONE
+    return False
+
+
 def get_fmha_impl(
-    config: GptInitModelParameters, weight: ModelWeights, attn_inputs: PyAttentionInputs
+    attn_configs: AttentionConfigs,
+    weight: ModelWeights,
+    attn_inputs: PyAttentionInputs,
+    fmha_config: Optional[FMHAConfig] = None,
+    quant_config: Optional[object] = None,
 ) -> FMHAImplBase:
     mha_impls = PREFILL_MHA_IMPS if attn_inputs.is_prefill else DECODE_MHA_IMPS
     for impl in mha_impls:
-        instance = impl(config, attn_inputs)
-        if instance.support():
-            return instance
+        # Check if this FMHA type is disabled before creating instance
+        # We need to create a temporary instance to get its fmha_type
+        # But we can optimize by checking the type first if possible
+        try:
+            # Try to get fmha_type without full instantiation if possible
+            # For now, we'll create the instance and check both disabled status and support
+            instance = impl(attn_configs, attn_inputs)
+            fmha_type = instance.fmha_type()
+            
+            # Skip if this FMHA type is disabled in config
+            if _is_fmha_type_disabled(fmha_type, fmha_config):
+                continue
+                
+            if instance.support():
+                return instance
+        except Exception as e:
+            # If instantiation fails, continue to next impl
+            logging.warning(f"Failed to instantiate {impl}: {e}")
+            continue
     raise Exception(f"can not find mha type")
 
 
@@ -49,7 +114,7 @@ class AttnImplFactory(object):
     FMHA_IMPL_REGISTRY: Dict[
         str,
         Callable[
-            [GptInitModelParameters, ModelWeights, PyAttentionInputs], FMHAImplBase
+            [AttentionConfigs, ModelWeights, PyAttentionInputs, Optional[FMHAConfig]], FMHAImplBase
         ],
     ] = {
         "mha": get_fmha_impl,
@@ -59,13 +124,17 @@ class AttnImplFactory(object):
     @classmethod
     def get_fmha_impl(
         cls,
-        config: GptInitModelParameters,
+        model_config,  # ModelConfig - kept for backward compatibility, but will extract attn_configs
+        parallelism_config,
         weight: ModelWeights,
         attn_inputs: PyAttentionInputs,
+        fmha_config: Optional[FMHAConfig] = None,
     ) -> FMHAImplBase:
-        key_str = "mla" if config.use_mla else "mha"
+        # Extract AttentionConfigs from ModelConfig
+        attn_configs = model_config.getAttentionConfigs(parallelism_config.tp_size)
+        key_str = "mla" if attn_configs.use_mla else "mha"
         fmha_impl_method = cls.FMHA_IMPL_REGISTRY[key_str]
-        instance = fmha_impl_method(config, weight, attn_inputs)
+        instance = fmha_impl_method(attn_configs, weight, attn_inputs, fmha_config, model_config.quant_config)
         logging.debug(f"get fmha impl: {instance.fmha_type()}")
         return instance
 

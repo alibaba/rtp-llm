@@ -1,7 +1,7 @@
 import json
 import os
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.ffn_weight import (
     FfnAtomicWeight,
@@ -31,20 +31,12 @@ class QWenV2MoeWeight(QWenV2Weight):
 
         moe_config = MoeConfig(
             expert_num=self.expert_num_,
-            inter_padding_size=(
-                self._layer_inter_padding_size[layer_id]
-                if self._layer_inter_padding_size
-                else self._inter_padding_size
-            ),
+            align_size=self._align_size,
             routed_scaling_factor=1.0,
         )
         ffn_config = FfnConfig(
             is_gated_activation=self._is_gated_activation,
-            inter_padding_size=(
-                self._layer_inter_padding_size[layer_id]
-                if self._layer_inter_padding_size
-                else self._inter_padding_size
-            ),
+            align_size=self._align_size,
         )
         return [
             MoeWithSharedWeight(
@@ -141,7 +133,7 @@ class Qwen2Moe(QWenV2):
         return config
 
     @classmethod
-    def load_moe_config(cls, ckpt_path: str, config: GptInitModelParameters):
+    def load_moe_config(cls, ckpt_path: str, config: ModelConfig):
         config_path = os.path.join(ckpt_path, "config.json")
         if not os.path.exists(config_path):
             raise Exception("qwen2 moe should have config.json")
@@ -150,7 +142,8 @@ class Qwen2Moe(QWenV2):
             config_json = json.loads(content)
         config.moe_k = config_json["num_experts_per_tok"]
         config.expert_num = config_json["num_experts"]
-        config.moe_inter_padding_size = config_json["moe_intermediate_size"]
+        # Set inter_size and moe_inter_size for hybrid MoE
+        config.moe_inter_size = config_json["moe_intermediate_size"]
         config.inter_size = config_json.get("shared_expert_intermediate_size", 0)
         config.layernorm_eps = config_json.get("rms_norm_eps", 1e-06)
         config.has_moe_norm = config_json.get("norm_topk_prob", False)
@@ -164,7 +157,7 @@ class Qwen2Moe(QWenV2):
         if moe_step != 1:
             raise Exception("Paritial moe weights for qwen2 is not implemented yet!")
         config.moe_layer_index = [
-            i for i in range(moe_step - 1, config.layer_num, moe_step)
+            i for i in range(moe_step - 1, config.num_layers, moe_step)
         ]
 
     @staticmethod

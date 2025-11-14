@@ -13,16 +13,13 @@ from flashinfer import (
 from flashinfer.jit import gen_batch_mla_module, gen_batch_prefill_module
 from flashinfer.utils import is_sm90a_supported
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.models_py.modules.factory.linear.factory import LinearFactory
 from rtp_llm.models_py.utils.arch import is_cuda
-
-# from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.models_py.modules.factory.linear.factory import LinearFactory
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
+from rtp_llm.ops import AttentionConfigs
 from rtp_llm.utils.model_weight import W
 
 g_workspace_buffer = None
-
 
 def warmup_flashinfer_python():
     modules = []
@@ -60,6 +57,7 @@ def warmup_flashinfer_python():
                 False,
             )
         )
+
 
 
 def check_attention_inputs(attention_inputs: PyAttentionInputs) -> None:
@@ -158,7 +156,7 @@ def concat_and_cast_mha_k_triton(
 class MlaFlashInferPrefillOp(object):
     def __init__(
         self,
-        config: GptInitModelParameters,  # for LinearFactory
+        attn_configs: AttentionConfigs,
         num_heads: int,
         kv_lora_rank: int,
         qk_rope_head_dim: int,
@@ -168,11 +166,13 @@ class MlaFlashInferPrefillOp(object):
         use_mla: bool,
         weights: List[Dict[str, torch.Tensor]] | None,
         use_trt_fmha: bool = False,
+        quant_config: Optional[object] = None,
     ):
         super().__init__()
         if weights is None:
             raise Exception(f"MlaAbsorbAttention need weights but got none")
-        self.config = config
+        self.attn_configs = attn_configs
+        self.quant_config = quant_config
         self.num_heads = num_heads
         self.kv_lora_rank = kv_lora_rank
         self.qk_rope_head_dim = qk_rope_head_dim
@@ -193,7 +193,7 @@ class MlaFlashInferPrefillOp(object):
         if use_trt_fmha:
             from rtp_llm.ops.compute_ops import TRTAttnOp
 
-            self.prefill_wrapper = TRTAttnOp(self.config)
+            self.prefill_wrapper = TRTAttnOp(attn_configs)
             return
 
         self.prefill_wrapper = BatchPrefillWithRaggedKVCacheWrapper(
@@ -333,11 +333,13 @@ class MlaFlashInferPrefillOp(object):
 
         k_pe = k_pe.view(-1, 1, self.qk_rope_head_dim)
         self.k_nope_proj = LinearFactory.create_linear_from_weights(
-            self.weights[layer_id], W.mla_k_nope_w, W.mla_k_nope_s, None, self.config
+            self.weights[layer_id], W.mla_k_nope_w, W.mla_k_nope_s, None, 
+            self.quant_config
         )
 
         self.v_proj = LinearFactory.create_linear_from_weights(
-            self.weights[layer_id], W.mla_v_w, W.mla_v_s, None, self.config
+            self.weights[layer_id], W.mla_v_w, W.mla_v_s, None,
+            self.quant_config
         )
 
         k_nope = self.k_nope_proj(compressed_kv)
@@ -502,13 +504,15 @@ class MlaFlashInferDecodeOp(object):
 class TrtV2PrefillAttentionOp(object):
     def __init__(
         self,
-        config: GptInitModelParameters,
+        attn_configs: AttentionConfigs,
         num_heads: int,
         kv_lora_rank: int,
         qk_rope_head_dim: int,
         qk_nope_head_dim: int,
         use_mla: bool,
         weights: List[Dict[str, torch.Tensor]] | None,
+        fmha_config,
+        quant_config: Optional[object] = None,
     ):
         super().__init__()
         self.num_heads = num_heads
@@ -516,14 +520,21 @@ class TrtV2PrefillAttentionOp(object):
         self.qk_rope_head_dim = qk_rope_head_dim
         self.qk_nope_head_dim = qk_nope_head_dim
         self.scale = (self.qk_nope_head_dim + self.qk_rope_head_dim) ** -0.5
-        self.config = config
+        self.attn_configs = attn_configs
+        self.quant_config = quant_config
         self.weights = weights
-        self.use_mla = use_mla
+        self.use_mla = use_mla   
+        # Get FMHAConfig - will check in support() method
+        self.fmha_config = fmha_config
+        
         from rtp_llm.ops.compute_ops import TRTAttnOp
 
-        self.fmha_impl = TRTAttnOp(self.config)
+        self.fmha_impl = TRTAttnOp(attn_configs)
 
     def support(self, attention_inputs: PyAttentionInputs):
+        # Check if TRT FMHA is enabled
+        if not self.fmha_config.enable_paged_trt_fmha:
+            return False
         return (
             self.use_mla
             and attention_inputs.is_prefill
@@ -543,11 +554,13 @@ class TrtV2PrefillAttentionOp(object):
     ) -> torch.Tensor:
         k_pe = k_pe.view(-1, 1, self.qk_rope_head_dim)
         self.k_nope_proj = LinearFactory.create_linear_from_weights(
-            self.weights[layer_id], W.mla_k_nope_w, W.mla_k_nope_s, None, self.config
+            self.weights[layer_id], W.mla_k_nope_w, W.mla_k_nope_s, None, 
+            self.quant_config
         )
 
         self.v_proj = LinearFactory.create_linear_from_weights(
-            self.weights[layer_id], W.mla_v_w, W.mla_v_s, None, self.config
+            self.weights[layer_id], W.mla_v_w, W.mla_v_s, None,
+            self.quant_config
         )
 
         k_nope = self.k_nope_proj(compressed_kv)
@@ -587,7 +600,7 @@ class TrtV2PrefillAttentionOp(object):
 class TrtV2PrefillAttention(nn.Module):
     def __init__(
         self,
-        config: GptInitModelParameters,
+        attn_configs: AttentionConfigs,
         num_heads: int,
         kv_lora_rank: int,
         qk_rope_head_dim: int,
@@ -607,7 +620,7 @@ class TrtV2PrefillAttention(nn.Module):
         self.scale = (self.qk_nope_head_dim + self.qk_rope_head_dim) ** -0.5
         self.v_weight = v_weight
         self.k_nope_weight = k_nope_weight
-        self.config = config
+        self.attn_configs = attn_configs
     def forward(
         self,
         q_nope: torch.Tensor,
@@ -633,7 +646,8 @@ class TrtV2PrefillAttention(nn.Module):
         pad_len = self.qk_rope_head_dim
         value_states = F.pad(value_states, (0, pad_len))
         from rtp_llm.ops.compute_ops import TRTAttnOp
-        self.fmha_impl = TRTAttnOp(self.config)
+
+        self.fmha_impl = TRTAttnOp(self.attn_configs)
         self.support_: bool = self.fmha_impl.support(attention_inputs)
         if self.support_:
             self.fmha_params = self.fmha_impl.prepare(attention_inputs)

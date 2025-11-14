@@ -62,19 +62,20 @@ inline DataType getDataType(const std::string& type_str) {
 }
 
 inline std::string getDataTypeStr(const DataType& data_type) {
-    std::string type_str;
-    if (data_type == TYPE_FP16) {
-        type_str = "fp16";
-    } else if (data_type == TYPE_BF16) {
-        type_str = "bf16";
-    } else if (data_type == TYPE_FP32) {
-        type_str = "fp32";
-    } else if (data_type == TYPE_FP8_E4M3) {
-        type_str = "fp8bf16";
-    } else {
-        throw std::runtime_error("wrong data type");
+    switch (data_type) {
+        case TYPE_FP16:
+            return "fp16";
+        case TYPE_BF16:
+            return "bf16";
+        case TYPE_FP32:
+            return "fp32";
+        case TYPE_INT8:
+            return "int8";
+        case TYPE_FP8_E4M3:
+            return "fp8";
+        default:
+            throw std::runtime_error("Invalid DataType: " + std::to_string(static_cast<int>(data_type)));
     }
-    return type_str;
 }
 
 template<typename T>

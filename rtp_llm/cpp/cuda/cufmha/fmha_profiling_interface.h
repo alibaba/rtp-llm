@@ -133,12 +133,11 @@ public:
     void                       operator=(ProfilingInterface const&) = delete;
     static ProfilingInterface& Instance(FMHAConfig fmha_config) {
         static ProfilingInterface instance;
-        instance.show_params_ = fmha_config.fmha_show_params;
-        instance.use_nvtx_    = fmha_config.fmha_perf_instrument;
+        instance.use_nvtx_ = false;
         return instance;
     }
     bool get_op_info() {
-        return show_params_ || use_nvtx_;
+        return use_nvtx_;
     }
     void instrument(bool start, FmhaProfParam& fmha_params) {
         if (!get_op_info()) {
@@ -146,9 +145,6 @@ public:
         }
         if (start) {
             std::string op_name = fmha_params.format();
-            if (show_params_) {
-                std::cout << op_name << std::endl;
-            }
             if (use_nvtx_) {
                 nvtxEventAttributes_t eventAttrib = {0};
                 eventAttrib.version               = NVTX_VERSION;
@@ -172,7 +168,6 @@ private:
         nvtxDomainDestroy(domain_);
     }
     bool               use_nvtx_;
-    bool               show_params_;
     nvtxDomainHandle_t domain_;
 };
 }  // namespace fmha

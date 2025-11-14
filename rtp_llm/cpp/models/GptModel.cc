@@ -289,7 +289,7 @@ rtp_llm::AttentionCommonInputs GptModel::prepareAttentionInputs(const GptModelIn
             device_->attentionMask({inputs.input_lengths->view(decoder_batch_size, context_batch_size),
                                     *inputs.prefix_lengths,
                                     attn_dtype,
-                                    description_.attention_conf.mask_type == rtp_llm::AttentionMaskType::causalMask});
+                                    description_.attention_conf.is_causal});
     }
 
     return attention_inputs;
@@ -395,7 +395,7 @@ GptModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const MicroB
         fake_inputs.prefix_lengths   = device_->allocateBuffer({DataType::TYPE_INT32, {1}, AllocationType::HOST});
         fake_inputs.prefix_lengths->data<int32_t>()[0] = 0;
         auto fake_hidden =
-            device_->allocateBuffer({description_.data_type, {1, description_.attention_conf.hidden_size}});
+            device_->allocateBuffer({description_.data_type, {1, description_.attention_conf.head_num * description_.attention_conf.size_per_head}});
         micro_batch_inputs.push_back(fake_inputs);
     } else {
         // TODO(wangyin.yx): refact this splitting method, extract common code
@@ -721,7 +721,7 @@ GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
                                     || description_.act_qscheme == Qfp8PerTensor,
                                 "ring p2p overlap only supports bf16/fp16 or w8a8 or fp8 per block");
         const size_t max_batch_seq_len =
-            device_->initParams().fifo_scheduler_config.max_context_batch_size * device_->initParams().max_seq_len;
+            device_->initParams().runtime_config.fifo_scheduler_config.max_context_batch_size * device_->initParams().max_seq_len;
         const size_t attn_rs_hidden         = layer0.self_attention_weights.output_weight->kernel->shape()[1];
         const size_t ffn_rs_hidden          = layer0.ffn_weights.down_weight->kernel->shape()[1];
         const size_t attn_ag_hidden         = layer0.self_attention_weights.qkv_weight->kernel->shape()[0];

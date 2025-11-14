@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 
+namespace rtp_llm {
 // void gemm(at::Tensor& output, at::Tensor& input, at::Tensor& weight, int64_t hip_stream){
 //     CHECK_INPUT(input);
 //     CHECK_INPUT(weight);
@@ -179,8 +180,36 @@ void gemm(at::Tensor& output, at::Tensor& input, at::Tensor& weight) {
     rtp_llm::BufferPtr output_buffer = rtp_llm::torchTensor2Buffer(output);
 
     if (!rtp_llm::DeviceFactory::isAlreadyInit()) {
-        rtp_llm::DeviceFactory::initDevices(rtp_llm::GptInitParameter());
+        ParallelismConfig           parallelism_config;
+        ModelConfig                 model_config;
+        EPLBConfig                  eplb_config;
+        FMHAConfig                  fmha_config;
+        DeviceResourceConfig        device_resource_config;
+        MoeConfig                   moe_config;
+        SpeculativeExecutionConfig  sp_config;
+        MiscellaneousConfig         misc_config;
+        ProfilingDebugLoggingConfig profiling_debug_logging_config;
+        HWKernelConfig              hw_kernel_config;
+        ConcurrencyConfig           concurrency_config;
+        FfnDisAggregateConfig       ffn_disaggregate_config;
+        RuntimeConfig               runtime_config;
+        rtp_llm::DeviceFactory::initDevices(parallelism_config,
+                                            model_config,
+                                            eplb_config,
+                                            fmha_config,
+                                            device_resource_config,
+                                            moe_config,
+                                            sp_config,
+                                            misc_config,
+                                            profiling_debug_logging_config,
+                                            hw_kernel_config,
+                                            concurrency_config,
+                                            ffn_disaggregate_config,
+                                            runtime_config);
     }
+
     rtp_llm::ROCmDevice* device_ = dynamic_cast<rtp_llm::ROCmDevice*>(rtp_llm::DeviceFactory::getDefaultDevice());
     device_->gemm({*input_buffer, *weight_buffer, std::nullopt, output_buffer});
 }
+
+}  // namespace rtp_llm

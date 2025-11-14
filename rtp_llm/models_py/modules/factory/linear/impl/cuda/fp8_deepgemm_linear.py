@@ -5,7 +5,6 @@ from typing import Optional
 
 import torch
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
     fp8_gemm_nt,
     has_deep_gemm,
@@ -26,15 +25,12 @@ class CudaFp8DeepGEMMLinear(LinearBase):
     @classmethod
     def can_handle(
         cls,
-        config: Optional[GptInitModelParameters],
+        quant_config: object,
         weight: torch.Tensor,
         weight_scales: Optional[torch.Tensor],
     ) -> bool:
         """Handle other FP8 methods (FP8, FP8_PER_BLOCK, etc.)"""
-        if weight_scales is None or config is None:
-            return False
-
-        if not hasattr(config, "quant_config") or config.quant_config is None:
+        if weight_scales is None or quant_config is None:
             return False
 
         # Check if weight is FP8 format
@@ -42,10 +38,8 @@ class CudaFp8DeepGEMMLinear(LinearBase):
             return False
 
         # Check quantization method - handle all other FP8 methods
-        if hasattr(config.quant_config, "get_method"):
-            quant_method = config.quant_config.get_method()
-            return quant_method == "FP8_PER_BLOCK"
-        return False
+        quant_method = quant_config.get_method()
+        return quant_method == "FP8_PER_BLOCK"
 
     @torch.inference_mode()
     def __init__(
@@ -54,15 +48,15 @@ class CudaFp8DeepGEMMLinear(LinearBase):
         weight_scales: Optional[torch.Tensor] = None,
         input_scales: Optional[torch.Tensor] = None,
         bias: Optional[torch.Tensor] = None,
-        config: Optional[GptInitModelParameters] = None,
+        quant_config: object = None,
     ):
-        super().__init__(weight, weight_scales, input_scales, bias, config)
+        super().__init__(weight, weight_scales, input_scales, bias, quant_config)
         # Initialize parameters
         self.weight = weight
         self.weight_scales = weight_scales
         self.input_scales = input_scales
         self.bias = bias
-        self.config = config
+
         # Check if DeepGEMM is available
         if not has_deep_gemm():
             error_msg = "DeepGEMM is not available. Please install the `deep_gemm` package to enable DeepGEMM kernels."

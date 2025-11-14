@@ -3,46 +3,44 @@ import os
 import re
 from typing import Any, Dict, List, Tuple, Union
 
-from transformers import AutoTokenizer, CLIPVisionConfig
+from transformers import CLIPVisionConfig
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig, VitParameters
+from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.llama import Llama
 from rtp_llm.models.llava_vit import LlavaImageEmbedding
 from rtp_llm.models.llava_weight import LlavaWeightInfo
 from rtp_llm.models.multimodal.multimodal_mixin import BaseVitWeights, MultiModalMixin
 
-
 class Llava(Llama, MultiModalMixin):
-    def _init_multimodal(self, config: GptInitModelParameters):
-        self.mm_part = LlavaImageEmbedding(config)
+    def _init_multimodal(
+        self,
+        mm_model_config: Any,  # MMModelConfig
+        vit_config: VitConfig,
+    ):
+        # mm_related_params is in model_config, not mm_model_config
+        mm_related_params = self.model_config.mm_related_params
+        self.mm_part = LlavaImageEmbedding(mm_related_params, model_config=self.model_config)
         vit_weight_dict: Dict[str, Any] = {"mm_projector": self.mm_part.mm_projector}
         if (
-            config.mm_related_params.config["unfreeze_mm_vision_tower"]
-            or "mm_vision_tower" in config.mm_related_params.config["mm_tunable_parts"]
+            mm_related_params.config.get("unfreeze_mm_vision_tower", False)
+            or "mm_vision_tower" in mm_related_params.config.get("mm_tunable_parts", [])
         ):
             vit_weight_dict["vision_tower"] = self.mm_part.vision_tower
-        if "unpad" in config.mm_related_params.config.get(
-            "mm_patch_merge_type", "flat"
-        ):
+        if "unpad" in mm_related_params.config.get("mm_patch_merge_type", "flat"):
             vit_weight_dict["image_newline"] = self.mm_part.image_newline
-        config.mm_related_params.vit_weights = BaseVitWeights(vit_weight_dict, True)
+        mm_related_params.vit_weights = BaseVitWeights(vit_weight_dict, True)
 
     @staticmethod
-    def _create_config(ckpt_path):
-        config = GptInitModelParameters(
-            head_num=0,
-            size_per_head=0,
-            layer_num=0,
-            max_seq_len=0,
-            vocab_size=0,
-            ckpt_path=ckpt_path,
-            activation_type="SiGLU",
-            norm_type="rmsnorm",
-            rotary_embedding_dim=128,
-            rotary_embedding_style=1,
-            has_post_decoder_layernorm=True,
-        )
+    def _create_config(ckpt_path: str) -> ModelConfig:
+        config = ModelConfig()
+        config.ckpt_path = ckpt_path
+        config.activation_type = "SiGLU"
+        config.norm_type = "rmsnorm"
+        config.attn_config.rope_config.dim = 128
+        config.attn_config.rope_config.style = 1
+        config.has_post_decoder_layernorm = True
         # hugggingface
         config_path = os.path.join(ckpt_path, "config.json")
         param_path = os.path.join(ckpt_path, "params.json")
@@ -61,7 +59,7 @@ class Llava(Llama, MultiModalMixin):
         return LlavaWeightInfo
 
     @staticmethod
-    def from_huggingface(config: GptInitModelParameters, config_json: Dict[str, Any]):
+    def from_huggingface(config: ModelConfig, config_json: Dict[str, Any]):
         if "text_config" in config_json:
             text_config = config_json["text_config"]
             # if text_config.get("_name_or_path", "") != "":
@@ -123,7 +121,7 @@ class Llava(Llama, MultiModalMixin):
                 config.mm_related_params.config["patch_size"] = patch_size
                 config.mm_related_params.config["image_size"] = img_size
             config.mm_related_params.config["vit_tower_path"] = vis_tower_name
-            config.mm_sep_tokens = [[-200]]  # image_token_index
+            config.mm_model_config.mm_sep_tokens = [[-200]]  # image_token_index
 
 
 register_model("llava", Llava, ["LlavaLlamaForCausalLM"])

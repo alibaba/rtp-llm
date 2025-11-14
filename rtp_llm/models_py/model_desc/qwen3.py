@@ -3,7 +3,7 @@ from typing import Dict, Optional
 import torch
 from torch import nn
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
@@ -20,16 +20,17 @@ from rtp_llm.ops.compute_ops import (
     PyModelInputs,
     PyModelOutputs,
 )
+from rtp_llm.ops import ParallelismConfig
 from rtp_llm.utils.model_weight import W
 
 
 class Qwen3DecoderLayer(nn.Module):
     def __init__(
-        self, config: GptInitModelParameters, weights: Dict[str, torch.Tensor]
+        self, config: ModelConfig, parallelism_config: ParallelismConfig, weights: Dict[str, torch.Tensor], quant_config: Optional[object] = None
     ):
         super().__init__()
-        self.self_attn = CausalAttention(config, weights)
-        self.mlp = FusedSiluActDenseMLP(config, weights)
+        self.self_attn = CausalAttention(config, parallelism_config, weights, quant_config)
+        self.mlp = FusedSiluActDenseMLP(config.activation_type, parallelism_config, weights, quant_config)
         self.input_layernorm = RMSNorm(
             weights[W.pre_ln_gamma], eps=config.layernorm_eps
         )
@@ -62,13 +63,31 @@ class Qwen3DecoderLayer(nn.Module):
 
 
 class Qwen3Model(GptModelBase):
-    def __init__(self, config: GptInitModelParameters, weights: ModelWeights):
-        super().__init__(config, weights)
+    def __init__(
+        self, 
+        config: ModelConfig, 
+        parallelism_config: ParallelismConfig,
+        weights: ModelWeights, 
+         max_generate_batch_size: int,
+        quant_config: Optional[object] = None,
+        fmha_config=None,
+        py_hw_kernel_config=None,
+        device_resource_config=None,
+    ):
+        super().__init__(
+            config, 
+            parallelism_config, 
+            weights,
+            max_generate_batch_size=max_generate_batch_size,
+            fmha_config=fmha_config, 
+            py_hw_kernel_config=py_hw_kernel_config,
+            device_resource_config=device_resource_config,
+        )
 
-        self.embed_tokens = Embedding(config, weights.get_global_weight(W.embedding))
+        self.embed_tokens = Embedding(config, parallelism_config, weights.get_global_weight(W.embedding))
         self.layers = nn.ModuleList(
             [
-                Qwen3DecoderLayer(config, weights.weights[idx])
+                Qwen3DecoderLayer(config, parallelism_config, weights.weights[idx], quant_config)
                 for idx in range(self.layer_num)
             ]
         )
@@ -83,7 +102,7 @@ class Qwen3Model(GptModelBase):
 
         attention_inputs: PyAttentionInputs = inputs.attention_inputs
         fmha_impl = AttnImplFactory.get_fmha_impl(
-            self.config, self.weight, attention_inputs
+            self.config, self.parallelism_config, self.weight, attention_inputs, self.fmha_config
         )
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
             hidden_states = decoder_layer(
