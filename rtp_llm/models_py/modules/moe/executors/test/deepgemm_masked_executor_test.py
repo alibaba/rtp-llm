@@ -3,10 +3,12 @@ from typing import Dict, Tuple
 
 import torch
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.models_py.modules.moe.config_adapter import MoEConfigAdapter
 from rtp_llm.models_py.modules.moe.executors.deepgemm_masked_executor import (
     DeepGemmMaskedExecutor,
 )
+from rtp_llm.ops import MoeConfig, ParallelismConfig, RuntimeConfig
 from rtp_llm.models_py.modules.moe.fused_moe import (
     ExpertForwardPayload,
     ExpertTokensMetadata,
@@ -28,30 +30,43 @@ K = HIDDEN_SIZE
 N = MOE_INTERMEDIATE_SIZE * 2
 
 
-def _generate_config() -> GptInitModelParameters:
-    config = GptInitModelParameters(
-        head_num=2,
-        size_per_head=128,
-        layer_num=2,
-        max_seq_len=2048,
-        vocab_size=500000,
+def _generate_config() -> MoEConfigAdapter:
+    model_config = ModelConfig()
+    model_config.head_num = 2
+    model_config.size_per_head = 128
+    model_config.num_layers = 2
+    model_config.max_seq_len = 2048
+    model_config.vocab_size = 500000
+    model_config.expert_num = NUM_EXPERTS
+    model_config.hidden_size = HIDDEN_SIZE
+    model_config.moe_inter_padding_size = MOE_INTERMEDIATE_SIZE
+    model_config.moe_k = TOPK if 'TOPK' in globals() else 8
+    
+    parallelism_config = ParallelismConfig()
+    parallelism_config.world_size = DP_SIZE * EP_SIZE
+    parallelism_config.dp_size = DP_SIZE
+    parallelism_config.tp_size = TP_SIZE
+    parallelism_config.ep_size = EP_SIZE
+    parallelism_config.dp_rank = 0
+    parallelism_config.tp_rank = 0
+    parallelism_config.ep_rank = 0
+    parallelism_config.world_rank = 0
+    parallelism_config.local_world_size = 1
+    
+    moe_config = MoeConfig()
+    runtime_config = RuntimeConfig()
+    runtime_config.max_generate_batch_size = MAX_GENERATE_BATCH_SIZE
+    
+    return MoEConfigAdapter(
+        model_config=model_config,
+        parallelism_config=parallelism_config,
+        moe_config=moe_config,
+        runtime_config=runtime_config,
     )
-    config.world_size = DP_SIZE * EP_SIZE
-    config.dp_size = DP_SIZE
-    config.tp_size = TP_SIZE
-    config.ep_size = EP_SIZE
-    config.dp_rank = 0
-    config.tp_rank = 0
-    config.ep_rank = 0
-    config.expert_num = NUM_EXPERTS
-    config.hidden_size = HIDDEN_SIZE
-    config.max_generate_batch_size = MAX_GENERATE_BATCH_SIZE
-    config.moe_inter_padding_size = MOE_INTERMEDIATE_SIZE
-    return config
 
 
 def _generate_payload_and_weights(
-    config: GptInitModelParameters,
+    config: MoEConfigAdapter,
     use_fp8: bool,
 ) -> Tuple[ExpertForwardPayload, Dict[str, torch.Tensor]]:
     torch_dtype = torch.float8_e4m3fn if use_fp8 else torch.bfloat16

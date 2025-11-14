@@ -5,7 +5,8 @@ from typing import List
 
 import torch
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.ops import ParallelismConfig, MoeConfig, RuntimeConfig
 from rtp_llm.distribute.worker_info import g_parallel_info, update_master_info
 from rtp_llm.models_py.distributed.deepep_wrapper import init_deepep_wrapper
 from rtp_llm.models_py.distributed.process_group_state import (
@@ -14,6 +15,7 @@ from rtp_llm.models_py.distributed.process_group_state import (
     init_distributed_environment,
 )
 from rtp_llm.models_py.modules.moe.utils import FusedMoEQuantConfig
+from rtp_llm.models_py.modules.moe.config_adapter import MoEConfigAdapter
 from rtp_llm.models_py.modules.rocm.moe.routers.deepep_normal_router import (
     DeepepNormalRouter,
 )
@@ -28,23 +30,39 @@ def init_router(rank: int, use_fp8: bool):
     g_parallel_info.reload()
     update_master_info(f"127.0.0.1", int(os.environ["START_PORT"]))
     print(f"rank {rank}, {g_parallel_info}")
-    config = GptInitModelParameters(0, 0, 0, 0, 0)
-    config.moe_config.use_deepep_low_latency = False
-    config.expert_num = 16
-    config.hidden_size = 1024
-    config.tp_size = g_parallel_info.tp_size
-    config.tp_rank = g_parallel_info.tp_rank
-    config.ep_size = g_parallel_info.ep_size
-    config.ep_rank = g_parallel_info.ep_rank
-    config.dp_size = g_parallel_info.dp_size
-    config.dp_rank = g_parallel_info.dp_rank
-    config.ffn_tp_rank = g_parallel_info.ffn_tp_rank
-    config.ffn_tp_size = g_parallel_info.ffn_tp_size
-    config.local_rank = rank
-    init_distributed_environment(config, backend="nccl", timeout=60)
-    init_deepep_wrapper(group=get_ep_group().device_group, params=config)
-    router = DeepepNormalRouter(config, use_fp8, expert_alignment=1)
-    return config, router
+    
+    # Create configuration objects
+    model_config = ModelConfig()
+    model_config.expert_num = 16
+    model_config.hidden_size = 1024
+    
+    parallelism_config = ParallelismConfig()
+    parallelism_config.tp_size = g_parallel_info.tp_size
+    parallelism_config.tp_rank = g_parallel_info.tp_rank
+    parallelism_config.ep_size = g_parallel_info.ep_size
+    parallelism_config.ep_rank = g_parallel_info.ep_rank
+    parallelism_config.dp_size = g_parallel_info.dp_size
+    parallelism_config.dp_rank = g_parallel_info.dp_rank
+    parallelism_config.ffn_tp_rank = g_parallel_info.ffn_tp_rank
+    parallelism_config.ffn_tp_size = g_parallel_info.ffn_tp_size
+    
+    moe_config = MoeConfig()
+    moe_config.use_deepep_low_latency = False
+    
+    runtime_config = RuntimeConfig()
+    
+    # Create MoEConfigAdapter
+    config_adapter = MoEConfigAdapter(
+        model_config=model_config,
+        parallelism_config=parallelism_config,
+        moe_config=moe_config,
+        max_generate_batch_size=0,
+    )
+    
+    init_distributed_environment(parallelism_config, nccl_ip="127.0.0.1", th_nccl_port=int(os.environ["START_PORT"]), backend="nccl", timeout=60)
+    init_deepep_wrapper(group=get_ep_group().device_group, model_config=model_config, parallelism_config=parallelism_config, moe_config=moe_config, runtime_config=runtime_config)
+    router = DeepepNormalRouter(config_adapter, use_fp8, expert_alignment=1)
+    return config_adapter, router
 
 
 # payload.expert_x: [token, dim], type: fp8

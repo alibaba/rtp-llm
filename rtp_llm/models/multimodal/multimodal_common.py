@@ -88,14 +88,21 @@ class MultiModalEmbeddingInterface:
         raise NotImplementedError
 
     @torch.inference_mode()
-    def mm_embedding(self, url: str, mm_type: MMUrlType, **kwargs: Any):
+    def mm_embedding(
+        self, 
+        url: str, 
+        mm_type: MMUrlType, 
+        download_headers: str = "",
+        **kwargs: Any
+    ):
         dtype = self._data_type
         if g_parallel_info.tp_rank > 0:
             return torch.Tensor([])
+
         cached_res = vit_emb_cache_.check_cache(url)
         if cached_res is not None:
             return cached_res
-        bytes_io = get_bytes_io_from_url(url)
+        bytes_io = get_bytes_io_from_url(url, download_headers=download_headers)
         mm_input = self._mm_preprocess(bytes_io, mm_type=mm_type, **kwargs)
         with mm_lock:
             features = self.mm_process(mm_input, mm_type=mm_type, **kwargs)

@@ -7,8 +7,8 @@ from typing import Dict, Optional
 import torch
 from torch import nn
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.models_py.modules import Linear, utils
+from rtp_llm.models_py.modules import utils
+from rtp_llm.models_py.modules.linear import Linear
 
 if utils.is_hip():
     from rtp_llm.models_py.modules.rocm.fp8_linear import (
@@ -41,7 +41,7 @@ class LinearFactory:
 
     @staticmethod
     def should_use_fp8_linear(
-        config: GptInitModelParameters,
+        quant_config: Optional[object],
         weights: Dict[str, torch.Tensor],
         weight_key: str,
     ) -> bool:
@@ -49,12 +49,12 @@ class LinearFactory:
         if not FP8_LINEAR_AVAILABLE:
             return False
 
-        if not hasattr(config, "quant_config") or config.quant_config is None:
+        if quant_config is None:
             return False
 
         # Check quantization method if available
-        if hasattr(config.quant_config, "get_method"):
-            quant_method = config.quant_config.get_method()
+        if hasattr(quant_config, "get_method"):
+            quant_method = quant_config.get_method()
             fp8_methods = [
                 "FP8",
                 "FP8_PER_BLOCK",
@@ -79,7 +79,7 @@ class LinearFactory:
         weight_scales: Optional[torch.Tensor] = None,
         input_scales: Optional[torch.Tensor] = None,
         bias: Optional[torch.Tensor] = None,
-        config: Optional[GptInitModelParameters] = None,
+        quant_config: Optional[object] = None,
         force_fp8: bool = False,
     ) -> nn.Module:
         """Create Linear layer (FP8 or regular)."""
@@ -92,30 +92,30 @@ class LinearFactory:
         ):
             if weight_scales is None:
                 raise ValueError("FP8 linear layer requires weight_scales")
-            if config is None:
-                raise ValueError("FP8 linear layer requires config")
+            if quant_config is None:
+                raise ValueError("FP8 linear layer requires quant_config")
             else:
-                quant_config = config.quant_config
                 if quant_config.get_method() in [
                     "FP8_PER_TENSOR_COMPRESSED",
                     "FP8_DYNAMIC_PER_TENSOR",
                 ]:
                     return Fp8PerTensorLinear(
-                        config.quant_config, weight, weight_scales, input_scales, bias
+                        quant_config, weight, weight_scales, input_scales, bias
                     )
                 else:
                     if not FP8_LINEAR_AVAILABLE:
                         raise RuntimeError(
                             "FP8 DeepGEMMLinear layer requested but not available"
                         )
-
+                    # Check for PTPC (Per-Tensor-Per-Channel) method
                     if (
                         quant_config
                         and quant_config.get_method() == "FP8_PER_CHANNEL_COMPRESSED"
+                        and FP8_PTPC_AVAILABLE
                     ):
-                        return Fp8PTPCLinear(weight, weight_scales, bias, config)
+                        return Fp8PTPCLinear(weight, weight_scales, bias)
                     else:
-                        return Fp8DeepGEMMLinear(weight, weight_scales, bias, config)
+                        return Fp8DeepGEMMLinear(weight, weight_scales, bias)
         else:
             return Linear(weight, bias)
 
@@ -125,7 +125,7 @@ class LinearFactory:
         weight_key: str,
         scale_key: Optional[str] = None,
         bias_key: Optional[str] = None,
-        config: Optional[GptInitModelParameters] = None,
+        quant_config: Optional[object] = None,  # QuantizationConfig for quantization settings
     ) -> nn.Module:
         """Create Linear layer from weight dictionary."""
         weight = weights[weight_key]
@@ -133,13 +133,13 @@ class LinearFactory:
         bias = weights.get(bias_key)
 
         # Auto-detect FP8 usage
-        use_fp8 = LinearFactory.should_use_fp8_linear(config, weights, weight_key)
+        use_fp8 = LinearFactory.should_use_fp8_linear(quant_config, weights, weight_key)
 
         return LinearFactory.create_linear(
             weight=weight,
             weight_scales=weight_scales,
             bias=bias,
-            config=config,
+            quant_config=quant_config,
             force_fp8=use_fp8,
         )
 
@@ -149,12 +149,12 @@ class LinearFactory:
         weight_keys: list,
         scale_keys: Optional[list] = None,
         bias_keys: Optional[list] = None,
-        config: Optional[GptInitModelParameters] = None,
+        quant_config: Optional[object] = None,
         dim: int = -1,
     ) -> nn.Module:
         """Create merged Linear layer (e.g., gate_up_proj)."""
         # Check FP8 usage based on first weight
-        use_fp8 = LinearFactory.should_use_fp8_linear(config, weights, weight_keys[0])
+        use_fp8 = LinearFactory.should_use_fp8_linear(quant_config, weights, weight_keys[0])
 
         # Merge weights
         weight_tensors = [weights[key] for key in weight_keys]
@@ -182,6 +182,6 @@ class LinearFactory:
             weight=merged_weight,
             weight_scales=merged_scales,
             bias=merged_bias,
-            config=config,
+            quant_config=quant_config,
             force_fp8=use_fp8,
         )

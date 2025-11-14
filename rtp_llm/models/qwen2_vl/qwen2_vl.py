@@ -5,7 +5,9 @@ from typing import Any, Dict, List, Tuple, Union
 
 from transformers import AutoTokenizer
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.model_config import VitParameters
+from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, AttnConfig
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, FfnConfig, FfnWeight
@@ -14,7 +16,6 @@ from rtp_llm.model_loader.model_weight_info import (
     ModelWeightInfo,
 )
 from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
-from rtp_llm.models.base_model import BaseModel, MultimodalInput
 from rtp_llm.models.multimodal.multimodal_mixin import (
     BaseMultiModalWeightInfo,
     BaseVitWeights,
@@ -47,9 +48,9 @@ class QwenVL2VitWeight(BaseVitWeights):
 
 
 class QWen2VLWeightInfo(ModelDeployWeightInfo, BaseMultiModalWeightInfo):
-    def __init__(self, config, tp_size, tp_rank):
-        ModelDeployWeightInfo.__init__(self, config, tp_size, tp_rank)
-        BaseMultiModalWeightInfo.__init__(self, config)
+    def __init__(self, vit_weights, **kwargs):
+        ModelDeployWeightInfo.__init__(self, **kwargs)
+        BaseMultiModalWeightInfo.__init__(self, vit_weights=vit_weights, **kwargs)
 
     @property
     def support_lora(self) -> bool:
@@ -57,7 +58,6 @@ class QWen2VLWeightInfo(ModelDeployWeightInfo, BaseMultiModalWeightInfo):
 
     def _get_weight_info(self):
         weights = self._get_hf_weight_info()
-        weights = self._get_vit_info(weights)
         return weights
 
     def _get_hf_weight_info(self):
@@ -89,11 +89,7 @@ class QWen2VLWeightInfo(ModelDeployWeightInfo, BaseMultiModalWeightInfo):
         return ModelWeightInfo(layer_weights=layer_weights, weights=weights)
 
     def _get_hf_layer_weight_info(self, layer_id):
-        inter_padding_size = (
-            self._layer_inter_padding_size[layer_id]
-            if self._layer_inter_padding_size
-            else self._inter_padding_size
-        )
+        inter_padding_size = self._inter_padding_size
         attn_config: AttnConfig = self.attn_config
         ffn_config: FfnConfig = self.ffn_config
         layer_weights = [
@@ -229,54 +225,69 @@ class QWen2VLWeightInfo(ModelDeployWeightInfo, BaseMultiModalWeightInfo):
 
 
 class QWen2_VL(QWen_VL, MultiModalMixin):
-    def _init_multimodal(self, config: GptInitModelParameters):
-        self.mm_part = Qwen2VLImageEmbedding(config)
-        config.mm_related_params.vit_weights = QwenVL2VitWeight(
+    def _init_multimodal(
+        self,
+        mm_model_config,
+        vit_config: VitConfig,
+    ):
+        # mm_related_params is in model_config, not mm_model_config
+        if self.model_config.mm_related_params is None:
+            self.model_config.mm_related_params = VitParameters()
+        self.mm_part = Qwen2VLImageEmbedding(
+            self.model_config.mm_related_params,
+            model_config=self.model_config
+        )
+        self.model_config.mm_related_params.vit_weights = QwenVL2VitWeight(
             {"vit": self.mm_part.visual}
         )
 
     @classmethod
-    def _create_config(cls, ckpt_path: str):
-        config = GptInitModelParameters(
-            head_num=0, size_per_head=0, layer_num=0, max_seq_len=0, vocab_size=0
-        )
+    def _create_config(cls, ckpt_path: str) -> ModelConfig:
+        config = ModelConfig()
+        config.ckpt_path = ckpt_path
 
         config_path = os.path.join(ckpt_path, "config.json")
         if not os.path.exists(config_path):
-            return
+            return config
         with open(config_path) as reader:
             content = reader.read()
             config_json = json.loads(content)
 
         QWen2_VL._from_hf(config, config_json)
         QWen2_VL._load_vit_param(config, config_json)
+        if config.mm_related_params is None:
+            config.mm_related_params = VitParameters()
         config.mm_related_params.config["ckpt_path"] = ckpt_path
 
         return config
 
     @staticmethod
-    def _load_vit_param(config: GptInitModelParameters, config_json: Dict[str, Any]):
+    def _load_vit_param(config: ModelConfig, config_json: Dict[str, Any]):
+        if config.mm_related_params is None:
+            config.mm_related_params = VitParameters()
         config.mm_related_params.config = config_json["vision_config"]
+        if config.mm_related_params.special_tokens is None:
+            from rtp_llm.config.model_config import SpecialTokens
+            config.mm_related_params.special_tokens = SpecialTokens()
         config.mm_related_params.special_tokens.update({"default_mm_token": "<img/>"})
-        config.mm_sep_tokens = [
+        config.mm_model_config.mm_sep_tokens = [
             [config_json["vision_start_token_id"], config_json["vision_end_token_id"]]
         ]
 
     @staticmethod
-    def _from_hf(config: GptInitModelParameters, config_json: Dict[str, Any]):
+    def _from_hf(config: ModelConfig, config_json: Dict[str, Any]):
         config.vocab_size = config_json["vocab_size"]
-        config.rotary_embedding_base = config_json["rope_theta"]
         config.max_seq_len = 10240
         config.activation_type = "SiGLU"
-        config.head_num = config_json["num_attention_heads"]
-        config.head_num_kv = config_json["num_key_value_heads"]
+        config.attn_config.head_num = config_json["num_attention_heads"]
+        config.attn_config.kv_head_num = config_json["num_key_value_heads"]
         config.hidden_size = config_json["hidden_size"]
-        config.size_per_head = (
+        config.attn_config.size_per_head = (
             int(config_json.get("head_dim"))
             if "head_dim" in config_json
-            else config_json["hidden_size"] // config.head_num
+            else config_json["hidden_size"] // config.attn_config.head_num
         )
-        config.layer_num = config_json["num_hidden_layers"]
+        config.num_layers = config_json["num_hidden_layers"]
         config.inter_size = config_json["intermediate_size"]
         config.norm_type = "rmsnorm"
         config.layernorm_eps = config_json["rms_norm_eps"]
@@ -284,29 +295,34 @@ class QWen2_VL(QWen_VL, MultiModalMixin):
         config.special_tokens.bos_token_id = config_json.get("bos_token_id", -1)
         config.special_tokens.eos_token_id = config_json.get("eos_token_id", 0)
         config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
-
-        config.rotary_embedding_style = 7
-        config.mrope_section = config_json["rope_scaling"].get(
-            "mrope_section", [16, 24, 24]
-        )
-        config.mm_position_ids_style = 2
-        config.position_id_len_factor = len(config.mrope_section)
-        config.rotary_embedding_dim = 128
+        config.mm_model_config.mm_position_ids_style = 2
+        rope_config = config.attn_config.rope_config
+        rope_config.style = 7
+        rope_config.base = int(config_json["rope_theta"])
+        # mrope_section is not available in RopeConfig, using default value
+        mrope_section = config_json["rope_scaling"].get("mrope_section", [16, 24, 24])
+        rope_config.index_factor = len(mrope_section)
+        rope_config.mrope_dim1 = mrope_section[0]
+        rope_config.mrope_dim2 = mrope_section[1]
+        rope_config.mrope_dim3 = mrope_section[2]
+        rope_config.dim = 128
 
     @staticmethod
     def get_weight_cls():
         return QWen2VLWeightInfo
 
     @staticmethod
-    def eval_model_size(config: GptInitModelParameters):
-        llm_size = BaseModel.eval_model_size(config)
+    def eval_model_size(config: ModelConfig):
+        llm_size = config.eval_model_size()
 
         data_width = 4
         llm_size += QWen2_VL.eval_vit_param_count(config) * data_width
         return llm_size
 
     @staticmethod
-    def eval_vit_param_count(config: GptInitModelParameters):
+    def eval_vit_param_count(config: ModelConfig):
+        if config.mm_related_params is None or config.mm_related_params.config is None:
+            return 0
         vit_config = config.mm_related_params.config
         embed_dim = vit_config.get("embed_dim", 1280)
         hidden_size = vit_config.get("hidden_size", 3584)
@@ -326,8 +342,8 @@ class QWen2_VL(QWen_VL, MultiModalMixin):
         return vit_size
 
     @staticmethod
-    def eval_model_param_count(config: GptInitModelParameters):
-        llm_param_count = BaseModel.eval_model_param_count(config)
+    def eval_model_param_count(config: ModelConfig):
+        llm_param_count = config.model_param_count()
         llm_param_count += QWen2_VL.eval_vit_param_count(config)
 
         return llm_param_count

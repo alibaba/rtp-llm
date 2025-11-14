@@ -40,7 +40,6 @@ MlaAttnLayerOp::MlaAttnLayerOp(int64_t head_num,
                                double  softmax_extra_scale) {
     rtp_llm::initLogger();
     GptInitParameter gpt_init_parameter;
-    gpt_init_parameter.update_from_env_for_test();
     rtp_llm::DeviceFactory::initDevices(gpt_init_parameter);
     device_      = rtp_llm::DeviceFactory::getDefaultDevice();
     attn_configs = AttentionConfigs({
@@ -50,7 +49,7 @@ MlaAttnLayerOp::MlaAttnLayerOp(int64_t head_num,
         static_cast<size_t>(hidden_size),
         RopeConfig(),
         64,
-        AttentionMaskType::causalMask,
+        true,
         1.0f,
         true,
         false,

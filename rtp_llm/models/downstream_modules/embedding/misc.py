@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from torch.nn.utils.rnn import pad_sequence
 
 from rtp_llm.async_decoder_engine.embedding.interface import EngineInputs, EngineOutputs
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.distribute.worker_info import g_parallel_info
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.models.downstream_modules.common_input_generator import (
@@ -62,8 +62,9 @@ def combo_to_batch_moe_gating(
 def generate_attention_mask(input_lengths: Sequence[int]) -> torch.Tensor:
     max_input_length: int = max(input_lengths)
     batch_size = len(input_lengths)
+    device = torch.device(f"cuda:{g_parallel_info.local_rank}")
     batched_attention_mask = torch.ones(
-        (batch_size, max_input_length), dtype=torch.bool, device=g_parallel_info.device
+        (batch_size, max_input_length), dtype=torch.bool, device=device
     )
     for b, input_length in enumerate(input_lengths):
         batched_attention_mask[b, input_length:] = 0
@@ -137,7 +138,7 @@ def combo_to_list(
 class EmbeddingRendererBase(CustomRenderer):
     embedding_type: EmbeddingResponseType
 
-    def __init__(self, config: GptInitModelParameters, tokenizer: BaseTokenizer):
+    def __init__(self, config: ModelConfig, tokenizer: BaseTokenizer):
         super().__init__(config, tokenizer)
         self.generator = CommonInputGenerator(tokenizer, config)
 

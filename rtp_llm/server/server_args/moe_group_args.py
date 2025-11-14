@@ -1,7 +1,7 @@
 from rtp_llm.server.server_args.util import str2bool
 
 
-def init_moe_group_args(parser):
+def init_moe_group_args(parser, py_eplb_config):
     ##############################################################################################################
     # MOE 特性
     ##############################################################################################################
@@ -57,6 +57,7 @@ def init_moe_group_args(parser):
     moe_group.add_argument(
         "--eplb_control_step",
         env_name="EPLB_CONTROL_STEP",
+        bind_to=(py_eplb_config, 'eplb_control_step'),
         type=int,
         default=100,
         help="为 EPLB (Expert Placement Load Balancing) 控制器指定控制周期或步骤参数。这可能影响专家的负载均衡调整的频率或粒度。",
@@ -65,6 +66,7 @@ def init_moe_group_args(parser):
     moe_group.add_argument(
         "--eplb_test_mode",
         env_name="EPLB_TEST_MODE",
+        bind_to=(py_eplb_config, 'eplb_test_mode'),
         type=str2bool,
         default=False,
         help="设置为 `True` 时，为 ExpertBalancer 组件启用测试模式。用于调试或特定的测试场景。",
@@ -73,6 +75,7 @@ def init_moe_group_args(parser):
     moe_group.add_argument(
         "--eplb_balance_layer_per_step",
         env_name="EPLB_BALANCE_LAYER_PER_STEP",
+        bind_to=(py_eplb_config, 'eplb_balance_layer_per_step'),
         type=int,
         default=1,
         help="设置 eplb 每次更新的层数。",
@@ -98,13 +101,6 @@ def init_moe_group_args(parser):
         type=int,
         default=0,
         help="冗余专家个数",
-    )
-    moe_group.add_argument(
-        "--hack_ep_single_entry",
-        env_name="HACK_EP_SINGLE_ENTRY",
-        type=int,
-        default=0,
-        help="HACK_EP_SINGLE_ENTRY",
     )
     moe_group.add_argument(
         "--balance_method",
@@ -133,4 +129,11 @@ def init_moe_group_args(parser):
         type=int,
         default=1024,
         help="moe normal使用masked的最大token数目",
+    )
+    moe_group.add_argument(
+        "--use_all_gather",
+        env_name="USE_ALL_GATHER",
+        type=str2bool,
+        default=False,
+        help="是否使用 all_gather 进行通信。",
     )

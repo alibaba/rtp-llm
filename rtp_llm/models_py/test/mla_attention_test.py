@@ -12,7 +12,8 @@ import torch
 # sys.path.append(os.path.join(str(CUR_PATH), "../../../"))
 device = torch.device(f"cuda")
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.ops import ParallelismConfig
 from rtp_llm.models.rotary_embedding.deepseek_rotary_embedding import (
     DeepseekV3YarnRotaryEmbedding,
 )
@@ -108,8 +109,12 @@ class MLATest(TestCase):
             )
             bias += seq_page_sizes[i]
 
-        self.config = GptInitModelParameters(128, 16, 27, 1024, 102400)
+        self.config = ModelConfig()
         self.config.head_num = 16
+        self.config.num_layers = 27
+        self.config.max_seq_len = 1024
+        self.config.vocab_size = 102400
+        self.config.size_per_head = 128
         self.config.hidden_size = hidden_size
         self.config.nope_head_dim = 128
         self.config.rope_head_dim = 64
@@ -120,6 +125,10 @@ class MLATest(TestCase):
         self.config.softmax_extra_scale = 1.0
         self.config.use_mla = True
         self.config.size_per_head = 192
+        
+        self.parallelism_config = ParallelismConfig()
+        self.parallelism_config.tp_size = 1
+        self.parallelism_config.tp_rank = 0
 
         torch.manual_seed(0)
         sequence_lengths_mius_1 = [x - 1 for x in sequence_lengths]
@@ -194,10 +203,13 @@ class MLATest(TestCase):
         layer_weights.append(weights)
 
         fmha_impl = MlaFlashInferPrefillImpl(
-            self.config, attn_inputs, layer_weights, create_cos_sin_cache()
+            self.config, self.parallelism_config, attn_inputs, layer_weights, create_cos_sin_cache()
         )
-        deepseekv2_mla = MlaAttention(self.config, weights, 0)
+        from rtp_llm.models_py.modules.mla.mla_attention import MlaAttention
+        deepseekv2_mla = MlaAttention(self.config, self.parallelism_config, weights, 0)
         kv_cache: Optional[KVCache] = None
+        # Note: MlaAttentionRef may need to be updated to match new signature
+        from rtp_llm.models_py.modules.mla.mla_attention_ref import MlaAttentionRef
         deepseekv2_mla_ref = MlaAttentionRef(self.config, weights, 0)
 
         hidden = torch.randn(

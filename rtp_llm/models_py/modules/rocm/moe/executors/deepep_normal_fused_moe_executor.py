@@ -5,7 +5,7 @@ import numpy as np
 import aiter
 import logging
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.models_py.modules.moe.config_adapter import MoEConfigAdapter
 from rtp_llm.models_py.modules.moe import (
     ExpertForwardPayload,
     FusedMoeExpertExecutor,
@@ -22,7 +22,7 @@ BLOCK_SIZE_M = 32
 class FusedMoeExecutor(FusedMoeExpertExecutor):
     def __init__(
         self,
-        config: GptInitModelParameters,
+        config: MoEConfigAdapter,
         weights: Dict[str, torch.Tensor],
     ):
         super().__init__(FusedMoEQuantConfig())

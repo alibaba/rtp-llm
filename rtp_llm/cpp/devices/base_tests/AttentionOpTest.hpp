@@ -824,7 +824,7 @@ void AttentionOpTest::flashinferPrefillOpTest(size_t        batch_size,
     auto kv_cache_block_id = allocateKVBlocks(cache_conf, kv_seq_lengths, kvcache_pad, false);
     auto kv_cache_buffer   = cache_manager_->kvCacheBuffer();
     auto attention_config  = AttentionConfigs(
-        {num_heads, num_key_value_heads, head_dim, num_heads * head_dim, rope_config, tokens_per_block, causalMask});
+        {num_heads, num_key_value_heads, head_dim, num_heads * head_dim, rope_config, tokens_per_block, true});
     attention_config.kv_cache_dtype         = KvCacheDataType::BASE;
     attention_config.skip_append_kv_cache   = true;
     BufferPtr        prefix_lengths_buf     = tensorToBuffer(prefix_lengths_host, AllocationType::HOST);
@@ -980,7 +980,7 @@ void AttentionOpTest::xqaPrefillOpTest(size_t        batch_size,
     auto kv_cache_block_id = allocateKVBlocks(cache_conf, kv_seq_lengths, kvcache_pad_fp8, false);
     auto kv_cache_buffer   = cache_manager_->kvCacheBuffer();
     auto attention_config  = AttentionConfigs(
-        {num_heads, num_key_value_heads, head_dim, num_heads * head_dim, rope_config, tokens_per_block, causalMask});
+        {num_heads, num_key_value_heads, head_dim, num_heads * head_dim, rope_config, tokens_per_block, true});
     attention_config.kv_cache_dtype         = KvCacheDataType::FP8;
     attention_config.skip_append_kv_cache   = true;
     BufferPtr        prefix_lengths_buf     = tensorToBuffer(prefix_lengths_host, AllocationType::HOST);

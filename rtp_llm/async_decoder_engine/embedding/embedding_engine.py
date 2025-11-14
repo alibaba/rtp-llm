@@ -5,8 +5,6 @@ from typing_extensions import override
 
 from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 from rtp_llm.async_decoder_engine.embedding.interface import EngineInputs, EngineOutputs
-from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.config.task_type import TaskType
 from rtp_llm.ops import MultimodalInputCpp, RtpEmbeddingOp
 from rtp_llm.utils.mm_process_engine import MMProcessEngine
 
@@ -29,11 +27,10 @@ class EmbeddingCppEngine(BaseEngine):
     @override
     def _start(self):
         if self.model.is_multimodal():
-            self.mm_engine = MMProcessEngine(self.model)
+            self.mm_engine = MMProcessEngine(self.model, self.model.vit_config)
         else:
             self.mm_engine = None
-        self.cpp_engine.init(self.model, self.mm_engine)
-        # self.model.custom_module.handler.init_cpp_handler()
+        self.cpp_engine.init(self.model, self.model.engine_config, self.model.vit_config, self.mm_engine)
 
     def decode_sync(self, inputs: EngineInputs, outputs: EngineOutputs):
         multimodal_inputs = [

@@ -8,7 +8,6 @@ import torch
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.frontend.tokenizer_factory.tokenizer_utils import (
     DecodingState,
     IncrementDecodingUtils,
@@ -16,6 +15,7 @@ from rtp_llm.frontend.tokenizer_factory.tokenizer_utils import (
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.metrics import GaugeMetrics, kmonitor
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
+from rtp_llm.ops import FfnDisAggregateConfig, SpecialTokens, SpeculativeExecutionConfig
 from rtp_llm.utils.base_model_datatypes import (
     GenerateInput,
     GenerateOutput,
@@ -39,18 +39,38 @@ request_counter = AtomicCounter()
 class Pipeline(object):
     def __init__(
         self,
-        model_config: GptInitModelParameters,
+        special_tokens: SpecialTokens,  # SpecialTokens from ModelConfig
+        pd_sep_config,  # PDSepConfig from ops
+        runtime_config,  # RuntimeConfig from ops
+        ffn_disaggregate_config: FfnDisAggregateConfig,
+        max_seq_len: int,  # max_seq_len_ from ModelConfig
+        seq_size_per_block: int,  # seq_size_per_block_ from ModelConfig
         tokenizer: Optional[BaseTokenizer],
+        sp_config: Optional[SpeculativeExecutionConfig] = None,
         separated_frontend: bool = False,
+        mm_related_params: Optional[Any] = None,  # mm_related_params from ModelConfig (optional)
+        gang_info=None,
     ):
-        self.model_config = model_config
+        self.pd_sep_config = pd_sep_config
+        self.runtime_config = runtime_config
+        self.ffn_disaggregate_config = ffn_disaggregate_config
         self.tokenizer = tokenizer
-        self._special_tokens: int = self.model_config.special_tokens
-        self._mm_token: str = self.model_config.mm_related_params.special_tokens.get(
-            "default_mm_token", ""
-        )
+        self._special_tokens: SpecialTokens = special_tokens
+        self._mm_token: str = ""
+        if mm_related_params:
+            self._mm_token = mm_related_params.special_tokens.get("default_mm_token", "")
+        
         self.backend_rpc_server_visitor = BackendRPCServerVisitor(
-            model_config, separated_frontend
+            max_seq_len=max_seq_len,
+            seq_size_per_block=seq_size_per_block,
+            pd_sep_config=pd_sep_config,
+            runtime_config=runtime_config,
+            ffn_disaggregate_config=ffn_disaggregate_config,
+            sp_config=sp_config,
+            max_rpc_timeout_ms=pd_sep_config.max_rpc_timeout_ms,
+            decode_entrance=pd_sep_config.decode_entrance,
+            separated_frontend=separated_frontend,
+            gang_info=gang_info,
         )
 
     def encode(self, prompt: str):
@@ -67,6 +87,7 @@ class Pipeline(object):
         vocab_size: int,
         special_tokens: Any,
         tokenizer: BaseTokenizer,
+        generate_env_config,
         **kwargs: Any
     ) -> GenerateConfig:
         if isinstance(generate_config, dict):
@@ -76,7 +97,7 @@ class Pipeline(object):
             config = generate_config
         config.add_special_tokens(special_tokens)
         config.convert_select_tokens(vocab_size, tokenizer)
-        config.add_thinking_params(tokenizer)
+        config.add_thinking_params(tokenizer, generate_env_config)
         config.add_stop_ids_from_str(tokenizer)
         return config
 
@@ -148,7 +169,7 @@ class Pipeline(object):
         generate_config = self.create_generate_config(
             generate_config_json,
             self.tokenizer.vocab_size,
-            self.model_config.special_tokens,
+            self._special_tokens,
             self.tokenizer,
             **kwargs
         )

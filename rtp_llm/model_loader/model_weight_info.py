@@ -1,12 +1,9 @@
 import functools
-import gc
 import logging
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.config.quant_config import QuantizationConfig
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, AttnConfig
 from rtp_llm.model_loader.ffn_weight import FfnConfig, FfnWeight, MoeWithSharedWeight
@@ -27,6 +24,17 @@ from rtp_llm.utils.model_weight import (
     tolerate_failed,
 )
 from rtp_llm.utils.weight_type import WEIGHT_TYPE
+from rtp_llm.ops import VitSeparation
+
+# Forward references for type hints
+from typing import TYPE_CHECKING
+
+# Import BaseMultiModalWeightInfo for isinstance check
+from rtp_llm.models.multimodal.multimodal_mixin import BaseMultiModalWeightInfo
+if TYPE_CHECKING:
+    from rtp_llm.config.model_config import ModelConfig
+    from rtp_llm.config.kv_cache_config import KVCacheConfig
+    from rtp_llm.ops import ParallelismConfig, HWKernelConfig
 
 
 def create_scalar_ones(ts: List[torch.Tensor]):
@@ -144,70 +152,93 @@ class ModelDeployWeightInfo:
         W.post_ln_beta: "transformer.layers.{i}.post_layernorm.bias",
     }
 
-    def __init__(self, config: GptInitModelParameters, tp_size: int, tp_rank: int):
-        self.config = config
-        self._use_swizzleA = config.hw_kernel_config.use_swizzleA
-        self._use_qk_norm = config.qk_norm
-        self._hidden_size = config.hidden_size
-        self._inter_size = config.inter_size
-        self._inter_padding_size = config.inter_padding_size
-        self._moe_inter_padding_size = config.moe_inter_padding_size
-        self._head_num = config.head_num
-        self._head_num_kv = config.head_num_kv
-        self.tp_size = tp_size
-        self.tp_rank = tp_rank
-        self.ep_size = config.ep_size
-        self.ep_rank = config.ep_rank
-        self.dp_size = config.dp_size
-        self.dp_rank = config.dp_rank
-        self.num_nodes: int = config.num_nodes
-        self.ffn_tp_rank = config.ffn_tp_rank
-        self.ffn_tp_size = config.ffn_tp_size
-        self._size_per_head = config.size_per_head
+    def __init__(
+        self,
+        model_config: "ModelConfig",
+        parallelism_config: "ParallelismConfig",
+        hw_kernel_config: "HWKernelConfig",
+        kv_cache_config: "KVCacheConfig",
+        merge_lora: bool = False,
+        vit_config: Optional["VitConfig"] = None,
+        **kwargs,
+    ):
+        """Initialize ModelDeployWeightInfo with independent configuration objects."""
+        self.model_config = model_config
+        self.merge_lora = merge_lora
+        
+        self._use_swizzleA = hw_kernel_config.use_swizzleA
+        self._use_qk_norm = model_config.qk_norm
+        self._hidden_size = model_config.hidden_size
+        self._inter_size = model_config.inter_size
+        self._inter_padding_size = model_config.inter_padding_size
+        self._moe_inter_padding_size = model_config.moe_inter_padding_size
+        self._head_num = model_config.attn_config.head_num
+        self._head_num_kv = model_config.attn_config.kv_head_num
+        self.tp_size = parallelism_config.tp_size
+        self.tp_rank = parallelism_config.tp_rank
+        self.ep_size = parallelism_config.ep_size
+        self.ep_rank = parallelism_config.ep_rank
+        self.dp_size = parallelism_config.dp_size
+        self.dp_rank = parallelism_config.dp_rank
+        # num_nodes should come from gang_info, not from config
+        self.num_nodes: int = 1  # Will be set from gang_info later
+        self.ffn_tp_rank = parallelism_config.ffn_tp_rank
+        self.ffn_tp_size = parallelism_config.ffn_tp_size
+        self._size_per_head = model_config.attn_config.size_per_head
         if self._head_num_kv == -1:
             self._head_num_kv = self._head_num
-        self._quant_algo = config.quant_algo
-        self._quant_config = config.quant_config
-        self._num_layers = config.num_layers
-        self._layer_head_num = config.layer_head_num
-        self._layer_inter_padding_size = config.layer_inter_padding_size
+        self._quant_algo = model_config.quant_algo
+        self._quant_config = model_config.quant_config
+        self._num_layers = model_config.num_layers
         self._has_prefix_encoder = False
-        self._is_sparse_head = config.is_sparse_head
-        self._layer_head_num = config.layer_head_num
-        self._src_quantization_bit = config.src_quantization_bit
-        self.tp_split_emb_and_lm_head = config.tp_split_emb_and_lm_head
+        self._src_quantization_bit = model_config.src_quantization_bit
 
-        self._is_gated_activation = config.gpt_init_params.isGatedActivation()
-        self.expert_num_ = config.gpt_init_params.expert_num
-        self.moe_n_group_ = config.moe_n_group
-        self.enable_eplb_ = config.enable_eplb
-        self.phy_exp_num_ = config.phy_exp_num
-        self.moe_k_ = config.gpt_init_params.moe_k
-        self.moe_layer_index_ = config.gpt_init_params.moe_layer_index
-        self.moe_style_ = config.gpt_init_params.moe_style
-        self._moe_inter_padding_size = config.moe_inter_padding_size
+        self._is_gated_activation = model_config.isGatedActivation()
+        self.expert_num_ = model_config.expert_num
+        self.moe_n_group_ = model_config.moe_n_group
+        self.enable_eplb_ = model_config.eplb_config.enable_eplb()
+        self.phy_exp_num_ = model_config.eplb_config.phy_exp_num(model_config.expert_num)
+        self.moe_k_ = model_config.moe_k
+        self.moe_layer_index_ = model_config.moe_layer_index
+        self.moe_style_ = model_config.moe_style
+        self._moe_inter_padding_size = model_config.moe_inter_padding_size
 
-        self.tie_word_embeddings = config.tie_word_embeddings
+        self.tie_word_embeddings = model_config.tie_word_embeddings
         self.weight_style = WeightStyle.NONE
 
         # for mla
-        self.kv_lora_rank = config.kv_lora_rank
-        self.nope_head_dim = config.nope_head_dim
-        self.rope_head_dim = config.rope_head_dim
-        self.v_head_dim = config.v_head_dim
-
-        # for vit sep
-        self.vit_separation = config.vit_separation
+        self.kv_lora_rank = model_config.attn_config.kv_lora_rank
+        self.nope_head_dim = model_config.attn_config.nope_head_dim
+        self.rope_head_dim = model_config.attn_config.rope_head_dim
+        self.v_head_dim = model_config.attn_config.v_head_dim
+        self.vit_separation = vit_config.vit_separation
 
         # for eplb
-        self.phy2log = config.phy2log
+        # phy2log should be loaded from LoadConfig, not from config
+        self.phy2log = None  # Will be set in create_load_config
+
         # for moe
         self._use_stack_weight = False
 
-        self.kv_cache_data_type = config.kv_cache_data_type
+        self.kv_cache_data_type = model_config.kv_cache_data_type
+        
+        # Calculate use_fp8_kv_cache from kv_cache_config
+        self.use_fp8_kv_cache = False
+        if kv_cache_config:
+            self.use_fp8_kv_cache = (
+                self.kv_cache_data_type == WEIGHT_TYPE.FP8.to_str()
+                and kv_cache_config.blockwise_use_fp8_kv_cache == 1
+            )
 
         self.is_ffn_service = (
-            config.gpt_init_params.ffn_disaggregate_config.is_ffn_service()
+            parallelism_config.ffn_disaggregate_config.is_ffn_service()
+        )
+        
+        # Calculate is_attn_model: True if FFN disaggregate is enabled but this is not an FFN service
+        ffn_config = parallelism_config.ffn_disaggregate_config
+        self.is_attn_model = (
+            ffn_config.enable_ffn_disaggregate
+            and not ffn_config.is_ffn_service()
         )
 
     @property
@@ -221,8 +252,7 @@ class ModelDeployWeightInfo:
             size_per_head=self._size_per_head,
             head_num=self._head_num,
             head_num_kv=self._head_num_kv,
-            use_fp8_kv_cache=self.kv_cache_data_type == WEIGHT_TYPE.FP8.to_str()
-            and StaticConfig.py_kv_cache_config.blockwise_use_fp8_kv_cache == 1,
+            use_fp8_kv_cache=self.use_fp8_kv_cache,
         )
         return attn_config
 
@@ -237,7 +267,11 @@ class ModelDeployWeightInfo:
 
     def get_weight_info(self) -> ModelWeightInfo:
         weight_info = self._get_weight_info()
-        use_fp32 = self.config.py_env_configs.model_config.use_float32
+        if (isinstance(self, BaseMultiModalWeightInfo) and
+            self.vit_separation != VitSeparation.VIT_SEPARATION_REMOTE and
+            self.tp_rank == 0):
+            weight_info = self._get_vit_info(weight_info)
+        use_fp32 = self.model_config.use_float32
         if use_fp32:
             weight_info = weight_info.set_weight_dtype(torch.float32)
 
@@ -267,10 +301,6 @@ class ModelDeployWeightInfo:
         if self.tie_word_embeddings:
             logging.info("fix tie_word_embeddings")
             weight_info = self._fix_tie_lm_head(weight_info)
-        if self._is_sparse_head:
-            logging.info("Skiping load empty weight for head_num == 0")
-            weight_info = self._process_sparse_weight(weight_info)
-
         return weight_info
 
     def _fix_weight_style_layer_weight(self, origin_weight_info: ModelWeightInfo):
@@ -431,34 +461,6 @@ class ModelDeployWeightInfo:
         origin_weight_info.weights[lm_head_idx] = lm_head
         return origin_weight_info
 
-    def _process_sparse_weight(
-        self, origin_weight_info: ModelWeightInfo
-    ) -> ModelWeightInfo:
-        if not isinstance(origin_weight_info.layer_weights[0], list):
-            raise Exception("model weight use sparse config should be list(list())")
-        new_layer_weights = []
-
-        skip_weights_list = [
-            W.attn_qkv_w,
-            W.attn_qkv_b,
-            W.attn_ln_gamma,
-            W.attn_ln_beta,
-            W.qk_ln_gamma,
-            W.attn_o_w,
-        ]
-
-        for i, layer_weight in enumerate(origin_weight_info.layer_weights):
-            if self._layer_head_num[i] == 0:
-                new_weights = [
-                    weight
-                    for weight in layer_weight
-                    if weight.name not in skip_weights_list
-                ]
-            else:
-                new_weights = layer_weight
-            new_layer_weights.append(new_weights)
-        return ModelWeightInfo(origin_weight_info.weights, new_layer_weights)
-
     def _get_weight_info(self) -> ModelWeightInfo:
         raise NotImplementedError()
 
@@ -525,7 +527,7 @@ class ModelDeployWeightInfo:
         if not database.is_ft_style:
             merge_lora = (
                 database.has_lora()
-                and self.config.py_env_configs.lora_config.merge_lora
+                and self.merge_lora
             )
 
         if database.has_lora() and not self.support_lora:
@@ -536,7 +538,7 @@ class ModelDeployWeightInfo:
         if (
             database.is_ft_style
             and database.ft_weight_params
-            and self.vit_separation != 1
+            and self.vit_separation != VitSeparation.VIT_SEPARATION_ROLE
         ):
             # check ft_style ParallelInfo is match weight's ParallelInfo
             src_tp_size = int(database.ft_weight_params.get("TP_SIZE", self.tp_size))
@@ -577,17 +579,16 @@ class ModelDeployWeightInfo:
             num_nodes=self.num_nodes,
             ffn_tp_rank=self.ffn_tp_rank,
             ffn_tp_size=self.ffn_tp_size,
-            tp_split_emb_and_lm_head=self.tp_split_emb_and_lm_head,
             merge_lora=merge_lora,
             vit_separation=self.vit_separation,
             compute_dtype=compute_dtype,
             quant_algo=self._quant_algo,
             bit=self._quant_algo.getWeightBits(),
             is_ft_style_weight=database.is_ft_style,
-            phy2log=self.config.phy2log,  # Notice use config, because phy2log init after ModelDeployWeightInfo.__init__
+            phy2log=self.phy2log,  # phy2log should be set before create_load_config is called
             exported_device=exported_device,
             use_swizzleA=self._use_swizzleA,
-            load_method=LoadMethod(StaticConfig.load_config.load_method),
+            load_method=LoadMethod.AUTO,  # Default load method
         )
         return load_config
 

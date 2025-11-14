@@ -38,7 +38,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     GenerateOutputsPB,
     TensorPB,
 )
-from rtp_llm.models.base_model import GenerateInput, GenerateOutputs
+from rtp_llm.utils.base_model_datatypes import GenerateInput, GenerateOutputs
 
 
 class FakeStub:
@@ -81,6 +81,14 @@ class FakeStub:
 class FakeModelRpcClient(ModelRpcClient):
 
     def __init__(self):
+        # Call parent __init__ with minimal required parameters
+        from rtp_llm.ops import FfnDisAggregateConfig
+        super().__init__(
+            FfnDisAggregateConfig(),
+            None,  # py_env_configs
+            0,     # max_rpc_timeout_ms
+            False, # decode_entrance
+        )
         self.stub = FakeStub()
 
     async def enqueue(

@@ -5,7 +5,7 @@ import torch
 import torch.multiprocessing as mp
 from librtp_compute_ops import init_device
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.distribute.worker_info import (
     g_master_info,
     g_parallel_info,
@@ -20,9 +20,11 @@ from rtp_llm.models_py.distributed.process_group_state import (
     get_ep_group,
     init_distributed_environment,
 )
+from rtp_llm.models_py.modules.moe.config_adapter import MoEConfigAdapter
 from rtp_llm.models_py.modules.moe.routers.deepep_low_latency_router import (
     DeepEpLowLatencyRouter,
 )
+from rtp_llm.ops import FfnDisAggregateConfig, MoeConfig, ParallelismConfig, RuntimeConfig
 from rtp_llm.models_py.modules.moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
 )
@@ -67,33 +69,94 @@ def _init_router(rank: int, use_fp8: bool):
     g_parallel_info.reload()
     update_master_info(f"0.0.0.0", int(os.environ["MASTER_PORT"]))
     # init params
-    config = GptInitModelParameters(
-        head_num=2,
-        size_per_head=128,
-        layer_num=2,
-        max_seq_len=2048,
-        vocab_size=500000,
+    model_config = ModelConfig()
+    model_config.head_num = 2
+    model_config.size_per_head = 128
+    model_config.num_layers = 2
+    model_config.max_seq_len = 2048
+    model_config.vocab_size = 500000
+    model_config.moe_k = TOPK
+    model_config.expert_num = NUM_EXPERTS
+    model_config.hidden_size = HIDDEN_SIZE
+    
+    parallelism_config = ParallelismConfig()
+    parallelism_config.nccl_ip = "127.0.0.1"
+    parallelism_config.tp_nccl_port = int(os.getenv("MASTER_PORT", "8376"))
+    parallelism_config.dp_rank = rank
+    parallelism_config.dp_size = WORLD_SIZE
+    parallelism_config.tp_rank = 0
+    parallelism_config.tp_size = 1
+    parallelism_config.ep_rank = rank
+    parallelism_config.ep_size = WORLD_SIZE
+    parallelism_config.local_rank = rank
+    parallelism_config.world_size = WORLD_SIZE
+    parallelism_config.world_rank = rank
+    parallelism_config.local_world_size = WORLD_SIZE
+    
+    moe_config = MoeConfig()
+    moe_config.use_deepep_low_latency = True
+    moe_config.use_deepep_internode = False
+    
+    runtime_config = RuntimeConfig()
+    runtime_config.max_generate_batch_size = NUM_TOKEN_PER_RANK
+    
+    ffn_disaggregate_config = FfnDisAggregateConfig()
+    ffn_disaggregate_config.enable_ffn_disaggregate = False
+    
+    config = MoEConfigAdapter(
+        model_config=model_config,
+        parallelism_config=parallelism_config,
+        moe_config=moe_config,
+        runtime_config=runtime_config,
     )
-    config.nccl_ip = "127.0.0.1"
-    config.dp_rank = g_parallel_info.dp_rank
-    config.dp_size = g_parallel_info.dp_size
-    config.tp_rank = g_parallel_info.tp_rank
-    config.tp_size = g_parallel_info.tp_size
-    config.ep_rank = g_parallel_info.ep_rank
-    config.ep_size = g_parallel_info.ep_size
-    config.local_rank = rank
-    config.world_size = g_parallel_info.world_size
-    config.moe_config.use_deepep_low_latency = True
-    config.moe_config.use_deepep_internode = False
-    config.gpt_init_params.ffn_disaggregate_config.enable_ffn_disaggregate = False
+    config._ffn_disaggregate_config = ffn_disaggregate_config
+    
+    torch.cuda.set_device(parallelism_config.local_rank)
+    torch.set_default_device(f"cuda:{parallelism_config.local_rank}")
+    init_distributed_environment(
+        parallelism_config=parallelism_config,
+        nccl_ip=parallelism_config.nccl_ip,
+        th_nccl_port=parallelism_config.tp_nccl_port,
+        backend="nccl",
+        timeout=60
+    )
+    init_deepep_wrapper(
+        group=get_ep_group().device_group,
+        model_config=model_config,
+        parallelism_config=parallelism_config,
+        moe_config=moe_config,
+        runtime_config=runtime_config,
+        ffn_disaggregate_config=ffn_disaggregate_config,
+    )
+    # Set additional config values
     config.moe_k = TOPK
     config.expert_num = NUM_EXPERTS
     config.hidden_size = HIDDEN_SIZE
     config.max_generate_batch_size = NUM_TOKEN_PER_RANK
-    torch.cuda.set_device(config.local_rank)
-    torch.set_default_device(f"cuda:{config.local_rank}")
-    init_distributed_environment(config, backend="nccl", timeout=60)
-    init_deepep_wrapper(group=get_ep_group().device_group, params=config)
+    moe_config.use_deepep_low_latency = True
+    moe_config.use_deepep_internode = False
+    
+    # Set parallelism config values from g_parallel_info
+    parallelism_config.nccl_ip = "127.0.0.1"
+    parallelism_config.local_rank = rank
+    
+    torch.cuda.set_device(parallelism_config.local_rank)
+    torch.set_default_device(f"cuda:{parallelism_config.local_rank}")
+    init_distributed_environment(
+        parallelism_config=parallelism_config,
+        nccl_ip=parallelism_config.nccl_ip,
+        th_nccl_port=parallelism_config.tp_nccl_port,
+        backend="nccl",
+        timeout=60
+    )
+    init_deepep_wrapper(
+        group=get_ep_group().device_group,
+        model_config=model_config,
+        parallelism_config=parallelism_config,
+        moe_config=moe_config,
+        runtime_config=runtime_config,
+        ffn_disaggregate_config=ffn_disaggregate_config,
+    )
     router = DeepEpLowLatencyRouter(
         config,
         use_fp8_dispatch=use_fp8,

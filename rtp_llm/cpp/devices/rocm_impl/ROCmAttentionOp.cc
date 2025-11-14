@@ -399,7 +399,7 @@ ParamsPtr FlashInferAttnParams::prepareDecodeFlashInferAttnParams(rtp_llm::Devic
     if (!cuda_device || (dtype != DataType::TYPE_FP16 && dtype != DataType::TYPE_BF16)
         || attn_configs.kv_cache_dtype != KvCacheDataType::BASE
         || (attn_configs.rope_config.style != RopeStyle::Base && attn_configs.rope_config.style != RopeStyle::No)
-        || attn_configs.mask_type != causalMask || attn_configs.q_scaling != 1.0f || attn_configs.use_logn_attn
+        || !attn_configs.is_causal || attn_configs.q_scaling != 1.0f || attn_configs.use_logn_attn
         || (size_per_head != 64 && size_per_head != 128 && size_per_head != 192)
         || (group_size > 10 && group_size != 16)) {
         return nullptr;
@@ -818,14 +818,13 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
         }
         writeCacheStore(params);
     }
-
     
     if (use_fmha_fp8){
         fmha_runner_->setup(
-            DataType::TYPE_FP8_E4M3, params.configs.mask_type, head_num, kv_head_num, size_per_head, params.configs.q_scaling);
+            DataType::TYPE_FP8_E4M3,params.configs.is_causal, head_num, kv_head_num, size_per_head, params.configs.q_scaling);
     } else {
         fmha_runner_->setup(
-            datatype, params.configs.mask_type, head_num, kv_head_num, size_per_head, params.configs.q_scaling);
+            datatype, params.configs.is_causal, head_num, kv_head_num, size_per_head, params.configs.q_scaling);
     }
 
     printBufferData(*q_output, "q_output");
@@ -951,7 +950,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
             auto attention_mask    = attentionMask({*lengths_host,
                                                     *prefix_lengths_host,
                                                     q_output->type(),
-                                                    params.configs.mask_type == AttentionMaskType::causalMask});
+                                                    params.configs.is_causal});
             auto softmax_qk_output = softmax({std::move(qk_output), *attention_mask, nullopt, scale, datatype});
             softmax_qk_output->updateShape(
                 {batch_size, kv_head_num, (head_num / kv_head_num) * seq_len, seq_len_with_prefix});

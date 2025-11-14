@@ -12,9 +12,9 @@
 namespace rtp_llm {
 
 absl::StatusOr<std::unordered_map<std::string, SystemPromptParams>> SystemPromptConstructor::construct(
-    const rtp_llm::GptInitParameter& params, EngineBase* engine, CacheManager* cache_manager, bool insert_kv_cache) {
+    const KVCacheConfig& kv_cache_config, EngineBase* engine, CacheManager* cache_manager, bool insert_kv_cache) {
     std::unordered_map<std::string, SystemPromptParams> multi_task_prompt_args;
-    for (const auto& item : params.multi_task_prompt_tokens_) {
+    for (const auto& item : kv_cache_config.multi_task_prompt_tokens) {
         const auto& task_id   = item.first;
         const auto& tokens_id = item.second;
 

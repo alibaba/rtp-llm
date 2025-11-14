@@ -6,7 +6,7 @@ from typing import Any, Dict, Optional
 
 import torch
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.models_py.modules.moe.config_adapter import MoEConfigAdapter
 from rtp_llm.models_py.modules.ep.kernels import (
     ep_gather,
     ep_scatter,
@@ -41,7 +41,7 @@ def align_up_math(n: int, alignment: int = 128) -> int:
 class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
     def __init__(
         self,
-        config: GptInitModelParameters,
+        config: MoEConfigAdapter,
         weights: Dict[str, torch.Tensor],
     ):
         super().__init__(FusedMoEQuantConfig())

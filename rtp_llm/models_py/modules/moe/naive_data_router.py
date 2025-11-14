@@ -5,7 +5,6 @@ from typing import Any, Optional
 import torch
 
 import rtp_llm.models_py.modules.moe.fused_moe as mm
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.models_py.modules.moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous,
     TopKWeightAndReduceDelegate,

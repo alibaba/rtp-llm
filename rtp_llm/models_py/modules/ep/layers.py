@@ -11,9 +11,18 @@ from torch.nn import Module
 
 import rtp_llm.models_py.modules.utils as utils
 from rtp_llm.distribute.collective import Group, all_reduce
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+
+if utils.is_cuda():
+    from librtp_compute_ops.rtp_llm_ops import trt_fp8_quantize_128
+else:
+    rtp_llm_ops = None
+    trt_fp8_quantize_128 = None
+
+from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.quant_config import QuantizationConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.modules.utils import ceil_div, dispose_tensor
+from rtp_llm.ops import ParallelismConfig, MoeConfig
 from rtp_llm.utils.model_weight import W
 
 if utils.is_cuda():
@@ -87,13 +96,16 @@ class GroupedGemmRunner(torch.nn.Module):
 class FusedMoE(torch.nn.Module):
     def __init__(
         self,
-        config: GptInitModelParameters,
+        config: ModelConfig,
+        parallelism_config: ParallelismConfig,
         weights: Dict[str, torch.Tensor],
         layer_id: int,
+        moe_config: MoeConfig,
     ):
         super().__init__()
 
         self.config = config
+        self.parallelism_config = parallelism_config
         self.layer_id = layer_id
         self.hidden_dim = config.hidden_size
         self.ffn_dim = config.moe_inter_padding_size
@@ -101,8 +113,9 @@ class FusedMoE(torch.nn.Module):
         self.top_k = config.moe_k
         self.up_proj = weights.get(W.moe_w1, None)
         self.down_proj = weights.get(W.moe_w2, None)
-        self.select_topk_op = SelectTopkOp(config)
-        self.fused_moe_op = FusedMoEOp(config)
+        # Use passed moe_config instead of creating new one
+        self.select_topk_op = SelectTopkOp(config, moe_config.fake_balance_expert, parallelism_config.dp_rank)
+        self.fused_moe_op = FusedMoEOp(config, parallelism_config)
 
     def forward(
         self,
@@ -150,17 +163,20 @@ class LegacyEPMoE(torch.nn.Module):
 
     def __init__(
         self,
-        config: GptInitModelParameters,
+        config: ModelConfig,
+        parallelism_config: ParallelismConfig,
         weights: Dict[str, torch.Tensor],
         layer_id: int,
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
 
         self.config = config
+        self.parallelism_config = parallelism_config
         self.layer_id = layer_id
 
-        self.tp_size = config.tp_size
-        self.tp_rank = config.tp_rank
+        self.tp_size = parallelism_config.tp_size
+        self.tp_rank = parallelism_config.tp_rank
 
         self.num_experts = config.expert_num
         assert self.num_experts % self.tp_size == 0
@@ -174,10 +190,10 @@ class LegacyEPMoE(torch.nn.Module):
         self.renormalize = True
 
         # Check if FP8 quantization should be used
-        if self.config.quant_config:
+        if quant_config:
             self.use_fp8_w8a8 = True
-            self.use_block_quant = self.config.quant_config.group_size() > 0
-            group_size = self.config.quant_config.group_size()
+            self.use_block_quant = quant_config.group_size() > 0
+            group_size = quant_config.group_size()
             self.block_shape = [group_size, group_size] if group_size > 0 else None
             self.fp8_dtype = torch.float8_e4m3fn
             self.activation_scheme = "dynamic"  # Default to dynamic activation scheme

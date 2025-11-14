@@ -154,7 +154,13 @@ def _load_as_ft_style(
         hf_model_info = get_hf_model_info(model_path)
         if hf_model_info and hf_model_info.model_config_file is not None:
             model_path = os.path.dirname(hf_model_info.model_config_file)
-    quantization = ModelConfig.get_quantization_from_params(env_params)
+    # Get quantization from env_params (compatibility logic)
+    quantization = env_params.get("QUANTIZATION", "")
+    if not quantization:
+        int8_mode = env_params.get("INT8_MODE", "0")
+        weight_type = env_params.get("WEIGHT_TYPE", "").upper()
+        if int(int8_mode) == 1 or weight_type == "INT8":
+            quantization = "INT8"
     model_config = ModelConfig(
         model_type=ft_model_type,
         ckpt_path=model_path,
@@ -164,7 +170,14 @@ def _load_as_ft_style(
         tokenizer_path=None,
         quantization=quantization,
     )
-    config: GptInitModelParameters = model_cls.create_config(model_config)
+    config: ModelConfig = model_cls._create_config(model_path)
+    # Apply model_config settings to config
+    config.ckpt_path = model_config.ckpt_path
+    config.tokenizer_path = model_config.tokenizer_path or model_config.ckpt_path
+    config.max_seq_len = model_config.max_seq_len or 0
+    config.quantization = model_config.quantization
+    config.act_type = model_config.act_type
+    config.model_type = model_type
     is_quant_weight = config.quant_algo.isQuant()
     quant_config = None
     if is_quant_weight:
@@ -194,14 +207,14 @@ def _load_as_ft_style(
     try:
         param_count = model_cls.eval_model_param_count(config)
     except Exception as e:
-        param_count = BaseModel.eval_model_param_count(config)
+        param_count = config.model_param_count()
         logging.error(f"eval model param count failed: {str(e)}")
     total_size = None
     try:
         total_size = model_cls.eval_model_size(config)
     except Exception as e:
-        total_size = BaseModel.eval_model_size(config)
-        logging.error(f"eval model param count failed: {str(e)}")
+        total_size = config.eval_model_size()
+        logging.error(f"eval model size failed: {str(e)}")
 
     raw_config_dict = _get_raw_config(model_path)
 
@@ -209,7 +222,7 @@ def _load_as_ft_style(
         ft_model_type=ft_model_type,
         param_count=param_count,
         model_size=total_size,
-        hidden_size=config.gpt_init_params.hidden_size,
+        hidden_size=config.model_config.hidden_size,
         architectures=raw_config_dict.get("architectures", None),
         llm_architectures=None,
         is_quant_weight=is_quant_weight,

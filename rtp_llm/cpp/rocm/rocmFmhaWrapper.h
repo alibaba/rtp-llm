@@ -7,8 +7,8 @@ namespace rtp_llm {
 class rocmFmhaWrapper {
 private:
     /* data */
-    DataType          dtype_;
-    AttentionMaskType mtype_;
+    DataType dtype_;
+    bool     is_causal_;
 
     size_t head_num_;
     size_t kv_head_num_;
@@ -24,14 +24,14 @@ public:
     void init(hipStream_t stream) {
         stream_ = stream;
     }
-    void setup(DataType          dtype,
-               AttentionMaskType mtype,
-               size_t            head_num,
-               size_t            kv_head_num,
-               size_t            size_per_head,
-               float             q_scaling) {
+    void setup(DataType dtype,
+               bool     is_causal,
+               size_t   head_num,
+               size_t   kv_head_num,
+               size_t   size_per_head,
+               float    q_scaling) {
         dtype_         = dtype;
-        mtype_         = mtype;
+        is_causal_     = is_causal;
         head_num_      = head_num;
         kv_head_num_   = kv_head_num;
         size_per_head_ = size_per_head;

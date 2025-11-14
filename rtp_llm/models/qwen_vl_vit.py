@@ -175,15 +175,15 @@ class VisualAttention(nn.Module):
 
         # Per attention head and per partition values.
         assert embed_dim % num_heads == 0
-        self.hidden_size_per_attention_head = embed_dim // num_heads
+        self.hidden_sizeper_attention_head = embed_dim // num_heads
         self.num_attention_heads_per_partition = num_heads
-        self.hidden_size_per_partition = embed_dim
+        self.hidden_sizeper_partition = embed_dim
 
         # Strided linear layer.
         assert self._qkv_same_embed_dim, "Only Support SelfAttention Currently"
         self.in_proj = nn.Linear(embed_dim, 3 * embed_dim)
         self.out_proj = nn.Linear(embed_dim, embed_dim)
-        self.norm_factor = math.sqrt(self.hidden_size_per_attention_head)
+        self.norm_factor = math.sqrt(self.hidden_sizeper_attention_head)
 
     def forward(self, query, key, value, attn_mask=None):
         # query/key/value: [sq, b, h]
@@ -196,26 +196,26 @@ class VisualAttention(nn.Module):
         # [sq, b, (np * 3 * hn)] --> [sq, b, np, 3 * hn]
         new_tensor_shape = mixed_x_layer.size()[:-1] + (
             self.num_attention_heads_per_partition,
-            3 * self.hidden_size_per_attention_head,
+            3 * self.hidden_sizeper_attention_head,
         )
         mixed_x_layer = mixed_x_layer.view(*new_tensor_shape)
 
         # [sq, b, np, 3 * hn] --> 3 [sq, b, np, hn]
         query_layer, key_layer, value_layer = mixed_x_layer.split(
-            self.hidden_size_per_attention_head, dim=-1
+            self.hidden_sizeper_attention_head, dim=-1
         )
 
         # [sq, b, np, hn] -> [sq, b * np, hn]
         query_layer = query_layer.view(
             sq,
             b * self.num_attention_heads_per_partition,
-            self.hidden_size_per_attention_head,
+            self.hidden_sizeper_attention_head,
         ).transpose(0, 1)
         # [sk, b, np, hn] -> [sk, b * np, hn]
         key_layer = key_layer.view(
             sk,
             b * self.num_attention_heads_per_partition,
-            self.hidden_size_per_attention_head,
+            self.hidden_sizeper_attention_head,
         ).transpose(0, 1)
 
         q_scaled = query_layer / self.norm_factor
@@ -230,7 +230,7 @@ class VisualAttention(nn.Module):
         value_layer = value_layer.view(
             sk,
             b * self.num_attention_heads_per_partition,
-            self.hidden_size_per_attention_head,
+            self.hidden_sizeper_attention_head,
         ).transpose(0, 1)
 
         # matmul: [b * np, sq, hn]
@@ -241,7 +241,7 @@ class VisualAttention(nn.Module):
             b,
             self.num_attention_heads_per_partition,
             sq,
-            self.hidden_size_per_attention_head,
+            self.hidden_sizeper_attention_head,
         )
 
         # [b, np, sq, hn] --> [sq, b, np, hn]
@@ -249,7 +249,7 @@ class VisualAttention(nn.Module):
 
         # [sq, b, np, hn] --> [sq, b, hp]
         new_context_layer_shape = context_layer.size()[:-2] + (
-            self.hidden_size_per_partition,
+            self.hidden_sizeper_partition,
         )
         context_layer = context_layer.view(*new_context_layer_shape)
 

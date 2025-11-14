@@ -6,8 +6,8 @@ from typing import List, Optional
 
 import torch
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters, MlaOpsType
-from rtp_llm.config.py_config_modules import StaticConfig
+from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.ops import MlaOpsType
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import MlaAttnAtomicWeight, MlaConfig
 from rtp_llm.model_loader.ffn_weight import (
@@ -54,9 +54,6 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
     q_use_lora = False
     has_e_score_correction_bias = False
 
-    def __init__(self, config: GptInitModelParameters, tp_size: int, tp_rank: int):
-        super().__init__(config, tp_size, tp_rank)
-
     def _process_meta(self, meta_dict, weight_keys):
         if "model.layers.0.self_attn.q_a_proj.weight" in weight_keys:
             self.q_use_lora = True
@@ -76,7 +73,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
             kv_lora_rank=self.kv_lora_rank,
             ope_head_dim=self.nope_head_dim,
             v_head_dim=self.v_head_dim,
-            use_mla=self.config.use_mla and self.config.mla_ops_type != MlaOpsType.MHA,
+            use_mla=self.model_config.attn_config.use_mla and self.model_config.mla_ops_type != MlaOpsType.MHA,
             q_use_lora=self.q_use_lora,
         )
         layer_weights = [
@@ -228,7 +225,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                 )
             )
 
-        if self.config.use_mla and self.config.mla_ops_type != MlaOpsType.MHA:
+        if self.model_config.attn_config.use_mla and self.model_config.mla_ops_type != MlaOpsType.MHA:
             mla_layer_weights.append(
                 MlaAttnAtomicWeight(
                     W.mla_kc,
@@ -271,11 +268,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
         return layer_weights
 
     def _get_hf_ffn_layer_weight_info(self, layer_id: int):
-        inter_padding_size = (
-            self._layer_inter_padding_size[layer_id]
-            if self._layer_inter_padding_size
-            else self._inter_padding_size
-        )
+        inter_padding_size = self._inter_padding_size
 
         ffn_config = FfnConfig(
             inter_padding_size=inter_padding_size,
@@ -446,26 +439,26 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
             ]
 
     def _create_rope_w(self) -> Optional[AtomicWeight]:
-        if self.config.mla_ops_type == MlaOpsType.MHA:
+        if self.model_config.mla_ops_type == MlaOpsType.MHA:
             return None
-        config: GptInitModelParameters = self.config
+        config = self.model_config
 
-        def __create_rope_w(ts: List[torch.Tensor], config: GptInitModelParameters):
+        def __create_rope_w(ts: List[torch.Tensor], config: ModelConfig):
             logging.info(
                 f"initialize rope cos sin cache with seq_len: {config.max_seq_len}"
             )
             rotary_emb = DeepseekV3YarnRotaryEmbedding(
-                config.rotary_embedding_dim,
+                config.attn_config.rope_config.dim,
                 config.max_seq_len,
-                config.rotary_embedding_base,
-                scaling_factor=config.rotary_embedding_scale,
+                config.attn_config.rope_config.base,
+                scaling_factor=config.attn_config.rope_config.scale,
                 original_max_position_embeddings=config.org_embedding_max_pos,
                 beta_fast=config.rotary_factor2,
                 beta_slow=config.rotary_factor1,
                 mscale=config.deepseek_rope_mscale,
                 mscale_all_dim=config.deepseek_mscale_all_dim,
             )
-            half_rope_dim = config.rotary_embedding_dim // 2
+            half_rope_dim = config.attn_config.rope_config.dim // 2
             cos_cache = rotary_emb.cos_cached[:, :half_rope_dim]
             sin_cache = rotary_emb.sin_cached[:, :half_rope_dim]
             # cos sin cache must be float32
@@ -507,28 +500,43 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
 class DeepSeekV2(BaseModel):
     @classmethod
     def _create_config(cls, ckpt_path: str):
-        config = GptInitModelParameters(
-            head_num=0,
-            head_num_kv=0,
-            size_per_head=0,
-            layer_num=0,
-            inter_size=0,
-            vocab_size=102400,
-            max_seq_len=8192,
-            norm_type="rmsnorm",
-            has_post_decoder_layernorm=True,
-        )
+        config = ModelConfig()
+        config.attn_config.head_num = 0
+        config.attn_config.kv_head_num = 0
+        config.attn_config.size_per_head = 0
+        config.num_layers = 0
+        config.inter_size = 0
+        config.vocab_size = 102400
+        config.max_seq_len = 8192
+        config.norm_type = "rmsnorm"
+        config.has_post_decoder_layernorm = True
         # config.activation_type = "gated-silu"
         config.activation_type = "SiGLU"
         DeepSeekV2._from_hf(config, ckpt_path)
         return config
 
     def _create_python_model(self) -> Optional[GptModelBase]:
-        attention_type = "mla"
-        self.py_model = GenericMoeModel(self.config, self.weight, attention_type)
+        model_config = self.model_config
+        parallelism_config = self.engine_config.parallelism_config
+        fmha_config = self.engine_config.fmha_config
+        py_hw_kernel_config = self.engine_config.hw_kernel_config
+        moe_config = self.engine_config.moe_config
+        max_generate_batch_size = self.engine_config.runtime_config.max_generate_batch_size
+        
+        # Use GenericMoeModel with new config architecture
+        # attention_type is determined from model_config.attn_config.use_mla
+        self.py_model = GenericMoeModel(
+            model_config,
+            parallelism_config,
+            self.weight,
+            moe_config,
+            fmha_config=fmha_config,
+            py_hw_kernel_config=py_hw_kernel_config,
+            max_generate_batch_size=max_generate_batch_size,
+        )
 
     @staticmethod
-    def _from_hf(config: GptInitModelParameters, ckpt_path: str):
+    def _from_hf(config: ModelConfig, ckpt_path: str):
         config_path = os.path.join(ckpt_path, "config.json")
         if not os.path.exists(config_path):
             return
@@ -536,12 +544,12 @@ class DeepSeekV2(BaseModel):
             content = reader.read()
             config_json = json.loads(content)
             config.inter_size = config_json["intermediate_size"]
-            config.head_num = config_json["num_attention_heads"]
-            config.head_num_kv = config_json.get("num_key_value_heads", config.head_num)
-            config.layer_num = config_json["num_hidden_layers"]
-            config.rotary_embedding_base = config_json.get(
-                "rope_theta", config.rotary_embedding_base
-            )
+            config.attn_config.head_num = config_json["num_attention_heads"]
+            config.attn_config.kv_head_num = config_json.get("num_key_value_heads", config.attn_config.head_num)
+            config.num_layers = config_json["num_hidden_layers"]
+            config.attn_config.rope_config.base = int(config_json.get(
+                "rope_theta", config.attn_config.rope_config.base
+            ))
             config.vocab_size = config_json["vocab_size"]
             config.layernorm_eps = config_json.get("rms_norm_eps", 1e-06)
             config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
@@ -549,25 +557,21 @@ class DeepSeekV2(BaseModel):
 
             # MLA config
             config.use_mla = True
-            config.mla_ops_type = MlaOpsType.__members__[
-                StaticConfig.model_config.mla_ops_type
-            ]
-            logging.info(f"deepseek2 mla_ops_type: {config.mla_ops_type.name}")
             config.q_lora_rank = config_json["q_lora_rank"]
             config.kv_lora_rank = config_json["kv_lora_rank"]
             config.nope_head_dim = config_json["qk_nope_head_dim"]
             config.rope_head_dim = config_json["qk_rope_head_dim"]
             config.v_head_dim = config_json["v_head_dim"]
-            config.size_per_head = config.nope_head_dim + config.rope_head_dim
-            config.rotary_embedding_dim = config.rope_head_dim
+            config.attn_config.size_per_head = config.nope_head_dim + config.rope_head_dim
+            config.attn_config.rope_config.dim = config.rope_head_dim
 
             # yarn rotary config
             if config.mla_ops_type != MlaOpsType.MHA:
-                config.rotary_embedding_style = 0
+                config.attn_config.rope_config.style = 0
             else:
-                config.rotary_embedding_style = 5
+                config.attn_config.rope_config.style = 5
             rope_scaling = config_json.get("rope_scaling")
-            config.rotary_embedding_scale = rope_scaling["factor"]
+            config.attn_config.rope_config.scale = rope_scaling["factor"]
             config.rotary_factor1 = float(rope_scaling.get("beta_slow", 1))
             config.rotary_factor2 = float(rope_scaling.get("beta_fast", 32))
             config.org_embedding_max_pos = rope_scaling[
@@ -579,10 +583,10 @@ class DeepSeekV2(BaseModel):
             mscale_all_dim = rope_scaling["mscale_all_dim"]
             config.deepseek_rope_mscale = mscale
             config.deepseek_mscale_all_dim = mscale_all_dim
-            config.rotary_embedding_mscale = yarn_get_mscale(
+            config.attn_config.rope_config.mscale = yarn_get_mscale(
                 scaling_factor, mscale
             ) / yarn_get_mscale(scaling_factor, mscale_all_dim)
-            config.rotary_embedding_offset = config.nope_head_dim
+            config.attn_config.rope_config.offset = config.nope_head_dim
 
             # softmax scale config
             softmax_mscale = yarn_get_mscale(scaling_factor, mscale_all_dim)
@@ -616,13 +620,13 @@ class DeepSeekV2(BaseModel):
             first_k_dense_replace = config_json["first_k_dense_replace"]
             config.moe_layer_index = [
                 i
-                for i in range(config.layer_num)
+                for i in range(config.num_layers)
                 if i >= first_k_dense_replace and i % moe_step == 0
             ]
 
             ffn_inter_size = config_json.get("intermediate_size", config.inter_size)
             layer_inter_size = []
-            for i in range(config.layer_num):
+            for i in range(config.num_layers):
                 if i in config.moe_layer_index:
                     layer_inter_size.append(config.inter_size)
                 else:
@@ -637,8 +641,8 @@ class DeepSeekV2(BaseModel):
 
 class DeepSeekV3MtpWeight(DeepSeekV2Weight):
 
-    def __init__(self, config: GptInitModelParameters, tp_size: int, tp_rank: int):
-        super().__init__(config, tp_size, tp_rank)
+    def __init__(self, model_config: ModelConfig, parallelism_config, hw_kernel_config, kv_cache_config, merge_lora: bool = False, vit_config=None, **kwargs):
+        super().__init__(model_config=model_config, parallelism_config=parallelism_config, hw_kernel_config=hw_kernel_config, kv_cache_config=kv_cache_config, merge_lora=merge_lora, vit_config=vit_config, **kwargs)
 
     def _get_weight_info(self):
         layer_weights: List[List[WeightModule]] = []
@@ -700,7 +704,7 @@ class DeepSeekV3Mtp(DeepSeekV2):
     @classmethod
     def _create_config(cls, ckpt_path: str):
         config = super()._create_config(ckpt_path)
-        config.moe_layer_index = [i for i in range(config.layer_num)]
+        config.moe_layer_index = [i for i in range(config.num_layers)]
         config.reverse_e_h_norm = True
         config.is_mtp = True
         return config

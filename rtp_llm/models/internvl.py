@@ -4,48 +4,49 @@ from typing import Any, Dict, List
 
 from transformers import AutoTokenizer
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import VitParameters
+from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.internvl_vit import InternVLImageEmbedding
 from rtp_llm.models.internvl_weight import InternVLVitWeight, InternVLWeightInfo
 from rtp_llm.models.llama import Llama
-from rtp_llm.models.multimodal.multimodal_mixin import MultiModalMixin
+from rtp_llm.models.multimodal.multimodal_mixin import BaseVitWeights, MultiModalMixin
 from rtp_llm.models.qwen_v2 import QWenV2
 
 
 class InternVL(BaseModel, MultiModalMixin):
-    def _init_multimodal(self, config: GptInitModelParameters):
-        self.mm_part = InternVLImageEmbedding(config)
-        config.mm_related_params.vit_weights = InternVLVitWeight(
+    def _init_multimodal(
+        self,
+        mm_model_config: Any,  # MMModelConfig
+        vit_config: VitConfig,
+    ):
+        # mm_related_params is in model_config, not mm_model_config
+        mm_related_params = self.model_config.mm_related_params
+        if mm_related_params is None:
+            raise ValueError("mm_related_params is required for InternVL")
+        self.mm_part = InternVLImageEmbedding(mm_related_params)
+        self.model_config.mm_related_params.vit_weights = InternVLVitWeight(
             {"vision_model": self.mm_part.vision_model, "mlp1": self.mm_part.mlp1}, True
         )
-        config.mm_sep_tokens = [
-            [self.tokenizer.encode("<img>")[0], self.tokenizer.encode("</img>")[0]]
-        ]
+        # mm_sep_tokens is stored in mm_model_config or can be set directly
+        if not hasattr(mm_model_config, 'mm_sep_tokens') or mm_model_config.mm_sep_tokens is None:
+            mm_model_config.mm_sep_tokens = [
+                [self.tokenizer.encode("<img>")[0], self.tokenizer.encode("</img>")[0]]
+            ]
 
     @staticmethod
     def get_weight_cls():
         return InternVLWeightInfo
 
     @classmethod
-    def _create_config(cls, ckpt_path: str):
-        config = GptInitModelParameters(
-            head_num=0,
-            head_num_kv=0,
-            size_per_head=0,
-            layer_num=0,
-            inter_size=0,
-            vocab_size=0,
-            max_seq_len=0,
-            ckpt_path=ckpt_path,
-            rotary_embedding_dim=128,
-            rotary_embedding_style=1,
-            activation_type="SiGLU",
-            has_pre_decoder_layernorm=False,
-            has_post_decoder_layernorm=True,
-            norm_type="rmsnorm",
-        )
+    def _create_config(cls, ckpt_path: str) -> ModelConfig:
+        config = ModelConfig()
+        config.ckpt_path = ckpt_path
+        config.attn_config.rope_config.dim = 128
+        config.attn_config.rope_config.style = 1
+        config.has_pre_decoder_layernorm = False
 
         config_path = os.path.join(ckpt_path, "config.json")
         if os.path.exists(config_path):
@@ -70,14 +71,14 @@ class InternVL(BaseModel, MultiModalMixin):
             config.head_num > 0
             and config.head_num_kv > 0
             and config.size_per_head > 0
-            and config.layer_num > 0
+            and config.num_layers > 0
             and config.inter_size > 0
         ), "error config"
         config.mm_related_params.special_tokens.update({"default_mm_token": "<image>"})
         return config
 
     @staticmethod
-    def _init_vit_params(config: GptInitModelParameters, config_json: Dict[str, Any]):
+    def _init_vit_params(config: ModelConfig, config_json: Dict[str, Any]):
         config.mm_related_params.config = config_json["vision_config"]
         config.mm_related_params.config["select_layer"] = config_json["select_layer"]
         config.mm_related_params.config["llm_hidden_size"] = config_json["llm_config"][

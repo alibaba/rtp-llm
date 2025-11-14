@@ -29,7 +29,12 @@ class RtpLLMOp:
     def start(self):
         self.weight = self.model.weight
         self.ft_op.init(  # type: ignore
-            self.model, self.mm_engine, self.propose_model, self.token_processor
+            self.model,
+            self.model.engine_config,
+            self.model.vit_config,
+            self.mm_engine,
+            self.propose_model,
+            self.token_processor,
         )
 
     def stop(self):

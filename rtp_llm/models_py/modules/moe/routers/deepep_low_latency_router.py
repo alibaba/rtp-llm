@@ -3,8 +3,8 @@ from typing import Any, Optional, Tuple
 
 import torch
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.distribute.collective import Group, all_gather
+from rtp_llm.models_py.modules.moe.config_adapter import MoEConfigAdapter
 from rtp_llm.models_py.distributed.deepep_wrapper import get_deepep_wrapper
 from rtp_llm.models_py.modules.moe.fused_moe import (
     ExpertForwardPayload,
@@ -32,7 +32,7 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
 
     def __init__(
         self,
-        config: GptInitModelParameters,
+        config: MoEConfigAdapter,
         use_fp8_dispatch: bool = True,
         zero_copy: bool = False,
         async_finish: bool = False,

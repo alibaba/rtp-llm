@@ -1,10 +1,12 @@
-from typing import Dict
+from typing import Dict, Optional
 
 import torch
 
 import rtp_llm.models_py.modules.utils as utils
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.quant_config import Fp8PerTensorCompressedQuantConfig
+from rtp_llm.models_py.modules.moe.config_adapter import MoEConfigAdapter
+from rtp_llm.ops import MoeConfig, ParallelismConfig, RuntimeConfig
 from rtp_llm.models_py.modules.moe import (
     BatchedDataRouter,
     DataRouterNoEPStandard,
@@ -19,7 +21,7 @@ initialized = False
 from rtp_llm.ops.compute_ops import DeviceType, get_device
 
 
-def init_deepep_env_once(config: GptInitModelParameters):
+def init_deepep_env_once(config: MoEConfigAdapter):
     global initialized
     if initialized:
         return
@@ -29,17 +31,40 @@ def init_deepep_env_once(config: GptInitModelParameters):
         get_ep_group,
         init_distributed_environment,
     )
+    from rtp_llm.ops import FfnDisAggregateConfig
+    
+    # Extract config parameters from adapter
+    model_config = config.model_config
+    parallelism_config = config.parallelism_config
+    moe_config = config.moe_config
+    runtime_config = config.runtime_config
+    nccl_ip = config.nccl_ip
+    th_nccl_port = config.th_nccl_port
+    ffn_disaggregate_config = parallelism_config.ffn_disaggregate_config
 
-    init_distributed_environment(params=config, backend="nccl", timeout=None)
+    init_distributed_environment(
+        parallelism_config=parallelism_config,
+        nccl_ip=nccl_ip,
+        th_nccl_port=th_nccl_port,
+        backend="nccl",
+        timeout=None
+    )
     ep_group = get_ep_group()
     assert ep_group.device_group is not None, "ep group device group is not initialized"
-    init_deepep_wrapper(group=ep_group.device_group, params=config)
+    init_deepep_wrapper(
+        group=ep_group.device_group,
+        model_config=model_config,
+        parallelism_config=parallelism_config,
+        moe_config=moe_config,
+        runtime_config=runtime_config,
+        ffn_disaggregate_config=ffn_disaggregate_config,
+    )
 
 
 class FusedMoeFactory(object):
     @staticmethod
     def _create_fp8_per_block_fused_moe(
-        config: GptInitModelParameters, weights: Dict[str, torch.Tensor]
+        config: MoEConfigAdapter, weights: Dict[str, torch.Tensor]
     ):
         assert utils.is_cuda(), "FP8_PER_BLOCK only supports cuda"
         # single gpu
@@ -94,7 +119,7 @@ class FusedMoeFactory(object):
 
     @staticmethod
     def _create_fp8_per_tensor_fused_moe(
-        config: GptInitModelParameters, weights: Dict[str, torch.Tensor]
+        config: MoEConfigAdapter, weights: Dict[str, torch.Tensor]
     ):
         assert utils.is_cuda(), "FP8_PER_TENSOR only supports cuda"
         from rtp_llm.models_py.modules.moe.executors.cutlass_moe import (
@@ -154,7 +179,7 @@ class FusedMoeFactory(object):
 
     @staticmethod
     def create_amd_fused_moe(
-        config: GptInitModelParameters, weights: Dict[str, torch.Tensor]
+        config: MoEConfigAdapter, weights: Dict[str, torch.Tensor]
     ) -> FusedMoe:
         if config.ep_size > 1:
             if config.moe_config.use_deepep_low_latency == False:
@@ -197,7 +222,7 @@ class FusedMoeFactory(object):
 
     @staticmethod
     def create_fused_moe(
-        config: GptInitModelParameters, weights: Dict[str, torch.Tensor]
+        config: MoEConfigAdapter, weights: Dict[str, torch.Tensor]
     ) -> FusedMoe:
         # TODO get_method should return enu class other than string
         device_type = get_device().get_device_type()
@@ -251,14 +276,18 @@ class FusedMoeFactory(object):
                         w2=weights[W.moe_w2],
                     )
                     return FusedMoe(router, experts, expert_num=config.expert_num)
-            elif config.quant_config.get_method() == "FP8_PER_BLOCK":
-                return FusedMoeFactory._create_fp8_per_block_fused_moe(config, weights)
-            elif config.quant_config.get_method() in [
-                "FP8_PER_TENSOR_COMPRESSED",
-                "FP8_DYNAMIC_PER_TENSOR",
-            ]:
-                return FusedMoeFactory._create_fp8_per_tensor_fused_moe(config, weights)
-            else:
+        quant_config = config.quant_config
+        if quant_config and quant_config.get_method() == "FP8_PER_BLOCK":
+            return FusedMoeFactory._create_fp8_per_block_fused_moe(config, weights)
+        elif quant_config and quant_config.get_method() in [
+            "FP8_PER_TENSOR_COMPRESSED",
+            "FP8_DYNAMIC_PER_TENSOR",
+        ]:
+            return FusedMoeFactory._create_fp8_per_tensor_fused_moe(config, weights)
+        else:
+            if quant_config:
                 raise ValueError(
-                    f"Unsupported quantization method: {config.quant_config.get_method()}"
+                    f"Unsupported quantization method: {quant_config.get_method()}"
                 )
+            else:
+                raise ValueError("quant_config is None but quantization path was selected")

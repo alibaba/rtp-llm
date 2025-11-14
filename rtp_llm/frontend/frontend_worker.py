@@ -7,8 +7,6 @@ import traceback
 from functools import partial
 from typing import Any, AsyncGenerator, Dict, List, Optional, Set, Tuple, Union
 
-from rtp_llm.config.py_config_modules import StaticConfig
-
 current_file_path = pathlib.Path(__file__).parent.absolute()
 sys.path.append(str(current_file_path.parent.absolute()))
 
@@ -17,14 +15,12 @@ from pydantic import BaseModel
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
-from rtp_llm.model_factory import ModelFactory
 from rtp_llm.pipeline.pipeline import Pipeline
 from rtp_llm.structure.request_extractor import Request, RequestExtractor
 from rtp_llm.utils.base_model_datatypes import GenerateResponse
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
-
 
 class PipelineResponse(BaseModel):
     response: str = ""
@@ -55,16 +51,51 @@ class TokenizerEncodeResponse(BaseModel):
 
 
 class FrontendWorker:
-    def __init__(self, separated_frontend: bool) -> None:
+    def __init__(self, separated_frontend: bool, py_env_configs, special_tokens=None) -> None:
         logging.info("starting frontend worker")
-        self.model_config = ModelFactory.create_frontend_config(
-            ModelFactory.create_normal_model_config()
+        from rtp_llm.config.engine_config import EngineConfig
+        from rtp_llm.ops import SpecialTokens
+        from rtp_llm.config.model_config import (
+            update_stop_words_from_env,
+            update_tokenizer_special_tokens,
         )
-        self.tokenizer = TokenizerFactory.create_from_env()
-        self.model_config.update_task_prompt_tokens_id(self.tokenizer)
-        self.model_config.update_tokenizer_special_tokens(self.tokenizer)
-        self.pipeline = Pipeline(self.model_config, self.tokenizer, separated_frontend)
+        
+        # Get tokenizer parameters from py_env_configs.model_args
+        ckpt_path = py_env_configs.model_args.ckpt_path or ""
+        tokenizer_path = py_env_configs.model_args.tokenizer_path or ckpt_path
+        # Get model_type from py_env_configs
+        model_type = py_env_configs.model_args.model_type
+        # Paths should already be local after fetch_model_files_to_local()
+        self.tokenizer = TokenizerFactory.create(ckpt_path, tokenizer_path, model_type)   
+        engine_config = EngineConfig.create(py_env_configs, gang_info=None)
+        
+        # Use provided special_tokens or create new one
+        if special_tokens is None:
+            special_tokens = SpecialTokens()
+            update_stop_words_from_env(special_tokens, py_env_configs.generate_env_config)
+        # Update special_tokens with tokenizer (needed for tokenizer-specific tokens)
+        update_tokenizer_special_tokens(special_tokens, self.tokenizer)
+        
+        # Get max_seq_len and seq_size_per_block
+        max_seq_len = py_env_configs.model_args.max_seq_len
+        seq_size_per_block = py_env_configs.kv_cache_config.seq_size_per_block
+
+        self.pipeline = Pipeline(
+            special_tokens=special_tokens,
+            pd_sep_config=engine_config.pd_sep_config,
+            runtime_config=engine_config.runtime_config,
+            ffn_disaggregate_config=engine_config.parallelism_config.ffn_disaggregate_config,
+            max_seq_len=max_seq_len,
+            seq_size_per_block=seq_size_per_block,
+            tokenizer=self.tokenizer,
+            sp_config=py_env_configs.sp_config,
+            separated_frontend=separated_frontend,
+            mm_related_params=None,  # Frontend doesn't need mm_related_params
+            gang_info=None,
+        )
         self.backend_rpc_server_visitor = self.pipeline.backend_rpc_server_visitor
+        self.generate_env_config = py_env_configs.generate_env_config
+
         logging.info("frontend worker start done.")
 
     def tokenizer_offset_mapping(self, prompt: str) -> Any:
@@ -218,6 +249,7 @@ class FrontendWorker:
             request_id=request_id,
             urls=urls,
             generate_config=generate_config,
+            generate_env_config=self.generate_env_config,
             **kwargs,
         )
         async for generate_response in stream:

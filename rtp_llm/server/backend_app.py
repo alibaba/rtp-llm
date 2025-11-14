@@ -17,7 +17,7 @@ from typing_extensions import override
 from uvicorn import Config, Server
 from uvicorn.loops.auto import auto_loop_setup
 
-from rtp_llm.config.py_config_modules import PyEnvConfigs, StaticConfig
+from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.uvicorn_config import UVICORN_LOGGING_CONFIG
 from rtp_llm.distribute.worker_info import WorkerInfo
 from rtp_llm.embedding.backend_embedding_app import register_backend_embedding_api
@@ -54,7 +54,7 @@ class GracefulShutdownServer(Server):
 
 
 class BackendApp(object):
-    def __init__(self, py_env_configs: PyEnvConfigs = StaticConfig):
+    def __init__(self, py_env_configs: PyEnvConfigs):
         self.py_env_configs = py_env_configs
         self.backend_server = BackendServer(py_env_configs)
 

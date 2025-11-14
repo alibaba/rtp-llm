@@ -50,7 +50,7 @@ void InferenceParsedRequest::extractRequestUrls(const RawRequest& req, Inference
 
 void InferenceParsedRequest::extractRequestGenerateConfigs(RawRequest&                            req,
                                                            InferenceParsedRequest&                pr,
-                                                           const rtp_llm::GptInitParameter&       params,
+                                                           const ModelConfig&                     model_config,
                                                            const std::shared_ptr<TokenProcessor>& token_processor) {
     if (req.generate_config.has_value()) {
         auto& config = req.generate_config.value();
@@ -58,7 +58,7 @@ void InferenceParsedRequest::extractRequestGenerateConfigs(RawRequest&          
             throw HttpApiServerException(HttpApiServerException::ERROR_INPUT_FORMAT_ERROR,
                                          "request is non_stream but use incremental decoder");
         }
-        config.addSpecialTokens(params.special_tokens_);
+        config.addSpecialTokens(model_config.special_tokens);
         if (config.sp_advice_prompt.empty() == false) {
             config.sp_advice_prompt_token_ids = token_processor->encode(config.sp_advice_prompt);
         }
@@ -87,7 +87,7 @@ void InferenceParsedRequest::extractRequestGenerateConfigs(RawRequest&          
 }
 
 InferenceParsedRequest InferenceParsedRequest::extractRequest(const std::string&                     body,
-                                                              const rtp_llm::GptInitParameter&       params,
+                                                              const ModelConfig&                     model_config,
                                                               const std::shared_ptr<TokenProcessor>& token_processor) {
     RawRequest req;
     FromJsonString(req, body);
@@ -100,7 +100,7 @@ InferenceParsedRequest InferenceParsedRequest::extractRequest(const std::string&
 
     InferenceParsedRequest::extractRequestTexts(req, pr);
     InferenceParsedRequest::extractRequestUrls(req, pr);
-    InferenceParsedRequest::extractRequestGenerateConfigs(req, pr, params, token_processor);
+    InferenceParsedRequest::extractRequestGenerateConfigs(req, pr, model_config, token_processor);
 
     return pr;
 }
@@ -110,14 +110,14 @@ InferenceService::InferenceService(const std::shared_ptr<EngineBase>&           
                                    const std::shared_ptr<autil::AtomicCounter>&    request_counter,
                                    const std::shared_ptr<TokenProcessor>&          token_processor,
                                    const std::shared_ptr<ConcurrencyController>&   controller,
-                                   const rtp_llm::GptInitParameter&                params,
+                                   const ModelConfig&                              model_config,
                                    const std::shared_ptr<ApiServerMetricReporter>& metric_reporter):
     engine_(engine),
     mm_processor_(mm_processor),
     token_processor_(token_processor),
     request_counter_(request_counter),
     controller_(controller),
-    params_(params),
+    model_config_(model_config),
     metric_reporter_(metric_reporter) {}
 
 void checkMasterWorker(bool isInternal) {
@@ -163,7 +163,7 @@ void InferenceService::inferResponse(int64_t                                    
     autil::StageTime iterate_stage_timer;
     auto             start_time_ms = autil::TimeUtility::currentTimeInMilliSeconds();
     const auto       body          = request.GetBody();
-    auto             req           = InferenceParsedRequest::extractRequest(body, params_, token_processor_);
+    auto             req           = InferenceParsedRequest::extractRequest(body, model_config_, token_processor_);
     if (metric_reporter_) {
         metric_reporter_->reportQpsMetric(req.source);
     }

@@ -15,7 +15,7 @@ import uvicorn
 from fastapi import FastAPI
 import torch.distributed
 
-from rtp_llm.config.py_config_modules import PyEnvConfigs, StaticConfig
+from rtp_llm.config.py_config_modules import GangConfig, ServerConfig
 from rtp_llm.config.uvicorn_config import UVICORN_LOGGING_CONFIG
 from rtp_llm.distribute.gang_info import GangInfo, get_gang_info
 
@@ -79,7 +79,9 @@ class FailedRankInfo:
 
 
 class GangServer:
-    def __init__(self, py_env_configs: PyEnvConfigs):
+    def __init__(self, gang_config: GangConfig, server_config: ServerConfig):
+        self.gang_config = gang_config
+        self.server_config = server_config
         self._initialized: bool = False
         self._gang_status: Dict[str, str] = {}
         self._gang_parts: Dict[str, str] = {}
@@ -88,7 +90,6 @@ class GangServer:
         self._failure_events: Dict[int, FailedRankInfo] = {}
         self._delay_exit_loops: int = 0
         self._max_delay_times: int = 3
-        self.py_env_configs = py_env_configs
 
     def _start_server(self):
         app = FastAPI()
@@ -111,7 +112,7 @@ class GangServer:
         @app.post("/broadcast_parts")
         def broadcast_parts(req: Dict[str, Any]):
             logging.debug("broadcast parts recv: %s", json.dumps(req))
-            StaticConfig.gang_config.json_gang_parts = json.dumps(req)
+            self.gang_config.json_gang_parts = json.dumps(req)
 
         @app.post("/report_failure")
         def handle_failure_report(req: Dict[str, Any]):
@@ -208,13 +209,21 @@ class GangServer:
             )
 
     def _wait_ready(self):
-        timeout_minutes = self.py_env_configs.gang_config.gang_timeout_min
-        sleep_time = self.py_env_configs.gang_config.gang_sleep_time
+        timeout_minutes = self.gang_config.gang_timeout_min
+        sleep_time = self.gang_config.gang_sleep_time
         start_time = datetime.datetime.now()
         retry_time = 0
         while True:
             try:
-                self._gang_info = get_gang_info()
+                self._gang_info = get_gang_info(
+                    start_port=self.server_config.start_port,
+                    distribute_config_file=self.gang_config.distribute_config_file,
+                    gang_config_string=self.gang_config.gang_config_string,
+                    json_gang_parts=self.gang_config.json_gang_parts,
+                    leader_address=self.gang_config.leader_address,
+                    gang_annocation_path=self.gang_config.gang_annocation_path,
+                    zone_name=self.gang_config.zone_name,
+                )
                 if self._gang_info.only_leader:
                     self._exchange_gang_info(self._gang_info)
                     self._check_gang_info(self._gang_info)
@@ -294,7 +303,7 @@ class GangServer:
                         part_info["name"] = name
                         part_info["ip"] = address
                         parts[name] = part_info
-                    StaticConfig.gang_config.json_gang_parts = json.dumps(parts)
+                    self.gang_config.json_gang_parts = json.dumps(parts)
                     try:
                         result = requests.post(broadcast_url, json=parts, timeout=1)
                     except:
@@ -383,7 +392,7 @@ class GangServer:
             logging.error(f"first failure node is {first_failure_info}")
 
     def start_health_check(self):
-        sleep_time = self.py_env_configs.gang_config.gang_sleep_time
+        sleep_time = self.gang_config.gang_sleep_time
 
         def wrapper():
             while True:
@@ -413,7 +422,7 @@ class GangServer:
     def start(self):
         if g_parallel_info.world_size == 1:
             logging.info("world_size==1, do not start gang_server")
-            update_master_info("", self.py_env_configs.server_config.start_port)
+            update_master_info("", self.server_config.start_port)
             return
         self._start()
         self._wait_ready()
@@ -425,7 +434,7 @@ class GangServer:
             f"tcp://{g_master_info.ip}:{self._gang_info.master.server_port - 1}"
         )
         logging.info(f"gang worker {g_parallel_info} init_process_group {master_url}")
-        init_process_timeout = self.py_env_configs.gang_config.dist_barrier_timeout
+        init_process_timeout = self.gang_config.dist_barrier_timeout
         os.environ["TORCH_DIST_INIT_BARRIER"] = "1"
         torch.distributed.init_process_group(
             backend=torch.distributed.Backend.NCCL,

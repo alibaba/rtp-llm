@@ -12,7 +12,7 @@ import torch
 # sys.path.append(os.path.join(str(CUR_PATH), "../../../"))
 device = torch.device(f"cuda")
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models.rotary_embedding.deepseek_rotary_embedding import (
     DeepseekV3YarnRotaryEmbedding,
 )
@@ -100,7 +100,7 @@ class MLATest(TestCase):
             device=torch.device("cpu"),
         )
 
-        self.config = GptInitModelParameters(128, 16, 27, 1024, 102400)
+        self.config = ModelConfig()
         self.config.head_num = 16
         self.config.hidden_size = hidden_size
         self.config.nope_head_dim = 128
@@ -110,7 +110,7 @@ class MLATest(TestCase):
         self.config.q_lora_rank = 0
         self.config.seq_size_per_block = 64
         self.config.softmax_extra_scale = 1.0
-        self.config.use_mla = True
+        self.config.attn_config.use_mla = True
         self.config.size_per_head = 192
         self.scaling = (self.config.nope_head_dim + self.config.rope_head_dim) ** (-0.5)
 
@@ -208,11 +208,11 @@ class MLATest(TestCase):
 
         k_pe = k_pe.view(-1, 1, self.config.rope_head_dim)
         self.k_nope_proj = LinearFactory.create_linear_from_weights(
-            layer_weights[0], W.mla_k_nope_w, W.mla_k_nope_s, None, self.config
+            layer_weights[0], W.mla_k_nope_w, W.mla_k_nope_s, None
         )
 
         self.v_proj = LinearFactory.create_linear_from_weights(
-            layer_weights[0], W.mla_v_w, W.mla_v_s, None, self.config
+            layer_weights[0], W.mla_v_w, W.mla_v_s, None
         )
 
         k_nope = self.k_nope_proj(compressed_kv)

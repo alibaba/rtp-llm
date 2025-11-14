@@ -7,7 +7,7 @@ from grpc import StatusCode
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleType
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.ops import EPLBConfig, FfnDisAggregateConfig
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     ErrorDetailsPB,
     GenerateInputPB,
@@ -16,7 +16,6 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     RoleAddrPB,
 )
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import RpcServiceStub
-from rtp_llm.distribute.gang_info import get_gang_info
 from rtp_llm.distribute.worker_info import g_parallel_info, g_worker_info
 from rtp_llm.utils.base_model_datatypes import (
     AuxInfo,
@@ -265,21 +264,28 @@ def trans_output(
 
 class ModelRpcClient(object):
 
-    def __init__(self, config: GptInitModelParameters, address: Optional[str] = None):
+    def __init__(
+        self,
+        ffn_disaggregate_config: FfnDisAggregateConfig,
+        max_rpc_timeout_ms: int = 0,
+        decode_entrance: bool = False,
+        address: Optional[str] = None,
+        gang_info=None,
+    ):
         # 创建到服务器的连接
         if not address:
             address = f"localhost:{g_worker_info.rpc_server_port}"
         self._addresses = []
-        # for test usage
-        hack_ep_single_entry = config.py_env_configs.py_eplb_config.hack_ep_single_entry
-        logging.info(f"hack ep single entry: {hack_ep_single_entry}")
-        if (g_parallel_info.dp_size > 1) and (not hack_ep_single_entry):
+        self.ffn_disaggregate_config = ffn_disaggregate_config
+        self.max_rpc_timeout_ms = max_rpc_timeout_ms
+        self.decode_entrance = decode_entrance
+        if g_parallel_info.dp_size > 1:
             members_info_str = (
                 f"[world_rank: {g_parallel_info.world_rank}]"
                 + f"[tp_size: {g_parallel_info.tp_size}] all members: "
                 + "{"
             )
-            members = get_gang_info().members
+            members = gang_info.members
             for member in members:
                 members_info_str += f"{member}\n"
                 if member.local_rank % g_parallel_info.tp_size == 0:
@@ -289,22 +295,21 @@ class ModelRpcClient(object):
         else:
             self._addresses = [address]
         # last rank as ffn service, no be entry
-        if config.gpt_init_params.ffn_disaggregate_config.enable_ffn_disaggregate:
+        if ffn_disaggregate_config.enable_ffn_disaggregate:
             serving_ranks = (
-                config.gpt_init_params.ffn_disaggregate_config.attention_tp_size
-                * config.gpt_init_params.ffn_disaggregate_config.attention_dp_size
+                ffn_disaggregate_config.attention_tp_size
+                * ffn_disaggregate_config.attention_dp_size
             )
             self._addresses = self._addresses[:serving_ranks]
         logging.info(f"client connect to rpc addresses: {self._addresses}")
-        self.model_config = config
 
     async def enqueue(
         self, input_py: GenerateInput
     ) -> AsyncGenerator[GenerateOutputs, None]:
         request_timeout_ms = input_py.generate_config.timeout_ms
         rpc_timeout_ms = (
-            self.model_config.max_rpc_timeout_ms
-            if self.model_config.max_rpc_timeout_ms > 0
+            self.max_rpc_timeout_ms
+            if self.max_rpc_timeout_ms > 0
             else MAX_GRPC_TIMEOUT_SECONDS * 1000
         )
         if request_timeout_ms == None or request_timeout_ms <= 0:
@@ -321,12 +326,12 @@ class ModelRpcClient(object):
         for role_addr in input_py.generate_config.role_addrs:
             if (
                 (
-                    self.model_config.decode_entrance
+                    self.decode_entrance
                     and role_addr.role == RoleType.DECODE
                 )
                 or role_addr.role == RoleType.PDFUSION
                 or (
-                    not self.model_config.decode_entrance
+                    not self.decode_entrance
                     and role_addr.role == RoleType.PREFILL
                 )
             ):

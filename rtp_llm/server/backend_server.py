@@ -14,15 +14,15 @@ from pydantic import BaseModel
 
 from rtp_llm.access_logger.access_logger import AccessLogger
 from rtp_llm.async_decoder_engine.base_engine import BaseEngine
-from rtp_llm.config.py_config_modules import PyEnvConfigs, StaticConfig
-from rtp_llm.config.task_type import TaskType
+from rtp_llm.config.engine_config import EngineConfig
+from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.ops import TaskType
 from rtp_llm.distribute.gang_server import GangServer
 from rtp_llm.distribute.worker_info import g_parallel_info
 from rtp_llm.embedding.embedding_endpoint import EmbeddingEndpoint
 from rtp_llm.lora.lora_manager import LoraManager
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 from rtp_llm.model_factory import ModelFactory
-from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.ops import EngineScheduleInfo, KVCacheInfo, WorkerStatusInfo
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.server.misc import format_exception
@@ -45,16 +45,8 @@ USAGE_HEADER = "USAGE"
 
 class BackendServer(object):
     def __init__(self, py_env_configs: PyEnvConfigs):
-        if torch.cuda.is_available():
-            if (
-                "NCCL_P2P_DISABLE" not in os.environ
-                and "RTX" in torch.cuda.get_device_name(0)
-            ):
-                os.environ["NCCL_P2P_DISABLE"] = "1"
-        else:
-            os.environ["NCCL_P2P_DISABLE"] = "1"
-        self._access_logger = AccessLogger()
-        self._gang_server = GangServer(py_env_configs)
+        self._access_logger = AccessLogger(py_env_configs.profiling_debug_config.log_path, py_env_configs.profiling_debug_config.log_file_backup_count)
+        self._gang_server = GangServer(py_env_configs.gang_config, py_env_configs.server_config)
         self._lora_manager = None
         self.thread_lock_ = threading.Lock()
         self._global_controller = get_global_controller()
@@ -63,8 +55,6 @@ class BackendServer(object):
             kmonitor.init()
         self.engine: Optional[BaseEngine] = None
         self._embedding_endpoint = None
-        self.py_env_configs = py_env_configs
-        self.dp_rank = g_parallel_info.dp_rank
         self.dp_size = g_parallel_info.dp_size
         self.tp_size = g_parallel_info.tp_size
         self._weight_manager = None
@@ -75,22 +65,68 @@ class BackendServer(object):
             # for debug online
             logging.info("DEBUG_START_FAKE_PROCESS is set, start fake backend server")
         else:
-            self.engine = ModelFactory.create_from_env(self._gang_server._gang_info)
-            logging.info(
-                "engine created successfully: self.engine.task_type=%s",
-                self.engine.task_type,
+            # Get gang_info from gang_server after start()
+            gang_info = self._gang_server._gang_info
+            
+            # Create and fully initialize EngineConfig from py_env_configs
+            engine_config = EngineConfig.create(py_env_configs, gang_info=gang_info)
+            
+            # Create model configs (ModelConfig construction is handled in ModelFactory)
+            model_config, propose_model_config = ModelFactory.create_model_configs(
+                engine_config=engine_config,
+                model_args=py_env_configs.model_args,
+                lora_config=py_env_configs.lora_config,
+                generate_env_config=py_env_configs.generate_env_config,
+                embedding_config=py_env_configs.embedding_config,
+                quantization_config=py_env_configs.quantization_config,
             )
+            
+            # Create engine using new API (returns BaseEngine, not AsyncModel)
+            # All metadata is already in model_config (including mm_model_config)
+            # vit_config is needed for multimodal models
+            self.engine = ModelFactory.from_model_configs(
+                model_config=model_config,
+                engine_config=engine_config,
+                gang_info=gang_info,
+                vit_config=py_env_configs.vit_config,
+                propose_model_config=propose_model_config,
+                generate_env_config=py_env_configs.generate_env_config,
+            )
+            
+            logging.info(
+                "engine created successfully: model_config.task_type=%s",
+                model_config.task_type,
+            )
+             
             # Initialize endpoints based on task type
-            if self.engine and self.engine.task_type != TaskType.LANGUAGE_MODEL:
+            if model_config.task_type != TaskType.LANGUAGE_MODEL:
                 # For embedding models
                 self._embedding_endpoint = EmbeddingEndpoint(self.engine)
             else:
                 # For language models
                 self.backend_rpc_server_visitor = BackendRPCServerVisitor(
-                    self.engine.config
+                    max_seq_len=model_config.max_seq_len,
+                    seq_size_per_block=engine_config.kv_cache_config.seq_size_per_block,
+                    pd_sep_config=engine_config.pd_sep_config,
+                    runtime_config=engine_config.runtime_config,
+                    ffn_disaggregate_config=engine_config.parallelism_config.ffn_disaggregate_config,
+                    sp_config=engine_config.sp_config,
+                    max_rpc_timeout_ms=engine_config.pd_sep_config.max_rpc_timeout_ms,
+                    decode_entrance=engine_config.pd_sep_config.decode_entrance,
+                    gang_info=gang_info,
                 )
-                self._lora_manager = LoraManager(self.engine)
+
+                max_lora_model_size = self.engine.model.engine_config.model_specific_config.max_lora_model_size
+                self._lora_manager = LoraManager(self.engine, max_lora_model_size=max_lora_model_size)
                 self._weight_manager = WeightManager(self.engine)
+
+    def model_runtime_meta(self) -> str:
+        if self.engine is None:
+            return "unknown"
+        # BaseEngine doesn't have model_runtime_meta, get from model if available
+        if hasattr(self.engine.model, 'model_runtime_meta'):
+            return self.engine.model.model_runtime_meta
+        return "unknown"
 
     def stop(self) -> None:
         if isinstance(self.engine, BaseEngine):

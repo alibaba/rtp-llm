@@ -9,10 +9,10 @@ import safetensors
 import torch
 import torch.nn.functional as F
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.config.py_config_modules import PyEnvConfigs, StaticConfig
-from rtp_llm.config.task_type import TaskType
+from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.py_config_modules import LoadConfig as PyLoadConfig
 from rtp_llm.device import get_current_device
+from rtp_llm.ops import TaskType
 from rtp_llm.eplb.ep_balancer import ExpertBalancer
 from rtp_llm.lora.lora_weights import LoRAWeights
 from rtp_llm.model_loader.load_config import LoadConfig, LoadMethod
@@ -29,7 +29,7 @@ from rtp_llm.utils.model_weight import W, WeightStyle
 from rtp_llm.utils.module_util import has_module
 from rtp_llm.utils.time_util import timer_wrapper
 from rtp_llm.utils.util import check_with_info
-
+from rtp_llm.ops import VitSeparation
 
 class ModelLoader:
     WeightInfo = NamedTuple(
@@ -43,25 +43,30 @@ class ModelLoader:
 
     def __init__(
         self,
-        task_type: TaskType,
+        model_config: ModelConfig,
         weights_info: ModelDeployWeightInfo,
         misc_weights_info: Optional[CustomAtomicWeight],
         compute_dtype: torch.dtype,
         database: BaseDatabase,
-        py_env_configs: PyEnvConfigs = StaticConfig,
-        is_attn_model: bool = False,
     ):
-        self._task_type = task_type
+        # self.model_config = model_config
+        # Get task_type from model_config (C++ enum)
+        self._task_type = model_config.task_type
+        
         self._weights_info = weights_info
         self._misc_weights_info: Optional[CustomAtomicWeight] = misc_weights_info
         self._model_weights_info: Optional[ModelWeightInfo] = (
             self._weights_info.create_model_weight_info(database)
         )
-        self.py_env_configs = py_env_configs
-        use_fp32 = py_env_configs.model_config.use_float32
+        
+        # Get use_fp32 from model_config
+        use_fp32 = model_config.use_float32
         if use_fp32:
             compute_dtype = torch.float32
-        self._is_attn_model = is_attn_model
+        logging.info(f'load use type {compute_dtype}')
+        
+        # Get is_attn_model flag from weights_info (calculated in ModelDeployWeightInfo constructor)
+        self._is_attn_model = weights_info.is_attn_model
         self._init_eplb_config(self._weights_info, compute_dtype)
 
         self._load_config: LoadConfig = self._weights_info.create_load_config(
@@ -248,7 +253,9 @@ class ModelLoader:
             raise ValueError(f"Unknown load method: {load_method}")
 
     def _is_memory_enough_for_fastsafetensor(self):
-        model_size = self._weights_info.config.eval_model_size()
+        # Get task_type from C++ ModelConfig (enum)
+        task_type = self._weights_info.model_config.task_type
+        model_size = self._weights_info.model_config.eval_model_size()
         device_mem_info = self._load_config.exported_device.get_mem_info()
         max_file_size = self._load_config.database.get_max_file_size()
         if device_mem_info is None:
@@ -313,7 +320,7 @@ class ModelLoader:
         return model_weights
 
     def prepare_weights(self, device: str):
-        if self._load_config.vit_separation != 1 and not self._is_attn_model:
+        if self._load_config.vit_separation != VitSeparation.VIT_SEPARATION_ROLE and not self._is_attn_model:
             for id in range(self._load_config.num_layers):
                 results = self._load_layer_weights(id, device)
                 for name, tensor in results.items():
@@ -346,7 +353,7 @@ class ModelLoader:
         WeightInfo = ModelLoader.WeightInfo
         tensor_to_weight_map: Dict[str, WeightInfo] = {}
         weight_info_list: List[WeightInfo] = []
-        if self._load_config.vit_separation != 1:
+        if self._load_config.vit_separation != VitSeparation.VIT_SEPARATION_ROLE:
             for layer_id in range(self._load_config.num_layers):
                 layer_weights = self._model_weights_info.layer_weights[layer_id]
                 if isinstance(layer_weights, WeightModule):
@@ -403,7 +410,9 @@ class ModelLoader:
     def _choose_weight_convert_device(self, current_device):
         if "FORCE_CPU_LOAD_WEIGHTS" in os.environ:
             return "cpu"
-        model_size = self._weights_info.config.eval_model_size()
+        # Get task_type from C++ ModelConfig (enum)
+        task_type = self._weights_info.model_config.task_type
+        model_size = self._weights_info.model_config.eval_model_size()
         device_mem_info = self._load_config.exported_device.get_mem_info()
         if device_mem_info is None:
             return "cpu"
@@ -422,7 +431,7 @@ class ModelLoader:
         for layer_id, name, tensor in self.prepare_weights(convert_device):
             if convert_device != device:
                 tensor = tensor.to(device)
-            if layer_id is not None and self._load_config.vit_separation != 1:
+            if layer_id is not None and self._load_config.vit_separation != VitSeparation.VIT_SEPARATION_ROLE:
                 weights.set_layer_weight(layer_id, name, tensor)
             else:
                 weights.set_global_weight(name, tensor)
@@ -463,20 +472,21 @@ class ModelLoader:
 
         embedding_weight = weight.global_weights.get(W.embedding, None)
         if embedding_weight != None:
-            self._weights_info.config.embedding_size = embedding_weight.shape[0]
+            self._weights_info.model_config.embedding_size = embedding_weight.shape[0]
             logging.info(
-                f"embedding_size is {self._weights_info.config.embedding_size}, vocab size is {self._weights_info.config.vocab_size}"
+                f"embedding_size is {self._weights_info.model_config.embedding_size}, vocab size is {self._weights_info.model_config.vocab_size}"
             )
 
-        if self._load_config.vit_separation != 1:
+        if self._load_config.vit_separation != VitSeparation.VIT_SEPARATION_ROLE:
             if self._task_type == TaskType.LANGUAGE_MODEL:
                 lm_head_w = weight.steal_global_weight(W.lm_head)
                 if lm_head_w == None:
                     lm_head_w = weight.global_weights[W.embedding]
-                if self._weights_info.config.normalize_lm_head_weight:
+                if self._weights_info.model_config.normalize_lm_head_weight:
                     lm_head_w = F.normalize(lm_head_w)
-                if self._weights_info.config.logit_scale != 1.0:
-                    lm_head_w = self._weights_info.config.scale_logit * lm_head_w
+                logit_scale = self._weights_info.model_config.logit_scale
+                if logit_scale != 1.0:
+                    lm_head_w = logit_scale * lm_head_w
                 weight.set_global_weight(W.lm_head, lm_head_w)
             else:
                 # Some LLM can be used for other tasks, e.g. classification, in which case lm_head is not needed
@@ -484,11 +494,12 @@ class ModelLoader:
 
             pos_weight = weight.global_weights.get(W.positional_embedding, None)
             if pos_weight != None:
-                if pos_weight.shape[0] < self._weights_info.config.max_seq_len:
+                max_seq_len = self._weights_info.model_config.max_seq_len
+                if pos_weight.shape[0] < max_seq_len:
                     raise Exception(
-                        f"positon_weight has shape: {pos_weight.shape}, but max_seq_len is: {self._weights_info.config.max_seq_len} > {pos_weight.shape[0]}"
+                        f"positon_weight has shape: {pos_weight.shape}, but max_seq_len is: {max_seq_len} > {pos_weight.shape[0]}"
                     )
-                pos_weight = pos_weight[: self._weights_info.config.max_seq_len].to(
+                pos_weight = pos_weight[: max_seq_len].to(
                     device
                 )
                 weight.set_global_weight(W.positional_embedding, pos_weight)
@@ -506,47 +517,51 @@ class ModelLoader:
                         dynamic_weight.name, dynamic_w.get(dynamic_weight.name)
                     )
 
-    def _init_redundant_expert(self, config: GptInitModelParameters):
-        if config.expert_num == 0:
+    def _init_redundant_expert(self, weights_info: ModelDeployWeightInfo):
+        if weights_info.expert_num_ == 0:
             return
 
-        expert_num = config.expert_num
-        ep_size = config.ep_size
-        layer_num = config.layer_num
-        phy_exp_num = config.phy_exp_num
+        expert_num = weights_info.expert_num_
+        ep_size = weights_info.ep_size
+        layer_num = weights_info._num_layers
+        phy_exp_num = weights_info.phy_exp_num_
 
+        # Create a minimal LoadConfig object (py_env_configs is not available in ModelDeployWeightInfo)
+        load_config = PyLoadConfig()
+        
         phy2log = LoadConfig.create_redundant_expert(
             layer_num=layer_num,
             expert_num=expert_num,
+            load_config=load_config,
             phy_exp_num=phy_exp_num,
             ep_size=ep_size,
-            num_nodes=config.num_nodes,
+            num_nodes=weights_info.num_nodes,
         )
-        config.phy2log = phy2log
+        weights_info.phy2log = phy2log
 
     def _init_eplb_config(
         self, weights_info: ModelDeployWeightInfo, compute_dtype: torch.dtype
     ):
-        self._init_redundant_expert(weights_info.config)
-        if weights_info.config.enable_eplb:
+        self._init_redundant_expert(weights_info)
+        if weights_info.enable_eplb_:
             model_path = None
-            if weights_info.config.is_mtp:
-                model_path = weights_info.config.ckpt_path
+            if weights_info.model_config.is_mtp:
+                model_path = weights_info.model_config.ckpt_path
             else:
-                path = self.py_env_configs.model_config.original_checkpoint_path
-                if path is None:
-                    path = weights_info.config.ckpt_path
+                # Use ckpt_path from model_config (py_env_configs is not available in ModelDeployWeightInfo)
+                path = weights_info.model_config.ckpt_path
                 model_path = fetch_remote_file_to_local(path)
 
             ep_lb_database = CkptDatabase(model_path)
+            
             self.ep_balancer = ExpertBalancer(
                 weights_info=weights_info,
                 compute_dtype=compute_dtype,
-                phy2log=weights_info.config.phy2log,
+                phy2log=weights_info.phy2log,
                 database=ep_lb_database,
-                py_env_configs=self.py_env_configs,
+                model_config=self.model_config,
             )
-            weights_info.config.py_eplb = self.ep_balancer
+            weights_info.py_eplb = self.ep_balancer
 
     def _init_eplb_weight(self, weight: ModelWeights, device: str):
         expert_num = self._load_config.expert_num
@@ -555,7 +570,7 @@ class ModelLoader:
         phy2log = self._load_config.phy2log
 
         if expert_num == 0 or (
-            not self._weights_info.config.enable_eplb and redundant_expert == 0
+            not self._weights_info.enable_eplb_ and redundant_expert == 0
         ):
             logging.info("don't need to init eplb weight, skip...")
             return
@@ -580,12 +595,11 @@ class ModelLoader:
 
 
 def get_model_loader(
-    task_type: TaskType,
+    model_config: ModelConfig,
     weights_info: ModelDeployWeightInfo,
     misc_weights_info: Optional[CustomAtomicWeight],
     compute_dtype: torch.dtype,
     database: BaseDatabase,
-    is_attn_model: bool,
 ) -> ModelLoader:
     if weights_info._head_num % weights_info.tp_size != 0:
         raise Exception(
@@ -601,10 +615,9 @@ def get_model_loader(
             % (weights_info.tp_size, weights_info._head_num_kv)
         )
     return ModelLoader(
-        task_type,
+        model_config,
         weights_info,
         misc_weights_info,
         compute_dtype,
         database,
-        is_attn_model=is_attn_model,
     )

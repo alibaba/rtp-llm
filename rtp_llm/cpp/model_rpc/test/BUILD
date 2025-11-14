@@ -24,7 +24,7 @@ py_test (
 test_deps = [
     "//rtp_llm/cpp/devices/testing:device_test_utils",
     "//rtp_llm/cpp/models:models",
-    "//rtp_llm/cpp/config:gpt_init_params",
+    "//rtp_llm/cpp/config:config_modules",
     "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
     "//rtp_llm/cpp/model_rpc:model_rpc_server",
     "@com_google_googletest//:gtest",

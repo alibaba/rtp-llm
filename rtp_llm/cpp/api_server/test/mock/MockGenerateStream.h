@@ -4,13 +4,14 @@
 #include <gtest/gtest.h>
 
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 
 namespace rtp_llm {
 
 class MockGenerateStream: public GenerateStream {
 public:
-    MockGenerateStream(const std::shared_ptr<GenerateInput>& input, const rtp_llm::GptInitParameter& param):
-        GenerateStream(input, param, ResourceContext{}, nullptr) {}
+    MockGenerateStream(const std::shared_ptr<GenerateInput>& input, const ModelConfig& model_config, const RuntimeConfig& runtime_config):
+        GenerateStream(input, model_config, runtime_config, ResourceContext{}, nullptr) {}
     ~MockGenerateStream() override = default;
 
 public:

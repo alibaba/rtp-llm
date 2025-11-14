@@ -17,12 +17,6 @@ enum class FMHAType {
     AITER_DECODE
 };
 
-enum AttentionMaskType {
-    // ones matrix, for bert model.
-    noMask,
-    causalMask,
-};
-
 enum class KvCacheDataType : int8_t {
     BASE = 0,
     INT8 = 1,
@@ -45,18 +39,17 @@ struct AttentionConfigs {
     size_t head_num;
     size_t kv_head_num;
     size_t size_per_head;
-    size_t hidden_size;
 
     // rotary embending config
     RopeConfig rope_config;
 
     // kv cache block
-    size_t tokens_per_block;
+    size_t tokens_per_block = 8;
 
-    AttentionMaskType mask_type         = noMask;
-    float             q_scaling         = 1.0f;
-    bool              fuse_qkv_add_bias = true;
-    bool              use_logn_attn     = false;
+    float  q_scaling         = 1.0f;
+    bool   fuse_qkv_add_bias = true;
+    bool   use_logn_attn     = false;
+    bool   is_causal         = true;
 
     // mla config
     bool   use_mla = false;

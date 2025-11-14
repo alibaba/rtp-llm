@@ -107,10 +107,12 @@ class AutoModel:
 
     def _init_kv_cache(self):
         self.kv_cache = KVCache()
-        self.layer_num = self.model_config.gpt_init_params.layer_num
-        self.model_config.gpt_init_params.seq_size_per_block = self.tokens_per_block
-        self.kv_head_num = self.model_config.gpt_init_params.head_num_kv
-        self.size_per_head = self.model_config.gpt_init_params.size_per_head
+        self.layer_num = self.model_config.num_layers
+        # seq_size_per_block is stored in attn_config.rope_config or model_config
+        # For now, use tokens_per_block directly
+        seq_size_per_block = self.tokens_per_block
+        self.kv_head_num = self.model_config.head_num_kv
+        self.size_per_head = self.model_config.size_per_head
         kv_shape = [
             self.layer_num * 2,
             self.block_nums,

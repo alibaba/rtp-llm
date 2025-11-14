@@ -9,6 +9,9 @@ from jinja2.exceptions import TemplateError
 from jinja2.sandbox import ImmutableSandboxedEnvironment
 from packaging import version
 
+from typing import Any, Optional
+
+from rtp_llm.config.py_config_modules import GenerateEnvConfig, RenderConfig
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.openai.renderers.custom_renderer import (
@@ -46,8 +49,13 @@ class BasicRenderer(CustomChatRenderer):
         self,
         tokenizer: BaseTokenizer,
         renderer_params: RendererParams,
+        generate_env_config: GenerateEnvConfig,
+        render_config: Optional[RenderConfig] = None,
+        ckpt_path: Optional[str] = None,
+        misc_config: Optional[Any] = None,
+        vit_config: Optional[Any] = None,
     ):
-        super().__init__(tokenizer, renderer_params)
+        super().__init__(tokenizer, renderer_params, generate_env_config, render_config, ckpt_path, misc_config, vit_config)
 
         if version.parse(jinja2.__version__) <= version.parse("3.0.0"):
             raise ImportError(
@@ -58,7 +66,7 @@ class BasicRenderer(CustomChatRenderer):
 
         self.add_generation_prompt = True
         self.chat_template = None
-        self.special_tokens_map = {}
+        self.special_tokensmap = {}
         try:
             self._setup_chat_template()
             assert self.chat_template != None
@@ -75,9 +83,9 @@ class BasicRenderer(CustomChatRenderer):
                 self.add_extra_stop_words(["<|im_end|>"])
 
         try:
-            if tokenizer.special_tokens_map != None:
-                self.special_tokens_map = tokenizer.special_tokens_map
-                for k, v in self.special_tokens_map.items():
+            if tokenizer.special_tokensmap != None:
+                self.special_tokensmap = tokenizer.special_tokensmap
+                for k, v in self.special_tokensmap.items():
                     logging.info(f"special token [{v}]({k}) added as stop words.")
                     if isinstance(v, str):
                         self.add_extra_stop_words([v])
@@ -106,10 +114,10 @@ class BasicRenderer(CustomChatRenderer):
 
         logging.info(f"found chat template to use: {self.chat_template}")
         self.default_template_key = (
-            self.py_env_configs.render_config.default_chat_template_key
+            self.render_config.default_chat_template_key
         )
         self.default_tool_use_template_key = (
-            self.py_env_configs.render_config.default_tool_use_template_key
+            self.render_config.default_tool_use_template_key
         )
         self.compiled_template_map: Dict[str, jinja2.Template] = {}
 
@@ -175,7 +183,7 @@ class BasicRenderer(CustomChatRenderer):
             "json": json,
             "add_generation_prompt": self.add_generation_prompt,
         }
-        render_args.update(self.special_tokens_map)
+        render_args.update(self.special_tokensmap)
         # functions with none value may occur exception in llama3 template
         if request_dict.get("functions", None):
             render_args["functions"] = request_dict["functions"]

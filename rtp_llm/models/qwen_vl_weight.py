@@ -13,11 +13,6 @@ class QwenVLVitWeight(BaseVitWeights):
 
 class QWenVLWeightInfo(QWenWeight, BaseMultiModalWeightInfo):
 
-    def __init__(self, config, tp_size, tp_rank):
-        QWenWeight.__init__(self, config, tp_size, tp_rank)
-        BaseMultiModalWeightInfo.__init__(self, config)
-
-    def _get_weight_info(self):
-        qwen_vl_weight = super()._get_weight_info()
-        qwen_vl_weight = self._get_vit_info(qwen_vl_weight)
-        return qwen_vl_weight
+    def __init__(self, vit_weights, **kwargs):
+        QWenWeight.__init__(self, **kwargs)
+        BaseMultiModalWeightInfo.__init__(self, vit_weights=vit_weights, **kwargs)

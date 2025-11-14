@@ -60,4 +60,29 @@ inline bool isGatedActivation(ActivationType activaiton_type) {
            || activaiton_type == ActivationType::GeGluNoneApproximate;
 }
 
+inline std::string getActivationTypeStr(ActivationType activation_type) {
+    switch (activation_type) {
+        case ActivationType::Gelu:
+            return "gelu";
+        case ActivationType::Relu:
+            return "relu";
+        case ActivationType::Silu:
+            return "silu";
+        case ActivationType::Swiglu:
+            return "gated-silu";
+        case ActivationType::Geglu:
+            return "geglu";
+        case ActivationType::Identity:
+            return "identity";
+        case ActivationType::GeluNoneApproximate:
+            return "gelu-none-approximate";
+        case ActivationType::GeGluNoneApproximate:
+            return "geglu-none-approximate";
+        case ActivationType::Sigmoid:
+            return "sigmoid";
+        default:
+            throw std::runtime_error("Invalid ActivationType: " + std::to_string(static_cast<int>(activation_type)));
+    }
+}
+
 }  // namespace rtp_llm

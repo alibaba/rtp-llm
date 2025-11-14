@@ -3,37 +3,42 @@ from typing import Any, Optional
 
 from torch import Tensor, nn
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.modules import DECODE_MHA_IMPS, PREFILL_MHA_IMPS, FMHAImplBase
 from rtp_llm.models_py.modules.fmha import DECODE_MLA_IMPS, PREFILL_MLA_IMPS
-from rtp_llm.ops.compute_ops import (
-    DeviceType,
-    KVCache,
+from rtp_llm.ops import (
     PyAttentionInputs,
     PyModelInitResources,
     PyModelInputs,
     PyModelOutputs,
-    get_device,
 )
+from rtp_llm.ops.compute_ops import DeviceType, KVCache, get_device
 from rtp_llm.utils.model_weight import W
 
 
 class GptModelBase(nn.Module):
-    def __init__(self, config: GptInitModelParameters, weight: ModelWeights) -> None:
+    def __init__(
+        self, 
+        config: ModelConfig, 
+        parallelism_config,
+        weight: ModelWeights,
+        fmha_config=None,  # Optional FMHAConfig
+        py_hw_kernel_config=None,  # Optional HWKernelConfig
+    ) -> None:
         super().__init__()
         self.config = config
+        self.parallelism_config = parallelism_config
         self.weight = weight
+        self.fmha_config = fmha_config
+        self.py_hw_kernel_config = py_hw_kernel_config
 
-        self.layer_num: int = config.layer_num
+        self.layer_num: int = config.num_layers
         self.vocab_size: int = config.vocab_size
 
         self.kv_cache: Optional[KVCache] = None
         self.device_type: DeviceType = get_device().get_device_type()
 
-        self.micro_batch_size: int = (
-            1 if config.device_resource_config.enable_layer_micro_batch == 0 else 2
-        )
         ## (batch_size -> fmha_params)
         self.params_dict: dict[int, Any] = {}
 
@@ -84,6 +89,7 @@ class GptModelBase(nn.Module):
             cos_sin_cache = self.weight.get_global_weight(W.rope_cos_sin_cache)
             impl = fmha_impl(
                 self.config,
+                self.parallelism_config,
                 attn_inputs,
                 self.weight.weights,
                 cos_sin_cache,
@@ -93,9 +99,36 @@ class GptModelBase(nn.Module):
         raise Exception(f"can not find fmha type")
 
     def get_fmha_impl(self, attn_inputs: PyAttentionInputs) -> FMHAImplBase:
+        from rtp_llm.ops import FMHAType
         mha_impls = PREFILL_MHA_IMPS if attn_inputs.is_prefill else DECODE_MHA_IMPS
         for fmha_impl in mha_impls:
-            impl = fmha_impl(self.config, attn_inputs)
+            # Check config at runtime to filter implementations
+            if self.fmha_config is not None:
+                fmha_type = fmha_impl.fmha_type()
+                # Skip FlashInfer if disabled
+                if fmha_type == FMHAType.FLASH_INFER and self.fmha_config.disable_flash_infer:
+                    continue
+                # Skip TRT FMHA if not enabled
+                if fmha_type == FMHAType.TRT_V2 and not self.fmha_config.enable_paged_trt_fmha:
+                    continue
+                # Skip XQA if not enabled
+                if fmha_type == FMHAType.XQA and not self.fmha_config.enable_xqa:
+                    continue
+            
+            # Pass config objects to implementation if it accepts them
+            # Some implementations may not accept these parameters yet
+            try:
+                # Try with config parameters first
+                impl = fmha_impl(
+                    self.config, 
+                    self.parallelism_config, 
+                    attn_inputs,
+                    fmha_config=self.fmha_config,
+                    py_hw_kernel_config=self.py_hw_kernel_config,
+                )
+            except TypeError:
+                # Fallback to old signature if implementation doesn't accept config parameters yet
+                impl = fmha_impl(self.config, self.parallelism_config, attn_inputs)
             if impl.support():
                 return impl
         raise Exception(f"can not find fmha type")

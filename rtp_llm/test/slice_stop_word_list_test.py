@@ -23,7 +23,16 @@ class SliceStopWordListTest(TestCase):
         engine: BaseEngine = FakeModelLoader(
             "llama", ckpt_path, ckpt_path, max_seq_len=1024
         ).init_engine()
-        self.pipeline = Pipeline(engine.config, engine.model.tokenizer)
+        self.pipeline = Pipeline(
+            special_tokens=engine.model.model_config.special_tokens,
+            pd_sep_config=engine.model.engine_config.pd_sep_config,
+            runtime_config=engine.model.engine_config.runtime_config,
+            ffn_disaggregate_config=engine.model.engine_config.parallelism_config.ffn_disaggregate_config,
+            max_seq_len=engine.model.model_config.max_seq_len,
+            seq_size_per_block=engine.model.engine_config.kv_cache_config.seq_size_per_block,
+            tokenizer=engine.model.tokenizer,
+            sp_config=engine.model.engine_config.sp_config,
+        )
 
     async def mock_generate(self):
         yield GenerateOutputs(

@@ -1,8 +1,9 @@
 import logging
+from typing import Optional
 
 from transformers import PreTrainedTokenizerBase
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.renderer_factory import ChatRendererFactory
 from rtp_llm.openai.renderers.basic_renderer import BasicRenderer
@@ -10,7 +11,7 @@ from rtp_llm.openai.renderers.custom_renderer import CustomChatRenderer, Rendere
 
 
 class OpenAIRenderBasicInfo(object):
-    def __init__(self, tokenizer: BaseTokenizer, config: GptInitModelParameters):
+    def __init__(self, tokenizer: BaseTokenizer, config: ModelConfig):
         self.config = config
         self.max_seq_len = self.config.max_seq_len
 
@@ -25,7 +26,7 @@ class OpenAIRenderBasicInfo(object):
         self.stop_word_ids_list = self.config.special_tokens.stop_words_id_list
 
         render_params = RendererParams(
-            model_type=config.py_env_configs.model_config.model_type,
+            model_type=self.config.model_type,
             max_seq_len=self.max_seq_len,
             eos_token_id=self.eos_token_id,
             stop_word_ids_list=self.stop_word_ids_list,

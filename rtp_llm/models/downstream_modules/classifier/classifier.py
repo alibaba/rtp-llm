@@ -3,7 +3,7 @@ from typing import Any, Dict, List
 import torch
 
 from rtp_llm.async_decoder_engine.embedding.interface import EngineInputs, EngineOutputs
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.model_loader.weight_module import CustomAtomicWeight
 from rtp_llm.models.downstream_modules.classifier.api_datatype import (
@@ -30,14 +30,14 @@ from .util import load_num_labels
 
 # Normal Classifier
 class ClassifierModule(CustomModule):
-    def __init__(self, config: GptInitModelParameters, tokenizer: BaseTokenizer):
+    def __init__(self, config: ModelConfig, tokenizer: BaseTokenizer):
         super().__init__(config, tokenizer)
         self.renderer = ClassifierRenderer(self.config_, self.tokenizer_)
         self.handler = ClassifierHandler(self.config_)
 
 
 class ClassifierRenderer(CustomRenderer):
-    def __init__(self, config: GptInitModelParameters, tokenizer: BaseTokenizer):
+    def __init__(self, config: ModelConfig, tokenizer: BaseTokenizer):
         super().__init__(config, tokenizer)
         self.generator = CommonInputGenerator(tokenizer, config)
 
@@ -59,7 +59,7 @@ class ClassifierRenderer(CustomRenderer):
 
 
 class ClassifierHandler(CustomHandler):
-    def __init__(self, config: GptInitModelParameters):
+    def __init__(self, config: ModelConfig):
         super().__init__(config)
         num_labels = load_num_labels(self.config_.ckpt_path)
         self.linear = torch.nn.Linear(self.config_.hidden_size, num_labels)
@@ -87,7 +87,7 @@ class ClassifierHandler(CustomHandler):
         input_lengths: torch.Tensor,
     ) -> List[torch.Tensor]:
         # TODO test it
-        if self.config_.is_causal:
+        if self.config_.attn_config.is_causal:
             last_tokens = get_last_token_from_combo_tokens(hidden_states, input_lengths)
             return self.linear(last_tokens)
         else:

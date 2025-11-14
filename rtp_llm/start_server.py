@@ -7,17 +7,73 @@ import time
 
 import requests
 
-from rtp_llm.config.py_config_modules import ServerConfig, StaticConfig
-from rtp_llm.metrics import kmonitor
-from rtp_llm.ops import ProfilingDebugLoggingConfig
-from rtp_llm.tools.api.hf_model_helper import get_hf_model_info
-
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
-from rtp_llm.distribute.worker_info import WorkerInfo, g_parallel_info
-from rtp_llm.server.server_args.server_args import setup_args, EnvArgumentParser
+import json
+
+from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.ops import RoleType
+from rtp_llm.distribute.worker_info import WorkerInfo, g_parallel_info, update_worker_info
+from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.utils.concurrency_controller import init_controller
+from rtp_llm.utils.fuser import fetch_remote_file_to_local
+
+
+def fetch_model_files_to_local(py_env_configs: PyEnvConfigs):
+    """Fetch remote model files to local and update py_env_configs in place."""
+    # Fetch checkpoint_path from model_args
+    model_args = py_env_configs.model_args
+    if model_args.ckpt_path:
+        model_args.ckpt_path = fetch_remote_file_to_local(
+            model_args.ckpt_path
+        )
+    
+    # Fetch tokenizer_path from model_args
+    tokenizer_path = model_args.tokenizer_path
+    if not tokenizer_path:
+        tokenizer_path = model_args.ckpt_path
+    if tokenizer_path:
+        model_args.tokenizer_path = fetch_remote_file_to_local(tokenizer_path)
+    
+    # Fetch extra_data_path from model_args
+    if model_args.extra_data_path:
+        local_extra_data_path = fetch_remote_file_to_local(
+            model_args.extra_data_path
+        )
+        model_args.local_extra_data_path = local_extra_data_path
+    
+    # Fetch ptuning_path from model_args
+    if model_args.ptuning_path:
+        model_args.ptuning_path = fetch_remote_file_to_local(
+            model_args.ptuning_path
+        )
+    
+    # Fetch lora paths
+    lora_config = py_env_configs.lora_config
+    if lora_config.lora_info:
+        try:
+            lora_infos = json.loads(lora_config.lora_info)
+            for lora_name, lora_path in lora_infos.items():
+                lora_infos[lora_name] = fetch_remote_file_to_local(lora_path)
+            # Update lora_info back to string format
+            lora_config.lora_info = json.dumps(lora_infos)
+        except (json.JSONDecodeError, TypeError) as e:
+            logging.warning(f"Failed to parse lora_info: {e}, skipping lora path fetching")
+    
+    # Fetch checkpoint_path if exists
+    sp_config = py_env_configs.sp_config
+    if sp_config.checkpoint_path:
+        sp_config.checkpoint_path = fetch_remote_file_to_local(
+            sp_config.checkpoint_path
+        )
+    
+    logging.info(
+        f"Fetched model files - checkpoint_path: {model_args.ckpt_path}, "
+        f"tokenizer_path: {model_args.tokenizer_path}, "
+        f"ptuning_path: {model_args.ptuning_path}, "
+        f"extra_data_path: {model_args.local_extra_data_path}"
+    )
 
 
 def check_server_health(server_port):
@@ -36,24 +92,20 @@ def check_server_health(server_port):
         return False
 
 
-def start_backend_server_impl(global_controller):
+def start_backend_server_impl(global_controller, py_env_configs):
     from rtp_llm.start_backend_server import start_backend_server
 
-    profiling_debug_config = ProfilingDebugLoggingConfig()
-    profiling_debug_config.update_from_env()
     # only for debug
-    if profiling_debug_config.debug_load_server:
-        start_backend_server(global_controller)
+    if py_env_configs.profiling_debug_config.debug_load_server:
+        start_backend_server(global_controller, py_env_configs)
         os._exit(-1)
     backend_process = multiprocessing.Process(
-        target=start_backend_server, args=(global_controller,), name="backend_server"
+        target=start_backend_server, args=(global_controller, py_env_configs), name="backend_server"
     )
     backend_process.start()
 
     retry_interval_seconds = 5
-    server_config = ServerConfig()
-    server_config.update_from_env()
-    start_port = server_config.start_port
+    start_port = py_env_configs.server_config.start_port
     backend_server_port = WorkerInfo.backend_server_port_offset(0, start_port)
     while True:
         if not backend_process.is_alive():
@@ -73,12 +125,10 @@ def start_backend_server_impl(global_controller):
     return backend_process
 
 
-def start_frontend_server_impl(global_controller, backend_process):
+def start_frontend_server_impl(global_controller, backend_process, py_env_configs):
     from rtp_llm.start_frontend_server import start_frontend_server
 
-    server_config = ServerConfig()
-    server_config.update_from_env()
-    frontend_server_count = server_config.frontend_server_count
+    frontend_server_count = py_env_configs.server_config.frontend_server_count
     if frontend_server_count < 1:
         logging.info(
             "frontend server's count is {frontend_server_count}, this may be a mistake"
@@ -102,14 +152,14 @@ def start_frontend_server_impl(global_controller, backend_process):
         for i in range(frontend_server_count):
             process = multiprocessing.Process(
                 target=start_frontend_server,
-                args=(rank, i, global_controller),
+                args=(rank, i, global_controller, py_env_configs),
                 name=f"frontend_server_{i}",
             )
             frontend_processes.append(process)
             process.start()
 
     retry_interval_seconds = 5
-    start_port = server_config.start_port
+    start_port = py_env_configs.server_config.start_port
 
     while True:
         if not all(proc.is_alive() for proc in frontend_processes):
@@ -148,53 +198,41 @@ def monitor_and_release_process(backend_process, frontend_process):
 
     logging.info("all process exit")
 
-
-def get_model_type_and_update_env(parser: EnvArgumentParser, args: argparse.Namespace):
-    if hasattr(args, 'checkpoint_path') and args.checkpoint_path is not None and args.checkpoint_path != "":
-        model_path = args.checkpoint_path
-        current_model_type = os.environ.get("MODEL_TYPE", StaticConfig.model_config.model_type)
-        if current_model_type is None or current_model_type == "":
-            if hasattr(args, 'model_type') and args.model_type is not None and args.model_type != "":
-                config_model_type = args.model_type
-            else:
-                model_info = get_hf_model_info(model_path)
-                config_model_type = model_info.ft_model_type
-                setattr(args, "model_type", config_model_type)
-            if config_model_type is not None and config_model_type != "":
-                EnvArgumentParser.update_env_from_args(parser, "model_type", args)
-    StaticConfig.update_from_env()
-
-
 def main():
-    parser, args = setup_args()
+    py_env_configs: PyEnvConfigs = setup_args()
+    fetch_model_files_to_local(py_env_configs)
+    update_worker_info(py_env_configs.server_config.start_port, py_env_configs.server_config.worker_info_port_num)
 
-    start_server(parser, args)
+    start_server(py_env_configs)
 
 
-def start_server(parser: EnvArgumentParser, args: argparse.Namespace):
+def start_server(py_env_configs):
     try:
         multiprocessing.set_start_method("spawn")
     except RuntimeError as e:
-        logging.warn(str(e))
-    global_controller = init_controller()
+        logging.warning(str(e))
+    global_controller = init_controller(py_env_configs.concurrency_config,
+                                        dp_size=g_parallel_info.dp_size)
     backend_process = None
     frontend_process = None
-    get_model_type_and_update_env(parser, args)
+
     try:
-        if os.environ.get("ROLE_TYPE", "") != "FRONTEND":
+        if py_env_configs.role_config.role_type != RoleType.FRONTEND:
             logging.info("start backend server")
-            backend_process = start_backend_server_impl(global_controller)
+            backend_process = start_backend_server_impl(global_controller, py_env_configs)
             logging.info(f"backend server process = {backend_process}")
 
         logging.info("start frontend server")
         frontend_process = start_frontend_server_impl(
-            global_controller, backend_process
+            global_controller, backend_process, py_env_configs
         )
         logging.info(f"frontend server process = {frontend_process}")
 
         logging.info(f"后端RPC 服务监听的ip为 0.0.0.0，ip/ip段可自定义为所需范围")
     except Exception as e:
+        import traceback
         logging.error(f"start failed, {str(e)}")
+        logging.error(f"Traceback:\n{traceback.format_exc()}")
     finally:
         monitor_and_release_process(backend_process, frontend_process)
 

@@ -2,7 +2,7 @@ from typing import Dict, List
 
 import torch
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.model_loader.weight_module import CustomAtomicWeight
 from rtp_llm.models.downstream_modules.custom_module import CustomHandler, CustomModule
@@ -15,14 +15,14 @@ from .util import load_num_labels
 
 
 class RobertaClassifierModule(CustomModule):
-    def __init__(self, config: GptInitModelParameters, tokenizer: BaseTokenizer):
+    def __init__(self, config: ModelConfig, tokenizer: BaseTokenizer):
         super().__init__(config, tokenizer)
         self.renderer = ClassifierRenderer(self.config_, self.tokenizer_)
         self.handler = RobertaClassifierHandler(self.config_)
 
 
 class RobertaClassifierHandler(CustomHandler):
-    def __init__(self, config: GptInitModelParameters):
+    def __init__(self, config: ModelConfig):
         super().__init__(config)
         num_labels = load_num_labels(self.config_.ckpt_path)
         self.out_proj = torch.nn.Linear(self.config_.hidden_size, num_labels)

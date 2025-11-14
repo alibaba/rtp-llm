@@ -22,10 +22,11 @@ std::shared_ptr<MockGenerateStream> CreateMockGenerateStream() {
     input->input_ids = std::make_shared<rtp_llm::Buffer>(
         rtp_llm::MemoryType::MEMORY_CPU, rtp_llm::DataType::TYPE_INT32, shape, fake_token_ids.data());
 
-    rtp_llm::GptInitParameter param;
-    param.max_seq_len_ = fake_token_ids.size();
+    ModelConfig model_config;
+    RuntimeConfig runtime_config;
+    model_config.max_seq_len = fake_token_ids.size();
 
-    auto mock_stream = std::make_shared<MockGenerateStream>(input, param);
+    auto mock_stream = std::make_shared<MockGenerateStream>(input, model_config, runtime_config);
     return mock_stream;
 }
 

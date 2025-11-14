@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional
 import torch
 import torch.distributed as dist
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.models_py.modules.moe.config_adapter import MoEConfigAdapter
 from rtp_llm.distribute.collective import Group
 from rtp_llm.models_py.distributed.deepep_wrapper import get_deepep_wrapper
 from rtp_llm.models_py.modules.moe import (
@@ -20,7 +20,7 @@ from rtp_llm.models_py.modules.moe import (
 class DeepepNormalRouter(FusedMoeDataRouter):
     def __init__(
         self,
-        config: GptInitModelParameters,
+        config: MoEConfigAdapter,
         use_fp8: bool = True,
         async_mode: bool = False,
         expert_alignment: int = 128,

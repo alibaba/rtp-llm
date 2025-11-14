@@ -13,7 +13,8 @@ from transformers import AutoTokenizer
 from typing_extensions import override
 
 from rtp_llm.config.generate_config import GenerateConfig
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.engine_config import SpecialTokens
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.frontend.tokenizer_factory.tokenizers.tokenization_qwen import (
@@ -254,8 +255,42 @@ class BaseToolCallTestSuite:
         tokenizer = self._create_tokenizer(tokenizer_path)
 
         self.parent.model.tokenizer = tokenizer
+        # Create minimal configs for test
+        from rtp_llm.config.py_config_modules import ModelArgs, GenerateEnvConfig, RenderConfig, PyMiscellaneousConfig, VitConfig
+        from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
+        from rtp_llm.ops import SpecialTokens as OpsSpecialTokens
+        model_args = ModelArgs()
+        model_args.model_type = self._get_model_type()
+        generate_env_config = GenerateEnvConfig()
+        render_config = RenderConfig()
+        misc_config = PyMiscellaneousConfig()
+        vit_config = VitConfig()
+        special_tokens = OpsSpecialTokens()
+        if hasattr(self.parent.model.config, 'special_tokens') and self.parent.model.config.special_tokens:
+            special_tokens = self.parent.model.config.special_tokens
+        from rtp_llm.config.py_config_modules import GangConfig
+        gang_config = GangConfig()
+        backend_rpc_server_visitor = BackendRPCServerVisitor(
+            max_seq_len=self.parent.model.config.max_seq_len,
+            seq_size_per_block=64,
+            pd_sep_config=None,
+            runtime_config=None,
+            ffn_disaggregate_config=None,
+            gang_config=gang_config,
+        )
         self.parent.endpoint = OpenaiEndpoint(
-            self.parent.model.config, self.parent.model.tokenizer, None
+            model_args=model_args,
+            generate_env_config=generate_env_config,
+            render_config=render_config,
+            misc_config=misc_config,
+            vit_config=vit_config,
+            special_tokens=special_tokens,
+            max_seq_len=self.parent.model.config.max_seq_len,
+            template_type=None,
+            model_name="",
+            ckpt_path="",
+            tokenizer=self.parent.model.tokenizer,
+            backend_rpc_server_visitor=backend_rpc_server_visitor,
         )
 
         return tokenizer
@@ -365,13 +400,14 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         self.test_data_path = os.path.join(
             os.getcwd(), "rtp_llm/test/model_test/fake_test/testdata"
         )
-        model_params = GptInitModelParameters(
-            head_num=1024,
-            size_per_head=1024,
-            layer_num=1024,
-            max_seq_len=1024,
-            vocab_size=1024,
-        )
+        from rtp_llm.config.py_config_modules import PyEnvConfigs
+        model_params = ModelConfig()
+        model_params.head_num_ = 1024
+        model_params.size_per_head_ = 1024
+        model_params.num_layers = 1024
+        model_params.max_seq_len = 1024
+        model_params.vocab_size = 1024
+        model_params.special_tokens = SpecialTokens()
         self.model = FakeModel(None)
         self.model.config = model_params
 
@@ -380,7 +416,34 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             f"{self.test_data_path}/qwen_7b/tokenizer/qwen.tiktoken"
         )
         self.model.tokenizer = tokenizer
-        self.endpoint = OpenaiEndpoint(self.model.config, self.model.tokenizer, None)
+        from rtp_llm.config.py_config_modules import PyEnvConfigs
+        from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
+        from rtp_llm.ops import SpecialTokens as OpsSpecialTokens
+        py_env_configs = PyEnvConfigs()
+        backend_rpc_server_visitor = BackendRPCServerVisitor(
+            max_seq_len=self.model.config.max_seq_len,
+            seq_size_per_block=64,
+            pd_sep_config=None,
+            runtime_config=None,
+            ffn_disaggregate_config=None,
+        )
+        special_tokens = OpsSpecialTokens()
+        if hasattr(self.model.config, 'special_tokens_') and self.model.config.special_tokens:
+            special_tokens = self.model.config.special_tokens
+        self.endpoint = OpenaiEndpoint(
+            model_args=py_env_configs.model_args,
+            generate_env_config=py_env_configs.generate_env_config,
+            render_config=py_env_configs.render_config,
+            misc_config=py_env_configs.misc_config,
+            vit_config=py_env_configs.vit_config,
+            special_tokens=special_tokens,
+            max_seq_len=self.model.config.max_seq_len,
+            template_type=None,
+            model_name="",
+            ckpt_path=py_env_configs.model_args.ckpt_path or "",
+            tokenizer=self.model.tokenizer,
+            backend_rpc_server_visitor=backend_rpc_server_visitor,
+        )
         test_ids = [
             198,
             84169,
@@ -474,7 +537,34 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             f"{self.test_data_path}/qwen_7b/tokenizer/qwen.tiktoken"
         )
         self.model.tokenizer = tokenizer
-        self.endpoint = OpenaiEndpoint(self.model.config, self.model.tokenizer, None)
+        from rtp_llm.config.py_config_modules import PyEnvConfigs
+        from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
+        from rtp_llm.ops import SpecialTokens as OpsSpecialTokens
+        py_env_configs = PyEnvConfigs()
+        backend_rpc_server_visitor = BackendRPCServerVisitor(
+            max_seq_len=self.model.config.max_seq_len,
+            seq_size_per_block=64,
+            pd_sep_config=None,
+            runtime_config=None,
+            ffn_disaggregate_config=None,
+        )
+        special_tokens = OpsSpecialTokens()
+        if hasattr(self.model.config, 'special_tokens_') and self.model.config.special_tokens:
+            special_tokens = self.model.config.special_tokens
+        self.endpoint = OpenaiEndpoint(
+            model_args=py_env_configs.model_args,
+            generate_env_config=py_env_configs.generate_env_config,
+            render_config=py_env_configs.render_config,
+            misc_config=py_env_configs.misc_config,
+            vit_config=py_env_configs.vit_config,
+            special_tokens=special_tokens,
+            max_seq_len=self.model.config.max_seq_len,
+            template_type=None,
+            model_name="",
+            ckpt_path=py_env_configs.model_args.ckpt_path or "",
+            tokenizer=self.model.tokenizer,
+            backend_rpc_server_visitor=backend_rpc_server_visitor,
+        )
         test_ids = [198, 84169, 25, 49434, 239, 73670, 37029]
         render_params = RendererParams(
             model_type="qwen",
@@ -505,7 +595,34 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             f"{self.test_data_path}/qwen_7b/tokenizer/qwen.tiktoken"
         )
         self.model.tokenizer = tokenizer
-        self.endpoint = OpenaiEndpoint(self.model.config, self.model.tokenizer, None)
+        from rtp_llm.config.py_config_modules import PyEnvConfigs
+        from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
+        from rtp_llm.ops import SpecialTokens as OpsSpecialTokens
+        py_env_configs = PyEnvConfigs()
+        backend_rpc_server_visitor = BackendRPCServerVisitor(
+            max_seq_len=self.model.config.max_seq_len,
+            seq_size_per_block=64,
+            pd_sep_config=None,
+            runtime_config=None,
+            ffn_disaggregate_config=None,
+        )
+        special_tokens = OpsSpecialTokens()
+        if hasattr(self.model.config, 'special_tokens_') and self.model.config.special_tokens:
+            special_tokens = self.model.config.special_tokens
+        self.endpoint = OpenaiEndpoint(
+            model_args=py_env_configs.model_args,
+            generate_env_config=py_env_configs.generate_env_config,
+            render_config=py_env_configs.render_config,
+            misc_config=py_env_configs.misc_config,
+            vit_config=py_env_configs.vit_config,
+            special_tokens=special_tokens,
+            max_seq_len=self.model.config.max_seq_len,
+            template_type=None,
+            model_name="",
+            ckpt_path=py_env_configs.model_args.ckpt_path or "",
+            tokenizer=self.model.tokenizer,
+            backend_rpc_server_visitor=backend_rpc_server_visitor,
+        )
         test_ids = [
             25,
             220,
@@ -654,7 +771,34 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             f"{self.test_data_path}/qwen_7b/tokenizer/qwen.tiktoken"
         )
         self.model.tokenizer = tokenizer
-        self.endpoint = OpenaiEndpoint(self.model.config, self.model.tokenizer, None)
+        from rtp_llm.config.py_config_modules import PyEnvConfigs
+        from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
+        from rtp_llm.ops import SpecialTokens as OpsSpecialTokens
+        py_env_configs = PyEnvConfigs()
+        backend_rpc_server_visitor = BackendRPCServerVisitor(
+            max_seq_len=self.model.config.max_seq_len,
+            seq_size_per_block=64,
+            pd_sep_config=None,
+            runtime_config=None,
+            ffn_disaggregate_config=None,
+        )
+        special_tokens = OpsSpecialTokens()
+        if hasattr(self.model.config, 'special_tokens_') and self.model.config.special_tokens:
+            special_tokens = self.model.config.special_tokens
+        self.endpoint = OpenaiEndpoint(
+            model_args=py_env_configs.model_args,
+            generate_env_config=py_env_configs.generate_env_config,
+            render_config=py_env_configs.render_config,
+            misc_config=py_env_configs.misc_config,
+            vit_config=py_env_configs.vit_config,
+            special_tokens=special_tokens,
+            max_seq_len=self.model.config.max_seq_len,
+            template_type=None,
+            model_name="",
+            ckpt_path=py_env_configs.model_args.ckpt_path or "",
+            tokenizer=self.model.tokenizer,
+            backend_rpc_server_visitor=backend_rpc_server_visitor,
+        )
         test_ids = [
             25,
             220,
@@ -2113,9 +2257,36 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         tokenizer = TokenizerFactory.create(
             "", "rtp_llm/test/tokenizer_test/testdata/chatglm3_tokenizer", "chatglm3"
         )
-        self.model.config.py_env_configs.model_config.model_type = "chatglm3"
+        self.model.config.py_env_configs.model_args.model_type = "chatglm3"
         self.model.tokenizer = tokenizer
-        self.endpoint = OpenaiEndpoint(self.model.config, self.model.tokenizer, None)
+        from rtp_llm.config.py_config_modules import PyEnvConfigs
+        from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
+        from rtp_llm.ops import SpecialTokens as OpsSpecialTokens
+        py_env_configs = PyEnvConfigs()
+        backend_rpc_server_visitor = BackendRPCServerVisitor(
+            max_seq_len=self.model.config.max_seq_len,
+            seq_size_per_block=64,
+            pd_sep_config=None,
+            runtime_config=None,
+            ffn_disaggregate_config=None,
+        )
+        special_tokens = OpsSpecialTokens()
+        if hasattr(self.model.config, 'special_tokens_') and self.model.config.special_tokens:
+            special_tokens = self.model.config.special_tokens
+        self.endpoint = OpenaiEndpoint(
+            model_args=py_env_configs.model_args,
+            generate_env_config=py_env_configs.generate_env_config,
+            render_config=py_env_configs.render_config,
+            misc_config=py_env_configs.misc_config,
+            vit_config=py_env_configs.vit_config,
+            special_tokens=special_tokens,
+            max_seq_len=self.model.config.max_seq_len,
+            template_type=None,
+            model_name="",
+            ckpt_path=py_env_configs.model_args.ckpt_path or "",
+            tokenizer=self.model.tokenizer,
+            backend_rpc_server_visitor=backend_rpc_server_visitor,
+        )
         self.assertEqual(self.endpoint.stop_words_id_list, [[64795], [64797], [2]])
         self.assertEqual(
             self.endpoint.stop_words_str_list, ["<|user|>", "<|observation|>"]
@@ -2129,7 +2300,34 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             "", f"{self.test_data_path}/deepseek_r1_qwen_14b_tokenizer", "qwen_2"
         )
         self.model.tokenizer = tokenizer
-        self.endpoint = OpenaiEndpoint(self.model.config, self.model.tokenizer, None)
+        from rtp_llm.config.py_config_modules import PyEnvConfigs
+        from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
+        from rtp_llm.ops import SpecialTokens as OpsSpecialTokens
+        py_env_configs = PyEnvConfigs()
+        backend_rpc_server_visitor = BackendRPCServerVisitor(
+            max_seq_len=self.model.config.max_seq_len,
+            seq_size_per_block=64,
+            pd_sep_config=None,
+            runtime_config=None,
+            ffn_disaggregate_config=None,
+        )
+        special_tokens = OpsSpecialTokens()
+        if hasattr(self.model.config, 'special_tokens_') and self.model.config.special_tokens:
+            special_tokens = self.model.config.special_tokens
+        self.endpoint = OpenaiEndpoint(
+            model_args=py_env_configs.model_args,
+            generate_env_config=py_env_configs.generate_env_config,
+            render_config=py_env_configs.render_config,
+            misc_config=py_env_configs.misc_config,
+            vit_config=py_env_configs.vit_config,
+            special_tokens=special_tokens,
+            max_seq_len=self.model.config.max_seq_len,
+            template_type=None,
+            model_name="",
+            ckpt_path=py_env_configs.model_args.ckpt_path or "",
+            tokenizer=self.model.tokenizer,
+            backend_rpc_server_visitor=backend_rpc_server_visitor,
+        )
 
         test_ids = [151648, 198, 73670, 73670, 73670, 151649, 271, 37029, 37029, 37029]
         render_params = RendererParams(
