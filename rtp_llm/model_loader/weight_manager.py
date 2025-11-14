@@ -13,6 +13,7 @@ from rtp_llm.model_loader.model_weight_info import ModelWeights
 
 # Assuming these imports are from your project and accessible
 from rtp_llm.model_loader.weight_module import WeightModule
+from rtp_llm.distribute.worker_info import g_parallel_info
 
 from .tipc import CudaIpcHelper, SharedMemIpcMeta, SharedMemoryIPCHelper
 
@@ -108,7 +109,7 @@ class WeightManager:
         """
         self._engine: BaseEngine = engine
         self._s_helper = SharedMemoryIPCHelper()
-        self._device: torch.device = engine.model.device
+        self._device: torch.device = torch.device(f"cuda:{g_parallel_info.local_rank}")
         self._weights: ModelWeights = engine.model.weight
         self._weights_loader: ModelLoader = engine.model.model_weights_loader
         self._weight_module = self._weights_loader._model_weights_info

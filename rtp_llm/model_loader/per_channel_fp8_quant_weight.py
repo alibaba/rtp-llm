@@ -263,7 +263,7 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
                     ],
                     functools.partial(
                         pad_w13,
-                        inter_padding_size=src_weight_info.config.inter_padding_size,
+                        align_size=src_weight_info.config.align_size,
                         dim=0,
                     ),
                     data_type=torch.float8_e4m3fn,
@@ -278,7 +278,7 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
                     ],
                     functools.partial(
                         pad_w13,
-                        inter_padding_size=src_weight_info.config.inter_padding_size,
+                        align_size=src_weight_info.config.align_size,
                         dim=0,
                     ),
                     data_type=torch.float32,
@@ -297,7 +297,7 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
                 [CkptWeightInfo(w_name + QW_SUFFIX, identity)],
                 functools.partial(
                     pad,
-                    inter_padding_size=src_weight_info.config.inter_padding_size,
+                    align_size=src_weight_info.config.align_size,
                     dim=0,
                 ),
                 data_type=torch.float8_e4m3fn,
@@ -309,7 +309,7 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
                 [CkptWeightInfo(w_name + QS_SUFFIX, identity)],
                 functools.partial(
                     pad,
-                    inter_padding_size=src_weight_info.config.inter_padding_size,
+                    align_size=src_weight_info.config.align_size,
                     dim=0,
                 ),
                 data_type=torch.float32,
@@ -323,7 +323,7 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
                 [CkptWeightInfo(w_name + QW_SUFFIX, identity)],
                 functools.partial(
                     pad,
-                    inter_padding_size=src_weight_info.config.inter_padding_size,
+                    align_size=src_weight_info.config.align_size,
                     dim=1,
                 ),
                 data_type=torch.float8_e4m3fn,

@@ -3,7 +3,8 @@
 #include <optional>
 #include <pybind11/pytypes.h>
 #include <vector>
-#include "rtp_llm/cpp/config/GptInitParameter.h"
+#include "rtp_llm/cpp/config/ModelConfig.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/embedding_engine/EmbeddingEngine.h"
@@ -25,7 +26,7 @@ class RtpEmbeddingOp: public th::jit::CustomClassHolder {
 public:
     RtpEmbeddingOp();
     ~RtpEmbeddingOp();
-    void       init(py::object model, py::object mm_process_engine);
+    void       init(py::object model, py::object engine_config, py::object vit_config, py::object mm_process_engine);
     void       stop();
     py::object decode(th::Tensor                            token_ids,
                       th::Tensor                            token_type_ids,
@@ -34,7 +35,10 @@ public:
                       std::vector<MultimodalInput> multimodal_inputs = {});
 
 private:
-    void startRpcServer(const GptInitParameter&              gpt_init_params,
+    void startRpcServer(int64_t model_rpc_port,
+                        int64_t arpc_thread_num,
+                        int64_t arpc_queue_num,
+                        int64_t arpc_io_thread_num,
                         py::object                                    py_render,
                         py::object                                    py_tokenizer,
                         kmonitor::MetricsReporterPtr                  reporter,

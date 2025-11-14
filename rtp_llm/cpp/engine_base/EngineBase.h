@@ -6,7 +6,8 @@
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/cache/KvCacheInfo.h"
-#include "rtp_llm/cpp/models/eplb/EplbConfig.h"
+#include "rtp_llm/cpp/config/EplbConfig.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/models/lora/LoraManager.h"
 #include "rtp_llm/cpp/devices/DeviceBase.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/NormalCacheStore.h"
@@ -101,7 +102,7 @@ public:
         return false;
     }
 
-    virtual bool updateEplbConfig(const EplbConfig& config) {
+    virtual bool updateEplbConfig(const EPLBConfig& config) {
         return false;
     }
 

@@ -3,7 +3,8 @@ from typing import Any, Dict, List, Optional
 
 import torch
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.ops import ParallelismConfig
+from rtp_llm.models_py.modules.common.moe.router.config_adapter import MoEConfigAdapter
 from rtp_llm.models_py.modules.fmha import FMHADecodeImplBase, FMHAPrefillImplBase
 from rtp_llm.models_py.modules.mla.flashinfer_mla import (
     MlaFlashInferDecodeOp,
@@ -22,51 +23,53 @@ try:
     class MlaFlashInferPrefillImpl(FMHAPrefillImplBase):
         def __init__(
             self,
-            config: GptInitModelParameters,
+            config: MoEConfigAdapter,
             attn_inputs: PyAttentionInputs,
             weights: List[Dict[str, torch.Tensor]],
             cos_sin_cache: torch.Tensor,
             absorb_opt_len: int = 1024,
             use_trt_fmha: bool = False,
+            warm_up: bool = False,
         ) -> None:
             # trt prefill not support reuse cache yet
             super().__init__(
                 MlaFlashInferPrefillOp(
-                    config,
-                    config.head_num // config.tp_size,
-                    config.kv_lora_rank,
-                    config.rope_head_dim,
-                    config.nope_head_dim,
-                    config.seq_size_per_block,
-                    config.softmax_extra_scale,
-                    config.use_mla,
+                    config.model_config,
+                    config.parallelism_config,
+                    config.model_config.attn_config.head_num // config.tp_size,
+                    config.model_config.attn_config.kv_lora_rank,
+                    config.model_config.attn_config.rope_head_dim,
+                    config.model_config.attn_config.nope_head_dim,
+                    config.model_config.attn_config.tokens_per_block,
+                    config.model_config.attn_config.softmax_extra_scale,
+                    config.model_config.attn_config.use_mla,
                     weights,
                     use_trt_fmha,
                 ),
                 MlaRotaryEmbeddingOp(
-                    head_size=config.nope_head_dim,
+                    head_size=config.model_config.attn_config.nope_head_dim,
                     cos_sin_cache=cos_sin_cache,
-                    kv_lora_rank=config.kv_lora_rank,
-                    rope_head_dim=config.rope_head_dim,
-                    token_per_block=config.seq_size_per_block,
+                    kv_lora_rank=config.model_config.attn_config.kv_lora_rank,
+                    rope_head_dim=config.model_config.attn_config.rope_head_dim,
+                    token_per_block=config.model_config.attn_config.tokens_per_block,
                     is_neox_style=False,
                 ),
                 attn_inputs,
             )
-            self.warm_up = config.warm_up
+            self.warm_up = warm_up
             self.has_reuse_cache = False
             if attn_inputs.prefix_lengths is not None:
                 self.has_reuse_cache = attn_inputs.prefix_lengths.max().item() > 0
 
             self.absorb_opt_len = absorb_opt_len
             self.aborb_fmha = MlaFlashInferDecodeOp(
-                config.head_num // config.tp_size,
-                config.kv_lora_rank,
-                config.rope_head_dim,
-                config.nope_head_dim,
-                config.seq_size_per_block,
-                config.softmax_extra_scale,
-                config.use_mla,
+                config.model_config.attn_config.head_num // config.parallelism_config.tp_size,
+                config.model_config.attn_config.kv_lora_rank,
+                config.model_config.attn_config.rope_head_dim,
+                config.model_config.attn_config.nope_head_dim,
+                config.model_config.attn_config.tokens_per_block,
+                config.model_config.attn_config.softmax_extra_scale,
+                config.model_config.attn_config.use_mla,
                 weights,
             )
             self.aborb_fmha.prepare(attn_inputs)
@@ -162,28 +165,28 @@ try:
 
         def __init__(
             self,
-            config: GptInitModelParameters,
+            config: MoEConfigAdapter,
             attn_inputs: PyAttentionInputs,
             weights: List[Dict[str, torch.Tensor]],
             cos_sin_cache: torch.Tensor,
         ) -> None:
             super().__init__(
                 MlaFlashInferDecodeOp(
-                    config.head_num // config.tp_size,
-                    config.kv_lora_rank,
-                    config.rope_head_dim,
-                    config.nope_head_dim,
-                    config.seq_size_per_block,
-                    config.softmax_extra_scale,
-                    config.use_mla,
+                    config.model_config.attn_config.head_num // config.tp_size,
+                    config.model_config.attn_config.kv_lora_rank,
+                    config.model_config.attn_config.rope_head_dim,
+                    config.model_config.attn_config.nope_head_dim,
+                    config.model_config.attn_config.tokens_per_block,
+                    config.model_config.attn_config.softmax_extra_scale,
+                    config.model_config.attn_config.use_mla,
                     weights,
                 ),
                 MlaRotaryEmbeddingOp(
-                    head_size=config.nope_head_dim,
+                    head_size=config.model_config.attn_config.nope_head_dim,
                     cos_sin_cache=cos_sin_cache,
-                    kv_lora_rank=config.kv_lora_rank,
-                    rope_head_dim=config.rope_head_dim,
-                    token_per_block=config.seq_size_per_block,
+                    kv_lora_rank=config.model_config.attn_config.kv_lora_rank,
+                    rope_head_dim=config.model_config.attn_config.rope_head_dim,
+                    token_per_block=config.model_config.attn_config.tokens_per_block,
                     is_neox_style=False,
                 ),
                 attn_inputs,

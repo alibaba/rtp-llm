@@ -11,11 +11,12 @@ using namespace torch_ext;
 
 namespace rtp_llm {
 
-FlashInferPrefillOp::FlashInferPrefillOp(const GptInitParameter& gpt_init_parameter):
-    FMHACudaBase(gpt_init_parameter) {}
+FlashInferPrefillOp::FlashInferPrefillOp(const AttentionConfigs& attn_configs):
+    attn_configs_(attn_configs),
+    device_(dynamic_cast<CudaDevice*>(DeviceFactory::getDefaultDevice())) {}
 
 bool FlashInferPrefillOp::support(torch_ext::PyAttentionInputs attn_inputs) {
-    if (fmha_config_.disable_flash_infer || attn_configs_.kv_cache_dtype == KvCacheDataType::INT8) {
+    if (attn_configs_.kv_cache_dtype != KvCacheDataType::BASE) {
         return false;
     }
     auto     prefix_lengths_host   = torchTensor2Buffer(attn_inputs.prefix_lengths);
@@ -99,10 +100,12 @@ torch::Tensor FlashInferPrefillOp::forward(const torch::Tensor&              q,
     return output;
 }
 
-FlashInferDecodeOp::FlashInferDecodeOp(const GptInitParameter& gpt_init_parameter): FMHACudaBase(gpt_init_parameter) {}
+FlashInferDecodeOp::FlashInferDecodeOp(const AttentionConfigs& attn_configs):
+    attn_configs_(attn_configs),
+    device_(dynamic_cast<CudaDevice*>(DeviceFactory::getDefaultDevice())) {}
 
 bool FlashInferDecodeOp::support(torch_ext::PyAttentionInputs attn_inputs) {
-    if (fmha_config_.disable_flash_infer || attn_configs_.kv_cache_dtype == KvCacheDataType::INT8) {
+    if (attn_configs_.kv_cache_dtype != KvCacheDataType::BASE) {
         return false;
     }
     // FIXME: FlashInferDecodeOp causes crash in this case, temporarily bypassing it here
@@ -178,12 +181,14 @@ void registerFlashInferOp(const py::module& m) {
         m, "FlashInferAttnParams")
         .def(pybind11::init<>());
     pybind11::class_<FlashInferPrefillOp>(m, "FlashInferPrefillOp")
-        .def(pybind11::init<GptInitParameter>(), py::arg("gpt_init_parameter"))
+        .def(pybind11::init<const AttentionConfigs&>(),
+             py::arg("attn_configs"))
         .def("support", &FlashInferPrefillOp::support, py::arg("attn_inputs"))
         .def("prepare", &FlashInferPrefillOp::prepare, py::arg("attn_inputs"))
         .def("forward", &FlashInferPrefillOp::forward, py::arg("q"), py::arg("kv_cache"), py::arg("params"));
     pybind11::class_<FlashInferDecodeOp>(m, "FlashInferDecodeOp")
-        .def(pybind11::init<GptInitParameter>(), py::arg("gpt_init_parameter"))
+        .def(pybind11::init<const AttentionConfigs&>(),
+             py::arg("attn_configs"))
         .def("support", &FlashInferDecodeOp::support, py::arg("attn_inputs"))
         .def("prepare", &FlashInferDecodeOp::prepare, py::arg("attn_inputs"))
         .def("forward", &FlashInferDecodeOp::forward, py::arg("q"), py::arg("kv_cache"), py::arg("params"));

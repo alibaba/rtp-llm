@@ -55,6 +55,18 @@ def to_torch_dtype(maybe_str_dtype: Union[str, torch.dtype]) -> torch.dtype:
     if isinstance(maybe_str_dtype, torch.dtype):
         dtype = maybe_str_dtype
     else:
+        # Handle enum types (pybind11 enums have 'name' attribute)
+        if hasattr(maybe_str_dtype, 'name'):
+            # Convert enum to string using name attribute
+            maybe_str_dtype = maybe_str_dtype.name
+        elif not isinstance(maybe_str_dtype, str):
+            # Convert other types to string
+            maybe_str_dtype = str(maybe_str_dtype)
+        
+        # Remove TYPE_ prefix if present (e.g., TYPE_BF16 -> BF16)
+        if maybe_str_dtype.startswith('TYPE_'):
+            maybe_str_dtype = maybe_str_dtype[5:]  # Remove 'TYPE_' prefix
+        
         try:
             dtype = {
                 "bf16": torch.bfloat16,

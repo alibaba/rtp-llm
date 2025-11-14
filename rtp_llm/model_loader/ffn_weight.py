@@ -21,7 +21,8 @@ from rtp_llm.utils.util import check_with_info
 
 class FfnConfig(BaseModel):
     is_gated_activation: bool = False
-    inter_padding_size: int = -1
+    # align_size is used for dynamic padding calculation
+    align_size: int = 0  # 0 means no padding needed
     is_moe: bool = False
     need_post_ln: bool = False
     need_ffn_act_scale: bool = False
@@ -281,7 +282,8 @@ class FfnWeight(CompositeWeight):
 class MoeConfig(BaseModel):
     is_moe: bool = True
     expert_num: int = -1
-    inter_padding_size: int = -1
+    # align_size is used for dynamic padding calculation
+    align_size: int = 0  # 0 means no padding needed (for MoE)
     weight_stack: bool = False
 
 

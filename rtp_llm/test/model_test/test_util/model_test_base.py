@@ -10,8 +10,6 @@ import torch
 from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 from rtp_llm.model_factory import ModelConfig, ModelFactory
 from rtp_llm.pipeline.pipeline import Pipeline
-from rtp_llm.utils.ft_plugin import plguin_loader
-
 
 class ModelTestBase(TestCase):
     """
@@ -36,11 +34,6 @@ class ModelTestBase(TestCase):
         self.quantization = quantization
         self.test_loss = test_loss
         self.fake_name = fake_name
-
-        os.environ["FT_PLUGIN_PATH"] = os.path.join(
-            os.getcwd(), "rtp_llm/plugins/ret_hidden_states.py"
-        )
-        plguin_loader.reload()
 
         logging.info(f"model_type: {self.model_type}")
         logging.info(f"tokenizer path: {self.tokenizer_path}")
@@ -248,8 +241,17 @@ class ModelTestBase(TestCase):
     def simple_test(self, is_fake: bool):
         engine: BaseEngine = self._load_engine()
         try:
-            pipeline = Pipeline(engine.config, engine.model.tokenizer)
-            if engine.config.pre_seq_len > 0:
+            pipeline = Pipeline(
+                special_tokens=engine.model.model_config.special_tokens,
+                pd_sep_config=engine.model.engine_config.pd_sep_config,
+                runtime_config=engine.model.engine_config.runtime_config,
+                ffn_disaggregate_config=engine.model.engine_config.parallelism_config.ffn_disaggregate_config,
+                max_seq_len=engine.model.model_config.max_seq_len,
+                seq_size_per_block=engine.model.engine_config.kv_cache_config.seq_size_per_block,
+                tokenizer=engine.model.tokenizer,
+                sp_config=engine.model.engine_config.sp_config,
+            )
+            if engine.model.model_config.pre_seq_len > 0:
                 model_str = "/ptuning"
             else:
                 model_str = ""

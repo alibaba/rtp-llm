@@ -51,8 +51,17 @@ class ProcessedOutput:
 
 
 class QwenAgentRenderer(CustomChatRenderer):
-    def __init__(self, tokenizer: QwenTokenizerTypes, renderer_params: RendererParams):
-        super().__init__(tokenizer, renderer_params)
+    def __init__(
+        self, 
+        tokenizer: QwenTokenizerTypes, 
+        renderer_params: RendererParams,
+        generate_env_config,
+        render_config=None,
+        ckpt_path=None,
+        misc_config=None,
+        vit_config=None,
+    ):
+        super().__init__(tokenizer, renderer_params, generate_env_config, render_config, ckpt_path, misc_config, vit_config)
         self.add_extra_stop_words(["✿RESULT✿", "✿RETURN✿"])
 
         self.template_chat_renderer: Optional[BasicRenderer] = None
@@ -62,13 +71,22 @@ class QwenAgentRenderer(CustomChatRenderer):
                     f"qwen model has chat_template [{tokenizer.chat_template}], "
                     "which will be used for non-function call dialogue."
                 )
-                self.template_chat_renderer = BasicRenderer(tokenizer, renderer_params)
+                self.template_chat_renderer = BasicRenderer(tokenizer, renderer_params, generate_env_config, render_config, ckpt_path, misc_config, vit_config)
         except AttributeError:
             pass
 
         llm_cfg = {
             "model": "qwen"
         }  # model 设置以qwen开头，且没设置server，会直接路由初始化 qwen_dashcope 这个类，我们要用里面的处理逻辑
+        
+        # Get misc_config if available
+        if misc_config is not None:
+            # misc_config might be PyMiscellaneousConfig, extract the actual misc_config
+            if hasattr(misc_config, 'misc_config'):
+                llm_cfg["misc_config"] = misc_config.misc_config
+            else:
+                llm_cfg["misc_config"] = misc_config
+        
         self.qwen_llm = get_chat_model(llm_cfg)
 
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:

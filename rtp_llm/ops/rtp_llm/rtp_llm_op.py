@@ -1,4 +1,5 @@
 import logging
+import os
 from typing import Dict, List, Optional
 
 from rtp_llm.frontend.token_processor import TokenProcessor
@@ -28,8 +29,14 @@ class RtpLLMOp:
 
     def start(self):
         self.weight = self.model.weight
+        logging.info("engine_config: %s", self.model.engine_config.to_string())
         self.ft_op.init(  # type: ignore
-            self.model, self.mm_engine, self.propose_model, self.token_processor
+            self.model,
+            self.model.engine_config,
+            self.model.vit_config,
+            self.mm_engine,
+            self.propose_model,
+            self.token_processor,
         )
 
     def stop(self):

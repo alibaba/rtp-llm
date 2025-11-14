@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Union
 
 import torch
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.model_loader.weight_module import CustomAtomicWeight
 from rtp_llm.models.downstream_modules.custom_module import CustomHandler, CustomModule
@@ -22,14 +22,14 @@ from rtp_llm.utils.util import to_torch_dtype
 
 
 class SparseEmbeddingModule(CustomModule):
-    def __init__(self, config: GptInitModelParameters, tokenizer: BaseTokenizer):
+    def __init__(self, config: ModelConfig, tokenizer: BaseTokenizer):
         super().__init__(config, tokenizer)
         self.renderer = SparseEmbeddingRenderer(config, tokenizer)
         self.handler = SparseEmbeddingHandler(config)
 
 
 class SparseEmbeddingRenderer(EmbeddingRendererBase):
-    def __init__(self, config: GptInitModelParameters, tokenizer: BaseTokenizer):
+    def __init__(self, config: ModelConfig, tokenizer: BaseTokenizer):
         super().__init__(config, tokenizer)
         self.embedding_type = EmbeddingResponseType.SPARSE
         self.unused_tokens = set(
@@ -87,7 +87,7 @@ class SparseEmbeddingRenderer(EmbeddingRendererBase):
 
 
 class SparseEmbeddingHandler(CustomHandler):
-    def __init__(self, config: GptInitModelParameters):
+    def __init__(self, config: ModelConfig):
         super().__init__(config)
         self.sparse_linear = torch.nn.Linear(
             in_features=self.config_.hidden_size, out_features=1

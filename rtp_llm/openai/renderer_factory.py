@@ -1,8 +1,8 @@
 import copy
 import logging
-from typing import Optional
+from typing import Any, Optional
 
-from rtp_llm.config.py_config_modules import StaticConfig
+from rtp_llm.config.py_config_modules import GenerateEnvConfig, RenderConfig
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.renderer_factory_register import _renderer_factory
 from rtp_llm.openai.renderers.basic_renderer import BasicRenderer
@@ -19,14 +19,19 @@ class ChatRendererFactory:
     def try_get_imported_renderer(
         tokenizer: BaseTokenizer,
         params: RendererParams,
+        generate_env_config: GenerateEnvConfig,
+        render_config: Optional[RenderConfig] = None,
+        ckpt_path: Optional[str] = None,
+        misc_config: Optional[Any] = None,
+        vit_config: Optional[Any] = None,
     ) -> Optional[CustomChatRenderer]:
         try:
-            return FastChatRenderer(tokenizer, params)
+            return FastChatRenderer(tokenizer, params, generate_env_config, render_config, ckpt_path, misc_config, vit_config)
         except KeyError:
             pass
 
         try:
-            return LlamaTemplateRenderer(tokenizer, params)
+            return LlamaTemplateRenderer(tokenizer, params, generate_env_config, render_config, ckpt_path, misc_config, vit_config)
         except AssertionError as e:  # assertion at llama_template.py:229
             pass
         return None
@@ -35,14 +40,30 @@ class ChatRendererFactory:
     def get_renderer(
         tokenizer: BaseTokenizer,
         params: RendererParams,
+        generate_env_config: GenerateEnvConfig,
+        render_config: Optional[RenderConfig] = None,
+        ckpt_path: Optional[str] = None,
+        misc_config: Optional[Any] = None,
+        vit_config: Optional[Any] = None,
     ) -> CustomChatRenderer:
+        """Get renderer for tokenizer and params.
+        
+        Args:
+            tokenizer: BaseTokenizer instance.
+            params: RendererParams object.
+            generate_env_config: GenerateEnvConfig object.
+            render_config: RenderConfig object.
+            ckpt_path: Checkpoint path string.
+            misc_config: MiscellaneousConfig object.
+            vit_config: VitConfig object.
+        """
         # renderer priority:  `MODEL_TEMPLATE_TYPE` env for llama template or fastchat conversation
         #                    > tokenizer.chat_template
         #                    > model customized renderer (e.g. Qwen, which implemented function call)
         #                    > try get template from `MODEL_TYPE`
         #                    > transformers default chat template
 
-        model_template_type = StaticConfig.render_config.model_template_type
+        model_template_type = render_config.model_template_type
         if model_template_type:
             new_params = copy.deepcopy(params)
             new_params.model_type = model_template_type
@@ -50,7 +71,7 @@ class ChatRendererFactory:
                 f"Renderer factory try found MODEL_TEMPLATE_TYPE: {model_template_type}, try get predefined renderer."
             )
             renderer = ChatRendererFactory.try_get_imported_renderer(
-                tokenizer, new_params
+                tokenizer, new_params, generate_env_config, render_config, ckpt_path, misc_config, vit_config
             )
             if renderer:
                 return renderer
@@ -66,14 +87,14 @@ class ChatRendererFactory:
             logging.info(
                 f"Renderer factory found model type [{params.model_type}] has dedicated renderer, use this."
             )
-            return _renderer_factory[params.model_type](tokenizer, params)
+            return _renderer_factory[params.model_type](tokenizer, params, generate_env_config, render_config, ckpt_path, misc_config, vit_config)
 
         try:
             if tokenizer.chat_template != None:
                 logging.info(
                     f"Renderer factory found tokenizer has chat_template [{tokenizer.chat_template}], use it."
                 )
-                return BasicRenderer(tokenizer, params)
+                return BasicRenderer(tokenizer, params, generate_env_config, render_config, ckpt_path, misc_config, vit_config)
             else:
                 pass
         except AttributeError:
@@ -83,7 +104,7 @@ class ChatRendererFactory:
             f"Renderer factory try get predefined renderer via model type [{params.model_type}]"
         )
         imported_template_renderer = ChatRendererFactory.try_get_imported_renderer(
-            tokenizer, params
+            tokenizer, params, generate_env_config, render_config, ckpt_path, misc_config, vit_config
         )
         if imported_template_renderer:
             logging.info(
@@ -94,4 +115,4 @@ class ChatRendererFactory:
         logging.warn(
             f"Renderer factory found model [{params.model_type}] falls back to basic renderer, this is typically unwanted."
         )
-        return BasicRenderer(tokenizer, params)
+        return BasicRenderer(tokenizer, params, generate_env_config, render_config, ckpt_path, misc_config, vit_config)

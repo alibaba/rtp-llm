@@ -2,7 +2,6 @@
 
 #include <torch/torch.h>
 #include <c10/cuda/CUDAStream.h>
-#include "rtp_llm/cpp/config/GptInitParameter.h"
 #include "rtp_llm/cpp/kernels/no_aux_tc_kernels.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "rtp_llm/cpp/devices/cuda_impl/CudaDevice.h"

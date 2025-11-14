@@ -15,7 +15,7 @@ public:
         ProposeExecutor(device) {
 
         propose_step_ = std::min(propose_model_engine_init_params->gen_num_per_circle,
-                                 (size_t)score_model_engine_init_params.gpt_init_parameter.max_seq_len_);
+                                 (size_t)score_model_engine_init_params.model_config_.max_seq_len);
 
         min_token_match_len_ = device->initParams().sp_config.sp_min_token_match;
         max_token_match_len_ = device->initParams().sp_config.sp_max_token_match;

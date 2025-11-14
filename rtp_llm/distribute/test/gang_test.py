@@ -12,12 +12,11 @@ from unittest import mock
 import requests
 import torch
 
-from rtp_llm.config.py_config_modules import StaticConfig
-
 torch.cuda.set_device = lambda x: None
 
 from rtp_llm.distribute.gang_info import get_c2_members, get_gang_info
-from rtp_llm.distribute.worker_info import WorkerInfo, g_parallel_info
+from rtp_llm.distribute.worker_info import WorkerInfo, g_parallel_info, g_worker_info
+from rtp_llm.config.py_config_modules import MIN_WORKER_INFO_PORT_NUM, GangConfig
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.frontend.frontend_server import FrontendWorker
 from rtp_llm.start_backend_server import main
@@ -48,9 +47,8 @@ class GangTest(unittest.TestCase):
         {"GANG_ANNOCATION_PATH": "rtp_llm/distribute/test/testdata/annocation"},
     )
     def test_annocation(self):
-        StaticConfig.update_from_env()
-        # os.environ['GANG_ANNOCATION_PATH'] = "rtp_llm/distribute/test/testdata/annocation"
-        gang_members = get_c2_members()
+        gang_annocation_path = os.environ.get("GANG_ANNOCATION_PATH", "rtp_llm/distribute/test/testdata/annocation")
+        gang_members = get_c2_members(gang_annocation_path)
         self.assertEqual(len(gang_members), 2)
         self.assertEqual(gang_members[0].name, "llama_7b_a10_part2_new_inference_part0")
         self.assertEqual(gang_members[0].ip, "33.115.125.211")
@@ -69,9 +67,10 @@ class GangTest(unittest.TestCase):
         },
     )
     def test_multi_gpu_gang_info(self):
-        StaticConfig.update_from_env()
-        g_parallel_info.reload()
-        gang_info = get_gang_info()
+        worker_info_port_num = int(os.environ.get("WORKER_INFO_PORT_NUM", str(MIN_WORKER_INFO_PORT_NUM)))
+        g_parallel_info.reload(worker_info_port_num)
+        gang_config = GangConfig()
+        gang_info = get_gang_info(start_port=g_worker_info.rpc_server_port, gang_config=gang_config)
         self.assertEqual(len(gang_info.members), 2)
         self.assertEqual(gang_info.members[0].ip, self.get_self_ip())
         self.assertEqual(gang_info.members[0].name, "local_0")
@@ -96,9 +95,10 @@ class GangTest(unittest.TestCase):
         },
     )
     def test_multi_worker_gang_info(self):
-        StaticConfig.update_from_env()
-        g_parallel_info.reload()
-        gang_info = get_gang_info()
+        worker_info_port_num = int(os.environ.get("WORKER_INFO_PORT_NUM", str(MIN_WORKER_INFO_PORT_NUM)))
+        g_parallel_info.reload(worker_info_port_num)
+        gang_annocation_path = os.environ.get("GANG_ANNOCATION_PATH", "rtp_llm/distribute/test/testdata/annocation")
+        gang_info = get_gang_info(gang_annocation_path=gang_annocation_path)
         self.assertEqual(len(gang_info.members), 2)
         self.assertEqual(gang_info.members[0].ip, "33.115.125.211")
         self.assertEqual(
@@ -127,9 +127,12 @@ class GangTest(unittest.TestCase):
         },
     )
     def test_multi_worker_gpu_gang_info(self):
-        StaticConfig.update_from_env()
-        g_parallel_info.reload()
-        gang_info = get_gang_info()
+        worker_info_port_num = int(os.environ.get("WORKER_INFO_PORT_NUM", str(MIN_WORKER_INFO_PORT_NUM)))
+        g_parallel_info.reload(worker_info_port_num)
+        gang_annocation_path = os.environ.get("GANG_ANNOCATION_PATH", "rtp_llm/distribute/test/testdata/annocation")
+        gang_config = GangConfig()
+        gang_config.gang_annocation_path = gang_annocation_path
+        gang_info = get_gang_info(start_port=g_worker_info.rpc_server_port, gang_config=gang_config)
         self.assertEqual(len(gang_info.members), 4)
         self.assertEqual(gang_info.members[0].ip, "33.115.125.211")
         self.assertEqual(
@@ -175,9 +178,12 @@ class GangTest(unittest.TestCase):
         },
     )
     def test_multi_worker_gang_info_from_json(self):
-        StaticConfig.update_from_env()
-        g_parallel_info.reload()
-        gang_info = get_gang_info()
+        worker_info_port_num = int(os.environ.get("WORKER_INFO_PORT_NUM", str(MIN_WORKER_INFO_PORT_NUM)))
+        g_parallel_info.reload(worker_info_port_num)
+        distribute_config_file = os.environ.get("DISTRIBUTE_CONFIG_FILE", "rtp_llm/distribute/test/testdata/parallel.json")
+        gang_config = GangConfig()
+        gang_config.distribute_config_file = distribute_config_file
+        gang_info = get_gang_info(start_port=g_worker_info.rpc_server_port, gang_config=gang_config)
         self.assertEqual(len(gang_info.members), 2)
         self.assertEqual(gang_info.members[0].ip, "11.161.48.116")
         self.assertEqual(
@@ -190,7 +196,6 @@ class GangTest(unittest.TestCase):
             gang_info.members[1].name, "llama13B_2A10_PCIE_1_inference_part1_0"
         )
         self.assertEqual(gang_info.members[1].server_port, 20000)
-        StaticConfig.gang_config.distribute_config_file = ""
 
     @mock.patch("torch.cuda.device_count")
     @mock.patch.dict(
@@ -216,16 +221,15 @@ class GangTest(unittest.TestCase):
         },
     )
     def test_server_start(self, torch_device_count):
-        StaticConfig.update_from_env()
         try:
             multiprocessing.set_start_method("spawn")
         except RuntimeError as e:
             logging.warn(str(e))
 
         torch_device_count.return_value = 2
-        g_parallel_info.reload()
+        worker_info_port_num = int(os.environ.get("WORKER_INFO_PORT_NUM", str(MIN_WORKER_INFO_PORT_NUM)))
+        g_parallel_info.reload(worker_info_port_num)
         procs: List[Process] = list()
-        StaticConfig.update_from_env()
         procs = main()
 
         try:
@@ -265,8 +269,8 @@ class GangTest(unittest.TestCase):
         },
     )
     def test_get_world_rank_from_world_index(self):
-        StaticConfig.update_from_env()
-        g_parallel_info.reload()
+        worker_info_port_num = int(os.environ.get("WORKER_INFO_PORT_NUM", str(MIN_WORKER_INFO_PORT_NUM)))
+        g_parallel_info.reload(worker_info_port_num)
         self.assertEqual(g_parallel_info.world_rank, 2)
 
     @mock.patch.dict(
@@ -282,9 +286,14 @@ class GangTest(unittest.TestCase):
         },
     )
     def test_multi_worker_gang_info_from_leader(self):
-        StaticConfig.update_from_env()
-        g_parallel_info.reload()
-        gang_info = get_gang_info()
+        worker_info_port_num = int(os.environ.get("WORKER_INFO_PORT_NUM", str(MIN_WORKER_INFO_PORT_NUM)))
+        g_parallel_info.reload(worker_info_port_num)
+        leader_address = os.environ.get("LEADER_ADDRESS", "33.115.125.211")
+        zone_name = os.environ.get("ZONE_NAME", "prefill")
+        gang_config = GangConfig()
+        gang_config.leader_address = leader_address
+        gang_config.zone_name = zone_name
+        gang_info = get_gang_info(start_port=g_worker_info.rpc_server_port, gang_config=gang_config)
         self.assertEqual(len(gang_info.members), 2)
         self.assertEqual(gang_info.members[0].ip, "33.115.125.211")
         self.assertEqual(gang_info.members[0].name, "prefill_part0_0")
@@ -296,8 +305,6 @@ class GangTest(unittest.TestCase):
         self.assertEqual(
             gang_info.members[1].server_port, WorkerInfo.server_port_offset(0)
         )
-        StaticConfig.gang_config.zone_name = ""
-        StaticConfig.gang_config.leader_address = None
 
     @mock.patch("torch.cuda.device_count")
     @mock.patch.dict(
@@ -324,16 +331,15 @@ class GangTest(unittest.TestCase):
         },
     )
     def test_server_start_leader(self, torch_device_count):
-        StaticConfig.update_from_env()
         try:
             multiprocessing.set_start_method("spawn")
         except RuntimeError as e:
             logging.warn(str(e))
 
         torch_device_count.return_value = 2
-        g_parallel_info.reload()
+        worker_info_port_num = int(os.environ.get("WORKER_INFO_PORT_NUM", str(MIN_WORKER_INFO_PORT_NUM)))
+        g_parallel_info.reload(worker_info_port_num)
         procs: List[Process] = list()
-        StaticConfig.update_from_env()
         procs = main()
 
         try:
@@ -360,7 +366,6 @@ class GangTest(unittest.TestCase):
             self.assertEqual(hb_response.json()["initializing"], False)
 
         finally:
-            StaticConfig.gang_config.leader_address = None
             for proc in procs:
                 if proc.is_alive():
                     proc.terminate()
@@ -390,16 +395,15 @@ class GangTest(unittest.TestCase):
         },
     )
     def test_server_start_worker(self, torch_device_count):
-        StaticConfig.update_from_env()
         try:
             multiprocessing.set_start_method("spawn")
         except RuntimeError as e:
             logging.warn(str(e))
 
         torch_device_count.return_value = 2
-        g_parallel_info.reload()
+        worker_info_port_num = int(os.environ.get("WORKER_INFO_PORT_NUM", str(MIN_WORKER_INFO_PORT_NUM)))
+        g_parallel_info.reload(worker_info_port_num)
         procs: List[Process] = list()
-        StaticConfig.update_from_env()
         procs = main()
 
         try:
@@ -436,7 +440,6 @@ class GangTest(unittest.TestCase):
             self.assertEqual(hb_response.json()["initializing"], False)
 
         finally:
-            StaticConfig.gang_config.leader_address = None
             for proc in procs:
                 if proc.is_alive():
                     proc.terminate()

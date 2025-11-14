@@ -19,7 +19,7 @@ public:
     virtual size_t       reserveStep() const                                                           = 0;
     virtual absl::Status normalProcess(const std::list<GenerateStreamPtr>& streams)                    = 0;
 
-    virtual bool updateEplbConfig(const EplbConfig& config) {
+    virtual bool updateEplbConfig(const EPLBConfig& config) {
         return true;
     }
 

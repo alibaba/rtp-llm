@@ -5,12 +5,15 @@ import torch
 from aiter.ops.shuffle import shuffle_weight
 from torch import dtype as _dtype
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+
 from rtp_llm.models_py.modules.common.moe.fused_moe import ExpertForwardPayload
 from rtp_llm.models_py.modules.rocm.moe.executors.deepep_normal_fused_moe_executor import (
     FusedMoeExecutor,
     torch_moe_ref,
 )
+from rtp_llm.models_py.modules.rocm.moe.executors.deepep_normal_fused_moe_executor import torch_moe_ref, FusedMoeExecutor
+from rtp_llm.models_py.modules.common.moe import ExpertForwardPayload
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.utils.model_weight import W
 
 
@@ -74,18 +77,15 @@ class FusedMoeTest(TestCase):
         )
 
         # Model configuration
-        model_param = GptInitModelParameters(
-            head_num=4,
-            size_per_head=64,
-            layer_num=2,
-            max_seq_len=2048,
-            vocab_size=32000,
-        )
-        model_param.ep_size = 1
-        model_param.ep_rank = 0
-        model_param.expert_num = expert_num
+        model_param = ModelConfig()
+        model_param.head_num = 4
+        model_param.size_per_head = 64
+        model_param.num_layers = 2
+        model_param.max_seq_len = 2048
+        model_param.vocab_size = 32000
+        model_param.expert_num = expert_num        
         model_param.moe_k = top_k
-        model_param.moe_inter_padding_size = inter_dim
+        model_param.moe_inter_size = inter_dim
         model_param.activation_type = "silu"
 
         w1 = shuffle_weight(w1, layout=(16, 16))

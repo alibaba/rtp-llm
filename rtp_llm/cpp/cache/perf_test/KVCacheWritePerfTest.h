@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/cache/DistKvCache.h"
 #include "rtp_llm/cpp/cache/perf_test/KVCacheOptionBase.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 
 extern std::atomic<bool> g_stop_flag;
 
@@ -83,9 +84,11 @@ public:
 
         auto             device   = createDevice();
         auto             reporter = createMetricsReporter();
-        GptInitParameter gpt_init_params;
-        gpt_init_params.model_name_ = "TestModel";
-        auto cache_manager = std::make_shared<CacheManager>(cache_config, device, false, reporter, gpt_init_params);
+        KVCacheConfig kv_cache_config;
+        ParallelismConfig parallelism_config;
+        RuntimeConfig runtime_config;
+        runtime_config.model_name = "TestModel";
+        auto cache_manager = std::make_shared<CacheManager>(cache_config, device, false, reporter, kv_cache_config, parallelism_config, runtime_config);
 
         if (g_stop_flag.load()) {
             return;
@@ -105,7 +108,7 @@ public:
         DistKvCacheInitParams dist_kvcache_init_params;
         dist_kvcache_init_params.storage_manager_params.init_params_3fs = storage_3fs_init_params;
 
-        auto dist_kvcache = std::make_shared<DistKvCache>(cache_manager.get(), gpt_init_params, reporter);
+        auto dist_kvcache = std::make_shared<DistKvCache>(cache_manager.get(), parallelism_config, runtime_config, reporter);
         if (!dist_kvcache->init(dist_kvcache_init_params)) {
             RTP_LLM_LOG_ERROR("dist kvcache init failed");
             return;
@@ -193,7 +196,33 @@ private:
     }
 
     DeviceBase* createDevice() const {
-        DeviceFactory::initDevices(GptInitParameter());
+        ParallelismConfig parallelism_config;
+        ModelConfig model_config;
+        EPLBConfig eplb_config;
+        FMHAConfig fmha_config;
+        DeviceResourceConfig device_resource_config;
+        MoeConfig moe_config;
+        SpeculativeExecutionConfig sp_config;
+        MiscellaneousConfig misc_config;
+        ProfilingDebugLoggingConfig profiling_debug_logging_config;
+        HWKernelConfig hw_kernel_config;
+        ConcurrencyConfig concurrency_config;
+        FfnDisAggregateConfig ffn_disaggregate_config;
+        RuntimeConfig runtime_config;
+        DeviceFactory::initDevices(
+            parallelism_config,
+            model_config,
+            eplb_config,
+            fmha_config,
+            device_resource_config,
+            moe_config,
+            sp_config,
+            misc_config,
+            profiling_debug_logging_config,
+            hw_kernel_config,
+            concurrency_config,
+            ffn_disaggregate_config,
+            runtime_config);
         return DeviceFactory::getDefaultDevice();
     }
 

@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/DistKvCache.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 
 namespace rtp_llm {
 
@@ -16,11 +17,12 @@ using MapStrStr = std::map<std::string, std::string>;
 
 class MockDistKvCache: public DistKvCache {
 public:
-    MockDistKvCache(): DistKvCache(nullptr, GptInitParameter{}, nullptr) {}
+    MockDistKvCache(): DistKvCache(nullptr, ParallelismConfig{}, RuntimeConfig{}, nullptr) {}
     MockDistKvCache(CacheManager*                       cache_manager,
-                    const GptInitParameter&             gpt_init_params,
+                    const ParallelismConfig&            parallelism_config,
+                    const RuntimeConfig&                runtime_config,
                     const kmonitor::MetricsReporterPtr& metrics_reporter):
-        DistKvCache(cache_manager, gpt_init_params, metrics_reporter) {}
+        DistKvCache(cache_manager, parallelism_config, runtime_config, metrics_reporter) {}
     ~MockDistKvCache() override = default;
 
 public:

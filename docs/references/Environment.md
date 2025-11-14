@@ -19,7 +19,7 @@ When adding new parameter information, you need to specify the parameter type, v
 In `rtp_llm/cpp/th_op/ConfigModules.h`, all related parameter information classifications are placed here. Let's illustrate with the following example:
 
 ```c++
-struct ParallelismDistributedConfig {
+struct ParallelismConfig {
     int tp_size = 1;
     int ep_size = 1;
     int dp_size = 1;
@@ -28,7 +28,6 @@ struct ParallelismDistributedConfig {
     int world_rank = 0;
     int local_world_size = 1;
     std::string to_string() const;
-    void update_from_env_for_test();
 };
 ```
 

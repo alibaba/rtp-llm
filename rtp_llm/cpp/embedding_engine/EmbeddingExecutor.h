@@ -48,7 +48,9 @@ private:
     py::handle                      torch_type_;
     rtp_llm::BufferPtr              max_position_ids_buf_;
     kmonitor::MetricsReporterPtr    metrics_reporter_ = nullptr;
-    const rtp_llm::GptInitParameter params_;
+    ModelConfig                     model_config_;
+    ParallelismConfig               parallelism_config;
+    EPLBConfig                      eplb_config;
 
     ModelRequest                     generateOldModelRequest(GptModelInputs& model_input);
     absl::StatusOr<GptModelInputs>   gatherModelInput(const std::list<EmbeddingStreamPtr>& streams) const;

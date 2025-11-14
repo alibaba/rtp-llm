@@ -10,8 +10,6 @@ logging.basicConfig(
     format="[process-%(process)d][%(name)s][%(asctime)s.%(msecs)03d][%(filename)s:%(funcName)s():%(lineno)s][%(levelname)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
-
-
 class Qwen3AutoPyModelTest(TestCase):
 
     def setUp(self):
@@ -75,3 +73,4 @@ class Qwen3AutoPyModelTest(TestCase):
 
 if __name__ == "__main__":
     main()
+

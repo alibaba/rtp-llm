@@ -1,9 +1,7 @@
 from abc import abstractmethod
 from typing import Any, AsyncGenerator, Dict
 
-from rtp_llm.config.generate_config import GenerateConfig
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.config.task_type import TaskType
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.ops import EngineScheduleInfo, KVCacheInfo, WorkerStatusInfo
 
@@ -12,9 +10,7 @@ class BaseEngine:
     def __init__(self, model: BaseModel) -> None:
         self.started = False
         self.model: BaseModel = model
-        self.config: GptInitModelParameters = model.config
-        self.role_type = str(model.config.role_type)
-        pass
+        self.config: ModelConfig = model.model_config
 
     def start(self) -> None:
         self._start()
@@ -87,10 +83,3 @@ class BaseEngine:
         """Restarts the engine's execution."""
         raise NotImplementedError()
 
-    @property
-    def task_type(self) -> TaskType:
-        return self.model.task_type
-
-    @property
-    def default_generate_config(self) -> GenerateConfig:
-        return self.model.default_generate_config

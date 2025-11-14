@@ -34,7 +34,8 @@ struct DistKvCacheInitParams {
 class DistKvCache: public std::enable_shared_from_this<DistKvCache> {
 public:
     DistKvCache(CacheManager*                       cache_manager,
-                const GptInitParameter&             gpt_init_params,
+                const ParallelismConfig&             parallelism_config,
+                const RuntimeConfig&                runtime_config,
                 const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr);
     virtual ~DistKvCache();
 
@@ -93,7 +94,8 @@ private:
 
 private:
     CacheManager*                cache_manager_{nullptr};
-    const GptInitParameter       gpt_init_params_;
+    const ParallelismConfig      parallelism_config_;
+    const RuntimeConfig          runtime_config_;
     kmonitor::MetricsReporterPtr metrics_reporter_;
 
     std::map<std::string, std::string> default_metas_;

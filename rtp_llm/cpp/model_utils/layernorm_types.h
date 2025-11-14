@@ -43,4 +43,30 @@ inline NormType getNormType(std::string norm_type_str) {
     return NormType::invalid_type;
 }
 
+inline std::string getLayerNormTypeStr(LayerNormType layernorm_type) {
+    switch (layernorm_type) {
+        case LayerNormType::pre_layernorm:
+            return "pre_layernorm";
+        case LayerNormType::post_layernorm:
+            return "post_layernorm";
+        default:
+            throw std::runtime_error("Invalid LayerNormType: " + std::to_string(static_cast<int>(layernorm_type)));
+    }
+}
+
+inline std::string getNormTypeStr(NormType norm_type) {
+    switch (norm_type) {
+        case NormType::layernorm:
+            return "layernorm";
+        case NormType::rmsnorm:
+            return "rmsnorm";
+        case NormType::alphanorm:
+            return "alphanorm";
+        case NormType::add_bias:
+            return "add_bias";
+        default:
+            throw std::runtime_error("Invalid NormType: " + std::to_string(static_cast<int>(norm_type)));
+    }
+}
+
 }  // namespace rtp_llm

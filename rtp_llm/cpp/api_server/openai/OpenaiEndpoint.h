@@ -2,7 +2,7 @@
 
 #include <memory>
 
-#include "rtp_llm/cpp/config/GptInitParameter.h"
+#include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/api_server/openai/ChatRender.h"
 #include "rtp_llm/cpp/api_server/tokenizer/Tokenizer.h"
 
@@ -14,7 +14,7 @@ class OpenaiEndpoint {
 public:
     OpenaiEndpoint(const std::shared_ptr<Tokenizer>&  tokenizer,
                    const std::shared_ptr<ChatRender>& chat_render,
-                   const rtp_llm::GptInitParameter&   params);
+                   const ModelConfig&                 model_config);
     virtual ~OpenaiEndpoint() {}
 
 public:
@@ -33,7 +33,7 @@ private:
 
     std::shared_ptr<Tokenizer>  tokenizer_;
     std::shared_ptr<ChatRender> chat_render_;
-    rtp_llm::GptInitParameter   model_config_;
+    ModelConfig                 model_config_;
 };
 
 }  // namespace rtp_llm

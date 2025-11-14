@@ -7,7 +7,7 @@ from transformers.models.whisper.feature_extraction_whisper import (
     WhisperFeatureExtractor,
 )
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import VitParameters
 from rtp_llm.models.multimodal.multimodal_common import (
     AudioEmbeddingInterface,
     timeout_decorator,
@@ -24,9 +24,8 @@ from rtp_llm.utils.util import get_config_from_path
 
 
 class Processor(AudioEmbeddingInterface):
-    def __init__(self, config: GptInitModelParameters):
-        self.config = config
-        ckpt_path = config.ckpt_path
+    def __init__(self, mm_related_params: VitParameters, ckpt_path: str):
+        self.mm_related_params = mm_related_params
         dtype = self._data_type
         self.feature_extractor = WhisperFeatureExtractor.from_pretrained(ckpt_path)
         config_json = get_config_from_path(ckpt_path)
