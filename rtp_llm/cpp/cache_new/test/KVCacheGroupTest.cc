@@ -17,7 +17,7 @@ protected:
     void TearDown() override {}
 };
 
-// ==================== 基础功能测试 ====================
+// ==================== Basic functionality tests ====================
 
 }  // namespace test
 }  // namespace rtp_llm
