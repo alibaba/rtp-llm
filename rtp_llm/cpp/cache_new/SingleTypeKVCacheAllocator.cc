@@ -13,13 +13,9 @@ SingleTypeKVCacheAllocator::SingleTypeKVCacheAllocator(const CacheConfig&   conf
     KVCacheAllocator(config, device, atype) {}
 
 bool SingleTypeKVCacheAllocator::init() {
-    auto&           spec       = config_.layer_type_params[0];
-    auto            block_size = spec->block_size();
-    BlockPoolConfig pool_config =
-        BlockPoolConfigHelper::createKVFirstConfig(config_.layer_num, config_.block_num, block_size);
-
-    // Set dtype from spec
-    pool_config.dtype = spec->dtype;
+    auto&           spec        = config_.layer_type_params[0];
+    BlockPoolConfig pool_config = BlockPoolConfigHelper::createKVFirstConfig(
+        static_cast<uint32_t>(config_.layer_num), static_cast<uint32_t>(config_.block_num), spec);
 
     block_pool_ = std::make_shared<BlockPool>(pool_config, device_, atype_);
     if (!block_pool_->init()) {
