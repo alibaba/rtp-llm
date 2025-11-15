@@ -27,7 +27,6 @@ namespace rtp_llm {
 
 class KVCacheGroup {
 public:
-    // TODO, KVCacheSpec 也包含了layer ids.
     KVCacheGroup(const LayerIdsType& layer_ids, std::shared_ptr<KVCacheSpec> group_spec, BlockPoolPtr block_pool):
         layer_ids_(layer_ids),
         group_spec_(std::move(group_spec)),

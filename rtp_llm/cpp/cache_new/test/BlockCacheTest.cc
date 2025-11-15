@@ -14,7 +14,7 @@ typedef BlockCacheV1::CacheItem CacheItem;
 class BlockCacheV1Test: public ::testing::Test {
 protected:
     void SetUp() override {
-        // 每个测试用例前初始化
+        // Initialize before each test case
         cache_ = std::make_unique<BlockCacheV1>();
     }
 
@@ -25,10 +25,10 @@ protected:
     std::unique_ptr<BlockCacheV1> cache_;
 };
 
-// ==================== 基础功能测试 ====================
+// ==================== Basic functionality tests ====================
 
 TEST_F(BlockCacheV1Test, ConstructorTest) {
-    // 测试构造函数
+    // Test constructor
     BlockCacheV1 cache1;
     EXPECT_TRUE(cache1.empty());
     EXPECT_EQ(cache1.size(), 0);
@@ -44,7 +44,7 @@ TEST_F(BlockCacheV1Test, MatchBasicTest) {
     auto      result1 = cache_->put(item);
     EXPECT_TRUE(result1);
 
-    // put重复的key
+    // Put a duplicate key
     auto result2 = cache_->put(item);
     EXPECT_FALSE(result2);
 
@@ -56,7 +56,7 @@ TEST_F(BlockCacheV1Test, MatchBasicTest) {
 }
 
 TEST_F(BlockCacheV1Test, PopBasicTest) {
-    // 测试基本的pop功能
+    // Test basic pop functionality
     std::vector<int64_t> cache_keys = {101, 102, 103, 104, 105};
     std::vector<int>     block_ids  = {1, 2, 3, 4, 5};
 
@@ -78,14 +78,14 @@ TEST_F(BlockCacheV1Test, PopBasicTest) {
 
     EXPECT_EQ(cache_->size(), 5);
 
-    // 最老的block被pop出来
+    // The oldest blocks are popped
     auto popped1 = cache_->pop(2);
     EXPECT_EQ(popped1.size(), 2);
     EXPECT_EQ(cache_->size(), 3);
     EXPECT_EQ(popped1[0], 1);
     EXPECT_EQ(popped1[1], 2);
 
-    // 剩余的三个block被pop出来
+    // The remaining three blocks are popped
     auto popped2 = cache_->pop(3);
     EXPECT_EQ(popped2.size(), 3);
     EXPECT_EQ(cache_->size(), 0);
@@ -93,7 +93,7 @@ TEST_F(BlockCacheV1Test, PopBasicTest) {
     EXPECT_EQ(popped2[1], 4);
     EXPECT_EQ(popped2[2], 5);
 
-    // 空的cache，不能pop出来
+    // An empty cache cannot pop any items
     auto popped3 = cache_->pop(3);
     EXPECT_EQ(popped3.size(), 0);
     EXPECT_EQ(cache_->size(), 0);
@@ -104,7 +104,7 @@ TEST_F(BlockCacheV1Test, PopBasicTest) {
     EXPECT_TRUE(result6);
     EXPECT_EQ(cache_->size(), 1);
 
-    // resident项不会被pop
+    // Resident entries won't be popped
     auto popped4 = cache_->pop(2);
     EXPECT_EQ(popped4.size(), 0);
     EXPECT_EQ(cache_->size(), 1);

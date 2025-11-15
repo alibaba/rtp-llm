@@ -150,15 +150,15 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MallocMultipleBatches) {
 
     MallocInfo malloc_info(batch_resource, complete_token_ids);
     malloc_info.common_seq_len = seq_length;
-    malloc_info.total_seq_len = seq_length+1;
+    malloc_info.total_seq_len  = seq_length + 1;
 
-    auto       result = allocator_->malloc(malloc_info);
+    auto result = allocator_->malloc(malloc_info);
 
     EXPECT_TRUE(result.success);
     for (int i = 0; i < batch_size; ++i) {
         EXPECT_EQ(batch_resource->batch_block_id[i].size(), 3);
     }
-    EXPECT_EQ(allocator_->freeBlocksNums(), config.block_num - 6);  //2 shared + 3 batches * 1 blocks + 1 reserved
+    EXPECT_EQ(allocator_->freeBlocksNums(), config.block_num - 6);  // 2 shared + 3 batches * 1 blocks + 1 reserved
 }
 
 // TEST_F(SingleTypeKVCacheAllocatorTest, MallocWithInsufficientBlocks) {
@@ -418,7 +418,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyVector) {
 
     EXPECT_NO_THROW(allocator_->blockBatchCopy(copy_mapping));
 
-    // 验证每个 block 的数据正确性
+    // Verify data correctness for each block
     for (const auto& pair : copy_mapping) {
         for (int layer_id = 0; layer_id < config.layer_num; ++layer_id) {
             auto src_addr = allocator_->convertIndexToAddr(layer_id, pair.src);
@@ -636,7 +636,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, FreeWithNullBatchResource) {
     EXPECT_FALSE(result.success);
 }
 
-// ==================== 压力测试 ====================
+// ==================== Stress tests ====================
 
 TEST_F(SingleTypeKVCacheAllocatorTest, MixedOperations) {
     auto config = createSingleTypeTestConfig(4, 30);

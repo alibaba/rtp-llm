@@ -117,7 +117,7 @@ bool GenerateStream::hasCacheKeys() const {
     return stream_cache_resource_->hasCacheKeys();
 }
 
-const std::vector<size_t>& GenerateStream::cacheKeys(int32_t batch_id) const {
+const CacheKeysType& GenerateStream::cacheKeys(int32_t batch_id) const {
     return stream_cache_resource_->cacheKeys(batch_id);
 }
 
@@ -725,9 +725,8 @@ BatchKVCacheResource& GenerateStream::kvCacheMutable() {
 BatchKVCacheResourcePtr GenerateStream::kvCachePtr() {
     // Return a shared_ptr that wraps the reference, note: this is a non-owning pointer
     // Use with caution - only valid during the lifetime of the stream
-    return std::shared_ptr<BatchKVCacheResource>(
-        &stream_cache_resource_->kvCacheMutable(),
-        [](BatchKVCacheResource*) {} // Empty deleter, we don't own it
+    return std::shared_ptr<BatchKVCacheResource>(&stream_cache_resource_->kvCacheMutable(), [](BatchKVCacheResource*) {}
+                                                 // Empty deleter, we don't own it
     );
 }
 
