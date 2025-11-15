@@ -67,6 +67,10 @@ CacheLayerLayout KVCacheManager::layerCacheBase() const {
 
 KVCacheBuffer KVCacheManager::kvCacheBuffer() const {
     // Delegate to allocator implementation
+    if (!allocator_) {
+        RTP_LLM_LOG_ERROR("kvCacheBuffer called before KVCacheManager initialized");
+        return {};
+    }
     return allocator_->kvCacheBuffer();
 }
 
@@ -97,7 +101,8 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
 
     // append cache_keys for eache batch
     for (int i = 0; i < batch_size; ++i) {
-        auto& keys = malloc_info.batch_kv_cache_resource->batch_resource[i].cache_keys;
+        auto& keys = malloc_info.batch_kv_cache_resource->cache_keys[i];
+
         if ((int)keys.size() > desired_blocks) {
             keys.resize(desired_blocks);
         }
@@ -112,6 +117,10 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
                     rtp_llm::hashInt64Array(rolling_hash, token_ids + pos, token_ids + pos + (int)seq_size_per_block);
                 keys.push_back(rolling_hash);
             }
+        }
+
+        for (auto& hash : keys) {
+            RTP_LLM_LOG_INFO("DECODE: malloc cache_key %s", std::to_string(hash).c_str());
         }
     }
 
@@ -163,8 +172,8 @@ void KVCacheManager::blockBatchCopy(const BlockIdPair* copy_mapping_begin, const
     return allocator_->blockBatchCopy(copy_mapping_begin, copy_mapping_end);
 }
 
-bool KVCacheManager::getCacheForRank(const std::vector<size_t>&                cache_keys,
-                                     const std::vector<int32_t>&               block_indices,
+bool KVCacheManager::getCacheForRank(const CacheKeysType&                      cache_keys,
+                                     const BlockIndicesType&                   block_indices,
                                      size_t                                    ignore_block_num,
                                      int64_t                                   request_id,
                                      const std::map<std::string, std::string>& extra_metas) const {
@@ -172,8 +181,8 @@ bool KVCacheManager::getCacheForRank(const std::vector<size_t>&                c
     return false;
 }
 
-bool KVCacheManager::putCacheForRank(const std::vector<size_t>&                cache_keys,
-                                     const std::vector<int32_t>&               block_indices,
+bool KVCacheManager::putCacheForRank(const CacheKeysType&                      cache_keys,
+                                     const BlockIndicesType&                   block_indices,
                                      size_t                                    ignore_block_num,
                                      int64_t                                   request_id,
                                      const std::map<std::string, std::string>& extra_metas) const {
