@@ -17,7 +17,7 @@ protected:
     void TearDown() override {}
 };
 
-// ==================== 基础功能测试 ====================
+// ==================== Basic functionality tests ====================
 
 TEST_F(FullKVCacheGroupTest, NeedBlocksNumTest) {
     auto block_pool = createBlockPool();

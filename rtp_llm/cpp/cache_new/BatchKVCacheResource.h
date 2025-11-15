@@ -13,7 +13,7 @@ struct BlockIds {
     std::vector<int> block_indices;
 };
 
-typedef size_t  CacheKeyType;
+typedef int64_t CacheKeyType;
 typedef int32_t BlockIdxType;
 
 typedef std::vector<CacheKeyType> CacheKeysType;
@@ -70,8 +70,8 @@ public:
     bool enable_reuse_cache = true;
 
     // this two member will be deleted soon
-    std::vector<std::vector<int32_t>> batch_block_id;
-    std::vector<std::vector<size_t>>  cache_keys;
+    std::vector<std::vector<BlockIdxType>> batch_block_id;
+    std::vector<std::vector<CacheKeyType>> cache_keys;
 
     std::vector<KVCacheResourceV1> batch_resource;
 };

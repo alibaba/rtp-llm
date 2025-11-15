@@ -11,6 +11,8 @@ namespace rtp_llm {
 
 void StreamCacheResource::init(int batch_size) {
     batch_resource_->resize(batch_size);
+    // Keep legacy cache_keys size consistent with batch_block_id
+    batch_resource_->cache_keys.resize(batch_size);
     // constructCacheKey();
 }
 
@@ -67,6 +69,9 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
         int batch_size     = batch_resource_->batchSize();
         batch_resource_->clear();
         batch_resource_->resize(batch_size);
+        // Keep legacy cache_keys consistent after re-initialize
+        batch_resource_->cache_keys.clear();
+        batch_resource_->cache_keys.resize(batch_size);
         fake_inited_ = false;
         return max_block_size;
     }
@@ -368,7 +373,7 @@ bool StreamCacheResource::hasCacheKeys() const {
     return !batch_resource_->cache_keys.empty();
 }
 
-const std::vector<size_t>& StreamCacheResource::cacheKeys(int32_t batch_id) const {
+const CacheKeysType& StreamCacheResource::cacheKeys(int32_t batch_id) const {
     RTP_LLM_CHECK_WITH_INFO(batch_resource_->cache_keys.size() > batch_id, "cache_keys size is <= batch_id");
     return batch_resource_->cache_keys[batch_id];
 }
@@ -379,6 +384,8 @@ void StreamCacheResource::fakeInitKVBlock() {
     for (size_t i = 0; i < stream_->maxBatchSize(); i++) {
         batch_resource_->resize(i, stream_->seqLength(), true);
     }
+
+    batch_resource_->cache_keys.resize(stream_->maxBatchSize());
 }
 
 int StreamCacheResource::mallocFailedTimes() const {

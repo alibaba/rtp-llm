@@ -9,14 +9,9 @@
 #include "rtp_llm/cpp/core/Buffer.h"
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/cache_new/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 
 namespace rtp_llm {
-
-class CompleteTokenIds;
-using CompleteTokenIdsPtr = std::shared_ptr<CompleteTokenIds>;
-
-class BatchKVCacheResource;
-using BatchKVCacheResourcePtr = std::shared_ptr<BatchKVCacheResource>;
 
 typedef int32_t               GroupIdType;
 typedef std::vector<float>    LossType;
@@ -59,10 +54,10 @@ struct KVCacheInfo {
 
 // For backward compatibility with old cache system (same as GptModel.h definition)
 struct KVCacheBuffer {
-    rtp_llm::BufferPtr k_blocks;
-    rtp_llm::BufferPtr v_blocks;
-    rtp_llm::BufferPtr k_scale;
-    rtp_llm::BufferPtr v_scale;
+    rtp_llm::BufferPtr k_blocks = nullptr;
+    rtp_llm::BufferPtr v_blocks = nullptr;
+    rtp_llm::BufferPtr k_scale  = nullptr;
+    rtp_llm::BufferPtr v_scale  = nullptr;
 };
 
 struct BlockIdPair {

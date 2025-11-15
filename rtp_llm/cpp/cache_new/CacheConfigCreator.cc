@@ -8,8 +8,8 @@ namespace rtp_llm {
 
 // create cache config for models with one full attention
 CacheConfig CacheConfigCreator::createBasicConfig(const rtp_llm::GptInitParameter& param, bool is_mtp) {
-    int local_head_num_kv = (param.head_num_kv_ > 1) ? static_cast<int>(param.head_num_kv_ / param.tp_size_)
-                                                     : static_cast<int>(param.head_num_kv_);
+    int local_head_num_kv = (param.head_num_kv_ > 1) ? static_cast<int>(param.head_num_kv_ / param.tp_size_) :
+                                                       static_cast<int>(param.head_num_kv_);
 
     const auto device_prop = rtp_llm::DeviceFactory::getDefaultDevice()->getDeviceProperties();
     auto       dtype       = param.kv_cache_data_type_;
@@ -29,52 +29,54 @@ CacheConfig CacheConfigCreator::createBasicConfig(const rtp_llm::GptInitParamete
     }
 
     CacheConfig config;
-    config.layer_type_num    = 1;
-    config.layer_num         = layer_num;
-    config.block_num         = 0;  
+    config.layer_type_num     = 1;
+    config.layer_num          = layer_num;
+    config.block_num          = 0;
     config.seq_size_per_block = static_cast<size_t>(param.seq_size_per_block_);
-    
-    // for adaption  
+
+    // for adaption
     config.use_mla = param.use_mla_;
 
     if (param.use_mla_ && param.mla_ops_type_ != rtp_llm::MlaOpsType::MHA) {
-        auto spec                 = std::make_shared<MLAKVCacheSpec>();
-        spec->type                = KVCacheType::MultiHeadLatentAttention;
-        spec->dtype               = dtype;
-        spec->seq_size_per_block  = static_cast<uint>(param.seq_size_per_block_);
-        spec->layer_num           = static_cast<uint>(layer_num);
-        spec->block_nums          = 0;
-        spec->kv_lora_rank        = static_cast<uint>(param.kv_lora_rank_);
-        spec->rope_head_dim       = static_cast<uint>(param.rope_head_dim_);
-        spec->layer_ids_          = all_layer_ids;
+        auto spec                = std::make_shared<MLAKVCacheSpec>();
+        spec->type               = KVCacheType::MultiHeadLatentAttention;
+        spec->dtype              = dtype;
+        spec->seq_size_per_block = static_cast<uint>(param.seq_size_per_block_);
+        spec->layer_num          = static_cast<uint>(layer_num);
+        spec->block_nums         = 0;
+        spec->kv_lora_rank       = static_cast<uint>(param.kv_lora_rank_);
+        spec->rope_head_dim      = static_cast<uint>(param.rope_head_dim_);
+        spec->local_head_num_kv  = 1;  // mla set local_head_num_kv to 1
+        spec->layer_ids_         = all_layer_ids;
 
         config.layer_type_params.push_back(spec);
-        config.block_size = static_cast<int>(spec->block_size());
-        
+        config.block_size = static_cast<int>(spec->block_size() * spec->layer_num);
+
         // Set block strides for backward compatibility
-        config.k_block_stride = spec->k_block_size();
-        config.v_block_stride = spec->v_block_size();
+        config.k_block_stride        = spec->k_block_size();
+        config.v_block_stride        = spec->v_block_size();
         config.kv_scale_block_stride = 0;  // MLA typically doesn't use scale
     } else {
-        auto spec                 = std::make_shared<MHAKVCacheSpec>();
-        spec->type                = KVCacheType::MultiHeadAttention;
-        spec->dtype               = dtype;
-        spec->seq_size_per_block  = static_cast<uint>(param.seq_size_per_block_);
-        spec->layer_num           = static_cast<uint>(layer_num);
-        spec->block_nums          = 0;
-        spec->local_head_num_kv   = static_cast<uint>(std::max(1, local_head_num_kv));
-        spec->size_per_head       = static_cast<uint>(param.size_per_head_);
-        spec->layer_ids_          = all_layer_ids;
+        auto spec                = std::make_shared<MHAKVCacheSpec>();
+        spec->type               = KVCacheType::MultiHeadAttention;
+        spec->dtype              = dtype;
+        spec->seq_size_per_block = static_cast<uint>(param.seq_size_per_block_);
+        spec->layer_num          = static_cast<uint>(layer_num);
+        spec->block_nums         = 0;
+        spec->local_head_num_kv  = static_cast<uint>(std::max(1, local_head_num_kv));
+        spec->size_per_head      = static_cast<uint>(param.size_per_head_);
+        spec->layer_ids_         = all_layer_ids;
 
         config.layer_type_params.push_back(spec);
-        config.block_size = static_cast<int>(spec->block_size());
-        
+        config.block_size = static_cast<int>(spec->block_size() * spec->layer_num);
+
         // Set block strides for backward compatibility
         config.k_block_stride = spec->k_block_size();
         config.v_block_stride = spec->v_block_size();
         // Calculate scale block stride for INT8/FP8 KV cache
         if (dtype == rtp_llm::DataType::TYPE_INT8 || dtype == rtp_llm::DataType::TYPE_FP8_E4M3) {
-            config.kv_scale_block_stride = local_head_num_kv * 4 * param.seq_size_per_block_;  // 4 bytes per scale value
+            config.kv_scale_block_stride =
+                local_head_num_kv * 4 * param.seq_size_per_block_;  // 4 bytes per scale value
         } else {
             config.kv_scale_block_stride = 0;
         }
@@ -187,7 +189,7 @@ CacheConfig CacheConfigCreator::createConfig(const rtp_llm::GptInitParameter&   
         block_nums = static_cast<uint32_t>(param.block_nums_);
     } else {
         const auto kv_cache_mem_size = getKVCacheMemorySize(param, warm_up_result);
-        block_nums                   = static_cast<uint32_t>(kv_cache_mem_size / static_cast<size_t>(config.block_size));
+        block_nums = static_cast<uint32_t>(kv_cache_mem_size / static_cast<size_t>(config.block_size));
     }
     RTP_LLM_CHECK_WITH_INFO(block_nums > 0,
                             "kv cache needs at least 1 block but %ld, each block needs %ld MiB memory",
@@ -227,13 +229,13 @@ CacheConfigCreator::createSpConfig(const rtp_llm::GptInitParameter&   score_para
                 cache_num = 1;
             }
 
-            block_nums = kv_cache_mem_size /
-                         (static_cast<size_t>(score_config.block_size) +
-                          static_cast<size_t>(propose_config.block_size) * static_cast<size_t>(cache_num));
+            block_nums = kv_cache_mem_size
+                         / (static_cast<size_t>(score_config.block_size)
+                            + static_cast<size_t>(propose_config.block_size) * static_cast<size_t>(cache_num));
         } else {
-            block_nums = kv_cache_mem_size /
-                         (static_cast<size_t>(score_config.block_size) +
-                          static_cast<size_t>(propose_config.block_size));
+            block_nums =
+                kv_cache_mem_size
+                / (static_cast<size_t>(score_config.block_size) + static_cast<size_t>(propose_config.block_size));
         }
     }
     RTP_LLM_CHECK_WITH_INFO(block_nums > 0, "kv cache needs at least 1 block but %ld", block_nums);
