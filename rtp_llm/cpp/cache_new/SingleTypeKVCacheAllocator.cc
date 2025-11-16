@@ -220,4 +220,94 @@ void SingleTypeKVCacheAllocator::regUserMr(size_t model_id) {
     }
 }
 
+// Update kv blocks for beam search or multi-return sequences.
+// - batch_kv_cache_resource: in/out, batch blocks and cache_keys will be rearranged based on block_src_batch
+// - block_src_batch: new batch i forks from old batch block_src_batch[i]
+// - copy_last_block: whether to copy the last block for each forked batch (instead of sharing)
+// - block_update_mapping: out, mapping from old block to new block for batch copy
+bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                               const std::vector<int>&        block_src_batch,
+                                               bool                           copy_last_block,
+                                               std::vector<BlockIdPair>&      block_update_mapping) {
+    block_update_mapping.clear();
+
+    if (!batch_kv_cache_resource || block_src_batch.empty()) {
+        return true;
+    }
+
+    const int        old_batch_size = batch_kv_cache_resource->batchSize();
+    const int        new_batch_size = static_cast<int>(block_src_batch.size());
+    std::vector<int> batch_fork_count(old_batch_size, 0);
+    for (const int old_batch_idx : block_src_batch) {
+        RTP_LLM_CHECK_WITH_INFO(old_batch_idx < old_batch_size,
+                                "try to reuse an old batch %d that out of range %d",
+                                old_batch_idx,
+                                old_batch_size);
+        ++batch_fork_count[old_batch_idx];
+    }
+
+    std::vector<int> disused_kv_blocks;
+    uint32_t         num_new_blocks = 0;
+    for (int old_batch_idx = 0; old_batch_idx < old_batch_size; ++old_batch_idx) {
+        const int fork_count = batch_fork_count[old_batch_idx];
+        if (fork_count == 0) {
+            const auto& blocks = batch_kv_cache_resource->batch_block_id[old_batch_idx];
+            disused_kv_blocks.insert(disused_kv_blocks.end(), blocks.begin(), blocks.end());
+        } else if (fork_count > 1 && copy_last_block) {
+            num_new_blocks += static_cast<uint32_t>(fork_count - 1);
+        }
+    }
+
+    // free disused first to reclaim capacity
+    if (!disused_kv_blocks.empty()) {
+        full_kv_cache_group_->free(disused_kv_blocks);
+    }
+    // ensure there are enough free blocks for last-block copies
+    if (num_new_blocks > 0) {
+        if (!full_kv_cache_group_->ensureFreeBlocks(static_cast<int>(num_new_blocks))) {
+            RTP_LLM_LOG_WARNING("ensure free blocks failed for kv cache update, need %u", num_new_blocks);
+            return false;
+        }
+    }
+
+    // rebuild batch_kv_cache_resource and generate mapping
+    std::vector<std::vector<int32_t>> old_block_ids = std::move(batch_kv_cache_resource->batch_block_id);
+    batch_kv_cache_resource->batch_block_id.reserve(new_batch_size);
+    std::vector<std::vector<int64_t>> old_cache_keys = std::move(batch_kv_cache_resource->cache_keys);
+    batch_kv_cache_resource->cache_keys.reserve(new_batch_size);
+    block_update_mapping.reserve(num_new_blocks);
+
+    for (int new_batch_idx = 0; new_batch_idx < new_batch_size; ++new_batch_idx) {
+        const int old_batch_idx = block_src_batch[new_batch_idx];
+        auto&     fork_count    = batch_fork_count[old_batch_idx];
+        RTP_LLM_CHECK_WITH_INFO(fork_count > 0, "old batch %d has been forked too many times", old_batch_idx);
+
+        if (fork_count == 1) {
+            batch_kv_cache_resource->batch_block_id.emplace_back(std::move(old_block_ids[old_batch_idx]));
+            batch_kv_cache_resource->cache_keys.emplace_back(std::move(old_cache_keys[old_batch_idx]));
+        } else {
+            // create new batch by referencing from source blocks
+            batch_kv_cache_resource->batch_block_id.emplace_back();
+            batch_kv_cache_resource->cache_keys.emplace_back(old_cache_keys[old_batch_idx]);
+            auto& blocks     = batch_kv_cache_resource->batch_block_id.back();
+            auto& cache_keys = batch_kv_cache_resource->cache_keys.back();
+            full_kv_cache_group_->reference(blocks, old_block_ids[old_batch_idx]);
+            if (copy_last_block && !blocks.empty()) {
+                const int old_block = blocks.back();
+                blocks.pop_back();
+
+                // allocate exactly one new block via kvCacheGroup
+                int  seq_len_target = (static_cast<int>(blocks.size()) + 1) * full_kv_cache_group_->seqSizePerBlock();
+                bool ok             = full_kv_cache_group_->malloc(cache_keys, blocks, seq_len_target);
+                RTP_LLM_CHECK_WITH_INFO(ok, "malloc one block via kvCacheGroup failed during kv cache update");
+                const int new_block = blocks.back();
+
+                block_update_mapping.push_back(BlockIdPair{old_block, new_block});
+            }
+        }
+        --fork_count;
+    }
+    return true;
+}
+
 }  // namespace rtp_llm

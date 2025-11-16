@@ -31,6 +31,11 @@ public:
 
     KVCacheBuffer kvCacheBuffer() const override;
 
+    bool updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                       const std::vector<int>&        block_src_batch,
+                       bool                           copy_last_block,
+                       std::vector<BlockIdPair>&      block_update_mapping) override;
+
 private:
     MallocResult incrMalloc(const MallocInfo& malloc_info);
     MallocResult initMallocForCommonLen(const MallocInfo& malloc_info);
