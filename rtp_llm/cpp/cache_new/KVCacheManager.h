@@ -66,6 +66,10 @@ public:
                          int64_t                                   request_id,
                          const std::map<std::string, std::string>& extra_metas) const;
 
+    bool                                    updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                                          const std::vector<int>&        block_src_batch,
+                                                          bool                           copy_last_block,
+                                                          std::vector<BlockIdPair>&      block_update_mapping);
     std::shared_ptr<class MemoryBlockCache> memoryBlockCache() const;
 
 private:
