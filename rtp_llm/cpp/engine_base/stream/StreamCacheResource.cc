@@ -185,7 +185,9 @@ void StreamCacheResource::setKVCache(const BatchKVCacheResource& kv_cache_resour
 
 // TODO(chanyin): move  kv blocks update for beam search to kv cache manager
 bool StreamCacheResource::updateKVBlock(const std::vector<int>& block_src_batch, bool copy_last_block) {
-    return true;
+    // return true;
+    return resource_context_.cache_manager->updateKVBlock(
+        batch_resource_, block_src_batch, copy_last_block, block_update_mapping_);
 }
 
 // bool StreamCacheResource::updateKVBlock(const std::vector<int>& block_src_batch, bool copy_last_block) {

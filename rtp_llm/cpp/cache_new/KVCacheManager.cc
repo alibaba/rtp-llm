@@ -190,6 +190,13 @@ bool KVCacheManager::putCacheForRank(const CacheKeysType&                      c
     return false;
 }
 
+bool KVCacheManager::updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                   const std::vector<int>&        block_src_batch,
+                                   bool                           copy_last_block,
+                                   std::vector<BlockIdPair>&      block_update_mapping) {
+    return allocator_->updateKVBlock(batch_kv_cache_resource, block_src_batch, copy_last_block, block_update_mapping);
+}
+
 std::shared_ptr<MemoryBlockCache> KVCacheManager::memoryBlockCache() const {
     RTP_LLM_LOG_WARNING("memoryBlockCache is not implemented in new KVCacheManager yet");
     return nullptr;

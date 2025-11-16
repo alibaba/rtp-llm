@@ -44,6 +44,11 @@ public:
 
     virtual KVCacheBuffer kvCacheBuffer() const = 0;
 
+    virtual bool updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                               const std::vector<int>&        block_src_batch,
+                               bool                           copy_last_block,
+                               std::vector<BlockIdPair>&      block_update_mapping) = 0;
+
 protected:
     MallocResult         initMalloc(const MallocInfo& malloc_info);
     virtual MallocResult incrMalloc(const MallocInfo& malloc_info)             = 0;
