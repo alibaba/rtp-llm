@@ -89,7 +89,11 @@ void LinearKVCacheGroup::reference(BlockIndicesType& block_indices, const BlockI
 }
 
 void LinearKVCacheGroup::free(const BlockIndicesType& block_indices) {
-    block_pool_->free(block_indices);
+    for (auto block : block_indices) {
+        if (!isNullBlockIdx(block)) {
+            block_pool_->free(block);
+        }
+    }
 }
 
 void LinearKVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
