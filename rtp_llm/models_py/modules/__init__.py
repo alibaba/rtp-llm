@@ -24,7 +24,7 @@ else:
     from rtp_llm.models_py.modules.norm import FusedQKRMSNorm, RMSNorm
     from rtp_llm.models_py.modules.linear import Linear
     from rtp_llm.models_py.modules.mlp import FusedSiluActDenseMLP
-    from rtp_llm.models_py.modules.select_topk import SelectTopk
+    from rtp_llm.models_py.modules.select_topk import SelectTopk, GroupTopK
     from rtp_llm.models_py.modules.fmha import (
         DECODE_MHA_IMPS,
         PREFILL_MHA_IMPS,
