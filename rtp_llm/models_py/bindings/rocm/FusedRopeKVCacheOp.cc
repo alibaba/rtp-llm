@@ -25,8 +25,10 @@ CKAttnPtr FusedRopeKVCachePrefillOp::prepare(torch_ext::PyAttentionInputs attn_i
     cu_seqlens                             = cu_seqlens.cuda();
     torch::Tensor cu_kv_seqlens            = cu_seqlens;
     CKAttnPtr     attn_params = std::make_shared<CKAttn>();
+    bool use_fmha_fp8 = false;
+    use_fmha_fp8 = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
     auto          params = device_->PrepareCKAttn(
-        attn_configs_, attn_inputs.kv_block_offset, kv_cache_block_id_device, attn_inputs.input_lengths.size(0));
+        attn_configs_, attn_inputs.kv_block_offset, kv_cache_block_id_device, attn_inputs.input_lengths.size(0), use_fmha_fp8);
     if (params != nullptr) {
         attn_params                 = CKAttnPtr(params, (CKAttn*)params.get());
     }
@@ -36,7 +38,7 @@ CKAttnPtr FusedRopeKVCachePrefillOp::prepare(torch_ext::PyAttentionInputs attn_i
     attn_params->max_seq_len    = attn_inputs.input_lengths.max().item<int32_t>();
     attn_params->padding_offset = attn_inputs.padding_offset;
     attn_params->prefix_lengths = attn_inputs.prefix_lengths;
-
+    attn_params->kv_block_array.cache_type = attn_configs_.kv_cache_dtype;
     return attn_params;
 }
 
@@ -63,6 +65,7 @@ torch::Tensor FusedRopeKVCachePrefillOp::forward(const torch::Tensor&           
                                           torch::TensorOptions(qkv.dtype()).device(qkv.device()));
 
     PrefixPromptBatchWeightsParam prefix_prompt_param;
+    bool use_fmha_fp8 = false;
     if (kv_cache.has_value()) {
         auto kv_block_array            = params->kv_block_array;
         kv_block_array.mPrimaryPoolPtr = kv_cache.value().k_cache_base.data_ptr();
@@ -75,6 +78,17 @@ torch::Tensor FusedRopeKVCachePrefillOp::forward(const torch::Tensor&           
             prefix_prompt_param.max_prefix_prompt_length = params->prefix_lengths.max().item<int>();
             prefix_prompt_param.count_length             = 1;
         }
+        use_fmha_fp8 = kv_block_array.cache_type == KvCacheDataType::FP8;
+    }
+
+    if (qkv.dtype().toScalarType() == torch::kFloat16) {
+        // TODO: FP8 FMHA currently does not support FP16 output.
+        //       Please run with BF16 activation instead (set environment variable ACT_TYPE=bf16)
+        use_fmha_fp8 = false;
+    }
+    torch::Tensor  qkv_buf_fp8 = torch::Tensor();
+    if (use_fmha_fp8) {
+        qkv_buf_fp8 = torch::empty(qkv.sizes(), torch::TensorOptions(torch::kFloat8_e4m3fnuz).device(qkv.device()));
     }
 
     bool store_qkv   = true;   // 存储回原始 QKV
@@ -91,7 +105,7 @@ torch::Tensor FusedRopeKVCachePrefillOp::forward(const torch::Tensor&           
                                              v_output.data_ptr(),
                                              &prefix_prompt_param,
                                              qkv.data_ptr(),
-                                             nullptr,
+                                             use_fmha_fp8 ? qkv_buf_fp8.data_ptr() : nullptr,
                                              nullptr,
                                              nullptr,
                                              params->padding_offset.data_ptr<int>(),
@@ -122,7 +136,7 @@ torch::Tensor FusedRopeKVCachePrefillOp::forward(const torch::Tensor&           
                                              v_output.data_ptr(),
                                              &prefix_prompt_param,
                                              qkv.data_ptr(),
-                                             nullptr,
+                                             use_fmha_fp8 ? qkv_buf_fp8.data_ptr() : nullptr,
                                              nullptr,
                                              nullptr,
                                              nullptr,
@@ -147,7 +161,7 @@ torch::Tensor FusedRopeKVCachePrefillOp::forward(const torch::Tensor&           
             );
         }
     }
-    return qkv;
+    return use_fmha_fp8 ? qkv_buf_fp8 : qkv;
 }
 
 FusedRopeKVCacheDecodeOp::FusedRopeKVCacheDecodeOp(const GptInitParameter& gpt_init_parameter):
@@ -165,8 +179,10 @@ CKAttnPtr FusedRopeKVCacheDecodeOp::prepare(torch_ext::PyAttentionInputs attn_in
     auto          cu_seqlens                           = attn_inputs.cu_seqlens;
     torch::Tensor cu_kv_seqlens                        = cu_seqlens;
     CKAttnPtr     attn_params;
+    bool use_fmha_fp8 = false;
+    use_fmha_fp8 = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
     auto          params = device_->PrepareCKAttn(
-        attn_configs_, attn_inputs.kv_block_offset, kv_cache_block_id_device, attn_inputs.sequence_lengths.size(0));
+        attn_configs_, attn_inputs.kv_block_offset, kv_cache_block_id_device, attn_inputs.sequence_lengths.size(0), use_fmha_fp8);
 
     attn_params                            = CKAttnPtr(params, (CKAttn*)params.get());
     attn_params->decode_plan               = true;
