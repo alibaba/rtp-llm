@@ -118,10 +118,15 @@ def run_cutlass_moe_fp8(
     local_E = w1.size(0)
     inv_perm = None
 
-    swap_ab = (
+    swap_ab_gemm1 = (
         get_best_config_swap_ab(local_E, actual_M, 2 * N, K)
         if use_batched_format
         else get_best_config_swap_ab(local_E, M, 2 * N, K)
+    )
+    swap_ab_gemm2 = (
+        get_best_config_swap_ab(local_E, actual_M, K, N)
+        if use_batched_format
+        else get_best_config_swap_ab(local_E, M, K, N)
     )
 
     if use_batched_format:
@@ -142,7 +147,8 @@ def run_cutlass_moe_fp8(
             padded_M,
             N,
             K,
-            swap_ab,
+            swap_ab_gemm1,
+            swap_ab_gemm2,
         )
 
         w1_scale = w1_scale.reshape(w1_scale.size(0), -1)
@@ -181,7 +187,8 @@ def run_cutlass_moe_fp8(
             local_E,
             N,
             K,
-            swap_ab,
+            swap_ab_gemm1,
+            swap_ab_gemm2,
         )
 
     if not per_act_token and (expert_map is not None or use_batched_format):
@@ -232,8 +239,12 @@ def run_cutlass_moe_fp8(
         per_out_ch,
 =======
         actual_M,
+<<<<<<< HEAD:rtp_llm/models_py/modules/cuda/moe/executors/cutlass_moe.py
         swap_ab,
 >>>>>>> feat: support gemm load config:rtp_llm/models_py/modules/moe/executors/cutlass_moe.py
+=======
+        swap_ab_gemm1,
+>>>>>>> fix: split swap_ab for moe gemm1 and gemm2:rtp_llm/models_py/modules/moe/executors/cutlass_moe.py
     )
 
     if use_batched_format:
@@ -254,7 +265,7 @@ def run_cutlass_moe_fp8(
             per_act_token,
             per_out_ch,
             actual_M,
-            swap_ab,
+            swap_ab_gemm2,
         )
     else:
         activation_callable(c2, c1)
@@ -277,7 +288,7 @@ def run_cutlass_moe_fp8(
             per_act_token,
             per_out_ch,
             actual_M,
-            swap_ab,
+            swap_ab_gemm2,
         )
         moe_unpermute(
             out=output,
