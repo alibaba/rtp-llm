@@ -48,6 +48,14 @@ config_setting(
 )
 
 config_setting(
+    name = "using_rocm_with_aiter_src",
+    define_values = {
+        "using_rocm": "true",
+        "using_aiter_src": "true",
+    },
+)
+
+config_setting(
     name = "using_arm",
     values = {"define": "using_arm=true"},
 )
