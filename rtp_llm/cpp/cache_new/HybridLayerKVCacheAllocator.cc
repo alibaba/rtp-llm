@@ -74,14 +74,13 @@ int HybridLayerKVCacheAllocator::reuseCache(const CacheKeysType& cache_keys, Gro
         }
     }
 
-    auto reuse_blocks = static_cast<int>(pos + 1);
-    for (auto& group : group_block_ids) {
-        group->block_indices.resize(reuse_blocks);
-    }
+    auto reuse_blocks                 = static_cast<int>(pos + 1);
+    group_block_ids[0]->block_indices = full_match_result.block_indices;
+    group_block_ids[0]->block_indices.resize(reuse_blocks);
 
     if (reuse_blocks > 0) {
-        group_block_ids[0]->block_indices = full_match_result.block_indices;
         for (int linear_group_id = 0; linear_group_id < linear_kv_cache_groups_.size(); linear_group_id++) {
+            group_block_ids[linear_group_id + 1]->block_indices.resize(reuse_blocks, NULL_BLOCK_IDX);
             group_block_ids[linear_group_id + 1]->block_indices[reuse_blocks - 1] = linear_match_bocks[linear_group_id];
         }
     }
@@ -119,10 +118,11 @@ MallocResult HybridLayerKVCacheAllocator::initMallocForCommonLen(const MallocInf
     int seq_len =
         (malloc_info.total_seq_len >= 0) ? malloc_info.total_seq_len : malloc_info.complete_token_ids->seqLength();
     bool has_common_len = (malloc_info.common_seq_len >= 0) && (malloc_info.common_seq_len <= seq_len);
-    int  common_seq_len = has_common_len ? malloc_info.common_seq_len : seq_len;
+    int  common_seq_len = has_common_len ? malloc_info.common_seq_len : 0;
 
-    auto& cache_keys_0      = malloc_info.batch_kv_cache_resource->batch_resource[0].cache_keys;
-    auto& group_block_ids_0 = malloc_info.batch_kv_cache_resource->batch_resource[0].group_block_ids;
+    auto& batch_resource    = malloc_info.batch_kv_cache_resource->batch_resource;
+    auto& cache_keys_0      = batch_resource[0].cache_keys;
+    auto& group_block_ids_0 = batch_resource[0].group_block_ids;
 
     if (malloc_info.batch_kv_cache_resource->enable_reuse_cache
         && group_block_ids_0[0]->block_indices.size() < cache_keys_0.size()) {
@@ -139,7 +139,7 @@ MallocResult HybridLayerKVCacheAllocator::initMallocForCommonLen(const MallocInf
     }
 
     for (int batch_id = 1; batch_id < batch_size; ++batch_id) {
-        auto& group_block_ids = malloc_info.batch_kv_cache_resource->batch_resource[batch_id].group_block_ids;
+        auto& group_block_ids = batch_resource[batch_id].group_block_ids;
         for (int i = 0; i < all_kv_cache_groups_.size(); i++) {
             all_kv_cache_groups_[i]->reference(group_block_ids[i]->block_indices, group_block_ids_0[i]->block_indices);
         }
@@ -220,10 +220,12 @@ void HybridLayerKVCacheAllocator::regUserMr(size_t model_id) {
     }
 }
 
+// TODO, 修改下。
 BlockAddrInfo HybridLayerKVCacheAllocator::convertIndexToAddr(int layer_id, int block_id) const {
     return full_kv_cache_group_->convertIndexToAddr(layer_id, block_id);
 }
 
+// TODO, 修改下。
 BlockBufferInfo HybridLayerKVCacheAllocator::convertIndexToBuffer(int layer_id, int block_id) const {
     return full_kv_cache_group_->convertIndexToBuffer(layer_id, block_id);
 }
@@ -242,6 +244,7 @@ size_t HybridLayerKVCacheAllocator::totalBlocksNums() const {
 }
 
 size_t HybridLayerKVCacheAllocator::maxSeqLen() const {
+    // TODO, 修改下。
     return block_pool_->totalBlockNums() * full_kv_cache_group_->seqSizePerBlock();
 }
 
