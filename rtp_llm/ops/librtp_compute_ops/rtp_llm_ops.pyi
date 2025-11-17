@@ -72,11 +72,14 @@ class RtpProcessGroupType:
       TP_GROUP
     
       DP_AND_TP_GROUP
+    
+      AFD_GROUP
     """
     DP_AND_TP_GROUP: typing.ClassVar[RtpProcessGroupType]  # value = <RtpProcessGroupType.DP_AND_TP_GROUP: 2>
     DP_GROUP: typing.ClassVar[RtpProcessGroupType]  # value = <RtpProcessGroupType.DP_GROUP: 0>
     TP_GROUP: typing.ClassVar[RtpProcessGroupType]  # value = <RtpProcessGroupType.TP_GROUP: 1>
-    __members__: typing.ClassVar[dict[str, RtpProcessGroupType]]  # value = {'DP_GROUP': <RtpProcessGroupType.DP_GROUP: 0>, 'TP_GROUP': <RtpProcessGroupType.TP_GROUP: 1>, 'DP_AND_TP_GROUP': <RtpProcessGroupType.DP_AND_TP_GROUP: 2>}
+    AFD_GROUP: typing.ClassVar[RtpProcessGroupType]  # value = <RtpProcessGroupType.AFD_GROUP: 3>
+    __members__: typing.ClassVar[dict[str, RtpProcessGroupType]]  # value = {'DP_GROUP': <RtpProcessGroupType.DP_GROUP: 0>, 'TP_GROUP': <RtpProcessGroupType.TP_GROUP: 1>, 'DP_AND_TP_GROUP': <RtpProcessGroupType.DP_AND_TP_GROUP: 2>, 'AFD_GROUP': <RtpProcessGroupType.AFD_GROUP: 3>}
     def __eq__(self, other: typing.Any) -> bool:
         ...
     def __getstate__(self) -> int:

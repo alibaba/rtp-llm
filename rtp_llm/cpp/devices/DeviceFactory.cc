@@ -78,6 +78,7 @@ void DeviceFactory::initDevices(const GptInitParameter& params) {
     device_params.device_id                      = params.local_rank_;
     device_params.master_ip                      = params.nccl_ip_;
     device_params.tp_master_port                 = params.tp_nccl_port_;
+    device_params.afd_master_port                = params.afd_nccl_port_;
     device_params.dp_tp_master_port              = params.dp_tp_nccl_port_;
     device_params.ffn_tp_master_port             = params.ffn_tp_nccl_port_;
     device_params.tokens_per_block               = params.seq_size_per_block_;
@@ -97,6 +98,9 @@ void DeviceFactory::initDevices(const GptInitParameter& params) {
     device_params.profile_debug_logging_config   = params.profiling_debug_logging_config;
     device_params.hw_kernel_config               = params.hw_kernel_config;
     device_params.concurrency_config             = params.concurrency_config;
+    device_params.world_size                     = params.world_size_;
+    device_params.world_rank                     = params.parallelism_distributed_config.world_rank;
+    device_params.enable_ffn_disaggregate        = params.ffn_disaggregate_config.enable_ffn_disaggregate;
     size_t max_batch_size                        = params.max_context_batch_size_ + params.max_generate_batch_size_
                             + std::max((long)0, params.gen_num_per_circle_) * 32;
     device_params.ffn_as_service = params.ffn_disaggregate_config.is_ffn_service();
