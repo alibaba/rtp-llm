@@ -118,14 +118,15 @@ GreedyOutput ROCmDevice::sampleGreedy(const GreedyParams& params) {
     auto seed_h   = allocateBuffer({DataType::TYPE_INT64, {batch_size}, AllocationType::HOST});
     auto offset_h = allocateBuffer({DataType::TYPE_INT64, {batch_size}, AllocationType::HOST});
     for (int i = 0; i < batch_size; i++) {
-        auto [sd, ofst] = params.generator[i].defined() ?
-            get_seed_and_offset(batch_size * 32, params.generator[i]) :
-            std::make_pair(0ULL, 0ULL);
+        auto [sd, ofst] = get_seed_and_offset(batch_size * 32,
+                                              params.generator[i].defined() ?
+                                              std::make_optional(params.generator[i]) :
+                                              std::nullopt);
         seed_h->data<int64_t>()[i]   = static_cast<int64_t>(sd);
         offset_h->data<int64_t>()[i] = static_cast<int64_t>(ofst);
     }
-    auto seed = Buffer2torchTensor(clone({*seed_h, AllocationType::DEVICE}), false);
-    auto offset = Buffer2torchTensor(clone({*offset_h, AllocationType::DEVICE}), false);
+    auto seed = Buffer2torchTensor(seed_h, false);
+    auto offset = Buffer2torchTensor(offset_h, false);
 
     auto logits_ref = params.logits.slice(0, params.logits.shape()[0]);
     auto probs      = softmax({logits_ref, std::nullopt, std::nullopt, 1.0f, DataType::TYPE_INVALID, std::nullopt});
