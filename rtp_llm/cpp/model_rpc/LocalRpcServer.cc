@@ -19,11 +19,11 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
     maga_init_params_ = maga_init_params;
     metrics_reporter_ = maga_init_params.metrics_reporter;
     RTP_LLM_LOG_INFO("LocalRpcServer aux_string %s",
-                        maga_init_params_.gpt_init_parameter.misc_config.aux_string.c_str());
+                     maga_init_params_.gpt_init_parameter.misc_config.aux_string.c_str());
     const bool use_new_sp_engine = maga_init_params_.gpt_init_parameter.sp_config.use_new_sp_engine;
+    propose_maga_init_params_    = propose_params.get();
 
     if (propose_params && !use_new_sp_engine) {
-        propose_maga_init_params_ = propose_params.get();
         if (!mm_process_engine.is_none()) {
             return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
                                 "Multimodal processing is not supported for speculative engine");

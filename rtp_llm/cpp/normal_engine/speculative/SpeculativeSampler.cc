@@ -70,6 +70,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     torch::Tensor output_emitted_token_num_h = output_emitted_token_num_d.to(host_device).contiguous();
 
     for (int stream_idx = 0; stream_idx < batch_size; stream_idx++) {
+        // TODO(yinzhi): support force accept
         size_t accept_len = output_emitted_token_num_h[stream_idx].item<int32_t>();
 
         BufferPtr accept_tokens = device_->allocateBuffer(

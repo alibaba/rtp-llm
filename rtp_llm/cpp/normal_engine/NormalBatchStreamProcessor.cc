@@ -67,6 +67,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     model_input.pd_separation      = role_type_ == RoleType::PREFILL;
     model_input.warmup             = warm_up_;
     model_input.decode_entrance    = decode_entrance_;
+    model_input.is_fake_stream     = stream_groups.isFakeStream();
 
     int* merged_tokens      = (int*)model_input.combo_tokens->data();
     int* input_lengths      = (int*)model_input.input_lengths->data();

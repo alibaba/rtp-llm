@@ -22,6 +22,28 @@ struct MtpMetricsCollector {
     bool not_skip = false;
 };
 
+class MtpBufferHolder {
+public:
+    void hold(const GptModelInputs& model_input) {
+        host_buffers_holder_.push_back(model_input.combo_tokens);
+        host_buffers_holder_.push_back(model_input.input_lengths);
+        host_buffers_holder_.push_back(model_input.sequence_lengths);
+        host_buffers_holder_.push_back(model_input.lm_output_indexes);
+        host_buffers_holder_.push_back(model_input.prefix_lengths);
+    }
+
+    void hold(const BufferPtr& buffer) {
+        host_buffers_holder_.push_back(buffer);
+    }
+
+    void release() {
+        host_buffers_holder_.clear();
+    }
+
+private:
+    std::vector<BufferPtr> host_buffers_holder_;
+};
+
 class MtpExecutor: public Executor {
 public:
     explicit MtpExecutor(const EngineInitParams&                           params,
@@ -97,6 +119,10 @@ private:
     std::vector<std::shared_ptr<CacheManager>>       mtp_cache_managers_;
     std::unique_ptr<speculative::SpeculativeSampler> speculative_sampler_;
 
-    bool warm_up_;
+    // holder for host buffers to avoid early free before H2D copy kernel execution
+    MtpBufferHolder buffer_holder_;
+
+    bool     warm_up_;
+    RoleType role_type_;
 };
 };  // namespace rtp_llm

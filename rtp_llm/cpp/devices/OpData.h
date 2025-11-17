@@ -148,6 +148,7 @@ struct GptModelInputs {
     bool need_moe_gating = false;
     bool warmup          = false;
     bool skip_run        = false;
+    bool is_fake_stream  = false;
 
     // not sync to other tp rank
     std::vector<std::string> trace_ids;

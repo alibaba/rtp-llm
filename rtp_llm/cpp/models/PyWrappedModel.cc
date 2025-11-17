@@ -38,10 +38,10 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     torch_ext::PyAttentionInputs py_attn_inputs;
     py_attn_inputs.prefix_lengths   = Buffer2torchTensor(inputs.prefix_lengths, false);
     py_attn_inputs.sequence_lengths = Buffer2torchTensor(inputs.sequence_lengths, false);
-    py_attn_inputs.input_lengths    = Buffer2torchTensor(inputs.input_lengths);
+    py_attn_inputs.input_lengths    = Buffer2torchTensor(inputs.input_lengths, false);
 
     if (k_cache_buffer_) {
-        py_attn_inputs.kv_cache_block_id_host = Buffer2torchTensor(inputs.kv_cache_block_id);
+        py_attn_inputs.kv_cache_block_id_host = Buffer2torchTensor(inputs.kv_cache_block_id, false);
         py_attn_inputs.kv_block_offset =
             k_cache_buffer_ ? k_cache_buffer_->shape()[0] * k_cache_buffer_->shape()[1] : 0;
     }
@@ -59,7 +59,7 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         batch_size);
     if (context_batch_size > 0) {
         // Calculate cu_seqlens
-        torch::Tensor cu_seqlens = torch::zeros({device_->initParams().concurrency_config.concurrency_limit + 1},
+        torch::Tensor cu_seqlens    = torch::zeros({device_->initParams().concurrency_config.concurrency_limit + 1},
                                                 torch::TensorOptions(torch::kInt32).device(torch::kCPU));
         torch::Tensor cu_kv_seqlens = torch::zeros({device_->initParams().concurrency_config.concurrency_limit + 1},
                                                    torch::TensorOptions(torch::kInt32).device(torch::kCPU));
@@ -70,8 +70,7 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         py_attn_inputs.cu_seqlens              = cu_seqlens.cuda();
         py_attn_inputs.cu_kv_seqlens           = cu_kv_seqlens.cuda();
     }
-    py_attn_inputs.sequence_lengths.pin_memory();
-    py_attn_inputs.prefix_lengths.pin_memory();
+
     return py_attn_inputs;
 }
 
@@ -142,8 +141,8 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
         }
         PyCacheStoreInputs cache_store_inputs{context_batch_size,
                                               decoder_batch_size,
-                                              Buffer2torchTensor(inputs.request_id),
-                                              Buffer2torchTensor(inputs.request_pd_separation),
+                                              Buffer2torchTensor(inputs.request_id, false),
+                                              Buffer2torchTensor(inputs.request_pd_separation, false),
                                               transVectorToString(cache_keys_vec),
                                               inputs.seq_size_per_block,
                                               inputs.k_block_size,
@@ -229,7 +228,7 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
 }
 
 GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
-
+    holdInputsHostBuffers(inputs);
     py::gil_scoped_acquire gil;
     try {
         RTP_LLM_LOG_DEBUG("Calling forward method on Python object instance.");
@@ -267,7 +266,9 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             py_model_outputs      = outputs.cast<PyModelOutputs>();
         }
         auto hidden_states_tensor = py_model_outputs.hidden_states;
-        auto hidden_states        = torchTensor2Buffer(hidden_states_tensor);
+
+        // TODO(huzetao.hzt): hold is not worked here, so we need extra clone here, need to fix this.
+        auto hidden_states = device_->clone({*torchTensor2Buffer(hidden_states_tensor)});
 
         RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
 

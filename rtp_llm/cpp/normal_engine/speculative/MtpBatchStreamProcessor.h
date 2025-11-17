@@ -51,23 +51,29 @@ public:
     void updateMultiStepDraftSamplerOutput(const StreamGroups&         stream_groups,
                                            SamplerOutput&              draft_sampler_output,
                                            torch::Tensor&              draft_token_ids_d_t,
+                                           torch::Tensor&              spec_token_ids_d_t,
                                            torch::Tensor&              draft_token_probs_d_t,
                                            std::vector<torch::Tensor>& draft_token_probs_list);
 
 protected:
-    void dispatchProposePrefillSingleStream(GenerateStreamPtr         stream,
-                                            const MergedOutput&       propose_output,
-                                            int                       batch_idx_in,
-                                            int                       batch_idx_out,
-                                            int                       token_offset,
-                                            int                       accept_len,
-                                            bool                      return_all_probs,
-                                            const rtp_llm::BufferPtr& new_tokens_all) const;
+    void updateProposeTokens(const StreamGroups&                stream_groups,
+                             const MergedOutput&                draft_prefill_output,
+                             std::vector<StreamSpecUpdateInfo>& spec_update_infos) const;
 
-    void setProposeTokensForAllStreams(const StreamGroups&      stream_groups,
-                                       const MergedOutput&      draft_prefill_output,
-                                       const rtp_llm::BufferPtr new_tokens_all) const;
+    void preparePrefillSpecUpdateInfo(const StreamGroups&                stream_groups,
+                                      const MergedOutput&                prefill_output,
+                                      const MergedOutput&                propose_output,
+                                      const rtp_llm::BufferPtr&          new_tokens_all,
+                                      std::vector<StreamSpecUpdateInfo>& spec_update_infos) const;
 
+    void prepareDecodeSpecUpdateInfo(const StreamGroups&                          stream_groups,
+                                     const speculative::SpeculativeSamplerOutput& spec_decode_output,
+                                     const MergedOutput&                          draft_prefill_output,
+                                     std::vector<StreamSpecUpdateInfo>&           spec_update_infos) const;
+
+    void gatherHiddenStates(const StreamGroups& stream_groups, GptModelInputs& model_input) const;
+
+protected:
     int propose_step_;
 };
 }  // namespace rtp_llm

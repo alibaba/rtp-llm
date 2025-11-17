@@ -17,8 +17,8 @@ public:
         for (auto& stream : streams) {
             auto cur_batch_size  = stream->currentBatchSize();
             auto next_batch_size = stream->nextBatchSize();
-            if (!stream->isDummyStream()) {
-                is_fake_stream_ = false;
+            if (stream->isDummyStream()) {
+                is_fake_stream_ = true;
             }
             if (stream->isContextStream()) {
                 context_streams_.push_back(stream);
@@ -47,6 +47,8 @@ public:
             adapter_names.push_back(stream->adapterName());
             gen_timeline_ |= stream->genTimeline();
         }
+        RTP_LLM_CHECK_WITH_INFO(
+            !(streams.size() > 1 && is_fake_stream_), "streams.size()[%d] > 1 && is_fake_stream_", streams.size());
     }
 
     size_t totalDecodeBatchSize() const {
@@ -154,6 +156,10 @@ public:
         return is_fake_stream_;
     }
 
+    void setFakeStream(bool is_fake_stream) {
+        is_fake_stream_ = is_fake_stream;
+    }
+
     std::string debugString() const {
         std::stringstream debug_string, context_stream_ids, decode_stream_ids;
         for (auto& stream : context_streams_) {
@@ -177,6 +183,18 @@ public:
         return debug_string.str();
     }
 
+    void updateStreams(const std::vector<StreamSpecUpdateInfo>& spec_update_infos) const {
+        int stream_idx = 0;
+        for (auto& stream : decode_streams_) {
+            stream->specUpdate(spec_update_infos[stream_idx]);
+            stream_idx++;
+        }
+        for (auto& stream : context_streams_) {
+            stream->specUpdate(spec_update_infos[stream_idx]);
+            stream_idx++;
+        }
+    }
+
 private:
     std::list<GenerateStreamPtr> context_streams_;
     std::list<GenerateStreamPtr> decode_streams_;
@@ -195,7 +213,7 @@ private:
     size_t                       total_score_batch_size_       = 0;
     bool                         has_multimodal_input_         = false;
     bool                         gen_timeline_                 = false;
-    bool                         is_fake_stream_               = true;
+    bool                         is_fake_stream_               = false;
     std::list<std::string>       adapter_names;
 };
 

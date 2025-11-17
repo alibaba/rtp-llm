@@ -326,7 +326,8 @@ absl::Status NormalEngine::step() {
         CHECK_AND_ASSIGN(streams, scheduler_->schedule(reserve_step_));
         if (params_.dp_size_ > 1) {
             mayAddFakeStream(streams);
-        } else {
+        }
+        if (streams.empty()) {
             return absl::OkStatus();
         }
     }

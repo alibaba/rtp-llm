@@ -29,12 +29,12 @@ public:
 
     static std::vector<RoleAddr> getRoleAddrs(const GenerateConfigPB* config_proto);
 
-private:
-    static std::shared_ptr<GenerateConfig> transGenerateConfig(const GenerateConfigPB* config_proto);
-
     static torch::Tensor transTensor(const TensorPB& tensor_pb);
 
     static void transTensorPB(TensorPB* t, const rtp_llm::Buffer* buffer);
+
+private:
+    static std::shared_ptr<GenerateConfig> transGenerateConfig(const GenerateConfigPB* config_proto);
 
     static void transMMPreprocessConfig(MMPreprocessConfigPB* config_pb, const MMPreprocessConfig config);
 

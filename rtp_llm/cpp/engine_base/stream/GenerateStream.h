@@ -35,6 +35,19 @@ struct StreamUpdateInfo {
     bool                     update_remote_generate = true;
     bool                     force_update_info      = false;
 };
+
+struct StreamSpecUpdateInfo {
+    const rtp_llm::BufferPtr new_tokens;
+    int                      num_new_tokens;
+
+    int                      draft_token;
+    const rtp_llm::BufferPtr draft_hidden_states;
+    const rtp_llm::BufferPtr draft_token_probs;
+
+    bool update_remote_generate = true;
+    bool force_update_info      = false;
+};
+
 struct SpeculativeExecutorStreamOutput {
 public:
     std::string debugString() const {
@@ -67,6 +80,9 @@ public:
     rtp_llm::BufferPtr loss          = nullptr;
     rtp_llm::BufferPtr all_probs     = nullptr;
     rtp_llm::BufferPtr softmax_probs = nullptr;
+
+    // hold tensors from grpc
+    std::vector<torch::Tensor> tensors_holder;
 };
 using SpeculativeExecutorStreamOutputPtr = std::shared_ptr<SpeculativeExecutorStreamOutput>;
 
@@ -106,6 +122,7 @@ public:
 
     virtual void updateOutput(const StreamUpdateInfo& update_info) = 0;
     void         update(const StreamUpdateInfo& update_info);
+    void         specUpdate(const StreamSpecUpdateInfo& update_info);
     bool         updateKvCacheBlocks(const rtp_llm::BufferPtr& src_batch_indices);
 
     virtual size_t scoreLen() const {
@@ -488,14 +505,6 @@ public:
         return generate_input_->generate_config->enable_memory_block_cache;
     }
 
-    bool isSpDecodeStream() const {
-        return is_sp_decode_stream_;
-    }
-
-    void setSpDecodeStream() {
-        is_sp_decode_stream_ = true;
-    }
-
     void fillSubGenerateStatus(StreamState state);
     void resizeSubGenerateStatus(size_t new_size);
 
@@ -578,7 +587,6 @@ protected:
     bool                               contain_propose_token_ = false;
     int                                mtp_token_index_       = 0;
     SpeculativeExecutorStreamOutputPtr sp_output_buffer_      = nullptr;
-    bool                               is_sp_decode_stream_   = false;
 
     bool return_all_hidden_states_ = false;
 
