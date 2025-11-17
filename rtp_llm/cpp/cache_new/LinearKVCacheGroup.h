@@ -28,8 +28,11 @@ public:
 private:
     int needBlocksNum(int seq_len, int current_blocks) const override;
 
-private:
-    int save_point;
+    // TODO, fix this public
+public:
+    int  chunk_blocks;
+    int  save_point;
+    bool reuse_cache;
 };
 
 using LinearKVCacheGroupPtr = std::shared_ptr<LinearKVCacheGroup>;
