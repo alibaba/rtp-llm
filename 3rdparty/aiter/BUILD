@@ -104,7 +104,8 @@ genrule(
         "aiter/jit/libmodule_rmsnorm.so",
         "aiter/jit/libmodule_smoothquant.so",
         "aiter/jit/libmodule_gemm_a8w8.so",
-        "aiter/jit/libmodule_moe_ck2stages.so"
+        "aiter/jit/libmodule_moe_ck2stages.so",
+        "aiter/jit/libmodule_m_grouped_gemm.so"
     ],
     cmd = """
         cd external/aiter_src;
@@ -113,7 +114,7 @@ genrule(
         /opt/conda310/bin/python -m pip install -r requirements.txt -i https://artifacts.antgroup-inc.cn/simple/ --extra-index-url=https://artlab.alibaba-inc.com/1/PYPI/py-central/ --extra-index-url=https://artlab.alibaba-inc.com/1/PYPI/pytorch/ --extra-index-url=http://artlab.alibaba-inc.com/1/pypi/rtp_diffusion --trusted-host=artlab.alibaba-inc.com;
         /opt/conda310/bin/python -m pip install ninja -i https://artifacts.antgroup-inc.cn/simple/ --extra-index-url=https://artlab.alibaba-inc.com/1/PYPI/py-central/ --extra-index-url=https://artlab.alibaba-inc.com/1/PYPI/pytorch/ --extra-index-url=http://artlab.alibaba-inc.com/1/pypi/rtp_diffusion --trusted-host=artlab.alibaba-inc.com;
         /opt/conda310/bin/python -m pip install packaging -i https://artifacts.antgroup-inc.cn/simple/ --extra-index-url=https://artlab.alibaba-inc.com/1/PYPI/py-central/ --extra-index-url=https://artlab.alibaba-inc.com/1/PYPI/pytorch/ --extra-index-url=http://artlab.alibaba-inc.com/1/pypi/rtp_diffusion --trusted-host=artlab.alibaba-inc.com;
-        AITER_SYMBOL_VISIBLE=1 GPU_ARCHS=gfx942 ROCM_HOME=/opt/rocm LD_LIBRARY_PATH=/opt/amdgpu/lib64 PATH=/opt/rocm/bin:/opt/conda310/bin:$$PATH /opt/conda310/bin/python build_aiter_module.py;
+        LD_LIBRARY_PATH=/opt/amdgpu/lib64:/opt/rocm-6.4.3/lib/llvm/lib/:$$LD_LIBRARY_PATH AITER_SYMBOL_VISIBLE=1 GPU_ARCHS=gfx942 ROCM_HOME=/opt/rocm PATH=/opt/rocm/bin:/opt/conda310/bin:$$PATH /opt/conda310/bin/python build_aiter_module.py;
         
         cd ../..;
         cp external/aiter_src/aiter/jit/module_aiter_enum.so $(location aiter/jit/libmodule_aiter_enum.so);
@@ -128,6 +129,7 @@ genrule(
         cp external/aiter_src/aiter/jit/module_attention_asm.so $(location aiter/jit/libmodule_attention_asm.so);
         cp external/aiter_src/aiter/jit/module_gemm_a8w8_bpreshuffle.so $(location aiter/jit/libmodule_gemm_a8w8_bpreshuffle.so);
         cp external/aiter_src/aiter/jit/module_activation.so $(location aiter/jit/libmodule_activation.so);
+        cp external/aiter_src/aiter/jit/module_m_grouped_gemm.so $(location aiter/jit/libmodule_m_grouped_gemm.so);
         cp external/aiter_src/aiter/jit/module_norm.so $(location aiter/jit/libmodule_norm.so);
         cp external/aiter_src/aiter/jit/module_rmsnorm.so $(location aiter/jit/libmodule_rmsnorm.so);
         cp external/aiter_src/aiter/jit/module_mha_fwd.so $(location aiter/jit/libmodule_mha_fwd.so);
@@ -337,6 +339,17 @@ cc_library(
     copts = [],
     linkopts = [],
     strip_include_prefix = "csrc/include/",
+    visibility = ["//visibility:public"],
+    tags = ["rocm","local"],
+)
+ 
+cc_library(
+    name = "module_m_grouped_gemm",
+    srcs = ["aiter/jit/libmodule_m_grouped_gemm.so"],
+    hdrs = ["csrc/ck_m_grouped_gemm/include/m_grouped_gemm.h"],
+    deps = [":cpp_libraries"],
+    copts = [],
+    linkopts = [],
     visibility = ["//visibility:public"],
     tags = ["rocm","local"],
 )

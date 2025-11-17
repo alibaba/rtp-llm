@@ -17,6 +17,7 @@ copy_files(
 filegroup(
     name = "copy_aiter",
     srcs = select({
+        "@//:using_rocm_with_aiter_src": [":aiter_src_copy",],
         "@//:using_aiter_src": [":aiter_src_copy",],
         "//conditions:default": [":aiter_copy"],
     }),
@@ -34,7 +35,7 @@ copy_files(
 
 genrule(
     name = "aiter_src_copy",
-    srcs = ["@aiter_src//:cpp_libraries"],
+    srcs = ["@aiter_src//:cpp_libraries", "@deep_ep_rocm//:cpp_libraries"],
     outs = [
         "libmodule_aiter_enum.so",
         "libmodule_custom_all_reduce.so",
@@ -47,6 +48,8 @@ genrule(
         "libmodule_smoothquant.so",
         "libmodule_pa.so",
         "libmodule_activation.so",
+        "libmodule_m_grouped_gemm.so",
+        "libdeep_ep_rocm.so",
         "libmodule_attention_asm.so",
         "libmodule_mha_fwd.so",
         "libmodule_fmha_v3_varlen_fwd.so",
@@ -74,6 +77,8 @@ cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_norm.so $(locat
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_rmsnorm.so $(location libmodule_rmsnorm.so);
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_gemm_a8w8.so $(location libmodule_gemm_a8w8.so);
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_moe_ck2stages.so $(location libmodule_moe_ck2stages.so);
+cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_m_grouped_gemm.so $(location libmodule_m_grouped_gemm.so);
+cp ./bazel-out/k8-opt/bin/external/deep_ep_rocm/libdeep_ep_rocm.so $(location libdeep_ep_rocm.so);
 """,
 tags = ["rocm", "local"],
 )
