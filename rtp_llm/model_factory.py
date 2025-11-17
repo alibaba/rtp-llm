@@ -23,6 +23,8 @@ from rtp_llm.config.py_config_modules import (
     RenderConfig,
     VitConfig,
 )
+from rtp_llm.distribute.gang_info import get_gang_info
+from rtp_llm.distribute.worker_info import g_parallel_info
 from rtp_llm.model_factory_register import _model_factory
 from rtp_llm.model_loader.load_config import LoadMethod
 from rtp_llm.models.propose_model.propose_model import ProposeModel
@@ -174,7 +176,7 @@ class ModelFactory:
     def from_model_configs(
         model_config: ModelConfig,
         engine_config: EngineConfig,
-        gang_info,
+        world_info,
         vit_config: Optional[VitConfig] = None,
         merge_lora: bool = False,
         propose_model_config: Optional[ModelConfig] = None,
@@ -219,7 +221,7 @@ class ModelFactory:
         propose_model = ModelFactory.get_sp_model(
             model_config=model_config,
             propose_model_config=propose_model_config,
-            engine_config=engine_config,
+            engine_config=engine_config
         )
 
         # Create engine using create_engine function (replaces AsyncModel)
@@ -228,7 +230,7 @@ class ModelFactory:
             model=model,
             engine_config=engine_config,
             alog_conf_path=alog_conf_path,
-            gang_info=gang_info,
+            world_info = world_info,
             propose_model=propose_model,
         )
         engine.start()

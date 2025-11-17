@@ -244,19 +244,19 @@ class WorkerInfo(object):
                 local_rank, start_port, worker_info_port_num
             ),
             remote_rpc_server_port=WorkerInfo.rpc_server_port_offset(
-                local_rank, int(os.environ.get("REMOTE_SERVER_PORT", 0)), worker_info_port_num
+                local_rank, StaticConfig.distribute_config.remote_server_port, worker_info_port_num
             ),
             cache_store_listen_port=WorkerInfo.cache_store_listen_port_offset(
                 local_rank, start_port, worker_info_port_num
             ),
             cache_store_connect_port=WorkerInfo.cache_store_listen_port_offset(
-                local_rank, int(os.environ.get("REMOTE_SERVER_PORT", 0)), worker_info_port_num
+                local_rank, StaticConfig.distribute_config.remote_server_port, worker_info_port_num
             ),
             cache_store_rdma_listen_port=WorkerInfo.cache_store_rdma_listen_port_offset(
                 local_rank, start_port, worker_info_port_num
             ),
             cache_store_rdma_connect_port=WorkerInfo.cache_store_rdma_listen_port_offset(
-                local_rank, int(os.environ.get("REMOTE_SERVER_PORT", 0)), worker_info_port_num
+                local_rank, StaticConfig.distribute_config.remote_server_port, worker_info_port_num
             ),
             backend_server_port=WorkerInfo.backend_server_port_offset(
                 local_rank, start_port, worker_info_port_num
@@ -271,40 +271,44 @@ class WorkerInfo(object):
         return info
 
     @staticmethod
-    def server_port_offset(local_rank: int, server_port: int, worker_info_port_num: int = None) -> int:
+    def server_port_offset(local_rank: int = 0, server_port: int, worker_info_port_num: int = None) -> int:
         base_port = server_port
         if worker_info_port_num is None:
             worker_info_port_num = g_parallel_info.worker_info_port_num
         return base_port + local_rank * worker_info_port_num
 
     @staticmethod
-    def rpc_server_port_offset(local_rank: int, server_port: int, worker_info_port_num: int = None) -> int:
+    def rpc_server_port_offset(local_rank: int = 0, server_port: int, worker_info_port_num: int = None) -> int:
         return WorkerInfo.server_port_offset(local_rank, server_port, worker_info_port_num) + 1
 
     @staticmethod
-    def cache_store_listen_port_offset(local_rank: int, server_port: int, worker_info_port_num: int = None) -> int:
+    def cache_store_listen_port_offset(
+        local_rank: int = 0, server_port: int, worker_info_port_num: int = None
+    ) -> int:
         return WorkerInfo.server_port_offset(local_rank, server_port, worker_info_port_num) + 2
 
     @staticmethod
-    def gang_hb_port_offset(local_rank: int, server_port: int, worker_info_port_num: int = None) -> int:
+    def gang_hb_port_offset(local_rank: int = 0, server_port: int, worker_info_port_num: int = None) -> int:
         return WorkerInfo.server_port_offset(local_rank, server_port, worker_info_port_num) + 3
 
     @staticmethod
     def cache_store_rdma_listen_port_offset(
-        local_rank: int, server_port: int, worker_info_port_num: int = None
+        local_rank: int = 0, server_port: int, worker_info_port_num: int = None
     ) -> int:
         return WorkerInfo.server_port_offset(local_rank, server_port, worker_info_port_num) + 4
 
     @staticmethod
-    def http_port_offset(local_rank: int, server_port: int, worker_info_port_num: int = None) -> int:
+    def http_port_offset(local_rank: int = 0, server_port: int, worker_info_port_num: int = None) -> int:
         return WorkerInfo.server_port_offset(local_rank, server_port, worker_info_port_num) + 5
 
     @staticmethod
-    def backend_server_port_offset(local_rank: int, server_port: int, worker_info_port_num: int = None) -> int:
+    def backend_server_port_offset(local_rank: int = 0, server_port: int, worker_info_port_num: int = None) -> int:
         return WorkerInfo.server_port_offset(local_rank, server_port, worker_info_port_num) + 6
 
     @staticmethod
-    def embedding_rpc_server_port_offset(local_rank: int, server_port: int,  worker_info_port_num: int = None) -> int:
+    def embedding_rpc_server_port_offset(
+        local_rank: int = 0, server_port: int,  worker_info_port_num: int = None
+    ) -> int:
         return WorkerInfo.server_port_offset(local_rank, server_port, worker_info_port_num) + 7
 
     # used for ut
