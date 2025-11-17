@@ -19,7 +19,7 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
     maga_init_params_ = maga_init_params;
     metrics_reporter_ = maga_init_params.metrics_reporter;
     RTP_LLM_LOG_INFO("LocalRpcServer aux_string %s",
-                        maga_init_params_.gpt_init_parameter.misc_config.aux_string.c_str());
+                     maga_init_params_.gpt_init_parameter.misc_config.aux_string.c_str());
     if (propose_params) {
         propose_maga_init_params_ = propose_params.get();
         if (!mm_process_engine.is_none()) {
@@ -371,6 +371,77 @@ EngineScheduleInfo LocalRpcServer::getEngineScheduleInfo(int64_t latest_finished
         const std::string error_msg = "cache manager " + ::DistKvCacheOp_Name(op_code) + " failed";
         return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
     }
+    return grpc::Status::OK;
+}
+
+grpc::Status LocalRpcServer::UpdateSchedulerInfo(grpc::ServerContext*                context,
+                                                 const UpdateSchedulerInfoRequestPB* request,
+                                                 EmptyPB*                            response) {
+    const std::string scheduler_info = request->scheduler_info();
+    engine_->getScheduler().updateSchedulerInfo(scheduler_info);
+    return grpc::Status::OK;
+}
+
+grpc::Status
+LocalRpcServer::SetLogLevel(grpc::ServerContext* context, const SetLogLevelRequestPB* request, EmptyPB* response) {
+    std::string log_level_str = request->log_level();
+    uint32_t    log_level     = alog::LOG_LEVEL_INFO;
+    if (log_level_str == "INFO" || log_level_str == "info") {
+        log_level = alog::LOG_LEVEL_INFO;
+    } else if (log_level_str == "WARNING" || log_level_str == "warning") {
+        log_level = alog::LOG_LEVEL_WARN;
+    } else if (log_level_str == "DEBUG" || log_level_str == "debug") {
+        log_level = alog::LOG_LEVEL_DEBUG;
+    } else if (log_level_str == "TRACE" || log_level_str == "trace") {
+        log_level = alog::LOG_LEVEL_TRACE1;
+    } else {
+        RTP_LLM_LOG_WARNING("set log level failed, unknown log level: %s", log_level_str.c_str());
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "Invalid log_level format");
+    }
+    auto& logger = rtp_llm::Logger::getEngineLogger();
+    logger.setBaseLevel(log_level);
+    return grpc::Status::OK;
+}
+
+grpc::Status
+LocalRpcServer::CheckHealth(grpc::ServerContext* context, const EmptyPB* request, CheckHealthResponsePB* response) {
+    RTP_LLM_LOG_DEBUG("receive cacheStatus rpc request from client: %s", context->peer().c_str());
+    response->set_health("OK");
+    return grpc::Status::OK;
+}
+
+grpc::Status LocalRpcServer::UpdateEplbConfig(grpc::ServerContext*             context,
+                                              const UpdateEplbConfigRequestPB* request,
+                                              EmptyPB*                         response) {
+    RTP_LLM_LOG_DEBUG("receive cacheStatus rpc request from client: %s", context->peer().c_str());
+    const string mode_str = request->mode();
+    EplbConfig   config;
+    if (mode_str == "EPLB" || mode_str == "eplb") {
+        config.mode = EplbMode::EPLB;
+    } else if (mode_str == "STATS" || mode_str == "stats") {
+        config.mode = EplbMode::STATS;
+    } else if (mode_str == "NONE" || mode_str == "none") {
+        config.mode = EplbMode::NONE;
+    } else if (mode_str == "ALL" || mode_str == "all") {
+        config.mode = EplbMode::ALL;
+    } else {
+        RTP_LLM_LOG_WARNING("set eplb mode failed, unknown mode : %s", mode_str.c_str());
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "Invalid eplb mode");
+    }
+    config.update_time = request->update_time();
+    engine_->updateEplbConfig(config);
+    return grpc::Status::OK;
+}
+
+grpc::Status LocalRpcServer::SetPause(grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response) {
+    RTP_LLM_LOG_DEBUG("receive cacheStatus rpc request from client: %s", context->peer().c_str());
+    engine_->pause();
+    return grpc::Status::OK;
+}
+
+grpc::Status LocalRpcServer::SetRestart(grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response) {
+    RTP_LLM_LOG_DEBUG("receive cacheStatus rpc request from client: %s,", context->peer().c_str());
+    engine_->restart();
     return grpc::Status::OK;
 }
 

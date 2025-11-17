@@ -23,19 +23,13 @@ from rtp_llm.lora.lora_manager import LoraManager
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.model_loader.weight_manager import WeightManager
-from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
-from rtp_llm.ops import EngineScheduleInfo, KVCacheInfo, WorkerStatusInfo
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.server.misc import format_exception
-from rtp_llm.server.worker_status import TaskInfo, WorkStatus
-from rtp_llm.structure.request_extractor import request_id_field_name
 from rtp_llm.utils.concurrency_controller import (
     ConcurrencyException,
     get_global_controller,
 )
 from rtp_llm.utils.fuser import _nfs_manager
-from rtp_llm.utils.time_util import Timer
-from rtp_llm.utils.version_info import VersionInfo
 
 StreamObjectType = Union[Dict[str, Any], BaseModel]
 
@@ -139,153 +133,6 @@ class BackendServer(object):
                 except Exception as e:
                     logging.warn("worker not all ready, error_msg: " + str(e))
                     time.sleep(5)
-
-    def get_engine_schedule_info(
-        self, latest_finished_version: int
-    ) -> EngineScheduleInfo:
-        if self.engine is None:
-            return EngineScheduleInfo()
-        return self.engine.get_engine_schedule_info(latest_finished_version)
-
-        # get worker status
-
-    def get_cache_status(self, latest_cache_version: int) -> KVCacheInfo:
-        with Timer() as t:
-            cache_status_info: KVCacheInfo = self.engine.get_cache_status_info(
-                latest_cache_version
-            )
-        kmonitor.report(AccMetrics.CACHE_STATUS_QPS_METRIC, 1)
-        kmonitor.report(GaugeMetrics.CACHE_STATUS_QPS_LATENCY_METRIC, t.cost_ms())
-        return cache_status_info
-
-    def get_worker_status(self, latest_finished_version: int) -> WorkStatus:
-        with Timer() as t:
-            worker_status_info: WorkerStatusInfo = self.engine.get_worker_status_info(
-                latest_finished_version
-            )
-            engine_schedule_info = worker_status_info.engine_schedule_info
-            worker_status: WorkStatus = WorkStatus(
-                role=self.role_type,
-                running_task_info=[
-                    TaskInfo(
-                        **{
-                            "request_id": task.request_id,
-                            "inter_request_id": task.inter_request_id,
-                            "prefix_length": task.prefix_length,
-                            "input_length": task.input_length,
-                            "waiting_time_ms": task.waiting_time_ms,
-                            "iterate_count": task.iterate_count,
-                            "end_time_ms": task.end_time_ms,
-                            "dp_rank": worker_status_info.dp_rank,
-                        }
-                    )
-                    for task in engine_schedule_info.running_task_info_list
-                ],
-                finished_task_list=[
-                    TaskInfo(
-                        **{
-                            "request_id": task.request_id,
-                            "inter_request_id": task.inter_request_id,
-                            "prefix_length": task.prefix_length,
-                            "input_length": task.input_length,
-                            "waiting_time_ms": task.waiting_time_ms,
-                            "iterate_count": task.iterate_count,
-                            "end_time_ms": task.end_time_ms,
-                            "dp_rank": worker_status_info.dp_rank,
-                        }
-                    )
-                    for task in engine_schedule_info.finished_task_info_list
-                ],
-                profile_meta=None,
-                dp_size=worker_status_info.dp_size,
-                tp_size=worker_status_info.tp_size,
-                status_version=worker_status_info.status_version,
-                alive=worker_status_info.alive,
-                precision=worker_status_info.precision,
-            )
-        kmonitor.report(AccMetrics.WORKER_STATUS_QPS_METRIC, 1)
-        kmonitor.report(GaugeMetrics.WORKER_STATUS_QPS_LANTENCY_METRIC, t.cost_ms())
-        return worker_status
-
-    # TODO(xinfei.sxf) use model
-    def set_log_level(self, req: Union[str, Dict[Any, Any]]) -> None:
-        if isinstance(req, str):
-            req = json.loads(req)
-        return torch.ops.rtp_llm.set_log_level(req["log_level"])
-
-    async def update(self, version_info: VersionInfo):
-        try:
-            request = version_info.model_dump()
-            lora_infos: Dict[str, Any] = dict()
-            if version_info.peft_info != None:
-                lora_infos = version_info.peft_info.get("lora_info", {})
-            request[request_id_field_name] = self._global_controller.increment()
-        except Exception as e:
-            return self._handle_exception(request, e)
-
-        try:
-            assert self._lora_manager
-            with Timer() as t, self.thread_lock_:
-                add_lora_map = self._lora_manager.get_add_lora_map(lora_infos)
-                remove_lora_map = self._lora_manager.get_remove_lora_map(lora_infos)
-                # must remove first
-                for key, value in remove_lora_map.items():
-                    self.remove_lora({"adapter_name": key})
-                for key, value in add_lora_map.items():
-                    self.add_lora({"adapter_name": key, "lora_path": value})
-            rep = ORJSONResponse(None)
-            kmonitor.report(AccMetrics.UPDATE_QPS_METRIC, 1)
-            kmonitor.report(GaugeMetrics.UPDATE_LANTENCY_METRIC, t.cost_ms())
-            return rep
-        except Exception as e:
-            self._access_logger.log_exception_access(request, e)
-            kmonitor.report(AccMetrics.ERROR_UPDATE_QPS_METRIC, 1)
-            error_code = 500
-            rep = ORJSONResponse(format_exception(e), status_code=error_code)
-            return rep
-        finally:
-            self._global_controller.decrement()
-
-    def add_lora(self, req: Dict[str, str]):
-        assert self._lora_manager is not None
-        if g_parallel_info.is_master and g_parallel_info.world_size > 1:
-            _ = self._gang_server.request_workers(req, "add_lora_internal", True)
-        self._lora_manager.add_lora(req["adapter_name"], req["lora_path"])
-
-    def remove_lora(self, req: Dict[str, str]):
-        assert self._lora_manager is not None
-        self._lora_manager.remove_lora(req["adapter_name"])
-        if g_parallel_info.is_master and g_parallel_info.world_size > 1:
-            _ = self._gang_server.request_workers(req, "remove_lora_internal", True)
-
-    def update_scheduler_info(self, req: Union[str, Dict[str, str]]):
-        if self.engine is None:
-            return
-        if isinstance(req, str):
-            req = json.loads(req)
-        try:
-            self.engine.update_scheduler_info(json.dumps(req))
-            if not (g_parallel_info.is_master and g_parallel_info.world_size > 1):
-                return {"status": "ok"}
-            ret: List[requests.Response] = self._gang_server.request_workers(
-                req, "update_scheduler_info", True
-            )
-            for r in ret:
-                if r.status_code != 200:
-                    return {
-                        "status": "error",
-                        "details": f"update scheduler info failed, status_code: {r.status_code}",
-                    }
-                if r.json().get("status", "ok") != "ok":
-                    return {"status": "error", "details": r.json()}
-            return {"status": "ok"}
-        except Exception as e:
-            return {"status": "error", "details": str(e)}
-
-    def update_eplb_config(self, req: Dict[str, str]) -> bool:
-        if self.engine is None:
-            return False
-        return self.engine.update_eplb_config(req)
 
     def pause(self) -> None:
         if g_parallel_info.is_master and g_parallel_info.world_size > 1:
