@@ -1395,11 +1395,10 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(const GptLayerInputs&     
     }
     printBufferData(*attn_hidden, "layer_" + to_string(layer_id) + "_attn_output");
 
-    // TO DO: moe model not support quant input, therefore LayerNormOp need transfer QScheme::NoQuantize
-    auto modelType = autil::EnvUtil::getEnv("MODEL_TYPE", "");      
-    auto quant_type = QScheme::NoQuantize;
-    if (modelType.find("moe") == std::string::npos) {
-        quant_type = description_.act_qscheme;
+    auto quant_type = description_.act_qscheme;
+    // Note: MOE gating supports BF16 only (FP8 unsupported), no RMSNorm+Quant fusion here.
+    if (layer.ffn_weights.moe_gating_weight) {
+        quant_type = QScheme::NoQuantize;
     }
     if (layer.post_layernorm) {
         // attn_hidden = attn_hidden + residual
