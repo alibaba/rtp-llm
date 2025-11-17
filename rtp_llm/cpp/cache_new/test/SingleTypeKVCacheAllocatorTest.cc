@@ -66,13 +66,11 @@ CompleteTokenIdsPtr createCompleteTokenIds(int batch_size, int seq_length) {
 
 BatchKVCacheResourcePtr createBatchKVCacheResource(int batch_size, int block_num_per_batch = 0) {
     auto resource = std::make_shared<BatchKVCacheResource>();
-    resource->batch_block_id.resize(batch_size);
-    resource->cache_keys.resize(batch_size);
     resource->batch_resource.resize(batch_size);
     for (int i = 0; i < batch_size; ++i) {
-        resource->batch_block_id[i]            = std::vector<int>(block_num_per_batch);
-        resource->cache_keys[i]                = std::vector<size_t>(block_num_per_batch, i * 100);
-        resource->batch_resource[i].cache_keys = std::vector<size_t>(block_num_per_batch, i * 100);
+        resource->batch_resource[i].initGroups(1);
+        resource->batch_resource[i].group_block_ids[0]->block_indices = std::vector<int>(block_num_per_batch);
+        resource->batch_resource[i].cache_keys = CacheKeysType(block_num_per_batch, static_cast<CacheKeyType>(i * 100));
     }
     return resource;
 }
@@ -128,7 +126,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MallocSingleBatch) {
     auto       result = allocator_->malloc(malloc_info);
 
     EXPECT_TRUE(result.success);
-    EXPECT_EQ(batch_resource->batch_block_id[0].size(), 2);
+    EXPECT_EQ(batch_resource->batch_resource[0].group_block_ids[0]->block_indices.size(), 2);
     EXPECT_LT(allocator_->freeBlocksNums(), config.block_num);
 
     seq_length         = 160;
@@ -156,7 +154,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MallocMultipleBatches) {
 
     EXPECT_TRUE(result.success);
     for (int i = 0; i < batch_size; ++i) {
-        EXPECT_EQ(batch_resource->batch_block_id[i].size(), 3);
+        EXPECT_EQ(batch_resource->batch_resource[i].group_block_ids[0]->block_indices.size(), 3);
     }
     EXPECT_EQ(allocator_->freeBlocksNums(), config.block_num - 6);  // 2 shared + 3 batches * 1 blocks + 1 reserved
 }

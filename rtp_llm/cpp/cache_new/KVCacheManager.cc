@@ -99,9 +99,9 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
     int seq_len            = malloc_info.complete_token_ids->seqLength();
     int desired_blocks     = seq_len / (int)seq_size_per_block;
 
-    // append cache_keys for eache batch
+    // append cache_keys for each batch
     for (int i = 0; i < batch_size; ++i) {
-        auto& keys = malloc_info.batch_kv_cache_resource->cache_keys[i];
+        auto& keys = malloc_info.batch_kv_cache_resource->batch_resource[i].cache_keys;
 
         if ((int)keys.size() > desired_blocks) {
             keys.resize(desired_blocks);
