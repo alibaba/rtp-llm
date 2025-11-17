@@ -29,24 +29,14 @@ void cutlass_moe_mm(torch::Tensor&       out_tensors,
                     int                  cluster_k = 0,
                     bool                 swap_ab   = false);
 
-void get_cutlass_moe_mm_data(const torch::Tensor&                topk_ids,
-                             torch::Tensor&                      expert_offsets,
-                             torch::Tensor&                      problem_sizes1,
-                             torch::Tensor&                      problem_sizes2,
-                             torch::Tensor&                      input_permutation,
-                             torch::Tensor&                      output_permutation,
-                             const int64_t                       num_experts,
-                             const int64_t                       n,
-                             const int64_t                       k,
-                             const std::optional<torch::Tensor>& blockscale_offsets);
-
 void get_cutlass_moe_mm_without_permute_info(const torch::Tensor&                topk_ids,
                                              torch::Tensor&                      problem_sizes1,
                                              torch::Tensor&                      problem_sizes2,
                                              const int64_t                       num_experts,
                                              const int64_t                       n,
                                              const int64_t                       k,
-                                             const bool                          swap_ab,
+                                             const bool                          problem_1_swap_ab,
+                                             const bool                          problem_2_swap_ab,
                                              const std::optional<torch::Tensor>& blockscale_offsets);
 
 void get_cutlass_batched_moe_mm_data(torch::Tensor&       expert_offsets,
@@ -57,6 +47,7 @@ void get_cutlass_batched_moe_mm_data(torch::Tensor&       expert_offsets,
                                      const int64_t        padded_m,
                                      const int64_t        n,
                                      const int64_t        k,
-                                     const bool           swap_ab);
+                                     const bool           problem_1_swap_ab,
+                                     const bool           problem_2_swap_ab);
 
 };  // namespace rtp_llm

@@ -31,19 +31,6 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
                   py::arg("cluster_k") = 0,
                   py::arg("swap_ab")   = false);
 
-    rtp_ops_m.def("get_cutlass_moe_mm_data",
-                  &get_cutlass_moe_mm_data,
-                  py::arg("topk_ids"),
-                  py::arg("expert_offsets"),
-                  py::arg("problem_sizes1"),
-                  py::arg("problem_sizes2"),
-                  py::arg("input_permutation"),
-                  py::arg("output_permutation"),
-                  py::arg("num_experts"),
-                  py::arg("n"),
-                  py::arg("k"),
-                  py::arg("blockscale_offsets") = py::none());
-
     rtp_ops_m.def("get_cutlass_batched_moe_mm_data",
                   &get_cutlass_batched_moe_mm_data,
                   py::arg("expert_offsets"),
@@ -54,7 +41,8 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
                   py::arg("padded_m"),
                   py::arg("n"),
                   py::arg("k"),
-                  py::arg("swap_ab"));
+                  py::arg("problem_1_swap_ab"),
+                  py::arg("problem_2_swap_ab"));
 
     rtp_ops_m.def("get_cutlass_moe_mm_without_permute_info",
                   &get_cutlass_moe_mm_without_permute_info,
@@ -64,7 +52,8 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
                   py::arg("num_experts"),
                   py::arg("n"),
                   py::arg("k"),
-                  py::arg("swap_ab"),
+                  py::arg("problem_1_swap_ab"),
+                  py::arg("problem_2_swap_ab"),
                   py::arg("blockscale_offsets") = py::none());
 
     rtp_ops_m.def("per_tensor_quant_fp8",

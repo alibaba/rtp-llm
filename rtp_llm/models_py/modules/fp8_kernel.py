@@ -184,7 +184,9 @@ def cutlass_moe_mm_fp8_scaled(
             config["cluster_k"],
         )
         if swap_ab != config["swap_ab"]:
-            print("gemm1 swap_ab but gemm2 not swap_ab")
+            logging.warning(
+                "Using mismatched gemm config swap_ab, potentially causing cutlass groupgemm performance loss."
+            )
         return cutlass_moe_mm(
             output,
             aq,
