@@ -21,7 +21,15 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
                   py::arg("b_strides"),
                   py::arg("c_strides"),
                   py::arg("per_act_token"),
-                  py::arg("per_out_ch"));
+                  py::arg("per_out_ch"),
+                  py::arg("profile")   = false,
+                  py::arg("m_tile")    = 0,
+                  py::arg("n_tile")    = 0,
+                  py::arg("k_tile")    = 0,
+                  py::arg("cluster_m") = 0,
+                  py::arg("cluster_n") = 0,
+                  py::arg("cluster_k") = 0,
+                  py::arg("swap_ab")   = false);
 
     rtp_ops_m.def("get_cutlass_moe_mm_data",
                   &get_cutlass_moe_mm_data,
@@ -45,7 +53,8 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
                   py::arg("num_local_experts"),
                   py::arg("padded_m"),
                   py::arg("n"),
-                  py::arg("k"));
+                  py::arg("k"),
+                  py::arg("swap_ab"));
 
     rtp_ops_m.def("get_cutlass_moe_mm_without_permute_info",
                   &get_cutlass_moe_mm_without_permute_info,
@@ -55,6 +64,7 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
                   py::arg("num_experts"),
                   py::arg("n"),
                   py::arg("k"),
+                  py::arg("swap_ab"),
                   py::arg("blockscale_offsets") = py::none());
 
     rtp_ops_m.def("per_tensor_quant_fp8",
