@@ -83,6 +83,11 @@ BlockIndicesType BlockPool::malloc(int num_blocks) {
     return block_ids;
 }
 
+void BlockPool::free(BlockIdxType block_idx) {
+    auto block_ids = {block_idx};
+    free(block_ids);
+}
+
 void BlockPool::free(const BlockIndicesType& block_ids) {
     block_ref_counter_.decrementRefCounter(block_ids);
     for (auto& block_id : block_ids) {

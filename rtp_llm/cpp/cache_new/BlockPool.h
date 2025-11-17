@@ -18,7 +18,6 @@
 #include "rtp_llm/cpp/cache_new/BlockCacheV1.h"
 #include "rtp_llm/cpp/cache_new/MemoryLayoutStrategy.h"
 
-
 namespace rtp_llm {
 
 // TODO, 0 号block不能算作free
@@ -37,10 +36,11 @@ public:
     size_t totalBlockNums() const;
     size_t freeBlockNums() const;
 
-    MemoryType where() const;
+    MemoryType                 where() const;
     std::vector<torch::Tensor> layerCacheBase() const;
 
     std::vector<BlockIdxType> malloc(int num_blocks);
+    void                      free(BlockIdxType block_idx);
     void                      free(const BlockIndicesType& block_indices);
     void                      reference(const BlockIndicesType& block_indices);
 
@@ -50,7 +50,7 @@ public:
 
     void* getKCacheAddr(int layer_id, int block_id) const;
     void* getVCacheAddr(int layer_id, int block_id) const;
-    
+
     // For backward compatibility with old cache system
     KVCacheBuffer kvCacheBuffer() const;
 

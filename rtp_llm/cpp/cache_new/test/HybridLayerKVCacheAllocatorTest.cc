@@ -64,13 +64,14 @@ CompleteTokenIdsPtr createCompleteTokenIds(int batch_size, int seq_length) {
     return complete_token_ids;
 }
 
-BatchKVCacheResourcePtr createBatchKVCacheResource(int batch_size, int group_nums = 0, int block_nums = 0) {
+BatchKVCacheResourcePtr createBatchKVCacheResource(int batch_size, int group_nums = 0, int cache_key_nums = 0) {
     auto resource = std::make_shared<BatchKVCacheResource>();
     resource->batch_resource.resize(batch_size);
     for (int i = 0; i < batch_size; ++i) {
+        for (size_t j = 0; j < cache_key_nums; ++j) {
+            resource->batch_resource[i].cache_keys.push_back(100 + j);
+        }
         resource->batch_resource[i].initGroups(group_nums);
-        resource->batch_resource[i].resizeBlocks(block_nums, 0);
-        resource->batch_resource[i].cache_keys = CacheKeysType(block_nums, static_cast<CacheKeyType>(i * 100));
     }
     return resource;
 }
@@ -150,6 +151,18 @@ TEST_F(HybridLayerKVCacheAllocatorTest, ReuseCache) {
 
     int reuse_blocks2 = allocator_->reuseCache(cache_keys, group_ids);
     ASSERT_EQ(reuse_blocks2, 2);
+
+    ASSERT_EQ(group_ids[0]->block_indices.size(), 2);
+    ASSERT_EQ(group_ids[0]->block_indices[0], 1);
+    ASSERT_EQ(group_ids[0]->block_indices[1], 2);
+
+    ASSERT_EQ(group_ids[1]->block_indices.size(), 2);
+    ASSERT_EQ(group_ids[1]->block_indices[0], -1);
+    ASSERT_EQ(group_ids[1]->block_indices[1], 4);
+
+    ASSERT_EQ(group_ids[2]->block_indices.size(), 2);
+    ASSERT_EQ(group_ids[2]->block_indices[0], -1);
+    ASSERT_EQ(group_ids[2]->block_indices[1], 5);
 }
 
 TEST_F(HybridLayerKVCacheAllocatorTest, IncrMallocSingleBatch) {
@@ -169,6 +182,10 @@ TEST_F(HybridLayerKVCacheAllocatorTest, IncrMallocSingleBatch) {
     EXPECT_EQ(result.reuse_len, 0);
     EXPECT_EQ(batch_resource->batch_resource[0].blocks(), 2);
     EXPECT_EQ(allocator_->freeBlocksNums(), total_blocks - 3 * 2);
+
+    FreeInfo free_info(batch_resource, complete_token_ids);
+    allocator_->free(free_info);
+    EXPECT_EQ(allocator_->freeBlocksNums(), total_blocks);
 }
 
 TEST_F(HybridLayerKVCacheAllocatorTest, IncrMallocMultiBatch) {
@@ -189,6 +206,10 @@ TEST_F(HybridLayerKVCacheAllocatorTest, IncrMallocMultiBatch) {
     EXPECT_EQ(batch_resource->batch_resource[0].blocks(), 2);
     EXPECT_EQ(batch_resource->batch_resource[1].blocks(), 2);
     EXPECT_EQ(allocator_->freeBlocksNums(), total_blocks - 2 * 3 * 2);
+
+    FreeInfo free_info(batch_resource, complete_token_ids);
+    allocator_->free(free_info);
+    EXPECT_EQ(allocator_->freeBlocksNums(), total_blocks);
 }
 
 TEST_F(HybridLayerKVCacheAllocatorTest, initMallocForCommonLenSingleBatch) {
@@ -203,7 +224,158 @@ TEST_F(HybridLayerKVCacheAllocatorTest, initMallocForCommonLenSingleBatch) {
 
     MallocInfo malloc_info(batch_resource, complete_token_ids);
     malloc_info.batch_kv_cache_resource->enable_reuse_cache = false;
+    malloc_info.common_seq_len                              = 16;
     auto malloc_result1                                     = allocator_->initMallocForCommonLen(malloc_info);
+    EXPECT_TRUE(malloc_result1.success);
+    EXPECT_EQ(batch_resource->batch_resource[0].blocks(), 4);
+    EXPECT_EQ(allocator_->freeBlocksNums(), total_blocks - 3 * 4);
+
+    FreeInfo free_info(batch_resource, complete_token_ids);
+    allocator_->free(free_info);
+    EXPECT_EQ(allocator_->freeBlocksNums(), total_blocks);
+
+    auto                    block_pool  = allocator_->getBlockPool();
+    auto                    block_cache = block_pool->blockCache();
+    BlockCacheV1::CacheItem item1       = {101, 0, 1, false};
+    auto                    result1     = block_cache->put(item1);
+    EXPECT_TRUE(result1);
+    BlockCacheV1::CacheItem item2   = {102, 0, 2, false};
+    auto                    result2 = block_cache->put(item2);
+    EXPECT_TRUE(result2);
+    BlockCacheV1::CacheItem item3   = {102, 1, 3, false};
+    auto                    result3 = block_cache->put(item3);
+    EXPECT_TRUE(result3);
+    BlockCacheV1::CacheItem item4   = {102, 2, 4, false};
+    auto                    result4 = block_cache->put(item4);
+    EXPECT_TRUE(result4);
+
+    auto batch_resource2                = createBatchKVCacheResource(1, 3);
+    malloc_info.batch_kv_cache_resource = batch_resource2;
+    auto& cache_keys                    = malloc_info.batch_kv_cache_resource->batch_resource[0].cache_keys;
+    cache_keys                          = {101, 102, 103, 104};
+
+    malloc_info.batch_kv_cache_resource->enable_reuse_cache = true;
+    auto malloc_result2                                     = allocator_->initMallocForCommonLen(malloc_info);
+    EXPECT_TRUE(malloc_result2.success);
+    EXPECT_EQ(malloc_result2.reuse_len, 8);
+    EXPECT_EQ(batch_resource2->batch_resource[0].blocks(), 4);
+    EXPECT_EQ(batch_resource2->batch_resource[0].group_block_ids[0]->size(), 4);
+    EXPECT_EQ(batch_resource2->batch_resource[0].group_block_ids[1]->size(), 4);
+    EXPECT_EQ(batch_resource2->batch_resource[0].group_block_ids[2]->size(), 4);
+    EXPECT_EQ(batch_resource2->batch_resource[0].group_block_ids[0]->block_indices[0], 1);
+    EXPECT_EQ(batch_resource2->batch_resource[0].group_block_ids[0]->block_indices[1], 2);
+    EXPECT_EQ(batch_resource2->batch_resource[0].group_block_ids[1]->block_indices[0], -1);
+    EXPECT_EQ(batch_resource2->batch_resource[0].group_block_ids[1]->block_indices[1], 3);
+    EXPECT_EQ(batch_resource2->batch_resource[0].group_block_ids[2]->block_indices[0], -1);
+    EXPECT_EQ(batch_resource2->batch_resource[0].group_block_ids[2]->block_indices[1], 4);
+
+    EXPECT_EQ(allocator_->freeBlocksNums(), total_blocks - 3 * 2);
+
+    FreeInfo free_info_2(batch_resource2, complete_token_ids);
+    allocator_->free(free_info_2);
+    EXPECT_EQ(allocator_->freeBlocksNums(), total_blocks);
+}
+
+TEST_F(HybridLayerKVCacheAllocatorTest, initMallocForCommonLenMultiBatch) {
+    auto config = createHybridLayerTestConfig(4, 40, 4);
+    allocator_  = std::make_shared<HybridLayerKVCacheAllocator>(config, device_);
+    allocator_->init();
+    auto total_blocks = allocator_->freeBlocksNums();
+
+    int  seq_length         = 17;
+    auto batch_resource     = createBatchKVCacheResource(2, 3);
+    auto complete_token_ids = createCompleteTokenIds(2, seq_length);
+
+    MallocInfo malloc_info(batch_resource, complete_token_ids);
+    malloc_info.common_seq_len                              = 16;
+    malloc_info.batch_kv_cache_resource->enable_reuse_cache = false;
+    auto malloc_result1                                     = allocator_->initMallocForCommonLen(malloc_info);
+    EXPECT_TRUE(malloc_result1.success);
+    EXPECT_EQ(batch_resource->batch_resource[0].blocks(), 4);
+    EXPECT_EQ(allocator_->freeBlocksNums(), total_blocks - (3 * 4));
+
+    FreeInfo free_info(batch_resource, complete_token_ids);
+    allocator_->free(free_info);
+    EXPECT_EQ(allocator_->freeBlocksNums(), total_blocks);
+
+    auto                    block_pool  = allocator_->getBlockPool();
+    auto                    block_cache = block_pool->blockCache();
+    BlockCacheV1::CacheItem item1       = {101, 0, 1, false};
+    auto                    result1     = block_cache->put(item1);
+    EXPECT_TRUE(result1);
+    BlockCacheV1::CacheItem item2   = {102, 0, 2, false};
+    auto                    result2 = block_cache->put(item2);
+    EXPECT_TRUE(result2);
+    BlockCacheV1::CacheItem item3   = {102, 1, 3, false};
+    auto                    result3 = block_cache->put(item3);
+    EXPECT_TRUE(result3);
+    BlockCacheV1::CacheItem item4   = {102, 2, 4, false};
+    auto                    result4 = block_cache->put(item4);
+    EXPECT_TRUE(result4);
+
+    auto batch_resource2                = createBatchKVCacheResource(2, 3);
+    malloc_info.batch_kv_cache_resource = batch_resource2;
+    auto& cache_keys                    = malloc_info.batch_kv_cache_resource->batch_resource[0].cache_keys;
+    cache_keys                          = {101, 102, 103, 104};
+    auto& cache_keys_2                  = malloc_info.batch_kv_cache_resource->batch_resource[1].cache_keys;
+    cache_keys_2                        = {101, 102, 103, 104};
+
+    malloc_info.batch_kv_cache_resource->enable_reuse_cache = true;
+    auto malloc_result2                                     = allocator_->initMallocForCommonLen(malloc_info);
+    EXPECT_TRUE(malloc_result2.success);
+    auto& batch_id_0 = batch_resource2->batch_resource[0];
+    auto& batch_id_1 = batch_resource2->batch_resource[1];
+
+    EXPECT_EQ(batch_id_0.blocks(), 4);
+    EXPECT_EQ(batch_id_0.group_block_ids[0]->size(), 4);
+    EXPECT_EQ(batch_id_0.group_block_ids[1]->size(), 4);
+    EXPECT_EQ(batch_id_0.group_block_ids[2]->size(), 4);
+    EXPECT_EQ(batch_id_0.group_block_ids[0]->block_indices[0], 1);
+    EXPECT_EQ(batch_id_0.group_block_ids[0]->block_indices[1], 2);
+    EXPECT_EQ(batch_id_0.group_block_ids[1]->block_indices[0], -1);
+    EXPECT_EQ(batch_id_0.group_block_ids[1]->block_indices[1], 3);
+    EXPECT_EQ(batch_id_0.group_block_ids[2]->block_indices[0], -1);
+    EXPECT_EQ(batch_id_0.group_block_ids[2]->block_indices[1], 4);
+
+    EXPECT_EQ(batch_id_1.blocks(), 4);
+    EXPECT_EQ(batch_id_1.group_block_ids[0]->size(), 4);
+    EXPECT_EQ(batch_id_1.group_block_ids[1]->size(), 4);
+    EXPECT_EQ(batch_id_1.group_block_ids[2]->size(), 4);
+    EXPECT_EQ(batch_id_1.group_block_ids[0]->block_indices[0], 1);
+    EXPECT_EQ(batch_id_1.group_block_ids[0]->block_indices[1], 2);
+    EXPECT_EQ(batch_id_1.group_block_ids[1]->block_indices[0], -1);
+    EXPECT_EQ(batch_id_1.group_block_ids[1]->block_indices[1], 3);
+    EXPECT_EQ(batch_id_1.group_block_ids[2]->block_indices[0], -1);
+    EXPECT_EQ(batch_id_1.group_block_ids[2]->block_indices[1], 4);
+
+    EXPECT_EQ(batch_id_0.group_block_ids[0]->block_indices[2], batch_id_1.group_block_ids[0]->block_indices[2]);
+    EXPECT_EQ(batch_id_0.group_block_ids[0]->block_indices[3], batch_id_1.group_block_ids[0]->block_indices[3]);
+    EXPECT_EQ(batch_id_0.group_block_ids[1]->block_indices[2], batch_id_1.group_block_ids[1]->block_indices[2]);
+    EXPECT_EQ(batch_id_0.group_block_ids[1]->block_indices[3], batch_id_1.group_block_ids[1]->block_indices[3]);
+    EXPECT_EQ(batch_id_0.group_block_ids[2]->block_indices[2], batch_id_1.group_block_ids[2]->block_indices[2]);
+    EXPECT_EQ(batch_id_0.group_block_ids[2]->block_indices[3], batch_id_1.group_block_ids[2]->block_indices[3]);
+
+    EXPECT_EQ(allocator_->freeBlocksNums(), total_blocks - (3 * 2));
+
+    FreeInfo free_info_2(batch_resource2, complete_token_ids);
+    allocator_->free(free_info_2);
+    EXPECT_EQ(allocator_->freeBlocksNums(), total_blocks);
+}
+
+TEST_F(HybridLayerKVCacheAllocatorTest, initMallocSingleBatch) {
+    auto config = createHybridLayerTestConfig(4, 40, 4);
+    allocator_  = std::make_shared<HybridLayerKVCacheAllocator>(config, device_);
+    allocator_->init();
+    auto total_blocks = allocator_->freeBlocksNums();
+
+    int  seq_length         = 17;
+    auto batch_resource     = createBatchKVCacheResource(1, 3);
+    auto complete_token_ids = createCompleteTokenIds(1, seq_length);
+
+    MallocInfo malloc_info(batch_resource, complete_token_ids);
+    malloc_info.batch_kv_cache_resource->enable_reuse_cache = false;
+    malloc_info.common_seq_len                              = 16;
+    auto malloc_result1                                     = allocator_->malloc(malloc_info);
     EXPECT_TRUE(malloc_result1.success);
     EXPECT_EQ(batch_resource->batch_resource[0].blocks(), 5);
     EXPECT_EQ(allocator_->freeBlocksNums(), total_blocks - 3 * 5);
@@ -233,549 +405,290 @@ TEST_F(HybridLayerKVCacheAllocatorTest, initMallocForCommonLenSingleBatch) {
     cache_keys                          = {101, 102, 103, 104};
 
     malloc_info.batch_kv_cache_resource->enable_reuse_cache = true;
-    auto malloc_result2                                     = allocator_->initMallocForCommonLen(malloc_info);
+    auto malloc_result2                                     = allocator_->malloc(malloc_info);
     EXPECT_TRUE(malloc_result2.success);
-    EXPECT_EQ(batch_resource->batch_resource[0].blocks(), 5);
-    EXPECT_EQ(batch_resource->batch_resource[0].group_block_ids[0]->size(), 5);
-    EXPECT_EQ(batch_resource->batch_resource[0].group_block_ids[1]->size(), 5);
-    EXPECT_EQ(batch_resource->batch_resource[0].group_block_ids[2]->size(), 5);
-    // EXPECT_EQ(allocator_->freeBlocksNums(), total_blocks - 5);
+    EXPECT_EQ(malloc_result2.reuse_len, 8);
+    EXPECT_EQ(batch_resource2->batch_resource[0].blocks(), 5);
+    EXPECT_EQ(batch_resource2->batch_resource[0].group_block_ids[0]->size(), 5);
+    EXPECT_EQ(batch_resource2->batch_resource[0].group_block_ids[1]->size(), 5);
+    EXPECT_EQ(batch_resource2->batch_resource[0].group_block_ids[2]->size(), 5);
+    EXPECT_EQ(batch_resource2->batch_resource[0].group_block_ids[0]->block_indices[0], 1);
+    EXPECT_EQ(batch_resource2->batch_resource[0].group_block_ids[0]->block_indices[1], 2);
+    EXPECT_EQ(batch_resource2->batch_resource[0].group_block_ids[1]->block_indices[0], -1);
+    EXPECT_EQ(batch_resource2->batch_resource[0].group_block_ids[1]->block_indices[1], 3);
+    EXPECT_EQ(batch_resource2->batch_resource[0].group_block_ids[2]->block_indices[0], -1);
+    EXPECT_EQ(batch_resource2->batch_resource[0].group_block_ids[2]->block_indices[1], 4);
+
+    EXPECT_EQ(allocator_->freeBlocksNums(), total_blocks - 3 * 3);
+
+    FreeInfo free_info_2(batch_resource2, complete_token_ids);
+    allocator_->free(free_info_2);
+    EXPECT_EQ(allocator_->freeBlocksNums(), total_blocks);
 }
 
-// TEST_F(HybridLayerKVCacheAllocatorTest, MallocMultipleBatches) {
-//     auto config = createHybridLayerTestConfig();
-//     allocator_  = std::make_shared<HybridLayerKVCacheAllocator>(config, device_);
-//     allocator_->init();
-
-//     int  batch_size         = 3;
-//     int  seq_length         = 16;
-//     auto batch_resource     = createBatchKVCacheResource(batch_size);
-//     auto complete_token_ids = createCompleteTokenIds(batch_size, seq_length);
-
-//     MallocInfo malloc_info(batch_resource, complete_token_ids);
-//     auto       result = allocator_->malloc(malloc_info);
-
-//     EXPECT_TRUE(result.success);
-//     for (int i = 0; i < batch_size; ++i) {
-//         EXPECT_EQ(batch_resource->batch_block_id[i].size(), 2);
-//     }
-//     EXPECT_EQ(allocator_->freeBlocksNums(), config.block_num - 7);  // 3 batches * 2 blocks + 1 reserved
-// }
-
-// // TEST_F(HybridLayerKVCacheAllocatorTest, MallocWithInsufficientBlocks) {
-// //     auto config = createHybridLayerTestConfig(4, 5, 8);
-// //     allocator_ = std::make_shared<HybridLayerKVCacheAllocator>(config, device_);
-// //     allocator_->init();
-
-// //     int batch_size = 3;
-// //     int seq_length = 16;  // 3 batches * 2 blocks
-// //     auto batch_resource = createBatchKVCacheResource(batch_size);
-// //     auto complete_token_ids = createCompleteTokenIds(batch_size, seq_length);
-
-// //     MallocInfo malloc_info(batch_resource, complete_token_ids);
-// //     auto result = allocator_->malloc(malloc_info);
-
-// //     EXPECT_LE(allocator_->freeBlocksNums(), 5);
-// // }
-
-// // Test free
-// TEST_F(HybridLayerKVCacheAllocatorTest, FreeSingleBatch) {
-//     auto config = createHybridLayerTestConfig();
-//     allocator_  = std::make_shared<HybridLayerKVCacheAllocator>(config, device_);
-//     allocator_->init();
-
-//     int  seq_length         = 16;
-//     auto batch_resource     = createBatchKVCacheResource(1);
-//     auto complete_token_ids = createCompleteTokenIds(1, seq_length);
-
-//     MallocInfo malloc_info(batch_resource, complete_token_ids);
-//     allocator_->malloc(malloc_info);
-
-//     size_t free_before = allocator_->freeBlocksNums();
-
-//     FreeInfo free_info(batch_resource, complete_token_ids);
-//     auto     result = allocator_->free(free_info);
-
-//     EXPECT_TRUE(result.success);
-//     EXPECT_GT(allocator_->freeBlocksNums(), free_before);
-// }
-
-// TEST_F(HybridLayerKVCacheAllocatorTest, FreeMultipleBatches) {
-//     auto config = createHybridLayerTestConfig();
-//     allocator_  = std::make_shared<HybridLayerKVCacheAllocator>(config, device_);
-//     allocator_->init();
-
-//     int  batch_size         = 3;
-//     int  seq_length         = 16;
-//     auto batch_resource     = createBatchKVCacheResource(batch_size);
-//     auto complete_token_ids = createCompleteTokenIds(batch_size, seq_length);
-
-//     MallocInfo malloc_info(batch_resource, complete_token_ids);
-//     allocator_->malloc(malloc_info);
-
-//     FreeInfo free_info(batch_resource, complete_token_ids);
-//     auto     result = allocator_->free(free_info);
-
-//     EXPECT_TRUE(result.success);
-//     EXPECT_EQ(allocator_->freeBlocksNums(), config.block_num - 1);  // reserve 1 block
-// }
-
-// // Test malloc free cycle
-// TEST_F(HybridLayerKVCacheAllocatorTest, MallocFreeCycle) {
-//     auto config = createHybridLayerTestConfig();
-//     allocator_  = std::make_shared<HybridLayerKVCacheAllocator>(config, device_);
-//     allocator_->init();
-
-//     for (int i = 0; i < 5; ++i) {
-//         int  seq_length         = 16;
-//         auto batch_resource     = createBatchKVCacheResource(1);
-//         auto complete_token_ids = createCompleteTokenIds(1, seq_length);
-
-//         MallocInfo malloc_info(batch_resource, complete_token_ids);
-//         auto       malloc_result = allocator_->malloc(malloc_info);
-//         EXPECT_TRUE(malloc_result.success);
-
-//         FreeInfo free_info(batch_resource, complete_token_ids);
-//         auto     free_result = allocator_->free(free_info);
-//         EXPECT_TRUE(free_result.success);
-
-//         EXPECT_EQ(allocator_->freeBlocksNums(), config.block_num - 1);  // reserve 1 block
-//     }
-// }
-
-// // Test insert into cache
-// TEST_F(HybridLayerKVCacheAllocatorTest, InsertIntoCache) {
-//     auto config = createHybridLayerTestConfig();
-//     allocator_  = std::make_shared<HybridLayerKVCacheAllocator>(config, device_);
-//     allocator_->init();
-
-//     int  seq_length         = 16;
-//     auto batch_resource     = createBatchKVCacheResource(1);
-//     auto complete_token_ids = createCompleteTokenIds(1, seq_length);
-
-//     MallocInfo malloc_info(batch_resource, complete_token_ids);
-//     allocator_->malloc(malloc_info);
-
-//     InsertInfo insert_info(batch_resource, complete_token_ids, false);
-//     auto       result = allocator_->insertIntoCache(insert_info);
-
-//     EXPECT_TRUE(result.success);
-// }
-
-// TEST_F(HybridLayerKVCacheAllocatorTest, InsertIntoCacheAsResident) {
-//     auto config = createHybridLayerTestConfig();
-//     allocator_  = std::make_shared<HybridLayerKVCacheAllocator>(config, device_);
-//     allocator_->init();
-
-//     int  seq_length         = 16;
-//     auto batch_resource     = createBatchKVCacheResource(1);
-//     auto complete_token_ids = createCompleteTokenIds(1, seq_length);
-
-//     MallocInfo malloc_info(batch_resource, complete_token_ids);
-//     allocator_->malloc(malloc_info);
-
-//     InsertInfo insert_info(batch_resource, complete_token_ids, true);
-//     auto       result = allocator_->insertIntoCache(insert_info);
-
-//     EXPECT_TRUE(result.success);
-// }
-
-// // Test convert index to addr
-// TEST_F(HybridLayerKVCacheAllocatorTest, ConvertIndexToAddr) {
-//     auto config = createHybridLayerTestConfig();
-//     allocator_  = std::make_shared<HybridLayerKVCacheAllocator>(config, device_);
-//     allocator_->init();
-
-//     for (int layer_id = 0; layer_id < config.layer_num; ++layer_id) {
-//         for (int block_id = 0; block_id < 3; ++block_id) {
-//             auto addr_info = allocator_->convertIndexToAddr(layer_id, block_id);
-//             EXPECT_NE(addr_info.k_addr, nullptr);
-//             EXPECT_NE(addr_info.v_addr, nullptr);
-//         }
-//     }
-// }
-
-// TEST_F(HybridLayerKVCacheAllocatorTest, ConvertIndexToAddrInvalidLayer) {
-//     auto config = createHybridLayerTestConfig();
-//     allocator_  = std::make_shared<HybridLayerKVCacheAllocator>(config, device_);
-//     allocator_->init();
-
-//     int  invalid_layer = config.layer_num + 10;
-//     auto addr_info     = allocator_->convertIndexToAddr(invalid_layer, 0);
-//     EXPECT_EQ(addr_info.k_addr, nullptr);
-//     EXPECT_EQ(addr_info.v_addr, nullptr);
-// }
-
-// // Test convert index to buffer
-// TEST_F(HybridLayerKVCacheAllocatorTest, ConvertIndexToBuffer) {
-//     auto config = createHybridLayerTestConfig();
-//     allocator_  = std::make_shared<HybridLayerKVCacheAllocator>(config, device_);
-//     allocator_->init();
-
-//     auto buffer_info = allocator_->convertIndexToBuffer(0, 0);
-//     EXPECT_NE(buffer_info.k_addr, nullptr);
-//     EXPECT_NE(buffer_info.v_addr, nullptr);
-// }
-
-// // Test layer cache base
-// TEST_F(HybridLayerKVCacheAllocatorTest, LayerCacheBase) {
-//     auto config = createHybridLayerTestConfig();
-//     allocator_  = std::make_shared<HybridLayerKVCacheAllocator>(config, device_);
-//     allocator_->init();
-
-//     auto layout = allocator_->layerCacheBase();
-//     EXPECT_EQ(layout.layers_to_buffer_ptrs.size(), config.layer_num);
-
-//     for (size_t i = 0; i < layout.layers_to_buffer_ptrs.size(); ++i) {
-//         EXPECT_TRUE(layout.layers_to_buffer_ptrs[i].defined());
-//         EXPECT_GT(layout.layers_to_buffer_ptrs[i].numel(), 0);
-//     }
-// }
-
-// // Test block copy
-// TEST_F(HybridLayerKVCacheAllocatorTest, BlockCopySingle) {
-//     auto config = createHybridLayerTestConfig();
-//     allocator_  = std::make_shared<HybridLayerKVCacheAllocator>(config, device_, AllocationType::HOST);
-//     allocator_->init();
-
-//     int src_block = 0;
-//     int dst_block = 1;
-
-//     auto&  spec         = config.layer_type_params[0];
-//     size_t k_block_size = spec->k_block_size();
-//     size_t v_block_size = spec->v_block_size();
-
-//     for (int layer_id = 0; layer_id < config.layer_num; ++layer_id) {
-//         auto src_addr = allocator_->convertIndexToAddr(layer_id, src_block);
-//         ASSERT_NE(src_addr.k_addr, nullptr) << "K addr is null for layer " << layer_id << ", block " << src_block;
-//         ASSERT_NE(src_addr.v_addr, nullptr) << "V addr is null for layer " << layer_id << ", block " << src_block;
-
-//         auto dst_addr = allocator_->convertIndexToAddr(layer_id, dst_block);
-//         ASSERT_NE(dst_addr.k_addr, nullptr) << "K addr is null for layer " << layer_id << ", block " << dst_block;
-//         ASSERT_NE(dst_addr.v_addr, nullptr) << "V addr is null for layer " << layer_id << ", block " << dst_block;
-
-//         auto* k_data = static_cast<uint8_t*>(src_addr.k_addr);
-//         auto* v_data = static_cast<uint8_t*>(src_addr.v_addr);
-
-//         for (size_t i = 0; i < k_block_size; ++i) {
-//             k_data[i] = static_cast<uint8_t>((layer_id * 100 + src_block * 10 + i) % 256);
-//         }
-//         for (size_t i = 0; i < v_block_size; ++i) {
-//             v_data[i] = static_cast<uint8_t>((layer_id * 100 + src_block * 10 + i + 128) % 256);
-//         }
-//     }
-
-//     EXPECT_NO_THROW(allocator_->blockCopy(src_block, dst_block));
-
-//     for (int layer_id = 0; layer_id < config.layer_num; ++layer_id) {
-//         auto src_addr = allocator_->convertIndexToAddr(layer_id, src_block);
-//         auto dst_addr = allocator_->convertIndexToAddr(layer_id, dst_block);
-
-//         auto* src_k_data = static_cast<uint8_t*>(src_addr.k_addr);
-//         auto* dst_k_data = static_cast<uint8_t*>(dst_addr.k_addr);
-//         auto* src_v_data = static_cast<uint8_t*>(src_addr.v_addr);
-//         auto* dst_v_data = static_cast<uint8_t*>(dst_addr.v_addr);
-
-//         for (size_t i = 0; i < k_block_size; ++i) {
-//             EXPECT_EQ(dst_k_data[i], src_k_data[i]) << "K cache mismatch at layer " << layer_id << ", offset " << i;
-//         }
-
-//         for (size_t i = 0; i < v_block_size; ++i) {
-//             EXPECT_EQ(dst_v_data[i], src_v_data[i]) << "V cache mismatch at layer " << layer_id << ", offset " << i;
-//         }
-//     }
-// }
-
-// TEST_F(HybridLayerKVCacheAllocatorTest, BlockBatchCopyVector) {
-//     auto config = createHybridLayerTestConfig();
-//     allocator_  = std::make_shared<HybridLayerKVCacheAllocator>(config, device_, AllocationType::HOST);
-//     allocator_->init();
-
-//     std::vector<BlockIdPair> copy_mapping;
-//     copy_mapping.push_back({0, 1});
-//     copy_mapping.push_back({2, 3});
-//     copy_mapping.push_back({4, 5});
-
-//     auto&  spec         = config.layer_type_params[0];
-//     size_t k_block_size = spec->k_block_size();
-//     size_t v_block_size = spec->v_block_size();
-
-//     for (const auto& pair : copy_mapping) {
-//         for (int layer_id = 0; layer_id < config.layer_num; ++layer_id) {
-//             auto src_addr = allocator_->convertIndexToAddr(layer_id, pair.src);
-//             ASSERT_NE(src_addr.k_addr, nullptr);
-//             ASSERT_NE(src_addr.v_addr, nullptr);
-
-//             auto* k_data = static_cast<uint8_t*>(src_addr.k_addr);
-//             auto* v_data = static_cast<uint8_t*>(src_addr.v_addr);
-//             for (size_t i = 0; i < k_block_size; ++i) {
-//                 k_data[i] = static_cast<uint8_t>((layer_id * 100 + pair.src * 10 + i) % 256);
-//             }
-//             for (size_t i = 0; i < v_block_size; ++i) {
-//                 v_data[i] = static_cast<uint8_t>((layer_id * 100 + pair.src * 10 + i + 128) % 256);
-//             }
-//         }
-//     }
-
-//     EXPECT_NO_THROW(allocator_->blockBatchCopy(copy_mapping));
-
-//     // 验证每个 block 的数据正确性
-//     for (const auto& pair : copy_mapping) {
-//         for (int layer_id = 0; layer_id < config.layer_num; ++layer_id) {
-//             auto src_addr = allocator_->convertIndexToAddr(layer_id, pair.src);
-//             auto dst_addr = allocator_->convertIndexToAddr(layer_id, pair.dst);
-
-//             auto* src_k_data = static_cast<uint8_t*>(src_addr.k_addr);
-//             auto* dst_k_data = static_cast<uint8_t*>(dst_addr.k_addr);
-//             auto* src_v_data = static_cast<uint8_t*>(src_addr.v_addr);
-//             auto* dst_v_data = static_cast<uint8_t*>(dst_addr.v_addr);
-
-//             for (size_t i = 0; i < k_block_size; ++i) {
-//                 EXPECT_EQ(dst_k_data[i], src_k_data[i]) << "K cache mismatch at block pair (" << pair.src << "->"
-//                                                         << pair.dst << "), layer " << layer_id << ", offset " << i;
-//             }
-
-//             for (size_t i = 0; i < v_block_size; ++i) {
-//                 EXPECT_EQ(dst_v_data[i], src_v_data[i]) << "V cache mismatch at block pair (" << pair.src << "->"
-//                                                         << pair.dst << "), layer " << layer_id << ", offset " << i;
-//             }
-//         }
-//     }
-// }
-
-// TEST_F(HybridLayerKVCacheAllocatorTest, BlockBatchCopyEmpty) {
-//     auto config = createHybridLayerTestConfig();
-//     allocator_  = std::make_shared<HybridLayerKVCacheAllocator>(config, device_);
-//     allocator_->init();
-
-//     std::vector<BlockIdPair> empty_mapping;
-
-//     EXPECT_NO_THROW(allocator_->blockBatchCopy(empty_mapping));
-// }
-
-// TEST_F(HybridLayerKVCacheAllocatorTest, BlockBatchCopyPointers) {
-//     auto config = createHybridLayerTestConfig();
-//     allocator_  = std::make_shared<HybridLayerKVCacheAllocator>(config, device_, AllocationType::HOST);
-//     allocator_->init();
-
-//     BlockIdPair pairs[] = {{0, 1}, {2, 3}};
-
-//     auto&  spec         = config.layer_type_params[0];
-//     size_t k_block_size = spec->k_block_size();
-//     size_t v_block_size = spec->v_block_size();
-
-//     for (const auto& pair : pairs) {
-//         for (int layer_id = 0; layer_id < config.layer_num; ++layer_id) {
-//             auto  src_addr = allocator_->convertIndexToAddr(layer_id, pair.src);
-//             auto* k_data   = static_cast<uint8_t*>(src_addr.k_addr);
-//             auto* v_data   = static_cast<uint8_t*>(src_addr.v_addr);
-//             for (size_t i = 0; i < k_block_size; ++i) {
-//                 k_data[i] = static_cast<uint8_t>((layer_id * 50 + pair.src * 20 + i) % 256);
-//             }
-//             for (size_t i = 0; i < v_block_size; ++i) {
-//                 v_data[i] = static_cast<uint8_t>((layer_id * 50 + pair.src * 20 + i + 64) % 256);
-//             }
-//         }
-//     }
-
-//     EXPECT_NO_THROW(allocator_->blockBatchCopy(pairs, pairs + 2));
-
-//     for (const auto& pair : pairs) {
-//         for (int layer_id = 0; layer_id < config.layer_num; ++layer_id) {
-//             auto src_addr = allocator_->convertIndexToAddr(layer_id, pair.src);
-//             auto dst_addr = allocator_->convertIndexToAddr(layer_id, pair.dst);
-
-//             auto* src_k_data = static_cast<uint8_t*>(src_addr.k_addr);
-//             auto* dst_k_data = static_cast<uint8_t*>(dst_addr.k_addr);
-//             auto* src_v_data = static_cast<uint8_t*>(src_addr.v_addr);
-//             auto* dst_v_data = static_cast<uint8_t*>(dst_addr.v_addr);
-
-//             EXPECT_EQ(memcmp(dst_k_data, src_k_data, k_block_size), 0)
-//                 << "K cache mismatch for block pair (" << pair.src << "->" << pair.dst << "), layer " << layer_id;
-//             EXPECT_EQ(memcmp(dst_v_data, src_v_data, v_block_size), 0)
-//                 << "V cache mismatch for block pair (" << pair.src << "->" << pair.dst << "), layer " << layer_id;
-//         }
-//     }
-// }
-
-// TEST_F(HybridLayerKVCacheAllocatorTest, BlockBatchCopyBuffer) {
-//     auto config = createHybridLayerTestConfig();
-//     allocator_  = std::make_shared<HybridLayerKVCacheAllocator>(config, device_, AllocationType::HOST);
-//     allocator_->init();
-
-//     std::vector<int32_t> data   = {0, 1, 2, 3, 4, 5};  // 3 pairs: (0->1, 2->3, 4->5)
-//     auto                 buffer = device_->allocateBuffer({rtp_llm::TYPE_INT32, {3, 2}, AllocationType::HOST});
-//     std::memcpy(buffer->data(), data.data(), data.size() * sizeof(int32_t));
-
-//     auto&  spec         = config.layer_type_params[0];
-//     size_t k_block_size = spec->k_block_size();
-//     size_t v_block_size = spec->v_block_size();
-
-//     for (size_t i = 0; i < data.size(); i += 2) {
-//         int src_block = data[i];
-//         for (int layer_id = 0; layer_id < config.layer_num; ++layer_id) {
-//             auto  src_addr = allocator_->convertIndexToAddr(layer_id, src_block);
-//             auto* k_data   = static_cast<uint8_t*>(src_addr.k_addr);
-//             auto* v_data   = static_cast<uint8_t*>(src_addr.v_addr);
-//             for (size_t j = 0; j < k_block_size; ++j) {
-//                 k_data[j] = static_cast<uint8_t>((layer_id * 70 + src_block * 15 + j) % 256);
-//             }
-//             for (size_t j = 0; j < v_block_size; ++j) {
-//                 v_data[j] = static_cast<uint8_t>((layer_id * 70 + src_block * 15 + j + 96) % 256);
-//             }
-//         }
-//     }
-
-//     EXPECT_NO_THROW(allocator_->blockBatchCopy(*buffer));
-
-//     for (size_t i = 0; i < data.size(); i += 2) {
-//         int src_block = data[i];
-//         int dst_block = data[i + 1];
-//         for (int layer_id = 0; layer_id < config.layer_num; ++layer_id) {
-//             auto src_addr = allocator_->convertIndexToAddr(layer_id, src_block);
-//             auto dst_addr = allocator_->convertIndexToAddr(layer_id, dst_block);
-
-//             auto* src_k_data = static_cast<uint8_t*>(src_addr.k_addr);
-//             auto* dst_k_data = static_cast<uint8_t*>(dst_addr.k_addr);
-//             auto* src_v_data = static_cast<uint8_t*>(src_addr.v_addr);
-//             auto* dst_v_data = static_cast<uint8_t*>(dst_addr.v_addr);
-
-//             EXPECT_EQ(memcmp(dst_k_data, src_k_data, k_block_size), 0)
-//                 << "K cache mismatch for block pair (" << src_block << "->" << dst_block << "), layer " << layer_id;
-//             EXPECT_EQ(memcmp(dst_v_data, src_v_data, v_block_size), 0)
-//                 << "V cache mismatch for block pair (" << src_block << "->" << dst_block << "), layer " << layer_id;
-//         }
-//     }
-// }
-
-// // Test getter methods
-// TEST_F(HybridLayerKVCacheAllocatorTest, FreeBlocksNums) {
-//     auto config = createHybridLayerTestConfig();
-//     allocator_  = std::make_shared<HybridLayerKVCacheAllocator>(config, device_);
-//     allocator_->init();
-
-//     EXPECT_EQ(allocator_->freeBlocksNums(), config.block_num - 1);  // reserve 1 block
-// }
-
-// TEST_F(HybridLayerKVCacheAllocatorTest, AvailableBlocksNums) {
-//     auto config = createHybridLayerTestConfig();
-//     allocator_  = std::make_shared<HybridLayerKVCacheAllocator>(config, device_);
-//     allocator_->init();
-
-//     EXPECT_EQ(allocator_->availableBlocksNums(), config.block_num - 1);  // reserve 1 block
-// }
-
-// TEST_F(HybridLayerKVCacheAllocatorTest, TotalBlocksNums) {
-//     auto config = createHybridLayerTestConfig(4, 20);
-//     allocator_  = std::make_shared<HybridLayerKVCacheAllocator>(config, device_);
-//     allocator_->init();
-
-//     EXPECT_EQ(allocator_->totalBlocksNums(), 20);
-// }
-
-// TEST_F(HybridLayerKVCacheAllocatorTest, MaxSeqLen) {
-//     auto config = createHybridLayerTestConfig(4, 10, 8);
-//     allocator_  = std::make_shared<HybridLayerKVCacheAllocator>(config, device_);
-//     allocator_->init();
-
-//     EXPECT_EQ(allocator_->maxSeqLen(), 10 * 8);  // block_num * seq_size_per_block
-// }
-
-// // Test boundary conditions
-
-// TEST_F(HybridLayerKVCacheAllocatorTest, MallocWithZeroSeqLength) {
-//     auto config = createHybridLayerTestConfig();
-//     allocator_  = std::make_shared<HybridLayerKVCacheAllocator>(config, device_);
-//     allocator_->init();
-
-//     auto batch_resource     = createBatchKVCacheResource(1);
-//     auto complete_token_ids = createCompleteTokenIds(1, 0);
-
-//     MallocInfo malloc_info(batch_resource, complete_token_ids);
-//     auto       result = allocator_->malloc(malloc_info);
-//     // not crash
-//     EXPECT_TRUE(result.success || !result.success);
-// }
-
-// TEST_F(HybridLayerKVCacheAllocatorTest, FreeEmptyBatchResource) {
-//     auto config = createHybridLayerTestConfig();
-//     allocator_  = std::make_shared<HybridLayerKVCacheAllocator>(config, device_);
-//     allocator_->init();
-
-//     auto batch_resource     = createBatchKVCacheResource(0);
-//     auto complete_token_ids = createCompleteTokenIds(0, 0);
-
-//     FreeInfo free_info(batch_resource, complete_token_ids);
-//     auto     result = allocator_->free(free_info);
-
-//     EXPECT_TRUE(result.success);
-// }
-
-// TEST_F(HybridLayerKVCacheAllocatorTest, MallocWithNullBatchResource) {
-//     auto config = createHybridLayerTestConfig();
-//     allocator_  = std::make_shared<HybridLayerKVCacheAllocator>(config, device_);
-//     allocator_->init();
-
-//     auto complete_token_ids = createCompleteTokenIds(1, 16);
-
-//     MallocInfo malloc_info(nullptr, complete_token_ids);
-//     auto       result = allocator_->malloc(malloc_info);
-
-//     EXPECT_FALSE(result.success);
-// }
-
-// TEST_F(HybridLayerKVCacheAllocatorTest, FreeWithNullBatchResource) {
-//     auto config = createHybridLayerTestConfig();
-//     allocator_  = std::make_shared<HybridLayerKVCacheAllocator>(config, device_);
-//     allocator_->init();
-
-//     auto complete_token_ids = createCompleteTokenIds(1, 16);
-
-//     FreeInfo free_info(nullptr, complete_token_ids);
-//     auto     result = allocator_->free(free_info);
-
-//     EXPECT_FALSE(result.success);
-// }
-
-// // ==================== 压力测试 ====================
-
-// TEST_F(HybridLayerKVCacheAllocatorTest, MixedOperations) {
-//     auto config = createHybridLayerTestConfig(4, 20);
-//     allocator_  = std::make_shared<HybridLayerKVCacheAllocator>(config, device_);
-//     allocator_->init();
-
-//     std::vector<BatchKVCacheResourcePtr> resources;
-//     std::vector<CompleteTokenIdsPtr>     token_ids_list;
-
-//     for (int i = 0; i < 5; ++i) {
-//         auto batch_resource     = createBatchKVCacheResource(2);
-//         auto complete_token_ids = createCompleteTokenIds(2, 16);
-
-//         MallocInfo malloc_info(batch_resource, complete_token_ids);
-//         auto       result = allocator_->malloc(malloc_info);
-//         EXPECT_TRUE(result.success);
-
-//         resources.push_back(batch_resource);
-//         token_ids_list.push_back(complete_token_ids);
-//     }
-
-//     for (int i = 0; i < 3; ++i) {
-//         FreeInfo free_info(resources[i], token_ids_list[i]);
-//         auto     result = allocator_->free(free_info);
-//         EXPECT_TRUE(result.success);
-//     }
-
-//     for (int i = 0; i < 2; ++i) {
-//         auto batch_resource     = createBatchKVCacheResource(1);
-//         auto complete_token_ids = createCompleteTokenIds(1, 16);
-
-//         MallocInfo malloc_info(batch_resource, complete_token_ids);
-//         auto       result = allocator_->malloc(malloc_info);
-//         EXPECT_TRUE(result.success);
-//     }
-
-//     EXPECT_GT(allocator_->freeBlocksNums(), 0);
-// }
+TEST_F(HybridLayerKVCacheAllocatorTest, initMallocMultiBatch) {
+    auto config = createHybridLayerTestConfig(4, 40, 4);
+    allocator_  = std::make_shared<HybridLayerKVCacheAllocator>(config, device_);
+    allocator_->init();
+    auto total_blocks = allocator_->freeBlocksNums();
+
+    int  seq_length         = 17;
+    auto batch_resource     = createBatchKVCacheResource(2, 3);
+    auto complete_token_ids = createCompleteTokenIds(2, seq_length);
+
+    MallocInfo malloc_info(batch_resource, complete_token_ids);
+    malloc_info.common_seq_len                              = 16;
+    malloc_info.batch_kv_cache_resource->enable_reuse_cache = false;
+    auto malloc_result1                                     = allocator_->malloc(malloc_info);
+    EXPECT_TRUE(malloc_result1.success);
+    EXPECT_EQ(batch_resource->batch_resource[0].blocks(), 5);
+    EXPECT_EQ(allocator_->freeBlocksNums(), total_blocks - (3 * 5 + 3 * 1));
+
+    FreeInfo free_info(batch_resource, complete_token_ids);
+    allocator_->free(free_info);
+    EXPECT_EQ(allocator_->freeBlocksNums(), total_blocks);
+
+    auto                    block_pool  = allocator_->getBlockPool();
+    auto                    block_cache = block_pool->blockCache();
+    BlockCacheV1::CacheItem item1       = {101, 0, 1, false};
+    auto                    result1     = block_cache->put(item1);
+    EXPECT_TRUE(result1);
+    BlockCacheV1::CacheItem item2   = {102, 0, 2, false};
+    auto                    result2 = block_cache->put(item2);
+    EXPECT_TRUE(result2);
+    BlockCacheV1::CacheItem item3   = {102, 1, 3, false};
+    auto                    result3 = block_cache->put(item3);
+    EXPECT_TRUE(result3);
+    BlockCacheV1::CacheItem item4   = {102, 2, 4, false};
+    auto                    result4 = block_cache->put(item4);
+    EXPECT_TRUE(result4);
+
+    auto batch_resource2                = createBatchKVCacheResource(2, 3);
+    malloc_info.batch_kv_cache_resource = batch_resource2;
+    auto& cache_keys                    = malloc_info.batch_kv_cache_resource->batch_resource[0].cache_keys;
+    cache_keys                          = {101, 102, 103, 104};
+    auto& cache_keys_2                  = malloc_info.batch_kv_cache_resource->batch_resource[1].cache_keys;
+    cache_keys_2                        = {101, 102, 103, 104};
+
+    malloc_info.batch_kv_cache_resource->enable_reuse_cache = true;
+    auto malloc_result2                                     = allocator_->malloc(malloc_info);
+    EXPECT_TRUE(malloc_result2.success);
+    auto& batch_id_0 = batch_resource2->batch_resource[0];
+    auto& batch_id_1 = batch_resource2->batch_resource[1];
+
+    EXPECT_EQ(batch_id_0.blocks(), 5);
+    EXPECT_EQ(batch_id_0.group_block_ids[0]->size(), 5);
+    EXPECT_EQ(batch_id_0.group_block_ids[1]->size(), 5);
+    EXPECT_EQ(batch_id_0.group_block_ids[2]->size(), 5);
+    EXPECT_EQ(batch_id_0.group_block_ids[0]->block_indices[0], 1);
+    EXPECT_EQ(batch_id_0.group_block_ids[0]->block_indices[1], 2);
+    EXPECT_EQ(batch_id_0.group_block_ids[1]->block_indices[0], -1);
+    EXPECT_EQ(batch_id_0.group_block_ids[1]->block_indices[1], 3);
+    EXPECT_EQ(batch_id_0.group_block_ids[2]->block_indices[0], -1);
+    EXPECT_EQ(batch_id_0.group_block_ids[2]->block_indices[1], 4);
+
+    EXPECT_EQ(batch_id_1.blocks(), 5);
+    EXPECT_EQ(batch_id_1.group_block_ids[0]->size(), 5);
+    EXPECT_EQ(batch_id_1.group_block_ids[1]->size(), 5);
+    EXPECT_EQ(batch_id_1.group_block_ids[2]->size(), 5);
+    EXPECT_EQ(batch_id_1.group_block_ids[0]->block_indices[0], 1);
+    EXPECT_EQ(batch_id_1.group_block_ids[0]->block_indices[1], 2);
+    EXPECT_EQ(batch_id_1.group_block_ids[1]->block_indices[0], -1);
+    EXPECT_EQ(batch_id_1.group_block_ids[1]->block_indices[1], 3);
+    EXPECT_EQ(batch_id_1.group_block_ids[2]->block_indices[0], -1);
+    EXPECT_EQ(batch_id_1.group_block_ids[2]->block_indices[1], 4);
+
+    EXPECT_EQ(batch_id_0.group_block_ids[0]->block_indices[2], batch_id_1.group_block_ids[0]->block_indices[2]);
+    EXPECT_EQ(batch_id_0.group_block_ids[0]->block_indices[3], batch_id_1.group_block_ids[0]->block_indices[3]);
+    EXPECT_NE(batch_id_0.group_block_ids[0]->block_indices[4], batch_id_1.group_block_ids[0]->block_indices[4]);
+    EXPECT_EQ(batch_id_0.group_block_ids[1]->block_indices[2], batch_id_1.group_block_ids[1]->block_indices[2]);
+    EXPECT_EQ(batch_id_0.group_block_ids[1]->block_indices[3], batch_id_1.group_block_ids[1]->block_indices[3]);
+    EXPECT_NE(batch_id_0.group_block_ids[1]->block_indices[4], batch_id_1.group_block_ids[1]->block_indices[4]);
+    EXPECT_EQ(batch_id_0.group_block_ids[2]->block_indices[2], batch_id_1.group_block_ids[2]->block_indices[2]);
+    EXPECT_EQ(batch_id_0.group_block_ids[2]->block_indices[3], batch_id_1.group_block_ids[2]->block_indices[3]);
+    EXPECT_NE(batch_id_0.group_block_ids[2]->block_indices[4], batch_id_1.group_block_ids[2]->block_indices[4]);
+
+    EXPECT_EQ(allocator_->freeBlocksNums(), total_blocks - (3 * 3 + 3 * 1));
+
+    FreeInfo free_info_2(batch_resource2, complete_token_ids);
+    allocator_->free(free_info_2);
+    EXPECT_EQ(allocator_->freeBlocksNums(), total_blocks);
+}
+
+TEST_F(HybridLayerKVCacheAllocatorTest, MallocWithInsufficientBlocks) {
+    auto config = createHybridLayerTestConfig(4, 5, 4);
+    allocator_  = std::make_shared<HybridLayerKVCacheAllocator>(config, device_);
+    allocator_->init();
+    auto total_blocks = allocator_->freeBlocksNums();
+
+    int  seq_length         = 17;
+    auto batch_resource     = createBatchKVCacheResource(2, 3);
+    auto complete_token_ids = createCompleteTokenIds(2, seq_length);
+
+    MallocInfo malloc_info(batch_resource, complete_token_ids);
+    malloc_info.common_seq_len                              = 16;
+    malloc_info.batch_kv_cache_resource->enable_reuse_cache = false;
+    auto malloc_result1                                     = allocator_->malloc(malloc_info);
+    EXPECT_FALSE(malloc_result1.success);
+    EXPECT_EQ(malloc_result1.reuse_len, 0);
+
+    FreeInfo free_info(batch_resource, complete_token_ids);
+    allocator_->free(free_info);
+    EXPECT_EQ(allocator_->freeBlocksNums(), total_blocks);
+}
+
+// Test malloc free cycle
+TEST_F(HybridLayerKVCacheAllocatorTest, MallocFreeCycle) {
+    auto config = createHybridLayerTestConfig(4, 50, 4);
+    allocator_  = std::make_shared<HybridLayerKVCacheAllocator>(config, device_);
+    allocator_->init();
+
+    for (int i = 0; i < 5; ++i) {
+        auto total_blocks       = allocator_->freeBlocksNums();
+        int  seq_length         = 17;
+        auto batch_resource     = createBatchKVCacheResource(2, 3);
+        auto complete_token_ids = createCompleteTokenIds(2, seq_length);
+
+        MallocInfo malloc_info(batch_resource, complete_token_ids);
+
+        auto malloc_result = allocator_->malloc(malloc_info);
+        EXPECT_TRUE(malloc_result.success);
+
+        FreeInfo free_info(batch_resource, complete_token_ids);
+        auto     free_result = allocator_->free(free_info);
+        EXPECT_TRUE(free_result.success);
+
+        EXPECT_EQ(allocator_->freeBlocksNums(), total_blocks);
+    }
+}
+
+// Test insert into cache
+TEST_F(HybridLayerKVCacheAllocatorTest, InsertIntoCache) {
+    auto config = createHybridLayerTestConfig(4, 50, 4);
+    allocator_  = std::make_shared<HybridLayerKVCacheAllocator>(config, device_);
+    allocator_->init();
+    auto block_pool   = allocator_->getBlockPool();
+    auto block_cache  = block_pool->blockCache();
+    auto total_blocks = allocator_->freeBlocksNums();
+
+    int  seq_length         = 16;
+    auto batch_resource     = createBatchKVCacheResource(2, 3, 4);
+    auto complete_token_ids = createCompleteTokenIds(2, seq_length);
+
+    MallocInfo malloc_info(batch_resource, complete_token_ids);
+    malloc_info.common_seq_len                              = 16;
+    malloc_info.batch_kv_cache_resource->enable_reuse_cache = false;
+    auto malloc_result1                                     = allocator_->malloc(malloc_info);
+    EXPECT_TRUE(malloc_result1.success);
+
+    // batch 0: 12个block，9个block可以insert to cache。
+    // batch 1: 12个block，在前面都insert to cache过了。
+    InsertInfo insert_info1(batch_resource, complete_token_ids, false);
+    auto       result = allocator_->insertIntoCache(insert_info1);
+    EXPECT_TRUE(result.success);
+    ASSERT_EQ(block_cache->size(), 9);
+    EXPECT_EQ(allocator_->freeBlocksNums(), total_blocks - (3 * 4));
+
+    // batch 0: 12个block，12个block可以insert to cache。
+    // batch 1: 12个block，在前面都insert to cache过了。
+    seq_length                      = 17;
+    auto       complete_token_ids_2 = createCompleteTokenIds(2, seq_length);
+    InsertInfo insert_info2(batch_resource, complete_token_ids_2, false);
+    auto       result2 = allocator_->insertIntoCache(insert_info2);
+    EXPECT_TRUE(result2.success);
+    ASSERT_EQ(block_cache->size(), 12);
+    EXPECT_EQ(allocator_->freeBlocksNums(), total_blocks - (3 * 4));
+}
+
+TEST_F(HybridLayerKVCacheAllocatorTest, InsertIntoCacheAsResident) {
+    auto config = createHybridLayerTestConfig(4, 50, 4);
+    allocator_  = std::make_shared<HybridLayerKVCacheAllocator>(config, device_);
+    allocator_->init();
+    auto total_blocks = allocator_->freeBlocksNums();
+
+    int  seq_length         = 17;
+    auto batch_resource     = createBatchKVCacheResource(2, 3, 4);
+    auto complete_token_ids = createCompleteTokenIds(2, seq_length);
+
+    MallocInfo malloc_info(batch_resource, complete_token_ids);
+    malloc_info.common_seq_len = 16;
+    allocator_->malloc(malloc_info);
+
+    InsertInfo insert_info(batch_resource, complete_token_ids, true);
+    auto       result = allocator_->insertIntoCache(insert_info);
+
+    EXPECT_TRUE(result.success);
+    EXPECT_EQ(allocator_->freeBlocksNums(), total_blocks - (3 * 5 + 3 * 1));
+}
+
+TEST_F(HybridLayerKVCacheAllocatorTest, MaxSeqLen) {
+    auto config = createHybridLayerTestConfig(4, 10, 8);
+    allocator_  = std::make_shared<HybridLayerKVCacheAllocator>(config, device_);
+    allocator_->init();
+
+    EXPECT_EQ(allocator_->maxSeqLen(), 10 * 8);  // block_num * seq_size_per_block
+}
+
+TEST_F(HybridLayerKVCacheAllocatorTest, MallocWithZeroSeqLength) {
+    auto config = createHybridLayerTestConfig();
+    allocator_  = std::make_shared<HybridLayerKVCacheAllocator>(config, device_);
+    allocator_->init();
+    auto total_blocks = allocator_->freeBlocksNums();
+
+    auto batch_resource     = createBatchKVCacheResource(1, 3);
+    auto complete_token_ids = createCompleteTokenIds(1, 0);
+
+    MallocInfo malloc_info(batch_resource, complete_token_ids);
+    auto       result = allocator_->malloc(malloc_info);
+    EXPECT_TRUE(result.success);
+    EXPECT_EQ(allocator_->freeBlocksNums(), total_blocks);
+}
+
+TEST_F(HybridLayerKVCacheAllocatorTest, FreeEmptyBatchResource) {
+    auto config = createHybridLayerTestConfig();
+    allocator_  = std::make_shared<HybridLayerKVCacheAllocator>(config, device_);
+    allocator_->init();
+    auto total_blocks = allocator_->freeBlocksNums();
+
+    auto batch_resource     = createBatchKVCacheResource(0);
+    auto complete_token_ids = createCompleteTokenIds(0, 0);
+
+    FreeInfo free_info(batch_resource, complete_token_ids);
+    auto     result = allocator_->free(free_info);
+
+    EXPECT_TRUE(result.success);
+    EXPECT_EQ(allocator_->freeBlocksNums(), total_blocks);
+}
+
+TEST_F(HybridLayerKVCacheAllocatorTest, MallocWithNullBatchResource) {
+    auto config = createHybridLayerTestConfig();
+    allocator_  = std::make_shared<HybridLayerKVCacheAllocator>(config, device_);
+    allocator_->init();
+    auto total_blocks = allocator_->freeBlocksNums();
+
+    auto complete_token_ids = createCompleteTokenIds(1, 16);
+
+    MallocInfo malloc_info(nullptr, complete_token_ids);
+    auto       result = allocator_->malloc(malloc_info);
+
+    EXPECT_FALSE(result.success);
+    EXPECT_EQ(allocator_->freeBlocksNums(), total_blocks);
+}
+
+TEST_F(HybridLayerKVCacheAllocatorTest, FreeWithNullBatchResource) {
+    auto config = createHybridLayerTestConfig();
+    allocator_  = std::make_shared<HybridLayerKVCacheAllocator>(config, device_);
+    allocator_->init();
+    auto total_blocks = allocator_->freeBlocksNums();
+
+    auto complete_token_ids = createCompleteTokenIds(1, 16);
+
+    FreeInfo free_info(nullptr, complete_token_ids);
+    auto     result = allocator_->free(free_info);
+
+    EXPECT_FALSE(result.success);
+    EXPECT_EQ(allocator_->freeBlocksNums(), total_blocks);
+}
 
 }  // namespace test
 }  // namespace rtp_llm

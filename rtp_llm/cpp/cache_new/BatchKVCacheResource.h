@@ -65,6 +65,11 @@ public:
     void                    clear();
     void                    check() const;
 
+    void resizeBlocks(int reserver_blocks, int value) {
+        for (auto& resource : batch_resource) {
+            resource.resizeBlocks(reserver_blocks, value);
+        }
+    }
     std::string debugString() const;
 
 public:
