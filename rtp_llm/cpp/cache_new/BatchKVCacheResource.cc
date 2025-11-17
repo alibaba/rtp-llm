@@ -69,13 +69,13 @@ void BatchKVCacheResource::check() const {
 std::string BatchKVCacheResource::debugString() const {
     std::stringstream debug_string, batch_offset_string;
     for (size_t i = 0; i < batch_resource.size(); i++) {
-        batch_offset_string << "batch:[" << i << "] , block:[";
-        if (!batch_resource[i].group_block_ids.empty()) {
-            for (auto& v : batch_resource[i].group_block_ids[0]->block_indices) {
+        for (int j = 0; j < batch_resource[i].group_block_ids.size(); j++) {
+            batch_offset_string << "batch:[" << i << "], group:[" << j << "], block:[";
+            for (auto& v : batch_resource[i].group_block_ids[j]->block_indices) {
                 batch_offset_string << v << ", ";
             }
+            batch_offset_string << "], ";
         }
-        batch_offset_string << "], ";
     }
 
     debug_string << "BatchKVCacheResource {" << batch_offset_string.str() << "}";
