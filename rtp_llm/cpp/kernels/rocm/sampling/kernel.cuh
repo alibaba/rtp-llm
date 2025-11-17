@@ -59,6 +59,7 @@ using namespace hipcub;
   }
 
 #define VEC_BYTES 64
+#define WARP_SIZE 64
 
 constexpr BlockScanAlgorithm SCAN_ALGO = BLOCK_SCAN_WARP_SCANS;
 constexpr BlockReduceAlgorithm REDUCE_ALGO = BLOCK_REDUCE_WARP_REDUCTIONS;
@@ -88,7 +89,7 @@ template <uint32_t BLOCK_THREADS, BlockScanAlgorithm SCAN_ALGORITHM,
           BlockReduceAlgorithm REDUCE_ALGORITHM>
 struct SamplingTempStorage {
   union {
-    float deterministic_scan[BLOCK_THREADS / 32];
+    float deterministic_scan[BLOCK_THREADS / WARP_SIZE];
     typename BlockScan<float, BLOCK_THREADS, SCAN_ALGORITHM>::TempStorage scan;
     typename BlockReduce<float, BLOCK_THREADS, REDUCE_ALGORITHM>::TempStorage reduce;
     typename BlockReduce<int, BLOCK_THREADS, REDUCE_ALGORITHM>::TempStorage reduce_int;
@@ -128,7 +129,7 @@ __device__ __forceinline__ void DeterministicInclusiveSum(
   float thread_exclusive_prefix_sum = thread_sum;
 
 #pragma unroll
-  for (uint32_t offset = 1; offset < 32; offset *= 2) {
+  for (uint32_t offset = 1; offset < WARP_SIZE; offset *= 2) {
     float tmp = __shfl_up(thread_exclusive_prefix_sum, offset);
     if ((threadIdx.x + 1) % (offset * 2) == 0) {
       thread_exclusive_prefix_sum += tmp;
@@ -136,12 +137,12 @@ __device__ __forceinline__ void DeterministicInclusiveSum(
   }
 
   float warp_sum = __shfl(thread_exclusive_prefix_sum, threadIdx.x | 0xffffffff);
-  if (threadIdx.x % 32 == 31) {
+  if (threadIdx.x % WARP_SIZE == WARP_SIZE - 1) {
     thread_exclusive_prefix_sum = 0;
   }
 
 #pragma unroll
-  for (uint32_t offset = 16; offset >= 1; offset /= 2) {
+  for (uint32_t offset = WARP_SIZE / 2; offset >= 1; offset /= 2) {
     float tmp = __shfl_xor(thread_exclusive_prefix_sum, offset);
     if ((threadIdx.x + 1) % (offset * 2) == 0) {
       thread_exclusive_prefix_sum = tmp + thread_exclusive_prefix_sum;
@@ -151,27 +152,27 @@ __device__ __forceinline__ void DeterministicInclusiveSum(
     }
   }
 
-  smem_prefix_sum[threadIdx.x / 32] = warp_sum;
+  smem_prefix_sum[threadIdx.x / WARP_SIZE] = warp_sum;
   __syncthreads();
 
-  if (threadIdx.x < 32) {
+  if (threadIdx.x < WARP_SIZE) {
     float warp_exclusive_prefix_sum =
-        (threadIdx.x < BLOCK_THREADS / 32) ? smem_prefix_sum[threadIdx.x] : 0;
+        (threadIdx.x < BLOCK_THREADS / WARP_SIZE) ? smem_prefix_sum[threadIdx.x] : 0;
 
 #pragma unroll
-    for (uint32_t offset = 1; offset < 32; offset *= 2) {
+    for (uint32_t offset = 1; offset < WARP_SIZE; offset *= 2) {
       float tmp = __shfl_up(warp_exclusive_prefix_sum, offset);
       if ((threadIdx.x + 1) % (offset * 2) == 0) {
         warp_exclusive_prefix_sum += tmp;
       }
     }
 
-    if (threadIdx.x % 32 == 31) {
+    if (threadIdx.x % WARP_SIZE == WARP_SIZE - 1) {
       warp_exclusive_prefix_sum = 0;
     }
 
 #pragma unroll
-    for (uint32_t offset = 16; offset >= 1; offset /= 2) {
+    for (uint32_t offset = WARP_SIZE / 2; offset >= 1; offset /= 2) {
       float tmp = __shfl_xor(warp_exclusive_prefix_sum, offset);
       if ((threadIdx.x + 1) % (offset * 2) == 0) {
         warp_exclusive_prefix_sum = tmp + warp_exclusive_prefix_sum;
@@ -180,7 +181,7 @@ __device__ __forceinline__ void DeterministicInclusiveSum(
         warp_exclusive_prefix_sum = tmp;
       }
     }
-    if (threadIdx.x < BLOCK_THREADS / 32) {
+    if (threadIdx.x < BLOCK_THREADS / WARP_SIZE) {
       smem_prefix_sum[threadIdx.x] = warp_exclusive_prefix_sum;
     }
   }
@@ -188,7 +189,7 @@ __device__ __forceinline__ void DeterministicInclusiveSum(
 
 #pragma unroll
   for (uint32_t i = 0; i < VEC_SIZE; ++i) {
-    out_data[i] = smem_prefix_sum[threadIdx.x / 32] + thread_exclusive_prefix_sum + thread_data[i];
+    out_data[i] = smem_prefix_sum[threadIdx.x / WARP_SIZE] + thread_exclusive_prefix_sum + thread_data[i];
   }
 }
 
