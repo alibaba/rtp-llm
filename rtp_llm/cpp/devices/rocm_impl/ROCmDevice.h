@@ -36,7 +36,14 @@ struct AiterAttnParams {
     BufferPtr     sequence_lengths_host;
     torch::Tensor sequence_lengths_t;
 
-    static ParamsPtr prepareDecodeAiterAttnParams(rtp_llm::DeviceBase* device, const BufferPtr& sequence_lengths_host);
+    KVBlockArray kv_block_array;
+    BufferPtr    kv_cache_offset;
+
+    static ParamsPtr prepareDecodeAiterAttnParams(rtp_llm::DeviceBase* device,
+                                              const BufferPtr& sequence_lengths_host,
+                                              const AttentionConfigs& configs,
+                                              const int kv_cache_offset,
+                                              const BufferPtr& kv_cache_block_id);
 };
 
 struct FlashInferAttnParams {
