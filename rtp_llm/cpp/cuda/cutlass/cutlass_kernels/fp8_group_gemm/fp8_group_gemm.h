@@ -19,7 +19,15 @@ void cutlass_moe_mm(torch::Tensor&       out_tensors,
                     torch::Tensor const& b_strides,
                     torch::Tensor const& c_strides,
                     bool                 per_act_token,
-                    bool                 per_out_ch);
+                    bool                 per_out_ch,
+                    bool                 profile   = false,
+                    int                  m_tile    = 0,
+                    int                  n_tile    = 0,
+                    int                  k_tile    = 0,
+                    int                  cluster_m = 0,
+                    int                  cluster_n = 0,
+                    int                  cluster_k = 0,
+                    bool                 swap_ab   = false);
 
 void get_cutlass_moe_mm_data(const torch::Tensor&                topk_ids,
                              torch::Tensor&                      expert_offsets,
@@ -38,6 +46,7 @@ void get_cutlass_moe_mm_without_permute_info(const torch::Tensor&               
                                              const int64_t                       num_experts,
                                              const int64_t                       n,
                                              const int64_t                       k,
+                                             const bool                          swap_ab,
                                              const std::optional<torch::Tensor>& blockscale_offsets);
 
 void get_cutlass_batched_moe_mm_data(torch::Tensor&       expert_offsets,
@@ -47,6 +56,7 @@ void get_cutlass_batched_moe_mm_data(torch::Tensor&       expert_offsets,
                                      const int64_t        num_local_experts,
                                      const int64_t        padded_m,
                                      const int64_t        n,
-                                     const int64_t        k);
+                                     const int64_t        k,
+                                     const bool           swap_ab);
 
 };  // namespace rtp_llm
