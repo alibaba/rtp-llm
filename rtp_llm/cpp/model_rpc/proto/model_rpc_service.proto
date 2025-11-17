@@ -384,6 +384,33 @@ message MemoryBlockCacheResponsePB {
     bool success = 1;
 }
 
+message EmbeddingInputPB {
+    repeated int32 token_ids = 1;
+    repeated int32 token_type_ids = 2;
+    repeated int32 input_lengths = 3;
+    int64 request_id = 4;
+    repeated MultimodalInputPB multimodal_features = 5;
+}
+
+message EmbeddingHealthRequestPB {
+    int64 request_id = 1;
+}
+
+message EmbeddingTensorMapPB {
+    map<string, TensorPB> tensor_map = 1;
+}
+
+message EmbeddingOutputPB {
+    bool output_is_tensor = 1;
+    TensorPB output_t = 2;
+    repeated EmbeddingTensorMapPB output_map = 3;
+}
+
+service EmbeddingRpcService {
+    rpc decode(EmbeddingInputPB) returns (EmbeddingOutputPB);
+    rpc health(EmbeddingHealthRequestPB) returns (EmptyPB);
+}
+
 service RpcService {
     rpc GetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
     rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);

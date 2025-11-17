@@ -303,6 +303,7 @@ class GptInitModelParameters:
     mm_sep_tokens: list[list[int]]
     model_name: str
     model_rpc_port: int
+    embedding_rpc_port: int
     moe_inter_padding_size: int
     moe_k: int
     moe_layer_index: list[int]
@@ -444,6 +445,7 @@ class GptInitModelParameters:
         self.th_nccl_port = g_master_info.th_nccl_port
         self.ffn_tp_nccl_port = g_master_info.ffn_tp_nccl_port
         self.model_rpc_port = g_worker_info.rpc_server_port
+        self.embedding_rpc_port = g_worker_info.embedding_rpc_server_port
         self.http_port = g_worker_info.http_port
         self.cache_store_listen_port = g_worker_info.cache_store_listen_port
         self.cache_store_connect_port = g_worker_info.cache_store_connect_port

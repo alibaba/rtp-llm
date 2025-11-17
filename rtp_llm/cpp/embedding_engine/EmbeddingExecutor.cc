@@ -125,7 +125,6 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
     if (params_.position_ids_style_ == 1) {
         position_bias = params_.special_tokens_.pad_token_id_ + 1;
     }
-
     std::vector<rtp_llm::BufferPtr> gathered_mm_features;
     std::vector<int>                new_locs;
     std::vector<int>                merged_text_mask;

@@ -25,7 +25,8 @@ ErrorInfo MultimodalProcessor::getStrHash(int32_t* token_ids, std::string& url, 
     int                    now_idx    = 0;
     std::hash<std::string> hasher;
     while (now_idx * substr_len < url_len && now_idx * data_size_scale < mm_emb_len) {
-        int32_t hash_res = hasher(url.substr(now_idx * substr_len, std::min(url_len - now_idx * substr_len, substr_len)));
+        int32_t hash_res =
+            hasher(url.substr(now_idx * substr_len, std::min(url_len - now_idx * substr_len, substr_len)));
         memcpy(token_ids + now_idx * data_size_scale, &hash_res, sizeof(int32_t));
         now_idx++;
     }
@@ -193,7 +194,7 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
     }
     std::string ip_port = "";
     if (input->generate_config) {
-        for(auto & role_addr : input->generate_config->role_addrs) {
+        for (auto& role_addr : input->generate_config->role_addrs) {
             if (role_addr.role == RoleType::VIT) {
                 ip_port = role_addr.ip + ":" + std::to_string(role_addr.grpc_port);
                 break;
@@ -214,19 +215,26 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
     return ErrorInfo::OkStatus();
 }
 
-ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm::EmbeddingInput>&    input,
-                                                        const std::vector<rtp_llm::MultimodalInput>& mm_inputs) {
-    CHECK_AND_RETURN_REF(mm_embedding_res, MultimodalEmbedding(mm_inputs, ""));
+ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm::EmbeddingInput>& input) {
+
+    CHECK_AND_RETURN_REF(mm_embedding_res, MultimodalEmbedding(input->multimodal_inputs.value(), ""));
+
     MultimodalFeature mm_features;
-    mm_features.features = std::move(mm_embedding_res.mm_features);
-    CHECK_AND_RETURN_REF(expanded_ids,
-                         expandTokenIds(mm_features.features, input->token_ids, mm_inputs, input->token_type_ids));
+    mm_features.features   = std::move(mm_embedding_res.mm_features);
+    input->mm_position_ids = std::move(mm_embedding_res.mm_position_ids);
+    CHECK_AND_RETURN_REF(
+        expanded_ids,
+        expandTokenIds(
+            mm_features.features, input->token_ids, input->multimodal_inputs.value(), input->token_type_ids));
     mm_features.expanded_ids     = expanded_ids.expanded_ids;
     mm_features.text_tokens_mask = expanded_ids.text_tokens_mask;
     mm_features.locs             = expanded_ids.locs;
     input->multimodal_features.emplace(mm_features);
-    input->token_ids      = expanded_ids.expanded_ids;
-    input->token_type_ids = expanded_ids.token_type_ids;
+
+    input->text_tokens_mask = expanded_ids.text_tokens_mask;
+    input->mm_locs          = expanded_ids.locs;
+    input->token_ids        = expanded_ids.expanded_ids;
+    input->token_type_ids   = expanded_ids.token_type_ids;
     if (input->input_lengths->shape().size() == 1 && input->input_lengths->shape()[0] == 1
         && expanded_ids.expanded_ids->shape().size() == 1) {
         input->input_lengths->data<int32_t>()[0] = expanded_ids.expanded_ids->shape()[0];
