@@ -5,7 +5,6 @@ from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.config.task_type import TaskType
 from rtp_llm.models.base_model import BaseModel
-from rtp_llm.ops import EngineScheduleInfo, KVCacheInfo, WorkerStatusInfo
 
 
 class BaseEngine:
@@ -37,28 +36,6 @@ class BaseEngine:
 
     @abstractmethod
     def decode(self, input: Any) -> AsyncGenerator[Any, None]:
-        raise NotImplementedError()
-
-    @abstractmethod
-    def get_worker_status_info(self, latest_finished_version: int) -> WorkerStatusInfo:
-        raise NotImplementedError()
-
-    @abstractmethod
-    def get_cache_status_info(self, latest_cache_version: int) -> KVCacheInfo:
-        raise NotImplementedError()
-
-    @abstractmethod
-    def get_engine_schedule_info(
-        self, latest_finised_version: int
-    ) -> EngineScheduleInfo:
-        raise NotImplementedError()
-
-    @abstractmethod
-    def update_scheduler_info(self, scheduler_info: str) -> None:
-        raise NotImplementedError()
-
-    @abstractmethod
-    def update_eplb_config(self, req: Dict[str, str]) -> bool:
         raise NotImplementedError()
 
     def pause(self) -> None:

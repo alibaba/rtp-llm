@@ -340,6 +340,23 @@ message CacheStatusPB {
   map<int64, bool> cache_keys = 5;
 }
 
+message UpdateSchedulerInfoRequestPB {
+    string scheduler_info = 1;
+}
+
+message SetLogLevelRequestPB {
+    string log_level = 1;
+}
+
+message CheckHealthResponsePB {
+    string   health = 1;
+}
+
+message UpdateEplbConfigRequestPB {
+    string      mode = 1;
+    int32      update_time = 2;
+}
+
 message TaskInfoPB {
   int64 request_id = 1;
   int64 inter_request_id = 2;
@@ -420,6 +437,12 @@ service RpcService {
     rpc RemoteFinish(RemoteFinishRequestPB) returns (EmptyPB);
     rpc RemoteFinishNew(RemoteFinishRequestPB) returns (EmptyPB);
 
+    rpc CheckHealth(EmptyPB) returns (CheckHealthResponsePB);
+    rpc UpdateEplbConfig(UpdateEplbConfigRequestPB) returns (EmptyPB);
+    rpc SetPause(EmptyPB) returns (EmptyPB);
+    rpc SetRestart(EmptyPB) returns (EmptyPB);
+    rpc SetLogLevel(SetLogLevelRequestPB) returns (EmptyPB);
+    rpc UpdateSchedulerInfo(UpdateSchedulerInfoRequestPB) returns (EmptyPB);
 
     rpc RemoteGenerateNew(RemoteGenerateRequestPBNew) returns (RemoteGenerateResponsePBNew);
     rpc RemoteStore(RemoteStoreRequestPB) returns (RemoteStoreResponsePB);

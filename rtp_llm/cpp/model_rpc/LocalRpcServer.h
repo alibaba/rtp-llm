@@ -44,6 +44,20 @@ public:
                                const ::DistKvCacheRequestPB* request,
                                ::DistKvCacheResponsePB*      response);
 
+    grpc::Status CheckHealth(grpc::ServerContext* context, const EmptyPB* request, CheckHealthResponsePB* response);
+
+    grpc::Status
+    UpdateEplbConfig(grpc::ServerContext* context, const UpdateEplbConfigRequestPB* request, EmptyPB* response);
+
+    grpc::Status SetPause(grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response);
+
+    grpc::Status SetRestart(grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response);
+
+    grpc::Status SetLogLevel(grpc::ServerContext* context, const SetLogLevelRequestPB* request, EmptyPB* response);
+
+    grpc::Status
+    UpdateSchedulerInfo(grpc::ServerContext* context, const UpdateSchedulerInfoRequestPB* request, EmptyPB* response);
+
     KVCacheInfo getCacheStatusInfo(int64_t latest_cache_version, bool need_cache_keys);
 
     WorkerStatusInfo getWorkerStatusInfo(int64_t latest_finished_version);

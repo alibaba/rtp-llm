@@ -170,66 +170,6 @@ class BackendApp(object):
             worker_status.grpc_port = worker_info.rpc_server_port
             return ORJSONResponse(content=worker_status.model_dump(exclude_none=True))
 
-        # entry for worker RANK != 0
-        @app.post("/inference_internal")
-        @check_is_worker()
-        async def inference_internal(
-            req: Union[str, Dict[Any, Any]], raw_request: RawRequest
-        ):
-            global active_requests
-            active_requests.increment()
-            try:
-                return await self.backend_server.inference(req, raw_request)
-            finally:
-                active_requests.decrement()
-
-        @app.post("/add_lora_internal")
-        @check_is_worker()
-        def add_lora_internal(req: Dict[str, str]):
-            self.backend_server.add_lora(req)
-
-        @app.post("/remove_lora_internal")
-        @check_is_worker()
-        def remove_lora_internal(req: Dict[str, str]):
-            self.backend_server.remove_lora(req)
-
-        @app.post("/update_scheduler_info")
-        def update_scheduler_info(req: Union[str, Dict[str, Any]]):
-            return self.backend_server.update_scheduler_info(req)
-
-        # update for worker RANK == 0
-        @app.post("/update")
-        @check_is_master()
-        def update(version_info: VersionInfo):
-            try:
-                return self.backend_server.update(version_info)
-            except Exception as e:
-                return {"error": f"Failed to update", "details": str(e)}
-
-        # request format: {"log_level": "DEBUG"}, {"log_level": "info"}
-        @app.post("/set_log_level")
-        async def set_log_level(req: Union[str, Dict[Any, Any]]):
-            try:
-                if self.backend_server.set_log_level(req):
-                    return {"status": "ok"}
-                else:
-                    return {"status": "set log level failed"}
-            except Exception as e:
-                return {"error": str(e)}
-
-        # request format: {"mode": "NONE", "update_time": 5000}
-        @app.post("/update_eplb_config")
-        async def update_eplb_config(req: Dict[Any, Any]):
-            # TODO(yinzhi): support manual set eplb config
-            try:
-                logging.info(f"update eplb config: {req}")
-                if self.backend_server.update_eplb_config(req):
-                    return {"status": "ok"}
-                else:
-                    return {"status": "set eplb config failed"}
-            except Exception as e:
-                return {"error": str(e)}
-
         @app.post("/pause")
         async def pause():
             """

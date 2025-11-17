@@ -44,6 +44,36 @@ public:
         return local_server_->GetCacheStatus(context, request, response);
     }
 
+    ::grpc::Status UpdateSchedulerInfo(::grpc::ServerContext*              context,
+                                       const UpdateSchedulerInfoRequestPB* request,
+                                       EmptyPB*                            response) override {
+        return local_server_->UpdateSchedulerInfo(context, request, response);
+    }
+
+    ::grpc::Status
+    SetLogLevel(::grpc::ServerContext* context, const SetLogLevelRequestPB* request, EmptyPB* response) override {
+        return local_server_->SetLogLevel(context, request, response);
+    }
+
+    ::grpc::Status
+    CheckHealth(::grpc::ServerContext* context, const EmptyPB* request, CheckHealthResponsePB* response) override {
+        return local_server_->CheckHealth(context, request, response);
+    }
+
+    ::grpc::Status UpdateEplbConfig(::grpc::ServerContext*           context,
+                                    const UpdateEplbConfigRequestPB* request,
+                                    EmptyPB*                         response) override {
+        return local_server_->UpdateEplbConfig(context, request, response);
+    }
+
+    ::grpc::Status SetPause(::grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response) override {
+        return local_server_->SetPause(context, request, response);
+    }
+
+    ::grpc::Status SetRestart(::grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response) override {
+        return local_server_->SetRestart(context, request, response);
+    }
+
     WorkerStatusInfo getWorkerStatusInfo(int64_t latest_finished_version) {
         return local_server_->getWorkerStatusInfo(latest_finished_version);
     }

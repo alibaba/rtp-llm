@@ -12,7 +12,6 @@
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/WeightsConverter.h"
-#include "rtp_llm/cpp/engine_base/WorkerStatusInfo.h"
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "rtp_llm/cpp/core/BufferHelper.h"
@@ -165,34 +164,6 @@ std::unique_ptr<ProposeModelEngineInitParams> RtpLLMOp::initProposeModel(py::obj
     }
 }
 
-void RtpLLMOp::addLora(const std::string& adapter_name, py::object py_lora_a_weights, py::object py_lora_b_weights) {
-    auto                         convert        = WeightsConverter(true);
-    auto                         lora_a_weights = convert.convertLayerWeights_(py_lora_a_weights);
-    auto                         lora_b_weights = convert.convertLayerWeights_(py_lora_b_weights);
-    pybind11::gil_scoped_release release;
-    model_rpc_service_->addLora(adapter_name, *lora_a_weights, *lora_b_weights);
-}
-
-void RtpLLMOp::removeLora(const std::string& adapter_name) {
-    pybind11::gil_scoped_release release;
-    model_rpc_service_->removeLora(adapter_name);
-}
-
-EngineScheduleInfo RtpLLMOp::getEngineScheduleInfo(int64_t latest_finised_version) {
-    pybind11::gil_scoped_release release;
-    return model_rpc_service_->getEngineScheduleInfo(latest_finised_version);
-}
-
-WorkerStatusInfo RtpLLMOp::getWorkerStatusInfo(int64_t latest_finished_version) {
-    pybind11::gil_scoped_release release;
-    return model_rpc_service_->getWorkerStatusInfo(latest_finished_version);
-}
-
-KVCacheInfo RtpLLMOp::getCacheStatusInfo(int64_t latest_cache_version) {
-    pybind11::gil_scoped_release release;
-    return model_rpc_service_->getCacheStatusInfo(latest_cache_version, true);
-}
-
 void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_init_params,
                              py::object                                    mm_process_engine,
                              std::unique_ptr<ProposeModelEngineInitParams> propose_params,
@@ -262,19 +233,6 @@ void RtpLLMOp::startHttpServer(py::object model_weights_loader,
     }
 }
 
-void RtpLLMOp::updateSchedulerInfo(const std::string& scheduler_info) {
-    pybind11::gil_scoped_release release;
-    model_rpc_service_->getEngine()->getScheduler().updateSchedulerInfo(scheduler_info);
-}
-
-bool RtpLLMOp::updateEplbConfig(const EplbConfig& config) {
-    if (model_rpc_service_) {
-        pybind11::gil_scoped_release release;
-        return model_rpc_service_->getEngine()->updateEplbConfig(config);
-    }
-    return false;
-}
-
 void RtpLLMOp::stop() {
     int64_t STOP_TIMEOUT_MS = 60 * 1000;
     if (!is_server_shutdown_) {
@@ -337,18 +295,7 @@ void registerRtpLLMOp(const py::module& m) {
              py::arg("gang_info"),
              py::arg("tokenizer"),
              py::arg("render"))
-        .def("add_lora",
-             &RtpLLMOp::addLora,
-             py::arg("adapter_name"),
-             py::arg("lora_a_weights"),
-             py::arg("lora_b_weights"))
-        .def("remove_lora", &RtpLLMOp::removeLora, py::arg("adapter_name"))
-        .def("get_engine_schedule_info", &RtpLLMOp::getEngineScheduleInfo)
-        .def("get_worker_status_info", &RtpLLMOp::getWorkerStatusInfo, py::arg("latest_finished_version"))
-        .def("get_cache_status_info", &RtpLLMOp::getCacheStatusInfo, py::arg("latest_cache_version"))
-        .def("update_scheduler_info", &RtpLLMOp::updateSchedulerInfo, py::arg("scheduler_info"))
         .def("stop", &RtpLLMOp::stop)
-        .def("update_eplb_config", &RtpLLMOp::updateEplbConfig, py::arg("config"))
         .def("pause", &RtpLLMOp::pause)
         .def("restart", &RtpLLMOp::restart);
 }
