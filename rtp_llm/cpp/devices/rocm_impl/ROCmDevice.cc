@@ -28,7 +28,8 @@ using namespace rocm;
 
 ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
     ROCM_CHECK(hipSetDevice(params.device_id));
-    stream_ = at::hip::getCurrentHIPStream().stream();
+    torch_default_stream_ = std::make_unique<at::hip::HIPStreamMasqueradingAsCUDA>(at::hip::getDefaultHIPStreamMasqueradingAsCUDA());
+    stream_ = torch_default_stream_->stream();
     ROCM_CHECK(hipStreamCreate(&assist_stream_));
     current_stream_ = stream_;
     ROCM_CHECK(hipGetDeviceProperties(&rocmDevProp, device_id_));
@@ -173,6 +174,13 @@ void ROCmDevice::init() {
     DeviceBase::init();
     RTP_LLM_LOG_INFO("max batch size: %d", init_params_.max_batch_size);
     curandstate_buf_ = allocateBuffer({init_params_.max_batch_size * sizeof(curandState_t)}, {"curandstate"});
+    if (init_params_.use_deepep_moe) {
+        if (!initDeepEPBuffer()) {
+            RTP_LLM_CHECK_WITH_INFO(false, "init deepep buffer failed");
+        } else {
+            RTP_LLM_LOG_INFO("init deepep buffer success");
+        }
+    }
 }
 
 DeviceProperties ROCmDevice::getDeviceProperties() {
