@@ -181,7 +181,6 @@ def triton_deps(names):
     deps_map = {
         "@//:cuda_pre_12_9": [requirement_gpu_cuda12(name) for name in names],
         "@//:using_cuda12_9_x86": [requirement_gpu_cuda12_9(name) for name in names],
-        "@//:using_rocm": [requirement_gpu_rocm(name) for name in names],
         "//conditions:default": [],
     }
     return select(deps_map)
