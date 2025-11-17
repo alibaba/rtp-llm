@@ -116,7 +116,8 @@ class RenderConfig:
             f"llava_chat_template: {self.llava_chat_template}"
         )
 
-class GangConfig:
+
+class DistributeConfig:
     def __init__(self):
         self.fake_gang_env: bool = False
         self.gang_annocation_path: str = "/etc/podinfo/annotations"
@@ -128,6 +129,33 @@ class GangConfig:
         self.gang_timeout_min: int = 30
         self.json_gang_parts: Optional[str] = None
         self.leader_address: Optional[str] = None
+        self.remote_server_port: int = 0
+
+    def update_from_env(self):
+        self.fake_gang_env = get_env_bool("FAKE_GANG_ENV", self.fake_gang_env)
+        self.gang_annocation_path = os.environ.get(
+            "GANG_ANNOCATION_PATH", self.gang_annocation_path
+        )
+        self.gang_config_string = os.environ.get(
+            "GANG_CONFIG_STRING", self.gang_config_string
+        )
+        self.zone_name = os.environ.get("ZONE_NAME", self.zone_name)
+        self.distribute_config_file = os.environ.get(
+            "DISTRIBUTE_CONFIG_FILE", self.distribute_config_file
+        )
+        dist_barrier_timeout_env = os.environ.get("DIST_BARRIER_TIMEOUT")
+        self.dist_barrier_timeout = (
+            int(dist_barrier_timeout_env) if dist_barrier_timeout_env else None
+        )
+        self.gang_sleep_time = int(
+            os.environ.get("GANG_SLEEP_TIME", self.gang_sleep_time)
+        )
+        self.gang_timeout_min = int(
+            os.environ.get("GANG_TIMEOUT_MIN", self.gang_timeout_min)
+        )
+        self.json_gang_parts = os.environ.get("JSON_GANG_PARTS", self.json_gang_parts)
+        self.leader_address = os.environ.get("LEADER_ADDRESS", self.leader_address)
+        self.remote_server_port = int(os.environ.get("REMOTE_SERVER_PORT", self.remote_server_port))
 
     def to_string(self):
         return (
@@ -141,6 +169,7 @@ class GangConfig:
             f"gang_timeout_min: {self.gang_timeout_min}\n"
             f"json_gang_parts: {self.json_gang_parts}\n"
             f"lead_address: {self.leader_address}\n"
+            f"remote_server_port: {self.remote_server_port}\n"
         )
 
 class VitConfig:
@@ -312,7 +341,7 @@ class PyEnvConfigs:
         self.lora_config: LoraConfig = LoraConfig()
         self.load_config: LoadConfig = LoadConfig()
         self.render_config: RenderConfig = RenderConfig()
-        self.gang_config: GangConfig = GangConfig()
+        self.distribute_config: DistributeConfig = DistributeConfig()
         self.vit_config: VitConfig = VitConfig()
         self.generate_env_config: GenerateEnvConfig = GenerateEnvConfig()
         self.quantization_config: QuantizationConfig = QuantizationConfig()
@@ -343,3 +372,51 @@ class PyEnvConfigs:
         self.sampler_config = SamplerConfig()
         self.grpc_config = GrpcConfig()
         self.deep_ep_config = DeepEPConfig()
+        # self.distribute_config.update_from_env()
+
+    def to_string(self):
+        return (
+            "[server_config]\n" + self.server_config.to_string() + "\n\n"
+            "[profiling_debug_logging_config]\n"
+            + self.profiling_debug_logging_config.to_string()
+            + "\n\n"
+            "[model_config]\n" + self.model_config.to_string() + "\n\n"
+            "[sp_config]\n"
+            + self.sp_config.to_string()
+            + "\n\n"
+            "[lora_config]\n" + self.lora_config.to_string() + "\n\n"
+            "[load_config]\n" + self.load_config.to_string() + "\n\n"
+            "[render_config]\n" + self.render_config.to_string() + "\n\n"
+            "[distribute_config]\n" + self.distribute_config.to_string() + "\n\n"
+            "[vit_config]\n" + self.vit_config.to_string() + "\n\n"
+            "[generate_env_config]\n" + self.generate_env_config.to_string() + "\n\n"
+            "[quantization_config]\n" + self.quantization_config.to_string() + "\n\n"
+            "[eplb_config]\n" + self.eplb_config.to_string() + "\n\n"
+            "[kv_cache_config]\n" + self.kv_cache_config.to_string() + "\n\n"
+            "[device_resource_config]\n"
+            + self.device_resource_config.to_string()
+            + "\n\n"
+            "[sparse_config]\n" + self.sparse_config.to_string() + "\n\n"
+            "[embedding_config]\n" + self.embedding_config.to_string() + "\n\n"
+            "[role_config]\n" + self.role_config.to_string() + "\n\n"
+            "[pd_separation_config]\n" + self.pd_separation_config.to_string() + "\n\n"
+            "[parallelism_distributed_config]\n"
+            + self.parallelism_distributed_config.to_string()
+            + "\n\n"
+            "[model_specific_config]\n"
+            + self.model_specific_config.to_string()
+            + "\n\n"
+            "[fmha_config]\n" + self.fmha_config.to_string() + "\n\n"
+            "[misc_config]\n" + self.misc_config.to_string() + "\n\n"
+            "[concurrency_config]\n" + self.concurrency_config.to_string() + "\n\n"
+            "[moe_config]\n" + self.moe_config.to_string() + "\n\n"
+            "[jit_config]\n" + self.jit_config.to_string() + "\n\n"
+            "[py_hw_kernel_config]\n" + self.py_hw_kernel_config.to_string() + "\n\n"
+            "[sp_config]\n" + self.sp_config.to_string() + "\n\n"
+            "[sampler_config]\n" + self.sampler_config.to_string() + "\n\n"
+            "[cache_store_config]\n" + self.cache_store_config.to_string() + "\n\n"
+            "[runtime_config]\n" + self.runtime_config.to_string() + "\n\n"
+            "[batch_decode_scheduler_config]\n" + self.runtime_config.batch_decode_scheduler_config.to_string() + "\n\n"
+            "[fifo_scheduler_config]\n" + self.runtime_config.fifo_scheduler_config.to_string() + "\n\n"
+            "[grpc_config]\n" + self.grpc_config.to_string() + "\n\n"
+        )
