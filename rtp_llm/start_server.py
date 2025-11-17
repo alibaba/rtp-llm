@@ -4,6 +4,7 @@ import multiprocessing
 import os
 import sys
 import time
+import traceback
 
 import requests
 
@@ -16,7 +17,7 @@ CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
 from rtp_llm.distribute.worker_info import WorkerInfo, g_parallel_info
-from rtp_llm.server.server_args.server_args import setup_args, EnvArgumentParser
+from rtp_llm.server.server_args.server_args import EnvArgumentParser, setup_args
 from rtp_llm.utils.concurrency_controller import init_controller
 
 
@@ -150,11 +151,21 @@ def monitor_and_release_process(backend_process, frontend_process):
 
 
 def get_model_type_and_update_env(parser: EnvArgumentParser, args: argparse.Namespace):
-    if hasattr(args, 'checkpoint_path') and args.checkpoint_path is not None and args.checkpoint_path != "":
+    if (
+        hasattr(args, "checkpoint_path")
+        and args.checkpoint_path is not None
+        and args.checkpoint_path != ""
+    ):
         model_path = args.checkpoint_path
-        current_model_type = os.environ.get("MODEL_TYPE", StaticConfig.model_config.model_type)
+        current_model_type = os.environ.get(
+            "MODEL_TYPE", StaticConfig.model_config.model_type
+        )
         if current_model_type is None or current_model_type == "":
-            if hasattr(args, 'model_type') and args.model_type is not None and args.model_type != "":
+            if (
+                hasattr(args, "model_type")
+                and args.model_type is not None
+                and args.model_type != ""
+            ):
                 config_model_type = args.model_type
             else:
                 model_info = get_hf_model_info(model_path)
@@ -194,7 +205,7 @@ def start_server(parser: EnvArgumentParser, args: argparse.Namespace):
 
         logging.info(f"后端RPC 服务监听的ip为 0.0.0.0，ip/ip段可自定义为所需范围")
     except Exception as e:
-        logging.error(f"start failed, {str(e)}")
+        logging.error(f"start failed, trace: {traceback.format_exc()}")
     finally:
         monitor_and_release_process(backend_process, frontend_process)
 

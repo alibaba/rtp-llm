@@ -182,15 +182,6 @@ py_test (
 )
 
 py_test (
-    name = "moe_select_topk_test",
-    srcs = ["moe_select_topk_test.py"],
-    deps = py_test_deps,
-    env = test_envs,
-    tags = ["open_skip", "H20"],
-    exec_properties = {'gpu':'H20'},
-)
-
-py_test (
     name = "fused_moe_test",
     srcs = ["fused_moe_test.py"],
     deps = py_test_deps,

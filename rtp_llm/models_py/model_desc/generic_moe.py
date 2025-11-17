@@ -10,12 +10,11 @@ from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import RMSNorm, SelectTopk
 from rtp_llm.models_py.modules.attention import CausalAttention
 from rtp_llm.models_py.modules.embedding import Embedding
+from rtp_llm.models_py.modules.factory.fused_moe import FusedMoeFactory
 from rtp_llm.models_py.modules.fmha import FMHAImplBase
 from rtp_llm.models_py.modules.linear import Linear
 from rtp_llm.models_py.modules.mla.mla_attention import MlaAttention
 from rtp_llm.models_py.modules.mlp import FusedSiluActDenseMLP
-from rtp_llm.models_py.modules.moe import FusedMoe
-from rtp_llm.models_py.modules.moe.fused_moe_factory import FusedMoeFactory
 from rtp_llm.ops.compute_ops import (
     KVCache,
     PyAttentionInputs,
@@ -173,7 +172,7 @@ class GenericMoeLayer(nn.Module):
 
         self.gate = Linear(weights[W.moe_gate], None)
         self.select_topk = SelectTopk(config)
-        self.fused_moe: FusedMoe = FusedMoeFactory.create_fused_moe(config, weights)
+        self.fused_moe = FusedMoeFactory().create_fused_moe(config, weights)
         self.w1 = weights.get(W.moe_w1, None)
         self.w2 = weights.get(W.moe_w2, None)
         assert (

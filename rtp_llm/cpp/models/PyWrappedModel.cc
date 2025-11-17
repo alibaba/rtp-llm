@@ -212,7 +212,6 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
 GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
 
     py::gil_scoped_acquire gil;
-    printBufferDataDebug(*inputs.combo_position_ids, "forward inputs.combo_position_ids");
     try {
         RTP_LLM_LOG_DEBUG("Calling forward method on Python object instance.");
 

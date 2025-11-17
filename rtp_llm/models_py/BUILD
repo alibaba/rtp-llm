@@ -14,7 +14,6 @@ py_library(
     ]),
     deps = [
         "//rtp_llm/models_py/distributed:deepep_wrapper",
-        "//rtp_llm/models_py/distributed:process_group_state",
     ],
     visibility = ["//visibility:public"],
 )
@@ -44,14 +43,16 @@ py_library(
     name = "modules_cuda",
     srcs = glob([
         "modules/cuda/*.py",
-    ]),
+        "modules/cuda/**/*.py",
+    ])
 )
 
 py_library(
     name = "modules_rocm",
     srcs = glob([
         "modules/rocm/*.py",
-    ]),
+        "modules/rocm/**/*.py",
+    ])
 )
 
 py_library(
