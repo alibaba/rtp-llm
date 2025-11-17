@@ -335,3 +335,154 @@ def silu_mul_bf16_deep_gemm_masked(
     )
 
     return y_o
+
+
+# TODO(serina.wzq): 优化两次loop
+@triton.jit
+def _silu_mul_fp8_per_token_quant_batched(
+    input_ptr,
+    y_q_ptr,
+    y_s_ptr,
+    counts_ptr,
+    H: tl.constexpr,  # hidden size
+    T: tl.constexpr,  # max_num_tokens
+    stride_i_e,
+    stride_i_t,
+    stride_i_h,
+    stride_yq_e,
+    stride_yq_t,
+    stride_yq_h,
+    stride_ys_e,
+    stride_ys_t,
+    stride_cnt_e,
+    eps: tl.constexpr,
+    fp8_min: tl.constexpr,
+    fp8_max: tl.constexpr,
+    use_ue8m0: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    e = tl.program_id(0).to(tl.int64)
+    t = tl.program_id(1).to(tl.int64)
+
+    n_tokens = tl.load(counts_ptr + e * stride_cnt_e).to(tl.int64)
+
+    if t >= n_tokens:
+        return
+
+    base_offset_e_t = e * stride_i_e + t * stride_i_t
+
+    max_val = 0.0
+    # 计算quant scale
+    for h_offset in tl.range(0, H, BLOCK_SIZE):
+        h_indices = tl.arange(0, BLOCK_SIZE).to(tl.int64)
+        h_actual = h_offset + h_indices
+        h_mask = h_actual < H
+
+        gate_offset = base_offset_e_t + (H + h_actual) * stride_i_h
+        up_offset = base_offset_e_t + h_actual * stride_i_h
+
+        gate = tl.load(input_ptr + gate_offset, mask=h_mask, other=0.0).to(tl.float32)
+        up = tl.load(input_ptr + up_offset, mask=h_mask, other=0.0).to(tl.float32)
+        y = gate * (1.0 / (1.0 + tl.exp(-gate))) * up
+        block_max = tl.max(tl.abs(y))
+        max_val = tl.maximum(max_val, block_max)
+    scale = tl.maximum(max_val, eps) / fp8_max
+    if use_ue8m0:
+        scale = tl.exp2(tl.ceil(tl.log2(scale)))
+    scale_inv = 1.0 / scale
+
+    # silu_mul and quant
+    for h_offset in tl.range(0, H, BLOCK_SIZE):
+        h_indices = tl.arange(0, BLOCK_SIZE).to(tl.int64)
+        h_actual = h_offset + h_indices
+        h_mask = h_actual < H
+
+        gate_offset = base_offset_e_t + (H + h_actual) * stride_i_h
+        up_offset = base_offset_e_t + h_actual * stride_i_h
+
+        gate = tl.load(input_ptr + gate_offset, mask=h_mask, other=0.0).to(tl.float32)
+        up = tl.load(input_ptr + up_offset, mask=h_mask, other=0.0).to(tl.float32)
+        y = gate * (1.0 / (1.0 + tl.exp(-gate))) * up
+
+        y_q = tl.clamp(y * scale_inv, fp8_min, fp8_max).to(y_q_ptr.dtype.element_ty)
+        yq_offset = e * stride_yq_e + t * stride_yq_t + h_actual * stride_yq_h
+        tl.store(y_q_ptr + yq_offset, y_q, mask=h_mask)
+
+    tl.store(y_s_ptr + e * stride_ys_e + t * stride_ys_t, scale)
+
+
+def silu_mul_fp8_per_token_quant_batched(
+    y: torch.Tensor,  # (E, T, 2*H)
+    tokens_per_expert: torch.Tensor,  # (E,)
+    use_ue8m0: bool = False,
+    eps: float = 1e-10,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Quantize silu(y[..., :H]) * y[..., H:] to FP8 with per-token scales
+    Args:
+        y: (E * T, 2*H) or (E, T, 2*H)
+        tokens_per_expert: (E,) 每个expert真正的token数
+        use_ue8m0: 是否舍入scale到2的幂次
+        eps: 数值稳定性
+    Returns:
+        y_q: (E, T, H), dtype为fp8
+        y_s: (E, T), per token 的scale, dtype为fp32
+    """
+    if y.ndim == 3:
+        E, T, H2 = y.shape
+        assert E == tokens_per_expert.shape[0]
+    elif y.ndim == 2:
+        E = tokens_per_expert.shape[0]
+        E_T, H2 = y.shape
+        T = E_T // E
+        y = y.view(E, T, H2)
+    else:
+        raise RuntimeError(
+            f"unsupported input dim for silu_mul_fp8_per_token_quant_batched"
+        )
+
+    assert H2 % 2 == 0
+    H = H2 // 2
+
+    tokens_per_expert = tokens_per_expert.to(device=y.device, dtype=torch.int32)
+
+    fp8_dtype = torch.float8_e4m3fn
+    y_q = torch.empty((E, T, H), dtype=fp8_dtype, device=y.device)
+    y_s = torch.empty((E, T), dtype=torch.float32, device=y.device)
+
+    stride_i_e, stride_i_t, stride_i_h = y.stride()
+    stride_yq_e, stride_yq_t, stride_yq_h = y_q.stride()
+    stride_ys_e, stride_ys_t = y_s.stride()
+    stride_cnt_e = tokens_per_expert.stride()[0]
+
+    f_info = torch.finfo(fp8_dtype)
+    fp8_max = f_info.max
+    fp8_min = f_info.min
+
+    grid = (E, T)
+    BLOCK_SIZE = 1024
+
+    _silu_mul_fp8_per_token_quant_batched[grid](
+        y,
+        y_q,
+        y_s,
+        tokens_per_expert,
+        H=H,
+        T=T,
+        stride_i_e=stride_i_e,
+        stride_i_t=stride_i_t,
+        stride_i_h=stride_i_h,
+        stride_yq_e=stride_yq_e,
+        stride_yq_t=stride_yq_t,
+        stride_yq_h=stride_yq_h,
+        stride_ys_e=stride_ys_e,
+        stride_ys_t=stride_ys_t,
+        stride_cnt_e=stride_cnt_e,
+        eps=eps,
+        fp8_min=fp8_min,
+        fp8_max=fp8_max,
+        use_ue8m0=use_ue8m0,
+        BLOCK_SIZE=BLOCK_SIZE,
+        num_warps=4,
+    )
+    return y_q.view(-1, H), y_s.view(-1)
