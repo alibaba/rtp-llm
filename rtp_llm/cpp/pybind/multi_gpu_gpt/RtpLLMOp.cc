@@ -12,7 +12,6 @@
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/WeightsConverter.h"
-#include "rtp_llm/cpp/engine_base/WorkerStatusInfo.h"
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "rtp_llm/cpp/core/BufferHelper.h"
@@ -24,20 +23,17 @@ namespace th = torch;
 
 namespace rtp_llm {
 
-std::tuple<GptInitParameter, std::unique_ptr<Weights>> prepareEngineInitParams(
-    py::object model, bool sp_model)
-{
+std::tuple<GptInitParameter, std::unique_ptr<Weights>> prepareEngineInitParams(py::object model, bool sp_model) {
     if (sp_model) {
         model = model.attr("model");
     }
-    const GptInitParameter& gpt_init_params =
-    model.attr("config").attr("gpt_init_params").cast<GptInitParameter>();
-    py::object py_layers_weights = model.attr("weight").attr("weights");
-    py::object py_global_weights = model.attr("weight").attr("global_weights");
-    
+    const GptInitParameter& gpt_init_params   = model.attr("config").attr("gpt_init_params").cast<GptInitParameter>();
+    py::object              py_layers_weights = model.attr("weight").attr("weights");
+    py::object              py_global_weights = model.attr("weight").attr("global_weights");
+
     auto convert    = WeightsConverter(false, gpt_init_params.quant_algo_);
     auto gpt_weight = convert.createGptWeights(py_layers_weights, py_global_weights);
-    
+
     return {gpt_init_params, std::move(gpt_weight)};
 }
 
@@ -49,13 +45,12 @@ std::unique_ptr<ProposeModelEngineInitParams> prepareMTPEngineInitParams(size_t 
 
     std::unique_ptr<std::vector<std::unique_ptr<EngineInitParams>>> mtp_params =
         std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
-    const GptInitParameter& gpt_init_params =
-        sp_model.attr("config").attr("gpt_init_params").cast<GptInitParameter>();
-    py::object py_layers_weights     = sp_model.attr("weight").attr("weights");
-    py::object py_global_weights     = sp_model.attr("weight").attr("global_weights");
-    auto       convert               = WeightsConverter(false, gpt_init_params.quant_algo_);
-    auto       py_layers_weights_vec = convertPyObjectToVec(py_layers_weights);
-    size_t     model_num             = py_layers_weights_vec.size();
+    const GptInitParameter& gpt_init_params = sp_model.attr("config").attr("gpt_init_params").cast<GptInitParameter>();
+    py::object              py_layers_weights     = sp_model.attr("weight").attr("weights");
+    py::object              py_global_weights     = sp_model.attr("weight").attr("global_weights");
+    auto                    convert               = WeightsConverter(false, gpt_init_params.quant_algo_);
+    auto                    py_layers_weights_vec = convertPyObjectToVec(py_layers_weights);
+    size_t                  model_num             = py_layers_weights_vec.size();
     if (gpt_init_params.gen_num_per_circle_ > 1 && py_layers_weights_vec.size() == 1) {
         RTP_LLM_LOG_WARNING("duplicate py_layers_weights_vec from 1 to gpt_init_params.gen_num_per_circle_: %d",
                             gpt_init_params.gen_num_per_circle_);
@@ -103,7 +98,7 @@ void RtpLLMOp::init(py::object model,
     RTP_LLM_LOG_INFO("init engine params success");
     params.showGptInitParameter();
     std::unique_ptr<ProposeModelEngineInitParams> propose_params = initProposeModel(propose_model);
-    pybind11::gil_scoped_release                           release;
+    pybind11::gil_scoped_release                  release;
     grpc_server_thread_ = std::thread(&RtpLLMOp::initRPCServer,
                                       this,
                                       std::move(params),
@@ -143,9 +138,9 @@ std::unique_ptr<ProposeModelEngineInitParams> RtpLLMOp::initProposeModel(py::obj
         if (propose_model.is_none()) {
             return nullptr;
         }
-        std::unique_ptr<ProposeModelEngineInitParams> params = nullptr;
-        std::string sp_type            = propose_model.attr("sp_type").cast<std::string>();
-        size_t      gen_num_per_circle = propose_model.attr("gen_num_per_circle").cast<size_t>();
+        std::unique_ptr<ProposeModelEngineInitParams> params  = nullptr;
+        std::string                                   sp_type = propose_model.attr("sp_type").cast<std::string>();
+        size_t gen_num_per_circle                             = propose_model.attr("gen_num_per_circle").cast<size_t>();
         if (sp_type == "vanilla") {
             auto [gpt_init_params, gpt_weight] = prepareEngineInitParams(propose_model, true);
             params                             = std::make_unique<ProposeModelEngineInitParams>(
@@ -169,38 +164,10 @@ std::unique_ptr<ProposeModelEngineInitParams> RtpLLMOp::initProposeModel(py::obj
     }
 }
 
-void RtpLLMOp::addLora(const std::string& adapter_name, py::object py_lora_a_weights, py::object py_lora_b_weights) {
-    auto                         convert        = WeightsConverter(true);
-    auto                         lora_a_weights = convert.convertLayerWeights_(py_lora_a_weights);
-    auto                         lora_b_weights = convert.convertLayerWeights_(py_lora_b_weights);
-    pybind11::gil_scoped_release release;
-    model_rpc_service_->addLora(adapter_name, *lora_a_weights, *lora_b_weights);
-}
-
-void RtpLLMOp::removeLora(const std::string& adapter_name) {
-    pybind11::gil_scoped_release release;
-    model_rpc_service_->removeLora(adapter_name);
-}
-
-EngineScheduleInfo RtpLLMOp::getEngineScheduleInfo(int64_t latest_finised_version) {
-    pybind11::gil_scoped_release release;
-    return model_rpc_service_->getEngineScheduleInfo(latest_finised_version);
-}
-
-WorkerStatusInfo RtpLLMOp::getWorkerStatusInfo(int64_t latest_finished_version) {
-    pybind11::gil_scoped_release release;
-    return model_rpc_service_->getWorkerStatusInfo(latest_finished_version);
-}
-
-KVCacheInfo RtpLLMOp::getCacheStatusInfo(int64_t latest_cache_version) {
-    pybind11::gil_scoped_release release;
-    return model_rpc_service_->getCacheStatusInfo(latest_cache_version, true);
-}
-
 void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_init_params,
-                             py::object                                             mm_process_engine,
+                             py::object                                    mm_process_engine,
                              std::unique_ptr<ProposeModelEngineInitParams> propose_params,
-                             py::object                                             token_processor) {
+                             py::object                                    token_processor) {
     auto http_port      = maga_init_params.gpt_init_parameter.http_port_;
     auto model_rpc_port = maga_init_params.gpt_init_parameter.model_rpc_port_;
     auto role_type      = maga_init_params.gpt_init_parameter.role_type_;
@@ -222,10 +189,10 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
         // NOTE: ip/ip段可自定义为所需范围。
         std::string http_server_address("tcp:0.0.0.0:" + std::to_string(http_port));
         http_server_.reset(new HttpApiServer(model_rpc_service_->getEngine(),
-                                                      model_rpc_service_->getMultimodalProcessor(),
-                                                      http_server_address,
-                                                      maga_init_params,
-                                                      token_processor));
+                                             model_rpc_service_->getMultimodalProcessor(),
+                                             http_server_address,
+                                             maga_init_params,
+                                             token_processor));
         if (model_rpc_port < 0) {
             is_server_ready_ = true;
             return;
@@ -263,19 +230,6 @@ void RtpLLMOp::startHttpServer(py::object model_weights_loader,
     } else {
         RTP_LLM_FAIL("normal HTTP Server start fail.");
     }
-}
-
-void RtpLLMOp::updateSchedulerInfo(const std::string& scheduler_info) {
-    pybind11::gil_scoped_release release;
-    model_rpc_service_->getEngine()->getScheduler().updateSchedulerInfo(scheduler_info);
-}
-
-bool RtpLLMOp::updateEplbConfig(const EplbConfig& config) {
-    if (model_rpc_service_) {
-        pybind11::gil_scoped_release release;
-        return model_rpc_service_->getEngine()->updateEplbConfig(config);
-    }
-    return false;
 }
 
 void RtpLLMOp::stop() {
@@ -340,20 +294,9 @@ void registerRtpLLMOp(const py::module& m) {
              py::arg("gang_info"),
              py::arg("tokenizer"),
              py::arg("render"))
-        .def("add_lora",
-             &RtpLLMOp::addLora,
-             py::arg("adapter_name"),
-             py::arg("lora_a_weights"),
-             py::arg("lora_b_weights"))
-        .def("remove_lora", &RtpLLMOp::removeLora, py::arg("adapter_name"))
-        .def("get_engine_schedule_info", &RtpLLMOp::getEngineScheduleInfo)
-        .def("get_worker_status_info", &RtpLLMOp::getWorkerStatusInfo, py::arg("latest_finished_version"))
-        .def("get_cache_status_info", &RtpLLMOp::getCacheStatusInfo, py::arg("latest_cache_version"))
-        .def("update_scheduler_info", &RtpLLMOp::updateSchedulerInfo, py::arg("scheduler_info"))
         .def("stop", &RtpLLMOp::stop)
-        .def("update_eplb_config", &RtpLLMOp::updateEplbConfig, py::arg("config"))
         .def("pause", &RtpLLMOp::pause)
         .def("restart", &RtpLLMOp::restart);
 }
 
-}
+}  // namespace rtp_llm
