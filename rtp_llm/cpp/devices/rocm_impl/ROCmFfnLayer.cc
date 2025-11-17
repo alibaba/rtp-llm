@@ -726,7 +726,7 @@ FfnLayerOutput ROCmDevice::ffnLayer(const FfnLayerParams& params) {
             activation_params.states = up_gemm_output;
             up_output = activation(activation_params);
         } else if (params.qscheme == QScheme::Qfp8PerToken) {
-            auto up_gemm_params = GemmParams(params.input, *(params.weights.up_weight->kernel));
+            auto up_gemm_params = GemmParams(params.input, *(params.weights.up_weight->kernel), std::nullopt, nullptr, DataType::TYPE_INVALID, params.output->type());
             auto lora_linear_params = LoraLinearParams(up_gemm_params,  params.lora_input.up_lora_input);
             auto activation_params  = ActivationParams(params.configs.activation_type,
                                                       nullptr,

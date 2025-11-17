@@ -154,16 +154,8 @@ struct ROCmGemmArguments {
             DDtype = params.D->type();
         } else if (params.A.type() == DataType::TYPE_INT8 || params.A.type() == DataType::TYPE_QINT8){
             DDtype = DataType::TYPE_FP16;
-        } else if (params.A.type() == DataType::TYPE_FP8_E4M3 || params.A.type() == DataType::TYPE_QFP8_E4M3){
-            // TO DO: When A is TYPE_FP8_E4M3, choose output dtype according to env "ACT_TYPE".
-            auto act_type = autil::EnvUtil::getEnv("ACT_TYPE", "");      
-            DDtype = DataType::TYPE_FP16; // default
-            // normalize to lower
-            std::transform(act_type.begin(), act_type.end(), act_type.begin(), ::tolower);
-            // check bf16 preference
-            if (act_type.find("bf16") != std::string::npos) {
-                DDtype = DataType::TYPE_BF16;
-            }
+        } else if (params.D_type){
+            DDtype = params.D_type;
         } else {
             DDtype = params.compute_type == DataType::TYPE_INVALID ? ADtype : compute_type;
         }
@@ -369,7 +361,6 @@ BufferPtr ROCmDevice::gemm(const GemmParams& params) {
 
     using GemmImplementType = ROCmGemmDispatch::GemmImplementType;
     ROCmGemmArguments arguments(params);
-
     BufferPtr output;
     if (params.D) {
         output = params.D;
