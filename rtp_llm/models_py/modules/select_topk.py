@@ -1,7 +1,7 @@
 import torch
-from librtp_compute_ops.rtp_llm_ops import SelectTopkOp
 from torch import nn
 
+import rtp_llm.ops.compute_ops as compute_ops
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 
 
@@ -9,7 +9,7 @@ class SelectTopk(nn.Module):
     def __init__(self, config: GptInitModelParameters):
         super().__init__()
         self.config = config
-        self.select_topk_op = SelectTopkOp(self.config)
+        self.select_topk_op = compute_ops.SelectTopkOp(self.config)
 
     def forward(
         self,
@@ -23,9 +23,8 @@ class SelectTopk(nn.Module):
 class GroupTopK(nn.Module):
     def __init__(self):
         super().__init__()
-        from librtp_compute_ops.rtp_llm_ops import GroupTopKOp
 
-        self.group_topk_op = GroupTopKOp()
+        self.group_topk_op = compute_ops.GroupTopKOp()
 
     def forward(
         self,

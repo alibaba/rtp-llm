@@ -18,6 +18,7 @@ class FusedMoeTest(TestCase):
     DTYPES = [torch.bfloat16]
     TOKEN_NUM = [32]
     HIDDEN_DIM = [512]
+    EXPERT_NUM = [32]
     INTER_DIM = [1024]
     TOP_K = [4]
 
@@ -111,6 +112,7 @@ class FusedMoeTest(TestCase):
             self.DTYPES,
             self.TOKEN_NUM,
             self.HIDDEN_DIM,
+            self.EXPERT_NUM,
             self.INTER_DIM,
             self.TOP_K,
         ):
