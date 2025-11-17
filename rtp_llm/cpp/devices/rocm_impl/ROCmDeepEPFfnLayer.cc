@@ -154,7 +154,7 @@ MoeDispatchOutput ROCmDevice::deepEpDispatch(const MoeDispatchParams& params) {
         //             expert_scales ? expert_scales->debugString().c_str() : "null",
         //             hidden->debugString().c_str());
         auto dispatch_layout_output = deepep_buffer_->getDispatchLayout(
-            topk_idx_tensor, expert_num, dispatch_begin_event, true /*async*/, true /*allocate_on_comm_stream*/);
+            topk_idx_tensor, expert_num, dispatch_begin_event, true /*async*/, false /*allocate_on_comm_stream*/);
 
         deep_ep::Config dispatch_config = deepep_buffer_->getDispatchConfig();
 
@@ -171,7 +171,7 @@ MoeDispatchOutput ROCmDevice::deepEpDispatch(const MoeDispatchParams& params) {
                                                         dispatch_config,
                                                         dispatch_layout_output.event_overlap,
                                                         true /*async_finish*/,
-                                                        true /*allocate_on_comm_stream*/);
+                                                        false /*allocate_on_comm_stream*/);
 
         DeviceHookPtr comm_hook;
         if (params.overlapped) {
@@ -258,7 +258,7 @@ MoeCombineOutput ROCmDevice::deepEpCombine(const MoeCombineParams& params) {
                                                   combine_config,
                                                   compute_event,
                                                   true /*async_finish*/,
-                                                  true /*allocate_on_comm_stream*/);
+                                                  false /*allocate_on_comm_stream*/);
     syncAndCheck();
     RUNTIME_ASSERT_OP_ARG(combine_output.event_overlap, "combine overlap should always exist.");
 
