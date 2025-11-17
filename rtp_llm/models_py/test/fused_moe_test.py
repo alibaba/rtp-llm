@@ -6,8 +6,13 @@ import torch.nn.functional as F
 from torch import dtype as _dtype
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.models_py.modules.moe import BatchedDataRouter, FusedMoe
-from rtp_llm.models_py.modules.moe.fused_batched_moe import BatchedTritonExperts
+from rtp_llm.models_py.modules.common.moe.executor.batched_triton_executor import (
+    BatchedTritonExperts,
+)
+from rtp_llm.models_py.modules.common.moe.fused_moe import FusedMoe
+from rtp_llm.models_py.modules.common.moe.router.batched_data_router import (
+    BatchedDataRouter,
+)
 
 
 def torch_sparse_block_forward(
@@ -107,6 +112,7 @@ class FusedMoeBatchedTest(TestCase):
             num_local_experts=num_experts,
             num_dispatchers=1,
             rank=0,
+            num_experts=num_experts,
         )
         scaling_factor = 0.1
         # Create test weights
