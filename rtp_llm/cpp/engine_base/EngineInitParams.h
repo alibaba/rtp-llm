@@ -44,7 +44,8 @@ struct EngineInitParams {
                      const FfnDisAggregateConfig&      ffn_disaggregate_config,
                      const VitConfig&                  vit_config,
                      rtp_llm::Weights&&               gpt_weights,
-                     py::object                       py_model = py::none(),
+                     py::object                       py_model       = py::none(),
+                     py::object                       weight_manager = py::none(),
                      py::object                       py_eplb = py::none()):
         model_id(model_id),
         model_config_(model_config),
@@ -69,12 +70,13 @@ struct EngineInitParams {
         vit_config(vit_config),
         gpt_weights(std::move(gpt_weights)),
         py_model(py_model),
-        py_eplb(py_eplb) {
+        py_eplb(py_eplb),
+        weight_manager(weight_manager) {
         StaticConfig::user_ft_core_dump_on_exception =
             profiling_debug_logging_config.ft_core_dump_on_exception;
         StaticConfig::user_disable_pdl = misc_config.disable_pdl;
         // default 1 minute and 1000
-        ParallelInfo& global_parallel_info    = ParallelInfo::globalParallelInfo();
+        ParallelInfo& global_parallel_info = ParallelInfo::globalParallelInfo();
         global_parallel_info.setTpSize(parallelism_config.tp_size);
         global_parallel_info.setPpSize(parallelism_config.pp_size);
         global_parallel_info.setEpSize(parallelism_config.ep_size);
@@ -110,7 +112,7 @@ struct EngineInitParams {
     py::object                py_model;
     py::object                py_eplb;
     py::object                py_sp_model;
-
+    py::object                   weight_manager;
     kmonitor::MetricsReporterPtr metrics_reporter = nullptr;
 
 public:
