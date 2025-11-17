@@ -1180,6 +1180,44 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             assert response_delta.tool_calls[0].id == "get-current-weather:0"
             assert response_delta.tool_calls[1].id == "get-current-weather:1"
 
+    class KimiK2ThinkingTestSuite(KimiK2TestSuite):
+        """KimiK2Thinking test suite - tests reasoning parsing with <think> tags"""
+
+        def _get_test_data(self, include_stop_word=False):
+            """Generate test data with <think> tags
+            Output: <think>Let me think about this</think>The answer is 42.
+            """
+            token_ids = [
+                163606,  # <think>
+                9413,  # Let
+                1019,  # me
+                2704,  # think
+                1215,  # about
+                566,  # this
+                163607,  # </think>
+                1042,  # 12
+                715,  # +
+                1341,  # 30
+                327,  # =
+                5512,  # 42
+                13,  # .
+            ]
+
+            if not include_stop_word:
+                token_ids = token_ids[:-1]
+
+            return token_ids
+
+        def _assert_tool_call_response(
+            self,
+            response_delta,
+            expected_content="12+30=42",
+        ):
+            """Assert that reasoning content is separated from normal content"""
+            assert response_delta.content.strip() == expected_content.strip()
+            assert response_delta.reasoning_content.strip() == "Let me think about this"
+            assert response_delta.tool_calls is None
+
     class ChatGLM45TestSuite(BaseToolCallTestSuite):
         """GLM45相关测试的内嵌测试套件"""
 
@@ -1882,6 +1920,18 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         """测试KimiK2工具调用非流式场景（包含停止词）"""
         kimi_suite = self.KimiK2AdvancedTestSuite(self)
         await kimi_suite.test_no_stream_stop_words()
+
+    @think_mode
+    async def test_parse_kimik2_thinking_streaming_case(self):
+        """测试KimiK2 Thinking流式场景"""
+        kimi_thinking_suite = self.KimiK2ThinkingTestSuite(self)
+        await kimi_thinking_suite.test_streaming_case()
+
+    @think_mode
+    async def test_parse_kimik2_thinking_no_stream(self):
+        """测试KimiK2 Thinking非流式场景"""
+        kimi_thinking_suite = self.KimiK2ThinkingTestSuite(self)
+        await kimi_thinking_suite.test_no_stream()
 
     @think_mode
     async def test_parse_chatglm45_tool_call_streaming_case(self):

@@ -808,6 +808,52 @@ template ends here"""
                 # 抛出了其他异常，测试失败
                 assert False, f"Expected ValueError but got {type(e).__name__}: {e}"
 
+    class Kimik2ThinkingRendererTestImpl(Kimik2RendererTestImpl):
+        """Kimi-K2-Thinking test inherits from regular Kimik2 test"""
+
+        def get_tools(self) -> List[GPTToolDefinition]:
+            return []
+
+        def get_initial_messages(self) -> List[ChatMessage]:
+            return [
+                ChatMessage(
+                    role=RoleEnum.system,
+                    content="You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nCurrent Date: 2024-09-30",
+                ),
+                ChatMessage(role=RoleEnum.user, content="What is 25 * 4? Think step by step."),
+            ]
+
+        def get_messages_with_tool_response(self) -> List[ChatMessage]:
+            messages = self.get_initial_messages()
+            messages.append(
+                ChatMessage(
+                    role=RoleEnum.assistant,
+                    content="<think>Let me calculate this step by step. 25 * 4 = 25 * 2 * 2 = 50 * 2 = 100</think>The answer is 100.",
+                )
+            )
+            messages.append(ChatMessage(role=RoleEnum.user, content="What about 100 / 4?"))
+            return messages
+
+        def get_messages_with_final_answer(self) -> List[ChatMessage]:
+            messages = self.get_messages_with_tool_response()
+            messages.append(
+                ChatMessage(
+                    role=RoleEnum.assistant,
+                    content="<think>100 divided by 4 is straightforward: 100 / 4 = 25</think>The result is 25.",
+                )
+            )
+            messages.append(ChatMessage(role=RoleEnum.user, content="Add 10 to that"))
+            return messages
+
+        def get_step1_expected_renderer_prompt(self) -> str:
+            return """<|im_system|>system<|im_middle|>You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nCurrent Date: 2024-09-30<|im_end|><|im_user|>user<|im_middle|>What is 25 * 4? Think step by step.<|im_end|><|im_assistant|>assistant<|im_middle|>"""
+
+        def get_step2_expected_renderer_prompt(self) -> str:
+            return """<|im_system|>system<|im_middle|>You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nCurrent Date: 2024-09-30<|im_end|><|im_user|>user<|im_middle|>What is 25 * 4? Think step by step.<|im_end|><|im_assistant|>assistant<|im_middle|><think>Let me calculate this step by step. 25 * 4 = 25 * 2 * 2 = 50 * 2 = 100</think>The answer is 100.<|im_end|><|im_user|>user<|im_middle|>What about 100 / 4?<|im_end|><|im_assistant|>assistant<|im_middle|>"""
+
+        def get_step3_expected_renderer_prompt(self) -> str:
+            return """<|im_system|>system<|im_middle|>You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nCurrent Date: 2024-09-30<|im_end|><|im_user|>user<|im_middle|>What is 25 * 4? Think step by step.<|im_end|><|im_assistant|>assistant<|im_middle|><think>Let me calculate this step by step. 25 * 4 = 25 * 2 * 2 = 50 * 2 = 100</think>The answer is 100.<|im_end|><|im_user|>user<|im_middle|>What about 100 / 4?<|im_end|><|im_assistant|>assistant<|im_middle|><think>100 divided by 4 is straightforward: 100 / 4 = 25</think>The result is 25.<|im_end|><|im_user|>user<|im_middle|>Add 10 to that<|im_end|><|im_assistant|>assistant<|im_middle|>"""
+
     # Qwen3 Coder渲染器测试实现
     class Qwen3CoderRendererTestImpl(BaseRendererTestMixin):
         def __init__(self, test_instance):
@@ -911,6 +957,11 @@ template ends here"""
         """Kimik2 Error Check渲染器测试"""
         kimik2_error_check_test = self.Kimik2RendererErrorCheckTestImpl(self)
         kimik2_error_check_test.run_renderer_test()
+
+    def test_kimik2_thinking(self):
+        """Kimik2 Thinking渲染器测试"""
+        kimik2_thinking_test = self.Kimik2ThinkingRendererTestImpl(self)
+        kimik2_thinking_test.run_renderer_test()
 
     def test_qwen3_coder(self):
         """Qwen3 Coder渲染器测试"""

@@ -23,6 +23,7 @@ from rtp_llm.openai.renderers.sglang_helpers.function_call.base_format_detector 
 from rtp_llm.openai.renderers.sglang_helpers.function_call.kimik2_detector import (
     KimiK2Detector,
 )
+from rtp_llm.openai.renderers.sglang_helpers.reasoning_parser import ReasoningParser
 
 
 class KimiK2Renderer(ReasoningToolBaseRenderer):
@@ -41,6 +42,18 @@ class KimiK2Renderer(ReasoningToolBaseRenderer):
             return KimiK2Detector()
         else:
             return None
+
+    @override
+    def _create_reasoning_parser(
+        self, request: ChatCompletionRequest
+    ) -> Optional[ReasoningParser]:
+        if self.in_think_mode(request):
+            return ReasoningParser(
+                model_type="kimi_k2",
+                stream_reasoning=True,
+                force_reasoning=True,
+            )
+        return None
 
     @override
     def _preprocess_messages(self, messages: list[dict]) -> list[dict]:
