@@ -7,7 +7,6 @@ from typing import Any, Mapping
 
 import torch
 
-from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 from rtp_llm.model_loader.loader import ModelLoader
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 
@@ -95,22 +94,14 @@ class WeightManager:
     or Pipeline Parallelism (PP)).
     """
 
-    def __init__(self, engine: BaseEngine) -> None:
+    def __init__(self, device, weight, model_weights_loader) -> None:
         """
-        Initializes the WeightManager with an BaseEngine instance.
-        Args:
-            model: An instance of `BaseEngine` containing the model's structure,
-                   device information, and weight loaders.
-        Error Handling:
-            This constructor does not explicitly raise errors, but relies on the
-            correct initialization of the `BaseEngine` and its internal components.
-            Issues with `model` object structure could lead to `AttributeError`.
+        Initializes the WeightManager with an model's weight, device information, and weight loaders.
         """
-        self._engine: BaseEngine = engine
         self._s_helper = SharedMemoryIPCHelper()
-        self._device: torch.device = engine.model.device
-        self._weights: ModelWeights = engine.model.weight
-        self._weights_loader: ModelLoader = engine.model.model_weights_loader
+        self._device: torch.device = device
+        self._weights: ModelWeights = weight
+        self._weights_loader: ModelLoader = model_weights_loader
         self._weight_module = self._weights_loader._model_weights_info
         self._working_stream: torch.cuda.Stream = torch.cuda.Stream(
             device=self._device,
@@ -141,7 +132,7 @@ class WeightManager:
         else:
             return None
 
-    def update(self, req: Mapping[str, Any]) -> None:
+    def update(self, req: dict[str, str]) -> None:
         """
         Receives an Inter-Process Communication (IPC) tensor description and
         updates the corresponding model weights.
@@ -166,7 +157,6 @@ class WeightManager:
             - `Exception`: If the tensor cannot be built from the IPC metadata (e.g., invalid descriptor).
                           This is a general catch-all for unexpected failures in `_t_helper.build_from_meta`.
         """
-        # --- Validate Request Fields ---
         if "desc" not in req:
             raise KeyError(
                 "Update request is missing the 'desc' field. "
@@ -182,9 +172,9 @@ class WeightManager:
                 "Update request is missing the 'method' field. "
                 "It must specify the IPC method (e.g., 'cuda_ipc' or 'shm')."
             )
-        method: str = str(req["method"])
-        desc: str = str(req["desc"])
-        name: str = str(req["name"])
+        method: str = req["method"]
+        desc: str = req["desc"]
+        name: str = req["name"]
         stored_name: str = name
 
         if method not in {"cuda_ipc", "shm"}:

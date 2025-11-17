@@ -28,7 +28,7 @@ from rtp_llm.config.quant_config import (
     init_quant_config,
 )
 from rtp_llm.config.task_type import TaskType, check_task_type
-from rtp_llm.distribute.gang_info import GangInfo, get_gang_info
+from rtp_llm.distribute.distributed_server import WorldInfo, get_world_info
 from rtp_llm.distribute.worker_info import (
     WORKER_INFO_PORT_NUM,
     ParallelInfo,
@@ -519,7 +519,7 @@ class GptInitModelParameters:
     def update_worker_addrs(self):
         worker_addrs = []
         worker_grpc_addrs = []
-        for member in get_gang_info().members:
+        for member in get_world_info().members:
             logging.info(
                 f"member world rank: {member.world_rank}, member local rank: {member.local_rank}, local rank: {self.local_rank}, "
                 f"tp_size: {self.tp_size}, dp_size: {self.dp_size}, dp_rank: {self.dp_rank}, use_all_gather: {self.use_all_gather}"
@@ -1147,7 +1147,7 @@ class GptInitModelParameters:
         ref_dict: Dict[str, torch.Tensor] = {},
         parallel_info: ParallelInfo = g_parallel_info,
         config_mode: ConfigMode = ConfigMode.ComplexMode,
-        gang_info: Optional[GangInfo] = None,
+        world_info: Optional[WorldInfo] = None,
     ):
 
         self._init_precision_config(ckpt_path, quantization, data_type, kv_cache_type)
@@ -1180,11 +1180,11 @@ class GptInitModelParameters:
         )
         logging.info(f"phy_exp_num: {self.phy_exp_num}")
 
-        if gang_info is not None:
-            self.num_nodes = gang_info.num_nodes
+        if world_info is not None:
+            self.num_nodes = world_info.num_nodes
         else:
             try:
-                self.num_nodes = get_gang_info().num_nodes
+                self.num_nodes = get_world_info().num_nodes
             except:
                 self.num_nodes = 1
 

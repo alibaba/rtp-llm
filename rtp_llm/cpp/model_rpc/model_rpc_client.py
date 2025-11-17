@@ -17,7 +17,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     RoleAddrPB,
 )
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import RpcServiceStub
-from rtp_llm.distribute.gang_info import get_gang_info
+from rtp_llm.distribute.distributed_server import get_world_info
 from rtp_llm.distribute.worker_info import g_parallel_info, g_worker_info
 from rtp_llm.utils.base_model_datatypes import (
     AuxInfo,
@@ -355,7 +355,7 @@ class ModelRpcClient(object):
                 + f"[tp_size: {g_parallel_info.tp_size}] all members: "
                 + "{"
             )
-            members = get_gang_info().members
+            members = get_world_info().members
             for member in members:
                 members_info_str += f"{member}\n"
                 if member.local_rank % g_parallel_info.tp_size == 0:

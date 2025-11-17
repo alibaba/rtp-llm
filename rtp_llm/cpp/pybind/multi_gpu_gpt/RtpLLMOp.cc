@@ -12,7 +12,6 @@
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/WeightsConverter.h"
-#include "rtp_llm/cpp/engine_base/WorkerStatusInfo.h"
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "rtp_llm/cpp/core/BufferHelper.h"
@@ -116,9 +115,10 @@ EngineInitParams RtpLLMOp::initModel(py::object model) {
     try {
         auto [gpt_init_params, gpt_weight] = prepareEngineInitParams(model, false);
         auto py_model                      = model.attr("py_model");
+        auto weight_manager                = model.attr("weight_manager");
         // TODO(wangyin.yx): Only one of `py_model` and `gpt_weight` is actually needed.
 
-        EngineInitParams params(model_id_, gpt_init_params, std::move(*gpt_weight), py_model);
+        EngineInitParams params(model_id_, gpt_init_params, std::move(*gpt_weight), py_model, weight_manager);
         model_id_++;
         if (gpt_init_params.tp_rank_ == 0) {
             // kmon metric init
@@ -163,34 +163,6 @@ std::unique_ptr<ProposeModelEngineInitParams> RtpLLMOp::initProposeModel(py::obj
         RTP_LLM_FAIL("init propose engine params failed, error msg: %s", e.what());
         return nullptr;
     }
-}
-
-void RtpLLMOp::addLora(const std::string& adapter_name, py::object py_lora_a_weights, py::object py_lora_b_weights) {
-    auto                         convert        = WeightsConverter(true);
-    auto                         lora_a_weights = convert.convertLayerWeights_(py_lora_a_weights);
-    auto                         lora_b_weights = convert.convertLayerWeights_(py_lora_b_weights);
-    pybind11::gil_scoped_release release;
-    model_rpc_service_->addLora(adapter_name, *lora_a_weights, *lora_b_weights);
-}
-
-void RtpLLMOp::removeLora(const std::string& adapter_name) {
-    pybind11::gil_scoped_release release;
-    model_rpc_service_->removeLora(adapter_name);
-}
-
-EngineScheduleInfo RtpLLMOp::getEngineScheduleInfo(int64_t latest_finised_version) {
-    pybind11::gil_scoped_release release;
-    return model_rpc_service_->getEngineScheduleInfo(latest_finised_version);
-}
-
-WorkerStatusInfo RtpLLMOp::getWorkerStatusInfo(int64_t latest_finished_version) {
-    pybind11::gil_scoped_release release;
-    return model_rpc_service_->getWorkerStatusInfo(latest_finished_version);
-}
-
-KVCacheInfo RtpLLMOp::getCacheStatusInfo(int64_t latest_cache_version) {
-    pybind11::gil_scoped_release release;
-    return model_rpc_service_->getCacheStatusInfo(latest_cache_version, true);
 }
 
 void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_init_params,
@@ -248,31 +220,18 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
 
 void RtpLLMOp::startHttpServer(py::object model_weights_loader,
                                py::object lora_infos,
-                               py::object gang_info,
+                               py::object world_info,
                                py::object tokenizer,
                                py::object render) {
     if (http_server_ == nullptr) {
         RTP_LLM_FAIL("normal HTTP Server nullptr error.");
         return;
     }
-    if (http_server_->start(model_weights_loader, lora_infos, gang_info, tokenizer, render)) {
+    if (http_server_->start(model_weights_loader, lora_infos, world_info, tokenizer, render)) {
         RTP_LLM_LOG_INFO("normal HTTP Server listening on %s", http_server_->getListenAddr().c_str());
     } else {
         RTP_LLM_FAIL("normal HTTP Server start fail.");
     }
-}
-
-void RtpLLMOp::updateSchedulerInfo(const std::string& scheduler_info) {
-    pybind11::gil_scoped_release release;
-    model_rpc_service_->getEngine()->getScheduler().updateSchedulerInfo(scheduler_info);
-}
-
-bool RtpLLMOp::updateEplbConfig(const EplbConfig& config) {
-    if (model_rpc_service_) {
-        pybind11::gil_scoped_release release;
-        return model_rpc_service_->getEngine()->updateEplbConfig(config);
-    }
-    return false;
 }
 
 void RtpLLMOp::stop() {
@@ -334,23 +293,10 @@ void registerRtpLLMOp(const py::module& m) {
              &RtpLLMOp::startHttpServer,
              py::arg("model_weights_loader"),
              py::arg("lora_infos"),
-             py::arg("gang_info"),
+             py::arg("world_info"),
              py::arg("tokenizer"),
              py::arg("render"))
-        .def("add_lora",
-             &RtpLLMOp::addLora,
-             py::arg("adapter_name"),
-             py::arg("lora_a_weights"),
-             py::arg("lora_b_weights"))
-        .def("remove_lora", &RtpLLMOp::removeLora, py::arg("adapter_name"))
-        .def("get_engine_schedule_info", &RtpLLMOp::getEngineScheduleInfo)
-        .def("get_worker_status_info", &RtpLLMOp::getWorkerStatusInfo, py::arg("latest_finished_version"))
-        .def("get_cache_status_info", &RtpLLMOp::getCacheStatusInfo, py::arg("latest_cache_version"))
-        .def("update_scheduler_info", &RtpLLMOp::updateSchedulerInfo, py::arg("scheduler_info"))
-        .def("stop", &RtpLLMOp::stop)
-        .def("update_eplb_config", &RtpLLMOp::updateEplbConfig, py::arg("config"))
-        .def("pause", &RtpLLMOp::pause)
-        .def("restart", &RtpLLMOp::restart);
+        .def("stop", &RtpLLMOp::stop);
 }
 
 }  // namespace rtp_llm

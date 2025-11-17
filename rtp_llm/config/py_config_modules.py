@@ -281,7 +281,7 @@ class RenderConfig:
         )
 
 
-class GangConfig:
+class DistributeConfig:
     def __init__(self):
         self.fake_gang_env: bool = False
         self.gang_annocation_path: str = "/etc/podinfo/annotations"
@@ -293,6 +293,7 @@ class GangConfig:
         self.gang_timeout_min: int = 30
         self.json_gang_parts: Optional[str] = None
         self.leader_address: Optional[str] = None
+        self.remote_server_port: int = 0
 
     def update_from_env(self):
         self.fake_gang_env = get_env_bool("FAKE_GANG_ENV", self.fake_gang_env)
@@ -318,6 +319,7 @@ class GangConfig:
         )
         self.json_gang_parts = os.environ.get("JSON_GANG_PARTS", self.json_gang_parts)
         self.leader_address = os.environ.get("LEADER_ADDRESS", self.leader_address)
+        self.remote_server_port = int(os.environ.get("REMOTE_SERVER_PORT", self.remote_server_port))
 
     def to_string(self):
         return (
@@ -331,6 +333,7 @@ class GangConfig:
             f"gang_timeout_min: {self.gang_timeout_min}\n"
             f"json_gang_parts: {self.json_gang_parts}\n"
             f"lead_address: {self.leader_address}\n"
+            f"remote_server_port: {self.remote_server_port}\n"
         )
 
 
@@ -859,7 +862,7 @@ class PyEnvConfigs:
         self.lora_config: LoraConfig = LoraConfig()
         self.load_config: LoadConfig = LoadConfig()
         self.render_config: RenderConfig = RenderConfig()
-        self.gang_config: GangConfig = GangConfig()
+        self.distribute_config: DistributeConfig = DistributeConfig()
         self.vit_config: VitConfig = VitConfig()
         self.generate_env_config: GenerateEnvConfig = GenerateEnvConfig()
         self.quantization_config: QuantizationConfig = QuantizationConfig()
@@ -894,7 +897,7 @@ class PyEnvConfigs:
         self.lora_config.update_from_env()
         self.load_config.update_from_env()
         self.render_config.update_from_env()
-        self.gang_config.update_from_env()
+        self.distribute_config.update_from_env()
         self.vit_config.update_from_env()
         self.generate_env_config.update_from_env()
         self.quantization_config.update_from_env()
@@ -951,7 +954,7 @@ class PyEnvConfigs:
             "[lora_config]\n" + self.lora_config.to_string() + "\n\n"
             "[load_config]\n" + self.load_config.to_string() + "\n\n"
             "[render_config]\n" + self.render_config.to_string() + "\n\n"
-            "[gang_config]\n" + self.gang_config.to_string() + "\n\n"
+            "[distribute_config]\n" + self.distribute_config.to_string() + "\n\n"
             "[vit_config]\n" + self.vit_config.to_string() + "\n\n"
             "[generate_env_config]\n" + self.generate_env_config.to_string() + "\n\n"
             "[quantization_config]\n" + self.quantization_config.to_string() + "\n\n"

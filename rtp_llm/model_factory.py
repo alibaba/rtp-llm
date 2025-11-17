@@ -11,8 +11,9 @@ from rtp_llm.config.py_config_modules import StaticConfig
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
+from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 from rtp_llm.config.gpt_init_model_parameters import ConfigMode, GptInitModelParameters
-from rtp_llm.distribute.gang_info import get_gang_info
+from rtp_llm.distribute.distributed_server import get_world_info
 from rtp_llm.distribute.worker_info import g_parallel_info
 from rtp_llm.model_factory_register import _model_factory
 from rtp_llm.tools.api.hf_model_helper import get_model_info_from_hf
@@ -65,7 +66,7 @@ class ModelFactory:
             ref_module=model_config.ref_module,
             ref_dict=model_config.ref_dict,
             parallel_info=g_parallel_info,
-            gang_info=get_gang_info(),
+            world_info=get_world_info(),
             config_mode=ConfigMode.SimpleMode,
         )
         config.seq_size_per_block = model_config.seq_size_per_block
@@ -149,8 +150,8 @@ class ModelFactory:
     def from_model_config(
         model_config: ModelConfig,
         propose_model_config: Optional[ModelConfig] = None,
-        gang_info=None,
-    ):
+        world_info=None,
+    ) -> BaseEngine:
         from rtp_llm.async_decoder_engine.engine_creator import create_engine
 
         model = ModelFactory._create_model(model_config)
@@ -164,7 +165,8 @@ class ModelFactory:
         if propose_model:
             logging.info("set enable_speculative_decoding")
             model.config.enable_speculative_decoding = True
-        engine = create_engine(model, propose_model, gang_info)
+
+        engine = create_engine(model, propose_model, world_info)
         engine.start()
         if propose_model:
             logging.info("create propose model done")
@@ -323,17 +325,17 @@ class ModelFactory:
             )
 
     @staticmethod
-    def create_from_env(gang_info=None):
-        from rtp_llm.distribute.gang_info import get_gang_info
+    def create_from_env(world_info=None) -> BaseEngine:
+        from rtp_llm.distribute.distributed_server import get_world_info
 
         normal_model_config = ModelFactory.create_normal_model_config()
         propose_model_config = ModelFactory.create_propose_model_config(
             normal_model_config
         )
-        if gang_info is None:
-            gang_info = get_gang_info()
+        if world_info is None:
+            world_info = get_world_info()
         engine = ModelFactory.from_model_config(
-            normal_model_config, propose_model_config, gang_info
+            normal_model_config, propose_model_config, world_info
         )
         ModelFactory.load_default_generate_config(engine)
 
