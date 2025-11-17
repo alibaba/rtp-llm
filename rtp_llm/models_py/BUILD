@@ -22,12 +22,20 @@ py_library(
 flashinfer = ["flashinfer-python"]
 requirement(flashinfer)
 
+
+filegroup(
+    name = "cutlass_moe_config",
+    srcs = glob(["configs/cutlass_groupgemm/*"]),
+    visibility = ["//visibility:public"],
+)
+
 py_library(
     name = "modules",
     srcs = glob([
         "modules/*.py",
         "modules/**/*.py",
     ]),
+    data = [":cutlass_moe_config"],
     deps = [
         ":utils",
         "//rtp_llm/models_py/triton_kernels:triton_kernels",

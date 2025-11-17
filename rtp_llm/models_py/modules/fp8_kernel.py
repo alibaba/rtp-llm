@@ -8,9 +8,13 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import torch
 
 import rtp_llm.models_py.modules.utils as utils
+from rtp_llm.models_py.modules.configs.get_best_config import (
+    get_cutlass_groupgemm_best_config,
+)
 
 if utils.is_cuda():
     from rtp_llm.ops.compute_ops import (
+        cutlass_moe_mm,
         per_tensor_quant_fp8,
         per_token_group_quant_fp8,
         per_token_group_quant_int8,
@@ -145,3 +149,98 @@ def scaled_fp8_per_token_quant(
     per_token_quant_fp8(input, output, scale)
     scale = scale.reshape(-1, 1)
     return output, scale
+
+
+def cutlass_moe_mm_fp8_scaled(
+    output,
+    aq,
+    w,
+    aq_scale,
+    w_scale,
+    expert_offsets,
+    problem_sizes,
+    a_strides,
+    b_strides,
+    c_strides,
+    per_act_token,
+    per_out_ch,
+    actual_m,
+    swap_ab,
+):
+
+    assert per_act_token == True
+    assert per_out_ch == False
+
+    E, N, _ = w.shape
+    M, K = aq.shape
+    configs = get_cutlass_groupgemm_best_config(E, N, K)
+    if configs:
+        # Get the optimal config
+        config = configs[min(configs.keys(), key=lambda x: abs(x - actual_m))]
+        tile_m, tile_n, tile_k = config["tile_m"], config["tile_n"], config["tile_k"]
+        cluster_m, cluster_n, cluster_k = (
+            config["cluster_m"],
+            config["cluster_n"],
+            config["cluster_k"],
+        )
+        if swap_ab != config["swap_ab"]:
+            print("gemm1 swap_ab but gemm2 not swap_ab")
+        return cutlass_moe_mm(
+            output,
+            aq,
+            w,
+            aq_scale,
+            w_scale,
+            expert_offsets,
+            problem_sizes,
+            a_strides,
+            b_strides,
+            c_strides,
+            per_act_token,
+            per_out_ch,
+            True,  # profile
+            tile_m,
+            tile_n,
+            tile_k,
+            cluster_m,
+            cluster_n,
+            cluster_k,
+            swap_ab,
+        )
+    else:
+        return cutlass_moe_mm(
+            output,
+            aq,
+            w,
+            aq_scale,
+            w_scale,
+            expert_offsets,
+            problem_sizes,
+            a_strides,
+            b_strides,
+            c_strides,
+            per_act_token,
+            per_out_ch,
+            False,
+            128,
+            128,
+            128,
+            1,
+            1,
+            1,
+            swap_ab,
+        )
+
+
+def get_best_config_swap_ab(
+    E: int,
+    M: int,
+    N: int,
+    K: int,
+):
+    configs = get_cutlass_groupgemm_best_config(E, N, K)
+    if configs:
+        config = configs[min(configs.keys(), key=lambda x: abs(x - M))]
+        return config["swap_ab"]
+    else:
+        return M <= 64 * E
