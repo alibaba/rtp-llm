@@ -32,17 +32,15 @@ absl::StatusOr<std::unordered_map<std::string, SystemPromptParams>> SystemPrompt
         CHECK_AND_RETURN_REF(stream, engine->preRun(generate_input, preRunMode::build_system_prompt));
 
         if (insert_kv_cache) {
-            const auto& kv_cache   = stream->kvCache();
+            const auto& kv_cache = stream->kvCache();
             // const auto& cache_keys = stream->cacheKeys(0);  // Unused in new cache system
-            const auto& all_blocks = kv_cache.batch_block_id;
-            const auto& blocks     = all_blocks[0];
+            const auto& blocks = kv_cache.batch_resource[0].group_block_ids[0]->block_indices;
             RTP_LLM_CHECK(blocks.size() > 0);
-            
+
             // Use new KVCacheManager insertIntoCache with is_resident=true
-            rtp_llm::InsertInfo insert_info(
-                stream->kvCachePtr(),
-                stream->completeTokenIdsPtr(),
-                true  // is_resident for system prompt
+            rtp_llm::InsertInfo insert_info(stream->kvCachePtr(),
+                                            stream->completeTokenIdsPtr(),
+                                            true  // is_resident for system prompt
             );
             cache_manager->insertIntoCache(insert_info);
             multi_task_prompt_args[task_id] = SystemPromptParams(tokens_id, blocks);

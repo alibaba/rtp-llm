@@ -11,8 +11,7 @@ namespace rtp_llm {
 
 void StreamCacheResource::init(int batch_size) {
     batch_resource_->resize(batch_size);
-    // Keep legacy cache_keys size consistent with batch_block_id
-    batch_resource_->cache_keys.resize(batch_size);
+    batch_resource_->initGroups(1);
     // constructCacheKey();
 }
 
@@ -69,9 +68,6 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
         int batch_size     = batch_resource_->batchSize();
         batch_resource_->clear();
         batch_resource_->resize(batch_size);
-        // Keep legacy cache_keys consistent after re-initialize
-        batch_resource_->cache_keys.clear();
-        batch_resource_->cache_keys.resize(batch_size);
         fake_inited_ = false;
         return max_block_size;
     }
@@ -190,194 +186,21 @@ bool StreamCacheResource::updateKVBlock(const std::vector<int>& block_src_batch,
         batch_resource_, block_src_batch, copy_last_block, block_update_mapping_);
 }
 
-// bool StreamCacheResource::updateKVBlock(const std::vector<int>& block_src_batch, bool copy_last_block) {
-//     block_update_mapping_.clear();
-
-//     if (!resource_context_.cache_manager || block_src_batch.size() == 0) {
-//         return true;
-//     }
-
-//     // collect forking count for all old batches
-//     auto        old_batch_size = batch_resource_->batchSize();
-//     auto        new_batch_size = block_src_batch.size();
-//     vector<int> batch_fork_count(old_batch_size, 0);
-//     for (const auto& old_batch_idx : block_src_batch) {
-//         RTP_LLM_CHECK_WITH_INFO(old_batch_idx < old_batch_size,
-//                                 "try to reuse an old batch %d that out of range %d",
-//                                 old_batch_idx,
-//                                 old_batch_size);
-//         ++batch_fork_count[old_batch_idx];
-//     }
-
-//     // collect free and malloc infos of kv cache blocks
-//     // TODO(zhangjianning.zjn): might be possible to repurpose disused blocks for new batches?
-//     vector<int> disused_kv_blocks;
-//     uint32_t    num_new_blocks = 0;
-//     for (int old_batch_idx = 0; old_batch_idx < old_batch_size; ++old_batch_idx) {
-//         int fork_count = batch_fork_count[old_batch_idx];
-
-//         if (fork_count == 0) {
-//             const auto& blocks = batch_resource_->batch_block_id[old_batch_idx];
-//             disused_kv_blocks.insert(disused_kv_blocks.end(), blocks.begin(), blocks.end());
-//         } else if (fork_count > 1 && copy_last_block) {
-//             num_new_blocks += fork_count - 1;
-//         }
-//     }
-
-//     // check kv cache capacity
-//     size_t available_blocks = resource_context_.cache_manager->availableBlockNums()
-//                               + resource_context_.cache_manager->newFreeBlocks(disused_kv_blocks);
-//     if (available_blocks < num_new_blocks) {
-//         RTP_LLM_LOG_WARNING(
-//             "no enough available blocks for kv cache update of stream %lld, need %llu, but only %llu remained",
-//             stream_->streamId(),
-//             num_new_blocks,
-//             available_blocks);
-//         return false;
-//     }
-
-//     // do free and malloc
-//     if (disused_kv_blocks.size() > 0) {
-//         resource_context_.cache_manager->free(disused_kv_blocks);
-//     }
-//     std::vector<int> new_blocks;
-//     if (num_new_blocks > 0) {
-//         auto [malloc_status, cache_resource] =
-//             resource_context_.cache_manager->malloc({stream_->streamId(), num_new_blocks});
-//         RTP_LLM_CHECK_WITH_INFO(malloc_status,
-//                                 "failed to malloc %u new blocks during kv cache update of stream %lld",
-//                                 num_new_blocks,
-//                                 stream_->streamId());
-//         new_blocks = std::move(cache_resource.block_id);
-//     }
-
-//     // increase ref count of shared blocks
-//     for (int old_batch_idx = 0; old_batch_idx < old_batch_size; ++old_batch_idx) {
-//         if (batch_fork_count[old_batch_idx] <= 1) {
-//             // no shared blocks
-//             continue;
-//         }
-
-//         auto& batch_blocks = batch_resource_->batch_block_id[old_batch_idx];
-
-//         // need to exclude last block if it is not shared
-//         const bool exclude_last_block = copy_last_block && batch_blocks.size() > 0;
-
-//         int last_block;
-//         if (exclude_last_block) {
-//             last_block = batch_blocks.back();
-//             batch_blocks.pop_back();
-//         }
-
-//         // TODO(zhangjianning.zjn): would be better to pass the ref increment directly
-//         if (batch_blocks.size() > 0) {
-//             for (int i = 1; i < batch_fork_count[old_batch_idx]; ++i) {
-//                 resource_context_.cache_manager->incrRefCounter(batch_blocks);
-//             }
-//         }
-
-//         if (exclude_last_block) {
-//             batch_blocks.push_back(last_block);
-//         }
-//     }
-
-//     // TODO(chanyin): update batch_kv_cache_resource's kv_cache_resource here
-//     // generate update mapping for block ids
-//     vector<vector<int32_t>> old_block_ids = std::move(batch_resource_->batch_block_id);
-//     batch_resource_->batch_block_id.reserve(new_batch_size);
-//     vector<vector<size_t>> old_cache_keys = std::move(batch_resource_->cache_keys);
-//     batch_resource_->cache_keys.reserve(new_batch_size);
-//     block_update_mapping_.reserve(num_new_blocks);
-//     for (int new_batch_idx = 0; new_batch_idx < new_batch_size; ++new_batch_idx) {
-//         int   old_batch_idx = block_src_batch[new_batch_idx];
-//         auto& fork_count    = batch_fork_count[old_batch_idx];
-//         RTP_LLM_CHECK_WITH_INFO(fork_count > 0, "old batch %d has been forked too many times", old_batch_idx);
-//         if (fork_count == 1) {
-//             // move from old blocks directly
-//             batch_resource_->batch_block_id.emplace_back(std::move(old_block_ids[old_batch_idx]));
-//             batch_resource_->cache_keys.emplace_back(std::move(old_cache_keys[old_batch_idx]));
-//         } else {
-//             // copy from old blocks
-//             batch_resource_->batch_block_id.emplace_back(old_block_ids[old_batch_idx]);
-//             batch_resource_->cache_keys.emplace_back(old_cache_keys[old_batch_idx]);
-//             auto& blocks = batch_resource_->batch_block_id.back();
-//             if (copy_last_block && blocks.size() > 0) {
-//                 int old_block = blocks.back();
-//                 blocks.pop_back();
-
-//                 int new_block = new_blocks.back();
-//                 new_blocks.pop_back();
-//                 blocks.push_back(new_block);
-
-//                 block_update_mapping_.push_back(BlockIdPair{old_block, new_block});
-//             }
-//         }
-//         --fork_count;
-//     }
-
-//     return true;
-// }
-
-// TODO(xinfei.sxf) move code to batch resource class
-void StreamCacheResource::constructCacheKey() {
-    batch_resource_->cache_keys.resize(stream_->currentBatchSize());
-    if (!resource_context_.cache_manager) {
-        return;
-    }
-    if (!reuseCache() && !resource_context_.use_cache_store) {
-        return;
-    }
-    for (size_t i = 0; i < stream_->currentBatchSize(); i++) {
-        batch_resource_->cache_keys[i].reserve(singleBatchNeedBlocks(stream_->max_seq_len_));
-    }
-    auto   seq_size_per_block = seqSizePerBlock();
-    auto   token_ids          = stream_->generate_input_->input_ids->data<int32_t>();
-    size_t hash               = 0;
-    last_block_aligned_       = stream_->seqLength() % seq_size_per_block == 0 ? true : false;
-    int32_t end_block_index   = singleBatchNeedBlocks(stream_->seqLength());
-    for (int index = 0; index < end_block_index; index++) {
-        auto pos = index * seq_size_per_block;
-        hash =
-            hashInt64Array(hash, token_ids + pos, token_ids + std::min(pos + seq_size_per_block, stream_->seqLength()));
-        batch_resource_->cache_keys[0].push_back(hash);
-    }
-    for (size_t i = 1; i < stream_->currentBatchSize(); i++) {
-        batch_resource_->cache_keys[i] = batch_resource_->cache_keys[0];
-    }
-}
-
-void StreamCacheResource::reConstructCacheKeys() {
-    if (!resource_context_.cache_manager) {
-        return;
-    }
-    if (!reuseCache() && !resource_context_.use_cache_store) {
-        return;
-    }
-    auto seq_size_per_block = seqSizePerBlock();
-    auto total_blocks       = stream_->seqLength() / seq_size_per_block;
-    for (size_t i = 0; i < stream_->currentBatchSize(); ++i) {
-        if (!last_block_aligned_ && !batch_resource_->cache_keys[i].empty()) {
-            batch_resource_->cache_keys[i].pop_back();
-        }
-        auto   token_ids = stream_->complete_token_ids_->data(i);
-        size_t hash      = batch_resource_->cache_keys[i].empty() ? 0 : batch_resource_->cache_keys[i].back();
-        for (int index = batch_resource_->cache_keys[i].size(); index < total_blocks; index++) {
-            auto pos = index * seq_size_per_block;
-            hash     = hashInt64Array(hash, token_ids + pos, token_ids + pos + seq_size_per_block);
-            batch_resource_->cache_keys[i].push_back(hash);
-        }
-    }
-
-    last_block_aligned_ = true;
-}
-
 bool StreamCacheResource::hasCacheKeys() const {
-    return !batch_resource_->cache_keys.empty();
+    if (batch_resource_->batch_resource.empty()) {
+        return false;
+    }
+    for (const auto& br : batch_resource_->batch_resource) {
+        if (!br.cache_keys.empty()) {
+            return true;
+        }
+    }
+    return false;
 }
 
 const CacheKeysType& StreamCacheResource::cacheKeys(int32_t batch_id) const {
-    RTP_LLM_CHECK_WITH_INFO(batch_resource_->cache_keys.size() > batch_id, "cache_keys size is <= batch_id");
-    return batch_resource_->cache_keys[batch_id];
+    RTP_LLM_CHECK_WITH_INFO(batch_id >= 0 && batch_id < batch_resource_->batchSize(), "invalid batch_id");
+    return batch_resource_->batch_resource[batch_id].cache_keys;
 }
 
 void StreamCacheResource::fakeInitKVBlock() {
@@ -387,7 +210,7 @@ void StreamCacheResource::fakeInitKVBlock() {
         batch_resource_->resize(i, stream_->seqLength(), true);
     }
 
-    batch_resource_->cache_keys.resize(stream_->maxBatchSize());
+    // cache keys will be constructed lazily per batch_resource[i].cache_keys
 }
 
 int StreamCacheResource::mallocFailedTimes() const {

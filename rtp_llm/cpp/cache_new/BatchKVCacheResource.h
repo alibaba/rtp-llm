@@ -56,11 +56,12 @@ public:
     BatchKVCacheResource() {}
     int                     batchSize() const;
     int                     blockSize(int batch_id) const;
+    void                    initGroups(int group_nums);
     void                    resize(size_t batch_size);
     void                    resize(size_t batch_id, int reserver_blocks, int value);
     void                    shrink(size_t batch_id, int reserver_blocks);
     int                     maxBlockSize() const;
-    const std::vector<int>& blocks(int batch_id) const;
+    const std::vector<int>& blocks(int batch_id, int group_id = 0) const;
     void                    clear();
     void                    check() const;
 
@@ -68,10 +69,6 @@ public:
 
 public:
     bool enable_reuse_cache = true;
-
-    // this two member will be deleted soon
-    std::vector<std::vector<BlockIdxType>> batch_block_id;
-    std::vector<std::vector<CacheKeyType>> cache_keys;
 
     std::vector<KVCacheResourceV1> batch_resource;
 };

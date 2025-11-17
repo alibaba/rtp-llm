@@ -118,7 +118,6 @@ cc_test(
     copts = test_copts,
     deps = test_deps + [
         ":block_pool_test_helper",
-        "//rtp_llm/cpp/cache:cache",
     ],
     env = {},
     exec_properties = {'gpu':'A10'},
@@ -133,7 +132,6 @@ cc_test(
     copts = test_copts,
     deps = test_deps + [
         ":block_pool_test_helper",
-        "//rtp_llm/cpp/cache:cache",
     ],
     env = {},
     exec_properties = {'gpu':'A10'},

@@ -66,15 +66,11 @@ CompleteTokenIdsPtr createCompleteTokenIds(int batch_size, int seq_length) {
 
 BatchKVCacheResourcePtr createBatchKVCacheResource(int batch_size, int group_nums = 0, int block_nums = 0) {
     auto resource = std::make_shared<BatchKVCacheResource>();
-    resource->batch_block_id.resize(batch_size);
-    resource->cache_keys.resize(batch_size);
     resource->batch_resource.resize(batch_size);
     for (int i = 0; i < batch_size; ++i) {
-        resource->batch_block_id[i]            = std::vector<int>(block_nums);
-        resource->cache_keys[i]                = std::vector<size_t>(block_nums, i * 100);
-        resource->batch_resource[i].cache_keys = std::vector<size_t>(block_nums, i * 100);
         resource->batch_resource[i].initGroups(group_nums);
         resource->batch_resource[i].resizeBlocks(block_nums, 0);
+        resource->batch_resource[i].cache_keys = CacheKeysType(block_nums, static_cast<CacheKeyType>(i * 100));
     }
     return resource;
 }
