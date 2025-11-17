@@ -7,6 +7,9 @@ import torch
 
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.kv_cache_config import KVCacheConfig
+from rtp_llm.config.task_type import TaskType
+from rtp_llm.distribute.distributed_server import get_world_info
+from rtp_llm.distribute.worker_info import ParallelInfo, g_parallel_info
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import (
     BaseTokenizer,
     TokenizerFactory,
@@ -14,6 +17,7 @@ from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import (
 from rtp_llm.model_loader.loader import ModelLoader, get_model_loader
 from rtp_llm.model_loader.load_config import LoadMethod
 from rtp_llm.model_loader.model_weight_info import ModelDeployWeightInfo, ModelWeights
+from rtp_llm.model_loader.weight_manager import WeightManager
 from rtp_llm.models.downstream_modules.custom_module import CustomModule
 from rtp_llm.models.downstream_modules.utils import create_custom_module
 from rtp_llm.models.multimodal.multimodal_mixin import MultiModalMixin
@@ -84,6 +88,10 @@ class BaseModel(object):
         self.merge_lora = merge_lora
         self.device_resource_config = device_resource_config
         self.weight = None
+        self.weight_manager = None
+
+        self.linear_bias_slopes: Optional[torch.Tensor] = None
+        self.prefix_tokens: Optional[torch.Tensor] = None
         self.py_eplb = None
         self.tokenizer: Optional[BaseTokenizer] = None
         self.custom_module: Optional[CustomModule] = None
@@ -139,7 +147,9 @@ class BaseModel(object):
         self.py_eplb = self.model_weights_loader._py_eplb
         device_str = self._get_device_str()
         self._load(device_str)
-
+        self.weight_manager = WeightManager(
+            self.device, self.weight, self.model_weights_loader
+        )
         if self.load_python_model:
             logging.info(
                 f"Creating python model for {self.model_config.ckpt_path} on {device_str}"
