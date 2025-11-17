@@ -68,7 +68,7 @@ FfnLayerOutput ROCmDevice::deepEpLLMoeFfn(const FfnLayerParams& params, const Mo
     RUNTIME_ASSERT_OP_ARG(hidden_shape.size() == 3 && hidden_shape[0] == num_experts_per_rank,
                     "hidden_shape dims should be 3 and dim 0 should be num_experts_per_rank");
     const size_t num_token = rank_hidden->shape()[1];
-    RTP_LLM_CHECK_WITH_INFO(rank_hidden->type() == DataType::TYPE_BF16, "Only input hidden datatype bf16 is supported.");
+
     
     // get w1 and w2
     torch::Tensor                w1_tensor, w2_tensor;
@@ -135,7 +135,17 @@ FfnLayerOutput ROCmDevice::deepEpLLMoeFfn(const FfnLayerParams& params, const Mo
         torch::Tensor   hidden_tensor;
         torch::Tensor   scale_tensor;
 
-        quantize_3d(this, rank_hidden, q_hidden, hidden_tensor, scale_tensor);
+        if (deep_ep_ll_output->packed_recv_x_scales.has_value()) {
+            const char* env_fp8_cast_level = std::getenv("ACCL_FP8_CAST_LEVEL");
+            RUNTIME_ASSERT_OP_ARG(env_fp8_cast_level != nullptr, "env ACCL_FP8_CAST_LEVEL must be set when doing quant in low latency dispatch");
+            RUNTIME_ASSERT_OP_ARG(0 == std::strcmp(env_fp8_cast_level, "2"), "env ACCL_FP8_CAST_LEVEL must be set to 2 when using PTPC quant in ROCm");
+
+            hidden_tensor = deep_ep_ll_output->packed_recv_x;
+            scale_tensor = deep_ep_ll_output->packed_recv_x_scales.value();
+        } else {
+            quantize_3d(this, rank_hidden, q_hidden, hidden_tensor, scale_tensor);
+        }
+
         ::m_grouped_gemm(hidden_tensor,
                          w1_tensor,
                          fc1_result_tensor,
