@@ -20,7 +20,16 @@ MoeDispatchOutput ROCmDevice::deepEpLLDispatch(const MoeDispatchParams& params) 
     const auto& moe_conf   = params.moe_configs;
     auto const  tp_size    = moe_conf.tp_size;
     auto const  expert_num = moe_conf.expert_num + moe_conf.extra_expert_num;
-    auto const  use_fp8    = params.qscheme == QScheme::Qfp8PerTokenBlock;
+    bool use_fp8 = false;
+    const char* env_fp8_cast_level = std::getenv("ACCL_FP8_CAST_LEVEL");
+    // Qfp8PerTokenBlock + ACCL_FP8_CAST_LEVEL=1 -> do per-block quant in low latency dispatch
+    if (params.qscheme == QScheme::Qfp8PerTokenBlock and env_fp8_cast_level != nullptr and 0 == std::strcmp(env_fp8_cast_level, "1")) {
+        use_fp8 = true;
+    }
+    // Qfp8PerToken + ACCL_FP8_CAST_LEVEL=2 -> do per-token quant in low latency dispatch
+    if (params.qscheme == QScheme::Qfp8PerToken and env_fp8_cast_level != nullptr and 0 == std::strcmp(env_fp8_cast_level, "2")) {
+        use_fp8 = true;
+    }
 
     size_t      token_num                        = params.expert_ids.shape()[0];
     size_t      tp_token_size                    = (token_num + tp_size - 1) / tp_size;

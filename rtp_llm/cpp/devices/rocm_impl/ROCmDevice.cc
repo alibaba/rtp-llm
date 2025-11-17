@@ -223,7 +223,9 @@ DevicePrepOutput ROCmDevice::prepareModelRun(const DevicePrepParams& params) {
                                                                                                params.input_lengths,
                                                                                                params.kv_cache_block_id,
                                                                                                params.attn_dtype);
-    output.decode_aiter_attn        = AiterAttnParams::prepareDecodeAiterAttnParams(this, params.sequence_lengths);
+    const int kv_cache_offset = params.k_cache ? params.k_cache->shape()[0] * params.k_cache->shape()[1] : 0;
+    auto decode_kv_cache_block_id_d = params.kv_cache_block_id_d ? params.kv_cache_block_id_d->slice(0, params.decoder_batch_size) : nullptr;
+    output.decode_aiter_attn = AiterAttnParams::prepareDecodeAiterAttnParams(this, params.sequence_lengths, params.configs, kv_cache_offset, decode_kv_cache_block_id_d);
     return std::move(output);
 }
 

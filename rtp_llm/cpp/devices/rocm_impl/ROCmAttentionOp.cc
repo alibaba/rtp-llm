@@ -318,24 +318,64 @@ void prepareContextMLAFlashInferAttnParamsImpl(FlashInferAttnParams*            
 void prepareDecodeAiterAttnParamsImpl(AiterAttnParams*     params,
                                       rtp_llm::DeviceBase* device,
                                       const BufferPtr&     sequence_lengths_host,
+                                      const AttentionConfigs& configs,
+                                      const BufferPtr&     kv_cache_block_id,
+                                      const int            kv_cache_offset,
                                       const uint64_t       batch_size) {
     if (device->nativeGraphCapturing()) {
         params->sequence_lengths_host = nullptr;
         params->sequence_lengths      = device->clone({*sequence_lengths_host, AllocationType::DEVICE});
         params->sequence_lengths_t    = Buffer2torchTensor(params->sequence_lengths, false);
         params->sequence_lengths_t += 1;
-        return;
+    } else {
+        params->sequence_lengths_host =
+            device->allocateBuffer({DataType::TYPE_INT32, {batch_size}, AllocationType::HOST}, {"sequence_lengths_host"});
+        for (int i = 0; i < int(batch_size); i++) {
+            params->sequence_lengths_host->data<int>()[i] = sequence_lengths_host->data<int>()[i] + 1;
+        }
+        params->sequence_lengths = device->clone({*params->sequence_lengths_host, AllocationType::DEVICE});
+        params->sequence_lengths_t = Buffer2torchTensor(params->sequence_lengths, false);
     }
-    params->sequence_lengths_host =
-        device->allocateBuffer({DataType::TYPE_INT32, {batch_size}, AllocationType::HOST}, {"sequence_lengths_host"});
 
-    for (int i = 0; i < int(batch_size); i++) {
-        params->sequence_lengths_host->data<int>()[i] = sequence_lengths_host->data<int>()[i] + 1;
+    int ele_size   = 2;
+    KvCacheDataType cache_type = KvCacheDataType::BASE;
+#ifdef ENABLE_FP8
+    if (use_fp8_fmha_) {
+        cache_type = KvCacheDataType::FP8;
+        ele_size   = 1;
+    } else
+#endif
+    if (configs.kv_cache_dtype == KvCacheDataType::INT8) {
+        cache_type = KvCacheDataType::INT8;
+        ele_size   = 1;
+    } else if (configs.kv_cache_dtype == KvCacheDataType::FP8) {
+        cache_type = KvCacheDataType::FP8;
+        ele_size   = 1;
     }
 
-    params->sequence_lengths = device->clone({*params->sequence_lengths_host, AllocationType::DEVICE});
+    const size_t max_blocks_per_batch = kv_cache_block_id->shape()[1];
+    params->kv_cache_offset =
+      device->allocateBuffer({DataType::TYPE_INT32, {size_t(batch_size), 1, 2, max_blocks_per_batch}, AllocationType::DEVICE},
+                      {"kv_cache_offset"});
+    params->kv_block_array = KVBlockArray(batch_size,
+                                          max_blocks_per_batch,
+                                          configs.tokens_per_block,
+                                          configs.kv_head_num * configs.size_per_head * ele_size,
+                                          0,
+                                          0,
+                                          nullptr,
+                                          nullptr,
+                                          (rtp_llm::KVCacheIndex*)params->kv_cache_offset->data<int>());
+    params->kv_block_array.cache_type          = cache_type;
+    params->kv_block_array.mScaleBytesPerBlock = configs.tokens_per_block * configs.kv_head_num * sizeof(float);
 
-    params->sequence_lengths_t = Buffer2torchTensor(params->sequence_lengths, false);
+    invokeConvertOffsetToBlockArrayData(params->kv_cache_offset->data<int>(),
+                                        kv_cache_block_id->data<int>(),
+                                        batch_size,
+                                        max_blocks_per_batch,
+                                        ((ROCmDevice*)device)->getStream());
+    check_cuda_error();
+    return;
 }
 
 ParamsPtr FlashInferAttnParams::preparePrefillFlashInferAttnParams(rtp_llm::DeviceBase*             device,
@@ -427,7 +467,10 @@ ParamsPtr FlashInferAttnParams::prepareDecodeFlashInferAttnParams(rtp_llm::Devic
 }
 
 ParamsPtr AiterAttnParams::prepareDecodeAiterAttnParams(rtp_llm::DeviceBase* device,
-                                                        const BufferPtr&     sequence_lengths_host) {
+                                                        const BufferPtr& sequence_lengths_host,
+                                                        const AttentionConfigs& configs,
+                                                        const int kv_cache_offset,
+                                                        const BufferPtr& kv_cache_block_id) {
 
     if (!device->initParams().use_aiter_pa) {
         return nullptr;
@@ -441,7 +484,7 @@ ParamsPtr AiterAttnParams::prepareDecodeAiterAttnParams(rtp_llm::DeviceBase* dev
     auto ret    = ParamsPtr(new AiterAttnParams, aiterAttnParamsDeleter);
     auto params = (AiterAttnParams*)ret.get();
 
-    prepareDecodeAiterAttnParamsImpl(params, device, sequence_lengths_host, batch_size);
+    prepareDecodeAiterAttnParamsImpl(params, device, sequence_lengths_host, configs, kv_cache_block_id, kv_cache_offset, batch_size);
     return ret;
 }
 
