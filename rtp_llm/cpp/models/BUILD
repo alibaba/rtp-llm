@@ -64,7 +64,6 @@ cc_library(
         "//rtp_llm/cpp/engine_base/stream:generate_types",
         "//rtp_llm/cpp/engine_base/stream:generate_config",
         "//rtp_llm/cpp/multimodal_processor:multimodal_types",
-        "//rtp_llm/cpp/cache",
         "//rtp_llm/cpp/pybind:py_utils",
     ],
     visibility = ["//visibility:public"],

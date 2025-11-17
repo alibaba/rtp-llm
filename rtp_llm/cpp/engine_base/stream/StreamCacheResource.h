@@ -40,8 +40,6 @@ public:
         releaseResource();
     }
     void                 init(int batch_size);
-    void                 constructCacheKey();
-    void                 reConstructCacheKeys();
     bool                 hasCacheKeys() const;
     const CacheKeysType& cacheKeys(int32_t batch_id) const;
     absl::StatusOr<int>  initKVBlock(int token_capacity, size_t reserve_step = 0);
@@ -119,8 +117,12 @@ public:
 
         for (size_t i = 0; i < batch_resource_->batchSize(); i++) {
             debug_string << " [";
-            for (size_t j = 0; j < batch_resource_->batch_block_id[i].size(); j++) {
-                debug_string << batch_resource_->batch_block_id[i][j] << " ";
+            if (i < batch_resource_->batch_resource.size()
+                && !batch_resource_->batch_resource[i].group_block_ids.empty()) {
+                const auto& blocks = batch_resource_->batch_resource[i].group_block_ids[0]->block_indices;
+                for (size_t j = 0; j < blocks.size(); j++) {
+                    debug_string << blocks[j] << " ";
+                }
             }
             debug_string << "],";
         }
