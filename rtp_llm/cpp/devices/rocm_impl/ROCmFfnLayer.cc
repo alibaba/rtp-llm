@@ -19,13 +19,13 @@ namespace rtp_llm {
 
 MoeDispatchOutput ROCmDevice::epDispatch(const MoeDispatchParams& params) {
     DevicePerfWrapper wrapper(this, "epDispatch");
-    // if (init_params_.use_deepep_moe) {
-    //     if (init_params_.use_deepep_low_latency) {
-    //         return deepEpLLDispatch(params);
-    //     } else {
-    //         return deepEpDispatch(params);
-    //     }
-    // }
+    if (init_params_.use_deepep_moe) {
+        if (init_params_.use_deepep_low_latency) {
+            return deepEpLLDispatch(params);
+        } else {
+            return deepEpDispatch(params);
+        }
+    }
     const auto& moe_conf = params.moe_configs;
 
     auto const expert_num = moe_conf.expert_num + moe_conf.extra_expert_num;
@@ -152,13 +152,13 @@ MoeDispatchOutput ROCmDevice::epDispatch(const MoeDispatchParams& params) {
 
 MoeCombineOutput ROCmDevice::epCombine(const MoeCombineParams& params) {
     DevicePerfWrapper wrapper(this, "epCombine");
-    // if (init_params_.use_deepep_moe) {
-    //     if (init_params_.use_deepep_low_latency) {
-    //         return deepEpLLCombine(params);
-    //     } else {
-    //         return deepEpCombine(params);
-    //     }
-    // }
+    if (init_params_.use_deepep_moe) {
+        if (init_params_.use_deepep_low_latency) {
+            return deepEpLLCombine(params);
+        } else {
+            return deepEpCombine(params);
+        }
+    }
     // 当前卡接受计算完moe的token
     bool overlapped = false;
 
@@ -317,11 +317,31 @@ MoeGateSelectOutput ROCmDevice::moeGateSelect(const FfnLayerParams& params) {
     }
 
     balanceExperts(topk_ids, params.expert_stats, params.configs.moe_configs.value(), params.weights);
-
+    if (init_params_.moe_config.fake_balance_expert) {
+        if (topk_ids->type() == DataType::TYPE_INT64) {
+            fake_balance_expert(topk_ids->data<int64_t>(),
+                                topk_weights->data<float>(),
+                                init_params_.dp_rank,
+                                num_expert,
+                                num_token * topk,
+                                stream_);
+        } else {
+            fake_balance_expert(topk_ids->data<int>(),
+                                topk_weights->data<float>(),
+                                init_params_.dp_rank,
+                                num_expert,
+                                num_token * topk,
+                                stream_);
+        }
+    }
     return {topk_ids, topk_weights, moe_gating};
 }
 
 FfnLayerOutput ROCmDevice::moeFfn(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs) {
+    // deepseek deepep low latency only
+    if (init_params_.ep_size > 1 && init_params_.use_deepep_moe && init_params_.use_deepep_low_latency) {
+        return deepEpLLMoeFfn(params, gate_outputs);
+    }
     const MoeConfigs& moe_conf = params.configs.moe_configs.value();
 
     const Buffer& hidden = params.input;
@@ -344,7 +364,7 @@ FfnLayerOutput ROCmDevice::moeFfn(const FfnLayerParams& params, const MoeGateSel
         return {moe_out_final};
     }
 
-    torch::Tensor topk_ids_tensor     = Buffer2torchTensor(*(gate_outputs.expert_ids), false);
+    torch::Tensor topk_ids_tensor     = Buffer2torchTensor(*(gate_outputs.expert_ids), false).to(torch::kInt32);
     torch::Tensor topk_weights_tensor = Buffer2torchTensor(*(gate_outputs.expert_scales), false);
 
     // get input
