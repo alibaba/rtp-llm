@@ -252,4 +252,12 @@ KVCacheBuffer HybridLayerKVCacheAllocator::kvCacheBuffer() const {
     return block_pool_->kvCacheBuffer();
 }
 
+bool HybridLayerKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                                const std::vector<int>&        block_src_batch,
+                                                bool                           copy_last_block,
+                                                std::vector<BlockIdPair>&      block_update_mapping) {
+    // TODO(chanyin): may be implemented in Base class in future
+    return true;
+}
+
 }  // namespace rtp_llm

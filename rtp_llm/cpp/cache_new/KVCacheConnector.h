@@ -1,6 +1,6 @@
 #pragma once
 
-#include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache_new/BatchKVCacheResource.h"
 
 namespace rtp_llm {
 

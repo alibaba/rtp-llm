@@ -73,10 +73,13 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     // TODO, 这里是啥含义呢？在外围做掉？
     int seq_len =
         (malloc_info.total_seq_len >= 0) ? malloc_info.total_seq_len : malloc_info.complete_token_ids->seqLength();
-    bool  has_common_len  = (malloc_info.common_seq_len >= 0) && (malloc_info.common_seq_len <= seq_len);
-    int   common_seq_len  = has_common_len ? malloc_info.common_seq_len : seq_len;
-    auto& cache_keys_0    = malloc_info.batch_kv_cache_resource->cache_keys[0];
-    auto& block_indices_0 = malloc_info.batch_kv_cache_resource->batch_block_id[0];
+    bool has_common_len = (malloc_info.common_seq_len >= 0) && (malloc_info.common_seq_len <= seq_len);
+    int  common_seq_len = has_common_len ? malloc_info.common_seq_len : seq_len;
+    // ensure group 0 exists
+    auto& br0 = malloc_info.batch_kv_cache_resource->batch_resource[0];
+
+    auto& cache_keys_0    = br0.cache_keys;
+    auto& block_indices_0 = br0.group_block_ids[0]->block_indices;
     if (malloc_info.batch_kv_cache_resource->enable_reuse_cache && block_indices_0.size() < cache_keys_0.size()) {
         auto match_result = full_kv_cache_group_->match(cache_keys_0);
         reuse_len         = static_cast<int>(match_result.reuse_length);
@@ -87,8 +90,10 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
         return {false, 0};
     }
 
+    // reference other batches to group 0
     for (int batch_id = 1; batch_id < batch_size; ++batch_id) {
-        auto& block_indices_other = malloc_info.batch_kv_cache_resource->batch_block_id[batch_id];
+        auto& br                  = malloc_info.batch_kv_cache_resource->batch_resource[batch_id];
+        auto& block_indices_other = br.group_block_ids[0]->block_indices;
         full_kv_cache_group_->reference(block_indices_other, block_indices_0);
     }
 
@@ -106,8 +111,10 @@ MallocResult SingleTypeKVCacheAllocator::incrMalloc(const MallocInfo& malloc_inf
         return {true, 0};
     }
     for (int batch_id = 0; batch_id < batch_size; ++batch_id) {
-        auto& cache_keys    = malloc_info.batch_kv_cache_resource->cache_keys[batch_id];
-        auto& block_indices = malloc_info.batch_kv_cache_resource->batch_block_id[batch_id];
+        auto& br = malloc_info.batch_kv_cache_resource->batch_resource[batch_id];
+
+        auto& cache_keys    = br.cache_keys;
+        auto& block_indices = br.group_block_ids[0]->block_indices;
         if (!full_kv_cache_group_->malloc(cache_keys, block_indices, seq_len)) {
             // TODO，回滚已经malloc的资源。
             return {false, 0};
@@ -127,13 +134,12 @@ FreeResult SingleTypeKVCacheAllocator::free(const FreeInfo& free_info) {
         return {false};
     }
     // Free all blocks in batch_kv_cache_resource
-    std::unordered_set<int> all_blocks;
     for (int batch_id = 0; batch_id < free_info.batch_kv_cache_resource->batchSize(); ++batch_id) {
-        auto& batch_blocks = free_info.batch_kv_cache_resource->batch_block_id[batch_id];
-
-        for (int block_id : batch_blocks) {
-            all_blocks.insert(block_id);
+        auto& br = free_info.batch_kv_cache_resource->batch_resource[batch_id];
+        if (br.group_block_ids.empty()) {
+            continue;
         }
+        auto& batch_blocks = br.group_block_ids[0]->block_indices;
 
         if (!batch_blocks.empty()) {
             full_kv_cache_group_->free(batch_blocks);
@@ -151,8 +157,10 @@ InsertResult SingleTypeKVCacheAllocator::insertIntoCache(const InsertInfo& inser
     batch_size = 1;
 
     for (int batch_id = 0; batch_id < batch_size; ++batch_id) {
-        auto& cache_keys = insert_info.batch_kv_cache_resource->cache_keys[batch_id];
-        auto& block_ids  = insert_info.batch_kv_cache_resource->batch_block_id[batch_id];
+        auto& br = insert_info.batch_kv_cache_resource->batch_resource[batch_id];
+
+        auto& cache_keys = br.cache_keys;
+        auto& block_ids  = br.group_block_ids[0]->block_indices;
 
         size_t block_len = std::min(size_t(cache_keys.size()), size_t(block_ids.size()));
         if (block_len == 0) {
@@ -251,7 +259,8 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& ba
     for (int old_batch_idx = 0; old_batch_idx < old_batch_size; ++old_batch_idx) {
         const int fork_count = batch_fork_count[old_batch_idx];
         if (fork_count == 0) {
-            const auto& blocks = batch_kv_cache_resource->batch_block_id[old_batch_idx];
+            const auto& br_old = batch_kv_cache_resource->batch_resource[old_batch_idx];
+            const auto& blocks = br_old.group_block_ids[0]->block_indices;
             disused_kv_blocks.insert(disused_kv_blocks.end(), blocks.begin(), blocks.end());
         } else if (fork_count > 1 && copy_last_block) {
             num_new_blocks += static_cast<uint32_t>(fork_count - 1);
@@ -271,11 +280,8 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& ba
     }
 
     // rebuild batch_kv_cache_resource and generate mapping
-    std::vector<std::vector<int32_t>> old_block_ids = std::move(batch_kv_cache_resource->batch_block_id);
-    batch_kv_cache_resource->batch_block_id.reserve(new_batch_size);
-    std::vector<std::vector<int64_t>> old_cache_keys = std::move(batch_kv_cache_resource->cache_keys);
-    batch_kv_cache_resource->cache_keys.reserve(new_batch_size);
-    block_update_mapping.reserve(num_new_blocks);
+    std::vector<KVCacheResourceV1> old_resources = std::move(batch_kv_cache_resource->batch_resource);
+    batch_kv_cache_resource->batch_resource.reserve(new_batch_size);
 
     for (int new_batch_idx = 0; new_batch_idx < new_batch_size; ++new_batch_idx) {
         const int old_batch_idx = block_src_batch[new_batch_idx];
@@ -283,15 +289,19 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& ba
         RTP_LLM_CHECK_WITH_INFO(fork_count > 0, "old batch %d has been forked too many times", old_batch_idx);
 
         if (fork_count == 1) {
-            batch_kv_cache_resource->batch_block_id.emplace_back(std::move(old_block_ids[old_batch_idx]));
-            batch_kv_cache_resource->cache_keys.emplace_back(std::move(old_cache_keys[old_batch_idx]));
+            auto& br = batch_kv_cache_resource->batch_resource[new_batch_idx];
+            br.initGroups(1);
+            br.group_block_ids[0]->block_indices =
+                std::move(old_resources[old_batch_idx].group_block_ids[0]->block_indices);
+            br.cache_keys = std::move(old_resources[old_batch_idx].cache_keys);
         } else {
             // create new batch by referencing from source blocks
-            batch_kv_cache_resource->batch_block_id.emplace_back();
-            batch_kv_cache_resource->cache_keys.emplace_back(old_cache_keys[old_batch_idx]);
-            auto& blocks     = batch_kv_cache_resource->batch_block_id.back();
-            auto& cache_keys = batch_kv_cache_resource->cache_keys.back();
-            full_kv_cache_group_->reference(blocks, old_block_ids[old_batch_idx]);
+            auto& br = batch_kv_cache_resource->batch_resource[new_batch_idx];
+            br.initGroups(1);
+            auto& blocks     = br.group_block_ids[0]->block_indices;
+            auto& cache_keys = br.cache_keys;
+            cache_keys       = old_resources[old_batch_idx].cache_keys;
+            full_kv_cache_group_->reference(blocks, old_resources[old_batch_idx].group_block_ids[0]->block_indices);
             if (copy_last_block && !blocks.empty()) {
                 const int old_block = blocks.back();
                 blocks.pop_back();
