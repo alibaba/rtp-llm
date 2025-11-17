@@ -39,10 +39,6 @@ public:
     absl::Status startLoop();
 
 public:
-    const ResourceContext& resourceContext() const {
-        return resource_context_;
-    }
-
     const rtp_llm::GptInitParameter& GetGptInitParameter();
 
 private:
@@ -55,7 +51,6 @@ private:
     std::atomic<bool>                   running_{false};
     std::unique_ptr<EmbeddingExecutor>  executor_;
     std::unique_ptr<EmbeddingScheduler> scheduler_;
-    ResourceContext                     resource_context_;
     kmonitor::MetricsReporterPtr        metrics_reporter_ = nullptr;
     std::shared_ptr<CudaProfiler>       profiler_;
 };

@@ -647,6 +647,7 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(dp_tp_nccl_port, dp_tp_nccl_port_)                                                                    \
     DEF_PROPERTY(ffn_tp_nccl_port, ffn_tp_nccl_port_)                                                                  \
     DEF_PROPERTY(model_rpc_port, model_rpc_port_)                                                                      \
+    DEF_PROPERTY(embedding_rpc_port, embedding_rpc_port_)                                                              \
     DEF_PROPERTY(http_port, http_port_)                                                                                \
     DEF_PROPERTY(tp_size, tp_size_)                                                                                    \
     DEF_PROPERTY(tp_rank, tp_rank_)                                                                                    \

@@ -36,10 +36,10 @@ using Flag = std::bitset<NUM_INPUT_TYPES>;
 class EmbeddingExecutor {
 public:
     explicit EmbeddingExecutor(const EngineInitParams& params, rtp_llm::DeviceBase* device, py::object handler);
+    absl::Status                   process(const std::list<EmbeddingStreamPtr>& streams);
+    absl::StatusOr<GptModelInputs> gatherModelInput(const std::list<EmbeddingStreamPtr>& streams) const;
 
-    absl::Status process(const std::list<EmbeddingStreamPtr>& streams);
-
-    rtp_llm::DeviceBase*            device_;
+    rtp_llm::DeviceBase* device_;
 
 private:
     std::unique_ptr<GptModel>       model_;
@@ -49,9 +49,11 @@ private:
     rtp_llm::BufferPtr              max_position_ids_buf_;
     kmonitor::MetricsReporterPtr    metrics_reporter_ = nullptr;
     const rtp_llm::GptInitParameter params_;
+    bool                            has_positional_encoding_;
+    size_t                          position_id_len_factor_ = 1;
+    PositionIdsStyle                mm_position_ids_style_;
 
     ModelRequest                     generateOldModelRequest(GptModelInputs& model_input);
-    absl::StatusOr<GptModelInputs>   gatherModelInput(const std::list<EmbeddingStreamPtr>& streams) const;
     std::unique_ptr<GptModelOutputs> copyResultToCPU(th::Tensor gpu_outputs) const;
     absl::Status                     updateStreams(py::object                           post_process_output,
                                                    const std::list<EmbeddingStreamPtr>& streams,
@@ -62,7 +64,6 @@ private:
     slicePyList(py::object gpu_outputs, const std::list<EmbeddingStreamPtr>& streams, int total_batch_size) const;
     absl::StatusOr<py::object> postProcess(const ModelRequest& model_request, const GptModelOutputs& gpu_outputs);
     void calcTokenNum(const std::list<EmbeddingStreamPtr>& streams, int64_t& token_num, int64_t& batch_size) const;
-    void init_position_ids(int max_seq_len);
     void reportMetrics(size_t context_batch_size, size_t combo_token_num, size_t max_seq_len) const;
 };
 

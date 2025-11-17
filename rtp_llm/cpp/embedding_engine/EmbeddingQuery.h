@@ -26,17 +26,30 @@ public:
     explicit EmbeddingInput(const torch::Tensor&             token_ids,
                             const torch::Tensor&             token_type_ids,
                             const torch::Tensor&             input_lengths,
-                            int                              request_id,
+                            int64_t                          request_id,
                             std::optional<MultimodalFeature> multimodal_features = std::nullopt,
                             std::optional<torch::Tensor>     input_embeddings    = std::nullopt);
 
-    std::shared_ptr<rtp_llm::Buffer>                token_ids;
-    std::shared_ptr<rtp_llm::Buffer>                token_type_ids;
-    std::shared_ptr<rtp_llm::Buffer>                input_lengths;
-    int64_t                                         total_length;
-    int64_t                                         request_id;
-    std::optional<MultimodalFeature>                multimodal_features;
-    std::optional<std::shared_ptr<rtp_llm::Buffer>> input_embeddings;
+    explicit EmbeddingInput(const std::vector<int32_t>&                     token_ids,
+                            const std::vector<int32_t>&                     token_type_ids,
+                            const std::vector<int32_t>&                     input_lengths,
+                            int64_t                                         request_id,
+                            std::optional<std::vector<MultimodalInput>>     multimodal_inputs   = std::nullopt,
+                            std::optional<MultimodalFeature>                multimodal_features = std::nullopt,
+                            std::optional<std::shared_ptr<rtp_llm::Buffer>> input_embeddings    = std::nullopt);
+
+    std::shared_ptr<rtp_llm::Buffer> token_ids;
+    std::shared_ptr<rtp_llm::Buffer> token_type_ids;
+    std::shared_ptr<rtp_llm::Buffer> input_lengths;
+    int64_t                          total_length = -1;
+    int64_t                          request_id   = -1;
+
+    std::optional<std::vector<MultimodalInput>> multimodal_inputs;
+    std::optional<MultimodalFeature>            multimodal_features;
+    std::optional<rtp_llm::BufferPtr>           text_tokens_mask;  // text part for 1 and multimodal part for 0
+    std::optional<rtp_llm::BufferPtr>           mm_locs;           // multimodal input locations
+    std::optional<std::vector<torch::Tensor>>   mm_position_ids;
+    std::optional<rtp_llm::BufferPtr>           input_embeddings;
 
     void        checkVaild();
     std::string debugString() const {
