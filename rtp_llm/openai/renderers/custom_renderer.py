@@ -4,7 +4,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import AsyncGenerator, List, Optional, Union
+from typing import Any, AsyncGenerator, Dict, List, Optional, Union
 
 import torch
 
@@ -197,6 +197,7 @@ class RendererParams:
     stop_word_ids_list: List[List[int]]
     template_type: TemplateType = TemplateType.chat
     ckpt_path: str = ""
+    custom_modal_config: Optional[Dict[str, Any]] = None
 
 
 @dataclass

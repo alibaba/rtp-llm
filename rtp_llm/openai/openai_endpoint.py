@@ -65,6 +65,7 @@ class OpenaiEndpoint(object):
             stop_word_ids_list=self.stop_words_id_list,
             template_type=self.model_config.template_type,
             ckpt_path=self.model_config.ckpt_path,
+            custom_modal_config=self.model_config.custom_modal,
         )
 
         self.chat_renderer: CustomChatRenderer = ChatRendererFactory.get_renderer(

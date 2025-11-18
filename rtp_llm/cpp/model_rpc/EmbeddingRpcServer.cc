@@ -18,7 +18,7 @@ grpc::Status EmbeddingRpcServiceImpl::embedding(grpc::ServerContext*    context,
 
     std::vector<MultimodalInput> multimodal_inputs;
     for (const auto& pb_feature : request->multimodal_features()) {
-        MultimodalInput feature(pb_feature.multimodal_url(), torch::empty(1), pb_feature.multimodal_type());
+        MultimodalInput feature(pb_feature.multimodal_data(), torch::empty(1), pb_feature.multimodal_type());
         multimodal_inputs.emplace_back(std::move(feature));
     }
 

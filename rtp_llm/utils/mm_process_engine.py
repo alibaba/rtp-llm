@@ -38,19 +38,22 @@ class MMProcessEngine:
         tensors: Optional[List[torch.Tensor]] = None,
         preprocess_configs: Optional[List[List[int]]] = None,
     ):
-        if self.run_batch:
-            with Timer() as route_timer:
-                res, pos = self.model.mm_part.mm_embedding(urls, types, tensors)
-            kmonitor.report(
-                GaugeMetrics.VIT_PREPROCESS_RT_METRIC, route_timer.cost_ms()
-            )
-            return MMEmbeddingRes(res, pos)
         if types is None or len(types) == 0:
             types = [MMUrlType.DEFAULT] * len(urls)
         if preprocess_configs is None or len(preprocess_configs) == 0:
             configs = [MMPreprocessConfig()] * len(urls)
         else:
             configs = [MMPreprocessConfig(*config) for config in preprocess_configs]
+
+        if self.run_batch:
+            with Timer() as route_timer:
+                res, pos = self.model.mm_part.mm_embedding(
+                    urls, types, tensors=tensors, configs=configs
+                )
+            kmonitor.report(
+                GaugeMetrics.VIT_PREPROCESS_RT_METRIC, route_timer.cost_ms()
+            )
+            return MMEmbeddingRes(res, pos)
         try:
             res: List[torch.Tensor] = []
             pos: Optional[List[torch.Tensor]] = [] if self.contains_pos else None

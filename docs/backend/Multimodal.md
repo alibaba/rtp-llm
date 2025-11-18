@@ -50,7 +50,7 @@ def trans_multimodal_input(urls):
     input_pb = MultimodalInputsPB()
     for url in urls:
         mm_input_pb = MultimodalInputPB()
-        mm_input_pb.multimodal_url = url
+        mm_input_pb.multimodal_data = url
         mm_input_pb.multimodal_type = 1
         mm_input_pb.mm_preprocess_config.width = -1
         mm_input_pb.mm_preprocess_config.height = -1

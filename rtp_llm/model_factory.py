@@ -16,6 +16,7 @@ from rtp_llm.config.gpt_init_model_parameters import ConfigMode, GptInitModelPar
 from rtp_llm.distribute.gang_info import get_gang_info
 from rtp_llm.distribute.worker_info import g_parallel_info
 from rtp_llm.model_factory_register import _model_factory
+from rtp_llm.models.multimodal.multimodal_mixin import MultiModalMixin
 from rtp_llm.tools.api.hf_model_helper import get_model_info_from_hf
 from rtp_llm.utils.base_model_datatypes import ModelConfig
 from rtp_llm.utils.dump_config_utils import dump_model_to_table
@@ -70,6 +71,7 @@ class ModelFactory:
             config_mode=ConfigMode.SimpleMode,
         )
         config.seq_size_per_block = model_config.seq_size_per_block
+        config.update_config_with_custom_modal(model_config.ckpt_path)
 
         return config
 
@@ -80,6 +82,21 @@ class ModelFactory:
             raise Exception(f"model type {model_config.model_type} not registered!")
         model_cls = _model_factory[model_config.model_type]
         config: GptInitModelParameters = model_cls.create_config(model_config)
+        
+        # Dynamic mixin for custom_modal
+        if getattr(config, "custom_modal", None) and not issubclass(model_cls, MultiModalMixin):
+            class CustomModalWrapper(model_cls, MultiModalMixin):
+                def _init_multimodal(self, config):
+                    pass
+            
+            # Disguise the wrapper as the original class to maintain compatibility
+            # with logging, config dumping, and registry lookups by name.
+            CustomModalWrapper.__name__ = model_cls.__name__
+            CustomModalWrapper.__qualname__ = model_cls.__qualname__
+            
+            model_cls = CustomModalWrapper
+            logging.info(f"Dynamically mixed in MultiModalMixin for custom_modal support on {config.model_name}")
+
         config.model_name = model_cls.__name__
         model = model_cls.from_config(config)
         dump_model_to_table(
