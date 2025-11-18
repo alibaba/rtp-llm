@@ -7,6 +7,10 @@
 #include "rtp_llm/cpp/utils/HashUtil.h"
 #include "rtp_llm/cpp/cache_new/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
+#include "rtp_llm/cpp/devices/DeviceBase.h"
+#include "rtp_llm/cpp/core/Buffer.h"
+
+#include "rtp_llm/cpp/core/Types.h"
 
 namespace rtp_llm {
 
@@ -86,6 +90,70 @@ BlockAddrInfo KVCacheManager::convertIndexToAddr(int block_index, int layer_id) 
         return {};
     }
     return allocator_->convertIndexToAddr(layer_id, block_index);
+}
+
+void KVCacheManager::setKVBlockValue(int              block_index,
+                                     int              layer_id,
+                                     rtp_llm::Buffer& k_buffer,
+                                     rtp_llm::Buffer& v_buffer) {
+    if (!allocator_ || !device_) {
+        RTP_LLM_LOG_ERROR("setKVBlockValue called before KVCacheManager initialized");
+        return;
+    }
+    // Basic size/type validation to prevent out-of-bounds copy
+    auto&  spec             = config_.layer_type_params[0];
+    size_t expected_k_bytes = spec->k_block_size();
+    size_t expected_v_bytes = spec->v_block_size();
+    size_t src_k_bytes      = k_buffer.size() * rtp_llm::getTypeSize(k_buffer.type());
+    size_t src_v_bytes      = v_buffer.size() * rtp_llm::getTypeSize(v_buffer.type());
+    if (src_k_bytes < expected_k_bytes || src_v_bytes < expected_v_bytes) {
+        RTP_LLM_LOG_ERROR("setKVBlockValue src bytes too small: k[%zu]<[%zu] or v[%zu]<[%zu]",
+                          src_k_bytes,
+                          expected_k_bytes,
+                          src_v_bytes,
+                          expected_v_bytes);
+        return;
+    }
+    auto dst = allocator_->convertIndexToBuffer(layer_id, block_index);
+    if (!dst.k_addr || !dst.v_addr) {
+        RTP_LLM_LOG_ERROR("convertIndexToBuffer returned null for layer %d, block %d", layer_id, block_index);
+        return;
+    }
+    device_->copy({*dst.k_addr, k_buffer});
+    device_->copy({*dst.v_addr, v_buffer});
+    device_->syncAndCheck();
+}
+
+void KVCacheManager::setKVBlockValue(int block_index, rtp_llm::Buffer& k_buffer, rtp_llm::Buffer& v_buffer) {
+    if (!allocator_ || !device_) {
+        RTP_LLM_LOG_ERROR("setKVBlockValue called before KVCacheManager initialized");
+        return;
+    }
+    // Basic size/type validation to prevent out-of-bounds copy
+    auto&  spec             = config_.layer_type_params[0];
+    size_t expected_k_bytes = spec->k_block_size();
+    size_t expected_v_bytes = spec->v_block_size();
+    size_t src_k_bytes      = k_buffer.size() * rtp_llm::getTypeSize(k_buffer.type());
+    size_t src_v_bytes      = v_buffer.size() * rtp_llm::getTypeSize(v_buffer.type());
+    if (src_k_bytes < expected_k_bytes || src_v_bytes < expected_v_bytes) {
+        RTP_LLM_LOG_ERROR("setKVBlockValue src bytes too small: k[%zu]<[%zu] or v[%zu]<[%zu]",
+                          src_k_bytes,
+                          expected_k_bytes,
+                          src_v_bytes,
+                          expected_v_bytes);
+        return;
+    }
+    // Populate all layers for this block to match legacy semantics
+    for (int layer_id = 0; layer_id < config_.layer_num; ++layer_id) {
+        auto dst = allocator_->convertIndexToBuffer(layer_id, block_index);
+        if (!dst.k_addr || !dst.v_addr) {
+            RTP_LLM_LOG_ERROR("convertIndexToBuffer returned null for layer %d, block %d", layer_id, block_index);
+            continue;
+        }
+        device_->copy({*dst.k_addr, k_buffer});
+        device_->copy({*dst.v_addr, v_buffer});
+    }
+    device_->syncAndCheck();
 }
 
 MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
