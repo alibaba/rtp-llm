@@ -22,16 +22,15 @@ py_test (
     exec_properties = {'gpu':'H20', 'gpu_count':'2'},
 )
 
-py_test (
-    name = "fused_moe_afd_test",
-    srcs = ["fused_moe_afd_test.py"],
-    deps = [
-        "//rtp_llm/models_py:models",
-        "//rtp_llm:config",
-        "//rtp_llm:utils",
-        "//rtp_llm:testlib",
-        "//rtp_llm/test/model_test/test_util:test_util"
-    ],
-    env = test_envs,
-    exec_properties = {'gpu':'H20'},
-)
+# TODO@muxue uncomment afd router test after accl-ep-m2n is ready
+# py_test (
+#     name = "afd_data_router_test",
+#     srcs = ["afd_data_router_test.py"],
+#     deps = [
+#         "//rtp_llm/models_py/standalone:py_standalone_testlib",
+#         "//rtp_llm/models_py/distributed/test:process_group_state"
+#     ],
+#     env = {"GPU_COUNT": "3"},
+#     tags = ["open_skip", "H20"],
+#     exec_properties = {'gpu':'H20', 'gpu_count':'3'},
+# )

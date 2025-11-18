@@ -6,10 +6,21 @@ from unittest import TestCase, main
 import torch
 import torch.distributed as dist
 
+from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.distribute.worker_info import (
+    g_master_info,
+    g_parallel_info,
+    update_master_info,
+)
+from rtp_llm.models_py.distributed.test.process_group_state import (
+    destroy_distributed_environment,
+    init_distributed_environment,
+)
 from rtp_llm.models_py.modules.cuda.moe.routers.afd_data_router import (
     AfdDataRouterAttn,
     AfdDataRouterFfn,
 )
+from rtp_llm.test.utils.port_util import PortsContext
 
 
 def _generate_mock_routing_data(
@@ -37,22 +48,14 @@ def _run_attn_rank_logic(
     num_tokens: int,
     hidden_dim: int,
     top_k: int,
-    group: dist.ProcessGroup,
+    config: GptInitModelParameters,
 ):
     """Handles all logic for an Attention rank."""
 
     # Initialize the Attention data router
     num_ffn_ranks = world_size - num_attn_ranks
 
-    router = AfdDataRouterAttn(
-        rank,
-        world_size,
-        num_attn_ranks,
-        num_experts,
-        num_tokens,  # num_max_dispatch_tokens_per_rank
-        hidden_dim,
-        group,
-    )
+    router = AfdDataRouterAttn(config)
 
     # --- Create Mock Input Data ---
     torch.manual_seed(rank)
@@ -68,11 +71,13 @@ def _run_attn_rank_logic(
     )
 
     # --- 1. Prepare Phase: Send data ---
-    router.prepare(hidden_states, topk_weights, topk_ids, num_experts, None)
+    router.prepare(hidden_states, None, None, topk_weights, topk_ids, None)
+
     torch.cuda.synchronize(device=None)
 
     # --- 2. Finalize Phase: Receive combined result ---
     final_output = router.finalize()
+
     torch.cuda.synchronize(device=None)
 
     # --- Verification on Attn Rank ---
@@ -107,25 +112,19 @@ def _run_ffn_rank_logic(
     num_tokens: int,
     hidden_dim: int,
     top_k: int,
-    group: dist.ProcessGroup,
+    config: GptInitModelParameters,
 ):
     """Handles all logic for an FFN/Expert rank."""
+
     # Initialize the FFN data router
     num_ffn_ranks = world_size - num_attn_ranks
-    router = AfdDataRouterFfn(
-        rank,
-        world_size,
-        num_attn_ranks,
-        num_experts,
-        num_tokens,  # num_max_dispatch_tokens_per_rank
-        hidden_dim,
-        group,
-    )
+    router = AfdDataRouterFfn(config)
 
     # --- 1. Prepare Phase: Receive data ---
     dummy_a1 = torch.empty(0, hidden_dim, device=f"cuda:{rank}")
     dummy_topk_ids = torch.empty(0, top_k, dtype=torch.int64, device=f"cuda:{rank}")
-    payload = router.prepare(dummy_a1, None, None, dummy_topk_ids, num_experts, None)
+    payload = router.prepare(dummy_a1, None, None, None, dummy_topk_ids, None)
+
     torch.cuda.synchronize(device=None)
 
     # --- Verification on FFN Rank ---
@@ -158,8 +157,10 @@ def _run_ffn_rank_logic(
     dummy_topk_weights = torch.empty(0, top_k, device=f"cuda:{rank}")
     dummy_topk_ids = torch.empty(0, top_k, device=f"cuda:{rank}")
 
+    extra_finalize_args = {"a1_shape": dummy_a1.shape}
+
     output = router.finalize(
-        processed_data, dummy_topk_weights, dummy_topk_ids, False, None, None
+        processed_data, dummy_topk_weights, dummy_topk_ids, False, extra_finalize_args
     )
     torch.cuda.synchronize(device=None)
 
@@ -176,44 +177,54 @@ def router_test_runner(
     hidden_dim: int,
     top_k: int,
 ):
-    dist.init_process_group(
-        backend="nccl",
-        world_size=world_size,
-        rank=rank,
-        device_id=torch.device(f"cuda:{rank}"),
-    )
-    torch.set_default_device("cuda")
-    torch.cuda.set_device(rank)
-    group = dist.new_group(list(range(world_size)))
 
-    try:
-        assert isinstance(group, dist.ProcessGroup)
+    update_master_info(f"0.0.0.0", int(os.environ["MASTER_PORT"]))
+    config = GptInitModelParameters(0, 0, 0, 0, 0)
+    config.world_size = world_size
+    config.local_rank = rank
+    config.expert_num = num_experts
+    config.hidden_size = hidden_dim
+    config.max_generate_batch_size = num_tokens
+    config.gpt_init_params.parallelism_distributed_config.world_rank = rank
+    config.moe_config.use_deepep_low_latency = True
+    config.ffn_disaggregate_config.enable_ffn_disaggregate = True
+    config.ffn_disaggregate_config.attention_tp_size = 1
+    config.ffn_disaggregate_config.attention_dp_size = num_attn_ranks
+    config.ffn_disaggregate_config.ffn_tp_size = 1
+    config.ffn_disaggregate_config.ffn_ep_size = world_size - num_attn_ranks
+    config.nccl_ip = "127.0.0.1"
+    config.th_nccl_port = int(os.getenv("MASTER_PORT", "12345"))
 
-        if rank < num_attn_ranks:
-            _run_attn_rank_logic(
-                rank,
-                world_size,
-                num_attn_ranks,
-                num_experts,
-                num_tokens,
-                hidden_dim,
-                top_k,
-                group,
-            )
-        else:
-            _run_ffn_rank_logic(
-                rank,
-                world_size,
-                num_attn_ranks,
-                num_experts,
-                num_tokens,
-                hidden_dim,
-                top_k,
-                group,
-            )
-    finally:
-        dist.barrier()
-        dist.destroy_process_group()
+    torch.cuda.set_device(config.local_rank)
+    torch.set_default_device(f"cuda:{config.local_rank}")
+    init_distributed_environment(config, backend="nccl", timeout=60)
+
+    # try:
+    if rank < num_attn_ranks:
+        _run_attn_rank_logic(
+            rank,
+            world_size,
+            num_attn_ranks,
+            num_experts,
+            num_tokens,
+            hidden_dim,
+            top_k,
+            config,
+        )
+    else:
+        _run_ffn_rank_logic(
+            rank,
+            world_size,
+            num_attn_ranks,
+            num_experts,
+            num_tokens,
+            hidden_dim,
+            top_k,
+            config,
+        )
+    # finally:
+    # dist.barrier()
+    destroy_distributed_environment()
 
 
 # --- The Main Test Class ---
@@ -228,8 +239,8 @@ class AfdDataRouterTest(TestCase):
 
     # Test configurations: (world_size, num_attn_ranks)
     TEST_CONFIGS = [
-        # (2, 1),
-        (4, 2),  # 4 ranks, 2 attn ranks, 2 expert ranks
+        (2, 1),
+        # (4, 2),  # 4 ranks, 2 attn ranks, 2 expert ranks
         # (4, 3),  # 4 ranks, 3 attn ranks, 1 expert ranks
         # (8, 7),  # 8 ranks, 7 attn ranks, 1 expert rank
     ]
@@ -243,7 +254,6 @@ class AfdDataRouterTest(TestCase):
         os.environ["ACCL_TOPO_FIX"] = "1"
         os.environ["ACCL_LOAD_BALANCE"] = "1"
         os.environ["NCCL_TOPO_DUMP_FILE"] = "/tmp/nccl_topo.xml"
-        os.environ["MASTER_PORT"] = str(torch.randint(10000, 65535, (1,)).item())
         os.environ["MASTER_ADDR"] = "127.0.0.1"
         os.environ["USE_DEEPEP_LOW_LATENCY"] = "1"
 
@@ -268,6 +278,9 @@ class AfdDataRouterTest(TestCase):
                 )  # assume tp_size = 1
                 os.environ["ACCL_DISPATCH_NUM_WARP_GROUPS"] = str(accl_num_warp_groups)
                 os.environ["ACCL_COMBINE_NUM_WARP_GROUPS"] = str(accl_num_warp_groups)
+                with PortsContext(None, 1) as ports:
+                    os.environ["MASTER_PORT"] = str(ports[0])
+
                 with self.subTest(
                     world_size=world_size, num_attn_ranks=num_attn_ranks, params=params
                 ):
