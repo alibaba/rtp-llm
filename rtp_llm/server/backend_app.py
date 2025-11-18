@@ -20,7 +20,6 @@ from uvicorn.loops.auto import auto_loop_setup
 from rtp_llm.config.py_config_modules import PyEnvConfigs, StaticConfig
 from rtp_llm.config.uvicorn_config import UVICORN_LOGGING_CONFIG
 from rtp_llm.distribute.worker_info import WorkerInfo
-from rtp_llm.embedding.backend_embedding_app import register_backend_embedding_api
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.server.backend_server import BackendServer
 from rtp_llm.server.misc import check_is_master, check_is_worker
@@ -321,5 +320,4 @@ class BackendApp(object):
             """
             return self.backend_server.update_weight(req)
 
-        register_backend_embedding_api(app, self.backend_server)
         return app

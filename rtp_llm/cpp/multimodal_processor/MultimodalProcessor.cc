@@ -25,7 +25,8 @@ ErrorInfo MultimodalProcessor::getStrHash(int32_t* token_ids, std::string& url, 
     int                    now_idx    = 0;
     std::hash<std::string> hasher;
     while (now_idx * substr_len < url_len && now_idx * data_size_scale < mm_emb_len) {
-        int32_t hash_res = hasher(url.substr(now_idx * substr_len, std::min(url_len - now_idx * substr_len, substr_len)));
+        int32_t hash_res =
+            hasher(url.substr(now_idx * substr_len, std::min(url_len - now_idx * substr_len, substr_len)));
         memcpy(token_ids + now_idx * data_size_scale, &hash_res, sizeof(int32_t));
         now_idx++;
     }
@@ -193,7 +194,7 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
     }
     std::string ip_port = "";
     if (input->generate_config) {
-        for(auto & role_addr : input->generate_config->role_addrs) {
+        for (auto& role_addr : input->generate_config->role_addrs) {
             if (role_addr.role == RoleType::VIT) {
                 ip_port = role_addr.ip + ":" + std::to_string(role_addr.grpc_port);
                 break;

@@ -81,6 +81,7 @@ class BgeM3EmbeddingHandler(CustomHandler):
         sparse: SparseEmbeddingHandler,
         colbert: ColBertEmbeddingHandler,
     ):
+        self.need_post_process = True
         self.dense_handler = dense
         self.sparse_handler = sparse
         self.colbert_handler = colbert
