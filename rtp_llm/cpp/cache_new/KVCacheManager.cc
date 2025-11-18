@@ -7,6 +7,8 @@
 #include "rtp_llm/cpp/utils/HashUtil.h"
 #include "rtp_llm/cpp/cache_new/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
+#include "rtp_llm/cpp/devices/DeviceBase.h"
+#include "rtp_llm/cpp/core/Buffer.h"
 
 namespace rtp_llm {
 
@@ -86,6 +88,39 @@ BlockAddrInfo KVCacheManager::convertIndexToAddr(int block_index, int layer_id) 
         return {};
     }
     return allocator_->convertIndexToAddr(layer_id, block_index);
+}
+
+void KVCacheManager::setKVBlockValue(int              block_index,
+                                     int              layer_id,
+                                     rtp_llm::Buffer& k_buffer,
+                                     rtp_llm::Buffer& v_buffer) {
+    if (!allocator_ || !device_) {
+        RTP_LLM_LOG_ERROR("setKVBlockValue called before KVCacheManager initialized");
+        return;
+    }
+    auto dst = allocator_->convertIndexToBuffer(layer_id, block_index);
+    if (!dst.k_addr || !dst.v_addr) {
+        RTP_LLM_LOG_ERROR("convertIndexToBuffer returned null for layer %d, block %d", layer_id, block_index);
+        return;
+    }
+    device_->copy({*dst.k_addr, k_buffer});
+    device_->copy({*dst.v_addr, v_buffer});
+    device_->syncAndCheck();
+}
+
+void KVCacheManager::setKVBlockValue(int block_index, rtp_llm::Buffer& k_buffer, rtp_llm::Buffer& v_buffer) {
+    if (!allocator_ || !device_) {
+        RTP_LLM_LOG_ERROR("setKVBlockValue called before KVCacheManager initialized");
+        return;
+    }
+    auto dst = allocator_->convertIndexToBuffer(0, block_index);
+    if (!dst.k_addr || !dst.v_addr) {
+        RTP_LLM_LOG_ERROR("convertIndexToBuffer returned null for layer 0, block %d", block_index);
+        return;
+    }
+    device_->copy({*dst.k_addr, k_buffer});
+    device_->copy({*dst.v_addr, v_buffer});
+    device_->syncAndCheck();
 }
 
 MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
