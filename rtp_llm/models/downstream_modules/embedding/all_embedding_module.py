@@ -1,6 +1,9 @@
+import base64
 import copy
+import logging
 from typing import Any, Dict, List, Union
 
+import numpy as np
 import torch
 
 from rtp_llm.async_decoder_engine.embedding.interface import EngineInputs, EngineOutputs
@@ -56,21 +59,40 @@ class ALLEmbeddingRenderer(EmbeddingRendererBase):
         bias = 0
         if not isinstance(outputs.outputs, torch.Tensor):
             raise Exception("result should be tensor")
+
+        def numpy_to_bf16(arr: np.ndarray) -> np.ndarray:
+            arr_float32 = arr.astype(np.float32)
+            uint8_view = arr_float32.view(np.uint8).reshape(-1, 4)
+            bf16_bytes = uint8_view[:, 2:].reshape(arr.shape + (2,))
+            return np.frombuffer(bf16_bytes.tobytes(), dtype=np.uint16).reshape(
+                arr.shape
+            )
+
         for i in range(len(outputs.outputs)):
-            embedding = outputs.outputs[i][: inputs.input_lengths[i]]
-            token_ids = inputs.token_ids[bias : bias + inputs.input_lengths[i]].tolist()
+            embedding = outputs.outputs[i][:]
+            token_ids = inputs.token_ids[:].tolist()
             if request.normalize:
                 embedding = torch.nn.functional.normalize(embedding, dim=-1)
+
+            if embedding is not None:
+                embedding_array = embedding.numpy()
+                if self.config_.data_type == "bf16":
+                    embedding_array = numpy_to_bf16(embedding_array)
+                embedding_base64 = base64.b64encode(embedding_array.tobytes()).decode(
+                    "ascii"
+                )
+
             data.append(
                 ALLEmbeddingResponseFormat(
                     object=self.embedding_type,
-                    embedding=embedding.tolist(),
+                    embedding=embedding_base64,
                     token_ids=token_ids,
                     index=i,
                 )
             )
             bias += inputs.input_lengths[i]
-        return ALLEmbeddingResponse(data=data, usage=usage).model_dump()
+        result = ALLEmbeddingResponse(data=data, usage=usage).model_dump()
+        return result
 
     async def render_log_response(self, response: Dict[str, Any]):
         log_response = copy.copy(response)

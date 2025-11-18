@@ -14,6 +14,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <algorithm>
+#include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 
 using namespace std;
 using namespace at::indexing;
@@ -57,7 +58,10 @@ EmbeddingExecutor::EmbeddingExecutor(const EngineInitParams& params, rtp_llm::De
     handler_(handler),
     handler_args_(),
     metrics_reporter_(params.metrics_reporter),
-    params_(params.gpt_init_parameter) {
+    params_(params.gpt_init_parameter),
+    has_positional_encoding_(params.gpt_init_parameter.has_positional_encoding_),
+    position_id_len_factor_(params.gpt_init_parameter.position_id_len_factor_),
+    mm_position_ids_style_(PositionIdsStyle(params.gpt_init_parameter.mm_position_ids_style_)) {
     GptModelInitParams model_init_params({
         device_,
         params.gpt_weights,
@@ -72,8 +76,6 @@ EmbeddingExecutor::EmbeddingExecutor(const EngineInitParams& params, rtp_llm::De
         RTP_LLM_LOG_INFO("init legacy c++ gpt model");
         model_.reset(new GptModel(model_init_params));
     }
-
-    init_position_ids(params_.max_seq_len_);
     std::vector<std::string> handler_args;
     {
         py::gil_scoped_acquire acquire;
@@ -88,27 +90,23 @@ EmbeddingExecutor::EmbeddingExecutor(const EngineInitParams& params, rtp_llm::De
     }
 }
 
-void EmbeddingExecutor::init_position_ids(int max_seq_len) {
-    max_position_ids_buf_ = device_->allocateBuffer(
-        {rtp_llm::DataType::TYPE_INT32, {(size_t)max_seq_len}, rtp_llm::AllocationType::HOST, true}, {});
-    int32_t* position_ids = max_position_ids_buf_->data<int32_t>();
-    for (int i = 0; i < max_seq_len; i++) {
-        position_ids[i] = i;
-    }
-}
-
 absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::list<EmbeddingStreamPtr>& streams) const {
     int64_t token_num  = 0;
     int64_t batch_size = 0;
     calcTokenNum(streams, token_num, batch_size);
     GptModelInputs model_input;
+    // const bool need_cal_position_id = (mm_position_ids_style_ != PositionIdsStyle::DEFAULT) ||
+    // has_positional_encoding_;
     model_input.combo_tokens = device_->allocateBuffer(
         {rtp_llm::DataType::TYPE_INT32, {(size_t)token_num}, rtp_llm::AllocationType::HOST}, {});
     model_input.combo_tokens_type_ids = device_->allocateBuffer(
         {rtp_llm::DataType::TYPE_INT32, {(size_t)token_num}, rtp_llm::AllocationType::HOST}, {});
-    model_input.combo_position_ids = device_->allocateBuffer(
-        {rtp_llm::DataType::TYPE_INT32, {(size_t)token_num}, rtp_llm::AllocationType::HOST, true}, {});
-    model_input.input_lengths = device_->allocateBuffer(
+    model_input.combo_position_ids = device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32,
+                                                              {(size_t)token_num * position_id_len_factor_},
+                                                              rtp_llm::AllocationType::HOST,
+                                                              true},
+                                                             {});
+    model_input.input_lengths      = device_->allocateBuffer(
         {rtp_llm::DataType::TYPE_INT32, {(size_t)batch_size}, rtp_llm::AllocationType::HOST}, {});
     model_input.sequence_lengths =
         device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {0}, rtp_llm::AllocationType::HOST}, {});
@@ -117,7 +115,7 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
     memset(model_input.prefix_lengths->data(), 0, model_input.prefix_lengths->sizeBytes());
     int* merged_tokens         = model_input.combo_tokens->data<int>();
     int* input_lengths         = model_input.input_lengths->data<int>();
-    int* merged_positon_ids    = model_input.combo_position_ids->data<int>();
+    int* combo_position_ids    = model_input.combo_position_ids->data<int>();
     int* merged_token_type_ids = model_input.combo_tokens_type_ids->data<int>();
     int  token_idx             = 0;
     int  batch_idx             = 0;
@@ -133,21 +131,39 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
     std::vector<int>                gathered_input_embeddings_locs;
     merged_text_mask.resize(token_num, 1);
     for (auto& stream : streams) {
-        int         length     = stream->inputLength();
-        int         batchSize  = stream->batchSize();
-        const auto& mm_feature = stream->multimodalFeature();
+        int         length       = stream->inputLength();
+        const auto& mm_feature   = stream->multimodalFeature();
+        const auto& stream_input = stream->embeddingInput();
         if (mm_feature.has_value()) {
             for (const auto& feature : mm_feature.value().features) {
                 gathered_mm_features.emplace_back(torchTensor2Buffer(feature));
             }
-            const auto mm_locs = mm_feature.value().locs;
+            const auto mm_locs = stream_input->mm_locs.value();
             for (int i = 0; i < mm_locs->size(); ++i) {
                 new_locs.push_back(*mm_locs->dataWithOffset<int>(i) + token_idx);
             }
-            const auto text_token_mask = mm_feature.value().text_tokens_mask;
+            const auto text_token_mask = stream_input->text_tokens_mask.value();
             memcpy(merged_text_mask.data() + token_idx, text_token_mask->data(), text_token_mask->size() * sizeof(int));
         }
-
+        int batchSize  = stream->batchSize();
+        int length_idx = 0;
+        for (auto i = 0; i < batchSize; ++i) {
+            int seqLen = stream->embeddingInput()->input_lengths->data<int32_t>()[i];
+            std::optional<vector<rtp_llm::BufferPtr>> position_ids_buffer = std::nullopt;
+            if (stream->embeddingInput()->mm_position_ids.has_value()) {
+                position_ids_buffer =
+                    rtp_llm::torchTensorVec2BufferVec(stream->embeddingInput()->mm_position_ids.value());
+            }
+            BufferPtr context_pos_ids = PositionIdsGenerator::generatePositionIds(device_,
+                                                                                  stream->inputLength(),
+                                                                                  mm_position_ids_style_,
+                                                                                  stream->embeddingInput()->mm_locs,
+                                                                                  position_ids_buffer);
+            memcpy(combo_position_ids + token_idx * position_id_len_factor_ + length_idx,
+                   context_pos_ids->dataWithOffset<int32_t>(0) + position_bias,
+                   seqLen * sizeof(int32_t));
+            length_idx += seqLen;
+        }
         if (stream->embeddingInput()->input_embeddings.has_value()) {
             auto input_embedding_buffer = stream->embeddingInput()->input_embeddings.value();
             gathered_input_embeddings.emplace_back(
@@ -161,20 +177,6 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
         memcpy(input_lengths + (int)batch_idx,
                stream->embeddingInput()->input_lengths->data(),
                stream->batchSize() * sizeof(int32_t));
-        int length_idx = 0;
-        for (int i = 0; i < batchSize; i++) {
-            int seqLen = stream->embeddingInput()->input_lengths->data<int32_t>()[i];
-            RTP_LLM_CHECK_WITH_INFO(seqLen + position_bias <= int(max_position_ids_buf_->shape()[0]),
-                                    "position index exceed max_position_length");
-            memcpy(merged_positon_ids + token_idx + length_idx,
-                   max_position_ids_buf_->data<int32_t>() + position_bias,
-                   seqLen * sizeof(int32_t));
-            length_idx += seqLen;
-        }
-
-        if (length_idx != length) {
-            return absl::InternalError("stream total_length not equal to sum of lengths");
-        }
         batch_idx += stream->batchSize();
         token_idx += length;
     }
