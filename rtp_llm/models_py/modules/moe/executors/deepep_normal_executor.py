@@ -12,6 +12,10 @@ from rtp_llm.models_py.modules.ep.kernels import (
     ep_scatter,
     tma_align_input_scale,
 )
+from rtp_llm.models_py.modules.fp8_kernel import (
+    per_token_cast_to_fp8,
+    requant_weight_ue8m0,
+)
 from rtp_llm.models_py.modules.moe import (
     ExpertForwardPayload,
     FusedMoeExpertExecutor,
@@ -39,6 +43,10 @@ def align_up_math(n: int, alignment: int = 128) -> int:
 
 
 class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
+
+    # The Deep Gemm kernels only support block size of 128
+    DEEPGEMM_BLOCK_SHAPE: list[int] = [EXPERT_ALIGNMENT, BLOCK_SIZE]
+
     def __init__(
         self,
         config: GptInitModelParameters,
@@ -66,6 +74,14 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
         self.w2_weight_scale_inv = weights[W.moe_s2]
         self.w13_weight_scale = None
         self.w2_weight_scale = None
+        if is_deep_gemm_e8m0_used():
+            self.w13_weight, self.w13_weight_scale_inv = requant_weight_ue8m0(
+                self.w13_weight, self.w13_weight_scale_inv, self.DEEPGEMM_BLOCK_SHAPE
+            )
+            self.w2_weight, self.w2_weight_scale_inv = requant_weight_ue8m0(
+                self.w2_weight, self.w2_weight_scale_inv, self.DEEPGEMM_BLOCK_SHAPE
+            )
+
         self.w13_weight_fp8 = (
             self.w13_weight,
             self.w13_weight_scale_inv,
@@ -124,6 +140,7 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
         num_recv_tokens_per_expert = [
             align_up_math(x, EXPERT_ALIGNMENT) for x in num_recv_tokens_per_expert
         ]
+
         all_tokens: int = sum(num_recv_tokens_per_expert)
         if all_tokens <= 0:
             return torch.zeros(
@@ -148,6 +165,7 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
                     dtype=torch.int,
                 ).transpose(0, 1)
                 if is_deep_gemm_e8m0_used()
+                and False  # 现在ue8m0的quant是在后面手动做的，后面优化下
                 else torch.empty(
                     (all_tokens, K // BLOCK_SIZE),
                     device=hidden_states_fp8.device,
@@ -176,6 +194,7 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
             input_tensor[1],
             m_indices,
             output_index,
+            # scale_ue8m0=is_deep_gemm_e8m0_used() # 后面再优化下
         )
         dispose_tensor(hidden_states_fp8)
         gateup_output = torch.empty(
@@ -190,7 +209,7 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
             self.w13_weight_fp8,
             gateup_output,
             m_indices,
-            disable_ue8m0_cast=True,
+            disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
         )
         del input_tensor
         down_input = torch.empty(
@@ -209,7 +228,10 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
             device=hidden_states_fp8_device,
             dtype=torch.bfloat16,
         )
-        down_input_fp8, down_input_scale = trt_fp8_quantize_128(down_input, False)
+        if is_deep_gemm_e8m0_used():
+            down_input_fp8, down_input_scale = per_token_cast_to_fp8(down_input, True)
+        else:
+            down_input_fp8, down_input_scale = trt_fp8_quantize_128(down_input, False)
         del down_input
         if not is_deep_gemm_e8m0_used():
             down_input_scale = tma_align_input_scale(down_input_scale)
@@ -218,7 +240,7 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
             self.w2_weight_fp8,
             down_output,
             m_indices,
-            disable_ue8m0_cast=True,
+            disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
         )
         del down_input_fp8, down_input_scale
         gather_out = torch.empty(
@@ -226,5 +248,6 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
             device=hidden_states_fp8_device,
             dtype=torch.bfloat16,
         )
+
         ep_gather(down_output, topk_idx, topk_weights, output_index, gather_out)
         return gather_out

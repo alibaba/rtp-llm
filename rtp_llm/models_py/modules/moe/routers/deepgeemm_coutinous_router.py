@@ -5,11 +5,18 @@ import torch
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.distribute.collective import Group, all_reduce
 from rtp_llm.models_py.modules.ep.kernels import recompute_topk_ids_sum_expert_count
+from rtp_llm.models_py.modules.fp8_kernel import (
+    per_token_cast_to_fp8,
+    requant_weight_ue8m0,
+)
 from rtp_llm.models_py.modules.moe import (
     ExpertForwardPayload,
     ExpertTokensMetadata,
     FusedMoeDataRouter,
     FusedMoEQuantConfig,
+)
+from rtp_llm.models_py.modules.quantization.deepgemm_wrapper import (
+    is_deep_gemm_e8m0_used,
 )
 from rtp_llm.ops.compute_ops import trt_fp8_quantize_128
 
@@ -50,7 +57,10 @@ class DeepGemmCountinousRouter(FusedMoeDataRouter):
         quant_config: FusedMoEQuantConfig,
     ) -> ExpertForwardPayload:
         # recompute top_k ids to current expert, mask out of range expert to -1
-        expert_x, expert_x_scale = trt_fp8_quantize_128(a1, False)
+        if is_deep_gemm_e8m0_used():
+            expert_x, expert_x_scale = per_token_cast_to_fp8(a1, True)
+        else:
+            expert_x, expert_x_scale = trt_fp8_quantize_128(a1, False)
         adjusted_topk_ids, num_recv_tokens_per_expert = (
             recompute_topk_ids_sum_expert_count(
                 topk_ids, self.expert_start_id, self.expert_num_per_rank

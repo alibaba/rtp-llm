@@ -465,7 +465,7 @@ py_library(
             "//rtp_llm/tools/convert:convert",
         ],
             }) + select({
-                "@//:using_cuda12": ["@deep_gemm_ext//:deep_gemm"],
+                # "@//:using_cuda12": ["@deep_gemm_ext//:deep_gemm"],
                 "//conditions:default": [],
             }),
     data = [
@@ -563,6 +563,7 @@ whl_reqs = [
     "portalocker",
     "concurrent_log_handler",
     "flashinfer-python==0.2.5",
+    "deep_gemm"
 ] + whl_deps() + platform_deps() + xft_dep
 
 py_wheel(

@@ -142,12 +142,12 @@ def deep_ep_py_deps():
         actual = "//rtp_llm:empty_target",
     )
 
-def deep_gemm_deps():
-    native.alias(
-        name = "deep_gemm",
-        actual = "@deep_gemm_ext//:deep_gemm",
-        visibility = ["//visibility:public"],
-    )
+# def deep_gemm_deps():
+#     native.alias(
+#         name = "deep_gemm",
+#         actual = "@deep_gemm_ext//:deep_gemm",
+#         visibility = ["//visibility:public"],
+#     )
 
 def kernel_so_deps():
     return select({

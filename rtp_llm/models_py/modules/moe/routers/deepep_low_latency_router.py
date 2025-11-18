@@ -17,6 +17,9 @@ from rtp_llm.models_py.modules.moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
 )
 from rtp_llm.models_py.modules.moe.utils import FusedMoEQuantConfig
+from rtp_llm.models_py.modules.quantization.deepgemm_wrapper import (
+    is_deep_gemm_e8m0_used,
+)
 
 # DeepEP kernels quantize dispatch inputs in 128 element chunks.
 DEEPEP_QUANT_BLOCK_SIZE = 128
@@ -128,6 +131,9 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
 
         if not self._use_GB_deepep:
             dispatch_args["pertoken_quant"] = quant_config.is_per_act_token
+        elif is_deep_gemm_e8m0_used():
+            dispatch_args["round_scale"] = True
+            dispatch_args["use_ue8m0"] = True
 
         expert_x, expert_num_tokens, self._handle, _, _ = (
             self._buffer.low_latency_dispatch(**dispatch_args)
