@@ -1,8 +1,7 @@
 import gc
 import os
 import re
-from abc import ABC
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 
@@ -15,6 +14,7 @@ from rtp_llm.models.multimodal.multimodal_trt_engine import MultiModalTRTEngine
 from rtp_llm.models_py.distributed.collective_torch import Group, barrier
 from rtp_llm.ops import ParallelismConfig, VitSeparation
 from rtp_llm.utils.model_weight import CkptWeightInfo, identity, sp_id
+from rtp_llm.utils.multimodal_util import MultimodalInput, get_vit_compute_dtype
 
 
 class BaseVitWeights:
@@ -32,10 +32,6 @@ class BaseVitWeights:
         return self._ckpt_prefix
 
     @property
-    def ft_prefix(self) -> str:
-        return self._ft_prefix
-
-    @ft_prefix.setter
     def ft_prefix(self, prefix: str) -> None:
         self._ft_prefix = prefix
 
@@ -80,6 +76,7 @@ class BaseMultiModalWeightInfo(ABC):
                             split_func=sp_id,
                         )
                     )
+
         return llm_weights
 
 
@@ -87,15 +84,73 @@ class BaseMultiModalWeightInfo(ABC):
 class MultiModalMixin:
     mm_part: MultiModalEmbeddingInterface
 
-    def init_multimodal(
-        self,
-        device: str,
-    ) -> None:
-        with torch.device(device):
-            torch_default_dtype = torch.get_default_dtype()
-            torch.set_default_dtype(self.model_config.compute_dtype)
-            self._init_multimodal()
-            torch.set_default_dtype(torch_default_dtype)
+    @property
+    def vit_data_type(self):
+        return get_vit_compute_dtype(self.config.data_type)
+
+    def init_multimodal(self, config: GptInitModelParameters, device: str) -> None:
+        self.vit_config = config.py_env_configs.vit_config
+        if config.vit_separation != 2:
+            with torch.device(device):
+                torch_default_dtype = torch.get_default_dtype()
+                torch.set_default_dtype(self.vit_data_type)
+                self._init_multimodal(config)
+
+                # Dynamic injection of custom multimodal embedding
+                if hasattr(config, "custom_modal") and config.custom_modal:
+                    cls = ModelDeployWeightInfo._load_custom_modal_class_from_config(
+                        config
+                    )
+                    if cls:
+                        try:
+                            # Assuming the custom class constructor signature is (config, tokenizer, weight)
+                            custom_mm_part = cls(config, self.tokenizer, self.weight)
+
+                            # If a native mm_part already exists (e.g. Qwen-VL), we need to support both.
+                            if hasattr(self, "mm_part") and self.mm_part is not None:
+                                original_mm_part = self.mm_part
+                                original_method = custom_mm_part.mm_embedding
+                                logging.info(
+                                    f"Native mm_part found: {type(original_mm_part).__name__}. Creating composite router."
+                                )
+
+                                def _composite_mm_embedding(url, mm_type, **kwargs):
+                                    # Check if it's a custom type (handle both single int and list)
+                                    is_custom = False
+                                    target_type = (
+                                        mm_type[0]
+                                        if isinstance(mm_type, list)
+                                        and len(mm_type) > 0
+                                        else mm_type
+                                    )
+                                    if isinstance(target_type, int):  # Enum is int
+                                        is_custom = target_type in [
+                                            MMUrlType.CUSTOM_JSON,
+                                            MMUrlType.CUSTOM_RAW,
+                                        ]
+
+                                    if is_custom:
+                                        return original_method(url, mm_type, **kwargs)
+                                    else:
+                                        return original_mm_part.mm_embedding(
+                                            url, mm_type, **kwargs
+                                        )
+
+                                custom_mm_part.mm_embedding = _composite_mm_embedding
+
+                            self.mm_part = custom_mm_part
+
+                            logging.info(
+                                f"Successfully replaced mm_part with custom implementation: {cls.__name__}"
+                            )
+                        except Exception as e:
+                            logging.error(
+                                f"Failed to instantiate custom embedding module: {e}"
+                            )
+                            raise RuntimeError(
+                                f"Custom embedding module load failure: {e}"
+                            )
+                torch.set_default_dtype(torch_default_dtype)
 
     def _init_multimodal(self) -> None:
         raise NotImplementedError
@@ -242,9 +297,9 @@ class MultiModalMixin:
         if isinstance(self.mm_part, MultiModalTRTEngine):
             return
 
-        # mm_related_params is in model_config, not mm_model_config
-        mm_related_params = model_config.mm_related_params
-        self._load_mm_weight(mm_related_params, ctype, device)
+        # Call custom load_weight if available.
+        if hasattr(self.mm_part, "load_weight") and callable(self.mm_part.load_weight):
+            logging.info("Calling custom mm_part.load_weight() in load_mm_weight...")
+            self.mm_part.load_weight(self.weight)
 
-    def mm_gather_batch(self):
-        raise NotImplementedError("MultiModalMixin.mm_gather_batch is not implemented")
+        self._load_mm_weight(self.config.mm_related_params, ctype, device)

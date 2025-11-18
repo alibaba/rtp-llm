@@ -7,8 +7,8 @@ from typing import Any, AsyncGenerator, List, Optional
 from fastapi import Request
 
 from rtp_llm.config.generate_config import GenerateConfig
-from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.model_args import ModelArgs
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import (
     GenerateEnvConfig,
     PyMiscellaneousConfig,
@@ -81,6 +81,7 @@ class OpenaiEndpoint(object):
             stop_word_ids_list=self.stop_words_id_list,
             template_type=template_type,
             ckpt_path=ckpt_path,
+            custom_modal_config=model_config.custom_modal,
         )
 
         self.chat_renderer: CustomChatRenderer = ChatRendererFactory.get_renderer(

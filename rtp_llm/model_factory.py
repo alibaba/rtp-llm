@@ -26,6 +26,7 @@ from rtp_llm.config.py_config_modules import (
 )
 from rtp_llm.model_factory_register import _model_factory
 from rtp_llm.model_loader.load_config import LoadMethod
+from rtp_llm.models.multimodal.multimodal_mixin import MultiModalMixin
 from rtp_llm.models.propose_model.propose_model import ProposeModel
 from rtp_llm.ops import (
     ProfilingDebugLoggingConfig,
@@ -33,6 +34,7 @@ from rtp_llm.ops import (
     TaskType,
     VitSeparation,
 )
+from rtp_llm.tools.api.hf_model_helper import get_model_info_from_hf
 from rtp_llm.utils.util import check_with_info
 
 
@@ -81,7 +83,25 @@ class ModelFactory:
         """
         model_type = model_config.model_type
         model_cls = ModelFactory.get_model_cls(model_type)
+        if getattr(config, "custom_modal", None) and not issubclass(
+            model_cls, MultiModalMixin
+        ):
 
+            class CustomModalWrapper(model_cls, MultiModalMixin):
+                def _init_multimodal(self, config):
+                    pass
+
+            # Disguise the wrapper as the original class to maintain compatibility
+            # with logging, config dumping, and registry lookups by name.
+            CustomModalWrapper.__name__ = model_cls.__name__
+            CustomModalWrapper.__qualname__ = model_cls.__qualname__
+
+            model_cls = CustomModalWrapper
+            logging.info(
+                f"Dynamically mixed in MultiModalMixin for custom_modal support on {config.model_name}"
+            )
+
+        config.model_name = model_cls.__name__
         # Get model_name from model_config (default to model class name if not set)
         model_name = model_config.model_name or model_cls.__name__
         model_config.model_name = model_name

@@ -6,6 +6,7 @@ import torch
 
 from rtp_llm.config.generate_config import GenerateConfig, RoleAddr
 
+
 class EmbeddingOutput:
     text_embedding: torch.Tensor
     extra_input: Optional[torch.Tensor]
@@ -31,6 +32,8 @@ class MMUrlType(IntEnum):
     AUDIO = 3
     TENSOR = 4
     IGRAPH = 5
+    CUSTOM_JSON = 6
+    CUSTOM_RAW = 7
 
 
 @dataclass

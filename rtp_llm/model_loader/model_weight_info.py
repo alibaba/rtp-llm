@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 import torch
 
-from rtp_llm.config.quant_config import QuantizationConfig, Fp8PerTensorQuantConfig
+from rtp_llm.config.quant_config import Fp8PerTensorQuantConfig, QuantizationConfig
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, AttnConfig
 from rtp_llm.model_loader.ffn_weight import FfnConfig, FfnWeight, MoeWithSharedWeight
 from rtp_llm.model_loader.load_config import LoadConfig, LoadMethod
@@ -15,9 +15,10 @@ from rtp_llm.model_loader.weight_module import (
     CompositeWeight,
     WeightModule,
 )
-from rtp_llm.ops import VitSeparation, KvCacheDataType
+from rtp_llm.ops import KvCacheDataType, VitSeparation
 from rtp_llm.utils.ckpt_file_info import CkptFileInfo
 from rtp_llm.utils.database import BaseDatabase, CkptDatabase
+from rtp_llm.utils.import_util import load_module  # Added load_module
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
@@ -176,7 +177,9 @@ class ModelDeployWeightInfo:
         self.ep_rank = parallelism_config.ep_rank
         self.dp_size = parallelism_config.dp_size
         self.dp_rank = parallelism_config.dp_rank
-        self.num_nodes: int = parallelism_config.world_size // parallelism_config.local_world_size
+        self.num_nodes: int = (
+            parallelism_config.world_size // parallelism_config.local_world_size
+        )
         self.ffn_tp_rank = parallelism_config.ffn_tp_rank
         self.ffn_tp_size = parallelism_config.ffn_tp_size
         self._size_per_head = model_config.attn_config.size_per_head
@@ -235,14 +238,19 @@ class ModelDeployWeightInfo:
         self.nope_head_dim = model_config.attn_config.nope_head_dim
         self.rope_head_dim = model_config.attn_config.rope_head_dim
         self.v_head_dim = model_config.attn_config.v_head_dim
-        self.vit_separation = vit_config.vit_separation if vit_config is not None else VitSeparation.VIT_SEPARATION_LOCAL
+        self.vit_separation = (
+            vit_config.vit_separation
+            if vit_config is not None
+            else VitSeparation.VIT_SEPARATION_LOCAL
+        )
 
         # for moe
         self._use_stack_weight = False
 
-        self.gen_dummy_reciprocal = (model_config.attn_config.kv_cache_dtype == KvCacheDataType.FP8 and
-                                     not isinstance(model_config.quant_config, Fp8PerTensorQuantConfig))
-
+        self.gen_dummy_reciprocal = (
+            model_config.attn_config.kv_cache_dtype == KvCacheDataType.FP8
+            and not isinstance(model_config.quant_config, Fp8PerTensorQuantConfig)
+        )
 
         self.is_ffn_service = (
             parallelism_config.ffn_disaggregate_config.is_ffn_service()
@@ -282,6 +290,7 @@ class ModelDeployWeightInfo:
         weight_info = self._get_weight_info()
         # avoid circular import
         from rtp_llm.models.multimodal.multimodal_mixin import BaseMultiModalWeightInfo
+
         if (
             isinstance(self, BaseMultiModalWeightInfo)
             and self.vit_separation != VitSeparation.VIT_SEPARATION_REMOTE
@@ -478,11 +487,62 @@ class ModelDeployWeightInfo:
     def _get_weight_info(self) -> ModelWeightInfo:
         raise NotImplementedError()
 
+    @staticmethod
+    def _load_custom_modal_class_from_config(
+        config: GptInitModelParameters,
+    ) -> Optional[Any]:
+        """Helper to load custom modal class from config."""
+        custom_modal_config = getattr(config, "custom_modal", None)
+        if not isinstance(custom_modal_config, dict):
+            return None
+
+        path_str = custom_modal_config.get("embedding_module_path")
+        if not path_str:
+            return None
+
+        try:
+            file_name_part, class_name = path_str.rsplit(".", 1)
+            module_file_path = os.path.join(config.ckpt_path, file_name_part + ".py")
+
+            if not os.path.exists(module_file_path):
+                logging.warning(
+                    f"Custom modal module file not found: {module_file_path}"
+                )
+                return None
+
+            logging.debug(f"Loading custom modal class from {module_file_path}")
+            module = load_module(module_file_path)
+            cls = getattr(module, class_name)
+            return cls
+        except Exception as e:
+            logging.warning(f"Failed to load custom modal class: {e}")
+            return None
+
     def create_model_weight_info(self, database: BaseDatabase) -> ModelWeightInfo:
         if isinstance(database, CkptDatabase) and not database.is_ft_style:
             self.process_meta_from_ckpt(database.pretrain_file_list)
             self.process_meta_from_ckpt(database.finetune_file_list)
-            return self.get_weight_info()
+            weight_info = self.get_weight_info()
+
+            if self.tp_rank == 0:
+                cls = self._load_custom_modal_class_from_config(self.config)
+                if cls:
+                    get_weight_info_method = getattr(cls, "get_weight_info", None)
+                    if callable(get_weight_info_method):
+                        extra_weights = get_weight_info_method(
+                            self.config, self.tp_rank
+                        )
+                        if extra_weights:
+                            logging.info(
+                                f"Registering {len(extra_weights)} extra weights from {cls.__name__}"
+                            )
+                            weight_info.weights.extend(extra_weights)
+                    else:
+                        logging.warning(
+                            f"Custom modal class '{cls.__name__}' has no callable 'get_weight_info' static method."
+                        )
+
+            return weight_info
         elif database.is_ft_style:
             return None
         else:

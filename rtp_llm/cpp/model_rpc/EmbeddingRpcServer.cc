@@ -30,7 +30,7 @@ grpc::Status EmbeddingRpcServiceImpl::embedding(grpc::ServerContext*    context,
             for (const auto& crop_position : mm_preprocess_config->crop_positions()) {
                 crop_positions.push_back(crop_position);
             }
-            MultimodalInput feature(pb_feature.multimodal_url(),
+            MultimodalInput feature(pb_feature.multimodal_data(),
                                     torch::empty(1),
                                     pb_feature.multimodal_type(),
                                     mm_preprocess_config->width(),

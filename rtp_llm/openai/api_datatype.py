@@ -51,6 +51,7 @@ class ContentPartTypeEnum(str, Enum):
     image_url = "image_url"
     video_url = "video_url"
     audio_url = "audio_url"
+    custom = "custom"
 
 
 class MMPreprocessConfigPart(BaseModel):
@@ -87,6 +88,7 @@ class ContentPart(BaseModel):
     video_url: Optional[ImageURL] = None
     audio_url: Optional[AudioURL] = None
     preprocess_config: Optional[MMPreprocessConfigPart] = None
+    data: Optional[Any] = None
 
 
 class ChatMessage(BaseModel):

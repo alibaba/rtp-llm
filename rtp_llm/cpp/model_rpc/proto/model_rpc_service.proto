@@ -109,7 +109,7 @@ message MMPreprocessConfigPB {
 }
 
 message MultimodalInputPB {
-    string multimodal_url = 1;
+    string multimodal_data = 1;
     int32 multimodal_type = 2;
     TensorPB multimodal_tensor = 3;
     MMPreprocessConfigPB mm_preprocess_config = 4;

@@ -5,7 +5,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, AsyncGenerator, List, Optional, Union
+from typing import Any, AsyncGenerator, Dict, List, Optional, Union
 
 import torch
 
@@ -48,18 +48,23 @@ from rtp_llm.utils.word_util import (
     truncate_response_with_stop_words,
 )
 
+
 def _get_think_config(generate_env_config):
     """Get thinking configuration from generate_env_config.
-    
+
     Args:
         generate_env_config: GenerateEnvConfig object.
-        
+
     Returns:
         Tuple of (think_mode, think_start_tag, think_end_tag)
     """
     think_mode = generate_env_config.think_mode
-    think_start_tag = generate_env_config.think_start_tag.encode("utf-8").decode("unicode_escape")
-    think_end_tag = generate_env_config.think_end_tag.encode("utf-8").decode("unicode_escape")
+    think_start_tag = generate_env_config.think_start_tag.encode("utf-8").decode(
+        "unicode_escape"
+    )
+    think_end_tag = generate_env_config.think_end_tag.encode("utf-8").decode(
+        "unicode_escape"
+    )
     return think_mode, think_start_tag, think_end_tag
 
 
@@ -195,11 +200,14 @@ class ResponseObject:
     usage: Optional[UsageInfo] = None
     aux_info: Optional[AuxInfo] = None
 
+
 class TemplateType(Enum):
     """Template type for different model types."""
+
     chat = "chat"
     vqa = "vqa"
     base = "image"
+
 
 @dataclass
 class RendererParams:
@@ -209,6 +217,7 @@ class RendererParams:
     stop_word_ids_list: List[List[int]]
     template_type: TemplateType = TemplateType.chat
     ckpt_path: str = ""
+    custom_modal_config: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -279,13 +288,13 @@ class CustomChatRenderer:
         self.think_mode, self.think_start_tag, self.think_end_tag = _get_think_config(
             generate_env_config
         )
-        
+
         # Store configs for subclasses
         self.ckpt_path = ckpt_path
         self.misc_config = misc_config
         self.vit_config = vit_config
         self.render_config = render_config
-        
+
         # Create a minimal model_config-like object for renderers that access self.model_config.checkpoint_path
         # This is only for backward compatibility with existing renderer code that accesses model_config attributes
         class MinimalModelConfig:
@@ -294,8 +303,9 @@ class CustomChatRenderer:
                 self.checkpoint_path = ckpt_path
                 self.misc_config = misc_config
                 self.vit_config = vit_config
+
         self.model_config = MinimalModelConfig(ckpt_path or "", misc_config, vit_config)
-        
+
         self.tokenizer = tokenizer
         self.model_type = renderer_params.model_type
         self.max_seq_len = renderer_params.max_seq_len
