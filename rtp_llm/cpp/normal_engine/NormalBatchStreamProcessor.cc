@@ -351,7 +351,6 @@ SamplerInputs NormalBatchStreamProcessor::allocateSamplerInputs(const StreamGrou
     sampler_inputs.repetition_penalty   = CACHED_HOST_BUF(TYPE_FP32, {total_batch_size_in});
     sampler_inputs.presence_penalty     = CACHED_HOST_BUF(TYPE_FP32, {total_batch_size_in});
     sampler_inputs.frequency_penalty    = CACHED_HOST_BUF(TYPE_FP32, {total_batch_size_in});
-    sampler_inputs.min_lengths          = CACHED_HOST_BUF(TYPE_INT32, {total_batch_size_in});
     sampler_inputs.no_repeat_ngram_size = CACHED_HOST_BUF(TYPE_INT32, {total_batch_size_in});
     sampler_inputs.do_sample            = CACHED_HOST_BUF(TYPE_BOOL, {total_batch_size_in});
     sampler_inputs.finished_mask        = CACHED_HOST_BUF(TYPE_BOOL, {total_batch_size_in});
@@ -379,7 +378,6 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs&          
     float*    repetition_penalty   = sampler_inputs.repetition_penalty->data<float>();
     float*    presence_penalty     = sampler_inputs.presence_penalty->data<float>();
     float*    frequency_penalty    = sampler_inputs.frequency_penalty->data<float>();
-    int32_t*  min_lengths          = sampler_inputs.min_lengths->data<int32_t>();
     int32_t*  no_repeat_ngram_size = sampler_inputs.no_repeat_ngram_size->data<int32_t>();
     bool*     do_sample            = sampler_inputs.do_sample->data<bool>();
 
@@ -410,7 +408,6 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs&          
             repetition_penalty[batch_idx] = stream->generateConfig()->repetition_penalty;
             presence_penalty[batch_idx]   = stream->generateConfig()->presence_penalty;
             frequency_penalty[batch_idx]  = stream->generateConfig()->frequency_penalty;
-            min_lengths[batch_idx]        = stream->generateConfig()->min_new_tokens;
             do_sample[batch_idx]          = stream->generateConfig()->do_sample;
             if (!do_sample[batch_idx]) {
                 top_k[batch_idx]       = 1;

@@ -893,7 +893,6 @@ struct GreedyParams {
     const Buffer&     temperature;
 
     OptionalBufferRef repetition_penalty;
-    OptionalBufferRef min_lengths;
     OptionalBufferRef no_repeat_ngram_size;
 
     OptionalBufferRef cum_log_probs;

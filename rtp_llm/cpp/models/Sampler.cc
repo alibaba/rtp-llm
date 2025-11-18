@@ -95,7 +95,6 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
             auto repetition_penalty = MAY_GET_BUFFER_VIEW(inputs.repetition_penalty, from_batch_idx_in, batch_size_in);
             auto presence_penalty   = MAY_GET_BUFFER_VIEW(inputs.presence_penalty, from_batch_idx_in, batch_size_in);
             auto frequency_penalty  = MAY_GET_BUFFER_VIEW(inputs.frequency_penalty, from_batch_idx_in, batch_size_in);
-            auto min_lengths        = MAY_GET_BUFFER_VIEW(inputs.min_lengths, from_batch_idx_in, batch_size_in);
             auto no_repeat_ngram_size =
                 MAY_GET_BUFFER_VIEW(inputs.no_repeat_ngram_size, from_batch_idx_in, batch_size_in);
             auto all_probs = (inputs.all_probs.get() ? inputs.all_probs->view(from_batch_idx_in, batch_size_in) :
@@ -113,7 +112,6 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                                        top_p,
                                        temperature,
                                        inputs.repetition_penalty ? (OptionalBufferRef)repetition_penalty : nullopt,
-                                       inputs.min_lengths ? (OptionalBufferRef)min_lengths : nullopt,
                                        inputs.no_repeat_ngram_size ? (OptionalBufferRef)no_repeat_ngram_size : nullopt,
                                        inputs.cum_log_probs ? (OptionalBufferRef)cum_log_probs_out : nullopt,
                                        nullopt,  // output_log_probs
