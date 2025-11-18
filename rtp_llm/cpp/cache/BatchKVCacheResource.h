@@ -6,13 +6,56 @@
 
 namespace rtp_llm {
 
+struct BlockIds {
+    size_t size() {
+        return block_indices.size();
+    }
+
+    std::vector<int> block_indices;
+};
+
+typedef size_t  CacheKeyType;
+typedef int32_t BlockIdxType;
+
+typedef std::vector<CacheKeyType> CacheKeysType;
+typedef std::vector<BlockIdxType> BlockIndicesType;
+
+typedef std::vector<std::shared_ptr<BlockIds>> GroupBlockIds;
+typedef std::vector<std::shared_ptr<BlockIds>> LayerBlockIds;
+// typedef std::vector<GroupBlockIds>             BatchGroupBlockIds;
+// typedef std::vector<LayerBlockIds>             BatchLayerBlockIds;
+// typedef std::vector<CacheKeyType>              BatchCacheKeys;
+
+class KVCacheResourceV1 {
+public:
+    // layer_id -> block_indices
+    LayerBlockIds layer_block_ids;
+    // group_id -> block_indices
+    GroupBlockIds group_block_ids;
+    // cache_keys and block_id are not consistent at all times
+    CacheKeysType cache_keys;
+
+public:
+    void initGroups(int group_nums) {
+        for (int i = 0; i < group_nums; i++) {
+            group_block_ids.push_back(std::make_shared<BlockIds>());
+        }
+    }
+
+    void resizeBlocks(int reserver_blocks, int value) {
+        for (auto& group : group_block_ids) {
+            group->block_indices.resize(reserver_blocks, value);
+        }
+    }
+};
+
 class BatchKVCacheResource {
 public:
     BatchKVCacheResource() {}
     int                     batchSize() const;
     int                     blockSize(int batch_id) const;
     void                    resize(size_t batch_size);
-    void                    resize(size_t batch_id, int reserver_blocks, bool clear = false);
+    void                    resize(size_t batch_id, int reserver_blocks, int value);
     void                    shrink(size_t batch_id, int reserver_blocks);
     void                    pushBack(const KVCacheResource& addr);
     void                    append(size_t batch_id, const KVCacheResource& addr);
@@ -26,11 +69,15 @@ public:
     std::string debugString() const;
 
 public:
-    // [batch_size, max_block_per_seq]
-    std::vector<std::vector<int32_t>> batch_block_id;
+    bool enable_reuse_cache = true;
 
-    // cache_keys and batch_block_id are not consistent at all times
-    std::vector<std::vector<int64_t>> cache_keys;
+    // this two member will be deleted soon
+    std::vector<std::vector<int32_t>> batch_block_id;
+    std::vector<std::vector<size_t>>  cache_keys;
+
+    std::vector<KVCacheResourceV1> batch_resource;
 };
+
+using BatchKVCacheResourcePtr = std::shared_ptr<BatchKVCacheResource>;
 
 }  // namespace rtp_llm

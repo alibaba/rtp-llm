@@ -52,14 +52,14 @@ public:
 
     // 匹配缓存项，只需要match没命中的cache key和对应的blockid
     MemoryMatchResult
-    match(const std::vector<int64_t>& cache_keys, const std::vector<int>& gpu_block_ids, int64_t request_id);
+    match(const std::vector<size_t>& cache_keys, const std::vector<int>& gpu_block_ids, int64_t request_id);
 
     // 将数据放入缓存，分配内存并拷贝数据, 这时需要放全部的cache_keys和对应的block_ids
-    void put(const std::vector<int64_t>& cache_keys,
-             const std::vector<int>&     gpu_block_ids,
-             const std::vector<float>&   losses,
-             bool                        is_resident,
-             int64_t                     request_id);
+    void put(const std::vector<size_t>& cache_keys,
+             const std::vector<int>&    gpu_block_ids,
+             const std::vector<float>&  losses,
+             bool                       is_resident,
+             int64_t                    request_id);
 
     // 拷贝方向枚举
     enum class CopyDirection {

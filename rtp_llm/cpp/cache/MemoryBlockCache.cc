@@ -78,9 +78,9 @@ size_t MemoryBlockCache::availableBlockNum() const {
     return block_lru_cache_->availableBlockNum();
 }
 
-MemoryMatchResult MemoryBlockCache::match(const std::vector<int64_t>& cache_keys,
-                                          const std::vector<int>&     gpu_block_ids,
-                                          int64_t                     request_id) {
+MemoryMatchResult MemoryBlockCache::match(const std::vector<size_t>& cache_keys,
+                                          const std::vector<int>&    gpu_block_ids,
+                                          int64_t                    request_id) {
     autil::ScopedTime2 timer;
 
     MemoryMatchResult result = {0, {}, {}};
@@ -122,11 +122,11 @@ MemoryMatchResult MemoryBlockCache::match(const std::vector<int64_t>& cache_keys
     return result;
 }
 
-void MemoryBlockCache::put(const std::vector<int64_t>& cache_keys,
-                           const std::vector<int>&     gpu_block_ids,
-                           const std::vector<float>&   losses,
-                           bool                        is_resident,
-                           int64_t                     request_id) {
+void MemoryBlockCache::put(const std::vector<size_t>& cache_keys,
+                           const std::vector<int>&    gpu_block_ids,
+                           const std::vector<float>&  losses,
+                           bool                       is_resident,
+                           int64_t                    request_id) {
     autil::ScopedTime2 timer;
 
     if (cache_keys.empty() || gpu_block_ids.empty() || cache_keys.size() != gpu_block_ids.size()) {
@@ -172,8 +172,8 @@ void MemoryBlockCache::put(const std::vector<int64_t>& cache_keys,
     // 添加新block的ID
     match_result.block_ids.insert(
         match_result.block_ids.end(), new_memory_block_ids.begin(), new_memory_block_ids.end());
-    std::vector<int64_t> new_cache_keys(cache_keys.begin(),
-                                        cache_keys.begin() + existing_blocks + new_memory_block_ids.size());
+    std::vector<size_t> new_cache_keys(cache_keys.begin(),
+                                       cache_keys.begin() + existing_blocks + new_memory_block_ids.size());
 
     // 使用BlockLRUCache存储映射关系，传入完整的参数
     // BlockLRUCache内部会处理已存在的block，只存储新block，同时更新已存在block热度
@@ -370,7 +370,8 @@ bool MemoryBlockCache::syncRpcCallForAllRank(const std::vector<int>& gpu_block_i
     const int                                     worker_size = static_cast<int>(grpc_workers.size());
     std::vector<MemoryBlockCacheWorkerRpcContext> worker_rpc_contexts(worker_size);
 
-    std::chrono::system_clock::time_point deadline      = std::chrono::system_clock::now() + std::chrono::milliseconds(timeout_ms);
+    std::chrono::system_clock::time_point deadline =
+        std::chrono::system_clock::now() + std::chrono::milliseconds(timeout_ms);
 
     for (int rank = 0; rank < worker_size; ++rank) {
         const auto& worker_addr    = grpc_workers[rank];

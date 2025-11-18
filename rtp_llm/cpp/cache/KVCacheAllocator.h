@@ -14,7 +14,6 @@
 #include "rtp_llm/cpp/devices/DeviceBase.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "kmonitor/client/MetricsReporter.h"
-#include "rtp_llm/cpp/cache/KvCacheInfo.h"
 
 namespace rtp_llm {
 
@@ -23,23 +22,23 @@ struct BlockIdPair {
     int dst;
 };
 
+struct KVCacheBuffer {
+    rtp_llm::BufferPtr k_blocks;
+    rtp_llm::BufferPtr v_blocks;
+    rtp_llm::BufferPtr k_scale;
+    rtp_llm::BufferPtr v_scale;
+};
+
+struct BlockAddrInfo {
+    void* k_addr       = nullptr;
+    void* v_addr       = nullptr;
+    void* k_scale_addr = nullptr;
+    void* v_scale_addr = nullptr;
+};
+
 // KVCacheAllocator 以KVCacheBlock为粒度分配显存or内存
 class KVCacheAllocator {
 public:
-    struct KVCacheBuffer {
-        rtp_llm::BufferPtr k_blocks;
-        rtp_llm::BufferPtr v_blocks;
-        rtp_llm::BufferPtr k_scale;
-        rtp_llm::BufferPtr v_scale;
-    };
-
-    struct BlockAddrInfo {
-        void* k_addr       = nullptr;
-        void* v_addr       = nullptr;
-        void* k_scale_addr = nullptr;
-        void* v_scale_addr = nullptr;
-    };
-
     struct SimpleMallocInfo {
         SimpleMallocInfo(int64_t request_id, uint32_t block_nums, bool verbose = false):
             request_id(request_id), block_nums(block_nums), verbose(verbose) {}
