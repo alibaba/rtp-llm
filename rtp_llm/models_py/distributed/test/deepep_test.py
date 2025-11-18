@@ -1945,7 +1945,6 @@ class DeepEPTest(TestCase):
             use_deepep_low_latency=True,
             enable_ffn_disaggregate=False,
         )
-
         # init distributed environment
 
         torch.cuda.set_device(config_adapter.parallelism_config.local_rank)
