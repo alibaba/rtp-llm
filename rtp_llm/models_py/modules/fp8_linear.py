@@ -10,12 +10,15 @@ from rtp_llm.models_py.modules import utils
 logger = logging.getLogger(__name__)
 
 from rtp_llm.models_py.modules.fp8_kernel import (
+    per_token_cast_to_fp8,
+    requant_weight_ue8m0,
     scaled_fp8_per_tensor_quant,
     sgl_per_token_group_quant_fp8,
 )
 from rtp_llm.models_py.modules.quantization.deepgemm_wrapper import (
     fp8_gemm_nt,
     has_deep_gemm,
+    is_deep_gemm_e8m0_used,
 )
 
 
@@ -36,11 +39,21 @@ class Fp8DeepGEMMLinear(nn.Module):
             )
         self.hidden_size = weight.shape[0]  # k
         self.output_size = weight.shape[1]  # n
-        self.weight = weight.reshape([weight.shape[1], weight.shape[0]])
+        self.weight = weight.reshape([weight.shape[1], weight.shape[0]]).contiguous()
         self.weight_scales = weight_scales.reshape(
             [weight_scales.shape[1], weight_scales.shape[0]]
-        )
+        ).contiguous()
         self.bias = bias
+        self.scale_ue8m0 = is_deep_gemm_e8m0_used()
+        # tmp not use ue8m0, maybe worst
+        self.scale_ue8m0 = False
+        weight_block_size = [128, 128]
+        if self.hidden_size < 512 or self.output_size < 128:
+            self.scale_ue8m0 = False
+        if self.scale_ue8m0:
+            self.weight, self.weight_scales = requant_weight_ue8m0(
+                self.weight, self.weight_scales, weight_block_size
+            )
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         # Get input dimensions
@@ -75,36 +88,41 @@ class Fp8DeepGEMMLinear(nn.Module):
 
         # Quantize using sgl_per_token_group_quant_fp8
         quantization_eps = 1e-4
-        input_fp8, input_scales = sgl_per_token_group_quant_fp8(
-            input_for_quant,
-            group_size=128,
-            eps=quantization_eps,
-            column_major_scales=False,
-        )
-
-        FP8_E4M3_MAX = 448.0
-        min_scale_threshold = 1e-4 / FP8_E4M3_MAX
-        input_scales = torch.clamp(input_scales, min=min_scale_threshold)
-        input_scales = input_scales.to(torch.float32)
+        if self.scale_ue8m0:
+            input_fp8, input_scales = per_token_cast_to_fp8(input_for_quant, True)
+        else:
+            input_fp8, input_scales = sgl_per_token_group_quant_fp8(
+                input_for_quant,
+                group_size=128,
+                eps=quantization_eps,
+                column_major_scales=self.scale_ue8m0,
+                scale_tma_aligned=self.scale_ue8m0,
+                scale_ue8m0=self.scale_ue8m0,
+            )
+            input_fp8 = input_fp8.contiguous()
+            input_scales = input_scales.contiguous()
+        if not self.scale_ue8m0:
+            FP8_E4M3_MAX = 448.0
+            min_scale_threshold = 1e-4 / FP8_E4M3_MAX
+            input_scales = torch.clamp(input_scales, min=min_scale_threshold)
+            input_scales = input_scales.to(torch.float32)
         output_m = input_for_quant.shape[0]
         output = torch.zeros(
             output_m, output_n, dtype=torch.bfloat16, device=input.device
         )
 
         # Call DeepGEMM
-        deepgemm_input_scales = input_scales
-        input_fp8 = input_fp8.contiguous()
-        deepgemm_input_scales = deepgemm_input_scales.contiguous()
-        weight = self.weight.contiguous()
-        weight_scales = self.weight_scales.contiguous()
+
+        weight = self.weight
+        weight_scales = self.weight_scales
         output = output.contiguous()
         try:
             fp8_gemm_nt(
-                (input_fp8, deepgemm_input_scales),
+                (input_fp8, input_scales),
                 (weight, weight_scales),
                 output,
                 c=None,
-                disable_ue8m0_cast=True,
+                disable_ue8m0_cast=not self.scale_ue8m0,
             )
         except Exception as e:
             # DeepGEMM call failed - log error and re-raise

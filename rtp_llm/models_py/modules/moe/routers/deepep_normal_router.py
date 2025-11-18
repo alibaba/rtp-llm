@@ -5,7 +5,11 @@ import torch
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.distribute.collective import Group, all_gather
 from rtp_llm.models_py.distributed.deepep_wrapper import get_deepep_wrapper
-from rtp_llm.models_py.modules.fp8_kernel import scaled_fp8_per_token_quant
+from rtp_llm.models_py.modules.fp8_kernel import (
+    per_token_cast_to_fp8,
+    requant_weight_ue8m0,
+    scaled_fp8_per_token_quant,
+)
 from rtp_llm.models_py.modules.moe import (
     ExpertForwardPayload,
     ExpertTokensMetadata,
@@ -13,6 +17,9 @@ from rtp_llm.models_py.modules.moe import (
     FusedMoEQuantConfig,
     TopKWeightAndReduceContiguous,
     TopKWeightAndReduceDelegate,
+)
+from rtp_llm.models_py.modules.quantization.deepgemm_wrapper import (
+    is_deep_gemm_e8m0_used,
 )
 from rtp_llm.ops.compute_ops import trt_fp8_quantize_128
 
@@ -67,12 +74,13 @@ class DeepepNormalRouter(FusedMoeDataRouter):
 
         slice_begin = min(tp_token_size * tp_rank, token_num)
         slice_size = min(token_num - slice_begin, tp_token_size)
-
         if self.use_fp8:
             if quant_config.is_per_act_token:
                 a1, a1_scale = scaled_fp8_per_token_quant(a1, None)
                 assert a1.shape[1] % 128 == 0
                 a1_scale = a1_scale.repeat(1, a1.shape[1] // 128)
+            elif is_deep_gemm_e8m0_used():
+                a1, a1_scale = per_token_cast_to_fp8(a1, True)
             else:
                 a1, a1_scale = trt_fp8_quantize_128(a1, False)
 
