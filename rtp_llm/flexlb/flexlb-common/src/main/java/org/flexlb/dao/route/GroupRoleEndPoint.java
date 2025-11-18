@@ -1,11 +1,11 @@
 package org.flexlb.dao.route;
 
-import java.util.ArrayList;
-import java.util.List;
-
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
+
+import java.util.ArrayList;
+import java.util.List;
 
 @JsonIgnoreProperties(ignoreUnknown = true)
 @Data
@@ -64,9 +64,9 @@ public class GroupRoleEndPoint {
             return prefillEndpoint;
         } else if (roleType == RoleType.DECODE) {
             return decodeEndpoint;
-        } else if (roleType == RoleType.VIT){
+        } else if (roleType == RoleType.VIT) {
             return vitEndpoint;
-        } else if (roleType == RoleType.PDFUSION){
+        } else if (roleType == RoleType.PDFUSION) {
             return pdFusionEndpoint;
         }
         return null;

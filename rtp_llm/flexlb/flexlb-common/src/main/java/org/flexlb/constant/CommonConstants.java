@@ -2,13 +2,9 @@ package org.flexlb.constant;
 
 public class CommonConstants {
 
-    public static final String DONE_INFO = "[done]";
-
     public static final String FUNCTION = "aigc.text-generation.generation";
 
     public static final String START = "start";
-
-    public static final String AGGREGATOR = "aggregator";
 
     public static final String CODEC = "codec";
 

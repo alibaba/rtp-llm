@@ -23,10 +23,4 @@ public class WorkerCacheUpdateResult {
     private long cacheVersion;
     private long timestamp;
     private String errorMessage;
-    
-    @Override
-    public String toString() {
-        return String.format("WorkerCacheUpdate[ip=%s, success=%s, blocks=%d, available=%d/%d, version=%d]",
-            engineIpPort, success, cacheBlockCount, availableKvCache, totalKvCache, cacheVersion);
-    }
 }

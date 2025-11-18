@@ -29,7 +29,6 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * @author laichuan
- * @date 2025/8/19
  **/
 @Slf4j
 public class WhaleSpanImpl implements WhaleSpan {
@@ -49,7 +48,7 @@ public class WhaleSpanImpl implements WhaleSpan {
     public void startSpan(Map<String, String> carrier) {
 
         TextMapGetter<Map<String, String>> getter =
-                new TextMapGetter<Map<String, String>>() {
+                new TextMapGetter<>() {
                     @Override
                     public String get(Map<String, String> carrier, String key) {
                         if (carrier == null) {

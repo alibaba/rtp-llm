@@ -1,10 +1,8 @@
 package org.flexlb.dao.master;
 
-
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
-
 
 @JsonIgnoreProperties(ignoreUnknown = true)
 @Data
@@ -32,7 +30,7 @@ public class TaskInfo {
         return estimatePrefillTimeMs(inputLength, prefixLength);
     }
 
-    static public long estimatePrefillTimeMs(long tokens, long hitCacheTokens) {
+    public static long estimatePrefillTimeMs(long tokens, long hitCacheTokens) {
         return (long) (tokens * 1.0 - hitCacheTokens * 0.7);
     }
 }

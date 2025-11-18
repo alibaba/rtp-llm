@@ -1,6 +1,7 @@
 package org.flexlb.sync.schedule;
 
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.collections4.MapUtils;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
@@ -19,15 +20,10 @@ import java.util.concurrent.atomic.AtomicLong;
 public class ExpirationCleaner {
 
     private static final long TASK_TIME_OUT_MS = 1000 * 60;
-    private final EngineWorkerStatus engineWorkerStatus;
 
-    public ExpirationCleaner(EngineWorkerStatus engineWorkerStatus) {
-        this.engineWorkerStatus = engineWorkerStatus;
-    }
-
-    @Scheduled(fixedRate = 2000)
+    @Scheduled(fixedRate = 3000)
     public void cleanExpiredWorkers() {
-        ModelWorkerStatus modelWorkerStatus = engineWorkerStatus.getModelRoleWorkerStatusMap().get("engine_service");
+        ModelWorkerStatus modelWorkerStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP.get("engine_service");
         if (modelWorkerStatus == null) {
             log.error("modelWorkerStatus is null, modelName: engine_service");
             return;
@@ -38,8 +34,8 @@ public class ExpirationCleaner {
         doClean(modelWorkerStatus.getVitStatusMap());
     }
 
-    public static void doClean(ConcurrentHashMap<String, WorkerStatus> workerStatusMap) {
-        if (workerStatusMap == null) {
+    public static void doClean(Map<String, WorkerStatus> workerStatusMap) {
+        if (MapUtils.isEmpty(workerStatusMap)) {
             return;
         }
         long curTimeMillis = System.currentTimeMillis();

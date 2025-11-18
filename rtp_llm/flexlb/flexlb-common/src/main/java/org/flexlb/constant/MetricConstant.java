@@ -103,10 +103,9 @@ public class MetricConstant {
     /**
      * 获取引擎worker信息服务的step latency 方差
      */
-    public final static String ENGINE_WORKER_INFO_STEP_LATENCY_VAR = "app.engine.worker.info.step.latency.var";
+    public static final String ENGINE_WORKER_INFO_STEP_LATENCY_VAR = "app.engine.worker.info.step.latency.var";
 
-
-    public final static String ENGINE_WORKER_INFO_RUNNING_QUERY_LEN_VAR = "app.engine.worker.info.running.query.len.var";
+    public static final String ENGINE_WORKER_INFO_RUNNING_QUERY_LEN_VAR = "app.engine.worker.info.running.query.len.var";
 
     /* ------------------------ 缓存健康监控 -------------------------- */
 

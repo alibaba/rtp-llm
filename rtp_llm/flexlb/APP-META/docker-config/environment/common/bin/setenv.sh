@@ -29,7 +29,7 @@ if [ -z $SETENV_SETTED ]; then
 
     # app
     # set ${APP_NAME}, if empty $(basename "${APP_HOME}") will be used.
-    APP_HOME=$(cd $(dirname ${BASH_SOURCE[0]})/..; pwd)
+    APP_HOME=$(cd $(dirname ${BASH_SOURCE[0]})/.. || exit; pwd)
     # Force APP_NAME to be FlexLB to match tgz structure
     APP_NAME=FlexLB
     echo "setenv.sh setting APP_NAME to: ${APP_NAME}"
@@ -97,18 +97,18 @@ if [ -z $SETENV_SETTED ]; then
         fi
 
         SERVICE_OPTS="${SERVICE_OPTS} -XX:MetaspaceSize=512m -XX:MaxMetaspaceSize=512m"
-        SERVICE_OPTS="${SERVICE_OPTS} -XX:MaxDirectMemorySize=2g"
+        SERVICE_OPTS="${SERVICE_OPTS} -XX:ReservedCodeCacheSize=512m -XX:MaxDirectMemorySize=2g"
         # 使用G1GC
         SERVICE_OPTS="${SERVICE_OPTS} -XX:+UseG1GC"
         SERVICE_OPTS="${SERVICE_OPTS} -XX:+UnlockExperimentalVMOptions"
         SERVICE_OPTS="${SERVICE_OPTS} -XX:MaxGCPauseMillis=150"
-        SERVICE_OPTS="${SERVICE_OPTS} -XX:InitiatingHeapOccupancyPercent=45"
+        SERVICE_OPTS="${SERVICE_OPTS} -XX:InitiatingHeapOccupancyPercent=40"
         SERVICE_OPTS="${SERVICE_OPTS} -XX:G1HeapRegionSize=32M"
         SERVICE_OPTS="${SERVICE_OPTS} -XX:G1NewSizePercent=20"
         SERVICE_OPTS="${SERVICE_OPTS} -XX:+ExplicitGCInvokesConcurrent"
         SERVICE_OPTS="${SERVICE_OPTS} -XX:SurvivorRatio=8"
         SERVICE_OPTS="${SERVICE_OPTS} -Dsun.rmi.dgc.server.gcInterval=2592000000 -Dsun.rmi.dgc.client.gcInterval=2592000000"
-        SERVICE_OPTS="${SERVICE_OPTS} -XX:ParallelGCThreads=24 -XX:ConcGCThreads=6"
+        SERVICE_OPTS="${SERVICE_OPTS} -XX:ParallelGCThreads=24 -XX:ConcGCThreads=8"
         if [[ "$JAVA_VERSION" -lt 9 ]]; then
             SERVICE_OPTS="${SERVICE_OPTS} -Xloggc:${MIDDLEWARE_LOGS}/gc.log -XX:+PrintGCDetails -XX:+PrintGCDateStamps"
         else
@@ -125,6 +125,19 @@ if [ -z $SETENV_SETTED ]; then
         SERVICE_OPTS="${SERVICE_OPTS} -Dproject.name=${APP_NAME}"
         SERVICE_OPTS="${SERVICE_OPTS} -Dlog4j.defaultInitOverride=true"
         SERVICE_OPTS="${SERVICE_OPTS} -Dserver.port=${TOMCAT_PORT} -Dmanagement.port=7002 -Dmanagement.server.port=7002"
+
+        # JDK17 JMPS opts
+        if [[ "$JAVA_VERSION" -ge 17 ]]; then
+          SERVICE_OPTS="${SERVICE_OPTS} --add-modules ALL-SYSTEM"
+          SERVICE_OPTS="${SERVICE_OPTS} --add-opens java.base/java.lang=ALL-UNNAMED"
+          SERVICE_OPTS="${SERVICE_OPTS} --add-opens java.base/java.lang.invoke=ALL-UNNAMED"
+          SERVICE_OPTS="${SERVICE_OPTS} --add-opens java.base/java.util=ALL-UNNAMED"
+          SERVICE_OPTS="${SERVICE_OPTS} --add-opens java.base/java.util.concurrent=ALL-UNNAMED"
+          SERVICE_OPTS="${SERVICE_OPTS} --add-opens=java.base/jdk.internal.misc=ALL-UNNAMED"
+          SERVICE_OPTS="${SERVICE_OPTS} --add-opens java.base/java.nio=ALL-UNNAMED"
+          SERVICE_OPTS="${SERVICE_OPTS} --add-opens java.base/sun.nio.ch=ALL-UNNAMED"
+          SERVICE_OPTS="${SERVICE_OPTS} --add-opens java.instrument/sun.instrument=ALL-UNNAMED"
+        fi
 
         # debug opts
 

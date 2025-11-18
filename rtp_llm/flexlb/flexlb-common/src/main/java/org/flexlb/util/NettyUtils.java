@@ -34,7 +34,7 @@ public class NettyUtils {
         List<HttpNettyChannelContext.ByteData> byteDataList = nettyCtx.getByteDataList();
         // 如果只有一个 chunk, 那么不需要合并, 直接返回
         if (byteDataList.size() == 1) {
-            return byteDataList.get(0).getData();
+            return byteDataList.getFirst().getData();
         }
         long totalBufferSize = nettyCtx.getByteDataSize().sum();
         byte[] mergedData = new byte[(int) totalBufferSize];

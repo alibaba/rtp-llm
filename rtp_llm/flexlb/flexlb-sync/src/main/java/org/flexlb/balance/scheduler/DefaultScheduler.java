@@ -1,5 +1,7 @@
 package org.flexlb.balance.scheduler;
 
+import lombok.Getter;
+import org.apache.commons.collections4.MapUtils;
 import org.flexlb.balance.LoadBalanceStrategyFactory;
 import org.flexlb.balance.strategy.LoadBalancer;
 import org.flexlb.dao.loadbalance.MasterRequest;
@@ -26,20 +28,19 @@ import java.util.Map;
  * date: 2025/4/20
  */
 @Component("defaultScheduler")
-@DependsOn({"randomStrategy", "lowestCacheUsedStrategy", "shortestTTFTStrategy"})
+@DependsOn({"randomStrategy", "weightedCacheStrategy", "shortestTTFTStrategy"})
 public class DefaultScheduler implements Scheduler {
 
+    @Getter
     private final LoadBalancer prefillLoadBalancer;
     private final LoadBalancer decodeLoadBalancer;
     private final LoadBalancer vitLoadBalancer;
     private final LoadBalancer fusionLoadBalancer;
-    private final EngineWorkerStatus engineWorkerStatus;
 
-    public DefaultScheduler(ConfigService configService, EngineWorkerStatus engineWorkerStatus) {
-        this.engineWorkerStatus = engineWorkerStatus;
+    public DefaultScheduler(ConfigService configService) {
         prefillLoadBalancer = LoadBalanceStrategyFactory.getLoadBalanceStrategy(
                 configService.loadBalanceConfig().getLoadBalanceStrategy());
-        decodeLoadBalancer = LoadBalanceStrategyFactory.getLoadBalanceStrategy(LoadBalanceStrategyEnum.LOWEST_CACHE_USED);
+        decodeLoadBalancer = LoadBalanceStrategyFactory.getLoadBalanceStrategy(LoadBalanceStrategyEnum.WEIGHTED_CACHE);
         vitLoadBalancer = LoadBalanceStrategyFactory.getLoadBalanceStrategy(
                 configService.loadBalanceConfig().getLoadBalanceStrategy());
         fusionLoadBalancer = LoadBalanceStrategyFactory.getLoadBalanceStrategy(
@@ -49,16 +50,19 @@ public class DefaultScheduler implements Scheduler {
     public MasterResponse select(BalanceContext balanceContext) {
         if (balanceContext.getMasterRequest() == null) {
             LoggingUtils.error("masterRequest is null");
+            return MasterResponse.code(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode());
         }
         MasterRequest masterRequest = balanceContext.getMasterRequest();
         String modelName = masterRequest.getModel();
 
-        Map<String/*modelName*/, ModelWorkerStatus> targetModelRoleWorkerStatusMap = engineWorkerStatus.getModelRoleWorkerStatusMap();
-        if (targetModelRoleWorkerStatusMap.isEmpty()) {
+        Map<String/*modelName*/, ModelWorkerStatus> targetModelRoleWorkerStatusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP;
+        if (MapUtils.isEmpty(targetModelRoleWorkerStatusMap)) {
             LoggingUtils.error("targetModelRoleWorkerStatusMap is empty");
+            return MasterResponse.code(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode());
         }
         if (targetModelRoleWorkerStatusMap.get(modelName) == null) {
             LoggingUtils.error("targetModelRoleWorkerStatusMap has no key named {}", modelName);
+            return MasterResponse.code(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode());
         }
         ModelWorkerStatus workerStatus = targetModelRoleWorkerStatusMap.get(modelName);
         List<RoleType> roleTypeList = workerStatus.getRoleTypeList();

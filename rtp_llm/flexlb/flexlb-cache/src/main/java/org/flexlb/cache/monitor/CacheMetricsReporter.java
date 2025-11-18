@@ -91,7 +91,6 @@ public class CacheMetricsReporter {
         monitor.register(CACHE_ENGINE_VIEWS_MAP_SIZE, FlexMetricType.GAUGE);
     }
 
-
     /**
      * 上报单个引擎的本地缓存指标
      *

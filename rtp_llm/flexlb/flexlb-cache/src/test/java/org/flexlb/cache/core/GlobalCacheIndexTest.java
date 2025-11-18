@@ -152,7 +152,7 @@ class GlobalCacheIndexTest {
         globalCacheIndex.addCacheBlock(1L, "engine1");
 
         Map<String, Integer> result = globalCacheIndex.batchCalculatePrefixMatchLength(
-                Collections.singletonList("engine1"), Collections.singletonList(1L));
+                List.of("engine1"), List.of(1L));
 
         assertEquals(1, result.get("engine1").intValue(), "Single engine should match single block");
     }

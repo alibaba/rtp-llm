@@ -14,7 +14,7 @@ ENV PATH "$PATH:/opt/taobao/java/bin/"
 COPY environment/common/bin/ /home/admin/${APP_NAME}/bin
 
 # 构建时要做的事，一般是执行shell命令，例如用来安装必要软件，创建文件（夹），修改文件
-RUN rpm -ivh --nodeps "http://yum.tbsite.net/taobao/7/x86_64/current/ali-jdk/ali-jdk-8.4.8-1574344.alios7.x86_64.rpm" && \
+RUN rpm -ivh --nodeps "http://yum.tbsite.net/taobao/7/x86_64/current/ajdk21/ajdk21-21.0.6.0.6-20250508143732.alios7.x86_64.rpm" && \
 rpm -ivh --nodeps "http://yum.tbsite.net/taobao/7/x86_64/current/tengine-proxy/tengine-proxy-2.1.13-20170802132414.el7u2.x86_64.rpm" && \
 rpm -ivh --nodeps "http://yum.tbsite.net/alios/7/os/x86_64/Packages/taobao-cronolog-1.6.2-15.alios7.x86_64.rpm" && \
 mkdir -p /home/admin/$APP_NAME/target && \

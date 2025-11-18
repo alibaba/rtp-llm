@@ -1,13 +1,14 @@
 package org.flexlb.cache.domain;
 
-import java.io.Serializable;
-import java.util.Collections;
-import java.util.Set;
-
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
+
+import java.io.Serial;
+import java.io.Serializable;
+import java.util.Collections;
+import java.util.Set;
 
 /**
  * Diff计算结果
@@ -20,7 +21,8 @@ import lombok.NoArgsConstructor;
 @NoArgsConstructor
 @AllArgsConstructor
 public class DiffResult implements Serializable {
-    
+
+    @Serial
     private static final long serialVersionUID = 1L;
     
     /**
@@ -34,7 +36,6 @@ public class DiffResult implements Serializable {
      */
     @Builder.Default
     private Set<Long> removedBlocks = Collections.emptySet();
-    
     
     /**
      * 引擎IP

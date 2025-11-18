@@ -1,5 +1,7 @@
 package org.flexlb.metric;
 
+import lombok.Getter;
+
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
@@ -30,6 +32,7 @@ public interface FlexMetricTags {
      * 用于替代KMonitor的ImmutableMetricTags
      */
     class ImmutableFlexMetricTags implements FlexMetricTags {
+        @Getter
         private final Map<String, String> tags;
 
         /**
@@ -69,11 +72,6 @@ public interface FlexMetricTags {
         }
 
         @Override
-        public Map<String, String> getTags() {
-            return tags;
-        }
-
-        @Override
         public boolean isEmpty() {
             return tags.isEmpty();
         }
@@ -85,8 +83,12 @@ public interface FlexMetricTags {
 
         @Override
         public boolean equals(Object o) {
-            if (this == o) return true;
-            if (o == null || getClass() != o.getClass()) return false;
+            if (this == o) {
+                return true;
+            }
+            if (o == null || getClass() != o.getClass()) {
+                return false;
+            }
             ImmutableFlexMetricTags that = (ImmutableFlexMetricTags) o;
             return tags.equals(that.tags);
         }

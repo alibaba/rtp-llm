@@ -1,10 +1,5 @@
 package org.flexlb.cache.service.impl;
 
-import java.util.Collections;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.cache.core.KvCacheManager;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
@@ -15,6 +10,11 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
+
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 /**
  * 缓存感知服务默认实现

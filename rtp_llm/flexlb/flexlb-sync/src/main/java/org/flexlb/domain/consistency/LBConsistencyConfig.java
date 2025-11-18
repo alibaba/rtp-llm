@@ -12,9 +12,9 @@ import lombok.Setter;
 @Setter
 public class LBConsistencyConfig {
 
-    private boolean needConsistency = false;
+    private boolean needConsistency;
     private MasterElectType masterElectType = MasterElectType.ZOOKEEPER;
-    private ZookeeperConfig zookeeperConfig = null;
+    private ZookeeperConfig zookeeperConfig;
 
     public enum MasterElectType {
         ZOOKEEPER

@@ -37,5 +37,3 @@ public enum StrategyErrorType {
         return name() + "(" + errorCode + ")";
     }
 }
-
-

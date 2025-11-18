@@ -9,6 +9,7 @@ import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.discovery.ServiceDiscovery;
 import org.flexlb.discovery.ServiceHostListener;
 import org.flexlb.util.JsonUtils;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PreDestroy;
@@ -31,12 +32,24 @@ public class EngineAddressNameResolver implements CustomNameResolver {
     private final ServiceDiscovery serviceDiscovery;
     private Listener listener;
     private List<String/*ip:port*/> allHosts = new ArrayList<>();
+    private final List<String> serviceAddressList;
 
     public EngineAddressNameResolver(ServiceDiscovery serviceDiscovery) {
         String modelConfig = System.getenv("MODEL_SERVICE_CONFIG");
         this.serviceDiscovery = serviceDiscovery;
-        List<String> serviceAddressList = initServiceAddressList(modelConfig);
+        this.serviceAddressList = initServiceAddressList(modelConfig);
         log.warn("EngineAddressNameResolver start subscribe clusters:{} ", serviceAddressList);
+        fetchAllDomainsHosts();
+        setupListeners(serviceDiscovery, serviceAddressList);
+    }
+
+    @Scheduled(fixedDelay = 30000) // 每30秒执行一次
+    public void periodicHostUpdate() {
+        log.info("EngineAddressNameResolver performing periodic host update for domains: {}", serviceAddressList);
+        fetchAllDomainsHosts();
+    }
+
+    private void setupListeners(ServiceDiscovery serviceDiscovery, List<String> serviceAddressList) {
         // 为每个服务地址创建独立的监听器
         for (String serviceAddress : serviceAddressList) {
             if (serviceAddress == null) {
@@ -45,6 +58,23 @@ public class EngineAddressNameResolver implements CustomNameResolver {
             }
             ServiceHostListener addressListener = hosts -> updateDomainHosts(serviceAddress, hosts);
             serviceDiscovery.listen(serviceAddress, addressListener);
+        }
+    }
+
+    private void fetchAllDomainsHosts() {
+        for (String serverAddress : serviceAddressList) {
+            if (serverAddress == null) {
+                log.warn("Skipping null serverAddress during fetch");
+                continue;
+            }
+
+            try {
+                List<WorkerHost> hosts = serviceDiscovery.getHosts(serverAddress);
+                log.info("Fetched {} hosts for domain: {}", hosts != null ? hosts.size() : 0, serverAddress);
+                updateDomainHosts(serverAddress, hosts);
+            } catch (Exception e) {
+                log.error("Failed to fetch hosts for domain: {}, error: {}", serverAddress, e.getMessage(), e);
+            }
         }
     }
 

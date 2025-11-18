@@ -11,8 +11,8 @@ import org.flexlb.util.IdUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.flexlb.constant.CommonConstants.DEADLINE_EXCEEDED_MESSAGE;
@@ -26,7 +26,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
     private final String modelName;
     private final String site;
     private final String group;
-    private final ConcurrentHashMap<String/*ipPort*/, WorkerStatus> workerStatuses;
+    private final Map<String/*ipPort*/, WorkerStatus> workerStatuses;
     private final EngineHealthReporter engineHealthReporter;
     private final EngineGrpcService engineGrpcService;
     private final String ip;
@@ -37,7 +37,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
     private final long syncRequestTimeoutMs;
 
     public GrpcWorkerStatusRunner(String modelName, String ipPort, String site, String group,
-                                  ConcurrentHashMap<String/*ip*/, WorkerStatus> workerStatuses,
+                                  Map<String/*ip*/, WorkerStatus> workerStatuses,
                                   EngineHealthReporter engineHealthReporter,
                                   EngineGrpcService engineGrpcService,
                                   long syncRequestTimeoutMs) {
@@ -115,6 +115,9 @@ public class GrpcWorkerStatusRunner implements Runnable {
 
             Long currentVersion = workerStatus.getStatusVersion();
             if (currentVersion >= responseVersion) {
+                // 版本相同但是也需要更新 expirationTime
+                // Set expiration time to 3 seconds from now
+                workerStatus.getStatusLastUpdateTime().set(System.currentTimeMillis());
                 logger.info("query engine worker status via gRPC, version is not updated, currentVersion: {}, responseVersion: {}",
                         currentVersion, responseVersion);
                 return;

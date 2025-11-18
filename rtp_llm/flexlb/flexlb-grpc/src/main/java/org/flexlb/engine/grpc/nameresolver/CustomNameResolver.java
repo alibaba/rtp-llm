@@ -1,6 +1,5 @@
 package org.flexlb.engine.grpc.nameresolver;
 
-
 import java.util.List;
 
 /**

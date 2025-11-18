@@ -28,7 +28,7 @@ public class LBStatusConsistencyService implements MasterElectService {
 
     private static final Logger LOGGER = LoggerFactory.getLogger("syncConsistencyLogger");
     public static final String MASTER_CHANGE_NOTIFY_PATH = "/rtp_llm/notify_master";
-    public static final ScheduledExecutorService scheduledExecutorService = new ScheduledThreadPoolExecutor(
+    public static final ScheduledExecutorService SCHEDULED_EXECUTOR_SERVICE = new ScheduledThreadPoolExecutor(
             4,
             new NamedThreadFactory("LBStatusConsistencyService-Schedule-Thread"),
             new ThreadPoolExecutor.AbortPolicy()
@@ -71,7 +71,7 @@ public class LBStatusConsistencyService implements MasterElectService {
         }
         LOGGER.warn("start init ZookeeperMasterElectService.");
 
-        scheduledExecutorService.scheduleWithFixedDelay(this::syncLBStatusFromMaster, 1000, 500, TimeUnit.MILLISECONDS);
+        SCHEDULED_EXECUTOR_SERVICE.scheduleWithFixedDelay(this::syncLBStatusFromMaster, 1000, 500, TimeUnit.MILLISECONDS);
     }
 
     @Override
@@ -107,7 +107,7 @@ public class LBStatusConsistencyService implements MasterElectService {
     @Override
     public String getMasterHostIp(boolean forceSync) {
         // 如果不需要一致性控制，则直接返回本机ip
-        return !lbConsistencyConfig.isNeedConsistency() ? this.hostIp : masterElectService.getMasterHostIp(forceSync);
+        return lbConsistencyConfig.isNeedConsistency() ? masterElectService.getMasterHostIp(forceSync) : this.hostIp;
     }
 
     public String getMasterHostIpPort() {

@@ -18,7 +18,7 @@ import java.util.concurrent.TimeUnit;
 
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 
 @ExtendWith(MockitoExtension.class)
@@ -50,8 +50,8 @@ class WorkerAddressServiceTest {
 
         // Assertions
         Assertions.assertTrue(actualHosts.isEmpty());
-        verify(serviceDiscoveryRunner, times(0)).call();
-        verify(serviceDiscoveryExecutor, times(0)).submit(any(WorkerAddressService.ServiceDiscoveryRunner.class));
-        verify(future, times(0)).get(500, TimeUnit.MILLISECONDS);
+        verify(serviceDiscoveryRunner, never()).call();
+        verify(serviceDiscoveryExecutor, never()).submit(any(WorkerAddressService.ServiceDiscoveryRunner.class));
+        verify(future, never()).get(500, TimeUnit.MILLISECONDS);
     }
 }

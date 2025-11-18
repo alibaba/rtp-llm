@@ -1,10 +1,5 @@
 package org.flexlb.sync.runner;
 
-import java.util.Map;
-import java.util.Optional;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.LongAdder;
-
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.cache.service.DynamicCacheIntervalService;
@@ -21,6 +16,11 @@ import org.flexlb.util.IdUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.LongAdder;
+
 import static org.flexlb.constant.CommonConstants.DEADLINE_EXCEEDED_MESSAGE;
 import static org.flexlb.util.CommonUtils.toGrpcPort;
 
@@ -32,7 +32,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
     private final String modelName;
     private final String site;
     private final RoleType roleType;
-    private final ConcurrentHashMap<String/*ipPort*/, WorkerStatus> workerStatuses;
+    private final Map<String/*ipPort*/, WorkerStatus> workerStatuses;
     private final EngineHealthReporter engineHealthReporter;
     private final EngineGrpcService engineGrpcService;
     private final CacheAwareService cacheAwareService;
@@ -47,7 +47,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
     private final Long syncEngineStatusInterval;
 
     public GrpcCacheStatusCheckRunner(String modelName, String ipPort, String site, RoleType roleType,
-                                      ConcurrentHashMap<String/*ip*/, WorkerStatus> workerStatuses,
+                                      Map<String/*ip*/, WorkerStatus> workerStatuses,
                                       EngineHealthReporter engineHealthReporter,
                                       EngineGrpcService engineGrpcService,
                                       CacheAwareService cacheAwareService,
@@ -84,7 +84,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
 
         // Skip prefill cache status check if not in 100ms interval
         if ((RoleType.PREFILL.equals(roleType) || RoleType.PDFUSION.equals(roleType))
-                    && !(syncCount.longValue() % roundInterval == 0)) {
+                    && syncCount.longValue() % roundInterval != 0) {
             logger.info("Skip prefill cache status check for {} because not in {}ms interval", ipPort, prefillCacheStatusCheckInterval);
             return;
         }
