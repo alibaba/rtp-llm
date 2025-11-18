@@ -50,3 +50,31 @@ def timer_wrapper(description=""):
         return wrapped
 
     return decorator
+
+
+class Chrono(object):
+    def __init__(self):
+        self.start_time: Optional[float] = None
+        self.cost = {}
+
+    def start(self):
+        self.start_time = current_time_ms()
+
+    def stage_record(self, stage: str):
+        now = current_time_ms()
+        cost = self.cost.get(stage, 0)
+        cost += now - self.start_time
+        self.cost[stage] = cost
+        self.start_time = now
+
+    def print_cost(self):
+        if len(self.cost) == 0:
+            logging.info("no statistics")
+        else:
+            log_msg = "Statistics on the time cost of stages:"
+            for stage, cost in self.cost.items():
+                log_msg += f"\n{stage}: {cost/1000:.2f}"
+            logging.info(log_msg)
+
+
+load_time_recorder = Chrono()
