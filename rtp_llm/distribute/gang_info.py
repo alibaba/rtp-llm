@@ -250,6 +250,7 @@ def get_gang_info() -> GangInfo:
                 -1,
                 -1,
                 -1,
+                -1,
                 0,
                 0,
                 "local",
@@ -276,6 +277,9 @@ def get_gang_info() -> GangInfo:
                 ),
                 http_port=WorkerInfo.http_port_offset(local_rank, member.server_port),
                 rpc_server_port=WorkerInfo.rpc_server_port_offset(
+                    local_rank, member.server_port
+                ),
+                embedding_rpc_server_port=WorkerInfo.embedding_rpc_server_port_offset(
                     local_rank, member.server_port
                 ),
                 backend_server_port=WorkerInfo.backend_server_port_offset(

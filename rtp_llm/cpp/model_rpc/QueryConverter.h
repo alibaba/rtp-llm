@@ -29,6 +29,8 @@ public:
 
     static std::vector<RoleAddr> getRoleAddrs(const GenerateConfigPB* config_proto);
 
+    static void transTensorPB(TensorPB* tensor_pb, const torch::Tensor& tensor);
+
 private:
     static std::shared_ptr<GenerateConfig> transGenerateConfig(const GenerateConfigPB* config_proto);
 

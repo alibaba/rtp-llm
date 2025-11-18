@@ -8,6 +8,7 @@ from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.model_loader.weight_module import CustomAtomicWeight
+from rtp_llm.ops import EmbeddingCppOutput
 
 """
 用于多种多样的下游任务
@@ -49,6 +50,7 @@ class CustomHandler(object):
     def __init__(self, config: GptInitModelParameters):
         self.config_ = config
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.need_post_process = False
 
     def custom_weight_info(self) -> List[CustomAtomicWeight]:
         return []
@@ -90,7 +92,9 @@ class CustomHandler(object):
             hidden_states=kwargs["hidden_states"],
         )
 
-    def post_process(self, request: Any, batch_output: EngineOutputs) -> EngineOutputs:
+    def post_process(
+        self, request: Any, batch_output: EmbeddingCppOutput
+    ) -> EmbeddingCppOutput:
         return batch_output
 
 

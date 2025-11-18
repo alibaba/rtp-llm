@@ -131,4 +131,69 @@ TEST_F(QueryConverterTest, testTransOutput) {
     }
 }
 
+TEST_F(QueryConverterTest, TransTensorPB_FP32) {
+
+    torch::Tensor tensor = torch::rand({2, 3}, torch::kFloat32);
+    TensorPB      tensor_pb;
+    QueryConverter::transTensorPB(&tensor_pb, tensor);
+    EXPECT_EQ(tensor_pb.data_type(), TensorPB::FP32);
+    ASSERT_EQ(tensor_pb.shape_size(), 2);
+    EXPECT_EQ(tensor_pb.shape(0), 2);
+    EXPECT_EQ(tensor_pb.shape(1), 3);
+
+    // 验证数据一致性
+    const std::string& proto_data        = tensor_pb.fp32_data();
+    const float*       proto_ptr         = reinterpret_cast<const float*>(proto_data.data());
+    torch::Tensor      contiguous_tensor = tensor.contiguous();
+    const float*       tensor_ptr        = contiguous_tensor.data_ptr<float>();
+
+    ASSERT_EQ(proto_data.size(), contiguous_tensor.numel() * sizeof(float));
+    for (int i = 0; i < contiguous_tensor.numel(); ++i) {
+        EXPECT_FLOAT_EQ(proto_ptr[i], tensor_ptr[i]);
+    }
+}
+
+TEST_F(QueryConverterTest, TransTensorPB_BF16) {
+    torch::Tensor tensor = torch::rand({3}, torch::kBFloat16);
+    TensorPB      tensor_pb;
+    QueryConverter::transTensorPB(&tensor_pb, tensor);
+
+    EXPECT_EQ(tensor_pb.data_type(), TensorPB::BF16);
+
+    const std::string& proto_data    = tensor_pb.bf16_data();
+    size_t             expected_size = tensor.numel() * sizeof(c10::BFloat16);
+    ASSERT_EQ(proto_data.size(), expected_size);
+
+    const char* tensor_data = static_cast<const char*>(tensor.contiguous().data_ptr());
+    EXPECT_EQ(std::memcmp(proto_data.data(), tensor_data, expected_size), 0);
+}
+
+TEST_F(QueryConverterTest, TransTensorPB_ScalarShape) {
+    torch::Tensor tensor = torch::tensor(42, torch::kInt32);
+    TensorPB      tensor_pb;
+    QueryConverter::transTensorPB(&tensor_pb, tensor);
+    EXPECT_EQ(tensor_pb.shape_size(), 0);
+}
+
+TEST_F(QueryConverterTest, TransTensorPB_NonContiguous) {
+    torch::Tensor tensor = torch::rand({3, 4}, torch::kFloat32).transpose(0, 1);
+    TensorPB      tensor_pb;
+    QueryConverter::transTensorPB(&tensor_pb, tensor);
+
+    torch::Tensor      contiguous_tensor = tensor.contiguous();
+    const std::string& proto_data        = tensor_pb.fp32_data();
+    const float*       proto_ptr         = reinterpret_cast<const float*>(proto_data.data());
+    const float*       tensor_ptr        = contiguous_tensor.data_ptr<float>();
+
+    for (int i = 0; i < contiguous_tensor.numel(); ++i) {
+        EXPECT_FLOAT_EQ(proto_ptr[i], tensor_ptr[i]);
+    }
+}
+
+TEST_F(QueryConverterTest, TransTensorPB_UnsupportedType) {
+    torch::Tensor tensor = torch::ones({1}, torch::kInt64);
+    TensorPB      tensor_pb;
+    EXPECT_THROW(QueryConverter::transTensorPB(&tensor_pb, tensor), std::runtime_error);
+}
+
 }  // namespace rtp_llm

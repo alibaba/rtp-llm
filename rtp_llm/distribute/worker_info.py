@@ -205,6 +205,7 @@ class WorkerInfo(object):
         gang_hb_port: int,
         http_port: int,
         rpc_server_port: int,
+        embedding_rpc_server_port: int,
         remote_rpc_server_port: int,
         cache_store_listen_port: int,
         cache_store_connect_port: int,
@@ -221,6 +222,7 @@ class WorkerInfo(object):
         self.gang_hb_port = gang_hb_port
         self.http_port = http_port
         self.rpc_server_port = rpc_server_port
+        self.embedding_rpc_server_port = embedding_rpc_server_port
         self.remote_rpc_server_port = remote_rpc_server_port
         self.cache_store_listen_port = cache_store_listen_port
         self.cache_store_connect_port = cache_store_connect_port
@@ -243,6 +245,9 @@ class WorkerInfo(object):
             gang_hb_port=WorkerInfo.gang_hb_port_offset(g_parallel_info.local_rank),
             http_port=WorkerInfo.http_port_offset(g_parallel_info.local_rank),
             rpc_server_port=WorkerInfo.rpc_server_port_offset(
+                g_parallel_info.local_rank
+            ),
+            embedding_rpc_server_port=WorkerInfo.embedding_rpc_server_port_offset(
                 g_parallel_info.local_rank
             ),
             remote_rpc_server_port=WorkerInfo.rpc_server_port_offset(
@@ -307,6 +312,10 @@ class WorkerInfo(object):
     @staticmethod
     def backend_server_port_offset(local_rank: int, server_port: int = -1) -> int:
         return WorkerInfo.server_port_offset(local_rank, server_port) + 6
+
+    @staticmethod
+    def embedding_rpc_server_port_offset(local_rank: int, server_port: int = -1) -> int:
+        return WorkerInfo.server_port_offset(local_rank, server_port) + 7
 
     # used for ut
     def reload(self):
