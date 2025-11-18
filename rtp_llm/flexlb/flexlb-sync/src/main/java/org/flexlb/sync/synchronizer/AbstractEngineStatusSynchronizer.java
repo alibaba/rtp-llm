@@ -47,10 +47,10 @@ public abstract class AbstractEngineStatusSynchronizer {
 
     protected final WhaleMasterConfig whaleMasterConfig;
 
-    protected AbstractEngineStatusSynchronizer(WorkerAddressService workerAddressService,
-                                               EngineHealthReporter engineHealthReporter,
-                                               EngineWorkerStatus engineWorkerStatus,
-                                               ModelMetaConfig modelMetaConfig) {
+    public AbstractEngineStatusSynchronizer(WorkerAddressService workerAddressService,
+                                            EngineHealthReporter engineHealthReporter,
+                                            EngineWorkerStatus engineWorkerStatus,
+                                            ModelMetaConfig modelMetaConfig) {
         this.workerAddressService = workerAddressService;
         this.engineHealthReporter = engineHealthReporter;
         this.engineWorkerStatus = engineWorkerStatus;

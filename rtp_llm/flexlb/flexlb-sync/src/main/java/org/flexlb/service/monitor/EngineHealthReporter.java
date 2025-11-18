@@ -4,6 +4,7 @@ import io.netty.channel.EventLoopGroup;
 import io.netty.util.concurrent.EventExecutor;
 import io.netty.util.concurrent.SingleThreadEventExecutor;
 import lombok.Data;
+import org.apache.commons.collections4.CollectionUtils;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
@@ -12,26 +13,23 @@ import org.flexlb.domain.balance.BalanceContext;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.enums.FlexMetricType;
-import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
 import org.flexlb.metric.FlexStatisticsType;
 import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.sync.status.EngineWorkerStatus;
+import org.flexlb.sync.status.ModelWorkerStatus;
 import org.flexlb.sync.synchronizer.AbstractEngineStatusSynchronizer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
+import reactor.netty.resources.LoopResources;
 
 import javax.annotation.PostConstruct;
-
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadPoolExecutor;
 
 import static org.flexlb.constant.MetricConstant.CACHE_BLOCK_SIZE;
@@ -46,9 +44,9 @@ import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_SCHEDUL
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_SELECT_DETAIL;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_THREAD_POOL_INFO;
 import static org.flexlb.constant.MetricConstant.ENGINE_DECODE_WORKER_NUMBER;
+import static org.flexlb.constant.MetricConstant.ENGINE_LOCAL_TASK_MAP_SIZE;
 import static org.flexlb.constant.MetricConstant.ENGINE_NUMBER_SERVICE_DISCOVERY_RESULT;
 import static org.flexlb.constant.MetricConstant.ENGINE_PREFILL_WORKER_NUMBER;
-import static org.flexlb.constant.MetricConstant.ENGINE_LOCAL_TASK_MAP_SIZE;
 import static org.flexlb.constant.MetricConstant.ENGINE_RUNNING_QUEUE_TIME;
 import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_AVAILABLE_CONCURRENCY;
 import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_CHECK_FAIL;
@@ -71,28 +69,30 @@ import static org.flexlb.constant.MetricConstant.PREFILL_MASTER_NODE;
 @Component
 public class EngineHealthReporter {
 
-    private final FlexMonitor monitor;
+    private static final Logger logger = LoggerFactory.getLogger("syncLogger");
 
-    private final EngineWorkerStatus engineWorkerStatus;
+    private final FlexMonitor monitor;
 
     private final CacheMetricsReporter cacheMetricsReporter;
 
     private final EngineGrpcClient engineGrpcClient;
 
-    private Set<String/*modelName*/> proxyEngineSet = ConcurrentHashMap.newKeySet();
-
-    private static final Logger logger = LoggerFactory.getLogger("syncLogger");
+    private final Map<String, EventLoopGroup> eventLoopGroupMap;
 
     @Autowired
     public EngineHealthReporter(FlexMonitor monitor,
                                 CacheMetricsReporter cacheMetricsReporter,
-                                EngineWorkerStatus engineWorkerStatus,
-                                EngineGrpcClient engineGrpcClient) {
-
+                                EngineGrpcClient engineGrpcClient,
+                                LoopResources serverLoopResources) {
         this.monitor = monitor;
-        this.engineWorkerStatus = engineWorkerStatus;
         this.cacheMetricsReporter = cacheMetricsReporter;
         this.engineGrpcClient = engineGrpcClient;
+
+        this.eventLoopGroupMap = Map.of(
+                "serverWorker", serverLoopResources.onServer(true),
+                "serverSelector", serverLoopResources.onServerSelect(true),
+                "gRpcEventLoopGroup", engineGrpcClient.getEventLoopGroup()
+        );
     }
 
     @PostConstruct
@@ -107,8 +107,8 @@ public class EngineHealthReporter {
         this.monitor.register(ENGINE_DECODE_WORKER_NUMBER, FlexMetricType.GAUGE);
         this.monitor.register(ENGINE_NUMBER_SERVICE_DISCOVERY_RESULT, FlexMetricType.GAUGE);
         this.monitor.register(ENGINE_STATUS_CHECK_FAIL, FlexMetricType.QPS);
-        this.monitor.register(ENGINE_BALANCING_THREAD_POOL_INFO, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        this.monitor.register(ENGINE_BALANCING_EVENT_LOOP_GROUP_INFO, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(ENGINE_BALANCING_THREAD_POOL_INFO, FlexMetricType.GAUGE);
+        this.monitor.register(ENGINE_BALANCING_EVENT_LOOP_GROUP_INFO, FlexMetricType.GAUGE);
 
         this.monitor.register(ENGINE_BALANCING_MASTER_ALL_QPS, FlexMetricType.QPS);
         this.monitor.register(ENGINE_BALANCING_MASTER_FAIL_QPS, FlexMetricType.QPS);
@@ -143,6 +143,14 @@ public class EngineHealthReporter {
 
     @Scheduled(fixedRate = 2000)
     private void reportEngineMetric() {
+        for (Map.Entry<String, ModelWorkerStatus> entry : EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP.entrySet()) {
+            String modelName = entry.getKey();
+            FlexMetricTags tags = FlexMetricTags.of("model", modelName);
+            ModelWorkerStatus modelWorkerStatus = entry.getValue();
+            monitor.report(ENGINE_WORKER_NUMBER, tags, modelWorkerStatus.getWorkerTotalCount());
+            monitor.report(ENGINE_PREFILL_WORKER_NUMBER, tags, modelWorkerStatus.getPrefillStatusMap().size());
+            monitor.report(ENGINE_DECODE_WORKER_NUMBER, tags, modelWorkerStatus.getDecodeStatusMap().size());
+        }
 
         if (AbstractEngineStatusSynchronizer.engineSyncExecutor != null && AbstractEngineStatusSynchronizer.statusCheckExecutor != null) {
             reportThreadPoolInfo(ENGINE_BALANCING_THREAD_POOL_INFO, "engineSyncExecutor",
@@ -152,9 +160,9 @@ public class EngineHealthReporter {
             reportThreadPoolInfo(ENGINE_BALANCING_THREAD_POOL_INFO, "serviceDiscoveryExecutor",
                     (ThreadPoolExecutor) WorkerAddressService.serviceDiscoveryExecutor);
         }
-
         reportThreadPoolInfo(ENGINE_BALANCING_THREAD_POOL_INFO, "gRpcExecutor", (ThreadPoolExecutor) engineGrpcClient.getExecutor());
-        reportEventLoopGroup(ENGINE_BALANCING_EVENT_LOOP_GROUP_INFO, "gRpcEventLoopGroup", engineGrpcClient.getEventLoopGroup());
+
+        eventLoopGroupMap.forEach(this::reportEventLoopGroup);
     }
 
     public void reportServiceDiscoveryResult(String modelName, int result, String role) {
@@ -251,15 +259,26 @@ public class EngineHealthReporter {
             FlexMetricTags metricTags = FlexMetricTags.of("model", ctx.getMasterRequest().getModel());
             monitor.report(ENGINE_BALANCING_MASTER_ALL_QPS, metricTags, 1.0);
             monitor.report(ENGINE_BALANCING_MASTER_SCHEDULE_RT, metricTags, System.currentTimeMillis() - ctx.getStartTime());
+        }
 
-            // 汇报选择的结果
-            List<ServerStatus> serverStatus = ctx.getMasterResponse().getServerStatus();
-            for (ServerStatus status : serverStatus) {
-                FlexMetricTags tags = FlexMetricTags.of(
-                        "model", ctx.getMasterRequest().getModel(),
-                        "engineIp", status.getServerIp(),
-                        "role", status.getRole().name());
-                monitor.report(ENGINE_BALANCING_MASTER_SELECT_DETAIL, tags, 1.0);
+        // 汇报服务器状态选择结果（根据 roleType 和 ip 区分）
+        if (ctx.getMasterResponse() != null && CollectionUtils.isNotEmpty(ctx.getMasterResponse().getServerStatus())) {
+            String modelName = ctx.getMasterRequest().getModel();
+            boolean isSuccess = ctx.getMasterResponse().isSuccess();
+            int code = ctx.getMasterResponse().getCode();
+
+            for (ServerStatus serverStatus : ctx.getMasterResponse().getServerStatus()) {
+                if (serverStatus.getRole() != null && serverStatus.getServerIp() != null) {
+                    // 汇报具体服务器选择QPS
+                    FlexMetricTags serverSelectionTags = FlexMetricTags.of(
+                            "model", modelName,
+                            "role", serverStatus.getRole().name(),
+                            "engineIp", serverStatus.getServerIp(),
+                            "success", String.valueOf(isSuccess),
+                            "code", String.valueOf(code)
+                    );
+                    monitor.report(ENGINE_BALANCING_MASTER_SELECT_DETAIL, serverSelectionTags, 1.0);
+                }
             }
         }
     }
@@ -338,10 +357,9 @@ public class EngineHealthReporter {
         monitor.report(metricName, FlexMetricTags.of(metricMap), engineSyncExecutor.getPoolSize());
     }
 
-    private void reportEventLoopGroup(String metricName, String eventLoopGroupName, EventLoopGroup eventLoopGroup) {
+    private void reportEventLoopGroup(String eventLoopGroupName, EventLoopGroup eventLoopGroup) {
         int totalActiveExecutorCount = 0;
         int totalPendingTask = 0;
-        Map<String, Integer> pendingTasksMap = new HashMap<>();
         for (EventExecutor executor : eventLoopGroup) {
             boolean isShutdown = executor.isShutdown();
             boolean isTerminated = executor.isTerminated();
@@ -350,23 +368,17 @@ public class EngineHealthReporter {
             if (!isShutdown && !isTerminated && !isShuttingDown) {
                 totalActiveExecutorCount++;
             }
-            if (executor instanceof SingleThreadEventExecutor) {
-                SingleThreadEventExecutor singleThreadEventExecutor = (SingleThreadEventExecutor) executor;
+            if (executor instanceof SingleThreadEventExecutor singleThreadEventExecutor) {
                 int pendingTasks = singleThreadEventExecutor.pendingTasks();
                 totalPendingTask += pendingTasks;
-                pendingTasksMap.put(singleThreadEventExecutor.threadProperties().name(), pendingTasks);
             }
         }
         Map<String, String> metricMap = new HashMap<>();
         metricMap.put("name", eventLoopGroupName);
         metricMap.put("type", "active-executor-count");
-        monitor.report(metricName, FlexMetricTags.of(metricMap), totalActiveExecutorCount);
+        monitor.report(org.flexlb.constant.MetricConstant.ENGINE_BALANCING_EVENT_LOOP_GROUP_INFO, FlexMetricTags.of(metricMap), totalActiveExecutorCount);
         metricMap.put("type", "pending-task-total-count");
-        monitor.report(metricName, FlexMetricTags.of(metricMap), totalPendingTask);
-        for (Map.Entry<String, Integer> pendingTaskEntry : pendingTasksMap.entrySet()) {
-            metricMap.put("type", pendingTaskEntry.getKey() + "-pending-task-count");
-            monitor.report(metricName, FlexMetricTags.of(metricMap), pendingTaskEntry.getValue());
-        }
+        monitor.report(org.flexlb.constant.MetricConstant.ENGINE_BALANCING_EVENT_LOOP_GROUP_INFO, FlexMetricTags.of(metricMap), totalPendingTask);
     }
 
     public void reportCacheHitMetrics(String modelName, RoleType roleType, String engineIp, long hitTokens, double hitRatio) {

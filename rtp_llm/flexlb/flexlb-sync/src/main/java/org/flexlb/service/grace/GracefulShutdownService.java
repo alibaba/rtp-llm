@@ -9,7 +9,6 @@ import sun.misc.SignalHandler;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 
-
 /**
  * 服务优雅上下线配置
  */
@@ -37,4 +36,3 @@ public class GracefulShutdownService implements SignalHandler {
     }
 
 }
-

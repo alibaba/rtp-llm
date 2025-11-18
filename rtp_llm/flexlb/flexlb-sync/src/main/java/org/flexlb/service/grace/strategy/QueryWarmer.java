@@ -1,18 +1,18 @@
 package org.flexlb.service.grace.strategy;
 
-import java.util.Timer;
-import java.util.TimerTask;
-
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.listener.OnlineListener;
 import org.flexlb.service.grace.GracefulOnlineService;
 import org.springframework.stereotype.Component;
 
+import java.util.Timer;
+import java.util.TimerTask;
+
 @Slf4j
 @Component
 public class QueryWarmer implements OnlineListener {
 
-    public static boolean warmUpFinished = false;
+    public static boolean warmUpFinished;
     private static final int maxWaitTimeSeconds = 120;
 
     public QueryWarmer() {

@@ -46,8 +46,7 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
                                     ModelMetaConfig modelMetaConfig,
                                     CacheAwareService localKvCacheAwareManager) {
 
-        super(
-                workerAddressService,
+        super(workerAddressService,
                 engineHealthReporter,
                 engineWorkerStatus,
                 modelMetaConfig
@@ -72,7 +71,7 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
             LoggingUtils.warn("prefill load balancer env:MODEL_CONFIG is empty");
             throw new RuntimeException("master load balancer env:MODEL_CONFIG is empty");
         }
-        ServiceRoute serviceRoute = JsonUtils.toObject(modelConfig, new TypeReference<ServiceRoute>() {
+        ServiceRoute serviceRoute = JsonUtils.toObject(modelConfig, new TypeReference<>() {
         });
         ModelMetaConfig.putServiceRoute(serviceRoute.getServiceId(), serviceRoute);
         modelNames.add(IdUtils.getModelNameByServiceId(serviceRoute.getServiceId()));
@@ -84,10 +83,10 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
         logger.info("modelNames:{}", modelNames);
         try {
             for (String modelName : modelNames) {
-                ModelWorkerStatus modelWorkerStatus = engineWorkerStatus.getModelRoleWorkerStatusMap().get(modelName);
+                ModelWorkerStatus modelWorkerStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP.get(modelName);
                 if (modelWorkerStatus == null) {
                     modelWorkerStatus = new ModelWorkerStatus();
-                    engineWorkerStatus.getModelRoleWorkerStatusMap().put(modelName, modelWorkerStatus);
+                    EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP.put(modelName, modelWorkerStatus);
                 }
                 String serviceId = IdUtils.getServiceIdByModelName(modelName);
                 if (serviceId.isEmpty()) {
@@ -97,15 +96,11 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
                 if (serviceRoute == null) {
                     logger.error("serviceRoute not found");
                     continue;
-                } else {
-                    logger.info("get serviceRoute, roleEndpoints:{}", serviceRoute.getRoleEndpoints().size());
                 }
                 List<RoleType> roleTypes = serviceRoute.getAllRoleTypes();
-                logger.info("roleTypes : {}", roleTypes);
                 for (RoleType roleType : roleTypes) {
                     List<Endpoint> roleEndpoints = serviceRoute.getRoleEndpoints(roleType);
                     if (roleEndpoints != null) {
-                        logger.info("get roleEndpoints by roleType : {}, get size : {}", roleType, roleEndpoints.size());
                         engineSyncExecutor.submit(new EngineSyncRunner(
                                 modelName, modelWorkerStatus.getRoleStatusMap(roleType),
                                 workerAddressService, statusCheckExecutor, engineHealthReporter,

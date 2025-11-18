@@ -4,8 +4,6 @@ import lombok.extern.slf4j.Slf4j;
 import org.flexlb.domain.balance.WhaleMasterConfig;
 import org.flexlb.enums.LogLevel;
 
-import java.util.function.Supplier;
-
 /**
  * Logging utility class, in order to log when enable global switch or set log level in master request
  *
@@ -26,7 +24,7 @@ public class LoggingUtils {
     }
 
     public static void info(String format, Object... args) {
-        log(LogLevel.INFO, () -> log.info(format, args));
+        log(LogLevel.INFO, () -> log.info(format, args), false);
     }
 
     public static void warn(String format, Object... args) {

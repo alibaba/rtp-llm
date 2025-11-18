@@ -7,7 +7,7 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * @author laichuan
- * @date 2025/8/19
+ * @since  2025/8/19
  **/
 public class NoopSpanImpl implements WhaleSpan {
 

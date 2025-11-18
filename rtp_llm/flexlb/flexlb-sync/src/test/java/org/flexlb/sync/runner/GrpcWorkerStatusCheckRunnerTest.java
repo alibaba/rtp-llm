@@ -12,8 +12,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -55,6 +53,6 @@ class GrpcWorkerStatusCheckRunnerTest {
         runner.run();
 
         // Assert
-        verify(engineGrpcService, times(1)).getWorkerStatus(eq("127.0.0.1"), eq(8081), eq(-1L), eq(20L));
+        verify(engineGrpcService).getWorkerStatus("127.0.0.1", 8081, -1L, 20L);
     }
 }

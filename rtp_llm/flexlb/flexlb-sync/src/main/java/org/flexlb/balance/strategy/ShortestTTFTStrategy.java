@@ -107,12 +107,12 @@ public class ShortestTTFTStrategy implements LoadBalancer {
         Map<String/*ip*/, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(modelName, roleType, group);
 
         if (MapUtils.isEmpty(workerStatusMap)) {
-            LoggingUtils.warn("select ROLE: {} failed, workerStatusMap is empty");
+            LoggingUtils.warn("select ROLE: {} failed, workerStatusMap is empty", roleType.getCode());
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
         }
         List<WorkerStatus> workerStatusList = new ArrayList<>(workerStatusMap.values());
         if (CollectionUtils.isEmpty(workerStatusList)) {
-            LoggingUtils.warn("select ROLE: {} failed, workerStatusList is empty");
+            LoggingUtils.warn("select ROLE: {} failed, workerStatusList is empty", roleType.getCode());
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
         }
 
@@ -137,7 +137,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
             // 2. 按TTFT排序，选择最优的Worker
             Optional<ScoredWorker> bestWorker = findBestWorkerWithFreshness(scoredWorkers);
 
-            if (!bestWorker.isPresent()) {
+            if (bestWorker.isEmpty()) {
                 LoggingUtils.warn("select ROLE: {} failed, bestWorker is empty");
                 return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
             }
@@ -146,15 +146,6 @@ public class ShortestTTFTStrategy implements LoadBalancer {
             String formattedDateTime = now.format(formatter);
             LoggingUtils.debug("");
             LoggingUtils.debug("select time: {}, inter req id : {}", formattedDateTime, interRequestId);
-            for (WorkerStatus worker : workerStatusList) {
-                LoggingUtils.debug("worker: {}", worker.getIp());
-                for (TaskInfo task : worker.getRunningTaskList()) {
-                    LoggingUtils.debug("remote task inter req id : {}, input len: {}, prefix len: {}", task.getInterRequestId(), task.getInputLength(), task.getPrefixLength());
-                }
-                for (TaskInfo task : worker.getLocalTaskMap().values()) {
-                    LoggingUtils.debug("local task inter req id : {}, input len: {}, prefix len: {}", task.getInterRequestId(), task.getInputLength(), task.getPrefixLength());
-                }
-            }
             // 3. 选择最优Worker并更新状态
             ScoredWorker selectedWorker = bestWorker.get();
             WorkerStatus workerStatus = selectedWorker.worker();
@@ -187,16 +178,16 @@ public class ShortestTTFTStrategy implements LoadBalancer {
         // 先按TTFT排序
         List<ScoredWorker> sortedWorkers = scoredWorkers.stream()
                 .sorted(Comparator.comparingLong(ScoredWorker::ttft))
-                .collect(Collectors.toList());
+                .toList();
 
         // 选择前30%或至少5个Worker作为候选者
         int candidateCount = Math.max(TOP_K, (int) (sortedWorkers.size() * 0.3));
         List<ScoredWorker> candidates = sortedWorkers.stream()
                 .limit(candidateCount)
-                .collect(Collectors.toList());
+                .toList();
 
         // 找到候选者中的最小TTFT
-        long minTTFT = candidates.get(0).ttft();
+        long minTTFT = candidates.getFirst().ttft();
 
         // 计算候选者的TTFT平均值和标准差
         double avgTTFT = candidates.stream()
@@ -218,20 +209,19 @@ public class ShortestTTFTStrategy implements LoadBalancer {
         // 筛选出TTFT相近的Worker
         List<ScoredWorker> similarWorkers = candidates.stream()
                 .filter(worker -> Math.abs(worker.ttft() - minTTFT) <= threshold)
-                .collect(Collectors.toList());
+                .toList();
 
         if (similarWorkers.isEmpty()) {
             // 如果没有相近的Worker，直接选择TTFT最小的
-            return Optional.of(candidates.get(0));
+            return Optional.of(candidates.getFirst());
         } else {
             // 在相近的Worker中，优先选择最近没有被调度的（lastScheduleTime较小的）
             // 使用正值使最近没有被调度的Worker优先级更高
             // 如果找不到最近没有被调度的Worker，则直接返回第一个
             return similarWorkers.stream()
-                    .min(Comparator.comparingLong(worker -> {
+                    .min(Comparator.comparingLong(worker ->
                         // 使用正值使最近没有被调度的Worker优先级更高
-                        return worker.worker().getLastScheduleTime().get();
-                    }));
+                        worker.worker().getLastScheduleTime().get()));
         }
     }
 

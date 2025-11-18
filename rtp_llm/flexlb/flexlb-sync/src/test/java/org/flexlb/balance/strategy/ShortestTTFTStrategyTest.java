@@ -20,6 +20,7 @@ import org.mockito.Mockito;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -33,8 +34,8 @@ class ShortestTTFTStrategyTest {
     void test() {
 
         EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig());
-        engineWorkerStatus.getModelRoleWorkerStatusMap().put("test-model", new ModelWorkerStatus());
-        ConcurrentHashMap<String/*ip*/, WorkerStatus> prefillStatusMap = engineWorkerStatus.getModelRoleWorkerStatusMap().get("test-model").getPrefillStatusMap();
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP.put("test-model", new ModelWorkerStatus());
+        Map<String/*ip*/, WorkerStatus> prefillStatusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP.get("test-model").getPrefillStatusMap();
         List<TaskInfo> runningTaskList = new ArrayList<>();
         List<TaskInfo> finishedTaskList = new ArrayList<>();
         ConcurrentHashMap<Long, TaskInfo> localTaskList = new ConcurrentHashMap<>();

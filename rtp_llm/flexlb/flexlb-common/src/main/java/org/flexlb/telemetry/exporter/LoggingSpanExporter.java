@@ -1,13 +1,13 @@
 package org.flexlb.telemetry.exporter;
 
-import java.util.Collection;
-import java.util.logging.Handler;
-
 import io.opentelemetry.sdk.common.CompletableResultCode;
 import io.opentelemetry.sdk.trace.data.SpanData;
 import io.opentelemetry.sdk.trace.export.SpanExporter;
 import lombok.extern.java.Log;
 import org.springframework.lang.Nullable;
+
+import java.util.Collection;
+import java.util.logging.Handler;
 
 @Log
 public class LoggingSpanExporter implements SpanExporter {

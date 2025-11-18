@@ -20,7 +20,7 @@ public class SyncSchedulerConfig {
      */
     @Bean(name = "taskScheduler")
     public ScheduledThreadPoolExecutor taskScheduler() {
-        return new ScheduledThreadPoolExecutor(1, new NamedThreadFactory("task-scheduler"));
+        return new ScheduledThreadPoolExecutor(4, new NamedThreadFactory("task-scheduler"));
     }
 
     @Bean(name = "taskMetricScheduler")

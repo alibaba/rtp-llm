@@ -1,5 +1,7 @@
 package org.flexlb.discovery;
 
+import lombok.AccessLevel;
+import lombok.NoArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.flexlb.dao.master.WorkerHost;
@@ -15,8 +17,9 @@ import java.util.stream.Collectors;
  *
  * @author saichen.sm
  */
+@NoArgsConstructor(access = AccessLevel.PRIVATE)
 @Slf4j
-public class NoOpServiceDiscovery implements ServiceDiscovery {
+public final class NoOpServiceDiscovery implements ServiceDiscovery {
 
     private static final NoOpServiceDiscovery INSTANCE = new NoOpServiceDiscovery();
     /**
@@ -24,9 +27,6 @@ public class NoOpServiceDiscovery implements ServiceDiscovery {
      * 格式：ip1:port1,ip2:port2
      */
     private static final String ENV_DOMAIN_ADDRESS = "DOMAIN_ADDRESS:";
-
-    private NoOpServiceDiscovery() {
-    }
 
     public static NoOpServiceDiscovery getInstance() {
         return INSTANCE;

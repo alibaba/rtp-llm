@@ -1,6 +1,7 @@
 
 package org.flexlb.service.grace;
 
+import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.flexlb.listener.OnlineListener;
@@ -14,21 +15,16 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 
-@SuppressWarnings("NullableProblems")
 @Slf4j
 @Component
 public class GracefulOnlineService implements EnvironmentAware {
 
     private static final List<OnlineListener> ONLINE_LISTENERS = new CopyOnWriteArrayList<>();
+    @Setter
     private Environment environment;
 
     public static void addOnlineListener(OnlineListener listener) {
         ONLINE_LISTENERS.add(listener);
-    }
-
-    @Override
-    public void setEnvironment(Environment environment) {
-        this.environment = environment;
     }
 
     public void online(String profile) {

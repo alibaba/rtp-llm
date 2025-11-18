@@ -1,8 +1,8 @@
 package org.flexlb.dao.master;
 
-import java.util.List;
-
 import org.flexlb.dao.route.RoleType;
+
+import java.util.List;
 
 /**
  * Worker状态提供者接口

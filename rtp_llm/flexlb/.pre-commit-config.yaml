@@ -1,0 +1,19 @@
+# .pre-commit-config.yaml
+repos:
+  - repo: local
+    hooks:
+      - id: maven-compile
+        name: Maven Compile Check
+        entry: bash -c "cd rtp_llm/flexlb && ./mvnw clean package -DskipTests -U -T2C"
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]
+        # 只在相关文件修改时运行
+        files: \.(java|xml|properties)$
+
+      - id: spotless-check
+        name: Spotless Import Check
+        entry: bash -c "cd rtp_llm/flexlb && ./mvnw spotless:check -P spotless-check"
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]

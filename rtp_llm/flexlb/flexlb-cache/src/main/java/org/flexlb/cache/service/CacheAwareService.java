@@ -1,11 +1,11 @@
 package org.flexlb.cache.service;
 
-import java.util.List;
-import java.util.Map;
-
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+
+import java.util.List;
+import java.util.Map;
 
 /**
  * 缓存感知服务接口

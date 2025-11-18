@@ -1,14 +1,5 @@
 package org.flexlb.cache.core;
 
-import java.util.Collections;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.concurrent.atomic.LongAdder;
-
-import javax.annotation.PostConstruct;
-import javax.annotation.PreDestroy;
-
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.cache.domain.DiffResult;
@@ -17,6 +8,14 @@ import org.flexlb.dao.master.WorkerStatusProvider;
 import org.flexlb.dao.route.RoleType;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
+
+import javax.annotation.PostConstruct;
+import javax.annotation.PreDestroy;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.atomic.LongAdder;
 
 /**
  * KVCache管理器
