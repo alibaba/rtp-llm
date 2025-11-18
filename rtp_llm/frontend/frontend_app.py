@@ -19,6 +19,7 @@ from uvicorn.loops.auto import auto_loop_setup
 from rtp_llm.config.py_config_modules import PyEnvConfigs, StaticConfig
 from rtp_llm.config.uvicorn_config import UVICORN_LOGGING_CONFIG
 from rtp_llm.distribute.worker_info import WorkerInfo, g_worker_info
+from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
 from rtp_llm.frontend.frontend_server import FrontendServer
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.utils.util import AtomicCounter, async_request_server
@@ -234,9 +235,7 @@ class FrontendApp(object):
             active_requests.increment()
             try:
                 if self.frontend_server.is_embedding:
-                    return await async_request_server(
-                        "post", g_worker_info.backend_server_port, "v1/embeddings", req
-                    )
+                    return await self.frontend_server.embedding(req, raw_request)
                 else:
                     return await self.frontend_server.inference(req, raw_request)
             finally:
@@ -289,62 +288,30 @@ class FrontendApp(object):
 
         if self.frontend_server.is_embedding:
             # embedding
+            @app.post("/v1/embeddings/similarity")
+            @app.post("/v1/reranker")
+            @app.post("/v1/classifier")
             @app.post("/v1/embeddings")
             async def embedding(request: Dict[str, Any], raw_request: RawRequest):
-                return await async_request_server(
-                    "post", g_worker_info.backend_server_port, "v1/embeddings", request
-                )
+                return await self.frontend_server.embedding(request, raw_request)
 
             @app.post("/v1/embeddings/dense")
             async def embedding_dense(request: Dict[str, Any], raw_request: RawRequest):
-                return await async_request_server(
-                    "post",
-                    g_worker_info.backend_server_port,
-                    "v1/embeddings/dense",
-                    request,
-                )
+                request[TYPE_STR] = EmbeddingType.DENSE
+                return await self.frontend_server.embedding(request, raw_request)
 
             @app.post("/v1/embeddings/sparse")
             async def embedding_sparse(
                 request: Dict[str, Any], raw_request: RawRequest
             ):
-                return await async_request_server(
-                    "post",
-                    g_worker_info.backend_server_port,
-                    "v1/embeddings/sparse",
-                    request,
-                )
+                request[TYPE_STR] = EmbeddingType.SPARSE
+                return await self.frontend_server.embedding(request, raw_request)
 
             @app.post("/v1/embeddings/colbert")
             async def embedding_colbert(
                 request: Dict[str, Any], raw_request: RawRequest
             ):
-                return await async_request_server(
-                    "post",
-                    g_worker_info.backend_server_port,
-                    "v1/embeddings/colbert",
-                    request,
-                )
-
-            @app.post("/v1/embeddings/similarity")
-            async def similarity(request: Dict[str, Any], raw_request: RawRequest):
-                return await async_request_server(
-                    "post",
-                    g_worker_info.backend_server_port,
-                    "v1/embeddings/similarity",
-                    request,
-                )
-
-            @app.post("/v1/classifier")
-            async def classifier(request: Dict[str, Any], raw_request: RawRequest):
-                return await async_request_server(
-                    "post", g_worker_info.backend_server_port, "v1/classifier", request
-                )
-
-            @app.post("/v1/reranker")
-            async def reranker(request: Dict[str, Any], raw_request: RawRequest):
-                return await async_request_server(
-                    "post", g_worker_info.backend_server_port, "v1/reranker", request
-                )
+                request[TYPE_STR] = EmbeddingType.COLBERT
+                return await self.frontend_server.embedding(request, raw_request)
 
         return app

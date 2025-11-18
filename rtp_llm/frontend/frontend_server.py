@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import threading
+import time
 from typing import Any, Callable, Dict, Union
 
 from fastapi import Request
@@ -11,10 +12,14 @@ from pydantic import BaseModel
 
 from rtp_llm.access_logger.access_logger import AccessLogger
 from rtp_llm.config.generate_config import RoleType
+from rtp_llm.config.gpt_init_model_parameters import ConfigMode, GptInitModelParameters
 from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.config.task_type import TaskType
+from rtp_llm.embedding.embedding_endpoint import EmbeddingEndpoint
 from rtp_llm.frontend.frontend_worker import FrontendWorker, TokenizerEncodeResponse
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
+from rtp_llm.model_factory import ModelFactory
+from rtp_llm.model_factory_register import _model_factory
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.server.misc import format_exception
@@ -55,12 +60,24 @@ class FrontendServer(object):
             self._frontend_worker = FrontendWorker(self.separated_frontend)
             self._openai_endpoint = None
             self.is_embedding = False
+            self._embedding_endpoint = None
             if (
                 self._frontend_worker.model_config is not None
                 and self._frontend_worker.model_config.task_type
                 != TaskType.LANGUAGE_MODEL
             ):
                 self.is_embedding = True
+                model_config = ModelFactory.create_normal_model_config()
+                global _model_factory
+                if model_config.model_type not in _model_factory:
+                    raise Exception(
+                        f"model type {model_config.model_type} not registered!"
+                    )
+                model_cls = _model_factory[model_config.model_type]
+                config: GptInitModelParameters = model_cls.create_config(model_config)
+                self._embedding_endpoint = EmbeddingEndpoint(
+                    config, self._frontend_worker.tokenizer
+                )
             else:
                 self._openai_endpoint = OpenaiEndpoint(
                     self._frontend_worker.model_config,
@@ -71,6 +88,44 @@ class FrontendServer(object):
     def stop(self):
         if self._frontend_worker is not None:
             self._frontend_worker.stop()
+
+    async def embedding(self, request: Dict[str, Any], raw_request: Request):
+        start_time = time.time()
+        try:
+            if isinstance(request, str):
+                request = json.loads(request)
+            kmonitor.report(
+                AccMetrics.QPS_METRIC, 1, {"source": request.get("source", "unknown")}
+            )
+            request[request_id_field_name] = self._global_controller.increment()
+        except Exception as e:
+            return self._handle_exception(request, e)
+
+        try:
+            assert (
+                self._embedding_endpoint is not None
+            ), "embedding pipeline should not be None"
+            result, logable_result = await self._embedding_endpoint.embedding(request)
+            # do not log result since too big
+            if logable_result is not None:
+                self._access_logger.log_success_access(request, logable_result)
+            end_time = time.time()
+            kmonitor.report(
+                GaugeMetrics.LANTENCY_METRIC, (end_time - start_time) * 1000
+            )
+            kmonitor.report(
+                AccMetrics.SUCCESS_QPS_METRIC,
+                1,
+                {"source": request.get("source", "unknown")},
+            )
+            usage = result.get("usage", {})
+            if not isinstance(usage, dict):
+                usage = {}
+            return ORJSONResponse(result, headers={USAGE_HEADER: json.dumps(usage)})
+        except BaseException as e:
+            return self._handle_exception(request, e)
+        finally:
+            self._global_controller.decrement()
 
     # use asyncio.sleep(0) to correctly exit when client closed https://github.com/tiangolo/fastapi/issues/4146
     async def stream_response(

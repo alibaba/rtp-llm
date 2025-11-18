@@ -3,7 +3,7 @@ import glob
 import logging
 import os
 from argparse import Namespace
-from typing import Any, Dict, Optional, Sequence, TypeVar, Tuple
+from typing import Any, Dict, Optional, Sequence, Tuple, TypeVar
 
 from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.server.server_args.batch_decode_scheduler_group_args import (
@@ -24,6 +24,7 @@ from rtp_llm.server.server_args.fifo_scheduler_group_args import (
 from rtp_llm.server.server_args.fmha_group_args import init_fmha_group_args
 from rtp_llm.server.server_args.gang_group_args import init_gang_group_args
 from rtp_llm.server.server_args.generate_group_args import init_generate_group_args
+from rtp_llm.server.server_args.grpc_group_args import init_grpc_group_args
 from rtp_llm.server.server_args.hw_kernel_group_args import init_hw_kernel_group_args
 from rtp_llm.server.server_args.jit_group_args import init_jit_group_args
 from rtp_llm.server.server_args.kv_cache_group_args import init_kv_cache_group_args
@@ -90,6 +91,7 @@ class EnvArgumentGroup:
 
 class EnvArgumentParser(argparse.ArgumentParser):
     _env_mappings: Dict[str, str] = {}
+
     def __init__(self, *args, env_prefix: str = "", **kwargs):
         self.env_prefix = env_prefix.upper()
         self._groups: Dict[str, EnvArgumentGroup] = {}
@@ -179,11 +181,11 @@ class EnvArgumentParser(argparse.ArgumentParser):
 
     @staticmethod
     def update_env_from_args(
-            parser: argparse.ArgumentParser,
-            args_name: str,
-            namespace: argparse.Namespace,
+        parser: argparse.ArgumentParser,
+        args_name: str,
+        namespace: argparse.Namespace,
     ) -> None:
-        env_name  = EnvArgumentParser._env_mappings[args_name]
+        env_name = EnvArgumentParser._env_mappings[args_name]
         value = getattr(namespace, args_name, None)
         if value is None:
             return None
@@ -278,6 +280,7 @@ def init_all_group_args(parser: EnvArgumentParser) -> None:
     init_worker_group_args(parser)
     init_jit_group_args(parser)
     init_pd_separation_group_args(parser)
+    init_grpc_group_args(parser)
 
 
 def setup_args() -> tuple[EnvArgumentParser, Namespace]:

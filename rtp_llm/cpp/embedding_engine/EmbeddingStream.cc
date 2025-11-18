@@ -67,7 +67,7 @@ void EmbeddingStream::reportMetrics() {
 }
 
 void EmbeddingStream::setError(const std::string& error_info) {
-    embedding_output_->setError(error_info);
+    embedding_output_->setError(ErrorCode::UNKNOWN_ERROR, error_info);
     stream_state_ = StreamState::STOPPED;
     reportMetrics();
 }

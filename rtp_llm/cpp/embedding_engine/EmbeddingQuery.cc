@@ -9,7 +9,7 @@ EmbeddingInput::EmbeddingInput(const std::shared_ptr<rtp_llm::Buffer>&         t
                                const std::shared_ptr<rtp_llm::Buffer>&         input_lengths,
                                const int64_t                                   total_length,
                                int64_t                                         request_id,
-                               std::optional<MultimodalFeature>                multimodal_features,
+                               const std::optional<MultimodalFeature>&         multimodal_features,
                                std::optional<std::shared_ptr<rtp_llm::Buffer>> input_embeddings):
     token_ids(token_ids),
     token_type_ids(token_type_ids),
@@ -21,12 +21,41 @@ EmbeddingInput::EmbeddingInput(const std::shared_ptr<rtp_llm::Buffer>&         t
     checkVaild();
 }
 
-EmbeddingInput::EmbeddingInput(const torch::Tensor&             token_ids_,
-                               const torch::Tensor&             token_type_ids_,
-                               const torch::Tensor&             input_lengths_,
-                               int                              request_id_,
-                               std::optional<MultimodalFeature> multimodal_features_,
-                               std::optional<torch::Tensor>     input_embeddings_) {
+EmbeddingInput::EmbeddingInput(const std::vector<int32_t>&                     token_ids_param,
+                               const std::vector<int32_t>&                     token_type_ids_param,
+                               const std::vector<int32_t>&                     input_lengths_param,
+                               int64_t                                         request_id_param,
+                               const std::optional<MultimodalFeature>&         multimodal_features_param,
+                               std::optional<std::shared_ptr<rtp_llm::Buffer>> input_embeddings_param) {
+
+    token_ids = std::make_shared<rtp_llm::Buffer>(rtp_llm::MemoryType::MEMORY_CPU,
+                                                  rtp_llm::DataType::TYPE_INT32,
+                                                  std::vector<size_t>{token_ids_param.size()},
+                                                  (void*)token_ids_param.data());
+
+    token_type_ids = std::make_shared<rtp_llm::Buffer>(rtp_llm::MemoryType::MEMORY_CPU,
+                                                       rtp_llm::DataType::TYPE_INT32,
+                                                       std::vector<size_t>{token_type_ids_param.size()},
+                                                       (void*)token_type_ids_param.data());
+
+    total_length = std::accumulate(input_lengths_param.begin(), input_lengths_param.end(), 0);
+
+    input_lengths       = std::make_shared<rtp_llm::Buffer>(rtp_llm::MemoryType::MEMORY_CPU,
+                                                      rtp_llm::DataType::TYPE_INT32,
+                                                      std::vector<size_t>{input_lengths_param.size()},
+                                                      (void*)input_lengths_param.data());
+    request_id          = request_id_param;
+    multimodal_features = multimodal_features_param;
+    input_embeddings    = input_embeddings_param;
+    checkVaild();
+}
+
+EmbeddingInput::EmbeddingInput(const torch::Tensor&                    token_ids_,
+                               const torch::Tensor&                    token_type_ids_,
+                               const torch::Tensor&                    input_lengths_,
+                               int64_t                                 request_id_,
+                               const std::optional<MultimodalFeature>& multimodal_features_,
+                               std::optional<torch::Tensor>            input_embeddings_) {
     token_ids = std::make_shared<rtp_llm::Buffer>(rtp_llm::MemoryType::MEMORY_CPU,
                                                   rtp_llm::DataType::TYPE_INT32,
                                                   std::vector<size_t>{(size_t)token_ids_.size(0)},

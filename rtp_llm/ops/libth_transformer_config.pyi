@@ -1,6 +1,7 @@
 from __future__ import annotations
 import typing
-__all__: list[str] = ['ArpcConfig', 'BatchDecodeSchedulerConfig', 'CacheStoreConfig', 'ConcurrencyConfig', 'DeviceResourceConfig', 'EplbConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'FfnDisAggregateConfig', 'GptInitParameter', 'HWKernelConfig', 'KVCacheConfig', 'MiscellaneousConfig',
+from typing import Dict, overload
+__all__: list[str] = ['ArpcConfig', 'BatchDecodeSchedulerConfig', 'CacheStoreConfig', 'ConcurrencyConfig', 'DeviceResourceConfig', 'EplbConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'FfnDisAggregateConfig', 'GptInitParameter', 'GrpcConfig', 'HWKernelConfig', 'KVCacheConfig', 'MiscellaneousConfig',
                       'MlaOpsType', 'ModelSpecificConfig', 'MoeConfig', 'ParallelismDistributedConfig', 'ProfilingDebugLoggingConfig', 'QuantAlgo', 'RoleSpecialTokens', 'RoleType', 'SamplerConfig', 'SchedulerConfig', 'ServiceDiscoveryConfig', 'SpecialTokens', 'SpeculativeExecutionConfig', 'get_block_cache_keys']
 
 
@@ -15,6 +16,24 @@ class ArpcConfig:
     def to_string(self) -> str:
         ...
 
+class GrpcConfig:
+    def __init__(self) -> None: 
+        ...
+    
+    def __init__(self, json_str: str) -> None: 
+        ...
+    
+    def to_string(self) -> str: 
+        ...
+        
+    def update_from_env(self) -> None: 
+        ... 
+        
+    def get_client_config(self) -> dict[str, int]: 
+        ...
+    
+    def get_server_config(self) -> dict[str, int]: 
+        ...
 
 class BatchDecodeSchedulerConfig:
     batch_decode_scheduler_batch_size: int
@@ -299,6 +318,7 @@ class GptInitParameter:
     activation_type: str
     add_bias_linear: bool
     arpc_config: ArpcConfig
+    grpc_config: GrpcConfig
     batch_decode_scheduler_config: BatchDecodeSchedulerConfig
     block_nums: int
     cache_store_config: CacheStoreConfig
