@@ -3,7 +3,7 @@
 #include <torch/torch.h>
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 #include "rtp_llm/cpp/devices/testing/TestBase.h"
-#include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache_new/CacheConfig.h"
 
 #ifdef USING_ROCM
 #include "rtp_llm/cpp/devices/rocm_impl/aiterPA.h"
@@ -219,14 +219,15 @@ void AttentionOpTest::contextAttentionOpTest(size_t        batch_size,
 #ifdef USING_ROCM
     auto rope_config = RopeConfig({RopeStyle::Base, (int)head_dim, 10000, 1, 2048, 1, 1});
 
-    size_t               tokensPerBlock = 16;
-    int                  block_num      = batch_size * ((seq_len + tokensPerBlock - 1) / tokensPerBlock + 1);
-    rtp_llm::CacheConfig cache_conf(rtp_llm::KVCacheParam(
-        {1, (uint)block_num, (uint)num_key_value_heads, (uint)head_dim, (uint)tokensPerBlock, DataType::TYPE_BF16}));
-    auto                 kv_cache_block_id = device_->allocateBuffer(
+    size_t tokensPerBlock = 16;
+    int    block_num      = batch_size * ((seq_len + tokensPerBlock - 1) / tokensPerBlock + 1);
+    auto   cache_conf     = makeMhaCacheConfig(
+        1, (uint)block_num, (uint)num_key_value_heads, (uint)head_dim, (uint)tokensPerBlock, DataType::TYPE_BF16);
+    auto kv_cache_block_id = device_->allocateBuffer(
         {rtp_llm::DataType::TYPE_INT32, {batch_size, block_num / batch_size}, rtp_llm::AllocationType::HOST});
 
-    cache_manager_            = std::make_shared<rtp_llm::CacheManager>(cache_conf, device_);
+    cache_manager_ = std::make_shared<rtp_llm::KVCacheManager>(cache_conf, device_);
+    ASSERT_TRUE(cache_manager_->init());
     auto kv_cache_buffer      = cache_manager_->kvCacheBuffer();
     auto layer_k_cache_buffer = kv_cache_buffer.k_blocks->index(0);
     auto layer_v_cache_buffer = kv_cache_buffer.v_blocks->index(0);
@@ -394,8 +395,8 @@ void AttentionOpTest::selfAttentionOpTest(size_t batch_size,
     auto block_num = 2 * batch_size * ((kv_seq_len + tokensPerBlock - 1) / tokensPerBlock + 1) + 1;
 #endif
 
-    rtp_llm::CacheConfig cache_conf(rtp_llm::KVCacheParam(
-        {1, (uint)block_num, (uint)num_key_value_heads, (uint)head_dim, (uint)tokensPerBlock, DataType::TYPE_FP16}));
+    auto cache_conf = makeMhaCacheConfig(
+        1, (uint)block_num, (uint)num_key_value_heads, (uint)head_dim, (uint)tokensPerBlock, DataType::TYPE_FP16);
     cache_manager_            = nullptr;
     auto kv_cache_block_id    = allocateKVBlocks(cache_conf, input_lengths, kvcache_pad);
     auto kv_cache_buffer      = cache_manager_->kvCacheBuffer();
@@ -540,9 +541,9 @@ void AttentionOpTest::aiterPageAttentionOpTest(size_t batch_size,
     // auto rope_config             = RopeConfig({RopeStyle::Base, (int)head_dim, 1000000, 1., 0., 0., 40960});
     auto rope_config = RopeConfig({RopeStyle::Base, (int)head_dim, 10000, 1, 2048, 1, 1});
     // cache manager need one block for preserve and every seq need one block for preserve.
-    auto                 block_num = 2 * batch_size * ((kv_seq_len + tokens_per_block - 1) / tokens_per_block + 1) + 1;
-    rtp_llm::CacheConfig cache_conf(rtp_llm::KVCacheParam(
-        {1, (uint)block_num, (uint)num_key_value_heads, (uint)head_dim, (uint)tokens_per_block, DataType::TYPE_BF16}));
+    auto block_num  = 2 * batch_size * ((kv_seq_len + tokens_per_block - 1) / tokens_per_block + 1) + 1;
+    auto cache_conf = makeMhaCacheConfig(
+        1, (uint)block_num, (uint)num_key_value_heads, (uint)head_dim, (uint)tokens_per_block, DataType::TYPE_BF16);
     cache_manager_         = nullptr;
     auto kv_cache_block_id = allocateKVBlocks(cache_conf, input_lengths, kvcache_pad);
     // cache, kv_cache_block_id = [batch_size, xxx]
@@ -673,18 +674,18 @@ void AttentionOpTest::xqaAttentionOpTest(size_t batch_size,
 
     // cache manager need one block for preserve and every seq need one block for preserve.
     auto block_num  = 2 * batch_size * ((kv_seq_len + seq_len + tokens_per_block - 1) / tokens_per_block + 1) + 1;
-    auto cache_conf = is_kv_cache_fp8 ? rtp_llm::CacheConfig(rtp_llm::KVCacheParam({1,
-                                                                                    (uint)block_num,
-                                                                                    (uint)num_key_value_heads,
-                                                                                    (uint)head_dim,
-                                                                                    (uint)tokens_per_block,
-                                                                                    DataType::TYPE_FP8_E4M3})) :
-                                        rtp_llm::CacheConfig(rtp_llm::KVCacheParam({1,
-                                                                                    (uint)block_num,
-                                                                                    (uint)num_key_value_heads,
-                                                                                    (uint)head_dim,
-                                                                                    (uint)tokens_per_block,
-                                                                                    DataType::TYPE_BF16}));
+    auto cache_conf = is_kv_cache_fp8 ? makeMhaCacheConfig(1,
+                                                           (uint)block_num,
+                                                           (uint)num_key_value_heads,
+                                                           (uint)head_dim,
+                                                           (uint)tokens_per_block,
+                                                           DataType::TYPE_FP8_E4M3) :
+                                        makeMhaCacheConfig(1,
+                                                           (uint)block_num,
+                                                           (uint)num_key_value_heads,
+                                                           (uint)head_dim,
+                                                           (uint)tokens_per_block,
+                                                           DataType::TYPE_BF16);
     cache_manager_  = nullptr;
     auto kv_cache_block_id    = is_kv_cache_fp8 ? allocateKVBlocks(cache_conf, input_lengths, kvcache_pad_fp8, false) :
                                                   allocateKVBlocks(cache_conf, input_lengths, kvcache_pad, false);
@@ -853,9 +854,9 @@ void AttentionOpTest::flashinferPrefillOpTest(size_t        batch_size,
     auto position_ids_device              = createDeviceBuffer<int>(position_ids_host);
     auto rope_config                      = RopeConfig({RopeStyle::No, (int)head_dim, 10000, 1, 2048, 1, 1});
     // cache manager need one block for preserve and every seq need one block for preserve.
-    auto                 block_num = 2 * batch_size * ((kv_seq_len + tokens_per_block - 1) / tokens_per_block + 1) + 1;
-    rtp_llm::CacheConfig cache_conf(rtp_llm::KVCacheParam(
-        {1, (uint)block_num, (uint)num_key_value_heads, (uint)head_dim, (uint)tokens_per_block, DataType::TYPE_BF16}));
+    auto block_num  = 2 * batch_size * ((kv_seq_len + tokens_per_block - 1) / tokens_per_block + 1) + 1;
+    auto cache_conf = makeMhaCacheConfig(
+        1, (uint)block_num, (uint)num_key_value_heads, (uint)head_dim, (uint)tokens_per_block, DataType::TYPE_BF16);
     cache_manager_         = nullptr;
     auto kv_cache_block_id = allocateKVBlocks(cache_conf, kv_seq_lengths, kvcache_pad, false);
     auto kv_cache_buffer   = cache_manager_->kvCacheBuffer();
@@ -1006,13 +1007,9 @@ void AttentionOpTest::xqaPrefillOpTest(size_t        batch_size,
     auto input_lengths_device    = createDeviceBuffer<int>(input_lengths_host);
     auto rope_config             = RopeConfig({RopeStyle::No, (int)head_dim, 10000, 1, 2048, 1, 1});
     // cache manager need one block for preserve and every seq need one block for preserve.
-    auto                 block_num = 2 * batch_size * ((kv_seq_len + tokens_per_block - 1) / tokens_per_block + 1) + 1;
-    rtp_llm::CacheConfig cache_conf(rtp_llm::KVCacheParam({1,
-                                                           (uint)block_num,
-                                                           (uint)num_key_value_heads,
-                                                           (uint)head_dim,
-                                                           (uint)tokens_per_block,
-                                                           DataType::TYPE_FP8_E4M3}));
+    auto block_num  = 2 * batch_size * ((kv_seq_len + tokens_per_block - 1) / tokens_per_block + 1) + 1;
+    auto cache_conf = makeMhaCacheConfig(
+        1, (uint)block_num, (uint)num_key_value_heads, (uint)head_dim, (uint)tokens_per_block, DataType::TYPE_FP8_E4M3);
     cache_manager_         = nullptr;
     auto kv_cache_block_id = allocateKVBlocks(cache_conf, kv_seq_lengths, kvcache_pad_fp8, false);
     auto kv_cache_buffer   = cache_manager_->kvCacheBuffer();
