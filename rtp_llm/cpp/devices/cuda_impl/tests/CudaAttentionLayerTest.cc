@@ -24,14 +24,14 @@ TEST_F(AttentionLayerTestFp16, testSimpleContextAttention) {
     attention_conf.rope_config.dim   = attention_conf.size_per_head;
     attention_conf.rope_config.base  = 1000000;
 
-    const size_t layer_num = 2;
-    const size_t block_num = 1024;
-    CacheConfig  cache_conf(rtp_llm::KVCacheParam({layer_num,
-                                                   block_num,
-                                                   static_cast<uint>(attention_conf.kv_head_num),
-                                                   static_cast<uint>(attention_conf.size_per_head),
-                                                   static_cast<uint>(attention_conf.tokens_per_block),
-                                                   getTensorType<TestType>()}));
+    const size_t layer_num  = 2;
+    const size_t block_num  = 1024;
+    auto         cache_conf = makeMhaCacheConfig(static_cast<uint>(layer_num),
+                                         static_cast<uint>(block_num),
+                                         static_cast<uint>(attention_conf.kv_head_num),
+                                         static_cast<uint>(attention_conf.size_per_head),
+                                         static_cast<uint>(attention_conf.tokens_per_block),
+                                         getTensorType<TestType>());
     testAttentionLayer(cache_conf, attention_conf, {5}, {});
 }
 
@@ -46,14 +46,14 @@ TEST_F(AttentionLayerTestFp16, testSimpleContextAttention2) {
     attention_conf.rope_config.dim   = attention_conf.size_per_head;
     attention_conf.rope_config.base  = 1000000;
 
-    const size_t layer_num = 2;
-    const size_t block_num = 1024;
-    CacheConfig  cache_conf(rtp_llm::KVCacheParam({layer_num,
-                                                   block_num,
-                                                   static_cast<uint>(attention_conf.kv_head_num),
-                                                   static_cast<uint>(attention_conf.size_per_head),
-                                                   static_cast<uint>(attention_conf.tokens_per_block),
-                                                   getTensorType<TestType>()}));
+    const size_t layer_num  = 2;
+    const size_t block_num  = 1024;
+    auto         cache_conf = makeMhaCacheConfig(static_cast<uint>(layer_num),
+                                         static_cast<uint>(block_num),
+                                         static_cast<uint>(attention_conf.kv_head_num),
+                                         static_cast<uint>(attention_conf.size_per_head),
+                                         static_cast<uint>(attention_conf.tokens_per_block),
+                                         getTensorType<TestType>());
     testAttentionLayer(cache_conf, attention_conf, {3}, {});
 }
 
