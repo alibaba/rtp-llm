@@ -165,6 +165,8 @@ void GptInitParameter::showDebugInfo() const {
         << misc_config.to_string() << "\n"
         << "========== ArpcConfig ==========\n"
         << arpc_config.to_string() << "\n"
+        << "========== GrpcConfig ==========\n"
+        << grpc_config.to_string() << "\n"
         << "========== FfnDisAggregateConfig ==========\n"
         << ffn_disaggregate_config.to_string() << "\n";
     RTP_LLM_LOG_INFO(oss.str());

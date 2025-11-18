@@ -110,6 +110,7 @@ cdll.LoadLibrary(sysconfig.get_config_var("LIBDIR") + "/libpython3.10.so")
 try:
     from libth_transformer_config import (
         ArpcConfig,
+        GrpcConfig,
         BatchDecodeSchedulerConfig,
         CacheStoreConfig,
         ConcurrencyConfig,
@@ -181,10 +182,11 @@ try:
     from libth_transformer import EngineScheduleInfo, KVCacheInfo
     from libth_transformer import MultimodalInput as MultimodalInputCpp
     from libth_transformer import RtpEmbeddingOp, RtpLLMOp, WorkerStatusInfo
+    from libth_transformer import EmbeddingCppOutput
 
     libth_transformer_imported = True
 except BaseException as e:
-    MultimodalInputCpp = EngineScheduleInfo = KVCacheInfo = WorkerStatusInfo = (
+    MultimodalInputCpp = EngineScheduleInfo = KVCacheInfo = WorkerStatusInfo = EmbeddingCppOutput = (
         EmptyClass
     )
     RtpEmbeddingOp = RtpLLMOp = EmptyClass

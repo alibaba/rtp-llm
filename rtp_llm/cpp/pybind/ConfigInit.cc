@@ -61,6 +61,18 @@ void register_arpc_config(pybind11::module& m) {
         .def_readwrite("ioThreadNum", &ArpcConfig::ioThreadNum);
 }
 
+void register_grpc_config(pybind11::module& m) {
+    pybind11::class_<GrpcConfig>(m, "GrpcConfig")
+        .def(pybind11::init<>())  // Default constructor
+        .def(pybind11::init<const std::string&>(),
+             pybind11::arg("json_str"))  // JSON string constructor
+        .def("to_string", &GrpcConfig::to_string)
+        .def("update_from_env", &GrpcConfig::update_from_env_for_test)
+        .def("from_json", &GrpcConfig::from_json, "Initialize from JSON string")
+        .def("get_client_config", &GrpcConfig::get_client_config)
+        .def("get_server_config", &GrpcConfig::get_server_config);
+}
+
 void register_ffn_disaggregate_config(pybind11::module& m) {
     pybind11::class_<FfnDisAggregateConfig>(m, "FfnDisAggregateConfig")
         .def(pybind11::init<bool, int, int, int, int, bool>(),
@@ -667,6 +679,7 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(dp_tp_nccl_port, dp_tp_nccl_port_)                                                                    \
     DEF_PROPERTY(ffn_tp_nccl_port, ffn_tp_nccl_port_)                                                                  \
     DEF_PROPERTY(model_rpc_port, model_rpc_port_)                                                                      \
+    DEF_PROPERTY(embedding_rpc_port, embedding_rpc_port_)                                                              \
     DEF_PROPERTY(http_port, http_port_)                                                                                \
     DEF_PROPERTY(tp_size, tp_size_)                                                                                    \
     DEF_PROPERTY(tp_rank, tp_rank_)                                                                                    \
@@ -775,6 +788,7 @@ void registerGptInitParameter(py::module m) {
         .def_readwrite("fifo_scheduler_config", &GptInitParameter::fifo_scheduler_config)
         .def_readwrite("misc_config", &GptInitParameter::misc_config)
         .def_readwrite("arpc_config", &GptInitParameter::arpc_config)
+        .def_readwrite("grpc_config", &GptInitParameter::grpc_config)
         .def_readwrite("ffn_disaggregate_config", &GptInitParameter::ffn_disaggregate_config) REGISTER_PROPERTYS;
 }
 
@@ -797,6 +811,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     register_fifo_scheduler_config(m);
     register_misc_config(m);
     register_arpc_config(m);
+    register_grpc_config(m);
     registerFMHAType(m);
     register_ffn_disaggregate_config(m);
     registerGptInitParameter(m);

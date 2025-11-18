@@ -1,9 +1,11 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "autil/EnvUtil.h"
+#include <map>
 #include <sstream>
 #include <algorithm>
 #include <string>
 #include <cctype>
+#include <regex>
 
 namespace rtp_llm {
 
@@ -427,6 +429,85 @@ std::string ArpcConfig::to_string() const {
         << "queueNum: " << queueNum << "\n"
         << "ioThreadNum: " << ioThreadNum;
     return oss.str();
+}
+
+GrpcConfig::GrpcConfig(const std::string& json_str) {
+    from_json(json_str);
+}
+
+std::string GrpcConfig::to_string() const {
+    std::ostringstream oss;
+
+    // Output client config
+    oss << "Client Config:\n";
+    for (auto it = client_config.begin(); it != client_config.end(); ++it) {
+        oss << "  " << it->first << ": " << it->second << "\n";
+    }
+
+    // Output server config
+    oss << "Server Config:\n";
+    for (auto it = server_config.begin(); it != server_config.end(); ++it) {
+        oss << "  " << it->first << ": " << it->second << "\n";
+    }
+
+    return oss.str();
+}
+
+void GrpcConfig::update_from_env_for_test() {
+    // Read JSON configuration from environment variable with new 2-level structure
+    std::string grpc_config_json = autil::EnvUtil::getEnv(
+        "GRPC_CONFIG_JSON",
+        "{\"client_config\": {\"grpc.max_receive_message_length\": 1073741824, \"grpc.max_metadata_size\": 1073741824}, \"server_config\": {\"grpc.max_concurrent_streams\": 100000, \"grpc.max_connection_idle_ms\": 600000, \"grpc.http2.min_recv_ping_interval_without_data_ms\": 1000, \"grpc.http2.max_ping_strikes\": 1000}}");
+    if (!grpc_config_json.empty()) {
+        from_json(grpc_config_json);
+    }
+}
+
+void GrpcConfig::from_json(const std::string& json_str) {
+    if (json_str.empty()) {
+        return;
+    }
+
+    // Clear existing configs
+    client_config.clear();
+    server_config.clear();
+
+    // Parse 2-level JSON structure
+    // Expected format: {"client_config": {"key1": value1, ...}, "server_config": {"key2": value2, ...}}
+
+    // Find client_config section
+    std::regex  client_section_pattern("\"client_config\"\\s*:\\s*\\{([^}]+)\\}");
+    std::smatch client_match;
+    if (std::regex_search(json_str, client_match, client_section_pattern)) {
+        std::string          client_section = client_match[1].str();
+        std::regex           key_value_pattern("\"([^\"]+)\"\\s*:\\s*(\\d+)");
+        std::sregex_iterator iter(client_section.begin(), client_section.end(), key_value_pattern);
+        std::sregex_iterator end;
+
+        while (iter != end) {
+            std::string key    = (*iter)[1].str();
+            int         value  = std::stoi((*iter)[2].str());
+            client_config[key] = value;
+            ++iter;
+        }
+    }
+
+    // Find server_config section
+    std::regex  server_section_pattern("\"server_config\"\\s*:\\s*\\{([^}]+)\\}");
+    std::smatch server_match;
+    if (std::regex_search(json_str, server_match, server_section_pattern)) {
+        std::string          server_section = server_match[1].str();
+        std::regex           key_value_pattern("\"([^\"]+)\"\\s*:\\s*(\\d+)");
+        std::sregex_iterator iter(server_section.begin(), server_section.end(), key_value_pattern);
+        std::sregex_iterator end;
+
+        while (iter != end) {
+            std::string key    = (*iter)[1].str();
+            int         value  = std::stoi((*iter)[2].str());
+            server_config[key] = value;
+            ++iter;
+        }
+    }
 }
 
 // FfnDisAggregateConfig

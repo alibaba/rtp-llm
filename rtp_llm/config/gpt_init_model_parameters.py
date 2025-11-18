@@ -46,6 +46,7 @@ from rtp_llm.ops import (
     FIFOSchedulerConfig,
     FMHAConfig,
     GptInitParameter,
+    GrpcConfig,
     HWKernelConfig,
     KVCacheConfig,
     MiscellaneousConfig,
@@ -304,6 +305,7 @@ class GptInitModelParameters:
     mm_sep_tokens: list[list[int]]
     model_name: str
     model_rpc_port: int
+    embedding_rpc_port: int
     moe_inter_padding_size: int
     moe_k: int
     moe_layer_index: list[int]
@@ -394,6 +396,7 @@ class GptInitModelParameters:
     kv_cache_config: KVCacheConfig
     misc_config: MiscellaneousConfig
     arpc_config: ArpcConfig
+    grpc_config: GrpcConfig
     model_specific_config: ModelSpecificConfig
     moe_config: MoeConfig
     parallelism_distributed_config: ParallelismDistributedConfig
@@ -445,6 +448,7 @@ class GptInitModelParameters:
         self.th_nccl_port = g_master_info.th_nccl_port
         self.ffn_tp_nccl_port = g_master_info.ffn_tp_nccl_port
         self.model_rpc_port = g_worker_info.rpc_server_port
+        self.embedding_rpc_port = g_worker_info.embedding_rpc_server_port
         self.http_port = g_worker_info.http_port
         self.cache_store_listen_port = g_worker_info.cache_store_listen_port
         self.cache_store_connect_port = g_worker_info.cache_store_connect_port
@@ -997,6 +1001,13 @@ class GptInitModelParameters:
             threadNum=get_env_int("ARPC_THREAD_NUM", 10),
             queueNum=get_env_int("ARPC_QUEUE_NUM", 50),
             ioThreadNum=get_env_int("ARPC_IO_THREAD_NUM", 2),
+        )
+
+        self.gpt_init_params.grpc_config = GrpcConfig(
+            get_env_str(
+                "GRPC_CONFIG_JSON",
+                '{"client_config": {"grpc.max_receive_message_length": 1073741824, "grpc.max_metadata_size": 1073741824}, "server_config": {"grpc.max_concurrent_streams": 100000, "grpc.max_connection_idle_ms": 600000, "grpc.http2.min_recv_ping_interval_without_data_ms": 1000, "grpc.http2.max_ping_strikes": 1000}',
+            )
         )
 
         # PD Seperation

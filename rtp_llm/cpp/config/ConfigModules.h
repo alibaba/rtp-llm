@@ -2,7 +2,7 @@
 #include <string>
 #include <sstream>
 #include <vector>
-
+#include <map>
 namespace rtp_llm {
 
 struct ParallelismDistributedConfig {
@@ -349,6 +349,22 @@ struct ArpcConfig {
     int         queueNum    = 50;
     int         ioThreadNum = 2;
     std::string to_string() const;
+};
+
+struct GrpcConfig {
+    std::map<std::string, int> client_config;
+    std::map<std::string, int> server_config;
+    GrpcConfig() {};
+    GrpcConfig(const std::string& json_str);
+    std::string                to_string() const;
+    void                       update_from_env_for_test();
+    void                       from_json(const std::string& json_str);
+    std::map<std::string, int> get_client_config() const {
+        return client_config;
+    }
+    std::map<std::string, int> get_server_config() const {
+        return server_config;
+    }
 };
 
 std::string to_lower(const std::string& s);
