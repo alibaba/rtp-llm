@@ -38,6 +38,7 @@ from rtp_llm.utils.model_weight import (
     stack_moe_w1,
     transpose,
     transpose_pad,
+    zeros,
 )
 
 
@@ -495,4 +496,85 @@ class Glm4Moe(DeepSeekV2):
         return Glm4MoeWeight
 
 
+class Glm4MoeMtpWeight(Glm4MoeWeight):
+
+    def __init__(self, config: GptInitModelParameters, tp_size: int, tp_rank: int):
+        super().__init__(config, tp_size, tp_rank)
+
+    def _get_weight_info(self):
+        layer_weights: List[List[WeightModule]] = []
+        weights = [
+            AtomicWeight(
+                W.embedding,
+                [CkptWeightInfo("model.embed_tokens.weight", identity)],
+                identity,
+            ),
+            AtomicWeight(
+                W.final_ln_gamma,
+                [CkptWeightInfo("model.norm.weight", identity)],
+                identity,
+            ),
+            AtomicWeight(
+                W.lm_head,
+                [CkptWeightInfo("lm_head.weight", identity)],
+                identity,
+            ),
+        ]
+        assert self._num_layers == 1
+        for layer in range(self._num_layers):
+            layer_weights_tmp = self._get_hf_layer_weight_info(layer)
+            layer_weights_tmp.extend(
+                [
+                    AtomicWeight(
+                        W.multi_tokens_predict_final_ln_gamma,
+                        [
+                            CkptWeightInfo(
+                                "model.layers.{i}.shared_head.norm.weight", identity
+                            )
+                        ],
+                        identity,
+                    ),
+                    AtomicWeight(
+                        W.multi_tokens_predict_final_ln_beta,
+                        [],
+                        functools.partial(zeros, shape=[self._hidden_size]),
+                    ),
+                    AtomicWeight(
+                        W.multi_tokens_predict_enorm,
+                        [CkptWeightInfo("model.layers.{i}.enorm.weight", identity)],
+                        identity,
+                    ),
+                    AtomicWeight(
+                        W.multi_tokens_predict_hnorm,
+                        [CkptWeightInfo("model.layers.{i}.hnorm.weight", identity)],
+                        identity,
+                    ),
+                    AtomicWeight(
+                        W.multi_tokens_predict_eh_proj,
+                        [CkptWeightInfo("model.layers.{i}.eh_proj.weight", identity)],
+                        transpose,
+                    ),
+                ]
+            )
+            layer_weights.append(layer_weights_tmp)
+
+        return ModelWeightInfo(layer_weights=layer_weights, weights=weights)
+
+
+class Glm4MoeMtp(Glm4Moe):
+
+    @classmethod
+    def _create_config(cls, ckpt_path: str):
+        config = super()._create_config(ckpt_path)
+        config.moe_layer_index = [i for i in range(config.layer_num)]
+        config.reverse_e_h_norm = True
+        config.is_mtp = True
+        return config
+
+    @staticmethod
+    def get_weight_cls():
+        return Glm4MoeMtpWeight
+
+
 register_model("glm4_moe", Glm4Moe, [], ["Glm4MoeForCausalLM"])
+register_model("glm4_moe-mtp", Glm4MoeMtp, ["Glm4MoeForCausalLMNextN"])
