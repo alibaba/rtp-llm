@@ -3,37 +3,20 @@ from typing import Any, Callable, Optional
 
 import torch
 
-<<<<<<< HEAD:rtp_llm/models_py/modules/cuda/moe/executors/cutlass_moe.py
 import rtp_llm.models_py.modules.common.moe.fused_moe as mm
 import rtp_llm.ops.compute_ops as compute_ops
 from rtp_llm.models_py.modules.factory.fused_moe.quant_config import FusedMoEQuantConfig
 from rtp_llm.models_py.modules.factory.fused_moe.type import ExecutorType
-
-from .util import moe_kernel_quantize_input, moe_permute, moe_unpermute, resize_cache
-=======
-import rtp_llm.models_py.modules.moe.fused_moe as mm
-from rtp_llm.models_py.modules.ep.reorder_utils import moe_permute, moe_unpermute
 from rtp_llm.models_py.modules.fp8_kernel import (
     cutlass_moe_mm_fp8_scaled,
     get_best_config_swap_ab,
-)
-from rtp_llm.models_py.modules.moe import TopKWeightAndReduceDelegate
-from rtp_llm.models_py.modules.moe.utils import (
-    FusedMoEQuantConfig,
-    moe_kernel_quantize_input,
-    resize_cache,
 )
 from rtp_llm.models_py.triton_kernels.common.activation import (
     silu_and_mul,
     silu_mul_fp8_per_token_quant_batched,
 )
 
-from rtp_llm.ops.compute_ops import (  # isort:skip
-    cutlass_moe_mm,
-    get_cutlass_batched_moe_mm_data,
-    get_cutlass_moe_mm_without_permute_info,
-)
->>>>>>> feat: support gemm load config:rtp_llm/models_py/modules/moe/executors/cutlass_moe.py
+from .util import moe_kernel_quantize_input, moe_permute, moe_unpermute, resize_cache
 
 
 def run_cutlass_moe_fp8(
@@ -114,20 +97,11 @@ def run_cutlass_moe_fp8(
         local_topk_ids = topk_ids
 
     topk = local_topk_ids.size(1)
-    actual_M = local_topk_ids.size(0)
     local_E = w1.size(0)
     inv_perm = None
-
-    swap_ab_gemm1 = (
-        get_best_config_swap_ab(local_E, actual_M, 2 * N, K)
-        if use_batched_format
-        else get_best_config_swap_ab(local_E, M, 2 * N, K)
-    )
-    swap_ab_gemm2 = (
-        get_best_config_swap_ab(local_E, actual_M, K, N)
-        if use_batched_format
-        else get_best_config_swap_ab(local_E, M, K, N)
-    )
+    elements_m = topk_ids.numel() * local_E // global_num_experts
+    swap_ab_gemm1 = get_best_config_swap_ab(local_E, elements_m, 2 * N, K)
+    swap_ab_gemm2 = get_best_config_swap_ab(local_E, elements_m, K, N)
 
     if use_batched_format:
         assert expert_num_tokens is not None
@@ -193,13 +167,9 @@ def run_cutlass_moe_fp8(
 
     if not per_act_token and (expert_map is not None or use_batched_format):
         c1.fill_(0)
-<<<<<<< HEAD:rtp_llm/models_py/modules/cuda/moe/executors/cutlass_moe.py
 
-    compute_ops.cutlass_moe_mm(
-=======
     # gemm1
     cutlass_moe_mm_fp8_scaled(
->>>>>>> feat: support gemm load config:rtp_llm/models_py/modules/moe/executors/cutlass_moe.py
         c1,
         a1q,
         w1,
@@ -212,39 +182,8 @@ def run_cutlass_moe_fp8(
         c_strides1,
         per_act_token,
         per_out_ch,
-<<<<<<< HEAD:rtp_llm/models_py/modules/cuda/moe/executors/cutlass_moe.py
-    )
-
-    activation_callable(c2, c1, torch.cuda.current_stream().cuda_stream)
-
-    a2q, a2q_scale = moe_kernel_quantize_input(
-        c2, a2_scale, torch.float8_e4m3fn, per_act_token
-    )
-
-    if expert_map is not None:
-        c3.fill_(0)
-
-    compute_ops.cutlass_moe_mm(
-        c3,
-        a2q,
-        w2,
-        a2q_scale,
-        w2_scale,
-        expert_offsets,
-        problem_sizes2,
-        ab_strides2,
-        ab_strides2,
-        c_strides2,
-        per_act_token,
-        per_out_ch,
-=======
-        actual_M,
-<<<<<<< HEAD:rtp_llm/models_py/modules/cuda/moe/executors/cutlass_moe.py
-        swap_ab,
->>>>>>> feat: support gemm load config:rtp_llm/models_py/modules/moe/executors/cutlass_moe.py
-=======
+        elements_m,
         swap_ab_gemm1,
->>>>>>> fix: split swap_ab for moe gemm1 and gemm2:rtp_llm/models_py/modules/moe/executors/cutlass_moe.py
     )
 
     if use_batched_format:
@@ -264,7 +203,7 @@ def run_cutlass_moe_fp8(
             c_strides2,
             per_act_token,
             per_out_ch,
-            actual_M,
+            elements_m,
             swap_ab_gemm2,
         )
     else:
@@ -287,7 +226,7 @@ def run_cutlass_moe_fp8(
             c_strides2,
             per_act_token,
             per_out_ch,
-            actual_M,
+            elements_m,
             swap_ab_gemm2,
         )
         moe_unpermute(
@@ -464,17 +403,12 @@ class CutlassExpertsFp8(mm.FusedMoeExpertExecutor):
             self.w1,
             self.w2,
             topk_ids,
-<<<<<<< HEAD:rtp_llm/models_py/modules/cuda/moe/executors/cutlass_moe.py
-            compute_ops.silu_and_mul,
-            self.num_experts,
-=======
             silu_and_mul,
-            global_num_experts,
+            self.num_experts,
             self.ab_strides1,
             self.c_strides1,
             self.ab_strides2,
             self.c_strides2,
->>>>>>> feat: support gemm load config:rtp_llm/models_py/modules/moe/executors/cutlass_moe.py
             expert_map,
             self.w1_scale,
             self.w2_scale,
@@ -658,17 +592,12 @@ class CutlassBatchedExpertsFp8(mm.FusedMoeExpertExecutor):
             self.w1,
             self.w2,
             topk_ids,
-<<<<<<< HEAD:rtp_llm/models_py/modules/cuda/moe/executors/cutlass_moe.py
-            compute_ops.silu_and_mul,
-            self.num_experts,
-=======
             silu_and_mul,
-            global_num_experts,
+            self.num_experts,
             self.ab_strides1,
             self.c_strides1,
             self.ab_strides2,
             self.c_strides2,
->>>>>>> feat: support gemm load config:rtp_llm/models_py/modules/moe/executors/cutlass_moe.py
             None,
             self.w1_scale,
             self.w2_scale,

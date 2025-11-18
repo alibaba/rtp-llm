@@ -8,7 +8,6 @@ import torch
 
 @functools.lru_cache
 def get_cutlass_groupgemm_best_config(E: int, N: int, K: int):
-    # NVIDIA H20/NVIDIA L20X
     device_name = torch.cuda.get_device_name().replace("-", "_").replace(" ", "_")
     op_name = "cutlass_groupgemm"
     json_file_name = f"E={E},N={N},K={K},device_name={device_name}.json"
@@ -19,7 +18,7 @@ def get_cutlass_groupgemm_best_config(E: int, N: int, K: int):
     if os.path.exists(config_file_path):
         with open(config_file_path) as f:
             logging.info(
-                "Using default configuration from %s for cutlascs fp8 groupgemm.",
+                "Using default configuration from %s for cutlass fp8 groupgemm.",
                 config_file_path,
             )
             tuned_config = json.load(f)
