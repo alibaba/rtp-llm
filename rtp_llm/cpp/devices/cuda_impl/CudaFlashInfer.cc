@@ -151,6 +151,18 @@ void FlashInferAttnParams::fillParams(torch::Tensor sequence_lengths,
                    seq_size_per_block);
     refreshFlashInferBuf(
         dynamic_cast<CudaDevice*>(DeviceFactory::getDefaultDevice()), batch_size, input_lengths.size(0));
+
+    auto cuda_device = dynamic_cast<CudaDevice*>(DeviceFactory::getDefaultDevice());
+    genPlan(batch_size,
+            1,
+            attn_configs.head_num,
+            attn_configs.kv_head_num,
+            attn_configs.size_per_head,
+            attn_configs.tokens_per_block,
+            attn_configs.kv_lora_rank,
+            attn_configs.use_mla,
+            reinterpret_cast<int64_t>(cuda_device->getStream()),
+            (!is_prefill && enable_cuda_graph));  // cuda_stream
 }
 
 void FlashInferAttnParams::fillFlashInfer(const BufferPtr& prefix_lengths_host,
@@ -426,10 +438,13 @@ ParamsPtr FlashInferAttnParams::prepare(rtp_llm::DeviceBase*             device,
         input_token_num = input_lengths_host->shape()[0];
     }
 
-    auto      params = FlashInferAttnParams::create(cuda_device,
+    auto params          = FlashInferAttnParams::create(cuda_device,
                                                max(MIN_CACHE_BATCH_SIZE, batch_size),
                                                max(MIN_CACHE_INPUT_TOKEN_NUM, input_token_num),
                                                MIN_CACHE_PAGE_NUM);
+    params->attn_configs = attn_configs;
+    params->is_prefill   = is_prefill;
+
     ParamsPtr ret(params, recycle);
 
     if (kv_cache_block_id_device) {
@@ -453,7 +468,8 @@ ParamsPtr FlashInferAttnParams::prepare(rtp_llm::DeviceBase*             device,
 
     // Todo(tuowu): flashinfer: do not use partition-kv kernel for short sequence, when not using CUDAGraph .
     // check how short as `short sequence`.
-    // bool enable_cuda_graph = device->initParams().hw_kernel_config.enable_cuda_graph;
+    bool enable_cuda_graph    = device->initParams().hw_kernel_config.enable_cuda_graph;
+    params->enable_cuda_graph = enable_cuda_graph;
     params->genPlan(batch_size,
                     q_length,
                     local_head_num,
@@ -463,7 +479,7 @@ ParamsPtr FlashInferAttnParams::prepare(rtp_llm::DeviceBase*             device,
                     attn_configs.kv_lora_rank,
                     attn_configs.use_mla,
                     reinterpret_cast<int64_t>(cuda_device->getStream()),
-                    false);  // cuda_stream
+                    (!is_prefill && enable_cuda_graph));  // cuda_stream
 
     return ret;
 }
