@@ -73,7 +73,6 @@ void GemmOp::forward_with_input_scale(torch::Tensor input,
     auto a_qptr = make_qbuffer(a_buf, a_scale_buf);
     auto b_qptr = make_qbuffer(b_buf, b_scale_buf);
     BufferPtr gemm_result;
-
     if (bias != std::nullopt){
         torch::Tensor bias_t = bias.value().to(output.dtype()).contiguous();
         const int64_t n = output.size(-1);
@@ -85,7 +84,25 @@ void GemmOp::forward_with_input_scale(torch::Tensor input,
         auto c_buf     = torchTensor2Buffer(bias_t);
         gemm_result = device->gemm({*a_qptr, *b_qptr, *c_buf});
     } else {
-        gemm_result = device->gemm({*a_qptr, *b_qptr});
+        auto wtype = weight.scalar_type(); 
+        // std::cout << "weight.scalar_type() : " << wtype << std::endl;
+        if (wtype == c10::ScalarType::Float8_e4m3fnuz) {
+            // FP8 PerToken: force gemm output D_type
+            gemm_result = device->gemm({
+                *a_qptr,
+                *b_qptr,
+                std::nullopt,
+                nullptr,
+                DataType::TYPE_INVALID,
+                DataType::TYPE_FP16
+            });
+        } else {
+            // INT8 PerTensor
+            gemm_result = device->gemm({
+                *a_qptr,
+                *b_qptr
+            });
+        }
     }
     device->copy({*out_buf, *gemm_result});
 }
