@@ -147,22 +147,17 @@ jobs:
     needs: [ unit_tests, e2e_tests ]
     if: ${{ always() && !cancelled() }}
     steps:
-    - name: Download A logs
+    - name: Download unit_tests logs
       uses: actions/download-artifact@v4
       with:
         name: logs_unit_tests
         path: logs_unit_tests
 
-    - name: Download B logs
+    - name: Download e2e_tests logs
       uses: actions/download-artifact@v4
       with:
         name: logs_e2e_tests
         path: logs_e2e_tests
-
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: "3.10"
 
     - name: Check out rocm_benchmark source code
       uses: actions/checkout@v3
@@ -174,9 +169,31 @@ jobs:
     - name: summarize results
       run: |
         mkdir logs
-        cp logs_unit_tests/* logs/
-        cp logs_e2e_tests/* logs/
-        bash ${{ github.workspace }}/rocm_benchmark/rtp_llm_benchmark/ci/summarize_results.sh ${{ github.workspace }}/logs/
+        cp ${{ github.workspace }}/logs_unit_tests/* ${{ github.workspace }}/logs/
+        cp ${{ github.workspace }}/logs_e2e_tests/* ${{ github.workspace }}/logs/
+        docker run --rm \
+          --privileged \
+          --cap-add=SYS_PTRACE \
+          --security-opt seccomp=unconfined \
+          --ulimit nofile=655350:655350 \
+          --ulimit memlock=-1 \
+          --cpu-shares=15360 \
+          --cpu-quota=9600000 \
+          --cpu-period=100000 \
+          --memory=500000m \
+          --network=host \
+          --device=/dev/kfd \
+          --device=/dev/dri \
+          --ipc=host \
+          --group-add video \
+          --group-add render \
+          --shm-size=64g \
+          -v /mnt/raid0:/mnt/raid0 \
+          -v ${PWD}:${PWD} \
+          -w ${{ github.workspace }} \
+          -e IMAGE_NAME=${IMAGE#*:} \
+          $IMAGE \
+          ${{ github.workspace }}/rocm_benchmark/rtp_llm_benchmark/ci/summarize_results.sh ${{ github.workspace }}/logs/
 
     - name: Check out rtp llm gh-pages
       if: always()
