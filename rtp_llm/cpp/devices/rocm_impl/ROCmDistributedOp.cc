@@ -99,6 +99,23 @@ AllReduceOutput ROCmDevice::allReduce(const AllReduceParams& params) {
     const auto nccl_op        = static_cast<ncclRedOp_t>(params.op);
     const auto nccl_data_type = getNcclDataType(buffer->type());
 
+    bool use_quick_ar =
+        !params.dest
+        && (params.mode == ParallelMode::TP
+            || (params.mode == ParallelMode::FFN_TP && tp_nccl_param_ == ffn_tp_nccl_param_))
+        && quick_allreduce_comm_ && nccl_op == ncclSum
+        && quick_allreduce_comm_->checkAllReduceAvailable(buffer->size(), buffer->type(), nccl_param.world_size_);
+
+    // if quick allreduce fails, try custom allreduce then
+    if (use_quick_ar) {
+        auto quick_ar_res_buf =
+            allocateBuffer({buffer->type(), buffer->shape(), AllocationType::DEVICE}, {"quick_ar_buf"});
+        torch::Tensor input_tensor  = Buffer2torchTensor(*buffer, false);
+        torch::Tensor output_tensor = Buffer2torchTensor(*quick_ar_res_buf, false);
+        quick_allreduce_comm_->allReduce(input_tensor, output_tensor);
+        return AllReduceOutput{quick_ar_res_buf};
+    }
+
     bool use_custom_ar =
         !params.dest
         && (params.mode == ParallelMode::TP
