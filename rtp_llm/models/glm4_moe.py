@@ -510,11 +510,6 @@ class Glm4MoeMtpWeight(Glm4MoeWeight):
                 identity,
             ),
             AtomicWeight(
-                W.final_ln_gamma,
-                [CkptWeightInfo("model.norm.weight", identity)],
-                identity,
-            ),
-            AtomicWeight(
                 W.lm_head,
                 [CkptWeightInfo("lm_head.weight", identity)],
                 identity,
