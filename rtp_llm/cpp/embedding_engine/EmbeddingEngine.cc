@@ -12,6 +12,7 @@ EmbeddingEngine::EmbeddingEngine(const EngineInitParams& params, py::object hand
     rtp_llm::DeviceFactory::initDevices(params.gpt_init_parameter);
     executor_.reset(new EmbeddingExecutor(params, rtp_llm::DeviceFactory::getDefaultDevice(), handler));
     scheduler_.reset(new EmbeddingScheduler(params_, metrics_reporter_));
+    gen_timeline_ = (autil::EnvUtil::getEnv("GEN_TIMELINE", "False") == "True");
 
     (void)startLoop();
 }
@@ -88,7 +89,7 @@ absl::Status EmbeddingEngine::step() {
         RTP_LLM_LOG_INFO("no query run and sleep");
         return absl::OkStatus();
     }
-    if (autil::EnvUtil::getEnv("GEN_TIMELINE", "False") == "True") {
+    if (gen_timeline_ && nullptr == profiler_) {
         profiler_ = std::make_shared<CudaProfiler>("embedding_profiler_");
         profiler_->start();
     }

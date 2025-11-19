@@ -85,7 +85,6 @@ void embeddingBert(at::Tensor& output,
     const int hidden_size = weight.size(1);
     CHECK_EQ(output.size(0), tokens);
     CHECK_EQ(output.size(1), hidden_size);
-    RTP_LLM_LOG_INFO("start embedding bert in cpp");
     StreamType stream = GET_CURRENT_STREAM();
 
     DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FP16(weight.scalar_type(), c_type, [&] {

@@ -58,6 +58,7 @@ private:
     ResourceContext                     resource_context_;
     kmonitor::MetricsReporterPtr        metrics_reporter_ = nullptr;
     std::shared_ptr<CudaProfiler>       profiler_;
+    bool                                gen_timeline_ = false;
 };
 
 }  // namespace rtp_llm
