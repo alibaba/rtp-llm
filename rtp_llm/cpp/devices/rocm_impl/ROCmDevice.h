@@ -23,6 +23,7 @@
 #include "rtp_llm/cpp/rocm/rocmCKW8A8GeluGemmWrapper.h"
 #include "rtp_llm/cpp/kernels/kv_cache/kv_cache_utils.h"
 #include "rtp_llm/cpp/rocm/custom_ar/custom_ar_comm.h"
+#include "rtp_llm/cpp/rocm/custom_ar/quick_ar_comm.h"
 #ifdef ENABLE_DEEP_EP
 #include "rtp_llm/cpp/devices/rocm_impl/DeepEPBuffer.h"
 #endif
@@ -341,6 +342,9 @@ private:
 
     // for custom allreduce use
     std::unique_ptr<CustomAllReduceComm> custom_allreduce_comm_ = nullptr;
+
+    // for quick allreduce use
+    std::unique_ptr<QuickAllReduceComm> quick_allreduce_comm_ = nullptr;
 
     // BufferPtr will be error when multi stream, tmp hold
     // std::vector<BufferPtr> overlap_hold_buffers_;

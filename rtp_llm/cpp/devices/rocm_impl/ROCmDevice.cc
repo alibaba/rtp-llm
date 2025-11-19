@@ -64,13 +64,15 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
                       dp_tp_nccl_param_);
     }
 
-    // Initialize custom all reduce communicator
+    // Initialize custom/quick all reduce communicator
     // Note: custom all reduce communicator will allocate cuda mem through cudaMalloc, it must be called before
     // allocator init
     if (tp_nccl_param_.world_size_ > 1) {
         auto&               nccl_param = tp_nccl_param_;
         std::vector<size_t> tp_ranks   = fcNcclGatherRanks(nccl_param, stream_);
+        // Initialization may fail, and the variable will still be nullptr. When allreduce is called, it will fall back to the normal allreduce.
         custom_allreduce_comm_         = initCustomAllReduceComm(nccl_param, tp_ranks, stream_);
+        quick_allreduce_comm_          = initQuickAllReduceComm(nccl_param, tp_ranks, stream_);
     }
 
     auto allocator_ptr     = new Allocator<AllocatorType::ROCM>();
