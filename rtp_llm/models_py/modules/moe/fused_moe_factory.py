@@ -196,6 +196,7 @@ class FusedMoeFactory(object):
             return FusedMoe(router, experts, expert_num=config.expert_num)
 
     @staticmethod
+    @torch.inference_mode()
     def create_fused_moe(
         config: GptInitModelParameters, weights: Dict[str, torch.Tensor]
     ) -> FusedMoe:

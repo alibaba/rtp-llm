@@ -58,12 +58,18 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
         # check fp8 block quantization
         self._use_fp8 = True
         if is_deep_gemm_e8m0_used():
-            self._w1, self._w1_scale = requant_weight_ue8m0(
+            w1_tmp, self._w1_scale = requant_weight_ue8m0(
                 self._w1, self._w1_scale, self.DEEPGEMM_BLOCK_SHAPE
             )
-            self._w2, self._w2_scale = requant_weight_ue8m0(
+            self._w1.copy_(w1_tmp)
+            self._weights[W.moe_s1] = self._w1_scale
+            del w1_tmp
+            w2_tmp, self._w2_scale = requant_weight_ue8m0(
                 self._w2, self._w2_scale, self.DEEPGEMM_BLOCK_SHAPE
             )
+            self._w2.copy_(w2_tmp)
+            self._weights[W.moe_s2] = self._w2_scale
+            del w2_tmp
         if self.quant_config.is_quantized:
             if (
                 self.quant_config.quant_dtype == torch.float8_e4m3fn
@@ -171,24 +177,6 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
                 M,
                 disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
             )
-            down_input = torch.empty(
-                (
-                    workspace.shape[0],
-                    workspace.shape[1],
-                    workspace.shape[2] // 2,
-                ),
-                device=workspace.device,
-                dtype=torch.float8_e4m3fn,
-            )
-            down_input_scale = torch.empty(
-                (
-                    workspace.shape[0],
-                    workspace.shape[1],
-                    workspace.shape[2] // 2 // self.DEEPGEMM_BLOCK_SHAPE[1],
-                ),
-                device=workspace.device,
-                dtype=torch.float32,
-            )
             # 老的和新的精度对不齐，新的精度感觉不对，先用老的吧
             down_input, down_input_scale = silu_mul_fp8_quant_deep_gemm_masked(
                 workspace,
@@ -197,6 +185,25 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
                 use_ue8m0=is_deep_gemm_e8m0_used(),
                 eps=1e-10,
             )
+            # down_input = torch.empty(
+            #     (
+            #         workspace.shape[0],
+            #         workspace.shape[1],
+            #         workspace.shape[2] // 2,
+            #     ),
+            #     device=workspace.device,
+            #     dtype=torch.float8_e4m3fn,
+            # )
+            # down_input_scale = torch.empty(
+            #     (
+            #         workspace.shape[0],
+            #         workspace.shape[1],
+            #         workspace.shape[2] // 2 // self.DEEPGEMM_BLOCK_SHAPE[1],
+            #     ),
+            #     device=workspace.device,
+            #     dtype=torch.float32,
+            # )
+
             # silu_and_mul_masked_post_quant_fwd(
             #     workspace,
             #     down_input,
