@@ -207,7 +207,7 @@ private:
         }
         return lbs;
     }
-    std::shared_ptr<KVCacheResourceV1> makeCacheResource(const std::vector<size_t>&           cache_keys,
+    std::shared_ptr<KVCacheResourceV1> makeCacheResource(const std::vector<int64_t>&          cache_keys,
                                                          const std::vector<std::vector<int>>& per_layer_block_indices,
                                                          size_t                               reuse_len = 0) const {
         auto res             = std::make_shared<KVCacheResourceV1>();
@@ -216,7 +216,7 @@ private:
         res->reuse_len       = reuse_len;
         return res;
     }
-    void putItemsToCache(const std::vector<size_t>& keys, size_t mem_block_size, int start_block_idx = 1) const {
+    void putItemsToCache(const std::vector<int64_t>& keys, size_t mem_block_size, int start_block_idx = 1) const {
         for (size_t i = 0; i < keys.size(); ++i) {
             MemoryBlockCache::CacheItem item;
             item.cache_key   = keys[i];
@@ -295,7 +295,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_ReturnNull_OnInvalidInputs) {
 
 TEST_F(KVCacheMemoryConnectorTest, asyncRead_AlreadyDoneTrue_WhenReuseLenGEKeys) {
     const size_t                  N = 3;
-    std::vector<size_t>           cache_keys{10001, 10002, 10003};
+    std::vector<int64_t>          cache_keys{10001, 10002, 10003};
     std::vector<std::vector<int>> lbs_vec{{1, 1, 1}, {2, 2, 2}};
     auto                          res = makeCacheResource(cache_keys, lbs_vec, N);
 
@@ -308,7 +308,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_AlreadyDoneTrue_WhenReuseLenGEKeys)
 
 TEST_F(KVCacheMemoryConnectorTest, asyncRead_ReturnNull_WhenPlanEmpty) {
     // 不命中任何 key，copy plan 为空，返回 nullptr
-    std::vector<size_t>           cache_keys{20001, 20002};
+    std::vector<int64_t>          cache_keys{20001, 20002};
     std::vector<std::vector<int>> lbs_vec{{3, 3}, {4, 4}};
     auto                          res = makeCacheResource(cache_keys, lbs_vec);
 
@@ -319,8 +319,8 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_ReturnNull_WhenPlanEmpty) {
 
 TEST_F(KVCacheMemoryConnectorTest, asyncRead_ReturnNull_WhenSendCopyPlanFails_NoWorkers) {
     // 有命中项，但没有 worker，发送失败应返回 nullptr
-    std::vector<size_t> cache_keys{30001, 30002};
-    const size_t        mem_size = 7777;
+    std::vector<int64_t> cache_keys{30001, 30002};
+    const size_t         mem_size = 7777;
     putItemsToCache(cache_keys, mem_size, /*start_block_idx=*/50);
     std::vector<std::vector<int>> lbs_vec{{10, 11}, {20, 21}};
     auto                          res = makeCacheResource(cache_keys, lbs_vec);
@@ -332,8 +332,8 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_ReturnNull_WhenSendCopyPlanFails_No
 
 TEST_F(KVCacheMemoryConnectorTest, asyncRead_Success_IncrementsReuseLen_ByMatchedPrefix) {
     // 初始 reuse_len=1，后续两个 key 均命中 => mem_match_len=2，最终 reuse_len=3
-    std::vector<size_t> cache_keys{40001, 40002, 40003};
-    const size_t        mem_size = 2048;
+    std::vector<int64_t> cache_keys{40001, 40002, 40003};
+    const size_t         mem_size = 2048;
     putItemsToCache({40002, 40003}, mem_size, /*start_block_idx=*/60);
     std::vector<std::vector<int>> lbs_vec{
         {101, 102, 103},  // layer0
@@ -364,8 +364,8 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_FailureOnMemResponse_NoReuseLenIncr
     ASSERT_TRUE(broadcast_manager->init());
     connector_->tp_broadcast_manager_ = broadcast_manager;
 
-    std::vector<size_t> cache_keys{50001, 50002};
-    const size_t        mem_size = 8888;
+    std::vector<int64_t> cache_keys{50001, 50002};
+    const size_t         mem_size = 8888;
     putItemsToCache(cache_keys, mem_size, /*start_block_idx=*/70);
     std::vector<std::vector<int>> lbs_vec{{11, 12}, {21, 22}};
     auto                          res = makeCacheResource(cache_keys, lbs_vec);
@@ -402,8 +402,8 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_FailureOnRpcStatus_NoReuseLenIncrem
     ASSERT_TRUE(broadcast_manager->init());
     connector_->tp_broadcast_manager_ = broadcast_manager;
 
-    std::vector<size_t> cache_keys{60001, 60002};
-    const size_t        mem_size = 9999;
+    std::vector<int64_t> cache_keys{60001, 60002};
+    const size_t         mem_size = 9999;
     putItemsToCache(cache_keys, mem_size, /*start_block_idx=*/80);
     std::vector<std::vector<int>> lbs_vec{{31, 32}, {41, 42}};
     auto                          res = makeCacheResource(cache_keys, lbs_vec);
@@ -424,7 +424,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_FailureOnRpcStatus_NoReuseLenIncrem
 
 TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForRead_ReturnEmpty_WhenNoMatch) {
     // block_cache_ 无命中，返回空
-    std::vector<size_t>           cache_keys{1, 2};
+    std::vector<int64_t>          cache_keys{1, 2};
     std::vector<std::vector<int>> lbs_vec{{10, 11}, {20, 21}};
     auto                          lbs  = makeLayerBlockIds(lbs_vec);
     auto                          plan = connector_->buildCopyPlanForRead(cache_keys, lbs, /*gpu_reuse_len=*/0);
@@ -433,7 +433,7 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForRead_ReturnEmpty_WhenNoMatch)
 
 TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForRead_PrefixMatch_StopsOnFirstMiss) {
     // 仅前缀两个 key 命中，第三个未命中，应在未命中处停止
-    std::vector<size_t> cache_keys{10, 11, 12};
+    std::vector<int64_t> cache_keys{10, 11, 12};
     // 预置命中项（mem_block_size 使用任意常量）
     const size_t mem_size = 1234;
     putItemsToCache({10, 11}, mem_size, /*start_block_idx=*/5);
@@ -473,8 +473,8 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForRead_PrefixMatch_StopsOnFirst
 
 TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForRead_RespectsGpuReuseLen) {
     // 三个 key 均命中，但 gpu_reuse_len=2，仅返回最后一个
-    std::vector<size_t> cache_keys{30, 31, 32};
-    const size_t        mem_size = 4096;
+    std::vector<int64_t> cache_keys{30, 31, 32};
+    const size_t         mem_size = 4096;
     putItemsToCache(cache_keys, mem_size, /*start_block_idx=*/8);
     ASSERT_TRUE(connector_->block_cache_->contains(30));
     ASSERT_TRUE(connector_->block_cache_->contains(31));
@@ -497,8 +497,8 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForRead_RespectsGpuReuseLen) {
 
 TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForRead_SkipsNullLayerBlocks) {
     // 命中一个 key，其中一层为 NULL_BLOCK_IDX，应被过滤
-    std::vector<size_t> cache_keys{40};
-    const size_t        mem_size = 2048;
+    std::vector<int64_t> cache_keys{40};
+    const size_t         mem_size = 2048;
     putItemsToCache(cache_keys, mem_size, /*start_block_idx=*/20);
     ASSERT_TRUE(connector_->block_cache_->contains(40));
 
@@ -519,8 +519,8 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForRead_SkipsNullLayerBlocks) {
 
 TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForRead_AllLayersEmpty_StillReturnsMemInfo) {
     // 无层（layer_num=0），命中一个 key，仍应返回包含 mem 信息的条目且 gpu_layer_blocks 为空
-    std::vector<size_t> cache_keys{50};
-    const size_t        mem_size = 8192;
+    std::vector<int64_t> cache_keys{50};
+    const size_t         mem_size = 8192;
     putItemsToCache(cache_keys, mem_size, /*start_block_idx=*/30);
     ASSERT_TRUE(connector_->block_cache_->contains(50));
 
@@ -535,8 +535,8 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForRead_AllLayersEmpty_StillRetu
 
 TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForRead_UsesMemBlockSizeFromCache) {
     // 验证 mem_block_size 与 cache 中 put 的值一致，而非 GPU buffer 大小
-    std::vector<size_t> cache_keys{60};
-    const size_t        custom_mem_size = 123456;
+    std::vector<int64_t> cache_keys{60};
+    const size_t         custom_mem_size = 123456;
     putItemsToCache(cache_keys, custom_mem_size, /*start_block_idx=*/99);
     ASSERT_TRUE(connector_->block_cache_->contains(60));
 
@@ -574,7 +574,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnAlreadyDoneTrue_WhenAllKeysI
     // 两个 key 均已在内存缓存中
     const int                     layer0        = 0;
     const int                     gpu_block_idx = 1;
-    std::vector<size_t>           cache_keys{10, 11};
+    std::vector<int64_t>          cache_keys{10, 11};
     std::vector<std::vector<int>> lbs_vec{{gpu_block_idx, gpu_block_idx}};
     auto                          res = makeCacheResource(cache_keys, lbs_vec);
 
@@ -607,7 +607,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnAlreadyDoneTrue_WhenAllKeysI
 
 TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnNull_WhenBuildPlanEmpty) {
     // 所有 layer 对于第一个未命中 key 的 blockIdx 都为 NULL，导致 plan 为空
-    std::vector<size_t> cache_keys{100, 101};
+    std::vector<int64_t> cache_keys{100, 101};
     // 2 层，全部 NULL
     std::vector<std::vector<int>> lbs_vec{{NULL_BLOCK_IDX, NULL_BLOCK_IDX}, {NULL_BLOCK_IDX, NULL_BLOCK_IDX}};
     auto                          res = makeCacheResource(cache_keys, lbs_vec);
@@ -620,7 +620,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnNull_WhenSendCopyPlanFails_N
     // 合法的 plan，但由于没有 worker，sendCopyPlan 返回空并触发回滚
     const int                     layer0        = 0;
     const int                     gpu_block_idx = 2;
-    std::vector<size_t>           cache_keys{1, 2};
+    std::vector<int64_t>          cache_keys{1, 2};
     std::vector<std::vector<int>> lbs_vec{{gpu_block_idx, gpu_block_idx}};
     auto                          res = makeCacheResource(cache_keys, lbs_vec);
 
@@ -644,7 +644,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_Success_AddsToBlockCache_AndKeepsM
     const int                     layer0        = 0;
     const int                     gpu_block_idx = 2;
     const size_t                  N             = 2;
-    std::vector<size_t>           cache_keys{200, 201};
+    std::vector<int64_t>          cache_keys{200, 201};
     std::vector<std::vector<int>> lbs_vec{{gpu_block_idx, gpu_block_idx}};
     auto                          res = makeCacheResource(cache_keys, lbs_vec);
 
@@ -689,7 +689,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_FailureOnMemResponse_FreesAllocate
 
     const int                     layer0        = 0;
     const int                     gpu_block_idx = 1;
-    std::vector<size_t>           cache_keys{301, 302};
+    std::vector<int64_t>          cache_keys{301, 302};
     std::vector<std::vector<int>> lbs_vec{{gpu_block_idx, gpu_block_idx}};
     auto                          res = makeCacheResource(cache_keys, lbs_vec);
 
@@ -720,8 +720,8 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_FailureOnMemResponse_FreesAllocate
 }
 
 TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_ReturnEmpty_WhenMatchLenEqualsSize) {
-    const size_t        N = 3;
-    std::vector<size_t> cache_keys{0, 1, 2};
+    const size_t         N = 3;
+    std::vector<int64_t> cache_keys{0, 1, 2};
     ASSERT_EQ(cache_keys.size(), N);
     // 使用 1 层，索引有效，但 match_len == size，应返回空
     std::vector<std::vector<int>> per_layer_block_indices = {
@@ -733,8 +733,8 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_ReturnEmpty_WhenMatchLe
 }
 
 TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_ReturnPlan_SingleLayer_AllValid) {
-    const size_t        N = 3;
-    std::vector<size_t> cache_keys{100, 101, 102};
+    const size_t         N = 3;
+    std::vector<int64_t> cache_keys{100, 101, 102};
     // 单层，全部有效
     const int                     layer0                  = 0;
     const int                     gpu_block_idx           = 1;
@@ -778,9 +778,9 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_ReturnPlan_SingleLayer_
 }
 
 TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_ReturnPlan_MultiLayer_SomeNull) {
-    const size_t        N = 3;
-    std::vector<size_t> cache_keys{10, 11, 12};
-    const int           layer0 = 0, layer1 = 1;
+    const size_t         N = 3;
+    std::vector<int64_t> cache_keys{10, 11, 12};
+    const int            layer0 = 0, layer1 = 1;
     // layer0 全部有效，layer1 只有中间一个有效
     std::vector<std::vector<int>> per_layer_block_indices = {
         {1, 1, 1},                           // layer0
@@ -825,7 +825,7 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_ReturnPlan_MultiLayer_S
 
 TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_ReturnEmptyAndCleanup_OnInvalidGpuBlocks) {
     // 前两个 key 有效，第三个 key 所有 layer 的 blockIdx 均为 NULL，触发失败并清理之前分配
-    std::vector<size_t> cache_keys{1, 2, 3};
+    std::vector<int64_t> cache_keys{1, 2, 3};
     // 使用 4 层，提升 block_size 唯一性
     std::vector<std::vector<int>> per_layer_block_indices = {
         {1, 1, NULL_BLOCK_IDX},  // layer0
@@ -856,9 +856,9 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_ReturnEmptyAndCleanup_O
 
 TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_ReturnPartialPlan_OnMallocFailure) {
     // 使用单层，预先占用 pool 使得仅剩 keep_free 个可用块
-    const size_t        keep_free = 2;
-    const size_t        N         = keep_free + 3;  // 使得中途分配失败
-    std::vector<size_t> cache_keys(N);
+    const size_t         keep_free = 2;
+    const size_t         N         = keep_free + 3;  // 使得中途分配失败
+    std::vector<int64_t> cache_keys(N);
     for (size_t i = 0; i < N; ++i) {
         cache_keys[i] = i + 1000;
     }

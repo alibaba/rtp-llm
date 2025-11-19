@@ -41,9 +41,7 @@ private:
     bool                                                                        success_{false};
 };
 
-class KVCacheMemoryConnector final:
-    public KVCacheConnector,
-    public std::enable_shared_from_this<KVCacheMemoryConnector> {
+class KVCacheMemoryConnector: public KVCacheConnector, public std::enable_shared_from_this<KVCacheMemoryConnector> {
 public:
     KVCacheMemoryConnector(const CacheConfig&                       cache_config,
                            const std::shared_ptr<KVCacheAllocator>& allocator,
@@ -63,8 +61,8 @@ public:
         throw std::runtime_error("KVCacheMemoryConnector asyncWriteByLayer is not implemented");
     }
 
-    // 同步拷贝KVCache(单TP)
-    bool copyCache(const MemoryCopyCacheRequestPB& request, MemoryCopyCacheResponsePB& response);
+    // 同步拷贝KVCache(单TP), virtual for test
+    virtual bool copyCache(const MemoryCopyCacheRequestPB& request, MemoryCopyCacheResponsePB& response);
 
 private:
     struct LayerBlock {
@@ -82,12 +80,12 @@ private:
         D2H = 1
     };
 
-    std::vector<CopyInfoPerKey> buildCopyPlanForRead(const std::vector<size_t>& cache_keys,
-                                                     const LayerBlockIds&       layer_block_ids,
-                                                     size_t                     gpu_reuse_len) const;
-    std::vector<CopyInfoPerKey> buildCopyPlanForWrite(const std::vector<size_t>& cache_keys,
-                                                      const LayerBlockIds&       layer_block_ids,
-                                                      size_t                     match_len);
+    std::vector<CopyInfoPerKey> buildCopyPlanForRead(const std::vector<int64_t>& cache_keys,
+                                                     const LayerBlockIds&        layer_block_ids,
+                                                     size_t                      gpu_reuse_len) const;
+    std::vector<CopyInfoPerKey> buildCopyPlanForWrite(const std::vector<int64_t>& cache_keys,
+                                                      const LayerBlockIds&        layer_block_ids,
+                                                      size_t                      match_len);
     std::shared_ptr<TPBroadcastResult<CopyCacheRequestPB, CopyCacheResponsePB>>
          sendCopyPlan(const std::vector<CopyInfoPerKey>& copy_infos, CopyDirection direction) const;
     bool prepareCopyBuffers(const std::vector<LayerBlock>& gpu_layer_blocks,

@@ -116,7 +116,7 @@ KVCacheMemoryConnector::asyncRead(const std::shared_ptr<KVCacheResourceV1>& reso
 }
 
 std::vector<KVCacheMemoryConnector::CopyInfoPerKey> KVCacheMemoryConnector::buildCopyPlanForRead(
-    const std::vector<size_t>& cache_keys, const LayerBlockIds& layer_block_ids, size_t gpu_reuse_len) const {
+    const std::vector<int64_t>& cache_keys, const LayerBlockIds& layer_block_ids, size_t gpu_reuse_len) const {
     std::vector<CopyInfoPerKey> copy_infos;
     const size_t                layer_num = layer_block_ids.size();
 
@@ -205,7 +205,7 @@ KVCacheMemoryConnector::asyncWrite(const std::shared_ptr<KVCacheResourceV1>& res
 }
 
 std::vector<KVCacheMemoryConnector::CopyInfoPerKey> KVCacheMemoryConnector::buildCopyPlanForWrite(
-    const std::vector<size_t>& cache_keys, const LayerBlockIds& layer_block_ids, size_t match_len) {
+    const std::vector<int64_t>& cache_keys, const LayerBlockIds& layer_block_ids, size_t match_len) {
     const size_t                layer_num = layer_block_ids.size();
     bool                        success   = true;
     std::vector<CopyInfoPerKey> copy_infos;
