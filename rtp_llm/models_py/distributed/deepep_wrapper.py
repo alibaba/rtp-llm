@@ -1,8 +1,10 @@
 import gc
 import os
+import platform
 from enum import IntEnum, auto
 from typing import Optional, Tuple
 
+import deep_ep
 from deep_ep import Buffer as DeepEPBuffer
 from deep_ep import Config as DeepEPConfig
 from torch.distributed import ProcessGroup
@@ -43,6 +45,7 @@ class DeepEPWrapper:
     _ll_num_max_token_per_rank: int = 0
     _num_sms: int = 24
     _use_accl_ep: bool = True
+    _use_GB_deepep: bool = False
     _mode: DeepEPMode = DeepEPMode.NORMAL
 
     def __init__(self, group: ProcessGroup, params: GptInitModelParameters) -> None:
@@ -52,8 +55,9 @@ class DeepEPWrapper:
         self._num_experts = params.expert_num
         self._num_topk = params.moe_k
         self._num_sms = params.moe_config.deep_ep_num_sm
+        self._use_GB_deepep = "aarch64" in platform.machine()
         device_type = get_device().get_device_type()
-        if device_type == DeviceType.ROCm:
+        if device_type == DeviceType.ROCm or self._use_GB_deepep:
             # use deep_ep_rocm in rocm
             self._use_accl_ep = False
         else:
@@ -248,6 +252,7 @@ class DeepEPWrapper:
             "num_rdma_bytes": num_rdma_bytes,
             "low_latency_mode": True,
             "num_qps_per_rank": num_qps_per_rank,
+            "allow_mnnvl": True,
         }
         if self._use_accl_ep:
             init_kwargs["allow_nvlink_for_low_latency_mode"] = True

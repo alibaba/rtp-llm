@@ -56,8 +56,7 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
         self._w2_scale = self._weights.get(W.moe_s2, None)
         assert self._w1 is not None and self._w2 is not None
         # check fp8 block quantization
-        self._use_fp8 = True
-        if is_deep_gemm_e8m0_used():
+        if self._use_fp8 and is_deep_gemm_e8m0_used():
             w1_tmp, self._w1_scale = requant_weight_ue8m0(
                 self._w1, self._w1_scale, self.DEEPGEMM_BLOCK_SHAPE
             )

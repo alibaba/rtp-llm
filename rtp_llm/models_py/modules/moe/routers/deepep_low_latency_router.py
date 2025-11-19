@@ -53,7 +53,9 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         self._return_recv_hook = return_recv_hook
         self._opt_level = int(os.environ.get("ACCL_LOW_LATENCY_OPTIMIZE", 1))
         self._handle: Optional[Tuple[Any, ...]] = None
-        self._use_GB_deepep = "GB200" in torch.cuda.get_device_name(0)
+        self._use_GB_deepep = "GB200" in torch.cuda.get_device_name(
+            0
+        ) or "L20A" in torch.cuda.get_device_name(0)
 
     @property
     def handle(self) -> Optional[Tuple[Any, ...]]:
