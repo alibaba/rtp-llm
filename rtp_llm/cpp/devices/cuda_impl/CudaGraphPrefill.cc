@@ -113,8 +113,6 @@ std::vector<int> CudaGraphRunner::getPrefillSequenceLengthsToCapture() {
         }
     }
 
-    // 7. Add key length points from your test data (frequently occurring lengths)
-    // Filter out lengths > 16384 since they're not relevant for your use case
     std::vector<int> key_lengths = {
         8915,  703,  2130,  2740,  1389, 1497,  697,   7945,  1097, 14,   10866, 399,  9145, 1580, 1384, 1172, 1992,
         2238,  629,  8948,  9591,  1919, 10218, 856,   11328, 673,  9227, 2842,  837,  4544, 1644, 1132, 1358, 1240,
@@ -130,12 +128,17 @@ std::vector<int> CudaGraphRunner::getPrefillSequenceLengthsToCapture() {
         }
     }
 
+    capture_seq_lens.erase(std::remove_if(capture_seq_lens.begin(),
+                                          capture_seq_lens.end(),
+                                          [&](int len) { return len > max_perfill_cuda_graph_len_; }),
+                           capture_seq_lens.end());
+
     // Remove duplicates and sort
     std::sort(capture_seq_lens.begin(), capture_seq_lens.end());
     capture_seq_lens.erase(std::unique(capture_seq_lens.begin(), capture_seq_lens.end()), capture_seq_lens.end());
 
-    // Ensure we have the maximum possible length if it's <= 16384
-    if (max_possible_length <= 16384 && capture_seq_lens[capture_seq_lens.size() - 1] != max_possible_length) {
+    if (max_possible_length <= max_perfill_cuda_graph_len_
+        && capture_seq_lens[capture_seq_lens.size() - 1] != max_possible_length) {
         capture_seq_lens.push_back(max_possible_length);
     }
 
@@ -153,6 +156,7 @@ void CudaGraphRunner::capturePrefillOneSeqLen(int seq_len) {
         py_forward_method_(inputs);
 
         py_forward_method_(inputs);
+
         RTP_LLM_LOG_INFO("WarmUp for seq len %d successfully.", seq_len);
         {
             CudaGraphStreamLife  stream_life(capture_stream_, device_);
@@ -167,9 +171,7 @@ void CudaGraphRunner::capturePrefillOneSeqLen(int seq_len) {
             CaptureCheck::in_cuda_graph_capture = true;
             auto py_outputs_obj                 = py_forward_method_(inputs);
             auto outputs                        = py_outputs_obj.cast<PyModelOutputs>();
-            std::cout << "decoder_layer_hidden_states_ copy start" << std::endl;
             graph_instances_[seq_len].mem_hold_.decoder_layer_hidden_states_.copy_(outputs.hidden_states);
-            std::cout << "decoder_layer_hidden_states_ copy end" << std::endl;
             graph.capture_end();
             RTP_LLM_LOG_INFO("Capture for seq len %d end.", seq_len);
             CaptureCheck::in_cuda_graph_capture = false;

@@ -1,6 +1,9 @@
 #include "rtp_llm/models_py/bindings/common/Torch_ext.h"
 #include "rtp_llm/models_py/bindings/common/CudaGraphPrefillCopy.h"
+#include "rtp_llm/cpp/core/Dispatch.h"
 #include "rtp_llm/cpp/kernels/cuda_graph_copy_kernel.h"
+#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
+#include "rtp_llm/cpp/kernels/unfused_attention_kernels.h"
 #include <cstdint>
 #include <iostream>
 #include <type_traits>
@@ -36,7 +39,16 @@ void cuda_graph_copy_small2large(at::Tensor& input_tensor,
     auto       input_lengths_ptr = input_lengths.data_ptr<int>();
     auto       cu_seq_len_ptr    = cu_seq_len.data_ptr<int>();
     StreamType stream            = GET_CURRENT_STREAM();
-
+    // DISPATCH_CUDA_FUNCTION_DATA_TYPE(torchDTypeToDataType(input_tensor.dtype()),
+    //                                  invoke_debug_kernel2,
+    //                                  input_tensor.data_ptr(),
+    //                                  0,
+    //                                  0,
+    //                                  10,
+    //                                  10,
+    //                                  2304,
+    //                                  9,
+    //                                  stream);
     // Dispatch based on tensor dtype
     DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FP16(input_tensor.scalar_type(), c_type, [&] {
         rtp_llm::invokeCudaGraphCopySmall2Large<c_type>(static_cast<c_type*>(input_ptr),
@@ -79,6 +91,18 @@ void cuda_graph_copy_large2small(at::Tensor& input_tensor,
 
     StreamType stream = GET_CURRENT_STREAM();
 
+    // Debug output before kernel execution
+    // DISPATCH_CUDA_FUNCTION_DATA_TYPE(torchDTypeToDataType(input_tensor.dtype()),
+    //     invoke_debug_kernel2,
+    //     input_tensor.data_ptr(),
+    //     0,
+    //     0,
+    //     10,
+    //     10,
+    //     768,
+    //     10,
+    //     stream);
+
     // Dispatch based on tensor dtype
     DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FP16(input_tensor.scalar_type(), c_type, [&] {
         rtp_llm::invokeCudaGraphCopyLarge2Small<c_type>(static_cast<c_type*>(input_ptr),
@@ -92,6 +116,18 @@ void cuda_graph_copy_large2small(at::Tensor& input_tensor,
                                                         stream);
         return true;
     });
+
+    // // Debug output after kernel execution
+    // DISPATCH_CUDA_FUNCTION_DATA_TYPE(torchDTypeToDataType(output_tensor.dtype()),
+    //     invoke_debug_kernel2,
+    //     output_tensor.data_ptr(),
+    //     0,
+    //     0,
+    //     10,
+    //     10,
+    //     768,
+    //     11,
+    //     stream);
 }
 
 }  // namespace torch_ext
