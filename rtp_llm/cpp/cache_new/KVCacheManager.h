@@ -9,9 +9,12 @@
 #include "rtp_llm/cpp/cache_new/CacheConfig.h"
 #include "rtp_llm/cpp/cache_new/KVCacheAllocator.h"
 #include "rtp_llm/cpp/config/GptInitParameter.h"
+#include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "kmonitor/client/MetricsReporter.h"
 
 namespace rtp_llm {
+
+class KVCacheMemoryConnector;
 
 class KVCacheManager {
 public:
@@ -76,6 +79,8 @@ public:
                                                           std::vector<BlockIdPair>&      block_update_mapping);
     std::shared_ptr<class MemoryBlockCache> memoryBlockCache() const;
 
+    bool CopyCache(const CopyCacheRequestPB& request, CopyCacheResponsePB& response);
+
 private:
     CacheConfig          config_;
     rtp_llm::DeviceBase* device_;
@@ -83,6 +88,8 @@ private:
 
     const kmonitor::MetricsReporterPtr metrics_reporter_;
     const GptInitParameter&            params_;
+
+    std::shared_ptr<KVCacheMemoryConnector> memory_connector_;
 };
 
 }  // namespace rtp_llm

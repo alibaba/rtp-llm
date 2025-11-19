@@ -2,6 +2,7 @@
 
 #include <algorithm>
 
+#include "rtp_llm/cpp/cache_new/KVCacheMemoryConnector.h"
 #include "rtp_llm/cpp/cache_new/SingleTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/HashUtil.h"
@@ -53,7 +54,14 @@ bool KVCacheManager::init() {
         RTP_LLM_LOG_ERROR("SingleTypeKVCacheAllocator only support Full Attention");
         return false;
     }
-    return false;
+
+    memory_connector_ = std::make_shared<KVCacheMemoryConnector>(config_, allocator_, device_, params_.worker_grpc_addrs_);
+    if (!memory_connector_->init()) {
+        RTP_LLM_LOG_ERROR("kvcache memory connector init failed");
+        memory_connector_.reset();
+        return false;
+    }
+    return true;
 }
 
 size_t KVCacheManager::availableTokenNums() const {
@@ -268,6 +276,20 @@ bool KVCacheManager::updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache
 std::shared_ptr<MemoryBlockCache> KVCacheManager::memoryBlockCache() const {
     RTP_LLM_LOG_WARNING("memoryBlockCache is not implemented in new KVCacheManager yet");
     return nullptr;
+}
+
+bool KVCacheManager::CopyCache(const CopyCacheRequestPB& request, CopyCacheResponsePB& response) {
+    if (request.has_mem_request()) {
+        if (!memory_connector_) {
+            RTP_LLM_LOG_WARNING("copy cache failed, memory connector is null, request: [%s]", request.DebugString().c_str());
+            response.mutable_mem_response()->set_success(false);
+            return false;
+        }
+        return memory_connector_->copyCache(request.mem_request(), *(response.mutable_mem_response()));
+    } else {
+        RTP_LLM_LOG_WARNING("copy cache failed, request is invalid, request: [%s]", request.DebugString().c_str());
+        return false;
+    }
 }
 
 }  // namespace rtp_llm
