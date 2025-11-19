@@ -263,16 +263,16 @@ std::vector<KVCacheMemoryConnector::CopyInfoPerKey> KVCacheMemoryConnector::buil
     return copy_infos;
 }
 
-std::shared_ptr<TPBroadcastResult> KVCacheMemoryConnector::sendCopyPlan(const std::vector<CopyInfoPerKey>& copy_infos,
-                                                                        CopyDirection direction) const {
+std::shared_ptr<TPBroadcastResult<CopyCacheRequestPB, CopyCacheResponsePB>>
+KVCacheMemoryConnector::sendCopyPlan(const std::vector<CopyInfoPerKey>& copy_infos, CopyDirection direction) const {
     if (!tp_broadcast_manager_ || tp_broadcast_manager_->workerNum() == 0) {
         RTP_LLM_LOG_WARNING("send copy plan failed, tp broadcast manager is null or no workers");
         return nullptr;
     }
 
-    MemoryBroadcastTpRequestPB mem_req;
-    mem_req.set_copy_direction(direction == CopyDirection::H2D ? MemoryBroadcastTpRequestPB::H2D :
-                                                                 MemoryBroadcastTpRequestPB::D2H);
+    MemoryCopyCacheRequestPB mem_req;
+    mem_req.set_copy_direction(direction == CopyDirection::H2D ? MemoryCopyCacheRequestPB::H2D :
+                                                                 MemoryCopyCacheRequestPB::D2H);
     for (const auto& copy_info : copy_infos) {
         auto* gpu_block = mem_req.add_gpu_blocks();
         for (const auto& lb : copy_info.gpu_layer_blocks) {
@@ -284,19 +284,25 @@ std::shared_ptr<TPBroadcastResult> KVCacheMemoryConnector::sendCopyPlan(const st
         mem_req.add_mem_block_sizes(copy_info.mem_block_size);
     }
 
-    std::vector<BroadcastTpRequestPB> requests;
+    std::vector<CopyCacheRequestPB> requests;
     requests.reserve(tp_broadcast_manager_->workerNum());
     for (size_t i = 0; i < tp_broadcast_manager_->workerNum(); ++i) {
-        BroadcastTpRequestPB req;
+        CopyCacheRequestPB req;
         req.mutable_mem_request()->CopyFrom(mem_req);
         requests.emplace_back(std::move(req));
     }
 
-    return tp_broadcast_manager_->broadcast(requests, /*timeout_ms*/ 10000);
+    auto rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
+                       const std::shared_ptr<grpc::ClientContext>& context,
+                       const CopyCacheRequestPB&                   request,
+                       grpc::CompletionQueue*                      completion_queue) {
+        return stub->AsyncCopyCache(context.get(), request, completion_queue);
+    };
+    return tp_broadcast_manager_->broadcast<CopyCacheRequestPB, CopyCacheResponsePB>(
+        requests, /*timeout_ms*/ 10000, rpc_call);
 }
 
-void KVCacheMemoryConnector::copyCache(const MemoryBroadcastTpRequestPB& request,
-                                       MemoryBroadcastTpResponsePB&      response) {
+bool KVCacheMemoryConnector::copyCache(const MemoryCopyCacheRequestPB& request, MemoryCopyCacheResponsePB& response) {
     if (request.gpu_blocks_size() != request.mem_block_ids_size()
         || request.gpu_blocks_size() != request.mem_block_sizes_size()) {
         RTP_LLM_LOG_WARNING(
@@ -305,11 +311,11 @@ void KVCacheMemoryConnector::copyCache(const MemoryBroadcastTpRequestPB& request
             request.mem_block_ids_size(),
             request.mem_block_sizes_size());
         response.set_success(false);
-        return;
+        return false;
     }
 
     const auto copy_direction =
-        (request.copy_direction() == MemoryBroadcastTpRequestPB::H2D) ? CopyDirection::H2D : CopyDirection::D2H;
+        (request.copy_direction() == MemoryCopyCacheRequestPB::H2D) ? CopyDirection::H2D : CopyDirection::D2H;
 
     std::vector<BufferPtr> dst_buffers;
     std::vector<BufferPtr> src_buffers;
@@ -323,7 +329,7 @@ void KVCacheMemoryConnector::copyCache(const MemoryBroadcastTpRequestPB& request
                 mem_block_id,
                 mem_block_size);
             response.set_success(false);
-            return;
+            return false;
         }
 
         std::vector<LayerBlock> gpu_layer_blocks;
@@ -340,7 +346,7 @@ void KVCacheMemoryConnector::copyCache(const MemoryBroadcastTpRequestPB& request
                 mem_block_size,
                 copy_direction == CopyDirection::H2D ? "H2D" : "D2H");
             response.set_success(false);
-            return;
+            return false;
         }
     }
 
@@ -348,6 +354,7 @@ void KVCacheMemoryConnector::copyCache(const MemoryBroadcastTpRequestPB& request
         device_->noBlockCopy(MultiCopyParams{dst_buffers, src_buffers});
     }
     response.set_success(true);
+    return true;
 }
 
 bool KVCacheMemoryConnector::prepareCopyBuffers(const std::vector<LayerBlock>& gpu_layer_blocks,

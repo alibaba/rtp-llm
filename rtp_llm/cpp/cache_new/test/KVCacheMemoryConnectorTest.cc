@@ -184,7 +184,7 @@ private:
         mem_block_index = malloced_mem_block_index;
         mem_block_size  = total;
     }
-    void addOneCopyInfoToPb(MemoryBroadcastTpRequestPB&                            req,
+    void addOneCopyInfoToPb(MemoryCopyCacheRequestPB&                              req,
                             const std::vector<KVCacheMemoryConnector::LayerBlock>& gpu_layer_blocks,
                             int                                                    mem_block_index,
                             size_t                                                 mem_block_size) const {
@@ -605,7 +605,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnAlreadyDoneTrue_WhenAllKeysI
     EXPECT_EQ(connector_->block_cache_->size(), cache_size_before);
 }
 
-TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnAlreadyDoneFalse_WhenBuildPlanEmpty) {
+TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnNull_WhenBuildPlanEmpty) {
     // 所有 layer 对于第一个未命中 key 的 blockIdx 都为 NULL，导致 plan 为空
     std::vector<size_t> cache_keys{100, 101};
     // 2 层，全部 NULL
@@ -1031,16 +1031,17 @@ TEST_F(KVCacheMemoryConnectorTest, sendCopyPlan_ReturnContext_RpcStatusError) {
 }
 
 TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnFalse_CountMismatch) {
-    MemoryBroadcastTpRequestPB req;
-    auto*                      gb = req.add_gpu_blocks();
-    auto*                      lb = gb->add_layer_blocks();
+    MemoryCopyCacheRequestPB req;
+    auto*                    gb = req.add_gpu_blocks();
+    auto*                    lb = gb->add_layer_blocks();
     lb->set_layer_id(0);
     lb->set_block_id(1);
     // Intentionally do not add mem_block_ids or mem_block_sizes to trigger mismatch
-    req.set_copy_direction(MemoryBroadcastTpRequestPB::H2D);
+    req.set_copy_direction(MemoryCopyCacheRequestPB::H2D);
 
-    MemoryBroadcastTpResponsePB resp;
-    connector_->copyCache(req, resp);
+    MemoryCopyCacheResponsePB resp;
+    auto                      ok = connector_->copyCache(req, resp);
+    EXPECT_FALSE(ok);
     EXPECT_FALSE(resp.success());
 }
 
@@ -1052,17 +1053,18 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnFalse_InvalidMemBlockId) {
     ASSERT_NE(gpu_buf.v_addr, nullptr);
     const size_t total = gpu_buf.k_addr->sizeBytes() + gpu_buf.v_addr->sizeBytes();
 
-    MemoryBroadcastTpRequestPB req;
-    auto*                      gb = req.add_gpu_blocks();
-    auto*                      lb = gb->add_layer_blocks();
+    MemoryCopyCacheRequestPB req;
+    auto*                    gb = req.add_gpu_blocks();
+    auto*                    lb = gb->add_layer_blocks();
     lb->set_layer_id(layer_id);
     lb->set_block_id(gpu_block_idx);
     req.add_mem_block_ids(-1);  // invalid mem block id
     req.add_mem_block_sizes(static_cast<int64_t>(total));
-    req.set_copy_direction(MemoryBroadcastTpRequestPB::H2D);
+    req.set_copy_direction(MemoryCopyCacheRequestPB::H2D);
 
-    MemoryBroadcastTpResponsePB resp;
-    connector_->copyCache(req, resp);
+    MemoryCopyCacheResponsePB resp;
+    auto                      ok = connector_->copyCache(req, resp);
+    EXPECT_FALSE(ok);
     EXPECT_FALSE(resp.success());
 }
 
@@ -1073,17 +1075,18 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnFalse_InvalidMemBlockSize) {
     ASSERT_NE(gpu_buf.k_addr, nullptr);
     ASSERT_NE(gpu_buf.v_addr, nullptr);
 
-    MemoryBroadcastTpRequestPB req;
-    auto*                      gb = req.add_gpu_blocks();
-    auto*                      lb = gb->add_layer_blocks();
+    MemoryCopyCacheRequestPB req;
+    auto*                    gb = req.add_gpu_blocks();
+    auto*                    lb = gb->add_layer_blocks();
     lb->set_layer_id(layer_id);
     lb->set_block_id(gpu_block_idx);
     req.add_mem_block_ids(1);
     req.add_mem_block_sizes(0);  // invalid mem block size
-    req.set_copy_direction(MemoryBroadcastTpRequestPB::H2D);
+    req.set_copy_direction(MemoryCopyCacheRequestPB::H2D);
 
-    MemoryBroadcastTpResponsePB resp;
-    connector_->copyCache(req, resp);
+    MemoryCopyCacheResponsePB resp;
+    auto                      ok = connector_->copyCache(req, resp);
+    EXPECT_FALSE(ok);
     EXPECT_FALSE(resp.success());
 }
 
@@ -1101,17 +1104,18 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnFalse_InvalidLayerId_BuildCop
     ASSERT_EQ(mem_blocks.size(), 1u);
     const int mem_block_index = mem_blocks[0];
 
-    MemoryBroadcastTpRequestPB req;
-    auto*                      gb = req.add_gpu_blocks();
-    auto*                      lb = gb->add_layer_blocks();
+    MemoryCopyCacheRequestPB req;
+    auto*                    gb = req.add_gpu_blocks();
+    auto*                    lb = gb->add_layer_blocks();
     lb->set_layer_id(cache_config_.layer_num);  // out of range
     lb->set_block_id(gpu_block_idx);
     req.add_mem_block_ids(mem_block_index);
     req.add_mem_block_sizes(static_cast<int64_t>(total));
-    req.set_copy_direction(MemoryBroadcastTpRequestPB::H2D);
+    req.set_copy_direction(MemoryCopyCacheRequestPB::H2D);
 
-    MemoryBroadcastTpResponsePB resp;
-    connector_->copyCache(req, resp);
+    MemoryCopyCacheResponsePB resp;
+    auto                      ok = connector_->copyCache(req, resp);
+    EXPECT_FALSE(ok);
     EXPECT_FALSE(resp.success());
 }
 
@@ -1139,17 +1143,18 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_SingleLayer) {
     offset += gpu_buf.k_addr->sizeBytes();
     setBufferContent(mem_buffer.k_addr, offset, gpu_buf.v_addr->sizeBytes(), 'b');
 
-    MemoryBroadcastTpRequestPB req;
-    auto*                      gb = req.add_gpu_blocks();
-    auto*                      lb = gb->add_layer_blocks();
+    MemoryCopyCacheRequestPB req;
+    auto*                    gb = req.add_gpu_blocks();
+    auto*                    lb = gb->add_layer_blocks();
     lb->set_layer_id(layer_id);
     lb->set_block_id(gpu_block_idx);
     req.add_mem_block_ids(mem_block_index);
     req.add_mem_block_sizes(static_cast<int64_t>(total));
-    req.set_copy_direction(MemoryBroadcastTpRequestPB::H2D);
+    req.set_copy_direction(MemoryCopyCacheRequestPB::H2D);
 
-    MemoryBroadcastTpResponsePB resp;
-    connector_->copyCache(req, resp);
+    MemoryCopyCacheResponsePB resp;
+    auto                      ok = connector_->copyCache(req, resp);
+    EXPECT_TRUE(ok);
     EXPECT_TRUE(resp.success());
 
     // H2D, 验证数据是否拷贝成功
@@ -1180,13 +1185,14 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_MultiLayer) {
     ASSERT_NE(mem_block_index2, -1);
     ASSERT_NE(mem_block_size2, 0);
 
-    MemoryBroadcastTpRequestPB req;
-    req.set_copy_direction(MemoryBroadcastTpRequestPB::H2D);
+    MemoryCopyCacheRequestPB req;
+    req.set_copy_direction(MemoryCopyCacheRequestPB::H2D);
     addOneCopyInfoToPb(req, gpu_layer_blocks1, mem_block_index1, mem_block_size1);
     addOneCopyInfoToPb(req, gpu_layer_blocks2, mem_block_index2, mem_block_size2);
 
-    MemoryBroadcastTpResponsePB resp;
-    connector_->copyCache(req, resp);
+    MemoryCopyCacheResponsePB resp;
+    auto                      ok = connector_->copyCache(req, resp);
+    EXPECT_TRUE(ok);
     EXPECT_TRUE(resp.success());
 
     // H2D, 验证数据是否拷贝成功
@@ -1216,17 +1222,18 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_D2H_SingleLayer) {
     ASSERT_NE(mem_buffer.k_addr, nullptr);
     EXPECT_EQ(mem_buffer.k_addr->sizeBytes(), total);
 
-    MemoryBroadcastTpRequestPB req;
-    auto*                      gb = req.add_gpu_blocks();
-    auto*                      lb = gb->add_layer_blocks();
+    MemoryCopyCacheRequestPB req;
+    auto*                    gb = req.add_gpu_blocks();
+    auto*                    lb = gb->add_layer_blocks();
     lb->set_layer_id(layer_id);
     lb->set_block_id(gpu_block_idx);
     req.add_mem_block_ids(mem_block_index);
     req.add_mem_block_sizes(static_cast<int64_t>(total));
-    req.set_copy_direction(MemoryBroadcastTpRequestPB::D2H);
+    req.set_copy_direction(MemoryCopyCacheRequestPB::D2H);
 
-    MemoryBroadcastTpResponsePB resp;
-    connector_->copyCache(req, resp);
+    MemoryCopyCacheResponsePB resp;
+    auto                      ok = connector_->copyCache(req, resp);
+    EXPECT_TRUE(ok);
     EXPECT_TRUE(resp.success());
 
     // D2H, 验证数据是否拷贝成功
@@ -1256,13 +1263,14 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_D2H_MultiLayer) {
     ASSERT_NE(mem_block_index2, -1);
     ASSERT_NE(mem_block_size2, 0);
 
-    MemoryBroadcastTpRequestPB req;
-    req.set_copy_direction(MemoryBroadcastTpRequestPB::D2H);
+    MemoryCopyCacheRequestPB req;
+    req.set_copy_direction(MemoryCopyCacheRequestPB::D2H);
     addOneCopyInfoToPb(req, gpu_layer_blocks1, mem_block_index1, mem_block_size1);
     addOneCopyInfoToPb(req, gpu_layer_blocks2, mem_block_index2, mem_block_size2);
 
-    MemoryBroadcastTpResponsePB resp;
-    connector_->copyCache(req, resp);
+    MemoryCopyCacheResponsePB resp;
+    auto                      ok = connector_->copyCache(req, resp);
+    EXPECT_TRUE(ok);
     EXPECT_TRUE(resp.success());
 
     // D2H, 验证数据是否拷贝成功

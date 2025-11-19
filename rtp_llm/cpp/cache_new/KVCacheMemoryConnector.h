@@ -3,6 +3,7 @@
 #include "autil/LockFreeThreadPool.h"
 #include "rtp_llm/cpp/cache_new/CacheConfig.h"
 #include "rtp_llm/cpp/cache_new/KVCacheConnector.h"
+#include "rtp_llm/cpp/cache_new/TpBroadcastManager.h"
 #include "rtp_llm/cpp/cache_new/types.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 
@@ -15,12 +16,12 @@ class DeviceBase;
 class KVCacheAllocator;
 class MemoryBlockCache;
 class TpBroadcastManager;
-class TPBroadcastResult;
 
 class MemoryConnectorAsyncContext: public KVCacheConnector::AsyncContext {
 public:
-    MemoryConnectorAsyncContext(const std::shared_ptr<TPBroadcastResult>& broadcast_result,
-                                const std::function<void(bool)>&          done_callback):
+    MemoryConnectorAsyncContext(
+        const std::shared_ptr<TPBroadcastResult<CopyCacheRequestPB, CopyCacheResponsePB>>& broadcast_result,
+        const std::function<void(bool)>&                                                   done_callback):
         broadcast_result_(broadcast_result), done_callback_(done_callback) {}
     MemoryConnectorAsyncContext(bool already_done, bool success): already_done_(already_done), success_(success) {}
     ~MemoryConnectorAsyncContext() override = default;
@@ -34,10 +35,10 @@ private:
     bool allResponseSuccess() const;
 
 private:
-    std::shared_ptr<TPBroadcastResult> broadcast_result_;
-    std::function<void(bool)>          done_callback_;
-    bool                               already_done_{false};
-    bool                               success_{false};
+    std::shared_ptr<TPBroadcastResult<CopyCacheRequestPB, CopyCacheResponsePB>> broadcast_result_;
+    std::function<void(bool)>                                                   done_callback_;
+    bool                                                                        already_done_{false};
+    bool                                                                        success_{false};
 };
 
 class KVCacheMemoryConnector final:
@@ -63,7 +64,7 @@ public:
     }
 
     // 同步拷贝KVCache(单TP)
-    void copyCache(const MemoryBroadcastTpRequestPB& request, MemoryBroadcastTpResponsePB& response);
+    bool copyCache(const MemoryCopyCacheRequestPB& request, MemoryCopyCacheResponsePB& response);
 
 private:
     struct LayerBlock {
@@ -81,23 +82,23 @@ private:
         D2H = 1
     };
 
-    std::vector<CopyInfoPerKey>        buildCopyPlanForRead(const std::vector<size_t>& cache_keys,
-                                                            const LayerBlockIds&       layer_block_ids,
-                                                            size_t                     gpu_reuse_len) const;
-    std::vector<CopyInfoPerKey>        buildCopyPlanForWrite(const std::vector<size_t>& cache_keys,
-                                                             const LayerBlockIds&       layer_block_ids,
-                                                             size_t                     match_len);
-    std::shared_ptr<TPBroadcastResult> sendCopyPlan(const std::vector<CopyInfoPerKey>& copy_infos,
-                                                    CopyDirection                      direction) const;
-    bool                               prepareCopyBuffers(const std::vector<LayerBlock>& gpu_layer_blocks,
-                                                          int                            mem_block_index,
-                                                          size_t                         mem_block_size,
-                                                          CopyDirection                  direction,
-                                                          std::vector<BufferPtr>&        dst,
-                                                          std::vector<BufferPtr>&        src);
-    bool                               mallocMemoryBlocks(const std::shared_ptr<BlockPool>& block_pool,
-                                                          size_t                            need_blocks,
-                                                          std::vector<BlockIdxType>&        malloced_blocks) const;
+    std::vector<CopyInfoPerKey> buildCopyPlanForRead(const std::vector<size_t>& cache_keys,
+                                                     const LayerBlockIds&       layer_block_ids,
+                                                     size_t                     gpu_reuse_len) const;
+    std::vector<CopyInfoPerKey> buildCopyPlanForWrite(const std::vector<size_t>& cache_keys,
+                                                      const LayerBlockIds&       layer_block_ids,
+                                                      size_t                     match_len);
+    std::shared_ptr<TPBroadcastResult<CopyCacheRequestPB, CopyCacheResponsePB>>
+         sendCopyPlan(const std::vector<CopyInfoPerKey>& copy_infos, CopyDirection direction) const;
+    bool prepareCopyBuffers(const std::vector<LayerBlock>& gpu_layer_blocks,
+                            int                            mem_block_index,
+                            size_t                         mem_block_size,
+                            CopyDirection                  direction,
+                            std::vector<BufferPtr>&        dst,
+                            std::vector<BufferPtr>&        src);
+    bool mallocMemoryBlocks(const std::shared_ptr<BlockPool>& block_pool,
+                            size_t                            need_blocks,
+                            std::vector<BlockIdxType>&        malloced_blocks) const;
     bool freeMemoryBlocks(const std::shared_ptr<BlockPool>& block_pool, const std::vector<int>& blocks);
     std::shared_ptr<BlockPool> getOrCreateMemoryBlockPool(size_t block_size, bool create = false);
     bool ensureEnoughFreeBlocks(const std::shared_ptr<BlockPool>& block_pool, size_t need_blocks) const;

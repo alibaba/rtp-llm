@@ -384,7 +384,7 @@ message MemoryBlockCacheResponsePB {
     bool success = 1;
 }
 
-message MemoryBroadcastTpRequestPB {
+message MemoryCopyCacheRequestPB {
     message GpuBlock {
         message LayerBlock {
             int32 layer_id = 1;
@@ -402,19 +402,19 @@ message MemoryBroadcastTpRequestPB {
     CopyDirection copy_direction = 4;
 }
 
-message MemoryBroadcastTpResponsePB {
+message MemoryCopyCacheResponsePB {
     bool success = 1;
 }
 
-message BroadcastTpRequestPB {
+message CopyCacheRequestPB {
     oneof request {
-        MemoryBroadcastTpRequestPB mem_request = 1;
+        MemoryCopyCacheRequestPB mem_request = 1;
     }
 }
 
-message BroadcastTpResponsePB {
+message CopyCacheResponsePB {
     oneof response {
-        MemoryBroadcastTpResponsePB mem_response = 1;
+        MemoryCopyCacheResponsePB mem_response = 1;
     }
 }
 
@@ -434,7 +434,7 @@ service RpcService {
     rpc DistKvCache(DistKvCacheRequestPB) returns (DistKvCacheResponsePB);
     rpc MemoryBlockCache(MemoryBlockCacheRequestPB) returns (MemoryBlockCacheResponsePB);
 
-    rpc BroadcastTp(BroadcastTpRequestPB) returns (BroadcastTpResponsePB);
+    rpc CopyCache(CopyCacheRequestPB) returns (CopyCacheResponsePB);
 }
 
 service MultimodalRpcService {

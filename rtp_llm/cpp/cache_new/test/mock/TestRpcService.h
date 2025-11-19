@@ -11,9 +11,9 @@ namespace rtp_llm::test {
 // 测试用RpcService，用于模拟RPC服务
 class TestRpcService final: public RpcService::Service {
 public:
-    ::grpc::Status BroadcastTp(::grpc::ServerContext*        context,
-                               const ::BroadcastTpRequestPB* request,
-                               ::BroadcastTpResponsePB*      response) override {
+    ::grpc::Status CopyCache(::grpc::ServerContext*      context,
+                             const ::CopyCacheRequestPB* request,
+                             ::CopyCacheResponsePB*      response) override {
         if (sleep_millis_ > 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(sleep_millis_));
         }
