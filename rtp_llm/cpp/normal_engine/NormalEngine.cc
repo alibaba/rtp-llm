@@ -166,6 +166,7 @@ std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_ne
     fake_input->fake_query                      = true;
     auto stream                                 = makeStream(fake_input);
     stream->setIsDummyStream(true);
+    stream->setIsContextStream(false);
     stream->setMetricsReporter(nullptr);
     stream->fakeInitKVBlock();
     return stream;
