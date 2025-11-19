@@ -23,7 +23,9 @@ tensorrt = [
 ]
 
 flashinfer = [
-    "flashinfer-python",
+    "flashinfer_python",
+    "flashinfer_cubin",
+    "flashinfer_jit_cache",
 ]
 
 xft_dep = select({
@@ -104,6 +106,8 @@ requirement([
     "concurrent_log_handler",
     "aiter",
     "fastsafetensors",
+    "deep_gemm",
+    "deep_ep",
 ] + tensorrt + flashinfer)
 
 filegroup(
