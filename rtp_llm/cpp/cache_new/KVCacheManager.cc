@@ -55,7 +55,8 @@ bool KVCacheManager::init() {
         return false;
     }
 
-    memory_connector_ = std::make_shared<KVCacheMemoryConnector>(config_, allocator_, device_, params_.worker_grpc_addrs_);
+    memory_connector_ =
+        std::make_shared<KVCacheMemoryConnector>(config_, allocator_, device_, params_.worker_grpc_addrs_);
     if (!memory_connector_->init()) {
         RTP_LLM_LOG_ERROR("kvcache memory connector init failed");
         memory_connector_.reset();
@@ -278,10 +279,11 @@ std::shared_ptr<MemoryBlockCache> KVCacheManager::memoryBlockCache() const {
     return nullptr;
 }
 
-bool KVCacheManager::CopyCache(const CopyCacheRequestPB& request, CopyCacheResponsePB& response) {
+bool KVCacheManager::copyCache(const CopyCacheRequestPB& request, CopyCacheResponsePB& response) {
     if (request.has_mem_request()) {
         if (!memory_connector_) {
-            RTP_LLM_LOG_WARNING("copy cache failed, memory connector is null, request: [%s]", request.DebugString().c_str());
+            RTP_LLM_LOG_WARNING("copy cache failed, memory connector is null, request: [%s]",
+                                request.DebugString().c_str());
             response.mutable_mem_response()->set_success(false);
             return false;
         }

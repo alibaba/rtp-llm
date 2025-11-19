@@ -419,12 +419,11 @@ void LocalRpcServer::reportCacheStatusTime(int64_t request_begin_time_us) {
         RTP_LLM_LOG_WARNING("copy cache failed, cache manager is null");
         return grpc::Status(grpc::StatusCode::INTERNAL, "cache manager is null");
     }
-    // bool result = cache_manager->CopyCache(*request, *response);
-    // if (!result) {
-    //     RTP_LLM_LOG_WARNING("cache manager copy cache failed, request: [%s]", request->DebugString().c_str());
-    //     const std::string error_msg = "cache manager copy cache failed, request: [" + request->DebugString() + "]";
-    //     return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
-    // }
+    if (!cache_manager->copyCache(*request, *response)) {
+        RTP_LLM_LOG_WARNING("cache manager copy cache failed, request: [%s]", request->DebugString().c_str());
+        const std::string error_msg = "cache manager copy cache failed, request: [" + request->DebugString() + "]";
+        return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
+    }
     return grpc::Status::OK;
 }
 

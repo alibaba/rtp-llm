@@ -79,7 +79,7 @@ public:
                                                           std::vector<BlockIdPair>&      block_update_mapping);
     std::shared_ptr<class MemoryBlockCache> memoryBlockCache() const;
 
-    bool CopyCache(const CopyCacheRequestPB& request, CopyCacheResponsePB& response);
+    bool copyCache(const CopyCacheRequestPB& request, CopyCacheResponsePB& response);
 
 private:
     CacheConfig          config_;

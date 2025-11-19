@@ -183,3 +183,17 @@ cc_test(
     env = {},
     exec_properties = {'gpu':'A10'},
 )
+
+cc_test(
+    name = "kv_cache_manager_test",
+    srcs = [
+        "KVCacheManagerTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps + [
+        "//rtp_llm/cpp/devices/testing:device_test_utils",
+    ],
+    env = {},
+    exec_properties = {'gpu':'A10'},
+)
