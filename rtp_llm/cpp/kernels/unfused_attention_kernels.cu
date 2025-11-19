@@ -863,10 +863,10 @@ __device__ float convert_to_float(int val) {
 }
 
 template<typename T>
-__global__ void debug_kernel2(T* data, int start_col, int m, int n, int row_len, int info_id) {
+__global__ void debug_kernel2(T* data, int start_row, int start_col, int m, int n, int row_len, int info_id) {
     if (blockIdx.x == 0 && threadIdx.x == 0) {
         printf("debug_kernel2 start: %d\n", info_id);
-        for (int i = 0; i < m; i++) {
+        for (int i = start_row; i < start_row + m; i++) {
             for (int j = start_col; j < start_col + n; j++) {
                 int   index = i * row_len + j;
                 float value = convert_to_float(data[index]);
@@ -879,13 +879,14 @@ __global__ void debug_kernel2(T* data, int start_col, int m, int n, int row_len,
 }
 
 template<typename T>
-void invoke_debug_kernel2(T* data, int start_col, int m, int n, int row_len, int info_id, cudaStream_t stream) {
-    debug_kernel2<<<1, 1, 0, stream>>>(data, start_col, m, n, row_len, info_id);
+void invoke_debug_kernel2(
+    T* data, int start_row, int start_col, int m, int n, int row_len, int info_id, cudaStream_t stream) {
+    debug_kernel2<<<1, 1, 0, stream>>>(data, start_row, start_col, m, n, row_len, info_id);
 }
 
 #define INSTANTIATEDEBUGKERNEL2(T)                                                                                     \
     template void invoke_debug_kernel2(                                                                                \
-        T* data, int start_col, int m, int n, int row_len, int info_id, cudaStream_t stream)
+        T* data, int start_row, int start_col, int m, int n, int row_len, int info_id, cudaStream_t stream)
 INSTANTIATEDEBUGKERNEL2(float);
 INSTANTIATEDEBUGKERNEL2(half);
 INSTANTIATEDEBUGKERNEL2(int);
@@ -2405,22 +2406,22 @@ void invokeDecodeAddFusedQKVBiasTranspose(T*               q_buf,
 
 #if USING_ROCM
 inline __device__ void convert_to_fp8(__hip_fp8x2_e4m3_fnuz* v, const amd_bfloat162 u) {
-    __hip_bfloat162_raw raw_bf16 = *reinterpret_cast<const __hip_bfloat162_raw*>(&u);
+    __hip_bfloat162_raw   raw_bf16  = *reinterpret_cast<const __hip_bfloat162_raw*>(&u);
     __hip_fp8x2_storage_t raw_fp8x2 = __hip_cvt_bfloat16raw2_to_fp8x2(raw_bf16, __HIP_SATFINITE, __HIP_E4M3_FNUZ);
-    *v = *reinterpret_cast<__hip_fp8x2_e4m3_fnuz*>(&raw_fp8x2);
+    *v                              = *reinterpret_cast<__hip_fp8x2_e4m3_fnuz*>(&raw_fp8x2);
 }
 
 inline __device__ void convert_to_fp8(__hip_fp8x2_e4m3_fnuz* v, const float2 u) {
-    __half2 h2 = __float22half2_rn(u);
-    __half2_raw raw_h2 = *reinterpret_cast<const __half2_raw*>(&h2);
+    __half2               h2        = __float22half2_rn(u);
+    __half2_raw           raw_h2    = *reinterpret_cast<const __half2_raw*>(&h2);
     __hip_fp8x2_storage_t raw_fp8x2 = __hip_cvt_halfraw2_to_fp8x2(raw_h2, __HIP_SATFINITE, __HIP_E4M3_FNUZ);
-    *v = *reinterpret_cast<const __hip_fp8x2_e4m3_fnuz*>(&raw_fp8x2);
+    *v                              = *reinterpret_cast<const __hip_fp8x2_e4m3_fnuz*>(&raw_fp8x2);
 }
 
 inline __device__ void convert_to_fp8(__hip_fp8x2_e4m3_fnuz* v, const uint32_t u) {
-   __half2_raw raw_h2 = *reinterpret_cast<const __half2_raw*>(&u);
-   __hip_fp8x2_storage_t raw_fp8x2 = __hip_cvt_halfraw2_to_fp8x2(raw_h2, __HIP_SATFINITE, __HIP_E4M3_FNUZ);
-   *v = *reinterpret_cast<const __hip_fp8x2_e4m3_fnuz*>(&raw_fp8x2);
+    __half2_raw           raw_h2    = *reinterpret_cast<const __half2_raw*>(&u);
+    __hip_fp8x2_storage_t raw_fp8x2 = __hip_cvt_halfraw2_to_fp8x2(raw_h2, __HIP_SATFINITE, __HIP_E4M3_FNUZ);
+    *v                              = *reinterpret_cast<const __hip_fp8x2_e4m3_fnuz*>(&raw_fp8x2);
 }
 
 template<typename T, typename Tcache, bool PREFIX_PROMPT, bool USE_PAGED_FMHA, RopeStyle ROPE_STYLE>
@@ -2762,7 +2763,6 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel(T*                   
     extern __shared__ __align__(sizeof(float2)) char smem_[];  // align on largest vector type
 
     static constexpr bool ENABLE_8BITS_CACHE = sizeof(Tcache) == 1;
-
 
     // Quantized output only supports fp8 currently.
     using QuantizedEltType = __hip_fp8_e4m3_fnuz;

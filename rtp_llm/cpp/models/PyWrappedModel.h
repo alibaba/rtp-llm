@@ -36,6 +36,7 @@ private:
     GraphBase*    graph_runner_{nullptr};
     py::object    py_model_;
     bool          enable_cuda_graph_{false};
+    bool          is_prefill_cuda_graph_mode_{false};
     torch::Tensor k_cache_base_tensor_;
     torch::Tensor v_cache_base_tensor_;
     torch::Tensor k_scale_base_tensor_;
@@ -46,7 +47,9 @@ private:
 inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                       py::object                py_instance,
                                       bool                      is_prefill_cuda_graph_mode):
-    GptModel(params), enable_cuda_graph_(params.device->initParams().hw_kernel_config.enable_cuda_graph) {
+    GptModel(params),
+    enable_cuda_graph_(params.device->initParams().hw_kernel_config.enable_cuda_graph),
+    is_prefill_cuda_graph_mode_(is_prefill_cuda_graph_mode) {
     if (setenv("PYTHONUNBUFFERED", "TRUE", 1) != 0) {
         RTP_LLM_LOG_WARNING("Failed to set PYTHONUNBUFFERED environment variable on POSIX.");
     } else {

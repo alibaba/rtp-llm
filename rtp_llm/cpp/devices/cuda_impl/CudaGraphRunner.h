@@ -100,6 +100,7 @@ private:
     int                  max_num_token_{1};
     int                  current_batch_size_{1};
     int                  current_seq_len_{1};
+    int                  max_perfill_cuda_graph_len_{240};
     // for decode
     int current_real_graph_bs_{1};
     // for prefill
