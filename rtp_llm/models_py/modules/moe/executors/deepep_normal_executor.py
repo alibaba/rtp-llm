@@ -75,12 +75,18 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
         self.w13_weight_scale = None
         self.w2_weight_scale = None
         if is_deep_gemm_e8m0_used():
-            self.w13_weight, self.w13_weight_scale_inv = requant_weight_ue8m0(
+            w13_weight_tmp, self.w13_weight_scale_inv = requant_weight_ue8m0(
                 self.w13_weight, self.w13_weight_scale_inv, self.DEEPGEMM_BLOCK_SHAPE
             )
-            self.w2_weight, self.w2_weight_scale_inv = requant_weight_ue8m0(
+            self.w13_weight.copy_(w13_weight_tmp)
+            weights[W.moe_s1] = self.w13_weight_scale_inv
+            del w13_weight_tmp
+            w2_weight_tmp, self.w2_weight_scale_inv = requant_weight_ue8m0(
                 self.w2_weight, self.w2_weight_scale_inv, self.DEEPGEMM_BLOCK_SHAPE
             )
+            self.w2_weight.copy_(w2_weight_tmp)
+            weights[W.moe_s2] = self.w2_weight_scale_inv
+            del w2_weight_tmp
 
         self.w13_weight_fp8 = (
             self.w13_weight,
