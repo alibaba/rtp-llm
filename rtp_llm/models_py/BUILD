@@ -14,6 +14,7 @@ py_library(
     ]),
     deps = [
         "//rtp_llm/models_py/distributed:deepep_wrapper",
+        "//rtp_llm/models_py/distributed:symm_mem",
     ],
     visibility = ["//visibility:public"],
 )
