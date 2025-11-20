@@ -1,4 +1,5 @@
 import logging
+import math
 from typing import Optional
 
 import torch
@@ -10,7 +11,10 @@ from rtp_llm.models_py.modules.fp8_kernel import (
     scaled_fp8_per_tensor_quant,
     sgl_per_token_group_quant_fp8,
 )
-from rtp_llm.models_py.modules.quantization.deepgemm_wrapper import fp8_gemm_nt
+from rtp_llm.models_py.modules.quantization.deepgemm_wrapper import (
+    fp8_gemm_nt,
+    has_deep_gemm,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +42,10 @@ class Fp8PerBlockLinear(nn.Module):
         self.weight = self.weight.reshape(self.N, self.K)
         self.weight_scale = self.weight_scale.reshape(self.scale_N, self.scale_K)
         # Check weight scale sizes
-        if self.scale_N * 128 != self.N or self.scale_K * 128 != self.K:
+        if (
+            math.ceil(self.N / 128) != self.scale_N
+            or math.ceil(self.K / 128) != self.scale_K
+        ):
             error_msg = f"Weight scale dimension mismatch! N: {self.N}, scale_N: {self.scale_N}, K: {self.K}, scale_K: {self.scale_K}"
             logger.error(error_msg)
             raise ValueError(error_msg)
@@ -73,6 +80,10 @@ class Fp8PerBlockLinear(nn.Module):
                 error_msg = f"Bias dtype must be bfloat16, got {self.bias.dtype}"
                 logger.error(error_msg)
                 raise ValueError(error_msg)
+        if not has_deep_gemm():
+            error_msg = "DeepGEMM is not available, please install deep_gemm package"
+            logger.error(error_msg)
+            raise RuntimeError(error_msg)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Check input dtype - only accept bfloat16
