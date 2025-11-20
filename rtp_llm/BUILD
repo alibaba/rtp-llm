@@ -23,9 +23,9 @@ tensorrt = [
 ]
 
 flashinfer = [
-    "flashinfer_python",
-    "flashinfer_cubin",
-    "flashinfer_jit_cache",
+    "flashinfer-python",
+    "flashinfer-cubin",
+    "flashinfer-jit-cache",
 ]
 
 xft_dep = select({
@@ -566,8 +566,6 @@ whl_reqs = [
     "bitsandbytes",
     "portalocker",
     "concurrent_log_handler",
-    "flashinfer-python==0.2.5",
-    "deep_gemm"
 ] + whl_deps() + platform_deps() + xft_dep
 
 py_wheel(
