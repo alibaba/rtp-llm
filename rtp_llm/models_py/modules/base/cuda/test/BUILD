@@ -65,3 +65,18 @@ py_test (
     exec_properties = {'gpu':'H20'},
 )
 
+
+py_test (
+    name = "torch_symm_mem_test",
+    srcs = ["torch_symm_mem_test.py"],
+    deps = py_test_deps + [
+        "//rtp_llm/models_py:distributed",
+        "//rtp_llm/test/utils:port_util",
+    ],
+    env = {
+        "DEVICE_RESERVE_MEMORY_BYTES": "512000000",  # 512MB
+        "TP_SIZE": "4",
+    },
+    tags = ["open_skip", "H20"],
+    exec_properties = {'gpu':'H20'},
+)

@@ -13,3 +13,12 @@ py_library(
     }),
     visibility = ["//visibility:public"],
 )
+
+py_library(
+    name = "symm_mem",
+    srcs = ["symm_mem.py"],
+    deps = [
+        "//rtp_llm:torch",
+    ],
+    visibility = ["//visibility:public"],
+)
