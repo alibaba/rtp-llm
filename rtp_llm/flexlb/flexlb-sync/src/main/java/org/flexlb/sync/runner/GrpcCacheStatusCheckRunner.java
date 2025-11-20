@@ -39,7 +39,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
     private final String ip;
     private final int port;
     private final int grpcPort;
-    private final long startTime = System.currentTimeMillis();
+    private final long startTime = System.nanoTime() / 1000;
     private final String id = IdUtils.fastUuid();
     private final boolean debug;
     private final long requestTimeoutMs;
@@ -89,7 +89,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
             return;
         }
 
-        long startTime = System.currentTimeMillis();
+        long startTime = System.nanoTime() / 1000;
         long currentCacheVersion = getCurrentCacheVersion();
 
         // Launch gRPC cache status check
@@ -171,7 +171,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
             }
 
             engineHealthReporter.reportCacheStatusCheckerSuccess(modelName, workerStatus);
-            workerStatus.getCacheLastUpdateTime().set(System.currentTimeMillis());
+            workerStatus.getCacheLastUpdateTime().set(System.nanoTime() / 1000);
 
         } catch (Throwable e) {
             log("engine cache status check via gRPC exception, msg: " + e.getMessage(), e);
@@ -207,7 +207,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
     private void logCacheStatusUpdate(CacheStatus cacheStatus, long startTime) {
         
         logger.info("gRPC Cache Status - {}, role:{}, block_size:{}, version:{}, cacheKeySize:{},"
-                        + " available_kv_cache:{}, total_kv_cache:{}, cost:{}, syncInterval:{}",
+                        + " available_kv_cache:{}, total_kv_cache:{}, cost:{}, syncIntervalMs:{}",
                 ipPort,
                 roleType.name(),
                 cacheStatus.getBlockSize(),
@@ -215,7 +215,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                 cacheStatus.getCacheKeySize(),
                 cacheStatus.getAvailableKvCache(),
                 cacheStatus.getTotalKvCache(),
-                System.currentTimeMillis() - startTime,
+                (System.nanoTime() / 1000) - startTime,
                 DynamicCacheIntervalService.getCurrentIntervalMs());
     }
 
@@ -236,22 +236,22 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
     }
 
     private void log(String msg) {
-        logger.info("[gRPC-Cache][{}][{}][{}][{}][{}ms]: {}",
+        logger.info("[gRPC-Cache][{}][{}][{}][{}][{}us]: {}",
                 id,
                 site,
                 ipPort,
                 modelName,
-                System.currentTimeMillis() - startTime,
+                (System.nanoTime() / 1000) - startTime,
                 msg);
     }
 
     private void log(String msg, Throwable e) {
-        logger.info("[gRPC-Cache][{}][{}][{}][{}][{}ms]: {}",
+        logger.info("[gRPC-Cache][{}][{}][{}][{}][{}us]: {}",
                 id,
                 site,
                 ipPort,
                 modelName,
-                System.currentTimeMillis() - startTime,
+                (System.nanoTime() / 1000) - startTime,
                 msg,
                 e);
     }

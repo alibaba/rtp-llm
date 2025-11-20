@@ -91,10 +91,10 @@ public class WorkerAddressService {
         } catch (Exception e) {
             if (e instanceof TimeoutException) {
                 logger.error("query service discovery timeout, model={}, address={}, msg:{}", modelName, address, "timeout");
-                engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.SERVICE_DISCOVERY_TIMEOUT);
+                engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.SERVICE_DISCOVERY_TIMEOUT, null);
             } else {
                 logger.error("query service discovery error, model={}, address={}, msg:{}", modelName, address, e.getMessage());
-                engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.SERVICE_DISCOVERY_ERROR);
+                engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null);
             }
             future.cancel(true);
             return new ArrayList<>();
@@ -137,13 +137,13 @@ public class WorkerAddressService {
 
         @Override
         public List<WorkerHost> call() {
-            long start = System.currentTimeMillis();
+            long start = System.nanoTime() / 1000;
             try {
                 return serviceDiscovery.getHosts(address);
             } catch (Throwable e) {
                 logger.error("query service discovery exception, cost={}ms, model={}, address={}, msg:{}",
-                        System.currentTimeMillis() - start, modelName, address, e.getMessage());
-                engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.SERVICE_DISCOVERY_ERROR);
+                        System.nanoTime() / 1000 - start, modelName, address, e.getMessage());
+                engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null);
                 return new ArrayList<>();
             }
         }

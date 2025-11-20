@@ -19,7 +19,7 @@ import java.util.concurrent.atomic.AtomicLong;
 @Component
 public class ExpirationCleaner {
 
-    private static final long TASK_TIME_OUT_MS = 1000 * 60;
+    private static final long TASK_TIME_OUT_US = 1000 * 60 * 1000L;
 
     @Scheduled(fixedRate = 3000)
     public void cleanExpiredWorkers() {
@@ -38,18 +38,18 @@ public class ExpirationCleaner {
         if (MapUtils.isEmpty(workerStatusMap)) {
             return;
         }
-        long curTimeMillis = System.currentTimeMillis();
+        long curTimeMillis = System.nanoTime() / 1000;
         for (Iterator<Map.Entry<String, WorkerStatus>> it = workerStatusMap.entrySet().iterator(); it.hasNext(); ) {
             Map.Entry<String, WorkerStatus> item = it.next();
             WorkerStatus workerStatus = item.getValue();
-            long expirationTime = workerStatus.getStatusLastUpdateTime().get() + 3000L;
+            long expirationTime = workerStatus.getStatusLastUpdateTime().get() + 3 * 1000 * 1000L; // 3秒
             if (curTimeMillis > expirationTime) {
                 it.remove();
             }
 
             // 删除运行队列中的超时任务
             ConcurrentHashMap<Long, TaskInfo> localTaskMap = workerStatus.getLocalTaskMap();
-            long currentTime = System.currentTimeMillis();
+            long currentTime = System.nanoTime() / 1000;
             localTaskMap.forEach((requestId, task) -> {
                 if (isTaskTimeout(task, currentTime)) {
                     localTaskMap.computeIfPresent(requestId, (k, existing) -> {
@@ -63,8 +63,8 @@ public class ExpirationCleaner {
 
     private static boolean isTaskTimeout(TaskInfo task, long currentTime) {
         // 使用任务开始时间或创建时间判断超时
-        long lastAccessTime = task.getLastActiveTimeMs();
-        return (currentTime - lastAccessTime) > TASK_TIME_OUT_MS;
+        long lastAccessTime = task.getLastActiveTimeUs();
+        return (currentTime - lastAccessTime) > TASK_TIME_OUT_US;
     }
 
     private static TaskInfo decrementQueueTime(AtomicLong runningQueueTime, TaskInfo task, String role) {

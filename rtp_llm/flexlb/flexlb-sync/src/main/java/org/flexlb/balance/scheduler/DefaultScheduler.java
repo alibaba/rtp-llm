@@ -72,7 +72,7 @@ public class DefaultScheduler implements Scheduler {
         long interRequestId = balanceContext.getInterRequestId();
         masterResponse.setInterRequestId(interRequestId);
 
-        long startTimeInMs = System.currentTimeMillis();
+        long startTimeInMs = System.nanoTime() / 1000;
 
         // INFO  暂时不支持既有prefill又有pd fusion的服务
         if (roleTypeList.contains(RoleType.PREFILL)) {
@@ -134,7 +134,7 @@ public class DefaultScheduler implements Scheduler {
             serverStatusList.add(vitServerStatus);
         }
 
-        long costTime = System.currentTimeMillis() - startTimeInMs;
+        long costTime = System.nanoTime() / 1000 - startTimeInMs;
         balanceContext.getRequestContext().getSpan().addEvent("load balance finish(" + costTime + "ms)");
 
         masterResponse.setServerStatus(serverStatusList);

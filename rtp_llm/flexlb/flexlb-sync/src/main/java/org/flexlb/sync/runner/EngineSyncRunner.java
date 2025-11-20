@@ -74,12 +74,12 @@ public class EngineSyncRunner implements Runnable {
     public void run() {
         logger.info("EngineSyncRunner start for model: {}, role: {}", modelName, roleType.toString());
         try {
-            long startTimeInMs = System.currentTimeMillis();
+            long startTimeInUs = System.nanoTime() / 1000;
             List<WorkerHost> latestEngineWorkerList = workerAddressService.getEngineWorkerList(modelName, roleType);
             logger.info("workerAddressService getEngineWorkerList, model: {}, role: {}, size: {}", modelName, roleType, latestEngineWorkerList.size());
             engineHealthReporter.reportServiceDiscoveryResult(modelName, latestEngineWorkerList.size(), roleType.toString());
             if (CollectionUtils.isEmpty(latestEngineWorkerList)) {
-                logger.error("get engine worker list is empty, cost={}ms, model={}", System.currentTimeMillis() - startTimeInMs, modelName);
+                logger.error("get engine worker list is empty, cost={}us, model={}", System.nanoTime() / 1000 - startTimeInUs, modelName);
                 return;
             }
             Map<String/*ip*/, WorkerStatus> cachedWorkerStatuses = workerStatusMap;
@@ -99,12 +99,10 @@ public class EngineSyncRunner implements Runnable {
                 String ipPort = entry.getKey();
                 if (!latestValidIpPorts.contains(ipPort)) {
                     long lastTime = workerStatus.getStatusLastUpdateTime().get();
-                    if (System.currentTimeMillis() - lastTime > 1000) {
+                    if (System.nanoTime() / 1000 - lastTime > 1000 * 1000) { // 如果上次更新时间超过1s，则移除
                         cachedWorkerStatuses.remove(ipPort);
                         logger.info("[remove] engine ip changes, model={}, role={}, ipPort={}", modelName, roleType, ipPort);
                     }
-                } else {
-                    workerStatus.getLastScheduleTime().set(System.currentTimeMillis());
                 }
             }
             if (latestEngineWorkerList.isEmpty()) {
@@ -137,7 +135,7 @@ public class EngineSyncRunner implements Runnable {
 
         } catch (Exception e) {
             logger.error("sync engine workers status exception, modelName:{}, error:{}", modelName, e.getMessage(), e);
-            engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.UNKNOWN_ERROR);
+            engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.UNKNOWN_ERROR, null);
         } finally {
             logger.debug("Entering finally block for model: {}", modelName);
             int size = workerStatusMap.size();

@@ -21,6 +21,5 @@ public class WorkerCacheUpdateResult {
     private long availableKvCache;
     private long totalKvCache;
     private long cacheVersion;
-    private long timestamp;
     private String errorMessage;
 }

@@ -37,9 +37,9 @@ public class WorkerStatus {
     private long dpSize;
     private long tpSize;
 
-    private AtomicLong statusLastUpdateTime = new AtomicLong(-1);
-    private AtomicLong cacheLastUpdateTime = new AtomicLong(-1);
-    private AtomicLong lastScheduleTime = new AtomicLong(-1);
+    private AtomicLong statusLastUpdateTime = new AtomicLong(-1); // 上次更新状态的时间
+    private AtomicLong cacheLastUpdateTime = new AtomicLong(-1); // 上次更新缓存状态的时间
+    private AtomicLong lastSelectedTime = new AtomicLong(-1); // 上次被选中的时间
     private Long statusVersion = -1L;
 
     /**
@@ -50,7 +50,7 @@ public class WorkerStatus {
     public void putLocalTask(Long requestId, TaskInfo taskInfo) {
         localTaskMap.put(requestId, taskInfo);
         addRunningQueueTime(taskInfo.estimatePrefillTime());
-        lastScheduleTime.set(System.currentTimeMillis());
+        lastSelectedTime.set(System.nanoTime() / 1000);
     }
 
     /**
@@ -87,7 +87,7 @@ public class WorkerStatus {
         for (TaskInfo taskInfo : runningTaskList) {
             Long requestId = taskInfo.getInterRequestId();
             localTaskMap.computeIfPresent(requestId, (k, existingTask) -> {
-                existingTask.setLastActiveTimeMs(System.currentTimeMillis());
+                existingTask.setLastActiveTimeUs(System.nanoTime() / 1000);
                 return taskInfo;
             });
         }

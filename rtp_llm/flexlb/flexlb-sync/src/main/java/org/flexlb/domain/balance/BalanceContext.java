@@ -27,7 +27,7 @@ public class BalanceContext {
 
     private long interRequestId;
 
-    private long startTime = System.currentTimeMillis();
+    private long startTime = System.nanoTime() / 1000;
 
     private int workerCalcParallel = 1;
 

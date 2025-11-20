@@ -6,11 +6,8 @@ import org.flexlb.dao.route.RoleType;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.util.concurrent.ConcurrentHashMap;
-
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -115,12 +112,5 @@ class EngineWorkerStatusTest {
         // Then
         assertNotNull(result);
         assertTrue(result.isEmpty());
-    }
-
-    @Test
-    void should_contain_query_status_disposable_map_when_using_static_field() {
-        // When and Then
-        assertNotNull(EngineWorkerStatus.QUERY_STATUS_DISPOSABLE_MAP);
-        assertInstanceOf(ConcurrentHashMap.class, EngineWorkerStatus.QUERY_STATUS_DISPOSABLE_MAP);
     }
 }

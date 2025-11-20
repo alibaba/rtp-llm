@@ -43,12 +43,6 @@ public class DiffResult implements Serializable {
     private String engineIp;
     
     /**
-     * 计算时间戳
-     */
-    @Builder.Default
-    private long calculateTime = System.currentTimeMillis();
-    
-    /**
      * 版本号
      */
     private String version;
