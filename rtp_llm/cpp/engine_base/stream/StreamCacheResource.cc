@@ -21,7 +21,8 @@ void StreamCacheResource::freeBatchBlocks(size_t batch_id, vector<int>& blocks) 
     bool should_reuse_cache =
         reuseCache() && (!stream_->hasNumBeams() || (!stream_->stoppedWithoutLock() && batch_id == 0));
     // TODO(zhangjianning.zjn) cache all beams of beam search
-    if (blocks.size() == batch_resource_.blockSize(batch_id) && should_reuse_cache) {
+    if (blocks.size() == batch_resource_.blockSize(batch_id) && should_reuse_cache
+        && (stream_->finishedWithoutLock() || stream_->isRemoteRunningWithoutLock())) {
         reConstructCacheKeys();
         auto          tokens_id  = stream_->completeTokenIdsVec(batch_id);
         const auto&   cache_keys = stream_->cacheKeys(batch_id);
@@ -29,7 +30,6 @@ void StreamCacheResource::freeBatchBlocks(size_t batch_id, vector<int>& blocks) 
         if (stream_->getLoss()) {
             loss = rtp_llm::buffer2vector<float>(*(stream_->getLoss()));
         }
-        // TODO(xinfei.sxf) 一些场景调用了cancel的地方，是否应该free with cache
         CacheManager::FreeInfo free_info(stream_->streamId(),
                                          tokens_id,
                                          cache_keys,
