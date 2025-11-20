@@ -56,21 +56,6 @@ public class MetricConstant {
     public static final String ENGINE_BALANCING_MASTER_FAIL_QPS = "app.engine.balancing.master.fail.qps";
 
     /**
-     * prefill 负载均衡 筛选节点QPS
-     */
-    public static final String PREFILL_BALANCE_SELECT_QPS = "app.engine.prefill.balance.select.qps";
-
-    /**
-     * prefill 负载均衡 筛选节点失败QPS
-     */
-    public static final String PREFILL_BALANCE_SELECT_FAIL_QPS = "app.engine.prefill.balance.select.qps.error";
-
-    /**
-     * prefill 负载均衡 筛选节点花费的时间
-     */
-    public static final String PREFILL_BALANCE_TOKENIZE_COST = "app.engine.prefill.balance.select.cost";
-
-    /**
      * 引擎队列等待时间
      */
     public static final String ENGINE_RUNNING_QUEUE_TIME = "app.engine.health.check.running.queue.time";

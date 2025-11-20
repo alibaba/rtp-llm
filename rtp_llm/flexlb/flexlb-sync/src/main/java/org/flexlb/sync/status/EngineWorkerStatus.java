@@ -6,7 +6,6 @@ import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.springframework.stereotype.Component;
-import reactor.core.Disposable;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -18,7 +17,6 @@ import java.util.stream.Collectors;
 public class EngineWorkerStatus {
 
     public static final  Map<String/*modelName*/, ModelWorkerStatus> MODEL_ROLE_WORKER_STATUS_MAP = new ConcurrentHashMap<>();
-    public static final Map<String/*ip+时间戳*/, Disposable> QUERY_STATUS_DISPOSABLE_MAP = new ConcurrentHashMap<>();
 
     public final ModelMetaConfig modelMetaConfig;
 

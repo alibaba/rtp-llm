@@ -265,7 +265,7 @@ public class CacheMetricsReporter {
                 "success", success
         );
 
-        monitor.report(CACHE_FIND_MATCHING_ENGINES_RT, tags, System.currentTimeMillis() - startTime);
+        monitor.report(CACHE_FIND_MATCHING_ENGINES_RT, tags, ((double) System.nanoTime() / 1000) - startTime);
     }
 
     /**
@@ -283,7 +283,7 @@ public class CacheMetricsReporter {
                 "success", success
         );
 
-        monitor.report(CACHE_UPDATE_ENGINE_BLOCK_CACHE_RT, tags, System.currentTimeMillis() - startTime);
+        monitor.report(CACHE_UPDATE_ENGINE_BLOCK_CACHE_RT, tags, ((double) System.nanoTime() / 1000) - startTime);
     }
 
     /**

@@ -49,8 +49,7 @@ public class KvCacheManager {
      * 性能统计
      */
     private final LongAdder totalUpdates = new LongAdder();
-    private volatile long lastOperationTime = System.currentTimeMillis();
-    
+
     @PostConstruct
     public void init() {
         log.info("KvCacheManager initialized successfully");
@@ -77,8 +76,6 @@ public class KvCacheManager {
         if (blockCacheKeys == null || blockCacheKeys.isEmpty()) {
             return Collections.emptyMap();
         }
-
-        lastOperationTime = System.currentTimeMillis();
 
         // 使用候选引擎列表
         List<String> enginesIpPorts = workerStatusProvider.getWorkerIpPorts(modelName, roleType, group);
@@ -126,7 +123,6 @@ public class KvCacheManager {
         }
 
         totalUpdates.increment();
-        lastOperationTime = System.currentTimeMillis();
         // report metrics
         cacheMetricsReporter.reportEngineLocalMetrics(engineIPort, role, engineLocalView.size(engineIPort));
         cacheMetricsReporter.reportGlobalCacheMetrics(globalCacheIndex.totalBlocks(), globalCacheIndex.totalMappings());
@@ -142,7 +138,6 @@ public class KvCacheManager {
         engineLocalView.clear();
 
         totalUpdates.reset();
-        lastOperationTime = System.currentTimeMillis();
         // report
         cacheMetricsReporter.reportGlobalCacheMetrics(globalCacheIndex.totalBlocks(), globalCacheIndex.totalMappings());
 
