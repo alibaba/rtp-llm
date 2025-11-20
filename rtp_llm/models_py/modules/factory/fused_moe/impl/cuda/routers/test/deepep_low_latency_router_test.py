@@ -21,30 +21,14 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_low_latency_router import (
     DeepEpLowLatencyRouter,
 )
+from rtp_llm.models_py.modules.factory.fused_moe.quant_config import FusedMoEQuantConfig
+from rtp_llm.test.utils.numeric_util import per_token_cast_back
 from rtp_llm.test.utils.port_util import PortsContext
 
 NUM_TOKEN_PER_RANK = 64
 HIDDEN_SIZE = 7168
 TOPK = 8
 NUM_EXPERTS = 128
-
-
-def per_token_cast_back(x_fp8: torch.Tensor, x_scales: torch.Tensor):
-    if x_scales.dtype == torch.int:
-        if os.getenv("ACCL_FP8_CAST_LEVEL", "1") == "2":
-            x_scales = x_scales << 23
-        else:
-            x_scales = x_scales.view(dtype=torch.int8).to(torch.int) << 23
-
-        x_scales = x_scales.view(dtype=torch.float)
-
-    if os.getenv("ACCL_FP8_CAST_LEVEL", "1") == "2":
-        x_fp32 = x_fp8.to(torch.float32).view(x_fp8.size(0), -1, x_fp8.size(1))
-    else:
-        x_fp32 = x_fp8.to(torch.float32).view(x_fp8.size(0), -1, 128)
-
-    x_scales = x_scales.view(x_fp8.size(0), -1, 1)
-    return (x_fp32 * x_scales).view(x_fp8.shape).to(torch.bfloat16)
 
 
 def _init_router(rank: int, use_fp8: bool):
