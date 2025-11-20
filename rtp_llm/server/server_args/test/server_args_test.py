@@ -94,6 +94,7 @@ class ServerArgsDefaultTest(TestCase):
         self.assertEqual(env.get("ENABLE_CUDA_GRAPH_DEBUG_MODE"), "0")
         self.assertEqual(env.get("USE_AITER_PA"), "1")
         self.assertEqual(env.get("USE_ASM_PA"), "1")
+        self.assertEqual(env.get("USE_TRITON_PA"), "1")
         self.assertEqual(env.get("ENABLE_NATIVE_CUDA_GRAPH"), "0")
         self.assertEqual(env.get("NUM_NATIVE_CUDA_GRAPH"), "200")
 
@@ -419,6 +420,8 @@ class ServerArgsSetTest(TestCase):
             "False",
             "--use_asm_pa",
             "False",
+            "--use_triton_pa",
+            "True",
             "--enable_native_cuda_graph",
             "True",
             "--num_native_cuda_graph",
@@ -791,6 +794,7 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(env.get("ENABLE_CUDA_GRAPH_DEBUG_MODE"), "1")
         self.assertEqual(env.get("USE_AITER_PA"), "0")
         self.assertEqual(env.get("USE_ASM_PA"), "0")
+        self.assertEqual(env.get("USE_TRITON_PA"), "1")
         self.assertEqual(env.get("ENABLE_NATIVE_CUDA_GRAPH"), "1")
         self.assertEqual(env.get("NUM_NATIVE_CUDA_GRAPH"), "100")
 

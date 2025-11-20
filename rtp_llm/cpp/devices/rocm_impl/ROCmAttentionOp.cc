@@ -628,7 +628,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
         use_fmha_fp8 = false;
     }
     BufferPtr qkv_buf_fp8 = nullptr;
-    if (use_fmha_fp8) {
+    if (use_fmha_fp8 && !use_mtp_pa_) {
         qkv_buf_fp8 = allocateBuffer({DataType::TYPE_FP8_E4M3, params.input.shape(), AllocationType::DEVICE},
                                      {"qkv_buf_fp8"});}
 
@@ -636,7 +636,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
     float* scale_out_ptr = nullptr;
     int    int8_mode     = 0;
 
-    if (prefix_prompt_param.max_prefix_prompt_length > 0) {
+    if (prefix_prompt_param.max_prefix_prompt_length > 0 && !use_mtp_pa_) {
         if (init_params_.use_aiter_pa) {
             if (init_params_.use_asm_pa) {
                 DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
@@ -1146,6 +1146,10 @@ AttentionModuleOutput ROCmDevice::decoderSelfAttention(const AttentionModulePara
                                         && !params.configs.fuse_qkv_add_bias);
         printBufferData(*params.common.input_lengths, "input_lengths");
         if (!skip_add_bias_transpose) {
+            // bool q_fp8 = kv_block_array.cache_type == KvCacheDataType::FP8;
+            bool q_fp8 = false;
+            BufferPtr q_buf_fp8 = nullptr;
+            if (q_fp8) { q_buf_fp8 = allocateBuffer({DataType::TYPE_FP8_E4M3, q_output->shape(), AllocationType::DEVICE}, {"q_buf_fp8"}); }
 
             bool use_rope_cache =
                 params.configs.rope_config.style == RopeStyle::Base;
@@ -1165,7 +1169,7 @@ AttentionModuleOutput ROCmDevice::decoderSelfAttention(const AttentionModulePara
                                              &prefix_prompt_param,
                                              input_lengths,
                                              params.input.data(),
-                                             nullptr,
+                                             q_buf_fp8? q_buf_fp8->data(): nullptr,
                                              params.common.position_ids ? params.common.position_ids->data<int>() :
                                                                           nullptr,
                                              params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias ?
@@ -1201,7 +1205,7 @@ AttentionModuleOutput ROCmDevice::decoderSelfAttention(const AttentionModulePara
                                              &prefix_prompt_param,
                                              input_lengths,
                                              params.input.data(),
-                                             nullptr,
+                                             q_buf_fp8? q_buf_fp8->data(): nullptr,
                                              params.common.position_ids ? params.common.position_ids->data<int>() :
                                                                           nullptr,
                                              params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias ?

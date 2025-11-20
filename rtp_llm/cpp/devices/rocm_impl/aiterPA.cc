@@ -12,35 +12,55 @@ AiterWrapper::AiterWrapper(const DeviceInitParams& params) {
     }
     py::gil_scoped_acquire acquire;
     aiter_module = py::module::import("aiter");
-    pa_func = aiter_module.attr("paged_attention_rocm");
+    paged_attention_rocm = aiter_module.attr("paged_attention_rocm");
+    aiter_triton_module = py::module::import("aiter.ops.triton.gluon.pa_decode_gluon");
+    pa_decode_gluon = aiter_triton_module.attr("pa_decode_gluon");
+
+    triton_tl = py::module_::import("triton.language");
+    compute_type_ = triton_tl.attr("float8e4b8");
     use_asm_pa_ = params.use_asm_pa;
+    use_triton_pa_ = params.use_triton_pa;
 }
 
 void AiterWrapper::mtp(const AttentionModuleParams& params, rtp_llm::DeviceBase* device, Buffer& q_mtp) {
     py::gil_scoped_acquire acquire;
-    size_t  num_seqs       = q_mtp.shape()[0];
-    size_t  num_heads      = q_mtp.shape()[1];
-    size_t  head_size      = q_mtp.shape()[2];
-
-    int64_t partition_size = 256;
+    size_t  token_num  = params.input.shape()[0];
+    size_t  num_heads  = params.configs.head_num;
+    size_t  head_size  = params.configs.size_per_head;
 
     bool prefill_pa = (params.common.sequence_lengths != nullptr &&
                       params.common.sequence_lengths->data() == nullptr);
+
+    int64_t partition_size = 256;
+    int64_t mtp = prefill_pa ? params.common.context_max_seq_len : 1;
+    int64_t num_kv_heads = params.configs.kv_head_num;
     int64_t max_seq_len = prefill_pa ?
                 (params.common.context_max_seq_len + params.common.max_prefix_length) : (params.common.decoder_max_seq_len + 1);
 
+    size_t query_group_size = num_heads / (size_t)num_kv_heads;
+    size_t multi_query_group_size = num_heads / (size_t)num_kv_heads * (size_t)mtp;
     size_t max_num_partitions = (max_seq_len + partition_size - 1) / partition_size;
+    size_t batch_size = prefill_pa ? params.common.context_batch_size : params.common.decoder_batch_size;
 
-    BufferPtr exp_sums_buffer    = device->allocateBuffer({rtp_llm::DataType::TYPE_FP32,
-                        {num_seqs, num_heads, max_num_partitions}, AllocationType::DEVICE}, {"exp_sums"});
+    BufferPtr exp_sums_buffer = use_triton_pa_ ?
+        device->allocateBuffer({rtp_llm::DataType::TYPE_FP32,
+            {batch_size, (size_t)num_kv_heads, max_num_partitions, multi_query_group_size}, AllocationType::DEVICE}, {"exp_sums"}):
+        device->allocateBuffer({rtp_llm::DataType::TYPE_FP32,
+            {token_num, num_heads, max_num_partitions}, AllocationType::DEVICE}, {"exp_sums"});
 
-    BufferPtr max_logits_buffer = device->allocateBuffer({rtp_llm::DataType::TYPE_FP32,
-                        {num_seqs, num_heads, max_num_partitions}, AllocationType::DEVICE}, {"max_logits"});
+    BufferPtr max_logits_buffer = use_triton_pa_ ?
+        device->allocateBuffer({rtp_llm::DataType::TYPE_FP32,
+            {batch_size, (size_t)num_kv_heads, max_num_partitions, multi_query_group_size}, AllocationType::DEVICE}, {"max_logits"}):
+        device->allocateBuffer({rtp_llm::DataType::TYPE_FP32,
+            {token_num, num_heads, max_num_partitions}, AllocationType::DEVICE}, {"max_logits"});
 
-    BufferPtr tmp_out_buffer = device->allocateBuffer({params.output.type(),
-                        {num_seqs, num_heads, max_num_partitions, head_size}, AllocationType::DEVICE}, {"tmp_out"});
+    BufferPtr tmp_out_buffer = use_triton_pa_ ?
+        device->allocateBuffer({params.output.type(),
+            {batch_size, (size_t)num_kv_heads, max_num_partitions, multi_query_group_size, head_size}, AllocationType::DEVICE}, {"tmp_out"}):
+        device->allocateBuffer({params.output.type(),
+            {token_num, num_heads, max_num_partitions, head_size}, AllocationType::DEVICE}, {"tmp_out"});
 
-    auto out          = Buffer2torchTensor(params.output,false);
+    auto out          = Buffer2torchTensor(params.output, false);
     auto exp_sums     = Buffer2torchTensor(exp_sums_buffer, false);
     auto max_logits   = Buffer2torchTensor(max_logits_buffer, false);
     auto tmp_out      = Buffer2torchTensor(tmp_out_buffer, false);
@@ -48,7 +68,6 @@ void AiterWrapper::mtp(const AttentionModuleParams& params, rtp_llm::DeviceBase*
     auto key_cache    = Buffer2torchTensor(params.common.kv_cache->k_cache_buffer, false);
     auto value_cache  = Buffer2torchTensor(params.common.kv_cache->v_cache_buffer, false);
 
-    int64_t num_kv_heads = params.configs.kv_head_num;
     float scale = params.configs.softmax_extra_scale / sqrtf(params.configs.size_per_head * 1.0f);
 
     auto block_tables = Buffer2torchTensor(params.common.kv_cache->kv_cache_block_id, false);
@@ -56,19 +75,15 @@ void AiterWrapper::mtp(const AttentionModuleParams& params, rtp_llm::DeviceBase*
                             ((AiterAttnParams*)params.common.decode_aiter_attn.get())->sequence_lengths_t;
 
     int64_t block_size = params.configs.tokens_per_block;
-    std::optional<torch::Tensor> alibi_slopes;
-
+    int64_t x = 16 / key_cache.element_size();
     if (use_asm_pa_) {
-        int64_t x = 16 / key_cache.element_size();
         auto value_sizes = value_cache.sizes();
         // [num_blocks, num_kv_heads, block_size/X, head_size, X]
         value_cache = value_cache.view({value_sizes[0], value_sizes[1], value_sizes[2] / x, value_sizes[3], x});
     }
 
-    std::optional<torch::Tensor> q_scale = std::nullopt;
-    std::optional<torch::Tensor> k_scale = std::nullopt;
-    std::optional<torch::Tensor> v_scale = std::nullopt;
-    std::optional<torch::Tensor> fp8_out_scale = std::nullopt;
+    torch::Tensor q_quant, q_scale, query_scale_gluon;
+    torch::Tensor k_scale, v_scale;
 
     std::string kv_cache_dtype = "auto";
     if (key_cache.dtype() == at::kFloat8_e4m3fnuz) {
@@ -77,33 +92,32 @@ void AiterWrapper::mtp(const AttentionModuleParams& params, rtp_llm::DeviceBase*
         v_scale = Buffer2torchTensor(params.common.kv_cache->v_scale_buffer, false);
     }
 
-    int64_t mtp = prefill_pa ? params.common.context_max_seq_len : 1;
+    std::optional<torch::Tensor> fp8_out_scale = std::nullopt;
+    std::optional<torch::Tensor> alibi_slopes;
+    torch::Tensor output_gluon, query_gluon;
+    if (use_triton_pa_) {
+        out = out.view(query.sizes());
+        auto key_sizes = key_cache.sizes();
+        // [num_blocks, num_kv_heads, head_size // x, kv_block_size, x]
+        key_cache = key_cache.view({key_sizes[0], key_sizes[1], key_sizes[3] / x, key_sizes[2], x});
 
-    py::object result = pa_func(out,
-        exp_sums,
-        max_logits,
-        tmp_out,
-        query,
-        key_cache,
-        value_cache,
-        num_kv_heads,
-        scale,
-        block_tables,
-        seq_lens,
-        block_size,
-        max_seq_len,
-        alibi_slopes,
-        kv_cache_dtype,
-        k_scale,
-        v_scale,
-        fp8_out_scale,
-        partition_size,
-        mtp,
-        q_scale
-    );
-    torch::Tensor output_tensor = result.cast<torch::Tensor>();
-    BufferPtr output_buf = torchTensor2Buffer(output_tensor);
-    params.output.swap(*output_buf);
+        if (k_scale.defined()) k_scale.unsqueeze_(-1);
+        if (v_scale.defined()) v_scale.unsqueeze_(-1);
+        if (mtp > 1) {
+            output_gluon = torch::empty({(int)batch_size, (int)num_kv_heads * (int)mtp * (int)query_group_size, (int)head_size},
+                                        torch::TensorOptions().dtype(out.dtype()).device(torch::Device(torch::kCUDA)));
+            query_gluon = torch::empty({(int)batch_size, (int)num_kv_heads * (int)mtp * (int)query_group_size, (int)head_size},
+                                        torch::TensorOptions().dtype(query.dtype()).device(torch::Device(torch::kCUDA)));
+        }
+        pa_decode_gluon(out, output_gluon, query, query_gluon, query_scale_gluon, key_cache, value_cache,
+                            seq_lens, block_tables, scale, mtp, max_seq_len, partition_size, compute_type_,
+                            q_scale, k_scale, v_scale, exp_sums, max_logits, tmp_out, alibi_slopes);
+    } else {
+        paged_attention_rocm(out, exp_sums, max_logits, tmp_out, q_quant.defined() ? q_quant : query,
+                                                 key_cache, value_cache, num_kv_heads, scale, block_tables, seq_lens,
+                                                 block_size, max_seq_len, alibi_slopes, kv_cache_dtype, k_scale, v_scale,
+                                                 fp8_out_scale, partition_size, mtp, q_scale);
+    }
 }
 
 inline torch::Tensor Buffer2torchTensorCustom(const Buffer& buf, std::vector<int64_t> shape, size_t offset = 0) {
