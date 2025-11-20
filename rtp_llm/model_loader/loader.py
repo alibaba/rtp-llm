@@ -402,15 +402,19 @@ class ModelLoader:
 
     def _choose_weight_convert_device(self, current_device):
         if "FORCE_CPU_LOAD_WEIGHTS" in os.environ:
+            logging.warning("FORCE_CPU_LOAD_WEIGHTS is set, load weights to cpu")
             return "cpu"
         model_size = self._weights_info.config.eval_model_weight_size()
         device_mem_info = self._load_config.exported_device.get_mem_info()
         if device_mem_info is None:
+            logging.warning("device_mem_info is None, load weights to cpu")
             return "cpu"
         else:
-            free_mem = device_mem_info.free / (1024.0**2)
-        model_mem = model_size / self._load_config.tp_size / (1024.0**2)
-        return current_device if free_mem * 0.9 > model_mem else "cpu"
+            free_mem = device_mem_info.free / (1024.0**3)
+        model_mem = model_size / max(self._load_config.ep_size, self._load_config.tp_size) / (1024.0**3)
+        device = current_device if free_mem * 0.9 > model_mem else "cpu"
+        logging.info(f"free_mem: {free_mem}, estimated model_mem: {model_mem}, use device: {device}")
+        return device
 
     def _load_from_scratch(self, device: str):
         weights = self._create_model_weights(device)
