@@ -10,7 +10,7 @@ def git_deps():
     git_repository(
         name = "aiter_src",
         remote = "https://github.com/ROCm/aiter.git",
-        commit = "007fe7aa070d827bbdad398a578f403057a34e87", # add several ds shapes to fp4 tuned config (#1131)
+        commit = "f829a42b8de6445725cd89dc5626c6292b0c7002", # add several ds shapes to fp4 tuned config (#1131)
         recursive_init_submodules = True,
         patches = ["//3rdparty/aiter:aiter.patch", "//3rdparty/aiter:gemm_a8w8.patch"],
         patch_cmds = [

@@ -36,9 +36,9 @@
 
 --- aiter/jit/core.py
 +++ aiter/jit/core.py
-@@ -66,37 +66,18 @@
- AITER_ROOT_DIR = os.path.abspath(f"{this_dir}/../../")
- AITER_LOG_MORE = int(os.getenv("AITER_LOG_MORE", 0))
+@@ -276,31 +276,11 @@ class AITER_CONFIG(object):
+ AITER_CONFIGS = AITER_CONFIG()
+ # config_env end here
  
 -find_aiter = importlib.util.find_spec("aiter")
 -if find_aiter is not None:
@@ -72,14 +72,6 @@
  sys.path.insert(0, AITER_META_DIR)
  AITER_CSRC_DIR = f"{AITER_META_DIR}/csrc"
  AITER_GRADLIB_DIR = f"{AITER_META_DIR}/gradlib"
- gfx = get_gfx()
- AITER_ASM_DIR = f"{AITER_META_DIR}/hsa/{gfx}/"
--os.environ["AITER_ASM_DIR"] = AITER_ASM_DIR
-+if "AITER_ASM_DIR" not in os.environ:
-+    os.environ["AITER_ASM_DIR"] = AITER_ASM_DIR
- CK_3RDPARTY_DIR = os.environ.get(
-     "CK_DIR", f"{AITER_META_DIR}/3rdparty/composable_kernel"
- )
  
 
 --- /dev/null

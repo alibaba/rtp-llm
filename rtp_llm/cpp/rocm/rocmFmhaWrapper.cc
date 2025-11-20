@@ -221,13 +221,12 @@ uint32_t rocmFmhaWrapper::runCKFmha(void*  q,
                              // nullptr,                        // o_acc_buf.GetDeviceBuffer(),
                              softmax_lse_,
                              output,
-                             nullptr, //cu_seqlen_q_ptr
-                             nullptr, //cu_seqlen_kv_ptr
                              seqstart_q,
                              seqstart_k,
-                             nullptr,  // seqlen_kpads
-                             nullptr, //seqstart_padded_q_ptr
-                             nullptr, //seqstart_padded_k_ptr
+                             nullptr,
+                             nullptr,   
+                             nullptr, // seqlen_kpads
+                             nullptr,
                              shape_seqlen_q,
                              shape_seqlen_k,
                              batch,
@@ -489,13 +488,12 @@ uint32_t rocmFmhaWrapper::runCKFmhaV2(void*  q,
                              // nullptr,                        // o_acc_buf.GetDeviceBuffer(),
                              softmax_lse_,
                              output,
-                             nullptr, //cu_seqlen_q_ptr
-                             nullptr, //cu_seqlen_kv_ptr
                              seqstart_q,
                              seqstart_k,
-                             nullptr,  // seqlen_kpads
-                             nullptr, //seqstart_padded_q_ptr
-                             nullptr, //seqstart_padded_k_ptr
+                             nullptr, // seqlen_kpads
+                             nullptr,
+                             nullptr,
+                             nullptr,
                              shape_seqlen_q,
                              shape_seqlen_k,
                              batch,
@@ -759,13 +757,12 @@ uint32_t rocmFmhaWrapper::runCKFmhaMLA(void*  q,
                              // nullptr,                        // o_acc_buf.GetDeviceBuffer(),
                              softmax_lse_,
                              output,
-                             nullptr, //cu_seqlen_q_ptr
-                             nullptr, //cu_seqlen_kv_ptr
                              seqstart_q,
                              seqstart_k,
-                             nullptr,  // seqlen_kpads
-                             nullptr, //seqstart_padded_q_ptr
-                             nullptr, //seqstart_padded_k_ptr
+                             nullptr, // seqlen_kpads
+                             nullptr,
+                             nullptr,
+                             nullptr,
                              shape_seqlen_q,
                              shape_seqlen_k,
                              batch,

@@ -43,16 +43,17 @@ bool CustomAllReduceComm::checkAllReduceAvailable(size_t elts_total_num, DataTyp
 
 void CustomAllReduceComm::allReduce(torch::Tensor& input_tensor, torch::Tensor& output_tensor) {
     if (at::hip::currentStreamCaptureStatusMayInitCtx() != at::hip::CaptureStatus::None) {
-        aiter::all_reduce_reg(fa_, input_tensor, output_tensor, false);
+        aiter::all_reduce(fa_, input_tensor, output_tensor, false, false, std::nullopt);
     } else {
-        aiter::all_reduce_unreg(fa_, input_tensor, buffer_, output_tensor);
+         aiter::all_reduce(fa_, input_tensor, output_tensor, false, false, buffer_);
     }
 }
 
 void CustomAllReduceComm::registerGraphBuffers() {
     auto handle_and_offset = aiter::get_graph_buffer_ipc_meta(fa_); // tuple<tensor, vector<int64_t>> -> vector<tensor> size=2
-    auto handle = handle_and_offset[0];
-    auto offset = handle_and_offset[1];
+    auto handle = std::get<0>(handle_and_offset);
+    auto offset = std::get<1>(handle_and_offset);
+
 
     auto _handles = all_gather(handle.data_ptr(), handle.element_size() * handle.numel(), at::hip::getCurrentHIPStream().stream());
     auto _offsets = all_gather(offset.data_ptr(), offset.element_size() * offset.numel(), at::hip::getCurrentHIPStream().stream());
