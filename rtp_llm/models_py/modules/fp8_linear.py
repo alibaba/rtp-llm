@@ -39,7 +39,7 @@ class Fp8PerBlockLinear(nn.Module):
         self.weight_scale = self.weight_scale.reshape(self.scale_N, self.scale_K)
         # Check weight scale sizes
         if self.scale_N * 128 != self.N or self.scale_K * 128 != self.K:
-            error_msg = f"Weight scale dimension mismatch! Expected N: {self.N}, got {self.scale_N * 128}, expected K: {self.K}, got {self.scale_K * 128}"
+            error_msg = f"Weight scale dimension mismatch! N: {self.N}, scale_N: {self.scale_N}, K: {self.K}, scale_K: {self.scale_K}"
             logger.error(error_msg)
             raise ValueError(error_msg)
         # Check weight and weight scale dtypes

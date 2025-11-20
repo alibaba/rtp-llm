@@ -1,3 +1,7 @@
+"""
+COPIED FROM DeepEP
+"""
+
 import json
 import os
 import sys
@@ -7,24 +11,6 @@ from typing import Callable, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
-
-
-def calc_diff(x: torch.Tensor, y: torch.Tensor) -> float:
-    x, y = x.double() + 1, y.double() + 1
-    denominator = (x * x + y * y).sum()
-    sim = 2 * (x * y).sum() / denominator
-    return (1 - sim).item()
-
-
-# COPIED FROM DeepGEMM
-def count_bytes(*tensors):  # pyright: ignore[reportMissingParameterType]
-    total = 0
-    for t in tensors:
-        if isinstance(t, (tuple, list)):
-            total += count_bytes(*t)
-        elif t is not None:
-            total += t.numel() * t.element_size()
-    return total
 
 
 class empty_suppress:
@@ -221,7 +207,3 @@ def bench_kineto(
 
     # Return execution durations
     return kernel_durations if is_tuple else kernel_durations[0]
-
-
-def hash_tensor(t: torch.Tensor):
-    return t.view(torch.int64).sum().item()
