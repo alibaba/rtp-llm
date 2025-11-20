@@ -75,6 +75,9 @@ class GptModelBase(nn.Module):
             seq_size_per_block,
         )
 
+    def sync_global_infos(self, inputs: PyModelInputs) -> bool:
+        return True
+
     def forward(self, inputs: PyModelInputs) -> PyModelOutputs:
         raise NotImplementedError("forward method must be implemented in subclass")
 

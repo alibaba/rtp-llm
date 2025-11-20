@@ -186,6 +186,7 @@ class ParamsBase:
 class PyAttentionInputs:
     input_lengths: torch.Tensor
     is_prefill: bool
+    is_normal_mode: bool
     kv_cache_block_id_host: torch.Tensor
     prefix_lengths: torch.Tensor
     sequence_lengths: torch.Tensor

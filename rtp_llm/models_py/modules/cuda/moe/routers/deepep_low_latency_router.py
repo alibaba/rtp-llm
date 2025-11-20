@@ -12,6 +12,7 @@ from rtp_llm.models_py.modules.common.moe.fused_moe import (
     FusedMoeDataRouter,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.quant_config import FusedMoEQuantConfig
+from rtp_llm.models_py.modules.factory.fused_moe.runtime_config import RuntimeConfig
 from rtp_llm.models_py.modules.factory.fused_moe.type import RouterType
 
 # DeepEP kernels quantize dispatch inputs in 128 element chunks.
@@ -32,7 +33,7 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         return RouterType.DEEPEP_LOW_LATENCY
 
     @classmethod
-    def check_conditions(cls, checker: Any, config: GptInitModelParameters) -> None:
+    def check_conditions(cls, checker: Any, config: RuntimeConfig) -> None:
         """Check if DeepEpLowLatencyRouter can handle the configuration"""
         from rtp_llm.models_py.modules.factory.fused_moe.config_resolver import (
             MoeConfigResolver,
@@ -55,7 +56,7 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         self._config = config
         self._num_experts = config.expert_num
         wrapper = DeepEpInitializer.get_deepep_wrapper(self._config)
-        self._buffer = wrapper.buffer
+        self._buffer = wrapper.low_latency_buffer
         self._num_max_dispatch_tokens_per_rank = wrapper.ll_num_max_token_per_rank
         self._use_fp8_dispatch = use_fp8_dispatch
         self._zero_copy = zero_copy

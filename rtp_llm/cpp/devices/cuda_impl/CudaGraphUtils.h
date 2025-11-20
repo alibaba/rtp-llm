@@ -23,6 +23,8 @@ public:
         py_model_inputs_.attention_inputs.kv_cache_block_id_host   = inputs.attention_inputs.kv_cache_block_id_host;
         py_model_inputs_.attention_inputs.prefix_lengths           = inputs.attention_inputs.prefix_lengths;
         py_model_inputs_.input_ids                                 = inputs.input_ids;
+        py_model_inputs_.attention_inputs.is_prefill               = inputs.attention_inputs.is_prefill;
+        py_model_inputs_.attention_inputs.is_normal_mode           = inputs.attention_inputs.is_normal_mode;
         py_model_inputs_.attention_inputs.cu_seqlens               = inputs.attention_inputs.cu_seqlens;
         py_model_inputs_.attention_inputs.padding_offset           = inputs.attention_inputs.padding_offset;
         py_model_inputs_.attention_inputs.is_prefill               = is_embedding;

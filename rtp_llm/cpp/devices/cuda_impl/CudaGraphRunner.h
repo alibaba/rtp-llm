@@ -32,8 +32,9 @@ public:
             throw std::runtime_error("CudaGraphRunner constructor: Python instance is null or none.");
         }
 
-        py_forward_method_     = py_instance_.attr("forward");
-        py_fill_params_method_ = py_instance_.attr("fill_params");
+        py_forward_method_           = py_instance_.attr("forward");
+        py_fill_params_method_       = py_instance_.attr("fill_params");
+        py_sync_global_infos_method_ = py_instance_.attr("sync_global_infos");
 
         RTP_LLM_LOG_INFO("Initialize CudaGraphRunner with parameters below: \n \
             enable_cuda_graph_: %d, concurrency_limit_: %d, enable_cuda_graph_debug_mode_: %d, hidden_size_: %d, max_seq_len_: %d, seq_size_per_block_: %d, kv_cache_block_offset_: %d, is_prefill_cuda_graph_mode_: %d",
@@ -76,6 +77,7 @@ private:
     void initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int max_num_token);
     py::object                             py_forward_method_;
     py::object                             py_fill_params_method_;
+    py::object                             py_sync_global_infos_method_;
     bool                                   enable_cuda_graph_{false};
     bool                                   is_prefill_cuda_graph_mode_{false};
     int                                    concurrency_limit_{32};
