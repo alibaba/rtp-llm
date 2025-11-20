@@ -680,6 +680,10 @@ bool GenerateStream::finished() {
     return generate_status_->status == StreamState::FINISHED;
 }
 
+bool GenerateStream::isRemoteRunningWithoutLock() {
+    return generate_status_->status == StreamState::REMOTE_RUNNING;
+}
+
 bool GenerateStream::needRemoteGenerate() const {
     std::lock_guard<std::mutex> lock(*output_mutex_);
     return need_remote_generate_;
