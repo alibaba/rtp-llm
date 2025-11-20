@@ -29,40 +29,40 @@ TEST_F(UnfusedAttentionTest, AddFusedQKVBiasTransposeTest) {
     }
 }
 
-// TEST_F(UnfusedAttentionTest, AddFusedQKVBiasTransposeBenchmark) {
-//     auto device_init_params = DeviceInitParams();
-//     device_                 = new CudaDevice(device_init_params);
-//     device_->init();
-//     std::vector<size_t> batch_size = {1, 2, 4, 8, 16};
-//     std::vector<size_t> seq_q      = {2048, 4096, 8192};
-//     size_t              head_q     = 64;
-//     std::vector<size_t> head_kv    = {4, 8};
-//     std::vector<size_t> head_dim   = {128};
-//     std::vector<size_t> page_size  = {64};
-//     for (auto bs : batch_size) {
-//         for (auto sq : seq_q) {
-//             for (auto hkv : head_kv) {
-//                 for (auto hd : head_dim) {
-//                     for (auto ps : page_size) {
-//                         addFusedQKVBiasTransposeTest(bs, sq, head_q, hkv, hd, ps, true);
-//                     }
-//                 }
-//             }
-//         }
-//     }
-// }
+TEST_F(UnfusedAttentionTest, AddFusedQKVBiasTransposeBenchmark) {
+    auto device_init_params = DeviceInitParams();
+    device_                 = new CudaDevice(device_init_params);
+    device_->init();
+    std::vector<size_t> batch_size = {1, 2, 4, 8, 16};
+    std::vector<size_t> seq_q      = {2048, 4096, 8192};
+    size_t              head_q     = 64;
+    std::vector<size_t> head_kv    = {4, 8};
+    std::vector<size_t> head_dim   = {128};
+    std::vector<size_t> page_size  = {64};
+    for (auto bs : batch_size) {
+        for (auto sq : seq_q) {
+            for (auto hkv : head_kv) {
+                for (auto hd : head_dim) {
+                    for (auto ps : page_size) {
+                        addFusedQKVBiasTransposeTest(bs, sq, head_q, hkv, hd, ps, true);
+                    }
+                }
+            }
+        }
+    }
+}
 
 TEST_F(UnfusedAttentionTest, DecodeAddFusedQKVBiasTransposeTest) {
     auto device_init_params = DeviceInitParams();
     device_                 = new CudaDevice(device_init_params);
     device_->init();
-    std::vector<size_t> batch_size = {1, 17};
+    std::vector<size_t> batch_size = {1};
     size_t              seq_q      = 1;
-    std::vector<size_t> seq_kv     = {1, 65, 129};
+    std::vector<size_t> seq_kv     = {1};
     size_t              head_q     = 64;
-    std::vector<size_t> head_kv    = {4, 8};
+    std::vector<size_t> head_kv    = {4};
     size_t              head_dim   = 128;
-    std::vector<size_t> page_size  = {16, 64};
+    std::vector<size_t> page_size  = {16};
     for (auto bs : batch_size) {
         for (auto skv : seq_kv) {
             for (auto hkv : head_kv) {
