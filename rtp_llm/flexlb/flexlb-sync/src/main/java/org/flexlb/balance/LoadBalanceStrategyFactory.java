@@ -8,7 +8,7 @@ import java.util.concurrent.ConcurrentHashMap;
 
 public class LoadBalanceStrategyFactory {
 
-    private final static Map<LoadBalanceStrategyEnum, LoadBalancer> loadBalancerFactory = new ConcurrentHashMap<>();
+    private static final Map<LoadBalanceStrategyEnum, LoadBalancer> loadBalancerFactory = new ConcurrentHashMap<>();
 
     public static void register(LoadBalanceStrategyEnum strategy, LoadBalancer loadBalancer) {
         loadBalancerFactory.put(strategy, loadBalancer);

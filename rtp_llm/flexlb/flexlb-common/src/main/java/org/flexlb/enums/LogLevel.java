@@ -16,5 +16,5 @@ public enum LogLevel {
     @JsonProperty("warn")
     WARN,
     @JsonProperty("error")
-    ERROR;
+    ERROR
 }

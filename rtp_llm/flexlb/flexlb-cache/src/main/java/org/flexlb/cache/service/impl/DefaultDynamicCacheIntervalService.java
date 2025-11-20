@@ -1,12 +1,12 @@
 package org.flexlb.cache.service.impl;
 
-import java.util.Optional;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.locks.ReentrantReadWriteLock;
-
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.cache.service.DynamicCacheIntervalService;
 import org.springframework.stereotype.Service;
+
+import java.util.Optional;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
  * Default implementation of DynamicIntervalManager.
@@ -17,7 +17,6 @@ import org.springframework.stereotype.Service;
 @Service
 @Slf4j
 public class DefaultDynamicCacheIntervalService implements DynamicCacheIntervalService {
-
 
     // Environment variable configuration
     private final int targetDiffSize;
@@ -34,8 +33,8 @@ public class DefaultDynamicCacheIntervalService implements DynamicCacheIntervalS
 
     // Rolling average for diff size tracking
     private final int[] diffHistory = new int[ROLLING_WINDOW_SIZE];
-    private int historyIndex = 0;
-    private int historySize = 0;
+    private int historyIndex;
+    private int historySize;
     private double rollingAverage = 0.0;
     
     // Statistics

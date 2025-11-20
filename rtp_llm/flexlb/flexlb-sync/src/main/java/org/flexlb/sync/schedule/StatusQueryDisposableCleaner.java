@@ -27,7 +27,7 @@ public class StatusQueryDisposableCleaner {
         ScheduledThreadPoolExecutor DisposableCleanScheduler = new ScheduledThreadPoolExecutor(5,
                 new NamedThreadFactory("disposable-clean-scheduler"), new ThreadPoolExecutor.AbortPolicy());
         DisposableCleanScheduler.scheduleAtFixedRate(() -> {
-            logger.info("scheduled clean queryStatusDisposableMap, size: {}", EngineWorkerStatus.queryStatusDisposableMap.size());
+            logger.info("scheduled clean queryStatusDisposableMap, size: {}", EngineWorkerStatus.QUERY_STATUS_DISPOSABLE_MAP.size());
             cleanDisposable();
         }, 0, CLEAN_DISPOSABLE_PERIOD, TimeUnit.MILLISECONDS);
     }
@@ -36,7 +36,7 @@ public class StatusQueryDisposableCleaner {
      * 清理超过3秒的Disposable对象
      */
     public static void cleanDisposable() {
-        Map<String, Disposable> queryStatusDisposableMap = EngineWorkerStatus.queryStatusDisposableMap;
+        Map<String, Disposable> queryStatusDisposableMap = EngineWorkerStatus.QUERY_STATUS_DISPOSABLE_MAP;
         // 遍历查询状态Disposable映射表中的所有条目
         for (Iterator<Map.Entry<String, Disposable>> it = queryStatusDisposableMap.entrySet().iterator(); it.hasNext(); ) {
             Map.Entry<String, Disposable> entry = it.next();

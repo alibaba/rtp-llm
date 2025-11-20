@@ -23,7 +23,6 @@ import java.io.IOException;
 import java.util.List;
 import java.util.Map;
 
-
 @Slf4j
 public class JsonUtils {
 
@@ -67,10 +66,10 @@ public class JsonUtils {
         ObjectReader reader = MAPPER.readerFor(clazz);
         try {
             T res;
-            if (input instanceof String) {
-                res = reader.readValue((String) input);
-            } else if (input instanceof byte[]) {
-                res = reader.readValue((byte[]) input);
+            if (input instanceof String string) {
+                res = reader.readValue(string);
+            } else if (input instanceof byte[] bytes) {
+                res = reader.readValue(bytes);
             } else {
                 throw new IllegalArgumentException("Unsupported input type: " + input.getClass());
             }

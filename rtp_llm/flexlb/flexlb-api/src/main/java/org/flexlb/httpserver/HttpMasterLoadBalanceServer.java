@@ -60,7 +60,7 @@ public class HttpMasterLoadBalanceServer implements ShutdownListener, OnlineList
     private final LoadBalanceWrapper loadBalanceWrapper;
     private final LBStatusConsistencyService lbStatusConsistencyService;
     private final EngineHealthReporter engineHealthReporter;
-    private final static long FORWARD_TIMEOUT_MS = 300;
+    private static final long FORWARD_TIMEOUT_MS = 300;
 
     public HttpMasterLoadBalanceServer(GeneralHttpNettyService generalHttpNettyService,
                                        LoadBalanceWrapper loadBalanceWrapper,
@@ -239,7 +239,6 @@ public class HttpMasterLoadBalanceServer implements ShutdownListener, OnlineList
                 });
     }
 
-
     public Mono<ServerResponse> dumpLBStatus(ServerRequest request) {
         return request.bodyToMono(SyncLBStatusReq.class)
                 .flatMap(syncLBStatusReq -> {
@@ -285,7 +284,7 @@ public class HttpMasterLoadBalanceServer implements ShutdownListener, OnlineList
             if (values == null || values.isEmpty()) {
                 continue;
             }
-            String headerValue = values.get(0);
+            String headerValue = values.getFirst();
             String lowerCaseHeaderName = headerName.toLowerCase();
             BiConsumer<RequestContext, String> processor = HttpRequestUtils.HEADER_PROCESSORS.get(lowerCaseHeaderName);
             if (processor != null) {

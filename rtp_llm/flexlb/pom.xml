@@ -1,5 +1,6 @@
 <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
+    <modelVersion>4.0.0</modelVersion>
 
     <parent>
         <groupId>org.springframework.boot</groupId>
@@ -8,7 +9,7 @@
         <relativePath/>
     </parent>
 
-    <modelVersion>4.0.0</modelVersion>
+
     <groupId>org.flexlb</groupId>
     <artifactId>flexlb</artifactId>
     <packaging>pom</packaging>
@@ -18,9 +19,9 @@
     <url>https://github.com/flexlb/flexlb</url>
 
     <properties>
-        <maven.compiler.target>1.8</maven.compiler.target>
-        <maven.compiler.source>1.8</maven.compiler.source>
-        <java.version>1.8</java.version>
+        <maven.compiler.target>21</maven.compiler.target>
+        <maven.compiler.source>21</maven.compiler.source>
+        <java.version>21</java.version>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
 
@@ -36,6 +37,9 @@
         <reactor.version>2024.0.10</reactor.version>
         <netty.version>4.1.127.Final</netty.version>
         <micrometer.version>1.10.13</micrometer.version>
+        <!-- 高版本 Mockito，摆脱 powermock 和 JUnit4 的限制 -->
+        <mockito.version>5.20.0</mockito.version>
+        <byte-buddy.version>1.17.6</byte-buddy.version>
         <!-- 5.3.x 的最新小版本，提供了一些 BUG 修复 -->
         <spring-framework.version>5.3.39</spring-framework.version>
         <commons-collections4.version>4.4</commons-collections4.version>
@@ -116,6 +120,19 @@
                 <scope>import</scope>
             </dependency>
             <dependency>
+                <groupId>org.mockito</groupId>
+                <artifactId>mockito-bom</artifactId>
+                <version>${mockito.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.mockito</groupId>
+                <artifactId>mockito-core</artifactId>
+                <version>${mockito.version}</version>
+                <scope>test</scope>
+            </dependency>
+            <dependency>
                 <groupId>io.opentelemetry</groupId>
                 <artifactId>opentelemetry-bom</artifactId>
                 <version>${opentelemetry.version}</version>
@@ -136,7 +153,6 @@
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>
-
             <dependency>
                 <groupId>org.apache.commons</groupId>
                 <artifactId>commons-collections4</artifactId>
@@ -230,8 +246,106 @@
             </dependency>
             <!-- util tools 依赖 end -->
         </dependencies>
-
     </dependencyManagement>
+    
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.openrewrite.maven</groupId>
+                <artifactId>rewrite-maven-plugin</artifactId>
+                <version>6.21.1</version>
+                <configuration>
+                    <exportDatatables>true</exportDatatables>
+                    <activeRecipes>
+                        <!-- 升级到 JDK21 -->
+                        <recipe>org.openrewrite.java.migrate.UpgradeToJava21</recipe>
+                        <!-- SLF4J 的日志记录使用参数化格式 -->
+                        <recipe>org.openrewrite.java.logging.slf4j.ParameterizedLogging</recipe>
+                        <!-- 一些静态分析 -->
+                        <recipe>org.openrewrite.staticanalysis.CommonStaticAnalysis</recipe>
+                        <!-- Lombok 最佳实践 -->
+                        <recipe>org.openrewrite.java.migrate.lombok.LombokBestPractices</recipe>
+                        <!-- Mockito 最佳实践 -->
+                        <recipe>org.openrewrite.java.testing.mockito.MockitoBestPractices</recipe>
+                        <!-- 用 List/Map/Set.of() -->
+                        <recipe>org.openrewrite.java.migrate.util.MigrateCollectionsSingletonList</recipe>
+                        <recipe>org.openrewrite.java.migrate.util.MigrateCollectionsSingletonMap</recipe>
+                        <recipe>org.openrewrite.java.migrate.util.MigrateCollectionsSingletonSet</recipe>
+                        <recipe>org.openrewrite.java.migrate.util.MigrateCollectionsUnmodifiableList</recipe>
+                    </activeRecipes>
+                </configuration>
+                <dependencies>
+                    <dependency>
+                        <groupId>org.openrewrite.recipe</groupId>
+                        <artifactId>rewrite-migrate-java</artifactId>
+                        <version>3.12.0</version>
+                    </dependency>
+                    <dependency>
+                        <groupId>org.openrewrite.recipe</groupId>
+                        <artifactId>rewrite-logging-frameworks</artifactId>
+                        <version>3.10.0</version>
+                    </dependency>
+                    <dependency>
+                        <groupId>org.openrewrite.recipe</groupId>
+                        <artifactId>rewrite-static-analysis</artifactId>
+                        <version>2.19.0</version>
+                    </dependency>
+                    <dependency>
+                        <groupId>org.openrewrite.recipe</groupId>
+                        <artifactId>rewrite-testing-frameworks</artifactId>
+                        <version>3.19.0</version>
+                    </dependency>
+                </dependencies>
+            </plugin>
+        </plugins>
+        <pluginManagement>
+            <plugins>
+                <plugin>
+                    <groupId>org.springframework.boot</groupId>
+                    <artifactId>spring-boot-maven-plugin</artifactId>
+                    <configuration>
+                        <jvmArguments>
+                            --add-modules ALL-SYSTEM
+                            --add-opens java.base/java.lang=ALL-UNNAMED
+                            --add-opens java.base/java.lang.invoke=ALL-UNNAMED
+                            --add-opens java.base/java.util=ALL-UNNAMED
+                            --add-opens java.base/java.util.concurrent=ALL-UNNAMED
+                            --add-opens=java.base/jdk.internal.misc=ALL-UNNAMED
+                            --add-opens java.base/java.nio=ALL-UNNAMED
+                            --add-opens java.base/sun.nio.ch=ALL-UNNAMED
+                            --add-opens java.instrument/sun.instrument=ALL-UNNAMED
+                        </jvmArguments>
+                    </configuration>
+                </plugin>
+                <plugin>
+                    <artifactId>maven-antrun-plugin</artifactId>
+                    <version>${maven-antrun.version}</version>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-resources-plugin</artifactId>
+                    <version>${maven-resources.version}</version>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-surefire-plugin</artifactId>
+                    <configuration>
+                        <argLine>
+                            --add-modules ALL-SYSTEM
+                            --add-opens java.base/java.lang=ALL-UNNAMED
+                            --add-opens java.base/java.lang.invoke=ALL-UNNAMED
+                            --add-opens java.base/java.util=ALL-UNNAMED
+                            --add-opens java.base/java.util.concurrent=ALL-UNNAMED
+                            --add-opens=java.base/jdk.internal.misc=ALL-UNNAMED
+                            --add-opens java.base/java.nio=ALL-UNNAMED
+                            --add-opens java.base/sun.nio.ch=ALL-UNNAMED
+                            --add-opens java.instrument/sun.instrument=ALL-UNNAMED
+                        </argLine>
+                    </configuration>
+                </plugin>
+            </plugins>
+        </pluginManagement>
+    </build>
 
     <profiles>
         <!-- Internal profile - automatically activated when internal dependencies exists -->
@@ -257,26 +371,68 @@
                 <internal.modules.enabled>false</internal.modules.enabled>
             </properties>
         </profile>
-    </profiles>
 
-    <build>
-        <pluginManagement>
-            <plugins>
-                <plugin>
-                    <groupId>org.springframework.boot</groupId>
-                    <artifactId>spring-boot-maven-plugin</artifactId>
-                    <version>${spring-boot.version}</version>
-                </plugin>
-                <plugin>
-                    <artifactId>maven-antrun-plugin</artifactId>
-                    <version>${maven-antrun.version}</version>
-                </plugin>
-                <plugin>
-                    <groupId>org.apache.maven.plugins</groupId>
-                    <artifactId>maven-resources-plugin</artifactId>
-                    <version>${maven-resources.version}</version>
-                </plugin>
-            </plugins>
-        </pluginManagement>
-    </build>
+        <!-- Spotless code formatting profile -->
+        <profile>
+            <id>spotless-check</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>com.diffplug.spotless</groupId>
+                        <artifactId>spotless-maven-plugin</artifactId>
+                        <version>3.0.0</version>
+                        <configuration>
+                            <java>
+                                <!-- 移除无用的 import -->
+                                <removeUnusedImports/>
+                                <importOrder>
+                                    <!-- import 顺序：先第三方，然后 java|javax，之后是静态导入 -->
+                                    <order>,|,javax|java,|,\#</order>
+                                </importOrder>
+                                <forbidWildcardImports/>
+
+                                <replaceRegex>
+                                    <name>多个空行替换为单个空行</name>
+                                    <searchRegex>(\n\s*\n)\s*\n+</searchRegex>
+                                    <replacement>$1</replacement>
+                                </replaceRegex>
+                                <replaceRegex>
+                                    <name>控制语句括号前空格（只在行首匹配）</name>
+                                    <searchRegex>^(\s*)(if|for|while|switch|catch|synchronized)\s*\(</searchRegex>
+                                    <replacement>$1$2 (</replacement>
+                                </replaceRegex>
+                                <replaceRegex>
+                                    <name>类和接口声明大括号前空格</name>
+                                    <searchRegex>^(\s*(?:public|private|protected|abstract|final|static)?\s*(?:class|interface|enum)\s+\w+[^{]*?)\s*\{</searchRegex>
+                                    <replacement>$1 {</replacement>
+                                </replaceRegex>
+                                <replaceRegex>
+                                    <name>try语句大括号前空格</name>
+                                    <searchRegex>^(\s*(?:try|catch|finally)(?:\s*\([^)]*\))?)\s*\{</searchRegex>
+                                    <replacement>$1 {</replacement>
+                                </replaceRegex>
+                                <replaceRegex>
+                                    <name>else语句大括号前空格</name>
+                                    <searchRegex>\}\s*else\s*\{</searchRegex>
+                                    <replacement>} else {</replacement>
+                                </replaceRegex>
+                                <replaceRegex>
+                                    <name>方法声明的大括号前空格</name>
+                                    <searchRegex>^(\s*(?:public|private|protected|static|final|synchronized|native|abstract)*.*?\))\s*\{</searchRegex>
+                                    <replacement>$1 {</replacement>
+                                </replaceRegex>
+                            </java>
+                        </configuration>
+                        <executions>
+                            <execution>
+                                <goals>
+                                    <goal>check</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 </project>

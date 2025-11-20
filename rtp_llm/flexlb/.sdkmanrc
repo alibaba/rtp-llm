@@ -1,0 +1,14 @@
+# Enable auto-env for the current project
+# Java 1.8.0-zulu for Whale Wave compatibility
+# This file configures sdkman to automatically switch Java versions when entering this directory
+
+# Java version
+java=21.0.8-amzn
+
+# Maven version (will use wrapper, so this is optional)
+# mav=3.9.9
+
+# Additional notes:
+# Install with: sdk install java 21.0.8-amzn
+# Enable auto-switching: sdk env install
+# Or when entering directory with this file: sdk env

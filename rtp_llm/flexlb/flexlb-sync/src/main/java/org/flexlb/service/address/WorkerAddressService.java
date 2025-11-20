@@ -61,7 +61,6 @@ public class WorkerAddressService {
     }
 
     public List<WorkerHost> getEngineWorkerList(String modelName, RoleType modelEndpointType) {
-        logger.info("get engine worker list, modelName={}, modelEndpointType={}", modelName, modelEndpointType);
         ServiceRoute serviceRoute = modelMetaConfig.getServiceRoute(IdUtils.getServiceIdByModelName(modelName));
         if (serviceRoute == null) {
             logger.info("modelName={} service route not found", modelName);

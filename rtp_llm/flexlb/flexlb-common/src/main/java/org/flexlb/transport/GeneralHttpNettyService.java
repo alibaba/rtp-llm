@@ -37,7 +37,6 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.LongAdder;
 
-
 /**
  * 通用HttpNettyClient请求
  */
@@ -65,7 +64,7 @@ public class GeneralHttpNettyService {
 
     public <Request, Result> Mono<Result> request(Request request, URI uri, String path, HttpHeaders headers, Class<Result> responseClz) {
 
-        return Mono.fromFuture(this.<Request, Result>doRequest(request, uri, path, headers, responseClz).toFuture());
+        return Mono.fromFuture(this.doRequest(request, uri, path, headers, responseClz).toFuture());
     }
 
     public <Request, Result> Mono<Result> doRequest(Request request, URI uri, String path, HttpHeaders headers, Class<Result> responseClz) {
@@ -123,8 +122,7 @@ public class GeneralHttpNettyService {
     private <Result> DefaultFullHttpRequest buildRequest(HttpNettyChannelContext<Result> nettyCtx, URI uri, String path, HttpHeaders headers) {
         DefaultFullHttpRequest request = new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.POST, path);
 
-
-        String body = JsonUtils.toStringOrEmpty((nettyCtx.getRequest()));
+        String body = JsonUtils.toStringOrEmpty(nettyCtx.getRequest());
         request.content().writeBytes(body.getBytes(StandardCharsets.UTF_8));
         if (headers == null) {
 
@@ -160,8 +158,8 @@ public class GeneralHttpNettyService {
             return;
         }
 
-        if (obj instanceof HttpResponse) {
-            nettyCtx.setHttpResp((HttpResponse) obj);
+        if (obj instanceof HttpResponse response) {
+            nettyCtx.setHttpResp(response);
         } else if (obj instanceof HttpContent) {
             handleNettyChunk(nettyCtx, obj, responseClz);
         } else {

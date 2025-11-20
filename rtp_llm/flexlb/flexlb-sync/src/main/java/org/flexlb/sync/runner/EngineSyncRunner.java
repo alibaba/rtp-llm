@@ -13,8 +13,8 @@ import org.slf4j.LoggerFactory;
 import org.springframework.util.CollectionUtils;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.stream.Collectors;
@@ -25,7 +25,7 @@ public class EngineSyncRunner implements Runnable {
 
     private final String modelName;
 
-    private final ConcurrentHashMap<String /*ipPort*/, WorkerStatus> workerStatusMap;
+    private final Map<String /*ipPort*/, WorkerStatus> workerStatusMap;
 
     private final WorkerAddressService workerAddressService;
 
@@ -46,7 +46,7 @@ public class EngineSyncRunner implements Runnable {
     private final Long syncEngineStatusInterval;
 
     public EngineSyncRunner(String modelName,
-                            ConcurrentHashMap<String, WorkerStatus> workerStatusMap,
+                            Map<String, WorkerStatus> workerStatusMap,
                             WorkerAddressService workerAddressService,
                             ExecutorService statusCheckExecutor,
                             EngineHealthReporter engineHealthReporter,
@@ -79,10 +79,10 @@ public class EngineSyncRunner implements Runnable {
             logger.info("workerAddressService getEngineWorkerList, model: {}, role: {}, size: {}", modelName, roleType, latestEngineWorkerList.size());
             engineHealthReporter.reportServiceDiscoveryResult(modelName, latestEngineWorkerList.size(), roleType.toString());
             if (CollectionUtils.isEmpty(latestEngineWorkerList)) {
-                logger.error("get engine worker list is empty, cost={}ms, model={}", (System.currentTimeMillis() - startTimeInMs), modelName);
+                logger.error("get engine worker list is empty, cost={}ms, model={}", System.currentTimeMillis() - startTimeInMs, modelName);
                 return;
             }
-            ConcurrentHashMap<String/*ip*/, WorkerStatus> cachedWorkerStatuses = workerStatusMap;
+            Map<String/*ip*/, WorkerStatus> cachedWorkerStatuses = workerStatusMap;
             // 如果最新的机器数和缓存中的机器数不一致，则打印日志
             if (cachedWorkerStatuses.size() != latestEngineWorkerList.size()) {
                 logger.info("[update] engine ip changes, model={}, role={}, before={}, after={}",
@@ -94,12 +94,12 @@ public class EngineSyncRunner implements Runnable {
                     .map(WorkerHost::getIpPort)
                     .collect(Collectors.toSet());
             logger.info("Current cached worker size: {}, latest worker list size: {}", cachedWorkerStatuses.size(), latestEngineWorkerList.size());
-            for (String ipPort : cachedWorkerStatuses.keySet()) {
-                WorkerStatus workerStatus = cachedWorkerStatuses.get(ipPort);
-                logger.info("worker status ip: {} , alive: {}", workerStatus.getIp(), workerStatus.isAlive());
+            for (Map.Entry<String, WorkerStatus> entry: cachedWorkerStatuses.entrySet()) {
+                WorkerStatus workerStatus = entry.getValue();
+                String ipPort = entry.getKey();
                 if (!latestValidIpPorts.contains(ipPort)) {
-                    long last_time = workerStatus.getStatusLastUpdateTime().get();
-                    if (System.currentTimeMillis() - last_time > 1000) {
+                    long lastTime = workerStatus.getStatusLastUpdateTime().get();
+                    if (System.currentTimeMillis() - lastTime > 1000) {
                         cachedWorkerStatuses.remove(ipPort);
                         logger.info("[remove] engine ip changes, model={}, role={}, ipPort={}", modelName, roleType, ipPort);
                     }
@@ -111,8 +111,7 @@ public class EngineSyncRunner implements Runnable {
                 logger.warn("latestEngineWorkerList is empty, role: {}", roleType);
                 return;
             } else {
-                logger.info("latestEngineWorkerList for role: {}, workers:\n{}", roleType,
-                        latestEngineWorkerList.stream().map(WorkerHost::getIpPort).collect(Collectors.joining("\n")));
+                logger.info("latestEngineWorkerList for role: {}, workers:{}", roleType, latestEngineWorkerList.size());
             }
 
             logger.info("Submitting status check tasks for {} workers", latestEngineWorkerList.size());

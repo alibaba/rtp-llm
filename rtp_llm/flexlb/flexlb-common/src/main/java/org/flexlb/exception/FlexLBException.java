@@ -1,29 +1,16 @@
 package org.flexlb.exception;
 
+import lombok.Getter;
 import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.enums.StatusEnum;
 
 public class FlexLBException extends RuntimeException {
 
+    @Getter
     private final int code;
 
+    @Getter
     private final String name;
-
-    /**
-     * 是否是简单异常：仅落异常Msg，不落异常堆栈信息
-     * @return boolean
-     */
-    public boolean isSimpleException() {
-        return false;
-    }
-
-    /**
-     * 是否是用户异常: 不落异常日志，直接返回给用户错误信息
-     * @return boolean
-     */
-    public boolean isUserException() {
-        return false;
-    }
 
     public FlexLBException(int code, String name, String message, Throwable cause) {
         super(message, cause);
@@ -47,13 +34,5 @@ public class FlexLBException extends RuntimeException {
         super(balanceStatusEnum.getMessage());
         this.code = balanceStatusEnum.getCode();
         this.name = balanceStatusEnum.name();
-    }
-
-    public int getCode() {
-        return code;
-    }
-
-    public String getName() {
-        return name;
     }
 }

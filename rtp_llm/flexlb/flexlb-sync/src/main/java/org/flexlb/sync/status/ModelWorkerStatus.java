@@ -1,15 +1,17 @@
 package org.flexlb.sync.status;
 
-import java.util.ArrayList;
-import java.util.List;
-import java.util.concurrent.ConcurrentHashMap;
-
 import lombok.Data;
 import lombok.NoArgsConstructor;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.utils.LoggingUtils;
+import org.springframework.util.CollectionUtils;
 
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
 
 /**
  * @author zjw
@@ -23,15 +25,16 @@ public class ModelWorkerStatus {
     /**
      * 非PD分离模式
      */
-    private ConcurrentHashMap<String/*ipPort*/, WorkerStatus> pdFusionStatusMap = new ConcurrentHashMap<>();
+    private Map<String/*ipPort*/, WorkerStatus> pdFusionStatusMap = new ConcurrentHashMap<>();
 
-    private ConcurrentHashMap<String/*ipPort*/, WorkerStatus> prefillStatusMap = new ConcurrentHashMap<>();
+    private Map<String/*ipPort*/, WorkerStatus> prefillStatusMap = new ConcurrentHashMap<>();
 
-    private ConcurrentHashMap<String/*ipPort*/, WorkerStatus> decodeStatusMap = new ConcurrentHashMap<>();
+    private Map<String/*ipPort*/, WorkerStatus> decodeStatusMap = new ConcurrentHashMap<>();
 
-    private ConcurrentHashMap<String/*ipPort*/, WorkerStatus> vitStatusMap = new ConcurrentHashMap<>();
+    private Map<String/*ipPort*/, WorkerStatus> vitStatusMap = new ConcurrentHashMap<>();
 
-    public ConcurrentHashMap<String, WorkerStatus> getRoleStatusMap(RoleType roleType) {
+    public Map<String, WorkerStatus> getRoleStatusMap(RoleType roleType) {
+
         if (roleType == RoleType.DECODE) {
             return decodeStatusMap;
         } else if (roleType == RoleType.PREFILL) {
@@ -41,7 +44,8 @@ public class ModelWorkerStatus {
         } else if (roleType == RoleType.VIT) {
             return vitStatusMap;
         }
-        return null;
+
+        return Map.of();
     }
 
     public List<RoleType> getRoleTypeList() {
@@ -55,27 +59,31 @@ public class ModelWorkerStatus {
         if (!prefillStatusMap.isEmpty()) {
             roleTypeList.add(RoleType.PREFILL);
         }
-        if(!vitStatusMap.isEmpty()) {
+        if (!vitStatusMap.isEmpty()) {
             roleTypeList.add(RoleType.VIT);
         }
         return roleTypeList;
     }
 
-    public ConcurrentHashMap<String, WorkerStatus> getRoleStatusMap(RoleType roleType, String group) {
-        ConcurrentHashMap<String, WorkerStatus> roleStatusMap = getRoleStatusMap(roleType);
-        if (roleStatusMap.isEmpty()) {
+    public Map<String, WorkerStatus> getRoleStatusMap(RoleType roleType, String group) {
+        Map<String, WorkerStatus> roleStatusMap = getRoleStatusMap(roleType);
+        if (CollectionUtils.isEmpty(roleStatusMap)) {
             LoggingUtils.warn("roleStatusMap is empty, role: {}", roleType.toString());
-            return new ConcurrentHashMap<>();
+            return Map.of();
         }
-        ConcurrentHashMap<String, WorkerStatus> filteredMap = new ConcurrentHashMap<>();
-        roleStatusMap.entrySet()
+
+        Map<String, WorkerStatus> filteredMap = roleStatusMap.entrySet()
                 .stream()
                 .filter(entry -> entry.getValue().getGroup().equals(group))
-                .forEach(entry -> filteredMap.put(entry.getKey(), entry.getValue()));
-        if (filteredMap.isEmpty()) {
+                .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+        if (CollectionUtils.isEmpty(filteredMap)) {
             LoggingUtils.warn("roleStatusMap is empty, role: {}, group:{}, ", roleType.toString(), group);
         }
+
         return filteredMap;
     }
 
+    public int getWorkerTotalCount() {
+        return pdFusionStatusMap.size() + decodeStatusMap.size() + prefillStatusMap.size() + vitStatusMap.size();
+    }
 }
