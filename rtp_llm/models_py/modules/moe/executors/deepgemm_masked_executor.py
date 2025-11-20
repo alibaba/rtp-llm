@@ -56,19 +56,6 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
         self._w2_scale = self._weights.get(W.moe_s2, None)
         assert self._w1 is not None and self._w2 is not None
         # check fp8 block quantization
-        if self._use_fp8 and is_deep_gemm_e8m0_used():
-            w1_tmp, self._w1_scale = requant_weight_ue8m0(
-                self._w1, self._w1_scale, self.DEEPGEMM_BLOCK_SHAPE
-            )
-            self._w1.copy_(w1_tmp)
-            self._weights[W.moe_s1] = self._w1_scale
-            del w1_tmp
-            w2_tmp, self._w2_scale = requant_weight_ue8m0(
-                self._w2, self._w2_scale, self.DEEPGEMM_BLOCK_SHAPE
-            )
-            self._w2.copy_(w2_tmp)
-            self._weights[W.moe_s2] = self._w2_scale
-            del w2_tmp
         if self.quant_config.is_quantized:
             if (
                 self.quant_config.quant_dtype == torch.float8_e4m3fn
@@ -86,6 +73,19 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
                 )
         else:
             self._use_fp8 = False
+        if self._use_fp8 and is_deep_gemm_e8m0_used():
+            w1_tmp, self._w1_scale = requant_weight_ue8m0(
+                self._w1, self._w1_scale, self.DEEPGEMM_BLOCK_SHAPE
+            )
+            self._w1.copy_(w1_tmp)
+            self._weights[W.moe_s1] = self._w1_scale
+            del w1_tmp
+            w2_tmp, self._w2_scale = requant_weight_ue8m0(
+                self._w2, self._w2_scale, self.DEEPGEMM_BLOCK_SHAPE
+            )
+            self._w2.copy_(w2_tmp)
+            self._weights[W.moe_s2] = self._w2_scale
+            del w2_tmp
 
     @property
     def local_num_experts(self) -> int:
