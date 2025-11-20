@@ -8,7 +8,7 @@ py_library(
     ],
     deps = [
         "//rtp_llm:testlib",
-        "//rtp_llm/test/utils:maga_server_manager",
+        "//rtp_llm/test/utils:server_manager",
         "//rtp_llm/test/utils:device_resource",
     ],
     visibility = ["//visibility:public"],

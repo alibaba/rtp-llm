@@ -12,7 +12,7 @@ import psutil
 import requests
 
 from rtp_llm.distribute.worker_info import WorkerInfo
-from rtp_llm.test.utils.port_util import PortManager
+from rtp_llm.test.utils.base_server_manager import BaseServerManager
 
 CHECKPOINT_PATH = "CHECKPOINT_PATH"
 MODEL_TYPE = "MODEL_TYPE"
@@ -21,10 +21,7 @@ LORA_INFO = "LORA_INFO"
 PTUNING_PATH = "PTUNING_PATH"
 LOG_PATH = "LOG_PATH"
 
-long_live_port_locks = []
-
-
-class MagaServerManager(object):
+class MagaServerManager(BaseServerManager):
     def __init__(
         self,
         env_args: Optional[Dict[str, Any]] = {},
@@ -34,28 +31,17 @@ class MagaServerManager(object):
         process_file_name: str = "process.log",
         smoke_args_str: str = "",
     ):
+        super().__init__()
         self._username = os.getenv("USER")
         self._env_args = env_args
         self._log_file = None
         self._device_ids = device_ids
-        self._server_process = None
         self._role_name = role_name
-        self._file_stream = None
         self._process_file_name = process_file_name
         self._port = port
         self._smoke_args_str = smoke_args_str
         if self._port is None:
-            self._port = MagaServerManager.get_free_port()
-
-    def __del__(self):
-        self.stop_server()
-
-    @staticmethod
-    def get_free_port() -> str:
-        # just make sure more than enough ports
-        ports, locks = PortManager().get_consecutive_ports(200)
-        long_live_port_locks.extend(locks)
-        return str(ports[0] + 100)
+            self._port = self.get_free_port()
 
     @property
     def port(self) -> int:
@@ -171,33 +157,6 @@ class MagaServerManager(object):
         self._server_process = p
 
         return self.wait_sever_done(timeout)
-
-    def stop_server(self):
-        if self._server_process is not None and self._server_process.pid is not None:
-            try:
-                # 如果只kill start_server，会残留 backend/frontend 占用显存。
-                # 部署时容器整体会回收，但测试时需要自己递归 kill
-                # 不适用 setsid/killpg 是因为 setsid 可能会在 test 父进程意外退出的情况遗留 start_server 占用测试资源
-                logging.info("stop server and children: %d", self._server_process.pid)
-                parent = psutil.Process(self._server_process.pid)
-                children = list(
-                    parent.children(recursive=True)
-                )  # 获取所有子进程（递归）
-                for child in children:
-                    child.terminate()  # 先尝试优雅终止
-                _, alive = psutil.wait_procs(children, timeout=5)
-                for child in alive:
-                    child.kill()  # 强制终止未退出的进程
-                parent.terminate()
-                parent.wait()
-                self._server_process = None
-            except Exception as e:
-                logging.warning("failed to get process with: " + str(e))
-                self._server_process = None
-        if self._file_stream is not None:
-            self._file_stream.close()
-            self._file_stream = None
-        return True
 
     def visit(self, query: Dict[str, Any], retry_times: int, endpoint: str = "/"):
         logging.info(f"retry times: {retry_times}")

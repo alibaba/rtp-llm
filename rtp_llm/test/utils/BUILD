@@ -39,8 +39,10 @@ py_library(
 )
 
 py_library(
-    name = "maga_server_manager",
-    srcs = ["maga_server_manager.py"],
+    name = "server_manager",
+    srcs = ["maga_server_manager.py",
+            "base_server_manager.py",
+            "kvcm_server_manager.py"],
     visibility = ["//visibility:public"],
 )
 
