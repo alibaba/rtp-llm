@@ -147,21 +147,27 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.PUSH_TO_MAIN }}
       run: |
         SOURCE_BRANCH="${{ steps.branch_info.outputs.source_branch }}"
+        ENCODED_SOURCE_BRANCH=$(echo -n "${SOURCE_BRANCH}" | jq -sRr '@uri')
         BASE_BRANCH="main"
         UPSTREAM_REPO="${{ env.UPSTREAM_REPO }}"
         
         # Check if PR already exists in upstream repo for this branch from forked repo
+        # Note: head format for cross-repo PRs is "owner:branch", not "owner/repo:branch"
+        FORK_OWNER="${{ github.repository_owner }}"
+        
+        echo "Checking for existing PR: ${FORK_OWNER}:${SOURCE_BRANCH} -> ${UPSTREAM_REPO}:${BASE_BRANCH}"
+        
         pr_exists=$(curl -s -H "Authorization: token ${GITHUB_TOKEN}" \
           -H "Accept: application/vnd.github.v3+json" \
-          "https://api.github.com/repos/${UPSTREAM_REPO}/pulls?head=${{ github.repository }}:${SOURCE_BRANCH}&base=${BASE_BRANCH}&state=open" \
+          "https://api.github.com/repos/${UPSTREAM_REPO}/pulls?head=${FORK_OWNER}:${ENCODED_SOURCE_BRANCH}&base=${BASE_BRANCH}&state=open" \
           | jq length)
         
         echo "pr_exists=${pr_exists}" >> ${GITHUB_OUTPUT}
         
         if [ "$pr_exists" -gt 0 ]; then
-          echo "PR already exists for branch ${{ github.repository }}:${SOURCE_BRANCH} -> ${UPSTREAM_REPO}:${BASE_BRANCH}"
+          echo "✓ PR already exists (count: ${pr_exists})"
         else
-          echo "No existing PR found for branch ${{ github.repository }}:${SOURCE_BRANCH} -> ${UPSTREAM_REPO}:${BASE_BRANCH}"
+          echo "✓ No existing PR found, will create new one"
         fi
 
     - name: Create Pull Request
@@ -173,6 +179,7 @@ jobs:
         BASE_BRANCH="main" # the target branch in upstream repo
         SHORT_SHA="${{ steps.branch_info.outputs.short_sha }}"
         UPSTREAM_REPO="${{ env.UPSTREAM_REPO }}"
+        FORK_OWNER="${{ github.repository_owner }}"
         
         # Use original PR title and body if available
         ORIGINAL_PR_TITLE="${{ steps.get_original_pr.outputs.pr_title }}"
@@ -195,10 +202,13 @@ jobs:
         
         # Create the PR in upstream repo (from forked repo)
         # Note: head format is "fork_owner:branch" for cross-repository PRs
+        # URL encode the branch name to handle special characters like #
+        ENCODED_SOURCE_BRANCH=$(echo -n "${SOURCE_BRANCH}" | jq -sRr '@uri')
+        
         # Properly escape JSON values to avoid shell parsing issues
         TITLE_JSON=$(echo "${PR_TITLE}" | jq -Rs .)
         BODY_JSON=$(echo "${PR_BODY}" | jq -Rs .)
-        HEAD_VALUE="${{ github.repository }}:${SOURCE_BRANCH}"
+        HEAD_VALUE="${FORK_OWNER}:${ENCODED_SOURCE_BRANCH}"
         
         response=$(curl -s -X POST \
           -H "Authorization: token ${GITHUB_TOKEN}" \
@@ -234,5 +244,6 @@ jobs:
       run: |
         UPSTREAM_REPO="${{ env.UPSTREAM_REPO }}"
         BASE_BRANCH="main"
-        echo "PR already exists for branch ${{ github.repository }}:${{ steps.branch_info.outputs.source_branch }} -> ${UPSTREAM_REPO}:${BASE_BRANCH}, skipping creation"
+        FORK_OWNER="${{ github.repository_owner }}"
+        echo "PR already exists for branch ${FORK_OWNER}:${{ steps.branch_info.outputs.source_branch }} -> ${UPSTREAM_REPO}:${BASE_BRANCH}, skipping creation"
 
