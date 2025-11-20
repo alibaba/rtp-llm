@@ -8,11 +8,11 @@
 #include "rtp_llm/cpp/cache_new/MemoryBlockCache.h"
 #include "rtp_llm/cpp/cache_new/SingleTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache_new/test/mock/TestRpcService.h"
-#include "rtp_llm/cpp/cache_new/TpBroadcastManager.h"
 #include "rtp_llm/cpp/config/GptInitParameter.h"
 #include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
+#include "rtp_llm/cpp/model_rpc/TpBroadcastManager.h"
 
 namespace rtp_llm::test {
 

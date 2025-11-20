@@ -4,7 +4,6 @@
 #include "rtp_llm/cpp/cache_new/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache_new/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache_new/MemoryBlockCache.h"
-#include "rtp_llm/cpp/cache_new/TpBroadcastManager.h"
 #include "rtp_llm/cpp/devices/DeviceBase.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 

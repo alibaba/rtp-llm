@@ -3,9 +3,8 @@
 #include "autil/LockFreeThreadPool.h"
 #include "rtp_llm/cpp/cache_new/CacheConfig.h"
 #include "rtp_llm/cpp/cache_new/KVCacheConnector.h"
-#include "rtp_llm/cpp/cache_new/TpBroadcastManager.h"
 #include "rtp_llm/cpp/cache_new/types.h"
-#include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
+#include "rtp_llm/cpp/model_rpc/TpBroadcastManager.h"
 
 #include <map>
 

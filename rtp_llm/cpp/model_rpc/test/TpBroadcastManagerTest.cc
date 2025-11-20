@@ -3,7 +3,7 @@
 #include "grpc++/grpc++.h"
 
 #include "autil/NetUtil.h"
-#include "rtp_llm/cpp/cache_new/TpBroadcastManager.h"
+#include "rtp_llm/cpp/model_rpc/TpBroadcastManager.h"
 
 namespace rtp_llm::test {
 
