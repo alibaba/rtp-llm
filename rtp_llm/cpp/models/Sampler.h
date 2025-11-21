@@ -21,8 +21,6 @@ private:
 
 private:
     rtp_llm::DeviceBase* device_;
-    rtp_llm::BufferPtr   eos_ids_;
-    rtp_llm::BufferPtr   eos_ids_host_;
 };
 
 }  // namespace rtp_llm

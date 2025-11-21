@@ -380,46 +380,5 @@ template void invokeBatchApplyRepetitionPenalty(half*        logits,
                                                 const int    step,
                                                 cudaStream_t stream);
 
-template<typename T>
-__global__ void batchApplyMinLengthPenaltyNew(T*         logits,
-                                              const int* min_lengths,
-                                              const int* end_ids,
-                                              const int* sequence_lengths,
-                                              const int* input_lengths,
-                                              const int  vocab_size_padded,
-                                              const int  decoder_batch_size) {
-    int bid = threadIdx.x + blockIdx.x * blockDim.x;  // batch index
-    if ((bid < decoder_batch_size && sequence_lengths[bid] - input_lengths[bid] < min_lengths[bid])
-        || (bid >= decoder_batch_size && min_lengths[bid] > 1)) {
-        T mask_val                                     = (std::is_same<T, half>::value) ? -65504.0f : -FLT_MAX;
-        logits[bid * vocab_size_padded + end_ids[bid]] = mask_val;
-    }
-}
-
-template<typename T>
-void invokeMinLengthPenaltyNew(T*           logits,
-                               const int*   min_lengths,
-                               const int*   end_ids,
-                               const int*   sequnece_lengths,
-                               const int*   input_lengths,
-                               const int    decoder_batch_size,
-                               const int    batch_size,
-                               const int    vocab_size_padded,
-                               cudaStream_t stream) {
-    const int block_size = min(batch_size, 1024);
-    const int grid_size  = (batch_size + block_size - 1) / block_size;
-    batchApplyMinLengthPenaltyNew<<<grid_size, block_size, 0, stream>>>(
-        logits, min_lengths, end_ids, sequnece_lengths, input_lengths, vocab_size_padded, decoder_batch_size);
-}
-
-template void invokeMinLengthPenaltyNew(float*       logits,
-                                        const int*   min_lengths,
-                                        const int*   end_ids,
-                                        const int*   sequnece_lengths,
-                                        const int*   input_lengths,
-                                        const int    decoder_batch_size,
-                                        const int    context_batch_size,
-                                        const int    vocab_size_padded,
-                                        cudaStream_t stream);
 
 }  // namespace rtp_llm
