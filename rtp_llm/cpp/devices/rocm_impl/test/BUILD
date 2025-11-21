@@ -48,7 +48,7 @@ test_deps = [
 cc_test(
     name = "rocm_memory_test",
     srcs = [
-        "AllocatorTest.cc",
+        "RocmAllocatorTest.cc",
     ],
     data = [],
     env = device_test_envs(),
