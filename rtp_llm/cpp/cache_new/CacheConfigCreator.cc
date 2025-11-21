@@ -29,7 +29,6 @@ CacheConfig CacheConfigCreator::createBasicConfig(const rtp_llm::GptInitParamete
     }
 
     CacheConfig config;
-    config.layer_type_num     = 1;
     config.layer_num          = layer_num;
     config.block_num          = 0;
     config.seq_size_per_block = static_cast<size_t>(param.seq_size_per_block_);
@@ -47,9 +46,8 @@ CacheConfig CacheConfigCreator::createBasicConfig(const rtp_llm::GptInitParamete
         spec->kv_lora_rank       = static_cast<uint>(param.kv_lora_rank_);
         spec->rope_head_dim      = static_cast<uint>(param.rope_head_dim_);
         spec->local_head_num_kv  = 1;  // mla set local_head_num_kv to 1
-        spec->layer_ids_         = all_layer_ids;
 
-        config.layer_type_params.push_back(spec);
+        config.cache_specs.push_back(spec);
         config.block_size = static_cast<int>(spec->block_size() * spec->layer_num);
 
         // Set block strides for backward compatibility
@@ -65,9 +63,8 @@ CacheConfig CacheConfigCreator::createBasicConfig(const rtp_llm::GptInitParamete
         spec->block_nums         = 0;
         spec->local_head_num_kv  = static_cast<uint>(std::max(1, local_head_num_kv));
         spec->size_per_head      = static_cast<uint>(param.size_per_head_);
-        spec->layer_ids_         = all_layer_ids;
 
-        config.layer_type_params.push_back(spec);
+        config.cache_specs.push_back(spec);
         config.block_size = static_cast<int>(spec->block_size() * spec->layer_num);
 
         // Set block strides for backward compatibility

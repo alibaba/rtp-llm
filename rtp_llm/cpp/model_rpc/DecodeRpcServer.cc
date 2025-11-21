@@ -90,8 +90,8 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
 
     auto cache_manager = engine_->resourceContext().cache_manager;
     auto reserve_block_num =
-        maga_init_params_.gpt_init_parameter.fifo_scheduler_config.scheduler_reserve_resource_ratio * cache_manager->totalBlocksNums() / 100;
-    auto current_blocks = cache_manager->availableBlocksNums();
+        maga_init_params_.gpt_init_parameter.fifo_scheduler_config.scheduler_reserve_resource_ratio * cache_manager->totalBlocksNum() / 100;
+    auto current_blocks = cache_manager->availableBlocksNum();
     if (current_blocks < reserve_block_num) {
         string error_msg = "request: [" + decode_context.request_key + "] malloc kv cache block failed at decode node, "
                            + "current_blocks = " + std::to_string(current_blocks)

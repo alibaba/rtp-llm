@@ -27,18 +27,22 @@ namespace rtp_llm {
 
 class KVCacheGroup {
 public:
-    KVCacheGroup(const LayerIdsType& layer_ids, std::shared_ptr<KVCacheSpec> group_spec, BlockPoolPtr block_pool):
+    KVCacheGroup(const LayerIdsType&          layer_ids,
+                 std::shared_ptr<KVCacheSpec> kvcache_spec,
+                 BlockPoolPtr                 block_pool,
+                 int                          group_id):
         layer_ids_(layer_ids),
-        group_spec_(std::move(group_spec)),
+        kvcache_spec_(std::move(kvcache_spec)),
         block_pool_(block_pool),
         block_cache_(block_pool_->blockCache()),
-        seq_size_per_block_(group_spec_->seq_size_per_block) {}
+        group_id_(group_id),
+        seq_size_per_block_(kvcache_spec_->seq_size_per_block) {}
 
     virtual ~KVCacheGroup() = default;
 
     bool         init();
     virtual bool malloc(const CacheKeysType& cache_keys, BlockIndicesType& block_indices, int seq_len) = 0;
-    // TODO, match 替换为try match，和touch
+    // TODO, match 替换为try match，热度不增加
     virtual MatchResult match(const CacheKeysType& cache_keys) = 0;
     MatchResult         matchSingleKey(CacheKeyType cache_key);
     virtual void        free(const BlockIndicesType& block_indices) = 0;
@@ -51,24 +55,18 @@ public:
 
     std::unordered_map<int, torch::Tensor> layerCacheBase() const;
     BlockAddrInfo                          convertIndexToAddr(int layer_id, int block_id) const;
-    BlockBufferInfo                        convertIndexToBuffer(int layer_id, int block_id) const;
+    BlockBufferPtrInfo                     convertIndexToBuffer(int layer_id, int block_id) const;
 
-    size_t freeBlockNums() const;
+    size_t freeBlocksNum() const;
     bool   ensureFreeBlocks(int need_blocks);
     int    seqSizePerBlock() const;
 
-    // TODO, optimize this
-    void setGroupId(int group_id) {
-        group_id_ = group_id;
-    }
-
 protected:
     LayerIdsType                 layer_ids_;
-    std::shared_ptr<KVCacheSpec> group_spec_;
+    std::shared_ptr<KVCacheSpec> kvcache_spec_;
     BlockPoolPtr                 block_pool_;
     BlockCacheV1Ptr              block_cache_;
-    // TODO，放在哪里比较合适。
-    int group_id_ = 0;
+    int                          group_id_ = 0;
 
     int                                    seq_size_per_block_;
     std::unordered_map<int, torch::Tensor> gloabl_layer_to_kv_tensors;

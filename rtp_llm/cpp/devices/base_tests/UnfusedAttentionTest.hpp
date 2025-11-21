@@ -247,7 +247,7 @@ void UnfusedAttentionTest::addFusedQKVBiasTransposeTest(size_t batch_size,
     auto seq_len_with_prefix = seq_len + params.common.max_prefix_length;
 
     auto qkv_buf_fp8 =
-        cache_conf.layer_type_params[0]->dtype == DataType::TYPE_FP8_E4M3 ?
+        cache_conf.cache_specs[0]->dtype == DataType::TYPE_FP8_E4M3 ?
             device->allocateBuffer({DataType::TYPE_FP8_E4M3,
                                     {batch_size, (num_heads + num_key_value_heads * 2), seq_len_with_prefix, head_dim},
                                     AllocationType::DEVICE},

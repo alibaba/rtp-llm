@@ -13,7 +13,7 @@ SingleTypeKVCacheAllocator::SingleTypeKVCacheAllocator(const CacheConfig&   conf
     KVCacheAllocator(config, device, atype) {}
 
 bool SingleTypeKVCacheAllocator::init() {
-    auto&           spec        = config_.layer_type_params[0];
+    auto&           spec        = config_.cache_specs[0];
     BlockPoolConfig pool_config = BlockPoolConfigHelper::createKVFirstConfig(
         static_cast<uint32_t>(config_.layer_num), static_cast<uint32_t>(config_.block_num), spec);
 
@@ -24,41 +24,18 @@ bool SingleTypeKVCacheAllocator::init() {
     }
 
     std::vector<int> layer_ids(config_.layer_ids[0]);
-    if (config_.layer_type_params.empty()) {
-        RTP_LLM_LOG_ERROR("no layer_type_params found in CacheConfig");
+    if (config_.cache_specs.empty()) {
+        RTP_LLM_LOG_ERROR("no cache_specs found in CacheConfig");
         return false;
     }
 
-    full_kv_cache_group_ = std::make_shared<FullKVCacheGroup>(layer_ids, spec, block_pool_);
-
-    // if (cache_type == KVCacheType::MultiHeadLatentAttention) {
-    //     // Use MLA specialization (fields remain default for now)
-    //     MLAKVCacheSpec mla_spec;
-    //     mla_spec.layer_ids_ = layer_ids;
-    //     mla_spec.seq_size_per_block = static_cast<uint>(config_.seq_size_per_block);
-    //     // Construct group with MLA spec
-    //     auto block_cache = std::make_shared<BlockCacheV1>(static_cast<size_t>(config_.seq_size_per_block));
-    //     full_kv_cache_group_ = std::make_shared<FullKVCacheGroup>(
-    //         layer_ids, mla_spec, block_cache, block_pool_
-    //     );
-    // } else if (cache_type == KVCacheType::MultiHeadAttention) {
-    //     MHAKVCacheSpec mha_spec;
-    //     mha_spec.layer_ids_ = layer_ids;
-    //     mha_spec.seq_size_per_block = static_cast<uint>(config_.seq_size_per_block);
-    //     auto block_cache = std::make_shared<BlockCacheV1>(static_cast<size_t>(config_.seq_size_per_block));
-    //     full_kv_cache_group_ = std::make_shared<FullKVCacheGroup>(
-    //         layer_ids, mha_spec, block_cache, block_pool_
-    //     );
-    // } else {
-    //     RTP_LLM_LOG_ERROR("SingleTypeKVCacheAllocator only supports MHA/MLA full attention");
-    //     return false;
-    // }
+    full_kv_cache_group_ = std::make_shared<FullKVCacheGroup>(layer_ids, spec, block_pool_, 0);
 
     if (!full_kv_cache_group_->init()) {
         RTP_LLM_LOG_ERROR("Failed to initialize FullKVCacheGroup");
         return false;
     }
-    full_kv_cache_group_->setGroupId(0);
+    // group id is set via constructor
 
     // kv_cache_groups_.push_back(full_kv_cache_group_);
 
@@ -70,9 +47,7 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     int batch_size = malloc_info.batch_kv_cache_resource->batchSize();
     int reuse_len  = 0;
 
-    // TODO, 这里是啥含义呢？在外围做掉？
-    int seq_len =
-        (malloc_info.total_seq_len >= 0) ? malloc_info.total_seq_len : malloc_info.complete_token_ids->seqLength();
+    int  seq_len        = malloc_info.total_seq_len;
     bool has_common_len = (malloc_info.common_seq_len >= 0) && (malloc_info.common_seq_len <= seq_len);
     int  common_seq_len = has_common_len ? malloc_info.common_seq_len : seq_len;
     // ensure group 0 exists
@@ -117,6 +92,7 @@ MallocResult SingleTypeKVCacheAllocator::incrMalloc(const MallocInfo& malloc_inf
         auto& block_indices = br.group_block_ids[0]->block_indices;
         if (!full_kv_cache_group_->malloc(cache_keys, block_indices, seq_len)) {
             // TODO，回滚已经malloc的资源。
+            // 所有 batch 都要回退
             return {false, 0};
         }
     }
@@ -194,25 +170,25 @@ BlockAddrInfo SingleTypeKVCacheAllocator::convertIndexToAddr(int layer_id, int b
     return full_kv_cache_group_->convertIndexToAddr(layer_id, block_id);
 }
 
-BlockBufferInfo SingleTypeKVCacheAllocator::convertIndexToBuffer(int layer_id, int block_id) const {
+BlockBufferPtrInfo SingleTypeKVCacheAllocator::convertIndexToBuffer(int layer_id, int block_id) const {
     return full_kv_cache_group_->convertIndexToBuffer(layer_id, block_id);
 }
 
-size_t SingleTypeKVCacheAllocator::freeBlocksNums() const {
-    return block_pool_->freeBlockNums();
+size_t SingleTypeKVCacheAllocator::freeBlocksNum() const {
+    return block_pool_->freeBlocksNum();
 }
 
-size_t SingleTypeKVCacheAllocator::availableBlocksNums() const {
+size_t SingleTypeKVCacheAllocator::availableBlocksNum() const {
     // TODO: free blocks nums not equal to available blocks nums when block cache holds blocks reference
-    return block_pool_->freeBlockNums();
+    return block_pool_->freeBlocksNum();
 }
 
-size_t SingleTypeKVCacheAllocator::totalBlocksNums() const {
-    return block_pool_->totalBlockNums();
+size_t SingleTypeKVCacheAllocator::totalBlocksNum() const {
+    return block_pool_->totalBlocksNum();
 }
 
 size_t SingleTypeKVCacheAllocator::maxSeqLen() const {
-    return block_pool_->totalBlockNums() * full_kv_cache_group_->seqSizePerBlock();
+    return block_pool_->totalBlocksNum() * full_kv_cache_group_->seqSizePerBlock();
 }
 
 KVCacheBuffer SingleTypeKVCacheAllocator::kvCacheBuffer() const {

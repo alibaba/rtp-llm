@@ -75,7 +75,7 @@ void KVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, const BlockI
         copy_params.reserve(static_cast<CopyType>(i), copy_nums[i]);
     }
 
-    auto&  spec         = config_.layer_type_params[0];
+    auto&  spec         = config_.cache_specs[0];
     size_t k_block_size = spec->k_block_size();
     size_t v_block_size = spec->v_block_size();
 

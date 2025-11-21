@@ -723,11 +723,9 @@ BatchKVCacheResource& GenerateStream::kvCacheMutable() {
 }
 
 BatchKVCacheResourcePtr GenerateStream::kvCachePtr() {
-    // Return a shared_ptr that wraps the reference, note: this is a non-owning pointer
-    // Use with caution - only valid during the lifetime of the stream
-    return std::shared_ptr<BatchKVCacheResource>(&stream_cache_resource_->kvCacheMutable(), [](BatchKVCacheResource*) {}
-                                                 // Empty deleter, we don't own it
-    );
+    // TODO: set deleter if use BatchKVCacheResource to manager life cycles of kv cache automatically
+    return std::shared_ptr<BatchKVCacheResource>(&stream_cache_resource_->kvCacheMutable(),
+                                                 [](BatchKVCacheResource*) {});
 }
 
 const ResourceContext& GenerateStream::resourceContext() const {

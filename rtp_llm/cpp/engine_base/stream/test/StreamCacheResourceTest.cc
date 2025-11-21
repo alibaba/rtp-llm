@@ -31,7 +31,7 @@ protected:
     void prepareResource(bool reuse_cache = false) {
         auto cache_config = init_config();
         cache_manager_    = std::make_shared<CacheManager>(cache_config, device_);
-        ASSERT_EQ(cache_manager_->freeBlockNums(), 8);
+        ASSERT_EQ(cache_manager_->freeBlocksNum(), 8);
         allocator_ = cache_manager_->kvCacheAllocator();
         ResourceContext resource_context;
         resource_context.cache_manager = cache_manager_;
@@ -76,7 +76,7 @@ TEST_F(StreamCacheResourceTest, testAllocateResource) {
 
     int token_capacity = 1000;
     ASSERT_TRUE(resource.initKVBlock(token_capacity).ok());
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 5);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 5);
     ASSERT_EQ(resource.maxBlockSize(), 3);
     const BatchKVCacheResource& blocks = resource.kvCache();
     CHECK_BLOCK(blocks.batch_block_id, 2, 3);
@@ -84,24 +84,24 @@ TEST_F(StreamCacheResourceTest, testAllocateResource) {
     stream_->setSeqLength(7);
     stream_->setIsContextStream(false);
     ASSERT_TRUE(resource.incrKVBlock(token_capacity).ok());
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 3);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 3);
 
     CHECK_BLOCK(blocks.batch_block_id, 2, 4);
 
     stream_->releaseResource();
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 8);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 8);
 
     ASSERT_EQ(blocks.batch_block_id.size(), 0);
 }
 
 TEST_F(StreamCacheResourceTest, testFallback) {
     prepareResource();
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 8);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 8);
     auto& resource = stream_->streamCacheResource();
 
     int token_capacity = 1000;
     ASSERT_TRUE(resource.initKVBlock(token_capacity).ok());
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 5);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 5);
     ASSERT_EQ(resource.maxBlockSize(), 3);
     const BatchKVCacheResource& blocks = resource.kvCache();
     CHECK_BLOCK(blocks.batch_block_id, 2, 3);
@@ -110,28 +110,28 @@ TEST_F(StreamCacheResourceTest, testFallback) {
     stream_->setIsContextStream(false);
     ASSERT_TRUE(resource.incrKVBlock(token_capacity).ok());
     CHECK_BLOCK(blocks.batch_block_id, 2, 4);
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 3);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 3);
 
     resource.tryReleaseKVBlock(resource.maxBlockSize());
     stream_->setPaused();
     CHECK_BLOCK(blocks.batch_block_id, 2, 0);
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 8);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 8);
 
     token_capacity = 1000;
     ASSERT_TRUE(resource.initKVBlock(token_capacity).ok());
     CHECK_BLOCK(blocks.batch_block_id, 2, 4);
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 3);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 3);
 }
 
 TEST_F(StreamCacheResourceTest, testFallbackWithFastGen) {
     prepareResource();
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 8);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 8);
     auto& resource            = stream_->streamCacheResource();
     stream_->enable_fast_gen_ = true;
 
     int token_capacity = 1000;
     ASSERT_TRUE(resource.initKVBlock(token_capacity).ok());
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 5);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 5);
     ASSERT_EQ(resource.maxBlockSize(), 3);
     const BatchKVCacheResource& blocks = resource.kvCache();
     CHECK_BLOCK(blocks.batch_block_id, 2, 3);
@@ -140,45 +140,45 @@ TEST_F(StreamCacheResourceTest, testFallbackWithFastGen) {
     stream_->setIsContextStream(false);
     ASSERT_TRUE(resource.incrKVBlock(token_capacity).ok());
     CHECK_BLOCK(blocks.batch_block_id, 2, 4);
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 3);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 3);
 
     // first fallback
     resource.tryReleaseKVBlock(resource.maxBlockSize());
     stream_->setPaused();
     CHECK_BLOCK(blocks.batch_block_id, 2, 0);
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 8);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 8);
 
     // first chunk
     token_capacity = 4;
     ASSERT_TRUE(resource.initKVBlock(token_capacity).ok());
     CHECK_BLOCK(blocks.batch_block_id, 2, 2);
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 6);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 6);
 
     // second chunk
     token_capacity = 4;
     ASSERT_TRUE(resource.incrKVBlock(token_capacity).ok());
     CHECK_BLOCK(blocks.batch_block_id, 2, 4);
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 3);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 3);
 
     // fallback again
     resource.tryReleaseKVBlock(resource.maxBlockSize());
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 8);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 8);
 
     // first chunk again
     token_capacity = 4;
     ASSERT_TRUE(resource.initKVBlock(token_capacity).ok());
     CHECK_BLOCK(blocks.batch_block_id, 2, 2);
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 6);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 6);
 }
 
 TEST_F(StreamCacheResourceTest, testPartialFallback) {
     prepareResource();
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 8);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 8);
     auto& resource = stream_->streamCacheResource();
 
     int token_capacity = 1000;
     ASSERT_TRUE(resource.initKVBlock(token_capacity).ok());
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 5);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 5);
     ASSERT_EQ(resource.maxBlockSize(), 3);
     const BatchKVCacheResource& blocks = resource.kvCache();
     CHECK_BLOCK(blocks.batch_block_id, 2, 3);
@@ -187,17 +187,17 @@ TEST_F(StreamCacheResourceTest, testPartialFallback) {
     stream_->setIsContextStream(false);
     ASSERT_TRUE(resource.incrKVBlock(token_capacity).ok());
     CHECK_BLOCK(blocks.batch_block_id, 2, 4);
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 3);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 3);
 
     resource.tryReleaseKVBlock(2);
     stream_->setPaused();
     CHECK_BLOCK(blocks.batch_block_id, 2, 2);
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 6);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 6);
 
     token_capacity = 1000;
     ASSERT_TRUE(resource.initKVBlock(token_capacity).ok());
     CHECK_BLOCK(blocks.batch_block_id, 2, 4);
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 3);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 3);
     ASSERT_EQ(stream_->fallbackPrefixLength(), 4);
     stream_->step();
     ASSERT_EQ(stream_->fallbackPrefixLength(), 0);
@@ -205,13 +205,13 @@ TEST_F(StreamCacheResourceTest, testPartialFallback) {
 
 TEST_F(StreamCacheResourceTest, testPartialFallbackWithFastGen) {
     prepareResource();
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 8);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 8);
     stream_->enable_fast_gen_ = true;
     auto& resource            = stream_->streamCacheResource();
 
     int token_capacity = 1000;
     ASSERT_TRUE(resource.initKVBlock(token_capacity).ok());
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 5);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 5);
     ASSERT_EQ(resource.maxBlockSize(), 3);
     const BatchKVCacheResource& blocks = resource.kvCache();
     CHECK_BLOCK(blocks.batch_block_id, 2, 3);
@@ -220,14 +220,14 @@ TEST_F(StreamCacheResourceTest, testPartialFallbackWithFastGen) {
     stream_->setIsContextStream(false);
     ASSERT_TRUE(resource.incrKVBlock(token_capacity).ok());
     CHECK_BLOCK(blocks.batch_block_id, 2, 4);
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 3);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 3);
 
     // first fallback
     resource.tryReleaseKVBlock(2);
     stream_->setPaused();
     ASSERT_EQ(stream_->fallbackPrefixLength(), 4);
     CHECK_BLOCK(blocks.batch_block_id, 2, 2);
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 6);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 6);
     stream_->step();
     ASSERT_EQ(stream_->fallbackPrefixLength(), 0);
 
@@ -235,24 +235,24 @@ TEST_F(StreamCacheResourceTest, testPartialFallbackWithFastGen) {
     token_capacity = 2;
     ASSERT_TRUE(resource.initKVBlock(token_capacity).ok());
     CHECK_BLOCK(blocks.batch_block_id, 2, 3);
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 5);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 5);
 
     // second chunk
     token_capacity = 2;
     ASSERT_TRUE(resource.incrKVBlock(token_capacity).ok());
     CHECK_BLOCK(blocks.batch_block_id, 2, 4);
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 3);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 3);
 
     // second fallback
     resource.tryReleaseKVBlock(2);
     CHECK_BLOCK(blocks.batch_block_id, 2, 2);
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 6);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 6);
 
     // first chunk again
     token_capacity = 2;
     ASSERT_TRUE(resource.initKVBlock(token_capacity).ok());
     CHECK_BLOCK(blocks.batch_block_id, 2, 3);
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 5);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 5);
     ASSERT_EQ(stream_->fallbackPrefixLength(), 4);
 }
 
@@ -265,7 +265,7 @@ TEST_F(StreamCacheResourceTest, testAllocateResourceWithFastGen) {
     // first chunk
     int token_capacity = 4;
     ASSERT_TRUE(resource.initKVBlock(token_capacity).ok());
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 6);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 6);
     ASSERT_EQ(resource.maxBlockSize(), 2);
     const BatchKVCacheResource& blocks = resource.kvCache();
     CHECK_BLOCK(blocks.batch_block_id, 2, 2);
@@ -273,18 +273,18 @@ TEST_F(StreamCacheResourceTest, testAllocateResourceWithFastGen) {
     // second chunk
     token_capacity = 4;
     ASSERT_TRUE(resource.incrKVBlock(token_capacity).ok());
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 5);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 5);
     CHECK_BLOCK(blocks.batch_block_id, 2, 3);
 
     stream_->setSeqLength(7);
     stream_->setIsContextStream(false);
     ASSERT_TRUE(resource.incrKVBlock(token_capacity).ok());
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 3);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 3);
 
     CHECK_BLOCK(blocks.batch_block_id, 2, 4);
 
     stream_->releaseResource();
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 8);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 8);
 
     ASSERT_EQ(blocks.batch_block_id.size(), 0);
 }
@@ -298,7 +298,7 @@ TEST_F(StreamCacheResourceTest, testReuseCache) {
     stream_->setSeqLength(9);
     stream_->setIsContextStream(false);
     ASSERT_TRUE(resource.incrKVBlock(token_capacity).ok());
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 1);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 1);
 
     auto batch_tokens_1                      = stream_->complete_token_ids_->data(0);
     batch_tokens_1[stream_->seqLength() - 3] = 7;
@@ -310,7 +310,7 @@ TEST_F(StreamCacheResourceTest, testReuseCache) {
     stream_->setFinishedWithoutLock();
     stream_->releaseResource();
 
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 3);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 3);
     ASSERT_EQ(cache_manager_->cacheItemNum(), 2);
     ASSERT_TRUE(cache_manager_->blockCache().hasKey({1, 2, 3, 4, 5, 6, 7, 8}));
     ASSERT_TRUE(cache_manager_->blockCache().hasKey({1, 2, 3, 4, 5, 6, 9, 10}));
@@ -343,16 +343,16 @@ TEST_F(StreamCacheResourceTest, testReuseCache) {
     auto& resource2 = stream_->streamCacheResource();
     token_capacity  = 1000;
     ASSERT_TRUE(resource2.initKVBlock(token_capacity).ok());
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 1);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 1);
 
     stream_->setIsContextStream(false);
     stream_->setSeqLength(10);
     ASSERT_TRUE(resource2.incrKVBlock(token_capacity).ok());
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 1);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 1);
 
     stream_->setSeqLength(11);
     ASSERT_TRUE(resource2.incrKVBlock(token_capacity).ok());
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 0);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 0);
 
     auto tokens_1                      = stream_->complete_token_ids_->data(0);
     tokens_1[stream_->seqLength() - 2] = 12;
@@ -363,7 +363,7 @@ TEST_F(StreamCacheResourceTest, testReuseCache) {
 
     stream_->setFinishedWithoutLock();
     stream_->releaseResource();
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 2);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 2);
     ASSERT_EQ(cache_manager_->cacheItemNum(), 3);
 }
 
@@ -377,10 +377,9 @@ TEST_F(StreamCacheResourceTest, testReuseCacheWithFastGen) {
     stream_->setSeqLength(7);
     stream_->setIsContextStream(false);
     ASSERT_TRUE(resource.incrKVBlock(token_capacity).ok());
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 3);
-    stream_->setFinishedWithoutLock();
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 3);
     stream_->releaseResource();
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 5);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 5);
 
     ASSERT_EQ(cache_manager_->cacheItemNum(), 1);
     ASSERT_TRUE(cache_manager_->blockCache().hasKey({1, 2, 3, 4, 5, 6}));
@@ -409,45 +408,45 @@ TEST_F(StreamCacheResourceTest, testReuseCacheWithFastGen) {
     token_capacity = 2;
     ASSERT_TRUE(resource2.initKVBlock(token_capacity).ok());
     ASSERT_EQ(stream_->reuseLength(), 2);
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 4);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 4);
 
     // second chunk
     token_capacity = 2;
     ASSERT_TRUE(resource2.incrKVBlock(token_capacity).ok());
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 3);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 3);
 
     // third chunk
     token_capacity = 2;
     ASSERT_TRUE(resource2.incrKVBlock(token_capacity).ok());
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 1);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 1);
 
     stream_->setIsContextStream(false);
     stream_->setSeqLength(8);
     ASSERT_TRUE(resource2.incrKVBlock(token_capacity).ok());
     ASSERT_EQ(stream_->maxBlockSize(), 4);
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 1);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 1);
 
     // partial fallback
     stream_->setFinishedWithoutLock();
     stream_->tryReleaseKVBlock(2);
     stream_->setPaused();
     ASSERT_EQ(stream_->maxBlockSize(), 2);
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 4);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 4);
 
     // first chunk again
     token_capacity = 2;
     ASSERT_TRUE(resource2.initKVBlock(token_capacity).ok());
     ASSERT_EQ(stream_->reuseLength(), 2);
     ASSERT_EQ(stream_->prefixLength(), 4);
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 3);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 3);
     ASSERT_EQ(stream_->maxBlockSize(), 3);
 
     // full fallback
     stream_->setFinishedWithoutLock();
     stream_->tryReleaseKVBlock(stream_->maxBlockSize());
     stream_->setPaused();
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 3);
-    ASSERT_EQ(cache_manager_->availableBlockNums(), 8);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 3);
+    ASSERT_EQ(cache_manager_->availableBlocksNum(), 8);
     ASSERT_EQ(cache_manager_->cacheItemNum(), 2);
     ASSERT_EQ(stream_->maxBlockSize(), 0);
 
@@ -457,12 +456,12 @@ TEST_F(StreamCacheResourceTest, testReuseCacheWithFastGen) {
     ASSERT_EQ(stream_->reuseLength(), 6);
     ASSERT_EQ(stream_->prefixLength(), 6);
     ASSERT_EQ(stream_->currentChunkLen(), 8);
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 1);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 1);
     ASSERT_EQ(stream_->maxBlockSize(), 4);
 
     stream_->setFinishedWithoutLock();
     stream_->releaseResource();
-    ASSERT_EQ(cache_manager_->availableBlockNums(), 8);
+    ASSERT_EQ(cache_manager_->availableBlocksNum(), 8);
 }
 
 TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock) {
@@ -471,7 +470,7 @@ TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock) {
 
     int token_capacity = 1000;
     ASSERT_TRUE(resource.initKVBlock(token_capacity).ok());
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 5);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 5);
     ASSERT_EQ(resource.maxBlockSize(), 3);
     ASSERT_EQ(allocator_->blockRefCounter().getRefCounter(1), 2);
     ASSERT_EQ(allocator_->blockRefCounter().getRefCounter(2), 2);
@@ -479,7 +478,7 @@ TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock) {
 
     stream_->setFinishedWithoutLock();
     resource.tryReleaseKVBlock(1);
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 6);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 6);
     ASSERT_EQ(resource.maxBlockSize(), 2);
 
     ASSERT_EQ(allocator_->blockRefCounter().getRefCounter(1), 2);
@@ -488,7 +487,7 @@ TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock) {
 
     stream_->setFinishedWithoutLock();
     resource.tryReleaseKVBlock(2);
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 8);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 8);
     ASSERT_EQ(resource.maxBlockSize(), 0);
 
     ASSERT_EQ(allocator_->blockRefCounter().getRefCounter(1), 0);
@@ -496,7 +495,7 @@ TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock) {
     ASSERT_EQ(allocator_->blockRefCounter().getRefCounter(3), 0);
 
     ASSERT_TRUE(resource.incrKVBlock(token_capacity).ok());
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 5);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 5);
     ASSERT_EQ(resource.maxBlockSize(), 3);
 
     ASSERT_EQ(allocator_->blockRefCounter().getRefCounter(1), 2);
@@ -508,7 +507,7 @@ TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock) {
 
     stream_->setFinishedWithoutLock();
     resource.tryReleaseKVBlock(2);
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 7);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 7);
     ASSERT_EQ(resource.maxBlockSize(), 1);
 
     resource.resource_context_.reuse_cache = true;
@@ -519,13 +518,13 @@ TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock) {
 
     stream_->setFinishedWithoutLock();
     resource.tryReleaseKVBlock(1);
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 7);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 7);
     ASSERT_EQ(resource.maxBlockSize(), 0);
     ASSERT_EQ(cache_manager_->cacheItemNum(), 2);
 
     stream_->setFinishedWithoutLock();
     resource.tryReleaseKVBlock(1);
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 7);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 7);
     ASSERT_EQ(resource.maxBlockSize(), 0);
     ASSERT_EQ(cache_manager_->cacheItemNum(), 2);
 }
@@ -539,17 +538,17 @@ TEST_F(StreamCacheResourceTest, testQueryLevelReuseCacheControl) {
     stream_->generate_input_->generate_config->reuse_cache = true;
     int token_capacity                                     = 1000;
     ASSERT_TRUE(resource.initKVBlock(token_capacity).ok());
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 5);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 5);
     ASSERT_EQ(resource.maxBlockSize(), 3);
 
     // Test with query-level reuse_cache = false
     stream_->releaseResource();
     // Re-initialize batch resource after release
     resource.init(stream_->currentBatchSize());
-    size_t baseline_free_blocks                            = cache_manager_->freeBlockNums();
+    size_t baseline_free_blocks                            = cache_manager_->freeBlocksNum();
     stream_->generate_input_->generate_config->reuse_cache = false;
     ASSERT_TRUE(resource.initKVBlock(token_capacity).ok());
-    ASSERT_EQ(cache_manager_->freeBlockNums(),
+    ASSERT_EQ(cache_manager_->freeBlocksNum(),
               baseline_free_blocks >= 3 ? baseline_free_blocks - 3 : baseline_free_blocks);
     ASSERT_EQ(resource.maxBlockSize(), 3);
 
@@ -565,7 +564,7 @@ TEST_F(StreamCacheResourceTest, testQueryLevelReuseCacheMasterSwitch) {
     stream_->generate_input_->generate_config->reuse_cache = true;
     int token_capacity                                     = 1000;
     ASSERT_TRUE(resource.initKVBlock(token_capacity).ok());
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 5);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 5);
     ASSERT_EQ(resource.maxBlockSize(), 3);
 
     // Test with query-level reuse_cache = false, should also be ignored
@@ -574,7 +573,7 @@ TEST_F(StreamCacheResourceTest, testQueryLevelReuseCacheMasterSwitch) {
     resource.init(stream_->currentBatchSize());
     stream_->generate_input_->generate_config->reuse_cache = false;
     ASSERT_TRUE(resource.initKVBlock(token_capacity).ok());
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 5);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 5);
     ASSERT_EQ(resource.maxBlockSize(), 3);
 
     stream_->releaseResource();

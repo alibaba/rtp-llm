@@ -53,7 +53,7 @@ BlockAddrInfo LayerFirstLayoutStrategy::convertIndexToAddr(int layer_id, int blo
     return {tensor.data_ptr(), tensor.data_ptr(), nullptr, nullptr};
 }
 
-BlockBufferInfo LayerFirstLayoutStrategy::convertIndexToBuffer(int layer_id, int block_id) const {
+BlockBufferPtrInfo LayerFirstLayoutStrategy::convertIndexToBuffer(int layer_id, int block_id) const {
     if (layer_id >= layer_kv_tensors_.size()) {
         RTP_LLM_LOG_ERROR("Layer ID %d out of range (max: %zu)", layer_id, layer_kv_tensors_.size());
         return {nullptr, nullptr};
@@ -183,7 +183,7 @@ BlockAddrInfo KVFirstLayoutStrategy::convertIndexToAddr(int layer_id, int block_
             nullptr};
 }
 
-BlockBufferInfo KVFirstLayoutStrategy::convertIndexToBuffer(int layer_id, int block_id) const {
+BlockBufferPtrInfo KVFirstLayoutStrategy::convertIndexToBuffer(int layer_id, int block_id) const {
     if (layer_id >= config_.layer_num) {
         RTP_LLM_LOG_ERROR("Layer ID %d out of range (max: %d)", layer_id, config_.layer_num);
         return {nullptr, nullptr};
