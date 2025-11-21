@@ -25,9 +25,9 @@ public:
 
     void regUserMr(size_t model_id) override;
 
-    size_t freeBlocksNums() const override;
-    size_t availableBlocksNums() const override;
-    size_t totalBlocksNums() const override;
+    size_t freeBlocksNum() const override;
+    size_t availableBlocksNum() const override;
+    size_t totalBlocksNum() const override;
     size_t maxSeqLen() const override;
 
     bool updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,

@@ -13,8 +13,11 @@ namespace rtp_llm {
 
 class FullKVCacheGroup: public KVCacheGroup {
 public:
-    FullKVCacheGroup(const LayerIdsType& layer_ids, std::shared_ptr<KVCacheSpec> group_spec, BlockPoolPtr block_pool):
-        KVCacheGroup(layer_ids, group_spec, block_pool) {}
+    FullKVCacheGroup(const LayerIdsType&          layer_ids,
+                     std::shared_ptr<KVCacheSpec> kvcache_spec,
+                     BlockPoolPtr                 block_pool,
+                     int                          group_id):
+        KVCacheGroup(layer_ids, kvcache_spec, block_pool, group_id) {}
 
     bool        malloc(const CacheKeysType& cache_keys, BlockIndicesType& block_indices, int seq_len) override;
     MatchResult match(const CacheKeysType& cache_keys) override;

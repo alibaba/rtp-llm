@@ -59,7 +59,6 @@ public:
     void                    initGroups(int group_nums);
     void                    resize(size_t batch_size);
     void                    resize(size_t batch_id, int reserver_blocks, int value);
-    void                    shrink(size_t batch_id, int reserver_blocks);
     int                     maxBlockSize() const;
     const std::vector<int>& blocks(int batch_id, int group_id = 0) const;
     void                    clear();

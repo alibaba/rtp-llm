@@ -39,6 +39,7 @@ struct BlockBufferInfo {
     // BufferPtr v_scale_addr;
 };
 
+// TODO: change into Buffer Ptr
 struct CacheLayerLayout {
     std::vector<int>           layer_to_groups;
     std::vector<torch::Tensor> layers_to_buffer_ptrs;

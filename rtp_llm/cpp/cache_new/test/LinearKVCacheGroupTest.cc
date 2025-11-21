@@ -22,25 +22,25 @@ protected:
 TEST_F(LinearKVCacheGroupTest, MallocFreeTest) {
     auto block_pool = createBlockPool();
     block_pool->init();
-    ASSERT_EQ(block_pool->freeBlockNums(), 9);
+    ASSERT_EQ(block_pool->freeBlocksNum(), 9);
 
     auto spec                = make_shared<MHAKVCacheSpec>();
     spec->seq_size_per_block = 2;
 
-    LinearKVCacheGroup group1({}, spec, block_pool);
+    LinearKVCacheGroup group1({}, spec, block_pool, 0);
 
     CacheKeysType    cache_keys = {101, 102, 103};
     BlockIndicesType block_indices;
 
     ASSERT_TRUE(group1.malloc(cache_keys, block_indices, 7));
-    ASSERT_EQ(block_pool->freeBlockNums(), 5);
+    ASSERT_EQ(block_pool->freeBlocksNum(), 5);
     ASSERT_EQ(block_indices.size(), 4);
 
     BlockIndicesType expected_result = {1, 2, 3, 4};
     ASSERT_EQ(block_indices, expected_result);
 
     group1.free(block_indices);
-    ASSERT_EQ(block_pool->freeBlockNums(), 9);
+    ASSERT_EQ(block_pool->freeBlocksNum(), 9);
 
     ASSERT_FALSE(group1.malloc(cache_keys, block_indices, 180));
 }
@@ -52,13 +52,13 @@ TEST_F(LinearKVCacheGroupTest, RemoveSkippedBlocksTest) {
     auto spec                = make_shared<MHAKVCacheSpec>();
     spec->seq_size_per_block = 2;
 
-    LinearKVCacheGroup group1({}, spec, block_pool);
+    LinearKVCacheGroup group1({}, spec, block_pool, 0);
 
     CacheKeysType    cache_keys = {101, 102, 103, 104};
     BlockIndicesType block_indices1;
 
     ASSERT_TRUE(group1.malloc(cache_keys, block_indices1, 8));
-    ASSERT_EQ(block_pool->freeBlockNums(), 5);
+    ASSERT_EQ(block_pool->freeBlocksNum(), 5);
     ASSERT_EQ(block_indices1.size(), 4);
 
     BlockIndicesType old_indices   = {-1, 2, -1, 4};
@@ -70,7 +70,7 @@ TEST_F(LinearKVCacheGroupTest, RemoveSkippedBlocksTest) {
     ASSERT_EQ(block_indices[2], NULL_BLOCK_IDX);
     ASSERT_EQ(block_indices[3], 4);
 
-    ASSERT_EQ(block_pool->freeBlockNums(), 6);
+    ASSERT_EQ(block_pool->freeBlocksNum(), 6);
 }
 
 TEST_F(LinearKVCacheGroupTest, MatchTest) {
@@ -85,7 +85,7 @@ TEST_F(LinearKVCacheGroupTest, MatchTest) {
     auto spec                = make_shared<MHAKVCacheSpec>();
     spec->seq_size_per_block = 4;
 
-    LinearKVCacheGroup group1({}, spec, block_pool);
+    LinearKVCacheGroup group1({}, spec, block_pool, 0);
 
     // zero math
     CacheKeysType cache_keys    = {103, 104, 105, 106};

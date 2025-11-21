@@ -25,16 +25,9 @@ void BatchKVCacheResource::initGroups(int group_nums) {
     }
 }
 
-// TODO, fix name
 void BatchKVCacheResource::resize(size_t batch_id, int reserver_blocks, int value) {
     RTP_LLM_CHECK(batch_resource.size() > batch_id);
     batch_resource[batch_id].resizeBlocks(reserver_blocks, value);
-}
-
-void BatchKVCacheResource::shrink(size_t batch_id, int reserver_blocks) {
-    RTP_LLM_CHECK(batch_resource.size() > batch_id
-                  && batch_resource[batch_id].group_block_ids[0]->size() >= size_t(reserver_blocks));
-    batch_resource[batch_id].resizeBlocks(reserver_blocks, 0);
 }
 
 int BatchKVCacheResource::maxBlockSize() const {
