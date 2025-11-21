@@ -96,8 +96,10 @@ Allocator<AllocatorType::CUDA>::Allocator(int device_id): PurePointerCudaAllocat
     cudaDeviceProp props;
     check_cuda_value(cudaGetDeviceProperties(&props, device_id));
 
-    // enable vmem allocation only on sm80+ (A100, Rtx 3090, etc.)
-    _enable_virtual_mem_allocation = props.major >= 8 && props.minor > 0;
+    // enable vmem allocation only on sm80+ (A100, etc.)
+    auto sm_code = props.major * 10 + props.minor;
+    _enable_virtual_mem_allocation =
+        (sm_code == 80 || sm_code == 87 || sm_code == 90 || sm_code == 100 || sm_code == 120);
 
     vmem_allocations_ = std::make_unique<std::unordered_map<CUdeviceptr, VmemBlock>>();
 }
