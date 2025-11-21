@@ -68,8 +68,13 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("dtype", &PyAttentionInputs::dtype)
         .def_readwrite("kv_block_offset", &PyAttentionInputs::kv_block_offset)
         .def_readwrite("cu_seqlens", &PyAttentionInputs::cu_seqlens)
+        .def_readwrite("cu_kv_seqlens", &PyAttentionInputs::cu_kv_seqlens)
+        .def_readwrite("context_total_kv_length", &PyAttentionInputs::context_total_kv_length)
         .def_readwrite("padding_offset", &PyAttentionInputs::padding_offset)
         .def_readwrite("cache_store_inputs", &PyAttentionInputs::cache_store_inputs)
+        .def("set_dtype_from_tensor", [](PyAttentionInputs& self, torch::Tensor t) {
+            self.dtype = t.dtype();
+        })
         .def("__repr__", [](const PyAttentionInputs& self) { return "PyAttentionInputs"; });
 
     pybind11::class_<BertEmbeddingInputs>(m, "BertEmbeddingInputs")

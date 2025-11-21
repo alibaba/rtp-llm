@@ -1,4 +1,3 @@
-
 test_envs = {
     "DEVICE_RESERVE_MEMORY_BYTES": "512000000",  # 512MB
     "LOAD_PYTHON_MODEL": "1",
@@ -13,5 +12,19 @@ py_test (
     env = test_envs,
     tags = ["H20"],
     exec_properties = {'gpu':'H20'},
+)
+
+py_test(
+    name = "qwen3_sp_perf_test",
+    srcs = ["qwen3_sp_perf_test.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:qwen3_sp",
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    data = [
+        "//rtp_llm/models_py/standalone:param.json",
+    ],
+    env = test_envs,
+    exec_properties = {'gpu':'A10'},
 )
 

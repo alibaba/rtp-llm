@@ -1,5 +1,7 @@
 load("//bazel:arch_select.bzl", get_triton_deps = "triton_deps")
 
+exports_files(["param.json"])
+
 py_library(
     name = "rtp_auto_model",
     srcs = ["rtp_auto_model.py"],
@@ -54,3 +56,17 @@ py_library(
     ],
     visibility = ["//visibility:public"],
 )
+
+py_library(
+    name = "qwen3_sp",
+    srcs = ["qwen3_sp.py"],
+    deps = [
+        "//rtp_llm/models_py:models",
+        "//rtp_llm:config",
+        "//rtp_llm/model_loader:loader",
+        "//rtp_llm:utils",
+        "//rtp_llm:ops",
+    ],
+    visibility = ["//visibility:public"],
+)
+
