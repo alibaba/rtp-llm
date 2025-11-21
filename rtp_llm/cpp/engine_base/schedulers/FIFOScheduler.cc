@@ -24,7 +24,7 @@ FIFOScheduler::FIFOScheduler(const rtp_llm::GptInitParameter&     params,
     need_fill_fake_stream_(params.dp_size_ > 1 && params.tp_rank_ == 0),
     fast_gen_max_context_len_(params.fast_gen_max_context_len_),
     metrics_reporter_(metrics_reporter) {
-    reserve_block_num_ = params.scheduler_reserve_resource_ratio_ * cache_manager->availableBlockNums() / 100;
+    reserve_block_num_ = params.fifo_scheduler_config.scheduler_reserve_resource_ratio * cache_manager->availableBlockNums() / 100;
     RTP_LLM_LOG_INFO("max_generate_batch_size is [%d], max_batch_tokens_size is [%d], reserve_block_num is [%d]",
                      max_generate_batch_size_,
                      max_batch_tokens_size_,
