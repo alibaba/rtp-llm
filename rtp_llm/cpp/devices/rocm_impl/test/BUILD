@@ -46,6 +46,20 @@ test_deps = [
 ] + torch_deps()
 
 cc_test(
+    name = "rocm_memory_test",
+    srcs = [
+        "RocmAllocatorTest.cc",
+    ],
+    data = [],
+    env = device_test_envs(),
+    copts = test_copts,
+    linkopts = test_linkopts,
+    deps = test_deps,
+    tags = ["rocm"],
+    exec_properties = {'gpu':'MI308X'},
+)
+
+cc_test(
     name = "rocm_basic_test",
     srcs = [],
     env = device_test_envs(),

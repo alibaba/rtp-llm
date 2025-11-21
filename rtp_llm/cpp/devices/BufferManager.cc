@@ -68,6 +68,17 @@ BufferPtr BufferManager::doAllocate(const BufferParams& params, const BufferHint
     const auto shape     = params.dims;
     const auto alloc_bytes =
         accumulate(shape.begin(), shape.end(), (size_t)1, std::multiplies<size_t>()) * getTypeSize(params.type);
+
+    if (params.vmem_ctl == VmemCtl::ForcePhysical) {
+        if (auto vmem_allocator = dynamic_cast<IVirtualMemAllocator*>(allocator)) {
+            const auto data    = vmem_allocator->mallocPhysical(alloc_bytes);
+            const auto deleter = [this, vmem_allocator](Buffer* buffer) { this->recycle(buffer, vmem_allocator); };
+            const auto buffer  = new Buffer(vmem_allocator->memoryType(), params.type, shape, data, deleter);
+            return BufferPtr(buffer);
+        }
+        // if allocator is not virtual memory allocator, fallback to default logic.
+    }
+
     const auto data    = params.private_alloc ? allocator->mallocPrivate(alloc_bytes) : allocator->malloc(alloc_bytes);
     const auto deleter = [this, allocator](Buffer* buffer) { this->recycle(buffer, allocator); };
     const auto buffer  = new Buffer(allocator->memoryType(), params.type, shape, data, deleter);
