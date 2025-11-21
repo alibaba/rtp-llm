@@ -7,6 +7,14 @@ import rtp_llm.models_py.modules.common.moe.fused_moe as mm
 import rtp_llm.ops.compute_ops as compute_ops
 from rtp_llm.models_py.modules.factory.fused_moe.quant_config import FusedMoEQuantConfig
 from rtp_llm.models_py.modules.factory.fused_moe.type import ExecutorType
+from rtp_llm.models_py.modules.fp8_kernel import (
+    cutlass_moe_mm_fp8_scaled,
+    get_best_config_swap_ab,
+)
+from rtp_llm.models_py.triton_kernels.common.activation import (
+    silu_and_mul,
+    silu_mul_fp8_per_token_quant_batched,
+)
 
 from .util import moe_kernel_quantize_input, moe_permute, moe_unpermute, resize_cache
 
@@ -19,6 +27,10 @@ def run_cutlass_moe_fp8(
     topk_ids: torch.Tensor,
     activation_callable: Callable,
     global_num_experts: int,
+    ab_strides1: torch.Tensor,
+    c_strides1: torch.Tensor,
+    ab_strides2: torch.Tensor,
+    c_strides2: torch.Tensor,
     expert_map: Optional[torch.Tensor],
     w1_scale: Optional[torch.Tensor],
     w2_scale: Optional[torch.Tensor],
@@ -67,6 +79,7 @@ def run_cutlass_moe_fp8(
         assert expert_num_tokens is None
 
     M = a1q.size(0)  # non batched expert M
+
     padded_M = a1q.size(1)  # batched expert M
     _, K, N = w2.shape
     device = a1q.device
@@ -86,6 +99,9 @@ def run_cutlass_moe_fp8(
     topk = local_topk_ids.size(1)
     local_E = w1.size(0)
     inv_perm = None
+    elements_m = topk_ids.numel() * local_E // global_num_experts
+    swap_ab_gemm1 = get_best_config_swap_ab(local_E, elements_m, 2 * N, K)
+    swap_ab_gemm2 = get_best_config_swap_ab(local_E, elements_m, K, N)
 
     if use_batched_format:
         assert expert_num_tokens is not None
@@ -105,7 +121,10 @@ def run_cutlass_moe_fp8(
             padded_M,
             N,
             K,
+            swap_ab_gemm1,
+            swap_ab_gemm2,
         )
+
         w1_scale = w1_scale.reshape(w1_scale.size(0), -1)
         w2_scale = w2_scale.reshape(w2_scale.size(0), -1)
         a1q = a1q.reshape(-1, a1q.size(2))
@@ -142,17 +161,15 @@ def run_cutlass_moe_fp8(
             local_E,
             N,
             K,
+            swap_ab_gemm1,
+            swap_ab_gemm2,
         )
-
-    ab_strides1 = torch.full((w1.size(0),), K, device=device, dtype=torch.int64)
-    c_strides1 = torch.full((w1.size(0),), 2 * N, device=device, dtype=torch.int64)
-    ab_strides2 = torch.full((w1.size(0),), N, device=device, dtype=torch.int64)
-    c_strides2 = torch.full((w1.size(0),), K, device=device, dtype=torch.int64)
 
     if not per_act_token and (expert_map is not None or use_batched_format):
         c1.fill_(0)
 
-    compute_ops.cutlass_moe_mm(
+    # gemm1
+    cutlass_moe_mm_fp8_scaled(
         c1,
         a1q,
         w1,
@@ -165,35 +182,53 @@ def run_cutlass_moe_fp8(
         c_strides1,
         per_act_token,
         per_out_ch,
-    )
-
-    activation_callable(c2, c1, torch.cuda.current_stream().cuda_stream)
-
-    a2q, a2q_scale = moe_kernel_quantize_input(
-        c2, a2_scale, torch.float8_e4m3fn, per_act_token
-    )
-
-    if expert_map is not None:
-        c3.fill_(0)
-
-    compute_ops.cutlass_moe_mm(
-        c3,
-        a2q,
-        w2,
-        a2q_scale,
-        w2_scale,
-        expert_offsets,
-        problem_sizes2,
-        ab_strides2,
-        ab_strides2,
-        c_strides2,
-        per_act_token,
-        per_out_ch,
+        elements_m,
+        swap_ab_gemm1,
     )
 
     if use_batched_format:
-        output.copy_(c3.reshape(local_E, padded_M, K), non_blocking=True)
+        if expert_map is not None:
+            output.fill_(0)
+        a2q, a2q_scale = silu_mul_fp8_per_token_quant_batched(c1, expert_num_tokens)
+        cutlass_moe_mm_fp8_scaled(
+            output.reshape(-1, K),
+            a2q,
+            w2,
+            a2q_scale,
+            w2_scale,
+            expert_offsets,
+            problem_sizes2,
+            ab_strides2,
+            ab_strides2,
+            c_strides2,
+            per_act_token,
+            per_out_ch,
+            elements_m,
+            swap_ab_gemm2,
+        )
     else:
+        activation_callable(c2, c1)
+        a2q, a2q_scale = moe_kernel_quantize_input(
+            c2, a2_scale, torch.float8_e4m3fn, per_act_token
+        )
+        if expert_map is not None:
+            c3.fill_(0)
+        cutlass_moe_mm_fp8_scaled(
+            c3,
+            a2q,
+            w2,
+            a2q_scale,
+            w2_scale,
+            expert_offsets,
+            problem_sizes2,
+            ab_strides2,
+            ab_strides2,
+            c_strides2,
+            per_act_token,
+            per_out_ch,
+            elements_m,
+            swap_ab_gemm2,
+        )
         moe_unpermute(
             out=output,
             permuted_hidden_states=c3,
@@ -287,6 +322,19 @@ class CutlassExpertsFp8(mm.FusedMoeExpertExecutor):
         assert per_out_ch_quant is False
         assert block_shape is None
 
+        _, K, N = self.w2.shape
+        device = self.w2.device
+        self.ab_strides1 = torch.full(
+            (w1.size(0),), K, device=device, dtype=torch.int64
+        )
+        self.c_strides1 = torch.full(
+            (w1.size(0),), 2 * N, device=device, dtype=torch.int64
+        )
+        self.ab_strides2 = torch.full(
+            (w1.size(0),), N, device=device, dtype=torch.int64
+        )
+        self.c_strides2 = torch.full((w1.size(0),), K, device=device, dtype=torch.int64)
+
     @property
     def local_num_experts(self) -> int:
         return self.w1.size(0)
@@ -355,8 +403,12 @@ class CutlassExpertsFp8(mm.FusedMoeExpertExecutor):
             self.w1,
             self.w2,
             topk_ids,
-            compute_ops.silu_and_mul,
+            silu_and_mul,
             self.num_experts,
+            self.ab_strides1,
+            self.c_strides1,
+            self.ab_strides2,
+            self.c_strides2,
             expert_map,
             self.w1_scale,
             self.w2_scale,
@@ -440,6 +492,18 @@ class CutlassBatchedExpertsFp8(mm.FusedMoeExpertExecutor):
 
         assert per_out_ch_quant is False
         assert block_shape is None
+        _, K, N = self.w2.shape
+        device = self.w2.device
+        self.ab_strides1 = torch.full(
+            (w1.size(0),), K, device=device, dtype=torch.int64
+        )
+        self.c_strides1 = torch.full(
+            (w1.size(0),), 2 * N, device=device, dtype=torch.int64
+        )
+        self.ab_strides2 = torch.full(
+            (w1.size(0),), N, device=device, dtype=torch.int64
+        )
+        self.c_strides2 = torch.full((w1.size(0),), K, device=device, dtype=torch.int64)
 
     @property
     def local_num_experts(self) -> int:
@@ -528,8 +592,12 @@ class CutlassBatchedExpertsFp8(mm.FusedMoeExpertExecutor):
             self.w1,
             self.w2,
             topk_ids,
-            compute_ops.silu_and_mul,
+            silu_and_mul,
             self.num_experts,
+            self.ab_strides1,
+            self.c_strides1,
+            self.ab_strides2,
+            self.c_strides2,
             None,
             self.w1_scale,
             self.w2_scale,

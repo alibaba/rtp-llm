@@ -12,6 +12,7 @@ from rtp_llm.config.quant_config import (
 )
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, MoeAtomicWeight
 from rtp_llm.model_loader.load_config import LoadConfig
+from rtp_llm.model_loader.tensor_source import TensorSource
 from rtp_llm.model_loader.w8a8_weight import W8A8Fp8AtomicWeight, create_w8a8_fp8_weight
 from rtp_llm.model_loader.weight_module import (
     AtomicWeight,
@@ -19,7 +20,6 @@ from rtp_llm.model_loader.weight_module import (
     QuantWeight,
     WeightModule,
 )
-from rtp_llm.model_loader.tensor_source import TensorSource
 from rtp_llm.utils.model_weight import (
     FP8_E4M3_MAX,
     CkptWeightInfo,
@@ -176,7 +176,9 @@ class StaticPerTensorFp8Weight(CompositeWeight, QuantWeight):
         scale: Optional[AtomicWeight] = None
         act_scale: Optional[AtomicWeight] = None
         act_scale_inv: Optional[AtomicWeight] = None
-        logging.debug("StaticPerTensorFp8Weight : %s, %s", self.qs_suffix, self.qw_suffix)
+        logging.debug(
+            "StaticPerTensorFp8Weight : %s, %s", self.qs_suffix, self.qw_suffix
+        )
 
         if src_weight_info.name == W.attn_qkv_w:
             (kernel, scale, act_scale, act_scale_inv) = self._get_qkv_quant_weight_info(
@@ -686,7 +688,9 @@ class LoadQuantStaticPerTensorFp8Weight(StaticPerTensorFp8Weight):
         device: str,
         load_config: LoadConfig,
     ):
-        kernel = self.kernel._load_raw_tensor(tensor_source, layer_id, device, load_config)
+        kernel = self.kernel._load_raw_tensor(
+            tensor_source, layer_id, device, load_config
+        )
         res = {}
         quant_kernel, scale = quantize_weight_to_fp8(kernel.get(self.kernel.name))
         quant_kernel = quant_kernel.T
@@ -706,7 +710,7 @@ class LoadQuantStaticPerTensorFp8Weight(StaticPerTensorFp8Weight):
             )
             res.update(act_scale_inv)
         return res
-    
+
     def get_tensor_names(
         self, layer_id: Optional[int], load_config: LoadConfig
     ) -> set[str]:
@@ -1192,15 +1196,6 @@ class Fp8PerTensorCompressedWeight(CompositeWeight, QuantWeight):
                             ] = (dq_weight / max_kernel_scale[expert_id]).to(
                                 torch.float8_e4m3fn
                             )
-                # w13 to w31
-                kernel_weight = torch.cat(
-                    [
-                        kernel_weight[:, load_config.moe_inter_padding_size :, :],
-                        kernel_weight[:, : load_config.moe_inter_padding_size, :],
-                    ],
-                    dim=1,
-                )
-
                 processed_res[self.kernel.name] = kernel_weight
                 processed_res[W.moe_s1] = max_kernel_scale
 

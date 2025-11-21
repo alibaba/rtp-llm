@@ -254,8 +254,14 @@ cc_library(
         "cutlass_kernels/fp8_group_gemm/*.h",
         "cutlass_kernels/fp8_group_gemm/*.cuh",
         "cutlass_kernels/fp8_group_gemm/include/*.hpp",
+        "cutlass_kernels/gemm_configs.h",
+        "cutlass_kernels/cutlass_heuristic.h",
     ]),
-    implementation_deps = [
+    deps = [
+        "//rtp_llm/cpp/cuda/cutlass/cutlass_extensions:cutlass_extensions",
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/cuda:cuda_host_utils",
+        "@havenask//aios/alog:alog",
         "@cutlass4.0//:cutlass",
         "@cutlass4.0//:cutlass_utils",
         "@local_config_cuda//cuda:cuda_headers",
