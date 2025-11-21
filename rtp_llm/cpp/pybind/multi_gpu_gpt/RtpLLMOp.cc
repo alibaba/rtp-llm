@@ -292,12 +292,12 @@ void RtpLLMOp::stop() {
             grpc_server_->Shutdown();
             grpc_server_.reset();
         }
-        {
+        if (model_rpc_service_) {
             pybind11::gil_scoped_release release;
             model_rpc_service_->stop();
             pybind11::gil_scoped_acquire acquire;
+            model_rpc_service_.reset();
         }
-        model_rpc_service_.reset();
         if (http_server_) {
             http_server_->stop();
             http_server_.reset();
