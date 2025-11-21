@@ -136,3 +136,6 @@ class BaseTokenizer:
 
     def __call__(self, text, **kwargs):
         return self.tokenizer(text, **kwargs)
+
+    def __len__(self) -> int:
+        return self.tokenizer.__len__()
