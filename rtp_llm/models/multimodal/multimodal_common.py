@@ -20,12 +20,17 @@ from functools import wraps
 
 from torchvision import transforms
 
+from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.distribute.worker_info import g_parallel_info
-from rtp_llm.utils.multimodal_util import (
-    MMUrlType,
+from rtp_llm.models.multimodal.multimodal_util import (
     get_bytes_io_from_url,
     get_vit_compute_dtype,
     vit_emb_cache_,
+)
+from rtp_llm.utils.base_model_datatypes import (
+    MMPreprocessConfig,
+    MMUrlType,
+    MultimodalInput,
 )
 
 
@@ -43,9 +48,6 @@ def timeout_decorator(timeout_sec):
         return wrapper
 
     return decorator
-
-
-mm_lock = threading.Lock()
 
 
 class ImageTransform:
@@ -79,82 +81,73 @@ class ImageTransform:
 
 
 class MultiModalEmbeddingInterface:
+    # do not take GptInitModelParameters as class member, as it cannot be pickled
+    def __init__(self, config: GptInitModelParameters):
+        self.data_type = config.data_type
+
     @property
     def _data_type(self):
-        return get_vit_compute_dtype(self.config.data_type)
+        return get_vit_compute_dtype(self.data_type)
 
     @property
     def _device(self):
         raise NotImplementedError
 
-    @torch.inference_mode()
-    def mm_embedding(self, url: str, mm_type: MMUrlType, **kwargs: Any):
-        dtype = self._data_type
-        if g_parallel_info.tp_rank > 0:
-            return torch.Tensor([])
-        cached_res = vit_emb_cache_.check_cache(url)
-        if cached_res is not None:
-            return cached_res
-        bytes_io = get_bytes_io_from_url(url)
-        mm_input = self._mm_preprocess(bytes_io, mm_type=mm_type, **kwargs)
-        with mm_lock:
-            features = self.mm_process(mm_input, mm_type=mm_type, **kwargs)
-        if isinstance(features, tuple):
-            features = (features[0].to(dtype).contiguous(), features[1].contiguous())
-        else:
-            features = (features.to(dtype).contiguous(), None)
-        vit_emb_cache_.insert_cache(url, features)
-        return features
+    @staticmethod
+    def preprocess_input(
+        mm_inputs: List[MultimodalInput],
+        **kwargs,
+    ):
+        raise NotImplementedError
 
-    @timeout_decorator(10)
-    def _mm_preprocess(self, data, **kwargs):
+    def get_preprocess_params(self):
+        return {}
+
+    @torch.inference_mode()
+    def embedding(self, data, **kwargs):
         raise NotImplementedError
 
     @torch.inference_mode()
-    def mm_process(self, mm_input, **kwargs):
-        raise NotImplementedError
+    def batched_embedding(
+        self, data_list: List[Any], mm_types: List[MMUrlType], **kwargs
+    ):
+        res_list = []
+        for data, mm_type in zip(data_list, mm_types):
+            res_list.append(self.embedding(data, mm_type=mm_type, **kwargs))
+        return res_list
 
 
 class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
-    @timeout_decorator(30)
-    def _mm_preprocess(self, data, **kwargs):
+    @staticmethod
+    def preprocess_input(
+        mm_inputs: List[MultimodalInput],
+        **kwargs,
+    ):
+        assert len(mm_inputs) == 1
+        data = get_bytes_io_from_url(mm_inputs[0].url)
         return Image.open(data).convert("RGB")
-
-    @torch.inference_mode()
-    def mm_process(self, mm_input, **kwargs):
-        return self.image_embedding([mm_input])[0]
-
-    @torch.inference_mode()
-    def image_embedding(self, images: List[Image.Image]):
-        raise NotImplementedError()
 
 
 class AudioEmbeddingInterface(MultiModalEmbeddingInterface):
-    @timeout_decorator(30)
-    def _mm_preprocess(self, data, **kwargs):
+    @staticmethod
+    def preprocess_input(
+        mm_inputs: List[MultimodalInput],
+        **kwargs,
+    ):
         # temporary
         import torchaudio
 
+        assert len(mm_inputs) == 1
+        data = get_bytes_io_from_url(mm_inputs[0].url)
         return torchaudio.load(data)
-
-    @torch.inference_mode()
-    def mm_process(self, mm_input, **kwargs):
-        return self.audio_embedding(mm_input)
-
-    @torch.inference_mode()
-    def audio_embedding(self, audio: Tuple[torch.Tensor, int]):
-        raise NotImplementedError()
 
 
 class VideoEmbeddingInterface(MultiModalEmbeddingInterface):
-    @timeout_decorator(30)
-    def _mm_preprocess(self, data, **kwargs):
+    @staticmethod
+    def preprocess_input(
+        mm_inputs: List[MultimodalInput],
+        **kwargs,
+    ):
+        assert len(mm_inputs) == 1
+        data = get_bytes_io_from_url(mm_inputs[0].url)
         return VideoReader(data, ctx=cpu(0))
-
-    @torch.inference_mode()
-    def mm_process(self, mm_input, **kwargs):
-        return self.video_embedding(mm_input)
-
-    @torch.inference_mode()
-    def video_embedding(self, video: List[Image.Image]):
-        raise NotImplementedError()
