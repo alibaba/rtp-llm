@@ -390,6 +390,13 @@ class GenericMoeModel(GptModelBase):
         local_is_prefill = inputs.attention_inputs.is_prefill and (
             inputs.input_ids.shape[0] > 1
         )
+        if (
+            self.config.ep_size == 1
+            and self.config.tp_size == 1
+            and self.config.dp_size == 1
+        ):
+            return local_is_prefill
+
         local_is_prefill = torch.tensor(
             [1 if local_is_prefill else 0],
             dtype=torch.int32,
@@ -411,7 +418,7 @@ class GenericMoeModel(GptModelBase):
         global_token_nums_tensor = all_reduce(token_nums_tensor, group=Group.DP_AND_TP)
         global_token_nums = int(global_token_nums_tensor.item())
 
-        max_token_per_rank = 64
+        max_token_per_rank = -1
         if DeepEpInitializer.supported():
             try:
                 deepep_wrapper = DeepEpInitializer.get_deepep_wrapper(self.config)
@@ -427,7 +434,7 @@ class GenericMoeModel(GptModelBase):
 
         is_normal_mode = (
             True
-            if (max_token_per_rank == 0 or global_token_nums > max_token_per_rank)
+            if (max_token_per_rank == -1 or global_token_nums > max_token_per_rank)
             else False
         )
         if is_normal_mode:
