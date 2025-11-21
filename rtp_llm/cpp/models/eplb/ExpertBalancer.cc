@@ -92,7 +92,8 @@ bool LoadFlags::isReady(DeviceBase* device) {
     flag_sync = device->allReduce({flag_gpu, ReduceOp::Sum, false, ParallelMode::DP_AND_TP, flag_sync}).buffer;
 
     device->copy({*flag_host, *flag_sync});
-
+    // Repeatedly executing “x = ReduceSum(x)” with tp8 will cause an overflow and set the value of x to 0
+    device->bufMemset(*flag_gpu, -1);
     // if all load_flag_tensor_ is 0, return true
     return *flag_host->data<int>() == 0;
 }
@@ -169,7 +170,6 @@ ExpertBalancer::ExpertBalancer(size_t                       log_exp_num,
                                QuantAlgo                    quant_algo,
                                kmonitor::MetricsReporterPtr metrics_reporter):
 
-        
     device_(device),
     num_logic_experts_(log_exp_num),
     num_physic_experts_(phy_exp_num),
