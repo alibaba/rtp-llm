@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/core/torch_utils/torch_cuda_allocator.h"
 #include "rtp_llm/cpp/utils/StackTrace.h"
-#include <iostream>
+#include <algorithm>
+#include <c10/core/CachingDeviceAllocator.h>
 
 namespace rtp_llm {
 
@@ -200,15 +201,64 @@ void TorchCudaAllocator::cacheInfo(TORCH_CUDA_ALLOCATOR_INDEX_DTYPE device, size
 void TorchCudaAllocator::assertValidDevice(TORCH_CUDA_ALLOCATOR_INDEX_DTYPE device) {}
 
 at::cuda::CUDACachingAllocator::DeviceStats
-TorchCudaAllocator::getDeviceStats(TORCH_CUDA_ALLOCATOR_INDEX_DTYPE device) {
-    throw std::runtime_error("not implemented.");
+TorchCudaAllocator::getDeviceStats(TORCH_CUDA_ALLOCATOR_INDEX_DTYPE /*device*/) {
+    using Stat     = c10::CachingDeviceAllocator::Stat;
+    using StatType = c10::CachingDeviceAllocator::StatType;
+
+    constexpr size_t kAggregateIndex = static_cast<size_t>(StatType::AGGREGATE);
+
+    auto          device_status = device_->getDeviceStatus();
+    auto          memory_status = device_status.device_memory_status;
+    auto          to_int64      = [](size_t value) { return static_cast<int64_t>(value); };
+    const int64_t allocated     = to_int64(memory_status.allocated_bytes);
+    const int64_t preserved     = to_int64(memory_status.preserved_bytes);
+    const int64_t reserved_total = allocated + preserved;
+
+    at::cuda::CUDACachingAllocator::DeviceStats stats;
+
+    auto set_stat = [](Stat& stat, int64_t current, int64_t peak) {
+        stat.current   = current;
+        stat.peak      = peak;
+        stat.allocated = current;
+        stat.freed     = 0;
+    };
+
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+    peak_stats_.allocated      = std::max(peak_stats_.allocated, allocated);
+    peak_stats_.reserved       = std::max(peak_stats_.reserved, reserved_total);
+    peak_stats_.active         = std::max(peak_stats_.active, allocated);
+    peak_stats_.requested      = std::max(peak_stats_.requested, allocated);
+    peak_stats_.inactive_split = std::max<int64_t>(peak_stats_.inactive_split, 0);
+
+    set_stat(stats.allocated_bytes[kAggregateIndex], allocated, peak_stats_.allocated);
+    set_stat(stats.reserved_bytes[kAggregateIndex], reserved_total, peak_stats_.reserved);
+    set_stat(stats.active_bytes[kAggregateIndex], allocated, peak_stats_.active);
+    set_stat(stats.inactive_split_bytes[kAggregateIndex], 0, peak_stats_.inactive_split);
+    set_stat(stats.requested_bytes[kAggregateIndex], allocated, peak_stats_.requested);
+
+    stats.max_split_size = 0;
+
+    return stats;
 }
 
 void TorchCudaAllocator::resetAccumulatedStats(TORCH_CUDA_ALLOCATOR_INDEX_DTYPE device) {
-    throw std::runtime_error("not implemented.");
+    (void)device;
 }
 
 void TorchCudaAllocator::resetPeakStats(TORCH_CUDA_ALLOCATOR_INDEX_DTYPE device) {
-    throw std::runtime_error("not implemented.");
+    (void)device;
+    auto          device_status = device_->getDeviceStatus();
+    auto          memory_status = device_status.device_memory_status;
+    auto          to_int64      = [](size_t value) { return static_cast<int64_t>(value); };
+    const int64_t allocated     = to_int64(memory_status.allocated_bytes);
+    const int64_t preserved     = to_int64(memory_status.preserved_bytes);
+    const int64_t reserved_total = allocated + preserved;
+
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+    peak_stats_.allocated      = allocated;
+    peak_stats_.reserved       = reserved_total;
+    peak_stats_.active         = allocated;
+    peak_stats_.requested      = allocated;
+    peak_stats_.inactive_split = 0;
 }
 }  // namespace rtp_llm

@@ -13,14 +13,19 @@
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPrompt.h"
 #include "rtp_llm/cpp/models/position_ids/PositionIdsGenerator.h"
+#include <functional>
 #include <iterator>
 #include <mutex>
+#include <optional>
+#include <torch/torch.h>
 
 namespace rtp_llm {
 
 // WARNGING: buffer in generate stream should all be host to avoid gpu buffer hold more time (except kv cache)
 
 struct StreamUpdateInfo {
+    using PostprocessCallback = std::function<torch::Tensor(const StreamUpdateInfo&)>;
+
     const rtp_llm::BufferPtr new_tokens;
     int                      num_new_tokens;
     const rtp_llm::BufferPtr hidden_states;
@@ -34,6 +39,11 @@ struct StreamUpdateInfo {
     const rtp_llm::BufferPtr all_hidden_states;
     bool                     update_remote_generate = true;
     bool                     force_update_info      = false;
+    PostprocessCallback      postprocess_cb_;
+
+    torch::Tensor runPostprocessCallback(const StreamUpdateInfo& info) const {
+        return postprocess_cb_(info);
+    }
 };
 struct SpeculativeExecutorStreamOutput {
 public:
@@ -567,10 +577,10 @@ protected:
     int                                mtp_token_index_       = 0;
     SpeculativeExecutorStreamOutputPtr sp_output_buffer_      = nullptr;
 
-    bool return_all_hidden_states_ = false;
-
-    std::optional<rtp_llm::BufferPtr> context_position_ids_;
-    PositionIdsStyle                  mm_position_ids_style_;
+    bool                               return_all_hidden_states_ = false;
+    rtp_llm::BufferPtr                 final_embedding_          = nullptr;
+    std::optional<rtp_llm::BufferPtr>  context_position_ids_;
+    PositionIdsStyle                   mm_position_ids_style_;
 
     rtp_llm::DataType dtype_;
     size_t            hidden_size_;

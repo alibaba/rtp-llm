@@ -3,6 +3,7 @@
 #include "c10/cuda/CUDACachingAllocator.h"
 #include "rtp_llm/cpp/core/allocator.h"
 #include "rtp_llm/cpp/devices/DeviceBase.h"
+#include <mutex>
 #include <torch/version.h>
 
 #if defined(TORCH_VERSION_MAJOR) && ((TORCH_VERSION_MAJOR == 2) & (TORCH_VERSION_MINOR >= 6))
@@ -23,6 +24,17 @@ private:
     DeviceBase* device_;
     c10::Device torch_device_;
     bool        allocate_private_ = false;
+
+    struct PeakStats {
+        int64_t allocated       = 0;
+        int64_t reserved        = 0;
+        int64_t active          = 0;
+        int64_t requested       = 0;
+        int64_t inactive_split  = 0;
+    };
+
+    mutable std::mutex stats_mutex_;
+    PeakStats          peak_stats_;
 
 public:
     TorchCudaAllocator(DeviceBase* device);
@@ -52,7 +64,7 @@ public:
 
     void attachAllocatorTraceTracker(c10::cuda::CUDACachingAllocator::AllocatorTraceTracker tracker) override;
 
-    c10::cuda::CUDACachingAllocator::ShareableHandle shareIpcHandle(void* ptr);
+    c10::cuda::CUDACachingAllocator::ShareableHandle shareIpcHandle(void* ptr) override;
 
     at::DataPtr allocate(size_t size) override;
 #else

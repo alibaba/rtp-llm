@@ -12,6 +12,7 @@ from sentence_transformers.models import Normalize, Transformer
 from sentence_transformers.util import import_from_string
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.task_type import TaskType
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.models.downstream_modules.custom_module import CustomHandler, CustomModule
 from rtp_llm.models.downstream_modules.embedding.api_datatype import (
@@ -23,6 +24,7 @@ from rtp_llm.models.downstream_modules.embedding.api_datatype import (
 from rtp_llm.models.downstream_modules.embedding.misc import (
     EmbeddingRendererBase,
     combo_to_batch_data,
+    slice_last_moe_gating,
 )
 from rtp_llm.utils.tensor_utils import (
     get_first_token_from_combo_tokens,
@@ -97,7 +99,8 @@ class NormalHandler(CustomHandler):
 
 class SentenceTransformerHandler(CustomHandler):
     arg_name_mapping = {
-        "token_embeddings": "hidden_states",
+        "token_embeddings": "all_hidden_states",
+        "sentence_embedding": "last_hidden_states",
     }
 
     @classmethod
@@ -109,6 +112,8 @@ class SentenceTransformerHandler(CustomHandler):
         sys.path.append(config.ckpt_path)
         dtype = to_torch_dtype(config.data_type)
 
+        self.is_language_model = config.task_type == TaskType.LANGUAGE_MODEL
+
         modules_config_path = os.path.join(config.ckpt_path, "modules.json")
         assert os.path.exists(
             modules_config_path
@@ -117,12 +122,20 @@ class SentenceTransformerHandler(CustomHandler):
             modules_config = json.load(fIn)
 
         modules: OrderedDict[str, nn.Module] = OrderedDict()
-        fallback_args = [
-            "input_lengths",
-            "input_ids",
-            "attention_mask",
-            "token_embeddings",
-        ]
+
+        if self.is_language_model:
+            logging.debug("Handler initialized in LANGUAGE_MODEL mode.")
+            fallback_args = [
+                "sentence_embedding",
+            ]
+        else:
+            logging.debug("Handler initialized in EMBEDDING mode.")
+            fallback_args = [
+                "input_lengths",
+                "input_ids",
+                "attention_mask",
+                "token_embeddings",
+            ]
         extend_forward_args_list: Set[str] = set()
         for module_idx, module_config in enumerate(modules_config):
             # import module
@@ -168,10 +181,15 @@ class SentenceTransformerHandler(CustomHandler):
         if "input_lengths" not in self.extend_forward_args_list:
             self.extend_forward_args_list.append("input_lengths")
 
-        logging.info(
+        # current_lengths
+        # require token_lengths for moe gating extraction
+        if "token_lengths" not in self.extend_forward_args_list:
+            self.extend_forward_args_list.append("token_lengths")
+
+        logging.debug(
             f"original extend forward args: {self.raw_extend_forward_args_list}"
         )
-        logging.info(f"extend forward args: {self.extend_forward_args_list}")
+        logging.debug(f"extend forward args: {self.extend_forward_args_list}")
 
     def extend_forward_args(self) -> List[str]:
         return self.extend_forward_args_list
@@ -180,14 +198,24 @@ class SentenceTransformerHandler(CustomHandler):
         self,
         **combo_data: Any,
     ) -> List[Any]:
-        input_lengths: torch.Tensor = combo_data["input_lengths"]
-        batch_data = combo_to_batch_data(input_lengths, combo_data)
-        return self.extend_forward_internal(batch_data)
+        if not self.is_language_model:
+            input_lengths: torch.Tensor = combo_data["input_lengths"]
+            data_to_process = combo_to_batch_data(input_lengths, combo_data)
+        else:
+            if combo_data.get("last_moe_gating"):
+                token_lengths = combo_data["token_lengths"]
+                combo_data["last_moe_gating"] = slice_last_moe_gating(
+                    combo_data["last_moe_gating"], combo_data["token_lengths"]
+                )
+
+            data_to_process = combo_data
+
+        return self.extend_forward_internal(data_to_process)
 
     def extend_forward_internal(self, data: Dict[str, torch.Tensor]):
         data = {
             k: data[self.arg_name_mapping.get(k, k)]
             for k in self.raw_extend_forward_args_list
         }
-
-        return self.model(data)["sentence_embedding"]
+        model_output_dict = self.model(data)
+        return model_output_dict["sentence_embedding"]

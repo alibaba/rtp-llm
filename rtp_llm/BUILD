@@ -65,6 +65,7 @@ requirement([
     "fastapi",
     "psutil",
     "pyodps",
+    "triton",
     "thrift",
     "torch",
     "torchvision",

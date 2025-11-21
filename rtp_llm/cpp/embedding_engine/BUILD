@@ -15,6 +15,7 @@ cc_library(
         "//rtp_llm/cpp/engine_base/stream:generate_config",
         "//rtp_llm/cpp/engine_base:worker_status_info",
         "//rtp_llm/cpp/engine_base/stream:stream",
+        "//rtp_llm/cpp/engine_base/executor_base:HandlerArgs",
         "//rtp_llm/cpp/models:models",
     ],
     visibility = ["//visibility:public"]
@@ -46,6 +47,7 @@ cc_library(
         "@havenask//aios/network/arpc:arpc",
         ":embedding_engine",
         ":embedding_engine_arpc_server_header",
+        "//rtp_llm/cpp/engine_base/executor_base:HandlerArgs",
         "//rtp_llm/cpp/multimodal_processor:multimodal_processor",
     ],
     visibility = ["//visibility:public"]
