@@ -3,6 +3,7 @@
 #include "grpc++/grpc++.h"
 #include "rtp_llm/cpp/model_rpc/RemoteRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/DecodeGenerateContext.h"
+#include "rtp_llm/cpp/cache_new/types.h"
 
 namespace rtp_llm {
 
@@ -25,8 +26,8 @@ public:
         LoadKVCacheContext(int64_t                         request_id,
                            const std::string&              request_key,
                            const std::vector<std::string>& peer_addrs,
-                           const std::vector<int64_t>&     cache_keys,
-                           const std::vector<int32_t>&     block_ids,
+                           const std::vector<CacheKeyType>& cache_keys,
+                           const std::vector<BlockIdxType>& block_ids,
                            int64_t                         reuse_block_size,
                            int64_t                         timeout_ms,
                            int                             partition_count,
@@ -45,8 +46,8 @@ public:
         int64_t                         request_id;
         const std::string&              request_key;
         const std::vector<std::string>& peer_addrs;
-        const std::vector<int64_t>&     cache_keys;
-        const std::vector<int32_t>&     block_ids;
+        const std::vector<CacheKeyType>& cache_keys;
+        const std::vector<BlockIdxType>& block_ids;
         int64_t                         reuse_block_size;
         int64_t                         timeout_ms;
         int                             partition_count;
