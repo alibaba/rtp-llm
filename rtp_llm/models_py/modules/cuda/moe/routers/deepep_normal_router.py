@@ -11,6 +11,7 @@ from rtp_llm.models_py.modules.common.moe.fused_moe import (
     FusedMoeDataRouter,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.quant_config import FusedMoEQuantConfig
+from rtp_llm.models_py.modules.factory.fused_moe.runtime_config import RuntimeConfig
 from rtp_llm.models_py.modules.factory.fused_moe.type import RouterType
 from rtp_llm.models_py.modules.fp8_kernel import scaled_fp8_per_token_quant
 from rtp_llm.ops.compute_ops import trt_fp8_quantize_128
@@ -22,7 +23,7 @@ class DeepepNormalRouter(FusedMoeDataRouter):
         return RouterType.DEEPEP_NORMAL
 
     @classmethod
-    def check_conditions(cls, checker: Any, config: GptInitModelParameters) -> None:
+    def check_conditions(cls, checker: Any, config: RuntimeConfig) -> None:
         """Check if DeepepNormalRouter can handle the configuration"""
         from rtp_llm.models_py.modules.factory.fused_moe.config_resolver import (
             MoeConfigResolver,
@@ -108,7 +109,7 @@ class DeepepNormalRouter(FusedMoeDataRouter):
             num_tokens_per_expert,
             is_token_in_rank,
             event1,
-        ) = self.deepep_buffer_wrapper.buffer.get_dispatch_layout(
+        ) = self.deepep_buffer_wrapper.normal_buffer.get_dispatch_layout(
             tp_expert_ids, self.expert_num
         )
         # dispatch
@@ -119,7 +120,7 @@ class DeepepNormalRouter(FusedMoeDataRouter):
             num_recv_tokens_per_expert_list,
             self.handle,
             event2,
-        ) = self.deepep_buffer_wrapper.buffer.dispatch(
+        ) = self.deepep_buffer_wrapper.normal_buffer.dispatch(
             tp_expert_input,
             None,
             num_tokens_per_rank,
@@ -173,7 +174,7 @@ class DeepepNormalRouter(FusedMoeDataRouter):
         extra_finalize_args: Optional[Dict[str, Any]],
     ) -> torch.Tensor:
         assert self.handle is not None, "handler is None"
-        out_token, _, event = self.deepep_buffer_wrapper.buffer.combine(
+        out_token, _, event = self.deepep_buffer_wrapper.normal_buffer.combine(
             fused_expert_output, self.handle
         )
         self.handle = None

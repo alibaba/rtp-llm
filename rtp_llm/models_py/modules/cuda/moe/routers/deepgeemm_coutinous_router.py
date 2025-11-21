@@ -10,6 +10,7 @@ from rtp_llm.models_py.modules.common.moe.fused_moe import (
     FusedMoeDataRouter,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.quant_config import FusedMoEQuantConfig
+from rtp_llm.models_py.modules.factory.fused_moe.runtime_config import RuntimeConfig
 from rtp_llm.models_py.modules.factory.fused_moe.type import RouterType
 from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
     recompute_topk_ids_sum_expert_count,
@@ -23,7 +24,7 @@ class PureTpRouter(FusedMoeDataRouter):
         return RouterType.PURE_TP
 
     @classmethod
-    def check_conditions(cls, checker: Any, config: GptInitModelParameters) -> None:
+    def check_conditions(cls, checker: Any, config: RuntimeConfig) -> None:
         """Check if PureTpRouter can handle the configuration"""
         from rtp_llm.models_py.modules.factory.fused_moe.config_resolver import (
             MoeConfigResolver,

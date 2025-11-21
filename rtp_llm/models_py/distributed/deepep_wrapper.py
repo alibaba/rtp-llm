@@ -59,12 +59,23 @@ class DeepEPWrapper:
         else:
             # use accl_ep in cuda
             self._use_accl_ep = True
-        self._mode, self._buffer = self._init_deepep_buffer(group, params)
+        self._mode, self._normal_buffer, self._low_latency_buffer = (
+            self._init_deepep_buffer(group, params)
+        )
 
     @property
-    def buffer(self) -> DeepEPBuffer:
-        assert self._buffer is not None, "deep_ep buffer is not initialized"
-        return self._buffer
+    def normal_buffer(self) -> DeepEPBuffer:
+        assert (
+            self._normal_buffer is not None
+        ), "deep_ep normal buffer is not initialized"
+        return self._normal_buffer
+
+    @property
+    def low_latency_buffer(self) -> DeepEPBuffer:
+        assert (
+            self._low_latency_buffer is not None
+        ), "deep_ep low latency buffer is not initialized"
+        return self._low_latency_buffer
 
     @property
     def mode(self) -> DeepEPMode:
@@ -113,8 +124,10 @@ class DeepEPWrapper:
         )
         if use_deepep_low_latency and enable_ffn_disaggregate:
             if self._use_accl_ep:
-                return DeepEPMode.LOW_LATENCY_M2N, self._init_low_latency_m2n_buffer(
-                    group, params
+                return (
+                    DeepEPMode.LOW_LATENCY_M2N,
+                    None,
+                    self._init_low_latency_m2n_buffer(group, params),
                 )
             else:
                 raise RuntimeError(
@@ -123,9 +136,13 @@ class DeepEPWrapper:
                     f"and enable_ffn_disaggregate: {enable_ffn_disaggregate}"
                 )
         elif use_deepep_low_latency and not enable_ffn_disaggregate:
-            return DeepEPMode.LOW_LATENCY, self._init_low_latency_buffer(group, params)
+            return (
+                DeepEPMode.LOW_LATENCY,
+                self._init_normal_buffer(group, params),
+                self._init_low_latency_buffer(group, params),
+            )
         elif not use_deepep_low_latency and not enable_ffn_disaggregate:
-            return DeepEPMode.NORMAL, self._init_normal_buffer(group, params)
+            return DeepEPMode.NORMAL, self._init_normal_buffer(group, params), None
         else:
             raise RuntimeError(
                 f"[rank: {ep_rank}] init deep_ep buffer failed, unsupported "
@@ -324,9 +341,12 @@ class DeepEPWrapper:
         return DeepEPBuffer(**init_kwargs)  # type: ignore
 
     def destroy_deepep_buffer(self) -> None:
-        if self._buffer is not None:
-            del self._buffer
-            self._buffer = None
+        if self._normal_buffer is not None:
+            del self._normal_buffer
+            self._normal_buffer = None
+        if self._low_latency_buffer is not None:
+            del self._low_latency_buffer
+            self._low_latency_buffer = None
         gc.collect()
 
 

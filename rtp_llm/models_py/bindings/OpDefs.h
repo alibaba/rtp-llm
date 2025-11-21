@@ -67,6 +67,7 @@ struct PyCaptureMetaData {
 
 struct PyAttentionInputs {
     bool             is_prefill;
+    bool             is_normal_mode;
     torch::Tensor    prefix_lengths;
     torch::Tensor    sequence_lengths;
     torch::Tensor    input_lengths;

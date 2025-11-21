@@ -236,9 +236,13 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         if (enable_cuda_graph_) {
             py_model_outputs = graph_runner_->forward(py_model_inputs);
         } else {
-            auto py_model_forward = py_model_.attr("forward");
-            auto outputs          = py_model_forward(py_model_inputs);
-            py_model_outputs      = outputs.cast<PyModelOutputs>();
+            auto py_sync_global_infos_method                = py_model_.attr("sync_global_infos");
+            auto global_infos_obj                           = py_sync_global_infos_method(py_model_inputs);
+            bool is_normal_mode                             = global_infos_obj.cast<bool>();
+            py_model_inputs.attention_inputs.is_normal_mode = is_normal_mode;
+            auto py_model_forward                           = py_model_.attr("forward");
+            auto outputs                                    = py_model_forward(py_model_inputs);
+            py_model_outputs                                = outputs.cast<PyModelOutputs>();
         }
         auto hidden_states_tensor = py_model_outputs.hidden_states;
         auto hidden_states        = torchTensor2Buffer(hidden_states_tensor);
