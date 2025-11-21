@@ -8,13 +8,13 @@ from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig, QuantizationCon
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, MlaAttnAtomicWeight
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, MoeAtomicWeight
 from rtp_llm.model_loader.load_config import LoadConfig
+from rtp_llm.model_loader.tensor_source import TensorSource
 from rtp_llm.model_loader.weight_module import (
     AtomicWeight,
     CompositeWeight,
     QuantWeight,
     WeightModule,
 )
-from rtp_llm.model_loader.tensor_source import TensorSource
 from rtp_llm.utils.model_weight import (
     FP8_E4M3_MAX,
     CkptWeightInfo,
@@ -710,7 +710,7 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
         ):
             return False
         name = src_weight_info.name
-        return name in cls.w8a8_weight_list
+        return name in cls.w8a8_weight_list and name not in [W.mla_kc, W.mla_vc]
 
     def __init__(
         self,
@@ -750,7 +750,9 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
         device: str,
         load_config: LoadConfig,
     ):
-        kernel = self.kernel._load_raw_tensor(tensor_source, layer_id, device, load_config)
+        kernel = self.kernel._load_raw_tensor(
+            tensor_source, layer_id, device, load_config
+        )
 
         res = {}
         scale = None
@@ -774,7 +776,7 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
             res.update({self.scale.name: scale.contiguous().to(device)})
 
         return res
-    
+
     def get_tensor_names(
         self, layer_id: Optional[int], load_config: LoadConfig
     ) -> set[str]:
