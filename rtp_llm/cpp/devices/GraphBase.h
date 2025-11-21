@@ -14,6 +14,7 @@ public:
     virtual void           setTokenTypeEmbedding(torch::Tensor token_type_embedding) = 0;
     virtual void           setInputEmbeddingScalar(float input_embedding_scalar)     = 0;
     virtual void           setModelDataType(caffe2::TypeMeta data_type)              = 0;
+    virtual void           setQKVDim(int dim)                                        = 0;
     py::object             py_instance_;
 };
 }  // namespace rtp_llm

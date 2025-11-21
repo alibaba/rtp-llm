@@ -4,6 +4,7 @@
 #include "rtp_llm/models_py/bindings/common/RtpEmbeddingLookup.h"
 #include "rtp_llm/models_py/bindings/common/FusedQKRmsNorm.h"
 #include "rtp_llm/models_py/bindings/common/WriteCacheStoreOp.h"
+#include "rtp_llm/models_py/bindings/common/CudaGraphPrefillCopy.h"
 #include "rtp_llm/models_py/bindings/cuda/FlashInferOp.h"
 #include "rtp_llm/models_py/bindings/cuda/FlashInferMlaParams.h"
 #include "rtp_llm/models_py/bindings/cuda/FusedMoEOp.h"
@@ -131,6 +132,31 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("combo_tokens_type_ids"),
                   py::arg("token_type_embedding"),
                   py::arg("input_embedding_scalar") = 1.0f);
+
+    // CUDA Graph Copy Kernel Functions
+    rtp_ops_m.def("cuda_graph_copy_small2large",
+                  &cuda_graph_copy_small2large,
+                  "CUDA Graph copy kernel: Small to Large tensor copy",
+                  py::arg("input_tensor"),
+                  py::arg("output_tensor"),
+                  py::arg("batch_size"),
+                  py::arg("max_batch_size"),
+                  py::arg("max_seq_len"),
+                  py::arg("input_lengths"),
+                  py::arg("hidden_size"),
+                  py::arg("cu_seq_len"));
+
+    rtp_ops_m.def("cuda_graph_copy_large2small",
+                  &cuda_graph_copy_large2small,
+                  "CUDA Graph copy kernel: Large to Small tensor copy",
+                  py::arg("input_tensor"),
+                  py::arg("output_tensor"),
+                  py::arg("batch_size"),
+                  py::arg("max_batch_size"),
+                  py::arg("max_seq_len"),
+                  py::arg("input_lengths"),
+                  py::arg("hidden_size"),
+                  py::arg("cu_seq_len"));
 }
 
 void registerBaseCudaBindings(py::module& rtp_ops_m) {
