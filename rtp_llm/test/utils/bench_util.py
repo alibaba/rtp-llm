@@ -1,3 +1,7 @@
+"""
+COPIED FROM DeepEP
+"""
+
 import json
 import os
 import sys
@@ -7,24 +11,6 @@ from typing import Callable, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
-
-
-def calc_diff(x: torch.Tensor, y: torch.Tensor) -> float:
-    x, y = x.double() + 1, y.double() + 1
-    denominator = (x * x + y * y).sum()
-    sim = 2 * (x * y).sum() / denominator
-    return (1 - sim).item()
-
-
-# COPIED FROM DeepGEMM
-def count_bytes(*tensors):  # pyright: ignore[reportMissingParameterType]
-    total = 0
-    for t in tensors:
-        if isinstance(t, (tuple, list)):
-            total += count_bytes(*t)
-        elif t is not None:
-            total += t.numel() * t.element_size()
-    return total
 
 
 class empty_suppress:
@@ -75,18 +61,19 @@ def bench(
     num_warmups: int = 50,
     num_tests: int = 50,
     post_fn: Optional[Callable[[], None]] = None,
+    trace_path: Optional[str] = None,
+    suppress_kineto_output: bool = False,
+    barrier_comm_profiling: bool = False,
 ) -> Tuple[float, float, float]:
     # 用256MB数据刷新L2缓存
     torch.cuda.synchronize()
     cache = torch.empty(int(256e6 // 4), dtype=torch.int, device="cuda")
-
     # Warmup
     for _ in range(num_warmups):
         fn()
 
     # Flush L2
     cache.zero_()
-
     # Testing
     start_events = [torch.cuda.Event(enable_timing=True) for _ in range(num_tests)]
     end_events = [torch.cuda.Event(enable_timing=True) for _ in range(num_tests)]
@@ -98,10 +85,38 @@ def bench(
         if post_fn is not None:
             post_fn()
     torch.cuda.synchronize()
-
     times = np.array(
         [s.elapsed_time(e) / 1e3 for s, e in zip(start_events, end_events)]
     )[1:]
+
+    if trace_path is not None:
+        # Flush L2
+        cache.zero_()
+        # Profile
+        suppress = suppress_stdout_stderr if suppress_kineto_output else empty_suppress
+        with suppress():
+            schedule = torch.profiler.schedule(wait=0, warmup=1, active=1, repeat=1)
+            with torch.profiler.profile(
+                activities=[torch.profiler.ProfilerActivity.CUDA], schedule=schedule
+            ) as prof:
+                for i in range(2):
+                    # NOTES: use a large kernel and a barrier to eliminate the unbalanced CPU launch overhead
+                    if barrier_comm_profiling:
+                        lhs = torch.randn(
+                            (8192, 8192), dtype=torch.float, device="cuda"
+                        )
+                        rhs = torch.randn(
+                            (8192, 8192), dtype=torch.float, device="cuda"
+                        )
+                        _ = lhs @ rhs
+                        torch.distributed.all_reduce(
+                            torch.ones(1, dtype=torch.float, device="cuda")
+                        )
+                    for _ in range(num_tests):
+                        fn()
+                    prof.step()
+        prof.export_chrome_trace(trace_path)
+
     return float(np.average(times)), float(np.min(times)), float(np.max(times))
 
 
@@ -192,7 +207,3 @@ def bench_kineto(
 
     # Return execution durations
     return kernel_durations if is_tuple else kernel_durations[0]
-
-
-def hash_tensor(t: torch.Tensor):
-    return t.view(torch.int64).sum().item()

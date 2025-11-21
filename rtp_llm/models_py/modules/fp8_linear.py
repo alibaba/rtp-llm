@@ -1,14 +1,12 @@
 import logging
+import math
 from typing import Optional
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from rtp_llm.config.quant_config import QuantizationConfig
-from rtp_llm.models_py.modules import utils
-
-logger = logging.getLogger(__name__)
-
 from rtp_llm.models_py.modules.fp8_kernel import (
     scaled_fp8_per_tensor_quant,
     sgl_per_token_group_quant_fp8,
@@ -18,169 +16,130 @@ from rtp_llm.models_py.modules.quantization.deepgemm_wrapper import (
     has_deep_gemm,
 )
 
+logger = logging.getLogger(__name__)
 
-class Fp8DeepGEMMLinear(nn.Module):
-    """FP8 Linear layer with DeepGEMM quantized matrix multiplication."""
 
+class Fp8PerBlockLinear(nn.Module):
     def __init__(
         self,
         weight: torch.Tensor,
-        weight_scales: torch.Tensor,
+        weight_scale: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
-        config=None,
-    ) -> None:
+    ):
         super().__init__()
-        if not has_deep_gemm():
-            raise RuntimeError(
-                "DeepGEMM is not available. Please install the `deep_gemm` package to enable DeepGEMM kernels."
-            )
-        self.hidden_size = weight.shape[0]  # k
-        self.output_size = weight.shape[1]  # n
-        self.weight = weight.reshape([weight.shape[1], weight.shape[0]])
-        self.weight_scales = weight_scales.reshape(
-            [weight_scales.shape[1], weight_scales.shape[0]]
-        )
+        # Initialize attributes
+        self.weight = weight
+        self.weight_scale = weight_scale
         self.bias = bias
-
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        # Get input dimensions
-        input_m = input.shape[0]
-        input_k = input.shape[1]
-        output_n = self.output_size
-
-        # Check input dtype - only accept BF16
-        if input.dtype != torch.bfloat16:
+        # Check weight and weight scale dimensions
+        if self.weight.dim() != 2 or self.weight_scale.dim() != 2:
+            error_msg = f"Weight and weight scale must be 2D tensors, but got weight dim: {self.weight.dim()} and weight scale dim: {self.weight_scale.dim()}"
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+        # Reshape weight and weight scale
+        self.K, self.N = self.weight.shape
+        self.scale_K, self.scale_N = self.weight_scale.shape
+        self.weight = self.weight.reshape(self.N, self.K)
+        self.weight_scale = self.weight_scale.reshape(self.scale_N, self.scale_K)
+        # Check weight scale sizes
+        if (
+            math.ceil(self.N / 128) != self.scale_N
+            or math.ceil(self.K / 128) != self.scale_K
+        ):
+            error_msg = f"Weight scale dimension mismatch! N: {self.N}, scale_N: {self.scale_N}, K: {self.K}, scale_K: {self.scale_K}"
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+        # Check weight and weight scale dtypes
+        if self.weight.dtype != torch.float8_e4m3fn:
+            error_msg = f"Weight dtype must be float8_e4m3fn, got {self.weight.dtype}"
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+        if self.weight_scale.dtype != torch.float32:
             error_msg = (
-                f"Fp8DeepGEMMLinear only accepts bfloat16 input, but got {input.dtype}. "
-                "Please convert input to bfloat16 before calling Fp8DeepGEMMLinear."
+                f"Weight scale dtype must be float32, got {self.weight_scale.dtype}"
             )
             logger.error(error_msg)
             raise ValueError(error_msg)
-
-        input_bf16 = input
-
-        # Quantize input to FP8
-
-        alignment = self._get_padding_size(input_m)
-        target_m = (input_m + alignment - 1) // alignment * alignment
-        need_padding = target_m > input_m
-
-        if need_padding:
-            input_for_quant = torch.zeros(
-                target_m, input_k, dtype=torch.bfloat16, device=input.device
-            )
-            input_for_quant[:input_m, :] = input_bf16
-        else:
-            input_for_quant = input_bf16
-
-        # Quantize using sgl_per_token_group_quant_fp8
-        quantization_eps = 1e-4
-        input_fp8, input_scales = sgl_per_token_group_quant_fp8(
-            input_for_quant,
-            group_size=128,
-            eps=quantization_eps,
-            column_major_scales=False,
-        )
-
-        FP8_E4M3_MAX = 448.0
-        min_scale_threshold = 1e-4 / FP8_E4M3_MAX
-        input_scales = torch.clamp(input_scales, min=min_scale_threshold)
-        input_scales = input_scales.to(torch.float32)
-        output_m = input_for_quant.shape[0]
-        output = torch.zeros(
-            output_m, output_n, dtype=torch.bfloat16, device=input.device
-        )
-
-        # Call DeepGEMM
-        deepgemm_input_scales = input_scales
-        input_fp8 = input_fp8.contiguous()
-        deepgemm_input_scales = deepgemm_input_scales.contiguous()
-        weight = self.weight.contiguous()
-        weight_scales = self.weight_scales.contiguous()
-        output = output.contiguous()
-        try:
-            fp8_gemm_nt(
-                (input_fp8, deepgemm_input_scales),
-                (weight, weight_scales),
-                output,
-                c=None,
-                disable_ue8m0_cast=True,
-            )
-        except Exception as e:
-            # DeepGEMM call failed - log error and re-raise
-            error_msg = f"DeepGEMM fp8_gemm_nt call failed: {type(e).__name__}: {e}"
-            logger.error(error_msg)
-            import traceback
-
-            logger.error(f"Traceback: {traceback.format_exc()}")
-            raise RuntimeError(error_msg) from e
-        if need_padding:
-            output = output[:input_m, :]
+        # Check bias
         if self.bias is not None:
-            output = output + self.bias.to(output.dtype)
-        return output
+            if self.bias.dim() != 1 and self.bias.dim() != 2:
+                error_msg = f"Bias dimension must be 1 or 2, got {self.bias.dim()}"
+                logger.error(error_msg)
+                raise ValueError(error_msg)
+            if self.bias.shape[-1] != self.N:
+                error_msg = (
+                    f"Bias last dimension must be {self.N}, got {self.bias.shape[-1]}"
+                )
+                logger.error(error_msg)
+                raise ValueError(error_msg)
+            if self.bias.dim() == 2 and self.bias.shape[0] != 1:
+                error_msg = f"Bias first dimension must be 1, got {self.bias.shape[0]}"
+                logger.error(error_msg)
+                raise ValueError(error_msg)
+            if self.bias.dtype != torch.bfloat16:
+                error_msg = f"Bias dtype must be bfloat16, got {self.bias.dtype}"
+                logger.error(error_msg)
+                raise ValueError(error_msg)
+        if not has_deep_gemm():
+            error_msg = "DeepGEMM is not available, please install deep_gemm package"
+            logger.error(error_msg)
+            raise RuntimeError(error_msg)
 
-    def _get_padding_size(self, m):
-        """Calculate padding size based on DeepGEMM requirements."""
-        if self._gemm_swap_ab_heuristic(m):
-            if m < 16:
-                return 16
-            else:
-                return 8
-        else:
-            return 64
-
-    def _gemm_swap_ab_heuristic(self, m):
-        return False
-
-    def _expand_input_scales(self, input_scales, target_shape):
-        """Expand input scales to target shape."""
-        # input_scales: [m, k/128] - always row-major
-        # target_shape: [m, k]
-        m, k = target_shape
-        expected_scales_shape = (m, (k + 127) // 128)
-        if input_scales.shape != expected_scales_shape:
-            raise ValueError(
-                f"Input scales shape mismatch! Expected {expected_scales_shape}, got {input_scales.shape}"
-            )
-        expanded = torch.zeros(
-            target_shape, dtype=input_scales.dtype, device=input_scales.device
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Check input dtype - only accept bfloat16
+        if x.dtype != torch.bfloat16:
+            error_msg = f"Input tensor dtype must be bfloat16, got {x.dtype}"
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+        # Check input tensor dimension
+        if x.dim() != 2:
+            error_msg = f"Input tensor dimension must be 2, got {x.dim()}D tensor"
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+        M, K = x.shape
+        # Check input tensor inner dimension expected to be K
+        if K != self.K:
+            error_msg = f"Input tensor inner dimension expected to be {self.K}, got {K}"
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+        # Quantize x to FP8
+        x_fp8, x_scales = sgl_per_token_group_quant_fp8(
+            x,
+            group_size=128,
+            eps=1e-4,
+            column_major_scales=True,
+            scale_tma_aligned=True,
         )
-        for i in range(input_scales.shape[0]):  # m tokens
-            for j in range(input_scales.shape[1]):  # k/128 groups
-                k_start = j * 128
-                k_end = min((j + 1) * 128, k)
-                expanded[i, k_start:k_end] = input_scales[i, j]
-        return expanded
-
-    def _expand_weight_scales(self):
-        """Expand weight scales to weight tensor shape."""
-        expanded = torch.zeros_like(self.weight, dtype=torch.float32)
-        for i in range(self.weight_scales.shape[0]):  # output_size blocks (60)
-            for j in range(self.weight_scales.shape[1]):  # hidden_size blocks (20)
-                h_start = i * 128  # output_size dimension
-                h_end = min((i + 1) * 128, self.weight.shape[0])
-                w_start = j * 128  # hidden_size dimension
-                w_end = min((j + 1) * 128, self.weight.shape[1])
-                expanded[h_start:h_end, w_start:w_end] = self.weight_scales[i, j]
-        return expanded
+        # Prepare output tensor
+        output = torch.empty(M, self.N, dtype=torch.bfloat16, device=x.device)
+        # Invoke DeepGEMM
+        fp8_gemm_nt(
+            (x_fp8, x_scales),
+            (self.weight, self.weight_scale),
+            output,
+            c=None,
+            disable_ue8m0_cast=True,
+        )
+        if self.bias is not None:
+            output = output + self.bias
+        return output
 
 
 class Fp8PerTensorLinear(nn.Module):
     def __init__(
         self,
-        quant_config: QuantizationConfig,
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
         input_scale: Optional[torch.Tensor] = None,
         bias: Optional[torch.Tensor] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
         self.weight = weight.T
         self.weight_scale = weight_scale
         self.input_scale = input_scale
         self.bias = bias
-        self.block_quant = None
+        self.quant_config = quant_config
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
 
