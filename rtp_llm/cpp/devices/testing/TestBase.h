@@ -111,7 +111,6 @@ protected:
                                                    uint              tokens_per_block,
                                                    rtp_llm::DataType dtype) {
         rtp_llm::CacheConfig config;
-        config.layer_type_num     = 1;
         config.layer_num          = static_cast<int>(layer_num);
         config.block_num          = static_cast<int>(block_num);
         config.seq_size_per_block = static_cast<size_t>(tokens_per_block);
@@ -123,7 +122,7 @@ protected:
         spec->seq_size_per_block  = tokens_per_block;
         spec->dtype               = dtype;
         spec->type                = rtp_llm::KVCacheType::MultiHeadAttention;
-        config.layer_type_params.push_back(spec);
+        config.cache_specs.push_back(spec);
         std::vector<int> layer_ids(layer_num);
         for (uint i = 0; i < layer_num; ++i)
             layer_ids[i] = static_cast<int>(i);
@@ -363,10 +362,10 @@ protected:
                                              torch::indexing::Slice(block_start, block_end),
                                              torch::indexing::Slice()})
                                      .reshape({static_cast<long>(cache_config.seq_size_per_block),
-                                               static_cast<long>(cache_config.layer_type_params[0]->local_head_num_kv),
-                                               static_cast<long>(static_cast<rtp_llm::MHAKVCacheSpec&>(
-                                                                     *cache_config.layer_type_params[0])
-                                                                     .size_per_head)})
+                                               static_cast<long>(cache_config.cache_specs[0]->local_head_num_kv),
+                                               static_cast<long>(
+                                                   static_cast<rtp_llm::MHAKVCacheSpec&>(*cache_config.cache_specs[0])
+                                                       .size_per_head)})
                                      .transpose(1, 0)
                                      .contiguous();
                         // vblock is not used in setKVBlockValue in this case
@@ -377,15 +376,15 @@ protected:
                                              torch::indexing::Slice(block_start, block_end),
                                              torch::indexing::Slice()})
                                      .reshape({static_cast<long>(cache_config.seq_size_per_block),
-                                               static_cast<long>(cache_config.layer_type_params[0]->local_head_num_kv),
-                                               static_cast<long>(static_cast<rtp_llm::MHAKVCacheSpec&>(
-                                                                     *cache_config.layer_type_params[0])
-                                                                     .size_per_head)})
+                                               static_cast<long>(cache_config.cache_specs[0]->local_head_num_kv),
+                                               static_cast<long>(
+                                                   static_cast<rtp_llm::MHAKVCacheSpec&>(*cache_config.cache_specs[0])
+                                                       .size_per_head)})
                                      .transpose(1, 0)
                                      .contiguous();
                     }
                     // Ensure k/v tensors match KV cache dtype
-                    auto target_torch_dtype = dataTypeToTorchType(cache_config.layer_type_params[0]->dtype);
+                    auto target_torch_dtype = dataTypeToTorchType(cache_config.cache_specs[0]->dtype);
                     if (kblock.scalar_type() != target_torch_dtype) {
                         kblock = kblock.to(target_torch_dtype);
                     }

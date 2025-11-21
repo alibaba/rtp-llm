@@ -17,8 +17,8 @@ class KVCacheManager {
 public:
     bool               init();
     const CacheConfig& cacheConfig() const;
-    // size_t availableBlockNums() const;
-    // size_t freeBlockNums() const;
+    // size_t availableBlocksNum() const;
+    // size_t freeBlocksNum() const;
 
     size_t availableTokenNums() const;
 
@@ -31,9 +31,9 @@ public:
                    const GptInitParameter&            params           = GptInitParameter{});
     ~KVCacheManager();
 
-    size_t      freeBlocksNums() const;
-    size_t      availableBlocksNums() const;
-    size_t      totalBlocksNums() const;
+    size_t      freeBlocksNum() const;
+    size_t      availableBlocksNum() const;
+    size_t      totalBlocksNum() const;
     size_t      maxSeqLen() const;
     KVCacheInfo getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
 
