@@ -66,7 +66,7 @@ void register_ffn_disaggregate_config(pybind11::module& m) {
              pybind11::arg("attention_tp_size")       = 1,
              pybind11::arg("attention_dp_size")       = 1,
              pybind11::arg("ffn_tp_size")             = 1,
-             pybind11::arg("ffn_dp_size")             = 1,
+             pybind11::arg("ffn_ep_size")             = 1,
              pybind11::arg("is_ffn_rank")             = false)
         .def("to_string", &FfnDisAggregateConfig::to_string)
         .def("update_from_env", &FfnDisAggregateConfig::update_from_env_for_test)
@@ -75,7 +75,7 @@ void register_ffn_disaggregate_config(pybind11::module& m) {
         .def_readwrite("attention_tp_size", &FfnDisAggregateConfig::attention_tp_size)
         .def_readwrite("attention_dp_size", &FfnDisAggregateConfig::attention_dp_size)
         .def_readwrite("ffn_tp_size", &FfnDisAggregateConfig::ffn_tp_size)
-        .def_readwrite("ffn_dp_size", &FfnDisAggregateConfig::ffn_dp_size)
+        .def_readwrite("ffn_ep_size", &FfnDisAggregateConfig::ffn_ep_size)
         .def_readwrite("is_ffn_rank", &FfnDisAggregateConfig::is_ffn_rank);
 }
 
@@ -646,6 +646,7 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(tp_nccl_port, tp_nccl_port_)                                                                          \
     DEF_PROPERTY(dp_tp_nccl_port, dp_tp_nccl_port_)                                                                    \
     DEF_PROPERTY(ffn_tp_nccl_port, ffn_tp_nccl_port_)                                                                  \
+    DEF_PROPERTY(afd_nccl_port, afd_nccl_port_)                                                                        \
     DEF_PROPERTY(model_rpc_port, model_rpc_port_)                                                                      \
     DEF_PROPERTY(http_port, http_port_)                                                                                \
     DEF_PROPERTY(tp_size, tp_size_)                                                                                    \

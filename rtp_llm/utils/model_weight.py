@@ -231,10 +231,15 @@ def sp_moe_neg1(
     dp: int,
     dp_rank: int,
     use_stack_weight: bool,
+    enable_ffn_disaggregate: bool,
     **kwargs: Any,
 ) -> torch.Tensor:
     if use_stack_weight:
-        if ep > 1:
+        # moe AFD FFN don't support TP yet
+        if enable_ffn_disaggregate:
+            tp_rank = 0
+            tp = 1
+        elif ep > 1:
             tp_rank = (dp_rank * tp + tp_rank) // ep
             tp = tp * dp // ep
         t1 = torch.split(t, t.shape[-1] // tp, dim=-1)[tp_rank]
@@ -254,11 +259,16 @@ def sp_moe_w1(
     dp: int,
     dp_rank: int,
     use_stack_weight: bool,
+    enable_ffn_disaggregate: bool,
     **kwargs: Any,
 ) -> torch.Tensor:
     # [expert_num, 2*n, k]
     if use_stack_weight:
-        if ep > 1:
+        # moe AFD FFN don't support TP yet
+        if enable_ffn_disaggregate:
+            tp_rank = 0
+            tp = 1
+        elif ep > 1:
             tp_rank = (dp_rank * tp + tp_rank) // ep
             tp = tp * dp // ep
         t1 = t.reshape([t.shape[0], 2, -1, t.shape[-1]])

@@ -313,7 +313,7 @@ class ModelLoader:
         return model_weights
 
     def prepare_weights(self, device: str):
-        if self._load_config.vit_separation != 1 and not self._is_attn_model:
+        if self._load_config.vit_separation != 1:
             for id in range(self._load_config.num_layers):
                 results = self._load_layer_weights(id, device)
                 for name, tensor in results.items():

@@ -2,6 +2,7 @@ from rtp_llm.models_py.modules.common.moe.strategy.batched_triton_strategy impor
     BatchedTritonStrategy,
 )
 from rtp_llm.models_py.modules.cuda.moe.strategy import (
+    CudaAfDisaggregateStrategy,
     CudaFp8PerBlockEpLowLatencyStrategy,
     CudaFp8PerBlockEpNormalStrategy,
     CudaFp8PerBlockNoDPStrategy,
@@ -24,4 +25,5 @@ registry.register(CudaFp8PerBlockNoDPStrategy())
 registry.register(CudaFp8PerTensorSingleGpuStrategy())
 registry.register(CudaNoQuantEpLowLatencyStrategy())
 registry.register(BatchedTritonStrategy())
+registry.register(CudaAfDisaggregateStrategy())
 FusedMoeFactory.set_registry(registry)

@@ -1857,6 +1857,7 @@ class DeepEPTest(TestCase):
         params.moe_config.use_deepep_low_latency = False
         params.moe_config.use_deepep_internode = False
         params.gpt_init_params.ffn_disaggregate_config.enable_ffn_disaggregate = False
+        params.gpt_init_params.parallelism_distributed_config.world_rank = rank
         params.moe_config.deep_ep_num_sm = 24
         params.moe_k = args["moe_k"]
         params.expert_num = args["expert_num"]
@@ -1914,6 +1915,7 @@ class DeepEPTest(TestCase):
         params.moe_config.use_deepep_low_latency = True
         params.moe_config.use_deepep_internode = False
         params.gpt_init_params.ffn_disaggregate_config.enable_ffn_disaggregate = False
+        params.gpt_init_params.parallelism_distributed_config.world_rank = rank
         params.moe_k = args["moe_k"]
         params.expert_num = args["expert_num"]
         params.hidden_size = args["hidden_size"]
@@ -1972,6 +1974,7 @@ class DeepEPTest(TestCase):
         params.moe_config.use_deepep_low_latency = True
         params.moe_config.use_deepep_internode = False
         params.gpt_init_params.ffn_disaggregate_config.enable_ffn_disaggregate = True
+        params.gpt_init_params.parallelism_distributed_config.world_rank = rank
         params.moe_k = args["moe_k"]
         params.expert_num = args["expert_num"]
         params.hidden_size = args["hidden_size"]
@@ -1980,7 +1983,7 @@ class DeepEPTest(TestCase):
             num_ranks // 2
         )
         params.gpt_init_params.ffn_disaggregate_config.attention_tp_size = 1
-        params.gpt_init_params.ffn_disaggregate_config.ffn_dp_size = num_ranks // 2
+        params.gpt_init_params.ffn_disaggregate_config.ffn_ep_size = num_ranks // 2
         params.gpt_init_params.ffn_disaggregate_config.ffn_tp_size = 1
         # init distributed environment
         torch.cuda.set_device(params.local_rank)
@@ -1995,7 +1998,7 @@ class DeepEPTest(TestCase):
             * params.gpt_init_params.ffn_disaggregate_config.attention_tp_size
         )
         num_n = (
-            params.gpt_init_params.ffn_disaggregate_config.ffn_dp_size
+            params.gpt_init_params.ffn_disaggregate_config.ffn_ep_size
             * params.gpt_init_params.ffn_disaggregate_config.ffn_tp_size
         )
         scale = num_ranks / num_n
@@ -2042,6 +2045,7 @@ class DeepEPTest(TestCase):
         params.moe_config.use_deepep_low_latency = False
         params.moe_config.use_deepep_internode = False
         params.gpt_init_params.ffn_disaggregate_config.enable_ffn_disaggregate = False
+        params.gpt_init_params.parallelism_distributed_config.world_rank = rank
         params.moe_config.deep_ep_num_sm = 24
         params.moe_k = 2
         params.expert_num = 4
@@ -2100,6 +2104,7 @@ class DeepEPTest(TestCase):
         params.moe_config.use_deepep_low_latency = True
         params.moe_config.use_deepep_internode = False
         params.gpt_init_params.ffn_disaggregate_config.enable_ffn_disaggregate = False
+        params.gpt_init_params.parallelism_distributed_config.world_rank = rank
         params.moe_k = args["moe_k"]
         params.expert_num = args["expert_num"]
         params.hidden_size = args["hidden_size"]

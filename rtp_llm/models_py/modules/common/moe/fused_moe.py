@@ -1,3 +1,4 @@
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Union, final
@@ -197,8 +198,9 @@ class FusedMoe(torch.nn.Module):
             extra_finalize_args,
         )
 
-        assert (
-            output.shape == hidden_states.shape
-        ), f"output batch size mismatch: expected {hidden_states.shape}, got {output.shape}"
+        if type(self.router).__name__ != "AfdDataRouterFfn":
+            assert (
+                output.shape == hidden_states.shape
+            ), f"output batch size mismatch: expected {hidden_states.shape}, got {output.shape}"
 
         return output
