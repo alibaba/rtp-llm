@@ -23,6 +23,10 @@ public:
     virtual int64_t                                      lastScheduleTime()                = 0;
     virtual int64_t                                      onflightStreams()                 = 0;
 
+    virtual absl::StatusOr<int> initKVBlock(const GenerateStreamPtr& stream) {
+        throw std::runtime_error("initKVBlock not implemented");
+    }
+
     virtual std::vector<EngineScheduleInfo::TaskInfo> waitingTaskList() {
         return {};
     }
