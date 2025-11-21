@@ -8,6 +8,7 @@ from functools import partial
 from typing import Any, AsyncGenerator, Dict, List, Optional, Set, Tuple, Union
 
 from rtp_llm.config.py_config_modules import StaticConfig
+from rtp_llm.openai.api_datatype import ChatCompletionTokenLogprob, TopLogprob
 
 current_file_path = pathlib.Path(__file__).parent.absolute()
 sys.path.append(str(current_file_path.parent.absolute()))
@@ -35,6 +36,7 @@ class PipelineResponse(BaseModel):
     logits: Optional[Union[List[float], List[List[float]]]] = None
     output_ids: Optional[List[List[int]]] = None
     input_ids: Optional[List[List[int]]] = None
+    logprobs: Optional[Union[List[ChatCompletionTokenLogprob],ChatCompletionTokenLogprob]] = None
 
 
 class MultiSequencesPipelineResponse(BaseModel):
@@ -96,6 +98,7 @@ class FrontendWorker:
             incremental=request.incremental,
             batch_infer=request.batch_infer,
             num_return_sequences=request.num_return_sequences,
+            generate_config=request.generate_configs[0],
         )
         return CompleteResponseAsyncGenerator(
             response_generator, complete_response_collect_func
@@ -179,10 +182,60 @@ class FrontendWorker:
                 if generate_config.return_input_ids and input_ids is not None
                 else None
             ),
+            logprobs=(
+                self._get_logprobs(gen_responses, generate_config)
+                if generate_config.logprobs 
+                else None)
         )
 
         return response
+    
+    
+    def _get_logprobs(self, gen_responses: GenerateResponse, generate_config: GenerateConfig) -> ChatCompletionTokenLogprob:
+        all_probs = gen_responses.generate_outputs.generate_outputs[0].all_probs
+        output_id = gen_responses.generate_outputs.generate_outputs[0].output_ids
+        prob_return_num = generate_config.top_logprobs
+        if output_id == None:
+            return None
+        if all_probs == None:
+            raise Exception(
+                "all_probs is None when logprobs is true. There should be a internal bug."
+            )
+        output_id = output_id.squeeze()
+        
+        # Handle both scalar and tensor cases
+        if output_id.dim() == 0:  # scalar tensor
+            selected_id = output_id.item()
+        else:  # tensor with dimensions
+            selected_id = output_id[-1].item()
+            
+        all_probs = all_probs.squeeze()
+        non_zero_size = all_probs.nonzero().shape[0]
+        prob_return_num = min(prob_return_num, non_zero_size)
+        probs, tokens = all_probs.topk(
+            prob_return_num, dim=-1, largest=True, sorted=True
+        )
+        log_values = probs.log()
 
+        selected_token = self.tokenizer.decode([selected_id])
+        chat_logprob = ChatCompletionTokenLogprob(
+            token=selected_token,
+            bytes=list(selected_token.encode("utf-8", errors="replace")),
+            logprob=all_probs[selected_id].log().item(),
+            top_logprobs=[],
+        )
+        for i in range(prob_return_num):
+            token = self.tokenizer.decode(tokens[i].item())
+            chat_logprob.top_logprobs.append(
+                TopLogprob(
+                    token=token,
+                    logprob=log_values[i].item(),
+                    bytes=list(token.encode("utf-8", errors="replace")),
+                )
+            )
+
+        return chat_logprob
+    
     def _format_response_new(
         self, gen_responses: GenerateResponse, generate_config: GenerateConfig
     ) -> Dict[str, Any]:
@@ -287,10 +340,24 @@ class FrontendWorker:
         incremental: bool,
         batch_infer: bool,
         num_return_sequences: int,
+        generate_config: Optional[GenerateConfig] = None,
     ) -> Union[PipelineResponse, MultiSequencesPipelineResponse, BatchPipelineResponse]:
 
         if not incremental:
-            return await CompleteResponseAsyncGenerator.get_last_value(all_responses)
+            if generate_config.logprobs:
+                complete_response_logprobs = []
+                response = None
+                async for response in all_responses:
+                    if response.logprobs:
+                        if isinstance(response.logprobs, list):
+                            complete_response_logprobs.extend(response.logprobs)
+                        else:
+                            complete_response_logprobs.append(response.logprobs)
+                if response is not None:
+                    response.aux_info["logprobs"] = complete_response_logprobs
+                    return response
+            else:
+                return await CompleteResponseAsyncGenerator.get_last_value(all_responses)
 
         if batch_infer:
             batch_response_incremental_stream = None

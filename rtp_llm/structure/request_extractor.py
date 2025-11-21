@@ -165,6 +165,9 @@ class RequestExtractor:
     def _get_adapter(
         self, generate_config: GenerateConfig, input_len: int
     ) -> List[GenerateConfig]:
+        if generate_config.logprobs:
+            generate_config.is_streaming = True
+            generate_config.return_all_probs = True
         generate_configs: List[GenerateConfig] = [generate_config] * input_len
         adapter_name = generate_config.adapter_name
         if adapter_name != None:
