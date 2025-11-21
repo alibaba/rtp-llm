@@ -127,7 +127,7 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
     hipblas_mm_wrapper_->setStream(stream_);
     fmha_runner_.reset(new rocmFmhaWrapper());
     fmha_runner_->init(stream_);
-    //moe_runner_.reset(new rocmMoeWrapper());
+    // moe_runner_.reset(new rocmMoeWrapper());
     ck_gemm_runner_.reset(new rocmCKGemmWrapper());
     ck_w8a8_gelu_gemm_runner_.reset(new rocmCKW8A8GeluGemmWrapper());
 
@@ -172,7 +172,9 @@ ROCmDevice::~ROCmDevice() {
 void ROCmDevice::init() {
     DeviceBase::init();
     RTP_LLM_LOG_INFO("max batch size: %d", init_params_.max_batch_size);
-    curandstate_buf_ = allocateBuffer({init_params_.max_batch_size * sizeof(curandState_t)}, {"curandstate"});
+    curandstate_buf_ = allocateBuffer(
+        {init_params_.max_batch_size * sizeof(curandState_t), AllocationType::DEVICE, false, VmemCtl::ForcePhysical},
+        {"curandstate"});
 }
 
 DeviceProperties ROCmDevice::getDeviceProperties() {
@@ -651,6 +653,23 @@ void ROCmCommHook::hook_sync() const {
     ROCM_CHECK(hipStreamWaitEvent(main_stream_, hook_event_, 0));
 }
 
+void ROCmDevice::detachPhysicalMemory() {
+    // Attempt to detach and clear physical memory.
+    if (auto allocator = dynamic_cast<rtp_llm::IVirtualMemAllocator*>(getAllocator())) {
+        return allocator->unmap();
+    } else {
+        throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+    }
+}
+void ROCmDevice::attachPhysicalMemory() {
+    // Try to allocate physical memory and attach it to a virtual address.
+    if (auto allocator = dynamic_cast<rtp_llm::IVirtualMemAllocator*>(getAllocator())) {
+        return allocator->map();
+    } else {
+        throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+    }
+}
+
 // void ROCmDevice::prepareCommBuffer(const PrepareCommBufferParams& params) {
 //     if (attn_rs_comm_buffer_) {
 //         return;
@@ -712,26 +731,34 @@ BufferPtr ROCmDevice::mhaQKVGemm(const AttentionLayerParams& params) {
     const auto qkv_merged_size = qkv_weight->kernel->shape()[1];
 
     BufferPtr qkv;
-    if (!params.configs.fuse_qkv_add_bias && params.weights.qkv_weight && params.qscheme == QScheme::Qint8PerTensor) {        
+    if (!params.configs.fuse_qkv_add_bias && params.weights.qkv_weight && params.qscheme == QScheme::Qint8PerTensor) {
         BufferPtr D = allocateBuffer({DataType::TYPE_FP16, {input.shape()[0], qkv_weight->kernel->shape()[1]}});
         OptionalConstBufferRef bias = std::nullopt;
         if (qkv_weight->bias) {
             bias = *(qkv_weight->bias);
         }
-        GemmParams qkv_gemm_params{input, *(qkv_weight->kernel), bias, D, DataType::TYPE_FP16,
-                                   DataType::TYPE_FP16, TransposeOperation::NONE, TransposeOperation::NONE};
-        qkv = loraLinear(LoraLinearParams(qkv_gemm_params, params.common.lora_input.qkv_lora_input)).output;  
+        GemmParams qkv_gemm_params{input,
+                                   *(qkv_weight->kernel),
+                                   bias,
+                                   D,
+                                   DataType::TYPE_FP16,
+                                   DataType::TYPE_FP16,
+                                   TransposeOperation::NONE,
+                                   TransposeOperation::NONE};
+        qkv = loraLinear(LoraLinearParams(qkv_gemm_params, params.common.lora_input.qkv_lora_input)).output;
     } else if (!params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias) {
         ActivationParams act_params(ActivationType::Identity,
                                     nullptr,
                                     mayGetRef(params.weights.qkv_weight->bias),
                                     std::nullopt,
                                     std::nullopt,
-                                    std::nullopt, nullptr, false,
+                                    std::nullopt,
+                                    nullptr,
+                                    false,
                                     params.qscheme);
-        auto qkv_gemm_params = GemmParams(input, *(qkv_weight->kernel));                            
-        auto lora_linear_params = LoraLinearParams(qkv_gemm_params, params.common.lora_input.qkv_lora_input);                                                  
-        qkv = loraLinearWithActivation(LoraLinearWithActivationParams(lora_linear_params, act_params));     
+        auto             qkv_gemm_params = GemmParams(input, *(qkv_weight->kernel));
+        auto lora_linear_params          = LoraLinearParams(qkv_gemm_params, params.common.lora_input.qkv_lora_input);
+        qkv = loraLinearWithActivation(LoraLinearWithActivationParams(lora_linear_params, act_params));
     } else {
         auto qkv_gemm_params = GemmParams(input, *(qkv_weight->kernel), std::nullopt, nullptr, DataType::TYPE_INVALID, params.output->type());
         qkv = loraLinear(LoraLinearParams(qkv_gemm_params, params.common.lora_input.qkv_lora_input)).output;

@@ -239,6 +239,9 @@ public:
             custom_allreduce_comm_->registerGraphBuffers();
     }
 
+    void detachPhysicalMemory() override;
+    void attachPhysicalMemory() override;
+
 protected:
     void InvokeROCmDeepGemm(const GemmParams& params, BufferPtr output);
     void InvokeROCmPTPCGemm(const GemmParams& params, BufferPtr output);
@@ -287,6 +290,7 @@ private:
     hipDeviceProp_t device_prop_;
 
     BufferPtr curandstate_buf_;  // for sampler use.
+    BufferPtr rope_;             // for attention op, rotary embedding cache.
 
     rocm::hipblasMMWrapper* hipblasMMWrapperPtr() const {
         return hipblas_mm_wrapper_.get();
