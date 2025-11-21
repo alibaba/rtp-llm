@@ -308,6 +308,10 @@ class WorkerInfo(object):
     def backend_server_port_offset(local_rank: int, server_port: int = -1) -> int:
         return WorkerInfo.server_port_offset(local_rank, server_port) + 6
 
+    @staticmethod
+    def ssl_server_port_offset(local_rank: int, server_port: int = -1) -> int:
+        return WorkerInfo.server_port_offset(local_rank, server_port) + 7
+
     # used for ut
     def reload(self):
         new_info = self.from_env()
