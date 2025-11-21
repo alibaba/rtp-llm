@@ -88,9 +88,9 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
     auto generate_stream              = engine_->makeStream(input);
     decode_context.request_timeout_ms = generate_stream->getTimeoutMs();
 
-    auto cache_manager = engine_->resourceContext().cache_manager;
-    auto reserve_block_num =
-        maga_init_params_.gpt_init_parameter.fifo_scheduler_config.scheduler_reserve_resource_ratio * cache_manager->totalBlocks() / 100;
+    auto cache_manager     = engine_->resourceContext().cache_manager;
+    auto reserve_block_num = maga_init_params_.gpt_init_parameter.fifo_scheduler_config.scheduler_reserve_resource_ratio
+                             * cache_manager->totalBlocks() / 100;
     auto current_blocks = cache_manager->availableBlockNums();
     if (current_blocks < reserve_block_num) {
         string error_msg = "request: [" + decode_context.request_key + "] malloc kv cache block failed at decode node, "
@@ -753,6 +753,11 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
                                 max_retry_timeout_ms);
             return decode_context.error_status;
         }
+        std::stringstream ss;
+        ss << "after initKVBlock: stream: [" << decode_context.getStream()->streamId()
+           << "], reuse_length: " << decode_context.getStream()->reuseLength()
+           << ", block_ids: " << decode_context.getStream()->kvCache().debugString();
+        RTP_LLM_LOG_INFO(ss.str());
         EXECUTE_STAGE_FUNC(loadCacheFromPrefill, decode_context);
         EXECUTE_STAGE_FUNC(localGenerate, decode_context);
         decode_context.stat_info.nextStage();

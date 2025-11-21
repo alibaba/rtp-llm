@@ -180,6 +180,9 @@ int GenerateStream::tryReleaseKVBlock(int nums) {
 
 void GenerateStream::releaseResource() {
     std::lock_guard<std::mutex> lock(*output_mutex_);
+    std::stringstream           ss;
+    ss << "in releaseResource: stream: [" << streamId() << "], block_ids: " << stream_cache_resource_->debugString();
+    RTP_LLM_LOG_INFO(ss.str());
     stream_cache_resource_->releaseResource();
 }
 void GenerateStream::setNeedReleaseResource(bool need_release_resource) {
