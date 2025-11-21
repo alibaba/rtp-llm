@@ -69,6 +69,10 @@ public:
     std::string                   sp_advice_prompt;
     std::vector<int>              sp_advice_prompt_token_ids;
 
+    bool        return_mtp_hidden_states     = false;
+    std::string mtp_hidden_states_saved_path = "";
+    int         mtp_input_len                = 0;
+
     bool do_sample             = true;
     bool can_use_pd_separation = true;
     bool pd_separation         = false;

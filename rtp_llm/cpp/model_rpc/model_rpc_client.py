@@ -86,6 +86,18 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.presence_penalty = input_py.generate_config.presence_penalty
     generate_config_pb.frequency_penalty = input_py.generate_config.frequency_penalty
     generate_config_pb.do_sample = input_py.generate_config.do_sample
+
+    if input_py.generate_config.return_mtp_hidden_states is not None:
+        generate_config_pb.return_mtp_hidden_states = (
+            input_py.generate_config.return_mtp_hidden_states
+        )
+    if input_py.generate_config.mtp_input_len is not None:
+        generate_config_pb.mtp_input_len = input_py.generate_config.mtp_input_len
+    if input_py.generate_config.mtp_hidden_states_saved_path is not None:
+        generate_config_pb.mtp_hidden_states_saved_path = (
+            input_py.generate_config.mtp_hidden_states_saved_path
+        )
+
     trans_option(generate_config_pb, input_py.generate_config, "no_repeat_ngram_size")
     trans_option(generate_config_pb, input_py.generate_config, "random_seed")
     trans_option(generate_config_pb, input_py.generate_config, "top_p_decay")
