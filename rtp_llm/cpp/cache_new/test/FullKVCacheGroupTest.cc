@@ -26,7 +26,7 @@ TEST_F(FullKVCacheGroupTest, NeedBlocksNumTest) {
     auto spec                = make_shared<MHAKVCacheSpec>();
     spec->seq_size_per_block = 4;
 
-    FullKVCacheGroup group1({}, spec, block_pool);
+    FullKVCacheGroup group1({}, spec, block_pool, 0);
     ASSERT_EQ(2, group1.needBlocksNum(10, 1));
     ASSERT_EQ(0, group1.needBlocksNum(10, 5));
     ASSERT_EQ(1, group1.needBlocksNum(1, 0));
@@ -40,7 +40,7 @@ TEST_F(FullKVCacheGroupTest, RemoveSkippedBlocksTest) {
     auto spec                = make_shared<MHAKVCacheSpec>();
     spec->seq_size_per_block = 4;
 
-    FullKVCacheGroup group1({}, spec, block_pool);
+    FullKVCacheGroup group1({}, spec, block_pool, 0);
 
     BlockIndicesType old_indices   = {1, 2, 3, 4};
     BlockIndicesType block_indices = old_indices;
@@ -65,7 +65,7 @@ TEST_F(FullKVCacheGroupTest, MatchTest) {
     auto spec                = make_shared<MHAKVCacheSpec>();
     spec->seq_size_per_block = 4;
 
-    FullKVCacheGroup group1({}, spec, block_pool);
+    FullKVCacheGroup group1({}, spec, block_pool, 0);
 
     // zero math
     CacheKeysType cache_keys    = {103, 104, 105, 106};
@@ -104,25 +104,25 @@ TEST_F(FullKVCacheGroupTest, MatchTest) {
 TEST_F(FullKVCacheGroupTest, MallocFreeTest) {
     auto block_pool = createBlockPool();
     block_pool->init();
-    ASSERT_EQ(block_pool->freeBlockNums(), 9);
+    ASSERT_EQ(block_pool->freeBlocksNum(), 9);
 
     auto spec                = make_shared<MHAKVCacheSpec>();
     spec->seq_size_per_block = 2;
 
-    FullKVCacheGroup group1({}, spec, block_pool);
+    FullKVCacheGroup group1({}, spec, block_pool, 0);
 
     CacheKeysType    cache_keys = {101, 102, 103};
     BlockIndicesType block_indices;
 
     ASSERT_TRUE(group1.malloc(cache_keys, block_indices, 7));
-    ASSERT_EQ(block_pool->freeBlockNums(), 5);
+    ASSERT_EQ(block_pool->freeBlocksNum(), 5);
     ASSERT_EQ(block_indices.size(), 4);
 
     BlockIndicesType expected_result = {1, 2, 3, 4};
     ASSERT_EQ(block_indices, expected_result);
 
     group1.free(block_indices);
-    ASSERT_EQ(block_pool->freeBlockNums(), 9);
+    ASSERT_EQ(block_pool->freeBlocksNum(), 9);
 
     ASSERT_FALSE(group1.malloc(cache_keys, block_indices, 180));
 }
@@ -130,18 +130,18 @@ TEST_F(FullKVCacheGroupTest, MallocFreeTest) {
 TEST_F(FullKVCacheGroupTest, InsertIntoCacheTest) {
     auto block_pool = createBlockPool();
     block_pool->init();
-    ASSERT_EQ(block_pool->freeBlockNums(), 9);
+    ASSERT_EQ(block_pool->freeBlocksNum(), 9);
 
     auto spec                = make_shared<MHAKVCacheSpec>();
     spec->seq_size_per_block = 2;
 
-    FullKVCacheGroup group1({}, spec, block_pool);
+    FullKVCacheGroup group1({}, spec, block_pool, 0);
 
     CacheKeysType    cache_keys = {103, 104, 105, 106};
     BlockIndicesType block_indices;
 
     group1.malloc(cache_keys, block_indices, 8);
-    ASSERT_EQ(block_pool->freeBlockNums(), 5);
+    ASSERT_EQ(block_pool->freeBlocksNum(), 5);
     ASSERT_EQ(block_indices.size(), 4);
     BlockIndicesType expected_result = {1, 2, 3, 4};
     ASSERT_EQ(block_indices, expected_result);
@@ -170,7 +170,7 @@ TEST_F(FullKVCacheGroupTest, InsertIntoCacheTest) {
 //     auto block_pool = createBlockPool();
 //     block_pool->init();
 //     auto block_cache = block_pool->blockCache();
-//     ASSERT_EQ(block_pool->freeBlockNums(), 9);
+//     ASSERT_EQ(block_pool->freeBlocksNum(), 9);
 
 //     FullKVCacheGroup group1({}, spec, block_pool);
 //     ASSERT_EQ(2, group1.ensureFreeBlocks(5));
