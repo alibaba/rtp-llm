@@ -70,8 +70,8 @@ torch::Tensor FlashInferPrefillOp::forward(const torch::Tensor&              q,
     RTP_LLM_LOG_DEBUG("prefill flashinfer");
     torch::Tensor k_cache, v_cache;
     if (kv_cache.has_value()) {
-        k_cache = kv_cache.value().k_cache_base;
-        v_cache = kv_cache.value().v_cache_base;
+        k_cache = kv_cache.value().k_cache_base.select(1, 0);
+        v_cache = kv_cache.value().k_cache_base.select(1, 1);
     }
     BatchPrefillWithPagedKVCacheRun(params->float_workspace_d,         // float_workspace_buffer
                                     params->int_workspace_d,           // int_workspace_buffer
@@ -147,8 +147,8 @@ torch::Tensor FlashInferDecodeOp::forward(const torch::Tensor&              q,
     RTP_LLM_LOG_DEBUG("decode flashinfer");
     torch::Tensor k_cache, v_cache;
     if (kv_cache.has_value()) {
-        k_cache = kv_cache.value().k_cache_base;
-        v_cache = kv_cache.value().v_cache_base;
+        k_cache = kv_cache.value().k_cache_base.select(1, 0);
+        v_cache = kv_cache.value().k_cache_base.select(1, 1);
     }
 
     BatchDecodeWithPagedKVCacheRun(params->float_workspace_d,         // float_workspace_buffer

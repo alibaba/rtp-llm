@@ -31,29 +31,13 @@ AttentionLayerOutput DeviceBase::mlaAttentionLayer(const AttentionLayerParams& p
                               "kv_cache_block_id shape in attention layer should be [batch_size, block_length]"
                               ", but got %s",
                               kv_cache_block_id.debugString().c_str());
-        RUNTIME_ASSERT_OP_ARG(kv_cache.k_cache_buffer && kv_cache.v_cache_buffer,
-                              "kv cache buffer should has value when use kv_cache_block_id");
-        const auto& k_cache_shape = kv_cache.k_cache_buffer->shape();
-        const auto& v_cache_shape = kv_cache.v_cache_buffer->shape();
-        RUNTIME_ASSERT_OP_ARG(((k_cache_shape.size() == 3) && (v_cache_shape.size() == 3)
-                               && (k_cache_shape[0] == v_cache_shape[0]) && (k_cache_shape[1] == v_cache_shape[1])
-                               && (k_cache_shape[1] == params.configs.tokens_per_block)
-                               && (k_cache_shape[2] == params.configs.kv_lora_rank + params.configs.rope_head_dim)
-                               && (v_cache_shape[2] == 0)),
-                              "mla kv cache buffer check shape failed. k_cache_buffer: %s, v_cache_buffer: %s",
-                              kv_cache.k_cache_buffer->debugString().c_str(),
-                              kv_cache.v_cache_buffer->debugString().c_str());
-        if (kv_cache.k_scale_buffer) {
-            const auto& k_scale_shape = kv_cache.k_scale_buffer->shape();
-            const auto& v_scale_shape = kv_cache.v_scale_buffer->shape();
-            RUNTIME_ASSERT_OP_ARG(((k_scale_shape.size() == 2) && (v_scale_shape.size() == 3)
-                                   && (k_scale_shape[0] == v_scale_shape[0]) && (k_scale_shape[1] == v_scale_shape[1])
-                                   && (k_cache_shape[0] == k_scale_shape[0])
-                                   && (k_scale_shape[1] == params.configs.tokens_per_block)),
-                                  "kv scale check buffer failed. k_scale_buffer: %s, v_scale_buffer: %s",
-                                  kv_cache.k_scale_buffer->debugString().c_str(),
-                                  kv_cache.v_scale_buffer->debugString().c_str());
-        }
+        RUNTIME_ASSERT_OP_ARG(kv_cache.k_cache_buffer, "k_cache_buffer should has value when use kv_cache_block_id");
+        const auto& layer_cache_shape = kv_cache.k_cache_buffer->shape();
+        RUNTIME_ASSERT_OP_ARG(((layer_cache_shape.size() == 3)
+                               && (layer_cache_shape[1] == params.configs.tokens_per_block)
+                               && (layer_cache_shape[2] == params.configs.kv_lora_rank + params.configs.rope_head_dim)),
+                              "mla kv cache buffer check shape failed. layer_cache: %s",
+                              kv_cache.k_cache_buffer->debugString().c_str());
     }
     BufferPtr         fused_qkv = nullptr;
     BufferPtr         q         = nullptr;

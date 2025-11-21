@@ -344,8 +344,8 @@ void cufmha::runOpenSourceFmhaPaged(void*            q,
     flash_fwd_params.v_row_stride   = size_per_head_;
     flash_fwd_params.k_head_stride  = seq_size_per_block * size_per_head_;
     flash_fwd_params.v_head_stride  = seq_size_per_block * size_per_head_;
-    flash_fwd_params.k_batch_stride = seq_size_per_block * (hidden_units_kv);
-    flash_fwd_params.v_batch_stride = seq_size_per_block * (hidden_units_kv);
+    flash_fwd_params.k_batch_stride = seq_size_per_block * (hidden_units_kv) * 2;
+    flash_fwd_params.v_batch_stride = seq_size_per_block * (hidden_units_kv) * 2;
 
     flash_fwd_params.block_table              = block_table;
     flash_fwd_params.block_table_batch_stride = block_table_batch_stride;

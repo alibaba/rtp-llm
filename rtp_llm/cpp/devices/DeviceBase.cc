@@ -174,10 +174,6 @@ void DeviceBase::writeCacheStore(const CacheStoreInputs& cache_store_inputs,
     const auto seq_size_per_block   = param.tokens_per_block;
     auto       offset_addr          = param.host_kv_cache_offset->data<int32_t>();
     auto       k_cache_data         = (uint64_t*)kv_cache.k_cache_buffer->data();
-    auto       v_cache_data         = (uint64_t*)kv_cache.v_cache_buffer->data();
-    // auto k_scale_data = (uint64_t*)(param.kv_cache->k_scale_buffer ? param.kv_cache->k_scale_buffer->data() :
-    // nullptr); auto v_scale_data = (uint64_t*)(param.kv_cache->v_scale_buffer ? param.kv_cache->v_scale_buffer->data()
-    // : nullptr);
 
     RTP_LLM_CHECK_WITH_INFO(param.context_batch_size == param.request_pd_separation->size(), "size not same");
     RTP_LLM_CHECK_WITH_INFO(param.context_batch_size == param.request_id->size(),
@@ -214,25 +210,6 @@ void DeviceBase::writeCacheStore(const CacheStoreInputs& cache_store_inputs,
             void*                 k_addr = (void*)((int8_t*)k_cache_data + block_id * param.k_block_size);
             std::shared_ptr<void> k_block_addr(k_addr, [](void* p) {});
             request_blocks->addBlock("k_" + cache_key, k_block_addr, param.k_block_size, true, true);
-            // if (k_scale_data) {
-            //     void* k_scale_addr = (void*)((int8_t*)k_scale_data + block_id * param.scale_block_size);
-            //     std::shared_ptr<void> k_scale_block_addr(k_scale_addr, [](void* p) { });
-            //     request_blocks->addBlock("k_scale" + cache_key, k_scale_block_addr, param.scale_block_size, true,
-            //     true);
-            // }
-            // mla kvcache 不存储 v_cache
-            if (mla_kvcache) {
-                continue;
-            }
-            void*                 v_addr = (void*)((int8_t*)v_cache_data + block_id * param.v_block_size);
-            std::shared_ptr<void> v_block_addr(v_addr, [](void* p) {});
-            request_blocks->addBlock("v_" + cache_key, v_block_addr, param.v_block_size, true, true);
-            // if (v_scale_data) {
-            //     void* v_scale_addr = (void*)((int8_t*)v_scale_data + block_id * param.scale_block_size);
-            //     std::shared_ptr<void> v_scale_block_addr(v_scale_addr, [](void* p) { });
-            //     request_blocks->addBlock("v_scale" + cache_key, v_scale_block_addr, param.scale_block_size, true,
-            //     true);
-            // }
         }
         auto storeCallback = [layer_id = param.layer_id, request_id](bool success, CacheStoreErrorCode ec) {
             if (!success) {
