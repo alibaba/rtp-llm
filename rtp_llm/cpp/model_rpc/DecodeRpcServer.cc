@@ -756,6 +756,7 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
         std::stringstream ss;
         ss << "after initKVBlock: stream: [" << decode_context.getStream()->streamId()
            << "], reuse_length: " << decode_context.getStream()->reuseLength()
+           << ", input_length:" << decode_context.getStream()->inputLength()
            << ", block_ids: " << decode_context.getStream()->kvCache().debugString();
         RTP_LLM_LOG_INFO(ss.str());
         EXECUTE_STAGE_FUNC(loadCacheFromPrefill, decode_context);
