@@ -103,8 +103,9 @@ void printBuffer2d(const std::string&  hint,
                 dim1,
                 dim2,
                 tensor.options().dtype().name().data());
-    size_t line_num = 0;
-    for (int i = 0; i < dim1; i++) {
+    size_t first_lines_start = dim1 < max_print_lines ? dim1 : max_print_lines;
+    size_t last_lines_start  = dim1 - max_print_lines > first_lines_start ? dim1 - max_print_lines : first_lines_start;
+    for (int i = 0; i < first_lines_start; i++) {
         std::stringstream ss;
         ss << "Buffer " << hint << " : ";
         ss << "[" << i << "]";
@@ -122,10 +123,25 @@ void printBuffer2d(const std::string&  hint,
         const auto [sum1, sum2] = calculateTensorSum([&](size_t j) -> auto { return tensor[i][j]; }, dim2);
         ss << " sum1 = " << sum1 << ", square sum2 = " << sum2;
         RTP_LLM_LOG(log_level, ss.str());
-        line_num++;
-        if (line_num > max_print_lines) {
-            return;
+    }
+    for (int i = last_lines_start; i < dim1; i++) {
+        std::stringstream ss;
+        ss << "Buffer " << hint << " : ";
+        ss << "[" << i << "]";
+        if (!show_stats_only) {
+            auto print_func = [&](size_t column_start, size_t column_end) {
+                for (int j = column_start; j < column_end && j < dim2; j++) {
+                    double value = tensor[i][j].item<double>();
+                    ss << " k = " << j << " value = " << value;
+                }
+            };
+            print_func(column_start, column_end);
+            ss << " ...... ";
+            print_func(std::max((size_t)0, dim2 - (column_end - column_start)), dim2);
         }
+        const auto [sum1, sum2] = calculateTensorSum([&](size_t j) -> auto { return tensor[i][j]; }, dim2);
+        ss << " sum1 = " << sum1 << ", square sum2 = " << sum2;
+        RTP_LLM_LOG(log_level, ss.str());
     }
 }
 

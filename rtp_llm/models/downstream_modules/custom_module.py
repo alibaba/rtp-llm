@@ -49,6 +49,7 @@ class CustomHandler(object):
     def __init__(self, config: GptInitModelParameters):
         self.config_ = config
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.need_post_process = False
 
     def custom_weight_info(self) -> List[CustomAtomicWeight]:
         return []

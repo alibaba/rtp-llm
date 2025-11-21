@@ -215,6 +215,60 @@ torch::Tensor QueryConverter::transTensor(const TensorPB& tensor_pb) {
     }
 }
 
+void QueryConverter::transTensorPB(TensorPB* tensor_pb, const torch::Tensor& tensor) {
+
+    // 设置数据类型
+    switch (tensor.dtype().toScalarType()) {
+        case torch::kFloat32:
+            tensor_pb->set_data_type(TensorPB::FP32);
+            break;
+        case torch::kInt32:
+            tensor_pb->set_data_type(TensorPB::INT32);
+            break;
+        case torch::kFloat16:
+            tensor_pb->set_data_type(TensorPB::FP16);
+            break;
+        case torch::kBFloat16:
+            tensor_pb->set_data_type(TensorPB::BF16);
+            break;
+        default:
+            throw std::runtime_error("Unsupported tensor data type.");
+    }
+    auto shape = tensor.sizes();
+    for (auto dim : shape) {
+        tensor_pb->add_shape(dim);
+    }
+    torch::Tensor contiguous_tensor = tensor.contiguous();
+    switch (tensor.dtype().toScalarType()) {
+        case torch::kFloat32: {
+            size_t      num_bytes = contiguous_tensor.numel() * sizeof(float);
+            const char* data_ptr  = static_cast<const char*>(contiguous_tensor.data_ptr());
+            tensor_pb->set_fp32_data(data_ptr, num_bytes);
+            break;
+        }
+        case torch::kInt32: {
+            size_t      num_bytes = contiguous_tensor.numel() * sizeof(int32_t);
+            const char* data_ptr  = static_cast<const char*>(contiguous_tensor.data_ptr());
+            tensor_pb->set_int32_data(data_ptr, num_bytes);
+            break;
+        }
+        case torch::kFloat16: {
+            size_t      num_bytes = contiguous_tensor.numel() * sizeof(c10::Half);
+            const char* data_ptr  = static_cast<const char*>(contiguous_tensor.data_ptr());
+            tensor_pb->set_fp16_data(data_ptr, num_bytes);
+            break;
+        }
+        case torch::kBFloat16: {
+            size_t      num_bytes = contiguous_tensor.numel() * sizeof(c10::BFloat16);
+            const char* data_ptr  = static_cast<const char*>(contiguous_tensor.data_ptr());
+            tensor_pb->set_bf16_data(data_ptr, num_bytes);
+            break;
+        }
+        default:
+            throw std::runtime_error("Unsupported tensor data type.");
+    }
+}
+
 void QueryConverter::transTensorPB(TensorPB* t, const rtp_llm::Buffer* buffer) {
     RTP_LLM_CHECK(t != nullptr);
     auto shape       = t->mutable_shape();
