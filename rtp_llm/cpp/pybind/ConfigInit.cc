@@ -664,7 +664,6 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(seq_size_per_block, seq_size_per_block_)                                                              \
     DEF_PROPERTY(max_block_size_per_item, max_block_size_per_item_)                                                    \
     DEF_PROPERTY(block_nums, block_nums_)                                                                              \
-    DEF_PROPERTY(scheduler_reserve_resource_ratio, scheduler_reserve_resource_ratio_)                                  \
     DEF_PROPERTY(kv_cache_mem_mb, kv_cache_mem_mb_)                                                                    \
     DEF_PROPERTY(reserve_runtime_mem_mb, reserve_runtime_mem_mb_)                                                      \
     DEF_PROPERTY(reuse_cache, reuse_cache_)                                                                            \
