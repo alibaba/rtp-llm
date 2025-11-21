@@ -211,7 +211,7 @@ torch::Tensor FusedRopeKVCacheDecodeOp::forward(const torch::Tensor&            
     //     prefix_prompt_param.max_prefix_prompt_length =params->prefix_lengths.max().item<int>();
     //     prefix_prompt_param.count_length = 1;
     // }
-    RTP_LLM_CHECK_WITH_INFO(params->sequence_lengths.is_pinned(), "sequence_lengths is not pinned memory");
+    // RTP_LLM_CHECK_WITH_INFO(params->sequence_lengths.is_pinned(), "sequence_lengths is not pinned memory");
     size_t seq_len     = 1;
     bool   store_qkv   = false;
     bool   store_q     = true;

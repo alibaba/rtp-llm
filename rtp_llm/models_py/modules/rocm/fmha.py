@@ -72,8 +72,10 @@ class FMHAParams(ParamsBase):
             else:
                 self.seq_lens = None
 
-    def update(self):
-        """Update parameters for CUDA graph execution."""
+    def fillParams(self, sequence_lengths, input_lengths, kv_cache_block_id_host):
+        self.sequence_lengths = sequence_lengths
+        self.input_lengths = input_lengths
+        self.kv_cache_block_id_host = kv_cache_block_id_host
         if self.seq_lens is not None and self.sequence_lengths is not None:
             self.seq_lens.copy_((self.sequence_lengths + 1).to(torch.device("cuda")))
             self.max_seq_len = 8192
