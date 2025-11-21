@@ -1395,6 +1395,11 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(const GptLayerInputs&     
     }
     printBufferData(*attn_hidden, "layer_" + to_string(layer_id) + "_attn_output");
 
+    auto quant_type = description_.act_qscheme;
+    // Note: MOE gating supports BF16 only (FP8 unsupported), no RMSNorm+Quant fusion here.
+    if (layer.ffn_weights.moe_gating_weight) {
+        quant_type = QScheme::NoQuantize;
+    }
     if (layer.post_layernorm) {
         // attn_hidden = attn_hidden + residual
         // hidden = layernorm(attn_hidden)
@@ -1411,7 +1416,7 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(const GptLayerInputs&     
                             false,
                             description_.post_layernorm,
                             description_.norm_type,
-                            description_.act_qscheme,
+                            quant_type,
                             false,
                             true);
 
