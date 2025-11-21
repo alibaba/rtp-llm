@@ -78,6 +78,8 @@ class GenerateConfig(BaseModel):
     calculate_loss: int = 0
     return_logits: bool = False
     logits_index: Optional[int] = None
+    logprobs: bool = False
+    top_logprobs: int = 1
     return_incremental: bool = False
     return_hidden_states: bool = False
     return_all_hidden_states: bool = False
