@@ -16,28 +16,24 @@ class KVCacheAllocator;
 class MemoryBlockCache;
 class TpBroadcastManager;
 
-class MemoryConnectorAsyncContext: public KVCacheConnector::AsyncContext {
+class MemoryConnectorAsyncContext: public AsyncContext {
 public:
     MemoryConnectorAsyncContext(
         const std::shared_ptr<TPBroadcastResult<CopyCacheRequestPB, CopyCacheResponsePB>>& broadcast_result,
         const std::function<void(bool)>&                                                   done_callback):
         broadcast_result_(broadcast_result), done_callback_(done_callback) {}
-    MemoryConnectorAsyncContext(bool already_done, bool success): already_done_(already_done), success_(success) {}
     ~MemoryConnectorAsyncContext() override = default;
 
 public:
-    bool success() const override;
-    void cancel() override;
     void waitDone() override;
-
-private:
-    bool allResponseSuccess() const;
+    void cancel() override;
+    bool done() const override;
+    bool success() const override;
 
 private:
     std::shared_ptr<TPBroadcastResult<CopyCacheRequestPB, CopyCacheResponsePB>> broadcast_result_;
     std::function<void(bool)>                                                   done_callback_;
     bool                                                                        already_done_{false};
-    bool                                                                        success_{false};
 };
 
 class KVCacheMemoryConnector: public KVCacheConnector, public std::enable_shared_from_this<KVCacheMemoryConnector> {

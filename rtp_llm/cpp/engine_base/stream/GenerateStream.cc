@@ -1080,4 +1080,25 @@ void GenerateStream::resizeSubGenerateStatus(size_t new_size) {
     }
 }
 
+bool GenerateStream::asyncLoadCache() {
+    if (stream_cache_resource_->asyncLoadCache()) {
+        setLoadingCacheState();
+        return true;
+    }
+    return false;
+}
+
+bool GenerateStream::loadCacheDone() const {
+    return stream_cache_resource_->loadCacheDone();
+}
+
+void GenerateStream::setLoadingCacheState() {
+    std::lock_guard<std::mutex> lock(*output_mutex_);
+    generate_status_->status = StreamState::LOADING_CACHE;
+}
+
+bool GenerateStream::isLoadingCache() const {
+    return generate_status_->status == StreamState::LOADING_CACHE;
+}
+
 }  // namespace rtp_llm

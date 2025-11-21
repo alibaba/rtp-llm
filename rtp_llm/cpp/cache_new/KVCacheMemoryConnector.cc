@@ -11,8 +11,17 @@ namespace rtp_llm {
 
 // ----------------------------- MemoryConnectorAsyncContext ---------------------------------
 
-bool MemoryConnectorAsyncContext::success() const {
-    return success_;
+void MemoryConnectorAsyncContext::waitDone() {
+    if (already_done_) {
+        return;
+    }
+    if (broadcast_result_) {
+        broadcast_result_->waitDone();
+    }
+    if (done_callback_) {
+        done_callback_(success());
+    }
+    already_done_ = true;
 }
 
 void MemoryConnectorAsyncContext::cancel() {
@@ -20,28 +29,16 @@ void MemoryConnectorAsyncContext::cancel() {
     return;
 }
 
-void MemoryConnectorAsyncContext::waitDone() {
-    if (already_done_) {
-        return;
-    }
-    if (broadcast_result_) {
-        broadcast_result_->waitDone();
-        already_done_ = true;
-
-        success_ = broadcast_result_->success();
-        if (!success_) {
-            return;
-        }
-
-        success_ = allResponseSuccess();
-    }
-    if (done_callback_) {
-        done_callback_(success_);
-    }
+bool MemoryConnectorAsyncContext::done() const {
+    return already_done_;
 }
 
-bool MemoryConnectorAsyncContext::allResponseSuccess() const {
-    const auto responses = broadcast_result_->responses();
+bool MemoryConnectorAsyncContext::success() const {
+    if (!broadcast_result_ || !broadcast_result_->success()) {
+        return false;
+    }
+
+    const auto& responses = broadcast_result_->responses();
     for (const auto& response : responses) {
         if (!response.has_mem_response() || !response.mem_response().success()) {
             return false;
@@ -78,9 +75,8 @@ bool KVCacheMemoryConnector::init() {
     return true;
 }
 
-std::shared_ptr<KVCacheConnector::AsyncContext>
-KVCacheMemoryConnector::asyncRead(const std::shared_ptr<KVCacheResourceV1>& resource,
-                                  const std::shared_ptr<Meta>&              meta) {
+std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::shared_ptr<KVCacheResourceV1>& resource,
+                                                                const std::shared_ptr<Meta>&              meta) {
     if (!resource || resource->cache_keys.empty() || resource->layer_block_ids.empty()) {
         return nullptr;
     }
@@ -88,7 +84,7 @@ KVCacheMemoryConnector::asyncRead(const std::shared_ptr<KVCacheResourceV1>& reso
     const auto&  cache_keys    = resource->cache_keys;
     const size_t gpu_reuse_len = resource->reuse_len;
     if (gpu_reuse_len >= cache_keys.size()) {
-        return std::make_shared<MemoryConnectorAsyncContext>(true, true);
+        return nullptr;
     }
 
     auto copy_infos = buildCopyPlanForRead(cache_keys, resource->layer_block_ids, gpu_reuse_len);
@@ -143,9 +139,8 @@ std::vector<KVCacheMemoryConnector::CopyInfoPerKey> KVCacheMemoryConnector::buil
     return copy_infos;
 }
 
-std::shared_ptr<KVCacheConnector::AsyncContext>
-KVCacheMemoryConnector::asyncWrite(const std::shared_ptr<KVCacheResourceV1>& resource,
-                                   const std::shared_ptr<Meta>&              meta) {
+std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shared_ptr<KVCacheResourceV1>& resource,
+                                                                 const std::shared_ptr<Meta>&              meta) {
     if (!resource || resource->cache_keys.empty() || resource->layer_block_ids.empty()) {
         return nullptr;
     }
@@ -159,7 +154,7 @@ KVCacheMemoryConnector::asyncWrite(const std::shared_ptr<KVCacheResourceV1>& res
         }
     }
     if (match_len >= cache_keys.size()) {
-        return std::make_shared<MemoryConnectorAsyncContext>(true, true);
+        return nullptr;
     }
 
     auto copy_infos = buildCopyPlanForWrite(cache_keys, resource->layer_block_ids, match_len);

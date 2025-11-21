@@ -5,6 +5,7 @@
 #include <set>
 #include <vector>
 
+#include "rtp_llm/cpp/cache_new/AsyncContext.h"
 #include "rtp_llm/cpp/cache_new/types.h"
 #include "rtp_llm/cpp/cache_new/CacheConfig.h"
 #include "rtp_llm/cpp/cache_new/KVCacheAllocator.h"
@@ -79,6 +80,10 @@ public:
                                                           std::vector<BlockIdPair>&      block_update_mapping);
     std::shared_ptr<class MemoryBlockCache> memoryBlockCache() const;
 
+    // async load cache from memory to gpu, for all tp
+    std::shared_ptr<AsyncContext> asyncLoadCache(const std::shared_ptr<KVCacheResourceV1>& resource);
+
+    // copy cache between gpu and memory, for single tp
     bool copyCache(const CopyCacheRequestPB& request, CopyCacheResponsePB& response);
 
 private:

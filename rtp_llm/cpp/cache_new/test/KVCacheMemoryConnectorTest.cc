@@ -293,16 +293,14 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_ReturnNull_OnInvalidInputs) {
     EXPECT_EQ(ctx2, nullptr);
 }
 
-TEST_F(KVCacheMemoryConnectorTest, asyncRead_AlreadyDoneTrue_WhenReuseLenGEKeys) {
+TEST_F(KVCacheMemoryConnectorTest, asyncRead_ReturnNull_WhenReuseLenGEKeys) {
     const size_t                  N = 3;
     std::vector<int64_t>          cache_keys{10001, 10002, 10003};
     std::vector<std::vector<int>> lbs_vec{{1, 1, 1}, {2, 2, 2}};
     auto                          res = makeCacheResource(cache_keys, lbs_vec, N);
 
     auto ctx = connector_->asyncRead(res, nullptr);
-    ASSERT_NE(ctx, nullptr);
-    ctx->waitDone();
-    EXPECT_TRUE(ctx->success());
+    EXPECT_EQ(ctx, nullptr);
     EXPECT_EQ(res->reuse_len, N);
 }
 
@@ -570,7 +568,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnNull_OnInvalidInputs) {
     EXPECT_EQ(ctx2, nullptr);
 }
 
-TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnAlreadyDoneTrue_WhenAllKeysInCache) {
+TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnNull_WhenAllKeysInCache) {
     // 两个 key 均已在内存缓存中
     const int                     layer0        = 0;
     const int                     gpu_block_idx = 1;
@@ -599,9 +597,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnAlreadyDoneTrue_WhenAllKeysI
     const size_t cache_size_before = connector_->block_cache_->size();
 
     auto ctx = connector_->asyncWrite(res, nullptr);
-    ASSERT_NE(ctx, nullptr);
-    ctx->waitDone();
-    EXPECT_TRUE(ctx->success());
+    ASSERT_EQ(ctx, nullptr);
     EXPECT_EQ(connector_->block_cache_->size(), cache_size_before);
 }
 

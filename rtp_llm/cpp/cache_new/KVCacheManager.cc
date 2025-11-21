@@ -274,6 +274,17 @@ bool KVCacheManager::updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache
     return allocator_->updateKVBlock(batch_kv_cache_resource, block_src_batch, copy_last_block, block_update_mapping);
 }
 
+std::shared_ptr<AsyncContext> KVCacheManager::asyncLoadCache(const std::shared_ptr<KVCacheResourceV1>& resource) {
+    if (!memory_connector_ || !resource) {
+        RTP_LLM_LOG_WARNING(
+            "async load cache failed, memory connector or resource is null, memory connector: %p, resource: %p",
+            memory_connector_.get(),
+            resource.get());
+        return nullptr;
+    }
+    return memory_connector_->asyncRead(resource, nullptr);
+}
+
 std::shared_ptr<MemoryBlockCache> KVCacheManager::memoryBlockCache() const {
     RTP_LLM_LOG_WARNING("memoryBlockCache is not implemented in new KVCacheManager yet");
     return nullptr;

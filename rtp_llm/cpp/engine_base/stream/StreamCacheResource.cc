@@ -229,4 +229,20 @@ bool StreamCacheResource::enableMemoryBlockCache() const {
     return resource_context_.enable_memory_block_cache && stream_->enableMemoryBlockCache();
 }
 
+bool StreamCacheResource::asyncLoadCache() {
+    if (enableMemoryBlockCache()) {
+        // TODO(LXQ): support batch0 now, support all batch or not?
+        auto resource       = std::make_shared<KVCacheResourceV1>(batch_resource_->batch_resource.at(0));
+        load_cache_context_ = resource_context_.cache_manager->asyncLoadCache(resource);
+        return load_cache_context_ != nullptr;
+    }
+    return false;
+}
+bool StreamCacheResource::loadCacheDone() const {
+    if (!load_cache_context_) {
+        return true;
+    }
+    return load_cache_context_->done();
+}
+
 }  // namespace rtp_llm
