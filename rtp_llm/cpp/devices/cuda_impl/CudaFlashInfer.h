@@ -53,9 +53,12 @@ public:
     std::vector<torch::Tensor> flash_mla_plan;
     MlaOpsType                 mla_ops_type = MlaOpsType::AUTO;
 
-    bool          decode_plan = true;
-    torch::Tensor plan;
-    DataType      dtype = DataType::TYPE_INVALID;
+    bool                      decode_plan = true;
+    torch::Tensor             plan;
+    DataType                  dtype = DataType::TYPE_INVALID;
+    rtp_llm::AttentionConfigs attn_configs;
+    bool                      is_prefill;
+    bool                      enable_cuda_graph = false;
 
     static bool
     check(rtp_llm::DeviceBase* device, const rtp_llm::AttentionConfigs& attn_configs, DataType dtype, bool is_prefill);
