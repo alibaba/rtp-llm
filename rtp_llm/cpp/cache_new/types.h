@@ -32,13 +32,14 @@ struct BlockAddrInfo {
     void* v_scale_addr = nullptr;
 };
 
-struct BlockBufferInfo {
+struct BlockBufferPtrInfo {
     BufferPtr k_addr;
     BufferPtr v_addr;
     // BufferPtr k_scale_addr;
     // BufferPtr v_scale_addr;
 };
 
+// TODO: change into Buffer Ptr
 struct CacheLayerLayout {
     std::vector<int>           layer_to_groups;
     std::vector<torch::Tensor> layers_to_buffer_ptrs;

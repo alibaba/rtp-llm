@@ -12,7 +12,7 @@ bool FullKVCacheGroup::malloc(const CacheKeysType& cache_keys, BlockIndicesType&
     if (need_blocks_num == 0) {
         return true;
     }
-    auto free_blocks_num = freeBlockNums();
+    auto free_blocks_num = freeBlocksNum();
     if (free_blocks_num < need_blocks_num) {
         if (!ensureFreeBlocks(need_blocks_num - free_blocks_num)) {
             RTP_LLM_LOG_WARNING(
@@ -26,8 +26,6 @@ bool FullKVCacheGroup::malloc(const CacheKeysType& cache_keys, BlockIndicesType&
         return false;
     }
     block_indices.insert(block_indices.end(), result.begin(), result.end());
-
-    // TODO, insert to cache right row, for reuse in batch query
 
     return true;
 }
