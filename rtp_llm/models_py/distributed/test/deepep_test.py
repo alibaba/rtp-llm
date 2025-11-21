@@ -1867,7 +1867,7 @@ class DeepEPTest(TestCase):
         init_distributed_environment(params=params, backend="nccl", timeout=60)
         init_deepep_wrapper(group=dist.group.WORLD, params=params)
         deep_ep_wrapper = get_deepep_wrapper()
-        buffer = deep_ep_wrapper.buffer
+        buffer = deep_ep_wrapper.normal_buffer
         # run test
         DeepEPTest._test_intranode_main(
             args["max_seq_len"],
@@ -1924,7 +1924,7 @@ class DeepEPTest(TestCase):
         init_distributed_environment(params=params, backend="nccl", timeout=60)
         init_deepep_wrapper(group=dist.group.WORLD, params=params)
         deep_ep_wrapper = get_deepep_wrapper()
-        buffer = deep_ep_wrapper.buffer
+        buffer = deep_ep_wrapper.low_latency_buffer
         # run test
         DeepEPTest._test_low_latency_main(
             (args["max_generate_batch_size"] + params.tp_size - 1) // params.tp_size,
@@ -1988,7 +1988,7 @@ class DeepEPTest(TestCase):
         init_distributed_environment(params=params, backend="nccl", timeout=60)
         init_deepep_wrapper(group=dist.group.WORLD, params=params)
         deep_ep_wrapper = get_deepep_wrapper()
-        buffer = deep_ep_wrapper.buffer
+        buffer = deep_ep_wrapper.low_latency_buffer
         # run test
         num_m = (
             params.gpt_init_params.ffn_disaggregate_config.attention_dp_size
@@ -2052,7 +2052,7 @@ class DeepEPTest(TestCase):
         init_distributed_environment(params=params, backend="nccl", timeout=60)
         init_deepep_wrapper(group=dist.group.WORLD, params=params)
         deep_ep_wrapper = get_deepep_wrapper()
-        buffer = deep_ep_wrapper.buffer
+        buffer = deep_ep_wrapper.normal_buffer
         # run test
         DeepEPTest._test_intranode_expert_alignment_main(
             deep_ep_wrapper.ep_rank,
@@ -2110,7 +2110,7 @@ class DeepEPTest(TestCase):
         init_distributed_environment(params=params, backend="nccl", timeout=60)
         init_deepep_wrapper(group=dist.group.WORLD, params=params)
         deep_ep_wrapper = get_deepep_wrapper()
-        buffer = deep_ep_wrapper.buffer
+        buffer = deep_ep_wrapper.low_latency_buffer
         # run test
         DeepEPTest._test_low_latency_per_token_quant_main(
             (args["max_generate_batch_size"] + params.tp_size - 1) // params.tp_size,

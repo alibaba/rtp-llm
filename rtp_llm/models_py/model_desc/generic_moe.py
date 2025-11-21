@@ -7,7 +7,7 @@ from torch import nn
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.distribute.collective import Group, all_reduce
 from rtp_llm.model_loader.model_weight_info import ModelWeights
-from rtp_llm.models_py.distributed.deepep_wrapper import get_deepep_wrapper
+from rtp_llm.models_py.distributed.deepep_initializer import DeepEpInitializer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import RMSNorm, SelectTopk
 from rtp_llm.models_py.modules.attention import CausalAttention
@@ -410,7 +410,21 @@ class GenericMoeModel(GptModelBase):
         )
         global_token_nums_tensor = all_reduce(token_nums_tensor, group=Group.DP_AND_TP)
         global_token_nums = int(global_token_nums_tensor.item())
-        max_token_per_rank = get_deepep_wrapper().ll_num_max_token_per_rank
+
+        max_token_per_rank = 64
+        if DeepEpInitializer.supported():
+            try:
+                deepep_wrapper = DeepEpInitializer.get_deepep_wrapper(self.config)
+                max_token_per_rank = deepep_wrapper.ll_num_max_token_per_rank
+            except RuntimeError as err:
+                logging.warning(
+                    "DeepEP wrapper unavailable, fallback to normal mode: %s", err
+                )
+        else:
+            logging.debug(
+                "DeepEP not supported in current build, always running normal mode"
+            )
+
         is_normal_mode = (
             True
             if (max_token_per_rank == 0 or global_token_nums > max_token_per_rank)
