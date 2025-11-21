@@ -209,7 +209,6 @@ public:
     int64_t max_block_size_per_item_ = 16;
 
     int64_t block_nums_                       = 0;
-    int64_t scheduler_reserve_resource_ratio_ = 5;
     int64_t reserve_runtime_mem_mb_           = 0;
     int64_t kv_cache_mem_mb_                  = 0;
     bool    reuse_cache_                      = false;
