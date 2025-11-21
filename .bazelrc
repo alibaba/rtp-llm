@@ -152,6 +152,8 @@ build:rocm --copt="-D_GLIBCXX_USE_CXX11_ABI=1"
 #build:rocm --copt="-DENABLE_PROF=1"
 build:rocm --action_env LD_LIBRARY_PATH="/opt/rh/gcc-toolset-12/root/usr/lib64:/lib64:/opt/conda310/lib/:/opt/rocm/lib/:/opt/taobao/java/jre/lib/amd64/server/:/opt/amdgpu/lib64/:$LD_LIBRARY_PATH"
 build:rocm --host_action_env LD_LIBRARY_PATH="/opt/rocm/lib/:/opt/taobao/java/jre/lib/amd64/server/:/opt/amdgpu/lib64/:$LD_LIBRARY_PATH"
+build:rocm --copt="-DUSE_ROCM=1"
+build:rocm --copt="-DFORCE_NVSHMEM_API=1"
 build:aiter_src --define=using_aiter_src=true
 test:rocm --test_env="/opt/rocm/lib/:/opt/taobao/java/jre/lib/amd64/server/:/opt/amdgpu/lib64/:$LD_LIBRARY_PATH"
 

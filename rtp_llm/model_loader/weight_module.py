@@ -360,6 +360,8 @@ class AtomicWeight(WeightModule):
         except Exception as e:
             logging.error(f"加载 {self.name} 失败，完整堆栈:\n{traceback.format_exc()}")
             raise e
+        if "scale" in self.name and after_merge_tensor.dim() == 1:
+            after_merge_tensor = after_merge_tensor.unsqueeze(-1)
         return {self.name: after_merge_tensor}
 
     def lora_tensor_name(self, layer_id: Optional[int], name: str):

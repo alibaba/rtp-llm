@@ -31,8 +31,12 @@ void runAiterAsmPA(const AttentionModuleParams& params,
 
     auto block_tables = Buffer2torchTensor(params.common.kv_cache->kv_cache_block_id,false);
 
-    auto context_lens = Buffer2torchTensor(params.common.sequence_lengths,false);
-    context_lens = context_lens + 1;
+    auto aiter_attn = (AiterAttnParams*)params.common.decode_aiter_attn.get();
+    if (!aiter_attn) {
+        throw std::runtime_error("aiter_attn must be setting when using aiter pa");
+    }
+
+    auto context_lens = aiter_attn->sequence_lengths_t;
     
     int max_num_blocks = block_tables.size(1);
     std::optional<torch::Tensor> K_QScale = std::nullopt;
