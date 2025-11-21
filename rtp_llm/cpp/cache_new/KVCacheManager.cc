@@ -24,22 +24,18 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
 KVCacheManager::~KVCacheManager() {}
 
 bool KVCacheManager::init() {
-    bool multiple_types = (config_.layer_type_num > 1) || (config_.layer_type_params.size() > 1);
+    bool multiple_types = config_.cache_specs.size() > 1;
     if (multiple_types) {
-        // if (config_.enable_independent_pool) {
-        //     RTP_LLM_LOG_ERROR("HybridPoolKVCacheAllocator not implemented");
-        //     return false;
-        // }
         RTP_LLM_LOG_ERROR("multiple types not supported");
         return false;
     }
 
-    if (config_.layer_type_params.empty()) {
-        RTP_LLM_LOG_ERROR("no layer_type_params");
+    if (config_.cache_specs.empty()) {
+        RTP_LLM_LOG_ERROR("no cache_specs");
         return false;
     }
 
-    auto& spec = config_.layer_type_params[0];
+    auto& spec = config_.cache_specs[0];
     if (spec->type == rtp_llm::KVCacheType::MultiHeadAttention
         || spec->type == rtp_llm::KVCacheType::MultiHeadLatentAttention) {
         allocator_ = std::make_shared<rtp_llm::SingleTypeKVCacheAllocator>(config_, device_, AllocationType::DEVICE);
@@ -101,7 +97,7 @@ void KVCacheManager::setKVBlockValue(int              block_index,
         return;
     }
     // Basic size/type validation to prevent out-of-bounds copy
-    auto&  spec             = config_.layer_type_params[0];
+    auto&  spec             = config_.cache_specs[0];
     size_t expected_k_bytes = spec->k_block_size();
     size_t expected_v_bytes = spec->v_block_size();
     size_t src_k_bytes      = k_buffer.size() * rtp_llm::getTypeSize(k_buffer.type());
@@ -130,7 +126,7 @@ void KVCacheManager::setKVBlockValue(int block_index, rtp_llm::Buffer& k_buffer,
         return;
     }
     // Basic size/type validation to prevent out-of-bounds copy
-    auto&  spec             = config_.layer_type_params[0];
+    auto&  spec             = config_.cache_specs[0];
     size_t expected_k_bytes = spec->k_block_size();
     size_t expected_v_bytes = spec->v_block_size();
     size_t src_k_bytes      = k_buffer.size() * rtp_llm::getTypeSize(k_buffer.type());
@@ -186,10 +182,6 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
                 keys.push_back(rolling_hash);
             }
         }
-
-        for (auto& hash : keys) {
-            RTP_LLM_LOG_INFO("DECODE: malloc cache_key %s", std::to_string(hash).c_str());
-        }
     }
 
     return allocator_->malloc(malloc_info);
@@ -208,16 +200,16 @@ KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cac
     return {0, 0, 0, {}, latest_version};
 }
 
-size_t KVCacheManager::freeBlocksNums() const {
-    return allocator_->freeBlocksNums();
+size_t KVCacheManager::freeBlocksNum() const {
+    return allocator_->freeBlocksNum();
 }
 
-size_t KVCacheManager::availableBlocksNums() const {
-    return allocator_->availableBlocksNums();
+size_t KVCacheManager::availableBlocksNum() const {
+    return allocator_->availableBlocksNum();
 }
 
-size_t KVCacheManager::totalBlocksNums() const {
-    return allocator_->totalBlocksNums();
+size_t KVCacheManager::totalBlocksNum() const {
+    return allocator_->totalBlocksNum();
 }
 
 size_t KVCacheManager::maxSeqLen() const {

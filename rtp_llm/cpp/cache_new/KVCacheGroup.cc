@@ -6,7 +6,6 @@ namespace rtp_llm {
 bool KVCacheGroup::init() {
     auto layer_tensors = block_pool_->layerCacheBase();
 
-    // TODO(chanyin): layer_ids might not be set in sequence, move to basic class
     for (int i = 0; i < layer_ids_.size(); ++i) {
         gloabl_layer_to_kv_tensors[layer_ids_[i]]  = layer_tensors[i];
         gloabl_layer_to_local_layer[layer_ids_[i]] = i;
@@ -22,12 +21,12 @@ bool KVCacheGroup::ensureFreeBlocks(int required_blocks) {
 
     // blocks popped by block_cache_ might be occupied by other query
     // it's necessary to checkout whether free blocks are enough
-    while (block_pool_->freeBlockNums() < required_blocks) {
-        int  need_evict     = required_blocks - block_pool_->freeBlockNums();
+    while (block_pool_->freeBlocksNum() < required_blocks) {
+        int  need_evict     = required_blocks - block_pool_->freeBlocksNum();
         auto evicted_blocks = block_cache_->pop(need_evict);
         if (evicted_blocks.empty()) {
             RTP_LLM_LOG_WARNING("ensure free blocks failed, free blocks : %d, need evict blocks : %d",
-                                block_pool_->freeBlockNums(),
+                                block_pool_->freeBlocksNum(),
                                 need_evict);
             return false;
         }
@@ -37,8 +36,8 @@ bool KVCacheGroup::ensureFreeBlocks(int required_blocks) {
     return true;
 }
 
-size_t KVCacheGroup::freeBlockNums() const {
-    return block_pool_->freeBlockNums();
+size_t KVCacheGroup::freeBlocksNum() const {
+    return block_pool_->freeBlocksNum();
 }
 
 int KVCacheGroup::seqSizePerBlock() const {
@@ -59,7 +58,7 @@ BlockAddrInfo KVCacheGroup::convertIndexToAddr(int layer_id, int block_id) const
     return block_pool_->convertIndexToAddr(local_layer_id, block_id);
 }
 
-BlockBufferInfo KVCacheGroup::convertIndexToBuffer(int layer_id, int block_id) const {
+BlockBufferPtrInfo KVCacheGroup::convertIndexToBuffer(int layer_id, int block_id) const {
     auto it = gloabl_layer_to_local_layer.find(layer_id);
     if (it == gloabl_layer_to_local_layer.end()) {
         RTP_LLM_LOG_ERROR("Invalid layer_id: %d", layer_id);

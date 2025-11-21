@@ -12,7 +12,7 @@ HybridLayerKVCacheAllocator::HybridLayerKVCacheAllocator(const CacheConfig&   co
     KVCacheAllocator(config, device, atype) {}
 
 bool HybridLayerKVCacheAllocator::init() {
-    auto            block_size = config_.layer_type_params[0]->block_size();
+    auto            block_size = config_.cache_specs[0]->block_size();
     BlockPoolConfig pool_config =
         BlockPoolConfigHelper::createLayerFirstConfig(config_.layer_num, config_.block_num, block_size);
 
@@ -23,14 +23,14 @@ bool HybridLayerKVCacheAllocator::init() {
     }
 
     std::vector<int> layer_ids(config_.layer_ids[0]);
-    if (config_.layer_type_params.empty()) {
-        RTP_LLM_LOG_ERROR("no layer_type_params found in CacheConfig");
+    if (config_.cache_specs.empty()) {
+        RTP_LLM_LOG_ERROR("no cache_specs found in CacheConfig");
         return false;
     }
 
-    auto& spec = config_.layer_type_params[0];
+    auto& spec = config_.cache_specs[0];
 
-    full_kv_cache_group_ = std::make_shared<FullKVCacheGroup>(layer_ids, spec, block_pool_);
+    full_kv_cache_group_ = std::make_shared<FullKVCacheGroup>(layer_ids, spec, block_pool_, 0);
 
     if (!full_kv_cache_group_->init()) {
         RTP_LLM_LOG_ERROR("Failed to initialize FullKVCacheGroup");
@@ -38,17 +38,15 @@ bool HybridLayerKVCacheAllocator::init() {
     }
 
     // TODO, user other layer_id
-    auto linear_kv_cache_group_1 = std::make_shared<LinearKVCacheGroup>(layer_ids, spec, block_pool_);
-    auto linear_kv_cache_group_2 = std::make_shared<LinearKVCacheGroup>(layer_ids, spec, block_pool_);
+    auto linear_kv_cache_group_1 = std::make_shared<LinearKVCacheGroup>(layer_ids, spec, block_pool_, 1);
+    auto linear_kv_cache_group_2 = std::make_shared<LinearKVCacheGroup>(layer_ids, spec, block_pool_, 2);
     linear_kv_cache_groups_.push_back(linear_kv_cache_group_1);
     linear_kv_cache_groups_.push_back(linear_kv_cache_group_2);
 
     all_kv_cache_groups_.push_back(full_kv_cache_group_);
     all_kv_cache_groups_.insert(
         all_kv_cache_groups_.end(), linear_kv_cache_groups_.begin(), linear_kv_cache_groups_.end());
-    for (int i = 0; i < all_kv_cache_groups_.size(); i++) {
-        all_kv_cache_groups_[i]->setGroupId(i);
-    }
+    // group ids have been set via constructors
 
     RTP_LLM_LOG_INFO("HybridLayerKVCacheAllocator initialized successfully with KV_FIRST layout");
     return true;
@@ -226,26 +224,26 @@ BlockAddrInfo HybridLayerKVCacheAllocator::convertIndexToAddr(int layer_id, int 
 }
 
 // TODO, 修改下。
-BlockBufferInfo HybridLayerKVCacheAllocator::convertIndexToBuffer(int layer_id, int block_id) const {
+BlockBufferPtrInfo HybridLayerKVCacheAllocator::convertIndexToBuffer(int layer_id, int block_id) const {
     return full_kv_cache_group_->convertIndexToBuffer(layer_id, block_id);
 }
 
-size_t HybridLayerKVCacheAllocator::freeBlocksNums() const {
-    return block_pool_->freeBlockNums();
+size_t HybridLayerKVCacheAllocator::freeBlocksNum() const {
+    return block_pool_->freeBlocksNum();
 }
 
-size_t HybridLayerKVCacheAllocator::availableBlocksNums() const {
+size_t HybridLayerKVCacheAllocator::availableBlocksNum() const {
     // TODO: free blocks nums not equal to available blocks nums when block cache holds blocks reference
-    return block_pool_->freeBlockNums();
+    return block_pool_->freeBlocksNum();
 }
 
-size_t HybridLayerKVCacheAllocator::totalBlocksNums() const {
-    return block_pool_->totalBlockNums();
+size_t HybridLayerKVCacheAllocator::totalBlocksNum() const {
+    return block_pool_->totalBlocksNum();
 }
 
 size_t HybridLayerKVCacheAllocator::maxSeqLen() const {
     // TODO, 修改下。
-    return block_pool_->totalBlockNums() * full_kv_cache_group_->seqSizePerBlock();
+    return block_pool_->totalBlocksNum() * full_kv_cache_group_->seqSizePerBlock();
 }
 
 KVCacheBuffer HybridLayerKVCacheAllocator::kvCacheBuffer() const {
