@@ -143,8 +143,6 @@ void GptInitParameter::showDebugInfo() const {
         << hw_kernel_config.to_string() << "\n"
         << "========== DeviceResourceConfig ==========\n"
         << device_resource_config.to_string() << "\n"
-        << "========== SamplerConfig ==========\n"
-        << sampler_config.to_string() << "\n"
         << "========== MoeConfig ==========\n"
         << moe_config.to_string() << "\n"
         << "========== ModelSpecificConfig ==========\n"
