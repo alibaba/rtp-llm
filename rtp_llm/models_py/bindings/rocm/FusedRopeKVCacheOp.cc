@@ -77,6 +77,7 @@ torch::Tensor FusedRopeKVCachePrefillOp::forward(const torch::Tensor&           
 
     bool store_qkv   = true;   // 存储回原始 QKV
     bool store_q     = false;  // 存储到独立 Q 缓冲区
+    bool store_q_mtp = false;
     bool store_kv    = false;  // 存储到独立 K、V 缓冲区
     bool store_cache = kv_cache.has_value();
     if (hw_kernel_config_.use_aiter_pa) {
@@ -85,6 +86,7 @@ torch::Tensor FusedRopeKVCachePrefillOp::forward(const torch::Tensor&           
             DISPATCH_CUDA_FUNCTION_DATA_TYPE(torchDTypeToDataType(qkv.dtype()),
                                              invokeAddFusedQKVBiasTransposePrefill,
                                              q_output.data_ptr(),
+                                             nullptr,
                                              k_output.data_ptr(),
                                              v_output.data_ptr(),
                                              &prefix_prompt_param,
@@ -107,6 +109,7 @@ torch::Tensor FusedRopeKVCachePrefillOp::forward(const torch::Tensor&           
                                              false,        // use_paged_fmha
                                              store_qkv,    // store_qkv
                                              store_q,      // store_q
+                                             store_q_mtp,  // store_q_mtp
                                              store_kv,     // store_kv
                                              store_cache,  // store_cache
                                              nullptr,
@@ -116,6 +119,7 @@ torch::Tensor FusedRopeKVCachePrefillOp::forward(const torch::Tensor&           
             DISPATCH_CUDA_FUNCTION_DATA_TYPE(torchDTypeToDataType(qkv.dtype()),
                                              invokeAddFusedQKVBiasTransposePrefillV1,
                                              q_output.data_ptr(),
+                                             nullptr,
                                              k_output.data_ptr(),
                                              v_output.data_ptr(),
                                              &prefix_prompt_param,
@@ -138,6 +142,7 @@ torch::Tensor FusedRopeKVCachePrefillOp::forward(const torch::Tensor&           
                                              false,        // use_paged_fmha
                                              store_qkv,    // store_qkv
                                              store_q,      // store_q
+                                             store_q_mtp,  // store_q_mtp
                                              store_kv,     // store_kv
                                              store_cache,  // store_cache
                                              nullptr,
