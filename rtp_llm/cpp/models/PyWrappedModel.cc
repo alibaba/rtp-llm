@@ -85,12 +85,6 @@ torch_ext::BertEmbeddingInputs PyWrappedModel::buildBertEmbeddingInputs(const Gp
 
     // Convert combo_tokens_type_ids from Buffer to torch::Tensor
     if (inputs.combo_tokens_type_ids) {
-        // {
-        //     DevicePerfWrapper      wrapper(device_, "py model combo_tokens");
-        //     const auto combo_tokens = device_->clone({*inputs.combo_tokens, AllocationType::DEVICE,
-        //     {"combo_tokens"}}); bert_embedding_inputs.combo_tokens_type_ids = Buffer2torchTensor(combo_tokens,
-        //     false);
-        // }
         {
             DevicePerfWrapper wrapper(device_, "py model combo_tokens.cuda()");
             bert_embedding_inputs.combo_tokens_type_ids =
@@ -229,7 +223,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
     DevicePerfWrapper      wrapper(device_, "py model forward");
     py::gil_scoped_acquire gil;
     try {
-        // RTP_LLM_LOG_DEBUG("Calling forward method on Python object instance.");
+        RTP_LLM_LOG_DEBUG("Calling forward method on Python object instance.");
 
         if (int(device_props_.enable_layer_micro_batch)) {
             return forwardMicroBatched(inputs);
@@ -243,7 +237,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             attention_inputs.cache_store_inputs = prepareWriteCacheParams(inputs);
         }
         setupKVCacheForAttentionInputs(attention_inputs, inputs, kv_cache_block_id_device);
-        //
+
         if (!enable_cuda_graph_ || !is_prefill_cuda_graph_mode_) {
             calculatePaddingOffset(attention_inputs);
         }
