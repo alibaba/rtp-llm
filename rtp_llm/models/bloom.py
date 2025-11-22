@@ -3,7 +3,8 @@ from typing import Any, Dict
 
 import torch
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import VitParameters
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight
@@ -61,12 +62,12 @@ class BloomWeightInfo(ModelDeployWeightInfo):
                 W.final_ln_beta, [CkptWeightInfo("ln_f.bias", identity)], identity
             ),
         ]
-        if self.config.use_attention_linear_bias:
+        if self.model_config.use_attention_linear_bias:
             weights.append(
                 AtomicWeight(
                     W.linear_bias_slopes,
                     [],
-                    functools.partial(slopes, n=self.config.head_num),
+                    functools.partial(slopes, n=self.model_config.attn_config.head_num),
                     data_type=torch.float,
                 )
             )
@@ -187,22 +188,21 @@ class Bloom(BaseModel):
     @staticmethod
     def from_huggingface(config_json: Dict[str, Any]):
         model_type = config_json["model_type"]
-        config = GptInitModelParameters(
-            head_num=32,
-            size_per_head=128,
-            layer_num=30,
-            max_seq_len=2048,
-            vocab_size=250682,
-        )
+        config = ModelConfig()
+        config.attn_config.head_num = 32
+        config.attn_config.size_per_head = 128
+        config.num_layers = 30
+        config.max_seq_len = 2048
+        config.vocab_size = 250682
         if model_type != "bloom":
             raise BaseException(f"model type is not bloom: {model_type}")
-        config.head_num = config_json.get(
+        config.attn_config.head_num = config_json.get(
             "num_attention_heads", config_json.get("n_head")
         )
-        config.head_num_kv = config.head_num
+        config.attn_config.kv_head_num = config.attn_config.head_num
         config.hidden_size = config_json.get("n_embed", config_json.get("hidden_size"))
-        config.size_per_head = config.hidden_size // config.head_num
-        config.layer_num = config_json["n_layer"]
+        config.attn_config.size_per_head = config.hidden_size // config.attn_config.head_num
+        config.num_layers = config_json["n_layer"]
         config.max_seq_len = config_json.get("seq_length", 2048)
         config.vocab_size = config_json["vocab_size"]
         config.layernorm_eps = config_json["layer_norm_epsilon"]
@@ -213,20 +213,19 @@ class Bloom(BaseModel):
         return config
 
     @classmethod
-    def _create_config(cls, ckpt_path: str):
+    def _create_config(cls, ckpt_path: str) -> ModelConfig:
         config_dict = get_config_from_path(ckpt_path)
         if config_dict:
             config = Bloom.from_huggingface(config_dict)
         else:
-            config = GptInitModelParameters(
-                head_num=32,
-                head_num_kv=32,
-                size_per_head=128,
-                inter_size=4 * 32 * 128,
-                layer_num=30,
-                max_seq_len=2048,
-                vocab_size=250880,
-            )
+            config = ModelConfig()
+            config.attn_config.head_num = 32
+            config.attn_config.kv_head_num = 32
+            config.attn_config.size_per_head = 128
+            config.inter_size = 4 * 32 * 128
+            config.num_layers = 30
+            config.max_seq_len = 2048
+            config.vocab_size = 250880
         config.layernorm_eps = 1e-5
         config.layernorm_type = "pre_layernorm"
         config.activation_type = "gelu"

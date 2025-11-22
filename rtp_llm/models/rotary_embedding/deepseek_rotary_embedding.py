@@ -22,12 +22,12 @@ class DeepseekV3RotaryEmbedding(nn.Module):
             device=self.inv_freq.device,
             dtype=torch.get_default_dtype(),
         )
-        self.max_seq_len_cached = None
+        self.max_seq_lencached = None
 
     def _set_cos_sin_cache(self, seq_len, device, dtype):
-        self.max_seq_len_cached = seq_len
+        self.max_seq_lencached = seq_len
         t = torch.arange(
-            self.max_seq_len_cached, device=device, dtype=self.inv_freq.dtype
+            self.max_seq_lencached, device=device, dtype=self.inv_freq.dtype
         )
 
         freqs = torch.outer(t, self.inv_freq.to(t.device))
@@ -38,7 +38,7 @@ class DeepseekV3RotaryEmbedding(nn.Module):
 
     def forward(self, x, seq_len=None):
         # x: [bs, num_attention_heads, seq_len, head_size]
-        if self.max_seq_len_cached is None or seq_len > self.max_seq_len_cached:
+        if self.max_seq_lencached is None or seq_len > self.max_seq_lencached:
             self._set_cos_sin_cache(seq_len=seq_len, device=x.device, dtype=x.dtype)
 
         return (
@@ -63,9 +63,9 @@ class DeepseekV3LinearScalingRotaryEmbedding(DeepseekV3RotaryEmbedding):
         super().__init__(dim, max_position_embeddings, base, device)
 
     def _set_cos_sin_cache(self, seq_len, device, dtype):
-        self.max_seq_len_cached = seq_len
+        self.max_seq_lencached = seq_len
         t = torch.arange(
-            self.max_seq_len_cached, device=device, dtype=self.inv_freq.dtype
+            self.max_seq_lencached, device=device, dtype=self.inv_freq.dtype
         )
         t = t / self.scaling_factor
 
@@ -92,7 +92,7 @@ class DeepseekV3DynamicNTKScalingRotaryEmbedding(DeepseekV3RotaryEmbedding):
         super().__init__(dim, max_position_embeddings, base, device)
 
     def _set_cos_sin_cache(self, seq_len, device, dtype):
-        self.max_seq_len_cached = seq_len
+        self.max_seq_lencached = seq_len
 
         if seq_len > self.max_position_embeddings:
             base = self.base * (
@@ -105,7 +105,7 @@ class DeepseekV3DynamicNTKScalingRotaryEmbedding(DeepseekV3RotaryEmbedding):
             self.register_buffer("inv_freq", inv_freq, persistent=False)
 
         t = torch.arange(
-            self.max_seq_len_cached, device=device, dtype=self.inv_freq.dtype
+            self.max_seq_lencached, device=device, dtype=self.inv_freq.dtype
         )
 
         freqs = torch.outer(t, self.inv_freq)
@@ -176,7 +176,7 @@ class DeepseekV3YarnRotaryEmbedding(DeepseekV3RotaryEmbedding):
         super().__init__(dim, max_position_embeddings, base, device)
 
     def _set_cos_sin_cache(self, seq_len, device, dtype):
-        self.max_seq_len_cached = seq_len
+        self.max_seq_lencached = seq_len
         dim = self.dim
 
         freq_extra = 1.0 / (

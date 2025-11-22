@@ -3,7 +3,7 @@ import functools
 import json
 import logging
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Tuple
 
 import torch
 from typing_extensions import override
@@ -186,12 +186,21 @@ def make_context(
 
 
 class QwenRenderer(CustomChatRenderer):
-    def __init__(self, tokenizer: BaseTokenizer, renderer_params: RendererParams):
-        super().__init__(tokenizer, renderer_params)
+    def __init__(
+        self, 
+        tokenizer: BaseTokenizer, 
+        renderer_params: RendererParams,
+        generate_env_config,
+        render_config=None,
+        ckpt_path=None,
+        misc_config=None,
+        vit_config=None,
+    ):
+        super().__init__(tokenizer, renderer_params, generate_env_config, render_config, ckpt_path, misc_config, vit_config)
         self.add_extra_stop_word_ids([[37763, 367, 25], [151643]])  # Observation:
 
         self.qwen_reasoning_tool_renderer = QwenReasoningToolRenderer(
-            tokenizer, renderer_params
+            tokenizer, renderer_params, generate_env_config, render_config, ckpt_path, misc_config, vit_config
         )
 
         self.template_chat_renderer: Optional[BasicRenderer] = None
@@ -201,7 +210,7 @@ class QwenRenderer(CustomChatRenderer):
                     f"qwen model has chat_template [{tokenizer.chat_template}], "
                     "which will be used for non-function call dialogue."
                 )
-                self.template_chat_renderer = BasicRenderer(tokenizer, renderer_params)
+                self.template_chat_renderer = BasicRenderer(tokenizer, renderer_params, generate_env_config, render_config, ckpt_path, misc_config, vit_config)
         except AttributeError:
             pass
 

@@ -3,7 +3,6 @@ import os
 from multiprocessing import Lock, Value
 from typing import Optional
 
-from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.distribute.worker_info import g_parallel_info
 
 
@@ -52,9 +51,19 @@ class ConcurrencyController:
 global_controller: Optional[ConcurrencyController] = None
 
 
-def init_controller():
-    concurrency_limit = StaticConfig.concurrency_config.concurrency_limit
-    global_concurrency_limit = concurrency_limit * g_parallel_info.dp_size
+def init_controller(concurrency_config, dp_size=None):
+    """Initialize concurrency controller.
+    
+    Args:
+        concurrency_config: ConcurrencyConfig object.
+        dp_size: Data parallel size. If None, uses g_parallel_info.dp_size.
+    """
+    
+    if dp_size is None:
+        dp_size = g_parallel_info.dp_size
+    
+    concurrency_limit = concurrency_config.concurrency_limit
+    global_concurrency_limit = concurrency_limit * dp_size
     logging.info(
         f"concurrency_limit : {concurrency_limit}, global_concurrency_limit : {global_concurrency_limit}"
     )
@@ -72,6 +81,9 @@ def get_global_controller() -> ConcurrencyController:
         return global_controller
 
     if int(os.environ.get("FT_SERVER_TEST", 0)) == 1:
-        set_global_controller(init_controller())
+        # For test mode, create a default controller
+        from rtp_llm.config.py_config_modules import ConcurrencyConfig
+        default_config = ConcurrencyConfig()
+        set_global_controller(init_controller(default_config))
 
     return global_controller  # type: ignore

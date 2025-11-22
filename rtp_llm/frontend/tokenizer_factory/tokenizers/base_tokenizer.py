@@ -113,7 +113,7 @@ class BaseTokenizer:
 
     @property
     def special_tokens_map(self):
-        return self.tokenizer.special_tokens_map
+        return self.tokenizer.special_tokensmap
 
     def save_pretrained(self, save_directory, **kwargs):
         return self.tokenizer.save_pretrained(save_directory, **kwargs)

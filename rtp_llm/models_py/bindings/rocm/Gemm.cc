@@ -178,9 +178,6 @@ void gemm(at::Tensor& output, at::Tensor& input, at::Tensor& weight) {
     rtp_llm::BufferPtr weight_buffer = rtp_llm::torchTensor2Buffer(weight);
     rtp_llm::BufferPtr output_buffer = rtp_llm::torchTensor2Buffer(output);
 
-    if (!rtp_llm::DeviceFactory::isAlreadyInit()) {
-        rtp_llm::DeviceFactory::initDevices(rtp_llm::GptInitParameter());
-    }
     rtp_llm::ROCmDevice* device_ = dynamic_cast<rtp_llm::ROCmDevice*>(rtp_llm::DeviceFactory::getDefaultDevice());
     device_->gemm({*input_buffer, *weight_buffer, std::nullopt, output_buffer});
 }

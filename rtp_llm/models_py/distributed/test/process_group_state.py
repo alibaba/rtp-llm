@@ -8,7 +8,7 @@ from typing import Optional
 import torch
 import torch.distributed
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.ops import ParallelismConfig
 
 __all__ = [
     "init_distributed_environment",
@@ -22,16 +22,16 @@ def distributed_environment_initialized() -> bool:
 
 
 def init_distributed_environment(
-    params: GptInitModelParameters,
+    parallelism_config: ParallelismConfig,
     backend: str = "nccl",
     timeout: Optional[int] = None,
 ):
     assert backend in ["nccl"], "backend current only supports nccl"
-    ip = params.nccl_ip
-    port = params.th_nccl_port
-    rank = params.dp_rank * params.tp_size + params.tp_rank
-    world_size = params.world_size
-    local_rank = params.local_rank
+    ip = parallelism_config.nccl_ip
+    port = parallelism_config.tp_nccl_port
+    rank = parallelism_config.dp_rank * parallelism_config.tp_size + parallelism_config.tp_rank
+    world_size = parallelism_config.world_size
+    local_rank = parallelism_config.local_rank
     os.environ["TORCH_DIST_INIT_BARRIER"] = "1"
     if not torch.distributed.is_initialized():
         print(

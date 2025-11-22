@@ -19,8 +19,17 @@ from rtp_llm.utils.multimodal_util import MMPreprocessConfig, MMUrlType
 
 
 class QwenVLRenderer(CustomChatRenderer):
-    def __init__(self, tokenizer: BaseTokenizer, renderer_params: RendererParams):
-        super().__init__(tokenizer, renderer_params)
+    def __init__(
+        self, 
+        tokenizer: BaseTokenizer, 
+        renderer_params: RendererParams,
+        generate_env_config,
+        render_config=None,
+        ckpt_path=None,
+        misc_config=None,
+        vit_config=None,
+    ):
+        super().__init__(tokenizer, renderer_params, generate_env_config, render_config, ckpt_path, misc_config, vit_config)
 
     def _render_messages(self, messages: List[ChatMessage]) -> PromptWithMMInput:
         prompt = ""
@@ -62,8 +71,17 @@ class QwenVLRenderer(CustomChatRenderer):
 
 
 class Qwen2VLRenderer(CustomChatRenderer):
-    def __init__(self, tokenizer: BaseTokenizer, renderer_params: RendererParams):
-        super().__init__(tokenizer, renderer_params)
+    def __init__(
+        self, 
+        tokenizer: BaseTokenizer, 
+        renderer_params: RendererParams,
+        generate_env_config,
+        render_config=None,
+        ckpt_path=None,
+        misc_config=None,
+        vit_config=None,
+    ):
+        super().__init__(tokenizer, renderer_params, generate_env_config, render_config, ckpt_path, misc_config, vit_config)
 
     def _render_messages(
         self, messages: List[ChatMessage], add_vision_id: bool

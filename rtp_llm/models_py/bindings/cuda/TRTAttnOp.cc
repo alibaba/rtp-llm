@@ -9,10 +9,13 @@ using namespace torch_ext;
 
 namespace rtp_llm {
 
-TRTPrefillOp::TRTPrefillOp(const GptInitParameter& gpt_init_parameter): FMHACudaBase(gpt_init_parameter) {}
+TRTPrefillOp::TRTPrefillOp(const AttentionConfigs& attn_configs):
+    attn_configs_(attn_configs),
+    device_(dynamic_cast<CudaDevice*>(DeviceFactory::getDefaultDevice())) {}
 
 bool TRTPrefillOp::support(torch_ext::PyAttentionInputs attn_inputs) {
-    return fmha_config_.enable_paged_trt_fmha && attn_configs_.kv_cache_dtype != KvCacheDataType::INT8;
+    // FMHAConfig check will be done in Python layer
+    return attn_configs_.kv_cache_dtype != KvCacheDataType::INT8;
 }
 
 ParamsBasePtr TRTPrefillOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
@@ -176,7 +179,8 @@ torch::Tensor TRTPrefillOp::forward(const torch::Tensor&              input,
 
 void registerTRTAttnOp(const py::module& m) {
     pybind11::class_<TRTPrefillOp>(m, "TRTAttnOp")
-        .def(pybind11::init<GptInitParameter>(), py::arg("gpt_init_parameter"))
+        .def(pybind11::init<const AttentionConfigs&>(),
+             py::arg("attn_configs"))
         .def("support", &TRTPrefillOp::support, py::arg("attn_inputs"))
         .def("prepare", &TRTPrefillOp::prepare, py::arg("attn_inputs"))
         .def("forward", &TRTPrefillOp::forward, py::arg("input"), py::arg("kv_cache"), py::arg("params"));

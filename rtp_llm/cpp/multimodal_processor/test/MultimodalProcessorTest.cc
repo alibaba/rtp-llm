@@ -8,7 +8,8 @@
 #include "rtp_llm/cpp/multimodal_processor/MultimodalProcessor.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalTypes.h"
 #include "rtp_llm/cpp/devices/testing/TestBase.h"
-#include "rtp_llm/cpp/config/GptInitParameter.h"
+#include "rtp_llm/cpp/config/ModelConfig.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 
 using namespace std;
 
@@ -21,11 +22,10 @@ public:
     static FakeMultimodalProcessor createFakeMultimodalProcessor(std::vector<std::vector<int64_t>> sep_token_ids,
                                                                  bool                              include_sep_tokens,
                                                                  int                               max_seq_len) {
-        GptInitParameter params;
-        params.mm_sep_tokens_      = sep_token_ids;
-        params.include_sep_tokens_ = include_sep_tokens;
-        params.max_seq_len_        = max_seq_len;
-        return FakeMultimodalProcessor(py::none(), params);
+        MMModelConfig mm_model_config;
+        mm_model_config.mm_sep_tokens      = sep_token_ids;
+        mm_model_config.include_sep_tokens = include_sep_tokens;
+        return FakeMultimodalProcessor(py::none(), mm_model_config, max_seq_len);
     }
 
     ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs,

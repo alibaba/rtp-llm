@@ -64,18 +64,6 @@ def init_profile_debug_logging_group_args(parser):
         default="",
         help="指定开启Torch的Profile时对应的生成目录",
     )
-
-    profile_debug_logging_group.add_argument(
-        "--log_path", env_name="LOG_PATH", type=str, default="logs", help="日志路径"
-    )
-    profile_debug_logging_group.add_argument(
-        "--log_file_backup_count",
-        env_name="LOG_FILE_BACKUP_COUNT",
-        type=int,
-        default=16,
-        help="日志文件备份数量",
-    )
-
     profile_debug_logging_group.add_argument(
         "--nccl_debug_file",
         env_name="NCCL_DEBUG_FILE",

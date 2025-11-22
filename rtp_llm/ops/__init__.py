@@ -114,29 +114,37 @@ try:
         CacheStoreConfig,
         ConcurrencyConfig,
         DeviceResourceConfig,
-        EplbConfig,
         EplbMode,
         FfnDisAggregateConfig,
         FIFOSchedulerConfig,
         FMHAConfig,
         FMHAType,
-        GptInitParameter,
         HWKernelConfig,
         KVCacheConfig,
         MiscellaneousConfig,
         MlaOpsType,
+        ModelConfig,
         ModelSpecificConfig,
         MoeConfig,
-        ParallelismDistributedConfig,
+        PDSepConfig,
+        ParallelismConfig,
         ProfilingDebugLoggingConfig,
+        TaskType,
+        VitConfig,
+        VitSeparation,
+    )
+    # Alias for backward compatibility
+    from libth_transformer_config import (
         QuantAlgo,
         RoleType,
+        RuntimeConfig,
         SamplerConfig,
-        SchedulerConfig,
-        ServiceDiscoveryConfig,
         SpecialTokens,
         SpeculativeExecutionConfig,
+        EPLBConfig,
     )
+    # Alias for backward compatibility
+    EplbConfig = EPLBConfig
     from libth_transformer_config import (
         get_block_cache_keys as cpp_get_block_cache_keys,
     )
@@ -171,10 +179,15 @@ frontend_mode = os.environ.get("ROLE_TYPE") == "FRONTEND"
 
 try:
     import librtp_compute_ops
+    from .compute_ops import rtp_llm_ops
+    # Export KVCache and other types from librtp_compute_ops
+    from librtp_compute_ops import KVCache, PyAttentionInputs, PyModelInputs, PyModelOutputs, PyModelInitResources, PyCacheStoreInputs
 except BaseException as e:
     if not frontend_mode:
         logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")
         raise e
+    rtp_llm_ops = EmptyClass
+    KVCache = PyAttentionInputs = PyModelInputs = PyModelOutputs = PyModelInitResources = PyCacheStoreInputs = EmptyClass
 
 try:
 

@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "rtp_llm/cpp/devices/OpData.h"
 #include "rtp_llm/cpp/devices/Weights.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 
 using namespace rtp_llm;
 
@@ -27,20 +28,51 @@ public:
                  torch::Tensor                output);
 
 private:
-    DeviceBase*      device_ = nullptr;
-    GptInitParameter params_;
+    DeviceBase* device_ = nullptr;
+    int64_t ep_rank_ = 0;
+    int64_t ep_size_ = 1;
+    int64_t dp_rank_ = 0;
+    int64_t dp_size_ = 1;
 };
 
 ROCmFfnMoeBf16Op::ROCmFfnMoeBf16Op(int64_t ep_rank, int64_t ep_size) {
-    // TODO: add ep parameters here
-    params_                  = GptInitParameter();
-    params_.dp_size_         = ep_size;
-    params_.dp_rank_         = ep_rank;
-    params_.ep_size_         = ep_size;
-    params_.ep_rank_         = ep_rank;
-    params_.nccl_ip_         = "localhost";
-    params_.dp_tp_nccl_port_ = 50049;
-    DeviceFactory::initDevices(params_);
+    ep_rank_ = ep_rank;
+    ep_size_ = ep_size;
+    dp_rank_ = ep_rank;
+    dp_size_ = ep_size;
+    ParallelismConfig parallelism_config;
+    parallelism_config.dp_size = ep_size;
+    parallelism_config.dp_rank = ep_rank;
+    parallelism_config.ep_size = ep_size;
+    parallelism_config.ep_rank = ep_rank;
+    parallelism_config.nccl_ip = "localhost";
+    parallelism_config.dp_tp_nccl_port = 50049;
+    ModelConfig model_config;
+    EPLBConfig eplb_config;
+    FMHAConfig fmha_config;
+    DeviceResourceConfig device_resource_config;
+    MoeConfig moe_config;
+    SpeculativeExecutionConfig sp_config;
+    MiscellaneousConfig misc_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    HWKernelConfig hw_kernel_config;
+    ConcurrencyConfig concurrency_config;
+    FfnDisAggregateConfig ffn_disaggregate_config;
+    RuntimeConfig runtime_config;
+    DeviceFactory::initDevices(
+        parallelism_config,
+        model_config,
+        eplb_config,
+        fmha_config,
+        device_resource_config,
+        moe_config,
+        sp_config,
+        misc_config,
+        profiling_debug_logging_config,
+        hw_kernel_config,
+        concurrency_config,
+        ffn_disaggregate_config,
+        runtime_config);
     device_ = DeviceFactory::getDefaultDevice();
 }
 
@@ -61,12 +93,11 @@ void ROCmFfnMoeBf16Op::forward(torch::Tensor                input,
     MoeConfigs moe_configs({.expert_num             = num_expert,
                             .top_k                  = static_cast<size_t>(topk),
                             .normalize_expert_scale = false,  // FIXME(liyangcheng.lyc): has_moe_norm?
-                            .moe_inter_padding_size = model_dim,
                             .has_moe_norm           = false,
-                            .ep_rank                = static_cast<size_t>(params_.ep_rank_),
-                            .ep_size                = static_cast<size_t>(params_.ep_size_),
-                            .dp_rank                = static_cast<size_t>(params_.dp_rank_),
-                            .dp_size                = static_cast<size_t>(params_.dp_size_),
+                            .ep_rank                = static_cast<size_t>(ep_rank_),
+                            .ep_size                = static_cast<size_t>(ep_size_),
+                            .dp_rank                = static_cast<size_t>(dp_rank_),
+                            .dp_size                = static_cast<size_t>(dp_size_),
                             .scoring_func           = 1,  // FIXME(liyangcheng.lyc): useless now
                             .topk_group             = static_cast<int>(topk_group),
                             .n_group                = static_cast<int>(num_expert_group)});

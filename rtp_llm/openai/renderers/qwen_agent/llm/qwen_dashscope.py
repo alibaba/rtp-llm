@@ -22,8 +22,6 @@ from qwen_agent.log import logger
 from qwen_agent.settings import DEFAULT_MAX_INPUT_TOKENS
 from qwen_agent.utils.utils import has_chinese_messages, merge_generate_cfgs
 
-from rtp_llm.config.py_config_modules import StaticConfig
-
 # end region
 
 
@@ -236,20 +234,29 @@ class QwenChatAtDS(BaseTextChatModel):
 
 
 def initialize_dashscope(cfg: Optional[Dict] = None) -> None:
+    """Initialize dashscope with configuration from cfg.
+    
+    Args:
+        cfg: Configuration dictionary. Should contain either:
+            - Direct keys: "api_key", "base_http_api_url", "base_websocket_api_url"
+            - Or "misc_config" object with: dashscope_api_key, dashscope_http_url, dashscope_websocket_url
+    """
     cfg = cfg or {}
 
     api_key = cfg.get("api_key", "")
     base_http_api_url = cfg.get("base_http_api_url", None)
     base_websocket_api_url = cfg.get("base_websocket_api_url", None)
 
-    if not api_key:
-        api_key = StaticConfig.model_config.dashscope_api_key
-    if not base_http_api_url:
-        base_http_api_url = StaticConfig.model_config.dashscope_http_url
-    if not base_websocket_api_url:
-        base_websocket_api_url = StaticConfig.model_config.dashscope_websocket_url
+    # Try to get from misc_config if available in cfg
+    misc_config = cfg.get("misc_config")
+    if not api_key and misc_config:
+        api_key = misc_config.dashscope_api_key
+    if not base_http_api_url and misc_config:
+        base_http_api_url = misc_config.dashscope_http_url
+    if not base_websocket_api_url and misc_config:
+        base_websocket_api_url = misc_config.dashscope_websocket_url
 
-    api_key = api_key.strip()
+    api_key = api_key.strip() if api_key else ""
     dashscope.api_key = api_key
     if base_http_api_url is not None:
         dashscope.base_http_api_url = base_http_api_url.strip()

@@ -23,7 +23,7 @@ try:
 except ImportError:
     pass
 
-from rtp_llm.config.py_config_modules import PyEnvConfigs, StaticConfig
+from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.distribute.gang_info import members_from_test_env
 from rtp_llm.test.perf_test.batch_decode_test import run_single
 from rtp_llm.test.perf_test.test_util import create_query
@@ -34,9 +34,10 @@ from rtp_llm.utils.fuser import fetch_remote_file_to_local
 # uvloop_setup()
 
 
-def wait_master_done(env_dict: Dict[str, str] = {}) -> None:
+def wait_master_done(env_dict: Dict[str, str] = {}, world_rank: int = 0) -> None:
+    # Get gang_config_string from environment variable or env_dict
     dist_config_str = env_dict.get(
-        "GANG_CONFIG_STRING", StaticConfig.gang_config.gang_config_string
+        "GANG_CONFIG_STRING", os.environ.get("GANG_CONFIG_STRING", None)
     )
     if not dist_config_str:
         raise RuntimeError("no gang config string, unexpected!")
@@ -44,7 +45,6 @@ def wait_master_done(env_dict: Dict[str, str] = {}) -> None:
     master_member = dist_members[0]
     master_host = master_member.ip
     master_port = master_member.server_port
-    world_rank = StaticConfig.parallelism_distributed_config.world_rank
     while True:
         logging.info(
             f"rank [{world_rank}] waiting for master {master_host}:{master_port} done"
@@ -150,11 +150,10 @@ if __name__ == "__main__":
     os.environ["MAX_SEQ_LEN"] = str(max_seq_len + 20)
 
     py_env_configs = PyEnvConfigs()
-    py_env_configs.update_from_env()
     port = py_env_configs.server_config.start_port
     world_rank = py_env_configs.parallelism_distributed_config.world_rank
     log_dir_name = (
-        f"test_output_{py_env_configs.model_config.model_type}_{py_env_configs.parallelism_distributed_config.dp_size}"
+        f"test_output_{py_env_configs.model_args.model_type}_{py_env_configs.parallelism_distributed_config.dp_size}"
         f"_{py_env_configs.parallelism_distributed_config.tp_size}_{py_env_configs.parallelism_distributed_config.world_rank}"
         f"_{time.strftime('%Y%m%d_%H%M%S')}"
     ).upper()
@@ -173,15 +172,15 @@ if __name__ == "__main__":
         logging.info(f"setpgrp error: {e}")
 
     tokenizer_path = fetch_remote_file_to_local(
-        py_env_configs.model_config.tokenizer_path
+        py_env_configs.model_args.tokenizer_path
     )
     if tokenizer_path is None:
         raise RuntimeError(
-            f"fetch tokenizer path failed, tokenizer_path: {py_env_configs.model_config.tokenizer_path}"
+            f"fetch tokenizer path failed, tokenizer_path: {py_env_configs.model_args.tokenizer_path}"
         )
 
     input_query_dict = create_query(
-        py_env_configs.model_config.model_type,
+        py_env_configs.model_args.model_type,
         tokenizer_path,
         input_len_list,
     )
@@ -193,7 +192,7 @@ if __name__ == "__main__":
             raise Exception("server start failed")
         if world_rank:
             logging.info(f"world rank non-zero: {world_rank}, wait for main.")
-            wait_master_done()
+            wait_master_done(world_rank=world_rank)
         else:
             test_main(
                 port,

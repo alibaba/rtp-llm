@@ -4,7 +4,6 @@ import json
 import os
 from typing import List
 
-from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
@@ -117,14 +116,28 @@ conv_templates = {
 }
 
 
+from typing import Any, Optional
+
+from rtp_llm.config.py_config_modules import GenerateEnvConfig, RenderConfig
+
 class InternVLRenderer(CustomChatRenderer):
-    def __init__(self, tokenizer: BaseTokenizer, renderer_params: RendererParams):
-        super().__init__(tokenizer, renderer_params)
+    def __init__(
+        self, 
+        tokenizer: BaseTokenizer, 
+        renderer_params: RendererParams,
+        generate_env_config: GenerateEnvConfig,
+        render_config: Optional[RenderConfig] = None,
+        ckpt_path: Optional[str] = None,
+        misc_config: Optional[Any] = None,
+        vit_config: Optional[Any] = None,
+    ):
+        super().__init__(tokenizer, renderer_params, generate_env_config, render_config, ckpt_path, misc_config, vit_config)
         self.roles = {RoleEnum.user: "USER", RoleEnum.assistant: "ASSISTANT"}
         self.video_frame_num = 8
 
     def _render_messages(self, messages: List[ChatMessage]) -> PromptWithMMInput:
-        ckpt_path: str = StaticConfig.model_config.checkpoint_path
+        # Use checkpoint path from model_config
+        ckpt_path: str = self.model_config.checkpoint_path
         config_path = os.path.join(fetch_remote_file_to_local(ckpt_path), "config.json")
         if os.path.exists(config_path):
             with open(config_path) as reader:

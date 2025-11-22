@@ -204,18 +204,16 @@ class LoadQuantDynamicPerTensorFp8Weight(CompositeWeight, QuantWeight):
 
         if isinstance(self.kernel, MoeAtomicWeight):
             if self.kernel.name is W.moe_w1:
-                # handle moe w13 weight
-                num_local_experts, moe_inter_padding_size, _ = kernel_weight.shape
-                assert moe_inter_padding_size == (
-                    load_config.moe_inter_padding_size * 2
-                )
+                # handle moe w13 weight (w13 is concatenated, so split in half)
+                num_local_experts, total_padded_size, _ = kernel_weight.shape
                 assert kernel_scale is not None
-                moe_inter_padding_size = moe_inter_padding_size // 2
-                # w13 to w31
+                # Total padded size should be 2x the individual w1/w3 padded size
+                half_size = total_padded_size // 2
+                # w13 to w31: swap w1 and w3 parts
                 kernel_weight = torch.cat(
                     [
-                        kernel_weight[:, load_config.moe_inter_padding_size :, :],
-                        kernel_weight[:, : load_config.moe_inter_padding_size, :],
+                        kernel_weight[:, half_size:, :],  # w3 part
+                        kernel_weight[:, :half_size, :],  # w1 part
                     ],
                     dim=1,
                 )

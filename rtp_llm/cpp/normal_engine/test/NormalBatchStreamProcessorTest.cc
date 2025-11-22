@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/core/BufferHelper.h"
 #include "rtp_llm/cpp/devices/testing/TestBase.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 
 using namespace std;
 
@@ -18,16 +19,20 @@ class NormalBatchStreamProcessorTest: public DeviceTestBase {};
 
 TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     ResourceContext  resource_context;
-    GptInitParameter param;
-    param.max_seq_len_        = 2048;
-    param.vocab_size_         = 2048;
-    param.num_layers_         = 2;
-    param.kv_cache_data_type_ = DataType::TYPE_INT8;
-    NormalBatchStreamProcessor     processor(param, CacheConfig(), false);
+    ModelConfig model_config;
+    model_config.max_seq_len        = 2048;
+    model_config.vocab_size         = 2048;
+    model_config.num_layers         = 2;
+    model_config.attn_config.kv_cache_dtype = KvCacheDataType::INT8;
+    PDSepConfig pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig cache_config;
+    RuntimeConfig runtime_config;
+    NormalBatchStreamProcessor     processor(model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
     std::shared_ptr<GenerateInput> query1 = make_shared<GenerateInput>();
     query1->input_ids                     = createBuffer<int32_t>({2}, {1, 2}, AllocationType::HOST);
     query1->generate_config               = make_shared<GenerateConfig>();
-    GenerateStreamPtr stream1             = make_shared<NormalGenerateStream>(query1, param, resource_context, nullptr);
+    GenerateStreamPtr stream1             = make_shared<NormalGenerateStream>(query1, model_config, runtime_config, resource_context, nullptr);
     query1->input_ids                     = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
     BatchKVCacheResource addr1;
     addr1.batch_block_id = {{1, 2, 3, 4}};
@@ -37,7 +42,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     std::shared_ptr<GenerateInput> query2 = make_shared<GenerateInput>();
     query2->input_ids                     = createBuffer<int32_t>({3}, {1, 2, 3}, AllocationType::HOST);
     query2->generate_config               = make_shared<GenerateConfig>();
-    GenerateStreamPtr stream2             = make_shared<NormalGenerateStream>(query2, param, resource_context, nullptr);
+    GenerateStreamPtr stream2             = make_shared<NormalGenerateStream>(query2, model_config, runtime_config, resource_context, nullptr);
     query2->input_ids                     = createBuffer<int32_t>({2}, {1, 2}, AllocationType::HOST);
     BatchKVCacheResource addr2;
     addr2.batch_block_id = {{5, 6, 7, 8}};
@@ -47,7 +52,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     std::shared_ptr<GenerateInput> query3 = make_shared<GenerateInput>();
     query3->input_ids                     = createBuffer<int32_t>({3}, {1, 2, 3}, AllocationType::HOST);
     query3->generate_config               = make_shared<GenerateConfig>();
-    GenerateStreamPtr    stream3          = make_shared<NormalGenerateStream>(query3, param, resource_context, nullptr);
+    GenerateStreamPtr    stream3          = make_shared<NormalGenerateStream>(query3, model_config, runtime_config, resource_context, nullptr);
     BatchKVCacheResource addr3;
     addr3.batch_block_id = {{9, 10}};
     stream3->setKVCache(addr3);
@@ -55,7 +60,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     std::shared_ptr<GenerateInput> query4 = make_shared<GenerateInput>();
     query4->input_ids                     = createBuffer<int32_t>({4}, {1, 2, 3, 4}, AllocationType::HOST);
     query4->generate_config               = make_shared<GenerateConfig>();
-    GenerateStreamPtr    stream4          = make_shared<NormalGenerateStream>(query4, param, resource_context, nullptr);
+    GenerateStreamPtr    stream4          = make_shared<NormalGenerateStream>(query4, model_config, runtime_config, resource_context, nullptr);
     BatchKVCacheResource addr4;
     addr4.batch_block_id = {{11, 12, 13, 14}};
     stream4->setKVCache(addr4);
@@ -90,7 +95,9 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         EXPECT_EQ(kv_cache_block_id, buffer2vector<int>(*model_input.kv_cache_block_id));
     }
     {
-        NormalBatchStreamProcessor processor(param, CacheConfig(), false);
+        MMModelConfig mm_model_config;
+        model_config.mm_model_config = mm_model_config;
+        NormalBatchStreamProcessor processor(model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
         StreamGroups               stream_groups(streams);
         auto                       merge_input_status = processor.gatherModelInput(stream_groups);
         EXPECT_TRUE(merge_input_status.ok());
@@ -101,16 +108,21 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
 
 TEST_F(NormalBatchStreamProcessorTest, testSoftmaxProbs) {
     ResourceContext  resource_context;
-    GptInitParameter param;
-    param.max_seq_len_                            = 2048;
-    param.vocab_size_                             = 2;
-    param.num_layers_                             = 2;
+    ModelConfig model_config;
+    model_config.max_seq_len                            = 2048;
+    model_config.vocab_size                             = 2;
+    model_config.num_layers                             = 2;
+
+    PDSepConfig pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig cache_config;
+    RuntimeConfig runtime_config;
     std::shared_ptr<GenerateInput> query1         = make_shared<GenerateInput>();
     query1->input_ids                             = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
     query1->generate_config                       = make_shared<GenerateConfig>();
     query1->generate_config->return_softmax_probs = true;
     // query1->generate_config->is_streaming   = true;
-    GenerateStreamPtr    stream1 = make_shared<NormalGenerateStream>(query1, param, resource_context, nullptr);
+    GenerateStreamPtr    stream1 = make_shared<NormalGenerateStream>(query1, model_config, runtime_config, resource_context, nullptr);
     BatchKVCacheResource addr1;
     addr1.batch_block_id = {{1}};
     stream1->setKVCache(addr1);
@@ -121,7 +133,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSoftmaxProbs) {
     for (const auto& stream : streams) {
         stream->setRunning();
     }
-    NormalBatchStreamProcessor processor(param, CacheConfig(), false);
+    NormalBatchStreamProcessor processor(model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
     StreamGroups               stream_groups(streams);
     auto                       merge_input_status = processor.gatherModelInput(stream_groups);
     EXPECT_TRUE(merge_input_status.ok());
@@ -143,15 +155,19 @@ TEST_F(NormalBatchStreamProcessorTest, testSoftmaxProbs) {
 
 TEST_F(NormalBatchStreamProcessorTest, testLoss) {
     ResourceContext  resource_context;
-    GptInitParameter param;
-    param.max_seq_len_                      = 2048;
-    param.vocab_size_                       = 2048;
-    param.num_layers_                       = 2;
+    ModelConfig model_config;
+    model_config.max_seq_len                      = 2048;
+    model_config.vocab_size                       = 2048;
+    model_config.num_layers                       = 2;
+    PDSepConfig pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig cache_config;
+    RuntimeConfig runtime_config;
     std::shared_ptr<GenerateInput> query1   = make_shared<GenerateInput>();
     query1->input_ids                       = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
     query1->generate_config                 = make_shared<GenerateConfig>();
     query1->generate_config->calculate_loss = 1;
-    GenerateStreamPtr    stream1 = make_shared<NormalGenerateStream>(query1, param, resource_context, nullptr);
+    GenerateStreamPtr    stream1 = make_shared<NormalGenerateStream>(query1, model_config, runtime_config, resource_context, nullptr);
     BatchKVCacheResource addr1;
     addr1.batch_block_id = {{1}};
     stream1->setKVCache(addr1);
@@ -160,7 +176,7 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
     query3->input_ids                       = createBuffer<int32_t>({2}, {0, 1}, AllocationType::HOST);
     query3->generate_config                 = make_shared<GenerateConfig>();
     query3->generate_config->calculate_loss = 2;
-    GenerateStreamPtr    stream3 = make_shared<NormalGenerateStream>(query3, param, resource_context, nullptr);
+    GenerateStreamPtr    stream3 = make_shared<NormalGenerateStream>(query3, model_config, runtime_config, resource_context, nullptr);
     BatchKVCacheResource addr3;
     addr3.batch_block_id = {{9}};
     stream3->setKVCache(addr3);
@@ -169,7 +185,7 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
     query4->input_ids                       = createBuffer<int32_t>({3}, {0, 1, 0}, AllocationType::HOST);
     query4->generate_config                 = make_shared<GenerateConfig>();
     query4->generate_config->calculate_loss = 1;
-    GenerateStreamPtr    stream4 = make_shared<NormalGenerateStream>(query4, param, resource_context, nullptr);
+    GenerateStreamPtr    stream4 = make_shared<NormalGenerateStream>(query4, model_config, runtime_config, resource_context, nullptr);
     BatchKVCacheResource addr4;
     addr4.batch_block_id = {{11, 12}};
     stream4->setKVCache(addr4);
@@ -182,7 +198,7 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
     for (const auto& stream : streams) {
         stream->setRunning();
     }
-    NormalBatchStreamProcessor processor(param, CacheConfig(), false);
+    NormalBatchStreamProcessor processor(model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
     StreamGroups               stream_groups(streams);
     auto                       merge_input_status = processor.gatherModelInput(stream_groups);
     EXPECT_TRUE(merge_input_status.ok());
@@ -211,26 +227,30 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
 
 TEST_F(NormalBatchStreamProcessorTest, testMultimodalGatherBatch) {
     ResourceContext  resource_context;
-    GptInitParameter param;
-    param.max_seq_len_        = 2048;
-    param.vocab_size_         = 2048;
-    param.num_layers_         = 2;
-    param.kv_cache_data_type_ = DataType::TYPE_INT8;
-    param.is_multimodal_      = true;
-    NormalBatchStreamProcessor     processor(param, CacheConfig(), false);
+    ModelConfig model_config;
+    model_config.max_seq_len        = 2048;
+    model_config.vocab_size         = 2048;
+    model_config.num_layers         = 2;
+    model_config.attn_config.kv_cache_dtype = KvCacheDataType::INT8;
+    model_config.mm_model_config.is_multimodal      = true;
+    PDSepConfig pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig cache_config;
+    RuntimeConfig runtime_config;
+    NormalBatchStreamProcessor     processor(model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
     std::shared_ptr<GenerateInput> query1 = make_shared<GenerateInput>();
     query1->input_ids                     = createBuffer<int32_t>({5}, {1, -1, -1, -1, 2}, AllocationType::HOST);
     query1->generate_config               = make_shared<GenerateConfig>();
     query1->mm_locs                       = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
     query1->text_tokens_mask              = createBuffer<int32_t>({5}, {1, 0, 0, 0, 1}, AllocationType::HOST);
     query1->multimodal_features           = {torch::rand({3, 10}, torch::kFloat16)};
-    GenerateStreamPtr stream1             = make_shared<NormalGenerateStream>(query1, param, resource_context, nullptr);
+    GenerateStreamPtr stream1             = make_shared<NormalGenerateStream>(query1, model_config, runtime_config, resource_context, nullptr);
     stream1->setIsContextStream(true);
 
     std::shared_ptr<GenerateInput> query2 = make_shared<GenerateInput>();
     query2->input_ids                     = createBuffer<int32_t>({3}, {3, 4, 5}, AllocationType::HOST);
     query2->generate_config               = make_shared<GenerateConfig>();
-    GenerateStreamPtr stream2             = make_shared<NormalGenerateStream>(query2, param, resource_context, nullptr);
+    GenerateStreamPtr stream2             = make_shared<NormalGenerateStream>(query2, model_config, runtime_config, resource_context, nullptr);
     stream2->setIsContextStream(true);
 
     std::shared_ptr<GenerateInput> query3 = make_shared<GenerateInput>();
@@ -239,7 +259,7 @@ TEST_F(NormalBatchStreamProcessorTest, testMultimodalGatherBatch) {
     query3->mm_locs                       = createBuffer<int32_t>({1}, {2}, AllocationType::HOST);
     query3->text_tokens_mask              = createBuffer<int32_t>({5}, {1, 1, 0, 0, 1}, AllocationType::HOST);
     query3->multimodal_features           = {torch::rand({2, 10}, torch::kFloat16)};
-    GenerateStreamPtr stream3             = make_shared<NormalGenerateStream>(query3, param, resource_context, nullptr);
+    GenerateStreamPtr stream3             = make_shared<NormalGenerateStream>(query3, model_config, runtime_config, resource_context, nullptr);
     stream3->setIsContextStream(true);
 
     std::list<GenerateStreamPtr> streams;

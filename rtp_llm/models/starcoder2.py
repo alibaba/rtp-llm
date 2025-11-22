@@ -4,7 +4,8 @@ from typing import Any, Dict, List
 import torch
 from transformers.models.gpt2.tokenization_gpt2_fast import GPT2TokenizerFast
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import VitParameters
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, FfnWeight
@@ -196,19 +197,17 @@ class StarCoder2(BaseModel):
         return Starcoder2WeightInfo
 
     @staticmethod
-    def from_huggingface(config_json: Dict[str, Any]):
+    def from_huggingface(config_json: Dict[str, Any]) -> ModelConfig:
         model_type = config_json["model_type"]
-        config = GptInitModelParameters(
-            head_num=config_json["num_attention_heads"],
-            head_num_kv=config_json["num_key_value_heads"],
-            size_per_head=config_json["hidden_size"]
-            // config_json["num_attention_heads"],
-            layer_num=config_json["num_hidden_layers"],
-            max_seq_len=config_json.get("max_position_embeddings", 8192),
-            vocab_size=config_json["vocab_size"],
-            rotary_embedding_dim=128,
-            rotary_embedding_style=1,
-        )
+        config = ModelConfig()
+        config.attn_config.head_num = config_json["num_attention_heads"]
+        config.attn_config.kv_head_num = config_json["num_key_value_heads"]
+        config.attn_config.size_per_head = config_json["hidden_size"] // config_json["num_attention_heads"]
+        config.num_layers = config_json["num_hidden_layers"]
+        config.max_seq_len = config_json.get("max_position_embeddings", 8192)
+        config.vocab_size = config_json["vocab_size"]
+        config.attn_config.rope_config.dim = 128
+        config.attn_config.rope_config.style = 1
         if model_type != "starcoder2":
             raise BaseException(f"model type is not starcoder: {model_type}")
         config.layernorm_eps = config_json["layer_norm_epsilon"]
@@ -216,33 +215,30 @@ class StarCoder2(BaseModel):
         config.special_tokens.eos_token_id = config_json.get("eos_token_id", 0)
         config.special_tokens.bos_token_id = config_json.get("bos_token_id", -1)
         config.activation_type = config_json["activation_function"]
-        config.has_post_decoder_layernorm = True
-        config.rotary_embedding_base = config_json.get("rope_theta", 1000000)
-        config.rotary_embedding_dim = config.size_per_head
+        config.attn_config.rope_config.base = int(config_json.get("rope_theta", 1000000))
+        config.attn_config.rope_config.dim = config.attn_config.size_per_head
         config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
         config.config_dtype = config_json.get("torch_dtype", None)
         return config
 
     @classmethod
-    def _create_config(cls, ckpt_path: str):
+    def _create_config(cls, ckpt_path: str) -> ModelConfig:
         config_dict = get_config_from_path(ckpt_path)
         if config_dict:
             config = StarCoder2.from_huggingface(config_dict)
         else:
-            config = GptInitModelParameters(
-                head_num=36,
-                head_num_kv=4,
-                size_per_head=128,
-                inter_size=4 * 4608,
-                layer_num=32,
-                max_seq_len=16384,
-                vocab_size=49152,
-                bos_token_id=0,
-                eos_token_id=0,
-                rotary_embedding_dim=128,
-                rotary_embedding_style=1,
-                has_post_decoder_layernorm=True,
-            )
+            config = ModelConfig()
+            config.attn_config.head_num = 36
+            config.attn_config.kv_head_num = 4
+            config.attn_config.size_per_head = 128
+            config.inter_size = 4 * 4608
+            config.num_layers = 32
+            config.max_seq_len = 16384
+            config.vocab_size = 49152
+            config.special_tokens.bos_token_id = 0
+            config.special_tokens.eos_token_id = 0
+            config.attn_config.rope_config.dim = 128
+            config.attn_config.rope_config.style = 1
         return config
 
 

@@ -1,4 +1,3 @@
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.chat_glm_v2 import ChatGlmV2
 from rtp_llm.utils.util import get_config_from_path
@@ -18,7 +17,7 @@ class ChatGlmV3(ChatGlmV2):
 
     @staticmethod
     def get_rotary_embedding_scale(config, config_json):
-        config.rotary_embedding_base = config_json.get("rope_theta", 10000) * int(
+        config.attn_config.rope_config.base = config_json.get("rope_theta", 10000) * int(
             config_json.get("rope_ratio", 1)
         )
         return config

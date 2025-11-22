@@ -8,13 +8,17 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h"
 #include "kmonitor/client/MetricsReporter.h"
-#include "rtp_llm/cpp/config/GptInitParameter.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/engine_base/schedulers/EngineScheduleInfo.h"
 namespace rtp_llm {
 
 class FIFOScheduler: public SchedulerBase {
 public:
-    explicit FIFOScheduler(const rtp_llm::GptInitParameter&     params,
+    explicit FIFOScheduler(const RuntimeConfig&                 runtime_config,
+                           const ModelConfig&                   model_config,
+                           const PDSepConfig&                  pd_sep_config,
+                           const ParallelismConfig&            parallelism_config,
+                           const ModelSpecificConfig&          model_specific_config,
                            const std::shared_ptr<CacheManager>& cache_manager,
                            const kmonitor::MetricsReporterPtr   metrics_reporter = nullptr,
                            const int                            max_score_len    = 1);
@@ -55,7 +59,8 @@ private:
     bool                         waitPredicate();
 
 protected:
-    rtp_llm::GptInitParameter     params_;
+    PDSepConfig                   pd_sep_config_;
+    ModelSpecificConfig           model_specific_config_;
     std::list<GenerateStreamPtr>  waiting_streams_;
     std::list<GenerateStreamPtr>  running_streams_;
     std::list<GenerateStreamPtr>  remote_running_streams_;
