@@ -3,9 +3,9 @@ import os
 import sys
 import unittest
 
-from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 import torch
 
+from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 from rtp_llm.cpp.devices.cuda_impl.tests.libtest_cuda_graph_decode_ops import (
     CudaGraphDecodePaddingOp,
 )
@@ -29,18 +29,20 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
             device_reserve_memory_bytes=-536870912,
         )
         engine: BaseEngine = loader.init_engine()
+        self.engines.append(engine)
         assert engine.model.py_model is not None
         return engine.model.py_model
 
     def __init__(self, methodName: str = "runTest") -> None:
         super().__init__(methodName)
         sys.path.append(os.environ["TEST_SRCDIR"] + "/rtp_llm/rtp_llm/cpp/models/test")
+        self.engines = []
+        os.environ["RESERVER_RUNTIME_MEM_MB"] = "10240"
         model = self.build_model()
+        print("build model successfully")
         self.op = CudaGraphDecodePaddingOp()
         self.op.init(model)
-        self.model = model
-        normal_model = self.build_model()
-        self.normal_model = normal_model
+        self.normal_model = model
 
     def _test_single(self, batch_size: int):
         max_seq_len = 64

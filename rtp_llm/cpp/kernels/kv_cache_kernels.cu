@@ -32,6 +32,21 @@
 
 namespace rtp_llm {
 
+// input: offset [b, m](kv_cache_block_id):
+// ┌─────────────────┐
+// │ batch0: [0,1,2] │
+// │ batch1: [3,4,5] │
+// │ batch2: [6,7,8] │
+// └─────────────────┘
+// flatten to (k,v block offset) -> k block id and v block id:
+// output: offset_addr [b, 2, m](kv_block_array.data, kv_block_array.mPrimaryPool is the real kv cache data address):
+// ┌─────────────────────────────────────────---┐
+// │ batch0_K: [0,1,2]  batch0_V: [0+Δ,1+Δ,2+Δ] │
+// │ batch1_K: [3,4,5]  batch1_V: [3+Δ,4+Δ,5+Δ] │
+// │ batch2_K: [6,7,8]  batch2_V: [6+Δ,7+Δ,8+Δ] │
+// └─────────────────────────────────────────---┘
+// Δ is kv_block_offset (layer_num * block_num_per_layer).
+
 __global__ void ConvertOffsetToBlockArrayData(int32_t*   offset_addr,
                                               const int* offset,  // [b, m]
                                               int        batch_size,
