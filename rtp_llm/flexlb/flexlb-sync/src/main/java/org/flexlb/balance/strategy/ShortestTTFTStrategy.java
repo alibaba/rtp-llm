@@ -12,7 +12,6 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.domain.balance.BalanceContext;
 import org.flexlb.domain.monitor.SelectMonitorContext;
 import org.flexlb.domain.worker.ScoredWorker;
-import org.flexlb.domain.worker.WorkerTTFT;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
@@ -20,224 +19,412 @@ import org.flexlb.util.CommonUtils;
 import org.flexlb.utils.LoggingUtils;
 import org.springframework.stereotype.Component;
 
-import java.time.LocalDateTime;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.stream.Collectors;
 
 /**
- * @author zjw
- * description:
- * date: 2025/3/10
+ * 基于最短首Token时间(TTFT)的负载均衡策略
+ *
+ * <p>该策略通过综合考虑以下因素选择最优Worker： 1. KV-Cache命中率：优先选择缓存命中率高的Worker 2. 排队时间：考虑Worker当前的任务队列情况 3.
+ * 调度公平性：在性能相近的Worker间实现负载均衡
+ *
+ * @author saichen.sm
+ * @since 2025/3/10
  */
 @Component("shortestTTFTStrategy")
 public class ShortestTTFTStrategy implements LoadBalancer {
 
     private final EngineWorkerStatus engineWorkerStatus;
-
     private final EngineHealthReporter engineHealthReporter;
-
     private final CacheAwareService cacheAwareService;
 
-    private static final int TOP_K = 1;
+    private static final int MIN_CANDIDATE_COUNT = 1;
+    private static final double CANDIDATE_PERCENTAGE = 0.3;
+    private static final double TTFT_THRESHOLD_PERCENTAGE = 0.1;
+    private static final double STDDEV_THRESHOLD_FACTOR = 0.5;
 
-    public ShortestTTFTStrategy(
-            EngineWorkerStatus engineWorkerStatus,
-            EngineHealthReporter engineHealthReporter,
-            CacheAwareService cacheAwareService) {
-
+    public ShortestTTFTStrategy(EngineWorkerStatus engineWorkerStatus, EngineHealthReporter engineHealthReporter,
+                                CacheAwareService cacheAwareService) {
         this.engineWorkerStatus = engineWorkerStatus;
         this.engineHealthReporter = engineHealthReporter;
         this.cacheAwareService = cacheAwareService;
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.SHORTEST_TTFT, this);
     }
 
-    public void releaseLocalCache(String modelName, String ip, Long interRequestId) {
-        Map<String/*ip*/, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(modelName, RoleType.PREFILL, null);
-        LoggingUtils.debug("releaseLocalCache, ip: {}, interRequestId: {}", modelName, ip, interRequestId);
-        LoggingUtils.debug(String.join(",", workerStatusMap.keySet()));
-        WorkerStatus workerStatus = workerStatusMap.get(ip);
-        workerStatus.removeLocalTask(interRequestId);
-    }
-
+    /**
+     * 选择最优Worker执行任务
+     *
+     * @param balanceContext 负载均衡上下文
+     * @param roleType Worker角色类型
+     * @param group Worker分组
+     * @return 选中的服务器状态
+     */
+    @Override
     public ServerStatus select(BalanceContext balanceContext, RoleType roleType, String group) {
         SelectMonitorContext monitorContext = new SelectMonitorContext();
-
         monitorContext.setStartTime(System.currentTimeMillis());
-        Exception exception = null;
+
         try {
-            ServerStatus result = select0(balanceContext, monitorContext, roleType, group);
+            ServerStatus result = doSelect(balanceContext, monitorContext, roleType, group);
             if (!result.isSuccess()) {
                 monitorContext.markError(result.getMessage());
             }
             return result;
         } catch (Exception e) {
-            exception = e;
-            LoggingUtils.warn("select worker error", e);
+            LoggingUtils.warn("Failed to select worker", e);
+            monitorContext.setErrorCode("LB_UNKNOWN_ERROR");
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
         } finally {
-            if (exception != null && monitorContext.getErrorCode() == null) {
-                monitorContext.setErrorCode("LB_UNKNOWN_ERROR");
-            }
-            monitorContext.setTotalCost(System.currentTimeMillis() - monitorContext.getStartTime());
-            engineHealthReporter.reportPrefillBalanceSelectMetric(balanceContext.getMasterRequest().getModel(),
-                    monitorContext.getErrorCode() == null,
-                    monitorContext.getErrorCode(),
-                    monitorContext.getTotalCost(),
-                    monitorContext.getTokenizeEndTime() - monitorContext.getTokenizeStartTime(),
-                    monitorContext.getCalcPrefixEndTime() - monitorContext.getCalcPrefixStartTime(),
-                    monitorContext.getCalcTTFTEndTime() - monitorContext.getCalcTTFTStartTime());
+            reportMetrics(balanceContext, monitorContext);
         }
     }
 
-    private ServerStatus select0(BalanceContext balanceContext, SelectMonitorContext monitorContext, RoleType roleType, String group) {
+    /**
+     * 释放指定Worker上的本地缓存任务
+     *
+     * @param modelName 模型名称
+     * @param ip Worker IP地址
+     * @param interRequestId 内部请求ID
+     */
+    public void releaseLocalCache(String modelName, String ip, Long interRequestId) {
+        Map<String, WorkerStatus> workerStatusMap =
+                engineWorkerStatus.selectModelWorkerStatus(modelName, RoleType.PREFILL, null);
 
+        LoggingUtils.debug("releaseLocalCache - modelName: {}, ip: {}, interRequestId: {}", modelName, ip, interRequestId);
+
+        WorkerStatus workerStatus = workerStatusMap.get(ip);
+        if (workerStatus != null) {
+            workerStatus.removeLocalTask(interRequestId);
+        }
+    }
+
+    /**
+     * 上报负载均衡选择指标
+     *
+     * @param balanceContext 负载均衡上下文
+     * @param monitorContext 监控上下文
+     */
+    private void reportMetrics(BalanceContext balanceContext, SelectMonitorContext monitorContext) {
+        monitorContext.setTotalCost(System.currentTimeMillis() - monitorContext.getStartTime());
+        engineHealthReporter.reportPrefillBalanceSelectMetric(
+                balanceContext.getMasterRequest().getModel(),
+                monitorContext.getErrorCode() == null,
+                monitorContext.getErrorCode(),
+                monitorContext.getTotalCost(),
+                monitorContext.getTokenizeEndTime() - monitorContext.getTokenizeStartTime(),
+                monitorContext.getCalcPrefixEndTime() - monitorContext.getCalcPrefixStartTime(),
+                monitorContext.getCalcTTFTEndTime() - monitorContext.getCalcTTFTStartTime());
+    }
+
+    /**
+     * 执行Worker选择的核心逻辑
+     *
+     * @param balanceContext 负载均衡上下文
+     * @param monitorContext 监控上下文
+     * @param roleType Worker角色类型
+     * @param group Worker分组
+     * @return 选中的服务器状态
+     */
+    private ServerStatus doSelect(BalanceContext balanceContext, SelectMonitorContext monitorContext, RoleType roleType,
+                                  String group) {
         long interRequestId = balanceContext.getInterRequestId();
         String modelName = balanceContext.getMasterRequest().getModel();
         long seqLen = balanceContext.getMasterRequest().getSeqLen();
 
-        LoggingUtils.debug("do shortest ttft select");
+        LoggingUtils.debug("Starting shortest TTFT selection for model: {}, role: {}", modelName, roleType);
 
-        monitorContext.setStartTime(System.currentTimeMillis());
-
-        Map<String/*ip*/, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(modelName, roleType, group);
-
-        if (MapUtils.isEmpty(workerStatusMap)) {
-            LoggingUtils.warn("select ROLE: {} failed, workerStatusMap is empty", roleType.getCode());
-            return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
-        }
-        List<WorkerStatus> workerStatusList = new ArrayList<>(workerStatusMap.values());
-        if (CollectionUtils.isEmpty(workerStatusList)) {
-            LoggingUtils.warn("select ROLE: {} failed, workerStatusList is empty", roleType.getCode());
+        // 获取可用的Worker列表
+        List<WorkerStatus> availableWorkers = getAvailableWorkers(modelName, roleType, group);
+        if (CollectionUtils.isEmpty(availableWorkers)) {
+            LoggingUtils.warn("No available workers for role: {}", roleType.getCode());
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
         }
 
         monitorContext.setCalcTTFTStartTime(System.currentTimeMillis());
 
-        // 调用 Local KV-Cache 匹配引擎
-        List<Long> blockCacheKeys = balanceContext.getMasterRequest().getBlockCacheKeys();
-        Map<String/*engineIpPort*/, Integer/*prefixMatchLength*/> matchResultsMap =
-                cacheAwareService.findMatchingEngines(blockCacheKeys, modelName, roleType, group);
+        // 计算每个引擎的缓存匹配结果
+        Map<String, Integer> cacheMatchResults = getCacheMatchResults(balanceContext, modelName, roleType, group);
 
-        // 使用全局锁方式选择最优Worker，避免复杂的并发控制
         synchronized (ShortestTTFTStrategy.class) {
-            // 1. 计算所有存活Worker的TTFT
-            List<ScoredWorker> scoredWorkers = workerStatusList.stream()
-                    .filter(WorkerStatus::isAlive) // 只考虑存活的Worker
-                    .map(workerStatus -> {
-                        WorkerTTFT ttft = calcWorkerTTFT(workerStatus, matchResultsMap, seqLen);
-                        return new ScoredWorker(workerStatus, ttft);
-                    })
-                    .collect(Collectors.toList());
+            List<ScoredWorker> scoredWorkers = scoreWorkers(availableWorkers, cacheMatchResults, seqLen);
 
-            // 2. 按TTFT排序，选择最优的Worker
-            Optional<ScoredWorker> bestWorker = findBestWorkerWithFreshness(scoredWorkers);
-
-            if (bestWorker.isEmpty()) {
-                LoggingUtils.warn("select ROLE: {} failed, bestWorker is empty");
+            ScoredWorker bestWorker = selectBestWorker(scoredWorkers);
+            if (bestWorker == null) {
+                LoggingUtils.warn("Failed to find best worker for role: {}", roleType);
                 return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
             }
-            LocalDateTime now = LocalDateTime.now();
-            DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
-            String formattedDateTime = now.format(formatter);
-            LoggingUtils.debug("");
-            LoggingUtils.debug("select time: {}, inter req id : {}", formattedDateTime, interRequestId);
-            // 3. 选择最优Worker并更新状态
-            ScoredWorker selectedWorker = bestWorker.get();
-            WorkerStatus workerStatus = selectedWorker.worker();
-            LoggingUtils.debug("selected worker ip: {}", workerStatus.getIp());
-            engineHealthReporter.reportCacheHitMetrics(modelName, roleType, workerStatus.getIp(),
-                    selectedWorker.getWorkerTTFT().getHitCacheTokens(),
-                    selectedWorker.getWorkerTTFT().getHitCacheTokens() / (double) seqLen);
 
-            TaskInfo task = new TaskInfo();
-            task.setLastActiveTimeMs(System.currentTimeMillis());
-            task.setInterRequestId(interRequestId);
-            task.setInputLength(balanceContext.getMasterRequest().getSeqLen());
-            task.setPrefixLength(selectedWorker.getWorkerTTFT().getHitCacheTokens());
-            LoggingUtils.debug("成功选择{} Worker, ip:{}, port: {}, prefill_time: {}, ttft:{}",
-                    roleType.toString(), workerStatus.getIp(), workerStatus.getPort(),
-                    selectedWorker.getWorkerTTFT().getPrefillTime(),
-                    selectedWorker.ttft()
-            );
-            workerStatus.putLocalTask(interRequestId, task);
-
-            return buildServerStatus(workerStatus, bestWorker.get().getWorkerTTFT(), roleType, interRequestId);
+            return finalizeWorkerSelection(bestWorker, balanceContext, roleType, interRequestId, seqLen);
         }
     }
 
-    private Optional<ScoredWorker> findBestWorkerWithFreshness(List<ScoredWorker> scoredWorkers) {
-        if (scoredWorkers.isEmpty()) {
-            return Optional.empty();
+    /**
+     * 获取可用的Worker列表
+     *
+     * @param modelName 模型名称
+     * @param roleType Worker角色类型
+     * @param group Worker分组
+     * @return 可用的Worker列表
+     */
+    private List<WorkerStatus> getAvailableWorkers(String modelName, RoleType roleType, String group) {
+
+        Map<String, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(modelName, roleType, group);
+        if (MapUtils.isEmpty(workerStatusMap)) {
+            return new ArrayList<>();
         }
 
-        // 先按TTFT排序
-        List<ScoredWorker> sortedWorkers = scoredWorkers.stream()
-                .sorted(Comparator.comparingLong(ScoredWorker::ttft))
-                .toList();
+        return new ArrayList<>(workerStatusMap.values());
+    }
 
-        // 选择前30%或至少5个Worker作为候选者
-        int candidateCount = Math.max(TOP_K, (int) (sortedWorkers.size() * 0.3));
-        List<ScoredWorker> candidates = sortedWorkers.stream()
-                .limit(candidateCount)
-                .toList();
+    /**
+     * 获取缓存匹配结果
+     *
+     * @param balanceContext 负载均衡上下文
+     * @param modelName 模型名称
+     * @param roleType Worker角色类型
+     * @param group Worker分组
+     * @return 缓存匹配结果: key: engineIpPort，value: prefixMatchLength
+     */
+    private Map<String /*engineIpPort*/, Integer /*prefixMatchLength*/> getCacheMatchResults(BalanceContext balanceContext,
+                                                                                             String modelName,
+                                                                                             RoleType roleType,
+                                                                                             String group) {
+        List<Long> blockCacheKeys = balanceContext.getMasterRequest().getBlockCacheKeys();
+        return cacheAwareService.findMatchingEngines(blockCacheKeys, modelName, roleType, group);
+    }
 
-        // 找到候选者中的最小TTFT
+    /**
+     * 为所有存活的Worker计算TTFT评分
+     *
+     * @param workers Worker列表
+     * @param cacheMatchResults 缓存匹配结果
+     * @param seqLen 序列长度
+     * @return 已评分的Worker列表
+     */
+    private List<ScoredWorker> scoreWorkers(List<WorkerStatus> workers, Map<String, Integer> cacheMatchResults, long seqLen) {
+        return workers.stream()
+                .filter(WorkerStatus::isAlive)
+                .map(workerStatus -> {
+                    long hitCacheTokens = calculatePrefixMatchLength(workerStatus, cacheMatchResults);
+                    long prefillTime = TaskInfo.estimatePrefillTimeMs(seqLen, hitCacheTokens);
+                    long queueTime = workerStatus.getRunningQueueTime().get();
+                    long newTTFT = prefillTime + queueTime;
+                    LoggingUtils.debug("Calculate TTFT for worker - ip: {}, port: {}, hitCacheTokens: {}, prefillTime: {}, queueTime: {}, newTTFT: {}",
+                            workerStatus.getIp(),
+                            workerStatus.getPort(),
+                            hitCacheTokens,
+                            prefillTime,
+                            queueTime,
+                            newTTFT);
+                    return new ScoredWorker(workerStatus, newTTFT, hitCacheTokens);
+                })
+                .collect(Collectors.toList());
+    }
+
+    /**
+     * 完成Worker选择并更新状态
+     *
+     * @param selectedWorker 已选Worker
+     * @param balanceContext 负载均衡上下文
+     * @param roleType Worker角色类型
+     * @param interRequestId 内部请求ID
+     * @param seqLen 序列长度
+     * @return 服务器状态
+     */
+    private ServerStatus finalizeWorkerSelection(ScoredWorker selectedWorker,
+                                                 BalanceContext balanceContext,
+                                                 RoleType roleType,
+                                                 long interRequestId,
+                                                 long seqLen) {
+        WorkerStatus workerStatus = selectedWorker.worker();
+
+        logWorkerSelection(selectedWorker, roleType);
+        reportCacheHitMetrics(balanceContext.getMasterRequest().getModel(), roleType, workerStatus.getIp(), selectedWorker.hitCacheTokens(), seqLen);
+
+        TaskInfo task = createTaskInfo(interRequestId, balanceContext.getMasterRequest().getSeqLen(), selectedWorker.hitCacheTokens());
+        workerStatus.putLocalTask(interRequestId, task);
+
+        return buildServerStatus(selectedWorker, roleType, interRequestId);
+    }
+
+    /**
+     * 记录Worker选择日志
+     *
+     * @param selectedWorker 已选Worker
+     * @param roleType Worker角色类型
+     */
+    private void logWorkerSelection(ScoredWorker selectedWorker, RoleType roleType) {
+        WorkerStatus workerStatus = selectedWorker.worker();
+        LoggingUtils.debug("Selected {} worker - ip: {}, port: {}, hitCacheTokens: {}, ttft: {}",
+                roleType,
+                workerStatus.getIp(),
+                workerStatus.getPort(),
+                selectedWorker.hitCacheTokens(),
+                selectedWorker.ttft());
+    }
+
+    /**
+     * 上报缓存命中指标
+     *
+     * @param modelName 模型名称
+     * @param roleType Worker角色类型
+     * @param ip Worker IP地址
+     * @param hitCacheTokens 命中的缓存Token数量
+     * @param seqLen 序列长度
+     */
+    private void reportCacheHitMetrics(String modelName, RoleType roleType, String ip, long hitCacheTokens, long seqLen) {
+        double hitRate = seqLen > 0 ? hitCacheTokens / (double) seqLen : 0.0;
+        engineHealthReporter.reportCacheHitMetrics(modelName, roleType, ip, hitCacheTokens, hitRate);
+    }
+
+    /**
+     * 创建任务信息
+     *
+     * @param interRequestId 内部请求ID
+     * @param inputLength 输入长度
+     * @param prefixLength 前缀长度
+     * @return 任务信息
+     */
+    private TaskInfo createTaskInfo(long interRequestId, long inputLength, long prefixLength) {
+        TaskInfo task = new TaskInfo();
+        task.setLastActiveTimeMs(System.currentTimeMillis());
+        task.setInterRequestId(interRequestId);
+        task.setInputLength(inputLength);
+        task.setPrefixLength(prefixLength);
+        return task;
+    }
+
+    /**
+     * 选择最佳Worker，综合考虑TTFT和调度公平性
+     *
+     * <p>算法流程： 1. 按TTFT对所有Worker排序 2. 选择前30%的Worker作为候选者（至少1个） 3. 在TTFT相近的候选者中，优先选择最近未被调度的Worker
+     *
+     * @param scoredWorkers 已评分的Worker列表
+     * @return 最佳Worker
+     */
+    private ScoredWorker selectBestWorker(List<ScoredWorker> scoredWorkers) {
+        if (scoredWorkers.isEmpty()) {
+            return null;
+        }
+
+        List<ScoredWorker> sortedWorkers = sortByTTFT(scoredWorkers);
+        List<ScoredWorker> candidates = selectTopCandidates(sortedWorkers);
+        LoggingUtils.debug("Select best worker, sortedWorkers size: {}, candidates size: {}", sortedWorkers.size(), candidates.size());
+
+        if (candidates.isEmpty()) {
+            return null;
+        }
+
         long minTTFT = candidates.getFirst().ttft();
+        double threshold = calculateTTFTThreshold(candidates);
 
-        // 计算候选者的TTFT平均值和标准差
-        double avgTTFT = candidates.stream()
-                .mapToLong(ScoredWorker::ttft)
-                .average()
-                .orElse(0.0);
+        List<ScoredWorker> similarWorkers = filterSimilarWorkers(candidates, minTTFT, threshold);
+
+        return selectWorkerByScheduleFairness(similarWorkers, candidates);
+    }
+
+    /**
+     * 按TTFT对Worker排序
+     *
+     * @param workers Worker列表
+     * @return 排序后的Worker列表 从小到大
+     */
+    private List<ScoredWorker> sortByTTFT(List<ScoredWorker> workers) {
+        return workers.stream().sorted(Comparator.comparingLong(ScoredWorker::ttft)).toList();
+    }
+
+    /**
+     * 选择前N个候选Worker
+     *
+     * @param sortedWorkers 已排序的Worker列表
+     * @return 候选Worker列表
+     */
+    private List<ScoredWorker> selectTopCandidates(List<ScoredWorker> sortedWorkers) {
+        int candidateCount = Math.max(MIN_CANDIDATE_COUNT, (int) (sortedWorkers.size() * CANDIDATE_PERCENTAGE));
+        return sortedWorkers.stream().limit(candidateCount).toList();
+    }
+
+    /**
+     * 计算TTFT相似度阈值
+     *
+     * @param candidates 候选Worker列表
+     * @return TTFT阈值
+     */
+    private double calculateTTFTThreshold(List<ScoredWorker> candidates) {
+        double avgTTFT = candidates.stream().mapToLong(ScoredWorker::ttft).average().orElse(0.0);
 
         double stdDev = Math.sqrt(
                 candidates.stream()
                         .mapToLong(ScoredWorker::ttft)
                         .mapToDouble(v -> Math.pow(v - avgTTFT, 2))
                         .average()
-                        .orElse(0.0)
-        );
-
-        // 定义"相近"阈值为平均值的10%或标准差，取较大者
-        double threshold = Math.max(avgTTFT * 0.1, stdDev * 0.5);
-
-        // 筛选出TTFT相近的Worker
-        List<ScoredWorker> similarWorkers = candidates.stream()
-                .filter(worker -> Math.abs(worker.ttft() - minTTFT) <= threshold)
-                .toList();
-
-        if (similarWorkers.isEmpty()) {
-            // 如果没有相近的Worker，直接选择TTFT最小的
-            return Optional.of(candidates.getFirst());
-        } else {
-            // 在相近的Worker中，优先选择最近没有被调度的（lastScheduleTime较小的）
-            // 使用正值使最近没有被调度的Worker优先级更高
-            // 如果找不到最近没有被调度的Worker，则直接返回第一个
-            return similarWorkers.stream()
-                    .min(Comparator.comparingLong(worker ->
-                        // 使用正值使最近没有被调度的Worker优先级更高
-                        worker.worker().getLastScheduleTime().get()));
-        }
+                        .orElse(0.0));
+        double percentageAvgTTFT = avgTTFT * TTFT_THRESHOLD_PERCENTAGE;
+        double factoredStdDev = stdDev * STDDEV_THRESHOLD_FACTOR;
+        LoggingUtils.debug("Calculate TTFT threshold, avgTTFT: {}, stdDev: {}, percentageAvgTTFT: {}, factoredStdDev: {}", avgTTFT, stdDev, percentageAvgTTFT, factoredStdDev);
+        return Math.max(percentageAvgTTFT, factoredStdDev);
     }
 
-    private ServerStatus buildServerStatus(WorkerStatus workerStatus, WorkerTTFT workerTTFT, RoleType roleType, long interRequestId) {
+    /**
+     * 筛选TTFT相近的Worker
+     *
+     * @param candidates 候选Worker列表
+     * @param minTTFT 最小TTFT值
+     * @param threshold 阈值
+     * @return TTFT相近的Worker列表
+     */
+    private List<ScoredWorker> filterSimilarWorkers(List<ScoredWorker> candidates, long minTTFT, double threshold) {
+        List<ScoredWorker> scoredWorkers = candidates.stream()
+                .filter(worker -> Math.abs(worker.ttft() - minTTFT) <= threshold)
+                .toList();
+        LoggingUtils.debug("Filter similar workers, minTTFT: {}, threshold: {}, candidates size: {}", minTTFT, threshold, scoredWorkers.size());
+        return scoredWorkers;
+    }
+
+    /**
+     * 根据调度公平性选择Worker
+     * 在TTFT相近的Worker中，优先选择最近未被调度的Worker
+     *
+     * @param similarWorkers TTFT相近的Worker列表
+     * @param fallbackCandidates 候补Worker列表
+     * @return 最终选择的Worker
+     */
+    private ScoredWorker selectWorkerByScheduleFairness(List<ScoredWorker> similarWorkers, List<ScoredWorker> fallbackCandidates) {
+        if (similarWorkers.isEmpty()) {
+            return fallbackCandidates.getFirst();
+        }
+
+        return similarWorkers.stream()
+                // 优先选择最近未被调度的Worker
+                .min(Comparator.comparingLong(worker -> worker.worker().getLastSelectedTime().get()))
+                .orElse(fallbackCandidates.getFirst());
+    }
+
+    /**
+     * 构建服务器状态响应
+     *
+     * @param selectedWorker 已选Worker
+     * @param roleType Worker角色类型
+     * @param interRequestId 内部请求ID
+     * @return 服务器状态
+     */
+    private ServerStatus buildServerStatus(ScoredWorker selectedWorker, RoleType roleType, long interRequestId) {
+        WorkerStatus workerStatus = selectedWorker.worker();
         ServerStatus result = new ServerStatus();
         try {
             result.setSuccess(true);
             result.setRole(roleType);
             result.setInterRequestId(interRequestId);
-            result.setPrefillTime(workerTTFT.getTtft());
+            result.setPrefillTime(selectedWorker.ttft());
             result.setGroup(workerStatus.getGroup());
             result.setServerIp(workerStatus.getIp());
             result.setHttpPort(workerStatus.getPort());
             result.setGrpcPort(CommonUtils.toGrpcPort(workerStatus.getPort()));
         } catch (Exception e) {
-            LoggingUtils.error("buildServerStatus error, requestId:{} ", interRequestId, e);
+            LoggingUtils.error("Failed to build server status for requestId: {}", interRequestId, e);
             result.setCode(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode());
             result.setMessage(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorMsg());
             result.setSuccess(false);
@@ -245,28 +432,24 @@ public class ShortestTTFTStrategy implements LoadBalancer {
         return result;
     }
 
-    private WorkerTTFT calcWorkerTTFT(WorkerStatus workerStatus, Map<String, Integer> matchResultsMap, long seqLength) {
-
-        // 获取最长前缀匹配长度
-        long hitCacheTokens = calcPrefixMatchLength(workerStatus, matchResultsMap);
-
-        // 预估执行Prefill的时间
-        long prefillTime = TaskInfo.estimatePrefillTimeMs(seqLength, hitCacheTokens);
-
-        // 预估排队的时间
-        long queueTime = workerStatus.getRunningQueueTime().get();
-
-        return new WorkerTTFT(workerStatus, prefillTime + queueTime, prefillTime, hitCacheTokens);
-    }
-
-    private long calcPrefixMatchLength(WorkerStatus workerStatus, Map<String, Integer> matchResultsMap) {
-        if (workerStatus.getCacheStatus() == null || matchResultsMap == null) {
-            return 0;
+    /**
+     * 计算前缀匹配长度（缓存命中的Token数量）
+     *
+     * @param workerStatus Worker状态
+     * @param cacheMatchResults 缓存匹配结果
+     * @return 命中的Token数量
+     */
+    private long calculatePrefixMatchLength(
+            WorkerStatus workerStatus, Map<String, Integer> cacheMatchResults) {
+        if (workerStatus.getCacheStatus() == null || cacheMatchResults == null) {
+            return 0L;
         }
-        Integer prefixMatchLength = matchResultsMap.get(workerStatus.getIpPort());
+
+        Integer prefixMatchLength = cacheMatchResults.get(workerStatus.getIpPort());
         if (prefixMatchLength == null) {
-            return 0;
+            return 0L;
         }
+
         long blockSize = workerStatus.getCacheStatus().getBlockSize();
         return blockSize * prefixMatchLength;
     }

@@ -188,8 +188,12 @@ public class EngineHealthReporter {
         monitor.report(CACHE_STATUS_CHECK_VISITOR_SUCCESS_QPS, metricTags, 1.0);
     }
 
-    public void reportStatusCheckerFail(String modelName, BalanceStatusEnum errorEnum) {
-        FlexMetricTags metricTags = FlexMetricTags.of("model", modelName, "code", String.valueOf(errorEnum.getCode()));
+    public void reportStatusCheckerFail(String modelName, BalanceStatusEnum errorEnum, String ip) {
+        FlexMetricTags metricTags = FlexMetricTags.of(
+                "model", modelName,
+                "code", String.valueOf(errorEnum.getCode()),
+                "engineIp", ip == null ? "" : ip
+        );
         monitor.report(ENGINE_STATUS_CHECK_FAIL, metricTags, 1.0);
     }
 

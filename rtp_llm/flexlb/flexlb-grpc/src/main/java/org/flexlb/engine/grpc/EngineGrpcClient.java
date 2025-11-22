@@ -59,29 +59,24 @@ public class EngineGrpcClient extends AbstractGrpcClient<RpcServiceGrpc.RpcServi
 
         String channelKey = createKey(ip, port, serviceType);
         Invoker invoker = getInvoker(channelKey);
-        boolean shutdownAfterInvoke = false;
 
         if (invoker == null) {
-            shutdownAfterInvoke = true;
-            log.warn("ip:{} {} grpc channel not found, creating new channel", ip, serviceType);
-            invoker = new Invoker(channelKey, createChannel(channelKey));
+            log.warn("ip:{} {} grpc channel not found, creating and adding to pool", ip, serviceType);
+            ManagedChannel newChannel = createChannel(channelKey);
+            invoker = new Invoker(channelKey, newChannel);
+            channelPool.put(channelKey, invoker);
         } else if (invoker.getChannel().isShutdown() || invoker.getChannel().isTerminated()) {
-            shutdownAfterInvoke = true;
-            log.warn("ip:{} {} grpc channel is shutdown or terminated, recreating", ip, serviceType);
-            invoker = new Invoker(invoker.getChannelKey(), createChannel(invoker.getChannelKey()));
+            log.warn("ip:{} {} grpc channel is shutdown or terminated, recreating and updating pool", ip, serviceType);
+            ManagedChannel newChannel = createChannel(channelKey);
+            invoker = new Invoker(channelKey, newChannel);
+            channelPool.put(channelKey, invoker);
         }
 
         try {
             RpcServiceGrpc.RpcServiceBlockingStub rpcServiceStub = invoker.getRpcServiceStub()
                     .withDeadlineAfter(requestTimeoutMs, TimeUnit.MILLISECONDS);
 
-            R result = grpcCall.apply(rpcServiceStub);
-
-            if (shutdownAfterInvoke) {
-                invoker.shutdown();
-            }
-
-            return result;
+            return grpcCall.apply(rpcServiceStub);
         } catch (Exception e) {
             log.error("Exception during {} gRPC call setup for {}:{}", serviceType.getOperationName(), ip, port, e);
             throw e;
@@ -113,8 +108,8 @@ public class EngineGrpcClient extends AbstractGrpcClient<RpcServiceGrpc.RpcServi
                 .withOption(ChannelOption.TCP_NODELAY, true)
                 .withOption(ChannelOption.SO_KEEPALIVE, true)
                 .withOption(ChannelOption.ALLOCATOR, PooledByteBufAllocator.DEFAULT)
-                // 25ms 连接超时
-                .withOption(ChannelOption.CONNECT_TIMEOUT_MILLIS, 25)
+                // 500ms 连接超时,避免网络抖动导致连接失败
+                .withOption(ChannelOption.CONNECT_TIMEOUT_MILLIS, 500)
                 // 写缓冲区水位线：防止内存堆积和 pendingTasks 累积
                 .withOption(ChannelOption.WRITE_BUFFER_WATER_MARK, new WriteBufferWaterMark(32 * 1024, 64 * 1024))
                 // 接收/发送缓冲区大小优化
@@ -122,6 +117,10 @@ public class EngineGrpcClient extends AbstractGrpcClient<RpcServiceGrpc.RpcServi
                 .withOption(ChannelOption.SO_SNDBUF, 256 * 1024)
                 // 最大消息大小限制（4MB）
                 .maxInboundMessageSize(4 * 1024 * 1024)
+                // gRPC keepalive 配置：保持连接活跃，防止被中间设备断开
+                .keepAliveTime(2, TimeUnit.SECONDS)
+                .keepAliveTimeout(10, TimeUnit.SECONDS)
+                .keepAliveWithoutCalls(true)
                 .executor(executor)
                 .eventLoopGroup(eventLoopGroup)
                 .usePlaintext()

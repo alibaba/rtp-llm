@@ -2,7 +2,6 @@ package org.flexlb.balance;
 
 import org.flexlb.balance.scheduler.DefaultScheduler;
 import org.flexlb.balance.scheduler.Scheduler;
-import org.flexlb.dao.loadbalance.MasterRequest;
 import org.flexlb.dao.loadbalance.MasterResponse;
 import org.flexlb.domain.balance.BalanceContext;
 import org.flexlb.domain.balance.WhaleMasterConfig;
@@ -34,16 +33,12 @@ public class LoadBalanceWrapper {
     }
 
     public MasterResponse selectEngineWorker(BalanceContext balanceContext) {
-        MasterRequest masterRequest = balanceContext.getMasterRequest();
-        LoggingUtils.info("do selectEngineWorker, masterReq model:{}", masterRequest.getModel());
-        LoggingUtils.info("do selectEngineWorker, masterReq seqLen:{}", masterRequest.getSeqLen());
         balanceContext.getRequestContext().getSpan().addEvent("start selectEngineWorker");
         WhaleMasterConfig whaleMasterConfig = configService.loadBalanceConfig();
         balanceContext.setConfig(whaleMasterConfig);
         balanceContext.setWorkerCalcParallel(Runtime.getRuntime().availableProcessors());
         long interRequestId = (System.currentTimeMillis()) * 1000 + (IncNum.getAndIncrement()) % 1000;
         balanceContext.setInterRequestId(interRequestId);
-        LoggingUtils.info("go to roleScheduler.select for requestId: {}", interRequestId);
         MasterResponse result = roleScheduler.select(balanceContext);
         balanceContext.setMasterResponse(result);
         balanceContext.getRequestContext().getSpan().addEvent("finish selectEngineWorker");

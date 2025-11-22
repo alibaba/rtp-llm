@@ -43,7 +43,7 @@ class WorkerAddressServiceTest {
         String modelName = "TestModel";
         String address = "TestAddress";
         Future<List<WorkerHost>> future = mock(Future.class);
-        Mockito.doNothing().when(engineHealthReporter).reportStatusCheckerFail(any(), any());
+        Mockito.doNothing().when(engineHealthReporter).reportStatusCheckerFail(any(), any(), null);
 
         // Act
         List<WorkerHost> actualHosts = workerAddressService.getServiceHosts(modelName, address);
