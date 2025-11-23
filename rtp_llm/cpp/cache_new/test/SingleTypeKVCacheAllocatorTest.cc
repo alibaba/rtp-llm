@@ -634,6 +634,53 @@ TEST_F(SingleTypeKVCacheAllocatorTest, FreeWithNullBatchResource) {
     EXPECT_FALSE(result.success);
 }
 
+// Test rollback logic in incrMalloc
+TEST_F(SingleTypeKVCacheAllocatorTest, IncrMallocRollback) {
+    // Create a config with limited blocks to trigger rollback
+    auto config = createSingleTypeTestConfig(4, 8, 4);  // 8 blocks, 4 seq per block
+    allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config, device_);
+    allocator_->init();
+
+    size_t initial_free_blocks = allocator_->freeBlocksNum();
+    EXPECT_EQ(initial_free_blocks, 7);
+
+    int  batch_size         = 3;
+    auto batch_resource     = createBatchKVCacheResource(batch_size);
+    auto complete_token_ids = createCompleteTokenIds(batch_size, 4);  // 4 seq length = 1 block per batch
+
+    // First, do a common allocation for all batches (1 block each)
+    MallocInfo common_malloc_info(batch_resource, complete_token_ids);
+    common_malloc_info.common_seq_len = 4;
+    common_malloc_info.total_seq_len  = 4;
+    auto common_result                = allocator_->initMallocForCommonLen(common_malloc_info);
+    EXPECT_TRUE(common_result.success);
+
+    // 1 block allocated and shared by all batches
+    size_t after_common_free_blocks = allocator_->freeBlocksNum();
+    EXPECT_EQ(after_common_free_blocks, 6);
+
+    // Verify each batch has 1 block
+    for (int i = 0; i < batch_size; ++i) {
+        EXPECT_EQ(batch_resource->batch_resource[i].group_block_ids[0]->block_indices.size(), 1);
+    }
+
+    MallocInfo incr_malloc_info(batch_resource, complete_token_ids);
+    incr_malloc_info.total_seq_len = 16;  // 3 more blocks for a batch, will rollback at batch 3
+
+    auto incr_result = allocator_->incrMalloc(incr_malloc_info);
+    EXPECT_FALSE(incr_result.success);
+
+    size_t after_rollback_free_blocks = allocator_->freeBlocksNum();
+    EXPECT_EQ(after_rollback_free_blocks, 6);
+
+    for (int i = 0; i < batch_size; ++i) {
+        EXPECT_EQ(batch_resource->batch_resource[i].group_block_ids[0]->block_indices.size(), 1);
+    }
+
+    // Verify that no extra blocks were allocated and left unfreed
+    // If rollback didn't work properly, we might have partially allocated blocks
+}
+
 // ==================== Stress tests ====================
 
 TEST_F(SingleTypeKVCacheAllocatorTest, MixedOperations) {

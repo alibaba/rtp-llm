@@ -85,14 +85,33 @@ MallocResult SingleTypeKVCacheAllocator::incrMalloc(const MallocInfo& malloc_inf
     if (need_blocks == 0) {
         return {true, 0};
     }
+    // Record original sizes for rollback in case any subsequent allocation fails
+    std::vector<size_t> original_sizes(static_cast<size_t>(batch_size), 0);
+    for (int batch_id = 0; batch_id < batch_size; ++batch_id) {
+        auto& br                 = malloc_info.batch_kv_cache_resource->batch_resource[batch_id];
+        original_sizes[batch_id] = br.group_block_ids[0]->block_indices.size();
+    }
+
     for (int batch_id = 0; batch_id < batch_size; ++batch_id) {
         auto& br = malloc_info.batch_kv_cache_resource->batch_resource[batch_id];
 
         auto& cache_keys    = br.cache_keys;
         auto& block_indices = br.group_block_ids[0]->block_indices;
         if (!full_kv_cache_group_->malloc(cache_keys, block_indices, seq_len)) {
-            // TODO，回滚已经malloc的资源。
-            // 所有 batch 都要回退
+            BlockIndicesType blocks_to_free;
+            for (int rb = 0; rb <= batch_id; ++rb) {
+                auto&        rb_br      = malloc_info.batch_kv_cache_resource->batch_resource[rb];
+                auto&        rb_indices = rb_br.group_block_ids[0]->block_indices;
+                const size_t ori_n      = original_sizes[rb];
+                if (rb_indices.size() > ori_n) {
+                    blocks_to_free.insert(
+                        blocks_to_free.end(), rb_indices.begin() + static_cast<long>(ori_n), rb_indices.end());
+                    rb_indices.resize(ori_n);
+                }
+            }
+            if (!blocks_to_free.empty()) {
+                full_kv_cache_group_->free(blocks_to_free);
+            }
             return {false, 0};
         }
     }
