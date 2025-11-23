@@ -25,7 +25,7 @@ requirement(flashinfer)
 
 filegroup(
     name = "cutlass_moe_config",
-    srcs = glob(["configs/cutlass_groupgemm/*"]),
+    srcs = glob(["modules/configs/cutlass_groupgemm/*"]),
     visibility = ["//visibility:public"],
 )
 

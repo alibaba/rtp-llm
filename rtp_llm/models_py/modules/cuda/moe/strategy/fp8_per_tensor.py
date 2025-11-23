@@ -29,14 +29,7 @@ class CudaFp8PerTensorEpLowLatencyStrategy(MoeStrategy):
             CutlassBatchedExpertsFp8,
         )
 
-        max_num_tokens = (
-            config.max_generate_batch_size + config.tp_size - 1
-        ) // config.tp_size
-        num_dispatchers = config.world_size // config.tp_size
-
         return CutlassBatchedExpertsFp8(
-            max_num_tokens=max_num_tokens,
-            num_dispatchers=num_dispatchers,
             w1=weights[W.moe_w1],
             w2=weights[W.moe_w2],
             w1_scale=weights[W.moe_s1],

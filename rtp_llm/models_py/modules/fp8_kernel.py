@@ -164,7 +164,7 @@ def cutlass_moe_mm_fp8_scaled(
     c_strides,
     per_act_token,
     per_out_ch,
-    actual_m,
+    elements_m,
     swap_ab,
 ):
 
@@ -176,7 +176,8 @@ def cutlass_moe_mm_fp8_scaled(
     configs = get_cutlass_groupgemm_best_config(E, N, K)
     if configs:
         # Get the optimal config
-        config = configs[min(configs.keys(), key=lambda x: abs(x - actual_m))]
+        key = min(configs.keys(), key=lambda x: abs(x - elements_m))
+        config = configs[min(configs.keys(), key=lambda x: abs(x - elements_m))]
         tile_m, tile_n, tile_k = config["tile_m"], config["tile_n"], config["tile_k"]
         cluster_m, cluster_n, cluster_k = (
             config["cluster_m"],
