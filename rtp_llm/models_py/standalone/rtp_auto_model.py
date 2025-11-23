@@ -112,16 +112,24 @@ class AutoModel:
         self.kv_head_num = self.model_config.gpt_init_params.head_num_kv
         self.size_per_head = self.model_config.gpt_init_params.size_per_head
         kv_shape = [
-            self.layer_num * 2,
+            self.layer_num,
             self.block_nums,
+            2,
             self.kv_head_num,
             self.tokens_per_block,
             self.size_per_head,
         ]
         kv_cache_dtype = self._get_kv_cache_dtype(self.factory_model_config)
         kv_cache_total = torch.zeros(kv_shape, dtype=kv_cache_dtype, device=self.device)
-        k_cache_base = kv_cache_total[: self.layer_num, :, :, :, :]
-        v_cache_base = kv_cache_total[self.layer_num :, :, :, :, :]
+        k_cache_base = kv_cache_total
+        v_cache_base = torch.empty(
+            self.layer_num,
+            0,
+            self.kv_head_num,
+            self.tokens_per_block,
+            self.size_per_head,
+            device=self.device,
+        )
         self.kv_cache.k_cache_base = k_cache_base
         self.kv_cache.v_cache_base = v_cache_base
 

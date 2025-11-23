@@ -548,23 +548,23 @@ TEST_F(CacheManagerTest, testSetBlockValue) {
     auto testFunc = [&](int block_index, int block_value) {
         auto [kbuffer, vbuffer] = cache_manager.getKVBlockValue(block_index);
         auto host_kbuffer       = device_->clone({*kbuffer, AllocationType::HOST});
-        auto host_vbuffer       = device_->clone({*vbuffer, AllocationType::HOST});
+        // auto host_vbuffer       = device_->clone({*vbuffer, AllocationType::HOST});
         ASSERT_EQ(cache_config.kv_block_size, host_kbuffer->size());
-        ASSERT_EQ(cache_config.kv_block_size, host_vbuffer->size());
+        // ASSERT_EQ(cache_config.kv_block_size, host_vbuffer->size());
         for (size_t i = 0; i < host_kbuffer->size(); i++) {
             ASSERT_EQ(block_value, host_kbuffer->data<int8_t>()[i]);
-            ASSERT_EQ(block_value, host_vbuffer->data<int8_t>()[i]);
+            // ASSERT_EQ(block_value, host_vbuffer->data<int8_t>()[i]);
         }
 
         for (size_t layer_id = 0; layer_id < cache_config.layer_num; layer_id++) {
             auto [kbuffer, vbuffer] = cache_manager.getKVBlockValue(block_index, layer_id);
             auto host_kbuffer       = device_->clone({*kbuffer, AllocationType::HOST});
-            auto host_vbuffer       = device_->clone({*vbuffer, AllocationType::HOST});
+            // auto host_vbuffer       = device_->clone({*vbuffer, AllocationType::HOST});
             ASSERT_EQ(cache_config.k_block_stride, host_kbuffer->size());
-            ASSERT_EQ(cache_config.k_block_stride, host_vbuffer->size());
+            // ASSERT_EQ(cache_config.k_block_stride, host_vbuffer->size());
             for (size_t i = 0; i < host_kbuffer->size(); i++) {
                 ASSERT_EQ(block_value, host_kbuffer->data<int8_t>()[i]);
-                ASSERT_EQ(block_value, host_vbuffer->data<int8_t>()[i]);
+                // ASSERT_EQ(block_value, host_vbuffer->data<int8_t>()[i]);
             }
         }
     };
@@ -594,23 +594,23 @@ TEST_F(CacheManagerTest, blockBatchCopy) {
     auto testFunc = [&](int block_index, int block_value) {
         auto [kbuffer, vbuffer] = cache_manager.getKVBlockValue(block_index);
         auto host_kbuffer       = device_->clone({*kbuffer, AllocationType::HOST});
-        auto host_vbuffer       = device_->clone({*vbuffer, AllocationType::HOST});
+        // auto host_vbuffer       = device_->clone({*vbuffer, AllocationType::HOST});
         ASSERT_EQ(cache_config.kv_block_size, host_kbuffer->size());
-        ASSERT_EQ(cache_config.kv_block_size, host_vbuffer->size());
+        // ASSERT_EQ(cache_config.kv_block_size, host_vbuffer->size());
         for (size_t i = 0; i < host_kbuffer->size(); i++) {
             ASSERT_EQ(block_value, host_kbuffer->data<int8_t>()[i]);
-            ASSERT_EQ(block_value, host_vbuffer->data<int8_t>()[i]);
+            // ASSERT_EQ(block_value, host_vbuffer->data<int8_t>()[i]);
         }
 
         for (size_t layer_id = 0; layer_id < cache_config.layer_num; layer_id++) {
             auto [kbuffer, vbuffer] = cache_manager.getKVBlockValue(block_index, layer_id);
             auto host_kbuffer       = device_->clone({*kbuffer, AllocationType::HOST});
-            auto host_vbuffer       = device_->clone({*vbuffer, AllocationType::HOST});
+            // auto host_vbuffer       = device_->clone({*vbuffer, AllocationType::HOST});
             ASSERT_EQ(cache_config.k_block_stride, host_kbuffer->size());
-            ASSERT_EQ(cache_config.k_block_stride, host_vbuffer->size());
+            // ASSERT_EQ(cache_config.k_block_stride, host_vbuffer->size());
             for (size_t i = 0; i < host_kbuffer->size(); i++) {
                 ASSERT_EQ(block_value, host_kbuffer->data<int8_t>()[i]);
-                ASSERT_EQ(block_value, host_vbuffer->data<int8_t>()[i]);
+                // ASSERT_EQ(block_value, host_vbuffer->data<int8_t>()[i]);
             }
         }
     };
