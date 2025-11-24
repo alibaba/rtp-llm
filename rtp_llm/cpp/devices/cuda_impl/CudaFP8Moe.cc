@@ -146,6 +146,12 @@ FfnLayerOutput CudaDevice::moeFfnFp8Contiguous(const FfnLayerParams& params, con
         }
         total_padding_num += padding_size;
     }
+    // for use_all_gather=1 path, we need to check padding num = 0 after get selected-expert token num
+    if (total_padding_num == 0) {
+        // for all-reduce, we need to set output to 0
+        bufMemset(*output, 0, DeviceStream::DEFAULT);
+        return {output};
+    }
     BufferPtr permuted_src_row_to_dst_device = clone({*permuted_src_row_to_dst});
     BufferPtr padding_group_index_device     = clone({*padding_group_index});
     cudaStreamSynchronize(stream_);

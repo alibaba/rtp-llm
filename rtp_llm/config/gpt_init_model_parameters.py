@@ -652,9 +652,7 @@ class GptInitModelParameters:
             rocm_hipblaslt_config=get_env_str(
                 "ROCM_HIPBLASLT_CONFIG", "gemm_config.csv"
             ),
-            use_swizzleA = (
-                get_env_bool("USE_SWIZZLEA", False)
-            ),
+            use_swizzleA=(get_env_bool("USE_SWIZZLEA", False)),
             ft_disable_custom_ar=get_env_bool("FT_DISABLE_CUSTOM_AR", True),
             enable_cuda_graph=get_env_bool("ENABLE_CUDA_GRAPH", False),
             enable_cuda_graph_debug_mode=get_env_bool(
@@ -668,7 +666,9 @@ class GptInitModelParameters:
 
         # DeviceResourceConfig
         self.gpt_init_params.device_resource_config = DeviceResourceConfig(
-            device_reserve_memory_bytes=get_env_int("DEVICE_RESERVE_MEMORY_BYTES", -1073741824),
+            device_reserve_memory_bytes=get_env_int(
+                "DEVICE_RESERVE_MEMORY_BYTES", -1073741824
+            ),
             host_reserve_memory_bytes=get_env_int(
                 "HOST_RESERVE_MEMORY_BYTES", 4 * 1024 * 1024 * 1024
             ),
@@ -834,14 +834,20 @@ class GptInitModelParameters:
                     inter_size
                     + (
                         get_pad_size(inter_size, align_size)
-                        if (self.quant_algo.isQuant() or self.gpt_init_params.hw_kernel_config.use_swizzleA)
+                        if (
+                            self.quant_algo.isQuant()
+                            or self.gpt_init_params.hw_kernel_config.use_swizzleA
+                        )
                         else 0
                     )
                 )
             self.layer_inter_padding_size = layer_inter_padding_size
         self.inter_padding_size = self.inter_size + (
             get_pad_size(self.inter_size, align_size)
-            if (self.quant_algo.isQuant() or self.gpt_init_params.hw_kernel_config.use_swizzleA)
+            if (
+                self.quant_algo.isQuant()
+                or self.gpt_init_params.hw_kernel_config.use_swizzleA
+            )
             else 0
         )
         if self.head_num_kv <= 0:
@@ -931,8 +937,9 @@ class GptInitModelParameters:
         self.enable_sp = parallel_info.ffn_sp_size > 1
         self.local_rank = parallel_info.local_rank
         self.use_all_gather = (
-            bool(int(os.environ.get("USE_ALL_GATHER", 0)))
-            and self.gpt_init_params.moe_config.use_deepep_low_latency == False
+            # default enable since it has better performance in most cases
+            bool(int(os.environ.get("USE_ALL_GATHER", 1)))
+            and self.gpt_init_params.ep_size == self.gpt_init_params.tp_size
         )
         logging.info(f"use_all_gather: {self.use_all_gather}")
 
