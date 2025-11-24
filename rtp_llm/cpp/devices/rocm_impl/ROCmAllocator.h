@@ -49,200 +49,205 @@ class Allocator<AllocatorType::ROCM>:
     public IVirtualMemAllocator {
 
 public:
-    Allocator(): IVirtualMemAllocator() {
+    Allocator() {
         ROCM_CHECK(hipGetDevice(&_device_id));
         ROCM_CHECK(hipDeviceGetAttribute(
             &_enable_virtual_mem_allocation, hipDeviceAttributeVirtualMemoryManagementSupported, _device_id));
+
         vmem_allocations_ = std::make_unique<std::unordered_map<void*, VmemBlock>>();
     }
 
+    // -------------------------------------
+    // mallocPinnedVirtualMemory
+    // -------------------------------------
     void* mallocPhysical(size_t size) {
-        RTP_LLM_LOG_DEBUG("malloc physical memory with size %lu\n", size);
-        std::lock_guard<std::mutex> lock(lock_);
+        std::lock_guard<std::mutex> g(lock_);
 
-        void* ptr = malloc(size);
-        if (_enable_virtual_mem_allocation && ptr != nullptr) {
-            auto it = vmem_allocations_->find(ptr);
-            if (it == vmem_allocations_->end()) {
-                RTP_LLM_LOG_ERROR("Unexpected allocation, can not find %lu vmem record.", ptr);
-                return ptr;
-            }
-            auto& block = it->second;
-            block.pin   = true;
+        void* p = malloc(size);
+        if (!_enable_virtual_mem_allocation)
+            return p;
+
+        auto it = vmem_allocations_->find(p);
+        if (it == vmem_allocations_->end()) {
+            RTP_LLM_LOG_ERROR("mallocPinnedVirtualMemory: missing vmem block for %p", p);
+            return p;
         }
+
+        it->second.pin = true;
+        return p;
     }
 
+    // -------------------------------------
+    // malloc (virtual memory version)
+    // -------------------------------------
     void* malloc(size_t size) {
-        RTP_LLM_LOG_DEBUG("malloc memory with size %lu\n", size);
+        if (!_enable_virtual_mem_allocation)
+            return ROCmAllocator::malloc(size);
 
-        if (!_enable_virtual_mem_allocation) {
-            return ROCmAllocator<AllocatorType::ROCM, MEMORY_GPU, hipMalloc, hipFree>::malloc(size);
-        } else {
+        std::lock_guard<std::mutex> g(lock_);
 
-            // https://rocm.docs.amd.com/projects/HIP/en/latest/how-to/hip_runtime_api/memory_management/virtual_memory.html
+        hipMemAllocationProp prop{};
+        prop.type          = hipMemAllocationTypePinned;
+        prop.location.type = hipMemLocationTypeDevice;
+        prop.location.id   = _device_id;
 
-            hipMemGenericAllocationHandle_t allocHandle;
-            hipMemAllocationProp            prop = {};
+        size_t granularity = 0;
+        ROCM_CHECK(hipMemGetAllocationGranularity(&granularity, &prop, hipMemAllocationGranularityMinimum));
 
-            prop.type          = hipMemAllocationTypePinned;
-            prop.location.type = hipMemLocationTypeDevice;
-            prop.location.id   = _device_id;
+        if (granularity == 0)
+            throw std::runtime_error("Unsupported granularity");
 
-            size_t granularity = 0;
+        size_t padded = ((size + granularity - 1) / granularity) * granularity;
 
-            ROCM_CHECK(hipMemGetAllocationGranularity(&granularity, &prop, hipMemAllocationGranularityMinimum));
+        void* vptr = nullptr;
+        ROCM_CHECK(hipMemAddressReserve(&vptr, padded, granularity, nullptr, 0));
 
-            if (granularity <= 0) {
-                throw std::runtime_error("unsupported system granularity.");
-            }
+        VmemBlock block(vptr, padded);
+        allocatePhysicalMemory(block);
 
-            // Allocate physical memory
-            size_t padded_size = (size + granularity - 1) / granularity * granularity;
-            ROCM_CHECK(hipMemCreate(&allocHandle, padded_size, &prop, 0));
+        setAccess(vptr, padded);
 
-            RTP_LLM_LOG_DEBUG("malloc memory with size %lu, pad it to %lu\n", size, padded_size);
-
-            // Reserve a virtual memory address range
-            void* virtualPointer = nullptr;
-            ROCM_CHECK(hipMemAddressReserve(&virtualPointer, padded_size, granularity, nullptr, 0));
-
-            // Map the physical memory to the virtual address range
-            ROCM_CHECK(hipMemMap(virtualPointer, padded_size, 0, allocHandle, 0));
-
-            // Set memory access permission for pointer
-            hipMemAccessDesc accessDesc = {};
-            accessDesc.location.type    = hipMemLocationTypeDevice;
-            accessDesc.location.id      = _device_id;
-            accessDesc.flags            = hipMemAccessFlagsProtReadWrite;
-
-            ROCM_CHECK(hipMemSetAccess(virtualPointer, padded_size, &accessDesc, 1));
-
-            // record vmem allocation info
-            (*vmem_allocations_)[virtualPointer] = {false, true, padded_size, allocHandle};
-
-            return virtualPointer;
-        }
-    };
+        (*vmem_allocations_)[vptr] = std::move(block);
+        return vptr;
+    }
 
     void* mallocSync(size_t size) {
         return malloc(size);
-    };
+    }
 
+    // -------------------------------------
+    // free
+    // -------------------------------------
     void free(void** ptr) {
+        if (!ptr || !*ptr)
+            return;
+
         if (!_enable_virtual_mem_allocation) {
-            return ROCmAllocator<AllocatorType::ROCM, MEMORY_GPU, hipMalloc, hipFree>::free(ptr);
-        } else {
-            if (!(*ptr)) {
-                RTP_LLM_LOG_WARNING("Try to free an empty pointer\n");
-                return;
-            }
-
-            std::lock_guard<std::mutex> lock(lock_);
-            auto                        it = vmem_allocations_->find(*ptr);
-            if (it == vmem_allocations_->end()) {
-                RTP_LLM_LOG_ERROR("Free Pointer Failed, Pointer is not managed by this alloctor %p\n", *ptr);
-                return;
-            }
-
-            RTP_LLM_LOG_DEBUG("Vmem allocator free pointer %p\n", *ptr);
-            // tmp sync to avoid memory free before kernel run. cudaFree will not perform any implicit synchronization
-            // when the pointer was allocated with cudaMallocAsync or cudaMallocFromPoolAsync
-            const auto& block = it->second;
-
-            if (block.mapped) {
-                check_cuda_value(hipMemUnmap(*ptr, block.size));
-                check_cuda_value(hipMemRelease(block.handle));
-                RTP_LLM_LOG_DEBUG("Double free ptr %p\n", *ptr);
-            }
-
-            check_cuda_value(hipMemAddressFree(*ptr, block.size));
-
-            RTP_LLM_LOG_DEBUG("Vmem allocator free pointer %p successfully\n", *ptr);
+            ROCmAllocator::free(ptr);
             return;
         }
-    };
 
+        std::lock_guard<std::mutex> g(lock_);
+
+        auto it = vmem_allocations_->find(*ptr);
+        if (it == vmem_allocations_->end()) {
+            RTP_LLM_LOG_ERROR("free: pointer %p not allocated by vmem allocator", *ptr);
+            return;
+        }
+
+        VmemBlock& block = it->second;
+
+        if (block.mapped) {
+            ROCM_CHECK(hipMemUnmap(block.vptr, block.size));
+            releaseHandles(block);
+            block.mapped = false;
+        }
+
+        ROCM_CHECK(hipMemAddressFree(block.vptr, block.size));
+
+        vmem_allocations_->erase(it);
+
+        *ptr = nullptr;
+    }
+
+    // -------------------------------------
+    // unmap: unmap but keep virtual address reserved
+    // -------------------------------------
     void unmap() {
-        std::lock_guard<std::mutex> lock(lock_);
+        if (!_enable_virtual_mem_allocation)
+            throw std::runtime_error("unmap requires VMM support");
 
-        if (_enable_virtual_mem_allocation) {
-            RTP_LLM_LOG_INFO("Vmem allocator unmap all allocated buffer\n");
+        std::lock_guard<std::mutex> g(lock_);
 
-            for (auto& [ptr, block] : *vmem_allocations_) {
+        for (auto& kv : *vmem_allocations_) {
+            VmemBlock& b = kv.second;
+            if (b.pin || !b.mapped)
+                continue;
 
-                if (block.pin || !block.mapped) {
-                    continue;
-                }
-                RTP_LLM_LOG_INFO("Vmem allocator unmap %p[%lu]\n", ptr, block.size);
-
-                // 1. 解除映射
-                ROCM_CHECK(hipMemUnmap(ptr, block.size));
-
-                // 2. 释放对应的物理显存
-                ROCM_CHECK(hipMemRelease(block.handle));
-                block.mapped = false;
-            }
-        } else {
-            throw std::runtime_error("Unmap method need more advanced computing device.");
+            ROCM_CHECK(hipMemUnmap(b.vptr, b.size));
+            releaseHandles(b);
+            b.mapped = false;
         }
     }
 
+    // -------------------------------------
+    // map: map back previously unmapped blocks
+    // -------------------------------------
     void map() {
-        std::lock_guard<std::mutex> lock(lock_);
+        if (!_enable_virtual_mem_allocation)
+            throw std::runtime_error("map requires VMM support");
 
-        if (_enable_virtual_mem_allocation) {
-            RTP_LLM_LOG_INFO("Vmem allocator map all allocated buffer\n");
+        std::lock_guard<std::mutex> g(lock_);
 
-            for (auto& [ptr, block] : *vmem_allocations_) {
+        for (auto& kv : *vmem_allocations_) {
+            VmemBlock& b = kv.second;
+            if (b.pin || b.mapped)
+                continue;
 
-                if (block.pin || block.mapped) {
-                    continue;
-                }
-
-                RTP_LLM_LOG_INFO("Vmem allocator map %p[%lu]\n", ptr, block.size);
-
-                size_t padded_size = block.size;
-
-                hipMemAllocationProp prop = {};
-                prop.type                 = hipMemAllocationTypePinned;
-                prop.location.type        = hipMemLocationTypeDevice;
-                prop.location.id          = _device_id;
-
-                // Allocate physical memory
-                hipMemGenericAllocationHandle_t allocHandle;
-                ROCM_CHECK(hipMemCreate(&allocHandle, padded_size, &prop, 0));
-
-                // Map the physical memory to the virtual address range
-                ROCM_CHECK(hipMemMap(ptr, padded_size, 0, allocHandle, 0));
-
-                // Set memory access permission for pointer
-                hipMemAccessDesc accessDesc = {};
-                accessDesc.location.type    = hipMemLocationTypeDevice;
-                accessDesc.location.id      = _device_id;
-                accessDesc.flags            = hipMemAccessFlagsProtReadWrite;
-
-                ROCM_CHECK(hipMemSetAccess(ptr, padded_size, &accessDesc, 1));
-
-                // update control block info
-                block.handle = allocHandle;
-                block.mapped = true;
-            }
-        } else {
-            throw std::runtime_error("Unmap method need more advanced computing device.");
+            allocatePhysicalMemory(b);
+            setAccess(b.vptr, b.size);
         }
     }
 
 private:
     struct VmemBlock {
-        bool                            pin;     // Whether the memory block is pinned (resident)
-        bool                            mapped;  // Whether the memory has been mapped to virtual memory
-        size_t                          size;    // Size of the block
-        hipMemGenericAllocationHandle_t handle;  // Physical memory handle (ROCM memory handle)
+        void*                                        vptr;
+        bool                                         pin;
+        bool                                         mapped;
+        size_t                                       size;
+        std::vector<hipMemGenericAllocationHandle_t> handles;
+
+        VmemBlock(): vptr(nullptr), pin(false), mapped(false), size(0) {}
+
+        VmemBlock(void* v, size_t s): vptr(v), pin(false), mapped(false), size(s) {}
     };
+
+    void allocatePhysicalMemory(VmemBlock& block) {
+        hipMemAllocationProp prop{};
+        prop.type          = hipMemAllocationTypePinned;
+        prop.location.type = hipMemLocationTypeDevice;
+        prop.location.id   = _device_id;
+
+        size_t allocated = 0;
+        block.handles.clear();
+
+        while (allocated < block.size) {
+            size_t remain = block.size - allocated;
+            size_t csize  = (remain > MAX_PHYSICAL_CHUNK ? MAX_PHYSICAL_CHUNK : remain);
+
+            hipMemGenericAllocationHandle_t h;
+            ROCM_CHECK(hipMemCreate(&h, csize, &prop, 0));
+            ROCM_CHECK(hipMemMap(block.vptr, csize, allocated, h, 0));
+
+            block.handles.push_back(h);
+            allocated += csize;
+        }
+
+        block.mapped = true;
+    }
+
+    void releaseHandles(VmemBlock& block) {
+        for (auto h : block.handles)
+            ROCM_CHECK(hipMemRelease(h));
+        block.handles.clear();
+    }
+
+    void setAccess(void* vptr, size_t size) {
+        hipMemAccessDesc d{};
+        d.location.type = hipMemLocationTypeDevice;
+        d.location.id   = _device_id;
+        d.flags         = hipMemAccessFlagsProtReadWrite;
+
+        ROCM_CHECK(hipMemSetAccess(vptr, size, &d, 1));
+    }
+
+private:
+    static const size_t MAX_PHYSICAL_CHUNK = (1ULL << 30);
+
     std::unique_ptr<std::unordered_map<void*, VmemBlock>> vmem_allocations_;
     std::mutex                                            lock_;
-    int32_t                                               _enable_virtual_mem_allocation;
-    int32_t                                               _device_id;
+    int                                                   _enable_virtual_mem_allocation = 0;
+    int                                                   _device_id                     = 0;
 };
 
 template<>
