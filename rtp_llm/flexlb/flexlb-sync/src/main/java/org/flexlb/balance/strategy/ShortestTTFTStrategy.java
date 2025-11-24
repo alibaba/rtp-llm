@@ -300,7 +300,13 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      * @return 排序后的Worker列表 从小到大
      */
     private List<ScoredWorker> sortByTTFT(List<ScoredWorker> workers) {
-        return workers.stream().sorted(Comparator.comparingLong(ScoredWorker::ttft)).toList();
+        // 二级排序
+        // 1. 第一级排序：按 ttft（首Token时间）从小到大排序
+        // 2. 第二级排序：当 ttft 相等时，按 lastSelectedTime（最后选择时间）从小到大排序
+        return workers.stream()
+                .sorted(Comparator.comparingLong(ScoredWorker::ttft)
+                        .thenComparingLong(worker -> worker.worker().getLastSelectedTime().get()))
+                .toList();
     }
 
     /**
