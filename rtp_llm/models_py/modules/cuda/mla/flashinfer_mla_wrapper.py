@@ -1,6 +1,6 @@
 import logging
 from typing import Any, Dict, List, Optional
-
+import os
 import torch
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
@@ -30,6 +30,9 @@ class MlaFlashInferPrefillImpl(FMHAPrefillImplBase):
         use_trt_fmha: bool = False,
     ) -> None:
         # trt prefill not support reuse cache yet
+        absorb_opt_len = int(
+            os.environ.get("RTP_LLM_ABSORB_OPT_LEN", absorb_opt_len)
+        )
         super().__init__(
             MlaFlashInferPrefillOp(
                 config,
@@ -53,6 +56,7 @@ class MlaFlashInferPrefillImpl(FMHAPrefillImplBase):
             ),
             attn_inputs,
         )
+        self.rope_params = self.fmha_params
         self.warm_up = config.warm_up
         self.has_reuse_cache = False
         if attn_inputs.prefix_lengths is not None:
@@ -69,7 +73,7 @@ class MlaFlashInferPrefillImpl(FMHAPrefillImplBase):
             config.use_mla,
             weights,
         )
-        self.aborb_fmha.prepare(attn_inputs)
+        self.aborb_fmha.plan(self.fmha_params)
 
     @staticmethod
     def fmha_type() -> FMHAType:
@@ -178,6 +182,7 @@ class MlaFlashInferDecodeImpl(FMHADecodeImplBase):
             ),
             attn_inputs,
         )
+        self.rope_params = self.fmha_params
 
     @staticmethod
     def fmha_type() -> FMHAType:
