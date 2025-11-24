@@ -41,8 +41,8 @@ public:
     KVCacheBuffer kvCacheBuffer() const;
 
     // Write one KV block (optionally per-layer) from host/device buffers for test
-    virtual void setKVBlockValue(int block_index, int layer_id, rtp_llm::Buffer& k_buffer, rtp_llm::Buffer& v_buffer);
-    virtual void setKVBlockValue(int block_index, rtp_llm::Buffer& k_buffer, rtp_llm::Buffer& v_buffer);
+    virtual bool setKVBlockValue(int block_index, int layer_id, rtp_llm::Buffer& k_buffer, rtp_llm::Buffer& v_buffer);
+    virtual bool setKVBlockValue(int block_index, rtp_llm::Buffer& k_buffer, rtp_llm::Buffer& v_buffer);
 
     MallocResult malloc(const MallocInfo& malloc_info);
     FreeResult   free(const FreeInfo& free_info);
