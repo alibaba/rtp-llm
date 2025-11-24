@@ -1,4 +1,5 @@
 import logging
+import os
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -53,12 +54,13 @@ class MlaFlashInferPrefillImpl(FMHAPrefillImplBase):
             ),
             attn_inputs,
         )
+        self.rope_params = self.fmha_params
         self.warm_up = config.warm_up
         self.has_reuse_cache = False
         if attn_inputs.prefix_lengths is not None:
             self.has_reuse_cache = attn_inputs.prefix_lengths.max().item() > 0
 
-        self.absorb_opt_len = absorb_opt_len
+        self.absorb_opt_len = config.py_env_configs.py_kv_cache_config.absorb_opt_len
         self.aborb_fmha = MlaFlashInferDecodeOp(
             config.head_num // config.tp_size,
             config.kv_lora_rank,
@@ -69,7 +71,7 @@ class MlaFlashInferPrefillImpl(FMHAPrefillImplBase):
             config.use_mla,
             weights,
         )
-        self.aborb_fmha.prepare(attn_inputs)
+        self.aborb_fmha.plan(self.fmha_params)
 
     @staticmethod
     def fmha_type() -> FMHAType:
@@ -178,6 +180,7 @@ class MlaFlashInferDecodeImpl(FMHADecodeImplBase):
             ),
             attn_inputs,
         )
+        self.rope_params = self.fmha_params
 
     @staticmethod
     def fmha_type() -> FMHAType:

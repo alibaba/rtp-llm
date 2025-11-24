@@ -34,14 +34,7 @@ class MlaRotaryEmbeddingOp(object):
         self.token_per_block = token_per_block
 
     def prepare(self, attention_inputs: PyAttentionInputs):
-        check_attention_inputs(attention_inputs)
-        return rtp_llm_ops.fill_mla_params(
-            attention_inputs.prefix_lengths,
-            attention_inputs.sequence_lengths,
-            attention_inputs.input_lengths,
-            attention_inputs.kv_cache_block_id_host,
-            self.token_per_block,
-        )
+        return None
 
     def forward(
         self,

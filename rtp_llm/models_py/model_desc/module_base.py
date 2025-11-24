@@ -35,8 +35,6 @@ class GptModelBase(nn.Module):
         )
         ## (batch_size -> fmha_params)
         self.params_dict: dict[int, Any] = {}
-        if self.config.tp_size > 1:
-            get_symm_mem_communicator()
 
         logging.info(
             f"GptModelBase initialized with layer_num={self.layer_num}, "

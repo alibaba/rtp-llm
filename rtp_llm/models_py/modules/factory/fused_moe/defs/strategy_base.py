@@ -49,6 +49,10 @@ class MoeStrategy(ABC):
         router_cls = attrs.get_router_class()
         executor_cls = attrs.get_executor_class()
 
+        # for CudaNoQuantEpLowLatencyStrategy/CudaFp8PerBlockEpLowLatencyStrategy has same router and executor,
+        # so we need to check Strategy conditions here (like quant_method)
+        self.check_conditions(checker, config)
+
         # Call check_conditions on Router and Executor classes
         if router_cls:
             router_cls.check_conditions(checker, config)
@@ -56,6 +60,10 @@ class MoeStrategy(ABC):
             executor_cls.check_conditions(checker, config)
 
         return checker.all_passed()
+
+    @classmethod
+    def check_conditions(cls, checker: Any, config: GptInitModelParameters) -> None:
+        pass
 
     @abstractmethod
     def create_router(self, config: GptInitModelParameters) -> FusedMoeDataRouter:
