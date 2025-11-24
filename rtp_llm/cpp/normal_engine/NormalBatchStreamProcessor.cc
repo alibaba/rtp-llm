@@ -143,7 +143,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     int                             mm_feature_index   = 0;
 
     for (const auto& stream : context_streams) {
-        // context stream也需要batch运行是为了fallback的场景和perf test的场景
+        // context stream也需要batch运行是为了perf test的场景
         model_input.need_all_logits = model_input.need_all_logits || stream->calculateLoss();
         auto current_batch_size     = stream->currentBatchSize();
 
@@ -335,7 +335,6 @@ SamplerInputs NormalBatchStreamProcessor::allocateSamplerInputs(const StreamGrou
                                                                 size_t                    total_batch_size_in,
                                                                 size_t                    total_batch_size_out,
                                                                 const rtp_llm::BufferPtr& sequence_lengths) const {
-    // TODO(xinfei.sxf) don't sample for chunk stream
     SamplerInputs sampler_inputs;
     sampler_inputs.step             = stream_groups.maxSeqLen();
     sampler_inputs.batch_size       = total_batch_size_in;
@@ -467,9 +466,6 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_gro
     auto new_tokens_all   = CACHED_HOST_BUF(TYPE_INT32, {(size_t)total_batch_size_out, (size_t)1});
 
     for (auto& stream : stream_groups.allStreams()) {
-        if (stream->isChunkStream()) {
-            continue;
-        }
         auto cur_batch_size  = stream->currentBatchSize();
         auto next_batch_size = stream->nextBatchSize();
 
