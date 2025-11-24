@@ -24,12 +24,12 @@ def _load_all_configs():
     # Load open source config directory
     opensource_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), op_name)
     if os.path.exists(opensource_dir):
-        pattern = os.path.join(opensource_dir, "E=*,N=*,K=*,device_name=*.json")
+        pattern = os.path.join(opensource_dir, "E=*-N=*-K=*-device_name=*.json")
         for config_file in glob.glob(pattern):
             filename = os.path.basename(config_file)
             try:
-                # Parse filename: E={E},N={N},K={K},device_name={device_name}.json
-                parts = filename.replace(".json", "").split(",")
+                # Parse filename: E={E}-N={N}-K={K}-device_name={device_name}.json
+                parts = filename.replace(".json", "").split("-")
                 E = int(parts[0].split("=")[1])
                 N = int(parts[1].split("=")[1])
                 K = int(parts[2].split("=")[1])
