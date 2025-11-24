@@ -66,23 +66,11 @@ class FlashInferPythonPrefillOp(object):
         self.scaling = self.head_dim**-0.5
         self.local_head_num = config.head_num // config.tp_size
         self.workspace_buffer = create_g_workspace_buffer()
-        logging.info(
-            f"FlashInferPythonPrefillOp initialized with head_dim={self.head_dim}, head_num={self.head_num}, local_head_num={self.local_head_num}, scaling={self.scaling}"
-        )
-        print(
-            f"FlashInferPythonPrefillOp initialized with head_dim={self.head_dim}, head_num={self.head_num}, local_head_num={self.local_head_num}, scaling={self.scaling}"
-        )
 
     def support(self, attention_inputs: PyAttentionInputs):
         return attention_inputs.is_prefill
 
     def prepare(self, attention_inputs: PyAttentionInputs) -> FlashInferPythonParams:
-        logging.info(
-            f"FlashInferPythonPrefillOp preparing with batch_size={attention_inputs.input_lengths.size(0)}, max_seq_len={attention_inputs.input_lengths.max().item()}, seq_lens={attention_inputs.input_lengths}, cu_seqlens={attention_inputs.cu_seqlens}, cu_kv_seqlens={attention_inputs.cu_kv_seqlens}"
-        )
-        print(
-            f"FlashInferPythonPrefillOp preparing with batch_size={attention_inputs.input_lengths.size(0)}, max_seq_len={attention_inputs.input_lengths.max().item()}, seq_lens={attention_inputs.input_lengths}, cu_seqlens={attention_inputs.cu_seqlens}, cu_kv_seqlens={attention_inputs.cu_kv_seqlens}"
-        )
         return FlashInferPythonParams(
             batch_size=attention_inputs.input_lengths.size(0),
             max_seq_len=attention_inputs.input_lengths.max().item(),
@@ -123,14 +111,6 @@ class FlashInferPythonPrefillOp(object):
             # TODO: add attention_sink operation or nvfp4 scale factor if needed
             sinks=None,
             out_dtype=o_type,  # model_runner.dtype
-        )
-        logging.info(
-            f"FlashInferPythonPrefillOp forward called with q shape: {q.shape}, bmm1_scale: {bmm1_scale}, bmm2_scale: {bmm2_scale}, k shape: {kv_cache.k_cache_base.shape}, v shape: {kv_cache.v_cache_base.shape}, \
-                     block_tables shape: {fmha_params.block_tables.shape}, seq_lens: {fmha_params.seq_lens}, max_seq_len: {fmha_params.max_seq_len}, batch_size: {fmha_params.batch_size}, cu_seqlens: {fmha_params.cu_seqlens}, \ cu_kv_seqlens: {fmha_params.cu_kv_seqlens}, o shape: {o.shape}"
-        )
-        print(
-            f"FlashInferPythonPrefillOp forward called with q shape: {q.shape}, bmm1_scale: {bmm1_scale}, bmm2_scale: {bmm2_scale}, k shape: {kv_cache.k_cache_base.shape}, v shape: {kv_cache.v_cache_base.shape}, \
-                     block_tables shape: {fmha_params.block_tables.shape}, seq_lens: {fmha_params.seq_lens}, max_seq_len: {fmha_params.max_seq_len}, batch_size: {fmha_params.batch_size}, cu_seqlens: {fmha_params.cu_seqlens}, \ cu_kv_seqlens: {fmha_params.cu_kv_seqlens}, o shape: {o.shape}"
         )
 
         return o.view(-1, self.local_head_num * self.head_dim).to(q_type)
