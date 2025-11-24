@@ -33,7 +33,8 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
 
     for (int i = 0; i < nextBatchSize(); i++) {
         GenerateOutput generate_output;
-        generate_output.output_ids = SAFE_CACHED_HOST_BUF(TYPE_INT32, {1lu, output_len});
+        generate_output.aux_info.iter_count = iter_count_;
+        generate_output.output_ids          = SAFE_CACHED_HOST_BUF(TYPE_INT32, {1lu, output_len});
 
         // TODO(xinfei.sxf) optimize this copy : only copy last token
         complete_token_ids_->copyTokensTo(i, generate_output.output_ids->data(), last_output_pos_, output_len);

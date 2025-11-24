@@ -142,8 +142,6 @@ message AuxInfoPB {
     int32 total_reuse_len = 4;
     int32 prefix_len = 5;
     int32 output_len = 6;
-    int32 fallback_tokens = 7;
-    int32 fallback_times = 8;
     TensorPB cum_log_probs = 9;
     int32 step_output_len = 10;
     bool pd_sep = 11;

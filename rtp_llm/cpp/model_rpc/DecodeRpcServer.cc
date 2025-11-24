@@ -101,7 +101,7 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
         return;
     }
 
-    auto status = generate_stream->initKVBlock(0);
+    auto status = generate_stream->initKVBlock();
     decode_context.setStream(generate_stream);
     if (!status.ok()) {
         string error_msg = "request: [" + decode_context.request_key + "] malloc kv cache block failed at decode node";
@@ -183,7 +183,6 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
     }
     if (propose_maga_init_params_) {
         generate_stream->setReuseLength(generate_stream->seqLength() - 1);
-        generate_stream->setFallbackPrefixLength(generate_stream->reuseLength());
         generate_stream->setSpEditRun(false);
         generate_stream->setMtpTokenIndex(generate_stream->seqLength() - 1);
         generate_stream->setContainProposeToken(true);

@@ -87,7 +87,7 @@ public:
             if (device_->getDeviceProperties().dp_rank != 0) {
                 (*it)->setGenTimeline(false);
             }
-            auto result = (*it)->initKVBlock(0, 0);
+            auto result = (*it)->initKVBlock(0);
             if (!result.ok()) {
                 (*it)->setStop(ErrorCode::MALLOC_FAILED,
                                "BatchDecodeScheduler::initRunningStreams: initKVBlock failed");
@@ -104,7 +104,7 @@ public:
 
     void incrRunningStream() {
         for (auto it = running_streams_.begin(); it != running_streams_.end();) {
-            auto result = (*it)->incrKVBlock(0, 0);
+            auto result = (*it)->incrKVBlock();
             if (!result.ok()) {
                 (*it)->stopAndRelease(ErrorCode::MALLOC_FAILED, "incrKVBlock failed");
                 RTP_LLM_LOG_WARNING("stream [%ld] incr block failed", (*it)->streamId());
@@ -134,7 +134,7 @@ public:
         evictAllDoneStreams();
         return running_streams_;
     }
-    
+
     absl::Status stop() override {
         // Not implemented
         return absl::UnimplementedError("BatchDecodeScheduler::stop not implemented");
@@ -159,9 +159,9 @@ private:
     std::condition_variable      cond_;
     std::list<GenerateStreamPtr> waiting_streams_;
     std::list<GenerateStreamPtr> running_streams_;
-    uint32_t batch_size_;
+    uint32_t                     batch_size_;
     bool                         reorder_request_;
-    uint32_t current_step_ = 0;
+    uint32_t                     current_step_ = 0;
 
     std::shared_ptr<CacheManager> cache_manager_;
     kmonitor::MetricsReporterPtr  metrics_reporter_;
