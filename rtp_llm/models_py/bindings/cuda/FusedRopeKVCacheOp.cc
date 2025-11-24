@@ -20,8 +20,9 @@ TRTAttnPtr FusedRopeKVCachePrefillOp::prepare(torch_ext::PyAttentionInputs attn_
         kv_cache_block_id_device = torchTensor2Buffer(attn_inputs.kv_cache_block_id_device);
     }
     // not support has_alibi_slopes
-    auto          cu_seqlens    = attn_inputs.cu_seqlens;
-    torch::Tensor cu_kv_seqlens = cu_seqlens;
+    auto          cu_seqlens                = attn_inputs.cu_seqlens;
+    auto          cu_seqlens_without_prefix = attn_inputs.cu_seqlens_without_prefix;
+    torch::Tensor cu_kv_seqlens             = cu_seqlens;
     TRTAttnPtr    attn_params;
     auto          params =
         device_->prepareTrtAttn(attn_configs_, attn_inputs.kv_block_offset, kv_cache_block_id_device, batch_size);
@@ -32,6 +33,7 @@ TRTAttnPtr FusedRopeKVCachePrefillOp::prepare(torch_ext::PyAttentionInputs attn_
     }
     attn_params->attn_type                 = torchDTypeToDataType(attn_inputs.dtype);
     attn_params->cu_seqlens                = cu_seqlens;
+    attn_params->cu_seqlens_without_prefix = cu_seqlens_without_prefix;
     attn_params->cu_kv_seqlens             = cu_kv_seqlens;
     attn_params->max_seq_len               = attn_inputs.input_lengths.max().item<int32_t>();
     attn_params->kv_block_array.cache_type = attn_configs_.kv_cache_dtype;
@@ -111,6 +113,7 @@ torch::Tensor FusedRopeKVCachePrefillOp::forward(const torch::Tensor&           
                   // params.weights.qkv_weight->bias->data() : nullptr,
         padding_offset,
         params->cu_seqlens.data_ptr<int>(),
+        params->cu_seqlens_without_prefix.data_ptr<int>(),
         device_->useRopeCache(),
         device_->useRopeCache() && device_->ropeCache().defined() ? device_->ropeCache().data_ptr<float>() : nullptr,
         batch_size,

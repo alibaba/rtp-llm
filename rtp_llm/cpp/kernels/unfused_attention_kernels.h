@@ -103,6 +103,7 @@ void invokeAddFusedQKVBiasTranspose(T*                             q_no_transpos
                                     const T*                       qkv_bias,
                                     const int*                     padding_offset,
                                     const int*                     cu_seqlens,
+                                    const int*                     cu_seqlens_without_prefix,
                                     const bool                     use_rope_cache,
                                     const float*                   rope_cache,
                                     const int                      batch_size,
