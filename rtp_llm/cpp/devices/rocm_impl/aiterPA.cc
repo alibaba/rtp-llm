@@ -115,6 +115,12 @@ void runAiterPA(const AttentionModuleParams& params, rtp_llm::DeviceBase* device
 
     auto context_lens = aiter_attn->sequence_lengths_t;
 
+    std::stringstream ss;
+    ss << "Q TYPE: " << query.dtype() << " ";
+    ss << "KV CACHE TYPE: " << kv_cache_dtype << " ";
+    std::cout << ss.str() << std::endl;
+    RTP_LLM_LOG_INFO(ss.str().c_str());
+
     paged_attention(out,
                     exp_sums,
                     max_logits,
