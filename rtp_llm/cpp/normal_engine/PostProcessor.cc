@@ -38,11 +38,18 @@ StreamUpdateInfo::PostprocessCallback PostProcessor::buildCallback(const rtp_llm
         return {};
     }
 
-    pybind11::object handler;
+    std::shared_ptr<pybind11::object> handler;
     {
         pybind11::gil_scoped_acquire gil;
-        handler = handler_;
+        handler = std::shared_ptr<pybind11::object>(
+            new pybind11::object(handler_),
+            [](pybind11::object* ptr) {
+                pybind11::gil_scoped_acquire gil; // Acquire GIL before deletion
+                delete ptr;
+            }
+        );
     }
+
     HandlerArgs::Flag handler_args = handler_args_;
     GenerateStreamPtr stream_capture;
     if (HandlerArgs::has_arg(handler_args, HandlerArgs::Arg::TOKEN_LENGTHS)) {
@@ -86,7 +93,7 @@ StreamUpdateInfo::PostprocessCallback PostProcessor::buildCallback(const rtp_llm
             kwargs[pybind11::str(HandlerArgs::get_name(HandlerArgs::Arg::TOKEN_LENGTHS))] = lengths;
         }
 
-        return handler.attr("extend_forward")(**kwargs).cast<torch::Tensor>();
+        return handler->attr("extend_forward")(**kwargs).cast<torch::Tensor>();
     };
 }
 
