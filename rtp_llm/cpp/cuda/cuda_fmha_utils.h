@@ -141,17 +141,6 @@ protected:
         const std::string& multi_task_prompt_env     = params.kv_cache_config.multi_task_prompt;
         const std::string& multi_task_prompt_str_env = params.kv_cache_config.multi_task_prompt_str;
 
-        bool enable_partial_fallback_env = params.fifo_scheduler_config.enable_partial_fallback;
-        if (enable_partial_fallback_env) {
-            RTP_LLM_LOG_INFO("QKV length not equal: enable part fallback");
-            return false;
-        }
-
-        if (params.fifo_scheduler_config.enable_fast_gen) {
-            RTP_LLM_LOG_INFO("QKV length not equal: enable fast gen");
-            return false;
-        }
-
         if (!not_prefix) {
             RTP_LLM_LOG_INFO("QKV length not equal: use kv cache reuse");
             return false;

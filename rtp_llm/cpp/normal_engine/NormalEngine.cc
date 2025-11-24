@@ -79,7 +79,7 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<Gen
         stream->setIsContextStream(false);
         stream->fakeInitKVBlock();
     } else if (mode == preRunMode::build_system_prompt) {
-        THROW_IF_STATUSOR_ERROR(stream->initKVBlock(0, 0));
+        THROW_IF_STATUS_ERROR(stream->initKVBlock());
     };
     std::list<GenerateStreamPtr> streams{stream};
     THROW_IF_STATUS_ERROR(executor_->process(streams));

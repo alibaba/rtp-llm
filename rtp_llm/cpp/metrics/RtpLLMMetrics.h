@@ -162,9 +162,6 @@ public:
 
     int64_t query_batch_size = 0;
 
-    int64_t fallback_tokens = 0;
-    int64_t fallback_times  = 0;
-
     int32_t batch_with_prefill_times = 0;
     int32_t batch_with_prefill_len   = 0;
     int32_t malloc_failed_times      = 0;
@@ -192,8 +189,6 @@ public:
     kmonitor::MutableMetric* output_token_length_metric    = nullptr;
     kmonitor::MutableMetric* query_batch_size_metric       = nullptr;
 
-    kmonitor::MutableMetric* fallback_tokens_metric          = nullptr;
-    kmonitor::MutableMetric* fallback_times_metric           = nullptr;
     kmonitor::MutableMetric* batch_with_prefill_times_metric = nullptr;
     kmonitor::MutableMetric* batch_with_prefill_len_metric   = nullptr;
 
@@ -252,7 +247,6 @@ public:
     int64_t wait_stream_size           = 0;
     int64_t running_stream_size        = 0;
     int64_t remote_running_stream_size = 0;
-    int64_t fallback_stream_size       = 0;
 };
 
 class RtpLLMSchedulerMetrics: public kmonitor::MetricsGroup {
@@ -264,7 +258,6 @@ public:
     kmonitor::MutableMetric* wait_stream_size_metric           = nullptr;
     kmonitor::MutableMetric* running_stream_size_metric        = nullptr;
     kmonitor::MutableMetric* remote_running_stream_size_metric = nullptr;
-    kmonitor::MutableMetric* fallback_stream_size_metric       = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();

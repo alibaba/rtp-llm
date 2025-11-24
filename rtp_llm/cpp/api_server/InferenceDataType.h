@@ -89,8 +89,6 @@ public:
         json.Jsonize("output_len", output_len, output_len);
         json.Jsonize("pd_sep", pd_sep, pd_sep);
         json.Jsonize("step_output_len", step_output_len, step_output_len);
-        json.Jsonize("fallback_tokens", fallback_tokens, fallback_tokens);
-        json.Jsonize("fallback_times", fallback_times, fallback_times);
         json.Jsonize("beam_responses", beam_responses, beam_responses);
         if (json.GetMode() == FastJsonizableBase::Mode::TO_JSON && cum_log_probs.has_value()) {
             auto buffer = cum_log_probs.value();
@@ -103,18 +101,16 @@ public:
         AuxInfo();
     }
     AuxInfoAdapter(const AuxInfo& base) {
-        cost_time_us    = base.cost_time_us;
-        iter_count      = base.iter_count;
-        input_len       = base.input_len;
-        prefix_len      = base.prefix_len;
-        reuse_len       = base.reuse_len;
-        output_len      = base.output_len;
-        fallback_tokens = base.fallback_tokens;
-        fallback_times  = base.fallback_times;
-        step_output_len = base.step_output_len;
-        pd_sep          = base.pd_sep;
-        cum_log_probs   = base.cum_log_probs;
-        local_reuse_len = base.local_reuse_len;
+        cost_time_us     = base.cost_time_us;
+        iter_count       = base.iter_count;
+        input_len        = base.input_len;
+        prefix_len       = base.prefix_len;
+        reuse_len        = base.reuse_len;
+        output_len       = base.output_len;
+        step_output_len  = base.step_output_len;
+        pd_sep           = base.pd_sep;
+        cum_log_probs    = base.cum_log_probs;
+        local_reuse_len  = base.local_reuse_len;
         remote_reuse_len = base.remote_reuse_len;
 
         cost_time_ms = cost_time_us / 1000.0;

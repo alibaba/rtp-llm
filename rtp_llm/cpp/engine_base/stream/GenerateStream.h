@@ -115,13 +115,12 @@ public:
     // Only used in C++ world.
     int                         reuseBlockSize() const;
     void                        fakeInitKVBlock();
-    virtual absl::StatusOr<int> initKVBlock(int token_capacity, size_t reserve_step = 0);
-    virtual absl::StatusOr<int> incrKVBlock(int token_capacity, size_t reserve_step = 0);
+    virtual absl::Status        initKVBlock(size_t reserve_step = 0);
+    virtual absl::Status        incrKVBlock(size_t reserve_step = 0);
     virtual int                 tryReleaseKVBlock(int nums);
     virtual void                releaseResource();
     int                         nextNeedBlockNums(size_t reserve_step) const;
     void                        setNeedReleaseResource(bool need_release_resource);
-    void                        incrFallbackBlock(int fallback_blocks);
     bool                        hasCacheKeys() const;
     const std::vector<int64_t>& cacheKeys(int32_t batch_id = 0) const;
 
@@ -176,16 +175,9 @@ public:
     int    localReuseLength() const;
     int    remoteReuseLength() const;
     void   setInitialReuseLength(int initial_reuse_length);
-    int    fallbackPrefixLength() const;
-    void   setFallbackPrefixLength(int fallback_prefix_length);
     void   incLastOutputPos();
 
-    absl::StatusOr<int> acquireCapacity(int token_capacity);
-    int                 currentChunkLen() const;
-    void                resetChunkLen(int chunck_len, int max_chunk_len);
-
     bool                      isContextStream() const;
-    bool                      isChunkStream() const;
     const rtp_llm::BufferPtr& cumLogProbs() const;
 
     const rtp_llm::BufferPtr& completeTokenIds();
@@ -512,27 +504,20 @@ protected:
     int64_t                              wait_time_us_  = 0;
     std::shared_ptr<StreamCacheResource> stream_cache_resource_;
     std::shared_ptr<bool>                is_context_stream_;
-    size_t                               iter_count_             = 0;
-    size_t                               sp_iter_count_          = 0;
-    size_t                               last_output_pos_        = 0;
-    int                                  initial_reuse_length_   = 0;
-    int                                  reuse_length_           = 0;
-    int                                  local_reuse_length_     = 0;
-    int                                  remote_reuse_length_    = 0;
-    int                                  reuse_mm_length_        = 0;
-    int                                  fallback_blocks_        = 0;
-    int                                  fallback_times_         = 0;
-    int                                  fallback_prefix_length_ = 0;
+    size_t                               iter_count_           = 0;
+    size_t                               sp_iter_count_        = 0;
+    size_t                               last_output_pos_      = 0;
+    int                                  initial_reuse_length_ = 0;
+    int                                  reuse_length_         = 0;
+    int                                  local_reuse_length_   = 0;
+    int                                  remote_reuse_length_  = 0;
+    int                                  reuse_mm_length_      = 0;
     // TOOD(xinfei.sxf) fix state
     bool done_                  = false;
     bool released_              = false;
     bool need_release_resource_ = true;
 
-    bool enable_fast_gen_   = false;
-    bool return_all_probs_  = false;
-    int  current_chunk_len_ = 0;
-    int  last_chunk_len_    = 0;
-    int  max_chunk_len_     = 0;
+    bool return_all_probs_ = false;
 
     bool          last_block_aligned_   = false;
     volatile bool need_remote_generate_ = false;

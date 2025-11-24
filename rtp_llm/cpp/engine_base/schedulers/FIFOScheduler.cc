@@ -17,23 +17,13 @@ FIFOScheduler::FIFOScheduler(const rtp_llm::GptInitParameter&     params,
     max_seq_len_(params.max_seq_len_),
     max_batch_tokens_size_(params.max_batch_tokens_size_),
     max_generate_batch_size_(params.max_generate_batch_size_),
-    // not support fallback when use pd_speration:use_cache_store
-    enable_partial_fallback_(params.enable_partial_fallback_ && params.role_type_ == RoleType::PDFUSION),
-    enable_whole_fallback_(params.role_type_ == RoleType::PDFUSION),
-    enable_fast_gen_(params.enable_fast_gen_),
     need_fill_fake_stream_(params.dp_size_ > 1 && params.tp_rank_ == 0),
-    fast_gen_max_context_len_(params.fast_gen_max_context_len_),
     metrics_reporter_(metrics_reporter) {
     reserve_block_num_ = params.fifo_scheduler_config.scheduler_reserve_resource_ratio * cache_manager->availableBlockNums() / 100;
     RTP_LLM_LOG_INFO("max_generate_batch_size is [%d], max_batch_tokens_size is [%d], reserve_block_num is [%d]",
                      max_generate_batch_size_,
                      max_batch_tokens_size_,
                      reserve_block_num_);
-    if (!params.sp_config.sp_type.empty()) {
-        RTP_LLM_LOG_INFO("using sp, disable fallback strategy");
-        enable_partial_fallback_ = false;
-        enable_whole_fallback_   = false;
-    }
 }
 
 FIFOScheduler::~FIFOScheduler() {
@@ -113,88 +103,20 @@ int FIFOScheduler::runningNextBlockNum(size_t reserve_step) const {
 }
 
 // TODO(xinfei.sxf) Is there any situation where the request cannot be ended?
-tuple<int, int> FIFOScheduler::evaluateRunningNext(size_t reserve_step) {
-    // Only in the case of partial fallback, the stream in the waiting queue may hold blocks resources.
-    int fallback_streams = 0;
-    int error_streams    = 0;
-
-    if (enable_partial_fallback_) {
-        for (auto& stream : waiting_streams_) {
-            int need_block_num = (int)runningNextBlockNum(reserve_step) - (int)cache_manager_->availableBlockNums();
-            if (need_block_num <= 0) {
-                break;
-            }
-            if (stream->maxBlockSize()) {
-                RTP_LLM_LOG_INFO("lack mem, stream [%ld] in watting queue try release blocks, "
-                                 "it's input_length:%d seq_length:%d, hold block size:%d, release block size:%d",
-                                 stream->streamId(),
-                                 stream->inputLength(),
-                                 stream->seqLength(),
-                                 stream->maxBlockSize(),
-                                 need_block_num);
-                stream->tryReleaseKVBlock(need_block_num);
-
-                if (stream->spIterCount() > 0 || stream->hasNumBeams()) {
-                    // sp and beam search do not support partial fallback
-                    stream->releaseResource();
-                    stream->setStop(ErrorCode::MALLOC_FAILED, "cancel stream since lack kv memory");
-                }
-                fallback_streams++;
-            }
-        }
-    }
-
-    if (enable_whole_fallback_) {
-        while (!running_streams_.empty()) {
-            int need_block_num = (int)runningNextBlockNum(reserve_step) - (int)cache_manager_->availableBlockNums();
-            if (need_block_num <= 0) {
-                break;
-            }
-            auto& last_stream         = *(running_streams_.rbegin());
-            int   need_release_blocks = enable_partial_fallback_ ? need_block_num : last_stream->maxBlockSize();
-            RTP_LLM_LOG_INFO(
-                "lack mem, stream [%ld] fallback to wait, it's input_length:%d seq_length:%d, hold block size:%d, release block size:%d",
-                last_stream->streamId(),
-                last_stream->inputLength(),
-                last_stream->seqLength(),
-                last_stream->maxBlockSize(),
-                need_release_blocks);
-            last_stream->tryReleaseKVBlock(need_release_blocks);
-            if (last_stream->spIterCount() > 0) {
-                // sp doesn't support fallback
-                last_stream->releaseResource();
-                last_stream->setStop(ErrorCode::MALLOC_FAILED, "cancel stream since lack kv memory");
-            } else {
-                last_stream->setPaused();
-                waiting_streams_.emplace_front(last_stream);
-            }
-            running_streams_.pop_back();
-            fallback_streams++;
-        }
-    }
-
-    if (enable_fast_gen_) {
-        token_capacity_ = fast_gen_max_context_len_;
-        RTP_LLM_LOG_DEBUG("initial token_capacity is %d", token_capacity_);
-    }
-
+int FIFOScheduler::evaluateRunningNext(size_t reserve_step) {
+    int error_streams = 0;
     for (auto it = running_streams_.begin(); it != running_streams_.end();) {
-        auto result = (*it)->incrKVBlock(token_capacity_, reserve_step);
+        auto result = (*it)->incrKVBlock(reserve_step);
         if (!result.ok()) {
-            (*it)->stopAndRelease(ErrorCode::MALLOC_FAILED, "incrKVBlock failed");
+            (*it)->stopAndRelease(ErrorCode::MALLOC_FAILED, "incrKVBlock failed: LACK MEM");
             RTP_LLM_LOG_WARNING("stream [%ld] incr block failed", (*it)->streamId());
             it = running_streams_.erase(it);
             error_streams++;
         } else {
-            if (enable_fast_gen_) {
-                token_capacity_ -= result.value();
-                RTP_LLM_LOG_DEBUG(
-                    "after stream [%ld] acquireCapacity, token_capacity is %d", (*it)->streamId(), token_capacity_);
-            }
             it++;
         }
     }
-    return {fallback_streams, error_streams};
+    return error_streams;
 }
 
 bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams,
@@ -214,18 +136,14 @@ bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams
         return false;
     }
 
-    if (!enable_fast_gen_) {
-        int max_token_size = new_stream->contextLength();
-        if (streams.empty() && max_token_size + running_streams_.size() < int(max_seq_len_)) {
-            return true;
-        }
-        for (auto& stream : streams) {
-            max_token_size = std::max(max_token_size, stream->contextLength());
-        }
-        return max_token_size * (streams.size() + 1) + running_streams_.size() < int(max_batch_tokens_size_);
-    } else {
+    int max_token_size = new_stream->contextLength();
+    if (streams.empty() && max_token_size + running_streams_.size() < int(max_seq_len_)) {
         return true;
     }
+    for (auto& stream : streams) {
+        max_token_size = std::max(max_token_size, stream->contextLength());
+    }
+    return max_token_size * (streams.size() + 1) + running_streams_.size() < int(max_batch_tokens_size_);
 }
 
 bool FIFOScheduler::evaluateNewStream(const list<GenerateStreamPtr>& streams,
@@ -236,12 +154,7 @@ bool FIFOScheduler::evaluateNewStream(const list<GenerateStreamPtr>& streams,
     }
 
     auto old_blocks = new_stream->maxBlockSize();
-    auto result     = new_stream->initKVBlock(token_capacity_, reserve_step);
-    if (result.ok() && enable_fast_gen_) {
-        token_capacity_ -= result.value();
-        RTP_LLM_LOG_DEBUG(
-            "after stream [%ld] acquireCapacity, token_capacity is %d", new_stream->streamId(), token_capacity_);
-    }
+    auto result     = new_stream->initKVBlock(reserve_step);
     if (result.ok()) {
         if (cache_manager_->availableBlockNums() >= reserve_block_num_) {
             return true;
@@ -328,11 +241,11 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule(size_t reserve_s
     evictDoneStreams(remote_running_streams_);
 
     // TODO(xinfei.sxf) Those who just kicked out of running may join running again immediately.
-    auto [fallback_streams, error_streams] = evaluateRunningNext(reserve_step);
-    auto new_streams                       = scheduleNew(reserve_step);
+    evaluateRunningNext(reserve_step);
+    auto new_streams = scheduleNew(reserve_step);
     accountBatchMetrics(new_streams, running_streams_);
     running_streams_.insert(running_streams_.end(), new_streams.begin(), new_streams.end());
-    reportMetrics(fallback_streams);
+    reportMetrics();
     last_schedule_time_ = autil::TimeUtility::currentTimeInMilliSeconds();
     return running_streams_;
 }
@@ -380,13 +293,12 @@ std::vector<EngineScheduleInfo::TaskInfo> FIFOScheduler::runningTaskList() {
     return running_task_list_;
 }
 
-void FIFOScheduler::reportMetrics(size_t fallback_stream_size) {
+void FIFOScheduler::reportMetrics() {
     if (metrics_reporter_) {
         RtpLLMSchedulerMetricsCollector collector;
         collector.wait_stream_size           = waiting_streams_.size();
         collector.running_stream_size        = running_streams_.size();
         collector.remote_running_stream_size = remote_running_streams_.size();
-        collector.fallback_stream_size       = fallback_stream_size;
         metrics_reporter_->report<RtpLLMSchedulerMetrics, RtpLLMSchedulerMetricsCollector>(nullptr, &collector);
     }
     return;

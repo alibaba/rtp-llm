@@ -212,11 +212,8 @@ public:
     int64_t reserve_runtime_mem_mb_           = 0;
     int64_t kv_cache_mem_mb_                  = 0;
     bool    reuse_cache_                      = false;
-    bool    enable_partial_fallback_          = false;
-    bool    enable_fast_gen_                  = false;
     bool    warm_up_                          = false;
     bool    warm_up_with_loss_                = false;
-    int64_t fast_gen_max_context_len_         = 0;
     bool    reverse_e_h_norm_                 = false;
 
     std::string nccl_ip_            = "";

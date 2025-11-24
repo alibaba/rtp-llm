@@ -408,8 +408,6 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
             aux_info->set_first_token_cost_time_us(response.aux_info.first_token_cost_time_us);
             aux_info->set_wait_time_us(response.aux_info.wait_time_us);
             aux_info->set_iter_count(response.aux_info.iter_count);
-            aux_info->set_fallback_tokens(response.aux_info.fallback_tokens);
-            aux_info->set_fallback_times(response.aux_info.fallback_times);
             aux_info->set_input_len(response.aux_info.input_len);
             aux_info->set_prefix_len(response.aux_info.prefix_len);
             aux_info->set_output_len(response.aux_info.output_len);

@@ -455,19 +455,13 @@ void register_batch_decode_scheduler_config(pybind11::module& m) {
 // FIFOSchedulerConfig
 void register_fifo_scheduler_config(pybind11::module& m) {
     pybind11::class_<FIFOSchedulerConfig>(m, "FIFOSchedulerConfig")
-        .def(pybind11::init<int64_t, int, bool, bool, int64_t>(),
+        .def(pybind11::init<int64_t, int64_t>(),
              pybind11::arg("max_context_batch_size")           = 1,
-             pybind11::arg("scheduler_reserve_resource_ratio") = 5,
-             pybind11::arg("enable_fast_gen")                  = false,
-             pybind11::arg("enable_partial_fallback")          = false,
-             pybind11::arg("fast_gen_context_budget")          = -1)
+             pybind11::arg("scheduler_reserve_resource_ratio") = 5)
         .def("to_string", &FIFOSchedulerConfig::to_string)
         .def("update_from_env", &FIFOSchedulerConfig::update_from_env_for_test)
         .def_readwrite("max_context_batch_size", &FIFOSchedulerConfig::max_context_batch_size)
-        .def_readwrite("scheduler_reserve_resource_ratio", &FIFOSchedulerConfig::scheduler_reserve_resource_ratio)
-        .def_readwrite("enable_fast_gen", &FIFOSchedulerConfig::enable_fast_gen)
-        .def_readwrite("enable_partial_fallback", &FIFOSchedulerConfig::enable_partial_fallback)
-        .def_readwrite("fast_gen_context_budget", &FIFOSchedulerConfig::fast_gen_context_budget);
+        .def_readwrite("scheduler_reserve_resource_ratio", &FIFOSchedulerConfig::scheduler_reserve_resource_ratio);
 }
 
 // MiscellaneousConfig
@@ -667,11 +661,8 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(kv_cache_mem_mb, kv_cache_mem_mb_)                                                                    \
     DEF_PROPERTY(reserve_runtime_mem_mb, reserve_runtime_mem_mb_)                                                      \
     DEF_PROPERTY(reuse_cache, reuse_cache_)                                                                            \
-    DEF_PROPERTY(enable_partial_fallback, enable_partial_fallback_)                                                    \
-    DEF_PROPERTY(enable_fast_gen, enable_fast_gen_)                                                                    \
     DEF_PROPERTY(warm_up, warm_up_)                                                                                    \
     DEF_PROPERTY(warm_up_with_loss, warm_up_with_loss_)                                                                \
-    DEF_PROPERTY(fast_gen_max_context_len, fast_gen_max_context_len_)                                                  \
     DEF_PROPERTY(is_causal, is_causal_)                                                                                \
     DEF_PROPERTY(nccl_ip, nccl_ip_)                                                                                    \
     DEF_PROPERTY(tp_nccl_port, tp_nccl_port_)                                                                          \

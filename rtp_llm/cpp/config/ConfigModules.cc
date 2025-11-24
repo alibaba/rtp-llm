@@ -394,18 +394,12 @@ std::string BatchDecodeSchedulerConfig::to_string() const {
 void FIFOSchedulerConfig::update_from_env_for_test() {
     max_context_batch_size           = autil::EnvUtil::getEnv("MAX_CONTEXT_BATCH_SIZE", 1);
     scheduler_reserve_resource_ratio = autil::EnvUtil::getEnv("SCHEDULER_RESERVE_RESOURCE_RATIO", 5);
-    enable_fast_gen                  = bool_from_env_for_test("ENABLE_FAST_GEN", false);
-    enable_partial_fallback          = bool_from_env_for_test("ENABLE_PARTIAL_FALLBACK", false);
-    fast_gen_context_budget          = autil::EnvUtil::getEnv("FAST_GEN_MAX_CONTEXT_LEN", -1);
 }
 
 std::string FIFOSchedulerConfig::to_string() const {
     std::ostringstream oss;
     oss << "max_context_batch_size: " << max_context_batch_size << "\n"
-        << "scheduler_reserve_resource_ratio: " << scheduler_reserve_resource_ratio << "\n"
-        << "enable_fast_gen: " << enable_fast_gen << "\n"
-        << "enable_partial_fallback: " << enable_partial_fallback << "\n"
-        << "fast_gen_context_budget: " << fast_gen_context_budget;
+        << "scheduler_reserve_resource_ratio: " << scheduler_reserve_resource_ratio << "\n";
     return oss.str();
 }
 

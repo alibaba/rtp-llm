@@ -252,8 +252,6 @@ class GptInitModelParameters:
     th_nccl_port: int
     embedding_size: int
     enable_eplb: bool
-    enable_fast_gen: bool
-    enable_partial_fallback: bool
     enable_sp: bool
     enable_speculative_decoding: bool
     ep_rank: int
@@ -261,7 +259,6 @@ class GptInitModelParameters:
     eplb_mode: EplbMode
     eplb_update_time: int
     expert_num: int
-    fast_gen_max_context_len: int
     ffn_tp_nccl_port: int
     ffn_tp_rank: int
     ffn_tp_size: int
@@ -962,9 +959,6 @@ class GptInitModelParameters:
             scheduler_reserve_resource_ratio=get_env_int(
                 "SCHEDULER_RESERVE_RESOURCE_RATIO", 5
             ),
-            enable_fast_gen=get_env_bool("ENABLE_FAST_GEN", False),
-            enable_partial_fallback=get_env_bool("ENABLE_PARTIAL_FALLBACK", False),
-            fast_gen_context_budget=get_env_int("FAST_GEN_MAX_CONTEXT_LEN", 0),
         )
 
         # SamplerConfig
@@ -1265,25 +1259,12 @@ class GptInitModelParameters:
         logging.info(f"kv_cache_mem_mb: {self.kv_cache_mem_mb}")
         self.block_nums = self.py_env_configs.py_kv_cache_config.test_block_num
         logging.info(f"block_nums: {self.block_nums}")
-        self.enable_partial_fallback = (
-            self.fifo_scheduler_config.enable_partial_fallback
-        )
-        logging.info(f"enable_partial_fallback: {self.enable_partial_fallback}")
-        self.enable_fast_gen = self.fifo_scheduler_config.enable_fast_gen
-        logging.info(f"enable_fast_gen: {self.enable_fast_gen}")
         self.warm_up = bool(self.py_env_configs.engine_config.warm_up)
         logging.info(f"warm_up: {self.warm_up}")
         self.warm_up_with_loss = bool(
             self.py_env_configs.engine_config.warm_up_with_loss
         )
         logging.info(f"warm_up_with_loss: {self.warm_up_with_loss}")
-
-        self.fast_gen_max_context_len = (
-            1024
-            if self.fifo_scheduler_config.fast_gen_context_budget == -1
-            else self.fifo_scheduler_config.fast_gen_context_budget
-        )
-        logging.info(f"fast_gen_max_context_len: {self.fast_gen_max_context_len}")
 
         self.max_rpc_timeout_ms = int(os.environ.get("MAX_RPC_TIMEOUT_MS", 0))
         logging.info(f"max_rpc_timeout_ms: {self.max_rpc_timeout_ms}")

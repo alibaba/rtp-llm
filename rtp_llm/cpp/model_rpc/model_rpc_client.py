@@ -270,8 +270,6 @@ def trans_output(
                 prefix_len=aux_info_pb.prefix_len,
                 output_len=aux_info_pb.output_len,
                 step_output_len=aux_info_pb.step_output_len,
-                fallback_tokens=aux_info_pb.fallback_tokens,
-                fallback_times=aux_info_pb.fallback_times,
                 pd_sep=aux_info_pb.pd_sep,
                 reuse_len=aux_info_pb.total_reuse_len,
                 local_reuse_len=aux_info_pb.local_reuse_len,

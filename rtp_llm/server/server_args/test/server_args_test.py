@@ -172,9 +172,6 @@ class ServerArgsDefaultTest(TestCase):
         # 15. FIFO 调度器配置
         self.assertEqual(env.get("MAX_CONTEXT_BATCH_SIZE"), "1")
         self.assertEqual(env.get("SCHEDULER_RESERVE_RESOURCE_RATIO"), "5")
-        self.assertEqual(env.get("ENABLE_FAST_GEN"), "0")
-        self.assertIsNone(env.get("FAST_GEN_MAX_CONTEXT_LEN"))
-        self.assertEqual(env.get("ENABLE_PARTIAL_FALLBACK"), "0")
 
         # 16. BatchDecode 调度器配置
         self.assertEqual(env.get("BATCH_DECODE_SCHEDULER_BATCH_SIZE"), "1")
@@ -550,12 +547,6 @@ class ServerArgsSetTest(TestCase):
             "16",
             "--scheduler_reserve_resource_ratio",
             "20",
-            "--enable_fast_gen",
-            "True",
-            "--fast_gen_context_budget",
-            "256",
-            "--enable_partial_fallback",
-            "True",
             # 16. BatchDecode 调度器配置
             "--batch_decode_scheduler_batch_size",
             "32",
@@ -874,9 +865,6 @@ class ServerArgsSetTest(TestCase):
         # 15. FIFO 调度器配置
         self.assertEqual(env["MAX_CONTEXT_BATCH_SIZE"], "16")
         self.assertEqual(env["SCHEDULER_RESERVE_RESOURCE_RATIO"], "20")
-        self.assertEqual(env["ENABLE_FAST_GEN"], "1")
-        self.assertEqual(env["FAST_GEN_MAX_CONTEXT_LEN"], "256")
-        self.assertEqual(env["ENABLE_PARTIAL_FALLBACK"], "1")
 
         # 16. BatchDecode 调度器配置
         self.assertEqual(env["BATCH_DECODE_SCHEDULER_BATCH_SIZE"], "32")

@@ -96,7 +96,6 @@ void SpeculativeSampler::updateSampleStream(SpeculativeExecutorStreamOutputPtr& 
 
     stream->update(update_info);
     stream->setReuseLength(stream->seqLength() - 1);
-    stream->setFallbackPrefixLength(stream->reuseLength());
     stream->setAccepedBounsToken(accept_len > propose_step);
     stream->incSpEditSearchIndex(accept_len - 1);
     stream->setSpEditRun(false);

@@ -207,10 +207,7 @@ struct BatchDecodeSchedulerConfig {
 
 struct FIFOSchedulerConfig {
     int64_t max_context_batch_size           = 1;
-    int     scheduler_reserve_resource_ratio = 5;
-    bool    enable_fast_gen                  = false;
-    bool    enable_partial_fallback          = false;
-    int64_t fast_gen_context_budget          = -1;
+    int64_t scheduler_reserve_resource_ratio = 5;
 
     std::string to_string() const;
     void        update_from_env_for_test();

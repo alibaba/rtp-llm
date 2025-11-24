@@ -20,25 +20,3 @@ def init_fifo_scheduler_group_args(parser):
         default=5,
         help="默认调度器将尝试保留的 KV cache blocks 的最小百分比。这有助于应对突发请求模式，为高优先级请求预留空间，或防止系统性能颠簸。",
     )
-
-    fifo_scheduler_group.add_argument(
-        "--enable_fast_gen",
-        env_name="ENABLE_FAST_GEN",
-        type=str2bool,
-        default=False,
-        help="若为 True，长请求会被拆分为chunks并分步处理。这主要用于提高长序列或流式输入的处理效率，并能改善并发场景下其他请求的交互性。注意：仅在使用默认调度器时有效。",
-    )
-
-    fifo_scheduler_group.add_argument(
-        "--fast_gen_context_budget",
-        env_name="FAST_GEN_MAX_CONTEXT_LEN",  # 和参数名不一致
-        type=int,
-        help="当 ENABLE_FAST_GEN 启用时，拆分成的chunk的大小。注意：仅当 ENABLE_FAST_GEN 为 True 且使用默认调度器时有效。",
-    )
-    fifo_scheduler_group.add_argument(
-        "--enable_partial_fallback",
-        env_name="ENABLE_PARTIAL_FALLBACK",
-        type=str2bool,
-        default=False,
-        help="若为 True，则允许默认调度器在系统内存不足以满足活动请求时，从某些请求中回收一部分 KV cache blocks。这可以在高负载下提高系统利用率，但可能会影响那些资源被回收的请求的公平性。注意：在使用默认调度器时有效。",
-    )

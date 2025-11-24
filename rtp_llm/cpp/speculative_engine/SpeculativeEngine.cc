@@ -97,7 +97,6 @@ std::shared_ptr<GenerateStream> SpeculativeEngine::createMinFakeStream(int32_t m
         stream->update(update_info);
         stream->setIsContextStream(false);
         stream->setReuseLength(1);
-        stream->setFallbackPrefixLength(1);
     }
 
     return stream;
@@ -165,7 +164,7 @@ absl::StatusOr<GenerateStreamPtr> SpeculativeEngine::preRun(const std::shared_pt
     if (mode == preRunMode::decode_warm_up) {
         score_stream->setIsContextStream(false);
     } else if (mode == preRunMode::build_system_prompt) {
-        THROW_IF_STATUSOR_ERROR(score_stream->initKVBlock(0, 0));
+        THROW_IF_STATUS_ERROR(score_stream->initKVBlock());
     };
 
     if (propose_model_params_->draftModel()) {
@@ -451,7 +450,6 @@ absl::Status SpeculativeEngine::normStep(std::list<GenerateStreamPtr>& streams) 
     // stream post process
     for (auto& stream : streams) {
         stream->setReuseLength(stream->seqLength() - 1);
-        stream->setFallbackPrefixLength(stream->reuseLength());
         stream->setSpEditRun(false);
         RTP_LLM_LOG_DEBUG("stream [%ld], topk = [%d], topp = [%f], propose_tokens = 0, accept_tokens = 1",
                           stream->streamId(),
@@ -552,7 +550,6 @@ absl::Status SpeculativeEngine::prefillMtpStep(std::list<GenerateStreamPtr>& str
             RTP_LLM_CHECK_WITH_INFO(propose_tokens_vec.size() > 0, "propose token size should not be empty");
             stream->setProposeToken(propose_tokens_vec);
             stream->setReuseLength(stream->seqLength() - 1);
-            stream->setFallbackPrefixLength(stream->reuseLength());
             stream->setSpEditRun(false);
             stream->setLastHiddenStates(nullptr);
             stream->setSPOutputBuffer(nullptr);
