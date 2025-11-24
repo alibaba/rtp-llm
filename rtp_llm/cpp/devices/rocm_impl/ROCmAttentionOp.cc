@@ -796,6 +796,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                                                  nullptr,
                                              params.common.padding_offset->data<int>(),
                                              params.common.cu_seqlens->data<int>(),
+                                             params.common.cu_seqlens_without_prefix->data<int>(),
                                              batch_size,
                                              seq_len,
                                              token_num,
