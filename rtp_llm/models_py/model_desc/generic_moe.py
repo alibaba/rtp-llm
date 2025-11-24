@@ -42,7 +42,7 @@ class GenericMoeLayer(nn.Module):
 
         self.hidden_dim = config.hidden_size
         self.ffn_dim = config.moe_inter_padding_size
-        self.num_experts = config.expert_num
+        self.num_experts = config.phy_exp_num
         self.top_k = config.moe_k
 
         self.gate = LinearFactory.create_linear_from_weights(
@@ -76,12 +76,12 @@ class GenericMoeLayer(nn.Module):
         router_logits = self.gate(hidden_states)
         router_logits_fp32 = router_logits.float()
 
-        topk_weights = torch.zeros(
+        topk_weights = torch.empty(
             (num_tokens, self.top_k),
             dtype=torch.float32,
             device=hidden_states.device,
         )
-        topk_ids = torch.zeros(
+        topk_ids = torch.empty(
             (num_tokens, self.top_k),
             dtype=torch.int64,
             device=hidden_states.device,

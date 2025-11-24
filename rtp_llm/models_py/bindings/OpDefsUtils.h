@@ -34,7 +34,7 @@ inline void calculatePaddingOffset(torch_ext::PyAttentionInputs& py_attn_inputs)
     auto padding_offset_host = torch::zeros({total_tokens}, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
     getPaddingOffset(padding_offset_host.data_ptr<int32_t>(),
                      py_attn_inputs.input_lengths.data_ptr<int32_t>(),
-                     py_attn_inputs.prefix_lengths.data_ptr<int32_t>(),
+                     nullptr,
                      batch_size,
                      max_seq_len);
     py_attn_inputs.padding_offset = padding_offset_host.cuda();

@@ -8,7 +8,7 @@
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 namespace torch_ext {
-struct MlaParams {
+struct MlaParams: public rtp_llm::ParamsBase {
     torch::Tensor batch_indice;
     torch::Tensor positions;
     torch::Tensor paged_kv_last_page_len;
@@ -19,6 +19,10 @@ struct MlaParams {
     torch::Tensor prefill_page_indptr;
     torch::Tensor qo_indptr;
     torch::Tensor batch_reuse_info_vec;
+
+    // Hidden field to keep FlashInferMlaAttnParams object alive
+    // This ensures the underlying buffers (buf_d, buf_h) are not deallocated
+    std::shared_ptr<void> _params_holder;
 };
 
 struct KVCache {

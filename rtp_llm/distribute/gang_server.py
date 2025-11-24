@@ -438,6 +438,13 @@ class GangServer:
             timeout=init_process_timeout,
         )
 
+        from rtp_llm.models_py.distributed.symm_mem import get_symm_mem_communicator
+
+        # TODO: remove this to all reduce for lately init
+        # some not impl errors happened after engine start, need to fix later
+        if g_parallel_info.tp_size > 1:
+            get_symm_mem_communicator()
+
         logging.info(f"gang worker {g_parallel_info} start_health_check")
         self.start_health_check()
         logging.info(f"gang init done")

@@ -76,6 +76,7 @@ py_test (
     env = {
         "DEVICE_RESERVE_MEMORY_BYTES": "512000000",  # 512MB
         "TP_SIZE": "4",
+        "WORLD_SIZE": "4",
     },
     tags = ["open_skip", "H20"],
     exec_properties = {'gpu':'H20'},

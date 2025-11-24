@@ -497,10 +497,14 @@ class PyKvCacheConfig:
         self.blockwise_use_fp8_kv_cache: int = 0
         self.kv_cache_dtype: Optional[str] = None
         self.reuse_cache: bool = False
+        self.absorb_opt_len: int = 1024
 
     def update_from_env(self):
         self.int8_kv_cache = int(os.environ.get("INT8_KV_CACHE", self.int8_kv_cache))
         self.fp8_kv_cache = int(os.environ.get("FP8_KV_CACHE", self.fp8_kv_cache))
+        self.absorb_opt_len = int(
+            os.environ.get("RTP_LLM_ABSORB_OPT_LEN", self.absorb_opt_len)
+        )
         self.kv_cache_mem_mb = int(
             os.environ.get("KV_CACHE_MEM_MB", self.kv_cache_mem_mb)
         )

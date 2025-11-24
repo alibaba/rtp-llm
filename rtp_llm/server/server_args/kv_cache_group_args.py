@@ -14,6 +14,13 @@ def init_kv_cache_group_args(parser):
         help="控制是否激活KV Cache的重用机制。设置为 True 启用 , False 关闭",
     )
     kv_cache_group.add_argument(
+        "--absorb_opt_len",
+        env_name="RTP_LLM_ABSORB_OPT_LEN",
+        type=int,
+        default=1024,
+        help="控制命中reuse cache后，走absorb attn的最大q_len",
+    )
+    kv_cache_group.add_argument(
         "--multi_task_prompt",
         env_name="MULTI_TASK_PROMPT",
         type=str,
