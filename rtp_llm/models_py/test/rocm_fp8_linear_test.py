@@ -94,7 +94,7 @@ class Fp8PTPCLinearTest(unittest.TestCase):
 
         ref_output = aiter.gemm_a8w8_bpreshuffle(
             ref_input_fp8,  # A_quant_tensor
-            ptpc_linear.weight,  # W_kernel_tensor (使用 Fp8PTPCLinear 内部的 weight)
+            ptpc_linear.weight_fp8,  # W_kernel_tensor (使用 Fp8PTPCLinear 内部的 weight)
             ref_input_scales,  # A_quant_scale_tensor (M, 1)
             ptpc_linear.weight_scales,  # W_scale_tensor (使用 Fp8PTPCLinear 内部的 weight_scales)
             None,  # bias
