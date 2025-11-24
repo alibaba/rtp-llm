@@ -188,6 +188,16 @@ class CudaFp8DeepGEMMLinearTest(unittest.TestCase):
             f"N: {weight.shape[1]}, scale_N: {self.weight_scale.shape[1]}, K: {weight.shape[0]}, scale_K: {self.weight_scale.shape[0]}",
             str(context.exception),
         )
+        weight = torch.randn(
+            (self.K + 1, self.N), dtype=torch.float32, device=self.device
+        ).to(torch.float8_e4m3fn)
+        with self.assertRaises(ValueError) as context:
+            Fp8PerBlockLinear(weight, self.weight_scale)
+        self.assertIn(f"Weight scale dimension mismatch! ", str(context.exception))
+        self.assertIn(
+            f"N: {weight.shape[1]}, scale_N: {self.weight_scale.shape[1]}, K: {weight.shape[0]}, scale_K: {self.weight_scale.shape[0]}",
+            str(context.exception),
+        )
         # Validate weight dtype not equal to float8_e4m3fn
         weight = torch.randn((self.K, self.N), dtype=torch.float32, device=self.device)
         with self.assertRaises(ValueError) as context:
@@ -235,6 +245,31 @@ class CudaFp8DeepGEMMLinearTest(unittest.TestCase):
             f"N: {self.weight.shape[1]}, scale_N: {weight_scale.shape[1]}, K: {self.weight.shape[0]}, scale_K: {weight_scale.shape[0]}",
             str(context.exception),
         )
+        weight_scale = torch.randn(
+            (self.scale_K + 1, self.scale_N), dtype=torch.float32, device=self.device
+        )
+        with self.assertRaises(ValueError) as context:
+            Fp8PerBlockLinear(self.weight, weight_scale)
+        self.assertIn(f"Weight scale dimension mismatch! ", str(context.exception))
+        self.assertIn(
+            f"N: {self.weight.shape[1]}, scale_N: {weight_scale.shape[1]}, K: {self.weight.shape[0]}, scale_K: {weight_scale.shape[0]}",
+            str(context.exception),
+        )
+        weight = torch.randn((7168, 2112), dtype=torch.float32, device=self.device).to(
+            torch.float8_e4m3fn
+        )
+        weight_scale = torch.randn((56, 17), dtype=torch.float32, device=self.device)
+        fp8_linear = Fp8PerBlockLinear(weight, weight_scale)
+        input_tensor = torch.randn(
+            32,
+            7168,
+            dtype=torch.bfloat16,
+            device=self.device,
+        )
+        output = fp8_linear(input_tensor)
+        self.assertEqual(output.shape, (32, 2112))
+        self.assertEqual(output.dtype, torch.bfloat16)
+        self.assertEqual(output.device.type, "cuda")
         # Validate weight scale dtype not equal to float32
         weight_scale = torch.randn(
             (self.scale_K, self.scale_N), dtype=torch.float16, device=self.device

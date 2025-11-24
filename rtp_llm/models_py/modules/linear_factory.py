@@ -10,30 +10,37 @@ from torch import nn
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.models_py.modules import Linear, utils
 
+Fp8PerBlockLinear = None
+Fp8PerTensorLinear = None
+Fp8PTPCLinear = None
+
 if utils.is_hip():
-    from rtp_llm.models_py.modules.rocm.fp8_linear import (
-        Fp8DeepGEMMLinear,
-        Fp8PTPCLinear,
-    )
-
-    FP8_LINEAR_AVAILABLE = True
-    FP8_PTPC_AVAILABLE = True
-
+    try:
+        from rtp_llm.models_py.modules.rocm.fp8_linear import (
+            Fp8DeepGEMMLinear as Fp8PerBlockLinear,
+        )
+    except ImportError:
+        Fp8PerBlockLinear = None
+    try:
+        from rtp_llm.models_py.modules.rocm.fp8_linear import Fp8PTPCLinear
+    except ImportError:
+        Fp8PTPCLinear = None
 
 elif utils.is_cuda():
-    from rtp_llm.models_py.modules.fp8_linear import Fp8PerTensorLinear
+    try:
+        from rtp_llm.models_py.modules.fp8_linear import Fp8PerBlockLinear
+    except ImportError:
+        Fp8PerBlockLinear = None
 
     try:
-        from rtp_llm.models_py.modules.fp8_linear import Fp8DeepGEMMLinear
-
-        FP8_LINEAR_AVAILABLE = True
+        from rtp_llm.models_py.modules.fp8_linear import Fp8PerTensorLinear
     except ImportError:
-        Fp8DeepGEMMLinear = None
-        FP8_LINEAR_AVAILABLE = False
+        Fp8PerTensorLinear = None
+
 else:
-    Fp8DeepGEMMLinear = None
-    FP8_LINEAR_AVAILABLE = False
-    FP8_PTPC_AVAILABLE = False
+    Fp8PerBlockLinear = None
+    Fp8PerTensorLinear = None
+    Fp8PTPCLinear = None
 
 
 class LinearFactory:
@@ -89,37 +96,32 @@ class LinearFactory:
         ):
             if weight_scales is None:
                 raise ValueError("FP8 linear layer requires weight_scales")
-            if config is None:
-                raise ValueError("FP8 linear layer requires config")
+            if config is None or config.quant_config is None:
+                raise ValueError("FP8 linear layer requires config and quant_config")
             else:
                 quant_config = config.quant_config
                 if quant_config.get_method() == "FP8_PER_BLOCK":
-                    if has_deep_gemm():
-                        return Fp8PerBlockLinear(weight, weight_scales, bias)
-                    else:
-                        raise RuntimeError(
-                            "No available fp8 gemm backend for Fp8PerBlockLinear"
-                        )
+                    assert (
+                        Fp8PerBlockLinear is not None
+                    ), "Fp8PerBlockLinear is not available"
+                    return Fp8PerBlockLinear(weight, weight_scales, bias)
                 elif quant_config.get_method() in [
                     "FP8_PER_TENSOR_COMPRESSED",
                     "FP8_DYNAMIC_PER_TENSOR",
                 ]:
+                    assert (
+                        Fp8PerTensorLinear is not None
+                    ), "Fp8PerTensorLinear is not available"
                     return Fp8PerTensorLinear(
-                        weight, weight_scales, input_scales, bias, config.quant_config
+                        weight, weight_scales, input_scales, bias, quant_config
                     )
+                elif quant_config.get_method() == "FP8_PER_CHANNEL_COMPRESSED":
+                    assert Fp8PTPCLinear is not None, "Fp8PTPCLinear is not available"
+                    return Fp8PTPCLinear(weight, weight_scales, bias)
                 else:
-                    if not FP8_LINEAR_AVAILABLE:
-                        raise RuntimeError(
-                            "FP8 DeepGEMMLinear layer requested but not available"
-                        )
-
-                    if (
-                        quant_config
-                        and quant_config.get_method() == "FP8_PER_CHANNEL_COMPRESSED"
-                    ):
-                        return Fp8PTPCLinear(weight, weight_scales, bias, config)
-                    else:
-                        return Fp8DeepGEMMLinear(weight, weight_scales, bias, config)
+                    raise ValueError(
+                        f"Unsupported FP8 quantization method: {quant_config.get_method()}"
+                    )
         else:
             return Linear(weight, bias)
 
