@@ -118,8 +118,6 @@ TEST(InferenceDataTypeTest, AuxInfoAdapter) {
     ASSERT_TRUE(jsonStr.find(R"("output_len":0)") != std::string::npos);
     ASSERT_TRUE(jsonStr.find(R"("pd_sep":false)") != std::string::npos);
     ASSERT_TRUE(jsonStr.find(R"("step_output_len":0)") != std::string::npos);
-    ASSERT_TRUE(jsonStr.find(R"("fallback_tokens":0)") != std::string::npos);
-    ASSERT_TRUE(jsonStr.find(R"("fallback_times":0)") != std::string::npos);
     ASSERT_TRUE(jsonStr.find(R"("beam_responses":[])") != std::string::npos);
     ASSERT_TRUE(jsonStr.find(R"("cum_log_probs":)") == std::string::npos);
 }

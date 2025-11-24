@@ -67,8 +67,6 @@ struct AuxInfo {
     int32_t                                reuse_len                = 0;
     int32_t                                prefix_len               = 0;
     int32_t                                output_len               = 0;
-    int32_t                                fallback_tokens          = 0;
-    int32_t                                fallback_times           = 0;
     int32_t                                step_output_len          = 0;
     bool                                   pd_sep                   = false;
     int32_t                                first_token_cost_time_us = 0;

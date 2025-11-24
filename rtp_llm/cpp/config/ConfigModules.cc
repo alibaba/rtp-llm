@@ -299,12 +299,8 @@ std::string BatchDecodeSchedulerConfig::to_string() const {
 // FIFOSchedulerConfig
 std::string FIFOSchedulerConfig::to_string() const {
     std::ostringstream oss;
-    oss << "enable_fast_gen: " << enable_fast_gen << "\n"
-        << "enable_partial_fallback: " << enable_partial_fallback << "\n"
-        << "fast_gen_context_budget: " << fast_gen_context_budget << "\n"
-        << "max_context_batch_size: " << max_context_batch_size << "\n"
+    oss << "max_context_batch_size: " << max_context_batch_size << "\n"
         << "scheduler_reserve_resource_ratio: " << scheduler_reserve_resource_ratio << "\n"
-        << "fast_gen_max_context_len: " << fast_gen_max_context_len << "\n"
         << "max_batch_tokens_size: " << max_batch_tokens_size;
     return oss.str();
 }
