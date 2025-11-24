@@ -23,6 +23,7 @@
 #include "rtp_llm/cpp/rocm/rocmCKW8A8GeluGemmWrapper.h"
 #include "rtp_llm/cpp/kernels/kv_cache/kv_cache_utils.h"
 #include "rtp_llm/cpp/rocm/custom_ar/custom_ar_comm.h"
+#include "rtp_llm/cpp/devices/rocm_impl/aiterPA.h"
 
 #include "torch_hip_allocator.h"
 
@@ -189,6 +190,7 @@ public:
     AttentionModuleOutput  contextAttention(const AttentionModuleParams& params) override;
     AttentionModuleOutput  mlaContextAttention(const MlaAttentionModuleParams& params) override;
     AttentionModuleOutput  decoderSelfAttention(const AttentionModuleParams& params) override;
+    void                   chainSpeculativeSampling(const SpeculativeSamplingParams& params) override;
     MoeGateSelectOutput    moeGateSelect(const FfnLayerParams& params) override;
     FfnLayerOutput         moeFfn(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs) override;
     FfnLayerOutput         ffnLayer(const FfnLayerParams& params) override;
@@ -248,6 +250,7 @@ protected:
     void InvokeROCmPTPCGemm(const GemmParams& params, BufferPtr output);
     void HipblasltPTPCGemm(const GemmParams& params, BufferPtr output);
     void InvokeROCmDeepGemmWi8Ai8(const GemmParams& params, BufferPtr output);
+    bool checkSpecDecode(const DevicePrepParams& params, bool skip_no_prefix = true);
     // void prepareCommBuffer(const PrepareCommBufferParams& params) override;
 
 public:
@@ -260,6 +263,9 @@ public:
     hipStream_t getStream() {
         return stream_;
     }
+    torch::Device getTorchDevice() override {
+        return torch::Device(torch::kCUDA);
+    };
     hipDeviceProp_t* getRocmDeviceProperties() {
         return &rocmDevProp;
     }
@@ -291,6 +297,7 @@ private:
     hipblasLtHandle_t hipblaslt_handle_;
 
     std::unique_ptr<rocm::hipblasMMWrapper> hipblas_mm_wrapper_;
+    std::unique_ptr<rtp_llm::AiterWrapper> aiter_wrapper_;
 
     // fmha
     std::unique_ptr<rocmFmhaWrapper> fmha_runner_;
@@ -331,6 +338,7 @@ private:
 
 protected:
     bool use_multi_block_mode = false;
+    bool use_mtp_pa_;
 };
 
 }  // namespace rtp_llm

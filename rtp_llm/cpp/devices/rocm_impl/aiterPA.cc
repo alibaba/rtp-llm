@@ -2,7 +2,109 @@
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/devices/rocm_impl/ROCmDevice.h"
 
+using namespace pybind11::literals;
+
 namespace rtp_llm {
+
+AiterWrapper::AiterWrapper(const DeviceInitParams& params) {
+    if (!Py_IsInitialized()) {
+        return;
+    }
+    py::gil_scoped_acquire acquire;
+    aiter_module = py::module::import("aiter");
+    pa_func = aiter_module.attr("paged_attention_rocm");
+    use_asm_pa_ = params.use_asm_pa;
+}
+
+void AiterWrapper::mtp(const AttentionModuleParams& params, rtp_llm::DeviceBase* device, Buffer& q_mtp) {
+    py::gil_scoped_acquire acquire;
+    size_t  num_seqs       = q_mtp.shape()[0];
+    size_t  num_heads      = q_mtp.shape()[1];
+    size_t  head_size      = q_mtp.shape()[2];
+
+    int64_t partition_size = 256;
+
+    bool prefill_pa = (params.common.sequence_lengths != nullptr &&
+                      params.common.sequence_lengths->data() == nullptr);
+    int64_t max_seq_len = prefill_pa ?
+                (params.common.context_max_seq_len + params.common.max_prefix_length) : (params.common.decoder_max_seq_len + 1);
+
+    size_t max_num_partitions = (max_seq_len + partition_size - 1) / partition_size;
+
+    BufferPtr exp_sums_buffer    = device->allocateBuffer({rtp_llm::DataType::TYPE_FP32,
+                        {num_seqs, num_heads, max_num_partitions}, AllocationType::DEVICE}, {"exp_sums"});
+
+    BufferPtr max_logits_buffer = device->allocateBuffer({rtp_llm::DataType::TYPE_FP32,
+                        {num_seqs, num_heads, max_num_partitions}, AllocationType::DEVICE}, {"max_logits"});
+
+    BufferPtr tmp_out_buffer = device->allocateBuffer({params.output.type(),
+                        {num_seqs, num_heads, max_num_partitions, head_size}, AllocationType::DEVICE}, {"tmp_out"});
+
+    auto out          = Buffer2torchTensor(params.output,false);
+    auto exp_sums     = Buffer2torchTensor(exp_sums_buffer, false);
+    auto max_logits   = Buffer2torchTensor(max_logits_buffer, false);
+    auto tmp_out      = Buffer2torchTensor(tmp_out_buffer, false);
+    auto query        = Buffer2torchTensor(q_mtp, false);
+    auto key_cache    = Buffer2torchTensor(params.common.kv_cache->k_cache_buffer, false);
+    auto value_cache  = Buffer2torchTensor(params.common.kv_cache->v_cache_buffer, false);
+
+    int64_t num_kv_heads = params.configs.kv_head_num;
+    float scale = params.configs.softmax_extra_scale / sqrtf(params.configs.size_per_head * 1.0f);
+
+    auto block_tables = Buffer2torchTensor(params.common.kv_cache->kv_cache_block_id, false);
+    auto seq_lens = prefill_pa ? Buffer2torchTensor(params.common.kv_seqlens, false) :
+                            ((AiterAttnParams*)params.common.decode_aiter_attn.get())->sequence_lengths_t;
+
+    int64_t block_size = params.configs.tokens_per_block;
+    std::optional<torch::Tensor> alibi_slopes;
+
+    if (use_asm_pa_) {
+        int64_t x = 16 / key_cache.element_size();
+        auto value_sizes = value_cache.sizes();
+        // [num_blocks, num_kv_heads, block_size/X, head_size, X]
+        value_cache = value_cache.view({value_sizes[0], value_sizes[1], value_sizes[2] / x, value_sizes[3], x});
+    }
+
+    std::optional<torch::Tensor> q_scale = std::nullopt;
+    std::optional<torch::Tensor> k_scale = std::nullopt;
+    std::optional<torch::Tensor> v_scale = std::nullopt;
+    std::optional<torch::Tensor> fp8_out_scale = std::nullopt;
+
+    std::string kv_cache_dtype = "auto";
+    if (key_cache.dtype() == at::kFloat8_e4m3fnuz) {
+        kv_cache_dtype = "fp8";
+        k_scale = Buffer2torchTensor(params.common.kv_cache->k_scale_buffer, false);
+        v_scale = Buffer2torchTensor(params.common.kv_cache->v_scale_buffer, false);
+    }
+
+    int64_t mtp = prefill_pa ? params.common.context_max_seq_len : 1;
+
+    py::object result = pa_func(out,
+        exp_sums,
+        max_logits,
+        tmp_out,
+        query,
+        key_cache,
+        value_cache,
+        num_kv_heads,
+        scale,
+        block_tables,
+        seq_lens,
+        block_size,
+        max_seq_len,
+        alibi_slopes,
+        kv_cache_dtype,
+        k_scale,
+        v_scale,
+        fp8_out_scale,
+        partition_size,
+        mtp,
+        q_scale
+    );
+    torch::Tensor output_tensor = result.cast<torch::Tensor>();
+    BufferPtr output_buf = torchTensor2Buffer(output_tensor);
+    params.output.swap(*output_buf);
+}
 
 inline torch::Tensor Buffer2torchTensorCustom(const Buffer& buf, std::vector<int64_t> shape, size_t offset = 0) {
     auto option =
