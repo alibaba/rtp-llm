@@ -668,7 +668,9 @@ class GptInitModelParameters:
 
         # DeviceResourceConfig
         self.gpt_init_params.device_resource_config = DeviceResourceConfig(
-            device_reserve_memory_bytes=get_env_int("DEVICE_RESERVE_MEMORY_BYTES", 0),
+            device_reserve_memory_bytes=get_env_int(
+                "DEVICE_RESERVE_MEMORY_BYTES", -1073741824
+            ),
             host_reserve_memory_bytes=get_env_int(
                 "HOST_RESERVE_MEMORY_BYTES", 4 * 1024 * 1024 * 1024
             ),
@@ -937,8 +939,9 @@ class GptInitModelParameters:
         self.enable_sp = parallel_info.ffn_sp_size > 1
         self.local_rank = parallel_info.local_rank
         self.use_all_gather = (
-            bool(int(os.environ.get("USE_ALL_GATHER", 0)))
-            and self.gpt_init_params.moe_config.use_deepep_low_latency == False
+            # default enable since it has better performance in most cases
+            bool(int(os.environ.get("USE_ALL_GATHER", 1)))
+            and self.gpt_init_params.ep_size == self.gpt_init_params.tp_size
         )
         logging.info(f"use_all_gather: {self.use_all_gather}")
 
