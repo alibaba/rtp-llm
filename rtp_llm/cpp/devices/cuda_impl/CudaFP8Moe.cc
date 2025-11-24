@@ -139,6 +139,12 @@ FfnLayerOutput CudaDevice::moeFfnFp8Contiguous(const FfnLayerParams& params, con
         size_t padding_size = pad_to_multiple_of_128(num_row_now);
         total_padding_num_128 += padding_size;
     }
+    // for use_all_gather=1 path, we need to check padding num = 0 after get selected-expert token num
+    if (total_padding_num_128 == 0) {
+        // for all-reduce, we need to set output to 0
+        bufMemset(*output, 0, DeviceStream::DEFAULT);
+        return {output};
+    }
     // Decide padding strategy based on sparsity
     bool use_64_padding = (float(total_padding_num_128) / (token_num * top_k)) > 1.5;
     // Allocate buffer based on chosen strategy
