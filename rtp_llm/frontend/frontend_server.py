@@ -336,13 +336,30 @@ class FrontendServer(object):
             return np.frombuffer(bf16_bytes.tobytes(), dtype=np.uint16).reshape(
                 arr.shape
             )
+        def bf16_to_tensor(arr_bf16: np.ndarray) -> torch.Tensor:
+            """将 uint16 格式的 bfloat16 NumPy 数组转换为 PyTorch 张量"""
+            return torch.from_numpy(arr_bf16).view(torch.bfloat16)
 
+        import logging
         if all_hidden_states is not None:
             all_hidden_states_array = np.array(all_hidden_states)
+            logging.warning(f"all_hidden_states_array1: \n  {all_hidden_states_array}")
             all_hidden_states_bf16 = numpy_to_bf16(all_hidden_states_array)
             all_hidden_states_base64 = base64.b64encode(
                 all_hidden_states_bf16.tobytes()
             ).decode("ascii")
+            if True:
+                all_hidden_states_decoded = base64.b64decode(all_hidden_states_base64)
+                all_hidden_states_bf16_decoded = np.frombuffer(
+                    all_hidden_states_decoded, dtype=np.uint16
+                )
+                
+                logging.warning(f"all_hidden_states_bf16_decoded: {all_hidden_states_bf16_decoded}")
+                all_hidden_states_bf16_decoded = all_hidden_states_bf16_decoded.reshape(all_hidden_states_array.shape)
+                all_hidden_states_tensor = bf16_to_tensor(all_hidden_states_bf16_decoded)
+                logging.warning(f"all_hidden_states_array2: \n  {all_hidden_states_tensor}")
+                
+            
             complete_response["extra_outputs"][
                 "all_hidden_states"
             ] = all_hidden_states_base64
