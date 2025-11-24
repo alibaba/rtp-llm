@@ -138,7 +138,7 @@ FreeResult SingleTypeKVCacheAllocator::free(const FreeInfo& free_info) {
 
         if (!batch_blocks.empty()) {
             full_kv_cache_group_->free(batch_blocks);
-            // batch_blocks.clear();
+            free_info.batch_kv_cache_resource->resize(batch_id, 0, 0);
         }
     }
 

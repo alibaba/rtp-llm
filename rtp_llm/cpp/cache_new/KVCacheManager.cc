@@ -88,14 +88,15 @@ BlockAddrInfo KVCacheManager::convertIndexToAddr(int block_index, int layer_id) 
     return allocator_->convertIndexToAddr(layer_id, block_index);
 }
 
-void KVCacheManager::setKVBlockValue(int              block_index,
+bool KVCacheManager::setKVBlockValue(int              block_index,
                                      int              layer_id,
                                      rtp_llm::Buffer& k_buffer,
                                      rtp_llm::Buffer& v_buffer) {
     if (!allocator_ || !device_) {
         RTP_LLM_LOG_ERROR("setKVBlockValue called before KVCacheManager initialized");
-        return;
+        return false;
     }
+
     // Basic size/type validation to prevent out-of-bounds copy
     auto&  spec             = config_.cache_specs[0];
     size_t expected_k_bytes = spec->k_block_size();
@@ -108,48 +109,57 @@ void KVCacheManager::setKVBlockValue(int              block_index,
                           expected_k_bytes,
                           src_v_bytes,
                           expected_v_bytes);
-        return;
+        return false;
     }
+
     auto dst = allocator_->convertIndexToBuffer(layer_id, block_index);
     if (!dst.k_addr || !dst.v_addr) {
         RTP_LLM_LOG_ERROR("convertIndexToBuffer returned null for layer %d, block %d", layer_id, block_index);
-        return;
+        return false;
     }
-    device_->copy({*dst.k_addr, k_buffer});
-    device_->copy({*dst.v_addr, v_buffer});
+
+    auto copyFunc = [&](rtp_llm::Buffer& src_buffer, rtp_llm::BufferPtr& dst_buffer) -> bool {
+        if (dst_buffer->sizeBytes() < src_buffer.sizeBytes()) {
+            RTP_LLM_LOG_ERROR("dst block bytes[%zu] < src bytes[%zu] in setKVBlockValue(layer=%d)",
+                              dst_buffer->sizeBytes(),
+                              src_buffer.sizeBytes(),
+                              layer_id);
+            return false;
+        }
+
+        rtp_llm::Buffer dst_view(dst_buffer->where(), src_buffer.type(), {src_buffer.size()}, dst_buffer->data());
+        rtp_llm::Buffer src_view(src_buffer.where(), src_buffer.type(), {src_buffer.size()}, src_buffer.data());
+        device_->copy({dst_view, src_view});
+        return true;
+    };
+
+    if (!copyFunc(k_buffer, dst.k_addr)) {
+        return false;
+    }
+    if (!copyFunc(v_buffer, dst.v_addr)) {
+        return false;
+    }
+
     device_->syncAndCheck();
+    return true;
 }
 
-void KVCacheManager::setKVBlockValue(int block_index, rtp_llm::Buffer& k_buffer, rtp_llm::Buffer& v_buffer) {
+bool KVCacheManager::setKVBlockValue(int block_index, rtp_llm::Buffer& k_buffer, rtp_llm::Buffer& v_buffer) {
     if (!allocator_ || !device_) {
         RTP_LLM_LOG_ERROR("setKVBlockValue called before KVCacheManager initialized");
-        return;
+        return false;
     }
-    // Basic size/type validation to prevent out-of-bounds copy
-    auto&  spec             = config_.cache_specs[0];
-    size_t expected_k_bytes = spec->k_block_size();
-    size_t expected_v_bytes = spec->v_block_size();
-    size_t src_k_bytes      = k_buffer.size() * rtp_llm::getTypeSize(k_buffer.type());
-    size_t src_v_bytes      = v_buffer.size() * rtp_llm::getTypeSize(v_buffer.type());
-    if (src_k_bytes < expected_k_bytes || src_v_bytes < expected_v_bytes) {
-        RTP_LLM_LOG_ERROR("setKVBlockValue src bytes too small: k[%zu]<[%zu] or v[%zu]<[%zu]",
-                          src_k_bytes,
-                          expected_k_bytes,
-                          src_v_bytes,
-                          expected_v_bytes);
-        return;
+
+    if (block_index < 0 || block_index >= config_.block_num) {
+        RTP_LLM_LOG_WARNING("Invalid block_index: %d, valid range: [0, %d)", block_index, config_.block_num);
+        return false;
     }
-    // Populate all layers for this block to match legacy semantics
+
+    bool all_success = true;
     for (int layer_id = 0; layer_id < config_.layer_num; ++layer_id) {
-        auto dst = allocator_->convertIndexToBuffer(layer_id, block_index);
-        if (!dst.k_addr || !dst.v_addr) {
-            RTP_LLM_LOG_ERROR("convertIndexToBuffer returned null for layer %d, block %d", layer_id, block_index);
-            continue;
-        }
-        device_->copy({*dst.k_addr, k_buffer});
-        device_->copy({*dst.v_addr, v_buffer});
+        all_success = setKVBlockValue(block_index, layer_id, k_buffer, v_buffer) && all_success;
     }
-    device_->syncAndCheck();
+    return all_success;
 }
 
 MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {

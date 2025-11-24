@@ -141,7 +141,8 @@ size_t BlockPool::freeBlocksNum() const {
 }
 
 size_t BlockPool::totalBlocksNum() const {
-    return config_.block_num;
+    // reserve block 0 for internal use
+    return config_.block_num - 1;
 }
 
 BlockAddrInfo BlockPool::convertIndexToAddr(int layer_id, int block_id) const {

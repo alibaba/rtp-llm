@@ -84,7 +84,6 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
         // TODO(chanyin): Handle cache insertion for reuse_cache case
 
         resource_context_.cache_manager->free(free_info);
-
         // batch_resource_ is modified directly by KVCacheManager::free
     }
 
