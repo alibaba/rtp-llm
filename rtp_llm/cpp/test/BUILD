@@ -125,7 +125,7 @@ cc_test(
         "@local_config_cuda//cuda:cuda_driver",
     ],
     copts = copts(),
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
 )
 
 
