@@ -213,6 +213,11 @@ public:
     }
     DeviceEventPtr createEvent() override;
 
+    GraphBase* getDeviceGraphRunner(const DeviceInitParams& params,
+                                    py::object              py_instance,
+                                    int                     kv_cache_block_offset,
+                                    bool                    is_prefill_hip_graph_mode = false) override;
+
     BufferPtr quantize(const QuantizeParams& params) override;
     BufferPtr dequantize(const QuantizeParams& params);
     void      printBuffer(const BufferPtr buffer);
@@ -280,8 +285,8 @@ private:
     hipStream_t     assist_stream_  = nullptr;
     hipStream_t     current_stream_ = nullptr;
     hipDeviceProp_t device_prop_;
-
-    BufferPtr curandstate_buf_;  // for sampler use.
+    GraphBase*      graph_runner_{nullptr};
+    BufferPtr       curandstate_buf_;  // for sampler use.
 
     rocm::hipblasMMWrapper* hipblasMMWrapperPtr() const {
         return hipblas_mm_wrapper_.get();
