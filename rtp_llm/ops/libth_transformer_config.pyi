@@ -321,10 +321,6 @@ class EplbMode:
     def value(self) -> int:
         ...
 class FIFOSchedulerConfig:
-    enable_fast_gen: bool
-    enable_partial_fallback: bool
-    fast_gen_context_budget: int
-    fast_gen_max_context_len: int
     max_batch_tokens_size: int
     max_context_batch_size: int
     scheduler_reserve_resource_ratio: int

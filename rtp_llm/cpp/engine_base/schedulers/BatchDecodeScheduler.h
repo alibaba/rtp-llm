@@ -87,7 +87,7 @@ public:
             if (device_->getDeviceProperties().dp_rank != 0) {
                 (*it)->setGenTimeline(false);
             }
-            auto result = (*it)->initKVBlock(0, 0);
+            auto result = (*it)->initKVBlock(0);
             if (!result.ok()) {
                 (*it)->setStop(ErrorCode::MALLOC_FAILED,
                                "BatchDecodeScheduler::initRunningStreams: initKVBlock failed");
@@ -104,7 +104,7 @@ public:
 
     void incrRunningStream() {
         for (auto it = running_streams_.begin(); it != running_streams_.end();) {
-            auto result = (*it)->incrKVBlock(0, 0);
+            auto result = (*it)->incrKVBlock();
             if (!result.ok()) {
                 (*it)->stopAndRelease(ErrorCode::MALLOC_FAILED, "incrKVBlock failed");
                 RTP_LLM_LOG_WARNING("stream [%ld] incr block failed", (*it)->streamId());

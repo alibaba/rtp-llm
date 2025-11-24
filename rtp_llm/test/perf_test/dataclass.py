@@ -31,8 +31,6 @@ class ResponseInfo:
                 "reuse_len": 0,
                 "output_len": 500,
                 "step_output_len": 500,
-                "fallback_tokens": 0,
-                "fallback_times": 0,
                 "first_token_cost_time": 6129.027,
                 "wait_time": 5021.9,
                 "pd_sep": false,

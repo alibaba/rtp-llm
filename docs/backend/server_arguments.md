@@ -153,9 +153,6 @@ This page lists server arguments used to configure the behavior and performance 
 | `--use-batch-decode-scheduler` | Enables batch decode scheduler | False |
 | `--max-context-batch-size` | Maximum context batch size | 1 |
 | `--scheduler-reserve-resource-ratio` | Reserved resource percentage | 5 |
-| `--enable-fast-gen` | Enables long request chunking processing | False |
-| `--fast-gen-context-budget` | Chunk processing size | None |
-| `--enable-partial-fallback` | Allows partial resource reclamation | False |
 | `--batch-decode-scheduler-batch-size` | Decode batch size | 1 |
 
 ## Load Balancing and Performance Optimization Configuration

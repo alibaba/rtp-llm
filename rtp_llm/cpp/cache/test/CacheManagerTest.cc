@@ -130,10 +130,6 @@ TEST_F(CacheManagerTest, testAllocateWithFreeCache) {
     ASSERT_EQ(allocator->blockRefCounter().getRefCounter(2), 1);
     ASSERT_EQ(allocator->blockRefCounter().getRefCounter(3), 0);
     ASSERT_EQ(cache_manager.freeBlockNums(), 1);
-
-    // paritial fallback case
-    freeWithCache(cache_manager, index2, {1000, 2000, 3000, 4000, 5000});
-    ASSERT_TRUE(cache_manager.blockCache().hasKey({1000, 2000}));
 }
 
 TEST_F(CacheManagerTest, testLossCache) {
