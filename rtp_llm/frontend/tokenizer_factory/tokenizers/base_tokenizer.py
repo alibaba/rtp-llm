@@ -2,9 +2,13 @@ from typing import Any, Dict, List, Union
 
 from transformers import AutoTokenizer
 
+from rtp_llm.config.py_config_modules import PyEnvConfigs
+
 
 class BaseTokenizer:
     def __init__(self, tokenizer_path: str, config_json: Dict[str, Any] = {}):
+        self.py_env_configs = PyEnvConfigs()
+        self.py_env_configs.update_from_env()
         self.path = tokenizer_path
         self.config_json = config_json
         self.init_tokenizer(tokenizer_path, self.config_json)

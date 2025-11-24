@@ -215,6 +215,7 @@ class LoadConfig:
         # seem like it's a third-party pkg environment, but we reserve it temporar
         self.load_ckpt_num_process: int = 0
         self.load_method: str = "auto"
+        self.use_fast_tokenizer: bool = True
 
     def update_from_env(self):
         self.phy2log_path = os.environ.get("PHY2LOG_PATH", self.phy2log_path)
@@ -228,6 +229,9 @@ class LoadConfig:
             os.environ.get("LOAD_CKPT_NUM_PROCESS", self.load_ckpt_num_process)
         )
         self.load_method = str(os.environ.get("LOAD_METHOD", self.load_method)).lower()
+        self.use_fast_tokenizer = get_env_bool(
+            "USE_FAST_TOKENIZER", self.use_fast_tokenizer
+        )
 
     def to_string(self):
         return (

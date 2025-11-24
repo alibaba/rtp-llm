@@ -14,7 +14,9 @@ class BertTokenizer(BaseTokenizer):
     def init_tokenizer(self, tokenizer_path: str, config_json: Dict[str, Any] = {}):
         try:
             self.tokenizer = AutoTokenizer.from_pretrained(
-                tokenizer_path, trust_remote_code=True
+                tokenizer_path,
+                trust_remote_code=True,
+                use_fast=self.py_env_configs.load_config.use_fast_tokenizer,
             )
         except:
             logging.warning(

@@ -34,7 +34,10 @@ class QWenTokenizer(BaseTokenizer):
 class QWenV2Tokenizer(BaseTokenizer):
     def init_tokenizer(self, tokenizer_path: str, config_json: Dict[str, Any] = {}):
         self.tokenizer = AutoTokenizer.from_pretrained(
-            tokenizer_path, verbose=False, trust_remote_code=True
+            tokenizer_path,
+            verbose=False,
+            trust_remote_code=True,
+            use_fast=self.py_env_configs.load_config.use_fast_tokenizer,
         )
         self.tokenizer.im_start_id = self.tokenizer.encode("<|im_start|>")[0]
         self.tokenizer.im_end_id = self.tokenizer.encode("<|im_end|>")[0]

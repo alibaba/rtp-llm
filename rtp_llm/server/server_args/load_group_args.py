@@ -41,3 +41,10 @@ def init_load_group_args(parser):
         default="auto",
         help="模型权重加载方法",
     )
+    load_group.add_argument(
+        "--use_fast_tokenizer",
+        env_name="USE_FAST_TOKENIZER",
+        type=str2bool,
+        default=True,
+        help="模型权重Tokenizer是否开启Fast方式",
+    )
