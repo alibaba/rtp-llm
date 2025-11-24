@@ -358,7 +358,8 @@ class FrontendServer(object):
                 all_hidden_states_bf16_decoded = all_hidden_states_bf16_decoded.reshape(all_hidden_states_array.shape)
                 all_hidden_states_tensor = bf16_to_tensor(all_hidden_states_bf16_decoded)
                 logging.warning(f"all_hidden_states_array2: \n  {all_hidden_states_tensor}")
-                
+                logging.warning(f"all_hidden_states_tensor: \n  {all_hidden_states_tensor.shape}")
+                logging.warning(f"all_hidden_states_array2: \n  {all_hidden_states_tensor[64:]}")
             
             complete_response["extra_outputs"][
                 "all_hidden_states"
