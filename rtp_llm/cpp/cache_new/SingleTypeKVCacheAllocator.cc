@@ -198,8 +198,11 @@ size_t SingleTypeKVCacheAllocator::freeBlocksNum() const {
 }
 
 size_t SingleTypeKVCacheAllocator::availableBlocksNum() const {
-    // TODO: free blocks nums not equal to available blocks nums when block cache holds blocks reference
-    return block_pool_->freeBlocksNum();
+    return block_pool_->availableBlocksNum();
+}
+
+size_t SingleTypeKVCacheAllocator::availableTokensNum() const {
+    return block_pool_->availableBlocksNum() * full_kv_cache_group_->seqSizePerBlock();
 }
 
 size_t SingleTypeKVCacheAllocator::totalBlocksNum() const {

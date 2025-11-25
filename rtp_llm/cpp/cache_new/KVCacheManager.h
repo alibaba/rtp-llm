@@ -17,10 +17,6 @@ class KVCacheManager {
 public:
     bool               init();
     const CacheConfig& cacheConfig() const;
-    // size_t availableBlocksNum() const;
-    // size_t freeBlocksNum() const;
-
-    size_t availableTokenNums() const;
 
     CacheLayerLayout layerCacheBase() const;
 
@@ -33,6 +29,7 @@ public:
 
     size_t      freeBlocksNum() const;
     size_t      availableBlocksNum() const;
+    size_t      availableTokensNum() const;
     size_t      totalBlocksNum() const;
     size_t      maxSeqLen() const;
     KVCacheInfo getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;

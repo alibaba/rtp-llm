@@ -19,7 +19,7 @@ bool KVCacheGroup::ensureFreeBlocks(int required_blocks) {
         return true;
     }
 
-    // blocks popped by block_cache_ might be occupied by other query
+    // blocks popped by block cache might be occupied by request
     // it's necessary to checkout whether free blocks are enough
     while (block_pool_->freeBlocksNum() < required_blocks) {
         int  need_evict     = required_blocks - block_pool_->freeBlocksNum();
@@ -30,7 +30,7 @@ bool KVCacheGroup::ensureFreeBlocks(int required_blocks) {
                                 need_evict);
             return false;
         }
-        block_pool_->free(evicted_blocks);
+        block_pool_->blockCacheFree(evicted_blocks);
     }
 
     return true;
@@ -74,7 +74,7 @@ MatchResult KVCacheGroup::matchSingleKey(CacheKeyType cache_key) {
 }
 
 void KVCacheGroup::reference(const BlockIndicesType& new_block_indices) {
-    block_pool_->reference(new_block_indices);
+    block_pool_->requestReference(new_block_indices);
 }
 
 }  // namespace rtp_llm

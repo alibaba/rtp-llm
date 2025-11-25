@@ -52,9 +52,8 @@ bool KVCacheManager::init() {
     return false;
 }
 
-size_t KVCacheManager::availableTokenNums() const {
-    // TODO(chanyin): implement this
-    return 0;
+size_t KVCacheManager::availableTokensNum() const {
+    return allocator_->availableTokensNum();
 }
 
 const CacheConfig& KVCacheManager::cacheConfig() const {

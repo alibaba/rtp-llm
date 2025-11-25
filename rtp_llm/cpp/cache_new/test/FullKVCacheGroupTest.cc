@@ -105,6 +105,7 @@ TEST_F(FullKVCacheGroupTest, MallocFreeTest) {
     auto block_pool = createBlockPool();
     block_pool->init();
     ASSERT_EQ(block_pool->freeBlocksNum(), 9);
+    ASSERT_EQ(block_pool->availableBlocksNum(), 9);
 
     auto spec                = make_shared<MHAKVCacheSpec>();
     spec->seq_size_per_block = 2;
@@ -116,6 +117,7 @@ TEST_F(FullKVCacheGroupTest, MallocFreeTest) {
 
     ASSERT_TRUE(group1.malloc(cache_keys, block_indices, 7));
     ASSERT_EQ(block_pool->freeBlocksNum(), 5);
+    ASSERT_EQ(block_pool->availableBlocksNum(), 5);
     ASSERT_EQ(block_indices.size(), 4);
 
     BlockIndicesType expected_result = {1, 2, 3, 4};
@@ -123,6 +125,7 @@ TEST_F(FullKVCacheGroupTest, MallocFreeTest) {
 
     group1.free(block_indices);
     ASSERT_EQ(block_pool->freeBlocksNum(), 9);
+    ASSERT_EQ(block_pool->availableBlocksNum(), 9);
 
     ASSERT_FALSE(group1.malloc(cache_keys, block_indices, 180));
 }
@@ -131,6 +134,7 @@ TEST_F(FullKVCacheGroupTest, InsertIntoCacheTest) {
     auto block_pool = createBlockPool();
     block_pool->init();
     ASSERT_EQ(block_pool->freeBlocksNum(), 9);
+    ASSERT_EQ(block_pool->availableBlocksNum(), 9);
 
     auto spec                = make_shared<MHAKVCacheSpec>();
     spec->seq_size_per_block = 2;
@@ -165,16 +169,45 @@ TEST_F(FullKVCacheGroupTest, InsertIntoCacheTest) {
     ASSERT_EQ(match_result3.block_indices, expected_result3);
 }
 
-// TODO, modify these ut after block cache not ref blocks
-// TEST_F(FullKVCacheGroupTest, EnsureFreeBlocksTest) {
-//     auto block_pool = createBlockPool();
-//     block_pool->init();
-//     auto block_cache = block_pool->blockCache();
-//     ASSERT_EQ(block_pool->freeBlocksNum(), 9);
+TEST_F(FullKVCacheGroupTest, EnsureFreeBlocksTest) {
+    auto block_pool = createBlockPool();
+    block_pool->init();
+    auto block_cache  = block_pool->blockCache();
+    auto total_blocks = block_pool->freeBlocksNum();
 
-//     FullKVCacheGroup group1({}, spec, block_pool);
-//     ASSERT_EQ(2, group1.ensureFreeBlocks(5));
-// }
+    auto spec                = make_shared<MHAKVCacheSpec>();
+    spec->seq_size_per_block = 2;
+
+    FullKVCacheGroup group1({}, spec, block_pool, 0);
+    ASSERT_EQ(true, group1.ensureFreeBlocks(5));
+    ASSERT_EQ(block_pool->freeBlocksNum(), total_blocks);
+    ASSERT_EQ(block_pool->availableBlocksNum(), total_blocks);
+
+    ASSERT_EQ(false, group1.ensureFreeBlocks(10));
+
+    CacheKeysType    cache_keys = {101, 102, 103, 104};
+    BlockIndicesType block_indices;
+
+    ASSERT_TRUE(group1.malloc(cache_keys, block_indices, 8));
+    ASSERT_EQ(block_indices.size(), 4);
+    ASSERT_EQ(block_pool->freeBlocksNum(), total_blocks - 4);
+    ASSERT_EQ(block_pool->availableBlocksNum(), total_blocks - 4);
+
+    group1.insertIntoCache(cache_keys, block_indices, false);
+    ASSERT_EQ(block_cache->size(), 4);
+    ASSERT_EQ(block_pool->freeBlocksNum(), total_blocks - 4);
+    ASSERT_EQ(block_pool->availableBlocksNum(), total_blocks - 4);
+
+    group1.free(block_indices);
+    ASSERT_EQ(block_cache->size(), 4);
+    ASSERT_EQ(block_pool->freeBlocksNum(), total_blocks - 4);
+    ASSERT_EQ(block_pool->availableBlocksNum(), total_blocks);
+
+    ASSERT_EQ(true, group1.ensureFreeBlocks(total_blocks - 2));
+    ASSERT_EQ(block_cache->size(), 2);
+    ASSERT_EQ(block_pool->freeBlocksNum(), total_blocks - 2);
+    ASSERT_EQ(block_pool->availableBlocksNum(), total_blocks);
+}
 
 }  // namespace test
 }  // namespace rtp_llm

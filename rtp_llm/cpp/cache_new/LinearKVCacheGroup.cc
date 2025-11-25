@@ -47,7 +47,7 @@ void LinearKVCacheGroup::removeSkippedBlocks(BlockIndicesType& block_indices) {
                 found_valid_block = true;
             } else {
                 BlockIndicesType blocks = {block_indices[i]};
-                block_pool_->free(blocks);
+                block_pool_->requestFree(blocks);
                 block_indices[i] = NULL_BLOCK_IDX;
             }
         }
@@ -85,13 +85,13 @@ bool LinearKVCacheGroup::malloc(const CacheKeysType& cache_keys, BlockIndicesTyp
 
 void LinearKVCacheGroup::reference(BlockIndicesType& block_indices, const BlockIndicesType& new_block_indices) {
     block_indices.insert(block_indices.end(), new_block_indices.begin(), new_block_indices.end());
-    block_pool_->reference(new_block_indices);
+    block_pool_->requestReference(new_block_indices);
 }
 
 void LinearKVCacheGroup::free(const BlockIndicesType& block_indices) {
     for (auto block : block_indices) {
         if (!isNullBlockIdx(block)) {
-            block_pool_->free(block);
+            block_pool_->requestFree(block);
         }
     }
 }
@@ -105,8 +105,9 @@ void LinearKVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
 
     for (int i = 0; i < cache_keys.size(); i++) {
         BlockCacheV1::CacheItem item{cache_keys[i], group_id_, block_indices[i], is_resident};
+        // block cache引用了block
         if (block_cache_->put(item)) {
-            block_pool_->incrBlockRefCounter({block_indices[i]});
+            block_pool_->blockCacheReference(block_indices[i]);
         }
     }
 }

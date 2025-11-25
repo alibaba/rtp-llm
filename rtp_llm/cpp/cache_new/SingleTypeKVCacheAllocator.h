@@ -26,6 +26,7 @@ public:
 
     size_t freeBlocksNum() const override;
     size_t availableBlocksNum() const override;
+    size_t availableTokensNum() const override;
     size_t totalBlocksNum() const override;
     size_t maxSeqLen() const override;
 

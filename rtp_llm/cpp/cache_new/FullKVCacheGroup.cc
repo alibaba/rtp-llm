@@ -56,13 +56,14 @@ void FullKVCacheGroup::free(const BlockIndicesType& block_indices) {
         return;
     }
 
-    block_pool_->free(block_indices);
+    block_pool_->requestFree(block_indices);
     RTP_LLM_LOG_DEBUG("Freed %zu blocks", block_indices.size());
 }
 
 void FullKVCacheGroup::reference(BlockIndicesType& block_indices, const BlockIndicesType& new_block_indices) {
     block_indices.insert(block_indices.end(), new_block_indices.begin(), new_block_indices.end());
-    block_pool_->reference(new_block_indices);
+    // query 引用了block
+    block_pool_->requestReference(new_block_indices);
 }
 
 void FullKVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
@@ -89,7 +90,10 @@ void FullKVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
         item.group_id    = group_id_;
         item.block_index = block_indices[i];
         item.is_resident = is_resident;
-        block_cache_->put(item);
+        // block cache引用了block
+        if (block_cache_->put(item)) {
+            block_pool_->blockCacheReference(block_indices[i]);
+        }
     }
 
     RTP_LLM_LOG_DEBUG("Inserted %zu blocks into cache", block_indices.size());
