@@ -28,9 +28,8 @@ void CudaGraphRunner::capturePrefill() {
         inputs.attention_inputs.input_lengths.data_ptr<int>()[0] = seq_len;
         inputs.attention_inputs.prefix_lengths = capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths;
         inputs.attention_inputs.dtype          = capture_mem_hold_.py_model_inputs_.attention_inputs.dtype;
-        // inputs.attention_inputs.padding_offset =
-        //     capture_mem_hold_.py_model_inputs_.attention_inputs.padding_offset.slice(
-        //         0, 0, max_bs_ * num_tokens_per_bs_);
+        inputs.attention_inputs.padding_offset =
+            capture_mem_hold_.py_model_inputs_.attention_inputs.padding_offset.slice(0, 0, seq_len);
         inputs.attention_inputs.prefill_cuda_graph_copy_params =
             capture_mem_hold_.py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params;
         if (inputs.attention_inputs.prefill_cuda_graph_copy_params) {
@@ -144,7 +143,6 @@ std::vector<int> CudaGraphRunner::getPrefillSequenceLengthsToCapture() {
 
     RTP_LLM_LOG_INFO("Total sequence lengths to capture: %zu", capture_seq_lens.size());
     RTP_LLM_LOG_INFO("Min length: %d, Max length: %d", capture_seq_lens.front(), capture_seq_lens.back());
-
     return capture_seq_lens;
 }
 

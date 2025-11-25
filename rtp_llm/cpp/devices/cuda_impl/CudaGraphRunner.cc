@@ -89,6 +89,10 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
 
         copySmallerIntoLarger(inputs.attention_inputs.kv_cache_block_id_device,
                               py_model_inputs_.attention_inputs.kv_cache_block_id_device);
+
+        optimizedCopy(inputs.attention_inputs.padding_offset,
+                      py_model_inputs_.attention_inputs.padding_offset,
+                      inputs.attention_inputs.padding_offset.size(0) * sizeof(int));
         graph_instances_[current_real_graph_bs_].mem_hold_.params_ptr->fillParams(
             inputs.attention_inputs.sequence_lengths,
             inputs.attention_inputs.input_lengths,
@@ -109,6 +113,10 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
                       (current_batch_size_ + 1) * sizeof(int));
 
         optimizedCopy(inputs.input_ids, py_model_inputs_.input_ids, current_seq_len_ * sizeof(int));
+
+        optimizedCopy(inputs.attention_inputs.padding_offset,
+                      py_model_inputs_.attention_inputs.padding_offset,
+                      current_seq_len_ * sizeof(int));
 
         if (py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params) {
             (*(py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params->cuda_graph_prefill_batch_size
@@ -221,7 +229,7 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     inputs.attention_inputs.kv_cache_block_id_device = torch::zeros(
         {int(max_bs_), ((max_seq_len_ + seq_size_per_block_ - 1) / seq_size_per_block_)}, options_cuda_int32_);
     // prefix_lengths [batch_size, int32] (for attention `prepare`)
-    inputs.attention_inputs.prefix_lengths = torch::full({int(max_bs_)}, num_tokens_per_bs_, options_cpu_int32_);
+    inputs.attention_inputs.prefix_lengths = torch::zeros({int(max_bs_)}, options_cpu_int32_);
 
     inputs.attention_inputs.kv_cache_block_id_host = torch::zeros(
         {int(max_bs_), ((max_seq_len_ + seq_size_per_block_ - 1) / seq_size_per_block_)}, options_cpu_int32_);
@@ -263,6 +271,11 @@ void CudaGraphRunner::setInputEmbeddingScalar(float input_embedding_scalar) {
 
 void CudaGraphRunner::setModelDataType(caffe2::TypeMeta data_type) {
     model_data_type_ = data_type;
+}
+
+void CudaGraphRunner::setMaxPrefillCudaGraphLen(int max_prefill_cuda_graph_len) {
+    max_perfill_cuda_graph_len_ = max_prefill_cuda_graph_len;
+    RTP_LLM_LOG_INFO("Set max_perfill_cuda_graph_len_ to %d", max_perfill_cuda_graph_len_);
 }
 
 void CudaGraphRunner::initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int max_num_token) {

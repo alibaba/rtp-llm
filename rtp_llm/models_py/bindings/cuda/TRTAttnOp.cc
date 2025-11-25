@@ -111,14 +111,15 @@ ParamsBasePtr TRTPrefillOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
 torch::Tensor TRTPrefillOp::forward(const torch::Tensor&              input,
                                     std::optional<torch_ext::KVCache> kv_cache,
                                     const TRTAttnPtr&                 params) {
+    // reserve for debug
     // DISPATCH_CUDA_FUNCTION_DATA_TYPE(torchDTypeToDataType(input.dtype()),
     //                                  invoke_debug_kernel2,
     //                                  input.data_ptr(),
     //                                  0,
     //                                  0,
-    //                                  220,
+    //                                  30,
     //                                  10,
-    //                                  2304,
+    //                                  input.sizes()[1],
     //                                  1,
     //                                  device_->getStream());
     KVBlockArray kv_block_array;
@@ -170,7 +171,6 @@ torch::Tensor TRTPrefillOp::forward(const torch::Tensor&              input,
             fmha_output_ptr = tmp_fmha_output.data_ptr();
         }
         RTP_LLM_CHECK_WITH_INFO(fmha_output_ptr, "fmha_output_ptr must be provided for trt v2 fmha");
-
         cufmha_runner_->runTrtV2Fmha(fmha_input_ptr,
                                      params->cu_seqlens.data_ptr(),
                                      fmha_output_ptr,
@@ -184,6 +184,7 @@ torch::Tensor TRTPrefillOp::forward(const torch::Tensor&              input,
             output = tmp_fmha_output.to(output.dtype());
         }
     }
+    // reserve for debug
     // DISPATCH_CUDA_FUNCTION_DATA_TYPE(torchDTypeToDataType(output.dtype()),
     //                                  invoke_debug_kernel2,
     //                                  output.data_ptr(),
@@ -191,18 +192,8 @@ torch::Tensor TRTPrefillOp::forward(const torch::Tensor&              input,
     //                                  0,
     //                                  30,
     //                                  10,
-    //                                  768,
+    //                                  output.sizes()[1],
     //                                  2,
-    //                                  device_->getStream());
-    // DISPATCH_CUDA_FUNCTION_DATA_TYPE(torchDTypeToDataType(output.dtype()),
-    //                                  invoke_debug_kernel2,
-    //                                  output.data_ptr(),
-    //                                  208,
-    //                                  0,
-    //                                  10,
-    //                                  10,
-    //                                  768,
-    //                                  3,
     //                                  device_->getStream());
     return output;
 }

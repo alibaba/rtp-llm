@@ -1,7 +1,10 @@
 #pragma once
-
 #include <torch/extension.h>
+
+#if USING_CUDA
+#include <cuda_runtime_api.h>
 #include <cuda_runtime.h>
+#endif
 
 namespace torch_ext {
 

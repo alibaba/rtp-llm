@@ -375,6 +375,7 @@ py_test(
         "HACK_LAYER_NUM" : "1",
         "CUDA_LAUNCH_BLOCKING" : "1",
     },
+    tags = ['A10'],
     exec_properties = {'gpu':'A10'},
 )
 
@@ -395,7 +396,9 @@ py_test(
         "HACK_LAYER_NUM" : "1",
         "CUDA_LAUNCH_BLOCKING" : "1",
         "ENABLE_CUDA_GRAPH_DEBUG_MODE" : "1",
+        "MAX_CONTEXT_BATCH_SIZE" : "128"
     },
+    tags = ['A10'],
     exec_properties = {'gpu':'A10'},
 )
 

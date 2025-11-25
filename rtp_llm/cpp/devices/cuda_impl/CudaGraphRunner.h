@@ -78,6 +78,7 @@ public:
     void           setInputEmbeddingScalar(float input_embedding_scalar) override;
     void           setModelDataType(caffe2::TypeMeta data_type) override;
     void           setQKVDim(int dim) override;
+    void           setMaxPrefillCudaGraphLen(int max_prefill_cuda_graph_len);
 
 private:
     void                 copySmallerIntoLarger(const torch::Tensor& source_tensor, torch::Tensor& target_tensor);

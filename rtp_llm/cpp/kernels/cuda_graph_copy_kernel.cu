@@ -1,6 +1,3 @@
-
-#include <cuda_runtime.h>
-#include <cuda_fp16.h>
 #include <algorithm>
 #include "rtp_llm/cpp/kernels/cuda_graph_copy_kernel.h"
 #include <stdio.h>
@@ -303,6 +300,28 @@ template void invokeCudaGraphCopyLarge2Small<float>(float*      input_tensor,
                                                     const int   hidden_size,
                                                     int*        cu_seq_len,
                                                     hipStream_t stream);
+
+#ifdef ENABLE_BF16
+template void invokeCudaGraphCopySmall2Large<amd_bfloat16>(amd_bfloat16* input_tensor,
+                                                           amd_bfloat16* output_tensor,
+                                                           int*          batch_size,
+                                                           const int     max_batch_size,
+                                                           const int     max_seq_len,
+                                                           int*          input_lengths,
+                                                           const int     hidden_size,
+                                                           int*          cu_seq_len,
+                                                           hipStream_t   stream);
+
+template void invokeCudaGraphCopyLarge2Small<amd_bfloat16>(amd_bfloat16* input_tensor,
+                                                           amd_bfloat16* output_tensor,
+                                                           int*          batch_size,
+                                                           const int     max_batch_size,
+                                                           const int     max_seq_len,
+                                                           int*          input_lengths,
+                                                           const int     hidden_size,
+                                                           int*          cu_seq_len,
+                                                           hipStream_t   stream);
+#endif
 #endif
 
 }  // namespace rtp_llm

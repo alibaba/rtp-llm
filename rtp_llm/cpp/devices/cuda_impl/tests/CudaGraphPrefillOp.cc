@@ -6,9 +6,11 @@ void CudaGraphPrefillOp::init(py::object py_instance) {
     cuda_graph_runner_ = createCudaGraphRunner(std::move(py_instance));
     // initializeResource();
     // model warm up
-    auto inputs = buildInputs(1, 64, 64, 64, true);
+    auto inputs = buildInputs(2, 64, 64, 64, true);
     cuda_graph_runner_->normalForward(inputs);
     setCufmhaPadded(true);
+    cuda_graph_runner_->setQKVDim(4608);
+    cuda_graph_runner_->setMaxPrefillCudaGraphLen(960);
     cuda_graph_runner_->initCapture();
 }
 
@@ -27,7 +29,7 @@ CudaGraphRunnerPtr CudaGraphPrefillOp::createCudaGraphRunner(py::object py_insta
     DeviceInitParams params;
     DeviceBase*      device                              = rtp_llm::DeviceFactory::getDefaultDevice();
     params.hw_kernel_config.enable_cuda_graph            = true;
-    params.concurrency_config.concurrency_limit          = 128;
+    params.fifo_scheduler_config.max_context_batch_size  = 128;
     params.hw_kernel_config.enable_cuda_graph_debug_mode = false;
     params.hidden_size                                   = 3584;
     params.max_seq_len                                   = 64;
