@@ -233,8 +233,11 @@ size_t HybridLayerKVCacheAllocator::freeBlocksNum() const {
 }
 
 size_t HybridLayerKVCacheAllocator::availableBlocksNum() const {
-    // TODO: free blocks nums not equal to available blocks nums when block cache holds blocks reference
-    return block_pool_->freeBlocksNum();
+    return block_pool_->availableBlocksNum();
+}
+
+size_t HybridLayerKVCacheAllocator::availableTokensNum() const {
+    return block_pool_->availableBlocksNum() * full_kv_cache_group_->seqSizePerBlock();
 }
 
 size_t HybridLayerKVCacheAllocator::totalBlocksNum() const {

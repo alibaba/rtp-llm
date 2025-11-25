@@ -31,17 +31,22 @@ public:
 
     BlockCacheV1Ptr blockCache();
 
-    // size_t totalBlocks() const;
     size_t totalBlocksNum() const;
     size_t freeBlocksNum() const;
+    size_t availableBlocksNum() const;
 
     MemoryType                 where() const;
     std::vector<torch::Tensor> layerCacheBase() const;
 
     std::vector<BlockIdxType> malloc(int num_blocks);
-    void                      free(BlockIdxType block_idx);
-    void                      free(const BlockIndicesType& block_indices);
-    void                      reference(const BlockIndicesType& block_indices);
+    void                      requestFree(BlockIdxType block_idx);
+    void                      requestFree(const BlockIndicesType& block_indices);
+    void                      blockCacheFree(BlockIdxType block_idx);
+    void                      blockCacheFree(const BlockIndicesType& block_indices);
+    void                      requestReference(BlockIdxType block_idx);
+    void                      requestReference(const BlockIndicesType& block_indices);
+    void                      blockCacheReference(BlockIdxType block_idx);
+    void                      blockCacheReference(const BlockIndicesType& block_indices);
 
     void               regUserMr(size_t model_id);
     BlockAddrInfo      convertIndexToAddr(int layer_id, int block_id) const;
@@ -59,12 +64,14 @@ public:
 private:
     void initFreeBlocks();
     void deregUserMr();
+    void freeImpl(const BlockIndicesType& block_indices);
 
 private:
     BlockPoolConfig                        config_;
     std::set<BlockIdxType>                 free_block_ids_;
     std::unordered_map<int, torch::Tensor> layer_kv_tensors_;  // global_layer_id -> kv cache addresses
-    BlockRefCounter                        block_ref_counter_;
+    BlockRefCounter                        all_ref_counter_;
+    BlockRefCounter                        request_ref_counter_;
     rtp_llm::DeviceBase*                   device_;
     AllocationType                         atype_;
 
