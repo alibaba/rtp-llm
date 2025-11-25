@@ -206,6 +206,12 @@ MultimodalOutput QueryConverter::transMMOutput(const MultimodalOutputsPB* output
             }
             mm_output.mm_position_ids.value().emplace_back(transTensor(output_pb.multimodal_pos_id()));
         }
+        if (output_pb.has_multimodal_deepstack_embeds()) {
+            if (mm_output.mm_deepstack_embeds == std::nullopt) {
+                mm_output.mm_deepstack_embeds = std::vector<torch::Tensor>();
+            }
+            mm_output.mm_deepstack_embeds.value().emplace_back(transTensor(output_pb.multimodal_deepstack_embeds()));
+        }
     }
     return mm_output;
 }
