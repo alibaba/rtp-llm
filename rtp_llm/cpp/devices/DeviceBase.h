@@ -181,7 +181,8 @@ public:
     BufferPtr                     mhaQKVGemm(const AttentionLayerParams& params) override;
     GroupedGemmOutput             groupedGemm(const GroupedGemmParams& params) override;
     MultimodalEmbeddingOutput     multimodalEmbedding(const MultimodalEmbeddingParams& params) override;
-    BufferPtr                     inputEmbedding(const InputEmbeddingParams& params) override;
+    BufferPtr multimodalDeepstackEmbedding(const MultimodalDeepstackEmbeddingParams& params) override;
+    BufferPtr inputEmbedding(const InputEmbeddingParams& params) override;
     // mla
     AttentionLayerOutput mlaAttentionLayer(const AttentionLayerParams& params) override;
 

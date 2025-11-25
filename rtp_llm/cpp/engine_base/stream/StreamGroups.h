@@ -109,6 +109,15 @@ public:
         return decode_streams_;
     }
 
+    bool hasMMDeepstackEmbed() const {
+        for (auto& stream : context_streams_) {
+            if (stream->multimodalDeepstackEmbeds().size() > 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     bool needReturnAllProbs() const {
         for (auto& stream : context_streams_) {
             if (stream->getReturnAllProbs()) {

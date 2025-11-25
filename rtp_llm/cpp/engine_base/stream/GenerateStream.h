@@ -212,6 +212,7 @@ public:
     void spStep();
 
     std::vector<torch::Tensor>    multimodalFeatures() const;
+    std::vector<torch::Tensor>    multimodalDeepstackEmbeds() const;
     int                           multimodalFeaturesLength() const;
     rtp_llm::BufferPtr            multimodalLocations() const;
     std::vector<std::vector<int>> multimodalIntervals() const;
