@@ -136,6 +136,20 @@ cc_library(
 )
 
 cc_library(
+    name = "module_quick_all_reduce",
+    srcs = ["aiter/jit/module_quick_all_reduce.so"],
+    hdrs = ["aiter_meta/csrc/include/quick_all_reduce.h"],
+    deps = [
+        ":aiter_so",
+        ":aiter_headers",
+    ],
+    copts = [],
+    strip_include_prefix = "aiter_meta/csrc/include/",
+    visibility = ["//visibility:public"],
+    tags = ["rocm"],
+)
+
+cc_library(
     name = "module_aiter_enum",
     srcs = ["aiter/jit/module_aiter_enum.so"],
     hdrs = ["aiter_meta/csrc/include/aiter_enum.h"],
@@ -280,6 +294,22 @@ cc_library(
     copts = [],
     linkopts = [],
     strip_include_prefix = "aiter_meta/csrc/include/",
+    visibility = ["//visibility:public"],
+    tags = ["rocm"],
+)
+
+cc_library(
+    name = "module_fmha_v3_varlen_fwd",
+    srcs = ["aiter/jit/module_fmha_v3_varlen_fwd.so"],
+    hdrs = ["aiter_meta/csrc/include/torch/mha_v3_varlen_fwd.h"],
+    deps = [
+        ":aiter_so",
+        ":aiter_headers",
+        ":ck_fmha_example_headers",
+    ],
+    copts = [],
+    linkopts = [],
+    strip_include_prefix = "aiter_meta/csrc/include/torch/",
     visibility = ["//visibility:public"],
     tags = ["rocm"],
 )
