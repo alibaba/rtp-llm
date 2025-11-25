@@ -41,6 +41,7 @@ cc_library(
             "@aiter_src//:module_rmsnorm",
             "@aiter_src//:module_norm",
             "@aiter_src//:module_mha_fwd",
+            "@aiter_src//:module_fmha_v3_varlen_fwd",
             "@aiter_src//:module_moe_ck2stages",
         ],
         "//conditions:default": [
@@ -57,6 +58,7 @@ cc_library(
             "@aiter//:module_rmsnorm",
             "@aiter//:module_norm",
             "@aiter//:module_mha_fwd",
+            "@aiter//:module_fmha_v3_varlen_fwd",
             "@aiter//:module_moe_ck2stages",
         ],
     }),
