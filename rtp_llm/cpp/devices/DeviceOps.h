@@ -35,6 +35,7 @@ public:
     virtual MultiplyOutput    multiply(const MultiplyParams& params);
     virtual BufferPtr         embeddingLookup(const EmbeddingLookupParams& params);
     virtual BufferPtr         multimodalEmbedding(const MultimodalEmbeddingParams& params);
+    virtual BufferPtr         multimodalDeepstackEmbedding(const MultimodalDeepstackEmbeddingParams& params);
     virtual BufferPtr         inputEmbedding(const InputEmbeddingParams& params);
     virtual BufferPtr         activation(const ActivationParams& params);
     virtual BufferPtr         softmax(const SoftmaxParams& params);
@@ -112,7 +113,7 @@ public:
     // for device-specific weights preprocess
     static torch::Tensor
     preprocessGemmWeightByKey(const std::string& key, torch::Tensor weight, bool user_arm_gemm_use_kai);
-    static torch::Tensor              preprocessWeightScale(torch::Tensor weight, torch::Tensor scale);
+    static torch::Tensor preprocessWeightScale(torch::Tensor weight, torch::Tensor scale);
 
     virtual void prepareCommBuffer(const PrepareCommBufferParams& params);
 };

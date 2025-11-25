@@ -210,9 +210,11 @@ public:
     void step();
     void spStep();
 
-    std::vector<torch::Tensor> multimodalFeatures() const;
-    int                        multimodalFeaturesLength() const;
-    rtp_llm::BufferPtr         multimodalLocations() const;
+    std::vector<torch::Tensor>    multimodalFeatures() const;
+    std::vector<torch::Tensor>    multimodalDeepstackEmbeds() const;
+    int                           multimodalFeaturesLength() const;
+    rtp_llm::BufferPtr            multimodalLocations() const;
+    std::vector<std::vector<int>> multimodalIntervals() const;
 
     int64_t      getTimeoutMs() const;
     void         checkTimeout();

@@ -171,6 +171,13 @@ def trans_input(input_py: GenerateInput):
     return input_pb
 
 
+def get_multimodal_preprocess_value(value: Optional[int], default: int):
+    if value is not None and value != -1:
+        return value
+    else:
+        return default
+
+
 def trans_multimodal_input(
     input_py: GenerateInput, input_pb: GenerateInputPB, generate_config: GenerateConfig
 ):
@@ -187,19 +194,35 @@ def trans_multimodal_input(
         mm_input_pb.multimodal_url = mm_input.url
         mm_input_pb.multimodal_type = mm_input.mm_type
         mm_preprocess_config_pb = mm_input_pb.mm_preprocess_config
-        mm_preprocess_config_pb.width = (
-            mm_input.config.width if mm_input.config.width != -1 else resized_shape[0]
+        mm_preprocess_config_pb.width = get_multimodal_preprocess_value(
+            mm_input.config.width, resized_shape[0]
         )
-        mm_preprocess_config_pb.height = (
-            mm_input.config.height if mm_input.config.height != -1 else resized_shape[1]
+        mm_preprocess_config_pb.height = get_multimodal_preprocess_value(
+            mm_input.config.height, resized_shape[1]
         )
-        mm_preprocess_config_pb.min_pixels = mm_input.config.min_pixels
-        mm_preprocess_config_pb.max_pixels = mm_input.config.max_pixels
-        mm_preprocess_config_pb.fps = mm_input.config.fps
-        mm_preprocess_config_pb.min_frames = mm_input.config.min_frames
-        mm_preprocess_config_pb.max_frames = mm_input.config.max_frames
-        mm_preprocess_config_pb.crop_positions.extend(mm_input.config.crop_positions)
-        mm_preprocess_config_pb.mm_timeout_ms = mm_input.config.mm_timeout_ms
+        mm_preprocess_config_pb.min_pixels = get_multimodal_preprocess_value(
+            generate_config.min_pixels, mm_input.config.min_pixels
+        )
+        mm_preprocess_config_pb.max_pixels = get_multimodal_preprocess_value(
+            generate_config.max_pixels, mm_input.config.max_pixels
+        )
+        mm_preprocess_config_pb.fps = get_multimodal_preprocess_value(
+            generate_config.fps, mm_input.config.fps
+        )
+        mm_preprocess_config_pb.min_frames = get_multimodal_preprocess_value(
+            generate_config.min_frames, mm_input.config.min_frames
+        )
+        mm_preprocess_config_pb.max_frames = get_multimodal_preprocess_value(
+            generate_config.max_frames, mm_input.config.max_frames
+        )
+        mm_preprocess_config_pb.crop_positions.extend(
+            generate_config.crop_positions
+            if generate_config.crop_positions is not None
+            else mm_input.config.crop_positions
+        )
+        mm_preprocess_config_pb.mm_timeout_ms = get_multimodal_preprocess_value(
+            generate_config.mm_timeout_ms, mm_input.config.mm_timeout_ms
+        )
         input_pb.multimodal_inputs.append(mm_input_pb)
 
 

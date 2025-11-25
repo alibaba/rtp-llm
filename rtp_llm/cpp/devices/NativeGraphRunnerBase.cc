@@ -102,6 +102,7 @@ GptModelInputs NativeGraphRunnerBase<GptModelInputs, GptModelOutputs>::prepareIn
             {},       // multimodal_features
             text_tokens_mask,
             mm_features_locs,
+            std::nullopt,  // mm_deepstack_embeds
             std::nullopt,  // input_embeddings
             nullptr,       // input_embeddings_locs
             request_id,

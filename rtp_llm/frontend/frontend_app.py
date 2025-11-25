@@ -21,7 +21,6 @@ from uvicorn.loops.auto import auto_loop_setup
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.uvicorn_config import get_uvicorn_logging_config
 from rtp_llm.distribute.worker_info import WorkerInfo, g_worker_info
-from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
 from rtp_llm.frontend.frontend_server import FrontendServer
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.utils.grpc_client_wrapper import GrpcClientWrapper
@@ -306,6 +305,8 @@ class FrontendApp(object):
             return self.frontend_server.tokenize(req)
 
         if self.frontend_server.is_embedding:
+            from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
+
             # embedding
             @app.post("/v1/embeddings/similarity")
             @app.post("/v1/reranker")
