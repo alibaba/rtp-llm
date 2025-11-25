@@ -401,6 +401,15 @@ std::vector<torch::Tensor> GenerateStream::multimodalFeatures() const {
     }
 }
 
+std::vector<torch::Tensor> GenerateStream::multimodalDeepstackEmbeds() const {
+    if (generate_input_->mm_deepstack_embeds) {
+        auto& embeds = generate_input_->mm_deepstack_embeds.value();
+        return std::vector<torch::Tensor>(embeds.begin() + reuse_mm_length_, embeds.end());
+    } else {
+        return std::vector<torch::Tensor>();
+    }
+}
+
 int GenerateStream::multimodalFeaturesLength() const {
     return multimodalFeatures().size() * currentBatchSize();
 }

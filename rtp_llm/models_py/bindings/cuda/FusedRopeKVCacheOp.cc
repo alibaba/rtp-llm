@@ -48,9 +48,12 @@ void invokeFusedQKVBiasTransposeHelper(const torch::Tensor&              qkv,
         }
     }
 
-    int* padding_offset = nullptr;
+    int* padding_offset = nullptr, *position_ids = nullptr;
     if (params->padding_offset.defined()) {
         padding_offset = params->padding_offset.data_ptr<int>();
+    }
+    if (params->position_ids.defined()) {
+        position_ids = params->position_ids.data_ptr<int>();
     }
     auto       rope_cache = getRopeCacheOnce(attn_configs.rope_config, device->initParams().max_seq_len);
     StreamType stream     = GET_CURRENT_STREAM();
@@ -64,7 +67,7 @@ void invokeFusedQKVBiasTransposeHelper(const torch::Tensor&              qkv,
         &prefix_prompt_param,
         qkv.data_ptr(),
         qkv_fp8_output,
-        nullptr,  // position_ids
+        position_ids,
         nullptr,  // qkv_bias
         padding_offset,
         params->cu_seqlens.data_ptr<int>(),
@@ -117,6 +120,7 @@ TRTAttnPtr FusedRopeKVCachePrefillOpBase::prepare(torch_ext::PyAttentionInputs a
     attn_params->prefix_lengths            = attn_inputs.prefix_lengths;
     attn_params->kv_block_array.cache_type = attn_configs_.kv_cache_dtype;
     attn_params->padding_offset            = attn_inputs.padding_offset;
+    attn_params->position_ids              = attn_inputs.combo_position_ids;
     return attn_params;
 }
 
@@ -239,6 +243,13 @@ torch::Tensor FusedRopeKVCacheDecodeOp::forward(const torch::Tensor&            
 
     auto rope_cache = getRopeCacheOnce(attn_configs_.rope_config, device_->initParams().max_seq_len);
 
+    int* position_ids_ptr = nullptr;
+    if (params->position_ids.defined()) {
+        position_ids_ptr = params->position_ids.data_ptr<int>();
+    } else {
+        position_ids_ptr = params->sequence_lengths.data_ptr<int>();
+    }
+
     RTP_LLM_CHECK_WITH_INFO(params->sequence_lengths.is_pinned(), "sequence_lengths is not pinned memory");
     StreamType stream = GET_CURRENT_STREAM();
     DISPATCH_CUDA_FUNCTION_DATA_TYPE(
@@ -249,7 +260,7 @@ torch::Tensor FusedRopeKVCacheDecodeOp::forward(const torch::Tensor&            
         nullptr,  // v_buf
         kv_block_array,
         qkv.data_ptr(),
-        params->sequence_lengths.data_ptr<int>(),
+        position_ids_ptr,
         nullptr,  // params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias ?
                   // params.weights.qkv_weight->bias->data() : nullptr,
         rope_cache.used,

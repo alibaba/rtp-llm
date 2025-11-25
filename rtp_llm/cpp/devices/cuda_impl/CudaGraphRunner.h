@@ -78,6 +78,9 @@ public:
     void           setMaxPrefillCudaGraphLen(int max_prefill_cuda_graph_len);
     int            getCurrentRealGraphBs();
     PyModelOutputs forward(PyModelInputs& inputs) override;
+    void           setModelDataType(caffe2::TypeMeta data_type) override;
+    void           setPositionIdLenFactor(int position_id_len_factor) override;
+    void           setNeedComboPositionIds(bool need_combo_position_ids) override;
     void           initCapture() override;
 
 private:
@@ -106,6 +109,8 @@ private:
     py::object           py_forward_method_;
     py::object           py_attn_pyobj_method_;
     bool                 enable_cuda_graph_{false};
+    int                  position_id_len_factor_{1};  // batch_size * position_id_len_factor_
+    bool                 need_combo_position_ids_{false};
     bool                 is_prefill_cuda_graph_mode_{false};
     at::cuda::CUDAStream capture_stream_;
     bool                 enable_cuda_graph_debug_mode_{false};

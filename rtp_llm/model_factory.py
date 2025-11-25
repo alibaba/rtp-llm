@@ -112,6 +112,8 @@ class ModelFactory:
         Returns:
             ProposeModel instance or None if no propose model needed
         """
+        from rtp_llm.models.propose_model.propose_model import ProposeModel
+
         sp_type = engine_config.sp_config.type  # Get SpeculativeType enum value
         if sp_type == SpeculativeType.NONE:
             return None
@@ -198,6 +200,8 @@ class ModelFactory:
         Returns:
             BaseEngine instance (RPCEngine or EmbeddingCppEngine)
         """
+        from rtp_llm.async_decoder_engine.engine_creator import create_engine
+
         model = ModelFactory._create_model(
             model_config=model_config,
             engine_config=engine_config,

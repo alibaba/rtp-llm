@@ -1,3 +1,5 @@
+from typing import Optional
+
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -18,19 +20,32 @@ class EmbeddingTorch(nn.Module):
 
 
 class Embedding(nn.Module):
-    def __init__(self, config: ModelConfig, parallelism_config: ParallelismConfig, weight: torch.Tensor):
+    def __init__(
+        self,
+        config: ModelConfig,
+        parallelism_config: ParallelismConfig,
+        weight: torch.Tensor,
+    ):
         super().__init__()
         self.weight = weight
         self.config = config
         self.parallelism_config = parallelism_config
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        input: torch.Tensor,
+        position_ids: Optional[torch.Tensor] = None,
+        token_types: Optional[torch.Tensor] = None,
+        text_tokens_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         tokens = input.size(0)
         hidden_size = self.weight.size(-1)
         output = torch.empty(
             (tokens, hidden_size), dtype=self.weight.dtype, device=input.device
         )
-        rtp_llm_ops.embedding(output, input, self.weight.data)
+        rtp_llm_ops.embedding(
+            output, input, self.weight.data, position_ids, token_types, text_tokens_mask
+        )
         if self.parallelism_config.tp_size > 1:
             m, n = output.shape
             output = all_gather(output, group=Group.TP)
@@ -44,7 +59,12 @@ class Embedding(nn.Module):
 
 
 class EmbeddingBert(nn.Module):
-    def __init__(self, config: ModelConfig, parallelism_config: ParallelismConfig, weight: torch.Tensor):
+    def __init__(
+        self,
+        config: ModelConfig,
+        parallelism_config: ParallelismConfig,
+        weight: torch.Tensor,
+    ):
         super().__init__()
         self.weight = weight
         self.config = config
