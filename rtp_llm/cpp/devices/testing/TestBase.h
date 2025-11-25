@@ -58,12 +58,8 @@ public:
         const auto test_work_space = getenv("TEST_WORKSPACE");
         const auto test_binary     = getenv("TEST_BINARY");
         if (!(test_src_dir && test_work_space && test_binary)) {
-            // Fallback for non-Bazel or debugger runs: use current working directory
-            const char* pwd = getenv("PWD");
-            test_data_path_ = pwd ? std::string(pwd) + "/" : std::string("./");
-            std::cerr << "Warning: TEST_SRCDIR/TEST_WORKSPACE/TEST_BINARY not found; "
-                      << "fallback to working directory: [" << test_data_path_ << "]" << std::endl;
-            return;
+            std::cerr << "Unable to retrieve TEST_SRCDIR / TEST_WORKSPACE / TEST_BINARY env!" << std::endl;
+            abort();
         }
 
         std::string test_binary_str = std::string(test_binary);
@@ -333,6 +329,7 @@ protected:
             const auto& indices = batch_kv_cache->blocks(static_cast<int>(i));
             std::memcpy((*kv_cache_block_id)[i].data(), indices.data(), indices.size() * sizeof(int));
             if (kvCache.dim() == 5) {
+                // [layernum, batch, 2, max_pad_seq, dim]
                 auto max_pad_seq = kvCache.sizes()[3];
                 auto k_indexs    = indices;
                 for (auto k = 0; k < (max_pad_seq / cache_config.seq_size_per_block); k++) {
@@ -358,15 +355,16 @@ protected:
                         kblock = kvCache
                                      .index({torch::indexing::Slice(),
                                              static_cast<int64_t>(i),
-                                             0,
+                                             torch::indexing::Slice(),
                                              torch::indexing::Slice(block_start, block_end),
                                              torch::indexing::Slice()})
-                                     .reshape({static_cast<long>(cache_config.seq_size_per_block),
-                                               static_cast<long>(cache_config.cache_specs[0]->local_head_num_kv),
-                                               static_cast<long>(
+                                     .reshape({2,
+                                               static_cast<int64_t>(cache_config.seq_size_per_block),
+                                               static_cast<int64_t>(cache_config.cache_specs[0]->local_head_num_kv),
+                                               static_cast<int64_t>(
                                                    static_cast<rtp_llm::MHAKVCacheSpec&>(*cache_config.cache_specs[0])
                                                        .size_per_head)})
-                                     .transpose(1, 0)
+                                     .transpose(2, 1)
                                      .contiguous();
                         // vblock is not used in setKVBlockValue in this case
                         vblock = kvCache
@@ -375,27 +373,22 @@ protected:
                                              1,
                                              torch::indexing::Slice(block_start, block_end),
                                              torch::indexing::Slice()})
-                                     .reshape({static_cast<long>(cache_config.seq_size_per_block),
-                                               static_cast<long>(cache_config.cache_specs[0]->local_head_num_kv),
-                                               static_cast<long>(
+                                     .reshape({static_cast<int64_t>(cache_config.seq_size_per_block),
+                                               static_cast<int64_t>(cache_config.cache_specs[0]->local_head_num_kv),
+                                               static_cast<int64_t>(
                                                    static_cast<rtp_llm::MHAKVCacheSpec&>(*cache_config.cache_specs[0])
                                                        .size_per_head)})
                                      .transpose(1, 0)
                                      .contiguous();
                     }
-                    // Ensure k/v tensors match KV cache dtype
-                    auto target_torch_dtype = dataTypeToTorchType(cache_config.cache_specs[0]->dtype);
-                    if (kblock.scalar_type() != target_torch_dtype) {
-                        kblock = kblock.to(target_torch_dtype);
-                    }
-                    if (vblock.scalar_type() != target_torch_dtype) {
-                        vblock = vblock.to(target_torch_dtype);
-                    }
                     auto kblock_buffer = rtp_llm::torchTensor2Buffer(kblock);
                     auto vblock_buffer = rtp_llm::torchTensor2Buffer(vblock);
                     // std::cout << "index: " << k << " start: " << block_start << " end: " << block_end << std::endl;
                     // std::cout << "block index: " << k_indexs[k] << std::endl;
-                    cache_manager_->setKVBlockValue(k_indexs[k], *kblock_buffer, *vblock_buffer);
+                    if (!cache_manager_->setKVBlockValue(k_indexs[k], *kblock_buffer, *vblock_buffer)) {
+                        std::cout << "setKVBlockValue failed for block index: " << k_indexs[k] << std::endl;
+                        return nullptr;
+                    }
                 }
             }
         }

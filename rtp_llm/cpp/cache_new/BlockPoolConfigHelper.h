@@ -68,24 +68,46 @@ public:
     /**
      * Derive a KV-First configuration from KVCacheSpec (for adaption, should be removed in future).
      * - Automatically compute k_block_size and v_block_size from spec
-     * - kv_head_num: the shared local_head_num_kv for both MHA and MLA
-     * - tokens_per_block: spec->seq_size_per_block
+     * - local_head_num_kv: the shared local_head_num_kv for both MHA and MLA
+     * - seq_size_per_block: spec->seq_size_per_block
      * - size_per_head: use size_per_head for MHA; use rope_head_dim for MLA
      */
     static BlockPoolConfig
     createKVFirstConfig(uint32_t layer_num, uint32_t block_num, const std::shared_ptr<KVCacheSpec>& spec) {
-        const uint32_t  k_block_size     = static_cast<uint32_t>(spec->k_block_size());
-        const uint32_t  v_block_size     = static_cast<uint32_t>(spec->v_block_size());
-        const uint32_t  kv_head_num      = static_cast<uint32_t>(spec->local_head_num_kv);
-        const uint32_t  tokens_per_block = static_cast<uint32_t>(spec->seq_size_per_block);
-        BlockPoolConfig config           = createKVFirstConfig(layer_num, block_num, k_block_size, v_block_size);
-        config.dtype                     = spec->dtype;
-        config.tokens_per_block          = tokens_per_block;
-        config.kv_head_num               = kv_head_num;
-        config.is_mla                    = spec->type == KVCacheType::MultiHeadLatentAttention;
+        const uint32_t  k_block_size       = static_cast<uint32_t>(spec->k_block_size());
+        const uint32_t  v_block_size       = static_cast<uint32_t>(spec->v_block_size());
+        const uint32_t  local_head_num_kv  = static_cast<uint32_t>(spec->local_head_num_kv);
+        const uint32_t  seq_size_per_block = static_cast<uint32_t>(spec->seq_size_per_block);
+        BlockPoolConfig config             = createKVFirstConfig(layer_num, block_num, k_block_size, v_block_size);
+        config.dtype                       = spec->dtype;
+        config.seq_size_per_block          = seq_size_per_block;
+        config.local_head_num_kv           = local_head_num_kv;
+        config.is_mla                      = spec->type == KVCacheType::MultiHeadLatentAttention;
+        config.k_token_size                = static_cast<uint32_t>(spec->k_token_size());
+        config.v_token_size                = static_cast<uint32_t>(spec->v_token_size());
+        return config;
+    }
 
-        config.k_token_size = static_cast<uint32_t>(spec->k_token_size());
-        config.v_token_size = static_cast<uint32_t>(spec->v_token_size());
+    static BlockPoolConfig
+    createLayerFirstConfig(uint32_t layer_num, uint32_t block_num, const std::shared_ptr<KVCacheSpec>& spec) {
+        const uint32_t k_block_size       = static_cast<uint32_t>(spec->k_block_size());
+        const uint32_t v_block_size       = static_cast<uint32_t>(spec->v_block_size());
+        const uint32_t local_head_num_kv  = static_cast<uint32_t>(spec->local_head_num_kv);
+        const uint32_t seq_size_per_block = static_cast<uint32_t>(spec->seq_size_per_block);
+        const uint32_t k_token_size       = static_cast<uint32_t>(spec->k_token_size());
+        const uint32_t v_token_size       = static_cast<uint32_t>(spec->v_token_size());
+        const uint32_t block_size         = static_cast<uint32_t>(spec->block_size());
+
+        BlockPoolConfig config    = createLayerFirstConfig(layer_num, block_num, block_size);
+        config.seq_size_per_block = seq_size_per_block;
+        config.local_head_num_kv  = local_head_num_kv;
+        config.is_mla             = spec->type == KVCacheType::MultiHeadLatentAttention;
+        config.dtype              = spec->dtype;
+        config.k_token_size       = k_token_size;
+        config.v_token_size       = v_token_size;
+        config.k_block_size       = k_block_size;
+        config.v_block_size       = v_block_size;
+
         return config;
     }
 };
