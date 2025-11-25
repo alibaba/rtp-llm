@@ -37,6 +37,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
 
     const bool has_multimodal_input = is_multimodal_ && stream_groups.has_multimodal_input();
     const bool need_cal_position_id = (mm_position_ids_style_ != PositionIdsStyle::DEFAULT) || has_positional_encoding_;
+    const bool has_mm_deepstack_embed = is_multimodal_ && stream_groups.hasMMDeepstackEmbed();
 
     model_input.combo_tokens = CACHED_HOST_BUF(TYPE_INT32, {current_tokens_size});
     if (max_blocks_num) {
@@ -138,6 +139,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     }
 
     std::vector<rtp_llm::BufferPtr> gathered_mm_features;
+    std::vector<rtp_llm::BufferPtr> gathered_mm_deepstack_embeds;
     int                             token_idx          = batch_idx;
     int                             cum_output_seq_len = batch_idx;
     int                             mm_feature_index   = 0;
@@ -208,6 +210,20 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
                        (context_pos_ids->size() - stream->reuseLength() * position_id_len_factor_)
                            * context_pos_ids->typeSize());
             }
+
+            if (has_mm_deepstack_embed) {
+                auto mm_deepstack_embed = stream->multimodalDeepstackEmbeds();
+                if (mm_deepstack_embed.size() != 0) {
+                    for (auto& mm_deepstack_embed : mm_deepstack_embed) {
+                        auto feature_buffer = torchTensor2Buffer(mm_deepstack_embed);
+                        if (feature_buffer->where() != rtp_llm::MemoryType::MEMORY_GPU) {
+                            gathered_mm_deepstack_embeds.emplace_back(device_->clone({*feature_buffer}));
+                        } else {
+                            gathered_mm_deepstack_embeds.emplace_back(feature_buffer);
+                        }
+                    }
+                }
+            }
             lora_ids[batch_idx]           = stream->loraId();
             lora_input_lengths[batch_idx] = input_lengths[batch_idx];
             if (max_blocks_num) {
@@ -237,6 +253,9 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
 
     if (is_multimodal_ && gathered_mm_features.size() > 0) {
         model_input.multimodal_features = std::move(gathered_mm_features);
+    }
+    if (has_mm_deepstack_embed && gathered_mm_deepstack_embeds.size() > 0) {
+        model_input.mm_deepstack_embeds = std::move(gathered_mm_deepstack_embeds);
     }
     return model_input;
 }
