@@ -7,8 +7,6 @@
 #include <stdexcept>
 #include <mutex>
 #include <vector>
-#include <chrono>
-#include <cuda_runtime.h>
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 #include <cstdlib>
@@ -238,9 +236,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         }
         setupKVCacheForAttentionInputs(attention_inputs, inputs, kv_cache_block_id_device);
 
-        if (!enable_cuda_graph_ || !is_prefill_cuda_graph_mode_) {
-            calculatePaddingOffset(attention_inputs);
-        }
+        calculatePaddingOffset(attention_inputs);
 
         auto           py_model_inputs = PyModelInputs({token_ids, attention_inputs, bert_embedding_inputs});
         PyModelOutputs py_model_outputs;
