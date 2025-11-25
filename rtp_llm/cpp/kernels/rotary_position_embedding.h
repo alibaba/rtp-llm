@@ -23,6 +23,11 @@ struct vector_size<half, uint32_t> {
 };
 
 template<>
+struct vector_size<half, uint4> {
+    static constexpr int size = 8;
+};
+
+template<>
 struct vector_size<float, float> {
     static constexpr int size = 1;
 };
@@ -35,6 +40,11 @@ struct vector_size<float, float2> {
 template<>
 struct vector_size<float, float4> {
     static constexpr int size = 4;
+};
+
+template<>
+struct vector_size<float, Float8_> {
+    static constexpr int size = 8;
 };
 
 template<>
@@ -88,6 +98,11 @@ struct is_alignment<float, float4> {
 };
 
 template<>
+struct is_alignment<float, Float8_> {
+    static constexpr bool value = false;
+};
+
+template<>
 struct is_alignment<uint16_t, uint32_t> {
     static constexpr bool value = false;
 };
@@ -104,6 +119,11 @@ struct is_alignment<uint16_t, uint4> {
 
 template<>
 struct is_alignment<half, uint32_t> {
+    static constexpr bool value = false;
+};
+
+template<>
+struct is_alignment<half, uint4> {
     static constexpr bool value = false;
 };
 
@@ -421,17 +441,47 @@ struct Llama3Rope {
     }
 };
 
-__device__ __inline__ float2 rotary_embedding_transform(const float2 v, const float2 coef) {
+__device__ __inline__ float2 rotary_embedding_transform(const float2 v, const float2& coef) {
     float2 rot_v;
     rot_v.x = coef.x * v.x - coef.y * v.y;
     rot_v.y = coef.x * v.y + coef.y * v.x;
     return rot_v;
 }
 
-__device__ __inline__ uint32_t rotary_embedding_transform(const uint32_t v, const float2 coef) {
+__device__ __inline__ Float8_ rotary_embedding_transform(const Float8_ v, const Float8_& coef) {
+    Float8_ rot_v;
+    rot_v.x = rotary_embedding_transform(v.x, coef.x);
+    rot_v.y = rotary_embedding_transform(v.y, coef.y);
+    rot_v.z = rotary_embedding_transform(v.z, coef.z);
+    rot_v.w = rotary_embedding_transform(v.w, coef.w);
+
+    return rot_v;
+}
+
+__device__ __inline__ uint32_t rotary_embedding_transform(const uint32_t v, const float2& coef) {
     float2 fv     = half2_to_float2(v);
     float2 rot_fv = rotary_embedding_transform(fv, coef);
     return float2_to_half2(rot_fv);
+}
+
+__device__ __inline__ uint4 rotary_embedding_transform(const uint4 v, const Float8_& coef) {
+    Float8_ fv;
+    Float8_ rot_fv;
+    uint4   rot_v;
+    fv.x     = half2_to_float2(v.x);
+    fv.y     = half2_to_float2(v.y);
+    rot_fv.x = rotary_embedding_transform(fv.x, coef.x);
+    fv.z     = half2_to_float2(v.z);
+    rot_fv.y = rotary_embedding_transform(fv.y, coef.y);
+    rot_v.x  = float2_to_half2(rot_fv.x);
+    fv.w     = half2_to_float2(v.w);
+    rot_fv.z = rotary_embedding_transform(fv.z, coef.z);
+    rot_v.y  = float2_to_half2(rot_fv.y);
+    rot_fv.w = rotary_embedding_transform(fv.w, coef.w);
+    rot_v.z  = float2_to_half2(rot_fv.z);
+    rot_v.w  = float2_to_half2(rot_fv.w);
+
+    return rot_v;
 }
 
 /**
@@ -446,10 +496,30 @@ __device__ __inline__ uint32_t rotary_embedding_transform(const uint32_t v, cons
  *
  */
 #ifdef ENABLE_BF16
-__device__ __inline__ __nv_bfloat162 rotary_embedding_transform(const __nv_bfloat162 v, const float2 coef) {
+__device__ __inline__ __nv_bfloat162 rotary_embedding_transform(const __nv_bfloat162 v, const float2& coef) {
     float2 fv     = bf1622float2(v);
     float2 rot_fv = rotary_embedding_transform(fv, coef);
     return __floats2bfloat162_rn(rot_fv.x, rot_fv.y);
+}
+
+__device__ __inline__ bf16_8_t rotary_embedding_transform(const bf16_8_t v, const Float8_& coef) {
+    Float8_  fv;
+    Float8_  rot_fv;
+    bf16_8_t rot_v;
+    fv.x     = bf1622float2(v.x);
+    fv.y     = bf1622float2(v.y);
+    rot_fv.x = rotary_embedding_transform(fv.x, coef.x);
+    fv.z     = bf1622float2(v.z);
+    rot_fv.y = rotary_embedding_transform(fv.y, coef.y);
+    rot_v.x  = __floats2bfloat162_rn(rot_fv.x.x, rot_fv.x.y);
+    fv.w     = bf1622float2(v.w);
+    rot_fv.z = rotary_embedding_transform(fv.z, coef.z);
+    rot_v.y  = __floats2bfloat162_rn(rot_fv.y.x, rot_fv.y.y);
+    rot_fv.w = rotary_embedding_transform(fv.w, coef.w);
+    rot_v.z  = __floats2bfloat162_rn(rot_fv.z.x, rot_fv.z.y);
+    rot_v.w  = __floats2bfloat162_rn(rot_fv.w.x, rot_fv.w.y);
+
+    return rot_v;
 }
 #endif
 
@@ -693,11 +763,16 @@ __device__ __inline__ void normal_rope(vector_t&       x,
     }
 }
 
-template<typename vector_t, typename scalar_t>
+template<typename vector_t, typename scalar_t, typename rope_t>
 __device__ __inline__ void normal_rope_with_cache(
-    vector_t& x, scalar_t* smem, const int tidx, const int dim, const float2& coef, const bool work) {
+    vector_t& x, scalar_t* smem, const int tidx, const int dim, const rope_t& coef, const bool work) {
     if (work) {
-        reinterpret_cast<vector_t*>(smem)[tidx] = x;
+        if constexpr (std::is_same_v<rope_t, Float8_>
+                      && (std::is_same_v<scalar_t, half> || std::is_same_v<scalar_t, __nv_bfloat16>)) {
+            reinterpret_cast<int4*>(smem)[tidx] = *reinterpret_cast<int4*>(&x);
+        } else {
+            reinterpret_cast<vector_t*>(smem)[tidx] = x;
+        }
     }
 
     __syncthreads();
@@ -711,8 +786,15 @@ __device__ __inline__ void normal_rope_with_cache(
     __syncthreads();
 
     if (work) {
-        x = reinterpret_cast<vector_t*>(smem)[tidx];
+        if constexpr (std::is_same_v<rope_t, Float8_>
+                      && (std::is_same_v<scalar_t, half> || std::is_same_v<scalar_t, __nv_bfloat16>)) {
+            *reinterpret_cast<int4*>(&x) = reinterpret_cast<int4*>(smem)[tidx];
+        } else {
+            x = reinterpret_cast<vector_t*>(smem)[tidx];
+        }
     }
+
+    __syncthreads();
 }
 
 template<typename RopeInit, typename scalar_t, typename vector_t>
@@ -809,13 +891,13 @@ __device__ inline void apply_rope(RopeConfig    rope_config,
     }
 }
 
-template<typename vector_t, typename scalar_t, RopeStyle ROPE_STYLE>
+template<typename vector_t, typename scalar_t, typename rope_t, RopeStyle ROPE_STYLE>
 __device__ inline void
-apply_rope_with_cache(vector_t& x, scalar_t* smem, const int tidx, const int dim, const float2& coef, const bool work) {
+apply_rope_with_cache(vector_t& x, scalar_t* smem, const int tidx, const int dim, const rope_t& coef, const bool work) {
     switch (ROPE_STYLE) {
         case RopeStyle::Base:
         case RopeStyle::Yarn:
-            normal_rope_with_cache<vector_t, scalar_t>(x, smem, tidx, dim, coef, work);
+            normal_rope_with_cache<vector_t, scalar_t, rope_t>(x, smem, tidx, dim, coef, work);
             break;
 
         default:

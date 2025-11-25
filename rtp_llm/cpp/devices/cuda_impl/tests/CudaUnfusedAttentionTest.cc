@@ -11,7 +11,7 @@ TEST_F(UnfusedAttentionTest, AddFusedQKVBiasTransposeTest) {
     device_                 = new CudaDevice(device_init_params);
     device_->init();
     std::vector<size_t> batch_size = {1, 3};
-    std::vector<size_t> seq        = {1, 65, 129};
+    std::vector<size_t> seq        = {1, 65, 193};
     size_t              head_q     = 64;
     std::vector<size_t> head_kv    = {4, 8};
     std::vector<size_t> head_dim   = {128};
