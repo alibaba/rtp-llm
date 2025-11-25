@@ -838,6 +838,40 @@ struct Vec_t<__nv_bfloat16> {
 };
 #endif
 
+template<typename T>
+struct Vec_t2 {
+    static constexpr int size = 0;
+};
+
+template<>
+struct Vec_t2<float> {
+    using Type                = Float8_;
+    static constexpr int size = 8;
+#ifdef ENABLE_FP8
+    using QuantizedType = fp8_8_t;
+#endif
+};
+
+template<>
+struct Vec_t2<half> {
+    using Type                = uint4;
+    static constexpr int size = 8;
+#ifdef ENABLE_FP8
+    using QuantizedType = fp8_8_t;
+#endif
+};
+
+#ifdef ENABLE_BF16
+template<>
+struct Vec_t2<__nv_bfloat16> {
+    using Type                = bf16_8_t;
+    static constexpr int size = 8;
+#ifdef ENABLE_FP8
+    using QuantizedType = fp8_8_t;
+#endif
+};
+#endif
+
 // Multiple calls of reinterpret_cast.
 template<typename type_in, typename type_out>
 inline __device__ type_out* reinterpret_ptr(void* ptr, size_t offset) {
@@ -944,17 +978,17 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
 
     // NOTE: QKV src shape (batch_size, seq_len, 3, head_num, size_per_head)
     //  QKV dst shape (3, batch_size, head_num, seq_len, size_per_head)
-    extern __shared__ __align__(sizeof(float2)) char smem_[];  // align on largest vector type
+    extern __shared__ __align__(sizeof(Float8_)) char smem_[];  // align on largest vector type
 
     static constexpr bool ENABLE_8BITS_CACHE = sizeof(Tcache) == 1;
 
 #ifdef ENABLE_FP8
     // Quantized output only supports fp8 currently.
     using QuantizedEltType = __nv_fp8_e4m3;
-    using QuantizedVecType = typename Vec_t<T>::QuantizedType;
+    using QuantizedVecType = typename Vec_t2<T>::QuantizedType;
 #endif
-    constexpr int vec_size = Vec_t<T>::size;
-    using Vec_t            = typename Vec_t<T>::Type;
+    constexpr int vec_size = Vec_t2<T>::size;
+    using vec_t2           = typename Vec_t2<T>::Type;
 
     const int batch_idx = blockIdx.x;
     if (batch_idx >= batch_size) {
@@ -995,27 +1029,30 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
 
     // NOTE: q has seq len excluding prefix prompt
     // src QKV: [batch, time, 3, head, hidden]
-    int    position_id = position_ids ? position_ids[token_idx * rope_config.index_factor] :
-                                        (PREFIX_PROMPT && param.count_length ? seq_idx + prefix_prompt_length : seq_idx);
-    bool   work        = false;
-    int    smem_off    = 0;
-    float2 coef;
+    int     position_id = position_ids ? position_ids[token_idx * rope_config.index_factor] :
+                                         (PREFIX_PROMPT && param.count_length ? seq_idx + prefix_prompt_length : seq_idx);
+    bool    work        = false;
+    int     smem_off    = 0;
+    Float8_ coef;
     if (bidz < max_k_bidy) {
-        constexpr int rope_size = vector_size<T, Vec_t>::size;
+        constexpr int rope_size = vector_size<T, vec_t2>::size;
         const int     rope_idx  = lane_id * rope_size;
         work                    = (rope_idx >= 0 && rope_idx < rope_config.dim);
         if (work) {
             smem_off = 2 * block_token_idx * rope_config.dim;
-            coef     = *(reinterpret_cast<float2*>(
-                const_cast<float*>(&rope_cache[position_id * rope_config.dim + lane_id * 2])));
+            *reinterpret_cast<float4*>(&coef.x) =
+                *(reinterpret_cast<const float4*>(&rope_cache[position_id * rope_config.dim + lane_id * 8]));
+            *reinterpret_cast<float4*>(&coef.z) =
+                *(reinterpret_cast<const float4*>(&rope_cache[position_id * rope_config.dim + lane_id * 8 + 4]));
         }
     }
 
     if (bidz < max_q_bidy) {
-        Vec_t q[2];
-        int   q_load_idx  = 0;
-        int   q_store_idx = 0;
-        int   q_idx_off   = 1;
+        vec_t2 q[2];
+        vec_t2 q_bias[2];
+        int    q_load_idx  = 0;
+        int    q_store_idx = 0;
+        int    q_idx_off   = 1;
 
         int       head_idx   = bidz * HEAD_Q_BLOCK_NUM;
         size_t    hidden_idx = head_idx * size_per_head + lane_id * vec_size;
@@ -1042,11 +1079,11 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
                          + seq_idx * size_per_head + lane_id * vec_size;
         }
 
-        q[q_load_idx] = *reinterpret_cast<const Vec_t*>(&QKV[src_q_idx]);
+        *reinterpret_cast<int4*>(&q[q_load_idx]) = *reinterpret_cast<int4*>(&QKV[src_q_idx]);
 
         if (qkv_bias) {
-            Vec_t q_bias  = *reinterpret_cast<const Vec_t*>(&qkv_bias[hidden_idx]);
-            q[q_load_idx] = add(q[q_load_idx], q_bias);
+            *reinterpret_cast<int4*>(&q_bias[q_load_idx]) = *reinterpret_cast<const int4*>(&qkv_bias[hidden_idx]);
+            q[q_load_idx]                                 = add(q[q_load_idx], q_bias[q_load_idx]);
         }
 
 #pragma unroll
@@ -1057,27 +1094,25 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
             hidden_idx += size_per_head;
             src_q_idx += size_per_head;
 
-            q[q_load_idx] = *reinterpret_cast<const Vec_t*>(&QKV[src_q_idx]);
+            *reinterpret_cast<int4*>(&q[q_load_idx]) = *reinterpret_cast<int4*>(&QKV[src_q_idx]);
 
             if (qkv_bias) {
-                Vec_t q_bias  = *reinterpret_cast<const Vec_t*>(&qkv_bias[hidden_idx]);
-                q[q_load_idx] = add(q[q_load_idx], q_bias);
+                *reinterpret_cast<int4*>(&q_bias[q_load_idx]) = *reinterpret_cast<const int4*>(&qkv_bias[hidden_idx]);
+                q[q_load_idx]                                 = add(q[q_load_idx], q_bias[q_load_idx]);
             }
 
-            apply_rope_with_cache<Vec_t, T, ROPE_STYLE>(
+            apply_rope_with_cache<vec_t2, T, Float8_, ROPE_STYLE>(
                 q[q_store_idx], reinterpret_cast<T*>(smem_) + smem_off, lane_id, rope_config.dim, coef, work);
 
             if (use_logn_attn) {
                 logn_attention(q[q_store_idx], seq_idx, rope_config.max_pos);
             }
 
-            __syncthreads();
-
             if (store_qkv) {
-                *reinterpret_cast<Vec_t*>(&QKV[src_q_idx]) = q[q_store_idx];
+                *reinterpret_cast<int4*>(&QKV[src_q_idx]) = *reinterpret_cast<int4*>(&q[q_store_idx]);
 #ifdef ENABLE_FP8
                 if (QuantizedQKV != nullptr) {
-                    *reinterpret_cast<Vec_t*>(&q_buf[dest_qkv_idx]) = q[q_store_idx];
+                    *reinterpret_cast<int4*>(&q_buf[dest_qkv_idx]) = *reinterpret_cast<int4*>(&q[q_store_idx]);
                     QuantizedVecType* quantized_q_ptr =
                         USE_PAGED_FMHA ? reinterpret_ptr<QuantizedEltType, QuantizedVecType>(q_buf, dest_qkv_idx) :
                                          reinterpret_ptr<QuantizedEltType, QuantizedVecType>(QuantizedQKV, src_q_idx);
@@ -1093,7 +1128,8 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
             }
 
             if (store_q_no_transpose) {
-                *reinterpret_cast<Vec_t*>(&q_no_transpose_buf[dest_q_no_transpose_idx]) = q[q_store_idx];
+                *reinterpret_cast<int4*>(&q_no_transpose_buf[dest_q_no_transpose_idx]) =
+                    *reinterpret_cast<int4*>(&q[q_store_idx]);
                 dest_q_no_transpose_idx += size_per_head;
             }
 
@@ -1107,11 +1143,11 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
                     convert_to_fp8(quantized_q_ptr, q[q_store_idx]);
                 } else {
                     // paged fmha
-                    *reinterpret_cast<Vec_t*>(&q_buf[dest_q_idx]) = q[q_store_idx];
+                    *reinterpret_cast<int4*>(&q_buf[dest_q_idx]) = *reinterpret_cast<int4*>(&q[q_store_idx]);
                 }
 #else
                 // paged fmha
-                *reinterpret_cast<Vec_t*>(&q_buf[dest_q_idx]) = q[q_store_idx];
+                *reinterpret_cast<int4*>(&q_buf[dest_q_idx]) = *reinterpret_cast<int4*>(&q[q_store_idx]);
 #endif
 
                 if constexpr (USE_PAGED_FMHA) {
@@ -1124,20 +1160,18 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
             q_store_idx ^= q_idx_off;
         }
 
-        apply_rope_with_cache<Vec_t, T, ROPE_STYLE>(
+        apply_rope_with_cache<vec_t2, T, Float8_, ROPE_STYLE>(
             q[q_store_idx], reinterpret_cast<T*>(smem_) + smem_off, lane_id, rope_config.dim, coef, work);
 
         if (use_logn_attn) {
             logn_attention(q[q_store_idx], seq_idx, rope_config.max_pos);
         }
 
-        __syncthreads();
-
         if (store_qkv) {
-            *reinterpret_cast<Vec_t*>(&QKV[src_q_idx]) = q[q_store_idx];
+            *reinterpret_cast<int4*>(&QKV[src_q_idx]) = *reinterpret_cast<int4*>(&q[q_store_idx]);
 #ifdef ENABLE_FP8
             if (QuantizedQKV != nullptr) {
-                *reinterpret_cast<Vec_t*>(&q_buf[dest_qkv_idx]) = q[q_store_idx];
+                *reinterpret_cast<int4*>(&q_buf[dest_qkv_idx]) = *reinterpret_cast<int4*>(&q[q_store_idx]);
                 QuantizedVecType* quantized_q_ptr =
                     USE_PAGED_FMHA ? reinterpret_ptr<QuantizedEltType, QuantizedVecType>(q_buf, dest_qkv_idx) :
                                      reinterpret_ptr<QuantizedEltType, QuantizedVecType>(QuantizedQKV, src_q_idx);
@@ -1147,7 +1181,8 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
         }
 
         if (store_q_no_transpose) {
-            *reinterpret_cast<Vec_t*>(&q_no_transpose_buf[dest_q_no_transpose_idx]) = q[q_store_idx];
+            *reinterpret_cast<int4*>(&q_no_transpose_buf[dest_q_no_transpose_idx]) =
+                *reinterpret_cast<int4*>(&q[q_store_idx]);
         }
 
         if (store_q) {
@@ -1160,18 +1195,19 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
                 convert_to_fp8(quantized_q_ptr, q[q_store_idx]);
             } else {
                 // paged fmha
-                *reinterpret_cast<Vec_t*>(&q_buf[dest_q_idx]) = q[q_store_idx];
+                *reinterpret_cast<int4*>(&q_buf[dest_q_idx]) = *reinterpret_cast<int4*>(&q[q_store_idx]);
             }
 #else
             // paged fmha
-            *reinterpret_cast<Vec_t*>(&q_buf[dest_q_idx]) = q[q_store_idx];
+            *reinterpret_cast<int4*>(&q_buf[dest_q_idx]) = *reinterpret_cast<int4*>(&q[q_store_idx]);
 #endif
         }
     } else if (bidz < max_k_bidy) {
-        Vec_t k[2];
-        int   k_load_idx  = 0;
-        int   k_store_idx = 0;
-        int   k_idx_off   = 1;
+        vec_t2 k[2];
+        vec_t2 k_bias[2];
+        int    k_load_idx  = 0;
+        int    k_store_idx = 0;
+        int    k_idx_off   = 1;
 
         int    head_idx   = (bidz - max_q_bidy) * HEAD_K_BLOCK_NUM;
         size_t hidden_idx = head_idx * size_per_head + lane_id * vec_size;
@@ -1197,11 +1233,11 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
             }
         }
 
-        k[k_load_idx] = *reinterpret_cast<const Vec_t*>(&QKV[src_k_idx]);
+        *reinterpret_cast<int4*>(&k[k_load_idx]) = *reinterpret_cast<int4*>(&QKV[src_k_idx]);
 
         if (qkv_bias) {
-            Vec_t k_bias  = *reinterpret_cast<const Vec_t*>(&qkv_bias[hidden_idx + n]);
-            k[k_load_idx] = add(k[k_load_idx], k_bias);
+            *reinterpret_cast<int4*>(&k_bias[k_load_idx]) = *reinterpret_cast<const int4*>(&qkv_bias[hidden_idx + n]);
+            k[k_load_idx]                                 = add(k[k_load_idx], k_bias[k_load_idx]);
         }
 
 #pragma unroll
@@ -1212,17 +1248,16 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
             hidden_idx += size_per_head;
             src_k_idx += size_per_head;
 
-            k[k_load_idx] = *reinterpret_cast<const Vec_t*>(&QKV[src_k_idx]);
+            *reinterpret_cast<int4*>(&k[k_load_idx]) = *reinterpret_cast<const int4*>(&QKV[src_k_idx]);
 
             if (qkv_bias) {
-                Vec_t k_bias  = *reinterpret_cast<const Vec_t*>(&qkv_bias[hidden_idx + n]);
-                k[k_load_idx] = add(k[k_load_idx], k_bias);
+                *reinterpret_cast<int4*>(&k_bias[k_load_idx]) =
+                    *reinterpret_cast<const int4*>(&qkv_bias[hidden_idx + n]);
+                k[k_load_idx] = add(k[k_load_idx], k_bias[k_load_idx]);
             }
 
-            apply_rope_with_cache<Vec_t, T, ROPE_STYLE>(
+            apply_rope_with_cache<vec_t2, T, Float8_, ROPE_STYLE>(
                 k[k_store_idx], reinterpret_cast<T*>(smem_) + smem_off, lane_id, rope_config.dim, coef, work);
-
-            __syncthreads();
 
             if (store_qkv) {
 #ifdef ENABLE_FP8
@@ -1233,11 +1268,11 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
                                    k[k_store_idx]);
                 }
 #endif
-                *reinterpret_cast<Vec_t*>(&QKV[src_k_idx]) = k[k_store_idx];
+                *reinterpret_cast<int4*>(&QKV[src_k_idx]) = *reinterpret_cast<int4*>(&k[k_store_idx]);
             }
 
             if (store_kv) {
-                *reinterpret_cast<Vec_t*>(&k_buf[dest_kv_idx]) = k[k_store_idx];
+                *reinterpret_cast<int4*>(&k_buf[dest_kv_idx]) = *reinterpret_cast<int4*>(&k[k_store_idx]);
                 dest_kv_idx += (size_per_head * total_seq_len);
             }
 
@@ -1248,7 +1283,7 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
                         *reinterpret_cast<float*>(&k_scale_ptr[inScaleIdx]) = scale;
                     }
                 } else {
-                    *reinterpret_cast<Vec_t*>(&k_cache[inBlockIdx]) = k[k_store_idx];
+                    *reinterpret_cast<int4*>(&k_cache[inBlockIdx]) = *reinterpret_cast<int4*>(&k[k_store_idx]);
                 }
 
                 inBlockIdx = kv_block_array.getKVLocalIdx(dst_kv_seq_idx, head_idx, size_per_head, lane_id * vec_size);
@@ -1260,10 +1295,8 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
             k_store_idx ^= k_idx_off;
         }
 
-        apply_rope_with_cache<Vec_t, T, ROPE_STYLE>(
+        apply_rope_with_cache<vec_t2, T, Float8_, ROPE_STYLE>(
             k[k_store_idx], reinterpret_cast<T*>(smem_) + smem_off, lane_id, rope_config.dim, coef, work);
-
-        __syncthreads();
 
         if (store_qkv) {
 #ifdef ENABLE_FP8
@@ -1274,11 +1307,11 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
                     k[k_store_idx]);
             }
 #endif
-            *reinterpret_cast<Vec_t*>(&QKV[src_k_idx]) = k[k_store_idx];
+            *reinterpret_cast<int4*>(&QKV[src_k_idx]) = *reinterpret_cast<int4*>(&k[k_store_idx]);
         }
 
         if (store_kv) {
-            *reinterpret_cast<Vec_t*>(&k_buf[dest_kv_idx]) = k[k_store_idx];
+            *reinterpret_cast<int4*>(&k_buf[dest_kv_idx]) = *reinterpret_cast<int4*>(&k[k_store_idx]);
         }
 
         if (store_cache) {
@@ -1288,14 +1321,15 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
                     *reinterpret_cast<float*>(&k_scale_ptr[inScaleIdx]) = scale;
                 }
             } else {
-                *reinterpret_cast<Vec_t*>(&k_cache[inBlockIdx]) = k[k_store_idx];
+                *reinterpret_cast<int4*>(&k_cache[inBlockIdx]) = *reinterpret_cast<int4*>(&k[k_store_idx]);
             }
         }
     } else {
-        Vec_t v[2];
-        int   v_load_idx  = 0;
-        int   v_store_idx = 0;
-        int   v_idx_off   = 1;
+        vec_t2 v[2];
+        vec_t2 v_bias[2];
+        int    v_load_idx  = 0;
+        int    v_store_idx = 0;
+        int    v_idx_off   = 1;
 
         int    head_idx   = (bidz - max_k_bidy) * HEAD_V_BLOCK_NUM;
         size_t hidden_idx = head_idx * size_per_head + lane_id * vec_size;
@@ -1321,14 +1355,13 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
             }
         }
 
-        v[v_load_idx] = *reinterpret_cast<const Vec_t*>(&QKV[src_v_idx]);
+        *reinterpret_cast<int4*>(&v[v_load_idx]) = *reinterpret_cast<int4*>(&QKV[src_v_idx]);
 
         if (qkv_bias) {
-            Vec_t v_bias  = *reinterpret_cast<const Vec_t*>(&qkv_bias[hidden_idx + n + kv_n]);
-            v[v_load_idx] = add(v[v_load_idx], v_bias);
+            *reinterpret_cast<int4*>(&v_bias[v_load_idx]) =
+                *reinterpret_cast<const int4*>(&qkv_bias[hidden_idx + n + kv_n]);
+            v[v_load_idx] = add(v[v_load_idx], v_bias[v_load_idx]);
         }
-
-        __syncthreads();
 
 #pragma unroll
         for (int h = 1; h < HEAD_V_BLOCK_NUM; ++h) {
@@ -1338,11 +1371,12 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
             hidden_idx += size_per_head;
             src_v_idx += size_per_head;
 
-            v[v_load_idx] = *reinterpret_cast<const Vec_t*>(&QKV[src_v_idx]);
+            *reinterpret_cast<int4*>(&v[v_load_idx]) = *reinterpret_cast<const int4*>(&QKV[src_v_idx]);
 
             if (qkv_bias) {
-                Vec_t v_bias  = *reinterpret_cast<const Vec_t*>(&qkv_bias[hidden_idx + n + kv_n]);
-                v[v_load_idx] = add(v[v_load_idx], v_bias);
+                *reinterpret_cast<int4*>(&v_bias[v_load_idx]) =
+                    *reinterpret_cast<const int4*>(&qkv_bias[hidden_idx + n + kv_n]);
+                v[v_load_idx] = add(v[v_load_idx], v_bias[v_load_idx]);
             }
 
             if (store_qkv) {
@@ -1354,11 +1388,11 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
                                    v[v_store_idx]);
                 }
 #endif
-                *reinterpret_cast<Vec_t*>(&QKV[src_v_idx]) = v[v_store_idx];
+                *reinterpret_cast<int4*>(&QKV[src_v_idx]) = *reinterpret_cast<int4*>(&v[v_store_idx]);
             }
 
             if (store_kv) {
-                *reinterpret_cast<Vec_t*>(&v_buf[dest_kv_idx]) = v[v_store_idx];
+                *reinterpret_cast<int4*>(&v_buf[dest_kv_idx]) = *reinterpret_cast<int4*>(&v[v_store_idx]);
                 dest_kv_idx += (size_per_head * total_seq_len);
             }
 
@@ -1369,7 +1403,7 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
                         *reinterpret_cast<float*>(&v_scale_ptr[inScaleIdx]) = scale;
                     }
                 } else {
-                    *reinterpret_cast<Vec_t*>(&v_cache[inBlockIdx]) = v[v_store_idx];
+                    *reinterpret_cast<int4*>(&v_cache[inBlockIdx]) = *reinterpret_cast<int4*>(&v[v_store_idx]);
                 }
 
                 inBlockIdx = kv_block_array.getKVLocalIdx(dst_kv_seq_idx, head_idx, size_per_head, lane_id * vec_size);
@@ -1379,8 +1413,6 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
             }
 
             v_store_idx ^= v_idx_off;
-
-            __syncthreads();
         }
 
         if (store_qkv) {
@@ -1392,11 +1424,11 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
                     v[v_store_idx]);
             }
 #endif
-            *reinterpret_cast<Vec_t*>(&QKV[src_v_idx]) = v[v_store_idx];
+            *reinterpret_cast<int4*>(&QKV[src_v_idx]) = *reinterpret_cast<int4*>(&v[v_store_idx]);
         }
 
         if (store_kv) {
-            *reinterpret_cast<Vec_t*>(&v_buf[dest_kv_idx]) = v[v_store_idx];
+            *reinterpret_cast<int4*>(&v_buf[dest_kv_idx]) = *reinterpret_cast<int4*>(&v[v_store_idx]);
         }
 
         if (store_cache) {
@@ -1406,7 +1438,7 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
                     *reinterpret_cast<float*>(&v_scale_ptr[inScaleIdx]) = scale;
                 }
             } else {
-                *reinterpret_cast<Vec_t*>(&v_cache[inBlockIdx]) = v[v_store_idx];
+                *reinterpret_cast<int4*>(&v_cache[inBlockIdx]) = *reinterpret_cast<int4*>(&v[v_store_idx]);
             }
         }
     }
@@ -1507,13 +1539,12 @@ __global__ void add_fusedQKV_bias_transpose_with_rope_cache_kernel(T*           
             q            = add(q, q_bias);
         }
 
-        apply_rope_with_cache<Vec_t, T, ROPE_STYLE>(q, reinterpret_cast<T*>(smem_), tidx, rope_config.dim, coef, work);
+        apply_rope_with_cache<Vec_t, T, float2, ROPE_STYLE>(
+            q, reinterpret_cast<T*>(smem_), tidx, rope_config.dim, coef, work);
 
         if (use_logn_attn) {
             logn_attention(q, seq_idx, rope_config.max_pos);
         }
-
-        __syncthreads();
 
         if (store_qkv) {
             *reinterpret_cast<Vec_t*>(&QKV[src_q_idx]) = q;
@@ -1578,9 +1609,8 @@ __global__ void add_fusedQKV_bias_transpose_with_rope_cache_kernel(T*           
             k            = add(k, k_bias);
         }
 
-        apply_rope_with_cache<Vec_t, T, ROPE_STYLE>(k, reinterpret_cast<T*>(smem_), tidx, rope_config.dim, coef, work);
-
-        __syncthreads();
+        apply_rope_with_cache<Vec_t, T, float2, ROPE_STYLE>(
+            k, reinterpret_cast<T*>(smem_), tidx, rope_config.dim, coef, work);
 
         if (store_qkv) {
 #ifdef ENABLE_FP8
@@ -1946,15 +1976,15 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
 }
 
 #define ADD_FUSEDQKV_BIAS_TRANSPOSE_NON_INT8_WITH_ROPE_CACHE(head_q_block_num, head_k_block_num, head_v_block_num)     \
-    const int    thread_num        = 512;                                                                              \
-    const int    threads_per_token = ceil_div<int>(size_per_head / Vec_t<T>::size, 32) * 32;                           \
-    const int    tokens_per_block  = thread_num / threads_per_token;                                                   \
-    dim3         block(thread_num);                                                                                    \
-    dim3         grid(batch_size,                                                                                      \
-              ceil_div<int>(seq_len, tokens_per_block),                                                        \
-              head_num / head_q_block_num + head_num_kv / head_k_block_num + head_num_kv / head_v_block_num);  \
-    const size_t smem_size =                                                                                           \
-        rope_config.style == RopeStyle::No ? 0 : 2 * tokens_per_block * rope_config.dim * sizeof(T);                   \
+    constexpr int thread_num        = 128;                                                                             \
+    const int     threads_per_token = size_per_head / Vec_t2<T>::size;                                                 \
+    const int     tokens_per_block  = thread_num / threads_per_token;                                                  \
+    dim3          block(thread_num);                                                                                   \
+    dim3          grid(batch_size,                                                                                     \
+              ceil_div<int>(seq_len, tokens_per_block),                                                       \
+              head_num / head_q_block_num + head_num_kv / head_k_block_num + head_num_kv / head_v_block_num); \
+    const size_t  smem_size =                                                                                          \
+        rope_config.style == RopeStyle::No ? 0 : 2 * tokens_per_block * rope_config.dim * sizeof(T);                  \
     FT_SWITCH(param_ptr->max_prefix_prompt_length != 0, PREFIX_PROMPT, [&] {                                           \
         FT_SWITCH(use_paged_fmha, USE_PAGED_FMHA, [&] {                                                                \
             FT_SWITCH_KV_CACHE_TYPE_CASE(param_ptr->kv_block_array.cache_type, Tcache, [&] {                           \
@@ -2032,11 +2062,8 @@ void invokeAddFusedQKVBiasTranspose(T*                             q_no_transpos
                                     const bool                     store_cache,
                                     cudaStream_t                   stream) {
     if (use_rope_cache && rope_cache) {
-        if (head_num % 8 == 0 && head_num_kv % 8 == 0
+        if (head_num % 8 == 0 && head_num_kv % 4 == 0
             && param_ptr->kv_block_array.cache_type != KvCacheDataType::INT8) {
-            ADD_FUSEDQKV_BIAS_TRANSPOSE_NON_INT8_WITH_ROPE_CACHE(8, 8, 8);
-        } else if (head_num % 8 == 0 && head_num_kv % 4 == 0
-                   && param_ptr->kv_block_array.cache_type != KvCacheDataType::INT8) {
             ADD_FUSEDQKV_BIAS_TRANSPOSE_NON_INT8_WITH_ROPE_CACHE(8, 4, 4);
         } else {
             dim3         block((size_per_head / Vec_t<T>::size + 31) / 32 * 32);
@@ -2205,13 +2232,12 @@ __global__ void decode_add_fusedQKV_bias_transpose_with_rope_cache_kernel(T*    
             q            = add(q, q_bias);
         }
 
-        apply_rope_with_cache<Vec_t, T, ROPE_STYLE>(q, reinterpret_cast<T*>(smem_), tidx, rope_config.dim, coef, work);
+        apply_rope_with_cache<Vec_t, T, float2, ROPE_STYLE>(
+            q, reinterpret_cast<T*>(smem_), tidx, rope_config.dim, coef, work);
 
         if (use_logn_attn) {
             logn_attention(q, seq_idx, rope_config.max_pos);
         }
-
-        __syncthreads();
 
         if (store_q) {
             size_t dest_q_idx = batch_idx * size_per_head * seq_len * head_num + head_idx * size_per_head * seq_len
@@ -2230,9 +2256,8 @@ __global__ void decode_add_fusedQKV_bias_transpose_with_rope_cache_kernel(T*    
             k            = add(k, k_bias);
         }
 
-        apply_rope_with_cache<Vec_t, T, ROPE_STYLE>(k, reinterpret_cast<T*>(smem_), tidx, rope_config.dim, coef, work);
-
-        __syncthreads();
+        apply_rope_with_cache<Vec_t, T, float2, ROPE_STYLE>(
+            k, reinterpret_cast<T*>(smem_), tidx, rope_config.dim, coef, work);
 
         if (store_kv) {
             const int    dst_kv_seq_idx = seq_idx;
@@ -2606,6 +2631,7 @@ __global__ void decode_add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kern
 
     if (bidy < max_q_bidy) {
         Vec_t q[2];
+        Vec_t q_bias[2];
         int   q_load_idx  = 0;
         int   q_store_idx = 0;
         int   q_idx_off   = 1;
@@ -2620,8 +2646,8 @@ __global__ void decode_add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kern
         q[q_load_idx] = *reinterpret_cast<const Vec_t*>(&QKV[src_q_idx]);
 
         if (qkv_bias) {
-            Vec_t q_bias  = *reinterpret_cast<const Vec_t*>(&qkv_bias[hidden_idx]);
-            q[q_load_idx] = add(q[q_load_idx], q_bias);
+            q_bias[q_load_idx] = *reinterpret_cast<const Vec_t*>(&qkv_bias[hidden_idx]);
+            q[q_load_idx]      = add(q[q_load_idx], q_bias[q_load_idx]);
         }
 
 #pragma unroll
@@ -2635,18 +2661,16 @@ __global__ void decode_add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kern
             q[q_load_idx] = *reinterpret_cast<const Vec_t*>(&QKV[src_q_idx]);
 
             if (qkv_bias) {
-                Vec_t q_bias  = *reinterpret_cast<const Vec_t*>(&qkv_bias[hidden_idx]);
-                q[q_load_idx] = add(q[q_load_idx], q_bias);
+                q_bias[q_load_idx] = *reinterpret_cast<const Vec_t*>(&qkv_bias[hidden_idx]);
+                q[q_load_idx]      = add(q[q_load_idx], q_bias[q_load_idx]);
             }
 
-            apply_rope_with_cache<Vec_t, T, ROPE_STYLE>(
+            apply_rope_with_cache<Vec_t, T, float2, ROPE_STYLE>(
                 q[q_store_idx], reinterpret_cast<T*>(smem_), tidx, rope_config.dim, coef, work);
 
             if (use_logn_attn) {
                 logn_attention(q[q_store_idx], seq_idx, rope_config.max_pos);
             }
-
-            __syncthreads();
 
             if (store_q) {
                 *reinterpret_cast<Vec_t*>(&q_buf[dest_q_idx]) = q[q_store_idx];
@@ -2656,20 +2680,19 @@ __global__ void decode_add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kern
             q_store_idx ^= q_idx_off;
         }
 
-        apply_rope_with_cache<Vec_t, T, ROPE_STYLE>(
+        apply_rope_with_cache<Vec_t, T, float2, ROPE_STYLE>(
             q[q_store_idx], reinterpret_cast<T*>(smem_), tidx, rope_config.dim, coef, work);
 
         if (use_logn_attn) {
             logn_attention(q[q_store_idx], seq_idx, rope_config.max_pos);
         }
 
-        __syncthreads();
-
         if (store_q) {
             *reinterpret_cast<Vec_t*>(&q_buf[dest_q_idx]) = q[q_store_idx];
         }
     } else if (bidy < max_k_bidy) {
         Vec_t k[2];
+        Vec_t k_bias[2];
         int   k_load_idx  = 0;
         int   k_store_idx = 0;
         int   k_idx_off   = 1;
@@ -2701,8 +2724,8 @@ __global__ void decode_add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kern
         k[k_load_idx] = *reinterpret_cast<const Vec_t*>(&QKV[src_k_idx]);
 
         if (qkv_bias) {
-            Vec_t k_bias  = *reinterpret_cast<const Vec_t*>(&qkv_bias[hidden_idx + n]);
-            k[k_load_idx] = add(k[k_load_idx], k_bias);
+            k_bias[k_load_idx] = *reinterpret_cast<const Vec_t*>(&qkv_bias[hidden_idx + n]);
+            k[k_load_idx]      = add(k[k_load_idx], k_bias[k_load_idx]);
         }
 
 #pragma unroll
@@ -2716,14 +2739,12 @@ __global__ void decode_add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kern
             k[k_load_idx] = *reinterpret_cast<const Vec_t*>(&QKV[src_k_idx]);
 
             if (qkv_bias) {
-                Vec_t k_bias  = *reinterpret_cast<const Vec_t*>(&qkv_bias[hidden_idx + n]);
-                k[k_load_idx] = add(k[k_load_idx], k_bias);
+                k_bias[k_load_idx] = *reinterpret_cast<const Vec_t*>(&qkv_bias[hidden_idx + n]);
+                k[k_load_idx]      = add(k[k_load_idx], k_bias[k_load_idx]);
             }
 
-            apply_rope_with_cache<Vec_t, T, ROPE_STYLE>(
+            apply_rope_with_cache<Vec_t, T, float2, ROPE_STYLE>(
                 k[k_store_idx], reinterpret_cast<T*>(smem_), tidx, rope_config.dim, coef, work);
-
-            __syncthreads();
 
             if (store_kv) {
                 *reinterpret_cast<Vec_t*>(&k_buf[dest_kv_idx]) = k[k_store_idx];
@@ -2749,10 +2770,8 @@ __global__ void decode_add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kern
             k_store_idx ^= k_idx_off;
         }
 
-        apply_rope_with_cache<Vec_t, T, ROPE_STYLE>(
+        apply_rope_with_cache<Vec_t, T, float2, ROPE_STYLE>(
             k[k_store_idx], reinterpret_cast<T*>(smem_), tidx, rope_config.dim, coef, work);
-
-        __syncthreads();
 
         if (store_kv) {
             *reinterpret_cast<Vec_t*>(&k_buf[dest_kv_idx]) = k[k_store_idx];
@@ -2770,6 +2789,7 @@ __global__ void decode_add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kern
         }
     } else {
         Vec_t v[2];
+        Vec_t v_bias[2];
         int   v_load_idx  = 0;
         int   v_store_idx = 0;
         int   v_idx_off   = 1;
@@ -2801,8 +2821,8 @@ __global__ void decode_add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kern
         v[v_load_idx] = *reinterpret_cast<const Vec_t*>(&QKV[src_v_idx]);
 
         if (qkv_bias) {
-            Vec_t v_bias  = *reinterpret_cast<const Vec_t*>(&qkv_bias[hidden_idx + n + kv_n]);
-            v[v_load_idx] = add(v[v_load_idx], v_bias);
+            v_bias[v_load_idx] = *reinterpret_cast<const Vec_t*>(&qkv_bias[hidden_idx + n + kv_n]);
+            v[v_load_idx]      = add(v[v_load_idx], v_bias[v_load_idx]);
         }
 
         __syncthreads();
@@ -2818,8 +2838,8 @@ __global__ void decode_add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kern
             v[v_load_idx] = *reinterpret_cast<const Vec_t*>(&QKV[src_v_idx]);
 
             if (qkv_bias) {
-                Vec_t v_bias  = *reinterpret_cast<const Vec_t*>(&qkv_bias[hidden_idx + n + kv_n]);
-                v[v_load_idx] = add(v[v_load_idx], v_bias);
+                v_bias[v_load_idx] = *reinterpret_cast<const Vec_t*>(&qkv_bias[hidden_idx + n + kv_n]);
+                v[v_load_idx]      = add(v[v_load_idx], v_bias[v_load_idx]);
             }
 
             if (store_kv) {
@@ -2946,6 +2966,7 @@ __global__ void decode_add_fusedQKV_bias_transpose_non_int8_kernel(T*           
 
     if (bidy < max_q_bidy) {
         Vec_t q[2];
+        Vec_t q_bias[2];
         int   q_load_idx  = 0;
         int   q_store_idx = 0;
         int   q_idx_off   = 1;
@@ -2960,8 +2981,8 @@ __global__ void decode_add_fusedQKV_bias_transpose_non_int8_kernel(T*           
         q[q_load_idx] = *reinterpret_cast<const Vec_t*>(&QKV[src_q_idx]);
 
         if (qkv_bias) {
-            Vec_t q_bias  = *reinterpret_cast<const Vec_t*>(&qkv_bias[hidden_idx]);
-            q[q_load_idx] = add(q[q_load_idx], q_bias);
+            q_bias[q_load_idx] = *reinterpret_cast<const Vec_t*>(&qkv_bias[hidden_idx]);
+            q[q_load_idx]      = add(q[q_load_idx], q_bias[q_load_idx]);
         }
 
 #pragma unroll
@@ -2975,8 +2996,8 @@ __global__ void decode_add_fusedQKV_bias_transpose_non_int8_kernel(T*           
             q[q_load_idx] = *reinterpret_cast<const Vec_t*>(&QKV[src_q_idx]);
 
             if (qkv_bias) {
-                Vec_t q_bias  = *reinterpret_cast<const Vec_t*>(&qkv_bias[hidden_idx]);
-                q[q_load_idx] = add(q[q_load_idx], q_bias);
+                q_bias[q_load_idx] = *reinterpret_cast<const Vec_t*>(&qkv_bias[hidden_idx]);
+                q[q_load_idx]      = add(q[q_load_idx], q_bias[q_load_idx]);
             }
 
             apply_rope<T, Vec_t, ROPE_STYLE>(
@@ -3010,6 +3031,7 @@ __global__ void decode_add_fusedQKV_bias_transpose_non_int8_kernel(T*           
         }
     } else if (bidy < max_k_bidy) {
         Vec_t k[2];
+        Vec_t k_bias[2];
         int   k_load_idx  = 0;
         int   k_store_idx = 0;
         int   k_idx_off   = 1;
@@ -3033,8 +3055,8 @@ __global__ void decode_add_fusedQKV_bias_transpose_non_int8_kernel(T*           
         k[k_load_idx] = *reinterpret_cast<const Vec_t*>(&QKV[src_k_idx]);
 
         if (qkv_bias) {
-            Vec_t k_bias  = *reinterpret_cast<const Vec_t*>(&qkv_bias[hidden_idx + n]);
-            k[k_load_idx] = add(k[k_load_idx], k_bias);
+            k_bias[k_load_idx] = *reinterpret_cast<const Vec_t*>(&qkv_bias[hidden_idx + n]);
+            k[k_load_idx]      = add(k[k_load_idx], k_bias[k_load_idx]);
         }
 
 #pragma unroll
@@ -3048,8 +3070,8 @@ __global__ void decode_add_fusedQKV_bias_transpose_non_int8_kernel(T*           
             k[k_load_idx] = *reinterpret_cast<const Vec_t*>(&QKV[src_k_idx]);
 
             if (qkv_bias) {
-                Vec_t k_bias  = *reinterpret_cast<const Vec_t*>(&qkv_bias[hidden_idx + n]);
-                k[k_load_idx] = add(k[k_load_idx], k_bias);
+                k_bias[k_load_idx] = *reinterpret_cast<const Vec_t*>(&qkv_bias[hidden_idx + n]);
+                k[k_load_idx]      = add(k[k_load_idx], k_bias[k_load_idx]);
             }
 
             apply_rope<T, Vec_t, ROPE_STYLE>(
@@ -3100,6 +3122,7 @@ __global__ void decode_add_fusedQKV_bias_transpose_non_int8_kernel(T*           
         }
     } else {
         Vec_t v[2];
+        Vec_t v_bias[2];
         int   v_load_idx  = 0;
         int   v_store_idx = 0;
         int   v_idx_off   = 1;
@@ -3123,8 +3146,8 @@ __global__ void decode_add_fusedQKV_bias_transpose_non_int8_kernel(T*           
         v[v_load_idx] = *reinterpret_cast<const Vec_t*>(&QKV[src_v_idx]);
 
         if (qkv_bias) {
-            Vec_t v_bias  = *reinterpret_cast<const Vec_t*>(&qkv_bias[hidden_idx + n + kv_n]);
-            v[v_load_idx] = add(v[v_load_idx], v_bias);
+            v_bias[v_load_idx] = *reinterpret_cast<const Vec_t*>(&qkv_bias[hidden_idx + n + kv_n]);
+            v[v_load_idx]      = add(v[v_load_idx], v_bias[v_load_idx]);
         }
 
         __syncthreads();
@@ -3140,8 +3163,8 @@ __global__ void decode_add_fusedQKV_bias_transpose_non_int8_kernel(T*           
             v[v_load_idx] = *reinterpret_cast<const Vec_t*>(&QKV[src_v_idx]);
 
             if (qkv_bias) {
-                Vec_t v_bias  = *reinterpret_cast<const Vec_t*>(&qkv_bias[hidden_idx + n + kv_n]);
-                v[v_load_idx] = add(v[v_load_idx], v_bias);
+                v_bias[v_load_idx] = *reinterpret_cast<const Vec_t*>(&qkv_bias[hidden_idx + n + kv_n]);
+                v[v_load_idx]      = add(v[v_load_idx], v_bias[v_load_idx]);
             }
 
             if (store_kv) {

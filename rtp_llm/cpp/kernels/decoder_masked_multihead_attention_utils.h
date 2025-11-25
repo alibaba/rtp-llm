@@ -2109,6 +2109,20 @@ __device__ __inline__ void logn_attention(float2& vec, const int seq_idx, const 
     }
 }
 
+__device__ __inline__ void logn_attention(Float8_& vec, const int seq_idx, const int logn_seq_len) {
+    float logn = logf(seq_idx + 1) / logf(logn_seq_len);
+    if (seq_idx > logn_seq_len) {
+        vec.x.x = vec.x.x * logn;
+        vec.x.y = vec.x.y * logn;
+        vec.y.x = vec.y.x * logn;
+        vec.y.y = vec.y.y * logn;
+        vec.z.x = vec.z.x * logn;
+        vec.z.y = vec.z.y * logn;
+        vec.w.x = vec.w.x * logn;
+        vec.w.y = vec.w.y * logn;
+    }
+}
+
 __device__ __inline__ void logn_attention(uint32_t& vec, const int seq_idx, const int logn_seq_len) {
     float2 result = half2_to_float2(vec);
     float  logn   = logf(seq_idx + 1) / logf(logn_seq_len);
