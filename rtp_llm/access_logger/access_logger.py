@@ -1,10 +1,12 @@
 import logging
-from typing import Any, Dict
+import time
+from typing import Any, Dict, List, Optional
 
 from rtp_llm.access_logger.json_util import dump_json
 from rtp_llm.access_logger.log_utils import get_handler
 from rtp_llm.access_logger.py_access_log import PyAccessLog, RequestLog, ResponseLog
 from rtp_llm.structure.request_extractor import request_id_field_name
+from rtp_llm.utils.base_model_datatypes import MultimodalInput
 
 ACCESS_LOGGER_NAME = "access_logger"
 QUERY_ACCESS_LOGGER_NAME = "query_access_logger"
@@ -78,3 +80,42 @@ class AccessLogger:
             self.log_access(
                 {request_id_field_name: request[request_id_field_name]}, response_log
             )
+
+
+class MMAccessLogger(AccessLogger):
+    def log(
+        self,
+        logger,
+        request: List[MultimodalInput],
+        exception: Optional[BaseException] = None,
+        response: Optional[Any] = None,
+    ) -> None:
+        current_time = time.time()
+        local_time = time.localtime(current_time)
+        log_time = (
+            time.strftime("%Y-%m-%d %H:%M:%S", local_time)
+            + f".{int((current_time % 1) * 1000):03d}"
+        )
+        logger.info(
+            dump_json(
+                {
+                    "query": request,
+                    "log_time": log_time,
+                    "exception": exception,
+                    "response": response,
+                }
+            )
+        )
+
+    def log_query_access(self, mm_inputs: List[MultimodalInput]) -> None:
+        self.log(self.query_logger, mm_inputs)
+
+    def log_exception_access(
+        self, mm_inputs: List[MultimodalInput], exception: BaseException
+    ) -> None:
+        self.log(self.logger, mm_inputs, exception=exception)
+
+    def log_success_access(
+        self, mm_inputs: List[MultimodalInput], response: Any
+    ) -> None:
+        self.log(self.logger, mm_inputs, response=response)
