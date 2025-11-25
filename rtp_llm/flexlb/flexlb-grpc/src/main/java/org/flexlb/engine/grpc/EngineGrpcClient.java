@@ -1,5 +1,6 @@
 package org.flexlb.engine.grpc;
 
+import com.google.protobuf.MessageLite;
 import io.grpc.ManagedChannel;
 import io.grpc.StatusRuntimeException;
 import io.grpc.internal.GrpcUtil;
@@ -74,13 +75,32 @@ public class EngineGrpcClient extends AbstractGrpcClient<RpcServiceGrpc.RpcServi
         }
 
         try {
+            invoker.updateLastUsedTime();
             RpcServiceGrpc.RpcServiceBlockingStub rpcServiceStub = invoker.getRpcServiceStub()
                     .withDeadlineAfter(requestTimeoutMs, TimeUnit.MILLISECONDS);
 
-            return grpcCall.apply(rpcServiceStub);
+            long startTime = System.nanoTime() / 1000;
+            R response = grpcCall.apply(rpcServiceStub);
+            long endTime = System.nanoTime() / 1000;
+            
+            // 计算响应体字节大小
+            int responseSize = 0;
+            if (response instanceof MessageLite messageLite) {
+                responseSize = messageLite.getSerializedSize();
+            }
+            
+            // 记录统计信息
+            long duration = endTime - startTime;
+            grpcReporter.reportCallMetrics(ip, serviceType.getOperationName(), duration, responseSize, false);
+            
+            return response;
         } catch (StatusRuntimeException e) {
             if (isConnectionBrokenError(e)) {
-                log.warn("Connection broken for {}:{} {}, recreating channel and retrying once, msh:{}", ip, port, serviceType, e.getMessage());
+                invoker.markExpired();
+                long connectionDuration = invoker.getConnectionDuration();
+                grpcReporter.reportConnectionDuration(ip, serviceType.getOperationName(), connectionDuration);
+                log.warn("Connection broken for {}:{} {}, duration: {}μs, recreating channel and retrying once, msh:{}", 
+                        ip, port, serviceType, connectionDuration, e.getMessage());
                 return retryWithNewChannel(channelKey, grpcCall, requestTimeoutMs, ip, port, serviceType);
             }
             log.error("Exception during {} gRPC call for {}:{}", serviceType.getOperationName(), ip, port, e);
@@ -102,10 +122,10 @@ public class EngineGrpcClient extends AbstractGrpcClient<RpcServiceGrpc.RpcServi
     }
 
     private <R> R retryWithNewChannel(String channelKey,
-                                     Function<RpcServiceGrpc.RpcServiceBlockingStub, R> grpcCall,
-                                     long requestTimeoutMs,
-                                     String ip, int port,
-                                     ServiceType serviceType) {
+                                      Function<RpcServiceGrpc.RpcServiceBlockingStub, R> grpcCall,
+                                      long requestTimeoutMs,
+                                      String ip, int port,
+                                      ServiceType serviceType) {
         ManagedChannel newChannel = createChannel(channelKey);
         Invoker newInvoker = new Invoker(channelKey, newChannel);
         channelPool.put(channelKey, newInvoker);
@@ -115,7 +135,21 @@ public class EngineGrpcClient extends AbstractGrpcClient<RpcServiceGrpc.RpcServi
         RpcServiceGrpc.RpcServiceBlockingStub rpcServiceStub = newInvoker.getRpcServiceStub()
                 .withDeadlineAfter(requestTimeoutMs, TimeUnit.MILLISECONDS);
         
-        return grpcCall.apply(rpcServiceStub);
+        long startTime = System.nanoTime() / 1000;
+        R response = grpcCall.apply(rpcServiceStub);
+        long endTime = System.nanoTime() / 1000;
+        
+        // 计算响应体字节大小
+        int responseSize = 0;
+        if (response instanceof MessageLite messageLite) {
+            responseSize = messageLite.getSerializedSize();
+        }
+        
+        // 记录重试统计信息
+        long duration = endTime - startTime;
+        grpcReporter.reportCallMetrics(ip, serviceType.getOperationName(), duration, responseSize, true);
+        
+        return response;
     }
 
     /**
@@ -143,8 +177,8 @@ public class EngineGrpcClient extends AbstractGrpcClient<RpcServiceGrpc.RpcServi
                 .withOption(ChannelOption.TCP_NODELAY, true)
                 .withOption(ChannelOption.SO_KEEPALIVE, true)
                 .withOption(ChannelOption.ALLOCATOR, PooledByteBufAllocator.DEFAULT)
-                // 500ms 连接超时,避免网络抖动导致连接失败
-                .withOption(ChannelOption.CONNECT_TIMEOUT_MILLIS, 500)
+                // 20ms 连接超时
+                .withOption(ChannelOption.CONNECT_TIMEOUT_MILLIS, 20)
                 // 写缓冲区水位线：防止内存堆积和 pendingTasks 累积
                 .withOption(ChannelOption.WRITE_BUFFER_WATER_MARK, new WriteBufferWaterMark(64 * 1024, 128 * 1024))
                 // 接收/发送缓冲区

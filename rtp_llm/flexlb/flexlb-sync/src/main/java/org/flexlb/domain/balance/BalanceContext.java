@@ -1,10 +1,10 @@
 package org.flexlb.domain.balance;
 
 import lombok.Data;
+import org.flexlb.config.WhaleMasterConfig;
 import org.flexlb.dao.RequestContext;
 import org.flexlb.dao.loadbalance.MasterRequest;
 import org.flexlb.dao.loadbalance.MasterResponse;
-import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.pv.PvLogData;
 
 /**
@@ -23,13 +23,9 @@ public class BalanceContext {
 
     private RequestContext requestContext;
 
-    private ServerStatus serverStatus;
-
     private long interRequestId;
 
     private long startTime = System.nanoTime() / 1000;
-
-    private int workerCalcParallel = 1;
 
     private boolean success = true;
 

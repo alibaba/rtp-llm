@@ -2,7 +2,7 @@ package org.flexlb.httpserver;
 
 import lombok.NoArgsConstructor;
 import org.flexlb.listener.OnlineListener;
-import org.flexlb.utils.LoggingUtils;
+import org.flexlb.util.LoggingUtils;
 import org.springframework.context.annotation.Bean;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;

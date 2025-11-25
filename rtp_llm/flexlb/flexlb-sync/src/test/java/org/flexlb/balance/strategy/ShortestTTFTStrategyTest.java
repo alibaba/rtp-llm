@@ -2,6 +2,7 @@ package org.flexlb.balance.strategy;
 
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ModelMetaConfig;
+import org.flexlb.config.WhaleMasterConfig;
 import org.flexlb.dao.loadbalance.MasterRequest;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.CacheStatus;
@@ -9,7 +10,6 @@ import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.domain.balance.BalanceContext;
-import org.flexlb.domain.balance.WhaleMasterConfig;
 import org.flexlb.service.config.ConfigService;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
@@ -67,7 +67,6 @@ class ShortestTTFTStrategyTest {
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setConfig(new WhaleMasterConfig());
         balanceContext.setMasterRequest(req);
-        balanceContext.setWorkerCalcParallel(4);
         ServerStatus result = staticCacheLoadBalancer.select(balanceContext, RoleType.PREFILL, null);
         Assertions.assertTrue(result.isSuccess());
         Assertions.assertEquals("127.0.0.2", result.getServerIp());
@@ -88,7 +87,7 @@ class ShortestTTFTStrategyTest {
         cacheStatus.setAvailableKvCache(10000);
         workerStatus.setCacheStatus(cacheStatus);
         workerStatus.getRunningQueueTime().getAndSet(runningQueueTime);
-        workerStatus.clearFinishedTask(finishedTaskList);
+        workerStatus.updateTaskStates(runningTaslList, finishedTaskList);
         workerStatus.setRunningTaskList(runningTaslList);
         workerStatus.setLocalTaskMap(localTaskList);
         return workerStatus;

@@ -3,6 +3,7 @@ package org.flexlb.dao.master;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
+import org.flexlb.enums.TaskStateEnum;
 
 @JsonIgnoreProperties(ignoreUnknown = true)
 @Data
@@ -23,8 +24,10 @@ public class TaskInfo {
     private long endTimeMs;
     @JsonProperty("dp_rank")
     private long dpRank;
-    @JsonProperty("last_active_time_us")
-    private long lastActiveTimeUs;
+
+    // 任务状态相关字段
+    private TaskStateEnum taskState = TaskStateEnum.CREATED;
+    private long lastActiveTimeUs = System.nanoTime() / 1000;
 
     public long estimatePrefillTime() {
         return estimatePrefillTimeMs(inputLength, prefixLength);
@@ -32,5 +35,29 @@ public class TaskInfo {
 
     public static long estimatePrefillTimeMs(long tokens, long hitCacheTokens) {
         return (long) (tokens * 1.0 - hitCacheTokens * 0.7);
+    }
+    
+    /**
+     * 更新任务状态
+     */
+    public void updateTaskState(TaskStateEnum newState) {
+        if (this.taskState != newState) {
+            this.taskState = newState;
+            this.lastActiveTimeUs = System.nanoTime() / 1000;
+        }
+    }
+    
+    /**
+     * 判断任务是否丢失
+     */
+    public boolean isLost() {
+        return taskState == TaskStateEnum.LOST;
+    }
+    
+    /**
+     * 判断任务是否超时
+     */
+    public boolean isTimeout(long currentTimeUs, long timeoutUs) {
+        return (currentTimeUs - lastActiveTimeUs) > timeoutUs;
     }
 }
