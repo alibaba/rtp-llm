@@ -996,10 +996,10 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
     if (rope_config.style == RopeStyle::Mrope) {
         int rope_dim = rope_config.mrope_dim1 + rope_config.mrope_dim2 + rope_config.mrope_dim3;
         int now_idx = tidx % rope_dim, now_dim = 0;
-        if (now_idx >= rope_config.mrope_dim1 + rope_config.mrope_dim2) {
-            now_dim = 2;
-        } else if (now_idx >= rope_config.mrope_dim1) {
+        if (now_idx % 3 == 1 && now_idx < rope_config.mrope_dim2 * 3) {
             now_dim = 1;
+        } else if (now_idx % 3 == 2 && now_idx < rope_config.mrope_dim3 * 3) {
+            now_dim = 2;
         }
         position_id = position_ids[token_idx * rope_config.index_factor + now_dim];
     } else if (position_ids) {
@@ -1475,10 +1475,10 @@ __global__ void decode_add_fusedQKV_bias_transpose_kernel(T*           q_buf,
     if (rope_config.style == RopeStyle::Mrope) {
         int rope_dim = rope_config.mrope_dim1 + rope_config.mrope_dim2 + rope_config.mrope_dim3;
         int now_idx = tidx % rope_dim, now_dim = 0;
-        if (now_idx >= rope_config.mrope_dim1 + rope_config.mrope_dim2) {
-            now_dim = 2;
-        } else if (now_idx >= rope_config.mrope_dim1) {
+        if (now_idx % 3 == 1 && now_idx < rope_config.mrope_dim2 * 3) {
             now_dim = 1;
+        } else if (now_idx % 3 == 2 && now_idx < rope_config.mrope_dim3 * 3) {
+            now_dim = 2;
         }
         position_id = position_ids[token_idx * rope_config.index_factor + now_dim];
     } else if (position_ids) {
@@ -2001,10 +2001,10 @@ __global__ void decode_add_fusedQKV_bias_transpose_non_int8_kernel(T*           
     if (rope_config.style == RopeStyle::Mrope) {
         int rope_dim = rope_config.mrope_dim1 + rope_config.mrope_dim2 + rope_config.mrope_dim3;
         int now_idx = tidx % rope_dim, now_dim = 0;
-        if (now_idx >= rope_config.mrope_dim1 + rope_config.mrope_dim2) {
-            now_dim = 2;
-        } else if (now_idx >= rope_config.mrope_dim1) {
+        if (now_idx % 3 == 1 && now_idx < rope_config.mrope_dim2 * 3) {
             now_dim = 1;
+        } else if (now_idx % 3 == 2 && now_idx < rope_config.mrope_dim3 * 3) {
+            now_dim = 2;
         }
         position_id = position_ids[token_idx * rope_config.index_factor + now_dim];
     } else if (position_ids) {
@@ -2405,22 +2405,22 @@ void invokeDecodeAddFusedQKVBiasTranspose(T*               q_buf,
 
 #if USING_ROCM
 inline __device__ void convert_to_fp8(__hip_fp8x2_e4m3_fnuz* v, const amd_bfloat162 u) {
-    __hip_bfloat162_raw raw_bf16 = *reinterpret_cast<const __hip_bfloat162_raw*>(&u);
+    __hip_bfloat162_raw   raw_bf16  = *reinterpret_cast<const __hip_bfloat162_raw*>(&u);
     __hip_fp8x2_storage_t raw_fp8x2 = __hip_cvt_bfloat16raw2_to_fp8x2(raw_bf16, __HIP_SATFINITE, __HIP_E4M3_FNUZ);
-    *v = *reinterpret_cast<__hip_fp8x2_e4m3_fnuz*>(&raw_fp8x2);
+    *v                              = *reinterpret_cast<__hip_fp8x2_e4m3_fnuz*>(&raw_fp8x2);
 }
 
 inline __device__ void convert_to_fp8(__hip_fp8x2_e4m3_fnuz* v, const float2 u) {
-    __half2 h2 = __float22half2_rn(u);
-    __half2_raw raw_h2 = *reinterpret_cast<const __half2_raw*>(&h2);
+    __half2               h2        = __float22half2_rn(u);
+    __half2_raw           raw_h2    = *reinterpret_cast<const __half2_raw*>(&h2);
     __hip_fp8x2_storage_t raw_fp8x2 = __hip_cvt_halfraw2_to_fp8x2(raw_h2, __HIP_SATFINITE, __HIP_E4M3_FNUZ);
-    *v = *reinterpret_cast<const __hip_fp8x2_e4m3_fnuz*>(&raw_fp8x2);
+    *v                              = *reinterpret_cast<const __hip_fp8x2_e4m3_fnuz*>(&raw_fp8x2);
 }
 
 inline __device__ void convert_to_fp8(__hip_fp8x2_e4m3_fnuz* v, const uint32_t u) {
-   __half2_raw raw_h2 = *reinterpret_cast<const __half2_raw*>(&u);
-   __hip_fp8x2_storage_t raw_fp8x2 = __hip_cvt_halfraw2_to_fp8x2(raw_h2, __HIP_SATFINITE, __HIP_E4M3_FNUZ);
-   *v = *reinterpret_cast<const __hip_fp8x2_e4m3_fnuz*>(&raw_fp8x2);
+    __half2_raw           raw_h2    = *reinterpret_cast<const __half2_raw*>(&u);
+    __hip_fp8x2_storage_t raw_fp8x2 = __hip_cvt_halfraw2_to_fp8x2(raw_h2, __HIP_SATFINITE, __HIP_E4M3_FNUZ);
+    *v                              = *reinterpret_cast<const __hip_fp8x2_e4m3_fnuz*>(&raw_fp8x2);
 }
 
 template<typename T, typename Tcache, bool PREFIX_PROMPT, bool USE_PAGED_FMHA, RopeStyle ROPE_STYLE>
@@ -2524,10 +2524,10 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel_v1(T*                
     if (rope_config.style == RopeStyle::Mrope) {
         int rope_dim = rope_config.mrope_dim1 + rope_config.mrope_dim2 + rope_config.mrope_dim3;
         int now_idx = tidx % rope_dim, now_dim = 0;
-        if (now_idx >= rope_config.mrope_dim1 + rope_config.mrope_dim2) {
-            now_dim = 2;
-        } else if (now_idx >= rope_config.mrope_dim1) {
+        if (now_idx % 3 == 1 && now_idx < rope_config.mrope_dim2 * 3) {
             now_dim = 1;
+        } else if (now_idx % 3 == 2 && now_idx < rope_config.mrope_dim3 * 3) {
+            now_dim = 2;
         }
         position_id = position_ids[token_idx * rope_config.index_factor + now_dim];
     } else if (position_ids) {
@@ -2763,7 +2763,6 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel(T*                   
 
     static constexpr bool ENABLE_8BITS_CACHE = sizeof(Tcache) == 1;
 
-
     // Quantized output only supports fp8 currently.
     using QuantizedEltType = __hip_fp8_e4m3_fnuz;
     using QuantizedVecType = __hip_fp8x2_e4m3_fnuz;
@@ -2824,10 +2823,10 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel(T*                   
     if (rope_config.style == RopeStyle::Mrope) {
         int rope_dim = rope_config.mrope_dim1 + rope_config.mrope_dim2 + rope_config.mrope_dim3;
         int now_idx = tidx % rope_dim, now_dim = 0;
-        if (now_idx >= rope_config.mrope_dim1 + rope_config.mrope_dim2) {
-            now_dim = 2;
-        } else if (now_idx >= rope_config.mrope_dim1) {
+        if (now_idx % 3 == 1 && now_idx < rope_config.mrope_dim2 * 3) {
             now_dim = 1;
+        } else if (now_idx % 3 == 2 && now_idx < rope_config.mrope_dim3 * 3) {
+            now_dim = 2;
         }
         position_id = position_ids[token_idx * rope_config.index_factor + now_dim];
     } else if (position_ids) {

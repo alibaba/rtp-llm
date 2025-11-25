@@ -170,12 +170,12 @@ class MMProcessEngine:
         with self.query_num_lock:
             return self.query_num
 
-    def _maybe_tensor_to_list(self, tensor):
+    def _maybe_tensor_to_list(self, tensor, dim=2):
         if tensor == None:
             return []
         elif not isinstance(tensor, torch.Tensor):
             return tensor
-        elif len(tensor.shape) > 2:
+        elif len(tensor.shape) > dim:
             return list(tensor)
         else:
             return [tensor]
@@ -239,6 +239,9 @@ class MMProcessEngine:
                 res = work_item.get_embedding_result(self.model.mm_part.embedding)
                 emb_res.extend(self._maybe_tensor_to_list(res[0]))
                 pos_res.extend(self._maybe_tensor_to_list(res[1]))
+                if len(res) > 2:
+                    # deepstack embeds is a tensor of 3 dim
+                    tensor_res.extend(self._maybe_tensor_to_list(res[2], dim=3))
 
             kmonitor.report(GaugeMetrics.VIT_SUCCESS_QPS_METRIC, 1)
             res = MMEmbeddingRes(emb_res, pos_res, tensor_res)
