@@ -1659,7 +1659,14 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     } else {
         layer_inputs.need_moe_gating = inputs.need_moe_gating;
         for (int32_t i = 0; i < layer_num_; ++i) {
-            layer_outputs                     = forwardGptLayer(layer_inputs, i, inputs.lora_model_input);
+            layer_outputs = forwardGptLayer(layer_inputs, i, inputs.lora_model_input);
+            if (inputs.mm_deepstack_embeds.has_value()) {
+                device_->multimodalDeepstackEmbedding({i,
+                                                       layer_outputs.hidden,
+                                                       (OptionalConstBufferRef)*inputs.mm_features_locs,
+                                                       (OptionalConstVecBufferPtrRef)inputs.mm_deepstack_embeds});
+                printBufferData(*layer_outputs.hidden, "layer_" + to_string(i) + "_after_mm_deepstack_embedding");
+            }
             layer_inputs.hidden               = layer_outputs.hidden;
             layer_inputs.pre_decoder_residual = layer_outputs.pre_decoder_residual;
             if (inputs.need_moe_gating) {
@@ -1788,6 +1795,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, rtp_llm::DeviceBase* device) {
         shape_hints_ptr[GptModelInputIndex::mmFeaturesNum] ?
             (std::uint8_t)inputs.multimodal_features.value()[0]->type() :
             0;
+    shape_hints_ptr[GptModelInputIndex::mmHasDeepstackEmbeddings] =
+        inputs.mm_deepstack_embeds.has_value() ? inputs.mm_deepstack_embeds.value().size() : 0;
     shape_hints_ptr[GptModelInputIndex::needAllLogits] = inputs.need_all_logits;
     shape_hints_ptr[GptModelInputIndex::mtpHiddenStates] =
         inputs.last_hidden_states.get() ? inputs.last_hidden_states->size() : 0;
@@ -1825,6 +1834,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, rtp_llm::DeviceBase* device) {
         device->syncCommunication(false);
         device->syncAndCheck();
     }
+
+    const bool mm_has_deepstack_embeddings = shape_hints_ptr[GptModelInputIndex::mmHasDeepstackEmbeddings] > 0;
 
     auto   max_blocks              = (size_t)shape_hints_ptr[GptModelInputIndex::maxBlocksPerBatch];
     auto   combo_position_ids_size = shape_hints_ptr[GptModelInputIndex::comboPositionIds];
@@ -1908,14 +1919,24 @@ void tpSyncModelInputs(GptModelInputs& inputs, rtp_llm::DeviceBase* device) {
         }
         if (mm_features_num) {
             std::vector<rtp_llm::BufferPtr> mm_features;
+            std::vector<rtp_llm::BufferPtr> mm_deepstack_embeds;
             for (auto mm_index = 0; mm_index < mm_features_num; ++mm_index) {
                 mm_features.emplace_back(
                     device->allocateBuffer({(rtp_llm::DataType)shape_hints_ptr[GptModelInputIndex::mmFeaturesDtype],
                                             {(size_t)mm_features_shape_ptr[mm_index],
                                              (size_t)shape_hints_ptr[GptModelInputIndex::mmFeaturesSize]},
                                             rtp_llm::AllocationType::DEVICE}));
+                if (mm_has_deepstack_embeddings) {
+                    mm_deepstack_embeds.emplace_back(
+                        device->allocateBuffer({(rtp_llm::DataType)shape_hints_ptr[GptModelInputIndex::mmFeaturesDtype],
+                                                {3,
+                                                 (size_t)mm_features_shape_ptr[mm_index],
+                                                 (size_t)shape_hints_ptr[GptModelInputIndex::mmFeaturesSize]},
+                                                rtp_llm::AllocationType::DEVICE}));
+                }
             }
             inputs.multimodal_features = std::move(mm_features);
+            inputs.mm_deepstack_embeds = std::move(mm_deepstack_embeds);
         }
     }
 
@@ -1949,6 +1970,11 @@ void tpSyncModelInputs(GptModelInputs& inputs, rtp_llm::DeviceBase* device) {
     if (mm_features_num) {
         for (auto& mm_feature : inputs.multimodal_features.value()) {
             buffers.emplace_back(mm_feature);
+        }
+        if (mm_has_deepstack_embeddings) {
+            for (auto& mm_deepstack_embed : inputs.mm_deepstack_embeds.value()) {
+                buffers.emplace_back(mm_deepstack_embed);
+            }
         }
     }
     if (hidden_states_size) {
