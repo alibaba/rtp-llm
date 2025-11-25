@@ -117,25 +117,30 @@ bool KVCacheManager::setKVBlockValue(int              block_index,
         return false;
     }
 
-    auto copyFunc = [&](rtp_llm::Buffer& src_buffer, rtp_llm::BufferPtr& dst_buffer) -> bool {
-        if (dst_buffer->sizeBytes() < src_buffer.sizeBytes()) {
-            RTP_LLM_LOG_ERROR("dst block bytes[%zu] < src bytes[%zu] in setKVBlockValue(layer=%d)",
-                              dst_buffer->sizeBytes(),
-                              src_buffer.sizeBytes(),
+    auto copyFunc = [&](rtp_llm::Buffer& src_buffer, rtp_llm::BufferPtr& dst_buffer, size_t dst_byte_offset) -> bool {
+        const size_t dst_bytes = dst_buffer->sizeBytes();
+        const size_t src_bytes = src_buffer.sizeBytes();
+        if (dst_bytes < dst_byte_offset + src_bytes) {
+            RTP_LLM_LOG_ERROR("dst block bytes[%zu] < dst_offset[%zu] + src bytes[%zu] in setKVBlockValue(layer=%d)",
+                              dst_bytes,
+                              dst_byte_offset,
+                              src_bytes,
                               layer_id);
             return false;
         }
 
-        rtp_llm::Buffer dst_view(dst_buffer->where(), src_buffer.type(), {src_buffer.size()}, dst_buffer->data());
+        auto*           dst_ptr = static_cast<char*>(dst_buffer->data()) + dst_byte_offset;
+        rtp_llm::Buffer dst_view(dst_buffer->where(), src_buffer.type(), {src_buffer.size()}, dst_ptr);
         rtp_llm::Buffer src_view(src_buffer.where(), src_buffer.type(), {src_buffer.size()}, src_buffer.data());
         device_->copy({dst_view, src_view});
         return true;
     };
 
-    if (!copyFunc(k_buffer, dst.k_addr)) {
+    if (!copyFunc(k_buffer, dst.k_addr, 0)) {
         return false;
     }
-    if (!copyFunc(v_buffer, dst.v_addr)) {
+
+    if (!copyFunc(v_buffer, dst.v_addr, expected_k_bytes)) {
         return false;
     }
 

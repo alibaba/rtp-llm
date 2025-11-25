@@ -35,6 +35,38 @@ bool LayerFirstLayoutStrategy::init(const BlockPoolConfig& config,
                           layer_tensor.numel());
     }
 
+    const auto layer_num          = static_cast<size_t>(config_.layer_num);
+    const auto block_num          = static_cast<size_t>(config_.block_num);
+    const auto seq_size_per_block = static_cast<size_t>(config_.seq_size_per_block);
+    const auto k_token_size       = static_cast<size_t>(config_.k_token_size);
+    const auto v_token_size       = static_cast<size_t>(config_.v_token_size);
+    const auto local_head_num_kv  = static_cast<size_t>(config_.local_head_num_kv);
+
+    // for adaption use k_blocks as base ptr
+    std::vector<size_t> k_shape;
+    std::vector<size_t> v_shape;
+
+    if (config_.is_mla) {
+        k_shape = {layer_num, block_num, seq_size_per_block, k_token_size + v_token_size};
+        v_shape = {layer_num, block_num, seq_size_per_block, (size_t)0};
+    } else {
+        // check k_token_size and v_token_size are equal
+        if (config_.k_token_size != config_.v_token_size) {
+            RTP_LLM_LOG_ERROR("k_token_size and v_token_size are not equal");
+            return false;
+        }
+        k_shape = {layer_num, block_num, 2, local_head_num_kv, seq_size_per_block, k_token_size};
+        v_shape = {layer_num, block_num, 2, local_head_num_kv, seq_size_per_block, (size_t)0};
+    }
+
+    auto memory_type = cache_buffer.is_cuda() ? rtp_llm::MEMORY_GPU : rtp_llm::MEMORY_CPU;
+
+    kv_cache_buffer_.k_blocks = std::make_shared<rtp_llm::Buffer>(memory_type, data_type_, k_shape, cache_base_ptr_);
+    kv_cache_buffer_.v_blocks = std::make_shared<rtp_llm::Buffer>(
+        memory_type, data_type_, v_shape, (void*)((char*)cache_base_ptr_ + kv_cache_buffer_.k_blocks->size()));
+    kv_cache_buffer_.k_scale = nullptr;
+    kv_cache_buffer_.v_scale = nullptr;
+
     RTP_LLM_LOG_INFO("LayerFirstLayoutStrategy initialized successfully");
     return true;
 }
@@ -75,8 +107,6 @@ void* LayerFirstLayoutStrategy::getVCacheAddr(int layer_id, int block_id) const 
 }
 
 const KVCacheBuffer& LayerFirstLayoutStrategy::kvCacheBuffer() const {
-    // LayerFirst layout does not support K/V separation
-    // Return empty buffer with all fields as nullptr
     return kv_cache_buffer_;
 }
 
@@ -133,19 +163,19 @@ bool KVFirstLayoutStrategy::init(const BlockPoolConfig& config,
     std::vector<size_t> k_shape;
     std::vector<size_t> v_shape;
 
-    const size_t layer_num        = static_cast<size_t>(config_.layer_num);
-    const size_t block_num        = static_cast<size_t>(config_.block_num);
-    const size_t tokens_per_block = static_cast<size_t>(config_.tokens_per_block);
-    const size_t k_token_size     = static_cast<size_t>(config_.k_token_size);
-    const size_t v_token_size     = static_cast<size_t>(config_.v_token_size);
+    const size_t layer_num          = static_cast<size_t>(config_.layer_num);
+    const size_t block_num          = static_cast<size_t>(config_.block_num);
+    const size_t seq_size_per_block = static_cast<size_t>(config_.seq_size_per_block);
+    const size_t k_token_size       = static_cast<size_t>(config_.k_token_size);
+    const size_t v_token_size       = static_cast<size_t>(config_.v_token_size);
 
-    const size_t kv_head_num = static_cast<size_t>(config_.kv_head_num);
+    const size_t local_head_num_kv = static_cast<size_t>(config_.local_head_num_kv);
     if (config_.is_mla) {
-        k_shape = {layer_num, block_num, tokens_per_block, k_token_size};
-        v_shape = {layer_num, block_num, tokens_per_block, v_token_size};
+        k_shape = {layer_num, block_num, seq_size_per_block, k_token_size};
+        v_shape = {layer_num, block_num, seq_size_per_block, v_token_size};
     } else {
-        k_shape = {layer_num, block_num, kv_head_num, tokens_per_block, k_token_size};
-        v_shape = {layer_num, block_num, kv_head_num, tokens_per_block, v_token_size};
+        k_shape = {layer_num, block_num, local_head_num_kv, seq_size_per_block, k_token_size};
+        v_shape = {layer_num, block_num, local_head_num_kv, seq_size_per_block, v_token_size};
     }
 
     auto memory_type = k_cache_tensor_.is_cuda() ? rtp_llm::MEMORY_GPU : rtp_llm::MEMORY_CPU;
@@ -217,10 +247,6 @@ void* KVFirstLayoutStrategy::getVCacheAddr(int layer_id, int block_id) const {
 }
 
 const KVCacheBuffer& KVFirstLayoutStrategy::kvCacheBuffer() const {
-    if (!k_cache_tensor_.defined() || !v_cache_tensor_.defined()) {
-        RTP_LLM_LOG_WARNING("KV cache tensors are not initialized");
-    }
-
     return kv_cache_buffer_;
 }
 

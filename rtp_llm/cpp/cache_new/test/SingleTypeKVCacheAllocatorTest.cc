@@ -98,7 +98,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ConstructorAndInit) {
     bool init_result = allocator_->init();
     EXPECT_TRUE(init_result);
 
-    EXPECT_EQ(allocator_->totalBlocksNum(), config.block_num);
+    EXPECT_EQ(allocator_->totalBlocksNum(), config.block_num - 1);
     EXPECT_EQ(allocator_->freeBlocksNum(), config.block_num - 1);  // reserve 1 block
 }
 
@@ -109,7 +109,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InitWithDifferentLayerNum) {
     bool init_result = allocator_->init();
     EXPECT_TRUE(init_result);
 
-    EXPECT_EQ(allocator_->totalBlocksNum(), 20);
+    EXPECT_EQ(allocator_->totalBlocksNum(), 20 - 1);
 }
 
 // Test malloc
@@ -567,7 +567,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, TotalBlocksNums) {
     allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config, device_);
     allocator_->init();
 
-    EXPECT_EQ(allocator_->totalBlocksNum(), 20);
+    EXPECT_EQ(allocator_->totalBlocksNum(), 20 - 1);
 }
 
 TEST_F(SingleTypeKVCacheAllocatorTest, MaxSeqLen) {
@@ -575,7 +575,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MaxSeqLen) {
     allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config, device_);
     allocator_->init();
 
-    EXPECT_EQ(allocator_->maxSeqLen(), 10 * 8);  // block_num * seq_size_per_block
+    EXPECT_EQ(allocator_->maxSeqLen(), (10 - 1) * 8);  // block_num * seq_size_per_block
 }
 
 // Test boundary conditions

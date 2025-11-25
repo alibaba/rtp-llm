@@ -22,11 +22,10 @@ enum MemoryLayout {
 };
 
 struct KVCacheSpec {
-    uint layer_num;
-    uint block_nums;
-    uint local_head_num_kv;
-
-    uint seq_size_per_block = 1;
+    uint32_t layer_num;
+    uint32_t block_nums;
+    uint32_t local_head_num_kv;
+    uint32_t seq_size_per_block = 1;
 
     KVCacheType       type;
     rtp_llm::DataType dtype;
@@ -41,8 +40,8 @@ struct KVCacheSpec {
 };
 
 struct MHAKVCacheSpec: public KVCacheSpec {
-    uint size_per_head;
-    uint scale_size = 0;
+    uint32_t size_per_head;
+    uint32_t scale_size = 0;
 
     size_t block_size() const override {
         auto dtype_size = rtp_llm::getTypeSize(dtype);
@@ -65,8 +64,8 @@ struct MHAKVCacheSpec: public KVCacheSpec {
 };
 
 struct MLAKVCacheSpec: public KVCacheSpec {
-    uint kv_lora_rank;
-    uint rope_head_dim;
+    uint32_t kv_lora_rank;
+    uint32_t rope_head_dim;
 
     size_t block_size() const override {
         auto dtype_size = rtp_llm::getTypeSize(dtype);
@@ -74,22 +73,23 @@ struct MLAKVCacheSpec: public KVCacheSpec {
     }
     size_t k_block_size() const override {
         auto dtype_size = rtp_llm::getTypeSize(dtype);
-        return local_head_num_kv * (kv_lora_rank + rope_head_dim) * seq_size_per_block * dtype_size;
+        return local_head_num_kv * kv_lora_rank * seq_size_per_block * dtype_size;
     }
     size_t v_block_size() const override {
-        return 0;
+        auto dtype_size = rtp_llm::getTypeSize(dtype);
+        return local_head_num_kv * rope_head_dim * seq_size_per_block * dtype_size;
     }
     size_t k_token_size() const override {
-        return kv_lora_rank + rope_head_dim;
+        return kv_lora_rank;
     }
     size_t v_token_size() const override {
-        return 0;
+        return rope_head_dim;
     }
 };
 
 struct LinearKVCacheSpec: public KVCacheSpec {
-    uint conv_state_size;
-    uint temporal_state_size;
+    uint32_t conv_state_size;
+    uint32_t temporal_state_size;
 
     size_t block_size() const override {
         auto dtype_size = rtp_llm::getTypeSize(dtype);
@@ -156,8 +156,8 @@ struct BlockPoolConfig {
 
     // extra meta for exposing logical shape to kernels
     // valid for KV_FIRST layout
-    uint32_t kv_head_num      = 0;
-    uint32_t tokens_per_block = 0;
+    uint32_t local_head_num_kv  = 0;
+    uint32_t seq_size_per_block = 0;
 };
 
 }  // namespace rtp_llm

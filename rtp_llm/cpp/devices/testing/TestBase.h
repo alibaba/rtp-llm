@@ -59,13 +59,8 @@ public:
         const auto test_work_space = getenv("TEST_WORKSPACE");
         const auto test_binary     = getenv("TEST_BINARY");
         if (!(test_src_dir && test_work_space && test_binary)) {
-            // 在某些环境（例如 docker 包装、手工执行二进制、部分远程执行环境）下，
-            // Bazel 的 TEST_* 变量可能不会被透传。对不依赖测试数据路径的用例来说，
-            // 直接 abort 会导致所有测试无法运行，这里改为降级为警告。
-            std::cerr << "Unable to retrieve TEST_SRCDIR / TEST_WORKSPACE / TEST_BINARY env! "
-                      << "fallback to empty test_data_path_." << std::endl;
-            test_data_path_.clear();
-            return;
+            std::cerr << "Unable to retrieve TEST_SRCDIR / TEST_WORKSPACE / TEST_BINARY env!" << std::endl;
+            abort();
         }
 
         std::string test_binary_str = std::string(test_binary);
