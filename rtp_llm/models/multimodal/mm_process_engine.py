@@ -205,7 +205,7 @@ class MMProcessEngine:
             return []
         elif not isinstance(tensor, torch.Tensor):
             return tensor
-        elif len(tensor.shape) > 2:
+        elif len(tensor.shape) > dim:
             return list(tensor)
         else:
             return [tensor]

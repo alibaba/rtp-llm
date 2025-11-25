@@ -35,6 +35,7 @@ public:
     virtual MultiplyOutput    multiply(const MultiplyParams& params);
     virtual BufferPtr         embeddingLookup(const EmbeddingLookupParams& params);
     virtual BufferPtr         multimodalEmbedding(const MultimodalEmbeddingParams& params);
+    virtual BufferPtr         multimodalDeepstackEmbedding(const MultimodalDeepstackEmbeddingParams& params);
     virtual BufferPtr         inputEmbedding(const InputEmbeddingParams& params);
     virtual BufferPtr         activation(const ActivationParams& params);
     virtual BufferPtr         softmax(const SoftmaxParams& params);
