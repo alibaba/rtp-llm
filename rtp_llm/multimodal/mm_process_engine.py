@@ -422,12 +422,15 @@ class MMProcessEngine:
         # Preallocate slots to preserve input order (including cached items).
         ordered_emb: List[Optional[Any]] = [None] * len(work_items)
         ordered_pos: List[Optional[Any]] = [None] * len(work_items)
+        ordered_tensor: List[Optional[Any]] = [None] * len(work_items)
 
         pending_items: List[Tuple[int, MMWorkItem]] = []
         for idx, work_item in enumerate(work_items):
             if work_item.embedding_result is not None:
                 ordered_emb[idx] = work_item.embedding_result[0]
                 ordered_pos[idx] = work_item.embedding_result[1]
+                if len(work_item.embedding_result) > 2:
+                    ordered_tensor[idx] = work_item.embedding_result[2]
             else:
                 pending_items.append((idx, work_item))
 
@@ -454,18 +457,21 @@ class MMProcessEngine:
                         vit_emb_cache_.insert_cache(work_item.cache_key, result)
                     ordered_emb[idx] = result[0]
                     ordered_pos[idx] = result[1]
+                    if len(result) > 2:
+                        ordered_tensor[idx] = result[2]
             else:
                 for idx, work_item in pending_items:
                     result = work_item.get_embedding_result(self.mm_part.embedding)
                     ordered_emb[idx] = result[0]
                     ordered_pos[idx] = result[1]
+                    if len(result) > 2:
+                        ordered_tensor[idx] = result[2]
 
         # Flatten outputs in original input order.
-        for emb, pos in zip(ordered_emb, ordered_pos):
-            if emb is not None:
-                emb_res.extend(self._maybe_tensor_to_list(emb))
-            if pos is not None:
-                pos_res.extend(self._maybe_tensor_to_list(pos))
+        for emb, pos, tensor in zip(ordered_emb, ordered_pos, ordered_tensor):
+            emb_res.extend(self._maybe_tensor_to_list(emb))
+            pos_res.extend(self._maybe_tensor_to_list(pos))
+            tensor_res.extend(self._maybe_tensor_to_list(tensor))
 
         return emb_res, pos_res, tensor_res
 

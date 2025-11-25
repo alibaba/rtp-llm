@@ -125,6 +125,13 @@ class GenerateConfig(BaseModel):
 
     # multimodal preprocess
     resized_shape: Optional[List[int]] = None
+    max_pixels: Optional[int] = None
+    min_pixels: Optional[int] = None
+    fps: Optional[int] = None
+    min_frames: Optional[int] = None
+    max_frames: Optional[int] = None
+    crop_positions: Optional[List[float]] = None
+    mm_timeout_ms: Optional[int] = None
 
     # whether add vision id in chat template; only use in frontend
     add_vision_id: bool = True

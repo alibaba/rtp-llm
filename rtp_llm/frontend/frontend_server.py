@@ -118,6 +118,8 @@ class FrontendServer(object):
                 backend_rpc_server_visitor=self._frontend_worker.backend_rpc_server_visitor,
             )
         else:
+            from rtp_llm.embedding.embedding_endpoint import EmbeddingEndpoint
+
             self._embedding_endpoint = EmbeddingEndpoint(
                 model_config=model_config,
                 grpc_config=self.py_env_configs.grpc_config,
