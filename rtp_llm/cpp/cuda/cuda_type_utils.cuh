@@ -84,6 +84,40 @@ struct TypeConverter<__nv_bfloat16> {
 };
 #endif  // ENABLE_BF16
 
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+struct __align__(16) Float4_ {
+    float2 x;
+    float2 y;
+};
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+struct __align__(32) Float8_ {
+    float2 x;
+    float2 y;
+    float2 z;
+    float2 w;
+};
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+#ifdef ENABLE_BF16
+struct __align__(8) bf16_4_t {
+    __nv_bfloat162 x;
+    __nv_bfloat162 y;
+};
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+struct __align__(16) bf16_8_t {
+    __nv_bfloat162 x;
+    __nv_bfloat162 y;
+    __nv_bfloat162 z;
+    __nv_bfloat162 w;
+};
+#endif
+
 // Defined math operations (bfloat16 fallback to fp32 when it is not supported)
 template<typename T>
 inline __device__ T hadd2(T a, T b) {
@@ -103,6 +137,11 @@ inline __device__ T add(T a, T b) {
 }
 
 template<>
+inline __device__ Float8_ add(Float8_ a, Float8_ b) {
+    return {add(a.x, b.x), add(a.y, b.y), add(a.z, b.z), add(a.w, b.w)};
+}
+
+template<>
 inline __device__ half2 add(half2 a, half2 b) {
     return __hadd2(a, b);
 }
@@ -113,6 +152,11 @@ inline __device__ half add(half a, half b) {
 }
 
 #if ENABLE_BF16
+template<>
+inline __device__ bf16_8_t add(bf16_8_t a, bf16_8_t b) {
+    return {bf16hadd2(a.x, b.x), bf16hadd2(a.y, b.y), bf16hadd2(a.z, b.z), bf16hadd2(a.w, b.w)};
+}
+
 template<>
 inline __device__ __nv_bfloat162 add(__nv_bfloat162 a, __nv_bfloat162 b) {
     return bf16hadd2(a, b);
@@ -589,40 +633,6 @@ __inline__ __device__ float getScaleFactor<__nv_fp8_e4m3>() {
 typedef struct __align__(4) {
     half x, y, z, w;
 } half4;
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-struct __align__(16) Float4_ {
-    float2 x;
-    float2 y;
-};
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-struct __align__(32) Float8_ {
-    float2 x;
-    float2 y;
-    float2 z;
-    float2 w;
-};
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-#ifdef ENABLE_BF16
-struct __align__(8) bf16_4_t {
-    __nv_bfloat162 x;
-    __nv_bfloat162 y;
-};
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-struct __align__(16) bf16_8_t {
-    __nv_bfloat162 x;
-    __nv_bfloat162 y;
-    __nv_bfloat162 z;
-    __nv_bfloat162 w;
-};
-#endif
 
 #ifdef ENABLE_FP8
 using fp8_2_t = __nv_fp8x2_e4m3;
