@@ -15,7 +15,7 @@ import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.util.CommonUtils;
-import org.flexlb.utils.LoggingUtils;
+import org.flexlb.util.LoggingUtils;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -27,8 +27,10 @@ import java.util.stream.Collectors;
 /**
  * 基于最短首Token时间(TTFT)的负载均衡策略
  *
- * <p>该策略通过综合考虑以下因素选择最优Worker： 1. KV-Cache命中率：优先选择缓存命中率高的Worker 2. 排队时间：考虑Worker当前的任务队列情况 3.
- * 调度公平性：在性能相近的Worker间实现负载均衡
+ * <p>该策略通过综合考虑以下因素选择最优Worker：
+ * 1. KV-Cache命中率：优先选择缓存命中率高的Worker
+ * 2. 排队时间：考虑Worker当前的任务队列情况
+ * 3. 调度公平性：在性能相近的Worker间实现负载均衡
  *
  * @author saichen.sm
  * @since 2025/3/10
@@ -257,7 +259,6 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      */
     private TaskInfo createTaskInfo(long interRequestId, long inputLength, long prefixLength) {
         TaskInfo task = new TaskInfo();
-        task.setLastActiveTimeUs(System.nanoTime() / 1000);
         task.setInterRequestId(interRequestId);
         task.setInputLength(inputLength);
         task.setPrefixLength(prefixLength);

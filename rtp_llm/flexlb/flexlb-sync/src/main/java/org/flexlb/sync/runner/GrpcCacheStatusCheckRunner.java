@@ -236,7 +236,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
     }
 
     private void log(String msg) {
-        logger.info("[gRPC-Cache][{}][{}][{}][{}][{}us]: {}",
+        logger.info("[gRPC-Cache][{}][{}][{}][{}][{}μs]: {}",
                 id,
                 site,
                 ipPort,
@@ -246,7 +246,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
     }
 
     private void log(String msg, Throwable e) {
-        logger.info("[gRPC-Cache][{}][{}][{}][{}][{}us]: {}",
+        logger.info("[gRPC-Cache][{}][{}][{}][{}][{}μs]: {}",
                 id,
                 site,
                 ipPort,

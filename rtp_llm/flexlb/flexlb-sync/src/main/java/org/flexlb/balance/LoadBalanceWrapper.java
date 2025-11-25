@@ -2,11 +2,11 @@ package org.flexlb.balance;
 
 import org.flexlb.balance.scheduler.DefaultScheduler;
 import org.flexlb.balance.scheduler.Scheduler;
+import org.flexlb.config.WhaleMasterConfig;
 import org.flexlb.dao.loadbalance.MasterResponse;
 import org.flexlb.domain.balance.BalanceContext;
-import org.flexlb.domain.balance.WhaleMasterConfig;
 import org.flexlb.service.config.ConfigService;
-import org.flexlb.utils.LoggingUtils;
+import org.flexlb.util.LoggingUtils;
 import org.springframework.context.annotation.DependsOn;
 import org.springframework.stereotype.Component;
 
@@ -36,7 +36,6 @@ public class LoadBalanceWrapper {
         balanceContext.getRequestContext().getSpan().addEvent("start selectEngineWorker");
         WhaleMasterConfig whaleMasterConfig = configService.loadBalanceConfig();
         balanceContext.setConfig(whaleMasterConfig);
-        balanceContext.setWorkerCalcParallel(Runtime.getRuntime().availableProcessors());
         long interRequestId = System.nanoTime() + (IncNum.getAndIncrement()) % 1000;
         balanceContext.setInterRequestId(interRequestId);
         MasterResponse result = roleScheduler.select(balanceContext);

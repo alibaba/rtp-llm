@@ -79,7 +79,7 @@ public class EngineSyncRunner implements Runnable {
             logger.info("workerAddressService getEngineWorkerList, model: {}, role: {}, size: {}", modelName, roleType, latestEngineWorkerList.size());
             engineHealthReporter.reportServiceDiscoveryResult(modelName, latestEngineWorkerList.size(), roleType.toString());
             if (CollectionUtils.isEmpty(latestEngineWorkerList)) {
-                logger.error("get engine worker list is empty, cost={}us, model={}", System.nanoTime() / 1000 - startTimeInUs, modelName);
+                logger.error("get engine worker list is empty, cost={}μs, model={}", System.nanoTime() / 1000 - startTimeInUs, modelName);
                 return;
             }
             Map<String/*ip*/, WorkerStatus> cachedWorkerStatuses = workerStatusMap;

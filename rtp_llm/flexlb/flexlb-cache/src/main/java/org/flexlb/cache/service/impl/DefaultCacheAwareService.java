@@ -88,7 +88,7 @@ public class DefaultCacheAwareService implements CacheAwareService {
             
             return result;
                 
-        } catch (Exception e) {
+        } catch (Throwable e) {
             log.error("Error updating worker cache for: {}", engineIpPort, e);
             
             WorkerCacheUpdateResult result = buildFailureResult(engineIpPort, e.getMessage());

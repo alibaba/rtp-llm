@@ -34,7 +34,7 @@ public class ChannelConfiguration {
     @Bean
     public EventLoopGroup managedChannelEventLoopGroup() {
         return new NioEventLoopGroup(
-                Runtime.getRuntime().availableProcessors() * 2,
+                Runtime.getRuntime().availableProcessors() * 8,
                 null,
                 DefaultEventExecutorChooserFactory.INSTANCE,
                 SelectorProvider.provider(),

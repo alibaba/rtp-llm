@@ -14,7 +14,7 @@ import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.service.config.ConfigService;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.sync.status.ModelWorkerStatus;
-import org.flexlb.utils.LoggingUtils;
+import org.flexlb.util.LoggingUtils;
 import org.springframework.context.annotation.DependsOn;
 import org.springframework.stereotype.Component;
 

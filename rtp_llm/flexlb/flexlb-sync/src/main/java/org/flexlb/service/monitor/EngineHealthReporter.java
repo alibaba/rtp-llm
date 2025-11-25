@@ -34,21 +34,23 @@ import java.util.Map;
 import java.util.concurrent.ThreadPoolExecutor;
 
 import static org.flexlb.constant.MetricConstant.CACHE_BLOCK_SIZE;
+import static org.flexlb.constant.MetricConstant.CACHE_KEY_SIZE;
 import static org.flexlb.constant.MetricConstant.CACHE_STATUS_CHECK_FAIL;
 import static org.flexlb.constant.MetricConstant.CACHE_STATUS_CHECK_SUCCESS_PERIOD;
 import static org.flexlb.constant.MetricConstant.CACHE_STATUS_CHECK_VISITOR_RT;
 import static org.flexlb.constant.MetricConstant.CACHE_STATUS_CHECK_VISITOR_SUCCESS_QPS;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_EVENT_LOOP_GROUP_INFO;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_ALL_QPS;
-import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_FAIL_QPS;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_SCHEDULE_RT;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_SELECT_DETAIL;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_THREAD_POOL_INFO;
 import static org.flexlb.constant.MetricConstant.ENGINE_DECODE_WORKER_NUMBER;
+import static org.flexlb.constant.MetricConstant.ENGINE_FINISHED_TASK_LIST_SIZE;
 import static org.flexlb.constant.MetricConstant.ENGINE_LOCAL_TASK_MAP_SIZE;
 import static org.flexlb.constant.MetricConstant.ENGINE_NUMBER_SERVICE_DISCOVERY_RESULT;
 import static org.flexlb.constant.MetricConstant.ENGINE_PREFILL_WORKER_NUMBER;
 import static org.flexlb.constant.MetricConstant.ENGINE_RUNNING_QUEUE_TIME;
+import static org.flexlb.constant.MetricConstant.ENGINE_RUNNING_TASK_INFO_SIZE;
 import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_AVAILABLE_CONCURRENCY;
 import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_CHECK_FAIL;
 import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_CHECK_SUCCESS_PERIOD;
@@ -106,10 +108,12 @@ public class EngineHealthReporter {
         this.monitor.register(ENGINE_NUMBER_SERVICE_DISCOVERY_RESULT, FlexMetricType.GAUGE);
         this.monitor.register(ENGINE_STATUS_CHECK_FAIL, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         this.monitor.register(ENGINE_BALANCING_THREAD_POOL_INFO, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(ENGINE_FINISHED_TASK_LIST_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(ENGINE_RUNNING_TASK_INFO_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(CACHE_KEY_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(ENGINE_BALANCING_EVENT_LOOP_GROUP_INFO, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
         this.monitor.register(ENGINE_BALANCING_MASTER_ALL_QPS, FlexMetricType.QPS);
-        this.monitor.register(ENGINE_BALANCING_MASTER_FAIL_QPS, FlexMetricType.QPS);
         this.monitor.register(ENGINE_BALANCING_MASTER_SCHEDULE_RT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(ENGINE_BALANCING_MASTER_SELECT_DETAIL, FlexMetricType.QPS, FlexPriorityType.PRECISE);
 
@@ -199,7 +203,10 @@ public class EngineHealthReporter {
         monitor.report(CACHE_STATUS_CHECK_FAIL, metricTags, 1.0);
     }
 
-    public void reportStatusCheckerSuccess(String modelName, WorkerStatus workerStatus) {
+    public void reportStatusCheckerSuccess(String modelName,
+                                           WorkerStatus workerStatus,
+                                           int runningTaskInfoSize,
+                                           int finishedTaskListSize) {
 
         FlexMetricTags metricTags = FlexMetricTags.of(
                 "model", modelName,
@@ -220,6 +227,13 @@ public class EngineHealthReporter {
         // 汇报本地任务缓存的大小
         int localTaskMapSize = workerStatus.getLocalTaskMap() != null ? workerStatus.getLocalTaskMap().size() : 0;
         monitor.report(ENGINE_LOCAL_TASK_MAP_SIZE, metricTags, localTaskMapSize);
+
+        metricTags = FlexMetricTags.of(
+                "engineIp", workerStatus.getIp(),
+                "role", workerStatus.getRole());
+
+        monitor.report(ENGINE_FINISHED_TASK_LIST_SIZE, metricTags, finishedTaskListSize);
+        monitor.report(ENGINE_RUNNING_TASK_INFO_SIZE, metricTags, runningTaskInfoSize);
     }
 
     public void reportCacheStatusCheckerSuccess(String modelName, WorkerStatus workerStatus) {
@@ -234,11 +248,13 @@ public class EngineHealthReporter {
         }
         if (workerStatus.getCacheStatus() != null) {
             long blockSize = workerStatus.getCacheStatus().getBlockSize();
-            FlexMetricTags blockSizeTags = FlexMetricTags.of(
+            long cacheKeySize = workerStatus.getCacheStatus().getCacheKeySize();
+            FlexMetricTags metricTags = FlexMetricTags.of(
                     "model", modelName,
                     "engineIp", workerStatus.getIp(),
                     "role", workerStatus.getRole());
-            monitor.report(CACHE_BLOCK_SIZE, blockSizeTags, blockSize);
+            monitor.report(CACHE_BLOCK_SIZE, metricTags, blockSize);
+            monitor.report(CACHE_KEY_SIZE, metricTags, cacheKeySize);
         }
     }
 
@@ -247,17 +263,11 @@ public class EngineHealthReporter {
             return;
         }
 
-        if (!ctx.isSuccess()) {
-            FlexMetricTags metricTags = FlexMetricTags.of(
-                    "model", ctx.getMasterRequest().getModel(),
-                    "code", String.valueOf(ctx.getMasterResponse().getCode()));
-            monitor.report(ENGINE_BALANCING_MASTER_FAIL_QPS, metricTags, 1.0);
-            monitor.report(ENGINE_BALANCING_MASTER_ALL_QPS, metricTags, 1.0);
-        } else {
-            FlexMetricTags metricTags = FlexMetricTags.of("model", ctx.getMasterRequest().getModel());
-            monitor.report(ENGINE_BALANCING_MASTER_ALL_QPS, metricTags, 1.0);
-            monitor.report(ENGINE_BALANCING_MASTER_SCHEDULE_RT, metricTags, (double) System.nanoTime() / 1000 - ctx.getStartTime());
-        }
+        FlexMetricTags metricTags = FlexMetricTags.of(
+                "model", ctx.getMasterRequest().getModel(),
+                "code", String.valueOf(ctx.getMasterResponse().getCode()));
+        monitor.report(ENGINE_BALANCING_MASTER_ALL_QPS, metricTags, 1.0);
+        monitor.report(ENGINE_BALANCING_MASTER_SCHEDULE_RT, metricTags, (double) System.nanoTime() / 1000 - ctx.getStartTime());
 
         // 汇报服务器状态选择结果（根据 roleType 和 ip 区分）
         if (ctx.getMasterResponse() != null && CollectionUtils.isNotEmpty(ctx.getMasterResponse().getServerStatus())) {

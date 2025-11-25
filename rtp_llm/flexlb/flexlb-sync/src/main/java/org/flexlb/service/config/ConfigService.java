@@ -1,6 +1,6 @@
 package org.flexlb.service.config;
 
-import org.flexlb.domain.balance.WhaleMasterConfig;
+import org.flexlb.config.WhaleMasterConfig;
 
 public interface ConfigService {
 
