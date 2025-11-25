@@ -120,7 +120,7 @@ class TokenProcessorPerStream:
                     self.ouput_tokens_list[i] = tokens
                 else:
                     self.ouput_tokens_list[i] = np.concatenate(
-                        (self.ouput_tokens_list[i], tokens), axis=1
+                        (self.ouput_tokens_list[i], tokens), axis=0
                     )
                 tokens = self.ouput_tokens_list[i]
             tokens = remove_padding_eos_with_numpy(
