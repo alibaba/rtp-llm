@@ -670,7 +670,9 @@ class GptInitModelParameters:
 
         # DeviceResourceConfig
         self.gpt_init_params.device_resource_config = DeviceResourceConfig(
-            device_reserve_memory_bytes=get_env_int("DEVICE_RESERVE_MEMORY_BYTES", -1073741824),
+            device_reserve_memory_bytes=get_env_int(
+                "DEVICE_RESERVE_MEMORY_BYTES", -1073741824
+            ),
             host_reserve_memory_bytes=get_env_int(
                 "HOST_RESERVE_MEMORY_BYTES", 4 * 1024 * 1024 * 1024
             ),
@@ -795,6 +797,9 @@ class GptInitModelParameters:
             StaticConfig.rpc_access_log_config.enable_rpc_access_log,
             StaticConfig.rpc_access_log_config.access_log_interval,
             StaticConfig.rpc_access_log_config.log_plaintext,
+        )
+        logging.info(
+            f"StaticConfig.rpc_access_log_config: {StaticConfig.rpc_access_log_config.to_string()}"
         )
 
         # PD Seperation

@@ -52,13 +52,13 @@ public:
     }
 
     static Logger& getAccessLogger() {
-        static Logger access_logger_("access");
+        static Logger access_logger_("rpc_access");
         return access_logger_;
     }
 
-    static Logger& getQueryAccessLogger() {
-        static Logger query_access_logger_("query_access");
-        return query_access_logger_;
+    static Logger& getQueryLogger() {
+        static Logger query_logger_("rpc_query");
+        return query_logger_;
     }
 
     static Logger& getStackTraceLogger() {
@@ -210,7 +210,7 @@ private:
 
 #define RTP_LLM_QUERY_ACCESS_LOG(level, ...)                                                                           \
     do {                                                                                                               \
-        auto& logger = rtp_llm::Logger::getQueryAccessLogger();                                                        \
+        auto& logger = rtp_llm::Logger::getQueryLogger();                                                              \
         logger.log(level, __FILE__, __LINE__, __PRETTY_FUNCTION__, __VA_ARGS__);                                       \
     } while (0)
 #define RTP_LLM_QUERY_ACCESS_LOG_TRACE(...) RTP_LLM_QUERY_ACCESS_LOG(alog::LOG_LEVEL_TRACE1, __VA_ARGS__)
@@ -218,7 +218,7 @@ private:
 #define RTP_LLM_QUERY_ACCESS_LOG_INFO(...) RTP_LLM_QUERY_ACCESS_LOG(alog::LOG_LEVEL_INFO, __VA_ARGS__)
 #define RTP_LLM_QUERY_ACCESS_LOG_WARNING(...) RTP_LLM_QUERY_ACCESS_LOG(alog::LOG_LEVEL_WARN, __VA_ARGS__)
 #define RTP_LLM_QUERY_ACCESS_LOG_ERROR(...) RTP_LLM_QUERY_ACCESS_LOG(alog::LOG_LEVEL_ERROR, __VA_ARGS__)
-#define RTP_LLM_QUERY_ACCESS_LOG_EXCEPTION(ex, ...) rtp_llm::Logger::getQueryAccessLogger().log(ex, ##__VA_ARGS__)
+#define RTP_LLM_QUERY_ACCESS_LOG_EXCEPTION(ex, ...) rtp_llm::Logger::getQueryLogger().log(ex, ##__VA_ARGS__)
 
 #define RTP_LLM_STACKTRACE_LOG(level, ...)                                                                             \
     do {                                                                                                               \

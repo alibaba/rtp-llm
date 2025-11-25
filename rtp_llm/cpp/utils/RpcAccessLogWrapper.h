@@ -8,11 +8,15 @@ namespace rtp_llm {
 
 class RpcAccessLogWrapper {
 public:
-    static void logRpcRequest(const RpcAccessLogConfig&        config,
-                              const std::string&               requestType,
-                              const google::protobuf::Message& request,
-                              const google::protobuf::Message& output,
-                              const std::string&               request_key = "");
+    static void logQuery(const RpcAccessLogConfig&        config,
+                         const std::string&               requestType,
+                         const google::protobuf::Message& request,
+                         const std::string&               request_key = "");
+    static void logAccess(const RpcAccessLogConfig&        config,
+                          const std::string&               requestType,
+                          const google::protobuf::Message& request,
+                          const google::protobuf::Message& output,
+                          const std::string&               request_key = "");
 
 private:
     static std::string serializeMessagePlaintext(const google::protobuf::Message& message);

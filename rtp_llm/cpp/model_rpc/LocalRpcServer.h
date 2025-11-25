@@ -65,6 +65,10 @@ public:
         return maga_init_params_.gpt_init_parameter.tp_size_;
     }
 
+    const RpcAccessLogConfig& getRpcAccessLogConfig() const {
+        return maga_init_params_.gpt_init_parameter.rpc_access_log_config;
+    }
+
     virtual size_t onflightRequestNum();
 
     void stop() {

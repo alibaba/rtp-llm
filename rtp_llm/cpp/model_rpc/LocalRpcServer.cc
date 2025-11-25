@@ -20,7 +20,7 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
     maga_init_params_ = maga_init_params;
     metrics_reporter_ = maga_init_params.metrics_reporter;
     RTP_LLM_LOG_INFO("LocalRpcServer aux_string %s",
-                        maga_init_params_.gpt_init_parameter.misc_config.aux_string.c_str());
+                     maga_init_params_.gpt_init_parameter.misc_config.aux_string.c_str());
     if (propose_params) {
         propose_maga_init_params_ = propose_params.get();
         if (!mm_process_engine.is_none()) {
@@ -153,11 +153,11 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
     if (generate_context.error_status.ok()) {
         // 创建一个空的响应对象作为示例，实际应该记录真实的响应
         GenerateOutputsPB response_pb;
-        RpcAccessLogWrapper::logRpcRequest(maga_init_params_.gpt_init_parameter.rpc_access_log_config,
-                                           "GenerateStreamCall",
-                                           *request,
-                                           response_pb,
-                                           generate_context.request_key);
+        RpcAccessLogWrapper::logAccess(maga_init_params_.gpt_init_parameter.rpc_access_log_config,
+                                       "GenerateStreamCall",
+                                       *request,
+                                       response_pb,
+                                       generate_context.request_key);
     }
 
     meta_->dequeue(generate_context.request_id, generate_context.getStream());

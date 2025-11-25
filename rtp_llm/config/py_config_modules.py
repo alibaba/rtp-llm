@@ -581,13 +581,10 @@ class RpcAccessLogConfig:
         self.log_plaintext: bool = True
 
     def update_from_env(self):
-        self.enable_rpc_access_log = (
-            os.environ.get("ENABLE_RPC_ACCESS_LOG", "false").lower() == "true"
-        )
+        self.enable_rpc_access_log = get_env_bool("ENABLE_RPC_ACCESS_LOG")
+
         self.access_log_interval = int(os.environ.get("RPC_ACCESS_LOG_INTERVAL", "100"))
-        self.log_plaintext = (
-            os.environ.get("RPC_LOG_PLAINTEXT", "true").lower() == "true"
-        )
+        self.log_plaintext = get_env_bool("RPC_LOG_PLAINTEXT")
 
     def to_string(self):
         return (

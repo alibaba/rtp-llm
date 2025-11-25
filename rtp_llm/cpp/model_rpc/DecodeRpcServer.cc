@@ -771,11 +771,11 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
     if (decode_context.error_status.ok()) {
         // 创建一个空的响应对象作为示例，实际应该记录真实的响应
         GenerateOutputsPB response_pb;
-        RpcAccessLogWrapper::logRpcRequest(maga_init_params_.gpt_init_parameter.rpc_access_log_config,
-                                           "RemoteGenerate",
-                                           decode_context.allocate_request,
-                                           response_pb,
-                                           decode_context.request_key);
+        RpcAccessLogWrapper::logAccess(maga_init_params_.gpt_init_parameter.rpc_access_log_config,
+                                       "RemoteGenerate",
+                                       decode_context.allocate_request,
+                                       response_pb,
+                                       decode_context.request_key);
     }
 
     return grpc::Status::OK;
