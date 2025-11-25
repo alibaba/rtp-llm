@@ -154,7 +154,7 @@ try:
         def support_cuda_graph(self) -> bool:
             return True
 
-    PREFILL_MHA_IMPS.append(FlashInferPrefillImpl)
+    # PREFILL_MHA_IMPS.append(FlashInferPrefillImpl)
 
     class MlaFlashInferPrefillImpl(FMHAPrefillImplBase):
 
@@ -378,7 +378,7 @@ try:
         def support_cuda_graph(self) -> bool:
             return True
 
-    DECODE_MHA_IMPS.append(FlashInferDecodeImpl)
+    # DECODE_MHA_IMPS.append(FlashInferDecodeImpl)
 
     class MlaFlashInferDecodeImpl(FMHADecodeImplBase):
 
