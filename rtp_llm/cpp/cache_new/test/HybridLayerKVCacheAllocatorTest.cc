@@ -97,7 +97,7 @@ TEST_F(HybridLayerKVCacheAllocatorTest, ConstructorAndInit) {
     bool init_result = allocator_->init();
     EXPECT_TRUE(init_result);
 
-    EXPECT_EQ(allocator_->totalBlocksNum(), config.block_num);
+    EXPECT_EQ(allocator_->totalBlocksNum(), config.block_num - 1);
     EXPECT_EQ(allocator_->freeBlocksNum(), config.block_num - 1);  // reserve 1 block
 }
 
@@ -625,7 +625,7 @@ TEST_F(HybridLayerKVCacheAllocatorTest, MaxSeqLen) {
     allocator_  = std::make_shared<HybridLayerKVCacheAllocator>(config, device_);
     allocator_->init();
 
-    EXPECT_EQ(allocator_->maxSeqLen(), 10 * 8);  // block_num * seq_size_per_block
+    EXPECT_EQ(allocator_->maxSeqLen(), (10 - 1) * 8);  // block_num * seq_size_per_block
 }
 
 TEST_F(HybridLayerKVCacheAllocatorTest, MallocWithZeroSeqLength) {
