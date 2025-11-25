@@ -229,6 +229,8 @@ class ParamsBase:
 class PyAttentionInputs:
     cache_store_inputs: PyCacheStoreInputs | None
     context_parallel_info: PyContextParallelParams | None
+    combo_position_ids: torch.Tensor
+    combo_tokens_type_ids: torch.Tensor
     context_total_kv_length: int
     cu_kv_seqlens: torch.Tensor
     cu_seqlens: torch.Tensor
@@ -245,12 +247,16 @@ class PyAttentionInputs:
     kv_cache_kernel_block_id_device: torch.Tensor
     kv_cache_kernel_block_id_host: torch.Tensor
     kv_cache_layer_to_group: torch.Tensor
+    mm_deepstack_embeds: list[torch.Tensor] | None
+    mm_features_locs: torch.Tensor | None
+    multimodal_features: list[torch.Tensor] | None
     padding_offset: torch.Tensor
     position_ids: torch.Tensor
     prefill_cuda_graph_copy_params: PyPrefillCudaGaphCopyParams | None
     prefix_lengths: torch.Tensor
     sequence_lengths: torch.Tensor
     sequence_lengths_plus_1_d: torch.Tensor
+    text_tokens_mask: torch.Tensor
     total_tokens: int
     headwise_config: dict | None
     def __init__(self) -> None: ...

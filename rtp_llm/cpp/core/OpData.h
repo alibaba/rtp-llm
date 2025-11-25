@@ -113,6 +113,7 @@ struct GptModelInputs {
     std::optional<std::vector<torch::Tensor>> multimodal_features;  // all features in gathered stream stored here
     torch::Tensor text_tokens_mask;  // text part in multimodal input tokens [cumulated_seq_len]
     torch::Tensor mm_features_locs;  // features index
+    std::optional<std::vector<torch::Tensor>> mm_deepstack_embeds;  // multimodal deepstack embeds
 
     std::optional<std::vector<torch::Tensor>> input_embeddings;  // all input embeddings in gathered stream stored here
     torch::Tensor                             input_embeddings_locs;  // input embeddings index
@@ -594,6 +595,8 @@ struct GreedyParams {
 
     std::optional<torch::Tensor> cum_log_probs;
     std::optional<torch::Tensor> output_log_probs;
+
+    bool return_original_all_probs = false;
 
     std::optional<torch::Tensor> output_all_probs;
     std::optional<torch::Tensor> presence_penalty;

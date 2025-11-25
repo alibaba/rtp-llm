@@ -6,6 +6,10 @@ Different architectures may have different implementations.
 # Import common base modules (architecture-independent)
 from rtp_llm.models_py.modules.base.common.embedding import Embedding, EmbeddingBert
 from rtp_llm.models_py.modules.base.common.kvcache_store import WriteCacheStoreOp
+from rtp_llm.models_py.modules.base.common.multimodal_embedding import (
+    MultimodalDeepstackInjector,
+    MultimodalEmbeddingInjector,
+)
 from rtp_llm.models_py.modules.base.common.norm import (
     AddBiasResLayerNormTorch,
     LayerNorm,
@@ -73,4 +77,6 @@ else:
         "FusedSiluAndMul",
         "IndexerOp",
         "SigmoidGateScaleAdd",
+        "MultimodalDeepstackInjector",
+        "MultimodalEmbeddingInjector",
     ]

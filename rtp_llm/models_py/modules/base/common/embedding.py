@@ -1,3 +1,5 @@
+from typing import Optional
+
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -30,14 +32,22 @@ class Embedding(nn.Module):
         self.parallelism_config = parallelism_config
         self.tp_size = parallelism_config.get_attn_tp_size()
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        input: torch.Tensor,
+        position_ids: Optional[torch.Tensor] = None,
+        token_types: Optional[torch.Tensor] = None,
+        text_tokens_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         tokens = input.size(0)
         hidden_size = self.weight.size(-1)
         output = torch.empty(
             (tokens, hidden_size), dtype=self.weight.dtype, device=input.device
         )
-        rtp_llm_ops.embedding(output, input, self.weight.data)
-        if self.tp_size > 1:
+        rtp_llm_ops.embedding(
+            output, input, self.weight.data, position_ids, token_types, text_tokens_mask
+        )
+        if self.parallelism_config.tp_size > 1:
             m, n = output.shape
             output = all_gather(output, group=Group.TP)
             output = (

@@ -84,6 +84,8 @@ public:
     void           replayPrefill(int seq_len);
     int            getCurrentRealGraphBs(const CudaGraphState& state) const;
     PyModelOutputs forward(const PyModelInputs& inputs, CudaGraphState& state) override;
+    void           setPositionIdLenFactor(int position_id_len_factor) override;
+    void           setNeedComboPositionIds(bool need_combo_position_ids) override;
     void           initCapture() override;
 
     // Factory methods for test: take GraphParams so callers can reuse the same struct
@@ -112,28 +114,30 @@ private:
     /// Select graph key for decode; false if no captured graph can serve current_batch_size (e.g. lower_bound hit end).
     bool tryGetRealGraphDecodeBatchSize(const PyModelInputs& inputs, CudaGraphState& state);
     /// Select graph key for prefill; false if capture_range_ empty or seq_len above max captured (lower_bound hit end).
-    bool                    tryGetRealGraphPrefillSeqLen(const PyModelInputs& inputs, CudaGraphState& state);
-    void                    initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs);
-    void                    initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int max_num_token);
-    void                    initCaptureAttentionInputsPost();
-    py::object              py_forward_method_;
-    py::object              py_attn_pyobj_method_;
-    bool                    enable_cuda_graph_{false};
-    bool                    is_prefill_cuda_graph_mode_{false};
-    bool                    is_target_verify_{false};
-    cuda_graph::GraphStream capture_stream_;
-    bool                    enable_cuda_graph_debug_mode_{false};
-    size_t                  max_bs_{1};
-    int                     num_tokens_per_bs_{1};
-    int                     max_num_token_{1};
-    int                     max_seq_len_{0};
-    int                     seq_size_per_block_{0};
-    int                     kernel_seq_size_per_block_{0};
-    int                     hidden_size_{0};
-    int                     sp_steps_{0};
-    std::vector<int>        capture_range_;
-    std::vector<int>        prefill_capture_seq_lens_;    // Pre-configured sequence lengths from Python
-    std::vector<int>        decode_capture_batch_sizes_;  // Pre-configured batch sizes from Python
+    bool                 tryGetRealGraphPrefillSeqLen(const PyModelInputs& inputs, CudaGraphState& state);
+    void                 initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs);
+    void                 initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int max_num_token);
+    void                 initCaptureAttentionInputsPost();
+    py::object           py_forward_method_;
+    py::object           py_attn_pyobj_method_;
+    bool                 enable_cuda_graph_{false};
+    int                  position_id_len_factor_{1};  // batch_size * position_id_len_factor_
+    bool                 need_combo_position_ids_{false};
+    bool                 is_prefill_cuda_graph_mode_{false};
+    bool                 is_target_verify_{false};
+    at::cuda::CUDAStream capture_stream_;
+    bool                 enable_cuda_graph_debug_mode_{false};
+    size_t               max_bs_{1};
+    int                  num_tokens_per_bs_{1};
+    int                  max_num_token_{1};
+    int                  max_seq_len_{0};
+    int                  seq_size_per_block_{0};
+    int                  kernel_seq_size_per_block_{0};
+    int                  hidden_size_{0};
+    int                  sp_steps_{0};
+    std::vector<int>     capture_range_;
+    std::vector<int>     prefill_capture_seq_lens_;    // Pre-configured sequence lengths from Python
+    std::vector<int>     decode_capture_batch_sizes_;  // Pre-configured batch sizes from Python
     // capture seqLen -> GraphInstance (prefill)
     // batch_size -> GraphInstance (decode)
     std::unordered_map<int, GraphInstance> graph_instances_;

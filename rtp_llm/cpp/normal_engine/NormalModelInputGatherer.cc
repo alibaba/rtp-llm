@@ -24,6 +24,7 @@ struct GatherModelInputContext {
     int          batch_idx;
     int*         sequence_lengths;
     bool         has_multimodal_input;
+    bool         has_mm_deepstack_embed;
     size_t       total_decode_batch_size;
     int*         prefix_lengths;
     int*         merged_text_mask;
@@ -55,6 +56,7 @@ GatherModelInputContext createGatherContext(const NormalModelInputGathererConfig
     ctx.lm_output_lengths    = model_input.lm_output_lengths.data_ptr<int32_t>();
     ctx.combo_position_ids   = ctx.need_cal_position_id ? model_input.combo_position_ids.data_ptr<int32_t>() : nullptr;
     ctx.has_multimodal_input = config.is_multimodal && stream_groups.has_multimodal_input();
+    ctx.has_mm_deepstack_embed = config.is_multimodal && stream_groups.hasMMDeepstackEmbed();
     ctx.prefix_lengths       = model_input.prefix_lengths.data_ptr<int32_t>();
     ctx.merged_text_mask     = ctx.has_multimodal_input ? model_input.text_tokens_mask.data_ptr<int32_t>() : nullptr;
     ctx.mm_features_locs     = ctx.has_multimodal_input ? model_input.mm_features_locs.data_ptr<int32_t>() : nullptr;
@@ -271,6 +273,7 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
 absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&     model_input,
                                                              const StreamGroups& stream_groups) const {
     std::vector<torch::Tensor> gathered_mm_features;
+    std::vector<torch::Tensor> gathered_mm_deepstack_embeds;
     auto ctx = createGatherContext(config_, model_input, stream_groups, GatherContextMode::CONTEXT);
 
     for (const auto& stream : stream_groups.contextStreams()) {
@@ -318,6 +321,15 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
                        (context_pos_ids.numel() - reuse_offset) * sizeof(int));
             }
 
+            if (ctx.has_mm_deepstack_embed) {
+                auto mm_deepstack_embeds = stream->multimodalDeepstackEmbeds();
+                if (mm_deepstack_embeds.size() != 0) {
+                    for (auto& mm_deepstack_embed : mm_deepstack_embeds) {
+                        gathered_mm_deepstack_embeds.emplace_back(mm_deepstack_embed.to(torch::kCUDA));
+                    }
+                }
+            }
+
             copyKvCacheBlocksToModelInput(
                 model_input, kv_cache, i, ctx.batch_idx, ctx.max_blocks_num, config_.kernel_blocks_per_kv_block);
 
@@ -342,6 +354,9 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
 
     if (config_.is_multimodal && !gathered_mm_features.empty()) {
         model_input.multimodal_features = std::move(gathered_mm_features);
+    }
+    if (ctx.has_mm_deepstack_embed && gathered_mm_deepstack_embeds.size() > 0) {
+        model_input.mm_deepstack_embeds = std::move(gathered_mm_deepstack_embeds);
     }
     return absl::OkStatus();
 }
