@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 from torch import nn
@@ -9,14 +9,46 @@ from rtp_llm.distribute.collective import Group, recv, send
 from rtp_llm.distribute.worker_info import g_parallel_info
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
-from rtp_llm.models_py.modules.attention_pure import CausalAttentionPure
+from rtp_llm.models_py.modules.common.mha.base import FMHAImplBase
 from rtp_llm.models_py.modules.embedding import Embedding
+from rtp_llm.models_py.modules.factory.attention_factory import AttnImplFactory
 from rtp_llm.models_py.modules.linear import Linear
 from rtp_llm.models_py.modules.mlp import FusedSiluActDenseMLP
 from rtp_llm.models_py.modules.norm import FusedQKRMSNorm, RMSNorm
-from rtp_llm.ops.compute_ops import PyModelInitResources, PyModelInputs, PyModelOutputs
+from rtp_llm.ops.compute_ops import (
+    KVCache,
+    PyModelInitResources,
+    PyModelInputs,
+    PyModelOutputs,
+)
 from rtp_llm.utils.model_weight import W
 from rtp_llm.utils.util import check_with_info
+
+
+class CausalAttentionPure(nn.Module):
+    def __init__(
+        self, config: GptInitModelParameters, weights: Dict[str, torch.Tensor]
+    ):
+        super().__init__()
+        self.config = config
+        self.head_dim = config.hidden_size // config.head_num
+        self.head_num = config.head_num
+        self.num_key_value_groups = config.head_num // config.head_num_kv
+        self.q_size = config.head_num * self.head_dim
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        fmha_impl: FMHAImplBase,
+        kv_cache: Optional[KVCache],
+    ) -> torch.Tensor:
+        input_shape = hidden_states.shape[:-1]
+        attn_output = torch.empty(
+            [*input_shape, 4096], device=hidden_states.device, dtype=hidden_states.dtype
+        )
+        attn_output = fmha_impl.forward(hidden_states, kv_cache)
+        attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+        return attn_output
 
 
 @dataclass
@@ -341,7 +373,9 @@ class Qwen3AttnModel(DisaggregateModelBase):
                 inputs = self.recv_from_ffn_service(
                     mirco_batch_input.input_ids.shape[0]
                 )
-                fmha_impl = self.get_fmha_impl(mirco_batch_input.attention_inputs)
+                fmha_impl = AttnImplFactory.get_fmha_impl(
+                    self.config, self.weight, mirco_batch_input.attention_inputs
+                )
                 out = layer(
                     hidden_states=inputs,
                     fmha_impl=fmha_impl,

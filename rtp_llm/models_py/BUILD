@@ -52,7 +52,8 @@ py_library(
     srcs = glob([
         "modules/cuda/*.py",
         "modules/cuda/**/*.py",
-    ])
+    ]),
+    visibility = [":__subpackages__"],
 )
 
 py_library(
@@ -60,7 +61,8 @@ py_library(
     srcs = glob([
         "modules/rocm/*.py",
         "modules/rocm/**/*.py",
-    ])
+    ]),
+    visibility = [":__subpackages__"],
 )
 
 py_library(

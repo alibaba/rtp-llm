@@ -1,3 +1,4 @@
+# moe registry
 from rtp_llm.models_py.modules.common.moe.strategy.batched_triton_strategy import (
     BatchedTritonStrategy,
 )
@@ -15,3 +16,6 @@ registry.register(RocmEpLowLatencyStrategy())
 registry.register(RocmEpNormalStrategy())
 registry.register(BatchedTritonStrategy())
 FusedMoeFactory.set_registry(registry)
+
+# fmha registry
+import rtp_llm.models_py.modules.rocm.mha

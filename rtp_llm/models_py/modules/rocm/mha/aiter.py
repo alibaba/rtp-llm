@@ -1,26 +1,23 @@
 import logging
-import os
-from typing import Any, List, Optional
+from typing import Any, Optional
 
 import aiter
 import torch
 from aiter import dtypes
 
-# from librtp_compute_ops import KVCache
-from librtp_compute_ops.rtp_llm_ops import (
-    FusedRopeKVCacheDecodeOp,
-    FusedRopeKVCachePrefillOp,
-)
-
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.models_py.modules.fmha import FMHAImplBase
+from rtp_llm.models_py.modules.common.mha.base import (
+    FMHADecodeImplBase,
+    FMHAImplBase,
+    FMHAPrefillImplBase,
+)
 from rtp_llm.ops import FMHAType
 from rtp_llm.ops.compute_ops import (
+    FusedRopeKVCacheDecodeOp,
+    FusedRopeKVCachePrefillOp,
     KVCache,
     ParamsBase,
     PyAttentionInputs,
-    PyModelInputs,
-    PyModelOutputs,
 )
 
 
@@ -83,52 +80,6 @@ class FMHAParams(ParamsBase):
         return True
 
 
-class FMHAPrefillImplBase(FMHAImplBase):
-
-    def __init__(
-        self,
-        fmha_impl: Any,
-        attn_inputs: PyAttentionInputs,
-        config: GptInitModelParameters,
-    ) -> None:
-        super().__init__(
-            fmha_impl, FusedRopeKVCachePrefillOp(config.gpt_init_params), attn_inputs
-        )
-
-
-class FMHADecodeImplBase(FMHAImplBase):
-
-    def __init__(
-        self,
-        fmha_impl: Any,
-        attn_inputs: PyAttentionInputs,
-        config: GptInitModelParameters,
-    ) -> None:
-        super().__init__(
-            fmha_impl, FusedRopeKVCacheDecodeOp(config.gpt_init_params), attn_inputs
-        )
-
-
-PREFILL_MHA_IMPS: List[type[FMHAPrefillImplBase]] = []
-DECODE_MHA_IMPS: List[type[FMHADecodeImplBase]] = []
-
-try:
-
-    class AiterPrefillImpl(FMHAPrefillImplBase):
-        def __init__(
-            self, config: GptInitModelParameters, attn_inputs: PyAttentionInputs
-        ) -> None:
-            super().__init__(AiterPrefillAttnOp(config), attn_inputs, config)
-
-        @staticmethod
-        def fmha_type() -> FMHAType:
-            return FMHAType.AITER_PREFILL
-
-    PREFILL_MHA_IMPS.append(AiterPrefillImpl)
-except ImportError:
-    logging.info("AiterPrefillImpl not available, skipped.")
-
-
 class AiterPrefillAttnOp:
     def __init__(self, config: GptInitModelParameters):
         self.head_num = config.head_num // config.tp_size
@@ -177,19 +128,6 @@ class AiterPrefillAttnOp:
         token_num = res.shape[0]
         final_result = res.reshape(token_num, self.head_num * self.head_dim)
         return final_result
-
-
-try:
-
-    class AiterDecodeImpl(FMHADecodeImplBase):
-        def __init__(
-            self, config: GptInitModelParameters, attn_inputs: PyAttentionInputs
-        ) -> None:
-            super().__init__(AiterDecodeAttnOp(config), attn_inputs, config)
-
-    DECODE_MHA_IMPS.append(AiterDecodeImpl)
-except ImportError:
-    logging.info("PagedAttnDecodeOp not available, skipped.")
 
 
 class AiterDecodeAttnOp:
@@ -307,3 +245,29 @@ class AiterDecodeAttnOp:
 
         output_reshaped = output.view(output.shape[0], -1)
         return output_reshaped
+
+
+class AiterPrefillImpl(FMHAPrefillImplBase):
+    def __init__(
+        self, config: GptInitModelParameters, attn_inputs: PyAttentionInputs
+    ) -> None:
+        super().__init__(
+            AiterPrefillAttnOp(config),
+            FusedRopeKVCachePrefillOp(config.gpt_init_params),
+            attn_inputs,
+        )
+
+    @staticmethod
+    def fmha_type() -> FMHAType:
+        return FMHAType.AITER_PREFILL
+
+
+class AiterDecodeImpl(FMHADecodeImplBase):
+    def __init__(
+        self, config: GptInitModelParameters, attn_inputs: PyAttentionInputs
+    ) -> None:
+        super().__init__(
+            AiterDecodeAttnOp(config),
+            FusedRopeKVCacheDecodeOp(config.gpt_init_params),
+            attn_inputs,
+        )
