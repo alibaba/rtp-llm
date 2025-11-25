@@ -524,8 +524,7 @@ class DeepSeekV2(BaseModel):
         return config
 
     def _create_python_model(self) -> Optional[GptModelBase]:
-        attention_type = "mla"
-        self.py_model = GenericMoeModel(self.config, self.weight, attention_type)
+        self.py_model = GenericMoeModel(self.config, self.weight)
 
     @staticmethod
     def _from_hf(config: GptInitModelParameters, ckpt_path: str):

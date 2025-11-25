@@ -4,11 +4,9 @@ from typing import Any, Optional
 
 import torch
 
-from rtp_llm.models_py.modules.mla.flashinfer_mla import (
-    check_attention_inputs,
-    flashinfer_python,
-)
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
+
+from .flashinfer_mla import check_attention_inputs, flashinfer_python
 
 
 class MlaRotaryEmbeddingOp(object):
