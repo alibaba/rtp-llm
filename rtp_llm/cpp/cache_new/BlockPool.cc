@@ -53,7 +53,8 @@ void BlockPool::initFreeBlocks() {
     for (BlockIdxType i = 1; i < static_cast<BlockIdxType>(config_.block_num); ++i) {
         free_block_ids_.insert(i);
     }
-    block_ref_counter_.init(config_.block_num);
+    all_ref_counter_.init(config_.block_num);
+    request_ref_counter_.init(config_.block_num);
 }
 
 std::vector<torch::Tensor> BlockPool::layerCacheBase() const {
@@ -79,26 +80,55 @@ BlockIndicesType BlockPool::malloc(int num_blocks) {
         block_ids.push_back(*it);
     }
     free_block_ids_.erase(first, last);
-    reference(block_ids);
+    requestReference(block_ids);
     return block_ids;
 }
 
-void BlockPool::free(BlockIdxType block_idx) {
+void BlockPool::requestFree(BlockIdxType block_idx) {
     auto block_ids = {block_idx};
-    free(block_ids);
+    freeImpl(block_ids);
 }
 
-void BlockPool::free(const BlockIndicesType& block_ids) {
-    block_ref_counter_.decrementRefCounter(block_ids);
+void BlockPool::requestFree(const BlockIndicesType& block_ids) {
+    freeImpl(block_ids);
+    request_ref_counter_.decrementRefCounter(block_ids);
+}
+
+void BlockPool::blockCacheFree(BlockIdxType block_idx) {
+    auto block_ids = {block_idx};
+    freeImpl(block_ids);
+}
+
+void BlockPool::blockCacheFree(const BlockIndicesType& block_ids) {
+    freeImpl(block_ids);
+}
+
+void BlockPool::freeImpl(const BlockIndicesType& block_ids) {
+    all_ref_counter_.decrementRefCounter(block_ids);
     for (auto& block_id : block_ids) {
-        if (block_ref_counter_.getRefCounter(block_id) == 0) {
+        if (all_ref_counter_.getRefCounter(block_id) == 0) {
             free_block_ids_.insert(block_id);
         }
     }
 }
 
-void BlockPool::reference(const BlockIndicesType& block_ids) {
-    block_ref_counter_.incrementRefCounter(block_ids);
+void BlockPool::requestReference(BlockIdxType block_idx) {
+    BlockIndicesType block_ids = {block_idx};
+    requestReference(block_ids);
+}
+
+void BlockPool::requestReference(const BlockIndicesType& block_ids) {
+    request_ref_counter_.incrementRefCounter(block_ids);
+    all_ref_counter_.incrementRefCounter(block_ids);
+}
+
+void BlockPool::blockCacheReference(BlockIdxType block_idx) {
+    BlockIndicesType block_ids = {block_idx};
+    blockCacheReference(block_ids);
+}
+
+void BlockPool::blockCacheReference(const BlockIndicesType& block_ids) {
+    all_ref_counter_.incrementRefCounter(block_ids);
 }
 
 void BlockPool::regUserMr(size_t model_id) {
@@ -143,6 +173,11 @@ size_t BlockPool::freeBlocksNum() const {
 size_t BlockPool::totalBlocksNum() const {
     // reserve block 0 for internal use
     return config_.block_num - 1;
+}
+
+// Blocks not referenced by a request are free.
+size_t BlockPool::availableBlocksNum() const {
+    return request_ref_counter_.freeBlockNum();
 }
 
 BlockAddrInfo BlockPool::convertIndexToAddr(int layer_id, int block_id) const {
