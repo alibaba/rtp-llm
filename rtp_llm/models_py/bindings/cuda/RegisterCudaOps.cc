@@ -4,7 +4,10 @@
 #include "rtp_llm/cpp/cuda/cutlass/cutlass_kernels/fp8_group_gemm/fp8_group_gemm.h"
 #include "rtp_llm/cpp/kernels/scaled_fp8_quant.h"
 #include "rtp_llm/cpp/kernels/moe/ep_utils.h"
+
+#include "rtp_llm/cpp/kernels/atex/ops/f16/gate_silu.h"
 #include "rtp_llm/cpp/kernels/atex/ops/f16/rmsnorm.h"
+
 #include "rtp_llm/cpp/kernels/atex/ops/f8/quant.h"
 
 namespace rtp_llm {
@@ -134,6 +137,10 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
                   &atex::impl::launch_minmax_pertensor_quant_bf16_fp8e4m3,
                   "fp8e4m3 pertensor quantization function",
                   py::arg("x"));
+
+    rtp_ops_m.def("atex_gate_silu_fp16", &atex::impl::launch_gate_silu_bf16, "fused gated silu function", py::arg("x"));
+
+    rtp_ops_m.def("atex_gate_silu_bf16", &atex::impl::launch_gate_silu_bf16, "fused gated silu function", py::arg("x"));
 
     registerBaseCudaBindings(rtp_ops_m);
     registerAttnOpBindings(rtp_ops_m);

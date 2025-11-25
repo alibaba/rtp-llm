@@ -128,6 +128,22 @@ py_test(
 )
 
 py_test(
+    name="gate_silu_test",
+    srcs=[
+        "gate_silu/gate_silu_test.py"
+    ],
+    data = [
+        "//:rtp_compute_ops",
+    ],
+    deps = [
+        "//rtp_llm:torch",
+        "//rtp_llm:rtp_llm_lib",
+    ],
+    tags = ["H20"],
+    exec_properties = {'gpu':'H20'}
+)
+
+py_test(
     name = "generalT5LayerNorm",
     srcs = [
         "layernorm/generalT5LayerNorm.py"

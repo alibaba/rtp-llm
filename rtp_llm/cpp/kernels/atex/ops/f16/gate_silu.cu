@@ -21,7 +21,7 @@ __global__ void device_gate_silu_f16(const f16x2_t* const __restrict__ x,  // [m
     f16x2_t local_gate[VPT];
     f16x2_t local_y[VPT];
 
-    for (uint32_t index = (bid * TPB * VPT + tid * VPT) * 2; index < numel, index += gridDim.x * TPB * VPT * 2) {
+    for (uint32_t index = (bid * TPB * VPT + tid * VPT) * 2; index < numel; index += gridDim.x * TPB * VPT * 2) {
         atex::copy<sizeof(f16x2_t) * VPT>(x + index + 0, local_value);
         atex::copy<sizeof(f16x2_t) * VPT>(x + index + N, local_gate);
 
@@ -45,60 +45,58 @@ Tensor launch_gate_silu_bf16(const Tensor& x) {
     TORCH_CHECK(x.is_cuda(), "x must be a CUDA tensor.");
     TORCH_CHECK(x.scalar_type() == c10::ScalarType::BFloat16, "x must be BF16.");
 
-    auto          sizes = x.sizes();
-    auto          ndim  = x.ndimension();
-    const int64_t n     = sizes[ndim - 1];
-    TORCH_CHECK(n % 16 == 0, "n must be a multiple of 16");
+    auto sizes = x.sizes();
+    auto ndim  = x.ndimension();
+    TORCH_CHECK(ndim >= 1, "Input tensor must have at least 1 dimension.");
 
-    std::vector<int64_t> output_sizes = {m, n / 2};
-    Tensor               output       = at::empty(output_sizes, x.options());
+    int64_t n = sizes[ndim - 1];
+    TORCH_CHECK(n % 16 == 0, "Last dimension must be a multiple of 16.");
+
+    std::vector<int64_t> output_sizes(sizes.begin(), sizes.end());
+    output_sizes[ndim - 1] = n / 2;
+    Tensor output          = at::empty(output_sizes, x.options());
 
     constexpr uint32_t TPB = 256;
     constexpr uint32_t VPT = 16 / sizeof(bf16x2_t);
 
-    // Launch configuration
-    const uint32_t N     = n / 2;               // half size
-    const uint32_t numel = output.numel() / 2;  // Number of half2 in output
-    const uint32_t grid  = (numel + TPB * VPT - 1) / (TPB * VPT);
+    uint32_t N         = n / 2;
+    uint32_t num_half2 = output.numel() / 2;
+    uint32_t grid      = (num_half2 + TPB * VPT - 1) / (TPB * VPT);
 
-    // Launch kernel
-    device_gate_silu_f16<bf16x2_t, TPB, VPT><<<grid, TPB>>>(PTR<bf16x2_t>(x), PTR<bf16x2_t>(output), N, numel);
+    device_gate_silu_f16<bf16x2_t, TPB, VPT><<<grid, TPB>>>(PTR<bf16x2_t>(x), PTR<bf16x2_t>(output), N, num_half2);
 
-    // Error check
     cudaError_t err = cudaGetLastError();
     TORCH_CHECK(err == cudaSuccess, "CUDA kernel launch failed: ", cudaGetErrorString(err));
-
     return output;
 }
 
 Tensor launch_gate_silu_fp16(const Tensor& x) {
     TORCH_CHECK(x.is_contiguous(), "x must be contiguous.");
     TORCH_CHECK(x.is_cuda(), "x must be a CUDA tensor.");
-    TORCH_CHECK(x.scalar_type() == c10::ScalarType::Half, "x must be FP16.");
+    TORCH_CHECK(x.scalar_type() == c10::ScalarType::BFloat16, "x must be BF16.");
 
-    auto          sizes = x.sizes();
-    auto          ndim  = x.ndimension();
-    const int64_t n     = sizes[ndim - 1];
-    TORCH_CHECK(n % 16 == 0, "n must be a multiple of 16");
+    auto sizes = x.sizes();
+    auto ndim  = x.ndimension();
+    TORCH_CHECK(ndim >= 1, "Input tensor must have at least 1 dimension.");
 
-    std::vector<int64_t> output_sizes = {m, n / 2};
-    Tensor               output       = at::empty(output_sizes, x.options());
+    int64_t n = sizes[ndim - 1];
+    TORCH_CHECK(n % 16 == 0, "Last dimension must be a multiple of 16.");
+
+    std::vector<int64_t> output_sizes(sizes.begin(), sizes.end());
+    output_sizes[ndim - 1] = n / 2;
+    Tensor output          = at::empty(output_sizes, x.options());
 
     constexpr uint32_t TPB = 256;
     constexpr uint32_t VPT = 16 / sizeof(fp16x2_t);
 
-    // Launch configuration
-    const uint32_t N     = n / 2;               // half size
-    const uint32_t numel = output.numel() / 2;  // Number of half2 in output
-    const uint32_t grid  = (numel + TPB * VPT - 1) / (TPB * VPT);
+    uint32_t N         = n / 2;
+    uint32_t num_half2 = output.numel() / 2;
+    uint32_t grid      = (num_half2 + TPB * VPT - 1) / (TPB * VPT);
 
-    // Launch kernel
-    device_gate_silu_f16<fp16x2_t, TPB, VPT><<<grid, TPB>>>(PTR<fp16x2_t>(x), PTR<fp16x2_t>(output), N, numel);
+    device_gate_silu_f16<fp16x2_t, TPB, VPT><<<grid, TPB>>>(PTR<fp16x2_t>(x), PTR<fp16x2_t>(output), N, num_half2);
 
-    // Error check
     cudaError_t err = cudaGetLastError();
     TORCH_CHECK(err == cudaSuccess, "CUDA kernel launch failed: ", cudaGetErrorString(err));
-
     return output;
 }
 
