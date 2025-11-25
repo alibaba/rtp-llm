@@ -12,6 +12,7 @@ from typing import Any, List, Optional, Union
 
 import torch
 
+from rtp_llm.access_logger.access_logger import MMAccessLogger
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import MultimodalInputsPB
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
@@ -23,7 +24,6 @@ from rtp_llm.utils.base_model_datatypes import (
     MultimodalInput,
 )
 from rtp_llm.utils.time_util import Timer
-from rtp_llm.utils.util import check_with_info
 
 
 class MMEmbeddingRes:
@@ -35,6 +35,9 @@ class MMEmbeddingRes:
         self.embeddings = embeddings
         self.position_ids = position_ids
         self.deepstack_embeds = deepstack_embeds
+
+    def __str__(self):
+        return f"MMEmbeddingRes(embeddings={self.embeddings}, position_ids={self.position_ids}, deepstack_embeds={self.deepstack_embeds})"
 
 
 class MMWorkItemStatus(enum.Enum):
@@ -105,10 +108,10 @@ class MMWorkItem:
 
     # future cannot be pickled, so it cannot be a member of MMWorkItem
     def may_get_preprocess_result(self, future):
-        if future == None and self.preprocess_result is not None:
+        if future == None and self.embedding_result is not None:
             return
-        elif future == None and self.preprocess_result is None:
-            raise Exception("Preprocess result and future cannot both be None")
+        elif future == None and self.embedding_result is None:
+            raise Exception("Embedding result and future cannot both be None")
 
         try:
             self.preprocess_result, preprocess_time = future.result(
@@ -152,6 +155,7 @@ class MMProcessEngine:
 
         self.query_num = 0
         self.query_num_lock = Lock()
+        self._access_logger = MMAccessLogger()
 
     def inc_query_num(self):
         with self.query_num_lock:
@@ -206,6 +210,8 @@ class MMProcessEngine:
         try:
             kmonitor.report(GaugeMetrics.VIT_QPS_METRIC, 1, {"source": "mm_embedding"})
             self.inc_query_num()
+            self._access_logger.log_query_access(mm_inputs)
+
             work_items = []
             futures = []
             emb_res = []
@@ -235,11 +241,14 @@ class MMProcessEngine:
                 pos_res.extend(self._maybe_tensor_to_list(res[1]))
 
             kmonitor.report(GaugeMetrics.VIT_SUCCESS_QPS_METRIC, 1)
-            return MMEmbeddingRes(emb_res, pos_res, tensor_res)
+            res = MMEmbeddingRes(emb_res, pos_res, tensor_res)
+            self._access_logger.log_success_access(mm_inputs, str(res))
+            return res
         except Exception as e:
             torch.cuda.empty_cache()
             gc.collect()
             kmonitor.report(GaugeMetrics.VIT_ERROR_QPS_METRIC, 1)
+            self._access_logger.log_exception_access(mm_inputs, e)
             raise e
         finally:
             self.dec_query_num()

@@ -55,11 +55,9 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
         worker_status.status_version = 1
         worker_status.alive = True
         return worker_status
-        # return self.engine.get_worker_status(request.latest_finished_version)
 
     def GetCacheStatus(self, request: CacheVersionPB, context):
         return CacheStatusPB()
-        # return self.engine.get_cache_status(request.latest_cache_version)
 
     def stop(self):
         self.engine.stop()
