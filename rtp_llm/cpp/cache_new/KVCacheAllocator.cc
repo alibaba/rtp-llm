@@ -31,7 +31,7 @@ MallocResult KVCacheAllocator::malloc(const MallocInfo& malloc_info) {
         return {false, 0};
     }
 
-    if (malloc_info.batch_kv_cache_resource->maxBlockSize() == 0) {
+    if (malloc_info.batch_kv_cache_resource->maxBlocksNum() == 0) {
         return initMalloc(malloc_info);
     } else {
         return incrMalloc(malloc_info);

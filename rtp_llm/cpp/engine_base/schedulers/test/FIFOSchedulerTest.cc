@@ -175,7 +175,7 @@ TEST_F(FIFOSchedulerTest, testIncrKVCacheFallBackReleaseAllBlocks) {
     ASSERT_EQ(stream2->stopReason(), "");
     // stream2 pause了，release了所有的block
     ASSERT_TRUE(stream2->paused());
-    ASSERT_EQ(stream2->maxBlockSize(), 0);
+    ASSERT_EQ(stream2->maxBlocksNum(), 0);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 1);
     ASSERT_EQ(scheduler.runningStreamsSize(), 1);
     ASSERT_EQ(cache_manager->freeBlocksNum(), 1);

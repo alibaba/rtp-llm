@@ -50,7 +50,7 @@ public:
     void                 freeBatchBlocks(size_t batch_id, std::vector<int>& blocks);
     void                 releaseResource();
     int                  singleBatchNeedBlocks(int seq_len) const;
-    int                  maxBlockSize() const;
+    int                  maxBlocksNum() const;
     int                  mallocFailedTimes() const;
 
     const BatchKVCacheResource& kvCache() const;
@@ -113,19 +113,9 @@ public:
     std::string debugString() const {
         std::stringstream debug_string;
         debug_string << "StreamCacheResource {"
-                     << "need_release_resource: " << need_release_resource_ << ", batch_resource: [";
+                     << "need_release_resource: " << need_release_resource_ << ", batch_resource: ";
 
-        for (size_t i = 0; i < batch_resource_->batchSize(); i++) {
-            debug_string << " [";
-            if (i < batch_resource_->batch_resource.size()
-                && !batch_resource_->batch_resource[i].group_block_ids.empty()) {
-                const auto& blocks = batch_resource_->batch_resource[i].group_block_ids[0]->block_indices;
-                for (size_t j = 0; j < blocks.size(); j++) {
-                    debug_string << blocks[j] << " ";
-                }
-            }
-            debug_string << "],";
-        }
+        debug_string << batch_resource_->debugString();
 
         debug_string << "}";
         return debug_string.str();

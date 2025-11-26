@@ -168,10 +168,8 @@ bool KVCacheManager::setKVBlockValue(int block_index, rtp_llm::Buffer& k_buffer,
 }
 
 MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
-    if (!malloc_info.batch_kv_cache_resource || !malloc_info.complete_token_ids) {
-        RTP_LLM_LOG_ERROR("malloc_info is invalid: batch_kv_cache_resource or complete_token_ids is null");
-        return {false, 0};
-    }
+    RTP_LLM_CHECK(malloc_info.batch_kv_cache_resource && malloc_info.complete_token_ids);
+
     const int seq_size_per_block = config_.seq_size_per_block;
 
     // Build or update cache_keys for each batch based on current complete_token_ids.
@@ -185,8 +183,9 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
     return allocator_->malloc(malloc_info);
 }
 
-FreeResult KVCacheManager::free(const FreeInfo& free_info) {
-    return allocator_->free(free_info);
+void KVCacheManager::free(const FreeInfo& free_info) {
+    RTP_LLM_CHECK(free_info.batch_kv_cache_resource && free_info.complete_token_ids);
+    allocator_->free(free_info);
 }
 
 InsertResult KVCacheManager::insertIntoCache(const InsertInfo& insert_info) {

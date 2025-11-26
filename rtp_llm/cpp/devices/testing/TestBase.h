@@ -301,7 +301,7 @@ protected:
             {rtp_llm::DataType::TYPE_INT32, {batch_size, batch_layer_kv_block_num}, rtp_llm::AllocationType::HOST});
 
         auto batch_kv_cache = std::make_shared<rtp_llm::BatchKVCacheResource>();
-        batch_kv_cache->resize(batch_size);
+        batch_kv_cache->resetBatchSize(batch_size);
         batch_kv_cache->initGroups(1);
 
         auto complete_token_ids =

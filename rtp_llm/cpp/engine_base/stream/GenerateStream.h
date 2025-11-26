@@ -237,7 +237,7 @@ public:
     const BatchKVCacheResource& kvCache() const;
     BatchKVCacheResource&       kvCacheMutable();
     BatchKVCacheResourcePtr     kvCachePtr();
-    size_t                      maxBlockSize() const;
+    size_t                      maxBlocksNum() const;
 
     bool needFinish();
     bool needFinishBySPTokens();

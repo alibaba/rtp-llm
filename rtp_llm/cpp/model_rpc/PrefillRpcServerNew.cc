@@ -99,8 +99,8 @@ bool PrefillRpcServerNew::validRequest(PrefillGenerateContextNew& prefill_contex
         return false;
     }
 
-    auto generate_stream = prefill_context.getStream();
-    auto block_ids       = generate_stream->kvCache().blocks(0);
+    auto  generate_stream = prefill_context.getStream();
+    auto& block_ids       = generate_stream->kvCachePtr()->blocks(0);
     if (block_ids.size() != request->block_ids_size()) {
         RTP_LLM_LOG_WARNING("request [%s] block_ids size [%d] not match request block_ids size [%d]",
                             prefill_context.request_key.c_str(),
@@ -184,7 +184,7 @@ void PrefillRpcServerNew::constructRemoteLoadRequest(PrefillGenerateContextNew& 
     for (int i = prefill_context.request->reuse_block_size(); i < prefill_context.request->block_ids_size(); i++) {
         request.add_decode_block_ids(prefill_context.request->block_ids(i));
     }
-    auto block_ids = prefill_context.getStream()->kvCache().blocks(0);
+    auto& block_ids = prefill_context.getStream()->kvCachePtr()->blocks(0);
     for (int i = prefill_context.request->reuse_block_size(); i < block_ids.size(); i++) {
         request.add_prefill_block_ids(block_ids[i]);
     }
