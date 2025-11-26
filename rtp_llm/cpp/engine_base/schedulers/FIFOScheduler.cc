@@ -92,7 +92,14 @@ absl::Status FIFOScheduler::enqueue(const GenerateStreamPtr& stream) {
 
 absl::Status FIFOScheduler::batchEnqueue(const vector<GenerateStreamPtr>& streams) {
     {
-        std::lock_guard<std::mutex> lock(lock_);
+        std::lock_guard<std::mutex>                   lock(lock_);
+        static std::random_device                     rd;
+        static std::mt19937                           gen(rd());
+        static std::uniform_int_distribution<int64_t> dis(1);
+        int64_t                                       batch_id = dis(gen);
+        for (const auto& stream : streams) {
+            stream->setBatchId(batch_id);
+        }
         waiting_streams_.insert(waiting_streams_.end(), streams.begin(), streams.end());
     }
     cond_.notify_all();
@@ -255,8 +262,17 @@ bool FIFOScheduler::evaluateNewStream(const list<GenerateStreamPtr>& streams,
 
 list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
     list<GenerateStreamPtr> new_streams;
+    int64_t                 batch_id      = -1;
+    bool                    init_batch_id = false;
     for (auto it = waiting_streams_.begin(); it != waiting_streams_.end();) {
         auto& stream = *it;
+        if (!init_batch_id) {
+            init_batch_id = true;
+            batch_id      = stream->batchId();
+        }
+        if (stream->batchId() != batch_id) {
+            break;
+        }
         if (evaluateNewStream(new_streams, *it, reserve_step)) {
             RTP_LLM_LOG_DEBUG("stream [%ld] add to new queue", stream->streamId());
             // if setRunning fails, it must be in stopped state, evict it in next iteration

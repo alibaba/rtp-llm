@@ -214,6 +214,12 @@ int64_t GenerateStream::streamId() const {
     }
     return generate_input_->request_id;
 }
+int64_t GenerateStream::batchId() const {
+    return batch_id_;
+}
+void GenerateStream::setBatchId(int64_t batch_id) {
+    batch_id_ = batch_id;
+}
 int GenerateStream::loraId() const {
     return generate_input_->lora_id;
 }

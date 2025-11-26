@@ -130,6 +130,8 @@ public:
     std::vector<int>                 textTokensMask() const;
     bool                             isStreaming() const;
     int64_t                          streamId() const;
+    int64_t                          batchId() const;
+    void                             setBatchId(int64_t batch_id);
     int                              loraId() const;
     std::string                      adapterName() const;
     rtp_llm::SpecialTokens           specialTokens() const;
@@ -527,11 +529,12 @@ protected:
     bool released_              = false;
     bool need_release_resource_ = true;
 
-    bool enable_fast_gen_   = false;
-    bool return_all_probs_  = false;
-    int  current_chunk_len_ = 0;
-    int  last_chunk_len_    = 0;
-    int  max_chunk_len_     = 0;
+    int64_t batch_id_          = -1;
+    bool    enable_fast_gen_   = false;
+    bool    return_all_probs_  = false;
+    int     current_chunk_len_ = 0;
+    int     last_chunk_len_    = 0;
+    int     max_chunk_len_     = 0;
 
     bool          last_block_aligned_   = false;
     volatile bool need_remote_generate_ = false;
