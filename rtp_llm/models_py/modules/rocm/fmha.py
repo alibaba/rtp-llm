@@ -30,29 +30,63 @@ class FMHAParams(ParamsBase):
 
     def __init__(
         self,
-        input_lengths: torch.Tensor,
-        is_prefill: Optional[bool] = None,
-        sequence_lengths: Optional[torch.Tensor] = None,
-        kv_cache_block_id_device: Optional[torch.Tensor] = None,
-        enable_cuda_graph: bool = False,
+        attn_inputs: PyAttentionInputs,
+        is_prefill: bool = True,
     ):
         super().__init__()
 
         # Prefill mode
-        if is_prefill is not None and is_prefill:
+        if is_prefill:
+            input_lengths = attn_inputs.input_lengths
+            prefix_lengths = (
+                attn_inputs.prefix_lengths
+                if hasattr(attn_inputs, "prefix_lengths")
+                else None
+            )
+
             self.max_seq_len = input_lengths.max().item()
             batch_size = input_lengths.size(0)
+
+            # Create cu_seqlens_q for query (based on input_lengths only)
             self.cu_seqlens_q = torch.zeros(
                 batch_size + 1, dtype=torch.int32, device=input_lengths.device
             )
             self.cu_seqlens_q[1:] = torch.cumsum(input_lengths, 0)
-            self.cu_seqlens_k = self.cu_seqlens_q.clone()
+
+            kv_lengths = torch.zeros_like(input_lengths)
+            # Create cu_seqlens_k for key/value (includes prefix_lengths)
+            if prefix_lengths is not None and prefix_lengths.numel() > 0:
+                kv_lengths = input_lengths + prefix_lengths
+                self.cu_seqlens_k = torch.zeros(
+                    batch_size + 1, dtype=torch.int32, device=input_lengths.device
+                )
+                self.cu_seqlens_k[1:] = torch.cumsum(kv_lengths, 0)
+                # Calculate max sequence length including prefix
+                max_prefix_length = (
+                    prefix_lengths.max().item() if prefix_lengths.numel() > 0 else 0
+                )
+                self.max_seqlen_k = self.max_seq_len + max_prefix_length
+            else:
+                self.cu_seqlens_k = self.cu_seqlens_q.clone()
+                self.max_seqlen_k = self.max_seq_len
+
             self.max_seqlen_q = self.max_seq_len
-            self.max_seqlen_k = self.max_seq_len
             self.seq_lens = None
-            self.kv_cache_block_id_device = None
+            self.kv_cache_block_id_device = getattr(
+                attn_inputs, "kv_cache_block_id_device", None
+            )
+            self.prefix_lengths = prefix_lengths
+            self.token_q_num = input_lengths.sum().item()
+            self.token_kv_num = kv_lengths.sum().item()
         # Decode mode
         else:
+            input_lengths = attn_inputs.input_lengths
+            sequence_lengths = getattr(attn_inputs, "sequence_lengths", None)
+            kv_cache_block_id_device = getattr(
+                attn_inputs, "kv_cache_block_id_device", None
+            )
+            enable_cuda_graph = getattr(attn_inputs, "enable_cuda_graph", False)
+
             self.sequence_lengths = sequence_lengths
             self.kv_cache_block_id_device = kv_cache_block_id_device
 
@@ -72,8 +106,10 @@ class FMHAParams(ParamsBase):
             else:
                 self.seq_lens = None
 
-    def update(self):
-        """Update parameters for CUDA graph execution."""
+    def fillParams(self, sequence_lengths, input_lengths, kv_cache_block_id_host):
+        self.sequence_lengths = sequence_lengths
+        self.input_lengths = input_lengths
+        self.kv_cache_block_id_host = kv_cache_block_id_host
         if self.seq_lens is not None and self.sequence_lengths is not None:
             self.seq_lens.copy_((self.sequence_lengths + 1).to(torch.device("cuda")))
             self.max_seq_len = 8192
@@ -140,29 +176,31 @@ class AiterPrefillAttnOp:
         return True
 
     def prepare(self, attn_inputs: PyAttentionInputs):
-        # Create prefill parameters using pure Python implementation
-        self.fmha_params = FMHAParams(
-            input_lengths=attn_inputs.input_lengths, is_prefill=True
+        fmha_params = FMHAParams(
+            attn_inputs=attn_inputs,
+            is_prefill=True,
         )
-        return self.fmha_params
+        return fmha_params
 
-    def advanced_qkv_split(self, qkv, head_num, head_num_kv, size_per_head):
-        token_num = qkv.shape[0]
-        qkv_reshaped = qkv.reshape(token_num, head_num + 2 * head_num_kv, size_per_head)
-        q = qkv_reshaped[:, :head_num, :]
-        k = qkv_reshaped[:, head_num : head_num + head_num_kv, :]
-        v = qkv_reshaped[:, head_num + head_num_kv : head_num + 2 * head_num_kv, :]
-        return q, k, v
+    def reshape_qkv(self, qkv):
+        q_contiguous = qkv[0].permute(1, 0, 2).contiguous()
+        k_contiguous = qkv[1].permute(1, 0, 2).contiguous()
+        v_contiguous = qkv[2].permute(1, 0, 2).contiguous()
+        return q_contiguous, k_contiguous, v_contiguous
 
     def forward(self, qkv, kv_cache, fmha_params):
-        cu_seqlens_q = fmha_params.cu_seqlens_q.to(qkv.device)
-        cu_seqlens_k = fmha_params.cu_seqlens_k.to(qkv.device)
+
+        q_tensor, k_tensor, v_tensor = self.reshape_qkv(qkv)
+
+        q_tensor = q_tensor[: fmha_params.token_q_num]
+        k_tensor = k_tensor[: fmha_params.token_kv_num]
+        v_tensor = v_tensor[: fmha_params.token_kv_num]
+
+        cu_seqlens_q = fmha_params.cu_seqlens_q.to(q_tensor.device)
+        cu_seqlens_k = fmha_params.cu_seqlens_k.to(k_tensor.device)
         max_seqlen_q = fmha_params.max_seqlen_q
         max_seqlen_k = fmha_params.max_seqlen_k
 
-        q_tensor, k_tensor, v_tensor = self.advanced_qkv_split(
-            qkv, self.head_num, self.head_num_kv, self.head_dim
-        )
         res = aiter.flash_attn_varlen_func(
             q_tensor,  # Query张量: (total_q, nheads, headdim_q) - 批次中所有query token的总数
             k_tensor,  # Key张量: (total_k, nheads_k, headdim_q) - 批次中所有key token的总数
@@ -174,7 +212,7 @@ class AiterPrefillAttnOp:
             dropout_p=0.0,  # Dropout概率 - 评估时应设为0.0
             causal=True,  # 因果注意力掩码 - 用于自回归建模，每个位置只能关注自己和之前的位置
         )
-        token_num = res.shape[0]
+        token_num = fmha_params.token_q_num
         final_result = res.reshape(token_num, self.head_num * self.head_dim)
         return final_result
 
@@ -208,14 +246,11 @@ class AiterDecodeAttnOp:
 
     def prepare(self, attn_inputs: PyAttentionInputs):
         # Create decode parameters using pure Python implementation
-        self.fmha_params = FMHAParams(
-            input_lengths=attn_inputs.input_lengths,
+        fmha_params = FMHAParams(
+            attn_inputs=attn_inputs,
             is_prefill=False,
-            sequence_lengths=attn_inputs.sequence_lengths,
-            kv_cache_block_id_device=attn_inputs.kv_cache_block_id_device,
-            enable_cuda_graph=self.enable_cuda_graph,
         )
-        return self.fmha_params
+        return fmha_params
 
     def forward(
         self, query: torch.Tensor, kv_cache: Optional[KVCache], fmha_params
