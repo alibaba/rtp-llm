@@ -1,3 +1,6 @@
+import os
+from torch.profiler import profile, record_function, ProfilerActivity
+
 import gc
 from typing import List, Optional
 
@@ -32,6 +35,29 @@ class MMProcessEngine:
             return [tensor]
 
     def submit(
+        self,
+        *args,
+        **kwargs,
+    ):
+        if not os.environ.get("MM_TRACE"):
+            return self._submit(*args, **kwargs)
+        if not hasattr(self, '_forward_call_count'):
+            self._forward_call_count = 0
+        else:
+            self._forward_call_count += 1
+
+        with profile(
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            with_stack=True,
+            record_shapes=True
+        ) as prof:
+            with record_function("MMProcessEngine.submit"):
+                ret = self._submit(*args, **kwargs)
+
+        trace_file_name = f"{os.environ.get('MM_TRACE')}_fwd{self._forward_call_count}.json"
+        prof.export_chrome_trace(trace_file_name)
+        return ret
+    def _submit(
         self,
         urls: List[str],
         types: Optional[List[MMUrlType]] = None,
