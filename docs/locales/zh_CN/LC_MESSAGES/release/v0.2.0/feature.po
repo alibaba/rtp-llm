@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-11-07 16:47+0800\n"
+"POT-Creation-Date: 2025-11-26 10:19+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -232,42 +232,68 @@ msgstr ""
 msgid "Warmup produce nan maybe influence kvcache"
 msgstr ""
 
+#: ../../release/v0.2.0/feature.md:37
+msgid "Not success query make bad kvcache case wrong answer"
+msgstr ""
+
 #: ../../release/v0.2.0/feature.md:38
+msgid "UseAllGather takes effect automatically according to the DP/TP"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:39
+msgid "UseAllGather with deepgemm coredump cause by topk type is bad."
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:40
+msgid "FlexLb too many log cause bad performance"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:41
+msgid "Flexlb support PD_FUSION"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:43
 msgid "Question of omission"
 msgstr "遗漏问题"
 
-#: ../../release/v0.2.0/feature.md:39
+#: ../../release/v0.2.0/feature.md:44
 msgid ""
 "In 3fs Case need more MEM or set FRONTEND_SERVER_COUNT=1 to reduce "
 "frontend_server mem usage in P/D when Use Frontend Disaggregation."
 msgstr "在3FS情况下，使用前端分离架构时需要更多内存或设置FRONTEND_SERVER_COUNT=1来减少P/D中frontend_server的内存使用。"
 
-#: ../../release/v0.2.0/feature.md:40
+#: ../../release/v0.2.0/feature.md:45
 msgid "too many dynamic lora need more reserver_runtime_mem_mb"
 msgstr "过多的动态LoRA需要更多的reserver_runtime_mem_mb"
 
-#: ../../release/v0.2.0/feature.md:41
+#: ../../release/v0.2.0/feature.md:46
 msgid "AMD not support MoE models"
 msgstr "AMD不支持MoE模型"
 
-#: ../../release/v0.2.0/feature.md:42
+#: ../../release/v0.2.0/feature.md:47
 msgid "MoE model without shared_experter cannot use enable-layer-micro-batch"
 msgstr "没有shared_experter的MoE模型无法使用enable-layer-micro-batch"
 
-#: ../../release/v0.2.0/feature.md:43
+#: ../../release/v0.2.0/feature.md:48
 msgid "P/D Disaggregation with EPLB and MTP step > 1 may cause Prefill Hang"
 msgstr "带有EPLB和MTP step > 1的P/D分离架构可能导致Prefill挂起"
 
-#: ../../release/v0.2.0/feature.md:44
+#: ../../release/v0.2.0/feature.md:49
 #, fuzzy
 msgid "Embedding of VL Model is not ok cause by position id is wrong"
 msgstr "因为position id 不对导致VL de Embedding 结果有问题"
 
-#: ../../release/v0.2.0/feature.md:46
+#: ../../release/v0.2.0/feature.md:50
+msgid ""
+"FlexLb: Frequent switching of a large number of machines results in the "
+"performance degradation of flexlb"
+msgstr ""
+
+#: ../../release/v0.2.0/feature.md:53
 msgid "Performance"
 msgstr "性能"
 
-#: ../../release/v0.2.0/feature.md:48
+#: ../../release/v0.2.0/feature.md:55
 msgid "Compatibility"
 msgstr "兼容性"
 
