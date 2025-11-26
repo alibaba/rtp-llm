@@ -321,11 +321,7 @@ class QWenV2Weight(ModelDeployWeightInfo):
                 ),
                 AtomicWeight(
                     W.lm_head,
-                    [
-                        CkptWeightInfo(
-                            self.transformer_prefix + "lm_head.weight", identity
-                        )
-                    ],
+                    [CkptWeightInfo("lm_head.weight", identity)],
                     identity,
                 ),
                 AtomicWeight(
