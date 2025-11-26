@@ -255,7 +255,7 @@ try:
         def support_cuda_graph(self) -> bool:
             return True
 
-    PREFILL_MHA_IMPS.append(FlashInferPrefillImpl)
+    # PREFILL_MHA_IMPS.append(FlashInferPrefillImpl)
 
     class MlaFlashInferPrefillImpl(FMHAPrefillImplBase):
 
