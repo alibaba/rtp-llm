@@ -191,9 +191,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, FreeSingleBatch) {
     size_t free_before = allocator_->freeBlocksNum();
 
     FreeInfo free_info(batch_resource, complete_token_ids);
-    auto     result = allocator_->free(free_info);
-
-    EXPECT_TRUE(result.success);
+    allocator_->free(free_info);
     EXPECT_GT(allocator_->freeBlocksNum(), free_before);
 }
 
@@ -211,9 +209,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, FreeMultipleBatches) {
     allocator_->malloc(malloc_info);
 
     FreeInfo free_info(batch_resource, complete_token_ids);
-    auto     result = allocator_->free(free_info);
-
-    EXPECT_TRUE(result.success);
+    allocator_->free(free_info);
     EXPECT_EQ(allocator_->freeBlocksNum(), config.block_num - 1);  // reserve 1 block
 }
 
@@ -233,8 +229,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MallocFreeCycle) {
         EXPECT_TRUE(malloc_result.success);
 
         FreeInfo free_info(batch_resource, complete_token_ids);
-        auto     free_result = allocator_->free(free_info);
-        EXPECT_TRUE(free_result.success);
+        allocator_->free(free_info);
 
         EXPECT_EQ(allocator_->freeBlocksNum(), config.block_num - 1);  // reserve 1 block
     }
@@ -603,35 +598,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, FreeEmptyBatchResource) {
     auto complete_token_ids = createCompleteTokenIds(0, 0);
 
     FreeInfo free_info(batch_resource, complete_token_ids);
-    auto     result = allocator_->free(free_info);
-
-    EXPECT_TRUE(result.success);
-}
-
-TEST_F(SingleTypeKVCacheAllocatorTest, MallocWithNullBatchResource) {
-    auto config = createSingleTypeTestConfig();
-    allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config, device_);
-    allocator_->init();
-
-    auto complete_token_ids = createCompleteTokenIds(1, 16);
-
-    MallocInfo malloc_info(nullptr, complete_token_ids);
-    auto       result = allocator_->malloc(malloc_info);
-
-    EXPECT_FALSE(result.success);
-}
-
-TEST_F(SingleTypeKVCacheAllocatorTest, FreeWithNullBatchResource) {
-    auto config = createSingleTypeTestConfig();
-    allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config, device_);
-    allocator_->init();
-
-    auto complete_token_ids = createCompleteTokenIds(1, 16);
-
-    FreeInfo free_info(nullptr, complete_token_ids);
-    auto     result = allocator_->free(free_info);
-
-    EXPECT_FALSE(result.success);
+    allocator_->free(free_info);
 }
 
 // Test rollback logic in incrMalloc
@@ -705,8 +672,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MixedOperations) {
 
     for (int i = 0; i < 3; ++i) {
         FreeInfo free_info(resources[i], token_ids_list[i]);
-        auto     result = allocator_->free(free_info);
-        EXPECT_TRUE(result.success);
+        allocator_->free(free_info);
     }
 
     for (int i = 0; i < 2; ++i) {

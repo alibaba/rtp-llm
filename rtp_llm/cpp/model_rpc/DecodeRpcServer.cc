@@ -272,7 +272,7 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
 ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_context) {
     auto* generate_stream = decode_context.getStream().get();
     auto& cache_keys      = generate_stream->cacheKeys(0);
-    auto& block_ids       = generate_stream->kvCache().blocks(0);
+    auto& block_ids       = generate_stream->kvCachePtr()->blocks(0);
 
     if (cache_keys.size() != block_ids.size()) {
         return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED,
