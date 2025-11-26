@@ -48,6 +48,9 @@ class MMWorkItemStatus(enum.Enum):
     ERROR = 4
 
 
+mm_embedding_lock = Lock()
+
+
 class MMWorkItem:
     def __init__(
         self,
@@ -67,10 +70,6 @@ class MMWorkItem:
 
         self.work_item_id: str = str(uuid.uuid4())
         self.check_cache()
-
-    @property
-    def id(self):
-        return self.id
 
     def check_cache(self):
         # only cache url, type and config
@@ -125,9 +124,10 @@ class MMWorkItem:
     def get_embedding_result(self, embedding_func):
         if self.preprocess_result is not None:
             with Timer() as route_timer:
-                self.embedding_result = embedding_func(
-                    self.preprocess_result, mm_type=self.mm_type
-                )
+                with mm_embedding_lock:
+                    self.embedding_result = embedding_func(
+                        self.preprocess_result, mm_type=self.mm_type
+                    )
             kmonitor.report(GaugeMetrics.VIT_EMBEDDING_RT_METRIC, route_timer.cost_ms())
             if self.need_check_cache:
                 vit_emb_cache_.insert_cache(
