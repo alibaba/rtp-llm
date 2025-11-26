@@ -2,6 +2,7 @@
 syntax = "proto3";
 import "google/protobuf/wrappers.proto";
 
+option java_package = "org.flexlb.engine.grpc";
 
 message TensorPB {
     enum DataType {
