@@ -35,7 +35,7 @@ TEST_F(SystemPromptConstructorTest, testMultiTaskPromptConstruct) {
     ASSERT_EQ(result_status.ok(), true);
     auto result = result_status.value();
     ASSERT_EQ(result.size(), 2);
-    ASSERT_EQ(engine->resourceContext().cache_manager->freeBlocksNum(), 97);
+    ASSERT_EQ(engine->resourceContext().cache_manager->freeBlocksNum(), 96);  // 99 - (2 + 1)
 
     const auto& item1 = result["1"];
     ASSERT_EQ(item1.prompt_tokens.size(), 3);
