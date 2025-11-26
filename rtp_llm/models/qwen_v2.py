@@ -2,7 +2,7 @@ import functools
 import json
 import logging
 import os
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import torch
 from transformers import AutoTokenizer
@@ -46,6 +46,7 @@ class QWenV2Weight(ModelDeployWeightInfo):
         self.model_prefix: str = "model."
         self.bias = True
         self.strip_model_prefix = False
+        self.lm_head_weight_name: Optional[str] = None
         super().__init__(*args, **kwargs)
 
     @property
@@ -61,6 +62,33 @@ class QWenV2Weight(ModelDeployWeightInfo):
         if self._exist(weight_keys, "layers.0.input_layernorm.weight"):
             self.model_prefix = ""
         self.transformer_prefix = self.model_prefix + self.prefix
+        lm_head_suffix = "lm_head.weight"
+        candidate_names = []
+        for name in [
+            self.transformer_prefix + lm_head_suffix,
+            self.model_prefix + lm_head_suffix,
+            self.prefix + lm_head_suffix,
+            lm_head_suffix,
+        ]:
+            if not name:
+                continue
+            if name not in candidate_names:
+                candidate_names.append(name)
+        self.lm_head_weight_name = candidate_names[0]
+        for name in candidate_names:
+            if self._exist(weight_keys, name):
+                self.lm_head_weight_name = name
+                if name != candidate_names[0]:
+                    logging.info(
+                        "detected lm_head weight name override: %s",
+                        self.lm_head_weight_name,
+                    )
+                break
+        else:
+            logging.warning(
+                "lm_head weight %s not found in checkpoint meta, fallback to default",
+                candidate_names[0],
+            )
         logging.info(f"weight_style: {self.weight_style}")
 
     def _get_weight_info(self):
@@ -309,6 +337,9 @@ class QWenV2Weight(ModelDeployWeightInfo):
                 ),
             ]
         else:
+            lm_head_name = self.lm_head_weight_name or (
+                self.transformer_prefix + "lm_head.weight"
+            )
             weights = [
                 AtomicWeight(
                     W.embedding,
@@ -321,11 +352,7 @@ class QWenV2Weight(ModelDeployWeightInfo):
                 ),
                 AtomicWeight(
                     W.lm_head,
-                    [
-                        CkptWeightInfo(
-                            self.transformer_prefix + "lm_head.weight", identity
-                        )
-                    ],
+                    [CkptWeightInfo(lm_head_name, identity)],
                     identity,
                 ),
                 AtomicWeight(

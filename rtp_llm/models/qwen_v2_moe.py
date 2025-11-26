@@ -1,5 +1,6 @@
 import json
 import os
+from typing import Any, Dict
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.model_factory_register import register_model
@@ -137,17 +138,23 @@ class Qwen2Moe(QWenV2):
     @classmethod
     def _create_config(cls, ckpt_path: str):
         config = super()._create_config(ckpt_path)
-        Qwen2Moe.load_moe_config(ckpt_path, config)
+        Qwen2Moe._from_hf(config, ckpt_path)
         return config
 
     @classmethod
-    def load_moe_config(cls, ckpt_path: str, config: GptInitModelParameters):
+    def _from_hf(cls, config: GptInitModelParameters, ckpt_path: str):
         config_path = os.path.join(ckpt_path, "config.json")
         if not os.path.exists(config_path):
             raise Exception("qwen2 moe should have config.json")
         with open(config_path) as reader:
             content = reader.read()
             config_json = json.loads(content)
+        cls.load_moe_config(config, config_json)
+
+    @classmethod
+    def load_moe_config(
+        cls, config: GptInitModelParameters, config_json: Dict[str, Any]
+    ):
         config.moe_k = config_json["num_experts_per_tok"]
         config.expert_num = config_json["num_experts"]
         config.moe_inter_padding_size = config_json["moe_intermediate_size"]

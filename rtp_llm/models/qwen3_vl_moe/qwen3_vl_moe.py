@@ -1,104 +1,145 @@
+import json
+import os
+from typing import List
+
 import torch
-import torch.nn as nn
-from transformers.activations import ACT2FN
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.model_factory_register import register_model
-from rtp_llm.models.multimodal.multimodal_mixin import BaseMultiModalWeightInfo
-from rtp_llm.models.qwen2_5_vl.qwen2_5_vl import QWen2_5_VL, Qwen2_5_VLImageEmbedding
-from rtp_llm.models.qwen2_vl.qwen2_vl import QwenVL2VitWeight
-from rtp_llm.models.qwen3_vl_moe.modeling_qwen3_vl_moe import (
-    Qwen3_VL_MOEVisionTransformerPretrainedModel,
+from rtp_llm.model_loader.ffn_weight import MoeAtomicWeight, MoeConfig, MoeWeight
+from rtp_llm.models.multimodal.multimodal_mixin import (
+    BaseMultiModalWeightInfo,
+    MultiModalMixin,
 )
+from rtp_llm.models.qwen3_vl.qwen3_vl import (
+    QWen3_VL,
+    Qwen3_VLImageEmbedding,
+    Qwen3VLVitWeight,
+)
+from rtp_llm.models.qwen_v2_moe import Qwen2Moe
 from rtp_llm.models.qwen_v3_moe import Qwen3Moe, QWenV3MoeWeight
-
-# === Vision Encoder === #
-
-
-class Qwen3_VisionMlp(nn.Module):
-    def __init__(self, config, bias: bool = False):
-        super().__init__()
-        self.hidden_size = config.hidden_size
-        self.intermediate_size = config.intermediate_size
-        self.linear_fc1 = nn.Linear(self.hidden_size, self.intermediate_size, bias=bias)
-        self.linear_act = ACT2FN[config.hidden_act]
-        self.linear_fc2 = nn.Linear(self.intermediate_size, self.hidden_size, bias=bias)
-
-    def forward(self, x) -> torch.Tensor:
-        return self.linear_fc2(self.linear_act(self.linear_fc1(x)))
+from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity, stack_, transpose
 
 
-# class Qwen3_VisionMLP(nn.Module):
-
-#     def __init__(self,
-#                  in_features: int,
-#                  hidden_features: int,
-#                  bias: bool = False,
-#                  act_fn: Callable[[torch.Tensor], torch.Tensor] = F.silu,
-#                  quant_config: Optional[QuantizationConfig] = None,
-#                  prefix: str = ""):
-#         super().__init__()
-#         self.linear_fc1 = ColumnParallelLinear(in_features,
-#                                                hidden_features,
-#                                                bias=bias,
-#                                                quant_config=quant_config,
-#                                                return_bias=False,
-#                                                prefix=f"{prefix}.linear_fc1")
-#         self.linear_fc2 = RowParallelLinear(hidden_features,
-#                                             in_features,
-#                                             bias=bias,
-#                                             quant_config=quant_config,
-#                                             return_bias=False,
-#                                             prefix=f"{prefix}.linear_fc2")
-#         self.act_fn = act_fn
-
-#     def forward(self, x: torch.Tensor):
-#         mlp_output = self.linear_fc2(self.act_fn(self.linear_fc1(x)))
-#         return mlp_output
+def _convert_gate_up_proj(ts: List[torch.Tensor]) -> torch.Tensor:
+    tensor = identity(ts)
+    tensor = tensor.permute(0, 2, 1).contiguous()  # (experts, 1536, hidden)
+    split_size = tensor.shape[1] // 2
+    gate, up = torch.split(tensor, split_size, dim=1)
+    return torch.cat([up, gate], dim=1)
 
 
-class QWenV3VLWeightInfo(QWenV3MoeWeight, BaseMultiModalWeightInfo):
+def _convert_down_proj(ts: List[torch.Tensor]) -> torch.Tensor:
+    tensor = identity(ts)
+    return tensor.permute(0, 2, 1).contiguous()
+
+
+class QWen3VLMoeWeightInfo(QWenV3MoeWeight, BaseMultiModalWeightInfo):
     def __init__(self, config, tp_size, tp_rank):
         QWenV3MoeWeight.__init__(self, config, tp_size, tp_rank)
         BaseMultiModalWeightInfo.__init__(self, config)
-        self.bias = False
-        self.use_qk_norm = True
-
-    @property
-    def support_lora(self) -> bool:
-        return True
 
     def _get_weight_info(self):
         weights = self._get_hf_weight_info()
         weights = self._get_vit_info(weights)
         return weights
 
-
-class QWen3_VL_MOE(QWen2_5_VL):
-    def _init_multimodal(self, config: GptInitModelParameters):
-        self.mm_part = Qwen2_5_VLImageEmbedding(config)
-        self.mm_part.visual = Qwen3_VL_MOEVisionTransformerPretrainedModel(
-            config.mm_related_params.config
+    def _get_hf_ffn_layer_weight_info(self, layer_id: int):
+        moe_config = MoeConfig(
+            expert_num=self.expert_num_,
+            inter_padding_size=(
+                self._layer_inter_padding_size[layer_id]
+                if self._layer_inter_padding_size
+                else self._inter_padding_size
+            ),
+            routed_scaling_factor=1.0,
+            weight_stack=True,
         )
-        # vl_config = Qwen2_5_VLVisionConfig(**config.mm_related_params.config)
+        return [
+            MoeWeight(
+                sub_weights=[
+                    MoeAtomicWeight(
+                        W.moe_gate,
+                        [
+                            CkptWeightInfo(
+                                "model.language_model.layers.{i}.mlp.gate.weight",
+                                identity,
+                            )
+                        ],
+                        transpose,
+                        config=moe_config,
+                    ),
+                    MoeAtomicWeight(
+                        W.moe_w1,
+                        [
+                            CkptWeightInfo(
+                                "model.language_model.layers.{i}.mlp.experts.gate_up_proj",
+                                _convert_gate_up_proj,
+                            )
+                        ],
+                        identity,
+                        config=moe_config,
+                    ),
+                    MoeAtomicWeight(
+                        W.moe_w2,
+                        [
+                            CkptWeightInfo(
+                                "model.language_model.layers.{i}.mlp.experts.down_proj",
+                                _convert_down_proj,
+                            )
+                        ],
+                        identity,
+                        config=moe_config,
+                    ),
+                ],
+                config=moe_config,
+            )
+        ]
 
-        # for i in range(len(self.mm_part.visual.blocks)):
-        #     self.mm_part.visual.blocks[i].mlp = Qwen3_VisionMlp(vl_config, bias=True)
 
-        config.mm_related_params.vit_weights = QwenVL2VitWeight(
+class QWen3_VL_MOE(Qwen3Moe, MultiModalMixin):
+    def _init_multimodal(self, config: GptInitModelParameters):
+        self.mm_part = Qwen3_VLImageEmbedding(config)
+        config.mm_related_params.vit_weights = Qwen3VLVitWeight(
             {"vit": self.mm_part.visual}
         )
 
     @staticmethod
     def get_weight_cls():
-        return QWenV3VLWeightInfo
+        return QWen3VLMoeWeightInfo
 
     @classmethod
     def _create_config(cls, ckpt_path: str):
-        config = super()._create_config(ckpt_path)
-        Qwen3Moe.load_moe_config(ckpt_path, config)
-        config.use_qk_norm = True
+        config = GptInitModelParameters(
+            head_num=0,
+            head_num_kv=0,
+            size_per_head=0,
+            layer_num=0,
+            inter_size=0,
+            vocab_size=0,
+            max_seq_len=0,
+        )
+        config.rotary_embedding_dim = 128
+        config.activation_type = "SiGLU"
+        config.has_pre_decoder_layernorm = False
+        config.has_post_decoder_layernorm = True
+        config.norm_type = "rmsnorm"
+        config.qk_norm = True
+        cls._from_hf(config, ckpt_path)
+        return config
+
+    @classmethod
+    def _from_hf(cls, config: GptInitModelParameters, ckpt_path: str):
+        config_path = os.path.join(ckpt_path, "config.json")
+
+        if not os.path.exists(config_path):
+            return
+        with open(config_path) as reader:
+            content = reader.read()
+            config_json = json.loads(content)
+        QWen3_VL._from_config_json(config, config_json)
+        Qwen2Moe.load_moe_config(config, config_json["text_config"])
         return config
 
 
-register_model("qwen3_vl_moe", QWen3_VL_MOE, ["Qwen3_VL_MOEForConditionalGeneration"])
+register_model("qwen3_vl_moe", QWen3_VL_MOE, ["Qwen3VLMoeForConditionalGeneration"])
