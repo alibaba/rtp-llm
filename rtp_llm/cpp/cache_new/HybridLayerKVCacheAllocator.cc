@@ -52,7 +52,7 @@ bool HybridLayerKVCacheAllocator::init() {
     return true;
 }
 
-int HybridLayerKVCacheAllocator::reuseCache(const CacheKeysType& cache_keys, GroupBlockIds& group_block_ids) {
+int HybridLayerKVCacheAllocator::reuseCache(const CacheKeysType& cache_keys, KVCacheResourceV1& cache_resource) {
     auto                      full_match_result = full_kv_cache_group_->match(cache_keys);
     int                       pos               = full_match_result.reuse_blocks - 1;
     std::vector<BlockIdxType> linear_match_bocks;
@@ -72,34 +72,38 @@ int HybridLayerKVCacheAllocator::reuseCache(const CacheKeysType& cache_keys, Gro
         }
     }
 
-    auto reuse_blocks                 = static_cast<int>(pos + 1);
-    group_block_ids[0]->block_indices = full_match_result.block_indices;
-    group_block_ids[0]->block_indices.resize(reuse_blocks);
+    auto  reuse_blocks = static_cast<int>(pos + 1);
+    auto& blocks_0     = cache_resource.blocks(0);
+    blocks_0           = full_match_result.block_indices;
+    blocks_0.resize(reuse_blocks);
 
     if (reuse_blocks > 0) {
         for (int linear_group_id = 0; linear_group_id < linear_kv_cache_groups_.size(); linear_group_id++) {
-            group_block_ids[linear_group_id + 1]->block_indices.resize(reuse_blocks, NULL_BLOCK_IDX);
-            group_block_ids[linear_group_id + 1]->block_indices[reuse_blocks - 1] = linear_match_bocks[linear_group_id];
+            auto& blocks = cache_resource.blocks(linear_group_id + 1);
+            blocks.resize(reuse_blocks, NULL_BLOCK_IDX);
+            blocks[reuse_blocks - 1] = linear_match_bocks[linear_group_id];
         }
     }
     return reuse_blocks;
 }
 
 MallocResult HybridLayerKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
-    int seq_len =
+    auto& kv_cache_resource = malloc_info.batch_kv_cache_resource;
+    int   seq_len =
         (malloc_info.total_seq_len >= 0) ? malloc_info.total_seq_len : malloc_info.complete_token_ids->seqLength();
 
-    int  batch_size     = malloc_info.batch_kv_cache_resource->batchSize();
-    int  current_blocks = malloc_info.batch_kv_cache_resource->maxBlockSize();
+    int  batch_size     = kv_cache_resource->batchSize();
+    int  current_blocks = kv_cache_resource->maxBlocksNum();
     auto need_blocks    = full_kv_cache_group_->needBlocksNum(seq_len, current_blocks);
     if (need_blocks == 0) {
         return {true, 0};
     }
     for (int batch_id = 0; batch_id < batch_size; ++batch_id) {
-        auto& cache_keys      = malloc_info.batch_kv_cache_resource->batch_resource[batch_id].cache_keys;
-        auto& group_block_ids = malloc_info.batch_kv_cache_resource->batch_resource[batch_id].group_block_ids;
-        for (int i = 0; i < group_block_ids.size(); i++) {
-            if (!all_kv_cache_groups_[i]->malloc(cache_keys, group_block_ids[i]->block_indices, seq_len)) {
+        auto& cache_keys = kv_cache_resource->cacheKeys(batch_id);
+        int   group_nums = kv_cache_resource->groupNums();
+        for (int group_id = 0; group_id < group_nums; group_id++) {
+            if (!all_kv_cache_groups_[group_id]->malloc(
+                    cache_keys, kv_cache_resource->blocks(batch_id, group_id), seq_len)) {
                 // TODO，回滚已经malloc的资源。
                 return {false, 0};
             }
@@ -109,8 +113,9 @@ MallocResult HybridLayerKVCacheAllocator::incrMalloc(const MallocInfo& malloc_in
 }
 
 MallocResult HybridLayerKVCacheAllocator::initMallocForCommonLen(const MallocInfo& malloc_info) {
-    int batch_size   = malloc_info.batch_kv_cache_resource->batchSize();
-    int reuse_blocks = 0;
+    auto& kv_cache_resource = malloc_info.batch_kv_cache_resource;
+    int   batch_size        = kv_cache_resource->batchSize();
+    int   reuse_blocks      = 0;
 
     // TODO, 这里是啥含义呢？在外围做掉？
     int seq_len =
@@ -118,63 +123,61 @@ MallocResult HybridLayerKVCacheAllocator::initMallocForCommonLen(const MallocInf
     bool has_common_len = (malloc_info.common_seq_len >= 0) && (malloc_info.common_seq_len <= seq_len);
     int  common_seq_len = has_common_len ? malloc_info.common_seq_len : 0;
 
-    auto& batch_resource    = malloc_info.batch_kv_cache_resource->batch_resource;
-    auto& cache_keys_0      = batch_resource[0].cache_keys;
-    auto& group_block_ids_0 = batch_resource[0].group_block_ids;
+    auto& cache_keys_0 = kv_cache_resource->cacheKeys(0);
 
-    if (malloc_info.batch_kv_cache_resource->enable_reuse_cache
-        && group_block_ids_0[0]->block_indices.size() < cache_keys_0.size()) {
-        reuse_blocks = reuseCache(cache_keys_0, group_block_ids_0);
-        for (int i = 0; i < all_kv_cache_groups_.size(); i++) {
-            all_kv_cache_groups_[i]->reference(group_block_ids_0[i]->block_indices);
+    if (kv_cache_resource->enable_reuse_cache && kv_cache_resource->blocksNum(0, 0) < cache_keys_0.size()) {
+        reuse_blocks = reuseCache(cache_keys_0, kv_cache_resource->cacheResource(0));
+        for (int group_id = 0; group_id < all_kv_cache_groups_.size(); group_id++) {
+            all_kv_cache_groups_[group_id]->reference(kv_cache_resource->blocks(0, group_id));
         }
     }
 
-    for (int i = 0; i < all_kv_cache_groups_.size(); i++) {
-        if (!all_kv_cache_groups_[i]->malloc(cache_keys_0, group_block_ids_0[i]->block_indices, common_seq_len)) {
+    for (int group_id = 0; group_id < all_kv_cache_groups_.size(); group_id++) {
+        if (!all_kv_cache_groups_[group_id]->malloc(
+                cache_keys_0, kv_cache_resource->blocks(0, group_id), common_seq_len)) {
             return {false, 0};
         }
     }
 
     for (int batch_id = 1; batch_id < batch_size; ++batch_id) {
-        auto& group_block_ids = batch_resource[batch_id].group_block_ids;
-        for (int i = 0; i < all_kv_cache_groups_.size(); i++) {
-            all_kv_cache_groups_[i]->reference(group_block_ids[i]->block_indices, group_block_ids_0[i]->block_indices);
+        for (int group_id = 0; group_id < all_kv_cache_groups_.size(); group_id++) {
+            all_kv_cache_groups_[group_id]->reference(kv_cache_resource->blocks(batch_id, group_id),
+                                                      kv_cache_resource->blocks(0, group_id));
         }
     }
 
     return {true, reuse_blocks * all_kv_cache_groups_[0]->seqSizePerBlock()};
 }
 
-FreeResult HybridLayerKVCacheAllocator::free(const FreeInfo& free_info) {
-    if (!free_info.batch_kv_cache_resource) {
-        RTP_LLM_LOG_ERROR("BatchKVCacheResource is null");
-        return {false};
+void HybridLayerKVCacheAllocator::free(const FreeInfo& free_info) {
+    auto& kv_cache_resource = free_info.batch_kv_cache_resource;
+
+    if (kv_cache_resource->maxBlocksNum() == 0) {
+        return;
     }
 
-    for (int batch_id = 0; batch_id < free_info.batch_kv_cache_resource->batchSize(); ++batch_id) {
-        auto& group_block_ids = free_info.batch_kv_cache_resource->batch_resource[batch_id].group_block_ids;
-        for (int group_id = 0; group_id < group_block_ids.size(); group_id++) {
-            all_kv_cache_groups_[group_id]->free(group_block_ids[group_id]->block_indices);
+    for (auto& resource : kv_cache_resource->batch_resource) {
+        int group_nums = resource.groupNums();
+        for (int id = 0; id < group_nums; id++) {
+            all_kv_cache_groups_[id]->free(resource.blocks(id));
         }
     }
-
-    return {true};
+    kv_cache_resource->clearBlocks();
 }
 
 InsertResult HybridLayerKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
-    if (!insert_info.batch_kv_cache_resource) {
+    auto& kv_cache_resource = insert_info.batch_kv_cache_resource;
+    if (!kv_cache_resource) {
         RTP_LLM_LOG_ERROR("BatchKVCacheResource is null");
         return {false};
     }
 
-    int batch_size         = insert_info.batch_kv_cache_resource->batchSize();
+    int batch_size         = kv_cache_resource->batchSize();
     int seq_size_per_block = full_kv_cache_group_->seqSizePerBlock();
 
     for (int batch_id = 0; batch_id < batch_size; ++batch_id) {
-        auto& cache_keys      = insert_info.batch_kv_cache_resource->batch_resource[batch_id].cache_keys;
-        auto& group_block_ids = insert_info.batch_kv_cache_resource->batch_resource[batch_id].group_block_ids;
-        auto  blocks_num      = group_block_ids[0]->block_indices.size();
+        auto& cache_keys = kv_cache_resource->cacheKeys(batch_id);
+        auto  blocks_num = kv_cache_resource->blocksNum(batch_id);
 
         auto token_ids = insert_info.complete_token_ids->completeTokenIdsVec(batch_id);
         if (token_ids.size() <= 1) {
@@ -182,14 +185,14 @@ InsertResult HybridLayerKVCacheAllocator::insertIntoCache(const InsertInfo& inse
         }
         size_t token_len     = token_ids.size() - 1;
         size_t max_by_tokens = token_len / static_cast<size_t>(seq_size_per_block);
-        blocks_num           = std::min({cache_keys.size(), blocks_num, max_by_tokens});
+        blocks_num           = std::min((int)cache_keys.size(), std::min((int)blocks_num, (int)max_by_tokens));
         if (blocks_num == 0) {
             continue;
         }
 
         std::vector<CacheKeyType> put_cache_keys(cache_keys.begin(), cache_keys.begin() + blocks_num);
         for (int group_id = 0; group_id < all_kv_cache_groups_.size(); group_id++) {
-            const auto&               block_ids = group_block_ids[group_id]->block_indices;
+            const auto&               block_ids = kv_cache_resource->blocks(batch_id, group_id);
             std::vector<BlockIdxType> put_block_ids(block_ids.begin(), block_ids.begin() + blocks_num);
             all_kv_cache_groups_[group_id]->insertIntoCache(put_cache_keys, put_block_ids, insert_info.is_resident);
         }

@@ -98,7 +98,7 @@ TEST_F(StreamCacheResourceTest, testAllocateResource) {
     int token_capacity = 1000;
     ASSERT_TRUE(resource.initKVBlock(token_capacity).ok());
     ASSERT_EQ(cache_manager_->freeBlocksNum(), 5);
-    ASSERT_EQ(resource.maxBlockSize(), 3);
+    ASSERT_EQ(resource.maxBlocksNum(), 3);
     const BatchKVCacheResource& blocks = resource.kvCache();
     CHECK_BLOCK(blocks, 2, 3);
 
@@ -123,7 +123,7 @@ TEST_F(StreamCacheResourceTest, testFallback) {
     int token_capacity = 1000;
     ASSERT_TRUE(resource.initKVBlock(token_capacity).ok());
     ASSERT_EQ(cache_manager_->freeBlocksNum(), 5);
-    ASSERT_EQ(resource.maxBlockSize(), 3);
+    ASSERT_EQ(resource.maxBlocksNum(), 3);
     const BatchKVCacheResource& blocks = resource.kvCache();
     CHECK_BLOCK(blocks, 2, 3);
 
@@ -133,7 +133,7 @@ TEST_F(StreamCacheResourceTest, testFallback) {
     CHECK_BLOCK(blocks, 2, 4);
     ASSERT_EQ(cache_manager_->freeBlocksNum(), 3);
 
-    int old_max_blocks = resource.maxBlockSize();
+    int old_max_blocks = resource.maxBlocksNum();
     stream_->setFallbackPrefixLength(4);
     ASSERT_EQ(stream_->fallbackPrefixLength(), 4);
 

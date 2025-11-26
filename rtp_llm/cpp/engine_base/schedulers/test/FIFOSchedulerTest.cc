@@ -175,7 +175,7 @@ TEST_F(FIFOSchedulerTest, testIncrKVCacheFallBackReleaseAllBlocks) {
     ASSERT_EQ(stream2->stopReason(), "");
     // stream2 pause了，release了所有的block
     ASSERT_TRUE(stream2->paused());
-    ASSERT_EQ(stream2->maxBlockSize(), 0);
+    ASSERT_EQ(stream2->maxBlocksNum(), 0);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 1);
     ASSERT_EQ(scheduler.runningStreamsSize(), 1);
     ASSERT_EQ(cache_manager->freeBlocksNum(), 1);
@@ -235,7 +235,7 @@ TEST_F(FIFOSchedulerTest, testIncrKVCacheFallBackReleasePartBlocks) {
     ASSERT_EQ(stream2->stopReason(), "");
     // stream2 pause，并且进入waiting queue，release了部分block
     ASSERT_TRUE(stream2->paused());
-    ASSERT_EQ(stream2->maxBlockSize(), 1);
+    ASSERT_EQ(stream2->maxBlocksNum(), 1);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 1);
     ASSERT_EQ(scheduler.runningStreamsSize(), 1);
     ASSERT_EQ(cache_manager->freeBlocksNum(), 1);
@@ -249,7 +249,7 @@ TEST_F(FIFOSchedulerTest, testIncrKVCacheFallBackReleasePartBlocks) {
     ASSERT_EQ(scheduler.waitingStreamsSize(), 1);
     ASSERT_EQ(scheduler.runningStreamsSize(), 1);
     // stream2继续回退block
-    ASSERT_EQ(stream2->maxBlockSize(), 0);
+    ASSERT_EQ(stream2->maxBlocksNum(), 0);
 
     stream1->setFinishedWithoutLock();
     auto streams_status4 = scheduler.schedule();
@@ -258,7 +258,7 @@ TEST_F(FIFOSchedulerTest, testIncrKVCacheFallBackReleasePartBlocks) {
     ASSERT_TRUE(stream1->finished());
     ASSERT_FALSE(stream2->stopped());
     // stream2开始运行
-    ASSERT_EQ(stream2->maxBlockSize(), 3);
+    ASSERT_EQ(stream2->maxBlocksNum(), 3);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
     ASSERT_EQ(scheduler.runningStreamsSize(), 1);
     ASSERT_EQ(cache_manager->freeBlocksNum(), 2);

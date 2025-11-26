@@ -50,7 +50,7 @@ public:
     void                 freeBatchBlocks(size_t batch_id, std::vector<int>& blocks);
     void                 releaseResource();
     int                  singleBatchNeedBlocks(int seq_len) const;
-    int                  maxBlockSize() const;
+    int                  maxBlocksNum() const;
     int                  mallocFailedTimes() const;
 
     const BatchKVCacheResource& kvCache() const;

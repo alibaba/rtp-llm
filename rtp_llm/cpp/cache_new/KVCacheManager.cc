@@ -162,10 +162,7 @@ bool KVCacheManager::setKVBlockValue(int block_index, rtp_llm::Buffer& k_buffer,
 }
 
 MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
-    if (!malloc_info.batch_kv_cache_resource || !malloc_info.complete_token_ids) {
-        RTP_LLM_LOG_ERROR("malloc_info is invalid: batch_kv_cache_resource or complete_token_ids is null");
-        return {false, 0};
-    }
+    RTP_LLM_CHECK(malloc_info.batch_kv_cache_resource && malloc_info.complete_token_ids);
 
     int batch_size         = malloc_info.batch_kv_cache_resource->batchSize();
     int seq_size_per_block = config_.seq_size_per_block;
@@ -173,8 +170,8 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
     int desired_blocks     = seq_len / (int)seq_size_per_block;
 
     // append cache_keys for each batch
-    for (int i = 0; i < batch_size; ++i) {
-        auto& keys = malloc_info.batch_kv_cache_resource->batch_resource[i].cache_keys;
+    for (int batch_id = 0; batch_id < batch_size; ++batch_id) {
+        auto& keys = malloc_info.batch_kv_cache_resource->cacheKeys(batch_id);
 
         if ((int)keys.size() > desired_blocks) {
             keys.resize(desired_blocks);
@@ -183,7 +180,7 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
         int64_t rolling_hash = keys.empty() ? 0 : keys.back();
         int     start_index  = (int)keys.size();
         if (start_index < desired_blocks) {
-            auto* token_ids = malloc_info.complete_token_ids->data(i);
+            auto* token_ids = malloc_info.complete_token_ids->data(batch_id);
             for (int index = start_index; index < desired_blocks; ++index) {
                 int pos = index * seq_size_per_block;
                 rolling_hash =
@@ -196,8 +193,9 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
     return allocator_->malloc(malloc_info);
 }
 
-FreeResult KVCacheManager::free(const FreeInfo& free_info) {
-    return allocator_->free(free_info);
+void KVCacheManager::free(const FreeInfo& free_info) {
+    RTP_LLM_CHECK(free_info.batch_kv_cache_resource && free_info.complete_token_ids);
+    allocator_->free(free_info);
 }
 
 InsertResult KVCacheManager::insertIntoCache(const InsertInfo& insert_info) {
