@@ -5,6 +5,7 @@
 #include "rtp_llm/models_py/bindings/rocm/Gemm.h"
 #include "rtp_llm/models_py/bindings/rocm/FusedRopeKVCacheOp.h"
 #include "rtp_llm/models_py/bindings/common/RtpProcessGroup.h"
+#include "rtp_llm/models_py/bindings/rocm/CudaGraphPrefillCopy.h"
 
 using namespace rtp_llm;
 
@@ -58,6 +59,31 @@ void registerBasicRocmOps(py::module& rtp_ops_m) {
                   py::arg("norm_size"));
 
     rtp_ops_m.def("gemm", &gemm, "Gemm kernel", py::arg("output"), py::arg("input"), py::arg("weight"));
+
+    // CUDA Graph Copy Kernel Functions (also supported in ROCm)
+    rtp_ops_m.def("cuda_graph_copy_small2large",
+                  &cuda_graph_copy_small2large,
+                  "CUDA Graph copy kernel: Small to Large tensor copy",
+                  py::arg("input_tensor"),
+                  py::arg("output_tensor"),
+                  py::arg("batch_size"),
+                  py::arg("max_batch_size"),
+                  py::arg("max_seq_len"),
+                  py::arg("input_lengths"),
+                  py::arg("hidden_size"),
+                  py::arg("cu_seq_len"));
+
+    rtp_ops_m.def("cuda_graph_copy_large2small",
+                  &cuda_graph_copy_large2small,
+                  "CUDA Graph copy kernel: Large to Small tensor copy",
+                  py::arg("input_tensor"),
+                  py::arg("output_tensor"),
+                  py::arg("batch_size"),
+                  py::arg("max_batch_size"),
+                  py::arg("max_seq_len"),
+                  py::arg("input_lengths"),
+                  py::arg("hidden_size"),
+                  py::arg("cu_seq_len"));
 }
 
 void registerBaseRocmBindings(py::module& rtp_ops_m) {
