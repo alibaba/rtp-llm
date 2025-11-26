@@ -252,7 +252,6 @@ class GptInitModelParameters:
     th_nccl_port: int
     embedding_size: int
     enable_eplb: bool
-    enable_partial_fallback: bool
     enable_sp: bool
     enable_speculative_decoding: bool
     ep_rank: int
@@ -1261,10 +1260,6 @@ class GptInitModelParameters:
         logging.info(f"kv_cache_mem_mb: {self.kv_cache_mem_mb}")
         self.block_nums = self.py_env_configs.py_kv_cache_config.test_block_num
         logging.info(f"block_nums: {self.block_nums}")
-        self.enable_partial_fallback = (
-            self.fifo_scheduler_config.enable_partial_fallback
-        )
-        logging.info(f"enable_partial_fallback: {self.enable_partial_fallback}")
         self.warm_up = bool(self.py_env_configs.engine_config.warm_up)
         logging.info(f"warm_up: {self.warm_up}")
         self.warm_up_with_loss = bool(
