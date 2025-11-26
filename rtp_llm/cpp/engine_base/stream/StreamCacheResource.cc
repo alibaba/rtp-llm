@@ -77,11 +77,13 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
     int release_blocks_num = maxBlockSize();
 
     if (release_blocks_num > 0 && batch_resource_->batchSize() > 0) {
+        // Insert all blocks into cache
+        InsertInfo insert_info(batch_resource_, stream_->completeTokenIdsPtr(), false);
+        resource_context_.cache_manager->insertIntoCache(insert_info);
+
         // Free all blocks using KVCacheManager::free
         FreeInfo free_info(batch_resource_, stream_->completeTokenIdsPtr());
         free_info.request_id = stream_->streamId();
-
-        // TODO(chanyin): Handle cache insertion for reuse_cache case
 
         resource_context_.cache_manager->free(free_info);
         // batch_resource_ is modified directly by KVCacheManager::free
@@ -156,6 +158,10 @@ absl::StatusOr<int> StreamCacheResource::incrKVBlock(int token_capacity, size_t 
         malloc_failed_times_++;
         return absl::InternalError("malloc failed");
     }
+
+    stream_->setReuseLength(result.reuse_len);
+    stream_->setMtpTokenIndex(result.reuse_len);
+    stream_->setInitialReuseLength(result.reuse_len);
 
     return real_occupy;
 }
