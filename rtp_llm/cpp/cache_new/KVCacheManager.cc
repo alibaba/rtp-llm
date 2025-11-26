@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/HashUtil.h"
 #include "rtp_llm/cpp/cache_new/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache_new/KVCacheHashUtil.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/devices/DeviceBase.h"
 #include "rtp_llm/cpp/core/Buffer.h"
@@ -171,31 +172,14 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
         RTP_LLM_LOG_ERROR("malloc_info is invalid: batch_kv_cache_resource or complete_token_ids is null");
         return {false, 0};
     }
+    const int seq_size_per_block = config_.seq_size_per_block;
 
-    int batch_size         = malloc_info.batch_kv_cache_resource->batchSize();
-    int seq_size_per_block = config_.seq_size_per_block;
-    int seq_len            = malloc_info.complete_token_ids->seqLength();
-    int desired_blocks     = seq_len / (int)seq_size_per_block;
-
-    // append cache_keys for each batch
-    for (int i = 0; i < batch_size; ++i) {
-        auto& keys = malloc_info.batch_kv_cache_resource->batch_resource[i].cache_keys;
-
-        if ((int)keys.size() > desired_blocks) {
-            keys.resize(desired_blocks);
-        }
-
-        int64_t rolling_hash = keys.empty() ? 0 : keys.back();
-        int     start_index  = (int)keys.size();
-        if (start_index < desired_blocks) {
-            auto* token_ids = malloc_info.complete_token_ids->data(i);
-            for (int index = start_index; index < desired_blocks; ++index) {
-                int pos = index * seq_size_per_block;
-                rolling_hash =
-                    rtp_llm::hashInt64Array(rolling_hash, token_ids + pos, token_ids + pos + (int)seq_size_per_block);
-                keys.push_back(rolling_hash);
-            }
-        }
+    // Build or update cache_keys for each batch based on current complete_token_ids.
+    if (!malloc_info.batch_kv_cache_resource->first_fill_finished) {
+        initCacheKeys(*malloc_info.batch_kv_cache_resource, *malloc_info.complete_token_ids, seq_size_per_block);
+        malloc_info.batch_kv_cache_resource->first_fill_finished = true;
+    } else {
+        updateCacheKeys(*malloc_info.batch_kv_cache_resource, *malloc_info.complete_token_ids, seq_size_per_block);
     }
 
     return allocator_->malloc(malloc_info);

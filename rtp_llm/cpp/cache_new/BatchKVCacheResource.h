@@ -72,7 +72,9 @@ public:
     std::string debugString() const;
 
 public:
-    bool enable_reuse_cache = true;
+    bool enable_reuse_cache  = true;
+    bool first_fill_finished = false;
+    bool last_block_aligned  = true;
 
     std::vector<KVCacheResourceV1> batch_resource;
 };
