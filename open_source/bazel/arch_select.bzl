@@ -65,7 +65,7 @@ def subscribe_deps():
 def whl_deps():
     return select({
         "@//:using_cuda12": ["torch==2.6.0+cu126"],
-        "@//:using_rocm": ["pyrsmi", "amdsmi@https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis%2FAMD%2Famd_smi%2Fali%2Famd_smi.tar", "aiter@https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/RTP/aiter-0.1.5%2Bgit.007fe7aa.date.202510272053-py3-none-any.whl"],
+        "@//:using_rocm": ["pyrsmi==0.2.0", "amdsmi@https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis%2FAMD%2Famd_smi%2Fali%2Famd_smi.tar", "aiter@https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/RTP/aiter-0.1.5%2Bgit.007fe7aa.date.202510272053-py3-none-any.whl"],
         "//conditions:default": ["torch==2.1.2"],
     })
 
@@ -73,7 +73,7 @@ def platform_deps():
     return select({
         "@//:using_arm": [],
         "@//:using_cuda12_arm": [],
-        "@//:using_rocm": ["pyyaml","decord==0.6.0"],
+        "@//:using_rocm": ["pyyaml==6.0.2","decord==0.6.0"],
         "//conditions:default": ["decord==0.6.0"],
     })
 
