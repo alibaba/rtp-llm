@@ -5,4 +5,5 @@ https://repo.radeon.com/rocm/manylinux/rocm-rel-6.4.1/torchvision-0.19.0%2Brocm6
 pyrsmi==0.2.0
 pyyaml==6.0.2
 https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/RTP/aiter-0.1.6%2Bgit.329d07ba.date.202511061023-py3-none-any.whl
+ (fix: modify pyrsmi version in rocm requirements)
 https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis%2FAMD%2Famd_smi%2Fali%2Famd_smi.tar
