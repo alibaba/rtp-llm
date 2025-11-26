@@ -59,11 +59,6 @@ protected:
     rtp_llm::DeviceBase* device_;
     AllocationType       atype_;
     // std::vector<std::shared_ptr<KVCacheGroup>> kv_cache_groups_;
-
-    int singleBatchNeedBlocks(int seq_len, int current_blocks) const {
-        return std::max<int>((seq_len + config_.seq_size_per_block - 1) / config_.seq_size_per_block - current_blocks,
-                             0);
-    }
 };
 
 using KVCacheAllocatorPtr = std::shared_ptr<KVCacheAllocator>;
