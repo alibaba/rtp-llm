@@ -732,8 +732,8 @@ const ResourceContext& GenerateStream::resourceContext() const {
     return stream_cache_resource_->resourceContext();
 }
 
-size_t GenerateStream::maxBlockSize() const {
-    return stream_cache_resource_->maxBlockSize();
+size_t GenerateStream::maxBlocksNum() const {
+    return stream_cache_resource_->maxBlocksNum();
 }
 
 size_t GenerateStream::maxTokenNum() const {

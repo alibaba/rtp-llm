@@ -103,10 +103,6 @@ struct FreeInfo {
     int64_t request_id = 0;  // for logging and debugging
 };
 
-struct FreeResult {
-    bool success;
-};
-
 struct InsertInfo {
     InsertInfo(BatchKVCacheResourcePtr batch_kv_cache_resource,
                CompleteTokenIdsPtr     complete_token_ids,

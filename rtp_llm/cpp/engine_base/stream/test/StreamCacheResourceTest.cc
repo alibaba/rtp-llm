@@ -71,10 +71,10 @@ protected:
         stream_->setRunning();
     }
 
-    void checkBlockFunc(const BatchKVCacheResource& blocks, int outter_size, int inner_size) {
-        ASSERT_EQ(blocks.batchSize(), outter_size);
+    void checkBlockFunc(BatchKVCacheResource& batch_resource, int outter_size, int inner_size) {
+        ASSERT_EQ(batch_resource.batchSize(), outter_size);
         for (int i = 0; i < outter_size; ++i) {
-            ASSERT_EQ(blocks.blocks(i).size(), inner_size);
+            ASSERT_EQ(batch_resource.blocks(i).size(), inner_size);
         }
     };
 
@@ -98,8 +98,8 @@ TEST_F(StreamCacheResourceTest, testAllocateResource) {
     int token_capacity = 1000;
     ASSERT_TRUE(resource.initKVBlock(token_capacity).ok());
     ASSERT_EQ(cache_manager_->freeBlocksNum(), 5);
-    ASSERT_EQ(resource.maxBlockSize(), 3);
-    const BatchKVCacheResource& blocks = resource.kvCache();
+    ASSERT_EQ(resource.maxBlocksNum(), 3);
+    auto& blocks = resource.kvCacheMutable();
     CHECK_BLOCK(blocks, 2, 3);
 
     stream_->setSeqLength(7);
@@ -112,7 +112,7 @@ TEST_F(StreamCacheResourceTest, testAllocateResource) {
     stream_->releaseResource();
     ASSERT_EQ(cache_manager_->freeBlocksNum(), 8);
 
-    ASSERT_EQ(blocks.batchSize(), 0);
+    CHECK_BLOCK(blocks, 2, 0);
 }
 
 TEST_F(StreamCacheResourceTest, testFallback) {
@@ -123,8 +123,8 @@ TEST_F(StreamCacheResourceTest, testFallback) {
     int token_capacity = 1000;
     ASSERT_TRUE(resource.initKVBlock(token_capacity).ok());
     ASSERT_EQ(cache_manager_->freeBlocksNum(), 5);
-    ASSERT_EQ(resource.maxBlockSize(), 3);
-    const BatchKVCacheResource& blocks = resource.kvCache();
+    ASSERT_EQ(resource.maxBlocksNum(), 3);
+    auto& blocks = resource.kvCacheMutable();
     CHECK_BLOCK(blocks, 2, 3);
 
     stream_->setSeqLength(7);
@@ -133,7 +133,7 @@ TEST_F(StreamCacheResourceTest, testFallback) {
     CHECK_BLOCK(blocks, 2, 4);
     ASSERT_EQ(cache_manager_->freeBlocksNum(), 3);
 
-    int old_max_blocks = resource.maxBlockSize();
+    int old_max_blocks = resource.maxBlocksNum();
     stream_->setFallbackPrefixLength(4);
     ASSERT_EQ(stream_->fallbackPrefixLength(), 4);
 

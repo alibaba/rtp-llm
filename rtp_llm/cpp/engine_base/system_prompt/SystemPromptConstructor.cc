@@ -33,12 +33,9 @@ absl::StatusOr<std::unordered_map<std::string, SystemPromptParams>> SystemPrompt
         CHECK_AND_RETURN_REF(stream, engine->preRun(generate_input, preRunMode::build_system_prompt));
 
         if (insert_kv_cache) {
-            const auto& kv_cache = stream->kvCache();
-            // const auto& cache_keys = stream->cacheKeys(0);  // Unused in new cache system
-            const auto& blocks = kv_cache.batch_resource[0].group_block_ids[0]->block_indices;
+            auto& kv_cache = stream->kvCacheMutable();
+            auto& blocks   = kv_cache.blocks(0, 0);
             RTP_LLM_CHECK(blocks.size() > 0);
-
-            // Use new KVCacheManager insertIntoCache with is_resident=true
             rtp_llm::InsertInfo insert_info(stream->kvCachePtr(),
                                             stream->completeTokenIdsPtr(),
                                             true  // is_resident for system prompt

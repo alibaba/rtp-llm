@@ -16,7 +16,7 @@ void initCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
     const int desired_blocks = (seq_len + seq_size_per_block - 1) / seq_size_per_block;  // ceil
 
     for (int i = 0; i < batch_size; ++i) {
-        auto& keys = batch_kv_cache_resource->batch_resource[i].cache_keys;
+        auto& keys = batch_kv_cache_resource->cacheKeys(i);
         keys.clear();
 
         int64_t rolling_hash = 0;
@@ -39,7 +39,7 @@ void updateCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
     const int seq_len    = complete_token_ids->seqLength();
 
     for (int i = 0; i < batch_size; ++i) {
-        auto&     keys         = batch_kv_cache_resource->batch_resource[i].cache_keys;
+        auto&     keys         = batch_kv_cache_resource->cacheKeys(i);
         const int total_blocks = seq_len / seq_size_per_block;  // floor, only full blocks
 
         // If last_block_aligned was false previously, the last cache key corresponds to a partial block.
@@ -68,8 +68,9 @@ void dropLastPartialBlock(BatchKVCacheResourcePtr batch_kv_cache_resource) {
         return;
     }
     for (auto& resource : batch_kv_cache_resource->batch_resource) {
-        resource.cache_keys.pop_back();
+        resource.cacheKeys().pop_back();
     }
+    // TODO, 这里正确吗？
     batch_kv_cache_resource->last_block_aligned = false;
 }
 

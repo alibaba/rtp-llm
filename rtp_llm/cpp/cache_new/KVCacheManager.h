@@ -42,7 +42,7 @@ public:
     virtual bool setKVBlockValue(int block_index, rtp_llm::Buffer& k_buffer, rtp_llm::Buffer& v_buffer);
 
     MallocResult malloc(const MallocInfo& malloc_info);
-    FreeResult   free(const FreeInfo& free_info);
+    void         free(const FreeInfo& free_info);
     InsertResult insertIntoCache(const InsertInfo& insert_info);
 
     void blockCopy(int src_block_index, int dest_block_index);
