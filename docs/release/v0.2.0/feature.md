@@ -34,6 +34,11 @@ RTP-LLM First Release Version:0.2.0(2025.09)
 * Raw Request stream stop_words cause fake hang
 * some speculative decoding bugs
 * Warmup produce nan maybe influence kvcache
+* Not success query make bad kvcache case wrong answer
+* UseAllGather takes effect automatically according to the DP/TP 
+* UseAllGather with deepgemm coredump cause by topk type is bad.
+* FlexLb too many log cause bad performance
+* Flexlb support PD_FUSION
 
 ## Question of omission
 * In 3fs Case need more MEM or set FRONTEND_SERVER_COUNT=1 to reduce frontend_server mem usage in P/D when Use Frontend Disaggregation.
@@ -42,6 +47,8 @@ RTP-LLM First Release Version:0.2.0(2025.09)
 * MoE model without shared_experter cannot use enable-layer-micro-batch
 * P/D Disaggregation with EPLB and MTP step > 1 may cause Prefill Hang
 * Embedding of VL Model is not ok cause by position id is wrong
+* FlexLb: Frequent switching of a large number of machines results in the performance degradation of flexlb
+
 
 ## Performance
 
