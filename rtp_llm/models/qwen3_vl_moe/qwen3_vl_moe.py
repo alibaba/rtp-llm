@@ -1,6 +1,6 @@
 import json
 import os
-from typing import List
+from typing import Any, List
 
 import torch
 
@@ -39,6 +39,14 @@ class QWen3VLMoeWeightInfo(QWenV3MoeWeight, BaseMultiModalWeightInfo):
         QWenV3MoeWeight.__init__(self, config, tp_size, tp_rank)
         BaseMultiModalWeightInfo.__init__(self, config)
 
+    def _process_meta(self, meta_dicts: Any, weight_keys: List[str]):
+        super()._process_meta(meta_dicts, weight_keys)
+        self._use_stack_weight = False
+        for key in weight_keys:
+            if "experts.down_proj" in key or "experts.gate_up_proj" in key:
+                self._use_stack_weight = True
+                break
+
     def _get_weight_info(self):
         weights = self._get_hf_weight_info()
         weights = self._get_vit_info(weights)
@@ -62,7 +70,7 @@ class QWen3VLMoeWeightInfo(QWenV3MoeWeight, BaseMultiModalWeightInfo):
                         W.moe_gate,
                         [
                             CkptWeightInfo(
-                                "model.language_model.layers.{i}.mlp.gate.weight",
+                                self.transformer_prefix + "layers.{i}.mlp.gate.weight",
                                 identity,
                             )
                         ],
@@ -73,7 +81,8 @@ class QWen3VLMoeWeightInfo(QWenV3MoeWeight, BaseMultiModalWeightInfo):
                         W.moe_w1,
                         [
                             CkptWeightInfo(
-                                "model.language_model.layers.{i}.mlp.experts.gate_up_proj",
+                                self.transformer_prefix
+                                + "layers.{i}.mlp.experts.gate_up_proj",
                                 _convert_gate_up_proj,
                             )
                         ],
@@ -84,7 +93,8 @@ class QWen3VLMoeWeightInfo(QWenV3MoeWeight, BaseMultiModalWeightInfo):
                         W.moe_w2,
                         [
                             CkptWeightInfo(
-                                "model.language_model.layers.{i}.mlp.experts.down_proj",
+                                self.transformer_prefix
+                                + "layers.{i}.mlp.experts.down_proj",
                                 _convert_down_proj,
                             )
                         ],
