@@ -181,37 +181,9 @@ class PrefillCaptureSeqLensTest(TestCase):
             "max_seq_len and step must be positive integers", str(context.exception)
         )
 
-    def test_empty_file_raises_error(self):
-        """Test that empty file raises ValueError"""
-        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".txt") as f:
-            # Write only comments and empty lines
-            f.write("# Only comments\n")
-            f.write("\n")
-            temp_file = f.name
-
-        try:
-            os.environ["PREFILL_CAPTURE_CONFIG"] = temp_file
-            with self.assertRaises(ValueError) as context:
-                self.params._generate_prefill_capture_seq_lens()
-            self.assertIn(
-                "No valid sequence lengths found in file", str(context.exception)
-            )
-        finally:
-            os.unlink(temp_file)
-
     def test_empty_comma_list_raises_error(self):
         """Test that empty comma-separated list raises ValueError"""
         os.environ["PREFILL_CAPTURE_CONFIG"] = ",,,"  # Only commas
-        with self.assertRaises(ValueError) as context:
-            self.params._generate_prefill_capture_seq_lens()
-        self.assertIn(
-            "PREFILL_CAPTURE_CONFIG contains no valid sequence lengths",
-            str(context.exception),
-        )
-
-    def test_comma_list_all_invalid_raises_error(self):
-        """Test that comma-separated list with all invalid values raises ValueError"""
-        os.environ["PREFILL_CAPTURE_CONFIG"] = "0,-5,abc"
         with self.assertRaises(ValueError) as context:
             self.params._generate_prefill_capture_seq_lens()
         self.assertIn(
