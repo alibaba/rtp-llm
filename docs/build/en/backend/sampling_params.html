@@ -58,7 +58,7 @@
     <link rel="prev" title="ServerArgs" href="server_arguments.html" />
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
-    <meta name="docbuild:last-update" content="Nov 07, 2025"/>
+    <meta name="docbuild:last-update" content="Nov 26, 2025"/>
 <link
   rel="stylesheet"
   href="../_static/css/language-switcher.css"
@@ -563,6 +563,12 @@ document.write(`
 <tr class="row-even"><td><p>repetition_penalty</p></td>
 <td><p>Repetition suppression factor:<br>→ &gt;1.0 suppresses repetition<br>→ &lt;1.0 encourages repetition</p></td>
 </tr>
+<tr class="row-odd"><td><p>frequency_penalty</p></td>
+<td><p>This parameter is used to discourage the model from repeating the same words or phrases too frequently within the generated text. It is a value that is added to the log-probability of a token each time it occurs in the generated text. A higher frequency_penalty value will result in the model being more conservative in its use of repeated tokens.</p></td>
+</tr>
+<tr class="row-even"><td><p>presence_penalty</p></td>
+<td><p>This parameter is used to encourage the model to include a diverse range of tokens in the generated text. It is a value that is subtracted from the log-probability of a token each time it is generated. A higher presence_penalty value will result in the model being more likely to generate tokens that have not yet been included in the generated text.</p></td>
+</tr>
 <tr class="row-odd"><td><p>stop_words_list</p></td>
 <td><p>Token ID stop words (better performance):<br><code class="docutils literal notranslate"><span class="pre">[[20490,25],[1024]]</span></code></p></td>
 </tr>
@@ -827,7 +833,7 @@ By RTP-LLM Team
 
   <div class="footer-item">
     <p class="last-updated">
-  Last updated on Nov 07, 2025.
+  Last updated on Nov 26, 2025.
   <br/>
 </p>
   </div>
