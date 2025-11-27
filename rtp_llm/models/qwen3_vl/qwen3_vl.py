@@ -64,9 +64,7 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
         assert len(mm_inputs) == 1
         mm_input = mm_inputs[0]
         mm_type = mm_input.mm_type
-        if mm_type == MMUrlType.DEFAULT:
-            raise Exception("cannot infer multimodal input type")
-        elif mm_type == MMUrlType.IMAGE:
+        if mm_type == MMUrlType.DEFAULT or mm_type == MMUrlType.IMAGE:
             res = processor.image_processor(mm_input.url, return_tensors="pt")
             return res["pixel_values"], res["image_grid_thw"]
         elif mm_type == MMUrlType.VIDEO:
