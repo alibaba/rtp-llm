@@ -12,6 +12,7 @@ namespace rtp_llm {
 void StreamCacheResource::init(int batch_size) {
     batch_resource_->resize(batch_size);
     batch_resource_->initGroups(1);
+    batch_resource_->enable_reuse_cache = reuseCache();
     // constructCacheKey();
 }
 
