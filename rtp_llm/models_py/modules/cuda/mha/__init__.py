@@ -3,9 +3,7 @@ from rtp_llm.models_py.modules.utils import is_cuda
 
 from .flash_infer import FlashInferDecodeImpl, FlashInferPrefillImpl
 
-PREFILL_MHA_IMPS.append(FlashInferPrefillImpl)
-DECODE_MHA_IMPS.append(FlashInferDecodeImpl)
-
+# currently append early means impl has higher priority
 if is_cuda():
     from .trt import TRTMHAImpl
 
@@ -13,3 +11,7 @@ if is_cuda():
     from .xqa import XQAImpl
 
     DECODE_MHA_IMPS.append(XQAImpl)
+
+
+PREFILL_MHA_IMPS.append(FlashInferPrefillImpl)
+DECODE_MHA_IMPS.append(FlashInferDecodeImpl)

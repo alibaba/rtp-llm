@@ -19,15 +19,15 @@ def copy_all_so():
     copy_so("//rtp_llm/cpp/cuda/cutlass:moe")
     copy_so("//rtp_llm/cpp/cuda/cutlass:moe_sm90")
     copy_so("//rtp_llm/cpp/cuda/cutlass:int8_gemm")
-    copy_so("@flashinfer//:flashinfer_single_prefill")
-    copy_so("@flashinfer//:flashinfer_single_decode")
-    copy_so("@flashinfer//:flashinfer_batch_paged_prefill")
-    copy_so("@flashinfer//:flashinfer_batch_paged_decode")
-    copy_so("@flashinfer//:flashinfer_batch_ragged_prefill")
+    copy_so("@flashinfer_cpp//:flashinfer_single_prefill")
+    copy_so("@flashinfer_cpp//:flashinfer_single_decode")
+    copy_so("@flashinfer_cpp//:flashinfer_batch_paged_prefill")
+    copy_so("@flashinfer_cpp//:flashinfer_batch_paged_decode")
+    copy_so("@flashinfer_cpp//:flashinfer_batch_ragged_prefill")
     # num of so
     copy_so_inst("//rtp_llm/cpp/cuda/deep_gemm:deepgemm_dpsk", dpsk_gemm_so_num)
     copy_so_inst("//rtp_llm/cpp/cuda/deep_gemm:deepgemm_qwen", qwen_gemm_so_num)
-    copy_so("@flashinfer//:flashinfer_sm90")
+    copy_so("@flashinfer_cpp//:flashinfer_sm90")
     copy_so("@deep_ep//:deep_ep_cu")
 
 def requirement(names):
@@ -121,7 +121,7 @@ def fa_deps():
 def flashinfer_deps():
     native.alias(
         name = "flashinfer",
-        actual = "@flashinfer//:flashinfer"
+        actual = "@flashinfer_cpp//:flashinfer"
     )
 
 def flashmla_deps():

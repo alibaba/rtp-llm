@@ -138,7 +138,7 @@ def git_deps():
     )
 
     new_git_repository(
-        name = "flashinfer",
+        name = "flashinfer_cpp",
         remote = "https://github.com/flashinfer-ai/flashinfer.git",
         commit = "1c88d650eeec97be3a4dcebe4a9912d7785bc250",
         build_file = str(Label("//3rdparty/flashinfer:flashinfer.BUILD")),

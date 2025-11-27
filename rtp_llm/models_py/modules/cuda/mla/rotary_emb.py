@@ -1,12 +1,14 @@
-import logging
 import math
 from typing import Any, Optional
 
+import flashinfer.page as page
+import flashinfer.rope as rope
 import torch
+from flashinfer import get_batch_indices_positions, get_seq_lens
 
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
 
-from .flashinfer_mla import check_attention_inputs, flashinfer_python
+from .flashinfer_mla import check_attention_inputs
 
 
 class MlaRotaryEmbeddingOp(object):
@@ -50,7 +52,7 @@ class MlaRotaryEmbeddingOp(object):
         kv_cache: Optional[KVCache] = None,
     ):
 
-        flashinfer_python.rope._apply_rope_pos_ids_cos_sin_cache(
+        rope._apply_rope_pos_ids_cos_sin_cache(
             q=query,
             k=key.unsqueeze(1),
             q_rope=query,
@@ -65,7 +67,7 @@ class MlaRotaryEmbeddingOp(object):
                 kv_cache.k_cache_base, [self.kv_lora_rank, self.rope_head_dim], dim=-1
             )
 
-            flashinfer_python.page.append_paged_mla_kv_cache(
+            page.append_paged_mla_kv_cache(
                 append_ckv_t,
                 key,
                 rope_params.batch_indice,
@@ -125,11 +127,9 @@ class MlaRotaryEmbeddingOp(object):
                 dtype=torch.int32,
                 device=append_ckv_t.device,
             )
-            batch_indices, positions = flashinfer_python.get_batch_indices_positions(
+            batch_indices, positions = get_batch_indices_positions(
                 kv_append_indptr,
-                flashinfer_python.get_seq_lens(
-                    kv_page_indptr, kv_last_page_len, self.token_per_block
-                ),
+                get_seq_lens(kv_page_indptr, kv_last_page_len, self.token_per_block),
                 append_ckv_t.size(0),
             )
             cache = torch.empty(
@@ -145,7 +145,7 @@ class MlaRotaryEmbeddingOp(object):
                 cache, [self.kv_lora_rank, self.rope_head_dim], dim=-1
             )
 
-            flashinfer_python.page.append_paged_mla_kv_cache(
+            page.append_paged_mla_kv_cache(
                 append_ckv_t,
                 key,
                 batch_indices,

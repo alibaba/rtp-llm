@@ -1,51 +1,33 @@
-import importlib.util
-import logging
-import os
-import sys
 from typing import Any, Dict, List, Optional
 
-import pkg_resources
 import torch
 
-import rtp_llm.models_py.modules.utils as utils
+# import flashinfer
+import torch.nn.functional as F
+from flashinfer import (
+    BatchMLAPagedAttentionWrapper,
+    BatchPrefillWithRaggedKVCacheWrapper,
+)
+from flashinfer.jit import gen_batch_mla_module, gen_batch_prefill_module
+from flashinfer.utils import is_sm90a_supported
+
+from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.models_py.modules.linear_factory import LinearFactory
+
+# from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
+from rtp_llm.utils.model_weight import W
 
 g_workspace_buffer = None
-
-
-# 确保是从site-packages加载的Python包，避免同名的cpp flashinfer包冲突
-def load_flashinfer_python():
-    try:
-        dist = pkg_resources.get_distribution("flashinfer-python")
-        flashinfer_path = dist.location
-        logging.info(f"Found flashinfer-python at: {flashinfer_path}")
-        spec = importlib.util.spec_from_file_location(
-            "flashinfer", os.path.join(flashinfer_path, "flashinfer", "__init__.py")
-        )
-        if spec and spec.origin and "site-packages" in spec.origin:
-            flashinfer_module = importlib.util.module_from_spec(spec)
-            sys.modules["flashinfer"] = flashinfer_module
-            spec.loader.exec_module(flashinfer_module)
-            logging.info(f"load flashinfer-python succeed! spec: {spec}")
-            return flashinfer_module
-        else:
-            logging.warning(f"can't load flashinfer-python, spec: {spec}")
-    except Exception as e:
-        logging.warning(f"Failed to load flashinfer-python: {e}")
-    return None
-
-
-flashinfer_python = load_flashinfer_python()
 
 
 def warmup_flashinfer_python():
     modules = []
     for backend in ["fa2", "fa3"]:
-        if backend == "fa3" and not flashinfer_python.utils.is_sm90a_supported(
-            torch.device("cuda")
-        ):
+        if backend == "fa3" and not is_sm90a_supported(torch.device("cuda")):
             continue
         modules.append(
-            flashinfer_python.jit.gen_batch_prefill_module(
+            gen_batch_prefill_module(
                 backend,
                 torch.bfloat16,
                 torch.bfloat16,
@@ -61,12 +43,10 @@ def warmup_flashinfer_python():
         )
 
     for backend in ["fa2", "fa3"]:
-        if backend == "fa3" and not flashinfer_python.utils.is_sm90a_supported(
-            torch.device("cuda")
-        ):
+        if backend == "fa3" and not is_sm90a_supported(torch.device("cuda")):
             continue
         modules.append(
-            flashinfer_python.jit.gen_batch_mla_module(
+            gen_batch_mla_module(
                 backend,
                 torch.bfloat16,
                 torch.bfloat16,
@@ -77,19 +57,6 @@ def warmup_flashinfer_python():
                 False,
             )
         )
-
-
-# import flashinfer
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.models_py.modules.linear_factory import LinearFactory
-
-# from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
-from rtp_llm.utils.model_weight import W
 
 
 def check_attention_inputs(attention_inputs: PyAttentionInputs) -> None:
@@ -148,10 +115,8 @@ class MlaFlashInferPrefillOp(object):
             self.prefill_wrapper = TRTAttnOp(self.config)
             return
 
-        self.prefill_wrapper = (
-            flashinfer_python.prefill.BatchPrefillWithRaggedKVCacheWrapper(
-                g_workspace_buffer, "NHD", backend="auto"
-            )
+        self.prefill_wrapper = BatchPrefillWithRaggedKVCacheWrapper(
+            g_workspace_buffer, "NHD", backend="auto"
         )
 
     def support(self, attention_inputs: PyAttentionInputs):
@@ -372,7 +337,7 @@ class MlaFlashInferDecodeOp(object):
                 dtype=torch.int8,
                 device=self.weights[0].get(W.mla_vc).device,
             )
-        self.mla_wrapper = flashinfer_python.mla.BatchMLAPagedAttentionWrapper(
+        self.mla_wrapper = BatchMLAPagedAttentionWrapper(
             g_workspace_buffer, backend="auto"
         )
 
