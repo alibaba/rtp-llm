@@ -154,9 +154,9 @@ cc_library(
     deps = [
         ":core_utils",
         "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
         "@com_google_protobuf//:protobuf",
         "@havenask//aios/autil:json",
-        "@havenask//aios/autil:thread",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],

@@ -766,18 +766,6 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
         decode_context.error_status = grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
         return decode_context.error_status;
     }
-
-    // 记录RPC访问日志
-    if (decode_context.error_status.ok()) {
-        // 创建一个空的响应对象作为示例，实际应该记录真实的响应
-        GenerateOutputsPB response_pb;
-        RpcAccessLogWrapper::logAccess(maga_init_params_.gpt_init_parameter.rpc_access_log_config,
-                                       "RemoteGenerate",
-                                       decode_context.allocate_request,
-                                       response_pb,
-                                       decode_context.request_key);
-    }
-
     return grpc::Status::OK;
 }
 

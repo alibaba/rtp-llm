@@ -120,7 +120,7 @@ void AccessLogWrapper::logQueryAccess(const std::string& raw_request, int64_t re
 
     try {
         std::string access_log_info_str = autil::legacy::ToJsonString(access_log_info, /*isCompact=*/true);
-        RTP_LLM_QUERY_ACCESS_LOG_INFO("%s", access_log_info_str.c_str());
+        RTP_LLM_QUERY_LOG_INFO("%s", access_log_info_str.c_str());
     } catch (const std::exception& e) {
         RTP_LLM_LOG_ERROR("AccessLogWrapper logQueryAccess ToJsonString failed, error: %s", e.what());
     }

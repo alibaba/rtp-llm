@@ -220,6 +220,7 @@ grpc::Status DecodeRpcServerNew::localGenerate(DecodeGenerateContextNew& decode_
     }
 
     engine_->enqueue(decode_context.getStream());
+
     decode_context.error_status = pollStreamOutput(decode_context.server_context,
                                                    decode_context.request_key,
                                                    decode_context.response_writer,

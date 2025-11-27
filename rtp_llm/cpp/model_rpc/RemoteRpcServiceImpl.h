@@ -22,11 +22,9 @@ public:
                                     grpc::ServerWriter<GenerateOutputsPB>* writer) override {
         // 记录query access log (只记录请求到达时间)
         if (decode_entrance_ && decode_server_new_) {
-            RpcAccessLogWrapper::logQuery(
-                decode_server_new_->getRpcAccessLogConfig(), "GenerateStreamCall_Query", *request);
+            LOG_RPC_QUERY_INFO(decode_server_new_->getRpcAccessLogConfig(), GenerateStreamCall, request);
         } else if (prefill_server_) {
-            RpcAccessLogWrapper::logQuery(
-                prefill_server_->getRpcAccessLogConfig(), "GenerateStreamCall_Query", *request);
+            LOG_RPC_QUERY_INFO(prefill_server_->getRpcAccessLogConfig(), GenerateStreamCall, request);
         }
 
         if (decode_entrance_) {
@@ -49,7 +47,7 @@ public:
     grpc::Status
     RemoteFinish(grpc::ServerContext* context, const RemoteFinishRequestPB* request, EmptyPB* response) override {
         // 记录query access log (只记录请求到达时间)
-        RpcAccessLogWrapper::logQuery(prefill_server_->getRpcAccessLogConfig(), "RemoteFinish_Query", *request);
+        LOG_RPC_QUERY_INFO(prefill_server_->getRpcAccessLogConfig(), RemoteFinish, request);
 
         if (!prefill_server_) {
             auto error_msg = "server not implement RemoteFinish";
@@ -58,11 +56,8 @@ public:
         }
         auto status = prefill_server_->RemoteFinish(context, request, response);
 
-        // 记录access log (记录请求和响应)
-        if (status.ok()) {
-            RpcAccessLogWrapper::logAccess(
-                prefill_server_->getRpcAccessLogConfig(), "RemoteFinish", *request, *response);
-        }
+        // 记录access log (记录请求和响应，无论成功与否)
+        LOG_RPC_ACCESS_INFO(prefill_server_->getRpcAccessLogConfig(), RemoteFinish, request, response, status);
 
         return status;
     }
@@ -71,7 +66,7 @@ public:
                             const BroadcastLoadRequestPB* request,
                             BroadcastLoadResponsePB*      response) override {
         // 记录query access log (只记录请求到达时间)
-        RpcAccessLogWrapper::logQuery(decode_server_->getRpcAccessLogConfig(), "RemoteLoad_Query", *request);
+        LOG_RPC_QUERY_INFO(decode_server_->getRpcAccessLogConfig(), RemoteLoad, request);
 
         if (!decode_server_) {
             auto error_msg = "server not implement RemoteLoad";
@@ -80,10 +75,8 @@ public:
         }
         auto status = decode_server_->RemoteLoad(context, request, response);
 
-        // 记录access log (记录请求和响应)
-        if (status.ok()) {
-            RpcAccessLogWrapper::logAccess(decode_server_->getRpcAccessLogConfig(), "RemoteLoad", *request, *response);
-        }
+        // 记录access log (记录请求和响应，无论成功与否)
+        LOG_RPC_ACCESS_INFO(decode_server_->getRpcAccessLogConfig(), RemoteLoad, request, response, status);
 
         return status;
     }
@@ -106,8 +99,7 @@ public:
                                    const RemoteGenerateRequestPBNew* request,
                                    RemoteGenerateResponsePBNew*      response) override {
         // 记录query access log (只记录请求到达时间)
-        RpcAccessLogWrapper::logQuery(
-            prefill_server_new_->getRpcAccessLogConfig(), "RemoteGenerateNew_Query", *request);
+        LOG_RPC_QUERY_INFO(prefill_server_new_->getRpcAccessLogConfig(), RemoteGenerateNew, request);
 
         if (!prefill_server_new_) {
             auto error_msg = "server not implement RemoteGenerateNew";
@@ -116,11 +108,8 @@ public:
         }
         auto status = prefill_server_new_->RemoteGenerateNew(context, request, response);
 
-        // 记录access log (记录请求和响应)
-        if (status.ok()) {
-            RpcAccessLogWrapper::logAccess(
-                prefill_server_new_->getRpcAccessLogConfig(), "RemoteGenerateNew", *request, *response);
-        }
+        // 记录access log (记录请求和响应，无论成功与否)
+        LOG_RPC_ACCESS_INFO(prefill_server_new_->getRpcAccessLogConfig(), RemoteGenerateNew, request, response, status);
 
         return status;
     }
@@ -129,7 +118,7 @@ public:
                              const RemoteStoreRequestPB* request,
                              RemoteStoreResponsePB*      response) override {
         // 记录query access log (只记录请求到达时间)
-        RpcAccessLogWrapper::logQuery(prefill_server_new_->getRpcAccessLogConfig(), "RemoteStore_Query", *request);
+        LOG_RPC_QUERY_INFO(prefill_server_new_->getRpcAccessLogConfig(), RemoteStore, request);
 
         if (!prefill_server_new_) {
             auto error_msg = "server not implement RemoteStore";
@@ -138,11 +127,8 @@ public:
         }
         auto status = prefill_server_new_->RemoteStore(context, request, response);
 
-        // 记录access log (记录请求和响应)
-        if (status.ok()) {
-            RpcAccessLogWrapper::logAccess(
-                prefill_server_new_->getRpcAccessLogConfig(), "RemoteStore", *request, *response);
-        }
+        // 记录access log (记录请求和响应，无论成功与否)
+        LOG_RPC_ACCESS_INFO(prefill_server_new_->getRpcAccessLogConfig(), RemoteStore, request, response, status);
 
         return status;
     }
@@ -150,7 +136,7 @@ public:
     grpc::Status
     RemoteFinishNew(grpc::ServerContext* context, const RemoteFinishRequestPB* request, EmptyPB* response) override {
         // 记录query access log (只记录请求到达时间)
-        RpcAccessLogWrapper::logQuery(prefill_server_new_->getRpcAccessLogConfig(), "RemoteFinishNew_Query", *request);
+        LOG_RPC_QUERY_INFO(prefill_server_new_->getRpcAccessLogConfig(), RemoteFinishNew, request);
 
         if (!prefill_server_new_) {
             auto error_msg = "server not implement RemoteFinishNew";
@@ -159,11 +145,8 @@ public:
         }
         auto status = prefill_server_new_->RemoteFinish(context, request, response);
 
-        // 记录access log (记录请求和响应)
-        if (status.ok()) {
-            RpcAccessLogWrapper::logAccess(
-                prefill_server_new_->getRpcAccessLogConfig(), "RemoteFinishNew", *request, *response);
-        }
+        // 记录access log (记录请求和响应，无论成功与否)
+        LOG_RPC_ACCESS_INFO(prefill_server_new_->getRpcAccessLogConfig(), RemoteFinishNew, request, response, status);
 
         return status;
     }

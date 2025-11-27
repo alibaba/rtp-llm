@@ -26,62 +26,37 @@ public:
     grpc::Status GenerateStreamCall(grpc::ServerContext*                   context,
                                     const GenerateInputPB*                 request,
                                     grpc::ServerWriter<GenerateOutputsPB>* writer) override {
-        // 记录query access log (只记录请求到达时间)
-        RpcAccessLogWrapper::logQuery(local_server_->getRpcAccessLogConfig(), "GenerateStreamCall_Query", *request);
+        LOG_RPC_QUERY_INFO(local_server_->getRpcAccessLogConfig(), GenerateStreamCall, request);
 
         auto status = local_server_->GenerateStreamCall(context, request, writer);
 
         // For streaming calls, we don't log the full response here as it's streamed
         // The server implementation should handle logging of the complete response if needed
-
         return status;
     }
 
     ::grpc::Status DistKvCache(::grpc::ServerContext*        context,
                                const ::DistKvCacheRequestPB* request,
                                ::DistKvCacheResponsePB*      response) override {
-        // 记录query access log (只记录请求到达时间)
-        RpcAccessLogWrapper::logQuery(local_server_->getRpcAccessLogConfig(), "DistKvCache_Query", *request);
-
+        LOG_RPC_QUERY_DEBUG(local_server_->getRpcAccessLogConfig(), DistKvCache, request);
         auto status = local_server_->DistKvCache(context, request, response);
-
-        // 记录access log (记录请求和响应)
-        if (status.ok()) {
-            RpcAccessLogWrapper::logAccess(local_server_->getRpcAccessLogConfig(), "DistKvCache", *request, *response);
-        }
-
+        LOG_RPC_ACCESS_DEBUG(local_server_->getRpcAccessLogConfig(), DistKvCache, request, response, status);
         return status;
     }
 
     ::grpc::Status
     GetWorkerStatus(::grpc::ServerContext* context, const StatusVersionPB* request, WorkerStatusPB* response) override {
-        // 记录query access log (只记录请求到达时间)
-        RpcAccessLogWrapper::logQuery(local_server_->getRpcAccessLogConfig(), "GetWorkerStatus_Query", *request);
-
+        LOG_RPC_QUERY_DEBUG(local_server_->getRpcAccessLogConfig(), GetWorkerStatus, request);
         auto status = local_server_->GetWorkerStatus(context, request, response);
-
-        // 记录access log (记录请求和响应)
-        if (status.ok()) {
-            RpcAccessLogWrapper::logAccess(
-                local_server_->getRpcAccessLogConfig(), "GetWorkerStatus", *request, *response);
-        }
-
+        LOG_RPC_ACCESS_DEBUG(local_server_->getRpcAccessLogConfig(), GetWorkerStatus, request, response, status);
         return status;
     }
 
     ::grpc::Status
     GetCacheStatus(::grpc::ServerContext* context, const CacheVersionPB* request, CacheStatusPB* response) override {
-        // 记录query access log (只记录请求到达时间)
-        RpcAccessLogWrapper::logQuery(local_server_->getRpcAccessLogConfig(), "GetCacheStatus_Query", *request);
-
+        LOG_RPC_QUERY_DEBUG(local_server_->getRpcAccessLogConfig(), GetCacheStatus, request);
         auto status = local_server_->GetCacheStatus(context, request, response);
-
-        // 记录access log (记录请求和响应)
-        if (status.ok()) {
-            RpcAccessLogWrapper::logAccess(
-                local_server_->getRpcAccessLogConfig(), "GetCacheStatus", *request, *response);
-        }
-
+        LOG_RPC_ACCESS_DEBUG(local_server_->getRpcAccessLogConfig(), GetCacheStatus, request, response, status);
         return status;
     }
 
@@ -128,17 +103,9 @@ public:
     ::grpc::Status MemoryBlockCache(::grpc::ServerContext*             context,
                                     const ::MemoryBlockCacheRequestPB* request,
                                     ::MemoryBlockCacheResponsePB*      response) override {
-        // 记录query access log (只记录请求到达时间)
-        RpcAccessLogWrapper::logQuery(local_server_->getRpcAccessLogConfig(), "MemoryBlockCache_Query", *request);
-
+        LOG_RPC_QUERY_DEBUG(local_server_->getRpcAccessLogConfig(), MemoryBlockCache, request);
         auto status = local_server_->MemoryBlockCache(context, request, response);
-
-        // 记录access log (记录请求和响应)
-        if (status.ok()) {
-            RpcAccessLogWrapper::logAccess(
-                local_server_->getRpcAccessLogConfig(), "MemoryBlockCache", *request, *response);
-        }
-
+        LOG_RPC_ACCESS_DEBUG(local_server_->getRpcAccessLogConfig(), MemoryBlockCache, request, response, status);
         return status;
     }
 

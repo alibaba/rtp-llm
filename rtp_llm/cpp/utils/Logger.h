@@ -52,12 +52,12 @@ public:
     }
 
     static Logger& getAccessLogger() {
-        static Logger access_logger_("rpc_access");
+        static Logger access_logger_("access");
         return access_logger_;
     }
 
     static Logger& getQueryLogger() {
-        static Logger query_logger_("rpc_query");
+        static Logger query_logger_("query");
         return query_logger_;
     }
 
@@ -208,17 +208,20 @@ private:
 #define RTP_LLM_ACCESS_LOG_ERROR(...) RTP_LLM_ACCESS_LOG(alog::LOG_LEVEL_ERROR, __VA_ARGS__)
 #define RTP_LLM_ACCESS_LOG_EXCEPTION(ex, ...) rtp_llm::Logger::getAccessLogger().log(ex, ##__VA_ARGS__)
 
-#define RTP_LLM_QUERY_ACCESS_LOG(level, ...)                                                                           \
+#define RTP_LLM_QUERY_LOG(level, ...)                                                                                  \
     do {                                                                                                               \
         auto& logger = rtp_llm::Logger::getQueryLogger();                                                              \
+        if (!logger.isLevelEnabled(level)) {                                                                           \
+            break;                                                                                                     \
+        }                                                                                                              \
         logger.log(level, __FILE__, __LINE__, __PRETTY_FUNCTION__, __VA_ARGS__);                                       \
     } while (0)
-#define RTP_LLM_QUERY_ACCESS_LOG_TRACE(...) RTP_LLM_QUERY_ACCESS_LOG(alog::LOG_LEVEL_TRACE1, __VA_ARGS__)
-#define RTP_LLM_QUERY_ACCESS_LOG_DEBUG(...) RTP_LLM_QUERY_ACCESS_LOG(alog::LOG_LEVEL_DEBUG, __VA_ARGS__)
-#define RTP_LLM_QUERY_ACCESS_LOG_INFO(...) RTP_LLM_QUERY_ACCESS_LOG(alog::LOG_LEVEL_INFO, __VA_ARGS__)
-#define RTP_LLM_QUERY_ACCESS_LOG_WARNING(...) RTP_LLM_QUERY_ACCESS_LOG(alog::LOG_LEVEL_WARN, __VA_ARGS__)
-#define RTP_LLM_QUERY_ACCESS_LOG_ERROR(...) RTP_LLM_QUERY_ACCESS_LOG(alog::LOG_LEVEL_ERROR, __VA_ARGS__)
-#define RTP_LLM_QUERY_ACCESS_LOG_EXCEPTION(ex, ...) rtp_llm::Logger::getQueryLogger().log(ex, ##__VA_ARGS__)
+#define RTP_LLM_QUERY_LOG_TRACE(...) RTP_LLM_QUERY_LOG(alog::LOG_LEVEL_TRACE1, __VA_ARGS__)
+#define RTP_LLM_QUERY_LOG_DEBUG(...) RTP_LLM_QUERY_LOG(alog::LOG_LEVEL_DEBUG, __VA_ARGS__)
+#define RTP_LLM_QUERY_LOG_INFO(...) RTP_LLM_QUERY_LOG(alog::LOG_LEVEL_INFO, __VA_ARGS__)
+#define RTP_LLM_QUERY_LOG_WARNING(...) RTP_LLM_QUERY_LOG(alog::LOG_LEVEL_WARN, __VA_ARGS__)
+#define RTP_LLM_QUERY_LOG_ERROR(...) RTP_LLM_QUERY_LOG(alog::LOG_LEVEL_ERROR, __VA_ARGS__)
+#define RTP_LLM_QUERY_LOG_EXCEPTION(ex, ...) rtp_llm::Logger::getQueryLogger().log(ex, ##__VA_ARGS__)
 
 #define RTP_LLM_STACKTRACE_LOG(level, ...)                                                                             \
     do {                                                                                                               \

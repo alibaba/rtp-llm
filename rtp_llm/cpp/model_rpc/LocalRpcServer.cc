@@ -83,7 +83,8 @@ grpc::Status LocalRpcServer::serializeErrorMsg(const string& request_key, ErrorI
 grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             context,
                                               const string&                    request_key,
                                               WriterInterface*                 writer,
-                                              std::shared_ptr<GenerateStream>& stream) {
+                                              std::shared_ptr<GenerateStream>& stream,
+                                              GenerateOutputsPB*               last_frame) {
     while (!stream->finished() || stream->hasOutput()) {
         const auto result = stream->nextOutput();
         if (!result.ok()) {
@@ -93,20 +94,29 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
                 break;
             }
         }
+
         RTP_LLM_LOG_DEBUG("request [%s] generate next output success", request_key.c_str());
         GenerateOutputsPB outputs_pb;
         QueryConverter::transResponse(
             &outputs_pb, &(result.value()), maga_init_params_.gpt_init_parameter.misc_config.aux_string);
+
         if (context->IsCancelled()) {
             stream->cancel();
             RTP_LLM_LOG_WARNING("request [%s] cancelled by user", request_key.c_str());
             return grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled by user");
         }
+
         if (!writer->Write(outputs_pb)) {
             stream->cancel();
             RTP_LLM_LOG_WARNING("request [%s] write outputs pb failed", request_key.c_str());
             return grpc::Status(grpc::StatusCode::INTERNAL, "request write outputs pb failed");
         }
+
+        // 检查是否是最后一帧，如果是则保存
+        if (stream->finished() && !stream->hasOutput() && last_frame != nullptr) {
+            *last_frame = outputs_pb;
+        }
+
         if (stream->needRemoteGenerate()) {
             break;
         }
@@ -115,8 +125,8 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
             break;
         }
     }
-    RTP_LLM_LOG_DEBUG("request [%s] local generate done", request_key.c_str());
 
+    RTP_LLM_LOG_DEBUG("request [%s] local generate done", request_key.c_str());
     return grpc::Status::OK;
 }
 
@@ -146,21 +156,16 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
 
     RTP_LLM_LOG_DEBUG("request [%ld] enqueue success", request_id);
 
+    // 用于保存最后一帧的数据
+    GenerateOutputsPB last_frame;
     generate_context.error_status =
-        pollStreamOutput(context, generate_context.request_key, writer, generate_context.getStream());
-
-    // 记录RPC访问日志
-    if (generate_context.error_status.ok()) {
-        // 创建一个空的响应对象作为示例，实际应该记录真实的响应
-        GenerateOutputsPB response_pb;
-        RpcAccessLogWrapper::logAccess(maga_init_params_.gpt_init_parameter.rpc_access_log_config,
-                                       "GenerateStreamCall",
-                                       *request,
-                                       response_pb,
-                                       generate_context.request_key);
-    }
+        pollStreamOutput(context, generate_context.request_key, writer, generate_context.getStream(), &last_frame);
 
     meta_->dequeue(generate_context.request_id, generate_context.getStream());
+
+    // 使用LOG_RPC_ACCESS_INFO记录最后一帧
+    LOG_RPC_ACCESS_INFO(
+        getRpcAccessLogConfig(), GenerateStreamCall, request, &last_frame, generate_context.error_status);
     return generate_context.error_status;
 }
 

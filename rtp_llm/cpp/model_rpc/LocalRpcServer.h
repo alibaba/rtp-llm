@@ -93,7 +93,8 @@ protected:
     grpc::Status pollStreamOutput(grpc::ServerContext*             context,
                                   const std::string&               request_key,
                                   WriterInterface*                 writer,
-                                  std::shared_ptr<GenerateStream>& stream);
+                                  std::shared_ptr<GenerateStream>& stream,
+                                  GenerateOutputsPB*               last_frame = nullptr);
 
 protected:
     std::shared_ptr<EngineBase>           engine_;
