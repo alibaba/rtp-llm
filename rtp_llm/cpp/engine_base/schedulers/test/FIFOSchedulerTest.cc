@@ -293,8 +293,7 @@ TEST_F(FIFOSchedulerTest, testReuseCache) {
     ASSERT_TRUE(streams_status2.ok());
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
     ASSERT_EQ(scheduler.runningStreamsSize(), 0);
-    // TODO(chanyin): cached blocks will not be referenced
-    ASSERT_EQ(cache_manager->freeBlocksNum(), 10);
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 8);
 
     std::shared_ptr<GenerateInput> query2 = make_shared<GenerateInput>();
     query2->input_ids                     = createBuffer<int32_t>({7}, {1, 2, 3, 4, 5, 6, 7}, AllocationType::HOST);
@@ -311,8 +310,7 @@ TEST_F(FIFOSchedulerTest, testReuseCache) {
     ASSERT_TRUE(streams_status4.ok());
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
     ASSERT_EQ(scheduler.runningStreamsSize(), 0);
-    // TODO(chanyin): cached blocks will not be referenced
-    ASSERT_EQ(cache_manager->freeBlocksNum(), 10);
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 7);
 }
 
 TEST_F(FIFOSchedulerTest, testMaxContextBatchSize) {

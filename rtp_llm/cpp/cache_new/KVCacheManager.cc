@@ -176,10 +176,10 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
 
     // Build or update cache_keys for each batch based on current complete_token_ids.
     if (!malloc_info.batch_kv_cache_resource->first_fill_finished) {
-        initCacheKeys(*malloc_info.batch_kv_cache_resource, *malloc_info.complete_token_ids, seq_size_per_block);
+        initCacheKeys(malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids, seq_size_per_block);
         malloc_info.batch_kv_cache_resource->first_fill_finished = true;
     } else {
-        updateCacheKeys(*malloc_info.batch_kv_cache_resource, *malloc_info.complete_token_ids, seq_size_per_block);
+        updateCacheKeys(malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids, seq_size_per_block);
     }
 
     return allocator_->malloc(malloc_info);
@@ -190,6 +190,7 @@ FreeResult KVCacheManager::free(const FreeInfo& free_info) {
 }
 
 InsertResult KVCacheManager::insertIntoCache(const InsertInfo& insert_info) {
+    dropLastPartialBlock(insert_info.batch_kv_cache_resource);
     return allocator_->insertIntoCache(insert_info);
 }
 

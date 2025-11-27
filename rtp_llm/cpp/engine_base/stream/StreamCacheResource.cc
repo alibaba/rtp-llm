@@ -53,7 +53,6 @@ void StreamCacheResource::releaseResource() {
     }
     // do not reuse cache from stopped beam search streams, whose states are likely corrupted
     if (!need_release_resource_ && (!stream_->hasNumBeams() || !stream_->stoppedWithoutLock())) {
-        // reConstructCacheKeys();
         return;
     }
     tryReleaseKVBlock(maxBlockSize());
@@ -78,8 +77,10 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
 
     if (release_blocks_num > 0 && batch_resource_->batchSize() > 0) {
         // Insert all blocks into cache
-        InsertInfo insert_info(batch_resource_, stream_->completeTokenIdsPtr(), false);
-        resource_context_.cache_manager->insertIntoCache(insert_info);
+        if (reuseCache()) {
+            InsertInfo insert_info(batch_resource_, stream_->completeTokenIdsPtr(), false);
+            resource_context_.cache_manager->insertIntoCache(insert_info);
+        }
 
         // Free all blocks using KVCacheManager::free
         FreeInfo free_info(batch_resource_, stream_->completeTokenIdsPtr());
