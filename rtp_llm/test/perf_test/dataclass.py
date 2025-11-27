@@ -57,7 +57,7 @@ class ResponseInfo:
         self.total_time = aux_info.get("cost_time", 0.0) - self.wait_time
         self.prefill_time = aux_info.get("first_token_cost_time", 0.0) - self.wait_time
         self.decode_time = self.total_time - self.prefill_time
-        self.decode_time_per_token = self.decode_time / (self.output_len - 1)
+        self.decode_time_per_token = self.decode_time / (self.output_len - 1) if self.output_len > 1 else 0.0
 
 
 @dataclass
