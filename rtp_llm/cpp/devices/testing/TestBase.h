@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 #include <netinet/in.h>
 #include <numeric>
+#include <algorithm>
 #include <stdlib.h>
 #include <sys/socket.h>
 #include <torch/torch.h>
@@ -330,9 +331,11 @@ protected:
             std::memcpy((*kv_cache_block_id)[i].data(), indices.data(), indices.size() * sizeof(int));
             if (kvCache.dim() == 5) {
                 // [layernum, batch, 2, max_pad_seq, dim]
-                auto max_pad_seq = kvCache.sizes()[3];
-                auto k_indexs    = indices;
-                for (auto k = 0; k < (max_pad_seq / cache_config.seq_size_per_block); k++) {
+                auto       max_pad_seq    = kvCache.sizes()[3];
+                auto       k_indexs       = indices;
+                const auto max_k_blocks   = max_pad_seq / cache_config.seq_size_per_block;
+                const auto blocks_to_fill = std::min<size_t>(max_k_blocks, k_indexs.size());
+                for (size_t k = 0; k < blocks_to_fill; ++k) {
                     auto          block_start = k * cache_config.seq_size_per_block;
                     auto          block_end   = block_start + cache_config.seq_size_per_block;
                     torch::Tensor kblock, vblock;
