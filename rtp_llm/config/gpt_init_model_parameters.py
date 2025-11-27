@@ -532,6 +532,100 @@ class GptInitModelParameters:
         self.worker_grpc_addrs = worker_grpc_addrs
         self.worker_addrs = worker_addrs
 
+    def _generate_prefill_capture_seq_lens(self) -> List[int]:
+        """
+        Generate prefill capture sequence lengths from Python.
+        Supports three formats via PREFILL_CAPTURE_CONFIG:
+        1. File path: starts with 'file://' or '/', e.g., 'file:///path/to/seq_lens.txt' or '/path/to/seq_lens.txt'
+        2. Comma-separated list: e.g., '10,100,500,1000,2000'
+        3. Range: format 'max:step', e.g., '16384:128' (generates [128, 256, ..., 16384])
+
+        This function MUST return a non-empty list. If no configuration is provided,
+        it will raise an error.
+        """
+        config = get_env_str("PREFILL_CAPTURE_CONFIG", "")
+        if not config:
+            raise ValueError(
+                "PREFILL_CAPTURE_CONFIG must be set. Supported formats:\n"
+                "  1. File path: 'file:///path/to/seq_lens.txt' or '/path/to/seq_lens.txt'\n"
+                "  2. Comma-separated list: '10,100,500,1000,2000'\n"
+                "  3. Range: '16384:128' (generates [128, 256, ..., 16384])"
+            )
+
+        config = config.strip()
+
+        # Mode 1: File path (starts with 'file://' or '/')
+        if config.startswith("file://") or config.startswith("/"):
+            file_path = config[7:] if config.startswith("file://") else config
+            try:
+                seq_lens = []
+                with open(file_path, "r") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and not line.startswith("#"):
+                            try:
+                                seq_len = int(line)
+                                if seq_len > 0:
+                                    seq_lens.append(seq_len)
+                            except ValueError:
+                                logging.warning(
+                                    f"Invalid sequence length in file: {line}"
+                                )
+                if seq_lens:
+                    logging.info(
+                        f"Loaded {len(seq_lens)} sequence lengths from {file_path}"
+                    )
+                    return seq_lens
+                else:
+                    raise ValueError(
+                        f"No valid sequence lengths found in file: {file_path}"
+                    )
+            except FileNotFoundError:
+                raise FileNotFoundError(f"Prefill capture file not found: {file_path}")
+            except Exception as e:
+                raise RuntimeError(f"Error reading prefill capture file: {e}")
+
+        # Mode 3: Range format (max:step)
+        if ":" in config:
+            try:
+                parts = config.split(":")
+                if len(parts) != 2:
+                    raise ValueError("Range format must be 'max:step'")
+                max_seq_len = int(parts[0].strip())
+                step = int(parts[1].strip())
+                if max_seq_len <= 0 or step <= 0:
+                    raise ValueError("max_seq_len and step must be positive integers")
+                seq_lens = list(range(step, max_seq_len + 1, step))
+                if max_seq_len not in seq_lens:
+                    seq_lens.append(max_seq_len)
+                if seq_lens:
+                    logging.info(
+                        f"Generated {len(seq_lens)} sequence lengths from range (step={step}, max={max_seq_len})"
+                    )
+                    return seq_lens
+                else:
+                    raise ValueError(
+                        f"Invalid range parameters: max_seq_len={max_seq_len}, step={step}"
+                    )
+            except ValueError as e:
+                raise ValueError(f"Invalid range format '{config}': {e}")
+
+        # Mode 2: Comma-separated list (default)
+        try:
+            seq_lens = [int(x.strip()) for x in config.split(",") if x.strip()]
+            seq_lens = [x for x in seq_lens if x > 0]
+            if seq_lens:
+                logging.info(
+                    f"Using prefill capture sequence lengths from comma-separated list: {len(seq_lens)} lengths"
+                )
+                return seq_lens
+            else:
+                raise ValueError(
+                    f"PREFILL_CAPTURE_CONFIG contains no valid sequence lengths: '{config}'"
+                )
+        except ValueError as e:
+            raise ValueError(f"Invalid PREFILL_CAPTURE_CONFIG format '{config}': {e}")
+
     def update_gpt_init_params_from_env(
         self, parallel_info: ParallelInfo = g_parallel_info
     ):
@@ -646,6 +740,11 @@ class GptInitModelParameters:
             )
         )
         # HWKernelConfig
+        enable_cuda_graph = get_env_bool("ENABLE_CUDA_GRAPH", False)
+        # Generate prefill capture sequence lengths from Python only when CUDA Graph is enabled
+        prefill_capture_seq_lens = []
+        if enable_cuda_graph:
+            prefill_capture_seq_lens = self._generate_prefill_capture_seq_lens()
         self.gpt_init_params.hw_kernel_config = HWKernelConfig(
             deep_gemm_num_sm=get_env_int("DEEP_GEMM_NUM_SM"),
             arm_gemm_use_kai=get_env_bool("ARM_GEMM_USE_KAI"),
@@ -656,7 +755,7 @@ class GptInitModelParameters:
             ),
             use_swizzleA=(get_env_bool("USE_SWIZZLEA", False)),
             ft_disable_custom_ar=get_env_bool("FT_DISABLE_CUSTOM_AR", True),
-            enable_cuda_graph=get_env_bool("ENABLE_CUDA_GRAPH", False),
+            enable_cuda_graph=enable_cuda_graph,
             enable_cuda_graph_debug_mode=get_env_bool(
                 "ENABLE_CUDA_GRAPH_DEBUG_MODE", False
             ),
@@ -664,6 +763,7 @@ class GptInitModelParameters:
             use_asm_pa=get_env_bool("USE_ASM_PA", True),
             enable_native_cuda_graph=get_env_bool("ENABLE_NATIVE_CUDA_GRAPH", False),
             num_native_cuda_graph=get_env_int("NUM_NATIVE_CUDA_GRAPH", 200),
+            prefill_capture_seq_lens=prefill_capture_seq_lens,
         )
 
         # DeviceResourceConfig

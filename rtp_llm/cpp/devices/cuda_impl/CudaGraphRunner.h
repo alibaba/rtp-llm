@@ -28,6 +28,7 @@ public:
         max_seq_len_(params.max_seq_len),
         seq_size_per_block_(params.tokens_per_block),
         kv_cache_block_offset_(kv_cache_block_offset),
+        prefill_capture_seq_lens_(params.hw_kernel_config.prefill_capture_seq_lens),
         device_(device) {
         py::gil_scoped_acquire gil;
         if (!py_instance_ || py_instance_.is_none()) {
@@ -112,6 +113,7 @@ private:
     int              seq_len_sum_{0};
     int              qkv_dim_{0};
     std::vector<int> capture_range_;
+    std::vector<int> prefill_capture_seq_lens_;  // Pre-configured sequence lengths from Python
     // capture seqLen -> GraphInstance (prefill)
     // batch_size -> GraphInstance (decode)
     std::unordered_map<int, GraphInstance> graph_instances_;

@@ -1,6 +1,7 @@
 #pragma once
 #include <string>
 #include <sstream>
+#include <vector>
 
 namespace rtp_llm {
 
@@ -97,8 +98,11 @@ struct HWKernelConfig {
     bool        use_asm_pa                   = true;
     bool        enable_native_cuda_graph     = false;
     int         num_native_cuda_graph        = 200;
-    std::string to_string() const;
-    void        update_from_env_for_test();
+    // Prefill CUDA Graph capture configuration
+    // Can be set via: prefill_capture_file_path, prefill_capture_seq_lens, or prefill_capture_max_seq_len + step
+    std::vector<int> prefill_capture_seq_lens;
+    std::string      to_string() const;
+    void             update_from_env_for_test();
 };
 
 struct DeviceResourceConfig {

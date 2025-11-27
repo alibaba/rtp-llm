@@ -1,6 +1,6 @@
 import logging
 import os
-from typing import Optional
+from typing import List, Optional
 
 from rtp_llm.ops import (
     ConcurrencyConfig,
@@ -758,6 +758,7 @@ class PyHwKernelConfig:
         self.use_asm_pa: bool = True
         self.enable_native_cuda_graph: bool = False
         self.num_native_cuda_graph: int = 200
+        self.prefill_capture_seq_lens: List[int] = []
 
     def update_from_env(self):
         self.deep_gemm_num_sm = get_env_int("DEEP_GEMM_NUM_SM", self.deep_gemm_num_sm)
@@ -804,7 +805,8 @@ class PyHwKernelConfig:
             f"use_aiter_pa: {self.use_aiter_pa}\n"
             f"use_asm_pa: {self.use_asm_pa}\n"
             f"enable_native_cuda_graph: {self.enable_native_cuda_graph}\n"
-            f"num_native_cuda_graph: {self.num_native_cuda_graph}"
+            f"num_native_cuda_graph: {self.num_native_cuda_graph}\n"
+            f"prefill_capture_seq_lens: {self.prefill_capture_seq_lens}"
         )
 
 

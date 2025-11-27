@@ -203,7 +203,8 @@ std::string HWKernelConfig::to_string() const {
         << "use_aiter_pa: " << use_aiter_pa << "\n"
         << "use_asm_pa: " << use_asm_pa << "\n"
         << "enable_native_cuda_graph" << enable_native_cuda_graph << "\n"
-        << "num_native_cuda_graph" << num_native_cuda_graph << "\n";
+        << "num_native_cuda_graph" << num_native_cuda_graph << "\n"
+        << "prefill_capture_seq_lens size: " << prefill_capture_seq_lens.size() << "\n";
     return oss.str();
 }
 

@@ -110,3 +110,17 @@ def init_hw_kernel_group_args(parser):
         default=False,
         help="hipBLASLt GEMM 是否使用 swizzle",
     )
+
+    hw_kernel_group.add_argument(
+        "--prefill_capture_config",
+        env_name="PREFILL_CAPTURE_CONFIG",
+        type=str,
+        default="240:3",
+        help=(
+            "Prefill CUDA Graph capture sequence lengths configuration. "
+            "Supports three formats:\n"
+            "  1. File path: starts with 'file://' or '/', e.g., 'file:///path/to/seq_lens.txt' or '/path/to/seq_lens.txt'\n"
+            "  2. Comma-separated list: e.g., '10,100,500,1000,2000'\n"
+            "  3. Range: format 'max:step', e.g., '16384:128' (generates [128, 256, ..., 16384])"
+        ),
+    )
