@@ -244,6 +244,7 @@ class ModelLoader:
         logging.info(
             f"load method: {self._load_config.load_method}, finally choose load method: {load_method}"
         )
+
         if load_method == LoadMethod.FASTSAFETENSORS:
             return self._load_from_fastsafetensor(device)
         elif load_method == LoadMethod.SCRATCH:
@@ -425,7 +426,7 @@ class ModelLoader:
         )
         device = current_device if free_mem * 0.9 > model_mem else "cpu"
         logging.info(
-            f"free_mem: {free_mem}, estimated model_mem: {model_mem}, use device: {device}"
+            f"free_mem: {free_mem:.2f}GB, estimated model_mem: {model_mem:.2f}GB, use device: {device}"
         )
         return device
 
