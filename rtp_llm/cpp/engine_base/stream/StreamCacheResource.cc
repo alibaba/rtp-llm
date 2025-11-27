@@ -160,9 +160,11 @@ absl::StatusOr<int> StreamCacheResource::incrKVBlock(int token_capacity, size_t 
         return absl::InternalError("malloc failed");
     }
 
-    stream_->setReuseLength(result.reuse_len);
-    stream_->setMtpTokenIndex(result.reuse_len);
-    stream_->setInitialReuseLength(result.reuse_len);
+    if (result.reuse_len > 0) {
+        stream_->setReuseLength(result.reuse_len);
+        stream_->setMtpTokenIndex(result.reuse_len);
+        stream_->setInitialReuseLength(result.reuse_len);
+    }
 
     return real_occupy;
 }
