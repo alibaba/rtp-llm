@@ -240,7 +240,7 @@ std::vector<KVCacheMemoryConnector::CopyInfoPerKey> KVCacheMemoryConnector::buil
         if (!mallocMemoryBlocks(block_pool, 1, mem_blocks)) {
             RTP_LLM_LOG_WARNING(
                 "build copy plan for write failed, malloc memory blocks failed, maybe no enough free blocks, free blocks: %zu",
-                block_pool->freeBlockNums());
+                block_pool->freeBlocksNum());
             break;
         }
 
@@ -434,7 +434,7 @@ bool KVCacheMemoryConnector::mallocMemoryBlocks(const std::shared_ptr<BlockPool>
         RTP_LLM_LOG_WARNING(
             "malloc memory blocks failed, ensure enough free blocks failed, need blocks: %zu, free blocks: %zu",
             need_blocks,
-            block_pool->freeBlockNums());
+            block_pool->freeBlocksNum());
         return false;
     }
     auto blocks = block_pool->malloc(need_blocks);
@@ -500,7 +500,7 @@ std::shared_ptr<BlockPool> KVCacheMemoryConnector::getOrCreateMemoryBlockPool(si
 
 bool KVCacheMemoryConnector::ensureEnoughFreeBlocks(const std::shared_ptr<BlockPool>& block_pool,
                                                     size_t                            need_blocks) const {
-    const auto free_blocks = block_pool->freeBlockNums();
+    const auto free_blocks = block_pool->freeBlocksNum();
     if (free_blocks >= need_blocks) {
         return true;
     }
@@ -509,7 +509,7 @@ bool KVCacheMemoryConnector::ensureEnoughFreeBlocks(const std::shared_ptr<BlockP
     if (!evict_blocks.empty()) {
         block_pool->free(evict_blocks);
     }
-    return block_pool->freeBlockNums() >= need_blocks;
+    return block_pool->freeBlocksNum() >= need_blocks;
 }
 
 // (removed legacy multi-key plan builder)

@@ -37,17 +37,16 @@ bool KVCacheManager::init() {
     }
 
     auto& spec = config_.cache_specs[0];
-    if (spec->type == rtp_llm::KVCacheType::MultiHeadAttention
-        || spec->type == rtp_llm::KVCacheType::MultiHeadLatentAttention) {
-        allocator_ = std::make_shared<rtp_llm::SingleTypeKVCacheAllocator>(config_, device_, AllocationType::DEVICE);
-        if (!allocator_->init()) {
-            RTP_LLM_LOG_ERROR("SingleTypeKVCacheAllocator init failed");
-            allocator_.reset();
-            return false;
-        }
-        return true;
-    } else {
+    if (spec->type != rtp_llm::KVCacheType::MultiHeadAttention
+        && spec->type != rtp_llm::KVCacheType::MultiHeadLatentAttention) {
         RTP_LLM_LOG_ERROR("SingleTypeKVCacheAllocator only support Full Attention");
+        return false;
+    }
+
+    allocator_ = std::make_shared<rtp_llm::SingleTypeKVCacheAllocator>(config_, device_, AllocationType::DEVICE);
+    if (!allocator_->init()) {
+        RTP_LLM_LOG_ERROR("SingleTypeKVCacheAllocator init failed");
+        allocator_.reset();
         return false;
     }
 
@@ -296,6 +295,9 @@ bool KVCacheManager::initMemoryConnector() {
     auto config                               = config_;
     config.memory_block_cache_size_mb         = params_.kv_cache_config.memory_block_cache_size_mb;
     config.memory_block_cache_sync_timeout_ms = params_.kv_cache_config.memory_block_cache_sync_timeout_ms;
+    RTP_LLM_LOG_INFO("init memory connector, size: %ld MB, sync timeout: %ld ms",
+                     config.memory_block_cache_size_mb,
+                     config.memory_block_cache_sync_timeout_ms);
 
     memory_connector_ =
         std::make_shared<KVCacheMemoryConnector>(config_, allocator_, device_, params_.worker_grpc_addrs_);
