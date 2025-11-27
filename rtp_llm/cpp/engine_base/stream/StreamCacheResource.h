@@ -112,7 +112,6 @@ public:
 
     bool asyncLoadCache();
     bool loadCacheDone() const;
-    bool isLoadingCache() const;
 
     std::string debugString() const {
         std::stringstream debug_string;

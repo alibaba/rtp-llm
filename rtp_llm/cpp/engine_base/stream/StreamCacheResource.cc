@@ -63,10 +63,6 @@ void StreamCacheResource::releaseResource() {
 int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
     RTP_LLM_LOG_DEBUG("stream [%ld] try release [%lu] blocks", stream_->streamId(), nums);
 
-    if (isLoadingCache()) {
-        load_cache_context_->cancel();
-    }
-
     if (fake_inited_) {
         int max_block_size = maxBlockSize();
         int batch_size     = batch_resource_->batchSize();
@@ -81,6 +77,11 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
     int release_blocks_num = maxBlockSize();
 
     if (release_blocks_num > 0 && batch_resource_->batchSize() > 0) {
+        if (reuseCache()) {
+            InsertInfo insert_info(batch_resource_, stream_->completeTokenIdsPtr(), false);
+            resource_context_.cache_manager->insertIntoCache(insert_info);
+        }
+
         // Free all blocks using KVCacheManager::free
         FreeInfo free_info(batch_resource_, stream_->completeTokenIdsPtr());
         free_info.request_id = stream_->streamId();
@@ -161,6 +162,13 @@ absl::StatusOr<int> StreamCacheResource::incrKVBlock(int token_capacity, size_t 
         return absl::InternalError("malloc failed");
     }
 
+    if (result.reuse_len > 0) {
+        stream_->setInitialReuseLength(result.reuse_len);
+        stream_->setReuseLength(result.reuse_len);
+        stream_->setLocalReuseLength(result.reuse_len);
+        stream_->setMtpTokenIndex(result.reuse_len);
+    }
+
     return real_occupy;
 }
 
@@ -233,23 +241,19 @@ bool StreamCacheResource::enableMemoryBlockCache() const {
 }
 
 bool StreamCacheResource::asyncLoadCache() {
-    if (enableMemoryBlockCache()) {
-        // TODO(LXQ): only support batch0 now, need to support all batch in the future?
-        auto resource       = std::make_shared<KVCacheResourceV1>(batch_resource_->batch_resource.at(0));
-        load_cache_context_ = resource_context_.cache_manager->asyncLoadCache(resource);
-        return load_cache_context_ != nullptr;
+    if (!enableMemoryBlockCache()) {
+        return false;
     }
-    return false;
+    // TODO(LXQ): only support batch0 now, need to support all batch in the future?
+    auto resource       = std::make_shared<KVCacheResourceV1>(batch_resource_->batch_resource.at(0));
+    load_cache_context_ = resource_context_.cache_manager->asyncLoadCache(resource);
+    return load_cache_context_ != nullptr;
 }
 bool StreamCacheResource::loadCacheDone() const {
     if (!load_cache_context_) {
         return true;
     }
     return load_cache_context_->done();
-}
-
-bool StreamCacheResource::isLoadingCache() const {
-    return load_cache_context_ != nullptr && !(load_cache_context_->done());
 }
 
 }  // namespace rtp_llm
