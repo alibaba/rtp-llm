@@ -1,4 +1,4 @@
-#include "rtp_llm/models_py/bindings/rocm/CudaGraphPrefillCopy.h"
+#include "rtp_llm/models_py/bindings/common/CudaGraphPrefillCopy.h"
 
 namespace torch_ext {
 

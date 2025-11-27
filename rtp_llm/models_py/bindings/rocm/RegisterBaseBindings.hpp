@@ -5,7 +5,7 @@
 #include "rtp_llm/models_py/bindings/rocm/Gemm.h"
 #include "rtp_llm/models_py/bindings/rocm/FusedRopeKVCacheOp.h"
 #include "rtp_llm/models_py/bindings/common/RtpProcessGroup.h"
-#include "rtp_llm/models_py/bindings/rocm/CudaGraphPrefillCopy.h"
+#include "rtp_llm/models_py/bindings/common/CudaGraphPrefillCopy.h"
 
 using namespace rtp_llm;
 

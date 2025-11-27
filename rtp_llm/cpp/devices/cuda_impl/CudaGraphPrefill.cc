@@ -62,88 +62,21 @@ void CudaGraphRunner::capturePrefill() {
 }
 
 std::vector<int> CudaGraphRunner::getPrefillSequenceLengthsToCapture() {
-    std::vector<int> capture_seq_lens;
+    // prefill_capture_seq_lens_ must be provided from Python and cannot be empty
+    RTP_LLM_CHECK_WITH_INFO(!prefill_capture_seq_lens_.empty(),
+                            "prefill_capture_seq_lens_ must be provided from Python and cannot be empty");
 
-    // Calculate the maximum possible sequence length
-    int max_possible_length = max_seq_len_ * max_bs_;
-    RTP_LLM_LOG_INFO("Maximum possible sequence length: %d (max_seq_len_: %d * max_bs_: %d)",
-                     max_possible_length,
-                     max_seq_len_,
-                     max_bs_);
+    RTP_LLM_LOG_INFO("Using prefill capture sequence lengths from Python: %zu lengths",
+                     prefill_capture_seq_lens_.size());
 
-    // Optimized for max sequence length of 16384
-    // 1. Small sequence lengths (10-500): step size 5, covering most short sequences
-    for (int i = 10; i <= std::min(500, max_possible_length); i += 5) {
-        capture_seq_lens.push_back(i);
-    }
+    // Sort and remove duplicates
+    std::vector<int> result = prefill_capture_seq_lens_;
+    std::sort(result.begin(), result.end());
+    result.erase(std::unique(result.begin(), result.end()), result.end());
 
-    // 2. Medium sequence lengths (500-2000): step size 20
-    for (int i = 500; i <= std::min(2000, max_possible_length); i += 20) {
-        capture_seq_lens.push_back(i);
-    }
-
-    // 3. Large sequence lengths (2000-5000): step size 50
-    for (int i = 2000; i <= std::min(5000, max_possible_length); i += 50) {
-        capture_seq_lens.push_back(i);
-    }
-
-    // 4. Extra large sequence lengths (5000-10000): step size 100
-    for (int i = 5000; i <= std::min(10000, max_possible_length); i += 100) {
-        capture_seq_lens.push_back(i);
-    }
-
-    // 5. Very large sequence lengths (10000-16384): step size 128 (more granular for 16K range)
-    for (int i = 10000; i <= std::min(16384, max_possible_length); i += 128) {
-        capture_seq_lens.push_back(i);
-    }
-
-    // 6. Add common power-of-2 lengths and multiples of 512 (common in transformer models)
-    // Optimized for 16K max length
-    std::vector<int> common_lengths = {
-        256,   512,   1024,  1536,  2048,  2560,  3072,  3584,  4096,  4608,  5120,
-        5632,  6144,  6656,  7168,  7680,  8192,  8704,  9216,  9728,  10240, 10752,
-        11264, 11776, 12288, 12800, 13312, 13824, 14336, 14848, 15360, 15872, 16384  // Max 16K
-    };
-
-    // Add common lengths
-    for (int len : common_lengths) {
-        if (len <= max_possible_length) {
-            capture_seq_lens.push_back(len);
-        }
-    }
-
-    std::vector<int> key_lengths = {
-        8915,  703,  2130,  2740,  1389, 1497,  697,   7945,  1097, 14,   10866, 399,  9145, 1580, 1384, 1172, 1992,
-        2238,  629,  8948,  9591,  1919, 10218, 856,   11328, 673,  9227, 2842,  837,  4544, 1644, 1132, 1358, 1240,
-        1120,  1214, 10380, 9130,  115,  240,   11489, 2535,  7437, 1343, 797,   1854, 2454, 9416, 2945, 321,  1220,
-        1726,  1582, 697,   2582,  3149, 8711,  1225,  576,   77,   356,  252,   1283, 685,  248,  1685, 1709, 793,
-        10570, 889,  9517,  10486, 1378, 1406,  2231,  720,   2208, 6614, 7536,  317,  1966, 2377, 7757, 411,  844,
-        1887,  311,  8300,  1780,  971,  7481,  9136,  1293,  10,   1352, 8844,  2081, 2274, 125,  1560, 6};
-
-    // Add key lengths from test data (only those <= 16384)
-    for (int len : key_lengths) {
-        if (len <= std::min(16384, max_possible_length)) {
-            capture_seq_lens.push_back(len);
-        }
-    }
-
-    capture_seq_lens.erase(std::remove_if(capture_seq_lens.begin(),
-                                          capture_seq_lens.end(),
-                                          [&](int len) { return len > max_perfill_cuda_graph_len_; }),
-                           capture_seq_lens.end());
-
-    // Remove duplicates and sort
-    std::sort(capture_seq_lens.begin(), capture_seq_lens.end());
-    capture_seq_lens.erase(std::unique(capture_seq_lens.begin(), capture_seq_lens.end()), capture_seq_lens.end());
-
-    if (max_possible_length <= max_perfill_cuda_graph_len_
-        && capture_seq_lens[capture_seq_lens.size() - 1] != max_possible_length) {
-        capture_seq_lens.push_back(max_possible_length);
-    }
-
-    RTP_LLM_LOG_INFO("Total sequence lengths to capture: %zu", capture_seq_lens.size());
-    RTP_LLM_LOG_INFO("Min length: %d, Max length: %d", capture_seq_lens.front(), capture_seq_lens.back());
-    return capture_seq_lens;
+    RTP_LLM_LOG_INFO(
+        "Total sequence lengths to capture: %zu (min: %d, max: %d)", result.size(), result.front(), result.back());
+    return result;
 }
 
 void CudaGraphRunner::capturePrefillOneSeqLen(int seq_len) {

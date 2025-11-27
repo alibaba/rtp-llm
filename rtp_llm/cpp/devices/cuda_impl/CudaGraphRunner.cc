@@ -1,5 +1,6 @@
 #include <cuda_runtime_api.h>
 #include <torch/torch.h>
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include "ATen/core/TensorBody.h"
@@ -312,6 +313,13 @@ void CudaGraphRunner::initCapture() {
         at::cuda::CUDAGraph graph;
         if (is_prefill_cuda_graph_mode_) {
             capture_range_ = getPrefillSequenceLengthsToCapture();
+            // Set max_perfill_cuda_graph_len_ to the maximum value from capture_range_
+            if (!capture_range_.empty()) {
+                int max_seq_len             = *std::max_element(capture_range_.begin(), capture_range_.end());
+                max_perfill_cuda_graph_len_ = max_seq_len;
+                RTP_LLM_LOG_INFO("Set max_perfill_cuda_graph_len_ to %d (max from capture_range_)",
+                                 max_perfill_cuda_graph_len_);
+            }
         } else {
             capture_range_ = getDecodeBatchSizesToCapture();
         }

@@ -516,12 +516,13 @@ class HWKernelConfig:
     enable_stable_scatter_add: bool
     ft_disable_custom_ar: bool
     num_native_cuda_graph: int
+    prefill_capture_seq_lens: list[int]
     rocm_hipblaslt_config: str
     use_aiter_pa: bool
     use_asm_pa: bool
     use_swizzleA: bool
 
-    def __init__(self, deep_gemm_num_sm: int = -1, arm_gemm_use_kai: bool = False, enable_stable_scatter_add: bool = False, enable_multi_block_mode: bool = True, ft_disable_custom_ar: bool = True, rocm_hipblaslt_config: str = 'gemm_config.csv', use_swizzleA: bool = False, enable_cuda_graph: bool = False, enable_cuda_graph_debug_mode: bool = False, use_aiter_pa: bool = True, use_asm_pa: bool = True, enable_native_cuda_graph: bool = False, num_native_cuda_graph: int = 200) -> None:
+    def __init__(self, deep_gemm_num_sm: int = -1, arm_gemm_use_kai: bool = False, enable_stable_scatter_add: bool = False, enable_multi_block_mode: bool = True, ft_disable_custom_ar: bool = True, rocm_hipblaslt_config: str = 'gemm_config.csv', use_swizzleA: bool = False, enable_cuda_graph: bool = False, enable_cuda_graph_debug_mode: bool = False, use_aiter_pa: bool = True, use_asm_pa: bool = True, enable_native_cuda_graph: bool = False, num_native_cuda_graph: int = 200, prefill_capture_seq_lens: list[int] = ...) -> None:
         ...
 
     def to_string(self) -> str:
