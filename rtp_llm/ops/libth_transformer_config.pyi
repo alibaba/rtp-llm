@@ -672,10 +672,11 @@ class ParallelismDistributedConfig:
     local_world_size: int
     pp_size: int
     tp_size: int
+    use_all_gather: bool
     world_rank: int
     world_size: int
 
-    def __init__(self, tp_size: int = 1, ep_size: int = 1, dp_size: int = 1, pp_size: int = 1, world_size: int = 1, world_rank: int = 0, local_world_size: int = 1, ffn_sp_size: int = 1) -> None:
+    def __init__(self, tp_size: int = 1, ep_size: int = 1, dp_size: int = 1, pp_size: int = 1, world_size: int = 1, world_rank: int = 0, local_world_size: int = 1, ffn_sp_size: int = 1, use_all_gather: bool = False) -> None:
         ...
 
     def to_string(self) -> str:

@@ -32,6 +32,7 @@ void ParallelismDistributedConfig::update_from_env_for_test() {
     world_rank       = autil::EnvUtil::getEnv("WORLD_RANK", 0);
     local_world_size = autil::EnvUtil::getEnv("LOCAL_WORLD_SIZE", 1);
     ffn_sp_size      = autil::EnvUtil::getEnv("FFN_SP_SIZE", 1);
+    use_all_gather   = bool_from_env_for_test("USE_ALL_GATHER", true) && (ep_size == tp_size);
 }
 
 // ParallelismDistributedConfig
@@ -44,7 +45,8 @@ std::string ParallelismDistributedConfig::to_string() const {
         << "world_rank: " << world_rank << "\n"
         << "pp_size: " << pp_size << "\n"
         << "local_world_size: " << local_world_size << "\n"
-        << "ffn_sp_size" << ffn_sp_size;
+        << "ffn_sp_size: " << ffn_sp_size << "\n"
+        << "use_all_gather: " << use_all_gather;
     return oss.str();
 }
 

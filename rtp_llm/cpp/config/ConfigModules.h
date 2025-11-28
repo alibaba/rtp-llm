@@ -13,6 +13,7 @@ struct ParallelismDistributedConfig {
     int         world_rank       = 0;
     int         local_world_size = 1;
     int         ffn_sp_size      = 1;
+    bool        use_all_gather   = false;
     std::string to_string() const;
     void        update_from_env_for_test();
 };

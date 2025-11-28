@@ -535,6 +535,11 @@ class GptInitModelParameters:
     ):
 
         # ParallelismDistributedConfig
+        # Calculate use_all_gather: (USE_ALL_GATHER env is True) and (ep_size == tp_size)
+        use_all_gather_env = get_env_bool("USE_ALL_GATHER", True)
+        use_all_gather = use_all_gather_env and (
+            parallel_info.ep_size == parallel_info.tp_size
+        )
         self.gpt_init_params.parallelism_distributed_config = (
             ParallelismDistributedConfig(
                 tp_size=parallel_info.tp_size,
@@ -545,6 +550,7 @@ class GptInitModelParameters:
                 local_world_size=parallel_info.local_world_size,
                 pp_size=parallel_info.pp_size,
                 ffn_sp_size=parallel_info.ffn_sp_size,
+                use_all_gather=use_all_gather,
             )
         )
 
@@ -938,7 +944,7 @@ class GptInitModelParameters:
         self.local_rank = parallel_info.local_rank
         self.use_all_gather = (
             # default enable since it has better performance in most cases
-            bool(int(os.environ.get("USE_ALL_GATHER", 1)))
+            self.gpt_init_params.parallelism_distributed_config.use_all_gather
             and self.gpt_init_params.ep_size == self.gpt_init_params.tp_size
         )
         logging.info(f"use_all_gather: {self.use_all_gather}")

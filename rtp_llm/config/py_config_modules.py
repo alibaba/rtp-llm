@@ -8,6 +8,7 @@ from rtp_llm.ops import (
     FMHAConfig,
     MiscellaneousConfig,
     ModelSpecificConfig,
+    MoeConfig,
     ParallelismDistributedConfig,
     ProfilingDebugLoggingConfig,
     RoleType,
@@ -854,6 +855,7 @@ class PyEnvConfigs:
         self.fmha_config = FMHAConfig()
         self.misc_config = MiscellaneousConfig()
         self.concurrency_config = ConcurrencyConfig()
+        self.moe_config = MoeConfig()
         self.jit_config = JITConfig()
         self.py_hw_kernel_config = PyHwKernelConfig()
 
@@ -884,6 +886,7 @@ class PyEnvConfigs:
         self.fmha_config.update_from_env()
         self.misc_config.update_from_env()
         self.concurrency_config.update_from_env()
+        self.moe_config.update_from_env()
         self.ffn_disaggregate_config.update_from_env()
         self.jit_config.update_from_env()
         self.py_hw_kernel_config.update_from_env()
@@ -926,6 +929,7 @@ class PyEnvConfigs:
             "[fmha_config]\n" + self.fmha_config.to_string() + "\n\n"
             "[misc_config]\n" + self.misc_config.to_string() + "\n\n"
             "[concurrency_config]\n" + self.concurrency_config.to_string() + "\n\n"
+            "[moe_config]\n" + self.moe_config.to_string() + "\n\n"
             "[jit_config]\n" + self.jit_config.to_string() + "\n\n"
             "[py_hw_kernel_config]\n" + self.py_hw_kernel_config.to_string() + "\n\n"
         )
