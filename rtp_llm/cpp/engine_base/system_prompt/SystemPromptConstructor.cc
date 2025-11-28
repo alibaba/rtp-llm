@@ -26,8 +26,9 @@ absl::StatusOr<std::unordered_map<std::string, SystemPromptParams>> SystemPrompt
         generate_input->request_id      = 0;
         generate_input->input_ids       = std::make_unique<rtp_llm::Buffer>(
             rtp_llm::MEMORY_CPU, rtp_llm::TYPE_INT32, shape, (void*)(tokens_id.data()));
-        generate_input->generate_config       = generate_config;
-        generate_input->need_release_resource = true;
+        generate_input->generate_config = generate_config;
+        // TODO(chanyin): last partial block will be wasted when need_release_resource is false
+        generate_input->need_release_resource = false;
 
         CHECK_AND_RETURN_REF(stream, engine->preRun(generate_input, preRunMode::build_system_prompt));
 
