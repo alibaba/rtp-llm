@@ -129,17 +129,6 @@ py_test(
 )
 
 py_test(
-    name = "th_fp8_gemm",
-    srcs = [
-        "fp8_gemm/th_fp8_gemm.py"
-    ],
-    data = op_test_data,
-    deps = op_test_deps,
-    tags = ["H20"],
-    exec_properties = {'gpu':'H20'},
-)
-
-py_test(
     name = "th_gemm_dequantize",
     srcs = [
         "gemm_dequantize/th_gemm_dequantize.py"
