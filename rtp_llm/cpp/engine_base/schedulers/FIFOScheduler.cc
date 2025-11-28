@@ -88,6 +88,25 @@ void FIFOScheduler::evictDoneStreams(list<GenerateStreamPtr>& streams) {
     }
 }
 
+void FIFOScheduler::evictLoadingCacheDoneStreams() {
+    for (auto it = loading_cache_streams_.begin(); it != loading_cache_streams_.end();) {
+        auto& stream = *it;
+        // must wait load cache done, cause it occupy blocks
+        if (!stream->loadCacheDone()) {
+            it = std::next(it);
+            continue;
+        }
+        stream->checkTimeout();
+        if (stream->stopped() || stream->finished()) {
+            stream->releaseResource();
+            RTP_LLM_LOG_DEBUG("evict stream [%ld]", stream->streamId());
+            it = loading_cache_streams_.erase(it);
+        } else {
+            it = std::next(it);
+        }
+    }
+}
+
 absl::Status FIFOScheduler::enqueue(const GenerateStreamPtr& stream) {
     {
         std::lock_guard<std::mutex> lock(lock_);
@@ -322,13 +341,13 @@ std::list<GenerateStreamPtr> FIFOScheduler::evaluateLoadingCacheStreams() {
         if (stream->setRunning()) {
             RTP_LLM_LOG_DEBUG("stream [%ld] cache load finished, move to running", stream->streamId());
             ready_streams.emplace_back(stream);
+            it = loading_cache_streams_.erase(it);
         } else {
             RTP_LLM_LOG_WARNING("stream [%ld] set running failed after cache load", stream->streamId());
+            // evict it in next iteration
             stream->releaseResource();
-            // move to waiting list
-            waiting_streams_.emplace_back(stream);
+            it = std::next(it);
         }
-        it = loading_cache_streams_.erase(it);
     }
     return ready_streams;
 }
@@ -361,6 +380,7 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule(size_t reserve_s
     evictDoneStreams(waiting_streams_);
     evictDoneStreams(running_streams_);
     evictDoneStreams(remote_running_streams_);
+    evictLoadingCacheDoneStreams();
 
     // TODO(xinfei.sxf) Those who just kicked out of running may join running again immediately.
     auto [fallback_streams, error_streams] = evaluateRunningNext(reserve_step);

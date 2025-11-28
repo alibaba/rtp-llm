@@ -42,6 +42,7 @@ protected:
 
 private:
     void                         evictDoneStreams(std::list<GenerateStreamPtr>& streams);
+    void                         evictLoadingCacheDoneStreams();
     bool                         evaluateNewStream(const std::list<GenerateStreamPtr>& streams,
                                                    const GenerateStreamPtr&            new_stream,
                                                    size_t                              reserve_step);
