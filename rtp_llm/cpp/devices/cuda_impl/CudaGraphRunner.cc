@@ -10,7 +10,6 @@
 #include "rtp_llm/cpp/devices/cuda_impl/CudaFlashInfer.h"
 #include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 #include "rtp_llm/models_py/bindings/OpDefsUtils.h"
-#include "rtp_llm/cpp/devices/utils/DevicePerfWrapper.h"
 using namespace torch_ext;
 namespace rtp_llm {
 
@@ -32,8 +31,9 @@ GraphBase* CudaDevice::getDeviceGraphRunner(const DeviceInitParams& params,
                                             int                     kv_cache_block_offset,
                                             bool                    is_prefill_cuda_graph_mode) {
     if (!graph_runner_) {
-        graph_runner_ = new CudaGraphRunner(
-            params, std::move(py_instance), kv_cache_block_offset, this, is_prefill_cuda_graph_mode);
+        at::cuda::CUDAStream capture_stream = *torch_default_stream_;
+        graph_runner_                       = new CudaGraphRunner(
+            params, std::move(py_instance), kv_cache_block_offset, capture_stream, is_prefill_cuda_graph_mode);
     }
     return graph_runner_;
 }
@@ -69,8 +69,7 @@ void CudaGraphRunner::copySmallerIntoLarger(const torch::Tensor& source_tensor, 
 
 void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
     if (!is_prefill_cuda_graph_mode_) {
-        DevicePerfWrapper wrapper(device_, "cuda graph prefill prepareInputs");
-        auto&             py_model_inputs_ = graph_instances_[current_real_graph_bs_].mem_hold_.py_model_inputs_;
+        auto& py_model_inputs_ = graph_instances_[current_real_graph_bs_].mem_hold_.py_model_inputs_;
 
         // Optimized copies using cudaMemcpy/memcpy
         optimizedCopy(inputs.attention_inputs.input_lengths,
@@ -101,8 +100,7 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
             current_batch_size_,
             seq_size_per_block_);
     } else {
-        DevicePerfWrapper wrapper(device_, "cuda graph prefill prepareInputs");
-        auto&             py_model_inputs_ = graph_instances_[current_real_graph_seq_len_].mem_hold_.py_model_inputs_;
+        auto& py_model_inputs_ = graph_instances_[current_real_graph_seq_len_].mem_hold_.py_model_inputs_;
 
         // Optimized copies using cudaMemcpy/memcpy
         optimizedCopy(inputs.attention_inputs.input_lengths,
@@ -141,7 +139,6 @@ PyModelOutputs CudaGraphRunner::forward(PyModelInputs& inputs) {
     // decode or embedding model only
     if (canRun(inputs)) {
         RTP_LLM_LOG_INFO("Replay Start");
-        DevicePerfWrapper wrapper(device_, "cuda graph replay");
         prepareInputs(inputs);
         if (is_prefill_cuda_graph_mode_) {
             replayPrefill(current_real_graph_seq_len_);

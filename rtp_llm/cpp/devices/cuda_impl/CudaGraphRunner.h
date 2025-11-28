@@ -17,19 +17,18 @@ public:
     CudaGraphRunner(const DeviceInitParams& params,
                     py::object              py_instance,
                     int                     kv_cache_block_offset,
-                    DeviceBase*             device,
+                    at::cuda::CUDAStream    capture_stream,
                     bool                    is_prefill_cuda_graph_mode = false):
         GraphBase(std::move(py_instance)),
         enable_cuda_graph_(params.hw_kernel_config.enable_cuda_graph),
         is_prefill_cuda_graph_mode_(is_prefill_cuda_graph_mode),
-        capture_stream_(at::cuda::getStreamFromPool()),
+        capture_stream_(capture_stream),
         enable_cuda_graph_debug_mode_(params.hw_kernel_config.enable_cuda_graph_debug_mode),
         hidden_size_(params.hidden_size),
         max_seq_len_(params.max_seq_len),
         seq_size_per_block_(params.tokens_per_block),
         kv_cache_block_offset_(kv_cache_block_offset),
-        prefill_capture_seq_lens_(params.hw_kernel_config.prefill_capture_seq_lens),
-        device_(device) {
+        prefill_capture_seq_lens_(params.hw_kernel_config.prefill_capture_seq_lens) {
         py::gil_scoped_acquire gil;
         if (!py_instance_ || py_instance_.is_none()) {
             throw std::runtime_error("CudaGraphRunner constructor: Python instance is null or none.");
@@ -125,8 +124,5 @@ private:
     at::TensorOptions                      options_cuda_int32_;
     at::TensorOptions                      options_cpu_int32_;
     at::TensorOptions                      options_cuda_float_;
-
-public:
-    DeviceBase* device_{nullptr};
 };
 }  // namespace rtp_llm

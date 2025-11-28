@@ -70,9 +70,13 @@ PyModelInputs CudaGraphDecodePaddingOp::buildInputs(int64_t batch_size,
     inputs.attention_inputs.dtype           = torch::kFloat16;
     inputs.attention_inputs.kv_block_offset = 344864;
     // max_bs = 8
-    size_t    cu_len = batch_size + 1;
-    BufferPtr cu_seqlens_buf =
-        cuda_graph_runner_->device_->allocateBuffer({DataType::TYPE_INT32, {cu_len}, AllocationType::HOST});
+    size_t cu_len = batch_size + 1;
+
+    // 使用 torch 创建 cu_seqlens tensor
+    torch::Tensor cu_seqlens_tensor = torch::zeros({int(cu_len)}, options2).pin_memory();
+
+    // 将 torch tensor 转换为 BufferPtr
+    BufferPtr cu_seqlens_buf           = torchTensor2Buffer(cu_seqlens_tensor);
     inputs.attention_inputs.cu_seqlens = Buffer2torchTensor(cu_seqlens_buf, false);
     return inputs;
 }

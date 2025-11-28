@@ -136,13 +136,14 @@ PyModelInputs CudaGraphPrefillOp::buildInputs(int64_t batch_size,
     inputs.attention_inputs.kv_block_offset = 0;
     RTP_LLM_LOG_INFO("kv_cache_block_id_device build success\n");
     // 计算 cu_seqlens
-    size_t    cu_len = batch_size + 1;
-    BufferPtr cu_seqlens_buf =
-        cuda_graph_runner_->device_->allocateBuffer({DataType::TYPE_INT32, {cu_len}, AllocationType::HOST});
+    size_t cu_len = batch_size + 1;
+
+    // 使用 torch 创建 cu_seqlens tensor
+    torch::Tensor cu_seqlens_tensor = torch::zeros({int(cu_len)}, options2).pin_memory();
+    int32_t*      cu_seqlens_data   = cu_seqlens_tensor.data_ptr<int32_t>();
 
     // 手动计算 cu_seqlens - 使用真实有效的长度
-    int32_t* cu_seqlens_data = cu_seqlens_buf->data<int32_t>();
-    int32_t  total_seq_len   = 0;
+    int32_t total_seq_len = 0;
     for (int64_t i = 0; i < batch_size; i++) {
         cu_seqlens_data[i] = total_seq_len;
         if (use_max_padded_mode) {
@@ -156,6 +157,9 @@ PyModelInputs CudaGraphPrefillOp::buildInputs(int64_t batch_size,
         }
     }
     cu_seqlens_data[batch_size] = total_seq_len;
+
+    // 将 torch tensor 转换为 BufferPtr
+    BufferPtr cu_seqlens_buf = torchTensor2Buffer(cu_seqlens_tensor);
     RTP_LLM_LOG_INFO("cu_seqlens_data build success\n");
     inputs.attention_inputs.cu_seqlens = Buffer2torchTensor(cu_seqlens_buf, false);
     if (!use_max_padded_mode) {

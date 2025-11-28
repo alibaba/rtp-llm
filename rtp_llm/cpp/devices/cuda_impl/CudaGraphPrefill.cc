@@ -90,7 +90,7 @@ void CudaGraphRunner::capturePrefillOneSeqLen(int seq_len) {
 
         RTP_LLM_LOG_INFO("WarmUp for seq len %d successfully.", seq_len);
         {
-            CudaGraphStreamLife  stream_life(capture_stream_, device_);
+            CudaGraphStreamLife  stream_life(capture_stream_);
             at::cuda::CUDAGraph& graph               = graph_instances_[seq_len].graph_;
             auto                 output_dot_filename = "";
             if (enable_cuda_graph_debug_mode_) {
