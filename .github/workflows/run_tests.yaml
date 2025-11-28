@@ -40,7 +40,7 @@ jobs:
         
         conda activate py310
         for id in 3 4 5 6 7; do
-          SERVER_PIDS=$(nvitop | awk -v id="$id" '$2 == id {print $3}')
+          SERVER_PIDS=$(nvitop | awk -v id="$id" '$2 == id && $3 ~ /^[0-9]+$/ {print $3}' || true)
           if [ -n "$SERVER_PIDS" ]; then
             echo "Killing processes on GPU $id: $SERVER_PIDS"
             echo "$SERVER_PIDS" | xargs -r sudo kill -9
