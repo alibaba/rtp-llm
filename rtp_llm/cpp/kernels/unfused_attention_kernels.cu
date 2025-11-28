@@ -1029,23 +1029,14 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
     // src QKV: [batch, time, 3, head, hidden]
     int     position_id = position_ids ? position_ids[token_idx * rope_config.index_factor] :
                                          (PREFIX_PROMPT && param.count_length ? seq_idx + prefix_prompt_length : seq_idx);
-    bool    work        = false;
-    bool    is_front    = true;
     Float8_ coef1;
     Float8_ coef2;
     if (bidz < max_k_bidz) {
-        constexpr int rope_size = vector_size<T, vec_t2>::size;
-        const int     rope_idx  = lane_id * rope_size;
-        work                    = (rope_idx >= 0 && rope_idx < rope_config.dim);
-        if (work) {
-            is_front                             = lane_id * vec_size < rope_config.dim / 2;
-            const int idx                        = is_front ? position_id * rope_config.dim + lane_id * 16 :
-                                                              position_id * rope_config.dim + lane_id * 16 - rope_config.dim;
-            *reinterpret_cast<float4*>(&coef1.x) = *(reinterpret_cast<const float4*>(&rope_cache[idx]));
-            *reinterpret_cast<float4*>(&coef1.z) = *(reinterpret_cast<const float4*>(&rope_cache[idx + 4]));
-            *reinterpret_cast<float4*>(&coef2.x) = *(reinterpret_cast<const float4*>(&rope_cache[idx + 8]));
-            *reinterpret_cast<float4*>(&coef2.z) = *(reinterpret_cast<const float4*>(&rope_cache[idx + 12]));
-        }
+        const int idx                        = position_id * rope_config.dim + lane_id * 16;
+        *reinterpret_cast<float4*>(&coef1.x) = *(reinterpret_cast<const float4*>(&rope_cache[idx]));
+        *reinterpret_cast<float4*>(&coef1.z) = *(reinterpret_cast<const float4*>(&rope_cache[idx + 4]));
+        *reinterpret_cast<float4*>(&coef2.x) = *(reinterpret_cast<const float4*>(&rope_cache[idx + 8]));
+        *reinterpret_cast<float4*>(&coef2.z) = *(reinterpret_cast<const float4*>(&rope_cache[idx + 12]));
     }
 
     if (bidz < max_q_bidz) {
@@ -1062,12 +1053,8 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
         size_t    hidden_idx = head_idx * size_per_head + lane_id * vec_size;
         size_t    src_q_idx  = token_idx * (n + 2 * kv_n) + hidden_idx;
 
-        size_t permuted_hidden_idx = 0;
-        size_t src_q_permuted_idx  = 0;
-        if (work) {
-            permuted_hidden_idx = is_front ? hidden_idx + rope_config.dim / 2 : hidden_idx - rope_config.dim / 2;
-            src_q_permuted_idx  = is_front ? src_q_idx + rope_config.dim / 2 : src_q_idx - rope_config.dim / 2;
-        }
+        size_t hidden_permuted_idx = hidden_idx + rope_config.dim / 2;
+        size_t src_q_permuted_idx  = src_q_idx + rope_config.dim / 2;
 
         size_t dest_qkv_idx = 0;
         if constexpr (USE_PAGED_FMHA) {
@@ -1077,9 +1064,11 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
             dest_qkv_idx = batch_idx * size_per_head * seq_len * head_num + head_idx * size_per_head * seq_len
                            + seq_idx * size_per_head + lane_id * vec_size;
         }
+        size_t dest_qkv_permuted_idx = dest_qkv_idx + rope_config.dim / 2;
 
         size_t dest_q_no_transpose_idx =
             (pre_len + seq_idx) * head_num * size_per_head + head_idx * size_per_head + lane_id * vec_size;
+        size_t dest_q_permuted_no_transpose_idx = dest_q_no_transpose_idx + rope_config.dim / 2;
 
         size_t dest_q_idx = 0;
         if constexpr (USE_PAGED_FMHA) {
@@ -1088,20 +1077,17 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
             dest_q_idx = batch_idx * size_per_head * seq_len * head_num + head_idx * size_per_head * seq_len
                          + seq_idx * size_per_head + lane_id * vec_size;
         }
+        size_t dest_q_permuted_idx = dest_q_idx + rope_config.dim / 2;
 
-        *reinterpret_cast<int4*>(&q[q_load_idx]) = *reinterpret_cast<int4*>(&QKV[src_q_idx]);
-        if (work) {
-            *reinterpret_cast<int4*>(&q_permuted[q_load_idx]) = *reinterpret_cast<int4*>(&QKV[src_q_permuted_idx]);
-        }
+        *reinterpret_cast<int4*>(&q[q_load_idx])          = *reinterpret_cast<int4*>(&QKV[src_q_idx]);
+        *reinterpret_cast<int4*>(&q_permuted[q_load_idx]) = *reinterpret_cast<int4*>(&QKV[src_q_permuted_idx]);
 
         if (qkv_bias) {
             *reinterpret_cast<int4*>(&q_bias[q_load_idx]) = *reinterpret_cast<const int4*>(&qkv_bias[hidden_idx]);
-            q[q_load_idx]                                 = add(q[q_load_idx], q_bias[q_load_idx]);
-            if (work) {
-                *reinterpret_cast<int4*>(&q_permuted_bias[q_load_idx]) =
-                    *reinterpret_cast<const int4*>(&qkv_bias[permuted_hidden_idx]);
-                q_permuted[q_load_idx] = add(q_permuted[q_load_idx], q_permuted_bias[q_load_idx]);
-            }
+            *reinterpret_cast<int4*>(&q_permuted_bias[q_load_idx]) =
+                *reinterpret_cast<const int4*>(&qkv_bias[hidden_permuted_idx]);
+            q[q_load_idx]          = add(q[q_load_idx], q_bias[q_load_idx]);
+            q_permuted[q_load_idx] = add(q_permuted[q_load_idx], q_permuted_bias[q_load_idx]);
         }
 
 #pragma unroll
@@ -1111,45 +1097,52 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
             ++head_idx;
             hidden_idx += size_per_head;
             src_q_idx += size_per_head;
+            hidden_permuted_idx += size_per_head;
+            src_q_permuted_idx += size_per_head;
 
-            *reinterpret_cast<int4*>(&q[q_load_idx]) = *reinterpret_cast<int4*>(&QKV[src_q_idx]);
-            if (work) {
-                permuted_hidden_idx += size_per_head;
-                src_q_permuted_idx += size_per_head;
-                *reinterpret_cast<int4*>(&q_permuted[q_load_idx]) = *reinterpret_cast<int4*>(&QKV[src_q_permuted_idx]);
-            }
+            *reinterpret_cast<int4*>(&q[q_load_idx])          = *reinterpret_cast<int4*>(&QKV[src_q_idx]);
+            *reinterpret_cast<int4*>(&q_permuted[q_load_idx]) = *reinterpret_cast<int4*>(&QKV[src_q_permuted_idx]);
 
             if (qkv_bias) {
                 *reinterpret_cast<int4*>(&q_bias[q_load_idx]) = *reinterpret_cast<const int4*>(&qkv_bias[hidden_idx]);
-                q[q_load_idx]                                 = add(q[q_load_idx], q_bias[q_load_idx]);
-                if (work) {
-                    *reinterpret_cast<int4*>(&q_permuted_bias[q_load_idx]) =
-                        *reinterpret_cast<const int4*>(&qkv_bias[permuted_hidden_idx]);
-                    q_permuted[q_load_idx] = add(q_permuted[q_load_idx], q_permuted_bias[q_load_idx]);
-                }
+                *reinterpret_cast<int4*>(&q_permuted_bias[q_load_idx]) =
+                    *reinterpret_cast<const int4*>(&qkv_bias[hidden_permuted_idx]);
+                q[q_load_idx]          = add(q[q_load_idx], q_bias[q_load_idx]);
+                q_permuted[q_load_idx] = add(q_permuted[q_load_idx], q_permuted_bias[q_load_idx]);
             }
 
             apply_rope_with_cache<vec_t2, T, Float8_, ROPE_STYLE>(
-                q[q_store_idx], q_permuted[q_store_idx], coef1, coef2, work, is_front);
+                q[q_store_idx], q_permuted[q_store_idx], coef1, coef2);
 
             if (use_logn_attn) {
                 logn_attention(q[q_store_idx], seq_idx, rope_config.max_pos);
+                logn_attention(q_permuted[q_store_idx], seq_idx, rope_config.max_pos);
             }
 
             if (store_qkv) {
-                *reinterpret_cast<int4*>(&QKV[src_q_idx]) = *reinterpret_cast<int4*>(&q[q_store_idx]);
+                *reinterpret_cast<int4*>(&QKV[src_q_idx])          = *reinterpret_cast<int4*>(&q[q_store_idx]);
+                *reinterpret_cast<int4*>(&QKV[src_q_permuted_idx]) = *reinterpret_cast<int4*>(&q_permuted[q_store_idx]);
 #ifdef ENABLE_FP8
                 if (QuantizedQKV != nullptr) {
                     *reinterpret_cast<int4*>(&q_buf[dest_qkv_idx]) = *reinterpret_cast<int4*>(&q[q_store_idx]);
+                    *reinterpret_cast<int4*>(&q_buf[dest_qkv_permuted_idx]) =
+                        *reinterpret_cast<int4*>(&q_permuted[q_store_idx]);
                     QuantizedVecType* quantized_q_ptr =
                         USE_PAGED_FMHA ? reinterpret_ptr<QuantizedEltType, QuantizedVecType>(q_buf, dest_qkv_idx) :
                                          reinterpret_ptr<QuantizedEltType, QuantizedVecType>(QuantizedQKV, src_q_idx);
+                    QuantizedVecType* quantized_q_permuted_ptr =
+                        USE_PAGED_FMHA ?
+                            reinterpret_ptr<QuantizedEltType, QuantizedVecType>(q_buf, dest_qkv_permuted_idx) :
+                            reinterpret_ptr<QuantizedEltType, QuantizedVecType>(QuantizedQKV, src_q_permuted_idx);
                     convert_to_fp8(quantized_q_ptr, q[q_store_idx]);
+                    convert_to_fp8(quantized_q_permuted_ptr, q_permuted[q_store_idx]);
 
                     if constexpr (USE_PAGED_FMHA) {
                         dest_qkv_idx += size_per_head;
+                        dest_qkv_permuted_idx += size_per_head;
                     } else {
                         dest_qkv_idx += (size_per_head * seq_len);
+                        dest_qkv_permuted_idx += (size_per_head * seq_len);
                     }
                 }
 #endif
@@ -1158,7 +1151,10 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
             if (store_q_no_transpose) {
                 *reinterpret_cast<int4*>(&q_no_transpose_buf[dest_q_no_transpose_idx]) =
                     *reinterpret_cast<int4*>(&q[q_store_idx]);
+                *reinterpret_cast<int4*>(&q_no_transpose_buf[dest_q_permuted_no_transpose_idx]) =
+                    *reinterpret_cast<int4*>(&q_permuted[q_store_idx]);
                 dest_q_no_transpose_idx += size_per_head;
+                dest_q_permuted_no_transpose_idx += size_per_head;
             }
 
             if (store_q) {
@@ -1168,42 +1164,61 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
                     QuantizedVecType* quantized_q_ptr =
                         USE_PAGED_FMHA ? reinterpret_ptr<QuantizedEltType, QuantizedVecType>(q_buf, dest_q_idx) :
                                          reinterpret_ptr<QuantizedEltType, QuantizedVecType>(QuantizedQKV, src_q_idx);
+                    QuantizedVecType* quantized_q_permuted_ptr =
+                        USE_PAGED_FMHA ?
+                            reinterpret_ptr<QuantizedEltType, QuantizedVecType>(q_buf, dest_q_permuted_idx) :
+                            reinterpret_ptr<QuantizedEltType, QuantizedVecType>(QuantizedQKV, src_q_permuted_idx);
                     convert_to_fp8(quantized_q_ptr, q[q_store_idx]);
+                    convert_to_fp8(quantized_q_permuted_ptr, q_permuted[q_store_idx]);
                 } else {
                     // paged fmha
                     *reinterpret_cast<int4*>(&q_buf[dest_q_idx]) = *reinterpret_cast<int4*>(&q[q_store_idx]);
+                    *reinterpret_cast<int4*>(&q_buf[dest_q_permuted_idx]) =
+                        *reinterpret_cast<int4*>(&q_permuted[q_store_idx]);
                 }
 #else
                 // paged fmha
                 *reinterpret_cast<int4*>(&q_buf[dest_q_idx]) = *reinterpret_cast<int4*>(&q[q_store_idx]);
+                *reinterpret_cast<int4*>(&q_buf[dest_q_permuted_idx]) =
+                    *reinterpret_cast<int4*>(&q_permuted[q_store_idx]);
 #endif
 
                 if constexpr (USE_PAGED_FMHA) {
                     dest_q_idx += size_per_head;
+                    dest_q_permuted_idx += size_per_head;
                 } else {
                     dest_q_idx += (size_per_head * seq_len);
+                    dest_q_permuted_idx += (size_per_head * seq_len);
                 }
             }
 
             q_store_idx ^= q_idx_off;
         }
 
-        apply_rope_with_cache<vec_t2, T, Float8_, ROPE_STYLE>(
-            q[q_store_idx], q_permuted[q_store_idx], coef1, coef2, work, is_front);
+        apply_rope_with_cache<vec_t2, T, Float8_, ROPE_STYLE>(q[q_store_idx], q_permuted[q_store_idx], coef1, coef2);
 
         if (use_logn_attn) {
             logn_attention(q[q_store_idx], seq_idx, rope_config.max_pos);
+            logn_attention(q_permuted[q_store_idx], seq_idx, rope_config.max_pos);
         }
 
         if (store_qkv) {
-            *reinterpret_cast<int4*>(&QKV[src_q_idx]) = *reinterpret_cast<int4*>(&q[q_store_idx]);
+            *reinterpret_cast<int4*>(&QKV[src_q_idx])          = *reinterpret_cast<int4*>(&q[q_store_idx]);
+            *reinterpret_cast<int4*>(&QKV[src_q_permuted_idx]) = *reinterpret_cast<int4*>(&q_permuted[q_store_idx]);
 #ifdef ENABLE_FP8
             if (QuantizedQKV != nullptr) {
                 *reinterpret_cast<int4*>(&q_buf[dest_qkv_idx]) = *reinterpret_cast<int4*>(&q[q_store_idx]);
+                *reinterpret_cast<int4*>(&q_buf[dest_qkv_permuted_idx]) =
+                    *reinterpret_cast<int4*>(&q_permuted[q_store_idx]);
                 QuantizedVecType* quantized_q_ptr =
                     USE_PAGED_FMHA ? reinterpret_ptr<QuantizedEltType, QuantizedVecType>(q_buf, dest_qkv_idx) :
                                      reinterpret_ptr<QuantizedEltType, QuantizedVecType>(QuantizedQKV, src_q_idx);
+                QuantizedVecType* quantized_q_permuted_ptr =
+                    USE_PAGED_FMHA ?
+                        reinterpret_ptr<QuantizedEltType, QuantizedVecType>(q_buf, dest_qkv_permuted_idx) :
+                        reinterpret_ptr<QuantizedEltType, QuantizedVecType>(QuantizedQKV, src_q_permuted_idx);
                 convert_to_fp8(quantized_q_ptr, q[q_store_idx]);
+                convert_to_fp8(quantized_q_permuted_ptr, q_permuted[q_store_idx]);
             }
 #endif
         }
@@ -1211,6 +1226,8 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
         if (store_q_no_transpose) {
             *reinterpret_cast<int4*>(&q_no_transpose_buf[dest_q_no_transpose_idx]) =
                 *reinterpret_cast<int4*>(&q[q_store_idx]);
+            *reinterpret_cast<int4*>(&q_no_transpose_buf[dest_q_permuted_no_transpose_idx]) =
+                *reinterpret_cast<int4*>(&q_permuted[q_store_idx]);
         }
 
         if (store_q) {
@@ -1220,14 +1237,22 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
                 QuantizedVecType* quantized_q_ptr =
                     USE_PAGED_FMHA ? reinterpret_ptr<QuantizedEltType, QuantizedVecType>(q_buf, dest_q_idx) :
                                      reinterpret_ptr<QuantizedEltType, QuantizedVecType>(QuantizedQKV, src_q_idx);
+                QuantizedVecType* quantized_q_permuted_ptr =
+                    USE_PAGED_FMHA ?
+                        reinterpret_ptr<QuantizedEltType, QuantizedVecType>(q_buf, dest_q_permuted_idx) :
+                        reinterpret_ptr<QuantizedEltType, QuantizedVecType>(QuantizedQKV, src_q_permuted_idx);
                 convert_to_fp8(quantized_q_ptr, q[q_store_idx]);
+                convert_to_fp8(quantized_q_permuted_ptr, q_permuted[q_store_idx]);
             } else {
                 // paged fmha
                 *reinterpret_cast<int4*>(&q_buf[dest_q_idx]) = *reinterpret_cast<int4*>(&q[q_store_idx]);
+                *reinterpret_cast<int4*>(&q_buf[dest_q_permuted_idx]) =
+                    *reinterpret_cast<int4*>(&q_permuted[q_store_idx]);
             }
 #else
             // paged fmha
-            *reinterpret_cast<int4*>(&q_buf[dest_q_idx]) = *reinterpret_cast<int4*>(&q[q_store_idx]);
+            *reinterpret_cast<int4*>(&q_buf[dest_q_idx])          = *reinterpret_cast<int4*>(&q[q_store_idx]);
+            *reinterpret_cast<int4*>(&q_buf[dest_q_permuted_idx]) = *reinterpret_cast<int4*>(&q_permuted[q_store_idx]);
 #endif
         }
     } else if (bidz < max_k_bidz) {
@@ -1243,46 +1268,42 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
         size_t hidden_idx = head_idx * size_per_head + lane_id * vec_size;
         size_t src_k_idx  = token_idx * (n + 2 * kv_n) + hidden_idx + n;
 
-        size_t permuted_hidden_idx = 0;
-        size_t src_k_permuted_idx  = 0;
-        if (work) {
-            permuted_hidden_idx = is_front ? hidden_idx + rope_config.dim / 2 : hidden_idx - rope_config.dim / 2;
-            src_k_permuted_idx  = is_front ? src_k_idx + rope_config.dim / 2 : src_k_idx - rope_config.dim / 2;
-        }
+        size_t hidden_permuted_idx = hidden_idx + rope_config.dim / 2;
+        size_t src_k_permuted_idx  = src_k_idx + rope_config.dim / 2;
 
         const int dst_kv_seq_idx = seq_idx + prefix_prompt_length;
         size_t    dest_kv_idx    = batch_idx * size_per_head * total_seq_len * head_num_kv
                              + head_idx * size_per_head * total_seq_len + dst_kv_seq_idx * size_per_head
                              + lane_id * vec_size;
+        size_t dest_kv_permuted_idx = dest_kv_idx + rope_config.dim / 2;
 
-        KVBlockArray kv_block_array = param.kv_block_array;
-        const float  scale          = 1.f;
-        Tcache*      k_cache        = nullptr;
-        int          inBlockIdx     = -1;
-        float*       k_scale_ptr    = nullptr;
-        int          inScaleIdx     = -1;
+        KVBlockArray kv_block_array      = param.kv_block_array;
+        const float  scale               = 1.f;
+        Tcache*      k_cache             = nullptr;
+        int          inBlockIdx          = -1;
+        int          inBlockIdx_permuted = -1;
+        float*       k_scale_ptr         = nullptr;
+        int          inScaleIdx          = -1;
         if (store_cache) {
             k_cache    = reinterpret_cast<Tcache*>(kv_block_array.getKBlockPtr(batch_idx, dst_kv_seq_idx));
             inBlockIdx = kv_block_array.getKVLocalIdx(dst_kv_seq_idx, head_idx, size_per_head, lane_id * vec_size);
+            inBlockIdx_permuted = kv_block_array.getKVLocalIdx(
+                dst_kv_seq_idx, head_idx, size_per_head, lane_id * vec_size + rope_config.dim / 2);
             if constexpr (ENABLE_8BITS_CACHE) {
                 k_scale_ptr = reinterpret_cast<float*>(kv_block_array.getKScalePtr(batch_idx, dst_kv_seq_idx));
                 inScaleIdx  = kv_block_array.getKVScaleLocalIdx(dst_kv_seq_idx, head_idx);
             }
         }
 
-        *reinterpret_cast<int4*>(&k[k_load_idx]) = *reinterpret_cast<int4*>(&QKV[src_k_idx]);
-        if (work) {
-            *reinterpret_cast<int4*>(&k_permuted[k_load_idx]) = *reinterpret_cast<int4*>(&QKV[src_k_permuted_idx]);
-        }
+        *reinterpret_cast<int4*>(&k[k_load_idx])          = *reinterpret_cast<int4*>(&QKV[src_k_idx]);
+        *reinterpret_cast<int4*>(&k_permuted[k_load_idx]) = *reinterpret_cast<int4*>(&QKV[src_k_permuted_idx]);
 
         if (qkv_bias) {
             *reinterpret_cast<int4*>(&k_bias[k_load_idx]) = *reinterpret_cast<const int4*>(&qkv_bias[hidden_idx + n]);
-            k[k_load_idx]                                 = add(k[k_load_idx], k_bias[k_load_idx]);
-            if (work) {
-                *reinterpret_cast<int4*>(&k_permuted_bias[k_load_idx]) =
-                    *reinterpret_cast<const int4*>(&qkv_bias[permuted_hidden_idx + n]);
-                k_permuted[k_load_idx] = add(k_permuted[k_load_idx], k_permuted_bias[k_load_idx]);
-            }
+            *reinterpret_cast<int4*>(&k_permuted_bias[k_load_idx]) =
+                *reinterpret_cast<const int4*>(&qkv_bias[hidden_permuted_idx + n]);
+            k[k_load_idx]          = add(k[k_load_idx], k_bias[k_load_idx]);
+            k_permuted[k_load_idx] = add(k_permuted[k_load_idx], k_permuted_bias[k_load_idx]);
         }
 
 #pragma unroll
@@ -1292,27 +1313,23 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
             ++head_idx;
             hidden_idx += size_per_head;
             src_k_idx += size_per_head;
+            hidden_permuted_idx += size_per_head;
+            src_k_permuted_idx += size_per_head;
 
-            *reinterpret_cast<int4*>(&k[k_load_idx]) = *reinterpret_cast<const int4*>(&QKV[src_k_idx]);
-            if (work) {
-                permuted_hidden_idx += size_per_head;
-                src_k_permuted_idx += size_per_head;
-                *reinterpret_cast<int4*>(&k_permuted[k_load_idx]) = *reinterpret_cast<int4*>(&QKV[src_k_permuted_idx]);
-            }
+            *reinterpret_cast<int4*>(&k[k_load_idx])          = *reinterpret_cast<int4*>(&QKV[src_k_idx]);
+            *reinterpret_cast<int4*>(&k_permuted[k_load_idx]) = *reinterpret_cast<int4*>(&QKV[src_k_permuted_idx]);
 
             if (qkv_bias) {
                 *reinterpret_cast<int4*>(&k_bias[k_load_idx]) =
                     *reinterpret_cast<const int4*>(&qkv_bias[hidden_idx + n]);
-                k[k_load_idx] = add(k[k_load_idx], k_bias[k_load_idx]);
-                if (work) {
-                    *reinterpret_cast<int4*>(&k_permuted_bias[k_load_idx]) =
-                        *reinterpret_cast<const int4*>(&qkv_bias[permuted_hidden_idx + n]);
-                    k_permuted[k_load_idx] = add(k_permuted[k_load_idx], k_permuted_bias[k_load_idx]);
-                }
+                *reinterpret_cast<int4*>(&k_permuted_bias[k_load_idx]) =
+                    *reinterpret_cast<const int4*>(&qkv_bias[hidden_permuted_idx + n]);
+                k[k_load_idx]          = add(k[k_load_idx], k_bias[k_load_idx]);
+                k_permuted[k_load_idx] = add(k_permuted[k_load_idx], k_permuted_bias[k_load_idx]);
             }
 
             apply_rope_with_cache<vec_t2, T, Float8_, ROPE_STYLE>(
-                k[k_store_idx], k_permuted[k_store_idx], coef1, coef2, work, is_front);
+                k[k_store_idx], k_permuted[k_store_idx], coef1, coef2);
 
             if (store_qkv) {
 #ifdef ENABLE_FP8
@@ -1321,27 +1338,39 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
                     convert_to_fp8(reinterpret_cast<QuantizedVecType*>(reinterpret_cast<QuantizedEltType*>(QuantizedQKV)
                                                                        + src_k_idx),
                                    k[k_store_idx]);
+                    convert_to_fp8(reinterpret_cast<QuantizedVecType*>(reinterpret_cast<QuantizedEltType*>(QuantizedQKV)
+                                                                       + src_k_permuted_idx),
+                                   k_permuted[k_store_idx]);
                 }
 #endif
-                *reinterpret_cast<int4*>(&QKV[src_k_idx]) = *reinterpret_cast<int4*>(&k[k_store_idx]);
+                *reinterpret_cast<int4*>(&QKV[src_k_idx])          = *reinterpret_cast<int4*>(&k[k_store_idx]);
+                *reinterpret_cast<int4*>(&QKV[src_k_permuted_idx]) = *reinterpret_cast<int4*>(&k_permuted[k_store_idx]);
             }
 
             if (store_kv) {
                 *reinterpret_cast<int4*>(&k_buf[dest_kv_idx]) = *reinterpret_cast<int4*>(&k[k_store_idx]);
+                *reinterpret_cast<int4*>(&k_buf[dest_kv_permuted_idx]) =
+                    *reinterpret_cast<int4*>(&k_permuted[k_store_idx]);
                 dest_kv_idx += (size_per_head * total_seq_len);
+                dest_kv_permuted_idx += (size_per_head * total_seq_len);
             }
 
             if (store_cache) {
                 if constexpr (ENABLE_8BITS_CACHE) {
                     store_8bits_kv_cache_vec(k_cache, k[k_store_idx], inBlockIdx, scale);
+                    store_8bits_kv_cache_vec(k_cache, k_permuted[k_store_idx], inBlockIdx_permuted, scale);
                     if (lane_id == 0) {
                         *reinterpret_cast<float*>(&k_scale_ptr[inScaleIdx]) = scale;
                     }
                 } else {
                     *reinterpret_cast<int4*>(&k_cache[inBlockIdx]) = *reinterpret_cast<int4*>(&k[k_store_idx]);
+                    *reinterpret_cast<int4*>(&k_cache[inBlockIdx_permuted]) =
+                        *reinterpret_cast<int4*>(&k_permuted[k_store_idx]);
                 }
 
                 inBlockIdx = kv_block_array.getKVLocalIdx(dst_kv_seq_idx, head_idx, size_per_head, lane_id * vec_size);
+                inBlockIdx_permuted = kv_block_array.getKVLocalIdx(
+                    dst_kv_seq_idx, head_idx, size_per_head, lane_id * vec_size + rope_config.dim / 2);
                 if constexpr (ENABLE_8BITS_CACHE) {
                     inScaleIdx = kv_block_array.getKVScaleLocalIdx(dst_kv_seq_idx, head_idx);
                 }
@@ -1350,8 +1379,7 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
             k_store_idx ^= k_idx_off;
         }
 
-        apply_rope_with_cache<vec_t2, T, Float8_, ROPE_STYLE>(
-            k[k_store_idx], k_permuted[k_store_idx], coef1, coef2, work, is_front);
+        apply_rope_with_cache<vec_t2, T, Float8_, ROPE_STYLE>(k[k_store_idx], k_permuted[k_store_idx], coef1, coef2);
 
         if (store_qkv) {
 #ifdef ENABLE_FP8
@@ -1360,28 +1388,38 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
                 convert_to_fp8(
                     reinterpret_cast<QuantizedVecType*>(reinterpret_cast<QuantizedEltType*>(QuantizedQKV) + src_k_idx),
                     k[k_store_idx]);
+                convert_to_fp8(reinterpret_cast<QuantizedVecType*>(reinterpret_cast<QuantizedEltType*>(QuantizedQKV)
+                                                                   + src_k_permuted_idx),
+                               k_permuted[k_store_idx]);
             }
 #endif
-            *reinterpret_cast<int4*>(&QKV[src_k_idx]) = *reinterpret_cast<int4*>(&k[k_store_idx]);
+            *reinterpret_cast<int4*>(&QKV[src_k_idx])          = *reinterpret_cast<int4*>(&k[k_store_idx]);
+            *reinterpret_cast<int4*>(&QKV[src_k_permuted_idx]) = *reinterpret_cast<int4*>(&k_permuted[k_store_idx]);
         }
 
         if (store_kv) {
-            *reinterpret_cast<int4*>(&k_buf[dest_kv_idx]) = *reinterpret_cast<int4*>(&k[k_store_idx]);
+            *reinterpret_cast<int4*>(&k_buf[dest_kv_idx])          = *reinterpret_cast<int4*>(&k[k_store_idx]);
+            *reinterpret_cast<int4*>(&k_buf[dest_kv_permuted_idx]) = *reinterpret_cast<int4*>(&k_permuted[k_store_idx]);
         }
 
         if (store_cache) {
             if constexpr (ENABLE_8BITS_CACHE) {
                 store_8bits_kv_cache_vec(k_cache, k[k_store_idx], inBlockIdx, scale);
+                store_8bits_kv_cache_vec(k_cache, k_permuted[k_store_idx], inBlockIdx_permuted, scale);
                 if (lane_id == 0) {
                     *reinterpret_cast<float*>(&k_scale_ptr[inScaleIdx]) = scale;
                 }
             } else {
                 *reinterpret_cast<int4*>(&k_cache[inBlockIdx]) = *reinterpret_cast<int4*>(&k[k_store_idx]);
+                *reinterpret_cast<int4*>(&k_cache[inBlockIdx_permuted]) =
+                    *reinterpret_cast<int4*>(&k_permuted[k_store_idx]);
             }
         }
     } else {
         vec_t2 v[2];
+        vec_t2 v_permuted[2];
         vec_t2 v_bias[2];
+        vec_t2 v_permuted_bias[2];
         int    v_load_idx  = 0;
         int    v_store_idx = 0;
         int    v_idx_off   = 1;
@@ -1390,32 +1428,43 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
         size_t hidden_idx = head_idx * size_per_head + lane_id * vec_size;
         size_t src_v_idx  = token_idx * (n + 2 * kv_n) + hidden_idx + n + kv_n;
 
+        size_t hidden_permuted_idx = hidden_idx + rope_config.dim / 2;
+        size_t src_v_permuted_idx  = src_v_idx + rope_config.dim / 2;
+
         const int dst_kv_seq_idx = seq_idx + prefix_prompt_length;
         size_t    dest_kv_idx    = batch_idx * size_per_head * total_seq_len * head_num_kv
                              + head_idx * size_per_head * total_seq_len + dst_kv_seq_idx * size_per_head
                              + lane_id * vec_size;
+        size_t dest_kv_permuted_idx = dest_kv_idx + rope_config.dim / 2;
 
-        KVBlockArray kv_block_array = param.kv_block_array;
-        const float  scale          = 1.f;
-        Tcache*      v_cache        = nullptr;
-        int          inBlockIdx     = -1;
-        float*       v_scale_ptr    = nullptr;
-        int          inScaleIdx     = -1;
+        KVBlockArray kv_block_array      = param.kv_block_array;
+        const float  scale               = 1.f;
+        Tcache*      v_cache             = nullptr;
+        int          inBlockIdx          = -1;
+        int          inBlockIdx_permuted = -1;
+        float*       v_scale_ptr         = nullptr;
+        int          inScaleIdx          = -1;
         if (store_cache) {
             v_cache    = reinterpret_cast<Tcache*>(kv_block_array.getVBlockPtr(batch_idx, dst_kv_seq_idx));
             inBlockIdx = kv_block_array.getKVLocalIdx(dst_kv_seq_idx, head_idx, size_per_head, lane_id * vec_size);
+            inBlockIdx_permuted = kv_block_array.getKVLocalIdx(
+                dst_kv_seq_idx, head_idx, size_per_head, lane_id * vec_size + rope_config.dim / 2);
             if constexpr (ENABLE_8BITS_CACHE) {
                 v_scale_ptr = reinterpret_cast<float*>(kv_block_array.getVScalePtr(batch_idx, dst_kv_seq_idx));
                 inScaleIdx  = kv_block_array.getKVScaleLocalIdx(dst_kv_seq_idx, head_idx);
             }
         }
 
-        *reinterpret_cast<int4*>(&v[v_load_idx]) = *reinterpret_cast<int4*>(&QKV[src_v_idx]);
+        *reinterpret_cast<int4*>(&v[v_load_idx])          = *reinterpret_cast<int4*>(&QKV[src_v_idx]);
+        *reinterpret_cast<int4*>(&v_permuted[v_load_idx]) = *reinterpret_cast<int4*>(&QKV[src_v_permuted_idx]);
 
         if (qkv_bias) {
             *reinterpret_cast<int4*>(&v_bias[v_load_idx]) =
                 *reinterpret_cast<const int4*>(&qkv_bias[hidden_idx + n + kv_n]);
-            v[v_load_idx] = add(v[v_load_idx], v_bias[v_load_idx]);
+            *reinterpret_cast<int4*>(&v_permuted_bias[v_load_idx]) =
+                *reinterpret_cast<const int4*>(&qkv_bias[hidden_permuted_idx + n + kv_n]);
+            v[v_load_idx]          = add(v[v_load_idx], v_bias[v_load_idx]);
+            v_permuted[v_load_idx] = add(v_permuted[v_load_idx], v_permuted_bias[v_load_idx]);
         }
 
 #pragma unroll
@@ -1425,13 +1474,19 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
             ++head_idx;
             hidden_idx += size_per_head;
             src_v_idx += size_per_head;
+            hidden_permuted_idx += size_per_head;
+            src_v_permuted_idx += size_per_head;
 
-            *reinterpret_cast<int4*>(&v[v_load_idx]) = *reinterpret_cast<const int4*>(&QKV[src_v_idx]);
+            *reinterpret_cast<int4*>(&v[v_load_idx])          = *reinterpret_cast<int4*>(&QKV[src_v_idx]);
+            *reinterpret_cast<int4*>(&v_permuted[v_load_idx]) = *reinterpret_cast<int4*>(&QKV[src_v_permuted_idx]);
 
             if (qkv_bias) {
                 *reinterpret_cast<int4*>(&v_bias[v_load_idx]) =
                     *reinterpret_cast<const int4*>(&qkv_bias[hidden_idx + n + kv_n]);
-                v[v_load_idx] = add(v[v_load_idx], v_bias[v_load_idx]);
+                *reinterpret_cast<int4*>(&v_permuted_bias[v_load_idx]) =
+                    *reinterpret_cast<const int4*>(&qkv_bias[hidden_permuted_idx + n + kv_n]);
+                v[v_load_idx]          = add(v[v_load_idx], v_bias[v_load_idx]);
+                v_permuted[v_load_idx] = add(v_permuted[v_load_idx], v_permuted_bias[v_load_idx]);
             }
 
             if (store_qkv) {
@@ -1441,27 +1496,39 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
                     convert_to_fp8(reinterpret_cast<QuantizedVecType*>(reinterpret_cast<QuantizedEltType*>(QuantizedQKV)
                                                                        + src_v_idx),
                                    v[v_store_idx]);
+                    convert_to_fp8(reinterpret_cast<QuantizedVecType*>(reinterpret_cast<QuantizedEltType*>(QuantizedQKV)
+                                                                       + src_v_permuted_idx),
+                                   v_permuted[v_store_idx]);
                 }
 #endif
-                *reinterpret_cast<int4*>(&QKV[src_v_idx]) = *reinterpret_cast<int4*>(&v[v_store_idx]);
+                *reinterpret_cast<int4*>(&QKV[src_v_idx])          = *reinterpret_cast<int4*>(&v[v_store_idx]);
+                *reinterpret_cast<int4*>(&QKV[src_v_permuted_idx]) = *reinterpret_cast<int4*>(&v_permuted[v_store_idx]);
             }
 
             if (store_kv) {
                 *reinterpret_cast<int4*>(&v_buf[dest_kv_idx]) = *reinterpret_cast<int4*>(&v[v_store_idx]);
+                *reinterpret_cast<int4*>(&v_buf[dest_kv_permuted_idx]) =
+                    *reinterpret_cast<int4*>(&v_permuted[v_store_idx]);
                 dest_kv_idx += (size_per_head * total_seq_len);
+                dest_kv_permuted_idx += (size_per_head * total_seq_len);
             }
 
             if (store_cache) {
                 if constexpr (ENABLE_8BITS_CACHE) {
                     store_8bits_kv_cache_vec(v_cache, v[v_store_idx], inBlockIdx, scale);
+                    store_8bits_kv_cache_vec(v_cache, v_permuted[v_store_idx], inBlockIdx_permuted, scale);
                     if (lane_id == 0) {
                         *reinterpret_cast<float*>(&v_scale_ptr[inScaleIdx]) = scale;
                     }
                 } else {
                     *reinterpret_cast<int4*>(&v_cache[inBlockIdx]) = *reinterpret_cast<int4*>(&v[v_store_idx]);
+                    *reinterpret_cast<int4*>(&v_cache[inBlockIdx_permuted]) =
+                        *reinterpret_cast<int4*>(&v_permuted[v_store_idx]);
                 }
 
                 inBlockIdx = kv_block_array.getKVLocalIdx(dst_kv_seq_idx, head_idx, size_per_head, lane_id * vec_size);
+                inBlockIdx_permuted = kv_block_array.getKVLocalIdx(
+                    dst_kv_seq_idx, head_idx, size_per_head, lane_id * vec_size + rope_config.dim / 2);
                 if constexpr (ENABLE_8BITS_CACHE) {
                     inScaleIdx = kv_block_array.getKVScaleLocalIdx(dst_kv_seq_idx, head_idx);
                 }
@@ -1477,23 +1544,31 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
                 convert_to_fp8(
                     reinterpret_cast<QuantizedVecType*>(reinterpret_cast<QuantizedEltType*>(QuantizedQKV) + src_v_idx),
                     v[v_store_idx]);
+                convert_to_fp8(reinterpret_cast<QuantizedVecType*>(reinterpret_cast<QuantizedEltType*>(QuantizedQKV)
+                                                                   + src_v_permuted_idx),
+                               v_permuted[v_store_idx]);
             }
 #endif
-            *reinterpret_cast<int4*>(&QKV[src_v_idx]) = *reinterpret_cast<int4*>(&v[v_store_idx]);
+            *reinterpret_cast<int4*>(&QKV[src_v_idx])          = *reinterpret_cast<int4*>(&v[v_store_idx]);
+            *reinterpret_cast<int4*>(&QKV[src_v_permuted_idx]) = *reinterpret_cast<int4*>(&v_permuted[v_store_idx]);
         }
 
         if (store_kv) {
-            *reinterpret_cast<int4*>(&v_buf[dest_kv_idx]) = *reinterpret_cast<int4*>(&v[v_store_idx]);
+            *reinterpret_cast<int4*>(&v_buf[dest_kv_idx])          = *reinterpret_cast<int4*>(&v[v_store_idx]);
+            *reinterpret_cast<int4*>(&v_buf[dest_kv_permuted_idx]) = *reinterpret_cast<int4*>(&v_permuted[v_store_idx]);
         }
 
         if (store_cache) {
             if constexpr (ENABLE_8BITS_CACHE) {
                 store_8bits_kv_cache_vec(v_cache, v[v_store_idx], inBlockIdx, scale);
+                store_8bits_kv_cache_vec(v_cache, v_permuted[v_store_idx], inBlockIdx_permuted, scale);
                 if (lane_id == 0) {
                     *reinterpret_cast<float*>(&v_scale_ptr[inScaleIdx]) = scale;
                 }
             } else {
                 *reinterpret_cast<int4*>(&v_cache[inBlockIdx]) = *reinterpret_cast<int4*>(&v[v_store_idx]);
+                *reinterpret_cast<int4*>(&v_cache[inBlockIdx_permuted]) =
+                    *reinterpret_cast<int4*>(&v_permuted[v_store_idx]);
             }
         }
     }
@@ -2032,7 +2107,7 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
 
 #define ADD_FUSEDQKV_BIAS_TRANSPOSE_NON_INT8_WITH_ROPE_CACHE(head_q_block_num, head_k_block_num, head_v_block_num)     \
     constexpr int thread_num        = 128;                                                                             \
-    const int     threads_per_token = size_per_head / Vec_t2<T>::size;                                                 \
+    const int     threads_per_token = size_per_head / Vec_t2<T>::size / 2;                                             \
     const int     tokens_per_block  = thread_num / threads_per_token;                                                  \
     dim3          block(thread_num);                                                                                   \
     dim3          grid(batch_size,                                                                                     \
@@ -2114,92 +2189,91 @@ void invokeAddFusedQKVBiasTranspose(T*                             q_no_transpos
                                     const bool                     store_kv,
                                     const bool                     store_cache,
                                     cudaStream_t                   stream) {
-    ADD_FUSEDQKV_BIAS_TRANSPOSE_NON_INT8_WITH_ROPE_CACHE(8, 4, 4);
-    // if (use_rope_cache && rope_cache) {
-    //     if (head_num % 8 == 0 && head_num_kv % 4 == 0
-    //         && param_ptr->kv_block_array.cache_type != KvCacheDataType::INT8) {
-    //         ADD_FUSEDQKV_BIAS_TRANSPOSE_NON_INT8_WITH_ROPE_CACHE(8, 4, 4);
-    //     } else {
-    //         dim3         block((size_per_head / Vec_t<T>::size + 31) / 32 * 32);
-    //         dim3         grid(token_num, head_num + head_num_kv * 2);
-    //         const size_t smem_size = rope_config.style == RopeStyle::No ? 0 : 2 * rope_config.dim * sizeof(T);
+    if (use_rope_cache && rope_cache) {
+        if (head_num % 8 == 0 && head_num_kv % 4 == 0 && param_ptr->kv_block_array.cache_type != KvCacheDataType::INT8
+            && size_per_head == rope_config.dim) {
+            ADD_FUSEDQKV_BIAS_TRANSPOSE_NON_INT8_WITH_ROPE_CACHE(8, 4, 4);
+        } else {
+            dim3         block((size_per_head / Vec_t<T>::size + 31) / 32 * 32);
+            dim3         grid(token_num, head_num + head_num_kv * 2);
+            const size_t smem_size = rope_config.style == RopeStyle::No ? 0 : 2 * rope_config.dim * sizeof(T);
 
-    //         FT_SWITCH(param_ptr->max_prefix_prompt_length != 0, PREFIX_PROMPT, [&] {
-    //             FT_SWITCH(use_paged_fmha, USE_PAGED_FMHA, [&] {
-    //                 FT_SWITCH_KV_CACHE_TYPE_CASE(param_ptr->kv_block_array.cache_type, Tcache, [&] {
-    //                     FT_ROPE_SWITCH(rope_config.style, ROPE_STYLE, [&] {
-    //                         add_fusedQKV_bias_transpose_with_rope_cache_kernel<T,
-    //                                                                            Tcache,
-    //                                                                            PREFIX_PROMPT,
-    //                                                                            USE_PAGED_FMHA,
-    //                                                                            ROPE_STYLE>
-    //                             <<<grid, block, smem_size, stream>>>(q_no_transpose_buf,
-    //                                                                  q_buf,
-    //                                                                  k_buf,
-    //                                                                  v_buf,
-    //                                                                  *param_ptr,
-    //                                                                  QKV,
-    //                                                                  QuantizedQKV,
-    //                                                                  position_ids,
-    //                                                                  qkv_bias,
-    //                                                                  padding_offset,
-    //                                                                  cu_seqlens,
-    //                                                                  rope_cache,
-    //                                                                  batch_size,
-    //                                                                  seq_len,
-    //                                                                  head_num,
-    //                                                                  head_num_kv,
-    //                                                                  size_per_head,
-    //                                                                  rope_config,
-    //                                                                  use_logn_attn,
-    //                                                                  store_qkv,
-    //                                                                  store_q_no_transpose,
-    //                                                                  store_q,
-    //                                                                  store_kv,
-    //                                                                  store_cache);
-    //                     });
-    //                 });
-    //             });
-    //         });
-    //     }
-    // } else {
-    //     dim3         block((size_per_head / Vec_t<T>::size + 31) / 32 * 32);
-    //     dim3         grid(token_num, head_num);
-    //     const size_t smem_size = rope_config.style == RopeStyle::No ? 0 : 2 * rope_config.dim * sizeof(T);
+            FT_SWITCH(param_ptr->max_prefix_prompt_length != 0, PREFIX_PROMPT, [&] {
+                FT_SWITCH(use_paged_fmha, USE_PAGED_FMHA, [&] {
+                    FT_SWITCH_KV_CACHE_TYPE_CASE(param_ptr->kv_block_array.cache_type, Tcache, [&] {
+                        FT_ROPE_SWITCH(rope_config.style, ROPE_STYLE, [&] {
+                            add_fusedQKV_bias_transpose_with_rope_cache_kernel<T,
+                                                                               Tcache,
+                                                                               PREFIX_PROMPT,
+                                                                               USE_PAGED_FMHA,
+                                                                               ROPE_STYLE>
+                                <<<grid, block, smem_size, stream>>>(q_no_transpose_buf,
+                                                                     q_buf,
+                                                                     k_buf,
+                                                                     v_buf,
+                                                                     *param_ptr,
+                                                                     QKV,
+                                                                     QuantizedQKV,
+                                                                     position_ids,
+                                                                     qkv_bias,
+                                                                     padding_offset,
+                                                                     cu_seqlens,
+                                                                     rope_cache,
+                                                                     batch_size,
+                                                                     seq_len,
+                                                                     head_num,
+                                                                     head_num_kv,
+                                                                     size_per_head,
+                                                                     rope_config,
+                                                                     use_logn_attn,
+                                                                     store_qkv,
+                                                                     store_q_no_transpose,
+                                                                     store_q,
+                                                                     store_kv,
+                                                                     store_cache);
+                        });
+                    });
+                });
+            });
+        }
+    } else {
+        dim3         block((size_per_head / Vec_t<T>::size + 31) / 32 * 32);
+        dim3         grid(token_num, head_num);
+        const size_t smem_size = rope_config.style == RopeStyle::No ? 0 : 2 * rope_config.dim * sizeof(T);
 
-    //     FT_SWITCH(param_ptr->max_prefix_prompt_length != 0, PREFIX_PROMPT, [&] {
-    //         FT_SWITCH(use_paged_fmha, USE_PAGED_FMHA, [&] {
-    //             FT_SWITCH_KV_CACHE_TYPE_CASE(param_ptr->kv_block_array.cache_type, Tcache, [&] {
-    //                 FT_ROPE_SWITCH(rope_config.style, ROPE_STYLE, [&] {
-    //                     add_fusedQKV_bias_transpose_kernel<T, Tcache, PREFIX_PROMPT, USE_PAGED_FMHA, ROPE_STYLE>
-    //                         <<<grid, block, smem_size, stream>>>(q_no_transpose_buf,
-    //                                                              q_buf,
-    //                                                              k_buf,
-    //                                                              v_buf,
-    //                                                              *param_ptr,
-    //                                                              QKV,
-    //                                                              QuantizedQKV,
-    //                                                              position_ids,
-    //                                                              qkv_bias,
-    //                                                              padding_offset,
-    //                                                              cu_seqlens,
-    //                                                              batch_size,
-    //                                                              seq_len,
-    //                                                              head_num,
-    //                                                              head_num_kv,
-    //                                                              size_per_head,
-    //                                                              rope_config,
-    //                                                              use_logn_attn,
-    //                                                              store_qkv,
-    //                                                              store_q_no_transpose,
-    //                                                              store_q,
-    //                                                              store_kv,
-    //                                                              store_cache);
-    //                 });
-    //             });
-    //         });
-    //     });
-    // }
+        FT_SWITCH(param_ptr->max_prefix_prompt_length != 0, PREFIX_PROMPT, [&] {
+            FT_SWITCH(use_paged_fmha, USE_PAGED_FMHA, [&] {
+                FT_SWITCH_KV_CACHE_TYPE_CASE(param_ptr->kv_block_array.cache_type, Tcache, [&] {
+                    FT_ROPE_SWITCH(rope_config.style, ROPE_STYLE, [&] {
+                        add_fusedQKV_bias_transpose_kernel<T, Tcache, PREFIX_PROMPT, USE_PAGED_FMHA, ROPE_STYLE>
+                            <<<grid, block, smem_size, stream>>>(q_no_transpose_buf,
+                                                                 q_buf,
+                                                                 k_buf,
+                                                                 v_buf,
+                                                                 *param_ptr,
+                                                                 QKV,
+                                                                 QuantizedQKV,
+                                                                 position_ids,
+                                                                 qkv_bias,
+                                                                 padding_offset,
+                                                                 cu_seqlens,
+                                                                 batch_size,
+                                                                 seq_len,
+                                                                 head_num,
+                                                                 head_num_kv,
+                                                                 size_per_head,
+                                                                 rope_config,
+                                                                 use_logn_attn,
+                                                                 store_qkv,
+                                                                 store_q_no_transpose,
+                                                                 store_q,
+                                                                 store_kv,
+                                                                 store_cache);
+                    });
+                });
+            });
+        });
+    }
 #if USING_CUDA
     check_cuda_value(cudaPeekAtLastError());
     check_cuda_error();
@@ -3282,132 +3356,132 @@ void invokeDecodeAddFusedQKVBiasTranspose(T*               q_buf,
                                           const bool       store_kv,
                                           const bool       store_cache,
                                           cudaStream_t     stream) {
-    // const size_t smem_size = rope_config.style == RopeStyle::No ? 0 : 2 * rope_config.dim * sizeof(T);
-    // dim3         block((size_per_head / Vec_t<T>::size + 31) / 32 * 32);
+    const size_t smem_size = rope_config.style == RopeStyle::No ? 0 : 2 * rope_config.dim * sizeof(T);
+    dim3         block((size_per_head / Vec_t<T>::size + 31) / 32 * 32);
 
-    // if (use_rope_cache && rope_cache) {
-    //     constexpr int head_q_block_num = 4;
-    //     constexpr int head_k_block_num = 4;
-    //     constexpr int head_v_block_num = 4;
-    //     if (batch_size <= 16 || head_num % head_q_block_num != 0 || head_num_kv % head_k_block_num != 0
-    //         || head_num_kv % head_v_block_num != 0 || kv_block_array.cache_type == KvCacheDataType::INT8) {
-    //         dim3 grid(batch_size, head_num + head_num_kv * 2);
+    if (use_rope_cache && rope_cache) {
+        constexpr int head_q_block_num = 4;
+        constexpr int head_k_block_num = 4;
+        constexpr int head_v_block_num = 4;
+        if (batch_size <= 16 || head_num % head_q_block_num != 0 || head_num_kv % head_k_block_num != 0
+            || head_num_kv % head_v_block_num != 0 || kv_block_array.cache_type == KvCacheDataType::INT8) {
+            dim3 grid(batch_size, head_num + head_num_kv * 2);
 
-    //         FT_SWITCH_KV_CACHE_TYPE_CASE(kv_block_array.cache_type, Tcache, [&] {
-    //             FT_ROPE_SWITCH(rope_config.style, ROPE_STYLE, [&] {
-    //                 decode_add_fusedQKV_bias_transpose_with_rope_cache_kernel<T, Tcache, ROPE_STYLE>
-    //                     <<<grid, block, smem_size, stream>>>(q_buf,
-    //                                                          k_buf,
-    //                                                          v_buf,
-    //                                                          kv_block_array,
-    //                                                          QKV,
-    //                                                          position_ids,
-    //                                                          qkv_bias,
-    //                                                          rope_cache,
-    //                                                          batch_size,
-    //                                                          head_num,
-    //                                                          head_num_kv,
-    //                                                          size_per_head,
-    //                                                          rope_config,
-    //                                                          use_logn_attn,
-    //                                                          store_q,
-    //                                                          store_kv,
-    //                                                          store_cache);
-    //             });
-    //         });
-    //     } else {
-    //         dim3 grid(batch_size,
-    //                   head_num / head_q_block_num + head_num_kv / head_k_block_num + head_num_kv / head_v_block_num);
+            FT_SWITCH_KV_CACHE_TYPE_CASE(kv_block_array.cache_type, Tcache, [&] {
+                FT_ROPE_SWITCH(rope_config.style, ROPE_STYLE, [&] {
+                    decode_add_fusedQKV_bias_transpose_with_rope_cache_kernel<T, Tcache, ROPE_STYLE>
+                        <<<grid, block, smem_size, stream>>>(q_buf,
+                                                             k_buf,
+                                                             v_buf,
+                                                             kv_block_array,
+                                                             QKV,
+                                                             position_ids,
+                                                             qkv_bias,
+                                                             rope_cache,
+                                                             batch_size,
+                                                             head_num,
+                                                             head_num_kv,
+                                                             size_per_head,
+                                                             rope_config,
+                                                             use_logn_attn,
+                                                             store_q,
+                                                             store_kv,
+                                                             store_cache);
+                });
+            });
+        } else {
+            dim3 grid(batch_size,
+                      head_num / head_q_block_num + head_num_kv / head_k_block_num + head_num_kv / head_v_block_num);
 
-    //         FT_SWITCH_KV_CACHE_TYPE_CASE(kv_block_array.cache_type, Tcache, [&] {
-    //             FT_ROPE_SWITCH(rope_config.style, ROPE_STYLE, [&] {
-    //                 decode_add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel<T,
-    //                                                                                    Tcache,
-    //                                                                                    ROPE_STYLE,
-    //                                                                                    head_q_block_num,
-    //                                                                                    head_k_block_num,
-    //                                                                                    head_v_block_num>
-    //                     <<<grid, block, smem_size, stream>>>(q_buf,
-    //                                                          k_buf,
-    //                                                          v_buf,
-    //                                                          kv_block_array,
-    //                                                          QKV,
-    //                                                          position_ids,
-    //                                                          qkv_bias,
-    //                                                          rope_cache,
-    //                                                          batch_size,
-    //                                                          head_num,
-    //                                                          head_num_kv,
-    //                                                          size_per_head,
-    //                                                          rope_config,
-    //                                                          use_logn_attn,
-    //                                                          store_q,
-    //                                                          store_kv,
-    //                                                          store_cache);
-    //             });
-    //         });
-    //     }
-    // } else {
-    //     constexpr int head_q_block_num = 2;
-    //     constexpr int head_k_block_num = 2;
-    //     constexpr int head_v_block_num = 4;
-    //     if (batch_size <= 16 || head_num % head_q_block_num != 0 || head_num_kv % head_k_block_num != 0
-    //         || head_num_kv % head_v_block_num != 0 || kv_block_array.cache_type == KvCacheDataType::INT8) {
-    //         dim3 grid(batch_size, head_num + head_num_kv * 2);
+            FT_SWITCH_KV_CACHE_TYPE_CASE(kv_block_array.cache_type, Tcache, [&] {
+                FT_ROPE_SWITCH(rope_config.style, ROPE_STYLE, [&] {
+                    decode_add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel<T,
+                                                                                       Tcache,
+                                                                                       ROPE_STYLE,
+                                                                                       head_q_block_num,
+                                                                                       head_k_block_num,
+                                                                                       head_v_block_num>
+                        <<<grid, block, smem_size, stream>>>(q_buf,
+                                                             k_buf,
+                                                             v_buf,
+                                                             kv_block_array,
+                                                             QKV,
+                                                             position_ids,
+                                                             qkv_bias,
+                                                             rope_cache,
+                                                             batch_size,
+                                                             head_num,
+                                                             head_num_kv,
+                                                             size_per_head,
+                                                             rope_config,
+                                                             use_logn_attn,
+                                                             store_q,
+                                                             store_kv,
+                                                             store_cache);
+                });
+            });
+        }
+    } else {
+        constexpr int head_q_block_num = 2;
+        constexpr int head_k_block_num = 2;
+        constexpr int head_v_block_num = 4;
+        if (batch_size <= 16 || head_num % head_q_block_num != 0 || head_num_kv % head_k_block_num != 0
+            || head_num_kv % head_v_block_num != 0 || kv_block_array.cache_type == KvCacheDataType::INT8) {
+            dim3 grid(batch_size, head_num + head_num_kv * 2);
 
-    //         FT_SWITCH_KV_CACHE_TYPE_CASE(kv_block_array.cache_type, Tcache, [&] {
-    //             FT_ROPE_SWITCH(rope_config.style, ROPE_STYLE, [&] {
-    //                 decode_add_fusedQKV_bias_transpose_kernel<T, Tcache, ROPE_STYLE>
-    //                     <<<grid, block, smem_size, stream>>>(q_buf,
-    //                                                          k_buf,
-    //                                                          v_buf,
-    //                                                          kv_block_array,
-    //                                                          QKV,
-    //                                                          position_ids,
-    //                                                          qkv_bias,
-    //                                                          batch_size,
-    //                                                          head_num,
-    //                                                          head_num_kv,
-    //                                                          size_per_head,
-    //                                                          rope_config,
-    //                                                          use_logn_attn,
-    //                                                          store_q,
-    //                                                          store_kv,
-    //                                                          store_cache);
-    //             });
-    //         });
-    //     } else {
-    //         dim3 grid(batch_size,
-    //                   head_num / head_q_block_num + head_num_kv / head_k_block_num + head_num_kv / head_v_block_num);
+            FT_SWITCH_KV_CACHE_TYPE_CASE(kv_block_array.cache_type, Tcache, [&] {
+                FT_ROPE_SWITCH(rope_config.style, ROPE_STYLE, [&] {
+                    decode_add_fusedQKV_bias_transpose_kernel<T, Tcache, ROPE_STYLE>
+                        <<<grid, block, smem_size, stream>>>(q_buf,
+                                                             k_buf,
+                                                             v_buf,
+                                                             kv_block_array,
+                                                             QKV,
+                                                             position_ids,
+                                                             qkv_bias,
+                                                             batch_size,
+                                                             head_num,
+                                                             head_num_kv,
+                                                             size_per_head,
+                                                             rope_config,
+                                                             use_logn_attn,
+                                                             store_q,
+                                                             store_kv,
+                                                             store_cache);
+                });
+            });
+        } else {
+            dim3 grid(batch_size,
+                      head_num / head_q_block_num + head_num_kv / head_k_block_num + head_num_kv / head_v_block_num);
 
-    //         FT_SWITCH_KV_CACHE_TYPE_CASE(kv_block_array.cache_type, Tcache, [&] {
-    //             FT_ROPE_SWITCH(rope_config.style, ROPE_STYLE, [&] {
-    //                 decode_add_fusedQKV_bias_transpose_non_int8_kernel<T,
-    //                                                                    Tcache,
-    //                                                                    ROPE_STYLE,
-    //                                                                    head_q_block_num,
-    //                                                                    head_k_block_num,
-    //                                                                    head_v_block_num>
-    //                     <<<grid, block, smem_size, stream>>>(q_buf,
-    //                                                          k_buf,
-    //                                                          v_buf,
-    //                                                          kv_block_array,
-    //                                                          QKV,
-    //                                                          position_ids,
-    //                                                          qkv_bias,
-    //                                                          batch_size,
-    //                                                          head_num,
-    //                                                          head_num_kv,
-    //                                                          size_per_head,
-    //                                                          rope_config,
-    //                                                          use_logn_attn,
-    //                                                          store_q,
-    //                                                          store_kv,
-    //                                                          store_cache);
-    //             });
-    //         });
-    //     }
-    // }
+            FT_SWITCH_KV_CACHE_TYPE_CASE(kv_block_array.cache_type, Tcache, [&] {
+                FT_ROPE_SWITCH(rope_config.style, ROPE_STYLE, [&] {
+                    decode_add_fusedQKV_bias_transpose_non_int8_kernel<T,
+                                                                       Tcache,
+                                                                       ROPE_STYLE,
+                                                                       head_q_block_num,
+                                                                       head_k_block_num,
+                                                                       head_v_block_num>
+                        <<<grid, block, smem_size, stream>>>(q_buf,
+                                                             k_buf,
+                                                             v_buf,
+                                                             kv_block_array,
+                                                             QKV,
+                                                             position_ids,
+                                                             qkv_bias,
+                                                             batch_size,
+                                                             head_num,
+                                                             head_num_kv,
+                                                             size_per_head,
+                                                             rope_config,
+                                                             use_logn_attn,
+                                                             store_q,
+                                                             store_kv,
+                                                             store_cache);
+                });
+            });
+        }
+    }
 #if USING_CUDA
     check_cuda_value(cudaPeekAtLastError());
     check_cuda_error();
