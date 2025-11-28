@@ -84,7 +84,7 @@ class BackendRPCServerVisitor:
         try:
             # TODO(yinzhi): support debug
             role_addrs, inter_request_id = (
-                await self.master_client.get_backend_role_addrs(
+                self.master_client.get_backend_role_addrs(
                     master_addr=master_addr,
                     block_cache_keys=block_cache_keys,
                     seq_len=input.prompt_length,

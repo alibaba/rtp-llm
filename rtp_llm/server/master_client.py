@@ -1,9 +1,10 @@
 import json
 import logging
+import time
 from typing import List, Optional, Tuple
 
-import aiohttp
-from aiohttp import ClientTimeout
+import requests
+from requests.adapters import HTTPAdapter
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleAddr, RoleType
@@ -11,31 +12,50 @@ from rtp_llm.server.worker_status import ScheduleMeta
 
 route_logger = logging.getLogger("route_logger")
 
+def _create_client() -> requests.Session:
+    """创建HTTP客户端实例"""
+    session = requests.Session()
+
+    # 连接池配置参数
+    pool_connections = 20  # 支持的不同主机连接池数量
+    pool_maxsize = 30     # 每个连接池的最大连接数
+
+    # 显式配置连接池参数
+    adapter = HTTPAdapter(
+        pool_connections=pool_connections,
+        pool_maxsize=pool_maxsize,
+        max_retries=0,          # 不自动重试
+        pool_block=False        # 连接池满时立即失败而不是等待
+    )
+
+    # 应用到所有HTTP和HTTPS请求
+    session.mount('http://', adapter)
+    session.mount('https://', adapter)
+
+    # requests库的超时设置为 (连接超时, 读取超时) 的元组
+    session.timeout = (0.1, 0.4)  # (连接超时, 读取超时)
+
+    # 记录连接池配置
+    route_logger.info(f"HTTP客户端初始化完成 - 连接池配置: connections={pool_connections}, maxsize={pool_maxsize}")
+
+    return session
+
 
 class MasterClient:
-    def __init__(self, max_connect_pool_size=1000):
-        self.max_connect_pool_size = max_connect_pool_size
-        self._session = None
+    def __init__(self):
+        self._client = _create_client()
 
-    async def _get_session(self):
-        """获取或创建HTTP session"""
-        if self._session is None or self._session.closed:
-            timeout = ClientTimeout(total=0.5)
-            connector = aiohttp.TCPConnector(
-                limit=self.max_connect_pool_size,  # con pool size
-                limit_per_host=30,  # limit
-                keepalive_timeout=30,
-                enable_cleanup_closed=True,
-            )
-            self._session = aiohttp.ClientSession(timeout=timeout, connector=connector)
-        return self._session
+    def _get_client(self):
+        """获取HTTP client"""
+        return self._client
 
-    async def close(self):
-        """关闭HTTP session"""
-        if self._session and not self._session.closed:
-            await self._session.close()
+    def close(self):
+        """关闭HTTP client"""
+        if self._client:
+            self._client.close()
+            self._client = None
 
-    async def get_backend_role_addrs(
+    def get_backend_role_addrs(
         self,
         master_addr: Optional[str],
         block_cache_keys: list[int],
@@ -48,7 +68,7 @@ class MasterClient:
         # get master address
         if not master_addr:
             return None, inter_request_id
-        payload = {}
+            
         # prepare request to master
         url = "http://" + master_addr + "/rtp_llm/schedule"
         if generate_timeout != -1:
@@ -70,20 +90,38 @@ class MasterClient:
             }
         headers = {"Content-Type": "application/json"}
 
-        # connect to master using long connection
+        http_start_time = time.time()
         try:
-            session = await self._get_session()
-            async with session.post(
-                url, data=json.dumps(payload), headers=headers
-            ) as response:
-                if response.status != 200:
-                    route_logger.error(
-                        f"Failed to get master response from {master_addr}, http status: {response.status}"
-                    )
-                    return None, inter_request_id
-                result = await response.json()
+            client = self._get_client()
+
+            timeout = (0.1, 0.4)  # (连接超时, 读取超时)
+            response = client.post(
+                url,
+                data=json.dumps(payload),
+                headers=headers,
+                timeout=timeout
+            )
+
+            if response.status_code != 200:
+                route_logger.error(
+                    f"Failed to get master response from {master_addr}, http status: {response.status_code}"
+                )
+                return None, inter_request_id
+                
+            result = response.json()
+
         except Exception as e:
-            route_logger.error(f"Failed to connect to master at {master_addr}: {e}")
+            rt_ms = (time.time() - http_start_time) * 1000
+            if isinstance(e, requests.ConnectTimeout):
+                route_logger.error(f"Connect timeout to master at {master_addr}: {e}, RT: {rt_ms:.2f}ms")
+            elif isinstance(e, requests.ReadTimeout):
+                route_logger.error(f"Read timeout from master at {master_addr}: {e}, RT: {rt_ms:.2f}ms")
+            elif isinstance(e, requests.Timeout):
+                route_logger.error(f"General timeout to master at {master_addr}: {e}, RT: {rt_ms:.2f}ms")
+            elif isinstance(e, requests.ConnectionError):
+                route_logger.error(f"Connection error to master at {master_addr}: {e}, RT: {rt_ms:.2f}ms")
+            else:
+                route_logger.error(f"Failed to query master at {master_addr}: {type(e).__name__}: {e}, RT: {rt_ms:.2f}ms")
             return None, inter_request_id
 
         # check response
