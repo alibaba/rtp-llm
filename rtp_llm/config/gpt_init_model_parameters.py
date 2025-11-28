@@ -757,7 +757,7 @@ class GptInitModelParameters:
 
         # SamplerConfig
         self.gpt_init_params.sampler_config = SamplerConfig(
-            max_batch_size=get_env_int("SAMPLER_MAX_BATCH_SIZE", 0),
+            max_batch_size=get_env_int("MAX_BATCH_SIZE", 0),
             enable_flashinfer_sample_kernel=get_env_bool(
                 "ENABLE_FLASHINFER_SAMPLE_KERNEL", True
             ),
