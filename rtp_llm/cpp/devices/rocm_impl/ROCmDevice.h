@@ -272,6 +272,7 @@ public:
                             int                     kv_block_offset,
                             const BufferPtr&        kv_cache_block_id,
                             int                     batch_size);
+    void      maskLogits(Buffer& logits, const Buffer& mask) override;
 
 private:
     hipDeviceProp_t                              rocmDevProp;
