@@ -141,7 +141,7 @@ TEST_F(SpeculativeNormalEngineTest, testSystemPrompt) {
         ASSERT_TRUE(output1.ok()) << output1.status().ToString();
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.output_len, 1);
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.prefix_len, 6);
-        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.reuse_len, 4);
+        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.reuse_len, 6);
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.input_len, 7);
 
         ASSERT_TRUE(stream->finished());
