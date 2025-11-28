@@ -50,9 +50,9 @@ CacheConfig CacheConfigCreator::createBasicConfig(const rtp_llm::GptInitParamete
         config.cache_specs.push_back(spec);
         config.block_size = static_cast<int>(spec->block_size() * spec->layer_num);
 
-        // Set block strides for backward compatibility
-        config.k_block_stride        = spec->k_block_size();
-        config.v_block_stride        = spec->v_block_size();
+        // TODO(chanyin) set k_block_stride as block size for compatibility, fix in future
+        config.k_block_stride        = spec->block_size();
+        config.v_block_stride        = 0;
         config.kv_block_stride       = spec->block_size();
         config.kv_scale_block_stride = 0;  // MLA typically doesn't use scale
     } else {
@@ -69,8 +69,8 @@ CacheConfig CacheConfigCreator::createBasicConfig(const rtp_llm::GptInitParamete
         config.block_size = static_cast<int>(spec->block_size() * spec->layer_num);
 
         // Set block strides for backward compatibility
-        config.k_block_stride  = spec->k_block_size();
-        config.v_block_stride  = spec->v_block_size();
+        config.k_block_stride  = spec->block_size();
+        config.v_block_stride  = 0;
         config.kv_block_stride = spec->block_size();
         // Calculate scale block stride for INT8/FP8 KV cache
         if (dtype == rtp_llm::DataType::TYPE_INT8 || dtype == rtp_llm::DataType::TYPE_FP8_E4M3) {
