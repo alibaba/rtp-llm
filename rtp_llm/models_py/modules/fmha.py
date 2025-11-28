@@ -57,6 +57,9 @@ class FMHAImplBase(object):
         fmha_input = self.rope_kvcache_impl.forward(
             qkv, self.fmha_type(), kv_cache, self.rope_params
         )
+        torch.cuda.synchronize()
+        print("DEBUG: After rope_kvcache_impl.forward", flush=True)
+
         if (
             self.attn_inputs.is_prefill
             and self.attn_inputs.cache_store_inputs

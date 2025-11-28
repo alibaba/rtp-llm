@@ -132,10 +132,17 @@ class FlashInferPythonDecodeOp(object):
         return not attention_inputs.is_prefill
 
     def prepare(self, attention_inputs: PyAttentionInputs) -> FlashInferPythonParams:
+        seq_lens = attention_inputs.sequence_lengths
+        if seq_lens.device.type == 'cpu':
+            seq_lens = seq_lens.to('cuda')
+
+        print(f"DEBUG: seq_lens device={seq_lens.device}, dtype={seq_lens.dtype}, shape={seq_lens.shape}, ptr={seq_lens.data_ptr()}", flush=True)
+        print(f"DEBUG: seq_lens values={seq_lens}", flush=True)
+
         return FlashInferPythonParams(
             batch_size=attention_inputs.sequence_lengths.size(0),
             max_seq_len=attention_inputs.sequence_lengths.max().item(),
-            seq_lens=attention_inputs.sequence_lengths,
+            seq_lens=seq_lens,
             block_tables=attention_inputs.kv_cache_block_id_device,
             cu_seqlens=attention_inputs.cu_seqlens,
             cu_kv_seqlens=attention_inputs.cu_kv_seqlens,
@@ -157,6 +164,13 @@ class FlashInferPythonDecodeOp(object):
         bmm1_scale = q_scale * k_scale * self.scaling
         bmm2_scale = 1.0
         # sink: additional value per head in the denominator of the softmax.
+
+        print(f"DEBUG: forward calling trtllm_batch_decode_with_kv_cache", flush=True)
+        print(f"DEBUG: q shape={q.shape}, ptr={q.data_ptr()}", flush=True)
+        print(f"DEBUG: kv_cache k ptr={kv_cache.k_cache_base.data_ptr()}, v ptr={kv_cache.v_cache_base.data_ptr()}", flush=True)
+        print(f"DEBUG: block_tables shape={fmha_params.block_tables.shape}, ptr={fmha_params.block_tables.data_ptr()}", flush=True)
+        print(f"DEBUG: seq_lens ptr={fmha_params.seq_lens.data_ptr()}", flush=True)
+        print(f"DEBUG: workspace_buffer ptr={self.workspace_buffer.data_ptr()}", flush=True)
 
         # Call TRT-LLM kernel
         # raw_out: like q, [bs, acc_q_len, num_q_heads, head_dim] but with output dtype

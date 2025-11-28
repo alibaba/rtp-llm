@@ -28,3 +28,17 @@ py_test(
     exec_properties = {'gpu':'A10'},
 )
 
+py_test(
+    name = "qwen3_sp_perf_test",
+    srcs = ["qwen3_sp_perf_test.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:qwen3_sp",
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    data = [
+        "//rtp_llm/models_py/standalone:param.json",
+    ],
+    env = test_envs,
+    exec_properties = {'gpu':'A10'},
+)
+
