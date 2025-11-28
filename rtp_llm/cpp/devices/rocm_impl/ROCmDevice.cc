@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/kernels/activation_kernels.h"
 #include "rtp_llm/cpp/kernels/tensor_ops_kernels.h"
 #include "rtp_llm/cpp/kernels/embedding_kernels.h"
+#include "rtp_llm/cpp/kernels/mask_logits.h"
 #include "rtp_llm/cpp/cuda/nccl/nccl_utils_torch.h"
 #include "rtp_llm/cpp/cuda/nccl/nccl_utils.h"
 
@@ -702,6 +703,21 @@ BufferPtr ROCmDevice::mhaQKVGemm(const AttentionLayerParams& params) {
         printBufferData(*qkv, "qkv_after_k_norm");
     }
     return qkv;
+}
+
+void ROCmDevice::maskLogits(Buffer& logits, const Buffer& mask) {
+    size_t batch_size = logits.shape()[0];
+    size_t vocab_size = logits.shape()[1];
+    if (logits.type() == DataType::TYPE_FP32) {
+        invokeMaskLogits<float>((float*)(logits.data()), (const uint8_t*)mask.data(), batch_size, vocab_size, stream_);
+    } else if (logits.type() == DataType::TYPE_FP16) {
+        invokeMaskLogits<half>((half*)(logits.data()), (const uint8_t*)mask.data(), batch_size, vocab_size, stream_);
+    } else if (logits.type() == DataType::TYPE_BF16) {
+        invokeMaskLogits<__nv_bfloat16>(
+            (__nv_bfloat16*)(logits.data()), (const uint8_t*)mask.data(), batch_size, vocab_size, stream_);
+    } else {
+        throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+    }
 }
 
 }  // namespace rtp_llm
