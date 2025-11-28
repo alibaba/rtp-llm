@@ -30,8 +30,23 @@ env:
   IMAGE: ${{ vars.ALI_ROCM_IMAGE }}
 
 jobs:
+  clean_gpu:
+    runs-on: [ MI308 ]
+    steps:
+    - name: Clean GPU
+      run: |
+        conda activate py310
+        for id in 3 4 5 6 7; do
+          SERVER_PIDS=$(nvitop | awk -v id="$id" '$2 == id {print $3}')
+          if [ -n "$SERVER_PIDS" ]; then
+            echo "Killing processes on GPU $id: $SERVER_PIDS"
+            echo "$SERVER_PIDS" | xargs -r sudo kill -9
+          fi
+        done
+
   unit_tests: #TODO: assign 1 gpu card to this job
     runs-on: [ MI308 ]
+    needs: [ clean_gpu ]
     steps:
     - name: Check out rocm_benchmark source code
       uses: actions/checkout@v3
@@ -91,6 +106,7 @@ jobs:
 
   e2e_tests: #TODO: assign 4 gpu cards to this job
     runs-on: [ MI308 ] 
+    needs: [ clean_gpu ]
     steps:
     - name: Check out rocm_benchmark source code
       uses: actions/checkout@v3
@@ -224,7 +240,7 @@ jobs:
       run: |   
         if [[ ${{ github.event_name }} == 'workflow_dispatch' ]]; then
           cd rtp-llm
-          branch=${{ inputs.branch }}
+          branch=$(git rev-parse --abbrev-ref HEAD)
           commit_sha=$(git rev-parse --short=7 HEAD)
           cd -
         elif [ ${{ github.event_name }} == 'pull_request' ]; then
