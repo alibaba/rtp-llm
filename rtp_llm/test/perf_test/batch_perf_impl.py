@@ -32,6 +32,7 @@ def _curl_server_single_worker(
     }
     if profile:
         req["gen_timeline"] = True
+        req["profile_step"] = 1
     try:
         response = requests.post(
             f"http://127.0.0.1:{base_port}", json=req, timeout=wait_time
