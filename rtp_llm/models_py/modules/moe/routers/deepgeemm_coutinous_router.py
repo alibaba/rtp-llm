@@ -6,8 +6,8 @@ from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.distribute.collective import Group, all_reduce
 from rtp_llm.models_py.modules.ep.kernels import recompute_topk_ids_sum_expert_count
 from rtp_llm.models_py.modules.fp8_kernel import (
-    per_token_cast_to_fp8,
     requant_weight_ue8m0,
+    sgl_per_token_group_quant_fp8,
 )
 from rtp_llm.models_py.modules.moe import (
     ExpertForwardPayload,
@@ -58,7 +58,13 @@ class DeepGemmCountinousRouter(FusedMoeDataRouter):
     ) -> ExpertForwardPayload:
         # recompute top_k ids to current expert, mask out of range expert to -1
         if is_deep_gemm_e8m0_used():
-            expert_x, expert_x_scale = per_token_cast_to_fp8(a1, True)
+            expert_x, expert_x_scale = sgl_per_token_group_quant_fp8(
+                a1,
+                128,
+                column_major_scales=True,
+                scale_tma_aligned=True,
+                scale_ue8m0=True,
+            )
         else:
             expert_x, expert_x_scale = trt_fp8_quantize_128(a1, False)
         adjusted_topk_ids, num_recv_tokens_per_expert = (

@@ -10,7 +10,6 @@ from rtp_llm.models_py.modules import utils
 logger = logging.getLogger(__name__)
 
 from rtp_llm.models_py.modules.fp8_kernel import (
-    per_token_cast_to_fp8,
     requant_weight_ue8m0,
     scaled_fp8_per_tensor_quant,
     sgl_per_token_group_quant_fp8,
@@ -89,7 +88,13 @@ class Fp8DeepGEMMLinear(nn.Module):
         # Quantize using sgl_per_token_group_quant_fp8
         quantization_eps = 1e-4
         if self.scale_ue8m0:
-            input_fp8, input_scales = per_token_cast_to_fp8(input_for_quant, True)
+            input_fp8, input_scales = sgl_per_token_group_quant_fp8(
+                input_for_quant,
+                128,
+                column_major_scales=True,
+                scale_tma_aligned=True,
+                scale_ue8m0=True,
+            )
         else:
             input_fp8, input_scales = sgl_per_token_group_quant_fp8(
                 input_for_quant,

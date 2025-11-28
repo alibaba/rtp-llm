@@ -13,8 +13,8 @@ from rtp_llm.models_py.modules.ep.kernels import (
     tma_align_input_scale,
 )
 from rtp_llm.models_py.modules.fp8_kernel import (
-    per_token_cast_to_fp8,
     requant_weight_ue8m0,
+    sgl_per_token_group_quant_fp8,
 )
 from rtp_llm.models_py.modules.moe import (
     ExpertForwardPayload,
@@ -171,7 +171,6 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
                     dtype=torch.int,
                 ).transpose(0, 1)
                 if is_deep_gemm_e8m0_used()
-                and False  # 现在ue8m0的quant是在后面手动做的，后面优化下
                 else torch.empty(
                     (all_tokens, K // BLOCK_SIZE),
                     device=hidden_states_fp8.device,
@@ -200,7 +199,7 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
             input_tensor[1],
             m_indices,
             output_index,
-            # scale_ue8m0=is_deep_gemm_e8m0_used() # 后面再优化下
+            scale_ue8m0=is_deep_gemm_e8m0_used(),
         )
         dispose_tensor(hidden_states_fp8)
         gateup_output = torch.empty(
@@ -210,6 +209,7 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
         )
         if not is_deep_gemm_e8m0_used():
             input_tensor[1] = tma_align_input_scale(input_tensor[1])
+
         m_grouped_fp8_gemm_nt_contiguous(
             (input_tensor[0], input_tensor[1]),
             self.w13_weight_fp8,
@@ -235,7 +235,13 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
             dtype=torch.bfloat16,
         )
         if is_deep_gemm_e8m0_used():
-            down_input_fp8, down_input_scale = per_token_cast_to_fp8(down_input, True)
+            down_input_fp8, down_input_scale = sgl_per_token_group_quant_fp8(
+                down_input,
+                group_size=self.DEEPGEMM_BLOCK_SHAPE[1],
+                column_major_scales=True,
+                scale_tma_aligned=True,
+                scale_ue8m0=is_deep_gemm_e8m0_used(),
+            )
         else:
             down_input_fp8, down_input_scale = trt_fp8_quantize_128(down_input, False)
         del down_input
