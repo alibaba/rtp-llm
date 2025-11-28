@@ -398,7 +398,7 @@ class QWenV2(QWen):
         # <|im_start|> and <|im_end|>
         config.special_tokens.stop_words_id_list = [[151645], [151644]]
 
-        cls._from_hf(config, ckpt_path)
+        QWenV2._from_hf(config, ckpt_path)
         assert (
             config.head_num > 0
             and config.head_num_kv > 0

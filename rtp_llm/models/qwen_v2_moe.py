@@ -149,7 +149,7 @@ class Qwen2Moe(QWenV2):
         with open(config_path) as reader:
             content = reader.read()
             config_json = json.loads(content)
-        cls.load_moe_config(config, config_json)
+        Qwen2Moe.load_moe_config(config, config_json)
 
     @classmethod
     def load_moe_config(

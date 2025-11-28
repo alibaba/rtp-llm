@@ -8,13 +8,13 @@ from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig, QuantizationCon
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, MlaAttnAtomicWeight
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, MoeAtomicWeight
 from rtp_llm.model_loader.load_config import LoadConfig
+from rtp_llm.model_loader.tensor_source import TensorSource
 from rtp_llm.model_loader.weight_module import (
     AtomicWeight,
     CompositeWeight,
     QuantWeight,
     WeightModule,
 )
-from rtp_llm.model_loader.tensor_source import TensorSource
 from rtp_llm.utils.model_weight import (
     FP8_E4M3_MAX,
     CkptWeightInfo,
@@ -44,6 +44,7 @@ W_SUFFIX = ".weight"
 B_SUFFIX = ".bias"
 QW_SUFFIX = ".weight"
 QS_SUFFIX = ".weight_scale_inv"
+APPEND_SUFFIX = "_scale_inv"
 
 
 def dequant_weight_split_k(
@@ -63,6 +64,19 @@ def dequant_weight_split_k(
         v_head_dim,
         lora_rank,
     )
+
+
+def _convert_gate_up_proj(ts: List[torch.Tensor]) -> torch.Tensor:
+    tensor = identity(ts)
+    tensor = tensor.permute(0, 2, 1).contiguous()  # (experts, 1536, hidden)
+    split_size = tensor.shape[1] // 2
+    gate, up = torch.split(tensor, split_size, dim=1)
+    return torch.cat([up, gate], dim=1)
+
+
+def _convert_down_proj(ts: List[torch.Tensor]) -> torch.Tensor:
+    tensor = identity(ts)
+    return tensor.permute(0, 2, 1).contiguous()
 
 
 def dequant_weight_split_v(
@@ -613,9 +627,37 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             )
             return [kernel, scale]
 
+    def _get_qwen3_vl_moe_w2_quant_weight(self, src_weight_info: MoeAtomicWeight):
+        w_name = src_weight_info.weights[0].name
+        kernel = create_w8a8_fp8_per_block_weight(
+            src_weight_info,
+            W.moe_w2,
+            [CkptWeightInfo(w_name, _convert_down_proj)],
+            identity,
+            data_type=torch.float8_e4m3fn,
+            config=src_weight_info.config,
+        )
+        scale = create_w8a8_fp8_per_block_weight(
+            src_weight_info,
+            W.moe_s2,
+            [
+                CkptWeightInfo(
+                    w_name + APPEND_SUFFIX,
+                    _convert_down_proj,
+                )
+            ],
+            identity,
+            data_type=torch.float32,
+            config=src_weight_info.config,
+        )
+        return [kernel, scale]
+
     def _get_moe_w2_quant_weight(self, src_weight_info: MoeAtomicWeight):
         assert src_weight_info.name in [W.moe_w2]
-        w_name = src_weight_info.weights[0].name[: -len(W_SUFFIX)]
+        if not src_weight_info.weights[0].name.endswith(W_SUFFIX):
+            return self._get_qwen3_vl_moe_w2_quant_weight(src_weight_info)
+        else:
+            w_name = src_weight_info.weights[0].name[: -len(W_SUFFIX)]
         kernel = create_w8a8_fp8_per_block_weight(
             src_weight_info,
             W.moe_w2,
@@ -639,8 +681,36 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         )
         return [kernel, scale]
 
+    def _get_qwen3_vl_moe_w1_quant_weight(self, src_weight_info: MoeAtomicWeight):
+        kernel = create_w8a8_fp8_per_block_weight(
+            src_weight_info,
+            W.moe_w1,
+            [
+                CkptWeightInfo(w.name, _convert_gate_up_proj)
+                for w in src_weight_info.weights
+            ],
+            identity,
+            data_type=torch.float8_e4m3fn,
+            config=src_weight_info.config,
+        )
+        scale = create_w8a8_fp8_per_block_weight(
+            src_weight_info,
+            W.moe_s1,
+            [
+                CkptWeightInfo(w.name + APPEND_SUFFIX, _convert_gate_up_proj)
+                for w in src_weight_info.weights
+            ],
+            identity,
+            data_type=torch.float32,
+            config=src_weight_info.config,
+        )
+        return [kernel, scale]
+
     def _get_moe_w1_quant_weight(self, src_weight_info: MoeAtomicWeight):
         assert src_weight_info.name in [W.moe_w1]
+        if not src_weight_info.weights[0].name.endswith(W_SUFFIX):
+            return self._get_qwen3_vl_moe_w1_quant_weight(src_weight_info)
+
         kernel = create_w8a8_fp8_per_block_weight(
             src_weight_info,
             W.moe_w1,
@@ -750,7 +820,9 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
         device: str,
         load_config: LoadConfig,
     ):
-        kernel = self.kernel._load_raw_tensor(tensor_source, layer_id, device, load_config)
+        kernel = self.kernel._load_raw_tensor(
+            tensor_source, layer_id, device, load_config
+        )
 
         res = {}
         scale = None
@@ -774,7 +846,7 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
             res.update({self.scale.name: scale.contiguous().to(device)})
 
         return res
-    
+
     def get_tensor_names(
         self, layer_id: Optional[int], load_config: LoadConfig
     ) -> set[str]:
