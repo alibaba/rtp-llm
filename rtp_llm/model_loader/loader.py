@@ -27,7 +27,7 @@ from rtp_llm.utils.fuser import fetch_remote_file_to_local
 from rtp_llm.utils.model_weight import W, WeightStyle
 from rtp_llm.utils.module_util import has_module
 from rtp_llm.utils.time_util import timer_wrapper
-from rtp_llm.utils.util import check_with_info
+from rtp_llm.utils.util import check_with_info, to_torch_dtype
 
 
 class ModelLoader:
@@ -45,7 +45,6 @@ class ModelLoader:
         model_config: ModelConfig,
         weights_info: ModelDeployWeightInfo,
         misc_weights_info: Optional[CustomAtomicWeight],
-        compute_dtype: torch.dtype,
         database: BaseDatabase,
     ):
         # self.model_config = model_config
@@ -58,6 +57,8 @@ class ModelLoader:
             self._weights_info.create_model_weight_info(database)
         )
 
+        # Get compute_dtype from model_config
+        compute_dtype = to_torch_dtype(model_config.data_type)
         # Get use_fp32 from model_config
         use_fp32 = model_config.use_float32
         if use_fp32:
@@ -611,7 +612,6 @@ def get_model_loader(
     model_config: ModelConfig,
     weights_info: ModelDeployWeightInfo,
     misc_weights_info: Optional[CustomAtomicWeight],
-    compute_dtype: torch.dtype,
     database: BaseDatabase,
 ) -> ModelLoader:
     if weights_info._head_num % weights_info.tp_size != 0:
@@ -631,6 +631,5 @@ def get_model_loader(
         model_config,
         weights_info,
         misc_weights_info,
-        compute_dtype,
         database,
     )
