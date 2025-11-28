@@ -39,6 +39,7 @@ public:
 private:
     MallocResult incrMalloc(const MallocInfo& malloc_info);
     MallocResult initMallocForCommonLen(const MallocInfo& malloc_info);
+    void         makeLayerBlockIds(KVCacheResourceV1& resource) const;
 
 private:
     BlockPoolPtr                      block_pool_;

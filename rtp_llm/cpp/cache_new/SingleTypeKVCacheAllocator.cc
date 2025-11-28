@@ -64,12 +64,14 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     if (!full_kv_cache_group_->malloc(cache_keys_0, block_indices_0, common_seq_len)) {
         return {false, 0};
     }
+    makeLayerBlockIds(br0);
 
     // reference other batches to group 0
     for (int batch_id = 1; batch_id < batch_size; ++batch_id) {
         auto& br                  = malloc_info.batch_kv_cache_resource->batch_resource[batch_id];
         auto& block_indices_other = br.group_block_ids[0]->block_indices;
         full_kv_cache_group_->reference(block_indices_other, block_indices_0);
+        makeLayerBlockIds(br);
     }
 
     return {true, reuse_len};
@@ -114,6 +116,7 @@ MallocResult SingleTypeKVCacheAllocator::incrMalloc(const MallocInfo& malloc_inf
             }
             return {false, 0};
         }
+        makeLayerBlockIds(br);
     }
     return {true, 0};
 }
@@ -140,6 +143,7 @@ FreeResult SingleTypeKVCacheAllocator::free(const FreeInfo& free_info) {
             full_kv_cache_group_->free(batch_blocks);
             free_info.batch_kv_cache_resource->resize(batch_id, 0, 0);
         }
+        makeLayerBlockIds(br);
     }
 
     return {true};
@@ -289,6 +293,7 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& ba
             br.group_block_ids[0]->block_indices =
                 std::move(old_resources[old_batch_idx].group_block_ids[0]->block_indices);
             br.cache_keys = std::move(old_resources[old_batch_idx].cache_keys);
+            makeLayerBlockIds(br);
         } else {
             // create new batch by referencing from source blocks
             auto& br = batch_kv_cache_resource->batch_resource[new_batch_idx];
@@ -309,10 +314,24 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& ba
 
                 block_update_mapping.push_back(BlockIdPair{old_block, new_block});
             }
+            makeLayerBlockIds(br);
         }
         --fork_count;
     }
     return true;
+}
+
+void SingleTypeKVCacheAllocator::makeLayerBlockIds(KVCacheResourceV1& resource) const {
+    if (resource.group_block_ids.empty() || !(resource.group_block_ids[0])) {
+        resource.layer_block_ids.clear();
+        return;
+    }
+    const int layer_num = config_.layer_num;
+    resource.layer_block_ids.resize(static_cast<size_t>(layer_num));
+    const auto& blocks = resource.group_block_ids[0];
+    for (int layer = 0; layer < layer_num; ++layer) {
+        resource.layer_block_ids[static_cast<size_t>(layer)] = blocks;
+    }
 }
 
 }  // namespace rtp_llm
