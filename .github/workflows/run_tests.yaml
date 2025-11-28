@@ -35,7 +35,7 @@ jobs:
     steps:
     - name: Clean GPU
       run: |
-        sudo -u aaa -i bash <<'EOF'
+        sudo -u yuzho -i bash <<'EOF'
         source /mnt/raid0/yuzho/env/miniforge3/etc/profile.d/conda.sh
         
         conda activate py310
