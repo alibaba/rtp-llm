@@ -448,12 +448,16 @@ __device__ __inline__ float2 rotary_embedding_transform(const float2 v, const fl
     return rot_v;
 }
 
-__device__ __inline__ float2 rotary_embedding_transform(
-    const float2 v, const float2 v_permuted, const float2& coef1, const float2& coef2, const bool is_front) {
+__device__ __inline__ void
+rotary_embedding_transform(float2& v, float2& v_permuted, const float2& coef1, const float2& coef2) {
     float2 rot_v;
-    rot_v.x = v.x * coef1.x + (is_front ? -v_permuted.x : v_permuted.x) * coef1.y;
-    rot_v.y = v.y * coef2.x + (is_front ? -v_permuted.y : v_permuted.y) * coef2.y;
-    return rot_v;
+    float2 rot_v_permuted;
+    rot_v.x          = v.x * coef1.x - v_permuted.x * coef1.y;
+    rot_v.y          = v.y * coef2.x - v_permuted.y * coef2.y;
+    rot_v_permuted.x = v_permuted.x * coef1.x + v.x * coef1.y;
+    rot_v_permuted.y = v_permuted.y * coef2.x + v.y * coef2.y;
+    v                = rot_v;
+    v_permuted       = rot_v_permuted;
 }
 
 __device__ __inline__ Float8_ rotary_embedding_transform(const Float8_ v, const Float8_& coef) {
@@ -466,12 +470,12 @@ __device__ __inline__ Float8_ rotary_embedding_transform(const Float8_ v, const 
     return rot_v;
 }
 
-__device__ __inline__ void rotary_embedding_transform(
-    Float8_& v, const Float8_& v_permuted, const Float8_& coef1, const Float8_& coef2, const bool is_front) {
-    v.x = rotary_embedding_transform(v.x, v_permuted.x, coef1.x, coef1.y, is_front);
-    v.y = rotary_embedding_transform(v.y, v_permuted.y, coef1.z, coef1.w, is_front);
-    v.z = rotary_embedding_transform(v.z, v_permuted.z, coef2.x, coef2.y, is_front);
-    v.w = rotary_embedding_transform(v.w, v_permuted.w, coef2.z, coef2.w, is_front);
+__device__ __inline__ void
+rotary_embedding_transform(Float8_& v, Float8_& v_permuted, const Float8_& coef1, const Float8_& coef2) {
+    rotary_embedding_transform(v.x, v_permuted.x, coef1.x, coef1.y);
+    rotary_embedding_transform(v.y, v_permuted.y, coef1.z, coef1.w);
+    rotary_embedding_transform(v.z, v_permuted.z, coef2.x, coef2.y);
+    rotary_embedding_transform(v.w, v_permuted.w, coef2.z, coef2.w);
 }
 
 __device__ __inline__ uint32_t rotary_embedding_transform(const uint32_t v, const float2& coef) {
@@ -500,27 +504,30 @@ __device__ __inline__ uint4 rotary_embedding_transform(const uint4 v, const Floa
     return rot_v;
 }
 
-__device__ __inline__ void rotary_embedding_transform(
-    uint4& v, const uint4& v_permuted, const Float8_& coef1, const Float8_& coef2, const bool is_front) {
+__device__ __inline__ void
+rotary_embedding_transform(uint4& v, uint4& v_permuted, const Float8_& coef1, const Float8_& coef2) {
     Float8_ fv;
     Float8_ fv_permuted;
-    Float8_ rot_fv;
     fv.x          = half2_to_float2(v.x);
     fv_permuted.x = half2_to_float2(v_permuted.x);
     fv.y          = half2_to_float2(v.y);
     fv_permuted.y = half2_to_float2(v_permuted.y);
-    rot_fv.x      = rotary_embedding_transform(fv.x, fv_permuted.x, coef1.x, coef1.y, is_front);
+    rotary_embedding_transform(fv.x, fv_permuted.x, coef1.x, coef1.y);
     fv.z          = half2_to_float2(v.z);
     fv_permuted.z = half2_to_float2(v_permuted.z);
-    rot_fv.y      = rotary_embedding_transform(fv.y, fv_permuted.y, coef1.z, coef1.w, is_front);
-    v.x           = float2_to_half2(rot_fv.x);
+    rotary_embedding_transform(fv.y, fv_permuted.y, coef1.z, coef1.w);
+    v.x           = float2_to_half2(fv.x);
+    v_permuted.x  = float2_to_half2(fv_permuted.x);
     fv.w          = half2_to_float2(v.w);
     fv_permuted.w = half2_to_float2(v_permuted.w);
-    rot_fv.z      = rotary_embedding_transform(fv.z, fv_permuted.z, coef2.x, coef2.y, is_front);
-    v.y           = float2_to_half2(rot_fv.y);
-    rot_fv.w      = rotary_embedding_transform(fv.w, fv_permuted.w, coef2.z, coef2.w, is_front);
-    v.z           = float2_to_half2(rot_fv.z);
-    v.w           = float2_to_half2(rot_fv.w);
+    rotary_embedding_transform(fv.z, fv_permuted.z, coef2.x, coef2.y);
+    v.y          = float2_to_half2(fv.y);
+    v_permuted.y = float2_to_half2(fv_permuted.y);
+    rotary_embedding_transform(fv.w, fv_permuted.w, coef2.z, coef2.w);
+    v.z          = float2_to_half2(fv.z);
+    v_permuted.z = float2_to_half2(fv_permuted.z);
+    v.w          = float2_to_half2(fv.w);
+    v_permuted.w = float2_to_half2(fv_permuted.w);
 }
 
 /**
@@ -561,27 +568,30 @@ __device__ __inline__ bf16_8_t rotary_embedding_transform(const bf16_8_t v, cons
     return rot_v;
 }
 
-__device__ __inline__ void rotary_embedding_transform(
-    bf16_8_t& v, const bf16_8_t& v_permuted, const Float8_& coef1, const Float8_& coef2, const bool is_front) {
+__device__ __inline__ void
+rotary_embedding_transform(bf16_8_t& v, bf16_8_t& v_permuted, const Float8_& coef1, const Float8_& coef2) {
     Float8_ fv;
     Float8_ fv_permuted;
-    Float8_ rot_fv;
     fv.x          = bf1622float2(v.x);
     fv_permuted.x = bf1622float2(v_permuted.x);
     fv.y          = bf1622float2(v.y);
     fv_permuted.y = bf1622float2(v_permuted.y);
-    rot_fv.x      = rotary_embedding_transform(fv.x, fv_permuted.x, coef1.x, coef1.y, is_front);
+    rotary_embedding_transform(fv.x, fv_permuted.x, coef1.x, coef1.y);
     fv.z          = bf1622float2(v.z);
     fv_permuted.z = bf1622float2(v_permuted.z);
-    rot_fv.y      = rotary_embedding_transform(fv.y, fv_permuted.y, coef1.z, coef1.w, is_front);
-    v.x           = __floats2bfloat162_rn(rot_fv.x.x, rot_fv.x.y);
+    rotary_embedding_transform(fv.y, fv_permuted.y, coef1.z, coef1.w);
+    v.x           = __floats2bfloat162_rn(fv.x.x, fv.x.y);
+    v_permuted.x  = __floats2bfloat162_rn(fv_permuted.x.x, fv_permuted.x.y);
     fv.w          = bf1622float2(v.w);
     fv_permuted.w = bf1622float2(v_permuted.w);
-    rot_fv.z      = rotary_embedding_transform(fv.z, fv_permuted.z, coef2.x, coef2.y, is_front);
-    v.y           = __floats2bfloat162_rn(rot_fv.y.x, rot_fv.y.y);
-    rot_fv.w      = rotary_embedding_transform(fv.w, fv_permuted.w, coef2.z, coef2.w, is_front);
-    v.z           = __floats2bfloat162_rn(rot_fv.z.x, rot_fv.z.y);
-    v.w           = __floats2bfloat162_rn(rot_fv.w.x, rot_fv.w.y);
+    rotary_embedding_transform(fv.z, fv_permuted.z, coef2.x, coef2.y);
+    v.y          = __floats2bfloat162_rn(fv.y.x, fv.y.y);
+    v_permuted.y = __floats2bfloat162_rn(fv_permuted.y.x, fv_permuted.y.y);
+    rotary_embedding_transform(fv.w, fv_permuted.w, coef2.z, coef2.w);
+    v.z          = __floats2bfloat162_rn(fv.z.x, fv.z.y);
+    v_permuted.z = __floats2bfloat162_rn(fv_permuted.z.x, fv_permuted.z.y);
+    v.w          = __floats2bfloat162_rn(fv.w.x, fv.w.y);
+    v_permuted.w = __floats2bfloat162_rn(fv_permuted.w.x, fv_permuted.w.y);
 }
 #endif
 
@@ -860,15 +870,9 @@ __device__ __inline__ void normal_rope_with_cache(
 }
 
 template<typename vector_t, typename scalar_t, typename rope_t>
-__device__ __inline__ void normal_rope_with_cache(vector_t&       x,
-                                                  const vector_t& x_permuted,
-                                                  const rope_t&   coef1,
-                                                  const rope_t&   coef2,
-                                                  const bool      work,
-                                                  const bool      is_front) {
-    if (work) {
-        rotary_embedding_transform(x, x_permuted, coef1, coef2, is_front);
-    }
+__device__ __inline__ void
+normal_rope_with_cache(vector_t& x, vector_t& x_permuted, const rope_t& coef1, const rope_t& coef2) {
+    rotary_embedding_transform(x, x_permuted, coef1, coef2);
 }
 
 template<typename RopeInit, typename scalar_t, typename vector_t>
@@ -980,16 +984,12 @@ apply_rope_with_cache(vector_t& x, scalar_t* smem, const int tidx, const int dim
 }
 
 template<typename vector_t, typename scalar_t, typename rope_t, RopeStyle ROPE_STYLE>
-__device__ inline void apply_rope_with_cache(vector_t&       x,
-                                             const vector_t& x_permuted,
-                                             const rope_t&   coef1,
-                                             const rope_t&   coef2,
-                                             const bool      work,
-                                             const bool      is_front) {
+__device__ inline void
+apply_rope_with_cache(vector_t& x, vector_t& x_permuted, const rope_t& coef1, const rope_t& coef2) {
     switch (ROPE_STYLE) {
         case RopeStyle::Base:
         case RopeStyle::Yarn:
-            normal_rope_with_cache<vector_t, scalar_t, rope_t>(x, x_permuted, coef1, coef2, work, is_front);
+            normal_rope_with_cache<vector_t, scalar_t, rope_t>(x, x_permuted, coef1, coef2);
             break;
 
         default:

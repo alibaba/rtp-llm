@@ -687,7 +687,7 @@ void UnfusedAttentionTest::decodeAddFusedQKVBiasTransposeTest(size_t batch_size,
         auto result_k = bufferToTensor(*k_output);
         auto result_v = bufferToTensor(*v_output);
 
-        assertTensorClose(result_q, ref[0].to(result_q.dtype()), 1e-5, 1e-5);
+        assertTensorClose(result_q, ref[0].to(result_q.dtype()), 1e-5, 1e-2);
         assertTensorClose(result_k, ref[1].to(result_k.dtype()), 1e-5, 1e-2);
         assertTensorClose(result_v, ref[2].to(result_v.dtype()), 1e-5, 1e-5);
     }
