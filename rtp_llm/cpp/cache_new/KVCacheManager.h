@@ -87,7 +87,6 @@ public:
     bool copyCache(const CopyCacheRequestPB& request, CopyCacheResponsePB& response);
 
 private:
-    bool enableMemoryConnector() const;
     bool initMemoryConnector();
 
 private:
@@ -99,7 +98,7 @@ private:
     const GptInitParameter&            params_;
 
     std::shared_ptr<KVCacheMemoryConnector>    memory_connector_;
-    std::shared_ptr<autil::LockFreeThreadPool> write_cache_thread_pool_;
+    std::shared_ptr<autil::LockFreeThreadPool> wait_cache_thread_pool_;
 };
 
 }  // namespace rtp_llm

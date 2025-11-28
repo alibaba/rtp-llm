@@ -50,7 +50,7 @@ bool KVCacheManager::init() {
         return false;
     }
 
-    if (enableMemoryConnector()) {
+    if (params_.kv_cache_config.memory_block_cache_size_mb > 0) {
         if (!initMemoryConnector()) {
             RTP_LLM_LOG_ERROR("init memory connector failed");
             return false;
@@ -210,15 +210,18 @@ FreeResult KVCacheManager::free(const FreeInfo& free_info) {
 
 InsertResult KVCacheManager::insertIntoCache(const InsertInfo& insert_info) {
     // insert to gpu
-    auto gpu_result = allocator_->insertIntoCache(insert_info);
+    InsertResult gpu_result{false};
+    if (insert_info.reuse_cache) {
+        gpu_result = allocator_->insertIntoCache(insert_info);
+    }
 
-    if (enableMemoryConnector()) {
-        // insert to cpu
+    // insert to memory
+    if (insert_info.enable_memory_cache) {
         auto resource_batch0 = insert_info.batch_kv_cache_resource->batch_resource.at(0);
         auto resource        = std::make_shared<KVCacheResourceV1>(resource_batch0);
-        auto async_context   = memory_connector_->asyncWrite(resource, nullptr);
-        if (async_context) {
-            write_cache_thread_pool_->pushTask([async_context]() { async_context->waitDone(); });
+        auto context         = memory_connector_->asyncWrite(resource, nullptr);
+        if (context) {
+            wait_cache_thread_pool_->pushTask([context]() { context->waitDone(); });
         }
     }
 
@@ -287,30 +290,35 @@ bool KVCacheManager::updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache
     return allocator_->updateKVBlock(batch_kv_cache_resource, block_src_batch, copy_last_block, block_update_mapping);
 }
 
-bool KVCacheManager::enableMemoryConnector() const {
-    return params_.kv_cache_config.memory_block_cache_size_mb > 0;
-}
-
 bool KVCacheManager::initMemoryConnector() {
-    auto config                               = config_;
-    config.memory_block_cache_size_mb         = params_.kv_cache_config.memory_block_cache_size_mb;
-    config.memory_block_cache_sync_timeout_ms = params_.kv_cache_config.memory_block_cache_sync_timeout_ms;
+    const auto memory_block_cache_size_mb         = params_.kv_cache_config.memory_block_cache_size_mb;
+    const auto memory_block_cache_sync_timeout_ms = params_.kv_cache_config.memory_block_cache_sync_timeout_ms;
+    if (memory_block_cache_size_mb <= 0 || memory_block_cache_sync_timeout_ms <= 0) {
+        RTP_LLM_LOG_WARNING(
+            "init memory connector failed, memory size or sync timeout is invalid, memory size: %ld MB, sync timeout: %ld ms",
+            memory_block_cache_size_mb,
+            memory_block_cache_sync_timeout_ms);
+        return false;
+    }
+
+    config_.memory_block_cache_size_mb         = memory_block_cache_size_mb;
+    config_.memory_block_cache_sync_timeout_ms = memory_block_cache_sync_timeout_ms;
     RTP_LLM_LOG_INFO("init memory connector, size: %ld MB, sync timeout: %ld ms",
-                     config.memory_block_cache_size_mb,
-                     config.memory_block_cache_sync_timeout_ms);
+                     config_.memory_block_cache_size_mb,
+                     config_.memory_block_cache_sync_timeout_ms);
 
     memory_connector_ =
         std::make_shared<KVCacheMemoryConnector>(config_, allocator_, device_, params_.worker_grpc_addrs_);
     if (!memory_connector_->init()) {
-        RTP_LLM_LOG_ERROR("kvcache memory connector init failed");
+        RTP_LLM_LOG_ERROR("memory connector init failed");
         memory_connector_.reset();
         return false;
     }
 
-    write_cache_thread_pool_ = std::make_shared<autil::LockFreeThreadPool>(8, 1000, nullptr, "WriteCacheThreadPool");
-    if (!write_cache_thread_pool_->start()) {
-        RTP_LLM_LOG_ERROR("write cache thread pool start failed");
-        write_cache_thread_pool_.reset();
+    wait_cache_thread_pool_ = std::make_shared<autil::LockFreeThreadPool>(8, 1000, nullptr, "WaitCacheThreadPool");
+    if (!wait_cache_thread_pool_->start()) {
+        RTP_LLM_LOG_ERROR("wait cache thread pool start failed");
+        wait_cache_thread_pool_.reset();
         return false;
     }
 
@@ -325,7 +333,12 @@ std::shared_ptr<AsyncContext> KVCacheManager::asyncLoadCache(const std::shared_p
             resource.get());
         return nullptr;
     }
-    return memory_connector_->asyncRead(resource, nullptr);
+
+    auto context = memory_connector_->asyncRead(resource, nullptr);
+    if (context) {
+        wait_cache_thread_pool_->pushTask([context]() { context->waitDone(); });
+    }
+    return context;
 }
 
 bool KVCacheManager::copyCache(const CopyCacheRequestPB& request, CopyCacheResponsePB& response) {

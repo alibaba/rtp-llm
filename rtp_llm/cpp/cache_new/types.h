@@ -110,14 +110,20 @@ struct FreeResult {
 struct InsertInfo {
     InsertInfo(BatchKVCacheResourcePtr batch_kv_cache_resource,
                CompleteTokenIdsPtr     complete_token_ids,
-               bool                    is_resident):
+               bool                    is_resident,
+               bool                    reuse_cache         = true,
+               bool                    enable_memory_cache = false):
         batch_kv_cache_resource(batch_kv_cache_resource),
         complete_token_ids(complete_token_ids),
-        is_resident(is_resident) {}
+        is_resident(is_resident),
+        reuse_cache(reuse_cache),
+        enable_memory_cache(enable_memory_cache) {}
 
     BatchKVCacheResourcePtr batch_kv_cache_resource;
     CompleteTokenIdsPtr     complete_token_ids;
     bool                    is_resident;
+    bool                    reuse_cache{true};
+    bool                    enable_memory_cache{false};
 };
 
 struct InsertResult {

@@ -56,8 +56,9 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     auto& cache_keys_0    = br0.cache_keys;
     auto& block_indices_0 = br0.group_block_ids[0]->block_indices;
     if (malloc_info.batch_kv_cache_resource->enable_reuse_cache && block_indices_0.size() < cache_keys_0.size()) {
-        auto match_result = full_kv_cache_group_->match(cache_keys_0);
-        reuse_len         = static_cast<int>(match_result.reuse_length);
+        auto match_result   = full_kv_cache_group_->match(cache_keys_0);
+        reuse_len           = static_cast<int>(match_result.reuse_length);
+        br0.reuse_block_num = match_result.reuse_blocks;
         full_kv_cache_group_->reference(block_indices_0, match_result.block_indices);
     }
 

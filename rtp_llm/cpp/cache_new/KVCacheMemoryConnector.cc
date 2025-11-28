@@ -82,20 +82,30 @@ bool KVCacheMemoryConnector::init() {
 std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::shared_ptr<KVCacheResourceV1>& resource,
                                                                 const std::shared_ptr<Meta>&              meta) {
     if (!resource || resource->cache_keys.empty() || resource->layer_block_ids.empty()) {
+        RTP_LLM_LOG_WARNING(
+            "async read failed, resource is invalid, resource: %p, cache keys size: %zu, layer block ids size: %zu",
+            resource.get(),
+            resource->cache_keys.size(),
+            resource->layer_block_ids.size());
         return nullptr;
     }
 
-    const auto&  cache_keys    = resource->cache_keys;
-    const size_t gpu_reuse_len = resource->reuse_len;
-    if (gpu_reuse_len >= cache_keys.size()) {
+    const auto&  cache_keys          = resource->cache_keys;
+    const size_t gpu_reuse_block_num = resource->reuse_block_num;
+    if (gpu_reuse_block_num >= cache_keys.size()) {
+        RTP_LLM_LOG_DEBUG(
+            "async read skip, gpu reuse len is greater than cache keys size, gpu_reuse_block_num: %zu, cache_keys size: %zu",
+            gpu_reuse_block_num,
+            cache_keys.size());
         return nullptr;
     }
 
-    auto copy_infos = buildCopyPlanForRead(cache_keys, resource->layer_block_ids, gpu_reuse_len);
+    auto copy_infos = buildCopyPlanForRead(cache_keys, resource->layer_block_ids, gpu_reuse_block_num);
     if (copy_infos.empty()) {
-        RTP_LLM_LOG_WARNING("async read failed, build copy plan for read failed, gpu_reuse_len: %zu, cache_keys: %zu",
-                            gpu_reuse_len,
-                            cache_keys.size());
+        RTP_LLM_LOG_WARNING(
+            "async read failed, build copy plan for read failed, gpu_reuse_block_num: %zu, cache_keys: %zu",
+            gpu_reuse_block_num,
+            cache_keys.size());
         return nullptr;
     }
 
@@ -105,24 +115,25 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
         return nullptr;
     }
 
-    const auto mem_match_len = copy_infos.size();
-    auto       done_cb       = [resource, gpu_reuse_len, mem_match_len](bool success) {
+    const auto cpu_reuse_num = copy_infos.size();
+    auto       done_cb       = [resource, gpu_reuse_block_num, cpu_reuse_num](bool success) {
         if (success) {
-            resource->reuse_len = gpu_reuse_len + mem_match_len;
+            resource->reuse_block_num = gpu_reuse_block_num + cpu_reuse_num;
         }
     };
     return std::make_shared<MemoryConnectorAsyncContext>(send_result, done_cb);
 }
 
 std::vector<KVCacheMemoryConnector::CopyInfoPerKey> KVCacheMemoryConnector::buildCopyPlanForRead(
-    const std::vector<int64_t>& cache_keys, const LayerBlockIds& layer_block_ids, size_t gpu_reuse_len) const {
+    const std::vector<int64_t>& cache_keys, const LayerBlockIds& layer_block_ids, size_t gpu_reuse_block_num) const {
     std::vector<CopyInfoPerKey> copy_infos;
     const size_t                layer_num = layer_block_ids.size();
 
-    for (size_t i = gpu_reuse_len; i < cache_keys.size(); ++i) {
+    for (size_t i = gpu_reuse_block_num; i < cache_keys.size(); ++i) {
         const auto cache_key    = cache_keys.at(i);
         const auto match_result = block_cache_->match(static_cast<CacheKeyType>(cache_key));
         if (isNullBlockIdx(match_result.matched_index)) {
+            RTP_LLM_LOG_DEBUG("build copy plan for read, found null memory block index, cache key: %zu", cache_key);
             break;  // 只处理连续前缀
         }
 
@@ -133,10 +144,19 @@ std::vector<KVCacheMemoryConnector::CopyInfoPerKey> KVCacheMemoryConnector::buil
         copy_info.gpu_layer_blocks.reserve(layer_num);
         for (size_t layer = 0; layer < layer_num; ++layer) {
             const int gpu_block_idx = layer_block_ids.at(layer)->block_indices.at(i);
-            if (!isNullBlockIdx(gpu_block_idx)) {
-                LayerBlock lb{static_cast<int>(layer), gpu_block_idx};
-                copy_info.gpu_layer_blocks.push_back(lb);
+            RTP_LLM_LOG_INFO("build copy plan for read, cache key: %zu, mem block: %d, layer: %d, gpu block: %d",
+                             cache_key,
+                             match_result.matched_index,
+                             layer,
+                             gpu_block_idx);
+            if (isNullBlockIdx(gpu_block_idx)) {
+                RTP_LLM_LOG_DEBUG("build copy plan for read, found null gpu block index, cache key: %zu, layer: %zu",
+                                  cache_key,
+                                  layer);
+                continue;
             }
+            LayerBlock lb{static_cast<int>(layer), gpu_block_idx};
+            copy_info.gpu_layer_blocks.push_back(lb);
         }
         copy_infos.emplace_back(std::move(copy_info));
     }
@@ -146,6 +166,11 @@ std::vector<KVCacheMemoryConnector::CopyInfoPerKey> KVCacheMemoryConnector::buil
 std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shared_ptr<KVCacheResourceV1>& resource,
                                                                  const std::shared_ptr<Meta>&              meta) {
     if (!resource || resource->cache_keys.empty() || resource->layer_block_ids.empty()) {
+        RTP_LLM_LOG_WARNING(
+            "async write failed, resource is invalid, resource: %p, cache keys size: %zu, layer block ids size: %zu",
+            resource.get(),
+            resource->cache_keys.size(),
+            resource->layer_block_ids.size());
         return nullptr;
     }
 
@@ -158,6 +183,9 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
         }
     }
     if (match_len >= cache_keys.size()) {
+        RTP_LLM_LOG_DEBUG("async write skip, all cache keys already in cache, match len: %zu, cache keys size: %zu",
+                          match_len,
+                          cache_keys.size());
         return nullptr;
     }
 
@@ -178,6 +206,7 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
     }
 
     auto done_cb = [copy_infos, self = shared_from_this()](bool success) {
+        RTP_LLM_LOG_DEBUG("async write done, success: %d", success);
         if (!success) {
             for (const auto& copy_info : copy_infos) {
                 auto block_pool = self->getOrCreateMemoryBlockPool(copy_info.mem_block_size);
@@ -235,12 +264,13 @@ std::vector<KVCacheMemoryConnector::CopyInfoPerKey> KVCacheMemoryConnector::buil
             break;
         }
 
-        const auto&               block_pool = getOrCreateMemoryBlockPool(total_bytes, true);
+        auto                      block_pool = getOrCreateMemoryBlockPool(total_bytes, true);
         std::vector<BlockIdxType> mem_blocks;
         if (!mallocMemoryBlocks(block_pool, 1, mem_blocks)) {
+            const int free_blocks = block_pool ? block_pool->freeBlocksNum() : -1;
             RTP_LLM_LOG_WARNING(
-                "build copy plan for write failed, malloc memory blocks failed, maybe no enough free blocks, free blocks: %zu",
-                block_pool->freeBlocksNum());
+                "build copy plan for write failed, malloc memory blocks failed, maybe no enough free blocks, free blocks: %d",
+                free_blocks);
             break;
         }
 
@@ -510,6 +540,22 @@ bool KVCacheMemoryConnector::ensureEnoughFreeBlocks(const std::shared_ptr<BlockP
         block_pool->free(evict_blocks);
     }
     return block_pool->freeBlocksNum() >= need_blocks;
+}
+
+void KVCacheMemoryConnector::printCopyPlan(const std::vector<CopyInfoPerKey>& copy_infos) const {
+    RTP_LLM_LOG_INFO("print copy plan, copy infos size: %zu", copy_infos.size());
+    for (int i = 0; i < copy_infos.size(); ++i) {
+        const auto&        copy_info = copy_infos.at(i);
+        std::ostringstream oss;
+        oss << "copy info " << i << ": cache key: " << copy_info.cache_key
+            << ", mem block size: " << copy_info.mem_block_size << ", mem block index: " << copy_info.mem_block_index
+            << ", gpu layer blocks: [";
+        for (const auto& gpu_layer_block : copy_info.gpu_layer_blocks) {
+            oss << "(layer " << gpu_layer_block.layer_id << ", block " << gpu_layer_block.block_id << "), ";
+        }
+        oss << "]";
+        RTP_LLM_LOG_INFO(oss.str().c_str());
+    }
 }
 
 // (removed legacy multi-key plan builder)

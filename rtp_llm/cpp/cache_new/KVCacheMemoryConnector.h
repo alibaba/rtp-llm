@@ -77,7 +77,7 @@ private:
 
     std::vector<CopyInfoPerKey> buildCopyPlanForRead(const std::vector<int64_t>& cache_keys,
                                                      const LayerBlockIds&        layer_block_ids,
-                                                     size_t                      gpu_reuse_len) const;
+                                                     size_t                      gpu_reuse_block_num) const;
     std::vector<CopyInfoPerKey> buildCopyPlanForWrite(const std::vector<int64_t>& cache_keys,
                                                       const LayerBlockIds&        layer_block_ids,
                                                       size_t                      match_len);
@@ -95,6 +95,7 @@ private:
     bool freeMemoryBlocks(const std::shared_ptr<BlockPool>& block_pool, const std::vector<int>& blocks);
     std::shared_ptr<BlockPool> getOrCreateMemoryBlockPool(size_t block_size, bool create = false);
     bool ensureEnoughFreeBlocks(const std::shared_ptr<BlockPool>& block_pool, size_t need_blocks) const;
+    void printCopyPlan(const std::vector<CopyInfoPerKey>& copy_infos) const;
 
 private:
     const CacheConfig&                cache_config_;

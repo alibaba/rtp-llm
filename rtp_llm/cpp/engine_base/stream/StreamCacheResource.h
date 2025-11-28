@@ -111,7 +111,7 @@ public:
     bool enableMemoryBlockCache() const;
 
     bool asyncLoadCache();
-    bool loadCacheDone() const;
+    bool loadCacheDone();
 
     std::string debugString() const {
         std::stringstream debug_string;
