@@ -371,6 +371,7 @@ py_test(
         "//rtp_llm/test/model_test/test_util:test_util",
     ],
     env = {
+        "NOT_USE_DEFAULT_STREAM" : "1",
         "TEST_USING_DEVICE": "CUDA",
         "HACK_LAYER_NUM" : "1",
         "CUDA_LAUNCH_BLOCKING" : "1",
@@ -392,6 +393,7 @@ py_test(
         "//rtp_llm/test/model_test/test_util:test_util",
     ],
     env = {
+        "NOT_USE_DEFAULT_STREAM" : "1",
         "TEST_USING_DEVICE": "CUDA",
         "HACK_LAYER_NUM" : "1",
         "CUDA_LAUNCH_BLOCKING" : "1",

@@ -32,7 +32,7 @@ void CudaGraphRunner::captureDecodeOneBatchSize(int bs) {
     py_forward_method_(inputs);
     RTP_LLM_LOG_INFO("WarmUp for batch size %d successfully.", bs);
     {
-        CudaGraphStreamLife  stream_life(capture_stream_, device_);
+        CudaGraphStreamLife  stream_life(capture_stream_);
         at::cuda::CUDAGraph& graph               = graph_instances_[bs].graph_;
         auto                 output_dot_filename = "";
         if (enable_cuda_graph_debug_mode_) {

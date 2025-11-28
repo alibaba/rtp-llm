@@ -50,26 +50,18 @@ public:
 
 class CudaGraphStreamLife {
 public:
-    // CudaDevice's `stream_` is torch default stream
-    CudaGraphStreamLife(at::cuda::CUDAStream capture_stream, rtp_llm::DeviceBase* device):
+    CudaGraphStreamLife(at::cuda::CUDAStream capture_stream):
         origin_stream_(at::cuda::getCurrentCUDAStream(at::cuda::current_device())) {
-        cuda_device_ = dynamic_cast<rtp_llm::CudaDevice*>(device);
         // Set `capture_stream` for capture. All kernels should use this stream while capturing.
-        origin_cuda_device_stream_ = cuda_device_->getStream();
-        cuda_device_->setStream(capture_stream.stream());
-        RTP_LLM_LOG_INFO("Set Cuda Stream: capture_stream -> %d, set_stream -> %d, origin_cuda_device_stream_-> %d",
-                         capture_stream.stream(),
-                         reinterpret_cast<int64_t>(cuda_device_->getStream()),
-                         origin_cuda_device_stream_);
         at::cuda::setCurrentCUDAStream(capture_stream);
+        RTP_LLM_LOG_INFO("Set Cuda Stream: capture_stream -> %d, origin_stream -> %d",
+                         capture_stream.stream(),
+                         origin_stream_.stream());
     }
     ~CudaGraphStreamLife() {
         at::cuda::setCurrentCUDAStream(origin_stream_);
-        cuda_device_->setStream(origin_cuda_device_stream_);
     }
 
 private:
     at::cuda::CUDAStream origin_stream_;
-    cudaStream_t         origin_cuda_device_stream_;
-    rtp_llm::CudaDevice* cuda_device_;
 };
