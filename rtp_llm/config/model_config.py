@@ -482,7 +482,6 @@ class ModelConfig(CppModelConfig):
             ""  # Quantization method string (e.g., "INT8", "FP8", etc.)
         )
         # mm_related_params will be set to VitParameters() if needed
-        self.mm_related_params: Any = None
         self.src_quantization_bit: int = 0
         self.config_dtype: Optional[str] = None
 

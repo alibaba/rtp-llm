@@ -14,7 +14,7 @@ A multimodal model refers to an LLM that incorporates multimodal inputs. Current
 
     * `embedding` handles GPU-based transformation of preprocessed inputs into outputs.
 
-* For model weights, the required weights must be registered in `GptInitModelParameters` under `mm_related_params.vit_weights`. Refer to `BaseVitWeights` for specific implementation logic.
+* For model weights, the required weights must be registered in `ModelConfig` under `mm_related_params.vit_weights`. Refer to `BaseVitWeights` for specific implementation logic.
 
 ### Debug
 
