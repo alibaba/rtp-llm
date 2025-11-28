@@ -40,7 +40,7 @@ def trans_output(res: MMEmbeddingRes):
             multimodal_pos_id=(
                 trans_from_tensor(res.position_ids[i]) if contain_pos else None
             ),
-            multimodal_deepstack_embedding=(
+            multimodal_deepstack_embeds=(
                 trans_from_tensor(res.deepstack_embeds[i])
                 if contain_deepstack
                 else None
