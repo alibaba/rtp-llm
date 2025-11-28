@@ -250,15 +250,6 @@ class BaseModel(object):
     def is_multimodal(self) -> bool:
         return isinstance(self, MultiModalMixin)
 
-    def _init_database(self):
-        self.database = CkptDatabase(self.model_config.ckpt_path, self.model_config.ptuning_path)
-        lora_infos = self.model_config.lora_infos
-        self.static_lora: bool = len(lora_infos) == 1
-        if self.static_lora:
-            for name, path in lora_infos.items():
-                self.database.load_lora(name, path)
-            self.database.dump_lora_info()
-                
     def _load_model_weights(self):
         self.weight: ModelWeights = self.model_weights_loader.load_weights(
             device=self._get_device_str()
@@ -284,7 +275,14 @@ class BaseModel(object):
             )
 
     def create_model_loader(self) -> ModelLoader:
-        self._init_database()
+        # Create database locally, only used for model loading
+        database = CkptDatabase(self.model_config.ckpt_path, self.model_config.ptuning_path)
+        lora_infos = self.model_config.lora_infos
+        static_lora: bool = len(lora_infos) == 1
+        if static_lora:
+            for name, path in lora_infos.items():
+                database.load_lora(name, path)
+            database.dump_lora_info()
 
         vit_weights = None
         if self.model_config.mm_related_params is not None:
@@ -306,6 +304,6 @@ class BaseModel(object):
             self.model_config,
             weights_info,
             misc_weights_info,
-            self.database,
+            database,
         )
 
