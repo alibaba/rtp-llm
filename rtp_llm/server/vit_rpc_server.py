@@ -40,7 +40,7 @@ def trans_output(res: MMEmbeddingRes):
             multimodal_pos_id=(
                 trans_from_tensor(res.position_ids[i]) if contain_pos else None
             ),
-            multimodal_deepstack_embedding=(
+            multimodal_deepstack_embeds=(
                 trans_from_tensor(res.deepstack_embeds[i])
                 if contain_deepstack
                 else None
@@ -55,7 +55,7 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
         self.engine = mm_process_engine
 
     def RemoteMultimodalEmbedding(self, multimodal_inputs: MultimodalInputsPB, context):
-        res: MMEmbeddingRes = self.engine.mm_embedding_rpc(multimodal_inputs)
+        res: MMEmbeddingRes = self.engine.mm_embedding_rpc(multimodal_inputs))
         return trans_output(res)
 
     def GetWorkerStatus(self, request: StatusVersionPB, context):
