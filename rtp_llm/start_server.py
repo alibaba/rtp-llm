@@ -9,8 +9,8 @@ import traceback
 import requests
 
 from rtp_llm.config.py_config_modules import ServerConfig, StaticConfig
-from rtp_llm.metrics import kmonitor
-from rtp_llm.ops import ProfilingDebugLoggingConfig
+from rtp_llm.distribute.gang_info import get_gang_info
+from rtp_llm.ops import ProfilingDebugLoggingConfig, RoleType
 from rtp_llm.tools.api.hf_model_helper import get_hf_model_info
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
@@ -150,6 +150,157 @@ def monitor_and_release_process(backend_process, frontend_process):
     logging.info("all process exit")
 
 
+def should_auto_configure_deepep() -> bool:
+    """
+    Check if DeepEP should be auto-configured.
+    Returns True if current values match defaults (user hasn't manually set them).
+    Returns False if user has manually set any of the DeepEP values to non-default.
+
+    This function reads values from StaticConfig.moe_config and compares them with
+    default values to determine if user has manually configured.
+
+    Default values:
+    - USE_DEEPEP_MOE: False
+    - USE_DEEPEP_INTERNODE: False
+    - USE_DEEPEP_LOW_LATENCY: True
+    """
+    # Default values
+    default_use_deepep_moe = False
+    default_use_deepep_internode = False
+    default_use_deepep_low_latency = True
+
+    # Read current values from StaticConfig.moe_config
+    current_use_deepep_moe = StaticConfig.moe_config.use_deepep_moe
+    current_use_deepep_internode = StaticConfig.moe_config.use_deepep_internode
+    current_use_deepep_low_latency = StaticConfig.moe_config.use_deepep_low_latency
+
+    # Check if current values match defaults
+    # If all match defaults, user hasn't manually set them, so we should auto-configure
+    # If any value differs from default, user has manually configured, so we shouldn't auto-configure
+    return (
+        current_use_deepep_moe == default_use_deepep_moe
+        and current_use_deepep_internode == default_use_deepep_internode
+        and current_use_deepep_low_latency == default_use_deepep_low_latency
+    )
+
+
+def auto_configure_deepep(args: argparse.Namespace):
+    """
+    Automatically configure DeepEP settings based on deployment scenario.
+
+    Configuration rules (for 8-GPU machine):
+    - Non-PD separation + Inference node + Single GPU (1TP): 0, 0, 0
+    - Non-PD separation + Inference node + Single-node multi-GPU (>1TP): 1, 0, 0
+    - Non-PD separation + Inference node + Multi-node multi-GPU: 1, 0, 1
+    - PD separation + Prefill node + Single-node single-GPU (1TP): 0, 0, 0
+    - PD separation + Decode node + Single-node single-GPU (1TP): 0, 0, 0
+    - PD separation + Prefill node + Single-node multi-GPU (2-8 GPUs): 1, 0, 0
+    - PD separation + Decode node + Single-node multi-GPU (2-8 GPUs): 1, 1, 0
+    - PD separation + Prefill node + Multi-node multi-GPU (>=9 GPUs): 1, 0, 1
+    - PD separation + Decode node + Multi-node multi-GPU (>=9 GPUs): 1, 1, 1
+    """
+    # If USE_ALL_GATHER is enabled, disable all DeepEP settings
+    use_all_gather = StaticConfig.parallelism_distributed_config.use_all_gather
+
+    if use_all_gather:
+        os.environ["USE_DEEPEP_MOE"] = "0"
+        os.environ["USE_DEEPEP_LOW_LATENCY"] = "0"
+        os.environ["USE_DEEPEP_INTERNODE"] = "0"
+        logging.info(
+            f"USE_ALL_GATHER is enabled (use_all_gather={use_all_gather}), "
+            f"all DeepEP settings are disabled (0, 0, 0)"
+        )
+        return
+
+    # Get deployment information from StaticConfig
+    role_type_enum = StaticConfig.role_config.role_type
+    role_type = (
+        role_type_enum.name if hasattr(role_type_enum, "name") else str(role_type_enum)
+    )
+    world_size = g_parallel_info.world_size
+    tp_size = g_parallel_info.tp_size
+
+    # Get number of nodes
+    try:
+        gang_info = get_gang_info()
+        num_nodes = gang_info.num_nodes
+    except Exception:
+        # If get_gang_info fails, estimate from world_size
+        # Assuming 8 GPUs per node
+        num_nodes = (world_size + 7) // 8
+        logging.info(
+            f"Failed to get gang_info, estimated num_nodes={num_nodes} from world_size={world_size}"
+        )
+
+    # Determine if PD separation is enabled
+    is_pd_separation = role_type_enum in [RoleType.PREFILL, RoleType.DECODE]
+    is_inference = role_type_enum == RoleType.PDFUSION
+    is_decode = role_type_enum == RoleType.DECODE
+
+    # Determine GPU configuration
+    is_single_gpu = tp_size == 1
+    is_multi_gpu = tp_size > 1
+    is_multi_node = num_nodes > 1 or world_size >= 9
+
+    # Apply configuration rules
+    use_deepep_moe = False
+    use_deepep_low_latency = False
+    use_deepep_internode = False
+
+    if is_inference:
+        # Non-PD separation + Inference node
+        if is_single_gpu:
+            # Single GPU (1TP): 0, 0, 0
+            use_deepep_moe = False
+            use_deepep_low_latency = False
+            use_deepep_internode = False
+        elif is_multi_gpu and not is_multi_node:
+            # Single-node multi-GPU (>1TP): 1, 0, 0
+            use_deepep_moe = True
+            use_deepep_low_latency = False
+            use_deepep_internode = False
+        elif is_multi_node:
+            # Multi-node multi-GPU: 1, 0, 1
+            use_deepep_moe = True
+            use_deepep_low_latency = False
+            use_deepep_internode = True
+    elif is_pd_separation:
+        # PD separation
+        if is_single_gpu:
+            # Single-node single-GPU: 0, 0, 0
+            use_deepep_moe = False
+            use_deepep_low_latency = False
+            use_deepep_internode = False
+        elif is_multi_gpu and not is_multi_node:
+            # Single-node multi-GPU (2-8 GPUs)
+            use_deepep_moe = True
+            if is_decode:
+                use_deepep_low_latency = True
+        elif is_multi_node:
+            # Multi-node multi-GPU (>=9 GPUs)
+            use_deepep_moe = True
+            use_deepep_internode = True
+            if is_decode:
+                use_deepep_low_latency = True
+
+    # Set environment variables
+    os.environ["USE_DEEPEP_MOE"] = "1" if use_deepep_moe else "0"
+    os.environ["USE_DEEPEP_LOW_LATENCY"] = "1" if use_deepep_low_latency else "0"
+    os.environ["USE_DEEPEP_INTERNODE"] = "1" if use_deepep_internode else "0"
+
+    logging.info(
+        f"Auto-configured DeepEP settings based on deployment scenario:\n"
+        f"  Role Type: {role_type}\n"
+        f"  TP Size: {tp_size}\n"
+        f"  World Size: {world_size}\n"
+        f"  Num Nodes: {num_nodes}\n"
+        f"  PD Separation: {is_pd_separation}\n"
+        f"  USE_DEEPEP_MOE: {use_deepep_moe}\n"
+        f"  USE_DEEPEP_LOW_LATENCY: {use_deepep_low_latency}\n"
+        f"  USE_DEEPEP_INTERNODE: {use_deepep_internode}"
+    )
+
+
 def get_model_type_and_update_env(parser: EnvArgumentParser, args: argparse.Namespace):
     if (
         hasattr(args, "checkpoint_path")
@@ -160,7 +311,7 @@ def get_model_type_and_update_env(parser: EnvArgumentParser, args: argparse.Name
         current_model_type = os.environ.get(
             "MODEL_TYPE", StaticConfig.model_config.model_type
         )
-        if current_model_type is None or current_model_type == "":
+        if not current_model_type or current_model_type == "":
             if (
                 hasattr(args, "model_type")
                 and args.model_type is not None
@@ -186,11 +337,25 @@ def start_server(parser: EnvArgumentParser, args: argparse.Namespace):
     try:
         multiprocessing.set_start_method("spawn")
     except RuntimeError as e:
-        logging.warn(str(e))
+        logging.warning(str(e))
     global_controller = init_controller()
     backend_process = None
     frontend_process = None
+
+    # Check if DeepEP should be auto-configured before get_model_type_and_update_env
+    # because get_model_type_and_update_env may update environment variables
+    should_auto_config = should_auto_configure_deepep()
+
     get_model_type_and_update_env(parser, args)
+
+    # Auto-configure DeepEP settings based on deployment scenario
+    if should_auto_config:
+        auto_configure_deepep(args)
+    else:
+        logging.info(
+            "DeepEP configuration already set manually, skipping auto-configuration"
+        )
+
     try:
         if os.environ.get("ROLE_TYPE", "") != "FRONTEND":
             logging.info("start backend server")

@@ -26,7 +26,7 @@ void registerFMHAType(py::module m) {
 
 void register_parallelism_distributed_config(pybind11::module& m) {
     pybind11::class_<ParallelismDistributedConfig>(m, "ParallelismDistributedConfig")
-        .def(pybind11::init<int, int, int, int, int, int, int, int>(),
+        .def(pybind11::init<int, int, int, int, int, int, int, int, bool>(),
              pybind11::arg("tp_size")          = 1,
              pybind11::arg("ep_size")          = 1,
              pybind11::arg("dp_size")          = 1,
@@ -34,7 +34,8 @@ void register_parallelism_distributed_config(pybind11::module& m) {
              pybind11::arg("world_size")       = 1,
              pybind11::arg("world_rank")       = 0,
              pybind11::arg("local_world_size") = 1,
-             pybind11::arg("ffn_sp_size")      = 1)
+             pybind11::arg("ffn_sp_size")      = 1,
+             pybind11::arg("use_all_gather")   = false)
         .def("to_string", &ParallelismDistributedConfig::to_string)
         .def("update_from_env", &ParallelismDistributedConfig::update_from_env_for_test)
         .def_readwrite("tp_size", &ParallelismDistributedConfig::tp_size)
@@ -44,7 +45,8 @@ void register_parallelism_distributed_config(pybind11::module& m) {
         .def_readwrite("world_size", &ParallelismDistributedConfig::world_size)
         .def_readwrite("world_rank", &ParallelismDistributedConfig::world_rank)
         .def_readwrite("local_world_size", &ParallelismDistributedConfig::local_world_size)
-        .def_readwrite("ffn_sp_size", &ParallelismDistributedConfig::ffn_sp_size);
+        .def_readwrite("ffn_sp_size", &ParallelismDistributedConfig::ffn_sp_size)
+        .def_readwrite("use_all_gather", &ParallelismDistributedConfig::use_all_gather);
 }
 
 void register_arpc_config(pybind11::module& m) {
