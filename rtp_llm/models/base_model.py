@@ -29,7 +29,6 @@ from rtp_llm.ops import (
 )
 from rtp_llm.utils.database import CkptDatabase
 from rtp_llm.utils.time_util import timer_wrapper
-from rtp_llm.utils.util import to_torch_dtype
 
 class BaseModel(object):
 
@@ -124,6 +123,9 @@ class BaseModel(object):
             and self.support_cuda_graph() is False
         ):
             raise Exception("current model can't support cuda graph in py model mode")
+
+        self._may_init_multimodal()
+        self.custom_module = self._init_custom_module()        
 
         self.model_weights_loader = self.create_model_loader()
         device_str = self._get_device_str()
@@ -236,10 +238,6 @@ class BaseModel(object):
                 device=self._get_device_str(),
             )
 
-    @timer_wrapper(description="init custom_module")
-    def _init_misc(self):
-        self._may_init_multimodal()
-        self.custom_module = self._init_custom_module()
 
     def _init_custom_module(self) -> Optional[CustomModule]:
         return create_custom_module(self.model_config, self.tokenizer)
@@ -290,7 +288,6 @@ class BaseModel(object):
             )
 
     def create_model_loader(self) -> ModelLoader:
-        self._init_misc()
         self._init_database()
 
         vit_weights = None
@@ -313,7 +310,6 @@ class BaseModel(object):
             self.model_config,
             weights_info,
             misc_weights_info,
-            to_torch_dtype(self.model_config.data_type),
             self.database,
         )
 
