@@ -242,3 +242,17 @@ cc_test(
     ],
     tags = ["custom_ar_ut", "rocm"],
 )
+
+cc_test(
+    name = "rocm_mask_logits_op_test",
+    srcs = [
+        "ROCmMaskLogitsOpTest.cc",
+    ],
+    data = [],
+    env = device_test_envs(),
+    copts = test_copts,
+    linkopts = test_linkopts,
+    deps = test_deps,
+    tags = ["rocm"],
+    exec_properties = {'gpu':'MI308X'},
+)
