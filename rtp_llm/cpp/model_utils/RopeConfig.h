@@ -72,4 +72,12 @@ struct RopeConfig {
         }                                                                                                              \
     }()
 
+#define FT_ROPE_WITH_CACHE_SWITCH(COND, CONST_NAME, ...)                                                               \
+    [&] {                                                                                                              \
+        switch (COND) {                                                                                                \
+            FT_SWITCH_ONE_CASE(CONST_NAME, RopeStyle::Base, __VA_ARGS__)                                               \
+            FT_SWITCH_ONE_CASE(CONST_NAME, RopeStyle::Yarn, __VA_ARGS__)                                               \
+        }                                                                                                              \
+    }()
+
 }  // namespace rtp_llm
