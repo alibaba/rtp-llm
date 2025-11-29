@@ -119,10 +119,11 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
         return nullptr;
     }
 
-    const auto cpu_reuse_num = copy_infos.size();
-    auto done_cb = [resource, gpu_reuse_block_num, cpu_reuse_num, copy_infos, self = shared_from_this()](bool success) {
+    const auto cpu_reuse_num   = copy_infos.size();
+    const auto total_reuse_num = gpu_reuse_block_num + cpu_reuse_num;
+    auto       done_cb         = [resource, total_reuse_num, copy_infos, self = shared_from_this()](bool success) {
         if (success) {
-            resource->reuse_block_num = gpu_reuse_block_num + cpu_reuse_num;
+            resource->reuse_block_num = total_reuse_num;
         }
         for (const auto& copy_info : copy_infos) {
             auto block_pool = self->getBlockPool(copy_info.mem_block_size);
@@ -524,7 +525,8 @@ bool KVCacheMemoryConnector::freeBlocks(const std::shared_ptr<BlockPool>& block_
     return true;
 }
 
-void referenceBlocks(const std::shared_ptr<BlockPool>& block_pool, const std::vector<int>& blocks) {
+void KVCacheMemoryConnector::referenceBlocks(const std::shared_ptr<BlockPool>& block_pool,
+                                             const std::vector<int>&           blocks) {
     if (blocks.empty()) {
         return;
     }
