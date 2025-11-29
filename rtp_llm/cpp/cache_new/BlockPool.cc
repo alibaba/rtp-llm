@@ -98,6 +98,12 @@ void BlockPool::free(const BlockIndicesType& block_ids) {
 }
 
 void BlockPool::reference(const BlockIndicesType& block_ids) {
+    for (auto block_id : block_ids) {
+        auto it = free_block_ids_.find(block_id);
+        if (it != free_block_ids_.end()) {
+            free_block_ids_.erase(it);
+        }
+    }
     block_ref_counter_.incrementRefCounter(block_ids);
 }
 
