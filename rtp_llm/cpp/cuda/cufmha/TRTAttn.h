@@ -16,6 +16,7 @@ struct TRTAttn: public ParamsBase {
 
     torch::Tensor padding_offset;
     torch::Tensor cu_seqlens;
+    torch::Tensor cu_seqlens_without_prefix;
     torch::Tensor cu_kv_seqlens;
     torch::Tensor input_lengths;
     torch::Tensor sequence_lengths;

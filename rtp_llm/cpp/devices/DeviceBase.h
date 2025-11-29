@@ -167,6 +167,9 @@ public:
     torch::Tensor ropeCache() const {
         return rope_cache_;
     }
+    int ropeCacheDim() const {
+        return rope_cache_dim_;
+    }
 
 public:
     // device-independence op implementations
@@ -228,6 +231,7 @@ protected:
     std::once_flag rope_cache_flag_;
     bool           use_rope_cache_ = false;
     torch::Tensor  rope_cache_;
+    int            rope_cache_dim_;
 
 protected:
     std::unique_ptr<BufferManager> buffer_manager_;

@@ -131,29 +131,38 @@ PyModelInputs CudaGraphPrefillOp::buildInputs(int64_t batch_size,
     size_t cu_len = batch_size + 1;
 
     // 使用 torch 创建 cu_seqlens tensor
-    torch::Tensor cu_seqlens_tensor = torch::zeros({int(cu_len)}, options2).pin_memory();
-    int32_t*      cu_seqlens_data   = cu_seqlens_tensor.data_ptr<int32_t>();
+    torch::Tensor cu_seqlens_tensor                = torch::zeros({int(cu_len)}, options2).pin_memory();
+    int32_t*      cu_seqlens_data                  = cu_seqlens_tensor.data_ptr<int32_t>();
+    torch::Tensor cu_seqlens_without_prefix_tensor = torch::zeros({int(cu_len)}, options2).pin_memory();
+    int32_t*      cu_seqlens_without_prefix_data   = cu_seqlens_without_prefix_tensor.data_ptr<int32_t>();
 
     // 手动计算 cu_seqlens - 使用真实有效的长度
-    int32_t total_seq_len = 0;
+    int32_t total_seq_len                = 0;
+    int32_t total_seq_len_without_prefix = 0;
     for (int64_t i = 0; i < batch_size; i++) {
-        cu_seqlens_data[i] = total_seq_len;
+        cu_seqlens_data[i]                = total_seq_len;
+        cu_seqlens_without_prefix_data[i] = total_seq_len_without_prefix;
         if (use_max_padded_mode) {
             // 当使用 max_padded_mode 时，cu_seqlens 记录的是实际的有效长度
             // 即 10*(i+1)，而不是 padded 后的 max_seq_len
             int32_t actual_length = std::min(max_seq_len, 10 * (i + 1));
             total_seq_len += actual_length;
+            total_seq_len_without_prefix += actual_length;
         } else {
             // 否则使用实际的序列长度
             total_seq_len += input_lengths_data[i];
+            total_seq_len_without_prefix += input_lengths_data[i];
         }
     }
-    cu_seqlens_data[batch_size] = total_seq_len;
+    cu_seqlens_data[batch_size]                = total_seq_len;
+    cu_seqlens_without_prefix_data[batch_size] = total_seq_len_without_prefix;
 
     // 将 torch tensor 转换为 BufferPtr
-    BufferPtr cu_seqlens_buf = torchTensor2Buffer(cu_seqlens_tensor);
+    BufferPtr cu_seqlens_buf                = torchTensor2Buffer(cu_seqlens_tensor);
+    BufferPtr cu_seqlens_without_prefix_buf = torchTensor2Buffer(cu_seqlens_without_prefix_tensor);
     RTP_LLM_LOG_INFO("cu_seqlens_data build success\n");
-    inputs.attention_inputs.cu_seqlens = Buffer2torchTensor(cu_seqlens_buf, false);
+    inputs.attention_inputs.cu_seqlens                = Buffer2torchTensor(cu_seqlens_buf, false);
+    inputs.attention_inputs.cu_seqlens_without_prefix = Buffer2torchTensor(cu_seqlens_without_prefix_buf, false);
     if (!use_max_padded_mode) {
         calculatePaddingOffset(inputs.attention_inputs);
     }

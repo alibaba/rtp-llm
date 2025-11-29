@@ -14,8 +14,9 @@ void CudaGraphRunner::capturePrefill() {
         // Prepare common inputs using shared function
         prepareCaptureInputs(inputs, max_bs_, seq_len);
         // Prefill-specific settings
-        inputs.attention_inputs.cu_seqlens.data_ptr<int>()[1]    = seq_len;
-        inputs.attention_inputs.input_lengths.data_ptr<int>()[0] = seq_len;
+        inputs.attention_inputs.cu_seqlens.data_ptr<int>()[1]                = seq_len;
+        inputs.attention_inputs.cu_seqlens_without_prefix.data_ptr<int>()[1] = seq_len;
+        inputs.attention_inputs.input_lengths.data_ptr<int>()[0]             = seq_len;
         inputs.attention_inputs.prefill_cuda_graph_copy_params =
             capture_mem_hold_.py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params;
         if (inputs.bert_embedding_inputs.position_encoding.numel() > 0) {

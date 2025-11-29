@@ -49,12 +49,10 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     py_attn_inputs.is_prefill = !py_attn_inputs.sequence_lengths.size(0);
 
     // Calculate cu_seqlens
-    torch::Tensor cu_seqlens = torch::zeros({device_->initParams().concurrency_config.concurrency_limit + 1},
-                                            torch::TensorOptions(torch::kInt32).device(torch::kCPU));
+    int           batch_size = py_attn_inputs.input_lengths.size(0);
+    torch::Tensor cu_seqlens = torch::zeros({batch_size + 1}, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
     torch::Tensor cu_seqlens_without_prefix =
-        torch::zeros({device_->initParams().concurrency_config.concurrency_limit + 1},
-                     torch::TensorOptions(torch::kInt32).device(torch::kCPU));
-    int batch_size = py_attn_inputs.input_lengths.size(0);
+        torch::zeros({batch_size + 1}, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
 
     cu_seqlens                = cu_seqlens.cuda();
     cu_seqlens_without_prefix = cu_seqlens_without_prefix.cuda();
@@ -249,19 +247,20 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
 
         auto           py_model_inputs = PyModelInputs({token_ids, attention_inputs, bert_embedding_inputs});
         PyModelOutputs py_model_outputs;
+        BufferPtr      hidden_states;
         // Cast the Python object to PyModelOutputs and extract hidden states
         if (enable_cuda_graph_) {
             DevicePerfWrapper wrapper(device_, "cuda graph python forward");
             py_model_inputs.attention_inputs.is_s_padded = true;
             py_model_outputs                             = graph_runner_->forward(py_model_inputs);
+            hidden_states                                = torchTensor2Buffer(py_model_outputs.hidden_states);
         } else {
             DevicePerfWrapper wrapper(device_, "normal forward");
             auto              py_model_forward = py_model_.attr("forward");
             auto              outputs          = py_model_forward(py_model_inputs);
             py_model_outputs                   = outputs.cast<PyModelOutputs>();
+            hidden_states                      = device_->clone({*torchTensor2Buffer(py_model_outputs.hidden_states)});
         }
-        auto hidden_states_tensor = py_model_outputs.hidden_states;
-        auto hidden_states        = torchTensor2Buffer(hidden_states_tensor);
 
         RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
         return callForwardPostLayers(hidden_states, inputs, true);

@@ -291,7 +291,8 @@ void UnfusedAttentionTest::addFusedQKVBiasTransposeTest(size_t batch_size,
                                              params.common.cu_seqlens->data<int>(),
                                              params.common.cu_seqlens_without_prefix->data<int>(),
                                              device->use_rope_cache_,
-                                             device->use_rope_cache_ && device->rope_cache_.defined() ?
+                                             device->use_rope_cache_ && device->rope_cache_.defined()
+                                                     && device->rope_cache_dim_ == params.configs.rope_config.dim ?
                                                  device->rope_cache_.data_ptr<float>() :
                                                  nullptr,
                                              batch_size,
@@ -335,7 +336,8 @@ void UnfusedAttentionTest::addFusedQKVBiasTransposeTest(size_t batch_size,
                                              params.common.cu_seqlens->data<int>(),
                                              params.common.cu_seqlens_without_prefix->data<int>(),
                                              device->use_rope_cache_,
-                                             device->use_rope_cache_ && device->rope_cache_.defined() ?
+                                             device->use_rope_cache_ && device->rope_cache_.defined()
+                                                     && device->rope_cache_dim_ == params.configs.rope_config.dim ?
                                                  device->rope_cache_.data_ptr<float>() :
                                                  nullptr,
                                              batch_size,
@@ -374,40 +376,42 @@ void UnfusedAttentionTest::addFusedQKVBiasTransposeTest(size_t batch_size,
         bool store_kv    = true;
         bool store_cache = false;
 
-        DISPATCH_CUDA_FUNCTION_DATA_TYPE(
-            params.input.type(),
-            invokeAddFusedQKVBiasTranspose,
-            q_no_transpose_output->data(),
-            q_output->data(),
-            k_output->data(),
-            v_output->data(),
-            &prefix_prompt_param,
-            params.input.data(),
-            qkv_buf_fp8 ? qkv_buf_fp8->data() : nullptr,
-            params.common.position_ids->data<int>(),
-            params.weights.qkv_weight->bias->data(),
-            params.common.padding_offset->data<int>(),
-            params.common.cu_seqlens->data<int>(),
-            params.common.cu_seqlens_without_prefix->data<int>(),
-            device->use_rope_cache_,
-            device->use_rope_cache_ && device->rope_cache_.defined() ? device->rope_cache_.data_ptr<float>() : nullptr,
-            batch_size,
-            seq_len,
-            token_num,
-            num_heads,
-            num_key_value_heads,
-            head_dim,
-            params.configs.rope_config,
-            params.configs.use_logn_attn,
-            scale_out_ptr,
-            int8_mode,
-            use_paged_fmha,
-            store_qkv,
-            store_q_no_transpose,
-            store_q,
-            store_kv,
-            store_cache,
-            device->getStream());
+        DISPATCH_CUDA_FUNCTION_DATA_TYPE(params.input.type(),
+                                         invokeAddFusedQKVBiasTranspose,
+                                         q_no_transpose_output->data(),
+                                         q_output->data(),
+                                         k_output->data(),
+                                         v_output->data(),
+                                         &prefix_prompt_param,
+                                         params.input.data(),
+                                         qkv_buf_fp8 ? qkv_buf_fp8->data() : nullptr,
+                                         params.common.position_ids->data<int>(),
+                                         params.weights.qkv_weight->bias->data(),
+                                         params.common.padding_offset->data<int>(),
+                                         params.common.cu_seqlens->data<int>(),
+                                         params.common.cu_seqlens_without_prefix->data<int>(),
+                                         device->use_rope_cache_,
+                                         device->use_rope_cache_ && device->rope_cache_.defined()
+                                                 && device->rope_cache_dim_ == params.configs.rope_config.dim ?
+                                             device->rope_cache_.data_ptr<float>() :
+                                             nullptr,
+                                         batch_size,
+                                         seq_len,
+                                         token_num,
+                                         num_heads,
+                                         num_key_value_heads,
+                                         head_dim,
+                                         params.configs.rope_config,
+                                         params.configs.use_logn_attn,
+                                         scale_out_ptr,
+                                         int8_mode,
+                                         use_paged_fmha,
+                                         store_qkv,
+                                         store_q_no_transpose,
+                                         store_q,
+                                         store_kv,
+                                         store_cache,
+                                         device->getStream());
 
         device->syncAndCheck();
 
@@ -582,7 +586,8 @@ void UnfusedAttentionTest::decodeAddFusedQKVBiasTransposeTest(size_t batch_size,
                                              params.common.position_ids->data<int>(),
                                              nullptr,  // params.weights.qkv_weight->bias->data()
                                              device->use_rope_cache_,
-                                             device->use_rope_cache_ && device->rope_cache_.defined() ?
+                                             device->use_rope_cache_ && device->rope_cache_.defined()
+                                                     && device->rope_cache_dim_ == params.configs.rope_config.dim ?
                                                  device->rope_cache_.data_ptr<float>() :
                                                  nullptr,
                                              batch_size,
@@ -614,7 +619,8 @@ void UnfusedAttentionTest::decodeAddFusedQKVBiasTransposeTest(size_t batch_size,
                                              params.common.position_ids->data<int>(),
                                              nullptr,  // params.weights.qkv_weight->bias->data()
                                              device->use_rope_cache_,
-                                             device->use_rope_cache_ && device->rope_cache_.defined() ?
+                                             device->use_rope_cache_ && device->rope_cache_.defined()
+                                                     && device->rope_cache_dim_ == params.configs.rope_config.dim ?
                                                  device->rope_cache_.data_ptr<float>() :
                                                  nullptr,
                                              batch_size,
@@ -647,28 +653,30 @@ void UnfusedAttentionTest::decodeAddFusedQKVBiasTransposeTest(size_t batch_size,
         bool store_kv    = true;
         bool store_cache = false;
 
-        DISPATCH_CUDA_FUNCTION_DATA_TYPE(
-            params.input.type(),
-            invokeDecodeAddFusedQKVBiasTranspose,
-            q_output->data(),
-            k_output->data(),
-            v_output->data(),
-            trt_attn->kv_block_array,
-            params.input.data(),
-            params.common.position_ids->data<int>(),
-            params.weights.qkv_weight->bias->data(),
-            device->use_rope_cache_,
-            device->use_rope_cache_ && device->rope_cache_.defined() ? device->rope_cache_.data_ptr<float>() : nullptr,
-            batch_size,
-            num_heads,
-            num_key_value_heads,
-            head_dim,
-            params.configs.rope_config,
-            params.configs.use_logn_attn,
-            store_q,
-            store_kv,
-            store_cache,
-            device->getStream());
+        DISPATCH_CUDA_FUNCTION_DATA_TYPE(params.input.type(),
+                                         invokeDecodeAddFusedQKVBiasTranspose,
+                                         q_output->data(),
+                                         k_output->data(),
+                                         v_output->data(),
+                                         trt_attn->kv_block_array,
+                                         params.input.data(),
+                                         params.common.position_ids->data<int>(),
+                                         params.weights.qkv_weight->bias->data(),
+                                         device->use_rope_cache_,
+                                         device->use_rope_cache_ && device->rope_cache_.defined()
+                                                 && device->rope_cache_dim_ == params.configs.rope_config.dim ?
+                                             device->rope_cache_.data_ptr<float>() :
+                                             nullptr,
+                                         batch_size,
+                                         num_heads,
+                                         num_key_value_heads,
+                                         head_dim,
+                                         params.configs.rope_config,
+                                         params.configs.use_logn_attn,
+                                         store_q,
+                                         store_kv,
+                                         store_cache,
+                                         device->getStream());
 
         device->syncAndCheck();
 
