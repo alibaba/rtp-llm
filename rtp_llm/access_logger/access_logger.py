@@ -2,7 +2,7 @@ import logging
 from typing import Any, Dict
 
 from rtp_llm.access_logger.json_util import dump_json
-from rtp_llm.access_logger.log_utils import get_handler
+from rtp_llm.access_logger.log_utils import get_async_handler
 from rtp_llm.access_logger.py_access_log import PyAccessLog, RequestLog, ResponseLog
 from rtp_llm.structure.request_extractor import request_id_field_name
 
@@ -12,7 +12,7 @@ QUERY_ACCESS_LOGGER_NAME = "query_access_logger"
 
 def init_access_logger() -> None:
     access_logger = logging.getLogger(ACCESS_LOGGER_NAME)
-    handler = get_handler("access.log")
+    handler = get_async_handler("access.log")
     formatter = logging.Formatter("%(message)s")
     access_logger.handlers.clear()
     access_logger.parent = None
@@ -23,7 +23,7 @@ def init_access_logger() -> None:
 
 def init_query_access_logger() -> None:
     access_logger = logging.getLogger(QUERY_ACCESS_LOGGER_NAME)
-    handler = get_handler("query_access.log")
+    handler = get_async_handler("query_access.log")
     formatter = logging.Formatter("%(message)s")
     access_logger.handlers.clear()
     access_logger.parent = None
