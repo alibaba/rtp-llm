@@ -16,7 +16,7 @@
 
 namespace rtp_llm {
 
-class KVCacheMemoryConnector;
+class KVCacheConnector;
 
 class KVCacheManager {
 public:
@@ -97,7 +97,7 @@ private:
     const kmonitor::MetricsReporterPtr metrics_reporter_;
     const GptInitParameter&            params_;
 
-    std::shared_ptr<KVCacheMemoryConnector>    memory_connector_;
+    std::shared_ptr<KVCacheConnector>          memory_connector_;
     std::shared_ptr<autil::LockFreeThreadPool> wait_cache_thread_pool_;
 };
 

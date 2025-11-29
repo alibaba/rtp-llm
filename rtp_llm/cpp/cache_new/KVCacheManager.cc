@@ -215,7 +215,7 @@ InsertResult KVCacheManager::insertIntoCache(const InsertInfo& insert_info) {
         insert_result = allocator_->insertIntoCache(insert_info);
     }
 
-    // insert to memory
+    // insert to cpu
     if (insert_info.enable_memory_cache) {
         auto resource_batch0 = insert_info.batch_kv_cache_resource->batch_resource.at(0);
         auto deleter         = [insert_info, allocator = allocator_](KVCacheResourceV1* resource_ptr) {
@@ -359,7 +359,13 @@ bool KVCacheManager::copyCache(const CopyCacheRequestPB& request, CopyCacheRespo
             response.mutable_mem_response()->set_success(false);
             return false;
         }
-        return memory_connector_->copyCache(request.mem_request(), *(response.mutable_mem_response()));
+        auto memory_connector = std::dynamic_pointer_cast<KVCacheMemoryConnector>(memory_connector_);
+        if (!memory_connector) {
+            RTP_LLM_LOG_WARNING("copy cache failed, memory connector is not a KVCacheMemoryConnector");
+            response.mutable_mem_response()->set_success(false);
+            return false;
+        }
+        return memory_connector->copyCache(request.mem_request(), *(response.mutable_mem_response()));
     } else {
         RTP_LLM_LOG_WARNING("copy cache failed, request is invalid, request: [%s]", request.DebugString().c_str());
         return false;

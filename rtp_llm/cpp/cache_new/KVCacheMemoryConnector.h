@@ -77,7 +77,7 @@ private:
 
     std::vector<CopyInfoPerKey> buildCopyPlanForRead(const std::vector<int64_t>& cache_keys,
                                                      const LayerBlockIds&        layer_block_ids,
-                                                     size_t                      gpu_reuse_block_num) const;
+                                                     size_t                      gpu_reuse_block_num);
     std::vector<CopyInfoPerKey> buildCopyPlanForWrite(const std::vector<int64_t>& cache_keys,
                                                       const LayerBlockIds&        layer_block_ids,
                                                       size_t                      match_len);
@@ -89,11 +89,14 @@ private:
                             CopyDirection                  direction,
                             std::vector<BufferPtr>&        dst,
                             std::vector<BufferPtr>&        src);
-    bool mallocMemoryBlocks(const std::shared_ptr<BlockPool>& block_pool,
-                            size_t                            need_blocks,
-                            std::vector<BlockIdxType>&        malloced_blocks) const;
-    bool freeMemoryBlocks(const std::shared_ptr<BlockPool>& block_pool, const std::vector<int>& blocks);
+    bool mallocBlocks(const std::shared_ptr<BlockPool>& block_pool,
+                      size_t                            need_blocks,
+                      std::vector<BlockIdxType>&        malloced_blocks) const;
+    bool freeBlocks(const std::shared_ptr<BlockPool>& block_pool, const std::vector<int>& blocks);
+    void referenceBlocks(const std::shared_ptr<BlockPool>& block_pool, const std::vector<int>& blocks);
     std::shared_ptr<BlockPool> getOrCreateMemoryBlockPool(size_t block_size, bool create = false);
+    std::shared_ptr<BlockPool> getBlockPool(size_t block_size) const;
+    std::shared_ptr<BlockPool> createBlockPool(size_t block_size);
     bool ensureEnoughFreeBlocks(const std::shared_ptr<BlockPool>& block_pool, size_t need_blocks) const;
     void printCopyPlan(const std::vector<CopyInfoPerKey>& copy_infos) const;
 

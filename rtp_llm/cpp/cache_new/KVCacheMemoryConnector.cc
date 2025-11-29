@@ -112,20 +112,28 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
     auto send_result = sendCopyPlan(copy_infos, CopyDirection::H2D);
     if (!send_result) {
         RTP_LLM_LOG_WARNING("async read failed, send copy plan to tp failed");
+        for (const auto& copy_info : copy_infos) {
+            auto block_pool = getBlockPool(copy_info.mem_block_size);
+            freeBlocks(block_pool, {copy_info.mem_block_index});
+        }
         return nullptr;
     }
 
     const auto cpu_reuse_num = copy_infos.size();
-    auto       done_cb       = [resource, gpu_reuse_block_num, cpu_reuse_num](bool success) {
+    auto done_cb = [resource, gpu_reuse_block_num, cpu_reuse_num, copy_infos, self = shared_from_this()](bool success) {
         if (success) {
             resource->reuse_block_num = gpu_reuse_block_num + cpu_reuse_num;
+        }
+        for (const auto& copy_info : copy_infos) {
+            auto block_pool = self->getBlockPool(copy_info.mem_block_size);
+            self->freeBlocks(block_pool, {copy_info.mem_block_index});
         }
     };
     return std::make_shared<MemoryConnectorAsyncContext>(send_result, done_cb);
 }
 
 std::vector<KVCacheMemoryConnector::CopyInfoPerKey> KVCacheMemoryConnector::buildCopyPlanForRead(
-    const std::vector<int64_t>& cache_keys, const LayerBlockIds& layer_block_ids, size_t gpu_reuse_block_num) const {
+    const std::vector<int64_t>& cache_keys, const LayerBlockIds& layer_block_ids, size_t gpu_reuse_block_num) {
     std::vector<CopyInfoPerKey> copy_infos;
     const size_t                layer_num = layer_block_ids.size();
 
@@ -136,6 +144,8 @@ std::vector<KVCacheMemoryConnector::CopyInfoPerKey> KVCacheMemoryConnector::buil
             RTP_LLM_LOG_DEBUG("build copy plan for read, found null memory block index, cache key: %zu", cache_key);
             break;  // 只处理连续前缀
         }
+        auto block_pool = getBlockPool(match_result.block_size);
+        referenceBlocks(block_pool, {match_result.matched_index});
 
         CopyInfoPerKey copy_info;
         copy_info.cache_key       = cache_key;
@@ -178,6 +188,7 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
     // 计算内存中已存在的前缀长度
     size_t match_len = 0;
     for (; match_len < cache_keys.size(); ++match_len) {
+        // TODO(LXQ): 是否需要提升热度?
         if (!block_cache_->contains(static_cast<CacheKeyType>(cache_keys[match_len]))) {
             break;
         }
@@ -199,8 +210,8 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
     if (!send_result) {
         RTP_LLM_LOG_WARNING("async write failed, send copy plan to tp failed");
         for (const auto& copy_info : copy_infos) {
-            auto block_pool = getOrCreateMemoryBlockPool(copy_info.mem_block_size);
-            freeMemoryBlocks(block_pool, {copy_info.mem_block_index});
+            auto block_pool = getBlockPool(copy_info.mem_block_size);
+            freeBlocks(block_pool, {copy_info.mem_block_index});
         }
         return nullptr;
     }
@@ -209,15 +220,15 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
         RTP_LLM_LOG_DEBUG("async write done, success: %d", success);
         if (!success) {
             for (const auto& copy_info : copy_infos) {
-                auto block_pool = self->getOrCreateMemoryBlockPool(copy_info.mem_block_size);
-                self->freeMemoryBlocks(block_pool, {copy_info.mem_block_index});
+                auto block_pool = self->getBlockPool(copy_info.mem_block_size);
+                self->freeBlocks(block_pool, {copy_info.mem_block_index});
             }
             return;
         }
         for (const auto& copy_info : copy_infos) {
             if (self->block_cache_->contains(copy_info.cache_key)) {
-                auto block_pool = self->getOrCreateMemoryBlockPool(copy_info.mem_block_size);
-                self->freeMemoryBlocks(block_pool, {copy_info.mem_block_index});
+                auto block_pool = self->getBlockPool(copy_info.mem_block_size);
+                self->freeBlocks(block_pool, {copy_info.mem_block_index});
                 continue;
             }
             MemoryBlockCache::CacheItem item;
@@ -265,9 +276,13 @@ std::vector<KVCacheMemoryConnector::CopyInfoPerKey> KVCacheMemoryConnector::buil
             break;
         }
 
-        auto                      block_pool = getOrCreateMemoryBlockPool(total_bytes, true);
+        auto block_pool = getBlockPool(total_bytes);
+        if (!block_pool) {
+            block_pool = createBlockPool(total_bytes);
+        }
+
         std::vector<BlockIdxType> mem_blocks;
-        if (!mallocMemoryBlocks(block_pool, 1, mem_blocks)) {
+        if (!mallocBlocks(block_pool, 1, mem_blocks)) {
             const int free_blocks = block_pool ? block_pool->freeBlocksNum() : -1;
             RTP_LLM_LOG_WARNING(
                 "build copy plan for write failed, malloc memory blocks failed, maybe no enough free blocks, free blocks: %d",
@@ -284,8 +299,8 @@ std::vector<KVCacheMemoryConnector::CopyInfoPerKey> KVCacheMemoryConnector::buil
     }
     if (!success) {
         for (const auto& copy_info : copy_infos) {
-            auto block_pool = getOrCreateMemoryBlockPool(copy_info.mem_block_size);
-            freeMemoryBlocks(block_pool, {copy_info.mem_block_index});
+            auto block_pool = getBlockPool(copy_info.mem_block_size);
+            freeBlocks(block_pool, {copy_info.mem_block_index});
         }
         return {};
     }
@@ -392,15 +407,19 @@ bool KVCacheMemoryConnector::prepareCopyBuffers(const std::vector<LayerBlock>& g
                                                 CopyDirection                  direction,
                                                 std::vector<BufferPtr>&        dst,
                                                 std::vector<BufferPtr>&        src) {
-    auto mem_pool = getOrCreateMemoryBlockPool(mem_block_size, direction == CopyDirection::D2H);
-    if (!mem_pool) {
-        RTP_LLM_LOG_WARNING("prepare copy buffers failed, create/get mem pool failed, mem_block_size=%zu, direction=%s",
+    auto block_pool  = getBlockPool(mem_block_size);
+    bool create_pool = direction == CopyDirection::D2H;
+    if (!block_pool && create_pool) {
+        block_pool = createBlockPool(mem_block_size);
+    }
+    if (!block_pool) {
+        RTP_LLM_LOG_WARNING("prepare copy buffers failed, block pool is null, block_size=%zu, direction=%s",
                             mem_block_size,
                             direction == CopyDirection::H2D ? "H2D" : "D2H");
         return false;
     }
 
-    const auto mem_buffer = mem_pool->convertIndexToBuffer(0, mem_block_index);
+    const auto mem_buffer = block_pool->convertIndexToBuffer(/*layer_id=*/0, mem_block_index);
     if (!mem_buffer.k_addr) {
         RTP_LLM_LOG_WARNING("prepare copy buffers failed, mem buffer is null, block_idx=%d, direction=%s",
                             mem_block_index,
@@ -450,9 +469,9 @@ bool KVCacheMemoryConnector::prepareCopyBuffers(const std::vector<LayerBlock>& g
     return true;
 }
 
-bool KVCacheMemoryConnector::mallocMemoryBlocks(const std::shared_ptr<BlockPool>& block_pool,
-                                                size_t                            need_blocks,
-                                                std::vector<BlockIdxType>&        malloced_blocks) const {
+bool KVCacheMemoryConnector::mallocBlocks(const std::shared_ptr<BlockPool>& block_pool,
+                                          size_t                            need_blocks,
+                                          std::vector<BlockIdxType>&        malloced_blocks) const {
     if (!block_pool) {
         RTP_LLM_LOG_WARNING("malloc memory blocks failed, block pool is null, need blocks: %zu", need_blocks);
         return false;
@@ -480,13 +499,12 @@ bool KVCacheMemoryConnector::mallocMemoryBlocks(const std::shared_ptr<BlockPool>
     return true;
 }
 
-bool KVCacheMemoryConnector::freeMemoryBlocks(const std::shared_ptr<BlockPool>& block_pool,
-                                              const std::vector<int>&           blocks) {
+bool KVCacheMemoryConnector::freeBlocks(const std::shared_ptr<BlockPool>& block_pool, const std::vector<int>& blocks) {
     if (blocks.empty()) {
         return true;
     }
     if (!block_pool) {
-        RTP_LLM_LOG_WARNING("free memory blocks failed, memory block pool is null");
+        RTP_LLM_LOG_WARNING("free blocks failed, memory block pool is null");
         return false;
     }
 
@@ -506,6 +524,17 @@ bool KVCacheMemoryConnector::freeMemoryBlocks(const std::shared_ptr<BlockPool>& 
     return true;
 }
 
+void referenceBlocks(const std::shared_ptr<BlockPool>& block_pool, const std::vector<int>& blocks) {
+    if (blocks.empty()) {
+        return;
+    }
+    if (!block_pool) {
+        RTP_LLM_LOG_WARNING("reference blocks failed, block pool is null");
+        return;
+    }
+    block_pool->reference(blocks);
+}
+
 std::shared_ptr<BlockPool> KVCacheMemoryConnector::getOrCreateMemoryBlockPool(size_t block_size, bool create) {
     auto it = block_pools_.find(block_size);
     if (it != block_pools_.end()) {
@@ -517,7 +546,29 @@ std::shared_ptr<BlockPool> KVCacheMemoryConnector::getOrCreateMemoryBlockPool(si
 
     const int64_t block_nums = cache_config_.memory_block_cache_size_mb * 1024 * 1024 / block_size;
     RTP_LLM_LOG_INFO(
-        "init memory connector, size: %ld MB, block nums: %ld", cache_config_.memory_block_cache_size_mb, block_nums);
+        "init memory block pool, size: %ld MB, block nums: %ld", cache_config_.memory_block_cache_size_mb, block_nums);
+    const auto pool_config = BlockPoolConfigHelper::createLayerFirstConfig(
+        /*layer_num=*/1, static_cast<uint32_t>(block_nums), static_cast<uint32_t>(block_size));
+    auto pool = std::make_shared<BlockPool>(pool_config, device_, AllocationType::HOST);
+    if (!pool->init()) {
+        RTP_LLM_LOG_WARNING("create memory block pool failed, block_size=%zu", block_size);
+        return nullptr;
+    }
+    block_pools_[block_size] = pool;
+    return pool;
+}
+
+std::shared_ptr<BlockPool> KVCacheMemoryConnector::getBlockPool(size_t block_size) const {
+    if (auto it = block_pools_.find(block_size); it != block_pools_.end()) {
+        return it->second;
+    }
+    return nullptr;
+}
+
+std::shared_ptr<BlockPool> KVCacheMemoryConnector::createBlockPool(size_t block_size) {
+    const int64_t block_nums = cache_config_.memory_block_cache_size_mb * 1024 * 1024 / block_size;
+    RTP_LLM_LOG_INFO(
+        "init memory block pool, size: %ld MB, block nums: %ld", cache_config_.memory_block_cache_size_mb, block_nums);
     const auto pool_config = BlockPoolConfigHelper::createLayerFirstConfig(
         /*layer_num=*/1, static_cast<uint32_t>(block_nums), static_cast<uint32_t>(block_size));
     auto pool = std::make_shared<BlockPool>(pool_config, device_, AllocationType::HOST);
