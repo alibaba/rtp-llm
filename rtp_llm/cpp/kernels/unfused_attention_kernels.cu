@@ -2115,8 +2115,8 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
               head_num / head_q_block_num + head_num_kv / head_k_block_num + head_num_kv / head_v_block_num); \
     FT_SWITCH(param_ptr->max_prefix_prompt_length != 0, PREFIX_PROMPT, [&] {                                           \
         FT_SWITCH(use_paged_fmha, USE_PAGED_FMHA, [&] {                                                                \
-            FT_SWITCH_KV_CACHE_TYPE_CASE(param_ptr->kv_block_array.cache_type, Tcache, [&] {                           \
-                FT_ROPE_SWITCH(rope_config.style, ROPE_STYLE, [&] {                                                    \
+            FT_SWITCH_KV_CACHE_TYPE_NON_INT8_CASE(param_ptr->kv_block_array.cache_type, Tcache, [&] {                  \
+                FT_ROPE_WITH_CACHE_SWITCH(rope_config.style, ROPE_STYLE, [&] {                                         \
                     add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel<T,                                     \
                                                                                 Tcache,                                \
                                                                                 PREFIX_PROMPT,                         \
@@ -2201,7 +2201,7 @@ void invokeAddFusedQKVBiasTranspose(T*                             q_no_transpos
             FT_SWITCH(param_ptr->max_prefix_prompt_length != 0, PREFIX_PROMPT, [&] {
                 FT_SWITCH(use_paged_fmha, USE_PAGED_FMHA, [&] {
                     FT_SWITCH_KV_CACHE_TYPE_CASE(param_ptr->kv_block_array.cache_type, Tcache, [&] {
-                        FT_ROPE_SWITCH(rope_config.style, ROPE_STYLE, [&] {
+                        FT_ROPE_WITH_CACHE_SWITCH(rope_config.style, ROPE_STYLE, [&] {
                             add_fusedQKV_bias_transpose_with_rope_cache_kernel<T,
                                                                                Tcache,
                                                                                PREFIX_PROMPT,
@@ -3368,7 +3368,7 @@ void invokeDecodeAddFusedQKVBiasTranspose(T*               q_buf,
             dim3 grid(batch_size, head_num + head_num_kv * 2);
 
             FT_SWITCH_KV_CACHE_TYPE_CASE(kv_block_array.cache_type, Tcache, [&] {
-                FT_ROPE_SWITCH(rope_config.style, ROPE_STYLE, [&] {
+                FT_ROPE_WITH_CACHE_SWITCH(rope_config.style, ROPE_STYLE, [&] {
                     decode_add_fusedQKV_bias_transpose_with_rope_cache_kernel<T, Tcache, ROPE_STYLE>
                         <<<grid, block, smem_size, stream>>>(q_buf,
                                                              k_buf,
@@ -3393,8 +3393,8 @@ void invokeDecodeAddFusedQKVBiasTranspose(T*               q_buf,
             dim3 grid(batch_size,
                       head_num / head_q_block_num + head_num_kv / head_k_block_num + head_num_kv / head_v_block_num);
 
-            FT_SWITCH_KV_CACHE_TYPE_CASE(kv_block_array.cache_type, Tcache, [&] {
-                FT_ROPE_SWITCH(rope_config.style, ROPE_STYLE, [&] {
+            FT_SWITCH_KV_CACHE_TYPE_NON_INT8_CASE(kv_block_array.cache_type, Tcache, [&] {
+                FT_ROPE_WITH_CACHE_SWITCH(rope_config.style, ROPE_STYLE, [&] {
                     decode_add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel<T,
                                                                                        Tcache,
                                                                                        ROPE_STYLE,
@@ -3454,7 +3454,7 @@ void invokeDecodeAddFusedQKVBiasTranspose(T*               q_buf,
             dim3 grid(batch_size,
                       head_num / head_q_block_num + head_num_kv / head_k_block_num + head_num_kv / head_v_block_num);
 
-            FT_SWITCH_KV_CACHE_TYPE_CASE(kv_block_array.cache_type, Tcache, [&] {
+            FT_SWITCH_KV_CACHE_TYPE_NON_INT8_CASE(kv_block_array.cache_type, Tcache, [&] {
                 FT_ROPE_SWITCH(rope_config.style, ROPE_STYLE, [&] {
                     decode_add_fusedQKV_bias_transpose_non_int8_kernel<T,
                                                                        Tcache,
