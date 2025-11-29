@@ -107,6 +107,16 @@ void BlockPool::reference(const BlockIndicesType& block_ids) {
     block_ref_counter_.incrementRefCounter(block_ids);
 }
 
+void BlockPool::clearCache() {
+    if (!block_cache_) {
+        return;
+    }
+    auto blocks = block_cache_->clear();
+    if (!blocks.empty()) {
+        free(blocks);
+    }
+}
+
 void BlockPool::regUserMr(size_t model_id) {
     if (device_->cacheStore() && !kvcache_reg_mr_) {
         RTP_LLM_LOG_INFO("start to register user mr");

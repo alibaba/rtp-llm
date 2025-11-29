@@ -85,6 +85,7 @@ public:
 
     // copy cache between gpu and memory, for single tp
     bool copyCache(const CopyCacheRequestPB& request, CopyCacheResponsePB& response);
+    void clearLocalCache();
 
 private:
     bool initMemoryConnector();

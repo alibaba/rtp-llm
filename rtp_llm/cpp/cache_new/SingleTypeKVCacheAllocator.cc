@@ -322,6 +322,11 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& ba
     return true;
 }
 
+void SingleTypeKVCacheAllocator::clearCache() {
+    if (block_pool_) {
+        block_pool_->clearCache();
+    }
+}
 void SingleTypeKVCacheAllocator::makeLayerBlockIds(KVCacheResourceV1& resource) const {
     if (resource.group_block_ids.empty() || !(resource.group_block_ids[0])) {
         resource.layer_block_ids.clear();

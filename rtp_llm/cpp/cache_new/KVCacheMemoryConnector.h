@@ -56,8 +56,8 @@ public:
         throw std::runtime_error("KVCacheMemoryConnector asyncWriteByLayer is not implemented");
     }
 
-    // 同步拷贝KVCache(单TP), virtual for test
     virtual bool copyCache(const MemoryCopyCacheRequestPB& request, MemoryCopyCacheResponsePB& response);
+    void         clearCache();
 
 private:
     struct LayerBlock {

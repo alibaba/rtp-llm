@@ -610,6 +610,25 @@ void KVCacheMemoryConnector::printCopyPlan(const std::vector<CopyInfoPerKey>& co
     }
 }
 
-// (removed legacy multi-key plan builder)
+void KVCacheMemoryConnector::clearCache() {
+    if (!block_cache_) {
+        RTP_LLM_LOG_WARNING("clear cache failed, block cache is null");
+        return;
+    }
+    const auto                                  cache_items = block_cache_->clear();
+    std::map<size_t, std::vector<BlockIdxType>> blocks_by_size;
+    for (const auto& item : cache_items) {
+        blocks_by_size[item.block_size].push_back(item.block_index);
+    }
+    for (auto& [block_size, blocks] : blocks_by_size) {
+        auto pool = getBlockPool(block_size);
+        if (!freeBlocks(pool, blocks)) {
+            RTP_LLM_LOG_WARNING("clear cache failed, free memory blocks failed, pool: %p, block size: %zu, blocks: %zu",
+                                pool.get(),
+                                block_size,
+                                blocks.size());
+        }
+    }
+}
 
 }  // namespace rtp_llm

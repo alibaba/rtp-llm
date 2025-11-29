@@ -42,6 +42,8 @@ public:
 
     size_t size() const;
 
+    std::vector<CacheItem> clear();
+
 private:
     mutable LRUCache<CacheKeyType, CacheItem> lru_cache_;
     mutable std::mutex                        mutex_;

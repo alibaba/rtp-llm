@@ -28,6 +28,7 @@ public:
     MOCK_METHOD(size_t, totalBlocksNums, (), (const, override));
     MOCK_METHOD(size_t, maxSeqLen, (), (const, override));
     MOCK_METHOD(KVCacheBuffer, kvCacheBuffer, (), (const, override));
+    MOCK_METHOD(void, clearCache, (), (override));
 
 protected:
     MOCK_METHOD(MallocResult, initMalloc, (const MallocInfo&), (override));
