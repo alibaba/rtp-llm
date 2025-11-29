@@ -205,7 +205,7 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
         return nullptr;
     }
 
-    auto done_cb = [copy_infos, self = shared_from_this()](bool success) {
+    auto done_cb = [copy_infos, resource_copy = resource, self = shared_from_this()](bool success) mutable {
         RTP_LLM_LOG_DEBUG("async write done, success: %d", success);
         if (!success) {
             for (const auto& copy_info : copy_infos) {
@@ -227,6 +227,7 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
             item.is_resident = false;
             self->block_cache_->put(item);
         }
+        resource_copy.reset();
     };
     return std::make_shared<MemoryConnectorAsyncContext>(send_result, done_cb);
 }

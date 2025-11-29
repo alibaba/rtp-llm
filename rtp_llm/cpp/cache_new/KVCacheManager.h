@@ -81,7 +81,7 @@ public:
                        std::vector<BlockIdPair>&      block_update_mapping);
 
     // async load cache from memory to gpu, for all tp
-    std::shared_ptr<AsyncContext> asyncLoadCache(const std::shared_ptr<KVCacheResourceV1>& resource);
+    std::shared_ptr<AsyncContext> asyncLoadCache(const BatchKVCacheResourcePtr& batch_resource);
 
     // copy cache between gpu and memory, for single tp
     bool copyCache(const CopyCacheRequestPB& request, CopyCacheResponsePB& response);

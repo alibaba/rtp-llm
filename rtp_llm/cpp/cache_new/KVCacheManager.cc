@@ -210,22 +210,30 @@ FreeResult KVCacheManager::free(const FreeInfo& free_info) {
 
 InsertResult KVCacheManager::insertIntoCache(const InsertInfo& insert_info) {
     // insert to gpu
-    InsertResult gpu_result{false};
+    InsertResult insert_result{false};
     if (insert_info.reuse_cache) {
-        gpu_result = allocator_->insertIntoCache(insert_info);
+        insert_result = allocator_->insertIntoCache(insert_info);
     }
 
     // insert to memory
     if (insert_info.enable_memory_cache) {
         auto resource_batch0 = insert_info.batch_kv_cache_resource->batch_resource.at(0);
-        auto resource        = std::make_shared<KVCacheResourceV1>(resource_batch0);
-        auto context         = memory_connector_->asyncWrite(resource, nullptr);
+        auto deleter         = [insert_info, allocator = allocator_](KVCacheResourceV1* resource_ptr) {
+            FreeInfo free_info(insert_info.batch_kv_cache_resource, insert_info.complete_token_ids);
+            allocator->free(free_info);
+            delete resource_ptr;
+        };
+        std::shared_ptr<KVCacheResourceV1> resource(new KVCacheResourceV1(resource_batch0), deleter);
+        auto                               context = memory_connector_->asyncWrite(resource, nullptr);
         if (context) {
             wait_cache_thread_pool_->pushTask([context]() { context->waitDone(); });
         }
+    } else {
+        FreeInfo free_info(insert_info.batch_kv_cache_resource, insert_info.complete_token_ids);
+        free(free_info);
     }
 
-    return gpu_result;
+    return insert_result;
 }
 
 KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const {
@@ -325,16 +333,18 @@ bool KVCacheManager::initMemoryConnector() {
     return true;
 }
 
-std::shared_ptr<AsyncContext> KVCacheManager::asyncLoadCache(const std::shared_ptr<KVCacheResourceV1>& resource) {
-    if (!memory_connector_ || !resource) {
+std::shared_ptr<AsyncContext> KVCacheManager::asyncLoadCache(const BatchKVCacheResourcePtr& batch_resource) {
+    if (!memory_connector_ || !batch_resource) {
         RTP_LLM_LOG_WARNING(
             "async load cache failed, memory connector or resource is null, memory connector: %p, resource: %p",
             memory_connector_.get(),
-            resource.get());
+            batch_resource.get());
         return nullptr;
     }
 
-    auto context = memory_connector_->asyncRead(resource, nullptr);
+    // TODO(LXQ): only support batch0 now, need to support all batch?
+    std::shared_ptr<KVCacheResourceV1> resource(batch_resource, &(batch_resource->batch_resource.at(0)));
+    auto                               context = memory_connector_->asyncRead(resource, nullptr);
     if (context) {
         wait_cache_thread_pool_->pushTask([context]() { context->waitDone(); });
     }

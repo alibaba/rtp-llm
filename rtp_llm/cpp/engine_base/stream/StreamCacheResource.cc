@@ -81,16 +81,16 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
             InsertInfo insert_info(
                 batch_resource_, stream_->completeTokenIdsPtr(), false, reuseCache(), enableMemoryBlockCache());
             resource_context_.cache_manager->insertIntoCache(insert_info);
+        } else {
+            // Free all blocks using KVCacheManager::free
+            FreeInfo free_info(batch_resource_, stream_->completeTokenIdsPtr());
+            free_info.request_id = stream_->streamId();
+
+            // TODO(chanyin): Handle cache insertion for reuse_cache case
+
+            resource_context_.cache_manager->free(free_info);
+            // batch_resource_ is modified directly by KVCacheManager::free
         }
-
-        // Free all blocks using KVCacheManager::free
-        FreeInfo free_info(batch_resource_, stream_->completeTokenIdsPtr());
-        free_info.request_id = stream_->streamId();
-
-        // TODO(chanyin): Handle cache insertion for reuse_cache case
-
-        resource_context_.cache_manager->free(free_info);
-        // batch_resource_ is modified directly by KVCacheManager::free
     }
 
     // After releasing all blocks, reserved_blocks = 0
@@ -245,9 +245,7 @@ bool StreamCacheResource::asyncLoadCache() {
     if (!enableMemoryBlockCache()) {
         return false;
     }
-    // TODO(LXQ): only support batch0 now, need to support all batch in the future?
-    std::shared_ptr<KVCacheResourceV1> resource(batch_resource_, &(batch_resource_->batch_resource.at(0)));
-    load_cache_context_ = resource_context_.cache_manager->asyncLoadCache(resource);
+    load_cache_context_ = resource_context_.cache_manager->asyncLoadCache(batch_resource_);
     return load_cache_context_ != nullptr;
 }
 
