@@ -571,7 +571,8 @@ void ROCmDevice::getRopeCacheOnce(const RopeConfig& rope_config, int max_positio
     std::call_once(rope_cache_flag_, [&]() {
         use_rope_cache_ = rope_config.style == RopeStyle::Base;
         if (use_rope_cache_) {
-            rope_cache_ = getRopeCache(rope_config, max_position_embeddings);
+            rope_cache_     = getRopeCache(rope_config, max_position_embeddings);
+            rope_cache_dim_ = rope_config.dim;
         }
     });
 }
@@ -778,42 +779,46 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
             }
             check_cuda_error();
         } else {
-            DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
-                                             invokeAddFusedQKVBiasTranspose,
+            DISPATCH_CUDA_FUNCTION_DATA_TYPE(
+                datatype,
+                invokeAddFusedQKVBiasTranspose,
+                nullptr,
+                q_output->data(),
+                k_output->data(),
+                v_output->data(),
+                &prefix_prompt_param,
+                params.input.data(),
+                nullptr,
+                params.common.position_ids ? params.common.position_ids->dataWithOffset<int>(
+                                                 decoder_batch_size * params.configs.rope_config.index_factor) :
                                              nullptr,
-                                             q_output->data(),
-                                             k_output->data(),
-                                             v_output->data(),
-                                             &prefix_prompt_param,
-                                             params.input.data(),
-                                             nullptr,
-                                             params.common.position_ids ?
-                                                 params.common.position_ids->dataWithOffset<int>(
-                                                     decoder_batch_size * params.configs.rope_config.index_factor) :
-                                                 nullptr,
-                                             params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias ?
-                                                 params.weights.qkv_weight->bias->data() :
-                                                 nullptr,
-                                             params.common.padding_offset->data<int>(),
-                                             params.common.cu_seqlens->data<int>(),
-                                             params.common.cu_seqlens_without_prefix->data<int>(),
-                                             batch_size,
-                                             seq_len,
-                                             token_num,
-                                             head_num,
-                                             kv_head_num,
-                                             size_per_head,
-                                             params.configs.rope_config,
-                                             params.configs.use_logn_attn,
-                                             scale_out_ptr,
-                                             int8_mode,
-                                             false,
-                                             store_qkv,
-                                             false,
-                                             store_q,
-                                             store_kv,
-                                             store_cache,
-                                             stream_);
+                params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias ?
+                    params.weights.qkv_weight->bias->data() :
+                    nullptr,
+                params.common.padding_offset->data<int>(),
+                params.common.cu_seqlens->data<int>(),
+                params.common.cu_seqlens_without_prefix->data<int>(),
+                use_rope_cache_,
+                use_rope_cache_ && rope_cache_.defined() && rope_cache_dim_ == params.configs.rope_config.dim ?
+                    rope_cache_.data_ptr<float>() :
+                    nullptr,
+                batch_size,
+                seq_len,
+                token_num,
+                head_num,
+                kv_head_num,
+                size_per_head,
+                params.configs.rope_config,
+                params.configs.use_logn_attn,
+                scale_out_ptr,
+                int8_mode,
+                false,
+                store_qkv,
+                false,
+                store_q,
+                store_kv,
+                store_cache,
+                stream_);
             check_cuda_error();
         }
         writeCacheStore(params);

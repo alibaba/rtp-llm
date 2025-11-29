@@ -80,6 +80,10 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
                       py_model_inputs_.attention_inputs.cu_seqlens,
                       (state_.current_batch_size + 1) * sizeof(int));
 
+        optimizedCopy(inputs.attention_inputs.cu_seqlens_without_prefix,
+                      py_model_inputs_.attention_inputs.cu_seqlens_without_prefix,
+                      (state_.current_batch_size + 1) * sizeof(int));
+
         py_model_inputs_.input_ids.fill_(0);
         optimizedCopy(inputs.input_ids, py_model_inputs_.input_ids, inputs.input_ids.size(0) * sizeof(int));
 
@@ -109,6 +113,10 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
 
         optimizedCopy(inputs.attention_inputs.cu_seqlens,
                       py_model_inputs_.attention_inputs.cu_seqlens,
+                      (state_.current_batch_size + 1) * sizeof(int));
+
+        optimizedCopy(inputs.attention_inputs.cu_seqlens_without_prefix,
+                      py_model_inputs_.attention_inputs.cu_seqlens_without_prefix,
                       (state_.current_batch_size + 1) * sizeof(int));
 
         optimizedCopy(inputs.input_ids, py_model_inputs_.input_ids, state_.current_seq_len * sizeof(int));
@@ -207,6 +215,11 @@ void CudaGraphRunner::initKernelInternalMemory() {
         torch::zeros({int(max_bs_ + 1)}, options_cpu_int32_).pin_memory();
     RTP_LLM_CHECK_WITH_INFO(capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens.is_pinned(),
                             "capture_mem_hold_ cu_seqlens is not pinned memory");
+
+    capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens_without_prefix =
+        torch::zeros({int(max_bs_ + 1)}, options_cpu_int32_).pin_memory();
+    RTP_LLM_CHECK_WITH_INFO(capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens_without_prefix.is_pinned(),
+                            "capture_mem_hold_ cu_seqlens_without_prefix is not pinned memory");
 }
 
 int CudaGraphRunner::getCurrentRealGraphBs() {
@@ -345,7 +358,9 @@ void CudaGraphRunner::initCapture() {
         initCaptureAttentionInputsPost();
         if (is_prefill_cuda_graph_mode_) {
             RTP_LLM_LOG_INFO("initCapture forward post check start for prefill");
-            capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens.data_ptr<int>()[1]    = max_num_token_;
+            capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens.data_ptr<int>()[1] = max_num_token_;
+            capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens_without_prefix.data_ptr<int>()[1] =
+                max_num_token_;
             capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths.data_ptr<int>()[0] = max_num_token_;
             py_forward_method_(capture_mem_hold_.py_model_inputs_);
             RTP_LLM_LOG_INFO("initCapture forward post check end for prefill");
@@ -427,6 +442,8 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
         capture_mem_hold_.py_model_inputs_.attention_inputs.kv_cache_block_id_host.slice(0, 0, batch_size);
     inputs.attention_inputs.cu_seqlens =
         capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens.slice(0, 0, batch_size + 1);
+    inputs.attention_inputs.cu_seqlens_without_prefix =
+        capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens_without_prefix.slice(0, 0, batch_size + 1);
 
     // Common direct assignments (no slice needed)
     inputs.attention_inputs.prefix_lengths = capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths;

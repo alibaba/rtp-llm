@@ -97,7 +97,8 @@ void CudaDevice::getRopeCacheOnce(const RopeConfig& rope_config, int max_positio
     std::call_once(rope_cache_flag_, [&]() {
         use_rope_cache_ = rope_config.style == RopeStyle::Base || rope_config.style == RopeStyle::Yarn;
         if (use_rope_cache_) {
-            rope_cache_ = getRopeCache(rope_config, max_position_embeddings);
+            rope_cache_     = getRopeCache(rope_config, max_position_embeddings);
+            rope_cache_dim_ = rope_config.dim;
         }
     });
 }
@@ -217,7 +218,9 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
             params.common.cu_seqlens->data<int>(),
             params.common.cu_seqlens_without_prefix->data<int>(),
             use_rope_cache_,
-            use_rope_cache_ && rope_cache_.defined() ? rope_cache_.data_ptr<float>() : nullptr,
+            use_rope_cache_ && rope_cache_.defined() && rope_cache_dim_ == params.configs.rope_config.dim ?
+                rope_cache_.data_ptr<float>() :
+                nullptr,
             batch_size,
             seq_len,
             token_num,
@@ -408,8 +411,10 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
                                              params.weights.qkv_weight->bias->data() :
                                              nullptr,
                                          use_rope_cache_,
-                                         use_rope_cache_ && rope_cache_.defined() ? rope_cache_.data_ptr<float>() :
-                                                                                    nullptr,
+                                         use_rope_cache_ && rope_cache_.defined()
+                                                 && rope_cache_dim_ == params.configs.rope_config.dim ?
+                                             rope_cache_.data_ptr<float>() :
+                                             nullptr,
                                          batch_size,
                                          local_head_num,
                                          local_kv_head_num,

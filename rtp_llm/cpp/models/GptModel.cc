@@ -66,7 +66,7 @@ void getPaddingOffsetAndCuSeqLens(int32_t*       padding_offset,
         }
         cu_seqlens[i] = total_seq_len;
         if (cu_seqlens_without_prefix) {
-            cu_seqlens_without_prefix[batch_size] = total_seq_len_without_prefix;
+            cu_seqlens_without_prefix[i] = total_seq_len_without_prefix;
         }
         if (padding_offset) {
             for (int32_t j = 0; j < seq_len; j++) {

@@ -932,6 +932,7 @@ INSTANTIATEDEBUGKERNEL2(__nv_bfloat16);
 
 // Bandwidth-bound kernel by reading cos/sin coefficients from global memory (pre-computed and saved as weights).
 
+#if USING_CUDA
 template<typename T,
          typename Tcache,
          bool      PREFIX_PROMPT,
@@ -1048,13 +1049,15 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
         int    q_store_idx = 0;
         int    q_idx_off   = 1;
 
-        const int pre_len    = cu_seqlens[batch_idx];
-        int       head_idx   = bidz * HEAD_Q_BLOCK_NUM;
-        size_t    hidden_idx = head_idx * size_per_head + lane_id * vec_size;
-        size_t    src_q_idx  = token_idx * (n + 2 * kv_n) + hidden_idx;
+        const int pre_len        = cu_seqlens[batch_idx];
+        int       head_idx       = bidz * HEAD_Q_BLOCK_NUM;
+        size_t    hidden_idx     = head_idx * size_per_head + lane_id * vec_size;
+        size_t    src_q_idx      = token_idx * (n + 2 * kv_n) + hidden_idx;
+        size_t    src_q_last_idx = 0;
 
-        size_t hidden_permuted_idx = hidden_idx + rope_config.dim / 2;
-        size_t src_q_permuted_idx  = src_q_idx + rope_config.dim / 2;
+        size_t hidden_permuted_idx     = hidden_idx + rope_config.dim / 2;
+        size_t src_q_permuted_idx      = src_q_idx + rope_config.dim / 2;
+        size_t src_q_permuted_last_idx = 0;
 
         size_t dest_qkv_idx = 0;
         if constexpr (USE_PAGED_FMHA) {
@@ -1096,8 +1099,10 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
 
             ++head_idx;
             hidden_idx += size_per_head;
+            src_q_last_idx = src_q_idx;
             src_q_idx += size_per_head;
             hidden_permuted_idx += size_per_head;
+            src_q_permuted_last_idx = src_q_permuted_idx;
             src_q_permuted_idx += size_per_head;
 
             *reinterpret_cast<int4*>(&q[q_load_idx])          = *reinterpret_cast<int4*>(&QKV[src_q_idx]);
@@ -1120,20 +1125,22 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
             }
 
             if (store_qkv) {
-                *reinterpret_cast<int4*>(&QKV[src_q_idx])          = *reinterpret_cast<int4*>(&q[q_store_idx]);
-                *reinterpret_cast<int4*>(&QKV[src_q_permuted_idx]) = *reinterpret_cast<int4*>(&q_permuted[q_store_idx]);
+                *reinterpret_cast<int4*>(&QKV[src_q_last_idx]) = *reinterpret_cast<int4*>(&q[q_store_idx]);
+                *reinterpret_cast<int4*>(&QKV[src_q_permuted_last_idx]) =
+                    *reinterpret_cast<int4*>(&q_permuted[q_store_idx]);
 #ifdef ENABLE_FP8
                 if (QuantizedQKV != nullptr) {
                     *reinterpret_cast<int4*>(&q_buf[dest_qkv_idx]) = *reinterpret_cast<int4*>(&q[q_store_idx]);
                     *reinterpret_cast<int4*>(&q_buf[dest_qkv_permuted_idx]) =
                         *reinterpret_cast<int4*>(&q_permuted[q_store_idx]);
                     QuantizedVecType* quantized_q_ptr =
-                        USE_PAGED_FMHA ? reinterpret_ptr<QuantizedEltType, QuantizedVecType>(q_buf, dest_qkv_idx) :
-                                         reinterpret_ptr<QuantizedEltType, QuantizedVecType>(QuantizedQKV, src_q_idx);
+                        USE_PAGED_FMHA ?
+                            reinterpret_ptr<QuantizedEltType, QuantizedVecType>(q_buf, dest_qkv_idx) :
+                            reinterpret_ptr<QuantizedEltType, QuantizedVecType>(QuantizedQKV, src_q_last_idx);
                     QuantizedVecType* quantized_q_permuted_ptr =
                         USE_PAGED_FMHA ?
                             reinterpret_ptr<QuantizedEltType, QuantizedVecType>(q_buf, dest_qkv_permuted_idx) :
-                            reinterpret_ptr<QuantizedEltType, QuantizedVecType>(QuantizedQKV, src_q_permuted_idx);
+                            reinterpret_ptr<QuantizedEltType, QuantizedVecType>(QuantizedQKV, src_q_permuted_last_idx);
                     convert_to_fp8(quantized_q_ptr, q[q_store_idx]);
                     convert_to_fp8(quantized_q_permuted_ptr, q_permuted[q_store_idx]);
 
@@ -1162,12 +1169,13 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
                 if (QuantizedQKV != nullptr) {
                     // fp8 paged fmha
                     QuantizedVecType* quantized_q_ptr =
-                        USE_PAGED_FMHA ? reinterpret_ptr<QuantizedEltType, QuantizedVecType>(q_buf, dest_q_idx) :
-                                         reinterpret_ptr<QuantizedEltType, QuantizedVecType>(QuantizedQKV, src_q_idx);
+                        USE_PAGED_FMHA ?
+                            reinterpret_ptr<QuantizedEltType, QuantizedVecType>(q_buf, dest_q_idx) :
+                            reinterpret_ptr<QuantizedEltType, QuantizedVecType>(QuantizedQKV, src_q_last_idx);
                     QuantizedVecType* quantized_q_permuted_ptr =
                         USE_PAGED_FMHA ?
                             reinterpret_ptr<QuantizedEltType, QuantizedVecType>(q_buf, dest_q_permuted_idx) :
-                            reinterpret_ptr<QuantizedEltType, QuantizedVecType>(QuantizedQKV, src_q_permuted_idx);
+                            reinterpret_ptr<QuantizedEltType, QuantizedVecType>(QuantizedQKV, src_q_permuted_last_idx);
                     convert_to_fp8(quantized_q_ptr, q[q_store_idx]);
                     convert_to_fp8(quantized_q_permuted_ptr, q_permuted[q_store_idx]);
                 } else {
@@ -1264,12 +1272,14 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
         int    k_store_idx = 0;
         int    k_idx_off   = 1;
 
-        int    head_idx   = (bidz - max_q_bidz) * HEAD_K_BLOCK_NUM;
-        size_t hidden_idx = head_idx * size_per_head + lane_id * vec_size;
-        size_t src_k_idx  = token_idx * (n + 2 * kv_n) + hidden_idx + n;
+        int    head_idx       = (bidz - max_q_bidz) * HEAD_K_BLOCK_NUM;
+        size_t hidden_idx     = head_idx * size_per_head + lane_id * vec_size;
+        size_t src_k_idx      = token_idx * (n + 2 * kv_n) + hidden_idx + n;
+        size_t src_k_last_idx = 0;
 
-        size_t hidden_permuted_idx = hidden_idx + rope_config.dim / 2;
-        size_t src_k_permuted_idx  = src_k_idx + rope_config.dim / 2;
+        size_t hidden_permuted_idx     = hidden_idx + rope_config.dim / 2;
+        size_t src_k_permuted_idx      = src_k_idx + rope_config.dim / 2;
+        size_t src_k_permuted_last_idx = 0;
 
         const int dst_kv_seq_idx = seq_idx + prefix_prompt_length;
         size_t    dest_kv_idx    = batch_idx * size_per_head * total_seq_len * head_num_kv
@@ -1312,8 +1322,10 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
 
             ++head_idx;
             hidden_idx += size_per_head;
+            src_k_last_idx = src_k_idx;
             src_k_idx += size_per_head;
             hidden_permuted_idx += size_per_head;
+            src_k_permuted_last_idx = src_k_permuted_idx;
             src_k_permuted_idx += size_per_head;
 
             *reinterpret_cast<int4*>(&k[k_load_idx])          = *reinterpret_cast<int4*>(&QKV[src_k_idx]);
@@ -1336,15 +1348,16 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
                 if (QuantizedQKV != nullptr) {
                     // use 1.0f scale currently for qkv input of FP8 FMHA.
                     convert_to_fp8(reinterpret_cast<QuantizedVecType*>(reinterpret_cast<QuantizedEltType*>(QuantizedQKV)
-                                                                       + src_k_idx),
+                                                                       + src_k_last_idx),
                                    k[k_store_idx]);
                     convert_to_fp8(reinterpret_cast<QuantizedVecType*>(reinterpret_cast<QuantizedEltType*>(QuantizedQKV)
-                                                                       + src_k_permuted_idx),
+                                                                       + src_k_permuted_last_idx),
                                    k_permuted[k_store_idx]);
                 }
 #endif
-                *reinterpret_cast<int4*>(&QKV[src_k_idx])          = *reinterpret_cast<int4*>(&k[k_store_idx]);
-                *reinterpret_cast<int4*>(&QKV[src_k_permuted_idx]) = *reinterpret_cast<int4*>(&k_permuted[k_store_idx]);
+                *reinterpret_cast<int4*>(&QKV[src_k_last_idx]) = *reinterpret_cast<int4*>(&k[k_store_idx]);
+                *reinterpret_cast<int4*>(&QKV[src_k_permuted_last_idx]) =
+                    *reinterpret_cast<int4*>(&k_permuted[k_store_idx]);
             }
 
             if (store_kv) {
@@ -1424,12 +1437,14 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
         int    v_store_idx = 0;
         int    v_idx_off   = 1;
 
-        int    head_idx   = (bidz - max_k_bidz) * HEAD_V_BLOCK_NUM;
-        size_t hidden_idx = head_idx * size_per_head + lane_id * vec_size;
-        size_t src_v_idx  = token_idx * (n + 2 * kv_n) + hidden_idx + n + kv_n;
+        int    head_idx       = (bidz - max_k_bidz) * HEAD_V_BLOCK_NUM;
+        size_t hidden_idx     = head_idx * size_per_head + lane_id * vec_size;
+        size_t src_v_idx      = token_idx * (n + 2 * kv_n) + hidden_idx + n + kv_n;
+        size_t src_v_last_idx = 0;
 
-        size_t hidden_permuted_idx = hidden_idx + rope_config.dim / 2;
-        size_t src_v_permuted_idx  = src_v_idx + rope_config.dim / 2;
+        size_t hidden_permuted_idx     = hidden_idx + rope_config.dim / 2;
+        size_t src_v_permuted_idx      = src_v_idx + rope_config.dim / 2;
+        size_t src_v_permuted_last_idx = 0;
 
         const int dst_kv_seq_idx = seq_idx + prefix_prompt_length;
         size_t    dest_kv_idx    = batch_idx * size_per_head * total_seq_len * head_num_kv
@@ -1473,8 +1488,10 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
 
             ++head_idx;
             hidden_idx += size_per_head;
+            src_v_last_idx = src_v_idx;
             src_v_idx += size_per_head;
             hidden_permuted_idx += size_per_head;
+            src_v_permuted_last_idx = src_v_permuted_idx;
             src_v_permuted_idx += size_per_head;
 
             *reinterpret_cast<int4*>(&v[v_load_idx])          = *reinterpret_cast<int4*>(&QKV[src_v_idx]);
@@ -1494,15 +1511,16 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
                 if (QuantizedQKV != nullptr) {
                     // use 1.0f scale currently for qkv input of FP8 FMHA.
                     convert_to_fp8(reinterpret_cast<QuantizedVecType*>(reinterpret_cast<QuantizedEltType*>(QuantizedQKV)
-                                                                       + src_v_idx),
+                                                                       + src_v_last_idx),
                                    v[v_store_idx]);
                     convert_to_fp8(reinterpret_cast<QuantizedVecType*>(reinterpret_cast<QuantizedEltType*>(QuantizedQKV)
-                                                                       + src_v_permuted_idx),
+                                                                       + src_v_permuted_last_idx),
                                    v_permuted[v_store_idx]);
                 }
 #endif
-                *reinterpret_cast<int4*>(&QKV[src_v_idx])          = *reinterpret_cast<int4*>(&v[v_store_idx]);
-                *reinterpret_cast<int4*>(&QKV[src_v_permuted_idx]) = *reinterpret_cast<int4*>(&v_permuted[v_store_idx]);
+                *reinterpret_cast<int4*>(&QKV[src_v_last_idx]) = *reinterpret_cast<int4*>(&v[v_store_idx]);
+                *reinterpret_cast<int4*>(&QKV[src_v_permuted_last_idx]) =
+                    *reinterpret_cast<int4*>(&v_permuted[v_store_idx]);
             }
 
             if (store_kv) {
@@ -1573,6 +1591,7 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
         }
     }
 }
+#endif
 
 template<typename T, typename Tcache, bool PREFIX_PROMPT, bool USE_PAGED_FMHA, RopeStyle ROPE_STYLE>
 __global__ void add_fusedQKV_bias_transpose_with_rope_cache_kernel(T*                            q_no_transpose_buf,
@@ -2190,10 +2209,12 @@ void invokeAddFusedQKVBiasTranspose(T*                             q_no_transpos
                                     const bool                     store_cache,
                                     cudaStream_t                   stream) {
     if (use_rope_cache && rope_cache) {
+#if USING_CUDA
         if (head_num % 8 == 0 && head_num_kv % 4 == 0 && param_ptr->kv_block_array.cache_type != KvCacheDataType::INT8
             && size_per_head == rope_config.dim) {
             ADD_FUSEDQKV_BIAS_TRANSPOSE_NON_INT8_WITH_ROPE_CACHE(8, 4, 4);
         } else {
+#endif
             dim3         block((size_per_head / Vec_t<T>::size + 31) / 32 * 32);
             dim3         grid(token_num, head_num + head_num_kv * 2);
             const size_t smem_size = rope_config.style == RopeStyle::No ? 0 : 2 * rope_config.dim * sizeof(T);
@@ -2235,7 +2256,9 @@ void invokeAddFusedQKVBiasTranspose(T*                             q_no_transpos
                     });
                 });
             });
+#if USING_CUDA
         }
+#endif
     } else {
         dim3         block((size_per_head / Vec_t<T>::size + 31) / 32 * 32);
         dim3         grid(token_num, head_num);
