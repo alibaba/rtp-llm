@@ -88,6 +88,7 @@ public:
         rtp_llm::GptInitParameter gpt_init_params;
         gpt_init_params.device_resource_config.device_reserve_memory_bytes = device_reserve_memory_size_;
         gpt_init_params.device_resource_config.host_reserve_memory_bytes   = host_reserve_memory_size_;
+        gpt_init_params.max_seq_len_                                       = max_seq_len_;
         rtp_llm::DeviceFactory::initDevices(gpt_init_params);
         device_ = rtp_llm::DeviceFactory::getDefaultDevice();
     }
@@ -416,6 +417,7 @@ protected:
     rtp_llm::CacheManagerPtr cache_manager_;
     size_t                   device_reserve_memory_size_ = 1024L * 1024 * 1024;      // 1MB;
     size_t                   host_reserve_memory_size_   = 1L * 1024 * 1024 * 1024;  // 1GB;
+    int64_t                  max_seq_len_                = 8192;
 };
 
 #define RTP_LLM_RUN_DEVICE_TEST(test_class, case_name, ...)                                                            \

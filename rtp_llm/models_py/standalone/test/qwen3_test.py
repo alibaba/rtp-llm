@@ -18,7 +18,7 @@ class Qwen3AutoPyModelTest(TestCase):
         # test_msg1 consist of 20 tokens
         self.test_msg1 = [{"role": "user", "content": "你好，请用较长篇幅介绍自己"}]
         self.max_new_tokens1 = 45
-        self.expected_output_text1 = "你好！我是你的AI助手，我是一个基于深度学习的多模态语言模型，专为用户提供自然、流畅的对话体验。我能够理解多种语言，并且能够处理各种类型的查询，包括文字、"
+        self.expected_output_text1 = "你好！我是你的AI助手，我是一个基于深度学习的多模态语言模型，专为用户提供自然、流畅的对话体验。我能够理解多种语言，包括中文、英文、西班牙语、法语"
 
         self.test_msg2 = [{"role": "user", "content": "3.9和3.11哪个大"}]
         self.max_new_tokens2 = 50

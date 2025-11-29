@@ -1,3 +1,17 @@
+from rtp_llm.utils.model_weight import W
+from rtp_llm.utils.base_model_datatypes import ModelConfig
+from rtp_llm.ops.compute_ops import (
+    KVCache,
+    PyAttentionInputs,
+    PyModelInputs,
+    PyModelOutputs,
+    get_device,
+    get_typemeta,
+    init_device,
+)
+from rtp_llm.model_factory import ModelFactory
+from rtp_llm.config.py_config_modules import StaticConfig
+import rtp_llm.models
 import logging
 import math
 import os
@@ -10,21 +24,6 @@ from transformers import AutoTokenizer
 
 rtp_opensouce_path = Path(__file__).resolve().parent.parent.parent.parent
 sys.path.append(str(rtp_opensouce_path))
-
-import rtp_llm.models
-from rtp_llm.config.py_config_modules import StaticConfig
-from rtp_llm.model_factory import ModelFactory
-from rtp_llm.ops.compute_ops import (
-    KVCache,
-    PyAttentionInputs,
-    PyModelInputs,
-    PyModelOutputs,
-    get_device,
-    get_typemeta,
-    init_device,
-)
-from rtp_llm.utils.base_model_datatypes import ModelConfig
-from rtp_llm.utils.model_weight import W
 
 
 class AutoModel:
@@ -155,6 +154,9 @@ class AutoModel:
         attention_inputs.input_lengths = torch.tensor([input_length], dtype=torch.int32)
         attention_inputs.sequence_lengths = torch.tensor([], dtype=torch.int32)
         attention_inputs.cu_seqlens = torch.tensor(
+            [0, input_length], dtype=torch.int32, device=self.device
+        )
+        attention_inputs.cu_seqlens_without_prefix = torch.tensor(
             [0, input_length], dtype=torch.int32, device=self.device
         )
         attention_inputs.prefix_lengths = torch.tensor([0], dtype=torch.int32)
