@@ -37,11 +37,11 @@ public:
 
     KVCacheBuffer kvCacheBuffer() const override;
 
-    void clearCache() override;
-
     BlockPoolPtr getBlockPool() const {
         return block_pool_;
     }
+
+    void clearCache() override;
 
     // TODO, friend class test
 public:

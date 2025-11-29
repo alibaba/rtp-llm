@@ -236,20 +236,6 @@ InsertResult KVCacheManager::insertIntoCache(const InsertInfo& insert_info) {
     return insert_result;
 }
 
-void KVCacheManager::clearLocalCache() {
-    // clear gpu cache
-    if (allocator_) {
-        allocator_->clearCache();
-    }
-    // clear cpu cache
-    if (memory_connector_) {
-        auto memory_connector = std::dynamic_pointer_cast<KVCacheMemoryConnector>(memory_connector_);
-        if (memory_connector) {
-            memory_connector->clearCache();
-        }
-    }
-}
-
 KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const {
     // return allocator_->getKVCacheInfo(latest_version, need_cache_keys);
     return {0, 0, 0, {}, latest_version};
@@ -383,6 +369,20 @@ bool KVCacheManager::copyCache(const CopyCacheRequestPB& request, CopyCacheRespo
     } else {
         RTP_LLM_LOG_WARNING("copy cache failed, request is invalid, request: [%s]", request.DebugString().c_str());
         return false;
+    }
+}
+
+void KVCacheManager::clearLocalCache() {
+    // clear gpu cache
+    if (allocator_) {
+        allocator_->clearCache();
+    }
+    // clear cpu cache
+    if (memory_connector_) {
+        auto memory_connector = std::dynamic_pointer_cast<KVCacheMemoryConnector>(memory_connector_);
+        if (memory_connector) {
+            memory_connector->clearCache();
+        }
     }
 }
 
