@@ -10,7 +10,8 @@
 #include "rtp_llm/models_py/bindings/cuda/FusedMoEOp.h"
 #include "rtp_llm/models_py/bindings/cuda/SelectTopkOp.h"
 #include "rtp_llm/models_py/bindings/cuda/GroupTopKOp.h"
-#include "rtp_llm/models_py/bindings/common/RtpProcessGroup.h"
+// RtpProcessGroup is deprecated, use rtp_llm.distribute.collective_torch instead
+// #include "rtp_llm/models_py/bindings/common/RtpProcessGroup.h"
 #include "rtp_llm/models_py/bindings/cuda/PerTokenGroupQuantFp8.h"
 #include "rtp_llm/models_py/bindings/cuda/MoETopkSoftmax.h"
 #include "3rdparty/flashinfer/flashinfer.h"
@@ -200,7 +201,8 @@ void registerBaseCudaBindings(py::module& rtp_ops_m) {
     registerFusedMoEOp(rtp_ops_m);
     registerSelectTopkOp(rtp_ops_m);
     registerGroupTopKOp(rtp_ops_m);
-    registerRtpProcessGroup(rtp_ops_m);
+    // RtpProcessGroup is deprecated, use rtp_llm.distribute.collective_torch instead
+    // registerRtpProcessGroup(rtp_ops_m);
     registerTrtFp8QuantOp(rtp_ops_m);
 }
 

@@ -3,7 +3,7 @@ from typing import Any, Optional, Tuple
 
 import torch
 
-from rtp_llm.distribute.collective import Group, all_gather
+from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.distributed.deepep_initializer import DeepEpInitializer
 from rtp_llm.models_py.distributed.deepep_wrapper import use_accl_ep
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used

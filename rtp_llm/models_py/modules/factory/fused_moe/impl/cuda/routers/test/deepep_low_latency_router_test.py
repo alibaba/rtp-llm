@@ -9,7 +9,7 @@ import torch.distributed
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.distribute.worker_info import g_master_info
 
-from rtp_llm.models_py.distributed.test.process_group_state import (
+from rtp_llm.models_py.distributed.collective_torch import (
     destroy_distributed_environment,
     init_distributed_environment,
 )
@@ -57,7 +57,7 @@ def _init_router(rank: int, use_fp8: bool, parallelism_config: ParallelismConfig
     
     # Use the provided parallelism_config directly
     parallelism_config.nccl_ip = "127.0.0.1"
-    parallelism_config.tp_nccl_port = nccl_port
+    parallelism_config.th_nccl_port = nccl_port
     
     moe_config = MoeConfig()
     moe_config.use_deepep_low_latency = True

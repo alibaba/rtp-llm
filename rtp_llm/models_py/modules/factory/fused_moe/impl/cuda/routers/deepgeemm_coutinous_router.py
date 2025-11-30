@@ -2,12 +2,12 @@ from typing import Any, Optional
 
 import torch
 
-from rtp_llm.distribute.collective import Group, all_reduce
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     per_token_cast_to_fp8,
     sgl_per_token_group_quant_fp8,
 )
+from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     ExpertForwardPayload,
     ExpertTokensMetadata,

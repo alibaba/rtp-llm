@@ -3,8 +3,7 @@ from typing import Any, Dict, Optional
 import torch
 from torch import nn
 
-
-from rtp_llm.distribute.collective import Group, all_reduce
+from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.ops import ParallelismConfig, AttentionConfigs
 from rtp_llm.ops.compute_ops import DeviceType, KVCache, get_device

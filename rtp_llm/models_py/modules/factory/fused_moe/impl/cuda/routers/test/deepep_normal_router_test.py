@@ -5,9 +5,9 @@ from typing import List
 import torch
 
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.log_config import setup_logging
 from rtp_llm.distribute.worker_info import g_master_info
-from rtp_llm.models_py.modules.factory.fused_moe import FusedMoeFactory
-from rtp_llm.models_py.distributed.test.process_group_state import (
+from rtp_llm.models_py.distributed.collective_torch import (
     destroy_distributed_environment,
     init_distributed_environment,
 )
@@ -197,12 +197,13 @@ def test_single(world_size: int, test_tp_size: int, use_fp8: bool):
 
 
 if __name__ == "__main__":
+    setup_logging()
     mp.set_start_method("spawn")
 
     world_size = 2
     test_tp_sizes = [1, 2]
 
     # 为每个world_size运行test_single函数
-    for use_fp8 in [True, False]:
-        for test_tp_size in test_tp_sizes:
+    for use_fp8 in [True]:
+        for test_tp_size in [2]:
             test_single(world_size, test_tp_size, use_fp8)

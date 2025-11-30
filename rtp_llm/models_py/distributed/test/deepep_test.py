@@ -20,7 +20,7 @@ from rtp_llm.models_py.distributed.deepep_wrapper import (
     get_deepep_wrapper,
     init_deepep_wrapper,
 )
-from rtp_llm.models_py.distributed.test.process_group_state import (
+from rtp_llm.models_py.distributed.collective_torch import (
     destroy_distributed_environment,
     init_distributed_environment,
 )
@@ -1828,7 +1828,7 @@ class DeepEPTest(TestCase):
         
         parallelism_config = ParallelismConfig()
         parallelism_config.nccl_ip = "127.0.0.1"
-        parallelism_config.tp_nccl_port = int(os.getenv("MASTER_PORT", "8376"))
+        parallelism_config.th_nccl_port = int(os.getenv("MASTER_PORT", "8376"))
         parallelism_config.dp_rank = rank
         parallelism_config.dp_size = num_ranks
         parallelism_config.tp_rank = 0
