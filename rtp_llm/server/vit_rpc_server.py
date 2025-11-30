@@ -75,17 +75,12 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
 
 def vit_start_server():
     py_env_configs = setup_args()
-    
-    # Create GangServer and get gang_info
-    gang_server = GangServer(py_env_configs.gang_config, py_env_configs.server_config)
-    gang_server.start()
-    gang_info = gang_server._gang_info
-    
+
     url_data_cache_.resize_cache(py_env_configs.vit_config.url_cache_item_num)
     vit_emb_cache_.resize_cache(py_env_configs.vit_config.mm_cache_item_num)
 
     # Create and fully initialize engine config (global singleton)
-    engine_config = EngineConfig.create(py_env_configs, gang_info=gang_info)
+    engine_config = EngineConfig.create(py_env_configs)
     
     # Create model configs (ModelConfig construction is handled in ModelFactory)
     # All model metadata (lora_infos, multi_task_prompt, model_name, template_type, mm_model_config)

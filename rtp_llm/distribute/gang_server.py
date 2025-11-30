@@ -387,6 +387,7 @@ class GangServer:
             logging.error(f"first failure node is {first_failure_info}")
 
     def start_health_check(self):
+        logging.info(f"gang worker {g_parallel_info} start_health_check")
         sleep_time = self.gang_config.gang_sleep_time
 
         def wrapper():
@@ -430,30 +431,4 @@ class GangServer:
         update_master_info(
             self._gang_info.master.ip, self._gang_info.master.server_port
         )
-        master_url = (
-            f"tcp://{g_master_info.ip}:{self._gang_info.master.server_port - 1}"
-        )
-        logging.info(f"gang worker {g_parallel_info} init_process_group {master_url}")
-        init_process_timeout = self.gang_config.dist_barrier_timeout
-        # Default value is 10 minutes for NCCL
-        if init_process_timeout is not None:
-            init_process_timeout = timedelta(seconds=init_process_timeout)
-        os.environ["TORCH_DIST_INIT_BARRIER"] = "1"
-        torch.distributed.init_process_group(
-            backend=torch.distributed.Backend.NCCL,
-            init_method=master_url,
-            rank=g_parallel_info.world_rank,
-            world_size=g_parallel_info.world_size,
-            timeout=init_process_timeout,
-        )
-
-        from rtp_llm.models_py.distributed.symm_mem import get_symm_mem_communicator
-
-        # TODO: remove this to all reduce for lately init
-        # some not impl errors happened after engine start, need to fix later
-        if g_parallel_info.tp_size > 1:
-            get_symm_mem_communicator()
-
-        logging.info(f"gang worker {g_parallel_info} start_health_check")
         self.start_health_check()
-        logging.info(f"gang init done")

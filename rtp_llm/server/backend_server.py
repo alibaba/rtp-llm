@@ -11,10 +11,12 @@ import torch
 from fastapi import Request
 from fastapi.responses import ORJSONResponse
 from pydantic import BaseModel
+from datetime import timedelta
+
 
 from rtp_llm.access_logger.access_logger import AccessLogger
 from rtp_llm.async_decoder_engine.base_engine import BaseEngine
-from rtp_llm.config.engine_config import EngineConfig
+from rtp_llm.config.engine_config import EngineConfig, update_worker_addrs
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.log_config import get_log_path
 from rtp_llm.ops import TaskType, EngineScheduleInfo, KVCacheInfo, WorkerStatusInfo
@@ -24,6 +26,7 @@ from rtp_llm.lora.lora_manager import LoraManager
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.model_loader.weight_manager import WeightManager
+from rtp_llm.models_py.distributed.collective_torch import init_distributed_environment
 from rtp_llm.server.misc import format_exception
 from rtp_llm.server.worker_status import TaskInfo, WorkStatus
 from rtp_llm.structure.request_extractor import request_id_field_name
@@ -54,18 +57,33 @@ class BackendServer(object):
         self._role_type: str = "unknown"
 
     def start(self, py_env_configs: PyEnvConfigs):
-        self._gang_server.start()
         if py_env_configs.profiling_debug_logging_config.debug_start_fake_process == 1:
             # for debug online
             logging.info("DEBUG_START_FAKE_PROCESS is set, start fake backend server")
             return
+        
+        self._gang_server.start()
+
+        # Create EngineConfig from py_env_configs
+        engine_config = EngineConfig.create(py_env_configs)
+
+        if engine_config.parallelism_config.world_size > 1:
+            init_distributed_environment(
+                engine_config.parallelism_config,
+                backend="nccl",
+                timeout=py_env_configs.gang_config.dist_barrier_timeout,
+            )
 
         # Get gang_info from gang_server after start()
         gang_info = self._gang_server._gang_info
         
-        # Create and fully initialize EngineConfig from py_env_configs
-        engine_config = EngineConfig.create(py_env_configs, gang_info=gang_info)
-        
+        # Update worker addresses using gang_info
+        update_worker_addrs(
+            engine_config.runtime_config,
+            engine_config.parallelism_config,
+            gang_info,
+        )
+
         # Store role_type from engine_config
         self._role_type = 'RoleType.' + engine_config.pd_sep_config.role_type.name
         

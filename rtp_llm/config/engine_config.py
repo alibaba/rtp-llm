@@ -165,19 +165,21 @@ class EngineConfig:
         return "\n".join(lines)
     
     @staticmethod
-    def create(py_env_configs: PyEnvConfigs, gang_info) -> 'EngineConfig':
+    def create(py_env_configs: PyEnvConfigs) -> 'EngineConfig':
         """Create and fully initialize EngineConfig from py_env_configs.
         
-        This method creates the EngineConfig dataclass and performs all necessary
-        initialization including parallelism setup, runtime config setup, worker
-        address updates, and PD separation config setup.
+        This method creates the EngineConfig dataclass and performs necessary
+        initialization including parallelism setup, runtime config setup, and 
+        PD separation config setup.
+        
+        Note: Worker address updates (via update_worker_addrs) should be called 
+        separately after this method, when gang_info is available.
         
         Args:
             py_env_configs: PyEnvConfigs instance containing all configuration
-            gang_info: GangInfo instance from GangServer.
         
         Returns:
-            Fully initialized EngineConfig instance
+            Initialized EngineConfig instance
         """
         
         # Create ParallelismConfig and setup from parallel_info
@@ -233,13 +235,7 @@ class EngineConfig:
             grpc_config=grpc_config,
         )
         
-
         runtime_config.max_generate_batch_size = concurrency_config.concurrency_limit
-        update_worker_addrs(
-            engine_config.runtime_config,
-            engine_config.parallelism_config,
-            gang_info,
-        )
         
         # Setup PD separation config
         setup_pd_sep_config(

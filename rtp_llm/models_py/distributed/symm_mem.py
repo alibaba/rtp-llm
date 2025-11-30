@@ -170,39 +170,17 @@ class TorchSymmMemCommunicator:
         return out
 
 
-def _init_symm_mem_communicator() -> Optional[TorchSymmMemCommunicator]:
+# Use lazy initialization instead of module-level initialization
+_symm_mem_comm: Optional[TorchSymmMemCommunicator] = None
+
+def init_symm_mem_communicator(tp_group: ProcessGroup) -> Optional[TorchSymmMemCommunicator]:
     """Initialize TorchSymmMemCommunicator for TP group."""
     try:
-        if not torch.cuda.is_available() or not dist.is_initialized():
-            return None
-
-        # Get TP and DP info from environment variables or torch.distributed
-        import os
-
-        tp_size = int(os.environ.get("TP_SIZE", "1"))
-        world_rank = dist.get_rank()
-
-        if tp_size <= 1:
-            return None
-
-        # Calculate dp_rank: dp_rank = world_rank // tp_size
-        dp_rank = world_rank // tp_size
-
-        # Calculate TP group ranks
-        # For TP group, ranks are consecutive within the same DP group
-        # TP ranks: [dp_rank * tp_size, ..., dp_rank * tp_size + tp_size - 1]
-        tp_group_start = dp_rank * tp_size
-        tp_ranks = list(range(tp_group_start, tp_group_start + tp_size))
-
-        # Create or get TP ProcessGroup
-        tp_group = dist.new_group(tp_ranks, backend="nccl")
-        # Get local device
-        local_rank = int(torch.cuda.current_device())
-        device_obj = torch.device(f"cuda:{local_rank}")
-        # Initialize TorchSymmMemCommunicator
-        symm_mem_comm = TorchSymmMemCommunicator(tp_group, device_obj)
+        symm_mem_comm = TorchSymmMemCommunicator(tp_group, torch.cuda.current_device())
         if symm_mem_comm.disabled:
+            logging.warning(f"TorchSymmMemCommunicator is disabled, skipping initialization")
             return None
+        _symm_mem_comm = symm_mem_comm
         return symm_mem_comm
     except Exception as e:
         # If initialization fails, fall back to regular all_reduce
@@ -210,13 +188,7 @@ def _init_symm_mem_communicator() -> Optional[TorchSymmMemCommunicator]:
         return None
 
 
-# Use lazy initialization instead of module-level initialization
-_symm_mem_comm: Optional[TorchSymmMemCommunicator] = None
-
-
 def get_symm_mem_communicator() -> Optional[TorchSymmMemCommunicator]:
     """Get or initialize TorchSymmMemCommunicator (lazy initialization)."""
     global _symm_mem_comm
-    if _symm_mem_comm is None:
-        _symm_mem_comm = _init_symm_mem_communicator()
     return _symm_mem_comm

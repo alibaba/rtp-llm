@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.distribute.collective import Group, all_reduce
+from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.ops import ParallelismConfig

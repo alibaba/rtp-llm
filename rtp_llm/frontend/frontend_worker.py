@@ -112,16 +112,16 @@ class FrontendWorker:
         logging.info("starting frontend worker")
         
         self.tokenizer = TokenizerFactory.create(model_config.ckpt_path, model_config.tokenizer_path, model_config.model_type)
-        
+
+        # Create engine_config with gang_info
+        engine_config = EngineConfig.create(py_env_configs)
+                
         # Get gang_info from gang_config
         gang_info = get_gang_info(
             start_port=py_env_configs.server_config.start_port,
             gang_config=py_env_configs.gang_config,
         )
 
-        # Create engine_config with gang_info
-        engine_config = EngineConfig.create(py_env_configs, gang_info=gang_info)
-        
         # Get addresses from gang_info
         addresses = get_dp_addrs_from_gang_info(
             gang_info=gang_info,

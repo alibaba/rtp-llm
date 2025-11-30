@@ -70,7 +70,7 @@ py_test (
     name = "torch_symm_mem_test",
     srcs = ["torch_symm_mem_test.py"],
     deps = py_test_deps + [
-        "//rtp_llm/models_py:distributed",
+        "//rtp_llm/models_py/distributed:collective_torch",
         "//rtp_llm/test/utils:port_util",
     ],
     env = {
