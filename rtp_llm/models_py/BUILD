@@ -7,17 +7,6 @@ py_library(
     ]),
 )
 
-py_library(
-    name = "distributed",
-    srcs = glob([
-        "distributed/*.py",
-    ]),
-    deps = [
-        "//rtp_llm/models_py/distributed:deepep_wrapper",
-    ],
-    visibility = ["//visibility:public"],
-)
-
 # flashinfer-python is only available for CUDA12
 flashinfer = ["flashinfer-python"]
 requirement(flashinfer)
@@ -39,7 +28,8 @@ py_library(
     deps = [
         ":utils",
         "//rtp_llm/models_py/triton_kernels:triton_kernels",
-        ":distributed",
+        "//rtp_llm/models_py/distributed:deepep_wrapper",
+        "//rtp_llm/models_py/distributed:collective_torch",
     ] + select({
         "@//:using_cuda12": flashinfer,
         "//conditions:default": [],

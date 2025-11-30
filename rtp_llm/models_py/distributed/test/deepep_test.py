@@ -20,7 +20,7 @@ from rtp_llm.models_py.distributed.deepep_wrapper import (
     get_deepep_wrapper,
     init_deepep_wrapper,
 )
-from rtp_llm.models_py.distributed.test.process_group_state import (
+from rtp_llm.models_py.distributed.collective_torch import (
     destroy_distributed_environment,
     init_distributed_environment,
 )

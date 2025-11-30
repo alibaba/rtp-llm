@@ -2,7 +2,7 @@ from typing import Any, Optional
 
 import torch
 
-from rtp_llm.distribute.collective import Group, all_reduce
+from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     ExpertForwardPayload,
     ExpertTokensMetadata,
