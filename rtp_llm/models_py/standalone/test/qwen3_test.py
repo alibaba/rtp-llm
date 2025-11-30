@@ -21,10 +21,10 @@ class Qwen3AutoPyModelTest(TestCase):
         self.expected_output_text1 = "你好！我是你的AI助手，我是一个基于深度学习的多模态语言模型，专为用户提供自然、流畅的对话体验。我能够理解多种语言，并且能够处理各种类型的查询，包括文字、"
 
         self.test_msg2 = [{"role": "user", "content": "3.9和3.11哪个大"}]
-        self.max_new_tokens2 = 20
-        self.expected_output_text2 = "3.9 和 3.11 都是小数，比较它们的大小可以通过"
+        self.max_new_tokens2 = 50
+        self.expected_output_text2 = "3.9 和 3.11 中，**3.9 大于 3.11**。"
 
-        self.max_total_tokens = 64  # max_total_tokens is about kv_cache capacity
+        self.max_total_tokens = 100  # max_total_tokens is about kv_cache capacity
         self.tokens_per_block = 2
         self.model = AutoModel.from_pretrained(
             model_path_or_name="Qwen/Qwen3-0.6B",
@@ -52,7 +52,7 @@ class Qwen3AutoPyModelTest(TestCase):
 
         # test max_mew_tokens exceed max_total_tokens
         with self.assertRaises(AssertionError) as context:
-            self._run_message(self.test_msg1, max_new_tokens=self.max_new_tokens1 + 1)
+            self._run_message(self.test_msg1, max_new_tokens=self.max_new_tokens1 + 100)
         self.assertEqual("sequence_length is too long", str(context.exception))
 
     def _run_message(

@@ -1,3 +1,4 @@
+import logging
 from typing import Any, Callable, Dict, List, Type
 
 import torch
@@ -67,7 +68,9 @@ class AttnImplFactory(object):
     ) -> FMHAImplBase:
         key_str = "mla" if config.use_mla else "mha"
         fmha_impl_method = cls.FMHA_IMPL_REGISTRY[key_str]
-        return fmha_impl_method(config, weight, attn_inputs)
+        instance = fmha_impl_method(config, weight, attn_inputs)
+        logging.debug(f"get fmha impl: {instance.fmha_type()}")
+        return instance
 
     @classmethod
     def get_fmha_impl_method(cls, attention_type: str) -> str:

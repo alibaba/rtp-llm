@@ -1,3 +1,5 @@
+import logging
+import math
 import os
 import sys
 from pathlib import Path
@@ -66,9 +68,10 @@ class AutoModel:
         self.device = get_device().get_device_type().name.lower()
 
         # init kv cache and bind it to py model
-        self.block_nums = (
-            max_total_tokens + tokens_per_block - 1
-        ) // tokens_per_block + 1
+        self.block_nums = math.ceil(max_total_tokens / tokens_per_block)
+        # since block_id start from 1, so we should add 1 in the corner case
+        self.block_nums += 1
+        logging.info(f"total block nums: {self.block_nums}")
         self.tokens_per_block = tokens_per_block
         self._init_kv_cache()
         self.model.kv_cache = self.kv_cache
@@ -172,10 +175,9 @@ class AutoModel:
         return attention_inputs
 
     def _check_block_nums(self, sequence_length: int) -> int:
-        need_block_nums = (
-            sequence_length + self.tokens_per_block - 1
-        ) // self.tokens_per_block + 1
-        assert need_block_nums <= self.block_nums, "sequence_length is too long"
+        need_block_nums = math.ceil(sequence_length / self.tokens_per_block)
+        # plus one for zero case
+        assert need_block_nums + 1 <= self.block_nums, "sequence_length is too long"
         return need_block_nums
 
     def _prepare_decode_attention_inputs(
@@ -187,8 +189,9 @@ class AutoModel:
             [0], dtype=torch.int32, device=self.device
         )
         attention_inputs.input_lengths = torch.tensor([1], dtype=torch.int32)
+        # sequence_lengths is index, so minus 1
         attention_inputs.sequence_lengths = torch.tensor(
-            [sequence_length], dtype=torch.int32
+            [sequence_length - 1], dtype=torch.int32
         ).pin_memory()
         attention_inputs.kv_cache_block_id_device = torch.tensor(
             [[i for i in range(1, need_block_nums + 1)]],
