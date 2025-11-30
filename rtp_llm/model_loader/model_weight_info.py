@@ -38,11 +38,6 @@ def create_scalar_ones(ts: List[torch.Tensor]):
     return torch.ones([1], dtype=torch.float32).to(ts[0].device)
 
 
-def get_pad_size(size: int, align_size: int):
-    """Calculate padding size to align to align_size."""
-    return (align_size - (size % align_size)) % align_size
-
-
 class ModelWeightInfo:
     layer_weights: Union[List[WeightModule], List[List[WeightModule]]]
     weights: List[WeightModule]
