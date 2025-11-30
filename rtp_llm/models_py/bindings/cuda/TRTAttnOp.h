@@ -8,19 +8,35 @@
 
 namespace rtp_llm {
 
-class TRTPrefillOp: public FMHACudaBase {
+class TRTPrefillOpBase: public FMHACudaBase {
 public:
-    TRTPrefillOp(const GptInitParameter& gpt_init_parameter);
-    bool support(torch_ext::PyAttentionInputs attn_inputs);
+    TRTPrefillOpBase(const GptInitParameter& gpt_init_parameter);
+    virtual bool support(torch_ext::PyAttentionInputs attn_inputs) = 0;
 
-    ParamsBasePtr prepare(torch_ext::PyAttentionInputs attn_inputs);
+    virtual ParamsBasePtr prepare(torch_ext::PyAttentionInputs attn_inputs);
 
-    torch::Tensor
-    forward(const torch::Tensor& input, std::optional<torch_ext::KVCache> kv_cache, const TRTAttnPtr& params);
+    virtual torch::Tensor
+    forward(const torch::Tensor& input, std::optional<torch_ext::KVCache> kv_cache, const TRTAttnPtr& params) = 0;
 
-private:
+protected:
     std::shared_ptr<cufmha> cufmha_runner_;
     torch::Tensor           static_scale_;
+};
+
+class TRTPagedPrefillOp: public TRTPrefillOpBase {
+public:
+    using TRTPrefillOpBase::TRTPrefillOpBase;
+    bool support(torch_ext::PyAttentionInputs attn_inputs) override;
+    torch::Tensor
+    forward(const torch::Tensor& input, std::optional<torch_ext::KVCache> kv_cache, const TRTAttnPtr& params) override;
+};
+
+class TRTNormalPrefillOp: public TRTPrefillOpBase {
+public:
+    using TRTPrefillOpBase::TRTPrefillOpBase;
+    bool support(torch_ext::PyAttentionInputs attn_inputs) override;
+    torch::Tensor
+    forward(const torch::Tensor& input, std::optional<torch_ext::KVCache> kv_cache, const TRTAttnPtr& params) override;
 };
 
 void registerTRTAttnOp(const py::module& m);

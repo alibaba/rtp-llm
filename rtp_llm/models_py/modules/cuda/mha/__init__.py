@@ -5,9 +5,11 @@ from .flash_infer import FlashInferDecodeImpl, FlashInferPrefillImpl
 
 # currently append early means impl has higher priority
 if is_cuda():
-    from .trt import TRTMHAImpl
+    from .trt import TRTMHAImpl, TRTPagedMHAImpl
 
     PREFILL_MHA_IMPS.append(TRTMHAImpl)
+    PREFILL_MHA_IMPS.append(TRTPagedMHAImpl)
+
     from .xqa import XQAImpl
 
     DECODE_MHA_IMPS.append(XQAImpl)

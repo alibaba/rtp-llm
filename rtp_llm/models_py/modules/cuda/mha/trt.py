@@ -8,6 +8,7 @@ from rtp_llm.ops.compute_ops import (
     FusedRopeKVCachePrefillOp,
     PyAttentionInputs,
     TRTAttnOp,
+    TRTPagedAttnOp,
 )
 
 
@@ -25,6 +26,25 @@ class TRTMHAImpl(FMHAPrefillImplBase):
     @staticmethod
     def fmha_type() -> FMHAType:
         return FMHAType.TRT_V2
+
+    def support_cuda_graph(self) -> bool:
+        return True
+
+
+class TRTPagedMHAImpl(FMHAPrefillImplBase):
+
+    def __init__(
+        self, config: GptInitModelParameters, attn_inputs: PyAttentionInputs
+    ) -> None:
+        super().__init__(
+            TRTPagedAttnOp(config.gpt_init_params),
+            FusedRopeKVCachePrefillOp(config.gpt_init_params),
+            attn_inputs,
+        )
+
+    @staticmethod
+    def fmha_type() -> FMHAType:
+        return FMHAType.PAGED_TRT_V2
 
     def support_cuda_graph(self) -> bool:
         return True
