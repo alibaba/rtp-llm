@@ -3,7 +3,7 @@ from typing import Any, Optional, Tuple
 
 import torch
 
-from rtp_llm.distribute.collective import Group, all_gather
+from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.distributed.deepep_initializer import DeepEpInitializer
 
 from rtp_llm.models_py.modules.common.moe.router.config_adapter import MoEConfigAdapter

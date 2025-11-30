@@ -6,7 +6,7 @@ import torch
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.ops import ParallelismConfig, MoeConfig
-from rtp_llm.models_py.distributed.test.process_group_state import (
+from rtp_llm.models_py.distributed.collective_torch import (
     destroy_distributed_environment,
     init_distributed_environment,
 )

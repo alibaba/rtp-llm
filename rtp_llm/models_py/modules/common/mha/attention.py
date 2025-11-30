@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.distribute.collective import Group, all_reduce
+from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.modules import FusedQKRMSNorm
 from rtp_llm.models_py.modules.common.mha.base import FMHAImplBase
 from rtp_llm.models_py.modules.linear_factory import LinearFactory

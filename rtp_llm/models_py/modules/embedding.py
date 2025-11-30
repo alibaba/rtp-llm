@@ -3,7 +3,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.distribute.collective import Group, all_gather
+from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.ops import ParallelismConfig
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
