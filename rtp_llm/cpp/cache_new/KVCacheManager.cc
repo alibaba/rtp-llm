@@ -208,10 +208,10 @@ InsertResult KVCacheManager::insertIntoCache(const InsertInfo& insert_info) {
     // insert to cpu
     if (insert_info.enable_memory_cache) {
         auto resource_batch0 = insert_info.batch_kv_cache_resource->batch_resource.at(0);
-        auto deleter         = [insert_info, allocator = allocator_](KVCacheResourceV1* resource_ptr) {
+        auto deleter         = [insert_info, allocator = allocator_](KVCacheResourceV1* resource) {
             FreeInfo free_info(insert_info.batch_kv_cache_resource, insert_info.complete_token_ids);
             allocator->free(free_info);
-            delete resource_ptr;
+            delete resource;
         };
         std::shared_ptr<KVCacheResourceV1> resource(new KVCacheResourceV1(resource_batch0), deleter);
         auto                               context = memory_connector_->asyncWrite(resource, nullptr);

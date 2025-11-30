@@ -131,21 +131,13 @@ void BlockPool::blockCacheReference(const BlockIndicesType& block_ids) {
     all_ref_counter_.incrementRefCounter(block_ids);
 }
 
-// for (auto block_id : block_ids) {
-//     auto it = free_block_ids_.find(block_id);
-//     if (it != free_block_ids_.end()) {
-//         free_block_ids_.erase(it);
-//     }
-// }
-// block_ref_counter_.incrementRefCounter(block_ids);
-
 void BlockPool::clearCache() {
     if (!block_cache_) {
         return;
     }
     auto blocks = block_cache_->clear();
     if (!blocks.empty()) {
-        free(blocks);
+        blockCacheFree(blocks);
     }
 }
 

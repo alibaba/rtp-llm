@@ -91,14 +91,14 @@ private:
                             std::vector<BufferPtr>&        src);
     bool mallocBlocks(const std::shared_ptr<BlockPool>& block_pool,
                       size_t                            need_blocks,
-                      std::vector<BlockIdxType>&        malloced_blocks) const;
-    bool freeBlocks(const std::shared_ptr<BlockPool>& block_pool, const std::vector<int>& blocks);
+                      std::vector<BlockIdxType>&        malloced_blocks);
+    bool freeBlocks(const std::shared_ptr<BlockPool>& block_pool, const std::vector<int>& blocks, bool free_ref = true);
     void referenceBlocks(const std::shared_ptr<BlockPool>& block_pool, const std::vector<int>& blocks);
     std::shared_ptr<BlockPool> getOrCreateMemoryBlockPool(size_t block_size, bool create = false);
     std::shared_ptr<BlockPool> getBlockPool(size_t block_size) const;
     std::shared_ptr<BlockPool> createBlockPool(size_t block_size);
-    bool ensureEnoughFreeBlocks(const std::shared_ptr<BlockPool>& block_pool, size_t need_blocks) const;
-    void printCopyPlan(const std::vector<CopyInfoPerKey>& copy_infos) const;
+    bool                       ensureEnoughFreeBlocks(const std::shared_ptr<BlockPool>& block_pool, size_t need_blocks);
+    void                       printCopyPlan(const std::vector<CopyInfoPerKey>& copy_infos) const;
 
 private:
     const CacheConfig&                cache_config_;

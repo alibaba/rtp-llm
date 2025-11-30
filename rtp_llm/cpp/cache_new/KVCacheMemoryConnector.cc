@@ -212,24 +212,22 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
         RTP_LLM_LOG_WARNING("async write failed, send copy plan to tp failed");
         for (const auto& copy_info : copy_infos) {
             auto block_pool = getBlockPool(copy_info.mem_block_size);
-            freeBlocks(block_pool, {copy_info.mem_block_index});
+            freeBlocks(block_pool, {copy_info.mem_block_index}, /*free_ref=*/false);
         }
         return nullptr;
     }
 
     auto done_cb = [copy_infos, resource_copy = resource, self = shared_from_this()](bool success) mutable {
         RTP_LLM_LOG_DEBUG("async write done, success: %d", success);
+        for (const auto& copy_info : copy_infos) {
+            auto block_pool = self->getBlockPool(copy_info.mem_block_size);
+            self->freeBlocks(block_pool, {copy_info.mem_block_index}, /*free_ref=*/false);
+        }
         if (!success) {
-            for (const auto& copy_info : copy_infos) {
-                auto block_pool = self->getBlockPool(copy_info.mem_block_size);
-                self->freeBlocks(block_pool, {copy_info.mem_block_index});
-            }
             return;
         }
         for (const auto& copy_info : copy_infos) {
             if (self->block_cache_->contains(copy_info.cache_key)) {
-                auto block_pool = self->getBlockPool(copy_info.mem_block_size);
-                self->freeBlocks(block_pool, {copy_info.mem_block_index});
                 continue;
             }
             MemoryBlockCache::CacheItem item;
@@ -237,7 +235,11 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
             item.block_index = static_cast<BlockIdxType>(copy_info.mem_block_index);
             item.block_size  = copy_info.mem_block_size;
             item.is_resident = false;
-            self->block_cache_->put(item);
+            // TODO(LXQ): if block cache is full, need free evicted blocks from block pool
+            if (self->block_cache_->put(item)) {
+                auto block_pool = self->getBlockPool(copy_info.mem_block_size);
+                self->referenceBlocks(block_pool, {copy_info.mem_block_index});
+            }
         }
         resource_copy.reset();
     };
@@ -301,7 +303,7 @@ std::vector<KVCacheMemoryConnector::CopyInfoPerKey> KVCacheMemoryConnector::buil
     if (!success) {
         for (const auto& copy_info : copy_infos) {
             auto block_pool = getBlockPool(copy_info.mem_block_size);
-            freeBlocks(block_pool, {copy_info.mem_block_index});
+            freeBlocks(block_pool, {copy_info.mem_block_index}, /*free_ref=*/false);
         }
         return {};
     }
@@ -472,7 +474,7 @@ bool KVCacheMemoryConnector::prepareCopyBuffers(const std::vector<LayerBlock>& g
 
 bool KVCacheMemoryConnector::mallocBlocks(const std::shared_ptr<BlockPool>& block_pool,
                                           size_t                            need_blocks,
-                                          std::vector<BlockIdxType>&        malloced_blocks) const {
+                                          std::vector<BlockIdxType>&        malloced_blocks) {
     if (!block_pool) {
         RTP_LLM_LOG_WARNING("malloc memory blocks failed, block pool is null, need blocks: %zu", need_blocks);
         return false;
@@ -493,14 +495,16 @@ bool KVCacheMemoryConnector::mallocBlocks(const std::shared_ptr<BlockPool>& bloc
         RTP_LLM_LOG_WARNING("malloc memory blocks failed, malloc failed, need blocks: %zu, allocated blocks: %zu",
                             need_blocks,
                             blocks.size());
-        block_pool->free(blocks);
+        freeBlocks(block_pool, blocks, /*free_ref=*/false);
         return false;
     }
     malloced_blocks = std::move(blocks);
     return true;
 }
 
-bool KVCacheMemoryConnector::freeBlocks(const std::shared_ptr<BlockPool>& block_pool, const std::vector<int>& blocks) {
+bool KVCacheMemoryConnector::freeBlocks(const std::shared_ptr<BlockPool>& block_pool,
+                                        const std::vector<int>&           blocks,
+                                        bool                              free_ref) {
     if (blocks.empty()) {
         return true;
     }
@@ -521,7 +525,11 @@ bool KVCacheMemoryConnector::freeBlocks(const std::shared_ptr<BlockPool>& block_
         return true;
     }
 
-    block_pool->free(need_free_blocks);
+    if (free_ref) {
+        block_pool->blockCacheFree(need_free_blocks);
+    } else {
+        block_pool->requestFree(need_free_blocks);
+    }
     return true;
 }
 
@@ -534,7 +542,7 @@ void KVCacheMemoryConnector::referenceBlocks(const std::shared_ptr<BlockPool>& b
         RTP_LLM_LOG_WARNING("reference blocks failed, block pool is null");
         return;
     }
-    block_pool->reference(blocks);
+    block_pool->blockCacheReference(blocks);
 }
 
 std::shared_ptr<BlockPool> KVCacheMemoryConnector::getOrCreateMemoryBlockPool(size_t block_size, bool create) {
@@ -582,8 +590,7 @@ std::shared_ptr<BlockPool> KVCacheMemoryConnector::createBlockPool(size_t block_
     return pool;
 }
 
-bool KVCacheMemoryConnector::ensureEnoughFreeBlocks(const std::shared_ptr<BlockPool>& block_pool,
-                                                    size_t                            need_blocks) const {
+bool KVCacheMemoryConnector::ensureEnoughFreeBlocks(const std::shared_ptr<BlockPool>& block_pool, size_t need_blocks) {
     const auto free_blocks = block_pool->freeBlocksNum();
     if (free_blocks >= need_blocks) {
         return true;
@@ -591,7 +598,7 @@ bool KVCacheMemoryConnector::ensureEnoughFreeBlocks(const std::shared_ptr<BlockP
     const auto need_evict_blocks = need_blocks - free_blocks;
     const auto evict_blocks      = block_cache_->pop(need_evict_blocks);
     if (!evict_blocks.empty()) {
-        block_pool->free(evict_blocks);
+        freeBlocks(block_pool, evict_blocks);
     }
     return block_pool->freeBlocksNum() >= need_blocks;
 }
