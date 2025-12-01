@@ -3,6 +3,11 @@
 #include "c10/hip/HIPCachingAllocator.h"
 #include "rtp_llm/cpp/core/allocator.h"
 #include "rtp_llm/cpp/devices/DeviceBase.h"
+#include <torch/version.h>
+
+#if defined(TORCH_VERSION_MAJOR) && ((TORCH_VERSION_MAJOR == 2) & (TORCH_VERSION_MINOR >= 8))
+#define UNDER_TORCH_2_8
+#endif
 
 namespace rtp_llm {
 class TorchHipAllocator: public c10::hip::HIPCachingAllocator::HIPAllocator {
@@ -33,11 +38,20 @@ public:
     void free(void** ptr);
 
     void setMemoryFraction(double fraction, c10::DeviceIndex device) override {}
+ 
+#ifdef UNDER_TORCH_2_8
+    void recordHistory(bool                                          enabled,
+                       at::hip::HIPCachingAllocator::CreateContextFn context_recorder,
+                       size_t                                        alloc_trace_max_entries,
+                       at::hip::HIPCachingAllocator::RecordContext   when,
+		       bool                                          clearHistory) override {}
+#else
 
     void recordHistory(bool                                          enabled,
                        at::hip::HIPCachingAllocator::CreateContextFn context_recorder,
                        size_t                                        alloc_trace_max_entries,
                        at::hip::HIPCachingAllocator::RecordContext   when) override {}
+#endif
 
     bool isHistoryEnabled() override {
         return false;
@@ -51,18 +65,29 @@ public:
 
     void attachOutOfMemoryObserver(at::hip::HIPCachingAllocator::OutOfMemoryObserver observer) override {}
 
+#ifdef UNDER_TORCH_2_8
+    void emptyCache(at::hip::MempoolId_t mempool_id = {0, 0}) override {}
+#else
     void emptyCache() override {}
+#endif
 
     void* getBaseAllocation(void* ptr, size_t* outSize) override {
         return ptr;
     }
 
     void recordStream(const at::DataPtr& ptr, at::hip::HIPStream stream) override {}
-
+ 
+#ifdef UNDER_TORCH_2_8
+    at::hip::HIPCachingAllocator::SnapshotInfo snapshot(at::hip::MempoolId_t mempool_id = {0, 0}) override {
+        at::hip::HIPCachingAllocator::SnapshotInfo result;
+        return result;
+    }
+#else
     at::hip::HIPCachingAllocator::SnapshotInfo snapshot() override {
         at::hip::HIPCachingAllocator::SnapshotInfo result;
         return result;
     }
+#endif
 
     std::shared_ptr<at::hip::HIPCachingAllocator::AllocatorState> getCheckpointState(c10::DeviceIndex     device,
                                                                                      at::hip::MempoolId_t id) override {
@@ -161,6 +186,16 @@ public:
     }
 
     void attachAllocatorTraceTracker(c10::hip::HIPCachingAllocator::AllocatorTraceTracker tracker) override {};
+ 
+#ifdef UNDER_TORCH_2_8
+    double getMemoryFraction(c10::DeviceIndex device) override {};
+
+    void enable(bool value) override {};
+
+    bool isEnabled() const override {};
+
+    c10::hip::HIPCachingAllocator::ShareableHandle shareIpcHandle(void* ptr) override {};
+#endif
 
 #endif
 };

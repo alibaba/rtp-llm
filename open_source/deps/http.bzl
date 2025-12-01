@@ -50,9 +50,9 @@ def http_deps():
 
     http_archive(
         name = "torch_rocm",
-        sha256 = "39287cb8d52e4a71eb7194727365aa6be767da614fa5e44468155c90ba4a4e0c",
+        sha256 = "41b71911a2b9865094d50f15c9aa7e5ae43cb7cce609145657aed056ebd77e82",
         urls = [
-            "https://repo.radeon.com/rocm/manylinux/rocm-rel-6.4.1/torch-2.4.1%2Brocm6.4.1.git4e7ae583-cp310-cp310-linux_x86_64.whl"
+            "https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/home/bill/rtpllm/rocm711/torch-2.8.0%2Brocm7.1.1.lw.git93dd572c-cp310-cp310-linux_x86_64.whl"
         ],
         type = "zip",
         build_file = clean_dep("//:BUILD.pytorch"),
@@ -60,9 +60,9 @@ def http_deps():
 
     http_archive(
         name = "aiter",
-        sha256 = "236197b1e55e546ab80a19a2f42cfb69075ff058c8b33341b70bc513e488febd",
+        sha256 = "5d5b73d1134157e93f850a243118664cb4cbc5bb75beead002dedc3914e63489",
         urls = [
-	        "https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/RTP/aiter-0.1.5%2Bgit.007fe7aa.date.202510272053-py3-none-any.whl",
+	        "https://search-ad-cn-hangzhou.oss-cn-hangzhou.aliyuncs.com/xiebaijie.xbj/qwenvl/aiter-0.1.5.post5.dev3%2Bg007fe7aa0.d20251201-cp310-cp310-linux_x86_64.whl",
 	    ],
         type = "zip",
         build_file = clean_dep("//:BUILD.aiter"),
