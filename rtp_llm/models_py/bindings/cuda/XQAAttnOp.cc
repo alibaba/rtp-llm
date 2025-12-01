@@ -13,6 +13,7 @@ XQAAttnOp::XQAAttnOp(const GptInitParameter& gpt_init_parameter): FMHACudaBase(g
 
 bool XQAAttnOp::support(torch_ext::PyAttentionInputs attn_inputs) {
     return fmha_config_.enable_xqa && attn_configs_.kv_cache_dtype != KvCacheDataType::INT8
+           && get_sm() >= tensorrt_llm::kernels::kSM_90
            && supportXqa(DataType::TYPE_BF16,
                          DataType::TYPE_BF16,
                          DataType::TYPE_FP8_E4M3,
