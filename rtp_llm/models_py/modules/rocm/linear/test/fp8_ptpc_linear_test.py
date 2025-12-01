@@ -38,14 +38,14 @@ def shuffle_weight(x: torch.Tensor, layout=(16, 16)) -> torch.Tensor:
     return x_.view(x_type)
 
 
-class Fp8PTPCLinearTest(unittest.TestCase):
+class RocmFp8PTPCLinearTest(unittest.TestCase):
     """PTPC fp8 linear单元测试，kernel weight 必须 shuffle。"""
 
     def setUp(self):
         if not is_hip():
             raise SkipTest("Test requires ROCm/HIP backend!")
         if not AITER_AVAILABLE:
-            raise SkipTest("aiter required for Fp8PTPCLinear!")
+            raise SkipTest("aiter required for RocmFp8PTPCLinear!")
         self.device = "cuda"
         self.hidden_size = 256
         self.output_size = 512
@@ -63,7 +63,9 @@ class Fp8PTPCLinearTest(unittest.TestCase):
 
     def test_ptpc_fp8_forward(self):
         from rtp_llm.models_py.modules.rocm.fp8_kernel import rocm_per_token_quant_fp8
-        from rtp_llm.models_py.modules.rocm.fp8_linear import Fp8PTPCLinear
+        from rtp_llm.models_py.modules.rocm.linear.fp8_ptpc_linear import (
+            RocmFp8PTPCLinear,
+        )
 
         weight_q, weight_scales = rocm_per_token_quant_fp8(
             self.weight_fp32
@@ -75,7 +77,7 @@ class Fp8PTPCLinearTest(unittest.TestCase):
 
         weight_scales_for_init = weight_scales.T.contiguous()  # [1, N]
 
-        ptpc_linear = Fp8PTPCLinear(
+        ptpc_linear = RocmFp8PTPCLinear(
             weight=weight_for_init,  # [K, N]
             weight_scales=weight_scales_for_init,  # [1, N]
             bias=None,
@@ -94,11 +96,11 @@ class Fp8PTPCLinearTest(unittest.TestCase):
 
         ref_output = aiter.gemm_a8w8_bpreshuffle(
             ref_input_fp8,  # A_quant_tensor
-            ptpc_linear.weight,  # W_kernel_tensor (使用 Fp8PTPCLinear 内部的 weight)
+            ptpc_linear.weight,  # W_kernel_tensor (使用 RocmFp8PTPCLinear 内部的 weight)
             ref_input_scales,  # A_quant_scale_tensor (M, 1)
-            ptpc_linear.weight_scales,  # W_scale_tensor (使用 Fp8PTPCLinear 内部的 weight_scales)
+            ptpc_linear.weight_scales,  # W_scale_tensor (使用 RocmFp8PTPCLinear 内部的 weight_scales)
             None,  # bias
-            ref_input_bf16.dtype,  # output dtype (与 Fp8PTPCLinear.forward() 相同)
+            ref_input_bf16.dtype,  # output dtype (与 RocmFp8PTPCLinear.forward() 相同)
         )
         ref = ref_output
 

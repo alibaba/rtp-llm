@@ -44,7 +44,7 @@ Strategy registration is done in:
 ### Basic Usage
 
 ```python
-from rtp_llm.models_py.modules.factory.fused_moe import FusedMoeFactory
+from rtp_llm.models_py.modules.factory import FusedMoeFactory
 
 # Create FusedMoeFactory instance (registry is set automatically by cuda_registry.py or rocm_registry.py)
 factory = FusedMoeFactory()
@@ -284,7 +284,7 @@ class CudaMyQuantStrategy(MoeStrategy):
 ```python
 # In rtp_llm/models_py/modules/cuda_registry.py
 from rtp_llm.models_py.modules.cuda.moe.strategy.my_quant import CudaMyQuantStrategy
-from rtp_llm.models_py.modules.factory.fused_moe import FusedMoeFactory, StrategyRegistry
+from rtp_llm.models_py.modules.factory import FusedMoeFactory, StrategyRegistry
 
 registry = StrategyRegistry()
 # ... register other strategies ...

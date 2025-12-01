@@ -1,10 +1,25 @@
 import itertools
+from typing import Optional
 from unittest import SkipTest, TestCase, main
 
 import torch
 from torch import dtype as _dtype
+from torch import nn
+from torch.nn import functional as F
 
-from rtp_llm.models_py.modules import Linear, LinearTorch
+from rtp_llm.models_py.modules.factory import LinearFactory
+
+
+class LinearTorch(nn.Module):
+    def __init__(
+        self, weight: torch.Tensor, bias: Optional[torch.Tensor] = None
+    ) -> None:
+        super().__init__()
+        self.weight = weight.T
+        self.bias = bias
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        return F.linear(input, self.weight, self.bias)
 
 
 class LinearTest(TestCase):
@@ -22,7 +37,10 @@ class LinearTest(TestCase):
         torch.manual_seed(0)
         w = torch.randn(hidden_size, hidden_size // 2, dtype=dtype)
         torch.nn.init.xavier_uniform_(w)
-        linear = Linear(w)
+        w_dict = {"weight": w}
+        linear = LinearFactory.create_linear_from_weights(
+            w_dict, "weight", None, None, None
+        )
         linear_torch = LinearTorch(w)
         x = torch.randn(num_tokens, hidden_size, dtype=dtype)
         torch_output = linear_torch(x)

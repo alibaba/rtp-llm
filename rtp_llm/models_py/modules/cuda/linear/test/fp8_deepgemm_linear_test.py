@@ -3,10 +3,12 @@ import unittest
 
 import torch
 
-from rtp_llm.models_py.modules.fp8_linear import Fp8DeepGEMMLinear
+from rtp_llm.models_py.modules.cuda.linear.fp8_deepgemm_linear import (
+    CudaFp8DeepGEMMLinear,
+)
 
 
-class Fp8DeepGEMMLinearTest(unittest.TestCase):
+class CudaFp8DeepGEMMLinearTest(unittest.TestCase):
 
     def setUp(self):
         """Setup test environment"""
@@ -14,9 +16,9 @@ class Fp8DeepGEMMLinearTest(unittest.TestCase):
         if self.device == "cpu":
             self.skipTest("FP8 tests require CUDA")
 
-        logging.getLogger("rtp_llm.models_py.modules.fp8_linear").setLevel(
-            logging.WARNING
-        )
+        logging.getLogger(
+            "rtp_llm.models_py.modules.cuda.linear.fp8_deepgemm_linear"
+        ).setLevel(logging.WARNING)
 
         self.hidden_size = 512  # k
         self.output_size = 1024  # n
@@ -48,8 +50,8 @@ class Fp8DeepGEMMLinearTest(unittest.TestCase):
         )
 
     def _create_fp8_linear(self, with_bias: bool = True):
-        """Helper method to create Fp8DeepGEMMLinear instance"""
-        return Fp8DeepGEMMLinear(
+        """Helper method to create CudaFp8DeepGEMMLinear instance"""
+        return CudaFp8DeepGEMMLinear(
             weight=self.weight,
             weight_scales=self.weight_scales,
             bias=self.bias if with_bias else None,
@@ -57,7 +59,7 @@ class Fp8DeepGEMMLinearTest(unittest.TestCase):
         )
 
     def test_module_creation(self):
-        """Test Fp8DeepGEMMLinear module creation"""
+        """Test CudaFp8DeepGEMMLinear module creation"""
         fp8_linear = self._create_fp8_linear(with_bias=True)
         self.assertEqual(fp8_linear.hidden_size, self.hidden_size)
         self.assertEqual(fp8_linear.output_size, self.output_size)
@@ -74,7 +76,7 @@ class Fp8DeepGEMMLinearTest(unittest.TestCase):
         """Test dependency availability check - should fail if dependencies are missing"""
 
         # Test that we can at least import the module
-        self.assertIsNotNone(Fp8DeepGEMMLinear)
+        self.assertIsNotNone(CudaFp8DeepGEMMLinear)
 
         # For unit tests, dependencies MUST be available - fail if not
 
@@ -99,7 +101,7 @@ class Fp8DeepGEMMLinearTest(unittest.TestCase):
         with self.assertRaises(ValueError) as context:
             fp8_linear(input_fp32)
         self.assertIn(
-            "Fp8DeepGEMMLinear only accepts bfloat16 input", str(context.exception)
+            "CudaFp8DeepGEMMLinear only accepts bfloat16 input", str(context.exception)
         )
         self.assertIn("torch.float32", str(context.exception))
 
@@ -110,7 +112,7 @@ class Fp8DeepGEMMLinearTest(unittest.TestCase):
         with self.assertRaises(ValueError) as context:
             fp8_linear(input_fp16)
         self.assertIn(
-            "Fp8DeepGEMMLinear only accepts bfloat16 input", str(context.exception)
+            "CudaFp8DeepGEMMLinear only accepts bfloat16 input", str(context.exception)
         )
         self.assertIn("torch.float16", str(context.exception))
 
@@ -121,7 +123,7 @@ class Fp8DeepGEMMLinearTest(unittest.TestCase):
         with self.assertRaises(ValueError) as context:
             fp8_linear(input_int32)
         self.assertIn(
-            "Fp8DeepGEMMLinear only accepts bfloat16 input", str(context.exception)
+            "CudaFp8DeepGEMMLinear only accepts bfloat16 input", str(context.exception)
         )
         self.assertIn("torch.int32", str(context.exception))
 

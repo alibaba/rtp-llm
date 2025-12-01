@@ -190,35 +190,6 @@ py_test (
 )
 
 py_test (
-    name = "rocm_linear_test",
-    srcs = ["rocm_linear_test.py"],
-    deps = py_test_deps,
-    env = test_envs,
-    tags = ["rocm"],
-    exec_properties = {'gpu':'MI308X'},
-)
-
-py_test (
-    name = "fp8_linear_test",
-    srcs = ["fp8_linear_test.py"],
-    deps = py_test_deps,
-    env = test_envs,
-    tags = ["H20"],
-    exec_properties = {'gpu':'H20'},
-)
-
-py_test (
-    name = "rocm_fp8_linear_test",
-    srcs = ["rocm_fp8_linear_test.py"],
-    deps = py_test_deps,
-    timeout = "eternal",
-    env = test_envs,
-    tags = ["rocm"],
-    exec_properties = {'gpu':'MI308X'},
-)
-
-
-py_test (
     name = "cutlass_fp8_grouped_gemm_test",
     srcs = ["cutlass_fp8_grouped_gemm_test.py"],
     deps = py_test_deps,

@@ -11,8 +11,7 @@ from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules.common.mha.base import FMHAImplBase
 from rtp_llm.models_py.modules.embedding import Embedding
-from rtp_llm.models_py.modules.factory.attention_factory import AttnImplFactory
-from rtp_llm.models_py.modules.linear import Linear
+from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.models_py.modules.mlp import FusedSiluActDenseMLP
 from rtp_llm.models_py.modules.norm import FusedQKRMSNorm, RMSNorm
 from rtp_llm.ops.compute_ops import (
@@ -110,8 +109,8 @@ class Qwen3GemmLayer(nn.Module):
             if layer_idx == len(weights.weights) - 1
             else weights.weights[layer_idx + 1]
         )
-        self.o_proj = Linear(
-            curent_layer_weights[W.attn_o_w], curent_layer_weights.get(W.attn_o_b, None)
+        self.o_proj = LinearFactory.create_linear_from_weights(
+            curent_layer_weights, W.attn_o_w, None, W.attn_o_b, config
         )
         self.post_attention_layernorm = RMSNorm(
             curent_layer_weights[W.post_ln_gamma], eps=config.layernorm_eps
@@ -130,9 +129,8 @@ class Qwen3GemmLayer(nn.Module):
         self.input_layernorm = RMSNorm(
             next_layer_weights[W.pre_ln_gamma], eps=config.layernorm_eps
         )
-        self.qkv_proj = Linear(
-            next_layer_weights[W.attn_qkv_w],
-            next_layer_weights.get(W.attn_qkv_b, None),
+        self.qkv_proj = LinearFactory.create_linear_from_weights(
+            next_layer_weights, W.attn_qkv_w, None, W.attn_qkv_b, config
         )
         check_with_info(W.q_ln_gamma in next_layer_weights, "q_ln_gamma not found")
         check_with_info(W.k_ln_gamma in next_layer_weights, "k_ln_gamma not found")
@@ -173,8 +171,8 @@ class Qwen3GemmPreLayer(nn.Module):
         self.input_layernorm = RMSNorm(
             weights.weights[0][W.pre_ln_gamma], eps=config.layernorm_eps
         )
-        self.qkv_proj = Linear(
-            weights.weights[0][W.attn_qkv_w], weights.weights[0].get(W.attn_qkv_b, None)
+        self.qkv_proj = LinearFactory.create_linear_from_weights(
+            weights.weights[0], W.attn_qkv_w, None, W.attn_qkv_b, config
         )
         self.qk_fuse_norm = FusedQKRMSNorm(
             weights.weights[0][W.q_ln_gamma],
@@ -215,7 +213,10 @@ class Qwen3GemmModel(DisaggregateModelBase):
         self.norm = RMSNorm(
             weights.get_global_weight(W.final_ln_gamma), eps=config.layernorm_eps
         )
-        self.lm_head = Linear(weights.get_global_weight(W.lm_head))
+        lm_head_weights = {W.lm_head: weights.get_global_weight(W.lm_head)}
+        self.lm_head = LinearFactory.create_linear_from_weights(
+            lm_head_weights, W.lm_head, None, None, config
+        )
 
     def recv_micro_batch_split_info(self) -> Tuple[List[torch.Tensor], BatchSplitInfo]:
         dp_num = len(self.attn_dp_rank)
@@ -407,7 +408,10 @@ class Qwen3DisaggregateModel(GptModelBase):
         self.norm = RMSNorm(
             weights.get_global_weight(W.final_ln_gamma), eps=config.layernorm_eps
         )
-        self.lm_head = Linear(weights.get_global_weight(W.lm_head))
+        lm_head_weights = {W.lm_head: weights.get_global_weight(W.lm_head)}
+        self.lm_head = LinearFactory.create_linear_from_weights(
+            lm_head_weights, W.lm_head, None, None, config
+        )
 
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         super().initialize(init_resource)

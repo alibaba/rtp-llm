@@ -30,3 +30,6 @@ FusedMoeFactory.set_registry(registry)
 # fmha registry
 import rtp_llm.models_py.modules.cuda.mha
 import rtp_llm.models_py.modules.cuda.mla
+
+# Import to trigger Linear strategy registration
+from rtp_llm.models_py.modules.cuda.linear  # noqa: F401

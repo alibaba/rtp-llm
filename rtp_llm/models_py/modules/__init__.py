@@ -12,14 +12,12 @@ device_type = get_device().get_device_type()
 
 if device_type == DeviceType.ROCm:
     import rtp_llm.models_py.modules.rocm_registry
-    from rtp_llm.models_py.modules.rocm.linear import Linear
     from rtp_llm.models_py.modules.rocm.mlp import FusedSiluActDenseMLP
     from rtp_llm.models_py.modules.rocm.norm import FusedQKRMSNorm, RMSNorm
     from rtp_llm.models_py.modules.rocm.select_topk import SelectTopk
 
 else:
     from rtp_llm.models_py.modules.norm import FusedQKRMSNorm, RMSNorm
-    from rtp_llm.models_py.modules.linear import Linear
     from rtp_llm.models_py.modules.mlp import FusedSiluActDenseMLP
     from rtp_llm.models_py.modules.select_topk import SelectTopk, GroupTopK
     import rtp_llm.models_py.modules.cuda_registry
@@ -31,7 +29,6 @@ from rtp_llm.models_py.modules.common.mla import DECODE_MLA_IMPS, PREFILL_MLA_IM
 from rtp_llm.models_py.modules.common.mla.mla_attention import MlaAttention
 from rtp_llm.models_py.modules.embedding import Embedding
 from rtp_llm.models_py.modules.kvcache_store import WriteCacheStoreOp
-from rtp_llm.models_py.modules.linear import LinearTorch
 from rtp_llm.models_py.modules.mlp import DenseMLP
 from rtp_llm.models_py.modules.norm import AddBiasResLayerNorm, LayerNorm, RMSNormTorch
 
