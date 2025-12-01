@@ -322,6 +322,10 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
         }
         int64_t cost_time_us = currentTimeUs() - prefill_context.request_begin_time_us;
         for (size_t i = 0; i < response.generate_outputs_size(); i++) {
+            auto decode_total_reuse_len  = response.generate_outputs(i).aux_info().total_reuse_len();
+            auto decode_local_reuse_len  = response.generate_outputs(i).aux_info().local_reuse_len();
+            auto decode_remote_reuse_len = response.generate_outputs(i).aux_info().remote_reuse_len();
+
             response.mutable_generate_outputs(i)->mutable_aux_info()->set_first_token_cost_time_us(first_token_rt_us);
             response.mutable_generate_outputs(i)->mutable_aux_info()->set_cost_time_us(cost_time_us);
 
@@ -337,11 +341,11 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
                 prefill_remote_reuse_len);
 
             response.mutable_generate_outputs(i)->mutable_aux_info()->set_decode_total_reuse_len(
-                response.generate_outputs(i).aux_info().total_reuse_len());
+                decode_total_reuse_len);
             response.mutable_generate_outputs(i)->mutable_aux_info()->set_decode_local_reuse_len(
-                response.generate_outputs(i).aux_info().local_reuse_len());
+                decode_local_reuse_len);
             response.mutable_generate_outputs(i)->mutable_aux_info()->set_decode_remote_reuse_len(
-                response.generate_outputs(i).aux_info().remote_reuse_len());
+                decode_remote_reuse_len);
         }
         if (!prefill_context.rpc_context.writer->Write(response)) {
             RTP_LLM_LOG_WARNING("request [%ld] write outputs pb failed", request_id);
