@@ -34,6 +34,10 @@ class QWenV2Audio(QWenV2, MultiModalMixin):
         config.mm_related_params.vit_weights._ckpt_prefix = ""
 
     @classmethod
+    def _get_mm_module(cls, config: GptInitModelParameters):
+        return Processor(config).audio_tower
+
+    @classmethod
     def _create_config(cls, ckpt_path: str):
         config = super()._create_config(ckpt_path)
         return config

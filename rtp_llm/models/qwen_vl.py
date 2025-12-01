@@ -37,6 +37,10 @@ class QWen_VL(QWen, MultiModalMixin):
         )
 
     @classmethod
+    def _get_mm_module(cls, config: GptInitModelParameters):
+        return QwenVLImageEmbedding(config).vit
+
+    @classmethod
     def _create_config(cls, ckpt_path: str):
         config = GptInitModelParameters(
             head_num=0, size_per_head=0, layer_num=0, max_seq_len=1024, vocab_size=0
@@ -79,43 +83,6 @@ class QWen_VL(QWen, MultiModalMixin):
     @staticmethod
     def get_weight_cls():
         return QWenVLWeightInfo
-
-    @staticmethod
-    def eval_model_size(config: GptInitModelParameters):
-        llm_size = BaseModel.eval_model_size(config)
-
-        data_width = 4
-        llm_size += QWen_VL.eval_vit_param_count(config) * data_width
-        return llm_size
-
-    @staticmethod
-    def eval_vit_param_count(config: GptInitModelParameters):
-        vit_config = config.mm_related_params.config
-        embed_dim = vit_config["output_dim"]
-        width = vit_config["width"]
-        layers = vit_config["layers"]
-        patch_size = vit_config["patch_size"]
-        mlp_ratio = vit_config["mlp_ratio"]
-        mlp_width = int(mlp_ratio * width)
-
-        llm_size = 3 * width * patch_size**2 + width * 2
-        llm_size += layers * (
-            width * 2 * 2
-            + width**2 * 4
-            + width * 4
-            + mlp_width * width * 2
-            + mlp_width
-            + width
-        )
-        llm_size += width * embed_dim + embed_dim**2 + embed_dim + embed_dim * 2 * 3
-        return llm_size
-
-    @staticmethod
-    def eval_model_param_count(config: GptInitModelParameters):
-        llm_param_count = BaseModel.eval_model_param_count(config)
-        llm_param_count += QWen_VL.eval_vit_param_count(config)
-
-        return llm_param_count
 
 
 register_model("qwen_vl", QWen_VL, ["QWenMLMHeadModel"])
