@@ -1123,8 +1123,14 @@ GptLayerOutputs GptModel::forwardGptLayer(GptLayerInputs                        
                                           const rtp_llm::lora::LoraModelInputPtr& lora_model_input) {
     DevicePerfWrapper wrapper(device_, "forwardGptLayer_token_num_%d", inputs.hidden ? inputs.hidden->shape()[0] : 0);
     auto              pre_decoder_residual   = inputs.pre_decoder_residual;
+    auto start_xjn = std::chrono::high_resolution_clock::now();
     auto              attention_block_output = forwardAttentionBlock(inputs, layer_id, lora_model_input);
-
+    device_->syncAndCheck();
+    auto end_xjn = std::chrono::high_resolution_clock::now();
+    const auto xjn_duration = chrono::duration_cast<chrono::microseconds>(end_xjn - start_xjn).count();
+    std::cout << "[XJNDEBUG] Layer " << layer_id 
+              << ": forwardAttentionBlock execution time: " 
+              << xjn_duration << " us" << std::endl;
     auto        hidden    = move(attention_block_output.hidden);
     auto        residual  = move(attention_block_output.residual);
     auto        residual2 = move(attention_block_output.residual2);
@@ -1162,7 +1168,14 @@ GptLayerOutputs GptModel::forwardGptLayer(GptLayerInputs                        
     if (lora_model_input) {
         ffn_layer_params.lora_input = lora_model_input->getFfnLayerLoraInput(layer_id);
     }
+    auto start_xjn_ffn = std::chrono::high_resolution_clock::now();
     auto ffn_output = device_->ffnLayer(ffn_layer_params);
+    device_->syncAndCheck();
+    auto end_xjn_ffn = std::chrono::high_resolution_clock::now();
+    const auto xjn_duration_ffn = chrono::duration_cast<chrono::microseconds>(end_xjn_ffn - start_xjn_ffn).count();
+    std::cout << "[XJNDEBUG] Layer " << layer_id 
+              << ": ffnLayer execution time: " 
+              << xjn_duration_ffn << " us" << std::endl;
     device_->checkError();
     hidden = ffn_output.hidden_states;
     if (device_->initParams().profile_debug_logging_config.check_nan) {
@@ -1189,6 +1202,7 @@ GptLayerOutputs GptModel::forwardGptLayer(GptLayerInputs                        
     // TODO: maybe move this layernorm to ffn layer
     auto ffn_act_qscheme = ((layer_id == layer_num_ - 1) || (!layer.post_ffn_layernorm)) ?
                               QScheme::NoQuantize : description_.act_qscheme;
+    auto start_xjn_layernorm = std::chrono::high_resolution_clock::now();
     auto ffn_layernorm_output = device_->layernorm(
         LayernormParams(hidden,
                         pre_decoder_residual,
@@ -1202,6 +1216,12 @@ GptLayerOutputs GptModel::forwardGptLayer(GptLayerInputs                        
                         description_.post_layernorm,
                         description_.norm_type,
                         ffn_act_qscheme));
+    device_->syncAndCheck();
+    auto end_xjn_layernorm = std::chrono::high_resolution_clock::now();
+    const auto xjn_duration_layernorm = chrono::duration_cast<chrono::microseconds>(end_xjn_layernorm - start_xjn_layernorm).count();
+    std::cout << "[XJNDEBUG] Layer " << layer_id 
+                << ": ffn_layernorm execution time: " 
+                << xjn_duration_layernorm << " us" << std::endl;
     if (layer.post_ffn_layernorm && ffn_act_qscheme == QScheme::Qint8PerTensor &&
         !(ffn_layernorm_output.output->isQBuffer())) {
         auto norm_weight = layer.post_ffn_layernorm;
@@ -1642,6 +1662,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     if (device_->initParams().profile_debug_logging_config.check_nan) {
         (void)device_->checkNAN(*layer_outputs.hidden);
     }
+    auto start_xjn = std::chrono::high_resolution_clock::now();
     auto outputs = forwardPostLayers(layer_outputs.hidden,
                                      inputs.input_lengths->shape()[0] != inputs.sequence_lengths->shape()[0],
                                      inputs.need_all_logits,
@@ -1650,7 +1671,11 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
                                      layer_inputs.token_num,
                                      inputs,
                                      merged_eagle3_hidden);
-
+    device_->syncAndCheck();
+    auto end_xjn = std::chrono::high_resolution_clock::now();
+    const auto xjn_duration = chrono::duration_cast<chrono::microseconds>(end_xjn - start_xjn).count();
+    std::cout << "[XJNDEBUG] forwardPostLayers execution time: " 
+            << xjn_duration << " us" << std::endl;
     // make sure cpu buffers out lives gpu exec
     outputs.captured_values = make_shared<GptLayerInputs>(layer_inputs);
     outputs.moe_gating      = std::move(moe_gating);
