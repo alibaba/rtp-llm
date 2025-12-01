@@ -96,6 +96,8 @@ cc_binary(
         "-Wl,-rpath='$$ORIGIN'",
         "-Wl,-rpath=$(NVSHMEM_DIR)/lib",
         "-L$(NVSHMEM_DIR)/lib",
+        "-L/opt/rocm/llvm/lib/clang/20/lib/linux/",
+        "-lclang_rt.builtins-x86_64",
     ],
     visibility = ["//visibility:public"],
 )

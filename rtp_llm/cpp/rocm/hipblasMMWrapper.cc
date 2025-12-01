@@ -45,7 +45,7 @@ bool hipblasMMWrapper::test_swizzleA() {
     return test_swizzleA_;
 }
 
-hipblasDatatype_t hipblasMMWrapper::getHipBlasDataType(hipDataType data_type) {
+hipDataType hipblasMMWrapper::getHipBlasDataType(hipDataType data_type) {
     if (data_type == HIP_R_16F) {
         return HIPBLAS_R_16F;
     } else if (data_type == HIP_R_32F) {
@@ -378,7 +378,7 @@ void hipblasMMWrapper::Gemm(hipblasOperation_t transa,
                                      C,
                                      getHipBlasDataType(Ctype_),
                                      ldc,
-                                     getHipBlasDataType(computeType_),
+                                     getHipblasLtComputeType(computeType_),
                                      HIPBLAS_GEMM_DEFAULT));
         }
     }
@@ -434,7 +434,7 @@ void hipblasMMWrapper::stridedBatchedGemm(hipblasOperation_t transa,
                                            ldc,
                                            strideC,
                                            batch_count,
-                                           getHipBlasDataType(computeType),
+                                           getHipblasLtComputeType(computeType),
                                            HIPBLAS_GEMM_DEFAULT));
 }
 
