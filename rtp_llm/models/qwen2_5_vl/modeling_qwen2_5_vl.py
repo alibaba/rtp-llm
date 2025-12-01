@@ -123,6 +123,13 @@ class Qwen2_5_VisionPatchEmbed(nn.Module):
         self.embed_dim = embed_dim
 
         kernel_size = [temporal_patch_size, patch_size, patch_size]
+        import sys; sys.path.append("/home/xiebaijie.xbj/vit_rocm7_torch2.8/scripts"); from json_debug import json_file_manager
+        with json_file_manager("CONV_SHAPE") as info:
+            info["in_channels"] = in_channels
+            info["out_channels"] = embed_dim
+            info["kernel_size"] = kernel_size
+            info["stride"] = kernel_size
+            info["bias"] = False
         self.proj = nn.Conv3d(
             in_channels,
             embed_dim,
@@ -143,6 +150,9 @@ class Qwen2_5_VisionPatchEmbed(nn.Module):
         hidden_states = self.proj(hidden_states.to(dtype=target_dtype)).view(
             -1, self.embed_dim
         )
+        import sys; sys.path.append("/home/xiebaijie.xbj/vit_rocm7_torch2.8/scripts"); from json_debug import json_file_manager
+        with json_file_manager("CONV_SHAPE") as info:
+            info["input_shape"] = str(hidden_states.shape)
         return hidden_states
 
 
