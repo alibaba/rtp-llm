@@ -150,6 +150,7 @@ cc_library(
     ],
     deps = [
         ":cuda_register",
+        ":gpu_base",
         "//rtp_llm/cpp/devices/torch_impl:torch_beam_search_op_impl",
         "//rtp_llm/cpp/kernels:scaled_fp8_quant",
     ],

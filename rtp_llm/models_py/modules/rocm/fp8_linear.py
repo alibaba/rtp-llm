@@ -3,6 +3,7 @@ from typing import Optional
 
 import aiter
 import torch
+from aiter import dtypes
 from torch import nn
 
 from rtp_llm.config.quant_config import QuantizationConfig
@@ -127,45 +128,60 @@ class Fp8PTPCLinear(nn.Module):
 
     def __init__(
         self,
-        weight: torch.Tensor,
+        weight: torch.Tensor,  # (k,n)
         weight_scales: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
+        online_quant: bool = False,
         config=None,
     ) -> None:
         super().__init__()
         self.hidden_size = weight.shape[0]  # k
         self.output_size = weight.shape[1]  # n
-        # Reshape weight from [k, n] to [n, k] as done in C++ code
-        self.weight = weight.reshape([weight.shape[1], weight.shape[0]])
-        self.weight_scales = weight_scales.reshape(
-            [weight_scales.shape[1], weight_scales.shape[0]]
-        )
+
+        if online_quant:
+            self.weight_fp8, self.weight_scales = rocm_per_token_quant_fp8(
+                weight.T.contiguous().to(torch.bfloat16),
+                eps=1e-10,
+            )
+            self.weight_fp8 = self.shuffle_weight(
+                self.weight_fp8, layout=(16, 16), use_int4=False
+            )
+
+        else:
+            self.weight_fp8 = weight.reshape([weight.shape[1], weight.shape[0]])
+
+            self.weight_scales = weight_scales.reshape(
+                [weight_scales.shape[1], weight_scales.shape[0]]
+            )
         self.bias = bias
 
+    def shuffle_weight(
+        self, x: torch.Tensor, layout=(16, 16), use_int4=False
+    ) -> torch.Tensor:
+        x_type = x.dtype
+        if hasattr(torch, "float4_e2m1fn_x2") and x_type == torch.float4_e2m1fn_x2:
+            x = x.view(torch.uint8)
+
+        IN, IK = layout
+        BK = IK * 2
+        K = 16 // x.element_size() if not use_int4 else 32
+        BN = IN
+        assert x.shape[-2] % BN == 0, f"{x.shape[-2]} % {BN} == {x.shape[-2] % BN }"
+        assert x.shape[-1] % BK == 0, f"{x.shape[-1]} % {BK} == {x.shape[-1] % BK }"
+
+        x_ = x
+        x_ = x_.view(-1, x.shape[-2] // BN, BN, x.shape[-1] // BK, BK // K, K)
+        x_ = x_.permute(0, 1, 3, 4, 2, 5)
+        x_ = x_.contiguous()
+        x_ = x_.view(*x.shape)
+        return x_.view(x_type)
+
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        original_dtype = input.dtype
         # Convert to BF16 if needed
         if input.dtype != torch.bfloat16:
             input_bf16 = input.to(torch.bfloat16)
         else:
             input_bf16 = input
-
-        # Check FP8 availability
-        if not FP8_AVAILABLE:
-            error_msg = (
-                "FP8 quantization is not available but required for Fp8PTPCLinear. "
-                "Please ensure FP8 kernel is properly installed and imported."
-            )
-            logger.error(error_msg)
-            raise RuntimeError(error_msg)
-
-        if not AITER_GEMM_AVAILABLE:
-            error_msg = (
-                "aiter GEMM is not available but required for FP8 PTPC computation. "
-                "Please ensure aiter is properly installed and imported."
-            )
-            logger.error(error_msg)
-            raise RuntimeError(error_msg)
 
         # Get input dimensions
         M = input_bf16.shape[0]
@@ -175,27 +191,20 @@ class Fp8PTPCLinear(nn.Module):
         output = torch.empty((M, N), dtype=torch.bfloat16, device=input_bf16.device)
 
         quantization_eps = 1e-10
-        # Use per-token quantization (not per-token-block)
+        # Use per-token quantization
         input_fp8, input_scales = rocm_per_token_quant_fp8(
             input_bf16,
             eps=quantization_eps,
         )
 
-        # Clamp scales to avoid numerical issues
-        # FP8_E4M3_MAX = 448.0
-        # min_scale_threshold = 1e-10 / FP8_E4M3_MAX
-        # input_scales = torch.clamp(input_scales, min=min_scale_threshold)
         input_scales = input_scales.to(torch.float32)
 
-        # Use per-token scales (M, 1)
-        x_scales = input_scales
-        w_scales = self.weight_scales
         try:
             output = aiter.gemm_a8w8_bpreshuffle(
                 input_fp8,  # A_quant_tensor
-                self.weight,  # W_kernel_tensor (already reshaped to [n, k])
-                x_scales,  # A_quant_scale_tensor (M, 1)
-                w_scales,  # W_scale_tensor (reshaped)
+                self.weight_fp8,  # W_kernel_tensor (already reshaped to [n, k])
+                input_scales,  # A_quant_scale_tensor (M, 1)
+                self.weight_scales,  # W_scale_tensor (reshaped)
                 None,
                 input_bf16.dtype,
             )
@@ -209,12 +218,7 @@ class Fp8PTPCLinear(nn.Module):
             logger.error(f"Traceback: {traceback.format_exc()}")
             raise RuntimeError(error_msg) from e
 
-        # Add bias if present
         if self.bias is not None:
-            output = output + self.bias.to(output.dtype)
-
-        # Convert back to original dtype if needed
-        if output.dtype != original_dtype:
-            output = output.to(original_dtype)
+            output = output + self.bias
 
         return output
