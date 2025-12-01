@@ -70,10 +70,7 @@ struct PyPrefillCudaGaphCopyParams {
     // for embedding model cuda graph capture, the attenton batch size is padded to max_batch_size,
     // so we can't get the real batch size for `copy kernel` using `input_lengths.size(0)`(which is max_batch_size).
     torch::Tensor cuda_graph_prefill_batch_size = torch::empty(0);
-    torch::Tensor aligned_attn_buf              = torch::empty(0);
-    torch::Tensor compact_attn_buf              = torch::empty(0);
     int           max_seq_len                   = 0;
-    int           hidden_size                   = 0;
     int           max_batch_size                = 0;
 };
 

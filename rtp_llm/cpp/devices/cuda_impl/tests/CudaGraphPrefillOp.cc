@@ -9,7 +9,6 @@ void CudaGraphPrefillOp::init(py::object py_instance) {
     auto inputs = buildInputs(2, 64, 64, 64, true);
     cuda_graph_runner_->normalForward(inputs);
     setCufmhaPadded(true);
-    cuda_graph_runner_->setQKVDim(4608);
     cuda_graph_runner_->setMaxPrefillCudaGraphLen(960);
     cuda_graph_runner_->initCapture();
 }
