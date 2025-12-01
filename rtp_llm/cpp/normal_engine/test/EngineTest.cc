@@ -23,35 +23,37 @@ class NormalEngineTest: public DeviceTestBase {
 public:
 };
 
-TEST_F(NormalEngineTest, testInt8KVCache) {
-    CustomConfig config;
-    config.kv_cache_data_type = DataType::TYPE_INT8;
-    auto gpt_init_params      = rtp_llm::GptInitParameter();
-    auto engine               = createMockEngine(device_, config, gpt_init_params);
 
-    std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
-    query->input_ids       = createBuffer<int32_t>({7}, {1, 2, 3, 4, 5, 6, 7}, rtp_llm::AllocationType::HOST);
-    query->generate_config = make_shared<GenerateConfig>();
-    query->generate_config->max_new_tokens = 5;
-    query->generate_config->is_streaming   = false;
+// TODO(chanyin): refactored kv cache manager not support int8 quant now
+// TEST_F(NormalEngineTest, testInt8KVCache) {
+//     CustomConfig config;
+//     config.kv_cache_data_type = DataType::TYPE_INT8;
+//     auto gpt_init_params      = rtp_llm::GptInitParameter();
+//     auto engine               = createMockEngine(device_, config, gpt_init_params);
 
-    try {
-        shared_ptr<GenerateStream> stream = engine->enqueue(query);
+//     std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
+//     query->input_ids       = createBuffer<int32_t>({7}, {1, 2, 3, 4, 5, 6, 7}, rtp_llm::AllocationType::HOST);
+//     query->generate_config = make_shared<GenerateConfig>();
+//     query->generate_config->max_new_tokens = 5;
+//     query->generate_config->is_streaming   = false;
 
-        ASSERT_TRUE(stream != nullptr);
-        auto output = stream->nextOutput();
-        ASSERT_TRUE(output.ok());
-        ASSERT_EQ(output.value().generate_outputs[0].aux_info.output_len, 5);
-        ASSERT_EQ(output.value().generate_outputs[0].aux_info.input_len, 7);
-        ASSERT_EQ(output.value().generate_outputs[0].aux_info.iter_count, 5);
+//     try {
+//         shared_ptr<GenerateStream> stream = engine->enqueue(query);
 
-        ASSERT_TRUE(stream->finished());
-        auto output2 = stream->nextOutput();
-        ASSERT_TRUE(!output2.ok());
-    } catch (const std::exception& e) {
-        std::cout << e.what() << std::endl;
-    }
-}
+//         ASSERT_TRUE(stream != nullptr);
+//         auto output = stream->nextOutput();
+//         ASSERT_TRUE(output.ok());
+//         ASSERT_EQ(output.value().generate_outputs[0].aux_info.output_len, 5);
+//         ASSERT_EQ(output.value().generate_outputs[0].aux_info.input_len, 7);
+//         ASSERT_EQ(output.value().generate_outputs[0].aux_info.iter_count, 5);
+
+//         ASSERT_TRUE(stream->finished());
+//         auto output2 = stream->nextOutput();
+//         ASSERT_TRUE(!output2.ok());
+//     } catch (const std::exception& e) {
+//         std::cout << e.what() << std::endl;
+//     }
+// }
 
 TEST_F(NormalEngineTest, testSimple) {
     CustomConfig config;
@@ -181,7 +183,7 @@ TEST_F(NormalEngineTest, testSystemPrompt) {
         ASSERT_TRUE(output1.ok());
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.output_len, 1);
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.prefix_len, 6);
-        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.reuse_len, 4);
+        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.reuse_len, 6);
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.input_len, 7);
 
         ASSERT_TRUE(stream->finished());

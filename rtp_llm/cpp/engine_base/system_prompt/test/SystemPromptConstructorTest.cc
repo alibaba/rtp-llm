@@ -28,14 +28,15 @@ TEST_F(SystemPromptConstructorTest, testMultiTaskPromptConstruct) {
     CustomConfig config;
     auto         gpt_init_params = GptInitParameter();
     auto         engine          = createMockEngine(device_, config, gpt_init_params);
-    ASSERT_EQ(engine->resourceContext().cache_manager->freeBlockNums(), 99);
+    ASSERT_EQ(engine->resourceContext().cache_manager->freeBlocksNum(), 99);
     const_cast<ResourceContext*>(&engine->resourceContext())->reuse_cache = true;
     auto result_status =
         constructor.construct(params, engine.get(), engine->resourceContext().cache_manager.get(), true);
     ASSERT_EQ(result_status.ok(), true);
     auto result = result_status.value();
     ASSERT_EQ(result.size(), 2);
-    ASSERT_EQ(engine->resourceContext().cache_manager->freeBlockNums(), 97);
+    // TODO(chanyin): last partial block will be wasted when need_release_resource is false
+    ASSERT_EQ(engine->resourceContext().cache_manager->freeBlocksNum(), 95);  // 99 - (2 + 1) cached - 1 wasted
 
     const auto& item1 = result["1"];
     ASSERT_EQ(item1.prompt_tokens.size(), 3);

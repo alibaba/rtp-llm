@@ -79,7 +79,6 @@ cc_library(
         ":worker_status_info",
         "//rtp_llm/cpp/engine_base/stream:stream",
         "//rtp_llm/cpp/engine_base/schedulers:schedulers",
-        "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/models:lora",
         "//rtp_llm/cpp/engine_base/system_prompt:system_prompt",
         "//rtp_llm/cpp/utils:hash_util",

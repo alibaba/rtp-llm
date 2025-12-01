@@ -124,8 +124,8 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
             lm_output_lengths[batch_idx]  = 1;
             if (max_block_size) {
                 std::memcpy((*model_input.kv_cache_block_id)[batch_idx].data(),
-                            kv_cache.batch_block_id[i].data(),
-                            kv_cache.batch_block_id[i].size() * sizeof(int));
+                            kv_cache.batch_resource[i].group_block_ids[0]->block_indices.data(),
+                            kv_cache.batch_resource[i].group_block_ids[0]->block_indices.size() * sizeof(int));
             }
             batch_idx += 1;
         }
@@ -212,8 +212,8 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
             lora_input_lengths[batch_idx] = input_lengths[batch_idx];
             if (max_block_size) {
                 std::memcpy((*model_input.kv_cache_block_id)[batch_idx].data(),
-                            kv_cache.batch_block_id[i].data(),
-                            kv_cache.batch_block_id[i].size() * sizeof(int));
+                            kv_cache.batch_resource[i].group_block_ids[0]->block_indices.data(),
+                            kv_cache.batch_resource[i].group_block_ids[0]->block_indices.size() * sizeof(int));
                 if (role_type_ == RoleType::PREFILL && stream->hasCacheKeys()) {
                     std::memcpy((*model_input.cache_keys)[batch_idx - total_decode_batch_size].data(),
                                 stream->cacheKeys(i).data(),

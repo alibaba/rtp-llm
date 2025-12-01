@@ -107,10 +107,10 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
         generate_output.aux_info.wait_time_us             = wait_time_us_;
         generate_output.aux_info.input_len                = generate_input_->promptLength();
         generate_output.aux_info.prefix_len               = generate_input_->prefix_length;
+        generate_output.aux_info.output_len               = seqLength() - generate_input_->inputLength();
+        generate_output.aux_info.step_output_len          = output_len;
+        generate_output.aux_info.reuse_len                = reuse_length_;
         // TODO(xinfei.sxf) 提前结束的query，output len要设置正确
-        generate_output.aux_info.output_len       = seqLength() - generate_input_->inputLength();
-        generate_output.aux_info.step_output_len  = output_len;
-        generate_output.aux_info.reuse_len        = reuse_length_;
         generate_output.aux_info.pd_sep           = queryPdSep();
         generate_output.aux_info.local_reuse_len  = local_reuse_length_;
         generate_output.aux_info.remote_reuse_len = remote_reuse_length_;
