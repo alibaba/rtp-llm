@@ -734,7 +734,10 @@ class RocmImpl(GpuImpl):
 
         if key in [W.attn_qkv_w, W.attn_o_w, W.ffn_w2, W.ffn_w13, W.ffn_w3, W.moe_gate]:
             if self.py_env_configs.py_hw_kernel_config.use_swizzleA:
-                weight = swizzle_tensor(weight, weight.dtype != torch.float8_e4m3fn)
+                if self.py_env_configs.model_specific_config.load_python_model and weight.dtype != torch.float8_e4m3fn:
+                    weight = swizzle_tensor(weight.t(), False).t()
+                else:
+                    weight = swizzle_tensor(weight, weight.dtype != torch.float8_e4m3fn)
             elif weight.dtype == torch.float8_e4m3fn:
                 weight = self.shuffle_gemm_weight(weight)
 
