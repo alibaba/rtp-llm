@@ -1,13 +1,14 @@
 """ROCm F16 (non-quantized) Linear implementation"""
 
+import os
 from typing import Optional
 
 import torch
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.models_py.modules.factory.linear import LinearBase
-from rtp_llm.ops.compute_ops import rtp_llm_ops
-
+from aiter import hipb_mm, hipb_create_extension
+from functools import lru_cache
 
 class RocmF16Linear(LinearBase):
     """ROCm F16 (non-quantized) Linear"""
@@ -33,15 +34,23 @@ class RocmF16Linear(LinearBase):
         super().__init__(weight, weight_scales, input_scales, bias, config)
         self.weight = weight
         self.bias = bias
+        
+    @staticmethod    
+    @lru_cache(maxsize=1)
+    def init_hipblas():
+        hipb_create_extension()
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        output = torch.empty(
-            *input.shape[:-1],
-            self.weight.shape[1],
-            dtype=input.dtype,
-            device=input.device
+        self.init_hipblas()
+        has_swizzle = os.environ.get("USE_SWIZZLEA", None) == "1"
+        return hipb_mm(
+            input,
+            self.weight,
+            solution_index=-1,
+            bias=self.bias,
+            out_dtype=input.dtype,
+            scaleA=None,
+            scaleB=None,
+            scaleOut=None,
+            bpreshuffle=has_swizzle,
         )
-        rtp_llm_ops.gemm(output, input, self.weight)
-        if self.bias is not None:
-            output = output + self.bias
-        return output
