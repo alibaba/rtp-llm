@@ -167,5 +167,9 @@ class QWen2_5_VL(QWen2_VL):
             {"vit": self.mm_part.visual}
         )
 
+    @classmethod
+    def _get_mm_module(cls, config: GptInitModelParameters):
+        return Qwen2_5_VLImageEmbedding(config).visual
+
 
 register_model("qwen2_5_vl", QWen2_5_VL, ["Qwen2_5_VLForConditionalGeneration"])

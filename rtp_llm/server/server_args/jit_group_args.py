@@ -7,6 +7,6 @@ def init_jit_group_args(parser):
         "--remote_jit_dir",
         env_name="REMOTE_JIT_DIR",
         type=str,
-        default="/mnt/nas1",
+        default="",
         help="JIT远程cache目录",
     )

@@ -236,6 +236,10 @@ class QWen2_VL(QWen_VL, MultiModalMixin):
         )
 
     @classmethod
+    def _get_mm_module(cls, config: GptInitModelParameters):
+        return Qwen2VLImageEmbedding(config).visual
+
+    @classmethod
     def _create_config(cls, ckpt_path: str):
         config = GptInitModelParameters(
             head_num=0, size_per_head=0, layer_num=0, max_seq_len=0, vocab_size=0
@@ -296,41 +300,6 @@ class QWen2_VL(QWen_VL, MultiModalMixin):
     @staticmethod
     def get_weight_cls():
         return QWen2VLWeightInfo
-
-    @staticmethod
-    def eval_model_size(config: GptInitModelParameters):
-        llm_size = BaseModel.eval_model_size(config)
-
-        data_width = 4
-        llm_size += QWen2_VL.eval_vit_param_count(config) * data_width
-        return llm_size
-
-    @staticmethod
-    def eval_vit_param_count(config: GptInitModelParameters):
-        vit_config = config.mm_related_params.config
-        embed_dim = vit_config.get("embed_dim", 1280)
-        hidden_size = vit_config.get("hidden_size", 3584)
-        vit_size = (
-            vit_config.get("temporal_patch_size", 2)
-            * vit_config.get("spatial_patch_size", 14) ** 2
-            * vit_config.get("in_chans", 3)
-            * embed_dim
-        )
-        patch_merger_size = embed_dim * vit_config.get("spatial_merge_size", 2) ** 2
-        vit_size += patch_merger_size**2 + patch_merger_size * hidden_size + embed_dim
-        mlp_hidden_dim = embed_dim * vit_config.get("mlp_ratio", 4)
-        vit_size += vit_config.get("depth", 32) * (
-            embed_dim * 2 + embed_dim * mlp_hidden_dim + embed_dim * embed_dim * 4
-        )
-
-        return vit_size
-
-    @staticmethod
-    def eval_model_param_count(config: GptInitModelParameters):
-        llm_param_count = BaseModel.eval_model_param_count(config)
-        llm_param_count += QWen2_VL.eval_vit_param_count(config)
-
-        return llm_param_count
 
 
 register_model("qwen2_vl", QWen2_VL, ["Qwen2VLForConditionalGeneration"])
