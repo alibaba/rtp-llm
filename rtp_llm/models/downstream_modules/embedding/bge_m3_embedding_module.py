@@ -140,11 +140,11 @@ class BgeM3EmbeddingHandler(CustomHandler):
         dense_res = self.dense_handler.extend_forward_internal(batch_data)
         colbert_res = self.colbert_handler.forward_internal(
             batch_data["input_ids"],
-            batch_data["hidden_states"],
+            batch_data["all_hidden_states"],
             batch_data["attention_mask"],
         )
         sparse_res = self.sparse_handler.forward(
-            combo_data["input_ids"], combo_data["hidden_states"], input_lengths
+            combo_data["input_ids"], combo_data["all_hidden_states"], input_lengths
         )
         stream = torch.cuda.current_stream()
         dense_res = dense_res.cpu()

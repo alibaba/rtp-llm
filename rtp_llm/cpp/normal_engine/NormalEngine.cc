@@ -20,7 +20,7 @@
 using namespace std;
 namespace rtp_llm {
 
-NormalEngine::NormalEngine(const EngineInitParams& params):
+NormalEngine::NormalEngine(const EngineInitParams& params, py::object handler):
     EngineBase(params),
     params_(params.gpt_init_parameter),
     metrics_reporter_(params.metrics_reporter),
@@ -46,7 +46,8 @@ NormalEngine::NormalEngine(const EngineInitParams& params):
     }
     initCacheManager(warm_up_result);
     RTP_LLM_LOG_INFO("create cache manager done");
-    executor_.reset(new NormalExecutor(params, resource_context_.cache_manager, device_, getLoraManager()));
+    RTP_LLM_LOG_INFO("handler = %p", handler.ptr());
+    executor_.reset(new NormalExecutor(params, resource_context_.cache_manager, device_, getLoraManager(), false, handler));
     RTP_LLM_LOG_INFO("create normal executor done");
     initScheduler();
     (void)startLoop();

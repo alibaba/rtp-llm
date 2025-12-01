@@ -4,6 +4,7 @@ from typing import Optional
 
 import torch
 
+from rtp_llm.config.task_type import TaskType
 from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 from rtp_llm.async_decoder_engine.embedding.embedding_engine import EmbeddingCppEngine
 from rtp_llm.async_decoder_engine.rpc_engine import RPCEngine
@@ -17,9 +18,9 @@ class ExecutorType(Enum):
 
 
 def check_exeutor_type(model: BaseModel):
-    if model.custom_module is not None:
-        return ExecutorType.Embedding
-    return ExecutorType.Normal
+    if model.task_type == TaskType.LANGUAGE_MODEL:
+        return ExecutorType.Normal
+    return ExecutorType.Embedding
 
 
 def create_engine(
@@ -29,7 +30,6 @@ def create_engine(
         model.config.gpt_init_params.profiling_debug_logging_config.ft_alog_conf_path
     )
     executor_type = check_exeutor_type(model)
-    logging.info(f"executor_type: {executor_type}")
     if executor_type == ExecutorType.Normal:
         return RPCEngine(model, propose_model, gang_info)
     elif executor_type == ExecutorType.Embedding:
