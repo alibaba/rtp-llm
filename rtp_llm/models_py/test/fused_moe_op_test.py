@@ -8,7 +8,7 @@ from torch import nn
 from torch.profiler import ProfilerActivity, profile
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.models_py.modules.linear import Linear
+from rtp_llm.models_py.modules.factory import LinearFactory
 
 from rtp_llm.ops.compute_ops import FusedMoEOp  # isort:skip
 
@@ -44,11 +44,20 @@ class FusedMoEOpTest(TestCase):
         layers = list()
         for i in range(num_experts):
             up_proj_x, up_proj_g = torch.split(up_proj[i], inter_dim, dim=0)
+            up_proj_x_dict = {"weight": up_proj_x.transpose(0, 1)}
+            up_proj_g_dict = {"weight": up_proj_g.transpose(0, 1)}
+            down_proj_dict = {"weight": down_proj[i].transpose(0, 1)}
             layers.append(
                 {
-                    "up_proj_x": Linear(up_proj_x.transpose(0, 1), None),
-                    "up_proj_g": Linear(up_proj_g.transpose(0, 1), None),
-                    "down_proj": Linear(down_proj[i].transpose(0, 1), None),
+                    "up_proj_x": LinearFactory.create_linear_from_weights(
+                        up_proj_x_dict, "weight", None, None, None
+                    ),
+                    "up_proj_g": LinearFactory.create_linear_from_weights(
+                        up_proj_g_dict, "weight", None, None, None
+                    ),
+                    "down_proj": LinearFactory.create_linear_from_weights(
+                        down_proj_dict, "weight", None, None, None
+                    ),
                     "act_fn": nn.SiLU(),
                 }
             )

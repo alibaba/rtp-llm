@@ -11,7 +11,7 @@ Main components:
 Note: DeepEpInitializer is located in rtp_llm.models_py.distributed.deepep_initializer
 
 Usage example:
-    from rtp_llm.models_py.modules.factory.fused_moe import FusedMoeFactory
+    from rtp_llm.models_py.modules.factory import FusedMoeFactory
 
     moe = FusedMoeFactory.create_fused_moe(config, weights)
 """

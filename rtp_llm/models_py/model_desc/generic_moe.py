@@ -11,8 +11,7 @@ from rtp_llm.models_py.modules import CausalAttention, MlaAttention, RMSNorm, Se
 from rtp_llm.models_py.modules.common.mha.base import FMHAImplBase
 from rtp_llm.models_py.modules.embedding import Embedding
 from rtp_llm.models_py.modules.factory.attention_factory import AttnImplFactory
-from rtp_llm.models_py.modules.factory.fused_moe import FusedMoeFactory
-from rtp_llm.models_py.modules.linear import Linear
+from rtp_llm.models_py.modules.factory import FusedMoeFactory, LinearFactory
 from rtp_llm.models_py.modules.mlp import FusedSiluActDenseMLP
 from rtp_llm.ops.compute_ops import (
     KVCache,
@@ -39,7 +38,9 @@ class GenericMoeLayer(nn.Module):
         self.num_experts = config.expert_num
         self.top_k = config.moe_k
 
-        self.gate = Linear(weights[W.moe_gate], None)
+        self.gate = LinearFactory.create_linear_from_weights(
+            weights, W.moe_gate, None, None, config
+        )
         self.select_topk = SelectTopk(config)
         self.fused_moe = FusedMoeFactory().create_fused_moe(config, weights)
         self.w1 = weights.get(W.moe_w1, None)
