@@ -9,8 +9,6 @@
 namespace torch_ext {
 
 // CUDA Graph copy functions
-// CUDA implementation: rtp_llm/models_py/bindings/cuda/CudaGraphPrefillCopy.cc
-// ROCm stub implementation: rtp_llm/models_py/bindings/rocm/CudaGraphPrefillCopy.cc
 void cuda_graph_copy_small2large(at::Tensor& input_tensor,
                                  at::Tensor& output_tensor,
                                  at::Tensor& batch_size,

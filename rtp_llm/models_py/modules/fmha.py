@@ -219,30 +219,46 @@ try:
             assert self.fmha_impl is not None
             # CUDA graph copy logic specific to TRTMHAImpl
             if self.prefill_cuda_graph_copy_params:
+                # Infer qkv_dim from fmha_input tensor shape
+                qkv_dim = fmha_input.shape[1]
+                total_len = (
+                    self.prefill_cuda_graph_copy_params.max_seq_len
+                    * self.prefill_cuda_graph_copy_params.max_batch_size
+                )
+                aligned_attn_buf = torch.zeros(
+                    (total_len, qkv_dim),
+                    dtype=fmha_input.dtype,
+                    device=fmha_input.device,
+                )
                 cuda_graph_copy_small2large(
                     fmha_input,
-                    self.prefill_cuda_graph_copy_params.aligned_attn_buf,
+                    aligned_attn_buf,
                     self.prefill_cuda_graph_copy_params.cuda_graph_prefill_batch_size,
                     self.prefill_cuda_graph_copy_params.max_batch_size,
                     self.prefill_cuda_graph_copy_params.max_seq_len,
                     self.input_lengths,
-                    self.prefill_cuda_graph_copy_params.aligned_attn_buf.shape[1],
+                    qkv_dim,
                     self.cu_seq_lens,
                 )
-                fmha_input = self.prefill_cuda_graph_copy_params.aligned_attn_buf
+                fmha_input = aligned_attn_buf
             res = self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
             if self.prefill_cuda_graph_copy_params:
+                # Infer hidden_size from res tensor shape
+                hidden_size = res.shape[1]
+                compact_attn_buf = torch.zeros(
+                    (qkv.shape[0], hidden_size), dtype=res.dtype, device=res.device
+                )
                 cuda_graph_copy_large2small(
                     res,
-                    self.prefill_cuda_graph_copy_params.compact_attn_buf,
+                    compact_attn_buf,
                     self.prefill_cuda_graph_copy_params.cuda_graph_prefill_batch_size,
                     self.prefill_cuda_graph_copy_params.max_batch_size,
                     self.prefill_cuda_graph_copy_params.max_seq_len,
                     self.input_lengths,
-                    self.prefill_cuda_graph_copy_params.hidden_size,
+                    hidden_size,
                     self.cu_seq_lens,
                 )
-                res = self.prefill_cuda_graph_copy_params.compact_attn_buf
+                res = compact_attn_buf
             return res
 
     PREFILL_MHA_IMPS.append(TRTMHAImpl)

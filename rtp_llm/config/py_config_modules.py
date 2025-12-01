@@ -759,6 +759,7 @@ class PyHwKernelConfig:
         self.enable_native_cuda_graph: bool = False
         self.num_native_cuda_graph: int = 200
         self.prefill_capture_seq_lens: List[int] = []
+        self.prefill_capture_config: str = ""
 
     def update_from_env(self):
         self.deep_gemm_num_sm = get_env_int("DEEP_GEMM_NUM_SM", self.deep_gemm_num_sm)
@@ -789,6 +790,9 @@ class PyHwKernelConfig:
         )
         self.num_native_cuda_graph = get_env_int(
             "NUM_NATIVE_CUDA_GRAPH", self.num_native_cuda_graph
+        )
+        self.prefill_capture_config = get_env_str(
+            "PREFILL_CAPTURE_CONFIG", self.prefill_capture_config
         )
 
     def to_string(self):

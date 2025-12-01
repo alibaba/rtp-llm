@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "rtp_llm/cpp/devices/cuda_impl/CudaFlashInfer.h"
+#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
 #include <ATen/cuda/CUDAGeneratorImpl.h>
 #include <ATen/cuda/CUDAGraph.h>
 using namespace torch_ext;
@@ -64,4 +65,33 @@ public:
 
 private:
     at::cuda::CUDAStream origin_stream_;
+};
+
+// RAII guard for CUDA graph capture state
+class CudaGraphCaptureGuard {
+public:
+    CudaGraphCaptureGuard() {
+        rtp_llm::CaptureCheck::in_cuda_graph_capture = true;
+    }
+
+    ~CudaGraphCaptureGuard() {
+        rtp_llm::CaptureCheck::in_cuda_graph_capture = false;
+    }
+
+    // Non-copyable, non-movable
+    CudaGraphCaptureGuard(const CudaGraphCaptureGuard&)            = delete;
+    CudaGraphCaptureGuard& operator=(const CudaGraphCaptureGuard&) = delete;
+    CudaGraphCaptureGuard(CudaGraphCaptureGuard&&)                 = delete;
+    CudaGraphCaptureGuard& operator=(CudaGraphCaptureGuard&&)      = delete;
+};
+
+// Current state of CUDA graph execution
+struct CudaGraphState {
+    int current_batch_size{1};
+    int current_seq_len{1};
+    // for decode
+    int current_real_graph_bs{1};
+    // for prefill
+    int current_real_graph_seq_len{1};
+    int seq_len_sum{0};
 };

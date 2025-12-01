@@ -24,7 +24,6 @@ public:
         is_prefill_cuda_graph_mode_(is_prefill_cuda_graph_mode),
         capture_stream_(capture_stream),
         enable_cuda_graph_debug_mode_(params.hw_kernel_config.enable_cuda_graph_debug_mode),
-        hidden_size_(params.hidden_size),
         max_seq_len_(params.max_seq_len),
         seq_size_per_block_(params.tokens_per_block),
         kv_cache_block_offset_(kv_cache_block_offset),
@@ -43,11 +42,10 @@ public:
         options_cuda_int32_    = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
         options_cpu_int32_     = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
         RTP_LLM_LOG_INFO("Initialize CudaGraphRunner with parameters below: \n \
-            enable_cuda_graph_: %d, concurrency_limit_: %d, enable_cuda_graph_debug_mode_: %d, hidden_size_: %d, max_seq_len_: %d, seq_size_per_block_: %d, kv_cache_block_offset_: %d, is_prefill_cuda_graph_mode_: %d",
+            enable_cuda_graph_: %d, concurrency_limit_: %d, enable_cuda_graph_debug_mode_: %d, max_seq_len_: %d, seq_size_per_block_: %d, kv_cache_block_offset_: %d, is_prefill_cuda_graph_mode_: %d",
                          enable_cuda_graph_,
                          max_bs_,
                          enable_cuda_graph_debug_mode_,
-                         hidden_size_,
                          max_seq_len_,
                          seq_size_per_block_,
                          kv_cache_block_offset_,
@@ -66,19 +64,27 @@ public:
     void           capturePrefillOneSeqLen(int seq_len);
     void           prepareInputs(PyModelInputs& inputs);
     bool           canRun(PyModelInputs& inputs);
+    void           replayGraph(int key);
     void           replayDecode(int bs);
     void           replayPrefill(int seq_len);
-    void           initCapture() override;
-    void           initKernelInternalMemory();
+    void           setMaxPrefillCudaGraphLen(int max_prefill_cuda_graph_len);
+    py::object     normalForward(PyModelInputs& inputs);
     int            getCurrentRealGraphBs();
     PyModelOutputs forward(PyModelInputs& inputs) override;
-    py::object     normalForward(PyModelInputs& inputs);
-    void           setPositionEncoding(torch::Tensor position_encoding) override;
-    void           setTokenTypeEmbedding(torch::Tensor token_type_embedding) override;
-    void           setInputEmbeddingScalar(float input_embedding_scalar) override;
     void           setModelDataType(caffe2::TypeMeta data_type) override;
-    void           setQKVDim(int dim) override;
-    void           setMaxPrefillCudaGraphLen(int max_prefill_cuda_graph_len);
+    void           initCapture() override;
+
+private:
+    // Common capture logic for both prefill and decode
+    void captureOneGraphInstance(int key, const char* key_type);
+    // Common replay and sync check logic
+    void replayAndSyncCheck(int key, const char* key_type);
+    // Common input preparation logic for capture
+    void prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens);
+    void initKernelInternalMemory();
+    void setPositionEncoding(torch::Tensor position_encoding) override;
+    void setTokenTypeEmbedding(torch::Tensor token_type_embedding) override;
+    void setInputEmbeddingScalar(float input_embedding_scalar) override;
 
 private:
     void                 copySmallerIntoLarger(const torch::Tensor& source_tensor, torch::Tensor& target_tensor);
@@ -95,24 +101,16 @@ private:
     bool                 is_prefill_cuda_graph_mode_{false};
     at::cuda::CUDAStream capture_stream_;
     bool                 enable_cuda_graph_debug_mode_{false};
-    int                  hidden_size_;
     size_t               max_bs_{1};
     int                  num_tokens_per_bs_{1};
     int                  max_num_token_{1};
-    int                  current_batch_size_{1};
-    int                  current_seq_len_{1};
     int                  max_perfill_cuda_graph_len_{160};
-    // for decode
-    int current_real_graph_bs_{1};
-    // for prefill
-    int              current_real_graph_seq_len_{1};
-    int              max_seq_len_{0};
-    int              seq_size_per_block_{0};
-    int              kv_cache_block_offset_{0};
-    int              seq_len_sum_{0};
-    int              qkv_dim_{0};
-    std::vector<int> capture_range_;
-    std::vector<int> prefill_capture_seq_lens_;  // Pre-configured sequence lengths from Python
+    int                  max_seq_len_{0};
+    int                  seq_size_per_block_{0};
+    int                  kv_cache_block_offset_{0};
+    CudaGraphState       state_;
+    std::vector<int>     capture_range_;
+    std::vector<int>     prefill_capture_seq_lens_;  // Pre-configured sequence lengths from Python
     // capture seqLen -> GraphInstance (prefill)
     // batch_size -> GraphInstance (decode)
     std::unordered_map<int, GraphInstance> graph_instances_;

@@ -472,9 +472,10 @@ class GptInitModelParameters:
         # For cpp, we use `gpt_init_params`, `py_env_configs` for python.
         # There are some common envs in cpp and python, so they will
         # share some configs together.
-        self.update_gpt_init_params_from_env()
+        # Initialize py_env_configs first so it can be used in update_gpt_init_params_from_env()
         self.py_env_configs = PyEnvConfigs()
         self.py_env_configs.update_from_env()
+        self.update_gpt_init_params_from_env()
         self.py_env_configs.parallelism_distributed_config = (
             self.gpt_init_params.parallelism_distributed_config
         )
@@ -535,7 +536,7 @@ class GptInitModelParameters:
     def _generate_prefill_capture_seq_lens(self) -> List[int]:
         """
         Generate prefill capture sequence lengths from Python.
-        Supports three formats via PREFILL_CAPTURE_CONFIG:
+        Supports three formats via prefill_capture_config:
         1. File path: starts with 'file://' or '/', e.g., 'file:///path/to/seq_lens.txt' or '/path/to/seq_lens.txt'
         2. Comma-separated list: e.g., '10,100,500,1000,2000'
         3. Range: format 'max:step', e.g., '16384:128' (generates [128, 256, ..., 16384])
@@ -543,10 +544,11 @@ class GptInitModelParameters:
         This function MUST return a non-empty list. If no configuration is provided,
         it will raise an error.
         """
-        config = get_env_str("PREFILL_CAPTURE_CONFIG", "")
+        # Get config from py_env_configs (which is populated from command line arguments)
+        config = self.py_env_configs.py_hw_kernel_config.prefill_capture_config
         if not config:
             raise ValueError(
-                "PREFILL_CAPTURE_CONFIG must be set. Supported formats:\n"
+                "prefill_capture_config must be set. Supported formats:\n"
                 "  1. File path: 'file:///path/to/seq_lens.txt' or '/path/to/seq_lens.txt'\n"
                 "  2. Comma-separated list: '10,100,500,1000,2000'\n"
                 "  3. Range: '16384:128' (generates [128, 256, ..., 16384])"
@@ -621,10 +623,10 @@ class GptInitModelParameters:
                 return seq_lens
             else:
                 raise ValueError(
-                    f"PREFILL_CAPTURE_CONFIG contains no valid sequence lengths: '{config}'"
+                    f"prefill_capture_config contains no valid sequence lengths: '{config}'"
                 )
         except ValueError as e:
-            raise ValueError(f"Invalid PREFILL_CAPTURE_CONFIG format '{config}': {e}")
+            raise ValueError(f"Invalid prefill_capture_config format '{config}': {e}")
 
     def update_gpt_init_params_from_env(
         self, parallel_info: ParallelInfo = g_parallel_info

@@ -69,23 +69,23 @@ void CudaGraphRunner::copySmallerIntoLarger(const torch::Tensor& source_tensor, 
 
 void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
     if (!is_prefill_cuda_graph_mode_) {
-        auto& py_model_inputs_ = graph_instances_[current_real_graph_bs_].mem_hold_.py_model_inputs_;
+        auto& py_model_inputs_ = graph_instances_[state_.current_real_graph_bs].mem_hold_.py_model_inputs_;
 
         // Optimized copies using cudaMemcpy/memcpy
         optimizedCopy(inputs.attention_inputs.input_lengths,
                       py_model_inputs_.attention_inputs.input_lengths,
-                      current_batch_size_ * sizeof(int));
+                      state_.current_batch_size * sizeof(int));
 
         optimizedCopy(inputs.attention_inputs.cu_seqlens,
                       py_model_inputs_.attention_inputs.cu_seqlens,
-                      (current_batch_size_ + 1) * sizeof(int));
+                      (state_.current_batch_size + 1) * sizeof(int));
 
         py_model_inputs_.input_ids.fill_(0);
         optimizedCopy(inputs.input_ids, py_model_inputs_.input_ids, inputs.input_ids.size(0) * sizeof(int));
 
         optimizedCopy(inputs.attention_inputs.sequence_lengths,
                       py_model_inputs_.attention_inputs.sequence_lengths,
-                      current_batch_size_ * sizeof(int));
+                      state_.current_batch_size * sizeof(int));
 
         copySmallerIntoLarger(inputs.attention_inputs.kv_cache_block_id_device,
                               py_model_inputs_.attention_inputs.kv_cache_block_id_device);
@@ -93,43 +93,43 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
         optimizedCopy(inputs.attention_inputs.padding_offset,
                       py_model_inputs_.attention_inputs.padding_offset,
                       inputs.attention_inputs.padding_offset.size(0) * sizeof(int));
-        graph_instances_[current_real_graph_bs_].mem_hold_.params_ptr->fillParams(
+        graph_instances_[state_.current_real_graph_bs].mem_hold_.params_ptr->fillParams(
             inputs.attention_inputs.sequence_lengths,
             inputs.attention_inputs.input_lengths,
             inputs.attention_inputs.kv_cache_block_id_host,
-            current_batch_size_,
+            state_.current_batch_size,
             seq_size_per_block_);
     } else {
-        auto& py_model_inputs_ = graph_instances_[current_real_graph_seq_len_].mem_hold_.py_model_inputs_;
+        auto& py_model_inputs_ = graph_instances_[state_.current_real_graph_seq_len].mem_hold_.py_model_inputs_;
 
         // Optimized copies using cudaMemcpy/memcpy
         optimizedCopy(inputs.attention_inputs.input_lengths,
                       py_model_inputs_.attention_inputs.input_lengths,
-                      current_batch_size_ * sizeof(int));
+                      state_.current_batch_size * sizeof(int));
 
         optimizedCopy(inputs.attention_inputs.cu_seqlens,
                       py_model_inputs_.attention_inputs.cu_seqlens,
-                      (current_batch_size_ + 1) * sizeof(int));
+                      (state_.current_batch_size + 1) * sizeof(int));
 
-        optimizedCopy(inputs.input_ids, py_model_inputs_.input_ids, current_seq_len_ * sizeof(int));
+        optimizedCopy(inputs.input_ids, py_model_inputs_.input_ids, state_.current_seq_len * sizeof(int));
 
         optimizedCopy(inputs.attention_inputs.padding_offset,
                       py_model_inputs_.attention_inputs.padding_offset,
-                      current_seq_len_ * sizeof(int));
+                      state_.current_seq_len * sizeof(int));
 
         if (py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params) {
             (*(py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params->cuda_graph_prefill_batch_size
-                   .data_ptr<int>())) = current_batch_size_;
+                   .data_ptr<int>())) = state_.current_batch_size;
         }
 
         if (inputs.bert_embedding_inputs.position_encoding.numel() > 0) {
             optimizedCopy(inputs.bert_embedding_inputs.combo_position_ids,
                           py_model_inputs_.bert_embedding_inputs.combo_position_ids,
-                          current_seq_len_ * sizeof(int));
+                          state_.current_seq_len * sizeof(int));
 
             optimizedCopy(inputs.bert_embedding_inputs.combo_tokens_type_ids,
                           py_model_inputs_.bert_embedding_inputs.combo_tokens_type_ids,
-                          current_seq_len_ * sizeof(int));
+                          state_.current_seq_len * sizeof(int));
         }
     }
 }
@@ -141,15 +141,15 @@ PyModelOutputs CudaGraphRunner::forward(PyModelInputs& inputs) {
         RTP_LLM_LOG_INFO("Replay Start");
         prepareInputs(inputs);
         if (is_prefill_cuda_graph_mode_) {
-            replayPrefill(current_real_graph_seq_len_);
+            replayPrefill(state_.current_real_graph_seq_len);
             outputs.hidden_states =
-                graph_instances_[current_real_graph_seq_len_].mem_hold_.decoder_layer_hidden_states_.slice(
-                    0, 0, current_seq_len_);
+                graph_instances_[state_.current_real_graph_seq_len].mem_hold_.decoder_layer_hidden_states_.slice(
+                    0, 0, state_.current_seq_len);
         } else {
-            replayDecode(current_real_graph_bs_);
+            replayDecode(state_.current_real_graph_bs);
             outputs.hidden_states =
-                graph_instances_[current_real_graph_bs_].mem_hold_.decoder_layer_hidden_states_.slice(
-                    0, 0, seq_len_sum_);
+                graph_instances_[state_.current_real_graph_bs].mem_hold_.decoder_layer_hidden_states_.slice(
+                    0, 0, state_.seq_len_sum);
         }
         RTP_LLM_LOG_INFO("Replay End");
     } else {
@@ -163,20 +163,20 @@ PyModelOutputs CudaGraphRunner::forward(PyModelInputs& inputs) {
 }
 
 void CudaGraphRunner::tryGetRealGraphPrefillSeqLen(PyModelInputs& inputs) {
-    current_seq_len_            = inputs.attention_inputs.input_lengths.sum(0).item<int>();
-    auto it                     = std::lower_bound(capture_range_.begin(), capture_range_.end(), current_seq_len_);
-    current_real_graph_seq_len_ = *it;
-    current_batch_size_         = inputs.attention_inputs.input_lengths.size(0);
+    state_.current_seq_len = inputs.attention_inputs.input_lengths.sum(0).item<int>();
+    auto it                = std::lower_bound(capture_range_.begin(), capture_range_.end(), state_.current_seq_len);
+    state_.current_real_graph_seq_len = *it;
+    state_.current_batch_size         = inputs.attention_inputs.input_lengths.size(0);
 }
 
 void CudaGraphRunner::tryGetRealGraphDecodeBatchSize(PyModelInputs& inputs) {
-    int cuda_graph_bs   = inputs.attention_inputs.input_lengths.size(0);
-    current_batch_size_ = cuda_graph_bs;
+    int cuda_graph_bs         = inputs.attention_inputs.input_lengths.size(0);
+    state_.current_batch_size = cuda_graph_bs;
     RTP_LLM_LOG_INFO("canRun judge for batch size: %d", cuda_graph_bs);
-    auto it                = std::lower_bound(capture_range_.begin(), capture_range_.end(), current_batch_size_);
-    current_real_graph_bs_ = *it;
-    RTP_LLM_CHECK_WITH_INFO(it != capture_range_.end(), "batch size used in replay: %d", current_real_graph_bs_);
-    seq_len_sum_ = inputs.attention_inputs.input_lengths.sum(0).item<int>();
+    auto it = std::lower_bound(capture_range_.begin(), capture_range_.end(), state_.current_batch_size);
+    state_.current_real_graph_bs = *it;
+    RTP_LLM_CHECK_WITH_INFO(it != capture_range_.end(), "batch size used in replay: %d", state_.current_real_graph_bs);
+    state_.seq_len_sum = inputs.attention_inputs.input_lengths.sum(0).item<int>();
     RTP_LLM_LOG_INFO("can run cuda graph for decode");
 }
 
@@ -186,16 +186,16 @@ bool CudaGraphRunner::canRun(PyModelInputs& inputs) {
     }
     if (is_prefill_cuda_graph_mode_) {
         tryGetRealGraphPrefillSeqLen(inputs);
-        if (current_seq_len_ > max_perfill_cuda_graph_len_) {
+        if (state_.current_seq_len > max_perfill_cuda_graph_len_) {
             return false;
         }
         RTP_LLM_CHECK_WITH_INFO(std::any_of(capture_range_.begin(),
                                             capture_range_.end(),
-                                            [&](int x) { return x == current_real_graph_seq_len_; }),
+                                            [&](int x) { return x == state_.current_real_graph_seq_len; }),
                                 "seqlen used in replay: %d",
-                                current_real_graph_seq_len_);
-        RTP_LLM_LOG_INFO("can run cuda graph for prefill, current_real_graph_seq_len_: %d",
-                         current_real_graph_seq_len_);
+                                state_.current_real_graph_seq_len);
+        RTP_LLM_LOG_INFO("can run cuda graph for prefill, current_real_graph_seq_len: %d",
+                         state_.current_real_graph_seq_len);
     } else {
         tryGetRealGraphDecodeBatchSize(inputs);
     }
@@ -210,7 +210,7 @@ void CudaGraphRunner::initKernelInternalMemory() {
 }
 
 int CudaGraphRunner::getCurrentRealGraphBs() {
-    return current_real_graph_bs_;
+    return state_.current_real_graph_bs;
 }
 
 void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs) {
@@ -237,10 +237,6 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     inputs.attention_inputs.dtype          = model_data_type_;
 }
 
-void CudaGraphRunner::setQKVDim(int dim) {
-    qkv_dim_ = dim;
-}
-
 void CudaGraphRunner::initCaptureAttentionInputsPost() {
     auto&         inputs                        = capture_mem_hold_.py_model_inputs_;
     torch::Tensor cuda_graph_prefill_batch_size = torch::zeros({1}, options_cpu_int32_).pin_memory();
@@ -249,10 +245,8 @@ void CudaGraphRunner::initCaptureAttentionInputsPost() {
     RTP_LLM_CHECK_WITH_INFO(cuda_graph_prefill_batch_size.is_pinned(),
                             "capture_mem_hold_ cuda_graph_prefill_batch_size is not pinned memory");
 
-    torch::Tensor aligned_attn_buf = torch::zeros({max_num_token_, qkv_dim_}, options_cuda_float_);
-    torch::Tensor compact_attn_buf = torch::zeros({max_num_token_, hidden_size_}, options_cuda_float_);
-    inputs.attention_inputs.prefill_cuda_graph_copy_params = PyPrefillCudaGaphCopyParams{
-        cuda_graph_prefill_batch_size, aligned_attn_buf, compact_attn_buf, max_seq_len_, hidden_size_, int(max_bs_)};
+    inputs.attention_inputs.prefill_cuda_graph_copy_params =
+        PyPrefillCudaGaphCopyParams{cuda_graph_prefill_batch_size, max_seq_len_, int(max_bs_)};
 }
 
 void CudaGraphRunner::setPositionEncoding(torch::Tensor position_encoding) {
@@ -343,7 +337,9 @@ void CudaGraphRunner::initCapture() {
                                   .dtype(outputs.hidden_states.dtype().toScalarType())
                                   .device(torch::kCUDA)
                                   .requires_grad(false);
-        output = torch::zeros({max_num_token_, hidden_size_}, options_cuda_float_);
+        // Infer hidden_size from output tensor shape
+        int64_t hidden_size = outputs.hidden_states.sizes()[1];
+        output              = torch::zeros({max_num_token_, hidden_size}, options_cuda_float_);
         capture_mem_hold_.setHiddenStates(output);
         initCaptureAttentionInputsPost();
         if (is_prefill_cuda_graph_mode_) {
@@ -360,6 +356,74 @@ void CudaGraphRunner::initCapture() {
         initKernelInternalMemory();
         RTP_LLM_LOG_INFO("CUDA graph capture is not enabled, skipping initialization");
     }
+}
+
+void CudaGraphRunner::replayGraph(int key) {
+    graph_instances_[key].graph_.replay();
+}
+
+void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
+    auto inputs = graph_instances_[key].mem_hold_.py_model_inputs_;
+    // WarmUp twice
+    RTP_LLM_LOG_INFO("WarmUp for %s %d start.", key_type, key);
+    py_forward_method_(inputs);
+    py_forward_method_(inputs);
+    RTP_LLM_LOG_INFO("WarmUp for %s %d successfully.", key_type, key);
+
+    {
+        CudaGraphStreamLife  stream_life(capture_stream_);
+        at::cuda::CUDAGraph& graph               = graph_instances_[key].graph_;
+        auto                 output_dot_filename = "";
+        if (enable_cuda_graph_debug_mode_) {
+            graph.enable_debug_mode();
+            output_dot_filename = "cuda_graph_visualization.dot";
+        }
+        RTP_LLM_LOG_INFO("Capture for %s %d begin.", key_type, key);
+        PyModelOutputs outputs;
+        {
+            graph.capture_begin();
+            CudaGraphCaptureGuard capture_guard;
+            auto                  py_outputs_obj = py_forward_method_(inputs);
+            outputs                              = py_outputs_obj.cast<PyModelOutputs>();
+            graph_instances_[key].mem_hold_.decoder_layer_hidden_states_.copy_(outputs.hidden_states);
+            graph.capture_end();
+        }
+        RTP_LLM_LOG_INFO("Capture for %s %d end.", key_type, key);
+        if (outputs.params_ptr->check_recycle()) {
+            graph_instances_[key].mem_hold_.params_ptr =
+                ParamsBasePtr(outputs.params_ptr.get(), [&](ParamsBase* ptr) {});
+        } else {
+            graph_instances_[key].mem_hold_.params_ptr = outputs.params_ptr;
+        }
+
+        if (enable_cuda_graph_debug_mode_) {
+            graph.debug_dump(output_dot_filename);
+        }
+    }
+}
+
+void CudaGraphRunner::replayAndSyncCheck(int key, const char* key_type) {
+    RTP_LLM_LOG_INFO("replay start check for %s %d", key_type, key);
+    replayGraph(key);
+    check_cuda_value(cudaDeviceSynchronize());
+    RTP_LLM_LOG_INFO("replay end check for %s %d", key_type, key);
+}
+
+void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens) {
+    // Common slice operations for attention inputs
+    inputs.attention_inputs.sequence_lengths =
+        capture_mem_hold_.py_model_inputs_.attention_inputs.sequence_lengths.slice(0, 0, batch_size);
+    inputs.attention_inputs.kv_cache_block_id_device =
+        capture_mem_hold_.py_model_inputs_.attention_inputs.kv_cache_block_id_device.slice(0, 0, batch_size);
+    inputs.attention_inputs.kv_cache_block_id_host =
+        capture_mem_hold_.py_model_inputs_.attention_inputs.kv_cache_block_id_host.slice(0, 0, batch_size);
+    inputs.attention_inputs.cu_seqlens =
+        capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens.slice(0, 0, batch_size + 1);
+
+    // Common direct assignments (no slice needed)
+    inputs.attention_inputs.prefix_lengths = capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths;
+    inputs.attention_inputs.dtype          = capture_mem_hold_.py_model_inputs_.attention_inputs.dtype;
+    inputs.bert_embedding_inputs           = capture_mem_hold_.py_model_inputs_.bert_embedding_inputs;
 }
 
 }  // namespace rtp_llm

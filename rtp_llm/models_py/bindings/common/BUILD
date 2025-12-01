@@ -4,7 +4,7 @@ load("//:def.bzl", "copts")
 
 cc_library(
     name = "common",
-    srcs = glob(["*.cc"], exclude = ["CudaGraphPrefillCopy.cc"]),
+    srcs = glob(["*.cc"]),
     hdrs = glob(["*.h"]),
     deps = [
         "//rtp_llm/models_py/bindings:op_defs",
