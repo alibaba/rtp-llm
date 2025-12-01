@@ -55,20 +55,23 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     auto& cache_keys_0    = br0.cache_keys;
     auto& block_indices_0 = br0.group_block_ids[0]->block_indices;
     if (malloc_info.batch_kv_cache_resource->enable_reuse_cache && block_indices_0.size() < cache_keys_0.size()) {
-        auto match_result = full_kv_cache_group_->match(cache_keys_0);
-        reuse_len         = static_cast<int>(match_result.reuse_length);
+        auto match_result   = full_kv_cache_group_->match(cache_keys_0);
+        reuse_len           = static_cast<int>(match_result.reuse_length);
+        br0.reuse_block_num = match_result.reuse_blocks;
         full_kv_cache_group_->reference(block_indices_0, match_result.block_indices);
     }
 
     if (!full_kv_cache_group_->malloc(cache_keys_0, block_indices_0, common_seq_len)) {
         return {false, 0};
     }
+    makeLayerBlockIds(br0);
 
     // reference other batches to group 0
     for (int batch_id = 1; batch_id < batch_size; ++batch_id) {
         auto& br                  = malloc_info.batch_kv_cache_resource->batch_resource[batch_id];
         auto& block_indices_other = br.group_block_ids[0]->block_indices;
         full_kv_cache_group_->reference(block_indices_other, block_indices_0);
+        makeLayerBlockIds(br);
     }
 
     return {true, reuse_len};
@@ -113,6 +116,7 @@ MallocResult SingleTypeKVCacheAllocator::incrMalloc(const MallocInfo& malloc_inf
             }
             return {false, 0};
         }
+        makeLayerBlockIds(br);
     }
     return {true, 0};
 }
@@ -139,6 +143,7 @@ FreeResult SingleTypeKVCacheAllocator::free(const FreeInfo& free_info) {
             full_kv_cache_group_->free(batch_blocks);
             free_info.batch_kv_cache_resource->resize(batch_id, 0, 0);
         }
+        makeLayerBlockIds(br);
     }
 
     return {true};
@@ -180,6 +185,11 @@ CacheLayerLayout SingleTypeKVCacheAllocator::layerCacheBase() const {
         if (layer_id >= 0 && layer_id < config_.layer_num) {
             layout.layers_to_buffer_ptrs[layer_id] = kv.second;
         }
+    }
+    layout.layer_to_groups.reserve(config_.layer_num);
+    int group_id = full_kv_cache_group_->group_id();
+    for (int layed_id = 0; layed_id < config_.layer_num; layed_id++) {
+        layout.layer_to_groups.push_back(group_id);
     }
     return layout;
 }
@@ -291,6 +301,7 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& ba
             br.group_block_ids[0]->block_indices =
                 std::move(old_resources[old_batch_idx].group_block_ids[0]->block_indices);
             br.cache_keys = std::move(old_resources[old_batch_idx].cache_keys);
+            makeLayerBlockIds(br);
         } else {
             // create new batch by referencing from source blocks
             auto& br = batch_kv_cache_resource->batch_resource[new_batch_idx];
@@ -311,10 +322,29 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& ba
 
                 block_update_mapping.push_back(BlockIdPair{old_block, new_block});
             }
+            makeLayerBlockIds(br);
         }
         --fork_count;
     }
     return true;
+}
+
+void SingleTypeKVCacheAllocator::clearCache() {
+    if (block_pool_) {
+        block_pool_->clearCache();
+    }
+}
+void SingleTypeKVCacheAllocator::makeLayerBlockIds(KVCacheResourceV1& resource) const {
+    if (resource.group_block_ids.empty() || !(resource.group_block_ids[0])) {
+        resource.layer_block_ids.clear();
+        return;
+    }
+    const int layer_num = config_.layer_num;
+    resource.layer_block_ids.resize(static_cast<size_t>(layer_num));
+    const auto& blocks = resource.group_block_ids[0];
+    for (int layer = 0; layer < layer_num; ++layer) {
+        resource.layer_block_ids[static_cast<size_t>(layer)] = blocks;
+    }
 }
 
 }  // namespace rtp_llm
