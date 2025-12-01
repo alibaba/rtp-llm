@@ -115,6 +115,10 @@ class MultiModalMixin:
     def _init_multimodal(self, config: GptInitModelParameters) -> None:
         raise NotImplementedError
 
+    @classmethod
+    def _get_mm_module(cls, config: GptInitModelParameters):
+        raise NotImplementedError
+
     def _load_mm_weight(self, vit_params: VitParameters, ctype: str, device: str):
         # Load weight only for self.mm_part
 
@@ -135,6 +139,16 @@ class MultiModalMixin:
             w_name = re.sub(r"\.\d+\.", lambda x: "[" + x.group(0)[1:-1] + "].", w_name)
             param = eval(w_name)
             _safe_load_from_module(param, w, ctype)
+
+    @classmethod
+    def eval_mm_model_size(cls, config: GptInitModelParameters):
+        mm_part = cls._get_mm_module(config)
+        return sum([t.numel() for t in mm_part.parameters()]) * 2
+
+    @classmethod
+    def eval_mm_model_param_count(cls, config: GptInitModelParameters):
+        mm_part = cls._get_mm_module(config)
+        return sum([t.numel() for t in mm_part.parameters()])
 
     # def init_mm_trt(
     #     self,

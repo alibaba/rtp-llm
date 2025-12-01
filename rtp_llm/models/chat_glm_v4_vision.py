@@ -34,6 +34,10 @@ class ChatGlmV4Vision(ChatGlmV4, MultiModalMixin):
         )
 
     @classmethod
+    def _get_mm_module(cls, config: GptInitModelParameters):
+        return ChatGlmV4VisionImageEmbedding(config).vit
+
+    @classmethod
     def _create_config(cls, ckpt_path: str):
         config = ChatGlmV4._create_config(ckpt_path)
         config_dict = get_config_from_path(ckpt_path)
