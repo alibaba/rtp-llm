@@ -13,7 +13,7 @@ from librtp_compute_ops.rtp_llm_ops import (
 )
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.models_py.modules.fmha import FMHAImplBase
+from rtp_llm.models_py.modules.mha import FMHAImplBase
 from rtp_llm.ops import FMHAType
 from rtp_llm.ops.compute_ops import (
     KVCache,

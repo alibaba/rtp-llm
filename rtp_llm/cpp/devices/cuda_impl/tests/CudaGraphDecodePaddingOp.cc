@@ -74,6 +74,9 @@ PyModelInputs CudaGraphDecodePaddingOp::buildInputs(int64_t batch_size,
     BufferPtr cu_seqlens_buf =
         cuda_graph_runner_->device_->allocateBuffer({DataType::TYPE_INT32, {cu_len}, AllocationType::HOST});
     inputs.attention_inputs.cu_seqlens = Buffer2torchTensor(cu_seqlens_buf, false);
+    BufferPtr cu_kv_seqlens_buf =
+        cuda_graph_runner_->device_->allocateBuffer({DataType::TYPE_INT32, {cu_len}, AllocationType::HOST});
+    inputs.attention_inputs.cu_kv_seqlens = Buffer2torchTensor(cu_kv_seqlens_buf, false);
     return inputs;
 }
 

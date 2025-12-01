@@ -373,29 +373,6 @@ def git_deps():
         actual = "@zlib_archive//:zlib",
     )
 
-    # DeepGEMM dependency for RTP-LLM - using git repository
-    new_git_repository(
-        name = "deep_gemm_ext",
-        remote = "https://github.com/deepseek-ai/DeepGEMM.git",
-        commit = "79f48ee15a82dd5fad5cd9beaa393c1f755e6b55",
-        build_file = clean_dep("//3rdparty/deep_gemm:BUILD"),
-        patches = [
-            "//3rdparty/deep_gemm:0001-fix-smem_buffer.patch",
-        ],
-        patch_args = ["-p0"],
-        recursive_init_submodules = True,
-        patch_cmds = [
-            "mkdir -p deep_gemm_headers_temp",
-            "cp -r third-party/cutlass/include/* deep_gemm_headers_temp/ || true",
-            "mkdir -p deep_gemm_headers_temp/cute",
-            "if [ -d third-party/cutlass/include/cute ]; then cp -r third-party/cutlass/include/cute/* deep_gemm_headers_temp/cute/; fi || true",
-            "mkdir -p deep_gemm_headers_temp/deep_gemm",
-            "if [ -d deep_gemm/include ]; then find deep_gemm/include -name '*.h' -o -name '*.hpp' -o -name '*.cuh' | while read f; do rel=${f#deep_gemm/include/}; if [[ $rel != deep_gemm/* ]]; then mkdir -p deep_gemm_headers_temp/deep_gemm/$(dirname $rel); cp $f deep_gemm_headers_temp/deep_gemm/$rel; fi; done; fi || true",
-            "if [ -d deep_gemm/include/deep_gemm ]; then cp -r deep_gemm/include/deep_gemm/* deep_gemm_headers_temp/deep_gemm/; fi || true",
-            "rm -rf deep_gemm/include && mv deep_gemm_headers_temp deep_gemm/include",
-        ],
-    )
-
     new_git_repository(
         name = "flash-linear-attention",
         remote = "https://github.com/fla-org/flash-linear-attention.git",

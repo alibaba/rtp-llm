@@ -11,7 +11,7 @@ from rtp_llm.models_py.modules import RMSNorm, SelectTopk
 from rtp_llm.models_py.modules.attention import CausalAttention
 from rtp_llm.models_py.modules.embedding import Embedding
 from rtp_llm.models_py.modules.factory.fused_moe import FusedMoeFactory
-from rtp_llm.models_py.modules.fmha import FMHAImplBase
+from rtp_llm.models_py.modules.mha import FMHAImplBase
 from rtp_llm.models_py.modules.linear import Linear
 from rtp_llm.models_py.modules.mla.mla_attention import MlaAttention
 from rtp_llm.models_py.modules.mlp import FusedSiluActDenseMLP

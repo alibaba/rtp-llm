@@ -9,7 +9,7 @@ from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import FusedSiluActDenseMLP, RMSNorm
 from rtp_llm.models_py.modules.attention import CausalAttention
 from rtp_llm.models_py.modules.embedding import Embedding
-from rtp_llm.models_py.modules.fmha import FMHAImplBase
+from rtp_llm.models_py.modules.mha import FMHAImplBase
 from rtp_llm.ops.compute_ops import (
     KVCache,
     PyAttentionInputs,

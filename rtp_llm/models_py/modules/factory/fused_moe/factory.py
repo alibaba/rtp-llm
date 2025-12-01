@@ -29,6 +29,7 @@ class FusedMoeFactory:
     def set_registry(cls, r: StrategyRegistry):
         cls._registry = r
 
+    @torch.inference_mode()
     def create_fused_moe(
         self, config: GptInitModelParameters, weights: Dict[str, torch.Tensor]
     ) -> FusedMoe:

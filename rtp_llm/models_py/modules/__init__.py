@@ -25,14 +25,14 @@ else:
     from rtp_llm.models_py.modules.linear import Linear
     from rtp_llm.models_py.modules.mlp import FusedSiluActDenseMLP
     from rtp_llm.models_py.modules.select_topk import SelectTopk, GroupTopK
-    from rtp_llm.models_py.modules.fmha import (
+    from rtp_llm.models_py.modules.mha import (
         DECODE_MHA_IMPS,
         PREFILL_MHA_IMPS,
     )
     import rtp_llm.models_py.modules.cuda_registry
 
 from rtp_llm.models_py.modules.embedding import Embedding
-from rtp_llm.models_py.modules.fmha import FMHAImplBase
+from rtp_llm.models_py.modules.mha import FMHAImplBase
 from rtp_llm.models_py.modules.kvcache_store import WriteCacheStoreOp
 from rtp_llm.models_py.modules.linear import LinearTorch
 from rtp_llm.models_py.modules.mlp import DenseMLP

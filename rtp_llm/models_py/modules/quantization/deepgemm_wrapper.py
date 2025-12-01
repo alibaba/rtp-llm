@@ -5,7 +5,7 @@ from typing import Any, Callable, List, NoReturn, Optional, Tuple
 import torch
 
 from rtp_llm.utils.module_util import has_module, resolve_symbol
-
+import deep_gemm
 __all__ = [
     "fp8_gemm_nt",
     "m_grouped_fp8_gemm_nt_contiguous",
@@ -52,9 +52,7 @@ def has_deep_gemm() -> bool:
 
 @functools.cache
 def is_deep_gemm_e8m0_used() -> bool:
-    """Return ``True`` if RTP-LLM is configured to use DeepGEMM "
-    "E8M0 scale on a Hopper or Blackwell-class GPU."""
-    return False
+    return torch.cuda.get_device_capability()[0] in [10, 12]
 
 
 def _missing_deep_gemm() -> NoReturn:
@@ -148,10 +146,9 @@ def fp8_gemm_nt(
         output,
         c,
         compiled_dims=compiled_dims,
+        # normal gemm tmp not use ue8m0 cast
         disable_ue8m0_cast=(
-            disable_ue8m0_cast
-            if disable_ue8m0_cast is not None
-            else not is_deep_gemm_e8m0_used()
+            disable_ue8m0_cast if disable_ue8m0_cast is not None else True
         ),
     )
 

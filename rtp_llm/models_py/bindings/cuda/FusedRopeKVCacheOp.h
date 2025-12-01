@@ -8,10 +8,24 @@
 
 namespace rtp_llm {
 
-class FusedRopeKVCachePrefillOp: public FMHACudaBase {
+class FusedRopeKVCachePrefillOpBase: public FMHACudaBase {
 public:
-    FusedRopeKVCachePrefillOp(const GptInitParameter& gpt_init_parameter);
-    TRTAttnPtr    prepare(torch_ext::PyAttentionInputs attn_inputs);
+    FusedRopeKVCachePrefillOpBase(const GptInitParameter& gpt_init_parameter);
+    TRTAttnPtr prepare(torch_ext::PyAttentionInputs attn_inputs);
+};
+
+class FusedRopeKVCachePrefillOpQKVOut: public FusedRopeKVCachePrefillOpBase {
+public:
+    FusedRopeKVCachePrefillOpQKVOut(const GptInitParameter& gpt_init_parameter);
+    torch::Tensor forward(const torch::Tensor&              qkv,
+                          FMHAType                          fmha_type,
+                          std::optional<torch_ext::KVCache> kv_cache,
+                          const TRTAttnPtr&                 params);
+};
+
+class FusedRopeKVCachePrefillOpQOut: public FusedRopeKVCachePrefillOpBase {
+public:
+    FusedRopeKVCachePrefillOpQOut(const GptInitParameter& gpt_init_parameter);
     torch::Tensor forward(const torch::Tensor&              qkv,
                           FMHAType                          fmha_type,
                           std::optional<torch_ext::KVCache> kv_cache,
