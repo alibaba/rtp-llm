@@ -19,3 +19,6 @@ FusedMoeFactory.set_registry(registry)
 
 # fmha registry
 import rtp_llm.models_py.modules.rocm.mha
+
+# Import to trigger Linear strategy registration
+from rtp_llm.models_py.modules.rocm.linear
