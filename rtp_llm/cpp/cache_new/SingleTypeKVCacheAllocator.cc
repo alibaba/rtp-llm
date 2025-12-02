@@ -278,7 +278,8 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& ba
 
     // rebuild batch_kv_cache_resource and generate mapping
     std::vector<KVCacheResourceV1> old_resources = std::move(batch_kv_cache_resource->batch_resource);
-    batch_kv_cache_resource->batch_resource.reserve(new_batch_size);
+    batch_kv_cache_resource->batch_resource.clear();
+    batch_kv_cache_resource->batch_resource.resize(new_batch_size);
 
     for (int new_batch_idx = 0; new_batch_idx < new_batch_size; ++new_batch_idx) {
         const int old_batch_idx = block_src_batch[new_batch_idx];
