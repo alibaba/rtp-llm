@@ -1,11 +1,9 @@
 
 #ifdef USING_CUDA12
 #include "rtp_llm/models_py/bindings/cuda/XQAAttnOp.h"
+#include "rtp_llm/cpp/cuda/cufmha/TrtV2FmhaRunner.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/devices/cuda_impl/CudaDevice.h"
-#include "rtp_llm/cpp/kernels/unfused_attention_kernels.h"
-#include "rtp_llm/cpp/core/Dispatch.h"
-#include "rtp_llm/cpp/devices/DeviceFactory.h"
 
 namespace rtp_llm {
 
@@ -31,16 +29,23 @@ ParamsBasePtr XQAAttnOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
                             "decode should have kv cache block id.");
     kv_cache_block_id_host   = torchTensor2Buffer(attn_inputs.kv_cache_block_id_host);
     kv_cache_block_id_device = torchTensor2Buffer(attn_inputs.kv_cache_block_id_device);
-    // not support has_alibi_slopes
 
-    auto trt_params =
-        device_->prepareTrtAttn(attn_configs_, attn_inputs.kv_block_offset, kv_cache_block_id_device, batch_size);
+    // 使用独立的工具函数准备 TRT attention 参数
+    auto run_stream   = at::cuda::getCurrentCUDAStream(at::cuda::current_device()).stream();
+    bool use_fp8_fmha = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
+    auto trt_params   = prepareTrtAttnParams(attn_configs_,
+                                           attn_inputs.kv_block_offset,
+                                           kv_cache_block_id_device,
+                                           batch_size,
+                                           use_fp8_fmha,
+                                           run_stream,
+                                           false);
 
-    params->kv_block_array   = ((TRTAttn*)trt_params.get())->kv_block_array;
-    params->kv_cache_offset  = Buffer2torchTensor(((TRTAttn*)trt_params.get())->kv_cache_offset, false).clone();
-    params->batch_size       = batch_size;
-    params->max_seq_len      = attn_inputs.sequence_lengths.max().item<int32_t>();
-    params->sequence_lengths = attn_inputs.sequence_lengths;
+    params->kv_block_array            = ((TRTAttn*)trt_params.get())->kv_block_array;
+    params->kv_cache_offset           = ((TRTAttn*)trt_params.get())->kv_cache_offset.clone();
+    params->batch_size                = batch_size;
+    params->max_seq_len               = attn_inputs.sequence_lengths.max().item<int32_t>();
+    params->sequence_lengths          = attn_inputs.sequence_lengths;
     params->kv_block_array.cache_type = attn_configs_.kv_cache_dtype;
 
     return ParamsBasePtr(params);
@@ -67,6 +72,8 @@ XQAAttnOp::forward(const torch::Tensor& input, std::optional<torch_ext::KVCache>
 
     RTP_LLM_CHECK_WITH_INFO(kv_cache.has_value(), "decode should have kv cache.");
 
+    auto device = dynamic_cast<CudaDevice*>(DeviceFactory::getDefaultDevice());
+
     runXqa(input.data_ptr(),
            input.dtype() == torch::kBFloat16,
            output.data_ptr(),
@@ -81,7 +88,7 @@ XQAAttnOp::forward(const torch::Tensor& input, std::optional<torch_ext::KVCache>
            reinterpret_cast<int32_t*>((KVCacheIndex*)(params->kv_cache_offset.data_ptr())),
            kv_block_array.cache_type == KvCacheDataType::FP8,
            reinterpret_cast<uint32_t*>(params->sequence_lengths.data_ptr()),
-           device_);
+           device);
     return output;
 }
 

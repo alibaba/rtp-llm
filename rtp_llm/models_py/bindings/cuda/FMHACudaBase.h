@@ -1,8 +1,9 @@
 #pragma once
 
+#include <cuda_runtime.h>
 #include "rtp_llm/cpp/config/GptInitParameter.h"
-#include "rtp_llm/cpp/devices/cuda_impl/CudaDevice.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
+#include "rtp_llm/cpp/devices/cuda_impl/CudaDevice.h"
 
 namespace rtp_llm {
 

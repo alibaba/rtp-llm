@@ -63,9 +63,10 @@ ParamsPtr CudaDevice::prepareTrtAttn(const AttentionConfigs& configs,
                           kv_cache_block_id->debugString().c_str());
     const size_t max_blocks_per_batch = kv_cache_block_id->shape()[1];
 
-    trt_attn->kv_cache_offset =
-        allocateBuffer({DataType::TYPE_INT32, {size_t(batch_size), 1, 2, max_blocks_per_batch}, AllocationType::DEVICE},
-                       {"kv_cache_offset"});
+    // Create torch::Tensor for kv_cache_offset
+    trt_attn->kv_cache_offset = torch::empty({int64_t(batch_size), 1, 2, int64_t(max_blocks_per_batch)},
+                                             torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+
     trt_attn->kv_block_array                     = KVBlockArray(batch_size,
                                             max_blocks_per_batch,
                                             configs.tokens_per_block,
@@ -74,21 +75,18 @@ ParamsPtr CudaDevice::prepareTrtAttn(const AttentionConfigs& configs,
                                             0,
                                             nullptr,  // (uint64_t*)k_cache.data(),
                                             nullptr,
-                                            (rtp_llm::KVCacheIndex*)trt_attn->kv_cache_offset->data<int>());
+                                            (rtp_llm::KVCacheIndex*)trt_attn->kv_cache_offset.data_ptr<int>());
     trt_attn->kv_block_array.cache_type          = cache_type;
     trt_attn->kv_block_array.mScaleBytesPerBlock = configs.tokens_per_block * configs.kv_head_num * sizeof(float);
 
-    invokeConvertOffsetToBlockArrayData(trt_attn->kv_cache_offset->data<int>(),
+    invokeConvertOffsetToBlockArrayData(trt_attn->kv_cache_offset.data_ptr<int>(),
                                         kv_cache_block_id->data<int>(),
                                         batch_size,
                                         max_blocks_per_batch,
                                         stream_);
     if (is_sm90() && fmha_type_ == FMHAType::PAGED_TRT_V2) {
-        trt_attn->kv_cache_offset_h = allocateBuffer(
-            {DataType::TYPE_INT32, {size_t(batch_size), 1, 2, max_blocks_per_batch}, AllocationType::HOST},
-            {"kv_cache_offset_h"});
-        copy({*trt_attn->kv_cache_offset_h, *trt_attn->kv_cache_offset});
-        trt_attn->kv_block_array.pagedKVBlockOffsetsOnHost = trt_attn->kv_cache_offset_h->data();
+        trt_attn->kv_cache_offset_h                        = trt_attn->kv_cache_offset.to(torch::kCPU);
+        trt_attn->kv_block_array.pagedKVBlockOffsetsOnHost = trt_attn->kv_cache_offset_h.data_ptr();
     }
 
     check_cuda_error();
@@ -374,7 +372,7 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
     auto trt_attn       = ((TRTAttn*)params.common.decode_trt_attn.get());
     auto kv_block_array = trt_attn->kv_block_array;
     TRTAttn::setKvCache(kv_block_array, *params.common.kv_cache);
-    printBufferData(*trt_attn->kv_cache_offset, "kv_cache_offset");
+    printTorchTensorData(trt_attn->kv_cache_offset, "kv_cache_offset");
 
     BufferPtr q_output;
     auto      flash_infer    = (FlashInferAttnParams*)params.common.decode_flash_infer_attn.get();

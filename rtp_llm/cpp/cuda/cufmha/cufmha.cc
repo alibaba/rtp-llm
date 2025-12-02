@@ -2,25 +2,11 @@
 #include "fmha_profiling_interface.h"
 #include "rtp_llm/cpp/kernels/tensor_ops_kernels.h"
 #include "rtp_llm/cpp/core/Dispatch.h"
+#include "rtp_llm/cpp/cuda/cufmha/TrtV2FmhaRunner.h"
 
 using namespace tensorrt_llm::kernels;
 
 namespace rtp_llm {
-
-tensorrt_llm::kernels::Data_type trtDtypeConvert(DataType dtype) {
-    switch (dtype) {
-        case DataType::TYPE_FP16:
-            return tensorrt_llm::kernels::DATA_TYPE_FP16;
-        case DataType::TYPE_BF16:
-            return tensorrt_llm::kernels::DATA_TYPE_BF16;
-#ifdef ENABLE_FP8
-        case DataType::TYPE_FP8_E4M3:
-            return tensorrt_llm::kernels::DATA_TYPE_E4M3;
-#endif
-        default:
-            throw std::runtime_error("cufmha not support dtype: " + std::to_string(static_cast<int>(dtype)));
-    }
-}
 
 cufmha::cufmha(DataType          dtype,
                AttentionMaskType mtype,
@@ -45,17 +31,32 @@ cufmha::cufmha(DataType          dtype,
     size_per_head_ = size_per_head;
     is_s_padded_   = is_s_padded;
     // size_per_head_v_ equals to size_per_head in general.
-    size_per_head_v_           = size_per_head;
-    seq_size_per_block_        = seq_size_per_block;
-    q_scaling_                 = q_scaling;
-    use_linear_bias_slopes_    = use_linear_bias_slopes;
-    support_trt_v1_fmha_       = can_use_trtv1_fmha && initTrtV1FmhaAndCheckSupport();
-    support_trt_v2_fhma_       = can_use_trtv2_fmha && initTrtV2FmhaAndCheckSupport();
-    support_trt_v2_paged_fmha_ = can_use_trtv2_fmha_paged && initTrtV2FmhaPagedAndCheckSupport();
+    size_per_head_v_        = size_per_head;
+    seq_size_per_block_     = seq_size_per_block;
+    q_scaling_              = q_scaling;
+    use_linear_bias_slopes_ = use_linear_bias_slopes;
+    support_trt_v1_fmha_    = can_use_trtv1_fmha && initTrtV1FmhaAndCheckSupport();
     // sm 90 use open source has bug currently
     support_open_source_fmha_ = (can_use_open_source_fmha || can_use_open_source_fmha_paged)
                                 && initOpenSourceFmhaAndCheckSupport() && get_sm() < 90;
     stream_ = stream;
+
+    support_trt_v2_fmha_       = false;
+    support_trt_v2_paged_fmha_ = false;
+    if (can_use_trtv2_fmha || can_use_trtv2_fmha_paged) {
+        TrtV2FmhaRunnerConfig runner_config{
+            head_num,
+            kv_head_num,
+            size_per_head,
+            seq_size_per_block,
+            mtype_,
+            q_scaling_,
+            1.0f  // softmax_extra_scale
+        };
+        trtv2_runner_              = std::make_shared<TrtV2FmhaRunner>(runner_config, dtype_, is_s_padded_, stream);
+        support_trt_v2_fmha_       = trtv2_runner_->trtV2FmhaSupported();
+        support_trt_v2_paged_fmha_ = trtv2_runner_->trtV2PagedFmhaSupported();
+    }
 }
 
 cudaStream_t cufmha::getStream() {
@@ -114,121 +115,19 @@ void cufmha::runTrtV1Fmha(void*  input,
 #endif
 }
 
-MHARunnerFixedParams cufmha::createMHARunnerFixedParams(bool paged, bool isSPadded) {
-    MHARunnerFixedParams fixedParams;
-    fixedParams.dataType     = trtDtypeConvert(dtype_);
-    fixedParams.dataTypeKv   = trtDtypeConvert(dtype_);
-    fixedParams.dataTypeOut  = trtDtypeConvert(dtype_);
-    fixedParams.forceFp32Acc = false;
-    fixedParams.attentionMaskType =
-        mtype_ == AttentionMaskType::causalMask ? ContextAttentionMaskType::CAUSAL : ContextAttentionMaskType::PADDING;
-    fixedParams.attentionInputLayout      = paged ? AttentionInputLayout::Q_PAGED_KV : AttentionInputLayout::PACKED_QKV;
-    fixedParams.isSPadded                 = isSPadded;
-    fixedParams.numQHeads                 = head_num_;
-    fixedParams.numKvHeads                = kv_head_num_;
-    fixedParams.numTokensPerBlock         = seq_size_per_block_;
-    fixedParams.headSize                  = size_per_head_;
-    fixedParams.headSizeV                 = size_per_head_v_;
-    fixedParams.qScaling                  = q_scaling_;
-    fixedParams.attnLogitSoftcappingScale = 0.f;
-    fixedParams.hasAlibi                  = use_linear_bias_slopes_;
-    fixedParams.scaleAlibi                = false;
-    fixedParams.saveSoftmax               = false;
-    return fixedParams;
-}
-
-MHARunnerParams cufmha::createMHARunnerParams(void*        input,
-                                              void*        cu_seqlens,
-                                              void*        cu_kv_seqlens,
-                                              void*        output,
-                                              uint32_t*    tile_counter_ptr,
-                                              float*       attention_output_orig_quant_scale,
-                                              size_t       batch_size,
-                                              size_t       max_input_length,
-                                              size_t       max_kv_length,
-                                              size_t       total_q_seq_len,
-                                              size_t       total_kv_seq_len,
-                                              KVBlockArray kv_block_array,
-                                              void*        custom_mask) {
-    MHARunnerParams runnerParams;
-    runnerParams.b = batch_size;
-    // no in use ?
-    runnerParams.numGroupedHeads      = head_num_;
-    runnerParams.qSeqLen              = max_input_length;
-    runnerParams.kvSeqLen             = max_kv_length;
-    runnerParams.slidingWindowSize    = total_kv_seq_len;  // TODO: support sliding window
-    runnerParams.chunkedAttentionSize = INT_MAX;           // TODO: support chunked attention
-    runnerParams.totalQSeqLen         = total_q_seq_len;
-    runnerParams.totalKvSeqLen        = total_kv_seq_len;
-    runnerParams.qkvPtr               = input;
-    // for page attention, input is Q
-    runnerParams.qPtr              = input;
-    runnerParams.kvPtr             = nullptr;
-    runnerParams.pagedKvCache      = kv_block_array;
-    runnerParams.outputPtr         = output;
-    runnerParams.outputSfPtr       = nullptr;
-    runnerParams.softmaxStatsPtr   = nullptr;
-    runnerParams.attentionSinksPtr = nullptr;
-    runnerParams.packedMaskPtr     = nullptr;
-    runnerParams.cuQSeqLenPtr      = cu_seqlens;
-    runnerParams.cuKvSeqLenPtr     = cu_kv_seqlens;
-    runnerParams.cuMaskRowsPtr     = nullptr;
-    runnerParams.tileCounterPtr    = tile_counter_ptr;
-
-    // TODO: fix scaleBmm1Ptr and scaleBmm2Ptr
-    runnerParams.scaleBmm1Ptr = nullptr;
-    runnerParams.scaleBmm2Ptr = attention_output_orig_quant_scale;
-    runnerParams.oSfScalePtr  = attention_output_orig_quant_scale;
-    runnerParams.stream       = getStream();
-    // for sage attention
-    runnerParams.qScalePtr  = nullptr;
-    runnerParams.kScalePtr  = nullptr;
-    runnerParams.vScalePtr  = nullptr;
-    runnerParams.qMaxNBlock = 0;
-    runnerParams.kMaxNBlock = 0;
-    runnerParams.vMaxNBlock = 0;
-    return runnerParams;
-}
-
 // for cuda graph batch prefill test
 void cufmha::setIsPadded(bool is_s_padded) {
-    is_s_padded_                      = is_s_padded;
-    MHARunnerFixedParams fixedParams1 = createMHARunnerFixedParams(false, is_s_padded_);
-    trtv2_fmha_runner_.reset(new tensorrt_llm::kernels::FusedMHARunnerV2(fixedParams1));
-    MHARunnerFixedParams fixedParams2 = createMHARunnerFixedParams(true, is_s_padded_);
-    trtv2_paged_fmha_runner_.reset(new tensorrt_llm::kernels::FusedMHARunnerV2(fixedParams2));
-}
-
-bool cufmha::initTrtV2FmhaAndCheckSupport() {
-    if (get_sm() == tensorrt_llm::kernels::kSM_70) {
-        trtv2_sm70_fmha_runner_.reset(new tensorrt_llm::kernels::FusedMHARunnerV2Sm70(
-            trtDtypeConvert(dtype_), head_num_, size_per_head_, q_scaling_));
-        return trtv2_sm70_fmha_runner_->fmha_supported()
-               && (mtype_ == AttentionMaskType::causalMask || mtype_ == AttentionMaskType::noMask)
-               && !(mtype_ == AttentionMaskType::noMask && use_linear_bias_slopes_);
-    }
-    if (get_sm() < tensorrt_llm::kernels::kSM_80) {
-        RTP_LLM_LOG_INFO("cuda sm %d < 80, not support trt v2 fmha", get_sm());
-        return false;
-    }
-    MHARunnerFixedParams fixedParams = createMHARunnerFixedParams(false, is_s_padded_);
-    trtv2_fmha_runner_.reset(new tensorrt_llm::kernels::FusedMHARunnerV2(fixedParams));
-
-    return trtv2_fmha_runner_->isFmhaSupported()
-           && (mtype_ == AttentionMaskType::causalMask || mtype_ == AttentionMaskType::noMask)
-           && !(mtype_ == AttentionMaskType::noMask && use_linear_bias_slopes_);
-}
-
-bool cufmha::initTrtV2FmhaPagedAndCheckSupport() {
-    if (get_sm() < tensorrt_llm::kernels::kSM_80) {
-        RTP_LLM_LOG_INFO("cuda sm %d < 80, not support trt paged fmha", get_sm());
-        return false;
-    }
-    MHARunnerFixedParams fixedParams = createMHARunnerFixedParams(true, is_s_padded_);
-    trtv2_paged_fmha_runner_.reset(new tensorrt_llm::kernels::FusedMHARunnerV2(fixedParams));
-    return trtv2_paged_fmha_runner_->isFmhaSupported()
-           && (mtype_ == AttentionMaskType::causalMask || mtype_ == AttentionMaskType::noMask)
-           && !(mtype_ == AttentionMaskType::noMask && use_linear_bias_slopes_);
+    is_s_padded_ = is_s_padded;
+    TrtV2FmhaRunnerConfig runner_config{
+        head_num_,
+        kv_head_num_,
+        size_per_head_,
+        seq_size_per_block_,
+        mtype_,
+        q_scaling_,
+        1.0f  // softmax_extra_scale
+    };
+    trtv2_runner_ = std::make_shared<TrtV2FmhaRunner>(runner_config, dtype_, is_s_padded_, stream_);
 }
 
 bool cufmha::initOpenSourceFmhaAndCheckSupport() {
@@ -250,20 +149,22 @@ void cufmha::runTrtV2FmhaPaged(void*        input,
                                size_t       token_num_kv,
                                KVBlockArray kv_block_array,
                                void*        custom_mask) {
-    auto runnerParams = createMHARunnerParams(input,
-                                              cu_q_seqlens,
-                                              cu_kv_seqlens,
-                                              output,
-                                              tile_counter_ptr,
-                                              attention_output_orig_quant_scale,
-                                              batch_size,
-                                              max_input_seq_len,
-                                              max_past_kv_len,
-                                              token_num,
-                                              token_num_kv,
-                                              kv_block_array,
-                                              custom_mask);
-    trtv2_paged_fmha_runner_->run(runnerParams);
+    if (!trtv2_runner_) {
+        throw std::runtime_error("trtv2_runner_ is not initialized");
+    }
+    trtv2_runner_->runTrtV2FmhaPaged(input,
+                                     cu_q_seqlens,
+                                     cu_kv_seqlens,
+                                     output,
+                                     tile_counter_ptr,
+                                     attention_output_orig_quant_scale,
+                                     batch_size,
+                                     max_input_seq_len,
+                                     max_past_kv_len,
+                                     token_num,
+                                     token_num_kv,
+                                     kv_block_array,
+                                     custom_mask);
     check_cuda_error();
 }
 
@@ -277,28 +178,19 @@ void cufmha::runTrtV2Fmha(void*        input,
                           size_t       token_num,
                           KVBlockArray kv_block_array,
                           void*        custom_mask) {
-    if (trtv2_fmha_runner_) {
-        auto runnerParams = createMHARunnerParams(input,
-                                                  cu_seqlens,
-                                                  cu_seqlens,
-                                                  output,
-                                                  tile_counter_ptr,
-                                                  attention_output_orig_quant_scale,
-                                                  batch_size,
-                                                  max_seq_len,
-                                                  max_seq_len,
-                                                  token_num,
-                                                  token_num,
-                                                  kv_block_array,
-                                                  custom_mask);
-        trtv2_fmha_runner_->run(runnerParams);
-    } else {
-        trtv2_sm70_fmha_runner_->setup_flags(false, false, (mtype_ == AttentionMaskType::causalMask), kv_head_num_);
-
-        trtv2_sm70_fmha_runner_->setup(
-            batch_size, max_seq_len, max_seq_len, token_num, use_linear_bias_slopes_, false, 1, 0);
-        trtv2_sm70_fmha_runner_->run(input, cu_seqlens, output, stream_);
+    if (!trtv2_runner_) {
+        throw std::runtime_error("trtv2_runner_ is not initialized");
     }
+    trtv2_runner_->runTrtV2Fmha(input,
+                                cu_seqlens,
+                                output,
+                                tile_counter_ptr,
+                                attention_output_orig_quant_scale,
+                                batch_size,
+                                max_seq_len,
+                                token_num,
+                                kv_block_array,
+                                custom_mask);
     check_cuda_error();
 }
 
