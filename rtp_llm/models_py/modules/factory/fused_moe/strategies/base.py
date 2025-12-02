@@ -8,11 +8,11 @@ from typing import Any, Dict
 
 import torch
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.models_py.modules.common.moe.fused_moe import (
     FusedMoeDataRouter,
     FusedMoeExpertExecutor,
 )
+from rtp_llm.models_py.modules.factory.fused_moe.runtime_config import RuntimeConfig
 
 from .condition_checker import ConditionChecker
 from .priority_attributes import StrategyAttributes
@@ -29,7 +29,7 @@ class MoeStrategy(ABC):
     to define which Router and Executor implementations they use.
     """
 
-    def can_handle(self, config: GptInitModelParameters) -> bool:
+    def can_handle(self, config: RuntimeConfig) -> bool:
         """Determine whether this strategy can handle the given configuration
 
         This method creates a checker and calls the check_conditions methods
@@ -37,7 +37,7 @@ class MoeStrategy(ABC):
         the given configuration.
 
         Args:
-            config: Model initialization parameters
+            config: Runtime config, including model config and runtime flags
 
         Returns:
             Whether this configuration can be handled
@@ -58,7 +58,7 @@ class MoeStrategy(ABC):
         return checker.all_passed()
 
     @abstractmethod
-    def create_router(self, config: GptInitModelParameters) -> FusedMoeDataRouter:
+    def create_router(self, config: RuntimeConfig) -> FusedMoeDataRouter:
         """Create Router
 
         Args:
@@ -71,7 +71,7 @@ class MoeStrategy(ABC):
 
     @abstractmethod
     def create_executor(
-        self, config: GptInitModelParameters, weights: Dict[str, torch.Tensor]
+        self, config: RuntimeConfig, weights: Dict[str, torch.Tensor]
     ) -> FusedMoeExpertExecutor:
         """Create Executor
 

@@ -12,6 +12,7 @@ from rtp_llm.models_py.modules.common.moe.fused_moe import (
     FusedMoeExpertExecutor,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.quant_config import FusedMoEQuantConfig
+from rtp_llm.models_py.modules.factory.fused_moe.runtime_config import RuntimeConfig
 from rtp_llm.models_py.modules.factory.fused_moe.type import ExecutorType
 from rtp_llm.models_py.modules.quantization.deepgemm_wrapper import (
     is_deep_gemm_e8m0_used,
@@ -41,7 +42,7 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
         return ExecutorType.DEEPGEMM_CONTINUOUS
 
     @classmethod
-    def check_conditions(cls, checker: Any, config: GptInitModelParameters) -> None:
+    def check_conditions(cls, checker: Any, config: RuntimeConfig) -> None:
         """Check if DeepGemmContinousExecutor can handle the configuration"""
         from rtp_llm.models_py.modules.factory.fused_moe.config_resolver import (
             MoeConfigResolver,

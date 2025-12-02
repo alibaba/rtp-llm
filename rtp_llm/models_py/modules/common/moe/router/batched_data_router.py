@@ -5,8 +5,8 @@ from typing import Any, Optional
 import torch
 
 import rtp_llm.models_py.modules.common.moe.fused_moe as mm
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.models_py.modules.factory.fused_moe.quant_config import FusedMoEQuantConfig
+from rtp_llm.models_py.modules.factory.fused_moe.runtime_config import RuntimeConfig
 from rtp_llm.models_py.modules.factory.fused_moe.type import RouterType
 
 
@@ -67,7 +67,7 @@ class BatchedDataRouter(mm.FusedMoeDataRouter):
         return RouterType.BATCHED_DATA
 
     @classmethod
-    def check_conditions(cls, checker: Any, config: GptInitModelParameters) -> None:
+    def check_conditions(cls, checker: Any, config: RuntimeConfig) -> None:
         """Check if BatchedDataRouter can handle the configuration"""
         from rtp_llm.models_py.modules.factory.fused_moe.config_resolver import (
             MoeConfigResolver,
