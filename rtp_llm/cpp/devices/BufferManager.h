@@ -66,6 +66,7 @@ public:
     void                 setTraceMemory(bool trace_memory);
     virtual BufferStatus queryStatus();
     std::string          printAllocationRecords(IAllocator* allocator);
+    std::string          printAllocationRecordsStack(IAllocator* allocator);
 
     void holdRecycle();
     void releaseRecycleHold();

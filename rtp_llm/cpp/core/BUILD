@@ -162,7 +162,18 @@ cc_library(
     deps = [
         "//rtp_llm/cpp/core:allocator",
         "//rtp_llm/cpp/devices:devices_base",
+        "//rtp_llm/cpp/core:allocator_util",
     ] + torch_deps(),
     include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "allocator_util",
+    hdrs = [
+        "torch_utils/allocator_util.h"
+    ],
+    copts = copts(),
+    deps = torch_deps(),
     visibility = ["//visibility:public"],
 )
