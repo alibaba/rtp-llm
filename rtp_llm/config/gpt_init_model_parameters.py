@@ -533,6 +533,70 @@ class GptInitModelParameters:
         self.worker_grpc_addrs = worker_grpc_addrs
         self.worker_addrs = worker_addrs
 
+    def _parse_comma_separated_ints(
+        self, config: str, config_name: str, item_name: str, raise_on_empty: bool = True
+    ) -> List[int]:
+        """
+        Parse comma-separated list of positive integers from config string.
+
+        Args:
+            config: Configuration string containing comma-separated integers
+            config_name: Name of the configuration (for error messages)
+            item_name: Name of the items being parsed (e.g., "sequence lengths", "batch sizes")
+            raise_on_empty: If True, raise ValueError when no valid items found; if False, return empty list
+
+        Returns:
+            List of positive integers parsed from the config string
+
+        Raises:
+            ValueError: If raise_on_empty=True and no valid items found, or if parsing fails
+        """
+        try:
+            values = [int(x.strip()) for x in config.split(",") if x.strip()]
+            values = [x for x in values if x > 0]
+            if values:
+                logging.info(
+                    f"Using {item_name} from comma-separated list: {len(values)} items"
+                )
+                return values
+            else:
+                # Extract base item name (last 2 words, e.g., "sequence lengths" from "prefill capture sequence lengths")
+                words = item_name.split()
+                base_item_name = (
+                    " ".join(words[-2:])
+                    if len(words) >= 2
+                    else words[-1] if words else item_name
+                )
+                error_msg = f"{config_name} contains no valid {base_item_name}"
+                if raise_on_empty:
+                    raise ValueError(error_msg)
+                else:
+                    logging.warning(f"{error_msg}, using default logic")
+                    return []
+        except ValueError as e:
+            # Check if the exception is from our own code (contains config_name)
+            if config_name in str(e):
+                # Re-raise our own exceptions as-is
+                if raise_on_empty:
+                    raise
+                else:
+                    logging.warning(f"{e}, using default logic")
+                    return []
+            else:
+                # For parsing errors (e.g., invalid int), use simpler message
+                words = item_name.split()
+                base_item_name = (
+                    " ".join(words[-2:])
+                    if len(words) >= 2
+                    else words[-1] if words else item_name
+                )
+                error_msg = f"{config_name} contains no valid {base_item_name}"
+                if raise_on_empty:
+                    raise ValueError(error_msg)
+                else:
+                    logging.warning(f"{error_msg}, using default logic")
+                    return []
+
     def _generate_prefill_capture_seq_lens(self) -> List[int]:
         """
         Generate prefill capture sequence lengths from Python.
@@ -613,20 +677,37 @@ class GptInitModelParameters:
                 raise ValueError(f"Invalid range format '{config}': {e}")
 
         # Mode 2: Comma-separated list (default)
-        try:
-            seq_lens = [int(x.strip()) for x in config.split(",") if x.strip()]
-            seq_lens = [x for x in seq_lens if x > 0]
-            if seq_lens:
-                logging.info(
-                    f"Using prefill capture sequence lengths from comma-separated list: {len(seq_lens)} lengths"
-                )
-                return seq_lens
-            else:
-                raise ValueError(
-                    f"prefill_capture_config contains no valid sequence lengths: '{config}'"
-                )
-        except ValueError as e:
-            raise ValueError(f"Invalid prefill_capture_config format '{config}': {e}")
+        return self._parse_comma_separated_ints(
+            config,
+            "prefill_capture_config",
+            "prefill capture sequence lengths",
+            raise_on_empty=True,
+        )
+
+    def _generate_decode_capture_batch_sizes(self) -> List[int]:
+        """
+        Generate decode capture batch sizes from Python.
+        Only supports comma-separated list format, e.g., '1,2,4,8,16,32'
+
+        Returns empty list if no configuration is provided (will use default logic).
+        """
+        # Get config from py_env_configs (which is populated from command line arguments)
+        config = self.py_env_configs.py_hw_kernel_config.decode_capture_config
+        if not config:
+            # Return empty list to use default logic
+            return []
+
+        config = config.strip()
+        if not config:
+            return []
+
+        # Only support comma-separated list format
+        return self._parse_comma_separated_ints(
+            config,
+            "decode_capture_config",
+            "decode capture batch sizes",
+            raise_on_empty=False,
+        )
 
     def update_gpt_init_params_from_env(
         self, parallel_info: ParallelInfo = g_parallel_info
@@ -747,6 +828,8 @@ class GptInitModelParameters:
         prefill_capture_seq_lens = []
         if enable_cuda_graph:
             prefill_capture_seq_lens = self._generate_prefill_capture_seq_lens()
+        # Generate decode capture batch sizes from Python
+        decode_capture_batch_sizes = self._generate_decode_capture_batch_sizes()
         self.gpt_init_params.hw_kernel_config = HWKernelConfig(
             deep_gemm_num_sm=get_env_int("DEEP_GEMM_NUM_SM"),
             arm_gemm_use_kai=get_env_bool("ARM_GEMM_USE_KAI"),
@@ -766,6 +849,7 @@ class GptInitModelParameters:
             enable_native_cuda_graph=get_env_bool("ENABLE_NATIVE_CUDA_GRAPH", False),
             num_native_cuda_graph=get_env_int("NUM_NATIVE_CUDA_GRAPH", 200),
             prefill_capture_seq_lens=prefill_capture_seq_lens,
+            decode_capture_batch_sizes=decode_capture_batch_sizes,
         )
 
         # DeviceResourceConfig

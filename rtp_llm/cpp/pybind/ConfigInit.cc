@@ -235,6 +235,7 @@ void register_hwkernel_config(pybind11::module& m) {
                             bool,
                             bool,
                             int,
+                            std::vector<int>,
                             std::vector<int>>(),
              pybind11::arg("deep_gemm_num_sm")             = -1,
              pybind11::arg("arm_gemm_use_kai")             = false,
@@ -249,7 +250,8 @@ void register_hwkernel_config(pybind11::module& m) {
              pybind11::arg("use_asm_pa")                   = true,
              pybind11::arg("enable_native_cuda_graph")     = false,
              pybind11::arg("num_native_cuda_graph")        = 200,
-             pybind11::arg("prefill_capture_seq_lens")     = std::vector<int>())
+             pybind11::arg("prefill_capture_seq_lens")     = std::vector<int>(),
+             pybind11::arg("decode_capture_batch_sizes")   = std::vector<int>())
         .def("to_string", &HWKernelConfig::to_string)
         .def("update_from_env", &HWKernelConfig::update_from_env_for_test)
         .def_readwrite("deep_gemm_num_sm", &HWKernelConfig::deep_gemm_num_sm)
@@ -265,7 +267,8 @@ void register_hwkernel_config(pybind11::module& m) {
         .def_readwrite("use_asm_pa", &HWKernelConfig::use_asm_pa)
         .def_readwrite("enable_native_cuda_graph", &HWKernelConfig::enable_native_cuda_graph)
         .def_readwrite("num_native_cuda_graph", &HWKernelConfig::num_native_cuda_graph)
-        .def_readwrite("prefill_capture_seq_lens", &HWKernelConfig::prefill_capture_seq_lens);
+        .def_readwrite("prefill_capture_seq_lens", &HWKernelConfig::prefill_capture_seq_lens)
+        .def_readwrite("decode_capture_batch_sizes", &HWKernelConfig::decode_capture_batch_sizes);
 }
 
 // DeviceResourceConfig

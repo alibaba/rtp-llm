@@ -27,7 +27,8 @@ public:
         max_seq_len_(params.max_seq_len),
         seq_size_per_block_(params.tokens_per_block),
         kv_cache_block_offset_(kv_cache_block_offset),
-        prefill_capture_seq_lens_(params.hw_kernel_config.prefill_capture_seq_lens) {
+        prefill_capture_seq_lens_(params.hw_kernel_config.prefill_capture_seq_lens),
+        decode_capture_batch_sizes_(params.hw_kernel_config.decode_capture_batch_sizes) {
         py::gil_scoped_acquire gil;
         if (!py_instance_ || py_instance_.is_none()) {
             throw std::runtime_error("CudaGraphRunner constructor: Python instance is null or none.");
@@ -81,10 +82,12 @@ private:
     void replayAndSyncCheck(int key, const char* key_type);
     // Common input preparation logic for capture
     void prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens);
-    void initKernelInternalMemory();
-    void setPositionEncoding(torch::Tensor position_encoding) override;
-    void setTokenTypeEmbedding(torch::Tensor token_type_embedding) override;
-    void setInputEmbeddingScalar(float input_embedding_scalar) override;
+    // Common memory hold creation logic
+    CaptureMemoryHold createCaptureMemoryHold(PyModelInputs& inputs, int tokens_count);
+    void              initKernelInternalMemory();
+    void              setPositionEncoding(torch::Tensor position_encoding) override;
+    void              setTokenTypeEmbedding(torch::Tensor token_type_embedding) override;
+    void              setInputEmbeddingScalar(float input_embedding_scalar) override;
 
 private:
     void                 copySmallerIntoLarger(const torch::Tensor& source_tensor, torch::Tensor& target_tensor);
@@ -110,7 +113,8 @@ private:
     int                  kv_cache_block_offset_{0};
     CudaGraphState       state_;
     std::vector<int>     capture_range_;
-    std::vector<int>     prefill_capture_seq_lens_;  // Pre-configured sequence lengths from Python
+    std::vector<int>     prefill_capture_seq_lens_;    // Pre-configured sequence lengths from Python
+    std::vector<int>     decode_capture_batch_sizes_;  // Pre-configured batch sizes from Python
     // capture seqLen -> GraphInstance (prefill)
     // batch_size -> GraphInstance (decode)
     std::unordered_map<int, GraphInstance> graph_instances_;

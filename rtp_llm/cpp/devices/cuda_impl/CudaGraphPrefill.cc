@@ -9,18 +9,13 @@ void CudaGraphRunner::capturePrefill() {
         int seq_len = capture_range_[i];
         RTP_LLM_LOG_INFO("capture range for seq len: %d", seq_len);
         PyModelInputs inputs;
-        inputs.input_ids = capture_mem_hold_.py_model_inputs_.input_ids.slice(0, 0, seq_len);
         // for attention, it always run the max_bs, so when we run `forward`, the real batch size is not sure
         // we will transfer a `batch size tensor(int)` for `copy kernel`.
-        inputs.attention_inputs.input_lengths =
-            capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths.slice(0, 0, max_bs_);
         // Prepare common inputs using shared function
         prepareCaptureInputs(inputs, max_bs_, seq_len);
         // Prefill-specific settings
         inputs.attention_inputs.cu_seqlens.data_ptr<int>()[1]    = seq_len;
         inputs.attention_inputs.input_lengths.data_ptr<int>()[0] = seq_len;
-        inputs.attention_inputs.padding_offset =
-            capture_mem_hold_.py_model_inputs_.attention_inputs.padding_offset.slice(0, 0, seq_len);
         inputs.attention_inputs.prefill_cuda_graph_copy_params =
             capture_mem_hold_.py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params;
         if (inputs.bert_embedding_inputs.position_encoding.numel() > 0) {
@@ -29,11 +24,7 @@ void CudaGraphRunner::capturePrefill() {
             inputs.bert_embedding_inputs.combo_tokens_type_ids =
                 inputs.bert_embedding_inputs.combo_tokens_type_ids.slice(0, 0, seq_len);
         }
-        graph_instances_[seq_len].mem_hold_ =
-            CaptureMemoryHold(capture_mem_hold_.decoder_layer_hidden_states_.slice(0, 0, max_bs_ * num_tokens_per_bs_),
-                              inputs,
-                              kv_cache_block_offset_,
-                              is_prefill_cuda_graph_mode_);
+        graph_instances_[seq_len].mem_hold_ = createCaptureMemoryHold(inputs, max_bs_ * num_tokens_per_bs_);
         graph_instances_[seq_len].mem_hold_.decoder_layer_hidden_states_ =
             graph_instances_[seq_len].mem_hold_.decoder_layer_hidden_states_.slice(0, 0, seq_len);
         capturePrefillOneSeqLen(seq_len);

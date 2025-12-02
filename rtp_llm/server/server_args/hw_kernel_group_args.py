@@ -124,3 +124,15 @@ def init_hw_kernel_group_args(parser):
             "  3. Range: format 'max:step', e.g., '16384:128' (generates [128, 256, ..., 16384])"
         ),
     )
+
+    hw_kernel_group.add_argument(
+        "--decode_capture_config",
+        env_name="DECODE_CAPTURE_CONFIG",
+        type=str,
+        default="",
+        help=(
+            "Decode CUDA Graph capture batch sizes configuration. "
+            "Supports comma-separated list format, e.g., '1,2,4,8,16,32'. "
+            "If not set, default logic will be used to generate batch sizes."
+        ),
+    )

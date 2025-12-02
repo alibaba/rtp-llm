@@ -6,6 +6,13 @@ void CudaGraphRunner::replayDecode(int bs) {
 }
 
 std::vector<int> CudaGraphRunner::getDecodeBatchSizesToCapture() {
+    // If decode_capture_batch_sizes_ is provided from Python, use it directly
+    if (!decode_capture_batch_sizes_.empty()) {
+        RTP_LLM_LOG_INFO("Using decode capture batch sizes from Python: %zu sizes", decode_capture_batch_sizes_.size());
+        return decode_capture_batch_sizes_;
+    }
+
+    // Otherwise, use default logic
     std::vector<int> capture_bs;
     int              max_generate_batch_size = max_bs_;
     RTP_LLM_LOG_INFO("max_generate_batch_size for cuda graph: %d", max_generate_batch_size);
@@ -33,20 +40,10 @@ void CudaGraphRunner::captureDecode() {
     for (int i = 0; i <= capture_range_size - 1; i++) {
         int           bs = capture_range_[i];
         PyModelInputs inputs;
-        inputs.input_ids = capture_mem_hold_.py_model_inputs_.input_ids.slice(0, 0, bs * num_tokens_per_bs_);
-        inputs.attention_inputs.input_lengths =
-            capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths.slice(0, 0, bs);
         // Prepare common inputs using shared function
         prepareCaptureInputs(inputs, bs, bs * num_tokens_per_bs_);
-        // Decode-specific settings
-        inputs.attention_inputs.padding_offset =
-            capture_mem_hold_.py_model_inputs_.attention_inputs.padding_offset.slice(0, 0, bs * num_tokens_per_bs_);
 
-        graph_instances_[bs].mem_hold_ =
-            CaptureMemoryHold(capture_mem_hold_.decoder_layer_hidden_states_.slice(0, 0, bs * num_tokens_per_bs_),
-                              inputs,
-                              kv_cache_block_offset_,
-                              is_prefill_cuda_graph_mode_);
+        graph_instances_[bs].mem_hold_ = createCaptureMemoryHold(inputs, bs * num_tokens_per_bs_);
         captureDecodeOneBatchSize(bs);
         replayAndSyncCheck(bs, "batch size");
         RTP_LLM_LOG_INFO("capture success for batch size: %d", bs);
