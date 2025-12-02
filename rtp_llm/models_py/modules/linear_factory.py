@@ -51,7 +51,6 @@ class LinearFactory:
 
         if not hasattr(config, "quant_config") or config.quant_config is None:
             return False
-
         # Check quantization method if available
         if hasattr(config.quant_config, "get_method"):
             quant_method = config.quant_config.get_method()
@@ -59,6 +58,7 @@ class LinearFactory:
                 "FP8",
                 "FP8_PER_BLOCK",
                 "FP8_PER_CHANNEL_COMPRESSED",
+                "FP8_PER_CHANNEL_COMPRESSED_ONLINE",
                 "FP8_PER_TENSOR_COMPRESSED",
             ]
             if quant_method not in fp8_methods:
@@ -69,9 +69,13 @@ class LinearFactory:
         if weight is None:
             return False
 
-        return (
-            weight.dtype == torch.float8_e4m3fn or weight.dtype == torch.float8_e4m3fnuz
-        )
+        if quant_method == "FP8_PER_CHANNEL_COMPRESSED_ONLINE":
+            return True
+        else:
+            return (
+                weight.dtype == torch.float8_e4m3fn
+                or weight.dtype == torch.float8_e4m3fnuz
+            )
 
     @staticmethod
     def create_linear(
@@ -90,6 +94,14 @@ class LinearFactory:
                 or weight.dtype == torch.float8_e4m3fnuz
             )
         ):
+            if (
+                config is not None
+                and config.quant_config is not None
+                and config.quant_config.get_method()
+                == "FP8_PER_CHANNEL_COMPRESSED_ONLINE"
+            ):
+                return Fp8PTPCLinear(weight, weight_scales, bias, True, config)
+
             if weight_scales is None:
                 raise ValueError("FP8 linear layer requires weight_scales")
             if config is None:
@@ -113,7 +125,7 @@ class LinearFactory:
                         quant_config
                         and quant_config.get_method() == "FP8_PER_CHANNEL_COMPRESSED"
                     ):
-                        return Fp8PTPCLinear(weight, weight_scales, bias, config)
+                        return Fp8PTPCLinear(weight, weight_scales, bias, False, config)
                     else:
                         return Fp8DeepGEMMLinear(weight, weight_scales, bias, config)
         else:
