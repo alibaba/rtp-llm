@@ -35,7 +35,7 @@ void register_parallelism_distributed_config(pybind11::module& m) {
              pybind11::arg("world_rank")       = 0,
              pybind11::arg("local_world_size") = 1,
              pybind11::arg("ffn_sp_size")      = 1,
-             pybind11::arg("use_all_gather")   = false)
+             pybind11::arg("use_all_gather")   = true)
         .def("to_string", &ParallelismDistributedConfig::to_string)
         .def("update_from_env", &ParallelismDistributedConfig::update_from_env_for_test)
         .def_readwrite("tp_size", &ParallelismDistributedConfig::tp_size)

@@ -26,6 +26,7 @@ class ServerArgsDefaultTest(TestCase):
         self.assertIsNone(env.get("WORLD_RANK"))  # 无默认值
         self.assertIsNone(env.get("LOCAL_WORLD_SIZE"))  # 无默认值
         self.assertEqual(env.get("FFN_SP_SIZE"), "1")
+        self.assertEqual(env.get("USE_ALL_GATHER"), "1")  # 默认值为 True
 
         # 2. Concurrency 控制
         self.assertEqual(env.get("CONCURRENCY_WITH_BLOCK"), "0")  # 默认False->"0"
@@ -115,9 +116,13 @@ class ServerArgsDefaultTest(TestCase):
         self.assertIsNone(env.get("ACEXT_GEMM_CONFIG_DIR"))
 
         # 9. MOE 专家并行
-        self.assertEqual(env.get("USE_DEEPEP_MOE"), "0")
-        self.assertEqual(env.get("USE_DEEPEP_INTERNODE"), "0")
-        self.assertEqual(env.get("USE_DEEPEP_LOW_LATENCY"), "1")
+        self.assertIsNone(env.get("USE_DEEPEP_MOE"))  # 默认值为 None，允许自动配置
+        self.assertIsNone(
+            env.get("USE_DEEPEP_INTERNODE")
+        )  # 默认值为 None，允许自动配置
+        self.assertIsNone(
+            env.get("USE_DEEPEP_LOW_LATENCY")
+        )  # 默认值为 None，允许自动配置
         self.assertEqual(env.get("USE_DEEPEP_P2P_LOW_LATENCY"), "0")
         self.assertEqual(env.get("DEEP_EP_NUM_SM"), "0")
         self.assertEqual(env.get("FAKE_BALANCE_EXPERT"), "0")
@@ -299,6 +304,8 @@ class ServerArgsSetTest(TestCase):
             "6",
             "--ffn_sp_size",
             "2",
+            "--use_all_gather",
+            "True",
             # 2. Concurrency 控制
             "--concurrency_with_block",
             "True",
@@ -723,6 +730,7 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(env["WORLD_RANK"], "2")
         self.assertEqual(env["LOCAL_WORLD_SIZE"], "6")
         self.assertEqual(env["FFN_SP_SIZE"], "2")
+        self.assertEqual(env["USE_ALL_GATHER"], "1")
 
         # 2. Concurrency 控制
         self.assertEqual(env["CONCURRENCY_WITH_BLOCK"], "1")
@@ -945,8 +953,10 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(env["DASHSCOPE_HTTP_URL"], "http://test.url")
         self.assertEqual(env["DASHSCOPE_WEBSOCKET_URL"], "ws://test.url")
         self.assertEqual(env["OPENAI_API_KEY"], "test_openai_key")
-        self.assertEqual(env["JSON_MODEL_OVERRIDE_ARGS"],
-                         '{"rope_scaling":{"type":"yarn","factor":2.0,"original_max_position_embeddings":32768,"beta_slow":1.0,"beta_fast":1.0,"mscale":1.0,"extrapolation_factor":1.0}}')
+        self.assertEqual(
+            env["JSON_MODEL_OVERRIDE_ARGS"],
+            '{"rope_scaling":{"type":"yarn","factor":2.0,"original_max_position_embeddings":32768,"beta_slow":1.0,"beta_fast":1.0,"mscale":1.0,"extrapolation_factor":1.0}}',
+        )
 
         # 27. Lora Configuration
         self.assertEqual(env["LORA_INFO"], '{"lora1": "/path/to/lora1"}')
@@ -966,9 +976,7 @@ class ServerArgsSetTest(TestCase):
 
         # 30. Miscellaneous Configuration
         self.assertEqual(env["DISABLE_PDL"], "1")
-        self.assertEqual(
-            env["AUX_STRING"], ""
-        )
+        self.assertEqual(env["AUX_STRING"], "")
 
         # 31. PD-Separation Configuration
         self.assertEqual(env["PREFILL_RETRY_TIMES"], "2")

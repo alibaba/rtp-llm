@@ -16,6 +16,7 @@ from rtp_llm.config.py_config_modules import (
     StaticConfig,
     get_env_bool,
     get_env_int,
+    get_env_optional_bool,
     get_env_str,
 )
 from rtp_llm.config.quant_config import (
@@ -535,6 +536,8 @@ class GptInitModelParameters:
     ):
 
         # ParallelismDistributedConfig
+        # USE_ALL_GATHER: Enable all-gather communication for pure TP (ep_size == tp_size).
+        # When enabled, DeepEP should not be used. Default is False.
         # Calculate use_all_gather: (USE_ALL_GATHER env is True) and (ep_size == tp_size)
         use_all_gather_env = get_env_bool("USE_ALL_GATHER", True)
         use_all_gather = use_all_gather_env and (
@@ -687,10 +690,24 @@ class GptInitModelParameters:
         )
 
         # MoeConfig
+        use_deepep_moe_env = get_env_optional_bool("USE_DEEPEP_MOE")
+        use_deepep_internode_env = get_env_optional_bool("USE_DEEPEP_INTERNODE")
+        use_deepep_low_latency_env = get_env_optional_bool("USE_DEEPEP_LOW_LATENCY")
+
         self.gpt_init_params.moe_config = MoeConfig(
-            use_deepep_moe=get_env_bool("USE_DEEPEP_MOE", False),
-            use_deepep_internode=get_env_bool("USE_DEEPEP_INTERNODE", False),
-            use_deepep_low_latency=get_env_bool("USE_DEEPEP_LOW_LATENCY", True),
+            use_deepep_moe=(
+                use_deepep_moe_env if use_deepep_moe_env is not None else False
+            ),
+            use_deepep_internode=(
+                use_deepep_internode_env
+                if use_deepep_internode_env is not None
+                else False
+            ),
+            use_deepep_low_latency=(
+                use_deepep_low_latency_env
+                if use_deepep_low_latency_env is not None
+                else True
+            ),
             use_deepep_p2p_low_latency=get_env_bool(
                 "USE_DEEPEP_P2P_LOW_LATENCY", False
             ),

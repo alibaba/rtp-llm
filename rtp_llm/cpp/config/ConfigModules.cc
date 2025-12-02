@@ -32,7 +32,7 @@ void ParallelismDistributedConfig::update_from_env_for_test() {
     world_rank       = autil::EnvUtil::getEnv("WORLD_RANK", 0);
     local_world_size = autil::EnvUtil::getEnv("LOCAL_WORLD_SIZE", 1);
     ffn_sp_size      = autil::EnvUtil::getEnv("FFN_SP_SIZE", 1);
-    use_all_gather   = bool_from_env_for_test("USE_ALL_GATHER", true) && (ep_size == tp_size);
+    use_all_gather   = bool_from_env_for_test("USE_ALL_GATHER", true);
 }
 
 // ParallelismDistributedConfig

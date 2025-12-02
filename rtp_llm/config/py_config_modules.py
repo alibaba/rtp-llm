@@ -40,6 +40,17 @@ def get_env_bool(name: str, default: bool = False):
     return v.lower() == "1" or v.lower() == "on" or v.lower() == "true"
 
 
+def get_env_optional_bool(name: str):
+    """
+    Get optional bool from environment variable.
+    Returns None if environment variable is not set, otherwise returns bool value.
+    """
+    v = os.environ.get(name, None)
+    if v is None or v == "":
+        return None
+    return v.lower() == "1" or v.lower() == "on" or v.lower() == "true"
+
+
 class ServerConfig:
     def __init__(self):
         self.frontend_server_count = 4
@@ -891,6 +902,25 @@ class PyEnvConfigs:
         self.jit_config.update_from_env()
         self.py_hw_kernel_config.update_from_env()
         logging.info(self.to_string())
+
+    def should_auto_configure_deepep(self) -> bool:
+        """
+        Check if DeepEP should be auto-configured.
+        Returns True if environment variables are not set (None), meaning user hasn't manually configured.
+        Returns False if user has manually set any of the DeepEP environment variables.
+        """
+        use_deepep_moe_env = get_env_optional_bool("USE_DEEPEP_MOE")
+        use_deepep_internode_env = get_env_optional_bool("USE_DEEPEP_INTERNODE")
+        use_deepep_low_latency_env = get_env_optional_bool("USE_DEEPEP_LOW_LATENCY")
+
+        # Check if all environment variables are None (not set)
+        # If all are None, we should auto-configure
+        # If any is not None, user has manually configured, so we shouldn't auto-configure
+        return (
+            use_deepep_moe_env is None
+            and use_deepep_internode_env is None
+            and use_deepep_low_latency_env is None
+        )
 
     def to_string(self):
         return (

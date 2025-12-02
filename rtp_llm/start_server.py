@@ -6,6 +6,7 @@ import signal
 import sys
 import time
 import traceback
+from math import log
 
 import requests
 
@@ -135,40 +136,18 @@ def start_frontend_server_impl(
 def should_auto_configure_deepep() -> bool:
     """
     Check if DeepEP should be auto-configured.
-    Returns True if current values match defaults (user hasn't manually set them).
-    Returns False if user has manually set any of the DeepEP values to non-default.
-
-    This function reads values from StaticConfig.moe_config and compares them with
-    default values to determine if user has manually configured.
-
-    Default values:
-    - USE_DEEPEP_MOE: False
-    - USE_DEEPEP_INTERNODE: False
-    - USE_DEEPEP_LOW_LATENCY: True
+    Returns True if environment variables are not set (None), meaning user hasn't manually configured.
+    Returns False if user has manually set any of the DeepEP environment variables.
     """
-    # Default values
-    default_use_deepep_moe = False
-    default_use_deepep_internode = False
-    default_use_deepep_low_latency = True
-
-    # Read current values from StaticConfig.moe_config
-    current_use_deepep_moe = StaticConfig.moe_config.use_deepep_moe
-    current_use_deepep_internode = StaticConfig.moe_config.use_deepep_internode
-    current_use_deepep_low_latency = StaticConfig.moe_config.use_deepep_low_latency
-
-    # Check if current values match defaults
-    # If all match defaults, user hasn't manually set them, so we should auto-configure
-    # If any value differs from default, user has manually configured, so we shouldn't auto-configure
-    return (
-        current_use_deepep_moe == default_use_deepep_moe
-        and current_use_deepep_internode == default_use_deepep_internode
-        and current_use_deepep_low_latency == default_use_deepep_low_latency
-    )
+    return StaticConfig.should_auto_configure_deepep()
 
 
 def auto_configure_deepep(args: argparse.Namespace):
     """
     Automatically configure DeepEP settings based on deployment scenario.
+
+    Note: USE_ALL_GATHER should be enabled for pure TP scenarios (ep_size == tp_size).
+    When USE_ALL_GATHER is enabled, DeepEP should not be used.
 
     Configuration rules (for 8-GPU machine):
     - Non-PD separation + Inference node + Single GPU (1TP): 0, 0, 0
@@ -181,10 +160,19 @@ def auto_configure_deepep(args: argparse.Namespace):
     - PD separation + Prefill node + Multi-node multi-GPU (>=9 GPUs): 1, 0, 1
     - PD separation + Decode node + Multi-node multi-GPU (>=9 GPUs): 1, 1, 1
     """
-    # If USE_ALL_GATHER is enabled, disable all DeepEP settings
-    use_all_gather = StaticConfig.parallelism_distributed_config.use_all_gather
+    logging.info("auto configure deepep work")
+    # Get parallelism info for use_all_gather calculation
+    world_size = g_parallel_info.world_size
+    tp_size = g_parallel_info.tp_size
+    ep_size = g_parallel_info.ep_size
+    logging.info(f"world_size: {world_size}, tp_size: {tp_size}, ep_size: {ep_size}")
+    # If USE_ALL_GATHER is enabled (for pure TP scenarios), disable all DeepEP settings
+    # Calculate use_all_gather: (USE_ALL_GATHER env is True) and (ep_size == tp_size)
+    use_all_gather_env = StaticConfig.parallelism_distributed_config.use_all_gather
+    use_all_gather = use_all_gather_env and (ep_size == tp_size)
 
     if use_all_gather:
+        logging.info("use all gather in `auto_configure_deepep`")
         os.environ["USE_DEEPEP_MOE"] = "0"
         os.environ["USE_DEEPEP_LOW_LATENCY"] = "0"
         os.environ["USE_DEEPEP_INTERNODE"] = "0"
@@ -199,8 +187,6 @@ def auto_configure_deepep(args: argparse.Namespace):
     role_type = (
         role_type_enum.name if hasattr(role_type_enum, "name") else str(role_type_enum)
     )
-    world_size = g_parallel_info.world_size
-    tp_size = g_parallel_info.tp_size
 
     # Get number of nodes
     try:
