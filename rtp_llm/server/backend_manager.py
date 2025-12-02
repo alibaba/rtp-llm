@@ -12,31 +12,51 @@ import torch
 from fastapi import Request
 from fastapi.responses import ORJSONResponse
 from pydantic import BaseModel
+from uvicorn.loops.auto import auto_loop_setup
 
 from rtp_llm.access_logger.access_logger import AccessLogger
 from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 from rtp_llm.config.py_config_modules import PyEnvConfigs, StaticConfig
 from rtp_llm.config.task_type import TaskType
+from rtp_llm.config.uvicorn_config import UVICORN_LOGGING_CONFIG
 from rtp_llm.distribute.gang_server import GangServer
-from rtp_llm.distribute.worker_info import g_parallel_info
+from rtp_llm.distribute.worker_info import WorkerInfo, g_parallel_info
+from rtp_llm.embedding.backend_embedding_app import register_backend_embedding_api
 from rtp_llm.embedding.embedding_endpoint import EmbeddingEndpoint
+from rtp_llm.lora.lora_manager import LoraManager
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 from rtp_llm.model_factory import ModelFactory
+from rtp_llm.model_loader.weight_manager import WeightManager
+from rtp_llm.models.base_model import BaseModel
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
-from rtp_llm.server.misc import format_exception
+from rtp_llm.server.backend_server import BackendServer
+from rtp_llm.server.misc import check_is_master, check_is_worker, format_exception
+from rtp_llm.server.worker_status import CacheStatus
+from rtp_llm.structure.request_extractor import request_id_field_name
 from rtp_llm.utils.concurrency_controller import (
     ConcurrencyException,
     get_global_controller,
 )
 from rtp_llm.utils.fuser import _nfs_manager
+from rtp_llm.utils.util import AtomicCounter
+from rtp_llm.utils.version_info import VersionInfo
 
 StreamObjectType = Union[Dict[str, Any], BaseModel]
 
 USAGE_HEADER = "USAGE"
 
 
-class BackendServer(object):
-    def __init__(self, py_env_configs: PyEnvConfigs):
+# make buffer larger to avoid throw exception "RemoteProtocolError Receive buffer too long"
+MAX_INCOMPLETE_EVENT_SIZE = 1024 * 1024
+
+StreamObjectType = Union[Dict[str, Any], BaseModel]
+
+active_requests = AtomicCounter()
+
+
+class BackendManager(object):
+    def __init__(self, py_env_configs: PyEnvConfigs = StaticConfig):
+        self.py_env_configs = py_env_configs
         if torch.cuda.is_available():
             if (
                 "NCCL_P2P_DISABLE" not in os.environ
@@ -60,6 +80,10 @@ class BackendServer(object):
         self.tp_size = g_parallel_info.tp_size
         self._weight_manager = None
 
+    def init(self):
+        self.start(self.py_env_configs)
+        self.wait_all_worker_ready()
+
     def start(self, py_env_configs: PyEnvConfigs):
         self._gang_server.start()
         if py_env_configs.profiling_debug_config.debug_start_fake_process == 1:
@@ -72,52 +96,29 @@ class BackendServer(object):
                 self.engine.task_type,
             )
             # Initialize endpoints based on task type
-            if self.engine and self.engine.task_type == TaskType.LANGUAGE_MODEL:
+            if self.engine and self.engine.task_type != TaskType.LANGUAGE_MODEL:
+                # For embedding models
+                self._embedding_endpoint = EmbeddingEndpoint(self.engine)
+            else:
                 # For language models
                 self.backend_rpc_server_visitor = BackendRPCServerVisitor(
                     self.engine.config
                 )
 
-    def stop(self) -> None:
-        if isinstance(self.engine, BaseEngine):
-            _nfs_manager.unmount_all()
-            logging.info("all nfs paths unmounted")
-            self.engine.stop()
+        if g_parallel_info.is_master and g_parallel_info.world_size > 1:
+            while True:
+                try:
+                    self._gang_server.wait_infernece_server_ready()
+                    break
+                except Exception as e:
+                    logging.warn("worker not all ready, error_msg: " + str(e))
+                    time.sleep(5)
 
-    def ready(self):
-        if isinstance(self.engine, BaseEngine):
-            return self.engine.ready()
-        return True
-
-    @property
-    def role_type(self) -> str:
-        return self.engine.role_type if self.engine else "unknown"
-
-    def _handle_exception(self, request: Dict[str, Any], e: BaseException):
-        exception_json = format_exception(e)
-        error_code_str = exception_json.get("error_code_str", "")
-        if isinstance(e, ConcurrencyException):
-            kmonitor.report(AccMetrics.CONFLICT_QPS_METRIC)
-        elif isinstance(e, asyncio.CancelledError):
-            kmonitor.report(
-                AccMetrics.CANCEL_QPS_METRIC,
-                1,
-                {"source": request.get("source", "unknown")},
-            )
-            self._access_logger.log_exception_access(request, e)
-        else:
-            kmonitor.report(
-                AccMetrics.ERROR_QPS_METRIC,
-                1,
-                {
-                    "source": request.get("source", "unknown"),
-                    "error_code": error_code_str,
-                },
-            )
-            self._access_logger.log_exception_access(request, e)
-
-        rep = ORJSONResponse(exception_json, status_code=500)
-        return rep
+        if threading.current_thread() != threading.main_thread():
+            # NOTE: asyncio
+            loop = "none"
+            auto_loop_setup()
+            asyncio.set_event_loop(asyncio.new_event_loop())
 
     def wait_all_worker_ready(self):
         # master需要等其他所有机器都ready以后才能起服务，挂vipserver

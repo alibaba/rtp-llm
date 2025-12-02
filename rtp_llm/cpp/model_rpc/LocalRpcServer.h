@@ -30,6 +30,7 @@ public:
     virtual grpc::Status init(const EngineInitParams&                                maga_init_params,
                               py::object                                             mm_process_engine,
                               std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params);
+
     grpc::Status
     GetWorkerStatus(grpc::ServerContext* context, const ::StatusVersionPB* request, ::WorkerStatusPB* response);
 
@@ -45,6 +46,8 @@ public:
                                ::DistKvCacheResponsePB*      response);
 
     grpc::Status CheckHealth(grpc::ServerContext* context, const EmptyPB* request, CheckHealthResponsePB* response);
+
+    grpc::Status UpdateWeights(grpc::ServerContext* context, const UpdateWeightsRequestPB* request, EmptyPB* response);
 
     grpc::Status
     UpdateEplbConfig(grpc::ServerContext* context, const UpdateEplbConfigRequestPB* request, EmptyPB* response);
@@ -113,6 +116,7 @@ protected:
     kmonitor::MetricsReporterPtr          metrics_reporter_;
     std::atomic<size_t>                   onflight_requests_{0};
     std::shared_ptr<RpcServerRuntimeMeta> meta_;
+    py::object                            weight_manager_;
 };
 
 }  // namespace rtp_llm

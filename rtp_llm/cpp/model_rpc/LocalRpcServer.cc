@@ -17,6 +17,7 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
                                   std::unique_ptr<ProposeModelEngineInitParams> propose_params) {
     meta_.reset(new RpcServerRuntimeMeta());
     maga_init_params_ = maga_init_params;
+    weight_manager_   = maga_init_params.weight_manager;
     metrics_reporter_ = maga_init_params.metrics_reporter;
     RTP_LLM_LOG_INFO("LocalRpcServer aux_string %s",
                      maga_init_params_.gpt_init_parameter.misc_config.aux_string.c_str());
@@ -433,18 +434,6 @@ grpc::Status LocalRpcServer::UpdateEplbConfig(grpc::ServerContext*             c
     return grpc::Status::OK;
 }
 
-grpc::Status LocalRpcServer::SetPause(grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response) {
-    RTP_LLM_LOG_DEBUG("receive cacheStatus rpc request from client: %s", context->peer().c_str());
-    engine_->pause();
-    return grpc::Status::OK;
-}
-
-grpc::Status LocalRpcServer::SetRestart(grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response) {
-    RTP_LLM_LOG_DEBUG("receive cacheStatus rpc request from client: %s,", context->peer().c_str());
-    engine_->restart();
-    return grpc::Status::OK;
-}
-
 void LocalRpcServer::reportWorkerStatusTime(int64_t request_begin_time_us, int64_t request_after_ws_time_us) {
     RpcWorkerStatusMetricsCollector collector;
     collector.qps         = true;
@@ -515,4 +504,41 @@ void LocalRpcServer::reportCacheStatusTime(int64_t request_begin_time_us) {
     return grpc::Status::OK;
 }
 
+grpc::Status LocalRpcServer::SetPause(grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response) {
+    RTP_LLM_LOG_DEBUG("receive cacheStatus rpc request from client: %s", context->peer().c_str());
+    engine_->pause();
+    return grpc::Status::OK;
+}
+
+grpc::Status LocalRpcServer::SetRestart(grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response) {
+    RTP_LLM_LOG_DEBUG("receive cacheStatus rpc request from client: %s,", context->peer().c_str());
+    engine_->restart();
+    return grpc::Status::OK;
+}
+
+grpc::Status
+LocalRpcServer::UpdateWeights(grpc::ServerContext* context, const UpdateWeightsRequestPB* request, EmptyPB* response) {
+    RTP_LLM_LOG_DEBUG("Receive update weights request from: %s", context->peer().c_str());
+    try {
+        if (request->name().empty() || request->desc().empty() || request->method().empty()) {
+            throw std::runtime_error("Missing required field(s) in request");
+        }
+        {
+            py::gil_scoped_acquire acquire;
+            py::dict               req;
+            req["name"]   = request->name();
+            req["desc"]   = request->desc();
+            req["method"] = request->method();
+            weight_manager_.attr("update")(req);
+        }
+        return grpc::Status::OK;
+    } catch (const py::error_already_set& e) {
+        PyObject *type, *value, *traceback;
+        PyErr_Fetch(&type, &value, &traceback);
+        std::string err_msg = value ? PyUnicode_AsUTF8(value) : "Unknown Python error";
+        return {grpc::StatusCode::INTERNAL, "exception from python: " + err_msg};
+    } catch (const std::exception& e) {
+        return {grpc::StatusCode::INTERNAL, "exception from C++: " + std::string(e.what())};
+    }
+}
 }  // namespace rtp_llm

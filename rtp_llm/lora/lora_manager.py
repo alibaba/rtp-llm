@@ -3,7 +3,7 @@ import threading
 from typing import Any, Dict, Optional
 
 from rtp_llm.async_decoder_engine.base_engine import BaseEngine
-from rtp_llm.async_decoder_engine.rpc_engine import RPCEngine
+from rtp_llm.async_decoder_engine.rpc_engine import LanguageCppEngine
 from rtp_llm.lora.lora_exception import LoraCountException, LoraException
 from rtp_llm.model_loader.loader import ModelLoader
 from rtp_llm.utils.database import CkptDatabase
@@ -26,7 +26,7 @@ class LoraManager:
             engine.config.py_env_configs.model_specific_config.max_lora_model_size
         )
         self.device: str = self.engine_.model.device
-        assert isinstance(self.engine_, RPCEngine)
+        assert isinstance(self.engine_, LanguageCppEngine)
         self.lora_cpp_wrapper_ = self.engine_.rtp_llm_op_.ft_op
         assert isinstance(self.engine_.model.database, CkptDatabase)
         self.database_ = self.engine_.model.database
