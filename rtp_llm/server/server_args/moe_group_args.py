@@ -10,24 +10,24 @@ def init_moe_group_args(parser):
         "--use_deepep_moe",
         env_name="USE_DEEPEP_MOE",
         type=str2bool,
-        default=False,
-        help="设置为 `True` 以启用 DeepEP 来处理 MoE 模型的 expert 部分。",
+        default=None,
+        help="设置为 `True` 以启用 DeepEP 来处理 MoE 模型的 expert 部分。默认值为 None，允许自动配置。",
     )
 
     moe_group.add_argument(
         "--use_deepep_internode",
         env_name="USE_DEEPEP_INTERNODE",
         type=str2bool,
-        default=False,
-        help="设置为 `True` 以启用 DeepEP 来优化跨节点 (inter-node) 通信。",
+        default=None,
+        help="设置为 `True` 以启用 DeepEP 来优化跨节点 (inter-node) 通信。默认值为 None，允许自动配置。",
     )
 
     moe_group.add_argument(
         "--use_deepep_low_latency",
         env_name="USE_DEEPEP_LOW_LATENCY",
         type=str2bool,
-        default=True,
-        help="设置为 `True` 以启用 DeepEP 的低延迟模式。",
+        default=None,
+        help="设置为 `True` 以启用 DeepEP 的低延迟模式。默认值为 None，允许自动配置。",
     )
 
     moe_group.add_argument(
