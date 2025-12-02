@@ -1,49 +1,59 @@
-#include "rtp_llm/cpp/core/BufferHelper.h"
-#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/devices/cuda_impl/CudaXqa.h"
 #include "3rdparty/xqa/mha.h"
+#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
+#include "rtp_llm/cpp/utils/math_utils.h"
+#include <torch/torch.h>
+#include <c10/cuda/CUDAStream.h>
 
 using namespace std;
 using namespace rtp_llm;
 
 namespace rtp_llm {
 
-BufferPtr getKVCacheScale(CudaDevice* device) {
-    float     scale = 1.;
-    BufferPtr kv_cache_scale =
-        device->allocateBuffer({DataType::TYPE_FP32, {1}, AllocationType::DEVICE}, {"kv_cache_scale"});
-    check_cuda_value(
-        cudaMemcpyAsync(kv_cache_scale->data(), &scale, sizeof(float), cudaMemcpyHostToDevice, device->getStream()));
-    check_cuda_value(cudaStreamSynchronize(device->getStream()));
+static const cudaDeviceProp& getDeviceProp() {
+    static cudaDeviceProp prop = []() {
+        int device_id;
+        check_cuda_value(cudaGetDevice(&device_id));
+        cudaDeviceProp device_prop;
+        check_cuda_value(cudaGetDeviceProperties(&device_prop, device_id));
+        return device_prop;
+    }();
+    return prop;
+}
 
+static cudaStream_t getCurrentStream() {
+    return c10::cuda::getCurrentCUDAStream().stream();
+}
+
+torch::Tensor getKVCacheScale() {
+    float scale          = 1.f;
+    auto  kv_cache_scale = torch::tensor({scale}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
     return kv_cache_scale;
 }
 
-BufferPtr
-getSemaphores(CudaDevice* device, size_t kv_head_num, size_t group_size, size_t max_q_len, size_t max_batch_size) {
-    size_t    nb_blocks_per_grp = std::max(ceil_div<size_t>(max_q_len * group_size, M_TILESIZE),
+torch::Tensor getSemaphores(size_t kv_head_num, size_t group_size, size_t max_q_len, size_t max_batch_size) {
+    size_t nb_blocks_per_grp = std::max(ceil_div<size_t>(max_q_len * group_size, M_TILESIZE),
                                         ceil_div<size_t>(max_q_len, M_TILESIZE / group_size));
-    size_t    sem_size          = kv_head_num * nb_blocks_per_grp * max_batch_size;
-    size_t    real_sem_size     = round_up<size_t>(sem_size, 2) + 2 + sem_size + 2;
-    BufferPtr semaphores =
-        device->allocateBuffer({DataType::TYPE_UINT32, {real_sem_size}, AllocationType::DEVICE}, {"semaphores"});
-    device->bufMemset(*semaphores, 0);
+    size_t sem_size          = kv_head_num * nb_blocks_per_grp * max_batch_size;
+    size_t real_sem_size     = round_up<size_t>(sem_size, 2) + 2 + sem_size + 2;
 
+    auto semaphores =
+        torch::zeros({static_cast<int64_t>(real_sem_size)}, torch::dtype(torch::kUInt32).device(torch::kCUDA));
     return semaphores;
 }
 
-void* getScratch(CudaDevice* device, size_t group_size, uint32_t beam_width) {
-    size_t           scratch_size = (256u << 20) * 4;
-    static BufferPtr scratch =
-        device->allocateBuffer({DataType::TYPE_BYTES, {scratch_size}, AllocationType::DEVICE}, {"scratch"});
-    device->bufMemset(*scratch, 0);
+void* getScratch(size_t group_size, uint32_t beam_width) {
+    size_t               scratch_size = (256u << 20) * 4;
+    static torch::Tensor scratch =
+        torch::zeros({static_cast<int64_t>(scratch_size)}, torch::dtype(torch::kUInt8).device(torch::kCUDA));
+
     auto real_scratch = reinterpret_cast<void*>(
-        round_up<uintptr_t>(reinterpret_cast<uintptr_t>(scratch->data()), ioHeadBytes * group_size * beam_width));
+        round_up<uintptr_t>(reinterpret_cast<uintptr_t>(scratch.data_ptr()), ioHeadBytes * group_size * beam_width));
 
     return real_scratch;
 }
 
-BufferPtr getSpecQMask(CudaDevice* device, size_t max_q_len, size_t max_batch_size) {
+torch::Tensor getSpecQMask(size_t max_q_len, size_t max_batch_size) {
     const size_t          num_bits_per_packed_mask   = sizeof(uint32_t) * 8;
     const size_t          num_packed_masks_per_token = ceil_div<size_t>(max_q_len, num_bits_per_packed_mask);
     std::vector<bool>     host_mask(max_q_len * max_q_len);
@@ -71,8 +81,11 @@ BufferPtr getSpecQMask(CudaDevice* device, size_t max_q_len, size_t max_batch_si
         }
     }
 
-    BufferPtr q_mask = device->clone({*vector2Buffer(host_packed_mask), AllocationType::DEVICE, {"q_mask"}});
-    check_cuda_value(cudaStreamSynchronize(device->getStream()));
+    auto q_mask = torch::from_blob(host_packed_mask.data(),
+                                   {static_cast<int64_t>(host_packed_mask.size())},
+                                   torch::dtype(torch::kUInt32))
+                      .to(torch::kCUDA);
+    check_cuda_value(cudaStreamSynchronize(getCurrentStream()));
 
     return q_mask;
 }
@@ -108,36 +121,35 @@ bool supportXqa(DataType input_type,
     return support;
 }
 
-void runXqa(void*       input,
-            bool        is_input_bf16,
-            void*       output,
-            size_t      head_num,
-            size_t      kv_head_num,
-            size_t      head_dim,
-            size_t      batch_size,
-            size_t      max_blocks_per_seq,
-            size_t      max_seq_len,
-            size_t      page_size,
-            void*       kv_cache_pool,
-            int32_t*    kv_cache_page_list,
-            bool        is_kv_cache_fp8,
-            uint32_t*   sequence_lengths,
-            CudaDevice* device,
-            float*      rcp_out_scale,
-            size_t      max_q_len,
-            void*       q_cu_seqlens,
-            size_t      max_batch_size,
-            float       q_scale,
-            uint32_t    beam_width) {
+void runXqa(void*     input,
+            bool      is_input_bf16,
+            void*     output,
+            size_t    head_num,
+            size_t    kv_head_num,
+            size_t    head_dim,
+            size_t    batch_size,
+            size_t    max_blocks_per_seq,
+            size_t    max_seq_len,
+            size_t    page_size,
+            void*     kv_cache_pool,
+            int32_t*  kv_cache_page_list,
+            bool      is_kv_cache_fp8,
+            uint32_t* sequence_lengths,
+            float*    rcp_out_scale,
+            size_t    max_q_len,
+            void*     q_cu_seqlens,
+            size_t    max_batch_size,
+            float     q_scale,
+            uint32_t  beam_width) {
     if (!input || !output || !head_num || !kv_head_num || (head_num / kv_head_num > 16)
         || (head_dim != 64 && head_dim != 128 && head_dim != 256) || !batch_size || batch_size > max_batch_size
         || !max_blocks_per_seq || !max_seq_len
         || (page_size != 16 && page_size != 32 && page_size != 64 && page_size != 128) || !kv_cache_pool
-        || !kv_cache_page_list || !sequence_lengths || !device) {
+        || !kv_cache_page_list || !sequence_lengths) {
         RTP_LLM_LOG_ERROR(
             "xqa params error: input = %p, is_input_bf16 = %d, output = %p, head_num = %zu, kv_head_num = %zu, "
             "head_dim = %zu, batch_size = %zu, max_blocks_per_seq = %zu, max_seq_len = %zu, page_size = %zu, "
-            "kv_cache_pool = %p, kv_cache_page_list = %p, is_kv_cache_fp8 = %d, sequence_lengths = %p, device = %p, "
+            "kv_cache_pool = %p, kv_cache_page_list = %p, is_kv_cache_fp8 = %d, sequence_lengths = %p, "
             "rcp_out_scale = %p, max_q_len = %d, q_cu_seqlens = %p, max_batch_size = %zu, q_scale = %f, beam_width = %zu",
             input,
             is_input_bf16,
@@ -153,7 +165,6 @@ void runXqa(void*       input,
             kv_cache_page_list,
             is_kv_cache_fp8,
             sequence_lengths,
-            device,
             rcp_out_scale,
             max_q_len,
             q_cu_seqlens,
@@ -170,23 +181,25 @@ void runXqa(void*       input,
 
     size_t max_seq_len_round = round_up<size_t>(max_seq_len, page_size);
 
-    static BufferPtr kv_cache_scale = getKVCacheScale(device);
+    static torch::Tensor kv_cache_scale = getKVCacheScale();
 
-    static BufferPtr semaphores = getSemaphores(device, kv_head_num, group_size, max_q_len, max_batch_size);
+    static torch::Tensor semaphores = getSemaphores(kv_head_num, group_size, max_q_len, max_batch_size);
 
-    static void* scratch = getScratch(device, group_size, beam_width);
+    static void* scratch = getScratch(group_size, beam_width);
 
-    static BufferPtr q_mask = getSpecQMask(device, max_q_len, max_batch_size);
+    static torch::Tensor q_mask = getSpecQMask(max_q_len, max_batch_size);
+
+    static auto device_prop = getDeviceProp();
 
     SpecDecParams spec_params{
-        static_cast<uint32_t>(max_q_len), reinterpret_cast<uint32_t*>(q_cu_seqlens), q_mask->data<uint32_t>()};
+        static_cast<uint32_t>(max_q_len), reinterpret_cast<uint32_t*>(q_cu_seqlens), q_mask.data_ptr<uint32_t>()};
 
     run_xqa_sm90(static_cast<uint32_t>(head_dim),
                  static_cast<uint32_t>(page_size),
                  static_cast<uint32_t>(group_size),
                  is_input_bf16,
                  is_kv_cache_fp8,
-                 device->getDeviceProp(),
+                 device_prop,
                  static_cast<uint32_t>(kv_head_num),
                  q_scale,
                  output,
@@ -196,10 +209,10 @@ void runXqa(void*       input,
                  static_cast<uint32_t>(max_seq_len_round),
                  sequence_lengths,
                  static_cast<uint32_t>(batch_size),
-                 kv_cache_scale->data<float>(),
-                 semaphores->data<uint32_t>(),
+                 kv_cache_scale.data_ptr<float>(),
+                 semaphores.data_ptr<uint32_t>(),
                  scratch,
-                 device->getStream(),
+                 getCurrentStream(),
                  input,
                  rcp_out_scale,
                  is_spec ? &spec_params : nullptr);
