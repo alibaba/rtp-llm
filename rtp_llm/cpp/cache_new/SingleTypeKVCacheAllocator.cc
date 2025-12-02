@@ -223,7 +223,8 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& kv
     // rebuild batch_kv_cache_resource and generate mapping
     // TODO, 这里的move可以吗？这里再优化下。
     std::vector<KVCacheResourceV1> old_resources = std::move(kv_cache_resource->batch_resource);
-    kv_cache_resource->batch_resource.reserve(new_batch_size);
+    kv_cache_resource->batch_resource.clear();
+    kv_cache_resource->batch_resource.resize(new_batch_size);
 
     for (int new_batch_idx = 0; new_batch_idx < new_batch_size; ++new_batch_idx) {
         const int old_batch_idx = block_src_batch[new_batch_idx];
@@ -245,6 +246,7 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& kv
             full_kv_cache_group_->reference(blocks, old_resources[old_batch_idx].blocks());
             if (copy_last_block && !blocks.empty()) {
                 const int old_block = blocks.back();
+                full_kv_cache_group_->free({old_block});
                 blocks.pop_back();
 
                 // allocate exactly one new block via kvCacheGroup
