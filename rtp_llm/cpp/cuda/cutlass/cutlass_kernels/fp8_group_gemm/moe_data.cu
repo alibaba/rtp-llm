@@ -203,6 +203,7 @@ void rtp_llm::get_cutlass_batched_moe_mm_data(torch::Tensor&       expert_offset
 }
 
 void rtp_llm::get_cutlass_moe_mm_without_permute_info(const torch::Tensor&                topk_ids,
+                                                      torch::Tensor&                      expert_offsets,
                                                       torch::Tensor&                      problem_sizes1,
                                                       torch::Tensor&                      problem_sizes2,
                                                       const int64_t                       num_experts,
@@ -231,4 +232,10 @@ void rtp_llm::get_cutlass_moe_mm_without_permute_info(const torch::Tensor&      
                                                                    static_cast<int>(k),
                                                                    problem_1_swap_ab,
                                                                    problem_2_swap_ab);
+
+    compute_expert_offsets<<<1, 1, 0, stream>>>(static_cast<const int32_t*>(problem_sizes1.data_ptr()),
+                                                static_cast<int32_t*>(expert_offsets.data_ptr()),
+                                                static_cast<int32_t*>(atomic_buffer.data_ptr()),
+                                                static_cast<int>(num_experts),
+                                                problem_1_swap_ab);
 }
