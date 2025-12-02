@@ -30,6 +30,7 @@ void cutlass_moe_mm(torch::Tensor&       out_tensors,
                     bool                 swap_ab   = false);
 
 void get_cutlass_moe_mm_without_permute_info(const torch::Tensor&                topk_ids,
+                                             torch::Tensor&                      expert_offsets,
                                              torch::Tensor&                      problem_sizes1,
                                              torch::Tensor&                      problem_sizes2,
                                              const int64_t                       num_experts,

@@ -69,20 +69,10 @@ class GenericMoeLayer(nn.Module):
             self.w1 is not None and self.w2 is not None
         ), "Weights w1 and w2 must be provided"
         self.num_local_experts = self.w1.shape[0]
-        self.expert_map = self.build_expert_map()
+        self.expert_map = None
 
         # for group topk
         self.correction_bias = weights.get(W.e_score_correction_b, None)
-
-    def build_expert_map(self):
-        """Build expert mapping for EP (Expert Parallelism)."""
-        num_local_experts = self.num_local_experts
-        global_num_experts = self.num_experts
-        expert_map = torch.full((global_num_experts,), fill_value=-1, dtype=torch.int32)
-        start_id = self.parallelism_config.ep_rank * num_local_experts
-        end_id = start_id + num_local_experts
-        expert_map[start_id:end_id] = torch.tensor(list(range(num_local_experts)))
-        return expert_map.to(device=torch.cuda.current_device(), dtype=torch.int32)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, _ = hidden_states.shape

@@ -146,7 +146,7 @@ class DeepepNormalRouter(FusedMoeDataRouter):
         if self.use_fp8:
             if quant_config.is_per_act_token:
                 expert_x, expert_x_scale = output
-                expert_x_scale = expert_x_scale[:, 0].unsqueeze(1)
+                expert_x_scale = expert_x_scale[:, 0].contiguous()
             else:
                 expert_x, expert_x_scale = output
         else:
@@ -157,23 +157,12 @@ class DeepepNormalRouter(FusedMoeDataRouter):
             num_recv_tokens_per_expert_list, device=expert_x.device, dtype=torch.int32
         )
 
-        if recv_topk_idx.numel() != 0 and (
-            not self.use_fp8 or quant_config.is_per_act_token
-        ):
-            expert_topk_ids = torch.where(
-                recv_topk_idx == -1,
-                self.expert_num - 1 if self.rank_expert_offset == 0 else 0,
-                recv_topk_idx + self.rank_expert_offset,
-            )
-        else:
-            expert_topk_ids = recv_topk_idx
-
         return ExpertForwardPayload(
             expert_x,
             act_dtype,
             expert_x_scale,
             ExpertTokensMetadata(expert_num_tokens, num_recv_tokens_per_expert_list),
-            expert_topk_ids,
+            recv_topk_idx,
             recv_topk_weights,
         )
 
