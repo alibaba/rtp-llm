@@ -1,4 +1,3 @@
-#include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/embedding_engine/EmbeddingEngine.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -12,7 +11,7 @@ EmbeddingEngine::EmbeddingEngine(const EngineInitParams& params, py::object hand
     rtp_llm::DeviceFactory::initDevices(params.gpt_init_parameter);
     executor_.reset(new EmbeddingExecutor(params, rtp_llm::DeviceFactory::getDefaultDevice(), handler));
     scheduler_.reset(new EmbeddingScheduler(params_, metrics_reporter_));
-    gen_timeline_ = (autil::EnvUtil::getEnv("GEN_TIMELINE", "False") == "True");
+    gen_timeline_ = params_.profiling_debug_logging_config.gen_timeline_sync;
 
     (void)startLoop();
 }

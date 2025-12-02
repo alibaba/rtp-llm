@@ -16,13 +16,13 @@ namespace rtp_llm {
 // Helper function for optimized tensor copy
 void optimizedCopy(const torch::Tensor& src, torch::Tensor& dst, size_t size) {
     if (src.is_cuda() && dst.is_cuda()) {
-        cudaMemcpy(dst.data_ptr(), src.data_ptr(), size, cudaMemcpyDeviceToDevice);
+        check_cuda_value(cudaMemcpy(dst.data_ptr(), src.data_ptr(), size, cudaMemcpyDeviceToDevice));
     } else if (!src.is_cuda() && !dst.is_cuda()) {
         memcpy(dst.data_ptr(), src.data_ptr(), size);
     } else if (src.is_cuda() && !dst.is_cuda()) {
-        cudaMemcpy(dst.data_ptr(), src.data_ptr(), size, cudaMemcpyDeviceToHost);
+        check_cuda_value(cudaMemcpy(dst.data_ptr(), src.data_ptr(), size, cudaMemcpyDeviceToHost));
     } else {
-        cudaMemcpy(dst.data_ptr(), src.data_ptr(), size, cudaMemcpyHostToDevice);
+        check_cuda_value(cudaMemcpy(dst.data_ptr(), src.data_ptr(), size, cudaMemcpyHostToDevice));
     }
 }
 
@@ -410,6 +410,13 @@ void CudaGraphRunner::replayAndSyncCheck(int key, const char* key_type) {
 }
 
 void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens) {
+    // Common slice operations for input_ids and padding_offset
+    inputs.input_ids = capture_mem_hold_.py_model_inputs_.input_ids.slice(0, 0, seq_len_or_tokens);
+    inputs.attention_inputs.input_lengths =
+        capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths.slice(0, 0, batch_size);
+    inputs.attention_inputs.padding_offset =
+        capture_mem_hold_.py_model_inputs_.attention_inputs.padding_offset.slice(0, 0, seq_len_or_tokens);
+
     // Common slice operations for attention inputs
     inputs.attention_inputs.sequence_lengths =
         capture_mem_hold_.py_model_inputs_.attention_inputs.sequence_lengths.slice(0, 0, batch_size);
@@ -424,6 +431,13 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     inputs.attention_inputs.prefix_lengths = capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths;
     inputs.attention_inputs.dtype          = capture_mem_hold_.py_model_inputs_.attention_inputs.dtype;
     inputs.bert_embedding_inputs           = capture_mem_hold_.py_model_inputs_.bert_embedding_inputs;
+}
+
+CaptureMemoryHold CudaGraphRunner::createCaptureMemoryHold(PyModelInputs& inputs, int tokens_count) {
+    return CaptureMemoryHold(capture_mem_hold_.decoder_layer_hidden_states_.slice(0, 0, tokens_count),
+                             inputs,
+                             kv_cache_block_offset_,
+                             is_prefill_cuda_graph_mode_);
 }
 
 }  // namespace rtp_llm

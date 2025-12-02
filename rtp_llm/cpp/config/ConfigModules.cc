@@ -204,7 +204,8 @@ std::string HWKernelConfig::to_string() const {
         << "use_asm_pa: " << use_asm_pa << "\n"
         << "enable_native_cuda_graph" << enable_native_cuda_graph << "\n"
         << "num_native_cuda_graph" << num_native_cuda_graph << "\n"
-        << "prefill_capture_seq_lens size: " << prefill_capture_seq_lens.size() << "\n";
+        << "prefill_capture_seq_lens size: " << prefill_capture_seq_lens.size() << "\n"
+        << "decode_capture_batch_sizes size: " << decode_capture_batch_sizes.size() << "\n";
     return oss.str();
 }
 
