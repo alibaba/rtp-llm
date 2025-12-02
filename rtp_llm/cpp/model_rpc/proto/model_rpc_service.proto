@@ -19,11 +19,11 @@ message TensorPB {
 }
 
 message IntVector {
-  repeated int32 values = 1;
+    repeated int32 values = 1;
 }
 
 message IntMatrix {
-  repeated IntVector rows = 1;
+    repeated IntVector rows = 1;
 }
 
 message RoleAddrPB {
@@ -323,21 +323,21 @@ message DistKvCacheResponsePB {
 }
 
 message StatusVersionPB {
-  int64 latest_cache_version = 1;
-  int64 latest_finished_version = 2;
+    int64 latest_cache_version = 1;
+    int64 latest_finished_version = 2;
 }
 
 message CacheVersionPB {
-  int64 latest_cache_version = 1;
-  bool need_cache_keys = 2;
+    int64 latest_cache_version = 1;
+    bool need_cache_keys = 2;
 }
 
 message CacheStatusPB {
-  int64 available_kv_cache = 1;
-  int64 total_kv_cache = 2;
-  int64 block_size = 3;
-  int64 version = 4;
-  map<int64, bool> cache_keys = 5;
+    int64 available_kv_cache = 1;
+    int64 total_kv_cache = 2;
+    int64 block_size = 3;
+    int64 version = 4;
+    map<int64, bool> cache_keys = 5;
 }
 
 message UpdateSchedulerInfoRequestPB {
@@ -349,40 +349,46 @@ message SetLogLevelRequestPB {
 }
 
 message CheckHealthResponsePB {
-    string   health = 1;
+    string health = 1;
 }
 
 message UpdateEplbConfigRequestPB {
-    string      mode = 1;
-    int32      update_time = 2;
+    string mode = 1;
+    int32 update_time = 2;
 }
 
 message TaskInfoPB {
-  int64 request_id = 1;
-  int64 inter_request_id = 2;
-  int64 prefix_length = 3;
-  int64 input_length = 4;
-  int64 waiting_time_ms = 5;
-  int64 iterate_count = 6;
-  int64 end_time_ms = 7;
-  int64 dp_rank = 8;
-  bool is_waiting = 9;
+    int64 request_id = 1;
+    int64 inter_request_id = 2;
+    int64 prefix_length = 3;
+    int64 input_length = 4;
+    int64 waiting_time_ms = 5;
+    int64 iterate_count = 6;
+    int64 end_time_ms = 7;
+    int64 dp_rank = 8;
+    bool is_waiting = 9;
+}
+
+message UpdateWeightsRequestPB {
+    string name = 1;
+    string desc = 2;
+    string method = 3;
 }
 
 message WorkerStatusPB {
-  string role = 1;
-  int32 available_concurrency = 2;
-  repeated TaskInfoPB running_task_info = 3;
-  repeated TaskInfoPB finished_task_list = 4;
-  int32 waiting_query_len = 5;
-  int32 running_query_len = 6;
-  double step_latency_ms = 7;
-  int32 iterate_count = 8;
-  int32 dp_size = 9;
-  int32 tp_size = 10;
-  int64 status_version = 12;
-  bool alive = 13;
-  string precision = 14;
+    string role = 1;
+    int32 available_concurrency = 2;
+    repeated TaskInfoPB running_task_info = 3;
+    repeated TaskInfoPB finished_task_list = 4;
+    int32 waiting_query_len = 5;
+    int32 running_query_len = 6;
+    double step_latency_ms = 7;
+    int32 iterate_count = 8;
+    int32 dp_size = 9;
+    int32 tp_size = 10;
+    int64 status_version = 12;
+    bool alive = 13;
+    string precision = 14;
 }
 
 enum MemoryBlockCacheOp {
@@ -444,6 +450,7 @@ service RpcService {
     rpc SetLogLevel(SetLogLevelRequestPB) returns (EmptyPB);
     rpc UpdateSchedulerInfo(UpdateSchedulerInfoRequestPB) returns (EmptyPB);
 
+    rpc UpdateWeights(UpdateWeightsRequestPB) returns (EmptyPB);
     rpc RemoteGenerateNew(RemoteGenerateRequestPBNew) returns (RemoteGenerateResponsePBNew);
     rpc RemoteStore(RemoteStoreRequestPB) returns (RemoteStoreResponsePB);
 

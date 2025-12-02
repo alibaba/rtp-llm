@@ -6,7 +6,7 @@ import torch
 
 from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 from rtp_llm.async_decoder_engine.embedding.embedding_engine import EmbeddingCppEngine
-from rtp_llm.async_decoder_engine.rpc_engine import RPCEngine
+from rtp_llm.async_decoder_engine.rpc_engine import LanguageCppEngine
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.propose_model.propose_model import ProposeModel
 
@@ -23,7 +23,9 @@ def check_exeutor_type(model: BaseModel):
 
 
 def create_engine(
-    model: BaseModel, propose_model: Optional[ProposeModel] = None, gang_info=None
+    model: BaseModel,
+    propose_model: Optional[ProposeModel] = None,
+    gang_info=None,
 ) -> BaseEngine:
     torch.ops.rtp_llm.init_engine(
         model.config.gpt_init_params.profiling_debug_logging_config.ft_alog_conf_path
@@ -31,7 +33,7 @@ def create_engine(
     executor_type = check_exeutor_type(model)
     logging.info(f"executor_type: {executor_type}")
     if executor_type == ExecutorType.Normal:
-        return RPCEngine(model, propose_model, gang_info)
+        return LanguageCppEngine(model, propose_model, gang_info)
     elif executor_type == ExecutorType.Embedding:
         return EmbeddingCppEngine(model)
     else:

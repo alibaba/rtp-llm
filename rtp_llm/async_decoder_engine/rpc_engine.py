@@ -12,7 +12,7 @@ from rtp_llm.ops.rtp_llm.rtp_llm_op import RtpLLMOp
 from rtp_llm.utils.mm_process_engine import MMProcessEngine
 
 
-class RPCEngine(BaseEngine):
+class LanguageCppEngine(BaseEngine):
     def __init__(
         self,
         model: BaseModel,
@@ -57,15 +57,5 @@ class RPCEngine(BaseEngine):
     def _stop(self) -> None:
         self.rtp_llm_op_.stop()
 
-    @override
     def decode(self, input: GenerateInput) -> AsyncGenerator[GenerateOutputs, None]:
         return self.model_rpc_client.enqueue(input)
-
-    @override
-    def _pause(self) -> None:
-        self.started = False
-        return self.rtp_llm_op_.pause()
-
-    @override
-    def _restart(self) -> None:
-        return self.rtp_llm_op_.restart()

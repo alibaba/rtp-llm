@@ -115,9 +115,10 @@ EngineInitParams RtpLLMOp::initModel(py::object model) {
     try {
         auto [gpt_init_params, gpt_weight] = prepareEngineInitParams(model, false);
         auto py_model                      = model.attr("py_model");
+        auto weight_manager                = model.attr("weight_manager");
         // TODO(wangyin.yx): Only one of `py_model` and `gpt_weight` is actually needed.
 
-        EngineInitParams params(model_id_, gpt_init_params, std::move(*gpt_weight), py_model);
+        EngineInitParams params(model_id_, gpt_init_params, std::move(*gpt_weight), py_model, weight_manager);
         model_id_++;
         if (gpt_init_params.tp_rank_ == 0) {
             // kmon metric init
@@ -295,9 +296,7 @@ void registerRtpLLMOp(const py::module& m) {
              py::arg("gang_info"),
              py::arg("tokenizer"),
              py::arg("render"))
-        .def("stop", &RtpLLMOp::stop)
-        .def("pause", &RtpLLMOp::pause)
-        .def("restart", &RtpLLMOp::restart);
+        .def("stop", &RtpLLMOp::stop);
 }
 
 }  // namespace rtp_llm

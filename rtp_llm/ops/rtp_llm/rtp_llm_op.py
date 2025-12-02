@@ -8,7 +8,6 @@ from rtp_llm.ops import RtpLLMOp as CppRtpLLMOp
 from rtp_llm.ops import get_block_cache_keys as cpp_get_block_cache_keys
 from rtp_llm.utils.mm_process_engine import MMProcessEngine
 
-
 class RtpLLMOp:
     def __init__(
         self,
@@ -32,9 +31,3 @@ class RtpLLMOp:
 
     def stop(self):
         self.ft_op.stop()  # type: ignore
-
-    def pause(self):
-        return self.ft_op.pause()
-
-    def restart(self):
-        return self.ft_op.restart()
