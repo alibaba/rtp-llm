@@ -173,6 +173,7 @@ std::string DeepEPBuffer::getRootUniqueId() {
         BufferPtr           local_nvshmem_unique_id_buffer_cpu = vector2Buffer(local_nvshmem_unique_id_vec);
         local_nvshmem_unique_id_buffer_cpu->reshape({1, NVSHMEM_UNIQUE_ID_SIZE});
         device_->copy({all_nvshmem_unique_ids_buffer_gpu->view(world_rank_, 1), *local_nvshmem_unique_id_buffer_cpu});
+        device_->syncAndCheck();
     }
 
     device_->allGather({{all_nvshmem_unique_ids_buffer_gpu}, ParallelMode::DP_AND_TP});

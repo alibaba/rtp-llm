@@ -343,12 +343,15 @@ absl::Status EmbeddingExecutor::process(const std::list<EmbeddingStreamPtr>& str
     GptModelOutputs model_output;
     ModelRequest    model_request    = generateOldModelRequest(model_input);
     auto            total_batch_size = model_request.context_batch_size;
-    model_output                     = std::move(model_->forward(model_input));
+    model_->releaseBuffers();
+    model_output = std::move(model_->forward(model_input));
     py::gil_scoped_acquire acquire;
     // for py::list, handler should ensure object to cpu in the python impl,
     // for torch::Tensor, we manually move it to cpu during updateStreams()
     CHECK_AND_RETURN_REF(post, postProcess(model_request, model_output));
-    return updateStreams(post, streams, total_batch_size);
+    auto res = updateStreams(post, streams, total_batch_size);
+    model_->releaseBuffers();
+    return res;
 }
 
 void EmbeddingExecutor::reportMetrics(size_t context_batch_size, size_t combo_token_num, size_t max_seq_len) const {

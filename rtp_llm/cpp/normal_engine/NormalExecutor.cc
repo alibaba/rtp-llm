@@ -109,6 +109,10 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         }
         executor_collector.tp_sync_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
+
+    // make sure last model input is released before forward
+    model_->releaseBuffers();
+
     {
         // update kv cache
         if (model_input.kv_cache_update_mapping) {
@@ -138,6 +142,8 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
     if (device_->getDeviceProperties().tp_rank > 0 || warm_up_ || streams.size() == 0) {
+        device_->syncAndCheck();
+        model_->releaseBuffers();
         return absl::OkStatus();
     }
     {
@@ -154,6 +160,9 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
             batch_stream_processor_->dispatch(stream_groups, {std::move(model_output), std::move(sampler_output)});
         executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
         reportMetrics(stream_groups, executor_collector, tps_collector);
+
+        model_->releaseBuffers();
+
         return result;
     }
 }
