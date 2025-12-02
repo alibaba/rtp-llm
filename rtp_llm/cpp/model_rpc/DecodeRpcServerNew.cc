@@ -244,23 +244,22 @@ ErrorInfo DecodeRpcServerNew::writeAppendFirstToken(DecodeGenerateContextNew& de
     int64_t cost_time_us      = currentTimeUs() - decode_context.request_begin_time_us;
 
     auto response_output = response.mutable_output();
-    for (size_t i = 0; i < response_output->generate_outputs_size(); i++) {
-        response_output->mutable_generate_outputs(i)->mutable_aux_info()->set_first_token_cost_time_us(
-            first_token_rt_us);
-        response_output->mutable_generate_outputs(i)->mutable_aux_info()->set_cost_time_us(cost_time_us);
+    for (size_t i = 0; i < response_output->flatten_output().aux_info_size(); i++) {
+        response_output->mutable_flatten_output()->mutable_aux_info(i)->set_first_token_cost_time_us(first_token_rt_us);
+        response_output->mutable_flatten_output()->mutable_aux_info(i)->set_cost_time_us(cost_time_us);
 
-        response_output->mutable_generate_outputs(i)->mutable_aux_info()->set_prefill_total_reuse_len(
-            response_output->generate_outputs(i).aux_info().total_reuse_len());
-        response_output->mutable_generate_outputs(i)->mutable_aux_info()->set_prefill_local_reuse_len(
-            response_output->generate_outputs(i).aux_info().local_reuse_len());
-        response_output->mutable_generate_outputs(i)->mutable_aux_info()->set_prefill_remote_reuse_len(
-            response_output->generate_outputs(i).aux_info().remote_reuse_len());
+        response_output->mutable_flatten_output()->mutable_aux_info(i)->set_prefill_total_reuse_len(
+            response_output->flatten_output().aux_info(i).total_reuse_len());
+        response_output->mutable_flatten_output()->mutable_aux_info(i)->set_prefill_local_reuse_len(
+            response_output->flatten_output().aux_info(i).local_reuse_len());
+        response_output->mutable_flatten_output()->mutable_aux_info(i)->set_prefill_remote_reuse_len(
+            response_output->flatten_output().aux_info(i).remote_reuse_len());
 
-        response_output->mutable_generate_outputs(i)->mutable_aux_info()->set_decode_total_reuse_len(
+        response_output->mutable_flatten_output()->mutable_aux_info(i)->set_decode_total_reuse_len(
             decode_total_reuse_len);
-        response_output->mutable_generate_outputs(i)->mutable_aux_info()->set_decode_local_reuse_len(
+        response_output->mutable_flatten_output()->mutable_aux_info(i)->set_decode_local_reuse_len(
             decode_local_reuse_len);
-        response_output->mutable_generate_outputs(i)->mutable_aux_info()->set_decode_remote_reuse_len(
+        response_output->mutable_flatten_output()->mutable_aux_info(i)->set_decode_remote_reuse_len(
             decode_remote_reuse_len);
     }
 

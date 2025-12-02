@@ -51,7 +51,9 @@ The raw protocol specifies sampling parameters through **generate_config**. Exam
 
 | Parameter Name         | Function Description                                                     |
 |------------------------|--------------------------------------------------------------------------|
-| repetition_penalty     | Repetition suppression factor:<br>→ >1.0 suppresses repetition<br>→ <1.0 encourages repetition |
+| repetition_penalty     | Repetition suppression factor:<br>→ >1.0 suppresses repetition<br>→ <1.0 encourages repetition |default = 1.0 |
+| frequency_penalty|  This parameter is used to discourage the model from repeating the same words or phrases too frequently within the generated text. It is a value that is added to the log-probability of a token each time it occurs in the generated text. A higher frequency_penalty value will result in the model being more conservative in its use of repeated tokens.| default = 0.0 |
+|presence_penalty | This parameter is used to encourage the model to include a diverse range of tokens in the generated text. It is a value that is subtracted from the log-probability of a token each time it is generated. A higher presence_penalty value will result in the model being more likely to generate tokens that have not yet been included in the generated text. |default = 0.0 |
 | stop_words_list        | Token ID stop words (better performance):<br>`[[20490,25],[1024]]`        |
 | stop_words_str         | String stop words (better compatibility):<br>`["<end>","\nObservation"]` |
 | random_seed            | Random seed control:<br>→ None: True random<br>→ Fixed value: Reproducible generation |

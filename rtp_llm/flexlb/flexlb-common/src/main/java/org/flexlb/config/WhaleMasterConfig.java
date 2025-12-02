@@ -1,9 +1,8 @@
-package org.flexlb.domain.balance;
+package org.flexlb.config;
 
 import lombok.Getter;
 import lombok.Setter;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
-import org.flexlb.enums.LogLevel;
 
 /**
  * @author zjw
@@ -24,9 +23,4 @@ public class WhaleMasterConfig {
      * 建议范围：0.001-0.01 (针对缓存使用量数值范围优化)
      */
     private double weightedCacheDecayFactor = 0.001;
-
-    @Getter
-    @Setter
-    private static LogLevel logLevel;
-
 }

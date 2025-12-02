@@ -252,8 +252,11 @@ ErrorInfo PrefillRpcServerNew::generateFirstToken(PrefillGenerateContextNew& pre
         }
         RTP_LLM_LOG_DEBUG("request [%s] generate next output success", prefill_context.request_key.c_str());
         auto response_output = prefill_context.response->mutable_output();
-        QueryConverter::transResponse(
-            response_output, &(result.value()), maga_init_params_.gpt_init_parameter.misc_config.aux_string);
+        QueryConverter::transResponse(response_output,
+                                      &(result.value()),
+                                      stream->generateConfig()->aux_info,
+                                      maga_init_params_.gpt_init_parameter.misc_config.aux_string,
+                                      stream->specialTokens().eos_token_id_);
         // should only generate one token
         break;
     }

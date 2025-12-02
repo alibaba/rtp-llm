@@ -2,7 +2,7 @@ package org.flexlb.service.config;
 
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
-import org.flexlb.domain.balance.WhaleMasterConfig;
+import org.flexlb.config.WhaleMasterConfig;
 import org.flexlb.util.JsonUtils;
 import org.springframework.stereotype.Component;
 

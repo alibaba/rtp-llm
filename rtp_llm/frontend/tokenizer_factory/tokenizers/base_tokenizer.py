@@ -22,6 +22,15 @@ class BaseTokenizer:
             return ""
         return self.tokenizer.decode(token_id, **kwargs)
 
+    def batch_decode(self, token_ids: Union[List[int], List[List[int]]], **kwargs):
+        return [
+            self.tokenizer._decode(
+                seq,
+                **kwargs,
+            )
+            for seq in token_ids
+        ]
+
     def apply_chat_template(self, messages, **kwargs):
         return self.tokenizer.apply_chat_template(messages, **kwargs)
 
@@ -136,3 +145,6 @@ class BaseTokenizer:
 
     def __call__(self, text, **kwargs):
         return self.tokenizer(text, **kwargs)
+
+    def __len__(self) -> int:
+        return self.tokenizer.__len__()

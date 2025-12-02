@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/devices/rocm_impl/ROCmAllocator.h"
 #include "rtp_llm/cpp/core/TrackerAllocator.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
+#include "rtp_llm/cpp/kernels/eplb/experts_stats_kernels.h"
 #include "rtp_llm/cpp/kernels/add_residual_kernels.h"
 #include "rtp_llm/cpp/devices/ShapeCheck.h"
 #include "rtp_llm/cpp/core/Dispatch.h"
@@ -467,6 +468,63 @@ BufferPtr ROCmDevice::embeddingLookup(const EmbeddingLookupParams& params) {
     return embeddings;
 }
 
+void ROCmDevice::updateExpertGpuLoads(const MoeConfigs&          moe_conf,
+                                      const OptionalExpertStats& expert_stats,
+                                      BufferPtr                  expert_ids) {
+    if (expert_stats.has_value() && expert_ids->size()) {
+        auto& stats = expert_stats.value();
+        launch_update_gpu_loads(expert_ids->data<int>(),
+                                stats.getLayerGpuLoads(),
+                                expert_ids->size(),
+                                stats.phy_exp_num,
+                                moe_conf.ep_rank,
+                                moe_conf.ep_size,
+                                stream_);
+    }
+}
+
+void ROCmDevice::balanceExperts(BufferPtr                  expert_ids,
+                                const OptionalExpertStats& expert_stats,
+                                const MoeConfigs&          moe_conf,
+                                const FfnLayerWeights&     weights) {
+    if (expert_stats.has_value() && weights.log2phy) {
+        const auto& expert_stats_v = expert_stats.value();
+
+        int* log2phy          = weights.log2phy->data<int>();
+        int* logic_expert_cnt = weights.logic_expert_cnt->data<int>();
+
+        switch (moe_conf.balance_method) {
+            case EplbBalanceMethod::EQUAL:
+                if (expert_ids->type() == DataType::TYPE_INT64) {
+                    launch_equal_expert_balance(expert_ids->data<int64_t>(),
+                                                expert_stats_v.getLayerLogStats(),
+                                                log2phy,
+                                                logic_expert_cnt,
+                                                expert_stats_v.log_exp_num,
+                                                expert_stats_v.phy_exp_num,
+                                                expert_ids->size(),
+                                                moe_conf.use_all_gather ? 0 : moe_conf.ep_rank,
+                                                stream_);
+                } else {
+                    launch_equal_expert_balance(expert_ids->data<int>(),
+                                                expert_stats_v.getLayerLogStats(),
+                                                log2phy,
+                                                logic_expert_cnt,
+                                                expert_stats_v.log_exp_num,
+                                                expert_stats_v.phy_exp_num,
+                                                expert_ids->size(),
+                                                moe_conf.use_all_gather ? 0 : moe_conf.ep_rank,
+                                                stream_);
+                }
+                break;
+            default:
+                throw std::runtime_error("Unsupported balance method");
+                break;
+        }
+        ROCM_CHECK_ERROR();
+    }
+}
+
 MemoryStatus ROCmDevice::getDeviceMemoryStatus() {
     MemoryStatus status;
     size_t       total_bytes;
@@ -702,7 +760,7 @@ BufferPtr ROCmDevice::mhaQKVGemm(const AttentionLayerParams& params) {
         auto lora_linear_params          = LoraLinearParams(qkv_gemm_params, params.common.lora_input.qkv_lora_input);
         qkv = loraLinearWithActivation(LoraLinearWithActivationParams(lora_linear_params, act_params));
     } else {
-        auto qkv_gemm_params = GemmParams(input, *(qkv_weight->kernel));
+        auto qkv_gemm_params = GemmParams(input, *(qkv_weight->kernel), std::nullopt, nullptr, DataType::TYPE_INVALID, params.output->type());
         qkv = loraLinear(LoraLinearParams(qkv_gemm_params, params.common.lora_input.qkv_lora_input)).output;
     }
     printBufferData(*qkv, "qkv");

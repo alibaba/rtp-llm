@@ -137,11 +137,30 @@ public abstract class AbstractGrpcClient<STUB> implements CustomNameResolver.Lis
         private final String channelKey;
         private final ManagedChannel channel;
         private final STUB rpcServiceStub;
+        private final long createTime;
+        private volatile long lastUsedTime;
+        private volatile long expireTime;
 
         public Invoker(String channelKey, ManagedChannel channel) {
             this.channelKey = channelKey;
             this.channel = channel;
             this.rpcServiceStub = createStub(channel);
+            long currentTime = System.nanoTime() / 1000;
+            this.createTime = currentTime;
+            this.lastUsedTime = currentTime;
+            this.expireTime = 0;
+        }
+
+        public void updateLastUsedTime() {
+            this.lastUsedTime = System.nanoTime() / 1000;
+        }
+
+        public void markExpired() {
+            this.expireTime = System.nanoTime() / 1000;
+        }
+
+        public long getConnectionDuration() {
+            return expireTime > 0 ? expireTime - createTime : System.nanoTime() / 1000 - createTime;
         }
 
         public void shutdown() {

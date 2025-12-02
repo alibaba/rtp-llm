@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-10-20 10:08+0800\n"
+"POT-Creation-Date: 2025-11-26 10:19+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -97,6 +97,22 @@ msgid "Repetition suppression factor:<br>→ >1.0 suppresses repetition<br>→ <
 msgstr ""
 
 #: ../../backend/sampling_params.md:0
+msgid "frequency_penalty"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "This parameter is used to discourage the model from repeating the same words or phrases too frequently within the generated text. It is a value that is added to the log-probability of a token each time it occurs in the generated text. A higher frequency_penalty value will result in the model being more conservative in its use of repeated tokens."
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "presence_penalty"
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
+msgid "This parameter is used to encourage the model to include a diverse range of tokens in the generated text. It is a value that is subtracted from the log-probability of a token each time it is generated. A higher presence_penalty value will result in the model being more likely to generate tokens that have not yet been included in the generated text."
+msgstr ""
+
+#: ../../backend/sampling_params.md:0
 msgid "stop_words_list"
 msgstr ""
 
@@ -120,11 +136,11 @@ msgstr ""
 msgid "Random seed control:<br>→ None: True random<br>→ Fixed value: Reproducible generation"
 msgstr ""
 
-#: ../../backend/sampling_params.md:69
+#: ../../backend/sampling_params.md:71
 msgid "<a id=\"返回控制参数\"></a>"
 msgstr ""
 
-#: ../../backend/sampling_params.md:70
+#: ../../backend/sampling_params.md:72
 msgid "Return Control Parameters"
 msgstr ""
 
@@ -184,11 +200,11 @@ msgstr ""
 msgid "Output decoding validation"
 msgstr ""
 
-#: ../../backend/sampling_params.md:79
+#: ../../backend/sampling_params.md:81
 msgid "<a id=\"特殊模式参数\"></a>"
 msgstr ""
 
-#: ../../backend/sampling_params.md:80
+#: ../../backend/sampling_params.md:82
 msgid "Special Mode Parameters"
 msgstr ""
 
@@ -236,27 +252,27 @@ msgstr ""
 msgid "Enable parallel decoding optimization (hardware support required)"
 msgstr ""
 
-#: ../../backend/sampling_params.md:88
+#: ../../backend/sampling_params.md:90
 msgid "<a id=\"环境变量说明\"></a>"
 msgstr ""
 
-#: ../../backend/sampling_params.md:89
+#: ../../backend/sampling_params.md:91
 msgid "Environment Variable Description"
 msgstr ""
 
-#: ../../backend/sampling_params.md:100
+#: ../../backend/sampling_params.md:102
 msgid "<a id=\"采样策略说明\"></a>"
 msgstr ""
 
-#: ../../backend/sampling_params.md:101
+#: ../../backend/sampling_params.md:103
 msgid "Sampling Strategy Description"
 msgstr ""
 
-#: ../../backend/sampling_params.md:103
+#: ../../backend/sampling_params.md:105
 msgid "Combined Strategy Example"
 msgstr ""
 
-#: ../../backend/sampling_params.md:115
+#: ../../backend/sampling_params.md:117
 msgid "Strategy Recommended Values"
 msgstr ""
 
@@ -312,42 +328,42 @@ msgstr ""
 msgid "20"
 msgstr ""
 
-#: ../../backend/sampling_params.md:122
+#: ../../backend/sampling_params.md:124
 msgid "<a id=\"参数使用注意事项\"></a>"
 msgstr ""
 
-#: ../../backend/sampling_params.md:123
+#: ../../backend/sampling_params.md:125
 msgid "Parameter Usage Notes"
 msgstr ""
 
-#: ../../backend/sampling_params.md:125
+#: ../../backend/sampling_params.md:127
 msgid "**Stop Words Selection Principles**"
 msgstr ""
 
-#: ../../backend/sampling_params.md:126
+#: ../../backend/sampling_params.md:128
 msgid "Performance priority: Use `stop_words_list` for high-frequency triggering scenarios"
 msgstr ""
 
-#: ../../backend/sampling_params.md:127
+#: ../../backend/sampling_params.md:129
 msgid "Compatibility priority: Use `stop_words_str` for complex pattern matching"
 msgstr ""
 
-#: ../../backend/sampling_params.md:129
+#: ../../backend/sampling_params.md:131
 msgid "**Length Limit Coordination**"
 msgstr ""
 
-#: ../../backend/sampling_params.md:137
+#: ../../backend/sampling_params.md:139
 msgid "**Thinking Mode Special Constraints**"
 msgstr ""
 
-#: ../../backend/sampling_params.md:147
+#: ../../backend/sampling_params.md:149
 msgid "**Streaming Output Limitations**"
 msgstr ""
 
-#: ../../backend/sampling_params.md:148
+#: ../../backend/sampling_params.md:150
 msgid "Need to enable `yield_generator=True` simultaneously"
 msgstr ""
 
-#: ../../backend/sampling_params.md:149
+#: ../../backend/sampling_params.md:151
 msgid "`return_logits` only returns complete data in non-streaming mode"
 msgstr ""

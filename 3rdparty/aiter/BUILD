@@ -89,8 +89,10 @@ genrule(
     outs = [
         "aiter/jit/libmodule_aiter_enum.so",
         "aiter/jit/libmodule_custom_all_reduce.so",
+        "aiter/jit/libmodule_quick_all_reduce.so",
         "aiter/jit/libmodule_norm.so",
         "aiter/jit/libmodule_mha_fwd.so",
+        "aiter/jit/libmodule_fmha_v3_varlen_fwd.so",
         "aiter/jit/libmodule_quant.so",
         "aiter/jit/libmodule_gemm_a8w8_blockscale.so",
         "aiter/jit/libmodule_moe_sorting.so",
@@ -116,6 +118,7 @@ genrule(
         cd ../..;
         cp external/aiter_src/aiter/jit/module_aiter_enum.so $(location aiter/jit/libmodule_aiter_enum.so);
         cp external/aiter_src/aiter/jit/module_custom_all_reduce.so $(location aiter/jit/libmodule_custom_all_reduce.so);
+        cp external/aiter_src/aiter/jit/module_quick_all_reduce.so $(location aiter/jit/libmodule_quick_all_reduce.so);
         cp external/aiter_src/aiter/jit/module_quant.so $(location aiter/jit/libmodule_quant.so);
         cp external/aiter_src/aiter/jit/module_smoothquant.so $(location aiter/jit/libmodule_smoothquant.so);
         cp external/aiter_src/aiter/jit/module_moe_sorting.so $(location aiter/jit/libmodule_moe_sorting.so);
@@ -128,6 +131,7 @@ genrule(
         cp external/aiter_src/aiter/jit/module_norm.so $(location aiter/jit/libmodule_norm.so);
         cp external/aiter_src/aiter/jit/module_rmsnorm.so $(location aiter/jit/libmodule_rmsnorm.so);
         cp external/aiter_src/aiter/jit/module_mha_fwd.so $(location aiter/jit/libmodule_mha_fwd.so);
+        cp external/aiter_src/aiter/jit/module_fmha_v3_varlen_fwd.so $(location aiter/jit/libmodule_fmha_v3_varlen_fwd.so);
         cp external/aiter_src/aiter/jit/module_gemm_a8w8.so $(location aiter/jit/libmodule_gemm_a8w8.so);
         cp external/aiter_src/aiter/jit/module_moe_ck2stages.so $(location aiter/jit/libmodule_moe_ck2stages.so);
     """,
@@ -147,6 +151,17 @@ cc_library(
 )
 
 cc_library(
+    name = "module_quick_all_reduce",
+    srcs = ["aiter/jit/libmodule_quick_all_reduce.so"],
+    hdrs = ["csrc/include/quick_all_reduce.h"],
+    deps = [":cpp_libraries"],
+    copts = [],
+    strip_include_prefix = "csrc/include/",
+    visibility = ["//visibility:public"],
+    tags = ["rocm","local"],
+)
+
+cc_library(
     name = "module_mha_fwd",
     srcs = ["aiter/jit/libmodule_mha_fwd.so"],
     hdrs = ["csrc/include/mha_fwd.h", "csrc/include/aiter_hip_common.h"],
@@ -154,6 +169,18 @@ cc_library(
     copts = ["-std=c++20"],
     linkopts = [],
     strip_include_prefix = "csrc/include/",
+    visibility = ["//visibility:public"],
+    tags = ["rocm","local"],
+)
+
+cc_library(
+    name = "module_fmha_v3_varlen_fwd",
+    srcs = ["aiter/jit/libmodule_fmha_v3_varlen_fwd.so"],
+    hdrs = ["csrc/include/torch/mha_v3_varlen_fwd.h"],
+    deps = [":cpp_libraries", ":ck_fmha_example_headers"],
+    copts = ["-std=c++20"],
+    linkopts = [],
+    strip_include_prefix = "csrc/include/torch/",
     visibility = ["//visibility:public"],
     tags = ["rocm","local"],
 )

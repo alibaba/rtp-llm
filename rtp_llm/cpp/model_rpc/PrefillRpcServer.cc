@@ -313,35 +313,35 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
             prefill_context.error_status = grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled");
             return;
         }
-        if (response.generate_outputs_size() == 0) {
+        if (response.flatten_output().aux_info_size() == 0) {
             RTP_LLM_LOG_ERROR("request [%ld] generate output size is 0", request_id);
             break;
         }
-        for (size_t i = 0; i < response.generate_outputs_size(); i++) {
-            response.mutable_generate_outputs(i)->mutable_aux_info()->set_pd_sep(true);
+        for (size_t i = 0; i < response.flatten_output().aux_info_size(); i++) {
+            response.mutable_flatten_output()->mutable_aux_info(i)->set_pd_sep(true);
         }
         int64_t cost_time_us = currentTimeUs() - prefill_context.request_begin_time_us;
-        for (size_t i = 0; i < response.generate_outputs_size(); i++) {
-            response.mutable_generate_outputs(i)->mutable_aux_info()->set_first_token_cost_time_us(first_token_rt_us);
-            response.mutable_generate_outputs(i)->mutable_aux_info()->set_cost_time_us(cost_time_us);
+        for (size_t i = 0; i < response.flatten_output().aux_info_size(); i++) {
+            response.mutable_flatten_output()->mutable_aux_info(i)->set_first_token_cost_time_us(first_token_rt_us);
+            response.mutable_flatten_output()->mutable_aux_info(i)->set_cost_time_us(cost_time_us);
 
-            response.mutable_generate_outputs(i)->mutable_aux_info()->set_total_reuse_len(prefill_total_reuse_len);
-            response.mutable_generate_outputs(i)->mutable_aux_info()->set_local_reuse_len(prefill_local_reuse_len);
-            response.mutable_generate_outputs(i)->mutable_aux_info()->set_remote_reuse_len(prefill_remote_reuse_len);
+            response.mutable_flatten_output()->mutable_aux_info(i)->set_total_reuse_len(prefill_total_reuse_len);
+            response.mutable_flatten_output()->mutable_aux_info(i)->set_local_reuse_len(prefill_local_reuse_len);
+            response.mutable_flatten_output()->mutable_aux_info(i)->set_remote_reuse_len(prefill_remote_reuse_len);
 
-            response.mutable_generate_outputs(i)->mutable_aux_info()->set_prefill_total_reuse_len(
+            response.mutable_flatten_output()->mutable_aux_info(i)->set_prefill_total_reuse_len(
                 prefill_total_reuse_len);
-            response.mutable_generate_outputs(i)->mutable_aux_info()->set_prefill_local_reuse_len(
+            response.mutable_flatten_output()->mutable_aux_info(i)->set_prefill_local_reuse_len(
                 prefill_local_reuse_len);
-            response.mutable_generate_outputs(i)->mutable_aux_info()->set_prefill_remote_reuse_len(
+            response.mutable_flatten_output()->mutable_aux_info(i)->set_prefill_remote_reuse_len(
                 prefill_remote_reuse_len);
 
-            response.mutable_generate_outputs(i)->mutable_aux_info()->set_decode_total_reuse_len(
-                response.generate_outputs(i).aux_info().total_reuse_len());
-            response.mutable_generate_outputs(i)->mutable_aux_info()->set_decode_local_reuse_len(
-                response.generate_outputs(i).aux_info().local_reuse_len());
-            response.mutable_generate_outputs(i)->mutable_aux_info()->set_decode_remote_reuse_len(
-                response.generate_outputs(i).aux_info().remote_reuse_len());
+            response.mutable_flatten_output()->mutable_aux_info(i)->set_decode_total_reuse_len(
+                response.flatten_output().aux_info(i).total_reuse_len());
+            response.mutable_flatten_output()->mutable_aux_info(i)->set_decode_local_reuse_len(
+                response.flatten_output().aux_info(i).local_reuse_len());
+            response.mutable_flatten_output()->mutable_aux_info(i)->set_decode_remote_reuse_len(
+                response.flatten_output().aux_info(i).remote_reuse_len());
         }
         if (!prefill_context.rpc_context.writer->Write(response)) {
             RTP_LLM_LOG_WARNING("request [%ld] write outputs pb failed", request_id);

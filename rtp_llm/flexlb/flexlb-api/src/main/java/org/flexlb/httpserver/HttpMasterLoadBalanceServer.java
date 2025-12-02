@@ -10,7 +10,6 @@ import org.flexlb.dao.loadbalance.MasterResponse;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.pv.PvLogData;
 import org.flexlb.domain.balance.BalanceContext;
-import org.flexlb.domain.balance.WhaleMasterConfig;
 import org.flexlb.domain.consistency.MasterChangeNotifyReq;
 import org.flexlb.domain.consistency.MasterChangeNotifyResp;
 import org.flexlb.domain.consistency.SyncLBStatusReq;
@@ -24,7 +23,7 @@ import org.flexlb.transport.GeneralHttpNettyService;
 import org.flexlb.util.HttpRequestUtils;
 import org.flexlb.util.IdUtils;
 import org.flexlb.util.JsonUtils;
-import org.flexlb.utils.LoggingUtils;
+import org.flexlb.util.LoggingUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -96,10 +95,10 @@ public class HttpMasterLoadBalanceServer implements ShutdownListener, OnlineList
     private Mono<ServerResponse> debugMode(ServerRequest serverRequest) {
         return serverRequest.bodyToMono(LogLevelUpdateRequest.class)
                 .flatMap(logLevelUpdateRequest -> {
-                    WhaleMasterConfig.setLogLevel(logLevelUpdateRequest.getLogLevel());
+                    LoggingUtils.setGlobalLogLevel(logLevelUpdateRequest.getLogLevel());
                     return ServerResponse.ok()
                             .contentType(MediaType.APPLICATION_JSON)
-                            .body(Mono.just("Success! logLevel=" + WhaleMasterConfig.getLogLevel()), String.class);
+                            .body(Mono.just("Success! logLevel=" + LoggingUtils.getGlobalLogLevel()), String.class);
                 }).onErrorResume(e -> {
                     LoggingUtils.error("update logLevel error", e);
                     return ServerResponse.status(500)

@@ -1,5 +1,6 @@
 package org.flexlb.sync.runner;
 
+import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.domain.worker.WorkerStatusResponse;
 import org.flexlb.engine.grpc.EngineRpcService;
@@ -11,6 +12,7 @@ import org.flexlb.util.IdUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicLong;
@@ -94,7 +96,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
             if (newWorkerStatus.getMessage() != null) {
                 WorkerStatus workerStatus = getOrCreateWorkerStatus();
                 workerStatus.setAlive(false);
-                logger.info("query engine worker status via gRPC, msg={}", newWorkerStatus.getMessage());
+                logger.error("query engine worker status via gRPC, msg={}", newWorkerStatus.getMessage());
                 return;
             }
 
@@ -118,6 +120,10 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 // 版本相同但是也需要更新 expirationTime
                 // Set expiration time to 3 seconds from now
                 workerStatus.getStatusLastUpdateTime().set(System.nanoTime() / 1000);
+                // 更新任务状态
+                List<TaskInfo> runningTaskInfo = newWorkerStatus.getRunningTaskInfo();
+                List<TaskInfo> finishedTaskList = newWorkerStatus.getFinishedTaskList();
+                workerStatus.updateTaskStates(runningTaskInfo, finishedTaskList);
                 logger.info("query engine worker status via gRPC, version is not updated, currentVersion: {}, responseVersion: {}",
                         currentVersion, responseVersion);
                 return;
@@ -132,14 +138,17 @@ public class GrpcWorkerStatusRunner implements Runnable {
             workerStatus.setAlive(newWorkerStatus.isAlive());
             workerStatus.setVersion(String.valueOf(newWorkerStatus.getVersion()));
             workerStatus.setStatusVersion(responseVersion);
-            workerStatus.setRunningTaskList(newWorkerStatus.getRunningTaskInfo());
 
-            // 更新排队和运行中的任务
-            workerStatus.updateRunningTaskList(newWorkerStatus.getRunningTaskInfo());
-            // 更新完结的任务
-            workerStatus.clearFinishedTask(newWorkerStatus.getFinishedTaskList());
+            List<TaskInfo> runningTaskInfo = newWorkerStatus.getRunningTaskInfo();
+            List<TaskInfo> finishedTaskList = newWorkerStatus.getFinishedTaskList();
+            workerStatus.setRunningTaskList(runningTaskInfo);
 
-            engineHealthReporter.reportStatusCheckerSuccess(modelName, workerStatus);
+            // 更新本地任务状态（包含检查丢失、更新运行、清理完成）
+            workerStatus.updateTaskStates(runningTaskInfo, finishedTaskList);
+
+            engineHealthReporter.reportStatusCheckerSuccess(modelName, workerStatus,
+                    Optional.ofNullable(runningTaskInfo).map(List::size).orElse(0),
+                    Optional.ofNullable(finishedTaskList).map(List::size).orElse(0));
 
             workerStatus.getStatusLastUpdateTime().set(System.nanoTime() / 1000);
             logWorkerStatusUpdate(startTime, workerStatus);
@@ -182,7 +191,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
     }
 
     private void log(String msg) {
-        logger.info("[gRPC][{}][{}][{}][{}][{}us]: {}",
+        logger.info("[gRPC][{}][{}][{}][{}][{}μs]: {}",
                 id,
                 site,
                 ipPort,

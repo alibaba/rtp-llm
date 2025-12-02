@@ -38,6 +38,7 @@ genrule(
     outs = [
         "libmodule_aiter_enum.so",
         "libmodule_custom_all_reduce.so",
+        "libmodule_quick_all_reduce.so",
         "libmodule_moe_sorting.so",
         "libmodule_moe_asm.so",
         "libmodule_gemm_a8w8_bpreshuffle.so",
@@ -48,6 +49,7 @@ genrule(
         "libmodule_activation.so",
         "libmodule_attention_asm.so",
         "libmodule_mha_fwd.so",
+        "libmodule_fmha_v3_varlen_fwd.so",
         "libmodule_norm.so",
         "libmodule_rmsnorm.so",
         "libmodule_gemm_a8w8.so",
@@ -56,6 +58,7 @@ genrule(
     cmd = """
        cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_aiter_enum.so $(location libmodule_aiter_enum.so);
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_custom_all_reduce.so $(location libmodule_custom_all_reduce.so);
+cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_quick_all_reduce.so $(location libmodule_quick_all_reduce.so);
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_moe_sorting.so $(location libmodule_moe_sorting.so);
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_moe_asm.so $(location libmodule_moe_asm.so);
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_gemm_a8w8_bpreshuffle.so $(location libmodule_gemm_a8w8_bpreshuffle.so);
@@ -66,6 +69,7 @@ cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_pa.so $(locatio
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_activation.so $(location libmodule_activation.so);
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_attention_asm.so $(location libmodule_attention_asm.so);
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_mha_fwd.so $(location libmodule_mha_fwd.so);
+cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_fmha_v3_varlen_fwd.so $(location libmodule_fmha_v3_varlen_fwd.so);
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_norm.so $(location libmodule_norm.so);
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_rmsnorm.so $(location libmodule_rmsnorm.so);
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_gemm_a8w8.so $(location libmodule_gemm_a8w8.so);
@@ -80,6 +84,7 @@ genrule(
     outs = [
         "module_aiter_enum.so",
         "module_custom_all_reduce.so",
+        "module_quick_all_reduce.so",
         "module_moe_sorting.so",
         "module_moe_asm.so",
         "module_gemm_a8w8_bpreshuffle.so",
@@ -90,6 +95,7 @@ genrule(
         "module_activation.so",
         "module_attention_asm.so",
         "module_mha_fwd.so",
+        "module_fmha_v3_varlen_fwd.so",
         "module_norm.so",
         "module_rmsnorm.so",
         "module_gemm_a8w8.so",
@@ -98,6 +104,7 @@ genrule(
     cmd = """
         cp external/aiter/aiter/jit/module_aiter_enum.so $(location module_aiter_enum.so);
         cp external/aiter/aiter/jit/module_custom_all_reduce.so $(location module_custom_all_reduce.so);
+        cp external/aiter/aiter/jit/module_quick_all_reduce.so $(location module_quick_all_reduce.so);
         cp external/aiter/aiter/jit/module_moe_sorting.so $(location module_moe_sorting.so);
         cp external/aiter/aiter/jit/module_moe_asm.so $(location module_moe_asm.so);
         cp external/aiter/aiter/jit/module_gemm_a8w8_bpreshuffle.so $(location module_gemm_a8w8_bpreshuffle.so);
@@ -108,6 +115,7 @@ genrule(
         cp external/aiter/aiter/jit/module_activation.so $(location module_activation.so);
         cp external/aiter/aiter/jit/module_attention_asm.so $(location module_attention_asm.so);
         cp external/aiter/aiter/jit/module_mha_fwd.so $(location module_mha_fwd.so);
+        cp external/aiter/aiter/jit/module_fmha_v3_varlen_fwd.so $(location module_fmha_v3_varlen_fwd.so);
         cp external/aiter/aiter/jit/module_norm.so $(location module_norm.so);
         cp external/aiter/aiter/jit/module_rmsnorm.so $(location module_rmsnorm.so);
         cp external/aiter/aiter/jit/module_gemm_a8w8.so $(location module_gemm_a8w8.so);

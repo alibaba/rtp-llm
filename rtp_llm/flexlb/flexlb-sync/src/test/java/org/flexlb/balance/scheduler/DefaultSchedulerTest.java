@@ -1,6 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.strategy.LoadBalancer;
+import org.flexlb.config.WhaleMasterConfig;
 import org.flexlb.dao.RequestContext;
 import org.flexlb.dao.loadbalance.MasterRequest;
 import org.flexlb.dao.loadbalance.MasterResponse;
@@ -8,7 +9,6 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.domain.balance.BalanceContext;
-import org.flexlb.domain.balance.WhaleMasterConfig;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.service.config.ConfigService;
 import org.flexlb.sync.status.EngineWorkerStatus;

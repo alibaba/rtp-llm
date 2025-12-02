@@ -5,11 +5,17 @@ import org.apache.commons.collections4.MapUtils;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.FlexMetricType;
+import org.flexlb.enums.FlexPriorityType;
+import org.flexlb.enums.TaskStateEnum;
+import org.flexlb.metric.FlexMetricTags;
+import org.flexlb.metric.FlexMonitor;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.sync.status.ModelWorkerStatus;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
+import javax.annotation.PostConstruct;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -19,7 +25,22 @@ import java.util.concurrent.atomic.AtomicLong;
 @Component
 public class ExpirationCleaner {
 
-    private static final long TASK_TIME_OUT_US = 1000 * 60 * 1000L;
+    private static final String TASK_REMOVED = "task.removed";
+    
+    private final long taskTimeoutUs;
+    private final long workerTimeoutUs;
+    private final FlexMonitor monitor;
+
+    public ExpirationCleaner(FlexMonitor monitor) {
+        this.monitor = monitor;
+        this.taskTimeoutUs = Long.parseLong(System.getenv().getOrDefault("TASK_TIMEOUT_US", "3000000"));  // 默认3s
+        this.workerTimeoutUs = Long.parseLong(System.getenv().getOrDefault("WORKER_TIMEOUT_US", "3000000")); // 默认3s
+    }
+
+    @PostConstruct
+    public void init() {
+        this.monitor.register(TASK_REMOVED, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+    }
 
     @Scheduled(fixedRate = 3000)
     public void cleanExpiredWorkers() {
@@ -28,50 +49,76 @@ public class ExpirationCleaner {
             log.error("modelWorkerStatus is null, modelName: engine_service");
             return;
         }
-        doClean(modelWorkerStatus.getPrefillStatusMap());
-        doClean(modelWorkerStatus.getDecodeStatusMap());
-        doClean(modelWorkerStatus.getPdFusionStatusMap());
-        doClean(modelWorkerStatus.getVitStatusMap());
+        this.doClean(modelWorkerStatus.getPrefillStatusMap(), RoleType.PREFILL);
+        this.doClean(modelWorkerStatus.getDecodeStatusMap(), RoleType.DECODE);
+        this.doClean(modelWorkerStatus.getPdFusionStatusMap(), RoleType.PDFUSION);
+        this.doClean(modelWorkerStatus.getVitStatusMap(), RoleType.VIT);
     }
 
-    public static void doClean(Map<String, WorkerStatus> workerStatusMap) {
+    public void doClean(Map<String, WorkerStatus> workerStatusMap, RoleType role) {
         if (MapUtils.isEmpty(workerStatusMap)) {
             return;
         }
-        long curTimeMillis = System.nanoTime() / 1000;
+
         for (Iterator<Map.Entry<String, WorkerStatus>> it = workerStatusMap.entrySet().iterator(); it.hasNext(); ) {
             Map.Entry<String, WorkerStatus> item = it.next();
             WorkerStatus workerStatus = item.getValue();
-            long expirationTime = workerStatus.getStatusLastUpdateTime().get() + 3 * 1000 * 1000L; // 3秒
-            if (curTimeMillis > expirationTime) {
+
+            // 1. 判断Worker是否需要清理
+            long expirationTime = workerStatus.getStatusLastUpdateTime().get() + workerTimeoutUs;
+            long currentTime = System.nanoTime() / 1000;
+            if (currentTime > expirationTime) {
                 it.remove();
+                continue;
             }
 
-            // 删除运行队列中的超时任务
+            // 2. 判断Worker内的Task是否需要清理：丢失的任务和长时间超时的任务
             ConcurrentHashMap<Long, TaskInfo> localTaskMap = workerStatus.getLocalTaskMap();
-            long currentTime = System.nanoTime() / 1000;
-            localTaskMap.forEach((requestId, task) -> {
-                if (isTaskTimeout(task, currentTime)) {
-                    localTaskMap.computeIfPresent(requestId, (k, existing) -> {
-                        log.warn("Removing timeout task: {}", requestId);
-                        return decrementQueueTime(workerStatus.getRunningQueueTime(), existing, workerStatus.getRole());
-                    });
+            Iterator<Map.Entry<Long, TaskInfo>> taskIterator = localTaskMap.entrySet().iterator();
+            while (taskIterator.hasNext()) {
+                Map.Entry<Long, TaskInfo> entry = taskIterator.next();
+                Long requestId = entry.getKey();
+                TaskInfo task = entry.getValue();
+                
+                boolean shouldRemove = false;
+                
+                // 检查是否是丢失的任务
+                if (task.isLost()) {
+                    log.warn("Cleaning lost task: {}, state: {}, role: {}, worker: {}", requestId, task.getTaskState(), role, workerStatus.getIp());
+                    reportTaskRemoved(workerStatus.getRole(), workerStatus.getIp(), "lost");
+                    task.updateTaskState(TaskStateEnum.CLEANED);
+                    shouldRemove = true;
                 }
-            });
+                // 检查是否是超时的任务
+                else if (task.isTimeout(currentTime, taskTimeoutUs)) {
+                    log.warn("Removing timeout task: {}, state: {}, age: {}ms, role: {}, worker: {}", requestId, task.getTaskState(),
+                            (currentTime - task.getLastActiveTimeUs()) / 1000, role, workerStatus.getIp());
+                    reportTaskRemoved(workerStatus.getRole(), workerStatus.getIp(), "timeout");
+                    task.updateTaskState(TaskStateEnum.CLEANED);
+                    shouldRemove = true;
+                }
+                
+                if (shouldRemove) {
+                    decrementQueueTime(workerStatus.getRunningQueueTime(), task, workerStatus.getRole());
+                    taskIterator.remove();
+                }
+            }
         }
     }
 
-    private static boolean isTaskTimeout(TaskInfo task, long currentTime) {
-        // 使用任务开始时间或创建时间判断超时
-        long lastAccessTime = task.getLastActiveTimeUs();
-        return (currentTime - lastAccessTime) > TASK_TIME_OUT_US;
+    private void reportTaskRemoved(String role, String ip, String type) {
+        FlexMetricTags tags = FlexMetricTags.of(
+            "role", role, 
+            "ip", ip,
+            "type", type
+        );
+        monitor.report(TASK_REMOVED, tags, 1);
     }
 
-    private static TaskInfo decrementQueueTime(AtomicLong runningQueueTime, TaskInfo task, String role) {
+    private static void decrementQueueTime(AtomicLong runningQueueTime, TaskInfo task, String role) {
         if (RoleType.PREFILL.matches(role) || RoleType.PDFUSION.matches(role)) {
             long delta = task.estimatePrefillTime();
             WorkerStatus.safeDecrementQueueTime(runningQueueTime, delta);
         }
-        return null; // 返回null表示删除条目
     }
 }

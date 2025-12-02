@@ -16,7 +16,7 @@ import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.sync.status.ModelWorkerStatus;
 import org.flexlb.util.IdUtils;
 import org.flexlb.util.JsonUtils;
-import org.flexlb.utils.LoggingUtils;
+import org.flexlb.util.LoggingUtils;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;

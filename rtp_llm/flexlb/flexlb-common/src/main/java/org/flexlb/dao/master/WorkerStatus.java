@@ -2,11 +2,16 @@ package org.flexlb.dao.master;
 
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.collections4.CollectionUtils;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.TaskStateEnum;
+import org.flexlb.util.LoggingUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
@@ -49,8 +54,11 @@ public class WorkerStatus {
      */
     public void putLocalTask(Long requestId, TaskInfo taskInfo) {
         localTaskMap.put(requestId, taskInfo);
+        taskInfo.updateTaskState(TaskStateEnum.IN_TRANSIT);
+
         addRunningQueueTime(taskInfo.estimatePrefillTime());
         lastSelectedTime.set(System.nanoTime() / 1000);
+        LoggingUtils.debug("Task {} added to local queue with state: {}", requestId, TaskStateEnum.IN_TRANSIT);
     }
 
     /**
@@ -59,8 +67,10 @@ public class WorkerStatus {
      */
     public void removeLocalTask(Long requestId) {
         TaskInfo taskInfo = localTaskMap.get(requestId);
-        addRunningQueueTime(-1 * taskInfo.estimatePrefillTime());
-        localTaskMap.remove(requestId);
+        if (taskInfo != null) {
+            addRunningQueueTime(-1 * taskInfo.estimatePrefillTime());
+            localTaskMap.remove(requestId);
+        }
     }
 
     /**
@@ -79,52 +89,83 @@ public class WorkerStatus {
         kvCacheFree.addAndGet(-len);
     }
 
-    public void updateRunningTaskList(List<TaskInfo> runningTaskList) {
-        if (runningTaskList == null) {
-            return;
-        }
-
-        for (TaskInfo taskInfo : runningTaskList) {
-            Long requestId = taskInfo.getInterRequestId();
-            localTaskMap.computeIfPresent(requestId, (k, existingTask) -> {
-                existingTask.setLastActiveTimeUs(System.nanoTime() / 1000);
-                return taskInfo;
-            });
-        }
-    }
-
     /**
-     * 处理已完成任务
-     * @param finishedTaskList 已完成的任务列表
+     * 更新任务状态
+     * 检查丢失、更新运行、清理完成任务
      */
-    public void clearFinishedTask(List<TaskInfo> finishedTaskList) {
-        if (finishedTaskList == null) {
-            return;
-        }
-
-        // 原子更新版本号
-        long maxEndTime = 0;
-        for (TaskInfo taskInfo : finishedTaskList) {
-            long endTime = taskInfo.getEndTimeMs();
-            if (endTime > maxEndTime) {
-                maxEndTime = endTime;
+    public void updateTaskStates(List<TaskInfo> runningTaskList, List<TaskInfo> finishedTaskList) {
+        // 更新完成任务的版本号
+        if (CollectionUtils.isNotEmpty(finishedTaskList)) {
+            long maxEndTime = finishedTaskList.stream()
+                .mapToLong(TaskInfo::getEndTimeMs)
+                .max().orElse(-1);
+            if (maxEndTime != -1) {
+                latestFinishedTaskVersion.accumulateAndGet(maxEndTime, Math::max);
             }
         }
-        if (maxEndTime > 0) {
-            latestFinishedTaskVersion.accumulateAndGet(maxEndTime, Math::max);
-        }
-
-        // 在运行队列中删除已完成任务
-        for (TaskInfo taskInfo : finishedTaskList) {
-            Long requestId = taskInfo.getInterRequestId();
-            localTaskMap.computeIfPresent(requestId, (k, existingTask) -> {
+        
+        // 遍历本地任务，并更新任务状态
+        Iterator<Map.Entry<Long, TaskInfo>> iterator = localTaskMap.entrySet().iterator();
+        while (iterator.hasNext()) {
+            Map.Entry<Long, TaskInfo> entry = iterator.next();
+            Long requestId = entry.getKey();
+            TaskInfo localTask = entry.getValue();
+            
+            // 检查是否在运行列表中
+            TaskInfo runningTask = runningTaskList != null ? 
+                runningTaskList.stream().filter(t -> t.getInterRequestId() == requestId).findFirst().orElse(null) : null;
+                
+            // 检查是否在完成列表中
+            TaskInfo finishedTask = finishedTaskList != null ? 
+                finishedTaskList.stream().filter(t -> t.getInterRequestId() == requestId).findFirst().orElse(null) : null;
+            
+            // 处理完成的任务
+            if (finishedTask != null) {
+                if (localTask.getTaskState() == TaskStateEnum.IN_TRANSIT) {
+                    localTask.updateTaskState(TaskStateEnum.CONFIRMED);
+                    LoggingUtils.debug("Task {} first confirmed by worker", requestId);
+                }
+                localTask.updateTaskState(TaskStateEnum.FINISHED);
+                
                 if (RoleType.PREFILL.matches(role) || RoleType.PDFUSION.matches(role)) {
-                    long delta = taskInfo.estimatePrefillTime();
+                    long delta = finishedTask.estimatePrefillTime();
                     safeDecrementQueueTime(runningQueueTime, delta);
                 }
-                logger.info("Removed task {}", requestId);
-                return null; // 返回null表示删除条目
-            });
+                LoggingUtils.debug("Task {} finished and removed", requestId);
+                // 本地任务删除Task
+                iterator.remove();
+                continue;
+            }
+            
+            // 处理运行中的任务
+            if (runningTask != null) {
+                localTask.setLastActiveTimeUs(System.nanoTime() / 1000);
+
+                if (localTask.getTaskState() == TaskStateEnum.IN_TRANSIT) {
+                    localTask.updateTaskState(TaskStateEnum.CONFIRMED);
+                    LoggingUtils.debug("Task {} first confirmed by worker", requestId);
+                }
+                if (localTask.getTaskState() != TaskStateEnum.RUNNING) {
+                    localTask.updateTaskState(TaskStateEnum.RUNNING);
+                }
+                
+                // 更新引擎返回的字段
+                localTask.setPrefixLength(runningTask.getPrefixLength());
+                localTask.setPrefillTime(runningTask.getPrefillTime());
+                localTask.setInputLength(runningTask.getInputLength());
+                localTask.setWaitingTime(runningTask.getWaitingTime());
+                localTask.setIterateCount(runningTask.getIterateCount());
+                localTask.setEndTimeMs(runningTask.getEndTimeMs());
+                localTask.setDpRank(runningTask.getDpRank());
+                
+                continue;
+            }
+            
+            // 如果任务已经被确认，但是在运行列表和完成列表中都没有，则标记为丢失
+            if (localTask.getTaskState() == TaskStateEnum.CONFIRMED || localTask.getTaskState() == TaskStateEnum.RUNNING) {
+                localTask.updateTaskState(TaskStateEnum.LOST);
+                logger.warn("Task {} marked as LOST - not in running or finished list", requestId);
+            }
         }
     }
 

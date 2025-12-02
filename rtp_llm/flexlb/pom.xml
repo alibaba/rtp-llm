@@ -28,7 +28,7 @@
         <maven-antrun.version>3.1.0</maven-antrun.version>
         <maven-resources.version>3.3.1</maven-resources.version>
         <spring-boot.version>2.7.18</spring-boot.version>
-        <grpc.version>1.62.2</grpc.version>
+        <grpc.version>1.65.0</grpc.version>
         <protoc.version>3.25.1</protoc.version>
         <protobuf.version>3.25.1</protobuf.version>
         <curator.version>5.4.0</curator.version>

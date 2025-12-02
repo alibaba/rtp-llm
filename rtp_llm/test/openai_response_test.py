@@ -2116,7 +2116,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         self.model.config.py_env_configs.model_config.model_type = "chatglm3"
         self.model.tokenizer = tokenizer
         self.endpoint = OpenaiEndpoint(self.model.config, self.model.tokenizer, None)
-        self.assertEqual(self.endpoint.stop_words_id_list, [[64795], [64797], [2]])
+        self.assertEqual(self.endpoint.stop_words_id_list, [[2], [64795], [64797]])
         self.assertEqual(
             self.endpoint.stop_words_str_list, ["<|user|>", "<|observation|>"]
         )

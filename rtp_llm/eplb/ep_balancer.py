@@ -140,7 +140,7 @@ class ExpertBalancer:
         for idx in self.moe_layer_index:
             if (
                 most_unbalanced_idx == -1
-                or max_per_layer[idx] > max_per_layer[most_unbalanced_idx]
+                or (idx < max_per_layer.shape[0] and max_per_layer[idx] > max_per_layer[most_unbalanced_idx])
             ):
                 most_unbalanced_idx = idx
 

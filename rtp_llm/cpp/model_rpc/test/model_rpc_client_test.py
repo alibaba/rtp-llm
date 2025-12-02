@@ -46,35 +46,39 @@ class FakeStub:
     async def GenerateStreamCall(self, input: GenerateInputPB, timeout=None):
         # 1. 第一个响应：包含第一个生成的 token
         outputs_pb1 = GenerateOutputsPB()
-        output_pb1 = outputs_pb1.generate_outputs.add()
+        output_pb1 = outputs_pb1.flatten_output
         output_pb1.output_ids.data_type = TensorPB.DataType.INT32
         output_pb1.output_ids.shape.extend([1, 1])
         output_pb1.output_ids.int32_data = struct.pack("<i", 0)
-        output_pb1.aux_info.iter_count = 1
-        output_pb1.aux_info.output_len = 1
+        aux_info = output_pb1.aux_info.add()
+        aux_info.iter_count = 1
+        aux_info.output_len = 1
         output_pb1.logits.data_type = TensorPB.DataType.FP32
-        output_pb1.logits.shape.extend([1, 2])
+        output_pb1.logits.shape.extend([1, 1, 2])
         output_pb1.logits.fp32_data = struct.pack("<ff", 0.0, 0.0)
+        output_pb1.finished.extend([False])
         yield outputs_pb1
 
         # 2. 第二个响应：包含累积的两个 token
         outputs_pb2 = GenerateOutputsPB()
-        output_pb2 = outputs_pb2.generate_outputs.add()
+        output_pb2 = outputs_pb2.flatten_output
         output_pb2.output_ids.data_type = TensorPB.DataType.INT32
         output_pb2.output_ids.shape.extend([1, 2])
         output_pb2.output_ids.int32_data = struct.pack("<ii", 0, 1)
-        output_pb2.aux_info.iter_count = 2
-        output_pb2.aux_info.output_len = 2
+        aux_info2 = output_pb2.aux_info.add()
+        aux_info2.iter_count = 2
+        aux_info2.output_len = 2
         output_pb2.logits.data_type = TensorPB.DataType.FP32
-        output_pb2.logits.shape.extend([1, 2])
+        output_pb2.logits.shape.extend([1, 1, 2])
         output_pb2.logits.fp32_data = struct.pack("<ff", 0.1, 0.2)
+        output_pb2.finished.extend([False])
         yield outputs_pb2
 
         # 3. 最终响应：标记结束，并携带最后一个状态
         outputs_pb3 = GenerateOutputsPB()
-        output_pb3_item = outputs_pb3.generate_outputs.add()
+        output_pb3_item = outputs_pb3.flatten_output
         output_pb3_item.CopyFrom(output_pb2)
-        output_pb3_item.finished = True
+        output_pb3_item.finished[0] = True
         yield outputs_pb3
 
 
@@ -103,7 +107,7 @@ class ModelRpcClientTest(TestCase):
     async def _run(client, input):
         responses = []
         async for res in client.enqueue(input):
-            responses.append(res.generate_outputs[0])
+            responses.extend(res.generate_outputs)
         return responses
 
     @unittest.skip("need fix")
@@ -145,6 +149,7 @@ class ModelRpcClientTest(TestCase):
             mm_inputs=[],
         )
         res = asyncio.run(self._run(client, input))
+
         self.assertEqual(len(res), 3)
 
         # res[0] 是第一个token

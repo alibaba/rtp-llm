@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import pathlib
@@ -11,6 +12,8 @@ from rtp_llm.config.py_config_modules import StaticConfig
 
 current_file_path = pathlib.Path(__file__).parent.absolute()
 sys.path.append(str(current_file_path.parent.absolute()))
+
+from dataclasses import asdict
 
 from pydantic import BaseModel
 
@@ -141,19 +144,20 @@ class FrontendWorker:
     ) -> Dict[str, Any]:
         generate_texts = gen_responses.generate_texts
         finished = gen_responses.generate_outputs.generate_outputs[0].finished
-        aux_info = gen_responses.generate_outputs.generate_outputs[0].aux_info
+        if generate_config.aux_info:
+            aux_info = gen_responses.generate_outputs.generate_outputs[0].aux_info
+            if generate_config.has_num_beams():
+                aux_info.beam_responses = generate_texts
         hidden_states = gen_responses.generate_outputs.generate_outputs[0].hidden_states
         output_ids = gen_responses.generate_outputs.generate_outputs[0].output_ids
         input_ids = gen_responses.generate_outputs.generate_outputs[0].input_ids
         loss = gen_responses.generate_outputs.generate_outputs[0].loss
         logits = gen_responses.generate_outputs.generate_outputs[0].logits
 
-        if generate_config.has_num_beams():
-            aux_info.beam_responses = generate_texts
         response = PipelineResponse(
             response=generate_texts[0],
             finished=finished,
-            aux_info=aux_info.model_dump(mode="json"),
+            aux_info=asdict(aux_info) if generate_config.aux_info else {},
             hidden_states=(
                 hidden_states.tolist()
                 if generate_config.return_hidden_states and hidden_states is not None
@@ -188,6 +192,12 @@ class FrontendWorker:
     ) -> Dict[str, Any]:
         generate_texts = gen_responses.generate_texts
         if generate_config.num_return_sequences > 0:
+            aux_info = []
+            if generate_config.aux_info:
+                aux_info = [
+                    asdict(seq.aux_info)
+                    for seq in gen_responses.generate_outputs.generate_outputs
+                ]
             sequences_pipeline_response = MultiSequencesPipelineResponse(
                 response=generate_texts,
                 finished=all(
@@ -196,10 +206,7 @@ class FrontendWorker:
                         for seq in gen_responses.generate_outputs.generate_outputs
                     ]
                 ),
-                aux_info=[
-                    seq.aux_info.model_dump(mode="json")
-                    for seq in gen_responses.generate_outputs.generate_outputs
-                ],
+                aux_info=aux_info,
             )
             return sequences_pipeline_response
         else:
@@ -225,7 +232,6 @@ class FrontendWorker:
 
     def is_streaming(self, req: Dict[str, Any]):
         return RequestExtractor.is_streaming(req) or req.get("stream", False)
-
 
     async def _parallel_batch_async_generators(
         self,

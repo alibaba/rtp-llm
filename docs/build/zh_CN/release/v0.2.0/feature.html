@@ -59,7 +59,7 @@
     <link rel="prev" title="RTP-LLM 0.2.0" href="release.html" />
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="zh-CN"/>
-    <meta name="docbuild:last-update" content="2025 年 11 月 09 日"/>
+    <meta name="docbuild:last-update" content="2025 年 11 月 26 日"/>
 <link
   rel="stylesheet"
   href="../../_static/css/language-switcher.css"
@@ -206,7 +206,7 @@
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">高级后端配置</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../../backend/server_arguments.html">ServerArgs</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../../backend/sampling_params.html">Sampling Config</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../backend/sampling_params.html">采样配置</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../backend/attention_backend.html">Attention Backend</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">支持的模型</span></p>
@@ -570,6 +570,11 @@ document.write(`
 <li><p>原始请求流stop_words导致假挂起</p></li>
 <li><p>some speculative decoding bugs</p></li>
 <li><p>Warmup produce nan maybe influence kvcache</p></li>
+<li><p>Not success query make bad kvcache case wrong answer</p></li>
+<li><p>UseAllGather takes effect automatically according to the DP/TP</p></li>
+<li><p>UseAllGather with deepgemm coredump cause by topk type is bad.</p></li>
+<li><p>FlexLb too many log cause bad performance</p></li>
+<li><p>Flexlb support PD_FUSION</p></li>
 </ul>
 </section>
 </section>
@@ -582,6 +587,7 @@ document.write(`
 <li><p>没有shared_experter的MoE模型无法使用enable-layer-micro-batch</p></li>
 <li><p>带有EPLB和MTP step &gt; 1的P/D分离架构可能导致Prefill挂起</p></li>
 <li><p>Embedding of VL Model is not ok cause by position id is wrong</p></li>
+<li><p>FlexLb: Frequent switching of a large number of machines results in the performance degradation of flexlb</p></li>
 </ul>
 </section>
 <section id="performance">
@@ -680,7 +686,7 @@ document.write(`
 
   <div class="footer-item">
     <p class="last-updated">
-  最后更新于 2025 年 11 月 09 日.
+  最后更新于 2025 年 11 月 26 日.
   <br/>
 </p>
   </div>

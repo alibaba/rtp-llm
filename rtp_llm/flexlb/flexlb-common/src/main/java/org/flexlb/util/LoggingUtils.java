@@ -1,19 +1,34 @@
-package org.flexlb.utils;
+package org.flexlb.util;
 
+import lombok.Getter;
+import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
-import org.flexlb.domain.balance.WhaleMasterConfig;
 import org.flexlb.enums.LogLevel;
 
 /**
  * Logging utility class, in order to log when enable global switch or set log level in master request
  *
- * <p>The {@code warn} and {@code error} level in enabled by default.</p>
+ * <p>The {@code info} {@code warn} and {@code error} level in enabled by default.</p>
  *
- * @see WhaleMasterConfig#getLogLevel()
  * @see LogLevel
  */
 @Slf4j
 public class LoggingUtils {
+
+    @Getter
+    @Setter
+    private static LogLevel globalLogLevel;
+
+    static {
+        String logLevelStr = System.getenv("LOG_LEVEL");
+        if (logLevelStr != null) {
+            try {
+                globalLogLevel = LogLevel.valueOf(logLevelStr.toUpperCase().trim());
+            } catch (IllegalArgumentException e) {
+                log.warn("Invalid LOG_LEVEL value: '{}'. Valid values are: TRACE, DEBUG, INFO, WARN, ERROR.", logLevelStr);
+            }
+        }
+    }
 
     public static void trace(String format, Object... args) {
         log(LogLevel.TRACE, () -> log.trace(format, args));
@@ -40,7 +55,14 @@ public class LoggingUtils {
     }
 
     private static void log(LogLevel targetLevel, Runnable logAction, boolean checkGlobalLevel) {
-        LogLevel globalLogLevel = WhaleMasterConfig.getLogLevel();
+        boolean shouldLog = shouldLog(targetLevel, checkGlobalLevel);
+
+        if (shouldLog) {
+            logAction.run();
+        }
+    }
+
+    private static boolean shouldLog(LogLevel targetLevel, boolean checkGlobalLevel) {
         boolean shouldLog;
         if (checkGlobalLevel) {
             shouldLog = globalLogLevel != null && globalLogLevel.compareTo(targetLevel) <= 0;
@@ -48,9 +70,6 @@ public class LoggingUtils {
             // warn and error are enabled by default
             shouldLog = globalLogLevel == null || globalLogLevel.compareTo(targetLevel) <= 0;
         }
-
-        if (shouldLog) {
-            logAction.run();
-        }
+        return shouldLog;
     }
 }

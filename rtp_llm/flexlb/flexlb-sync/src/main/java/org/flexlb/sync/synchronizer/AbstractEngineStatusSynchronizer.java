@@ -2,7 +2,7 @@ package org.flexlb.sync.synchronizer;
 
 import io.micrometer.core.instrument.util.NamedThreadFactory;
 import org.flexlb.config.ModelMetaConfig;
-import org.flexlb.domain.balance.WhaleMasterConfig;
+import org.flexlb.config.WhaleMasterConfig;
 import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
