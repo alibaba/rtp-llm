@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rtp_llm/cpp/devices/OpData.h"
+#include "rtp_llm/cpp/cuda/cufmha/TRTAttn.h"
 #include "rtp_llm/cpp/cuda/cufmha/cufmha.h"
 #include "rtp_llm/cpp/devices/DeviceBase.h"
 #include "rtp_llm/cpp/cuda/cuda_host_utils.h"
@@ -56,32 +57,6 @@ private:
     cudaStream_t main_stream_;
     cudaStream_t comm_stream_;
 };
-
-struct TRTAttn: public ParamsBase {
-    KVBlockArray kv_block_array;
-    BufferPtr    kv_cache_offset;
-    BufferPtr    kv_cache_offset_h;
-
-    torch::Tensor padding_offset;
-    torch::Tensor cu_seqlens;
-    torch::Tensor cu_kv_seqlens;
-    torch::Tensor input_lengths;
-    torch::Tensor sequence_lengths;
-    torch::Tensor cu_mask_rows;
-    int           max_seq_len;
-    bool          decode_plan;
-
-    DataType attn_type;
-
-    static void setKvCache(KVBlockArray& kv_block_array, const KvCacheInfo& kv_cache) {
-        kv_block_array.mPrimaryPoolPtr = kv_cache.k_cache_buffer->data();
-        if (kv_cache.k_scale_buffer) {
-            kv_block_array.scale = kv_cache.k_scale_buffer->data();
-        }
-    }
-};
-
-using TRTAttnPtr = std::shared_ptr<TRTAttn>;
 
 class CudaDevice: public DeviceBase {
 public:

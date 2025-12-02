@@ -5,6 +5,7 @@
 #include "3rdparty/contextFusedMultiHeadAttentionSm70/fmhaRunner.h"
 #include "3rdparty/contextFusedMultiHeadAttention/fused_multihead_attention_common.h"
 #include "3rdparty/trt_fused_multihead_attention/qkvToContext.h"
+#include "rtp_llm/cpp/cuda/cufmha/TrtV2FmhaRunner.h"
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/devices/DeviceData.h"
 
@@ -36,7 +37,7 @@ public:
     }
 
     bool trtV2FmhaSupport() {
-        return support_trt_v2_fhma_;
+        return support_trt_v2_fmha_;
     }
 
     bool trtV2FmhaPagedSupport() {
@@ -131,27 +132,7 @@ private:
 
     bool initTrtV1FmhaAndCheckSupport();
 
-    bool initTrtV2FmhaAndCheckSupport();
-
-    bool initTrtV2FmhaPagedAndCheckSupport();
-
-    bool initOpenSourceFmhaAndCheckSupport();
-
-    tensorrt_llm::kernels::MHARunnerFixedParams createMHARunnerFixedParams(bool paged, bool isSPadded = false);
-    tensorrt_llm::kernels::MHARunnerParams      createMHARunnerParams(void*        input,
-                                                                      void*        cu_seqlens,
-                                                                      void*        cu_kv_seqlens,
-                                                                      void*        output,
-                                                                      uint32_t*    tile_counter_ptr,
-                                                                      float*       attention_output_orig_quant_scale,
-                                                                      size_t       batch_size,
-                                                                      size_t       max_input_length,
-                                                                      size_t       max_kv_length,
-                                                                      size_t       total_q_seq_len,
-                                                                      size_t       total_kv_seq_len,
-                                                                      KVBlockArray kv_block_array,
-                                                                      void*        custom_mask = nullptr);
-    static int                                  roundMultiple(int x, int m) {
+    static int roundMultiple(int x, int m) {
         return (x + m - 1) / m * m;
     }
 
@@ -170,10 +151,10 @@ private:
                                        float* linear_bias_slopes  = nullptr,
                                        float  softmax_extra_scale = 1.0f) const;
 
+    bool initOpenSourceFmhaAndCheckSupport();
+
 private:
-    std::unique_ptr<tensorrt_llm::kernels::FusedMHARunnerV2>     trtv2_fmha_runner_;
-    std::unique_ptr<tensorrt_llm::kernels::FusedMHARunnerV2>     trtv2_paged_fmha_runner_;
-    std::unique_ptr<tensorrt_llm::kernels::FusedMHARunnerV2Sm70> trtv2_sm70_fmha_runner_;
+    std::shared_ptr<TrtV2FmhaRunner> trtv2_runner_;
 #ifdef USE_OLD_TRT_FMHA
     std::unique_ptr<FusedMHARunnerFP16v2> trtv1_fmha_runner_;
 #endif
@@ -188,7 +169,7 @@ private:
     float        q_scaling_;
     bool         use_linear_bias_slopes_;
     bool         support_trt_v1_fmha_;
-    bool         support_trt_v2_fhma_;
+    bool         support_trt_v2_fmha_;
     bool         support_trt_v2_paged_fmha_;
     bool         support_open_source_fmha_;
     bool         is_s_padded_{false};

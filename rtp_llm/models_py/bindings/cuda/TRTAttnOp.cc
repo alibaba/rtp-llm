@@ -1,4 +1,5 @@
 #include "rtp_llm/models_py/bindings/cuda/TRTAttnOp.h"
+#include "rtp_llm/cpp/cuda/cufmha/TrtV2FmhaRunner.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 
 using namespace torch_ext;
@@ -19,8 +20,15 @@ ParamsBasePtr TRTPrefillOpBase::prepare(torch_ext::PyAttentionInputs attn_inputs
     auto          cu_seqlens    = attn_inputs.cu_seqlens;
     torch::Tensor cu_kv_seqlens = cu_seqlens;
     TRTAttnPtr    attn_params;
-    auto          params = device_->prepareTrtAttn(
-        attn_configs_, attn_inputs.kv_block_offset, kv_cache_block_id_device, attn_inputs.input_lengths.size(0));
+    auto          run_stream   = at::cuda::getCurrentCUDAStream(at::cuda::current_device()).stream();
+    bool          use_fp8_fmha = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
+    auto          params       = prepareTrtAttnParams(attn_configs_,
+                                       attn_inputs.kv_block_offset,
+                                       kv_cache_block_id_device,
+                                       attn_inputs.input_lengths.size(0),
+                                       use_fp8_fmha,
+                                       run_stream,
+                                       fmha_config_.enable_paged_trt_fmha);
     if (params) {
         attn_params = TRTAttnPtr(params, (TRTAttn*)params.get());
     } else {
@@ -31,19 +39,40 @@ ParamsBasePtr TRTPrefillOpBase::prepare(torch_ext::PyAttentionInputs attn_inputs
     attn_params->cu_kv_seqlens = cu_kv_seqlens;
     attn_params->max_seq_len   = attn_inputs.input_lengths.max().item<int32_t>();
     attn_params->input_lengths = attn_inputs.input_lengths;
-    // not support has_alibi_slopes
-    DataType attn_dtype = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8 ?
-                              DataType::TYPE_FP8_E4M3 :
-                              torchDTypeToDataType(attn_inputs.dtype);
-    cufmha_runner_      = device_->selectCuFMHARunner(attn_configs_, attn_dtype, false);
+
+    // 创建 TRT V2 FMHA Runner
+    DataType attn_dtype = use_fp8_fmha ? DataType::TYPE_FP8_E4M3 : torchDTypeToDataType(attn_inputs.dtype);
+
+    if (!trt_v2_runner_) {
+        auto runner_config = TrtV2FmhaRunnerConfig::fromAttentionConfigs(attn_configs_);
+        trt_v2_runner_     = std::make_shared<TrtV2FmhaRunner>(runner_config, attn_dtype, use_fp8_fmha, run_stream);
+    }
+
     return ParamsBasePtr(attn_params);
 }
 
 bool TRTPagedPrefillOp::support(torch_ext::PyAttentionInputs attn_inputs) {
     bool has_prefix =
         attn_inputs.prefix_lengths.defined() && torch::any(attn_inputs.prefix_lengths.reshape({-1})).item<bool>();
-    return has_prefix && fmha_config_.enable_trt_fmha && fmha_config_.enable_paged_trt_fmha
-           && attn_configs_.kv_cache_dtype != KvCacheDataType::INT8;
+
+    if (!has_prefix || !fmha_config_.enable_trt_fmha || !fmha_config_.enable_paged_trt_fmha
+        || attn_configs_.kv_cache_dtype == KvCacheDataType::INT8) {
+        return false;
+    }
+
+    // 创建 runner 并检查是否支持
+    DataType attn_dtype = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8 ?
+                              DataType::TYPE_FP8_E4M3 :
+                              torchDTypeToDataType(attn_inputs.dtype);
+
+    auto run_stream   = at::cuda::getCurrentCUDAStream(at::cuda::current_device()).stream();
+    bool use_fp8_fmha = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
+    if (!trt_v2_runner_) {
+        auto runner_config = TrtV2FmhaRunnerConfig::fromAttentionConfigs(attn_configs_);
+        trt_v2_runner_.reset(new TrtV2FmhaRunner(runner_config, attn_dtype, use_fp8_fmha, run_stream));
+    }
+
+    return trt_v2_runner_->trtV2PagedFmhaSupported();
 }
 
 torch::Tensor TRTPagedPrefillOp::forward(const torch::Tensor&              input,
@@ -69,7 +98,8 @@ torch::Tensor TRTPagedPrefillOp::forward(const torch::Tensor&              input
     torch::Tensor tiled_counter = torch::zeros({1}, torch::TensorOptions(torch::kUInt32).device(input.device()));
     bool          use_fp8_fmha  = kv_block_array.cache_type == KvCacheDataType::FP8;
     float*        attention_output_orig_quant_scale = use_fp8_fmha ? static_scale_.data_ptr<float>() : nullptr;
-    cufmha_runner_->runTrtV2FmhaPaged(input.data_ptr(),
+
+    trt_v2_runner_->runTrtV2FmhaPaged(input.data_ptr(),
                                       params->cu_seqlens.data_ptr(),
                                       params->cu_kv_seqlens.data_ptr(),
                                       output.data_ptr(),
@@ -87,7 +117,21 @@ torch::Tensor TRTPagedPrefillOp::forward(const torch::Tensor&              input
 bool TRTNormalPrefillOp::support(torch_ext::PyAttentionInputs attn_inputs) {
     bool has_prefix =
         attn_inputs.prefix_lengths.defined() && torch::any(attn_inputs.prefix_lengths.reshape({-1})).item<bool>();
-    return !has_prefix && fmha_config_.enable_trt_fmha && attn_configs_.kv_cache_dtype != KvCacheDataType::INT8;
+
+    if (has_prefix || !fmha_config_.enable_trt_fmha || attn_configs_.kv_cache_dtype == KvCacheDataType::INT8) {
+        return false;
+    }
+
+    auto     run_stream   = at::cuda::getCurrentCUDAStream(at::cuda::current_device()).stream();
+    bool     use_fp8_fmha = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
+    DataType attn_dtype   = use_fp8_fmha ? DataType::TYPE_FP8_E4M3 : torchDTypeToDataType(attn_inputs.dtype);
+
+    if (!trt_v2_runner_) {
+        auto runner_config = TrtV2FmhaRunnerConfig::fromAttentionConfigs(attn_configs_);
+        trt_v2_runner_.reset(new TrtV2FmhaRunner(runner_config, attn_dtype, use_fp8_fmha, run_stream));
+    }
+
+    return trt_v2_runner_->trtV2FmhaSupported();
 }
 
 torch::Tensor TRTNormalPrefillOp::forward(const torch::Tensor&              input,
@@ -127,7 +171,7 @@ torch::Tensor TRTNormalPrefillOp::forward(const torch::Tensor&              inpu
     }
     RTP_LLM_CHECK_WITH_INFO(fmha_output_ptr, "fmha_output_ptr must be provided for trt v2 fmha");
 
-    cufmha_runner_->runTrtV2Fmha(fmha_input_ptr,
+    trt_v2_runner_->runTrtV2Fmha(fmha_input_ptr,
                                  params->cu_seqlens.data_ptr(),
                                  fmha_output_ptr,
                                  reinterpret_cast<uint32_t*>(tiled_counter.data_ptr()),

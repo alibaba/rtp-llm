@@ -89,6 +89,35 @@ cc_library(
 fa_deps()
 
 cc_library(
+    name = "trt_v2_attn",
+    srcs = [
+        "cufmha/TrtV2FmhaRunner.cc",
+        "cufmha/TRTAttn.cc",
+    ],
+    hdrs = [
+        "cufmha/TrtV2FmhaRunner.h",
+        "cufmha/TRTAttn.h",
+    ],
+    deps = [
+        ":fa_hdrs",
+        ":cuda_host_utils",
+        "//rtp_llm/cpp/core:types",
+        "//rtp_llm/cpp/core:types_hdr",
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/kernels:kernels_tensor_ops",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+        "//3rdparty/contextFusedMultiHeadAttention:trt_fmha_impl",
+        "//3rdparty/contextFusedMultiHeadAttentionSm70:trt_sm70_fmha_impl",
+        # still need to include devices_base for struct OpData
+        "//rtp_llm/cpp/devices:devices_base",
+        "//rtp_llm/cpp/kernels:kernels_kv_cache"
+    ],
+    # for fused_multihead_attention_utils.h: alpha = reinterpret_cast<uint32_t const&>(h2)
+    copts = copts() + ["-fno-strict-aliasing"],
+)
+
+cc_library(
     name = "cufmha",
     srcs = [
         "cufmha/cufmha.cc",
@@ -108,10 +137,9 @@ cc_library(
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
         "//3rdparty/trt_fused_multihead_attention:trt_fused_multihead_attention_header",
-        "//3rdparty/contextFusedMultiHeadAttention:trt_fmha_impl",
-        "//3rdparty/contextFusedMultiHeadAttentionSm70:trt_sm70_fmha_impl",
         "//3rdparty/trt_fused_multihead_attention:trt_fused_multihead_attention_impl",
-        "//rtp_llm/cpp/devices:devices_base"
+        "//rtp_llm/cpp/devices:devices_base",
+        ":trt_v2_attn"
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
