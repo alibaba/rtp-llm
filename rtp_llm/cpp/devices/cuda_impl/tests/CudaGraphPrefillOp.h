@@ -21,8 +21,6 @@ public:
 
     CudaGraphRunnerPtr createCudaGraphRunner(py::object py_instance);
 
-    void setCufmhaPadded(bool is_s_padded);
-
     PyModelOutputs forward(PyModelInputs inputs) {
         return cuda_graph_runner_->forward(inputs);
     }

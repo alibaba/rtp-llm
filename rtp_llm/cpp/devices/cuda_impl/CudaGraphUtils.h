@@ -32,6 +32,7 @@ public:
         py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params =
             inputs.attention_inputs.prefill_cuda_graph_copy_params;
         py_model_inputs_.bert_embedding_inputs = inputs.bert_embedding_inputs;
+        py_model_inputs_.attention_inputs.is_s_padded              = inputs.attention_inputs.is_s_padded;
     }
 
 public:

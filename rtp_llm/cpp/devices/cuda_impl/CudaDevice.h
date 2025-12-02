@@ -239,8 +239,6 @@ public:
 
     std::shared_ptr<cufmha>
     selectCuFMHARunner(const AttentionConfigs& configs, DataType attn_dtype, bool has_alibi_slopes);
-    // only for cuda graph test
-    void setIsPadded(bool is_s_padded);
 
 protected:
     DevicePrepOutput prepareModelRunCommon(const DevicePrepParams& params);

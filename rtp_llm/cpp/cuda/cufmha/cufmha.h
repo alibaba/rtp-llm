@@ -119,13 +119,6 @@ public:
                         size_t            size_per_head,
                         float             q_scaling,
                         bool              use_linear_bias_slopes);
-    // for cuda graph batch prefill test
-    bool getIsPadded() {
-        return is_s_padded_;
-    }
-
-    // for cuda graph batch prefill test
-    void setIsPadded(bool is_s_padded);
 
 private:
     cudaStream_t getStream();

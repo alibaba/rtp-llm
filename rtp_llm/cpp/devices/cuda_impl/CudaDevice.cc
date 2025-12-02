@@ -382,15 +382,6 @@ DeviceProperties CudaDevice::getDeviceProperties() {
     return *prop;
 }
 
-// only for cuda graph batch prefill test
-void CudaDevice::setIsPadded(bool is_s_padded) {
-    RTP_LLM_CHECK_WITH_INFO(!cufmha_runner_pool_.empty(), "cufmha_runner_pool_ is empty, cannot call setIsPadded");
-    cufmha_runner_ = cufmha_runner_pool_.back();
-    RTP_LLM_LOG_INFO("cufmha runner nums: %d", cufmha_runner_pool_.size());
-    RTP_LLM_CHECK_WITH_INFO(cufmha_runner_ != nullptr, "cufmha_runner_ can't be nullptr");
-    cufmha_runner_->setIsPadded(is_s_padded);
-}
-
 std::shared_ptr<cufmha>
 CudaDevice::selectCuFMHARunner(const AttentionConfigs& configs, DataType attn_dtype, bool has_alibi_slopes) {
     bool     found_cufmha_runner = false;
