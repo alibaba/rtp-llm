@@ -50,7 +50,6 @@ bool TrtV2FmhaRunner::initTrtV2FmhaAndCheckSupport() {
 
     if (get_sm() < tensorrt_llm::kernels::kSM_80) {
         RTP_LLM_LOG_DEBUG("cuda sm %d < 80, not support trt v2 fmha", get_sm());
-        Â
         return false;
     }
 

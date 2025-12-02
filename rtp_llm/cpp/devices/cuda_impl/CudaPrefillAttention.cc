@@ -58,7 +58,6 @@ void CudaDevice::prefillAttention(const AttentionModuleParams& params,
                    reinterpret_cast<int32_t*>(const_cast<KVCacheIndex*>(kv_block_array.data)),
                    params.common.kv_cache->k_cache_buffer->type() == DataType::TYPE_FP8_E4M3,
                    params.common.kv_seqlens->data<uint32_t>(),
-                   this,
                    params.output.type() == DataType::TYPE_FP8_E4M3 ?
                        reinterpret_cast<float*>(params.weights.static_scale_reciprocal_weight->kernel->data()) :
                        nullptr,

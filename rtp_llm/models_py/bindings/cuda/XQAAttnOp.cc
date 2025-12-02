@@ -3,7 +3,6 @@
 #include "rtp_llm/models_py/bindings/cuda/XQAAttnOp.h"
 #include "rtp_llm/cpp/cuda/cufmha/TrtV2FmhaRunner.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
-#include "rtp_llm/cpp/devices/cuda_impl/CudaDevice.h"
 
 namespace rtp_llm {
 
@@ -72,8 +71,6 @@ XQAAttnOp::forward(const torch::Tensor& input, std::optional<torch_ext::KVCache>
 
     RTP_LLM_CHECK_WITH_INFO(kv_cache.has_value(), "decode should have kv cache.");
 
-    auto device = dynamic_cast<CudaDevice*>(DeviceFactory::getDefaultDevice());
-
     runXqa(input.data_ptr(),
            input.dtype() == torch::kBFloat16,
            output.data_ptr(),
@@ -87,8 +84,7 @@ XQAAttnOp::forward(const torch::Tensor& input, std::optional<torch_ext::KVCache>
            kv_cache.value().k_cache_base.data_ptr(),  // params->kv_block_array.mPrimaryPoolPtr,
            reinterpret_cast<int32_t*>((KVCacheIndex*)(params->kv_cache_offset.data_ptr())),
            kv_block_array.cache_type == KvCacheDataType::FP8,
-           reinterpret_cast<uint32_t*>(params->sequence_lengths.data_ptr()),
-           device);
+           reinterpret_cast<uint32_t*>(params->sequence_lengths.data_ptr()));
     return output;
 }
 

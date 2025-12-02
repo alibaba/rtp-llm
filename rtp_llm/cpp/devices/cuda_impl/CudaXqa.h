@@ -1,6 +1,9 @@
 #pragma once
 
-#include "rtp_llm/cpp/devices/cuda_impl/CudaDevice.h"
+#include "rtp_llm/cpp/core/Types.h"
+#include "rtp_llm/cpp/kernels/kv_cache/kv_cache_utils.h"
+#include "rtp_llm/models_py/bindings/ParamsBase.h"
+#include <torch/extension.h>
 
 namespace rtp_llm {
 
@@ -59,26 +62,25 @@ bool supportXqa(DataType input_type,
  * @param q_scale
  * @param beam_width
  */
-void runXqa(void*       input,
-            bool        is_input_bf16,
-            void*       output,
-            size_t      head_num,
-            size_t      kv_head_num,
-            size_t      head_dim,
-            size_t      batch_size,
-            size_t      max_blocks_per_seq,
-            size_t      max_seq_len,
-            size_t      page_size,
-            void*       kv_cache_pool,
-            int32_t*    kv_cache_page_list,
-            bool        is_kv_cache_fp8,
-            uint32_t*   sequence_lengths,
-            CudaDevice* device,
-            float*      rcp_out_scale  = nullptr,
-            size_t      max_q_len      = 2,
-            void*       q_cu_seqlens   = nullptr,
-            size_t      max_batch_size = 4096,
-            float       q_scale        = 1.f,
-            uint32_t    beam_width     = 1);
+void runXqa(void*     input,
+            bool      is_input_bf16,
+            void*     output,
+            size_t    head_num,
+            size_t    kv_head_num,
+            size_t    head_dim,
+            size_t    batch_size,
+            size_t    max_blocks_per_seq,
+            size_t    max_seq_len,
+            size_t    page_size,
+            void*     kv_cache_pool,
+            int32_t*  kv_cache_page_list,
+            bool      is_kv_cache_fp8,
+            uint32_t* sequence_lengths,
+            float*    rcp_out_scale  = nullptr,
+            size_t    max_q_len      = 2,
+            void*     q_cu_seqlens   = nullptr,
+            size_t    max_batch_size = 4096,
+            float     q_scale        = 1.f,
+            uint32_t  beam_width     = 1);
 
 }  // namespace rtp_llm
