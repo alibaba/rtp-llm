@@ -1,10 +1,6 @@
 from __future__ import annotations
 import typing
-from typing import Dict, overload
-__all__: list[str] = ['ArpcConfig', 'BatchDecodeSchedulerConfig', 'CacheStoreConfig', 'ConcurrencyConfig', 'DeviceResourceConfig', 'EplbConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'FfnDisAggregateConfig', 'GptInitParameter', 'GrpcConfig', 'HWKernelConfig', 'KVCacheConfig', 'MiscellaneousConfig',
-                      'MlaOpsType', 'ModelSpecificConfig', 'MoeConfig', 'ParallelismDistributedConfig', 'ProfilingDebugLoggingConfig', 'QuantAlgo', 'RoleSpecialTokens', 'RoleType', 'SamplerConfig', 'SchedulerConfig', 'ServiceDiscoveryConfig', 'SpecialTokens', 'SpeculativeExecutionConfig', 'get_block_cache_keys']
-
-
+__all__: list[str] = ['ArpcConfig', 'BatchDecodeSchedulerConfig', 'CacheStoreConfig', 'ConcurrencyConfig', 'DeviceResourceConfig', 'EplbConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'FfnDisAggregateConfig', 'GptInitParameter', 'HWKernelConfig', 'KVCacheConfig', 'MiscellaneousConfig', 'MlaOpsType', 'ModelSpecificConfig', 'MoeConfig', 'ParallelismDistributedConfig', 'ProfilingDebugLoggingConfig', 'QuantAlgo', 'RoleSpecialTokens', 'RoleType', 'SamplerConfig', 'SchedulerConfig', 'ServiceDiscoveryConfig', 'SpecialTokens', 'SpeculativeExecutionConfig', 'get_block_cache_keys']
 class ArpcConfig:
     ioThreadNum: int
     queueNum: int
@@ -13,27 +9,10 @@ class ArpcConfig:
         ...
     def to_string(self) -> str:
         ...
-
-class GrpcConfig:
-    def __init__(self) -> None: 
-    
-    def __init__(self, json_str: str) -> None: 
-        ...
-    
-    def to_string(self) -> str: 
-        ...
-        
-    def update_from_env(self) -> None: 
-        ... 
-        
-    def get_client_config(self) -> dict[str, int]: 
-        ...
-    
-    def get_server_config(self) -> dict[str, int]: 
-        ...
-
 class BatchDecodeSchedulerConfig:
     batch_decode_scheduler_batch_size: int
+    def __init__(self, batch_decode_scheduler_batch_size: int = 1, batch_decode_scheduler_warmup_type: int = 0) -> None:
+        ...
     def to_string(self) -> str:
         ...
     def update_from_env(self) -> None:
@@ -241,7 +220,6 @@ class GptInitParameter:
     activation_type: str
     add_bias_linear: bool
     arpc_config: ArpcConfig
-    grpc_config: GrpcConfig
     batch_decode_scheduler_config: BatchDecodeSchedulerConfig
     block_nums: int
     cache_store_config: CacheStoreConfig
@@ -565,10 +543,9 @@ class ParallelismDistributedConfig:
     local_world_size: int
     pp_size: int
     tp_size: int
-    use_all_gather: bool
     world_rank: int
     world_size: int
-    def __init__(self, tp_size: int = 1, ep_size: int = 1, dp_size: int = 1, pp_size: int = 1, world_size: int = 1, world_rank: int = 0, local_world_size: int = 1, ffn_sp_size: int = 1, use_all_gather: bool = True) -> None:
+    def __init__(self, tp_size: int = 1, ep_size: int = 1, dp_size: int = 1, pp_size: int = 1, world_size: int = 1, world_rank: int = 0, local_world_size: int = 1, ffn_sp_size: int = 1) -> None:
         ...
     def to_string(self) -> str:
         ...
@@ -594,7 +571,9 @@ class ProfilingDebugLoggingConfig:
     torch_cuda_profiler_dir: str
     trace_malloc_stack: bool
     trace_memory: bool
-    def __init__(self, trace_memory: bool = False, trace_malloc_stack: bool = False, enable_device_perf: bool = False, ft_core_dump_on_exception: bool = False, ft_alog_conf_path: str = '', log_level: str = 'INFO', gen_timeline_sync: bool = False, torch_cuda_profiler_dir: str = '', log_path: str = 'logs', log_file_backup_count: int = 16, nccl_debug_file: str = '', debug_load_server: bool = False, hack_layer_num: int = 0, debug_start_fake_process: bool = False, dg_print_reg_reuse: bool = False, qwen_agent_debug: bool = False, disable_dpc_random: bool = False, enable_detail_log: bool = False, check_nan: bool = False) -> None:
+    viztracer_enable: bool
+    viztracer_min_duration_ms: int
+    def __init__(self, trace_memory: bool = False, trace_malloc_stack: bool = False, enable_device_perf: bool = False, ft_core_dump_on_exception: bool = False, ft_alog_conf_path: str = '', log_level: str = 'INFO', gen_timeline_sync: bool = False, torch_cuda_profiler_dir: str = '', log_path: str = 'logs', log_file_backup_count: int = 16, nccl_debug_file: str = '', debug_load_server: bool = False, hack_layer_num: int = 0, debug_start_fake_process: bool = False, dg_print_reg_reuse: bool = False, qwen_agent_debug: bool = False, disable_dpc_random: bool = False, enable_detail_log: bool = False, check_nan: bool = False, viztracer_enable: bool = False, viztracer_min_duration_ms: int = 100) -> None:
         ...
     def to_string(self) -> str:
         ...

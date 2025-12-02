@@ -69,3 +69,22 @@ py_test(
     ],
     exec_properties = {'gpu':'A10'}
 )
+
+py_test(
+    name = "viztracer_util_test",
+    srcs = [
+        "viztracer_util_test.py"
+    ],
+    deps = [
+        "//rtp_llm:utils",
+        "//rtp_llm:config",
+        "//rtp_llm:_ft_pickler",
+        "//rtp_llm:config_ops"
+    ],
+    data = [
+        "//:th_transformer",
+        "//:th_transformer_config",
+        "//:rtp_compute_ops",
+    ],
+    exec_properties = {'gpu':'A10'}
+)

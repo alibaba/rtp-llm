@@ -151,6 +151,8 @@ void ProfilingDebugLoggingConfig::update_from_env_for_test() {
     qwen_agent_debug          = bool_from_env_for_test("QWEN_AGENT_DEBUG", false);
     disable_dpc_random        = bool_from_env_for_test("DISABLE_DPC_RANDOM", false);
     check_nan                 = bool_from_env_for_test("CHECK_NAN", false);
+    viztracer_enable          = bool_from_env_for_test("VIZTRACER_ENABLE", false);
+    viztracer_min_duration_ms = autil::EnvUtil::getEnv("VIZTRACER_MIN_DURATION_MS", 100);
 }
 
 std::string ProfilingDebugLoggingConfig::to_string() const {
@@ -172,7 +174,9 @@ std::string ProfilingDebugLoggingConfig::to_string() const {
         << "dg_print_reg_reuse: " << dg_print_reg_reuse << "\n"
         << "qwen_agent_debug" << qwen_agent_debug << "\n"
         << "disable_dpc_random" << disable_dpc_random << "\n"
-        << "check_nan" << check_nan << "\n";
+        << "check_nan" << check_nan << "\n"
+        << "viztracer_enable" << viztracer_enable << "\n"
+        << "viztracer_min_duration_ms" << viztracer_min_duration_ms << "\n";
     return oss.str();
 }
 
