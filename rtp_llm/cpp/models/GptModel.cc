@@ -1631,6 +1631,7 @@ GptModelOutputs GptModel::forwardPostLayers(rtp_llm::BufferPtr       input,
 GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     DevicePerfWrapper wrapper(device_, "forward [tp=%d, dp=%d]", device_props_.tp_size, device_props_.dp_size);
     cleanExpertStats();
+    auto start_all = std::chrono::high_resolution_clock::now();
     auto layer_inputs = forwardPreLayers(inputs);
 
     GptLayerOutputs        layer_outputs;
@@ -1679,6 +1680,11 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     // make sure cpu buffers out lives gpu exec
     outputs.captured_values = make_shared<GptLayerInputs>(layer_inputs);
     outputs.moe_gating      = std::move(moe_gating);
+    device_->syncAndCheck();
+    auto end_all = std::chrono::high_resolution_clock::now();
+    const auto all_duration = chrono::duration_cast<chrono::microseconds>(end_all - start_all).count();
+    std::cout << "###########run one forward execution time: "
+            << all_duration << " us" << std::endl;
     return outputs;
 }
 
