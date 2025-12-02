@@ -45,7 +45,8 @@ ParamsBasePtr TRTPrefillOpBase::prepare(torch_ext::PyAttentionInputs attn_inputs
 
     if (!trt_v2_runner_) {
         auto runner_config = TrtV2FmhaRunnerConfig::fromAttentionConfigs(attn_configs_);
-        trt_v2_runner_     = std::make_shared<TrtV2FmhaRunner>(runner_config, attn_dtype, use_fp8_fmha, run_stream);
+        trt_v2_runner_ =
+            std::make_shared<TrtV2FmhaRunner>(runner_config, attn_dtype, attn_inputs.is_s_padded, run_stream);
     }
 
     return ParamsBasePtr(attn_params);
@@ -69,7 +70,7 @@ bool TRTPagedPrefillOp::support(torch_ext::PyAttentionInputs attn_inputs) {
     bool use_fp8_fmha = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
     if (!trt_v2_runner_) {
         auto runner_config = TrtV2FmhaRunnerConfig::fromAttentionConfigs(attn_configs_);
-        trt_v2_runner_.reset(new TrtV2FmhaRunner(runner_config, attn_dtype, use_fp8_fmha, run_stream));
+        trt_v2_runner_.reset(new TrtV2FmhaRunner(runner_config, attn_dtype, attn_inputs.is_s_padded, run_stream));
     }
 
     return trt_v2_runner_->trtV2PagedFmhaSupported();
@@ -128,7 +129,7 @@ bool TRTNormalPrefillOp::support(torch_ext::PyAttentionInputs attn_inputs) {
 
     if (!trt_v2_runner_) {
         auto runner_config = TrtV2FmhaRunnerConfig::fromAttentionConfigs(attn_configs_);
-        trt_v2_runner_.reset(new TrtV2FmhaRunner(runner_config, attn_dtype, use_fp8_fmha, run_stream));
+        trt_v2_runner_.reset(new TrtV2FmhaRunner(runner_config, attn_dtype, attn_inputs.is_s_padded, run_stream));
     }
 
     return trt_v2_runner_->trtV2FmhaSupported();

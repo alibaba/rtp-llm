@@ -8,20 +8,12 @@ void CudaGraphPrefillOp::init(py::object py_instance) {
     // model warm up
     auto inputs = buildInputs(2, 64, 64, 64, true);
     cuda_graph_runner_->normalForward(inputs);
-    setCufmhaPadded(true);
     cuda_graph_runner_->setMaxPrefillCudaGraphLen(960);
     cuda_graph_runner_->initCapture();
 }
 
 int CudaGraphPrefillOp::getCurrentRealGraphSize() {
     return cuda_graph_runner_->getCurrentRealGraphBs();
-}
-
-void CudaGraphPrefillOp::setCufmhaPadded(bool is_s_padded) {
-    DeviceBase* device = rtp_llm::DeviceFactory::getDefaultDevice();
-    RTP_LLM_CHECK_WITH_INFO(device != nullptr, "device can't be nullptr");
-    CudaDevice* cuda_device = dynamic_cast<CudaDevice*>(device);
-    cuda_device->setIsPadded(is_s_padded);
 }
 
 CudaGraphRunnerPtr CudaGraphPrefillOp::createCudaGraphRunner(py::object py_instance) {
@@ -133,6 +125,7 @@ PyModelInputs CudaGraphPrefillOp::buildInputs(int64_t batch_size,
     inputs.attention_inputs.is_prefill      = true;
     inputs.attention_inputs.dtype           = torch::kBFloat16;
     inputs.attention_inputs.kv_block_offset = 0;
+    inputs.attention_inputs.is_s_padded     = use_max_padded_mode;
     RTP_LLM_LOG_INFO("kv_cache_block_id_device build success\n");
     // 计算 cu_seqlens
     size_t cu_len = batch_size + 1;
@@ -174,8 +167,7 @@ PYBIND11_MODULE(libtest_cuda_graph_prefill_ops, m) {
         .def("init", &CudaGraphPrefillOp::init)
         .def("forward", &cuda_graph::CudaGraphPrefillOp::forward)
         .def("getCurrentRealGraphSize", &cuda_graph::CudaGraphPrefillOp::getCurrentRealGraphSize)
-        .def("buildInputs", &cuda_graph::CudaGraphPrefillOp::buildInputs)
-        .def("setCufmhaPadded", &cuda_graph::CudaGraphPrefillOp::setCufmhaPadded);
+        .def("buildInputs", &cuda_graph::CudaGraphPrefillOp::buildInputs);
 }
 
 }  // namespace cuda_graph

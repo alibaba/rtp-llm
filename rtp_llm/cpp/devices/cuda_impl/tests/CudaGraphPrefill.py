@@ -71,14 +71,11 @@ class TestCudaGraphPrefill(unittest.TestCase):
         inputs1 = self.op.buildInputs(
             batch_size, max_seq_len, num_tokens_per_bs, seq_size_per_block, False
         )
-
-        self.op.setCufmhaPadded(False)
         outputs1 = self.normal_model.forward(inputs1)
         print(f"outputs1 success for batch size {batch_size}")
         inputs2 = self.op.buildInputs(
             batch_size, max_seq_len, num_tokens_per_bs, seq_size_per_block, True
         )
-        self.op.setCufmhaPadded(True)
         outputs2 = self.normal_model.forward(inputs2)
         print(f"outputs2 success for batch size {batch_size}")
         print(f"inputs1: {inputs1.input_ids}")

@@ -91,6 +91,7 @@ struct PyAttentionInputs {
     std::optional<PyCacheStoreInputs> cache_store_inputs;
 
     std::optional<PyPrefillCudaGaphCopyParams> prefill_cuda_graph_copy_params;
+    bool                              is_s_padded = false;
 };
 
 struct BertEmbeddingInputs {

@@ -115,21 +115,6 @@ void cufmha::runTrtV1Fmha(void*  input,
 #endif
 }
 
-// for cuda graph batch prefill test
-void cufmha::setIsPadded(bool is_s_padded) {
-    is_s_padded_ = is_s_padded;
-    TrtV2FmhaRunnerConfig runner_config{
-        head_num_,
-        kv_head_num_,
-        size_per_head_,
-        seq_size_per_block_,
-        mtype_,
-        q_scaling_,
-        1.0f  // softmax_extra_scale
-    };
-    trtv2_runner_ = std::make_shared<TrtV2FmhaRunner>(runner_config, dtype_, is_s_padded_, stream_);
-}
-
 bool cufmha::initOpenSourceFmhaAndCheckSupport() {
     return (kv_head_num_ != 0 && head_num_ % kv_head_num_ == 0)
            && (mtype_ == AttentionMaskType::causalMask || mtype_ == AttentionMaskType::noMask)

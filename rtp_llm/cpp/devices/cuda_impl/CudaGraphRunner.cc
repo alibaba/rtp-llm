@@ -235,6 +235,7 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     inputs.attention_inputs.padding_offset = torch::zeros({int(max_seq_len_ * max_bs_)}, options_cpu_int32_);
     inputs.attention_inputs.padding_offset = inputs.attention_inputs.padding_offset.pin_memory();
     inputs.attention_inputs.dtype          = model_data_type_;
+    inputs.attention_inputs.is_s_padded    = true;
 }
 
 void CudaGraphRunner::initCaptureAttentionInputsPost() {
