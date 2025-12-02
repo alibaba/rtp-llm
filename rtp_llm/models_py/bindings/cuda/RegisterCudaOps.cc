@@ -47,6 +47,7 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
     rtp_ops_m.def("get_cutlass_moe_mm_without_permute_info",
                   &get_cutlass_moe_mm_without_permute_info,
                   py::arg("topk_ids"),
+                  py::arg("expert_offsets"),
                   py::arg("problem_sizes1"),
                   py::arg("problem_sizes2"),
                   py::arg("num_experts"),
