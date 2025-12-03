@@ -27,9 +27,11 @@ class PyFlashinferDecodeAttnOp(object):
         self.seq_size_per_block = config.seq_size_per_block
         self.decode_wrapper = flashinfer.decode.BatchDecodeWithPagedKVCacheWrapper(
             self.g_workspace_buffer,
-            "HND",
+            kv_layout="HND",
         )
         self.datatype = to_torch_dtype(config.data_type)
+        self.kv_datatype = to_torch_dtype(config.kv_cache_data_type)
+
 
     def prepare(self, attn_inputs: PyAttentionInputs) -> ParamsBase:
         # from rtp_llm.models_py.utils.debug import set_trace_on_tty
@@ -42,7 +44,7 @@ class PyFlashinferDecodeAttnOp(object):
             self.seq_size_per_block,
         )
         self.decode_wrapper.plan(
-            flashinfer_decode_params.page_indptr,
+            flashinfer_decode_params.decode_page_indptr,
             flashinfer_decode_params.page_indice,
             flashinfer_decode_params.paged_kv_last_page_len,
             self.local_head_num,
@@ -50,7 +52,7 @@ class PyFlashinferDecodeAttnOp(object):
             self.head_dim_qk,
             self.seq_size_per_block,
             q_data_type=self.datatype,
-            kv_data_type=self.datatype,
+            kv_data_type=self.kv_datatype,
         )
         return ParamsBase()
 

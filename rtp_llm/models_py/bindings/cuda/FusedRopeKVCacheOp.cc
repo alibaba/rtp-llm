@@ -125,7 +125,7 @@ torch::Tensor FusedRopeKVCachePrefillOpQOut::forward(const torch::Tensor&       
     const int     size_per_head  = attn_configs_.size_per_head;
     const int     token_num      = qkv.size(0);
     const int     batch_size     = params->cu_seqlens.size(0) - 1;
-    torch::Tensor q_output       = torch::empty({local_head_num, token_num, size_per_head},
+    torch::Tensor q_output       = torch::empty({token_num, local_head_num, size_per_head},
                                           torch::TensorOptions(qkv.dtype()).device(qkv.device()));
 
     bool use_paged_attention = kv_cache.has_value() && params->max_prefix_length > 0;
@@ -135,8 +135,8 @@ torch::Tensor FusedRopeKVCachePrefillOpQOut::forward(const torch::Tensor&       
                                       params,
                                       attn_configs_,
                                       device_,
-                                      nullptr,  // q_no_transpose_output
-                                      q_output.data_ptr(),  // q_output
+                                      q_output.data_ptr(),  // q_no_transpose_output
+                                      nullptr,  // q_output
                                       nullptr,  // qkv_fp8_output
                                       token_num,
                                       batch_size,
@@ -145,8 +145,8 @@ torch::Tensor FusedRopeKVCachePrefillOpQOut::forward(const torch::Tensor&       
                                       size_per_head,
                                       use_paged_attention,
                                       false,  // store_qkv
-                                      false,  // store_q_no_transpose
-                                      true,   // store_q
+                                      true,  // store_q_no_transpose
+                                      false,   // store_q
                                       false,  // store_kv
                                       kv_cache.has_value());  // store_cache
 

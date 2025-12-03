@@ -1,6 +1,7 @@
 from typing import Optional
 
 import torch
+import functools
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 import flashinfer
@@ -14,6 +15,10 @@ DEFAULT_WORKSPACE_SIZE_MB = (
 
 # Reuse this workspace buffer across all TRTLLM MHA wrappers
 g_zero_workspace_buffer = None
+
+@functools.cache
+def is_sm_100() -> bool:
+    return torch.cuda.get_device_capability()[0] in [10]
 
 class FlashInferTRTLLMParams(object):
     def __init__(
@@ -58,7 +63,7 @@ class FlashInferTRTLLMPrefillOp(object):
         self.workspace_buffer = create_g_workspace_buffer()
 
     def support(self, attention_inputs: PyAttentionInputs):
-        return attention_inputs.is_prefill
+        return is_sm_100() and attention_inputs.is_prefill
 
     def prepare(self, attention_inputs: PyAttentionInputs) -> FlashInferTRTLLMParams:
         return FlashInferTRTLLMParams(
@@ -119,7 +124,7 @@ class FlashInferTRTLLMDecodeOp(object):
         self.workspace_buffer = create_g_workspace_buffer()
 
     def support(self, attention_inputs: PyAttentionInputs):
-        return not attention_inputs.is_prefill
+        return is_sm_100() and not attention_inputs.is_prefill
 
     def prepare(self, attention_inputs: PyAttentionInputs) -> FlashInferTRTLLMParams:
         return FlashInferTRTLLMParams(

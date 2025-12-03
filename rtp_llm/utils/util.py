@@ -64,6 +64,7 @@ def to_torch_dtype(maybe_str_dtype: Union[str, torch.dtype]) -> torch.dtype:
                 "float16": torch.float16,
                 "float32": torch.float32,
                 "int8": torch.int8,
+                "fp8": torch.float8_e4m3fn,
             }[maybe_str_dtype.lower()]
         except KeyError:
             raise ValueError(

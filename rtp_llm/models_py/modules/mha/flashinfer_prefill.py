@@ -32,7 +32,7 @@ class PyFlashinferPrefillAttnOp(object):
         self.head_dim_vo = config.size_per_head
         self.prefill_wrapper = flashinfer.prefill.BatchPrefillWithRaggedKVCacheWrapper(
             self.g_workspace_buffer,
-            "NHD",
+            kv_layout="NHD",
             backend="fa2",
         )
         self.datatype = to_torch_dtype(config.data_type)
