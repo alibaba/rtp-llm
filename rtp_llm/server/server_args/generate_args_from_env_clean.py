@@ -5,6 +5,7 @@
 """
 
 import argparse
+import datetime
 import os
 from ast import arg
 from typing import Any, List, Tuple
@@ -246,4 +247,7 @@ def main():
 
 
 if __name__ == "__main__":
+    # measure the initialization time
+    current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    print(f"[PROCESS_START]{current_time} Start generate args")
     main()

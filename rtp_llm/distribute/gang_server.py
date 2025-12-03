@@ -11,9 +11,9 @@ from threading import Thread
 from typing import Any, Dict, List, Union
 
 import requests
+import torch.distributed
 import uvicorn
 from fastapi import FastAPI
-import torch.distributed
 
 from rtp_llm.config.py_config_modules import PyEnvConfigs, StaticConfig
 from rtp_llm.config.uvicorn_config import UVICORN_LOGGING_CONFIG
@@ -28,6 +28,7 @@ from rtp_llm.distribute.worker_info import (
     g_worker_info,
     update_master_info,
 )
+from rtp_llm.utils.time_util import timer_wrapper
 
 
 def http_post_with_retry(
@@ -209,7 +210,7 @@ class GangServer:
 
     def _wait_ready(self):
         timeout_minutes = self.py_env_configs.gang_config.gang_timeout_min
-        sleep_time = self.py_env_configs.gang_config.gang_sleep_time
+        sleep_time = self.py_env_configs.gang_config.gang_startup_interval
         start_time = datetime.datetime.now()
         retry_time = 0
         while True:
@@ -410,6 +411,7 @@ class GangServer:
             timeout=timedelta(seconds=timeout),
         )
 
+    @timer_wrapper(description="start gang server")
     def start(self):
         if g_parallel_info.world_size == 1:
             logging.info("world_size==1, do not start gang_server")
