@@ -223,6 +223,8 @@ protected:
 
     void cleanExpertStats();
 
+    std::string getCurrentTime();
+
 protected:
     rtp_llm::DeviceBase*            device_;
     const rtp_llm::DeviceProperties device_props_;

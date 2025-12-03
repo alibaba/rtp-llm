@@ -1683,9 +1683,18 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     device_->syncAndCheck();
     auto end_all = std::chrono::high_resolution_clock::now();
     const auto all_duration = chrono::duration_cast<chrono::microseconds>(end_all - start_all).count();
-    std::cout << "###########run one forward execution time: "
-            << all_duration << " us" << std::endl;
+    std::cout << "[" << getCurrentTime() << "] "
+              << "###########run one forward execution time: "
+              << all_duration << " us" << std::endl;
     return outputs;
+}
+
+std::string GptModel::getCurrentTime() {
+    auto now = std::chrono::system_clock::now();
+    auto time_t = std::chrono::system_clock::to_time_t(now);
+    std::stringstream ss;
+    ss << std::put_time(std::localtime(&time_t), "%Y-%m-%d %H:%M:%S");
+    return ss.str();
 }
 
 void GptModel::prepareExpertStats(const size_t layer_id, rtp_llm::FfnLayerParams& ffn_layer_params) {
