@@ -70,7 +70,7 @@ void dropLastPartialBlock(BatchKVCacheResourcePtr batch_kv_cache_resource) {
     for (auto& resource : batch_kv_cache_resource->batch_resource) {
         resource.cache_keys.pop_back();
     }
-    batch_kv_cache_resource->last_block_aligned = false;
+    batch_kv_cache_resource->last_block_aligned = true;
 }
 
 }  // namespace rtp_llm

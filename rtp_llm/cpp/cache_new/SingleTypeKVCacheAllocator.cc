@@ -302,6 +302,7 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& ba
             full_kv_cache_group_->reference(blocks, old_resources[old_batch_idx].group_block_ids[0]->block_indices);
             if (copy_last_block && !blocks.empty()) {
                 const int old_block = blocks.back();
+                full_kv_cache_group_->free({old_block});
                 blocks.pop_back();
 
                 // allocate exactly one new block via kvCacheGroup
