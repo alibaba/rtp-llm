@@ -12,6 +12,7 @@ from fastapi import Request as RawRequest
 from fastapi import status
 from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import ORJSONResponse
 from typing_extensions import override
 from uvicorn import Config, Server
 from uvicorn.loops.auto import auto_loop_setup
@@ -147,16 +148,17 @@ class FrontendApp(object):
             if self.separated_frontend:
                 await check_all_health()
                 return "ok"
-            response = await self.grpc_client.post_request("health_check", {})
-            if response.get("status", "") == "ok":
-                return ORJSONResponse(
-                    status_code=200,
-                    content={"status": "ok"},
+            if self.frontend_server.is_embedding:
+                return await async_request_server(
+                    "post", g_worker_info.http_port, "health_check", {}
                 )
-            return ORJSONResponse(
-                status_code=400,
-                content={"error": f" HTTP health check failed"},
-            )
+            response = await self.grpc_client.post_request("health_check", {})
+            if response.get("status", "") != "ok":
+                return ORJSONResponse(
+                    status_code=400,
+                    content={"error": f" HTTP health check failed"},
+                )
+            return "ok"
 
         @app.get("/")
         async def health():
@@ -164,15 +166,12 @@ class FrontendApp(object):
                 await check_all_health()
                 return {"status": "home"}
             response = await self.grpc_client.post_request("health_check", {})
-            if response.get("status", "") == "ok":
+            if response.get("status", "") != "ok":
                 return ORJSONResponse(
-                    status_code=200,
-                    content={"status": "ok"},
+                    status_code=400,
+                    content={"error": f" HTTP health check failed"},
                 )
-            return ORJSONResponse(
-                status_code=400,
-                content={"error": f"HTTP health check failed"},
-            )
+            return "ok"
 
         @app.get("/cache_status")
         @app.post("/cache_status")
@@ -192,6 +191,11 @@ class FrontendApp(object):
                     self.frontend_server._global_controller.get_available_concurrency()
                 )
             logging.info(f"cache_status response {response}")
+            if "error" in response:
+                return ORJSONResponse(
+                    status_code=500,
+                    content=response,
+                )
             return response
 
         @app.get("/worker_status")
@@ -210,6 +214,11 @@ class FrontendApp(object):
             if "error" not in response:
                 response["frontend_available_concurrency"] = (
                     self.frontend_server._global_controller.get_available_concurrency()
+                )
+            else:
+                return ORJSONResponse(
+                    status_code=500,
+                    content=response,
                 )
             return response
 

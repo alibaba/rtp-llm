@@ -1,10 +1,10 @@
 import logging
 import os
 import signal
-import sys
+import threading
 import time
 from multiprocessing import Process
-from typing import List
+from typing import Callable, Dict, List, Optional
 
 
 class ProcessManager:
@@ -17,6 +17,14 @@ class ProcessManager:
         self.first_dead_time = 0
         self.shutdown_timeout = shutdown_timeout
         self.monitor_interval = monitor_interval
+
+        # Health check related attributes
+        self.health_check_processes: List[Process] = []
+        self.health_check_configs: Dict[str, dict] = {}  # process_name -> config
+        self.health_check_threads: List[threading.Thread] = []
+        self.health_check_status: Dict[str, dict] = {}  # process_name -> status
+        self.health_check_lock = threading.Lock()
+
         self._setup_signal_handlers()
 
     def _setup_signal_handlers(self):
@@ -121,6 +129,9 @@ class ProcessManager:
 
             # Check sub-process status
             elif not self._is_all_processes_alive() and not self.terminated:
+                for proc in self.processes:
+                    if not proc.is_alive():
+                        logging.error(f"Process {proc.pid} died unexpectedly")
                 if self.first_dead_time == 0:
                     self.first_dead_time = time.time()
                 logging.error("Some processes died unexpectedly, terminating all...")
@@ -151,3 +162,147 @@ class ProcessManager:
     def graceful_shutdown(self):
         """Trigger graceful shutdown"""
         self.shutdown_requested = True
+
+    def register_health_check(
+        self,
+        processes: list[Process],
+        process_name: str,
+        check_ready_fn: Callable[[], bool],
+        retry_interval_seconds: float = 0.1,
+    ):
+        """
+        Register a health check for a process
+
+        Args:
+            processes: The processes to monitor
+            process_name: Name identifier for the process
+            check_ready_fn: Custom function to check if service is ready.
+                          Should return True when ready, False otherwise.
+            retry_interval_seconds: Interval between health checks
+        """
+        self.health_check_processes.extend(processes)
+        self.health_check_configs[process_name] = {
+            "processes": processes,
+            "retry_interval_seconds": retry_interval_seconds,
+            "check_ready_fn": check_ready_fn,
+        }
+
+        # Initialize status
+        with self.health_check_lock:
+            self.health_check_status[process_name] = {
+                "ready": False,
+                "checked": False,
+            }
+
+    def _health_check_worker(self, process_name: str):
+        """
+        Worker thread for health checking a specific process
+
+        Args:
+            process_name: Name of the process to check
+        """
+        config = self.health_check_configs[process_name]
+        # fail fast, if backend fail, frontend should exit as soon as possible
+        processes = self.health_check_processes
+        retry_interval = config["retry_interval_seconds"]
+        check_ready_fn = config["check_ready_fn"]
+
+        while True:
+            if not self.is_available():
+                with self.health_check_lock:
+                    self.health_check_status[process_name]["ready"] = False
+                    self.health_check_status[process_name]["checked"] = True
+                logging.error(f"{process_name} process manager is not available")
+                return
+            # Check if process is still alive
+            if not all(proc.is_alive() for proc in processes):
+                with self.health_check_lock:
+                    self.health_check_status[process_name]["ready"] = False
+                    self.health_check_status[process_name]["checked"] = True
+                logging.error(f"{process_name} process is not alive")
+                return
+
+            try:
+                if check_ready_fn():
+                    with self.health_check_lock:
+                        self.health_check_status[process_name]["ready"] = True
+                        self.health_check_status[process_name]["checked"] = True
+                    logging.info(f"{process_name} is ready")
+                    return
+            except Exception as e:
+                logging.debug(f"{process_name} health check exception: {str(e)}")
+            time.sleep(retry_interval)
+
+    def start_parallel_health_checks(self):
+        """
+        Start parallel health checks for all registered processes
+        Creates a thread for each registered health check
+        """
+        if not self.health_check_configs:
+            logging.info("No health checks registered")
+            return
+
+        logging.info(
+            f"Starting parallel health checks for {len(self.health_check_configs)} processes"
+        )
+
+        for process_name in self.health_check_configs.keys():
+            thread = threading.Thread(
+                target=self._health_check_worker,
+                args=(process_name,),
+                daemon=True,
+                name=f"health_check_{process_name}",
+            )
+            self.health_check_threads.append(thread)
+            thread.start()
+
+    def wait_for_health_checks(self, timeout: Optional[float] = None) -> bool:
+        """
+        Wait for all health check threads to complete
+
+        Args:
+            timeout: Maximum time to wait in seconds. None means wait indefinitely
+
+        Returns:
+            True if all health checks passed, False otherwise
+        """
+        if not self.health_check_threads:
+            logging.info("No health check threads to wait for")
+            return True
+
+        logging.info(
+            f"Waiting for {len(self.health_check_threads)} health checks to complete..."
+        )
+
+        for thread in self.health_check_threads:
+            thread.join(timeout=timeout)
+
+        # Check results
+        all_ready = True
+        with self.health_check_lock:
+            for process_name, status in self.health_check_status.items():
+                if not status["checked"]:
+                    logging.warning(f"{process_name} health check did not complete")
+                    all_ready = False
+                elif not status["ready"]:
+                    logging.error(f"{process_name} health check failed")
+                    all_ready = False
+                else:
+                    logging.info(f"{process_name} health check passed")
+
+        return all_ready
+
+    def run_health_checks(self, timeout: Optional[float] = None) -> bool:
+        """
+        Start parallel health checks and wait for completion
+        This is a convenience method that combines start_parallel_health_checks()
+        and wait_for_health_checks()
+
+        Args:
+            timeout: Maximum time to wait in seconds. None means wait indefinitely
+
+        Returns:
+            True if all health checks passed, False otherwise
+        """
+        self.start_parallel_health_checks()
+        return self.wait_for_health_checks(timeout=timeout)
