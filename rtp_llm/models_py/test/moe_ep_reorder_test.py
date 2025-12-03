@@ -8,7 +8,10 @@ import torch
 import torch.nn.functional as F
 from torch import dtype as _dtype
 
-from rtp_llm.models_py.modules.cuda.moe.executors.util import moe_permute, moe_unpermute
+from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.util import (
+    moe_permute,
+    moe_unpermute,
+)
 
 
 class MoeReorderTest(TestCase):

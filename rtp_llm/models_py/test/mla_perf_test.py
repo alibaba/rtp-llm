@@ -19,7 +19,7 @@ from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.models.rotary_embedding.deepseek_rotary_embedding import (
     DeepseekV3YarnRotaryEmbedding,
 )
-from rtp_llm.models_py.modules.cuda.mla.flashinfer_mla_wrapper import (
+from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla_wrapper import (
     MlaFlashInferPrefillImpl,
 )
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs

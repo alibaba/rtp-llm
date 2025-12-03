@@ -25,7 +25,7 @@ requirement(flashinfer)
 
 filegroup(
     name = "cutlass_moe_config",
-    srcs = glob(["modules/configs/cutlass_groupgemm/*"]),
+    srcs = glob(["configs/cutlass_groupgemm/*"]),
     visibility = ["//visibility:public"],
 )
 
@@ -66,6 +66,22 @@ py_library(
 )
 
 py_library(
+    name = "kernels",
+    srcs = glob([
+        "kernels/*.py",
+        "kernels/**/*.py",
+    ])
+)
+
+py_library(
+    name = "configs",
+    srcs = glob([
+        "configs/*.py",
+    ]),
+    visibility = ["//visibility:public"],
+)
+
+py_library(
     name = "models",
     srcs = glob([
         "model_desc/*.py",
@@ -74,6 +90,8 @@ py_library(
     deps = [
         ":utils",
         ":modules",
+        ":kernels",
+        ":configs",
         "//rtp_llm/model_loader:loader",
     ] + select({
         "@//:using_cuda12": [

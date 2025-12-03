@@ -6,7 +6,9 @@ from unittest import SkipTest, TestCase, main
 import torch
 from torch import dtype as _dtype
 
-from rtp_llm.models_py.modules.moe.utils import moe_kernel_quantize_input
+from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.util import (
+    moe_kernel_quantize_input,
+)
 from rtp_llm.models_py.triton_kernels.common.activation import (
     silu_and_mul,
     silu_mul_fp8_per_token_quant_batched,

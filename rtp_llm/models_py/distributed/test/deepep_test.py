@@ -24,7 +24,7 @@ from rtp_llm.models_py.distributed.test.process_group_state import (
     destroy_distributed_environment,
     init_distributed_environment,
 )
-from rtp_llm.models_py.modules.utils import align
+from rtp_llm.models_py.utils.math import align
 from rtp_llm.test.utils.bench_util import bench, bench_kineto, calc_diff, hash_tensor
 from rtp_llm.test.utils.port_util import PortsContext
 

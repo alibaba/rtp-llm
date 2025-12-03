@@ -4,14 +4,17 @@ import unittest
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-from rtp_llm.models_py.modules.common.moe.strategy.batched_triton_strategy import (
+from rtp_llm.models_py.modules.factory.fused_moe.defs.type import (
+    ExecutorType,
+    RouterType,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.impl.common.strategy.batched_triton_strategy import (
     BatchedTritonStrategy,
 )
-from rtp_llm.models_py.modules.cuda.moe.strategy import (
+from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.strategy import (
     CudaFp8PerBlockNoDPStrategy,
     CudaFp8PerTensorSingleGpuStrategy,
 )
-from rtp_llm.models_py.modules.factory.fused_moe.type import ExecutorType, RouterType
 from rtp_llm.ops.compute_ops import DeviceType
 
 
@@ -111,7 +114,7 @@ class TestCudaFp8PerBlockNoDPStrategy(unittest.TestCase):
     @patch(
         "rtp_llm.models_py.modules.factory.fused_moe.config_resolver.MoeConfigResolver"
     )
-    @patch("rtp_llm.models_py.modules.quantization.deepgemm_wrapper.has_deep_gemm")
+    @patch("rtp_llm.models_py.utils.deepgemm_wrapper.has_deep_gemm")
     def test_can_handle_single_gpu(
         self, mock_has_deep_gemm: Any, mock_resolver_class: Any
     ) -> None:
@@ -131,7 +134,7 @@ class TestCudaFp8PerBlockNoDPStrategy(unittest.TestCase):
     @patch(
         "rtp_llm.models_py.modules.factory.fused_moe.config_resolver.MoeConfigResolver"
     )
-    @patch("rtp_llm.models_py.modules.quantization.deepgemm_wrapper.has_deep_gemm")
+    @patch("rtp_llm.models_py.utils.deepgemm_wrapper.has_deep_gemm")
     def test_can_handle_tp_equal_ep(
         self, mock_has_deep_gemm: Any, mock_resolver_class: Any
     ) -> None:
@@ -151,7 +154,7 @@ class TestCudaFp8PerBlockNoDPStrategy(unittest.TestCase):
     @patch(
         "rtp_llm.models_py.modules.factory.fused_moe.config_resolver.MoeConfigResolver"
     )
-    @patch("rtp_llm.models_py.modules.quantization.deepgemm_wrapper.has_deep_gemm")
+    @patch("rtp_llm.models_py.utils.deepgemm_wrapper.has_deep_gemm")
     def test_can_handle_false_no_deep_gemm(
         self, mock_has_deep_gemm: Any, mock_resolver_class: Any
     ) -> None:
