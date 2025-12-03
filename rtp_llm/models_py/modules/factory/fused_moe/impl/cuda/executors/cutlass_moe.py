@@ -109,7 +109,10 @@ class CutlassExpertsFp8(mm.FusedMoeExpertExecutor):
         expert_num_tokens = (
             payload.expert_tokens_meta.expert_num_tokens if expert_map is None else None
         )
-        num_gemm_tokens = sum(payload.expert_tokens_meta.expert_num_tokens_cpu)
+        if payload.expert_tokens_meta.expert_num_tokens_cpu is not None:
+            num_gemm_tokens = sum(payload.expert_tokens_meta.expert_num_tokens_cpu)
+        else:
+            num_gemm_tokens = topk_ids.numel()
 
         E, _, _ = self.w1.size()
         _, K, N = self.w2.size()
