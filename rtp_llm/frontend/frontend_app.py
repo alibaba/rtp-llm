@@ -12,6 +12,7 @@ from fastapi import Request as RawRequest
 from fastapi import status
 from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import ORJSONResponse
 from typing_extensions import override
 from uvicorn import Config, Server
 from uvicorn.loops.auto import auto_loop_setup
@@ -148,15 +149,12 @@ class FrontendApp(object):
                 await check_all_health()
                 return "ok"
             response = await self.grpc_client.post_request("health_check", {})
-            if response.get("status", "") == "ok":
+            if response.get("status", "") != "ok":
                 return ORJSONResponse(
-                    status_code=200,
-                    content={"status": "ok"},
+                    status_code=400,
+                    content={"error": f" HTTP health check failed"},
                 )
-            return ORJSONResponse(
-                status_code=400,
-                content={"error": f" HTTP health check failed"},
-            )
+            return "ok"
 
         @app.get("/")
         async def health():
@@ -164,15 +162,12 @@ class FrontendApp(object):
                 await check_all_health()
                 return {"status": "home"}
             response = await self.grpc_client.post_request("health_check", {})
-            if response.get("status", "") == "ok":
+            if response.get("status", "") != "ok":
                 return ORJSONResponse(
-                    status_code=200,
-                    content={"status": "ok"},
+                    status_code=400,
+                    content={"error": f" HTTP health check failed"},
                 )
-            return ORJSONResponse(
-                status_code=400,
-                content={"error": f"HTTP health check failed"},
-            )
+            return "ok"
 
         @app.get("/cache_status")
         @app.post("/cache_status")
