@@ -1435,7 +1435,13 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(const GptLayerInputs&     
                             false,
                             true);
 
+        auto start_xjn = std::chrono::high_resolution_clock::now();
         auto post_layernorm_output = device_->layernorm(post_layernorm_params);
+        device_->syncAndCheck();
+        auto end_xjn = std::chrono::high_resolution_clock::now();
+        const auto xjn_duration = chrono::duration_cast<chrono::microseconds>(end_xjn - start_xjn).count();
+        std::cout << "[XJNDEBUG] 1439 attentionBlock post_layernorm execution time: " 
+                  << xjn_duration << " us" << std::endl;
         if (description_.act_qscheme == QScheme::Qint8PerTensor && !(post_layernorm_output.output->isQBuffer())) {
             auto norm_weight = layer.post_layernorm;
             auto static_scale_reciprocal = norm_weight->static_scale_reciprocal;

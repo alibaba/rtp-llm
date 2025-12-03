@@ -693,6 +693,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
 
         if (init_params_.use_aiter_pa) {
             if (init_params_.use_asm_pa) {
+                auto start_1 = std::chrono::high_resolution_clock::now();
                 DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
                                              invokeAddFusedQKVBiasTransposePrefill,
                                              q_output->data(),
@@ -728,7 +729,13 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                                              use_rope_cache && rope_cache.defined() ? static_cast<float2*>(rope_cache.data_ptr()) :
                                                                                       nullptr,
                                              stream_);
+                syncAndCheck();
+                auto end_1 = std::chrono::high_resolution_clock::now();
+                const auto xjn_duration = chrono::duration_cast<chrono::microseconds>(end_1 - start_1).count();
+                std::cout << "[XJNDEBUG] 698 invokeAddFusedQKVBiasTransposePrefill execution time: " 
+                            << xjn_duration << " us" << std::endl;
             } else {
+                auto start_1 = std::chrono::high_resolution_clock::now();
                 DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
                                              invokeAddFusedQKVBiasTransposePrefillV1,
                                              q_output->data(),
@@ -764,9 +771,15 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                                              use_rope_cache && rope_cache.defined() ? static_cast<float2*>(rope_cache.data_ptr()) :
                                                                                       nullptr,
                                              stream_);
+                syncAndCheck();
+                auto end_1 = std::chrono::high_resolution_clock::now();
+                const auto xjn_duration = chrono::duration_cast<chrono::microseconds>(end_1 - start_1).count();
+                std::cout << "[XJNDEBUG] 740 invokeAddFusedQKVBiasTransposePrefillV1 execution time: " 
+                            << xjn_duration << " us" << std::endl;
             }
             check_cuda_error();
         } else {
+            auto start_1 = std::chrono::high_resolution_clock::now();
             DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
                                              invokeAddFusedQKVBiasTranspose,
                                              nullptr,
@@ -803,6 +816,11 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                                              store_cache,
                                              stream_);
             check_cuda_error();
+            syncAndCheck();
+            auto end_1 = std::chrono::high_resolution_clock::now();
+            const auto xjn_duration = chrono::duration_cast<chrono::microseconds>(end_1 - start_1).count();
+            std::cout << "[XJNDEBUG] 784 invokeAddFusedQKVBiasTranspose execution time: " 
+                        << xjn_duration << " us" << std::endl;
         }
         writeCacheStore(params);
     }
@@ -832,6 +850,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
     printBufferData(params.input, "run_ck_input");
     if (skip_add_bias_transpose || prefix_prompt_param.max_prefix_prompt_length <= 0) {
         // not implemented reuse cache for this branch
+        auto start_1 = std::chrono::high_resolution_clock::now();
         fmha_runner_->runCKFmha(params.input.data(),
                                 params.input.dataWithOffset(hidden_units),
                                 params.input.dataWithOffset(hidden_units + hidden_units_kv),
@@ -848,6 +867,11 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                                 nullptr,
                                 false,
                                 false);
+        syncAndCheck();
+        auto end_1 = std::chrono::high_resolution_clock::now();
+        const auto xjn_duration = chrono::duration_cast<chrono::microseconds>(end_1 - start_1).count();
+        std::cout << "[XJNDEBUG] 854 runCKFmha execution time: " 
+                    << xjn_duration << " us" << std::endl;
         printBufferData(params.output, "run_ck_data_output");
     } else {
         // Processing continuous/variable-length sequences
@@ -868,6 +892,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
         bufMemset(*v_contiguous, 0);
         const int hidden_size_q  = head_num * size_per_head;
         const int hidden_size_kv = kv_head_num * size_per_head;
+        auto start_1 = std::chrono::high_resolution_clock::now();
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
                                          invokeGatherSequencesCombined,
                                          q_contiguous->data(),
@@ -885,6 +910,11 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                                          kv_head_num,
                                          size_per_head,
                                          stream_);
+        syncAndCheck();
+        auto end_1 = std::chrono::high_resolution_clock::now();
+        const auto xjn_duration = chrono::duration_cast<chrono::microseconds>(end_1 - start_1).count();
+        std::cout << "[XJNDEBUG] 896 invokeGatherSequencesCombined execution time: " 
+                    << xjn_duration << " us" << std::endl;
         printBufferData(*q_contiguous, "q_contiguous");
         printBufferData(*k_contiguous, "k_contiguous");
         printBufferData(*v_contiguous, "v_contiguous");
@@ -893,6 +923,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
             datatype, params.configs.mask_type, head_num, kv_head_num, size_per_head, params.configs.q_scaling);
 
         auto lse_acc_buf = allocateBuffer({DataType::TYPE_FP32, {1, 1, 1, 1}, AllocationType::DEVICE}, {"lse_acc_buf"});
+        auto start_2 = std::chrono::high_resolution_clock::now();
         if (fmha_runner_->runCKFmhaV2(q_contiguous->data(),
                                       k_contiguous->data(),
                                       v_contiguous->data(),
@@ -910,6 +941,11 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                                       token_num,
                                       true,
                                       false)) {
+            syncAndCheck();
+            auto end_2 = std::chrono::high_resolution_clock::now();
+            const auto xjn_duration_2 = chrono::duration_cast<chrono::microseconds>(end_2 - start_2).count();
+            std::cout << "[XJNDEBUG] 927 runCKFmhaV2 execution time: " 
+                        << xjn_duration_2 << " us" << std::endl;
             printBufferData(params.output, "run_ck_data_output");
             return;
         } else {
@@ -917,6 +953,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                 q_output && k_output && v_output,
                 "q_output/k_output/v_output must be provided for default context attention implementation");
             q_output->updateShape({batch_size, kv_head_num, (head_num / kv_head_num) * seq_len, size_per_head});
+            auto start_3 = std::chrono::high_resolution_clock::now();
             auto qk_output = gemm({*q_output,
                                    *k_output,
                                    std::nullopt,
@@ -925,6 +962,11 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                                    DataType::TYPE_FP32,
                                    TransposeOperation::NONE,
                                    TransposeOperation::TRANSPOSE});
+            syncAndCheck();
+            auto end_3 = std::chrono::high_resolution_clock::now();
+            const auto xjn_duration_3 = chrono::duration_cast<chrono::microseconds>(end_3 - start_3).count();
+            std::cout << "[XJNDEBUG] 957 gemm execution time: " 
+                        << xjn_duration_3 << " us" << std::endl;
             qk_output->updateShape({batch_size, head_num, seq_len, seq_len_with_prefix});
             printBufferData(*qk_output, "qk_output: ");
             float scale = (1.0f / sqrtf(size_per_head * 1.0f));  // * params.configs.softmax_extra_scale;
@@ -934,20 +976,38 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                 params.common.prefix_prompt_lengths ?
                     clone({*params.common.prefix_prompt_lengths, AllocationType::HOST}) :
                     BufferPtr(new Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_INVALID, {0}, nullptr));
+            auto start_4 = std::chrono::high_resolution_clock::now();
             auto attention_mask    = attentionMask({*lengths_host,
                                                     *prefix_lengths_host,
                                                     q_output->type(),
                                                     params.configs.mask_type == AttentionMaskType::causalMask});
+            syncAndCheck();
+            auto end_4 = std::chrono::high_resolution_clock::now();
+            const auto xjn_duration_4 = chrono::duration_cast<chrono::microseconds>(end_4 - start_4).count();
+            std::cout << "[XJNDEBUG] 980 attentionMask execution time: " 
+                        << xjn_duration_4 << " us" << std::endl;
+            auto start_5 = std::chrono::high_resolution_clock::now();
             auto softmax_qk_output = softmax({std::move(qk_output), *attention_mask, nullopt, scale, datatype});
+            syncAndCheck();
+            auto end_5 = std::chrono::high_resolution_clock::now();
+            const auto xjn_duration_5 = chrono::duration_cast<chrono::microseconds>(end_5 - start_5).count();
+            std::cout << "[XJNDEBUG] 980 attentionMask execution time: " 
+                        << xjn_duration_5 << " us" << std::endl;
             softmax_qk_output->updateShape(
                 {batch_size, kv_head_num, (head_num / kv_head_num) * seq_len, seq_len_with_prefix});
             printBufferData(*softmax_qk_output, "softmax_qk_output: ");
-
+            auto start_6 = std::chrono::high_resolution_clock::now();
             auto qkv_output = gemm(
                 {*softmax_qk_output, *v_output, std::nullopt, nullptr, DataType::TYPE_INVALID, params.compute_type});
+            syncAndCheck();
+            auto end_6 = std::chrono::high_resolution_clock::now();
+            const auto xjn_duration_6 = chrono::duration_cast<chrono::microseconds>(end_6 - start_6).count();
+            std::cout << "[XJNDEBUG] 1000 gemm execution time: " 
+                        << xjn_duration_6 << " us" << std::endl;
             qkv_output->updateShape({batch_size, head_num, seq_len, size_per_head});
             printBufferData(*qkv_output, "qkv_output");
             auto& qkv_transpose_output = params.output;
+            auto start_7 = std::chrono::high_resolution_clock::now();
             DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
                                              invokeTransposeAttentionOutRemovePadding,
                                              qkv_output->data(),
@@ -961,6 +1021,11 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                                              nullptr,
                                              0,
                                              stream_);
+            syncAndCheck();
+            auto end_7 = std::chrono::high_resolution_clock::now();
+            const auto xjn_duration_7 = chrono::duration_cast<chrono::microseconds>(end_7 - start_7).count();
+            std::cout << "[XJNDEBUG] 1012 invokeTransposeAttentionOutRemovePadding execution time: " 
+                        << xjn_duration_7 << " us" << std::endl;
             printBufferData(params.output, "run_ck_data_output");
             return;
         }

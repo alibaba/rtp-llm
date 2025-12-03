@@ -247,7 +247,14 @@ BufferPtr DeviceBase::attentionOutGemm(const AttentionLayerParams& params) {
 }
 
 AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& params) {
+    auto start_xjn = std::chrono::high_resolution_clock::now();
     auto      qkv      = attentionQKVGemm(params);
+    syncAndCheck();
+    auto end_xjn = std::chrono::high_resolution_clock::now();
+    const auto xjn_duration = chrono::duration_cast<chrono::microseconds>(end_xjn - start_xjn).count();
+    std::cout << "[XJNDEBUG] attentionQKVGemm execution time: " 
+              << xjn_duration << " us" << std::endl;
+    auto start = std::chrono::high_resolution_clock::now();
     BufferPtr attn_out = attentionAttn({params.layer_id,
                                         *qkv,
                                         params.output,
@@ -260,6 +267,11 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
                                         params.compute_type,
                                         params.enable_sp,
                                         params.pad_token_num});
+    syncAndCheck();
+    auto end = std::chrono::high_resolution_clock::now();
+    const auto duration = chrono::duration_cast<chrono::microseconds>(end - start).count();
+    std::cout << "[XJNDEBUG] attentionAttn execution time: " 
+                << duration << " us" << std::endl;
     return {attentionOutGemm({params.layer_id,
                               *attn_out,
                               params.output,

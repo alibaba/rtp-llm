@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/devices/ShapeCheck.h"
 #include "rtp_llm/cpp/core/Dispatch.h"
 #include <cstring>
+#include <chrono>
 
 #include "rtp_llm/cpp/kernels/rmsnormKernels.h"
 #include "rtp_llm/cpp/kernels/activation_kernels.h"
@@ -662,7 +663,13 @@ BufferPtr ROCmDevice::mhaQKVGemm(const AttentionLayerParams& params) {
         }
         GemmParams qkv_gemm_params{input, *(qkv_weight->kernel), bias, D, DataType::TYPE_FP16,
                                    DataType::TYPE_FP16, TransposeOperation::NONE, TransposeOperation::NONE};
-        qkv = loraLinear(LoraLinearParams(qkv_gemm_params, params.common.lora_input.qkv_lora_input)).output;  
+        auto start_1 = std::chrono::high_resolution_clock::now();
+        qkv = loraLinear(LoraLinearParams(qkv_gemm_params, params.common.lora_input.qkv_lora_input)).output;
+        syncAndCheck();
+        auto end_1 = std::chrono::high_resolution_clock::now();
+        const auto xjn_duration = std::chrono::duration_cast<std::chrono::microseconds>(end_1 - start_1).count();
+        std::cout << "[XJNDEBUG] 666 loraLinear execution time: " 
+                  << xjn_duration << " us" << std::endl;
     } else if (!params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias) {
         ActivationParams act_params(ActivationType::Identity,
                                     nullptr,
@@ -672,17 +679,30 @@ BufferPtr ROCmDevice::mhaQKVGemm(const AttentionLayerParams& params) {
                                     std::nullopt, nullptr, false,
                                     params.qscheme);
         auto qkv_gemm_params = GemmParams(input, *(qkv_weight->kernel));                            
-        auto lora_linear_params = LoraLinearParams(qkv_gemm_params, params.common.lora_input.qkv_lora_input);                                                  
-        qkv = loraLinearWithActivation(LoraLinearWithActivationParams(lora_linear_params, act_params));     
+        auto lora_linear_params = LoraLinearParams(qkv_gemm_params, params.common.lora_input.qkv_lora_input);
+        auto start_1 = std::chrono::high_resolution_clock::now();                                                
+        qkv = loraLinearWithActivation(LoraLinearWithActivationParams(lora_linear_params, act_params));
+        syncAndCheck();
+        auto end_1 = std::chrono::high_resolution_clock::now();
+        const auto xjn_duration = std::chrono::duration_cast<std::chrono::microseconds>(end_1 - start_1).count();
+        std::cout << "[XJNDEBUG] 683 loraLinearWithActivation execution time: " 
+                  << xjn_duration << " us" << std::endl;  
     } else {
-        auto qkv_gemm_params = GemmParams(input, *(qkv_weight->kernel));    
+        auto qkv_gemm_params = GemmParams(input, *(qkv_weight->kernel));
+        auto start_1 = std::chrono::high_resolution_clock::now(); 
         qkv = loraLinear(LoraLinearParams(qkv_gemm_params, params.common.lora_input.qkv_lora_input)).output;
+        syncAndCheck();
+        auto end_1 = std::chrono::high_resolution_clock::now();
+        const auto xjn_duration = std::chrono::duration_cast<std::chrono::microseconds>(end_1 - start_1).count();
+        std::cout << "[XJNDEBUG] 692 loraLinear execution time: " 
+                  << xjn_duration << " us" << std::endl;
     }
     printBufferData(*qkv, "qkv");
     if (params.weights.q_norm_weight) {
         RTP_LLM_CHECK_WITH_INFO(params.weights.k_norm_weight != nullptr,
                                 "q_norm_weight and k_norm_weight should both be provided");
         RTP_LLM_CHECK_WITH_INFO(params.ln_params.norm_type == NormType::rmsnorm, "qkRmsNorm only support rmsnorm");
+        auto start_1 = std::chrono::high_resolution_clock::now();
         auto qk_rmsnorm_output = qkRmsNorm(QkRmsNormParams({qkv,
                                                             *params.weights.q_norm_weight,
                                                             *params.weights.k_norm_weight,
@@ -690,6 +710,11 @@ BufferPtr ROCmDevice::mhaQKVGemm(const AttentionLayerParams& params) {
                                                             params.configs.head_num,
                                                             params.configs.kv_head_num,
                                                             params.configs.size_per_head}));
+        syncAndCheck();
+        auto end_1 = std::chrono::high_resolution_clock::now();
+        const auto xjn_duration = std::chrono::duration_cast<std::chrono::microseconds>(end_1 - start_1).count();
+        std::cout << "[XJNDEBUG] 705 qkRmsNorm execution time: " 
+                    << xjn_duration << " us" << std::endl;
         printBufferData(*qkv, "qkv_after_qk_norm");
     }
     return qkv;
