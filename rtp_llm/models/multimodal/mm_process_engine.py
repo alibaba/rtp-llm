@@ -68,7 +68,6 @@ class MMWorkItem:
 
         self.need_check_cache = len(mm_inputs) == 1 and mm_inputs[0].url is not None
 
-        self.work_item_id: str = str(uuid.uuid4())
         self.check_cache()
 
     def check_cache(self):
@@ -193,7 +192,7 @@ class MMProcessEngine:
         urls: List[str],
         types: List[int],
         tensors: List[torch.Tensor],
-        mm_preprocess_configs: List[List[int]],
+        mm_preprocess_configs: List[Any],
     ):
         mm_inputs = []
         for url, type, tensor, config in zip(
