@@ -11,6 +11,7 @@ from rtp_llm.models_py.modules.common.moe.fused_moe import (
 )
 from rtp_llm.models_py.modules.factory.fused_moe.quant_config import FusedMoEQuantConfig
 from rtp_llm.models_py.modules.factory.fused_moe.type import RouterType
+from rtp_llm.models_py.modules.fp8_kernel import scaled_fp8_per_token_quant
 from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
     recompute_topk_ids_sum_expert_count,
 )
@@ -67,7 +68,10 @@ class PureTpRouter(FusedMoeDataRouter):
     ) -> ExpertForwardPayload:
         # recompute top_k ids to current expert, mask out of range expert to -1
         if self.use_fp8:
-            expert_x, expert_x_scale = trt_fp8_quantize_128(a1, False)
+            if quant_config.is_per_act_token:
+                expert_x, expert_x_scale = scaled_fp8_per_token_quant(a1, None)
+            else:
+                expert_x, expert_x_scale = trt_fp8_quantize_128(a1, False)
         else:
             expert_x = a1
             expert_x_scale = None
@@ -78,7 +82,7 @@ class PureTpRouter(FusedMoeDataRouter):
         )
         return ExpertForwardPayload(
             expert_x,
-            None,
+            a1.dtype,
             expert_x_scale,
             ExpertTokensMetadata(num_recv_tokens_per_expert, None),
             adjusted_topk_ids,

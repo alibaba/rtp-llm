@@ -9,7 +9,7 @@ from rtp_llm.models_py.modules.common.moe.strategy.batched_triton_strategy impor
 )
 from rtp_llm.models_py.modules.cuda.moe.strategy import (
     CudaFp8PerBlockNoDPStrategy,
-    CudaFp8PerTensorSingleGpuStrategy,
+    CudaFp8PerTensorNoDPStrategy,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.type import ExecutorType, RouterType
 from rtp_llm.ops.compute_ops import DeviceType
@@ -180,12 +180,12 @@ class TestCudaFp8PerBlockNoDPStrategy(unittest.TestCase):
         self.assertEqual(self.strategy.priority, expected_priority)
 
 
-class TestCudaFp8PerTensorSingleGpuStrategy(unittest.TestCase):
+class TestCudaFp8PerTensorNoDPStrategy(unittest.TestCase):
     """Test CUDA FP8 PerTensor single GPU strategy"""
 
     def setUp(self):
         """Prepare for testing"""
-        self.strategy = CudaFp8PerTensorSingleGpuStrategy()
+        self.strategy = CudaFp8PerTensorNoDPStrategy()
 
     @patch(
         "rtp_llm.models_py.modules.factory.fused_moe.config_resolver.MoeConfigResolver"
