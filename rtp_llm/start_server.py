@@ -151,13 +151,23 @@ def monitor_and_release_process(backend_process, frontend_process):
     logging.info("all process exit")
 
 
-def should_auto_configure_deepep() -> bool:
+def should_auto_configure_deepep(args: argparse.Namespace) -> bool:
     """
     Check if DeepEP should be auto-configured.
-    Returns True if environment variables are not set (None), meaning user hasn't manually configured.
-    Returns False if user has manually set any of the DeepEP environment variables.
+    Returns True if all DeepEP arguments are None (not set), meaning user hasn't manually configured.
+    Returns False if user has manually set any of the DeepEP arguments.
     """
-    return StaticConfig.should_auto_configure_deepep()
+    use_deepep_moe = getattr(args, "use_deepep_moe", None)
+    use_deepep_internode = getattr(args, "use_deepep_internode", None)
+    use_deepep_low_latency = getattr(args, "use_deepep_low_latency", None)
+
+    # If all are None, user hasn't manually configured, so we should auto-configure
+    # If any is not None, user has manually configured, so we shouldn't auto-configure
+    return (
+        use_deepep_moe is None
+        and use_deepep_internode is None
+        and use_deepep_low_latency is None
+    )
 
 
 def auto_configure_deepep(args: argparse.Namespace):
@@ -328,14 +338,11 @@ def start_server(parser: EnvArgumentParser, args: argparse.Namespace):
     backend_process = None
     frontend_process = None
 
-    # Check if DeepEP should be auto-configured before get_model_type_and_update_env
-    # because get_model_type_and_update_env may update environment variables
-    should_auto_config = should_auto_configure_deepep()
-
     get_model_type_and_update_env(parser, args)
 
     # Auto-configure DeepEP settings based on deployment scenario
-    if should_auto_config:
+    # Check from args to see if user has manually configured
+    if should_auto_configure_deepep(args):
         auto_configure_deepep(args)
     else:
         logging.info(
