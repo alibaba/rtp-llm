@@ -44,10 +44,11 @@ class MMPreprocessConfig:
     fps: int = -1
     min_frames: int = -1
     max_frames: int = -1
+    crop_positions: List[float] = field(default_factory=list)
     mm_timeout_ms: int = 30000
 
     def to_string(self):
-        return f"{self.width}_{self.height}_{self.min_pixels}_{self.max_pixels}_{self.fps}_{self.min_frames}_{self.max_frames}_{self.mm_timeout_ms}"
+        return f"{self.width}_{self.height}_{self.min_pixels}_{self.max_pixels}_{self.fps}_{self.min_frames}_{self.max_frames}_[{'_'.join([str(x) for x in self.crop_positions])}]_{self.mm_timeout_ms}"
 
 
 class MultimodalInput:
