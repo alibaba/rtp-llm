@@ -60,6 +60,16 @@ def multi_rank_start(global_controller: ConcurrencyController):
     except RuntimeError as e:
         logging.warn(str(e))
 
+    # handle shutdown signal
+    shutdown_requested = False
+
+    def signal_handler(signum, frame):
+        nonlocal shutdown_requested
+        logging.info(f"Backend server received signal {signum}, initiating shutdown...")
+        shutdown_requested = True
+
+    signal.signal(signal.SIGTERM, signal_handler)
+
     local_world_size = min(torch.cuda.device_count(), g_parallel_info.world_size)
     if "LOCAL_WORLD_SIZE" in os.environ:
         logging.info(
@@ -101,25 +111,40 @@ def multi_rank_start(global_controller: ConcurrencyController):
 
     first_dead_time = 0
     timeout_seconds = 50
+    terminated = False
+
     while any(proc.is_alive() for proc in procs):
-        if not all(proc.is_alive() for proc in procs):
+        # check shutdown signal
+        if shutdown_requested and not terminated:
+            logging.info("Shutdown requested, terminating rank processes...")
+            for proc in procs:
+                if proc.is_alive():
+                    proc.terminate()
+            terminated = True
+            first_dead_time = time.time()
+
+        # check sub-process status
+        elif not all(proc.is_alive() for proc in procs) and not terminated:
             if first_dead_time == 0:
                 first_dead_time = time.time()
-            elif (time.time() - first_dead_time) > timeout_seconds:
-                logging.info(
-                    f"wait proc terminate over timeout {timeout_seconds}s, "
-                    f"send SIGKILL to terminate all backend process"
-                )
-                for proc in procs:
-                    if proc.is_alive():
-                        logging.info(f"send kill to {proc}")
-                        os.kill(proc.pid, signal.SIGKILL)
-                time.sleep(5)
-                continue
-            logging.error(f"some backend proc is not alive, terminate!")
-            [proc.terminate() for proc in procs]
+            logging.error(f"Some backend proc died unexpectedly, terminating all...")
+            for proc in procs:
+                if proc.is_alive():
+                    proc.terminate()
+            terminated = True
+
+        # force kill after timeout
+        if terminated and (time.time() - first_dead_time) > timeout_seconds:
+            logging.warning(
+                f"Graceful shutdown timeout ({timeout_seconds}s), force killing..."
+            )
+            for proc in procs:
+                if proc.is_alive():
+                    os.kill(proc.pid, signal.SIGKILL)
+            break
+
         time.sleep(1)
-    logging.info(f"current backend procs is {procs}")
+
     [proc.join() for proc in procs]
 
 
