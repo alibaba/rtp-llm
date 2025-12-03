@@ -1,6 +1,7 @@
 import logging
 import os
 import sys
+import time
 import traceback
 
 from setproctitle import setproctitle
@@ -11,8 +12,6 @@ CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
 from rtp_llm.config.log_config import setup_logging
-from rtp_llm.distribute.worker_info import FrontendServerInfo, update_worker_info
-from rtp_llm.frontend.frontend_app import FrontendApp
 from rtp_llm.ops import RoleType
 from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
@@ -29,6 +28,16 @@ def start_frontend_server(
     py_env_configs: PyEnvConfigs,
 ):
     # Set rank_id and server_id on the passed config
+    logging.info(
+        f"[PROCESS_START]Start frontend server process rank_{rank_id}_server_{server_id}"
+    )
+    start_time = time.time()
+    from rtp_llm.distribute.worker_info import FrontendServerInfo, update_worker_info
+    from rtp_llm.frontend.frontend_app import FrontendApp
+
+    if rank_id == 0 and server_id == 0:
+        logging.info(f"import FrontendApp took {time.time() - start_time:.2f}s")
+
     py_env_configs.server_config.frontend_server_id = server_id
     py_env_configs.server_config.rank_id = rank_id
     setproctitle(f"rtp_llm_frontend_server_rank_{rank_id}_server_{server_id}")
