@@ -54,22 +54,8 @@ def local_rank_start(global_controller: ConcurrencyController):
         logging.info("GPU not found: using CPU")
 
 
-def multi_rank_start(global_controller: ConcurrencyController):
-    try:
-        multiprocessing.set_start_method("spawn")
-    except RuntimeError as e:
-        logging.warn(str(e))
-
-    # handle shutdown signal
-    shutdown_requested = False
-
-    def signal_handler(signum, frame):
-        nonlocal shutdown_requested
-        logging.info(f"Backend server received signal {signum}, initiating shutdown...")
-        shutdown_requested = True
-
-    signal.signal(signal.SIGTERM, signal_handler)
-
+def _get_local_world_size() -> int:
+    """Calculate local world size based on environment and hardware"""
     local_world_size = min(torch.cuda.device_count(), g_parallel_info.world_size)
     if "LOCAL_WORLD_SIZE" in os.environ:
         logging.info(
@@ -78,19 +64,37 @@ def multi_rank_start(global_controller: ConcurrencyController):
         local_world_size = int(os.environ["LOCAL_WORLD_SIZE"])
     else:
         logging.info(
-            f"multi rank starts with default local world size: {local_world_size}, device count = {torch.cuda.device_count()}, world size = {g_parallel_info.world_size}"
+            f"multi rank starts with default local world size: {local_world_size}, "
+            f"device count = {torch.cuda.device_count()}, world size = {g_parallel_info.world_size}"
         )
     os.environ["LOCAL_WORLD_SIZE"] = str(local_world_size)
-    procs: List[Process] = []
+    return local_world_size
+
+
+def _get_cuda_device_list() -> List[str]:
+    """Get CUDA device list from environment or hardware detection"""
     cuda_devices = os.environ.get("CUDA_VISIBLE_DEVICES", None)
-    cuda_device_list = (
+    return (
         cuda_devices.split(",")
         if cuda_devices is not None
         else [str(i) for i in range(torch.cuda.device_count())]
     )
+
+
+def _validate_dp_configuration():
+    """Validate data parallelism configuration"""
     if g_parallel_info.dp_size > 1:
         # tp must on one device when dp
         assert g_parallel_info.world_rank % g_parallel_info.tp_size == 0
+
+
+def _create_rank_processes(global_controller: ConcurrencyController) -> List[Process]:
+    """Create and start rank processes"""
+    local_world_size = _get_local_world_size()
+    cuda_device_list = _get_cuda_device_list()
+    _validate_dp_configuration()
+
+    processes = []
     for _, world_rank in enumerate(
         range(g_parallel_info.world_rank, g_parallel_info.world_rank + local_world_size)
     ):
@@ -102,50 +106,140 @@ def multi_rank_start(global_controller: ConcurrencyController):
             name=f"rank-{world_rank}",
         )
         proc.start()
-        procs.append(proc)
+        processes.append(proc)
 
+    return processes
+
+
+class BackendProcessManager:
+    """Manages backend rank processes for multi-TP scenarios"""
+
+    DEFAULT_SHUTDOWN_TIMEOUT = 50
+    MONITOR_INTERVAL = 1
+
+    def __init__(self):
+        self.processes: List[Process] = []
+        self.shutdown_requested = False
+        self.terminated = False
+        self.first_dead_time = 0
+        self._setup_signal_handlers()
+
+    def _setup_signal_handlers(self):
+        """Setup signal handlers for graceful shutdown"""
+        signal.signal(signal.SIGTERM, self._signal_handler)
+
+    def _signal_handler(self, signum, frame):
+        """Handle termination signals gracefully"""
+        logging.info(f"Backend server received signal {signum}, initiating shutdown...")
+        self.shutdown_requested = True
+
+    def set_processes(self, processes: List[Process]):
+        """Set the processes to manage"""
+        self.processes = processes
+
+    def _terminate_processes(self):
+        """Terminate all rank processes"""
+        if self.terminated:
+            return
+
+        logging.info("Shutdown requested, terminating rank processes...")
+        for proc in self.processes:
+            if proc.is_alive():
+                proc.terminate()
+        self.terminated = True
+        self.first_dead_time = time.time()
+
+    def _force_kill_processes(self):
+        """Force kill processes after timeout"""
+        logging.warning(
+            f"Graceful shutdown timeout ({self.DEFAULT_SHUTDOWN_TIMEOUT}s), force killing..."
+        )
+        for proc in self.processes:
+            if proc.is_alive():
+                os.kill(proc.pid, signal.SIGKILL)
+
+    def _monitor_processes(self):
+        """Monitor process health and handle failures"""
+        while any(proc.is_alive() for proc in self.processes):
+            # Check shutdown signal
+            if self.shutdown_requested and not self.terminated:
+                self._terminate_processes()
+
+            # Check sub-process status
+            elif (
+                not all(proc.is_alive() for proc in self.processes)
+                and not self.terminated
+            ):
+                if self.first_dead_time == 0:
+                    self.first_dead_time = time.time()
+                logging.error("Some backend proc died unexpectedly, terminating all...")
+                self._terminate_processes()
+
+            # Force kill after timeout
+            if (
+                self.terminated
+                and (time.time() - self.first_dead_time) > self.DEFAULT_SHUTDOWN_TIMEOUT
+            ):
+                self._force_kill_processes()
+                break
+
+            time.sleep(self.MONITOR_INTERVAL)
+
+    def monitor_and_join(self):
+        """Monitor process health and join processes when complete"""
+        # Monitor processes
+        while any(proc.is_alive() for proc in self.processes):
+            # Check shutdown signal
+            if self.shutdown_requested and not self.terminated:
+                self._terminate_processes()
+
+            # Check sub-process status
+            elif (
+                not all(proc.is_alive() for proc in self.processes)
+                and not self.terminated
+            ):
+                if self.first_dead_time == 0:
+                    self.first_dead_time = time.time()
+                logging.error("Some backend proc died unexpectedly, terminating all...")
+                self._terminate_processes()
+
+            # Force kill after timeout
+            if (
+                self.terminated
+                and (time.time() - self.first_dead_time) > self.DEFAULT_SHUTDOWN_TIMEOUT
+            ):
+                self._force_kill_processes()
+                break
+
+            time.sleep(self.MONITOR_INTERVAL)
+
+        # Join all processes
+        for proc in self.processes:
+            proc.join()
+
+
+def multi_rank_start(global_controller: ConcurrencyController):
+    """Start multi-rank backend server with proper process management"""
+    try:
+        multiprocessing.set_start_method("spawn")
+    except RuntimeError as e:
+        logging.warn(str(e))
+
+    # Create processes
+    processes = _create_rank_processes(global_controller)
+
+    # Check for fake gang environment
     gang_config = GangConfig()
     gang_config.update_from_env()
     if gang_config.fake_gang_env:
-        return procs
+        return processes
 
-    first_dead_time = 0
-    timeout_seconds = 50
-    terminated = False
+    # Create manager and monitor processes
+    manager = BackendProcessManager()
+    manager.set_processes(processes)
+    manager.monitor_and_join()
 
-    while any(proc.is_alive() for proc in procs):
-        # check shutdown signal
-        if shutdown_requested and not terminated:
-            logging.info("Shutdown requested, terminating rank processes...")
-            for proc in procs:
-                if proc.is_alive():
-                    proc.terminate()
-            terminated = True
-            first_dead_time = time.time()
-
-        # check sub-process status
-        elif not all(proc.is_alive() for proc in procs) and not terminated:
-            if first_dead_time == 0:
-                first_dead_time = time.time()
-            logging.error(f"Some backend proc died unexpectedly, terminating all...")
-            for proc in procs:
-                if proc.is_alive():
-                    proc.terminate()
-            terminated = True
-
-        # force kill after timeout
-        if terminated and (time.time() - first_dead_time) > timeout_seconds:
-            logging.warning(
-                f"Graceful shutdown timeout ({timeout_seconds}s), force killing..."
-            )
-            for proc in procs:
-                if proc.is_alive():
-                    os.kill(proc.pid, signal.SIGKILL)
-            break
-
-        time.sleep(1)
-
-    [proc.join() for proc in procs]
+    return processes
 
 
 def load_gpu_nic_affinity():
