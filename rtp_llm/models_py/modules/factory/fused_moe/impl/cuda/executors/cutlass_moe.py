@@ -111,8 +111,20 @@ class CutlassExpertsFp8(mm.FusedMoeExpertExecutor):
         )
         if payload.expert_tokens_meta.expert_num_tokens_cpu is not None:
             num_gemm_tokens = sum(payload.expert_tokens_meta.expert_num_tokens_cpu)
+        elif payload.expert_tokens_meta.expert_num_tokens is not None:
+            expert_num_tokens_cpu = (
+                payload.expert_tokens_meta.expert_num_tokens.cpu().tolist()
+            )
+            num_gemm_tokens = sum(expert_num_tokens_cpu)
         else:
             num_gemm_tokens = topk_ids.numel()
+
+        if num_gemm_tokens <= 0:
+            return torch.zeros(
+                payload.expert_x.shape,
+                device=payload.expert_x.device,
+                dtype=payload.expert_x_origin_dtype,
+            )
 
         E, _, _ = self.w1.size()
         _, K, N = self.w2.size()
@@ -152,7 +164,7 @@ class CutlassExpertsFp8(mm.FusedMoeExpertExecutor):
             dtype=payload.expert_x_origin_dtype,
         )
         workspace2 = torch.empty(
-            [num_gemm_tokens, max(N, K)],
+            [max(M, num_gemm_tokens), max(N, K)],
             device=payload.expert_x.device,
             dtype=payload.expert_x_origin_dtype,
         )
