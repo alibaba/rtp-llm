@@ -1,9 +1,12 @@
 import logging
 import os
+import time
 from typing import Optional
 
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_args import ModelArgs
+
+st = time.time()
 from rtp_llm.ops import (
     ArpcConfig,
     CacheStoreConfig,
@@ -25,6 +28,10 @@ from rtp_llm.ops import (
     SpeculativeExecutionConfig,
     VitSeparation,
 )
+
+consume_s = time.time() - st
+print(f"import rtp_llm.ops took {consume_s:.2f}s")
+
 
 DEFAULT_START_PORT = 8088
 MASTER_INFO_PORT_NUM = 11

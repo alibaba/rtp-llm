@@ -11,8 +11,10 @@ from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.propose_model.propose_model import ProposeModel
 from rtp_llm.ops import TaskType
+from rtp_llm.utils.time_util import timer_wrapper
 
 
+@timer_wrapper(description="create async engine")
 def create_engine(
     model: BaseModel,
     engine_config: EngineConfig,
