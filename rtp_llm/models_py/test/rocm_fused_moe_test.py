@@ -6,8 +6,10 @@ from aiter.ops.shuffle import shuffle_weight
 from torch import dtype as _dtype
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.models_py.modules.common.moe.fused_moe import ExpertForwardPayload
-from rtp_llm.models_py.modules.rocm.moe.executors.deepep_normal_fused_moe_executor import (
+from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
+    ExpertForwardPayload,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.executors.deepep_normal_fused_moe_executor import (
     FusedMoeExecutor,
     torch_moe_ref,
 )

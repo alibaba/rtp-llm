@@ -3,7 +3,7 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
-from rtp_llm.models_py.modules.factory.fused_moe.config_resolver import (
+from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
     MoeConfigResolver,
 )
 from rtp_llm.ops.compute_ops import DeviceType

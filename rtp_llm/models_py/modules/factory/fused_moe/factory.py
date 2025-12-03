@@ -8,9 +8,9 @@ from typing import Dict, Optional
 import torch
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.models_py.modules.common.moe.fused_moe import FusedMoe
 
-from .strategies.strategy_registry import StrategyRegistry
+from .defs.fused_moe import FusedMoe
+from .strategy_registry import StrategyRegistry
 
 
 class FusedMoeFactory:

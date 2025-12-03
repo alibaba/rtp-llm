@@ -255,6 +255,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         auto hidden_states        = torchTensor2Buffer(hidden_states_tensor);
 
         RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
+        // xxxx
         return callForwardPostLayers(hidden_states, inputs, true);
 
     } catch (const py::error_already_set& e) {

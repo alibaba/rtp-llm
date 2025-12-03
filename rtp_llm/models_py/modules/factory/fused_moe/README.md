@@ -8,16 +8,19 @@ This directory contains the refactored `FusedMoeFactory`, using strategy pattern
 fused_moe/
 ├── __init__.py                   # Export main interface
 ├── factory.py                    # Main factory class
-├── config_resolver.py            # Configuration resolver
-├── quant_config.py               # Quantization configuration
-├── type.py                       # RouterType and ExecutorType enums
+├── strategy_registry.py          # Strategy registry
 ├── README.md                     # This document
-├── strategies/                   # Strategy infrastructure
+├── defs/                         # Core definitions
 │   ├── __init__.py
-│   ├── base.py                   # Strategy base class
-│   ├── condition_checker.py      # Reusable condition checker utility
+│   ├── fused_moe.py              # FusedMoe, Router and Executor base classes
 │   ├── priority_attributes.py    # Priority calculation system
-│   └── strategy_registry.py      # Strategy registry
+│   ├── quant_config.py           # Quantization configuration
+│   ├── strategy_base.py          # Strategy base class
+│   └── type.py                   # RouterType and ExecutorType enums
+├── utils/                        # Utilities
+│   ├── __init__.py
+│   ├── condition_checker.py      # Reusable condition checker utility
+│   └── config_resolver.py        # Configuration resolver
 └── tests/                        # Unit tests
     ├── BUILD
     ├── test_config_resolver.py
@@ -94,7 +97,7 @@ Each registry creates a `StrategyRegistry` instance, registers all relevant stra
 
 ### MoeConfigResolver
 
-Configuration resolver, provides the following methods:
+Configuration resolver (`utils/config_resolver.py`), provides the following methods:
 
 - `get_device_type()`: Get device type
 - `has_quantization(config)`: Check if quantization is enabled
@@ -107,7 +110,7 @@ Configuration resolver, provides the following methods:
 
 ### FusedMoEQuantConfig
 
-Quantization configuration dataclass (`quant_config.py`), provides:
+Quantization configuration dataclass (`defs/quant_config.py`), provides:
 - `quant_dtype`: Post-quantization activation type
 - `per_act_token_quant`: Per-activation token quantization flag
 - `per_out_ch_quant`: Per-output channel quantization flag
@@ -117,7 +120,7 @@ Quantization configuration dataclass (`quant_config.py`), provides:
 
 ### RouterType and ExecutorType
 
-Type enums (`type.py`) for priority calculation:
+Type enums (`defs/type.py`) for priority calculation:
 - **RouterType**: `BATCHED_DATA` (0), `DEEPGEMM_CONTINUOUS` (1), `DEEPEP_NORMAL` (2), `DEEPEP_LOW_LATENCY` (4), `PURE_TP` (5)
 - **ExecutorType**: `BATCHED_TRITON` (0), `DEEPGEMM_CONTINUOUS` (1), `DEEPGEMM_MASKED` (2), `FUSED_MOE` (2), `CUTLASS_FP8` (3), `CUTLASS_BATCHED_FP8` (4)
 
@@ -127,7 +130,7 @@ Thread-safe DeepEP initialization manager (located at `rtp_llm/models_py/distrib
 
 ### MoeStrategy
 
-Base class for all strategies, defines the following interface:
+Base class for all strategies (`defs/strategy_base.py`), defines the following interface:
 
 - `can_handle(config)`: Determine if this configuration can be handled (automatically calls Router and Executor's `check_conditions`)
 - `create_router(config)`: Create Router (handles DeepEP initialization internally if needed)
@@ -137,7 +140,7 @@ Base class for all strategies, defines the following interface:
 
 ### ConditionChecker
 
-Reusable utility class for condition checking with automatic logging:
+Reusable utility class (`utils/condition_checker.py`) for condition checking with automatic logging:
 
 - Automatically extracts condition expressions from source code
 - Records all condition check results
@@ -192,8 +195,8 @@ class MyRouter(FusedMoeDataRouter):
 # In rtp_llm/models_py/modules/cuda/moe/routers/my_router.py
 from typing import Any
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.models_py.modules.common.moe.fused_moe import FusedMoeDataRouter
-from rtp_llm.models_py.modules.factory.fused_moe.type import RouterType
+from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import FusedMoeDataRouter
+from rtp_llm.models_py.modules.factory.fused_moe.defs.type import RouterType
 
 class MyRouter(FusedMoeDataRouter):
     @classmethod
@@ -203,7 +206,7 @@ class MyRouter(FusedMoeDataRouter):
     @classmethod
     def check_conditions(cls, checker: Any, config: GptInitModelParameters) -> None:
         """Check if MyRouter can handle the configuration"""
-        from rtp_llm.models_py.modules.factory.fused_moe.config_resolver import MoeConfigResolver
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import MoeConfigResolver
         resolver = MoeConfigResolver()
         # Define router-specific conditions
         checker.check(resolver.is_ep_enabled(config))
@@ -220,9 +223,9 @@ class MyRouter(FusedMoeDataRouter):
 from typing import Any, Dict
 import torch
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.models_py.modules.common.moe.fused_moe import FusedMoeExpertExecutor
-from rtp_llm.models_py.modules.factory.fused_moe.quant_config import FusedMoEQuantConfig
-from rtp_llm.models_py.modules.factory.fused_moe.type import ExecutorType
+from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import FusedMoeExpertExecutor
+from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import FusedMoEQuantConfig
+from rtp_llm.models_py.modules.factory.fused_moe.defs.type import ExecutorType
 
 class MyExecutor(FusedMoeExpertExecutor):
     @classmethod
@@ -232,7 +235,7 @@ class MyExecutor(FusedMoeExpertExecutor):
     @classmethod
     def check_conditions(cls, checker: Any, config: GptInitModelParameters) -> None:
         """Check if MyExecutor can handle the configuration"""
-        from rtp_llm.models_py.modules.factory.fused_moe.config_resolver import MoeConfigResolver
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import MoeConfigResolver
         resolver = MoeConfigResolver()
         # Define executor-specific conditions
         quant_method = resolver.get_quant_method(config)
@@ -250,8 +253,8 @@ class MyExecutor(FusedMoeExpertExecutor):
 from typing import Dict
 import torch
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.models_py.modules.factory.fused_moe.strategies.base import MoeStrategy
-from rtp_llm.models_py.modules.factory.fused_moe.strategies.priority_attributes import StrategyAttributes
+from rtp_llm.models_py.modules.factory.fused_moe.defs.strategy_base import MoeStrategy
+from rtp_llm.models_py.modules.factory.fused_moe.defs.priority_attributes import StrategyAttributes
 
 class CudaMyQuantStrategy(MoeStrategy):
     # No need to implement can_handle() or _check_conditions()!

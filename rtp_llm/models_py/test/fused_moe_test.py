@@ -6,11 +6,11 @@ import torch.nn.functional as F
 from torch import dtype as _dtype
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.models_py.modules.common.moe.executor.batched_triton_executor import (
+from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import FusedMoe
+from rtp_llm.models_py.modules.factory.fused_moe.impl.common.executor.batched_triton_executor import (
     BatchedTritonExperts,
 )
-from rtp_llm.models_py.modules.common.moe.fused_moe import FusedMoe
-from rtp_llm.models_py.modules.common.moe.router.batched_data_router import (
+from rtp_llm.models_py.modules.factory.fused_moe.impl.common.router.batched_data_router import (
     BatchedDataRouter,
 )
 

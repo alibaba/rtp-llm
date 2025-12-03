@@ -20,10 +20,10 @@ from rtp_llm.models.rotary_embedding.deepseek_rotary_embedding import (
     DeepseekV3YarnRotaryEmbedding,
 )
 from rtp_llm.models_py.modules.common.mla.mla_attention_ref import attention_ref
-from rtp_llm.models_py.modules.cuda.mla.flashinfer_mla_wrapper import (
+from rtp_llm.models_py.modules.factory import LinearFactory
+from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla_wrapper import (
     MlaFlashInferPrefillImpl,
 )
-from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs
 from rtp_llm.utils.model_weight import W
 
