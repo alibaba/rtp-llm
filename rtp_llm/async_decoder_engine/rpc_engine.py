@@ -1,4 +1,6 @@
 from typing import Dict, Optional
+import logging
+import time
 
 from typing_extensions import override
 
@@ -10,6 +12,7 @@ from rtp_llm.models.propose_model.propose_model import ProposeModel
 from rtp_llm.ops import TaskType
 from rtp_llm.ops.rtp_llm.rtp_llm_op import RtpLLMOp
 from rtp_llm.utils.mm_process_engine import MMProcessEngine
+from rtp_llm.utils.time_util import timer_wrapper
 
 
 class LanguageCppEngine(BaseEngine):
@@ -45,9 +48,13 @@ class LanguageCppEngine(BaseEngine):
             engine_config, model, self.mm_engine, propose_model, self.token_processor
         )
 
+    @timer_wrapper(description="start async engine")
     @override
     def _start(self) -> None:
+        start_time = time.time()
         self.rtp_llm_op_.start()
+        consume_s = time.time() - start_time
+        logging.info(f"start rtp_llm_op_ took {consume_s:.2f}s")
 
         # Start HTTP server for language model tasks
         if (

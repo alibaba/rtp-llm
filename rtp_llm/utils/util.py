@@ -6,12 +6,13 @@ import socket
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Union
+from typing import Any, Coroutine, Dict, List, Optional, Set, Union
 
 import aiohttp
 import psutil
 import torch
 from aiohttp import ClientConnectorError, ServerTimeoutError
+from fastapi.responses import JSONResponse
 
 from rtp_llm import _ft_pickler
 
@@ -56,17 +57,17 @@ def to_torch_dtype(maybe_str_dtype: Union[str, torch.dtype]) -> torch.dtype:
         dtype = maybe_str_dtype
     else:
         # Handle enum types (pybind11 enums have 'name' attribute)
-        if hasattr(maybe_str_dtype, 'name'):
+        if hasattr(maybe_str_dtype, "name"):
             # Convert enum to string using name attribute
             maybe_str_dtype = maybe_str_dtype.name
         elif not isinstance(maybe_str_dtype, str):
             # Convert other types to string
             maybe_str_dtype = str(maybe_str_dtype)
-        
+
         # Remove TYPE_ prefix if present (e.g., TYPE_BF16 -> BF16)
-        if maybe_str_dtype.startswith('TYPE_'):
+        if maybe_str_dtype.startswith("TYPE_"):
             maybe_str_dtype = maybe_str_dtype[5:]  # Remove 'TYPE_' prefix
-        
+
         try:
             dtype = {
                 "bf16": torch.bfloat16,
@@ -229,7 +230,7 @@ def has_overlap_kmp(a: str, b: str) -> bool:
 
 async def async_request_server(
     method: str, server_port: int, uri: str = "", req: Dict[str, Any] = None
-) -> Dict[str, Any]:
+) -> Union[JSONResponse, dict[str, Any]]:
     """
     异步HTTP请求服务 (基于aiohttp实现)
 
@@ -255,20 +256,31 @@ async def async_request_server(
                 async with session.post(url, json=req) as response:
                     return await _handle_response(response)
             else:
-                return {"error": f"Unsupported HTTP method: {method}"}
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": f"Unsupported HTTP method: {method}"},
+                )
     # 明确区分错误类型
     except ClientConnectorError as e:
         # 连接失败（如DNS解析错误、TCP连接拒绝）
-        return {"error": "Connection failed", "details": str(e)}
+        return JSONResponse(
+            status_code=500, content={"error": "Connection failed", "details": str(e)}
+        )
     except ServerTimeoutError as e:
         # 超时错误（连接或响应超时）
-        return {"error": "Request timeout", "details": str(e)}
+        return JSONResponse(
+            status_code=500, content={"error": "Request timeout", "details": str(e)}
+        )
     except aiohttp.ClientError as e:
         # 其他客户端错误（如无效URL、HTTP协议错误）
-        return {"error": "Client error", "details": str(e)}
+        return JSONResponse(
+            status_code=500, content={"error": "Client error", "details": str(e)}
+        )
     except Exception as e:
         # 未知错误
-        return {"error": "Unexpected error", "details": str(e)}
+        return JSONResponse(
+            status_code=500, content={"error": "Unexpected error", "details": str(e)}
+        )
 
 
 async def _handle_response(response: aiohttp.ClientResponse) -> Dict[str, Any]:
