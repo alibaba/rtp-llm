@@ -73,7 +73,7 @@ Each hardware and configuration combination has a corresponding strategy class:
   - `CudaFp8PerBlockNoDPStrategy`: FP8 PerBlock without DP
   - `CudaFp8PerBlockEpLowLatencyStrategy`: FP8 PerBlock EP low latency
   - `CudaFp8PerBlockEpNormalStrategy`: FP8 PerBlock EP normal
-  - `CudaFp8PerTensorSingleGpuStrategy`: FP8 PerTensor single GPU
+  - `CudaFp8PerTensorNoDPStrategy`: FP8 PerTensor without DP
   - `CudaFp8PerTensorEpLowLatencyStrategy`: FP8 PerTensor EP low latency
   - `CudaFp8PerTensorEpNormalStrategy`: FP8 PerTensor EP normal
   - `BatchedTritonStrategy`: Fallback strategy using Triton

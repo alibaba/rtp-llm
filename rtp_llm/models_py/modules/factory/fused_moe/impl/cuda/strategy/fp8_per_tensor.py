@@ -96,16 +96,14 @@ class CudaFp8PerTensorEpNormalStrategy(MoeStrategy):
         )
 
 
-# TODO expand to TP=EP case
-class CudaFp8PerTensorSingleGpuStrategy(MoeStrategy):
+class CudaFp8PerTensorNoDPStrategy(MoeStrategy):
     """CUDA FP8 PerTensor single GPU strategy"""
 
     def create_router(self, config: MoEConfigAdapter) -> Any:
-        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.no_ep_standard_router import (
-            DataRouterNoEPStandard,
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepgeemm_coutinous_router import (
+            PureTpRouter,
         )
-
-        return DataRouterNoEPStandard(num_dispatchers=1)
+        return PureTpRouter(config=config, expert_alignment=1)
 
     def create_executor(
         self, config: MoEConfigAdapter, weights: Dict[str, torch.Tensor]
@@ -129,11 +127,11 @@ class CudaFp8PerTensorSingleGpuStrategy(MoeStrategy):
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.cutlass_moe import (
             CutlassExpertsFp8,
         )
-        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.no_ep_standard_router import (
-            DataRouterNoEPStandard,
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepgeemm_coutinous_router import (
+            PureTpRouter,
         )
 
         return StrategyAttributes(
-            router_class=DataRouterNoEPStandard,
+            router_class=PureTpRouter,
             executor_class=CutlassExpertsFp8,
         )
