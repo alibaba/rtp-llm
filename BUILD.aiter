@@ -159,19 +159,6 @@ cc_library(
     tags = ["rocm"],
 )
 
-cc_library(
-    name = "module_quick_all_reduce",
-    srcs = ["aiter/jit/module_quick_all_reduce.so"],
-    hdrs = ["aiter_meta/csrc/include/quick_all_reduce.h"],
-    deps = [
-        ":aiter_so",
-        ":aiter_headers",
-    ],
-    copts = [],
-    strip_include_prefix = "aiter_meta/csrc/include/",
-    visibility = ["//visibility:public"],
-    tags = ["rocm"],
-)
 
 cc_library(
     name = "module_aiter_enum",

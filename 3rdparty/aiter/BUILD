@@ -105,8 +105,7 @@ genrule(
         "aiter/jit/libmodule_smoothquant.so",
         "aiter/jit/libmodule_gemm_a8w8.so",
         "aiter/jit/libmodule_moe_ck2stages.so",
-        "aiter/jit/libmodule_m_grouped_gemm.so",
-        "aiter/jit/libmodule_quick_all_reduce.so",
+        "aiter/jit/libmodule_deepgemm.so",
     ],
     cmd = """
         cd external/aiter_src;
@@ -130,14 +129,13 @@ genrule(
         cp external/aiter_src/aiter/jit/module_attention_asm.so $(location aiter/jit/libmodule_attention_asm.so);
         cp external/aiter_src/aiter/jit/module_gemm_a8w8_bpreshuffle.so $(location aiter/jit/libmodule_gemm_a8w8_bpreshuffle.so);
         cp external/aiter_src/aiter/jit/module_activation.so $(location aiter/jit/libmodule_activation.so);
-        cp external/aiter_src/aiter/jit/module_m_grouped_gemm.so $(location aiter/jit/libmodule_m_grouped_gemm.so);
+        cp external/aiter_src/aiter/jit/module_deepgemm.so $(location aiter/jit/libmodule_deepgemm.so);
         cp external/aiter_src/aiter/jit/module_norm.so $(location aiter/jit/libmodule_norm.so);
         cp external/aiter_src/aiter/jit/module_rmsnorm.so $(location aiter/jit/libmodule_rmsnorm.so);
         cp external/aiter_src/aiter/jit/module_mha_fwd.so $(location aiter/jit/libmodule_mha_fwd.so);
         cp external/aiter_src/aiter/jit/module_fmha_v3_varlen_fwd.so $(location aiter/jit/libmodule_fmha_v3_varlen_fwd.so);
         cp external/aiter_src/aiter/jit/module_gemm_a8w8.so $(location aiter/jit/libmodule_gemm_a8w8.so);
         cp external/aiter_src/aiter/jit/module_moe_ck2stages.so $(location aiter/jit/libmodule_moe_ck2stages.so);
-        cp external/aiter_src/aiter/jit/module_quick_all_reduce.so $(location aiter/jit/libmodule_quick_all_reduce.so);
     """,
     visibility = ["//visibility:public"],
     tags = ["rocm","local"],
@@ -178,16 +176,6 @@ cc_library(
     tags = ["rocm","local"],
 )
 
-cc_library(
-    name = "module_quick_all_reduce",
-    srcs = ["aiter/jit/libmodule_quick_all_reduce.so"],
-    hdrs = ["csrc/include/quick_all_reduce.h"],
-    deps = [":cpp_libraries"],
-    copts = [],
-    strip_include_prefix = "csrc/include/",
-    visibility = ["//visibility:public"],
-    tags = ["rocm","local"],
-)
 
 cc_library(
     name = "module_mha_fwd",
@@ -371,13 +359,9 @@ cc_library(
  
 cc_library(
     name = "module_m_grouped_gemm",
-    srcs = ["aiter/jit/module_deepgemm.so"],
+    srcs = ["aiter/jit/libmodule_deepgemm.so"],
     hdrs = ["csrc/ck_deepgemm/include/deepgemm.h"],
-    deps = [
-        ":aiter_so",
-        ":aiter_headers",
-        ":ck_deepgemm_example_headers"
-    ],
+    deps = [":cpp_libraries"],
     copts = [],
     strip_include_prefix = "csrc/ck_deepgemm/include",
     visibility = ["//visibility:public"],
