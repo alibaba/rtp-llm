@@ -24,6 +24,8 @@ class FMHAImplBase(object):
         init_params: bool = True,
     ) -> None:
         self.fmha_impl = fmha_impl
+        self.input_lengths = attn_inputs.input_lengths
+        self.cu_seq_lens = attn_inputs.cu_seqlens
         self.support_: bool = self.fmha_impl.support(attn_inputs)
         self.fmha_params = None
         self.rope_params = None
@@ -40,11 +42,19 @@ class FMHAImplBase(object):
                     self.attn_inputs.cache_store_inputs,
                 )
 
-    def forward(self, qkv: torch.Tensor, kv_cache: Optional[KVCache]) -> torch.Tensor:
+    def forward(
+        self,
+        qkv: torch.Tensor,
+        kv_cache: Optional[KVCache],
+        need_rope_kv_cache: bool = True,
+    ) -> torch.Tensor:
         assert self.rope_kvcache_impl is not None and self.rope_params is not None
-        fmha_input = self.rope_kvcache_impl.forward(
-            qkv, self.fmha_type(), kv_cache, self.rope_params
-        )
+        if need_rope_kv_cache:
+            fmha_input = self.rope_kvcache_impl.forward(
+                qkv, self.fmha_type(), kv_cache, self.rope_params
+            )
+        else:
+            fmha_input = qkv
         if (
             self.attn_inputs.is_prefill
             and self.attn_inputs.cache_store_inputs

@@ -3,7 +3,7 @@ import libth_transformer_config
 import torch
 import typing
 from . import rtp_llm_ops
-__all__: list[str] = ['BertEmbeddingInputs', 'DeviceExporter', 'DeviceType', 'KVCache', 'MlaParams', 'ParamsBase', 'PyAttentionInputs', 'PyCacheStoreInputs', 'PyCaptureMetaData', 'PyModelInitResources', 'PyModelInputs', 'PyModelOutputs', 'TypeMeta', 'get_device', 'init_device', 'rtp_llm_ops']
+__all__: list[str] = ['BertEmbeddingInputs', 'DeviceExporter', 'DeviceType', 'KVCache', 'MlaParams', 'ParamsBase', 'PyAttentionInputs', 'PyCacheStoreInputs', 'PyCaptureMetaData', 'PyModelInitResources', 'PyModelInputs', 'PyModelOutputs', 'PyPrefillCudaGaphCopyParams', 'TypeMeta', 'get_device', 'get_typemeta', 'init_device', 'rtp_llm_ops']
 class BertEmbeddingInputs:
     @typing.overload
     def __init__(self) -> None:
@@ -137,6 +137,9 @@ class KVCache:
         """
         Key cache scale tensor
         """
+    @k_scale_base.setter
+    def k_scale_base(self, arg0: torch.Tensor) -> None:
+        ...
     @property
     def layer_id(self) -> int:
         """
@@ -147,16 +150,28 @@ class KVCache:
         """
         Value cache base tensor
         """
+    @v_cache_base.setter
+    def v_cache_base(self, arg0: torch.Tensor) -> None:
+        ...
     @property
     def v_scale_base(self) -> torch.Tensor:
         """
         Value cache scale tensor
         """
+    @v_scale_base.setter
+    def v_scale_base(self, arg0: torch.Tensor) -> None:
+        ...
 class MlaParams:
     def __init__(self) -> None:
         ...
     @property
     def batch_indice(self) -> torch.Tensor:
+        ...
+    @property
+    def batch_reuse_info_vec(self) -> torch.Tensor:
+        ...
+    @property
+    def decode_page_indptr(self) -> torch.Tensor:
         ...
     @property
     def kvlen(self) -> torch.Tensor:
@@ -165,16 +180,19 @@ class MlaParams:
     def page_indice(self) -> torch.Tensor:
         ...
     @property
-    def page_indptr(self) -> torch.Tensor:
-        ...
-    @property
     def paged_kv_last_page_len(self) -> torch.Tensor:
         ...
     @property
     def positions(self) -> torch.Tensor:
         ...
     @property
+    def prefill_page_indptr(self) -> torch.Tensor:
+        ...
+    @property
     def qo_indptr(self) -> torch.Tensor:
+        ...
+    @property
+    def reuse_cache_page_indice(self) -> torch.Tensor:
         ...
 class ParamsBase:
     def __init__(self) -> None:
@@ -184,9 +202,15 @@ class ParamsBase:
         Fill parameters for CUDA graph execution
         """
 class PyAttentionInputs:
+    cache_store_inputs: PyCacheStoreInputs | None
+    cu_seqlens: torch.Tensor
+    dtype: TypeMeta
     input_lengths: torch.Tensor
     is_prefill: bool
+    kv_block_offset: int
+    kv_cache_block_id_device: torch.Tensor
     kv_cache_block_id_host: torch.Tensor
+    padding_offset: torch.Tensor
     prefix_lengths: torch.Tensor
     sequence_lengths: torch.Tensor
     def __init__(self) -> None:
@@ -194,22 +218,7 @@ class PyAttentionInputs:
     def __repr__(self) -> str:
         ...
     @property
-    def cache_store_inputs(self) -> PyCacheStoreInputs | None:
-        ...
-    @property
-    def cu_seqlens(self) -> torch.Tensor:
-        ...
-    @property
-    def dtype(self) -> TypeMeta:
-        ...
-    @property
-    def kv_block_offset(self) -> int:
-        ...
-    @property
-    def kv_cache_block_id_device(self) -> torch.Tensor:
-        ...
-    @property
-    def padding_offset(self) -> torch.Tensor:
+    def prefill_cuda_graph_copy_params(self) -> PyPrefillCudaGaphCopyParams | None:
         ...
 class PyCacheStoreInputs:
     def __init__(self) -> None:
@@ -298,10 +307,26 @@ class PyModelOutputs:
     @params_ptr.setter
     def params_ptr(self, arg0: ParamsBase) -> None:
         ...
+class PyPrefillCudaGaphCopyParams:
+    def __init__(self) -> None:
+        ...
+    @property
+    def cuda_graph_prefill_batch_size(self) -> torch.Tensor:
+        ...
+    @property
+    def max_batch_size(self) -> int:
+        ...
+    @property
+    def max_seq_len(self) -> int:
+        ...
 class TypeMeta:
     def __init__(self) -> None:
         ...
 def get_device() -> DeviceExporter:
     ...
+def get_typemeta(arg0: torch.Tensor) -> TypeMeta:
+    """
+    Convert tensor dtype to TypeMeta
+    """
 def init_device(params: libth_transformer_config.GptInitParameter) -> None:
     ...
