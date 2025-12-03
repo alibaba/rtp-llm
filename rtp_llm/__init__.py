@@ -67,6 +67,10 @@ if os.environ.get("FT_ALOG_CONF_PATH") is None:
 
 logging.info("init logger end")
 
+import time
+
+st = time.time()
+
 import transformers
 
 logging.info(f"transformers version: {transformers.__version__}")
@@ -79,3 +83,6 @@ try:
     import internal_source.rtp_llm.models_py
 except ImportError:
     logging.warning("Failed to import internal_source models")
+
+consume_s = time.time() - st
+print(f"import in __init__ took {consume_s:.2f}s")

@@ -2,7 +2,6 @@ import argparse
 import logging
 import multiprocessing
 import os
-import signal
 import sys
 import time
 import traceback
@@ -13,6 +12,7 @@ import requests
 from rtp_llm.config.py_config_modules import ServerConfig, StaticConfig
 from rtp_llm.ops import ProfilingDebugLoggingConfig, RoleType
 from rtp_llm.tools.api.hf_model_helper import get_hf_model_info
+from rtp_llm.utils.time_util import timer_wrapper
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
@@ -23,22 +23,7 @@ from rtp_llm.utils.concurrency_controller import init_controller
 from rtp_llm.utils.process_manager import ProcessManager
 
 
-def check_server_health(server_port):
-    try:
-        response = requests.get(f"http://localhost:{server_port}/health", timeout=60)
-        logging.info(
-            f"response status_code = {response.status_code}, text = {response.text}, len = {len(response.text)}"
-        )
-        if response.status_code == 200 and response.text.strip() == '"ok"':
-            return True
-        else:
-            logging.info(f"health check is not ready")
-            return False
-    except BaseException as e:
-        logging.debug("health check is not ready, %s", str(e))
-        return False
-
-
+@timer_wrapper(description="start backend server")
 def start_backend_server_impl(global_controller, process_manager=None):
     from rtp_llm.start_backend_server import start_backend_server
 
@@ -48,34 +33,31 @@ def start_backend_server_impl(global_controller, process_manager=None):
     if profiling_debug_config.debug_load_server:
         start_backend_server(global_controller)
         os._exit(-1)
+
+    logging.info(f"[PROCESS_SPAWN]Start backend server process outer")
     backend_process = multiprocessing.Process(
         target=start_backend_server, args=(global_controller,), name="backend_server"
     )
     backend_process.start()
 
-    retry_interval_seconds = 5
     server_config = ServerConfig()
     server_config.update_from_env()
     start_port = server_config.start_port
-    backend_server_port = WorkerInfo.backend_server_port_offset(0, start_port)
-    while True:
-        if not backend_process.is_alive():
-            logging.error("Backend server is not alive")
-            raise Exception("backend server is not alive")
 
-        try:
-            if check_server_health(backend_server_port):
-                logging.info(f"backend server is ready")
-                break
-            else:
-                time.sleep(retry_interval_seconds)
-        except Exception as e:
-            logging.info(f"backend server is not ready")
-            time.sleep(retry_interval_seconds)
+    backend_server_port = WorkerInfo.backend_server_port_offset(0, start_port)
+
+    # Register health check with ProcessManager
+    if process_manager:
+        process_manager.register_health_check(
+            processes=[backend_process],
+            process_name="backend_server",
+            port=backend_server_port,
+        )
 
     return backend_process
 
 
+@timer_wrapper(description="start frontend server")
 def start_frontend_server_impl(
     global_controller, backend_process, process_manager=None
 ):
@@ -105,6 +87,9 @@ def start_frontend_server_impl(
 
     for rank in range(local_world_size):
         for i in range(frontend_server_count):
+            logging.info(
+                f"[PROCESS_SPAWN]Start frontend server process rank_{rank}_server_{i} outer"
+            )
             process = multiprocessing.Process(
                 target=start_frontend_server,
                 args=(rank, i, global_controller),
@@ -113,21 +98,14 @@ def start_frontend_server_impl(
             frontend_processes.append(process)
             process.start()
 
-    retry_interval_seconds = 5
+    # Register health check with ProcessManager for the first frontend server
     start_port = server_config.start_port
-
-    while True:
-        if not all(proc.is_alive() for proc in frontend_processes):
-            logging.error("Frontend server is not alive")
-            raise Exception("frontend server is not alive")
-
-        try:
-            check_server_health(start_port)
-            logging.info(f"frontend server is ready")
-            break
-        except Exception as e:
-            # 如果连接失败，等待一段时间后重试
-            time.sleep(retry_interval_seconds)
+    if process_manager and frontend_processes:
+        process_manager.register_health_check(
+            processes=frontend_processes,
+            process_name="frontend_server",
+            port=start_port,
+        )
 
     return frontend_processes
 
@@ -304,6 +282,8 @@ def main():
 
 
 def start_server(parser: EnvArgumentParser, args: argparse.Namespace):
+    logging.info(f"[PROCESS_START]Start server")
+    start_time = time.time()
     try:
         multiprocessing.set_start_method("spawn")
     except RuntimeError as e:
@@ -348,7 +328,17 @@ def start_server(parser: EnvArgumentParser, args: argparse.Namespace):
         process_manager.add_processes(frontend_process)
         logging.info(f"frontend server process = {frontend_process}")
 
+        # Start parallel health checks for all registered services
+        process_manager.start_parallel_health_checks()
+
+        # Wait for all health checks to complete
+        if not process_manager.wait_for_health_checks():
+            logging.error("Health checks failed")
+            raise Exception("Health checks failed")
+
         logging.info(f"后端RPC 服务监听的ip为 0.0.0.0，ip/ip段可自定义为所需范围")
+        consume_s = time.time() - start_time
+        logging.info(f"start server took {consume_s:.2f}s")
     except Exception as e:
         logging.error(f"start failed, trace: {traceback.format_exc()}")
         # Trigger graceful shutdown on any exception

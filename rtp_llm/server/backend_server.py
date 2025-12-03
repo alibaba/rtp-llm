@@ -4,6 +4,7 @@ import logging
 import os
 import threading
 import time
+import traceback
 from typing import Any, Dict, List, Union
 
 import requests
@@ -22,11 +23,11 @@ from rtp_llm.embedding.embedding_endpoint import EmbeddingEndpoint
 from rtp_llm.lora.lora_manager import LoraManager
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 from rtp_llm.model_factory import ModelFactory
+from rtp_llm.model_loader.weight_manager import WeightManager
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.ops import EngineScheduleInfo, KVCacheInfo, WorkerStatusInfo
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.server.misc import format_exception
-from rtp_llm.model_loader.weight_manager import WeightManager
 from rtp_llm.server.worker_status import TaskInfo, WorkStatus
 from rtp_llm.structure.request_extractor import request_id_field_name
 from rtp_llm.utils.concurrency_controller import (
@@ -34,9 +35,8 @@ from rtp_llm.utils.concurrency_controller import (
     get_global_controller,
 )
 from rtp_llm.utils.fuser import _nfs_manager
-from rtp_llm.utils.time_util import Timer
+from rtp_llm.utils.time_util import Timer, timer_wrapper
 from rtp_llm.utils.version_info import VersionInfo
-import traceback
 
 StreamObjectType = Union[Dict[str, Any], BaseModel]
 
@@ -55,7 +55,7 @@ class BackendServer(object):
             os.environ["NCCL_P2P_DISABLE"] = "1"
         self._access_logger = AccessLogger(
             py_env_configs.server_config.rank_id,
-            py_env_configs.server_config.frontend_server_id
+            py_env_configs.server_config.frontend_server_id,
         )
         self._gang_server = GangServer(py_env_configs)
         self._openai_endpoint = None
@@ -199,6 +199,7 @@ class BackendServer(object):
         rep = ORJSONResponse(exception_json, status_code=500)
         return rep
 
+    @timer_wrapper(description="wait workers ready")
     def wait_all_worker_ready(self):
         # master需要等其他所有机器都ready以后才能起服务，挂vipserver
         if g_parallel_info.is_master and g_parallel_info.world_size > 1:
@@ -208,7 +209,7 @@ class BackendServer(object):
                     break
                 except Exception as e:
                     logging.warn("worker not all ready, error_msg: " + str(e))
-                    time.sleep(5)
+                    time.sleep(0.1)
 
     def get_engine_schedule_info(
         self, latest_finished_version: int

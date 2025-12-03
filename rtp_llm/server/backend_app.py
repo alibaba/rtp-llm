@@ -25,6 +25,7 @@ from rtp_llm.models.base_model import BaseModel
 from rtp_llm.server.backend_server import BackendServer
 from rtp_llm.server.misc import check_is_master, check_is_worker
 from rtp_llm.server.worker_status import CacheStatus
+from rtp_llm.utils.time_util import timer_wrapper
 from rtp_llm.utils.util import AtomicCounter
 from rtp_llm.utils.version_info import VersionInfo
 
@@ -56,10 +57,12 @@ class GracefulShutdownServer(Server):
 
 
 class BackendApp(object):
+    @timer_wrapper(description="init backend app")
     def __init__(self, py_env_configs: PyEnvConfigs = StaticConfig):
         self.py_env_configs = py_env_configs
         self.backend_server = BackendServer(py_env_configs)
 
+    @timer_wrapper(description="start backend app")
     def start(self, worker_info: WorkerInfo):
         self.backend_server.start(self.py_env_configs)
         app = self.create_app(worker_info)

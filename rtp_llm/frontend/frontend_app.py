@@ -12,6 +12,7 @@ from fastapi import Request as RawRequest
 from fastapi import status
 from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.responses import JSONResponse
 from typing_extensions import override
 from uvicorn import Config, Server
 from uvicorn.loops.auto import auto_loop_setup
@@ -172,7 +173,7 @@ class FrontendApp(object):
             response = await async_request_server(
                 "post", g_worker_info.backend_server_port, "cache_status", query_params
             )
-            if "error" not in response:
+            if not isinstance(response, JSONResponse) and "error" not in response:
                 response["frontend_available_concurrency"] = (
                     self.frontend_server._global_controller.get_available_concurrency()
                 )
@@ -192,7 +193,7 @@ class FrontendApp(object):
             response = await async_request_server(
                 "post", g_worker_info.backend_server_port, "worker_status", query_params
             )
-            if "error" not in response:
+            if not isinstance(response, JSONResponse) and "error" not in response:
                 response["frontend_available_concurrency"] = (
                     self.frontend_server._global_controller.get_available_concurrency()
                 )
