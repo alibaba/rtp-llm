@@ -4,7 +4,7 @@ Uses strategy pattern to create appropriate Linear instances based on configurat
 """
 
 import logging
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Type
 
 import torch
 from torch import nn
@@ -23,7 +23,7 @@ class LinearFactory:
     Uses a list of registered strategies to find the right implementation.
     """
 
-    _strategies: List[type] = []
+    _strategies: List[Type[LinearBase]] = []
 
     @classmethod
     def register(cls, strategy_class: type) -> None:
@@ -48,7 +48,7 @@ class LinearFactory:
         scale_key: Optional[str] = None,
         bias_key: Optional[str] = None,
         config: Optional[GptInitModelParameters] = None,
-    ) -> nn.Module:
+    ) -> LinearBase:
         """Create Linear layer from weight dictionary
 
         Args:

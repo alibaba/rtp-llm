@@ -1,8 +1,5 @@
 import logging
-from typing import Any, Callable, Dict, List, Type
-
-import torch
-import torch.nn as nn
+from typing import Callable, Dict, List
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.model_loader.model_weight_info import ModelWeights

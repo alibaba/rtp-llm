@@ -3,7 +3,7 @@ from typing import Optional, Tuple, Union
 
 import torch
 
-from rtp_llm.models_py.modules.fp8_kernel import (
+from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     scaled_fp8_per_tensor_quant,
     scaled_fp8_per_token_quant,
 )

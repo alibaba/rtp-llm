@@ -66,6 +66,14 @@ py_library(
 )
 
 py_library(
+    name = "kernels",
+    srcs = glob([
+        "kernels/*.py",
+        "kernels/**/*.py",
+    ])
+)
+
+py_library(
     name = "models",
     srcs = glob([
         "model_desc/*.py",
@@ -74,6 +82,7 @@ py_library(
     deps = [
         ":utils",
         ":modules",
+        ":kernels",
         "//rtp_llm/model_loader:loader",
     ] + select({
         "@//:using_cuda12": [

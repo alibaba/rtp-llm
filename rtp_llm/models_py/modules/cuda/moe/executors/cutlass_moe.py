@@ -5,12 +5,12 @@ import torch
 
 import rtp_llm.models_py.modules.common.moe.fused_moe as mm
 import rtp_llm.ops.compute_ops as compute_ops
-from rtp_llm.models_py.modules.factory.fused_moe.quant_config import FusedMoEQuantConfig
-from rtp_llm.models_py.modules.factory.fused_moe.type import ExecutorType
-from rtp_llm.models_py.modules.fp8_kernel import (
+from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     cutlass_moe_mm_fp8_scaled,
     get_best_config_swap_ab,
 )
+from rtp_llm.models_py.modules.factory.fused_moe.quant_config import FusedMoEQuantConfig
+from rtp_llm.models_py.modules.factory.fused_moe.type import ExecutorType
 from rtp_llm.models_py.triton_kernels.common.activation import (
     silu_and_mul,
     silu_mul_fp8_per_token_quant_batched,

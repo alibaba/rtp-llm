@@ -5,6 +5,7 @@ import torch
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.distribute.collective import Group, all_gather
 from rtp_llm.models_py.distributed.deepep_initializer import DeepEpInitializer
+from rtp_llm.models_py.kernels.cuda.fp8_kernel import scaled_fp8_per_token_quant
 from rtp_llm.models_py.modules.common.moe.fused_moe import (
     ExpertForwardPayload,
     ExpertTokensMetadata,
@@ -12,7 +13,6 @@ from rtp_llm.models_py.modules.common.moe.fused_moe import (
 )
 from rtp_llm.models_py.modules.factory.fused_moe.quant_config import FusedMoEQuantConfig
 from rtp_llm.models_py.modules.factory.fused_moe.type import RouterType
-from rtp_llm.models_py.modules.fp8_kernel import scaled_fp8_per_token_quant
 from rtp_llm.ops.compute_ops import trt_fp8_quantize_128
 
 

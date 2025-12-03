@@ -5,7 +5,7 @@ import torch
 from torch import dtype as _dtype
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.models_py.modules.embedding import Embedding, EmbeddingTorch
+from rtp_llm.models_py.modules.common.base.embedding import Embedding, EmbeddingTorch
 
 
 class EmbedingTest(TestCase):

@@ -4,7 +4,7 @@ from unittest import SkipTest, TestCase, main
 import torch
 from torch import dtype as _dtype
 
-from rtp_llm.models_py.modules.norm import AddBiasResLayerNorm, AddBiasResLayerNormTorch
+from rtp_llm.models_py.modules import AddBiasResLayerNorm, AddBiasResLayerNormTorch
 
 
 class RMSLayerNormTest(TestCase):

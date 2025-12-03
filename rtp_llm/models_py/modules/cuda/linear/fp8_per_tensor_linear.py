@@ -6,8 +6,8 @@ from typing import Optional
 import torch
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.models_py.kernels.cuda.fp8_kernel import scaled_fp8_per_tensor_quant
 from rtp_llm.models_py.modules.factory.linear import LinearBase
-from rtp_llm.models_py.modules.fp8_kernel import scaled_fp8_per_tensor_quant
 
 logger = logging.getLogger(__name__)
 

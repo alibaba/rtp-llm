@@ -6,35 +6,12 @@ from aiter import layernorm2d_fwd as layernorm2d_fwd
 from aiter import rmsnorm2d_fwd as rms_norm
 from torch import nn
 
-from rtp_llm.models_py.modules.norm import BaseNorm
+from rtp_llm.models_py.modules.common.base.norm import (
+    BaseAddBiasResLayerNorm,
+    BaseLayerNorm,
+    BaseNorm,
+)
 from rtp_llm.ops.compute_ops import rtp_llm_ops
-
-
-class BaseLayerNorm(torch.nn.Module):
-    def __init__(self, weight: torch.Tensor, beta: torch.Tensor, eps: float = 1e-6):
-        super().__init__()
-        self.weight = weight
-        self.beta = beta
-        self.variance_epsilon = eps
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        raise NotImplementedError()
-
-
-class LayerNormTorch(BaseLayerNorm):
-    def __init__(self, weight: torch.Tensor, beta: torch.Tensor, eps: float = 1e-6):
-        super().__init__(weight, beta, eps)
-
-    def forward(self, hidden_states: torch.Tensor):
-        input_dtype = hidden_states.dtype
-        hidden_states = hidden_states.to(torch.float32)
-        mean = hidden_states.mean(dim=-1, keepdim=True)
-        squared_sum = (hidden_states**2).mean(dim=-1, keepdim=True)
-
-        x_normalized = (hidden_states - mean) / torch.sqrt(
-            (squared_sum - (mean**2)) + self.variance_epsilon
-        )
-        return (self.weight * x_normalized + self.beta).to(input_dtype)
 
 
 class LayerNorm(BaseLayerNorm):
@@ -55,19 +32,6 @@ class RMSNorm(BaseNorm):
 
     def forward(self, hidden_states: torch.Tensor):
         return rms_norm(hidden_states, self.weight.data, self.variance_epsilon)
-
-
-class BaseAddBiasResLayerNorm(torch.nn.Module):
-    def __init__(self, weight: torch.Tensor, beta: torch.Tensor, eps: float = 1e-6):
-        super().__init__()
-        self.weight = weight
-        self.beta = beta
-        self.variance_epsilon = eps
-
-    def forward(
-        self, hidden_states: torch.Tensor, residual: torch.Tensor, bias: torch.Tensor
-    ) -> torch.Tensor:
-        raise NotImplementedError()
 
 
 class AddBiasResLayerNormROCmTorch(BaseAddBiasResLayerNorm):

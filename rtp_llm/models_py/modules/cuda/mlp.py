@@ -1,12 +1,12 @@
 from typing import Dict
 
-import aiter
 import torch
 from torch import nn
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.distribute.collective import Group, all_reduce
 from rtp_llm.models_py.modules.factory import LinearFactory
+from rtp_llm.ops.compute_ops import rtp_llm_ops
 from rtp_llm.utils.model_weight import W
 
 
@@ -33,10 +33,12 @@ class FusedSiluActDenseMLP(nn.Module):
 
     def forward(self, x: torch.Tensor):
         gate_up = self.gate_up_proj(x)
+
         d = gate_up.shape[-1] // 2
         output_shape = gate_up.shape[:-1] + (d,)
         output = torch.empty(output_shape, dtype=gate_up.dtype, device=gate_up.device)
-        aiter.silu_and_mul(output, gate_up)
+        stream_id = torch.cuda.current_stream().cuda_stream
+        rtp_llm_ops.silu_and_mul(output, gate_up, stream_id)
         down_proj = self.down_proj(output)
         if self.config.tp_size > 1:
             down_proj = all_reduce(down_proj, group=Group.TP)
