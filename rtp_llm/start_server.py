@@ -20,6 +20,7 @@ from rtp_llm.distribute.worker_info import WorkerInfo, g_parallel_info
 from rtp_llm.server.server_args.server_args import EnvArgumentParser, setup_args
 from rtp_llm.utils.concurrency_controller import init_controller
 from rtp_llm.utils.process_manager import ProcessManager
+from rtp_llm.models_py.utils.arch import is_hip        # Try to check via rtp_llm device API first
 
 
 def check_server_health(server_port):
@@ -183,7 +184,7 @@ def auto_configure_deepep(args: argparse.Namespace):
     # If USE_ALL_GATHER is enabled (for pure TP scenarios), disable all DeepEP settings
     # Calculate use_all_gather: (USE_ALL_GATHER env is True) and (ep_size == tp_size)
     use_all_gather_env = StaticConfig.parallelism_distributed_config.use_all_gather
-    use_all_gather = use_all_gather_env and (ep_size == tp_size)
+    use_all_gather = use_all_gather_env and (ep_size == tp_size) and (not is_hip()) # for ROCm backend, disable use_all_gather
 
     if use_all_gather:
         logging.info("use all gather in `auto_configure_deepep`")
