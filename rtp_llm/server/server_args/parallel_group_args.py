@@ -62,7 +62,7 @@ def init_parallel_group_args(parser):
         env_name="USE_ALL_GATHER",
         type=str2bool,
         default=True,
-        help="启用 all-gather 通信模式（适用于纯 TP 场景，即 ep_size == tp_size）。当启用时，不应使用 DeepEP。",
+        help="启用 all-gather 通信模式（适用于纯 TP 场景，即 ep_size == tp_size, 在实现逻辑当中会和ep_size, tp_size进行联合判断）。当启用时，不应使用 DeepEP。",
     )
     parallel_group.add_argument(
         "--enable_ffn_disaggregate",
