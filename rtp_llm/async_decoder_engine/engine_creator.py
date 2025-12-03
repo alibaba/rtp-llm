@@ -22,6 +22,10 @@ def check_exeutor_type(model: BaseModel):
     return ExecutorType.Normal
 
 
+from rtp_llm.utils.time_util import timer_wrapper
+
+
+@timer_wrapper(description="create async engine")
 def create_engine(
     model: BaseModel, propose_model: Optional[ProposeModel] = None
 ) -> BaseEngine:

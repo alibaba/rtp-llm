@@ -6,12 +6,14 @@ import socket
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Union
+from typing import Any, Coroutine, Dict, List, Optional, Set, Union
 
 import aiohttp
 import psutil
+import requests
 import torch
 from aiohttp import ClientConnectorError, ServerTimeoutError
+from fastapi.responses import JSONResponse
 
 from rtp_llm import _ft_pickler
 
@@ -216,7 +218,7 @@ def has_overlap_kmp(a: str, b: str) -> bool:
 
 async def async_request_server(
     method: str, server_port: int, uri: str = "", req: Dict[str, Any] = None
-) -> Dict[str, Any]:
+) -> Union[JSONResponse, dict[str, Any]]:
     """
     异步HTTP请求服务 (基于aiohttp实现)
 
@@ -242,20 +244,31 @@ async def async_request_server(
                 async with session.post(url, json=req) as response:
                     return await _handle_response(response)
             else:
-                return {"error": f"Unsupported HTTP method: {method}"}
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": f"Unsupported HTTP method: {method}"},
+                )
     # 明确区分错误类型
     except ClientConnectorError as e:
         # 连接失败（如DNS解析错误、TCP连接拒绝）
-        return {"error": "Connection failed", "details": str(e)}
+        return JSONResponse(
+            status_code=500, content={"error": "Connection failed", "details": str(e)}
+        )
     except ServerTimeoutError as e:
         # 超时错误（连接或响应超时）
-        return {"error": "Request timeout", "details": str(e)}
+        return JSONResponse(
+            status_code=500, content={"error": "Request timeout", "details": str(e)}
+        )
     except aiohttp.ClientError as e:
         # 其他客户端错误（如无效URL、HTTP协议错误）
-        return {"error": "Client error", "details": str(e)}
+        return JSONResponse(
+            status_code=500, content={"error": "Client error", "details": str(e)}
+        )
     except Exception as e:
         # 未知错误
-        return {"error": "Unexpected error", "details": str(e)}
+        return JSONResponse(
+            status_code=500, content={"error": "Unexpected error", "details": str(e)}
+        )
 
 
 async def _handle_response(response: aiohttp.ClientResponse) -> Dict[str, Any]:
@@ -292,24 +305,34 @@ def wait_sever_done(server_process, port: int, timeout: int = 1600):
     logging.info(f"等待pid[{server_process.pid}]启动中...\n端口 {port}")
     while True:
         try:
-            # 尝试连接到指定的主机和端口
-            sock = socket.create_connection((host, port), timeout=timeout)
-            sock.close()
-            logging.info(f"端口 {port} 已启动成功")
-            return True
-        except (socket.error, ConnectionRefusedError):
-            # 如果连接失败，等待一段时间后重试
-            time.sleep(retry_interval)
+            # 使用 HTTP health check 检查服务是否准备就绪
+            response = requests.get(
+                f"http://{host}:{port}/health", timeout=retry_interval
+            )
+            logging.info(
+                f"response status_code = {response.status_code}, text = {response.text}, len = {len(response.text)}"
+            )
+            if response.status_code == 200:
+                logging.info(f"端口 {port} 已启动成功")
+                return True
+            else:
+                logging.debug(f"health check is not ready")
+        except BaseException as e:
+            # 如果健康检查失败，记录调试信息
+            logging.debug("health check is not ready, %s", str(e))
 
-            if not psutil.pid_exists(server_process.pid) or server_process.poll():
-                logging.warning(
-                    f"进程:[{server_process.pid}] 状态异常, 服务启动失败,请查看日志文件"
-                )
-                return False
-            # 如果等待时间超过预设的超时时间，则放弃等待
-            if time.time() - start_time > timeout:
-                logging.warning(f"等待端口 {port} 启动超时,请查看日志文件")
-                return False
+        # 等待一段时间后重试
+        time.sleep(retry_interval)
+
+        if not psutil.pid_exists(server_process.pid) or server_process.poll():
+            logging.warning(
+                f"进程:[{server_process.pid}] 状态异常, 服务启动失败,请查看日志文件"
+            )
+            return False
+        # 如果等待时间超过预设的超时时间，则放弃等待
+        if time.time() - start_time > timeout:
+            logging.warning(f"等待端口 {port} 启动超时,请查看日志文件")
+            return False
 
 
 def stop_server(

@@ -297,9 +297,7 @@ class TestProcessManager(unittest.TestCase):
 
         self.manager.add_process(mock_proc)
         self.manager.terminated = True
-        self.manager.first_dead_time = (
-            time.time() - self.manager.shutdown_timeout - 1
-        )
+        self.manager.first_dead_time = time.time() - self.manager.shutdown_timeout - 1
 
         # Should force kill
         with patch("os.kill") as mock_kill:
@@ -345,6 +343,341 @@ class TestProcessManager(unittest.TestCase):
         with patch("logging.error") as mock_error:
             self.manager._join_all_processes()
             mock_error.assert_called()
+
+
+class TestProcessManagerHealthCheck(unittest.TestCase):
+    """Test cases for health check functionality"""
+
+    def setUp(self):
+        """Set up test fixtures"""
+        self.manager = ProcessManager(shutdown_timeout=50, monitor_interval=1)
+        logging.basicConfig(level=logging.INFO)
+
+    def tearDown(self):
+        """Clean up after tests"""
+        for proc in self.manager.processes:
+            if hasattr(proc, "_mock_name"):
+                continue
+            if proc.is_alive():
+                proc.terminate()
+                try:
+                    proc.join(timeout=1)
+                except Exception:
+                    pass
+                if proc.is_alive():
+                    try:
+                        os.kill(proc.pid, signal.SIGKILL)
+                    except (OSError, ProcessLookupError):
+                        pass
+
+    def test_register_health_check(self):
+        """Test registering health check for processes"""
+        # Create mock processes
+        mock_procs = [Mock() for _ in range(2)]
+        for mock_proc in mock_procs:
+            mock_proc.is_alive.return_value = True
+            mock_proc._mock_name = "mock_proc"
+
+        # Register health check
+        self.manager.register_health_check(
+            processes=mock_procs,
+            process_name="test_service",
+            port=8080,
+            retry_interval_seconds=0.1,
+            health_check_path="/health",
+            expected_response='"ok"',
+        )
+
+        # Verify registration
+        self.assertIn("test_service", self.manager.health_check_configs)
+        config = self.manager.health_check_configs["test_service"]
+        self.assertEqual(config["processes"], mock_procs)
+        self.assertEqual(config["port"], 8080)
+        self.assertEqual(config["retry_interval_seconds"], 0.1)
+        self.assertEqual(config["health_check_path"], "/health")
+        self.assertEqual(config["expected_response"], '"ok"')
+
+        # Verify status initialization
+        self.assertIn("test_service", self.manager.health_check_status)
+        status = self.manager.health_check_status["test_service"]
+        self.assertFalse(status["ready"])
+        self.assertFalse(status["checked"])
+
+    @patch("requests.get")
+    def test_check_server_health_success(self, mock_get):
+        """Test successful health check"""
+        # Mock successful response
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.text = '"ok"'
+        mock_get.return_value = mock_response
+
+        # Check health
+        result = self.manager._check_server_health(8080)
+
+        self.assertTrue(result)
+        mock_get.assert_called_once_with("http://localhost:8080/health", timeout=60)
+
+    @patch("requests.get")
+    def test_check_server_health_wrong_status(self, mock_get):
+        """Test health check with wrong status code"""
+        mock_response = Mock()
+        mock_response.status_code = 500
+        mock_response.text = '"error"'
+        mock_get.return_value = mock_response
+
+        result = self.manager._check_server_health(8080)
+        self.assertFalse(result)
+
+    @patch("requests.get")
+    def test_check_server_health_wrong_response(self, mock_get):
+        """Test health check with wrong response text"""
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.text = '"not ok"'
+        mock_get.return_value = mock_response
+
+        result = self.manager._check_server_health(8080, expected_response='"ok"')
+        self.assertFalse(result)
+
+    @patch("requests.get")
+    def test_check_server_health_connection_error(self, mock_get):
+        """Test health check with connection error"""
+        import requests
+
+        mock_get.side_effect = requests.ConnectionError("Connection refused")
+
+        result = self.manager._check_server_health(8080)
+        self.assertFalse(result)
+
+    @patch("requests.get")
+    def test_check_server_health_timeout(self, mock_get):
+        """Test health check with timeout"""
+        import requests
+
+        mock_get.side_effect = requests.Timeout("Timeout")
+
+        result = self.manager._check_server_health(8080)
+        self.assertFalse(result)
+
+    @patch("rtp_llm.utils.process_manager.ProcessManager._check_server_health")
+    def test_health_check_worker_success(self, mock_health_check):
+        """Test health check worker with successful check"""
+        # Mock processes
+        mock_procs = [Mock() for _ in range(2)]
+        for mock_proc in mock_procs:
+            mock_proc.is_alive.return_value = True
+            mock_proc._mock_name = "mock_proc"
+
+        # Register health check
+        self.manager.register_health_check(
+            processes=mock_procs, process_name="backend_server", port=8080
+        )
+
+        # Mock successful health check
+        mock_health_check.return_value = True
+
+        # Run worker
+        self.manager._health_check_worker("backend_server")
+
+        # Verify status updated
+        status = self.manager.health_check_status["backend_server"]
+        self.assertTrue(status["ready"])
+        self.assertTrue(status["checked"])
+
+    @patch("rtp_llm.utils.process_manager.ProcessManager._check_server_health")
+    def test_health_check_worker_process_dead(self, mock_health_check):
+        """Test health check worker when process is dead"""
+        # Mock dead processes
+        mock_procs = [Mock() for _ in range(2)]
+        for mock_proc in mock_procs:
+            mock_proc.is_alive.return_value = False
+            mock_proc._mock_name = "mock_proc"
+
+        # Register health check
+        self.manager.register_health_check(
+            processes=mock_procs, process_name="backend_server", port=8080
+        )
+
+        # Run worker
+        self.manager._health_check_worker("backend_server")
+
+        # Verify status - should be checked but not ready
+        status = self.manager.health_check_status["backend_server"]
+        self.assertFalse(status["ready"])
+        self.assertTrue(status["checked"])
+
+        # Health check should not be called since process is dead
+        mock_health_check.assert_not_called()
+
+    def test_start_parallel_health_checks_no_registration(self):
+        """Test starting parallel health checks with no registered checks"""
+        with patch("logging.info") as mock_info:
+            self.manager.start_parallel_health_checks()
+            mock_info.assert_any_call("No health checks registered")
+
+    @patch("rtp_llm.utils.process_manager.ProcessManager._check_server_health")
+    def test_start_parallel_health_checks(self, mock_health_check):
+        """Test starting parallel health checks"""
+        # Mock processes for multiple services
+        backend_procs = [Mock()]
+        backend_procs[0].is_alive.return_value = True
+        backend_procs[0]._mock_name = "backend_mock"
+
+        frontend_procs = [Mock()]
+        frontend_procs[0].is_alive.return_value = True
+        frontend_procs[0]._mock_name = "frontend_mock"
+
+        # Register multiple health checks
+        self.manager.register_health_check(
+            processes=backend_procs, process_name="backend_server", port=8080
+        )
+        self.manager.register_health_check(
+            processes=frontend_procs, process_name="frontend_server", port=8000
+        )
+
+        # Mock successful health checks
+        mock_health_check.return_value = False
+
+        # Start parallel checks
+        self.manager.start_parallel_health_checks()
+
+        # Verify threads created
+        self.assertEqual(len(self.manager.health_check_threads), 2)
+        self.assertTrue(all(t.is_alive() for t in self.manager.health_check_threads))
+
+        # Mock successful health checks
+        mock_health_check.return_value = True
+
+        # Wait for checks to complete
+        for thread in self.manager.health_check_threads:
+            thread.join(timeout=2)
+
+        # Verify both services are ready
+        self.assertTrue(self.manager.health_check_status["backend_server"]["ready"])
+        self.assertTrue(self.manager.health_check_status["frontend_server"]["ready"])
+
+    @patch("rtp_llm.utils.process_manager.ProcessManager._check_server_health")
+    def test_wait_for_health_checks_success(self, mock_health_check):
+        """Test waiting for health checks to complete successfully"""
+        # Mock processes
+        mock_procs = [Mock()]
+        mock_procs[0].is_alive.return_value = True
+        mock_procs[0]._mock_name = "mock_proc"
+
+        # Register and start health check
+        self.manager.register_health_check(
+            processes=mock_procs, process_name="test_service", port=8080
+        )
+
+        mock_health_check.return_value = True
+        self.manager.start_parallel_health_checks()
+
+        # Wait for completion
+        result = self.manager.wait_for_health_checks(timeout=5)
+
+        self.assertTrue(result)
+        self.assertTrue(self.manager.health_check_status["test_service"]["ready"])
+        self.assertTrue(self.manager.health_check_status["test_service"]["checked"])
+
+    @patch("rtp_llm.utils.process_manager.ProcessManager._check_server_health")
+    def test_wait_for_health_checks_failure(self, mock_health_check):
+        """Test waiting for health checks when they fail"""
+        # Mock dead processes
+        mock_procs = [Mock()]
+        mock_procs[0].is_alive.return_value = False
+        mock_procs[0]._mock_name = "mock_proc"
+
+        # Register and start health check
+        self.manager.register_health_check(
+            processes=mock_procs, process_name="test_service", port=8080
+        )
+
+        self.manager.start_parallel_health_checks()
+
+        # Wait for completion
+        result = self.manager.wait_for_health_checks(timeout=5)
+
+        self.assertFalse(result)
+        self.assertFalse(self.manager.health_check_status["test_service"]["ready"])
+
+    def test_wait_for_health_checks_no_threads(self):
+        """Test waiting when no health check threads exist"""
+        result = self.manager.wait_for_health_checks()
+        self.assertTrue(result)
+
+    @patch("rtp_llm.utils.process_manager.ProcessManager._check_server_health")
+    def test_wait_for_health_checks_timeout(self, mock_health_check):
+        """Test waiting for health checks with timeout"""
+        # Mock processes
+        mock_procs = [Mock()]
+        mock_procs[0].is_alive.return_value = True
+        mock_procs[0]._mock_name = "mock_proc"
+
+        # Register health check
+        self.manager.register_health_check(
+            processes=mock_procs,
+            process_name="slow_service",
+            port=8080,
+            retry_interval_seconds=10,  # Long interval to simulate slow check
+        )
+
+        # Health check never succeeds
+        mock_health_check.return_value = False
+
+        self.manager.start_parallel_health_checks()
+
+        # Wait with short timeout
+        result = self.manager.wait_for_health_checks(timeout=0.5)
+
+        # Should fail because check didn't complete
+        self.assertFalse(result)
+
+    @patch("rtp_llm.utils.process_manager.ProcessManager._check_server_health")
+    def test_parallel_health_checks_multiple_processes(self, mock_health_check):
+        """Test health checks work correctly with multiple processes per service"""
+        # Mock multiple processes for a service (e.g., frontend with multiple workers)
+        mock_procs = [Mock() for _ in range(3)]
+        for mock_proc in mock_procs:
+            mock_proc.is_alive.return_value = True
+            mock_proc._mock_name = "mock_proc"
+
+        # Register health check
+        self.manager.register_health_check(
+            processes=mock_procs, process_name="frontend_workers", port=8000
+        )
+
+        mock_health_check.return_value = True
+        self.manager.start_parallel_health_checks()
+
+        # Wait for completion
+        result = self.manager.wait_for_health_checks(timeout=5)
+
+        self.assertTrue(result)
+        self.assertTrue(self.manager.health_check_status["frontend_workers"]["ready"])
+
+    @patch("rtp_llm.utils.process_manager.ProcessManager._check_server_health")
+    def test_health_check_worker_one_process_dies(self, mock_health_check):
+        """Test health check when one of multiple processes dies"""
+        # Mock processes where one dies
+        mock_procs = [Mock() for _ in range(2)]
+        mock_procs[0].is_alive.return_value = True
+        mock_procs[1].is_alive.return_value = False  # One is dead
+        for mock_proc in mock_procs:
+            mock_proc._mock_name = "mock_proc"
+
+        # Register health check
+        self.manager.register_health_check(
+            processes=mock_procs, process_name="service_with_dead_proc", port=8080
+        )
+
+        # Run worker
+        self.manager._health_check_worker("service_with_dead_proc")
+
+        # Should detect that not all processes are alive
+        status = self.manager.health_check_status["service_with_dead_proc"]
+        self.assertFalse(status["ready"])
+        self.assertTrue(status["checked"])
 
 
 if __name__ == "__main__":

@@ -44,7 +44,7 @@ def timer_wrapper(description=""):
             with Timer() as t:
                 result = func(*args, **kwargs)
             desc = description if description else func.__name__
-            logging.info(f"{desc} took: {t.cost_ms()/1000:.0f}s")
+            logging.info(f"{desc} took: {t.cost_ms()/1000:.2f}s")
             return result
 
         return wrapped

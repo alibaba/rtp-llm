@@ -1,7 +1,9 @@
 import logging
 import os
+import time
 from typing import Optional
 
+st = time.time()
 from rtp_llm.ops import (
     ConcurrencyConfig,
     FfnDisAggregateConfig,
@@ -15,6 +17,9 @@ from rtp_llm.ops import (
 )
 from rtp_llm.utils.fuser import MountRwMode, fetch_remote_file_to_local
 from rtp_llm.utils.weight_type import WEIGHT_TYPE
+
+consume_s = time.time() - st
+print(f"import rtp_llm.ops took {consume_s:.2f}s")
 
 DEFAULT_START_PORT = 8088
 MASTER_INFO_PORT_NUM = 11
@@ -287,6 +292,7 @@ class GangConfig:
         self.distribute_config_file: str = ""
         self.dist_barrier_timeout: int = 45
         self.gang_sleep_time: int = 10
+        self.gang_startup_interval: float = 0.1
         self.gang_timeout_min: int = 30
         self.json_gang_parts: Optional[str] = None
         self.leader_address: Optional[str] = None
@@ -727,8 +733,10 @@ class PdSeparationConfig:
 class WorkerConfig:
     def __init__(self):
         self.worker_info_port_num: int = MIN_WORKER_INFO_PORT_NUM
-        self.shutdown_timeout: int = 50  # Default timeout in seconds, -1 means wait indefinitely
-        self.monitor_interval: int = 1   # Monitor interval in seconds
+        self.shutdown_timeout: int = (
+            50  # Default timeout in seconds, -1 means wait indefinitely
+        )
+        self.monitor_interval: int = 1  # Monitor interval in seconds
 
     def update_from_env(self):
         self.worker_info_port_num = int(
@@ -794,9 +802,7 @@ class PyHwKernelConfig:
         self.rocm_hipblaslt_config = get_env_str(
             "ROCM_HIPBLASLT_CONFIG", self.rocm_hipblaslt_config
         )
-        self.use_swizzleA = get_env_bool(
-            "USE_SWIZZLEA", self.use_swizzleA
-        )
+        self.use_swizzleA = get_env_bool("USE_SWIZZLEA", self.use_swizzleA)
         self.enable_cuda_graph = get_env_bool(
             "ENABLE_CUDA_GRAPH", self.enable_cuda_graph
         )
