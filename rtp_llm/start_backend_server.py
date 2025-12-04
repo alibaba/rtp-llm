@@ -29,10 +29,9 @@ from rtp_llm.utils.concurrency_controller import (
 from rtp_llm.utils.util import copy_gemm_config
 
 
-def vit_start_server(global_controller: ConcurrencyController):
+def vit_start_server():
     py_env_configs = PyEnvConfigs()
     py_env_configs.update_from_env()
-    set_global_controller(global_controller)
     app = VitEndpointApp(py_env_configs)
     app.start(g_worker_info)
 
@@ -198,7 +197,7 @@ def start_backend_server(global_controller: ConcurrencyController):
     vit_config.update_from_env()
     # TODO(xinfei.sxf) fix this
     if vit_config.vit_separation == 1:
-        return vit_start_server(global_controller)
+        return vit_start_server()
 
     if not torch.cuda.is_available():
         return local_rank_start(global_controller)
