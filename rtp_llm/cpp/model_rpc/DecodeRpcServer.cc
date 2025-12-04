@@ -534,22 +534,18 @@ ErrorInfo DecodeRpcServer::loadCacheSyncForTp(DecodeGenerateContext& decode_cont
 
 ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     AtomicGuard request_guard(onflight_load_cache_requests_);
-    const auto& request_key      = load_context.request_key;
-    auto        cache_manager    = engine_->resourceContext().cache_manager;
-    const auto& cache_config     = cache_manager->cacheConfig();
-    auto        k_block_size     = cache_config.kv_block_stride;
-    auto        scale_block_size = cache_config.kv_scale_block_stride;
-    auto        layer_num        = maga_init_params_.gpt_init_parameter.num_layers_;
+    const auto& request_key   = load_context.request_key;
+    auto        cache_manager = engine_->resourceContext().cache_manager;
+    const auto& cache_config  = cache_manager->cacheConfig();
+    auto        k_block_size  = cache_config.kv_block_stride;
+    auto        layer_num     = maga_init_params_.gpt_init_parameter.num_layers_;
 
-    if (k_block_size % load_context.peer_addrs.size() != 0 || scale_block_size % load_context.peer_addrs.size() != 0) {
-        RTP_LLM_LOG_WARNING("k block size [%d] or scale block size [%d] is not divisible by peer ips size [%d]",
-                            k_block_size,
-                            scale_block_size,
-                            load_context.peer_addrs.size());
+    if (k_block_size % load_context.peer_addrs.size() != 0) {
+        RTP_LLM_LOG_WARNING(
+            "k block size [%d] is not divisible by peer ips size [%d]", k_block_size, load_context.peer_addrs.size());
         return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "block size is not divisible by peer ips size");
     }
-    k_block_size     = k_block_size / load_context.peer_addrs.size();
-    scale_block_size = scale_block_size / load_context.peer_addrs.size();
+    k_block_size = k_block_size / load_context.peer_addrs.size();
 
     auto cancel_check_func  = [&load_context]() -> bool { return load_context.server_context->IsCancelled(); };
     auto start_load_time_us = currentTimeUs();

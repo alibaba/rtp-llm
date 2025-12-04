@@ -35,7 +35,7 @@ bool KVCacheManager::init() {
         RTP_LLM_CHECK_WITH_INFO(allocator_->init(), "SingleTypeKVCacheAllocator init failed");
         return true;
     } else {
-        RTP_LLM_CHECK(false, "SingleTypeKVCacheAllocator only support Full Attention");
+        RTP_LLM_CHECK_WITH_INFO(false, "SingleTypeKVCacheAllocator only support Full Attention");
         return false;
     }
 }

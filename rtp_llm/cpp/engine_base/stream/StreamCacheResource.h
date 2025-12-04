@@ -32,7 +32,6 @@ public:
     absl::StatusOr<int>  incrKVBlock(int token_capacity, size_t reserve_step = 0);
     void                 fakeInitKVBlock();
     int                  tryReleaseKVBlock(size_t nums);
-    absl::Status         releaseSequenceKVCache(size_t total_seq_len, size_t release_seq_len);
     void                 freeBatchBlocks(size_t batch_id, std::vector<int>& blocks);
     void                 releaseResource();
 

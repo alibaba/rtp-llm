@@ -254,7 +254,7 @@ size_t HybridLayerKVCacheAllocator::maxAvailableTokensNum() const {
 
 KVCacheBuffer HybridLayerKVCacheAllocator::kvCacheBuffer() const {
     if (!block_pool_) {
-        return KVCacheBuffer{nullptr, nullptr, nullptr, nullptr};
+        return KVCacheBuffer{nullptr, nullptr};
     }
     return block_pool_->kvCacheBuffer();
 }

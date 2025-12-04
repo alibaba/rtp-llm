@@ -41,7 +41,6 @@ struct KVCacheSpec {
 
 struct MHAKVCacheSpec: public KVCacheSpec {
     uint32_t size_per_head;
-    uint32_t scale_size = 0;
 
     size_t block_size() const override {
         auto dtype_size = rtp_llm::getTypeSize(dtype);
@@ -125,10 +124,9 @@ struct CacheConfig {
     std::string mtp_model_type = "default_model";
 
     // for backward compatibility with old NormalBatchStreamProcessor
-    size_t k_block_stride        = 0;  // for one layer
-    size_t v_block_stride        = 0;  // for one layer
-    size_t kv_block_stride       = 0;  // for one layer
-    size_t kv_scale_block_stride = 0;
+    size_t k_block_stride  = 0;  // for one layer
+    size_t v_block_stride  = 0;  // for one layer
+    size_t kv_block_stride = 0;  // for one layer
 
     CacheConfig() {}
 };

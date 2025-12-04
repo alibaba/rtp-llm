@@ -109,7 +109,6 @@ GptModelInputs NativeGraphRunnerBase<GptModelInputs, GptModelOutputs>::prepareIn
             cache_keys,
             old.k_block_size,
             old.v_block_size,
-            old.scale_block_size,
             old.seq_size_per_block,
             old.pd_separation,
             old.decode_entrance,

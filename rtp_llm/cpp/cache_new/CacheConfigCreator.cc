@@ -51,10 +51,9 @@ CacheConfig CacheConfigCreator::createBasicConfig(const rtp_llm::GptInitParamete
         config.block_size = static_cast<int>(spec->block_size() * spec->layer_num);
 
         // TODO(chanyin) set k_block_stride as block size for compatibility, fix in future
-        config.k_block_stride        = spec->block_size();
-        config.v_block_stride        = 0;
-        config.kv_block_stride       = spec->block_size();
-        config.kv_scale_block_stride = 0;  // MLA typically doesn't use scale
+        config.k_block_stride  = spec->block_size();
+        config.v_block_stride  = 0;
+        config.kv_block_stride = spec->block_size();
     } else {
         auto spec                = std::make_shared<MHAKVCacheSpec>();
         spec->type               = KVCacheType::MultiHeadAttention;
@@ -72,13 +71,6 @@ CacheConfig CacheConfigCreator::createBasicConfig(const rtp_llm::GptInitParamete
         config.k_block_stride  = spec->block_size();
         config.v_block_stride  = 0;
         config.kv_block_stride = spec->block_size();
-        // Calculate scale block stride for INT8/FP8 KV cache
-        if (dtype == rtp_llm::DataType::TYPE_INT8 || dtype == rtp_llm::DataType::TYPE_FP8_E4M3) {
-            config.kv_scale_block_stride =
-                local_head_num_kv * 4 * param.seq_size_per_block_;  // 4 bytes per scale value
-        } else {
-            config.kv_scale_block_stride = 0;
-        }
     }
 
     config.layer_ids.push_back(all_layer_ids);

@@ -194,9 +194,6 @@ size_t SingleTypeKVCacheAllocator::maxAvailableTokensNum() const {
 }
 
 KVCacheBuffer SingleTypeKVCacheAllocator::kvCacheBuffer() const {
-    if (!block_pool_) {
-        return KVCacheBuffer{nullptr, nullptr, nullptr, nullptr};
-    }
     return block_pool_->kvCacheBuffer();
 }
 

@@ -45,9 +45,9 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
     RTP_LLM_CHECK(nums == total_blocks);
 
     // TODO(xinfei.sxf) fix it, after remote running commit.
-    if (total_blocks > 0 && stream->finishedWithoutLock()) {
+    if (total_blocks > 0 && stream_->finishedWithoutLock()) {
         if (reuseCache()) {
-            InsertInfo insert_info(batch_resource_, stream_->completeTokenIdsPtr(), false);
+            InsertInfo insert_info{batch_resource_, stream_->completeTokenIdsPtr(), false};
             resource_context_.cache_manager->insertIntoCache(insert_info);
         }
 
@@ -62,26 +62,6 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
         stream_->resetChunkLen(0, stream_->seqLength());
     }
     return total_blocks;
-}
-
-// TODO, 这里当时是做什么用的。
-absl::Status StreamCacheResource::releaseSequenceKVCache(size_t total_seq_len, size_t release_seq_len) {
-    RTP_LLM_LOG_DEBUG("stream [%ld] current block size is [%lu] total seq_len is [%lu], release [%lu] seq_len KVCache",
-                      stream_->streamId(),
-                      maxBlocksNum(),
-                      total_seq_len,
-                      release_seq_len);
-    size_t last_block_occupied_seq_len =
-        seqSizePerBlock() == 1 ? 1 : ((total_seq_len + seqSizePerBlock() - 2) % seqSizePerBlock() + 1);
-    if (release_seq_len < last_block_occupied_seq_len) {
-        return absl::OkStatus();
-    }
-    size_t release_block_num       = release_seq_len / seqSizePerBlock() + 1;
-    size_t succ_release_blocks_num = tryReleaseKVBlock(release_block_num);
-    if (release_block_num != succ_release_blocks_num) {
-        return absl::InternalError("Release KVCache failed");
-    }
-    return absl::OkStatus();
 }
 
 // TODO, 等待删除。
