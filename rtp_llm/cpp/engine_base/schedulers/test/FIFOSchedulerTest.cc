@@ -270,7 +270,7 @@ TEST_F(FIFOSchedulerTest, testReuseCache) {
     std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config, device_);
     ASSERT_TRUE(cache_manager->init());
     ASSERT_EQ(cache_manager->freeBlocksNum(), 10);
-    ResourceContext  resource_context = {cache_manager, nullptr, nullptr, true};
+    ResourceContext  resource_context = {cache_manager, nullptr, {}, nullptr, true};
     GptInitParameter config;
     config.max_seq_len_             = 8192;
     config.max_generate_batch_size_ = 100;
@@ -318,7 +318,7 @@ TEST_F(FIFOSchedulerTest, testMaxContextBatchSize) {
     std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config, device_);
     ASSERT_TRUE(cache_manager->init());
     ASSERT_EQ(cache_manager->freeBlocksNum(), 20);
-    ResourceContext  resource_context = {cache_manager, nullptr, nullptr, true};
+    ResourceContext  resource_context = {cache_manager, nullptr, {}, nullptr, true};
     GptInitParameter config;
     config.max_seq_len_            = 100;
     config.max_context_batch_size_ = 1;
