@@ -76,8 +76,7 @@ void KVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, const BlockI
     }
 
     auto&  spec         = config_.cache_specs[0];
-    size_t k_block_size = spec->k_block_size();
-    size_t v_block_size = spec->v_block_size();
+    size_t k_block_size = spec->k_block_size() + spec->v_block_size();
 
     for (auto it = begin_ptr; it != end_ptr; ++it) {
         auto [src_block_index, dest_block_index] = *it;
@@ -86,7 +85,7 @@ void KVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, const BlockI
             auto src_addr_info = convertIndexToAddr(layer_id, src_block_index);
             auto dst_addr_info = convertIndexToAddr(layer_id, dest_block_index);
 
-            if (!src_addr_info.k_addr || !dst_addr_info.k_addr || !src_addr_info.v_addr || !dst_addr_info.v_addr) {
+            if (!src_addr_info.k_addr || !dst_addr_info.k_addr) {
                 RTP_LLM_LOG_ERROR("Failed to get block address for layer %d, src_block %d, dst_block %d",
                                   layer_id,
                                   src_block_index,
@@ -95,7 +94,6 @@ void KVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, const BlockI
             }
 
             copy_params.add(dst_addr_info.k_addr, src_addr_info.k_addr, k_block_size, copy_type);
-            copy_params.add(dst_addr_info.v_addr, src_addr_info.v_addr, v_block_size, copy_type);
         }
     }
 

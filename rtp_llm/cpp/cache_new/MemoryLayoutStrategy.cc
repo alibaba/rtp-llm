@@ -82,7 +82,7 @@ BlockAddrInfo LayerFirstLayoutStrategy::convertIndexToAddr(int layer_id, int blo
     }
 
     torch::Tensor tensor = layer_kv_tensors_[layer_id][block_id];
-    return {tensor.data_ptr(), tensor.data_ptr(), nullptr, nullptr};
+    return {tensor.data_ptr(), nullptr, nullptr, nullptr};
 }
 
 BlockBufferPtrInfo LayerFirstLayoutStrategy::convertIndexToBuffer(int layer_id, int block_id) const {
