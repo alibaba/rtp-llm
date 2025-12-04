@@ -16,6 +16,7 @@ from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import (
 )
 from rtp_llm.model_loader.loader import ModelLoader, get_model_loader
 from rtp_llm.model_loader.model_weight_info import ModelDeployWeightInfo, ModelWeights
+from rtp_llm.model_loader.weight_manager import WeightManager
 from rtp_llm.models.downstream_modules.custom_module import CustomModule
 from rtp_llm.models.downstream_modules.utils import create_custom_module
 from rtp_llm.models.multimodal.multimodal_mixin import MultiModalMixin
@@ -47,6 +48,7 @@ class BaseModel(object):
     def __init__(self, config: GptInitModelParameters) -> None:
         self.config = config
         self.weight = None
+        self.weight_manager = None
 
         self.linear_bias_slopes: Optional[torch.Tensor] = None
         self.prefix_tokens: Optional[torch.Tensor] = None
@@ -78,7 +80,9 @@ class BaseModel(object):
 
         self.model_weights_loader = self.create_model_loader(parallel_info)
         self._load(self.device)
-
+        self.weight_manager = WeightManager(
+            self.device, self.weight, self.model_weights_loader
+        )
         if self.config.model_specific_config.load_python_model:
             logging.info(
                 f"Creating python model for {self.config.ckpt_path} on {self.device}"
