@@ -41,7 +41,7 @@ class FrontendServer(object):
     def __init__(
         self, separated_frontend: bool = False, rank_id: int = 0, server_id: int = 0
     ):
-        self._access_logger = AccessLogger()
+        self._access_logger = AccessLogger(rank_id, server_id)
         self._frontend_worker = None
         self._openai_endpoint = None
         self.thread_lock_ = threading.Lock()
