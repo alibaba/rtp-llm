@@ -300,28 +300,6 @@ message RemoteStoreResponsePB {
     int64 done_time_us = 2;
 }
 
-enum DistKvCacheOp {
-    UNKNOWN = 0;
-    GET = 1;
-    PUT = 2;
-}
-
-message DistKvCacheRequestPB {
-    message MetaKV {
-        string key = 1;
-        string value = 2;
-    }
-    int64 request_id = 1;
-    repeated int64 cache_keys = 2;
-    repeated int32 block_ids = 3;
-    uint32 ignore_block_num = 4;
-    DistKvCacheOp op = 5;
-    repeated MetaKV extra_metas = 6;
-}
-
-message DistKvCacheResponsePB {
-}
-
 message StatusVersionPB {
   int64 latest_cache_version = 1;
   int64 latest_finished_version = 2;
@@ -366,22 +344,6 @@ message WorkerStatusPB {
   int64 status_version = 12;
   bool alive = 13;
   string precision = 14;
-}
-
-enum MemoryBlockCacheOp {
-    MEMORY_CACHE_COPY_FROM_GPU = 0;
-    MEMORY_CACHE_COPY_TO_GPU = 1;
-}
-
-message MemoryBlockCacheRequestPB {
-    repeated int32 gpu_block_ids = 1;
-    repeated int32 memory_block_ids = 2;
-    MemoryBlockCacheOp op = 3;
-    int64 request_id = 4;
-}
-
-message MemoryBlockCacheResponsePB {
-    bool success = 1;
 }
 
 message EmbeddingInputPB {
@@ -453,9 +415,6 @@ service RpcService {
 
     rpc RemoteGenerateNew(RemoteGenerateRequestPBNew) returns (RemoteGenerateResponsePBNew);
     rpc RemoteStore(RemoteStoreRequestPB) returns (RemoteStoreResponsePB);
-
-    rpc DistKvCache(DistKvCacheRequestPB) returns (DistKvCacheResponsePB);
-    rpc MemoryBlockCache(MemoryBlockCacheRequestPB) returns (MemoryBlockCacheResponsePB);
 
     rpc BroadcastTp(BroadcastTpRequestPB) returns (BroadcastTpResponsePB);
 }

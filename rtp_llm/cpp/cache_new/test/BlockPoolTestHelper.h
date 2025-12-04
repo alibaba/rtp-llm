@@ -15,15 +15,7 @@ createTestConfig(MemoryLayout layout = LAYER_FIRST, size_t k_block_size = 512, s
     config.block_num  = 10;
     config.block_size = 1024;
     config.layout     = layout;
-
-    if (layout == KV_FIRST) {
-        config.k_block_size = k_block_size;
-        config.v_block_size = v_block_size;
-        // K cache + V cache
-        config.total_size = config.layer_num * config.block_num * (config.k_block_size + config.v_block_size);
-    } else {
-        config.total_size = config.layer_num * config.block_num * config.block_size;
-    }
+    config.total_size = config.layer_num * config.block_num * config.block_size;
 
     return config;
 }

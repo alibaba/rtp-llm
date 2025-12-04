@@ -66,9 +66,9 @@ void KVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, const BlockI
     const size_t copy_num = (end_ptr - begin_ptr) * config_.layer_num;
 
     size_t copy_nums[CopyType::TYPE_SIZE] = {};
-    auto   copy_type =
-        BatchCopyParams::get_copy_type(atype_ == AllocationType::DEVICE ? rtp_llm::MEMORY_GPU : rtp_llm::MEMORY_CPU,
-                                       atype_ == AllocationType::DEVICE ? rtp_llm::MEMORY_GPU : rtp_llm::MEMORY_CPU);
+    auto   copy_type                      = BatchCopyParams::get_copy_type(
+        allocation_type_ == AllocationType::DEVICE ? rtp_llm::MEMORY_GPU : rtp_llm::MEMORY_CPU,
+        allocation_type_ == AllocationType::DEVICE ? rtp_llm::MEMORY_GPU : rtp_llm::MEMORY_CPU);
     copy_nums[copy_type] += copy_num * 2;  // for k and v
 
     for (size_t i = 0; i < CopyType::TYPE_SIZE; ++i) {
@@ -100,6 +100,36 @@ void KVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, const BlockI
     }
 
     device_->batchCopy(copy_params);
+}
+
+size_t KVCacheAllocator::freeBlocksNum() const {
+    return block_pool_->freeBlocksNum();
+}
+
+size_t KVCacheAllocator::availableBlocksNum() const {
+    return block_pool_->availableBlocksNum();
+}
+
+size_t KVCacheAllocator::availableTokensNum() const {
+    return block_pool_->availableBlocksNum() * seqSizePerBlock();
+}
+
+size_t KVCacheAllocator::totalBlocksNum() const {
+    return block_pool_->totalBlocksNum();
+}
+
+size_t KVCacheAllocator::maxAvailableTokensNum() const {
+    return block_pool_->totalBlocksNum() * seqSizePerBlock();
+}
+
+KVCacheBuffer KVCacheAllocator::kvCacheBuffer() const {
+    return block_pool_->kvCacheBuffer();
+}
+
+void KVCacheAllocator::regUserMr(size_t model_id) {
+    if (block_pool_) {
+        block_pool_->regUserMr(model_id);
+    }
 }
 
 }  // namespace rtp_llm

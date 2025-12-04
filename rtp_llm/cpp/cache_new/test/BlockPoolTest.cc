@@ -39,17 +39,6 @@ TEST_F(BlockPoolTest, ConstructorAndInit) {
     EXPECT_EQ(block_pool_->freeBlocksNum(), config.block_num - 1);
 }
 
-TEST_F(BlockPoolTest, InitWithKVFirstLayout) {
-    auto config = createTestConfig(KV_FIRST);
-    block_pool_ = std::make_shared<BlockPool>(config, device_);
-    ASSERT_NE(block_pool_, nullptr);
-
-    bool init_result = block_pool_->init();
-    EXPECT_TRUE(init_result);
-
-    EXPECT_EQ(block_pool_->freeBlocksNum(), config.block_num - 1);
-}
-
 // Allocation Test
 TEST_F(BlockPoolTest, AllocSingleBlock) {
     auto config = createTestConfig();
@@ -212,37 +201,6 @@ TEST_F(BlockPoolTest, ConvertIndexToAddrLayerFirst) {
     }
 }
 
-TEST_F(BlockPoolTest, ConvertIndexToAddrKVFirst) {
-    auto config = createTestConfig(KV_FIRST);
-    block_pool_ = std::make_shared<BlockPool>(config, device_);
-    block_pool_->init();
-
-    for (int layer = 0; layer < static_cast<int>(config.layer_num); ++layer) {
-        for (int block = 0; block < 3; ++block) {
-            auto addr_info = block_pool_->convertIndexToAddr(layer, block);
-            EXPECT_NE(addr_info.k_addr, nullptr);
-            EXPECT_NE(addr_info.v_addr, nullptr);
-            EXPECT_NE(addr_info.k_addr, addr_info.v_addr);
-        }
-    }
-}
-
-TEST_F(BlockPoolTest, GetKVCacheAddr) {
-    auto config = createTestConfig(KV_FIRST);
-    block_pool_ = std::make_shared<BlockPool>(config, device_);
-    block_pool_->init();
-
-    int layer = 1;
-    int block = 2;
-
-    void* k_addr = block_pool_->getKCacheAddr(layer, block);
-    void* v_addr = block_pool_->getVCacheAddr(layer, block);
-
-    EXPECT_NE(k_addr, nullptr);
-    EXPECT_NE(v_addr, nullptr);
-    EXPECT_NE(k_addr, v_addr);
-}
-
 TEST_F(BlockPoolTest, ConvertIndexToBuffer) {
     auto config = createTestConfig();
     block_pool_ = std::make_shared<BlockPool>(config, device_);
@@ -259,20 +217,6 @@ TEST_F(BlockPoolTest, ConvertIndexToBuffer) {
 // LayerCache Base Test
 TEST_F(BlockPoolTest, LayerCacheBaseLayerFirst) {
     auto config = createTestConfig(LAYER_FIRST);
-    block_pool_ = std::make_shared<BlockPool>(config, device_);
-    block_pool_->init();
-
-    auto layer_tensors = block_pool_->layerCacheBase();
-    EXPECT_EQ(layer_tensors.size(), config.layer_num);
-
-    for (size_t i = 0; i < layer_tensors.size(); ++i) {
-        EXPECT_TRUE(layer_tensors[i].defined());
-        EXPECT_GT(layer_tensors[i].numel(), 0);
-    }
-}
-
-TEST_F(BlockPoolTest, LayerCacheBaseKVFirst) {
-    auto config = createTestConfig(KV_FIRST);
     block_pool_ = std::make_shared<BlockPool>(config, device_);
     block_pool_->init();
 

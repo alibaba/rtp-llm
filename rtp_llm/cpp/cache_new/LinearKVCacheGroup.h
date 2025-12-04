@@ -3,10 +3,8 @@
 #include <memory>
 #include <vector>
 #include <cstdint>
-#include <set>
 
 #include "rtp_llm/cpp/cache_new/KVCacheGroup.h"
-#include "rtp_llm/cpp/cache_new/BlockCacheV1.h"
 #include "rtp_llm/cpp/core/Buffer.h"
 
 namespace rtp_llm {
@@ -31,8 +29,7 @@ public:
 private:
     int needBlocksNum(int seq_len, int current_blocks) const override;
 
-    // TODO, fix this public
-public:
+private:
     int  chunk_blocks;
     int  save_point;
     bool reuse_cache;

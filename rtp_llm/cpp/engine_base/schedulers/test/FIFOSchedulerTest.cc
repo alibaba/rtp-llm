@@ -73,7 +73,7 @@ TEST_F(FIFOSchedulerTest, testInitKVCacheLackMem) {
     ASSERT_TRUE(streams_status.ok());
     ASSERT_EQ(streams_status.value().size(), 0);
     ASSERT_TRUE(stream->stopped());
-    ASSERT_EQ(stream->stopReason(), "input len 3 is greater than kv cache max seq len 2");
+    ASSERT_EQ(stream->stopReason(), "input len 3 is greater than kv cache max available tokens num 2");
 
     auto streams_status2 = scheduler.schedule();
     ASSERT_TRUE(streams_status2.ok());
@@ -270,7 +270,7 @@ TEST_F(FIFOSchedulerTest, testReuseCache) {
     std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config, device_);
     ASSERT_TRUE(cache_manager->init());
     ASSERT_EQ(cache_manager->freeBlocksNum(), 10);
-    ResourceContext  resource_context = {cache_manager, nullptr, nullptr, true};
+    ResourceContext  resource_context = {cache_manager, nullptr, {}, nullptr, true};
     GptInitParameter config;
     config.max_seq_len_             = 8192;
     config.max_generate_batch_size_ = 100;
@@ -318,7 +318,7 @@ TEST_F(FIFOSchedulerTest, testMaxContextBatchSize) {
     std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config, device_);
     ASSERT_TRUE(cache_manager->init());
     ASSERT_EQ(cache_manager->freeBlocksNum(), 20);
-    ResourceContext  resource_context = {cache_manager, nullptr, nullptr, true};
+    ResourceContext  resource_context = {cache_manager, nullptr, {}, nullptr, true};
     GptInitParameter config;
     config.max_seq_len_            = 100;
     config.max_context_batch_size_ = 1;

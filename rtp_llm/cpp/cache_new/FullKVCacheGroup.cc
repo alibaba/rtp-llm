@@ -47,11 +47,6 @@ MatchResult FullKVCacheGroup::match(const CacheKeysType& cache_keys) {
 }
 
 void FullKVCacheGroup::free(const BlockIndicesType& block_indices) {
-    if (!block_pool_) {
-        RTP_LLM_LOG_ERROR("Block pool is not initialized");
-        return;
-    }
-
     if (block_indices.empty()) {
         return;
     }
@@ -62,18 +57,12 @@ void FullKVCacheGroup::free(const BlockIndicesType& block_indices) {
 
 void FullKVCacheGroup::reference(BlockIndicesType& block_indices, const BlockIndicesType& new_block_indices) {
     block_indices.insert(block_indices.end(), new_block_indices.begin(), new_block_indices.end());
-    // query 引用了block
     block_pool_->requestReference(new_block_indices);
 }
 
 void FullKVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
                                        const BlockIndicesType& block_indices,
                                        bool                    is_resident) {
-    if (!block_cache_) {
-        RTP_LLM_LOG_DEBUG("Block cache is not initialized, skip insertion");
-        return;
-    }
-
     if (cache_keys.empty()) {
         return;
     }
@@ -85,12 +74,11 @@ void FullKVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
     }
 
     for (size_t i = 0; i < cache_keys.size(); ++i) {
-        BlockCacheV1::CacheItem item;
+        BlockCache::CacheItem item;
         item.cache_key   = cache_keys[i];
         item.group_id    = group_id_;
         item.block_index = block_indices[i];
         item.is_resident = is_resident;
-        // block cache引用了block
         if (block_cache_->put(item)) {
             block_pool_->blockCacheReference(block_indices[i]);
         }

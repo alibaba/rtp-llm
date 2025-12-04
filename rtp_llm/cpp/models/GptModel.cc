@@ -30,10 +30,6 @@ GptModel::GptModel(const GptModelInitParams& params):
     if (params.kv_cache_buffer) {
         k_cache_buffer_ = params.kv_cache_buffer->k_blocks;
         v_cache_buffer_ = params.kv_cache_buffer->v_blocks;
-        if (params.kv_cache_buffer->k_scale) {
-            k_scale_buffer_ = params.kv_cache_buffer->k_scale;
-            v_scale_buffer_ = params.kv_cache_buffer->v_scale;
-        }
     }
     if (abs(description_.residual_scalar - 1.0) > 1e-6) {
         vector<float> residual_scale_vec = {(float)description_.residual_scalar};
@@ -275,7 +271,7 @@ rtp_llm::AttentionCommonInputs GptModel::prepareAttentionInputs(const GptModelIn
             inputs.seq_size_per_block,
             inputs.k_block_size,
             inputs.v_block_size,
-            inputs.scale_block_size,
+            0,
             inputs.pd_separation,
             model_id_,
             inputs.decode_entrance,

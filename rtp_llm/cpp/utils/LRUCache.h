@@ -3,7 +3,6 @@
 #include <list>
 #include <vector>
 #include <unordered_map>
-#include <utility>
 #include <functional>
 
 template<typename K1, typename K2>

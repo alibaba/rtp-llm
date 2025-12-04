@@ -365,12 +365,11 @@ grpc::Status PrefillRpcServerNew::RemoteStore(grpc::ServerContext*        server
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "deadline exceed");
     }
 
-    auto        cache_manager    = engine_->resourceContext().cache_manager;
-    const auto& cache_config     = cache_manager->cacheConfig();
-    auto        k_block_size     = cache_config.k_block_stride;
-    auto        v_block_size     = cache_config.v_block_stride;
-    auto        scale_block_size = cache_config.kv_scale_block_stride;
-    auto        layer_num        = maga_init_params_.gpt_init_parameter.num_layers_;
+    auto        cache_manager = engine_->resourceContext().cache_manager;
+    const auto& cache_config  = cache_manager->cacheConfig();
+    auto        k_block_size  = cache_config.k_block_stride;
+    auto        v_block_size  = cache_config.v_block_stride;
+    auto        layer_num     = maga_init_params_.gpt_init_parameter.num_layers_;
 
     auto remote_addr_size = request->partition_infos_size();
     if (remote_addr_size == 0) {
@@ -378,13 +377,11 @@ grpc::Status PrefillRpcServerNew::RemoteStore(grpc::ServerContext*        server
         return grpc::Status::OK;
     }
 
-    if (v_block_size % remote_addr_size != 0 || k_block_size % remote_addr_size != 0
-        || scale_block_size % remote_addr_size != 0) {
+    if (v_block_size % remote_addr_size != 0 || k_block_size % remote_addr_size != 0) {
         RTP_LLM_LOG_WARNING(
             "k block size [%d] or v block size [%d] or scale block size [%d] is not divisible by peer ips size [%d]",
             k_block_size,
             v_block_size,
-            scale_block_size,
             remote_addr_size);
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "block size is not divisible by peer ips size");
     }
@@ -425,19 +422,11 @@ grpc::Status PrefillRpcServerNew::RemoteStore(grpc::ServerContext*        server
                 auto decode_block_key = makeCacheKey(model_id, std::to_string(request->decode_block_ids(i)), layer_id);
                 auto prefill_block_key =
                     makeCacheKey(model_id, std::to_string(request->prefill_block_ids(i)), layer_id);
-
-                auto addr_info = cache_manager->convertIndexToAddr(request->prefill_block_ids(i), layer_id);
                 store_request->buffer_pairs["k_" + prefill_block_key] = "k_" + decode_block_key;
-                if (addr_info.k_scale_addr) {
-                    store_request->buffer_pairs["k_scale_" + prefill_block_key] = "k_scale_" + decode_block_key;
-                }
                 if (engine_->resourceContext().cache_manager->cacheConfig().use_mla) {
                     continue;
                 }
                 store_request->buffer_pairs["v_" + prefill_block_key] = "v_" + decode_block_key;
-                if (addr_info.v_scale_addr) {
-                    store_request->buffer_pairs["v_scale_" + prefill_block_key] = "v_scale_" + decode_block_key;
-                }
             }
         }
 

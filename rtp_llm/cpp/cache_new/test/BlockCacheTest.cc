@@ -4,32 +4,32 @@
 #include <thread>
 #include <atomic>
 #include <algorithm>
-#include "rtp_llm/cpp/cache_new/BlockCacheV1.h"
+#include "rtp_llm/cpp/cache_new/BlockCache.h"
 
 namespace rtp_llm {
 namespace test {
 
-typedef BlockCacheV1::CacheItem CacheItem;
+typedef BlockCache::CacheItem CacheItem;
 
 class BlockCacheV1Test: public ::testing::Test {
 protected:
     void SetUp() override {
         // Initialize before each test case
-        cache_ = std::make_unique<BlockCacheV1>();
+        cache_ = std::make_unique<BlockCache>();
     }
 
     void TearDown() override {
         cache_.reset();
     }
 
-    std::unique_ptr<BlockCacheV1> cache_;
+    std::unique_ptr<BlockCache> cache_;
 };
 
 // ==================== Basic functionality tests ====================
 
 TEST_F(BlockCacheV1Test, ConstructorTest) {
     // Test constructor
-    BlockCacheV1 cache1;
+    BlockCache cache1;
     EXPECT_TRUE(cache1.empty());
     EXPECT_EQ(cache1.size(), 0);
 }
