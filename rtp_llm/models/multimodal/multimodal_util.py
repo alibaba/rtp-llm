@@ -52,7 +52,6 @@ else:
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
     }
 
-BASE64_PREFIX = "data:image/jpeg;base64,"
 URL_CACHE_SIZE = StaticConfig.vit_config.url_cache_item_num
 MM_CACHE_SIZE = StaticConfig.vit_config.mm_cache_item_num
 
@@ -193,6 +192,7 @@ def trans_config(mm_process_config_pb: MMPreprocessConfigPB):
         fps=mm_process_config_pb.fps,
         min_frames=mm_process_config_pb.min_frames,
         max_frames=mm_process_config_pb.max_frames,
+        crop_positions=crop_positions.crop_positions,
         mm_timeout_ms=mm_process_config_pb.mm_timeout_ms,
     )
 
