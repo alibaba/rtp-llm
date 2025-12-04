@@ -68,8 +68,7 @@ void RemoteRpcServer::initCacheStore(const GptInitParameter&                init
     if (init_params.role_type_ != RoleType::PREFILL && init_params.role_type_ != RoleType::DECODE) {
         RTP_LLM_FAIL("role_type must be prefill or decode, but it is %d", init_params.role_type_);
     }
-    const_cast<ResourceContext*>(&engine_->resourceContext())->use_cache_store = true;
-    auto device                                                                = engine_->getDevice();
+    auto device        = engine_->getDevice();
     auto cache_manager = engine_->resourceContext().cache_manager;
 
     CacheStoreInitParams params;
