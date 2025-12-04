@@ -39,10 +39,6 @@ public:
                                     const GenerateInputPB*                 request,
                                     grpc::ServerWriter<GenerateOutputsPB>* writer);
 
-    ::grpc::Status DistKvCache(::grpc::ServerContext*        context,
-                               const ::DistKvCacheRequestPB* request,
-                               ::DistKvCacheResponsePB*      response);
-
     KVCacheInfo getCacheStatusInfo(int64_t latest_cache_version, bool need_cache_keys);
 
     WorkerStatusInfo getWorkerStatusInfo(int64_t latest_finished_version);
@@ -75,10 +71,6 @@ public:
     void reportWorkerStatusTime(int64_t request_begin_time_us, int64_t request_after_lb_time_us);
 
     void reportCacheStatusTime(int64_t request_begin_time_us);
-
-    ::grpc::Status MemoryBlockCache(::grpc::ServerContext*             context,
-                                    const ::MemoryBlockCacheRequestPB* request,
-                                    ::MemoryBlockCacheResponsePB*      response);
 
     ::grpc::Status BroadcastTp(::grpc::ServerContext*        context,
                                const ::BroadcastTpRequestPB* request,

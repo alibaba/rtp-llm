@@ -2,11 +2,9 @@
 
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/cache_new/types.h"
-#include <sstream>
 #include <string>
 #include <memory>
 #include <vector>
-#include <unordered_map>
 
 namespace rtp_llm {
 
@@ -18,7 +16,6 @@ enum KVCacheType {
 
 enum MemoryLayout {
     LAYER_FIRST,  // [layer_num, num_blocks, block_size] -> hybrid attention
-    KV_FIRST,     // [2, layer_num, num_blocks, kv_block_size] -> full attention
 };
 
 struct KVCacheSpec {
@@ -35,13 +32,12 @@ struct KVCacheSpec {
     virtual size_t v_block_size() const = 0;
     virtual size_t k_token_size() const = 0;
     virtual size_t v_token_size() const = 0;
-
-    virtual ~KVCacheSpec() = default;
 };
+
+typedef std::shared_ptr<KVCacheSpec> KVCacheSpecPtr;
 
 struct MHAKVCacheSpec: public KVCacheSpec {
     uint32_t size_per_head;
-    uint32_t scale_size = 0;
 
     size_t block_size() const override {
         auto dtype_size = rtp_llm::getTypeSize(dtype);
@@ -110,10 +106,8 @@ struct LinearKVCacheSpec: public KVCacheSpec {
 };
 
 struct CacheConfig {
-    std::vector<std::shared_ptr<KVCacheSpec>> cache_specs;
-    std::vector<std::vector<int>>             layer_ids;
-
-    bool enable_independent_pool = true;
+    std::vector<KVCacheSpecPtr>   cache_specs;
+    std::vector<std::vector<int>> layer_ids;
 
     int    layer_num;
     int    block_num;
@@ -121,14 +115,15 @@ struct CacheConfig {
     size_t seq_size_per_block = 1;  // for cache_keys generation
 
     // for adpation to MLA
-    bool        use_mla        = false;
+    bool use_mla = false;
+
+    // mtp
     std::string mtp_model_type = "default_model";
 
-    // for backward compatibility with old NormalBatchStreamProcessor
-    size_t k_block_stride        = 0;  // for one layer
-    size_t v_block_stride        = 0;  // for one layer
-    size_t kv_block_stride       = 0;  // for one layer
-    size_t kv_scale_block_stride = 0;
+    // for backward compatibility with old NormalBatchStreamProcessor, TODO, fix this
+    size_t k_block_stride  = 0;  // for one layer
+    size_t v_block_stride  = 0;  // for one layer
+    size_t kv_block_stride = 0;  // for one layer
 
     CacheConfig() {}
 };
@@ -156,7 +151,7 @@ struct BlockPoolConfig {
     bool is_mla = false;
 
     // extra meta for exposing logical shape to kernels
-    // valid for KV_FIRST layout
+    // valid for KV_FIRST layout, TODO check this
     uint32_t local_head_num_kv  = 0;
     uint32_t seq_size_per_block = 0;
 };

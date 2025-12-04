@@ -263,10 +263,6 @@ public:
     StreamCacheResource& streamCacheResource();
     void                 setPerfTest(bool perf_test_);
 
-    absl::Status releaseSequenceKVCache(size_t total_seq_len, size_t release_seq_len) {
-        return stream_cache_resource_->releaseSequenceKVCache(total_seq_len, release_seq_len);
-    }
-
     void CopyOnWrite(const GenerateStream& other_stream, bool copy_loss = true, bool share = false);
 
     void setReturnAllProbs(bool return_all_probs) {

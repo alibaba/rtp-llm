@@ -50,20 +50,14 @@ std::unordered_map<int, torch::Tensor> KVCacheGroup::layerCacheBase() const {
 
 BlockAddrInfo KVCacheGroup::convertIndexToAddr(int layer_id, int block_id) const {
     auto it = gloabl_layer_to_local_layer.find(layer_id);
-    if (it == gloabl_layer_to_local_layer.end()) {
-        RTP_LLM_LOG_ERROR("Invalid layer_id: %d", layer_id);
-        return {nullptr, nullptr, nullptr, nullptr};
-    }
+    RTP_LLM_CHECK_WITH_INFO(it != gloabl_layer_to_local_layer.end(), "invalid layer_id: " + std::to_string(layer_id));
     int local_layer_id = it->second;
     return block_pool_->convertIndexToAddr(local_layer_id, block_id);
 }
 
 BlockBufferPtrInfo KVCacheGroup::convertIndexToBuffer(int layer_id, int block_id) const {
     auto it = gloabl_layer_to_local_layer.find(layer_id);
-    if (it == gloabl_layer_to_local_layer.end()) {
-        RTP_LLM_LOG_ERROR("Invalid layer_id: %d", layer_id);
-        return {nullptr, nullptr};
-    }
+    RTP_LLM_CHECK_WITH_INFO(it != gloabl_layer_to_local_layer.end(), "invalid layer_id: " + std::to_string(layer_id));
     int local_layer_id = it->second;
     return block_pool_->convertIndexToBuffer(local_layer_id, block_id);
 }

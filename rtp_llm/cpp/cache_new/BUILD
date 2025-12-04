@@ -55,24 +55,7 @@ cc_library(
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
-    ] + torch_deps() + select({
-        "//:using_3fs": [
-            ":storage_3fs",
-        ],
-        "//conditions:default": [],
-    }),
+    ] + torch_deps(),
     copts = copts(),
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
-    name = "storage_3fs",
-    hdrs = [
-    ],
-    srcs = [
-    ],
-    deps = [
-        "//3rdparty/3fs:hf3fs",
-    ],
     visibility = ["//visibility:public"],
 )

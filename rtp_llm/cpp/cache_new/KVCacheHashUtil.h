@@ -16,6 +16,7 @@ void initCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
 void updateCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
                      CompleteTokenIdsPtr     complete_token_ids,
                      int                     seq_size_per_block);
+
 // Drop the last block in cache_keys
 void dropLastPartialBlock(BatchKVCacheResourcePtr batch_kv_cache_resource);
 
