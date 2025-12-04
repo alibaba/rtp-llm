@@ -101,10 +101,13 @@ class Qwen2_5_VLMLP(nn.Module):
         self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=bias)
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=bias)
         self.act_fn = ACT2FN[config.hidden_act]
+        self.up_gate_proj = nn.Linear(self.hidden_size, self.intermediate_size * 2, bias=bias)
 
     def forward(self, hidden_state):
+        import aiter
         return self.down_proj(
-            self.act_fn(self.gate_proj(hidden_state)) * self.up_proj(hidden_state)
+            aiter.silu_and_mul(self.up_gate_proj(hidden_state)),
+            # self.act_fn(self.gate_proj(hidden_state)) * self.up_proj(hidden_state)
         )
 
 
