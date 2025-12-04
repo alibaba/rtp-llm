@@ -64,8 +64,6 @@ bool LayerFirstLayoutStrategy::init(const BlockPoolConfig& config,
     kv_cache_buffer_.k_blocks = std::make_shared<rtp_llm::Buffer>(memory_type, data_type_, k_shape, cache_base_ptr_);
     kv_cache_buffer_.v_blocks = std::make_shared<rtp_llm::Buffer>(
         memory_type, data_type_, v_shape, (void*)((char*)cache_base_ptr_ + kv_cache_buffer_.k_blocks->size()));
-    kv_cache_buffer_.k_scale = nullptr;
-    kv_cache_buffer_.v_scale = nullptr;
 
     RTP_LLM_LOG_INFO("LayerFirstLayoutStrategy initialized successfully");
     return true;
@@ -78,11 +76,11 @@ std::vector<torch::Tensor> LayerFirstLayoutStrategy::getLayerCacheTensors() cons
 BlockAddrInfo LayerFirstLayoutStrategy::convertIndexToAddr(int layer_id, int block_id) const {
     if (layer_id >= layer_kv_tensors_.size()) {
         RTP_LLM_LOG_ERROR("Layer ID %d out of range (max: %zu)", layer_id, layer_kv_tensors_.size());
-        return {nullptr, nullptr, nullptr, nullptr};
+        return {nullptr, nullptr};
     }
 
     torch::Tensor tensor = layer_kv_tensors_[layer_id][block_id];
-    return {tensor.data_ptr(), tensor.data_ptr(), nullptr, nullptr};
+    return {tensor.data_ptr(), tensor.data_ptr()};
 }
 
 BlockBufferPtrInfo LayerFirstLayoutStrategy::convertIndexToBuffer(int layer_id, int block_id) const {
@@ -187,8 +185,6 @@ bool KVFirstLayoutStrategy::init(const BlockPoolConfig& config,
             std::make_shared<rtp_llm::Buffer>(memory_type, data_type_, k_shape, k_cache_tensor_.data_ptr());
         kv_cache_buffer_.v_blocks =
             std::make_shared<rtp_llm::Buffer>(memory_type, data_type_, v_shape, v_cache_tensor_.data_ptr());
-        kv_cache_buffer_.k_scale = nullptr;
-        kv_cache_buffer_.v_scale = nullptr;
     }
 
     RTP_LLM_LOG_INFO("KVFirstLayoutStrategy initialized successfully with k_block_size=%zu, v_block_size=%zu",
@@ -204,13 +200,10 @@ std::vector<torch::Tensor> KVFirstLayoutStrategy::getLayerCacheTensors() const {
 BlockAddrInfo KVFirstLayoutStrategy::convertIndexToAddr(int layer_id, int block_id) const {
     if (layer_id >= config_.layer_num) {
         RTP_LLM_LOG_ERROR("Layer ID %d out of range (max: %d)", layer_id, config_.layer_num);
-        return {nullptr, nullptr, nullptr, nullptr};
+        return {nullptr, nullptr};
     }
 
-    return {k_cache_tensor_[layer_id][block_id].data_ptr(),
-            v_cache_tensor_[layer_id][block_id].data_ptr(),
-            nullptr,
-            nullptr};
+    return {k_cache_tensor_[layer_id][block_id].data_ptr(), v_cache_tensor_[layer_id][block_id].data_ptr()};
 }
 
 BlockBufferPtrInfo KVFirstLayoutStrategy::convertIndexToBuffer(int layer_id, int block_id) const {
@@ -254,8 +247,6 @@ std::unique_ptr<MemoryLayoutStrategy> MemoryLayoutStrategyFactory::create(Memory
     switch (layout) {
         case LAYER_FIRST:
             return std::make_unique<LayerFirstLayoutStrategy>();
-        case KV_FIRST:
-            return std::make_unique<KVFirstLayoutStrategy>();
         default:
             RTP_LLM_LOG_ERROR("Unknown memory layout type: %d", static_cast<int>(layout));
             return nullptr;

@@ -1,7 +1,7 @@
 #include "rtp_llm/cpp/cache_new/SingleTypeKVCacheAllocator.h"
-#include <algorithm>
-#include "rtp_llm/cpp/cache_new/BlockPoolConfigHelper.h"
+
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/cache_new/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache_new/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 
@@ -9,14 +9,14 @@ namespace rtp_llm {
 
 SingleTypeKVCacheAllocator::SingleTypeKVCacheAllocator(const CacheConfig&   config,
                                                        rtp_llm::DeviceBase* device,
-                                                       AllocationType       atype):
-    KVCacheAllocator(config, device, atype) {}
+                                                       AllocationType       allocation_type):
+    KVCacheAllocator(config, device, allocation_type) {}
 
 bool SingleTypeKVCacheAllocator::init() {
     auto&           spec        = config_.cache_specs[0];
     BlockPoolConfig pool_config = BlockPoolConfigHelper::createLayerFirstConfig(
         static_cast<uint32_t>(config_.layer_num), static_cast<uint32_t>(config_.block_num), spec);
-    block_pool_ = std::make_shared<BlockPool>(pool_config, device_, atype_);
+    block_pool_ = std::make_shared<BlockPool>(pool_config, device_, allocation_type_);
     if (!block_pool_->init()) {
         RTP_LLM_LOG_ERROR("Failed to initialize block pool for SingleTypeKVCacheAllocator");
         return false;
@@ -34,9 +34,8 @@ bool SingleTypeKVCacheAllocator::init() {
         RTP_LLM_LOG_ERROR("Failed to initialize FullKVCacheGroup");
         return false;
     }
-    // TODO, group id is set via constructor
 
-    RTP_LLM_LOG_INFO("SingleTypeKVCacheAllocator initialized successfully with LayerFirst layout");
+    RTP_LLM_LOG_INFO("SingleTypeKVCacheAllocator initialized successfully");
     return true;
 }
 
@@ -97,7 +96,7 @@ MallocResult SingleTypeKVCacheAllocator::incrMalloc(const MallocInfo& malloc_inf
         return {true, 0};
     }
 
-    // rollback resource
+    // rollback kvcache blocks
     BlockIndicesType blocks_to_free;
     for (int batch_id = 0; batch_id <= current_batch; ++batch_id) {
         auto& blocks       = kv_resource->blocks(batch_id);
@@ -126,7 +125,7 @@ void SingleTypeKVCacheAllocator::free(const FreeInfo& free_info) {
     kv_cache_resource->clearBlocks();
 }
 
-InsertResult SingleTypeKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
+void SingleTypeKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
     auto& kv_resource = insert_info.batch_kv_cache_resource;
     int   batch_size  = kv_resource->batchSize();
 
@@ -147,8 +146,6 @@ InsertResult SingleTypeKVCacheAllocator::insertIntoCache(const InsertInfo& inser
 
         full_kv_cache_group_->insertIntoCache(put_cache_keys, put_block_ids, insert_info.is_resident);
     }
-
-    return {true};
 }
 
 CacheLayerLayout SingleTypeKVCacheAllocator::layerCacheBase() const {
@@ -171,39 +168,6 @@ BlockAddrInfo SingleTypeKVCacheAllocator::convertIndexToAddr(int layer_id, int b
 
 BlockBufferPtrInfo SingleTypeKVCacheAllocator::convertIndexToBuffer(int layer_id, int block_id) const {
     return full_kv_cache_group_->convertIndexToBuffer(layer_id, block_id);
-}
-
-size_t SingleTypeKVCacheAllocator::freeBlocksNum() const {
-    return block_pool_->freeBlocksNum();
-}
-
-size_t SingleTypeKVCacheAllocator::availableBlocksNum() const {
-    return block_pool_->availableBlocksNum();
-}
-
-size_t SingleTypeKVCacheAllocator::availableTokensNum() const {
-    return block_pool_->availableBlocksNum() * full_kv_cache_group_->seqSizePerBlock();
-}
-
-size_t SingleTypeKVCacheAllocator::totalBlocksNum() const {
-    return block_pool_->totalBlocksNum();
-}
-
-size_t SingleTypeKVCacheAllocator::maxSeqLen() const {
-    return block_pool_->totalBlocksNum() * full_kv_cache_group_->seqSizePerBlock();
-}
-
-KVCacheBuffer SingleTypeKVCacheAllocator::kvCacheBuffer() const {
-    if (!block_pool_) {
-        return KVCacheBuffer{nullptr, nullptr, nullptr, nullptr};
-    }
-    return block_pool_->kvCacheBuffer();
-}
-
-void SingleTypeKVCacheAllocator::regUserMr(size_t model_id) {
-    if (block_pool_) {
-        block_pool_->regUserMr(model_id);
-    }
 }
 
 // Update kv blocks for beam search or multi-return sequences.
@@ -257,7 +221,7 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& kv
     }
 
     // rebuild batch_kv_cache_resource and generate mapping
-    // todo， 这里的move可以吗？这里再优化下。
+    // TODO, 这里的move可以吗？这里再优化下。
     std::vector<KVCacheResourceV1> old_resources = std::move(kv_cache_resource->batch_resource);
     kv_cache_resource->batch_resource.reserve(new_batch_size);
 
@@ -295,6 +259,10 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& kv
         --fork_count;
     }
     return true;
+}
+
+int SingleTypeKVCacheAllocator::seqSizePerBlock() const {
+    return full_kv_cache_group_->seqSizePerBlock();
 }
 
 }  // namespace rtp_llm

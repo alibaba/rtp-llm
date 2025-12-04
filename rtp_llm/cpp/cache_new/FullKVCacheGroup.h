@@ -1,13 +1,8 @@
 #pragma once
 
 #include <memory>
-#include <vector>
-#include <cstdint>
-#include <set>
 
 #include "rtp_llm/cpp/cache_new/KVCacheGroup.h"
-#include "rtp_llm/cpp/cache_new/BlockPool.h"
-#include "rtp_llm/cpp/core/Buffer.h"
 
 namespace rtp_llm {
 

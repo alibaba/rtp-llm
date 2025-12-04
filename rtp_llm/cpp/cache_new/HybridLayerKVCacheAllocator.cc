@@ -8,15 +8,15 @@ namespace rtp_llm {
 
 HybridLayerKVCacheAllocator::HybridLayerKVCacheAllocator(const CacheConfig&   config,
                                                          rtp_llm::DeviceBase* device,
-                                                         AllocationType       atype):
-    KVCacheAllocator(config, device, atype) {}
+                                                         AllocationType       allocation_type):
+    KVCacheAllocator(config, device, allocation_type) {}
 
 bool HybridLayerKVCacheAllocator::init() {
     auto            block_size = config_.cache_specs[0]->block_size();
     BlockPoolConfig pool_config =
         BlockPoolConfigHelper::createLayerFirstConfig(config_.layer_num, config_.block_num, block_size);
 
-    block_pool_ = std::make_shared<BlockPool>(pool_config, device_, atype_);
+    block_pool_ = std::make_shared<BlockPool>(pool_config, device_, allocation_type_);
     if (!block_pool_->init()) {
         RTP_LLM_LOG_ERROR("Failed to initialize block pool for HybridLayerKVCacheAllocator");
         return false;
@@ -48,7 +48,7 @@ bool HybridLayerKVCacheAllocator::init() {
         all_kv_cache_groups_.end(), linear_kv_cache_groups_.begin(), linear_kv_cache_groups_.end());
     // group ids have been set via constructors
 
-    RTP_LLM_LOG_INFO("HybridLayerKVCacheAllocator initialized successfully with KV_FIRST layout");
+    RTP_LLM_LOG_INFO("HybridLayerKVCacheAllocator init success");
     return true;
 }
 
@@ -165,12 +165,9 @@ void HybridLayerKVCacheAllocator::free(const FreeInfo& free_info) {
     kv_cache_resource->clearBlocks();
 }
 
-InsertResult HybridLayerKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
+void HybridLayerKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
     auto& kv_cache_resource = insert_info.batch_kv_cache_resource;
-    if (!kv_cache_resource) {
-        RTP_LLM_LOG_ERROR("BatchKVCacheResource is null");
-        return {false};
-    }
+    RTP_LLM_CHECK(kv_cache_resource != nullptr);
 
     int batch_size         = kv_cache_resource->batchSize();
     int seq_size_per_block = full_kv_cache_group_->seqSizePerBlock();
@@ -197,8 +194,6 @@ InsertResult HybridLayerKVCacheAllocator::insertIntoCache(const InsertInfo& inse
             all_kv_cache_groups_[group_id]->insertIntoCache(put_cache_keys, put_block_ids, insert_info.is_resident);
         }
     }
-
-    return {true};
 }
 
 CacheLayerLayout HybridLayerKVCacheAllocator::layerCacheBase() const {
@@ -215,12 +210,6 @@ CacheLayerLayout HybridLayerKVCacheAllocator::layerCacheBase() const {
     return layout;
 }
 
-void HybridLayerKVCacheAllocator::regUserMr(size_t model_id) {
-    if (block_pool_) {
-        block_pool_->regUserMr(model_id);
-    }
-}
-
 // TODO, 修改下。
 BlockAddrInfo HybridLayerKVCacheAllocator::convertIndexToAddr(int layer_id, int block_id) const {
     return full_kv_cache_group_->convertIndexToAddr(layer_id, block_id);
@@ -231,32 +220,8 @@ BlockBufferPtrInfo HybridLayerKVCacheAllocator::convertIndexToBuffer(int layer_i
     return full_kv_cache_group_->convertIndexToBuffer(layer_id, block_id);
 }
 
-size_t HybridLayerKVCacheAllocator::freeBlocksNum() const {
-    return block_pool_->freeBlocksNum();
-}
-
-size_t HybridLayerKVCacheAllocator::availableBlocksNum() const {
-    return block_pool_->availableBlocksNum();
-}
-
-size_t HybridLayerKVCacheAllocator::availableTokensNum() const {
-    return block_pool_->availableBlocksNum() * full_kv_cache_group_->seqSizePerBlock();
-}
-
-size_t HybridLayerKVCacheAllocator::totalBlocksNum() const {
-    return block_pool_->totalBlocksNum();
-}
-
-size_t HybridLayerKVCacheAllocator::maxSeqLen() const {
-    // TODO, 修改下。
-    return block_pool_->totalBlocksNum() * full_kv_cache_group_->seqSizePerBlock();
-}
-
-KVCacheBuffer HybridLayerKVCacheAllocator::kvCacheBuffer() const {
-    if (!block_pool_) {
-        return KVCacheBuffer{nullptr, nullptr, nullptr, nullptr};
-    }
-    return block_pool_->kvCacheBuffer();
+int HybridLayerKVCacheAllocator::seqSizePerBlock() const {
+    return full_kv_cache_group_->seqSizePerBlock();
 }
 
 bool HybridLayerKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,

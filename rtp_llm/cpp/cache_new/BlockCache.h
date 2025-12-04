@@ -2,8 +2,6 @@
 
 #include <memory>
 #include <vector>
-#include <cstdint>
-#include <mutex>
 
 #include "rtp_llm/cpp/utils/LRUCache.h"
 #include "rtp_llm/cpp/cache_new/types.h"
@@ -14,7 +12,7 @@ const size_t kCacheMaxCapacity = 10000000;
 
 using CacheKeyGroupPair = std::pair<CacheKeyType, GroupIdType>;  // <cache_key, group_id>
 
-class BlockCacheV1 {
+class BlockCache {
 public:
     struct CacheItem {
         CacheKeyType cache_key;
@@ -38,18 +36,15 @@ public:
     using CacheSnapshot = typename LRUCacheType::CacheSnapshot;
 
 public:
-    explicit BlockCacheV1(): lru_cache_(kCacheMaxCapacity) {}
-
-    MatchResult match(size_t cache_key, int group_id = 0);
-
-    bool contains(size_t cache_key, int group_id = 0);
+    explicit BlockCache(): lru_cache_(kCacheMaxCapacity) {}
 
     bool put(CacheItem& cache_item);
 
-    // std::vector<BlockIdxType> put(const std::vector<CacheKeyType> cache_keys, const std::vector<BlockIdxType>
-    // block_indices);
+    bool contains(size_t cache_key, int group_id = 0) const;
 
-    std::vector<BlockIdxType> pop(int n);
+    MatchResult match(size_t cache_key, int group_id = 0);
+
+    BlockIndicesType pop(int n);
 
     bool empty() const;
 
@@ -58,13 +53,10 @@ public:
     CacheSnapshot cacheSnapshot(int64_t latest_version) const;
 
 private:
-    size_t               seq_size_per_block_;
-    mutable LRUCacheType lru_cache_;
-
-    // 先不用锁看下，否则再看并发问题。
-    mutable std::mutex mutex_;
+    size_t       seq_size_per_block_;
+    LRUCacheType lru_cache_;
 };
 
-using BlockCacheV1Ptr = std::shared_ptr<BlockCacheV1>;
+using BlockCacheV1Ptr = std::shared_ptr<BlockCache>;
 
 }  // namespace rtp_llm
