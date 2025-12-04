@@ -41,7 +41,9 @@ protected:
             // K cache + V cache
             config.total_size = config.layer_num * config.block_num * (config.k_block_size + config.v_block_size);
         } else {
-            config.total_size = config.layer_num * config.block_num * config.block_size;
+            config.total_size   = config.layer_num * config.block_num * config.block_size;
+            config.k_block_size = k_block_size;
+            config.v_block_size = v_block_size;
         }
 
         return config;
@@ -131,7 +133,9 @@ TEST_F(LayerFirstLayoutStrategyTest, ConvertIndexToAddr) {
 
             EXPECT_NE(addr_info.k_addr, nullptr);
             EXPECT_NE(addr_info.v_addr, nullptr);
-            EXPECT_EQ(addr_info.k_addr, addr_info.v_addr);
+
+            size_t diff = reinterpret_cast<size_t>(addr_info.v_addr) - reinterpret_cast<size_t>(addr_info.k_addr);
+            EXPECT_EQ(diff, config.k_block_size);
         }
     }
 }
@@ -166,7 +170,8 @@ TEST_F(LayerFirstLayoutStrategyTest, GetKVCacheAddr) {
     EXPECT_NE(k_addr, nullptr);
     EXPECT_NE(v_addr, nullptr);
 
-    EXPECT_EQ(k_addr, v_addr);
+    size_t diff = reinterpret_cast<size_t>(v_addr) - reinterpret_cast<size_t>(k_addr);
+    EXPECT_EQ(diff, config.k_block_size);
 }
 
 TEST_F(LayerFirstLayoutStrategyTest, ConvertIndexToBuffer) {
@@ -418,19 +423,26 @@ TEST_F(LayoutComparisonTest, AccessPatternsDiffer) {
     auto lf_addr = lf_strategy->convertIndexToAddr(layer, block);
     auto kv_addr = kv_strategy->convertIndexToAddr(layer, block);
 
-    EXPECT_EQ(lf_addr.k_addr, lf_addr.v_addr);
+    // Both layouts expose valid and distinct K/V addresses, but with different memory layouts.
+    EXPECT_NE(lf_addr.k_addr, nullptr);
+    EXPECT_NE(lf_addr.v_addr, nullptr);
+    EXPECT_NE(lf_addr.k_addr, lf_addr.v_addr);
 
+    EXPECT_NE(kv_addr.k_addr, nullptr);
+    EXPECT_NE(kv_addr.v_addr, nullptr);
     EXPECT_NE(kv_addr.k_addr, kv_addr.v_addr);
 }
 
 // Boundary Condition Test
 TEST_F(MemoryLayoutStrategyTest, SingleLayerSingleBlock) {
     BlockPoolConfig config;
-    config.layer_num  = 1;
-    config.block_num  = 1;
-    config.block_size = 512;
-    config.layout     = LAYER_FIRST;
-    config.total_size = config.layer_num * config.block_num * config.block_size;
+    config.layer_num    = 1;
+    config.block_num    = 1;
+    config.block_size   = 512;
+    config.layout       = LAYER_FIRST;
+    config.total_size   = config.layer_num * config.block_num * config.block_size;
+    config.k_block_size = config.block_size / 2;
+    config.v_block_size = config.block_size - config.k_block_size;
 
     auto  cache_buffer = createCacheBuffer(config);
     void* cache_ptr    = cache_buffer.data_ptr();
@@ -447,11 +459,13 @@ TEST_F(MemoryLayoutStrategyTest, SingleLayerSingleBlock) {
 
 TEST_F(MemoryLayoutStrategyTest, LargeConfiguration) {
     BlockPoolConfig config;
-    config.layer_num  = 32;
-    config.block_num  = 1024;
-    config.block_size = 4096;
-    config.layout     = LAYER_FIRST;
-    config.total_size = config.layer_num * config.block_num * config.block_size;
+    config.layer_num    = 32;
+    config.block_num    = 1024;
+    config.block_size   = 4096;
+    config.layout       = LAYER_FIRST;
+    config.total_size   = config.layer_num * config.block_num * config.block_size;
+    config.k_block_size = config.block_size / 2;
+    config.v_block_size = config.block_size - config.k_block_size;
 
     auto  cache_buffer = createCacheBuffer(config);
     void* cache_ptr    = cache_buffer.data_ptr();

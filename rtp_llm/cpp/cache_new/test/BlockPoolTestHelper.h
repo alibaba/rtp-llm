@@ -23,6 +23,9 @@ createTestConfig(MemoryLayout layout = LAYER_FIRST, size_t k_block_size = 512, s
         config.total_size = config.layer_num * config.block_num * (config.k_block_size + config.v_block_size);
     } else {
         config.total_size = config.layer_num * config.block_num * config.block_size;
+        // For layer-first tests, split the block evenly into K/V regions.
+        config.k_block_size = config.block_size / 2;
+        config.v_block_size = config.block_size - config.k_block_size;
     }
 
     return config;
