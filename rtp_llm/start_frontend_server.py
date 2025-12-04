@@ -19,22 +19,22 @@ from rtp_llm.utils.concurrency_controller import (
 )
 
 
-def start_frontend_server(rank_id: int, server_id: int, global_controller: ConcurrencyController):
+def start_frontend_server(rank_id: int, server_id: int, global_controller: ConcurrencyController, ssl: bool = False):
     ## collect all args and envs.
     py_env_configs = PyEnvConfigs()
     py_env_configs.update_from_env()
     py_env_configs.server_config.frontend_server_id = server_id
     py_env_configs.server_config.rank_id = rank_id
-    setproctitle(f"rtp_llm_frontend_server_rank_{rank_id}_server_{server_id}")
+    setproctitle(f"rtp_llm_frontend_server_rank_{rank_id}_server_{server_id}_ssl_{ssl}")
     app = None
     g_frontend_server_info = FrontendServerInfo(
         py_env_configs.server_config.frontend_server_id
     )
     try:
-        logging.info(f"g_frontend_server_info = {g_frontend_server_info}")
+        logging.info(f"g_frontend_server_info = {g_frontend_server_info} {ssl}")
         set_global_controller(global_controller)
         separated_frontend = os.environ.get("ROLE_TYPE", "") == "FRONTEND"
-        app = FrontendApp(py_env_configs, separated_frontend)
+        app = FrontendApp(py_env_configs, separated_frontend, ssl)
         app.start()
     except BaseException as e:
         logging.error(
