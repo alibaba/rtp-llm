@@ -73,7 +73,7 @@ TEST_F(FIFOSchedulerTest, testInitKVCacheLackMem) {
     ASSERT_TRUE(streams_status.ok());
     ASSERT_EQ(streams_status.value().size(), 0);
     ASSERT_TRUE(stream->stopped());
-    ASSERT_EQ(stream->stopReason(), "input len 3 is greater than kv cache max seq len 2");
+    ASSERT_EQ(stream->stopReason(), "input len 3 is greater than kv cache max available tokens num 2");
 
     auto streams_status2 = scheduler.schedule();
     ASSERT_TRUE(streams_status2.ok());

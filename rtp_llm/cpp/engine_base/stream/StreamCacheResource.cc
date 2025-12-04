@@ -44,8 +44,8 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
     int total_blocks = maxBlocksNum();
     RTP_LLM_CHECK(nums == total_blocks);
 
-    // TODO(xinfei.sxf) fix it, after remote running commit.
-    if (total_blocks > 0 && stream_->finishedWithoutLock()) {
+    if (total_blocks > 0) {
+        // TODO(xinfei.sxf) fix it, after finshed and remote running commit.
         if (reuseCache()) {
             InsertInfo insert_info{batch_resource_, stream_->completeTokenIdsPtr(), false};
             resource_context_.cache_manager->insertIntoCache(insert_info);
