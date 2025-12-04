@@ -19,7 +19,6 @@ FIFOScheduler::FIFOScheduler(const rtp_llm::GptInitParameter&       params,
     max_seq_len_(params.max_seq_len_),
     max_batch_tokens_size_(params.max_batch_tokens_size_),
     max_generate_batch_size_(params.max_generate_batch_size_),
-    // not support fallback when use pd_speration:use_cache_store
     enable_partial_fallback_(params.enable_partial_fallback_ && params.role_type_ == RoleType::PDFUSION),
     enable_whole_fallback_(params.role_type_ == RoleType::PDFUSION),
     enable_fast_gen_(params.enable_fast_gen_),
