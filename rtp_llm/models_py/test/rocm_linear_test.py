@@ -12,18 +12,24 @@ class LinearTest(TestCase):
     DTYPES = [torch.half, torch.bfloat16]
     NUM_TOKENS = [7, 83, 4096]
     HIDDEN_SIZES = [768, 769, 770, 771, 5120, 5124, 5125, 5126, 8192, 8199]
+    HAS_BIAS = [True, False]
 
     def setUp(self) -> None:
         if not torch.cuda.is_available():
             raise SkipTest("CUDA is not available")
         torch.set_default_device("cuda")
 
-    def _run_linear_test(self, num_tokens: int, hidden_size: int, dtype: _dtype):
+    def _run_linear_test(self, num_tokens: int, hidden_size: int, dtype: _dtype, has_bias: bool):
         torch.manual_seed(0)
         w = torch.randn(hidden_size, hidden_size // 2, dtype=dtype)
         torch.nn.init.xavier_uniform_(w)
-        linear = Linear(w)
-        linear_torch = LinearTorch(w)
+        if has_bias:
+            bias = torch.empty(hidden_size // 2, dtype=dtype)
+            torch.nn.init.normal_(bias, mean=0.0, std=0.01)
+        else:
+            bias = None
+        linear = Linear(w,bias)
+        linear_torch = LinearTorch(w,bias)
         x = torch.randn(num_tokens, hidden_size, dtype=dtype)
         torch_output = linear_torch(x)
         my_output = linear(x)
@@ -34,9 +40,10 @@ class LinearTest(TestCase):
             self.NUM_TOKENS,
             self.HIDDEN_SIZES,
             self.DTYPES,
+            self.HAS_BIAS,
         ):
             with self.subTest(
-                num_tokens=params[0], hidden_size=params[1], dtype=params[2]
+                num_tokens=params[0], hidden_size=params[1], dtype=params[2], has_bias=params[3]
             ):
                 self._run_linear_test(*params)
 
