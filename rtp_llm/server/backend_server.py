@@ -19,7 +19,6 @@ from rtp_llm.config.py_config_modules import PyEnvConfigs, StaticConfig
 from rtp_llm.config.task_type import TaskType
 from rtp_llm.distribute.gang_server import GangServer
 from rtp_llm.distribute.worker_info import g_parallel_info
-from rtp_llm.embedding.embedding_endpoint import EmbeddingEndpoint
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
@@ -53,30 +52,25 @@ class BackendServer(object):
         if g_parallel_info.world_rank == 0:
             kmonitor.init()
         self.engine: Optional[BaseEngine] = None
-        self._embedding_endpoint = None
         self.py_env_configs = py_env_configs
         self.dp_rank = g_parallel_info.dp_rank
         self.dp_size = g_parallel_info.dp_size
         self.tp_size = g_parallel_info.tp_size
-        self._weight_manager = None
+        self.backend_rpc_server_visitor = None
 
     def start(self, py_env_configs: PyEnvConfigs):
         self._gang_server.start()
-        if py_env_configs.profiling_debug_config.debug_start_fake_process == 1:
-            # for debug online
-            logging.info("DEBUG_START_FAKE_PROCESS is set, start fake backend server")
-        else:
-            self.engine = ModelFactory.create_from_env(self._gang_server._gang_info)
-            logging.info(
-                "engine created successfully: self.engine.task_type=%s",
-                self.engine.task_type,
+        self.engine = ModelFactory.create_from_env(self._gang_server._gang_info)
+        logging.info(
+            "engine created successfully: self.engine.task_type=%s",
+            self.engine.task_type,
+        )
+        # Initialize endpoints based on task type
+        if self.engine and self.engine.task_type == TaskType.LANGUAGE_MODEL:
+            # For language models
+            self.backend_rpc_server_visitor = BackendRPCServerVisitor(
+                self.engine.config
             )
-            # Initialize endpoints based on task type
-            if self.engine and self.engine.task_type == TaskType.LANGUAGE_MODEL:
-                # For language models
-                self.backend_rpc_server_visitor = BackendRPCServerVisitor(
-                    self.engine.config
-                )
 
     def stop(self) -> None:
         if isinstance(self.engine, BaseEngine):
@@ -92,32 +86,6 @@ class BackendServer(object):
     @property
     def role_type(self) -> str:
         return self.engine.role_type if self.engine else "unknown"
-
-    def _handle_exception(self, request: Dict[str, Any], e: BaseException):
-        exception_json = format_exception(e)
-        error_code_str = exception_json.get("error_code_str", "")
-        if isinstance(e, ConcurrencyException):
-            kmonitor.report(AccMetrics.CONFLICT_QPS_METRIC)
-        elif isinstance(e, asyncio.CancelledError):
-            kmonitor.report(
-                AccMetrics.CANCEL_QPS_METRIC,
-                1,
-                {"source": request.get("source", "unknown")},
-            )
-            self._access_logger.log_exception_access(request, e)
-        else:
-            kmonitor.report(
-                AccMetrics.ERROR_QPS_METRIC,
-                1,
-                {
-                    "source": request.get("source", "unknown"),
-                    "error_code": error_code_str,
-                },
-            )
-            self._access_logger.log_exception_access(request, e)
-
-        rep = ORJSONResponse(exception_json, status_code=500)
-        return rep
 
     def wait_all_worker_ready(self):
         # master需要等其他所有机器都ready以后才能起服务，挂vipserver
