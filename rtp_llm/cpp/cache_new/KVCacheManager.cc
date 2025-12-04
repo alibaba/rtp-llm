@@ -154,7 +154,25 @@ void KVCacheManager::insertIntoCache(const InsertInfo& insert_info) {
 }
 
 KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const {
-    return {0, 0, 0, {}, latest_version};
+    KVCacheInfo info;
+
+    if (!allocator_) {
+        RTP_LLM_LOG_ERROR("getKVCacheInfo called before KVCacheManager initialized");
+        info.version = latest_version;
+        return info;
+    }
+
+    const size_t block_size_tokens = config_.seq_size_per_block;
+    const size_t total_blocks      = allocator_->totalBlocksNum();
+    const size_t available_blocks  = allocator_->availableBlocksNum();
+
+    info.block_size         = block_size_tokens;
+    info.total_kv_cache     = total_blocks * block_size_tokens;
+    info.available_kv_cache = available_blocks * block_size_tokens;
+    info.version            = latest_version;
+    // cached_keys left empty for now; can be populated when distributed cache is wired up.
+
+    return info;
 }
 
 size_t KVCacheManager::freeBlocksNum() const {
