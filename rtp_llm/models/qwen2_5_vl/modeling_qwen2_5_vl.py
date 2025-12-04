@@ -105,10 +105,13 @@ class Qwen2_5_VLMLP(nn.Module):
 
     def forward(self, hidden_state):
         import aiter
-        return self.down_proj(
-            aiter.silu_and_mul(self.up_gate_proj(hidden_state)),
-            # self.act_fn(self.gate_proj(hidden_state)) * self.up_proj(hidden_state)
-        )
+        # up_gate_proj 输出形状: [..., intermediate_size * 2]
+        gate_up = self.up_gate_proj(hidden_state)
+        # silu_and_mul 是 out-place 操作，需要先创建输出张量
+        # 输入: [..., intermediate_size * 2], 输出: [..., intermediate_size]
+        intermediate = gate_up.new_empty(gate_up.shape[:-1] + (self.intermediate_size,))
+        aiter.silu_and_mul(intermediate, gate_up)
+        return self.down_proj(intermediate)
 
 
 class Qwen2_5_VisionPatchEmbed(nn.Module):
