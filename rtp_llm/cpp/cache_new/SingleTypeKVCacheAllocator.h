@@ -28,7 +28,7 @@ public:
     size_t availableBlocksNum() const override;
     size_t availableTokensNum() const override;
     size_t totalBlocksNum() const override;
-    size_t maxSeqLen() const override;
+    size_t maxAvailableTokensNum() const override;
 
     KVCacheBuffer kvCacheBuffer() const override;
 

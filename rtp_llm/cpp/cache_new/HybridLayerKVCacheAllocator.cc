@@ -247,7 +247,7 @@ size_t HybridLayerKVCacheAllocator::totalBlocksNum() const {
     return block_pool_->totalBlocksNum();
 }
 
-size_t HybridLayerKVCacheAllocator::maxSeqLen() const {
+size_t HybridLayerKVCacheAllocator::maxAvailableTokensNum() const {
     // TODO, 修改下。
     return block_pool_->totalBlocksNum() * full_kv_cache_group_->seqSizePerBlock();
 }

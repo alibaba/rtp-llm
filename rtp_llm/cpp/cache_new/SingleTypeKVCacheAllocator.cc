@@ -189,7 +189,7 @@ size_t SingleTypeKVCacheAllocator::totalBlocksNum() const {
     return block_pool_->totalBlocksNum();
 }
 
-size_t SingleTypeKVCacheAllocator::maxSeqLen() const {
+size_t SingleTypeKVCacheAllocator::maxAvailableTokensNum() const {
     return block_pool_->totalBlocksNum() * full_kv_cache_group_->seqSizePerBlock();
 }
 

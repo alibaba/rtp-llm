@@ -31,11 +31,11 @@ public:
 
     virtual void regUserMr(size_t model_id) = 0;
 
-    virtual size_t freeBlocksNum() const      = 0;
-    virtual size_t availableBlocksNum() const = 0;
-    virtual size_t availableTokensNum() const = 0;
-    virtual size_t totalBlocksNum() const     = 0;
-    virtual size_t maxSeqLen() const          = 0;
+    virtual size_t freeBlocksNum() const         = 0;
+    virtual size_t availableBlocksNum() const    = 0;
+    virtual size_t availableTokensNum() const    = 0;
+    virtual size_t totalBlocksNum() const        = 0;
+    virtual size_t maxAvailableTokensNum() const = 0;
 
     MallocResult malloc(const MallocInfo& malloc_info);
     void         blockCopy(int src_block_index, int dest_block_index);
