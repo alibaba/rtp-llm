@@ -96,10 +96,8 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
 
         generate_output.finished = sub_generate_status_[i].status == StreamState::FINISHED;
         if (generate_input_->generate_config->aux_info) {
-            generate_output.aux_info.iter_count      = iter_count_;
-            generate_output.aux_info.fallback_tokens = fallback_blocks_ * seqSizePerBlock();
-            generate_output.aux_info.fallback_times  = fallback_times_;
-            generate_output.aux_info.cost_time_us    = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
+            generate_output.aux_info.iter_count   = iter_count_;
+            generate_output.aux_info.cost_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
             generate_output.aux_info.first_token_cost_time_us = complete_token_ids_->firstTokenLatencyUs();
             generate_output.aux_info.wait_time_us             = wait_time_us_;
             generate_output.aux_info.input_len                = generate_input_->promptLength();
