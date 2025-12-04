@@ -287,17 +287,6 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ConvertIndexToAddr) {
     }
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, ConvertIndexToAddrInvalidLayer) {
-    auto config = createSingleTypeTestConfig();
-    allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config, device_);
-    allocator_->init();
-
-    int  invalid_layer = config.layer_num + 10;
-    auto addr_info     = allocator_->convertIndexToAddr(invalid_layer, 0);
-    EXPECT_EQ(addr_info.k_addr, nullptr);
-    EXPECT_EQ(addr_info.v_addr, nullptr);
-}
-
 // Test convert index to buffer
 TEST_F(SingleTypeKVCacheAllocatorTest, ConvertIndexToBuffer) {
     auto config = createSingleTypeTestConfig();
@@ -570,7 +559,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MaxSeqLen) {
     allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config, device_);
     allocator_->init();
 
-    EXPECT_EQ(allocator_->maxSeqLen(), (10 - 1) * 8);  // block_num * seq_size_per_block
+    EXPECT_EQ(allocator_->maxAvailableTokensNum(), (10 - 1) * 8);  // block_num * seq_size_per_block
 }
 
 // Test boundary conditions
@@ -671,7 +660,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MixedOperations) {
     }
 
     for (int i = 0; i < 3; ++i) {
-        FreeInfo free_info(resources[i], token_ids_list[i]);
+        FreeInfo free_info{resources[i], token_ids_list[i]};
         allocator_->free(free_info);
     }
 

@@ -176,7 +176,7 @@ TEST_F(HybridLayerKVCacheAllocatorTest, IncrMallocSingleBatch) {
     auto batch_resource     = createBatchKVCacheResource(1, 3);
     auto complete_token_ids = createCompleteTokenIds(1, seq_length);
 
-    MallocInfo malloc_info(batch_resource, complete_token_ids);
+    MallocInfo malloc_info{batch_resource, complete_token_ids};
     auto       result = allocator_->incrMalloc(malloc_info);
 
     EXPECT_TRUE(result.success);
@@ -184,7 +184,7 @@ TEST_F(HybridLayerKVCacheAllocatorTest, IncrMallocSingleBatch) {
     EXPECT_EQ(batch_resource->batch_resource[0].blocksNum(), 2);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_blocks - 3 * 2);
 
-    FreeInfo free_info(batch_resource, complete_token_ids);
+    FreeInfo free_info{batch_resource, complete_token_ids};
     allocator_->free(free_info);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_blocks);
 }
@@ -199,7 +199,7 @@ TEST_F(HybridLayerKVCacheAllocatorTest, IncrMallocMultiBatch) {
     auto batch_resource     = createBatchKVCacheResource(2, 3);
     auto complete_token_ids = createCompleteTokenIds(2, seq_length);
 
-    MallocInfo malloc_info(batch_resource, complete_token_ids);
+    MallocInfo malloc_info{batch_resource, complete_token_ids};
     auto       result = allocator_->incrMalloc(malloc_info);
 
     EXPECT_TRUE(result.success);
@@ -208,7 +208,7 @@ TEST_F(HybridLayerKVCacheAllocatorTest, IncrMallocMultiBatch) {
     EXPECT_EQ(batch_resource->batch_resource[1].blocksNum(), 2);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_blocks - 2 * 3 * 2);
 
-    FreeInfo free_info(batch_resource, complete_token_ids);
+    FreeInfo free_info{batch_resource, complete_token_ids};
     allocator_->free(free_info);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_blocks);
 }
@@ -223,7 +223,7 @@ TEST_F(HybridLayerKVCacheAllocatorTest, initMallocForCommonLenSingleBatch) {
     auto batch_resource     = createBatchKVCacheResource(1, 3);
     auto complete_token_ids = createCompleteTokenIds(1, seq_length);
 
-    MallocInfo malloc_info(batch_resource, complete_token_ids);
+    MallocInfo malloc_info{batch_resource, complete_token_ids};
     malloc_info.batch_kv_cache_resource->enable_reuse_cache = false;
     malloc_info.common_seq_len                              = 16;
     auto malloc_result1                                     = allocator_->initMallocForCommonLen(malloc_info);
@@ -231,7 +231,7 @@ TEST_F(HybridLayerKVCacheAllocatorTest, initMallocForCommonLenSingleBatch) {
     EXPECT_EQ(batch_resource->batch_resource[0].blocksNum(), 4);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_blocks - 3 * 4);
 
-    FreeInfo free_info(batch_resource, complete_token_ids);
+    FreeInfo free_info{batch_resource, complete_token_ids};
     allocator_->free(free_info);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_blocks);
 
@@ -272,7 +272,7 @@ TEST_F(HybridLayerKVCacheAllocatorTest, initMallocForCommonLenSingleBatch) {
 
     EXPECT_EQ(allocator_->freeBlocksNum(), total_blocks - 3 * 2);
 
-    FreeInfo free_info_2(batch_resource2, complete_token_ids);
+    FreeInfo free_info_2{batch_resource2, complete_token_ids};
     allocator_->free(free_info_2);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_blocks);
 }
@@ -287,7 +287,7 @@ TEST_F(HybridLayerKVCacheAllocatorTest, initMallocForCommonLenMultiBatch) {
     auto batch_resource     = createBatchKVCacheResource(2, 3);
     auto complete_token_ids = createCompleteTokenIds(2, seq_length);
 
-    MallocInfo malloc_info(batch_resource, complete_token_ids);
+    MallocInfo malloc_info{batch_resource, complete_token_ids};
     malloc_info.common_seq_len                              = 16;
     malloc_info.batch_kv_cache_resource->enable_reuse_cache = false;
     auto malloc_result1                                     = allocator_->initMallocForCommonLen(malloc_info);
@@ -295,7 +295,7 @@ TEST_F(HybridLayerKVCacheAllocatorTest, initMallocForCommonLenMultiBatch) {
     EXPECT_EQ(batch_resource->batch_resource[0].blocksNum(), 4);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_blocks - (3 * 4));
 
-    FreeInfo free_info(batch_resource, complete_token_ids);
+    FreeInfo free_info{batch_resource, complete_token_ids};
     allocator_->free(free_info);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_blocks);
 
@@ -358,7 +358,7 @@ TEST_F(HybridLayerKVCacheAllocatorTest, initMallocForCommonLenMultiBatch) {
 
     EXPECT_EQ(allocator_->freeBlocksNum(), total_blocks - (3 * 2));
 
-    FreeInfo free_info_2(batch_resource2, complete_token_ids);
+    FreeInfo free_info_2{batch_resource2, complete_token_ids};
     allocator_->free(free_info_2);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_blocks);
 }
@@ -373,7 +373,7 @@ TEST_F(HybridLayerKVCacheAllocatorTest, initMallocSingleBatch) {
     auto batch_resource     = createBatchKVCacheResource(1, 3);
     auto complete_token_ids = createCompleteTokenIds(1, seq_length);
 
-    MallocInfo malloc_info(batch_resource, complete_token_ids);
+    MallocInfo malloc_info{batch_resource, complete_token_ids};
     malloc_info.batch_kv_cache_resource->enable_reuse_cache = false;
     malloc_info.common_seq_len                              = 16;
     auto malloc_result1                                     = allocator_->malloc(malloc_info);
@@ -381,7 +381,7 @@ TEST_F(HybridLayerKVCacheAllocatorTest, initMallocSingleBatch) {
     EXPECT_EQ(batch_resource->batch_resource[0].blocksNum(), 5);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_blocks - 3 * 5);
 
-    FreeInfo free_info(batch_resource, complete_token_ids);
+    FreeInfo free_info{batch_resource, complete_token_ids};
     allocator_->free(free_info);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_blocks);
 
@@ -422,7 +422,7 @@ TEST_F(HybridLayerKVCacheAllocatorTest, initMallocSingleBatch) {
 
     EXPECT_EQ(allocator_->freeBlocksNum(), total_blocks - 3 * 3);
 
-    FreeInfo free_info_2(batch_resource2, complete_token_ids);
+    FreeInfo free_info_2{batch_resource2, complete_token_ids};
     allocator_->free(free_info_2);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_blocks);
 }
@@ -437,7 +437,7 @@ TEST_F(HybridLayerKVCacheAllocatorTest, initMallocMultiBatch) {
     auto batch_resource     = createBatchKVCacheResource(2, 3);
     auto complete_token_ids = createCompleteTokenIds(2, seq_length);
 
-    MallocInfo malloc_info(batch_resource, complete_token_ids);
+    MallocInfo malloc_info{batch_resource, complete_token_ids};
     malloc_info.common_seq_len                              = 16;
     malloc_info.batch_kv_cache_resource->enable_reuse_cache = false;
     auto malloc_result1                                     = allocator_->malloc(malloc_info);
@@ -445,7 +445,7 @@ TEST_F(HybridLayerKVCacheAllocatorTest, initMallocMultiBatch) {
     EXPECT_EQ(batch_resource->batch_resource[0].blocksNum(), 5);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_blocks - (3 * 5 + 3 * 1));
 
-    FreeInfo free_info(batch_resource, complete_token_ids);
+    FreeInfo free_info{batch_resource, complete_token_ids};
     allocator_->free(free_info);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_blocks);
 
@@ -511,7 +511,7 @@ TEST_F(HybridLayerKVCacheAllocatorTest, initMallocMultiBatch) {
 
     EXPECT_EQ(allocator_->freeBlocksNum(), total_blocks - (3 * 3 + 3 * 1));
 
-    FreeInfo free_info_2(batch_resource2, complete_token_ids);
+    FreeInfo free_info_2{batch_resource2, complete_token_ids};
     allocator_->free(free_info_2);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_blocks);
 }
@@ -526,14 +526,14 @@ TEST_F(HybridLayerKVCacheAllocatorTest, MallocWithInsufficientBlocks) {
     auto batch_resource     = createBatchKVCacheResource(2, 3);
     auto complete_token_ids = createCompleteTokenIds(2, seq_length);
 
-    MallocInfo malloc_info(batch_resource, complete_token_ids);
+    MallocInfo malloc_info{batch_resource, complete_token_ids};
     malloc_info.common_seq_len                              = 16;
     malloc_info.batch_kv_cache_resource->enable_reuse_cache = false;
     auto malloc_result1                                     = allocator_->malloc(malloc_info);
     EXPECT_FALSE(malloc_result1.success);
     EXPECT_EQ(malloc_result1.reuse_len, 0);
 
-    FreeInfo free_info(batch_resource, complete_token_ids);
+    FreeInfo free_info{batch_resource, complete_token_ids};
     allocator_->free(free_info);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_blocks);
 }
@@ -550,12 +550,12 @@ TEST_F(HybridLayerKVCacheAllocatorTest, MallocFreeCycle) {
         auto batch_resource     = createBatchKVCacheResource(2, 3);
         auto complete_token_ids = createCompleteTokenIds(2, seq_length);
 
-        MallocInfo malloc_info(batch_resource, complete_token_ids);
+        MallocInfo malloc_info{batch_resource, complete_token_ids};
 
         auto malloc_result = allocator_->malloc(malloc_info);
         EXPECT_TRUE(malloc_result.success);
 
-        FreeInfo free_info(batch_resource, complete_token_ids);
+        FreeInfo free_info{batch_resource, complete_token_ids};
         allocator_->free(free_info);
 
         EXPECT_EQ(allocator_->freeBlocksNum(), total_blocks);
@@ -575,7 +575,7 @@ TEST_F(HybridLayerKVCacheAllocatorTest, InsertIntoCache) {
     auto batch_resource     = createBatchKVCacheResource(2, 3, 4);
     auto complete_token_ids = createCompleteTokenIds(2, seq_length);
 
-    MallocInfo malloc_info(batch_resource, complete_token_ids);
+    MallocInfo malloc_info{batch_resource, complete_token_ids};
     malloc_info.common_seq_len                              = 16;
     malloc_info.batch_kv_cache_resource->enable_reuse_cache = false;
     auto malloc_result1                                     = allocator_->malloc(malloc_info);
@@ -583,7 +583,7 @@ TEST_F(HybridLayerKVCacheAllocatorTest, InsertIntoCache) {
 
     // batch 0: 12个block，9个block可以insert to cache。
     // batch 1: 12个block，在前面都insert to cache过了。
-    InsertInfo insert_info1(batch_resource, complete_token_ids, false);
+    InsertInfo insert_info1{batch_resource, complete_token_ids, false};
     auto       result = allocator_->insertIntoCache(insert_info1);
     EXPECT_TRUE(result.success);
     ASSERT_EQ(block_cache->size(), 9);
@@ -593,7 +593,7 @@ TEST_F(HybridLayerKVCacheAllocatorTest, InsertIntoCache) {
     // batch 1: 12个block，在前面都insert to cache过了。
     seq_length                      = 17;
     auto       complete_token_ids_2 = createCompleteTokenIds(2, seq_length);
-    InsertInfo insert_info2(batch_resource, complete_token_ids_2, false);
+    InsertInfo insert_info2{batch_resource, complete_token_ids_2, false};
     auto       result2 = allocator_->insertIntoCache(insert_info2);
     EXPECT_TRUE(result2.success);
     ASSERT_EQ(block_cache->size(), 12);
@@ -610,11 +610,11 @@ TEST_F(HybridLayerKVCacheAllocatorTest, InsertIntoCacheAsResident) {
     auto batch_resource     = createBatchKVCacheResource(2, 3, 4);
     auto complete_token_ids = createCompleteTokenIds(2, seq_length);
 
-    MallocInfo malloc_info(batch_resource, complete_token_ids);
+    MallocInfo malloc_info{batch_resource, complete_token_ids};
     malloc_info.common_seq_len = 16;
     allocator_->malloc(malloc_info);
 
-    InsertInfo insert_info(batch_resource, complete_token_ids, true);
+    InsertInfo insert_info{batch_resource, complete_token_ids, true};
     auto       result = allocator_->insertIntoCache(insert_info);
 
     EXPECT_TRUE(result.success);
@@ -626,7 +626,7 @@ TEST_F(HybridLayerKVCacheAllocatorTest, MaxSeqLen) {
     allocator_  = std::make_shared<HybridLayerKVCacheAllocator>(config, device_);
     allocator_->init();
 
-    EXPECT_EQ(allocator_->maxSeqLen(), (10 - 1) * 8);  // block_num * seq_size_per_block
+    EXPECT_EQ(allocator_->maxAvailableTokensNum(), (10 - 1) * 8);  // block_num * seq_size_per_block
 }
 
 TEST_F(HybridLayerKVCacheAllocatorTest, MallocWithZeroSeqLength) {
@@ -638,7 +638,7 @@ TEST_F(HybridLayerKVCacheAllocatorTest, MallocWithZeroSeqLength) {
     auto batch_resource     = createBatchKVCacheResource(1, 3);
     auto complete_token_ids = createCompleteTokenIds(1, 0);
 
-    MallocInfo malloc_info(batch_resource, complete_token_ids);
+    MallocInfo malloc_info{batch_resource, complete_token_ids};
     auto       result = allocator_->malloc(malloc_info);
     EXPECT_TRUE(result.success);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_blocks);
@@ -653,7 +653,7 @@ TEST_F(HybridLayerKVCacheAllocatorTest, FreeEmptyBatchResource) {
     auto batch_resource     = createBatchKVCacheResource(0);
     auto complete_token_ids = createCompleteTokenIds(0, 0);
 
-    FreeInfo free_info(batch_resource, complete_token_ids);
+    FreeInfo free_info{batch_resource, complete_token_ids};
     allocator_->free(free_info);
 
     EXPECT_EQ(allocator_->freeBlocksNum(), total_blocks);
