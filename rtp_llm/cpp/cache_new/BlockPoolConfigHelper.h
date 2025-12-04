@@ -23,6 +23,10 @@ public:
         config.layout     = LAYER_FIRST;
         config.total_size = static_cast<size_t>(layer_num) * block_num * block_size;
 
+        // For generic layer-first configs without KVCacheSpec, assume an even K/V split.
+        config.k_block_size = block_size / 2;
+        config.v_block_size = block_size - config.k_block_size;
+
         return config;
     }
 
