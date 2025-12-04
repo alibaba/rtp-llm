@@ -196,7 +196,9 @@ TEST_F(BlockPoolTest, ConvertIndexToAddrLayerFirst) {
             auto addr_info = block_pool_->convertIndexToAddr(layer, block);
             EXPECT_NE(addr_info.k_addr, nullptr);
             EXPECT_NE(addr_info.v_addr, nullptr);
-            EXPECT_EQ(addr_info.k_addr, addr_info.v_addr);
+
+            size_t diff = reinterpret_cast<size_t>(addr_info.v_addr) - reinterpret_cast<size_t>(addr_info.k_addr);
+            EXPECT_EQ(diff, config.k_block_size);
         }
     }
 }

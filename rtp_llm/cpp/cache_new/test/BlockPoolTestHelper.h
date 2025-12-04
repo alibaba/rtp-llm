@@ -15,7 +15,10 @@ createTestConfig(MemoryLayout layout = LAYER_FIRST, size_t k_block_size = 512, s
     config.block_num  = 10;
     config.block_size = 1024;
     config.layout     = layout;
-    config.total_size = config.layer_num * config.block_num * config.block_size;
+
+    config.total_size   = config.layer_num * config.block_num * config.block_size;
+    config.k_block_size = config.block_size / 2;
+    config.v_block_size = config.block_size - config.k_block_size;
 
     return config;
 }

@@ -274,11 +274,18 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ConvertIndexToAddr) {
     allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config, device_);
     allocator_->init();
 
+    auto& spec = config.cache_specs[0];
+
     for (int layer_id = 0; layer_id < config.layer_num; ++layer_id) {
         for (int block_id = 0; block_id < 3; ++block_id) {
             auto addr_info = allocator_->convertIndexToAddr(layer_id, block_id);
             EXPECT_NE(addr_info.k_addr, nullptr);
             EXPECT_NE(addr_info.v_addr, nullptr);
+
+            size_t expected_diff = spec->k_block_size();
+            size_t actual_diff =
+                reinterpret_cast<size_t>(addr_info.v_addr) - reinterpret_cast<size_t>(addr_info.k_addr);
+            EXPECT_EQ(actual_diff, expected_diff);
         }
     }
 }
@@ -325,14 +332,14 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockCopySingle) {
     for (int layer_id = 0; layer_id < config.layer_num; ++layer_id) {
         auto src_addr = allocator_->convertIndexToAddr(layer_id, src_block);
         ASSERT_NE(src_addr.k_addr, nullptr) << "K addr is null for layer " << layer_id << ", block " << src_block;
-        ASSERT_NE(src_addr.v_addr, nullptr) << "V addr is null for layer " << layer_id << ", block " << src_block;
+        // v_addr is not used for layer-first layout.
 
         auto dst_addr = allocator_->convertIndexToAddr(layer_id, dst_block);
         ASSERT_NE(dst_addr.k_addr, nullptr) << "K addr is null for layer " << layer_id << ", block " << dst_block;
-        ASSERT_NE(dst_addr.v_addr, nullptr) << "V addr is null for layer " << layer_id << ", block " << dst_block;
 
-        auto* k_data = static_cast<uint8_t*>(src_addr.k_addr);
-        auto* v_data = static_cast<uint8_t*>(src_addr.v_addr);
+        auto* base   = static_cast<uint8_t*>(src_addr.k_addr);
+        auto* k_data = base;
+        auto* v_data = base + k_block_size;
 
         for (size_t i = 0; i < k_block_size; ++i) {
             k_data[i] = static_cast<uint8_t>((layer_id * 100 + src_block * 10 + i) % 256);
@@ -348,10 +355,12 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockCopySingle) {
         auto src_addr = allocator_->convertIndexToAddr(layer_id, src_block);
         auto dst_addr = allocator_->convertIndexToAddr(layer_id, dst_block);
 
-        auto* src_k_data = static_cast<uint8_t*>(src_addr.k_addr);
-        auto* dst_k_data = static_cast<uint8_t*>(dst_addr.k_addr);
-        auto* src_v_data = static_cast<uint8_t*>(src_addr.v_addr);
-        auto* dst_v_data = static_cast<uint8_t*>(dst_addr.v_addr);
+        auto* src_base   = static_cast<uint8_t*>(src_addr.k_addr);
+        auto* dst_base   = static_cast<uint8_t*>(dst_addr.k_addr);
+        auto* src_k_data = src_base;
+        auto* dst_k_data = dst_base;
+        auto* src_v_data = src_base + k_block_size;
+        auto* dst_v_data = dst_base + k_block_size;
 
         for (size_t i = 0; i < k_block_size; ++i) {
             EXPECT_EQ(dst_k_data[i], src_k_data[i]) << "K cache mismatch at layer " << layer_id << ", offset " << i;
@@ -381,10 +390,10 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyVector) {
         for (int layer_id = 0; layer_id < config.layer_num; ++layer_id) {
             auto src_addr = allocator_->convertIndexToAddr(layer_id, pair.src);
             ASSERT_NE(src_addr.k_addr, nullptr);
-            ASSERT_NE(src_addr.v_addr, nullptr);
 
-            auto* k_data = static_cast<uint8_t*>(src_addr.k_addr);
-            auto* v_data = static_cast<uint8_t*>(src_addr.v_addr);
+            auto* base   = static_cast<uint8_t*>(src_addr.k_addr);
+            auto* k_data = base;
+            auto* v_data = base + k_block_size;
             for (size_t i = 0; i < k_block_size; ++i) {
                 k_data[i] = static_cast<uint8_t>((layer_id * 100 + pair.src * 10 + i) % 256);
             }
@@ -402,10 +411,12 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyVector) {
             auto src_addr = allocator_->convertIndexToAddr(layer_id, pair.src);
             auto dst_addr = allocator_->convertIndexToAddr(layer_id, pair.dst);
 
-            auto* src_k_data = static_cast<uint8_t*>(src_addr.k_addr);
-            auto* dst_k_data = static_cast<uint8_t*>(dst_addr.k_addr);
-            auto* src_v_data = static_cast<uint8_t*>(src_addr.v_addr);
-            auto* dst_v_data = static_cast<uint8_t*>(dst_addr.v_addr);
+            auto* src_base   = static_cast<uint8_t*>(src_addr.k_addr);
+            auto* dst_base   = static_cast<uint8_t*>(dst_addr.k_addr);
+            auto* src_k_data = src_base;
+            auto* dst_k_data = dst_base;
+            auto* src_v_data = src_base + k_block_size;
+            auto* dst_v_data = dst_base + k_block_size;
 
             for (size_t i = 0; i < k_block_size; ++i) {
                 EXPECT_EQ(dst_k_data[i], src_k_data[i]) << "K cache mismatch at block pair (" << pair.src << "->"
@@ -444,8 +455,9 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyPointers) {
     for (const auto& pair : pairs) {
         for (int layer_id = 0; layer_id < config.layer_num; ++layer_id) {
             auto  src_addr = allocator_->convertIndexToAddr(layer_id, pair.src);
-            auto* k_data   = static_cast<uint8_t*>(src_addr.k_addr);
-            auto* v_data   = static_cast<uint8_t*>(src_addr.v_addr);
+            auto* base     = static_cast<uint8_t*>(src_addr.k_addr);
+            auto* k_data   = base;
+            auto* v_data   = base + k_block_size;
             for (size_t i = 0; i < k_block_size; ++i) {
                 k_data[i] = static_cast<uint8_t>((layer_id * 50 + pair.src * 20 + i) % 256);
             }
@@ -462,10 +474,12 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyPointers) {
             auto src_addr = allocator_->convertIndexToAddr(layer_id, pair.src);
             auto dst_addr = allocator_->convertIndexToAddr(layer_id, pair.dst);
 
-            auto* src_k_data = static_cast<uint8_t*>(src_addr.k_addr);
-            auto* dst_k_data = static_cast<uint8_t*>(dst_addr.k_addr);
-            auto* src_v_data = static_cast<uint8_t*>(src_addr.v_addr);
-            auto* dst_v_data = static_cast<uint8_t*>(dst_addr.v_addr);
+            auto* src_base   = static_cast<uint8_t*>(src_addr.k_addr);
+            auto* dst_base   = static_cast<uint8_t*>(dst_addr.k_addr);
+            auto* src_k_data = src_base;
+            auto* dst_k_data = dst_base;
+            auto* src_v_data = src_base + k_block_size;
+            auto* dst_v_data = dst_base + k_block_size;
 
             EXPECT_EQ(memcmp(dst_k_data, src_k_data, k_block_size), 0)
                 << "K cache mismatch for block pair (" << pair.src << "->" << pair.dst << "), layer " << layer_id;
@@ -492,8 +506,9 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyBuffer) {
         int src_block = data[i];
         for (int layer_id = 0; layer_id < config.layer_num; ++layer_id) {
             auto  src_addr = allocator_->convertIndexToAddr(layer_id, src_block);
-            auto* k_data   = static_cast<uint8_t*>(src_addr.k_addr);
-            auto* v_data   = static_cast<uint8_t*>(src_addr.v_addr);
+            auto* base     = static_cast<uint8_t*>(src_addr.k_addr);
+            auto* k_data   = base;
+            auto* v_data   = base + k_block_size;
             for (size_t j = 0; j < k_block_size; ++j) {
                 k_data[j] = static_cast<uint8_t>((layer_id * 70 + src_block * 15 + j) % 256);
             }
@@ -512,10 +527,12 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyBuffer) {
             auto src_addr = allocator_->convertIndexToAddr(layer_id, src_block);
             auto dst_addr = allocator_->convertIndexToAddr(layer_id, dst_block);
 
-            auto* src_k_data = static_cast<uint8_t*>(src_addr.k_addr);
-            auto* dst_k_data = static_cast<uint8_t*>(dst_addr.k_addr);
-            auto* src_v_data = static_cast<uint8_t*>(src_addr.v_addr);
-            auto* dst_v_data = static_cast<uint8_t*>(dst_addr.v_addr);
+            auto* src_base   = static_cast<uint8_t*>(src_addr.k_addr);
+            auto* dst_base   = static_cast<uint8_t*>(dst_addr.k_addr);
+            auto* src_k_data = src_base;
+            auto* dst_k_data = dst_base;
+            auto* src_v_data = src_base + k_block_size;
+            auto* dst_v_data = dst_base + k_block_size;
 
             EXPECT_EQ(memcmp(dst_k_data, src_k_data, k_block_size), 0)
                 << "K cache mismatch for block pair (" << src_block << "->" << dst_block << "), layer " << layer_id;
