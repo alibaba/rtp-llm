@@ -21,93 +21,7 @@ sys.path.append(os.path.join(str(CUR_PATH), ".."))
 from rtp_llm.distribute.worker_info import WorkerInfo, g_parallel_info
 from rtp_llm.server.server_args.server_args import EnvArgumentParser, setup_args
 from rtp_llm.utils.concurrency_controller import init_controller
-
-
-class ProcessManager:
-    """Manages server processes and handles graceful shutdown"""
-
-    def __init__(self):
-        self.backend_process = None
-        self.frontend_processes = []
-        self._setup_signal_handlers()
-
-    def _setup_signal_handlers(self):
-        """Setup signal handlers for graceful shutdown"""
-        signal.signal(signal.SIGTERM, self._signal_handler)
-        signal.signal(signal.SIGINT, self._signal_handler)
-
-    def _signal_handler(self, signum, frame):
-        """Handle termination signals gracefully"""
-        logging.info(f"Received signal {signum}, starting graceful shutdown...")
-        self._graceful_shutdown()
-        sys.exit(0)
-
-    def _graceful_shutdown(self, timeout=50):
-        """Perform graceful shutdown of all managed processes"""
-        all_processes = []
-        if self.backend_process:
-            all_processes.append(self.backend_process)
-        all_processes.extend(self.frontend_processes)
-
-        if not all_processes:
-            return
-
-        # Send SIGTERM to all processes
-        for proc in all_processes:
-            if proc.is_alive():
-                logging.info(f"Sending SIGTERM to process {proc.pid}")
-                proc.terminate()
-
-        # Wait for graceful shutdown
-        start_time = time.time()
-        while (
-            any(proc.is_alive() for proc in all_processes)
-            and (time.time() - start_time) < timeout
-        ):
-            time.sleep(1)
-
-        # Force kill remaining processes
-        for proc in all_processes:
-            if proc.is_alive():
-                logging.warning(f"Force killing process {proc.pid}")
-                proc.kill()
-
-        logging.info("Graceful shutdown completed")
-
-    def set_backend_process(self, process):
-        """Set the backend process"""
-        self.backend_process = process
-
-    def set_frontend_processes(self, processes):
-        """Set the frontend processes"""
-        self.frontend_processes = processes if processes else []
-
-    def monitor_and_release_processes(self):
-        """Monitor all managed processes and handle failures"""
-        all_processes = []
-        if self.backend_process:
-            all_processes.append(self.backend_process)
-        all_processes.extend(self.frontend_processes)
-
-        logging.info(f"all process = {all_processes}")
-
-        while any(proc.is_alive() for proc in all_processes):
-            if not all(proc.is_alive() for proc in all_processes):
-                logging.error(f"server monitor : some process is not alive, exit!")
-                for proc in all_processes:
-                    try:
-                        proc.terminate()
-                    except Exception as e:
-                        logging.error(
-                            f"catch exception when process terminate : {str(e)}"
-                        )
-            time.sleep(1)
-
-        # Join all processes
-        for proc in all_processes:
-            proc.join()
-
-        logging.info("all process exit")
+from rtp_llm.utils.process_manager import ServerProcessManager
 
 
 def check_server_health(server_port):
@@ -126,7 +40,7 @@ def check_server_health(server_port):
         return False
 
 
-def start_backend_server_impl(global_controller):
+def start_backend_server_impl(global_controller, process_manager=None):
     from rtp_llm.start_backend_server import start_backend_server
 
     profiling_debug_config = ProfilingDebugLoggingConfig()
@@ -147,7 +61,9 @@ def start_backend_server_impl(global_controller):
     backend_server_port = WorkerInfo.backend_server_port_offset(0, start_port)
     while True:
         if not backend_process.is_alive():
-            monitor_and_release_process(backend_process, None)
+            logging.error("Backend server is not alive, triggering graceful shutdown")
+            if process_manager:
+                process_manager.graceful_shutdown()
             raise Exception("backend server is not alive")
 
         try:
@@ -163,7 +79,9 @@ def start_backend_server_impl(global_controller):
     return backend_process
 
 
-def start_frontend_server_impl(global_controller, backend_process):
+def start_frontend_server_impl(
+    global_controller, backend_process, process_manager=None
+):
     from rtp_llm.start_frontend_server import start_frontend_server
 
     server_config = ServerConfig()
@@ -203,7 +121,9 @@ def start_frontend_server_impl(global_controller, backend_process):
 
     while True:
         if not all(proc.is_alive() for proc in frontend_processes):
-            monitor_and_release_process(backend_process, frontend_processes)
+            logging.error("Frontend server is not alive, triggering graceful shutdown")
+            if process_manager:
+                process_manager.graceful_shutdown()
             raise Exception("frontend server is not alive")
 
         try:
@@ -403,7 +323,7 @@ def start_server(parser: EnvArgumentParser, args: argparse.Namespace):
         logging.warning(str(e))
 
     global_controller = init_controller()
-    process_manager = ProcessManager()
+    process_manager = ServerProcessManager()
     get_model_type_and_update_env(parser, args)
 
     # Auto-configure DeepEP settings based on deployment scenario
@@ -419,13 +339,15 @@ def start_server(parser: EnvArgumentParser, args: argparse.Namespace):
         backend_process = None
         if os.environ.get("ROLE_TYPE", "") != "FRONTEND":
             logging.info("start backend server")
-            backend_process = start_backend_server_impl(global_controller)
+            backend_process = start_backend_server_impl(
+                global_controller, process_manager
+            )
             process_manager.set_backend_process(backend_process)
             logging.info(f"backend server process = {backend_process}")
 
         logging.info("start frontend server")
         frontend_process = start_frontend_server_impl(
-            global_controller, backend_process
+            global_controller, backend_process, process_manager
         )
         process_manager.set_frontend_processes(frontend_process)
         logging.info(f"frontend server process = {frontend_process}")

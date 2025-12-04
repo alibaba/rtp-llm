@@ -26,10 +26,28 @@ from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
     set_global_controller,
 )
+from rtp_llm.utils.process_manager import BackendRankProcessManager
 from rtp_llm.utils.util import copy_gemm_config
 
 
 def local_rank_start(global_controller: ConcurrencyController):
+    """Start local rank with proper signal handling for graceful shutdown"""
+
+    def signal_handler(signum, frame):
+        logging.info(
+            f"Local rank received signal {signum}, shutting down gracefully..."
+        )
+        if app:
+            try:
+                app.shutdown()  # Graceful shutdown if available
+            except AttributeError:
+                logging.info("App does not support graceful shutdown, exiting...")
+        sys.exit(0)
+
+    # Setup signal handlers for graceful shutdown
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+
     copy_gemm_config()
     app = None
     ## collect all args and envs.
@@ -111,113 +129,6 @@ def _create_rank_processes(global_controller: ConcurrencyController) -> List[Pro
     return processes
 
 
-class BackendProcessManager:
-    """Manages backend rank processes for multi-TP scenarios"""
-
-    DEFAULT_SHUTDOWN_TIMEOUT = 50
-    MONITOR_INTERVAL = 1
-
-    def __init__(self):
-        self.processes: List[Process] = []
-        self.shutdown_requested = False
-        self.terminated = False
-        self.first_dead_time = 0
-        self._setup_signal_handlers()
-
-    def _setup_signal_handlers(self):
-        """Setup signal handlers for graceful shutdown"""
-        signal.signal(signal.SIGTERM, self._signal_handler)
-
-    def _signal_handler(self, signum, frame):
-        """Handle termination signals gracefully"""
-        logging.info(f"Backend server received signal {signum}, initiating shutdown...")
-        self.shutdown_requested = True
-
-    def set_processes(self, processes: List[Process]):
-        """Set the processes to manage"""
-        self.processes = processes
-
-    def _terminate_processes(self):
-        """Terminate all rank processes"""
-        if self.terminated:
-            return
-
-        logging.info("Shutdown requested, terminating rank processes...")
-        for proc in self.processes:
-            if proc.is_alive():
-                proc.terminate()
-        self.terminated = True
-        self.first_dead_time = time.time()
-
-    def _force_kill_processes(self):
-        """Force kill processes after timeout"""
-        logging.warning(
-            f"Graceful shutdown timeout ({self.DEFAULT_SHUTDOWN_TIMEOUT}s), force killing..."
-        )
-        for proc in self.processes:
-            if proc.is_alive():
-                os.kill(proc.pid, signal.SIGKILL)
-
-    def _monitor_processes(self):
-        """Monitor process health and handle failures"""
-        while any(proc.is_alive() for proc in self.processes):
-            # Check shutdown signal
-            if self.shutdown_requested and not self.terminated:
-                self._terminate_processes()
-
-            # Check sub-process status
-            elif (
-                not all(proc.is_alive() for proc in self.processes)
-                and not self.terminated
-            ):
-                if self.first_dead_time == 0:
-                    self.first_dead_time = time.time()
-                logging.error("Some backend proc died unexpectedly, terminating all...")
-                self._terminate_processes()
-
-            # Force kill after timeout
-            if (
-                self.terminated
-                and (time.time() - self.first_dead_time) > self.DEFAULT_SHUTDOWN_TIMEOUT
-            ):
-                self._force_kill_processes()
-                break
-
-            time.sleep(self.MONITOR_INTERVAL)
-
-    def monitor_and_join(self):
-        """Monitor process health and join processes when complete"""
-        # Monitor processes
-        while any(proc.is_alive() for proc in self.processes):
-            # Check shutdown signal
-            if self.shutdown_requested and not self.terminated:
-                self._terminate_processes()
-
-            # Check sub-process status
-            elif (
-                not all(proc.is_alive() for proc in self.processes)
-                and not self.terminated
-            ):
-                if self.first_dead_time == 0:
-                    self.first_dead_time = time.time()
-                logging.error("Some backend proc died unexpectedly, terminating all...")
-                self._terminate_processes()
-
-            # Force kill after timeout
-            if (
-                self.terminated
-                and (time.time() - self.first_dead_time) > self.DEFAULT_SHUTDOWN_TIMEOUT
-            ):
-                self._force_kill_processes()
-                break
-
-            time.sleep(self.MONITOR_INTERVAL)
-
-        # Join all processes
-        for proc in self.processes:
-            proc.join()
-
-
 def multi_rank_start(global_controller: ConcurrencyController):
     """Start multi-rank backend server with proper process management"""
     try:
@@ -235,7 +146,7 @@ def multi_rank_start(global_controller: ConcurrencyController):
         return processes
 
     # Create manager and monitor processes
-    manager = BackendProcessManager()
+    manager = BackendRankProcessManager()
     manager.set_processes(processes)
     manager.monitor_and_join()
 
