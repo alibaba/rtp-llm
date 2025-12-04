@@ -63,7 +63,6 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     model_input.k_block_size       = k_block_size_;
     model_input.v_block_size       = v_block_size_;
     model_input.seq_size_per_block = seq_size_per_block_;
-    model_input.scale_block_size   = scale_block_size_;
     model_input.pd_separation      = role_type_ == RoleType::PREFILL;
     model_input.warmup             = warm_up_;
     model_input.decode_entrance    = decode_entrance_;

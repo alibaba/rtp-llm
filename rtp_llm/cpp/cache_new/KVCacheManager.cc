@@ -20,37 +20,24 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
                                bool                               warmup,
                                const kmonitor::MetricsReporterPtr metrics_reporter,
                                const GptInitParameter&            params):
+    // TODO, warmup metrics_reporter params 都没有用起来
     config_(config), device_(device), metrics_reporter_(metrics_reporter), params_(params) {}
 
 KVCacheManager::~KVCacheManager() {}
 
 bool KVCacheManager::init() {
-    bool multiple_types = config_.cache_specs.size() > 1;
-    if (multiple_types) {
-        RTP_LLM_LOG_ERROR("multiple types not supported");
-        return false;
-    }
-
-    if (config_.cache_specs.empty()) {
-        RTP_LLM_LOG_ERROR("no cache_specs");
-        return false;
-    }
+    RTP_LLM_CHECK_WITH_INFO(config_.cache_specs.size() == 1, "cache specs size should be 1");
 
     auto& spec = config_.cache_specs[0];
     if (spec->type == rtp_llm::KVCacheType::MultiHeadAttention
         || spec->type == rtp_llm::KVCacheType::MultiHeadLatentAttention) {
         allocator_ = std::make_shared<rtp_llm::SingleTypeKVCacheAllocator>(config_, device_, AllocationType::DEVICE);
-        if (!allocator_->init()) {
-            RTP_LLM_LOG_ERROR("SingleTypeKVCacheAllocator init failed");
-            allocator_.reset();
-            return false;
-        }
+        RTP_LLM_CHECK_WITH_INFO(allocator_->init(), "SingleTypeKVCacheAllocator init failed");
         return true;
     } else {
-        RTP_LLM_LOG_ERROR("SingleTypeKVCacheAllocator only support Full Attention");
+        RTP_LLM_CHECK_WITH_INFO(false, "SingleTypeKVCacheAllocator only support Full Attention");
         return false;
     }
-    return false;
 }
 
 size_t KVCacheManager::availableTokensNum() const {
@@ -66,25 +53,14 @@ CacheLayerLayout KVCacheManager::layerCacheBase() const {
 }
 
 KVCacheBuffer KVCacheManager::kvCacheBuffer() const {
-    // Delegate to allocator implementation
-    if (!allocator_) {
-        RTP_LLM_LOG_ERROR("kvCacheBuffer called before KVCacheManager initialized");
-        return {};
-    }
     return allocator_->kvCacheBuffer();
 }
 
 void KVCacheManager::regUserMr(size_t model_id) {
-    if (!allocator_) {
-        return;
-    }
     allocator_->regUserMr(model_id);
 }
 
 BlockAddrInfo KVCacheManager::convertIndexToAddr(int block_index, int layer_id) const {
-    if (!allocator_) {
-        return {};
-    }
     return allocator_->convertIndexToAddr(layer_id, block_index);
 }
 
@@ -92,11 +68,6 @@ bool KVCacheManager::setKVBlockValue(int              block_index,
                                      int              layer_id,
                                      rtp_llm::Buffer& k_buffer,
                                      rtp_llm::Buffer& v_buffer) {
-    if (!allocator_ || !device_) {
-        RTP_LLM_LOG_ERROR("setKVBlockValue called before KVCacheManager initialized");
-        return false;
-    }
-
     // Basic size/type validation to prevent out-of-bounds copy
     auto&  spec             = config_.cache_specs[0];
     size_t expected_k_bytes = spec->k_block_size();
@@ -150,11 +121,6 @@ bool KVCacheManager::setKVBlockValue(int              block_index,
 }
 
 bool KVCacheManager::setKVBlockValue(int block_index, rtp_llm::Buffer& k_buffer, rtp_llm::Buffer& v_buffer) {
-    if (!allocator_ || !device_) {
-        RTP_LLM_LOG_ERROR("setKVBlockValue called before KVCacheManager initialized");
-        return false;
-    }
-
     if (block_index < 0 || block_index >= config_.block_num) {
         RTP_LLM_LOG_WARNING("Invalid block_index: %d, valid range: [0, %d)", block_index, config_.block_num);
         return false;
@@ -171,8 +137,6 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
     RTP_LLM_CHECK(malloc_info.batch_kv_cache_resource && malloc_info.complete_token_ids);
 
     const int seq_size_per_block = config_.seq_size_per_block;
-
-    // Build or update cache_keys for each batch based on current complete_token_ids.
     if (!malloc_info.batch_kv_cache_resource->first_fill_finished) {
         initCacheKeys(malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids, seq_size_per_block);
         malloc_info.batch_kv_cache_resource->first_fill_finished = true;
@@ -194,7 +158,6 @@ InsertResult KVCacheManager::insertIntoCache(const InsertInfo& insert_info) {
 }
 
 KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const {
-    // return allocator_->getKVCacheInfo(latest_version, need_cache_keys);
     return {0, 0, 0, {}, latest_version};
 }
 
@@ -210,8 +173,8 @@ size_t KVCacheManager::totalBlocksNum() const {
     return allocator_->totalBlocksNum();
 }
 
-size_t KVCacheManager::maxSeqLen() const {
-    return allocator_->maxSeqLen();
+size_t KVCacheManager::maxAvailableTokensNum() const {
+    return allocator_->maxAvailableTokensNum();
 }
 
 void KVCacheManager::blockCopy(int src_block_index, int dest_block_index) {

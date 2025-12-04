@@ -183,7 +183,7 @@ size_t BlockPool::availableBlocksNum() const {
 BlockAddrInfo BlockPool::convertIndexToAddr(int layer_id, int block_id) const {
     if (!layout_strategy_) {
         RTP_LLM_LOG_ERROR("Layout strategy not initialized");
-        return {nullptr, nullptr, nullptr, nullptr};
+        return {nullptr, nullptr};
     }
     return layout_strategy_->convertIndexToAddr(layer_id, block_id);
 }
@@ -215,7 +215,7 @@ BlockBufferPtrInfo BlockPool::convertIndexToBuffer(int layer_id, int block_id) c
 KVCacheBuffer BlockPool::kvCacheBuffer() const {
     if (!layout_strategy_) {
         RTP_LLM_LOG_ERROR("Layout strategy not initialized for kvCacheBuffer");
-        return KVCacheBuffer{nullptr, nullptr, nullptr, nullptr};
+        return KVCacheBuffer{nullptr, nullptr};
     }
     return layout_strategy_->kvCacheBuffer();
 }

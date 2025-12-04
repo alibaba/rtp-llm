@@ -29,7 +29,7 @@ public:
     size_t availableBlocksNum() const override;
     size_t availableTokensNum() const override;
     size_t totalBlocksNum() const override;
-    size_t maxSeqLen() const override;
+    size_t maxAvailableTokensNum() const override;
 
     bool updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                        const std::vector<int>&        block_src_batch,

@@ -31,7 +31,7 @@ public:
     size_t      availableBlocksNum() const;
     size_t      availableTokensNum() const;
     size_t      totalBlocksNum() const;
-    size_t      maxSeqLen() const;
+    size_t      maxAvailableTokensNum() const;
     KVCacheInfo getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
 
     // For backward compatibility with old code
