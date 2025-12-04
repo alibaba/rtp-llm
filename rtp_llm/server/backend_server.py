@@ -15,7 +15,7 @@ from pydantic import BaseModel
 
 from rtp_llm.access_logger.access_logger import AccessLogger
 from rtp_llm.async_decoder_engine.base_engine import BaseEngine
-from rtp_llm.config.py_config_modules import PyEnvConfigs, StaticConfig
+from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.task_type import TaskType
 from rtp_llm.distribute.gang_server import GangServer
 from rtp_llm.distribute.worker_info import g_parallel_info
@@ -52,7 +52,10 @@ class BackendServer(object):
                 os.environ["NCCL_P2P_DISABLE"] = "1"
         else:
             os.environ["NCCL_P2P_DISABLE"] = "1"
-        self._access_logger = AccessLogger()
+        self._access_logger = AccessLogger(
+            py_env_configs.server_config.rank_id,
+            py_env_configs.server_config.frontend_server_id
+        )
         self._gang_server = GangServer(py_env_configs)
         self._lora_manager = None
         self.thread_lock_ = threading.Lock()
