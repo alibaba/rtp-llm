@@ -516,7 +516,7 @@ void FfnDisAggregateConfig::update_from_env_for_test() {
     attention_tp_size       = autil::EnvUtil::getEnv("ATTENTION_TP_SIZE", 1);
     attention_dp_size       = autil::EnvUtil::getEnv("ATTENTION_DP_SIZE", 1);
     ffn_tp_size             = autil::EnvUtil::getEnv("FFN_TP_SIZE", 1);
-    ffn_dp_size             = autil::EnvUtil::getEnv("FFN_DP_SIZE", 1);
+    ffn_ep_size             = autil::EnvUtil::getEnv("FFN_EP_SIZE", 1);
     is_ffn_rank             = bool_from_env_for_test("IS_FFN_RANK", false);
 }
 
@@ -525,7 +525,7 @@ std::string FfnDisAggregateConfig::to_string() const {
     oss << "enable_ffn_disaggregate: " << enable_ffn_disaggregate << "\n";
     if (enable_ffn_disaggregate) {
         oss << "attention_tp_size: " << attention_tp_size << " attention_dp_size: " << attention_dp_size << "\n"
-            << "ffn_tp_size: " << ffn_tp_size << " ffn_dp_size: " << ffn_dp_size << "\n"
+            << "ffn_tp_size: " << ffn_tp_size << " ffn_ep_size: " << ffn_ep_size << "\n"
             << "is_ffn_rank: " << is_ffn_rank;
     }
     return oss.str();

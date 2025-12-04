@@ -49,7 +49,6 @@ class ModelLoader:
         compute_dtype: torch.dtype,
         database: BaseDatabase,
         py_env_configs: PyEnvConfigs = StaticConfig,
-        is_attn_model: bool = False,
     ):
         self._task_type = task_type
         self._weights_info = weights_info
@@ -61,7 +60,6 @@ class ModelLoader:
         use_fp32 = py_env_configs.model_config.use_float32
         if use_fp32:
             compute_dtype = torch.float32
-        self._is_attn_model = is_attn_model
         self._init_eplb_config(self._weights_info, compute_dtype)
 
         self._load_config: LoadConfig = self._weights_info.create_load_config(
@@ -313,7 +311,7 @@ class ModelLoader:
         return model_weights
 
     def prepare_weights(self, device: str):
-        if self._load_config.vit_separation != 1 and not self._is_attn_model:
+        if self._load_config.vit_separation != 1:
             for id in range(self._load_config.num_layers):
                 results = self._load_layer_weights(id, device)
                 for name, tensor in results.items():
@@ -585,7 +583,6 @@ def get_model_loader(
     misc_weights_info: Optional[CustomAtomicWeight],
     compute_dtype: torch.dtype,
     database: BaseDatabase,
-    is_attn_model: bool,
 ) -> ModelLoader:
     if weights_info._head_num % weights_info.tp_size != 0:
         raise Exception(
@@ -606,5 +603,4 @@ def get_model_loader(
         misc_weights_info,
         compute_dtype,
         database,
-        is_attn_model=is_attn_model,
     )

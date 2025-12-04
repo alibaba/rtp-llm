@@ -45,6 +45,7 @@ struct DeviceInitParams {
     int64_t     tp_master_port     = 0;
     int64_t     dp_tp_master_port  = 0;
     int64_t     ffn_tp_master_port = 0;
+    int64_t     afd_master_port    = 0;
 
     // size (bytes) of device memory preallocated and managed by MemoryTracker.
     // negative value means reserving all free memory but remains abs(value) bytes.
@@ -67,6 +68,11 @@ struct DeviceInitParams {
     int64_t num_experts    = 0;
     int64_t extra_experts  = 0;
     bool    ffn_as_service = false;
+
+    // to init nccl for afd
+    size_t world_size              = 1;
+    size_t world_rank              = 0;
+    bool   enable_ffn_disaggregate = false;
 
     bool                         use_deepep_moe         = false;
     int                          user_deep_gemm_num_sm  = -1;
@@ -128,6 +134,10 @@ struct DeviceProperties {
     std::set<int> eagle3_selected_layer{1, 46, 90};
     // std::set<int> eagle3_selected_layer{0,1,2};
     bool ffn_as_service = false;
+
+    // for afd
+    size_t world_rank = 0;
+    size_t world_size = 1;
 };
 
 struct MemoryStatus {

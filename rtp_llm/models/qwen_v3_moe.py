@@ -9,6 +9,7 @@ from rtp_llm.models.qwen_v2 import QWenV2, QWenV2Weight
 from rtp_llm.models.qwen_v2_moe import Qwen2Moe, QWenV2MoeWeight
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeModel
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
+from rtp_llm.models_py.model_desc.qwen3_moe_afd import Qwen3MoeAfdModel
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
@@ -89,7 +90,10 @@ class Qwen3Moe(Qwen2Moe):
         return config
 
     def _create_python_model(self) -> Optional[GptModelBase]:
-        self.py_model = GenericMoeModel(self.config, self.weight)
+        if self.config.gpt_init_params.ffn_disaggregate_config.enable_ffn_disaggregate:
+            self.py_model = Qwen3MoeAfdModel(self.config, self.weight)
+        else:
+            self.py_model = GenericMoeModel(self.config, self.weight)
         return self.py_model
 
 

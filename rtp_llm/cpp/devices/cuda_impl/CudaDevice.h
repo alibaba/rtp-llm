@@ -339,6 +339,7 @@ private:
     NcclParam tp_nccl_param_;
     NcclParam dp_tp_nccl_param_;
     NcclParam ffn_tp_nccl_param_;
+    NcclParam afd_nccl_param_;
 
     GraphBase* graph_runner_{nullptr};
 

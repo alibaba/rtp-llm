@@ -291,7 +291,6 @@ class BaseModel(object):
             misc_weights_info,
             self.compute_dtype,
             self.database,
-            self.is_attn_model,
         )
 
     @staticmethod

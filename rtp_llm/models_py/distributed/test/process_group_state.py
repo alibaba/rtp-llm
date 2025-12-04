@@ -29,7 +29,7 @@ def init_distributed_environment(
     assert backend in ["nccl"], "backend current only supports nccl"
     ip = params.nccl_ip
     port = params.th_nccl_port
-    rank = params.dp_rank * params.tp_size + params.tp_rank
+    rank = params.parallelism_distributed_config.world_rank
     world_size = params.world_size
     local_rank = params.local_rank
     os.environ["TORCH_DIST_INIT_BARRIER"] = "1"

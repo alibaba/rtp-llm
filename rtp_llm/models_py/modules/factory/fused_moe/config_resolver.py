@@ -109,3 +109,27 @@ class MoeConfigResolver:
             Whether TP size equals EP size
         """
         return config.tp_size == config.ep_size
+
+    @staticmethod
+    def is_afd_enabled(config: GptInitModelParameters) -> bool:
+        """Check if AF disaggregate is enabled
+
+        Args:
+            config: Model initialization parameters
+
+        Returns:
+            Whether AF disaggregate is enabled
+        """
+        return config.ffn_disaggregate_config.enable_ffn_disaggregate
+
+    @staticmethod
+    def is_afd_ffn_rank(config: GptInitModelParameters) -> bool:
+        """Check if AF disaggregate FFN rank
+
+        Args:
+            config: Model initialization parameters
+
+        Returns:
+            Whether AF disaggregate FFN rank
+        """
+        return config.ffn_disaggregate_config.is_ffn_service

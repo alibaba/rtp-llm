@@ -43,8 +43,8 @@ class DisaggregateModelBase(GptModelBase):
             "ffn_tp_size must be 1",
         )
         check_with_info(
-            self.config.gpt_init_params.ffn_disaggregate_config.ffn_dp_size == 1,
-            "ffn_dp_size must be 1",
+            self.config.gpt_init_params.ffn_disaggregate_config.ffn_ep_size == 1,
+            "ffn_ep_size must be 1",
         )
         self.attn_dp_rank: List[int] = [
             i
@@ -191,7 +191,7 @@ class Qwen3GemmModel(DisaggregateModelBase):
             [dp_num, self.micro_batch_size], dtype=torch.int64, device=self.device
         )
         for idx, rank in enumerate(self.attn_dp_rank):
-            recv(micro_batch_split_info[idx], rank, Group.DP_AND_TP)
+            recv(micro_batch_split_info[idx], rank, Group.AFD)
         mirco_batch_sizes_list: List[List[int]] = (
             micro_batch_split_info.cpu().transpose(0, 1).tolist()
         )
@@ -209,7 +209,7 @@ class Qwen3GemmModel(DisaggregateModelBase):
             for rank_idx, rank in enumerate(self.attn_dp_rank):
                 size = mirco_batch_sizes_list[idx][rank_idx]
                 if size > 0:
-                    recv(input_ids[offset : offset + size], rank, Group.DP_AND_TP)
+                    recv(input_ids[offset : offset + size], rank, Group.AFD)
                     offset += size
         return input_ids_list, BatchSplitInfo(
             total_micro_batch_sizes, mirco_batch_sizes_list
@@ -219,7 +219,7 @@ class Qwen3GemmModel(DisaggregateModelBase):
         offset = 0
         for idx, size in enumerate(micro_batch_size_list):
             tensor_slice = t[offset : offset + size]
-            send(tensor_slice, self.attn_dp_rank[idx], Group.DP_AND_TP)
+            send(tensor_slice, self.attn_dp_rank[idx], Group.AFD)
             offset += size
 
     def recv_from_attention(
@@ -238,7 +238,7 @@ class Qwen3GemmModel(DisaggregateModelBase):
         )
 
         for idx, size in enumerate(mirco_batch_size_list):
-            recv(t[offset : offset + size], self.attn_dp_rank[idx], Group.DP_AND_TP)
+            recv(t[offset : offset + size], self.attn_dp_rank[idx], Group.AFD)
             offset += size
         return t
 
@@ -296,10 +296,10 @@ class Qwen3AttnModel(DisaggregateModelBase):
         send(
             tensor_to_send,
             self.ffn_service_rank,
-            Group.DP_AND_TP,
+            Group.AFD,
         )
         for input in micro_batch_split_info:
-            send(input.input_ids, self.ffn_service_rank, Group.DP_AND_TP)
+            send(input.input_ids, self.ffn_service_rank, Group.AFD)
 
     def recv_from_ffn_service(self, token_num: int) -> torch.Tensor:
         t = torch.empty(
@@ -314,7 +314,7 @@ class Qwen3AttnModel(DisaggregateModelBase):
             device=self.device,
             dtype=torch.half,
         )
-        recv(t, self.ffn_service_rank, Group.DP_AND_TP)
+        recv(t, self.ffn_service_rank, Group.AFD)
         return t
 
     def recv_final_from_ffn_service(self, token_num: int) -> torch.Tensor:
@@ -326,11 +326,11 @@ class Qwen3AttnModel(DisaggregateModelBase):
             device=self.device,
             dtype=torch.half,
         )
-        recv(t, self.ffn_service_rank, Group.DP_AND_TP)
+        recv(t, self.ffn_service_rank, Group.AFD)
         return t
 
     def send_to_ffn_service(self, out: torch.Tensor):
-        send(out, self.ffn_service_rank, Group.DP_AND_TP)
+        send(out, self.ffn_service_rank, Group.AFD)
 
     def forward_micro_batch(
         self, mirco_batch_inputs: List[PyModelInputs]

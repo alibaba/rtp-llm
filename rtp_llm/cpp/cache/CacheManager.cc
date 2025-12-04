@@ -126,7 +126,7 @@ void CacheManager::reportMetricsLoop() {
 void CacheManager::allocateAndSync() {
     const auto properties = device_->getDeviceProperties();
     size_t     world_size = properties.tp_size * properties.dp_size;
-    if (world_size > 1) {
+    if (world_size > 1 && !properties.ffn_as_service) {
         size_t    local_rank = properties.tp_size * properties.dp_rank + properties.tp_rank;
         BufferPtr block_num_infos =
             device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {world_size}, rtp_llm::AllocationType::HOST});
@@ -135,11 +135,10 @@ void CacheManager::allocateAndSync() {
         device_->allGather({{block_num_infos}, ParallelMode::DP_AND_TP});
         device_->syncCommunication(false);
         device_->syncAndCheck();
-        if (properties.ffn_as_service) {
-            config_.block_nums = 1;
-        } else {
-            config_.block_nums = *std::min_element(block_num_ptr, block_num_ptr + world_size);
-        }
+        config_.block_nums = *std::min_element(block_num_ptr, block_num_ptr + world_size);
+    }
+    if (properties.ffn_as_service) {
+        config_.block_nums = 1;
     }
     RTP_LLM_LOG_INFO("block nums is %d after tp sync", config_.block_nums);
 }

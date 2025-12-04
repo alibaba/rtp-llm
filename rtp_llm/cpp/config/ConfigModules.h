@@ -335,7 +335,7 @@ struct FfnDisAggregateConfig {
     int         attention_tp_size       = 1;
     int         attention_dp_size       = 1;
     int         ffn_tp_size             = 1;
-    int         ffn_dp_size             = 1;
+    int         ffn_ep_size             = 1;
     bool        is_ffn_rank             = false;
     std::string to_string() const;
     void        update_from_env_for_test();

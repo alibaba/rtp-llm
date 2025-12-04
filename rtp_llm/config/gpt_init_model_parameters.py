@@ -43,6 +43,7 @@ from rtp_llm.ops import (
     ConcurrencyConfig,
     DeviceResourceConfig,
     EplbMode,
+    FfnDisAggregateConfig,
     FIFOSchedulerConfig,
     FMHAConfig,
     GptInitParameter,
@@ -250,6 +251,7 @@ class GptInitModelParameters:
     dp_size: int
     dp_tp_nccl_port: int
     th_nccl_port: int
+    afd_nccl_port: int
     embedding_size: int
     enable_eplb: bool
     enable_fast_gen: bool
@@ -397,6 +399,7 @@ class GptInitModelParameters:
     misc_config: MiscellaneousConfig
     arpc_config: ArpcConfig
     grpc_config: GrpcConfig
+    ffn_disaggregate_config: FfnDisAggregateConfig
     model_specific_config: ModelSpecificConfig
     moe_config: MoeConfig
     parallelism_distributed_config: ParallelismDistributedConfig
@@ -446,6 +449,7 @@ class GptInitModelParameters:
         self.tp_nccl_port = g_master_info.tp_nccl_port
         self.dp_tp_nccl_port = g_master_info.dp_tp_nccl_port
         self.th_nccl_port = g_master_info.th_nccl_port
+        self.afd_nccl_port = g_master_info.afd_nccl_port
         self.ffn_tp_nccl_port = g_master_info.ffn_tp_nccl_port
         self.model_rpc_port = g_worker_info.rpc_server_port
         self.embedding_rpc_port = g_worker_info.embedding_rpc_server_port
@@ -1013,6 +1017,16 @@ class GptInitModelParameters:
         # PD Seperation
         self.decode_entrance = get_env_bool("DECODE_ENTRANCE", False)
 
+        # FfnDisAggregateConfig
+        self.gpt_init_params.ffn_disaggregate_config = FfnDisAggregateConfig(
+            enable_ffn_disaggregate=get_env_bool("ENABLE_FFN_DISAGGREGATE", False),
+            attention_tp_size=get_env_int("ATTENTION_TP_SIZE", 1),
+            attention_dp_size=get_env_int("ATTENTION_DP_SIZE", 1),
+            ffn_tp_size=get_env_int("FFN_TP_SIZE", 1),
+            ffn_ep_size=get_env_int("FFN_EP_SIZE", 1),
+            is_ffn_rank=get_env_bool("IS_FFN_RANK", False),
+        )
+
     def update_config_with_sparse_config(self, ckpt_path: str):
         sparse_config_file = None
         sparse_config = None
@@ -1035,7 +1049,11 @@ class GptInitModelParameters:
             self.is_sparse_head = True
 
     def update_inter_padding_size(self, tp_size: int, ep_size: int, dp_size: int):
-        if tp_size * dp_size != ep_size:
+        # AFD: Skip tp_size * dp_size == ep_size validation
+        if (
+            not self.ffn_disaggregate_config.enable_ffn_disaggregate
+            and tp_size * dp_size != ep_size
+        ):
             raise ValueError(
                 f"tp_size:{tp_size} * dp_size:{dp_size} != ep_size:{ep_size}"
             )
@@ -1127,6 +1145,33 @@ class GptInitModelParameters:
             f"model task type: {self.task_type}, use_kvcache: {self.use_kvcache}"
         )
 
+    def update_ffn_disaggregate_config(self):
+        if StaticConfig.ffn_disaggregate_config.enable_ffn_disaggregate:
+            if self.moe_style != 0:
+                assert (
+                    StaticConfig.ffn_disaggregate_config.ffn_tp_size == 1
+                ), "ffn_tp_size must be 1 in current moe AFD implementation"
+            else:
+                # dense模型的AFD 暂时先限制tp=1, 更多支持在python版本实现
+                assert (
+                    StaticConfig.ffn_disaggregate_config.ffn_tp_size == 1
+                    and StaticConfig.ffn_disaggregate_config.ffn_ep_size == 1
+                    and StaticConfig.ffn_disaggregate_config.attention_tp_size == 1
+                ), "ffn_tp_size, ffn_ep_size, attention_tp_size must be 1 in current dense AFD implementation"
+
+            assert (
+                g_parallel_info.world_size
+                == StaticConfig.ffn_disaggregate_config.attention_dp_size
+                * StaticConfig.ffn_disaggregate_config.attention_tp_size
+                + StaticConfig.ffn_disaggregate_config.ffn_ep_size
+                * StaticConfig.ffn_disaggregate_config.ffn_tp_size
+            )
+            self.gpt_init_params.ffn_disaggregate_config.is_ffn_rank = (
+                g_parallel_info.world_rank
+                >= StaticConfig.ffn_disaggregate_config.attention_tp_size
+                * StaticConfig.ffn_disaggregate_config.attention_dp_size
+            )
+
     def update_common(
         self,
         ckpt_path: str,
@@ -1201,35 +1246,11 @@ class GptInitModelParameters:
 
         self.update_task_type_use_kvcache()
 
-        if StaticConfig.ffn_disaggregate_config.enable_ffn_disaggregate:
-            # 暂时先限制tp=1, 更多支持在python版本实现
-            assert (
-                g_parallel_info.tp_size == 1 and g_parallel_info.world_size > 1
-            ), "enable_ffn_disaggregate must be used in dp = 1 world_size > 1"
-            attention_dp_size = g_parallel_info.world_size - 1
-            attention_tp_size = 1
-            ffn_tp_size = 1
-            assert (
-                attention_tp_size == ffn_tp_size
-            ), "attention_tp_size must be equal to ffn_tp_size"
-            self.gpt_init_params.ffn_disaggregate_config.enable_ffn_disaggregate = True
-            self.gpt_init_params.ffn_disaggregate_config.attention_tp_size = (
-                attention_tp_size
-            )
-            self.gpt_init_params.ffn_disaggregate_config.attention_dp_size = (
-                attention_dp_size
-            )
-            self.gpt_init_params.ffn_disaggregate_config.ffn_tp_size = ffn_tp_size
-            # TODO: remove it, ffn dp is stupid
-            self.gpt_init_params.ffn_disaggregate_config.ffn_dp_size = 1
-            self.gpt_init_params.ffn_disaggregate_config.is_ffn_rank = (
-                g_parallel_info.world_rank >= attention_tp_size * attention_dp_size
-            )
-
         logging.info(f"config_mode = {config_mode}")
         if config_mode == ConfigMode.SimpleMode:
             return
 
+        self.update_ffn_disaggregate_config()
         self.update_worker_addrs()
         self.update_config_with_sparse_config(ckpt_path)
         self.update_inter_padding_size(self.tp_size, self.ep_size, self.dp_size)

@@ -26,6 +26,11 @@ RtpProcessGroup::RtpProcessGroup(RtpProcessGroupType type) {
         world_size_ = device_properties.dp_size * device_properties.tp_size;
         RTP_LLM_LOG_INFO("Create dp and tp group: rank = %d, world_size = %d", rank_, world_size_);
         mode_ = ParallelMode::DP_AND_TP;
+    } else if (type == RtpProcessGroupType::AFD_GROUP) {
+        rank_       = device_properties.world_rank;
+        world_size_ = device_properties.world_size;
+        RTP_LLM_LOG_INFO("Create afd group: rank = %d, world_size = %d", rank_, world_size_);
+        mode_ = ParallelMode::AFD;
     } else {
         RTP_LLM_LOG_ERROR("Invalid RtpProcessGroupType !");
         throw std::runtime_error("Invalid RtpProcessGroupType !");
@@ -79,6 +84,8 @@ void RtpProcessGroup::send(std::vector<torch::Tensor>& input, int dst_rank) {
 }
 
 void RtpProcessGroup::recv(std::vector<torch::Tensor>& input, int src_rank) {
+    // in AFD: FFN rank always recv from Attn rank, should release gil to avoid deadlock
+    pybind11::gil_scoped_release release;
     RTP_LLM_CHECK_WITH_INFO(input.size() == 1, "Send input size must be 1 , but got %d", input.size());
     BatchSendRecvParams params;
     params.p2p_params.push_back({SendRecvType::kRecv, torchTensor2Buffer(input[0]), src_rank});
@@ -98,7 +105,8 @@ void registerRtpProcessGroup(const py::module& m) {
     py::enum_<RtpProcessGroupType>(m, "RtpProcessGroupType")
         .value("DP_GROUP", RtpProcessGroupType::DP_GROUP)
         .value("TP_GROUP", RtpProcessGroupType::TP_GROUP)
-        .value("DP_AND_TP_GROUP", RtpProcessGroupType::DP_AND_TP_GROUP);
+        .value("DP_AND_TP_GROUP", RtpProcessGroupType::DP_AND_TP_GROUP)
+        .value("AFD_GROUP", RtpProcessGroupType::AFD_GROUP);
 
     // 注册RtpProcessGroup类
     py::class_<RtpProcessGroup>(m, "RtpProcessGroup")

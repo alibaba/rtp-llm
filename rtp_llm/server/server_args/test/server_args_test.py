@@ -27,6 +27,11 @@ class ServerArgsDefaultTest(TestCase):
         self.assertIsNone(env.get("LOCAL_WORLD_SIZE"))  # 无默认值
         self.assertEqual(env.get("FFN_SP_SIZE"), "1")
         self.assertEqual(env.get("USE_ALL_GATHER"), "1")  # 默认值为 True
+        self.assertEqual(env.get("ENABLE_FFN_DISAGGREGATE"), "0")
+        self.assertIsNone(env.get("ATTENTION_TP_SIZE"))
+        self.assertIsNone(env.get("ATTENTION_DP_SIZE"))
+        self.assertIsNone(env.get("FFN_TP_SIZE"))
+        self.assertIsNone(env.get("FFN_EP_SIZE"))
 
         # 2. Concurrency 控制
         self.assertEqual(env.get("CONCURRENCY_WITH_BLOCK"), "0")  # 默认False->"0"
@@ -306,6 +311,16 @@ class ServerArgsSetTest(TestCase):
             "2",
             "--use_all_gather",
             "True",
+            "--enable_ffn_disaggregate",
+            "True",
+            "--attention_tp_size",
+            "3",
+            "--attention_dp_size",
+            "4",
+            "--ffn_tp_size",
+            "5",
+            "--ffn_ep_size",
+            "6",
             # 2. Concurrency 控制
             "--concurrency_with_block",
             "True",
@@ -731,6 +746,11 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(env["LOCAL_WORLD_SIZE"], "6")
         self.assertEqual(env["FFN_SP_SIZE"], "2")
         self.assertEqual(env["USE_ALL_GATHER"], "1")
+        self.assertEqual(env["ENABLE_FFN_DISAGGREGATE"], "1")
+        self.assertEqual(env["ATTENTION_TP_SIZE"], "3")
+        self.assertEqual(env["ATTENTION_DP_SIZE"], "4")
+        self.assertEqual(env["FFN_TP_SIZE"], "5")
+        self.assertEqual(env["FFN_EP_SIZE"], "6")
 
         # 2. Concurrency 控制
         self.assertEqual(env["CONCURRENCY_WITH_BLOCK"], "1")
