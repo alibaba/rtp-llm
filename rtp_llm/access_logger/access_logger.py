@@ -1,5 +1,5 @@
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from rtp_llm.access_logger.json_util import dump_json
 from rtp_llm.access_logger.log_utils import get_handler
@@ -10,34 +10,38 @@ ACCESS_LOGGER_NAME = "access_logger"
 QUERY_ACCESS_LOGGER_NAME = "query_access_logger"
 
 
-def init_access_logger() -> None:
+def init_access_logger(rank_id: Optional[int] = None, server_id: Optional[int] = None, async_mode: bool = True) -> None:
     access_logger = logging.getLogger(ACCESS_LOGGER_NAME)
-    handler = get_handler("access.log")
+    handler = get_handler("access.log", rank_id, server_id, async_mode)
     formatter = logging.Formatter("%(message)s")
     access_logger.handlers.clear()
     access_logger.parent = None
-    if handler != None:
+    if handler is not None:
         handler.setFormatter(formatter)
         access_logger.addHandler(handler)
 
 
-def init_query_access_logger() -> None:
+def init_query_access_logger(rank_id: Optional[int] = None, server_id: Optional[int] = None, async_mode: bool = True) -> None:
     access_logger = logging.getLogger(QUERY_ACCESS_LOGGER_NAME)
-    handler = get_handler("query_access.log")
+    handler = get_handler("query_access.log", rank_id, server_id, async_mode)
     formatter = logging.Formatter("%(message)s")
     access_logger.handlers.clear()
     access_logger.parent = None
-    if handler != None:
+    if handler is not None:
         handler.setFormatter(formatter)
         access_logger.addHandler(handler)
 
 
 class AccessLogger:
-    def __init__(self) -> None:
-        init_access_logger()
-        init_query_access_logger()
+    def __init__(self, rank_id: Optional[int] = None, server_id: Optional[int] = None, async_mode: bool = True) -> None:
+        init_access_logger(rank_id, server_id, async_mode)
+        init_query_access_logger(rank_id, server_id, async_mode)
         self.logger = logging.getLogger(ACCESS_LOGGER_NAME)
         self.query_logger = logging.getLogger(QUERY_ACCESS_LOGGER_NAME)
+        self.async_mode = async_mode
+        self.rank_id = rank_id
+        self.server_id = server_id
+        logging.info(f"AccessLogger created: async_mode={async_mode}, rank_id={rank_id}, server_id={server_id}")
 
     @staticmethod
     def is_private_request(request: Dict[str, Any]):
