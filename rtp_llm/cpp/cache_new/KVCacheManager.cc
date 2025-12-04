@@ -20,37 +20,24 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
                                bool                               warmup,
                                const kmonitor::MetricsReporterPtr metrics_reporter,
                                const GptInitParameter&            params):
+    // TODO, warmup metrics_reporter params 都没有用起来
     config_(config), device_(device), metrics_reporter_(metrics_reporter), params_(params) {}
 
 KVCacheManager::~KVCacheManager() {}
 
 bool KVCacheManager::init() {
-    bool multiple_types = config_.cache_specs.size() > 1;
-    if (multiple_types) {
-        RTP_LLM_LOG_ERROR("multiple types not supported");
-        return false;
-    }
-
-    if (config_.cache_specs.empty()) {
-        RTP_LLM_LOG_ERROR("no cache_specs");
-        return false;
-    }
+    RTP_LLM_CHECK_WITH_INFO(config_.cache_specs.size() == 1, "cache specs size should be 1");
 
     auto& spec = config_.cache_specs[0];
     if (spec->type == rtp_llm::KVCacheType::MultiHeadAttention
         || spec->type == rtp_llm::KVCacheType::MultiHeadLatentAttention) {
         allocator_ = std::make_shared<rtp_llm::SingleTypeKVCacheAllocator>(config_, device_, AllocationType::DEVICE);
-        if (!allocator_->init()) {
-            RTP_LLM_LOG_ERROR("SingleTypeKVCacheAllocator init failed");
-            allocator_.reset();
-            return false;
-        }
+        RTP_LLM_CHECK_WITH_INFO(allocator_->init(), "SingleTypeKVCacheAllocator init failed");
         return true;
     } else {
-        RTP_LLM_LOG_ERROR("SingleTypeKVCacheAllocator only support Full Attention");
+        RTP_LLM_CHECK(false, "SingleTypeKVCacheAllocator only support Full Attention");
         return false;
     }
-    return false;
 }
 
 size_t KVCacheManager::availableTokensNum() const {

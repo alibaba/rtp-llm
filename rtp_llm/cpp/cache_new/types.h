@@ -1,8 +1,8 @@
 #pragma once
 
+#include <map>
 #include <vector>
 #include <cstdint>
-#include <map>
 
 #include <torch/torch.h>
 
@@ -13,10 +13,8 @@
 
 namespace rtp_llm {
 
-typedef int32_t               GroupIdType;
-typedef std::vector<float>    LossType;
-typedef std::vector<LossType> LossesType;
-typedef std::vector<int>      LayerIdsType;
+typedef int32_t          GroupIdType;
+typedef std::vector<int> LayerIdsType;
 
 constexpr int32_t NULL_BLOCK_IDX = -1;
 
@@ -24,19 +22,14 @@ inline bool isNullBlockIdx(BlockIdxType block_idx) {
     return block_idx == NULL_BLOCK_IDX;
 }
 
-// TODO(chanyin): remove k_scale_addr and v_scale_addr in future
 struct BlockAddrInfo {
-    void* k_addr       = nullptr;
-    void* v_addr       = nullptr;
-    void* k_scale_addr = nullptr;
-    void* v_scale_addr = nullptr;
+    void* k_addr = nullptr;
+    void* v_addr = nullptr;
 };
 
 struct BlockBufferPtrInfo {
     BufferPtr k_addr;
     BufferPtr v_addr;
-    // BufferPtr k_scale_addr;
-    // BufferPtr v_scale_addr;
 };
 
 // TODO: change into Buffer Ptr
@@ -57,8 +50,6 @@ struct KVCacheInfo {
 struct KVCacheBuffer {
     rtp_llm::BufferPtr k_blocks = nullptr;
     rtp_llm::BufferPtr v_blocks = nullptr;
-    rtp_llm::BufferPtr k_scale  = nullptr;
-    rtp_llm::BufferPtr v_scale  = nullptr;
 };
 
 struct BlockIdPair {
@@ -73,44 +64,29 @@ struct MatchResult {
 };
 
 struct MallocInfo {
-    MallocInfo(BatchKVCacheResourcePtr batch_kv_cache_resource, CompleteTokenIdsPtr complete_token_ids):
-        batch_kv_cache_resource(batch_kv_cache_resource), complete_token_ids(complete_token_ids) {}
-
     BatchKVCacheResourcePtr batch_kv_cache_resource;
     CompleteTokenIdsPtr     complete_token_ids;
-    BufferPtr               loss       = nullptr;
-    int64_t                 request_id = 0;  // for logging and debugging
-    bool                    verbose    = true;
+    int64_t                 request_id = 0;
+    bool                    verbose    = true;  // for failed log
 
     // For common/extra blocks allocation strategy
-    int common_seq_len = -1;  // -1 means no distinction between common and extra
-    int total_seq_len  = -1;  // -1 means use complete_token_ids->seqLength()
+    int common_seq_len = -1;  // -1 means no distinction between common and extra, // TODO, move to complete_token_ids ?
+    int total_seq_len  = -1;  // -1 means use complete_token_ids->seqLength(), // TODO, fix this
 };
 
 struct MallocResult {
     bool success;
-    int  reuse_len;
+    int  reuse_len;  // TODO, move reuse len to batch_kv_cache_resource ？
 };
 
 struct FreeInfo {
-    FreeInfo(BatchKVCacheResourcePtr batch_kv_cache_resource, CompleteTokenIdsPtr complete_token_ids):
-        batch_kv_cache_resource(batch_kv_cache_resource), complete_token_ids(complete_token_ids) {}
-
     BatchKVCacheResourcePtr batch_kv_cache_resource;
     CompleteTokenIdsPtr     complete_token_ids;
 
-    // Metadata
-    int64_t request_id = 0;  // for logging and debugging
+    int64_t request_id = 0;
 };
 
 struct InsertInfo {
-    InsertInfo(BatchKVCacheResourcePtr batch_kv_cache_resource,
-               CompleteTokenIdsPtr     complete_token_ids,
-               bool                    is_resident):
-        batch_kv_cache_resource(batch_kv_cache_resource),
-        complete_token_ids(complete_token_ids),
-        is_resident(is_resident) {}
-
     BatchKVCacheResourcePtr batch_kv_cache_resource;
     CompleteTokenIdsPtr     complete_token_ids;
     bool                    is_resident;

@@ -19,9 +19,7 @@ public:
         stream_(stream),
         batch_resource_(std::make_shared<BatchKVCacheResource>()),
         resource_context_(resource_context),
-        block_update_mapping_(),
-        need_release_resource_(need_release_resource),
-        adapter_name_(adapter_name) {}
+        need_release_resource_(need_release_resource) {}
 
     ~StreamCacheResource() {
         releaseResource();
@@ -37,9 +35,12 @@ public:
     absl::Status         releaseSequenceKVCache(size_t total_seq_len, size_t release_seq_len);
     void                 freeBatchBlocks(size_t batch_id, std::vector<int>& blocks);
     void                 releaseResource();
-    int                  singleBatchNeedBlocks(int seq_len) const;
-    int                  maxBlocksNum() const;
-    int                  mallocFailedTimes() const;
+
+    // TODO, remove this after remove fallback
+    int singleBatchNeedBlocks(int seq_len) const;
+
+    int maxBlocksNum() const;
+    int mallocFailedTimes() const;
 
     const BatchKVCacheResource& kvCache() const;
     BatchKVCacheResource&       kvCacheMutable();
@@ -90,10 +91,6 @@ public:
         need_release_resource_ = need_release_resource;
     }
 
-    void setStream(GenerateStream* stream) {
-        stream_ = stream;
-    }
-
     bool reuseCache() const;
     bool enable3FS() const;
     bool enableMemoryBlockCache() const;
@@ -114,11 +111,11 @@ private:
     BatchKVCacheResourcePtr  batch_resource_;
     ResourceContext          resource_context_;
     std::vector<BlockIdPair> block_update_mapping_;
-    bool                     last_block_aligned_    = false;
-    bool                     need_release_resource_ = true;
-    int                      malloc_failed_times_   = 0;
-    bool                     fake_inited_           = false;
-    const std::string        adapter_name_;
+
+    bool need_release_resource_ = true;
+    bool last_block_aligned_    = false;
+    int  malloc_failed_times_   = 0;
+    bool fake_inited_           = false;
 };
 
 }  // namespace rtp_llm
