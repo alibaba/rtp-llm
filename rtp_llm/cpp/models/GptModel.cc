@@ -1278,10 +1278,6 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(const GptLayerInputs&     
         attn_out_buf = device_->prepareAllReduce({std::move(attn_out_buf), ReduceOp::Sum}).buffer;
     }
     auto residual = pre_decoder_residual ? pre_decoder_residual : hidden;
-    if (device_->initParams().use_deepep_moe) {
-        // avoid attention o gemm copy
-        attn_out_buf.reset();
-    }
     printBufferData(*residual, "in residual");
     BufferPtr residual2         = nullptr;
     BufferPtr hidden_to_slice   = nullptr;  // for sp and overlap comm type 2
