@@ -193,34 +193,11 @@ void KVCacheManager::blockBatchCopy(const BlockIdPair* copy_mapping_begin, const
     return allocator_->blockBatchCopy(copy_mapping_begin, copy_mapping_end);
 }
 
-bool KVCacheManager::getCacheForRank(const CacheKeysType&                      cache_keys,
-                                     const BlockIndicesType&                   block_indices,
-                                     size_t                                    ignore_block_num,
-                                     int64_t                                   request_id,
-                                     const std::map<std::string, std::string>& extra_metas) const {
-    RTP_LLM_LOG_WARNING("getCacheForRank is not implemented in new KVCacheManager yet");
-    return false;
-}
-
-bool KVCacheManager::putCacheForRank(const CacheKeysType&                      cache_keys,
-                                     const BlockIndicesType&                   block_indices,
-                                     size_t                                    ignore_block_num,
-                                     int64_t                                   request_id,
-                                     const std::map<std::string, std::string>& extra_metas) const {
-    RTP_LLM_LOG_WARNING("putCacheForRank is not implemented in new KVCacheManager yet");
-    return false;
-}
-
 bool KVCacheManager::updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                                    const std::vector<int>&        block_src_batch,
                                    bool                           copy_last_block,
                                    std::vector<BlockIdPair>&      block_update_mapping) {
     return allocator_->updateKVBlock(batch_kv_cache_resource, block_src_batch, copy_last_block, block_update_mapping);
-}
-
-std::shared_ptr<MemoryBlockCache> KVCacheManager::memoryBlockCache() const {
-    RTP_LLM_LOG_WARNING("memoryBlockCache is not implemented in new KVCacheManager yet");
-    return nullptr;
 }
 
 }  // namespace rtp_llm

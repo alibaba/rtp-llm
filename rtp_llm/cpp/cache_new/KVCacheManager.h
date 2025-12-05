@@ -37,10 +37,6 @@ public:
     // For backward compatibility with old code
     KVCacheBuffer kvCacheBuffer() const;
 
-    // Write one KV block (optionally per-layer) from host/device buffers for test
-    virtual bool setKVBlockValue(int block_index, int layer_id, rtp_llm::Buffer& k_buffer, rtp_llm::Buffer& v_buffer);
-    virtual bool setKVBlockValue(int block_index, rtp_llm::Buffer& k_buffer, rtp_llm::Buffer& v_buffer);
-
     MallocResult malloc(const MallocInfo& malloc_info);
     void         free(const FreeInfo& free_info);
     InsertResult insertIntoCache(const InsertInfo& insert_info);
@@ -54,24 +50,14 @@ public:
 
     void regUserMr(size_t model_id);
 
-    // Distributed cache methods not implemented yet, delete when refactor ready
-    bool getCacheForRank(const CacheKeysType&                      cache_keys,
-                         const BlockIndicesType&                   block_indices,
-                         size_t                                    ignore_block_num,
-                         int64_t                                   request_id,
-                         const std::map<std::string, std::string>& extra_metas) const;
+    bool updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                       const std::vector<int>&        block_src_batch,
+                       bool                           copy_last_block,
+                       std::vector<BlockIdPair>&      block_update_mapping);
 
-    bool putCacheForRank(const CacheKeysType&                      cache_keys,
-                         const BlockIndicesType&                   block_indices,
-                         size_t                                    ignore_block_num,
-                         int64_t                                   request_id,
-                         const std::map<std::string, std::string>& extra_metas) const;
-
-    bool                                    updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
-                                                          const std::vector<int>&        block_src_batch,
-                                                          bool                           copy_last_block,
-                                                          std::vector<BlockIdPair>&      block_update_mapping);
-    std::shared_ptr<class MemoryBlockCache> memoryBlockCache() const;
+    // Write one KV block (optionally per-layer) from host/device buffers for test
+    virtual bool setKVBlockValue(int block_index, int layer_id, rtp_llm::Buffer& k_buffer, rtp_llm::Buffer& v_buffer);
+    virtual bool setKVBlockValue(int block_index, rtp_llm::Buffer& k_buffer, rtp_llm::Buffer& v_buffer);
 
 private:
     CacheConfig          config_;

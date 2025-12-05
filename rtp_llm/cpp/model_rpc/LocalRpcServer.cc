@@ -8,7 +8,6 @@
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/cache_new/types.h"
-// #include "rtp_llm/cpp/cache/MemoryBlockCache.h"
 
 using namespace std;
 
@@ -21,7 +20,7 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
     maga_init_params_ = maga_init_params;
     metrics_reporter_ = maga_init_params.metrics_reporter;
     RTP_LLM_LOG_INFO("LocalRpcServer aux_string %s",
-                        maga_init_params_.gpt_init_parameter.misc_config.aux_string.c_str());
+                     maga_init_params_.gpt_init_parameter.misc_config.aux_string.c_str());
     if (propose_params) {
         propose_maga_init_params_ = propose_params.get();
         if (!mm_process_engine.is_none()) {
@@ -323,56 +322,6 @@ EngineScheduleInfo LocalRpcServer::getEngineScheduleInfo(int64_t latest_finished
     return info;
 }
 
-::grpc::Status LocalRpcServer::DistKvCache(::grpc::ServerContext*        context,
-                                           const ::DistKvCacheRequestPB* request,
-                                           ::DistKvCacheResponsePB*      response) {
-    RTP_LLM_LOG_DEBUG("receive dist kvcache request from client: %s, request: [%s]",
-                      context->peer().c_str(),
-                      request->DebugString().c_str());
-
-    const int64_t request_id = request->request_id();
-    const auto    op_code    = request->op();
-    if (op_code == ::DistKvCacheOp::UNKNOWN) {
-        RTP_LLM_LOG_WARNING("dist kvcache failed, op code is unknown, request: %ld", request_id);
-        return grpc::Status(grpc::StatusCode::INTERNAL, "op code is unknown");
-    }
-
-    if (!engine_) {
-        RTP_LLM_LOG_WARNING("dist kvcache failed, engine is null, request: %ld", request_id);
-        return grpc::Status(grpc::StatusCode::INTERNAL, "engine is null");
-    }
-    auto cache_manager = engine_->getCacheManager();
-    if (!cache_manager) {
-        RTP_LLM_LOG_WARNING("dist kvcache failed, cache manager is null, request: %ld, op: %s",
-                            request_id,
-                            ::DistKvCacheOp_Name(op_code).c_str());
-        return grpc::Status(grpc::StatusCode::INTERNAL, "cache manager is null");
-    }
-
-    std::vector<CacheKeyType>          cache_keys(request->cache_keys().begin(), request->cache_keys().end());
-    std::vector<BlockIdxType>          block_ids(request->block_ids().begin(), request->block_ids().end());
-    const auto                         ignore_block_num = request->ignore_block_num();
-    std::map<std::string, std::string> extra_metas;
-    for (const auto& meta : request->extra_metas()) {
-        extra_metas[meta.key()] = meta.value();
-    }
-
-    bool result = false;
-    if (op_code == ::DistKvCacheOp::GET) {
-        result = cache_manager->getCacheForRank(cache_keys, block_ids, ignore_block_num, request_id, extra_metas);
-    } else {
-        result = cache_manager->putCacheForRank(cache_keys, block_ids, ignore_block_num, request_id, extra_metas);
-    }
-
-    if (!result) {
-        RTP_LLM_LOG_WARNING(
-            "dist kvcache failed, %s cache failed, request: %ld", ::DistKvCacheOp_Name(op_code).c_str(), request_id);
-        const std::string error_msg = "cache manager " + ::DistKvCacheOp_Name(op_code) + " failed";
-        return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
-    }
-    return grpc::Status::OK;
-}
-
 void LocalRpcServer::reportWorkerStatusTime(int64_t request_begin_time_us, int64_t request_after_ws_time_us) {
     RpcWorkerStatusMetricsCollector collector;
     collector.qps         = true;
@@ -389,15 +338,6 @@ void LocalRpcServer::reportCacheStatusTime(int64_t request_begin_time_us) {
     if (metrics_reporter_) {
         metrics_reporter_->report<RpcCacheStatusMetrics, RpcCacheStatusMetricsCollector>(nullptr, &collector);
     }
-}
-
-::grpc::Status LocalRpcServer::MemoryBlockCache(::grpc::ServerContext*             context,
-                                                const ::MemoryBlockCacheRequestPB* request,
-                                                ::MemoryBlockCacheResponsePB*      response) {
-    // TODO(chanyin): Temporarily disabled due to cache system conflicts
-    RTP_LLM_LOG_WARNING("MemoryBlockCache service is temporarily disabled due to cache system conflicts");
-    response->set_success(false);
-    return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "MemoryBlockCache service is temporarily disabled");
 }
 
 ::grpc::Status LocalRpcServer::BroadcastTp(::grpc::ServerContext*        context,
