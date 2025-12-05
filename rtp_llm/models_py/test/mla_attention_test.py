@@ -202,13 +202,9 @@ class MLATest(TestCase):
         layer_weights: List[Dict[str, torch.Tensor]] = []
         layer_weights.append(weights)
 
-        from rtp_llm.models_py.modules.common.moe.router.config_adapter import MoEConfigAdapter
-        moe_config_adapter = MoEConfigAdapter(
-            model_config=self.config,
-            parallelism_config=self.parallelism_config,
-        )
+        attn_configs = self.config.getAttentionConfigs(self.parallelism_config.tp_size)
         fmha_impl = MlaFlashInferPrefillImpl(
-            moe_config_adapter, attn_inputs, layer_weights, create_cos_sin_cache()
+            attn_configs, attn_inputs, layer_weights, create_cos_sin_cache()
         )
         from rtp_llm.models_py.modules.mla.mla_attention import MlaAttention
         deepseekv2_mla = MlaAttention(self.config, self.parallelism_config, weights, 0)

@@ -101,11 +101,11 @@ class AutoModel:
         self.device = 'cuda:0'
 
         # init kv cache and bind it to py model
-        self.block_nums = math.ceil(max_total_tokens / tokens_per_block)
+        self.tokens_per_block = self.model_config.attn_config.tokens_per_block
+        self.block_nums = math.ceil(max_total_tokens / self.tokens_per_block)
         # since block_id start from 1, so we should add 1 in the corner case
         self.block_nums += 1
         logging.info(f"total block nums: {self.block_nums}")
-        self.tokens_per_block = tokens_per_block
         self._init_kv_cache()
 
         self.model.kv_cache = self.kv_cache

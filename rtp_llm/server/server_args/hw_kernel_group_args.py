@@ -98,24 +98,6 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
     )
 
     hw_kernel_group.add_argument(
-        "--use_aiter_pa",
-        env_name="USE_AITER_PA",
-        bind_to=(hw_kernel_config, 'use_aiter_pa'),
-        type=str2bool,
-        default=True,
-        help="Rocm是否使用AITER Attention",
-    )
-
-    hw_kernel_group.add_argument(
-        "--use_asm_pa",
-        env_name="USE_ASM_PA",
-        bind_to=(hw_kernel_config, 'use_asm_pa'),
-        type=str2bool,
-        default=True,
-        help="Rocm是否使用AITER ASM Attention",
-    )
-
-    hw_kernel_group.add_argument(
         "--use_swizzleA",
         env_name="USE_SWIZZLEA",
         bind_to=(hw_kernel_config, 'use_swizzleA'),

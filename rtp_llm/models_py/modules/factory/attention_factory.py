@@ -37,12 +37,16 @@ def get_mla_impl(
     raise Exception(f"can not find mla type")
 
 
-def _is_fmha_type_disabled(fmha_type: FMHAType, fmha_config: Optional[FMHAConfig]) -> bool:
+def _is_fmha_type_disabled(
+    fmha_type: FMHAType, 
+    fmha_config: Optional[FMHAConfig]
+) -> bool:
     """Check if a FMHA type is disabled in fmha_config.
     
     Args:
         fmha_type: The FMHA type to check
         fmha_config: The FMHA config, if None, assume not disabled
+        impl_class_name: The implementation class name, used to distinguish between ASM and NonAsm variants
         
     Returns:
         True if the FMHA type is disabled, False otherwise
@@ -64,7 +68,35 @@ def _is_fmha_type_disabled(fmha_type: FMHAType, fmha_config: Optional[FMHAConfig
         return not fmha_config.enable_paged_open_source_fmha
     elif fmha_type == FMHAType.FLASH_INFER:
         return fmha_config.disable_flash_infer
-    # FMHAType.NONE, AITER_PREFILL, AITER_DECODE don't have corresponding config flags
+    elif fmha_type == FMHAType.AITER_ASM_DECODE:
+        # Check use_asm_pa from device to determine if ASM decode should be disabled
+        try:
+            from rtp_llm.ops.compute_ops import get_device
+            device = get_device()
+            # Try to get use_asm_pa from device
+            use_asm_pa = getattr(device, 'use_asm_pa', False)
+            
+            # If use_asm_pa is False, disable ASM implementation
+            if not use_asm_pa:
+                return True
+        except Exception:
+            # If we can't get use_asm_pa, don't disable the implementation
+            pass
+    elif fmha_type == FMHAType.AITER_DECODE:
+        # Check use_asm_pa from device to determine if non-ASM decode should be disabled
+        try:
+            from rtp_llm.ops.compute_ops import get_device
+            device = get_device()
+            # Try to get use_asm_pa from device
+            use_asm_pa = getattr(device, 'use_asm_pa', False)
+            
+            # If use_asm_pa is True, disable non-ASM implementation (use ASM instead)
+            if use_asm_pa:
+                return True
+        except Exception:
+            # If we can't get use_asm_pa, don't disable the implementation
+            pass
+    # FMHAType.NONE, AITER_PREFILL don't have corresponding config flags
     return False
 
 

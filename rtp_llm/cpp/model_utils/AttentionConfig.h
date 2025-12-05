@@ -4,19 +4,6 @@
 
 namespace rtp_llm {
 
-enum class FMHAType {
-    FLASH_INFER,
-    NONE,
-    OPEN_SOURCE,
-    PAGED_OPEN_SOURCE,
-    PAGED_TRT_V2,
-    TRT_V1,
-    TRT_V2,
-    XQA,
-    AITER_PREFILL,
-    AITER_DECODE
-};
-
 enum class KvCacheDataType : int8_t {
     BASE = 0,
     INT8 = 1,

@@ -49,7 +49,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("TRT_V2", FMHAType::TRT_V2)
         .value("XQA", FMHAType::XQA)
         .value("AITER_PREFILL", FMHAType::AITER_PREFILL)
-        .value("AITER_DECODE", FMHAType::AITER_DECODE);
+        .value("AITER_DECODE", FMHAType::AITER_DECODE)
+        .value("AITER_ASM_DECODE", FMHAType::AITER_ASM_DECODE);
 
     py::enum_<MlaOpsType>(m, "MlaOpsType")
         .value("AUTO", MlaOpsType::AUTO)
@@ -197,6 +198,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("enable_trtv1_fmha", &FMHAConfig::enable_trtv1_fmha)
         .def_readwrite("disable_flash_infer", &FMHAConfig::disable_flash_infer)
         .def_readwrite("enable_xqa", &FMHAConfig::enable_xqa)
+        .def_readwrite("use_aiter_pa", &FMHAConfig::use_aiter_pa)
+        .def_readwrite("use_asm_pa", &FMHAConfig::use_asm_pa)
         .def("to_string", &FMHAConfig::to_string)
         .def(py::pickle(
             [](const FMHAConfig& self) {
@@ -207,10 +210,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.enable_paged_open_source_fmha,
                                       self.enable_trtv1_fmha,
                                       self.disable_flash_infer,
-                                      self.enable_xqa);
+                                      self.enable_xqa,
+                                      self.use_aiter_pa,
+                                      self.use_asm_pa);
             },
             [](py::tuple t) {
-                if (t.size() != 8)
+                if (t.size() != 10)
                     throw std::runtime_error("Invalid state!");
                 FMHAConfig c;
                 try {
@@ -222,6 +227,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.enable_trtv1_fmha             = t[5].cast<bool>();
                     c.disable_flash_infer           = t[6].cast<bool>();
                     c.enable_xqa                    = t[7].cast<bool>();
+                    c.use_aiter_pa                  = t[8].cast<bool>();
+                    c.use_asm_pa                    = t[9].cast<bool>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("FMHAConfig unpickle error: ") + e.what());
                 }
@@ -380,8 +387,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("use_swizzleA", &HWKernelConfig::use_swizzleA)
         .def_readwrite("enable_cuda_graph", &HWKernelConfig::enable_cuda_graph)
         .def_readwrite("enable_cuda_graph_debug_mode", &HWKernelConfig::enable_cuda_graph_debug_mode)
-        .def_readwrite("use_aiter_pa", &HWKernelConfig::use_aiter_pa)
-        .def_readwrite("use_asm_pa", &HWKernelConfig::use_asm_pa)
         .def_readwrite("enable_native_cuda_graph", &HWKernelConfig::enable_native_cuda_graph)
         .def_readwrite("num_native_cuda_graph", &HWKernelConfig::num_native_cuda_graph)
         .def_readwrite("prefill_capture_seq_lens", &HWKernelConfig::prefill_capture_seq_lens)
@@ -399,8 +404,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.use_swizzleA,
                                       self.enable_cuda_graph,
                                       self.enable_cuda_graph_debug_mode,
-                                      self.use_aiter_pa,
-                                      self.use_asm_pa,
                                       self.enable_native_cuda_graph,
                                       self.num_native_cuda_graph,
                                       self.prefill_capture_seq_lens,
@@ -408,7 +411,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.disable_dpc_random);                           
             },
             [](py::tuple t) {
-                if (t.size() != 16)
+                if (t.size() != 14)
                     throw std::runtime_error("Invalid state!");
                 HWKernelConfig c;
                 try {
@@ -421,13 +424,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.use_swizzleA                 = t[6].cast<bool>();
                     c.enable_cuda_graph            = t[7].cast<bool>();
                     c.enable_cuda_graph_debug_mode = t[8].cast<bool>();
-                    c.use_aiter_pa                 = t[9].cast<bool>();
-                    c.use_asm_pa                   = t[10].cast<bool>();
-                    c.enable_native_cuda_graph     = t[11].cast<bool>();
-                    c.num_native_cuda_graph        = t[12].cast<int>();
-                    c.prefill_capture_seq_lens     = t[13].cast<std::vector<int>>();
-                    c.decode_capture_batch_sizes   = t[14].cast<std::vector<int>>();
-                    c.disable_dpc_random           = t[15].cast<bool>();
+                    c.enable_native_cuda_graph     = t[9].cast<bool>();
+                    c.num_native_cuda_graph        = t[10].cast<int>();
+                    c.prefill_capture_seq_lens     = t[11].cast<std::vector<int>>();
+                    c.decode_capture_batch_sizes   = t[12].cast<std::vector<int>>();
+                    c.disable_dpc_random           = t[13].cast<bool>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("HWKernelConfig unpickle error: ") + e.what());
                 }

@@ -70,3 +70,19 @@ def init_fmha_group_args(parser, fmha_config):
         default=True,
         help="控制是否开启 xqa 的功能，此功能需要 SM 90 (Hopper) 或更新的 GPU 架构。可选值: True (启用), False (禁用)。",
     )
+    fmha_group.add_argument(
+        "--use_aiter_pa",
+        env_name="USE_AITER_PA",
+        bind_to=(fmha_config, 'use_aiter_pa'),
+        type=str2bool,
+        default=True,
+        help="Rocm是否使用AITER Attention",
+    )
+    fmha_group.add_argument(
+        "--use_asm_pa",
+        env_name="USE_ASM_PA",
+        bind_to=(fmha_config, 'use_asm_pa'),
+        type=str2bool,
+        default=True,
+        help="Rocm是否使用AITER ASM Attention",
+    )

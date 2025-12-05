@@ -56,6 +56,20 @@ struct ConcurrencyConfig {
     std::string to_string() const;
 };
 
+enum class FMHAType {
+    FLASH_INFER,
+    NONE,
+    OPEN_SOURCE,
+    PAGED_OPEN_SOURCE,
+    PAGED_TRT_V2,
+    TRT_V1,
+    TRT_V2,
+    XQA,
+    AITER_PREFILL,
+    AITER_DECODE,
+    AITER_ASM_DECODE
+};
+
 struct FMHAConfig {
     bool        enable_fmha                   = true;
     bool        enable_trt_fmha               = true;
@@ -65,6 +79,8 @@ struct FMHAConfig {
     bool        enable_trtv1_fmha             = true;
     bool        disable_flash_infer           = false;
     bool        enable_xqa                    = true;
+    bool        use_aiter_pa                 = true;
+    bool        use_asm_pa                   = true;
     std::string to_string() const;
 };
 
@@ -123,8 +139,6 @@ struct HWKernelConfig {
     bool        use_swizzleA                 = false;
     bool        enable_cuda_graph            = false;
     bool        enable_cuda_graph_debug_mode = false;
-    bool        use_aiter_pa                 = true;
-    bool        use_asm_pa                   = true;
     bool        enable_native_cuda_graph     = false;
     int         num_native_cuda_graph        = 200;
     // Prefill CUDA Graph capture configuration

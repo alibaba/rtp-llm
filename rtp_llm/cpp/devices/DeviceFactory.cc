@@ -144,8 +144,8 @@ void DeviceFactory::initDevices(const ParallelismConfig& parallelism_config,
                      device_params.enable_comm_overlap,
                      device_params.enable_layer_micro_batch);
     device_params.user_deep_gemm_num_sm  = hw_kernel_config.deep_gemm_num_sm;
-    device_params.use_aiter_pa           = hw_kernel_config.use_aiter_pa;
-    device_params.use_asm_pa             = hw_kernel_config.use_asm_pa;
+    device_params.use_aiter_pa           = fmha_config.use_aiter_pa;
+    device_params.use_asm_pa             = fmha_config.use_asm_pa;
     device_params.use_deepep_moe         = moe_config.use_deepep_moe;
     device_params.use_deepep_internode   = moe_config.use_deepep_internode;
     device_params.use_deepep_low_latency = moe_config.use_deepep_low_latency;
