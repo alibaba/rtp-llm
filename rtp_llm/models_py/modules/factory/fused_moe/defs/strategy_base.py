@@ -104,8 +104,7 @@ class MoeStrategy(ABC):
         """
         pass
 
-    @property
-    def priority(self) -> int:
+    def priority(self, use_cuda_graph: bool) -> int:
         """Strategy priority (automatically calculated from Router and Executor types)
 
         When multiple strategies can handle the same configuration, the strategy

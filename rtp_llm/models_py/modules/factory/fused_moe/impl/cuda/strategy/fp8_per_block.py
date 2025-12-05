@@ -10,6 +10,8 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.priority_attributes import
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.strategy_base import MoeStrategy
 
+PRIORITY_BONUS = 10
+
 
 class CudaFp8PerBlockNoDPStrategy(MoeStrategy):
     """CUDA FP8 PerBlock single GPU strategy"""
@@ -103,6 +105,21 @@ class CudaFp8PerBlockEpLowLatencyStrategy(MoeStrategy):
             router_class=DeepEpLowLatencyRouter,
             executor_class=DeepGemmMaskedExecutor,
         )
+
+    def priority(self, use_cuda_graph: bool) -> int:
+        """Override priority for low latency strategy
+
+        Low latency strategy should have higher priority to be selected
+        when multiple strategies can handle the same configuration.
+
+        Returns:
+            Priority value (higher than default calculated priority)
+        """
+
+        base_priority = self.get_attributes().calculate_priority()
+        if use_cuda_graph:
+            base_priority = base_priority + PRIORITY_BONUS
+        return base_priority
 
 
 class CudaFp8PerBlockEpNormalStrategy(MoeStrategy):
