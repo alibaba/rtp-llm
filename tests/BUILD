@@ -63,6 +63,86 @@ op_test_deps = [
     "//rtp_llm:transformers",
 ]
 
+py_binary(
+    name="rmsnorm_benchmark",
+    srcs=[
+        "rmsnorm/rmsnorm_benchmark.py"
+    ],
+    data = [
+        "//:rtp_compute_ops",
+    ],
+    deps = [
+        "//rtp_llm:torch",
+        "//rtp_llm:rtp_llm_lib",
+    ],
+    tags = ["H20"],
+    exec_properties = {'gpu':'H20'}
+)
+
+py_binary(
+    name="skiprmsnorm_benchmark",
+    srcs=[
+        "rmsnorm/skiprmsnorm_benchmark.py"
+    ],
+    data = [
+        "//:rtp_compute_ops",
+    ],
+    deps = [
+        "//rtp_llm:torch",
+        "//rtp_llm:rtp_llm_lib",
+    ],
+    tags = ["H20"],
+    exec_properties = {'gpu':'H20'}
+)
+
+py_binary(
+    name="fp8_quant_benchmark",
+    srcs=[
+        "quant/fp8_quant_benchmark.py"
+    ],
+    data = [
+        "//:rtp_compute_ops",
+    ],
+    deps = [
+        "//rtp_llm:torch",
+        "//rtp_llm:rtp_llm_lib",
+    ],
+    tags = ["H20"],
+    exec_properties = {'gpu':'H20'}
+)
+
+py_test(
+    name="rmsnorm_test",
+    srcs=[
+        "rmsnorm/rmsnorm_test.py"
+    ],
+    data = [
+        "//:rtp_compute_ops",
+    ],
+    deps = [
+        "//rtp_llm:torch",
+        "//rtp_llm:rtp_llm_lib",
+    ],
+    tags = ["H20"],
+    exec_properties = {'gpu':'H20'}
+)
+
+py_test(
+    name="gate_silu_test",
+    srcs=[
+        "gate_silu/gate_silu_test.py"
+    ],
+    data = [
+        "//:rtp_compute_ops",
+    ],
+    deps = [
+        "//rtp_llm:torch",
+        "//rtp_llm:rtp_llm_lib",
+    ],
+    tags = ["H20"],
+    exec_properties = {'gpu':'H20'}
+)
+
 py_test(
     name = "generalT5LayerNorm",
     srcs = [
