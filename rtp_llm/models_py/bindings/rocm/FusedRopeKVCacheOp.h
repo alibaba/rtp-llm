@@ -13,10 +13,10 @@ class FusedRopeKVCachePrefillOp {
 public:
     FusedRopeKVCachePrefillOp(const AttentionConfigs& attn_configs, int layer_num, const HWKernelConfig& hw_kernel_config);
     CKAttnPtr                                               prepare(torch_ext::PyAttentionInputs attn_inputs);
-    torch::Tensor forward(const torch::Tensor&              qkv,
-                         FMHAType                          fmha_type,
-                         std::optional<torch_ext::KVCache> kv_cache_base,
-                         const CKAttnPtr&                  params);
+    std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> forward(const torch::Tensor&              qkv,
+                                                                     FMHAType                          fmha_type,
+                                                                     std::optional<torch_ext::KVCache> kv_cache_base,
+                                                                     const CKAttnPtr&                  params);
 
 protected:
     AttentionConfigs attn_configs_;
