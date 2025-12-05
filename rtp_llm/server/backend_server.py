@@ -52,7 +52,6 @@ class BackendServer(object):
         if g_parallel_info.world_rank == 0:
             kmonitor.init()
         self.engine: Optional[BaseEngine] = None
-        self._embedding_endpoint = None
         self.dp_size = g_parallel_info.dp_size
         self.tp_size = g_parallel_info.tp_size
         self._weight_manager = None
@@ -109,21 +108,10 @@ class BackendServer(object):
             vit_config=py_env_configs.vit_config,
             propose_model_config=propose_model_config,
         )
-        
-        logging.info(
-            "engine created successfully: model_config.task_type=%s",
-            model_config.task_type,
-        )
-            
-        # Initialize endpoints based on task type
-        if model_config.task_type != TaskType.LANGUAGE_MODEL:
-            # For embedding models
-            self._embedding_endpoint = EmbeddingEndpoint(self.engine)
-        else:
 
-            max_lora_model_size = engine_config.model_specific_config.max_lora_model_size
-            self._lora_manager = LoraManager(self.engine, max_lora_model_size=max_lora_model_size)
-            self._weight_manager = WeightManager(self.engine)
+        max_lora_model_size = engine_config.model_specific_config.max_lora_model_size
+        self._lora_manager = LoraManager(self.engine, max_lora_model_size=max_lora_model_size)
+        self._weight_manager = WeightManager(self.engine)
 
     def stop(self) -> None:
         if isinstance(self.engine, BaseEngine):
