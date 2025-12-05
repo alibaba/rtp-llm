@@ -69,14 +69,34 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     torch::Tensor output_token_ids_h         = output_token_ids_d.to(host_device).contiguous();
     torch::Tensor output_emitted_token_num_h = output_emitted_token_num_d.to(host_device).contiguous();
 
-    for (int stream_idx = 0; stream_idx < batch_size; stream_idx++) {
-        // TODO(yinzhi): support force accept
-        size_t accept_len = output_emitted_token_num_h[stream_idx].item<int32_t>();
+    BufferPtr draft_token_ids_h;
+    for (const GenerateStreamPtr& stream : streams) {
+        if (stream->forceSpAccept()) {
+            draft_token_ids_h = device_->clone({*draft_token_ids, AllocationType::HOST});
+            break;
+        }
+    }
 
-        BufferPtr accept_tokens = device_->allocateBuffer(
-            {rtp_llm::DataType::TYPE_INT32, {1, accept_len}, rtp_llm::AllocationType::HOST}, {"accept_tokens"});
+    int stream_idx = 0;
+    for (const GenerateStreamPtr& stream : streams) {
+        BufferPtr accept_tokens;
+        size_t    accept_len = 0;
 
-        memcpy(accept_tokens->data(), output_token_ids_h[stream_idx].data_ptr<int32_t>(), sizeof(int32_t) * accept_len);
+        if (stream->forceSpAccept()) {
+            accept_len    = propose_step_ + 1;
+            accept_tokens = device_->allocateBuffer(
+                {rtp_llm::DataType::TYPE_INT32, {1, accept_len}, rtp_llm::AllocationType::HOST}, {"accept_tokens"});
+            memcpy(accept_tokens->data(),
+                   draft_token_ids_h->dataWithOffset<int32_t>(stream_idx * propose_step_),
+                   sizeof(int32_t) * propose_step_);
+        } else {
+            accept_len    = output_emitted_token_num_h[stream_idx].item<int32_t>();
+            accept_tokens = device_->allocateBuffer(
+                {rtp_llm::DataType::TYPE_INT32, {1, accept_len}, rtp_llm::AllocationType::HOST}, {"accept_tokens"});
+            memcpy(accept_tokens->data(),
+                   output_token_ids_h[stream_idx].data_ptr<int32_t>(),
+                   sizeof(int32_t) * accept_len);
+        }
 
         // always use target token as the last token
         *accept_tokens->dataWithOffset<int32_t>(accept_len - 1) =
@@ -84,6 +104,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
 
         sample_output.accept_tokens.push_back(accept_tokens);
         sample_output.accept_len.push_back(accept_len);
+        stream_idx++;
     }
 }
 

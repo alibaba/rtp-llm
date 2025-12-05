@@ -35,6 +35,77 @@ void MtpExecutor::maybePrintModelInput(const GptModelInputs& model_input, const 
     }
 }
 
+static std::shared_ptr<NormalGenerateStream> makeFakeStream(int                     max_new_tokens,
+                                                            const GptInitParameter& params,
+                                                            const ResourceContext&  resource_context,
+                                                            DeviceBase*             device) {
+    std::shared_ptr<GenerateInput> fake_input = std::make_shared<GenerateInput>();
+    fake_input->input_ids =
+        device->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {(size_t)1}, rtp_llm::AllocationType::HOST});
+    device->bufMemset(*fake_input->input_ids, 0);
+    fake_input->generate_config                 = std::make_shared<GenerateConfig>();
+    fake_input->generate_config->max_new_tokens = max_new_tokens;
+    fake_input->generate_config->top_k          = 1;
+    fake_input->begin_time_us                   = autil::TimeUtility::currentTimeInMicroSeconds();
+    fake_input->fake_query                      = true;
+
+    auto fake_stream =
+        std::make_shared<NormalGenerateStream>(fake_input, params, resource_context, nullptr, max_new_tokens);
+    fake_stream->setIsDummyStream(true);
+    fake_stream->setMetricsReporter(nullptr);
+    fake_stream->fakeInitKVBlock();
+
+    return fake_stream;
+}
+
+static SpeculativeExecutorStreamOutputPtr makeFakeSPOutputBuffer(
+    DataType data_type, size_t hidden_size, size_t vocab_size, size_t propose_step, DeviceBase* device) {
+    auto sp_buffer = std::make_shared<SpeculativeExecutorStreamOutput>();
+
+    auto fake_hidden_states = device->allocateBuffer({data_type, {1, hidden_size}, AllocationType::DEVICE});
+    auto fake_probs         = device->allocateBuffer({DataType::TYPE_FP32, {1, vocab_size}, AllocationType::DEVICE});
+    auto fake_tokens = device->allocateBuffer({DataType::TYPE_INT32, {1, 2}, AllocationType::HOST}, {"spec_tokens"});
+
+    device->bufMemset(*fake_hidden_states, 0);
+    device->bufMemset(*fake_probs, 0);
+    device->bufMemset(*fake_tokens, 0);
+
+    sp_buffer->propose_step  = propose_step;
+    sp_buffer->all_probs     = fake_probs;
+    sp_buffer->tokens        = fake_tokens;
+    sp_buffer->hidden_states = fake_hidden_states;
+
+    return sp_buffer;
+}
+
+GenerateStreamPtr MtpExecutor::createMinFakePrefillStream(int                     max_new_tokens,
+                                                          const GptInitParameter& params,
+                                                          const ResourceContext&  resource_context,
+                                                          DeviceBase*             device) {
+    return makeFakeStream(max_new_tokens, params, resource_context, device);
+}
+
+GenerateStreamPtr MtpExecutor::createMinFakeDecodeStream(int                     max_new_tokens,
+                                                         const GptInitParameter& params,
+                                                         const ResourceContext&  resource_context,
+                                                         DeviceBase*             device) {
+    auto fake_stream = makeFakeStream(max_new_tokens, params, resource_context, device);
+
+    auto sp_buffer =
+        makeFakeSPOutputBuffer(params.data_type_, params.hidden_size_, params.vocab_size_, max_new_tokens, device);
+
+    BufferPtr new_tokens =
+        device->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {1, 1}, rtp_llm::AllocationType::HOST});
+    *new_tokens->dataWithOffset<int32_t>(0) = 0;
+
+    StreamUpdateInfo update_info{
+        new_tokens, 1, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, false};
+
+    fake_stream->update(update_info);
+    fake_stream->setSPOutputBuffer(sp_buffer);
+    return fake_stream;
+}
+
 MtpExecutor::MtpExecutor(const EngineInitParams&                           params,
                          std::unique_ptr<ProposeModelEngineInitParams>&    propose_params,
                          const std::shared_ptr<CacheManager>&              cache_manager,
@@ -50,6 +121,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                           param
     speculative_sampler_(new speculative::SpeculativeSampler(device, propose_params->gen_num_per_circle)),
     warm_up_(warm_up),
     role_type_(params.gpt_init_parameter.role_type_) {
+    data_type_          = params.gpt_init_parameter.data_type_;
+    hidden_size_        = params.gpt_init_parameter.hidden_size_;
     propose_step_       = propose_params->gen_num_per_circle;
     vocab_size_         = params.gpt_init_parameter.vocab_size_;
     propose_vocab_size_ = propose_params->getGptInitParameter().vocab_size_;
@@ -541,22 +614,25 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     return result;
 }
 
-absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams) {
-    MtpMetricsCollector metrics_collector;
-
-    std::list<GenerateStreamPtr> prefill_streams;
-    std::list<GenerateStreamPtr> decode_streams;
-
-    // prepare streams
+void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
+                                 std::list<GenerateStreamPtr>&       prefill_streams,
+                                 std::list<GenerateStreamPtr>&       decode_streams) {
     for (auto& stream : streams) {
+        // split streams into prefill and decode
         if (stream->isContextStream()) {
             prefill_streams.push_back(stream);
         } else {
             stream->setScoreLen(propose_step_ + 1);
+            if (stream->getSPOutputBuffer() == nullptr && stream->isPerfTest()) {
+                auto sp_output_buffer =
+                    makeFakeSPOutputBuffer(data_type_, hidden_size_, vocab_size_, propose_step_, device_);
+                stream->setSPOutputBuffer(sp_output_buffer);
+            }
             decode_streams.push_back(stream);
         }
-        stream->setReturnAllProbs(true);
 
+        // set base properties
+        stream->setReturnAllProbs(true);
         if (stream->getSPOutputBuffer() == nullptr) {
             auto sp_output_buffer          = std::make_shared<SpeculativeExecutorStreamOutput>();
             sp_output_buffer->propose_step = propose_step_;
@@ -566,6 +642,16 @@ absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams) {
             stream->setSPOutputBuffer(sp_output_buffer);
         }
     }
+}
+
+absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams) {
+    MtpMetricsCollector metrics_collector;
+
+    std::list<GenerateStreamPtr> prefill_streams;
+    std::list<GenerateStreamPtr> decode_streams;
+
+    // prepare streams
+    prepareStreams(streams, prefill_streams, decode_streams);
 
     // step forward
     int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -714,73 +800,6 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
     tpSyncModelInputs(model_input, device_);
     model_input.k_block_size = cache_manager_->cacheConfig().k_block_size;
     model_input.v_block_size = cache_manager_->cacheConfig().v_block_size;
-}
-
-static std::shared_ptr<GenerateInput> makeFakeInput(int max_new_tokens, DeviceBase* device) {
-    std::shared_ptr<GenerateInput> fake_input = std::make_shared<GenerateInput>();
-    fake_input->input_ids =
-        device->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {(size_t)1}, rtp_llm::AllocationType::HOST});
-    device->bufMemset(*fake_input->input_ids, 0);
-    fake_input->generate_config                 = std::make_shared<GenerateConfig>();
-    fake_input->generate_config->max_new_tokens = max_new_tokens;
-    fake_input->generate_config->top_k          = 1;
-    fake_input->begin_time_us                   = autil::TimeUtility::currentTimeInMicroSeconds();
-    fake_input->fake_query                      = true;
-    return fake_input;
-}
-
-GenerateStreamPtr MtpExecutor::createMinFakePrefillStream(int                     max_new_tokens,
-                                                          const GptInitParameter& params,
-                                                          const ResourceContext&  resource_context,
-                                                          DeviceBase*             device) {
-    auto fake_input = makeFakeInput(max_new_tokens, device);
-    auto fake_stream =
-        std::make_shared<NormalGenerateStream>(fake_input, params, resource_context, nullptr, max_new_tokens);
-    fake_stream->setIsDummyStream(true);
-    fake_stream->setMetricsReporter(nullptr);
-    fake_stream->fakeInitKVBlock();
-
-    return fake_stream;
-}
-
-GenerateStreamPtr MtpExecutor::createMinFakeDecodeStream(int                     max_new_tokens,
-                                                         const GptInitParameter& params,
-                                                         const ResourceContext&  resource_context,
-                                                         DeviceBase*             device) {
-    auto fake_input = makeFakeInput(max_new_tokens, device);
-    auto fake_stream =
-        std::make_shared<NormalGenerateStream>(fake_input, params, resource_context, nullptr, max_new_tokens);
-    fake_stream->setIsDummyStream(true);
-    fake_stream->setMetricsReporter(nullptr);
-    fake_stream->fakeInitKVBlock();
-
-    // init hidden
-    auto fake_hidden_states =
-        device->allocateBuffer({params.data_type_, {1, (size_t)params.hidden_size_}, AllocationType::DEVICE});
-    auto fake_probs =
-        device->allocateBuffer({DataType::TYPE_FP32, {1, (size_t)params.vocab_size_}, AllocationType::DEVICE});
-    auto fake_tokens = device->allocateBuffer({DataType::TYPE_INT32, {1, 2}, AllocationType::HOST}, {"spec_tokens"});
-
-    device->bufMemset(*fake_hidden_states, 0);
-    device->bufMemset(*fake_probs, 0);
-    device->bufMemset(*fake_tokens, 0);
-
-    BufferPtr new_tokens =
-        device->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {1, 1}, rtp_llm::AllocationType::HOST});
-    *new_tokens->dataWithOffset<int32_t>(0) = 0;
-
-    auto sp_buffer           = std::make_shared<SpeculativeExecutorStreamOutput>();
-    sp_buffer->propose_step  = max_new_tokens;
-    sp_buffer->all_probs     = fake_probs;
-    sp_buffer->tokens        = fake_tokens;
-    sp_buffer->hidden_states = fake_hidden_states;
-
-    StreamUpdateInfo update_info{
-        new_tokens, 1, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, false};
-
-    fake_stream->update(update_info);
-    fake_stream->setSPOutputBuffer(sp_buffer);
-    return fake_stream;
 }
 
 }  // namespace rtp_llm

@@ -818,8 +818,13 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
         return;
     }
 
-    const auto& new_tokens     = update_info.new_tokens;
-    auto        num_new_tokens = update_info.num_new_tokens;
+    const auto& new_tokens = update_info.new_tokens;
+
+    if (isPerfTest()) {
+        device_->bufMemset(*new_tokens, 0);
+    }
+
+    auto num_new_tokens = update_info.num_new_tokens;
 
     int error_token_id = 0;
     if (!complete_token_ids_->update(new_tokens,

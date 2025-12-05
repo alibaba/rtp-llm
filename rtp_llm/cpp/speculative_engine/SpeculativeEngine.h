@@ -110,6 +110,8 @@ private:
 
     absl::Status spStep(std::list<GenerateStreamPtr>& streams);
 
+    void preparePerfStreams(std::list<GenerateStreamPtr>& streams);
+
     std::list<GenerateStreamPtr> extractPrefillStreams(std::list<GenerateStreamPtr>& streams) {
         std::list<GenerateStreamPtr> need_prefill_streams;
         streams.erase(std::remove_if(streams.begin(),

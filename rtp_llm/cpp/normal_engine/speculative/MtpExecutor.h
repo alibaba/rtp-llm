@@ -100,6 +100,10 @@ protected:
 
     std::tuple<torch::Tensor, torch::Tensor> fastTopK(const torch::Tensor& probs, int top_k, int dim);
 
+    void prepareStreams(const std::list<GenerateStreamPtr>& streams,
+                        std::list<GenerateStreamPtr>&       prefill_streams,
+                        std::list<GenerateStreamPtr>&       decode_streams);
+
 private:
     std::unique_ptr<GptModel>                model_;
     std::unique_ptr<Sampler>                 sampler_;
@@ -113,6 +117,8 @@ private:
     size_t                                   vocab_size_;
 
     // for mtp
+    DataType                                         data_type_;
+    size_t                                           hidden_size_;
     size_t                                           propose_step_;
     size_t                                           propose_vocab_size_;
     std::unique_ptr<GptModel>                        draft_model_;

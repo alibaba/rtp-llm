@@ -23,13 +23,27 @@ def _curl_server_single_worker(
     decode_test_length: int,
     wait_time: int,
     profile: bool = False,
+    generate_config: Dict[str, Any] = {},
 ) -> ResponseInfo:
     req = {
         "prompt": input_query,
-        "top_k": 1,
-        "max_new_tokens": decode_test_length if is_decode else 10,
-        "min_new_tokens": decode_test_length if is_decode else 10,
+        "generate_config": {
+            "max_new_tokens": decode_test_length if is_decode else 10,
+            "min_new_tokens": decode_test_length if is_decode else 10,
+            "force_sp_accept": True,
+        },
     }
+
+    if generate_config:
+        req["generate_config"].update(generate_config)
+        if "top_k" in generate_config:
+            req["top_k"] = generate_config["top_k"]
+        if "top_p" in generate_config:
+            req["top_p"] = generate_config["top_p"]
+
+    if "top_k" not in req:
+        req["top_k"] = 1
+
     if profile:
         req["gen_timeline"] = True
     try:
@@ -55,6 +69,7 @@ def _curl_server_batch_worker(
     decode_test_length: int,
     wait_time: int,
     profile: bool = False,
+    generate_config: Dict[str, Any] = {},
 ) -> List[ResponseInfo]:
     """使用ThreadPoolExecutor并发处理多个请求"""
     responses = []
@@ -73,6 +88,7 @@ def _curl_server_batch_worker(
                 decode_test_length,
                 wait_time,
                 profile,
+                generate_config,
             )
             futures.append(future)
 
@@ -97,6 +113,7 @@ class BatchPerfImpl(object):
         wait_time: int = 100,
         decode_test_length: int = 10,
         profile: bool = True,
+        generate_config: Dict[str, Any] = {},
     ):
         self.base_port = base_port
         self.dp_size = dp_size
@@ -118,6 +135,7 @@ class BatchPerfImpl(object):
         self.wait_time = wait_time
         self.decode_test_length = decode_test_length
         self.profile = profile
+        self.generate_config = generate_config
 
     # 需要做3次
     # 第一次：warmup, 预编译jit
@@ -170,6 +188,7 @@ class BatchPerfImpl(object):
                     self.decode_test_length,
                     self.wait_time,
                     profile,
+                    self.generate_config,
                 )
             )
 

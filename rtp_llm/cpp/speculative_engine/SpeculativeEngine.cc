@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/speculative_engine/SpeculativeScheduler.h"
 #include "rtp_llm/cpp/speculative_engine/SpeculativeGatherBatchScheduler.h"
+#include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
 #include "rtp_llm/cpp/speculative_engine/propose_executor/VanillaExecutor.h"
 #include "rtp_llm/cpp/speculative_engine/propose_executor/MTPExecutor.h"
 #include "rtp_llm/cpp/speculative_engine/score_executor/ScoreExecutor.h"
@@ -133,7 +134,11 @@ absl::Status SpeculativeEngine::init() {
     score_executor_.reset(
         new ScoreExecutor(score_model_params_, device_, resource_context_.cache_manager, getLoraManager()));
 
-    if (score_model_params_.gpt_init_parameter.scheduler_config.use_gather_batch_scheduler) {
+    if (score_model_params_.gpt_init_parameter.scheduler_config.use_batch_decode_scheduler) {
+        RTP_LLM_LOG_INFO("create speculative batch decode scheduler");
+        scheduler_.reset(new BatchDecodeScheduler(
+            score_model_params_.gpt_init_parameter, resource_context_.cache_manager, metrics_reporter_, device_));
+    } else if (score_model_params_.gpt_init_parameter.scheduler_config.use_gather_batch_scheduler) {
         RTP_LLM_LOG_INFO("create speculative gather batch scheduler");
         scheduler_.reset(new SpeculativeGatherBatchScheduler(score_model_params_.gpt_init_parameter,
                                                              resource_context_.cache_manager,
@@ -374,6 +379,9 @@ absl::Status SpeculativeEngine::step() {
                 return absl::OkStatus();
             }
         }
+
+        preparePerfStreams(streams);
+
         if (score_model_params_.gpt_init_parameter.dp_size_ > 1
             && score_model_params_.gpt_init_parameter.role_type_ != RoleType::PREFILL) {
             bool has_hidden_states = false;
@@ -583,6 +591,39 @@ absl::Status SpeculativeEngine::prefillMtpStep(std::list<GenerateStreamPtr>& str
     metrics_.score_time_us   = propose_begin_time_us - score_begin_time_us;
 
     return absl::OkStatus();
+}
+
+void SpeculativeEngine::preparePerfStreams(std::list<GenerateStreamPtr>& streams) {
+    for (auto& stream : streams) {
+        if (stream->getScoreStream() == nullptr && !stream->isContextStream() && stream->isPerfTest()) {
+            int       input_len = stream->inputLength();
+            BufferPtr new_tokens =
+                device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {(size_t)1, 1}, rtp_llm::AllocationType::HOST});
+            *new_tokens->dataWithOffset<int32_t>(0) = 0;
+
+            auto propose_stream = makeMTPStream(stream, 0);
+            stream->setProposeStream(propose_stream);
+
+            StreamUpdateInfo update_info{
+                new_tokens, (int)1, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, false};
+            stream->update(update_info);
+
+            auto decode_hidden =
+                device_->allocateBuffer({score_model_params_.gpt_init_parameter.data_type_,
+                                         {1, (size_t)score_model_params_.gpt_init_parameter.hidden_size_}});
+
+            device_->bufMemset(*decode_hidden, 0);
+            stream->setLastHiddenStates(decode_hidden);
+            stream->setSeqLength(input_len + 1);
+            stream->setMtpTokenIndex(0);
+            stream->setReuseLength(input_len);
+            stream->setFallbackPrefixLength(input_len);
+
+            propose_stream->setMtpTokenIndex(input_len - 1);
+            propose_stream->setSeqLength(input_len);
+            propose_stream->setFallbackPrefixLength(0);
+        }
+    }
 }
 
 absl::Status SpeculativeEngine::mtpStep(std::list<GenerateStreamPtr>& streams) {

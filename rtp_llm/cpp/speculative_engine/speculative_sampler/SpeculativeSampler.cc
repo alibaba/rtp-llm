@@ -83,6 +83,11 @@ void SpeculativeSampler::updateSampleStream(SpeculativeExecutorStreamOutputPtr& 
 
     stream->step();
     stream->spStep();
+
+    if (stream->isPerfTest()) {
+        device_->bufMemset(*accept_tokens, 0);
+    }
+
     StreamUpdateInfo update_info{std::move(accept_tokens),
                                  (int)accept_len,
                                  hidden_states,
@@ -281,6 +286,10 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
             sample_output.propose_token_num += propose_step;
             sample_output.accept_token_num += accept_len;
             sample_output.stream_num++;
+        }
+
+        if (stream->forceSpAccept()) {
+            accept_len = propose_step + 1;
         }
 
         rtp_llm::BufferPtr accept_tokens = device_->allocateBuffer(

@@ -105,11 +105,11 @@ public:
 
 public:
     void setIsDummyStream(bool is_dummy) {
-        is_dummy_stream = is_dummy;
+        is_dummy_stream_ = is_dummy;
     }
 
     bool isDummyStream() const {
-        return is_dummy_stream;
+        return is_dummy_stream_;
     }
 
     // Exported to python world.
@@ -278,6 +278,9 @@ public:
     rtp_llm::BufferPtr   getSoftmaxProbs();
     StreamCacheResource& streamCacheResource();
     void                 setPerfTest(bool perf_test_);
+    bool                 isPerfTest() const {
+        return perf_test_;
+    }
 
     absl::Status releaseSequenceKVCache(size_t total_seq_len, size_t release_seq_len) {
         return stream_cache_resource_->releaseSequenceKVCache(total_seq_len, release_seq_len);
@@ -604,7 +607,7 @@ protected:
     // just for bool test
     bool perf_test_ = false;
     friend class StreamCacheResource;
-    bool is_dummy_stream = false;
+    bool is_dummy_stream_ = false;
 };
 
 typedef std::shared_ptr<GenerateStream> GenerateStreamPtr;
