@@ -65,7 +65,7 @@ FfnLayerOutput CudaDevice::moeFfnFp8Contiguous(const FfnLayerParams& params, con
     }
     const auto   num_experts          = moe_conf.expert_num + moe_conf.extra_expert_num;
     const auto   top_k                = moe_conf.top_k;
-    const auto   moe_inter_size       = moe_conf.moe_inter_padding_size;
+    const auto   moe_inter_size       = is_gated_activation ? weights.moe_gate_weight->kernel->shape()[1] / 2 : weights.moe_gate_weight->kernel->shape()[1];
     const size_t num_experts_per_node = num_experts / moe_conf.ep_size;
     const auto   src_row_to_dst       = allocateBuffer({DataType::TYPE_INT32, {top_k, token_num}}, {"moe_src_to_dst"});
     check_cuda_value(cudaMemsetAsync(src_row_to_dst->data(), -1, src_row_to_dst->sizeBytes(), stream_));
@@ -326,7 +326,7 @@ FfnLayerOutput CudaDevice::moeFfnFp8Masked(const FfnLayerParams& params, const M
     }
     const auto   num_experts          = moe_conf.expert_num + moe_conf.extra_expert_num;
     const auto   top_k                = moe_conf.top_k;
-    const auto   moe_inter_size       = moe_conf.moe_inter_padding_size;
+    const auto   moe_inter_size       = is_gated_activation ? weights.moe_gate_weight->kernel->shape()[1] / 2 : weights.moe_gate_weight->kernel->shape()[1];
     const size_t num_experts_per_node = num_experts / moe_conf.ep_size;
     const auto   src_row_to_dst       = allocateBuffer({DataType::TYPE_INT32, {top_k, token_num}}, {"moe_src_to_dst"});
     check_cuda_value(cudaMemsetAsync(src_row_to_dst->data(), -1, src_row_to_dst->sizeBytes(), stream_));
@@ -529,7 +529,7 @@ FfnLayerOutput CudaDevice::deepEpLLMoeFfn(const FfnLayerParams& params, const Mo
     bool         is_gated_activation  = isGatedActivation(params.configs.activation_type);
     const auto&  weights              = params.weights;
     const auto   num_experts          = moe_conf.expert_num + moe_conf.extra_expert_num;
-    const auto   moe_inter_size       = moe_conf.moe_inter_padding_size;
+    const auto   moe_inter_size       = is_gated_activation ? weights.moe_gate_weight->kernel->shape()[1] / 2 : weights.moe_gate_weight->kernel->shape()[1];
     const size_t num_experts_per_node = num_experts / moe_conf.ep_size;
 
     BufferPtr      quantize_hidden;

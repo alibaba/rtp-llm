@@ -8,7 +8,7 @@
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/core/Buffer.h"
-#include "rtp_llm/cpp/config/GptInitParameter.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 
 namespace py = pybind11;
 
@@ -28,16 +28,16 @@ struct ExpandedOutput {
 
 class MultimodalProcessor {
 public:
-    MultimodalProcessor(py::object mm_process_engine, rtp_llm::GptInitParameter params):
+    MultimodalProcessor(py::object mm_process_engine,
+                       const MMModelConfig& mm_model_config,
+                       int64_t max_seq_len):
         mm_process_engine_(mm_process_engine),
-        gpt_init_parameter_(params),
-        sep_token_ids_(params.mm_sep_tokens_),
-        include_sep_tokens_(params.include_sep_tokens_),
-        max_seq_len_(params.max_seq_len_) {}
+        sep_token_ids_(mm_model_config.mm_sep_tokens),
+        include_sep_tokens_(mm_model_config.include_sep_tokens),
+        max_seq_len_(max_seq_len) {}
 
 protected:
     py::object                mm_process_engine_;
-    rtp_llm::GptInitParameter gpt_init_parameter_;
 
 private:
     std::vector<std::vector<int64_t>> sep_token_ids_;

@@ -63,8 +63,13 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         self,
         tokenizer: BaseTokenizer,
         renderer_params: RendererParams,
+        generate_env_config,
+        render_config=None,
+        ckpt_path=None,
+        misc_config=None,
+        vit_config=None,
     ):
-        super().__init__(tokenizer, renderer_params)
+        super().__init__(tokenizer, renderer_params, generate_env_config, render_config, ckpt_path, misc_config, vit_config)
         self._setup_stop_words()
         self._setup_chat_template()
         # 避免短期内多次encode prompt的开销

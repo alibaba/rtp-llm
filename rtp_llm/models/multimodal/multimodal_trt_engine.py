@@ -11,7 +11,6 @@ import torch
 from PIL import Image
 from torch import nn
 
-from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.models.multimodal.multimodal_common import (
     AudioEmbeddingInterface,
     ImageEmbeddingInterface,
@@ -64,6 +63,7 @@ class MultiModalTRTEngine(nn.Module, ImageEmbeddingInterface, AudioEmbeddingInte
         image_size: int,
         device: Union[str, torch.device],
         dtype: torch.dtype,
+        vit_config,
     ):
         super(MultiModalTRTEngine, self).__init__()
         self.image_size = image_size
@@ -74,19 +74,27 @@ class MultiModalTRTEngine(nn.Module, ImageEmbeddingInterface, AudioEmbeddingInte
         self.cur_batch_size = 1
         self.input_names = ["input"]
         self.output_names = ["output"]
-        output_dir = MultiModalTRTEngine.cache_path(model_name, self.dtype)
+        output_dir = MultiModalTRTEngine.cache_path(
+            model_name, self.dtype, vit_config.trt_cache_path
+        )
         self.onnx_file_path = os.path.join(output_dir, "multimodal.onnx")
         self.engine_file_path = os.path.join(output_dir, "multimodal.trt")
         self.engine = None
         self.lock = threading.Lock()
 
     @staticmethod
-    def trt_engine_cached(model_name: str, dtype: torch.dtype) -> bool:
-        return MultiModalTRTEngine.completion_file_path(model_name, dtype).exists()
+    def trt_engine_cached(model_name: str, dtype: torch.dtype, trt_cache_path) -> bool:
+        return MultiModalTRTEngine.completion_file_path(
+            model_name, dtype, trt_cache_path
+        ).exists()
 
     @staticmethod
-    def cache_path(model_name: str, dtype: torch.dtype) -> str:
-        trt_cache_path = StaticConfig.vit_config.trt_cache_path
+    def cache_path(model_name: str, dtype: torch.dtype, trt_cache_path) -> str:
+        """Get cache path for TRT engine.
+
+        Args:
+            model_name: Model name.
+            dtype: Torch dtype."""
         if trt_cache_path is None:
             trt_cache_path = os.path.join(os.getcwd(), "trt_cache")
         return os.path.join(
@@ -95,10 +103,13 @@ class MultiModalTRTEngine(nn.Module, ImageEmbeddingInterface, AudioEmbeddingInte
         )
 
     @staticmethod
-    def completion_file_path(model_name: str, dtype: torch.dtype) -> Path:
+    def completion_file_path(
+        model_name: str, dtype: torch.dtype, trt_cache_path
+    ) -> Path:
         return Path(
             os.path.join(
-                MultiModalTRTEngine.cache_path(model_name, dtype), "trt_engine.done"
+                MultiModalTRTEngine.cache_path(model_name, dtype, trt_cache_path),
+                "trt_engine.done",
             )
         )
 

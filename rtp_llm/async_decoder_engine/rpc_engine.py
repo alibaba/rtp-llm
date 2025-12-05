@@ -1,12 +1,12 @@
-from typing import AsyncGenerator, Dict, Optional
+from typing import Dict, Optional
 
 from typing_extensions import override
 
 from rtp_llm.async_decoder_engine.base_engine import BaseEngine
-from rtp_llm.config.task_type import TaskType
-from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient
+from rtp_llm.config.engine_config import EngineConfig
+from rtp_llm.ops import TaskType
 from rtp_llm.frontend.token_processor import TokenProcessor
-from rtp_llm.models.base_model import BaseModel, GenerateInput, GenerateOutputs
+from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.propose_model.propose_model import ProposeModel
 from rtp_llm.ops import EngineScheduleInfo, KVCacheInfo, WorkerStatusInfo
 from rtp_llm.ops.rtp_llm.rtp_llm_op import RtpLLMOp
@@ -17,25 +17,34 @@ class RPCEngine(BaseEngine):
     def __init__(
         self,
         model: BaseModel,
-        propose_model: Optional[ProposeModel] = None,
+        engine_config: EngineConfig,
         gang_info=None,
+        propose_model: Optional[ProposeModel] = None
     ) -> None:
-        super().__init__(model)
+        """Initialize RPCEngine with model and engine configuration.
+        
+        Args:
+            model: BaseModel instance
+            engine_config: EngineConfig instance containing engine and parallelism configs
+            gang_info: Optional GangInfo instance from GangServer (used for HTTP server)
+            propose_model: Optional propose model for speculative decoding
+        """
+        self.model = model
         self.propose_model = propose_model
-        self.tokenizer = model.tokenizer
-
         self.gang_info = gang_info
+        self.tokenizer = model.tokenizer
+        # BaseModel no longer has config attribute, use model_config instead
+        self.config = model.model_config
         self.token_processor = TokenProcessor(
-            self.tokenizer, self.model.config.special_tokens
+            self.tokenizer, self.model.model_config.special_tokens
         )
         if self.model.is_multimodal():
-            self.mm_engine = MMProcessEngine(self.model)
+            self.mm_engine = MMProcessEngine(self.model, self.model.vit_config)
         else:
             self.mm_engine = None
         self.rtp_llm_op_ = RtpLLMOp(
-            model, self.mm_engine, propose_model, self.token_processor
+            engine_config, model, self.mm_engine, propose_model, self.token_processor
         )
-        self.model_rpc_client = ModelRpcClient(self.config)
 
     @override
     def _start(self) -> None:
@@ -43,12 +52,12 @@ class RPCEngine(BaseEngine):
 
         # Start HTTP server for language model tasks
         if (
-            self.model.task_type == TaskType.LANGUAGE_MODEL
+            self.config.task_type == TaskType.LANGUAGE_MODEL
             and self.gang_info is not None
         ):
             self.rtp_llm_op_.ft_op.start_http_server(
                 self.model.model_weights_loader,
-                self.model.config.lora_infos,
+                self.model.model_config.lora_infos,
                 self.gang_info,
                 self.tokenizer,
                 None,  # chat_renderer is not needed for HTTP server startup
@@ -57,10 +66,6 @@ class RPCEngine(BaseEngine):
     @override
     def _stop(self) -> None:
         self.rtp_llm_op_.stop()
-
-    @override
-    def decode(self, input: GenerateInput) -> AsyncGenerator[GenerateOutputs, None]:
-        return self.model_rpc_client.enqueue(input)
 
     @override
     def get_worker_status_info(self, latest_finished_version: int) -> WorkerStatusInfo:

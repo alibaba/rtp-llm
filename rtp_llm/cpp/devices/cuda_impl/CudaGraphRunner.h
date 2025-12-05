@@ -34,7 +34,7 @@ public:
             throw std::runtime_error("CudaGraphRunner constructor: Python instance is null or none.");
         }
         if (is_prefill_cuda_graph_mode) {
-            max_bs_ = params.fifo_scheduler_config.max_context_batch_size;
+            max_bs_ = params.runtime_config.fifo_scheduler_config.max_context_batch_size;
         } else {
             max_bs_ = params.concurrency_config.concurrency_limit;
         }

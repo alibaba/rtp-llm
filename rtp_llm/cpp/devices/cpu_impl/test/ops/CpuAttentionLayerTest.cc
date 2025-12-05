@@ -12,7 +12,7 @@ TEST_F(CpuAttentionLayerTestFP16, testSimpleContextAttention) {
     attention_conf.size_per_head    = 32;
     attention_conf.tokens_per_block = 4;
 
-    attention_conf.mask_type = AttentionMaskType::causalMask;
+    attention_conf.is_causal = true;
 
     attention_conf.rope_config.style   = RopeStyle::Base;
     attention_conf.rope_config.base    = 10000;

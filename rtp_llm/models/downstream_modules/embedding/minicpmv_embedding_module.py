@@ -1,6 +1,6 @@
 import copy
 import math
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
 import torch
@@ -9,7 +9,8 @@ from PIL import Image
 
 from rtp_llm.async_decoder_engine.embedding.interface import EngineInputs
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.metrics import GaugeMetrics, kmonitor
 from rtp_llm.models.downstream_modules.custom_module import CustomHandler, CustomModule
@@ -147,10 +148,11 @@ def split_to_patches(image, grid):
 
 class MiniCPMVInputGenerator(object):
 
-    def __init__(self, config: GptInitModelParameters, tokenizer: BaseTokenizer):
+    def __init__(self, config: ModelConfig, tokenizer: BaseTokenizer, vit_config: Optional[VitConfig] = None):
         self.tokenizer_ = tokenizer
         self.config_ = config
         self.vit_config = config.mm_related_params.config
+        self.vit_config_obj = vit_config  # Store VitConfig object for download_headers and url_cache_item_num
         self.im_start = self.tokenizer_.im_start
         self.im_end = self.tokenizer_.im_end
         self.slice_start = self.tokenizer_.slice_start
@@ -213,7 +215,8 @@ class MiniCPMVInputGenerator(object):
 
     def _render_image(self, url: str):
         content = ""
-        image = get_bytes_io_from_url(url)
+        download_headers = self.vit_config_obj.download_headers
+        image = get_bytes_io_from_url(url, download_headers=download_headers)
         image = Image.open(image).convert("RGB")
         if self.slice_mode:
             _, final_placeholder = self.get_slice_image_placeholder(
@@ -308,7 +311,7 @@ class MiniCPMVInputGenerator(object):
 
 class MiniCPMVHandler(CustomHandler):
 
-    def __init__(self, config: GptInitModelParameters):
+    def __init__(self, config: ModelConfig):
         super().__init__(config)
 
     def forward(
@@ -336,10 +339,10 @@ class MiniCPMVHandler(CustomHandler):
 
 class MiniCPMVRenderer(EmbeddingRendererBase):
 
-    def __init__(self, config: GptInitModelParameters, tokenizer: BaseTokenizer):
+    def __init__(self, config: ModelConfig, tokenizer: BaseTokenizer, vit_config: Optional[VitConfig] = None):
         super().__init__(config, tokenizer)
         self.embedding_type = EmbeddingResponseType.DENSE
-        self.generator = MiniCPMVInputGenerator(config, tokenizer)
+        self.generator = MiniCPMVInputGenerator(config, tokenizer, vit_config=vit_config)
 
     def similar_func(
         self, left: EmbeddingResponseFormat, right: EmbeddingResponseFormat
@@ -382,7 +385,7 @@ class MiniCPMVRenderer(EmbeddingRendererBase):
 
 class MiniCPMVModule(CustomModule):
 
-    def __init__(self, config: GptInitModelParameters, tokenizer: BaseTokenizer):
+    def __init__(self, config: ModelConfig, tokenizer: BaseTokenizer, vit_config: Optional[VitConfig] = None):
         super().__init__(config, tokenizer)
-        self.renderer = MiniCPMVRenderer(config, tokenizer)
+        self.renderer = MiniCPMVRenderer(config, tokenizer, vit_config=vit_config)
         self.handler = MiniCPMVHandler(config)

@@ -6,11 +6,16 @@ from typing import Any, Dict, Optional
 
 import torch
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
+    ep_gather,
+    ep_scatter,
+    tma_align_input_scale,
+)
 from rtp_llm.models_py.modules.common.moe.fused_moe import (
     ExpertForwardPayload,
     FusedMoeExpertExecutor,
 )
+from rtp_llm.models_py.modules.common.moe.router.config_adapter import MoEConfigAdapter
 from rtp_llm.models_py.modules.factory.fused_moe.quant_config import FusedMoEQuantConfig
 from rtp_llm.models_py.modules.factory.fused_moe.type import ExecutorType
 from rtp_llm.models_py.modules.quantization.deepgemm_wrapper import (
@@ -41,7 +46,7 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
         return ExecutorType.DEEPGEMM_CONTINUOUS
 
     @classmethod
-    def check_conditions(cls, checker: Any, config: GptInitModelParameters) -> None:
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         """Check if DeepGemmContinousExecutor can handle the configuration"""
         from rtp_llm.models_py.modules.factory.fused_moe.config_resolver import (
             MoeConfigResolver,
@@ -57,7 +62,7 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
 
     def __init__(
         self,
-        config: GptInitModelParameters,
+        config: MoEConfigAdapter,
         weights: Dict[str, torch.Tensor],
     ):
         super().__init__(FusedMoEQuantConfig())
@@ -70,7 +75,7 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
         self.start_expert_id = self.ep_rank * self.num_experts_per_partition
         self.end_expert_id = self.start_expert_id + self.num_experts_per_partition - 1
         self.top_k = config.moe_k
-        self.intermediate_size = config.moe_inter_padding_size
+        self.intermediate_size = config.inter_size
         self.activation = config.activation_type.lower()
         self.renormalize = True
         self.use_fp8_w8a8 = True

@@ -11,8 +11,8 @@ class MockOpenaiEndpoint: public OpenaiEndpoint {
 public:
     MockOpenaiEndpoint(const std::shared_ptr<Tokenizer>&  tokenizer,
                        const std::shared_ptr<ChatRender>& chat_render,
-                       const rtp_llm::GptInitParameter&   params):
-        OpenaiEndpoint(tokenizer, chat_render, params) {}
+                       const ModelConfig&                 model_config):
+        OpenaiEndpoint(tokenizer, chat_render, model_config) {}
     ~MockOpenaiEndpoint() override = default;
 
 public:

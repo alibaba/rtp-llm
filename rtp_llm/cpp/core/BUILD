@@ -162,6 +162,7 @@ cc_library(
     deps = [
         "//rtp_llm/cpp/core:allocator",
         "//rtp_llm/cpp/devices:devices_base",
+        "//rtp_llm/cpp/config:model_config",
     ] + torch_deps(),
     include_prefix = "src",
     visibility = ["//visibility:public"],

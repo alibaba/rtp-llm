@@ -98,10 +98,10 @@ bool LoadFlags::isReady(DeviceBase* device) {
     return *flag_host->data<int>() == 0;
 }
 
-void EplbController::init(const EplbConfig& eplb_control_data, DeviceBase* device) {
+void EplbController::init(const EPLBConfig& eplb_control_data, DeviceBase* device, const EPLBConfig& eplb_config) {
     this->eplb_control_data = eplb_control_data;
 
-    control_step = device->initParams().moe_config.eplb_control_step;
+    control_step = eplb_config.eplb_control_step;
     RTP_LLM_LOG_INFO("EPLB control step: %d", control_step);
 
     auto eplb_control_data_list = eplb_control_data.toList();
@@ -111,7 +111,7 @@ void EplbController::init(const EplbConfig& eplb_control_data, DeviceBase* devic
         {DataType::TYPE_INT32, {eplb_control_data_list.size()}, AllocationType::DEVICE}, {"eplb_control_data_device"});
 }
 
-void EplbController::setData(const EplbConfig& updated_control_data) {
+void EplbController::setData(const EPLBConfig& updated_control_data) {
     // lock mutex
     lock_guard<mutex> lock(eplb_control_mutex);
     eplb_control_data = updated_control_data;
@@ -127,9 +127,9 @@ bool EplbController::stepAndCheckSyncStep() {
     return false;
 }
 
-EplbConfig EplbController::getAndSyncData(DeviceBase* device) {
+EPLBConfig EplbController::getAndSyncData(DeviceBase* device) {
     // copy control data to host buffer
-    EplbConfig cur_data;
+    EPLBConfig cur_data;
     {
         lock_guard<mutex> lock(eplb_control_mutex);
         cur_data = eplb_control_data;
@@ -149,8 +149,8 @@ EplbConfig EplbController::getAndSyncData(DeviceBase* device) {
     // copy to host
     device->copy({*eplb_control_data_buf_host, *eplb_control_data_buf_device});
 
-    // convert to EplbControlData
-    auto eplb_control_data = EplbConfig::fromList(eplb_control_data_host_ptr);
+    // convert to EPLBConfig
+    auto eplb_control_data = EPLBConfig::fromList(eplb_control_data_host_ptr);
 
     return eplb_control_data;
 }
@@ -160,15 +160,14 @@ ExpertBalancer::ExpertBalancer(size_t                       log_exp_num,
                                size_t                       num_layers,
                                size_t                       moe_size,
                                size_t                       hidden_size,
-                               size_t                       update_time,
                                size_t                       ep_rank,
                                size_t                       ep_size,
                                py::object                   py_eplb,
                                DataType                     dtype,
                                DeviceBase*                  device,
-                               EplbMode                     eplb_mode,
                                QuantAlgo                    quant_algo,
-                               kmonitor::MetricsReporterPtr metrics_reporter):
+                               kmonitor::MetricsReporterPtr metrics_reporter,
+                               const EPLBConfig&             eplb_config):
 
     device_(device),
     num_logic_experts_(log_exp_num),
@@ -179,8 +178,7 @@ ExpertBalancer::ExpertBalancer(size_t                       log_exp_num,
     eplb_python_wrapper_(py_eplb) {
     cout << "ExpertBalancer constructed with " << log_exp_num << " logical experts" << endl;
     printf("DEBUG: ExpertBalancer constructor called for linker debug\n");
-    eplb_control_data_.mode        = eplb_mode;
-    eplb_control_data_.update_time = update_time;
+    eplb_control_data_ = eplb_config;
 
     // init memory
     stats_.init(num_layers, log_exp_num, ep_size_, device_);
@@ -188,11 +186,11 @@ ExpertBalancer::ExpertBalancer(size_t                       log_exp_num,
     eplb_plan_tensors_.init(log_exp_num, phy_exp_num);
     load_flags_.init(device_);
     load_flags_.setReady(false, device_);
-    eplb_controller_.init(eplb_control_data_, device);
+    eplb_controller_.init(eplb_control_data_, device, eplb_config);
 
-    test_mode_ = device_->initParams().moe_config.eplb_test_mode;
+    test_mode_ = eplb_config.eplb_test_mode;
 
-    balance_layer_per_step_ = device_->initParams().moe_config.eplb_balance_layer_per_step;
+    balance_layer_per_step_ = eplb_config.eplb_balance_layer_per_step;
 
     resetPlan(true);
 }
@@ -202,7 +200,7 @@ ExpertBalancer::~ExpertBalancer() {}
 void ExpertBalancer::stepForward(GptModel& model, RtpLLMExecutorMetricsCollector& executor_collector) {
     syncController();
 
-    if (checkEplbMode(eplb_control_data_.mode, EplbMode::NONE)) {
+    if (eplb_control_data_.checkEplbMode(eplb_control_data_.eplb_mode, EplbMode::NONE)) {
         return;
     }
 
@@ -215,7 +213,7 @@ void ExpertBalancer::stepForward(GptModel& model, RtpLLMExecutorMetricsCollector
     excuteEplbPlan(stats, model);
 }
 
-bool ExpertBalancer::updateEplbConfig(const EplbConfig& config) {
+bool ExpertBalancer::updateEplbConfig(const EPLBConfig& config) {
     eplb_controller_.setData(config);
     return true;
 }
@@ -224,15 +222,16 @@ void ExpertBalancer::syncController() {
     // sync control data
     if (eplb_controller_.stepAndCheckSyncStep()) {
         auto eplb_control_data = eplb_controller_.getAndSyncData(device_);
-        if (eplb_control_data != eplb_control_data_) {
+        if (eplb_control_data.eplb_mode != eplb_control_data_.eplb_mode || 
+            eplb_control_data.eplb_update_time != eplb_control_data_.eplb_update_time) {
             eplb_control_data_ = eplb_control_data;
-            RTP_LLM_LOG_INFO("EPLB coinfig changed to %s", eplb_control_data_.toString().c_str());
+            RTP_LLM_LOG_INFO("EPLB config changed to %s", eplb_control_data_.to_string().c_str());
         }
     }
 }
 
 void ExpertBalancer::reportStats(OverallExpertStats& stats) {
-    if (metrics_reporter_ && checkEplbMode(eplb_control_data_.mode, EplbMode::STATS, EplbMode::ALL)) {
+    if (metrics_reporter_ && eplb_control_data_.checkEplbMode(eplb_control_data_.eplb_mode, EplbMode::STATS, EplbMode::ALL)) {
         int layer_num = stats.layer_num;
         executor_collector_.gpu_loads.resize(layer_num);
         executor_collector_.ep_rank = ep_rank_;
@@ -260,13 +259,13 @@ EplbPlanStatus ExpertBalancer::getPlanStatus() const {
 }
 
 void ExpertBalancer::excuteEplbPlan(OverallExpertStats& stats, GptModel& model) {
-    if (checkEplbMode(eplb_control_data_.mode, EplbMode::EPLB, EplbMode::ALL)) {
+    if (eplb_control_data_.checkEplbMode(eplb_control_data_.eplb_mode, EplbMode::EPLB, EplbMode::ALL)) {
         EplbPlanStatus status = getPlanStatus();
         switch (status) {
             case EplbPlanStatus::INIT:
                 update_cnt_++;
                 updateStats(stats);
-                if (update_cnt_ >= eplb_control_data_.update_time) {
+                if (update_cnt_ >= eplb_control_data_.eplb_update_time) {
                     setPlanStatus(EplbPlanStatus::PREPARING);
                 }
                 break;
@@ -299,7 +298,7 @@ void ExpertBalancer::excuteEplbPlan(OverallExpertStats& stats, GptModel& model) 
                         update_cnt_        = 0;
                         balance_layer_cnt_ = 0;
                     } else {
-                        update_cnt_ = eplb_control_data_.update_time;  // quick update
+                        update_cnt_ = eplb_control_data_.eplb_update_time;  // quick update
                     }
 
                     setPlanStatus(EplbPlanStatus::INIT);

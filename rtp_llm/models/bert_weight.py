@@ -135,7 +135,7 @@ class BertWeightInfo(ModelDeployWeightInfo):
             )
             ffn_config = FfnConfig(
                 is_gated_activation=self._is_gated_activation,
-                inter_padding_size=self._inter_padding_size,
+                align_size=self._align_size,
                 is_moe=False,
             )
 

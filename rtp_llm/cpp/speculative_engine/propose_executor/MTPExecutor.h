@@ -44,11 +44,11 @@ public:
                 std::make_shared<NormalExecutor>(*mtp_params, cache_manager, device_, lora_manager, warm_up);
             const auto& cache_config = cache_manager ? cache_manager->cacheConfig() : CacheConfig();
             executor->setBatchProcessor(std::move(
-                std::make_unique<MTPBatchStreamProcessor>(mtp_params->gpt_init_parameter, cache_config, warm_up)));
+                std::make_unique<MTPBatchStreamProcessor>(mtp_params->model_config_, mtp_params->pd_sep_config, mtp_params->profiling_debug_logging_config, cache_config, warm_up)));
             auto model_params = GptModelInitParams(
                 {device_,
                  mtp_params->gpt_weights,
-                 Executor::genModelDescription(mtp_params->gpt_init_parameter),
+                 Executor::genModelDescription(mtp_params->model_config_, mtp_params->parallelism_config, mtp_params->eplb_config, mtp_params->moe_config),
                  cache_manager ? ((std::optional<KVCacheAllocator::KVCacheBuffer>)cache_manager->kvCacheBuffer()) :
                                  std::nullopt,
                  mtp_params->model_id});
@@ -91,7 +91,7 @@ public:
         return propose_step_;
     }
 
-    bool updateEplbConfig(const EplbConfig& config) override;
+    bool updateEplbConfig(const EPLBConfig& config) override;
 
 protected:
     std::string                                  sp_type_;

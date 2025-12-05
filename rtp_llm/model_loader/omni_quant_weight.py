@@ -366,7 +366,7 @@ class OmniQuantWeightInfo(CompositeWeight, QuantWeight):
                     W.ffn_smoother,
                     [],
                     functools.partial(
-                        ones, shape=src_weight_info.config.inter_padding_size
+                        ones, shape=src_weight_info.config.align_size
                     ),
                     data_type=torch.float32,
                     config=src_weight_info.config,

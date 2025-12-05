@@ -1,31 +1,41 @@
 #pragma once
 
-#include "rtp_llm/models_py/bindings/cuda/FMHACudaBase.h"
-#include "rtp_llm/cpp/config/GptInitParameter.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/model_utils/AttentionConfig.h"
+#include "rtp_llm/cpp/devices/cuda_impl/CudaDevice.h"
+#include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "rtp_llm/cpp/kernels/kv_cache/kv_cache_utils.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include <optional>
 
 namespace rtp_llm {
 
-class FusedRopeKVCachePrefillOp: public FMHACudaBase {
+class FusedRopeKVCachePrefillOp {
 public:
-    FusedRopeKVCachePrefillOp(const GptInitParameter& gpt_init_parameter);
+    FusedRopeKVCachePrefillOp(const AttentionConfigs& attn_configs);
     TRTAttnPtr    prepare(torch_ext::PyAttentionInputs attn_inputs);
     torch::Tensor forward(const torch::Tensor&              qkv,
                           FMHAType                          fmha_type,
                           std::optional<torch_ext::KVCache> kv_cache,
                           const TRTAttnPtr&                 params);
+
+protected:
+    AttentionConfigs attn_configs_;
+    CudaDevice*      device_;
 };
 
-class FusedRopeKVCacheDecodeOp: public FMHACudaBase {
+class FusedRopeKVCacheDecodeOp {
 public:
-    FusedRopeKVCacheDecodeOp(const GptInitParameter& gpt_init_parameter);
+    FusedRopeKVCacheDecodeOp(const AttentionConfigs& attn_configs);
     TRTAttnPtr    prepare(torch_ext::PyAttentionInputs attn_inputs);
     torch::Tensor forward(const torch::Tensor&              qkv,
                           FMHAType                          fmha_type,
                           std::optional<torch_ext::KVCache> kv_cache,
                           const TRTAttnPtr&                 params);
+
+protected:
+    AttentionConfigs attn_configs_;
+    CudaDevice*      device_;
 };
 
 void registerFusedRopeKVCacheOp(const py::module& m);

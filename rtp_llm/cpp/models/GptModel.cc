@@ -258,7 +258,7 @@ rtp_llm::AttentionCommonInputs GptModel::prepareAttentionInputs(const GptModelIn
             device_->attentionMask({inputs.input_lengths->view(decoder_batch_size, context_batch_size),
                                     *inputs.prefix_lengths,
                                     attn_dtype,
-                                    description_.attention_conf.mask_type == rtp_llm::AttentionMaskType::causalMask});
+                                    description_.attention_conf.is_causal});
     }
 
     return attention_inputs;
@@ -364,7 +364,7 @@ GptModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const MicroB
         fake_inputs.prefix_lengths   = device_->allocateBuffer({DataType::TYPE_INT32, {1}, AllocationType::HOST});
         fake_inputs.prefix_lengths->data<int32_t>()[0] = 0;
         auto fake_hidden =
-            device_->allocateBuffer({description_.data_type, {1, description_.attention_conf.hidden_size}});
+            device_->allocateBuffer({description_.data_type, {1, description_.attention_conf.head_num * description_.attention_conf.size_per_head}});
         micro_batch_inputs.push_back(fake_inputs);
     } else {
         // TODO(wangyin.yx): refact this splitting method, extract common code
@@ -589,7 +589,7 @@ GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
         inputs.multimodal_features ?
             device_->clone({*inputs.text_tokens_mask, AllocationType::DEVICE, {"text_tokens_mask"}}) :
             nullptr;
-    const BufferPtr mm_feature_locs       = inputs.mm_features_locs ? inputs.mm_features_locs : nullptr;
+    const BufferPtr mm_features_locs       = inputs.mm_features_locs ? inputs.mm_features_locs : nullptr;
     const BufferPtr input_embeddings_locs = inputs.input_embeddings_locs ? inputs.input_embeddings_locs : nullptr;
 
     // word embedding lookup
@@ -616,24 +616,23 @@ GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
     hidden                     = output.hidden;
     device_->checkError();
     if (inputs.input_embeddings) {
+        printBufferData(*hidden, "before inputEmbedding hidden");
         hidden =
             device_->inputEmbedding({hidden,
                                      (OptionalConstVecBufferPtrRef)inputs.input_embeddings,
                                      input_embeddings_locs ? (OptionalConstBufferRef)*input_embeddings_locs : nullopt});
     }
 
+
     auto hidden_dtype = hidden->type();
     auto attn_dtype   = hidden_dtype;
 
     // pre layernorm
     BufferPtr pre_decoder_residual = nullptr;
-    if (description_.act_qscheme != QScheme::NoQuantize && weights_.pre_decoder_layernorm) {
-        pre_decoder_residual = device_->allocateBufferLike(*hidden);
-    }
     printBufferData(*hidden, "before decoder layernorm hidden");
     if (weights_.pre_decoder_layernorm) {
         auto decoder_input = device_->layernorm(LayernormParams(hidden,
-                                                                pre_decoder_residual,
+                                                                nullptr,
                                                                 *weights_.pre_decoder_layernorm,
                                                                 nullopt,
                                                                 nullopt,
@@ -641,56 +640,31 @@ GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
                                                                 0.f,
                                                                 description_.layernorm_eps,
                                                                 true,
-                                                                pre_decoder_residual != nullptr,
+                                                                false,
                                                                 description_.norm_type,
-                                                                description_.act_qscheme));
+                                                                QScheme::NoQuantize));
         hidden             = std::move(decoder_input.output);
+        device_->checkError();
     }
-    device_->checkError();
-    if (hidden != nullptr)
-        printBufferData(*hidden, "before embedding hidden");
-    if (mm_feature_locs != 0)
-        printBufferData(*mm_feature_locs, "mm_feature_locs");
+    
+   
+    if (mm_features_locs != 0)
+        printBufferData(*mm_features_locs, "mm_features_locs");
     if (inputs.multimodal_features) {
-        std::vector<rtp_llm::BufferPtr> mm_features;
-        bool features_need_quantize = false;
-        if (inputs.multimodal_features.value()[0]->type() != hidden->type() && hidden->isQBuffer()) {
-            features_need_quantize = true;
-            ConstBufferPtr static_scale_reciprocal = nullptr;
-            if (description_.act_qscheme == QScheme::Qint8PerTensor && weights_.pre_decoder_layernorm) {
-                auto norm_weight = weights_.pre_decoder_layernorm;
-                static_scale_reciprocal = norm_weight->static_scale_reciprocal;
-            }
-            for (auto& mm_feature : inputs.multimodal_features.value()) {
-                auto quantized_feature = device_->quantize({*mm_feature, hidden->type(), 1, description_.act_qscheme,
-                               nullopt, nullopt, nullopt,
-                               static_scale_reciprocal ? (OptionalConstBufferRef)*static_scale_reciprocal : nullopt});
-                if (quantized_feature->isQBuffer()) {
-                    quantized_feature->updateTypeAndShape(QBufferDtype2BufferDtype(quantized_feature->type()), quantized_feature->shape());
-                }
-                mm_features.emplace_back(quantized_feature);
-            }
-        }
-        bool hidden_is_qbuffer = false;
-        DataType hidden_qbuffer_dt = hidden->type();
-        if (hidden->isQBuffer()) {
-            hidden_is_qbuffer = true;
-            hidden->updateTypeAndShape(QBufferDtype2BufferDtype(hidden_qbuffer_dt), hidden->shape());
-        }
-
-        hidden = device_->multimodalEmbedding({hidden,
-            features_need_quantize ? (OptionalConstVecBufferPtrRef)mm_features :
-                                     (OptionalConstVecBufferPtrRef)inputs.multimodal_features,
-            mm_feature_locs ? (OptionalConstBufferRef)*mm_feature_locs : nullopt});
-        if (hidden_is_qbuffer) {
-            hidden->updateTypeAndShape(hidden_qbuffer_dt, hidden->shape());
-        }
+        printBufferData(*hidden, "before multimodalEmbedding hidden");
+        hidden = device_->multimodalEmbedding({hidden, (OptionalConstVecBufferPtrRef)inputs.multimodal_features,
+            mm_features_locs ? (OptionalConstBufferRef)*mm_features_locs : nullopt});
+        device_->checkError();
     }
 
-    if (description_.act_qscheme == QScheme::Qint8PerTensor && !(hidden->isQBuffer())) {
+    if (description_.act_qscheme != QScheme::NoQuantize && weights_.pre_decoder_layernorm) {
+        pre_decoder_residual = hidden;
+    }
+
+    if ((description_.act_qscheme == QScheme::Qint8PerTensor || description_.act_qscheme == QScheme::Qfp8PerTensor) && !(hidden->isQBuffer())) {
         auto norm_weight = weights_.pre_decoder_layernorm;
         auto static_scale_reciprocal = norm_weight->static_scale_reciprocal;
-        hidden = device_->quantize({*hidden, DataType::TYPE_INT8, 1,
+        hidden = device_->quantize({*hidden, description_.act_qscheme == QScheme::Qint8PerTensor ? DataType::TYPE_INT8 : DataType::TYPE_FP8_E4M3, 1,
                      description_.act_qscheme, nullopt, nullopt, nullopt,
                      static_scale_reciprocal ? (OptionalConstBufferRef)*static_scale_reciprocal : nullopt});
     }
@@ -706,7 +680,7 @@ GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
                                     || description_.act_qscheme == Qfp8PerTensor,
                                 "ring p2p overlap only supports bf16/fp16 or w8a8 or fp8 per block");
         const size_t max_batch_seq_len =
-            device_->initParams().fifo_scheduler_config.max_context_batch_size * device_->initParams().max_seq_len;
+            device_->initParams().runtime_config.fifo_scheduler_config.max_context_batch_size * device_->initParams().max_seq_len;
         const size_t attn_rs_hidden         = layer0.self_attention_weights.output_weight->kernel->shape()[1];
         const size_t ffn_rs_hidden          = layer0.ffn_weights.down_weight->kernel->shape()[1];
         const size_t attn_ag_hidden         = layer0.self_attention_weights.qkv_weight->kernel->shape()[0];

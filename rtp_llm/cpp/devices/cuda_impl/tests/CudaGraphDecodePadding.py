@@ -3,6 +3,8 @@ import os
 import sys
 import unittest
 
+
+from rtp_llm.models.base_model import BaseModel
 import torch
 
 from rtp_llm.async_decoder_engine.base_engine import BaseEngine
@@ -28,10 +30,9 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
             data_type=WEIGHT_TYPE.FP16.to_str(),
             device_reserve_memory_bytes=-536870912,
         )
-        engine: BaseEngine = loader.init_engine()
-        self.engines.append(engine)
-        assert engine.model.py_model is not None
-        return engine.model.py_model
+
+        model: BaseModel = loader.init_model()
+        return model.py_model
 
     def __init__(self, methodName: str = "runTest") -> None:
         super().__init__(methodName)

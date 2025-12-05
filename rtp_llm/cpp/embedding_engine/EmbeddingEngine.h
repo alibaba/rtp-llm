@@ -43,14 +43,14 @@ public:
         return resource_context_;
     }
 
-    const rtp_llm::GptInitParameter& GetGptInitParameter();
-
 private:
     absl::Status trySaveStepError() const;
     void         loop();
 
 private:
-    const rtp_llm::GptInitParameter     params_;
+    ModelConfig                     model_config_;
+    ParallelismConfig               parallelism_config;
+    ConcurrencyConfig               concurrency_config;
     std::thread                         loop_thread_;
     std::atomic<bool>                   running_{false};
     std::unique_ptr<EmbeddingExecutor>  executor_;

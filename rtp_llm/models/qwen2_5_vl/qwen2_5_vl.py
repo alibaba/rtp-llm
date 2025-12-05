@@ -1,8 +1,11 @@
+from typing import Any
+
 import torch
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import VitParameters
+from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.qwen2_vl.qwen2_vl import QWen2_VL, QwenVL2VitWeight
 
@@ -13,8 +16,6 @@ except ModuleNotFoundError:
     cpu = None
 
 import torch.library as tl
-
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.models.qwen2_5_vl.modeling_qwen2_5_vl import (
     Qwen2_5_VisionTransformerPretrainedModel,
 )
@@ -66,14 +67,15 @@ def smart_nframes(configs, total_frames, video_fps) -> int:
 
 
 class Qwen2_5_VLImageEmbedding(Qwen2VLImageEmbedding):
-    def __init__(self, config: GptInitModelParameters):
+    def __init__(self, mm_related_params: VitParameters, model_config=None):
+        super().__init__(mm_related_params, model_config=model_config)
+        self.mm_related_params = mm_related_params
         self.image_processor = Qwen2VLImageProcessor.from_pretrained(
-            config.mm_related_params.config["ckpt_path"]
+            mm_related_params.config["ckpt_path"]
         )
         self.visual = Qwen2_5_VisionTransformerPretrainedModel(
-            config.mm_related_params.config
+            mm_related_params.config
         )
-        self.config = config
 
     def load_video(self, data, configs, **kwargs):
         vr = VideoReader(data, ctx=cpu(0), num_threads=1)
@@ -124,9 +126,15 @@ class Qwen2_5_VLImageEmbedding(Qwen2VLImageEmbedding):
 
 
 class QWen2_5_VL(QWen2_VL):
-    def _init_multimodal(self, config: GptInitModelParameters):
-        self.mm_part = Qwen2_5_VLImageEmbedding(config)
-        config.mm_related_params.vit_weights = QwenVL2VitWeight(
+    def _init_multimodal(
+        self,
+        mm_model_config: Any,  # MMModelConfig
+        vit_config: VitConfig,
+    ):
+        # mm_related_params is in model_config, not mm_model_config
+        mm_related_params = self.model_config.mm_related_params
+        self.mm_part = Qwen2_5_VLImageEmbedding(mm_related_params, model_config=self.model_config)
+        self.model_config.mm_related_params.vit_weights = QwenVL2VitWeight(
             {"vit": self.mm_part.visual}
         )
 

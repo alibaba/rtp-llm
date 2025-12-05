@@ -2,7 +2,7 @@ import torch
 
 from rtp_llm.distribute.worker_info import g_parallel_info
 from rtp_llm.model_factory_register import register_model
-from rtp_llm.models.base_model import GenerateOutput
+from rtp_llm.utils.base_model_datatypes import GenerateOutput
 from rtp_llm.models.bloom import Bloom
 
 
