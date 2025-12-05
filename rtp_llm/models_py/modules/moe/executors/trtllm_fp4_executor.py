@@ -185,13 +185,15 @@ class TrtllmFp4Executor(FusedMoeExpertExecutor):
         K = K_half * 2  # Unpacked hidden size
 
         # Get weight shapes
+        # w1: [E, 2*intermediate_size, K//2] (quantized on K dimension)
+        # w2: [E, K, intermediate_size//2] (quantized on intermediate_size dimension, NOT on K)
         _, N, _ = self._w1.size()  # [E, N, K//2]
         assert N % 2 == 0
         intermediate_size = N // 2
         assert self._w1.size(0) == E
         assert self._w1.size(2) == K_half
         assert self._w2.size(0) == E
-        assert self._w2.size(1) == K_half, f"w2 shape: {self._w2.shape}, K_half: {K_half}"
+        assert self._w2.size(1) == K, f"w2 shape: {self._w2.shape}, K: {K}, K_half: {K_half}"
         assert self._w2.size(2) == intermediate_size // 2
 
         # Compute total number of tokens
@@ -230,11 +232,12 @@ class TrtllmFp4Executor(FusedMoeExpertExecutor):
 
         # Prepare weight tensors
         # w13 combines w1 and w3 (gate and value) for SwiGLU
-        # In our case, w1 is already [E, N, K//2] where N = 2 * intermediate_size
+        # w1: [E, 2*intermediate_size, K//2] (quantized on K dimension)
+        # w2: [E, K, intermediate_size//2] (quantized on intermediate_size dimension, NOT on K)
         w13 = self._w1  # [E, 2*intermediate_size, K//2]
         w13_scale = self._w1_scale  # [E, 2*intermediate_size, K//16]
-        w2 = self._w2  # [E, K//2, intermediate_size//2]
-        w2_scale = self._w2_scale  # [E, K//16, intermediate_size//16]
+        w2 = self._w2  # [E, K, intermediate_size//2]
+        w2_scale = self._w2_scale  # [E, K, intermediate_size//16]
 
         # Compute output scale scalars
         # These are used for dequantization in the MoE kernel
