@@ -8,7 +8,8 @@ from rtp_llm.models_py.modules.moe.fused_moe import (
     ExpertForwardPayload,
     ExpertTokensMetadata,
 )
-from rtp_llm.models_py.modules.factory.fused_moe.quant_config import FusedMoEQuantConfig
+# from rtp_llm.models_py.modules.factory.fused_moe.quant_config import FusedMoEQuantConfig
+from rtp_llm.models_py.modules.moe.utils import FusedMoEQuantConfig
 from rtp_llm.utils.model_weight import W
 
 # Try to import fp4_quantize from flashinfer
