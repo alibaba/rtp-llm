@@ -1,6 +1,6 @@
 import logging
 import os
-from typing import List, Optional
+from typing import Optional
 
 from rtp_llm.ops import (
     ConcurrencyConfig,
@@ -770,7 +770,6 @@ class PyHwKernelConfig:
         self.use_asm_pa: bool = True
         self.enable_native_cuda_graph: bool = False
         self.num_native_cuda_graph: int = 200
-        self.prefill_capture_seq_lens: List[int] = []
         self.prefill_capture_config: str = ""
         self.decode_capture_config: str = ""
 
@@ -826,7 +825,6 @@ class PyHwKernelConfig:
             f"use_asm_pa: {self.use_asm_pa}\n"
             f"enable_native_cuda_graph: {self.enable_native_cuda_graph}\n"
             f"num_native_cuda_graph: {self.num_native_cuda_graph}\n"
-            f"prefill_capture_seq_lens: {self.prefill_capture_seq_lens}\n"
             f"prefill_capture_config: {self.prefill_capture_config}\n"
             f"decode_capture_config: {self.decode_capture_config}"
         )
