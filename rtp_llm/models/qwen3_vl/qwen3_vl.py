@@ -1,27 +1,14 @@
 import json
 import os
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 import torch
-from torchvision import transforms
-from torchvision.transforms import InterpolationMode
-
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.model_factory_register import register_model
-from rtp_llm.models.qwen2_vl.qwen2_vl import QWen2_VL, QwenVL2VitWeight
-
-try:
-    from decord import VideoReader, cpu
-except ModuleNotFoundError:
-    VideoReader = None
-    cpu = None
-
-from typing import List
-
 import torch.library as tl
+from PIL import Image
 from transformers import AutoProcessor, Qwen3VLConfig, Qwen3VLVisionModel
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.multimodal.multimodal_mixin import (
     BaseMultiModalWeightInfo,
     BaseVitWeights,
@@ -65,7 +52,10 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
         mm_input = mm_inputs[0]
         mm_type = mm_input.mm_type
         if mm_type == MMUrlType.DEFAULT or mm_type == MMUrlType.IMAGE:
-            res = processor.image_processor(mm_input.url, return_tensors="pt")
+            image = Image.open(get_bytes_io_from_url(mm_input.url))
+            if mm_input.config.height != -1 and mm_input.config.width != -1:
+                image = image.resize((mm_input.config.width, mm_input.config.height))
+            res = processor.image_processor(image, return_tensors="pt")
             return res["pixel_values"], res["image_grid_thw"]
         elif mm_type == MMUrlType.VIDEO:
             res = processor.video_processor(mm_input.url, return_tensors="pt")

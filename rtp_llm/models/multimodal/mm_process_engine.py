@@ -191,7 +191,7 @@ class MMProcessEngine:
         with self.query_num_lock:
             return self.query_num
 
-    def _maybe_tensor_to_list(self, tensor: Any) -> List[Any]:
+    def _maybe_tensor_to_list(self, tensor: Any, dim: int = 2) -> List[Any]:
         """
         Convert tensor to list format if needed.
 
@@ -331,8 +331,10 @@ class MMProcessEngine:
 
         for work_item in work_items:
             result = work_item.get_embedding_result(self.model.mm_part.embedding)
-            emb_res.extend(self._maybe_tensor_to_list(result[0]))
-            pos_res.extend(self._maybe_tensor_to_list(result[1]))
+            emb_res.extend(self._maybe_tensor_to_list(result[0], dim=2))
+            pos_res.extend(self._maybe_tensor_to_list(result[1], dim=2))
+            if len(result) > 2:
+                tensor_res.extend(self._maybe_tensor_to_list(result[2], dim=3))
 
         return emb_res, pos_res, tensor_res
 
