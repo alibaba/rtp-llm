@@ -86,3 +86,24 @@ def init_vit_group_args(parser):
         default=None,
         help="访问igraph失败时默认使用的key",
     )
+    vit_group.add_argument(
+        "--mm_preprocess_max_workers",
+        env_name="MM_PREPROCESS_MAX_WORKERS",
+        type=int,
+        default=10,
+        help="多模态预处理时最大线程数量",
+    )
+    vit_group.add_argument(
+        "--mm_batch_size",
+        env_name="MM_BATCH_SIZE",
+        type=int,
+        default=1,
+        help="多模态处理时批量大小",
+    )
+    vit_group.add_argument(
+        "--biencoder_preprocess",
+        env_name="BIENCODER_PREPROCESS",
+        type=bool,
+        default=False,
+        help="是否开启biencoder预处理",
+    )
