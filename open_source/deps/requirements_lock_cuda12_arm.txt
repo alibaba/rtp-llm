@@ -599,11 +599,14 @@ filelock==3.13.1 \
     #   huggingface-hub
     #   torch
     #   transformers
-flashinfer-cubin @ https://search-ad.oss-cn-hangzhou-zmf.aliyuncs.com/rtp_llm/arm_pkg/flashinfer_cubin-0.5.3-py3-none-any.whl
+flashinfer-cubin @ https://search-ad.oss-cn-hangzhou-zmf.aliyuncs.com/rtp_llm/arm_pkg/flashinfer_cubin-0.5.1-py3-none-any.whl \
+    --hash=sha256:614e05a8ec2ed53ec449716193628c7bd9129273b005efa49bdedcd2f092b1c7
     # via -r open_source/deps/requirements_cuda12_arm.txt
-flashinfer-jit-cache @ https://search-ad.oss-cn-hangzhou-zmf.aliyuncs.com/rtp_llm/arm_pkg/flashinfer_jit_cache-0.5.3-cp39-abi3-manylinux_2_28_aarch64.whl
+flashinfer-jit-cache @ https://search-ad.oss-cn-hangzhou-zmf.aliyuncs.com/rtp_llm/arm_pkg/flashinfer_jit_cache-0.5.1-cp39-abi3-manylinux_2_28_aarch64.whl \
+    --hash=sha256:b6d4d4570d79d574e3b476f383ded0a84dee45ea3891f8d99d5fb924cfa58acf
     # via -r open_source/deps/requirements_cuda12_arm.txt
-flashinfer-python @ https://search-ad.oss-cn-hangzhou-zmf.aliyuncs.com/rtp_llm/arm_pkg/flashinfer_python-0.5.3-py3-none-any.whl
+flashinfer-python @ https://search-ad.oss-cn-hangzhou-zmf.aliyuncs.com/rtp_llm/arm_pkg/flashinfer_python-0.5.1-py3-none-any.whl \
+    --hash=sha256:2c2cc2e0156d81c8efd0c836e52b4f929dab9a348914f212ffbaef5c71f27f2b
     # via -r open_source/deps/requirements_cuda12_arm.txt
 fonttools==4.60.1 \
     --hash=sha256:022beaea4b73a70295b688f817ddc24ed3e3418b5036ffcd5658141184ef0d0c \
