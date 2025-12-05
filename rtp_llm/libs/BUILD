@@ -48,7 +48,7 @@ genrule(
         "libmodule_smoothquant.so",
         "libmodule_pa.so",
         "libmodule_activation.so",
-        "libmodule_m_grouped_gemm.so",
+        "libmodule_deepgemm.so",
         "libdeep_ep_rocm.so",
         "libmodule_attention_asm.so",
         "libmodule_mha_fwd.so",
@@ -77,7 +77,7 @@ cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_norm.so $(locat
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_rmsnorm.so $(location libmodule_rmsnorm.so);
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_gemm_a8w8.so $(location libmodule_gemm_a8w8.so);
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_moe_ck2stages.so $(location libmodule_moe_ck2stages.so);
-cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_m_grouped_gemm.so $(location libmodule_m_grouped_gemm.so);
+cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_deepgemm.so $(location libmodule_deepgemm.so);
 cp ./bazel-out/k8-opt/bin/external/deep_ep_rocm/libdeep_ep_rocm.so $(location libdeep_ep_rocm.so);
 """,
 tags = ["rocm", "local"],
