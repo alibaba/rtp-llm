@@ -1,6 +1,5 @@
 #include "rtp_llm/cpp/cache_new/CacheConfigCreator.h"
 
-#include <algorithm>
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
@@ -33,7 +32,6 @@ CacheConfig CacheConfigCreator::createBasicConfig(const rtp_llm::GptInitParamete
     config.block_num          = 0;
     config.seq_size_per_block = static_cast<size_t>(param.seq_size_per_block_);
 
-    // for adaption
     config.use_mla = param.use_mla_;
 
     if (param.use_mla_ && param.mla_ops_type_ != rtp_llm::MlaOpsType::MHA) {
@@ -67,7 +65,7 @@ CacheConfig CacheConfigCreator::createBasicConfig(const rtp_llm::GptInitParamete
         config.cache_specs.push_back(spec);
         config.block_size = static_cast<int>(spec->block_size() * spec->layer_num);
 
-        // Set block strides for backward compatibility
+        // Set block strides for backward compatibility, TODO, fix this
         config.k_block_stride  = spec->block_size();
         config.v_block_stride  = 0;
         config.kv_block_stride = spec->block_size();

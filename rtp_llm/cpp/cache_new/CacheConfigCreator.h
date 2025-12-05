@@ -1,7 +1,6 @@
 #pragma once
 
 #include <memory>
-#include <vector>
 #include <optional>
 #include <tuple>
 #include "rtp_llm/cpp/cache_new/CacheConfig.h"

@@ -247,8 +247,6 @@ std::unique_ptr<MemoryLayoutStrategy> MemoryLayoutStrategyFactory::create(Memory
     switch (layout) {
         case LAYER_FIRST:
             return std::make_unique<LayerFirstLayoutStrategy>();
-        case KV_FIRST:
-            return std::make_unique<KVFirstLayoutStrategy>();
         default:
             RTP_LLM_LOG_ERROR("Unknown memory layout type: %d", static_cast<int>(layout));
             return nullptr;

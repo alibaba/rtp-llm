@@ -3,11 +3,10 @@
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/NormalCacheStore.h"
-#include "rtp_llm/cpp/disaggregate/cache_store/RequestBlockBuffer.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
-#include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
+
 BlockPool::BlockPool(const BlockPoolConfig& config, rtp_llm::DeviceBase* device, AllocationType allocation_type):
     config_(config), device_(device), allocation_type_(allocation_type) {}
 
@@ -25,10 +24,7 @@ bool BlockPool::init() {
     torch::Tensor kv_cache_tensor = Buffer2torchTensor(cache_aligned_buffer_, false);
 
     layout_strategy_ = MemoryLayoutStrategyFactory::create(config_.layout);
-    if (!layout_strategy_) {
-        RTP_LLM_LOG_ERROR("Failed to create memory layout strategy");
-        return false;
-    }
+    RTP_LLM_CHECK_WITH_INFO(!layout_strategy_, "Failed to create memory layout strategy");
 
     if (!layout_strategy_->init(config_, kv_cache_tensor, cache_base_ptr_, config_.dtype)) {
         RTP_LLM_LOG_ERROR("Failed to initialize memory layout strategy");
@@ -37,10 +33,9 @@ bool BlockPool::init() {
 
     initFreeBlocks();
 
-    block_cache_ = std::make_shared<BlockCacheV1>();
+    block_cache_ = std::make_shared<BlockCache>();
 
-    RTP_LLM_LOG_INFO("block pool init success with layout: %s",
-                     config_.layout == LAYER_FIRST ? "LAYER_FIRST" : "KV_FIRST");
+    RTP_LLM_LOG_INFO("block pool init success");
     return true;
 }
 
@@ -58,10 +53,6 @@ void BlockPool::initFreeBlocks() {
 }
 
 std::vector<torch::Tensor> BlockPool::layerCacheBase() const {
-    if (!layout_strategy_) {
-        RTP_LLM_LOG_ERROR("Layout strategy not initialized");
-        return {};
-    }
     return layout_strategy_->getLayerCacheTensors();
 }
 
@@ -74,11 +65,8 @@ BlockIndicesType BlockPool::malloc(int num_blocks) {
         return {};
     }
     auto first = free_block_ids_.begin();
-    auto last  = first;
-    std::advance(last, num_blocks);
-    for (auto it = first; it != last; ++it) {
-        block_ids.push_back(*it);
-    }
+    auto last  = std::next(first, num_blocks);
+    block_ids.assign(first, last);
     free_block_ids_.erase(first, last);
     requestReference(block_ids);
     return block_ids;
@@ -136,8 +124,7 @@ void BlockPool::regUserMr(size_t model_id) {
         RTP_LLM_LOG_INFO("start to register user mr");
         auto memory_util = std::static_pointer_cast<NormalCacheStore>(device_->cacheStore())->getMemoryUtil();
 
-        auto   start_time_us     = currentTimeUs();
-        size_t total_memory_size = config_.layer_num * config_.block_num * config_.block_size;
+        auto start_time_us = currentTimeUs();
 
         if (!memory_util->regUserMr(cache_base_ptr_, config_.total_size, true, config_.block_size)) {
             RTP_LLM_FAIL("register user mr for block pool cache buffer failed");
@@ -148,7 +135,7 @@ void BlockPool::regUserMr(size_t model_id) {
             "register user mr for block pool cache buffer success: cost %ld ms, cache base address %p, len %lu",
             cost_time_ms,
             cache_base_ptr_,
-            total_memory_size);
+            config_.total_size);
         mr_cost_time_ms_ += cost_time_ms;
         kvcache_reg_mr_ = true;
     }
@@ -181,42 +168,22 @@ size_t BlockPool::availableBlocksNum() const {
 }
 
 BlockAddrInfo BlockPool::convertIndexToAddr(int layer_id, int block_id) const {
-    if (!layout_strategy_) {
-        RTP_LLM_LOG_ERROR("Layout strategy not initialized");
-        return {nullptr, nullptr};
-    }
     return layout_strategy_->convertIndexToAddr(layer_id, block_id);
 }
 
 void* BlockPool::getKCacheAddr(int layer_id, int block_id) const {
-    if (!layout_strategy_) {
-        RTP_LLM_LOG_ERROR("Layout strategy not initialized");
-        return nullptr;
-    }
     return layout_strategy_->getKCacheAddr(layer_id, block_id);
 }
 
 void* BlockPool::getVCacheAddr(int layer_id, int block_id) const {
-    if (!layout_strategy_) {
-        RTP_LLM_LOG_ERROR("Layout strategy not initialized");
-        return nullptr;
-    }
     return layout_strategy_->getVCacheAddr(layer_id, block_id);
 }
 
 BlockBufferPtrInfo BlockPool::convertIndexToBuffer(int layer_id, int block_id) const {
-    if (!layout_strategy_) {
-        RTP_LLM_LOG_ERROR("Layout strategy not initialized");
-        return {nullptr, nullptr};
-    }
     return layout_strategy_->convertIndexToBuffer(layer_id, block_id);
 }
 
 KVCacheBuffer BlockPool::kvCacheBuffer() const {
-    if (!layout_strategy_) {
-        RTP_LLM_LOG_ERROR("Layout strategy not initialized for kvCacheBuffer");
-        return KVCacheBuffer{nullptr, nullptr};
-    }
     return layout_strategy_->kvCacheBuffer();
 }
 

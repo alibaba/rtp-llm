@@ -118,20 +118,20 @@ TEST_F(HybridLayerKVCacheAllocatorTest, ReuseCache) {
     auto block_pool  = allocator_->getBlockPool();
     auto block_cache = block_pool->blockCache();
 
-    BlockCacheV1::CacheItem item1   = {101, 0, 1, false};
-    auto                    result1 = block_cache->put(item1);
+    BlockCache::CacheItem item1   = {101, 0, 1, false};
+    auto                  result1 = block_cache->put(item1);
     EXPECT_TRUE(result1);
 
-    BlockCacheV1::CacheItem item2   = {102, 0, 2, false};
-    auto                    result2 = block_cache->put(item2);
+    BlockCache::CacheItem item2   = {102, 0, 2, false};
+    auto                  result2 = block_cache->put(item2);
     EXPECT_TRUE(result2);
 
-    BlockCacheV1::CacheItem item3   = {103, 0, 3, false};
-    auto                    result3 = block_cache->put(item3);
+    BlockCache::CacheItem item3   = {103, 0, 3, false};
+    auto                  result3 = block_cache->put(item3);
     EXPECT_TRUE(result3);
 
-    BlockCacheV1::CacheItem item4   = {102, 1, 4, false};
-    auto                    result4 = block_cache->put(item4);
+    BlockCache::CacheItem item4   = {102, 1, 4, false};
+    auto                  result4 = block_cache->put(item4);
     EXPECT_TRUE(result4);
 
     CacheKeysType     cache_keys{101, 102, 103, 104};
@@ -146,8 +146,8 @@ TEST_F(HybridLayerKVCacheAllocatorTest, ReuseCache) {
     int reuse_blocks1 = allocator_->reuseCache(cache_keys, resource);
     ASSERT_EQ(reuse_blocks1, 0);
 
-    BlockCacheV1::CacheItem item5   = {102, 2, 5, false};
-    auto                    result5 = block_cache->put(item5);
+    BlockCache::CacheItem item5   = {102, 2, 5, false};
+    auto                  result5 = block_cache->put(item5);
     EXPECT_TRUE(result5);
 
     int reuse_blocks2 = allocator_->reuseCache(cache_keys, resource);
@@ -235,19 +235,19 @@ TEST_F(HybridLayerKVCacheAllocatorTest, initMallocForCommonLenSingleBatch) {
     allocator_->free(free_info);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_blocks);
 
-    auto                    block_pool  = allocator_->getBlockPool();
-    auto                    block_cache = block_pool->blockCache();
-    BlockCacheV1::CacheItem item1       = {101, 0, 1, false};
-    auto                    result1     = block_cache->put(item1);
+    auto                  block_pool  = allocator_->getBlockPool();
+    auto                  block_cache = block_pool->blockCache();
+    BlockCache::CacheItem item1       = {101, 0, 1, false};
+    auto                  result1     = block_cache->put(item1);
     EXPECT_TRUE(result1);
-    BlockCacheV1::CacheItem item2   = {102, 0, 2, false};
-    auto                    result2 = block_cache->put(item2);
+    BlockCache::CacheItem item2   = {102, 0, 2, false};
+    auto                  result2 = block_cache->put(item2);
     EXPECT_TRUE(result2);
-    BlockCacheV1::CacheItem item3   = {102, 1, 3, false};
-    auto                    result3 = block_cache->put(item3);
+    BlockCache::CacheItem item3   = {102, 1, 3, false};
+    auto                  result3 = block_cache->put(item3);
     EXPECT_TRUE(result3);
-    BlockCacheV1::CacheItem item4   = {102, 2, 4, false};
-    auto                    result4 = block_cache->put(item4);
+    BlockCache::CacheItem item4   = {102, 2, 4, false};
+    auto                  result4 = block_cache->put(item4);
     EXPECT_TRUE(result4);
 
     auto batch_resource2                = createBatchKVCacheResource(1, 3);
@@ -299,19 +299,19 @@ TEST_F(HybridLayerKVCacheAllocatorTest, initMallocForCommonLenMultiBatch) {
     allocator_->free(free_info);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_blocks);
 
-    auto                    block_pool  = allocator_->getBlockPool();
-    auto                    block_cache = block_pool->blockCache();
-    BlockCacheV1::CacheItem item1       = {101, 0, 1, false};
-    auto                    result1     = block_cache->put(item1);
+    auto                  block_pool  = allocator_->getBlockPool();
+    auto                  block_cache = block_pool->blockCache();
+    BlockCache::CacheItem item1       = {101, 0, 1, false};
+    auto                  result1     = block_cache->put(item1);
     EXPECT_TRUE(result1);
-    BlockCacheV1::CacheItem item2   = {102, 0, 2, false};
-    auto                    result2 = block_cache->put(item2);
+    BlockCache::CacheItem item2   = {102, 0, 2, false};
+    auto                  result2 = block_cache->put(item2);
     EXPECT_TRUE(result2);
-    BlockCacheV1::CacheItem item3   = {102, 1, 3, false};
-    auto                    result3 = block_cache->put(item3);
+    BlockCache::CacheItem item3   = {102, 1, 3, false};
+    auto                  result3 = block_cache->put(item3);
     EXPECT_TRUE(result3);
-    BlockCacheV1::CacheItem item4   = {102, 2, 4, false};
-    auto                    result4 = block_cache->put(item4);
+    BlockCache::CacheItem item4   = {102, 2, 4, false};
+    auto                  result4 = block_cache->put(item4);
     EXPECT_TRUE(result4);
 
     auto batch_resource2                = createBatchKVCacheResource(2, 3);
@@ -385,19 +385,19 @@ TEST_F(HybridLayerKVCacheAllocatorTest, initMallocSingleBatch) {
     allocator_->free(free_info);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_blocks);
 
-    auto                    block_pool  = allocator_->getBlockPool();
-    auto                    block_cache = block_pool->blockCache();
-    BlockCacheV1::CacheItem item1       = {101, 0, 1, false};
-    auto                    result1     = block_cache->put(item1);
+    auto                  block_pool  = allocator_->getBlockPool();
+    auto                  block_cache = block_pool->blockCache();
+    BlockCache::CacheItem item1       = {101, 0, 1, false};
+    auto                  result1     = block_cache->put(item1);
     EXPECT_TRUE(result1);
-    BlockCacheV1::CacheItem item2   = {102, 0, 2, false};
-    auto                    result2 = block_cache->put(item2);
+    BlockCache::CacheItem item2   = {102, 0, 2, false};
+    auto                  result2 = block_cache->put(item2);
     EXPECT_TRUE(result2);
-    BlockCacheV1::CacheItem item3   = {102, 1, 3, false};
-    auto                    result3 = block_cache->put(item3);
+    BlockCache::CacheItem item3   = {102, 1, 3, false};
+    auto                  result3 = block_cache->put(item3);
     EXPECT_TRUE(result3);
-    BlockCacheV1::CacheItem item4   = {102, 2, 4, false};
-    auto                    result4 = block_cache->put(item4);
+    BlockCache::CacheItem item4   = {102, 2, 4, false};
+    auto                  result4 = block_cache->put(item4);
     EXPECT_TRUE(result4);
 
     auto batch_resource2                = createBatchKVCacheResource(1, 3);
@@ -449,19 +449,19 @@ TEST_F(HybridLayerKVCacheAllocatorTest, initMallocMultiBatch) {
     allocator_->free(free_info);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_blocks);
 
-    auto                    block_pool  = allocator_->getBlockPool();
-    auto                    block_cache = block_pool->blockCache();
-    BlockCacheV1::CacheItem item1       = {101, 0, 1, false};
-    auto                    result1     = block_cache->put(item1);
+    auto                  block_pool  = allocator_->getBlockPool();
+    auto                  block_cache = block_pool->blockCache();
+    BlockCache::CacheItem item1       = {101, 0, 1, false};
+    auto                  result1     = block_cache->put(item1);
     EXPECT_TRUE(result1);
-    BlockCacheV1::CacheItem item2   = {102, 0, 2, false};
-    auto                    result2 = block_cache->put(item2);
+    BlockCache::CacheItem item2   = {102, 0, 2, false};
+    auto                  result2 = block_cache->put(item2);
     EXPECT_TRUE(result2);
-    BlockCacheV1::CacheItem item3   = {102, 1, 3, false};
-    auto                    result3 = block_cache->put(item3);
+    BlockCache::CacheItem item3   = {102, 1, 3, false};
+    auto                  result3 = block_cache->put(item3);
     EXPECT_TRUE(result3);
-    BlockCacheV1::CacheItem item4   = {102, 2, 4, false};
-    auto                    result4 = block_cache->put(item4);
+    BlockCache::CacheItem item4   = {102, 2, 4, false};
+    auto                  result4 = block_cache->put(item4);
     EXPECT_TRUE(result4);
 
     auto batch_resource2                = createBatchKVCacheResource(2, 3);

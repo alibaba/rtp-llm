@@ -78,8 +78,8 @@ TEST_F(LinearKVCacheGroupTest, MatchTest) {
     block_pool->init();
     auto block_cache = block_pool->blockCache();
 
-    BlockCacheV1::CacheItem item2   = {102, 0, 2, false};
-    auto                    result2 = block_cache->put(item2);
+    BlockCache::CacheItem item2   = {102, 0, 2, false};
+    auto                  result2 = block_cache->put(item2);
     EXPECT_TRUE(result2);
 
     auto spec                = make_shared<MHAKVCacheSpec>();
@@ -104,8 +104,8 @@ TEST_F(LinearKVCacheGroupTest, MatchTest) {
     ASSERT_EQ(match_result2.block_indices, expected_result);
 
     // all match
-    BlockCacheV1::CacheItem item4   = {104, 0, 4, false};
-    auto                    result4 = block_cache->put(item4);
+    BlockCache::CacheItem item4   = {104, 0, 4, false};
+    auto                  result4 = block_cache->put(item4);
     EXPECT_TRUE(result4);
 
     cache_keys         = {101, 102, 103, 104};

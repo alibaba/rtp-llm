@@ -35,8 +35,6 @@ bool SingleTypeKVCacheAllocator::init() {
         return false;
     }
 
-    // TODO, group id is set via constructor
-
     RTP_LLM_LOG_INFO("SingleTypeKVCacheAllocator initialized successfully");
     return true;
 }

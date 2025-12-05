@@ -1,15 +1,6 @@
-#include <cassert>
-#include <iostream>
-#include <string>
-#include <vector>
-#include <set>
-
-#include "rtp_llm/cpp/cache_new/BlockCacheV1.h"
 #include "rtp_llm/cpp/cache_new/LinearKVCacheGroup.h"
-#include "rtp_llm/cpp/utils/LRUCache.h"
-#include "rtp_llm/cpp/utils/StringUtil.h"
 
-using namespace std;
+#include "rtp_llm/cpp/cache_new/BlockCache.h"
 
 namespace rtp_llm {
 
@@ -54,10 +45,6 @@ void LinearKVCacheGroup::removeSkippedBlocks(BlockIndicesType& block_indices) {
     }
 }
 
-// not reuse cache
-// reuse cache
-// prefill
-// decode
 int LinearKVCacheGroup::needBlocksNum(int seq_len, int current_blocks) const {
     return std::max((seq_len + seq_size_per_block_ - 1) / seq_size_per_block_ - current_blocks, 0);
 }
@@ -104,8 +91,7 @@ void LinearKVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
                                 + std::to_string(block_indices.size()));
 
     for (int i = 0; i < cache_keys.size(); i++) {
-        BlockCacheV1::CacheItem item{cache_keys[i], group_id_, block_indices[i], is_resident};
-        // block cache引用了block
+        BlockCache::CacheItem item{cache_keys[i], group_id_, block_indices[i], is_resident};
         if (block_cache_->put(item)) {
             block_pool_->blockCacheReference(block_indices[i]);
         }

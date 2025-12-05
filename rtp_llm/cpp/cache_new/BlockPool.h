@@ -1,21 +1,18 @@
 #pragma once
 
 #include <memory>
-#include <vector>
-#include <cstddef>
-#include <cstdint>
-#include <unordered_map>
 #include <set>
+#include <vector>
+#include <unordered_map>
 
 #include <torch/torch.h>
 
 #include "rtp_llm/cpp/cache_new/BlockRefCounter.h"
-#include "rtp_llm/cpp/cache_new/CacheConfig.h"
 #include "rtp_llm/cpp/devices/DeviceBase.h"
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/core/Buffer.h"
 #include "rtp_llm/cpp/cache_new/types.h"
-#include "rtp_llm/cpp/cache_new/BlockCacheV1.h"
+#include "rtp_llm/cpp/cache_new/BlockCache.h"
 #include "rtp_llm/cpp/cache_new/MemoryLayoutStrategy.h"
 
 namespace rtp_llm {
@@ -49,13 +46,14 @@ public:
     void                      blockCacheReference(const BlockIndicesType& block_indices);
 
     void               regUserMr(size_t model_id);
+    void               deregUserMr();
     BlockAddrInfo      convertIndexToAddr(int layer_id, int block_id) const;
     BlockBufferPtrInfo convertIndexToBuffer(int layer_id, int block_id) const;
 
     void* getKCacheAddr(int layer_id, int block_id) const;
     void* getVCacheAddr(int layer_id, int block_id) const;
 
-    // For backward compatibility with old cache system
+    // For backward compatibility with old cache system, TODO, 这里可以删除吗？
     KVCacheBuffer kvCacheBuffer() const;
 
     void incrBlockRefCounter(const BlockIndicesType& blocks) {}
@@ -63,7 +61,6 @@ public:
 
 private:
     void initFreeBlocks();
-    void deregUserMr();
     void freeImpl(const BlockIndicesType& block_indices);
 
 private:

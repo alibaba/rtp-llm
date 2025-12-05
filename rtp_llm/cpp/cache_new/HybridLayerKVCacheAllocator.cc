@@ -48,7 +48,7 @@ bool HybridLayerKVCacheAllocator::init() {
         all_kv_cache_groups_.end(), linear_kv_cache_groups_.begin(), linear_kv_cache_groups_.end());
     // group ids have been set via constructors
 
-    RTP_LLM_LOG_INFO("HybridLayerKVCacheAllocator initialized successfully with KV_FIRST layout");
+    RTP_LLM_LOG_INFO("HybridLayerKVCacheAllocator init success");
     return true;
 }
 
