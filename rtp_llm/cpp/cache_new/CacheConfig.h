@@ -117,6 +117,9 @@ struct CacheConfig {
     // for adpation to MLA
     bool use_mla = false;
 
+    // mtp
+    std::string mtp_model_type = "default_model";
+
     // for backward compatibility with old NormalBatchStreamProcessor, TODO, fix this
     size_t k_block_stride  = 0;  // for one layer
     size_t v_block_stride  = 0;  // for one layer
