@@ -382,7 +382,6 @@ class GptInitParameter:
     routed_scaling_factor: float
     sampler_config: SamplerConfig
     scheduler_config: SchedulerConfig
-    scheduler_reserve_resource_ratio: int
     scoring_func: int
     seq_size_per_block: int
     service_discovery_config: ServiceDiscoveryConfig

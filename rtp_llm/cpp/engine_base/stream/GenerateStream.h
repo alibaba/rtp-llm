@@ -221,6 +221,7 @@ public:
     bool         finishedWithoutLock();
     void         cancelIfNotRunning();
     void         setFinishedWithoutLock();
+    bool         isRemoteRunningWithoutLock();
     bool         needRemoteGenerate() const;
     bool         setRemoteGenerate();
     size_t       iterCount() const;

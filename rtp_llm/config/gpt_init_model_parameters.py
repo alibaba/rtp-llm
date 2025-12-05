@@ -352,7 +352,6 @@ class GptInitModelParameters:
     rotary_factor2: float
     partial_rotary_factor: float
     rotary_embedding_extrapolation_factor: float
-    scheduler_reserve_resource_ratio: int
     scoring_func: int
     seq_size_per_block: int
     size_per_head: int
@@ -1359,13 +1358,6 @@ class GptInitModelParameters:
                 self.py_env_configs.pd_separation_config.decode_entrance
             )
             logging.info(f"decode_entrance: {self.decode_entrance}")
-
-        self.scheduler_reserve_resource_ratio = int(
-            os.environ.get("SCHEDULER_RESERVE_RESOURCE_RATIO", 5)
-        )
-        logging.info(
-            f"scheduler_reserve_resource_ratio: {self.scheduler_reserve_resource_ratio}"
-        )
 
         self.reuse_cache = self.py_env_configs.py_kv_cache_config.reuse_cache
         logging.info(f"reuse_cache: {self.reuse_cache}")
