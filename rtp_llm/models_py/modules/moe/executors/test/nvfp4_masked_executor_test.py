@@ -294,6 +294,10 @@ def _generate_payload_and_weights(
         W.moe_w2: w2,
         W.moe_s1: w1_scale,
         W.moe_s2: w2_scale,
+        # Store global scales in weights dict for executor to use
+        "moe_w1_global_scale": w1_global_scale,
+        "moe_w2_global_scale": w2_global_scale,
+        "moe_input_global_scale": input_global_scale,
     }
     
     # Store global scales for reference output generation
@@ -437,11 +441,13 @@ def test_nvfp4_masked_executor(use_nvfp4: bool = True):
     ) / top_k
     
     # Assign expert IDs based on which expert has tokens
+    # Fill both topk positions with the same expert for simplicity
     token_idx = 0
     for expert_id in range(num_local_experts):
         num_tokens = payload.expert_tokens_meta.expert_num_tokens[expert_id].item()
         if num_tokens > 0:
             expert_topk_ids[token_idx : token_idx + num_tokens, 0] = expert_id
+            expert_topk_ids[token_idx : token_idx + num_tokens, 1] = expert_id  # Fill second position too
             token_idx += num_tokens
     
     # Update payload with topk information

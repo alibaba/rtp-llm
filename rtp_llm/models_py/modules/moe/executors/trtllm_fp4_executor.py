@@ -89,6 +89,12 @@ class TrtllmFp4Executor(FusedMoeExpertExecutor):
         assert self._w1 is not None and self._w2 is not None
         assert self._w1_scale is not None and self._w2_scale is not None
         
+        # Get global scales from weights dict if available (for testing)
+        # In production, these should be stored with the weights during quantization
+        self._w1_global_scale_from_weights = self._weights.get("moe_w1_global_scale", None)
+        self._w2_global_scale_from_weights = self._weights.get("moe_w2_global_scale", None)
+        self._input_global_scale_from_weights = self._weights.get("moe_input_global_scale", None)
+        
         # Check NVFP4 quantization
         if not self.quant_config.is_quantized:
             raise NotImplementedError(
@@ -123,22 +129,32 @@ class TrtllmFp4Executor(FusedMoeExpertExecutor):
 
     def _compute_global_scales(self):
         """Compute global scales for weights based on their amax values."""
-        # For NVFP4, we typically use a fixed global scale or compute from amax
-        # Here we use a simplified approach - in practice, these should be pre-computed
-        # during weight quantization
-        # NOTE: We cannot compute amax from quantized weights accurately
-        # For now, use a fixed scale similar to bench_fp4_moe.py
-        # In production, these should be stored with the weights
-        self._w1_global_scale = torch.tensor(
-            [1.0 / 448.0 / 6.0],  # Default global scale for NvFP4xNvFP4
-            device=self._w1.device,
-            dtype=torch.float32,
-        )
-        self._w2_global_scale = torch.tensor(
-            [1.0 / 448.0 / 6.0],  # Default global scale for NvFP4xNvFP4
-            device=self._w2.device,
-            dtype=torch.float32,
-        )
+        # For NVFP4, we need to compute global scales from the actual weight amax values
+        # The test code computes: w1_global_scale = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / w1_amax
+        # But we only have quantized weights, so we cannot compute amax accurately
+        # 
+        # If global scales are provided in weights dict (for testing), use them
+        # Otherwise, use a default that matches bench_fp4_moe.py
+        if self._w1_global_scale_from_weights is not None:
+            self._w1_global_scale = self._w1_global_scale_from_weights
+        else:
+            self._w1_global_scale = torch.tensor(
+                [1.0 / 448.0 / 6.0],  # Default for bench_fp4_moe.py
+                device=self._w1.device,
+                dtype=torch.float32,
+            )
+        
+        if self._w2_global_scale_from_weights is not None:
+            self._w2_global_scale = self._w2_global_scale_from_weights
+        else:
+            self._w2_global_scale = torch.tensor(
+                [1.0 / 448.0 / 6.0],  # Default for bench_fp4_moe.py
+                device=self._w2.device,
+                dtype=torch.float32,
+            )
+        
+        # Debug: print which global scales we're using
+        print(f"[DEBUG TrtllmFp4Executor] Using global scales from weights: w1={self._w1_global_scale_from_weights is not None}, w2={self._w2_global_scale_from_weights is not None}")
 
     @property
     def local_num_experts(self) -> int:
@@ -251,31 +267,39 @@ class TrtllmFp4Executor(FusedMoeExpertExecutor):
         # Compute output scale scalars
         # These are used for dequantization in the MoE kernel
         # According to bench_fp4_moe.py, for NvFP4xNvFP4:
-        # - hidden_states_global_scale = 1.0 / 448.0 / 6.0
-        # - w13_global_scale = 1.0 / 448.0 / 6.0
-        # - w2_global_scale = 1.0 / 448.0 / 6.0
+        # - Quantization uses global_scale = 448.0 * 6.0
+        # - Dequantization uses 1.0 / (448.0 * 6.0) = 1.0 / 448.0 / 6.0
+        # - hidden_states_global_scale = 1.0 / 448.0 / 6.0 (dequantization scale for input)
+        # - w13_global_scale = 1.0 / 448.0 / 6.0 (dequantization scale for w13)
+        # - w2_global_scale = 1.0 / 448.0 / 6.0 (dequantization scale for w2)
         # - output1_scale_scalar = hidden_states_global_scale * w13_global_scale
+        #   This is used to dequantize the output of gemm1 (after activation)
         # - output2_scale_scalar = hidden_states_global_scale * w2_global_scale
-        hidden_states_global_scale = torch.tensor(
-            [1.0 / 448.0 / 6.0],  # For NvFP4xNvFP4
-            device=self._device,
-            dtype=torch.float32,
-        )
-        w13_global_scale = self._w1_global_scale
-        w2_global_scale = self._w2_global_scale
+        #   This is used to dequantize the final output
+        # NOTE: We need to use the actual global scales from the quantization process
+        #       In the test, these are computed from the actual weight amax values
+        #       Use global scales from weights dict if available (for testing), otherwise use defaults
+        if self._input_global_scale_from_weights is not None:
+            hidden_states_global_scale_val = self._input_global_scale_from_weights.item() if hasattr(self._input_global_scale_from_weights, 'item') else float(self._input_global_scale_from_weights)
+        else:
+            hidden_states_global_scale_val = 1.0 / 448.0 / 6.0
+        
+        # Use the global scales from quantization (should match test data generation)
+        w13_global_scale_val = self._w1_global_scale.item() if hasattr(self._w1_global_scale, 'item') else float(self._w1_global_scale)
+        w2_global_scale_val = self._w2_global_scale.item() if hasattr(self._w2_global_scale, 'item') else float(self._w2_global_scale)
 
         output1_scale_scalar = torch.tensor(
-            [hidden_states_global_scale.item() * w13_global_scale.item()] * E,
+            [hidden_states_global_scale_val * w13_global_scale_val] * E,
             device=self._device,
             dtype=torch.float32,
         )
         output1_scale_gate_scalar = torch.tensor(
-            [hidden_states_global_scale.item() * w13_global_scale.item()] * E,
+            [hidden_states_global_scale_val * w13_global_scale_val] * E,
             device=self._device,
             dtype=torch.float32,
         )
         output2_scale_scalar = torch.tensor(
-            [hidden_states_global_scale.item() * w2_global_scale.item()] * E,
+            [hidden_states_global_scale_val * w2_global_scale_val] * E,
             device=self._device,
             dtype=torch.float32,
         )
