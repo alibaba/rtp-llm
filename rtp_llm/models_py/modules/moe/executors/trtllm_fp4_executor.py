@@ -191,7 +191,7 @@ class TrtllmFp4Executor(FusedMoeExpertExecutor):
         assert self._w1.size(0) == E
         assert self._w1.size(2) == K_half
         assert self._w2.size(0) == E
-        assert self._w2.size(1) == K_half
+        assert self._w2.size(1) == K_half, f"w2 shape: {self._w2.shape}, K_half: {K_half}"
         assert self._w2.size(2) == intermediate_size // 2
 
         # Compute total number of tokens
