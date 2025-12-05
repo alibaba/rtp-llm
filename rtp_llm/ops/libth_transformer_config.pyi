@@ -133,12 +133,9 @@ class EplbMode:
     def value(self) -> int:
         ...
 class FIFOSchedulerConfig:
-    enable_fast_gen: bool
-    enable_partial_fallback: bool
-    fast_gen_context_budget: int
     max_context_batch_size: int
     scheduler_reserve_resource_ratio: int
-    def __init__(self, max_context_batch_size: int = 1, scheduler_reserve_resource_ratio: int = 5, enable_fast_gen: bool = False, enable_partial_fallback: bool = False, fast_gen_context_budget: int = -1) -> None:
+    def __init__(self, max_context_batch_size: int = 1, scheduler_reserve_resource_ratio: int = 5) -> None:
         ...
     def to_string(self) -> str:
         ...
@@ -268,8 +265,6 @@ class GptInitParameter:
     dp_tp_nccl_port: int
     embedding_size: int
     enable_eplb: bool
-    enable_fast_gen: bool
-    enable_partial_fallback: bool
     enable_sp: bool
     enable_speculative_decoding: bool
     ep_rank: int
@@ -277,7 +272,6 @@ class GptInitParameter:
     eplb_mode: EplbMode
     eplb_update_time: int
     expert_num: int
-    fast_gen_max_context_len: int
     ffn_disaggregate_config: FfnDisAggregateConfig
     ffn_tp_nccl_port: int
     ffn_tp_rank: int

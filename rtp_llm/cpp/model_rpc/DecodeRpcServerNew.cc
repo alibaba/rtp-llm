@@ -284,7 +284,6 @@ ErrorInfo DecodeRpcServerNew::writeAppendFirstToken(DecodeGenerateContextNew& de
     generate_stream->update({new_tokens, 1, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr});
     if (propose_maga_init_params_) {
         generate_stream->setReuseLength(generate_stream->seqLength() - 1);
-        generate_stream->setFallbackPrefixLength(generate_stream->reuseLength());
         generate_stream->setSpEditRun(false);
     }
     generate_stream->resetBeginTime(currentTimeUs());
