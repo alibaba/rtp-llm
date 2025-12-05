@@ -28,7 +28,8 @@ using namespace rocm;
 
 ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
     ROCM_CHECK(hipSetDevice(params.device_id));
-    stream_ = at::hip::getCurrentHIPStream().stream();
+    torch_default_stream_ = std::make_unique<at::hip::HIPStreamMasqueradingAsCUDA>(at::hip::getDefaultHIPStreamMasqueradingAsCUDA());
+    stream_ = torch_default_stream_->stream();
     ROCM_CHECK(hipStreamCreate(&assist_stream_));
     current_stream_ = stream_;
     ROCM_CHECK(hipGetDeviceProperties(&rocmDevProp, device_id_));
@@ -62,13 +63,15 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
                       dp_tp_nccl_param_);
     }
 
-    // Initialize custom all reduce communicator
+    // Initialize custom/quick all reduce communicator
     // Note: custom all reduce communicator will allocate cuda mem through cudaMalloc, it must be called before
     // allocator init
     if (tp_nccl_param_.world_size_ > 1) {
         auto&               nccl_param = tp_nccl_param_;
         std::vector<size_t> tp_ranks   = fcNcclGatherRanks(nccl_param, stream_);
+        // Initialization may fail, and the variable will still be nullptr. When allreduce is called, it will fall back to the normal allreduce.
         custom_allreduce_comm_         = initCustomAllReduceComm(nccl_param, tp_ranks, stream_);
+        quick_allreduce_comm_          = initQuickAllReduceComm(nccl_param, tp_ranks, stream_);
     }
 
     auto allocator_ptr     = new Allocator<AllocatorType::ROCM>();
@@ -173,6 +176,13 @@ void ROCmDevice::init() {
     DeviceBase::init();
     RTP_LLM_LOG_INFO("max batch size: %d", init_params_.max_batch_size);
     curandstate_buf_ = allocateBuffer({init_params_.max_batch_size * sizeof(curandState_t)}, {"curandstate"});
+    if (init_params_.use_deepep_moe) {
+        if (!initDeepEPBuffer()) {
+            RTP_LLM_CHECK_WITH_INFO(false, "init deepep buffer failed");
+        } else {
+            RTP_LLM_LOG_INFO("init deepep buffer success");
+        }
+    }
 }
 
 DeviceProperties ROCmDevice::getDeviceProperties() {
@@ -214,7 +224,9 @@ DevicePrepOutput ROCmDevice::prepareModelRun(const DevicePrepParams& params) {
                                                                                                params.input_lengths,
                                                                                                params.kv_cache_block_id,
                                                                                                params.attn_dtype);
-    output.decode_aiter_attn        = AiterAttnParams::prepareDecodeAiterAttnParams(this, params.sequence_lengths);
+    const int kv_cache_offset = params.k_cache ? params.k_cache->shape()[0] * params.k_cache->shape()[1] : 0;
+    auto decode_kv_cache_block_id_d = params.kv_cache_block_id_d ? params.kv_cache_block_id_d->slice(0, params.decoder_batch_size) : nullptr;
+    output.decode_aiter_attn = AiterAttnParams::prepareDecodeAiterAttnParams(this, params.sequence_lengths, params.configs, kv_cache_offset, decode_kv_cache_block_id_d);
     return std::move(output);
 }
 

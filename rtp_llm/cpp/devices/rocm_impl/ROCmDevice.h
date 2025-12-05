@@ -23,6 +23,10 @@
 #include "rtp_llm/cpp/rocm/rocmCKW8A8GeluGemmWrapper.h"
 #include "rtp_llm/cpp/kernels/kv_cache/kv_cache_utils.h"
 #include "rtp_llm/cpp/rocm/custom_ar/custom_ar_comm.h"
+#include "rtp_llm/cpp/rocm/custom_ar/quick_ar_comm.h"
+#ifdef ENABLE_DEEP_EP
+#include "rtp_llm/cpp/devices/rocm_impl/DeepEPBuffer.h"
+#endif
 
 #include "torch_hip_allocator.h"
 
@@ -33,7 +37,14 @@ struct AiterAttnParams {
     BufferPtr     sequence_lengths_host;
     torch::Tensor sequence_lengths_t;
 
-    static ParamsPtr prepareDecodeAiterAttnParams(rtp_llm::DeviceBase* device, const BufferPtr& sequence_lengths_host);
+    KVBlockArray kv_block_array;
+    BufferPtr    kv_cache_offset;
+
+    static ParamsPtr prepareDecodeAiterAttnParams(rtp_llm::DeviceBase* device,
+                                              const BufferPtr& sequence_lengths_host,
+                                              const AttentionConfigs& configs,
+                                              const int kv_cache_offset,
+                                              const BufferPtr& kv_cache_block_id);
 };
 
 struct FlashInferAttnParams {
@@ -195,6 +206,11 @@ public:
     MoeDispatchOutput      epDispatch(const MoeDispatchParams& params) override;
     MoeCombineOutput       epCombine(const MoeCombineParams& params) override;
     FfnLayerOutput         gatherCombineOutput(const MoeCombineOutput& params) override;
+    MoeDispatchOutput deepEpDispatch(const MoeDispatchParams& params);
+    MoeCombineOutput deepEpCombine(const MoeCombineParams& params);
+    MoeDispatchOutput deepEpLLDispatch(const MoeDispatchParams& params);
+    MoeCombineOutput deepEpLLCombine(const MoeCombineParams& params);
+    FfnLayerOutput deepEpLLMoeFfn(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs) override;
     BufferPtr              softmax(const SoftmaxParams& params) override;
     GreedyOutput           sampleGreedy(const GreedyParams& params) override;
     MemoryStatus           getDeviceMemoryStatus() override;
@@ -283,6 +299,8 @@ private:
     std::unique_ptr<IAllocator>                  hostAllocator_;
     c10::hip::HIPCachingAllocator::HIPAllocator* origin_torch_hip_allocator_;
 
+    std::unique_ptr<at::hip::HIPStreamMasqueradingAsCUDA> torch_default_stream_;
+    std::unique_ptr<at::hip::HIPStreamMasqueradingAsCUDA> torch_comm_stream_;
     hipStream_t     stream_ = nullptr;
     hipStream_t     no_block_copy_stream_;
     hipStream_t     communication_stream_;
@@ -319,9 +337,17 @@ private:
     NcclParam getNcclParam(ParallelMode mode);
     // moe
     // std::unique_ptr<rocmMoeWrapper> moe_runner_;
+    bool initDeepEPBuffer();
+#ifdef ENABLE_DEEP_EP
+    std::unique_ptr<DeepEPBuffer> deepep_buffer_ = nullptr;  // for deep_ep use
+#endif
+    uint32_t ll_num_max_token_per_rank = 0;
 
     // for custom allreduce use
     std::unique_ptr<CustomAllReduceComm> custom_allreduce_comm_ = nullptr;
+
+    // for quick allreduce use
+    std::unique_ptr<QuickAllReduceComm> quick_allreduce_comm_ = nullptr;
 
     // BufferPtr will be error when multi stream, tmp hold
     // std::vector<BufferPtr> overlap_hold_buffers_;
