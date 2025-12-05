@@ -177,9 +177,13 @@ def _generate_payload_and_weights(
     )
     
     # Generate global scale for input quantization
-    input_global_scale = torch.tensor(
+    # NOTE: This is quantization global scale (used for quantization)
+    # For dequantization, we need the inverse (1.0 / quantization_global_scale)
+    input_quantization_global_scale = torch.tensor(
         [FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX], device="cuda", dtype=torch.float32
     )
+    # For dequantization and executor, we need the inverse
+    input_global_scale = 1.0 / input_quantization_global_scale
     
     for local_expert_id in range(num_local_experts):
         num_actual_tokens = max(
@@ -191,9 +195,10 @@ def _generate_payload_and_weights(
         
         # Quantize to NVFP4
         # Use is_sf_swizzled_layout=False to get linear layout that can be directly reshaped
+        # NOTE: fp4_quantize expects quantization global_scale (not dequantization scale)
         expert_x_q, expert_x_sf = fp4_quantize(
             expert_x_bf16_local,
-            input_global_scale,
+            input_quantization_global_scale,  # Use quantization scale for quantization
             sf_vec_size=16,
             sf_use_ue8m0=False,
             is_sf_swizzled_layout=False,
@@ -243,21 +248,27 @@ def _generate_payload_and_weights(
     )
     
     # Compute global scales for weights
+    # NOTE: These are quantization global scales (used for quantization)
+    # For dequantization, we need the inverse (1.0 / quantization_global_scale)
     w1_amax = torch.abs(w1_bf16).max().to(torch.float32)
     w2_amax = torch.abs(w2_bf16).max().to(torch.float32)
-    w1_global_scale = torch.tensor(
+    w1_quantization_global_scale = torch.tensor(
         [FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / w1_amax], device="cuda", dtype=torch.float32
     )
-    w2_global_scale = torch.tensor(
+    w2_quantization_global_scale = torch.tensor(
         [FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / w2_amax], device="cuda", dtype=torch.float32
     )
+    # For dequantization and executor, we need the inverse
+    w1_global_scale = 1.0 / w1_quantization_global_scale
+    w2_global_scale = 1.0 / w2_quantization_global_scale
     
     for local_expert_id in range(num_local_experts):
         # Quantize w1
         # Use is_sf_swizzled_layout=False to get linear layout that can be directly reshaped
+        # NOTE: fp4_quantize expects quantization global_scale (not dequantization scale)
         w1_q, w1_sf = fp4_quantize(
             w1_bf16[local_expert_id],
-            w1_global_scale,
+            w1_quantization_global_scale,  # Use quantization scale for quantization
             sf_vec_size=16,
             sf_use_ue8m0=False,
             is_sf_swizzled_layout=False,
@@ -273,9 +284,10 @@ def _generate_payload_and_weights(
         
         # Quantize w2
         # Use is_sf_swizzled_layout=False to get linear layout that can be directly reshaped
+        # NOTE: fp4_quantize expects quantization global_scale (not dequantization scale)
         w2_q, w2_sf = fp4_quantize(
             w2_bf16[local_expert_id],
-            w2_global_scale,
+            w2_quantization_global_scale,  # Use quantization scale for quantization
             sf_vec_size=16,
             sf_use_ue8m0=False,
             is_sf_swizzled_layout=False,
