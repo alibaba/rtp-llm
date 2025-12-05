@@ -4,7 +4,7 @@ from typing import Dict, Tuple, Optional
 import torch
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.models_py.modules.common.moe.fused_moe import (
+from rtp_llm.models_py.modules.moe.fused_moe import (
     ExpertForwardPayload,
     ExpertTokensMetadata,
 )
