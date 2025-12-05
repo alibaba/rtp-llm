@@ -694,11 +694,25 @@ GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
                 mm_features.emplace_back(quantized_feature);
             }
         }
-        bool     hidden_is_qbuffer = false;
-        DataType hidden_qbuffer_dt = hidden->type();
+
+        bool hidden_is_qbuffer = false;
+        DataType hidden_dt = hidden->type();
         if (hidden->isQBuffer()) {
             hidden_is_qbuffer = true;
-            hidden->updateTypeAndShape(QBufferDtype2BufferDtype(hidden_qbuffer_dt), hidden->shape());
+            hidden->updateTypeAndShape(QBufferDtype2BufferDtype(hidden_dt), hidden->shape());
+        }
+        bool pre_decoder_residual_quantized = false;
+        DataType pre_decoder_residual_dt = DataType::TYPE_INVALID;
+        if (pre_decoder_residual) {
+            pre_decoder_residual_quantized = pre_decoder_residual->isQBuffer() ? true : false;
+            pre_decoder_residual_dt = pre_decoder_residual->type();
+            if (pre_decoder_residual_quantized) {
+                RUNTIME_ASSERT_OP_ARG(pre_decoder_residual_dt == hidden_dt,
+                "data type of pre_decoder_residual %d and hidden %d are not equal",
+                pre_decoder_residual_dt, hidden_dt);
+                pre_decoder_residual->updateTypeAndShape(QBufferDtype2BufferDtype(pre_decoder_residual_dt),
+                                                         pre_decoder_residual->shape());
+            }
         }
 
         hidden = device_->multimodalEmbedding({hidden,
@@ -707,7 +721,16 @@ GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
                                                    (OptionalConstVecBufferPtrRef)inputs.multimodal_features,
                                                mm_feature_locs ? (OptionalConstBufferRef)*mm_feature_locs : nullopt});
         if (hidden_is_qbuffer) {
-            hidden->updateTypeAndShape(hidden_qbuffer_dt, hidden->shape());
+            hidden->updateTypeAndShape(hidden_dt, hidden->shape());
+        }
+        if (pre_decoder_residual) {
+            pre_decoder_residual = device_->multimodalEmbedding({pre_decoder_residual,
+                features_need_quantize ? (OptionalConstVecBufferPtrRef)mm_features :
+                                        (OptionalConstVecBufferPtrRef)inputs.multimodal_features,
+                mm_feature_locs ? (OptionalConstBufferRef)*mm_feature_locs : nullopt});
+            if (pre_decoder_residual_quantized) {
+                pre_decoder_residual->updateTypeAndShape(pre_decoder_residual_dt, pre_decoder_residual->shape());
+            }
         }
     }
 
