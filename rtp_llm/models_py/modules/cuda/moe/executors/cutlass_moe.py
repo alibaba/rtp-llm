@@ -15,8 +15,12 @@ from rtp_llm.models_py.triton_kernels.common.activation import (
     silu_and_mul,
     silu_mul_fp8_per_token_quant_batched,
 )
+from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
+    cutlass_moe_pre_reorder,
+    post_reorder_triton_kernel,
+)
 
-from .util import moe_kernel_quantize_input, moe_permute, moe_unpermute, resize_cache
+from .util import moe_kernel_quantize_input, resize_cache
 
 
 class CutlassExpertsFp8(mm.FusedMoeExpertExecutor):
@@ -103,7 +107,22 @@ class CutlassExpertsFp8(mm.FusedMoeExpertExecutor):
         expert_num_tokens = (
             payload.expert_tokens_meta.expert_num_tokens if expert_map is None else None
         )
-        num_gemm_tokens = sum(payload.expert_tokens_meta.expert_num_tokens_cpu)
+        if payload.expert_tokens_meta.expert_num_tokens_cpu is not None:
+            num_gemm_tokens = sum(payload.expert_tokens_meta.expert_num_tokens_cpu)
+        elif payload.expert_tokens_meta.expert_num_tokens is not None:
+            expert_num_tokens_cpu = (
+                payload.expert_tokens_meta.expert_num_tokens.cpu().tolist()
+            )
+            num_gemm_tokens = sum(expert_num_tokens_cpu)
+        else:
+            num_gemm_tokens = topk_ids.numel()
+
+        if num_gemm_tokens <= 0:
+            return torch.zeros(
+                payload.expert_x.shape,
+                device=payload.expert_x.device,
+                dtype=payload.expert_x_origin_dtype,
+            )
 
         E, _, _ = self.w1.size()
         _, K, N = self.w2.size()
@@ -113,6 +132,13 @@ class CutlassExpertsFp8(mm.FusedMoeExpertExecutor):
         assert activation == "SiGLU"
         M = payload.expert_x.size(0)
         topk = topk_ids.size(1)
+
+        if expert_map is not None:
+            topk_ids = torch.where(expert_map[topk_ids] != -1, expert_map[topk_ids], -1)
+        else:
+            topk_ids = topk_ids.to(torch.int32)
+
+        local_topk_ids = torch.where(topk_ids != -1, topk_ids, E)
 
         if payload.expert_x.dtype is not torch.float8_e4m3fn:
             assert payload.expert_x.dtype == torch.bfloat16
@@ -131,32 +157,29 @@ class CutlassExpertsFp8(mm.FusedMoeExpertExecutor):
             expert_x_scale = payload.expert_x_scale
 
         workspace13 = torch.empty(
-            [M * topk, max(N * 2, K)],
+            [num_gemm_tokens, max(N * 2, K)],
             device=payload.expert_x.device,
             dtype=payload.expert_x_origin_dtype,
         )
         workspace2 = torch.empty(
-            [M * topk, max(N, K)],
+            [max(M, num_gemm_tokens), max(N, K)],
             device=payload.expert_x.device,
             dtype=payload.expert_x_origin_dtype,
         )
-        output = resize_cache(workspace13, (M, K))
 
-        if expert_map is not None:
-            local_topk_ids = torch.where(
-                expert_map[topk_ids] != -1, expert_map[topk_ids], -1
-            )
-        else:
-            local_topk_ids = topk_ids
+        a1q_permute = resize_cache(
+            workspace2.view(dtype=torch.float8_e4m3fn), (num_gemm_tokens, K)
+        )
+        c1 = resize_cache(workspace13, (num_gemm_tokens, N * 2))
+        c2 = resize_cache(workspace2, (num_gemm_tokens, N))
+        c3 = resize_cache(workspace13, (num_gemm_tokens, K))
+        output = resize_cache(workspace2, (M, K))
 
         swap_ab_gemm1 = get_best_config_swap_ab(E, num_gemm_tokens, 2 * N, K)
         swap_ab_gemm2 = get_best_config_swap_ab(E, num_gemm_tokens, K, N)
 
-        c1 = resize_cache(workspace13, (M * topk, N * 2))
-        c2 = resize_cache(workspace2, (M * topk, N))
-        c3 = resize_cache(workspace13, (M * topk, K))
-        a1q_permute = resize_cache(
-            workspace2.view(dtype=torch.float8_e4m3fn), (M * topk, K)
+        a1q_scale_permute = torch.empty(
+            (num_gemm_tokens,), dtype=torch.float32, device=payload.expert_x.device
         )
 
         problem_sizes1 = torch.empty(
@@ -165,20 +188,23 @@ class CutlassExpertsFp8(mm.FusedMoeExpertExecutor):
         problem_sizes2 = torch.empty(
             (E, 3), dtype=torch.int32, device=payload.expert_x.device
         )
-
-        a1q, a1q_scale, expert_offsets, inv_perm = moe_permute(
-            hidden_states=expert_x,
-            a1q_scale=expert_x_scale,
-            topk_ids=topk_ids,
-            num_experts=self.num_experts,
-            num_local_experts=E,
-            expert_map=expert_map,
-            permuted_hidden_states=a1q_permute,
+        expert_offsets = torch.empty(
+            (E,), dtype=torch.int32, device=payload.expert_x.device
         )
-        expert_offsets = expert_offsets[:-1].to(torch.int32)
-
+        src_2_dst = cutlass_moe_pre_reorder(
+            input=expert_x,
+            permuted_input=a1q_permute,
+            input_scale=expert_x_scale,
+            permuted_scale=a1q_scale_permute,
+            topk_ids=local_topk_ids,
+            num_local_experts=E,
+            topk=topk,
+            num_tokens=M,
+            hidden_size=K,
+        )
         compute_ops.get_cutlass_moe_mm_without_permute_info(
-            local_topk_ids,
+            topk_ids,
+            expert_offsets,
             problem_sizes1,
             problem_sizes2,
             E,
@@ -192,9 +218,9 @@ class CutlassExpertsFp8(mm.FusedMoeExpertExecutor):
 
         cutlass_moe_mm_fp8_scaled(
             c1,
-            a1q,
+            a1q_permute,
             self.w1,
-            a1q_scale,
+            a1q_scale_permute,
             self.w1_scale,
             expert_offsets,
             problem_sizes1,
@@ -231,11 +257,17 @@ class CutlassExpertsFp8(mm.FusedMoeExpertExecutor):
             num_gemm_tokens,
             swap_ab_gemm2,
         )
-        moe_unpermute(
-            out=output,
-            permuted_hidden_states=c3,
-            topk_weights=topk_weights,
-            inv_permuted_idx=inv_perm,
+        del a2q
+
+        post_reorder_triton_kernel[(M,)](
+            down_output_ptr=c3,
+            output_ptr=output,
+            src2dst_ptr=src_2_dst,
+            topk_ids_ptr=topk_ids,
+            topk_weights_ptr=topk_weights,
+            topk=topk,
+            hidden_size=K,
+            BLOCK_SIZE=512,
         )
         return output
 
