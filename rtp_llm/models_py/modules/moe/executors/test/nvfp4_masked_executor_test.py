@@ -20,19 +20,31 @@ except ImportError:
     FLASHINFER_AVAILABLE = False
     fp4_quantize = None
 
-# Constants
-DP_SIZE = 4
+# Constants - matching bench_fp4_moe.py default parameters
+DP_SIZE = 1
 TP_SIZE = 1
-EP_SIZE = 4
+EP_SIZE = 1
 NUM_EXPERTS = 128
-BATCH_SIZE = 32
-MAX_GENERATE_BATCH_SIZE = 128
-HIDDEN_SIZE = 2048
-MOE_INTERMEDIATE_SIZE = 768
+BATCH_SIZE = 1  # Single request in prefill
+SEQ_LEN = 128  # Sequence length for prefill
+MAX_GENERATE_BATCH_SIZE = 128  # For decode phase (not used in prefill test)
+HIDDEN_SIZE = 4096  # Changed from 2048 to match bench_fp4_moe.py
+MOE_INTERMEDIATE_SIZE = 1536  # Changed from 768 to match bench_fp4_moe.py
+TOP_K = 8  # Changed from 2 to match bench_fp4_moe.py
 
-M = (MAX_GENERATE_BATCH_SIZE + TP_SIZE - 1) // TP_SIZE * EP_SIZE
+# M represents max tokens per expert in prefill scenario
+# For prefill: total tokens = batch_size * seqlen = 1 * 128 = 128
+# These tokens are distributed across experts based on routing
+# In worst case, all 128 tokens could go to one expert, so M = SEQ_LEN = 128
+M = SEQ_LEN  # Max tokens per expert (in worst case, all tokens go to one expert)
 K = HIDDEN_SIZE
 N = MOE_INTERMEDIATE_SIZE * 2
+
+# Test scenario verification:
+# - batch_size = 1 (single request)
+# - seqlen = 128 (sequence length for prefill)
+# - Single GPU: DP_SIZE=1, TP_SIZE=1, EP_SIZE=1
+# - Prefill phase: all 128 tokens are processed in parallel
 
 # NVFP4 constants
 FLOAT8_E4M3_MAX = 448.0
@@ -185,10 +197,57 @@ def _generate_payload_and_weights(
     # For dequantization and executor, we need the inverse
     input_global_scale = 1.0 / input_quantization_global_scale
     
+    # For prefill scenario: total tokens = batch_size * seqlen = 1 * 128 = 128
+    # Distribute these tokens across experts
+    total_tokens = BATCH_SIZE * SEQ_LEN  # 128 tokens total
+    tokens_per_expert = [0] * num_local_experts
+    
+    # Distribute tokens across experts (simulate routing)
+    # Each token can go to TOP_K experts, but for simplicity, we assign tokens to experts
+    # in a round-robin fashion with some randomness
+    # Ensure total tokens = 128 exactly
+    remaining_tokens = total_tokens
+    assigned_tokens = 0
+    
     for local_expert_id in range(num_local_experts):
-        num_actual_tokens = max(
-            min(int(NUM_EXPERTS * DP_SIZE * random.uniform(0.7, 1.3)), M), 1
-        )
+        if remaining_tokens <= 0:
+            break
+        # Assign tokens to this expert (at least 0, at most remaining_tokens)
+        # In real scenario, tokens are routed based on router output
+        max_tokens_for_expert = min(M, remaining_tokens)
+        if local_expert_id == num_local_experts - 1:
+            # Last expert gets all remaining tokens to ensure total = 128
+            tokens_per_expert[local_expert_id] = remaining_tokens
+        else:
+            # Randomly assign some tokens to this expert
+            # Use a smaller range to ensure we don't run out of tokens too early
+            tokens_for_this_expert = max(
+                0, min(max_tokens_for_expert, int(random.uniform(0.05, 0.15) * total_tokens))
+            )
+            tokens_per_expert[local_expert_id] = tokens_for_this_expert
+        remaining_tokens -= tokens_per_expert[local_expert_id]
+        assigned_tokens += tokens_per_expert[local_expert_id]
+    
+    # Ensure all tokens are assigned (should be exactly 128)
+    if remaining_tokens > 0:
+        # Add remaining tokens to the first expert that has space
+        for local_expert_id in range(num_local_experts):
+            if tokens_per_expert[local_expert_id] + remaining_tokens <= M:
+                tokens_per_expert[local_expert_id] += remaining_tokens
+                assigned_tokens += remaining_tokens
+                break
+    print(f"DEBUG tokens_per_expert: {tokens_per_expert}")
+    
+    # Final verification: total tokens must equal 128
+    assert assigned_tokens == total_tokens, (
+        f"Token assignment error: assigned {assigned_tokens} tokens, expected {total_tokens}"
+    )
+    
+    for local_expert_id in range(num_local_experts):
+        num_actual_tokens = tokens_per_expert[local_expert_id]
+        if num_actual_tokens == 0:
+            continue
+        
         expert_x_bf16_local = torch.randn(
             (num_actual_tokens, K), device="cuda", dtype=torch.bfloat16
         ) * 0.1
@@ -412,7 +471,15 @@ def _generate_ref_output(
 
 def test_nvfp4_masked_executor(use_nvfp4: bool = True):
     """
-    Test NVFP4 masked executor.
+    Test NVFP4 masked executor for prefill scenario.
+    
+    Test scenario:
+    - batch_size = 1 (single request)
+    - seqlen = 128 (sequence length for prefill)
+    - Single GPU: DP_SIZE=1, TP_SIZE=1, EP_SIZE=1
+    - Prefill phase: all 128 tokens are processed in parallel
+    - Total tokens = batch_size * seqlen = 1 * 128 = 128
+    - Tokens are distributed across 128 experts based on routing (TOP_K=8)
     
     Note: The executor implementation is not yet available, so this test
     will fail until the executor is implemented.
@@ -439,12 +506,21 @@ def test_nvfp4_masked_executor(use_nvfp4: bool = True):
     
     # Generate dummy topk_ids and topk_weights for testing
     # In real usage, these would come from the router
+    # For prefill scenario: total tokens = batch_size * seqlen = 1 * 128 = 128
     num_local_experts = NUM_EXPERTS // EP_SIZE
-    total_tokens = payload.expert_tokens_meta.expert_num_tokens.sum().item()
-    top_k = 2  # Default top_k
+    total_tokens = BATCH_SIZE * SEQ_LEN  # Should be 128 for prefill
+    top_k = TOP_K  # Use TOP_K constant matching bench_fp4_moe.py
+    
+    # Verify that total tokens match expected prefill scenario
+    actual_total_tokens = payload.expert_tokens_meta.expert_num_tokens.sum().item()
+    assert actual_total_tokens == total_tokens, (
+        f"Total tokens mismatch: expected {total_tokens} (batch_size * seqlen), "
+        f"got {actual_total_tokens} from expert_num_tokens"
+    )
     
     # Create dummy topk_ids and topk_weights
     # This is a simplified version - in practice, these should come from routing
+    # For prefill: each of the 128 tokens should be routed to TOP_K experts
     expert_topk_ids = torch.zeros(
         (total_tokens, top_k), device="cuda", dtype=torch.int32
     )
@@ -453,14 +529,23 @@ def test_nvfp4_masked_executor(use_nvfp4: bool = True):
     ) / top_k
     
     # Assign expert IDs based on which expert has tokens
-    # Fill both topk positions with the same expert for simplicity
+    # For simplicity, we assign tokens to experts in a round-robin fashion
+    # In real scenario, this would come from router output
     token_idx = 0
     for expert_id in range(num_local_experts):
         num_tokens = payload.expert_tokens_meta.expert_num_tokens[expert_id].item()
         if num_tokens > 0:
-            expert_topk_ids[token_idx : token_idx + num_tokens, 0] = expert_id
-            expert_topk_ids[token_idx : token_idx + num_tokens, 1] = expert_id  # Fill second position too
+            # Assign this expert as the primary expert for these tokens
+            # Fill all top_k positions with the same expert for simplicity
+            # In real scenario, each token would be routed to TOP_K different experts
+            for k in range(top_k):
+                expert_topk_ids[token_idx : token_idx + num_tokens, k] = expert_id
             token_idx += num_tokens
+    
+    # Verify all tokens are assigned
+    assert token_idx == total_tokens, (
+        f"Token assignment mismatch: assigned {token_idx} tokens, expected {total_tokens}"
+    )
     
     # Update payload with topk information
     payload.expert_topk_ids = expert_topk_ids
