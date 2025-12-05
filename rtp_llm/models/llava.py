@@ -28,6 +28,10 @@ class Llava(Llama, MultiModalMixin):
             vit_weight_dict["image_newline"] = self.mm_part.image_newline
         config.mm_related_params.vit_weights = BaseVitWeights(vit_weight_dict, True)
 
+    @classmethod
+    def _get_mm_module(cls, config: GptInitModelParameters):
+        return LlavaImageEmbedding(config).vision_tower
+
     @staticmethod
     def _create_config(ckpt_path):
         config = GptInitModelParameters(

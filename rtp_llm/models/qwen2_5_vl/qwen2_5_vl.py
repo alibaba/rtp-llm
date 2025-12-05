@@ -12,9 +12,12 @@ except ModuleNotFoundError:
     VideoReader = None
     cpu = None
 
+from typing import List
+
 import torch.library as tl
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.models.multimodal.multimodal_util import get_bytes_io_from_url
 from rtp_llm.models.qwen2_5_vl.modeling_qwen2_5_vl import (
     Qwen2_5_VisionTransformerPretrainedModel,
 )
@@ -32,6 +35,12 @@ from rtp_llm.models.qwen2_vl.qwen2_vl_vit import (
     ceil_by_factor,
     floor_by_factor,
     smart_resize,
+    timeout_decorator,
+)
+from rtp_llm.utils.base_model_datatypes import (
+    MMPreprocessConfig,
+    MMUrlType,
+    MultimodalInput,
 )
 
 if not hasattr(tl, "wrap_triton"):
@@ -67,15 +76,21 @@ def smart_nframes(configs, total_frames, video_fps) -> int:
 
 class Qwen2_5_VLImageEmbedding(Qwen2VLImageEmbedding):
     def __init__(self, config: GptInitModelParameters):
-        self.image_processor = Qwen2VLImageProcessor.from_pretrained(
-            config.mm_related_params.config["ckpt_path"]
+        self.image_processor: Qwen2VLImageProcessor = (
+            Qwen2VLImageProcessor.from_pretrained(
+                config.mm_related_params.config["ckpt_path"]
+            )
         )
         self.visual = Qwen2_5_VisionTransformerPretrainedModel(
             config.mm_related_params.config
         )
-        self.config = config
+        self.spatial_merge_size = config.mm_related_params.config.get(
+            "spatial_merge_size", 2
+        )
+        self.data_type = config.data_type
 
-    def load_video(self, data, configs, **kwargs):
+    @staticmethod
+    def load_video(data, configs, **kwargs):
         vr = VideoReader(data, ctx=cpu(0), num_threads=1)
         total_frames, video_fps = len(vr), vr.get_avg_fps()
         nframes = smart_nframes(configs, total_frames=total_frames, video_fps=video_fps)
@@ -122,6 +137,28 @@ class Qwen2_5_VLImageEmbedding(Qwen2VLImageEmbedding):
         ).float()
         return video
 
+    @staticmethod
+    def preprocess_input(
+        mm_inputs: List[MultimodalInput],
+        processor,
+    ):
+        assert len(mm_inputs) == 1
+        mm_input = mm_inputs[0]
+        mm_type = mm_input.mm_type
+        data = get_bytes_io_from_url(mm_input.url)
+        if mm_type == MMUrlType.DEFAULT:
+            raise Exception("cannot infer multimodal input type")
+        elif mm_type == MMUrlType.IMAGE:
+            data = Qwen2VLImageEmbedding.load_image(data, mm_input.config)
+            res = processor(images=data, videos=None, return_tensors="pt")
+            return res["pixel_values"], res["image_grid_thw"]
+        elif mm_type == MMUrlType.VIDEO:
+            data = Qwen2_5_VLImageEmbedding.load_video(data, mm_input.config)
+            res = processor(images=None, videos=data, return_tensors="pt")
+            return res["pixel_values_videos"], res["video_grid_thw"]
+        else:
+            raise Exception("unknown mm url type")
+
 
 class QWen2_5_VL(QWen2_VL):
     def _init_multimodal(self, config: GptInitModelParameters):
@@ -129,6 +166,10 @@ class QWen2_5_VL(QWen2_VL):
         config.mm_related_params.vit_weights = QwenVL2VitWeight(
             {"vit": self.mm_part.visual}
         )
+
+    @classmethod
+    def _get_mm_module(cls, config: GptInitModelParameters):
+        return Qwen2_5_VLImageEmbedding(config).visual
 
 
 register_model("qwen2_5_vl", QWen2_5_VL, ["Qwen2_5_VLForConditionalGeneration"])

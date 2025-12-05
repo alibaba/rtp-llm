@@ -21,12 +21,19 @@ sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
 from rtp_llm.distribute.worker_info import g_parallel_info, g_worker_info
 from rtp_llm.server.backend_app import BackendApp
-from rtp_llm.server.vit_rpc_server import vit_start_server
+from rtp_llm.server.vit_app import VitEndpointApp
 from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
     set_global_controller,
 )
 from rtp_llm.utils.util import copy_gemm_config
+
+
+def vit_start_server():
+    py_env_configs = PyEnvConfigs()
+    py_env_configs.update_from_env()
+    app = VitEndpointApp(py_env_configs)
+    app.start(g_worker_info)
 
 
 def local_rank_start(global_controller: ConcurrencyController):

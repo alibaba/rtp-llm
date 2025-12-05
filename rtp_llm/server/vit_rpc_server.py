@@ -3,10 +3,14 @@ from concurrent import futures
 import grpc
 
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
+    CacheStatusPB,
+    CacheVersionPB,
     MMPreprocessConfigPB,
     MultimodalInputsPB,
     MultimodalOutputPB,
     MultimodalOutputsPB,
+    StatusVersionPB,
+    WorkerStatusPB,
 )
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
     MultimodalRpcServiceServicer,
@@ -14,43 +18,24 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
 )
 from rtp_llm.distribute.worker_info import g_worker_info
 from rtp_llm.model_factory import ModelFactory
+from rtp_llm.models.multimodal.mm_process_engine import MMEmbeddingRes, MMProcessEngine
+from rtp_llm.utils.base_model_datatypes import (
+    MMPreprocessConfig,
+    MMUrlType,
+    MultimodalInput,
+)
 from rtp_llm.utils.grpc_util import trans_from_tensor, trans_tensor
-from rtp_llm.utils.mm_process_engine import MMEmbeddingRes, MMProcessEngine
-from rtp_llm.utils.multimodal_util import MMUrlType
-
-
-def trans_config(mm_process_config_pb: MMPreprocessConfigPB):
-    return [
-        mm_process_config_pb.width,
-        mm_process_config_pb.height,
-        mm_process_config_pb.min_pixels,
-        mm_process_config_pb.max_pixels,
-        mm_process_config_pb.fps,
-    ]
-
-
-def trans_input(mutlimodal_inputs_pb: MultimodalInputsPB):
-    urls = []
-    types = []
-    tensors = []
-    configs = []
-    try:
-        for mm_input in mutlimodal_inputs_pb.multimodal_inputs:
-            urls.append(mm_input.multimodal_url)
-            types.append(MMUrlType(mm_input.multimodal_type))
-            tensors.append(trans_tensor(mm_input.multimodal_tensor))
-            configs.append(trans_config(mm_input.mm_preprocess_config))
-    except Exception as e:
-        raise Exception(str(e))
-    return urls, types, tensors, configs
 
 
 def trans_output(res: MMEmbeddingRes):
     output_pb = MultimodalOutputsPB()
+    contain_pos = (res.position_ids is not None) and (len(res.position_ids) > 0)
     for i in range(len(res.embeddings)):
         output = MultimodalOutputPB(
             multimodal_embedding=trans_from_tensor(res.embeddings[i]),
-            multimodal_pos_id=trans_from_tensor(res.position_ids[i]),
+            multimodal_pos_id=(
+                trans_from_tensor(res.position_ids[i]) if contain_pos else None
+            ),
         )
         output_pb.multimodal_outputs.append(output)
     return output_pb
@@ -61,20 +46,47 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
         self.engine = mm_process_engine
 
     def RemoteMultimodalEmbedding(self, multimodal_inputs: MultimodalInputsPB, context):
-        urls, types, tensors, configs = trans_input(multimodal_inputs)
-        res: MMEmbeddingRes = self.engine.submit(
-            urls, types, tensors=tensors, preprocess_configs=configs
-        )
+        res: MMEmbeddingRes = self.engine.mm_embedding_rpc(multimodal_inputs)
         return trans_output(res)
 
+    def GetWorkerStatus(self, request: StatusVersionPB, context):
+        worker_status = WorkerStatusPB()
+        worker_status.role = "VIT"
+        worker_status.status_version = 1
+        worker_status.alive = True
+        return worker_status
 
-def vit_start_server():
+    def GetCacheStatus(self, request: CacheVersionPB, context):
+        return CacheStatusPB()
+
+    def stop(self):
+        self.engine.stop()
+
+
+def create_rpc_server():
+    server = grpc.server(
+        futures.ThreadPoolExecutor(max_workers=200),
+        options=[
+            ("grpc.max_send_message_length", 1024 * 1024 * 1024),
+            ("grpc.max_receive_message_length", 1024 * 1024 * 1024),
+            ("grpc.max_concurrent_streams", -1),
+            ("grpc.http2.min_ping_interval_without_data_ms", 1000),
+            ("grpc.http2.max_ping_strikes", 1000),
+        ],
+    )
+    return server
+
+
+def vit_start_rpc_server():
     model = ModelFactory.create_from_env()
     server = grpc.server(
         futures.ThreadPoolExecutor(max_workers=200),
         options=[
             ("grpc.max_send_message_length", 1024 * 1024 * 1024),
             ("grpc.max_receive_message_length", 1024 * 1024 * 1024),
+            ("grpc.max_concurrent_streams", -1),
+            ("grpc.http2.min_ping_interval_without_data_ms", 1000),
+            ("grpc.http2.max_ping_strikes", 1000),
         ],
     )
     add_MultimodalRpcServiceServicer_to_server(
@@ -86,4 +98,4 @@ def vit_start_server():
 
 
 if __name__ == "__main__":
-    vit_start_server()
+    vit_start_rpc_server()

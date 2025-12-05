@@ -348,6 +348,9 @@ class VitConfig:
         self.igraph_vipserver: int = 0
         self.igraph_table_name: str = ""
         self.default_key: Optional[str] = None
+        self.mm_preprocess_max_workers: int = 10
+        self.mm_batch_size: int = 1
+        self.biencoder_preprocess: bool = False
 
     def update_from_env(self):
         self.vit_separation = int(os.environ.get("VIT_SEPARATION", self.vit_separation))
@@ -375,6 +378,16 @@ class VitConfig:
         )
         self.default_key = os.environ.get("IGRAPH_DEFAULT_KEY", self.default_key)
 
+        self.mm_preprocess_max_workers = int(
+            os.environ.get("MM_PREPROCESS_MAX_WORKERS", self.mm_preprocess_max_workers)
+        )
+
+        self.mm_batch_size = int(os.environ.get("MM_BATCH_SIZE", self.mm_batch_size))
+
+        self.biencoder_preprocess = get_env_bool(
+            "BIENCODER_PREPROCESS", self.biencoder_preprocess
+        )
+
     def to_string(self):
         return (
             f"vit_separation: {self.vit_separation}\n"
@@ -388,7 +401,10 @@ class VitConfig:
             f"igraph_search_dom: {self.igraph_search_dom}\n"
             f"igraph_vipserver: {self.igraph_vipserver}\n"
             f"igraph_table_name: {self.igraph_table_name}\n"
-            f"igraph_default_key: {self.default_key}"
+            f"igraph_default_key: {self.default_key}\n"
+            f"mm_preprocess_max_workers: {self.mm_preprocess_max_workers}\n"
+            f"mm_batch_size: {self.mm_batch_size}\n"
+            f"biencoder_preprocess: {self.biencoder_preprocess}"
         )
 
 
