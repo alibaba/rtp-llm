@@ -5,6 +5,8 @@ from typing import Dict
 import torch
 from torch.distributed.distributed_c10d import AllreduceOptions, ReduceOp
 
+from rtp_llm.models_py.distributed.symm_mem import get_symm_mem_communicator
+
 
 class Group(Enum):
     DP = "DP"
@@ -47,6 +49,15 @@ try:
     def all_reduce(
         tensor: torch.Tensor, group: Group = Group.DP_AND_TP
     ) -> torch.Tensor:
+        if group == Group.TP:
+            symm_mem_comm = get_symm_mem_communicator()
+            if (
+                symm_mem_comm is not None
+                and symm_mem_comm.should_torch_symm_mem_allreduce(tensor)
+            ):
+                result = symm_mem_comm.all_reduce(tensor)
+                if result is not None:
+                    return result
         return _get_group(group).all_reduce([tensor])[0]
 
     def all_gather(

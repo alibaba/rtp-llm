@@ -14,6 +14,16 @@ from rtp_llm.models_py.modules.factory.fused_moe.strategies.priority_attributes 
 class CudaNoQuantEpLowLatencyStrategy(MoeStrategy):
     """CUDA EP low latency mode without quantization strategy"""
 
+    @classmethod
+    def check_conditions(cls, checker: Any, config: GptInitModelParameters) -> None:
+        from rtp_llm.models_py.modules.factory.fused_moe.config_resolver import (
+            MoeConfigResolver,
+        )
+
+        resolver = MoeConfigResolver()
+        quant_method = resolver.get_quant_method(config)
+        checker.check(quant_method is None)
+
     def create_router(self, config: GptInitModelParameters) -> Any:
         from rtp_llm.models_py.modules.cuda.moe.routers.deepep_low_latency_router import (
             DeepEpLowLatencyRouter,
