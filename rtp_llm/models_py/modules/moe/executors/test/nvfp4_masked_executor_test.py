@@ -1,3 +1,4 @@
+import os
 import random
 from typing import Dict, Tuple, Optional
 
@@ -250,6 +251,11 @@ def _generate_payload_and_weights(
         f"Token assignment error: assigned {assigned_tokens} tokens, expected {total_tokens}"
     )
     
+    # Setup save directory
+    user_home = os.path.expanduser("~")
+    save_dir = os.path.join(user_home, "nvfp4_quantization_tensors")
+    os.makedirs(save_dir, exist_ok=True)
+    
     for local_expert_id in range(num_local_experts):
         num_actual_tokens = tokens_per_expert[local_expert_id]
         if num_actual_tokens == 0:
@@ -258,6 +264,12 @@ def _generate_payload_and_weights(
         expert_x_bf16_local = torch.randn(
             (num_actual_tokens, K), device="cuda", dtype=torch.bfloat16
         ) * 0.1
+        
+        # Save input tensor before quantization
+        input_before_quant_path = os.path.join(
+            save_dir, f"expert_{local_expert_id}_input_before_quant.pt"
+        )
+        torch.save(expert_x_bf16_local, input_before_quant_path)
         
         # Quantize to NVFP4
         # Use is_sf_swizzled_layout=False to get linear layout that can be directly reshaped
@@ -270,12 +282,24 @@ def _generate_payload_and_weights(
             is_sf_swizzled_layout=False,
         )
         
+        # Save input tensor after quantization
+        input_after_quant_path = os.path.join(
+            save_dir, f"expert_{local_expert_id}_input_after_quant.pt"
+        )
+        torch.save(expert_x_q, input_after_quant_path)
+        
         # Reshape scale factors (linear layout can be directly reshaped)
         # fp4_quantize already reshapes scale factors to [M, K // sf_vec_size]
         # Convert to float8_e4m3fn view and take the first num_actual_tokens rows
         expert_x_sf_viewed = expert_x_sf.view(torch.float8_e4m3fn)
         # fp4_quantize returns [M, K // 16], but M might be padded, so take only num_actual_tokens rows
         expert_x_sf_reshaped = expert_x_sf_viewed[:num_actual_tokens, :]
+        
+        # Save input scale factors
+        input_scale_path = os.path.join(
+            save_dir, f"expert_{local_expert_id}_input_scale.pt"
+        )
+        torch.save(expert_x_sf_reshaped, input_scale_path)
         
         expert_x[local_expert_id, :num_actual_tokens, :] = expert_x_q
         expert_x_scale[local_expert_id, :num_actual_tokens, :] = expert_x_sf_reshaped
@@ -328,7 +352,24 @@ def _generate_payload_and_weights(
     w1_global_scale = 1.0 / w1_quantization_global_scale
     w2_global_scale = 1.0 / w2_quantization_global_scale
     
+    # Save global scales
+    global_scales_path = os.path.join(save_dir, "global_scales.pt")
+    torch.save({
+        "input_quantization_global_scale": input_quantization_global_scale,
+        "input_global_scale": input_global_scale,
+        "w1_quantization_global_scale": w1_quantization_global_scale,
+        "w1_global_scale": w1_global_scale,
+        "w2_quantization_global_scale": w2_quantization_global_scale,
+        "w2_global_scale": w2_global_scale,
+    }, global_scales_path)
+    
     for local_expert_id in range(num_local_experts):
+        # Save w1 before quantization
+        w1_before_quant_path = os.path.join(
+            save_dir, f"expert_{local_expert_id}_w1_before_quant.pt"
+        )
+        torch.save(w1_bf16[local_expert_id], w1_before_quant_path)
+        
         # Quantize w1
         # Use is_sf_swizzled_layout=False to get linear layout that can be directly reshaped
         # NOTE: fp4_quantize expects quantization global_scale (not dequantization scale)
@@ -345,8 +386,27 @@ def _generate_payload_and_weights(
             w1_sf_reshaped = w1_sf_viewed
         else:
             w1_sf_reshaped = w1_sf_viewed.reshape(N, K // NVFP4_BLOCK_SIZE)
+        
+        # Save w1 after quantization
+        w1_after_quant_path = os.path.join(
+            save_dir, f"expert_{local_expert_id}_w1_after_quant.pt"
+        )
+        torch.save(w1_q, w1_after_quant_path)
+        
+        # Save w1 scale factors
+        w1_scale_path = os.path.join(
+            save_dir, f"expert_{local_expert_id}_w1_scale.pt"
+        )
+        torch.save(w1_sf_reshaped, w1_scale_path)
+        
         w1[local_expert_id] = w1_q
         w1_scale[local_expert_id] = w1_sf_reshaped
+        
+        # Save w2 before quantization
+        w2_before_quant_path = os.path.join(
+            save_dir, f"expert_{local_expert_id}_w2_before_quant.pt"
+        )
+        torch.save(w2_bf16[local_expert_id], w2_before_quant_path)
         
         # Quantize w2
         # Use is_sf_swizzled_layout=False to get linear layout that can be directly reshaped
@@ -364,6 +424,19 @@ def _generate_payload_and_weights(
             w2_sf_reshaped = w2_sf_viewed
         else:
             w2_sf_reshaped = w2_sf_viewed.reshape(K, (N // 2) // NVFP4_BLOCK_SIZE)
+        
+        # Save w2 after quantization
+        w2_after_quant_path = os.path.join(
+            save_dir, f"expert_{local_expert_id}_w2_after_quant.pt"
+        )
+        torch.save(w2_q, w2_after_quant_path)
+        
+        # Save w2 scale factors
+        w2_scale_path = os.path.join(
+            save_dir, f"expert_{local_expert_id}_w2_scale.pt"
+        )
+        torch.save(w2_sf_reshaped, w2_scale_path)
+        
         w2[local_expert_id] = w2_q
         w2_scale[local_expert_id] = w2_sf_reshaped
     
