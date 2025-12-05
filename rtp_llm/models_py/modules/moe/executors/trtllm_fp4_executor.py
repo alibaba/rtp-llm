@@ -300,7 +300,7 @@ class TrtllmFp4Executor(FusedMoeExpertExecutor):
             E,  # local_num_experts
             None,  # routed_scaling_factor
             None,  # tile_tokens_dim
-            0,  # routing_method_type (default: Softmax -> TopK)
+            5,  # routing_method_type: TopK (since topk_ids are already routed)
             True,  # do_finalize
             self._enable_pdl,
             gated_act_type,
