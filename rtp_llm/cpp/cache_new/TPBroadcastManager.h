@@ -36,10 +36,10 @@ private:
     int                                            finished_count_{0};
 };
 
-class TpBroadcastManager {
+class TPBroadcastManager {
 public:
-    explicit TpBroadcastManager(const std::vector<std::string>& worker_addrs): worker_addrs_(worker_addrs) {}
-    ~TpBroadcastManager() {
+    explicit TPBroadcastManager(const std::vector<std::string>& worker_addrs): worker_addrs_(worker_addrs) {}
+    ~TPBroadcastManager() {
         rpc_pool_.reset();
     }
 

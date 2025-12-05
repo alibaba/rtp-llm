@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/cache_new/TpBroadcastManager.h"
+#include "rtp_llm/cpp/cache_new/TPBroadcastManager.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
@@ -76,9 +76,9 @@ void TPBroadcastResult::cancelAllRequests() const {
     }
 }
 
-// -------------------------------- TpBroadcastManager --------------------------------
+// -------------------------------- TPBroadcastManager --------------------------------
 
-bool TpBroadcastManager::init() {
+bool TPBroadcastManager::init() {
     if (worker_addrs_.empty()) {
         RTP_LLM_LOG_WARNING("init failed, worker_addrs is empty");
         return false;
@@ -88,7 +88,7 @@ bool TpBroadcastManager::init() {
     return true;
 }
 
-std::shared_ptr<TPBroadcastResult> TpBroadcastManager::broadcast(const std::vector<BroadcastTpRequestPB>& requests,
+std::shared_ptr<TPBroadcastResult> TPBroadcastManager::broadcast(const std::vector<BroadcastTpRequestPB>& requests,
                                                                  int timeout_ms) const {
     const auto worker_size = worker_addrs_.size();
     if (requests.size() != worker_size) {
