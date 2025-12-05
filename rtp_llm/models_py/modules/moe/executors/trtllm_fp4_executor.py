@@ -9,7 +9,8 @@ from rtp_llm.models_py.modules.moe.fused_moe import (
 )
 # from rtp_llm.models_py.modules.factory.fused_moe.quant_config import FusedMoEQuantConfig
 from rtp_llm.models_py.modules.moe.utils import FusedMoEQuantConfig
-from rtp_llm.models_py.modules.factory.fused_moe.type import ExecutorType
+# from rtp_llm.models_py.modules.factory.fused_moe.type import ExecutorType
+from rtp_llm.async_decoder_engine.engine_creator import ExecutorType
 from rtp_llm.utils.model_weight import W
 
 # Try to import trtllm_fp4_block_scale_routed_moe from flashinfer
