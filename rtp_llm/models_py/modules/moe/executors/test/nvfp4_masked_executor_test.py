@@ -417,7 +417,7 @@ def test_nvfp4_masked_executor(use_nvfp4: bool = True):
     ref_output = _generate_ref_output(payload, weights, global_scales, use_nvfp4)
     
     # Create executor
-    from rtp_llm.models_py.modules.cuda.moe.executors.trtllm_fp4_executor import (
+    from rtp_llm.models_py.modules.moe.executors.trtllm_fp4_executor import (
         TrtllmFp4Executor,
     )
     
