@@ -59,6 +59,11 @@ class RequestExtractor:
                         setattr(generate_config, key, source[param])
                         return
 
+        update_optional("return_mtp_hidden_states", ["return_mtp_hidden_states"])
+        update_optional(
+            "mtp_hidden_states_saved_path", ["mtp_hidden_states_saved_path"]
+        )
+        update_optional("mtp_input_len", ["mtp_input_len"])
         update_optional(
             "return_hidden_states", ["return_hidden_states", "output_hidden_states"]
         )
