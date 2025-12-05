@@ -396,52 +396,43 @@ class MMProcessEngine:
         # Preallocate slots to preserve input order (including cached items).
         ordered_emb: List[Optional[Any]] = [None] * len(work_items)
         ordered_pos: List[Optional[Any]] = [None] * len(work_items)
+        ordered_tensor: List[Optional[Any]] = [None] * len(work_items)
 
         pending_items: List[Tuple[int, MMWorkItem]] = []
         for idx, work_item in enumerate(work_items):
             if work_item.embedding_result is not None:
                 ordered_emb[idx] = work_item.embedding_result[0]
                 ordered_pos[idx] = work_item.embedding_result[1]
+                if len(work_item.embedding_result) > 2:
+                    ordered_tensor[idx] = work_item.embedding_result[2]
             else:
                 pending_items.append((idx, work_item))
 
         if pending_items:
             batch_outputs = None
-            try:
-                with Timer() as route_timer:
-                    batch_outputs = self.model.mm_part.batched_embedding(
-                        [wi.preprocess_result for _, wi in pending_items],
-                        [wi.mm_type for _, wi in pending_items],
-                    )
-                kmonitor.report(
-                    GaugeMetrics.VIT_EMBEDDING_RT_METRIC, route_timer.cost_ms()
+            with Timer() as route_timer:
+                batch_outputs = self.model.mm_part.batched_embedding(
+                    [wi.preprocess_result for _, wi in pending_items],
+                    [wi.mm_type for _, wi in pending_items],
                 )
-            except NotImplementedError:
-                batch_outputs = None
-            except Exception:
-                batch_outputs = None
+            kmonitor.report(
+                GaugeMetrics.VIT_EMBEDDING_RT_METRIC, route_timer.cost_ms()
+            )
 
-            if batch_outputs is not None:
-                for (idx, work_item), result in zip(pending_items, batch_outputs):
-                    work_item.embedding_result = result
-                    if work_item.need_check_cache:
-                        vit_emb_cache_.insert_cache(work_item.cache_key, result)
-                    ordered_emb[idx] = result[0]
-                    ordered_pos[idx] = result[1]
-            else:
-                for idx, work_item in pending_items:
-                    result = work_item.get_embedding_result(
-                        self.model.mm_part.embedding
-                    )
-                    ordered_emb[idx] = result[0]
-                    ordered_pos[idx] = result[1]
+            for (idx, work_item), result in zip(pending_items, batch_outputs):
+                work_item.embedding_result = result
+                if work_item.need_check_cache:
+                    vit_emb_cache_.insert_cache(work_item.cache_key, result)
+                ordered_emb[idx] = result[0]
+                ordered_pos[idx] = result[1]
+                if len(result) > 2:
+                    ordered_tensor[idx] = result[2]
 
         # Flatten outputs in original input order.
-        for emb, pos in zip(ordered_emb, ordered_pos):
-            if emb is not None:
-                emb_res.extend(self._maybe_tensor_to_list(emb))
-            if pos is not None:
-                pos_res.extend(self._maybe_tensor_to_list(pos))
+        for emb, pos, tensor in zip(ordered_emb, ordered_pos, ordered_tensor):
+            emb_res.extend(self._maybe_tensor_to_list(emb))
+            pos_res.extend(self._maybe_tensor_to_list(pos))
+            tensor_res.extend(self._maybe_tensor_to_list(tensor))
 
         return emb_res, pos_res, tensor_res
 
