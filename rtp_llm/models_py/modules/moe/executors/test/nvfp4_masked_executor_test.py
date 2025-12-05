@@ -666,10 +666,12 @@ def test_nvfp4_masked_executor(use_nvfp4: bool = True):
     
     # Check - use relaxed tolerance for quantization
     # Save output and ref_output to pt files for further examination
-    import os
+    # Use the same directory as quantization tensors
     user_home = os.path.expanduser("~")
-    torch.save(output, os.path.join(user_home, "nvfp4_executor_test_output.pt"))
-    torch.save(ref_output, os.path.join(user_home, "nvfp4_executor_test_ref_output.pt"))
+    save_dir = os.path.join(user_home, "nvfp4_quantization_tensors")
+    os.makedirs(save_dir, exist_ok=True)
+    torch.save(output, os.path.join(save_dir, "nvfp4_executor_test_output.pt"))
+    torch.save(ref_output, os.path.join(save_dir, "nvfp4_executor_test_ref_output.pt"))
     torch.testing.assert_close(output, ref_output, rtol=1e-1, atol=1e-1)
     
     # For now, just check that we can generate the data
