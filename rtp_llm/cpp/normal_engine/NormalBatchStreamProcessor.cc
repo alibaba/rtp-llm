@@ -274,7 +274,7 @@ absl::StatusOr<SamplerInputs> NormalBatchStreamProcessor::gatherSamplerInput(
             memcpy(sampler_inputs.token_ids->dataWithOffset<int32_t>((batch_idx) * (sampler_inputs.step + 1)),
                    complete_token_ids->dataWithOffset<int32_t>(cur_batch * complete_seq_len),
                    seq_len * sizeof(int));
-            sampler_inputs.finished_mask->data<bool>()[batch_idx] = stream->isDoneWithoutLock(i);
+            sampler_inputs.finished_mask->data<bool>()[batch_idx] = stream->isDoneWithoutLock(cur_batch);
             batch_idx += 1;
         }
         need_tiling |= stream->needTilingForSampling();
@@ -301,11 +301,12 @@ absl::StatusOr<SamplerInputs> NormalBatchStreamProcessor::gatherSamplerInput(
 
     // copy logits when needs tiling or returning logits
     if (need_tiling) {
+        // TODO(zhangjianning.zjn): tiling for logits should be moved after logits processors
         sampler_inputs.logits = device_->allocateBuffer(
             {model_output.logits->type(), {total_batch_size_in, vocab_size}, rtp_llm::AllocationType::DEVICE}, {});
         device_->copy({sampler_inputs.logits->view(0, total_decode_batch_size_in),
                        model_output.logits->view(0, total_decode_batch_size_in)});
-        size_t input_offset = 0, logits_offset = 0;
+        size_t input_offset = total_decode_batch_size_in, logits_offset = total_decode_batch_size_in;
         for (auto& stream : stream_groups.contextStreams()) {
             auto sampler_batch_size =
                 stream->needTilingForSampling() ? stream->nextBatchSize() : stream->currentBatchSize();
@@ -441,11 +442,13 @@ void NormalBatchStreamProcessor::setLogitsProcessorInputs(SamplerInputs&        
                                                           std::list<GenerateStreamPtr>& all_streams,
                                                           bool                          score_batch) const {
     LogitsProcessorStatesPtr state_ptr = std::make_shared<LogitsProcessorStates>();
+    // TODO(zhangjianning.zjn): tiling for logits should be moved after logits processors
     std::for_each(all_streams.begin(), all_streams.end(), [&state_ptr, idx = 0](auto& stream) mutable {
+        const auto batch_size = stream->needTilingForSampling() ? stream->nextBatchSize() : stream->currentBatchSize();
         for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
-            state_ptr->insert(processor, idx, idx + stream->currentBatchSize());
+            state_ptr->insert(processor, idx, idx + batch_size);
         }
-        idx += stream->currentBatchSize();
+        idx += batch_size;
     });
     sampler_inputs.logits_processor_states_ptr = state_ptr;
 }
@@ -466,116 +469,140 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_gro
     bool return_all_probs = stream_groups.needReturnAllProbs();
     auto new_tokens_all   = CACHED_HOST_BUF(TYPE_INT32, {(size_t)total_batch_size_out, (size_t)1});
 
+    std::vector<autil::ThreadPoolBase::Future<void>> futures;
+    if (thread_pool_ != nullptr) {
+        futures.reserve(stream_groups.size());
+    }
+
     for (auto& stream : stream_groups.allStreams()) {
         if (stream->isChunkStream()) {
             continue;
         }
         auto cur_batch_size  = stream->currentBatchSize();
         auto next_batch_size = stream->nextBatchSize();
+        auto token_size      = stream->currentExecuteTokenSize();
 
-        auto token_size              = stream->currentExecuteTokenSize();
-        auto batch_new_all_token_ids = new_all_token_ids->slice(batch_idx_out, next_batch_size);
+        auto task =
+            [&, stream, cur_batch_size, next_batch_size, token_size, batch_idx_in, batch_idx_out, token_offset]() {
+                auto batch_new_all_token_ids = new_all_token_ids->slice(batch_idx_out, next_batch_size);
 
-        bool has_beam_search = stream->currentNumBeams() > 1 || stream->nextNumBeams() > 1;
-        bool has_var_batch   = stream->currentBatchSize() != stream->nextBatchSize();
+                bool has_beam_search = stream->currentNumBeams() > 1 || stream->nextNumBeams() > 1;
+                bool has_var_batch   = stream->currentBatchSize() != stream->nextBatchSize();
 
-        // construct mapping from output batches to input batches
-        BufferPtr src_batch_indices;
-        if (has_beam_search) {
-            // beam search
-            src_batch_indices = sampler_output.beam_index->slice(batch_idx_out, next_batch_size);
-        } else if (has_var_batch) {
-            // from context stream to decode straem, there might be other cases in future
-            src_batch_indices = device_->allocateBuffer(
-                {rtp_llm::DataType::TYPE_INT32, {(size_t)next_batch_size}, rtp_llm::AllocationType::HOST}, {});
-            device_->bufMemset(*src_batch_indices, 0);
+                // construct mapping from output batches to input batches
+                BufferPtr src_batch_indices;
+                if (has_beam_search) {
+                    // beam search
+                    src_batch_indices = sampler_output.beam_index->slice(batch_idx_out, next_batch_size);
+                } else if (has_var_batch) {
+                    // from context stream to decode straem, there might be other cases in future
+                    src_batch_indices = device_->allocateBuffer(
+                        {rtp_llm::DataType::TYPE_INT32, {(size_t)next_batch_size}, rtp_llm::AllocationType::HOST}, {});
+                    device_->bufMemset(*src_batch_indices, 0);
+                }
+                const auto get_src_idx = [&](int32_t dst_idx) {
+                    return src_batch_indices ? src_batch_indices->data<int32_t>()[dst_idx] : dst_idx;
+                };
+
+                // construct update info
+                BufferPtr batch_hidden_states = nullptr;
+                if (stream->generateConfig()->return_hidden_states) {
+                    batch_hidden_states = model_output.hidden_states->slice(batch_idx_in, cur_batch_size);
+                }
+
+                BufferPtr batch_logits = nullptr;
+                if (stream->returnLogits() || stream->calculateSoftmaxProbs() || has_beam_search) {
+                    batch_logits = model_output.logits->slice(batch_idx_in, cur_batch_size);
+                }
+
+                BufferPtr all_probs = nullptr;
+                if (return_all_probs) {
+                    all_probs = sampler_output.all_probs->slice(batch_idx_out, next_batch_size, false);
+                    all_probs->updateParent(sampler_output.all_probs);
+                };
+
+                BufferPtr batch_cum_log_probs;
+                if (sampler_output.cum_log_probs) {
+                    batch_cum_log_probs = sampler_output.cum_log_probs->slice(batch_idx_out, next_batch_size);
+                }
+
+                BufferPtr loss;
+                if (stream->calculateLoss()) {
+                    auto               all_logits = model_output.all_logits->view(token_offset, token_size - 1);
+                    auto               tokens     = stream->currentExecuteTokens(0);
+                    rtp_llm::BufferPtr label      = device_->clone({{rtp_llm::MemoryType::MEMORY_CPU,
+                                                                     rtp_llm::DataType::TYPE_INT32,
+                                                                     {tokens.size() - 1},
+                                                                     tokens.data() + 1}});
+                    loss                          = device_->loss({all_logits, *label});
+                }
+
+                BufferPtr all_hidden_states = nullptr;
+                if (stream->needReturnHiddenStates()) {
+                    all_hidden_states = model_output.all_hidden_states->slice(token_offset, token_size, false);
+                    all_hidden_states->updateParent(model_output.all_hidden_states);
+                }
+
+                BufferPtr new_tokens = new_tokens_all->slice(batch_idx_out, next_batch_size);
+                for (size_t i = 0; i < next_batch_size; ++i) {
+                    new_tokens->data<int32_t>()[i] =
+                        new_all_token_ids->data<int32_t>()[(batch_idx_out + i) * token_stride + token_stride - 1];
+                }
+
+                BufferPtr batch_softmax_result;
+                BufferPtr current_softmax_result;
+                if (stream->calculateSoftmaxProbs()) {
+                    current_softmax_result = device_->allocateBuffer({rtp_llm::DataType::TYPE_FP32,
+                                                                      {(size_t)next_batch_size, (size_t)1},
+                                                                      rtp_llm::AllocationType::HOST},
+                                                                     {});
+                    batch_softmax_result   = device_->softmax(
+                        {batch_logits, std::nullopt, std::nullopt, 1.0f, DataType::TYPE_FP32, std::nullopt});
+                    for (int i = 0; i < next_batch_size; ++i) {
+                        device_->copy(
+                            {(*current_softmax_result)[i],
+                             (*batch_softmax_result)[get_src_idx(i)].view(new_tokens->data<int32_t>()[i], 1)});
+                    }
+                }
+
+                for (int i = 0; i < cur_batch_size; ++i) {
+                    if (sampler_output.success
+                        && !(*(sampler_output.success->dataWithOffset<bool>(batch_idx_in + i)))) {
+                        stream->setStop(ErrorCode::UNKNOWN_ERROR, "sampler generate token id failed");
+                    }
+                }
+
+                RTP_LLM_LOG_DEBUG("stream [%ld], new_tokens = [%s]",
+                                  stream->streamId(),
+                                  new_tokens->debugStringWithData<int32_t>().c_str());
+
+                stream->update({has_beam_search ? batch_new_all_token_ids : new_tokens,
+                                1,
+                                batch_hidden_states,
+                                batch_logits,
+                                current_softmax_result,
+                                batch_cum_log_probs,
+                                all_probs,
+                                loss,
+                                src_batch_indices,
+                                all_hidden_states});
+            };
+
+        if (thread_pool_ != nullptr) {
+            futures.emplace_back(thread_pool_->async(task));
+        } else {
+            task();
         }
-        const auto get_src_idx = [&](int32_t dst_idx) {
-            return src_batch_indices ? src_batch_indices->data<int32_t>()[dst_idx] : dst_idx;
-        };
-
-        // construct update info
-        BufferPtr batch_hidden_states = nullptr;
-        if (stream->generateConfig()->return_hidden_states) {
-            batch_hidden_states = model_output.hidden_states->slice(batch_idx_in, cur_batch_size);
-        }
-
-        BufferPtr batch_logits = nullptr;
-        if (stream->returnLogits() || stream->calculateSoftmaxProbs() || has_beam_search) {
-            batch_logits = model_output.logits->slice(batch_idx_in, cur_batch_size);
-        }
-
-        BufferPtr all_probs = nullptr;
-        if (return_all_probs) {
-            all_probs = sampler_output.all_probs->slice(batch_idx_out, next_batch_size, false);
-            all_probs->updateParent(sampler_output.all_probs);
-        };
-
-        BufferPtr batch_cum_log_probs;
-        if (sampler_output.cum_log_probs) {
-            batch_cum_log_probs = sampler_output.cum_log_probs->slice(batch_idx_out, next_batch_size);
-        }
-
-        BufferPtr loss;
-        if (stream->calculateLoss()) {
-            auto               all_logits = model_output.all_logits->view(token_offset, token_size - 1);
-            auto               tokens     = stream->currentExecuteTokens(0);
-            rtp_llm::BufferPtr label      = device_->clone({{rtp_llm::MemoryType::MEMORY_CPU,
-                                                             rtp_llm::DataType::TYPE_INT32,
-                                                             {tokens.size() - 1},
-                                                             tokens.data() + 1}});
-            loss                          = device_->loss({all_logits, *label});
-        }
-
-        BufferPtr all_hidden_states = nullptr;
-        if (stream->needReturnHiddenStates()) {
-            all_hidden_states = model_output.all_hidden_states->slice(token_offset, token_size, false);
-            all_hidden_states->updateParent(model_output.all_hidden_states);
-        }
-
-        BufferPtr new_tokens = new_tokens_all->slice(batch_idx_out, next_batch_size);
-        for (size_t i = 0; i < next_batch_size; ++i) {
-            new_tokens->data<int32_t>()[i] =
-                new_all_token_ids->data<int32_t>()[(batch_idx_out + i) * token_stride + token_stride - 1];
-        }
-
-        BufferPtr batch_softmax_result;
-        BufferPtr current_softmax_result;
-        if (stream->calculateSoftmaxProbs()) {
-            current_softmax_result = device_->allocateBuffer(
-                {rtp_llm::DataType::TYPE_FP32, {(size_t)next_batch_size, (size_t)1}, rtp_llm::AllocationType::HOST},
-                {});
-            batch_softmax_result =
-                device_->softmax({batch_logits, std::nullopt, std::nullopt, 1.0f, DataType::TYPE_FP32, std::nullopt});
-            for (int i = 0; i < next_batch_size; ++i) {
-                device_->copy({(*current_softmax_result)[i],
-                               (*batch_softmax_result)[get_src_idx(i)].view(new_tokens->data<int32_t>()[i], 1)});
-            }
-        }
-
-        for (int i = 0; i < cur_batch_size; ++i) {
-            if (sampler_output.success && !(*(sampler_output.success->dataWithOffset<bool>(batch_idx_in + i)))) {
-                stream->setStop(ErrorCode::UNKNOWN_ERROR, "sampler generate token id failed");
-            }
-        }
-
-        RTP_LLM_LOG_DEBUG(
-            "stream [%ld], new_tokens = [%s]", stream->streamId(), new_tokens->debugStringWithData<int32_t>().c_str());
-
-        stream->update({has_beam_search ? batch_new_all_token_ids : new_tokens,
-                        1,
-                        batch_hidden_states,
-                        batch_logits,
-                        current_softmax_result,
-                        batch_cum_log_probs,
-                        all_probs,
-                        loss,
-                        src_batch_indices,
-                        all_hidden_states});
 
         batch_idx_in += cur_batch_size;
         batch_idx_out += next_batch_size;
         token_offset += token_size;
+    }
+
+    if (thread_pool_ != nullptr) {
+        for (auto& future : futures) {
+            future.wait();
+        }
     }
 
     RTP_LLM_LOG_DEBUG("dispatch done");

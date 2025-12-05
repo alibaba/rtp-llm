@@ -113,6 +113,7 @@ public:
     MatchInfo                         mallocWithCache(const AdvancedMallocInfo& malloc_info);
     void                              reserveBlocks(int nums);
     void                              incrRefCounter(const std::vector<int>& blocks_index);
+    void                              incrRefCounterWithLock(const std::vector<int>& blocks_index);
 
     void free(const std::vector<KVCacheResource>& resource);
     void free(const std::vector<int>& indice);

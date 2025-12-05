@@ -81,6 +81,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     *is_context_stream_      = true;
     generate_status_         = std::make_shared<GenerateStatus>();
     generate_status_->status = StreamState::WAITING;
+    sub_generate_status_.reserve(maxBatchSize());
     sub_generate_status_.clear();
     resizeSubGenerateStatus(init_batch_size);
 
@@ -88,8 +89,9 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
 
     setReturnAllProbs(generate_input_->generate_config->return_all_probs);
 
-    think_logits_processor_ptr_ = ThinkModeLogitsProcessor::fromGenerateInput(device_, generate_input_, maxBatchSize());
-    tree_logits_processor_ptr_  = TreeLogitsProcessor::fromGenerateInput(device_, generate_input_, init_batch_size);
+    think_logits_processor_ptr_ =
+        ThinkModeLogitsProcessor::fromGenerateInput(device_, generate_input_, init_batch_size);
+    tree_logits_processor_ptr_ = TreeLogitsProcessor::fromGenerateInput(device_, generate_input_, init_batch_size);
     multi_seq_logits_processor_ptr_ =
         MultiSeqLogitsProcessor::fromGenerateInput(device_, generate_input_, special_tokens_.eos_token_id_);
 
@@ -230,7 +232,7 @@ int GenerateStream::batchSize(int output_len) const {
     if (generate_input_->generate_config->hasNumBeams()) {
         return numBeams(output_len);
     } else {
-        return std::max(numReturnSequences(), 1);
+        return output_len == 0 && !perf_test_ ? 1 : std::max(numReturnSequences(), 1);
     }
 }
 
@@ -848,7 +850,7 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
         updateLogitProcessorStatus(update_info);
     }
 
-    if (!is_done || reuseCache()) {
+    if (!is_done || stream_cache_resource_->reuseCache()) {
         // kv cache blocks must be updated if REUSE_CACHE is on, even the stream is done
         auto update_res = updateKvCacheBlocks(update_info.src_batch_indices);
         if (!update_res) {
@@ -877,7 +879,7 @@ bool GenerateStream::updateKvCacheBlocks(const rtp_llm::BufferPtr& src_batch_ind
 }
 
 void GenerateStream::updateLogitProcessorMultiSeqStatus(const rtp_llm::BufferPtr& src_batch_indices) {
-    if (src_batch_indices == nullptr || !hasNumBeams()) {
+    if (src_batch_indices == nullptr) {
         return;
     }
 
