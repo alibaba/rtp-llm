@@ -226,9 +226,18 @@ class TrtllmFp4Executor(FusedMoeExpertExecutor):
 
         # Build packed tensor from topk_ids and topk_weights
         # Format: (topk_ids << 16) | expert_weights.view(int16)
+        # According to bench_fp4_moe.py line 275-277:
+        # packed_tensor = (topk_ids.to(torch.int32) << 16) | expert_weights.to(torch.bfloat16).view(torch.int16)
         topk_ids_int32 = expert_topk_ids.to(torch.int32)
         expert_weights_bf16 = expert_topk_weights.to(torch.bfloat16)
+        # Ensure topk_ids are within valid range [0, num_experts)
+        topk_ids_int32 = topk_ids_int32.clamp(0, self._config.expert_num - 1)
         packed_tensor = (topk_ids_int32 << 16) | expert_weights_bf16.view(torch.int16)
+        
+        # Debug: print packed tensor info
+        print(f"[DEBUG TrtllmFp4Executor] topk_ids range: [{topk_ids_int32.min().item()}, {topk_ids_int32.max().item()}]")
+        print(f"[DEBUG TrtllmFp4Executor] expert_weights range: [{expert_topk_weights.min().item():.6f}, {expert_topk_weights.max().item():.6f}]")
+        print(f"[DEBUG TrtllmFp4Executor] packed_tensor sample (first 5): {packed_tensor[:5]}")
 
         # Prepare weight tensors
         # w13 combines w1 and w3 (gate and value) for SwiGLU
@@ -325,9 +334,15 @@ class TrtllmFp4Executor(FusedMoeExpertExecutor):
             gated_act_type,
             None,  # output (optional inplace)
         )[0]  # Returns list, get first element
+        
+        # Debug: print output statistics before reshape
+        print(f"[DEBUG TrtllmFp4Executor] output (2D) shape: {output.shape}, dtype: {output.dtype}")
+        print(f"[DEBUG TrtllmFp4Executor] output (2D) min: {output.min().item():.6f}, max: {output.max().item():.6f}, mean: {output.mean().item():.6f}")
 
         # Convert output from 2D [total_tokens, K] to 3D [E, M, K]
         # This is the reverse of the reconstruction above
+        # NOTE: The output from trtllm_fp4_block_scale_routed_moe is already weighted and finalized
+        # It should be in bfloat16 format and already properly scaled
         output_3d = torch.zeros(
             (E, M, K), device=output.device, dtype=output.dtype
         )
@@ -340,6 +355,10 @@ class TrtllmFp4Executor(FusedMoeExpertExecutor):
                     token_idx : token_idx + num_tokens, :
                 ]
                 token_idx += num_tokens
+        
+        # Debug: print output statistics after reshape
+        print(f"[DEBUG TrtllmFp4Executor] output_3d shape: {output_3d.shape}, dtype: {output_3d.dtype}")
+        print(f"[DEBUG TrtllmFp4Executor] output_3d min: {output_3d.min().item():.6f}, max: {output_3d.max().item():.6f}, mean: {output_3d.mean().item():.6f}")
 
         return output_3d
 
