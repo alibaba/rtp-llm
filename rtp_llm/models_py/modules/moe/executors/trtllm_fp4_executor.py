@@ -126,16 +126,16 @@ class TrtllmFp4Executor(FusedMoeExpertExecutor):
         # For NVFP4, we typically use a fixed global scale or compute from amax
         # Here we use a simplified approach - in practice, these should be pre-computed
         # during weight quantization
-        w1_amax = torch.abs(self._w1.to(torch.float32)).max()
-        w2_amax = torch.abs(self._w2.to(torch.float32)).max()
-        
+        # NOTE: We cannot compute amax from quantized weights accurately
+        # For now, use a fixed scale similar to bench_fp4_moe.py
+        # In production, these should be stored with the weights
         self._w1_global_scale = torch.tensor(
-            [FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / w1_amax],
+            [1.0 / 448.0 / 6.0],  # Default global scale for NvFP4xNvFP4
             device=self._w1.device,
             dtype=torch.float32,
         )
         self._w2_global_scale = torch.tensor(
-            [FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / w2_amax],
+            [1.0 / 448.0 / 6.0],  # Default global scale for NvFP4xNvFP4
             device=self._w2.device,
             dtype=torch.float32,
         )
@@ -241,8 +241,14 @@ class TrtllmFp4Executor(FusedMoeExpertExecutor):
 
         # Compute output scale scalars
         # These are used for dequantization in the MoE kernel
-        input_global_scale = torch.tensor(
-            [FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX],
+        # According to bench_fp4_moe.py, for NvFP4xNvFP4:
+        # - hidden_states_global_scale = 1.0 / 448.0 / 6.0
+        # - w13_global_scale = 1.0 / 448.0 / 6.0
+        # - w2_global_scale = 1.0 / 448.0 / 6.0
+        # - output1_scale_scalar = hidden_states_global_scale * w13_global_scale
+        # - output2_scale_scalar = hidden_states_global_scale * w2_global_scale
+        hidden_states_global_scale = torch.tensor(
+            [1.0 / 448.0 / 6.0],  # For NvFP4xNvFP4
             device=self._device,
             dtype=torch.float32,
         )
@@ -250,20 +256,33 @@ class TrtllmFp4Executor(FusedMoeExpertExecutor):
         w2_global_scale = self._w2_global_scale
 
         output1_scale_scalar = torch.tensor(
-            [input_global_scale.item() * w13_global_scale.item()] * E,
+            [hidden_states_global_scale.item() * w13_global_scale.item()] * E,
             device=self._device,
             dtype=torch.float32,
         )
         output1_scale_gate_scalar = torch.tensor(
-            [input_global_scale.item() * w13_global_scale.item()] * E,
+            [hidden_states_global_scale.item() * w13_global_scale.item()] * E,
             device=self._device,
             dtype=torch.float32,
         )
         output2_scale_scalar = torch.tensor(
-            [input_global_scale.item() * w2_global_scale.item()] * E,
+            [hidden_states_global_scale.item() * w2_global_scale.item()] * E,
             device=self._device,
             dtype=torch.float32,
         )
+        
+        # Debug: print scales and shapes
+        print(f"[DEBUG TrtllmFp4Executor] E={E}, M={M}, K={K}, K_half={K_half}, intermediate_size={intermediate_size}")
+        print(f"[DEBUG TrtllmFp4Executor] hidden_states shape: {hidden_states.shape}, scale shape: {hidden_states_scale.shape}")
+        print(f"[DEBUG TrtllmFp4Executor] w13 shape: {w13.shape}, w13_scale shape: {w13_scale.shape}")
+        print(f"[DEBUG TrtllmFp4Executor] w2 shape: {w2.shape}, w2_scale shape: {w2_scale.shape}")
+        print(f"[DEBUG TrtllmFp4Executor] hidden_states_global_scale: {hidden_states_global_scale.item()}")
+        print(f"[DEBUG TrtllmFp4Executor] w13_global_scale: {w13_global_scale.item()}")
+        print(f"[DEBUG TrtllmFp4Executor] w2_global_scale: {w2_global_scale.item()}")
+        print(f"[DEBUG TrtllmFp4Executor] output1_scale_scalar[0]: {output1_scale_scalar[0].item()}")
+        print(f"[DEBUG TrtllmFp4Executor] output2_scale_scalar[0]: {output2_scale_scalar[0].item()}")
+        print(f"[DEBUG TrtllmFp4Executor] packed_tensor shape: {packed_tensor.shape}, dtype: {packed_tensor.dtype}")
+        print(f"[DEBUG TrtllmFp4Executor] top_k: {top_k}, routing_method_type: 5 (TopK)")
 
         # Map activation string to GatedActType
         if activation.lower() == "silu" or activation.lower() == "swiglu":

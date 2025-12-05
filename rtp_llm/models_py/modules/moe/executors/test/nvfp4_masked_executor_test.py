@@ -462,6 +462,25 @@ def test_nvfp4_masked_executor(use_nvfp4: bool = True):
     # Execute
     output = executor.execute(payload, "silu", None, None, False, None)
     
+    # Debug: print output statistics
+    print(f"[DEBUG Test] output shape: {output.shape}, dtype: {output.dtype}")
+    print(f"[DEBUG Test] ref_output shape: {ref_output.shape}, dtype: {ref_output.dtype}")
+    print(f"[DEBUG Test] output min: {output.min().item():.6f}, max: {output.max().item():.6f}, mean: {output.mean().item():.6f}")
+    print(f"[DEBUG Test] ref_output min: {ref_output.min().item():.6f}, max: {ref_output.max().item():.6f}, mean: {ref_output.mean().item():.6f}")
+    
+    # Check for NaN or Inf
+    output_nan = torch.isnan(output).sum().item()
+    output_inf = torch.isinf(output).sum().item()
+    ref_nan = torch.isnan(ref_output).sum().item()
+    ref_inf = torch.isinf(ref_output).sum().item()
+    print(f"[DEBUG Test] output NaN count: {output_nan}, Inf count: {output_inf}")
+    print(f"[DEBUG Test] ref_output NaN count: {ref_nan}, Inf count: {ref_inf}")
+    
+    # Compute difference statistics
+    diff = (output - ref_output).abs()
+    print(f"[DEBUG Test] diff min: {diff.min().item():.6f}, max: {diff.max().item():.6f}, mean: {diff.mean().item():.6f}")
+    print(f"[DEBUG Test] diff > 1.0 count: {(diff > 1.0).sum().item()}")
+    
     # Check - use relaxed tolerance for quantization
     torch.testing.assert_close(output, ref_output, rtol=1e-1, atol=1e-1)
     
