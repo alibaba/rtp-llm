@@ -52,6 +52,8 @@ struct KVCacheBuffer {
     rtp_llm::BufferPtr v_blocks = nullptr;
 };
 
+// TODO, 和KVCacheBuffer类似的有好几个结构体，需要简化。
+
 struct BlockIdPair {
     BlockIdxType src;
     BlockIdxType dst;
@@ -90,10 +92,6 @@ struct InsertInfo {
     BatchKVCacheResourcePtr batch_kv_cache_resource;
     CompleteTokenIdsPtr     complete_token_ids;
     bool                    is_resident;
-};
-
-struct InsertResult {
-    bool success;
 };
 
 }  // namespace rtp_llm

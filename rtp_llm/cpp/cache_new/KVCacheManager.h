@@ -1,8 +1,6 @@
 #pragma once
 
 #include <cassert>
-#include <mutex>
-#include <set>
 #include <vector>
 
 #include "rtp_llm/cpp/cache_new/types.h"
@@ -39,7 +37,7 @@ public:
 
     MallocResult malloc(const MallocInfo& malloc_info);
     void         free(const FreeInfo& free_info);
-    InsertResult insertIntoCache(const InsertInfo& insert_info);
+    void         insertIntoCache(const InsertInfo& insert_info);
 
     void blockCopy(int src_block_index, int dest_block_index);
     void blockBatchCopy(const std::vector<BlockIdPair>& copy_mapping);

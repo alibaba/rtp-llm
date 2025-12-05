@@ -24,7 +24,7 @@ public:
 
     virtual bool               init()                                                 = 0;
     virtual void               free(const FreeInfo& free_info)                        = 0;
-    virtual InsertResult       insertIntoCache(const InsertInfo& insert_info)         = 0;
+    virtual void               insertIntoCache(const InsertInfo& insert_info)         = 0;
     virtual BlockAddrInfo      convertIndexToAddr(int layer_id, int block_id) const   = 0;
     virtual BlockBufferPtrInfo convertIndexToBuffer(int layer_id, int block_id) const = 0;
     virtual CacheLayerLayout   layerCacheBase() const                                 = 0;

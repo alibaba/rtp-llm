@@ -34,7 +34,7 @@
 //     FreeResult free(const FreeInfo& free_info) {
 //         // only consider the scenario of full fallback.
 //     }
-//     InsertResult insertIntoCache(const InsertInfo& insert_info){
+//     void insertIntoCache(const InsertInfo& insert_info){
 //         // insert blocks in stream that have been cached in block_cache into block_cache
 //     };
 

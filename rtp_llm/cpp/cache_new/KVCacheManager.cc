@@ -1,10 +1,6 @@
 #include "rtp_llm/cpp/cache_new/KVCacheManager.h"
 
-#include <algorithm>
-
 #include "rtp_llm/cpp/cache_new/SingleTypeKVCacheAllocator.h"
-#include "rtp_llm/cpp/utils/Logger.h"
-#include "rtp_llm/cpp/utils/HashUtil.h"
 #include "rtp_llm/cpp/cache_new/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache_new/KVCacheHashUtil.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
@@ -152,9 +148,9 @@ void KVCacheManager::free(const FreeInfo& free_info) {
     allocator_->free(free_info);
 }
 
-InsertResult KVCacheManager::insertIntoCache(const InsertInfo& insert_info) {
+void KVCacheManager::insertIntoCache(const InsertInfo& insert_info) {
     dropLastPartialBlock(insert_info.batch_kv_cache_resource);
-    return allocator_->insertIntoCache(insert_info);
+    allocator_->insertIntoCache(insert_info);
 }
 
 KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const {

@@ -249,9 +249,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InsertIntoCache) {
     allocator_->malloc(malloc_info);
 
     InsertInfo insert_info{batch_resource, complete_token_ids, false};
-    auto       result = allocator_->insertIntoCache(insert_info);
-
-    EXPECT_TRUE(result.success);
+    allocator_->insertIntoCache(insert_info);
 }
 
 TEST_F(SingleTypeKVCacheAllocatorTest, InsertIntoCacheAsResident) {
@@ -267,9 +265,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InsertIntoCacheAsResident) {
     allocator_->malloc(malloc_info);
 
     InsertInfo insert_info{batch_resource, complete_token_ids, true};
-    auto       result = allocator_->insertIntoCache(insert_info);
-
-    EXPECT_TRUE(result.success);
+    allocator_->insertIntoCache(insert_info);
 }
 
 // Test convert index to addr

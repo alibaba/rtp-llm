@@ -126,7 +126,7 @@ void SingleTypeKVCacheAllocator::free(const FreeInfo& free_info) {
     kv_cache_resource->clearBlocks();
 }
 
-InsertResult SingleTypeKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
+void SingleTypeKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
     auto& kv_resource = insert_info.batch_kv_cache_resource;
     int   batch_size  = kv_resource->batchSize();
 
@@ -147,8 +147,6 @@ InsertResult SingleTypeKVCacheAllocator::insertIntoCache(const InsertInfo& inser
 
         full_kv_cache_group_->insertIntoCache(put_cache_keys, put_block_ids, insert_info.is_resident);
     }
-
-    return {true};
 }
 
 CacheLayerLayout SingleTypeKVCacheAllocator::layerCacheBase() const {

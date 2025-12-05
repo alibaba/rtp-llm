@@ -165,12 +165,8 @@ void HybridLayerKVCacheAllocator::free(const FreeInfo& free_info) {
     kv_cache_resource->clearBlocks();
 }
 
-InsertResult HybridLayerKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
-    auto& kv_cache_resource = insert_info.batch_kv_cache_resource;
-    if (!kv_cache_resource) {
-        RTP_LLM_LOG_ERROR("BatchKVCacheResource is null");
-        return {false};
-    }
+void HybridLayerKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
+    RTP_LLM_CHECK(insert_info.batch_kv_cache_resource);
 
     int batch_size         = kv_cache_resource->batchSize();
     int seq_size_per_block = full_kv_cache_group_->seqSizePerBlock();
@@ -197,8 +193,6 @@ InsertResult HybridLayerKVCacheAllocator::insertIntoCache(const InsertInfo& inse
             all_kv_cache_groups_[group_id]->insertIntoCache(put_cache_keys, put_block_ids, insert_info.is_resident);
         }
     }
-
-    return {true};
 }
 
 CacheLayerLayout HybridLayerKVCacheAllocator::layerCacheBase() const {
