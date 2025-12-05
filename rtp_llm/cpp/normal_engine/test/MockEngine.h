@@ -145,6 +145,7 @@ createEngineInitParams(DeviceBase* device, const CustomConfig& config,
     rtp_llm::CacheStoreConfig cache_store_config;
     rtp_llm::MiscellaneousConfig misc_config;
     rtp_llm::ArpcConfig arpc_config;
+    rtp_llm::GrpcConfig grpc_config;
     rtp_llm::FfnDisAggregateConfig ffn_disaggregate_config;
     rtp_llm::VitConfig vit_config;
     
@@ -165,6 +166,7 @@ createEngineInitParams(DeviceBase* device, const CustomConfig& config,
                                              cache_store_config,
                                              misc_config,
                                              arpc_config,
+                                             grpc_config,
                                              ffn_disaggregate_config,
                                              vit_config,
                                              std::move(*weights));

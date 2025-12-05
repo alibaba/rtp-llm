@@ -400,7 +400,7 @@ class Qwen3AttnModel(DisaggregateModelBase):
                     mirco_batch_input.input_ids.shape[0]
                 )
                 fmha_impl = AttnImplFactory.get_fmha_impl(
-                    self.config, self.parallelism_config, self.weight, mirco_batch_input.attention_inputs
+                    self.config, self.parallelism_config, self.weight, mirco_batch_input.attention_inputs, self.fmha_config
                 )
                 out = layer(
                     hidden_states=inputs,

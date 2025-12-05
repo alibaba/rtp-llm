@@ -94,6 +94,7 @@ std::unique_ptr<ProposeModelEngineInitParams> prepareMTPEngineInitParams(size_t 
                 base_params.cache_store_config,
                 base_params.misc_config,
                 base_params.arpc_config,
+                base_params.grpc_config,
                 base_params.ffn_disaggregate_config,
                 base_params.vit_config,
                 std::move(*gpt_weight),
@@ -155,6 +156,7 @@ EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config,
         auto cache_store_config = engine_config.attr("cache_store_config").cast<CacheStoreConfig>();
         auto misc_config = engine_config.attr("misc_config").cast<MiscellaneousConfig>();
         auto arpc_config = engine_config.attr("arpc_config").cast<ArpcConfig>();
+        auto grpc_config = engine_config.attr("grpc_config").cast<GrpcConfig>();
         
         // Extract vit_config
         VitConfig vit_config_cpp;
@@ -194,6 +196,7 @@ EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config,
                                 cache_store_config,
                                 misc_config,
                                 arpc_config,
+                                grpc_config,
                 parallelism_config.ffn_disaggregate_config,
                 vit_config_cpp,
                 std::move(*gpt_weight),
@@ -332,7 +335,7 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
         }
     }
     grpc::ServerBuilder builder;
-    const GrpcConfig&   grpc_config   = maga_init_params.gpt_init_parameter.grpc_config;
+    const GrpcConfig&   grpc_config   = maga_init_params.grpc_config;
     auto                server_config = grpc_config.get_server_config();
     for (auto it = server_config.begin(); it != server_config.end(); ++it) {
         RTP_LLM_LOG_INFO("grpc server add channel argument %s: %d", it->first.c_str(), it->second);

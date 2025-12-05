@@ -74,10 +74,11 @@ void RtpEmbeddingOp::init(py::object model, py::object engine_config, py::object
                                 cache_store_config,
                                 misc_config,
                                 arpc_config,
-                parallelism_config.ffn_disaggregate_config,
-                vit_config_cpp,
-                std::move(*gpt_weight),
-                py_model);
+                                grpc_config,
+                                parallelism_config.ffn_disaggregate_config,
+                                vit_config_cpp,
+                                std::move(*gpt_weight),
+                                py_model);
         py::object                custom_module = model.attr("custom_module");
         py::object                py_render     = model.attr("custom_module").attr("renderer");
         py::object                py_tokenizer  = model.attr("tokenizer");

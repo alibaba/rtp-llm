@@ -50,6 +50,7 @@ protected:
         CacheStoreConfig cache_store_config;
         MiscellaneousConfig misc_config;
         ArpcConfig arpc_config;
+        GrpcConfig grpc_config;
         FfnDisAggregateConfig ffn_disaggregate_config;
         typedef half            T;
         const rtp_llm::DataType data_type    = getTensorType<T>();
@@ -138,6 +139,7 @@ protected:
             cache_store_config,
             misc_config,
             arpc_config,
+            grpc_config,
             ffn_disaggregate_config,
             vit_config,
             std::move(*convert.createGptWeights(std::make_unique<ConstBufferPtrMaps>(layer_weights),

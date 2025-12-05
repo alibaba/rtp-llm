@@ -25,7 +25,30 @@ struct ProposeModelEngineInitParams {
                                  py::object                       py_eplb = py::none()):
         sp_type(sp_type),
         gen_num_per_circle(gen_num_per_circle),
-        vanilla_model_params(new EngineInitParams(model_id, model_config, base_params.parallelism_config, base_params.runtime_config, base_params.pd_sep_config, base_params.concurrency_config, base_params.fmha_config, base_params.kv_cache_config, base_params.profiling_debug_logging_config, base_params.hw_kernel_config, base_params.device_resource_config, base_params.moe_config, base_params.model_specific_config, base_params.sp_config, base_params.cache_store_config, base_params.misc_config, base_params.arpc_config, base_params.ffn_disaggregate_config, base_params.vit_config, std::move(gpt_weights), py_model, py_eplb)) {}
+        vanilla_model_params(new EngineInitParams(
+            model_id,
+            model_config,
+            base_params.parallelism_config,
+            base_params.runtime_config,
+            base_params.pd_sep_config,
+            base_params.concurrency_config,
+            base_params.fmha_config,
+            base_params.kv_cache_config,
+            base_params.profiling_debug_logging_config,
+            base_params.hw_kernel_config,
+            base_params.device_resource_config,
+            base_params.moe_config,
+            base_params.model_specific_config,
+            base_params.sp_config,
+            base_params.cache_store_config,
+            base_params.misc_config,
+            base_params.arpc_config,
+            base_params.grpc_config,
+            base_params.ffn_disaggregate_config,
+            base_params.vit_config,
+            std::move(gpt_weights),
+            py_model,
+            py_eplb)) {}
 
     // Consturctor for deterministic propose model
     ProposeModelEngineInitParams(SpeculativeType sp_type, size_t gen_num_per_circle):

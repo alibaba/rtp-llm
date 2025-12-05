@@ -251,7 +251,7 @@ class GenericMoeModel(GptModelBase):
         hidden_states = inputs_embeds
         attention_inputs: PyAttentionInputs = inputs.attention_inputs
         fmha_impl = AttnImplFactory.get_fmha_impl(
-            self.config, self.weight, attention_inputs
+            self.config, self.parallelism_config, self.weight, attention_inputs, self.fmha_config
         )
 
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):

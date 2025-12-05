@@ -15,6 +15,7 @@ from rtp_llm.ops.compute_ops import (
     FusedRopeKVCacheDecodeOp,
     FusedRopeKVCachePrefillOp,
     KVCache,
+    ParamsBase,
     PyAttentionInputs,
 )
 

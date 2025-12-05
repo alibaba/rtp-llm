@@ -40,6 +40,7 @@ struct EngineInitParams {
                      const CacheStoreConfig&           cache_store_config,
                      const MiscellaneousConfig&         misc_config,
                      const ArpcConfig&                 arpc_config,
+                     const GrpcConfig&                 grpc_config,
                      const FfnDisAggregateConfig&      ffn_disaggregate_config,
                      const VitConfig&                  vit_config,
                      rtp_llm::Weights&&               gpt_weights,
@@ -63,6 +64,7 @@ struct EngineInitParams {
         cache_store_config(cache_store_config),
         misc_config(misc_config),
         arpc_config(arpc_config),
+        grpc_config(grpc_config),
         ffn_disaggregate_config(ffn_disaggregate_config),
         vit_config(vit_config),
         gpt_weights(std::move(gpt_weights)),
@@ -101,6 +103,7 @@ struct EngineInitParams {
     CacheStoreConfig          cache_store_config;
     MiscellaneousConfig       misc_config;
     ArpcConfig                arpc_config;
+    GrpcConfig                grpc_config;
     FfnDisAggregateConfig     ffn_disaggregate_config;
     VitConfig                 vit_config;
     rtp_llm::Weights          gpt_weights;

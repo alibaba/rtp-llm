@@ -11,17 +11,14 @@ XQAAttnOp::XQAAttnOp(const AttentionConfigs& attn_configs):
     device_(dynamic_cast<CudaDevice*>(DeviceFactory::getDefaultDevice())) {}
 
 bool XQAAttnOp::support(torch_ext::PyAttentionInputs attn_inputs) {
-    return fmha_config_.enable_xqa && attn_configs_.kv_cache_dtype != KvCacheDataType::INT8
+    return attn_configs_.kv_cache_dtype != KvCacheDataType::INT8
            && get_sm() >= tensorrt_llm::kernels::kSM_90
            && supportXqa(DataType::TYPE_BF16,
                          DataType::TYPE_BF16,
                          DataType::TYPE_FP8_E4M3,
                          attn_configs_.head_num / attn_configs_.kv_head_num,
                          attn_configs_.size_per_head,
-                         attn_configs_.tokens_per_block)) {
-        return true;
-    }
-    return false;
+                         attn_configs_.tokens_per_block);
 }
 
 ParamsBasePtr XQAAttnOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
