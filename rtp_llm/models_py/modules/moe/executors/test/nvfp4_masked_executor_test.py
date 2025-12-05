@@ -549,6 +549,36 @@ def _generate_ref_output(
     return ref_output
 
 
+def _extract_valid_tokens_2d(
+    tensor_3d: torch.Tensor,
+    expert_num_tokens: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Extract valid tokens from 3D tensor (n_experts, max_num_token_per_expert, hidden_size)
+    and convert to 2D tensor (total_valid_tokens, hidden_size).
+    
+    Args:
+        tensor_3d: 3D tensor of shape [n_experts, max_num_token_per_expert, hidden_size]
+        expert_num_tokens: 1D tensor of shape [n_experts] indicating valid tokens per expert
+    
+    Returns:
+        2D tensor of shape [total_valid_tokens, hidden_size]
+    """
+    num_experts = tensor_3d.shape[0]
+    valid_tokens_list = []
+    
+    for expert_id in range(num_experts):
+        num_valid_tokens = expert_num_tokens[expert_id].item()
+        if num_valid_tokens > 0:
+            valid_tokens = tensor_3d[expert_id, :num_valid_tokens, :]
+            valid_tokens_list.append(valid_tokens)
+    
+    if len(valid_tokens_list) == 0:
+        return torch.empty((0, tensor_3d.shape[2]), device=tensor_3d.device, dtype=tensor_3d.dtype)
+    
+    return torch.cat(valid_tokens_list, dim=0)
+
+
 def test_nvfp4_masked_executor(use_nvfp4: bool = True):
     """
     Test NVFP4 masked executor for prefill scenario.
@@ -659,10 +689,22 @@ def test_nvfp4_masked_executor(use_nvfp4: bool = True):
     print(f"[DEBUG Test] output NaN count: {output_nan}, Inf count: {output_inf}")
     print(f"[DEBUG Test] ref_output NaN count: {ref_nan}, Inf count: {ref_inf}")
     
-    # Compute difference statistics
-    diff = (output - ref_output).abs()
-    print(f"[DEBUG Test] diff min: {diff.min().item():.6f}, max: {diff.max().item():.6f}, mean: {diff.mean().item():.6f}")
-    print(f"[DEBUG Test] diff > 1.0 count: {(diff > 1.0).sum().item()}")
+    # Extract valid tokens from 3D tensors to 2D tensors for comparison
+    # output and ref_output are 3D: (n_experts, max_num_token_per_expert, hidden_size)
+    # We need to extract only valid tokens (excluding padding)
+    expert_num_tokens = payload.expert_tokens_meta.expert_num_tokens
+    output_2d = _extract_valid_tokens_2d(output, expert_num_tokens)
+    ref_output_2d = _extract_valid_tokens_2d(ref_output, expert_num_tokens)
+    
+    print(f"[DEBUG Test] output_2d shape: {output_2d.shape}, ref_output_2d shape: {ref_output_2d.shape}")
+    assert output_2d.shape == ref_output_2d.shape, (
+        f"Shape mismatch after extracting valid tokens: output_2d {output_2d.shape} vs ref_output_2d {ref_output_2d.shape}"
+    )
+    
+    # Compute difference statistics on 2D tensors
+    diff_2d = (output_2d - ref_output_2d).abs()
+    print(f"[DEBUG Test] diff_2d min: {diff_2d.min().item():.6f}, max: {diff_2d.max().item():.6f}, mean: {diff_2d.mean().item():.6f}")
+    print(f"[DEBUG Test] diff_2d > 1.0 count: {(diff_2d > 1.0).sum().item()}")
     
     # Check - use relaxed tolerance for quantization
     # Save output and ref_output to pt files for further examination
@@ -672,7 +714,11 @@ def test_nvfp4_masked_executor(use_nvfp4: bool = True):
     os.makedirs(save_dir, exist_ok=True)
     torch.save(output, os.path.join(save_dir, "nvfp4_executor_test_output.pt"))
     torch.save(ref_output, os.path.join(save_dir, "nvfp4_executor_test_ref_output.pt"))
-    torch.testing.assert_close(output, ref_output, rtol=1e-1, atol=1e-1)
+    torch.save(output_2d, os.path.join(save_dir, "nvfp4_executor_test_output_2d.pt"))
+    torch.save(ref_output_2d, os.path.join(save_dir, "nvfp4_executor_test_ref_output_2d.pt"))
+    
+    # Compare using 2D tensors (only valid tokens)
+    torch.testing.assert_close(output_2d, ref_output_2d, rtol=1e-1, atol=1e-1)
     
     # For now, just check that we can generate the data
     assert payload.expert_x.shape == (NUM_EXPERTS // EP_SIZE, M, K // 2)
