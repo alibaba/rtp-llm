@@ -4,7 +4,6 @@
 #include "rtp_llm/cpp/cache_new/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache_new/FullKVCacheGroup.h"
 #include "rtp_llm/cpp/cache_new/LinearKVCacheGroup.h"
-#include "rtp_llm/cpp/cache_new/BlockPool.h"
 #include "rtp_llm/cpp/cache_new/BatchKVCacheResource.h"
 
 namespace rtp_llm {
@@ -22,34 +21,19 @@ public:
     BlockBufferPtrInfo convertIndexToBuffer(int layer_id, int block_id) const override;
     CacheLayerLayout   layerCacheBase() const override;
 
-    void regUserMr(size_t model_id) override;
-
-    size_t freeBlocksNum() const override;
-    size_t availableBlocksNum() const override;
-    size_t availableTokensNum() const override;
-    size_t totalBlocksNum() const override;
-    size_t maxAvailableTokensNum() const override;
-
     bool updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                        const std::vector<int>&        block_src_batch,
                        bool                           copy_last_block,
                        std::vector<BlockIdPair>&      block_update_mapping) override;
 
-    KVCacheBuffer kvCacheBuffer() const override;
-
-    BlockPoolPtr getBlockPool() const {
-        return block_pool_;
-    }
-
     int seqSizePerBlock() const override;
 
-    // TODO, friend class test
-public:
+private:
     MallocResult incrMalloc(const MallocInfo& malloc_info) override;
     MallocResult initMallocForCommonLen(const MallocInfo& malloc_info) override;
+    int          reuseCache(const CacheKeysType& cache_keys, KVCacheResourceV1& cache_resource);
 
-    int reuseCache(const CacheKeysType& cache_keys, KVCacheResourceV1& cache_resource);
-
+private:
     std::shared_ptr<FullKVCacheGroup>                full_kv_cache_group_;
     std::vector<std::shared_ptr<LinearKVCacheGroup>> linear_kv_cache_groups_;
 

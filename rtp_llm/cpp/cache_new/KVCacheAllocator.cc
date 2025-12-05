@@ -102,31 +102,31 @@ void KVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, const BlockI
     device_->batchCopy(copy_params);
 }
 
-size_t SingleTypeKVCacheAllocator::freeBlocksNum() const {
+size_t KVCacheAllocator::freeBlocksNum() const {
     return block_pool_->freeBlocksNum();
 }
 
-size_t SingleTypeKVCacheAllocator::availableBlocksNum() const {
+size_t KVCacheAllocator::availableBlocksNum() const {
     return block_pool_->availableBlocksNum();
 }
 
-size_t SingleTypeKVCacheAllocator::availableTokensNum() const {
+size_t KVCacheAllocator::availableTokensNum() const {
     return block_pool_->availableBlocksNum() * seqSizePerBlock();
 }
 
-size_t SingleTypeKVCacheAllocator::totalBlocksNum() const {
+size_t KVCacheAllocator::totalBlocksNum() const {
     return block_pool_->totalBlocksNum();
 }
 
-size_t SingleTypeKVCacheAllocator::maxAvailableTokensNum() const {
+size_t KVCacheAllocator::maxAvailableTokensNum() const {
     return block_pool_->totalBlocksNum() * seqSizePerBlock();
 }
 
-KVCacheBuffer SingleTypeKVCacheAllocator::kvCacheBuffer() const {
+KVCacheBuffer KVCacheAllocator::kvCacheBuffer() const {
     return block_pool_->kvCacheBuffer();
 }
 
-void SingleTypeKVCacheAllocator::regUserMr(size_t model_id) {
+void KVCacheAllocator::regUserMr(size_t model_id) {
     if (block_pool_) {
         block_pool_->regUserMr(model_id);
     }

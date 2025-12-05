@@ -263,7 +263,7 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& kv
     return true;
 }
 
-int SingleTypeKVCacheAllocator::seqSizePerBlock() {
+int SingleTypeKVCacheAllocator::seqSizePerBlock() const {
     return full_kv_cache_group_->seqSizePerBlock();
 }
 

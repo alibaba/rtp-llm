@@ -210,12 +210,6 @@ CacheLayerLayout HybridLayerKVCacheAllocator::layerCacheBase() const {
     return layout;
 }
 
-void HybridLayerKVCacheAllocator::regUserMr(size_t model_id) {
-    if (block_pool_) {
-        block_pool_->regUserMr(model_id);
-    }
-}
-
 // TODO, 修改下。
 BlockAddrInfo HybridLayerKVCacheAllocator::convertIndexToAddr(int layer_id, int block_id) const {
     return full_kv_cache_group_->convertIndexToAddr(layer_id, block_id);
@@ -226,35 +220,7 @@ BlockBufferPtrInfo HybridLayerKVCacheAllocator::convertIndexToBuffer(int layer_i
     return full_kv_cache_group_->convertIndexToBuffer(layer_id, block_id);
 }
 
-// size_t HybridLayerKVCacheAllocator::freeBlocksNum() const {
-//     return block_pool_->freeBlocksNum();
-// }
-
-// size_t HybridLayerKVCacheAllocator::availableBlocksNum() const {
-//     return block_pool_->availableBlocksNum();
-// }
-
-// size_t HybridLayerKVCacheAllocator::availableTokensNum() const {
-//     return block_pool_->availableBlocksNum() * full_kv_cache_group_->seqSizePerBlock();
-// }
-
-// size_t HybridLayerKVCacheAllocator::totalBlocksNum() const {
-//     return block_pool_->totalBlocksNum();
-// }
-
-// size_t HybridLayerKVCacheAllocator::maxAvailableTokensNum() const {
-//     // TODO, 修改下。
-//     return block_pool_->totalBlocksNum() * full_kv_cache_group_->seqSizePerBlock();
-// }
-
-// KVCacheBuffer HybridLayerKVCacheAllocator::kvCacheBuffer() const {
-//     if (!block_pool_) {
-//         return KVCacheBuffer{nullptr, nullptr};
-//     }
-//     return block_pool_->kvCacheBuffer();
-// }
-
-int HybridLayerKVCacheAllocator::seqSizePerBlock() {
+int HybridLayerKVCacheAllocator::seqSizePerBlock() const {
     return full_kv_cache_group_->seqSizePerBlock();
 }
 
