@@ -24,9 +24,9 @@ except ImportError:
 DP_SIZE = 1
 TP_SIZE = 1
 EP_SIZE = 1
-NUM_EXPERTS = 128
+NUM_EXPERTS = 32
 BATCH_SIZE = 1  # Single request in prefill
-SEQ_LEN = 128  # Sequence length for prefill
+SEQ_LEN = 512  # Sequence length for prefill
 MAX_GENERATE_BATCH_SIZE = 128  # For decode phase (not used in prefill test)
 HIDDEN_SIZE = 4096  # Changed from 2048 to match bench_fp4_moe.py
 MOE_INTERMEDIATE_SIZE = 1536  # Changed from 768 to match bench_fp4_moe.py
@@ -586,8 +586,10 @@ def test_nvfp4_masked_executor(use_nvfp4: bool = True):
     
     # Check - use relaxed tolerance for quantization
     # Save output and ref_output to pt files for further examination
-    torch.save(output, "nvfp4_executor_test_output.pt")
-    torch.save(ref_output, "nvfp4_executor_test_ref_output.pt")
+    import os
+    user_home = os.path.expanduser("~")
+    torch.save(output, os.path.join(user_home, "nvfp4_executor_test_output.pt"))
+    torch.save(ref_output, os.path.join(user_home, "nvfp4_executor_test_ref_output.pt"))
     torch.testing.assert_close(output, ref_output, rtol=1e-1, atol=1e-1)
     
     # For now, just check that we can generate the data
