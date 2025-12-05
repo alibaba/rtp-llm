@@ -25,7 +25,7 @@ py_test (
         "//rtp_llm:config",
         "//rtp_llm:testlib",
     ] + flashinfer,
-    env = {"GPU_COUNT": "1"},
+    env = {"GPU_COUNT": "1", "FLASHINFER_DISABLE_VERSION_CHECK":"1"},
     tags = ["open_skip", "H20"],
     exec_properties = {'gpu':'H20', 'gpu_count':'1'},
 )
