@@ -197,48 +197,55 @@ def _generate_payload_and_weights(
     # For dequantization and executor, we need the inverse
     input_global_scale = 1.0 / input_quantization_global_scale
     
-    # For prefill scenario: total tokens = batch_size * seqlen = 1 * 128 = 128
-    # Distribute these tokens across experts
-    total_tokens = BATCH_SIZE * SEQ_LEN  # 128 tokens total
+    # For prefill scenario: total tokens = batch_size * seqlen
+    # Distribute these tokens across experts more evenly
+    total_tokens = BATCH_SIZE * SEQ_LEN
     tokens_per_expert = [0] * num_local_experts
+    
+    # Calculate average tokens per expert for more balanced distribution
+    avg_tokens_per_expert = total_tokens / num_local_experts
     
     # Distribute tokens across experts (simulate routing)
     # Each token can go to TOP_K experts, but for simplicity, we assign tokens to experts
-    # in a round-robin fashion with some randomness
-    # Ensure total tokens = 128 exactly
+    # with some randomness around the average to ensure balanced distribution
     remaining_tokens = total_tokens
     assigned_tokens = 0
     
-    for local_expert_id in range(num_local_experts):
+    # First pass: assign tokens to each expert with small random variation around average
+    # Use a tighter range (0.7x to 1.3x of average) to ensure more balanced distribution
+    for local_expert_id in range(num_local_experts - 1):  # Leave last expert for remainder
         if remaining_tokens <= 0:
             break
-        # Assign tokens to this expert (at least 0, at most remaining_tokens)
-        # In real scenario, tokens are routed based on router output
-        max_tokens_for_expert = min(M, remaining_tokens)
-        if local_expert_id == num_local_experts - 1:
-            # Last expert gets all remaining tokens to ensure total = 128
-            tokens_per_expert[local_expert_id] = remaining_tokens
-        else:
-            # Randomly assign some tokens to this expert
-            # Use a smaller range to ensure we don't run out of tokens too early
-            tokens_for_this_expert = max(
-                0, min(max_tokens_for_expert, int(random.uniform(0.05, 0.15) * total_tokens))
+        
+        # Calculate target tokens for this expert (around average with small variation)
+        # Use smaller variation range for more balanced distribution
+        min_tokens = max(1, int(avg_tokens_per_expert * 0.7))
+        max_tokens = min(M, remaining_tokens, int(avg_tokens_per_expert * 1.3))
+        
+        # Ensure we don't leave too few tokens for remaining experts
+        min_tokens_for_remaining = (num_local_experts - local_expert_id - 1) * 1
+        max_tokens_for_this_expert = remaining_tokens - min_tokens_for_remaining
+        
+        if max_tokens_for_this_expert > 0:
+            tokens_for_this_expert = random.randint(
+                min(min_tokens, max_tokens_for_this_expert),
+                min(max_tokens, max_tokens_for_this_expert)
             )
-            tokens_per_expert[local_expert_id] = tokens_for_this_expert
-        remaining_tokens -= tokens_per_expert[local_expert_id]
-        assigned_tokens += tokens_per_expert[local_expert_id]
+        else:
+            tokens_for_this_expert = 0
+        
+        tokens_per_expert[local_expert_id] = tokens_for_this_expert
+        remaining_tokens -= tokens_for_this_expert
+        assigned_tokens += tokens_for_this_expert
     
-    # Ensure all tokens are assigned (should be exactly 128)
-    if remaining_tokens > 0:
-        # Add remaining tokens to the first expert that has space
-        for local_expert_id in range(num_local_experts):
-            if tokens_per_expert[local_expert_id] + remaining_tokens <= M:
-                tokens_per_expert[local_expert_id] += remaining_tokens
-                assigned_tokens += remaining_tokens
-                break
+    # Last expert gets all remaining tokens to ensure total = batch_size * seqlen
+    tokens_per_expert[num_local_experts - 1] = remaining_tokens
+    assigned_tokens += remaining_tokens
+    
     print(f"DEBUG tokens_per_expert: {tokens_per_expert}")
+    print(f"DEBUG total assigned: {assigned_tokens}, expected: {total_tokens}, avg per expert: {avg_tokens_per_expert:.2f}")
     
-    # Final verification: total tokens must equal 128
+    # Final verification: total tokens must equal batch_size * seqlen
     assert assigned_tokens == total_tokens, (
         f"Token assignment error: assigned {assigned_tokens} tokens, expected {total_tokens}"
     )
