@@ -81,7 +81,7 @@ cc_library(
             "@aiter_src//:module_moe_asm",
             "@aiter_src//:module_pa",
             "@aiter_src//:module_activation",
-            "@aiter_src//:module_m_grouped_gemm",
+            "@aiter_src//:module_deepgemm",
             "@aiter_src//:module_rmsnorm",
             "@aiter_src//:module_norm",
             "@aiter_src//:module_mha_fwd",
@@ -104,7 +104,7 @@ cc_library(
             "@aiter//:module_mha_fwd",
             "@aiter//:module_fmha_v3_varlen_fwd",
             "@aiter//:module_moe_ck2stages",
-            "@aiter//:module_m_grouped_gemm",
+            "@aiter//:module_deepgemm",
         ]}) + select({
         ":enable_deep_ep": [
             ":deep_ep_buffer",
