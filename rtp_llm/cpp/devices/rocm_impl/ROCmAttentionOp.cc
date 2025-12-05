@@ -855,7 +855,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
     printBufferData(params.input, "run_ck_input");
 
     if (use_mtp_pa_) {
-        aiter_wrapper_->mtp(params, this, *q_mtp_output);
+        aiter_wrapper_->runTritonPA(params, this, *q_mtp_output, stream_);
         return;
     }
     if (skip_add_bias_transpose || prefix_prompt_param.max_prefix_prompt_length <= 0) {
@@ -1149,7 +1149,9 @@ AttentionModuleOutput ROCmDevice::decoderSelfAttention(const AttentionModulePara
             // bool q_fp8 = kv_block_array.cache_type == KvCacheDataType::FP8;
             bool q_fp8 = false;
             BufferPtr q_buf_fp8 = nullptr;
-            if (q_fp8) { q_buf_fp8 = allocateBuffer({DataType::TYPE_FP8_E4M3, q_output->shape(), AllocationType::DEVICE}, {"q_buf_fp8"}); }
+            if (q_fp8) {
+                q_buf_fp8 = allocateBuffer({DataType::TYPE_FP8_E4M3, q_output->shape(), AllocationType::DEVICE}, {"q_buf_fp8"});
+            }
 
             bool use_rope_cache =
                 params.configs.rope_config.style == RopeStyle::Base;
@@ -1238,7 +1240,7 @@ AttentionModuleOutput ROCmDevice::decoderSelfAttention(const AttentionModulePara
                 runAiterAsmPA(params, this, *q_output);
             }
             else {
-                runAiterPA(params, this, *q_output);
+                aiter_wrapper_->runHipPA(params, this, *q_output);
             }
             check_cuda_error();
         }

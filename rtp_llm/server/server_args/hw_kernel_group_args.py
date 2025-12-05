@@ -104,14 +104,6 @@ def init_hw_kernel_group_args(parser):
     )
 
     hw_kernel_group.add_argument(
-        "--use_triton_pa",
-        env_name="USE_TRITON_PA",
-        type=str2bool,
-        default=True,
-        help="Rocm是否在MTP流程使用AITER Triton Page Attention",
-    )
-
-    hw_kernel_group.add_argument(
         "--use_swizzleA",
         env_name="USE_SWIZZLEA",
         type=str2bool,

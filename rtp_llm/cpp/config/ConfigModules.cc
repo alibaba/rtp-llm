@@ -185,7 +185,6 @@ void HWKernelConfig::update_from_env_for_test() {
     enable_cuda_graph_debug_mode = bool_from_env_for_test("ENABLE_CUDA_GRAPH_DEBUG_MODE", false);
     use_aiter_pa                 = bool_from_env_for_test("USE_AITER_PA", true);
     use_asm_pa                   = bool_from_env_for_test("USE_ASM_PA", true);
-    use_triton_pa                = bool_from_env_for_test("USE_TRITON_PA", true);
     enable_native_cuda_graph     = bool_from_env_for_test("ENABLE_NATIVE_CUDA_GRAPH", false);
     num_native_cuda_graph        = autil::EnvUtil::getEnv("NUM_NATIVE_CUDA_GRAPH", 200);
 }
@@ -203,7 +202,6 @@ std::string HWKernelConfig::to_string() const {
         << "enable_cuda_graph_debug_mode" << enable_cuda_graph_debug_mode << "\n"
         << "use_aiter_pa: " << use_aiter_pa << "\n"
         << "use_asm_pa: " << use_asm_pa << "\n"
-        << "use_triton_pa: " << use_triton_pa << "\n"
         << "enable_native_cuda_graph" << enable_native_cuda_graph << "\n"
         << "num_native_cuda_graph" << num_native_cuda_graph << "\n";
     return oss.str();

@@ -95,7 +95,6 @@ struct HWKernelConfig {
     bool        enable_cuda_graph_debug_mode = false;
     bool        use_aiter_pa                 = true;
     bool        use_asm_pa                   = true;
-    bool        use_triton_pa                = true;
     bool        enable_native_cuda_graph     = false;
     int         num_native_cuda_graph        = 200;
     std::string to_string() const;

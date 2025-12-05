@@ -15,16 +15,14 @@ class AiterWrapper {
 public:
     AiterWrapper(const DeviceInitParams& params);
     void mtp(const AttentionModuleParams& params, rtp_llm::DeviceBase* device, Buffer& q_mtp);
-    void set_triton_pa(bool v) { use_triton_pa_ = v; }
+    void runTritonPA(const AttentionModuleParams& params, rtp_llm::DeviceBase* device, Buffer& q_mtp, hipStream_t stream);
+    void runHipPA(const AttentionModuleParams& params, rtp_llm::DeviceBase* device, Buffer& q_tmp);
 private:
-    py::object aiter_module;
-    py::object paged_attention_rocm;
-    py::object aiter_triton_module;
-    py::object pa_decode_gluon;
-    py::object triton_tl;
-    py::object compute_type_;
+    py::object  aiter_module;
+    py::object  paged_attention_rocm;
+    py::module_ pa_gluon_aot_api;
+    py::object  load_all_libs;
     bool use_asm_pa_    = true;
-    bool use_triton_pa_ = true;
 };
 
 void runAiterAsmPA(const AttentionModuleParams& params,

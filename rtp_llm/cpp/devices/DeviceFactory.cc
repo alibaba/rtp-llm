@@ -126,7 +126,6 @@ void DeviceFactory::initDevices(const GptInitParameter& params) {
     device_params.user_deep_gemm_num_sm  = params.hw_kernel_config.deep_gemm_num_sm;
     device_params.use_aiter_pa           = params.hw_kernel_config.use_aiter_pa;
     device_params.use_asm_pa             = params.hw_kernel_config.use_asm_pa;
-    device_params.use_triton_pa          = params.hw_kernel_config.use_triton_pa;
     device_params.use_deepep_moe         = params.moe_config.use_deepep_moe;
     device_params.use_deepep_internode   = params.moe_config.use_deepep_internode;
     device_params.use_deepep_low_latency = params.moe_config.use_deepep_low_latency;

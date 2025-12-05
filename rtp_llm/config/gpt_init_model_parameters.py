@@ -662,7 +662,6 @@ class GptInitModelParameters:
             ),
             use_aiter_pa=get_env_bool("USE_AITER_PA", True),
             use_asm_pa=get_env_bool("USE_ASM_PA", True),
-            use_triton_pa=get_env_bool("USE_TRITON_PA", True),
             enable_native_cuda_graph=get_env_bool("ENABLE_NATIVE_CUDA_GRAPH", False),
             num_native_cuda_graph=get_env_int("NUM_NATIVE_CUDA_GRAPH", 200),
         )
