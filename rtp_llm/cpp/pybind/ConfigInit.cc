@@ -366,7 +366,7 @@ void register_model_specific_config(pybind11::module& m) {
 // SpeculativeExecutionConfig
 void register_speculative_execution_config(pybind11::module& m) {
     pybind11::class_<SpeculativeExecutionConfig>(m, "SpeculativeExecutionConfig")
-        .def(pybind11::init<std::string, std::string, int64_t, int64_t, std::string, int, bool, bool>(),
+        .def(pybind11::init<std::string, std::string, int64_t, int64_t, std::string, int, bool, bool, bool>(),
              pybind11::arg("sp_model_type")                 = "",
              pybind11::arg("sp_type")                       = "",
              pybind11::arg("sp_min_token_match")            = 2,
@@ -374,7 +374,8 @@ void register_speculative_execution_config(pybind11::module& m) {
              pybind11::arg("tree_decode_config")            = "",
              pybind11::arg("gen_num_per_cycle")             = 1,
              pybind11::arg("force_stream_sample")           = false,
-             pybind11::arg("force_score_context_attention") = true)
+             pybind11::arg("force_score_context_attention") = true,
+             pybind11::arg("use_new_sp_engine")             = false)
         .def("to_string", &SpeculativeExecutionConfig::to_string)
         .def("update_from_env", &SpeculativeExecutionConfig::update_from_env_for_test)
         .def_readwrite("sp_model_type", &SpeculativeExecutionConfig::sp_model_type)
@@ -384,7 +385,8 @@ void register_speculative_execution_config(pybind11::module& m) {
         .def_readwrite("tree_decode_config", &SpeculativeExecutionConfig::tree_decode_config)
         .def_readwrite("gen_num_per_cycle", &SpeculativeExecutionConfig::gen_num_per_cycle)
         .def_readwrite("force_stream_sample", &SpeculativeExecutionConfig::force_stream_sample)
-        .def_readwrite("force_score_context_attention", &SpeculativeExecutionConfig::force_score_context_attention);
+        .def_readwrite("force_score_context_attention", &SpeculativeExecutionConfig::force_score_context_attention)
+        .def_readwrite("use_new_sp_engine", &SpeculativeExecutionConfig::use_new_sp_engine);
 }
 
 // ServiceDiscoveryConfig

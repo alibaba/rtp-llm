@@ -256,6 +256,20 @@ class ModelFactory:
         propose_model_config = None
 
         sp_type = StaticConfig.py_speculative_execution_config.sp_type
+        gen_num_per_circle = (
+            StaticConfig.py_speculative_execution_config.gen_num_per_circle
+        )
+
+        if StaticConfig.py_speculative_execution_config.use_new_sp_engine:
+            # only support mtp and eagle
+            if sp_type not in ["mtp", "eagle"]:
+                logging.error(
+                    f"use_new_sp_engine only support mtp and eagle, but got {sp_type}"
+                )
+                raise ValueError(
+                    f"use_new_sp_engine only support mtp and eagle, but got {sp_type}"
+                )
+
         if (
             sp_type == "vanilla"
             or sp_type == "mtp"
@@ -266,9 +280,7 @@ class ModelFactory:
             propose_model_type = (
                 StaticConfig.py_speculative_execution_config.sp_model_type
             )
-            gen_num_per_circle = (
-                StaticConfig.py_speculative_execution_config.gen_num_per_circle
-            )
+
             origin_ckpt_path = (
                 StaticConfig.py_speculative_execution_config.sp_checkpoint_path
             )
@@ -299,9 +311,6 @@ class ModelFactory:
                 quantization=quantization,
             )
         elif sp_type == "deterministic":
-            gen_num_per_circle = (
-                StaticConfig.py_speculative_execution_config.gen_num_per_circle
-            )
             propose_model_config = ModelConfig(
                 sp_type=sp_type, gen_num_per_circle=gen_num_per_circle
             )

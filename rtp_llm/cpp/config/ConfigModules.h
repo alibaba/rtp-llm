@@ -161,6 +161,7 @@ struct SpeculativeExecutionConfig {
     int64_t     gen_num_per_cycle             = 1;
     bool        force_stream_sample           = false;
     bool        force_score_context_attention = true;
+    bool        use_new_sp_engine             = false;
     std::string to_string() const;
     void        update_from_env_for_test();
 };

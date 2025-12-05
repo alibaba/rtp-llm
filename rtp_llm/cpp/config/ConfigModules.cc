@@ -304,6 +304,7 @@ void SpeculativeExecutionConfig::update_from_env_for_test() {
     gen_num_per_cycle             = autil::EnvUtil::getEnv("GEN_NUM_PER_CIRCLE", 1);
     force_stream_sample           = autil::EnvUtil::getEnv("FORCE_STREAM_SAMPLE", false);
     force_score_context_attention = autil::EnvUtil::getEnv("FORCE_SCORE_CONTEXT_ATTENTION", true);
+    use_new_sp_engine             = autil::EnvUtil::getEnv("USE_NEW_SP_ENGINE", false);
 }
 
 std::string SpeculativeExecutionConfig::to_string() const {
@@ -315,7 +316,8 @@ std::string SpeculativeExecutionConfig::to_string() const {
         << "tree_decode_config: " << tree_decode_config << "\n"
         << "gen_num_per_cycle: " << gen_num_per_cycle << "\n"
         << "force_stream_sample: " << force_stream_sample << "\n"
-        << "force_score_context_attention: " << force_score_context_attention;
+        << "force_score_context_attention: " << force_score_context_attention << "\n"
+        << "use_new_sp_engine: " << use_new_sp_engine;
     return oss.str();
 }
 

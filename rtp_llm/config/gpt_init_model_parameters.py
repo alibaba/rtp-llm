@@ -988,6 +988,7 @@ class GptInitModelParameters:
             force_score_context_attention=get_env_bool(
                 "FORCE_SCORE_CONTEXT_ATTENTION", True
             ),
+            use_new_sp_engine=get_env_bool("USE_NEW_SP_ENGINE", False),
         )
 
         # MiscellaneousConfig

@@ -13,6 +13,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "autil/TimeUtility.h"
+#include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
 #include <memory>
 #include <thread>
 #include <random>
@@ -20,9 +21,11 @@
 using namespace std;
 namespace rtp_llm {
 
-NormalEngine::NormalEngine(const EngineInitParams& params):
+NormalEngine::NormalEngine(const EngineInitParams&                       params,
+                           std::unique_ptr<ProposeModelEngineInitParams> propose_params):
     EngineBase(params),
     params_(params.gpt_init_parameter),
+    propose_params_(std::move(propose_params)),
     metrics_reporter_(params.metrics_reporter),
     profiler_step_(0),
     gen_timeline_sync_(params.gpt_init_parameter.profiling_debug_logging_config.gen_timeline_sync) {
@@ -46,10 +49,31 @@ NormalEngine::NormalEngine(const EngineInitParams& params):
     }
     initCacheManager(warm_up_result);
     RTP_LLM_LOG_INFO("create cache manager done");
-    executor_.reset(new NormalExecutor(params, resource_context_.cache_manager, device_, getLoraManager()));
+
+    initExecutor(params, propose_params_);
+    if (propose_params_) {
+        reserve_step_ = propose_params_->gen_num_per_circle + 1;
+    } else {
+        reserve_step_ = 0;
+    }
+
     RTP_LLM_LOG_INFO("create normal executor done");
     initScheduler();
     (void)startLoop();
+}
+
+void NormalEngine::initExecutor(const EngineInitParams&                        params,
+                                std::unique_ptr<ProposeModelEngineInitParams>& propose_params) {
+    if (propose_params_) {
+        executor_.reset(new MtpExecutor(params,
+                                        propose_params,
+                                        resource_context_.cache_manager,
+                                        resource_context_.mtp_cache_managers,
+                                        device_,
+                                        getLoraManager()));
+    } else {
+        executor_.reset(new NormalExecutor(params, resource_context_.cache_manager, device_, getLoraManager()));
+    }
 }
 
 void NormalEngine::initScheduler() {
@@ -127,6 +151,7 @@ std::shared_ptr<GenerateInput> NormalEngine::makeFakeInput(size_t seq_len) {
 }
 
 WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
+    // TODO(yinzhi): support mtp warm up
     auto fake_input                                   = makeFakeInput((size_t)params_.max_seq_len_ - 1);
     fake_input->generate_config->num_return_sequences = params_.max_context_batch_size_;
     fake_input->generate_config->calculate_loss       = int(params_.warm_up_with_loss_);
@@ -141,6 +166,7 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
 }
 
 WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
+    // TODO(yinzhi): support mtp warm up
     auto fake_input                                   = makeFakeInput((size_t)params_.max_seq_len_ - 1);
     fake_input->generate_config->num_return_sequences = params_.max_generate_batch_size_;
     fake_input->generate_config->calculate_loss       = int(params_.warm_up_with_loss_);
@@ -172,10 +198,37 @@ std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_ne
 }
 
 void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) {
-    auto result = CacheConfigCreator::createConfig(params_, warm_up_result);
-    RTP_LLM_LOG_INFO(
-        "create cache manager with block nums %d, block size %ld KB", result.block_nums, result.block_size / 1024);
-    resource_context_.cache_manager = make_shared<CacheManager>(result, device_, false, metrics_reporter_, params_);
+    if (propose_params_ && propose_params_->draftModel()) {
+        const auto& config = CacheConfigCreator::createSpConfig(
+            params_, propose_params_->getGptInitParameter(), warm_up_result, isMTPEagle(), isEagle());
+        auto scorer_cache_config             = std::get<0>(config);
+        auto proposer_cache_config           = std::get<1>(config);
+        scorer_cache_config.mtp_model_type   = "score_model";
+        proposer_cache_config.mtp_model_type = "propose_model";
+
+        resource_context_.cache_manager =
+            make_shared<CacheManager>(scorer_cache_config, device_, false, metrics_reporter_, params_);
+        if (isMTPEagle()) {
+            auto layer_num = propose_params_->getGptInitParameter().gen_num_per_circle_;
+            if (isEagle()) {
+                layer_num = 1;
+            }
+            RTP_LLM_LOG_INFO("mtp cache manager init use layer num : %d", layer_num);
+            for (int i = 0; i < layer_num; i++) {
+                RTP_LLM_CHECK(proposer_cache_config.layer_num == 1);
+                resource_context_.mtp_cache_managers.push_back(
+                    std::make_shared<CacheManager>(proposer_cache_config, device_, false, metrics_reporter_, params_));
+            }
+        } else {
+            resource_context_.propose_cache_manager =
+                make_shared<CacheManager>(proposer_cache_config, device_, false, metrics_reporter_, params_);
+        }
+    } else {
+        auto result = CacheConfigCreator::createConfig(params_, warm_up_result);
+        RTP_LLM_LOG_INFO(
+            "create cache manager with block nums %d, block size %ld KB", result.block_nums, result.block_size / 1024);
+        resource_context_.cache_manager = make_shared<CacheManager>(result, device_, false, metrics_reporter_, params_);
+    }
 }
 
 absl::Status NormalEngine::initSystemPrompt() {
@@ -270,10 +323,10 @@ absl::Status NormalEngine::step() {
 
     list<GenerateStreamPtr> streams;
     if (device_->getDeviceProperties().tp_rank == 0 && !params_.ffn_disaggregate_config.is_ffn_service()) {
-        CHECK_AND_ASSIGN(streams, scheduler_->schedule());
+        CHECK_AND_ASSIGN(streams, scheduler_->schedule(reserve_step_));
         if (streams.empty()) {
             if (params_.dp_size_ > 1) {
-                CHECK_AND_ASSIGN(streams, scheduler_->schedule());
+                CHECK_AND_ASSIGN(streams, scheduler_->schedule(reserve_step_));
                 if (streams.empty()) {
                     streams.emplace_back(createMinFakeStream(1));
                 }
@@ -348,6 +401,20 @@ bool NormalEngine::updateEplbConfig(const EplbConfig& config) {
         return executor_->updateEplbConfig(config);
     }
     return true;
+}
+
+bool NormalEngine::isMTPEagle() {
+    if (propose_params_) {
+        return propose_params_->sp_type == "mtp" || propose_params_->sp_type == "eagle";
+    }
+    return false;
+}
+
+bool NormalEngine::isEagle() {
+    if (propose_params_) {
+        return propose_params_->sp_type == "eagle";
+    }
+    return false;
 }
 
 }  // namespace rtp_llm

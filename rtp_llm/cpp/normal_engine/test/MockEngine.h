@@ -131,7 +131,7 @@ createEngineInitParams(DeviceBase* device, const CustomConfig& config, GptInitPa
 std::shared_ptr<NormalEngine>
 createMockEngine(DeviceBase* device, const CustomConfig& config, GptInitParameter& params) {
     EngineInitParams              rtp_llm_params = createEngineInitParams(device, config, params);
-    std::shared_ptr<NormalEngine> engine         = make_shared<NormalEngine>(rtp_llm_params);
+    std::shared_ptr<NormalEngine> engine         = make_shared<NormalEngine>(rtp_llm_params, nullptr);
     return engine;
 }
 

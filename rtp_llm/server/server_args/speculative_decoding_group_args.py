@@ -86,3 +86,11 @@ def init_speculative_decoding_group_args(parser):
         default=True,
         help="投机采样强制score阶段使用context attention",
     )
+
+    speculative_decoding_group.add_argument(
+        "--use_new_sp_engine",
+        env_name="USE_NEW_SP_ENGINE",
+        type=str2bool,
+        default=False,
+        help="是否使用新的投机采样引擎",
+    )

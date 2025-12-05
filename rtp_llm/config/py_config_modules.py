@@ -177,6 +177,7 @@ class PySpeculativeExecutionConfig:
         self.sp_type: Optional[str] = None
         self.sp_model_type: Optional[str] = None
         self.sp_kv_cache_dtype: Optional[str] = None
+        self.use_new_sp_engine: bool = False
 
     def update_from_env(self):
         self.gen_num_per_circle = int(
@@ -193,6 +194,9 @@ class PySpeculativeExecutionConfig:
         )
         self.sp_type = os.environ.get("SP_TYPE", self.sp_type)
         self.sp_model_type = os.environ.get("SP_MODEL_TYPE", self.sp_model_type)
+        self.use_new_sp_engine = get_env_bool(
+            "USE_NEW_SP_ENGINE", self.use_new_sp_engine
+        )
 
     def to_string(self):
         return (
