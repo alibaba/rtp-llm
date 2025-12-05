@@ -358,10 +358,13 @@ cc_library(
 )
  
 cc_library(
-    name = "module_m_grouped_gemm",
+    name = "module_deepgemm",
     srcs = ["aiter/jit/libmodule_deepgemm.so"],
     hdrs = ["csrc/ck_deepgemm/include/deepgemm.h"],
-    deps = [":cpp_libraries"],
+    deps = [
+        ":cpp_libraries",
+        ":ck_deepgemm_example_headers",
+    ],
     copts = [],
     strip_include_prefix = "csrc/ck_deepgemm/include",
     visibility = ["//visibility:public"],
