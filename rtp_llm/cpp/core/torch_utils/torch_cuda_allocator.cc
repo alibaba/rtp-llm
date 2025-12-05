@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/core/torch_utils/torch_cuda_allocator.h"
 #include "rtp_llm/cpp/utils/StackTrace.h"
+#include "rtp_llm/cpp/core/torch_utils/allocator_util.h"
 #include <iostream>
 
 namespace rtp_llm {
@@ -18,7 +19,10 @@ at::DataPtr TorchCudaAllocator::allocate(size_t size) {
 #else
 at::DataPtr TorchCudaAllocator::allocate(size_t size) const {
 #endif
-    auto       buffer = device_->allocateBuffer({size, AllocationType::DEVICE, allocate_private_}, {"torch_allocated"});
+    const auto& buffer_stack =
+        capturePythonStackTrace(device_->initParamsRef().profile_debug_logging_config.trace_memory);
+    auto buffer =
+        device_->allocateBuffer({size, AllocationType::DEVICE, allocate_private_}, {"torch_allocated", buffer_stack});
     auto       buffer_ctx  = new BufferPtr(buffer);
     const auto ptr         = buffer->data();
     const auto ctx_deleter = [](void* ctx_ptr) {
