@@ -30,8 +30,6 @@ from rtp_llm.utils.version_info import VersionInfo
 # make buffer larger to avoid throw exception "RemoteProtocolError Receive buffer too long"
 MAX_INCOMPLETE_EVENT_SIZE = 1024 * 1024
 
-StreamObjectType = Union[Dict[str, Any], BaseModel]
-
 active_requests = AtomicCounter()
 server_shutdown = False
 

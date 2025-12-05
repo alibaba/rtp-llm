@@ -10,18 +10,7 @@ from rtp_llm.async_decoder_engine.rpc_engine import RPCEngine
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.propose_model.propose_model import ProposeModel
 from rtp_llm.config.engine_config import EngineConfig
-
-
-class ExecutorType(Enum):
-    Normal = "normal"
-    Embedding = "embedding"
-
-
-def check_exeutor_type(model: BaseModel):
-    if model.custom_module is not None:
-        return ExecutorType.Embedding
-    return ExecutorType.Normal
-
+from rtp_llm.ops import TaskType
 
 def create_engine(
     model: BaseModel,
@@ -44,17 +33,16 @@ def create_engine(
         BaseEngine instance
     """
     torch.ops.rtp_llm.init_engine(alog_conf_path)
-    
-    executor_type = check_exeutor_type(model)
-    logging.info(f"executor_type: {executor_type}")
-    if executor_type == ExecutorType.Normal:
+
+    if model.model_config.task_type == TaskType.LANGUAGE_MODEL:
         return RPCEngine(
             model=model,
             engine_config=engine_config,
             gang_info=gang_info,
             propose_model=propose_model
         )
-    elif executor_type == ExecutorType.Embedding:
-        return EmbeddingCppEngine(model, engine_config)
+        logging.info("create llm engine")
     else:
-        raise Exception(f"unsupported executor type: {executor_type}")
+        logging.info("create embedding engine")
+        return EmbeddingCppEngine(model, engine_config)
+

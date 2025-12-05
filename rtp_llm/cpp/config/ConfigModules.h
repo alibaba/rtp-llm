@@ -44,6 +44,7 @@ struct ParallelismConfig {
     int64_t     th_nccl_port     = 0;  // General NCCL port for compatibility
     int64_t     http_port        = 0;
     int64_t     model_rpc_port   = 0;
+    int64_t     embedding_rpc_server_port = 0;
 
     FfnDisAggregateConfig ffn_disaggregate_config;  // FFN disaggregate configuration
 

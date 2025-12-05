@@ -241,7 +241,7 @@ class WorkerInfo(object):
                 local_rank, start_port, worker_info_port_num
             ),
             embedding_rpc_server_port=WorkerInfo.embedding_rpc_server_port_offset(
-                g_parallel_info.local_rank
+                local_rank, start_port, worker_info_port_num
             ),
             remote_rpc_server_port=WorkerInfo.rpc_server_port_offset(
                 local_rank, int(os.environ.get("REMOTE_SERVER_PORT", 0)), worker_info_port_num
@@ -304,8 +304,8 @@ class WorkerInfo(object):
         return WorkerInfo.server_port_offset(local_rank, server_port, worker_info_port_num) + 6
 
     @staticmethod
-    def embedding_rpc_server_port_offset(local_rank: int, server_port: int = -1) -> int:
-        return WorkerInfo.server_port_offset(local_rank, server_port) + 7
+    def embedding_rpc_server_port_offset(local_rank: int, server_port: int,  worker_info_port_num: int = None) -> int:
+        return WorkerInfo.server_port_offset(local_rank, server_port, worker_info_port_num) + 7
 
     # used for ut
     def reload(self, start_port):
@@ -319,6 +319,7 @@ class WorkerInfo(object):
         self.cache_store_connect_port = new_info.cache_store_connect_port
         self.rpc_server_port = new_info.rpc_server_port
         self.backend_server_port = new_info.backend_server_port
+        self.embedding_rpc_server_port = new_info.embedding_rpc_server_port
         self.local_rank = new_info.local_rank
         self.world_rank = new_info.world_rank
         self.name = new_info.name

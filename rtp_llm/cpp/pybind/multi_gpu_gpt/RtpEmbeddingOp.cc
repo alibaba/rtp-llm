@@ -107,12 +107,9 @@ void RtpEmbeddingOp::init(py::object model, py::object engine_config, py::object
                        params.metrics_reporter,
                        mm_processor_);
         startHttpServer(embedding_engine_, mm_processor_, params, custom_module);
-        // Calculate embedding_rpc_port (similar to model_rpc_port, typically model_rpc_port + 1)
-        int64_t embedding_rpc_port = parallelism_config.model_rpc_port > 0 ? 
-                                      parallelism_config.model_rpc_port + 1 : -1;
         grpc_server_thread_ = std::thread(&RtpEmbeddingOp::initGrpcServer,
                                           this,
-                                          embedding_rpc_port,
+                                          parallelism_config.embedding_rpc_server_port,
                                           grpc_config,
                                           embedding_engine_,
                                           py_render,

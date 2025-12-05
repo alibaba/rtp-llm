@@ -290,6 +290,7 @@ def setup_parallelism_config(
     parallelism_config.dp_tp_nccl_port = g_master_info.dp_tp_nccl_port
     parallelism_config.ffn_tp_nccl_port = g_master_info.ffn_tp_nccl_port
     parallelism_config.model_rpc_port = g_worker_info.rpc_server_port
+    parallelism_config.embedding_rpc_server_port = g_worker_info.embedding_rpc_server_port
     parallelism_config.http_port = g_worker_info.http_port
     parallelism_config.th_nccl_port = g_master_info.th_nccl_port
     

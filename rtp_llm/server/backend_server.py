@@ -24,7 +24,6 @@ from rtp_llm.lora.lora_manager import LoraManager
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.model_loader.weight_manager import WeightManager
-from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.server.misc import format_exception
 from rtp_llm.server.worker_status import TaskInfo, WorkStatus
 from rtp_llm.structure.request_extractor import request_id_field_name
@@ -36,25 +35,19 @@ from rtp_llm.utils.fuser import _nfs_manager
 from rtp_llm.utils.time_util import Timer
 from rtp_llm.utils.version_info import VersionInfo
 
-StreamObjectType = Union[Dict[str, Any], BaseModel]
-
-USAGE_HEADER = "USAGE"
-
 
 class BackendServer(object):
     def __init__(self, py_env_configs: PyEnvConfigs):
         self._access_logger = AccessLogger(get_log_path(), py_env_configs.profiling_debug_logging_config.log_file_backup_count)
         self._gang_server = GangServer(py_env_configs.gang_config, py_env_configs.server_config)
         self._lora_manager = None
+        self._weight_manager = None
         self.thread_lock_ = threading.Lock()
         self._global_controller = get_global_controller()
         # just rank 0 report metric
         if g_parallel_info.world_rank == 0:
             kmonitor.init()
         self.engine: Optional[BaseEngine] = None
-        self.dp_size = g_parallel_info.dp_size
-        self.tp_size = g_parallel_info.tp_size
-        self._weight_manager = None
         self._role_type: str = "unknown"
 
     def start(self, py_env_configs: PyEnvConfigs):
@@ -110,8 +103,10 @@ class BackendServer(object):
         )
 
         max_lora_model_size = engine_config.model_specific_config.max_lora_model_size
-        self._lora_manager = LoraManager(self.engine, max_lora_model_size=max_lora_model_size)
-        self._weight_manager = WeightManager(self.engine)
+        if model_config.task_type == TaskType.LANGUAGE_MODEL:
+            self._lora_manager = LoraManager(self.engine, max_lora_model_size=max_lora_model_size)
+            self._weight_manager = WeightManager(self.engine)
+
 
     def stop(self) -> None:
         if isinstance(self.engine, BaseEngine):
