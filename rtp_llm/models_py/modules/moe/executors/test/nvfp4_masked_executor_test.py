@@ -113,17 +113,23 @@ def _dequantize_nvfp4_to_dtype(
     float_vals = float_vals.reshape(m, num_blocks, block_size)
     
     # Convert scale factors from float8_e4m3fn to float32
+    # Since we use is_sf_swizzled_layout=False, scale factors are in linear layout
     tensor_sf_float = tensor_sf.view(torch.float8_e4m3fn).to(torch.float32)
     
-    # Reshape scale factors to match blocks
-    # Scale factors are in swizzled layout, need to convert to linear
-    # For simplicity, we assume they're already in the correct shape
-    # In practice, you might need to convert from swizzled layout
+    # Reshape scale factors to match blocks (linear layout can be directly reshaped)
+    # Scale factors should be shape [m, num_blocks] for linear layout
     if tensor_sf_float.numel() == m * num_blocks:
         tensor_sf_reshaped = tensor_sf_float.reshape(m, num_blocks)
     else:
-        # Handle swizzled layout conversion (simplified)
-        tensor_sf_reshaped = tensor_sf_float[: m * num_blocks].reshape(m, num_blocks)
+        # If shape doesn't match exactly, try to extract the correct portion
+        # This handles cases where scale factors might be padded
+        expected_size = m * num_blocks
+        if tensor_sf_float.numel() >= expected_size:
+            tensor_sf_reshaped = tensor_sf_float.flatten()[:expected_size].reshape(m, num_blocks)
+        else:
+            raise ValueError(
+                f"Scale factors size mismatch: expected {expected_size}, got {tensor_sf_float.numel()}"
+            )
     
     # Apply block-wise scaling
     tensor_sf_dtype = tensor_sf_reshaped / global_scale
@@ -184,18 +190,21 @@ def _generate_payload_and_weights(
         ) * 0.1
         
         # Quantize to NVFP4
+        # Use is_sf_swizzled_layout=False to get linear layout that can be directly reshaped
         expert_x_q, expert_x_sf = fp4_quantize(
             expert_x_bf16_local,
             input_global_scale,
             sf_vec_size=16,
             sf_use_ue8m0=False,
-            is_sf_swizzled_layout=True,
+            is_sf_swizzled_layout=False,
         )
         
-        # Reshape scale factors
-        expert_x_sf_reshaped = expert_x_sf.view(torch.float8_e4m3fn).reshape(
-            num_actual_tokens, K // NVFP4_BLOCK_SIZE
-        )
+        # Reshape scale factors (linear layout can be directly reshaped)
+        # fp4_quantize already reshapes scale factors to [M, K // sf_vec_size]
+        # Convert to float8_e4m3fn view and take the first num_actual_tokens rows
+        expert_x_sf_viewed = expert_x_sf.view(torch.float8_e4m3fn)
+        # fp4_quantize returns [M, K // 16], but M might be padded, so take only num_actual_tokens rows
+        expert_x_sf_reshaped = expert_x_sf_viewed[:num_actual_tokens, :]
         
         expert_x[local_expert_id, :num_actual_tokens, :] = expert_x_q
         expert_x_scale[local_expert_id, :num_actual_tokens, :] = expert_x_sf_reshaped
@@ -245,30 +254,38 @@ def _generate_payload_and_weights(
     
     for local_expert_id in range(num_local_experts):
         # Quantize w1
+        # Use is_sf_swizzled_layout=False to get linear layout that can be directly reshaped
         w1_q, w1_sf = fp4_quantize(
             w1_bf16[local_expert_id],
             w1_global_scale,
             sf_vec_size=16,
             sf_use_ue8m0=False,
-            is_sf_swizzled_layout=True,
+            is_sf_swizzled_layout=False,
         )
-        w1_sf_reshaped = w1_sf.view(torch.float8_e4m3fn).reshape(
-            N, K // NVFP4_BLOCK_SIZE
-        )
+        # fp4_quantize returns scale factors as [M, K // sf_vec_size] after reshape
+        w1_sf_viewed = w1_sf.view(torch.float8_e4m3fn)
+        if w1_sf_viewed.ndim == 2:
+            w1_sf_reshaped = w1_sf_viewed
+        else:
+            w1_sf_reshaped = w1_sf_viewed.reshape(N, K // NVFP4_BLOCK_SIZE)
         w1[local_expert_id] = w1_q
         w1_scale[local_expert_id] = w1_sf_reshaped
         
         # Quantize w2
+        # Use is_sf_swizzled_layout=False to get linear layout that can be directly reshaped
         w2_q, w2_sf = fp4_quantize(
             w2_bf16[local_expert_id],
             w2_global_scale,
             sf_vec_size=16,
             sf_use_ue8m0=False,
-            is_sf_swizzled_layout=True,
+            is_sf_swizzled_layout=False,
         )
-        w2_sf_reshaped = w2_sf.view(torch.float8_e4m3fn).reshape(
-            K, (N // 2) // NVFP4_BLOCK_SIZE
-        )
+        # fp4_quantize returns scale factors as [M, K // sf_vec_size] after reshape
+        w2_sf_viewed = w2_sf.view(torch.float8_e4m3fn)
+        if w2_sf_viewed.ndim == 2:
+            w2_sf_reshaped = w2_sf_viewed
+        else:
+            w2_sf_reshaped = w2_sf_viewed.reshape(K, (N // 2) // NVFP4_BLOCK_SIZE)
         w2[local_expert_id] = w2_q
         w2_scale[local_expert_id] = w2_sf_reshaped
     
