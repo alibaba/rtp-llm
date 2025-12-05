@@ -585,6 +585,9 @@ def test_nvfp4_masked_executor(use_nvfp4: bool = True):
     print(f"[DEBUG Test] diff > 1.0 count: {(diff > 1.0).sum().item()}")
     
     # Check - use relaxed tolerance for quantization
+    # Save output and ref_output to pt files for further examination
+    torch.save(output, "nvfp4_executor_test_output.pt")
+    torch.save(ref_output, "nvfp4_executor_test_ref_output.pt")
     torch.testing.assert_close(output, ref_output, rtol=1e-1, atol=1e-1)
     
     # For now, just check that we can generate the data
