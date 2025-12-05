@@ -16,12 +16,15 @@ from rtp_llm.config.gpt_init_model_parameters import ConfigMode, GptInitModelPar
 from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.config.task_type import TaskType
 from rtp_llm.embedding.embedding_endpoint import EmbeddingEndpoint
-from rtp_llm.frontend.frontend_worker import FrontendWorker, TokenizerEncodeResponse
+from rtp_llm.frontend.frontend_worker import TokenizerEncodeResponse
+from rtp_llm.frontend.raw_endpoint import RawEndpoint
+from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.model_factory_register import _model_factory
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
+from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.server.misc import format_exception
 from rtp_llm.structure.request_extractor import request_id_field_name
 from rtp_llm.utils.complete_response_async_generator import (
@@ -42,8 +45,12 @@ class FrontendServer(object):
         self, separated_frontend: bool = False, rank_id: int = 0, server_id: int = 0
     ):
         self._access_logger = AccessLogger()
-        self._frontend_worker = None
+        self._raw_endpoint = None
         self._openai_endpoint = None
+        # Create core components directly, not depending on other class members
+        self._model_config = None
+        self._tokenizer = None
+        self._backend_rpc_server_visitor = None
         self.thread_lock_ = threading.Lock()
         self._global_controller = get_global_controller()
         self.separated_frontend = separated_frontend
@@ -55,16 +62,33 @@ class FrontendServer(object):
         if StaticConfig.profiling_debug_config.debug_start_fake_process == 1:
             # for debug online
             logging.info("DEBUG_START_FAKE_PROCESS is set, start fake server")
-            self._frontend_worker = None
+            self._raw_endpoint = None
         else:
-            self._frontend_worker = FrontendWorker(self.separated_frontend)
+            # Create core components directly, not through other class members
+            self._model_config = ModelFactory.create_frontend_config(
+                ModelFactory.create_normal_model_config()
+            )
+            self._tokenizer = TokenizerFactory.create_from_env()
+            self._model_config.update_task_prompt_tokens_id(self._tokenizer)
+            self._model_config.update_tokenizer_special_tokens(self._tokenizer)
+            self._backend_rpc_server_visitor = BackendRPCServerVisitor(
+                self._model_config, self.separated_frontend
+            )
+
+            # Create RawEndpoint using directly created components
+            self._raw_endpoint = RawEndpoint(
+                self._model_config,
+                self._tokenizer,
+                self._backend_rpc_server_visitor,
+                self.separated_frontend,
+            )
+
             self._openai_endpoint = None
             self.is_embedding = False
             self._embedding_endpoint = None
             if (
-                self._frontend_worker.model_config is not None
-                and self._frontend_worker.model_config.task_type
-                != TaskType.LANGUAGE_MODEL
+                self._model_config is not None
+                and self._model_config.task_type != TaskType.LANGUAGE_MODEL
             ):
                 self.is_embedding = True
                 model_config = ModelFactory.create_normal_model_config()
@@ -79,15 +103,16 @@ class FrontendServer(object):
                     config, self._frontend_worker.tokenizer
                 )
             else:
+                # Use created components directly, not depending on frontend_worker members
                 self._openai_endpoint = OpenaiEndpoint(
-                    self._frontend_worker.model_config,
-                    self._frontend_worker.tokenizer,
-                    self._frontend_worker.backend_rpc_server_visitor,
+                    self._model_config,
+                    self._tokenizer,
+                    self._backend_rpc_server_visitor,
                 )
 
     def stop(self):
-        if self._frontend_worker is not None:
-            self._frontend_worker.stop()
+        if self._raw_endpoint is not None:
+            self._raw_endpoint.stop()
 
     async def embedding(self, request: Dict[str, Any], raw_request: Request):
         start_time = time.time()
@@ -157,7 +182,7 @@ class FrontendServer(object):
                 },
             )
         except BaseException as e:
-            # 捕获非Cancel以外所有的异常,所以使用BaseException
+            # Catch all exceptions except Cancel, so use BaseException
             self._access_logger.log_exception_access(request, e)
             format_e = format_exception(e)
             kmonitor.report(
@@ -195,8 +220,8 @@ class FrontendServer(object):
             return self._handle_exception(req, e)
 
         def generate_call():
-            assert self._frontend_worker is not None
-            return self._frontend_worker.inference(**req)
+            assert self._raw_endpoint is not None
+            return self._raw_endpoint.completion(**req)
 
         try:
             rep = await self._infer_wrap(req, raw_request, generate_call)
@@ -355,7 +380,7 @@ class FrontendServer(object):
                 },
             )
 
-        assert self._frontend_worker is not None
+        assert self._raw_endpoint is not None
         start_time = current_time_ms()
         response_generator = generate_call()
         return CompleteResponseAsyncGenerator(
@@ -382,18 +407,9 @@ class FrontendServer(object):
         raw_request: RawRequest,
         generate_call: Callable[[], CompleteResponseAsyncGenerator],
     ):
-        assert self._frontend_worker is not None
-        kmonitor.report(
-            AccMetrics.QPS_METRIC,
-            1,
-            {
-                "rank_id": self.rank_id,
-                "server_id": self.server_id,
-                "source": req.get("source", "unkown"),
-            },
-        )
+        assert self._raw_endpoint is not None
         self._access_logger.log_query_access(req)
-        is_streaming = self._frontend_worker.is_streaming(req)
+        is_streaming = self._raw_endpoint.is_streaming(req)
         if await raw_request.is_disconnected():
             raise asyncio.CancelledError("client disconnects")
         res = await self._call_generate_with_report(generate_call)
@@ -422,7 +438,7 @@ class FrontendServer(object):
                 token_ids = self._openai_endpoint.render_chat(chat_request).input_ids
             else:
                 prompt = req.pop("prompt")
-                token_ids = self._frontend_worker.pipeline.encode(prompt)
+                token_ids = self._raw_endpoint.encode(prompt)
             return ORJSONResponse({"token_ids": token_ids})
         except Exception as e:
             return ORJSONResponse(format_exception(e), status_code=500)
@@ -433,24 +449,22 @@ class FrontendServer(object):
                 req = json.loads(req)
             assert isinstance(req, dict)
             prompt = req.pop("prompt")
-            assert self._frontend_worker is not None
+            assert self._raw_endpoint is not None
             if req.get("return_offsets_mapping", None) == True:
-                mapping = self._frontend_worker.tokenizer_offset_mapping(prompt)
+                mapping = self._raw_endpoint.tokenizer_offset_mapping(prompt)
                 response = TokenizerEncodeResponse(
                     offset_mapping=mapping["offset_mapping"],
                     token_ids=mapping["input_ids"],
                 )
             else:
-                token_ids, tokens = self._frontend_worker.tokenizer_encode(prompt)
+                token_ids, tokens = self._raw_endpoint.tokenizer_encode(prompt)
                 response = TokenizerEncodeResponse(token_ids=token_ids, tokens=tokens)
             return ORJSONResponse(content=response.model_dump(exclude_none=True))
         except Exception as e:
             return ORJSONResponse(format_exception(e), status_code=500)
 
     def check_health(self):
-        assert self._frontend_worker is not None
-        return (
-            self._frontend_worker.backend_rpc_server_visitor.is_backend_service_ready(
-                refresh=False
-            )
+        assert self._raw_endpoint is not None
+        return self._raw_endpoint.backend_rpc_server_visitor.is_backend_service_ready(
+            refresh=False
         )

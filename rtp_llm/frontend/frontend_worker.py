@@ -244,20 +244,20 @@ class FrontendWorker:
         batch_state: List[Any] = [None] * len(iterators)
 
         while True:
-            # 创建并行任务
+            # Create parallel tasks
             tasks = []
             for idx, itr in enumerate(iterators):
-                if idx not in done_idxs:  # 仅为未完成的迭代器创建任务
+                if idx not in done_idxs:  # Create tasks only for unfinished iterators
                     tasks.append((idx, itr.__anext__()))
 
-            # 使用 asyncio.gather() 获取结果
+            # Use asyncio.gather() to get results
             if tasks:
                 results = await asyncio.gather(
                     *(task[1] for task in tasks), return_exceptions=True
                 )
                 for idx, result in zip((task[0] for task in tasks), results):
                     if isinstance(result, Exception):
-                        # 处理异常情况，如 StopAsyncIteration
+                        # Handle exception cases, such as StopAsyncIteration
                         if isinstance(result, StopAsyncIteration):
                             done_idxs.add(idx)
                             if batch_state[idx] is None:
@@ -271,11 +271,11 @@ class FrontendWorker:
                     else:
                         batch_state[idx] = result
 
-            # 检查是否所有迭代器都完成
+            # Check if all iterators are done
             if len(done_idxs) == len(iterators):
                 break
 
-            # 处理 batch 数据
+            # Process batch data
             batch = batch_state
             if batch_infer:
                 yield BatchPipelineResponse(response_batch=batch)
