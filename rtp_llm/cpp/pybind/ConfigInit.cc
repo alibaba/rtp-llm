@@ -191,7 +191,9 @@ void register_profiling_debug_logging_config(pybind11::module& m) {
                             bool,
                             bool,
                             bool,
-                            bool>(),
+                            bool,
+                            bool,
+                            int32_t>(),
              pybind11::arg("trace_memory")              = false,
              pybind11::arg("trace_malloc_stack")        = false,
              pybind11::arg("enable_device_perf")        = false,
@@ -210,7 +212,9 @@ void register_profiling_debug_logging_config(pybind11::module& m) {
              pybind11::arg("qwen_agent_debug")          = false,
              pybind11::arg("disable_dpc_random")        = false,
              pybind11::arg("enable_detail_log")         = false,
-             pybind11::arg("check_nan")                 = false)
+             pybind11::arg("check_nan")                 = false,
+             pybind11::arg("viztracer_enable")          = false,
+             pybind11::arg("viztracer_min_duration_ms") = 100)
         .def("to_string", &ProfilingDebugLoggingConfig::to_string)
         .def("update_from_env", &ProfilingDebugLoggingConfig::update_from_env_for_test)
         .def_readwrite("trace_memory", &ProfilingDebugLoggingConfig::trace_memory)
@@ -231,7 +235,9 @@ void register_profiling_debug_logging_config(pybind11::module& m) {
         .def_readwrite("qwen_agent_debug", &ProfilingDebugLoggingConfig::qwen_agent_debug)
         .def_readwrite("disable_dpc_random", &ProfilingDebugLoggingConfig::disable_dpc_random)
         .def_readwrite("enable_detail_log", &ProfilingDebugLoggingConfig::enable_detail_log)
-        .def_readwrite("check_nan", &ProfilingDebugLoggingConfig::check_nan);
+        .def_readwrite("check_nan", &ProfilingDebugLoggingConfig::check_nan)
+        .def_readwrite("viztracer_enable", &ProfilingDebugLoggingConfig::viztracer_enable)
+        .def_readwrite("viztracer_min_duration_ms", &ProfilingDebugLoggingConfig::viztracer_min_duration_ms);
 }
 
 void register_hwkernel_config(pybind11::module& m) {

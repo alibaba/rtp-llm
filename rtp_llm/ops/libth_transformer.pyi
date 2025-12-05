@@ -2,7 +2,7 @@ from __future__ import annotations
 import libth_transformer_config
 import torch
 import typing
-__all__: list[str] = ['EngineScheduleInfo', 'EngineTaskInfo', 'KVCacheInfo', 'MultimodalInput', 'RtpEmbeddingOp', 'RtpLLMOp', 'WorkerStatusInfo', 'EmbeddingCppOutput', 'TypedOutput']
+__all__: list[str] = ['EngineScheduleInfo', 'EngineTaskInfo', 'KVCacheInfo', 'MultimodalInput', 'RtpEmbeddingOp', 'RtpLLMOp', 'WorkerStatusInfo']
 class EngineScheduleInfo:
     finished_task_info_list: list[EngineTaskInfo]
     last_schedule_delta: int
@@ -42,30 +42,6 @@ class RtpEmbeddingOp:
         ...
     def stop(self) -> None:
         ...
-
-class TypedOutput:
-    isTensor: bool
-    t: torch.Tensor
-    map: list[dict[str, torch.Tensor]]
-    def __init__(self) -> None:
-        ...
-    def setTensorOutput(self, tensor: torch.Tensor) -> None:
-        ...
-    def setMapOutput(self, tensor_map: list[dict[str, torch.Tensor]]) -> None:
-        ...
-        
-class EmbeddingQueryOutput:
-    output: TypedOutput
-    error_info: typing.Any
-    def __init__(self) -> None:
-        ...
-    def setMapOutput(self, output: typing.Any) -> None:
-        ...
-    def setTensorOutput(self, output: typing.Any) -> None:
-        ...
-    def setErrorInfo(self, error_info: typing.Any) -> None:
-        ...
-    
 class RtpLLMOp:
     def __init__(self) -> None:
         ...
