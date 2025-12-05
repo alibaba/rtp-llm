@@ -1006,7 +1006,7 @@ class GptInitModelParameters:
         self.gpt_init_params.grpc_config = GrpcConfig(
             get_env_str(
                 "GRPC_CONFIG_JSON",
-                '{"client_config": {"grpc.max_receive_message_length": 1073741824, "grpc.max_metadata_size": 1073741824}, "server_config": {"grpc.max_concurrent_streams": 100000, "grpc.max_connection_idle_ms": 600000, "grpc.http2.min_recv_ping_interval_without_data_ms": 1000, "grpc.http2.max_ping_strikes": 1000}',
+                '{"client_config": {"grpc.max_receive_message_length": 1073741824, "grpc.max_metadata_size": 1073741824}, "server_config": {"grpc.max_metadata_size": 1073741824,"grpc.max_concurrent_streams": 100000, "grpc.max_connection_idle_ms": 600000, "grpc.http2.min_recv_ping_interval_without_data_ms": 1000, "grpc.http2.max_ping_strikes": 1000}',
             )
         )
 
