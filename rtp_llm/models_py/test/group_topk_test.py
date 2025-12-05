@@ -9,7 +9,7 @@ import torch
 # CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 # sys.path.append(os.path.join(str(CUR_PATH), "../../../"))
 device = torch.device(f"cuda")
-from rtp_llm.models_py.modules.select_topk import GroupTopK
+from rtp_llm.models_py.modules import GroupTopK
 
 
 def biased_grouped_topk_impl(

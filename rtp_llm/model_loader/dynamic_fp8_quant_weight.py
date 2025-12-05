@@ -4,7 +4,6 @@ from typing import Dict, Optional, Union
 
 import torch
 
-import rtp_llm.models_py.modules.utils as utils
 import rtp_llm.ops.compute_ops as compute_ops
 from rtp_llm.config.quant_config import (
     Fp8DynamicPerTensorQuantConfig,
@@ -20,6 +19,7 @@ from rtp_llm.model_loader.weight_module import (
     QuantWeight,
     WeightModule,
 )
+from rtp_llm.models_py.utils.arch import is_cuda
 from rtp_llm.utils.model_weight import W, WeightStyle
 
 
@@ -34,7 +34,7 @@ def quantize_weight_to_fp8(ts: torch.Tensor, output: Optional[torch.Tensor] = No
         assert output.dtype == torch.float8_e4m3fn
         assert output.device == ts.device
 
-    if utils.is_cuda() and ts.device.type != "cpu":
+    if is_cuda() and ts.device.type != "cpu":
         scale = torch.zeros(1, device=ts.device, dtype=torch.float32)
         compute_ops.per_tensor_quant_fp8(ts, output, scale, False)
         return output, scale

@@ -7,7 +7,7 @@ import torch
 import triton
 import triton.language as tl
 
-from rtp_llm.models_py.modules.utils import ceil_div
+from rtp_llm.models_py.utils.math import ceil_div
 
 logger = logging.getLogger(__name__)
 

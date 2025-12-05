@@ -5,7 +5,7 @@ import torch
 from torch import dtype as _dtype
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.models_py.modules.mlp import DenseMLP, FusedSiluActDenseMLP
+from rtp_llm.models_py.modules import DenseMLP, FusedSiluActDenseMLP
 from rtp_llm.utils.model_weight import W
 
 

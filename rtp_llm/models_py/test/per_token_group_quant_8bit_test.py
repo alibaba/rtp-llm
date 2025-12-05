@@ -1,17 +1,18 @@
 import itertools
 from typing import Tuple
+from unittest import SkipTest, TestCase, main
 
 import torch
 import triton
 import triton.language as tl
-
-from rtp_llm.models_py.modules.fp8_kernel import per_token_group_quant_int8, per_token_group_quant_fp8
-
-from unittest import TestCase, main, SkipTest
 from torch import dtype as _dtype
-from torch.profiler import profile, ProfilerActivity, record_function
+from torch.profiler import ProfilerActivity, profile, record_function
 
-from rtp_llm.models_py.modules.utils import is_hip
+from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
+    per_token_group_quant_fp8,
+    per_token_group_quant_int8,
+)
+from rtp_llm.models_py.utils.arch import is_hip
 
 _is_hip = is_hip()
 
@@ -255,7 +256,9 @@ def sglang_per_token_group_quant_8bit(
         iinfo = torch.iinfo(dtype)
         int8_max = iinfo.max
         int8_min = iinfo.min
-        per_token_group_quant_int8(x, x_q, x_s, group_size, eps, int8_min, int8_max, False)
+        per_token_group_quant_int8(
+            x, x_q, x_s, group_size, eps, int8_min, int8_max, False
+        )
     else:
         f8_info = torch.finfo(dtype)
         fp8_max = f8_info.max
@@ -263,6 +266,7 @@ def sglang_per_token_group_quant_8bit(
         per_token_group_quant_fp8(x, x_q, x_s, group_size, eps, fp8_min, fp8_max, False)
 
     return x_q, x_s
+
 
 class PerTokenGroupQuantTest(TestCase):
     # NUM_TOKENS = [127, 128, 512, 1024, 4096, 8192]
@@ -283,9 +287,19 @@ class PerTokenGroupQuantTest(TestCase):
             raise SkipTest("CUDA is not available")
         torch.set_default_device("cuda")
 
-    def _run_quant_test(self, num_tokens, hidden_dim, group_size, dst_dtype, column_major_scales, scale_tma_aligned):
+    def _run_quant_test(
+        self,
+        num_tokens,
+        hidden_dim,
+        group_size,
+        dst_dtype,
+        column_major_scales,
+        scale_tma_aligned,
+    ):
         if not column_major_scales and scale_tma_aligned:
-            self.skipTest("Invalid flag: scale_tma_aligned=True but column_major_scales=False")
+            self.skipTest(
+                "Invalid flag: scale_tma_aligned=True but column_major_scales=False"
+            )
         torch.manual_seed(0)
         x = torch.randn(num_tokens, hidden_dim, device="cuda", dtype=torch.float16)
 
@@ -307,10 +321,10 @@ class PerTokenGroupQuantTest(TestCase):
             column_major_scales=column_major_scales,
             scale_tma_aligned=scale_tma_aligned,
         )
-        print(f'x_q_triton = {x_q_triton}')
-        print(f'x_s_triton = {x_s_triton}')
-        print(f'x_q_sglang = {x_q_sglang}')
-        print(f'x_s_sglang = {x_s_sglang}')
+        print(f"x_q_triton = {x_q_triton}")
+        print(f"x_s_triton = {x_s_triton}")
+        print(f"x_q_sglang = {x_q_sglang}")
+        print(f"x_s_sglang = {x_s_sglang}")
 
     def test_per_token_group_quant(self):
         for params in itertools.product(
@@ -319,7 +333,7 @@ class PerTokenGroupQuantTest(TestCase):
             self.GROUP_SIZES,
             self.DST_DTYPES,
             self.COLUMN_MAJOR_SCALES,
-            self.SCALE_TMA_ALIGNED
+            self.SCALE_TMA_ALIGNED,
         ):
             with self.subTest(
                 num_tokens=params[0],

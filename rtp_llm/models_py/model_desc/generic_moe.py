@@ -7,13 +7,21 @@ from torch import nn
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
-from rtp_llm.models_py.modules import CausalAttention, MlaAttention, RMSNorm, SelectTopk
-from rtp_llm.models_py.modules.common.mha.base import FMHAImplBase
-from rtp_llm.models_py.modules.embedding import Embedding
-from rtp_llm.models_py.modules.factory.attention_factory import AttnImplFactory
-from rtp_llm.models_py.modules.factory.fused_moe import FusedMoeFactory
-from rtp_llm.models_py.modules.linear import Linear
-from rtp_llm.models_py.modules.mlp import FusedSiluActDenseMLP
+from rtp_llm.models_py.modules import (
+    CausalAttention,
+    Embedding,
+    FMHAImplBase,
+    FusedSiluActDenseMLP,
+    GroupTopK,
+    MlaAttention,
+    RMSNorm,
+    SelectTopk,
+)
+from rtp_llm.models_py.modules.factory import (
+    AttnImplFactory,
+    FusedMoeFactory,
+    LinearFactory,
+)
 from rtp_llm.ops.compute_ops import (
     KVCache,
     PyAttentionInputs,
@@ -39,7 +47,9 @@ class GenericMoeLayer(nn.Module):
         self.num_experts = config.expert_num
         self.top_k = config.moe_k
 
-        self.gate = Linear(weights[W.moe_gate], None)
+        self.gate = LinearFactory.create_linear_from_weights(
+            weights, W.moe_gate, None, None, config
+        )
         self.select_topk = SelectTopk(config)
         self.fused_moe = FusedMoeFactory().create_fused_moe(config, weights)
         self.w1 = weights.get(W.moe_w1, None)
@@ -80,8 +90,6 @@ class GenericMoeLayer(nn.Module):
         )
 
         if self.correction_bias is not None:
-            from rtp_llm.models_py.modules.select_topk import GroupTopK
-
             self.group_topk = GroupTopK()
             self.renormalize = self.config.has_moe_norm
             self.num_expert_group = self.config.moe_n_group

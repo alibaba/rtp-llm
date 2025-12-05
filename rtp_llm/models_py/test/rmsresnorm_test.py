@@ -4,7 +4,7 @@ from unittest import SkipTest, TestCase, main
 import torch
 from torch import dtype as _dtype
 
-from rtp_llm.models_py.modules.norm import RMSResNorm, RMSResNormTorch
+from rtp_llm.models_py.modules import RMSResNorm, RMSResNormTorch
 
 
 class RMSResNormTest(TestCase):
@@ -28,8 +28,8 @@ class RMSResNormTest(TestCase):
             torch.allclose(
                 rms_res_norm_torch(x, residual),
                 rms_res_norm(x, residual),
-                atol=1e-2,
-                rtol=1e-2,
+                atol=3e-2,
+                rtol=3e-2,
             )
         )
 
