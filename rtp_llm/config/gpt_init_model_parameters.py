@@ -866,6 +866,11 @@ class GptInitModelParameters:
         )
 
         # DeviceResourceConfig
+        # Force enable NOT_USE_DEFAULT_STREAM when CUDA Graph is enabled
+        # When enable_cuda_graph is True, not_use_default_stream is forced to True
+        not_use_default_stream = get_env_bool("NOT_USE_DEFAULT_STREAM", False)
+        if enable_cuda_graph:
+            not_use_default_stream = True
         self.gpt_init_params.device_resource_config = DeviceResourceConfig(
             device_reserve_memory_bytes=get_env_int(
                 "DEVICE_RESERVE_MEMORY_BYTES", -1073741824
@@ -878,7 +883,7 @@ class GptInitModelParameters:
             m_split=get_env_int("M_SPLIT", 0),
             enable_comm_overlap=get_env_bool("ENABLE_COMM_OVERLAP", True),
             enable_layer_micro_batch=get_env_int("ENABLE_LAYER_MICRO_BATCH", 0),
-            not_use_default_stream=get_env_bool("NOT_USE_DEFAULT_STREAM", False),
+            not_use_default_stream=not_use_default_stream,
         )
 
         # MoeConfig
