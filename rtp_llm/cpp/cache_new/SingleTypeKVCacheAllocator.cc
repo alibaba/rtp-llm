@@ -1,7 +1,7 @@
 #include "rtp_llm/cpp/cache_new/SingleTypeKVCacheAllocator.h"
-#include <algorithm>
-#include "rtp_llm/cpp/cache_new/BlockPoolConfigHelper.h"
+
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/cache_new/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache_new/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 
@@ -9,14 +9,14 @@ namespace rtp_llm {
 
 SingleTypeKVCacheAllocator::SingleTypeKVCacheAllocator(const CacheConfig&   config,
                                                        rtp_llm::DeviceBase* device,
-                                                       AllocationType       atype):
-    KVCacheAllocator(config, device, atype) {}
+                                                       AllocationType       allocation_type):
+    KVCacheAllocator(config, device, allocation_type) {}
 
 bool SingleTypeKVCacheAllocator::init() {
     auto&           spec        = config_.cache_specs[0];
     BlockPoolConfig pool_config = BlockPoolConfigHelper::createLayerFirstConfig(
         static_cast<uint32_t>(config_.layer_num), static_cast<uint32_t>(config_.block_num), spec);
-    block_pool_ = std::make_shared<BlockPool>(pool_config, device_, atype_);
+    block_pool_ = std::make_shared<BlockPool>(pool_config, device_, allocation_type_);
     if (!block_pool_->init()) {
         RTP_LLM_LOG_ERROR("Failed to initialize block pool for SingleTypeKVCacheAllocator");
         return false;

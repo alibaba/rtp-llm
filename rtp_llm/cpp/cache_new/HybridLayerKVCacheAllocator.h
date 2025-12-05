@@ -14,7 +14,7 @@ class HybridLayerKVCacheAllocator: public KVCacheAllocator {
 public:
     HybridLayerKVCacheAllocator(const CacheConfig&   config,
                                 rtp_llm::DeviceBase* device,
-                                AllocationType       atype = AllocationType::DEVICE);
+                                AllocationType       allocation_type = AllocationType::DEVICE);
 
     bool               init() override;
     void               free(const FreeInfo& free_info) override;

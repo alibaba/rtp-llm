@@ -17,8 +17,8 @@
 
 // class HybridPoolKVCacheAllocator public KVCacheAllocator {
 // public:
-//     HybridPoolKVCacheAllocator(const CacheConfig& config, rtp_llm::DeviceBase* device, AllocationType atype =
-//     AllocationType::DEVICE); bool init() {
+//     HybridPoolKVCacheAllocator(const CacheConfig& config, rtp_llm::DeviceBase* device, AllocationType allocation_type
+//     = AllocationType::DEVICE); bool init() {
 //         // 1. build block_pool for each kind of attentions.
 //         // 2. build kv_cache_groups_ by CacheConfig for each kind of attentions with its block_pool
 //     };

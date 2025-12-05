@@ -1,7 +1,6 @@
 #pragma once
 
 #include <memory>
-#include <map>
 #include "rtp_llm/cpp/cache_new/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache_new/FullKVCacheGroup.h"
 #include "rtp_llm/cpp/cache_new/BlockPool.h"
@@ -13,7 +12,7 @@ class SingleTypeKVCacheAllocator: public KVCacheAllocator {
 public:
     SingleTypeKVCacheAllocator(const CacheConfig&   config,
                                rtp_llm::DeviceBase* device,
-                               AllocationType       atype = AllocationType::DEVICE);
+                               AllocationType       allocation_type = AllocationType::DEVICE);
 
     bool               init() override;
     void               free(const FreeInfo& free_info) override;
@@ -38,8 +37,8 @@ public:
                        std::vector<BlockIdPair>&      block_update_mapping) override;
 
 private:
-    MallocResult incrMalloc(const MallocInfo& malloc_info);
-    MallocResult initMallocForCommonLen(const MallocInfo& malloc_info);
+    MallocResult incrMalloc(const MallocInfo& malloc_info) override;
+    MallocResult initMallocForCommonLen(const MallocInfo& malloc_info) override;
 
 private:
     BlockPoolPtr                      block_pool_;

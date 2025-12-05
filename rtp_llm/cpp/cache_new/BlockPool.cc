@@ -8,15 +8,15 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
-BlockPool::BlockPool(const BlockPoolConfig& config, rtp_llm::DeviceBase* device, AllocationType atype):
-    config_(config), device_(device), atype_(atype) {}
+BlockPool::BlockPool(const BlockPoolConfig& config, rtp_llm::DeviceBase* device, AllocationType allocation_type):
+    config_(config), device_(device), allocation_type_(allocation_type) {}
 
 BlockPool::~BlockPool() {
     cache_aligned_buffer_.reset();
 }
 
 bool BlockPool::init() {
-    cache_aligned_buffer_ = device_->allocateBuffer({rtp_llm::TYPE_INT8, {config_.total_size}, atype_});
+    cache_aligned_buffer_ = device_->allocateBuffer({rtp_llm::TYPE_INT8, {config_.total_size}, allocation_type_});
     cache_base_ptr_       = cache_aligned_buffer_->data();
     if (cache_aligned_buffer_ == nullptr || cache_base_ptr_ == nullptr) {
         RTP_LLM_LOG_ERROR("block pool allocate cache aligned buffer is null");

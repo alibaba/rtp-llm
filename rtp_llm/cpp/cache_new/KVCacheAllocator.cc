@@ -66,9 +66,9 @@ void KVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, const BlockI
     const size_t copy_num = (end_ptr - begin_ptr) * config_.layer_num;
 
     size_t copy_nums[CopyType::TYPE_SIZE] = {};
-    auto   copy_type =
-        BatchCopyParams::get_copy_type(atype_ == AllocationType::DEVICE ? rtp_llm::MEMORY_GPU : rtp_llm::MEMORY_CPU,
-                                       atype_ == AllocationType::DEVICE ? rtp_llm::MEMORY_GPU : rtp_llm::MEMORY_CPU);
+    auto   copy_type                      = BatchCopyParams::get_copy_type(
+        allocation_type_ == AllocationType::DEVICE ? rtp_llm::MEMORY_GPU : rtp_llm::MEMORY_CPU,
+        allocation_type_ == AllocationType::DEVICE ? rtp_llm::MEMORY_GPU : rtp_llm::MEMORY_CPU);
     copy_nums[copy_type] += copy_num * 2;  // for k and v
 
     for (size_t i = 0; i < CopyType::TYPE_SIZE; ++i) {

@@ -24,7 +24,7 @@ class BlockPool {
 public:
     BlockPool(const BlockPoolConfig& config,
               rtp_llm::DeviceBase*   device,
-              AllocationType         atype = AllocationType::DEVICE);
+              AllocationType         allocation_type = AllocationType::DEVICE);
     ~BlockPool();
 
     bool init();
@@ -73,7 +73,7 @@ private:
     BlockRefCounter                        all_ref_counter_;
     BlockRefCounter                        request_ref_counter_;
     rtp_llm::DeviceBase*                   device_;
-    AllocationType                         atype_;
+    AllocationType                         allocation_type_;
 
     BlockCacheV1Ptr block_cache_;
 

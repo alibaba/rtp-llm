@@ -8,15 +8,15 @@ namespace rtp_llm {
 
 HybridLayerKVCacheAllocator::HybridLayerKVCacheAllocator(const CacheConfig&   config,
                                                          rtp_llm::DeviceBase* device,
-                                                         AllocationType       atype):
-    KVCacheAllocator(config, device, atype) {}
+                                                         AllocationType       allocation_type):
+    KVCacheAllocator(config, device, allocation_type) {}
 
 bool HybridLayerKVCacheAllocator::init() {
     auto            block_size = config_.cache_specs[0]->block_size();
     BlockPoolConfig pool_config =
         BlockPoolConfigHelper::createLayerFirstConfig(config_.layer_num, config_.block_num, block_size);
 
-    block_pool_ = std::make_shared<BlockPool>(pool_config, device_, atype_);
+    block_pool_ = std::make_shared<BlockPool>(pool_config, device_, allocation_type_);
     if (!block_pool_->init()) {
         RTP_LLM_LOG_ERROR("Failed to initialize block pool for HybridLayerKVCacheAllocator");
         return false;
@@ -166,7 +166,8 @@ void HybridLayerKVCacheAllocator::free(const FreeInfo& free_info) {
 }
 
 void HybridLayerKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
-    RTP_LLM_CHECK(insert_info.batch_kv_cache_resource);
+    auto& kv_cache_resource = insert_info.batch_kv_cache_resource;
+    RTP_LLM_CHECK(!kv_cache_resource);
 
     int batch_size         = kv_cache_resource->batchSize();
     int seq_size_per_block = full_kv_cache_group_->seqSizePerBlock();
