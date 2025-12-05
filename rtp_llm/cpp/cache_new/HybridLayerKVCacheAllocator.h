@@ -1,7 +1,6 @@
 #pragma once
 
 #include <memory>
-#include <map>
 #include "rtp_llm/cpp/cache_new/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache_new/FullKVCacheGroup.h"
 #include "rtp_llm/cpp/cache_new/LinearKVCacheGroup.h"
@@ -42,15 +41,15 @@ public:
         return block_pool_;
     }
 
+    int seqSizePerBlock() const override;
+
     // TODO, friend class test
 public:
-    MallocResult initMalloc(const MallocInfo& malloc_info);
-    MallocResult incrMalloc(const MallocInfo& malloc_info);
-    MallocResult initMallocForCommonLen(const MallocInfo& malloc_info);
+    MallocResult incrMalloc(const MallocInfo& malloc_info) override;
+    MallocResult initMallocForCommonLen(const MallocInfo& malloc_info) override;
 
     int reuseCache(const CacheKeysType& cache_keys, KVCacheResourceV1& cache_resource);
 
-    BlockPoolPtr                                     block_pool_;
     std::shared_ptr<FullKVCacheGroup>                full_kv_cache_group_;
     std::vector<std::shared_ptr<LinearKVCacheGroup>> linear_kv_cache_groups_;
 

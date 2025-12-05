@@ -102,4 +102,34 @@ void KVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, const BlockI
     device_->batchCopy(copy_params);
 }
 
+size_t SingleTypeKVCacheAllocator::freeBlocksNum() const {
+    return block_pool_->freeBlocksNum();
+}
+
+size_t SingleTypeKVCacheAllocator::availableBlocksNum() const {
+    return block_pool_->availableBlocksNum();
+}
+
+size_t SingleTypeKVCacheAllocator::availableTokensNum() const {
+    return block_pool_->availableBlocksNum() * seqSizePerBlock();
+}
+
+size_t SingleTypeKVCacheAllocator::totalBlocksNum() const {
+    return block_pool_->totalBlocksNum();
+}
+
+size_t SingleTypeKVCacheAllocator::maxAvailableTokensNum() const {
+    return block_pool_->totalBlocksNum() * seqSizePerBlock();
+}
+
+KVCacheBuffer SingleTypeKVCacheAllocator::kvCacheBuffer() const {
+    return block_pool_->kvCacheBuffer();
+}
+
+void SingleTypeKVCacheAllocator::regUserMr(size_t model_id) {
+    if (block_pool_) {
+        block_pool_->regUserMr(model_id);
+    }
+}
+
 }  // namespace rtp_llm

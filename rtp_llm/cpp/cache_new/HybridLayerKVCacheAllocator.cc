@@ -226,32 +226,36 @@ BlockBufferPtrInfo HybridLayerKVCacheAllocator::convertIndexToBuffer(int layer_i
     return full_kv_cache_group_->convertIndexToBuffer(layer_id, block_id);
 }
 
-size_t HybridLayerKVCacheAllocator::freeBlocksNum() const {
-    return block_pool_->freeBlocksNum();
-}
+// size_t HybridLayerKVCacheAllocator::freeBlocksNum() const {
+//     return block_pool_->freeBlocksNum();
+// }
 
-size_t HybridLayerKVCacheAllocator::availableBlocksNum() const {
-    return block_pool_->availableBlocksNum();
-}
+// size_t HybridLayerKVCacheAllocator::availableBlocksNum() const {
+//     return block_pool_->availableBlocksNum();
+// }
 
-size_t HybridLayerKVCacheAllocator::availableTokensNum() const {
-    return block_pool_->availableBlocksNum() * full_kv_cache_group_->seqSizePerBlock();
-}
+// size_t HybridLayerKVCacheAllocator::availableTokensNum() const {
+//     return block_pool_->availableBlocksNum() * full_kv_cache_group_->seqSizePerBlock();
+// }
 
-size_t HybridLayerKVCacheAllocator::totalBlocksNum() const {
-    return block_pool_->totalBlocksNum();
-}
+// size_t HybridLayerKVCacheAllocator::totalBlocksNum() const {
+//     return block_pool_->totalBlocksNum();
+// }
 
-size_t HybridLayerKVCacheAllocator::maxAvailableTokensNum() const {
-    // TODO, 修改下。
-    return block_pool_->totalBlocksNum() * full_kv_cache_group_->seqSizePerBlock();
-}
+// size_t HybridLayerKVCacheAllocator::maxAvailableTokensNum() const {
+//     // TODO, 修改下。
+//     return block_pool_->totalBlocksNum() * full_kv_cache_group_->seqSizePerBlock();
+// }
 
-KVCacheBuffer HybridLayerKVCacheAllocator::kvCacheBuffer() const {
-    if (!block_pool_) {
-        return KVCacheBuffer{nullptr, nullptr};
-    }
-    return block_pool_->kvCacheBuffer();
+// KVCacheBuffer HybridLayerKVCacheAllocator::kvCacheBuffer() const {
+//     if (!block_pool_) {
+//         return KVCacheBuffer{nullptr, nullptr};
+//     }
+//     return block_pool_->kvCacheBuffer();
+// }
+
+int HybridLayerKVCacheAllocator::seqSizePerBlock() {
+    return full_kv_cache_group_->seqSizePerBlock();
 }
 
 bool HybridLayerKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,

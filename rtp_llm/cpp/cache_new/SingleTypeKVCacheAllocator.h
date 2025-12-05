@@ -36,12 +36,13 @@ public:
                        bool                           copy_last_block,
                        std::vector<BlockIdPair>&      block_update_mapping) override;
 
+    int seqSizePerBlock() const override;
+
 private:
     MallocResult incrMalloc(const MallocInfo& malloc_info) override;
     MallocResult initMallocForCommonLen(const MallocInfo& malloc_info) override;
 
 private:
-    BlockPoolPtr                      block_pool_;
     std::shared_ptr<FullKVCacheGroup> full_kv_cache_group_;
 };
 

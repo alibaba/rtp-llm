@@ -3,9 +3,9 @@
 #include <memory>
 #include <vector>
 
-#include "rtp_llm/cpp/cache_new/CacheConfig.h"
-#include "rtp_llm/cpp/cache_new/types.h"
 #include "rtp_llm/cpp/devices/DeviceBase.h"
+#include "rtp_llm/cpp/cache_new/types.h"
+#include "rtp_llm/cpp/cache_new/CacheConfig.h"
 
 namespace rtp_llm {
 
@@ -27,12 +27,6 @@ public:
 
     virtual void regUserMr(size_t model_id) = 0;
 
-    virtual size_t freeBlocksNum() const         = 0;
-    virtual size_t availableBlocksNum() const    = 0;
-    virtual size_t availableTokensNum() const    = 0;
-    virtual size_t totalBlocksNum() const        = 0;
-    virtual size_t maxAvailableTokensNum() const = 0;
-
     MallocResult malloc(const MallocInfo& malloc_info);
     void         blockCopy(int src_block_index, int dest_block_index);
     void         blockBatchCopy(const std::vector<BlockIdPair>& copy_mapping);
@@ -46,6 +40,13 @@ public:
                                bool                           copy_last_block,
                                std::vector<BlockIdPair>&      block_update_mapping) = 0;
 
+    size_t      freeBlocksNum() const;
+    size_t      availableBlocksNum() const;
+    size_t      availableTokensNum() const;
+    size_t      totalBlocksNum() const;
+    size_t      maxAvailableTokensNum() const;
+    virtual int seqSizePerBlock() const = 0;
+
 protected:
     MallocResult         initMalloc(const MallocInfo& malloc_info);
     virtual MallocResult incrMalloc(const MallocInfo& malloc_info)             = 0;
@@ -54,6 +55,7 @@ protected:
     CacheConfig          config_;
     rtp_llm::DeviceBase* device_;
     AllocationType       allocation_type_;
+    BlockPoolPtr         block_pool_;
 };
 
 using KVCacheAllocatorPtr = std::shared_ptr<KVCacheAllocator>;
