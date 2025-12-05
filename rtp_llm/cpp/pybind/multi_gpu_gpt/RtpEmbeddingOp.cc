@@ -80,12 +80,6 @@ void RtpEmbeddingOp::initGrpcServer(const EngineInitParams               maga_in
         RTP_LLM_LOG_INFO("grpc server add channel argument %s: %d", it->first.c_str(), it->second);
         builder.AddChannelArgument(it->first, it->second);
     }
-    // builder.AddChannelArgument(GRPC_ARG_MAX_CONCURRENT_STREAMS, grpc_config.get_value("max_concurrent_streams"));
-    // builder.AddChannelArgument(GRPC_ARG_MAX_METADATA_SIZE, grpc_config.get_value("max_metadata_size"));
-    // builder.AddChannelArgument(GRPC_ARG_MAX_CONNECTION_IDLE_MS, grpc_config.get_value("max_connection_idle_ms"));
-    // builder.AddChannelArgument(GRPC_ARG_HTTP2_MIN_RECV_PING_INTERVAL_WITHOUT_DATA_MS,
-    //                            grpc_config.get_value("http2_min_recv_ping_interval_without_data_ms"));
-    // builder.AddChannelArgument(GRPC_ARG_HTTP2_MAX_PING_STRIKES, grpc_config.get_value("http2_max_ping_strikes"));
     builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
     builder.RegisterService(embedding_grpc_service_.get());
     grpc_server_ = builder.BuildAndStart();

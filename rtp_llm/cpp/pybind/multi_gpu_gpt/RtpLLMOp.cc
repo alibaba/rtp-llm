@@ -24,20 +24,17 @@ namespace th = torch;
 
 namespace rtp_llm {
 
-std::tuple<GptInitParameter, std::unique_ptr<Weights>> prepareEngineInitParams(
-    py::object model, bool sp_model)
-{
+std::tuple<GptInitParameter, std::unique_ptr<Weights>> prepareEngineInitParams(py::object model, bool sp_model) {
     if (sp_model) {
         model = model.attr("model");
     }
-    const GptInitParameter& gpt_init_params =
-    model.attr("config").attr("gpt_init_params").cast<GptInitParameter>();
-    py::object py_layers_weights = model.attr("weight").attr("weights");
-    py::object py_global_weights = model.attr("weight").attr("global_weights");
-    
+    const GptInitParameter& gpt_init_params   = model.attr("config").attr("gpt_init_params").cast<GptInitParameter>();
+    py::object              py_layers_weights = model.attr("weight").attr("weights");
+    py::object              py_global_weights = model.attr("weight").attr("global_weights");
+
     auto convert    = WeightsConverter(false, gpt_init_params.quant_algo_);
     auto gpt_weight = convert.createGptWeights(py_layers_weights, py_global_weights);
-    
+
     return {gpt_init_params, std::move(gpt_weight)};
 }
 
@@ -49,13 +46,12 @@ std::unique_ptr<ProposeModelEngineInitParams> prepareMTPEngineInitParams(size_t 
 
     std::unique_ptr<std::vector<std::unique_ptr<EngineInitParams>>> mtp_params =
         std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
-    const GptInitParameter& gpt_init_params =
-        sp_model.attr("config").attr("gpt_init_params").cast<GptInitParameter>();
-    py::object py_layers_weights     = sp_model.attr("weight").attr("weights");
-    py::object py_global_weights     = sp_model.attr("weight").attr("global_weights");
-    auto       convert               = WeightsConverter(false, gpt_init_params.quant_algo_);
-    auto       py_layers_weights_vec = convertPyObjectToVec(py_layers_weights);
-    size_t     model_num             = py_layers_weights_vec.size();
+    const GptInitParameter& gpt_init_params = sp_model.attr("config").attr("gpt_init_params").cast<GptInitParameter>();
+    py::object              py_layers_weights     = sp_model.attr("weight").attr("weights");
+    py::object              py_global_weights     = sp_model.attr("weight").attr("global_weights");
+    auto                    convert               = WeightsConverter(false, gpt_init_params.quant_algo_);
+    auto                    py_layers_weights_vec = convertPyObjectToVec(py_layers_weights);
+    size_t                  model_num             = py_layers_weights_vec.size();
     if (gpt_init_params.gen_num_per_circle_ > 1 && py_layers_weights_vec.size() == 1) {
         RTP_LLM_LOG_WARNING("duplicate py_layers_weights_vec from 1 to gpt_init_params.gen_num_per_circle_: %d",
                             gpt_init_params.gen_num_per_circle_);
@@ -103,7 +99,7 @@ void RtpLLMOp::init(py::object model,
     RTP_LLM_LOG_INFO("init engine params success");
     params.showGptInitParameter();
     std::unique_ptr<ProposeModelEngineInitParams> propose_params = initProposeModel(propose_model);
-    pybind11::gil_scoped_release                           release;
+    pybind11::gil_scoped_release                  release;
     grpc_server_thread_ = std::thread(&RtpLLMOp::initRPCServer,
                                       this,
                                       std::move(params),
@@ -143,9 +139,9 @@ std::unique_ptr<ProposeModelEngineInitParams> RtpLLMOp::initProposeModel(py::obj
         if (propose_model.is_none()) {
             return nullptr;
         }
-        std::unique_ptr<ProposeModelEngineInitParams> params = nullptr;
-        std::string sp_type            = propose_model.attr("sp_type").cast<std::string>();
-        size_t      gen_num_per_circle = propose_model.attr("gen_num_per_circle").cast<size_t>();
+        std::unique_ptr<ProposeModelEngineInitParams> params  = nullptr;
+        std::string                                   sp_type = propose_model.attr("sp_type").cast<std::string>();
+        size_t gen_num_per_circle                             = propose_model.attr("gen_num_per_circle").cast<size_t>();
         if (sp_type == "vanilla") {
             auto [gpt_init_params, gpt_weight] = prepareEngineInitParams(propose_model, true);
             params                             = std::make_unique<ProposeModelEngineInitParams>(
@@ -198,9 +194,9 @@ KVCacheInfo RtpLLMOp::getCacheStatusInfo(int64_t latest_cache_version) {
 }
 
 void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_init_params,
-                             py::object                                             mm_process_engine,
+                             py::object                                    mm_process_engine,
                              std::unique_ptr<ProposeModelEngineInitParams> propose_params,
-                             py::object                                             token_processor) {
+                             py::object                                    token_processor) {
     auto http_port      = maga_init_params.gpt_init_parameter.http_port_;
     auto model_rpc_port = maga_init_params.gpt_init_parameter.model_rpc_port_;
     auto role_type      = maga_init_params.gpt_init_parameter.role_type_;
@@ -222,21 +218,22 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
         // NOTE: ip/ip段可自定义为所需范围。
         std::string http_server_address("tcp:0.0.0.0:" + std::to_string(http_port));
         http_server_.reset(new HttpApiServer(model_rpc_service_->getEngine(),
-                                                      model_rpc_service_->getMultimodalProcessor(),
-                                                      http_server_address,
-                                                      maga_init_params,
-                                                      token_processor));
+                                             model_rpc_service_->getMultimodalProcessor(),
+                                             http_server_address,
+                                             maga_init_params,
+                                             token_processor));
         if (model_rpc_port < 0) {
             is_server_ready_ = true;
             return;
         }
     }
     grpc::ServerBuilder builder;
-    builder.AddChannelArgument(GRPC_ARG_MAX_CONCURRENT_STREAMS, 100000);
-    builder.AddChannelArgument(GRPC_ARG_MAX_METADATA_SIZE, 1024 * 1024 * 1024);
-    builder.AddChannelArgument(GRPC_ARG_MAX_CONNECTION_IDLE_MS, 600000);
-    builder.AddChannelArgument(GRPC_ARG_HTTP2_MIN_RECV_PING_INTERVAL_WITHOUT_DATA_MS, 1000);
-    builder.AddChannelArgument(GRPC_ARG_HTTP2_MAX_PING_STRIKES, 1000);
+    const GrpcConfig&   grpc_config   = maga_init_params.gpt_init_parameter.grpc_config;
+    auto                server_config = grpc_config.get_server_config();
+    for (auto it = server_config.begin(); it != server_config.end(); ++it) {
+        RTP_LLM_LOG_INFO("grpc server add channel argument %s: %d", it->first.c_str(), it->second);
+        builder.AddChannelArgument(it->first, it->second);
+    }
     builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
     builder.RegisterService(model_rpc_service_.get());
 
@@ -356,4 +353,4 @@ void registerRtpLLMOp(const py::module& m) {
         .def("restart", &RtpLLMOp::restart);
 }
 
-}
+}  // namespace rtp_llm
