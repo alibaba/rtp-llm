@@ -134,6 +134,8 @@ message GenerateInputPB {
     GenerateConfigPB generate_config = 4;
     string client_id = 5;
     int64 start_time = 6;
+    repeated int64  cache_hash_key=7;
+    int64  dp_rank = 8;
 }
 
 message AuxInfoPB {
@@ -229,6 +231,11 @@ message GenerateRequestPB {
     repeated string peer_addrs = 7;
     repeated int32 propose_token_ids = 8;
     repeated int32 position_ids = 9;
+}
+
+message BatchGenerateInputPB {
+    int64  batch_id = 1;
+    repeated GenerateInputPB inputs = 2;
 }
 
 // in tp case, decode master broadcast to decode worker
@@ -407,6 +414,20 @@ message EmbeddingOutputPB {
     repeated EmbeddingTensorMapPB output_map = 3;
 }
 
+message ScheduleInfoPB {
+    int64 request_id = 1;
+    int64 batch_id = 2;
+    repeated RoleAddrPB inputs = 3;
+}
+
+message BatchScheduleInfoPB {
+    repeated ScheduleInfoPB inputs = 1;
+}
+
+message FetchRequestPB {
+    int64 request_id = 1;
+}
+
 service EmbeddingRpcService {
     rpc embedding(EmbeddingInputPB) returns (EmbeddingOutputPB);
     rpc health(EmbeddingHealthRequestPB) returns (EmptyPB);
@@ -421,6 +442,10 @@ service RpcService {
     rpc RemoteFinish(RemoteFinishRequestPB) returns (EmptyPB);
     rpc RemoteFinishNew(RemoteFinishRequestPB) returns (EmptyPB);
 
+    // async submit request
+    rpc Enqueue(BatchGenerateInputPB) returns (RpcErrorPB);
+    rpc FetchResponse(FetchRequestPB) returns (stream GenerateOutputsPB);
+    rpc Cancel(FetchRequestPB) returns (RpcErrorPB);
 
     rpc RemoteGenerateNew(RemoteGenerateRequestPBNew) returns (RemoteGenerateResponsePBNew);
     rpc RemoteStore(RemoteStoreRequestPB) returns (RemoteStoreResponsePB);
@@ -431,4 +456,8 @@ service RpcService {
 
 service MultimodalRpcService {
     rpc RemoteMultimodalEmbedding(MultimodalInputsPB) returns (MultimodalOutputsPB);
+}
+
+service FlexLbRpcService {
+    rpc Schedule(GenerateInputPB) returns (ScheduleInfoPB);
 }
