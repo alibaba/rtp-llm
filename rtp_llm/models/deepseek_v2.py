@@ -714,3 +714,4 @@ register_model("deepseek3", DeepSeekV2, ["DeepseekV3ForCausalLM"])
 register_model("deepseek-v3-mtp", DeepSeekV3Mtp, ["DeepseekV3ForCausalLMNextN"])
 register_model("kimi_k2", DeepSeekV2, [])
 register_model("deepseek_v31", DeepSeekV2, [])
+register_model("deepseek_v32", DeepSeekV2, [])  # DeepSeek-V3.2 uses same architecture as V3.1, with encoding script update
