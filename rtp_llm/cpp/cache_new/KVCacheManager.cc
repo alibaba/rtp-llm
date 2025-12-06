@@ -215,19 +215,18 @@ InsertResult KVCacheManager::insertIntoCache(const InsertInfo& insert_info) {
     }
 
     // insert to cpu
-    FreeInfo free_info(insert_info.batch_kv_cache_resource, insert_info.complete_token_ids);
     if (insert_info.enable_memory_cache) {
-        auto resource_batch0 = insert_info.batch_kv_cache_resource->batch_resource.at(0);
-        auto deleter         = [free_info, allocator = allocator_](KVCacheResourceV1* resource) {
-            allocator->free(free_info);
-            delete resource;
-        };
-        std::shared_ptr<KVCacheResourceV1> resource(new KVCacheResourceV1(resource_batch0), deleter);
+        // 拷贝一下batch resource, 外部可能会对batch resource中的blocks进行修改, 导致deleter中free时blocks未被释放
+        auto     copy_batch_resource = std::make_shared<BatchKVCacheResource>(*(insert_info.batch_kv_cache_resource));
+        FreeInfo free_info(copy_batch_resource, insert_info.complete_token_ids);
+        auto deleter = [free_info, allocator = allocator_](KVCacheResourceV1* resource) { allocator->free(free_info); };
+        std::shared_ptr<KVCacheResourceV1> resource(&(copy_batch_resource->batch_resource.at(0)), deleter);
         auto                               context = memory_connector_->asyncWrite(resource, nullptr);
         if (context) {
             wait_cache_thread_pool_->pushTask([context]() { context->waitDone(); });
         }
     } else {
+        FreeInfo free_info(insert_info.batch_kv_cache_resource, insert_info.complete_token_ids);
         allocator_->free(free_info);
     }
 
