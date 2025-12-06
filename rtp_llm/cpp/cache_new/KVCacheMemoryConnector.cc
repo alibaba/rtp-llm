@@ -56,11 +56,21 @@ bool MemoryConnectorAsyncContext::success() const {
 KVCacheMemoryConnector::KVCacheMemoryConnector(const CacheConfig&                       cache_config,
                                                const std::shared_ptr<KVCacheAllocator>& allocator,
                                                rtp_llm::DeviceBase*                     device,
-                                               const std::vector<std::string>&          tp_addrs):
-    cache_config_(cache_config), allocator_(allocator), device_(device), tp_addrs_(tp_addrs) {}
+                                               const std::vector<std::string>&          tp_addrs,
+                                               const kmonitor::MetricsReporterPtr&      metrics_reporter):
+    cache_config_(cache_config),
+    allocator_(allocator),
+    device_(device),
+    tp_addrs_(tp_addrs),
+    metrics_reporter_(metrics_reporter) {}
 
 KVCacheMemoryConnector::~KVCacheMemoryConnector() {
     RTP_LLM_LOG_INFO("KVCacheMemoryConnector destructor");
+    stop_.store(true);
+    if (metrics_reporter_thread_ && metrics_reporter_thread_->joinable()) {
+        metrics_reporter_thread_->join();
+        metrics_reporter_thread_.reset();
+    }
     tp_broadcast_manager_.reset();
     block_pools_.clear();
     block_cache_.reset();
@@ -76,17 +86,25 @@ bool KVCacheMemoryConnector::init() {
         RTP_LLM_LOG_WARNING("init failed, tp broadcast manager init failed");
         return false;
     }
+
+    if (metrics_reporter_) {
+        metrics_reporter_thread_ =
+            std::make_shared<std::thread>([self = shared_from_this()]() { self->reportMetricsLoop(); });
+    }
     return true;
 }
 
 std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::shared_ptr<KVCacheResourceV1>& resource,
                                                                 const std::shared_ptr<Meta>&              meta) {
+    autil::ScopedTime2 timer;
+
     if (!resource || resource->cacheKeys().empty() || resource->layerBlockIds().empty()) {
         RTP_LLM_LOG_WARNING(
             "async read failed, resource is invalid, resource: %p, cache keys size: %zu, layer block ids size: %zu",
             resource.get(),
             resource->cacheKeys().size(),
             resource->layerBlockIds().size());
+        reportReadMetrics(false, timer.done_us(), 0, 0, 0);
         return nullptr;
     }
 
@@ -94,22 +112,26 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
     const size_t gpu_reuse_num = resource->reuseBlocksNum();
     if (gpu_reuse_num >= cache_keys.size()) {
         RTP_LLM_LOG_DEBUG(
-            "async read skip, gpu reuse len is greater than cache keys size, gpu_reuse_num: %zu, cache_keys size: %zu",
-            gpu_reuse_num,
-            cache_keys.size());
+            "async read skip, gpu reuse len is greater than cache keys size, cache_keys size: %zu, gpu_reuse_num: %zu",
+            cache_keys.size(),
+            gpu_reuse_num);
+        reportReadMetrics(true, timer.done_us(), cache_keys.size(), 0, 0);
         return nullptr;
     }
 
     size_t cpu_matched_num = 0;
     auto   copy_infos = buildCopyPlanForRead(cache_keys, resource->layerBlockIds(), gpu_reuse_num, cpu_matched_num);
     if (copy_infos.empty()) {
-        if (cpu_matched_num > 0) {
+        if (cpu_matched_num > gpu_reuse_num) {
             RTP_LLM_LOG_WARNING(
-                "async read failed, build copy plan for read failed, gpu_reuse_num: %zu, cache_keys: %zu",
+                "async read failed, memory matched more blocks but build copy plan for read failed, cache_keys size: %zu, gpu_reuse_num: %zu, cpu_matched_num: %zu",
+                cache_keys.size(),
                 gpu_reuse_num,
-                cache_keys.size());
+                cpu_matched_num);
+            reportReadMetrics(false, timer.done_us(), cache_keys.size(), cpu_matched_num, 0);
         } else {
-            // not matched in memory cache, do not print log
+            // not matched, or matched but no need to read
+            reportReadMetrics(true, timer.done_us(), cache_keys.size(), cpu_matched_num, 0);
         }
         return nullptr;
     }
@@ -121,19 +143,26 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
             auto block_pool = getBlockPool(copy_info.mem_block_size);
             freeBlocks(block_pool, {copy_info.mem_block_index});
         }
+        reportReadMetrics(false, timer.done_us(), cache_keys.size(), cpu_matched_num, 0);
         return nullptr;
     }
 
-    const auto cpu_reuse_num   = copy_infos.size();
-    const auto total_reuse_num = gpu_reuse_num + cpu_reuse_num;
-    auto       done_cb         = [resource, total_reuse_num, copy_infos, self = shared_from_this()](bool success) {
+    auto done_cb = [resource,
+                    timer,
+                    copy_infos,
+                    cpu_matched_num,
+                    total_blocks_num = cache_keys.size(),
+                    gpu_reuse_num,
+                    self = shared_from_this()](bool success) {
+        const int read_block_num = success ? static_cast<int>(copy_infos.size()) : 0;
         if (success) {
-            resource->setReuseBlocksNum(total_reuse_num);
+            resource->setReuseBlocksNum(gpu_reuse_num + read_block_num);
         }
         for (const auto& copy_info : copy_infos) {
             auto block_pool = self->getBlockPool(copy_info.mem_block_size);
             self->freeBlocks(block_pool, {copy_info.mem_block_index});
         }
+        self->reportReadMetrics(success, timer.done_us(), total_blocks_num, cpu_matched_num, read_block_num);
     };
     return std::make_shared<MemoryConnectorAsyncContext>(send_result, done_cb);
 }
@@ -153,7 +182,12 @@ KVCacheMemoryConnector::buildCopyPlanForRead(const std::vector<int64_t>& cache_k
             RTP_LLM_LOG_DEBUG("build copy plan for read, found null memory block index, cache key: %zu", cache_key);
             break;  // 只处理连续前缀
         }
+
         ++cpu_matched_num;
+        if (cpu_matched_num <= gpu_matched_num) {
+            continue;
+        }
+
         auto block_pool = getBlockPool(match_result.block_size);
         referenceBlocks(block_pool, {match_result.matched_index});
 
@@ -180,12 +214,15 @@ KVCacheMemoryConnector::buildCopyPlanForRead(const std::vector<int64_t>& cache_k
 
 std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shared_ptr<KVCacheResourceV1>& resource,
                                                                  const std::shared_ptr<Meta>&              meta) {
+    autil::ScopedTime2 timer;
+
     if (!resource || resource->cacheKeys().empty() || resource->layerBlockIds().empty()) {
         RTP_LLM_LOG_WARNING(
             "async write failed, resource is invalid, resource: %p, cache keys size: %zu, layer block ids size: %zu",
             resource.get(),
             resource->cacheKeys().size(),
             resource->layerBlockIds().size());
+        reportWriteMetrics(false, timer.done_us(), 0, 0);
         return nullptr;
     }
 
@@ -203,12 +240,14 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
             "async write skip, all cache keys already in memory cache, matched num: %zu, cache keys size: %zu",
             cpu_matched_num,
             cache_keys.size());
+        reportWriteMetrics(true, timer.done_us(), static_cast<int64_t>(cache_keys.size()), 0);
         return nullptr;
     }
 
     auto copy_infos = buildCopyPlanForWrite(cache_keys, resource->layerBlockIds(), cpu_matched_num);
     if (copy_infos.empty()) {
         RTP_LLM_LOG_WARNING("async write failed, build copy plan for write failed");
+        reportWriteMetrics(false, timer.done_us(), static_cast<int64_t>(cache_keys.size()), 0);
         return nullptr;
     }
 
@@ -219,35 +258,41 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
             auto block_pool = getBlockPool(copy_info.mem_block_size);
             freeBlocks(block_pool, {copy_info.mem_block_index}, /*free_ref=*/false);
         }
+        reportWriteMetrics(false, timer.done_us(), static_cast<int64_t>(cache_keys.size()), 0);
         return nullptr;
     }
 
-    auto done_cb = [copy_infos, resource_copy = resource, self = shared_from_this()](bool success) mutable {
-        RTP_LLM_LOG_DEBUG("async write done, success: %d", success);
-        for (const auto& copy_info : copy_infos) {
-            auto block_pool = self->getBlockPool(copy_info.mem_block_size);
-            self->freeBlocks(block_pool, {copy_info.mem_block_index}, /*free_ref=*/false);
-        }
-        if (!success) {
-            return;
-        }
-        for (const auto& copy_info : copy_infos) {
-            if (self->block_cache_->contains(copy_info.cache_key)) {
-                continue;
-            }
-            MemoryBlockCache::CacheItem item;
-            item.cache_key   = copy_info.cache_key;
-            item.block_index = static_cast<BlockIdxType>(copy_info.mem_block_index);
-            item.block_size  = copy_info.mem_block_size;
-            item.is_resident = false;
-            // TODO(LXQ): if block cache is full, need free evicted blocks from block pool
-            if (self->block_cache_->put(item)) {
+    auto done_cb =
+        [copy_infos, resource_copy = resource, timer, total_block_num = cache_keys.size(), self = shared_from_this()](
+            bool success) mutable {
+            RTP_LLM_LOG_DEBUG("async write done, success: %d", success);
+            for (const auto& copy_info : copy_infos) {
                 auto block_pool = self->getBlockPool(copy_info.mem_block_size);
-                self->referenceBlocks(block_pool, {copy_info.mem_block_index});
+                self->freeBlocks(block_pool, {copy_info.mem_block_index}, /*free_ref=*/false);
             }
-        }
-        resource_copy.reset();
-    };
+
+            if (success) {
+                for (const auto& copy_info : copy_infos) {
+                    if (self->block_cache_->contains(copy_info.cache_key)) {
+                        continue;
+                    }
+                    MemoryBlockCache::CacheItem item;
+                    item.cache_key   = copy_info.cache_key;
+                    item.block_index = static_cast<BlockIdxType>(copy_info.mem_block_index);
+                    item.block_size  = copy_info.mem_block_size;
+                    item.is_resident = false;
+                    // TODO(LXQ): if block cache is full, need free evicted blocks from block pool
+                    if (self->block_cache_->put(item)) {
+                        auto block_pool = self->getBlockPool(copy_info.mem_block_size);
+                        self->referenceBlocks(block_pool, {copy_info.mem_block_index});
+                    }
+                }
+                resource_copy.reset();
+            }
+
+            const int64_t write_block_num = success ? static_cast<int64_t>(copy_infos.size()) : 0;
+            self->reportWriteMetrics(success, timer.done_us(), total_block_num, write_block_num);
+        };
     return std::make_shared<MemoryConnectorAsyncContext>(send_result, done_cb);
 }
 
@@ -355,6 +400,10 @@ KVCacheMemoryConnector::sendCopyPlan(const std::vector<CopyInfoPerKey>& copy_inf
 }
 
 bool KVCacheMemoryConnector::copyCache(const MemoryCopyCacheRequestPB& request, MemoryCopyCacheResponsePB& response) {
+    autil::ScopedTime2 timer;
+    const auto         copy_direction =
+        (request.copy_direction() == MemoryCopyCacheRequestPB::H2D) ? CopyDirection::H2D : CopyDirection::D2H;
+
     if (request.gpu_blocks_size() != request.mem_block_ids_size()
         || request.gpu_blocks_size() != request.mem_block_sizes_size()) {
         RTP_LLM_LOG_WARNING(
@@ -363,11 +412,9 @@ bool KVCacheMemoryConnector::copyCache(const MemoryCopyCacheRequestPB& request, 
             request.mem_block_ids_size(),
             request.mem_block_sizes_size());
         response.set_success(false);
+        reportCopyMetrics(false, timer.done_us(), copy_direction);
         return false;
     }
-
-    const auto copy_direction =
-        (request.copy_direction() == MemoryCopyCacheRequestPB::H2D) ? CopyDirection::H2D : CopyDirection::D2H;
 
     std::vector<BufferPtr> dst_buffers;
     std::vector<BufferPtr> src_buffers;
@@ -381,6 +428,7 @@ bool KVCacheMemoryConnector::copyCache(const MemoryCopyCacheRequestPB& request, 
                 mem_block_id,
                 mem_block_size);
             response.set_success(false);
+            reportCopyMetrics(false, timer.done_us(), copy_direction);
             return false;
         }
 
@@ -398,6 +446,7 @@ bool KVCacheMemoryConnector::copyCache(const MemoryCopyCacheRequestPB& request, 
                 mem_block_size,
                 copy_direction == CopyDirection::H2D ? "H2D" : "D2H");
             response.set_success(false);
+            reportCopyMetrics(false, timer.done_us(), copy_direction);
             return false;
         }
     }
@@ -406,6 +455,8 @@ bool KVCacheMemoryConnector::copyCache(const MemoryCopyCacheRequestPB& request, 
         device_->noBlockCopy(MultiCopyParams{dst_buffers, src_buffers});
     }
     response.set_success(true);
+
+    reportCopyMetrics(true, timer.done_us(), copy_direction);
     return true;
 }
 
@@ -642,6 +693,83 @@ void KVCacheMemoryConnector::clearCache() {
                                 block_size,
                                 blocks.size());
         }
+    }
+}
+
+void KVCacheMemoryConnector::reportReadMetrics(
+    bool success, int64_t latency_us, int64_t input_block_num, int64_t matched_block_num, int64_t read_block_num) {
+    if (!metrics_reporter_) {
+        return;
+    }
+
+    RtpLLMMemoryConnectorReadMetricsCollector collector;
+    collector.failed        = !success;
+    collector.latency_us    = latency_us;
+    collector.input_token   = input_block_num * cache_config_.seq_size_per_block;
+    collector.matched_token = matched_block_num * cache_config_.seq_size_per_block;
+    collector.read_token    = read_block_num * cache_config_.seq_size_per_block;
+
+    metrics_reporter_->report<RtpLLMMemoryConnectorMetrics, RtpLLMMemoryConnectorReadMetricsCollector>(nullptr,
+                                                                                                       &collector);
+}
+
+void KVCacheMemoryConnector::reportWriteMetrics(bool    success,
+                                                int64_t latency_us,
+                                                int64_t input_block_num,
+                                                int64_t write_block_num) {
+    if (!metrics_reporter_) {
+        return;
+    }
+
+    RtpLLMMemoryConnectorWriteMetricsCollector collector;
+    collector.failed      = !success;
+    collector.latency_us  = latency_us;
+    collector.input_token = input_block_num * cache_config_.seq_size_per_block;
+    collector.write_token = write_block_num * cache_config_.seq_size_per_block;
+
+    metrics_reporter_->report<RtpLLMMemoryConnectorMetrics, RtpLLMMemoryConnectorWriteMetricsCollector>(nullptr,
+                                                                                                        &collector);
+}
+
+void KVCacheMemoryConnector::reportCopyMetrics(bool success, int64_t latency_us, CopyDirection direction) {
+    if (!metrics_reporter_) {
+        return;
+    }
+
+    RtpLLMMemoryBlockCacheCopyMetricsCollector collector;
+    collector.failed     = !success;
+    collector.latency_us = latency_us;
+    collector.from_gpu   = direction == CopyDirection::D2H;
+
+    metrics_reporter_->report<RtpLLMMemoryConnectorMetrics, RtpLLMMemoryBlockCacheCopyMetricsCollector>(nullptr,
+                                                                                                        &collector);
+}
+
+void KVCacheMemoryConnector::reportMetricsLoop() {
+    while (!stop_.load()) {
+        if (metrics_reporter_) {
+            std::shared_ptr<BlockPool> block_pool;
+            if (!block_pools_.empty()) {
+                block_pool = block_pools_.begin()->second;
+            }
+            if (!block_pool) {
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+                continue;
+            }
+
+            const auto total_blocks     = block_pool->totalBlocksNum();
+            const auto free_blocks      = block_pool->freeBlocksNum();
+            const auto available_blocks = block_pool->availableBlocksNum();
+
+            RtpLLMMemoryBlockCacheStatusMetricsCollector collector;
+            collector.total_block_num     = total_blocks;
+            collector.allocated_block_num = total_blocks - free_blocks;
+            collector.available_block_num = available_blocks;
+
+            metrics_reporter_->report<RtpLLMMemoryConnectorMetrics, RtpLLMMemoryBlockCacheStatusMetricsCollector>(
+                nullptr, &collector);
+        }
+        std::this_thread::sleep_for(std::chrono::seconds(1));
     }
 }
 

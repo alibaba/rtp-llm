@@ -41,7 +41,8 @@ public:
     KVCacheMemoryConnector(const CacheConfig&                       cache_config,
                            const std::shared_ptr<KVCacheAllocator>& allocator,
                            rtp_llm::DeviceBase*                     device,
-                           const std::vector<std::string>&          tp_addrs);
+                           const std::vector<std::string>&          tp_addrs,
+                           const kmonitor::MetricsReporterPtr&      metrics_reporter = nullptr);
     ~KVCacheMemoryConnector() override;
 
 public:
@@ -101,6 +102,12 @@ private:
     bool                       ensureEnoughFreeBlocks(const std::shared_ptr<BlockPool>& block_pool, size_t need_blocks);
     void                       printCopyPlan(const std::vector<CopyInfoPerKey>& copy_infos) const;
 
+    void reportReadMetrics(
+        bool success, int64_t latency_us, int64_t input_block_num, int64_t matched_block_num, int64_t read_block_num);
+    void reportWriteMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t write_block_num);
+    void reportCopyMetrics(bool success, int64_t latency_us, CopyDirection direction);
+    void reportMetricsLoop();
+
 private:
     const CacheConfig&                cache_config_;
     std::shared_ptr<KVCacheAllocator> allocator_;
@@ -111,6 +118,11 @@ private:
     std::map<size_t, std::shared_ptr<BlockPool>> block_pools_;
     std::shared_ptr<MemoryBlockCache>            block_cache_;
     std::shared_ptr<TpBroadcastManager>          tp_broadcast_manager_;
+
+    // metrics reporter
+    kmonitor::MetricsReporterPtr metrics_reporter_;
+    std::shared_ptr<std::thread> metrics_reporter_thread_{nullptr};
+    std::atomic<bool>            stop_{false};
 };
 
 }  // namespace rtp_llm
