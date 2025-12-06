@@ -6,7 +6,6 @@ test_copts = [
 ] + copts()
 
 test_deps = [
-    "//rtp_llm/cpp/devices:devices_base",
     "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
     "//rtp_llm/cpp/config:gpt_init_params",
     "//rtp_llm/cpp/cache_new",
