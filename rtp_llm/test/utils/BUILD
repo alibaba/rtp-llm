@@ -11,6 +11,12 @@ py_library(
     srcs = ["bench_util.py"],
 )
 
+py_library(
+    name = "numeric_util",
+    deps = [],
+    srcs = ["numeric_util.py"],
+)
+
 py_binary(
     name = "gpu_lock",
     deps = [":torch"],

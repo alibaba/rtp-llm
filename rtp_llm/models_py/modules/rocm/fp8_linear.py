@@ -5,8 +5,6 @@ import aiter
 import torch
 from torch import nn
 
-from rtp_llm.config.quant_config import QuantizationConfig
-
 logger = logging.getLogger(__name__)
 
 try:
@@ -29,7 +27,6 @@ class Fp8DeepGEMMLinear(nn.Module):
         weight: torch.Tensor,
         weight_scales: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
-        config=None,
     ) -> None:
         super().__init__()
         self.hidden_size = weight.shape[0]  # k
@@ -130,7 +127,6 @@ class Fp8PTPCLinear(nn.Module):
         weight: torch.Tensor,
         weight_scales: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
-        config=None,
     ) -> None:
         super().__init__()
         self.hidden_size = weight.shape[0]  # k
