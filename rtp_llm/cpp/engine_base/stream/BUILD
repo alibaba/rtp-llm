@@ -31,7 +31,6 @@ cc_library(
     deps = [
         ":generate_types",
         ":generate_config",
-        "//rtp_llm/cpp/devices:devices_base",
         "//:rtp_compute_ops",
     ],
     visibility = ["//visibility:public"],

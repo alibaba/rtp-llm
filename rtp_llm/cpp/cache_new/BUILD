@@ -46,7 +46,6 @@ cc_library(
         "//rtp_llm/cpp/metrics:metrics",
         "//:rtp_compute_ops",
         "//rtp_llm/cpp/config:gpt_init_params",
-        "//rtp_llm/cpp/devices:devices_base",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:hash_util",
         "//rtp_llm/cpp/utils:kv_cache_utils",

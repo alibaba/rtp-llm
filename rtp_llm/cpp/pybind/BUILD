@@ -88,18 +88,7 @@ cc_library(
         "//rtp_llm/cpp/engine_base/schedulers:schedulers",
         "//rtp_llm/cpp/cache_new:cache_new",
         "//:rtp_compute_ops",
-    ] + torch_deps() + select({
-        "@//:using_cuda12": [
-            "//rtp_llm/cpp/devices/cuda_impl:gpu_register",
-        ],
-        "@//:using_cuda": [
-            "//rtp_llm/cpp/devices/cuda_impl:gpu_register",
-        ],
-        "@//:using_rocm": [
-            "//rtp_llm/cpp/devices/rocm_impl:rocm_impl",
-        ],
-        "//conditions:default": [],
-    }),
+    ] + torch_deps(),
     copts = copts(),
     alwayslink = True,
     visibility = ["//visibility:public"],
