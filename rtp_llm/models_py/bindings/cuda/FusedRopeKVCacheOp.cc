@@ -20,8 +20,9 @@ TRTAttnPtr FusedRopeKVCachePrefillOp::prepare(torch_ext::PyAttentionInputs attn_
         kv_cache_block_id_device = torchTensor2Buffer(attn_inputs.kv_cache_block_id_device);
     }
     // not support has_alibi_slopes
-    auto          cu_seqlens    = attn_inputs.cu_seqlens;
-    torch::Tensor cu_kv_seqlens = cu_seqlens;
+    auto          cu_seqlens                = attn_inputs.cu_seqlens;
+    auto          cu_seqlens_without_prefix = attn_inputs.cu_seqlens_without_prefix;
+    torch::Tensor cu_kv_seqlens             = cu_seqlens;
     TRTAttnPtr    attn_params;
     auto          params =
         device_->prepareTrtAttn(attn_configs_, attn_inputs.kv_block_offset, kv_cache_block_id_device, batch_size);
@@ -32,6 +33,7 @@ TRTAttnPtr FusedRopeKVCachePrefillOp::prepare(torch_ext::PyAttentionInputs attn_
     }
     attn_params->attn_type                 = torchDTypeToDataType(attn_inputs.dtype);
     attn_params->cu_seqlens                = cu_seqlens;
+    attn_params->cu_seqlens_without_prefix = cu_seqlens_without_prefix;
     attn_params->cu_kv_seqlens             = cu_kv_seqlens;
     attn_params->max_seq_len               = attn_inputs.input_lengths.max().item<int32_t>();
     attn_params->kv_block_array.cache_type = attn_configs_.kv_cache_dtype;
@@ -92,6 +94,9 @@ torch::Tensor FusedRopeKVCachePrefillOp::forward(const torch::Tensor&           
     }
     // tmp not use qkv fp8 buffer
     bool use_qkv_fp8 = false;
+
+    device_->getRopeCacheOnce(attn_configs_.rope_config, device_->initParams().max_seq_len);
+
     DISPATCH_CUDA_FUNCTION_DATA_TYPE(
         torchDTypeToDataType(qkv.dtype()),
         invokeAddFusedQKVBiasTranspose,
@@ -108,6 +113,12 @@ torch::Tensor FusedRopeKVCachePrefillOp::forward(const torch::Tensor&           
                   // params.weights.qkv_weight->bias->data() : nullptr,
         padding_offset,
         params->cu_seqlens.data_ptr<int>(),
+        params->cu_seqlens_without_prefix.data_ptr<int>(),
+        device_->useRopeCache(),
+        device_->useRopeCache() && device_->ropeCache().defined()
+                && device_->ropeCacheDim() == attn_configs_.rope_config.dim ?
+            device_->ropeCache().data_ptr<float>() :
+            nullptr,
         batch_size,
         params->max_seq_len,  // seq_len
         token_num,
@@ -148,9 +159,11 @@ TRTAttnPtr FusedRopeKVCacheDecodeOp::prepare(torch_ext::PyAttentionInputs attn_i
         kv_cache_block_id_device = torchTensor2Buffer(attn_inputs.kv_cache_block_id_device);
     }
     // not support has_alibi_slopes
-    attn_inputs.cu_seqlens.slice(0, 1, batch_size + 1) = attn_inputs.input_lengths.cumsum(0);
-    auto          cu_seqlens                           = attn_inputs.cu_seqlens;
-    torch::Tensor cu_kv_seqlens                        = cu_seqlens;
+    attn_inputs.cu_seqlens.slice(0, 1, batch_size + 1)                = attn_inputs.input_lengths.cumsum(0);
+    attn_inputs.cu_seqlens_without_prefix.slice(0, 1, batch_size + 1) = attn_inputs.input_lengths.cumsum(0);
+    auto          cu_seqlens                                          = attn_inputs.cu_seqlens;
+    auto          cu_seqlens_without_prefix                           = attn_inputs.cu_seqlens_without_prefix;
+    torch::Tensor cu_kv_seqlens                                       = cu_seqlens;
     TRTAttnPtr    attn_params;
     auto          params = device_->prepareTrtAttn(
         attn_configs_, attn_inputs.kv_block_offset, kv_cache_block_id_device, attn_inputs.sequence_lengths.size(0));
@@ -159,13 +172,12 @@ TRTAttnPtr FusedRopeKVCacheDecodeOp::prepare(torch_ext::PyAttentionInputs attn_i
     attn_params->decode_plan               = true;
     attn_params->attn_type                 = torchDTypeToDataType(attn_inputs.dtype);
     attn_params->cu_seqlens                = cu_seqlens;
+    attn_params->cu_seqlens_without_prefix = cu_seqlens_without_prefix;
     attn_params->cu_kv_seqlens             = cu_kv_seqlens;
     attn_params->sequence_lengths          = attn_inputs.sequence_lengths;
     attn_params->kv_block_array.cache_type = attn_configs_.kv_cache_dtype;
     return attn_params;
 }
-
-static std::once_flag rope_cache_flag;
 
 torch::Tensor FusedRopeKVCacheDecodeOp::forward(const torch::Tensor&              qkv,
                                                 FMHAType                          fmha_type,
@@ -186,14 +198,7 @@ torch::Tensor FusedRopeKVCacheDecodeOp::forward(const torch::Tensor&            
     torch::Tensor q_output          = torch::empty({token_num, local_head_num, size_per_head},
                                           torch::TensorOptions(qkv.dtype()).device(qkv.device()));
 
-    bool use_rope_cache =
-        attn_configs_.rope_config.style == RopeStyle::Base || attn_configs_.rope_config.style == RopeStyle::Yarn;
-    static torch::Tensor rope_cache;
-    std::call_once(rope_cache_flag, [&]() {
-        if (use_rope_cache) {
-            rope_cache = getRopeCache(attn_configs_.rope_config, device_->initParams().max_seq_len);
-        }
-    });
+    device_->getRopeCacheOnce(attn_configs_.rope_config, device_->initParams().max_seq_len);
 
     RTP_LLM_CHECK_WITH_INFO(params->sequence_lengths.is_pinned(), "sequence_lengths is not pinned memory");
     DISPATCH_CUDA_FUNCTION_DATA_TYPE(torchDTypeToDataType(qkv.dtype()),
@@ -206,7 +211,11 @@ torch::Tensor FusedRopeKVCacheDecodeOp::forward(const torch::Tensor&            
                                      params->sequence_lengths.data_ptr<int>(),
                                      nullptr,  // params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias ?
                                                // params.weights.qkv_weight->bias->data() : nullptr,
-                                     use_rope_cache && rope_cache.defined() ? rope_cache.data_ptr<float>() : nullptr,
+                                     device_->useRopeCache(),
+                                     device_->useRopeCache() && device_->ropeCache().defined()
+                                             && device_->ropeCacheDim() == attn_configs_.rope_config.dim ?
+                                         device_->ropeCache().data_ptr<float>() :
+                                         nullptr,
                                      batch_size,
                                      local_head_num,
                                      local_head_num_kv,

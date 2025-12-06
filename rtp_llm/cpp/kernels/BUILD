@@ -359,6 +359,7 @@ cc_library(
     ],
     deps = any_cuda_deps + [
         "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/utils:math_utils",
         "//rtp_llm/cpp/model_utils:model_utils",
         "//rtp_llm/cpp/cuda:cuda_utils_cu",
         "//rtp_llm/cpp/cuda:launch_utils",
