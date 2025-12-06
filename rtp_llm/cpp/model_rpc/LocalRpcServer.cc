@@ -21,7 +21,7 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
     maga_init_params_ = maga_init_params;
     metrics_reporter_ = maga_init_params.metrics_reporter;
     RTP_LLM_LOG_INFO("LocalRpcServer aux_string %s",
-                        maga_init_params_.gpt_init_parameter.misc_config.aux_string.c_str());
+                     maga_init_params_.gpt_init_parameter.misc_config.aux_string.c_str());
     if (propose_params) {
         propose_maga_init_params_ = propose_params.get();
         if (!mm_process_engine.is_none()) {
@@ -400,27 +400,31 @@ void LocalRpcServer::reportCacheStatusTime(int64_t request_begin_time_us) {
     return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "MemoryBlockCache service is temporarily disabled");
 }
 
-::grpc::Status LocalRpcServer::BroadcastTp(::grpc::ServerContext*        context,
-                                           const ::BroadcastTpRequestPB* request,
-                                           ::BroadcastTpResponsePB*      response) {
+::grpc::Status LocalRpcServer::CopyCache(::grpc::ServerContext*      context,
+                                         const ::CopyCacheRequestPB* request,
+                                         ::CopyCacheResponsePB*      response) {
     RTP_LLM_LOG_DEBUG("receive broadcast tp request from client: %s, request: [%s]",
                       context->peer().c_str(),
                       request->DebugString().c_str());
     if (context->IsCancelled()) {
-        RTP_LLM_LOG_WARNING("broadcast tp failed, request is cancelled");
+        RTP_LLM_LOG_WARNING("copy cache failed, request is cancelled");
         return grpc::Status(grpc::StatusCode::CANCELLED, "request is cancelled");
     }
     if (!engine_) {
-        RTP_LLM_LOG_WARNING("broadcast tp failed, engine is null");
+        RTP_LLM_LOG_WARNING("copy cache failed, engine is null");
         return grpc::Status(grpc::StatusCode::INTERNAL, "engine is null");
     }
     auto cache_manager = engine_->getCacheManager();
     if (!cache_manager) {
-        RTP_LLM_LOG_WARNING("broadcast tp failed, cache manager is null");
+        RTP_LLM_LOG_WARNING("copy cache failed, cache manager is null");
         return grpc::Status(grpc::StatusCode::INTERNAL, "cache manager is null");
     }
-    // TODO(LXQ): need to call corresponding function in cache manager
-    return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "broadcast tp is not implemented");
+    if (!cache_manager->copyCache(*request, *response)) {
+        RTP_LLM_LOG_WARNING("cache manager copy cache failed, request: [%s]", request->DebugString().c_str());
+        const std::string error_msg = "cache manager copy cache failed, request: [" + request->DebugString() + "]";
+        return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
+    }
+    return grpc::Status::OK;
 }
 
 }  // namespace rtp_llm

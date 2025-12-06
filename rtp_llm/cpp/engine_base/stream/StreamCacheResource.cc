@@ -11,7 +11,11 @@ namespace rtp_llm {
 
 void StreamCacheResource::init(int batch_size) {
     batch_resource_->resetBatchSize(batch_size);
-    batch_resource_->initGroups(1);
+    int layer_num = 0;
+    if (resource_context_.cache_manager) {
+        layer_num = resource_context_.cache_manager->cacheConfig().layer_num;
+    }
+    batch_resource_->initGroups(1, layer_num);
     batch_resource_->enable_reuse_cache = reuseCache();
     // constructCacheKey();
 }
@@ -77,15 +81,11 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
     int release_blocks_num = maxBlocksNum();
 
     if (release_blocks_num > 0 && batch_resource_->batchSize() > 0) {
-        // Insert all blocks into cache
-        if (reuseCache()) {
-            InsertInfo insert_info(batch_resource_, stream_->completeTokenIdsPtr(), false);
-            resource_context_.cache_manager->insertIntoCache(insert_info);
-        }
-
         // Free all blocks using KVCacheManager::free
-        FreeInfo free_info(batch_resource_, stream_->completeTokenIdsPtr());
+        FreeInfo free_info(batch_resource_, stream_->completeTokenIdsPtr(), reuseCache(), enableMemoryBlockCache());
         free_info.request_id = stream_->streamId();
+
+        // TODO(chanyin): Handle cache insertion for reuse_cache case
 
         resource_context_.cache_manager->free(free_info);
         // batch_resource_ is modified directly by KVCacheManager::free
@@ -234,6 +234,33 @@ bool StreamCacheResource::enable3FS() const {
 
 bool StreamCacheResource::enableMemoryBlockCache() const {
     return resource_context_.enable_memory_block_cache && stream_->enableMemoryBlockCache();
+}
+
+bool StreamCacheResource::asyncLoadCache() {
+    if (!enableMemoryBlockCache()) {
+        return false;
+    }
+    load_cache_context_ = resource_context_.cache_manager->asyncLoadCache(batch_resource_);
+    return load_cache_context_ != nullptr;
+}
+
+bool StreamCacheResource::loadCacheDone() {
+    if (!load_cache_context_) {
+        return true;
+    }
+    if (!load_cache_context_->done()) {
+        return false;
+    }
+    if (load_cache_context_->success()) {
+        auto&     resource  = batch_resource_->batch_resource.at(0);
+        const int reuse_len = resource.reuseBlocksNum() * seqSizePerBlock();
+        stream_->setInitialReuseLength(reuse_len);
+        stream_->setReuseLength(reuse_len);
+        stream_->setLocalReuseLength(reuse_len);
+        stream_->setMtpTokenIndex(reuse_len);
+    }
+    load_cache_context_.reset();
+    return true;
 }
 
 }  // namespace rtp_llm

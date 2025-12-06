@@ -42,6 +42,8 @@ public:
         return block_pool_;
     }
 
+    void clearCache() override;
+
     // TODO, friend class test
 public:
     MallocResult initMalloc(const MallocInfo& malloc_info);

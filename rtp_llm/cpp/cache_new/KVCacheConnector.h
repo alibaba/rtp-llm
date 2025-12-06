@@ -1,5 +1,6 @@
 #pragma once
 
+#include "rtp_llm/cpp/cache_new/AsyncContext.h"
 #include "rtp_llm/cpp/cache_new/BatchKVCacheResource.h"
 
 namespace rtp_llm {
@@ -10,17 +11,6 @@ public:
     virtual ~KVCacheConnector() = default;
 
 public:
-    class AsyncContext {
-    public:
-        AsyncContext()          = default;
-        virtual ~AsyncContext() = default;
-
-    public:
-        virtual bool success() const = 0;
-        virtual void cancel()        = 0;
-        virtual void waitDone()      = 0;
-    };
-
     class Meta {
     public:
         virtual ~Meta() = default;

@@ -93,12 +93,19 @@ struct MallocResult {
 };
 
 struct FreeInfo {
-    FreeInfo(BatchKVCacheResourcePtr batch_kv_cache_resource, CompleteTokenIdsPtr complete_token_ids):
-        batch_kv_cache_resource(batch_kv_cache_resource), complete_token_ids(complete_token_ids) {}
+    FreeInfo(BatchKVCacheResourcePtr batch_kv_cache_resource,
+             CompleteTokenIdsPtr     complete_token_ids,
+             bool                    reuse_cache         = false,
+             bool                    enable_memory_cache = false):
+        batch_kv_cache_resource(batch_kv_cache_resource),
+        complete_token_ids(complete_token_ids),
+        reuse_cache(reuse_cache),
+        enable_memory_cache(enable_memory_cache) {}
 
     BatchKVCacheResourcePtr batch_kv_cache_resource;
     CompleteTokenIdsPtr     complete_token_ids;
-
+    bool                    reuse_cache{false};
+    bool                    enable_memory_cache{false};
     // Metadata
     int64_t request_id = 0;  // for logging and debugging
 };
@@ -106,14 +113,20 @@ struct FreeInfo {
 struct InsertInfo {
     InsertInfo(BatchKVCacheResourcePtr batch_kv_cache_resource,
                CompleteTokenIdsPtr     complete_token_ids,
-               bool                    is_resident):
+               bool                    is_resident,
+               bool                    reuse_cache         = true,
+               bool                    enable_memory_cache = false):
         batch_kv_cache_resource(batch_kv_cache_resource),
         complete_token_ids(complete_token_ids),
-        is_resident(is_resident) {}
+        is_resident(is_resident),
+        reuse_cache(reuse_cache),
+        enable_memory_cache(enable_memory_cache) {}
 
     BatchKVCacheResourcePtr batch_kv_cache_resource;
     CompleteTokenIdsPtr     complete_token_ids;
     bool                    is_resident;
+    bool                    reuse_cache{true};
+    bool                    enable_memory_cache{false};
 };
 
 struct InsertResult {

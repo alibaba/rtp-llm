@@ -61,3 +61,13 @@ py_library(
     ],
     visibility = ["//visibility:public"],
 )
+
+cc_library(
+    name = "tp_broadcast_manager",
+    srcs = [],
+    hdrs = ["TpBroadcastManager.h"],
+    deps = [
+        ":model_rpc_pool",
+    ],
+    visibility = ["//visibility:public"],
+)

@@ -42,6 +42,7 @@ cc_library(
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
         "//rtp_llm/cpp/model_rpc:model_rpc_pool",
         "//rtp_llm/cpp/model_rpc:rpc_error_code",
+        "//rtp_llm/cpp/model_rpc:tp_broadcast_manager",
         "//rtp_llm/cpp/utils:lru_cache",
         "//rtp_llm/cpp/metrics:metrics",
         "//:rtp_compute_ops",
