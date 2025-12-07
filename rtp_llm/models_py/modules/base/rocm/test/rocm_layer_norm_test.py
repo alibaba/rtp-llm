@@ -2,10 +2,30 @@ import itertools
 from unittest import SkipTest, TestCase, main
 
 import torch
+import torch.nn.functional as F
 from torch import dtype as _dtype
 
 from rtp_llm.models_py.modules import AddBiasResLayerNorm
-from rtp_llm.models_py.modules.rocm.norm import AddBiasResLayerNormROCmTorch
+
+
+class AddBiasResLayerNormROCmTorch(torch.nn.Module):
+    def __init__(self, weight: torch.Tensor, beta: torch.Tensor, eps: float = 1e-6):
+        super().__init__()
+        self.weight = weight
+        self.beta = beta
+        self.variance_epsilon = eps
+
+    def forward(
+        self, hidden_states: torch.Tensor, residual: torch.Tensor, bias: torch.Tensor
+    ):
+        output = F.layer_norm(
+            input=hidden_states,
+            normalized_shape=(hidden_states.shape[-1],),
+            weight=self.weight.data,
+            bias=bias,
+            eps=self.variance_epsilon,
+        )
+        return output
 
 
 class LayerNormTest(TestCase):

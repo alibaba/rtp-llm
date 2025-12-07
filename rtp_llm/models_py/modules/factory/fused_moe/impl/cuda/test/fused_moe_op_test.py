@@ -8,7 +8,7 @@ from torch import nn
 from torch.profiler import ProfilerActivity, profile
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.models_py.modules.factory import LinearFactory
+from rtp_llm.models_py.modules import LinearFactory
 
 from rtp_llm.ops.compute_ops import FusedMoEOp  # isort:skip
 

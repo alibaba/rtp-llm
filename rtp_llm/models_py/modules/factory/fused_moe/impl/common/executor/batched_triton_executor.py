@@ -3,7 +3,7 @@ from typing import Any, Optional
 import torch
 import triton.language as tl
 
-import rtp_llm.models_py.modules.common.moe.fused_moe as mm
+import rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe as mm
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )

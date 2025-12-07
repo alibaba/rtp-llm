@@ -6,9 +6,9 @@ from typing import Optional
 import torch
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import fp8_gemm_nt, has_deep_gemm
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
 from rtp_llm.models_py.modules.factory.linear import LinearBase
-from rtp_llm.models_py.utils.deepgemm_wrapper import fp8_gemm_nt, has_deep_gemm
 
 logger = logging.getLogger(__name__)
 

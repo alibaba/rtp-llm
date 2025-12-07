@@ -26,7 +26,7 @@ class TestCudaNoQuantSingleGpuStrategy(unittest.TestCase):
         self.strategy = BatchedTritonStrategy()
 
     @patch(
-        "rtp_llm.models_py.modules.factory.fused_moe.config_resolver.MoeConfigResolver"
+        "rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver.MoeConfigResolver"
     )
     def test_can_handle_true(self, mock_resolver_class: Any) -> None:
         """Test case that can be handled"""
@@ -41,7 +41,7 @@ class TestCudaNoQuantSingleGpuStrategy(unittest.TestCase):
         self.assertTrue(self.strategy.can_handle(config))
 
     @patch(
-        "rtp_llm.models_py.modules.factory.fused_moe.config_resolver.MoeConfigResolver"
+        "rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver.MoeConfigResolver"
     )
     def test_can_handle_false_not_cuda(self, mock_resolver_class: Any) -> None:
         """Test not CUDA device
@@ -63,7 +63,7 @@ class TestCudaNoQuantSingleGpuStrategy(unittest.TestCase):
         self.assertFalse(self.strategy.can_handle(config))
 
     @patch(
-        "rtp_llm.models_py.modules.factory.fused_moe.config_resolver.MoeConfigResolver"
+        "rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver.MoeConfigResolver"
     )
     def test_can_handle_false_has_quant(self, mock_resolver_class: Any) -> None:
         """Test case with quantization"""
@@ -78,7 +78,7 @@ class TestCudaNoQuantSingleGpuStrategy(unittest.TestCase):
         self.assertFalse(self.strategy.can_handle(config))
 
     @patch(
-        "rtp_llm.models_py.modules.factory.fused_moe.config_resolver.MoeConfigResolver"
+        "rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver.MoeConfigResolver"
     )
     def test_can_handle_false_not_single_gpu(self, mock_resolver_class: Any) -> None:
         """Test multi-GPU case"""
@@ -112,9 +112,9 @@ class TestCudaFp8PerBlockNoDPStrategy(unittest.TestCase):
         self.strategy = CudaFp8PerBlockNoDPStrategy()
 
     @patch(
-        "rtp_llm.models_py.modules.factory.fused_moe.config_resolver.MoeConfigResolver"
+        "rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver.MoeConfigResolver"
     )
-    @patch("rtp_llm.models_py.utils.deepgemm_wrapper.has_deep_gemm")
+    @patch("rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.has_deep_gemm")
     def test_can_handle_single_gpu(
         self, mock_has_deep_gemm: Any, mock_resolver_class: Any
     ) -> None:
@@ -132,9 +132,9 @@ class TestCudaFp8PerBlockNoDPStrategy(unittest.TestCase):
         self.assertTrue(self.strategy.can_handle(config))
 
     @patch(
-        "rtp_llm.models_py.modules.factory.fused_moe.config_resolver.MoeConfigResolver"
+        "rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver.MoeConfigResolver"
     )
-    @patch("rtp_llm.models_py.utils.deepgemm_wrapper.has_deep_gemm")
+    @patch("rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.has_deep_gemm")
     def test_can_handle_tp_equal_ep(
         self, mock_has_deep_gemm: Any, mock_resolver_class: Any
     ) -> None:
@@ -152,9 +152,9 @@ class TestCudaFp8PerBlockNoDPStrategy(unittest.TestCase):
         self.assertTrue(self.strategy.can_handle(config))
 
     @patch(
-        "rtp_llm.models_py.modules.factory.fused_moe.config_resolver.MoeConfigResolver"
+        "rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver.MoeConfigResolver"
     )
-    @patch("rtp_llm.models_py.utils.deepgemm_wrapper.has_deep_gemm")
+    @patch("rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.has_deep_gemm")
     def test_can_handle_false_no_deep_gemm(
         self, mock_has_deep_gemm: Any, mock_resolver_class: Any
     ) -> None:
@@ -191,7 +191,7 @@ class TestCudaFp8PerTensorSingleGpuStrategy(unittest.TestCase):
         self.strategy = CudaFp8PerTensorSingleGpuStrategy()
 
     @patch(
-        "rtp_llm.models_py.modules.factory.fused_moe.config_resolver.MoeConfigResolver"
+        "rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver.MoeConfigResolver"
     )
     def test_can_handle_fp8_per_tensor_compressed(
         self, mock_resolver_class: Any
@@ -207,7 +207,7 @@ class TestCudaFp8PerTensorSingleGpuStrategy(unittest.TestCase):
         self.assertTrue(self.strategy.can_handle(config))
 
     @patch(
-        "rtp_llm.models_py.modules.factory.fused_moe.config_resolver.MoeConfigResolver"
+        "rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver.MoeConfigResolver"
     )
     def test_can_handle_fp8_dynamic_per_tensor(self, mock_resolver_class: Any) -> None:
         """Test FP8_DYNAMIC_PER_TENSOR case"""

@@ -7,6 +7,10 @@ from typing import Any, Dict, Optional
 import torch
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
+    is_deep_gemm_e8m0_used,
+    m_grouped_fp8_gemm_nt_contiguous,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     ExpertForwardPayload,
     FusedMoeExpertExecutor,
@@ -20,10 +24,6 @@ from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
     ep_gather,
     ep_scatter,
     tma_align_input_scale,
-)
-from rtp_llm.models_py.utils.deepgemm_wrapper import (
-    is_deep_gemm_e8m0_used,
-    m_grouped_fp8_gemm_nt_contiguous,
 )
 from rtp_llm.models_py.utils.math import ceil_div
 from rtp_llm.ops.compute_ops import trt_fp8_quantize_128
@@ -49,10 +49,10 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
     @classmethod
     def check_conditions(cls, checker: Any, config: GptInitModelParameters) -> None:
         """Check if DeepGemmContinousExecutor can handle the configuration"""
+        from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import has_deep_gemm
         from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
             MoeConfigResolver,
         )
-        from rtp_llm.models_py.utils.deepgemm_wrapper import has_deep_gemm
 
         resolver = MoeConfigResolver()
         quant_method = resolver.get_quant_method(config)

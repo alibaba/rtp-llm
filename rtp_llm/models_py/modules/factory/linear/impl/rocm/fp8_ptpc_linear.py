@@ -11,7 +11,7 @@ from rtp_llm.models_py.modules.factory.linear import LinearBase
 
 logger = logging.getLogger(__name__)
 
-from rtp_llm.models_py.kernels.fp8_kernel import rocm_per_token_quant_fp8
+from rtp_llm.models_py.kernels.rocm.fp8_kernel import rocm_per_token_quant_fp8
 
 
 class RocmFp8PTPCLinear(LinearBase):

@@ -1,13 +1,15 @@
-import math
-from einops import rearrange, repeat
 import itertools
-from unittest import TestCase, main, SkipTest
+import math
+from typing import List, Optional, Tuple
+from unittest import SkipTest, TestCase, main
+
+import aiter
 import torch
 import torch.nn.functional as F
 from aiter import dtypes
-import aiter
-from typing import Optional, List, Tuple
-    
+from einops import rearrange, repeat
+
+
 def construct_local_mask(
     seqlen_q,
     seqlen_k,
@@ -43,6 +45,7 @@ def construct_local_mask(
             col_idx > torch.minimum(row_idx + sk - sq + window_size[1], sk),
             col_idx < row_idx + sk - sq - window_size[0],
         )
+
 
 def attention_ref(
     q,
@@ -138,7 +141,8 @@ def attention_ref(
     if query_padding_mask is not None:
         output.masked_fill_(rearrange(~query_padding_mask, "b s -> b s 1 1"), 0.0)
     return output.to(dtype=dtype_og), attention.to(dtype=dtype_og)
-    
+
+
 def run_torch(
     q,
     k,
@@ -188,6 +192,7 @@ def run_torch(
         dq, dk, dv = torch.autograd.grad(out, (q, k, v), dout)
         return out, dq, dk, dv, None
 
+
 def run_ck(
     q,
     k,
@@ -202,7 +207,7 @@ def run_ck(
     return_lse=True,
     return_attn_probs=False,
 ):
-    out, _, S_dmask  = aiter.flash_attn_func(
+    out, _, S_dmask = aiter.flash_attn_func(
         q,
         k,
         v,
@@ -226,8 +231,7 @@ def run_ck(
         return out, None, dq, dk, dv, None
 
 
-
-_PARTITION_SIZE = 512 
+_PARTITION_SIZE = 512
 _PARTITION_SIZE_ROCM = 256
 _DEVICE_PROPERTIES = torch.cuda.get_device_properties("cuda")
 _ON_NAVI = (
@@ -367,7 +371,6 @@ def run_native(
     return output  # , 1
 
 
-
 def run_aiter(
     query: torch.Tensor,
     key_cache: torch.Tensor,
@@ -440,11 +443,9 @@ def run_aiter(
         if cpa_fp8_out:
             return output.view(num_seqs, num_heads * head_size)
     else:
-        assert use_custom==True,"rocm custom paged attention should be used"
-        
+        assert use_custom == True, "rocm custom paged attention should be used"
+
     return output
-
-
 
 
 def test_flash_attn_output(
@@ -557,6 +558,7 @@ def test_flash_attn_output(
 
     return out, out_ref, out_pt
 
+
 # 以下是从test_pa.py移植过来的test_paged_attention函数及其依赖代码
 
 uniform_range = (-1, 1)
@@ -569,9 +571,10 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "fp8_e5m2": torch.uint8,
 }
 
+
 def get_kv_cache_torch_dtype(
     cache_dtype,
-    model_dtype = None,
+    model_dtype=None,
 ):
     if isinstance(cache_dtype, str):
         if cache_dtype == "auto":
@@ -593,6 +596,7 @@ def get_kv_cache_torch_dtype(
         raise ValueError(f"Invalid kv cache dtype: {cache_dtype}")
     return torch_dtype
 
+
 def kv_cache_factory(
     num_blocks: int,
     block_size: int,
@@ -600,9 +604,9 @@ def kv_cache_factory(
     num_heads: int,
     head_size: int,
     cache_dtype,
-    model_dtype = None,
+    model_dtype=None,
     seed: int = 0,
-    device = "cuda",
+    device="cuda",
 ):
 
     if cache_dtype == "fp8" and head_size % 16:
@@ -635,7 +639,6 @@ def kv_cache_factory(
     return k_caches, v_caches
 
 
-
 def asm_V_shuffle(VC):
     # [num_blocks, num_kv_heads, head_size, block_size]
     x = 16 // VC.element_size()
@@ -644,6 +647,7 @@ def asm_V_shuffle(VC):
     # [num_blocks, num_kv_heads, block_size/X, head_size, X]
     VC = VC.permute(0, 1, 3, 2, 4).contiguous()
     return VC
+
 
 def test_paged_attention(
     ctx_lens: int,
@@ -683,6 +687,7 @@ def test_paged_attention(
 
     # Create the block tables.
     import random
+
     block_tables_lst = []
     for _ in range(num_seqs):
         block_table = [
@@ -735,13 +740,15 @@ def test_paged_attention(
         alibi_slopes,
         k_scale,
         v_scale,
-        num_queries_per_kv ,
-        dtype
+        num_queries_per_kv,
+        dtype,
     )
     if torch.allclose(out_native, out_aiter, atol=1e-2, rtol=1e-2):
         print("run_aiter test passed")
     else:
-        print(f"Output difference: max diff = {(out_native - out_aiter).abs().max().item()}")
+        print(
+            f"Output difference: max diff = {(out_native - out_aiter).abs().max().item()}"
+        )
 
     # Test run_aiter_asm (only for bf16)
     # if dtype == dtypes.bf16:
@@ -754,14 +761,16 @@ def test_paged_attention(
     #         max_num_blocks_per_seq,
     #     )
     #     print("run_aiter_asm test passed")
-        
+
     #     # Check if outputs are close
     #     if torch.allclose(out_aiter, out_aiter_asm, atol=1e-2, rtol=1e-2):
     #         print("run_aiter and run_aiter_asm outputs are close")
     #     else:
     #         print(f"Output difference: max diff = {(out_aiter - out_aiter_asm).abs().max().item()}")
 
-    print(f"Test completed: {ctx_lens=}, {num_seqs=}, {num_heads=}, {head_size=}, {use_alibi=}, {block_size=}, {dtype=}, {kv_cache_dtype=}")
+    print(
+        f"Test completed: {ctx_lens=}, {num_seqs=}, {num_heads=}, {head_size=}, {use_alibi=}, {block_size=}, {dtype=}, {kv_cache_dtype=}"
+    )
     return {"test_status": "passed"}
 
 
@@ -846,7 +855,9 @@ class FmhaTest(TestCase):
                     dtype,
                 )
                 print(f"Output max diff: {(out - out_ref).abs().max().item()}")
-                print(f"Output Pytorch max diff: {(out_pt - out_ref).abs().max().item()}")
+                print(
+                    f"Output Pytorch max diff: {(out_pt - out_ref).abs().max().item()}"
+                )
                 self.assertTrue(torch.allclose(out, out_ref, atol=1e-2, rtol=1e-2))
 
     def test_paged_attention_benchmark(self):
@@ -861,6 +872,7 @@ class FmhaTest(TestCase):
         self.assertIn("test_status", result)
         self.assertEqual(result["test_status"], "passed")
         print("Paged attention test completed successfully")
+
 
 if __name__ == "__main__":
     main()
