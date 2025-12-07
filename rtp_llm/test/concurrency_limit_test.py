@@ -65,6 +65,9 @@ def fake_inference(*args, **kwargs):
 FrontendWorker.__init__ = fake_init
 FrontendWorker.inference = fake_inference
 
+FrontendServer.__init__ = fake_init
+FrontendServer.start = fake_start
+
 BackendServer.start = fake_start
 BackendServer.ready = fake_ready
 

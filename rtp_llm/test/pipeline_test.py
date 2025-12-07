@@ -1,13 +1,14 @@
 import unittest
 from typing import List
+from unittest.mock import MagicMock
 
 import torch
 
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.frontend.frontend_worker import FrontendWorker
 from rtp_llm.frontend.tokenizer_factory.tokenizer_utils import DecodingState
 from rtp_llm.frontend.tokenizer_factory.tokenizers.base_tokenizer import BaseTokenizer
-from rtp_llm.pipeline.pipeline import Pipeline
 from rtp_llm.utils.base_model_datatypes import GenerateOutput, GenerateOutputs
 
 
@@ -71,9 +72,14 @@ class PipelineDecodeTest(unittest.TestCase):
         # Create mock tokenizer
         self.tokenizer = MockTokenizer()
 
-        # Create pipeline instance
-        self.pipeline = Pipeline(
-            model_config=self.model_config, tokenizer=self.tokenizer
+        # Create mock backend_rpc_server_visitor
+        mock_backend_rpc_server_visitor = MagicMock()
+
+        # Create FrontendWorker instance
+        self.pipeline = FrontendWorker(
+            model_config=self.model_config,
+            tokenizer=self.tokenizer,
+            backend_rpc_server_visitor=mock_backend_rpc_server_visitor,
         )
 
     def test_decode_non_incremental_tokens_basic(self):
@@ -101,7 +107,7 @@ class PipelineDecodeTest(unittest.TestCase):
                 stop_word_str_slices=[],
                 stop_word_ids=[],
                 stop_word_id_slices=[],
-                ouput_tokens_list=[],
+                output_tokens_list=[],
             )
         )
 
@@ -139,7 +145,7 @@ class PipelineDecodeTest(unittest.TestCase):
                 stop_word_str_slices=["C"],
                 stop_word_ids=[],
                 stop_word_id_slices=[],
-                ouput_tokens_list=[],
+                output_tokens_list=[],
             )
         )
 
@@ -179,7 +185,7 @@ class PipelineDecodeTest(unittest.TestCase):
                 stop_word_str_slices=[],
                 stop_word_ids=[],
                 stop_word_id_slices=[],
-                ouput_tokens_list=[],
+                output_tokens_list=[],
             )
         )
 
@@ -216,7 +222,7 @@ class PipelineDecodeTest(unittest.TestCase):
                 stop_word_id_slices=[],
                 decoding_states=[],
                 token_buffers=[],
-                ouput_tokens_list=[],
+                output_tokens_list=[],
             )
         )
 
@@ -256,7 +262,7 @@ class PipelineDecodeTest(unittest.TestCase):
                 stop_word_id_slices=[],
                 decoding_states=[],
                 token_buffers=[],
-                ouput_tokens_list=[],
+                output_tokens_list=[],
             )
         )
 
@@ -277,7 +283,7 @@ class PipelineDecodeTest(unittest.TestCase):
                 stop_word_id_slices=[],
                 decoding_states=decoding_states,
                 token_buffers=token_buffers,
-                ouput_tokens_list=output_tokens_list,
+                output_tokens_list=output_tokens_list,
             )
         )
 
@@ -319,7 +325,7 @@ class PipelineDecodeTest(unittest.TestCase):
                 stop_word_id_slices=[],
                 decoding_states=[],
                 token_buffers=[],
-                ouput_tokens_list=[],
+                output_tokens_list=[],
             )
         )
 
@@ -410,7 +416,7 @@ class PipelineDecodeTest(unittest.TestCase):
                 stop_word_str_slices=[],
                 stop_word_ids=[],
                 stop_word_id_slices=[],
-                ouput_tokens_list=[],
+                output_tokens_list=[],
             )
         )
 
@@ -448,7 +454,7 @@ class PipelineDecodeTest(unittest.TestCase):
                 stop_word_id_slices=[],
                 decoding_states=[],
                 token_buffers=[],
-                ouput_tokens_list=[],
+                output_tokens_list=[],
             )
         )
 

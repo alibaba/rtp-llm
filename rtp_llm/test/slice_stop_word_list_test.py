@@ -1,11 +1,12 @@
 import os
 from unittest import TestCase, main, mock
 
-from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 import torch
 
+from rtp_llm.async_decoder_engine.base_engine import BaseEngine
+from rtp_llm.frontend.frontend_worker import FrontendWorker
 from rtp_llm.models.base_model import GenerateOutput, GenerateOutputs
-from rtp_llm.pipeline.pipeline import Pipeline
+from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.test.model_test.test_util.fake_model_loader import FakeModelLoader
 
 os.environ["KV_CACHE_MEM_MB"] = "100"
@@ -23,7 +24,11 @@ class SliceStopWordListTest(TestCase):
         engine: BaseEngine = FakeModelLoader(
             "llama", ckpt_path, ckpt_path, max_seq_len=1024
         ).init_engine()
-        self.pipeline = Pipeline(engine.config, engine.model.tokenizer)
+
+        backend_rpc_server_visitor = BackendRPCServerVisitor(engine.config, False)
+        self.pipeline = FrontendWorker(
+            engine.config, engine.model.tokenizer, backend_rpc_server_visitor
+        )
 
     async def mock_generate(self):
         yield GenerateOutputs(

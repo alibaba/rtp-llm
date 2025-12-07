@@ -8,8 +8,8 @@ import pynvml
 import torch
 
 from rtp_llm.async_decoder_engine.base_engine import BaseEngine
+from rtp_llm.frontend.frontend_worker import FrontendWorker
 from rtp_llm.model_factory import ModelConfig, ModelFactory
-from rtp_llm.pipeline.pipeline import Pipeline
 from rtp_llm.utils.ft_plugin import plguin_loader
 
 
@@ -66,7 +66,7 @@ class ModelTestBase(TestCase):
 
     def _test_score(
         self,
-        pipeline: Pipeline,
+        pipeline: FrontendWorker,
         generate_config: Dict[str, Any],
         expect_result_file: str,
     ):
@@ -124,7 +124,7 @@ class ModelTestBase(TestCase):
     # 由于async请求时候跑的顺序不一定一致，所以需要修改max_new_tokens并取最后一个，来获取确定的结果
     def _test_async_score(
         self,
-        pipeline: Pipeline,
+        pipeline: FrontendWorker,
         generate_config: Dict[str, Any],
         expect_result_file: str,
     ):
@@ -177,15 +177,15 @@ class ModelTestBase(TestCase):
             )
         )
 
-    def _test_ft_score(self, pipeline: Pipeline, expect_result_file: str):
+    def _test_ft_score(self, pipeline: FrontendWorker, expect_result_file: str):
         generate_config = {"top_k": 1, "max_new_tokens": 10}
         self._test_score(pipeline, generate_config, expect_result_file)
 
-    def _test_ft_async_score(self, pipeline: Pipeline, expect_result_file: str):
+    def _test_ft_async_score(self, pipeline: FrontendWorker, expect_result_file: str):
         generate_config = {"top_k": 1, "max_new_tokens": 1}
         self._test_async_score(pipeline, generate_config, expect_result_file)
 
-    def _test_ft_config_score(self, pipeline: Pipeline, expect_result_file: str):
+    def _test_ft_config_score(self, pipeline: FrontendWorker, expect_result_file: str):
         generate_config = {
             "max_new_tokens": 16,
             "random_seed": None,
@@ -196,7 +196,7 @@ class ModelTestBase(TestCase):
         }
         self._test_score(pipeline, generate_config, expect_result_file)
 
-    def _test_hf_score(self, pipeline: Pipeline, expect_result_file: str):
+    def _test_hf_score(self, pipeline: FrontendWorker, expect_result_file: str):
         generate_config = {
             "top_k": 1,
             "temperature": None,
@@ -206,7 +206,7 @@ class ModelTestBase(TestCase):
         }
         self._test_score(pipeline, generate_config, expect_result_file)
 
-    def _test_loss(self, pipeline: Pipeline, expect_result_file: str):
+    def _test_loss(self, pipeline: FrontendWorker, expect_result_file: str):
         generate_config = {
             "top_k": 1,
             "max_new_tokens": 10,
@@ -240,7 +240,6 @@ class ModelTestBase(TestCase):
                 ckpt_path=self.ckpt_path,
                 quantization=self.quantization,
                 max_seq_len=8192,
-                quantization=self.quantization,
             )
         )
         return engine
@@ -248,7 +247,9 @@ class ModelTestBase(TestCase):
     def simple_test(self, is_fake: bool):
         engine: BaseEngine = self._load_engine()
         try:
-            pipeline = Pipeline(engine.config, engine.model.tokenizer)
+            pipeline = FrontendWorker(
+                engine.config, engine.model.tokenizer, engine.backend_rpc_server_visitor
+            )
             if engine.config.pre_seq_len > 0:
                 model_str = "/ptuning"
             else:

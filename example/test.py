@@ -4,10 +4,11 @@ import os
 import rtp_llm.models
 from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.distribute.worker_info import g_worker_info, update_master_info
+from rtp_llm.frontend.frontend_worker import FrontendWorker
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.openai.api_datatype import ChatCompletionRequest, ChatMessage, RoleEnum
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
-from rtp_llm.pipeline import Pipeline
+from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.test.utils.port_util import PortsContext
 
 
@@ -24,7 +25,10 @@ async def main():
         model = ModelFactory.from_huggingface(
             model_config.ckpt_path, model_config=model_config
         )
-        pipeline = Pipeline(model.config, model.tokenizer)
+        backend_rpc_server_visitor = BackendRPCServerVisitor(model.config, False)
+        pipeline = FrontendWorker(
+            model.config, model.tokenizer, backend_rpc_server_visitor
+        )
 
         # usual request
         for res in pipeline(

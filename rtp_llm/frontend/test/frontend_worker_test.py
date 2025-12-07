@@ -7,16 +7,21 @@ from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 from rtp_llm.config.log_config import LOGGING_CONFIG
 from rtp_llm.distribute.worker_info import g_worker_info, update_master_info
 from rtp_llm.frontend.frontend_worker import BatchPipelineResponse, FrontendWorker
-from rtp_llm.pipeline.pipeline import Pipeline
+from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.structure.request_extractor import request_id_field_name
 from rtp_llm.test.model_test.test_util.fake_model_loader import FakeModelLoader
 from rtp_llm.test.utils.port_util import PortManager
 
 
 class FakeFrontendWorker(FrontendWorker):
-    def __init__(self, engine, pipeline):
+    def __init__(self, engine, frontend_worker):
         self.engine = engine
-        self.pipeline = pipeline
+        # Copy all attributes from the real frontend_worker
+        self.model_config = frontend_worker.model_config
+        self.tokenizer = frontend_worker.tokenizer
+        self._special_tokens = frontend_worker._special_tokens
+        self._mm_token = frontend_worker._mm_token
+        self.backend_rpc_server_visitor = frontend_worker.backend_rpc_server_visitor
 
 
 class FrontendWorkerTest(TestCase):
@@ -49,8 +54,11 @@ class FrontendWorkerTest(TestCase):
             max_seq_len=2048,
         )
         engine: BaseEngine = self.fake_model_loader.init_engine()
-        pipeline = Pipeline(engine.config, engine.model.tokenizer)
-        return FakeFrontendWorker(engine, pipeline)
+        backend_rpc_server_visitor = BackendRPCServerVisitor(engine.config, False)
+        frontend_worker = FrontendWorker(
+            engine.config, engine.model.tokenizer, backend_rpc_server_visitor
+        )
+        return FakeFrontendWorker(engine, frontend_worker)
 
     async def _run(self, frontend_worker, **kwargs):
         count = 0
@@ -296,11 +304,6 @@ class FrontendWorkerTest(TestCase):
         self.assertEqual(3, len(aux_info[1]))
         self.assertEqual([True, True], finished)
         self.assertTrue(len(result_text) > 0)
-
-    def test_encode(self):
-        token_ids, tokens = self.frontend_worker.tokenizer_encode("a b c")
-        self.assertEqual(token_ids, [1, 263, 289, 274])
-        self.assertEqual(tokens, ["<s>", "a", "b", "c"])
 
 
 if __name__ == "__main__":

@@ -6,12 +6,12 @@ from transformers import AutoTokenizer
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.config.py_config_modules import StaticConfig
+from rtp_llm.frontend.frontend_worker import FrontendWorker
 from rtp_llm.frontend.tokenizer_factory.tokenizers.tokenization_qwen import (
     QWenTokenizer,
 )
 from rtp_llm.openai.api_datatype import ChatCompletionRequest, GenerateConfig
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
-from rtp_llm.pipeline.pipeline import Pipeline
 
 
 class GenerateConfigTest(TestCase):
@@ -43,7 +43,7 @@ class GenerateConfigTest(TestCase):
 
     def test_simple(self):
         parameter = GptInitModelParameters(0, 0, 0, 0, 0)
-        generate_config = Pipeline.create_generate_config(
+        generate_config = FrontendWorker.create_generate_config(
             tokenizer=None,
             vocab_size=100,
             special_tokens=parameter.special_tokens,
@@ -55,7 +55,7 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(generate_config.top_p, 0.95)
         self.assertEqual(generate_config.max_new_tokens, 100)
 
-        generate_config = Pipeline.create_generate_config(
+        generate_config = FrontendWorker.create_generate_config(
             tokenizer=None,
             vocab_size=100,
             special_tokens=parameter.special_tokens,
@@ -70,7 +70,7 @@ class GenerateConfigTest(TestCase):
 
     def test_kwargs_overwrite(self):
         parameter = GptInitModelParameters(0, 0, 0, 0, 0)
-        generate_config = Pipeline.create_generate_config(
+        generate_config = FrontendWorker.create_generate_config(
             tokenizer=None,
             vocab_size=100,
             special_tokens=parameter.special_tokens,
@@ -87,7 +87,7 @@ class GenerateConfigTest(TestCase):
         parameter = GptInitModelParameters(0, 0, 0, 0, 0)
         parameter.special_tokens.stop_words_id_list = [[1233, 19912]]
         parameter.special_tokens.stop_words_str_list = ["gg"]
-        generate_config = Pipeline.create_generate_config(
+        generate_config = FrontendWorker.create_generate_config(
             tokenizer=None,
             vocab_size=100,
             special_tokens=parameter.special_tokens,
@@ -105,7 +105,7 @@ class GenerateConfigTest(TestCase):
         tokenizer = QWenTokenizer(
             f"{self.test_data_path}/model_test/fake_test/testdata/qwen_7b/tokenizer/qwen.tiktoken"
         )
-        generate_config = Pipeline.create_generate_config(
+        generate_config = FrontendWorker.create_generate_config(
             tokenizer=tokenizer,
             vocab_size=100,
             special_tokens=parameter.special_tokens,
@@ -121,7 +121,7 @@ class GenerateConfigTest(TestCase):
 
     def test_select_tokens_id(self):
         parameter = GptInitModelParameters(0, 0, 0, 0, 0)
-        generate_config = Pipeline.create_generate_config(
+        generate_config = FrontendWorker.create_generate_config(
             tokenizer=None,
             vocab_size=100,
             special_tokens=parameter.special_tokens,
@@ -131,7 +131,7 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(generate_config.select_tokens_str, [])
 
         with self.assertRaisesRegex(Exception, "should be less than vocab_size"):
-            generate_config = Pipeline.create_generate_config(
+            generate_config = FrontendWorker.create_generate_config(
                 tokenizer=None,
                 vocab_size=2,
                 special_tokens=parameter.special_tokens,
@@ -143,13 +143,13 @@ class GenerateConfigTest(TestCase):
         parameter.special_tokens.stop_words_id_list = [[1233, 19912]]
         parameter.special_tokens.stop_words_str_list = ["gg"]
 
-        a = Pipeline.create_generate_config(
+        a = FrontendWorker.create_generate_config(
             tokenizer=None,
             vocab_size=100,
             special_tokens=parameter.special_tokens,
             generate_config=self._create_generate_config(),
         )
-        b = Pipeline.create_generate_config(
+        b = FrontendWorker.create_generate_config(
             tokenizer=None,
             vocab_size=100,
             special_tokens=parameter.special_tokens,
@@ -168,7 +168,7 @@ class GenerateConfigTest(TestCase):
         )
         generate_config_dict = self._create_generate_config()
         generate_config_dict.update({"max_thinking_tokens": 109})
-        generate_config = Pipeline.create_generate_config(
+        generate_config = FrontendWorker.create_generate_config(
             tokenizer=tokenizer,
             vocab_size=100,
             special_tokens=parameter.special_tokens,
@@ -187,7 +187,7 @@ class GenerateConfigTest(TestCase):
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
         generate_config_dict = self._create_generate_config()
         generate_config_dict.update({"max_thinking_tokens": 20})
-        generate_config = Pipeline.create_generate_config(
+        generate_config = FrontendWorker.create_generate_config(
             tokenizer=tokenizer,
             vocab_size=100,
             special_tokens=parameter.special_tokens,
@@ -206,7 +206,7 @@ class GenerateConfigTest(TestCase):
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
         generate_config_dict = self._create_generate_config()
         generate_config_dict.update({"max_thinking_tokens": 20})
-        generate_config = Pipeline.create_generate_config(
+        generate_config = FrontendWorker.create_generate_config(
             tokenizer=tokenizer,
             vocab_size=100,
             special_tokens=parameter.special_tokens,
