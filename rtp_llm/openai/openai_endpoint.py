@@ -35,6 +35,7 @@ from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
+from rtp_llm.utils.response_utils import append_string_field, update_field_with_latest
 
 
 class OpenaiEndpoint(object):
@@ -221,12 +222,12 @@ class OpenaiEndpoint(object):
         delta_tool_calls: Optional[List[ToolCall]],
     ) -> Optional[List[ToolCall]]:
         """
-        合并增量的 tool_calls 到现有的 tool_calls 中
+        Merge incremental tool_calls into existing tool_calls
         Args:
-            existing_tool_calls: 现有的 tool_calls 列表
-            delta_tool_calls: 增量的 tool_calls 列表
+            existing_tool_calls: Existing list of tool_calls
+            delta_tool_calls: Incremental list of tool_calls
         Returns:
-            合并后的 tool_calls 列表
+            Merged list of tool_calls
         """
         if delta_tool_calls is None:
             return existing_tool_calls
@@ -295,41 +296,37 @@ class OpenaiEndpoint(object):
                 else:
                     tool_call.function.arguments += delta_function.arguments
 
-    def _append_string_field(
-        self, existing_value: Optional[str], delta_value: Optional[str]
-    ) -> Optional[str]:
-        """拼接字符串字段，处理 None 的情况"""
-        if existing_value is None:
-            return delta_value or None
-        return existing_value + (delta_value or "")
-
     def _update_choice_with_delta(
         self, choice: ChatCompletionResponseChoice, delta_choice
     ) -> None:
-        """使用增量数据更新 choice"""
-        # 更新字符串字段
-        choice.message.content = self._append_string_field(
+        """Update choice with incremental data"""
+        # Update string fields
+        choice.message.content = append_string_field(
             choice.message.content, delta_choice.delta.content
         )
-        choice.message.reasoning_content = self._append_string_field(
+        choice.message.reasoning_content = append_string_field(
             choice.message.reasoning_content, delta_choice.delta.reasoning_content
         )
 
-        # 更新其他字段（取最新值）
-        choice.message.role = delta_choice.delta.role or choice.message.role
-        choice.message.function_call = (
-            delta_choice.delta.function_call or choice.message.function_call
+        # Update other fields (take latest value)
+        choice.message.role = update_field_with_latest(
+            choice.message.role, delta_choice.delta.role
+        )
+        choice.message.function_call = update_field_with_latest(
+            choice.message.function_call, delta_choice.delta.function_call
         )
 
-        # 合并 tool_calls
+        # Merge tool_calls
         choice.message.tool_calls = self._merge_tool_calls(
             choice.message.tool_calls, delta_choice.delta.tool_calls
         )
 
-        # 更新 finish_reason
-        choice.finish_reason = delta_choice.finish_reason or choice.finish_reason
+        # Update finish_reason
+        choice.finish_reason = update_field_with_latest(
+            choice.finish_reason, delta_choice.finish_reason
+        )
 
-        # 处理 logprobs
+        # Handle logprobs
         if choice.logprobs is not None and delta_choice.logprobs is not None:
             choice.logprobs.content += delta_choice.logprobs.content
         elif delta_choice.logprobs is not None:
@@ -338,7 +335,7 @@ class OpenaiEndpoint(object):
     def _initialize_choices(
         self, response_choices: List
     ) -> List[ChatCompletionResponseChoice]:
-        """从响应的第一批数据初始化 choices"""
+        """Initialize choices from the first batch of response data"""
         return [
             ChatCompletionResponseChoice(
                 index=i,
@@ -365,7 +362,7 @@ class OpenaiEndpoint(object):
         extra_outputs = None
 
         async for response in choice_generator:
-            # 初始化 choices（仅第一次）
+            # Initialize choices (first time only)
             if not all_choices:
                 all_choices = self._initialize_choices(response.choices)
             elif len(response.choices) != len(all_choices):
@@ -374,16 +371,18 @@ class OpenaiEndpoint(object):
                     f"[{response.choices}] vs [{all_choices}]."
                 )
             else:
-                # 更新每个 choice
+                # Update each choice
                 for i, delta_choice in enumerate(response.choices):
                     self._update_choice_with_delta(all_choices[i], delta_choice)
 
-            # 更新全局字段
-            usage = response.usage or usage
-            aux_info = response.aux_info or aux_info
-            extra_outputs = response.extra_outputs or extra_outputs
+            # Update global fields
+            usage = update_field_with_latest(usage, response.usage)
+            aux_info = update_field_with_latest(aux_info, response.aux_info)
+            extra_outputs = update_field_with_latest(
+                extra_outputs, response.extra_outputs
+            )
 
-        # 确保 usage 不为 None
+        # Ensure usage is not None
         if usage is None:
             logging.warning("No usage returned from stream response. use empty value.")
             usage = UsageInfo(prompt_tokens=0, total_tokens=0, completion_tokens=0)

@@ -54,6 +54,7 @@ from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
 from rtp_llm.utils.multimodal_util import MultimodalInput
+from rtp_llm.utils.response_utils import append_string_field, update_field_with_latest
 from rtp_llm.utils.time_util import current_time_ms
 from rtp_llm.utils.util import AtomicCounter
 from rtp_llm.utils.word_util import (
@@ -169,10 +170,10 @@ class FrontendWorker:
     def _format_generation_response(
         self, gen_responses: GenerateResponse, generate_config: GenerateConfig
     ) -> Dict[str, Any]:
-        """格式化生成响应为标准输出格式"""
+        """Format generation response to standard output format"""
         generate_texts = gen_responses.generate_texts
 
-        # 多序列响应
+        # Multi-sequence response
         if generate_config.num_return_sequences > 0:
             aux_info = (
                 [
@@ -192,11 +193,11 @@ class FrontendWorker:
                 aux_info=aux_info,
             )
 
-        # 单序列响应
+        # Single sequence response
         first_output = gen_responses.generate_outputs.generate_outputs[0]
         aux_info = first_output.aux_info if generate_config.aux_info else None
 
-        # 处理 beam search 的特殊情况
+        # Handle special case for beam search
         if aux_info and generate_config.has_num_beams():
             aux_info.beam_responses = generate_texts
 
@@ -223,7 +224,7 @@ class FrontendWorker:
 
     @staticmethod
     def _to_list_if_needed(tensor, should_convert: bool):
-        """辅助方法：条件转换张量为列表"""
+        """Helper method: conditionally convert tensor to list"""
         return tensor.tolist() if should_convert and tensor is not None else None
 
     async def _stream_formatted_results(
@@ -250,13 +251,13 @@ class FrontendWorker:
         generators: List[AsyncGenerator[Dict[str, Any], None]],
         batch_infer: bool,
     ) -> AsyncGenerator[Dict[str, Any], None]:
-        """并行合并多个生成器的输出流"""
+        """Merge multiple generator output streams in parallel"""
         iterators = [gen.__aiter__() for gen in generators]
         done_idxs: Set[int] = set()
         batch_state: List[Any] = [None] * len(iterators)
 
         while len(done_idxs) < len(iterators):
-            # 收集未完成迭代器的任务
+            # Collect tasks from unfinished iterators
             pending_tasks = [
                 (idx, itr.__anext__())
                 for idx, itr in enumerate(iterators)
@@ -266,12 +267,12 @@ class FrontendWorker:
             if not pending_tasks:
                 break
 
-            # 并行执行所有任务
+            # Execute all tasks in parallel
             results = await asyncio.gather(
                 *(task for _, task in pending_tasks), return_exceptions=True
             )
 
-            # 处理每个结果
+            # Process each result
             for (idx, _), result in zip(pending_tasks, results):
                 if isinstance(result, StopAsyncIteration):
                     self._handle_stream_completion(
@@ -282,7 +283,7 @@ class FrontendWorker:
                 else:
                     batch_state[idx] = result
 
-            # 输出当前批次状态
+            # Yield current batch state
             yield (
                 BatchGenerationResponse(response_batch=batch_state)
                 if batch_infer
@@ -293,14 +294,14 @@ class FrontendWorker:
     def _handle_stream_completion(
         batch_state: List[Any], idx: int, incremental: bool, done_idxs: Set[int]
     ):
-        """处理流完成的情况"""
+        """Handle stream completion"""
         done_idxs.add(idx)
         if batch_state[idx] is None or incremental:
             batch_state[idx] = GenerationResponse()
 
     @staticmethod
     def _handle_stream_error(error: Exception):
-        """处理流错误"""
+        """Handle stream error"""
         error_msg = f'ErrorMsg: {str(error)} \n Traceback: {"".join(traceback.format_tb(error.__traceback__))}'
         logging.warning(error_msg)
         raise error
@@ -320,7 +321,7 @@ class FrontendWorker:
     ) -> Union[
         GenerationResponse, MultiSequenceGenerationResponse, BatchGenerationResponse
     ]:
-        """聚合增量响应为完整响应"""
+        """Aggregate incremental responses into complete response"""
         if not incremental:
             return await CompleteResponseAsyncGenerator.get_last_value(all_responses)
 
@@ -338,7 +339,7 @@ class FrontendWorker:
 
     @staticmethod
     async def _aggregate_batch_responses(all_responses, num_return_sequences: int):
-        """聚合批量响应"""
+        """Aggregate batch responses"""
         batch_response_streams = None
 
         async for response in all_responses:
@@ -364,7 +365,7 @@ class FrontendWorker:
 
     @staticmethod
     async def _aggregate_multi_sequence_responses(all_responses):
-        """聚合多序列响应"""
+        """Aggregate multi-sequence responses"""
         responses = None
         aux_infos = None
         finished = False
@@ -376,7 +377,7 @@ class FrontendWorker:
                 finished = response.finished
 
             for idx, seq_response in enumerate(response.response):
-                responses[idx] += seq_response
+                responses[idx] = append_string_field(responses[idx], seq_response)
                 if response.aux_info and response.aux_info[idx]:
                     aux_infos[idx] = response.aux_info[idx]
 
@@ -391,16 +392,22 @@ class FrontendWorker:
 
     @staticmethod
     async def _aggregate_single_responses(all_responses):
-        """聚合单个响应"""
+        """Aggregate single responses"""
         result = GenerationResponse(response="", finished=False)
 
         async for response in all_responses:
-            result.response += response.response
+            result.response = append_string_field(result.response, response.response)
             result.finished = result.finished or response.finished
-            result.aux_info = response.aux_info or result.aux_info
-            result.output_ids = response.output_ids or result.output_ids
-            result.input_ids = response.input_ids or result.input_ids
-            result.logits = response.logits or result.logits
+            result.aux_info = update_field_with_latest(
+                result.aux_info, response.aux_info
+            )
+            result.output_ids = update_field_with_latest(
+                result.output_ids, response.output_ids
+            )
+            result.input_ids = update_field_with_latest(
+                result.input_ids, response.input_ids
+            )
+            result.logits = update_field_with_latest(result.logits, response.logits)
 
         return result
 
@@ -415,7 +422,7 @@ class FrontendWorker:
         if isinstance(generate_config, dict):
             config = GenerateConfig.create_generate_config(generate_config, **kwargs)
         else:
-            # 认为是从frontend_worker传递进来的，不需要再处理一遍
+            # Assume it's passed from frontend_worker, no need to process again
             config = generate_config
         config.add_special_tokens(special_tokens)
         config.convert_select_tokens(vocab_size, tokenizer)
@@ -430,17 +437,17 @@ class FrontendWorker:
         urls: Optional[List[str]] = None,
         **kwargs: Any,
     ) -> Iterator[GenerateResponse]:
-        """同步生成接口，通过线程和队列桥接异步生成器"""
+        """Synchronous generation interface, bridging async generator via thread and queue"""
         result_queue = queue.Queue()
 
         async def async_generator_wrapper():
-            """异步生成器包装，将结果放入队列"""
+            """Async generator wrapper that puts results into queue"""
             generator = None
             try:
                 generator = self.generate_async(prompt, request_id, urls, **kwargs)
                 async for result in generator:
                     result_queue.put(result)
-                result_queue.put(None)  # 完成标记
+                result_queue.put(None)  # Completion marker
             except Exception as e:
                 result_queue.put(e)
             finally:
@@ -448,12 +455,12 @@ class FrontendWorker:
                     await generator.aclose()
 
         def run_async_in_thread():
-            """在新线程中运行事件循环"""
+            """Run event loop in new thread"""
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             loop.run_until_complete(async_generator_wrapper())
 
-        # 启动后台线程
+        # Start background thread
         background_thread = threading.Thread(target=run_async_in_thread, daemon=False)
         background_thread.start()
 
@@ -461,7 +468,7 @@ class FrontendWorker:
             while True:
                 try:
                     result = result_queue.get(timeout=0.01)
-                    if result is None:  # 完成标记
+                    if result is None:  # Completion marker
                         break
                     if isinstance(result, Exception):
                         raise result
@@ -528,7 +535,7 @@ class FrontendWorker:
         stop_word_ids: List[List[int]],
         stop_word_id_slices: List[List[int]],
     ) -> List[int]:
-        """根据停止词ID截断tokens"""
+        """Truncate tokens by stop word IDs"""
         if generate_config.print_stop_words:
             return tokens
 
@@ -546,11 +553,11 @@ class FrontendWorker:
         stop_word_str_slices: List[str],
         token_buffer: str,
     ) -> Tuple[str, str]:
-        """根据停止词字符串截断文本"""
+        """Truncate text by stop word strings"""
         if generate_config.return_incremental:
-            text = token_buffer + text
+            text = append_string_field(token_buffer, text)
 
-        # 检查完整停止词匹配
+        # Check for complete stop word match
         if stop_word_str_list:
             stop_idx, stop_len = match_stop_words(text, stop_word_str_list)
             if stop_idx != -1:
@@ -565,7 +572,7 @@ class FrontendWorker:
         if generate_output.finished:
             return text, token_buffer
 
-        # 截断部分匹配的停止词
+        # Truncate partially matched stop words
         if generate_config.return_incremental or not generate_config.print_stop_words:
             truncated = truncate_response_with_stop_words(
                 text, stop_word_str_slices, generate_config.is_streaming, True
@@ -588,13 +595,13 @@ class FrontendWorker:
         output_tokens_list: List[torch.Tensor],
         **kwargs: Any,
     ) -> Tuple[List[str], List[int], List[torch.Tensor]]:
-        """完整解码tokens（用于beam search或非流式模式）"""
-        # 准备tokens列表
+        """Decode complete tokens (for beam search or non-streaming mode)"""
+        # Prepare token lists
         tokens_for_decode = self._prepare_tokens_for_complete_decode(
             generate_config, generate_outputs, output_tokens_list
         )
 
-        # 截断停止词tokens并解码
+        # Truncate stop word tokens and decode
         final_texts, output_lens = self._decode_and_truncate_tokens(
             generate_config,
             generate_outputs,
@@ -614,7 +621,7 @@ class FrontendWorker:
         generate_outputs: GenerateOutputs,
         output_tokens_list: List[torch.Tensor],
     ) -> List[List[int]]:
-        """准备用于完整解码的tokens"""
+        """Prepare tokens for complete decoding"""
         if generate_config.has_num_beams():
             return self._prepare_beam_tokens(generate_config, generate_outputs)
 
@@ -625,7 +632,7 @@ class FrontendWorker:
     def _prepare_beam_tokens(
         self, generate_config: GenerateConfig, generate_outputs: GenerateOutputs
     ):
-        """准备beam search的tokens"""
+        """Prepare tokens for beam search"""
         all_output_ids = torch.cat(
             [go.output_ids for go in generate_outputs.generate_outputs], dim=0
         )
@@ -645,7 +652,7 @@ class FrontendWorker:
         generate_outputs: GenerateOutputs,
         output_tokens_list: List[torch.Tensor],
     ):
-        """准备常规tokens"""
+        """Prepare regular tokens"""
         if not output_tokens_list:
             output_tokens_list[:] = [
                 torch.empty(0, dtype=torch.int32)
@@ -654,7 +661,7 @@ class FrontendWorker:
 
         tokens_lists = []
         for i, generate_output in enumerate(generate_outputs.generate_outputs):
-            # 累积tokens
+            # Accumulate tokens
             if len(output_tokens_list[i]) == 0:
                 output_tokens_list[i] = generate_output.output_ids
             else:
@@ -663,7 +670,7 @@ class FrontendWorker:
                 )
                 generate_output.output_ids = output_tokens_list[i]
 
-            # 处理EOS
+            # Handle EOS
             tokens = generate_output.output_ids.cpu().numpy().flatten()
             if not generate_config.ignore_eos:
                 tokens = remove_padding_eos_with_numpy(
@@ -687,11 +694,11 @@ class FrontendWorker:
         stop_word_id_slices: List[int],
         **kwargs: Any,
     ) -> Tuple[List[str], List[int]]:
-        """解码tokens并截断停止词"""
+        """Decode tokens and truncate stop words"""
         output_lens = []
         token_lists_to_decode = []
 
-        # 截断停止词tokens
+        # Truncate stop word tokens
         for i, (tokens_list, generate_output) in enumerate(
             zip(tokens_lists, generate_outputs.generate_outputs)
         ):
@@ -705,7 +712,7 @@ class FrontendWorker:
             )
             token_lists_to_decode.append(processed_tokens)
 
-        # 批量解码
+        # Batch decode
         decoded_batch = self.tokenizer.batch_decode(
             token_lists_to_decode,
             skip_special_tokens=generate_config.skip_special_tokens,
@@ -713,7 +720,7 @@ class FrontendWorker:
         )
         decoded_texts = [text.rstrip("\uFFFD") for text in decoded_batch]
 
-        # 截断停止词字符串并添加前缀
+        # Truncate stop word strings and add prefix
         final_texts = []
         for i, (text, generate_output) in enumerate(
             zip(decoded_texts, generate_outputs.generate_outputs)
@@ -749,10 +756,10 @@ class FrontendWorker:
     ) -> Tuple[
         List[str], List[int], List[DecodingState], List[str], List[torch.Tensor]
     ]:
-        """流式增量解码tokens"""
+        """Streaming incremental token decoding"""
         num_outputs = len(generate_outputs.generate_outputs)
 
-        # 初始化状态
+        # Initialize states
         token_buffers = token_buffers or [""] * num_outputs
         decoding_states = decoding_states or [
             DecodingState() for _ in range(num_outputs)
@@ -761,19 +768,19 @@ class FrontendWorker:
             torch.empty(0, dtype=torch.int32) for _ in range(num_outputs)
         ]
 
-        # 增量解码每个输出
+        # Incrementally decode each output
         newly_decoded_texts = []
         all_texts = []
         output_lens = []
 
         for i, generate_output in enumerate(generate_outputs.generate_outputs):
-            # 累积tokens
+            # Accumulate tokens
             output_tokens_list[i] = torch.cat(
                 (output_tokens_list[i], generate_output.output_ids), dim=1
             )
             tokens_np = output_tokens_list[i].cpu().numpy().flatten()
 
-            # 处理EOS
+            # Handle EOS
             if not generate_config.ignore_eos:
                 tokens_list = remove_padding_eos_with_numpy(
                     tokens_np, self._special_tokens.eos_token_id
@@ -783,7 +790,7 @@ class FrontendWorker:
 
             output_lens.append(len(tokens_list))
 
-            # 截断停止词tokens
+            # Truncate stop word tokens
             processed_tokens = self._truncate_by_stop_token_ids(
                 generate_config,
                 generate_output,
@@ -792,7 +799,7 @@ class FrontendWorker:
                 stop_word_id_slices,
             )
 
-            # 增量解码
+            # Incremental decoding
             new_text = IncrementDecodingUtils.detokenize_incrementally(
                 self.tokenizer, processed_tokens, decoding_states[i]
             )
@@ -806,7 +813,7 @@ class FrontendWorker:
             newly_decoded_texts.append(text_to_return)
             all_texts.append(decoding_states[i].all_text)
 
-        # 截断停止词字符串并添加前缀
+        # Truncate stop word strings and add prefix
         final_texts = []
         for i in range(num_outputs):
             text, token_buffers[i] = self._truncate_by_stop_strings(
@@ -853,7 +860,7 @@ class FrontendWorker:
             token_type_ids=token_type_ids,
         )
 
-        # 准备停止词匹配模式
+        # Prepare stop word matching patterns
         stop_word_strs = generate_config.stop_words_str
         stop_word_str_slices = get_stop_word_slices(stop_word_strs)
         stop_word_ids = generate_config.stop_words_list
@@ -863,7 +870,7 @@ class FrontendWorker:
             await self.backend_rpc_server_visitor.enqueue(input)
         )
 
-        # 初始化解码状态
+        # Initialize decoding states
         decoding_states: List[DecodingState] = []
         output_tokens_list: List[torch.Tensor] = []
         token_buffers: List[str] = []
@@ -873,7 +880,7 @@ class FrontendWorker:
         )
 
         async for generate_outputs in stream:
-            # 更新缓存（保留已完成的输出）
+            # Update cache (keep finished outputs)
             if not generate_outputs_cache.generate_outputs:
                 generate_outputs_cache.generate_outputs = (
                     generate_outputs.generate_outputs
@@ -890,7 +897,7 @@ class FrontendWorker:
                     )
                 ]
 
-            # 解码tokens
+            # Decode tokens
             begin_time = current_time_ms()
             if is_incremental:
                 (
@@ -933,7 +940,7 @@ class FrontendWorker:
                 generate_outputs=generate_outputs_cache, generate_texts=generate_texts
             )
 
-            # 检查是否全部完成并上报指标
+            # Check if all finished and report metrics
             if all(out.finished for out in generate_outputs_cache.generate_outputs):
                 if generate_config.aux_info:
                     kmonitor.report(
