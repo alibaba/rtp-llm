@@ -6,17 +6,18 @@ from unittest import TestCase, main
 from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 from rtp_llm.config.log_config import LOGGING_CONFIG
 from rtp_llm.distribute.worker_info import g_worker_info, update_master_info
-from rtp_llm.frontend.frontend_worker import BatchPipelineResponse, FrontendWorker
-from rtp_llm.pipeline.pipeline import Pipeline
+from rtp_llm.frontend.frontend_worker import BatchGenerationResponse, FrontendWorker
 from rtp_llm.structure.request_extractor import request_id_field_name
 from rtp_llm.test.model_test.test_util.fake_model_loader import FakeModelLoader
 from rtp_llm.test.utils.port_util import PortManager
 
 
 class FakeFrontendWorker(FrontendWorker):
-    def __init__(self, engine, pipeline):
+    def __init__(self, engine):
         self.engine = engine
-        self.pipeline = pipeline
+        # Call parent __init__ with the config, tokenizer, and backend_rpc_server_visitor
+        # Since this is a test mock, we pass None for backend_rpc_server_visitor
+        super().__init__(engine.config, engine.model.tokenizer, None)
 
 
 class FrontendWorkerTest(TestCase):
@@ -49,18 +50,17 @@ class FrontendWorkerTest(TestCase):
             max_seq_len=2048,
         )
         engine: BaseEngine = self.fake_model_loader.init_engine()
-        pipeline = Pipeline(engine.config, engine.model.tokenizer)
-        return FakeFrontendWorker(engine, pipeline)
+        return FakeFrontendWorker(engine)
 
     async def _run(self, frontend_worker, **kwargs):
         count = 0
         kwargs[request_id_field_name] = 1
-        gen = frontend_worker.inference(**kwargs)
+        gen = frontend_worker.generate_response(**kwargs)
         result = []
         aux_info = []
         finished = []
         async for response in gen:
-            if isinstance(response, BatchPipelineResponse):
+            if isinstance(response, BatchGenerationResponse):
                 self.assertTrue("prompt_batch" in kwargs)
                 logging.info(f"batch stream reponse: {response.response_batch}")
             else:
@@ -68,7 +68,7 @@ class FrontendWorkerTest(TestCase):
 
         # collect log response
         log_response = await gen.gen_complete_response_once()
-        if isinstance(log_response, BatchPipelineResponse):
+        if isinstance(log_response, BatchGenerationResponse):
             result = [_.response for _ in log_response.response_batch]
             aux_info = [_.aux_info for _ in log_response.response_batch]
             finished = [_.finished for _ in log_response.response_batch]

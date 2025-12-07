@@ -1,3 +1,9 @@
+"""
+DEPRECATED: This module is deprecated and will be removed in a future version.
+The Pipeline class has been merged into FrontendWorker class.
+Please use rtp_llm.frontend.frontend_worker.FrontendWorker instead.
+"""
+
 import asyncio
 import logging
 import queue

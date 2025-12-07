@@ -179,7 +179,7 @@ class BackendApp(object):
             global active_requests
             active_requests.increment()
             try:
-                return await self.backend_server.inference(req, raw_request)
+                return await self.backend_server.generate_response(req, raw_request)
             finally:
                 active_requests.decrement()
 

@@ -16,8 +16,8 @@ class FakePipelinResponse(BaseModel):
 
 
 class FakeFrontendWorker(object):
-    def inference(self, prompt: str, *args: Any, **kwargs: Any):
-        response_generator = self._inference(prompt, *args, **kwargs)
+    def generate_response(self, prompt: str, *args: Any, **kwargs: Any):
+        response_generator = self._create_generation_streams(prompt, *args, **kwargs)
         return CompleteResponseAsyncGenerator(
             response_generator, CompleteResponseAsyncGenerator.get_last_value
         )
@@ -25,10 +25,10 @@ class FakeFrontendWorker(object):
     def tokenizer_encode(self, prompt: str):
         return [1, 2, 3, 4], ["b", "c", "d", "e"]
 
-    async def _inference(self, prompt: str, *args: Any, **kwargs: Any):
+    async def _create_generation_streams(self, prompt: str, *args: Any, **kwargs: Any):
         yield FakePipelinResponse(res=prompt)
 
-    def is_streaming(self, *args: Any, **kwargs: Any):
+    def check_streaming_mode(self, *args: Any, **kwargs: Any):
         return False
 
 
@@ -44,7 +44,7 @@ class FrontendServerTest(TestCase):
         self.frontend_server._frontend_worker = FakeFrontendWorker()
 
     async def _async_run(self, *args: Any, **kwargs: Any):
-        res = await self.frontend_server.inference(*args, **kwargs)
+        res = await self.frontend_server.generate_response(*args, **kwargs)
         return res
 
     def test_simple(self):

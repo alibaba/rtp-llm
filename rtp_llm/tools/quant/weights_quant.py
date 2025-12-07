@@ -25,7 +25,6 @@ from rtp_llm.models.base_model import ModelConfig
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.openai.renderer_factory import ChatRendererFactory
 from rtp_llm.openai.renderers.custom_renderer import RendererParams
-from rtp_llm.pipeline.default_plugin import DefaultPlugin
 from rtp_llm.structure.request_extractor import RequestExtractor
 from rtp_llm.tools.api.model_basic_info_analyzer import parse_ft_model_type
 from rtp_llm.tools.quant.base_quanter import QUANT_TYPE, BaseQuanter, QuanterFactory

@@ -16,7 +16,7 @@ from rtp_llm.config.gpt_init_model_parameters import ConfigMode, GptInitModelPar
 from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.config.task_type import TaskType
 from rtp_llm.embedding.embedding_endpoint import EmbeddingEndpoint
-from rtp_llm.frontend.frontend_worker import FrontendWorker, TokenizerEncodeResponse
+from rtp_llm.frontend.frontend_worker import FrontendWorker, TokenizationResponse
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 from rtp_llm.model_factory import ModelFactory
@@ -195,7 +195,9 @@ class FrontendServer(object):
         finally:
             self._global_controller.decrement()
 
-    async def inference(self, req: Union[str, Dict[Any, Any]], raw_request: RawRequest):
+    async def generate_response(
+        self, req: Union[str, Dict[Any, Any]], raw_request: RawRequest
+    ):
         try:
             if isinstance(req, str):
                 req = json.loads(req)
@@ -215,7 +217,7 @@ class FrontendServer(object):
 
         def generate_call():
             assert self._frontend_worker is not None
-            return self._frontend_worker.inference(**req)
+            return self._frontend_worker.generate_response(**req)
 
         try:
             rep = await self._infer_wrap(req, raw_request, generate_call)
@@ -457,7 +459,7 @@ class FrontendServer(object):
                 mapping = self._tokenizer(
                     prompt, return_offsets_mapping=True, return_attention_mask=False
                 )
-                response = TokenizerEncodeResponse(
+                response = TokenizationResponse(
                     offset_mapping=mapping["offset_mapping"],
                     token_ids=mapping["input_ids"],
                 )
@@ -465,7 +467,7 @@ class FrontendServer(object):
                 token_ids = self._tokenizer.encode(prompt)
                 token_ids = [int(id) for id in token_ids]
                 tokens = [self._tokenizer.decode(id) for id in token_ids]
-                response = TokenizerEncodeResponse(token_ids=token_ids, tokens=tokens)
+                response = TokenizationResponse(token_ids=token_ids, tokens=tokens)
             return ORJSONResponse(content=response.model_dump(exclude_none=True))
         except Exception as e:
             return ORJSONResponse(format_exception(e), status_code=500)
