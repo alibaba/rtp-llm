@@ -42,7 +42,7 @@ class Pipeline(object):
         self,
         model_config: GptInitModelParameters,
         tokenizer: Optional[BaseTokenizer],
-        separated_frontend: bool = False,
+        backend_rpc_server_visitor: BackendRPCServerVisitor,
     ):
         self.model_config = model_config
         self.tokenizer = tokenizer
@@ -50,17 +50,7 @@ class Pipeline(object):
         self._mm_token: str = self.model_config.mm_related_params.special_tokens.get(
             "default_mm_token", ""
         )
-        self.backend_rpc_server_visitor = BackendRPCServerVisitor(
-            model_config, separated_frontend
-        )
-
-    def encode(self, prompt: str):
-        assert self.tokenizer is not None
-        return self.tokenizer.encode(prompt)
-
-    def decode(self, token_id: int):
-        assert self.tokenizer is not None
-        return self.tokenizer.decode([token_id])
+        self.backend_rpc_server_visitor = backend_rpc_server_visitor
 
     @staticmethod
     def create_generate_config(

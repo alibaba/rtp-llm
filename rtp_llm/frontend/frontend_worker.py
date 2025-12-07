@@ -58,28 +58,14 @@ class TokenizerEncodeResponse(BaseModel):
 
 
 class FrontendWorker:
-    def __init__(self, separated_frontend: bool) -> None:
+    def __init__(self, model_config, tokenizer, backend_rpc_server_visitor) -> None:
         logging.info("starting frontend worker")
-        self.model_config = ModelFactory.create_frontend_config(
-            ModelFactory.create_normal_model_config()
+        self.model_config = model_config
+        self.tokenizer = tokenizer
+        self.pipeline = Pipeline(
+            self.model_config, self.tokenizer, backend_rpc_server_visitor
         )
-        self.tokenizer = TokenizerFactory.create_from_env()
-        self.model_config.update_task_prompt_tokens_id(self.tokenizer)
-        self.model_config.update_tokenizer_special_tokens(self.tokenizer)
-        self.pipeline = Pipeline(self.model_config, self.tokenizer, separated_frontend)
-        self.backend_rpc_server_visitor = self.pipeline.backend_rpc_server_visitor
         logging.info("frontend worker start done.")
-
-    def tokenizer_offset_mapping(self, prompt: str) -> Any:
-        return self.pipeline.tokenizer(
-            prompt, return_offsets_mapping=True, return_attention_mask=False
-        )
-
-    def tokenizer_encode(self, prompt: str) -> Tuple[List[int], List[str]]:
-        token_ids = self.pipeline.encode(prompt)
-        token_ids = [int(id) for id in token_ids]
-        tokens = [self.pipeline.decode(id) for id in token_ids]
-        return token_ids, tokens
 
     def inference(self, **kwargs: Any) -> CompleteResponseAsyncGenerator:
         default_generate_config = GenerateConfig()

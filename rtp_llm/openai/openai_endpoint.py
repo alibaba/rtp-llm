@@ -44,22 +44,33 @@ class OpenaiEndpoint(object):
         tokenizer: BaseTokenizer,
         backend_rpc_server_visitor: BackendRPCServerVisitor,
     ):
+        self._init_basic_attributes(model_config, tokenizer, backend_rpc_server_visitor)
+        self._init_renderers()
+        self._init_stop_words()
+
+    def _init_basic_attributes(
+        self,
+        model_config: GptInitModelParameters,
+        tokenizer: BaseTokenizer,
+        backend_rpc_server_visitor: BackendRPCServerVisitor,
+    ) -> None:
         self.model_config = model_config
         self.max_seq_len = self.model_config.max_seq_len
 
-        if tokenizer == None:
+        if tokenizer is None:
             raise AttributeError(f"tokenizer is none!")
         self.tokenizer: BaseTokenizer = tokenizer
         self.backend_rpc_server_visitor = backend_rpc_server_visitor
 
         self.eos_token_id = tokenizer.eos_token_id
-        if self.eos_token_id == None:
+        if self.eos_token_id is None:
             self.eos_token_id = self.model_config.special_tokens.eos_token_id
 
         self.stop_words_id_list = self.model_config.special_tokens.stop_words_id_list
 
+    def _init_renderers(self) -> None:
         render_params = RendererParams(
-            model_type=model_config.py_env_configs.model_config.model_type,
+            model_type=self.model_config.py_env_configs.model_config.model_type,
             max_seq_len=self.max_seq_len,
             eos_token_id=self.eos_token_id,
             stop_word_ids_list=self.stop_words_id_list,
@@ -70,42 +81,38 @@ class OpenaiEndpoint(object):
         self.chat_renderer: CustomChatRenderer = ChatRendererFactory.get_renderer(
             self.tokenizer, render_params
         )
-        logging.info(f"Finally openai endpoint uses renderer: {self.chat_renderer} ")
+        logging.info(f"Finally openai endpoint uses renderer: {self.chat_renderer}")
+
         self.template_renderer: CustomChatRenderer = (
             self.chat_renderer
             if isinstance(self.chat_renderer, BasicRenderer)
             else BasicRenderer(self.tokenizer, render_params)
         )
         logging.info(f"chat_renderer [{self.chat_renderer}] is created.")
+
         extra_stop_word_ids_list = self.chat_renderer.get_all_extra_stop_word_ids_list()
         self.stop_words_id_list.extend(extra_stop_word_ids_list)
+
+    def _init_stop_words(self) -> None:
         self.stop_words_str_list = self.model_config.special_tokens.stop_words_str_list
 
-        env_stop_words_str = (
-            self.model_config.py_env_configs.generate_env_config.stop_words_str
-        )
-        env_stop_words_id = (
-            self.model_config.py_env_configs.generate_env_config.stop_words_list
-        )
+        # Merge environment stop words
+        env_config = self.model_config.py_env_configs.generate_env_config
         env_stop_words_str_list = (
-            json.loads(env_stop_words_str) if env_stop_words_str else []
+            json.loads(env_config.stop_words_str) if env_config.stop_words_str else []
         )
         env_stop_words_id_list = (
-            json.loads(env_stop_words_id) if env_stop_words_id else []
+            json.loads(env_config.stop_words_list) if env_config.stop_words_list else []
         )
-        env_force_stop = (
-            self.model_config.py_env_configs.generate_env_config.force_stop_words
-        )
-        if env_force_stop:
+
+        if env_config.force_stop_words:
             self.stop_words_str_list = env_stop_words_str_list
             self.stop_words_id_list = env_stop_words_id_list
         else:
-            self.stop_words_str_list = (
-                self.stop_words_str_list + env_stop_words_str_list
-            )
-            self.stop_words_id_list = self.stop_words_id_list + env_stop_words_id_list
+            self.stop_words_str_list += env_stop_words_str_list
+            self.stop_words_id_list += env_stop_words_id_list
 
-        # sync between stop word id str and stop words id list
+        # Sync between stop word IDs and strings
         stop_words_str_list_from_id = []
         for stop_word_ids in self.stop_words_id_list:
             word = self.tokenizer.decode(stop_word_ids)
@@ -121,7 +128,7 @@ class OpenaiEndpoint(object):
         self.stop_words_str_list += stop_words_str_list_from_id
         self.stop_words_id_list += stop_words_id_list_from_str
 
-        # dedup stop words
+        # Dedup and log
         self.stop_words_str_list = list(set(self.stop_words_str_list))
         self.stop_words_id_list = self._dedup_stop_words_list(self.stop_words_id_list)
 
@@ -143,23 +150,39 @@ class OpenaiEndpoint(object):
     def _extract_generation_config(
         self, request: ChatCompletionRequest
     ) -> GenerateConfig:
-        # TODO(wangyin): implement this
         config = request.extra_configs or GenerateConfig()
-        if request.trace_id != None:
+
+        self._apply_basic_config(request, config)
+        self._apply_stop_words_config(request, config)
+        self._apply_advanced_config(request, config)
+
+        config.convert_select_tokens(len(self.tokenizer), self.tokenizer)
+        config.add_thinking_params(self.tokenizer)
+        return config
+
+    def _apply_basic_config(
+        self, request: ChatCompletionRequest, config: GenerateConfig
+    ) -> None:
+        if request.trace_id is not None:
             config.trace_id = request.trace_id
-        if request.stream == True:
+        if request.stream:
             config.is_streaming = True
-        if request.temperature != None:
+        if request.temperature is not None:
             config.temperature = request.temperature
-        if request.top_p != None:
+        if request.top_p is not None:
             config.top_p = request.top_p
-        if request.max_tokens != None:
+        if request.max_tokens is not None:
             config.max_new_tokens = request.max_tokens
-        if request.n != None:
+        if request.n is not None:
             config.num_return_sequences = request.n
-        request_stop_words_list = request.stop if request.stop != None else []
+
+    def _apply_stop_words_config(
+        self, request: ChatCompletionRequest, config: GenerateConfig
+    ) -> None:
+        request_stop_words_list = request.stop if request.stop is not None else []
         if isinstance(request_stop_words_list, str):
             request_stop_words_list = [request_stop_words_list]
+
         config.stop_words_str = list(
             set(
                 self.stop_words_str_list
@@ -172,23 +195,25 @@ class OpenaiEndpoint(object):
             + self.chat_renderer.tokenize_words(config.stop_words_str)
             + config.stop_words_list
         )
-        if request.chat_id != None:
+
+    def _apply_advanced_config(
+        self, request: ChatCompletionRequest, config: GenerateConfig
+    ) -> None:
+        if request.chat_id is not None:
             config.chat_id = request.chat_id
-        if request.seed != None:
+        if request.seed is not None:
             config.random_seed = request.seed
-        if request.logprobs != None:
+        if request.logprobs is not None:
             config.return_all_probs = request.logprobs
         if request.logprobs or request.functions:
             config.is_streaming = True
-        config.convert_select_tokens(len(self.tokenizer), self.tokenizer)
+
         if (
             request.extra_configs
             and request.extra_configs.max_thinking_tokens is not None
             and isinstance(request.extra_configs.max_thinking_tokens, int)
         ):
             config.max_thinking_tokens = request.extra_configs.max_thinking_tokens
-        config.add_thinking_params(self.tokenizer)
-        return config
 
     def _merge_tool_calls(
         self,
@@ -207,61 +232,127 @@ class OpenaiEndpoint(object):
             return existing_tool_calls
         if existing_tool_calls is None:
             existing_tool_calls = []
+
         for delta_tool_call in delta_tool_calls:
-            # 查找是否已存在相同 index 的 tool_call
+            # Find existing tool_call with same index
             existing_tool_call = None
             if delta_tool_call.index is not None:
-                for existing in existing_tool_calls:
-                    if existing.index == delta_tool_call.index:
-                        existing_tool_call = existing
+                for tool_call in existing_tool_calls:
+                    if tool_call.index == delta_tool_call.index:
+                        existing_tool_call = tool_call
                         break
+
             if existing_tool_call is None:
-                # 创建新的 tool_call
-                new_tool_call = ToolCall(
-                    index=delta_tool_call.index,
-                    id=delta_tool_call.id,
-                    type=delta_tool_call.type,
-                    function=FunctionCall(
-                        name=(
-                            delta_tool_call.function.name
-                            if delta_tool_call.function
-                            else None
-                        ),
-                        arguments=(
-                            delta_tool_call.function.arguments
-                            if delta_tool_call.function
-                            else None
-                        ),
-                    ),
-                )
-                existing_tool_calls.append(new_tool_call)
+                # Add new tool_call
+                self._add_new_tool_call(existing_tool_calls, delta_tool_call)
             else:
-                # 增量更新现有的 tool_call
+                # Update existing tool_call
                 if delta_tool_call.id:
                     existing_tool_call.id = delta_tool_call.id
                 if delta_tool_call.type:
                     existing_tool_call.type = delta_tool_call.type
                 if delta_tool_call.function:
-                    if existing_tool_call.function is None:
-                        existing_tool_call.function = FunctionCall(
-                            name=delta_tool_call.function.name,
-                            arguments=delta_tool_call.function.arguments,
-                        )
-                    else:
-                        if delta_tool_call.function.name:
-                            existing_tool_call.function.name = (
-                                delta_tool_call.function.name
-                            )
-                        if delta_tool_call.function.arguments:
-                            if existing_tool_call.function.arguments is None:
-                                existing_tool_call.function.arguments = (
-                                    delta_tool_call.function.arguments
-                                )
-                            else:
-                                existing_tool_call.function.arguments += (
-                                    delta_tool_call.function.arguments
-                                )
+                    self._update_function_call(
+                        existing_tool_call, delta_tool_call.function
+                    )
+
         return existing_tool_calls
+
+    def _add_new_tool_call(
+        self, tool_calls: List[ToolCall], delta_tool_call: ToolCall
+    ) -> None:
+        new_tool_call = ToolCall(
+            index=delta_tool_call.index,
+            id=delta_tool_call.id,
+            type=delta_tool_call.type,
+            function=FunctionCall(
+                name=(
+                    delta_tool_call.function.name if delta_tool_call.function else None
+                ),
+                arguments=(
+                    delta_tool_call.function.arguments
+                    if delta_tool_call.function
+                    else None
+                ),
+            ),
+        )
+        tool_calls.append(new_tool_call)
+
+    def _update_function_call(
+        self, tool_call: ToolCall, delta_function: FunctionCall
+    ) -> None:
+        if tool_call.function is None:
+            tool_call.function = FunctionCall(
+                name=delta_function.name,
+                arguments=delta_function.arguments,
+            )
+        else:
+            if delta_function.name:
+                tool_call.function.name = delta_function.name
+            if delta_function.arguments:
+                if tool_call.function.arguments is None:
+                    tool_call.function.arguments = delta_function.arguments
+                else:
+                    tool_call.function.arguments += delta_function.arguments
+
+    def _append_string_field(
+        self, existing_value: Optional[str], delta_value: Optional[str]
+    ) -> Optional[str]:
+        """拼接字符串字段，处理 None 的情况"""
+        if existing_value is None:
+            return delta_value or None
+        return existing_value + (delta_value or "")
+
+    def _update_choice_with_delta(
+        self, choice: ChatCompletionResponseChoice, delta_choice
+    ) -> None:
+        """使用增量数据更新 choice"""
+        # 更新字符串字段
+        choice.message.content = self._append_string_field(
+            choice.message.content, delta_choice.delta.content
+        )
+        choice.message.reasoning_content = self._append_string_field(
+            choice.message.reasoning_content, delta_choice.delta.reasoning_content
+        )
+
+        # 更新其他字段（取最新值）
+        choice.message.role = delta_choice.delta.role or choice.message.role
+        choice.message.function_call = (
+            delta_choice.delta.function_call or choice.message.function_call
+        )
+
+        # 合并 tool_calls
+        choice.message.tool_calls = self._merge_tool_calls(
+            choice.message.tool_calls, delta_choice.delta.tool_calls
+        )
+
+        # 更新 finish_reason
+        choice.finish_reason = delta_choice.finish_reason or choice.finish_reason
+
+        # 处理 logprobs
+        if choice.logprobs is not None and delta_choice.logprobs is not None:
+            choice.logprobs.content += delta_choice.logprobs.content
+        elif delta_choice.logprobs is not None:
+            choice.logprobs = delta_choice.logprobs
+
+    def _initialize_choices(
+        self, response_choices: List
+    ) -> List[ChatCompletionResponseChoice]:
+        """从响应的第一批数据初始化 choices"""
+        return [
+            ChatCompletionResponseChoice(
+                index=i,
+                message=ChatMessage(
+                    role=choice.delta.role or RoleEnum.assistant,
+                    content=choice.delta.content or None,
+                    function_call=choice.delta.function_call or None,
+                    tool_calls=choice.delta.tool_calls or None,
+                ),
+                finish_reason=choice.finish_reason,
+                logprobs=choice.logprobs,
+            )
+            for i, choice in enumerate(response_choices)
+        ]
 
     async def _collect_complete_response(
         self,
@@ -272,75 +363,31 @@ class OpenaiEndpoint(object):
         usage = None
         aux_info = None
         extra_outputs = None
+
         async for response in choice_generator:
-            if len(response.choices) != len(all_choices):
-                if all_choices == []:
-                    all_choices = [
-                        ChatCompletionResponseChoice(
-                            index=i,
-                            message=ChatMessage(
-                                role=choice.delta.role or RoleEnum.assistant,
-                                content=choice.delta.content or None,
-                                function_call=choice.delta.function_call or None,
-                                tool_calls=choice.delta.tool_calls or None,
-                            ),
-                            finish_reason=choice.finish_reason,
-                            logprobs=choice.logprobs,
-                        )
-                        for i, choice in enumerate(response.choices)
-                    ]
-                else:
-                    raise ValueError(
-                        f"response.choices has different length! "
-                        f"[{response.choices}] vs [{all_choices}]."
-                    )
+            # 初始化 choices（仅第一次）
+            if not all_choices:
+                all_choices = self._initialize_choices(response.choices)
+            elif len(response.choices) != len(all_choices):
+                raise ValueError(
+                    f"response.choices has different length! "
+                    f"[{response.choices}] vs [{all_choices}]."
+                )
             else:
-                for i in range(len(all_choices)):
-                    if all_choices[i].message.content == None:
-                        all_choices[i].message.content = (
-                            response.choices[i].delta.content or None
-                        )
-                    else:
-                        all_choices[i].message.content += (
-                            response.choices[i].delta.content or ""
-                        )
-                    if all_choices[i].message.reasoning_content == None:
-                        all_choices[i].message.reasoning_content = (
-                            response.choices[i].delta.reasoning_content or None
-                        )
-                    else:
-                        all_choices[i].message.reasoning_content += (
-                            response.choices[i].delta.reasoning_content or ""
-                        )
-                    all_choices[i].message.role = (
-                        response.choices[i].delta.role or all_choices[i].message.role
-                    )
-                    all_choices[i].message.function_call = (
-                        response.choices[i].delta.function_call
-                        or all_choices[i].message.function_call
-                    )
-                    all_choices[i].message.tool_calls = self._merge_tool_calls(
-                        all_choices[i].message.tool_calls,
-                        response.choices[i].delta.tool_calls,
-                    )
-                    all_choices[i].finish_reason = (
-                        response.choices[i].finish_reason
-                        or all_choices[i].finish_reason
-                    )
-                    if all_choices[i].logprobs != None:
-                        if response.choices[i].logprobs != None:
-                            all_choices[i].logprobs.content += response.choices[
-                                i
-                            ].logprobs.content
-                    else:
-                        all_choices[i].logprobs = response.choices[i].logprobs
+                # 更新每个 choice
+                for i, delta_choice in enumerate(response.choices):
+                    self._update_choice_with_delta(all_choices[i], delta_choice)
+
+            # 更新全局字段
             usage = response.usage or usage
             aux_info = response.aux_info or aux_info
             extra_outputs = response.extra_outputs or extra_outputs
 
-        if usage == None:
-            logging.warning(f"No usage returned from stream response. use empty value.")
+        # 确保 usage 不为 None
+        if usage is None:
+            logging.warning("No usage returned from stream response. use empty value.")
             usage = UsageInfo(prompt_tokens=0, total_tokens=0, completion_tokens=0)
+
         return ChatCompletionResponse(
             choices=all_choices,
             usage=usage,

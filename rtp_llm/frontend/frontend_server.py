@@ -17,13 +17,19 @@ from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.config.task_type import TaskType
 from rtp_llm.embedding.embedding_endpoint import EmbeddingEndpoint
 from rtp_llm.frontend.frontend_worker import FrontendWorker, TokenizerEncodeResponse
+from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.model_factory_register import _model_factory
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
+from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.server.misc import format_exception
-from rtp_llm.structure.request_extractor import request_id_field_name
+from rtp_llm.structure.request_extractor import (
+    Request,
+    RequestExtractor,
+    request_id_field_name,
+)
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
@@ -44,11 +50,25 @@ class FrontendServer(object):
         self._access_logger = AccessLogger()
         self._frontend_worker = None
         self._openai_endpoint = None
+        self._embedding_endpoint = None
         self.thread_lock_ = threading.Lock()
         self._global_controller = get_global_controller()
         self.separated_frontend = separated_frontend
         self.rank_id = str(rank_id)
         self.server_id = str(server_id)
+        self.is_embedding = False
+
+        # Initialize dependencies
+        self._model_config = ModelFactory.create_frontend_config(
+            ModelFactory.create_normal_model_config()
+        )
+        self._tokenizer = TokenizerFactory.create_from_env()
+        self._model_config.update_task_prompt_tokens_id(self._tokenizer)
+        self._model_config.update_tokenizer_special_tokens(self._tokenizer)
+        self._backend_rpc_server_visitor = BackendRPCServerVisitor(
+            self._model_config, separated_frontend
+        )
+
         kmonitor.init()
 
     def start(self):
@@ -57,14 +77,15 @@ class FrontendServer(object):
             logging.info("DEBUG_START_FAKE_PROCESS is set, start fake server")
             self._frontend_worker = None
         else:
-            self._frontend_worker = FrontendWorker(self.separated_frontend)
-            self._openai_endpoint = None
-            self.is_embedding = False
-            self._embedding_endpoint = None
+            # Create frontend worker with dependencies
+            self._frontend_worker = FrontendWorker(
+                self._model_config, self._tokenizer, self._backend_rpc_server_visitor
+            )
+
+            # Initialize endpoints based on task type
             if (
-                self._frontend_worker.model_config is not None
-                and self._frontend_worker.model_config.task_type
-                != TaskType.LANGUAGE_MODEL
+                self._model_config is not None
+                and self._model_config.task_type != TaskType.LANGUAGE_MODEL
             ):
                 self.is_embedding = True
                 model_config = ModelFactory.create_normal_model_config()
@@ -75,14 +96,12 @@ class FrontendServer(object):
                     )
                 model_cls = _model_factory[model_config.model_type]
                 config: GptInitModelParameters = model_cls.create_config(model_config)
-                self._embedding_endpoint = EmbeddingEndpoint(
-                    config, self._frontend_worker.tokenizer
-                )
+                self._embedding_endpoint = EmbeddingEndpoint(config, self._tokenizer)
             else:
                 self._openai_endpoint = OpenaiEndpoint(
-                    self._frontend_worker.model_config,
-                    self._frontend_worker.tokenizer,
-                    self._frontend_worker.backend_rpc_server_visitor,
+                    self._model_config,
+                    self._tokenizer,
+                    self._backend_rpc_server_visitor,
                 )
 
     def stop(self):
@@ -393,7 +412,7 @@ class FrontendServer(object):
             },
         )
         self._access_logger.log_query_access(req)
-        is_streaming = self._frontend_worker.is_streaming(req)
+        is_streaming = RequestExtractor.is_streaming(req) or req.get("stream", False)
         if await raw_request.is_disconnected():
             raise asyncio.CancelledError("client disconnects")
         res = await self._call_generate_with_report(generate_call)
@@ -422,7 +441,7 @@ class FrontendServer(object):
                 token_ids = self._openai_endpoint.render_chat(chat_request).input_ids
             else:
                 prompt = req.pop("prompt")
-                token_ids = self._frontend_worker.pipeline.encode(prompt)
+                token_ids = self._tokenizer.encode(prompt)
             return ORJSONResponse({"token_ids": token_ids})
         except Exception as e:
             return ORJSONResponse(format_exception(e), status_code=500)
@@ -435,13 +454,17 @@ class FrontendServer(object):
             prompt = req.pop("prompt")
             assert self._frontend_worker is not None
             if req.get("return_offsets_mapping", None) == True:
-                mapping = self._frontend_worker.tokenizer_offset_mapping(prompt)
+                mapping = self._tokenizer(
+                    prompt, return_offsets_mapping=True, return_attention_mask=False
+                )
                 response = TokenizerEncodeResponse(
                     offset_mapping=mapping["offset_mapping"],
                     token_ids=mapping["input_ids"],
                 )
             else:
-                token_ids, tokens = self._frontend_worker.tokenizer_encode(prompt)
+                token_ids = self._tokenizer.encode(prompt)
+                token_ids = [int(id) for id in token_ids]
+                tokens = [self._tokenizer.decode(id) for id in token_ids]
                 response = TokenizerEncodeResponse(token_ids=token_ids, tokens=tokens)
             return ORJSONResponse(content=response.model_dump(exclude_none=True))
         except Exception as e:
@@ -449,8 +472,4 @@ class FrontendServer(object):
 
     def check_health(self):
         assert self._frontend_worker is not None
-        return (
-            self._frontend_worker.backend_rpc_server_visitor.is_backend_service_ready(
-                refresh=False
-            )
-        )
+        return self._backend_rpc_server_visitor.is_backend_service_ready(refresh=False)
