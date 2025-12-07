@@ -1,15 +1,30 @@
 from typing import List
 from unittest import TestCase, main
+from unittest.mock import MagicMock
 
 from rtp_llm.config.generate_config import GenerateConfig
-from rtp_llm.config.model_config import ModelConfig as PyModelConfig
-from rtp_llm.ops import FfnDisAggregateConfig, ModelConfig, PDSepConfig, RuntimeConfig
-from rtp_llm.pipeline import Pipeline
+from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.frontend.frontend_worker import FrontendWorker
 from rtp_llm.utils.base_model_datatypes import GenerateOutput
 from rtp_llm.utils.word_util import get_stop_word_slices
 
 
 class StopWordTest(TestCase):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        mock_backend_rpc_server_visitor = MagicMock()
+        self.pipeline = FrontendWorker(
+            GptInitModelParameters(
+                head_num=8,
+                size_per_head=128,
+                layer_num=1,
+                max_seq_len=32,
+                vocab_size=1024,
+            ),
+            None,
+            mock_backend_rpc_server_visitor,
+        )
+
     def _test_single(
         self,
         text: str,
@@ -27,7 +42,7 @@ class StopWordTest(TestCase):
         generate_output = GenerateOutput(finished=is_final_response)
         stop_word_str_slices = get_stop_word_slices(stop_word_str_list)
 
-        actual_text, actual_token_buffer = Pipeline.process_stop_str(
+        actual_text, actual_token_buffer = self.pipeline.process_stop_str(
             generate_config,
             generate_output,
             text,

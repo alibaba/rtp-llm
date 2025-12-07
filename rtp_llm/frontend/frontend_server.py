@@ -11,21 +11,25 @@ from fastapi.responses import ORJSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from rtp_llm.access_logger.access_logger import AccessLogger
+from rtp_llm.config.generate_config import RoleType
+from rtp_llm.config.gpt_init_model_parameters import ConfigMode, GptInitModelParameters
+from rtp_llm.config.py_config_modules import StaticConfig
+from rtp_llm.config.task_type import TaskType
 from rtp_llm.embedding.embedding_endpoint import EmbeddingEndpoint
-from rtp_llm.config.log_config import get_log_path
-from rtp_llm.config.model_config import (
-    update_stop_words_from_env,
-    update_tokenizer_special_tokens,
-)
 from rtp_llm.frontend.frontend_worker import FrontendWorker, TokenizerEncodeResponse
+from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.model_factory_register import _model_factory
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
-from rtp_llm.ops import SpecialTokens, TaskType
+from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.server.misc import format_exception
-from rtp_llm.structure.request_extractor import request_id_field_name
+from rtp_llm.structure.request_extractor import (
+    Request,
+    RequestExtractor,
+    request_id_field_name,
+)
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
@@ -41,87 +45,64 @@ USAGE_HEADER = "USAGE"
 
 class FrontendServer(object):
     def __init__(
-        self,
-        rank_id: int = 0,
-        server_id: int = 0,
-        py_env_configs=None,
+        self, separated_frontend: bool = False, rank_id: int = 0, server_id: int = 0
     ):
-        self.py_env_configs = py_env_configs
-        self._access_logger = AccessLogger(
-            get_log_path(),
-            py_env_configs.profiling_debug_logging_config.log_file_backup_count,
-            rank_id, server_id,
-        )
+        self._access_logger = AccessLogger(rank_id, server_id)
         self._frontend_worker = None
         self._openai_endpoint = None
         self._embedding_endpoint = None
-        self.is_embedding = False
         self.thread_lock_ = threading.Lock()
         self._global_controller = get_global_controller()
+        self.separated_frontend = separated_frontend
         self.rank_id = str(rank_id)
         self.server_id = str(server_id)
+        self.is_embedding = False
+
+        # Initialize dependencies
+        self._model_config = ModelFactory.create_frontend_config(
+            ModelFactory.create_normal_model_config()
+        )
+        self._tokenizer = TokenizerFactory.create_from_env()
+        self._model_config.update_task_prompt_tokens_id(self._tokenizer)
+        self._model_config.update_tokenizer_special_tokens(self._tokenizer)
+        self._backend_rpc_server_visitor = BackendRPCServerVisitor(
+            self._model_config, separated_frontend
+        )
+
         kmonitor.init()
 
     def start(self):
-        if (
-            self.py_env_configs.profiling_debug_logging_config.debug_start_fake_process
-            == 1
-        ):
+        if StaticConfig.profiling_debug_config.debug_start_fake_process == 1:
             # for debug online
             logging.info("DEBUG_START_FAKE_PROCESS is set, start fake server")
             self._frontend_worker = None
-            return
-
-        model_config = ModelFactory.create_model_config(
-            model_args=self.py_env_configs.model_args,
-            lora_config=self.py_env_configs.lora_config,
-            kv_cache_config=self.py_env_configs.kv_cache_config,
-            profiling_debug_logging_config=self.py_env_configs.profiling_debug_logging_config,
-            generate_env_config=self.py_env_configs.generate_env_config,
-            embedding_config=self.py_env_configs.embedding_config,
-            quantization_config=self.py_env_configs.quantization_config,
-            render_config=self.py_env_configs.render_config,
-        )
-        
-        # Create a temporary tokenizer to initialize special_tokens
-        # We'll update it with the actual tokenizer after FrontendWorker is created
-        special_tokens = SpecialTokens()
-        if self.py_env_configs.generate_env_config:
-            update_stop_words_from_env(
-                special_tokens, self.py_env_configs.generate_env_config
-            )
-
-        # Create FrontendWorker with special_tokens
-        self._frontend_worker = FrontendWorker(
-            self.py_env_configs, model_config, special_tokens
-        )
-
-        # Update special_tokens with actual tokenizer
-        update_tokenizer_special_tokens(special_tokens, self._frontend_worker.tokenizer)
-
-        # Only initialize OpenaiEndpoint for LANGUAGE_MODEL task type
-        if model_config.task_type == TaskType.LANGUAGE_MODEL:
-            # Update model_config with the latest values
-            model_config.special_tokens = special_tokens
-            model_config.generate_env_config = self.py_env_configs.generate_env_config
-            model_config.render_config = self.py_env_configs.render_config
-            model_config.model_name = self.py_env_configs.model_args.model_type
-            model_config.template_type = None
-            
-            self._openai_endpoint = OpenaiEndpoint(
-                model_config=model_config,
-                misc_config=self.py_env_configs.misc_config,
-                vit_config=self.py_env_configs.vit_config,
-                tokenizer=self._frontend_worker.tokenizer,
-                backend_rpc_server_visitor=self._frontend_worker.backend_rpc_server_visitor,
-            )
         else:
-            self._embedding_endpoint = EmbeddingEndpoint(
-                model_config=model_config,
-                grpc_config=self.py_env_configs.grpc_config,
-                tokenizer=self._frontend_worker.tokenizer
+            # Create frontend worker with dependencies
+            self._frontend_worker = FrontendWorker(
+                self._model_config, self._tokenizer, self._backend_rpc_server_visitor
             )
-            self.is_embedding = True
+
+            # Initialize endpoints based on task type
+            if (
+                self._model_config is not None
+                and self._model_config.task_type != TaskType.LANGUAGE_MODEL
+            ):
+                self.is_embedding = True
+                model_config = ModelFactory.create_normal_model_config()
+                global _model_factory
+                if model_config.model_type not in _model_factory:
+                    raise Exception(
+                        f"model type {model_config.model_type} not registered!"
+                    )
+                model_cls = _model_factory[model_config.model_type]
+                config: GptInitModelParameters = model_cls.create_config(model_config)
+                self._embedding_endpoint = EmbeddingEndpoint(config, self._tokenizer)
+            else:
+                self._openai_endpoint = OpenaiEndpoint(
+                    self._model_config,
+                    self._tokenizer,
+                    self._backend_rpc_server_visitor,
+                )
 
     def stop(self):
         if self._frontend_worker is not None:
@@ -232,32 +213,49 @@ class FrontendServer(object):
         except Exception as e:
             return self._handle_exception(req, e)
 
-        def generate_call():
+        # 直接展开原 _infer_impl 的逻辑
+        try:
             assert self._frontend_worker is not None
-            return self._frontend_worker.inference(**req)
+            kmonitor.report(
+                AccMetrics.QPS_METRIC,
+                1,
+                {
+                    "rank_id": self.rank_id,
+                    "server_id": self.server_id,
+                    "source": req.get("source", "unkown"),
+                },
+            )
+            self._access_logger.log_query_access(req)
+            is_streaming = RequestExtractor.is_streaming(req) or req.get(
+                "stream", False
+            )
 
-        try:
-            rep = await self._infer_wrap(req, raw_request, generate_call)
-        except Exception as e:
+            if await raw_request.is_disconnected():
+                raise asyncio.CancelledError("client disconnects")
+
+            # 直接调用 frontend_worker.inference
+            response_generator = self._frontend_worker.inference(**req)
+            res = await self._call_generate_with_report(lambda: response_generator)
+
+            if is_streaming:
+                return StreamingResponse(
+                    self.stream_response(req, res), media_type="text/event-stream"
+                )
+
+            async for x in res:
+                if await raw_request.is_disconnected():
+                    await res.aclose()
+                    raise asyncio.CancelledError("client disconnects")
+
+            complete_response = (
+                await self._collect_complete_response_and_record_access_log(req, res)
+            )
             self._global_controller.decrement()
-            raise e
+            return ORJSONResponse(content=complete_response)
 
-        if not isinstance(rep, StreamingResponse):
-            self._global_controller.decrement()
-
-        return rep
-
-    async def _infer_wrap(
-        self,
-        req: Dict[str, Any],
-        raw_request: RawRequest,
-        generate_call: Callable[[], CompleteResponseAsyncGenerator],
-    ):
-        try:
-            rep = await self._infer_impl(req, raw_request, generate_call)
         except BaseException as e:
-            rep = self._handle_exception(req, e)
-        return rep
+            self._global_controller.decrement()
+            return self._handle_exception(req, e)
 
     async def chat_completion(
         self, request: ChatCompletionRequest, raw_request: Request
@@ -275,28 +273,62 @@ class FrontendServer(object):
         except Exception as e:
             return self._handle_exception(request, e)
 
-        def generate_call():
-            assert self._openai_endpoint != None
-            response = self._openai_endpoint.chat_completion(
-                request_id, request, raw_request
-            )
-            assert isinstance(
-                response, CompleteResponseAsyncGenerator
-            ), f"error type: {type(response)}"
-            return response
-
+        # 直接展开原 _infer_impl 的逻辑
         try:
             request_dict = request.model_dump(exclude_none=True)
             request_dict[request_id_field_name] = request_id
-            rep = await self._infer_wrap(request_dict, raw_request, generate_call)
-        except Exception as e:
-            self._global_controller.decrement()
-            raise e
 
-        if not isinstance(rep, StreamingResponse):
-            self._global_controller.decrement()
+            assert self._openai_endpoint != None
+            kmonitor.report(
+                AccMetrics.QPS_METRIC,
+                1,
+                {
+                    "rank_id": self.rank_id,
+                    "server_id": self.server_id,
+                    "source": request_dict.get("source", "unkown"),
+                },
+            )
+            self._access_logger.log_query_access(request_dict)
+            is_streaming = RequestExtractor.is_streaming(
+                request_dict
+            ) or request_dict.get("stream", False)
 
-        return rep
+            if await raw_request.is_disconnected():
+                raise asyncio.CancelledError("client disconnects")
+
+            # 直接调用 openai_endpoint.chat_completion
+            response_generator = self._openai_endpoint.chat_completion(
+                request_id, request, raw_request
+            )
+            assert isinstance(
+                response_generator, CompleteResponseAsyncGenerator
+            ), f"error type: {type(response_generator)}"
+            res = await self._call_generate_with_report(lambda: response_generator)
+
+            if is_streaming:
+                return StreamingResponse(
+                    self.stream_response(request_dict, res),
+                    media_type="text/event-stream",
+                )
+
+            async for x in res:
+                if await raw_request.is_disconnected():
+                    await res.aclose()
+                    raise asyncio.CancelledError("client disconnects")
+
+            complete_response = (
+                await self._collect_complete_response_and_record_access_log(
+                    request_dict, res
+                )
+            )
+            self._global_controller.decrement()
+            return ORJSONResponse(content=complete_response)
+
+        except BaseException as e:
+            self._global_controller.decrement()
+            return self._handle_exception(
+                request_dict if "request_dict" in locals() else request, e
+            )
 
     async def chat_render(self, request: ChatCompletionRequest, raw_request: Request):
         try:
@@ -414,43 +446,6 @@ class FrontendServer(object):
 
         return complete_response
 
-    async def _infer_impl(
-        self,
-        req: Dict[Any, Any],
-        raw_request: RawRequest,
-        generate_call: Callable[[], CompleteResponseAsyncGenerator],
-    ):
-        assert self._frontend_worker is not None
-        kmonitor.report(
-            AccMetrics.QPS_METRIC,
-            1,
-            {
-                "rank_id": self.rank_id,
-                "server_id": self.server_id,
-                "source": req.get("source", "unkown"),
-            },
-        )
-        self._access_logger.log_query_access(req)
-        is_streaming = self._frontend_worker.is_streaming(req)
-        if await raw_request.is_disconnected():
-            raise asyncio.CancelledError("client disconnects")
-        res = await self._call_generate_with_report(generate_call)
-
-        if is_streaming:
-            return StreamingResponse(
-                self.stream_response(req, res), media_type="text/event-stream"
-            )
-        async for x in res:
-            if await raw_request.is_disconnected():
-                # Abort the request if the client disconnects.
-                await res.aclose()
-                raise asyncio.CancelledError("client disconnects")
-
-        complete_response = await self._collect_complete_response_and_record_access_log(
-            req, res
-        )
-        return ORJSONResponse(content=complete_response)
-
     def tokenize(self, req: str | Dict[str, Any]):
         try:
             if isinstance(req, str):
@@ -460,7 +455,7 @@ class FrontendServer(object):
                 token_ids = self._openai_endpoint.render_chat(chat_request).input_ids
             else:
                 prompt = req.pop("prompt")
-                token_ids = self._frontend_worker.pipeline.encode(prompt)
+                token_ids = self._tokenizer.encode(prompt)
             return ORJSONResponse({"token_ids": token_ids})
         except Exception as e:
             return ORJSONResponse(format_exception(e), status_code=500)
@@ -473,13 +468,17 @@ class FrontendServer(object):
             prompt = req.pop("prompt")
             assert self._frontend_worker is not None
             if req.get("return_offsets_mapping", None) == True:
-                mapping = self._frontend_worker.tokenizer_offset_mapping(prompt)
+                mapping = self._tokenizer(
+                    prompt, return_offsets_mapping=True, return_attention_mask=False
+                )
                 response = TokenizerEncodeResponse(
                     offset_mapping=mapping["offset_mapping"],
                     token_ids=mapping["input_ids"],
                 )
             else:
-                token_ids, tokens = self._frontend_worker.tokenizer_encode(prompt)
+                token_ids = self._tokenizer.encode(prompt)
+                token_ids = [int(id) for id in token_ids]
+                tokens = [self._tokenizer.decode(id) for id in token_ids]
                 response = TokenizerEncodeResponse(token_ids=token_ids, tokens=tokens)
             return ORJSONResponse(content=response.model_dump(exclude_none=True))
         except Exception as e:
@@ -487,8 +486,4 @@ class FrontendServer(object):
 
     def check_health(self):
         assert self._frontend_worker is not None
-        return (
-            self._frontend_worker.backend_rpc_server_visitor.is_backend_service_ready(
-                refresh=False
-            )
-        )
+        return self._backend_rpc_server_visitor.is_backend_service_ready(refresh=False)

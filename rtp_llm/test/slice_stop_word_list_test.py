@@ -3,10 +3,15 @@ from unittest import TestCase, main, mock
 
 import torch
 
-from rtp_llm.ops import PDSepConfig
-from rtp_llm.pipeline.pipeline import Pipeline
+from rtp_llm.async_decoder_engine.base_engine import BaseEngine
+from rtp_llm.frontend.frontend_worker import FrontendWorker
+from rtp_llm.models.base_model import GenerateOutput, GenerateOutputs
+from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.test.model_test.test_util.fake_model_loader import FakeModelLoader
-from rtp_llm.utils.base_model_datatypes import GenerateOutput, GenerateOutputs
+
+os.environ["KV_CACHE_MEM_MB"] = "100"
+os.environ["RESERVER_RUNTIME_MEM_MB"] = "1"
+os.environ["DEVICE_RESERVE_MEMORY_BYTES"] = str(64 * 1024**2)
 
 
 class SliceStopWordListTest(TestCase):
@@ -16,15 +21,13 @@ class SliceStopWordListTest(TestCase):
             os.getcwd(),
             "rtp_llm/test/model_test/fake_test/testdata/llama/fake/hf_source",
         )
-        pd_sep_config = PDSepConfig()
-        self.pipeline = Pipeline(
-            special_tokens=None,
-            pd_sep_config=pd_sep_config,
-            addresses=["localhost:8080"],  # Default test address
-            max_seq_len=1000,
-            seq_size_per_block=1,
-            tokenizer=None,
-            sp_config=None,
+        engine: BaseEngine = FakeModelLoader(
+            "llama", ckpt_path, ckpt_path, max_seq_len=1024
+        ).init_engine()
+
+        backend_rpc_server_visitor = BackendRPCServerVisitor(engine.config, False)
+        self.pipeline = FrontendWorker(
+            engine.config, engine.model.tokenizer, backend_rpc_server_visitor
         )
 
     async def mock_generate(self):

@@ -6,14 +6,45 @@ from unittest import TestCase, main
 from pydantic import BaseModel
 
 from rtp_llm.frontend.frontend_server import FrontendServer
-from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
-from rtp_llm.utils.concurrency_controller import init_controller, set_global_controller
+
 
 class FakePipelinResponse(BaseModel):
     res: str
+
+
+class FakeTokenizer(object):
+    def encode(self, text: str):
+        return [1, 2, 3, 4]
+
+    def decode(self, token_id: int):
+        token_map = {1: "b", 2: "c", 3: "d", 4: "e"}
+        return token_map.get(token_id, "")
+
+
+class FakeAccessLogger(object):
+    def log_query_access(self, request):
+        pass
+
+    def log_success_access(self, request, response):
+        pass
+
+    def log_exception_access(self, request, exception):
+        pass
+
+
+class FakeGlobalController(object):
+    def __init__(self):
+        self.counter = 0
+
+    def increment(self):
+        self.counter += 1
+        return self.counter
+
+    def decrement(self):
+        self.counter -= 1
 
 
 class FakeFrontendWorker(object):
@@ -22,9 +53,6 @@ class FakeFrontendWorker(object):
         return CompleteResponseAsyncGenerator(
             response_generator, CompleteResponseAsyncGenerator.get_last_value
         )
-
-    def tokenizer_encode(self, prompt: str):
-        return [1, 2, 3, 4], ["b", "c", "d", "e"]
 
     async def _inference(self, prompt: str, *args: Any, **kwargs: Any):
         yield FakePipelinResponse(res=prompt)
@@ -41,11 +69,19 @@ class FakeRawRequest(object):
 class FrontendServerTest(TestCase):
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
-        # Create PyEnvConfigs with default values for testing
-        py_env_configs = PyEnvConfigs()
-        set_global_controller(init_controller(py_env_configs.concurrency_config))
-        self.frontend_server = FrontendServer(py_env_configs=py_env_configs)
+        # Create FrontendServer without initializing tokenizer for testing
+        self.frontend_server = object.__new__(FrontendServer)
         self.frontend_server._frontend_worker = FakeFrontendWorker()
+        self.frontend_server._tokenizer = FakeTokenizer()
+        self.frontend_server._access_logger = FakeAccessLogger()
+        self.frontend_server._openai_endpoint = None
+        self.frontend_server._embedding_endpoint = None
+        self.frontend_server.thread_lock_ = None
+        self.frontend_server._global_controller = FakeGlobalController()
+        self.frontend_server.separated_frontend = False
+        self.frontend_server.rank_id = "0"
+        self.frontend_server.server_id = "0"
+        self.frontend_server.is_embedding = False
 
     async def _async_run(self, *args: Any, **kwargs: Any):
         res = await self.frontend_server.inference(*args, **kwargs)
