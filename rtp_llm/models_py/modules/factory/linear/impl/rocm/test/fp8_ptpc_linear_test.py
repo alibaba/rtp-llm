@@ -62,7 +62,7 @@ class RocmFp8PTPCLinearTest(unittest.TestCase):
         )  # [N]
 
     def test_ptpc_fp8_forward(self):
-        from rtp_llm.models_py.kernels.fp8_kernel import rocm_per_token_quant_fp8
+        from rtp_llm.models_py.kernels.rocm.fp8_kernel import rocm_per_token_quant_fp8
         from rtp_llm.models_py.modules.factory.linear.impl.rocm.fp8_ptpc_linear import (
             RocmFp8PTPCLinear,
         )

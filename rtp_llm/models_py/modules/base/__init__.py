@@ -4,7 +4,7 @@ Different architectures may have different implementations.
 """
 
 # Import common base modules (architecture-independent)
-from rtp_llm.models_py.modules.base.common.embedding import Embedding
+from rtp_llm.models_py.modules.base.common.embedding import Embedding, EmbeddingBert
 from rtp_llm.models_py.modules.base.common.kvcache_store import WriteCacheStoreOp
 from rtp_llm.models_py.modules.base.common.norm import (
     AddBiasResLayerNormTorch,
@@ -19,6 +19,7 @@ from rtp_llm.ops.compute_ops import DeviceType, get_device
 device_type = get_device().get_device_type()
 
 if device_type == DeviceType.ROCm:
+    from rtp_llm.models_py.modules.base.rocm.activation import FusedSiluAndMul
     from rtp_llm.models_py.modules.base.rocm.norm import (
         AddBiasResLayerNorm,
         FusedQKRMSNorm,
@@ -32,24 +33,8 @@ if device_type == DeviceType.ROCm:
         RMSResNorm,
     )
     from rtp_llm.models_py.modules.base.rocm.select_topk import SelectTopk
-
-    __all__ = [
-        "Embedding",
-        "WriteCacheStoreOp",
-        "AddBiasResLayerNorm",
-        "AddBiasResLayerNormTorch",
-        "LayerNorm",
-        "LayerNormTorch",
-        "RMSNormTorch",
-        "RMSResNormTorch",
-        "FusedQKRMSNorm",
-        "QKRMSNorm",
-        "RMSNorm",
-        "RMSResNorm",  # NotImplementedOp for ROCm
-        "SelectTopk",
-        "GroupTopK",  # NotImplementedOp for ROCm
-    ]
 else:
+    from rtp_llm.models_py.modules.base.cuda.activation import FusedSiluAndMul
     from rtp_llm.models_py.modules.base.cuda.norm import (
         AddBiasResLayerNorm,
         FusedQKRMSNorm,
@@ -61,6 +46,7 @@ else:
 
     __all__ = [
         "Embedding",
+        "EmbeddingBert",
         "WriteCacheStoreOp",
         "AddBiasResLayerNorm",
         "AddBiasResLayerNormTorch",
@@ -74,4 +60,5 @@ else:
         "RMSResNorm",
         "SelectTopk",
         "GroupTopK",
+        "FusedSiluAndMul",
     ]

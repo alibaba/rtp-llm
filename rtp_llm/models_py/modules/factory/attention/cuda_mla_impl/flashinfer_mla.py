@@ -12,7 +12,7 @@ from flashinfer.jit import gen_batch_mla_module, gen_batch_prefill_module
 from flashinfer.utils import is_sm90a_supported
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.models_py.modules.linear_factory import LinearFactory
+from rtp_llm.models_py.modules.factory.linear.factory import LinearFactory
 
 # from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops

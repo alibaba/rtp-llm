@@ -6,7 +6,7 @@ import torch
 from rtp_llm.models_py.modules.base.common.activation import SiluAndMulBase
 
 
-class RocmSiluAndMul(SiluAndMulBase):
+class FusedSiluAndMul(SiluAndMulBase):
     """ROCm implementation of silu_and_mul using aiter."""
 
     def silu_and_mul(self, output: torch.Tensor, gate_up: torch.Tensor) -> None:

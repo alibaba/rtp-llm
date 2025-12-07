@@ -3,7 +3,9 @@ from rtp_llm.models_py.modules.base import (
     AddBiasResLayerNorm,
     AddBiasResLayerNormTorch,
     Embedding,
+    EmbeddingBert,
     FusedQKRMSNorm,
+    FusedSiluAndMul,
     GroupTopK,
     LayerNorm,
     LayerNormTorch,
@@ -37,6 +39,7 @@ __all__ = [
     # Base modules
     "DenseMLP",
     "Embedding",
+    "EmbeddingBert",
     "WriteCacheStoreOp",
     "AddBiasResLayerNorm",
     "AddBiasResLayerNormTorch",
@@ -50,6 +53,7 @@ __all__ = [
     "RMSResNorm",
     "SelectTopk",
     "GroupTopK",
+    "FusedSiluAndMul",
     # Factory modules
     "FusedMoeFactory",
     "LinearFactory",

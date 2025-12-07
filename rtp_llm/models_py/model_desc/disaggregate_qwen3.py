@@ -4,21 +4,26 @@ from typing import Dict, List, Optional, Tuple
 import torch
 from torch import nn
 
-import rtp_llm.ops.librtp_compute_ops as compute_ops
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.distribute.collective import Group, recv, send
 from rtp_llm.distribute.worker_info import g_parallel_info
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
+    AttnImplFactory,
     Embedding,
     FMHAImplBase,
     FusedQKRMSNorm,
     FusedSiluActDenseMLP,
+    LinearFactory,
     RMSNorm,
 )
-from rtp_llm.models_py.modules.factory import AttnImplFactory, LinearFactory
-from rtp_llm.ops.compute_ops import PyModelInitResources, PyModelInputs, PyModelOutputs
+from rtp_llm.ops.compute_ops import (
+    KVCache,
+    PyModelInitResources,
+    PyModelInputs,
+    PyModelOutputs,
+)
 from rtp_llm.utils.model_weight import W
 from rtp_llm.utils.util import check_with_info
 
@@ -38,7 +43,7 @@ class CausalAttentionPure(nn.Module):
         self,
         hidden_states: torch.Tensor,
         fmha_impl: FMHAImplBase,
-        kv_cache: Optional[compute_ops.KVCache],
+        kv_cache: Optional[KVCache],
     ) -> torch.Tensor:
         input_shape = hidden_states.shape[:-1]
         attn_output = torch.empty(

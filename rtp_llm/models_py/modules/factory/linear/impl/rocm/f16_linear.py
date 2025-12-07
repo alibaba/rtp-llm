@@ -3,10 +3,10 @@
 from typing import Optional
 
 import torch
-from torch.nn import functional as F
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.models_py.modules.factory.linear import LinearBase
+from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 
 class RocmF16Linear(LinearBase):
@@ -31,8 +31,17 @@ class RocmF16Linear(LinearBase):
         config: Optional[GptInitModelParameters] = None,
     ):
         super().__init__(weight, weight_scales, input_scales, bias, config)
-        self.weight = weight.T
+        self.weight = weight
         self.bias = bias
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        return F.linear(input, self.weight, self.bias)
+        output = torch.empty(
+            *input.shape[:-1],
+            self.weight.shape[1],
+            dtype=input.dtype,
+            device=input.device
+        )
+        rtp_llm_ops.gemm(output, input, self.weight)
+        if self.bias is not None:
+            output = output + self.bias
+        return output

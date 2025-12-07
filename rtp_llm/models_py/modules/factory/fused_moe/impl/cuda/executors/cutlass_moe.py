@@ -3,7 +3,7 @@ from typing import Any, Callable, Optional
 
 import torch
 
-import rtp_llm.models_py.modules.common.moe.fused_moe as mm
+import rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe as mm
 import rtp_llm.ops.compute_ops as compute_ops
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     cutlass_moe_mm_fp8_scaled,

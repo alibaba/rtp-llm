@@ -34,23 +34,6 @@ class RMSNorm(BaseNorm):
         return rms_norm(hidden_states, self.weight.data, self.variance_epsilon)
 
 
-class AddBiasResLayerNormROCmTorch(BaseAddBiasResLayerNorm):
-    def __init__(self, weight: torch.Tensor, beta: torch.Tensor, eps: float = 1e-6):
-        super().__init__(weight, beta, eps)
-
-    def forward(
-        self, hidden_states: torch.Tensor, residual: torch.Tensor, bias: torch.Tensor
-    ):
-        output = F.layer_norm(
-            input=hidden_states,
-            normalized_shape=(hidden_states.shape[-1],),
-            weight=self.weight.data,
-            bias=bias,
-            eps=self.variance_epsilon,
-        )
-        return output
-
-
 class AddBiasResLayerNorm(BaseAddBiasResLayerNorm):
     def __init__(self, weight: torch.Tensor, beta: torch.Tensor, eps: float = 1e-6):
         super().__init__(weight, beta, eps)

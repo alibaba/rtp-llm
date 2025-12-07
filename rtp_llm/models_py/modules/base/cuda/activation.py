@@ -6,7 +6,7 @@ from rtp_llm.models_py.modules.base.common.activation import SiluAndMulBase
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 
-class CudaSiluAndMul(SiluAndMulBase):
+class FusedSiluAndMul(SiluAndMulBase):
     """CUDA implementation of silu_and_mul using rtp_llm_ops."""
 
     def silu_and_mul(self, output: torch.Tensor, gate_up: torch.Tensor) -> None:
