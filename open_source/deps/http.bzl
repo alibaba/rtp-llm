@@ -60,9 +60,9 @@ def http_deps():
 
     http_archive(
         name = "aiter",
-        sha256 = "5d5b73d1134157e93f850a243118664cb4cbc5bb75beead002dedc3914e63489",
+        sha256 = "4bd5179c70e5a2c95892db53a83bb50043fa79e5739eb54661ca6d451938963b",
         urls = [
-	        "https://search-ad-cn-hangzhou.oss-cn-hangzhou.aliyuncs.com/xiebaijie.xbj/qwenvl/aiter-0.1.5.post5.dev3%2Bg007fe7aa0.d20251201-cp310-cp310-linux_x86_64.whl",
+	        "https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/RTP/aiter-0.1.6%2Bgit.329d07ba.date.202511061023-py3-none-any.whl",
 	    ],
         type = "zip",
         build_file = clean_dep("//:BUILD.aiter"),

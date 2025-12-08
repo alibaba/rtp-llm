@@ -114,8 +114,8 @@ aiosignal==1.3.1 \
     --hash=sha256:54cd96e15e1649b75d6c87526a6ff0b6c1b0dd3459f43d9ca11d48c339b68cfc \
     --hash=sha256:f8376fb07dd1e86a584e4fcdec80b36b7f81aac666ebc724e2c090300dd83b17
     # via aiohttp
-aiter @ https://search-ad-cn-hangzhou.oss-cn-hangzhou.aliyuncs.com/xiebaijie.xbj/qwenvl/aiter-0.1.5.post5.dev3%2Bg007fe7aa0.d20251201-cp310-cp310-linux_x86_64.whl \
-    --hash=sha256:5d5b73d1134157e93f850a243118664cb4cbc5bb75beead002dedc3914e63489
+aiter @ https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/RTP/aiter-0.1.6%2Bgit.329d07ba.date.202511061023-py3-none-any.whl \
+    --hash=sha256:4bd5179c70e5a2c95892db53a83bb50043fa79e5739eb54661ca6d451938963b
     # via -r open_source/deps/requirements_rocm.txt
 aliyun-python-sdk-core==2.15.2 \
     --hash=sha256:54f66a53e193c61c5e16ea4505a0cab43543f8ad2ef22833f69c4d5e5151c17d
