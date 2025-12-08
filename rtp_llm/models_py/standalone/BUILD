@@ -45,6 +45,7 @@ py_library(
     ] + select({
         "@//:using_rocm": [
             "//rtp_llm:aiter",
+            "//rtp_llm:pytorch-triton-rocm",
             "//rtp_llm:amdsmi",
         ],
         "@//:using_cuda12": [
