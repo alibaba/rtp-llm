@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
 #include "rtp_llm/cpp/devices/GraphBase.h"
 #include "rtp_llm/cpp/devices/NativeGraphRunnerBase.h"
+#include "rtp_llm/cpp/cache_new/KVCacheConnector.h"
 
 namespace rtp_llm {
 
@@ -116,10 +117,12 @@ public:
                                                   bool                    is_prefill_cuda_graph_mode = false) {
         throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
     }
+
+    void setKVCacheConnector(std::shared_ptr<KVCacheConnector> connector);
+    void writeKVCacheConnector(const WriteCacheParams& params);
+
     void setCacheStore(std::shared_ptr<rtp_llm::CacheStore> cache_store);
-
     void writeCacheStore(const WriteCacheParams& params);
-
     void writeCacheStore(const CacheStoreInputs& cache_store_inputs, const KvCacheInfo& kv_cache, bool mla_kvcache);
 
     DeviceInitParams initParams() {
@@ -213,6 +216,7 @@ protected:
     DeviceInitParams                     init_params_;
     std::shared_ptr<rtp_llm::CacheStore> cache_store_;
     bool                                 enable_device_perf_ = false;
+    std::shared_ptr<KVCacheConnector>    kv_cache_connector_;  // maybe multiple connectors
 
     std::unique_ptr<MoEInsertionParams>  moe_insertion_params_;
     std::unique_ptr<MoEInsertionReturns> moe_insertion_ret_;
