@@ -4,8 +4,8 @@ import logging
 from typing_extensions import override
 
 from rtp_llm.async_decoder_engine.base_engine import BaseEngine
+from rtp_llm.models.multimodal.mm_process_engine import MMProcessEngine
 from rtp_llm.ops import RtpEmbeddingOp
-from rtp_llm.utils.mm_process_engine import MMProcessEngine
 
 
 class EmbeddingCppEngine(BaseEngine):

@@ -192,7 +192,7 @@ def trans_config(mm_process_config_pb: MMPreprocessConfigPB):
         fps=mm_process_config_pb.fps,
         min_frames=mm_process_config_pb.min_frames,
         max_frames=mm_process_config_pb.max_frames,
-        crop_positions=crop_positions.crop_positions,
+        crop_positions=list(mm_process_config_pb.crop_positions),
         mm_timeout_ms=mm_process_config_pb.mm_timeout_ms,
     )
 

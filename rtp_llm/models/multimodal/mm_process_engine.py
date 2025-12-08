@@ -1,5 +1,9 @@
 import concurrent.futures
 import gc
+import logging
+import os
+import signal
+import time
 from multiprocessing import Lock
 from typing import Any, Callable, List, Optional, Tuple
 
@@ -18,7 +22,6 @@ from rtp_llm.utils.base_model_datatypes import (
 )
 from rtp_llm.utils.time_util import Timer
 
-# Global lock for embedding operations to ensure thread safety
 mm_embedding_lock = Lock()
 
 
@@ -57,31 +60,11 @@ class MMWorkItem:
         self.preprocess_result: Optional[Any] = None
         self.embedding_result: Optional[Any] = None
 
-        # Only cache single URL inputs
         self.need_check_cache = len(mm_inputs) == 1 and mm_inputs[0].url is not None
-
-        self.check_cache()
-
-    def _get_cache_key(self) -> Optional[str]:
-        """
-        Get cache key for this work item.
-
-        Returns:
-            Cache key string if caching is enabled, None otherwise.
-        """
-        if not self.need_check_cache:
-            return None
-        return self.mm_inputs[0].to_string()
-
-    def check_cache(self) -> None:
-        """Check if embedding result is available in cache."""
-        cache_key = self._get_cache_key()
-        if cache_key is None:
-            return
-
-        cached_res = vit_emb_cache_.check_cache(cache_key)
-        if cached_res is not None:
-            self.embedding_result = cached_res
+        self.cache_key = (
+            self.mm_inputs[0].to_string() if self.need_check_cache else None
+        )
+        self.embedding_result = vit_emb_cache_.check_cache(self.cache_key)
 
     @staticmethod
     def download_and_preprocess(
@@ -127,10 +110,9 @@ class MMWorkItem:
         Note: Future cannot be pickled, so it cannot be a member of MMWorkItem.
         """
         if future is None:
-            if self.embedding_result is not None:
-                return
-            else:
+            if self.embedding_result is None:
                 raise ValueError("Embedding result and future cannot both be None")
+            return
 
         try:
             self.preprocess_result, preprocess_time = future.result(
@@ -138,45 +120,50 @@ class MMWorkItem:
             )
             kmonitor.report(GaugeMetrics.VIT_PREPROCESS_RT_METRIC, preprocess_time)
         except concurrent.futures.TimeoutError:
-            future.cancel()
+            self._safe_cancel_future(future)
             raise TimeoutError(f"Preprocessing timeout after {self.mm_timeout_ms}ms")
-        except Exception as e:
-            future.cancel()
+        except concurrent.futures.process.BrokenProcessPool:
             raise
+        except Exception:
+            self._safe_cancel_future(future)
+            raise
+
+    @staticmethod
+    def _safe_cancel_future(future: concurrent.futures.Future) -> None:
+        """Safely cancel a future, ignoring any errors."""
+        try:
+            future.cancel()
+        except Exception:
+            pass
 
     def get_embedding_result(self, embedding_func: Callable) -> Any:
         """Compute embedding result from preprocessed data or return cached result."""
-        if self.preprocess_result is not None:
-            with Timer() as route_timer:
-                with mm_embedding_lock:
-                    self.embedding_result = embedding_func(
-                        self.preprocess_result, mm_type=self.mm_type
-                    )
-            kmonitor.report(GaugeMetrics.VIT_EMBEDDING_RT_METRIC, route_timer.cost_ms())
+        if self.embedding_result is not None:
+            return self.embedding_result
 
-            if self.need_check_cache:
-                vit_emb_cache_.insert_cache(
-                    self.mm_inputs[0].to_string(), self.embedding_result
-                )
-            return self.embedding_result
-        elif self.embedding_result is not None:
-            return self.embedding_result
-        else:
+        if self.preprocess_result is None:
             raise ValueError(
                 "Preprocess result and embedding result in work item both be None"
             )
+
+        with Timer() as route_timer:
+            with mm_embedding_lock:
+                self.embedding_result = embedding_func(
+                    self.preprocess_result, mm_type=self.mm_type
+                )
+        kmonitor.report(GaugeMetrics.VIT_EMBEDDING_RT_METRIC, route_timer.cost_ms())
+
+        if self.need_check_cache:
+            vit_emb_cache_.insert_cache(self.cache_key, self.embedding_result)
+
+        return self.embedding_result
 
 
 class MMProcessEngine:
     """Engine for processing multimodal inputs with preprocessing and embedding."""
 
     def __init__(self, model: Any):
-        """
-        Initialize the multimodal process engine.
-
-        Args:
-            model: The model containing configuration and multimodal components.
-        """
+        """Initialize the multimodal process engine."""
         self.model = model
         self.contains_pos: bool = self.model.config.mm_position_ids_style != 0
         self.mm_preprocess_batch_size: int = self.model.config.mm_preprocess_batch_size
@@ -187,6 +174,7 @@ class MMProcessEngine:
 
         self.query_num: int = 0
         self.query_num_lock = Lock()
+        self._executor_lock = Lock()
         self._access_logger = MMAccessLogger()
 
     def inc_query_num(self) -> None:
@@ -204,35 +192,19 @@ class MMProcessEngine:
         with self.query_num_lock:
             return self.query_num
 
-    def _maybe_tensor_to_list(self, tensor: Any) -> List[Any]:
-        """
-        Convert tensor to list format if needed.
-
-        Args:
-            tensor: Input tensor or list
-
-        Returns:
-            List representation of the tensor
-        """
+    @staticmethod
+    def _maybe_tensor_to_list(tensor: Any, dim: int = 2) -> List[Any]:
+        """Convert tensor to list format if needed."""
         if tensor is None:
             return []
-        elif not isinstance(tensor, torch.Tensor):
+        if not isinstance(tensor, torch.Tensor):
             return tensor
-        elif len(tensor.shape) > 2:
+        if len(tensor.shape) > dim:
             return list(tensor)
-        else:
-            return [tensor]
+        return [tensor]
 
     def mm_embedding_rpc(self, mm_inputs: MultimodalInputsPB) -> MMEmbeddingRes:
-        """
-        Process multimodal inputs from RPC protocol buffer.
-
-        Args:
-            mm_inputs: Protocol buffer containing multimodal inputs
-
-        Returns:
-            MMEmbeddingRes containing embeddings and position IDs
-        """
+        """Process multimodal inputs from RPC protocol buffer."""
         converted_inputs = trans_mm_input(mm_inputs)
         return self.mm_embedding_impl(converted_inputs)
 
@@ -243,42 +215,19 @@ class MMProcessEngine:
         tensors: List[torch.Tensor],
         mm_preprocess_configs: List[Any],
     ) -> MMEmbeddingRes:
-        """
-        Process multimodal inputs from C++ interface.
-
-        Args:
-            urls: List of input URLs
-            types: List of URL types
-            tensors: List of input tensors
-            mm_preprocess_configs: List of preprocessing configurations
-
-        Returns:
-            MMEmbeddingRes containing embeddings and position IDs
-        """
-        mm_inputs = []
-        for url, url_type, tensor, config in zip(
-            urls, types, tensors, mm_preprocess_configs
-        ):
-            mm_inputs.append(
-                MultimodalInput(
-                    url, MMUrlType(url_type), tensor, MMPreprocessConfig(*config)
-                )
+        """Process multimodal inputs from C++ interface."""
+        mm_inputs = [
+            MultimodalInput(
+                url, MMUrlType(url_type), tensor, MMPreprocessConfig(*config)
             )
+            for url, url_type, tensor, config in zip(
+                urls, types, tensors, mm_preprocess_configs
+            )
+        ]
         return self.mm_embedding_impl(mm_inputs)
 
     def mm_embedding_impl(self, mm_inputs: List[MultimodalInput]) -> MMEmbeddingRes:
-        """
-        Core implementation for multimodal embedding processing.
-
-        Args:
-            mm_inputs: List of multimodal inputs to process
-
-        Returns:
-            MMEmbeddingRes containing embeddings and position IDs
-
-        Raises:
-            Exception: If processing fails
-        """
+        """Core implementation for multimodal embedding processing."""
         try:
             kmonitor.report(GaugeMetrics.VIT_QPS_METRIC, 1, {"source": "mm_embedding"})
             self.inc_query_num()
@@ -301,27 +250,111 @@ class MMProcessEngine:
         finally:
             self.dec_query_num()
 
+    @staticmethod
+    def _get_child_pids(executor: concurrent.futures.ProcessPoolExecutor) -> List[int]:
+        """Extract child process PIDs from executor."""
+        try:
+            if hasattr(executor, "_processes"):
+                return [
+                    p.pid
+                    for p in executor._processes.values()
+                    if hasattr(p, "pid") and p.pid is not None
+                ]
+        except (AttributeError, RuntimeError, ValueError):
+            pass
+        return []
+
+    @staticmethod
+    def _kill_child_processes(pids: List[int]) -> None:
+        """Kill child processes, waiting briefly for graceful shutdown."""
+        if not pids:
+            return
+
+        time.sleep(0.1)
+
+        for pid in pids:
+            try:
+                os.kill(pid, 0)
+                os.kill(pid, signal.SIGKILL)
+                logging.debug(f"Force killed child process {pid}")
+            except ProcessLookupError:
+                pass
+            except OSError as e:
+                logging.debug(f"Could not kill process {pid}: {e}")
+
+    def _recover_from_broken_process_pool(self) -> None:
+        """Recover from BrokenProcessPool by shutting down and recreating the executor."""
+        old_executor = self.mm_preprocess_executor
+
+        with self._executor_lock:
+            # Double-check: executor already replaced by another thread
+            if self.mm_preprocess_executor is not old_executor:
+                logging.debug("Executor already recovered by another thread")
+                return
+
+            child_pids = self._get_child_pids(old_executor)
+
+            try:
+                old_executor.shutdown(wait=False)
+            except Exception as e:
+                logging.warning(f"Error during executor shutdown: {e}", exc_info=True)
+
+            self._kill_child_processes(child_pids)
+
+            if self.mm_preprocess_executor is old_executor:
+                try:
+                    self.mm_preprocess_executor = concurrent.futures.ProcessPoolExecutor(
+                        max_workers=self.model.config.py_env_configs.vit_config.mm_preprocess_max_workers
+                    )
+                    logging.info(
+                        "Recreated ProcessPoolExecutor after BrokenProcessPool"
+                    )
+                except Exception as e:
+                    logging.error(
+                        f"Failed to create new ProcessPoolExecutor: {e}", exc_info=True
+                    )
+                    raise
+
+    def _submit_with_recovery(
+        self, work_item: MMWorkItem
+    ) -> Optional[concurrent.futures.Future]:
+        """Submit preprocessing task with automatic recovery from BrokenProcessPool."""
+        max_retries = 2
+        for attempt in range(max_retries):
+            try:
+                return work_item.may_submit_preprocess(
+                    self.model.mm_part, self.mm_preprocess_executor
+                )
+            except concurrent.futures.process.BrokenProcessPool:
+                if attempt < max_retries - 1:
+                    logging.warning(
+                        f"BrokenProcessPool detected (attempt {attempt + 1}/{max_retries}), "
+                        "recovering executor..."
+                    )
+                    self._recover_from_broken_process_pool()
+                else:
+                    logging.error(
+                        f"Failed to recover from BrokenProcessPool after {max_retries} attempts"
+                    )
+                    raise
+
     def _create_work_items(
         self, mm_inputs: List[MultimodalInput]
     ) -> Tuple[List[MMWorkItem], List[Optional[concurrent.futures.Future]]]:
         """Create work items and submit preprocessing tasks."""
-        work_items = []
-        futures = []
-
         batch_size = (
             self.mm_preprocess_batch_size
             if self.mm_preprocess_batch_size != -1
             else len(mm_inputs)
         )
 
+        work_items, futures = [], []
         for index in range(0, len(mm_inputs), batch_size):
             batch = mm_inputs[index : index + batch_size]
             work_item = MMWorkItem(batch)
-            future = work_item.may_submit_preprocess(
-                self.model.mm_part, self.mm_preprocess_executor
-            )
-            futures.append(future)
+            future = self._submit_with_recovery(work_item)
             work_items.append(work_item)
+            futures.append(future)
 
         return work_items, futures
 
@@ -332,15 +365,20 @@ class MMProcessEngine:
     ) -> None:
         """Wait for all preprocessing tasks to complete."""
         for future, work_item in zip(futures, work_items):
-            work_item.may_get_preprocess_result(future)
+            try:
+                work_item.may_get_preprocess_result(future)
+            except concurrent.futures.process.BrokenProcessPool:
+                logging.error(
+                    "BrokenProcessPool detected while waiting for preprocessing result"
+                )
+                self._recover_from_broken_process_pool()
+                raise
 
     def _compute_embeddings(
         self, work_items: List[MMWorkItem]
     ) -> Tuple[List[Any], List[Any], List[Any]]:
         """Compute embeddings for all work items."""
-        emb_res = []
-        pos_res = []
-        tensor_res = []
+        emb_res, pos_res, tensor_res = [], [], []
 
         for work_item in work_items:
             result = work_item.get_embedding_result(self.model.mm_part.embedding)
