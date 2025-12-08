@@ -109,7 +109,7 @@ def _generate_payload_and_weights(
         (num_local_experts, M, K // 2), device="cuda", dtype=torch.uint8
     )
     expert_x_scale = torch.zeros(
-        (num_local_experts, M, K // NVFP4_BLOCK_SIZE), device="cuda", dtype=torch.float8_e4m3fn
+        (num_local_experts, M, K // NVFP4_BLOCK_SIZE), device="cuda", dtype=torch.uint8
     )
     
     # Generate global scale for input quantization
