@@ -195,6 +195,9 @@ def _generate_payload_and_weights(
         )
 
         # 验证量化/反量化：反量化量化后的 tensor，与原始 tensor 比较
+        print(f"expert_x_q dtype: {expert_x_q.dtype}")
+        print(f"expert_x_sf dtype: {expert_x_sf.dtype}")
+        print(f"input_global_scale dtype: {input_global_scale.dtype}")
         expert_x_dequantized = e2m1_and_ufp8sf_scale_to_float(
             expert_x_q,
             expert_x_sf,
@@ -380,6 +383,9 @@ def _generate_ref_output(
         # Dequantize input
         expert_x_local_q = expert_x[local_expert_id, :num_actual_tokens, :]
         expert_x_local_sf = expert_x_scale[local_expert_id, :num_actual_tokens, :]
+        print(f"expert_x_local_q dtype: {expert_x_local_q.dtype}")
+        print(f"expert_x_local_sf dtype: {expert_x_local_sf.dtype}")
+        print(f"input_global_scale dtype: {input_global_scale.dtype}")
         expert_x_local_float32 = e2m1_and_ufp8sf_scale_to_float(
             expert_x_local_q,
             expert_x_local_sf,
