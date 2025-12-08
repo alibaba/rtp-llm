@@ -492,6 +492,9 @@ def test_nvfp4_masked_executor(use_nvfp4: bool = True):
     
     # Generate reference output
     ref_output = _generate_ref_output(payload, weights, global_scales, use_nvfp4)
+    payload.expert_x_scale = payload.expert_x_scale.view(torch.float8_e4m3fn)
+    weights[W.moe_s1] = weights[W.moe_s1].view(torch.float8_e4m3fn)
+    weights[W.moe_s2] = weights[W.moe_s2].view(torch.float8_e4m3fn)
     
     # Create executor
     from rtp_llm.models_py.modules.moe.executors.trtllm_fp4_executor import (
