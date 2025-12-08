@@ -279,6 +279,8 @@ def _generate_payload_and_weights(
     
     for local_expert_id in range(num_local_experts):
         # Quantize w1
+        print(f"w1_bf16[local_expert_id]: {w1_bf16[local_expert_id]}")
+        print(f"w1_quantization_global_scale: {w1_quantization_global_scale}")
         w1_q, w1_sf = fp4_quantize(
             w1_bf16[local_expert_id],
             w1_quantization_global_scale,  # Use w1 quantization scale
@@ -286,6 +288,8 @@ def _generate_payload_and_weights(
             sf_use_ue8m0=False,
             is_sf_swizzled_layout=False,
         )
+        print(f"w1_q: {w1_q}")
+        print(f"w1_sf: {w1_sf}")
         w1_sf_viewed = w1_sf.view(torch.float8_e4m3fn)
         if w1_sf_viewed.ndim == 2:
             w1_sf_reshaped = w1_sf_viewed
