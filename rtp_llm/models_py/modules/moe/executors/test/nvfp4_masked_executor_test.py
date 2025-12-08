@@ -271,12 +271,8 @@ def _generate_payload_and_weights(
     # For dequantization, we need the inverse (1.0 / quantization_global_scale)
     w1_amax = torch.abs(w1_bf16).max().to(torch.float32)
     w2_amax = torch.abs(w2_bf16).max().to(torch.float32)
-    w1_quantization_global_scale = torch.tensor(
-        [FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / w1_amax], device="cuda", dtype=torch.float32
-    )
-    w2_quantization_global_scale = torch.tensor(
-        [FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / w2_amax], device="cuda", dtype=torch.float32
-    )
+    w1_quantization_global_scale = input_global_scale.clone()
+    w2_quantization_global_scale = input_global_scale.clone()
     # For dequantization and executor, we need the inverse
     w1_global_scale = 1.0 / w1_quantization_global_scale
     w2_global_scale = 1.0 / w2_quantization_global_scale
@@ -285,7 +281,7 @@ def _generate_payload_and_weights(
         # Quantize w1
         w1_q, w1_sf = fp4_quantize(
             w1_bf16[local_expert_id],
-            input_quantization_global_scale,  # Use quantization scale for quantization
+            w1_quantization_global_scale,  # Use w1 quantization scale
             sf_vec_size=16,
             sf_use_ue8m0=False,
         )
@@ -295,13 +291,40 @@ def _generate_payload_and_weights(
         else:
             w1_sf_reshaped = w1_sf_viewed.reshape(N, K // NVFP4_BLOCK_SIZE)
         
+        # Verify w1 quantization/dequantization
+        w1_dequantized = e2m1_and_ufp8sf_scale_to_float(
+            w1_q,
+            w1_sf,
+            w1_global_scale,
+            sf_vec_size=16,
+            ufp8_type=1,
+            is_sf_swizzled_layout=True,
+        )
+        w1_dequantized_bf16 = w1_dequantized.to(device=w1_q.device).to(torch.bfloat16)
+        w1_dequantized_bf16 = w1_dequantized_bf16.reshape(N, K)
+        
+        w1_diff = (w1_bf16[local_expert_id].cpu() - w1_dequantized_bf16.cpu()).abs()
+        w1_max_diff = w1_diff.max().item()
+        w1_mean_diff = w1_diff.mean().item()
+        print(f"[DEBUG generate_weights] Expert {local_expert_id} w1:")
+        print(f"  Original shape: {w1_bf16[local_expert_id].shape}, dtype: {w1_bf16[local_expert_id].dtype}")
+        print(f"  Quantized shape: {w1_q.shape}, dtype: {w1_q.dtype}")
+        print(f"  Dequantized shape: {w1_dequantized_bf16.shape}, dtype: {w1_dequantized_bf16.dtype}")
+        print(f"  Max diff: {w1_max_diff:.6f}, Mean diff: {w1_mean_diff:.6f}")
+        print(f"  Original min: {w1_bf16[local_expert_id].min().item():.6f}, max: {w1_bf16[local_expert_id].max().item():.6f}")
+        print(f"  Dequantized min: {w1_dequantized_bf16.min().item():.6f}, max: {w1_dequantized_bf16.max().item():.6f}")
+        if w1_max_diff > 0.1:
+            assert 0, f"  ⚠ WARNING: Large w1 difference detected! Max diff: {w1_max_diff:.6f}"
+        else:
+            print(f"  ✓ w1 Quantization/dequantization check passed")
+        
         w1[local_expert_id] = w1_q
         w1_scale[local_expert_id] = w1_sf
         
         # Quantize w2
         w2_q, w2_sf = fp4_quantize(
             w2_bf16[local_expert_id],
-            input_quantization_global_scale,  # Use quantization scale for quantization
+            w2_quantization_global_scale,  # Use w2 quantization scale
             sf_vec_size=16,
             sf_use_ue8m0=False,
         )
@@ -311,6 +334,33 @@ def _generate_payload_and_weights(
             w2_sf_reshaped = w2_sf_viewed
         else:
             w2_sf_reshaped = w2_sf_viewed.reshape(K, (N // 2) // NVFP4_BLOCK_SIZE)
+        
+        # Verify w2 quantization/dequantization
+        w2_dequantized = e2m1_and_ufp8sf_scale_to_float(
+            w2_q,
+            w2_sf,
+            w2_global_scale,
+            sf_vec_size=16,
+            ufp8_type=1,
+            is_sf_swizzled_layout=True,
+        )
+        w2_dequantized_bf16 = w2_dequantized.to(device=w2_q.device).to(torch.bfloat16)
+        w2_dequantized_bf16 = w2_dequantized_bf16.reshape(K, N // 2)
+        
+        w2_diff = (w2_bf16[local_expert_id].cpu() - w2_dequantized_bf16.cpu()).abs()
+        w2_max_diff = w2_diff.max().item()
+        w2_mean_diff = w2_diff.mean().item()
+        print(f"[DEBUG generate_weights] Expert {local_expert_id} w2:")
+        print(f"  Original shape: {w2_bf16[local_expert_id].shape}, dtype: {w2_bf16[local_expert_id].dtype}")
+        print(f"  Quantized shape: {w2_q.shape}, dtype: {w2_q.dtype}")
+        print(f"  Dequantized shape: {w2_dequantized_bf16.shape}, dtype: {w2_dequantized_bf16.dtype}")
+        print(f"  Max diff: {w2_max_diff:.6f}, Mean diff: {w2_mean_diff:.6f}")
+        print(f"  Original min: {w2_bf16[local_expert_id].min().item():.6f}, max: {w2_bf16[local_expert_id].max().item():.6f}")
+        print(f"  Dequantized min: {w2_dequantized_bf16.min().item():.6f}, max: {w2_dequantized_bf16.max().item():.6f}")
+        if w2_max_diff > 0.1:
+            assert 0, f"  ⚠ WARNING: Large w2 difference detected! Max diff: {w2_max_diff:.6f}"
+        else:
+            print(f"  ✓ w2 Quantization/dequantization check passed")
         
         w2[local_expert_id] = w2_q
         w2_scale[local_expert_id] = w2_sf
@@ -326,11 +376,13 @@ def _generate_payload_and_weights(
         "moe_input_global_scale": input_global_scale,
     }
     
-    # Store global scales for reference output generation
+    # Store global scales and original tensors for reference output generation
     global_scales = {
         "input_global_scale": input_global_scale,
         "w1_global_scale": w1_global_scale,
         "w2_global_scale": w2_global_scale,
+        "w1_bf16": w1_bf16,  # Store original w1 for verification
+        "w2_bf16": w2_bf16,  # Store original w2 for verification
     }
     
     return payload, weights, global_scales
@@ -383,9 +435,6 @@ def _generate_ref_output(
         # Dequantize input
         expert_x_local_q = expert_x[local_expert_id, :num_actual_tokens, :]
         expert_x_local_sf = expert_x_scale[local_expert_id, :num_actual_tokens, :]
-        print(f"expert_x_local_q dtype: {expert_x_local_q.dtype}")
-        print(f"expert_x_local_sf dtype: {expert_x_local_sf.dtype}")
-        print(f"input_global_scale dtype: {input_global_scale.dtype}")
         expert_x_local_float32 = e2m1_and_ufp8sf_scale_to_float(
             expert_x_local_q,
             expert_x_local_sf,
@@ -396,17 +445,35 @@ def _generate_ref_output(
         )
         expert_x_local = expert_x_local_float32.to(device=expert_x_local_q.device).to(torch.bfloat16)
         
+        # Note: We can't verify expert_x dequantization here because we don't have the original tensor
+        # The verification is done in _generate_payload_and_weights during quantization
+        
         # Dequantize w1
         w1_local_q = w1[local_expert_id]
         w1_local_sf = w1_scale[local_expert_id]
         w1_local_float32 = e2m1_and_ufp8sf_scale_to_float(
             w1_local_q,
             w1_local_sf,
-            input_global_scale,
+            w1_global_scale,
             sf_vec_size=NVFP4_BLOCK_SIZE,
             ufp8_type=1,
         )
         w1_local = w1_local_float32.to(device=w1_local_q.device).to(torch.bfloat16)
+        
+        # Verify w1 dequantization matches original
+        if "w1_bf16" in global_scales:
+            w1_original = global_scales["w1_bf16"][local_expert_id]
+            w1_local_reshaped = w1_local.reshape(N, K)
+            w1_diff = (w1_original.cpu() - w1_local_reshaped.cpu()).abs()
+            w1_max_diff = w1_diff.max().item()
+            w1_mean_diff = w1_diff.mean().item()
+            print(f"[DEBUG _generate_ref_output] Expert {local_expert_id} w1 dequantization check:")
+            print(f"  Original shape: {w1_original.shape}, Dequantized shape: {w1_local_reshaped.shape}")
+            print(f"  Max diff: {w1_max_diff:.6f}, Mean diff: {w1_mean_diff:.6f}")
+            if w1_max_diff > 0.1:
+                print(f"  ⚠ WARNING: Large w1 dequantization difference! Max diff: {w1_max_diff:.6f}")
+            else:
+                print(f"  ✓ w1 dequantization check passed")
         
         # Dequantize w2
         w2_local_q = w2[local_expert_id]
@@ -414,11 +481,26 @@ def _generate_ref_output(
         w2_local_float32 = e2m1_and_ufp8sf_scale_to_float(
             w2_local_q,
             w2_local_sf,
-            input_global_scale,
+            w2_global_scale,
             sf_vec_size=NVFP4_BLOCK_SIZE,
             ufp8_type=1,
         )
         w2_local = w2_local_float32.to(device=w2_local_q.device).to(torch.bfloat16)
+        
+        # Verify w2 dequantization matches original
+        if "w2_bf16" in global_scales:
+            w2_original = global_scales["w2_bf16"][local_expert_id]
+            w2_local_reshaped = w2_local.reshape(K, N // 2)
+            w2_diff = (w2_original.cpu() - w2_local_reshaped.cpu()).abs()
+            w2_max_diff = w2_diff.max().item()
+            w2_mean_diff = w2_diff.mean().item()
+            print(f"[DEBUG _generate_ref_output] Expert {local_expert_id} w2 dequantization check:")
+            print(f"  Original shape: {w2_original.shape}, Dequantized shape: {w2_local_reshaped.shape}")
+            print(f"  Max diff: {w2_max_diff:.6f}, Mean diff: {w2_mean_diff:.6f}")
+            if w2_max_diff > 0.1:
+                print(f"  ⚠ WARNING: Large w2 dequantization difference! Max diff: {w2_max_diff:.6f}")
+            else:
+                print(f"  ✓ w2 dequantization check passed")
         
         # Compute MoE forward pass
         workspace1 = expert_x_local @ w1_local.transpose(0, 1)
