@@ -379,7 +379,7 @@ def _generate_payload_and_weights(
         print(f"  Max diff: {max_diff:.6f}, Mean diff: {mean_diff:.6f}")
         print(f"  Original min: {expert_x_bf16_local.min().item():.6f}, max: {expert_x_bf16_local.max().item():.6f}")
         print(f"  Dequantized min: {expert_x_dequantized.min().item():.6f}, max: {expert_x_dequantized.max().item():.6f}")
-        assert 0
+        assert 0, f"{expert_x_bf16_local.cpu()} {expert_x_dequantized.cpu()}"
         
         # 检查是否相同（考虑量化误差）
         if max_diff > 0.1:
