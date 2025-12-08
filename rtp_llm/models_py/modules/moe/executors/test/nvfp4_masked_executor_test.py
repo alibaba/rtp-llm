@@ -257,13 +257,13 @@ def _generate_payload_and_weights(
         (num_local_experts, N, K // 2), device="cuda", dtype=torch.uint8
     )
     w1_scale = torch.zeros(
-        (num_local_experts, N, K // NVFP4_BLOCK_SIZE), device="cuda", dtype=torch.float8_e4m3fn
+        (num_local_experts, N, K // NVFP4_BLOCK_SIZE), device="cuda", dtype=torch.uint8
     )
     w2 = torch.zeros(
         (num_local_experts, K, (N // 2) // 2), device="cuda", dtype=torch.uint8
     )
     w2_scale = torch.zeros(
-        (num_local_experts, K, (N // 2) // NVFP4_BLOCK_SIZE), device="cuda", dtype=torch.float8_e4m3fn
+        (num_local_experts, K, (N // 2) // NVFP4_BLOCK_SIZE), device="cuda", dtype=torch.uint8
     )
     
     # Compute global scales for weights
@@ -296,7 +296,7 @@ def _generate_payload_and_weights(
             w1_sf_reshaped = w1_sf_viewed.reshape(N, K // NVFP4_BLOCK_SIZE)
         
         w1[local_expert_id] = w1_q
-        w1_scale[local_expert_id] = w1_sf_reshaped
+        w1_scale[local_expert_id] = w1_sf
         
         # Quantize w2
         w2_q, w2_sf = fp4_quantize(
@@ -313,7 +313,7 @@ def _generate_payload_and_weights(
             w2_sf_reshaped = w2_sf_viewed.reshape(K, (N // 2) // NVFP4_BLOCK_SIZE)
         
         w2[local_expert_id] = w2_q
-        w2_scale[local_expert_id] = w2_sf_reshaped
+        w2_scale[local_expert_id] = w2_sf
     
     weights = {
         W.moe_w1: w1,
