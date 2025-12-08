@@ -15,11 +15,12 @@ from rtp_llm.utils.model_weight import W
 
 # Try to import fp4_quantize from flashinfer
 try:
-    from flashinfer import fp4_quantize
+    from flashinfer import fp4_quantize, e2m1_and_ufp8sf_scale_to_float
     FLASHINFER_AVAILABLE = True
 except ImportError:
     FLASHINFER_AVAILABLE = False
     fp4_quantize = None
+    e2m1_and_ufp8sf_scale_to_float = None
 
 # Constants - matching bench_fp4_moe.py default parameters
 DP_SIZE = 1
