@@ -256,6 +256,18 @@ KVCacheBuffer HybridLayerKVCacheAllocator::kvCacheBuffer() const {
     return block_pool_->kvCacheBuffer();
 }
 
+std::vector<std::pair<rtp_llm::BufferPtr, size_t>> HybridLayerKVCacheAllocator::getAllBuffers() const {
+    std::vector<std::pair<rtp_llm::BufferPtr, size_t>> buffers;
+    if (block_pool_) {
+        auto buffer = block_pool_->getCacheAlignedBuffer();
+        if (buffer) {
+            auto block_size = block_pool_->blockSize();
+            buffers.push_back(std::make_pair(buffer, block_size));
+        }
+    }
+    return buffers;
+}
+
 bool HybridLayerKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                                                 const std::vector<int>&        block_src_batch,
                                                 bool                           copy_last_block,

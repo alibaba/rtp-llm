@@ -93,7 +93,7 @@ BlockBufferPtrInfo LayerFirstLayoutStrategy::convertIndexToBuffer(int layer_id, 
 
     torch::Tensor tensor = layer_kv_tensors_[layer_id][block_id];
     BufferPtr     buffer = torchTensor2Buffer(tensor);
-    return {buffer, buffer};
+    return {buffer, buffer};  // TODO: support seprate for MLA and MHA and Linear
 }
 
 void* LayerFirstLayoutStrategy::getKCacheAddr(int layer_id, int block_id) const {
@@ -223,7 +223,7 @@ BlockBufferPtrInfo KVFirstLayoutStrategy::convertIndexToBuffer(int layer_id, int
     BufferPtr     k_buffer = torchTensor2Buffer(k_tensor);
     torch::Tensor v_tensor = v_cache_tensor_[layer_id][block_id];
     BufferPtr     v_buffer = torchTensor2Buffer(v_tensor);
-    return {k_buffer, v_buffer};
+    return {k_buffer, v_buffer};  // TODO: support seprate for MLA and MHA and Linear
 }
 
 void* KVFirstLayoutStrategy::getKCacheAddr(int layer_id, int block_id) const {

@@ -73,6 +73,11 @@ public:
                                                           std::vector<BlockIdPair>&      block_update_mapping);
     std::shared_ptr<class MemoryBlockCache> memoryBlockCache() const;
 
+    // Get the underlying KVCacheAllocator
+    KVCacheAllocatorPtr getAllocator() const {
+        return allocator_;
+    }
+
 private:
     CacheConfig          config_;
     rtp_llm::DeviceBase* device_;

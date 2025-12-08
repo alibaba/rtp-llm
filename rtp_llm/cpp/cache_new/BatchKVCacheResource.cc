@@ -75,4 +75,9 @@ std::string BatchKVCacheResource::debugString() const {
     return debug_string.str();
 }
 
+KVCacheResourceV1& BatchKVCacheResource::resource(int batch_id) {
+    RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
+    return batch_resource[batch_id];
+}
+
 }  // namespace rtp_llm

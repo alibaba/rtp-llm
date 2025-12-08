@@ -38,6 +38,8 @@ public:
 
     KVCacheBuffer kvCacheBuffer() const override;
 
+    std::vector<std::pair<rtp_llm::BufferPtr, size_t>> getAllBuffers() const override;
+
     BlockPoolPtr getBlockPool() const {
         return block_pool_;
     }

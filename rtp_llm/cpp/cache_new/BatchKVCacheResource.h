@@ -50,7 +50,15 @@ public:
     int blocks() const {
         return group_block_ids[0]->size();
     }
+
+    const LayerBlockIds& layerBlockIds() const {
+        return layer_block_ids;
+    }
+    const std::vector<int64_t>& cacheKeys() const {
+        return cache_keys;
+    }
 };
+
 class BatchKVCacheResource {
 public:
     BatchKVCacheResource() {}
@@ -70,6 +78,8 @@ public:
         }
     }
     std::string debugString() const;
+
+    KVCacheResourceV1& resource(int batch_id);
 
 public:
     bool enable_reuse_cache  = true;

@@ -45,6 +45,9 @@ public:
 
     virtual KVCacheBuffer kvCacheBuffer() const = 0;
 
+    // Get all buffers allocated by BlockPools in this allocator, with their corresponding block sizes
+    virtual std::vector<std::pair<rtp_llm::BufferPtr, size_t>> getAllBuffers() const = 0;
+
     virtual bool updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                                const std::vector<int>&        block_src_batch,
                                bool                           copy_last_block,

@@ -32,6 +32,8 @@ public:
 
     KVCacheBuffer kvCacheBuffer() const override;
 
+    std::vector<std::pair<rtp_llm::BufferPtr, size_t>> getAllBuffers() const override;
+
     bool updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                        const std::vector<int>&        block_src_batch,
                        bool                           copy_last_block,
@@ -40,6 +42,7 @@ public:
 private:
     MallocResult incrMalloc(const MallocInfo& malloc_info);
     MallocResult initMallocForCommonLen(const MallocInfo& malloc_info);
+    void         makeLayerBlockIds(KVCacheResourceV1& resource) const;
 
 private:
     BlockPoolPtr                      block_pool_;

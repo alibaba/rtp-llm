@@ -58,6 +58,15 @@ public:
     // For backward compatibility with old cache system
     KVCacheBuffer kvCacheBuffer() const;
 
+    // Get the underlying buffer allocated by this BlockPool
+    rtp_llm::BufferPtr getCacheAlignedBuffer() const {
+        return cache_aligned_buffer_;
+    }
+
+    size_t blockSize() const {
+        return config_.block_size;
+    }
+
     void incrBlockRefCounter(const BlockIndicesType& blocks) {}
     void decrBlockRefCounter(const BlockIndicesType& blocks) {}
 
