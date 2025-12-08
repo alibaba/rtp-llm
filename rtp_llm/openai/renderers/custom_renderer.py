@@ -717,8 +717,6 @@ class CustomChatRenderer:
                 ),
                 prompt_tokens_details=(
                     PromptTokensDetails(cached_tokens=reuse_lengths)
-                    if reuse_lengths > 0
-                    else None
                 ),
             ),
             # TODO(zhangjianning.zjn): merge all extra outputs for streaming request
@@ -810,8 +808,6 @@ class CustomChatRenderer:
                 ),
                 prompt_tokens_details=(
                     PromptTokensDetails(cached_tokens=reuse_length)
-                    if reuse_length > 0
-                    else None
                 ),
             ),
             aux_info=aux_info,
@@ -1051,8 +1047,6 @@ class CustomChatRenderer:
                 completion_tokens=output_lengths,
                 prompt_tokens_details=(
                     PromptTokensDetails(cached_tokens=reuse_lengths)
-                    if reuse_lengths > 0
-                    else None
                 ),
             ),
         )
@@ -1129,8 +1123,6 @@ class CustomChatRenderer:
                 completion_tokens=output_token_length,
                 prompt_tokens_details=(
                     PromptTokensDetails(cached_tokens=reuse_length)
-                    if reuse_length > 0
-                    else None
                 ),
             ),
             aux_info=aux_info,
