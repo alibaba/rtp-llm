@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/cache_new/types.h"
+// #include "rtp_llm/cpp/cache/MemoryBlockCache.h"
 
 using namespace std;
 
@@ -20,7 +21,7 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
     maga_init_params_ = maga_init_params;
     metrics_reporter_ = maga_init_params.metrics_reporter;
     RTP_LLM_LOG_INFO("LocalRpcServer aux_string %s",
-                     maga_init_params_.gpt_init_parameter.misc_config.aux_string.c_str());
+                        maga_init_params_.gpt_init_parameter.misc_config.aux_string.c_str());
     if (propose_params) {
         propose_maga_init_params_ = propose_params.get();
         if (!mm_process_engine.is_none()) {
@@ -58,9 +59,6 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
         }
     }
 
-    tp_broadcast_service_ = std::make_shared<TPBroadcastService>();
-
-    RTP_LLM_LOG_INFO("LocalRpcServer init success");
     return grpc::Status::OK;
 }
 
@@ -126,24 +124,11 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
 grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*                   context,
                                                 const GenerateInputPB*                 request,
                                                 grpc::ServerWriter<GenerateOutputsPB>* writer) {
-    AtomicGuard     request_guard(onflight_requests_);
-    GenerateContext generate_context(context, request, writer, metrics_reporter_, meta_);
-    RTP_LLM_LOG_DEBUG("receive request %ld", generate_context.request_id);
-
-    if (!initContext(generate_context, context, request, writer).ok()) {
-        return generate_context.error_status;
-    }
-
-    generate_context.error_status =
-        pollStreamOutput(context, generate_context.request_key, writer, generate_context.getStream());
-    meta_->dequeue(generate_context.request_id, generate_context.getStream());
-    return generate_context.error_status;
-}
-
-grpc::Status LocalRpcServer::initContext(GenerateContext&                       generate_context,
-                                         grpc::ServerContext*                   server_context,
-                                         const GenerateInputPB*                 request,
-                                         grpc::ServerWriter<GenerateOutputsPB>* writer) {
+    AtomicGuard request_guard(onflight_requests_);
+    auto        request_id = request->request_id();
+    RTP_LLM_LOG_DEBUG("receive request %ld", request_id);
+    auto generate_context =
+        GenerateContext(request_id, request->generate_config().timeout_ms(), context, metrics_reporter_, meta_);
     auto input = QueryConverter::transQuery(request);
 
     // need to check client has buffer at first
@@ -157,11 +142,15 @@ grpc::Status LocalRpcServer::initContext(GenerateContext&                       
 
     input->lora_id  = engine_->getLoraManager()->getLoraId(input->generate_config->adapter_name);
     auto lora_guard = lora::LoraResourceGuard(engine_->getLoraManager(), input->generate_config->adapter_name);
-    RTP_LLM_LOG_DEBUG("request [%ld] trans to stream success", generate_context.request_id);
+    RTP_LLM_LOG_DEBUG("request [%ld] trans to stream success", request_id);
     generate_context.setStream(engine_->enqueue(input));
 
-    RTP_LLM_LOG_DEBUG("request [%ld] enqueue success", generate_context.request_id);
-    return grpc::Status::OK;
+    RTP_LLM_LOG_DEBUG("request [%ld] enqueue success", request_id);
+
+    generate_context.error_status =
+        pollStreamOutput(context, generate_context.request_key, writer, generate_context.getStream());
+    meta_->dequeue(generate_context.request_id, generate_context.getStream());
+    return generate_context.error_status;
 }
 
 grpc::Status
@@ -421,7 +410,17 @@ void LocalRpcServer::reportCacheStatusTime(int64_t request_begin_time_us) {
         RTP_LLM_LOG_WARNING("broadcast tp failed, request is cancelled");
         return grpc::Status(grpc::StatusCode::CANCELLED, "request is cancelled");
     }
-    return tp_broadcast_service_->broadcast(context, request, response);
+    if (!engine_) {
+        RTP_LLM_LOG_WARNING("broadcast tp failed, engine is null");
+        return grpc::Status(grpc::StatusCode::INTERNAL, "engine is null");
+    }
+    auto cache_manager = engine_->getCacheManager();
+    if (!cache_manager) {
+        RTP_LLM_LOG_WARNING("broadcast tp failed, cache manager is null");
+        return grpc::Status(grpc::StatusCode::INTERNAL, "cache manager is null");
+    }
+    // TODO(LXQ): need to call corresponding function in cache manager
+    return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "broadcast tp is not implemented");
 }
 
 }  // namespace rtp_llm

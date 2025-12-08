@@ -9,7 +9,6 @@
 #include "rtp_llm/cpp/utils/AtomicUtil.h"
 #include "rtp_llm/cpp/engine_base/WorkerStatusInfo.h"
 #include "rtp_llm/cpp/cache_new/types.h"
-#include "rtp_llm/cpp/cache_new/TpBroadcastManager.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/model_rpc/GenerateContext.h"
@@ -21,12 +20,6 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
-
-namespace rtp_llm {
-namespace cache_store {
-class P2PConnectorServer;
-}
-}  // namespace rtp_llm
 
 namespace rtp_llm {
 class LocalRpcServer {
@@ -101,11 +94,6 @@ protected:
                                   WriterInterface*                 writer,
                                   std::shared_ptr<GenerateStream>& stream);
 
-    grpc::Status initContext(GenerateContext&                       generate_context,
-                             grpc::ServerContext*                   server_context,
-                             const GenerateInputPB*                 request,
-                             grpc::ServerWriter<GenerateOutputsPB>* writer);
-
 protected:
     std::shared_ptr<EngineBase>           engine_;
     std::shared_ptr<MultimodalProcessor>  mm_processor_;
@@ -114,7 +102,6 @@ protected:
     kmonitor::MetricsReporterPtr          metrics_reporter_;
     std::atomic<size_t>                   onflight_requests_{0};
     std::shared_ptr<RpcServerRuntimeMeta> meta_;
-    std::shared_ptr<TPBroadcastService>   tp_broadcast_service_;
 };
 
 }  // namespace rtp_llm
