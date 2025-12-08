@@ -61,8 +61,8 @@ bool TPBroadcastResult::success() const {
     return all_request_success_;
 }
 
-std::vector<BroadcastTpResponsePB> TPBroadcastResult::responses() const {
-    std::vector<BroadcastTpResponsePB> responses;
+std::vector<std::shared_ptr<BroadcastTpResponsePB>> TPBroadcastResult::responses() const {
+    std::vector<std::shared_ptr<BroadcastTpResponsePB>> responses;
     responses.reserve(worker_rpc_contexts_.size());
     for (const auto& worker_rpc_context : worker_rpc_contexts_) {
         responses.push_back(worker_rpc_context->response);
@@ -112,19 +112,37 @@ std::shared_ptr<TPBroadcastResult> TpBroadcastManager::broadcast(const std::vect
         auto& ctx           = contexts.at(rank);
         ctx->stub           = conn_status.value().stub;
         ctx->request        = requests.at(rank);
+        ctx->response       = std::make_shared<BroadcastTpResponsePB>();
         ctx->server_addr    = addr;
         ctx->timeout_ms     = timeout_ms;
         ctx->client_context = std::make_shared<grpc::ClientContext>();
-        ctx->client_context->set_deadline(deadline);
+        if (timeout_ms > 0) {
+            ctx->client_context->set_deadline(deadline);
+        }
     }
 
     for (int rank = 0; rank < worker_size; ++rank) {
         auto& ctx    = contexts.at(rank);
         auto  reader = ctx->stub->AsyncBroadcastTp(ctx->client_context.get(), ctx->request, &ctx->completion_queue);
-        reader->Finish(&ctx->response, &ctx->status, reinterpret_cast<void*>(static_cast<intptr_t>(rank)));
+        reader->Finish(ctx->response.get(), &ctx->status, reinterpret_cast<void*>(ctx.get()));
     }
 
     return std::make_shared<TPBroadcastResult>(std::move(contexts));
+}
+
+void TPBroadcastService::registerCallback(std::shared_ptr<Callback> callback) {
+    callbacks_.push_back(callback);
+}
+
+grpc::Status TPBroadcastService::broadcast(::grpc::ServerContext*        context,
+                                           const ::BroadcastTpRequestPB* request,
+                                           ::BroadcastTpResponsePB*      response) {
+    for (const auto& callback : callbacks_) {
+        if (callback->shouldProcess(*request)) {
+            return callback->onBroadcastTp(*request, *response);
+        }
+    }
+    return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "no callback should process this request");
 }
 
 }  // namespace rtp_llm
