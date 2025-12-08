@@ -117,7 +117,7 @@ public:
 
     absl::StatusOr<std::list<GenerateStreamPtr>> schedule(size_t reserve_step = 0) override {
         std::unique_lock<std::mutex> lock(lock_);
-        cond_.wait_for(lock, std::chrono::seconds(120), [this] {
+        cond_.wait_for(lock, std::chrono::seconds(30), [this] {
             return waiting_streams_.size() >= batch_size_ || running_streams_.size() > 0;
         });
         if (running_streams_.size() == 0 && waiting_streams_.size() >= batch_size_) {
@@ -129,7 +129,7 @@ public:
             RTP_LLM_LOG_INFO("BatchDecodeScheduler::schedule: running_streams_.size() = %d, start run",
                              running_streams_.size());
         } else {
-            RTP_LLM_LOG_INFO("BatchDecodeScheduler::schedule: running default");
+            RTP_LLM_LOG_INFO("BatchDecodeScheduler::schedule: running default, current waiting streams size = %d", waiting_streams_.size());
             incrRunningStream();
         }
         evictAllDoneStreams();
