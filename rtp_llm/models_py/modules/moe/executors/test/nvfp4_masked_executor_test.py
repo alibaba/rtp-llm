@@ -301,6 +301,33 @@ def _generate_payload_and_weights(
         )
         torch.save(expert_x_sf_reshaped, input_scale_path)
         
+        # 验证量化/反量化：反量化量化后的 tensor，与原始 tensor 比较
+        expert_x_dequantized = _dequantize_nvfp4_to_dtype(
+            expert_x_q,
+            expert_x_sf_reshaped,
+            input_global_scale,
+            torch.bfloat16,
+            block_size=NVFP4_BLOCK_SIZE,
+        )
+        
+        # 打印比较结果
+        diff = (expert_x_bf16_local - expert_x_dequantized).abs()
+        max_diff = diff.max().item()
+        mean_diff = diff.mean().item()
+        print(f"[DEBUG generate_payloads] Expert {local_expert_id}:")
+        print(f"  Original shape: {expert_x_bf16_local.shape}, dtype: {expert_x_bf16_local.dtype}")
+        print(f"  Quantized shape: {expert_x_q.shape}, dtype: {expert_x_q.dtype}")
+        print(f"  Dequantized shape: {expert_x_dequantized.shape}, dtype: {expert_x_dequantized.dtype}")
+        print(f"  Max diff: {max_diff:.6f}, Mean diff: {mean_diff:.6f}")
+        print(f"  Original min: {expert_x_bf16_local.min().item():.6f}, max: {expert_x_bf16_local.max().item():.6f}")
+        print(f"  Dequantized min: {expert_x_dequantized.min().item():.6f}, max: {expert_x_dequantized.max().item():.6f}")
+        
+        # 检查是否相同（考虑量化误差）
+        if max_diff > 0.1:
+            print(f"  ⚠ WARNING: Large difference detected! Max diff: {max_diff:.6f}")
+        else:
+            print(f"  ✓ Quantization/dequantization check passed")
+        
         expert_x[local_expert_id, :num_actual_tokens, :] = expert_x_q
         expert_x_scale[local_expert_id, :num_actual_tokens, :] = expert_x_sf_reshaped
         expert_num_tokens[local_expert_id] = num_actual_tokens
@@ -500,8 +527,14 @@ def _generate_ref_output(
         (num_local_experts, M, K), device="cuda", dtype=torch.bfloat16
     )
     
+    # Load original input tensors for comparison
+    user_home = os.path.expanduser("~")
+    save_dir = os.path.join(user_home, "nvfp4_quantization_tensors")
+    
     for local_expert_id in range(num_local_experts):
         num_actual_tokens = expert_num_tokens[local_expert_id].item()
+        if num_actual_tokens == 0:
+            continue
         
         # Dequantize input
         expert_x_local_q = expert_x[local_expert_id, :num_actual_tokens, :]
@@ -513,6 +546,32 @@ def _generate_ref_output(
             torch.bfloat16,
             block_size=NVFP4_BLOCK_SIZE,
         )
+        
+        # 加载原始输入 tensor 进行比较
+        input_before_quant_path = os.path.join(
+            save_dir, f"expert_{local_expert_id}_input_before_quant.pt"
+        )
+        if os.path.exists(input_before_quant_path):
+            expert_x_bf16_original = torch.load(input_before_quant_path)
+            
+            # 打印比较结果
+            diff = (expert_x_bf16_original - expert_x_local).abs()
+            max_diff = diff.max().item()
+            mean_diff = diff.mean().item()
+            print(f"[DEBUG generate_ref_output] Expert {local_expert_id}:")
+            print(f"  Original shape: {expert_x_bf16_original.shape}, dtype: {expert_x_bf16_original.dtype}")
+            print(f"  Dequantized shape: {expert_x_local.shape}, dtype: {expert_x_local.dtype}")
+            print(f"  Max diff: {max_diff:.6f}, Mean diff: {mean_diff:.6f}")
+            print(f"  Original min: {expert_x_bf16_original.min().item():.6f}, max: {expert_x_bf16_original.max().item():.6f}")
+            print(f"  Dequantized min: {expert_x_local.min().item():.6f}, max: {expert_x_local.max().item():.6f}")
+            
+            # 检查是否相同（考虑量化误差）
+            if max_diff > 0.1:
+                print(f"  ⚠ WARNING: Large difference detected! Max diff: {max_diff:.6f}")
+            else:
+                print(f"  ✓ Dequantization check passed")
+        else:
+            print(f"[DEBUG generate_ref_output] Expert {local_expert_id}: Original input file not found at {input_before_quant_path}")
         
         # Dequantize w1
         w1_local_q = w1[local_expert_id]
