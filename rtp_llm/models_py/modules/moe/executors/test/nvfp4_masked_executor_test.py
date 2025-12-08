@@ -593,6 +593,8 @@ def test_nvfp4_masked_executor(use_nvfp4: bool = True):
     print(f"[DEBUG Test] diff_2d min: {diff_2d.min().item():.6f}, max: {diff_2d.max().item():.6f}, mean: {diff_2d.mean().item():.6f}")
     print(f"[DEBUG Test] diff_2d > 1.0 count: {(diff_2d > 1.0).sum().item()}")
     
+    print("output_2d: ", output_2d)
+    print("ref_output_2d: ", ref_output_2d)
     # Compare using 2D tensors (only valid tokens)
     torch.testing.assert_close(output_2d, ref_output_2d, rtol=1e-1, atol=1e-1)
     
