@@ -333,7 +333,6 @@ def _generate_payload_and_weights(
         else:
             print(f"  ✓ w1 Quantization/dequantization check passed")
         
-        assert 0
         w1[local_expert_id] = w1_q
         w1_scale[local_expert_id] = w1_sf
         
