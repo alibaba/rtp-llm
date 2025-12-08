@@ -1,4 +1,3 @@
-import os
 import random
 from typing import Dict, Tuple, Optional
 
@@ -53,9 +52,6 @@ FLOAT8_E4M3_MAX = 448.0
 FLOAT4_E2M1_MAX = 6.0
 NVFP4_BLOCK_SIZE = 16
 
-kE2M1ToFloat = torch.tensor(
-    [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=torch.float32
-)
 
 def _generate_config() -> GptInitModelParameters:
     config = GptInitModelParameters(
@@ -77,134 +73,6 @@ def _generate_config() -> GptInitModelParameters:
     config.max_generate_batch_size = MAX_GENERATE_BATCH_SIZE
     config.moe_inter_padding_size = MOE_INTERMEDIATE_SIZE
     return config
-
-def convert_swizzled_to_linear(a_sf_swizzled: torch.Tensor, m, k, block_size):
-    m_tiles = (m + 128 - 1) // 128
-    f = block_size * 4
-    k_tiles = (k + f - 1) // f
-    tmp = torch.reshape(a_sf_swizzled, (1, m_tiles, k_tiles, 32, 4, 4))
-    tmp = torch.permute(tmp, (0, 1, 4, 3, 2, 5))
-    out = tmp.reshape(m_tiles * 128, k_tiles * f // block_size)
-    return out[0:m, 0:k]
-
-
-def dequantize_nvfp4_to_dtype(
-    tensor_fp4, tensor_sf, global_scale, dtype, block_size=16
-):
-    """Dequantize the fp4 tensor back to high precision."""
-    device = tensor_fp4.device
-    # Two fp4 values are packed into one uint8.
-    assert tensor_fp4.dtype == torch.uint8
-    m, packed_k = tensor_fp4.shape
-    k = packed_k * 2
-    tensor_f32 = break_fp4_bytes(tensor_fp4, dtype)
-    tensor_f32 = tensor_f32.reshape(m, k // block_size, block_size)
-    tensor_sf = tensor_sf.view(torch.float8_e4m3fn)
-    tensor_sf = convert_swizzled_to_linear(tensor_sf, m, k, block_size)
-    tensor_sf_dtype = tensor_sf.to(torch.float32) / global_scale
-
-    # scale the tensor
-    out = (tensor_f32 * tensor_sf_dtype.unsqueeze(-1)).reshape(m, k)
-    return out.to(dtype=dtype)
-
-
-def break_fp4_bytes(a, dtype):
-    assert a.dtype == torch.uint8
-    m, n = a.shape
-
-    # Vectorized nibble processing
-    a_flat = a.flatten()
-    high = (a_flat & 0xF0) >> 4  # Upper nibbles
-    low = a_flat & 0x0F  # Lower nibbles
-
-    # Combine nibbles for batch processing
-    combined = torch.stack((low, high), dim=1).flatten()
-
-    # Vectorized sign and magnitude extraction
-    signs = (combined & 0x08).to(torch.bool)  # Sign bits
-    abs_vals = (combined & 0x07).to(torch.long)  # Magnitude indices
-
-    # Device-aware lookup and sign application
-    kE2M1 = kE2M1ToFloat.to(device=a.device)
-    values = kE2M1[abs_vals] * torch.where(signs, -1.0, 1.0)
-
-    # Reshape to final form
-    return values.reshape(m, n * 2).to(dtype=dtype)
-
-def _dequantize_nvfp4_to_dtype(
-    tensor_fp4: torch.Tensor,
-    tensor_sf: torch.Tensor,
-    global_scale: torch.Tensor,
-    dtype: torch.dtype,
-    block_size: int = 16,
-) -> torch.Tensor:
-    """
-    Dequantize NVFP4 tensor back to high precision dtype.
-    
-    Args:
-        tensor_fp4: Quantized tensor of shape [M, K/2] with dtype uint8
-        tensor_sf: Scale factors tensor (swizzled layout, float8_e4m3fn)
-        global_scale: Global scale factor (scalar tensor)
-        dtype: Target dtype for output
-        block_size: Block size for quantization (default 16)
-    
-    Returns:
-        Dequantized tensor of shape [M, K] with dtype
-    """
-    assert tensor_fp4.dtype == torch.uint8
-    m, packed_k = tensor_fp4.shape
-    k = packed_k * 2
-    
-    # Unpack uint8 to two fp4 values
-    # Each uint8 contains two fp4 values: lower 4 bits and upper 4 bits
-    fp4_vals = torch.empty(m, k, dtype=torch.uint8, device=tensor_fp4.device)
-    fp4_vals[:, 0::2] = tensor_fp4 & 0x0F  # Lower 4 bits
-    fp4_vals[:, 1::2] = (tensor_fp4 >> 4) & 0x0F  # Upper 4 bits
-    
-    # E2M1 format: 1 sign bit + 2 exponent bits + 1 mantissa bit
-    # Values: 0, 1, 2, 3, 4, 5, 6, -0, -1, -2, -3, -4, -5, -6
-    E2M1_VALUES = torch.tensor(
-        [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, -0.0, -1.0, -2.0, -3.0, -4.0, -5.0, -6.0, 0.0, 0.0],
-        device=tensor_fp4.device,
-        dtype=torch.float32,
-    )
-    
-    # Extract sign and magnitude
-    sign_mask = (fp4_vals & 0x08) != 0
-    magnitude_idx = fp4_vals & 0x07
-    
-    # Convert to float values
-    float_vals = E2M1_VALUES[magnitude_idx.long()]
-    float_vals = torch.where(sign_mask, -float_vals, float_vals)
-    
-    # Reshape for block-wise scaling
-    num_blocks = k // block_size
-    float_vals = float_vals.reshape(m, num_blocks, block_size)
-    
-    # Convert scale factors from float8_e4m3fn to float32
-    # Since we use is_sf_swizzled_layout=False, scale factors are in linear layout
-    tensor_sf_float = tensor_sf.view(torch.float8_e4m3fn).to(torch.float32)
-    
-    # Reshape scale factors to match blocks (linear layout can be directly reshaped)
-    # Scale factors should be shape [m, num_blocks] for linear layout
-    if tensor_sf_float.numel() == m * num_blocks:
-        tensor_sf_reshaped = tensor_sf_float.reshape(m, num_blocks)
-    else:
-        # If shape doesn't match exactly, try to extract the correct portion
-        # This handles cases where scale factors might be padded
-        expected_size = m * num_blocks
-        if tensor_sf_float.numel() >= expected_size:
-            tensor_sf_reshaped = tensor_sf_float.flatten()[:expected_size].reshape(m, num_blocks)
-        else:
-            raise ValueError(
-                f"Scale factors size mismatch: expected {expected_size}, got {tensor_sf_float.numel()}"
-            )
-    
-    # Apply block-wise scaling
-    tensor_sf_dtype = tensor_sf_reshaped / global_scale
-    out = (float_vals * tensor_sf_dtype.unsqueeze(-1)).reshape(m, k)
-    
-    return out.to(dtype=dtype)
 
 
 def _generate_payload_and_weights(
@@ -307,11 +175,6 @@ def _generate_payload_and_weights(
         f"Token assignment error: assigned {assigned_tokens} tokens, expected {total_tokens}"
     )
     
-    # Setup save directory
-    user_home = os.path.expanduser("~")
-    save_dir = os.path.join(user_home, "nvfp4_quantization_tensors")
-    os.makedirs(save_dir, exist_ok=True)
-    
     for local_expert_id in range(num_local_experts):
         num_actual_tokens = tokens_per_expert[local_expert_id]
         if num_actual_tokens == 0:
@@ -320,12 +183,6 @@ def _generate_payload_and_weights(
         expert_x_bf16_local = torch.randn(
             (num_actual_tokens, K), device="cuda", dtype=torch.bfloat16
         ) * 0.1
-        
-        # Save input tensor before quantization
-        input_before_quant_path = os.path.join(
-            save_dir, f"expert_{local_expert_id}_input_before_quant.pt"
-        )
-        torch.save(expert_x_bf16_local, input_before_quant_path)
         
         # Quantize to NVFP4
         # Use is_sf_swizzled_layout=False to get linear layout that can be directly reshaped
@@ -337,12 +194,6 @@ def _generate_payload_and_weights(
             sf_use_ue8m0=False,
             is_sf_swizzled_layout=False,
         )
-        
-        # Save input tensor after quantization
-        input_after_quant_path = os.path.join(
-            save_dir, f"expert_{local_expert_id}_input_after_quant.pt"
-        )
-        torch.save(expert_x_q, input_after_quant_path)
 
         # 验证量化/反量化：反量化量化后的 tensor，与原始 tensor 比较
         expert_x_dequantized = e2m1_and_ufp8sf_scale_to_float(
@@ -355,18 +206,9 @@ def _generate_payload_and_weights(
         )
         
         # Reshape scale factors (linear layout can be directly reshaped)
-        # fp4_quantize already reshapes scale factors to [M, K // sf_vec_size]
         # Convert to float8_e4m3fn view and take the first num_actual_tokens rows
         expert_x_sf_viewed = expert_x_sf.view(torch.float8_e4m3fn)
-        # fp4_quantize returns [M, K // 16], but M might be padded, so take only num_actual_tokens rows
         expert_x_sf_reshaped = expert_x_sf_viewed[:num_actual_tokens, :]
-        
-        # Save input scale factors
-        input_scale_path = os.path.join(
-            save_dir, f"expert_{local_expert_id}_input_scale.pt"
-        )
-        torch.save(expert_x_sf_reshaped, input_scale_path)
-        
         
         # 打印比较结果
         diff = (expert_x_bf16_local.cpu() - expert_x_dequantized).abs()
@@ -379,11 +221,10 @@ def _generate_payload_and_weights(
         print(f"  Max diff: {max_diff:.6f}, Mean diff: {mean_diff:.6f}")
         print(f"  Original min: {expert_x_bf16_local.min().item():.6f}, max: {expert_x_bf16_local.max().item():.6f}")
         print(f"  Dequantized min: {expert_x_dequantized.min().item():.6f}, max: {expert_x_dequantized.max().item():.6f}")
-        assert 0, f"{expert_x_bf16_local.cpu()} {expert_x_dequantized.cpu()}"
         
         # 检查是否相同（考虑量化误差）
         if max_diff > 0.1:
-            print(f"  ⚠ WARNING: Large difference detected! Max diff: {max_diff:.6f}")
+            assert 0, f"  ⚠ WARNING: Large difference detected! Max diff: {max_diff:.6f}"
         else:
             print(f"  ✓ Quantization/dequantization check passed")
         
@@ -438,64 +279,24 @@ def _generate_payload_and_weights(
     w1_global_scale = 1.0 / w1_quantization_global_scale
     w2_global_scale = 1.0 / w2_quantization_global_scale
     
-    # Save global scales
-    global_scales_path = os.path.join(save_dir, "global_scales.pt")
-    torch.save({
-        "input_quantization_global_scale": input_quantization_global_scale,
-        "input_global_scale": input_global_scale,
-        "w1_quantization_global_scale": w1_quantization_global_scale,
-        "w1_global_scale": w1_global_scale,
-        "w2_quantization_global_scale": w2_quantization_global_scale,
-        "w2_global_scale": w2_global_scale,
-    }, global_scales_path)
-    
     for local_expert_id in range(num_local_experts):
-        # Save w1 before quantization
-        w1_before_quant_path = os.path.join(
-            save_dir, f"expert_{local_expert_id}_w1_before_quant.pt"
-        )
-        torch.save(w1_bf16[local_expert_id], w1_before_quant_path)
-        
         # Quantize w1
-        # Use is_sf_swizzled_layout=False to get linear layout that can be directly reshaped
-        # NOTE: fp4_quantize expects quantization global_scale (not dequantization scale)
         w1_q, w1_sf = fp4_quantize(
             w1_bf16[local_expert_id],
             input_quantization_global_scale,  # Use quantization scale for quantization
             sf_vec_size=16,
             sf_use_ue8m0=False,
         )
-        # fp4_quantize returns scale factors as [M, K // sf_vec_size] after reshape
         w1_sf_viewed = w1_sf.view(torch.float8_e4m3fn)
         if w1_sf_viewed.ndim == 2:
             w1_sf_reshaped = w1_sf_viewed
         else:
             w1_sf_reshaped = w1_sf_viewed.reshape(N, K // NVFP4_BLOCK_SIZE)
         
-        # Save w1 after quantization
-        w1_after_quant_path = os.path.join(
-            save_dir, f"expert_{local_expert_id}_w1_after_quant.pt"
-        )
-        torch.save(w1_q, w1_after_quant_path)
-        
-        # Save w1 scale factors
-        w1_scale_path = os.path.join(
-            save_dir, f"expert_{local_expert_id}_w1_scale.pt"
-        )
-        torch.save(w1_sf_reshaped, w1_scale_path)
-        
         w1[local_expert_id] = w1_q
         w1_scale[local_expert_id] = w1_sf_reshaped
         
-        # Save w2 before quantization
-        w2_before_quant_path = os.path.join(
-            save_dir, f"expert_{local_expert_id}_w2_before_quant.pt"
-        )
-        torch.save(w2_bf16[local_expert_id], w2_before_quant_path)
-        
         # Quantize w2
-        # Use is_sf_swizzled_layout=False to get linear layout that can be directly reshaped
-        # NOTE: fp4_quantize expects quantization global_scale (not dequantization scale)
         w2_q, w2_sf = fp4_quantize(
             w2_bf16[local_expert_id],
             input_quantization_global_scale,  # Use quantization scale for quantization
@@ -508,18 +309,6 @@ def _generate_payload_and_weights(
             w2_sf_reshaped = w2_sf_viewed
         else:
             w2_sf_reshaped = w2_sf_viewed.reshape(K, (N // 2) // NVFP4_BLOCK_SIZE)
-        
-        # Save w2 after quantization
-        w2_after_quant_path = os.path.join(
-            save_dir, f"expert_{local_expert_id}_w2_after_quant.pt"
-        )
-        torch.save(w2_q, w2_after_quant_path)
-        
-        # Save w2 scale factors
-        w2_scale_path = os.path.join(
-            save_dir, f"expert_{local_expert_id}_w2_scale.pt"
-        )
-        torch.save(w2_sf_reshaped, w2_scale_path)
         
         w2[local_expert_id] = w2_q
         w2_scale[local_expert_id] = w2_sf_reshaped
@@ -584,10 +373,6 @@ def _generate_ref_output(
         (num_local_experts, M, K), device="cuda", dtype=torch.bfloat16
     )
     
-    # Load original input tensors for comparison
-    user_home = os.path.expanduser("~")
-    save_dir = os.path.join(user_home, "nvfp4_quantization_tensors")
-    
     for local_expert_id in range(num_local_experts):
         num_actual_tokens = expert_num_tokens[local_expert_id].item()
         if num_actual_tokens == 0:
@@ -596,61 +381,39 @@ def _generate_ref_output(
         # Dequantize input
         expert_x_local_q = expert_x[local_expert_id, :num_actual_tokens, :]
         expert_x_local_sf = expert_x_scale[local_expert_id, :num_actual_tokens, :]
-        expert_x_local = dequantize_nvfp4_to_dtype(
+        expert_x_local_float32 = e2m1_and_ufp8sf_scale_to_float(
             expert_x_local_q,
             expert_x_local_sf,
             input_global_scale,
-            torch.bfloat16,
-            block_size=NVFP4_BLOCK_SIZE,
+            sf_vec_size=NVFP4_BLOCK_SIZE,
+            ufp8_type=1,
+            is_sf_swizzled_layout=False,
         )
-        
-        # 加载原始输入 tensor 进行比较
-        input_before_quant_path = os.path.join(
-            save_dir, f"expert_{local_expert_id}_input_before_quant.pt"
-        )
-        if os.path.exists(input_before_quant_path):
-            expert_x_bf16_original = torch.load(input_before_quant_path)
-            
-            # 打印比较结果
-            diff = (expert_x_bf16_original - expert_x_local).abs()
-            max_diff = diff.max().item()
-            mean_diff = diff.mean().item()
-            print(f"[DEBUG generate_ref_output] Expert {local_expert_id}:")
-            print(f"  Original shape: {expert_x_bf16_original.shape}, dtype: {expert_x_bf16_original.dtype}")
-            print(f"  Dequantized shape: {expert_x_local.shape}, dtype: {expert_x_local.dtype}")
-            print(f"  Max diff: {max_diff:.6f}, Mean diff: {mean_diff:.6f}")
-            print(f"  Original min: {expert_x_bf16_original.min().item():.6f}, max: {expert_x_bf16_original.max().item():.6f}")
-            print(f"  Dequantized min: {expert_x_local.min().item():.6f}, max: {expert_x_local.max().item():.6f}")
-            
-            # 检查是否相同（考虑量化误差）
-            if max_diff > 0.1:
-                print(f"  ⚠ WARNING: Large difference detected! Max diff: {max_diff:.6f}")
-            else:
-                print(f"  ✓ Dequantization check passed")
-        else:
-            print(f"[DEBUG generate_ref_output] Expert {local_expert_id}: Original input file not found at {input_before_quant_path}")
+        expert_x_local = expert_x_local_float32.to(device=expert_x_local_q.device).to(torch.bfloat16)
         
         # Dequantize w1
         w1_local_q = w1[local_expert_id]
         w1_local_sf = w1_scale[local_expert_id]
-        w1_local = dequantize_nvfp4_to_dtype(
+        w1_local_float32 = e2m1_and_ufp8sf_scale_to_float(
             w1_local_q,
             w1_local_sf,
-            w1_global_scale,
-            torch.bfloat16,
-            block_size=NVFP4_BLOCK_SIZE,
+            input_global_scale,
+            sf_vec_size=NVFP4_BLOCK_SIZE,
+            ufp8_type=1,
         )
+        w1_local = w1_local_float32.to(device=w1_local_q.device).to(torch.bfloat16)
         
         # Dequantize w2
         w2_local_q = w2[local_expert_id]
         w2_local_sf = w2_scale[local_expert_id]
-        w2_local = dequantize_nvfp4_to_dtype(
+        w2_local_float32 = e2m1_and_ufp8sf_scale_to_float(
             w2_local_q,
             w2_local_sf,
-            w2_global_scale,
-            torch.bfloat16,
-            block_size=NVFP4_BLOCK_SIZE,
+            input_global_scale,
+            sf_vec_size=NVFP4_BLOCK_SIZE,
+            ufp8_type=1,
         )
+        w2_local = w2_local_float32.to(device=w2_local_q.device).to(torch.bfloat16)
         
         # Compute MoE forward pass
         workspace1 = expert_x_local @ w1_local.transpose(0, 1)
@@ -821,17 +584,6 @@ def test_nvfp4_masked_executor(use_nvfp4: bool = True):
     diff_2d = (output_2d - ref_output_2d).abs()
     print(f"[DEBUG Test] diff_2d min: {diff_2d.min().item():.6f}, max: {diff_2d.max().item():.6f}, mean: {diff_2d.mean().item():.6f}")
     print(f"[DEBUG Test] diff_2d > 1.0 count: {(diff_2d > 1.0).sum().item()}")
-    
-    # Check - use relaxed tolerance for quantization
-    # Save output and ref_output to pt files for further examination
-    # Use the same directory as quantization tensors
-    user_home = os.path.expanduser("~")
-    save_dir = os.path.join(user_home, "nvfp4_quantization_tensors")
-    os.makedirs(save_dir, exist_ok=True)
-    torch.save(output, os.path.join(save_dir, "nvfp4_executor_test_output.pt"))
-    torch.save(ref_output, os.path.join(save_dir, "nvfp4_executor_test_ref_output.pt"))
-    torch.save(output_2d, os.path.join(save_dir, "nvfp4_executor_test_output_2d.pt"))
-    torch.save(ref_output_2d, os.path.join(save_dir, "nvfp4_executor_test_ref_output_2d.pt"))
     
     # Compare using 2D tensors (only valid tokens)
     torch.testing.assert_close(output_2d, ref_output_2d, rtol=1e-1, atol=1e-1)
