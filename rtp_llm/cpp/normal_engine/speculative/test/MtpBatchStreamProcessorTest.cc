@@ -28,11 +28,9 @@ public:
         addr.batch_block_id = {{block_id}};
         stream->setKVCache(addr);
 
-        auto   sp_output_buffer        = std::make_shared<SpeculativeExecutorStreamOutput>();
-        size_t propose_step            = param.sp_config.gen_num_per_cycle;
-        sp_output_buffer->propose_step = propose_step;
-        vector<int> propose_tokens     = vector<int>(propose_step, -1);
-        sp_output_buffer->tokens       = createBuffer<int>({1, propose_step}, propose_tokens, AllocationType::HOST);
+        auto        sp_output_buffer = std::make_shared<SpeculativeExecutorStreamOutput>();
+        vector<int> propose_tokens   = vector<int>(2, -1);
+        sp_output_buffer->tokens     = createBuffer<int>({1, 2}, propose_tokens, AllocationType::HOST);
         stream->setReturnAllProbs(true);
         stream->setSPOutputBuffer(sp_output_buffer);
         stream->setRunning();
@@ -49,18 +47,16 @@ public:
         auto token_ids = stream->getCompleteTokenIds()->completeTokenIdsVec(0);
         EXPECT_EQ(expect_token_ids, token_ids);
 
-        auto propose_tokens = stream->getProposeToken();
-        EXPECT_EQ(expect_propose_tokens, propose_tokens);
+        auto sp_output_buffer = stream->getSPOutputBuffer();
+        auto tokens           = sp_output_buffer->tokens;
+        auto tokens_h         = device_->clone({*tokens, AllocationType::HOST});
+        EXPECT_EQ(expect_propose_tokens, buffer2vector<int>(*tokens_h));
 
-        auto all_probs   = stream->getSPOutputBuffer()->all_probs;
+        auto all_probs   = sp_output_buffer->all_probs;
         auto all_probs_h = device_->clone({*all_probs, AllocationType::HOST});
-        // get sub all_probs
-        auto          all_probs_vec = buffer2vector<float>(*all_probs_h);
-        vector<float> sub_all_probs =
-            std::vector<float>(all_probs_vec.begin(), all_probs_vec.begin() + expect_all_probs.size());
-        EXPECT_EQ(expect_all_probs, sub_all_probs);
+        EXPECT_EQ(expect_all_probs, buffer2vector<float>(*all_probs_h));
 
-        auto last_hidden_states   = stream->getLastHiddenStates();
+        auto last_hidden_states   = sp_output_buffer->hidden_states;
         auto last_hidden_states_h = device_->clone({*last_hidden_states, AllocationType::HOST});
         EXPECT_EQ(expect_last_hidden_states, buffer2vector<float>(*last_hidden_states_h));
     }
@@ -153,8 +149,8 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherDecodeModelInput) {
     GenerateStreamPtr stream1 = createContextStream(param, resource_context, {1}, 1);
     GenerateStreamPtr stream2 = createContextStream(param, resource_context, {2}, 2);
 
-    stream1->setLastHiddenStates(createBuffer<float>({1, 2}, {0.1, 0.2}));
-    stream2->setLastHiddenStates(createBuffer<float>({1, 2}, {1.1, 1.2}));
+    stream1->getSPOutputBuffer()->hidden_states = createBuffer<float>({1, 2}, {0.1, 0.2});
+    stream2->getSPOutputBuffer()->hidden_states = createBuffer<float>({1, 2}, {1.1, 1.2});
 
     auto stream_groups = StreamGroups({stream1, stream2});
 
@@ -190,8 +186,8 @@ TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInput) {
     vector<int> propose_tokens_1 = {2, 3};
     vector<int> propose_tokens_2 = {3, 1};
 
-    stream1->setProposeToken(propose_tokens_1);
-    stream2->setProposeToken(propose_tokens_2);
+    stream1->getSPOutputBuffer()->tokens = createBuffer<int>({1, 2}, propose_tokens_1, AllocationType::HOST);
+    stream2->getSPOutputBuffer()->tokens = createBuffer<int>({1, 2}, propose_tokens_2, AllocationType::HOST);
 
     auto stream_groups = StreamGroups({stream1, stream2});
 
@@ -221,6 +217,53 @@ TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInput) {
 
     auto        lm_output_indexes        = model_input.lm_output_indexes;
     vector<int> expect_lm_output_indexes = {0, 1, 2, 3};
+    EXPECT_EQ(expect_lm_output_indexes, buffer2vector<int>(*lm_output_indexes));
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {
+    GptInitParameter param;
+    param.max_seq_len_                = 2048;
+    param.vocab_size_                 = 4;
+    param.num_layers_                 = 1;
+    param.sp_config.gen_num_per_cycle = 2;
+
+    CacheConfig     cache_config(KVCacheParam{1, 10, 2, 128, 256, rtp_llm::TYPE_INT8});
+    ResourceContext resource_context{std::make_shared<CacheManager>(cache_config, device_, false, nullptr, param)};
+
+    GenerateStreamPtr stream1 = createContextStream(param, resource_context, {1}, 1);
+    GenerateStreamPtr stream2 = createContextStream(param, resource_context, {1, 2}, 2);
+
+    BufferPtr context_token_1 = createBuffer<int>({1, 1}, {2}, AllocationType::HOST);
+    BufferPtr context_token_2 = createBuffer<int>({1, 1}, {3}, AllocationType::HOST);
+
+    stream1->update({context_token_1, 1, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr});
+    stream2->update({context_token_2, 1, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr});
+
+    vector<int> propose_tokens_1 = {2, 3};
+    vector<int> propose_tokens_2 = {3, 1};
+
+    stream1->getSPOutputBuffer()->tokens        = createBuffer<int>({1, 2}, propose_tokens_1, AllocationType::HOST);
+    stream2->getSPOutputBuffer()->tokens        = createBuffer<int>({1, 2}, propose_tokens_2, AllocationType::HOST);
+    stream1->getSPOutputBuffer()->hidden_states = createBuffer<float>({1, 2}, {0.1, 0.2});
+    stream2->getSPOutputBuffer()->hidden_states = createBuffer<float>({1, 2}, {1.1, 1.2});
+
+    auto stream_groups = StreamGroups({stream1, stream2});
+
+    auto processor          = MtpBatchStreamProcessor(param, CacheConfig(), false);
+    auto model_input_status = processor.gatherDecodeModelInput(stream_groups);
+    EXPECT_TRUE(model_input_status.ok());
+
+    auto& model_input            = model_input_status.value();
+    model_input.sequence_lengths = createBuffer<int>({2}, {1, 2}, AllocationType::HOST);
+
+    processor.prepareDecodeDraftModelInput(stream_groups, model_input);
+
+    auto        combo_tokens        = model_input.combo_tokens;
+    vector<int> expect_combo_tokens = {3, 1};
+    EXPECT_EQ(expect_combo_tokens, buffer2vector<int>(*combo_tokens));
+
+    auto        lm_output_indexes        = model_input.lm_output_indexes;
+    vector<int> expect_lm_output_indexes = {0, 1};
     EXPECT_EQ(expect_lm_output_indexes, buffer2vector<int>(*lm_output_indexes));
 }
 
@@ -327,8 +370,8 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateOneStepDraftSamplerOutput) {
 
     stream1->getSPOutputBuffer()->all_probs = createBuffer<float>({1, 4}, {0.1, 0.2, 0.3, 0.4}, AllocationType::HOST);
     stream2->getSPOutputBuffer()->all_probs = createBuffer<float>({1, 4}, {0.5, 0.6, 0.7, 0.8}, AllocationType::HOST);
-    stream1->setProposeToken(vector<int>{1, 2});
-    stream2->setProposeToken(vector<int>{2, 3});
+    stream1->getSPOutputBuffer()->tokens    = createBuffer<int>({1, 2}, {1, 2}, AllocationType::HOST);
+    stream2->getSPOutputBuffer()->tokens    = createBuffer<int>({1, 2}, {2, 3}, AllocationType::HOST);
 
     auto stream_groups = StreamGroups({stream1, stream2});
     auto processor     = MtpBatchStreamProcessor(param, CacheConfig(), false);
@@ -344,6 +387,60 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateOneStepDraftSamplerOutput) {
 
     auto          all_probs        = sampler_output.all_probs;
     vector<float> expect_all_probs = {0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8};
+    EXPECT_EQ(expect_all_probs, buffer2vector<float>(*all_probs));
+}
+
+TEST_F(MtpBatchStreamProcessorTest, updateMultiStepDraftSamplerOutput) {
+    GptInitParameter param;
+    param.max_seq_len_                = 2048;
+    param.vocab_size_                 = 4;
+    param.num_layers_                 = 1;
+    param.sp_config.gen_num_per_cycle = 3;
+
+    CacheConfig     cache_config(KVCacheParam{1, 10, 2, 128, 256, rtp_llm::TYPE_INT8});
+    ResourceContext resource_context{std::make_shared<CacheManager>(cache_config, device_, false, nullptr, param)};
+
+    GenerateStreamPtr stream1 = createContextStream(param, resource_context, {1}, 1);
+    GenerateStreamPtr stream2 = createContextStream(param, resource_context, {1, 2}, 2);
+
+    stream1->getSPOutputBuffer()->all_probs = createBuffer<float>({1, 4}, {0.1, 0.2, 0.3, 0.4}, AllocationType::HOST);
+    stream2->getSPOutputBuffer()->all_probs = createBuffer<float>({1, 4}, {0.5, 0.6, 0.7, 0.8}, AllocationType::HOST);
+    stream1->getSPOutputBuffer()->tokens    = createBuffer<int>({1, 2}, {1, 2}, AllocationType::HOST);
+    stream2->getSPOutputBuffer()->tokens    = createBuffer<int>({1, 2}, {2, 3}, AllocationType::HOST);
+
+    auto output_token_probs_1 =
+        createBuffer<float>({2, 1, 4}, {1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8}, AllocationType::HOST);
+    auto output_token_probs_2 =
+        createBuffer<float>({2, 1, 4}, {2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 2.8}, AllocationType::HOST);
+
+    auto draft_token_ids = createBuffer<int>({2, 4}, {2, 0, 1, 2, 3, 1, 2, 3}, AllocationType::HOST);
+
+    auto stream_groups = StreamGroups({stream1, stream2});
+    auto processor     = MtpBatchStreamProcessor(param, CacheConfig(), false);
+
+    torch::Tensor              draft_token_probs_d_t;
+    torch::Tensor              draft_token_ids_d_t = Buffer2torchTensor(draft_token_ids);
+    torch::Tensor              spec_token_ids_d_t;
+    std::vector<torch::Tensor> draft_token_probs_list;
+    SamplerOutput              sampler_output;
+
+    draft_token_probs_list.push_back(Buffer2torchTensor(output_token_probs_1));
+    draft_token_probs_list.push_back(Buffer2torchTensor(output_token_probs_2));
+
+    processor.updateMultiStepDraftSamplerOutput(stream_groups,
+                                                sampler_output,
+                                                draft_token_ids_d_t,
+                                                spec_token_ids_d_t,
+                                                draft_token_probs_d_t,
+                                                draft_token_probs_list);
+
+    auto        token_ids        = sampler_output.token_ids;
+    vector<int> expect_token_ids = {0, 1, 2, 1, 2, 3};
+    EXPECT_EQ(expect_token_ids, buffer2vector<int>(*token_ids));
+
+    auto          all_probs        = sampler_output.all_probs;
+    vector<float> expect_all_probs = {0.1, 0.2, 0.3, 0.4, 1.1, 1.2, 1.3, 1.4, 2.1, 2.2, 2.3, 2.4,
+                                      0.5, 0.6, 0.7, 0.8, 1.5, 1.6, 1.7, 1.8, 2.5, 2.6, 2.7, 2.8};
     EXPECT_EQ(expect_all_probs, buffer2vector<float>(*all_probs));
 }
 
