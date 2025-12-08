@@ -273,10 +273,14 @@ def _generate_payload_and_weights(
     # Compute global scales for weights
     # NOTE: These are quantization global scales (used for quantization)
     # For dequantization, we need the inverse (1.0 / quantization_global_scale)
-    w1_amax = torch.abs(w1_bf16).max().to(torch.float32)
-    w2_amax = torch.abs(w2_bf16).max().to(torch.float32)
     w1_quantization_global_scale = input_global_scale.clone()
     w2_quantization_global_scale = input_global_scale.clone()
+
+    w1_amax = torch.abs(w1_bf16).max().to(torch.float32)
+    w2_amax = torch.abs(w2_bf16).max().to(torch.float32)
+    w1_quantization_global_scale = torch.tensor([FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / w1_amax], device="cuda", dtype=torch.float32)
+    w2_quantization_global_scale = torch.tensor([FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / w2_amax], device="cuda", dtype=torch.float32)
+
     # For dequantization and executor, we need the inverse
     w1_global_scale = 1.0 / w1_quantization_global_scale
     w2_global_scale = 1.0 / w2_quantization_global_scale
