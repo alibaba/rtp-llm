@@ -16,7 +16,7 @@ public:
                                AllocationType       atype = AllocationType::DEVICE);
 
     bool               init() override;
-    FreeResult         free(const FreeInfo& free_info) override;
+    void               free(const FreeInfo& free_info) override;
     InsertResult       insertIntoCache(const InsertInfo& insert_info) override;
     BlockAddrInfo      convertIndexToAddr(int layer_id, int block_id) const override;
     BlockBufferPtrInfo convertIndexToBuffer(int layer_id, int block_id) const override;

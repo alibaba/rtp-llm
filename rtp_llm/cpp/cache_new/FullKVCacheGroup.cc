@@ -14,7 +14,7 @@ bool FullKVCacheGroup::malloc(const CacheKeysType& cache_keys, BlockIndicesType&
     }
     auto free_blocks_num = freeBlocksNum();
     if (free_blocks_num < need_blocks_num) {
-        if (!ensureFreeBlocks(need_blocks_num - free_blocks_num)) {
+        if (!ensureFreeBlocks(need_blocks_num)) {
             RTP_LLM_LOG_WARNING(
                 "Insufficient free blocks for common part: need %d, have %zu", need_blocks_num, free_blocks_num);
             return false;

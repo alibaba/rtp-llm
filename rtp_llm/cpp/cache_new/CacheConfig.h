@@ -127,6 +127,7 @@ struct CacheConfig {
     // for backward compatibility with old NormalBatchStreamProcessor
     size_t k_block_stride        = 0;  // for one layer
     size_t v_block_stride        = 0;  // for one layer
+    size_t kv_block_stride       = 0;  // for one layer
     size_t kv_scale_block_stride = 0;
 
     CacheConfig() {}

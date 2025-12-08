@@ -10,7 +10,7 @@ using namespace std;
 namespace rtp_llm {
 
 void StreamCacheResource::init(int batch_size) {
-    batch_resource_->resize(batch_size);
+    batch_resource_->resetBatchSize(batch_size);
     batch_resource_->initGroups(1);
     batch_resource_->enable_reuse_cache = reuseCache();
     // constructCacheKey();
@@ -56,25 +56,25 @@ void StreamCacheResource::releaseResource() {
     if (!need_release_resource_ && (!stream_->hasNumBeams() || !stream_->stoppedWithoutLock())) {
         return;
     }
-    tryReleaseKVBlock(maxBlockSize());
-    batch_resource_->clear();
+    tryReleaseKVBlock(maxBlocksNum());
+    batch_resource_->clearBlocks();
 }
 
 int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
     RTP_LLM_LOG_DEBUG("stream [%ld] try release [%lu] blocks", stream_->streamId(), nums);
 
     if (fake_inited_) {
-        int max_block_size = maxBlockSize();
+        int max_blocks_num = maxBlocksNum();
         int batch_size     = batch_resource_->batchSize();
-        batch_resource_->clear();
-        batch_resource_->resize(batch_size);
+        batch_resource_->clearBlocks();
+        batch_resource_->resetBatchSize(batch_size);
         fake_inited_ = false;
-        return max_block_size;
+        return max_blocks_num;
     }
 
     // NOTE: Currently only support releasing all blocks
     // Partial release (shrink) is not supported yet
-    int release_blocks_num = maxBlockSize();
+    int release_blocks_num = maxBlocksNum();
 
     if (release_blocks_num > 0 && batch_resource_->batchSize() > 0) {
         // Insert all blocks into cache
@@ -102,7 +102,7 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
 absl::Status StreamCacheResource::releaseSequenceKVCache(size_t total_seq_len, size_t release_seq_len) {
     RTP_LLM_LOG_DEBUG("stream [%ld] max block size is [%lu] total seq_len is [%lu], release [%lu] seq_len KVCache",
                       stream_->streamId(),
-                      maxBlockSize(),
+                      maxBlocksNum(),
                       total_seq_len,
                       release_seq_len);
     size_t last_block_occupied_seq_len =
@@ -119,7 +119,7 @@ absl::Status StreamCacheResource::releaseSequenceKVCache(size_t total_seq_len, s
 }
 
 int StreamCacheResource::singleBatchNeedBlocks(int seq_len) const {
-    return std::max((seq_len + seqSizePerBlock() - 1) / seqSizePerBlock() - maxBlockSize(), 0);
+    return std::max((seq_len + seqSizePerBlock() - 1) / seqSizePerBlock() - maxBlocksNum(), 0);
 }
 
 // TODO(xinfei.sxf) 保证这个函数的原子性
@@ -170,8 +170,8 @@ absl::StatusOr<int> StreamCacheResource::incrKVBlock(int token_capacity, size_t 
     return real_occupy;
 }
 
-int StreamCacheResource::maxBlockSize() const {
-    return batch_resource_->maxBlockSize();
+int StreamCacheResource::maxBlocksNum() const {
+    return batch_resource_->maxBlocksNum();
 }
 
 const BatchKVCacheResource& StreamCacheResource::kvCache() const {
@@ -199,8 +199,8 @@ bool StreamCacheResource::hasCacheKeys() const {
     if (batch_resource_->batch_resource.empty()) {
         return false;
     }
-    for (const auto& br : batch_resource_->batch_resource) {
-        if (!br.cache_keys.empty()) {
+    for (auto& resource : batch_resource_->batch_resource) {
+        if (!resource.cacheKeys().empty()) {
             return true;
         }
     }
@@ -209,15 +209,13 @@ bool StreamCacheResource::hasCacheKeys() const {
 
 const CacheKeysType& StreamCacheResource::cacheKeys(int32_t batch_id) const {
     RTP_LLM_CHECK_WITH_INFO(batch_id >= 0 && batch_id < batch_resource_->batchSize(), "invalid batch_id");
-    return batch_resource_->batch_resource[batch_id].cache_keys;
+    return batch_resource_->cacheKeys(batch_id);
 }
 
 void StreamCacheResource::fakeInitKVBlock() {
     fake_inited_ = true;
-    batch_resource_->resize(stream_->maxBatchSize());
-    for (size_t i = 0; i < stream_->maxBatchSize(); i++) {
-        batch_resource_->resize(i, stream_->seqLength(), true);
-    }
+    batch_resource_->resetBatchSize(stream_->maxBatchSize());
+    batch_resource_->resizeBlocks(stream_->seqLength(), 0);
 
     // cache keys will be constructed lazily per batch_resource[i].cache_keys
 }

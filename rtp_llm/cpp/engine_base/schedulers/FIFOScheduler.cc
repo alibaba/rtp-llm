@@ -19,7 +19,6 @@ FIFOScheduler::FIFOScheduler(const rtp_llm::GptInitParameter&       params,
     max_seq_len_(params.max_seq_len_),
     max_batch_tokens_size_(params.max_batch_tokens_size_),
     max_generate_batch_size_(params.max_generate_batch_size_),
-    // not support fallback when use pd_speration:use_cache_store
     enable_partial_fallback_(params.enable_partial_fallback_ && params.role_type_ == RoleType::PDFUSION),
     enable_whole_fallback_(params.role_type_ == RoleType::PDFUSION),
     enable_fast_gen_(params.enable_fast_gen_),
@@ -126,13 +125,13 @@ tuple<int, int> FIFOScheduler::evaluateRunningNext(size_t reserve_step) {
             if (need_block_num <= 0) {
                 break;
             }
-            if (stream->maxBlockSize()) {
+            if (stream->maxBlocksNum()) {
                 RTP_LLM_LOG_INFO("lack mem, stream [%ld] in watting queue try release blocks, "
                                  "it's input_length:%d seq_length:%d, hold block size:%d, release block size:%d",
                                  stream->streamId(),
                                  stream->inputLength(),
                                  stream->seqLength(),
-                                 stream->maxBlockSize(),
+                                 stream->maxBlocksNum(),
                                  need_block_num);
                 stream->tryReleaseKVBlock(need_block_num);
 
@@ -153,13 +152,13 @@ tuple<int, int> FIFOScheduler::evaluateRunningNext(size_t reserve_step) {
                 break;
             }
             auto& last_stream         = *(running_streams_.rbegin());
-            int   need_release_blocks = enable_partial_fallback_ ? need_block_num : last_stream->maxBlockSize();
+            int   need_release_blocks = enable_partial_fallback_ ? need_block_num : last_stream->maxBlocksNum();
             RTP_LLM_LOG_INFO(
                 "lack mem, stream [%ld] fallback to wait, it's input_length:%d seq_length:%d, hold block size:%d, release block size:%d",
                 last_stream->streamId(),
                 last_stream->inputLength(),
                 last_stream->seqLength(),
-                last_stream->maxBlockSize(),
+                last_stream->maxBlocksNum(),
                 need_release_blocks);
             last_stream->tryReleaseKVBlock(need_release_blocks);
             if (last_stream->spIterCount() > 0) {
@@ -238,7 +237,7 @@ bool FIFOScheduler::evaluateNewStream(const list<GenerateStreamPtr>& streams,
         return false;
     }
 
-    auto old_blocks = new_stream->maxBlockSize();
+    auto old_blocks = new_stream->maxBlocksNum();
     auto result     = new_stream->initKVBlock(token_capacity_, reserve_step);
     if (result.ok() && enable_fast_gen_) {
         token_capacity_ -= result.value();
@@ -254,7 +253,7 @@ bool FIFOScheduler::evaluateNewStream(const list<GenerateStreamPtr>& streams,
                 cache_manager_->availableBlocksNum(),
                 reserve_block_num_,
                 new_stream->streamId());
-            new_stream->tryReleaseKVBlock(new_stream->maxBlockSize() - old_blocks);
+            new_stream->tryReleaseKVBlock(new_stream->maxBlocksNum() - old_blocks);
             return false;
         }
     }

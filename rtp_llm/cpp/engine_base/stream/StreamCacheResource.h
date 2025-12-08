@@ -1,28 +1,14 @@
 #pragma once
 
+#include <memory>
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "rtp_llm/cpp/engine_base/system_prompt/SystemPrompt.h"
+#include "rtp_llm/cpp/engine_base/stream/ResourceContext.h"
 #include "rtp_llm/cpp/cache_new/BatchKVCacheResource.h"
-#include "rtp_llm/cpp/cache_new/KVCacheManager.h"
-#include <memory>
 
 namespace rtp_llm {
 
 class GenerateStream;
-
-struct ResourceContext {
-    // KV Cache Manager
-    std::shared_ptr<KVCacheManager> cache_manager         = nullptr;
-    std::shared_ptr<KVCacheManager> propose_cache_manager = nullptr;
-
-    std::shared_ptr<SystemPrompt>                system_prompt = nullptr;
-    bool                                         reuse_cache{false};
-    bool                                         enable_3fs{false};
-    bool                                         enable_memory_block_cache{false};
-    bool                                         use_cache_store{false};
-    std::vector<std::shared_ptr<KVCacheManager>> mtp_cache_managers;
-};
 
 class StreamCacheResource {
 public:
@@ -36,9 +22,11 @@ public:
         block_update_mapping_(),
         need_release_resource_(need_release_resource),
         adapter_name_(adapter_name) {}
+
     ~StreamCacheResource() {
         releaseResource();
     }
+
     void                 init(int batch_size);
     bool                 hasCacheKeys() const;
     const CacheKeysType& cacheKeys(int32_t batch_id) const;
@@ -50,7 +38,7 @@ public:
     void                 freeBatchBlocks(size_t batch_id, std::vector<int>& blocks);
     void                 releaseResource();
     int                  singleBatchNeedBlocks(int seq_len) const;
-    int                  maxBlockSize() const;
+    int                  maxBlocksNum() const;
     int                  mallocFailedTimes() const;
 
     const BatchKVCacheResource& kvCache() const;
@@ -113,19 +101,9 @@ public:
     std::string debugString() const {
         std::stringstream debug_string;
         debug_string << "StreamCacheResource {"
-                     << "need_release_resource: " << need_release_resource_ << ", batch_resource: [";
+                     << "need_release_resource: " << need_release_resource_ << ", batch_resource: ";
 
-        for (size_t i = 0; i < batch_resource_->batchSize(); i++) {
-            debug_string << " [";
-            if (i < batch_resource_->batch_resource.size()
-                && !batch_resource_->batch_resource[i].group_block_ids.empty()) {
-                const auto& blocks = batch_resource_->batch_resource[i].group_block_ids[0]->block_indices;
-                for (size_t j = 0; j < blocks.size(); j++) {
-                    debug_string << blocks[j] << " ";
-                }
-            }
-            debug_string << "],";
-        }
+        debug_string << batch_resource_->debugString();
 
         debug_string << "}";
         return debug_string.str();

@@ -17,7 +17,7 @@ public:
                                 AllocationType       atype = AllocationType::DEVICE);
 
     bool               init() override;
-    FreeResult         free(const FreeInfo& free_info) override;
+    void               free(const FreeInfo& free_info) override;
     InsertResult       insertIntoCache(const InsertInfo& insert_info) override;
     BlockAddrInfo      convertIndexToAddr(int layer_id, int block_id) const override;
     BlockBufferPtrInfo convertIndexToBuffer(int layer_id, int block_id) const override;
@@ -50,7 +50,7 @@ public:
     MallocResult incrMalloc(const MallocInfo& malloc_info);
     MallocResult initMallocForCommonLen(const MallocInfo& malloc_info);
 
-    int reuseCache(const CacheKeysType& cache_keys, GroupBlockIds& group_block_ids);
+    int reuseCache(const CacheKeysType& cache_keys, KVCacheResourceV1& cache_resource);
 
     BlockPoolPtr                                     block_pool_;
     std::shared_ptr<FullKVCacheGroup>                full_kv_cache_group_;
