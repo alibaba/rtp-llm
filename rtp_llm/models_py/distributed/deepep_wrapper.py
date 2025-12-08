@@ -19,9 +19,11 @@ __all__ = [
     "destroy_deepep_wrapper",
 ]
 
+
 def use_accl_ep():
     device_type = get_device().get_device_type()
     return not (device_type == DeviceType.ROCm or "aarch64" in platform.machine())
+
 
 class DeepEPMode(IntEnum):
     """
@@ -197,7 +199,7 @@ class DeepEPWrapper:
         }
         if self._use_accl_ep:
             init_kwargs["allow_nvlink_for_low_latency_mode"] = True
-            init_kwargs["allow_mnnvl"] = False
+            init_kwargs["allow_mnnvl"] = True
         return DeepEPBuffer(**init_kwargs)  # type: ignore
 
     def _init_low_latency_buffer(
@@ -250,7 +252,7 @@ class DeepEPWrapper:
         }
         if self._use_accl_ep:
             init_kwargs["allow_nvlink_for_low_latency_mode"] = True
-            init_kwargs["allow_mnnvl"] = False
+            init_kwargs["allow_mnnvl"] = True
         return DeepEPBuffer(**init_kwargs)  # type: ignore
 
     def _init_low_latency_m2n_buffer(
