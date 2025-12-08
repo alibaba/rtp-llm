@@ -369,7 +369,7 @@ def _generate_payload_and_weights(
         
         
         # 打印比较结果
-        diff = (expert_x_bf16_local - expert_x_dequantized).abs()
+        diff = (expert_x_bf16_local.cpu() - expert_x_dequantized).abs()
         max_diff = diff.max().item()
         mean_diff = diff.mean().item()
         print(f"[DEBUG generate_payloads] Expert {local_expert_id}:")
