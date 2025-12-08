@@ -110,6 +110,7 @@ requirement([
     "aiter",
     "fastsafetensors",
     "deep_ep",
+    "pytorch-triton-rocm",
 ] + tensorrt + flashinfer + deep_gemm)
 
 filegroup(
@@ -473,6 +474,7 @@ py_library(
             ":embedding",
             "//rtp_llm/tools/convert:convert",
             ":aiter",
+            ":pytorch-triton-rocm",
         ],
         "//conditions:default": [
             ":models",
