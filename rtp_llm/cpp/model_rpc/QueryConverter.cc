@@ -85,6 +85,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->reuse_cache               = config_proto->reuse_cache();
     generate_config->enable_3fs                = config_proto->enable_3fs();
     generate_config->enable_memory_block_cache = config_proto->enable_memory_block_cache();
+    generate_config->pd_sepration_unique_key   = config_proto->pd_sepration_unique_key();
     TRANS_OPTIONAL(trace_id);
 
     return generate_config;
