@@ -1,25 +1,34 @@
 from typing import Optional
-
 import torch
 from torch import nn
-from torch.nn import functional as F
 
-from rtp_llm.ops import rtp_llm_ops
-
+from aiter import hipb_mm, hipb_create_extension
+from functools import lru_cache
 
 class Linear(nn.Module):
     def __init__(
-        self, weight: torch.Tensor, bias: Optional[torch.Tensor] = None
+        self, weight: torch.Tensor, bias: Optional[torch.Tensor] = None, bpreshuffle: bool = False
     ) -> None:
         super().__init__()
         self.weight = weight
         self.bias = bias
+        self.bpreshuffle = bpreshuffle
+     
+    @staticmethod    
+    @lru_cache(maxsize=1)
+    def init_hipblas():
+        hipb_create_extension()
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        output = torch.zeros(
-            *input.shape[:-1], self.weight.shape[1], dtype=input.dtype
-        ).to(input.device)
-        rtp_llm_ops.gemm(output, input, self.weight)
-        if self.bias is not None:
-            output = output + self.bias
-        return output
+        self.init_hipblas()
+        return hipb_mm(
+            input,
+            self.weight,
+            solution_index=-1,
+            bias=self.bias,
+            out_dtype=input.dtype,
+            scaleA=None,
+            scaleB=None,
+            scaleOut=None,
+            bpreshuffle=self.bpreshuffle,
+        )
