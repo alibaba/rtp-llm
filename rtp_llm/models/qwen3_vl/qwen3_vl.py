@@ -16,6 +16,7 @@ from rtp_llm.models.multimodal.multimodal_mixin import (
 )
 from rtp_llm.models.multimodal.multimodal_util import get_bytes_io_from_url
 from rtp_llm.models.qwen2_5_vl.qwen2_5_vl import QWen2_5_VL, Qwen2_5_VLImageEmbedding
+from rtp_llm.models.qwen2_vl.qwen2_vl_vit import MAX_PIXELS, MIN_PIXELS, smart_resize
 from rtp_llm.models.qwen_v3 import QwenV3, QWenV3Weight
 from rtp_llm.utils.base_model_datatypes import (
     MMPreprocessConfig,
@@ -54,7 +55,30 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
         if mm_type == MMUrlType.DEFAULT or mm_type == MMUrlType.IMAGE:
             image = Image.open(get_bytes_io_from_url(mm_input.url))
             if mm_input.config.height != -1 and mm_input.config.width != -1:
-                image = image.resize((mm_input.config.width, mm_input.config.height))
+                resized_height, resized_width = smart_resize(
+                    mm_input.config.height,
+                    mm_input.config.width,
+                )
+                image = image.resize((resized_width, resized_height))
+            elif mm_input.config.max_pixels != -1 or mm_input.config.min_pixels != -1:
+                width, height = image.size
+                min_pixels = (
+                    0
+                    if mm_input.config.min_pixels == -1
+                    else mm_input.config.min_pixels
+                )
+                max_pixels = (
+                    0x7FFFFFFF
+                    if mm_input.config.max_pixels == -1
+                    else mm_input.config.max_pixels
+                )
+                resized_height, resized_width = smart_resize(
+                    height,
+                    width,
+                    min_pixels=min_pixels,
+                    max_pixels=max_pixels,
+                )
+                image = image.resize((resized_width, resized_height))
             res = processor.image_processor(image, return_tensors="pt")
             return res["pixel_values"], res["image_grid_thw"]
         elif mm_type == MMUrlType.VIDEO:
