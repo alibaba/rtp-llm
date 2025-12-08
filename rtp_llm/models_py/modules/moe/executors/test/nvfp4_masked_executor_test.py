@@ -332,9 +332,9 @@ def _generate_payload_and_weights(
         expert_x_q, expert_x_sf = fp4_quantize(
             expert_x_bf16_local,
             input_quantization_global_scale,  # Use quantization scale for quantization
-            sf_vec_size=16,
-            sf_use_ue8m0=False,
-            is_sf_swizzled_layout=True,
+            # sf_vec_size=16,
+            # sf_use_ue8m0=False,
+            # is_sf_swizzled_layout=True,
         )
         
         # Save input tensor after quantization
