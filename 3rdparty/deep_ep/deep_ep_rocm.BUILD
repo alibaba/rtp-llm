@@ -39,6 +39,7 @@ genrule(
     fi
     """,
     visibility = ["//visibility:public"],
+    tags = ["rocm","local"],
 )
 
 cc_library(
