@@ -186,6 +186,8 @@ def _generate_payload_and_weights(
         # Quantize to NVFP4
         # Use is_sf_swizzled_layout=False to get linear layout that can be directly reshaped
         # NOTE: fp4_quantize expects quantization global_scale (not dequantization scale)
+        print(f"expert_x_bf16_local: {expert_x_bf16_local}")
+        print(f"input_quantization_global_scale: {input_quantization_global_scale}")
         expert_x_q, expert_x_sf = fp4_quantize(
             expert_x_bf16_local,
             input_quantization_global_scale,  # Use quantization scale for quantization
@@ -193,6 +195,8 @@ def _generate_payload_and_weights(
             sf_use_ue8m0=False,
             is_sf_swizzled_layout=False,
         )
+        print(f"expert_x_q: {expert_x_q}")
+        print(f"expert_x_sf: {expert_x_sf}")
 
         # 验证量化/反量化：反量化量化后的 tensor，与原始 tensor 比较
         print(f"expert_x_q dtype: {expert_x_q.dtype}")
