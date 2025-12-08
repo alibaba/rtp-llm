@@ -235,27 +235,13 @@ bool FIFOScheduler::evaluateNewStream(const list<GenerateStreamPtr>& streams,
         return false;
     }
 
-    auto old_blocks = new_stream->maxBlockSize();
     auto result     = new_stream->initKVBlock(token_capacity_, reserve_step);
     if (result.ok() && enable_fast_gen_) {
         token_capacity_ -= result.value();
         RTP_LLM_LOG_DEBUG(
             "after stream [%ld] acquireCapacity, token_capacity is %d", new_stream->streamId(), token_capacity_);
     }
-    if (result.ok()) {
-        if (cache_manager_->availableBlockNums() >= reserve_block_num_) {
-            return true;
-        } else {
-            RTP_LLM_LOG_INFO(
-                "current availableBlockNums is [%ld], reserve_block_num is [%ld], so stream [%ld] malloc failed",
-                cache_manager_->availableBlockNums(),
-                reserve_block_num_,
-                new_stream->streamId());
-            new_stream->tryReleaseKVBlock(new_stream->maxBlockSize() - old_blocks);
-            return false;
-        }
-    }
-    return false;
+    return result.ok() && cache_manager_->availableBlockNums() >= reserve_block_num_;
 }
 
 list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
