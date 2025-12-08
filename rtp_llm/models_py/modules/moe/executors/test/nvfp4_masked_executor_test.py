@@ -85,9 +85,10 @@ def convert_swizzled_to_linear(a_sf_swizzled: torch.Tensor, m, k, block_size):
 
 
 def dequantize_nvfp4_to_dtype(
-    tensor_fp4, tensor_sf, global_scale, dtype, device, block_size=16
+    tensor_fp4, tensor_sf, global_scale, dtype, block_size=16
 ):
     """Dequantize the fp4 tensor back to high precision."""
+    device = tensor_fp4.device
     # Two fp4 values are packed into one uint8.
     assert tensor_fp4.dtype == torch.uint8
     m, packed_k = tensor_fp4.shape
