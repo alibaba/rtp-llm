@@ -76,13 +76,14 @@ public:
     bool             in_think_mode       = false;
     int              max_thinking_tokens = 0;
     std::vector<int> end_think_token_ids;
-    bool             gen_timeline = false;
-    int              profile_step = 3;
-    bool             ignore_eos   = false;
-    bool             reuse_cache  = true;
-    bool             enable_3fs   = true;
+    bool             gen_timeline              = false;
+    int              profile_step              = 3;
+    bool             ignore_eos                = false;
+    bool             reuse_cache               = true;
+    bool             enable_3fs                = true;
     bool             enable_memory_block_cache = true;
     std::string      trace_id;
+    std::string      pd_sepration_unique_key;
 
     bool top1() {
         return top_k == 1;
@@ -135,7 +136,9 @@ public:
                      << ", in_think_mode: " << in_think_mode << ", max_thinking_tokens: " << max_thinking_tokens
                      << ", end_think_token_ids: " << vectorToString(end_think_token_ids)
                      << ", gen_timeline: " << gen_timeline << ", profile_step: " << profile_step
-                     << ", reuse_cache: " << reuse_cache << ", enable_3fs: " << enable_3fs << ", enable_memory_block_cache: " << enable_memory_block_cache << "}";
+                     << ", reuse_cache: " << reuse_cache << ", enable_3fs: " << enable_3fs
+                     << ", enable_memory_block_cache: " << enable_memory_block_cache
+                     << ", pd_sepration_unique_key: " << pd_sepration_unique_key << "}";
         return debug_string.str();
     }
 
@@ -212,6 +215,7 @@ public:
         JSONIZE(reuse_cache);
         JSONIZE(enable_3fs);
         JSONIZE(enable_memory_block_cache);
+        JSONIZE(pd_sepration_unique_key);
 #undef JSONIZE
 #undef JSONIZE_OPTIONAL
     }
