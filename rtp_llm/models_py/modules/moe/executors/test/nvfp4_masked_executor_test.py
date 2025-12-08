@@ -294,7 +294,6 @@ def _generate_payload_and_weights(
             w1_quantization_global_scale,  # Use w1 quantization scale
             sf_vec_size=16,
             sf_use_ue8m0=False,
-            is_sf_swizzled_layout=False,
         )
         print(f"w1_q: {w1_q}")
         print(f"w1_sf: {w1_sf}")
@@ -311,7 +310,6 @@ def _generate_payload_and_weights(
             w1_global_scale,
             sf_vec_size=16,
             ufp8_type=1,
-            is_sf_swizzled_layout=False,
         )
         w1_dequantized_bf16 = w1_dequantized.to(device=w1_q.device).to(torch.bfloat16)
         w1_dequantized_bf16 = w1_dequantized_bf16.reshape(N, K)
