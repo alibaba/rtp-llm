@@ -314,6 +314,8 @@ def _generate_payload_and_weights(
         print(f"  Original min: {w1_bf16[local_expert_id].min().item():.6f}, max: {w1_bf16[local_expert_id].max().item():.6f}")
         print(f"  Dequantized min: {w1_dequantized_bf16.min().item():.6f}, max: {w1_dequantized_bf16.max().item():.6f}")
         if w1_max_diff > 0.1:
+            print(f"w1_q: {w1_bf16[local_expert_id]}")
+            print(f"w1_dequantized: {w1_dequantized_bf16}")
             assert 0, f"  ⚠ WARNING: Large w1 difference detected! Max diff: {w1_max_diff:.6f}"
         else:
             print(f"  ✓ w1 Quantization/dequantization check passed")
