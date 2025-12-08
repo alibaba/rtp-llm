@@ -8,10 +8,14 @@
 
 namespace rtp_llm {
 void CudaDevice::perfRangePush(const std::string& name) const {
-    nvtxRangePushA(name.c_str());
+#if CUDA_VERSION >= 12090
+    nvtxRangePushA(domain_, name.c_str());
+#endif
 }
 
 void CudaDevice::perfRangePop() const {
-    nvtxRangePop();
+#if CUDA_VERSION >= 12090
+    nvtxRangePop(domain_);
+#endif
 }
 }  // namespace rtp_llm

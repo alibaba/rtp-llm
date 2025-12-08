@@ -90,20 +90,20 @@ void BufferManager::recordAllcation(const BufferParams& params, const BufferHint
             AllocationRecord record             = {params.allocation, buffer->sizeBytes(), hints, stack_trace_id};
             allocation_records_[buffer->data()] = record;
         }
-        RTP_LLM_LOG_INFO("record allocation: %p, size: %zu, tag: [%s], trace id [%lu]",
-                         buffer->data(),
-                         buffer->sizeBytes(),
-                         hints.tag.c_str(),
-                         stack_trace_id);
+        // RTP_LLM_LOG_INFO("record allocation: %p, size: %zu, tag: [%s], trace id [%lu]",
+        //                  buffer->data(),
+        //                  buffer->sizeBytes(),
+        //                  hints.tag.c_str(),
+        //                  stack_trace_id);
         auto       status                = queryStatus();
         const auto device_consumed_bytes = status.device_allocated_bytes + status.device_fragmented_bytes;
         if (device_consumed_bytes > device_max_consumed_bytes_) {
-            RTP_LLM_LOG_INFO("Device allocated size + fragmented size reached new maximum %zu, \n"
-                             "previous is %zu bytes, current stack trace id[%lu]\n  %s",
-                             device_consumed_bytes,
-                             device_max_allocated_bytes_,
-                             stack_trace_id,
-                             printAllocationRecords(device_allocator_).c_str());
+            // RTP_LLM_LOG_INFO("Device allocated size + fragmented size reached new maximum %zu, \n"
+            //                  "previous is %zu bytes, current stack trace id[%lu]\n  %s",
+            //                  device_consumed_bytes,
+            //                  device_max_allocated_bytes_,
+            //                  stack_trace_id,
+            //                  printAllocationRecords(device_allocator_).c_str());
             device_max_consumed_bytes_ = device_consumed_bytes;
         }
         if (status.device_allocated_bytes > device_max_allocated_bytes_) {

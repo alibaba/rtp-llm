@@ -220,7 +220,7 @@ void FlashInferAttnParams::fillFlashInfer(const BufferPtr& prefix_lengths_host,
 
         int page_num = (seq_len + tokens_per_block - 1) / tokens_per_block;
         RTP_LLM_CHECK_WITH_INFO(total_page_idx + page_num <= this->page_num,
-                                "page_num exceed reserved %d > %d",
+                                "page_num exceed reserved %d > %d, seq_len %d, tokens_per_block %d",
                                 total_page_idx + page_num,
                                 this->page_num);
         if (kv_cache_block_id) {
