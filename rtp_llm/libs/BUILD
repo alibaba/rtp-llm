@@ -137,7 +137,7 @@ filegroup(
     srcs = [],
     data = [
         ":copy_hf3fs_libs",
-        ":copy_aiter",
+        #":copy_aiter",
         ":copy_acclep_libs",
     ] + kernel_so_deps()
 )
