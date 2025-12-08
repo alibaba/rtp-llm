@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/model_rpc/RpcServerRuntimeMeta.h"
+#include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 
 namespace rtp_llm {
 
@@ -27,6 +28,13 @@ public:
         request_begin_time_us = currentTimeUs();
     }
     virtual ~GenerateContext();
+
+    GenerateContext(grpc::ServerContext*                   context,
+                    const GenerateInputPB*                 request,
+                    grpc::ServerWriter<GenerateOutputsPB>* writer,
+                    kmonitor::MetricsReporterPtr&          metrics_reporter,
+                    std::shared_ptr<RpcServerRuntimeMeta>  meta);
+
     virtual void                             reset();
     bool                                     ok() const;
     bool                                     hasError() const;

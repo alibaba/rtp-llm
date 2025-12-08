@@ -2,6 +2,13 @@
 
 namespace rtp_llm {
 
+GenerateContext::GenerateContext(grpc::ServerContext*                   context,
+                                 const GenerateInputPB*                 request,
+                                 grpc::ServerWriter<GenerateOutputsPB>* writer,
+                                 kmonitor::MetricsReporterPtr&          metrics_reporter,
+                                 std::shared_ptr<RpcServerRuntimeMeta>  meta):
+    GenerateContext(request->request_id(), request->generate_config().timeout_ms(), context, metrics_reporter, meta) {}
+
 GenerateContext::~GenerateContext() {
     if (stream_ && !stream_->finished() && !stream_->stopped()) {
         stream_->cancel();
