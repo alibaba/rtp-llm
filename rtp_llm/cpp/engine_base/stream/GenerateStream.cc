@@ -552,7 +552,7 @@ void GenerateStream::spStep() {
 }
 
 int64_t GenerateStream::getTimeoutMs() const {
-    return generate_input_->generate_config->timeout_ms;
+    return generate_input_->generate_config->timeout_ms > 0 ? generate_input_->generate_config->timeout_ms : 30000;
 }
 
 void GenerateStream::checkTimeout() {

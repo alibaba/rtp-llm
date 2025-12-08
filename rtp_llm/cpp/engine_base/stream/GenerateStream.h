@@ -492,6 +492,14 @@ public:
     void fillSubGenerateStatus(StreamState state);
     void resizeSubGenerateStatus(size_t new_size);
 
+    int64_t getDeadlineMs() const {
+        return (begin_time_us_ / 1000) + getTimeoutMs();
+    }
+
+    std::string getPdSeparationUniqueKey() const {
+        return generate_input_->generate_config->pd_sepration_unique_key;
+    }
+
 public:
     struct TimeInfo {
         int64_t begin_time_us;
