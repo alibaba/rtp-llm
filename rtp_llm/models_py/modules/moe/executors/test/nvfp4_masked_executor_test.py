@@ -334,7 +334,7 @@ def _generate_payload_and_weights(
             input_quantization_global_scale,  # Use quantization scale for quantization
             sf_vec_size=16,
             sf_use_ue8m0=False,
-            is_sf_swizzled_layout=False,
+            is_sf_swizzled_layout=True,
         )
         
         # Save input tensor after quantization
@@ -461,7 +461,7 @@ def _generate_payload_and_weights(
             w1_quantization_global_scale,  # Use quantization scale for quantization
             sf_vec_size=16,
             sf_use_ue8m0=False,
-            is_sf_swizzled_layout=False,
+            is_sf_swizzled_layout=True,
         )
         # fp4_quantize returns scale factors as [M, K // sf_vec_size] after reshape
         w1_sf_viewed = w1_sf.view(torch.float8_e4m3fn)
@@ -499,7 +499,7 @@ def _generate_payload_and_weights(
             w2_quantization_global_scale,  # Use quantization scale for quantization
             sf_vec_size=16,
             sf_use_ue8m0=False,
-            is_sf_swizzled_layout=False,
+            is_sf_swizzled_layout=True,
         )
         # fp4_quantize returns scale factors as [M, K // sf_vec_size] after reshape
         w2_sf_viewed = w2_sf.view(torch.float8_e4m3fn)
