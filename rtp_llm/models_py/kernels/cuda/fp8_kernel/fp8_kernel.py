@@ -7,7 +7,9 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 
-from rtp_llm.models_py.configs.get_best_config import get_cutlass_groupgemm_best_config
+from rtp_llm.models_py.kernels.cuda.fp8_kernel.get_best_config import (
+    get_cutlass_groupgemm_best_config,
+)
 from rtp_llm.models_py.utils.arch import is_cuda
 from rtp_llm.models_py.utils.math import align
 
@@ -20,7 +22,7 @@ if is_cuda():
         per_token_quant_fp8,
     )
 else:
-    logging.warning("can't import from rtp_llm_ops, only support cuda!")
+    logging.info("skip import fp8 quant from rtp_llm_ops for non cuda platform")
 
 logger = logging.getLogger(__name__)
 
