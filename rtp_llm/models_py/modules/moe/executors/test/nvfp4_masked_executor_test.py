@@ -486,7 +486,9 @@ def _generate_ref_output(
             print(f"  Original shape: {w1_original.shape}, Dequantized shape: {w1_local_reshaped.shape}")
             print(f"  Max diff: {w1_max_diff:.6f}, Mean diff: {w1_mean_diff:.6f}")
             if w1_max_diff > 0.1:
-                print(f"  ⚠ WARNING: Large w1 dequantization difference! Max diff: {w1_max_diff:.6f}")
+                print(f"w1_original: {w1_original}")
+                print(f"w1_local_reshaped: {w1_local_reshaped}")
+                assert 0, f"  ⚠ WARNING: Large w1 dequantization difference! Max diff: {w1_max_diff:.6f}"
             else:
                 print(f"  ✓ w1 dequantization check passed")
         
@@ -513,7 +515,9 @@ def _generate_ref_output(
             print(f"  Original shape: {w2_original.shape}, Dequantized shape: {w2_local_reshaped.shape}")
             print(f"  Max diff: {w2_max_diff:.6f}, Mean diff: {w2_mean_diff:.6f}")
             if w2_max_diff > 0.1:
-                print(f"  ⚠ WARNING: Large w2 dequantization difference! Max diff: {w2_max_diff:.6f}")
+                print(f"w2_original: {w2_original}")
+                print(f"w2_local_reshaped: {w2_local_reshaped}")
+                assert 0, f"  ⚠ WARNING: Large w2 dequantization difference! Max diff: {w2_max_diff:.6f}"
             else:
                 print(f"  ✓ w2 dequantization check passed")
         
