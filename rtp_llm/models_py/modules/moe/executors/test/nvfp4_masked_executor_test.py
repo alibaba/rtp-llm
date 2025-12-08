@@ -332,9 +332,9 @@ def _generate_payload_and_weights(
         expert_x_q, expert_x_sf = fp4_quantize(
             expert_x_bf16_local,
             input_quantization_global_scale,  # Use quantization scale for quantization
-            # sf_vec_size=16,
-            # sf_use_ue8m0=False,
-            # is_sf_swizzled_layout=True,
+            sf_vec_size=16,
+            sf_use_ue8m0=False,
+            is_sf_swizzled_layout=False,
         )
         
         # Save input tensor after quantization
@@ -342,6 +342,16 @@ def _generate_payload_and_weights(
             save_dir, f"expert_{local_expert_id}_input_after_quant.pt"
         )
         torch.save(expert_x_q, input_after_quant_path)
+
+        # 验证量化/反量化：反量化量化后的 tensor，与原始 tensor 比较
+        expert_x_dequantized = e2m1_and_ufp8sf_scale_to_float(
+            expert_x_q,
+            expert_x_sf,
+            input_global_scale,
+            sf_vec_size=16,
+            ufp8_type=1,
+            is_sf_swizzled_layout=False,
+        )
         
         # Reshape scale factors (linear layout can be directly reshaped)
         # fp4_quantize already reshapes scale factors to [M, K // sf_vec_size]
@@ -356,14 +366,6 @@ def _generate_payload_and_weights(
         )
         torch.save(expert_x_sf_reshaped, input_scale_path)
         
-        # 验证量化/反量化：反量化量化后的 tensor，与原始 tensor 比较
-        expert_x_dequantized = dequantize_nvfp4_to_dtype(
-            expert_x_q,
-            expert_x_sf_reshaped,
-            input_global_scale,
-            torch.bfloat16,
-            block_size=NVFP4_BLOCK_SIZE,
-        )
         
         # 打印比较结果
         diff = (expert_x_bf16_local - expert_x_dequantized).abs()
@@ -458,10 +460,9 @@ def _generate_payload_and_weights(
         # NOTE: fp4_quantize expects quantization global_scale (not dequantization scale)
         w1_q, w1_sf = fp4_quantize(
             w1_bf16[local_expert_id],
-            w1_quantization_global_scale,  # Use quantization scale for quantization
+            input_quantization_global_scale,  # Use quantization scale for quantization
             sf_vec_size=16,
             sf_use_ue8m0=False,
-            is_sf_swizzled_layout=True,
         )
         # fp4_quantize returns scale factors as [M, K // sf_vec_size] after reshape
         w1_sf_viewed = w1_sf.view(torch.float8_e4m3fn)
@@ -496,10 +497,9 @@ def _generate_payload_and_weights(
         # NOTE: fp4_quantize expects quantization global_scale (not dequantization scale)
         w2_q, w2_sf = fp4_quantize(
             w2_bf16[local_expert_id],
-            w2_quantization_global_scale,  # Use quantization scale for quantization
+            input_quantization_global_scale,  # Use quantization scale for quantization
             sf_vec_size=16,
             sf_use_ue8m0=False,
-            is_sf_swizzled_layout=True,
         )
         # fp4_quantize returns scale factors as [M, K // sf_vec_size] after reshape
         w2_sf_viewed = w2_sf.view(torch.float8_e4m3fn)
