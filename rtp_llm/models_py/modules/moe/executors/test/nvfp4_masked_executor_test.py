@@ -12,7 +12,6 @@ from rtp_llm.models_py.modules.moe.fused_moe import (
 from rtp_llm.models_py.modules.moe.utils import FusedMoEQuantConfig
 from rtp_llm.utils.model_weight import W
 
-# Try to import fp4_quantize from flashinfer
 try:
     from flashinfer import fp4_quantize, e2m1_and_ufp8sf_scale_to_float
     FLASHINFER_AVAILABLE = True
@@ -229,7 +228,7 @@ def _generate_payload_and_weights(
             print(f"  ✓ Quantization/dequantization check passed")
         
         expert_x[local_expert_id, :num_actual_tokens, :] = expert_x_q
-        expert_x_scale[local_expert_id, :num_actual_tokens, :] = expert_x_sf_reshaped
+        expert_x_scale[local_expert_id, :num_actual_tokens, :] = expert_x_sf
         expert_num_tokens[local_expert_id] = num_actual_tokens
     
     payload = ExpertForwardPayload(
