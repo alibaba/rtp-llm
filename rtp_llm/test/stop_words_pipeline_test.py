@@ -1,25 +1,26 @@
 from typing import List
 from unittest import TestCase, main
 
-from rtp_llm.pipeline import Pipeline
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.pipeline import Pipeline
+from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.utils.base_model_datatypes import GenerateOutput
 from rtp_llm.utils.word_util import get_stop_word_slices
 
 
 class StopWordTest(TestCase):
     def __init__(self, *args, **kwargs):
+
         super().__init__(*args, **kwargs)
+        self.config = GptInitModelParameters(
+            head_num=1, size_per_head=128, layer_num=1, max_seq_len=32, vocab_size=1024
+        )
+        self.backend_rpc_server_visitor = BackendRPCServerVisitor(self.config, False)
         self.pipeline = Pipeline(
-            GptInitModelParameters(
-                head_num=8,
-                size_per_head=128,
-                layer_num=1,
-                max_seq_len=32,
-                vocab_size=1024,
-            ),
+            self.config,
             None,
+            self.backend_rpc_server_visitor,
         )
 
     def _test_single(

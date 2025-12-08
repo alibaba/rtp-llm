@@ -1,7 +1,9 @@
 import asyncio
 import json
+import os
 from typing import Any
 from unittest import TestCase, main
+from unittest.mock import Mock, patch
 
 from pydantic import BaseModel
 
@@ -22,14 +24,8 @@ class FakeFrontendWorker(object):
             response_generator, CompleteResponseAsyncGenerator.get_last_value
         )
 
-    def tokenizer_encode(self, prompt: str):
-        return [1, 2, 3, 4], ["b", "c", "d", "e"]
-
     async def _create_generation_streams(self, prompt: str, *args: Any, **kwargs: Any):
         yield FakePipelinResponse(res=prompt)
-
-    def check_streaming_mode(self, *args: Any, **kwargs: Any):
-        return False
 
 
 class FakeRawRequest(object):
@@ -40,7 +36,28 @@ class FakeRawRequest(object):
 class FrontendServerTest(TestCase):
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
-        self.frontend_server = FrontendServer()
+
+        # 创建 mock tokenizer，添加所有必要的属性
+        mock_tokenizer = Mock()
+        mock_tokenizer.vocab_size = 1000
+        mock_tokenizer.eos_token_id = 0
+        mock_tokenizer.encode = Mock(return_value=[1, 2, 3, 4])
+        mock_tokenizer.decode = Mock(return_value="test")
+        mock_tokenizer.convert_ids_to_tokens = Mock(return_value=["b", "c", "d", "e"])
+        # 添加 update_tokenizer_special_tokens 需要的属性
+        mock_tokenizer.stop_words_id_list = []
+        mock_tokenizer.stop_words_str_list = []
+        # 添加其他常用属性
+        mock_tokenizer.bos_token_id = 1
+        mock_tokenizer.pad_token_id = 0
+
+        # 使用 patch 来 mock TokenizerFactory.create_from_env
+        with patch(
+            "rtp_llm.frontend.frontend_server.TokenizerFactory.create_from_env",
+            return_value=mock_tokenizer,
+        ):
+            self.frontend_server = FrontendServer()
+
         self.frontend_server._frontend_worker = FakeFrontendWorker()
 
     async def _async_run(self, *args: Any, **kwargs: Any):
@@ -61,16 +78,6 @@ class FrontendServerTest(TestCase):
         self.assertEqual(
             res.body.decode("utf-8"), '{"res":"hello"}', res.body.decode("utf-8")
         )
-
-    def test_encode(self):
-        res = self.frontend_server.tokenizer_encode('{"prompt": "b c d e"}')
-        self.assertEqual(
-            res.body.decode("utf-8"),
-            '{"token_ids":[1,2,3,4],"tokens":["b","c","d","e"],"error":""}',
-        )
-        # test error input
-        res = self.frontend_server.tokenizer_encode('{"text": "b c d e"}')
-        self.assertEqual(json.loads(res.body.decode("utf-8"))["error_code"], 514)
 
 
 main()

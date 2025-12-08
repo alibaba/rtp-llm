@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import Thread
 from typing import Any
 from unittest import TestCase, main
+from unittest.mock import Mock, patch
 
 import requests
 from pydantic import BaseModel
@@ -51,7 +52,7 @@ class FakePipelineResponse(BaseModel):
     hello: str
 
 
-def fake_inference(*args, **kwargs):
+def fake_generate_response(*args, **kwargs):
     async def response_generator():
         for _ in range(5):
             await asyncio.sleep(1)
@@ -62,14 +63,33 @@ def fake_inference(*args, **kwargs):
     )
 
 
+# 创建 mock tokenizer
+mock_tokenizer = Mock()
+mock_tokenizer.vocab_size = 1000
+mock_tokenizer.eos_token_id = 0
+mock_tokenizer.encode = Mock(return_value=[1, 2, 3, 4])
+mock_tokenizer.decode = Mock(return_value="test")
+mock_tokenizer.convert_ids_to_tokens = Mock(return_value=["b", "c", "d", "e"])
+mock_tokenizer.stop_words_id_list = []
+mock_tokenizer.stop_words_str_list = []
+mock_tokenizer.bos_token_id = 1
+mock_tokenizer.pad_token_id = 0
+
+# Mock TokenizerFactory to avoid loading real tokenizer
+tokenizer_factory_patcher = patch(
+    "rtp_llm.frontend.frontend_server.TokenizerFactory.create_from_env",
+    return_value=mock_tokenizer,
+)
+tokenizer_factory_patcher.start()
+
 FrontendWorker.__init__ = fake_init
-FrontendWorker.inference = fake_inference
+FrontendWorker.generate_response = fake_generate_response
 
 BackendServer.start = fake_start
 BackendServer.ready = fake_ready
 
 OpenaiEndpoint.__init__ = fake_init
-OpenaiEndpoint.chat_completion = fake_inference
+OpenaiEndpoint.chat_completion = fake_generate_response
 
 
 class ConcurrencyLimitTest(TestCase):

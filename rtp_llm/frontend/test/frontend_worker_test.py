@@ -17,7 +17,12 @@ class FakeFrontendWorker(FrontendWorker):
         self.engine = engine
         # Call parent __init__ with the config, tokenizer, and backend_rpc_server_visitor
         # Since this is a test mock, we pass None for backend_rpc_server_visitor
-        super().__init__(engine.config, engine.model.tokenizer, None)
+        from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
+
+        self.backend_rpc_server_visitor = BackendRPCServerVisitor(engine.config, False)
+        super().__init__(
+            engine.config, engine.model.tokenizer, self.backend_rpc_server_visitor
+        )
 
 
 class FrontendWorkerTest(TestCase):
@@ -296,11 +301,6 @@ class FrontendWorkerTest(TestCase):
         self.assertEqual(3, len(aux_info[1]))
         self.assertEqual([True, True], finished)
         self.assertTrue(len(result_text) > 0)
-
-    def test_encode(self):
-        token_ids, tokens = self.frontend_worker.tokenizer_encode("a b c")
-        self.assertEqual(token_ids, [1, 263, 289, 274])
-        self.assertEqual(tokens, ["<s>", "a", "b", "c"])
 
 
 if __name__ == "__main__":

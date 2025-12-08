@@ -8,6 +8,7 @@ from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.frontend.tokenizer_factory.tokenizer_utils import DecodingState
 from rtp_llm.frontend.tokenizer_factory.tokenizers.base_tokenizer import BaseTokenizer
 from rtp_llm.pipeline.pipeline import Pipeline
+from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.utils.base_model_datatypes import GenerateOutput, GenerateOutputs
 
 
@@ -70,10 +71,14 @@ class PipelineDecodeTest(unittest.TestCase):
 
         # Create mock tokenizer
         self.tokenizer = MockTokenizer()
-
+        self.backend_rpc_server_visitor = BackendRPCServerVisitor(
+            self.model_config, False
+        )
         # Create pipeline instance
         self.pipeline = Pipeline(
-            model_config=self.model_config, tokenizer=self.tokenizer
+            model_config=self.model_config,
+            tokenizer=self.tokenizer,
+            backend_rpc_server_visitor=self.backend_rpc_server_visitor,
         )
 
     def test_decode_non_incremental_tokens_basic(self):
