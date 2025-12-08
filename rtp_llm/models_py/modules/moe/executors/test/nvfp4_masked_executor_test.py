@@ -52,6 +52,9 @@ FLOAT8_E4M3_MAX = 448.0
 FLOAT4_E2M1_MAX = 6.0
 NVFP4_BLOCK_SIZE = 16
 
+kE2M1ToFloat = torch.tensor(
+    [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=torch.float32
+)
 
 def _generate_config() -> GptInitModelParameters:
     config = GptInitModelParameters(
