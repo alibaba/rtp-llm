@@ -8,11 +8,11 @@ import triton.language as tl
 from torch import dtype as _dtype
 from torch.profiler import ProfilerActivity, profile, record_function
 
-from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
+from rtp_llm.models_py.utils.arch import is_hip
+from rtp_llm.ops.compute_ops import (
     per_token_group_quant_fp8,
     per_token_group_quant_int8,
 )
-from rtp_llm.models_py.utils.arch import is_hip
 
 _is_hip = is_hip()
 
