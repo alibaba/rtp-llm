@@ -284,6 +284,7 @@ def _generate_payload_and_weights(
             w1_quantization_global_scale,  # Use w1 quantization scale
             sf_vec_size=16,
             sf_use_ue8m0=False,
+            is_sf_swizzled_layout=False,
         )
         w1_sf_viewed = w1_sf.view(torch.float8_e4m3fn)
         if w1_sf_viewed.ndim == 2:
@@ -298,7 +299,7 @@ def _generate_payload_and_weights(
             w1_global_scale,
             sf_vec_size=16,
             ufp8_type=1,
-            is_sf_swizzled_layout=True,
+            is_sf_swizzled_layout=False,
         )
         w1_dequantized_bf16 = w1_dequantized.to(device=w1_q.device).to(torch.bfloat16)
         w1_dequantized_bf16 = w1_dequantized_bf16.reshape(N, K)
@@ -320,6 +321,7 @@ def _generate_payload_and_weights(
         else:
             print(f"  ✓ w1 Quantization/dequantization check passed")
         
+        assert 0
         w1[local_expert_id] = w1_q
         w1_scale[local_expert_id] = w1_sf
         
