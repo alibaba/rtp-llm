@@ -524,8 +524,4 @@ void DeviceBase::profileStop() {
     return;
 }
 
-void DeviceBase::getRopeCacheOnce(const RopeConfig& rope_config, int max_position_embeddings) {
-    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
-}
-
 }  // namespace rtp_llm

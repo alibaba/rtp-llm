@@ -2,13 +2,18 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
-float yarnFindCorrectionDim(int num_rotations, int rope_dim, int rope_theta, int max_position_embeddings) {
+
+float yarnFindCorrectionDim(const int num_rotations,
+                            const int rope_dim,
+                            const int rope_theta,
+                            const int max_position_embeddings) {
     return static_cast<float>(rope_dim
                               * std::log(static_cast<float>(max_position_embeddings / (num_rotations * 2.f * M_PI))))
            / (2.f * std::log(static_cast<float>(rope_theta)));
 }
 
-torch::Tensor genBaseCache(int rope_dim, int rope_theta, float rope_scale, int max_position_embeddings) {
+torch::Tensor
+genBaseCache(const int rope_dim, const int rope_theta, const float rope_scale, const int max_position_embeddings) {
     auto inv_freq =
         1.f / torch::pow(rope_theta, torch::arange(0, rope_dim, 2, torch::kInt64).to(torch::kFloat32) / rope_dim);
     auto t = torch::arange(max_position_embeddings * rope_scale, torch::kInt64).to(torch::kFloat32);
@@ -21,14 +26,14 @@ torch::Tensor genBaseCache(int rope_dim, int rope_theta, float rope_scale, int m
     return cos_sin.cuda();
 }
 
-torch::Tensor genYarnCache(int   rope_dim,
-                           int   rope_theta,
-                           float rope_scale,
-                           int   max_position_embeddings,
-                           int   beta_slow,
-                           int   beta_fast,
-                           float extrapolation_factor,
-                           float mscale) {
+torch::Tensor genYarnCache(const int   rope_dim,
+                           const int   rope_theta,
+                           const float rope_scale,
+                           const int   max_position_embeddings,
+                           const int   beta_slow,
+                           const int   beta_fast,
+                           const float extrapolation_factor,
+                           const float mscale) {
     auto pos_freqs =
         torch::pow(rope_theta, torch::arange(0, rope_dim, 2, torch::kInt64).to(torch::kFloat32) / rope_dim);
     auto  inv_freq_extrapolation = 1.f / pos_freqs;
@@ -55,14 +60,7 @@ torch::Tensor genYarnCache(int   rope_dim,
     return cos_sin.cuda();
 }
 
-/**
- * @brief Get the Rope Cos Sin object, TODO: move to python
- *
- * @param rope_config
- * @param max_position_embeddings
- * @return torch::Tensor
- */
-torch::Tensor getRopeCache(const RopeConfig& rope_config, int max_position_embeddings) {
+torch::Tensor getRopeCache(const RopeConfig& rope_config, const int max_position_embeddings) {
     RTP_LLM_LOG_INFO(
         "%s  max_position_embeddings: %d", rope_config.DebugRopeConfigStr().c_str(), max_position_embeddings);
     torch::Tensor rope_cache;
@@ -91,4 +89,26 @@ torch::Tensor getRopeCache(const RopeConfig& rope_config, int max_position_embed
     return rope_cache;
 }
 
-} // namespace rtm_llm
+RopeCache getRopeCacheOnce(const RopeConfig& rope_config, const int max_position_embeddings, const bool is_cuda) {
+    static std::once_flag rope_cache_flag;
+    static RopeCache      rope_cache;
+
+    std::call_once(rope_cache_flag, [&]() {
+        rope_cache.used = is_cuda ? rope_config.style == RopeStyle::Base || rope_config.style == RopeStyle::Yarn :
+                                    rope_config.style == RopeStyle::Base;
+        if (rope_cache.used) {
+            rope_cache.base = rope_config.base;
+            rope_cache.dim  = rope_config.dim;
+            rope_cache.data = getRopeCache(rope_config, max_position_embeddings);
+        }
+    });
+
+    return rope_cache;
+}
+
+bool checkRopeCache(const RopeConfig& rope_config, const RopeCache& rope_cache) {
+    return rope_cache.used && rope_cache.dim == rope_config.dim && rope_cache.base == rope_config.base
+           && rope_cache.data.defined();
+}
+
+}  // namespace rtp_llm

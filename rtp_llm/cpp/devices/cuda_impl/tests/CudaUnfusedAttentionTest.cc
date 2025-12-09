@@ -61,13 +61,15 @@ TEST_F(UnfusedAttentionTest, DecodeAddFusedQKVBiasTransposeTest) {
     std::vector<size_t> seq_kv     = {1, 65, 129};
     size_t              head_q     = 64;
     std::vector<size_t> head_kv    = {4, 8};
-    size_t              head_dim   = 128;
+    std::vector<size_t> head_dim   = {128};
     std::vector<size_t> page_size  = {16, 64};
     for (auto bs : batch_size) {
         for (auto skv : seq_kv) {
             for (auto hkv : head_kv) {
-                for (auto ps : page_size) {
-                    decodeAddFusedQKVBiasTransposeTest(bs, seq_q, skv, head_q, hkv, head_dim, ps);
+                for (auto hd : head_dim) {
+                    for (auto ps : page_size) {
+                        decodeAddFusedQKVBiasTransposeTest(bs, seq_q, skv, head_q, hkv, hd, ps);
+                    }
                 }
             }
         }
