@@ -271,15 +271,13 @@ class Qwen3GemmModel(DisaggregateModelBase):
             for i in range(ffn_disaggregate_config.attention_dp_size)
         ]
 
-        self.norm = RMSNorm(
-            weights.get_global_weight(W.final_ln_gamma), eps=config.layernorm_eps
-        )
-        lm_head_weights = {W.lm_head: weights.get_global_weight(W.lm_head)}
-        # Get quant_config from model_config
-        quant_config = config.quant_config
-        self.lm_head = LinearFactory.create_linear_from_weights(
-            lm_head_weights, W.lm_head, None, None, quant_config, self.py_hw_kernel_config
-        )
+        # self.norm = RMSNorm(
+        #     weights.get_global_weight(W.final_ln_gamma), eps=config.layernorm_eps
+        # )
+        # lm_head_weights = {W.lm_head: weights.get_global_weight(W.lm_head)}
+        # self.lm_head = LinearFactory.create_linear_from_weights(
+        #     lm_head_weights, W.lm_head, None, None, config
+        # )
 
     def recv_micro_batch_split_info(self) -> Tuple[List[torch.Tensor], BatchSplitInfo]:
         dp_num = len(self.attn_dp_rank)
@@ -387,10 +385,7 @@ class Qwen3AttnModel(DisaggregateModelBase):
         )
         ffn_disaggregate_config = parallelism_config.ffn_disaggregate_config
         self.attention_layers = nn.ModuleList(
-            [
-                CausalAttentionPure(config, parallelism_config, weights.weights[idx])
-                for idx in range(self.layer_num)
-            ]
+            [CausalAttentionPure(config, {}) for idx in range(self.layer_num)]
         )
         self.ffn_service_rank = (
             ffn_disaggregate_config.attention_dp_size
@@ -514,14 +509,13 @@ class Qwen3DisaggregateModel(GptModelBase):
                 device_resource_config=device_resource_config,
             )
 
-        self.norm = RMSNorm(
-            weights.get_global_weight(W.final_ln_gamma), eps=config.layernorm_eps
-        )
-        lm_head_weights = {W.lm_head: weights.get_global_weight(W.lm_head)}
-        quant_config = config.quant_config
-        self.lm_head = LinearFactory.create_linear_from_weights(
-            lm_head_weights, W.lm_head, None, None, quant_config, py_hw_kernel_config
-        )
+        # self.norm = RMSNorm(
+        #     weights.get_global_weight(W.final_ln_gamma), eps=config.layernorm_eps
+        # )
+        # lm_head_weights = {W.lm_head: weights.get_global_weight(W.lm_head)}
+        # self.lm_head = LinearFactory.create_linear_from_weights(
+        #     lm_head_weights, W.lm_head, None, None, config
+        # )
 
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         super().initialize(init_resource)

@@ -178,6 +178,8 @@ class BaseModel(object):
         )
         self._load_custom_module()
         self._load_multimodal()
+        # AFD: remove weights for atten/ffn rank
+        self.weight.afd_remove_weights(self.config)
         self.model_weights_loader.force_clean_cuda_memory()
 
     @classmethod
