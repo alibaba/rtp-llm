@@ -1,9 +1,11 @@
+import copy
 import itertools
 import json
 import logging
 from functools import partial
 from typing import AsyncGenerator, List, Optional
 
+import torch
 from fastapi import Request
 
 from rtp_llm.config.generate_config import GenerateConfig
@@ -32,6 +34,7 @@ from rtp_llm.openai.renderers.custom_renderer import (
     StreamResponseObject,
 )
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
+from rtp_llm.utils.base_model_datatypes import GenerateInput, GenerateOutputs
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
@@ -396,30 +399,6 @@ class OpenaiEndpoint(object):
             extra_outputs=extra_outputs,
         )
 
-    def _complete_stream_response(
-        self,
-        choice_generator: AsyncGenerator[StreamResponseObject, None],
-        debug_info: Optional[DebugInfo],
-    ) -> CompleteResponseAsyncGenerator:
-        async def response_generator():
-            debug_info_responded = False
-            async for response in choice_generator:
-                yield ChatCompletionStreamResponse(
-                    choices=response.choices,
-                    usage=response.usage,
-                    aux_info=response.aux_info,
-                    debug_info=debug_info if not debug_info_responded else None,
-                    extra_outputs=response.extra_outputs,
-                )
-                debug_info_responded = True
-
-        complete_response_collect_func = partial(
-            self._collect_complete_response, debug_info=debug_info
-        )
-        return CompleteResponseAsyncGenerator(
-            response_generator(), complete_response_collect_func
-        )
-
     def _get_debug_info(
         self,
         renderer: CustomChatRenderer,
@@ -467,30 +446,87 @@ class OpenaiEndpoint(object):
         )
         rendered_input = self.render_chat(chat_request)
         generate_config = self._extract_generation_config(chat_request)
-
-        mm_inputs = rendered_input.multimodal_inputs
-
-        if generate_config.sp_advice_prompt != "":
-            generate_config.sp_advice_prompt_token_ids = self.tokenizer.encode(
-                generate_config.sp_advice_prompt
-            )
-
         debug_info = (
             self._get_debug_info(renderer, rendered_input, generate_config)
             if chat_request.debug_info
             else None
         )
-
-        choice_generator = renderer.generate_choice(
+        if generate_config.sp_advice_prompt != "":
+            generate_config.sp_advice_prompt_token_ids = self.tokenizer.encode(
+                generate_config.sp_advice_prompt
+            )
+        choice_generator = self._generate_and_render(
             request_id,
-            rendered_input.input_ids,
-            mm_inputs,
+            rendered_input,
             generate_config,
-            self.backend_rpc_server_visitor,
+            renderer,
             chat_request,
         )
-
         return self._complete_stream_response(choice_generator, debug_info)
+
+    async def _generate_and_render(
+        self,
+        request_id: int,
+        rendered_input: RenderedInputs,
+        generate_config: GenerateConfig,
+        renderer: CustomChatRenderer,
+        chat_request: ChatCompletionRequest,
+    ) -> AsyncGenerator[StreamResponseObject, None]:
+        # input
+        token_type_ids = []
+        input_id_tensor = torch.Tensor(rendered_input.input_ids).int().unsqueeze(0)
+        generate_input = GenerateInput(
+            request_id=request_id,
+            token_ids=input_id_tensor,
+            mm_inputs=rendered_input.multimodal_inputs,
+            generate_config=generate_config,
+            tokenizer=self.tokenizer,
+            token_type_ids=token_type_ids,
+        )
+        #  backend enqueue
+        output_generator: AsyncGenerator[GenerateOutputs, None] = (
+            await self.backend_rpc_server_visitor.enqueue(generate_input)
+        )
+
+        if not generate_config.is_streaming:
+            # Non-streaming mode: merge all outputs first
+            merged_generator = await renderer._merge_non_streaming_outputs(
+                output_generator
+            )
+            async for response in renderer.render_response_stream(
+                merged_generator, chat_request, generate_config
+            ):
+                yield response
+        else:
+            # Streaming mode: process outputs incrementally
+            async for response in renderer.render_response_stream(
+                output_generator, chat_request, generate_config
+            ):
+                yield response
+
+    def _complete_stream_response(
+        self,
+        choice_generator: AsyncGenerator[StreamResponseObject, None],
+        debug_info: Optional[DebugInfo],
+    ) -> CompleteResponseAsyncGenerator:
+        async def response_generator():
+            debug_info_responded = False
+            async for response in choice_generator:
+                yield ChatCompletionStreamResponse(
+                    choices=response.choices,
+                    usage=response.usage,
+                    aux_info=response.aux_info,
+                    debug_info=debug_info if not debug_info_responded else None,
+                    extra_outputs=response.extra_outputs,
+                )
+                debug_info_responded = True
+
+        complete_response_collect_func = partial(
+            self._collect_complete_response, debug_info=debug_info
+        )
+        return CompleteResponseAsyncGenerator(
+            response_generator(), complete_response_collect_func
+        )
 
     def chat_render(self, chat_request: ChatCompletionRequest) -> DebugInfo:
         renderer = (

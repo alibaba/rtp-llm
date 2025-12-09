@@ -584,36 +584,79 @@ class FrontendWorker:
 
         return text, token_buffer
 
-    def decode_complete_tokens(
+    async def decode_complete_tokens(
         self,
+        output_generator: AsyncGenerator[GenerateOutputs, None],
         generate_config: GenerateConfig,
-        generate_outputs: GenerateOutputs,
         stop_word_str_list: List[str],
         stop_word_str_slices: List[str],
         stop_word_ids: List[int],
         stop_word_id_slices: List[int],
-        output_tokens_list: List[torch.Tensor],
         **kwargs: Any,
-    ) -> Tuple[List[str], List[int], List[torch.Tensor]]:
+    ) -> AsyncGenerator[GenerateResponse, None]:
         """Decode complete tokens (for beam search or non-streaming mode)"""
-        # Prepare token lists
-        tokens_for_decode = self._prepare_tokens_for_complete_decode(
-            generate_config, generate_outputs, output_tokens_list
-        )
+        output_tokens_list: List[torch.Tensor] = []
+        generate_outputs_cache = GenerateOutputs()
 
-        # Truncate stop word tokens and decode
-        final_texts, output_lens = self._decode_and_truncate_tokens(
-            generate_config,
-            generate_outputs,
-            tokens_for_decode,
-            stop_word_str_list,
-            stop_word_str_slices,
-            stop_word_ids,
-            stop_word_id_slices,
-            **kwargs,
-        )
+        async for generate_outputs in output_generator:
+            # Update cache (keep finished outputs)
+            if not generate_outputs_cache.generate_outputs:
+                generate_outputs_cache.generate_outputs = (
+                    generate_outputs.generate_outputs
+                )
+            else:
+                generate_outputs_cache.generate_outputs = [
+                    (
+                        cached_out
+                        if cached_out.finished
+                        else generate_outputs.generate_outputs[i]
+                    )
+                    for i, cached_out in enumerate(
+                        generate_outputs_cache.generate_outputs
+                    )
+                ]
 
-        return final_texts, output_lens, output_tokens_list
+            # Decode tokens
+            begin_time = current_time_ms()
+
+            # Prepare token lists
+            tokens_for_decode = self._prepare_tokens_for_complete_decode(
+                generate_config, generate_outputs_cache, output_tokens_list
+            )
+
+            # Truncate stop word tokens and decode
+            generate_texts, output_lens = self._decode_and_truncate_tokens(
+                generate_config,
+                generate_outputs_cache,
+                tokens_for_decode,
+                stop_word_str_list,
+                stop_word_str_slices,
+                stop_word_ids,
+                stop_word_id_slices,
+                **kwargs,
+            )
+
+            kmonitor.report(
+                GaugeMetrics.POST_PIPELINE_RT_METRIC, current_time_ms() - begin_time
+            )
+
+            yield GenerateResponse(
+                generate_outputs=generate_outputs_cache, generate_texts=generate_texts
+            )
+
+            # Check if all finished and report metrics
+            if all(out.finished for out in generate_outputs_cache.generate_outputs):
+                if generate_config.aux_info:
+                    kmonitor.report(
+                        GaugeMetrics.FT_ITERATE_COUNT_METRIC,
+                        generate_outputs_cache.generate_outputs[0].aux_info.iter_count,
+                    )
+                if output_lens:
+                    kmonitor.report(
+                        GaugeMetrics.OUTPUT_TOKEN_SIZE_METRIC,
+                        sum(output_lens) / len(output_lens),
+                    )
+                break
 
     def _prepare_tokens_for_complete_decode(
         self,
@@ -741,102 +784,139 @@ class FrontendWorker:
 
         return final_texts, output_lens
 
-    def decode_streaming_tokens(
+    async def decode_streaming_tokens(
         self,
+        output_generator: AsyncGenerator[GenerateOutputs, None],
         generate_config: GenerateConfig,
-        generate_outputs: GenerateOutputs,
         stop_word_str_list: List[str],
         stop_word_str_slices: List[str],
         stop_word_ids: List[int],
         stop_word_id_slices: List[int],
-        decoding_states: List[DecodingState],
-        token_buffers: List[str],
-        output_tokens_list: List[torch.Tensor],
         **kwargs: Any,
-    ) -> Tuple[
-        List[str], List[int], List[DecodingState], List[str], List[torch.Tensor]
-    ]:
+    ) -> AsyncGenerator[GenerateResponse, None]:
         """Streaming incremental token decoding"""
-        num_outputs = len(generate_outputs.generate_outputs)
+        decoding_states: List[DecodingState] = []
+        output_tokens_list: List[torch.Tensor] = []
+        token_buffers: List[str] = []
+        generate_outputs_cache = GenerateOutputs()
 
-        # Initialize states
-        token_buffers = token_buffers or [""] * num_outputs
-        decoding_states = decoding_states or [
-            DecodingState() for _ in range(num_outputs)
-        ]
-        output_tokens_list = output_tokens_list or [
-            torch.empty(0, dtype=torch.int32) for _ in range(num_outputs)
-        ]
-
-        # Incrementally decode each output
-        newly_decoded_texts = []
-        all_texts = []
-        output_lens = []
-
-        for i, generate_output in enumerate(generate_outputs.generate_outputs):
-            # Accumulate tokens
-            output_tokens_list[i] = torch.cat(
-                (output_tokens_list[i], generate_output.output_ids), dim=1
-            )
-            tokens_np = output_tokens_list[i].cpu().numpy().flatten()
-
-            # Handle EOS
-            if not generate_config.ignore_eos:
-                tokens_list = remove_padding_eos_with_numpy(
-                    tokens_np, self._special_tokens.eos_token_id
-                ).tolist()
+        async for generate_outputs in output_generator:
+            # Update cache (keep finished outputs)
+            if not generate_outputs_cache.generate_outputs:
+                generate_outputs_cache.generate_outputs = (
+                    generate_outputs.generate_outputs
+                )
             else:
-                tokens_list = tokens_np.tolist()
+                generate_outputs_cache.generate_outputs = [
+                    (
+                        cached_out
+                        if cached_out.finished
+                        else generate_outputs.generate_outputs[i]
+                    )
+                    for i, cached_out in enumerate(
+                        generate_outputs_cache.generate_outputs
+                    )
+                ]
 
-            output_lens.append(len(tokens_list))
+            # Decode tokens
+            begin_time = current_time_ms()
 
-            # Truncate stop word tokens
-            processed_tokens = self._truncate_by_stop_token_ids(
-                generate_config,
-                generate_output,
-                tokens_list,
-                stop_word_ids,
-                stop_word_id_slices,
+            num_outputs = len(generate_outputs_cache.generate_outputs)
+
+            # Initialize states
+            token_buffers = token_buffers or [""] * num_outputs
+            decoding_states = decoding_states or [
+                DecodingState() for _ in range(num_outputs)
+            ]
+            output_tokens_list = output_tokens_list or [
+                torch.empty(0, dtype=torch.int32) for _ in range(num_outputs)
+            ]
+
+            # Incrementally decode each output
+            newly_decoded_texts = []
+            all_texts = []
+            output_lens = []
+
+            for i, generate_output in enumerate(
+                generate_outputs_cache.generate_outputs
+            ):
+                # Accumulate tokens
+                output_tokens_list[i] = torch.cat(
+                    (output_tokens_list[i], generate_output.output_ids), dim=1
+                )
+                tokens_np = output_tokens_list[i].cpu().numpy().flatten()
+
+                # Handle EOS
+                if not generate_config.ignore_eos:
+                    tokens_list = remove_padding_eos_with_numpy(
+                        tokens_np, self._special_tokens.eos_token_id
+                    ).tolist()
+                else:
+                    tokens_list = tokens_np.tolist()
+
+                output_lens.append(len(tokens_list))
+
+                # Truncate stop word tokens
+                processed_tokens = self._truncate_by_stop_token_ids(
+                    generate_config,
+                    generate_output,
+                    tokens_list,
+                    stop_word_ids,
+                    stop_word_id_slices,
+                )
+
+                # Incremental decoding
+                new_text = IncrementDecodingUtils.detokenize_incrementally(
+                    self.tokenizer, processed_tokens, decoding_states[i]
+                )
+                decoding_states[i].all_text += new_text
+
+                text_to_return = (
+                    new_text
+                    if generate_config.return_incremental
+                    else decoding_states[i].all_text
+                )
+                newly_decoded_texts.append(text_to_return)
+                all_texts.append(decoding_states[i].all_text)
+
+            # Truncate stop word strings and add prefix
+            generate_texts = []
+            for i in range(num_outputs):
+                text, token_buffers[i] = self._truncate_by_stop_strings(
+                    generate_config,
+                    generate_outputs_cache.generate_outputs[i],
+                    newly_decoded_texts[i],
+                    stop_word_str_list,
+                    stop_word_str_slices,
+                    token_buffers[i],
+                )
+
+                if generate_config.out_prefix:
+                    text = generate_config.out_prefix + text
+
+                generate_texts.append(text)
+
+            kmonitor.report(
+                GaugeMetrics.POST_PIPELINE_RT_METRIC, current_time_ms() - begin_time
             )
 
-            # Incremental decoding
-            new_text = IncrementDecodingUtils.detokenize_incrementally(
-                self.tokenizer, processed_tokens, decoding_states[i]
-            )
-            decoding_states[i].all_text += new_text
-
-            text_to_return = (
-                new_text
-                if generate_config.return_incremental
-                else decoding_states[i].all_text
-            )
-            newly_decoded_texts.append(text_to_return)
-            all_texts.append(decoding_states[i].all_text)
-
-        # Truncate stop word strings and add prefix
-        final_texts = []
-        for i in range(num_outputs):
-            text, token_buffers[i] = self._truncate_by_stop_strings(
-                generate_config,
-                generate_outputs.generate_outputs[i],
-                newly_decoded_texts[i],
-                stop_word_str_list,
-                stop_word_str_slices,
-                token_buffers[i],
+            yield GenerateResponse(
+                generate_outputs=generate_outputs_cache, generate_texts=generate_texts
             )
 
-            if generate_config.out_prefix:
-                text = generate_config.out_prefix + text
-
-            final_texts.append(text)
-
-        return (
-            final_texts,
-            output_lens,
-            decoding_states,
-            token_buffers,
-            output_tokens_list,
-        )
+            # Check if all finished and report metrics
+            if all(out.finished for out in generate_outputs_cache.generate_outputs):
+                if generate_config.aux_info:
+                    kmonitor.report(
+                        GaugeMetrics.FT_ITERATE_COUNT_METRIC,
+                        generate_outputs_cache.generate_outputs[0].aux_info.iter_count,
+                    )
+                if output_lens:
+                    kmonitor.report(
+                        GaugeMetrics.OUTPUT_TOKEN_SIZE_METRIC,
+                        sum(output_lens) / len(output_lens),
+                    )
+                break
 
     @torch.inference_mode()
     async def stream_from_backend(
@@ -866,90 +946,35 @@ class FrontendWorker:
         stop_word_ids = generate_config.stop_words_list
         stop_word_id_slices = get_stop_word_slices(stop_word_ids)
 
-        stream: AsyncGenerator[GenerateOutputs, None] = (
+        output_generator: AsyncGenerator[GenerateOutputs, None] = (
             await self.backend_rpc_server_visitor.enqueue(input)
         )
 
-        # Initialize decoding states
-        decoding_states: List[DecodingState] = []
-        output_tokens_list: List[torch.Tensor] = []
-        token_buffers: List[str] = []
-        generate_outputs_cache = GenerateOutputs()
         is_incremental = (
             not generate_config.has_num_beams() and generate_config.is_streaming
         )
 
-        async for generate_outputs in stream:
-            # Update cache (keep finished outputs)
-            if not generate_outputs_cache.generate_outputs:
-                generate_outputs_cache.generate_outputs = (
-                    generate_outputs.generate_outputs
-                )
-            else:
-                generate_outputs_cache.generate_outputs = [
-                    (
-                        cached_out
-                        if cached_out.finished
-                        else generate_outputs.generate_outputs[i]
-                    )
-                    for i, cached_out in enumerate(
-                        generate_outputs_cache.generate_outputs
-                    )
-                ]
-
-            # Decode tokens
-            begin_time = current_time_ms()
-            if is_incremental:
-                (
-                    generate_texts,
-                    output_lens,
-                    decoding_states,
-                    token_buffers,
-                    output_tokens_list,
-                ) = self.decode_streaming_tokens(
-                    generate_config,
-                    generate_outputs_cache,
-                    stop_word_strs,
-                    stop_word_str_slices,
-                    stop_word_ids,
-                    stop_word_id_slices,
-                    decoding_states,
-                    token_buffers,
-                    output_tokens_list,
-                    **kwargs,
-                )
-            else:
-                generate_texts, output_lens, output_tokens_list = (
-                    self.decode_complete_tokens(
-                        generate_config,
-                        generate_outputs_cache,
-                        stop_word_strs,
-                        stop_word_str_slices,
-                        stop_word_ids,
-                        stop_word_id_slices,
-                        output_tokens_list,
-                        **kwargs,
-                    )
-                )
-
-            kmonitor.report(
-                GaugeMetrics.POST_PIPELINE_RT_METRIC, current_time_ms() - begin_time
-            )
-
-            yield GenerateResponse(
-                generate_outputs=generate_outputs_cache, generate_texts=generate_texts
-            )
-
-            # Check if all finished and report metrics
-            if all(out.finished for out in generate_outputs_cache.generate_outputs):
-                if generate_config.aux_info:
-                    kmonitor.report(
-                        GaugeMetrics.FT_ITERATE_COUNT_METRIC,
-                        generate_outputs_cache.generate_outputs[0].aux_info.iter_count,
-                    )
-                if output_lens:
-                    kmonitor.report(
-                        GaugeMetrics.OUTPUT_TOKEN_SIZE_METRIC,
-                        sum(output_lens) / len(output_lens),
-                    )
-                break
+        if is_incremental:
+            # Streaming decoding path
+            async for response in self.decode_streaming_tokens(
+                output_generator,
+                generate_config,
+                stop_word_strs,
+                stop_word_str_slices,
+                stop_word_ids,
+                stop_word_id_slices,
+                **kwargs,
+            ):
+                yield response
+        else:
+            # Complete decoding path
+            async for response in self.decode_complete_tokens(
+                output_generator,
+                generate_config,
+                stop_word_strs,
+                stop_word_str_slices,
+                stop_word_ids,
+                stop_word_id_slices,
+                **kwargs,
+            ):
+                yield response

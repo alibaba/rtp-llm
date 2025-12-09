@@ -153,7 +153,7 @@ class StreamStatusSync:
         remove_stop_word_ids_func,
     ):
         self.index += 1
-        delta_output_ids = output.output_ids.cpu().flatten().tolist()
+        delta_output_ids = output_ids.cpu().flatten().tolist()
         self.output_ids_list = copy.deepcopy(self.output_ids_list + delta_output_ids)
         self.finish_reason = check_finish_func(self.output_ids_list, input_len)
         self.output_ids = remove_stop_word_ids_func(
@@ -363,17 +363,16 @@ class CustomChatRenderer:
 
         token_type_ids = []
         input_id_tensor = torch.Tensor(input_ids).int().unsqueeze(0)
+        input = GenerateInput(
+            request_id=request_id,
+            token_ids=input_id_tensor,
+            mm_inputs=mm_inputs,
+            generate_config=generate_config,
+            tokenizer=self.tokenizer,
+            token_type_ids=token_type_ids,
+        )
         output_generator: AsyncGenerator[GenerateOutputs, None] = (
-            await backend_rpc_server_visitor.enqueue(
-                GenerateInput(
-                    request_id=request_id,
-                    token_ids=input_id_tensor,
-                    mm_inputs=mm_inputs,
-                    generate_config=generate_config,
-                    tokenizer=self.tokenizer,
-                    token_type_ids=token_type_ids,
-                )
-            )
+            await backend_rpc_server_visitor.enqueue(input)
         )
 
         # 处理非流式请求的合并逻辑
@@ -513,35 +512,6 @@ class CustomChatRenderer:
 
         return chat_logprob
 
-    async def _generate_extra_outputs(
-        self, output: GenerateOutput, generate_config: GenerateConfig
-    ) -> Optional[ChatCompletionExtraOutputs]:
-        final_result = None
-
-        def result():
-            nonlocal final_result
-            if final_result is None:
-                final_result = ChatCompletionExtraOutputs()
-            return final_result
-
-        if generate_config.return_hidden_states and output.hidden_states is not None:
-            result().hidden_states = output.hidden_states.tolist()
-        if (
-            generate_config.return_all_hidden_states
-            and output.all_hidden_states is not None
-        ):
-            result().all_hidden_states = output.all_hidden_states.tolist()
-        if generate_config.calculate_loss != 0 and output.loss is not None:
-            result().loss = output.loss.tolist()
-        if generate_config.return_logits and output.logits is not None:
-            result().logits = output.logits.tolist()
-        if generate_config.return_output_ids and output.output_ids is not None:
-            result().output_ids = output.output_ids.tolist()
-        if generate_config.return_input_ids and output.input_ids is not None:
-            result().input_ids = output.input_ids.tolist()
-
-        return final_result
-
     async def _update_single_status(
         self,
         status: StreamStatus,
@@ -674,57 +644,6 @@ class CustomChatRenderer:
         else:
             raise Exception(f"undefined output_str type[{type(item.output_str)}]")
 
-    async def _generate_stream_response(
-        self, items: List[OutputDelta], think_status_list: List[ThinkStatus]
-    ) -> StreamResponseObject:
-        if len(items) == 0:
-            raise Exception("output items length should not be 0")
-        input_lengths = items[0].input_length
-        output_lengths = sum([x.output_length for x in items])
-        reuse_lengths = items[0].reuse_length
-        all_choices = []
-        for i, item in enumerate(items):
-            delta = self._split_reasoning_text_and_content(item, think_status_list[i])
-            all_choices.append(
-                ChatCompletionResponseStreamChoice(
-                    index=i,
-                    delta=delta,
-                    logprobs=(
-                        ChoiceLogprobs(
-                            content=[item.logprobs] if item.logprobs != None else None,
-                            refusal=None,
-                        )
-                        if item.logprobs != None
-                        else None
-                    ),
-                )
-            )
-
-        return StreamResponseObject(
-            choices=all_choices,
-            usage=UsageInfo(
-                prompt_tokens=input_lengths,
-                total_tokens=input_lengths + output_lengths,
-                completion_tokens=output_lengths,
-                completion_tokens_details=(
-                    CompletionTokensDetails(
-                        reasoning_tokens=sum(
-                            [x.think_tokens for x in think_status_list]
-                        )
-                    )
-                    if think_status_list[0].enable_think_mode > 0
-                    else None
-                ),
-                prompt_tokens_details=(
-                    PromptTokensDetails(cached_tokens=reuse_lengths)
-                    if reuse_lengths > 0
-                    else None
-                ),
-            ),
-            # TODO(zhangjianning.zjn): merge all extra outputs for streaming request
-            extra_outputs=items[-1].extra_outputs,
-        )
-
     async def _flush_buffer(
         self,
         buffer_list: List[StreamStatus],
@@ -750,72 +669,6 @@ class CustomChatRenderer:
                 )
             )
         return await self._generate_stream_response(output_items, think_status_list)
-
-    async def _generate_final(
-        self,
-        buffer_list: List[StreamStatus],
-        request: ChatCompletionRequest,
-        think_status_list: List[ThinkStatus],
-    ):
-        input_token_length = 0
-        output_token_length = 0
-        reuse_length = 0
-        aux_info = None
-        for i, buffer in enumerate(buffer_list):
-            if buffer.output is None:
-                raise Exception("buffer last output should not be None")
-            # 延迟引入, 避免循环import
-            from rtp_llm.openai.renderers.reasoning_tool_base_renderer import (
-                ReasoningToolStreamStatus,
-            )
-
-            # 判断buffer有无generating_tool_call这个属性
-            if (
-                isinstance(buffer, ReasoningToolStreamStatus)
-                and buffer.generating_tool_call
-            ):
-                buffer.finish_reason = FinisheReason.tool_calls
-
-            if buffer.finish_reason == None:
-                logging.debug("output %s found no stop reason! use stop as default.", i)
-                buffer.finish_reason = FinisheReason.stop
-            if i == 0:
-                input_token_length = buffer.output.aux_info.input_len
-                reuse_length = buffer.output.aux_info.reuse_len
-                aux_info = buffer.output.aux_info if request.aux_info else None
-            output_token_length += buffer.output.aux_info.output_len
-        return StreamResponseObject(
-            choices=[
-                ChatCompletionResponseStreamChoice(
-                    index=i,
-                    delta=DeltaMessage(
-                        content="",
-                    ),
-                    finish_reason=buffer.finish_reason,
-                )
-                for i, buffer in enumerate(buffer_list)
-            ],
-            usage=UsageInfo(
-                prompt_tokens=input_token_length,
-                total_tokens=input_token_length + output_token_length,
-                completion_tokens=output_token_length,
-                completion_tokens_details=(
-                    CompletionTokensDetails(
-                        reasoning_tokens=sum(
-                            [x.think_tokens for x in think_status_list]
-                        )
-                    )
-                    if think_status_list[0].enable_think_mode
-                    else None
-                ),
-                prompt_tokens_details=(
-                    PromptTokensDetails(cached_tokens=reuse_length)
-                    if reuse_length > 0
-                    else None
-                ),
-            ),
-            aux_info=aux_info,
-        )
 
     async def _create_status_list(
         self, n: int, request: ChatCompletionRequest
@@ -894,6 +747,151 @@ class CustomChatRenderer:
             )
             yield await self._generate_final(status_list, request, think_status_list)
 
+    async def _generate_extra_outputs(
+        self, output: GenerateOutput, generate_config: GenerateConfig
+    ) -> Optional[ChatCompletionExtraOutputs]:
+        final_result = None
+
+        def result():
+            nonlocal final_result
+            if final_result is None:
+                final_result = ChatCompletionExtraOutputs()
+            return final_result
+
+        if generate_config.return_hidden_states and output.hidden_states is not None:
+            result().hidden_states = output.hidden_states.tolist()
+        if (
+            generate_config.return_all_hidden_states
+            and output.all_hidden_states is not None
+        ):
+            result().all_hidden_states = output.all_hidden_states.tolist()
+        if generate_config.calculate_loss != 0 and output.loss is not None:
+            result().loss = output.loss.tolist()
+        if generate_config.return_logits and output.logits is not None:
+            result().logits = output.logits.tolist()
+        if generate_config.return_output_ids and output.output_ids is not None:
+            result().output_ids = output.output_ids.tolist()
+        if generate_config.return_input_ids and output.input_ids is not None:
+            result().input_ids = output.input_ids.tolist()
+        return final_result
+
+    async def _generate_stream_response(
+        self, items: List[OutputDelta], think_status_list: List[ThinkStatus]
+    ) -> StreamResponseObject:
+        if len(items) == 0:
+            raise Exception("output items length should not be 0")
+        input_lengths = items[0].input_length
+        output_lengths = sum([x.output_length for x in items])
+        reuse_lengths = items[0].reuse_length
+        all_choices = []
+        for i, item in enumerate(items):
+            delta = self._split_reasoning_text_and_content(item, think_status_list[i])
+            all_choices.append(
+                ChatCompletionResponseStreamChoice(
+                    index=i,
+                    delta=delta,
+                    logprobs=(
+                        ChoiceLogprobs(
+                            content=[item.logprobs] if item.logprobs != None else None,
+                            refusal=None,
+                        )
+                        if item.logprobs != None
+                        else None
+                    ),
+                )
+            )
+
+        return StreamResponseObject(
+            choices=all_choices,
+            usage=UsageInfo(
+                prompt_tokens=input_lengths,
+                total_tokens=input_lengths + output_lengths,
+                completion_tokens=output_lengths,
+                completion_tokens_details=(
+                    CompletionTokensDetails(
+                        reasoning_tokens=sum(
+                            [x.think_tokens for x in think_status_list]
+                        )
+                    )
+                    if think_status_list[0].enable_think_mode > 0
+                    else None
+                ),
+                prompt_tokens_details=(
+                    PromptTokensDetails(cached_tokens=reuse_lengths)
+                    if reuse_lengths > 0
+                    else None
+                ),
+            ),
+            # TODO(zhangjianning.zjn): merge all extra outputs for streaming request
+            extra_outputs=items[-1].extra_outputs,
+        )
+        
+    async def _generate_final(
+        self,
+        buffer_list: List[StreamStatus],
+        request: ChatCompletionRequest,
+        think_status_list: List[ThinkStatus],
+    ):
+        input_token_length = 0
+        output_token_length = 0
+        reuse_length = 0
+        aux_info = None
+        for i, buffer in enumerate(buffer_list):
+            if buffer.output is None:
+                raise Exception("buffer last output should not be None")
+            # 延迟引入, 避免循环import
+            from rtp_llm.openai.renderers.reasoning_tool_base_renderer import (
+                ReasoningToolStreamStatus,
+            )
+
+            # 判断buffer有无generating_tool_call这个属性
+            if (
+                isinstance(buffer, ReasoningToolStreamStatus)
+                and buffer.generating_tool_call
+            ):
+                buffer.finish_reason = FinisheReason.tool_calls
+
+            if buffer.finish_reason == None:
+                logging.debug("output %s found no stop reason! use stop as default.", i)
+                buffer.finish_reason = FinisheReason.stop
+            if i == 0:
+                input_token_length = buffer.output.aux_info.input_len
+                reuse_length = buffer.output.aux_info.reuse_len
+                aux_info = buffer.output.aux_info if request.aux_info else None
+            output_token_length += buffer.output.aux_info.output_len
+        return StreamResponseObject(
+            choices=[
+                ChatCompletionResponseStreamChoice(
+                    index=i,
+                    delta=DeltaMessage(
+                        content="",
+                    ),
+                    finish_reason=buffer.finish_reason,
+                )
+                for i, buffer in enumerate(buffer_list)
+            ],
+            usage=UsageInfo(
+                prompt_tokens=input_token_length,
+                total_tokens=input_token_length + output_token_length,
+                completion_tokens=output_token_length,
+                completion_tokens_details=(
+                    CompletionTokensDetails(
+                        reasoning_tokens=sum(
+                            [x.think_tokens for x in think_status_list]
+                        )
+                    )
+                    if think_status_list[0].enable_think_mode
+                    else None
+                ),
+                prompt_tokens_details=(
+                    PromptTokensDetails(cached_tokens=reuse_length)
+                    if reuse_length > 0
+                    else None
+                ),
+            ),
+            aux_info=aux_info,
+        )
+        
     def _create_empty_delta_sync(self, input_len: int, output_len: int, reuse_len: int):
         return OutputDelta(
             output_str="",
