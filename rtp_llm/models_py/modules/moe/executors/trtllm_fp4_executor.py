@@ -14,8 +14,10 @@ from rtp_llm.async_decoder_engine.engine_creator import ExecutorType
 from rtp_llm.utils.model_weight import W
 
 # Try to import trtllm_fp4_block_scale_routed_moe from flashinfer
-from flashinfer.fused_moe import (
+from flashinfer import (
     fp4_quantize,
+)
+from flashinfer.fused_moe import (
     GatedActType,
     trtllm_fp4_block_scale_routed_moe,
 )
