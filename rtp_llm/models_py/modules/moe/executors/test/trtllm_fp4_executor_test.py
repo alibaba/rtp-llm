@@ -25,6 +25,81 @@ NVFP4_BLOCK_SIZE = 16
 
 REAL_DATA_DIR = Path("/home/xiebaijie.xbj/fp4/moe_params_prefill")
 
+def routing_reference(expertLogits, topK, padding):
+    """Reference routing implementation for permutation calculation."""
+    originalDevice = expertLogits.device
+    expertLogits = expertLogits.cpu()
+    numTokens, numExperts = expertLogits.shape
+    assert topK <= numExperts
+
+    numTokensPerExpert = torch.zeros(numExperts, dtype=torch.int64)
+    expandedTokenIdxToExpert = -torch.ones(numTokens * topK, dtype=torch.int64)
+    expandedTokenIdxToIdxInExpert = -torch.ones(numTokens * topK, dtype=torch.int64)
+
+    topKLogits, topKIndices = torch.topk(expertLogits, topK, dim=1)
+    for tokenIdx in range(numTokens):
+        for k in range(topK):
+            expandedIdx = tokenIdx * topK + k
+            expertIndex = topKIndices[tokenIdx, k]
+            expandedTokenIdxToExpert[expandedIdx] = expertIndex
+            expandedTokenIdxToIdxInExpert[expandedIdx] = numTokensPerExpert[expertIndex]
+            numTokensPerExpert[expertIndex] += 1
+
+    paddedTokensPerExpertPrefixSum = torch.zeros(numExperts + 1, dtype=torch.int64)
+    for ii in range(numExperts):
+
+        def divUpMul(a, b):
+            return (a + b - 1) // b * b
+
+        paddedTokensPerExpertPrefixSum[ii + 1] = paddedTokensPerExpertPrefixSum[
+            ii
+        ] + divUpMul(numTokensPerExpert[ii], padding)
+    permutedBufferSize = paddedTokensPerExpertPrefixSum[numExperts]
+
+    expandedTokenIdxToPermutedIdx = -torch.ones(numTokens * topK, dtype=torch.int64)
+    permutedIdxToExpandedIdx = -torch.ones(permutedBufferSize, dtype=torch.int64)
+    permutedIdxToTokenIdx = -torch.ones(permutedBufferSize, dtype=torch.int64)
+    for tokenIdx in range(numTokens):
+        for k in range(topK):
+            expandedIdx = tokenIdx * topK + k
+            expert = expandedTokenIdxToExpert[expandedIdx]
+            offsetWithinExpert = expandedTokenIdxToIdxInExpert[expandedIdx]
+            offsetForExpert = paddedTokensPerExpertPrefixSum[expert]
+            permutedIdx = offsetForExpert + offsetWithinExpert
+
+            expandedTokenIdxToPermutedIdx[expandedIdx] = permutedIdx
+            permutedIdxToExpandedIdx[permutedIdx] = expandedIdx
+            permutedIdxToTokenIdx[permutedIdx] = tokenIdx
+    return {
+        "paddedTokensPerExpertPrefixSum": paddedTokensPerExpertPrefixSum.to(
+            originalDevice
+        ),
+        "permutedBufferSize": permutedBufferSize.item(),
+        "expandedTokenIdxToPermutedIdx": expandedTokenIdxToPermutedIdx.to(
+            originalDevice
+        ),
+        "permutedIdxToExpandedIdx": permutedIdxToExpandedIdx.to(originalDevice),
+        "numTokensPerExpert": numTokensPerExpert.to(originalDevice),
+        "expandedTokenIdxToExpert": expandedTokenIdxToExpert.to(originalDevice),
+        "topKLogits": topKLogits.to(originalDevice),
+        "permutedIdxToTokenIdx": permutedIdxToTokenIdx.to(originalDevice),
+        "topKIndices": topKIndices.to(originalDevice),
+    }
+
+def routing_reference_renormalize(expert_logits, top_k, num_experts, padding):
+    """TopK -> Softmax routing reference."""
+    topk_values, topk_idx = torch.topk(expert_logits, k=top_k, dim=-1)
+    topk_values = torch.nn.functional.softmax(topk_values.float(), dim=-1)
+
+    new_mask = torch.zeros_like(expert_logits)
+    new_mask.scatter_(-1, topk_idx, 1)
+    scores = expert_logits * new_mask
+
+    for i in range(topk_idx.shape[0]):
+        for j in range(topk_idx.shape[1]):
+            scores[i, topk_idx[i, j]] = topk_values[i, j]
+    permute_info = routing_reference(scores, top_k, padding)
+    return permute_info, scores
 def _generate_config() -> GptInitModelParameters:
     config = GptInitModelParameters(
         head_num=2,
@@ -77,12 +152,10 @@ def _generate_payload_and_weights(
         check_meta(output1_scale_gate_scalar, (HIDDEN_SIZE / NVFP4_BLOCK_SIZE,), torch.float32) # ?
         output2_scale_scalar = load_pt("layer_g2_alphas.pt")
         check_meta(output2_scale_scalar, (HIDDEN_SIZE / NVFP4_BLOCK_SIZE,), torch.float32) # ?
-        if routing_method_type == RoutingMethodType.Renormalize:
-            permute_info, topk_weights = routing_reference_renormalize(
-                routing_logits, TOP_K, NUM_EXPERTS, 8
-            )
-        else:
-            assert 0, f"Routing method {routing_method_type} not supported"
+        routing_method_type = RoutingMethodType.Renormalize:
+        permute_info, topk_weights = routing_reference_renormalize(
+            routing_logits, TOP_K, NUM_EXPERTS, 8
+        )
         topk_ids = permute_info["topKIndices"].to(torch.int32)
         check_meta(topk_ids, (SEQ_LEN, TOP_K), torch.int32)
         topk_weights = topk_weights.view(SEQ_LEN, NUM_EXPERTS)[
