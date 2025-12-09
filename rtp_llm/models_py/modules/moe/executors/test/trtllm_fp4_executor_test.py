@@ -152,7 +152,6 @@ def _generate_payload_and_weights(
         check_meta(output1_scale_gate_scalar, (HIDDEN_SIZE / NVFP4_BLOCK_SIZE,), torch.float32) # ?
         output2_scale_scalar = load_pt("layer_g2_alphas.pt")
         check_meta(output2_scale_scalar, (HIDDEN_SIZE / NVFP4_BLOCK_SIZE,), torch.float32) # ?
-        routing_method_type = RoutingMethodType.Renormalize:
         permute_info, topk_weights = routing_reference_renormalize(
             routing_logits, TOP_K, NUM_EXPERTS, 8
         )
