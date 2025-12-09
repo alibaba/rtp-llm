@@ -14,6 +14,9 @@
 #include "rtp_llm/cpp/cuda/nccl/nccl_utils.h"
 
 #include "rtp_llm/cpp/devices/DeviceBase.h"
+#ifdef ENABLE_DEEP_EP
+#include "rtp_llm/cpp/devices/rocm_impl/DeepEPBuffer.h"
+#endif
 #include "rtp_llm/cpp/rocm/hip_host_utils.h"
 #include "rtp_llm/cpp/rocm/hipblasMMWrapper.h"
 #include "rtp_llm/cpp/rocm/rocmFmhaWrapper.h"
@@ -24,9 +27,6 @@
 #include "rtp_llm/cpp/kernels/kv_cache/kv_cache_utils.h"
 #include "rtp_llm/cpp/rocm/custom_ar/custom_ar_comm.h"
 #include "rtp_llm/cpp/rocm/custom_ar/quick_ar_comm.h"
-#ifdef ENABLE_DEEP_EP
-#include "rtp_llm/cpp/devices/rocm_impl/DeepEPBuffer.h"
-#endif
 
 #include "torch_hip_allocator.h"
 
@@ -206,11 +206,13 @@ public:
     MoeDispatchOutput      epDispatch(const MoeDispatchParams& params) override;
     MoeCombineOutput       epCombine(const MoeCombineParams& params) override;
     FfnLayerOutput         gatherCombineOutput(const MoeCombineOutput& params) override;
+#ifdef ENABLE_DEEP_EP
     MoeDispatchOutput deepEpDispatch(const MoeDispatchParams& params);
     MoeCombineOutput deepEpCombine(const MoeCombineParams& params);
     MoeDispatchOutput deepEpLLDispatch(const MoeDispatchParams& params);
     MoeCombineOutput deepEpLLCombine(const MoeCombineParams& params);
     FfnLayerOutput deepEpLLMoeFfn(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs) override;
+#endif
     BufferPtr              softmax(const SoftmaxParams& params) override;
     GreedyOutput           sampleGreedy(const GreedyParams& params) override;
     MemoryStatus           getDeviceMemoryStatus() override;
@@ -334,8 +336,8 @@ private:
     NcclParam getNcclParam(ParallelMode mode);
     // moe
     // std::unique_ptr<rocmMoeWrapper> moe_runner_;
-    bool initDeepEPBuffer();
 #ifdef ENABLE_DEEP_EP
+    bool initDeepEPBuffer();
     std::unique_ptr<DeepEPBuffer> deepep_buffer_ = nullptr;  // for deep_ep use
 #endif
     uint32_t ll_num_max_token_per_rank = 0;

@@ -3,14 +3,13 @@ load("//bazel:arch_select.bzl", "torch_deps")
 
 config_setting(
     name = "enable_deep_ep",
-    values = {"copt": "-DENABLE_DEEP_EP=1"},
+    define_values = {"enable_deep_ep": "true"},
+    visibility = ["//visibility:public"],
 )
  
 config_setting(
     name = "use_accl_ep",
-    values = {
-        "copt": "-DUSE_ACCL_EP=1",
-    },
+    define_values = {"use_accl_ep": "true"},
 )
  
 cc_library(
@@ -35,12 +34,17 @@ cc_library(
         ":use_accl_ep": [
             "//3rdparty/accl_ep:accl_ep",
         ],
-        "//conditions:default": ["@deep_ep_rocm//:deep_ep",],
+        ":enable_deep_ep": ["@deep_ep_rocm//:deep_ep"],
+        "//conditions:default": [],
     }) + torch_deps(),
     copts = rocm_copts() + [
         "-DUSE_ROCM=1",
         "-DDISABLE_INTERNODE=1",
-        "-DFORCE_NVSHMEM_API=1"],
+        "-DFORCE_NVSHMEM_API=1",
+    ] + select({
+        ":enable_deep_ep": ["-DENABLE_DEEP_EP=1"],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"]
 )
 
@@ -48,9 +52,14 @@ cc_library(
     name = "rocm_impl",
     hdrs = glob([
         "*.h",
+    ], exclude = [
+        "DeepEPBuffer.h",
+        "DeepEPDefs.h",
     ]),
     srcs = glob([
         "*.cc",
+    ], exclude = [
+        "DeepEPBuffer.cc",
     ]),
     deps = [
         "@local_config_rocm//rocm:rocm_headers",
@@ -115,6 +124,10 @@ cc_library(
     copts = rocm_copts() + [
         "-DUSE_ROCM=1",
         "-DDISABLE_INTERNODE=1",
-        "-DFORCE_NVSHMEM_API=1"],
+        "-DFORCE_NVSHMEM_API=1",
+    ] + select({
+        ":enable_deep_ep": ["-DENABLE_DEEP_EP=1"],
+        "//conditions:default": [],
+    }),
     alwayslink = True,
 )

@@ -177,6 +177,7 @@ void ROCmDevice::init() {
     DeviceBase::init();
     RTP_LLM_LOG_INFO("max batch size: %d", init_params_.max_batch_size);
     curandstate_buf_ = allocateBuffer({init_params_.max_batch_size * sizeof(curandState_t)}, {"curandstate"});
+#ifdef ENABLE_DEEP_EP
     if (init_params_.use_deepep_moe) {
         if (!initDeepEPBuffer()) {
             RTP_LLM_CHECK_WITH_INFO(false, "init deepep buffer failed");
@@ -184,6 +185,9 @@ void ROCmDevice::init() {
             RTP_LLM_LOG_INFO("init deepep buffer success");
         }
     }
+#else
+    RTP_LLM_LOG_INFO("deep_ep is not enabled");
+#endif
 }
 
 DeviceProperties ROCmDevice::getDeviceProperties() {
