@@ -172,6 +172,21 @@ public class MetricConstant {
     public static final String CACHE_KEY_SIZE = "app.cache.key.size";
     
     /**
+     * 已使用的KV缓存Token数量
+     */
+    public static final String CACHE_USED_KV_CACHE_TOKENS = "app.cache.used.kv.cache.tokens";
+    
+    /**
+     * 剩余可用的KV缓存Token数量
+     */
+    public static final String CACHE_AVAILABLE_KV_CACHE_TOKENS = "app.cache.available.kv.cache.tokens";
+    
+    /**
+     * KV缓存Token总量
+     */
+    public static final String CACHE_TOTAL_KV_CACHE_TOKENS = "app.cache.total.kv.cache.tokens";
+    
+    /**
      * 缓存diff计算中新增块的数量
      */
     public static final String CACHE_DIFF_ADDED_BLOCKS_SIZE = "app.cache.diff.added.blocks.size";

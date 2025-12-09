@@ -12,6 +12,7 @@ import org.slf4j.LoggerFactory;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
@@ -29,14 +30,14 @@ public class WorkerStatus {
     private String site;
     private Long availableConcurrency;
     private boolean alive;
-    private AtomicLong kvCacheFree = new AtomicLong();
-    private AtomicLong kvCacheUsed = new AtomicLong();
+    private AtomicLong availableKvCacheTokens = new AtomicLong();
+    private AtomicLong usedKvCacheTokens = new AtomicLong();
     private CacheStatus cacheStatus;
     private AtomicLong runningQueueTime = new AtomicLong();
     private List<TaskInfo> runningTaskList;
     private AtomicLong latestFinishedTaskVersion = new AtomicLong(-1);
 
-    private ConcurrentHashMap<Long, TaskInfo> localTaskMap = new ConcurrentHashMap<>();
+    private ConcurrentHashMap<Long/*requestId*/, TaskInfo> localTaskMap = new ConcurrentHashMap<>();
     private double stepLatencyMs;
     private long iterateCount;
     private long dpSize;
@@ -82,11 +83,11 @@ public class WorkerStatus {
     }
 
     public void addKvCacheUsed(long len) {
-        kvCacheUsed.addAndGet(len);
+        usedKvCacheTokens.addAndGet(len);
     }
 
     public void decKvCacheFree(long len) {
-        kvCacheFree.addAndGet(-len);
+        availableKvCacheTokens.addAndGet(-len);
     }
 
     /**
@@ -167,6 +168,55 @@ public class WorkerStatus {
                 logger.warn("Task {} marked as LOST - not in running or finished list", requestId);
             }
         }
+    }
+
+    /**
+     * 更新运行队列的总排队时间
+     */
+    public void updateRunningQueueTime() {
+        int localTaskMapSize = localTaskMap.size();
+        if (localTaskMapSize == 0) {
+            runningQueueTime.getAndSet(0);
+            return;
+        }
+        long rectifiedEstimateRunningTime = 0;
+        for (Entry<Long, TaskInfo> entry : localTaskMap.entrySet()) {
+            TaskInfo taskInfo = entry.getValue();
+            // 基于准确的 cache 命中数重算，纠偏本地任务运行排队时间
+            rectifiedEstimateRunningTime += taskInfo.estimatePrefillTime();
+        }
+        if (RoleType.PREFILL.matches(role) || RoleType.PDFUSION.matches(role)) {
+            // 这里仅在纠偏时间小于预估时间时才更新，原因是引擎层返回的 running_list 可能包含排队中的任务，这部分任务的 prefixLength=0
+            if (runningQueueTime.get() > rectifiedEstimateRunningTime) {
+                runningQueueTime.getAndSet(rectifiedEstimateRunningTime);
+            }
+        }
+    }
+
+    public void updateKvCacheTokens(long latestUsedKvCacheTokens, long latestAvailableKvCacheTokens) {
+
+        int localTaskMapSize = localTaskMap.size();
+        if (localTaskMapSize == 0) {
+            usedKvCacheTokens.getAndSet(latestUsedKvCacheTokens);
+            availableKvCacheTokens.getAndSet(latestAvailableKvCacheTokens);
+            return;
+        }
+
+        long inTransitTaskCacheUsed = 0;
+        for (Map.Entry<Long, TaskInfo> entry : localTaskMap.entrySet()) {
+            TaskInfo taskInfo = entry.getValue();
+            // 计算在途Task未命中缓存部分占用的Tokens
+            if (taskInfo.getTaskState() == TaskStateEnum.IN_TRANSIT) {
+                inTransitTaskCacheUsed = inTransitTaskCacheUsed + taskInfo.getInputLength() - taskInfo.getPrefixLength();
+            }
+        }
+        // 纠偏在途Task影响的KvCache Tokens
+        latestUsedKvCacheTokens += inTransitTaskCacheUsed;
+        latestAvailableKvCacheTokens -= inTransitTaskCacheUsed;
+
+        usedKvCacheTokens.getAndSet(latestUsedKvCacheTokens);
+        availableKvCacheTokens.getAndSet(latestAvailableKvCacheTokens);
+
     }
 
     /**

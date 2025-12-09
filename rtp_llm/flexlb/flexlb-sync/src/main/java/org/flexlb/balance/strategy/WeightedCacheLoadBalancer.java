@@ -73,10 +73,8 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
 
         if (selectedWorker != null) {
             long prefixLength = calcPrefixMatchLength(selectedWorker.getCacheStatus(), balanceContext.getMasterRequest().getBlockCacheKeys());
-            long needKvCacheLen = seqLen - prefixLength;
-
-            // 更新其他状态
-            return buildServerStatus(selectedWorker, seqLen, needKvCacheLen, roleType, balanceContext.getInterRequestId());
+            // 更新本地任务状态
+            return buildServerStatus(selectedWorker, seqLen, prefixLength, roleType, balanceContext.getInterRequestId());
         }
 
         // 如果没有找到合适的Worker，返回失败
@@ -84,24 +82,28 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
         return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
     }
 
-    private long calcPrefixMatchLength(CacheStatus cacheStatus, List<Long> blockCacheKeys) {
-        // 计算 prefix match length
-        if (cacheStatus == null) {
+    private long calcPrefixMatchLength(CacheStatus cacheStatus, List<Long> promptCacheKeys) {
+
+        if (cacheStatus == null || promptCacheKeys == null) {
             return 0;
         }
         long blockSize = cacheStatus.getBlockSize();
         Set<Long> cachePrefixHash = cacheStatus.getCachedKeys();
-        if (blockCacheKeys == null || cachePrefixHash == null) {
+        if (cachePrefixHash == null) {
             return 0;
         }
-        for (int index = blockCacheKeys.size() - 1; index >= 0; index--) {
-            long hash = blockCacheKeys.get(index);
-            // 将Long转换为BigInteger进行比较
-            if (cachePrefixHash.contains(hash)) {
-                return blockSize * (index + 1);
+        
+        // 从前往后遍历，找到第一个不匹配的位置
+        for (int index = 0; index < promptCacheKeys.size(); index++) {
+            long hash = promptCacheKeys.get(index);
+            if (!cachePrefixHash.contains(hash)) {
+                // 返回匹配的前缀长度（匹配的block数量 * block大小）
+                return blockSize * index;
             }
         }
-        return 0;
+        
+        // 如果全部匹配，返回总长度
+        return blockSize * promptCacheKeys.size();
     }
 
     /**
@@ -119,7 +121,7 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
         // 1. 计算cacheUsed的总和和平均值
         long totalCacheUsed = 0;
         for (WorkerStatus worker : candidateWorkers) {
-            totalCacheUsed += worker.getKvCacheUsed().get();
+            totalCacheUsed += worker.getUsedKvCacheTokens().get();
         }
         double avgCacheUsed = (double) totalCacheUsed / workerCount;
 
@@ -130,12 +132,12 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
 
         // 检查所有worker cacheUsed是否相同
         for (WorkerStatus worker : candidateWorkers) {
-            long cacheUsed = worker.getKvCacheUsed().get();
+            long cacheUsed = worker.getUsedKvCacheTokens().get();
             double normalizedValue = cacheUsed - avgCacheUsed;
 
             // 检查所有worker cacheUsed是否相同
             if (allSameUsage && !weightedWorkers.isEmpty()) {
-                long firstCacheUsed = weightedWorkers.getFirst().worker.getKvCacheUsed().get();
+                long firstCacheUsed = weightedWorkers.getFirst().worker.getUsedKvCacheTokens().get();
                 if (cacheUsed != firstCacheUsed) {
                     allSameUsage = false;
                 }
@@ -175,7 +177,7 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
 
         // 作为兜底方案：选择cacheUsed最小的worker
         return weightedWorkers.stream()
-                .min(Comparator.comparingLong(w -> w.worker.getKvCacheUsed().get()))
+                .min(Comparator.comparingLong(w -> w.worker.getUsedKvCacheTokens().get()))
                 .map(w -> w.worker)
                 .orElse(null);
     }
@@ -189,9 +191,13 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
             taskInfo.setInputLength(seqLen);
             taskInfo.setPrefixLength(prefixLength);
             taskInfo.setInterRequestId(interRequestId);
-            optimalWorker.decKvCacheFree(seqLen - prefixLength);
-            optimalWorker.addKvCacheUsed(seqLen - prefixLength);
-            optimalWorker.getLocalTaskMap().put(interRequestId, taskInfo);
+
+            // 本地增量更新KcCache Tokens
+            long needNewKvCacheLen = seqLen - prefixLength;
+            optimalWorker.decKvCacheFree(needNewKvCacheLen);
+            optimalWorker.addKvCacheUsed(needNewKvCacheLen);
+
+            optimalWorker.putLocalTask(interRequestId, taskInfo);
 
             result.setSuccess(true);
             result.setRole(roleType);
