@@ -1,8 +1,10 @@
 import logging
 import multiprocessing
 import os
+import signal
 import sys
 import time
+import traceback
 
 import requests
 
@@ -16,6 +18,7 @@ sys.path.append(os.path.join(str(CUR_PATH), ".."))
 from rtp_llm.distribute.worker_info import WorkerInfo, g_parallel_info
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.utils.concurrency_controller import init_controller
+from rtp_llm.utils.process_manager import ProcessManager
 
 
 def check_server_health(server_port):
@@ -34,7 +37,7 @@ def check_server_health(server_port):
         return False
 
 
-def start_backend_server_impl(global_controller):
+def start_backend_server_impl(global_controller, process_manager=None):
     from rtp_llm.start_backend_server import start_backend_server
 
     profiling_debug_config = ProfilingDebugLoggingConfig()
@@ -55,7 +58,7 @@ def start_backend_server_impl(global_controller):
     backend_server_port = WorkerInfo.backend_server_port_offset(0, start_port)
     while True:
         if not backend_process.is_alive():
-            monitor_and_release_process(backend_process, None)
+            logging.error("Backend server is not alive")
             raise Exception("backend server is not alive")
 
         try:
@@ -71,7 +74,9 @@ def start_backend_server_impl(global_controller):
     return backend_process
 
 
-def start_frontend_server_impl(global_controller, backend_process):
+def start_frontend_server_impl(
+    global_controller, backend_process, process_manager=None
+):
     from rtp_llm.start_frontend_server import start_frontend_server
 
     server_config = ServerConfig()
@@ -111,7 +116,7 @@ def start_frontend_server_impl(global_controller, backend_process):
 
     while True:
         if not all(proc.is_alive() for proc in frontend_processes):
-            monitor_and_release_process(backend_process, frontend_processes)
+            logging.error("Frontend server is not alive")
             raise Exception("frontend server is not alive")
 
         try:
@@ -124,29 +129,6 @@ def start_frontend_server_impl(global_controller, backend_process):
 
     return frontend_processes
 
-
-def monitor_and_release_process(backend_process, frontend_process):
-    all_process = []
-    if backend_process:
-        all_process.append(backend_process)
-    if frontend_process:
-        all_process.extend(frontend_process)
-    logging.info(f"all process = {all_process}")
-
-    while any(proc.is_alive() for proc in all_process):
-        if not all(proc.is_alive() for proc in all_process):
-            logging.error(f"server monitor : some process is not alive, exit!")
-            for proc in all_process:
-                try:
-                    proc.terminate()
-                except Exception as e:
-                    logging.error(f"catch exception when process terminate : {str(e)}")
-        time.sleep(1)
-    [proc.join() for proc in all_process]
-
-    logging.info("all process exit")
-
-
 def main():
     setup_args()
 
@@ -157,27 +139,45 @@ def start_server():
     try:
         multiprocessing.set_start_method("spawn")
     except RuntimeError as e:
-        logging.warn(str(e))
+        logging.warning(str(e))
+
     global_controller = init_controller()
-    backend_process = None
-    frontend_process = None
+    process_manager = ProcessManager()
+    get_model_type_and_update_env(parser, args)
+
+    # Auto-configure DeepEP settings based on deployment scenario
+    # Check from args to see if user has manually configured
+    if should_auto_configure_deepep(args):
+        auto_configure_deepep(args)
+    else:
+        logging.info(
+            "DeepEP configuration already set manually, skipping auto-configuration"
+        )
+
     try:
+        backend_process = None
         if os.environ.get("ROLE_TYPE", "") != "FRONTEND":
             logging.info("start backend server")
-            backend_process = start_backend_server_impl(global_controller)
+            backend_process = start_backend_server_impl(
+                global_controller, process_manager
+            )
+            process_manager.add_process(backend_process)
             logging.info(f"backend server process = {backend_process}")
 
         logging.info("start frontend server")
         frontend_process = start_frontend_server_impl(
-            global_controller, backend_process
+            global_controller, backend_process, process_manager
         )
+        process_manager.add_processes(frontend_process)
         logging.info(f"frontend server process = {frontend_process}")
 
         logging.info(f"后端RPC 服务监听的ip为 0.0.0.0，ip/ip段可自定义为所需范围")
     except Exception as e:
-        logging.error(f"start failed, {str(e)}")
+        logging.error(f"start failed, trace: {traceback.format_exc()}")
+        # Trigger graceful shutdown on any exception
+        process_manager.graceful_shutdown()
     finally:
-        monitor_and_release_process(backend_process, frontend_process)
+        process_manager.monitor_and_release_processes()
 
 
 if __name__ == "__main__":

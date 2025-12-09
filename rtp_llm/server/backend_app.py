@@ -49,8 +49,10 @@ class GracefulShutdownServer(Server):
         while active_requests.get() > 0:
             logging.info(f"wait {active_requests.get()} requests finish for 1s")
             await asyncio.sleep(1)
+        logging.info("all requests finished, start to shutdown backend server")
         self.backend_server.stop()
         await super().shutdown(sockets)
+        logging.info("backend server shutdown completed")
 
 
 class BackendApp(object):
