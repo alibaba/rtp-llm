@@ -146,6 +146,9 @@ public class GrpcWorkerStatusRunner implements Runnable {
             // 更新本地任务状态（包含检查丢失、更新运行、清理完成）
             workerStatus.updateTaskStates(runningTaskInfo, finishedTaskList);
 
+            // 纠偏运行队列总排队时间
+            workerStatus.updateRunningQueueTime();
+
             engineHealthReporter.reportStatusCheckerSuccess(modelName, workerStatus,
                     Optional.ofNullable(runningTaskInfo).map(List::size).orElse(0),
                     Optional.ofNullable(finishedTaskList).map(List::size).orElse(0));

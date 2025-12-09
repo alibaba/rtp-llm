@@ -4,7 +4,6 @@ import org.flexlb.cache.domain.WorkerCacheUpdateResult;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.cache.service.DynamicCacheIntervalService;
 import org.flexlb.dao.master.CacheStatus;
-import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
@@ -18,7 +17,6 @@ import org.slf4j.LoggerFactory;
 
 import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.LongAdder;
 
 import static org.flexlb.constant.CommonConstants.DEADLINE_EXCEEDED_MESSAGE;
@@ -135,33 +133,13 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
 
             engineHealthReporter.reportCacheStatusCheckRemoteInfo(modelName, ipPort, roleType.name(), startTime);
 
-            ConcurrentHashMap<Long, TaskInfo> localTaskMap = workerStatus.getLocalTaskMap();
-            long newCacheFree = newCacheStatus.getAvailableKvCache();
-            long newCacheUse = newCacheStatus.getTotalKvCache() - newCacheFree;
+            // 最新可用的KvCache Tokens
+            long latestAvailableKvCacheTokens = newCacheStatus.getAvailableKvCache();
+            // 最新已经使用的KvCache Tokens
+            long latestUsedKvCacheTokens = newCacheStatus.getTotalKvCache() - latestAvailableKvCacheTokens;
 
-            int localTaskMapSize = localTaskMap.size();
-
-            if (localTaskMapSize == 0) {
-                workerStatus.getKvCacheUsed().getAndSet(newCacheUse);
-                workerStatus.getKvCacheFree().getAndSet(newCacheFree);
-                workerStatus.getRunningQueueTime().getAndSet(0);
-            } else {
-                long estimateRunningTime = 0;
-                long cacheUsed = 0;
-                for (Map.Entry<Long, TaskInfo> entry : localTaskMap.entrySet()) {
-                    cacheUsed = cacheUsed + entry.getValue().getInputLength() - entry.getValue().getPrefixLength();
-                    estimateRunningTime += entry.getValue().estimatePrefillTime();
-                }
-                newCacheUse += cacheUsed;
-                newCacheFree -= cacheUsed;
-                workerStatus.getKvCacheUsed().getAndSet(newCacheUse);
-                workerStatus.getKvCacheFree().getAndSet(newCacheFree);
-                if (RoleType.PREFILL.equals(roleType) || RoleType.PDFUSION.equals(roleType)) {
-                    if (workerStatus.getRunningQueueTime().get() > estimateRunningTime) {
-                        workerStatus.getRunningQueueTime().getAndSet(estimateRunningTime);
-                    }
-                }
-            }
+            // 更新KvCache Tokens
+            workerStatus.updateKvCacheTokens(latestUsedKvCacheTokens, latestAvailableKvCacheTokens);
 
             if (validateCacheStatusResponse(workerStatus, newCacheStatus)) {
 

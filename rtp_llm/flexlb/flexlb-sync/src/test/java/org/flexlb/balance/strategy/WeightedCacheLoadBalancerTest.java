@@ -66,11 +66,11 @@ class WeightedCacheLoadBalancerTest {
                 .get("test-model").getDecodeStatusMap();
 
         WorkerStatus worker1 = createWorkerStatus("127.0.0.1");
-        worker1.getKvCacheUsed().set(1000);
+        worker1.getUsedKvCacheTokens().set(1000);
         WorkerStatus worker2 = createWorkerStatus("127.0.0.2");
-        worker2.getKvCacheUsed().set(1000);
+        worker2.getUsedKvCacheTokens().set(1000);
         WorkerStatus worker3 = createWorkerStatus("127.0.0.3");
-        worker3.getKvCacheUsed().set(1000);
+        worker3.getUsedKvCacheTokens().set(1000);
 
         decodeMap.put("127.0.0.1:8080", worker1);
         decodeMap.put("127.0.0.2:8080", worker2);
@@ -101,15 +101,15 @@ class WeightedCacheLoadBalancerTest {
 
         // Worker1: cacheUsed = 500 (well below average)
         WorkerStatus worker1 = createWorkerStatus("127.0.0.1");
-        worker1.getKvCacheUsed().set(500);
+        worker1.getUsedKvCacheTokens().set(500);
 
         // Worker2: cacheUsed = 1500 (above average)
         WorkerStatus worker2 = createWorkerStatus("127.0.0.2");
-        worker2.getKvCacheUsed().set(1500);
+        worker2.getUsedKvCacheTokens().set(1500);
 
         // Worker3: cacheUsed = 1000 (average)
         WorkerStatus worker3 = createWorkerStatus("127.0.0.3");
-        worker3.getKvCacheUsed().set(1000);
+        worker3.getUsedKvCacheTokens().set(1000);
 
         decodeMap.put("127.0.0.1:8080", worker1);
         decodeMap.put("127.0.0.2:8080", worker2);
@@ -141,7 +141,7 @@ class WeightedCacheLoadBalancerTest {
         // Create workers for specific group
         WorkerStatus worker1 = createWorkerStatus("127.0.0.1");
         worker1.setGroup("group-a");
-        worker1.getKvCacheUsed().set(1000);
+        worker1.getUsedKvCacheTokens().set(1000);
 
         modelStatus.getDecodeStatusMap().put("127.0.0.1:8080", worker1);
 
@@ -171,10 +171,10 @@ class WeightedCacheLoadBalancerTest {
         // 创建两个worker，测试指数衰减算法的权重平衡性
         // 归一化后 normalizedValue = -500 和 +500
         WorkerStatus worker1 = createWorkerStatus("127.0.0.1");
-        worker1.getKvCacheUsed().set(500);  // 低于平均值1000，normalizedValue = -500
+        worker1.getUsedKvCacheTokens().set(500);  // 低于平均值1000，normalizedValue = -500
 
         WorkerStatus worker2 = createWorkerStatus("127.0.0.2");
-        worker2.getKvCacheUsed().set(1500); // 高于平均值1000，normalizedValue = +500
+        worker2.getUsedKvCacheTokens().set(1500); // 高于平均值1000，normalizedValue = +500
 
         decodeMap.put("127.0.0.1:8080", worker1);
         decodeMap.put("127.0.0.2:8080", worker2);

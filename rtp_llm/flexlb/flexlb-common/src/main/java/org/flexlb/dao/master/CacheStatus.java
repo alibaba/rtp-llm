@@ -19,9 +19,9 @@ public class CacheStatus {
     @JsonProperty("message")
     private String message;
     @JsonProperty("available_kv_cache")
-    private long availableKvCache;
+    private long availableKvCache;  // available kv cache tokens
     @JsonProperty("total_kv_cache")
-    private long totalKvCache;
+    private long totalKvCache;      // total kv cache tokens
     @JsonProperty("block_size")
     private long blockSize;
     @JsonProperty("version")
