@@ -364,7 +364,7 @@ class CustomChatRenderer:
         token_type_ids = []
         input_id_tensor = torch.Tensor(input_ids).int().unsqueeze(0)
         output_generator: AsyncGenerator[GenerateOutputs, None] = (
-            await backend_rpc_server_visitor.enqueue(
+            backend_rpc_server_visitor.enqueue(
                 GenerateInput(
                     request_id=request_id,
                     token_ids=input_id_tensor,

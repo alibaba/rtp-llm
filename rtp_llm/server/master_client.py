@@ -1,7 +1,5 @@
 import json
 import logging
-import os
-import time
 from typing import List, Optional, Tuple
 
 import aiohttp
@@ -18,7 +16,6 @@ class MasterClient:
     def __init__(self, max_connect_pool_size=1000):
         self.max_connect_pool_size = max_connect_pool_size
         self._session = None
-        self.timeout_threshold_ms = float(os.environ.get('MASTER_CLIENT_TIMEOUT_MS', '10'))
 
     async def _get_session(self):
         """获取或创建HTTP session"""
@@ -47,17 +44,11 @@ class MasterClient:
         generate_timeout: int,
         request_priority: int = 100,
     ) -> Tuple[Optional[List[RoleAddr]], int]:
-
-        start_time = time.time()
         inter_request_id = -1
         # get master address
         if not master_addr:
-            # 计算并记录RT
-            elapsed_time = (time.time() - start_time) * 1000
-            if elapsed_time > self.timeout_threshold_ms:
-                route_logger.warning(f"get_backend_role_addrs RT exceeded {self.timeout_threshold_ms}ms: {elapsed_time:.2f}ms (no master_addr)")
             return None, inter_request_id
-
+        payload = {}
         # prepare request to master
         url = "http://" + master_addr + "/rtp_llm/schedule"
         if generate_timeout != -1:
@@ -89,24 +80,11 @@ class MasterClient:
                     route_logger.error(
                         f"Failed to get master response from {master_addr}, http status: {response.status}"
                     )
-                    # 计算并记录RT
-                    elapsed_time = (time.time() - start_time) * 1000
-                    if elapsed_time > self.timeout_threshold_ms:
-                        route_logger.warning(f"get_backend_role_addrs RT exceeded {self.timeout_threshold_ms}ms: {elapsed_time:.2f}ms (http status: {response.status})")
                     return None, inter_request_id
                 result = await response.json()
         except Exception as e:
             route_logger.error(f"query master[{master_addr}] failed: {type(e).__name__}: {e}")
-            # 计算并记录RT
-            elapsed_time = (time.time() - start_time) * 1000
-            if elapsed_time > self.timeout_threshold_ms:
-                route_logger.warning(f"get_backend_role_addrs RT exceeded {self.timeout_threshold_ms}ms: {elapsed_time:.2f}ms (exception occurred)")
             return None, inter_request_id
-
-        # 计算并记录RT
-        elapsed_time = (time.time() - start_time) * 1000
-        if elapsed_time > self.timeout_threshold_ms:
-            route_logger.warning(f"get_backend_role_addrs RT exceeded {self.timeout_threshold_ms}ms: {elapsed_time:.2f}ms (success)")
 
         # check response
         schedule_meta = ScheduleMeta.model_validate(result)
