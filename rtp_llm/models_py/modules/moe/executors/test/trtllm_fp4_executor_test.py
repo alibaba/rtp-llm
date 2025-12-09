@@ -21,6 +21,8 @@ HIDDEN_SIZE = 2048
 MOE_INTERMEDIATE_SIZE = 768
 TOP_K = 8
 
+NVFP4_BLOCK_SIZE = 16
+
 REAL_DATA_DIR = Path("/home/xiebaijie.xbj/fp4/moe_params_prefill")
 
 def _generate_config() -> GptInitModelParameters:
@@ -58,23 +60,23 @@ def _generate_payload_and_weights(
         hidden_states = load_pt("x.pt")
         check_meta(hidden_states, (SEQ_LEN, HIDDEN_SIZE), torch.bfloat16)
         hidden_states_scale = load_pt("layer_a1_gscale.pt")
-        check_meta(hidden_states_scale, (NUM_EXPERTS,), torch.float32)
+        check_meta(hidden_states_scale, (HIDDEN_SIZE / NVFP4_BLOCK_SIZE,), torch.float32) # ?
         routing_logits = load_pt("router_logits.pt")
         check_meta(routing_logits, (SEQ_LEN, NUM_EXPERTS), torch.bfloat16)
         w13 = load_pt("layer_gemm1_weights.pt")
         check_meta(w13, (NUM_EXPERTS, MOE_INTERMEDIATE_SIZE * 2, HIDDEN_SIZE / 2), torch.uint8)
         w13_scale = load_pt("layer_gemm1_weights_scale.pt")
-        check_meta(w13_scale, (NUM_EXPERTS, MOE_INTERMEDIATE_SIZE * 2, 1), torch.float32)
+        check_meta(w13_scale, (NUM_EXPERTS, MOE_INTERMEDIATE_SIZE * 2, HIDDEN_SIZE / NVFP4_BLOCK_SIZE), torch.float8_e4m3fn)
         w2 = load_pt("layer_gemm2_weights.pt")
         check_meta(w2, (NUM_EXPERTS, HIDDEN_SIZE, MOE_INTERMEDIATE_SIZE / 2), torch.uint8)
         w2_scale = load_pt("layer_gemm2_weights_scale.pt")
-        check_meta(w2_scale, (NUM_EXPERTS, HIDDEN_SIZE, 1), torch.float32)
+        check_meta(w2_scale, (NUM_EXPERTS, HIDDEN_SIZE, MOE_INTERMEDIATE_SIZE / NVFP4_BLOCK_SIZE), torch.float8_e4m3fn)
         output1_scale_scalar = load_pt("layer_g1_scale_c.pt")
-        check_meta(output1_scale_scalar, (1,), torch.float32)
+        check_meta(output1_scale_scalar, (HIDDEN_SIZE / NVFP4_BLOCK_SIZE,), torch.float32) # ?
         output1_scale_gate_scalar = load_pt("layer_g1_alphas.pt")
-        check_meta(output1_scale_gate_scalar, (1,), torch.float32)
+        check_meta(output1_scale_gate_scalar, (HIDDEN_SIZE / NVFP4_BLOCK_SIZE,), torch.float32) # ?
         output2_scale_scalar = load_pt("layer_g2_alphas.pt")
-        check_meta(output2_scale_scalar, (1,), torch.float32)
+        check_meta(output2_scale_scalar, (HIDDEN_SIZE / NVFP4_BLOCK_SIZE,), torch.float32) # ?
         if routing_method_type == RoutingMethodType.Renormalize:
             permute_info, topk_weights = routing_reference_renormalize(
                 routing_logits, TOP_K, NUM_EXPERTS, 8
