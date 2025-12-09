@@ -656,22 +656,22 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
     def _get_moe_w1_quant_weight(self, src_weight_info: MoeAtomicWeight):
         assert src_weight_info.name in [W.moe_w1]
         if not src_weight_info.weights[0].name.endswith(W_SUFFIX):
-            w_name = src_weight_info.weights[0].name
-            kernel_name = w_name
-            scale_name = w_name + APPEND_SUFFIX
+            w_names = [w.name for w in src_weight_info.weights]
+            kernel_names = [w_name for w_name in w_names]
+            scale_names = [w_name + APPEND_SUFFIX for w_name in w_names]
             opt1 = convert_gate_up_proj_
             opt2 = identity
         else:
-            w_name = src_weight_info.weights[0].name[: -len(W_SUFFIX)]
-            kernel_name = w_name + QW_SUFFIX
-            scale_name = w_name + QS_SUFFIX
+            w_names = [w.name[: -len(W_SUFFIX)] for w in src_weight_info.weights]
+            kernel_names = [w_name + QW_SUFFIX for w_name in w_names]
+            scale_names = [w_name + QS_SUFFIX for w_name in w_names]
             opt1 = identity
             opt2 = stack_moe_w1
 
         kernel = create_w8a8_fp8_per_block_weight(
             src_weight_info,
             W.moe_w1,
-            [CkptWeightInfo(kernel_name, opt1) for w in src_weight_info.weights],
+            [CkptWeightInfo(kernel_name, opt1) for kernel_name in kernel_names],
             opt2,
             data_type=torch.float8_e4m3fn,
             config=src_weight_info.config,
@@ -679,7 +679,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         scale = create_w8a8_fp8_per_block_weight(
             src_weight_info,
             W.moe_s1,
-            [CkptWeightInfo(scale_name, opt1) for w in src_weight_info.weights],
+            [CkptWeightInfo(scale_name, opt1) for scale_name in scale_names],
             opt2,
             data_type=torch.float32,
             config=src_weight_info.config,
