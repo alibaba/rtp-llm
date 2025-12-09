@@ -10,7 +10,6 @@ from math import log
 import requests
 
 from rtp_llm.config.py_config_modules import ServerConfig, StaticConfig
-from rtp_llm.distribute.gang_info import get_gang_info
 from rtp_llm.ops import ProfilingDebugLoggingConfig, RoleType
 from rtp_llm.tools.api.hf_model_helper import get_hf_model_info
 
@@ -160,6 +159,7 @@ def should_auto_configure_deepep(args: argparse.Namespace) -> bool:
     use_deepep_moe = getattr(args, "use_deepep_moe", None)
     use_deepep_internode = getattr(args, "use_deepep_internode", None)
     use_deepep_low_latency = getattr(args, "use_deepep_low_latency", None)
+    is_worker = StaticConfig.role_config.role_type != RoleType.FRONTEND
 
     # If all are None, user hasn't manually configured, so we should auto-configure
     # If any is not None, user has manually configured, so we shouldn't auto-configure
@@ -167,6 +167,7 @@ def should_auto_configure_deepep(args: argparse.Namespace) -> bool:
         use_deepep_moe is None
         and use_deepep_internode is None
         and use_deepep_low_latency is None
+        and is_worker
     )
 
 
@@ -183,17 +184,21 @@ def auto_configure_deepep(args: argparse.Namespace):
     - Non-PD separation + Inference node + Multi-node multi-GPU: 1, 0, 1
     - PD separation + Prefill node + Single-node single-GPU (1TP): 0, 0, 0
     - PD separation + Decode node + Single-node single-GPU (1TP): 0, 0, 0
-    - PD separation + Prefill node + Single-node multi-GPU (2-8 GPUs): 1, 0, 0
-    - PD separation + Decode node + Single-node multi-GPU (2-8 GPUs): 1, 1, 0
-    - PD separation + Prefill node + Multi-node multi-GPU (>=9 GPUs): 1, 0, 1
-    - PD separation + Decode node + Multi-node multi-GPU (>=9 GPUs): 1, 1, 1
+    - PD separation + Prefill node + Single-node multi-GPU (2-local_world_size GPUs): 1, 0, 0
+    - PD separation + Decode node + Single-node multi-GPU (2-local_world_size GPUs): 1, 1, 0
+    - PD separation + Prefill node + Multi-node multi-GPU (>=local_world_size GPUs): 1, 0, 1
+    - PD separation + Decode node + Multi-node multi-GPU (>=local_world_size GPUs): 1, 1, 1
     """
     logging.info("auto configure deepep work")
     # Get parallelism info for use_all_gather calculation
     world_size = g_parallel_info.world_size
+    local_world_size = g_parallel_info.local_world_size
     tp_size = g_parallel_info.tp_size
     ep_size = g_parallel_info.ep_size
-    logging.info(f"world_size: {world_size}, tp_size: {tp_size}, ep_size: {ep_size}")
+    num_nodes = (world_size + local_world_size - 1) // local_world_size
+    logging.info(
+        f"world_size: {world_size}, tp_size: {tp_size}, ep_size: {ep_size}, local_world_size: {local_world_size}, num_nodes: {num_nodes}"
+    )
     # If USE_ALL_GATHER is enabled (for pure TP scenarios), disable all DeepEP settings
     # Calculate use_all_gather: (USE_ALL_GATHER env is True) and (ep_size == tp_size)
     use_all_gather_env = StaticConfig.parallelism_distributed_config.use_all_gather
@@ -215,28 +220,15 @@ def auto_configure_deepep(args: argparse.Namespace):
     role_type = (
         role_type_enum.name if hasattr(role_type_enum, "name") else str(role_type_enum)
     )
-
-    # Get number of nodes
-    try:
-        gang_info = get_gang_info()
-        num_nodes = gang_info.num_nodes
-    except Exception:
-        # If get_gang_info fails, estimate from world_size
-        # Assuming 8 GPUs per node
-        num_nodes = (world_size + 7) // 8
-        logging.info(
-            f"Failed to get gang_info, estimated num_nodes={num_nodes} from world_size={world_size}"
-        )
-
     # Determine if PD separation is enabled
     is_pd_separation = role_type_enum in [RoleType.PREFILL, RoleType.DECODE]
     is_inference = role_type_enum == RoleType.PDFUSION
     is_decode = role_type_enum == RoleType.DECODE
 
     # Determine GPU configuration
-    is_single_gpu = tp_size == 1
-    is_multi_gpu = tp_size > 1
-    is_multi_node = num_nodes > 1 or world_size >= 9
+    is_single_gpu = world_size == 1
+    is_multi_gpu = world_size > 1
+    is_multi_node = num_nodes > 1 or world_size > local_world_size
 
     # Apply configuration rules
     use_deepep_moe = False
@@ -268,12 +260,12 @@ def auto_configure_deepep(args: argparse.Namespace):
             use_deepep_low_latency = False
             use_deepep_internode = False
         elif is_multi_gpu and not is_multi_node:
-            # Single-node multi-GPU (2-8 GPUs)
+            # Single-node multi-GPU (2-local_world_size GPUs)
             use_deepep_moe = True
             if is_decode:
                 use_deepep_low_latency = True
         elif is_multi_node:
-            # Multi-node multi-GPU (>=9 GPUs)
+            # Multi-node multi-GPU (world_size > local_world_size)
             use_deepep_moe = True
             use_deepep_internode = True
             if is_decode:
