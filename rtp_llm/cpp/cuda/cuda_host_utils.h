@@ -32,7 +32,6 @@ namespace rtp_llm {
 // workspace for cublas gemm : 32MB
 #define CUBLAS_WORKSPACE_SIZE 33554432
 
-
 template<typename T>
 void check(T result, const char* const file, int const line);
 #define check_cuda_value(val) rtp_llm::check((val), __FILE__, __LINE__)
@@ -68,9 +67,5 @@ int                        getMaxBlocksPerMultiprocessor(int device_id = -1);
 int                        getComputeCapabilityMajor(int device_id = -1);
 int                        getComputeCapabilityMinor(int device_id = -1);
 std::pair<int, int>        getComputeCapability(int device_id = -1);
-
-struct CaptureCheck {
-    static bool in_cuda_graph_capture;
-};
 
 }  // namespace rtp_llm

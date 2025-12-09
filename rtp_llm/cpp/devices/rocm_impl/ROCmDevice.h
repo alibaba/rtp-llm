@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/devices/DeviceData.h"
 #include "rtp_llm/cpp/devices/BufferManager.h"
 #include "rtp_llm/cpp/devices/rocm_impl/NativeHipGraphRunner.h"
+#include "rtp_llm/cpp/devices/GraphBase.h"
 
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
@@ -238,7 +239,12 @@ public:
     std::shared_ptr<NativeGraphRunner> getNativeGraphRunner() override {
         return std::make_shared<NativeHipGraphRunner<GptModelInputs, GptModelOutputs>>(this);
     }
-    void registerARGraphBuffers() {
+
+    GraphBase* getDeviceGraphRunner(const DeviceInitParams& params,
+                                    py::object              py_instance,
+                                    int                     kv_cache_block_offset,
+                                    bool                    is_prefill_hip_graph_mode = false) override;
+    void       registerARGraphBuffers() {
         if (custom_allreduce_comm_)
             custom_allreduce_comm_->registerGraphBuffers();
     }
@@ -337,6 +343,9 @@ private:
 
     // CK W8A8 Gelu gemm
     std::unique_ptr<rocmCKW8A8GeluGemmWrapper> ck_w8a8_gelu_gemm_runner_;
+
+    // Graph runner for HIP graph capture/replay
+    GraphBase* graph_runner_{nullptr};
 
 protected:
     bool use_multi_block_mode = false;

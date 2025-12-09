@@ -1,8 +1,10 @@
-#include "rtp_llm/cpp/devices/cuda_impl/CudaGraphRunner.h"
+#include "rtp_llm/cpp/devices/GraphBase.h"
 #include <optional>
+#include <algorithm>
 
 namespace rtp_llm {
-void CudaGraphRunner::capturePrefill() {
+
+void GraphBase::capturePrefill() {
     RTP_LLM_LOG_INFO("Capture Prefill Start");
     int capture_range_size = capture_range_.size();
     for (int i = 0; i <= capture_range_size - 1; i++) {
@@ -24,9 +26,9 @@ void CudaGraphRunner::capturePrefill() {
             inputs.bert_embedding_inputs.combo_tokens_type_ids =
                 inputs.bert_embedding_inputs.combo_tokens_type_ids.slice(0, 0, seq_len);
         }
-        graph_instances_[seq_len].mem_hold_ = createCaptureMemoryHold(inputs, max_bs_ * num_tokens_per_bs_);
-        graph_instances_[seq_len].mem_hold_.decoder_layer_hidden_states_ =
-            graph_instances_[seq_len].mem_hold_.decoder_layer_hidden_states_.slice(0, 0, seq_len);
+        graph_mem_holds_[seq_len] = createCaptureMemoryHold(inputs, max_bs_ * num_tokens_per_bs_);
+        graph_mem_holds_[seq_len].decoder_layer_hidden_states_ =
+            graph_mem_holds_[seq_len].decoder_layer_hidden_states_.slice(0, 0, seq_len);
         capturePrefillOneSeqLen(seq_len);
         replayAndSyncCheck(seq_len, "seq len");
         RTP_LLM_LOG_INFO("capture success for seq_len: %d", seq_len);
@@ -34,7 +36,7 @@ void CudaGraphRunner::capturePrefill() {
     RTP_LLM_LOG_INFO("Capture Prefill End");
 }
 
-std::vector<int> CudaGraphRunner::getPrefillSequenceLengthsToCapture() {
+std::vector<int> GraphBase::getPrefillSequenceLengthsToCapture() {
     // prefill_capture_seq_lens_ must be provided from Python and cannot be empty
     RTP_LLM_CHECK_WITH_INFO(!prefill_capture_seq_lens_.empty(),
                             "prefill_capture_seq_lens_ must be provided from Python and cannot be empty");
@@ -52,7 +54,7 @@ std::vector<int> CudaGraphRunner::getPrefillSequenceLengthsToCapture() {
     return result;
 }
 
-void CudaGraphRunner::capturePrefillOneSeqLen(int seq_len) {
+void GraphBase::capturePrefillOneSeqLen(int seq_len) {
     try {
         captureOneGraphInstance(seq_len, "seq len");
     } catch (const std::exception& e) {
@@ -64,7 +66,15 @@ void CudaGraphRunner::capturePrefillOneSeqLen(int seq_len) {
     }
 }
 
-void CudaGraphRunner::replayPrefill(int seq_len) {
-    replayGraph(seq_len);
+void GraphBase::replayPrefill(int seq_len) {
+    replayGraphImpl(seq_len);
 }
+
+void GraphBase::tryGetRealGraphPrefillSeqLen(PyModelInputs& inputs) {
+    state_.current_seq_len = inputs.attention_inputs.input_lengths.sum(0).item<int>();
+    auto it                = std::lower_bound(capture_range_.begin(), capture_range_.end(), state_.current_seq_len);
+    state_.current_real_graph_seq_len = *it;
+    state_.current_batch_size         = inputs.attention_inputs.input_lengths.size(0);
+}
+
 }  // namespace rtp_llm
