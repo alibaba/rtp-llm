@@ -57,12 +57,12 @@ class TrtllmFp4Executor(FusedMoeExpertExecutor):
 
     @property
     def local_num_experts(self) -> int:
-        assert self._w1 is not None
-        return self._w1.size(0)
+        assert self.w1 is not None
+        return self.w1.size(0)
     @property
     def intermediate_size(self) -> int:
-        assert self._w1 is not None
-        return int(self._w1.size(1) / 2)
+        assert self.w1 is not None
+        return int(self.w1.size(1) / 2)
 
     def execute(
         self,
