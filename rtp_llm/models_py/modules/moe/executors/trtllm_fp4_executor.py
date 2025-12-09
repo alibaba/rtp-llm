@@ -53,7 +53,7 @@ class TrtllmFp4Executor(FusedMoeExpertExecutor):
         assert self.w1 is not None and self.w2 is not None
         assert self.w1_scale is not None and self.w2_scale is not None
         
-        self._enable_pdl = device_support_pdl(self._w1.device)
+        self._enable_pdl = device_support_pdl(self.w1.device)
 
     @property
     def local_num_experts(self) -> int:
