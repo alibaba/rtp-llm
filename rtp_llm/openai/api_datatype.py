@@ -242,6 +242,8 @@ class DebugInfo(BaseModel):
     stop_words_list: List[str]
     renderer_info: RendererInfo
     generate_config: GenerateConfig
+    output_ids: Optional[List[List[int]]] = None
+    raw_output: Optional[List[str]] = None
 
 
 class ChatCompletionResponseChoice(BaseModel):

@@ -2248,6 +2248,54 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
 
         await return_output_ids_test_suite.test_no_stream()
 
+    async def test_debug_info_with_output_ids_and_raw_output(self):
+        """Test that debug_info includes output_ids and raw_output when debug_info=True"""
+        tokenizer = QwenTestTokenizer(
+            f"{self.test_data_path}/qwen_7b/tokenizer/qwen.tiktoken"
+        )
+        self.model.tokenizer = tokenizer
+        self.endpoint = OpenaiEndpoint(self.model.config, self.model.tokenizer, None)
+        test_ids = [198, 84169, 25, 49434, 239, 73670, 37029]
+
+        os.environ["MODEL_TYPE"] = "qwen"
+        render_params = RendererParams(
+            model_type="qwen",
+            max_seq_len=MAX_SEQ_LEN,
+            eos_token_id=tokenizer.eos_token_id or 0,
+            stop_word_ids_list=[],
+        )
+        chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
+        request = ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="hello")],
+            debug_info=True,
+            stream=False,
+        )
+        input_length = 314
+        id_generator = fake_output_generator_once(
+            test_ids, MAX_SEQ_LEN, tokenizer.eos_token_id or 0, input_length
+        )
+
+        rendered_input = chat_renderer.render_chat(request)
+        generate_config = self.endpoint._extract_generation_config(request)
+        debug_info = self.endpoint._get_debug_info(
+            chat_renderer, rendered_input, generate_config
+        )
+
+        stream_generator = chat_renderer.render_response_stream(
+            id_generator, request, generate_config
+        )
+        generate = self.endpoint._complete_stream_response(stream_generator, debug_info)
+        response = await generate.gen_complete_response_once()
+
+        self.assertIsNotNone(response.debug_info)
+        self.assertIsNotNone(response.debug_info.output_ids)
+        self.assertIsNotNone(response.debug_info.raw_output)
+        self.assertEqual(len(response.debug_info.output_ids), 1)
+        self.assertEqual(len(response.debug_info.raw_output), 1)
+        self.assertEqual(response.debug_info.output_ids[0], test_ids)
+        expected_raw_output = tokenizer.decode(test_ids)
+        self.assertEqual(response.debug_info.raw_output[0], expected_raw_output)
+
 
 if __name__ == "__main__":
     main()
