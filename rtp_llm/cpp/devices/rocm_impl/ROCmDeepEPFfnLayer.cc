@@ -311,20 +311,6 @@ MoeCombineOutput ROCmDevice::deepEpCombine(const MoeCombineParams& params) {
     return MoeCombineOutput({all_output, all_output, params, move(comm_hook)});
 }
 
-#else
-
-bool ROCmDevice::initDeepEPBuffer() {
-    return false;
-}
-
-MoeDispatchOutput ROCmDevice::deepEpDispatch(const MoeDispatchParams& params) {
-    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
-}
-
-MoeCombineOutput ROCmDevice::deepEpCombine(const MoeCombineParams& params) {
-    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
-}
-
 #endif
 
 }  // namespace rtp_llm

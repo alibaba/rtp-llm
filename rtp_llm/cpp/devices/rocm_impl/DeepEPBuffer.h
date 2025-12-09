@@ -1,9 +1,11 @@
 #pragma once
 
-#include "config_hip.hpp"
-#include "deep_ep_hip.hpp"
 #include "rtp_llm/cpp/devices/DeviceBase.h"
 #include "rtp_llm/cpp/devices/rocm_impl/DeepEPDefs.h"
+
+#ifdef ENABLE_DEEP_EP
+#include "config_hip.hpp"
+#include "deep_ep_hip.hpp"
 
 // c++ version of deepep buffer.py
 namespace rtp_llm {
@@ -207,3 +209,5 @@ private:
 };
 
 }  // namespace rtp_llm
+
+#endif  // ENABLE_DEEP_EP

@@ -128,16 +128,6 @@ MoeCombineOutput ROCmDevice::deepEpLLCombine(const MoeCombineParams& params) {
     return MoeCombineOutput({all_output, all_output, params, move(comm_hook)});
 }
 
-#else
-
-MoeDispatchOutput ROCmDevice::deepEpLLDispatch(const MoeDispatchParams& params) {
-    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
-}
-
-MoeCombineOutput ROCmDevice::deepEpLLCombine(const MoeCombineParams& params) {
-    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
-}
-
 #endif
 
 }  // namespace rtp_llm
