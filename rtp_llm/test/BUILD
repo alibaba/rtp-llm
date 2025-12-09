@@ -133,3 +133,38 @@ py_test(
     ],
     exec_properties = {'gpu':'A10'},
 )
+
+py_test(
+    name = "pipeline_test",
+    srcs = [
+        "pipeline_test.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm:sdk",
+    ],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "prefill_capture_seq_lens_test",
+    srcs = [
+        "prefill_capture_seq_lens_test.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "auto_configure_deepep_test",
+    srcs = [
+        "auto_configure_deepep_test.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm:sdk",
+    ],
+    exec_properties = {'gpu':'A10'},
+)
