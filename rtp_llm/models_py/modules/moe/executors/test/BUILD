@@ -18,8 +18,8 @@ flashinfer = ["flashinfer-python"]
 requirement(flashinfer)
 
 py_test (
-    name = "nvfp4_masked_executor_test",
-    srcs = ["nvfp4_masked_executor_test.py"],
+    name = "trtllm_fp4_executor_test",
+    srcs = ["trtllm_fp4_executor_test.py"],
     deps = [
         "//rtp_llm/models_py:modules",
         "//rtp_llm:config",
