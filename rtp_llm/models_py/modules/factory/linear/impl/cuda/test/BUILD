@@ -15,3 +15,12 @@ py_test(
     exec_properties = {'gpu':'H20'},
 )
 
+py_test(
+    name = "fp4_gemm_linear_test",
+    srcs = ["fp4_gemm_linear_test.py"],
+    deps = py_test_deps,
+    env = test_envs,
+    tags = ["L20A"],
+    exec_properties = {'gpu':'L20A'},
+)
+

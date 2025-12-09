@@ -20,3 +20,13 @@ if is_cuda():
 
     LinearFactory.register(CudaFp8PerTensorLinear)
     LinearFactory.register(CudaFp8DeepGEMMLinear)
+
+    # Register NVFP4 Linear if available
+    try:
+        from .nvfp4_linear import CudaFp4GEMMLinear, has_flashinfer_fp4
+
+        if has_flashinfer_fp4():
+            LinearFactory.register(CudaFp4GEMMLinear)
+            logger.debug("Registered CudaFp4GEMMLinear")
+    except ImportError:
+        logger.debug("CudaFp4GEMMLinear not available (flashinfer FP4 support not found)")

@@ -18,6 +18,8 @@ class CudaF16Linear(LinearBase):
         config: Optional[GptInitModelParameters],
         weight: torch.Tensor,
         weight_scales: Optional[torch.Tensor],
+        weight_scale_2: Optional[torch.Tensor] = None,
+        input_scale: Optional[torch.Tensor] = None,
     ) -> bool:
         """Handle non-FP8 cases (no weight_scales)"""
         return weight_scales is None
@@ -29,8 +31,9 @@ class CudaF16Linear(LinearBase):
         input_scales: Optional[torch.Tensor] = None,
         bias: Optional[torch.Tensor] = None,
         config: Optional[GptInitModelParameters] = None,
+        weight_scale_2: Optional[torch.Tensor] = None,
     ):
-        super().__init__(weight, weight_scales, input_scales, bias, config)
+        super().__init__(weight, weight_scales, input_scales, bias, config, weight_scale_2)
         self.weight = weight.T
         self.bias = bias
 
