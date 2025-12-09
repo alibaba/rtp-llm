@@ -69,3 +69,19 @@ py_test(
     ],
     exec_properties = {'gpu':'A10'}
 )
+
+py_test(
+    name = "process_manager_test",
+    srcs = [
+        "process_manager_test.py",
+    ],
+    deps = [
+        "//rtp_llm:utils",
+    ],
+    data = [
+        "//:th_transformer",
+        "//:th_transformer_config",
+        "//:rtp_compute_ops",
+    ],
+    exec_properties = {'gpu':'A10'}
+)
