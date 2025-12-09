@@ -1,4 +1,5 @@
 from typing import Any, Dict, Optional
+from functools import partial
 
 import torch
 
@@ -90,12 +91,12 @@ class TrtllmFp4Executor(FusedMoeExpertExecutor):
             torch.bfloat16
         ).view(torch.int16)
 
-        # Quantize input to FP4
-        (hidden_states, hidden_states_scale) = fp4_quantize(
-            payload.expert_x,
-            payload.expert_x_scale,
-            is_sf_swizzled_layout=False,
-        )
+        input_quantize_fn = {
+            torch.bfloat16: partial(fp4_quantize, is_sf_swizzled_layout=False),
+            torch.uint8: lambda x, x_scale: (x, x_scale),
+        }
+        hidden_states, hidden_states_scale = input_quantize_fn[payload.expert_x.dtype](
+            payload.expert_x, payload.expert_x_scale)
 
         output = trtllm_fp4_block_scale_routed_moe(
             packed_tensor,
@@ -103,13 +104,13 @@ class TrtllmFp4Executor(FusedMoeExpertExecutor):
             hidden_states,
             hidden_states_scale.view(torch.float8_e4m3fn),
             self.w1,
-            self.w1_scale,
+            self.w1_scale.view(torch.float8_e4m3fn),
             None,  # w13_bias
             None,  # gemm1_alpha
             None,  # gemm1_beta
             None,  # gemm1_clamp_limit
             self.w2,
-            self.w2_scale,
+            self.w2_scale.view(torch.float8_e4m3fn),
             None,  # w2_bias
             self.output1_scale_scalar,
             self.output1_scale_gate_scalar,

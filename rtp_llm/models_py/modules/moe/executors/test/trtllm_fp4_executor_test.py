@@ -161,40 +161,28 @@ def _generate_payload_and_weights(
             torch.arange(SEQ_LEN).unsqueeze(1), topk_ids
         ].to(torch.bfloat16)
         check_meta(topk_weights, (SEQ_LEN, TOP_K), torch.bfloat16)
-    payload = ExpertForwardPayload(
-        expert_x=hidden_states,
-        expert_x_origin_dtype=torch.bfloat16,
-        expert_x_scale=hidden_states_scale,
-        expert_topk_ids=topk_ids,
-        expert_topk_weights=topk_weights,
-    )
-    weights = {
-        W.moe_w1: w13,
-        W.moe_w2: w2,
-        W.moe_s1: w13_scale,
-        W.moe_s2: w2_scale,
-        "output1_scale_scalar": output1_scale_scalar,
-        "output1_scale_gate_scalar": output1_scale_gate_scalar,
-        "output2_scale_scalar": output2_scale_scalar,
-    }
-    return payload, weights
+        payload = ExpertForwardPayload(
+            expert_x=hidden_states,
+            expert_x_origin_dtype=torch.bfloat16,
+            expert_x_scale=hidden_states_scale,
+            expert_topk_ids=topk_ids,
+            expert_topk_weights=topk_weights,
+        )
+        weights = {
+            W.moe_w1: w13,
+            W.moe_w2: w2,
+            W.moe_s1: w13_scale,
+            W.moe_s2: w2_scale,
+            "output1_scale_scalar": output1_scale_scalar,
+            "output1_scale_gate_scalar": output1_scale_gate_scalar,
+            "output2_scale_scalar": output2_scale_scalar,
+        }
+        return payload, weights
 
 def _generate_ref_output(
     payload: ExpertForwardPayload,
     weights: Dict[str, torch.Tensor],
 ) -> torch.Tensor:
-    """
-    Generate reference output by dequantizing and computing MoE forward pass.
-    
-    Args:
-        payload: Expert forward payload
-        weights: Weight dictionary
-        global_scales: Dictionary containing global scale factors
-        use_nvfp4: Whether using NVFP4 (should be True)
-    
-    Returns:
-        Reference output tensor
-    """
     if REAL_DATA_DIR.is_dir():
         output = load_pt("output.pt")
         check_meta(output, (SEQ_LEN, HIDDEN_SIZE), torch.bfloat16)
@@ -309,38 +297,7 @@ def _generate_ref_output(
     
     return ref_output
 
-
-def _extract_valid_tokens_2d(
-    tensor_3d: torch.Tensor,
-    expert_num_tokens: torch.Tensor,
-) -> torch.Tensor:
-    """
-    Extract valid tokens from 3D tensor (n_experts, max_num_token_per_expert, hidden_size)
-    and convert to 2D tensor (total_valid_tokens, hidden_size).
-    
-    Args:
-        tensor_3d: 3D tensor of shape [n_experts, max_num_token_per_expert, hidden_size]
-        expert_num_tokens: 1D tensor of shape [n_experts] indicating valid tokens per expert
-    
-    Returns:
-        2D tensor of shape [total_valid_tokens, hidden_size]
-    """
-    num_experts = tensor_3d.shape[0]
-    valid_tokens_list = []
-    
-    for expert_id in range(num_experts):
-        num_valid_tokens = expert_num_tokens[expert_id].item()
-        if num_valid_tokens > 0:
-            valid_tokens = tensor_3d[expert_id, :num_valid_tokens, :]
-            valid_tokens_list.append(valid_tokens)
-    
-    if len(valid_tokens_list) == 0:
-        return torch.empty((0, tensor_3d.shape[2]), device=tensor_3d.device, dtype=tensor_3d.dtype)
-    
-    return torch.cat(valid_tokens_list, dim=0)
-
-
-def test_nvfp4_masked_executor():
+def test_trtllm_fp4_executor():
     torch.manual_seed(42)
     torch.cuda.manual_seed(42)
     random.seed(42)
@@ -371,5 +328,5 @@ def test_nvfp4_masked_executor():
     torch.testing.assert_close(output, ref_output)
 
 if __name__ == "__main__":
-    test_nvfp4_masked_executor()
+    test_trtllm_fp4_executor()
 
