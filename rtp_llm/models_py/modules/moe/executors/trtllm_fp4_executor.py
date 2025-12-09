@@ -143,7 +143,7 @@ class TrtllmFp4Executor(FusedMoeExpertExecutor):
             packed_tensor,
             None,  # routing_bias
             hidden_states,
-            hidden_states_scale,
+            hidden_states_scale.view(torch.float8_e4m3fn),
             self.w1,
             self.w1_scale,
             None,  # w13_bias
