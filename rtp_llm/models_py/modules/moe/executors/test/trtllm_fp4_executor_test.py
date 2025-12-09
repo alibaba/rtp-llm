@@ -62,7 +62,7 @@ def _generate_payload_and_weights(
         routing_logits = load_pt("router_logits.pt")
         check_meta(routing_logits, (SEQ_LEN, NUM_EXPERTS), torch.bfloat16)
         w13 = load_pt("layer_gemm1_weights.pt")
-        check_meta(w13, (NUM_EXPERTS, MOE_INTERMEDIATE_SIZE * 2, HIDDEN_SIZE), torch.bfloat16)
+        check_meta(w13, (NUM_EXPERTS, MOE_INTERMEDIATE_SIZE * 2, HIDDEN_SIZE / 2), torch.bfloat16)
         w13_scale = load_pt("layer_gemm1_weights_scale.pt")
         check_meta(w13_scale, (NUM_EXPERTS, MOE_INTERMEDIATE_SIZE * 2, 1), torch.float32)
         w2 = load_pt("layer_gemm2_weights.pt")
