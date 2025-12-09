@@ -58,7 +58,7 @@ def _generate_payload_and_weights(
         hidden_states = load_pt("x.pt")
         check_meta(hidden_states, (SEQ_LEN, HIDDEN_SIZE), torch.bfloat16)
         hidden_states_scale = load_pt("layer_a1_gscale.pt")
-        check_meta(hidden_states_scale, (SEQ_LEN, 1), torch.float32)
+        check_meta(hidden_states_scale, (NUM_EXPERTS,), torch.float32)
         routing_logits = load_pt("router_logits.pt")
         check_meta(routing_logits, (SEQ_LEN, NUM_EXPERTS), torch.bfloat16)
         w13 = load_pt("layer_gemm1_weights.pt")
