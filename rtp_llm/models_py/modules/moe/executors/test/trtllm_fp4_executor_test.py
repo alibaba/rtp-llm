@@ -366,6 +366,8 @@ def test_nvfp4_masked_executor():
     
     output = executor.execute(payload, "silu", NUM_EXPERTS, None, None, False, None)
 
+    print(output)
+    print(ref_output)
     torch.testing.assert_close(output, ref_output)
 
 if __name__ == "__main__":
