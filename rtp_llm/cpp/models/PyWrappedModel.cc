@@ -249,7 +249,7 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
                 "offset + py_model_outputs[i].hidden_states.size(0):%d > inputs.combo_tokens->shape()[0]:%d",
                 offset + py_model_outputs[i].hidden_states.size(0),
                 inputs.combo_tokens->shape()[0]);
-            auto hidden_states_slice = hidden_states->slice(offset, offset + py_model_outputs[i].hidden_states.size(0));
+            auto hidden_states_slice = hidden_states->slice(offset, py_model_outputs[i].hidden_states.size(0));
             auto py_model_output     = py_model_outputs[i];
             device_->copy({*hidden_states_slice, *torchTensor2Buffer(py_model_output.hidden_states)});
             offset += py_model_outputs[i].hidden_states.size(0);
