@@ -91,7 +91,6 @@ public:
                                           py::object              py_instance,
                                           int                     kv_cache_block_offset,
                                           bool                    is_prefill_cuda_graph_mode = false) override;
-    void             getRopeCacheOnce(const RopeConfig& rope_config, int max_position_embeddings) override;
 
 private:
     void         checkUseOpenSourceFMHA();

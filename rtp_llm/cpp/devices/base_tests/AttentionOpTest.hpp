@@ -226,8 +226,7 @@ void AttentionOpTest::contextAttentionOpTest(size_t        batch_size,
     auto                 kv_cache_block_id = device_->allocateBuffer(
         {rtp_llm::DataType::TYPE_INT32, {batch_size, block_num / batch_size}, rtp_llm::AllocationType::HOST});
 
-    cache_manager_ = std::make_shared<rtp_llm::CacheManager>(cache_conf, device_);
-    ;
+    cache_manager_            = std::make_shared<rtp_llm::CacheManager>(cache_conf, device_);
     auto kv_cache_buffer      = cache_manager_->kvCacheBuffer();
     auto layer_k_cache_buffer = kv_cache_buffer.k_blocks->index(0);
     auto layer_v_cache_buffer = kv_cache_buffer.v_blocks->index(0);

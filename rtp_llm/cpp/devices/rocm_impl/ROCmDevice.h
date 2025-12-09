@@ -242,7 +242,6 @@ public:
         if (custom_allreduce_comm_)
             custom_allreduce_comm_->registerGraphBuffers();
     }
-    void getRopeCacheOnce(const RopeConfig& rope_config, int max_position_embeddings) override;
 
 protected:
     void InvokeROCmDeepGemm(const GemmParams& params, BufferPtr output);

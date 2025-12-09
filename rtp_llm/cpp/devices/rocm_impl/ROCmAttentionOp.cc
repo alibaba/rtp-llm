@@ -567,16 +567,6 @@ ParamsPtr ROCmDevice::PrepareCKAttn(const AttentionConfigs& configs,
     return ck_attn;
 }
 
-void ROCmDevice::getRopeCacheOnce(const RopeConfig& rope_config, int max_position_embeddings) {
-    std::call_once(rope_cache_flag_, [&]() {
-        use_rope_cache_ = rope_config.style == RopeStyle::Base;
-        if (use_rope_cache_) {
-            rope_cache_     = getRopeCache(rope_config, max_position_embeddings);
-            rope_cache_dim_ = rope_config.dim;
-        }
-    });
-}
-
 AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& params) {
     auto datatype            = params.input.type();
     auto token_num           = params.input.shape()[0];
@@ -703,7 +693,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                                     && !params.configs.fuse_qkv_add_bias);
     RTP_LLM_LOG_DEBUG("skip_add_bias_transpose: %d", skip_add_bias_transpose);
     if (!skip_add_bias_transpose) {
-        getRopeCacheOnce(params.configs.rope_config, init_params_.max_seq_len);
+        auto rope_cache = getRopeCacheOnce(params.configs.rope_config, init_params_.max_seq_len, false);
 
         if (init_params_.use_aiter_pa) {
             if (init_params_.use_asm_pa) {
@@ -739,7 +729,8 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                     store_q,
                     store_kv,
                     store_cache,
-                    use_rope_cache_ && rope_cache_.defined() ? static_cast<float2*>(rope_cache_.data_ptr()) : nullptr,
+                    rope_cache.used && rope_cache.data.defined() ? static_cast<float2*>(rope_cache.data.data_ptr()) :
+                                                                   nullptr,
                     stream_);
             } else {
                 DISPATCH_CUDA_FUNCTION_DATA_TYPE(
@@ -774,7 +765,8 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                     store_q,
                     store_kv,
                     store_cache,
-                    use_rope_cache_ && rope_cache_.defined() ? static_cast<float2*>(rope_cache_.data_ptr()) : nullptr,
+                    rope_cache.used && rope_cache.data.defined() ? static_cast<float2*>(rope_cache.data.data_ptr()) :
+                                                                   nullptr,
                     stream_);
             }
             check_cuda_error();
@@ -798,10 +790,8 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                 params.common.padding_offset->data<int>(),
                 params.common.cu_seqlens->data<int>(),
                 params.common.cu_seqlens_without_prefix->data<int>(),
-                use_rope_cache_,
-                use_rope_cache_ && rope_cache_.defined() && rope_cache_dim_ == params.configs.rope_config.dim ?
-                    rope_cache_.data_ptr<float>() :
-                    nullptr,
+                rope_cache.used,
+                checkRopeCache(params.configs.rope_config, rope_cache) ? rope_cache.data.data_ptr<float>() : nullptr,
                 batch_size,
                 seq_len,
                 token_num,
@@ -1146,7 +1136,7 @@ AttentionModuleOutput ROCmDevice::decoderSelfAttention(const AttentionModulePara
                                         && !params.configs.fuse_qkv_add_bias);
         printBufferData(*params.common.input_lengths, "input_lengths");
         if (!skip_add_bias_transpose) {
-            getRopeCacheOnce(params.configs.rope_config, init_params_.max_seq_len);
+            auto rope_cache = getRopeCacheOnce(params.configs.rope_config, init_params_.max_seq_len, false);
 
             if (init_params_.use_asm_pa) {
                 DISPATCH_CUDA_FUNCTION_DATA_TYPE(
@@ -1181,7 +1171,8 @@ AttentionModuleOutput ROCmDevice::decoderSelfAttention(const AttentionModulePara
                     store_q,
                     store_kv,
                     store_cache,
-                    use_rope_cache_ && rope_cache_.defined() ? static_cast<float2*>(rope_cache_.data_ptr()) : nullptr,
+                    rope_cache.used && rope_cache.data.defined() ? static_cast<float2*>(rope_cache.data.data_ptr()) :
+                                                                   nullptr,
                     stream_);
             } else {
                 DISPATCH_CUDA_FUNCTION_DATA_TYPE(
@@ -1216,7 +1207,8 @@ AttentionModuleOutput ROCmDevice::decoderSelfAttention(const AttentionModulePara
                     store_q,
                     store_kv,
                     store_cache,
-                    use_rope_cache_ && rope_cache_.defined() ? static_cast<float2*>(rope_cache_.data_ptr()) : nullptr,
+                    rope_cache.used && rope_cache.data.defined() ? static_cast<float2*>(rope_cache.data.data_ptr()) :
+                                                                   nullptr,
                     stream_);
             }
             check_cuda_error();
