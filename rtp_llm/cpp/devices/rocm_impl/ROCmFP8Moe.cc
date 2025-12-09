@@ -16,6 +16,8 @@
 
 namespace rtp_llm {
 
+#ifdef ENABLE_DEEP_EP
+
 void quantize_3d(ROCmDevice* device, const BufferPtr& input, QBufferPtr& q_input, torch::Tensor& input_tensor, torch::Tensor& scale_tensor)
 {
     std::vector<size_t> origin_shape = input->shape();
@@ -189,5 +191,7 @@ FfnLayerOutput ROCmDevice::deepEpLLMoeFfn(const FfnLayerParams& params, const Mo
     }
     return {output};   
 }
+
+#endif
 
 }  // namespace rtp_llm

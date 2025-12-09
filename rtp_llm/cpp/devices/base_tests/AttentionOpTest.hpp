@@ -429,7 +429,7 @@ void AttentionOpTest::selfAttentionOpTest(size_t batch_size,
 #ifdef USING_ROCM
     ROCmDevice* device = dynamic_cast<ROCmDevice*>(device_);
     common_inputs.decode_aiter_attn =
-        AiterAttnParams::prepareDecodeAiterAttnParams(device, torchTensor2Buffer(sequence_lengths_host));
+        AiterAttnParams::prepareDecodeAiterAttnParams(device, torchTensor2Buffer(sequence_lengths_host), attention_config, 0, common_inputs.kv_cache->kv_cache_block_id);
 #endif
 
     auto qkv_output = device_->allocateBuffer({qkv_states_device->type(), {token_num, num_heads, head_dim}});
@@ -550,6 +550,8 @@ void AttentionOpTest::aiterPageAttentionOpTest(size_t batch_size,
     auto common_inputs        = AttentionCommonInputs({input_lengths_device, sequence_lengths_device});
     auto layer_k_cache_buffer = kv_cache_buffer.k_blocks->index(0);
     auto layer_v_cache_buffer = kv_cache_buffer.v_blocks->index(0);
+    auto attention_config       = AttentionConfigs(
+        {num_heads, num_key_value_heads, head_dim, num_heads * head_dim, rope_config, tokens_per_block});
     common_inputs.kv_cache    = KvCacheInfo(
         {(int)kv_cache_buffer.k_blocks->shape()[0], kv_cache_block_id, layer_k_cache_buffer, layer_v_cache_buffer});
     common_inputs.context_batch_size  = 0;
@@ -558,13 +560,11 @@ void AttentionOpTest::aiterPageAttentionOpTest(size_t batch_size,
     common_inputs.decoder_max_seq_len = step - 1;
     common_inputs.max_prefix_length   = 0;
     common_inputs.decode_aiter_attn =
-        AiterAttnParams::prepareDecodeAiterAttnParams(device, torchTensor2Buffer(sequence_lengths_host));
+        AiterAttnParams::prepareDecodeAiterAttnParams(device, torchTensor2Buffer(sequence_lengths_host), attention_config, 0, common_inputs.kv_cache->kv_cache_block_id);
     auto buffer_nullptr         = BufferPtr(nullptr);
     auto attention_weight       = AttentionLayerWeights();
     attention_weight.qkv_weight = make_shared<const DenseWeights>(DenseWeights(buffer_nullptr, bias_device));
     auto token_num              = batch_size * seq_len;
-    auto attention_config       = AttentionConfigs(
-        {num_heads, num_key_value_heads, head_dim, num_heads * head_dim, rope_config, tokens_per_block});
     auto qkv_output = device->allocateBuffer({qkv_states_device->type(), {token_num, num_heads, head_dim}});
     AttentionModuleParams params = {
         0, *qkv_states_device, *qkv_output, common_inputs, attention_weight, attention_config};
