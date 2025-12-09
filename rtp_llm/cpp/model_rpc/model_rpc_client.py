@@ -1,5 +1,6 @@
 import functools
 import logging
+import time
 from typing import AsyncGenerator, Optional
 
 import grpc
@@ -427,9 +428,19 @@ class ModelRpcClient(object):
                 )
                 # 调用服务器方法并接收流式响应
                 count = 0
-                async for response in response_iterator.__aiter__():
-                    count += 1
-                    yield trans_output(input_py, response, stream_state)
+                async_iter = response_iterator.__aiter__()
+                try:
+                    async for response in async_iter:
+                        count += 1
+                        yield trans_output(input_py, response, stream_state)
+                finally:
+                    # Explicitly disable the asynchronous iterator to prevent blocking during garbage collection
+                    try:
+                        await async_iter.aclose()
+                    except Exception as e:
+                        logging.error(f"async_iter.aclose() failed: {type(e).__name__}: {e}")
+                        pass
+
         except grpc.RpcError as e:
             # TODO(xinfei.sxf) 非流式的请求无法取消了
             if response_iterator:
