@@ -377,24 +377,34 @@ class CustomChatRenderer:
 
         # 处理非流式请求的合并逻辑
         if not generate_config.is_streaming:
-            output_generator = await self._merge_non_streaming_outputs(output_generator)
-
-        async for response in self.render_response_stream(
-            output_generator, request, generate_config
-        ):
-            yield response
+            # Non-streaming mode: merge all outputs and render
+            async for response in self._merge_non_streaming_outputs(
+                output_generator, request, generate_config
+            ):
+                yield response
+        else:
+            # Streaming mode: process outputs incrementally
+            async for response in self.render_response_stream(
+                output_generator, request, generate_config
+            ):
+                yield response
 
     async def _merge_non_streaming_outputs(
-        self, output_generator: AsyncGenerator[GenerateOutputs, None]
-    ) -> AsyncGenerator[GenerateOutputs, None]:
+        self,
+        output_generator: AsyncGenerator[GenerateOutputs, None],
+        request: ChatCompletionRequest,
+        generate_config: GenerateConfig,
+    ) -> AsyncGenerator[StreamResponseObject, None]:
         """
-        合并非流式请求的多个输出为单个输出
+        合并非流式请求的多个输出并渲染响应
 
         Args:
             output_generator: 原始的输出生成器
+            request: 聊天请求
+            generate_config: 生成配置
 
-        Returns:
-            包含单个合并输出的新生成器
+        Yields:
+            渲染后的响应对象
         """
         # 收集所有输出
         collected_outputs = []
@@ -404,11 +414,15 @@ class CustomChatRenderer:
         # 合并输出
         merged_output = self._merge_generate_outputs(collected_outputs)
 
-        # 创建新的单次输出generator
+        # 创建单次输出生成器
         async def single_output_generator():
             yield merged_output
 
-        return single_output_generator()
+        # 渲染响应并yield
+        async for response in self.render_response_stream(
+            single_output_generator(), request, generate_config
+        ):
+            yield response
 
     def _merge_generate_outputs(
         self, collected_outputs_list: List[GenerateOutputs]
@@ -825,7 +839,7 @@ class CustomChatRenderer:
             # TODO(zhangjianning.zjn): merge all extra outputs for streaming request
             extra_outputs=items[-1].extra_outputs,
         )
-        
+
     async def _generate_final(
         self,
         buffer_list: List[StreamStatus],
@@ -891,7 +905,7 @@ class CustomChatRenderer:
             ),
             aux_info=aux_info,
         )
-        
+
     def _create_empty_delta_sync(self, input_len: int, output_len: int, reuse_len: int):
         return OutputDelta(
             output_str="",

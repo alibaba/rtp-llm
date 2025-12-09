@@ -489,12 +489,9 @@ class OpenaiEndpoint(object):
         )
 
         if not generate_config.is_streaming:
-            # Non-streaming mode: merge all outputs first
-            merged_generator = await renderer._merge_non_streaming_outputs(
-                output_generator
-            )
-            async for response in renderer.render_response_stream(
-                merged_generator, chat_request, generate_config
+            # Non-streaming mode: merge all outputs and render
+            async for response in renderer._merge_non_streaming_outputs(
+                output_generator, chat_request, generate_config
             ):
                 yield response
         else:
