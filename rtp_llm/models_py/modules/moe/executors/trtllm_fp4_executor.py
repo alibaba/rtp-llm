@@ -97,6 +97,48 @@ class TrtllmFp4Executor(FusedMoeExpertExecutor):
             is_sf_swizzled_layout=False,
         )
 
+        # Print all parameters
+        def print_param(name, value):
+            if isinstance(value, torch.Tensor):
+                print(f"{name}: shape={value.shape}, dtype={value.dtype}")
+            else:
+                print(f"{name}: {value}")
+
+        print("=" * 80)
+        print("trtllm_fp4_block_scale_routed_moe parameters:")
+        print("=" * 80)
+        print_param("packed_tensor", packed_tensor)
+        print_param("routing_bias", None)
+        print_param("hidden_states", hidden_states)
+        print_param("hidden_states_scale", hidden_states_scale)
+        print_param("self.w1", self.w1)
+        print_param("self.w1_scale", self.w1_scale)
+        print_param("w13_bias", None)
+        print_param("gemm1_alpha", None)
+        print_param("gemm1_beta", None)
+        print_param("gemm1_clamp_limit", None)
+        print_param("self.w2", self.w2)
+        print_param("self.w2_scale", self.w2_scale)
+        print_param("w2_bias", None)
+        print_param("self.output1_scale_scalar", self.output1_scale_scalar)
+        print_param("self.output1_scale_gate_scalar", self.output1_scale_gate_scalar)
+        print_param("self.output2_scale_scalar", self.output2_scale_scalar)
+        print_param("global_num_experts", global_num_experts)
+        print_param("topk", topk)
+        print_param("n_group", None)
+        print_param("topk_group", None)
+        print_param("self.intermediate_size", self.intermediate_size)
+        print_param("local_expert_offset", 0)
+        print_param("self.local_num_experts", self.local_num_experts)
+        print_param("routed_scaling_factor", None)
+        print_param("tile_tokens_dim", None)
+        print_param("routing_method_type", 1)
+        print_param("do_finalize", True)
+        print_param("self._enable_pdl", self._enable_pdl)
+        print_param("gated_act_type", gated_act_type)
+        print_param("output (optional inplace)", None)
+        print("=" * 80)
+
         output = trtllm_fp4_block_scale_routed_moe(
             packed_tensor,
             None,  # routing_bias
