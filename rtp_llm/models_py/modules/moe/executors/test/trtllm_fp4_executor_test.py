@@ -179,24 +179,24 @@ def _generate_ref_output(
         output = load_pt("output.pt", (SEQ_LEN, HIDDEN_SIZE), torch.bfloat16)
         return output
 
-        w2_local_float32 = e2m1_and_ufp8sf_scale_to_float(
-            weights[W.moe_w2],
-            weights[W.moe_s2],
-            w2_global_scale,?
-            sf_vec_size=NVFP4_BLOCK_SIZE,
-            ufp8_type=1,
-        )
-        # Compute MoE forward pass
-        workspace1 = expert_x_local @ w1_local.transpose(0, 1)
-        gate = workspace1[..., N // 2 :].to(torch.float32)
-        value = workspace1[..., : N // 2].to(torch.float32)
-        gate = gate * (1.0 / (1.0 + torch.exp(-gate)))  # SiLU
-        workspace2 = (gate * value).to(torch.bfloat16)
-        ref_output[local_expert_id, :num_actual_tokens, :] = (
-            workspace2 @ w2_local.transpose(0, 1)
-        )
+    #     w2_local_float32 = e2m1_and_ufp8sf_scale_to_float(
+    #         weights[W.moe_w2],
+    #         weights[W.moe_s2],
+    #         w2_global_scale,
+    #         sf_vec_size=NVFP4_BLOCK_SIZE,
+    #         ufp8_type=1,
+    #     )
+    #     # Compute MoE forward pass
+    #     workspace1 = expert_x_local @ w1_local.transpose(0, 1)
+    #     gate = workspace1[..., N // 2 :].to(torch.float32)
+    #     value = workspace1[..., : N // 2].to(torch.float32)
+    #     gate = gate * (1.0 / (1.0 + torch.exp(-gate)))  # SiLU
+    #     workspace2 = (gate * value).to(torch.bfloat16)
+    #     ref_output[local_expert_id, :num_actual_tokens, :] = (
+    #         workspace2 @ w2_local.transpose(0, 1)
+    #     )
     
-    return ref_output
+    # return ref_output
 
 def test_trtllm_fp4_executor():
     torch.manual_seed(42)
