@@ -163,9 +163,9 @@ def _generate_payload_and_weights(
             W.moe_s1: w13_scale,
             W.moe_s2: w2_scale,
             "w13_input_scale": w13_input_scale,
-            "w13_scale_2": w13_scale_2,
+            "w13_weight_scale_2": w13_scale_2,
             "w2_input_scale": w2_input_scale,
-            "w2_scale_2": w2_scale_2,
+            "w2_weight_scale_2": w2_scale_2,
         }
         return payload, weights
 
