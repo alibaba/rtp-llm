@@ -149,7 +149,8 @@ def git_deps():
             "//3rdparty/flashinfer:0005-update-add-mla-attn-test-impl-mla-write-kvcache.patch",
             "//3rdparty/flashinfer:0006-add-mla-dispatch-inc.patch",
             "//3rdparty/flashinfer:0007-fix-nan.patch",
-            "//3rdparty/flashinfer:0008-enable-pdl.patch"
+            "//3rdparty/flashinfer:0008-enable-pdl.patch",
+            "//3rdparty/flashinfer:0009-sp-sample.patch"
         ],
     )
 
