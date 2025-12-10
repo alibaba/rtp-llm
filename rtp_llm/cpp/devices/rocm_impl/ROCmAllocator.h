@@ -61,7 +61,8 @@ public:
         ROCM_CHECK(hipDeviceGetAttribute(
             &_enable_virtual_mem_allocation, hipDeviceAttributeVirtualMemoryManagementSupported, _device_id));
 
-        vmem_allocations_ = std::make_unique<std::unordered_map<void*, VmemBlock>>();
+        _enable_virtual_mem_allocation = false;
+        vmem_allocations_              = std::make_unique<std::unordered_map<void*, VmemBlock>>();
     }
 
     /**
