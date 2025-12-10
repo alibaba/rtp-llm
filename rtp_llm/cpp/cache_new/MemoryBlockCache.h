@@ -42,7 +42,7 @@ public:
 
     size_t size() const;
 
-    std::vector<CacheItem> clear();
+    std::vector<CacheItem> steal();
 
 private:
     mutable LRUCache<CacheKeyType, CacheItem> lru_cache_;

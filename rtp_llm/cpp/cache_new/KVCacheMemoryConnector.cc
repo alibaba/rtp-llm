@@ -729,7 +729,7 @@ void KVCacheMemoryConnector::clearCache() {
         RTP_LLM_LOG_WARNING("clear cache failed, block cache is null");
         return;
     }
-    const auto                                  cache_items = block_cache_->clear();
+    const auto                                  cache_items = block_cache_->steal();
     std::map<size_t, std::vector<BlockIdxType>> blocks_by_size;
     for (const auto& item : cache_items) {
         blocks_by_size[item.block_size].push_back(item.block_index);

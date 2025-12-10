@@ -50,11 +50,11 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
 
     if (total_blocks > 0) {
         // TODO(xinfei.sxf) fix it, after finshed and remote running commit.
-        FreeInfo free_info(batch_resource_, stream_->completeTokenIdsPtr(), reuseCache(), enableMemoryBlockCache());
-        free_info.request_id = stream_->streamId();
-
-        // TODO(chanyin): Handle cache insertion for reuse_cache case
-
+        FreeInfo free_info{batch_resource_,
+                           stream_->completeTokenIdsPtr(),
+                           stream_->streamId(),
+                           reuseCache(),
+                           enableMemoryBlockCache()};
         resource_context_.cache_manager->free(free_info);
     }
 

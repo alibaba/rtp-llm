@@ -156,11 +156,11 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
 void KVCacheManager::free(const FreeInfo& free_info) {
     RTP_LLM_CHECK(free_info.batch_kv_cache_resource && free_info.complete_token_ids);
     if (free_info.reuse_cache || free_info.enable_memory_cache) {
-        InsertInfo insert_info(free_info.batch_kv_cache_resource,
+        InsertInfo insert_info{free_info.batch_kv_cache_resource,
                                free_info.complete_token_ids,
                                /*is_resident*/ false,
                                free_info.reuse_cache,
-                               free_info.enable_memory_cache);
+                               free_info.enable_memory_cache};
         // free blocks inside
         insertIntoCache(insert_info);
         return;
@@ -180,7 +180,7 @@ void KVCacheManager::insertIntoCache(const InsertInfo& insert_info) {
     if (insert_info.enable_memory_cache) {
         // 拷贝一下batch resource, 外部可能会对batch resource中的blocks进行修改, 导致deleter中free时blocks未被释放
         auto     copy_batch_resource = std::make_shared<BatchKVCacheResource>(*(insert_info.batch_kv_cache_resource));
-        FreeInfo free_info(copy_batch_resource, insert_info.complete_token_ids);
+        FreeInfo free_info{copy_batch_resource, insert_info.complete_token_ids};
         auto deleter = [free_info, allocator = allocator_](KVCacheResourceV1* resource) { allocator->free(free_info); };
         std::shared_ptr<KVCacheResourceV1> resource(&(copy_batch_resource->batch_resource.at(0)), deleter);
         auto                               context = memory_connector_->asyncWrite(resource, nullptr);
@@ -188,7 +188,7 @@ void KVCacheManager::insertIntoCache(const InsertInfo& insert_info) {
             wait_cache_thread_pool_->pushTask([context]() { context->waitDone(); });
         }
     } else {
-        FreeInfo free_info(insert_info.batch_kv_cache_resource, insert_info.complete_token_ids);
+        FreeInfo free_info{insert_info.batch_kv_cache_resource, insert_info.complete_token_ids};
         allocator_->free(free_info);
     }
 }

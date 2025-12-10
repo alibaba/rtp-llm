@@ -62,9 +62,8 @@ BlockCache::CacheSnapshot BlockCache::cacheSnapshot(int64_t latest_version) cons
     return lru_cache_.cacheSnapshot(latest_version);
 }
 
-std::vector<BlockIdxType> BlockCacheV1::clear() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    std::vector<BlockIdxType>   block_indices;
+std::vector<BlockIdxType> BlockCache::steal() {
+    std::vector<BlockIdxType> block_indices;
     block_indices.reserve(lru_cache_.size());
     for (const auto& item : lru_cache_.items()) {
         block_indices.push_back(item.second.block_index);

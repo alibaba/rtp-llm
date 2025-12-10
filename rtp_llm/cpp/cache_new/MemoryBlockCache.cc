@@ -74,7 +74,7 @@ size_t MemoryBlockCache::size() const {
     return lru_cache_.size();
 }
 
-std::vector<MemoryBlockCache::CacheItem> MemoryBlockCache::clear() {
+std::vector<MemoryBlockCache::CacheItem> MemoryBlockCache::steal() {
     std::lock_guard<std::mutex> lock(mutex_);
     std::vector<CacheItem>      items;
     items.reserve(lru_cache_.size());
