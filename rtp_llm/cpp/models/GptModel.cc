@@ -115,13 +115,23 @@ rtp_llm::AttentionCommonInputs GptModel::prepareAttentionInputs(const GptModelIn
     const auto& input_lengths      = inputs.input_lengths;
     const auto& sequence_lengths   = inputs.sequence_lengths;
     const auto& prefix_lengths     = inputs.prefix_lengths;
-    const auto  decoder_batch_size = sequence_lengths->shape()[0];
-    const auto  context_batch_size = input_lengths->shape()[0] - decoder_batch_size;
-    const auto  max_context_seq_len =
+    const auto  decoder_batch_size = sequence_lengths ? sequence_lengths->shape()[0] : static_cast<size_t>(0);
+    const auto  context_batch_size =
+        input_lengths ? (input_lengths->shape()[0] - decoder_batch_size) : static_cast<size_t>(0);
+
+    RTP_LLM_LOG_INFO("prepareAttentionInputs: decoder_batch_size=%zu, context_batch_size=%zu, "
+                     "input_lengths=%s, sequence_lengths=%s, kv_cache_block_id=%s",
+                     decoder_batch_size,
+                     context_batch_size,
+                     input_lengths ? input_lengths->debugStringWithData<int32_t>().c_str() : "null",
+                     sequence_lengths ? sequence_lengths->debugStringWithData<int32_t>().c_str() : "null",
+                     inputs.kv_cache_block_id ? inputs.kv_cache_block_id->debugString().c_str() : "NULL");
+
+    const auto max_context_seq_len =
         context_batch_size ?
-             *std::max_element(input_lengths->data<int32_t>() + decoder_batch_size,
+            *std::max_element(input_lengths->data<int32_t>() + decoder_batch_size,
                               input_lengths->data<int32_t>() + decoder_batch_size + context_batch_size) :
-             0;
+            0;
     RTP_LLM_CHECK_WITH_INFO(!prefix_lengths || prefix_lengths->size() == context_batch_size,
                             "prefix_lengths size %d is not equal to context batch size %d.",
                             prefix_lengths->size(),
@@ -146,6 +156,17 @@ rtp_llm::AttentionCommonInputs GptModel::prepareAttentionInputs(const GptModelIn
                                  max_context_seq_len);
     device_->checkError();
 
+    {
+        auto cu_seqlens_buf = vector2Buffer(cu_seqlens_data);
+        RTP_LLM_LOG_INFO("prepareAttentionInputs cu_seqlens_data (size=%zu): %s",
+                         cu_seqlens_data.size(),
+                         cu_seqlens_buf->debugStringWithData<int32_t>().c_str());
+        auto padding_offset_buf = vector2Buffer(padding_offset_data);
+        RTP_LLM_LOG_INFO("prepareAttentionInputs padding_offset_data (size=%zu): %s",
+                         padding_offset_data.size(),
+                         padding_offset_buf->debugStringWithData<int32_t>().c_str());
+    }
+
     // RUNTIME_ASSERT_OP_ARG(
     //     (cu_seqlens_data[context_batch_size] + decoder_batch_size == inputs.combo_tokens->shape()[0]),
     //     "combo_tokens is not consistent with input lengths, "
@@ -169,14 +190,35 @@ rtp_llm::AttentionCommonInputs GptModel::prepareAttentionInputs(const GptModelIn
             kv_seqlens_data[i] = cu_kv_seqlens_data[i + 1] - cu_kv_seqlens_data[i];
         }
 
+        int32_t total_kv_len = cu_kv_seqlens_data[context_batch_size];
+        {
+            auto cu_kv_buf = vector2Buffer(cu_kv_seqlens_data);
+            RTP_LLM_LOG_INFO("prepareAttentionInputs cu_kv_seqlens_data (size=%zu, total_kv_len=%d): %s",
+                             cu_kv_seqlens_data.size(),
+                             total_kv_len,
+                             cu_kv_buf->debugStringWithData<int32_t>().c_str());
+            auto kv_seqlens_buf = vector2Buffer(kv_seqlens_data);
+            RTP_LLM_LOG_INFO("prepareAttentionInputs kv_seqlens_data (size=%zu): %s",
+                             kv_seqlens_data.size(),
+                             kv_seqlens_buf->debugStringWithData<uint32_t>().c_str());
+        }
+
         attention_inputs.cu_kv_seqlens =
             device_->clone({*vector2Buffer(cu_kv_seqlens_data), AllocationType::DEVICE, {"cu_kv_seqlens"}});
         attention_inputs.kv_seqlens =
             device_->clone({*vector2Buffer(kv_seqlens_data), AllocationType::DEVICE, {"kv_seqlens"}});
-        attention_inputs.context_total_kv_length = cu_kv_seqlens_data[context_batch_size];
+        attention_inputs.context_total_kv_length = total_kv_len;
     } else {
         attention_inputs.cu_kv_seqlens = attention_inputs.cu_seqlens;
         std::vector<uint32_t> kv_seqlens_data(context_batch_size, 0);
+        {
+            auto    kv_seqlens_buf = vector2Buffer(kv_seqlens_data);
+            int32_t total_kv_len   = cu_seqlens_data[context_batch_size];
+            RTP_LLM_LOG_INFO("prepareAttentionInputs kv_seqlens_data(no-prefix) (size=%zu, total_kv_len=%d): %s",
+                             kv_seqlens_data.size(),
+                             total_kv_len,
+                             kv_seqlens_buf->debugStringWithData<uint32_t>().c_str());
+        }
         attention_inputs.kv_seqlens =
             device_->clone({*vector2Buffer(kv_seqlens_data), AllocationType::DEVICE, {"kv_seqlens"}});
         attention_inputs.context_total_kv_length = cu_seqlens_data[context_batch_size];
@@ -1375,11 +1417,54 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(const GptLayerInputs&     
             attention_common_inputs.kv_cache->v_scale_buffer = v_scale_buffer_->index(layer_id);
         }
     }
+    // Debug kv cache相关信息，辅助排查 decode 阶段 KV 读取是否异常
+    if (attention_common_inputs.kv_cache) {
+        auto& kv_info = attention_common_inputs.kv_cache.value();
+        RTP_LLM_LOG_INFO("attention block kv_cache info, layer_id=%d, layer_num=%d, "
+                         "context_batch_size=%zu, decoder_batch_size=%zu, "
+                         "context_token_num=%zu, context_total_kv_length=%zu",
+                         layer_id,
+                         kv_info.layer_num,
+                         attention_common_inputs.context_batch_size,
+                         attention_common_inputs.decoder_batch_size,
+                         attention_common_inputs.context_token_num,
+                         attention_common_inputs.context_total_kv_length);
+
+        if (kv_info.kv_cache_block_id) {
+            RTP_LLM_LOG_INFO("attention block kv_cache_block_id shape: %s",
+                             kv_info.kv_cache_block_id->debugString().c_str());
+            // 只打印第一行 block_id，避免日志过大
+            auto first_row = kv_info.kv_cache_block_id->view(0, 1);
+            RTP_LLM_LOG_INFO("attention block kv_cache_block_id first row: %s",
+                             first_row.debugStringWithData<int32_t>().c_str());
+        } else {
+            RTP_LLM_LOG_INFO("attention block kv_cache_block_id is null");
+        }
+
+        if (kv_info.k_cache_buffer && kv_info.v_cache_buffer) {
+            RTP_LLM_LOG_INFO("attention block k_cache_buffer shape: %s", kv_info.k_cache_buffer->debugString().c_str());
+            RTP_LLM_LOG_INFO("attention block v_cache_buffer shape: %s", kv_info.v_cache_buffer->debugString().c_str());
+        } else {
+            RTP_LLM_LOG_INFO("attention block k/v_cache_buffer is null "
+                             "(k_cache_buffer=%d, v_cache_buffer=%d)",
+                             kv_info.k_cache_buffer != nullptr,
+                             kv_info.v_cache_buffer != nullptr);
+        }
+
+        if (attention_common_inputs.kv_seqlens) {
+            RTP_LLM_LOG_INFO("attention block kv_seqlens: %s",
+                             attention_common_inputs.kv_seqlens->debugStringWithData<int32_t>().c_str());
+        } else {
+            RTP_LLM_LOG_INFO("attention block kv_seqlens is null");
+        }
+    }
     if (lora_model_input) {
         attention_common_inputs.lora_input = lora_model_input->getAttentionLayerLoraInput(layer_id);
     }
     AttentionLayerOutput attn_output;
     if (device_->initParams().profile_debug_logging_config.check_nan) {
+        RTP_LLM_LOG_INFO(
+            "checkNAN before attentionLayer, layer_id=%d, hidden: %s", layer_id, hidden->debugString().c_str());
         (void)device_->checkNAN(*hidden);
     }
     auto attn_params =
@@ -1395,6 +1480,22 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(const GptLayerInputs&     
                               description_.compute_type,
                               enable_sp,
                               inputs.pad_token_num});
+
+    RTP_LLM_LOG_INFO(
+        "attentionLayer entry, layer_id=%d, enable_sp=%d, pad_token_num=%zu, "
+        "decoder_batch_size=%zu, context_batch_size=%zu, "
+        "cu_seqlens_shape=%s, cu_kv_seqlens_shape=%s, kv_seqlens_shape=%s, kv_cache_block_id_shape=%s",
+        layer_id,
+        static_cast<int>(enable_sp),
+        inputs.pad_token_num,
+        attention_common_inputs.decoder_batch_size,
+        attention_common_inputs.context_batch_size,
+        attention_common_inputs.cu_seqlens ? attention_common_inputs.cu_seqlens->debugString().c_str() : "null",
+        attention_common_inputs.cu_kv_seqlens ? attention_common_inputs.cu_kv_seqlens->debugString().c_str() : "null",
+        attention_common_inputs.kv_seqlens ? attention_common_inputs.kv_seqlens->debugString().c_str() : "null",
+        (attention_common_inputs.kv_cache && attention_common_inputs.kv_cache->kv_cache_block_id) ?
+            attention_common_inputs.kv_cache->kv_cache_block_id->debugString().c_str() :
+            "null");
     if (description_.attention_conf.use_mla && device_->mla_ops_type != rtp_llm::MlaOpsType::MHA) {
         attn_output = device_->mlaAttentionLayer(attn_params);
     } else {

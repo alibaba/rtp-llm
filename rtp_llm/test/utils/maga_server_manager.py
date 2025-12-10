@@ -151,6 +151,8 @@ class MagaServerManager(object):
             current_env["DG_JIT_CACHE_DIR"] = os.path.join(home_dir, ".deep_gemm")
 
         bazel_outputs_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", os.getcwd())
+        bazel_outputs_dir = "/home/liudu.ld/smoke_logs"
+
         if "MULTI_TASK_PROMPT" in current_env:
             current_env["MULTI_TASK_PROMPT"] = os.path.join(
                 os.getcwd(), current_env["MULTI_TASK_PROMPT"]

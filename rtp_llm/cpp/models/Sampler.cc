@@ -25,11 +25,39 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     (buffer_ptr.get() ? buffer_ptr->view((offset), (size)) : Buffer::emptyBuffer())
 
 #define SCOPED_UPDATE_BUFFER_SHAPE(buffer, ...)                                                                        \
-    const auto org_##buffer##_shape__ = buffer.shape();                                                                \
+    const auto        org_##buffer##_shape__ = buffer.shape();                                                         \
     autil::ScopeGuard guard_##buffer([&]() { buffer.updateShape(org_##buffer##_shape__); });                           \
     buffer.updateShape(__VA_ARGS__);
 
     preprocessLogits(inputs);
+
+    // Debug: 打印部分 logits 信息，帮助分析为何采样结果退化为固定 token
+    {
+        auto host_logits = device_->clone({*inputs.logits, AllocationType::HOST});
+        if (host_logits && host_logits->dim() == 2 && host_logits->type() == DataType::TYPE_FP32) {
+            size_t       batch_size       = host_logits->shape()[0];
+            size_t       vocab_size       = host_logits->shape()[1];
+            const float* data             = host_logits->data<float>();
+            size_t       max_batch_to_log = batch_size < 4 ? batch_size : 4;  // 只打印前几个 batch，避免日志过大
+            for (size_t b = 0; b < max_batch_to_log; ++b) {
+                const float* row          = data + b * vocab_size;
+                float        logit0       = row[0];
+                int          argmax_id    = 0;
+                float        argmax_logit = row[0];
+                for (size_t i = 1; i < vocab_size; ++i) {
+                    if (row[i] > argmax_logit) {
+                        argmax_logit = row[i];
+                        argmax_id    = static_cast<int>(i);
+                    }
+                }
+                RTP_LLM_LOG_INFO("sampler logits summary, batch[%zu], logit[0]=%.6f, argmax_id=%d, argmax_logit=%.6f",
+                                 b,
+                                 logit0,
+                                 argmax_id,
+                                 argmax_logit);
+            }
+        }
+    }
 
     uint64_t max_seq_len   = inputs.token_ids->shape()[1];
     auto     num_beams_in  = inputs.num_beams_in->data<uint64_t>();

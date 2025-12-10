@@ -121,6 +121,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
             lora_manager_->makeLoraModelInput(model_input.lora_ids, model_input.lora_input_lengths);
     }
     {
+        RTP_LLM_LOG_INFO("model_input: %s", model_input.debugString(true).c_str());
         bool force = device_->getDeviceProperties().tp_rank == 0 && enable_detail_log_;
         if (force) {
             RTP_LLM_LOG_INFO("model_input: %s", model_input.debugString(force).c_str());

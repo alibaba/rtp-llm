@@ -148,10 +148,8 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
 
         auto& kv_cache = *stream->kvCachePtr();
         if (enable_detail_log_) {
-            RTP_LLM_LOG_DEBUG("context kv_cache: %s", kv_cache.debugString().c_str());
             RTP_LLM_LOG_DEBUG("context stream: %s", stream->debugString().c_str());
         } else {
-            RTP_LLM_LOG_TRACE("context kv_cache: %s", kv_cache.debugString().c_str());
             RTP_LLM_LOG_TRACE("context stream: %s", stream->debugString().c_str());
         }
 
@@ -455,7 +453,8 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_gro
     const auto& model_output      = merge_outputs.model_output;
     const auto& sampler_output    = merge_outputs.sampler_output;
     const auto& new_all_token_ids = sampler_output.token_ids;
-    RTP_LLM_LOG_DEBUG("new_all_token_ids = [%s]", new_all_token_ids->debugStringWithData<int32_t>().c_str());
+    // 打印本轮所有 batch 的 token_ids，方便对比采样输出和后续 new_tokens
+    RTP_LLM_LOG_INFO("dispatch new_all_token_ids: %s", new_all_token_ids->debugStringWithData<int32_t>().c_str());
     const size_t token_stride         = new_all_token_ids->shape()[1];
     const size_t total_batch_size_out = stream_groups.totalSamplerBatchSizeOut();
     RTP_LLM_CHECK(total_batch_size_out == new_all_token_ids->shape()[0]);
@@ -537,6 +536,9 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_gro
             new_tokens->data<int32_t>()[i] =
                 new_all_token_ids->data<int32_t>()[(batch_idx_out + i) * token_stride + token_stride - 1];
         }
+        // 打印当前 stream 对应的 new_tokens，验证与 new_all_token_ids 的最后一列是否一致
+        RTP_LLM_LOG_INFO(
+            "stream [%ld] new_tokens: %s", stream->streamId(), new_tokens->debugStringWithData<int32_t>().c_str());
 
         BufferPtr batch_softmax_result;
         BufferPtr current_softmax_result;
