@@ -625,7 +625,7 @@ GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
         inputs.multimodal_features ?
             device_->clone({*inputs.text_tokens_mask, AllocationType::DEVICE, {"text_tokens_mask"}}) :
             nullptr;
-    const BufferPtr mm_feature_locs       = inputs.mm_features_locs ? inputs.mm_features_locs : nullptr;
+    const BufferPtr mm_features_locs       = inputs.mm_features_locs ? inputs.mm_features_locs : nullptr;
     const BufferPtr input_embeddings_locs = inputs.input_embeddings_locs ? inputs.input_embeddings_locs : nullptr;
 
     // word embedding lookup
@@ -652,6 +652,7 @@ GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
     hidden                     = output.hidden;
     device_->checkError();
     if (inputs.input_embeddings) {
+        printBufferData(*hidden, "before inputEmbedding hidden");
         hidden =
             device_->inputEmbedding({hidden,
                                      (OptionalConstVecBufferPtrRef)inputs.input_embeddings,
@@ -662,14 +663,10 @@ GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
     auto attn_dtype   = hidden_dtype;
 
     // pre layernorm
-    BufferPtr pre_decoder_residual = nullptr;
-    if (description_.act_qscheme != QScheme::NoQuantize && weights_.pre_decoder_layernorm) {
-        pre_decoder_residual = device_->allocateBufferLike(*hidden);
-    }
     printBufferData(*hidden, "before decoder layernorm hidden");
     if (weights_.pre_decoder_layernorm) {
         auto decoder_input = device_->layernorm(LayernormParams(hidden,
-                                                                pre_decoder_residual,
+                                                                nullptr,
                                                                 *weights_.pre_decoder_layernorm,
                                                                 nullopt,
                                                                 nullopt,
@@ -677,95 +674,40 @@ GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
                                                                 0.f,
                                                                 description_.layernorm_eps,
                                                                 true,
-                                                                pre_decoder_residual != nullptr,
+                                                                false,
                                                                 description_.norm_type,
-                                                                description_.act_qscheme));
+                                                                QScheme::NoQuantize));
         hidden             = std::move(decoder_input.output);
+        device_->checkError();
     }
-    device_->checkError();
-    if (hidden != nullptr)
-        printBufferData(*hidden, "before embedding hidden");
-    if (mm_feature_locs != 0)
-        printBufferData(*mm_feature_locs, "mm_feature_locs");
+
+    if (mm_features_locs != 0)
+        printBufferData(*mm_features_locs, "mm_features_locs");
+
     if (inputs.multimodal_features) {
-        std::vector<rtp_llm::BufferPtr> mm_features;
-        bool                            features_need_quantize = false;
-        if (inputs.multimodal_features.value()[0]->type() != hidden->type() && hidden->isQBuffer()) {
-            features_need_quantize                 = true;
-            ConstBufferPtr static_scale_reciprocal = nullptr;
-            if (description_.act_qscheme == QScheme::Qint8PerTensor && weights_.pre_decoder_layernorm) {
-                auto norm_weight        = weights_.pre_decoder_layernorm;
-                static_scale_reciprocal = norm_weight->static_scale_reciprocal;
-            }
-            for (auto& mm_feature : inputs.multimodal_features.value()) {
-                auto quantized_feature = device_->quantize(
-                    {*mm_feature,
-                     hidden->type(),
-                     1,
-                     description_.act_qscheme,
-                     nullopt,
-                     nullopt,
-                     nullopt,
-                     static_scale_reciprocal ? (OptionalConstBufferRef)*static_scale_reciprocal : nullopt});
-                if (quantized_feature->isQBuffer()) {
-                    quantized_feature->updateTypeAndShape(QBufferDtype2BufferDtype(quantized_feature->type()),
-                                                          quantized_feature->shape());
-                }
-                mm_features.emplace_back(quantized_feature);
-            }
-        }
-
-        bool hidden_is_qbuffer = false;
-        DataType hidden_dt = hidden->type();
-        if (hidden->isQBuffer()) {
-            hidden_is_qbuffer = true;
-            hidden->updateTypeAndShape(QBufferDtype2BufferDtype(hidden_dt), hidden->shape());
-        }
-        bool pre_decoder_residual_quantized = false;
-        DataType pre_decoder_residual_dt = DataType::TYPE_INVALID;
-        if (pre_decoder_residual) {
-            pre_decoder_residual_quantized = pre_decoder_residual->isQBuffer() ? true : false;
-            pre_decoder_residual_dt = pre_decoder_residual->type();
-            if (pre_decoder_residual_quantized) {
-                RUNTIME_ASSERT_OP_ARG(pre_decoder_residual_dt == hidden_dt,
-                "data type of pre_decoder_residual %d and hidden %d are not equal",
-                pre_decoder_residual_dt, hidden_dt);
-                pre_decoder_residual->updateTypeAndShape(QBufferDtype2BufferDtype(pre_decoder_residual_dt),
-                                                         pre_decoder_residual->shape());
-            }
-        }
-
-        hidden = device_->multimodalEmbedding({hidden,
-                                               features_need_quantize ?
-                                                   (OptionalConstVecBufferPtrRef)mm_features :
-                                                   (OptionalConstVecBufferPtrRef)inputs.multimodal_features,
-                                               mm_feature_locs ? (OptionalConstBufferRef)*mm_feature_locs : nullopt});
-        if (hidden_is_qbuffer) {
-            hidden->updateTypeAndShape(hidden_dt, hidden->shape());
-        }
-        if (pre_decoder_residual) {
-            pre_decoder_residual = device_->multimodalEmbedding({pre_decoder_residual,
-                features_need_quantize ? (OptionalConstVecBufferPtrRef)mm_features :
-                                        (OptionalConstVecBufferPtrRef)inputs.multimodal_features,
-                mm_feature_locs ? (OptionalConstBufferRef)*mm_feature_locs : nullopt});
-            if (pre_decoder_residual_quantized) {
-                pre_decoder_residual->updateTypeAndShape(pre_decoder_residual_dt, pre_decoder_residual->shape());
-            }
-        }
+        printBufferData(*hidden, "before multimodalEmbedding hidden");
+        hidden = device_->multimodalEmbedding({hidden, (OptionalConstVecBufferPtrRef)inputs.multimodal_features,
+            mm_features_locs ? (OptionalConstBufferRef)*mm_features_locs : nullopt});
+        device_->checkError();
     }
 
-    if (description_.act_qscheme == QScheme::Qint8PerTensor && !(hidden->isQBuffer())) {
-        auto norm_weight             = weights_.pre_decoder_layernorm;
+    BufferPtr pre_decoder_residual = nullptr;
+    if (description_.act_qscheme != QScheme::NoQuantize && weights_.pre_decoder_layernorm) {
+        pre_decoder_residual = hidden;
+    }
+
+    if ((description_.act_qscheme == QScheme::Qint8PerTensor ||
+         description_.act_qscheme == QScheme::Qfp8PerTensor) && !(hidden->isQBuffer()) &&
+         weights_.pre_decoder_layernorm) {
+        auto norm_weight = weights_.pre_decoder_layernorm;
         auto static_scale_reciprocal = norm_weight->static_scale_reciprocal;
-        hidden =
-            device_->quantize({*hidden,
-                               DataType::TYPE_INT8,
-                               1,
-                               description_.act_qscheme,
-                               nullopt,
-                               nullopt,
-                               nullopt,
-                               static_scale_reciprocal ? (OptionalConstBufferRef)*static_scale_reciprocal : nullopt});
+        auto static_scale = norm_weight->static_scale;
+        hidden = device_->quantize(
+                     {*hidden, description_.act_qscheme == QScheme::Qint8PerTensor ?
+                          DataType::TYPE_INT8 : DataType::TYPE_FP8_E4M3, 1,
+                      description_.act_qscheme, nullopt, nullopt,
+                      static_scale ? (OptionalConstBufferRef)*static_scale : nullopt,
+                      static_scale_reciprocal ? (OptionalConstBufferRef)*static_scale_reciprocal : nullopt});
     }
 
     device_->checkError();
