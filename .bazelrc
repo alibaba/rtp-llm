@@ -144,6 +144,7 @@ build:rocm --copt -Wno-tautological-compare # grpc
 build:rocm --copt="-Wno-array-parameter"
 build:rocm --copt="-Wno-error=array-bounds"
 build:rocm --copt="-Wno-error=unused-result"
+build:rocm --copt="-Wno-deprecated-builtins"  # absl uses deprecated __has_trivial_assign
 build:rocm --copt="-D_GLIBCXX_USE_CXX11_ABI=1"
 #build:rocm --action_env ROCM_HIPBLASLT_CONFIG="/ali/rtp-llm/gemm_config_bert61.csv" # blasLt config
 #build:rocm --action_env ROCM_DISABLE_HIPBLASLT=1 # to use blas only
