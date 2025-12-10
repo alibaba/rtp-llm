@@ -144,7 +144,7 @@ def _generate_payload_and_weights(
         w2 = load_pt("process_weights_after_loading_gemm2_weights_fp4_shuffled.pt", (NUM_EXPERTS, HIDDEN_SIZE, MOE_INTERMEDIATE_SIZE / 2), torch.uint8)
         w2_scale = load_pt("process_weights_after_loading_gemm2_scales_fp4_shuffled.pt", (NUM_EXPERTS, HIDDEN_SIZE, MOE_INTERMEDIATE_SIZE / NVFP4_BLOCK_SIZE), torch.float8_e4m3fn)
         w2_scale_2 = load_pt("process_weights_after_loading_w2_weight_scale_2.pt", (NUM_EXPERTS,), torch.float32)
-        rmute_info, topk_weights = routing_reference_renormalize(
+        permute_info, topk_weights = routing_reference_renormalize(
             routing_logits, TOP_K, NUM_EXPERTS, 8
         )
         topk_ids = permute_info["topKIndices"].to(torch.int32)
