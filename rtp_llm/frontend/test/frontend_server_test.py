@@ -18,7 +18,7 @@ class FakePipelinResponse(BaseModel):
 
 
 class FakeFrontendWorker(object):
-    def generate_response(self, prompt: str, *args: Any, **kwargs: Any):
+    def generate(self, prompt: str, *args: Any, **kwargs: Any):
         response_generator = self._create_generation_streams(prompt, *args, **kwargs)
         return CompleteResponseAsyncGenerator(
             response_generator, CompleteResponseAsyncGenerator.get_last_value

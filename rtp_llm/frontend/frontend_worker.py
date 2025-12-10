@@ -527,15 +527,15 @@ class FrontendWorker:
             request_id, token_ids, mm_inputs, generate_config, **kwargs
         )
 
-    def _truncate_by_stop_token_ids(
+    def process_stop_id(
         self,
         generate_config: GenerateConfig,
         generate_output: GenerateOutput,
-        tokens: List[int],
+        tokens,
         stop_word_ids: List[List[int]],
         stop_word_id_slices: List[List[int]],
-    ) -> List[int]:
-        """Truncate tokens by stop word IDs"""
+    ):
+        """Process stop word IDs (compatible with Pipeline)"""
         if generate_config.print_stop_words:
             return tokens
 
@@ -544,16 +544,18 @@ class FrontendWorker:
         )
         return truncate_token_with_stop_word_id(tokens, stop_patterns)
 
-    def _truncate_by_stop_strings(
+    def process_stop_str(
         self,
         generate_config: GenerateConfig,
         generate_output: GenerateOutput,
         text: str,
+        all_text: str,
         stop_word_str_list: List[str],
         stop_word_str_slices: List[str],
         token_buffer: str,
-    ) -> Tuple[str, str]:
-        """Truncate text by stop word strings"""
+        **kwargs: Any,
+    ):
+        """Process stop word strings (compatible with Pipeline)"""
         if generate_config.return_incremental:
             text = append_string_field(token_buffer, text)
 
@@ -746,7 +748,7 @@ class FrontendWorker:
             zip(tokens_lists, generate_outputs.generate_outputs)
         ):
             output_lens.append(len(tokens_list))
-            processed_tokens = self._truncate_by_stop_token_ids(
+            processed_tokens = self.process_stop_id(
                 generate_config,
                 generate_output,
                 tokens_list,
@@ -768,10 +770,11 @@ class FrontendWorker:
         for i, (text, generate_output) in enumerate(
             zip(decoded_texts, generate_outputs.generate_outputs)
         ):
-            processed_text, _ = self._truncate_by_stop_strings(
+            processed_text, _ = self.process_stop_str(
                 generate_config,
                 generate_output,
                 text,
+                "",
                 stop_word_str_list,
                 stop_word_str_slices,
                 "",
@@ -784,6 +787,104 @@ class FrontendWorker:
 
         return final_texts, output_lens
 
+    def decode_incremental_tokens(
+        self,
+        generate_config: GenerateConfig,
+        generate_outputs: GenerateOutputs,
+        stop_word_str_list: List[str],
+        stop_word_str_slices: List[str],
+        stop_word_ids: List[int],
+        stop_word_id_slices: List[int],
+        decoding_states: List[DecodingState],
+        token_buffers: List[str],
+        ouput_tokens_list: List[torch.Tensor],
+        **kwargs: Any,
+    ) -> Tuple[
+        List[str], List[int], List[DecodingState], List[str], List[torch.Tensor]
+    ]:
+        """Public API: Decode tokens with incremental decoding (compatible with Pipeline)"""
+        num_outputs = len(generate_outputs.generate_outputs)
+
+        # Initialize states
+        token_buffers = token_buffers or [""] * num_outputs
+        decoding_states = decoding_states or [
+            DecodingState() for _ in range(num_outputs)
+        ]
+        ouput_tokens_list = ouput_tokens_list or [
+            torch.empty(0, dtype=torch.int32) for _ in range(num_outputs)
+        ]
+
+        # Incrementally decode each output
+        newly_decoded_texts = []
+        all_texts = []
+        output_lens = []
+
+        for i, generate_output in enumerate(generate_outputs.generate_outputs):
+            # Accumulate tokens
+            ouput_tokens_list[i] = torch.cat(
+                (ouput_tokens_list[i], generate_output.output_ids), dim=1
+            )
+            tokens_np = ouput_tokens_list[i].cpu().numpy().flatten()
+
+            # Handle EOS
+            if not generate_config.ignore_eos:
+                tokens_list = remove_padding_eos_with_numpy(
+                    tokens_np, self._special_tokens.eos_token_id
+                ).tolist()
+            else:
+                tokens_list = tokens_np.tolist()
+
+            output_lens.append(len(tokens_list))
+
+            # Truncate stop word tokens
+            processed_tokens = self.process_stop_id(
+                generate_config,
+                generate_output,
+                tokens_list,
+                stop_word_ids,
+                stop_word_id_slices,
+            )
+
+            # Incremental decoding
+            new_text = IncrementDecodingUtils.detokenize_incrementally(
+                self.tokenizer, processed_tokens, decoding_states[i]
+            )
+            decoding_states[i].all_text += new_text
+
+            text_to_return = (
+                new_text
+                if generate_config.return_incremental
+                else decoding_states[i].all_text
+            )
+            newly_decoded_texts.append(text_to_return)
+            all_texts.append(decoding_states[i].all_text)
+
+        # Truncate stop word strings and add prefix
+        generate_texts = []
+        for i in range(num_outputs):
+            text, token_buffers[i] = self.process_stop_str(
+                generate_config,
+                generate_outputs.generate_outputs[i],
+                newly_decoded_texts[i],
+                all_texts[i],
+                stop_word_str_list,
+                stop_word_str_slices,
+                token_buffers[i],
+            )
+
+            if generate_config.out_prefix:
+                text = generate_config.out_prefix + text
+
+            generate_texts.append(text)
+
+        return (
+            generate_texts,
+            output_lens,
+            decoding_states,
+            token_buffers,
+            ouput_tokens_list,
+        )
+
     async def decode_streaming_tokens(
         self,
         output_generator: AsyncGenerator[GenerateOutputs, None],
@@ -794,45 +895,36 @@ class FrontendWorker:
         stop_word_id_slices: List[int],
         **kwargs: Any,
     ) -> AsyncGenerator[GenerateResponse, None]:
-        """Streaming incremental token decoding"""
+        """Decode tokens incrementally with streaming"""
         decoding_states: List[DecodingState] = []
         output_tokens_list: List[torch.Tensor] = []
         token_buffers: List[str] = []
         generate_outputs_cache = GenerateOutputs()
 
         async for generate_outputs in output_generator:
-            # Update cache (keep finished outputs)
+            begin_time = current_time_ms()
+
+            # Update cache
             if not generate_outputs_cache.generate_outputs:
                 generate_outputs_cache.generate_outputs = (
                     generate_outputs.generate_outputs
                 )
             else:
                 generate_outputs_cache.generate_outputs = [
-                    (
-                        cached_out
-                        if cached_out.finished
-                        else generate_outputs.generate_outputs[i]
-                    )
-                    for i, cached_out in enumerate(
-                        generate_outputs_cache.generate_outputs
-                    )
+                    out if out.finished else generate_outputs.generate_outputs[i]
+                    for i, out in enumerate(generate_outputs_cache.generate_outputs)
                 ]
 
-            # Decode tokens
-            begin_time = current_time_ms()
-
+            # Initialize states on first call
             num_outputs = len(generate_outputs_cache.generate_outputs)
+            if not decoding_states:
+                decoding_states = [DecodingState() for _ in range(num_outputs)]
+                token_buffers = [""] * num_outputs
+                output_tokens_list = [
+                    torch.empty(0, dtype=torch.int32) for _ in range(num_outputs)
+                ]
 
-            # Initialize states
-            token_buffers = token_buffers or [""] * num_outputs
-            decoding_states = decoding_states or [
-                DecodingState() for _ in range(num_outputs)
-            ]
-            output_tokens_list = output_tokens_list or [
-                torch.empty(0, dtype=torch.int32) for _ in range(num_outputs)
-            ]
-
-            # Incrementally decode each output
+            # Incrementally decode
             newly_decoded_texts = []
             all_texts = []
             output_lens = []
@@ -886,6 +978,7 @@ class FrontendWorker:
                     generate_config,
                     generate_outputs_cache.generate_outputs[i],
                     newly_decoded_texts[i],
+                    all_texts[i],
                     stop_word_str_list,
                     stop_word_str_slices,
                     token_buffers[i],

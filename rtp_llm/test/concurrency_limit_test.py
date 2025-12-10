@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from rtp_llm.distribute.worker_info import g_worker_info
 from rtp_llm.frontend.frontend_app import FrontendApp
 from rtp_llm.frontend.frontend_server import FrontendServer, FrontendWorker
-from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
+from rtp_llm.frontend.openai_endpoint import OpenaiEndpoint
 from rtp_llm.server.backend_app import BackendApp
 from rtp_llm.server.backend_server import BackendServer
 from rtp_llm.utils.complete_response_async_generator import (

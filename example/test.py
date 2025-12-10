@@ -4,10 +4,10 @@ import os
 import rtp_llm.models
 from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.distribute.worker_info import g_worker_info, update_master_info
+from rtp_llm.frontend.frontend_worker import FrontendWorker
+from rtp_llm.frontend.openai_endpoint import OpenaiEndpoint
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.openai.api_datatype import ChatCompletionRequest, ChatMessage, RoleEnum
-from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
-from rtp_llm.pipeline import Pipeline
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.test.utils.port_util import PortsContext
 
@@ -27,18 +27,21 @@ async def main():
         )
 
         backend_rpc_server_visitor = BackendRPCServerVisitor(model.config, False)
-        pipeline = Pipeline(model.config, model.tokenizer, backend_rpc_server_visitor)
+        frontend_worker = FrontendWorker(
+            model.config, model.tokenizer, backend_rpc_server_visitor
+        )
 
         # usual request
-        for res in pipeline(
-            "<|im_start|>user\nhello, what's your name<|im_end|>\n<|im_start|>assistant\n",
-            max_new_tokens=100,
-        ):
+        gen = frontend_worker.generate_async(
+            prompt="<|im_start|>user\nhello, what's your name<|im_end|>\n<|im_start|>assistant\n",
+            generate_config={"max_new_tokens": 100},
+        )
+        async for res in gen:
             print(res.generate_texts)
 
         # openai request
         openai_endpoint = OpenaiEndpoint(
-            model.config, model.tokenizer, pipeline.backend_rpc_server_visitor
+            model.config, model.tokenizer, backend_rpc_server_visitor
         )
         messages = [
             ChatMessage(

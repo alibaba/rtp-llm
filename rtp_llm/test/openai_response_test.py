@@ -14,6 +14,7 @@ from typing_extensions import override
 
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.frontend.openai_endpoint import OpenaiEndpoint
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.frontend.tokenizer_factory.tokenizers.tokenization_qwen import (
@@ -36,7 +37,6 @@ from rtp_llm.openai.api_datatype import (
     GPTToolDefinition,
     RoleEnum,
 )
-from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.openai.renderer_factory import ChatRendererFactory, RendererParams
 from rtp_llm.openai.renderers import custom_renderer
 from rtp_llm.openai.renderers.chatglm45_renderer import ChatGlm45Renderer
@@ -329,7 +329,9 @@ class BaseToolCallTestSuite:
     def _validate_merged_result(self, merged_result):
         """验证合并后的结果 - 通用验证逻辑"""
         choice = merged_result.choices[0]
-        assert choice.finish_reason == FinisheReason.tool_calls, f"got finish_reason: {choice.finish_reason}"
+        assert (
+            choice.finish_reason == FinisheReason.tool_calls
+        ), f"got finish_reason: {choice.finish_reason}"
         delta = choice.delta
         assert delta.role == RoleEnum.assistant
         self._assert_tool_call_response(delta)

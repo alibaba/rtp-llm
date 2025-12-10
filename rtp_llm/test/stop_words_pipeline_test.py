@@ -3,7 +3,7 @@ from unittest import TestCase, main
 
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.pipeline import Pipeline
+from rtp_llm.frontend.frontend_worker import FrontendWorker
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.utils.base_model_datatypes import GenerateOutput
 from rtp_llm.utils.word_util import get_stop_word_slices
@@ -17,7 +17,7 @@ class StopWordTest(TestCase):
             head_num=1, size_per_head=128, layer_num=1, max_seq_len=32, vocab_size=1024
         )
         self.backend_rpc_server_visitor = BackendRPCServerVisitor(self.config, False)
-        self.pipeline = Pipeline(
+        self.frontend_worker = FrontendWorker(
             self.config,
             None,
             self.backend_rpc_server_visitor,
@@ -40,7 +40,7 @@ class StopWordTest(TestCase):
         generate_output = GenerateOutput(finished=is_final_response)
         stop_word_str_slices = get_stop_word_slices(stop_word_str_list)
 
-        actual_text, actual_token_buffer = self.pipeline.process_stop_str(
+        actual_text, actual_token_buffer = self.frontend_worker.process_stop_str(
             generate_config,
             generate_output,
             text,

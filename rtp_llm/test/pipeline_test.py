@@ -5,9 +5,9 @@ import torch
 
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.frontend.frontend_worker import FrontendWorker
 from rtp_llm.frontend.tokenizer_factory.tokenizer_utils import DecodingState
 from rtp_llm.frontend.tokenizer_factory.tokenizers.base_tokenizer import BaseTokenizer
-from rtp_llm.pipeline.pipeline import Pipeline
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.utils.base_model_datatypes import GenerateOutput, GenerateOutputs
 
@@ -56,7 +56,7 @@ class MockTokenizer(BaseTokenizer):
         return {}
 
 
-class PipelineDecodeTest(unittest.TestCase):
+class frontend_workerDecodeTest(unittest.TestCase):
 
     def setUp(self):
         """Set up test fixtures"""
@@ -74,8 +74,8 @@ class PipelineDecodeTest(unittest.TestCase):
         self.backend_rpc_server_visitor = BackendRPCServerVisitor(
             self.model_config, False
         )
-        # Create pipeline instance
-        self.pipeline = Pipeline(
+        # Create frontend_worker instance
+        self.frontend_worker = FrontendWorker(
             model_config=self.model_config,
             tokenizer=self.tokenizer,
             backend_rpc_server_visitor=self.backend_rpc_server_visitor,
@@ -99,7 +99,7 @@ class PipelineDecodeTest(unittest.TestCase):
 
         # Call the method
         final_texts, output_lens, output_tokens_list = (
-            self.pipeline.decode_non_incremental_tokens(
+            self.frontend_worker.decode_non_incremental_tokens(
                 generate_config=generate_config,
                 generate_outputs=generate_outputs,
                 stop_word_str_list=[],
@@ -137,7 +137,7 @@ class PipelineDecodeTest(unittest.TestCase):
 
         # Call the method
         final_texts, output_lens, output_tokens_list = (
-            self.pipeline.decode_non_incremental_tokens(
+            self.frontend_worker.decode_non_incremental_tokens(
                 generate_config=generate_config,
                 generate_outputs=generate_outputs,
                 stop_word_str_list=["C"],
@@ -177,7 +177,7 @@ class PipelineDecodeTest(unittest.TestCase):
         generate_outputs = GenerateOutputs([output1, output2])
         # Call the method
         final_texts, output_lens, output_tokens_list = (
-            self.pipeline.decode_non_incremental_tokens(
+            self.frontend_worker.decode_non_incremental_tokens(
                 generate_config=generate_config,
                 generate_outputs=generate_outputs,
                 stop_word_str_list=[],
@@ -212,7 +212,7 @@ class PipelineDecodeTest(unittest.TestCase):
 
         # Call the method with empty initial states
         final_texts, output_lens, decoding_states, token_buffers, output_tokens_list = (
-            self.pipeline.decode_incremental_tokens(
+            self.frontend_worker.decode_incremental_tokens(
                 generate_config=generate_config,
                 generate_outputs=generate_outputs,
                 stop_word_str_list=[],
@@ -252,7 +252,7 @@ class PipelineDecodeTest(unittest.TestCase):
 
         # Call the method for first step
         final_texts, output_lens, decoding_states, token_buffers, output_tokens_list = (
-            self.pipeline.decode_incremental_tokens(
+            self.frontend_worker.decode_incremental_tokens(
                 generate_config=generate_config,
                 generate_outputs=generate_outputs1,
                 stop_word_str_list=[],
@@ -273,7 +273,7 @@ class PipelineDecodeTest(unittest.TestCase):
 
         # Call the method for second step with previous states
         final_texts, output_lens, decoding_states, token_buffers, output_tokens_list = (
-            self.pipeline.decode_incremental_tokens(
+            self.frontend_worker.decode_incremental_tokens(
                 generate_config=generate_config,
                 generate_outputs=generate_outputs2,
                 stop_word_str_list=[],
@@ -315,7 +315,7 @@ class PipelineDecodeTest(unittest.TestCase):
 
         # Call the method
         final_texts, output_lens, decoding_states, token_buffers, output_tokens_list = (
-            self.pipeline.decode_incremental_tokens(
+            self.frontend_worker.decode_incremental_tokens(
                 generate_config=generate_config,
                 generate_outputs=generate_outputs,
                 stop_word_str_list=["B"],
@@ -349,7 +349,7 @@ class PipelineDecodeTest(unittest.TestCase):
         stop_word_id_slices = [[3]]
 
         # Call the method
-        result = self.pipeline.process_stop_id(
+        result = self.frontend_worker.process_stop_id(
             generate_config, generate_output, tokens, stop_word_ids, stop_word_id_slices
         )
 
@@ -375,7 +375,7 @@ class PipelineDecodeTest(unittest.TestCase):
         token_buffer = ""
 
         # Call the method
-        result_text, result_buffer = self.pipeline.process_stop_str(
+        result_text, result_buffer = self.frontend_worker.process_stop_str(
             generate_config,
             generate_output,
             text,
@@ -408,7 +408,7 @@ class PipelineDecodeTest(unittest.TestCase):
 
         # Call the method
         final_texts, output_lens, output_tokens_list = (
-            self.pipeline.decode_non_incremental_tokens(
+            self.frontend_worker.decode_non_incremental_tokens(
                 generate_config=generate_config,
                 generate_outputs=generate_outputs,
                 stop_word_str_list=[],
@@ -444,7 +444,7 @@ class PipelineDecodeTest(unittest.TestCase):
 
         # Call the method
         final_texts, output_lens, decoding_states, token_buffers, output_tokens_list = (
-            self.pipeline.decode_incremental_tokens(
+            self.frontend_worker.decode_incremental_tokens(
                 generate_config=generate_config,
                 generate_outputs=generate_outputs,
                 stop_word_str_list=[],
