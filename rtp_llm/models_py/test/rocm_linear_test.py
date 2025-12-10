@@ -5,27 +5,7 @@ import torch
 from torch import dtype as _dtype
 
 from rtp_llm.models_py.modules import Linear, LinearTorch
-
-
-def shuffle_weight(x: torch.Tensor, layout=(16, 16), use_int4=False) -> torch.Tensor:
-    # Hardcode BLOCK_K and BLOCK_N
-    x_type = x.dtype
-    if hasattr(torch, "float4_e2m1fn_x2") and x_type == torch.float4_e2m1fn_x2:
-        x = x.view(torch.uint8)
-
-    IN, IK = layout
-    BK = IK * 2
-    K = 16 // x.element_size() if not use_int4 else 32
-    BN = IN
-    assert x.shape[-2] % BN == 0, f"{x.shape[-2]} % {BN} == {x.shape[-2] % BN }"
-    assert x.shape[-1] % BK == 0, f"{x.shape[-1]} % {BK} == {x.shape[-1] % BK }"
-
-    x_ = x
-    x_ = x_.view(-1, x.shape[-2] // BN, BN, x.shape[-1] // BK, BK // K, K)
-    x_ = x_.permute(0, 1, 3, 4, 2, 5)
-    x_ = x_.contiguous()
-    x_ = x_.view(*x.shape)
-    return x_.view(x_type)
+from rtp_llm.utils.swizzle_utils import swizzle_tensor
 
 
 class LinearTest(TestCase):
@@ -39,7 +19,14 @@ class LinearTest(TestCase):
         (1024, 1024), (1024, 512), (1024, 2048),
         (2048, 2048), (2048, 1024), (2048, 4096),
         (4096, 4096), (4096, 2048), (4096, 8192),
-        (8192, 8192), (8192, 4096),
+        (8192, 8192), (8192, 4096),     
+        # (1280, 3420),  # gate_proj / up_proj
+        # (3420, 1280),  # down_proj
+        # (1280, 6840),  # up_gate_proj
+        (1280, 3840),  # qkv
+        (1280, 1280),  # proj
+        (5120, 5120),
+        (2048, 5120),
     ]
     HAS_BIAS = [True, False]
     SWIZZLE = [True, False]
@@ -61,12 +48,11 @@ class LinearTest(TestCase):
         x = torch.randn(num_tokens, k, dtype=dtype)
         torch_output = linear_torch(x)
         if swizzle:
-            # Follow aiter's approach: transpose to (n, k), shuffle, then transpose back to (k, n)
-            # This matches the format expected by hipb_mm with bpreshuffle=True
+            # Use RTP's swizzle_tensor: transpose to (n, k), swizzle, then transpose back to (k, n)
             w_t = w.t()  # (n, k)
-            w_t_shuffled = shuffle_weight(w_t, layout=(16, 16), use_int4=False)  # (n, k) shuffled
-            w_shuffled = w_t_shuffled.t()  # (k, n) - transpose back for hipb_mm
-            linear = Linear(w_shuffled, bias, bpreshuffle=True)
+            w_t_swizzled = swizzle_tensor(w_t, col_maj=False, MiM=16)  # (n, k) swizzled
+            w_swizzled = w_t_swizzled.t()  # (k, n) - transpose back for hipb_mm
+            linear = Linear(w_swizzled, bias, bpreshuffle=True)
         else:
             linear = Linear(w, bias, bpreshuffle=False)
         my_output = linear(x)
