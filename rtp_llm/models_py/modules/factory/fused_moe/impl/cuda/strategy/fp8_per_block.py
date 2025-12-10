@@ -96,20 +96,35 @@ class CudaFp8PerBlockEpLowLatencyStrategy(MoeStrategy):
             executor_class=DeepGemmMaskedExecutor,
         )
 
-    def priority(self, use_cuda_graph: bool) -> int:
+    def _priority_impl(self, use_cuda_graph: bool = False) -> int:
         """Override priority for low latency strategy
 
         Low latency strategy should have higher priority to be selected
         when multiple strategies can handle the same configuration.
 
+        Args:
+            use_cuda_graph: Whether CUDA graph is enabled (default: False)
+
         Returns:
             Priority value (higher than default calculated priority)
         """
-
         base_priority = self.get_attributes().calculate_priority()
         if use_cuda_graph:
             base_priority = base_priority + PRIORITY_BONUS
         return base_priority
+
+    @property
+    def priority(self):
+        """Strategy priority (automatically calculated from Router and Executor types)
+
+        Can be accessed directly: .priority (returns PriorityCallable, can be used as int)
+        Or called with parameter: .priority(use_cuda_graph=True) (returns int with provided value)
+        """
+        from rtp_llm.models_py.modules.factory.fused_moe.defs.strategy_base import (
+            PriorityCallable,
+        )
+
+        return PriorityCallable(self._priority_impl, default_use_cuda_graph=False)
 
 
 class CudaFp8PerBlockEpNormalStrategy(MoeStrategy):
