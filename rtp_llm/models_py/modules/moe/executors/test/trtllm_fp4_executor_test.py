@@ -272,6 +272,8 @@ def _generate_ref_output(
         
         ref_output[token_idx] = token_output[0]
     
+    print(output)
+    print(ref_output)
     torch.testing.assert_close(output, ref_output, rtol=2e-2, atol=1e-5)
     assert 0
     return ref_output
