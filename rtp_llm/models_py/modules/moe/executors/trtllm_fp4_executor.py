@@ -8,13 +8,9 @@ from rtp_llm.models_py.modules.moe.fused_moe import (
     ExpertForwardPayload,
     FusedMoeExpertExecutor,
 )
-# from rtp_llm.models_py.modules.factory.fused_moe.quant_config import FusedMoEQuantConfig
 from rtp_llm.models_py.modules.moe.utils import FusedMoEQuantConfig
-# from rtp_llm.models_py.modules.factory.fused_moe.type import ExecutorType
-from rtp_llm.async_decoder_engine.engine_creator import ExecutorType
 from rtp_llm.utils.model_weight import W
 
-# Try to import trtllm_fp4_block_scale_routed_moe from flashinfer
 from flashinfer import (
     fp4_quantize,
 )
@@ -23,11 +19,6 @@ from flashinfer.fused_moe import (
     trtllm_fp4_block_scale_routed_moe,
 )
 from flashinfer.utils import device_support_pdl
-
-# NVFP4 constants
-FLOAT8_E4M3_MAX = 448.0
-FLOAT4_E2M1_MAX = 6.0
-NVFP4_BLOCK_SIZE = 16
 
 
 class TrtllmFp4Executor(FusedMoeExpertExecutor):
@@ -43,17 +34,25 @@ class TrtllmFp4Executor(FusedMoeExpertExecutor):
         self.w2 = weights.get(W.moe_w2, None)
         self.w1_scale = weights.get(W.moe_s1, None)
         self.w2_scale = weights.get(W.moe_s2, None)
+        w13_input_scale = weights.get("w13_input_scale", None)
+        w13_weight_scale_2 = weights.get("w13_weight_scale_2", None)
+        w2_input_scale = weights.get("w2_input_scale", None)
+        w2_weight_scale_2 = weights.get("w2_weight_scale_2", None)
 
-        self.output1_scale_scalar = weights.get("output1_scale_scalar", None)
-        self.output1_scale_gate_scalar = weights.get("output1_scale_gate_scalar", None)
-        self.output2_scale_scalar = weights.get("output2_scale_scalar", None)
+        assert self.w1 is not None
+        assert self.w2 is not None
+        assert self.w1_scale is not None
+        assert self.w2_scale is not None
+        assert w13_input_scale is not None
+        assert w13_weight_scale_2 is not None
+        assert w2_input_scale is not None
+        assert w2_weight_scale_2 is not None
 
-        assert self.output1_scale_scalar is not None
-        assert self.output1_scale_gate_scalar is not None
-        assert self.output2_scale_scalar is not None
-        assert self.w1 is not None and self.w2 is not None
-        assert self.w1_scale is not None and self.w2_scale is not None
-        
+        self.expert_x_scale = 1 / w13_input_scale
+        self.g1_alphas = w13_input_scale * w13_weight_scale_2
+        self.g2_alphas = w2_input_scale * w2_weight_scale_2
+        self.g1_scale_c = self.g1_alphas / w2_input_scale
+
         self._enable_pdl = device_support_pdl(self.w1.device)
 
     @property
@@ -80,12 +79,12 @@ class TrtllmFp4Executor(FusedMoeExpertExecutor):
 
         topk = topk_ids.size(-1)
 
-        if activation.lower() == "silu" or activation.lower() == "swiglu":
-            gated_act_type = GatedActType.SwiGlu.value
-        elif activation.lower() == "geglu":
-            gated_act_type = GatedActType.GeGlu.value
-        else:
-            raise NotImplementedError(f"Activation {activation} not supported")
+        act_type_map = {
+            "silu": GatedActType.SwiGlu.value,
+            "swiglu": GatedActType.SwiGlu.value,
+            "geglu": GatedActType.GeGlu.value,
+        }
+        gated_act_type = act_type_map[activation.lower()]
 
         packed_tensor = (topk_ids.to(torch.int32) << 16) | topk_weights.to(
             torch.bfloat16
@@ -96,7 +95,7 @@ class TrtllmFp4Executor(FusedMoeExpertExecutor):
             torch.uint8: lambda x, x_scale: (x, x_scale),
         }
         hidden_states, hidden_states_scale = input_quantize_fn[payload.expert_x.dtype](
-            payload.expert_x, payload.expert_x_scale)
+            payload.expert_x, self.expert_x_scale)
 
         output = trtllm_fp4_block_scale_routed_moe(
             packed_tensor,
@@ -112,9 +111,9 @@ class TrtllmFp4Executor(FusedMoeExpertExecutor):
             self.w2,
             self.w2_scale.view(torch.float8_e4m3fn),
             None,  # w2_bias
-            self.output1_scale_scalar,
-            self.output1_scale_gate_scalar,
-            self.output2_scale_scalar,
+            self.g1_scale_c,
+            self.g1_alphas,
+            self.g2_alphas,
             global_num_experts,
             topk,
             None,  # n_group

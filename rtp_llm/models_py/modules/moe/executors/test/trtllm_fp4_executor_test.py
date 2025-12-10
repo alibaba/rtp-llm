@@ -16,14 +16,14 @@ DP_SIZE = 1
 TP_SIZE = 1
 EP_SIZE = 1
 NUM_EXPERTS = 128
-SEQ_LEN = 17
+SEQ_LEN = 908
 HIDDEN_SIZE = 2048
 MOE_INTERMEDIATE_SIZE = 768
 TOP_K = 8
 
 NVFP4_BLOCK_SIZE = 16
 
-REAL_DATA_DIR = Path("/home/xiebaijie.xbj/fp4/moe_params_prefill")
+REAL_DATA_DIR = Path("/home/xiebaijie.xbj/fp4/dump_908")
 
 def routing_reference(expertLogits, topK, padding):
     """Reference routing implementation for permutation calculation."""
@@ -120,39 +120,29 @@ def _generate_config() -> GptInitModelParameters:
     config.moe_inter_padding_size = MOE_INTERMEDIATE_SIZE
     return config
 
-def load_pt(filename):
+def load_pt(filename, shape, dtype):
     f = REAL_DATA_DIR / filename
     assert f.is_file()
-    return torch.load(f)
-def check_meta(tensor, shape, dtype):
-    assert tensor.shape == shape, f"Shape mismatch: expected {shape}, got {tensor.shape}"
-    assert tensor.dtype == dtype, f"Dtype mismatch: expected {dtype}, got {tensor.dtype}"
+    t = torch.load(f)
+    assert t.shape == shape, f"Shape mismatch: expected {shape}, got {t.shape}"
+    assert t.dtype == dtype, f"Dtype mismatch: expected {dtype}, got {t.dtype}"
+    return t
 
 def _generate_payload_and_weights(
     config: GptInitModelParameters,
 ) -> Tuple[ExpertForwardPayload, Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
     if REAL_DATA_DIR.is_dir():
-        hidden_states = load_pt("x.pt")
-        check_meta(hidden_states, (SEQ_LEN, HIDDEN_SIZE), torch.bfloat16)
-        hidden_states_scale = load_pt("layer_a1_gscale.pt")
-        check_meta(hidden_states_scale, (HIDDEN_SIZE / NVFP4_BLOCK_SIZE,), torch.float32) # ?
-        routing_logits = load_pt("router_logits.pt")
-        check_meta(routing_logits, (SEQ_LEN, NUM_EXPERTS), torch.bfloat16)
-        w13 = load_pt("layer_gemm1_weights.pt")
-        check_meta(w13, (NUM_EXPERTS, MOE_INTERMEDIATE_SIZE * 2, HIDDEN_SIZE / 2), torch.uint8)
-        w13_scale = load_pt("layer_gemm1_weights_scale.pt")
-        check_meta(w13_scale, (NUM_EXPERTS, MOE_INTERMEDIATE_SIZE * 2, HIDDEN_SIZE / NVFP4_BLOCK_SIZE), torch.float8_e4m3fn)
-        w2 = load_pt("layer_gemm2_weights.pt")
-        check_meta(w2, (NUM_EXPERTS, HIDDEN_SIZE, MOE_INTERMEDIATE_SIZE / 2), torch.uint8)
-        w2_scale = load_pt("layer_gemm2_weights_scale.pt")
-        check_meta(w2_scale, (NUM_EXPERTS, HIDDEN_SIZE, MOE_INTERMEDIATE_SIZE / NVFP4_BLOCK_SIZE), torch.float8_e4m3fn)
-        output1_scale_scalar = load_pt("layer_g1_scale_c.pt")
-        check_meta(output1_scale_scalar, (HIDDEN_SIZE / NVFP4_BLOCK_SIZE,), torch.float32) # ?
-        output1_scale_gate_scalar = load_pt("layer_g1_alphas.pt")
-        check_meta(output1_scale_gate_scalar, (HIDDEN_SIZE / NVFP4_BLOCK_SIZE,), torch.float32) # ?
-        output2_scale_scalar = load_pt("layer_g2_alphas.pt")
-        check_meta(output2_scale_scalar, (HIDDEN_SIZE / NVFP4_BLOCK_SIZE,), torch.float32) # ?
-        permute_info, topk_weights = routing_reference_renormalize(
+        hidden_states = load_pt("x.pt", (SEQ_LEN, HIDDEN_SIZE), torch.bfloat16)
+        routing_logits = load_pt("router_logits.pt", (SEQ_LEN, NUM_EXPERTS), torch.bfloat16)
+        w13_input_scale = load_pt("process_weights_after_loading_w13_input_scale.pt", (NUM_EXPERTS,), torch.float32)
+        w13 = load_pt("process_weights_after_loading_gemm1_weights_fp4_shuffled.pt", (NUM_EXPERTS, MOE_INTERMEDIATE_SIZE * 2, HIDDEN_SIZE / 2), torch.uint8)
+        w13_scale = load_pt("process_weights_after_loading_gemm1_scales_fp4_shuffled.pt", (NUM_EXPERTS, MOE_INTERMEDIATE_SIZE * 2, HIDDEN_SIZE / NVFP4_BLOCK_SIZE), torch.uint8)
+        w13_scale_2 = load_pt("process_weights_after_loading_w13_weight_scale_2.pt", (NUM_EXPERTS,), torch.float32)
+        w2_input_scale = load_pt("process_weights_after_loading_w2_input_scale.pt", (NUM_EXPERTS,), torch.float32)
+        w2 = load_pt("process_weights_after_loading_gemm2_weights_fp4_shuffled.pt", (NUM_EXPERTS, HIDDEN_SIZE, MOE_INTERMEDIATE_SIZE / 2), torch.uint8)
+        w2_scale = load_pt("process_weights_after_loading_gemm2_scales_fp4_shuffled.pt", (NUM_EXPERTS, HIDDEN_SIZE, MOE_INTERMEDIATE_SIZE / NVFP4_BLOCK_SIZE), torch.uint8)
+        w2_scale_2 = load_pt("process_weights_after_loading_w2_weight_scale_2.pt", (NUM_EXPERTS,), torch.float32)
+        rmute_info, topk_weights = routing_reference_renormalize(
             routing_logits, TOP_K, NUM_EXPERTS, 8
         )
         topk_ids = permute_info["topKIndices"].to(torch.int32)
@@ -164,7 +154,6 @@ def _generate_payload_and_weights(
         payload = ExpertForwardPayload(
             expert_x=hidden_states,
             expert_x_origin_dtype=torch.bfloat16,
-            expert_x_scale=hidden_states_scale,
             expert_topk_ids=topk_ids,
             expert_topk_weights=topk_weights,
         )
@@ -173,9 +162,10 @@ def _generate_payload_and_weights(
             W.moe_w2: w2,
             W.moe_s1: w13_scale,
             W.moe_s2: w2_scale,
-            "output1_scale_scalar": output1_scale_scalar,
-            "output1_scale_gate_scalar": output1_scale_gate_scalar,
-            "output2_scale_scalar": output2_scale_scalar,
+            "w13_input_scale": w13_input_scale,
+            "w13_scale_2": w13_scale_2,
+            "w2_input_scale": w2_input_scale,
+            "w2_scale_2": w2_scale_2,
         }
         return payload, weights
 
@@ -184,8 +174,7 @@ def _generate_ref_output(
     weights: Dict[str, torch.Tensor],
 ) -> torch.Tensor:
     if REAL_DATA_DIR.is_dir():
-        output = load_pt("output.pt")
-        check_meta(output, (SEQ_LEN, HIDDEN_SIZE), torch.bfloat16)
+        output = load_pt("output.pt", (SEQ_LEN, HIDDEN_SIZE), torch.bfloat16)
         return output
     
     num_local_experts = NUM_EXPERTS // EP_SIZE
@@ -223,9 +212,6 @@ def _generate_ref_output(
             is_sf_swizzled_layout=False,
         )
         expert_x_local = expert_x_local_float32.to(device=expert_x_local_q.device).to(torch.bfloat16)
-        
-        # Note: We can't verify expert_x dequantization here because we don't have the original tensor
-        # The verification is done in _generate_payload_and_weights during quantization
         
         # Dequantize w1
         w1_local_q = w1[local_expert_id]
