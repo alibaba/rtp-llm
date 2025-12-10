@@ -50,6 +50,13 @@ class ArmCpuImpl(CpuImpl):
         w_unpacked[:, 1::2] = w_packed_int4x2 // 16
         return w_unpacked.to(torch.int16).contiguous()
 
+    def pack_int8_tensor_to_packed_int4(self, tensor: torch.Tensor):
+        assert tensor.dtype == torch.int8
+        tensor -= (tensor >> 4) << 4
+        tensor = tensor.view(torch.uint8)
+        tensor = (tensor[:, 1::2] * 16 + tensor[:, ::2]).view(torch.int8)
+        return tensor
+
     def preprocess_groupwise_weight_params(
         self,
         qweight_int32,
@@ -64,7 +71,7 @@ class ArmCpuImpl(CpuImpl):
         qweight = qweight_int32.reshape(qweight_int32.shape[0], -1).cpu()
         qzeros = qzeros_int32.reshape(qzeros_int32.shape[0], -1).cpu()
         scales_fp16 = scales_fp16.reshape(scales_fp16.shape[0], -1).cpu()
-        packer = self.exported_device.pack_int8_tensor_to_packed_int4
+        packer = self.pack_int8_tensor_to_packed_int4
         preprocess_weight_scale = self.exported_device.preprocess_weight_scale
         is_int8 = weight_bits == 8
         if is_int8:

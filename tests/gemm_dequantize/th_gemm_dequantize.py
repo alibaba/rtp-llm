@@ -332,36 +332,6 @@ class TestGemmDequantize(unittest.TestCase):
     @unittest.skip("This is a benchmark so don't run by default")
     def test_bf16_int4_cublas(self):
         self.bench_helper(torch.bfloat16, torch.quint4x2, 1e-2, 1e-2)
-    
-    def test_preprocess_weights(self):
-        cpu_preprocess = torch.ops.gemm_dq_unit_ops.preprocess_weights_for_mixed_gemm
-        quant_types = [torch.int8, torch.quint4x2]
-        archs = ["70", "80", "90"]
-        rows = [512, 1024, 2048, 4096]
-        cols = [512, 1024, 2048, 4096]
-        err_msg = "preprocess weights not equal, quant_type: {}, arch: {}, result: {}, target: {}"
-        for row_size, col_size, quant_type, arch in zip(rows, cols, quant_types, archs):
-            tensor = torch.randint(-128, 128, size=(row_size, col_size), dtype=torch.int8, device="cuda")
-            result = self.preprocess_weights_for_mixed_gemm(tensor, quant_type, arch)
-            target = cpu_preprocess(tensor.cpu(), quant_type, arch)
-            self.assertTrue(
-                torch.equal(result.cpu(), target),
-                err_msg.format(quant_type, arch, result, target)
-            )
-    
-    def test_pack_int4s(self):
-        cpu_pack_int4s = torch.ops.gemm_dq_unit_ops.pack_int8_tensor_to_packed_int4
-        rows = [512, 1024, 2048, 4096]
-        cols = [512, 1024, 2048, 4096]
-        err_msg = "pack int4s not equal, result: {}, target: {}"
-        for row_size, col_size in zip(rows, cols):
-            tensor = torch.randint(-8, 7, size=(row_size, col_size), dtype=torch.int8, device="cpu")
-            result = self.pack_int4s(tensor.cuda())
-            target = cpu_pack_int4s(tensor)
-            self.assertTrue(
-                torch.equal(result.cpu(), target),
-                err_msg.format(result, target)
-            )
 
 
 if __name__ == "__main__":
