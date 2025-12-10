@@ -49,6 +49,16 @@ def http_deps():
     )
 
     http_archive(
+        name = "torch_2.8_py310_cuda",
+        sha256 = "54d240b5d3b1f9075d4ee6179675a22c1974f7bef1885d134c582678d5180cd3",
+        urls = [
+            "https://artlab.alibaba-inc.com/1/PYPI/pytorch/whl/torch/%252Fwhl%252Fcu129/torch-2.8.0%2Bcu129-cp310-cp310-manylinux_2_28_x86_64.whl",
+        ],
+        type = "zip",
+        build_file = clean_dep("//:BUILD.pytorch"),
+    )
+
+    http_archive(
         name = "torch_rocm",
         sha256 = "39287cb8d52e4a71eb7194727365aa6be767da614fa5e44468155c90ba4a4e0c",
         urls = [
