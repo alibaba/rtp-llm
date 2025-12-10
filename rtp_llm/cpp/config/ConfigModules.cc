@@ -58,7 +58,9 @@ std::string FMHAConfig::to_string() const {
         << "enable_paged_open_source_fmha: " << enable_paged_open_source_fmha << "\n"
         << "enable_trtv1_fmha: " << enable_trtv1_fmha << "\n"
         << "disable_flash_infer: " << disable_flash_infer << "\n"
-        << "enable_xqa: " << enable_xqa << "\n";
+        << "enable_xqa: " << enable_xqa << "\n"
+        << "use_aiter_pa: " << use_aiter_pa << "\n"
+        << "use_asm_pa: " << use_asm_pa << "\n";
     return oss.str();
 }
 
