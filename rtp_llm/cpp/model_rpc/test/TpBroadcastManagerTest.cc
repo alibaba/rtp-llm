@@ -95,7 +95,7 @@ protected:
             worker_addrs.push_back("127.0.0.1:" + std::to_string(ports_[i]));
         }
 
-        manager_ = std::make_unique<TPBroadcastManager>(worker_addrs);
+        manager_ = std::make_unique<TpBroadcastManager>(worker_addrs);
         ASSERT_TRUE(manager_->init());
     }
     void TearDown() override {
@@ -103,7 +103,7 @@ protected:
     }
 
 private:
-    std::unique_ptr<TPBroadcastManager> manager_;
+    std::unique_ptr<TpBroadcastManager> manager_;
     std::vector<int>                    ports_;
 };
 
@@ -111,14 +111,14 @@ private:
 
 TEST_F(TpBroadcastManagerTest, Init_ReturnFalse_EmptyWorkerAddrs) {
     std::vector<std::string> empty_addrs;
-    auto                     manager = std::make_unique<TPBroadcastManager>(empty_addrs);
+    auto                     manager = std::make_unique<TpBroadcastManager>(empty_addrs);
     ASSERT_FALSE(manager->init());
 }
 
 TEST_F(TpBroadcastManagerTest, Init_ReturnTrue_ValidWorkerAddrs) {
     std::vector<std::string> worker_addrs;
     worker_addrs.push_back("127.0.0.1:12345");
-    auto manager = std::make_unique<TPBroadcastManager>(worker_addrs);
+    auto manager = std::make_unique<TpBroadcastManager>(worker_addrs);
     ASSERT_TRUE(manager->init());
     ASSERT_EQ(manager->workerNum(), 1u);
     ASSERT_NE(manager->rpc_pool_, nullptr);
@@ -138,7 +138,7 @@ TEST_F(TpBroadcastManagerTest, Broadcast_ReturnNull_RequestsSizeMismatch) {
 
 TEST_F(TpBroadcastManagerTest, Broadcast_ReturnNull_GetConnectionFailed) {
     std::vector<std::string> empty_addrs;
-    auto                     manager = std::make_unique<TPBroadcastManager>(empty_addrs);
+    auto                     manager = std::make_unique<TpBroadcastManager>(empty_addrs);
 
     std::vector<CopyCacheRequestPB> requests(3);
     auto                            rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
@@ -160,7 +160,7 @@ TEST_F(TpBroadcastManagerTest, Broadcast_ReturnNotNull_AllRequestsSuccess) {
         servers.push_back(std::move(server));
     }
 
-    auto manager = std::make_unique<TPBroadcastManager>(server_addrs);
+    auto manager = std::make_unique<TpBroadcastManager>(server_addrs);
     ASSERT_TRUE(manager->init());
     ASSERT_EQ(manager->workerNum(), server_addrs.size());
 
@@ -201,7 +201,7 @@ TEST_F(TpBroadcastManagerTest, Broadcast_ReturnNotNull_AllRequestsTimeout) {
         servers.push_back(std::move(server));
     }
 
-    auto manager = std::make_unique<TPBroadcastManager>(server_addrs);
+    auto manager = std::make_unique<TpBroadcastManager>(server_addrs);
     ASSERT_TRUE(manager->init());
     ASSERT_EQ(manager->workerNum(), server_addrs.size());
 
@@ -248,7 +248,7 @@ TEST_F(TpBroadcastManagerTest, Broadcast_ReturnNotNull_PartialRequestsTimeout) {
         servers.push_back(std::move(server));
     }
 
-    auto manager = std::make_unique<TPBroadcastManager>(server_addrs);
+    auto manager = std::make_unique<TpBroadcastManager>(server_addrs);
     ASSERT_TRUE(manager->init());
     ASSERT_EQ(manager->workerNum(), server_addrs.size());
 
@@ -302,7 +302,7 @@ TEST_F(TpBroadcastManagerTest, Broadcast_ReturnNotNull_PartialResponseRpcStatusF
         servers.push_back(std::move(server));
     }
 
-    auto manager = std::make_unique<TPBroadcastManager>(server_addrs);
+    auto manager = std::make_unique<TpBroadcastManager>(server_addrs);
     ASSERT_TRUE(manager->init());
     ASSERT_EQ(manager->workerNum(), server_addrs.size());
 
@@ -353,7 +353,7 @@ TEST_F(TpBroadcastManagerTest, Broadcast_ReturnNotNull_ResponseStatusOkButMemRes
         servers.push_back(std::move(server));
     }
 
-    auto manager = std::make_unique<TPBroadcastManager>(server_addrs);
+    auto manager = std::make_unique<TpBroadcastManager>(server_addrs);
     ASSERT_TRUE(manager->init());
     ASSERT_EQ(manager->workerNum(), server_addrs.size());
 

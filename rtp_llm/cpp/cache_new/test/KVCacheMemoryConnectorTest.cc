@@ -1399,8 +1399,8 @@ TEST_F(KVCacheMemoryConnectorTest, prepareCopyBuffers_ReturnFalse_GetMemBufferFa
 
     auto pool = ensureBlockPool(total_bytes);
     ASSERT_NE(pool, nullptr);
-    // 将 layout_strategy_ 设置为 nullptr，模拟 convertIndexToBuffer 失败
-    pool->layout_strategy_ = nullptr;
+    // 将 layer_kv_tensors_ 设置为空，模拟 convertIndexToBuffer 失败
+    pool->layout_strategy_->layer_kv_tensors_.clear();
 
     std::vector<KVCacheMemoryConnector::LayerBlock> gpu_layer_blocks{{layer_id, gpu_block_idx}};
     std::vector<rtp_llm::BufferPtr>                 dst, src;
