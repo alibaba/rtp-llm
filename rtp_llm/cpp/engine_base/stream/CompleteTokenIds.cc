@@ -149,6 +149,11 @@ bool CompleteTokenIds::update(const rtp_llm::BufferPtr& new_tokens,
                               bool                      is_beam_search,
                               int64_t                   stream_id,
                               int&                      error_token_id) {
+    // 打印更新前的状态，方便对比 seq_length 及尾部 token
+    RTP_LLM_LOG_INFO("CompleteTokenIds::update before, stream[%ld], status: %s, new_tokens: %s",
+                     stream_id,
+                     showStatus(0).c_str(),
+                     new_tokens ? new_tokens->debugStringWithData<int32_t>().c_str() : "null");
     int new_batch_size = new_tokens->shape()[0];
     RTP_LLM_CHECK_WITH_INFO(
         new_batch_size <= max_batch_size_, "too many batches, expect < %d, found %d", max_batch_size_, new_batch_size);
@@ -183,6 +188,13 @@ bool CompleteTokenIds::update(const rtp_llm::BufferPtr& new_tokens,
             auto current_token_id = get_token_id(i, j);
             if (!(current_token_id >= 0 && current_token_id < vocab_size)) {  // check tokenid
                 error_token_id = current_token_id;
+                RTP_LLM_LOG_WARNING("CompleteTokenIds::update token id out of range, stream[%ld], batch[%zu], "
+                                    "token_idx[%zu], token_id[%d], vocab_size[%d]",
+                                    stream_id,
+                                    i,
+                                    j,
+                                    current_token_id,
+                                    vocab_size);
                 return false;
             }
         }
@@ -198,7 +210,10 @@ bool CompleteTokenIds::update(const rtp_llm::BufferPtr& new_tokens,
     batch_size_ = new_batch_size;
     setSeqLength(seq_length_ + num_new_tokens);
 
-    RTP_LLM_LOG_DEBUG("update token, num_new_tokens: %d, after update is %s", num_new_tokens, showStatus(0).c_str());
+    RTP_LLM_LOG_INFO("CompleteTokenIds::update after, stream[%ld], num_new_tokens: %d, status: %s",
+                     stream_id,
+                     num_new_tokens,
+                     showStatus(0).c_str());
     return true;
 }
 

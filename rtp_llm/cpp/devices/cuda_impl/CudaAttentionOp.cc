@@ -383,6 +383,16 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
 
         bool use_rope_cache =
             params.configs.rope_config.style == RopeStyle::Base || params.configs.rope_config.style == RopeStyle::Yarn;
+
+        RTP_LLM_LOG_INFO("use_rope_cache: %d", use_rope_cache);
+        if (params.configs.rope_config.style == RopeStyle::Yarn) {
+            RTP_LLM_LOG_INFO("rope is Yarn");
+        } else if (params.configs.rope_config.style == RopeStyle::Base) {
+            RTP_LLM_LOG_INFO("rope is Base");
+        } else {
+            RTP_LLM_LOG_INFO("rope is other");
+        }
+
         static torch::Tensor rope_cache;
         std::call_once(rope_cache_flag, [&]() {
             if (use_rope_cache) {

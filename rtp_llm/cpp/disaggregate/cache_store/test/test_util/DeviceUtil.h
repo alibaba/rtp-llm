@@ -1,3 +1,6 @@
+#ifndef RTP_LLM_CPP_DISAGGREGATE_CACHE_STORE_TEST_TEST_UTIL_DEVICEUTIL_H_
+#define RTP_LLM_CPP_DISAGGREGATE_CACHE_STORE_TEST_TEST_UTIL_DEVICEUTIL_H_
+
 #include <vector>
 
 #include "rtp_llm/cpp/devices/DeviceBase.h"
@@ -27,3 +30,5 @@ private:
 };
 
 }  // namespace rtp_llm
+
+#endif  // RTP_LLM_CPP_DISAGGREGATE_CACHE_STORE_TEST_TEST_UTIL_DEVICEUTIL_H_
