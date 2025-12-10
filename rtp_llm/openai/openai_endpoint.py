@@ -438,7 +438,7 @@ class OpenaiEndpoint(object):
             rendered_input.input_ids += self.tokenizer.encode(prepopulate_str)
         return rendered_input
 
-    def chat_completion(
+    def handle_request(
         self, request_id: int, chat_request: ChatCompletionRequest, raw_request: Request
     ) -> CompleteResponseAsyncGenerator:
         renderer = (

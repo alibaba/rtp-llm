@@ -60,7 +60,7 @@ class FrontendWorkerTest(TestCase):
     async def _run(self, frontend_worker, **kwargs):
         count = 0
         kwargs[request_id_field_name] = 1
-        gen = frontend_worker.generate_response(**kwargs)
+        gen = frontend_worker.handle_request(**kwargs)
         result = []
         aux_info = []
         finished = []

@@ -49,7 +49,7 @@ async def main():
             ),
         ]
         request = ChatCompletionRequest(messages=messages, stream=False)
-        response = openai_endpoint.chat_completion(
+        response = openai_endpoint.handle_request(
             request_id=0, chat_request=request, raw_request=None
         )
         async for res in response:

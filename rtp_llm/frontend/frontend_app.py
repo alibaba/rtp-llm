@@ -237,9 +237,7 @@ class FrontendApp(object):
                 if self.frontend_server.is_embedding:
                     return await self.frontend_server.embedding(req, raw_request)
                 else:
-                    return await self.frontend_server.generate_response(
-                        req, raw_request
-                    )
+                    return await self.frontend_server.generate(req, raw_request)
             finally:
                 active_requests.decrement()
 

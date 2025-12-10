@@ -109,7 +109,7 @@ class FrontendWorker:
         self.backend_rpc_server_visitor = backend_rpc_server_visitor
         logging.info("frontend worker start done.")
 
-    def generate_response(self, **kwargs: Any) -> CompleteResponseAsyncGenerator:
+    def handle_request(self, **kwargs: Any) -> CompleteResponseAsyncGenerator:
         default_generate_config = GenerateConfig()
         request_extractor = RequestExtractor(default_generate_config)
         request, kwargs = request_extractor.extract_request(kwargs)

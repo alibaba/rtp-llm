@@ -195,98 +195,238 @@ class FrontendServer(object):
         finally:
             self._global_controller.decrement()
 
-    async def generate_response(
-        self, req: Union[str, Dict[Any, Any]], raw_request: RawRequest
-    ):
-        try:
-            if isinstance(req, str):
-                req = json.loads(req)
-            assert isinstance(req, dict)
-            if "master_info" in req:
-                request_id = req["master_info"].get("request_id")
-                check_with_info(
-                    request_id != None and isinstance(request_id, int),
-                    "request_id in master_info is None or not int",
+    def _parse_generate_request(self, req: Union[str, Dict[Any, Any]]):
+        """Parse and validate generate request."""
+        if isinstance(req, str):
+            req = json.loads(req)
+        assert isinstance(req, dict)
+
+        if "master_info" in req:
+            request_id = req["master_info"].get("request_id")
+            check_with_info(
+                request_id != None and isinstance(request_id, int),
+                "request_id in master_info is None or not int",
+            )
+            req[request_id_field_name] = request_id
+            self._global_controller.increment()
+        else:
+            req[request_id_field_name] = self._global_controller.increment()
+
+        return req
+
+    async def _gen_response_with_monitoring(self, response_generator, start_time):
+        """Wrap response generator with monitoring metrics."""
+        last_iterate_time = current_time_ms()
+        first_token = True
+        iter_count = 0
+
+        async for response in response_generator:
+            end_time = current_time_ms()
+
+            # Report first token time
+            if first_token:
+                first_token = False
+                kmonitor.report(
+                    GaugeMetrics.RESPONSE_FIRST_TOKEN_RT_METRIC,
+                    end_time - last_iterate_time,
                 )
-                req[request_id_field_name] = request_id
-                self._global_controller.increment()
             else:
-                req[request_id_field_name] = self._global_controller.increment()
+                # Calculate step output length
+                step_output_len = 1
+                if hasattr(response, "aux_info"):
+                    if isinstance(response.aux_info, list):
+                        step_output_len = sum(
+                            info.get("step_output_len", 1) for info in response.aux_info
+                        )
+                    elif isinstance(response.aux_info, dict):
+                        step_output_len = max(
+                            response.aux_info.get("step_output_len", 1), 1
+                        )
+
+                kmonitor.report(
+                    GaugeMetrics.RESPONSE_ITER_RT_METRIC,
+                    (end_time - last_iterate_time) / step_output_len,
+                )
+
+            # Report iteration metrics
+            kmonitor.report(
+                AccMetrics.ITER_QPS_METRIC,
+                1,
+                {"rank_id": self.rank_id, "server_id": self.server_id},
+            )
+            last_iterate_time = end_time
+            iter_count += 1
+            yield response
+
+        # Report final metrics
+        kmonitor.report(GaugeMetrics.RESPONSE_ITERATE_COUNT, iter_count)
+        kmonitor.report(GaugeMetrics.LANTENCY_METRIC, current_time_ms() - start_time)
+        kmonitor.report(
+            AccMetrics.SUCCESS_QPS_METRIC,
+            1,
+            {"rank_id": self.rank_id, "server_id": self.server_id},
+        )
+
+    async def generate(self, req: Union[str, Dict[Any, Any]], raw_request: RawRequest):
+        # Parse and validate request
+        try:
+            req = self._parse_generate_request(req)
         except Exception as e:
             return self._handle_exception(req, e)
 
-        def generate_call():
+        # Execute inference
+        try:
             assert self._frontend_worker is not None
-            return self._frontend_worker.generate_response(**req)
 
-        try:
-            rep = await self._infer_wrap(req, raw_request, generate_call)
-        except Exception as e:
+            # Report metrics and log query
+            self._report_metrics_and_log_query(req)
+
+            # Check streaming mode
+            is_streaming = RequestExtractor.is_streaming(req) or req.get(
+                "stream", False
+            )
+
+            # Early check for client connection
+            if await raw_request.is_disconnected():
+                raise asyncio.CancelledError("client disconnects")
+
+            # Generate response with monitoring
+            start_time = current_time_ms()
+            response_generator = self._frontend_worker.handle_request(**req)
+            res = CompleteResponseAsyncGenerator(
+                self._gen_response_with_monitoring(response_generator, start_time),
+                response_generator._collect_complete_response_func,
+            )
+
+            # Dispatch to appropriate handler
+            if is_streaming:
+                return await self._handle_streaming_response(req, res)
+
+            # Non-streaming: consume and return
+            rep = await self._handle_non_streaming_response(req, res, raw_request)
             self._global_controller.decrement()
-            raise e
+            return rep
 
-        if not isinstance(rep, StreamingResponse):
-            self._global_controller.decrement()
-
-        return rep
-
-    async def _infer_wrap(
-        self,
-        req: Dict[str, Any],
-        raw_request: RawRequest,
-        generate_call: Callable[[], CompleteResponseAsyncGenerator],
-    ):
-        try:
-            rep = await self._infer_impl(req, raw_request, generate_call)
         except BaseException as e:
             rep = self._handle_exception(req, e)
-        return rep
+            self._global_controller.decrement()
+
+            # Re-raise certain exceptions after handling
+            if isinstance(e, Exception):
+                raise e
+            return rep
+
+    def _parse_chat_request(self, request: ChatCompletionRequest):
+        """Parse and validate chat completion request."""
+        if request.master_info is not None:
+            request_id = request.master_info.get("request_id")
+            check_with_info(
+                request_id != None and isinstance(request_id, int),
+                "request_id in master_info is None or not int",
+            )
+            self._global_controller.increment()
+        else:
+            request_id = self._global_controller.increment()
+
+        request_dict = request.model_dump(exclude_none=True)
+        request_dict[request_id_field_name] = request_id
+        return request_id, request_dict
+
+    def _report_metrics_and_log_query(self, request_dict: Dict[str, Any]):
+        """Report QPS metrics and log query access."""
+        kmonitor.report(
+            AccMetrics.QPS_METRIC,
+            1,
+            {
+                "rank_id": self.rank_id,
+                "server_id": self.server_id,
+                "source": request_dict.get("source", "unkown"),
+            },
+        )
+        self._access_logger.log_query_access(request_dict)
+
+    async def _handle_streaming_response(
+        self, request_dict: Dict[str, Any], res: CompleteResponseAsyncGenerator
+    ):
+        """Handle streaming response."""
+        return StreamingResponse(
+            self.stream_response(request_dict, res), media_type="text/event-stream"
+        )
+
+    async def _handle_non_streaming_response(
+        self,
+        request_dict: Dict[str, Any],
+        res: CompleteResponseAsyncGenerator,
+        raw_request: Request,
+    ):
+        """Handle non-streaming response."""
+        async for x in res:
+            if await raw_request.is_disconnected():
+                await res.aclose()
+                raise asyncio.CancelledError("client disconnects")
+
+        complete_response = await self._collect_complete_response_and_record_access_log(
+            request_dict, res
+        )
+        return ORJSONResponse(content=complete_response)
 
     async def chat_completion(
         self, request: ChatCompletionRequest, raw_request: Request
     ):
+        assert self._openai_endpoint != None
+        # Parse and validate request
         try:
-            if request.master_info is not None:
-                request_id = request.master_info.get("request_id")
-                check_with_info(
-                    request_id != None and isinstance(request_id, int),
-                    "request_id in master_info is None or not int",
-                )
-                self._global_controller.increment()
-            else:
-                request_id = self._global_controller.increment()
+            request_id, request_dict = self._parse_chat_request(request)
         except Exception as e:
             return self._handle_exception(request, e)
 
-        def generate_call():
-            assert self._openai_endpoint != None
-            response = self._openai_endpoint.chat_completion(
+        # Execute inference
+        try:
+            # Report metrics and log query
+            self._report_metrics_and_log_query(request_dict)
+
+            # Early check for client connection
+            if await raw_request.is_disconnected():
+                raise asyncio.CancelledError("client disconnects")
+
+            # Generate response
+            response = self._openai_endpoint.handle_request(
                 request_id, request, raw_request
             )
             assert isinstance(
                 response, CompleteResponseAsyncGenerator
             ), f"error type: {type(response)}"
-            return response
 
-        try:
-            request_dict = request.model_dump(exclude_none=True)
-            request_dict[request_id_field_name] = request_id
-            rep = await self._infer_wrap(request_dict, raw_request, generate_call)
-        except Exception as e:
+            is_streaming = RequestExtractor.is_streaming(
+                request_dict
+            ) or request_dict.get("stream", False)
+            start_time = current_time_ms()
+            res = CompleteResponseAsyncGenerator(
+                self._gen_response_with_monitoring(response, start_time),
+                response._collect_complete_response_func,
+            )
+
+            # Dispatch to appropriate handler
+            if is_streaming:
+                return await self._handle_streaming_response(request_dict, res)
+
+            # Non-streaming: consume and return
+            rep = await self._handle_non_streaming_response(
+                request_dict, res, raw_request
+            )
             self._global_controller.decrement()
-            raise e
+            return rep
 
-        if not isinstance(rep, StreamingResponse):
+        except BaseException as e:
+            rep = self._handle_exception(request_dict, e)
             self._global_controller.decrement()
 
-        return rep
-
-    async def chat_render(self, request: ChatCompletionRequest, raw_request: Request):
-        try:
-            assert self._openai_endpoint != None
-            return self._openai_endpoint.chat_render(request)
-        except Exception as e:
-            return ORJSONResponse(format_exception(e), status_code=500)
+            # Re-raise certain exceptions after handling
+            if isinstance(e, Exception) and not isinstance(
+                e, (asyncio.CancelledError, ConcurrencyException)
+            ):
+                raise e
+            return rep
 
     def _handle_exception(self, request: Dict[str, Any], e: BaseException):
         exception_json = format_exception(e)
@@ -320,70 +460,6 @@ class FrontendServer(object):
         rep = ORJSONResponse(exception_json, status_code=500)
         return rep
 
-    async def _call_generate_with_report(
-        self, generate_call: Callable[[], CompleteResponseAsyncGenerator]
-    ):
-        async def __gen_response_with_report(start_time: float, response_generator):
-            last_iterate_time = current_time_ms()
-            first_token = True
-            iter_count = 0
-            async for response in response_generator:
-                end_time = current_time_ms()
-                if first_token:
-                    first_token = False
-                    kmonitor.report(
-                        GaugeMetrics.RESPONSE_FIRST_TOKEN_RT_METRIC,
-                        end_time - last_iterate_time,
-                    )
-                else:
-                    step_output_len = 1
-                    if hasattr(response, "aux_info"):
-                        if isinstance(response.aux_info, list):
-                            step_output_len = 0
-                            for info in response.aux_info:
-                                step_output_len += info.get("step_output_len", 1)
-                        elif isinstance(response.aux_info, dict):
-                            step_output_len = max(
-                                response.aux_info.get("step_output_len", 1),
-                                step_output_len,
-                            )
-
-                    kmonitor.report(
-                        GaugeMetrics.RESPONSE_ITER_RT_METRIC,
-                        (end_time - last_iterate_time) / step_output_len,
-                    )
-                kmonitor.report(
-                    AccMetrics.ITER_QPS_METRIC,
-                    1,
-                    {
-                        "rank_id": self.rank_id,
-                        "server_id": self.server_id,
-                    },
-                )
-                last_iterate_time = end_time
-                iter_count += 1
-                yield response
-            kmonitor.report(GaugeMetrics.RESPONSE_ITERATE_COUNT, iter_count)
-            kmonitor.report(
-                GaugeMetrics.LANTENCY_METRIC, current_time_ms() - start_time
-            )
-            kmonitor.report(
-                AccMetrics.SUCCESS_QPS_METRIC,
-                1,
-                {
-                    "rank_id": self.rank_id,
-                    "server_id": self.server_id,
-                },
-            )
-
-        assert self._frontend_worker is not None
-        start_time = current_time_ms()
-        response_generator = generate_call()
-        return CompleteResponseAsyncGenerator(
-            __gen_response_with_report(start_time, response_generator),
-            response_generator._collect_complete_response_func,
-        )
-
     async def _collect_complete_response_and_record_access_log(
         self, req: Dict[Any, Any], res: Any
     ):
@@ -396,43 +472,6 @@ class FrontendServer(object):
         self._access_logger.log_success_access(req, complete_response)
 
         return complete_response
-
-    async def _infer_impl(
-        self,
-        req: Dict[Any, Any],
-        raw_request: RawRequest,
-        generate_call: Callable[[], CompleteResponseAsyncGenerator],
-    ):
-        assert self._frontend_worker is not None
-        kmonitor.report(
-            AccMetrics.QPS_METRIC,
-            1,
-            {
-                "rank_id": self.rank_id,
-                "server_id": self.server_id,
-                "source": req.get("source", "unkown"),
-            },
-        )
-        self._access_logger.log_query_access(req)
-        is_streaming = RequestExtractor.is_streaming(req) or req.get("stream", False)
-        if await raw_request.is_disconnected():
-            raise asyncio.CancelledError("client disconnects")
-        res = await self._call_generate_with_report(generate_call)
-
-        if is_streaming:
-            return StreamingResponse(
-                self.stream_response(req, res), media_type="text/event-stream"
-            )
-        async for x in res:
-            if await raw_request.is_disconnected():
-                # Abort the request if the client disconnects.
-                await res.aclose()
-                raise asyncio.CancelledError("client disconnects")
-
-        complete_response = await self._collect_complete_response_and_record_access_log(
-            req, res
-        )
-        return ORJSONResponse(content=complete_response)
 
     def tokenize(self, req: str | Dict[str, Any]):
         try:

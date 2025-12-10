@@ -61,7 +61,7 @@ class FrontendServerTest(TestCase):
         self.frontend_server._frontend_worker = FakeFrontendWorker()
 
     async def _async_run(self, *args: Any, **kwargs: Any):
-        res = await self.frontend_server.generate_response(*args, **kwargs)
+        res = await self.frontend_server.handle_request(*args, **kwargs)
         return res
 
     def test_simple(self):

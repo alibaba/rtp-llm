@@ -83,13 +83,13 @@ tokenizer_factory_patcher = patch(
 tokenizer_factory_patcher.start()
 
 FrontendWorker.__init__ = fake_init
-FrontendWorker.generate_response = fake_generate_response
+FrontendWorker.handle_request = fake_generate_response
 
 BackendServer.start = fake_start
 BackendServer.ready = fake_ready
 
 OpenaiEndpoint.__init__ = fake_init
-OpenaiEndpoint.chat_completion = fake_generate_response
+OpenaiEndpoint.handle_request = fake_generate_response
 
 
 class ConcurrencyLimitTest(TestCase):
