@@ -34,6 +34,7 @@ class TrtllmFp4Executor(FusedMoeExpertExecutor):
         self.w2 = weights.get(W.moe_w2, None)
         self.w1_scale = weights.get(W.moe_s1, None)
         self.w2_scale = weights.get(W.moe_s2, None)
+        print(weights)
         w13_input_scale = weights.get("w13_input_scale", None)
         w13_weight_scale_2 = weights.get("w13_weight_scale_2", None)
         w2_input_scale = weights.get("w2_input_scale", None)
