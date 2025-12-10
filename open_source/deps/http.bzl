@@ -50,9 +50,9 @@ def http_deps():
 
     http_archive(
         name = "torch_rocm",
-        sha256 = "39287cb8d52e4a71eb7194727365aa6be767da614fa5e44468155c90ba4a4e0c",
+        sha256 = "4ffad99d7335a95d30fbf23aabdc2eb856d323c3b69aaf3bf58cfc2e943bd2eb",
         urls = [
-            "https://repo.radeon.com/rocm/manylinux/rocm-rel-6.4.1/torch-2.4.1%2Brocm6.4.1.git4e7ae583-cp310-cp310-linux_x86_64.whl"
+            "file:///mnt/raid0/zhaoan12/cache/r6t28_whl/torch-2.8.0+git245bf6e-2.8git245bf6e-cp310-cp310-linux_x86_64.whl"
         ],
         type = "zip",
         build_file = clean_dep("//:BUILD.pytorch"),

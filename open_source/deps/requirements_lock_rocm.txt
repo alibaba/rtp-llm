@@ -539,7 +539,7 @@ filelock==3.13.1 \
     #   -r open_source/deps/requirements_base.txt
     #   blobfile
     #   huggingface-hub
-    #   pytorch-triton-rocm
+    #   triton
     #   torch
     #   transformers
 fonttools==4.53.1 \
@@ -2267,8 +2267,8 @@ python-dateutil==2.9.0.post0 \
     # via
     #   matplotlib
     #   pandas
-pytorch-triton-rocm @ https://repo.radeon.com/rocm/manylinux/rocm-rel-6.4.1/pytorch_triton_rocm-3.0.0%2Brocm6.4.1.git75cc27c2-cp310-cp310-linux_x86_64.whl \
-    --hash=sha256:350947d4a8a056ec3ff6f18263eae1ee34a21ea6597849fa9b0365989f978b12
+triton @ file:///mnt/raid0/zhaoan12/cache/r6t28_whl/triton-3.4.0-cp310-cp310-linux_x86_64.whl ; platform_machine == "x86_64" \
+    --hash=sha256:60069e38d151528a90d8d3a993a493c4637402ab50a8830e369a866c0b384011
     # via
     #   -r open_source/deps/requirements_rocm.txt
     #   torch
@@ -2976,8 +2976,8 @@ tokenizers==0.20.3 \
     --hash=sha256:fbaf3ea28fedfb2283da60e710aff25492e795a7397cad8a50f1e079b65a5a70 \
     --hash=sha256:ff1ef8bd47a02b0dc191688ccb4da53600df5d4c9a05a4b68e1e3de4823e78eb
     # via transformers
-torch @ https://repo.radeon.com/rocm/manylinux/rocm-rel-6.4.1/torch-2.4.1%2Brocm6.4.1.git4e7ae583-cp310-cp310-linux_x86_64.whl \
-    --hash=sha256:39287cb8d52e4a71eb7194727365aa6be767da614fa5e44468155c90ba4a4e0c
+torch @ file:///mnt/raid0/zhaoan12/cache/r6t28_whl/torch-2.8.0+git245bf6e-2.8git245bf6e-cp310-cp310-linux_x86_64.whl ; platform_machine == "x86_64" \
+    --hash=sha256:4ffad99d7335a95d30fbf23aabdc2eb856d323c3b69aaf3bf58cfc2e943bd2eb
     # via
     #   -r open_source/deps/requirements_rocm.txt
     #   accelerate
@@ -2985,8 +2985,8 @@ torch @ https://repo.radeon.com/rocm/manylinux/rocm-rel-6.4.1/torch-2.4.1%2Brocm
     #   sentence-transformers
     #   timm
     #   torchvision
-torchvision @ https://repo.radeon.com/rocm/manylinux/rocm-rel-6.4.1/torchvision-0.19.0%2Brocm6.4.1.git4d41ad71-cp310-cp310-linux_x86_64.whl \
-    --hash=sha256:772f6af6c11724639a460524d53521a31393c20e85818a3f4debf030c7f98aa1
+torchvision @ file:///mnt/raid0/zhaoan12/cache/r6t28_whl/torchvision-0.23.0a0+824e8c8-cp310-cp310-linux_x86_64.whl ; platform_machine == "x86_64" \
+    --hash=sha256:736c2a491017cf37dd5ef83b34addbbd1f6387282f0156642d3c3a18209444cb
     # via
     #   -r open_source/deps/requirements_rocm.txt
     #   timm

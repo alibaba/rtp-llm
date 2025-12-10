@@ -1,7 +1,7 @@
 -r requirements_base.txt
-https://repo.radeon.com/rocm/manylinux/rocm-rel-6.4.1/pytorch_triton_rocm-3.0.0%2Brocm6.4.1.git75cc27c2-cp310-cp310-linux_x86_64.whl
-https://repo.radeon.com/rocm/manylinux/rocm-rel-6.4.1/torch-2.4.1%2Brocm6.4.1.git4e7ae583-cp310-cp310-linux_x86_64.whl
-https://repo.radeon.com/rocm/manylinux/rocm-rel-6.4.1/torchvision-0.19.0%2Brocm6.4.1.git4d41ad71-cp310-cp310-linux_x86_64.whl
+file:///mnt/raid0/zhaoan12/cache/r6t28_whl/triton-3.4.0-cp310-cp310-linux_x86_64.whl
+file:///mnt/raid0/zhaoan12/cache/r6t28_whl/torch-2.8.0+git245bf6e-2.8git245bf6e-cp310-cp310-linux_x86_64.whl
+file:///mnt/raid0/zhaoan12/cache/r6t28_whl/torchvision-0.23.0a0+824e8c8-cp310-cp310-linux_x86_64.whl
 pyrsmi==0.2.0
 pyyaml==6.0.2
 https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/RTP/aiter-0.1.6%2Bgit.329d07ba.date.202511061023-py3-none-any.whl
