@@ -13,7 +13,7 @@ from rtp_llm.models_py.modules import (
     AttnImplFactory,
     Embedding,
     FMHAImplBase,
-    FusedQKRMSNorm,
+    QKRMSNorm,
     FusedSiluActDenseMLP,
     LinearFactory,
     RMSNorm,
@@ -139,7 +139,7 @@ class Qwen3GemmLayer(nn.Module):
         check_with_info(W.q_ln_gamma in next_layer_weights, "q_ln_gamma not found")
         check_with_info(W.k_ln_gamma in next_layer_weights, "k_ln_gamma not found")
 
-        self.qk_fuse_norm = FusedQKRMSNorm(
+        self.qk_fuse_norm = QKRMSNorm(
             next_layer_weights[W.q_ln_gamma],
             next_layer_weights[W.k_ln_gamma],
             config.head_num,
@@ -178,7 +178,7 @@ class Qwen3GemmPreLayer(nn.Module):
         self.qkv_proj = LinearFactory.create_linear_from_weights(
             weights.weights[0], W.attn_qkv_w, None, W.attn_qkv_b, config
         )
-        self.qk_fuse_norm = FusedQKRMSNorm(
+        self.qk_fuse_norm = QKRMSNorm(
             weights.weights[0][W.q_ln_gamma],
             weights.weights[0][W.k_ln_gamma],
             config.head_num,
@@ -246,7 +246,7 @@ class Qwen3GemmModel(DisaggregateModelBase):
             for rank_idx, rank in enumerate(self.attn_dp_rank):
                 size = mirco_batch_sizes_list[idx][rank_idx]
                 if size > 0:
-                    recv(input_ids[offset : offset + size], rank, Group.DP_AND_TP)
+                    recv(input_ids[offset: offset + size], rank, Group.DP_AND_TP)
                     offset += size
         return input_ids_list, BatchSplitInfo(
             total_micro_batch_sizes, mirco_batch_sizes_list
@@ -255,7 +255,7 @@ class Qwen3GemmModel(DisaggregateModelBase):
     def send_to_attention(self, t: torch.Tensor, micro_batch_size_list: List[int]):
         offset = 0
         for idx, size in enumerate(micro_batch_size_list):
-            tensor_slice = t[offset : offset + size]
+            tensor_slice = t[offset: offset + size]
             send(tensor_slice, self.attn_dp_rank[idx], Group.DP_AND_TP)
             offset += size
 
@@ -275,7 +275,7 @@ class Qwen3GemmModel(DisaggregateModelBase):
         )
 
         for idx, size in enumerate(mirco_batch_size_list):
-            recv(t[offset : offset + size], self.attn_dp_rank[idx], Group.DP_AND_TP)
+            recv(t[offset: offset + size], self.attn_dp_rank[idx], Group.DP_AND_TP)
             offset += size
         return t
 
