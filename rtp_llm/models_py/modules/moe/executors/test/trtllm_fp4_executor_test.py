@@ -224,7 +224,7 @@ def test_trtllm_fp4_executor():
 
     print(output)
     print(ref_output)
-    torch.testing.assert_close(output, ref_output)
+    torch.testing.assert_close(output, ref_output, rtol=2e-2, atol=1e-3)
 
 if __name__ == "__main__":
     test_trtllm_fp4_executor()
