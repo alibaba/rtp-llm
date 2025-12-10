@@ -45,8 +45,8 @@ genrule(
     cmd = select({
         "//rtp_llm/cpp/devices/rocm_impl:enable_deep_ep": """
             # Copy libdeep_ep_rocm.so from @deep_ep_rocm//:cpp_libraries
-            # $(locations) returns all output files, filter for .so file
-            for f in $(locations @deep_ep_rocm//:cpp_libraries); do
+            # $(SRCS) contains all files from srcs, filter for .so file
+            for f in $(SRCS); do
                 if [[ "$$f" == *.so ]]; then
                     cp "$$f" $(location libdeep_ep_rocm.so);
                     break;
