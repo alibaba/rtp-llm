@@ -246,6 +246,7 @@ def _generate_ref_output(
             # w13_expert: [MOE_INTERMEDIATE_SIZE * 2, HIDDEN_SIZE]
             # token_hidden: [1, HIDDEN_SIZE]
             # workspace1: [1, MOE_INTERMEDIATE_SIZE * 2]
+            print(w13_expert.transpose(0, 1).shape, token_hidden.shape)
             workspace1 = torch.matmul(token_hidden, w13_expert.transpose(0, 1))
             
             # Split into gate and value (for gated activation like SwiGLU)
