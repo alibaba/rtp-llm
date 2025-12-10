@@ -189,9 +189,9 @@ def _generate_ref_output(
     w13_global_scale = 1.0 / weights["w13_weight_scale_2"]  # [NUM_EXPERTS]
     w13_float_list = []
     for expert_id in range(NUM_EXPERTS):
-        expert_w13 = weights[W.moe_w1][expert_id:expert_id+1]  # [1, MOE_INTERMEDIATE_SIZE * 2, HIDDEN_SIZE / 2]
-        expert_w13_scale = weights[W.moe_s1][expert_id:expert_id+1]  # [1, MOE_INTERMEDIATE_SIZE * 2, HIDDEN_SIZE / NVFP4_BLOCK_SIZE]
-        expert_global_scale = w13_global_scale[expert_id:expert_id+1]  # [1]
+        expert_w13 = weights[W.moe_w1][expert_id]
+        expert_w13_scale = weights[W.moe_s1][expert_id]
+        expert_global_scale = w13_global_scale[expert_id]
         
         expert_w13_float = e2m1_and_ufp8sf_scale_to_float(
             expert_w13.view(torch.uint8),  # Ensure uint8 dtype
@@ -207,9 +207,9 @@ def _generate_ref_output(
     w2_global_scale = 1.0 / weights["w2_weight_scale_2"]  # [NUM_EXPERTS]
     w2_float_list = []
     for expert_id in range(NUM_EXPERTS):
-        expert_w2 = weights[W.moe_w2][expert_id:expert_id+1]  # [1, HIDDEN_SIZE, MOE_INTERMEDIATE_SIZE / 2]
-        expert_w2_scale = weights[W.moe_s2][expert_id:expert_id+1]  # [1, HIDDEN_SIZE, MOE_INTERMEDIATE_SIZE / NVFP4_BLOCK_SIZE]
-        expert_global_scale = w2_global_scale[expert_id:expert_id+1]  # [1]
+        expert_w2 = weights[W.moe_w2][expert_id]
+        expert_w2_scale = weights[W.moe_s2][expert_id]
+        expert_global_scale = w2_global_scale[expert_id]
         
         expert_w2_float = e2m1_and_ufp8sf_scale_to_float(
             expert_w2.view(torch.uint8),  # Ensure uint8 dtype
