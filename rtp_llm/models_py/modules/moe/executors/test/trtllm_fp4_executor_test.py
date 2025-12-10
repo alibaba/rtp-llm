@@ -12,6 +12,8 @@ from rtp_llm.models_py.modules.moe.fused_moe import (
 from rtp_llm.models_py.modules.moe.utils import FusedMoEQuantConfig
 from rtp_llm.utils.model_weight import W
 
+from flashinfer import e2m1_and_ufp8sf_scale_to_float
+
 DP_SIZE = 1
 TP_SIZE = 1
 EP_SIZE = 1
@@ -175,26 +177,104 @@ def _generate_ref_output(
 ) -> torch.Tensor:
     if REAL_DATA_DIR.is_dir():
         output = load_pt("output.pt", (SEQ_LEN, HIDDEN_SIZE), torch.bfloat16)
-        return output
-
-    #     w2_local_float32 = e2m1_and_ufp8sf_scale_to_float(
-    #         weights[W.moe_w2],
-    #         weights[W.moe_s2],
-    #         w2_global_scale,
-    #         sf_vec_size=NVFP4_BLOCK_SIZE,
-    #         ufp8_type=1,
-    #     )
-    #     # Compute MoE forward pass
-    #     workspace1 = expert_x_local @ w1_local.transpose(0, 1)
-    #     gate = workspace1[..., N // 2 :].to(torch.float32)
-    #     value = workspace1[..., : N // 2].to(torch.float32)
-    #     gate = gate * (1.0 / (1.0 + torch.exp(-gate)))  # SiLU
-    #     workspace2 = (gate * value).to(torch.bfloat16)
-    #     ref_output[local_expert_id, :num_actual_tokens, :] = (
-    #         workspace2 @ w2_local.transpose(0, 1)
-    #     )
+        # return output
     
-    # return ref_output
+    hidden_states = payload.expert_x  # [SEQ_LEN, HIDDEN_SIZE]
+    topk_ids = payload.expert_topk_ids  # [SEQ_LEN, TOP_K]
+    topk_weights = payload.expert_topk_weights  # [SEQ_LEN, TOP_K]
+    
+    device = hidden_states.device
+    dtype = hidden_states.dtype
+    
+    w13_global_scale = 1.0 / weights["w13_weight_scale_2"]  # [NUM_EXPERTS]
+    w13_float_list = []
+    for expert_id in range(NUM_EXPERTS):
+        expert_w13 = weights[W.moe_w1][expert_id:expert_id+1]  # [1, MOE_INTERMEDIATE_SIZE * 2, HIDDEN_SIZE / 2]
+        expert_w13_scale = weights[W.moe_s1][expert_id:expert_id+1]  # [1, MOE_INTERMEDIATE_SIZE * 2, HIDDEN_SIZE / NVFP4_BLOCK_SIZE]
+        expert_global_scale = w13_global_scale[expert_id:expert_id+1]  # [1]
+        
+        expert_w13_float = e2m1_and_ufp8sf_scale_to_float(
+            expert_w13.view(torch.uint8),  # Ensure uint8 dtype
+            expert_w13_scale.view(torch.uint8),  # Ensure uint8 dtype
+            expert_global_scale,  # Global scale for this expert [1]
+            sf_vec_size=NVFP4_BLOCK_SIZE,
+            ufp8_type=1,  # E4M3 format
+            is_sf_swizzled_layout=True,  # Scale factors are in swizzled layout
+        )  # Output: [1, MOE_INTERMEDIATE_SIZE * 2, HIDDEN_SIZE] (float32)
+        w13_float_list.append(expert_w13_float[0])
+    w13_float = torch.stack(w13_float_list, dim=0)  # [NUM_EXPERTS, MOE_INTERMEDIATE_SIZE * 2, HIDDEN_SIZE]
+    
+    w2_global_scale = 1.0 / weights["w2_weight_scale_2"]  # [NUM_EXPERTS]
+    w2_float_list = []
+    for expert_id in range(NUM_EXPERTS):
+        expert_w2 = weights[W.moe_w2][expert_id:expert_id+1]  # [1, HIDDEN_SIZE, MOE_INTERMEDIATE_SIZE / 2]
+        expert_w2_scale = weights[W.moe_s2][expert_id:expert_id+1]  # [1, HIDDEN_SIZE, MOE_INTERMEDIATE_SIZE / NVFP4_BLOCK_SIZE]
+        expert_global_scale = w2_global_scale[expert_id:expert_id+1]  # [1]
+        
+        expert_w2_float = e2m1_and_ufp8sf_scale_to_float(
+            expert_w2.view(torch.uint8),  # Ensure uint8 dtype
+            expert_w2_scale.view(torch.uint8),  # Ensure uint8 dtype
+            expert_global_scale,  # Global scale for this expert [1]
+            sf_vec_size=NVFP4_BLOCK_SIZE,
+            ufp8_type=1,  # E4M3 format
+            is_sf_swizzled_layout=True,  # Scale factors are in swizzled layout
+        )  # Output: [1, HIDDEN_SIZE, MOE_INTERMEDIATE_SIZE] (float32)
+        w2_float_list.append(expert_w2_float[0])
+    w2_float = torch.stack(w2_float_list, dim=0)  # [NUM_EXPERTS, HIDDEN_SIZE, MOE_INTERMEDIATE_SIZE]
+    
+    # Convert to bfloat16 for computation
+    w13_float = w13_float.to(device).to(dtype)  # [NUM_EXPERTS, MOE_INTERMEDIATE_SIZE * 2, HIDDEN_SIZE]
+    w2_float = w2_float.to(device).to(dtype)  # [NUM_EXPERTS, HIDDEN_SIZE, MOE_INTERMEDIATE_SIZE]
+    
+    ref_output = torch.zeros((SEQ_LEN, HIDDEN_SIZE), dtype=dtype, device=device)
+    
+    # Process each token
+    for token_idx in range(SEQ_LEN):
+        token_hidden = hidden_states[token_idx:token_idx+1]  # [1, HIDDEN_SIZE]
+        token_output = torch.zeros((1, HIDDEN_SIZE), dtype=dtype, device=device)
+        
+        # Process each selected expert
+        for k in range(TOP_K):
+            expert_id = topk_ids[token_idx, k].item()
+            expert_weight = topk_weights[token_idx, k]
+            
+            # Get expert weights
+            w13_expert = w13_float[expert_id]  # [MOE_INTERMEDIATE_SIZE * 2, HIDDEN_SIZE]
+            w2_expert = w2_float[expert_id]  # [HIDDEN_SIZE, MOE_INTERMEDIATE_SIZE]
+            
+            # GEMM1: hidden_states @ w13^T
+            # w13_expert: [MOE_INTERMEDIATE_SIZE * 2, HIDDEN_SIZE]
+            # token_hidden: [1, HIDDEN_SIZE]
+            # workspace1: [1, MOE_INTERMEDIATE_SIZE * 2]
+            workspace1 = torch.matmul(token_hidden, w13_expert.transpose(0, 1))
+            
+            # Split into gate and value (for gated activation like SwiGLU)
+            # w13 is ordered as [w3, w1] after reorder_w1w3_to_w3w1
+            # So first half is w3 (value), second half is w1 (gate)
+            N = workspace1.shape[-1]  # MOE_INTERMEDIATE_SIZE * 2
+            gate = workspace1[..., N // 2:].to(torch.float32)  # [1, MOE_INTERMEDIATE_SIZE]
+            value = workspace1[..., :N // 2].to(torch.float32)  # [1, MOE_INTERMEDIATE_SIZE]
+            
+            # Apply SiLU activation: gate = gate * sigmoid(gate)
+            gate = gate * torch.sigmoid(gate)  # SiLU
+            
+            # Element-wise multiplication: gate * value
+            workspace2 = (gate * value).to(dtype)  # [1, MOE_INTERMEDIATE_SIZE]
+            
+            # GEMM2: workspace2 @ w2^T
+            # workspace2: [1, MOE_INTERMEDIATE_SIZE]
+            # w2_expert: [HIDDEN_SIZE, MOE_INTERMEDIATE_SIZE]
+            # expert_output: [1, HIDDEN_SIZE]
+            expert_output = torch.matmul(workspace2, w2_expert.transpose(0, 1))
+            
+            # Weighted accumulation
+            token_output += expert_weight * expert_output
+        
+        ref_output[token_idx] = token_output[0]
+    
+    torch.testing.assert_close(output, ref_output, rtol=2e-2, atol=1e-5)
+    assert 0
+    return ref_output
 
 def test_trtllm_fp4_executor():
     torch.manual_seed(42)
@@ -224,7 +304,7 @@ def test_trtllm_fp4_executor():
 
     print(output)
     print(ref_output)
-    torch.testing.assert_close(output, ref_output, rtol=2e-2, atol=1e-3)
+    torch.testing.assert_close(output, ref_output, rtol=2e-2, atol=1e-5)
 
 if __name__ == "__main__":
     test_trtllm_fp4_executor()
