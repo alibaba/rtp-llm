@@ -949,7 +949,7 @@ class FrontendWorker:
                 output_lens.append(len(tokens_list))
 
                 # Truncate stop word tokens
-                processed_tokens = self._truncate_by_stop_token_ids(
+                processed_tokens = self.process_stop_id(
                     generate_config,
                     generate_output,
                     tokens_list,
@@ -974,7 +974,7 @@ class FrontendWorker:
             # Truncate stop word strings and add prefix
             generate_texts = []
             for i in range(num_outputs):
-                text, token_buffers[i] = self._truncate_by_stop_strings(
+                text, token_buffers[i] = self.process_stop_str(
                     generate_config,
                     generate_outputs_cache.generate_outputs[i],
                     newly_decoded_texts[i],

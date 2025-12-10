@@ -8,14 +8,14 @@ import pynvml
 import torch
 
 from rtp_llm.async_decoder_engine.base_engine import BaseEngine
+from rtp_llm.frontend.frontend_worker import FrontendWorker
 from rtp_llm.model_factory import ModelConfig, ModelFactory
-from rtp_llm.pipeline.pipeline import Pipeline
 from rtp_llm.utils.ft_plugin import plguin_loader
 
 
 class ModelTestBase(TestCase):
     """
-    using model to test synax of pipeline, do not check result
+    using model to test synax of frontend_worker, do not check result
     """
 
     def __init__(
@@ -66,7 +66,7 @@ class ModelTestBase(TestCase):
 
     def _test_score(
         self,
-        pipeline: Pipeline,
+        frontend_worker: FrontendWorker,
         generate_config: Dict[str, Any],
         expect_result_file: str,
     ):
@@ -74,7 +74,7 @@ class ModelTestBase(TestCase):
         # this returns list[torch.Tensor]
         responses = [
             response[1]
-            for response in pipeline.pipeline(
+            for response in frontend_worker.generate_sync(
                 test_input, [[], []], generate_config=generate_config
             )
         ]
@@ -124,7 +124,7 @@ class ModelTestBase(TestCase):
     # 由于async请求时候跑的顺序不一定一致，所以需要修改max_new_tokens并取最后一个，来获取确定的结果
     def _test_async_score(
         self,
-        pipeline: Pipeline,
+        frontend_worker: FrontendWorker,
         generate_config: Dict[str, Any],
         expect_result_file: str,
     ):
@@ -138,7 +138,7 @@ class ModelTestBase(TestCase):
         generate_config["max_new_tokens"] = 1
         responses = [
             response[1]
-            for response in pipeline.pipeline(
+            for response in frontend_worker.generate_sync(
                 test_input, [[], []], generate_config=generate_config
             )
         ]
@@ -160,7 +160,7 @@ class ModelTestBase(TestCase):
         generate_config["max_new_tokens"] = 2
         responses = [
             response[1]
-            for response in pipeline.pipeline(
+            for response in frontend_worker.generate_sync(
                 test_input, [[], []], generate_config=generate_config
             )
         ]
@@ -177,15 +177,19 @@ class ModelTestBase(TestCase):
             )
         )
 
-    def _test_ft_score(self, pipeline: Pipeline, expect_result_file: str):
+    def _test_ft_score(self, frontend_worker: FrontendWorker, expect_result_file: str):
         generate_config = {"top_k": 1, "max_new_tokens": 10}
-        self._test_score(pipeline, generate_config, expect_result_file)
+        self._test_score(frontend_worker, generate_config, expect_result_file)
 
-    def _test_ft_async_score(self, pipeline: Pipeline, expect_result_file: str):
+    def _test_ft_async_score(
+        self, frontend_worker: FrontendWorker, expect_result_file: str
+    ):
         generate_config = {"top_k": 1, "max_new_tokens": 1}
-        self._test_async_score(pipeline, generate_config, expect_result_file)
+        self._test_async_score(frontend_worker, generate_config, expect_result_file)
 
-    def _test_ft_config_score(self, pipeline: Pipeline, expect_result_file: str):
+    def _test_ft_config_score(
+        self, frontend_worker: FrontendWorker, expect_result_file: str
+    ):
         generate_config = {
             "max_new_tokens": 16,
             "random_seed": None,
@@ -194,9 +198,9 @@ class ModelTestBase(TestCase):
             "top_p": 0.95,
             "temperature": 1,
         }
-        self._test_score(pipeline, generate_config, expect_result_file)
+        self._test_score(frontend_worker, generate_config, expect_result_file)
 
-    def _test_hf_score(self, pipeline: Pipeline, expect_result_file: str):
+    def _test_hf_score(self, frontend_worker: FrontendWorker, expect_result_file: str):
         generate_config = {
             "top_k": 1,
             "temperature": None,
@@ -204,9 +208,9 @@ class ModelTestBase(TestCase):
             "repetition_penalty": 1,
             "using_hf_sampling": True,
         }
-        self._test_score(pipeline, generate_config, expect_result_file)
+        self._test_score(frontend_worker, generate_config, expect_result_file)
 
-    def _test_loss(self, pipeline: Pipeline, expect_result_file: str):
+    def _test_loss(self, frontend_worker: FrontendWorker, expect_result_file: str):
         generate_config = {
             "top_k": 1,
             "max_new_tokens": 10,
@@ -215,7 +219,7 @@ class ModelTestBase(TestCase):
         }
 
         test_input = "hello?"
-        response = pipeline.pipeline(
+        response = frontend_worker.generate_sync(
             test_input, [[], []], generate_config=generate_config
         )
         batch_loss = torch.Tensor(response.generate_output.loss)
@@ -224,7 +228,7 @@ class ModelTestBase(TestCase):
         )
 
         test_input = "what's your name"
-        response = pipeline.pipeline(
+        response = frontend_worker.generate_sync(
             test_input, [[], []], generate_config=generate_config
         )
         batch_loss = torch.Tensor(response.generate_output.loss)
@@ -248,7 +252,14 @@ class ModelTestBase(TestCase):
     def simple_test(self, is_fake: bool):
         engine: BaseEngine = self._load_engine()
         try:
-            pipeline = Pipeline(engine.config, engine.model.tokenizer)
+            from rtp_llm.server.backend_rpc_server_visitor import (
+                BackendRPCServerVisitor,
+            )
+
+            backend_rpc_server_visitor = BackendRPCServerVisitor(engine.config, False)
+            frontend_worker = FrontendWorker(
+                engine.config, engine.model.tokenizer, backend_rpc_server_visitor
+            )
             if engine.config.pre_seq_len > 0:
                 model_str = "/ptuning"
             else:
@@ -286,10 +297,10 @@ class ModelTestBase(TestCase):
                 )
             if self.test_loss:
                 expected_path += "/expect.loss"
-                self._test_loss(pipeline, expected_path)
+                self._test_loss(frontend_worker, expected_path)
             else:
                 expected_path += "/expect.pt"
-                self._test_ft_async_score(pipeline, expected_path)
+                self._test_ft_async_score(frontend_worker, expected_path)
         finally:
             if isinstance(engine, BaseEngine):
                 engine.stop()
