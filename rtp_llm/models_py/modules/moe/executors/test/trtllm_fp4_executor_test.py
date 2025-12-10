@@ -265,7 +265,7 @@ def _generate_ref_output(
             expert_output = torch.matmul(workspace2, w2_expert.transpose(0, 1))
             
             # Weighted accumulation
-            token_output += expert_output
+            token_output += expert_output / expert_weight
         
         ref_output[token_idx] = token_output[0]
     
