@@ -48,7 +48,7 @@ genrule(
         "libmodule_pa.so",
         "libmodule_activation.so",
         "libmodule_m_grouped_gemm.so",
-        "libdeep_ep_rocm.so",
+        "deep_ep_rocm.so",
         "libmodule_attention_asm.so",
         "libmodule_mha_fwd.so",
         "libmodule_norm.so",
@@ -76,7 +76,7 @@ cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_gemm_a8w8.so $(
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_moe_ck2stages.so $(location libmodule_moe_ck2stages.so);
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_m_grouped_gemm.so $(location libmodule_m_grouped_gemm.so);
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_quick_all_reduce.so $(location libmodule_quick_all_reduce.so);
-cp ./bazel-out/k8-opt/bin/external/deep_ep_rocm/libdeep_ep_rocm.so $(location libdeep_ep_rocm.so);
+cp ./bazel-out/k8-opt/bin/external/deep_ep_rocm/libdeep_ep_rocm.so $(location deep_ep_rocm.so);
 """,
 tags = ["rocm", "local"],
 )
@@ -103,7 +103,7 @@ genrule(
         "module_moe_ck2stages.so",
         "module_quick_all_reduce.so",
         "module_deepgemm.so",
-        "deep_ep_rocm.so",
+        "libdeep_ep_rocm.so",
     ],
     cmd = """
         cp external/aiter/aiter/jit/module_aiter_enum.so $(location module_aiter_enum.so);
@@ -124,7 +124,7 @@ genrule(
         cp external/aiter/aiter/jit/module_moe_ck2stages.so $(location module_moe_ck2stages.so);
         cp external/aiter/aiter/jit/module_quick_all_reduce.so $(location module_quick_all_reduce.so);
         cp external/aiter/aiter/jit/module_deepgemm.so $(location module_deepgemm.so);
-        cp ./bazel-out/k8-opt/bin/external/deep_ep_rocm/libdeep_ep_rocm.so $(location deep_ep_rocm.so);
+        cp ./bazel-out/k8-opt/bin/external/deep_ep_rocm/libdeep_ep_rocm.so $(location libdeep_ep_rocm.so);
 """,
     tags = ["rocm", "local"],
 )
