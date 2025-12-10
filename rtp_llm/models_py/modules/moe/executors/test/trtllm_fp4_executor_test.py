@@ -196,7 +196,7 @@ def _generate_ref_output(
         expert_w13_float = e2m1_and_ufp8sf_scale_to_float(
             expert_w13.view(torch.uint8),  # Ensure uint8 dtype
             expert_w13_scale.view(torch.uint8),  # Ensure uint8 dtype
-            expert_global_scale,  # Global scale for this expert [1]
+            1 / expert_global_scale,  # Global scale for this expert [1]
             sf_vec_size=NVFP4_BLOCK_SIZE,
             ufp8_type=1,  # E4M3 format
             is_sf_swizzled_layout=True,  # Scale factors are in swizzled layout
@@ -214,7 +214,7 @@ def _generate_ref_output(
         expert_w2_float = e2m1_and_ufp8sf_scale_to_float(
             expert_w2.view(torch.uint8),  # Ensure uint8 dtype
             expert_w2_scale.view(torch.uint8),  # Ensure uint8 dtype
-            expert_global_scale,  # Global scale for this expert [1]
+            1 / expert_global_scale,  # Global scale for this expert [1]
             sf_vec_size=NVFP4_BLOCK_SIZE,
             ufp8_type=1,  # E4M3 format
             is_sf_swizzled_layout=True,  # Scale factors are in swizzled layout
