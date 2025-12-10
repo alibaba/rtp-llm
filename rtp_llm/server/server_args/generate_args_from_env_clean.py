@@ -6,9 +6,11 @@
 
 import argparse
 import os
+from ast import arg
 from typing import Any, List, Tuple
 
 from rtp_llm.server.server_args.server_args import EnvArgumentParser
+from rtp_llm.server.server_args.util import str2bool
 
 
 def get_all_arguments_from_parser(
@@ -106,9 +108,9 @@ def generate_args_list(only_env_vars: bool = False) -> List[str]:
     Args:
         only_env_vars: 如果为True，只输出环境变量中存在的参数
     """
+
     # 创建解析器并设置所有参数
     parser = EnvArgumentParser(description="RTP LLM")
-
     # 使用统一的函数初始化所有参数组
     from rtp_llm.server.server_args.server_args import init_all_group_args
 
@@ -124,8 +126,40 @@ def generate_args_list(only_env_vars: bool = False) -> List[str]:
         if long_option == "--help" or default_value == "==SUPPRESS==":
             continue
 
-        # 只处理default不为None的参数
-        if default_value is not None:
+        # 检查环境变量是否存在
+        env_var_exists = os.getenv(env_name) is not None
+        # 如果default_value为None，只要环境变量存在就读取
+        if default_value is None:
+            if env_var_exists:
+                env_value_str = os.getenv(env_name)
+                if env_value_str is not None:
+                    try:
+                        # 根据类型转换环境变量值
+                        if arg_type == bool:
+                            env_value = env_value_str.lower() in (
+                                "true",
+                                "1",
+                                "yes",
+                                "on",
+                            )
+                        elif arg_type == int:
+                            env_value = int(env_value_str)
+                        elif arg_type == float:
+                            env_value = float(env_value_str)
+                        elif arg_type == str2bool:
+                            env_value = str2bool(env_value_str)
+                        else:
+                            env_value = str(env_value_str)
+
+                        # 跳过空字符串参数
+                        if isinstance(env_value, str) and env_value == "":
+                            continue
+
+                        args_list.extend(format_argument_pair(long_option, env_value))
+                    except (ValueError, TypeError):
+                        # 如果转换失败，跳过这个参数
+                        continue
+        else:
             # 从环境变量读取值
             env_value = read_env_value(env_name, default_value, arg_type)
 
@@ -135,7 +169,7 @@ def generate_args_list(only_env_vars: bool = False) -> List[str]:
 
             # 根据only_env_vars参数决定是否只输出环境变量中存在的参数
             if only_env_vars:
-                if os.getenv(env_name) is not None:
+                if env_var_exists:
                     args_list.extend(format_argument_pair(long_option, env_value))
             else:
                 # 总是添加参数，不管环境变量是否存在
