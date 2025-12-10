@@ -16,6 +16,14 @@ py_test (
 )
 
 py_test (
+    name = "mha_test",
+    srcs = ["mha_test.py"],
+    deps = py_test_deps,
+    env = test_envs,
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test (
     name = "rocm_norm_test",
     srcs = ["rocm_norm_test.py"],
     deps = py_test_deps,

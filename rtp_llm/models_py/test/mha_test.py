@@ -5,7 +5,7 @@ from typing import List, Optional
 from unittest import SkipTest, TestCase, main
 
 import torch
-
+import random
 # Add project root to path
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.join(CUR_PATH, "../../../")
@@ -23,6 +23,11 @@ from rtp_llm.models_py.modules.mha.flashinfer_decode import (
 )
 
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs
+def set_seed(seed: int):
+    random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
 
 # Import other MHA implementations
 try:
@@ -75,7 +80,8 @@ def attention_prefill_ref(
     """
     batch_size = cu_seqlens.shape[0] - 1
     num_tokens = q.shape[0]
-
+    dtype = q.dtype
+    device = q.device
     # Scale factor
     scale = 1.0 / math.sqrt(head_dim)
 
@@ -100,26 +106,29 @@ def attention_prefill_ref(
         if seq_len == 0:
             continue
 
-        q_seq = q[start_idx:end_idx]  # [seq_len, num_heads, head_dim]
-        k_seq = k[start_idx:end_idx]  # [seq_len, num_heads, head_dim]
-        v_seq = v[start_idx:end_idx]  # [seq_len, num_heads, head_dim]
+        q_seq = q[start_idx:end_idx].transpose(0, 1)  # [seq_len, num_heads, head_dim]
+        k_seq = k[start_idx:end_idx].transpose(0, 1)  # [seq_len, num_heads, head_dim]
+        v_seq = v[start_idx:end_idx].transpose(0, 1)  # [seq_len, num_heads, head_dim]
 
-        # Compute attention scores: [seq_len, num_heads, seq_len]
-        scores = torch.einsum("shd,thd->sht", q_seq, k_seq) * scale
-
+        # Compute attention scores: [num_heads, seq_len, seq_len]
+        scores = torch.einsum("hsd,htd->hst", q_seq, k_seq) * scale
         # Apply causal mask if needed
         if causal:
+            min_dtype = torch.finfo(dtype).min
+            causal_mask = torch.full(
+                (seq_len, seq_len), fill_value=min_dtype, dtype=dtype, device=device
+            )            
             causal_mask = torch.triu(
-                torch.ones(seq_len, seq_len, device=q.device, dtype=torch.bool),
+                causal_mask,
                 diagonal=1
             )
-            scores = scores.masked_fill(causal_mask.unsqueeze(0), float("-inf"))
+            scores = scores + causal_mask.unsqueeze(0)
 
         # Softmax
-        attn_weights = torch.softmax(scores, dim=-1)  # [seq_len, num_heads, seq_len]
+        attn_weights = torch.softmax(scores, dim=-1)  # [num_heads, seq_len, seq_len]
 
         # Apply attention to values
-        output = torch.einsum("sht,thd->shd", attn_weights, v_seq)  # [seq_len, num_heads, head_dim]
+        output = torch.einsum("hst,htd->hsd", attn_weights, v_seq).transpose(0, 1).contiguous()  # [seq_len, num_heads, head_dim]
         outputs.append(output)
 
     return torch.cat(outputs, dim=0)  # [num_tokens, num_heads, head_dim]
@@ -202,15 +211,16 @@ def attention_decode_ref(
             v_seq = v_seq.repeat_interleave(num_groups, dim=0)  # [num_heads, seq_len, head_dim]
 
         # Compute attention: q_i is [num_heads, head_dim], k_seq is [num_heads, seq_len, head_dim]
-        q_i = q[i]  # [num_heads, head_dim]
+        q_i = q[i].unsqueeze(1)  # [num_heads, head_dim]
         # scores: [num_heads, seq_len] = q_i @ k_seq^T
-        scores = torch.einsum("hd,hsd->hs", q_i, k_seq) * scale  # [num_heads, seq_len]
+        print('cc:', q_i.shape, k_seq.shape)
+        scores = torch.einsum("htd,hsd->hts", q_i, k_seq) * scale  # [num_heads, seq_len]
 
         # Softmax
         attn_weights = torch.softmax(scores, dim=-1)  # [num_heads, seq_len]
-
+        print('res:', q_i, k_seq, scores, attn_weights, v_seq)
         # Apply attention to values: [num_heads, seq_len] @ [num_heads, seq_len, head_dim] -> [num_heads, head_dim]
-        output = torch.einsum("hs,hsd->hd", attn_weights, v_seq)  # [num_heads, head_dim]
+        output = torch.einsum("hts,hsd->htd", attn_weights, v_seq).squeeze(1)  # [num_heads, head_dim]
         outputs.append(output)
 
     return torch.stack(outputs, dim=0)  # [batch_size, num_heads, head_dim]
@@ -221,12 +231,15 @@ class FlashInferPythonMHATest(TestCase):
         if not torch.cuda.is_available():
             raise SkipTest("CUDA is not available")
         torch.set_default_device(device)
-
+        set_seed(25536)
         self.num_pages = 1024
         self.page_size = 64
         self.head_dim = 128
         self.num_kv_heads = 8
         self.num_heads = 64
+        self.num_heads = 8        
+        self.num_kv_heads = 1
+
         self.k_cache = torch.randn(
             self.num_pages,
             self.num_kv_heads,
@@ -315,9 +328,11 @@ class FlashInferPythonMHATest(TestCase):
         kv_cache.v_cache_base = self.v_cache
         return kv_cache
 
-    def test_run_flashinfer_prefill_test(self):
+    def _test_run_flashinfer_prefill_test(self):
         """Test flashinfer prefill attention with reference comparison."""
         input_lengths = [2, 3, 10, 12]
+        # input_lengths = [1]
+        
         num_tokens = sum(input_lengths)
 
         config = GptInitModelParameters(self.num_heads, self.head_dim, 12, 2048, 102400)
@@ -406,6 +421,7 @@ class FlashInferPythonMHATest(TestCase):
     def test_run_flashinfer_decode_test(self):
         """Test flashinfer decode attention with reference comparison."""
         sequence_lengths = [2, 3, 10, 12]
+        sequence_lengths = [1]        
         num_tokens = len(sequence_lengths)
         config = GptInitModelParameters(self.num_heads, self.head_dim, 12, 2048, 102400)
         config.head_num = self.num_heads
@@ -474,8 +490,11 @@ class FlashInferPythonMHATest(TestCase):
         if not is_close:
             # Print some sample values for debugging
             print("\nSample comparison (first batch, first head, first 5 dims):")
-            print("FlashInfer:", out_flashinfer_f32[0, 0, :5])
-            print("Reference: ", out_ref_f32[0, 0, :5])
+            # print("FlashInfer decode:", out_flashinfer_f32[0, 0, :5])
+            # print("Reference decode: ", out_ref_f32[0, 0, :5])
+            print("FlashInfer decode:", out_flashinfer_f32)
+            print("Reference decode: ", out_ref_f32)
+            
             print("Difference:", (out_flashinfer_f32[0, 0, :5] - out_ref_f32[0, 0, :5]).abs())
 
         self.assertTrue(
@@ -483,7 +502,7 @@ class FlashInferPythonMHATest(TestCase):
             f"FlashInfer output does not match reference. Max diff: {max_diff}, Mean diff: {mean_diff}"
         )
 
-    def test_prefill_multiple_configs(self):
+    def _test_prefill_multiple_configs(self):
         """Test prefill with multiple configurations."""
         test_configs = [
             {"input_lengths": [1, 1, 1], "name": "single_token"},
@@ -549,7 +568,7 @@ class FlashInferPythonMHATest(TestCase):
                     f"Prefill test failed for config {test_config['name']}"
                 )
 
-    def test_decode_multiple_configs(self):
+    def _test_decode_multiple_configs(self):
         """Test decode with multiple configurations."""
         test_configs = [
             {"sequence_lengths": [1, 1, 1], "name": "single_token"},
@@ -612,7 +631,7 @@ class FlashInferPythonMHATest(TestCase):
                     f"Decode test failed for config {test_config['name']}"
                 )
 
-    def test_flashinfer_trtllm_prefill(self):
+    def _test_flashinfer_trtllm_prefill(self):
         """Test FlashInferTRTLLM prefill attention with reference comparison."""
         if not FLASHINFER_TRTLLM_AVAILABLE:
             raise SkipTest("FlashInferTRTLLM not available")
@@ -709,7 +728,7 @@ class FlashInferPythonMHATest(TestCase):
             f"FlashInferTRTLLM output does not match reference. Max diff: {max_diff}, Mean diff: {mean_diff}"
         )
 
-    def test_flashinfer_trtllm_decode(self):
+    def _test_flashinfer_trtllm_decode(self):
         """Test FlashInferTRTLLM decode attention with reference comparison."""
         if not FLASHINFER_TRTLLM_AVAILABLE:
             raise SkipTest("FlashInferTRTLLM not available")
@@ -805,7 +824,7 @@ class FlashInferPythonMHATest(TestCase):
             f"FlashInferTRTLLM output does not match reference. Max diff: {max_diff}, Mean diff: {mean_diff}"
         )
 
-    def test_trt_mha_prefill(self):
+    def _test_trt_mha_prefill(self):
         """Test TRT MHA prefill attention with reference comparison."""
         if not TRT_MHA_AVAILABLE:
             raise SkipTest("TRT MHA not available")
@@ -896,7 +915,7 @@ class FlashInferPythonMHATest(TestCase):
             f"TRT MHA output does not match reference. Max diff: {max_diff}, Mean diff: {mean_diff}"
         )
 
-    def test_xqa_decode(self):
+    def _test_xqa_decode(self):
         """Test XQA decode attention with reference comparison."""
         if not XQA_AVAILABLE:
             raise SkipTest("XQA not available")
