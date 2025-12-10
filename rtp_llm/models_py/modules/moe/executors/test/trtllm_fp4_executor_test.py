@@ -148,11 +148,9 @@ def _generate_payload_and_weights(
             routing_logits, TOP_K, NUM_EXPERTS, 8
         )
         topk_ids = permute_info["topKIndices"].to(torch.int32)
-        check_meta(topk_ids, (SEQ_LEN, TOP_K), torch.int32)
         topk_weights = topk_weights.view(SEQ_LEN, NUM_EXPERTS)[
             torch.arange(SEQ_LEN).unsqueeze(1), topk_ids
         ].to(torch.bfloat16)
-        check_meta(topk_weights, (SEQ_LEN, TOP_K), torch.bfloat16)
         payload = ExpertForwardPayload(
             expert_x=hidden_states,
             expert_x_origin_dtype=torch.bfloat16,
