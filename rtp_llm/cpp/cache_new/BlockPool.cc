@@ -121,7 +121,7 @@ void BlockPool::clearCache() {
     if (!block_cache_) {
         return;
     }
-    auto blocks = block_cache_->clear();
+    auto blocks = block_cache_->steal();
     if (!blocks.empty()) {
         blockCacheFree(blocks);
     }
