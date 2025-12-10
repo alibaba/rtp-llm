@@ -200,8 +200,8 @@ def _generate_ref_output(
             sf_vec_size=NVFP4_BLOCK_SIZE,
             ufp8_type=1,  # E4M3 format
             is_sf_swizzled_layout=True,  # Scale factors are in swizzled layout
-        )  # Output: [1, MOE_INTERMEDIATE_SIZE * 2, HIDDEN_SIZE] (float32)
-        w13_float_list.append(expert_w13_float[0])
+        )
+        w13_float_list.append(expert_w13_float)
     w13_float = torch.stack(w13_float_list, dim=0)  # [NUM_EXPERTS, MOE_INTERMEDIATE_SIZE * 2, HIDDEN_SIZE]
     
     w2_global_scale = 1.0 / weights["w2_weight_scale_2"]  # [NUM_EXPERTS]
@@ -218,8 +218,8 @@ def _generate_ref_output(
             sf_vec_size=NVFP4_BLOCK_SIZE,
             ufp8_type=1,  # E4M3 format
             is_sf_swizzled_layout=True,  # Scale factors are in swizzled layout
-        )  # Output: [1, HIDDEN_SIZE, MOE_INTERMEDIATE_SIZE] (float32)
-        w2_float_list.append(expert_w2_float[0])
+        )
+        w2_float_list.append(expert_w2_float)
     w2_float = torch.stack(w2_float_list, dim=0)  # [NUM_EXPERTS, HIDDEN_SIZE, MOE_INTERMEDIATE_SIZE]
     
     # Convert to bfloat16 for computation
@@ -246,7 +246,6 @@ def _generate_ref_output(
             # w13_expert: [MOE_INTERMEDIATE_SIZE * 2, HIDDEN_SIZE]
             # token_hidden: [1, HIDDEN_SIZE]
             # workspace1: [1, MOE_INTERMEDIATE_SIZE * 2]
-            print(w13_expert.transpose(0, 1).shape, token_hidden.shape)
             workspace1 = torch.matmul(token_hidden, w13_expert.transpose(0, 1))
             
             # Split into gate and value (for gated activation like SwiGLU)
