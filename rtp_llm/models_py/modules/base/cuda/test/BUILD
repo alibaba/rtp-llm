@@ -8,24 +8,32 @@ py_test_deps = [
 ]
 
 py_test (
-    name = "norm_test",
-    srcs = ["norm_test.py"],
+    name = "rmsnorm_test",
+    srcs = ["rmsnorm_test.py"],
     deps = py_test_deps,
     env = test_envs,
     exec_properties = {'gpu':'A10'},
 )
 
 py_test (
-    name = "rmsresnorm_test",
-    srcs = ["rmsresnorm_test.py"],
+    name = "fused_add_rmsnorm_test",
+    srcs = ["fused_add_rmsnorm_test.py"],
     deps = py_test_deps,
     env = test_envs,
     exec_properties = {'gpu':'A10'},
 )
 
 py_test (
-    name = "fusedqkrmsnorm_test",
-    srcs = ["fusedqkrmsnorm_test.py"],
+    name = "fused_qkrmsnorm_test",
+    srcs = ["fused_qkrmsnorm_test.py"],
+    deps = py_test_deps,
+    env = test_envs,
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test (
+    name = "qkrmsnorm_test",
+    srcs = ["qkrmsnorm_test.py"],
     deps = py_test_deps,
     env = test_envs,
     exec_properties = {'gpu':'A10'},

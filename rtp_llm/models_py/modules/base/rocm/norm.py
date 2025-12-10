@@ -1,4 +1,4 @@
-from typing import Tuple, Union
+from typing import Tuple, Union, Optional
 
 import torch
 import torch.nn.functional as F
@@ -10,6 +10,7 @@ from rtp_llm.models_py.modules.base.common.norm import (
     BaseAddBiasResLayerNorm,
     BaseLayerNorm,
     BaseNorm,
+    BaseQKNorm
 )
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
@@ -30,7 +31,7 @@ class RMSNorm(BaseNorm):
     def __init__(self, weight: torch.Tensor, eps: float = 1e-6):
         super().__init__(weight, eps)
 
-    def forward(self, hidden_states: torch.Tensor):
+    def forward(self, hidden_states: torch.Tensor, output: Optional[torch.Tensor] = None) -> torch.Tensor:
         return rms_norm(hidden_states, self.weight.data, self.variance_epsilon)
 
 
@@ -84,25 +85,19 @@ class AddBiasResLayerNormTorch(BaseAddBiasResLayerNorm):
         return (self.weight * x_normalized + self.beta).to(input_dtype)
 
 
-class QKRMSNorm(nn.Module):
+class QKRMSNorm(BaseQKNorm):
     def __init__(
         self,
         q_weight: torch.Tensor,
         k_weight: torch.Tensor,
         head_num: int,
         kv_head_num: int,
-        size_per_head: float = 128,
+        size_per_head: int,
         eps: float = 1e-6,
     ):
-        super().__init__()
+        super().__init__(q_weight, k_weight, head_num, kv_head_num, size_per_head, eps)
         self.q_norm = RMSNorm(q_weight, eps)
         self.k_norm = RMSNorm(k_weight, eps)
-        self.head_num = head_num
-        self.kv_head_num = kv_head_num
-        self.size_per_head = size_per_head
-        self.q_size = self.head_num * self.size_per_head
-        self.kv_size = self.kv_head_num * self.size_per_head
-        self.variance_epsilon = eps
 
     def _apply_qk_norm(
         self, q: torch.Tensor, k: torch.Tensor
@@ -115,40 +110,32 @@ class QKRMSNorm(nn.Module):
         k = k_by_head.view(k.shape)
         return q, k
 
-    def forward(self, hidden_states):
+    def forward(self, hidden_states: torch.Tensor):
         q, k, v = hidden_states.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self._apply_qk_norm(q, k)
         output = torch.cat([q, k, v], dim=-1)
         return output
 
 
-class FusedQKRMSNorm(nn.Module):
+class FusedQKRMSNorm(BaseQKNorm):
     def __init__(
         self,
         q_weight: torch.Tensor,
         k_weight: torch.Tensor,
         head_num: int,
         kv_head_num: int,
-        size_per_head: float = 128,
+        size_per_head: int,
         eps: float = 1e-6,
     ):
-        super().__init__()
-        self.q_weight = q_weight
-        self.k_weight = k_weight
-        self.eps = eps
-        self.head_num = head_num
-        self.kv_head_num = kv_head_num
-        self.size_per_head = size_per_head
-        self.q_size = self.head_num * self.size_per_head
-        self.kv_size = self.kv_head_num * self.size_per_head
+        super().__init__(q_weight, k_weight, head_num, kv_head_num, size_per_head, eps)
 
-    def forward(self, hidden_states):
+    def forward(self, hidden_states: torch.Tensor):
         m, n = hidden_states.shape
         rtp_llm_ops.fused_qk_rmsnorm(
             hidden_states,
             self.q_weight,
             self.k_weight,
-            self.eps,
+            self.variance_epsilon,
             self.head_num,
             self.kv_head_num,
             m,

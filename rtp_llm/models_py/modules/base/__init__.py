@@ -11,7 +11,8 @@ from rtp_llm.models_py.modules.base.common.norm import (
     LayerNorm,
     LayerNormTorch,
     RMSNormTorch,
-    RMSResNormTorch,
+    AddRMSNormTorch,
+    QKRMSNormTorch,
 )
 from rtp_llm.ops.compute_ops import DeviceType, get_device
 
@@ -30,7 +31,7 @@ if device_type == DeviceType.ROCm:
     # Import NotImplementedOp placeholders for ROCm
     from rtp_llm.models_py.modules.base.rocm.not_implemented_ops import (
         GroupTopK,
-        RMSResNorm,
+        FusedAddRMSNorm,
     )
     from rtp_llm.models_py.modules.base.rocm.select_topk import SelectTopk
 else:
@@ -40,7 +41,7 @@ else:
         FusedQKRMSNorm,
         QKRMSNorm,
         RMSNorm,
-        RMSResNorm,
+        FusedAddRMSNorm,
     )
     from rtp_llm.models_py.modules.base.cuda.select_topk import GroupTopK, SelectTopk
 
@@ -53,11 +54,12 @@ else:
         "LayerNorm",
         "LayerNormTorch",
         "RMSNormTorch",
-        "RMSResNormTorch",
+        "AddRMSNormTorch",
+        "QKRMSNormTorch",
         "FusedQKRMSNorm",
         "QKRMSNorm",
         "RMSNorm",
-        "RMSResNorm",
+        "FusedAddRMSNorm",
         "SelectTopk",
         "GroupTopK",
         "FusedSiluAndMul",

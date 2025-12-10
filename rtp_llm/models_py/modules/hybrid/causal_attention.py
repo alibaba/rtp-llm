@@ -10,12 +10,12 @@ from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplB
 from rtp_llm.ops.compute_ops import DeviceType, KVCache, get_device
 from rtp_llm.utils.model_weight import W
 
-# Import device-specific FusedQKRMSNorm
+# Import device-specific QKRMSNorm
 device_type = get_device().get_device_type()
 if device_type == DeviceType.ROCm:
-    from rtp_llm.models_py.modules.base.rocm.norm import FusedQKRMSNorm
+    from rtp_llm.models_py.modules.base.rocm.norm import FusedQKRMSNorm as QKRMSNorm
 else:
-    from rtp_llm.models_py.modules.base.cuda.norm import FusedQKRMSNorm
+    from rtp_llm.models_py.modules.base.cuda.norm import QKRMSNorm
 
 
 class CausalAttention(nn.Module):
@@ -39,7 +39,7 @@ class CausalAttention(nn.Module):
         )
         self.qk_fuse_norm = None
         if W.q_ln_gamma in weights and W.k_ln_gamma in weights:
-            self.qk_fuse_norm = FusedQKRMSNorm(
+            self.qk_fuse_norm = QKRMSNorm(
                 weights[W.q_ln_gamma],
                 weights[W.k_ln_gamma],
                 config.head_num // config.tp_size,
