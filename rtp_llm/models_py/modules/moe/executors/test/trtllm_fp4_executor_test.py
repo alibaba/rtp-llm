@@ -220,6 +220,7 @@ def _generate_ref_output(
         0,  # local_expert_offset
         NUM_EXPERTS,
         None,  # routed_scaling_factor
+        None,  # tile_tokens_dim
         RoutingMethodType.Renormalize.value,
         True,  # do_finalize
         device_support_pdl(payload.expert_x.device),
