@@ -226,7 +226,7 @@ def _generate_ref_output(
         device_support_pdl(payload.expert_x.device),
         GatedActType.SwiGlu.value,  # gated_act_type
         None,
-    )[0].to(torch.float)
+    )[0]
 
     print(output)
     print(ref_output)
