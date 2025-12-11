@@ -343,29 +343,27 @@ class ModelFactory:
         Returns:
             ModelConfig instance for propose model, or None if not needed
         """
-        sp_type = engine_config.sp_config.type  # Get SpeculativeType enum value
-        if not sp_type or sp_type == SpeculativeType.NONE:
+        sp_config = engine_config.sp_config
+        if not sp_config.type or sp_config.type == SpeculativeType.NONE:
             return None
-
-        propose_model_type = engine_config.sp_config.model_type
-        propose_ckpt_path = engine_config.sp_config.checkpoint_path
-        if not propose_ckpt_path:
+ 
+        if not sp_config.checkpoint_path:
             return None
 
         # Create ModelArgs for propose model (reuse main model args, but override ckpt_path)
         propose_model_args = ModelArgs()
-        propose_model_args.ckpt_path = propose_ckpt_path
+        propose_model_args.ckpt_path = sp_config.checkpoint_path
         propose_model_args.tokenizer_path = model_args.tokenizer_path
-        propose_model_args.model_type = propose_model_type
+        propose_model_args.model_type = sp_config.model_type
         propose_model_args.act_type = model_args.act_type
         propose_model_args.mla_ops_type = model_args.mla_ops_type
 
         # Create propose ModelConfig using _create_config
-        propose_model_cls = ModelFactory.get_model_cls(propose_model_type)
-        propose_model_config = propose_model_cls._create_config(propose_ckpt_path)
+        propose_model_cls = ModelFactory.get_model_cls(sp_config.model_type)
+        propose_model_config = propose_model_cls._create_config(sp_config.checkpoint_path)
         # Ensure max_seq_len matches main model
         propose_model_config.max_seq_len = model_config.max_seq_len
-        propose_model_config.quantization = model_config.quantization
+        propose_model_config.quantization = sp_config.quantization
 
         logging.info(
             f"load propose model from tokenizer_path: {propose_model_config.tokenizer_path}, "
