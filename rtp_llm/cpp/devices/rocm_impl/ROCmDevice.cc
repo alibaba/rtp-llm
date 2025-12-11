@@ -130,7 +130,7 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
         hipDataType::HIP_R_16F, hipDataType::HIP_R_16F, hipDataType::HIP_R_16F, hipDataType::HIP_R_32F);
 
     hipblas_mm_wrapper_->setStream(stream_);
-    aiter_wrapper_.reset(new AiterWrapper());
+    aiter_wrapper_.reset(new AiterWrapper(params));
     fmha_runner_.reset(new rocmFmhaWrapper());
     fmha_runner_->init(stream_);
     //moe_runner_.reset(new rocmMoeWrapper());
@@ -215,6 +215,29 @@ DeviceProperties ROCmDevice::getDeviceProperties() {
     return *prop;
 }
 
+bool ROCmDevice::checkSpecDecode(const DevicePrepParams& params, bool skip_no_prefix) {
+    bool has_prefix = params.prefix_lengths != nullptr && params.prefix_lengths->size();
+    if (!params.configs.use_mla && has_prefix) {
+        auto input_lengths_host = params.input_lengths->slice(params.decoder_batch_size, params.context_batch_size);
+        const int batch_size    = input_lengths_host->shape()[0];
+        size_t    sp_seq_len    = init_params_.sp_config.gen_num_per_cycle;
+        size_t    max_context_input_seq_len =
+            *std::max_element(input_lengths_host->data<int>(), input_lengths_host->data<int>() + batch_size);
+        size_t min_prefix_len =
+            *std::min_element(params.prefix_lengths->data<int>(), params.prefix_lengths->data<int>() + batch_size);
+
+        RTP_LLM_LOG_DEBUG("max_context_input_seq_len %d min_prefix_len %d sp_seq_len %d.",
+                          max_context_input_seq_len,
+                          min_prefix_len,
+                          sp_seq_len);
+
+        if (skip_no_prefix && (min_prefix_len == 0 || max_context_input_seq_len > sp_seq_len + 1)) {
+            return false;
+        }
+    }
+    return has_prefix;
+}
+
 DevicePrepOutput ROCmDevice::prepareModelRun(const DevicePrepParams& params) {
     DevicePrepOutput output;
     output.need_mask                = false;
@@ -234,6 +257,7 @@ DevicePrepOutput ROCmDevice::prepareModelRun(const DevicePrepParams& params) {
     const int kv_cache_offset = params.k_cache ? params.k_cache->shape()[0] * params.k_cache->shape()[1] : 0;
     auto decode_kv_cache_block_id_d = params.kv_cache_block_id_d ? params.kv_cache_block_id_d->slice(0, params.decoder_batch_size) : nullptr;
     output.decode_aiter_attn = AiterAttnParams::prepareDecodeAiterAttnParams(this, params.sequence_lengths, params.configs, kv_cache_offset, decode_kv_cache_block_id_d);
+    use_mtp_pa_ = checkSpecDecode(params);
     return std::move(output);
 }
 
