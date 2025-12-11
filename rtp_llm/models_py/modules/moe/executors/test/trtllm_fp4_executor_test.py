@@ -19,6 +19,7 @@ from flashinfer import (
 from flashinfer.utils import device_support_pdl
 from flashinfer.fused_moe import (
     trtllm_fp4_block_scale_moe,
+    RoutingMethodType,
 )
 
 DP_SIZE = 1
