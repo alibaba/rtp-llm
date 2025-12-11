@@ -34,7 +34,7 @@ TOP_K = 8
 
 NVFP4_BLOCK_SIZE = 16
 
-REAL_DATA_DIR = Path("/home/xiebaijie.xbj/fp4/dump_908")
+REAL_DATA_DIR = Path("/home/xiebaijie.xbj/fp4/dump_908/xxxxxxxx")
 
 def routing_reference(expertLogits, topK, padding):
     """Reference routing implementation for permutation calculation."""
