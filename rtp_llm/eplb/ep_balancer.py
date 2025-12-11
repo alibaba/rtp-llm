@@ -67,7 +67,7 @@ class ExpertBalancer:
             compute_dtype: Compute data type
             phy2log: Physical to logical expert mapping
             database: Database for loading weights
-            model_config: Optional ModelConfig (used to get eplb_config and use_float32)
+            model_config: Optional ModelConfig (used to get eplb_config)
         """
         self.database: BaseDatabase = database
         self._weights_info: ModelDeployWeightInfo = weights_info
@@ -75,14 +75,6 @@ class ExpertBalancer:
             self._weights_info.create_model_weight_info(database)
         )
         
-        # Get use_float32 from model_config
-        use_fp32 = False
-        if model_config is not None:
-            use_fp32 = model_config.use_float32
-        
-        if use_fp32:
-            compute_dtype = torch.float32
-
         self._load_config: LoadConfig = self._weights_info.create_load_config(
             compute_dtype, database, get_current_device()
         )

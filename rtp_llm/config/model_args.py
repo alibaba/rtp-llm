@@ -24,7 +24,6 @@ class ModelArgs:
         "model_type",
         "task_type",
         "act_type",
-        "use_float32",
         "max_seq_len",
         "mla_ops_type",
         "json_model_override_args",
@@ -45,7 +44,6 @@ class ModelArgs:
 
         # Data types and computation
         self.act_type: Optional[str] = None
-        self.use_float32: bool = False
 
         # Sequence length
         self.max_seq_len: Optional[int] = None

@@ -1213,8 +1213,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         // Fields merged from PyModelConfig
         .def_readwrite("extra_data_path", &ModelConfig::extra_data_path)
         .def_readwrite("local_extra_data_path", &ModelConfig::local_extra_data_path)
-        //        .def_readwrite("act_type", &ModelConfig::act_type)
-        .def_readwrite("use_float32", &ModelConfig::use_float32)
         .def_readwrite("model_type", &ModelConfig::model_type)
         .def_readwrite("ptuning_path", &ModelConfig::ptuning_path)
         .def_readwrite("json_model_override_args", &ModelConfig::json_model_override_args)

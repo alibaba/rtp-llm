@@ -260,7 +260,6 @@ std::string ModelConfig::to_string() const {
         << "extra_data_path: " << extra_data_path << "\n"
         << "local_extra_data_path: " << local_extra_data_path << "\n"
         //<< "act_type: " << act_type << "\n"
-        << "use_float32: " << use_float32 << "\n"
         << "model_type: " << model_type << "\n"
         << "ptuning_path: " << ptuning_path << "\n"
         << "json_model_override_args: " << json_model_override_args;

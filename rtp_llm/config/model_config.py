@@ -104,7 +104,6 @@ class ModelConfig(CppModelConfig):
         "mla_ops_type",
         "extra_data_path",
         "local_extra_data_path",
-        "use_float32",
         "model_type",
         "ptuning_path",
         "json_model_override_args",
@@ -774,7 +773,6 @@ def build_model_config(
     model_config.extra_data_path = model_args.extra_data_path
     model_config.local_extra_data_path = model_args.local_extra_data_path
     model_config.model_type = model_args.model_type
-    model_config.use_float32 = model_args.use_float32
 
     if model_args.mla_ops_type:
         model_config.mla_ops_type = model_args.mla_ops_type

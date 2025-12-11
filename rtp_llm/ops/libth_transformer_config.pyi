@@ -802,7 +802,6 @@ class ModelConfig:
     tokenizer_path: str
     type_vocab_size: int
     use_attention_linear_bias: bool
-    use_float32: bool
     use_fp32_to_compute_logit: bool
     use_kvcache: bool
     use_norm_attn_out_residual: bool

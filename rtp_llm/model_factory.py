@@ -358,7 +358,6 @@ class ModelFactory:
         propose_model_args.tokenizer_path = model_args.tokenizer_path
         propose_model_args.model_type = propose_model_type
         propose_model_args.act_type = model_args.act_type
-        propose_model_args.use_float32 = model_args.use_float32
         propose_model_args.mla_ops_type = model_args.mla_ops_type
 
         # Create propose ModelConfig using _create_config

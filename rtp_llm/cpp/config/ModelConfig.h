@@ -123,8 +123,6 @@ public:
     // Fields merged from PyModelConfig
     std::string extra_data_path          = "";
     std::string local_extra_data_path    = "";
-    //std::string act_type                 = "";
-    bool        use_float32              = false;
     std::string model_type               = "";
     std::string ptuning_path             = "";
     std::string json_model_override_args = "{}";

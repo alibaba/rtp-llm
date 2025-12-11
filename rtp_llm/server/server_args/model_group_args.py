@@ -39,14 +39,6 @@ def init_model_group_args(parser, model_args):
         help="计算使用的数据类型",
     )
     model_group.add_argument(
-        "--use_float32",
-        env_name="USE_FLOAT32",
-        bind_to=(model_args, 'use_float32'),
-        type=str2bool,
-        default=False,
-        help="是否使用FP32",
-    )
-    model_group.add_argument(
         "--mla_ops_type",
         env_name="MLA_OPS_TYPE",
         bind_to=(model_args, 'mla_ops_type'),

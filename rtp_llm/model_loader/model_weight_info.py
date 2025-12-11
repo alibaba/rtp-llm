@@ -297,9 +297,6 @@ class ModelDeployWeightInfo:
             and self.tp_rank == 0
         ):
             weight_info = self._get_vit_info(weight_info)
-        use_fp32 = self.model_config.use_float32
-        if use_fp32:
-            weight_info = weight_info.set_weight_dtype(torch.float32)
 
         if weight_info.layer_weights and not isinstance(
             weight_info.layer_weights[0], List

@@ -59,10 +59,6 @@ class ModelLoader:
 
         # Get compute_dtype from model_config
         compute_dtype = to_torch_dtype(model_config.data_type)
-        # Get use_fp32 from model_config
-        use_fp32 = model_config.use_float32
-        if use_fp32:
-            compute_dtype = torch.float32
         logging.info(f"load use type {compute_dtype}")
 
         # Get is_attn_model flag from weights_info (calculated in ModelDeployWeightInfo constructor)
