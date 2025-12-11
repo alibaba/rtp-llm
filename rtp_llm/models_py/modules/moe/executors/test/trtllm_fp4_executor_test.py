@@ -230,6 +230,8 @@ def _generate_ref_output(
 
     print(output)
     print(ref_output)
+    print(output[260, 1528])
+    print(ref_output[260, 1528])
     torch.testing.assert_close(output, ref_output, rtol=2e-2, atol=1e-5)
     assert 0
     return ref_output
