@@ -200,7 +200,7 @@ def _generate_payload_and_weights(
 
     # w13 = torch.empty((NUM_EXPERTS, MOE_INTERMEDIATE_SIZE * 2, HIDDEN_SIZE / 2), torch.uint8, device='cuda:0')
     w13_scale = torch.empty(
-        (NUM_EXPERTS, MOE_INTERMEDIATE_SIZE * 2, HIDDEN_SIZE / NVFP4_BLOCK_SIZE),
+        (NUM_EXPERTS, MOE_INTERMEDIATE_SIZE * 2, HIDDEN_SIZE // NVFP4_BLOCK_SIZE),
         dtype=torch.float32,
         device='cuda:0',
     ).normal_(76.1, 36.3).clamp_(0.1, 448.0).to(torch.float8_e4m3fn)
@@ -210,10 +210,14 @@ def _generate_payload_and_weights(
         dtype=torch.float32,
         device='cuda:0',
     ).normal_(9e-05, 3.6e-05).clamp_(4.8e-05, 0.0002)
-    w2_input_scale = torch.empty((NUM_EXPERTS,), dtype=torch.float32, device='cuda:0').fill_(0.0028)
+    w2_input_scale = torch.empty(
+        (NUM_EXPERTS,),
+        dtype=torch.float32,
+        device='cuda:0',
+    ).fill_(0.0028)
     # w2 = torch.empty((NUM_EXPERTS, HIDDEN_SIZE, MOE_INTERMEDIATE_SIZE / 2), torch.uint8, device='cuda:0')
     w2_scale = torch.empty(
-        (NUM_EXPERTS, HIDDEN_SIZE, MOE_INTERMEDIATE_SIZE / NVFP4_BLOCK_SIZE),
+        (NUM_EXPERTS, HIDDEN_SIZE, MOE_INTERMEDIATE_SIZE // NVFP4_BLOCK_SIZE),
         dtype=torch.float32,
         device='cuda:0',
     ).normal_(53.2, 20.7).clamp_(4.5, 448.0).to(torch.float8_e4m3fn)
