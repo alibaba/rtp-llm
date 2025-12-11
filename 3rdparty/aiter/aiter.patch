@@ -1,15 +1,3 @@
---- aiter/jit/optCompilerConfig.json
-+++ aiter/jit/optCompilerConfig.json
-@@ -699,7 +699,7 @@
-         "hip_clang_path": "os.environ.get('MHA_HIP_CLANG_PATH')",
-         "blob_gen_cmd": [
-             "f'{CK_DIR}/example/ck_tile/01_fmha/generate.py -d fwd --receipt 600 --output_dir {{}}'",
--            "f'{AITER_CSRC_DIR}/cpp_itfs/mha_fwd_generate.py --receipt 3 --output_dir {{}}'"
-+            "f'{AITER_CSRC_DIR}/cpp_itfs/mha_fwd_generate.py --receipt 2 --output_dir {{}}'"
-         ]
-     },
-     "module_mha_varlen_fwd": {
-
 --- csrc/py_itfs_cu/asm_pa.cu
 +++ csrc/py_itfs_cu/asm_pa.cu
 @@ -115,7 +115,7 @@
@@ -25,7 +13,7 @@
 
 --- aiter/jit/core.py
 +++ aiter/jit/core.py
-@@ -168,36 +168,18 @@
+@@ -270,29 +270,11 @@
  # config_env end here
  
  find_aiter = importlib.util.find_spec("aiter")
@@ -47,7 +35,6 @@
 -
 -    if isDevelopMode:
 -        AITER_META_DIR = AITER_ROOT_DIR
--    # install mode
 -    else:
 -        AITER_META_DIR = os.path.abspath(f"{AITER_ROOT_DIR}/aiter_meta/")
 +meta_path = os.path.abspath(f"{AITER_ROOT_DIR}/aiter_meta")
@@ -57,41 +44,268 @@
 -    AITER_META_DIR = AITER_ROOT_DIR
 -    logger.warning("aiter is not installed.")
 +    AITER_META_DIR = os.path.abspath(AITER_ROOT_DIR)
- sys.path.insert(0, AITER_META_DIR)
- AITER_CSRC_DIR = f"{AITER_META_DIR}/csrc"
+ 
+ # honor environment override and fallback if missing
+ env_meta = os.environ.get("AITER_META_DIR")
+@@ -306,7 +288,8 @@
  AITER_GRADLIB_DIR = f"{AITER_META_DIR}/gradlib"
- gfx = get_gfx()
- AITER_ASM_DIR = f"{AITER_META_DIR}/hsa/{gfx}/"
+ gfxs = get_gfx_list()
+ AITER_ASM_DIR = f"{AITER_META_DIR}/hsa/{get_gfx()}/"
 -os.environ["AITER_ASM_DIR"] = AITER_ASM_DIR
 +if "AITER_ASM_DIR" not in os.environ:
 +    os.environ["AITER_ASM_DIR"] = AITER_ASM_DIR
+ 
  CK_3RDPARTY_DIR = os.environ.get(
      "CK_DIR", f"{AITER_META_DIR}/3rdparty/composable_kernel"
- )
  
 
---- aiter/__init__.py	
+--- aiter/__init__.py 
 +++ aiter/__init__.py
-@@ -77,3 +77,4 @@
- from .ops.trans_ragged_layout import *
- from .ops.sample import *
- from . import mla
+@@ -4,7 +4,17 @@
+ import torch
+ import os
+ import logging
++import sys
+ 
++# fix Python3.10.9 inspect.BlockFinder issue
++if sys.version_info[:3] == (3, 10, 9):
++    import inspect
++    _orig_te = inspect.BlockFinder.tokeneater
++    def _patched_te(self, type, token, *a):
++        if token in ('(', ')') and getattr(self, 'indecorator', False):
++            return
++        _orig_te(self, type, token, *a)
++    inspect.BlockFinder.tokeneater = _patched_te
+ 
+ logger = logging.getLogger("aiter")
+ 
+@@ -77,6 +87,7 @@
+ from .ops.fused_qk_norm_rope_cache_quant import *  # noqa: F403,E402
+ from .ops.groupnorm import *  # noqa: F403,E402
+ from . import mla  # noqa: F403,F401,E402
 +from . import paged_attn
+ 
+ # Import Triton-based communication primitives from ops.triton.comms (optional, only if Iris is available)
+ try:
+
+--- /dev/null
++++ csrc/cpp_itfs/pa_gluon_aot/api.py
+@@ -0,0 +1,104 @@
++import ctypes
++from functools import lru_cache
++import aiter
++from csrc.cpp_itfs.pa_gluon_aot.transpose_query_output_gluon_aot import (
++    compile_query,
++    compile_output,
++)
++from csrc.cpp_itfs.pa_gluon_aot.pa_decode_gluon_aot import (
++    compile,
++)
++import torch
++import triton
++import triton.language as tl
++
++dtype_map = {
++    'float32': torch.float32,
++    'float': torch.float32,
++    'float64': torch.float64,
++    'double': torch.float64,
++    'float16': torch.float16,
++    'half': torch.float16,
++    'bfloat16': torch.bfloat16,
++    'int8': torch.int8,
++    'int16': torch.int16,
++    'int32': torch.int32,
++    'int': torch.int32,
++    'int64': torch.int64,
++    'long': torch.int64,
++    'uint8': torch.uint8,
++    'bool': torch.bool,
++    'complex64': torch.complex64,
++    'complex128': torch.complex128,
++}
++
++
++@lru_cache(maxsize=None)
++def load_all_libs(
++    data_type: str,
++    last_dim: int,
++    query_length: int,
++    num_query_heads: int,
++    num_kv_heads: int,
++    head_size: int,
++    kv_block_size: int,
++    context_partition_size: int,
++    query_quant_mode: int, # 0: per-tensor, 1: per-token
++    kv_quant_mode: int, # 0: per-tensor, 1: per-token
++    kv_cache_dtype: str,
++    value_transposed: bool,
++    use_sinks: int,
++    cdna_version: int
++):
++    # compile transpose_query
++    query_group_size = num_query_heads // num_kv_heads
++    data_type = dtype_map[data_type]
++    merged_dim_size = num_kv_heads * query_length * query_group_size
++    merged_block_size = triton.next_power_of_2(merged_dim_size)
++    block_size_last = triton.next_power_of_2(last_dim)
++    transpose_query_func = compile_query(
++        data_type=data_type,
++        merged_block_size=merged_block_size,
++        block_size_last=block_size_last,
++    )
++
++    # compile pa_decode
++    compute_type = tl.float8e4b8
++    equivalent_query_group_size = query_length * query_group_size
++
++    fp8_max_value = 1.0
++    if kv_cache_dtype == "fp8":
++        fp8_max_value = torch.finfo(aiter.dtypes.fp8).max
++    pa_decode_func = compile(
++        compute_type=compute_type,
++        equivalent_query_group_size=equivalent_query_group_size,
++        head_size=head_size,
++        kv_block_size=kv_block_size,
++        context_partition_size=context_partition_size,
++        query_quant_mode=query_quant_mode,
++        kv_quant_mode=kv_quant_mode,
++        fp8_max_value=fp8_max_value,
++        value_transposed=int(value_transposed),
++        is_causal=int(query_length > 1),
++        use_sinks=use_sinks,
++        cdna_version=cdna_version
++    )
++
++    # compile transpose_output
++    merged_dim_size = num_kv_heads * query_group_size
++    merged_block_size = triton.next_power_of_2(merged_dim_size)
++    block_size_last = triton.next_power_of_2(last_dim)
++    transpose_output_func = compile_output(
++        data_type=data_type,
++        merged_block_size=merged_block_size,
++        block_size_last=block_size_last,
++    )
++    return [
++        ctypes.cast(transpose_query_func, ctypes.c_void_p).value,
++        ctypes.cast(pa_decode_func, ctypes.c_void_p).value,
++        ctypes.cast(transpose_output_func, ctypes.c_void_p).value,
++    ]
++
++
++if __name__ == "__main__":
++    load_all_libs("bfloat16", 128, 4, 128, 128, 128, 16, 256, 0, 0, "fp8", False, 0, 3)
 
 
---- aiter/ops/gemm_op_a8w8.py
-+++ aiter/ops/gemm_op_a8w8.py
-@@ -425,9 +425,11 @@
-     WQ: Tensor,
-     x_scale: Tensor,
-     w_scale: Tensor,
--    dtype: torch.dtype = dtypes.bf16,
-+    dtype: torch.dtype = None,
-     isBpreshuffled: bool = False,
- ) -> torch.Tensor:
-+    if dtype is None:
-+        dtype = torch.bfloat16
-     assert dtype in [
-         dtypes.bf16,
-         dtypes.fp16,
+--- csrc/cpp_itfs/pa_gluon_aot/pa_decode_gluon_aot.py
++++ csrc/cpp_itfs/pa_gluon_aot/pa_decode_gluon_aot.py
+@@ -252,7 +252,7 @@ def compile(
+         os.makedirs(aot_file_dir, exist_ok=True)
 
+         compile_args = CompileGluonArgs(
+-            path=f"{AITER_CORE_DIR}/aiter/ops/triton/gluon/pa_decode_gluon.py",
++            path=f"{AITER_CORE_DIR}/../aiter/ops/triton/gluon/pa_decode_gluon.py",
+             kernel_name=gluon_kernel_name,
+             signature=signature,
+             grid="num_seqs,num_kv_heads,max_context_partition_num",
+@@ -292,7 +292,7 @@ def compile(
+         reduce_signature = ",".join(reduce_signature_parts)
+         reduce_kernel_name = "paged_attention_decode_v2_reduce_kernel"
+         reduce_compile_args = CompileArgs(
+-            path=f"{AITER_CORE_DIR}/aiter/ops/triton/gluon/pa_decode_gluon.py",
++            path=f"{AITER_CORE_DIR}/../aiter/ops/triton/gluon/pa_decode_gluon.py",
+             kernel_name=reduce_kernel_name,
+             signature=reduce_signature,
+             grid="num_seqs,num_kv_heads,1",
+
+--- csrc/cpp_itfs/pa_gluon_aot/transpose_query_output_gluon_aot.py
++++ csrc/cpp_itfs/pa_gluon_aot/transpose_query_output_gluon_aot.py
+@@ -112,7 +112,7 @@ def compile_query(
+         os.makedirs(aot_file_dir, exist_ok=True)
+
+         compile_args = CompileGluonArgs(
+-            path=f"{AITER_CORE_DIR}/aiter/ops/triton/gluon/pa_decode_gluon.py",
++            path=f"{AITER_CORE_DIR}/../aiter/ops/triton/gluon/pa_decode_gluon.py",
+             kernel_name=gluon_kernel_name,
+             signature=signature,
+             grid="grid_dim_0,grid_dim_1,grid_dim_2",
+@@ -432,7 +432,7 @@ def compile_output(
+         os.makedirs(aot_file_dir, exist_ok=True)
+
+         compile_args = CompileGluonArgs(
+-            path=f"{AITER_CORE_DIR}/aiter/ops/triton/gluon/pa_decode_gluon.py",
++            path=f"{AITER_CORE_DIR}/../aiter/ops/triton/gluon/pa_decode_gluon.py",
+             kernel_name=gluon_kernel_name,
+             signature=signature,
+             grid="grid_dim_0,grid_dim_1,grid_dim_2",
+
+--- /dev/null
++++ csrc/cpp_itfs/pa/pa_api.py
+@@ -0,0 +1,66 @@
++import torch
++import ctypes
++from jinja2 import Template
++from functools import lru_cache
++
++from csrc.cpp_itfs.utils import AITER_CORE_DIR, compile_template_op
++
++MD_NAME = "pa"
++
++with open(f"{AITER_CORE_DIR}/csrc/cpp_itfs/pa/pa.cpp.jinja", "r") as f:
++    src_template = Template(f.read())
++
++dtype_map = {
++    torch.bfloat16: "__hip_bfloat16",
++    torch.float16: "_Float16",
++    torch.float8_e4m3fnuz: "uint8_t",
++    torch.float8_e4m3fn: "uint8_t",
++}
++
++@lru_cache(maxsize=None)
++def load_all_libs(
++    gqa_ratio: int,
++    head_size: int,
++    npar_loops: int,
++    dtype: str,
++    kv_dtype: str,
++    fp8_kv_dtype: str,
++    out_dtype: str,
++    block_size: int,
++    alibi_enabled: str,
++    mtp: int = 1,
++    quant_method: str = "vllm::Fp8QuantMethod::kPerTensor",
++    v_shuffle: bool = False,
++    folder: str = None
++):
++    combined_func = compile_template_op(
++        src_template,
++        MD_NAME,
++        [
++            f"{AITER_CORE_DIR}/csrc/cpp_itfs/utils.h",
++            f"{AITER_CORE_DIR}/csrc/cpp_itfs/pa/pa.cuh",
++            f"{AITER_CORE_DIR}/csrc/cpp_itfs/pa/pa_common.cuh",
++            f"{AITER_CORE_DIR}/csrc/cpp_itfs/pa/pa_kernels.cuh",
++            f"{AITER_CORE_DIR}/csrc/include",
++            f"{AITER_CORE_DIR}/csrc/include/ck_tile",
++        ],
++        gqa_ratio=gqa_ratio,
++        head_size=head_size,
++        npar_loops=npar_loops,
++        dtype=dtype,
++        kv_dtype=kv_dtype,
++        fp8_kv_dtype=fp8_kv_dtype,
++        out_dtype=out_dtype,
++        block_size=block_size,
++        alibi_enabled=alibi_enabled,
++        mtp=mtp,
++        quant_method=quant_method,
++        v_shuffle=v_shuffle,
++        folder=folder,
++    )
++
++    return ctypes.cast(combined_func, ctypes.c_void_p).value
++
++
++if __name__ == "__main__":
++    load_all_libs(4, 128, 4, "__hip_bfloat16", "__hip_bfloat16", "auto", "__hip_bfloat16", 16, "false", 1, "vllm::Fp8QuantMethod::kPerTensor", True)
+ 
