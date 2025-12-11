@@ -209,18 +209,21 @@ class Qwen3MoeAttnModel(GptModelBase):
     ) -> List[PyModelOutputs]:
         hidden_states_list: List[torch.Tensor] = []
         next_hidden_states_list: List[torch.Tensor] = []
+        fmha_impl_list: List[FMHAImplBase] = []
 
         for input in mirco_batch_inputs:
             hidden_states_list.append(self.embed_tokens(input.input_ids))
+            fmha_impl_list.append(self.get_fmha_impl(input.attention_inputs))
+
         for i, layer in enumerate(self.layers):
             next_hidden_states_list = []
 
             for idx, micro_batch_input in enumerate(mirco_batch_inputs):
-                fmha_impl = self.get_fmha_impl(micro_batch_input.attention_inputs)
+                # fmha_impl = self.get_fmha_impl(micro_batch_input.attention_inputs)
                 hidden_states = hidden_states_list[idx]
                 hidden_states = layer(
                     hidden_states,
-                    fmha_impl,
+                    fmha_impl_list[idx],
                     kv_cache=(
                         self.kv_cache.get_layer_cache(i) if self.kv_cache else None
                     ),
