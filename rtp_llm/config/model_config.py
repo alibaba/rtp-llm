@@ -70,6 +70,7 @@ class ModelConfig(CppModelConfig):
         "moe_inter_size",
         "generate_env_config",
         "render_config",
+        "phy2log_path",
     }
 
     # Known C++ ModelConfig members (from ModelConfig.h)
@@ -773,6 +774,7 @@ def build_model_config(
     model_config.extra_data_path = model_args.extra_data_path
     model_config.local_extra_data_path = model_args.local_extra_data_path
     model_config.model_type = model_args.model_type
+    model_config.phy2log_path = model_args.phy2log_path
 
     if model_args.mla_ops_type:
         model_config.mla_ops_type = model_args.mla_ops_type

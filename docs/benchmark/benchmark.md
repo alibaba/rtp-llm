@@ -79,7 +79,6 @@ common_config:
   start_port: 12333
   decode_test_length: 2048
   max_context_batch_size: 1
-  load_ckpt_num_process: 64
   reserver_runtime_mem_mb: 0
   device_reserve_memory_bytes: 0
 ```

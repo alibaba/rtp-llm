@@ -27,6 +27,7 @@ class ModelArgs:
         "max_seq_len",
         "mla_ops_type",
         "json_model_override_args",
+        "phy2log_path",
     ]
 
     def __init__(self):
@@ -53,3 +54,6 @@ class ModelArgs:
 
         # Model override args
         self.json_model_override_args: str = "{}"
+
+        # EPLB config
+        self.phy2log_path: str = ""

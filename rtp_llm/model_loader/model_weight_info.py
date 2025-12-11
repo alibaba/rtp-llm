@@ -176,8 +176,7 @@ class ModelDeployWeightInfo:
         self.ep_rank = parallelism_config.ep_rank
         self.dp_size = parallelism_config.dp_size
         self.dp_rank = parallelism_config.dp_rank
-        # num_nodes should come from gang_info, not from config
-        self.num_nodes: int = 1  # Will be set from gang_info later
+        self.num_nodes: int = parallelism_config.world_size // parallelism_config.local_world_size
         self.ffn_tp_rank = parallelism_config.ffn_tp_rank
         self.ffn_tp_size = parallelism_config.ffn_tp_size
         self._size_per_head = model_config.attn_config.size_per_head
@@ -241,10 +240,6 @@ class ModelDeployWeightInfo:
             if vit_config is not None
             else VitSeparation.VIT_SEPARATION_REMOTE
         )
-
-        # for eplb
-        # phy2log should be loaded from LoadConfig, not from config
-        self.phy2log = None  # Will be set in create_load_config
 
         # for moe
         self._use_stack_weight = False
@@ -543,6 +538,7 @@ class ModelDeployWeightInfo:
         self,
         compute_dtype: torch.dtype,
         database: BaseDatabase,
+        phy2log: Optional[List[List[int]]] = None,
         exported_device: Optional[Any] = None,
     ):
         merge_lora = False
@@ -604,10 +600,9 @@ class ModelDeployWeightInfo:
             quant_algo=self._quant_algo,
             bit=self._quant_algo.getWeightBits(),
             is_ft_style_weight=database.is_ft_style,
-            phy2log=self.phy2log,  # phy2log should be set before create_load_config is called
+            phy2log=phy2log,  # phy2log should be set before create_load_config is called
             exported_device=exported_device,
             use_swizzleA=self._use_swizzleA,
-            load_method=LoadMethod.AUTO,  # Default load method
         )
         return load_config
 

@@ -5,11 +5,8 @@ from typing import Any, List, Optional, Union
 
 import torch
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
-
-from rtp_llm.config.py_config_modules import LoadConfig as PyLoadConfig
 from rtp_llm.device.device_base import DeviceBase
 from rtp_llm.utils.database import BaseDatabase
-from rtp_llm.utils.fuser import fetch_remote_file_to_local
 from rtp_llm.utils.util import check_with_info
 from rtp_llm.ops import VitSeparation
 
@@ -60,7 +57,6 @@ class LoadConfig(BaseModel):
 
     phy2log: Optional[List[List[int]]] = None
     use_swizzleA: bool = False
-    load_method: LoadMethod = LoadMethod.AUTO
 
     @field_validator("database", "compute_dtype", "quant_algo", "exported_device", "vit_separation")
     @classmethod
@@ -134,14 +130,11 @@ class LoadConfig(BaseModel):
     def create_redundant_expert(
         layer_num: int,
         expert_num: int,
-        load_config: PyLoadConfig,
         phy_exp_num: int,
         ep_size: int,
         num_nodes: int,
+        phy2log_path: Optional[str] = None,
     ):
-        if expert_num == 0:
-            return None
-
         expert_num = expert_num
         redundant_expert = phy_exp_num - expert_num
         expert_num_per_ep = expert_num // ep_size
@@ -159,7 +152,6 @@ class LoadConfig(BaseModel):
         layer_num = layer_num
 
         phy2log: List[List[int]] = []
-        phy2log_path = fetch_remote_file_to_local(load_config.phy2log_path) if load_config.phy2log_path else None
 
         if phy2log_path:
             with open(phy2log_path, "r") as f:

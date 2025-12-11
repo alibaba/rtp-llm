@@ -12,6 +12,7 @@ from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import (
     TokenizerFactory,
 )
 from rtp_llm.model_loader.loader import ModelLoader, get_model_loader
+from rtp_llm.model_loader.load_config import LoadMethod
 from rtp_llm.model_loader.model_weight_info import ModelDeployWeightInfo, ModelWeights
 from rtp_llm.models.downstream_modules.custom_module import CustomModule
 from rtp_llm.models.downstream_modules.utils import create_custom_module
@@ -50,6 +51,7 @@ class BaseModel(object):
         moe_config: MoeConfig,
         load_python_model: bool = False,
         max_generate_batch_size: int = 0,
+        load_method: LoadMethod = LoadMethod.AUTO,
         vit_config: Optional[VitConfig] = None,
         merge_lora: bool = False,
     ) -> None:
@@ -74,9 +76,11 @@ class BaseModel(object):
         self.moe_config = moe_config
         self.load_python_model = load_python_model
         self.max_generate_batch_size = max_generate_batch_size
+        self.load_method = load_method
         self.vit_config = vit_config
         self.merge_lora = merge_lora
         self.weight = None
+        self.py_eplb = None
         self.tokenizer: Optional[BaseTokenizer] = None
         self.custom_module: Optional[CustomModule] = None
         self.py_model: Optional[GptModelBase] = None
@@ -128,6 +132,7 @@ class BaseModel(object):
         self.custom_module = self._init_custom_module()        
 
         self.model_weights_loader = self.create_model_loader()
+        self.py_eplb = self.model_weights_loader._py_eplb
         device_str = self._get_device_str()
         self._load(device_str)
 
@@ -300,6 +305,7 @@ class BaseModel(object):
             merge_lora=self.merge_lora,
             vit_config=self.vit_config,
             vit_weights=vit_weights,
+            load_method=self.load_method,
         )
         misc_weights_info = (
             self.custom_module.get_custom_weight_info() if self.custom_module else []
@@ -309,5 +315,6 @@ class BaseModel(object):
             weights_info,
             misc_weights_info,
             database,
+            load_method=self.load_method,
         )
 

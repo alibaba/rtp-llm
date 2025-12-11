@@ -10,7 +10,6 @@ import torch
 import torch.nn.functional as F
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.config.py_config_modules import LoadConfig as PyLoadConfig
 from rtp_llm.device import get_current_device
 from rtp_llm.lora.lora_weights import LoRAWeights
 from rtp_llm.model_loader.load_config import LoadConfig, LoadMethod
@@ -23,7 +22,6 @@ from rtp_llm.model_loader.tensor_source import DatabaseTensorSource, TensorColle
 from rtp_llm.model_loader.weight_module import CustomAtomicWeight, WeightModule
 from rtp_llm.ops import TaskType, VitSeparation
 from rtp_llm.utils.database import BaseDatabase, CkptDatabase
-from rtp_llm.utils.fuser import fetch_remote_file_to_local
 from rtp_llm.utils.model_weight import W, WeightStyle
 from rtp_llm.utils.module_util import has_module
 from rtp_llm.utils.time_util import timer_wrapper
@@ -46,11 +44,11 @@ class ModelLoader:
         weights_info: ModelDeployWeightInfo,
         misc_weights_info: Optional[CustomAtomicWeight],
         database: BaseDatabase,
+        load_method: LoadMethod = LoadMethod.AUTO,
     ):
-        # self.model_config = model_config
-        # Get task_type from model_config (C++ enum)
+        self.model_config = model_config
         self._task_type = model_config.task_type
-
+        self._load_method = load_method
         self._weights_info = weights_info
         self._misc_weights_info: Optional[CustomAtomicWeight] = misc_weights_info
         self._model_weights_info: Optional[ModelWeightInfo] = (
@@ -63,10 +61,12 @@ class ModelLoader:
 
         # Get is_attn_model flag from weights_info (calculated in ModelDeployWeightInfo constructor)
         self._is_attn_model = weights_info.is_attn_model
-        self._init_eplb_config(self._weights_info, compute_dtype)
-
+        self._py_eplb, self._phy2log = self.create_eplb()
         self._load_config: LoadConfig = self._weights_info.create_load_config(
-            compute_dtype, database, get_current_device()
+            compute_dtype=compute_dtype,
+            database=database,
+            phy2log=self._phy2log,
+            exported_device=get_current_device(),
         )
 
     def get_load_config(self) -> LoadConfig:
@@ -221,7 +221,7 @@ class ModelLoader:
         return model_weights
 
     def _load_weight(self, device: str):
-        load_method = self._load_config.load_method
+        load_method = self._load_method
         if load_method == LoadMethod.AUTO:
             is_safetensor = self._load_config.database.is_safetensor
             convert_device = self._choose_weight_convert_device(device)
@@ -239,7 +239,7 @@ class ModelLoader:
                 load_method = LoadMethod.SCRATCH
 
         logging.info(
-            f"load method: {self._load_config.load_method}, finally choose load method: {load_method}"
+            f"load method: {load_method}, finally choose load method: {load_method}"
         )
 
         if load_method == LoadMethod.FASTSAFETENSORS:
@@ -525,53 +525,39 @@ class ModelLoader:
                         dynamic_weight.name, dynamic_w.get(dynamic_weight.name)
                     )
 
-    def _init_redundant_expert(self, weights_info: ModelDeployWeightInfo):
-        if weights_info.expert_num_ == 0:
-            return
+    def create_eplb(self):
+        weights_info = self._weights_info
+        
+        logging.info("create eplb: expert_num: %d, phy_exp_num: %d", weights_info.expert_num_, weights_info.phy_exp_num_)
 
-        expert_num = weights_info.expert_num_
-        ep_size = weights_info.ep_size
-        layer_num = weights_info._num_layers
-        phy_exp_num = weights_info.phy_exp_num_
-
-        # Create a minimal LoadConfig object (py_env_configs is not available in ModelDeployWeightInfo)
-        load_config = PyLoadConfig()
-
+        # static expert placement info
+        phy2log_path = self.model_config.phy2log_path
         phy2log = LoadConfig.create_redundant_expert(
-            layer_num=layer_num,
-            expert_num=expert_num,
-            load_config=load_config,
-            phy_exp_num=phy_exp_num,
-            ep_size=ep_size,
+            layer_num=self.model_config.num_layers,
+            expert_num=self.model_config.expert_num,
+            ep_size=weights_info.ep_size,
             num_nodes=weights_info.num_nodes,
+            phy_exp_num=weights_info.phy_exp_num_,
+            phy2log_path=phy2log_path,
         )
-        weights_info.phy2log = phy2log
 
-    def _init_eplb_config(
-        self, weights_info: ModelDeployWeightInfo, compute_dtype: torch.dtype
-    ):
-        self._init_redundant_expert(weights_info)
+        # dynamic expert balancer
+        from rtp_llm.eplb.ep_balancer import ExpertBalancer
+
+        model_path = self.model_config.ckpt_path
+        ep_lb_database = CkptDatabase(model_path)
+        compute_dtype = to_torch_dtype(self.model_config.data_type)
+
+        py_eplb = None
         if weights_info.enable_eplb_:
-            model_path = None
-            if weights_info.model_config.is_mtp:
-                model_path = weights_info.model_config.ckpt_path
-            else:
-                # Use ckpt_path from model_config (py_env_configs is not available in ModelDeployWeightInfo)
-                path = weights_info.model_config.ckpt_path
-                model_path = fetch_remote_file_to_local(path)
-
-            ep_lb_database = CkptDatabase(model_path)
-
-            from rtp_llm.eplb.ep_balancer import ExpertBalancer
-
-            self.ep_balancer = ExpertBalancer(
+            py_eplb = ExpertBalancer(
                 weights_info=weights_info,
                 compute_dtype=compute_dtype,
-                phy2log=weights_info.phy2log,
+                phy2log=phy2log,
                 database=ep_lb_database,
                 model_config=self.model_config,
             )
-            weights_info.py_eplb = self.ep_balancer
+        return py_eplb, phy2log
 
     def _init_eplb_weight(self, weight: ModelWeights, device: str):
         expert_num = self._load_config.expert_num
@@ -609,6 +595,7 @@ def get_model_loader(
     weights_info: ModelDeployWeightInfo,
     misc_weights_info: Optional[CustomAtomicWeight],
     database: BaseDatabase,
+    load_method: LoadMethod = LoadMethod.AUTO,
 ) -> ModelLoader:
     if weights_info._head_num % weights_info.tp_size != 0:
         raise Exception(
@@ -628,4 +615,5 @@ def get_model_loader(
         weights_info,
         misc_weights_info,
         database,
+        load_method=load_method,
     )

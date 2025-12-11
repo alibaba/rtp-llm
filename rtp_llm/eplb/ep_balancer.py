@@ -76,7 +76,10 @@ class ExpertBalancer:
         )
         
         self._load_config: LoadConfig = self._weights_info.create_load_config(
-            compute_dtype, database, get_current_device()
+            compute_dtype=compute_dtype,
+            database=database,
+            phy2log=phy2log,
+            exported_device=get_current_device(),
         )
         self.num_layers = self._load_config.num_layers
         self.num_replicas = self._load_config.phy_exp_num

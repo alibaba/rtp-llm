@@ -89,19 +89,10 @@ class LoraConfig:
 
 class LoadConfig:
     def __init__(self):
-        self.phy2log_path: str = ""
-        self.converter_num_per_gpu: int = 4
-        self.tokenizers_parallelism: bool = False
-        # seem like it's a third-party pkg environment, but we reserve it temporar
-        self.load_ckpt_num_process: int = 0
         self.load_method: str = "auto"
 
     def to_string(self):
         return (
-            f"phy2log_path: {self.phy2log_path}\n"
-            f"converter_num_per_gpu: {self.converter_num_per_gpu}\n"
-            f"tokenizers_parallelism: {self.tokenizers_parallelism}\n"
-            f"load_ckpt_num_process: {self.load_ckpt_num_process}\n"
             f"load_method: {self.load_method}"
         )
 

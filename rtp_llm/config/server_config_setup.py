@@ -244,6 +244,11 @@ def fetch_model_files_to_local(py_env_configs: PyEnvConfigs):
             model_args.ptuning_path
         )
     
+    if model_args.phy2log_path:
+        model_args.phy2log_path = fetch_remote_file_to_local(
+            model_args.phy2log_path
+        )
+    
     # Fetch lora paths
     lora_config = py_env_configs.lora_config
     if lora_config.lora_info:
@@ -267,7 +272,8 @@ def fetch_model_files_to_local(py_env_configs: PyEnvConfigs):
         f"Fetched model files - checkpoint_path: {model_args.ckpt_path}, "
         f"tokenizer_path: {model_args.tokenizer_path}, "
         f"ptuning_path: {model_args.ptuning_path}, "
-        f"extra_data_path: {model_args.local_extra_data_path}"
+        f"extra_data_path: {model_args.local_extra_data_path}, "
+        f"phy2log_path: {model_args.phy2log_path}"
     )
 
 
