@@ -10,7 +10,7 @@ def git_deps():
     git_repository(
         name = "aiter_src",
         remote = "https://github.com/ROCm/aiter.git",
-        commit = "329d07ba5d77f7d6b2a0557174288c5707f95e5f", # [Triton] DS a16w8 GEMM and fused reduce_rms_fp8_group_quant (#1328)
+        commit = "f829a42b8de6445725cd89dc5626c6292b0c7002", # [Triton] DS a16w8 GEMM and fused reduce_rms_fp8_group_quant (#1328)
         recursive_init_submodules = True,
         patches = ["//3rdparty/aiter:aiter.patch", "//3rdparty/aiter:gemm_a8w8.patch"],
         patch_cmds = [
@@ -62,6 +62,7 @@ def git_deps():
             "echo '    build_aiter_module(\"module_gemm_a8w8_blockscale\")' >> build_aiter_module.py",
             "echo '    build_aiter_module(\"module_quant\")' >> build_aiter_module.py",
             "echo '    build_aiter_module(\"module_smoothquant\")' >> build_aiter_module.py",
+            "echo '    build_aiter_module(\"module_deepgemm\")' >> build_aiter_module.py",
             "echo '    build_aiter_module(\"module_moe_sorting\")' >> build_aiter_module.py",
             "echo '    build_aiter_module(\"module_moe_asm\")' >> build_aiter_module.py",
             "echo '    build_aiter_module(\"module_pa\")' >> build_aiter_module.py",
