@@ -110,8 +110,8 @@ aiosignal==1.3.1 \
     --hash=sha256:54cd96e15e1649b75d6c87526a6ff0b6c1b0dd3459f43d9ca11d48c339b68cfc \
     --hash=sha256:f8376fb07dd1e86a584e4fcdec80b36b7f81aac666ebc724e2c090300dd83b17
     # via aiohttp
-aiter @ https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/RTP/aiter-0.1.6%2Bgit.e3ec80b8.date.202511071440-py3-none-any.whl \
-    --hash=sha256:58d674efc39a95fdca41ccaa1c37ec565bf3ddc1e19507f9d860949c306e89d3
+aiter @ https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/RTP/aiter-0.1.10%2Bgit.a75b522b.date.202512311557-cp310-cp310-linux_x86_64.whl \
+    --hash=sha256:30c1d8e5a9497c829e94b037269dc3afb4e0b4527f4feb2e99271a67003b6491
     # via -r open_source/deps/requirements_rocm.txt
 aliyun-python-sdk-core==2.15.2 \
     --hash=sha256:54f66a53e193c61c5e16ea4505a0cab43543f8ad2ef22833f69c4d5e5151c17d
@@ -1502,6 +1502,26 @@ networkx==3.3 \
     --hash=sha256:0c127d8b2f4865f59ae9cb8aafcd60b5c70f3241ebd66f7defad7c4ab90126c9 \
     --hash=sha256:28575580c6ebdaf4505b22c6256a2b9de86b316dc63ba9e93abde3d78dfdbcf2
     # via torch
+ninja==1.13.0 \
+    --hash=sha256:11be2d22027bde06f14c343f01d31446747dbb51e72d00decca2eb99be911e2f \
+    --hash=sha256:1c97223cdda0417f414bf864cfb73b72d8777e57ebb279c5f6de368de0062988 \
+    --hash=sha256:3c0b40b1f0bba764644385319028650087b4c1b18cdfa6f45cb39a3669b81aa9 \
+    --hash=sha256:3d00c692fb717fd511abeb44b8c5d00340c36938c12d6538ba989fe764e79630 \
+    --hash=sha256:3d7d7779d12cb20c6d054c61b702139fd23a7a964ec8f2c823f1ab1b084150db \
+    --hash=sha256:4a40ce995ded54d9dc24f8ea37ff3bf62ad192b547f6c7126e7e25045e76f978 \
+    --hash=sha256:4be9c1b082d244b1ad7ef41eb8ab088aae8c109a9f3f0b3e56a252d3e00f42c1 \
+    --hash=sha256:5f8e1e8a1a30835eeb51db05cf5a67151ad37542f5a4af2a438e9490915e5b72 \
+    --hash=sha256:60056592cf495e9a6a4bea3cd178903056ecb0943e4de45a2ea825edb6dc8d3e \
+    --hash=sha256:6739d3352073341ad284246f81339a384eec091d9851a886dfa5b00a6d48b3e2 \
+    --hash=sha256:8cfbb80b4a53456ae8a39f90ae3d7a2129f45ea164f43fadfa15dc38c4aef1c9 \
+    --hash=sha256:aa45b4037b313c2f698bc13306239b8b93b4680eb47e287773156ac9e9304714 \
+    --hash=sha256:b4f2a072db3c0f944c32793e91532d8948d20d9ab83da9c0c7c15b5768072200 \
+    --hash=sha256:be7f478ff9f96a128b599a964fc60a6a87b9fa332ee1bd44fa243ac88d50291c \
+    --hash=sha256:d741a5e6754e0bda767e3274a0f0deeef4807f1fec6c0d7921a0244018926ae5 \
+    --hash=sha256:e8bad11f8a00b64137e9b315b137d8bb6cbf3086fbdc43bf1f90fd33324d2e96 \
+    --hash=sha256:fa2a8bfc62e31b08f83127d1613d10821775a0eb334197154c4d6067b7068ff1 \
+    --hash=sha256:fb46acf6b93b8dd0322adc3a4945452a4e774b75b91293bafcc7b7f8e6517dfa \
+    --hash=sha256:fb8ee8719f8af47fed145cced4a85f0755dd55d45b2bddaf7431fa89803c5f3e
 numba==0.60.0 \
     --hash=sha256:01ef4cd7d83abe087d644eaa3d95831b777aa21d441a23703d649e06b8e06b74 \
     --hash=sha256:0b983bd6ad82fe868493012487f34eae8bf7dd94654951404114f23c3466d34b \
@@ -2295,9 +2315,11 @@ python-dateutil==2.9.0.post0 \
     # via
     #   matplotlib
     #   pandas
-pytorch-triton-rocm @ https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/home/bill/rtpllm/rocm643/pytorch_triton_rocm-3.0.0%2Brocm6.4.3.git5c5ec8c6-cp310-cp310-linux_x86_64.whl \
-    --hash=sha256:817ebe8bf748b083ac9721965d20e767c326e23607c29a00d760a2cdb3072824
-    # via -r open_source/deps/requirements_rocm.txt
+pytorch-triton-rocm @ https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/pytorch_triton_rocm/pytorch_triton_rocm-3.3.1%2Brocm6.4.3.git9c7bc0a3-cp310-cp310-linux_x86_64.whl \
+    --hash=sha256:2d9554ed44560cdf393f5c005d48a6aba7dd442deaf449d83ccc98c75a80618b
+    # via
+    #   -r open_source/deps/requirements_rocm.txt
+    #   torch
 pytz==2025.2 \
     --hash=sha256:360b9e3dbb49a209c21ad61809c7fb453643e048b38924c765813546746e81c3 \
     --hash=sha256:5ddf76296dd8c44c26eb8f4b6f35488f3ccbf6fbbd7adee0b7262d43f0ec2f00
@@ -2903,16 +2925,16 @@ tokenizers==0.21.4 \
     --hash=sha256:f23186c40395fc390d27f519679a58023f368a0aad234af145e0f39ad1212732 \
     --hash=sha256:fa23f85fbc9a02ec5c6978da172cdcbac23498c3ca9f3645c5c68740ac007880
     # via transformers
-torch @ https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/home/bill/rtpllm/rocm643/20251126/torch-2.4.1%2Bgit783fafb-cp310-cp310-linux_x86_64.whl \
-    --hash=sha256:b16eecfc5041bf8b2561e6b0d41e8fe99c321cad6f9524700b0398a35d0e5a8f
+torch @ https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/torch/torch-2.7.1%2Brocm6.4.3.git9015dfd-cp310-cp310-linux_x86_64.whl \
+    --hash=sha256:2b3f53e7cf53df7f89b8af1f139fe1aa8c0085b3ad654d0a44cbc125b4fbe66d
     # via
     #   -r open_source/deps/requirements_rocm.txt
     #   bitsandbytes
     #   sentence-transformers
     #   timm
     #   torchvision
-torchvision @ https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/home/bill/rtpllm/rocm643/torchvision-0.19.0%2Brocm6.4.3.gitbbf1b41e-cp310-cp310-linux_x86_64.whl \
-    --hash=sha256:ddb20fa3afca37bd7cca4ff23b7aabdc78254bd0219a3fe102aefb69277528eb
+torchvision @ https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/torchvision/torchvision-0.22.1%2Brocm6.4.3.git59a3e1f-cp310-cp310-linux_x86_64.whl \
+    --hash=sha256:1bd5ef9dfb53a3f4249b6708ed0aa21d038e3b2707574118b2cb355c3cffdefc
     # via
     #   -r open_source/deps/requirements_rocm.txt
     #   timm
