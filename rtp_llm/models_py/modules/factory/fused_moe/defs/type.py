@@ -26,3 +26,4 @@ class ExecutorType(Enum):
     DEEPGEMM_MASKED = 2  # DeepGEMM masked executor
     CUTLASS_FP8 = 3  # Cutlass FP8 executor (specialized)
     CUTLASS_BATCHED_FP8 = 4  # Cutlass batched FP8 (most optimized)
+    TRTLLM_FP4 = 5  # TRTLLM FP4 executor (specialized)
