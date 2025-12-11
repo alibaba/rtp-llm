@@ -1,6 +1,6 @@
 --- aiter/jit/optCompilerConfig.json
 +++ aiter/jit/optCompilerConfig.json
-@@ -699,7 +699,7 @@
+@@ -756,7 +756,7 @@
          "hip_clang_path": "os.environ.get('MHA_HIP_CLANG_PATH')",
          "blob_gen_cmd": [
              "f'{CK_DIR}/example/ck_tile/01_fmha/generate.py -d fwd --receipt 600 --output_dir {{}}'",
@@ -25,10 +25,11 @@
 
 --- aiter/jit/core.py
 +++ aiter/jit/core.py
-@@ -168,36 +168,18 @@
+@@ -276,31 +276,11 @@ class AITER_CONFIG(object):
+ AITER_CONFIGS = AITER_CONFIG()
  # config_env end here
  
- find_aiter = importlib.util.find_spec("aiter")
+-find_aiter = importlib.util.find_spec("aiter")
 -if find_aiter is not None:
 -    if find_aiter.submodule_search_locations:
 -        package_path = find_aiter.submodule_search_locations[0]
@@ -60,41 +61,7 @@
  sys.path.insert(0, AITER_META_DIR)
  AITER_CSRC_DIR = f"{AITER_META_DIR}/csrc"
  AITER_GRADLIB_DIR = f"{AITER_META_DIR}/gradlib"
- gfx = get_gfx()
- AITER_ASM_DIR = f"{AITER_META_DIR}/hsa/{gfx}/"
--os.environ["AITER_ASM_DIR"] = AITER_ASM_DIR
-+if "AITER_ASM_DIR" not in os.environ:
-+    os.environ["AITER_ASM_DIR"] = AITER_ASM_DIR
- CK_3RDPARTY_DIR = os.environ.get(
-     "CK_DIR", f"{AITER_META_DIR}/3rdparty/composable_kernel"
- )
  
-
---- aiter/__init__.py	
-+++ aiter/__init__.py
-@@ -77,3 +77,4 @@
- from .ops.trans_ragged_layout import *
- from .ops.sample import *
- from . import mla
-+from . import paged_attn
-
-
---- aiter/ops/gemm_op_a8w8.py
-+++ aiter/ops/gemm_op_a8w8.py
-@@ -425,9 +425,11 @@
-     WQ: Tensor,
-     x_scale: Tensor,
-     w_scale: Tensor,
--    dtype: torch.dtype = dtypes.bf16,
-+    dtype: torch.dtype = None,
-     isBpreshuffled: bool = False,
- ) -> torch.Tensor:
-+    if dtype is None:
-+        dtype = torch.bfloat16
-     assert dtype in [
-         dtypes.bf16,
-         dtypes.fp16,
-
 
 --- /dev/null
 +++ csrc/cpp_itfs/pa_gluon_aot/api.py
