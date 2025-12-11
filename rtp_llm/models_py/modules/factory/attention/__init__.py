@@ -1,5 +1,7 @@
 """Attention factory module - handles different attention implementations."""
 
+import logging
+
 # Import the factory after lists are defined to avoid circular imports
 from rtp_llm.models_py.modules.factory.attention.attn_factory import AttnImplFactory
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
@@ -49,15 +51,25 @@ else:
             TRTMHAImpl,
             TRTPagedMHAImpl,
         )
-        from rtp_llm.models_py.modules.factory.attention.cuda_impl.xqa import XQAImpl, XQADecodeImpl
+        from rtp_llm.models_py.modules.factory.attention.cuda_impl.xqa import XQAImpl
 
         PREFILL_MHA_IMPS.extend([TRTMHAImpl, TRTPagedMHAImpl])
 
-    
-
         major, minor = map(int, torch.version.cuda.split('.')[:2])
+        use_xqa_decode = False
+        
         if (major, minor) >= (12, 8):
-             #cuda > 12.8
+            try:
+                from flashinfer.xqa import xqa
+                use_xqa_decode = True
+                logging.info("CUDA >= 12.8 and flashinfer.xqa available, using XQADecodeImpl")
+            except (ImportError, AttributeError) as e:
+                logging.info(f"CUDA >= 12.8 but flashinfer.xqa not available ({e}), using XQAImpl")
+        else:
+            logging.info(f"CUDA version {major}.{minor} < 12.8, using XQAImpl")
+        
+        if use_xqa_decode:
+            from rtp_llm.models_py.modules.factory.attention.cuda_impl.xqa import XQADecodeImpl
             DECODE_MHA_IMPS.append(XQADecodeImpl)
         else:
             DECODE_MHA_IMPS.append(XQAImpl)
