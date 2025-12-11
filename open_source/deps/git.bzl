@@ -10,7 +10,7 @@ def git_deps():
     git_repository(
         name = "aiter_src",
         remote = "https://github.com/ROCm/aiter.git",
-        commit = "e3ec80b88cb5be74ce2a8bee992cec0af7889a79", # Support torch.library.infer_schema for torch < 2.5 (#773)
+        commit = "f829a42b8de6445725cd89dc5626c6292b0c7002", # [Triton] DS a16w8 GEMM and fused reduce_rms_fp8_group_quant (#1328)
         recursive_init_submodules = True,
         patches = ["//3rdparty/aiter:aiter.patch",
                    "//3rdparty/aiter:gemm_a8w8.patch"],

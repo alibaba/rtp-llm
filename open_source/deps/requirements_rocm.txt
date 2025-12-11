@@ -5,5 +5,5 @@ https://repo.radeon.com/rocm/manylinux/rocm-rel-6.4.1/torchvision-0.22.1%2Brocm6
 triton==3.5.0
 pyrsmi==0.2.0
 pyyaml==6.0.2
-https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/RTP/aiter-0.1.6%2Bgit.e3ec80b8.date.202511071440-py3-none-any.whl
+https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/RTP/aiter-0.1.7%2Bgit.f829a42b.date.202512221720-cp310-cp310-linux_x86_64.whl
 https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis%2FAMD%2Famd_smi%2Fali%2Famd_smi.tar
