@@ -15,11 +15,12 @@ from rtp_llm.utils.model_weight import W
 from flashinfer import (
     e2m1_and_ufp8sf_scale_to_float,
     fp4_quantize,
+    GatedActType,
+    RoutingMethodType,
 )
 from flashinfer.utils import device_support_pdl
 from flashinfer.fused_moe import (
     trtllm_fp4_block_scale_moe,
-    RoutingMethodType,
 )
 
 DP_SIZE = 1
