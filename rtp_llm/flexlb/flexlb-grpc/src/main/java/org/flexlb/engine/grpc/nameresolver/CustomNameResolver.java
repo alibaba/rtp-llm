@@ -13,7 +13,7 @@ public interface CustomNameResolver {
 
     interface Listener {
 
-        void onAddressUpdate(List<String/*ip:port*/> hosts);
+        void onAddressUpdate(List<String/*ip:port*/> ipPortList);
     }
 
 }

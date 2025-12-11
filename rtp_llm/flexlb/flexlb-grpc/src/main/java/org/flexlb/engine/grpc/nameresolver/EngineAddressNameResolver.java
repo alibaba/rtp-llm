@@ -31,7 +31,7 @@ public class EngineAddressNameResolver implements CustomNameResolver {
     private final Map<String/*address*/, List<String/*ip:port*/>> domainHostsMap = new ConcurrentHashMap<>();
     private final ServiceDiscovery serviceDiscovery;
     private Listener listener;
-    private List<String/*ip:port*/> allHosts = new ArrayList<>();
+    private List<String/*ip:port*/> allIpPortList = new ArrayList<>();
     private final List<String> serviceAddressList;
 
     public EngineAddressNameResolver(ServiceDiscovery serviceDiscovery) {
@@ -92,7 +92,7 @@ public class EngineAddressNameResolver implements CustomNameResolver {
     @Override
     public void start(Listener listener) {
         this.listener = listener;
-        listener.onAddressUpdate(allHosts);
+        listener.onAddressUpdate(allIpPortList);
     }
 
     /**
@@ -105,11 +105,11 @@ public class EngineAddressNameResolver implements CustomNameResolver {
         if (hostList == null || hostList.isEmpty()) {
             domainHostsMap.remove(address);
         } else {
-            List<String/*ip:port*/> addressHosts = new ArrayList<>(hostList.size());
+            List<String/*ip:port*/> ipPortList = new ArrayList<>(hostList.size());
             for (WorkerHost host : hostList) {
-                addressHosts.add(host.getIp() + ":" + host.getPort());
+                ipPortList.add(host.getIp() + ":" + host.getPort());
             }
-            domainHostsMap.put(address, addressHosts);
+            domainHostsMap.put(address, ipPortList);
         }
         // 聚合所有地址的机器列表
         List<String/*ip:port*/> aggregatedHosts = new ArrayList<>();
@@ -118,9 +118,9 @@ public class EngineAddressNameResolver implements CustomNameResolver {
         }
         log.info("Address {} hosts updated, total aggregated hosts: {}", address, aggregatedHosts.size());
         // 更新全局机器列表并通知监听器
-        this.allHosts = aggregatedHosts;
+        this.allIpPortList = aggregatedHosts;
         if (this.listener != null) {
-            this.listener.onAddressUpdate(allHosts);
+            this.listener.onAddressUpdate(allIpPortList);
         }
     }
 

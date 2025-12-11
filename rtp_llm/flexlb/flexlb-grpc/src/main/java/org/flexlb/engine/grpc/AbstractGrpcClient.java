@@ -3,6 +3,7 @@ package org.flexlb.engine.grpc;
 import io.grpc.ManagedChannel;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.collections4.CollectionUtils;
 import org.flexlb.cache.core.EngineLocalView;
 import org.flexlb.cache.core.GlobalCacheIndex;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
@@ -43,19 +44,41 @@ public abstract class AbstractGrpcClient<STUB> implements CustomNameResolver.Lis
         this.grpcReporter = grpcReporter;
     }
 
+    /**
+     * 处理服务地址更新事件
+     * 当服务发现检测到 worker 列表变化时，同步更新 gRPC channel 池和缓存视图
+     *
+     * @param ipPortList 最新的 worker 地址列表，格式为 ip:httpPort
+     */
     @Override
-    public void onAddressUpdate(List<String/*ip:port*/> hosts) {
-        if (hosts == null) {
-            log.error("received null hosts list");
+    public void onAddressUpdate(List<String/*ip:port*/> ipPortList) {
+        if (ipPortList == null) {
+            log.error("received null ipPort list");
             return;
         }
-        log.warn("address update, size:{} currentSize:{}", hosts.size(), channelPool.size());
+
+        // 更新 gRPC channel 池
+        updateGrpcChannelPool(ipPortList);
+
+        // 更新引擎缓存，清理已下线的 engine
+        updateEngineKvCache(ipPortList);
+    }
+
+    /**
+     * 根据最新的 ipPortList 列表更新 gRPC channel 池
+     * 新增 channel 连接新上线的 worker，移除已下线的 worker 的 channel
+     *
+     * @param ipPortList 最新的 worker 地址列表，格式为 ip:httpPort
+     */
+    private void updateGrpcChannelPool(List<String> ipPortList) {
+        log.warn("address update, size:{} currentSize:{}", ipPortList.size(), channelPool.size());
 
         Set<String/*ip:port:serviceType*/> currentKeys = new HashSet<>(channelPool.keySet());
         List<String/*ip:port:serviceType*/> addedKeys = new ArrayList<>();
 
-        for (String host : hosts) {
-            String[] parts = host.split(":");
+        // 识别新增和保留的 worker，标记需要移除的 channel
+        for (String ipPort : ipPortList) {
+            String[] parts = ipPort.split(":");
             String ip = parts[0];
             int httpPort = Integer.parseInt(parts[1]);
             int grpcPort = CommonUtils.toGrpcPort(httpPort);
@@ -70,34 +93,62 @@ public abstract class AbstractGrpcClient<STUB> implements CustomNameResolver.Lis
             }
         }
 
-        // add to pool
+        // 为新上线的 worker 创建 channel
         for (String newKey : addedKeys) {
             if (!channelPool.containsKey(newKey)) {
                 try {
                     ManagedChannel managedChannel = createChannel(newKey);
                     channelPool.put(newKey, new Invoker(newKey, managedChannel));
-                    log.info("add channel for host {}", newKey);
+                    log.info("add channel for ipPort {}", newKey);
                 } catch (Exception e) {
-                    log.error("create channel for host {} failed", newKey, e);
+                    log.error("create channel for ipPort {} failed", newKey, e);
                 }
             }
         }
 
-        // remove and shutdown not alive invoker
+        // 关闭并移除已下线 worker 的 channel
         for (String key : currentKeys) {
             Invoker invoker = channelPool.remove(key);
             if (invoker != null) {
                 try {
                     invoker.shutdown();
                 } catch (Exception e) {
-                    log.error("shutdown channel for host {} failed", invoker.getChannelKey(), e);
+                    log.error("shutdown channel for ipPort {} failed", invoker.getChannelKey(), e);
                 }
             }
+        }
+    }
 
-            String[] parsedKey = parseServiceKey(key);
-            String ipPort = parsedKey[0] + ":" + parsedKey[1];
-            engineLocalView.removeAllCacheBlockOfEngine(ipPort);
-            globalCacheIndex.removeAllCacheBlockOfEngine(ipPort);
+    /**
+     * 更新缓存，清理已下线的 engine 缓存
+     *
+     * @param ipPortList 最新的 worker 地址列表，格式为 ip:httpPort
+     */
+    private void updateEngineKvCache(List<String> ipPortList) {
+        Set<String> cacheEngineKeys = engineLocalView.getAllEngineIpPorts();
+        Set<String> newEngineIpPorts = new HashSet<>(ipPortList);
+
+        // size 相同时跳过
+        if (cacheEngineKeys.size() == newEngineIpPorts.size()) {
+            return;
+        }
+
+        // 找出需要清理的已下线 engine
+        Set<String> staleEngineKeys = new HashSet<>(cacheEngineKeys);
+        staleEngineKeys.removeAll(newEngineIpPorts);
+
+        if (CollectionUtils.isNotEmpty(staleEngineKeys)) {
+            log.info("Update cache: found {} stale engines to remove, current cache size: {}, new ipPortList size: {}",
+                    staleEngineKeys.size(), cacheEngineKeys.size(), newEngineIpPorts.size());
+
+            for (String staleEngine : staleEngineKeys) {
+                log.warn("Removing stale engine cache: {}", staleEngine);
+                long startTime = System.nanoTime() / 1000;
+                engineLocalView.removeAllCacheBlockOfEngine(staleEngine);
+                globalCacheIndex.removeAllCacheBlockOfEngine(staleEngine);
+                long elapsed = System.nanoTime() / 1000 - startTime;
+                log.warn("Removed stale engine cache: {} in {}μs", staleEngine, elapsed);
+            }
         }
     }
 
