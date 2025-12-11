@@ -1,3 +1,4 @@
+import logging
 from typing import Any, Dict, Optional
 
 import torch
@@ -68,6 +69,7 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
         self._w2_scale = self._weights.get(W.moe_s2, None)
         assert self._w1 is not None and self._w2 is not None
         # check fp8 block quantization
+
         self._use_fp8 = True
         if self.quant_config.is_quantized:
             if (
@@ -101,7 +103,11 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
         apply_router_weight_on_input: bool,
         extra_expert_args: Optional[dict[str, Any]],
     ) -> torch.Tensor:
-
+        # import debugpy
+        # debugpy.listen(("localhost", 42771 + self._config.parallelism_distributed_config.world_rank))
+        # print("Waiting for debugger attach...")
+        # debugpy.wait_for_client()
+        # debugpy.breakpoint()
         assert self._w1 is not None and self._w2 is not None
         assert payload.expert_x is not None
         assert payload.expert_tokens_meta is not None
@@ -129,7 +135,9 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
             assert payload.expert_x_scale is not None
 
             expert_x_scale = payload.expert_x_scale
-
+            logging.info(
+                f"expert_x.size: {expert_x.size()}, DEEPGEMM_BLOCK_SHAPE: {self.DEEPGEMM_BLOCK_SHAPE}"
+            )
             assert expert_x_scale.size(0) == E
             assert expert_x_scale.size(1) == M
             assert expert_x_scale.size(2) == K // self.DEEPGEMM_BLOCK_SHAPE[1]
