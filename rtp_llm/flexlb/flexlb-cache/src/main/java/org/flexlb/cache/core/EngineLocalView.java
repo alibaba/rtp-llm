@@ -12,7 +12,6 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.ForkJoinTask;
-import java.util.concurrent.atomic.LongAdder;
 
 /**
  * 引擎本地视图 (小Hash表)
@@ -29,11 +28,6 @@ public class EngineLocalView {
      * 核心存储结构: EngineIpPort -> Set<Long>
      */
     private final ConcurrentHashMap<String, Set<Long>> engineViews = new ConcurrentHashMap<>();
-
-    /**
-     * 统计信息
-     */
-    private final LongAdder totalCacheBlocks = new LongAdder();
 
     /**
      * 自定义ForkJoin线程池用于并行计算
@@ -115,11 +109,7 @@ public class EngineLocalView {
         }
         Set<Long> engineCache = engineViews.computeIfAbsent(engineIPort, k -> ConcurrentHashMap.newKeySet());
 
-        boolean isNewBlock = engineCache.add(blockCacheKey);
-
-        if (isNewBlock) {
-            totalCacheBlocks.increment();
-        }
+        engineCache.add(blockCacheKey);
     }
 
     /**
@@ -141,7 +131,6 @@ public class EngineLocalView {
         boolean isRemoveSuccess = engineCache.remove(blockCacheKey);
 
         if (isRemoveSuccess) {
-            totalCacheBlocks.decrement();
 
             // 如果引擎缓存为空，可以选择移除整个引擎条目
             if (engineCache.isEmpty()) {
@@ -160,7 +149,11 @@ public class EngineLocalView {
             return;
         }
 
-        engineViews.remove(engineIPort);
+        Set<Long> removed = engineViews.remove(engineIPort);
+        // 如果移除失败则告警
+        if (removed == null) {
+            log.warn("Remove failed, the engine: {} not exist.", engineIPort);
+        }
     }
 
     /**
@@ -183,7 +176,6 @@ public class EngineLocalView {
     public void clear() {
 
         engineViews.clear();
-        totalCacheBlocks.reset();
         log.info("Cleared engine local view");
 
     }
@@ -200,5 +192,14 @@ public class EngineLocalView {
      */
     public int getEngineViewsMapSize() {
         return engineViews.size();
+    }
+
+    /**
+     * 获取所有引擎的IP:Port集合
+     *
+     * @return 所有引擎的IP:Port集合
+     */
+    public Set<String> getAllEngineIpPorts() {
+        return engineViews.keySet();
     }
 }

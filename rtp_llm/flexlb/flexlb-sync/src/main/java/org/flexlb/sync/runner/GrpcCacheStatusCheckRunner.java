@@ -11,6 +11,7 @@ import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.grpc.EngineStatusConverter;
 import org.flexlb.service.monitor.EngineHealthReporter;
+import org.flexlb.util.CommonUtils;
 import org.flexlb.util.IdUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -20,7 +21,6 @@ import java.util.Optional;
 import java.util.concurrent.atomic.LongAdder;
 
 import static org.flexlb.constant.CommonConstants.DEADLINE_EXCEEDED_MESSAGE;
-import static org.flexlb.util.CommonUtils.toGrpcPort;
 
 public class GrpcCacheStatusCheckRunner implements Runnable {
 
@@ -58,7 +58,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
         this.ip = split[0];
         this.port = Integer.parseInt(split[1]);
         this.roleType = roleType;
-        this.grpcPort = toGrpcPort(Integer.parseInt(split[1]));
+        this.grpcPort = CommonUtils.toGrpcPort(Integer.parseInt(split[1]));
         this.modelName = modelName;
         this.workerStatuses = workerStatuses;
         this.site = site;
