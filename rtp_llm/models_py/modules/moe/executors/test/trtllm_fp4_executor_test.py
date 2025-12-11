@@ -199,7 +199,7 @@ def _generate_ref_output(
         extra_kwargs["routing_logits"],
         None,  # routing_bias
         hidden_states,
-        hidden_states_scale,
+        hidden_states_scale.view(torch.float8_e4m3fn),
         weights[W.moe_w1],
         weights[W.moe_s1],
         None,  # w13_bias
