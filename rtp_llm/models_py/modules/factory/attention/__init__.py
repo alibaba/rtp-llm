@@ -8,6 +8,7 @@ from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
     FMHAPrefillImplBase,
 )
 from rtp_llm.ops.compute_ops import DeviceType, get_device
+import torch
 
 __all__ = [
     "FMHAImplBase",
@@ -48,10 +49,19 @@ else:
             TRTMHAImpl,
             TRTPagedMHAImpl,
         )
-        from rtp_llm.models_py.modules.factory.attention.cuda_impl.xqa import XQAImpl
+        from rtp_llm.models_py.modules.factory.attention.cuda_impl.xqa import XQAImpl, XQADecodeImpl
 
         PREFILL_MHA_IMPS.extend([TRTMHAImpl, TRTPagedMHAImpl])
-        DECODE_MHA_IMPS.append(XQAImpl)
+
+    
+
+        major, minor = map(int, torch.version.cuda.split('.')[:2])
+        if (major, minor) >= (12, 8):
+             #cuda > 12.8
+            DECODE_MHA_IMPS.append(XQADecodeImpl)
+        else:
+            DECODE_MHA_IMPS.append(XQAImpl)
+        
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla_wrapper import (
             MlaFlashInferDecodeImpl,
             MlaFlashInferPrefillImpl,
