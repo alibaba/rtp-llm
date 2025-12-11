@@ -182,18 +182,18 @@ def _generate_payload_and_weights(
             "routing_logits": routing_logits,
         }
         # return payload, weights, extra_kwargs
-    hidden_states = torch.empty((SEQ_LEN, HIDDEN_SIZE), dtype=torch.bfloat16, device='cuda:0').normal_(-0.0035804398357868195, 0.1519165188074112).clamp_(-2.90625, 2.15625)
-    routing_logits = torch.empty((SEQ_LEN, NUM_EXPERTS), dtype=torch.bfloat16, device='cuda:0').normal_(-4.843157768249512, 0.8670358061790466).clamp_(-9.6875, -1.3125)
+    hidden_states = torch.empty((SEQ_LEN, HIDDEN_SIZE), dtype=torch.bfloat16, device='cuda:0').normal_(-0.003, 0.15).clamp_(-2.9, 2.2)
+    routing_logits = torch.empty((SEQ_LEN, NUM_EXPERTS), dtype=torch.bfloat16, device='cuda:0').normal_(-4.8, 0.86).clamp_(-9.6, -1.3)
     w13_input_scale = torch.empty((NUM_EXPERTS,), dtype=torch.float32, device='cuda:0').fill_(0.0014)
 
     # w13 = torch.empty((NUM_EXPERTS, MOE_INTERMEDIATE_SIZE * 2, HIDDEN_SIZE / 2), torch.uint8, device='cuda:0')
     # w13_scale = torch.empty((NUM_EXPERTS, MOE_INTERMEDIATE_SIZE * 2, HIDDEN_SIZE / NVFP4_BLOCK_SIZE), torch.float8_e4m3fn, device='cuda:0')
 
-    w13_scale_2 = torch.empty((NUM_EXPERTS,), dtype=torch.float32, device='cuda:0').normal_(9.058770956471562e-05, 3.610649946494959e-05).clamp_(4.868280666414648e-05, 0.0002615792618598789)
+    w13_scale_2 = torch.empty((NUM_EXPERTS,), dtype=torch.float32, device='cuda:0').normal_(9e-05, 3.6e-05).clamp_(4.8e-05, 0.0002)
     w2_input_scale = torch.empty((NUM_EXPERTS,), dtype=torch.float32, device='cuda:0').fill_(0.0028)
     # w2 = torch.empty((NUM_EXPERTS, HIDDEN_SIZE, MOE_INTERMEDIATE_SIZE / 2), torch.uint8, device='cuda:0')
     # w2_scale = torch.empty((NUM_EXPERTS, HIDDEN_SIZE, MOE_INTERMEDIATE_SIZE / NVFP4_BLOCK_SIZE), torch.float8_e4m3fn, device='cuda:0')
-    w2_scale_2 = torch.empty((NUM_EXPERTS,), dtype=torch.float32, device='cuda:0').normal_(0.00015353306662291288, 4.2520852730376646e-05).clamp_(8.501325646648183e-05, 0.00031825475161895156)
+    w2_scale_2 = torch.empty((NUM_EXPERTS,), dtype=torch.float32, device='cuda:0').normal_(0.0001, 4.2e-05).clamp_(8.5e-05, 0.0003)
 
     permute_info, topk_weights = routing_reference_renormalize(
         routing_logits, TOP_K, NUM_EXPERTS, 8
