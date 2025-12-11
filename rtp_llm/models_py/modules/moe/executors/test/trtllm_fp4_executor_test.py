@@ -34,7 +34,7 @@ TOP_K = 8
 
 NVFP4_BLOCK_SIZE = 16
 
-REAL_DATA_DIR = Path("/home/xiebaijie.xbj/fp4/dump_908/xxxxxxxx")
+REAL_DATA_DIR = Path("<path to the real data directory>")
 
 def routing_reference(expertLogits, topK, padding):
     """Reference routing implementation for permutation calculation."""
@@ -181,7 +181,7 @@ def _generate_payload_and_weights(
         extra_kwargs = {
             "routing_logits": routing_logits,
         }
-        # return payload, weights, extra_kwargs
+        return payload, weights, extra_kwargs
     hidden_states = torch.empty(
         (SEQ_LEN, HIDDEN_SIZE),
         dtype=torch.bfloat16,
@@ -268,6 +268,7 @@ def _generate_ref_output(
 ) -> torch.Tensor:
     if REAL_DATA_DIR.is_dir():
         output = load_pt("output.pt", (SEQ_LEN, HIDDEN_SIZE), torch.bfloat16)
+        return output
     g1_alphas = weights["w13_input_scale"] * weights["w13_weight_scale_2"]
     g2_alphas = weights["w2_input_scale"] * weights["w2_weight_scale_2"]
     g1_scale_c = g1_alphas / weights["w2_input_scale"]
