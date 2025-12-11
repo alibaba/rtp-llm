@@ -9,6 +9,7 @@ from deep_ep import Config as DeepEPConfig
 from torch.distributed import ProcessGroup
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.models_py.modules.mha.flashinfer_trtllm_gen import is_sm_100
 from rtp_llm.ops.compute_ops import DeviceType, get_device
 
 __all__ = [
@@ -22,7 +23,11 @@ __all__ = [
 
 def use_accl_ep():
     device_type = get_device().get_device_type()
-    return not (device_type == DeviceType.ROCm or "aarch64" in platform.machine())
+    return not device_type == DeviceType.ROCm
+
+
+def is_L20A():
+    return "aarch64" in platform.machine() and is_sm_100()
 
 
 class DeepEPMode(IntEnum):
@@ -199,7 +204,11 @@ class DeepEPWrapper:
         }
         if self._use_accl_ep:
             init_kwargs["allow_nvlink_for_low_latency_mode"] = True
-            init_kwargs["allow_mnnvl"] = True
+            if is_L20A():
+                init_kwargs["allow_mnnvl"] = True
+                init_kwargs["use_fabric"] = True
+            else:
+                init_kwargs["allow_mnnvl"] = False
         return DeepEPBuffer(**init_kwargs)  # type: ignore
 
     def _init_low_latency_buffer(
@@ -251,8 +260,12 @@ class DeepEPWrapper:
             "allow_mnnvl": True,
         }
         if self._use_accl_ep:
+            os.environ["ACCL_LOW_LATENCY_OPTIMIZE"] = "1"
             init_kwargs["allow_nvlink_for_low_latency_mode"] = True
-            init_kwargs["allow_mnnvl"] = True
+            if is_L20A():
+                init_kwargs["allow_mnnvl"] = True
+            else:
+                init_kwargs["allow_mnnvl"] = False
         return DeepEPBuffer(**init_kwargs)  # type: ignore
 
     def _init_low_latency_m2n_buffer(
