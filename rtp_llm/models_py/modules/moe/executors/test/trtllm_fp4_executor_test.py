@@ -182,18 +182,46 @@ def _generate_payload_and_weights(
             "routing_logits": routing_logits,
         }
         # return payload, weights, extra_kwargs
-    hidden_states = torch.empty((SEQ_LEN, HIDDEN_SIZE), dtype=torch.bfloat16, device='cuda:0').normal_(-0.003, 0.15).clamp_(-2.9, 2.2)
-    routing_logits = torch.empty((SEQ_LEN, NUM_EXPERTS), dtype=torch.bfloat16, device='cuda:0').normal_(-4.8, 0.86).clamp_(-9.6, -1.3)
-    w13_input_scale = torch.empty((NUM_EXPERTS,), dtype=torch.float32, device='cuda:0').fill_(0.0014)
+    hidden_states = torch.empty(
+        (SEQ_LEN, HIDDEN_SIZE),
+        dtype=torch.bfloat16,
+        device='cuda:0',
+    ).normal_(-0.003, 0.15).clamp_(-2.9, 2.2)
+    routing_logits = torch.empty(
+        (SEQ_LEN, NUM_EXPERTS),
+        dtype=torch.bfloat16,
+        device='cuda:0',
+    ).normal_(-4.8, 0.86).clamp_(-9.6, -1.3)
+    w13_input_scale = torch.empty(
+        (NUM_EXPERTS,),
+        dtype=torch.float32,
+        device='cuda:0',
+    ).fill_(0.0014)
 
     # w13 = torch.empty((NUM_EXPERTS, MOE_INTERMEDIATE_SIZE * 2, HIDDEN_SIZE / 2), torch.uint8, device='cuda:0')
-    w13_scale = torch.empty((NUM_EXPERTS, MOE_INTERMEDIATE_SIZE * 2, HIDDEN_SIZE / NVFP4_BLOCK_SIZE), torch.float32, device='cuda:0').normal_(76.1, 36.3).clamp_(0.1, 448.0).to(torch.float8_e4m3fn)
+    w13_scale = torch.empty(
+        (NUM_EXPERTS, MOE_INTERMEDIATE_SIZE * 2, HIDDEN_SIZE / NVFP4_BLOCK_SIZE),
+        dtype=torch.float32,
+        device='cuda:0',
+    ).normal_(76.1, 36.3).clamp_(0.1, 448.0).to(torch.float8_e4m3fn)
 
-    w13_scale_2 = torch.empty((NUM_EXPERTS,), dtype=torch.float32, device='cuda:0').normal_(9e-05, 3.6e-05).clamp_(4.8e-05, 0.0002)
+    w13_scale_2 = torch.empty(
+        (NUM_EXPERTS,),
+        dtype=torch.float32,
+        device='cuda:0',
+    ).normal_(9e-05, 3.6e-05).clamp_(4.8e-05, 0.0002)
     w2_input_scale = torch.empty((NUM_EXPERTS,), dtype=torch.float32, device='cuda:0').fill_(0.0028)
     # w2 = torch.empty((NUM_EXPERTS, HIDDEN_SIZE, MOE_INTERMEDIATE_SIZE / 2), torch.uint8, device='cuda:0')
-    w2_scale = torch.empty((NUM_EXPERTS, HIDDEN_SIZE, MOE_INTERMEDIATE_SIZE / NVFP4_BLOCK_SIZE), torch.float32, device='cuda:0').normal_(53.2, 20.7).clamp_(4.5, 448.0).to(torch.float8_e4m3fn)
-    w2_scale_2 = torch.empty((NUM_EXPERTS,), dtype=torch.float32, device='cuda:0').normal_(0.0001, 4.2e-05).clamp_(8.5e-05, 0.0003)
+    w2_scale = torch.empty(
+        (NUM_EXPERTS, HIDDEN_SIZE, MOE_INTERMEDIATE_SIZE / NVFP4_BLOCK_SIZE),
+        dtype=torch.float32,
+        device='cuda:0',
+    ).normal_(53.2, 20.7).clamp_(4.5, 448.0).to(torch.float8_e4m3fn)
+    w2_scale_2 = torch.empty(
+        (NUM_EXPERTS,),
+        dtype=torch.float32,
+        device='cuda:0',
+    ).normal_(0.0001, 4.2e-05).clamp_(8.5e-05, 0.0003)
 
     permute_info, topk_weights = routing_reference_renormalize(
         routing_logits, TOP_K, NUM_EXPERTS, 8
