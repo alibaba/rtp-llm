@@ -179,4 +179,19 @@ bool StreamCacheResource::enableMemoryBlockCache() const {
     return resource_context_.enable_memory_block_cache && stream_->enableMemoryBlockCache();
 }
 
+bool StreamCacheResource::asyncLoadCache() {
+    if (!enableMemoryBlockCache()) {
+        return false;
+    }
+    load_cache_context_ = resource_context_.cache_manager->asyncLoadCache(batch_resource_);
+    return load_cache_context_ != nullptr;
+}
+
+bool StreamCacheResource::loadCacheDone() {
+    if (!load_cache_context_) {
+        return true;
+    }
+    return load_cache_context_->done();
+}
+
 }  // namespace rtp_llm

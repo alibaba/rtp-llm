@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cache_new/KVCacheManager.h"
 
+#include "rtp_llm/cpp/cache_new/KVCacheConnector.h"
 #include "rtp_llm/cpp/cache_new/SingleTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache_new/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache_new/KVCacheHashUtil.h"
@@ -290,6 +291,24 @@ void KVCacheManager::reportMetricsLoop() {
         metrics_reporter_->report<RtpLLMCacheMetrics, RtpLLMCacheMetricsCollector>(&tags, &collector);
         std::this_thread::sleep_for(std::chrono::seconds(1));  // 1s
     }
+}
+
+std::shared_ptr<AsyncContext> KVCacheManager::asyncLoadCache(const BatchKVCacheResourcePtr& batch_resource) {
+    if (!memory_connector_ || !batch_resource) {
+        RTP_LLM_LOG_WARNING(
+            "async load cache failed, memory connector or resource is null, memory connector: %p, resource: %p",
+            memory_connector_.get(),
+            batch_resource.get());
+        return nullptr;
+    }
+
+    // TODO(LXQ): only support batch0 now, need to support all batch?
+    std::shared_ptr<KVCacheResourceV1> resource(batch_resource, &(batch_resource->batch_resource.at(0)));
+    auto                               context = memory_connector_->asyncRead(resource, nullptr);
+    if (context) {
+        wait_cache_thread_pool_->pushTask([context]() { context->waitDone(); });
+    }
+    return context;
 }
 
 }  // namespace rtp_llm

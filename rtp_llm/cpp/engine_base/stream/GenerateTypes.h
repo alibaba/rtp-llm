@@ -111,7 +111,8 @@ enum class StreamState {
     PAUSED,
     STOPPED,
     FINISHED,
-    REMOTE_RUNNING
+    REMOTE_RUNNING,
+    LOADING_CACHE
 };
 
 inline std::string StreamStateToString(StreamState state) {
