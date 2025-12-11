@@ -233,6 +233,9 @@ def _generate_ref_output(
     print(output[260, 1528])
     print(ref_output[260, 1528])
     torch.testing.assert_close(output, ref_output, rtol=2e-2, atol=1e-5)
+    mask = torch.isclose(output, ref_output, rtol=1e-3, atol=1e-3)
+    mismatch_pct = (~mask).float().mean().item() * 100
+    assert mismatch_pct < 6, f"Mismatch percentage is {mismatch_pct:.2f}"
     assert 0
     return ref_output
     
