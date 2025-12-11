@@ -148,6 +148,7 @@ void invokeGatherSequencesCombined(T*           output_q,
 
 template<typename T>
 void invokeAddFusedQKVBiasTransposePrefillV1(T*                             q_buf,
+                                             T*                             q_mtp_buf,
                                              T*                             k_buf,
                                              T*                             v_buf,
                                              PrefixPromptBatchWeightsParam* param,
@@ -170,6 +171,7 @@ void invokeAddFusedQKVBiasTransposePrefillV1(T*                             q_bu
                                              const bool                     use_paged_fmha,
                                              const bool                     store_qkv,
                                              const bool                     store_q,
+                                             const bool                     store_q_mtp,
                                              const bool                     store_kv,
                                              const bool                     store_cache,
                                              const float2*                  cos_sin_cache,
@@ -177,6 +179,7 @@ void invokeAddFusedQKVBiasTransposePrefillV1(T*                             q_bu
 
 template<typename T>
 void invokeAddFusedQKVBiasTransposePrefill(T*                             q_buf,
+                                           T*                             q_mtp_buf,
                                            T*                             k_buf,
                                            T*                             v_buf,
                                            PrefixPromptBatchWeightsParam* param,
@@ -199,6 +202,7 @@ void invokeAddFusedQKVBiasTransposePrefill(T*                             q_buf,
                                            const bool                     use_paged_fmha,
                                            const bool                     store_qkv,
                                            const bool                     store_q,
+                                           const bool                     store_q_mtp,
                                            const bool                     store_kv,
                                            const bool                     store_cache,
                                            const float2*                  cos_sin_cache,

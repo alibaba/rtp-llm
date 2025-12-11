@@ -264,6 +264,7 @@ protected:
     void InvokeROCmPTPCGemm(const GemmParams& params, BufferPtr output);
     void HipblasltPTPCGemm(const GemmParams& params, BufferPtr output);
     void InvokeROCmDeepGemmWi8Ai8(const GemmParams& params, BufferPtr output);
+    bool checkSpecDecode(const DevicePrepParams& params, bool skip_no_prefix = true);
     // void prepareCommBuffer(const PrepareCommBufferParams& params) override;
 
     void updateExpertGpuLoads(const MoeConfigs&          moe_conf,
@@ -371,6 +372,7 @@ private:
 
 protected:
     bool use_multi_block_mode = false;
+    bool use_mtp_pa_;
 };
 
 }  // namespace rtp_llm
