@@ -90,12 +90,13 @@ class TrtllmFp4Executor(FusedMoeExpertExecutor):
             torch.bfloat16
         ).view(torch.int16)
 
-        input_quantize_fn = {
-            torch.bfloat16: partial(fp4_quantize, is_sf_swizzled_layout=False),
-            torch.uint8: lambda x, x_scale: (x, x_scale),
-        }
-        hidden_states, hidden_states_scale = input_quantize_fn[payload.expert_x.dtype](
-            payload.expert_x, self.expert_x_scale)
+        if payload.expert_x.dtype is torch.bfloat16:
+            hidden_states, hidden_states_scale = fp4_quantize(
+                payload.expert_x, self.expert_x_scale, is_sf_swizzled_layout=False)
+        else:
+            assert payload.expert_x.dtype is torch.uint8
+            assert payload.expert_x_scale is not None
+            hidden_states, hidden_states_scale = payload.expert_x, payload.expert_x_scale
 
         output = trtllm_fp4_block_scale_routed_moe(
             packed_tensor,

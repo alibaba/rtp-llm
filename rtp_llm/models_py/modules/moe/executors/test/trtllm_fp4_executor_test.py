@@ -13,6 +13,10 @@ from rtp_llm.models_py.modules.moe.utils import FusedMoEQuantConfig
 from rtp_llm.utils.model_weight import W
 
 from flashinfer import e2m1_and_ufp8sf_scale_to_float
+from flashinfer.utils import device_support_pdl
+from flashinfer.fused_moe import (
+    trtllm_fp4_block_scale_moe,
+)
 
 DP_SIZE = 1
 TP_SIZE = 1
@@ -169,15 +173,60 @@ def _generate_payload_and_weights(
             "w2_input_scale": w2_input_scale,
             "w2_weight_scale_2": w2_scale_2,
         }
-        return payload, weights
+        extra_kwargs = {
+            "routing_logits": routing_logits,
+        }
+        return payload, weights, extra_kwargs
 
 def _generate_ref_output(
     payload: ExpertForwardPayload,
     weights: Dict[str, torch.Tensor],
+    extra_kwargs: Dict[str, torch.Tensor],
 ) -> torch.Tensor:
     if REAL_DATA_DIR.is_dir():
         output = load_pt("output.pt", (SEQ_LEN, HIDDEN_SIZE), torch.bfloat16)
-        # return output
+    g1_alphas = weights["w13_input_scale"] * weights["w13_weight_scale_2"]
+    g2_alphas = weights["w2_input_scale"] * weights["w2_weight_scale_2"]
+    g1_scale_c = g1_alphas / weights["w2_input_scale"]
+    hidden_states, hidden_states_scale = fp4_quantize(
+        payload.expert_x, 1 / weights["w13_input_scale"], is_sf_swizzled_layout=False)
+    ref_output = trtllm_fp4_block_scale_moe(
+        extra_kwargs["routing_logits"],
+        None,  # routing_bias
+        hidden_states,
+        hidden_states_scale,
+        weights[W.moe_w1],
+        weights[W.moe_s1],
+        None,  # w13_bias
+        None,  # gemm1_alpha
+        None,  # gemm1_beta
+        None,  # gemm1_clamp_limit
+        weights[W.moe_w2],
+        weights[W.moe_s2],
+        None,  # w2_bias
+        g1_scale_c,
+        g1_alphas,
+        g2_alphas,
+        NUM_EXPERTS,
+        TOP_K,
+        None,  # n_group
+        None,  # topk_group
+        MOE_INTERMEDIATE_SIZE,
+        0,  # local_expert_offset
+        NUM_EXPERTS,
+        None,  # routed_scaling_factor
+        RoutingMethodType.Renormalize.value,
+        True,  # do_finalize
+        device_support_pdl(payload.expert_x.device),
+        GatedActType.SwiGlu.value,  # gated_act_type
+        None,
+    )[0].to(torch.float)
+
+    print(output)
+    print(ref_output)
+    torch.testing.assert_close(output, ref_output, rtol=2e-2, atol=1e-5)
+    assert 0
+    return ref_output
     
     hidden_states = payload.expert_x
     topk_ids = payload.expert_topk_ids
@@ -234,45 +283,21 @@ def _generate_ref_output(
         for k in range(TOP_K):
             expert_id = topk_ids[token_idx, k].item()
             expert_weight = topk_weights[token_idx, k]
-            
-            # Get expert weights
-            w13_expert = w13_float[expert_id]  # [MOE_INTERMEDIATE_SIZE * 2, HIDDEN_SIZE]
-            w2_expert = w2_float[expert_id]  # [HIDDEN_SIZE, MOE_INTERMEDIATE_SIZE]
-            
-            # GEMM1: hidden_states @ w13^T
-            # w13_expert: [MOE_INTERMEDIATE_SIZE * 2, HIDDEN_SIZE]
-            # token_hidden: [1, HIDDEN_SIZE]
-            # workspace1: [1, MOE_INTERMEDIATE_SIZE * 2]
+            w13_expert = w13_float[expert_id]
+            w2_expert = w2_float[expert_id]
             workspace1 = torch.matmul(token_hidden, w13_expert.transpose(0, 1))
-            
-            # Split into gate and value (for gated activation like SwiGLU)
-            # w13 is ordered as [w3, w1] after reorder_w1w3_to_w3w1
-            # So first half is w3 (value), second half is w1 (gate)
-            N = workspace1.shape[-1]  # MOE_INTERMEDIATE_SIZE * 2
-            gate = workspace1[..., N // 2:].to(torch.float32)  # [1, MOE_INTERMEDIATE_SIZE]
-            value = workspace1[..., :N // 2].to(torch.float32)  # [1, MOE_INTERMEDIATE_SIZE]
-            
-            # Apply SiLU activation: gate = gate * sigmoid(gate)
-            gate = gate * torch.sigmoid(gate)  # SiLU
-            
-            # Element-wise multiplication: gate * value
-            workspace2 = (gate * value).to(dtype)  # [1, MOE_INTERMEDIATE_SIZE]
-            
-            # GEMM2: workspace2 @ w2^T
-            # workspace2: [1, MOE_INTERMEDIATE_SIZE]
-            # w2_expert: [HIDDEN_SIZE, MOE_INTERMEDIATE_SIZE]
-            # expert_output: [1, HIDDEN_SIZE]
+            N = workspace1.shape[-1]
+            gate = workspace1[..., N // 2:].to(torch.float32)
+            value = workspace1[..., :N // 2].to(torch.float32)
+            gate = gate * torch.sigmoid(gate)
+            workspace2 = (gate * value).to(dtype)
             expert_output = torch.matmul(workspace2, w2_expert.transpose(0, 1))
-            
-            # Weighted accumulation
             token_output += expert_output / expert_weight
-        
         ref_output[token_idx] = token_output[0]
     
     print(output)
     print(ref_output)
     torch.testing.assert_close(output, ref_output, rtol=2e-2, atol=1e-5)
-    assert 0
     return ref_output
 
 def test_trtllm_fp4_executor():
@@ -281,8 +306,8 @@ def test_trtllm_fp4_executor():
     random.seed(42)
     
     config = _generate_config()
-    payload, weights = _generate_payload_and_weights(config)
-    ref_output = _generate_ref_output(payload, weights)
+    payload, weights, extra_kwargs = _generate_payload_and_weights(config)
+    ref_output = _generate_ref_output(payload, weights, extra_kwargs)
 
     from rtp_llm.models_py.modules.moe.executors.trtllm_fp4_executor import (
         TrtllmFp4Executor,
