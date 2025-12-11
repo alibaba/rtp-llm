@@ -193,7 +193,7 @@ def _generate_payload_and_weights(
     w2_input_scale = torch.empty((NUM_EXPERTS,), dtype=torch.float32, device='cuda:0').fill_(0.0028)
     # w2 = torch.empty((NUM_EXPERTS, HIDDEN_SIZE, MOE_INTERMEDIATE_SIZE / 2), torch.uint8, device='cuda:0')
     # w2_scale = torch.empty((NUM_EXPERTS, HIDDEN_SIZE, MOE_INTERMEDIATE_SIZE / NVFP4_BLOCK_SIZE), torch.float8_e4m3fn, device='cuda:0')
-    w2_scale_2 = torch.empty((NUM_EXPERTS,), dtype=torch.float32, device='cuda:0').normal_(0.00015353306662291288, 4.2520852730376646e-05).clamp_(8.50132564664
+    w2_scale_2 = torch.empty((NUM_EXPERTS,), dtype=torch.float32, device='cuda:0').normal_(0.00015353306662291288, 4.2520852730376646e-05).clamp_(8.501325646648183e-05, 0.00031825475161895156)
 
     w13 = load_pt("process_weights_after_loading_gemm1_weights_fp4_shuffled.pt", (NUM_EXPERTS, MOE_INTERMEDIATE_SIZE * 2, HIDDEN_SIZE / 2), torch.uint8)
     w13_scale = load_pt("process_weights_after_loading_gemm1_scales_fp4_shuffled.pt", (NUM_EXPERTS, MOE_INTERMEDIATE_SIZE * 2, HIDDEN_SIZE / NVFP4_BLOCK_SIZE), torch.float8_e4m3fn)
