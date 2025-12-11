@@ -318,6 +318,11 @@ void CudaDevice::syncCommunication(bool timeout) {
                           ffn_tp_nccl_param_.world_size_);
         ftNcclStreamSynchronize(ffn_tp_nccl_param_, stream_, timeout);
     }
+    if (afd_nccl_param_.world_size_ > 1) {
+        RTP_LLM_LOG_DEBUG(
+            "Synchronize afd NCCL communicators rank %d of %d.", afd_nccl_param_.rank_, afd_nccl_param_.world_size_);
+        ftNcclStreamSynchronize(afd_nccl_param_, stream_, timeout);
+    }
 }
 
 void CudaDevice::syncCommunication(ParallelMode mode, bool timeout) {

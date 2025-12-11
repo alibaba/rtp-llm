@@ -379,7 +379,6 @@ absl::Status NormalEngine::step() {
             device_->allGather({{gen_timeline_buffer}, ParallelMode::DP_AND_TP});
         }
         device_->syncCommunication(false);
-        device_->syncAndCheck();
         auto it        = std::max_element(gen_timeline_buffer->data<uint8_t>(),
                                    gen_timeline_buffer->dataWithOffset<uint8_t>(world_size),
                                    [](const uint8_t a, const uint8_t b) { return a < b; });
