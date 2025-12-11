@@ -28,6 +28,22 @@ public:
         return allocator_;
     }
 
+    double getMemoryFraction(c10::DeviceIndex device) override {
+        return 0.0;
+    }
+
+    void enable(bool value) override {
+
+    }
+
+    bool isEnabled() const override {
+        return false;
+    }
+
+    c10::hip::HIPCachingAllocator::ShareableHandle shareIpcHandle(void* ptr) override {
+        return {};
+    }
+
     void malloc(void** devPtr, int device, size_t size, hipStream_t stream);
 
     void free(void** ptr);
