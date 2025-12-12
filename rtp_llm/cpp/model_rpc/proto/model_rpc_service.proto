@@ -238,6 +238,11 @@ message BatchGenerateInputPB {
     repeated GenerateInputPB inputs = 2;
 }
 
+message EnqueueResponsePB {
+    RpcErrorPB error_info = 1;
+    int64 done_time_us = 2;
+}
+
 // in tp case, decode master broadcast to decode worker
 message BroadcastLoadRequestPB {
     int64 request_id = 1;
@@ -443,7 +448,7 @@ service RpcService {
     rpc RemoteFinishNew(RemoteFinishRequestPB) returns (EmptyPB);
 
     // async submit request
-    rpc Enqueue(BatchGenerateInputPB) returns (RpcErrorPB);
+    rpc Enqueue(BatchGenerateInputPB) returns (EnqueueResponsePB);
     rpc FetchResponse(FetchRequestPB) returns (stream GenerateOutputsPB);
     rpc Cancel(FetchRequestPB) returns (RpcErrorPB);
 

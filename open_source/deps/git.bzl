@@ -229,9 +229,11 @@ def git_deps():
         shallow_since = "1678195250 +0800",
     )
 
-    native.local_repository(
+    http_archive(
         name = "com_google_protobuf",
-        path = "3rdparty/protobuf",
+        sha256 = "1a2affa2fbad568b9895b72e3c7cb1f72a14bf2501fba056c724dc68c249cd0f",
+        strip_prefix = "protobuf-3.25.1",
+        urls = ["https://github.com/protocolbuffers/protobuf/archive/v3.25.1.tar.gz"],
     )
 
     new_git_repository(

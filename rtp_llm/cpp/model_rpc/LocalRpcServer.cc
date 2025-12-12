@@ -154,6 +154,15 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
     return generate_context.error_status;
 }
 
+grpc::Status LocalRpcServer::Enqueue(grpc::ServerContext*                   context,
+                                     BatchGenerateRequestPB* request,
+                                     grpc::ServerWriter<EnqueueResponsePB>* writer) {
+    AtomicGuard request_guard(onflight_requests_);
+    auto        request_id = request->request_id();
+    RTP_LLM_LOG_DEBUG("receive request %ld", request_id);
+    
+}
+
 grpc::Status
 LocalRpcServer::GetCacheStatus(grpc::ServerContext* context, const CacheVersionPB* request, CacheStatusPB* response) {
     RTP_LLM_LOG_DEBUG("receive cacheStatus rpc request from client: %s, request cache version: [%d]",

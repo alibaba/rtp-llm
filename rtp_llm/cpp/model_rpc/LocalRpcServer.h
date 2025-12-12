@@ -40,6 +40,10 @@ public:
                                     const GenerateInputPB*                 request,
                                     grpc::ServerWriter<GenerateOutputsPB>* writer);
 
+    grpc::Status Enqueue(grpc::ServerContext*                   context,
+                         BatchGenerateRequestPB* request,
+                         grpc::ServerWriter<EnqueueResponsePB> *writer);
+
     ::grpc::Status DistKvCache(::grpc::ServerContext*        context,
                                const ::DistKvCacheRequestPB* request,
                                ::DistKvCacheResponsePB*      response);
