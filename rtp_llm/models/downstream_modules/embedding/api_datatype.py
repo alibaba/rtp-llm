@@ -141,7 +141,6 @@ class EmbeddingResponseFormat(PyDanticModelBase):
     embedding: Union[List[float], Dict[str, float], List[List[float]], str]
     index: int
 
-
 class ALLEmbeddingResponseFormat(PyDanticModelBase):
     object: EmbeddingResponseType
     embedding: Union[List[float], Dict[str, float], List[List[float]], str]

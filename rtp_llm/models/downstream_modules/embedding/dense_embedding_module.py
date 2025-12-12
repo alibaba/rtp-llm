@@ -189,5 +189,4 @@ class SentenceTransformerHandler(CustomHandler):
             k: data[self.arg_name_mapping.get(k, k)]
             for k in self.raw_extend_forward_args_list
         }
-
         return self.model(data)["sentence_embedding"]

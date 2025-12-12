@@ -172,15 +172,24 @@ class EmbeddingRendererBase(CustomRenderer):
         for i, out in enumerate(outputs.outputs):
             input_length = int(inputs.input_lengths[i])
             token_ids = inputs.token_ids[bias : bias + input_length]
-            data.append(
-                EmbeddingResponseFormat(
-                    object=self.embedding_type,
-                    embedding=self.embedding_func(
-                        request, out, input_length, token_ids
-                    ),
-                    index=i,
+
+            if len(out) > 0:
+                out = out.to(torch.int32)
+                data.append(
+                    EmbeddingResponseFormat(
+                        object=self.embedding_type,
+                        embedding=self.tokenizer_.batch_decode([out], skip_special_tokens=True)[0].strip(),
+                        index=i,
+                    )
                 )
-            )
+            else:
+                data.append(
+                    EmbeddingResponseFormat(
+                        object=self.embedding_type,
+                        embedding="",
+                        index=i,
+                    )
+                )
             bias += input_length
         return data
 
