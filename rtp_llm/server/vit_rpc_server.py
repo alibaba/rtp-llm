@@ -2,6 +2,8 @@ from concurrent import futures
 
 import grpc
 
+from rtp_llm.config.engine_config import EngineConfig
+from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     CacheStatusPB,
     CacheVersionPB,
@@ -16,17 +18,12 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
     MultimodalRpcServiceServicer,
     add_MultimodalRpcServiceServicer_to_server,
 )
-from rtp_llm.config.engine_config import EngineConfig
-from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.distribute.gang_server import GangServer
 from rtp_llm.distribute.worker_info import g_worker_info
 from rtp_llm.model_factory import ModelFactory
-from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.models.multimodal.mm_process_engine import MMEmbeddingRes, MMProcessEngine
-from rtp_llm.utils.base_model_datatypes import (
-    MMPreprocessConfig,
-    MultimodalInput,
-)
+from rtp_llm.server.server_args.server_args import setup_args
+from rtp_llm.utils.base_model_datatypes import MMPreprocessConfig, MultimodalInput
 from rtp_llm.utils.grpc_util import trans_from_tensor, trans_tensor
 
 
@@ -57,7 +54,7 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
         self.engine = mm_process_engine
 
     def RemoteMultimodalEmbedding(self, multimodal_inputs: MultimodalInputsPB, context):
-        res: MMEmbeddingRes = self.engine.mm_embedding_rpc(multimodal_inputs))
+        res: MMEmbeddingRes = self.engine.mm_embedding_rpc(multimodal_inputs)
         return trans_output(res)
 
     def GetWorkerStatus(self, request: StatusVersionPB, context):
@@ -86,4 +83,3 @@ def create_rpc_server():
         ],
     )
     return server
-

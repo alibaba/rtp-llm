@@ -150,9 +150,7 @@ class Qwen2_5_VLImageEmbedding(Qwen2VLImageEmbedding):
         mm_input = mm_inputs[0]
         mm_type = mm_input.mm_type
         data = get_bytes_io_from_url(mm_input.url, vit_config.download_headers)
-        if mm_type == MMUrlType.DEFAULT:
-            raise Exception("cannot infer multimodal input type")
-        elif mm_type == MMUrlType.IMAGE:
+        if mm_type == MMUrlType.DEFAULT or mm_type == MMUrlType.IMAGE:
             data = Qwen2VLImageEmbedding.load_image(data, mm_input.config)
             res = processor(images=data, videos=None, return_tensors="pt")
             return res["pixel_values"], res["image_grid_thw"]
