@@ -6,8 +6,6 @@ from unittest import SkipTest, TestCase, main
 
 import torch
 
-# CUR_PATH = os.path.dirname(os.path.abspath(__file__))
-# sys.path.append(os.path.join(str(CUR_PATH), "../../../"))
 device = torch.device(f"cuda")
 from rtp_llm.models_py.modules import GroupTopK
 
@@ -121,12 +119,12 @@ class MLATest(TestCase):
         scores = gating_output
         group_topk = GroupTopK()
 
-        output = torch.zeros(
+        output = torch.empty(
             (seq_length, topk),
             dtype=torch.float32,
             device=scores.device,
         )
-        indices = torch.zeros(
+        indices = torch.empty(
             (seq_length, topk),
             dtype=torch.int64,
             device=scores.device,

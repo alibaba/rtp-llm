@@ -9,8 +9,6 @@ from unittest import SkipTest, TestCase, main
 import torch
 import torch.nn.functional as F
 
-# CUR_PATH = os.path.dirname(os.path.abspath(__file__))
-# sys.path.append(os.path.join(str(CUR_PATH), "../../../"))
 device = torch.device(f"cuda")
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters

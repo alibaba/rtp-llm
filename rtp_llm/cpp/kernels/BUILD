@@ -55,7 +55,7 @@ cc_library(
         "//rtp_llm/cpp/cuda:cuda_utils_cu",
         "//rtp_llm/cpp/cuda:launch_utils",
     ],
-    copts = any_cuda_copts(), 
+    copts = any_cuda_copts(),
     include_prefix = "src",
     visibility = ["//visibility:public"],
 )
@@ -562,6 +562,7 @@ cc_library(
     ]),
     hdrs = glob([
         "mla_kernels/*.h",
+        "mla_kernels/*.cuh",
     ]),
     deps = any_cuda_deps + [
         "//rtp_llm/cpp/utils:core_utils",
