@@ -92,7 +92,8 @@ bool CudaDevice::initDeepEPBuffer() {
                                               num_nvl_bytes,
                                               num_rdma_bytes,
                                               init_params_.use_deepep_low_latency,
-                                              num_qps_per_rank));
+                                              num_qps_per_rank,
+                                              init_params_.use_deepep_p2p_low_latency));
         bool success = deepep_buffer_->init();
         if (!success) {
             RTP_LLM_LOG_ERROR("Failed to initialize DeepEPBuffer");
