@@ -72,19 +72,10 @@ class DeviceExporter:
     def get_device_type(self) -> DeviceType:
         ...
 
-    def pack_int8_tensor_to_packed_int4(self, weight: torch.Tensor) -> torch.Tensor:
-        ...
-
     def preprocess_gemm_weight_by_key(self, key: str, weight: torch.Tensor, user_arm_gemm_use_kai: bool) -> torch.Tensor:
         ...
 
     def preprocess_weight_scale(self, weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
-        ...
-
-    def preprocess_weights_for_mixed_gemm(self, weight: torch.Tensor, quant_type: typing.Any, arch: str) -> torch.Tensor:
-        ...
-
-    def symmetric_quantize_last_axis_of_batched_matrix(self, weight: torch.Tensor, quant_type: typing.Any, arch: str) -> list[torch.Tensor]:
         ...
 
     def update_current_torch_stream(self) -> None:
