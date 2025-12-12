@@ -188,7 +188,6 @@ class GenericMoeDecoderLayer(nn.Module):
         else:
             # MoE layer
             experts_output = self.moe_mlp(hidden_states)
-
             if self.shared_mlp is not None:
                 shared_mlp_output = self.shared_mlp(hidden_states)
                 hidden_states = experts_output + shared_mlp_output
@@ -224,7 +223,7 @@ class GenericMoeModel(GptModelBase):
         fmha_impl = AttnImplFactory.get_fmha_impl(
             self.config, self.weight, attention_inputs
         )
-
+        # fmha_impl = None
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
             hidden_states = decoder_layer(
                 hidden_states,
@@ -233,7 +232,7 @@ class GenericMoeModel(GptModelBase):
             )
 
         hidden_states = self.norm(hidden_states)
-
+        # return PyModelOutputs(hidden_states, None)
         return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
 
 

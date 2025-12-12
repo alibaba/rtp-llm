@@ -6,8 +6,15 @@ from typing import Optional
 import torch
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import fp8_gemm_nt, has_deep_gemm
-from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
+from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
+    fp8_gemm_nt,
+    has_deep_gemm,
+    is_deep_gemm_e8m0_used,
+)
+from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
+    requant_weight_ue8m0,
+    sgl_per_token_group_quant_fp8,
+)
 from rtp_llm.models_py.modules.factory.linear import LinearBase
 
 logger = logging.getLogger(__name__)
@@ -40,6 +47,7 @@ class CudaFp8DeepGEMMLinear(LinearBase):
             return quant_method == "FP8_PER_BLOCK"
         return False
 
+    @torch.inference_mode()
     def __init__(
         self,
         weight: torch.Tensor,
@@ -60,6 +68,16 @@ class CudaFp8DeepGEMMLinear(LinearBase):
             [weight_scales.shape[1], weight_scales.shape[0]]
         )
         self.bias = bias
+        self.scale_ue8m0 = is_deep_gemm_e8m0_used()
+        # tmp not use ue8m0, maybe worst
+        if self.hidden_size < 512 or self.output_size < 128:
+            self.scale_ue8m0 = False
+        if self.scale_ue8m0:
+            w_tmp, self.weight_scales = requant_weight_ue8m0(
+                self.weight, self.weight_scales
+            )
+            self.weight.copy_(w_tmp)
+            del w_tmp
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         # Get input dimensions
@@ -93,36 +111,46 @@ class CudaFp8DeepGEMMLinear(LinearBase):
 
         # Quantize using sgl_per_token_group_quant_fp8
         quantization_eps = 1e-4
-        input_fp8, input_scales = sgl_per_token_group_quant_fp8(
-            input_for_quant,
-            group_size=128,
-            eps=quantization_eps,
-            column_major_scales=False,
-        )
-
-        FP8_E4M3_MAX = 448.0
-        min_scale_threshold = 1e-4 / FP8_E4M3_MAX
-        input_scales = torch.clamp(input_scales, min=min_scale_threshold)
-        input_scales = input_scales.to(torch.float32)
+        if self.scale_ue8m0:
+            input_fp8, input_scales = sgl_per_token_group_quant_fp8(
+                input_for_quant,
+                128,
+                column_major_scales=True,
+                scale_tma_aligned=True,
+                scale_ue8m0=True,
+            )
+        else:
+            input_fp8, input_scales = sgl_per_token_group_quant_fp8(
+                input_for_quant,
+                group_size=128,
+                eps=quantization_eps,
+                column_major_scales=self.scale_ue8m0,
+                scale_tma_aligned=self.scale_ue8m0,
+                scale_ue8m0=self.scale_ue8m0,
+            )
+            input_fp8 = input_fp8.contiguous()
+            input_scales = input_scales.contiguous()
+        if not self.scale_ue8m0:
+            FP8_E4M3_MAX = 448.0
+            min_scale_threshold = 1e-4 / FP8_E4M3_MAX
+            input_scales = torch.clamp(input_scales, min=min_scale_threshold)
+            input_scales = input_scales.to(torch.float32).contiguous()
         output_m = input_for_quant.shape[0]
         output = torch.zeros(
             output_m, output_n, dtype=torch.bfloat16, device=input.device
         )
 
         # Call DeepGEMM
-        deepgemm_input_scales = input_scales
-        input_fp8 = input_fp8.contiguous()
-        deepgemm_input_scales = deepgemm_input_scales.contiguous()
-        weight = self.weight.contiguous()
-        weight_scales = self.weight_scales.contiguous()
+        weight = self.weight
+        weight_scales = self.weight_scales
         output = output.contiguous()
 
         fp8_gemm_nt(
-            (input_fp8, deepgemm_input_scales),
+            (input_fp8, input_scales),
             (weight, weight_scales),
             output,
             c=None,
-            disable_ue8m0_cast=True,
+            disable_ue8m0_cast=not self.scale_ue8m0,
         )
 
         if need_padding:

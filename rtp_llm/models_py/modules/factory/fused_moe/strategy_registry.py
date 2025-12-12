@@ -60,13 +60,13 @@ class StrategyRegistry:
             ValueError: If no suitable strategy is found
         """
         # Find all candidate strategies that can handle this config
-        logger.debug(
+        logger.info(
             f"[StrategyRegistry] Evaluating {len(self._strategies)} strategies..."
         )
         candidates = [
             strategy for strategy in self._strategies if strategy.can_handle(config)
         ]
-        logger.debug(f"[StrategyRegistry] Found {len(candidates)} candidate(s)")
+        logger.info(f"[StrategyRegistry] Found {len(candidates)} candidate(s)")
 
         if not candidates:
             logger.error(

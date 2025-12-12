@@ -76,7 +76,9 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("dtype", &PyAttentionInputs::dtype)
         .def_readwrite("kv_block_offset", &PyAttentionInputs::kv_block_offset)
         .def_readwrite("cu_seqlens", &PyAttentionInputs::cu_seqlens)
+        .def_readwrite("cu_kv_seqlens", &PyAttentionInputs::cu_kv_seqlens)
         .def_readwrite("cu_seqlens_without_prefix", &PyAttentionInputs::cu_seqlens_without_prefix)
+        .def_readwrite("context_total_kv_length", &PyAttentionInputs::context_total_kv_length)
         .def_readwrite("padding_offset", &PyAttentionInputs::padding_offset)
         .def_readwrite("cache_store_inputs", &PyAttentionInputs::cache_store_inputs)
         .def("__repr__", [](const PyAttentionInputs& self) { return "PyAttentionInputs"; })
@@ -113,26 +115,21 @@ void registerPyOpDefs(pybind11::module& m) {
 
     pybind11::class_<PyModelOutputs>(m, "PyModelOutputs")
         .def(pybind11::init<>(), "Default constructor")
-        .def(pybind11::init<torch::Tensor, std::shared_ptr<rtp_llm::ParamsBase>>(),
-             pybind11::arg("hidden_states"),
-             pybind11::arg("params_ptr"),
-             "Initialize with hidden states tensor and params pointer")
         .def(pybind11::init<torch::Tensor>(),
              pybind11::arg("hidden_states"),
              "Initialize with hidden states tensor only (params_ptr defaults to nullptr)")
-        .def(pybind11::init<std::shared_ptr<rtp_llm::ParamsBase>>(),
-             pybind11::arg("params_ptr"),
-             "Initialize with params pointer only (hidden_states defaults to empty tensor)")
         .def(pybind11::init([](torch::Tensor hidden_states, pybind11::object params_obj) {
                  // Try to cast to shared_ptr, return nullptr if conversion fails
-                 std::shared_ptr<rtp_llm::ParamsBase> params_ptr = nullptr;
+                 std::shared_ptr<rtp_llm::ParamsBase> params_ptr     = nullptr;
+                 py::object                           py_attn_params = py::none();
                  try {
                      params_ptr = pybind11::cast<std::shared_ptr<rtp_llm::ParamsBase>>(params_obj);
                  } catch (const pybind11::cast_error& e) {
                      // Conversion failed, params_ptr remains nullptr
                      RTP_LLM_LOG_INFO("Failed to cast params_obj to shared_ptr<ParamsBase>: %s", e.what());
+                     py_attn_params = params_obj;
                  }
-                 return PyModelOutputs(hidden_states, params_ptr);
+                 return PyModelOutputs(hidden_states, params_ptr, py_attn_params);
              }),
              pybind11::arg("hidden_states"),
              pybind11::arg("params_ptr"),

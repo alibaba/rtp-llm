@@ -23,7 +23,10 @@ tensorrt = [
 ]
 
 flashinfer = [
+    "apache-tvm-ffi",
     "flashinfer-python",
+    "flashinfer-cubin",
+    "flashinfer-jit-cache",
 ]
 
 xft_dep = select({
@@ -104,6 +107,8 @@ requirement([
     "concurrent_log_handler",
     "aiter",
     "fastsafetensors",
+    "deep_gemm",
+    "deep_ep",
 ] + tensorrt + flashinfer)
 
 filegroup(
@@ -213,6 +218,7 @@ py_library(
         ":nest_asyncio",
         ":matplotlib",
         ":av",
+        ":deep_gemm",
         "//rtp_llm/model_loader:loader",
         "//rtp_llm/models_py:models",
     ] + arch_dep + select({
@@ -465,7 +471,6 @@ py_library(
             "//rtp_llm/tools/convert:convert",
         ],
             }) + select({
-                "@//:using_cuda12": ["@deep_gemm_ext//:deep_gemm"],
                 "//conditions:default": [],
             }),
     data = [
@@ -561,7 +566,7 @@ whl_reqs = [
     "bitsandbytes",
     "portalocker",
     "concurrent_log_handler",
-    "flashinfer-python==0.2.5",
+    "apache-tvm-ffi==0.1.1",
 ] + whl_deps() + platform_deps() + xft_dep
 
 py_wheel(
