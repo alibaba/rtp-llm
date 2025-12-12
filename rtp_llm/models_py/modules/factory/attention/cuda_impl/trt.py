@@ -8,7 +8,7 @@ from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
 )
 from rtp_llm.ops import FMHAType
 from rtp_llm.ops.compute_ops import (
-    FusedRopeKVCachePrefillOp,
+    FusedRopeKVCachePrefillOpQOut,
     KVCache,
     PyAttentionInputs,
     TRTAttnOp,
@@ -25,7 +25,7 @@ class TRTMHAImpl(FMHAPrefillImplBase):
     ) -> None:
         super().__init__(
             TRTAttnOp(config.gpt_init_params),
-            FusedRopeKVCachePrefillOp(config.gpt_init_params),
+            FusedRopeKVCachePrefillOpQOut(config.gpt_init_params),
             attn_inputs,
         )
         # Only TRTMHAImpl uses prefill_cuda_graph_copy_params
@@ -110,7 +110,7 @@ class TRTPagedMHAImpl(FMHAPrefillImplBase):
     ) -> None:
         super().__init__(
             TRTPagedAttnOp(config.gpt_init_params),
-            FusedRopeKVCachePrefillOp(config.gpt_init_params),
+            FusedRopeKVCachePrefillOpQOut(config.gpt_init_params),
             attn_inputs,
         )
 

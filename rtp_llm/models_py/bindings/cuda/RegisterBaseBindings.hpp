@@ -111,6 +111,20 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("fp8_max"),
                   py::arg("scale_ue8m0"));
 
+    rtp_ops_m.def("per_token_group_quant_fp8_v2",
+                  &per_token_group_quant_fp8_v2,
+                  "Fp8 Gemm Per Token Group",
+                  py::arg("input"),
+                  py::arg("output_q"),
+                  py::arg("output_s"),
+                  py::arg("group_size"),
+                  py::arg("eps"),
+                  py::arg("fp8_min"),
+                  py::arg("fp8_max"),
+                  py::arg("scale_ue8m0"),
+                  py::arg("fuse_silu_and_mul"),
+                  py::arg("masked_m"));
+
     rtp_ops_m.def("moe_topk_softmax",
                   &moe_topk_softmax,
                   "MoE Topk Softmax kernel",

@@ -96,7 +96,6 @@ py_library(
     ] + select({
         "@//:using_cuda12": [
             ":modules_cuda",
-            "@deep_gemm_ext//:deep_gemm"
         ],
         "@//:using_rocm": [
             ":modules_rocm"
