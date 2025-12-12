@@ -49,6 +49,16 @@ def http_deps():
     )
 
     http_archive(
+        name = "torch_2.8_py310_cuda",
+        sha256 = "edadd510a59951323ca24a53b8fe55d179b9a90237f0f55aae07f8ebc07dd052",
+        urls = [
+            "https://download.pytorch.org/whl/cu128/torch-2.9.0%2Bcu128-cp310-cp310-manylinux_2_28_aarch64.whl",
+        ],
+        type = "zip",
+        build_file = clean_dep("//:BUILD.pytorch"),
+    )
+
+    http_archive(
         name = "torch_rocm",
         sha256 = "39287cb8d52e4a71eb7194727365aa6be767da614fa5e44468155c90ba4a4e0c",
         urls = [
