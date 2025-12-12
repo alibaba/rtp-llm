@@ -52,6 +52,8 @@ public:
 
     CacheSnapshot cacheSnapshot(int64_t latest_version) const;
 
+    std::vector<BlockIdxType> steal();
+
 private:
     size_t       seq_size_per_block_;
     LRUCacheType lru_cache_;

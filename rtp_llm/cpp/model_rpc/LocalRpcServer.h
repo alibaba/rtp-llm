@@ -72,9 +72,8 @@ public:
 
     void reportCacheStatusTime(int64_t request_begin_time_us);
 
-    ::grpc::Status BroadcastTp(::grpc::ServerContext*        context,
-                               const ::BroadcastTpRequestPB* request,
-                               ::BroadcastTpResponsePB*      response);
+    ::grpc::Status
+    CopyCache(::grpc::ServerContext* context, const ::CopyCacheRequestPB* request, ::CopyCacheResponsePB* response);
 
 public:
     typedef grpc::internal::WriterInterface<GenerateOutputsPB> WriterInterface;
