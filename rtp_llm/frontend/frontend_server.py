@@ -11,15 +11,13 @@ from fastapi.responses import ORJSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from rtp_llm.access_logger.access_logger import AccessLogger
-from rtp_llm.config.generate_config import RoleType
-from rtp_llm.config.gpt_init_model_parameters import ConfigMode, GptInitModelParameters
+from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.config.task_type import TaskType
 from rtp_llm.embedding.embedding_endpoint import EmbeddingEndpoint
 from rtp_llm.frontend.frontend_worker import FrontendWorker, TokenizerEncodeResponse
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 from rtp_llm.model_factory import ModelFactory
-from rtp_llm.model_factory_register import _model_factory
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.server.misc import format_exception
@@ -41,7 +39,7 @@ class FrontendServer(object):
     def __init__(
         self, separated_frontend: bool = False, rank_id: int = 0, server_id: int = 0
     ):
-        self._access_logger = AccessLogger()
+        self._access_logger = AccessLogger(rank_id, server_id)
         self._frontend_worker = None
         self._openai_endpoint = None
         self.thread_lock_ = threading.Lock()
