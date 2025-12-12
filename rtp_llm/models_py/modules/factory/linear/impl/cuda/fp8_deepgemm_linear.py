@@ -117,7 +117,8 @@ class CudaFp8DeepGEMMLinear(LinearBase):
                 logger.error(error_msg)
                 raise ValueError(error_msg)
         self.scale_ue8m0 = is_deep_gemm_e8m0_used()
-        # tmp not use ue8m0, maybe worst
+        # Disable UE8M0 for small tensors due to performance/accuracy trade-offs.
+        # TODO: Re-evaluate this threshold after further optimization of UE8M0 kernels.
         if self.hidden_size < 512 or self.output_size < 128:
             self.scale_ue8m0 = False
         if self.scale_ue8m0:
