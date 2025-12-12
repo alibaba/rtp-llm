@@ -55,7 +55,7 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
         self.engine = mm_process_engine
 
     def RemoteMultimodalEmbedding(self, multimodal_inputs: MultimodalInputsPB, context):
-        res: MMEmbeddingRes = self.engine.mm_embedding_rpc(multimodal_inputs))
+        res: MMEmbeddingRes = self.engine.mm_embedding_rpc(multimodal_inputs)
         return trans_output(res)
 
     def GetWorkerStatus(self, request: StatusVersionPB, context):
