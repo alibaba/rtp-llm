@@ -110,6 +110,12 @@ class GenerateConfig(BaseModel):
 
     ignore_eos: bool = False
     skip_special_tokens: bool = False
+
+    # MTP training used
+    return_mtp_hidden_states: bool = False
+    mtp_hidden_states_saved_path: str = ""
+    mtp_input_len: int = 0
+
     # lora
     adapter_name: Optional[Union[str, List[str]]] = None
     is_streaming: bool = False
