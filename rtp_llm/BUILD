@@ -27,6 +27,10 @@ flashinfer = [
     "flashinfer-python",
 ]
 
+deep_gemm = [
+    "deep_gemm",
+]
+
 xft_dep = select({
     "@//:using_arm": [],
     "//:xft_use_icx": [
@@ -105,9 +109,8 @@ requirement([
     "concurrent_log_handler",
     "aiter",
     "fastsafetensors",
-    "deep_gemm",
     "deep_ep",
-] + tensorrt + flashinfer)
+] + tensorrt + flashinfer + deep_gemm)
 
 filegroup(
     name = "cutlass_config",
@@ -216,12 +219,11 @@ py_library(
         ":nest_asyncio",
         ":matplotlib",
         ":av",
-        ":deep_gemm",
         "//rtp_llm/model_loader:loader",
         "//rtp_llm/models_py:models",
     ] + arch_dep + select({
-        "@//:using_cuda12_9_x86": tensorrt + flashinfer,
-        "@//:cuda_pre_12_9": tensorrt + flashinfer,
+        "@//:using_cuda12_9_x86": tensorrt + flashinfer + deep_gemm,
+        "@//:cuda_pre_12_9": tensorrt + flashinfer + deep_gemm,
         "//conditions:default": []
     }) + select({
         "@//:using_arm": [],
