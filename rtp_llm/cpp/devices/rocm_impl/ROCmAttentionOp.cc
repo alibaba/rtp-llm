@@ -565,7 +565,8 @@ KVBlockArray ROCmDevice::getKVBlockArray(const AttentionModuleParams& params,
 ParamsPtr ROCmDevice::PrepareCKAttn(const AttentionConfigs& configs,
                                     int                     kv_block_offset,
                                     const BufferPtr&        kv_cache_block_id,
-                                    int                     batch_size) {
+                                    int                     batch_size,
+                                    bool                    use_fp8_fmha) {
     RTP_LLM_LOG_DEBUG("PrepareCKAttn: kv_block_offset: %d, batch_size: %d, kv_cache_block_id: %s",
                       kv_block_offset,
                       batch_size,
@@ -575,17 +576,12 @@ ParamsPtr ROCmDevice::PrepareCKAttn(const AttentionConfigs& configs,
     }
     auto            ck_attn    = std::make_shared<CKAttn>();
     KvCacheDataType cache_type = KvCacheDataType::BASE;
-#ifdef ENABLE_FP8
-    if (use_fp8_fmha_) {
-        cache_type = KvCacheDataType::FP8;
-    } else
-#endif
-        if (configs.kv_cache_dtype == KvCacheDataType::INT8) {
+    if (configs.kv_cache_dtype == KvCacheDataType::INT8) {
         RTP_LLM_LOG_DEBUG("now use kv_cache int8");
         cache_type = KvCacheDataType::INT8;
     }
     const auto max_blocks_per_batch = kv_cache_block_id->shape()[1];
-    auto const elemSize             = 2;  // 2 for kv cache fp16
+    auto const elemSize = use_fp8_fmha ? sizeof(int8_t) : 2; // 2 for kv cache fp16
 
     ck_attn->kv_cache_offset =
         allocateBuffer({DataType::TYPE_INT32, {size_t(batch_size), 1, 2, max_blocks_per_batch}, AllocationType::DEVICE},
