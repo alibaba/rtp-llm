@@ -43,14 +43,6 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         )
 
         resolver = MoeConfigResolver()
-        print(
-            "ddd:",
-            resolver.is_ep_enabled(config),
-            resolver.use_low_latency(config),
-            DeepEpInitializer.supported(),
-            flush=True,
-        )
-
         checker.check(resolver.is_ep_enabled(config))
         checker.check(resolver.use_low_latency(config))
         checker.check(DeepEpInitializer.supported())

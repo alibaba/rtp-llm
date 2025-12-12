@@ -46,13 +46,6 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
         )
 
         resolver = MoeConfigResolver()
-        print(
-            "ccc:",
-            has_deep_gemm(),
-            resolver.is_bf16(config),
-            resolver.get_quant_method(config),
-            flush=True,
-        )
         checker.check(has_deep_gemm())
         checker.check(resolver.is_bf16(config))
         quant_method = resolver.get_quant_method(config)
