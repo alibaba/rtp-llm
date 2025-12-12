@@ -84,10 +84,10 @@ def worker_function(rank: int, use_fp8: bool, token_num_per_rank: List[int]):
             token_num = token_num_per_rank[dp_rank]
             # 相同dp_rank的a1相同
             torch.manual_seed(rank * dp_size + dp_rank)
-            a1 = (
-                torch.randn([token_num, config.hidden_size])
-                .to(current_device)
-                .to(torch.bfloat16)
+            a1 = torch.randn(
+                (token_num, config.hidden_size),
+                device=current_device,
+                dtype=torch.bfloat16,
             )
 
             a1[:, :128] = (
