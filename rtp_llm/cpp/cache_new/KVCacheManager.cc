@@ -1,6 +1,6 @@
 #include "rtp_llm/cpp/cache_new/KVCacheManager.h"
 
-#include "rtp_llm/cpp/cache_new/KVCacheConnector.h"
+#include "rtp_llm/cpp/cache_new/KVCacheMemoryConnector.h"
 #include "rtp_llm/cpp/cache_new/SingleTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache_new/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache_new/KVCacheHashUtil.h"
@@ -53,11 +53,18 @@ bool KVCacheManager::init() {
             stop_.store(false, std::memory_order_relaxed);
             metrics_reporter_thread_ = std::thread(&KVCacheManager::reportMetricsLoop, this);
         }
-        return true;
     } else {
         RTP_LLM_CHECK_WITH_INFO(false, "SingleTypeKVCacheAllocator only support Full Attention");
         return false;
     }
+
+    if (params_.kv_cache_config.memory_block_cache_size_mb > 0) {
+        if (!initMemoryConnector()) {
+            RTP_LLM_LOG_ERROR("init memory connector failed");
+            return false;
+        }
+    }
+    return true;
 }
 
 size_t KVCacheManager::availableTokensNum() const {
@@ -169,12 +176,42 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
 
 void KVCacheManager::free(const FreeInfo& free_info) {
     RTP_LLM_CHECK(free_info.batch_kv_cache_resource && free_info.complete_token_ids);
+    if (free_info.reuse_cache || free_info.enable_memory_cache) {
+        InsertInfo insert_info{free_info.batch_kv_cache_resource,
+                               free_info.complete_token_ids,
+                               /*is_resident*/ false,
+                               free_info.reuse_cache,
+                               free_info.enable_memory_cache};
+        // free blocks inside
+        insertIntoCache(insert_info);
+        return;
+    }
     allocator_->free(free_info);
 }
 
 void KVCacheManager::insertIntoCache(const InsertInfo& insert_info) {
     dropLastPartialBlock(insert_info.batch_kv_cache_resource);
-    allocator_->insertIntoCache(insert_info);
+
+    // insert to gpu
+    if (insert_info.reuse_cache) {
+        allocator_->insertIntoCache(insert_info);
+    }
+
+    // insert to cpu
+    if (insert_info.enable_memory_cache) {
+        // 拷贝一下batch resource, 外部可能会对batch resource中的blocks进行修改, 导致deleter中free时blocks未被释放
+        auto     copy_batch_resource = std::make_shared<BatchKVCacheResource>(*(insert_info.batch_kv_cache_resource));
+        FreeInfo free_info{copy_batch_resource, insert_info.complete_token_ids};
+        auto deleter = [free_info, allocator = allocator_](KVCacheResourceV1* resource) { allocator->free(free_info); };
+        std::shared_ptr<KVCacheResourceV1> resource(&(copy_batch_resource->batch_resource.at(0)), deleter);
+        auto                               context = memory_connector_->asyncWrite(resource, nullptr);
+        if (context) {
+            wait_cache_thread_pool_->pushTask([context]() { context->waitDone(); });
+        }
+    } else {
+        FreeInfo free_info{insert_info.batch_kv_cache_resource, insert_info.complete_token_ids};
+        allocator_->free(free_info);
+    }
 }
 
 KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const {
@@ -293,6 +330,41 @@ void KVCacheManager::reportMetricsLoop() {
     }
 }
 
+bool KVCacheManager::initMemoryConnector() {
+    const auto memory_block_cache_size_mb         = params_.kv_cache_config.memory_block_cache_size_mb;
+    const auto memory_block_cache_sync_timeout_ms = params_.kv_cache_config.memory_block_cache_sync_timeout_ms;
+    if (memory_block_cache_size_mb <= 0 || memory_block_cache_sync_timeout_ms <= 0) {
+        RTP_LLM_LOG_WARNING(
+            "init memory connector failed, memory size or sync timeout is invalid, memory size: %ld MB, sync timeout: %ld ms",
+            memory_block_cache_size_mb,
+            memory_block_cache_sync_timeout_ms);
+        return false;
+    }
+
+    config_.memory_block_cache_size_mb         = memory_block_cache_size_mb;
+    config_.memory_block_cache_sync_timeout_ms = memory_block_cache_sync_timeout_ms;
+    RTP_LLM_LOG_INFO("init memory connector, size: %ld MB, sync timeout: %ld ms",
+                     config_.memory_block_cache_size_mb,
+                     config_.memory_block_cache_sync_timeout_ms);
+
+    memory_connector_ =
+        std::make_shared<KVCacheMemoryConnector>(config_, allocator_, device_, params_.worker_grpc_addrs_);
+    if (!memory_connector_->init()) {
+        RTP_LLM_LOG_ERROR("memory connector init failed");
+        memory_connector_.reset();
+        return false;
+    }
+
+    wait_cache_thread_pool_ = std::make_shared<autil::LockFreeThreadPool>(8, 1000, nullptr, "WaitCacheThreadPool");
+    if (!wait_cache_thread_pool_->start()) {
+        RTP_LLM_LOG_ERROR("wait cache thread pool start failed");
+        wait_cache_thread_pool_.reset();
+        return false;
+    }
+
+    return true;
+}
+
 std::shared_ptr<AsyncContext> KVCacheManager::asyncLoadCache(const BatchKVCacheResourcePtr& batch_resource) {
     if (!memory_connector_ || !batch_resource) {
         RTP_LLM_LOG_WARNING(
@@ -309,6 +381,41 @@ std::shared_ptr<AsyncContext> KVCacheManager::asyncLoadCache(const BatchKVCacheR
         wait_cache_thread_pool_->pushTask([context]() { context->waitDone(); });
     }
     return context;
+}
+
+bool KVCacheManager::copyCache(const CopyCacheRequestPB& request, CopyCacheResponsePB& response) {
+    if (request.has_mem_request()) {
+        if (!memory_connector_) {
+            RTP_LLM_LOG_WARNING("copy cache failed, memory connector is null, request: [%s]",
+                                request.DebugString().c_str());
+            response.mutable_mem_response()->set_success(false);
+            return false;
+        }
+        auto memory_connector = std::dynamic_pointer_cast<KVCacheMemoryConnector>(memory_connector_);
+        if (!memory_connector) {
+            RTP_LLM_LOG_WARNING("copy cache failed, memory connector is not a KVCacheMemoryConnector");
+            response.mutable_mem_response()->set_success(false);
+            return false;
+        }
+        return memory_connector->copyCache(request.mem_request(), *(response.mutable_mem_response()));
+    } else {
+        RTP_LLM_LOG_WARNING("copy cache failed, request is invalid, request: [%s]", request.DebugString().c_str());
+        return false;
+    }
+}
+
+void KVCacheManager::clearLocalCache() {
+    // clear gpu cache
+    if (allocator_) {
+        allocator_->clearCache();
+    }
+    // clear cpu cache
+    if (memory_connector_) {
+        auto memory_connector = std::dynamic_pointer_cast<KVCacheMemoryConnector>(memory_connector_);
+        if (memory_connector) {
+            memory_connector->clearCache();
+        }
+    }
 }
 
 }  // namespace rtp_llm

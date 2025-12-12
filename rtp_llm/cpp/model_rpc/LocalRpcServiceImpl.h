@@ -78,10 +78,10 @@ public:
         }
     }
 
-    ::grpc::Status BroadcastTp(::grpc::ServerContext*        context,
-                               const ::BroadcastTpRequestPB* request,
-                               ::BroadcastTpResponsePB*      response) override {
-        return local_server_->BroadcastTp(context, request, response);
+    ::grpc::Status CopyCache(::grpc::ServerContext*      context,
+                             const ::CopyCacheRequestPB* request,
+                             ::CopyCacheResponsePB*      response) override {
+        return local_server_->CopyCache(context, request, response);
     }
 
 protected:

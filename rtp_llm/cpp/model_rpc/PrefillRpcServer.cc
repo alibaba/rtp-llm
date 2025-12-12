@@ -89,7 +89,7 @@ grpc::Status PrefillRpcServer::init(const EngineInitParams&                     
 ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> stream) {
     static int max_wait_timeout_us = maga_init_params_.gpt_init_parameter.prefill_max_wait_timeout_ms_ * 1000;
     auto       begin_time_us       = currentTimeUs();
-    while (stream->waiting()) {
+    while (stream->waiting() || stream->loadingCache()) {
         usleep(100);
         auto current_time_us = currentTimeUs();
         auto cost_time_us    = current_time_us - begin_time_us;

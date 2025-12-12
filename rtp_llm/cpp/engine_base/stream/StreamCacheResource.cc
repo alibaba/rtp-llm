@@ -11,7 +11,11 @@ namespace rtp_llm {
 
 void StreamCacheResource::init(int batch_size) {
     batch_resource_->resetBatchSize(batch_size);
-    batch_resource_->initGroups(1);
+    int layer_num = 0;
+    if (resource_context_.cache_manager) {
+        layer_num = resource_context_.cache_manager->cacheConfig().layer_num;
+    }
+    batch_resource_->initGroups(1, layer_num);
     batch_resource_->enable_reuse_cache = reuseCache();
 }
 
@@ -46,14 +50,11 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
 
     if (total_blocks > 0) {
         // TODO(xinfei.sxf) fix it, after finshed and remote running commit.
-        if (reuseCache()) {
-            InsertInfo insert_info{batch_resource_, stream_->completeTokenIdsPtr(), false};
-            resource_context_.cache_manager->insertIntoCache(insert_info);
-        }
-
-        FreeInfo free_info{batch_resource_, stream_->completeTokenIdsPtr()};
-        free_info.request_id = stream_->streamId();
-
+        FreeInfo free_info{batch_resource_,
+                           stream_->completeTokenIdsPtr(),
+                           stream_->streamId(),
+                           reuseCache(),
+                           enableMemoryBlockCache()};
         resource_context_.cache_manager->free(free_info);
     }
 
@@ -191,7 +192,19 @@ bool StreamCacheResource::loadCacheDone() {
     if (!load_cache_context_) {
         return true;
     }
-    return load_cache_context_->done();
+    if (!load_cache_context_->done()) {
+        return false;
+    }
+    if (load_cache_context_->success()) {
+        auto&     resource  = batch_resource_->batch_resource.at(0);
+        const int reuse_len = resource.reuseBlocksNum() * seqSizePerBlock();
+        stream_->setInitialReuseLength(reuse_len);
+        stream_->setReuseLength(reuse_len);
+        stream_->setLocalReuseLength(reuse_len);
+        stream_->setMtpTokenIndex(reuse_len);
+    }
+    load_cache_context_.reset();
+    return true;
 }
 
 }  // namespace rtp_llm

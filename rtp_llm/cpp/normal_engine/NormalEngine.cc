@@ -149,7 +149,7 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     auto cache_config               = rtp_llm::CacheConfigCreator::createBasicConfig(params_);
     cache_config.seq_size_per_block = params_.seq_size_per_block_;
     cache_config.block_num          = 5;
-    auto cache_manager              = make_shared<KVCacheManager>(cache_config, device_, true);
+    auto cache_manager              = make_shared<KVCacheManager>(cache_config, device_, true, nullptr, params_);
     if (!cache_manager->init()) {
         RTP_LLM_FAIL("init kv cache manager failed in decodeWarmUp");
     }

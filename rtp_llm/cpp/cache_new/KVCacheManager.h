@@ -67,6 +67,10 @@ public:
     // async load cache from connector to gpu, for all tp
     std::shared_ptr<AsyncContext> asyncLoadCache(const BatchKVCacheResourcePtr& batch_resource);
 
+    // copy cache between gpu and memory, for single tp
+    bool copyCache(const CopyCacheRequestPB& request, CopyCacheResponsePB& response);
+    void clearLocalCache();
+
 private:
     bool initMemoryConnector();
 

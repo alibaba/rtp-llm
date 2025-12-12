@@ -30,7 +30,8 @@ public:
                        bool                           copy_last_block,
                        std::vector<BlockIdPair>&      block_update_mapping) override;
 
-    int seqSizePerBlock() const override;
+    int  seqSizePerBlock() const override;
+    void clearCache() override;
 
 private:
     MallocResult incrMalloc(const MallocInfo& malloc_info) override;
