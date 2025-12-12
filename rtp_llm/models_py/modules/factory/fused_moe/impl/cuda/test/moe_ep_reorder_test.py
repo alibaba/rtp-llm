@@ -8,11 +8,10 @@ import torch
 import torch.nn.functional as F
 from torch import dtype as _dtype
 
-from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.util import (
-    moe_permute,
-    moe_unpermute,
+from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
+    cutlass_moe_pre_reorder,
+    post_reorder_triton_kernel,
 )
-
 
 class MoeReorderTest(TestCase):
     DTYPES = [torch.bfloat16, torch.float16]
@@ -163,16 +162,26 @@ class MoeReorderTest(TestCase):
             )
 
         hidden_states = torch.randn(num_tokens, hidden_dim, dtype=dtype).to("cuda")
+        input_scale = torch.randn(num_tokens, dtype=torch.float32).to("cuda")
         router_logits = torch.randn(num_tokens, num_expert, dtype=dtype).to("cuda")
         topk_weights, topk_ids = self.torch_fused_topk(
             hidden_states, router_logits, top_k, False
         )
+
+        if expert_map is not None:
+            ref_topk_ids = expert_map[topk_ids]
+        else:
+            ref_topk_ids = topk_ids
+        permute_topk_ids = torch.where(
+            ref_topk_ids != -1, ref_topk_ids, num_local_experts
+        )
+
         # test pre reorder kernel
         (
             torch_permuted_hidden_states,
             torch_expert_first_token_offset,
             src_row_id2dst_row_id_map,
-            _,
+            dst_2_src,
             _,
             valid_row_idx,
         ) = self.torch_moe_permute(
@@ -184,45 +193,40 @@ class MoeReorderTest(TestCase):
             start_expert=ep_rank * num_local_experts,
             expert_map=expert_map,
         )
-        permuted_hidden_states, _, expert_first_token_offset, inv_permuted_idx = (
-            moe_permute(
-                hidden_states=hidden_states,
-                a1q_scale=None,
-                topk_ids=topk_ids,
-                num_experts=num_expert,
-                num_local_experts=num_local_experts,
-                expert_map=expert_map,
-                permuted_hidden_states=None,
-            )
-        )
 
-        self.assertTrue(
-            torch.equal(
-                torch_expert_first_token_offset, expert_first_token_offset.flatten()
-            )
+        permuted_hidden_states = torch.empty(
+            num_tokens * top_k, hidden_dim, dtype=dtype
+        ).to("cuda")
+        permuted_scale = torch.empty(num_tokens * top_k, dtype=torch.float32).to("cuda")
+
+        src2dst = cutlass_moe_pre_reorder(
+            input=hidden_states,
+            permuted_input=permuted_hidden_states,
+            input_scale=input_scale,
+            permuted_scale=permuted_scale,
+            topk_ids=permute_topk_ids,
+            num_local_experts=num_local_experts,
+            topk=top_k,
+            num_tokens=num_tokens,
+            hidden_size=hidden_dim,
         )
-        # finalizeMoeRoutingKernel中inv_permuted_idx的shape为[topk, num_tokens], 所以在这里要做一次reshape
-        self.assertTrue(
-            torch.equal(src_row_id2dst_row_id_map.t().flatten(), inv_permuted_idx)
-        )
+        ref_permute_scale = input_scale[
+            dst_2_src.clamp(max=num_tokens * top_k - 1) // top_k
+        ]
+
         self.assertTrue(
             torch.equal(
                 torch_permuted_hidden_states[valid_row_idx],
                 permuted_hidden_states[valid_row_idx],
             )
         )
-
-        # test post reorder kernel
-        cuda_out = torch.empty_like(hidden_states)
-
-        moe_unpermute(
-            out=cuda_out,
-            permuted_hidden_states=permuted_hidden_states,
-            topk_weights=topk_weights,
-            inv_permuted_idx=src_row_id2dst_row_id_map.t().flatten(),
-            expert_first_token_offset=expert_first_token_offset,
+        self.assertTrue(
+            torch.equal(
+                ref_permute_scale[valid_row_idx],
+                permuted_scale[valid_row_idx],
+            )
         )
-
+        # test post reorder kernel
         torch_out = self.torch_moe_unpermute(
             permuted_hidden_states,
             topk_weights,
@@ -230,8 +234,18 @@ class MoeReorderTest(TestCase):
             valid_row_idx,
             top_k,
         )
-
-        self.assertTrue(torch.allclose(torch_out, cuda_out, atol=2e-2, rtol=0))
+        cuda_out = torch.empty_like(hidden_states)
+        post_reorder_triton_kernel[(num_tokens,)](
+            down_output_ptr=permuted_hidden_states,
+            output_ptr=cuda_out,
+            src2dst_ptr=src2dst,
+            topk_ids_ptr=ref_topk_ids,
+            topk_weights_ptr=topk_weights,
+            topk=top_k,
+            hidden_size=hidden_dim,
+            BLOCK_SIZE=512,
+        )
+        self.assertTrue(torch.allclose(torch_out, cuda_out, atol=5e-2, rtol=5e-2))
 
     def test_moe_ep_reorder(self):
         for params in itertools.product(

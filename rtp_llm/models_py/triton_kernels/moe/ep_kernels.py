@@ -413,3 +413,160 @@ def recompute_topk_ids_sum_expert_count(
     )
 
     return adjusted_topk_ids, expert_count
+
+
+@triton.jit
+def pre_reorder_moe_tokenwise_fp8_triton_kernel(
+    input_ptr,
+    permuted_input_ptr,
+    input_scale_ptr,
+    permuted_scale_ptr,
+    src2dst_ptr,
+    topk_ids_ptr,
+    num_local_experts,
+    topk,
+    num_tokens,
+    hidden_size,
+    BLOCK_SIZE: tl.constexpr,
+    NUM_STAGES: tl.constexpr,
+):
+
+    offset = BLOCK_SIZE * tl.program_id(1) + tl.arange(0, BLOCK_SIZE)
+    mask = offset < hidden_size
+    start_src_idx = tl.program_id(0)
+    step = tl.num_programs(0)
+
+    for src_idx_int32 in tl.range(
+        start_src_idx, num_tokens, step, num_stages=NUM_STAGES
+    ):
+        src_idx = src_idx_int32.to(tl.int64)
+        token_src2dst_ptr = src2dst_ptr + src_idx * topk
+        token_topk_ids_ptr = topk_ids_ptr + src_idx * topk
+
+        src_ptr_offs = input_ptr + src_idx * hidden_size + offset
+        dst_ptr_offs = permuted_input_ptr + offset
+        # Load input data
+        in_data = tl.load(src_ptr_offs, mask=mask)
+
+        if tl.program_id(1) == 0:
+            a1_scale = tl.load(input_scale_ptr + src_idx)
+        else:
+            a1_scale = 1.0
+
+        for idx in range(topk):
+            expert_id = tl.load(token_topk_ids_ptr + idx)
+            if expert_id != num_local_experts:
+                dst_idx = tl.load(token_src2dst_ptr + idx)
+                # Store reordered input data
+                tl.store(dst_ptr_offs + dst_idx * hidden_size, in_data, mask=mask)
+                # Store reordered scale
+                if tl.program_id(1) == 0:
+                    tl.store(permuted_scale_ptr + dst_idx, a1_scale)
+
+
+@triton.jit
+def compute_src2dst_triton_kernel(
+    reorder_ids, src2dst, num_toks, BLOCK_SIZE: tl.constexpr
+):
+    pid = tl.program_id(axis=0)
+    dst_id = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = dst_id < num_toks
+    src_id = tl.load(reorder_ids + dst_id, mask=mask)
+    tl.store(src2dst + src_id, dst_id, mask=mask)
+
+
+# moe pre reorder with token-wise fp8 scale
+def cutlass_moe_pre_reorder(
+    input,  # [num_tokens, hidden_size]
+    permuted_input,  # [num_tokens * topk, hidden_size]
+    input_scale,  # [num_tokens]
+    permuted_scale,  # [num_tokens * topk]
+    topk_ids,  # [num_tokens, topk]
+    num_local_experts: int,
+    topk: int,
+    num_tokens: int,
+    hidden_size: int,
+):
+    assert num_tokens == input.shape[0]
+    assert hidden_size == input.shape[1]
+
+    _, reorder_ids = torch.sort(topk_ids.view(-1), stable=True)
+
+    device = input.device
+    # 1. get src to dst map
+    grid = (triton.cdiv(topk_ids.numel(), 512),)
+    src2dst = torch.empty(topk_ids.numel(), device=device, dtype=torch.int32)
+    compute_src2dst_triton_kernel[grid](reorder_ids, src2dst, topk_ids.numel(), 512)
+
+    # 2. reorder input tokens and per token input scale
+    MAX_THREADS_PER_BLOCK = 1024
+    MIN_THREADS_PER_BLOCK = 512
+    MAX_WAVES = 8
+
+    props = torch.cuda.get_device_properties(device)
+    sm_count = props.multi_processor_count
+    max_threads_per_sm = props.max_threads_per_multi_processor
+    max_num_blocks = sm_count * max_threads_per_sm // MAX_THREADS_PER_BLOCK
+
+    min_block_dim_needed = triton.cdiv(num_tokens * hidden_size, max_num_blocks)
+    block_dim = triton.next_power_of_2(min_block_dim_needed)
+    block_dim = max(MIN_THREADS_PER_BLOCK, min(block_dim, MAX_THREADS_PER_BLOCK))
+
+    grid_dim_x = triton.cdiv(hidden_size, block_dim)
+    grid_dim_y = max(min(num_tokens, max_num_blocks * MAX_WAVES // grid_dim_x), 1)
+
+    grid = (grid_dim_y, grid_dim_x)
+
+    pre_reorder_moe_tokenwise_fp8_triton_kernel[grid](
+        input_ptr=input,
+        permuted_input_ptr=permuted_input,
+        input_scale_ptr=input_scale,
+        permuted_scale_ptr=permuted_scale,
+        src2dst_ptr=src2dst,
+        topk_ids_ptr=topk_ids,
+        num_local_experts=num_local_experts,
+        topk=topk,
+        num_tokens=num_tokens,
+        hidden_size=hidden_size,
+        BLOCK_SIZE=block_dim,
+        NUM_STAGES=3,
+    )
+
+    return src2dst
+
+
+# A generic post reorder implementation where invalid expert_ids are padded with -1
+@triton.jit
+def post_reorder_triton_kernel(
+    down_output_ptr,
+    output_ptr,
+    src2dst_ptr,
+    topk_ids_ptr,
+    topk_weights_ptr,
+    topk,
+    hidden_size,
+    BLOCK_SIZE: tl.constexpr,
+):
+    InDtype = down_output_ptr.dtype.element_ty
+
+    src_idx = tl.program_id(0).to(tl.int64)
+
+    src2dst_ptr = src2dst_ptr + src_idx * topk
+    topk_ids_ptr = topk_ids_ptr + src_idx * topk
+    topk_weights_ptr = topk_weights_ptr + src_idx * topk
+
+    store_ptr = output_ptr + src_idx * hidden_size
+
+    for start_offset in tl.range(0, hidden_size, BLOCK_SIZE):
+        offset = start_offset + tl.arange(0, BLOCK_SIZE)
+        mask = offset < hidden_size
+        sum_vec = tl.zeros([BLOCK_SIZE], dtype=InDtype)
+        for idx in range(topk):
+            expert_id = tl.load(topk_ids_ptr + idx)
+            if expert_id >= 0:
+                dst_idx = tl.load(src2dst_ptr + idx).to(tl.int64)
+                weigh_scale = tl.load(topk_weights_ptr + idx).to(InDtype)
+                load_ptr = down_output_ptr + dst_idx * hidden_size
+                in_data = tl.load(load_ptr + offset, mask=mask)
+                sum_vec += in_data * weigh_scale
+        tl.store(store_ptr + offset, sum_vec, mask=mask)
