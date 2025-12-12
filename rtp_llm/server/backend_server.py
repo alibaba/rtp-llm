@@ -17,7 +17,7 @@ from rtp_llm.access_logger.access_logger import AccessLogger
 from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 from rtp_llm.config.py_config_modules import PyEnvConfigs, StaticConfig
 from rtp_llm.config.task_type import TaskType
-from rtp_llm.distribute.gang_server import GangServer
+from rtp_llm.distribute.distributed_server import DistributedServer, get_world_info
 from rtp_llm.distribute.worker_info import g_parallel_info
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 from rtp_llm.model_factory import ModelFactory
@@ -45,7 +45,7 @@ class BackendServer(object):
         else:
             os.environ["NCCL_P2P_DISABLE"] = "1"
         self._access_logger = AccessLogger()
-        self._gang_server = GangServer(py_env_configs)
+        self._distributed_server = DistributedServer(py_env_configs)
         self.thread_lock_ = threading.Lock()
         self._global_controller = get_global_controller()
         # just rank 0 report metric
@@ -59,8 +59,8 @@ class BackendServer(object):
         self.backend_rpc_server_visitor = None
 
     def start(self, py_env_configs: PyEnvConfigs):
-        self._gang_server.start()
-        self.engine = ModelFactory.create_from_env(self._gang_server._gang_info)
+        self._distributed_server.start(self.py_env_configs)
+        self.engine = ModelFactory.create_from_env(get_world_info())
         logging.info(
             "engine created successfully: self.engine.task_type=%s",
             self.engine.task_type,
@@ -89,11 +89,5 @@ class BackendServer(object):
 
     def wait_all_worker_ready(self):
         # master需要等其他所有机器都ready以后才能起服务，挂vipserver
-        if g_parallel_info.is_master and g_parallel_info.world_size > 1:
-            while True:
-                try:
-                    self._gang_server.wait_infernece_server_ready()
-                    break
-                except Exception as e:
-                    logging.warn("worker not all ready, error_msg: " + str(e))
-                    time.sleep(5)
+        # TODO 用新的rpc方式加回来
+        return True

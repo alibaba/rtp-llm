@@ -280,7 +280,7 @@ class WorkerInfo(object):
         return StaticConfig.server_config.start_port
 
     @staticmethod
-    def server_port_offset(local_rank: int, server_port: int = -1) -> int:
+    def server_port_offset(local_rank: int = 0, server_port: int = -1) -> int:
         if server_port != -1:
             base_port = server_port
         else:
@@ -288,33 +288,37 @@ class WorkerInfo(object):
         return base_port + local_rank * WORKER_INFO_PORT_NUM
 
     @staticmethod
-    def rpc_server_port_offset(local_rank: int, server_port: int = -1) -> int:
+    def rpc_server_port_offset(local_rank: int = 0, server_port: int = -1) -> int:
         return WorkerInfo.server_port_offset(local_rank, server_port) + 1
 
     @staticmethod
-    def cache_store_listen_port_offset(local_rank: int, server_port: int = -1) -> int:
+    def cache_store_listen_port_offset(
+        local_rank: int = 0, server_port: int = -1
+    ) -> int:
         return WorkerInfo.server_port_offset(local_rank, server_port) + 2
 
     @staticmethod
-    def gang_hb_port_offset(local_rank: int, server_port: int = -1) -> int:
+    def gang_hb_port_offset(local_rank: int = 0, server_port: int = -1) -> int:
         return WorkerInfo.server_port_offset(local_rank, server_port) + 3
 
     @staticmethod
     def cache_store_rdma_listen_port_offset(
-        local_rank: int, server_port: int = -1
+        local_rank: int = 0, server_port: int = -1
     ) -> int:
         return WorkerInfo.server_port_offset(local_rank, server_port) + 4
 
     @staticmethod
-    def http_port_offset(local_rank: int, server_port: int = -1) -> int:
+    def http_port_offset(local_rank: int = 0, server_port: int = -1) -> int:
         return WorkerInfo.server_port_offset(local_rank, server_port) + 5
 
     @staticmethod
-    def backend_server_port_offset(local_rank: int, server_port: int = -1) -> int:
+    def backend_server_port_offset(local_rank: int = 0, server_port: int = -1) -> int:
         return WorkerInfo.server_port_offset(local_rank, server_port) + 6
 
     @staticmethod
-    def embedding_rpc_server_port_offset(local_rank: int, server_port: int = -1) -> int:
+    def embedding_rpc_server_port_offset(
+        local_rank: int = 0, server_port: int = -1
+    ) -> int:
         return WorkerInfo.server_port_offset(local_rank, server_port) + 7
 
     # used for ut

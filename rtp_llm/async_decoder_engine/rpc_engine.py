@@ -17,13 +17,13 @@ class LanguageCppEngine(BaseEngine):
         self,
         model: BaseModel,
         propose_model: Optional[ProposeModel] = None,
-        gang_info=None,
+        world_info=None,
     ) -> None:
         super().__init__(model)
         self.propose_model = propose_model
         self.tokenizer = model.tokenizer
 
-        self.gang_info = gang_info
+        self.world_info = world_info
         self.token_processor = TokenProcessor(
             self.tokenizer, self.model.config.special_tokens
         )
@@ -43,12 +43,12 @@ class LanguageCppEngine(BaseEngine):
         # Start HTTP server for language model tasks
         if (
             self.model.task_type == TaskType.LANGUAGE_MODEL
-            and self.gang_info is not None
+            and self.world_info is not None
         ):
             self.rtp_llm_op_.ft_op.start_http_server(
                 self.model.model_weights_loader,
                 self.model.config.lora_infos,
-                self.gang_info,
+                self.world_info,
                 self.tokenizer,
                 None,  # chat_renderer is not needed for HTTP server startup
             )
