@@ -45,6 +45,7 @@ py_library(
         "@//:using_rocm": [
             "//rtp_llm:aiter",
             "//rtp_llm:amdsmi",
+            "//rtp_llm:pytorch-triton-rocm",
         ],
         "//conditions:default": [],
     }),
