@@ -35,8 +35,9 @@ CKAttnPtr PagedAttnDecodeOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
     }
 
     CKAttnPtr attn_params;
+    bool use_fmha_fp8 = false;
     auto      params = device_->PrepareCKAttn(
-        attn_configs_, attn_inputs.kv_block_offset, kv_cache_block_id_device, attn_inputs.sequence_lengths.size(0));
+        attn_configs_, attn_inputs.kv_block_offset, kv_cache_block_id_device, attn_inputs.sequence_lengths.size(0), use_fmha_fp8);
 
     attn_params              = CKAttnPtr(params, (CKAttn*)params.get());
     attn_params->decode_plan = true;

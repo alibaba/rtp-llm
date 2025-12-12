@@ -132,6 +132,14 @@ class AiterPrefillAttnOp:
             is_prefill=True,
         )
         return fmha_params
+    
+    def advanced_qkv_split(self, qkv, head_num, head_num_kv, size_per_head):
+        token_num = qkv.shape[0]
+        qkv_reshaped = qkv.reshape(token_num, head_num + 2 * head_num_kv, size_per_head)
+        q = qkv_reshaped[:, :head_num, :]
+        k = qkv_reshaped[:, head_num : head_num + head_num_kv, :]
+        v = qkv_reshaped[:, head_num + head_num_kv : head_num + 2 * head_num_kv, :]
+        return q, k, v
 
     def reshape_qkv(self, qkv):
         q_contiguous = qkv[0].permute(1, 0, 2).contiguous()
@@ -140,29 +148,51 @@ class AiterPrefillAttnOp:
         return q_contiguous, k_contiguous, v_contiguous
 
     def forward(self, qkv, kv_cache, fmha_params):
-
-        q_tensor, k_tensor, v_tensor = self.reshape_qkv(qkv)
-
-        q_tensor = q_tensor[: fmha_params.token_q_num]
-        k_tensor = k_tensor[: fmha_params.token_kv_num]
-        v_tensor = v_tensor[: fmha_params.token_kv_num]
-
+        has_prefix = (
+            fmha_params.prefix_lengths is not None 
+            and fmha_params.prefix_lengths.numel() > 0 
+            and fmha_params.prefix_lengths.max().item() > 0
+        )
+        if has_prefix:
+            q_tensor, k_tensor, v_tensor = self.reshape_qkv(qkv)
+            q_tensor = q_tensor[: fmha_params.token_q_num]
+            k_tensor = k_tensor[: fmha_params.token_kv_num]
+            v_tensor = v_tensor[: fmha_params.token_kv_num]
+        else:
+            q_tensor, k_tensor, v_tensor = self.advanced_qkv_split(
+                qkv[0],
+                self.head_num,
+                self.head_num_kv,
+                self.head_dim,
+            )
         cu_seqlens_q = fmha_params.cu_seqlens_q.to(q_tensor.device)
         cu_seqlens_k = fmha_params.cu_seqlens_k.to(k_tensor.device)
         max_seqlen_q = fmha_params.max_seqlen_q
         max_seqlen_k = fmha_params.max_seqlen_k
 
-        res = aiter.flash_attn_varlen_func(
-            q_tensor,  # Query张量: (total_q, nheads, headdim_q) - 批次中所有query token的总数
-            k_tensor,  # Key张量: (total_k, nheads_k, headdim_q) - 批次中所有key token的总数
-            v_tensor,  # Value张量: (total_k, nheads_k, headdim_v) - 批次中所有value token的总数
-            cu_seqlens_q,  # Query累积序列长度: (batch_size + 1,) dtype=int32 - 用于索引q张量
-            cu_seqlens_k,  # Key累积序列长度: (batch_size + 1,) dtype=int32 - 用于索引k/v张量
-            max_seqlen_q,  # 批次中最大query序列长度
-            max_seqlen_k,  # 批次中最大key序列长度
-            dropout_p=0.0,  # Dropout概率 - 评估时应设为0.0
-            causal=True,  # 因果注意力掩码 - 用于自回归建模，每个位置只能关注自己和之前的位置
-        )
+        if q_tensor.dtype == torch.float8_e4m3fnuz and k_tensor.dtype == torch.float8_e4m3fnuz and v_tensor.dtype == torch.float8_e4m3fnuz:
+            res = aiter.flash_attn_varlen_fp8_pertensor_func(
+                q_tensor,
+                k_tensor,
+                v_tensor,
+                cu_seqlens_q,
+                cu_seqlens_k,
+                max_seqlen_q,
+                max_seqlen_k,
+                causal=True,
+            )
+        else:
+            res = aiter.flash_attn_varlen_func(
+                q_tensor,  # Query张量: (total_q, nheads, headdim_q) - 批次中所有query token的总数
+                k_tensor,  # Key张量: (total_k, nheads_k, headdim_q) - 批次中所有key token的总数
+                v_tensor,  # Value张量: (total_k, nheads_k, headdim_v) - 批次中所有value token的总数
+                cu_seqlens_q,  # Query累积序列长度: (batch_size + 1,) dtype=int32 - 用于索引q张量
+                cu_seqlens_k,  # Key累积序列长度: (batch_size + 1,) dtype=int32 - 用于索引k/v张量
+                max_seqlen_q,  # 批次中最大query序列长度
+                max_seqlen_k,  # 批次中最大key序列长度
+                dropout_p=0.0,  # Dropout概率 - 评估时应设为0.0
+                causal=True,  # 因果注意力掩码 - 用于自回归建模，每个位置只能关注自己和之前的位置
+            ) 
         token_num = fmha_params.token_q_num
         final_result = res.reshape(token_num, self.head_num * self.head_dim)
         return final_result
@@ -199,19 +229,28 @@ class AiterDecodeAttnOpAsm(AiterDecodeAttnOpBase):
         value_cache = kv_cache.k_cache_base.select(1, 1)
         block_tables_id_device = fmha_params.kv_cache_block_id_device
         max_num_blocks = block_tables_id_device.shape[1]
-        
+        K_QScale = None 
+        V_QScale = None
+        if key_cache.dtype == torch.float8_e4m3fnuz and value_cache.dtype == torch.float8_e4m3fnuz:
+                K_QScale = kv_cache.k_scale_base
+                V_QScale = kv_cache.v_scale_base
+        out_ = torch.empty_like(query)
         output = aiter.pa_fwd_asm(
-            query,  # [num_seqs, num_heads, head_size]
-            key_cache,  # [num_blocks, num_kv_heads, block_size, head_size/x, x]
-            value_cache,  # [num_blocks, num_kv_heads, block_size, head_size/x, x]
-            block_tables_id_device,
-            seq_lens,
-            max_num_blocks,
+                query,  # [num_seqs, num_heads, head_size]
+                key_cache,  # [num_blocks, num_kv_heads, block_size, head_size/x, x]
+                value_cache,  # [num_blocks, num_kv_heads, block_size, head_size/x, x]
+                block_tables_id_device,
+                seq_lens,
+                max_num_blocks,
+                1,
+                K_QScale,
+                V_QScale,
+                out_,
+                None,
+                0,
         )
         output_reshaped = output.view(output.shape[0], -1)
         return output_reshaped
-
-
 class AiterDecodeAttnOpNonAsm(AiterDecodeAttnOpBase):
     """Aiter decode attention operation using non-ASM paged attention."""
     def forward(

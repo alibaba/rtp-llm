@@ -28,7 +28,6 @@ CKAttnPtr FusedRopeKVCachePrefillOpBase::prepare(torch_ext::PyAttentionInputs at
         kv_cache_block_id_host   = torchTensor2Buffer(attn_inputs.kv_cache_block_id_host);
         kv_cache_block_id_device = torchTensor2Buffer(attn_inputs.kv_cache_block_id_device);
     }
-
     // 计算累积序列长度
     torch::Tensor cu_seqlens = torch::zeros({batch_size + 1}, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
     cu_seqlens.slice(0, 1, batch_size + 1) = attn_inputs.input_lengths.cumsum(0);
@@ -40,28 +39,27 @@ CKAttnPtr FusedRopeKVCachePrefillOpBase::prepare(torch_ext::PyAttentionInputs at
     if (has_prefix) {
         kv_lengths = kv_lengths + attn_inputs.prefix_lengths;
     }
-
     torch::Tensor cu_kv_seqlens =
         torch::zeros({batch_size + 1}, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
     cu_kv_seqlens.slice(0, 1, batch_size + 1) = kv_lengths.cumsum(0);
     cu_kv_seqlens                             = cu_kv_seqlens.cuda();
 
+    bool use_fmha_fp8 = false;
+    use_fmha_fp8 = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
     CKAttnPtr attn_params;
     auto      params = device_->PrepareCKAttn(
-        attn_configs_, attn_inputs.kv_block_offset, kv_cache_block_id_device, attn_inputs.input_lengths.size(0));
+        attn_configs_, attn_inputs.kv_block_offset, kv_cache_block_id_device, attn_inputs.input_lengths.size(0), use_fmha_fp8);
     if (params) {
         attn_params = CKAttnPtr(params, (CKAttn*)params.get());
     } else {
         attn_params = std::make_shared<CKAttn>();
     }
-
     attn_params->attn_type      = torchDTypeToDataType(attn_inputs.dtype);
     attn_params->cu_seqlens     = cu_seqlens;
     attn_params->cu_kv_seqlens  = cu_kv_seqlens;
     attn_params->attn_type      = torchDTypeToDataType(attn_inputs.dtype);
     attn_params->max_seq_len    = attn_inputs.input_lengths.max().item<int32_t>();
     attn_params->padding_offset = attn_inputs.padding_offset;
-
     // 处理 prefix_lengths：确保在 CUDA 上且连续
     if (has_prefix) {
         torch::Tensor prefix_lengths = attn_inputs.prefix_lengths;
@@ -72,7 +70,7 @@ CKAttnPtr FusedRopeKVCachePrefillOpBase::prepare(torch_ext::PyAttentionInputs at
     } else {
         attn_params->prefix_lengths = attn_inputs.prefix_lengths;
     }
-
+    attn_params->kv_block_array.cache_type = attn_configs_.kv_cache_dtype;
     return attn_params;
 }
 
@@ -100,6 +98,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
                                           torch::TensorOptions(qkv.dtype()).device(qkv.device()));
 
     PrefixPromptBatchWeightsParam prefix_prompt_param{};
+    bool use_fmha_fp8 = false;
     if (kv_cache.has_value()) {
         // 验证KV cache指针有效性
         if (!kv_cache.value().k_cache_base.defined() || kv_cache.value().k_cache_base.numel() == 0) {
@@ -120,6 +119,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
             }
         }
         prefix_prompt_param.kv_block_array = kv_block_array;
+        use_fmha_fp8 = kv_block_array.cache_type == KvCacheDataType::FP8;
     }
 
     // 设置 prefix_lengths 参数
@@ -134,7 +134,6 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
         prefix_prompt_param.count_length             = 1;
     }
     if (prefix_prompt_param.max_prefix_prompt_length > 0) {
-        // int8
         float* scale_out_ptr = nullptr;
         int    int8_mode     = 0;
         // Always use aiter_pa for ROCm
@@ -171,7 +170,12 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
                                              stream_);
         }
     }
-    bool store_qkv   = false;  // 存储回原始 QKV
+    if (qkv.dtype().toScalarType() == torch::kFloat16) {
+        // TODO: FP8 FMHA currently does not support FP16 output.
+        //       Please run with BF16 activation instead (set environment variable ACT_TYPE=bf16)
+        use_fmha_fp8 = false;
+    }
+    bool store_qkv   = true;  // 存储回原始 QKV
     bool store_q     = true;   // 存储到独立 Q 缓冲区
     bool store_kv    = true;   // 存储到独立 K、V 缓冲区
     bool store_cache = kv_cache.has_value();
@@ -183,7 +187,6 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
     hipStream_t stream_ = GET_CURRENT_STREAM();
     // 添加 FP8 缓冲区支持
     torch::Tensor qkv_buf_fp8;
-    bool          use_fmha_fp8 = false;
     if (use_fmha_fp8) {
         qkv_buf_fp8 = torch::empty(qkv.sizes(), torch::TensorOptions(torch::kFloat8_e4m3fn).device(qkv.device()));
     }
@@ -251,6 +254,12 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
                                          stream_  // 必须作为最后一个参数
         );
     }
+    if (use_fmha_fp8) {
+        return std::make_tuple(qkv_buf_fp8, torch::Tensor(), torch::Tensor());
+    }
+    if (prefix_prompt_param.max_prefix_prompt_length <= 0) {
+        return std::make_tuple(qkv, torch::Tensor(), torch::Tensor());
+    }
     // local_head_num, seq_len * batch_size, size_per_head
     torch::Tensor q_contiguous = torch::zeros({local_head_num, seq_len * batch_size, size_per_head},
                                               torch::TensorOptions(qkv.dtype()).device(qkv.device()));
@@ -313,9 +322,11 @@ CKAttnPtr FusedRopeKVCacheDecodeOpBase::prepare(torch_ext::PyAttentionInputs att
     cu_kv_seqlens                             = cu_kv_seqlens.cuda();
 
     CKAttnPtr attn_params;
+    bool use_fmha_fp8 = false;
+    use_fmha_fp8 = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
 
     auto params = device_->PrepareCKAttn(
-        attn_configs_, attn_inputs.kv_block_offset, kv_cache_block_id_device, attn_inputs.sequence_lengths.size(0));
+        attn_configs_, attn_inputs.kv_block_offset, kv_cache_block_id_device, attn_inputs.sequence_lengths.size(0), use_fmha_fp8);
     if (!params) {
         throw std::runtime_error("FusedRopeKVCacheDecodeOp::prepare: PrepareCKAttn failed. "
                                  "kv_block_offset="
