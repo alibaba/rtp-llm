@@ -15,6 +15,7 @@ cc_library(
     deps = torch_deps() + [
         "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
         "//rtp_llm/cpp/core:types_hdr",
+        "//rtp_llm/cpp/kernels:atex",
         "//rtp_llm/cpp/kernels:scaled_fp8_quant",
         "//rtp_llm/cpp/kernels:kernels_ep_util",
         "//rtp_llm/models_py/bindings:op_defs",
