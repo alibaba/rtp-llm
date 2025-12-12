@@ -52,11 +52,7 @@ class QWen3VLMoeWeightInfo(QWenV3MoeWeight, BaseMultiModalWeightInfo):
     def _get_hf_ffn_layer_weight_info(self, layer_id: int):
         moe_config = MoeConfig(
             expert_num=self.expert_num_,
-            inter_padding_size=(
-                self._layer_inter_padding_size[layer_id]
-                if self._layer_inter_padding_size
-                else self._inter_padding_size
-            ),
+            align_size=self._align_size,
             routed_scaling_factor=1.0,
             weight_stack=True,
         )
@@ -106,7 +102,7 @@ class QWen3VLMoeWeightInfo(QWenV3MoeWeight, BaseMultiModalWeightInfo):
 
 class QWen3_VL_MOE(Qwen3Moe, MultiModalMixin):
     def _init_multimodal(self):
-        self.mm_part = Qwen3_VLImageEmbedding(self.model_config.mm_related_params)
+        self.mm_part = Qwen3_VLImageEmbedding(self.model_config)
         self.model_config.mm_related_params.vit_weights = Qwen3VLVitWeight(
             {"vit": self.mm_part.visual}
         )
