@@ -44,7 +44,7 @@ FIFOScheduler::~FIFOScheduler() {
 
 bool FIFOScheduler::empty() {
     lock_guard<mutex> lock(lock_);
-    return waiting_streams_.empty() && running_streams_.empty();
+    return waiting_streams_.empty() && running_streams_.empty() && loading_cache_streams_.empty();
 }
 
 absl::Status FIFOScheduler::stop() {
@@ -264,7 +264,13 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
     list<GenerateStreamPtr> new_streams;
     for (auto it = waiting_streams_.begin(); it != waiting_streams_.end();) {
         auto& stream = *it;
-        if (evaluateNewStream(new_streams, *it, reserve_step)) {
+        if (evaluateNewStream(new_streams, stream, reserve_step)) {
+            if (stream->asyncLoadCache()) {
+                loading_cache_streams_.emplace_back(stream);
+                it = waiting_streams_.erase(it);
+                continue;
+            }
+
             RTP_LLM_LOG_DEBUG("stream [%ld] add to new queue", stream->streamId());
             // if setRunning fails, it must be in stopped state, evict it in next iteration
             if (stream->setRunning()) {
@@ -273,9 +279,11 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
             } else {
                 RTP_LLM_LOG_WARNING("stream [%ld] set running failed", stream->streamId());
                 stream->releaseResource();
-                it++;
+                it = std::next(it);
             }
-        } else if (running_streams_.empty() && new_streams.empty() && remote_running_streams_.empty()) {
+            continue;
+        } else if (running_streams_.empty() && new_streams.empty() && remote_running_streams_.empty()
+                   && loading_cache_streams_.empty()) {
             // TODO(xinfei.sxf) At this time, we can also release the blocks held by other waiting streams
             RTP_LLM_LOG_WARNING("stream [%ld] can not add to new queue", stream->streamId());
             if (stream->inputLength() > cache_manager_->maxAvailableTokensNum()) {
@@ -314,7 +322,8 @@ void FIFOScheduler::accountBatchMetrics(const list<GenerateStreamPtr>& new_strea
 }
 
 bool FIFOScheduler::waitPredicate() {
-    return stop_ || !waiting_streams_.empty() || !running_streams_.empty() || !remote_running_streams_.empty();
+    return stop_ || !waiting_streams_.empty() || !loading_cache_streams_.empty() || !running_streams_.empty()
+           || !remote_running_streams_.empty();
 }
 
 absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule(size_t reserve_step) {
@@ -328,15 +337,65 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule(size_t reserve_s
     evictDoneStreams(waiting_streams_);
     evictDoneStreams(running_streams_);
     evictDoneStreams(remote_running_streams_);
+    evictLoadingCacheDoneStreams();
 
     // TODO(xinfei.sxf) Those who just kicked out of running may join running again immediately.
     auto [fallback_streams, error_streams] = evaluateRunningNext(reserve_step);
-    auto new_streams                       = scheduleNew(reserve_step);
-    accountBatchMetrics(new_streams, running_streams_);
-    running_streams_.insert(running_streams_.end(), new_streams.begin(), new_streams.end());
     reportMetrics(fallback_streams);
+
+    auto load_done_streams = evaluateLoadingCacheStreams();
+    running_streams_.insert(running_streams_.end(), load_done_streams.begin(), load_done_streams.end());
+
+    auto new_streams = scheduleNew(reserve_step);
+    running_streams_.insert(running_streams_.end(), new_streams.begin(), new_streams.end());
+
+    load_done_streams.insert(load_done_streams.end(), new_streams.begin(), new_streams.end());
+    accountBatchMetrics(load_done_streams, running_streams_);
+
     last_schedule_time_ = autil::TimeUtility::currentTimeInMilliSeconds();
     return running_streams_;
+}
+
+void FIFOScheduler::evictLoadingCacheDoneStreams() {
+    for (auto it = loading_cache_streams_.begin(); it != loading_cache_streams_.end();) {
+        auto& stream = *it;
+        // must wait load cache done, cause it occupy blocks
+        if (!stream->loadCacheDone()) {
+            it = std::next(it);
+            continue;
+        }
+        stream->checkTimeout();
+        if (stream->stopped() || stream->finished()) {
+            stream->releaseResource();
+            RTP_LLM_LOG_DEBUG("evict stream [%ld]", stream->streamId());
+            it = loading_cache_streams_.erase(it);
+        } else {
+            it = std::next(it);
+        }
+    }
+}
+
+std::list<GenerateStreamPtr> FIFOScheduler::evaluateLoadingCacheStreams() {
+    list<GenerateStreamPtr> done_streams;
+    for (auto it = loading_cache_streams_.begin(); it != loading_cache_streams_.end();) {
+        auto& stream = *it;
+        if (!stream->loadCacheDone()) {
+            it = std::next(it);
+            continue;
+        }
+
+        if (stream->setRunning()) {
+            RTP_LLM_LOG_DEBUG("stream [%ld] cache load finished, move to running", stream->streamId());
+            done_streams.emplace_back(stream);
+            it = loading_cache_streams_.erase(it);
+        } else {
+            RTP_LLM_LOG_WARNING("stream [%ld] set running failed after cache load", stream->streamId());
+            // evict it in next iteration
+            stream->releaseResource();
+            it = std::next(it);
+        }
+    }
+    return done_streams;
 }
 
 int64_t FIFOScheduler::waitingStreamsSize() {
@@ -351,7 +410,7 @@ int64_t FIFOScheduler::runningStreamsSize() {
 
 int64_t FIFOScheduler::onflightStreams() {
     std::lock_guard<mutex> lock(lock_);
-    return waiting_streams_.size() + running_streams_.size();
+    return waiting_streams_.size() + running_streams_.size() + loading_cache_streams_.size();
 }
 
 std::vector<EngineScheduleInfo::TaskInfo> FIFOScheduler::waitingTaskList() {

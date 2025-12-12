@@ -94,6 +94,9 @@ public:
     bool enable3FS() const;
     bool enableMemoryBlockCache() const;
 
+    bool asyncLoadCache();
+    bool loadCacheDone();
+
     std::string debugString() const {
         std::stringstream debug_string;
         debug_string << "StreamCacheResource {"
@@ -115,6 +118,9 @@ private:
     bool last_block_aligned_    = false;
     int  malloc_failed_times_   = 0;
     bool fake_inited_           = false;
+
+    // for load cache from connector to gpu
+    std::shared_ptr<AsyncContext> load_cache_context_;
 };
 
 }  // namespace rtp_llm
