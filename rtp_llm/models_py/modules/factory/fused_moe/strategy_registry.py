@@ -83,7 +83,10 @@ class StrategyRegistry:
             )
 
         # Sort candidates by priority (descending, higher priority first)
-        candidates.sort(key=lambda s: s.priority, reverse=True)
+        candidates.sort(
+            key=lambda s: s.priority(config.hw_kernel_config.enable_cuda_graph),
+            reverse=True,
+        )
 
         # Log all candidate strategies
         logger.info(f"Found {len(candidates)} candidate strategy(ies) for MOE:")
