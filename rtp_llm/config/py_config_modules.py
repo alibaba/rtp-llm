@@ -591,6 +591,7 @@ class EngineConfig:
         self.warm_up: int = 1
         self.warm_up_with_loss: int = 0
         self.max_seq_len: int = 0
+        self.engine_async_worker_count: int = 0
 
     def update_from_env(self):
         self.warm_up = int(os.environ.get("WARM_UP", self.warm_up))
@@ -598,12 +599,16 @@ class EngineConfig:
             os.environ.get("WARM_UP_WITH_LOSS", self.warm_up_with_loss)
         )
         self.max_seq_len = int(os.environ.get("MAX_SEQ_LEN", self.max_seq_len))
+        self.engine_async_worker_count = int(
+            os.environ.get("ENGINE_ASYNC_WORKER_COUNT", self.engine_async_worker_count)
+        )
 
     def to_string(self):
         return (
             f"warm_up: {self.warm_up}\n"
             f"warm_up_with_loss: {self.warm_up_with_loss}\n"
-            f"max_seq_len: {self.max_seq_len}"
+            f"max_seq_len: {self.max_seq_len}\n"
+            f"engine_async_worker_count: {self.engine_async_worker_count}"
         )
 
 

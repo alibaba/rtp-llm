@@ -162,7 +162,7 @@ std::string ProfilingDebugLoggingConfig::to_string() const {
         << "ft_alog_conf_path: " << ft_alog_conf_path << "\n"
         << "log_level: " << log_level << "\n"
         << "gen_timeline_sync: " << gen_timeline_sync << "\n"
-        << "torch_cuda_profiler_dir" << torch_cuda_profiler_dir << "\n"
+        << "torch_cuda_profiler_dir: " << torch_cuda_profiler_dir << "\n"
         << "log_path: " << log_path << "\n"
         << "log_file_backup_count: " << log_file_backup_count << "\n"
         << "nccl_debug_file: " << nccl_debug_file << "\n"
@@ -170,9 +170,9 @@ std::string ProfilingDebugLoggingConfig::to_string() const {
         << "hack_layer_num: " << hack_layer_num << "\n"
         << "debug_start_fake_process: " << debug_start_fake_process << "\n"
         << "dg_print_reg_reuse: " << dg_print_reg_reuse << "\n"
-        << "qwen_agent_debug" << qwen_agent_debug << "\n"
-        << "disable_dpc_random" << disable_dpc_random << "\n"
-        << "check_nan" << check_nan << "\n";
+        << "qwen_agent_debug: " << qwen_agent_debug << "\n"
+        << "disable_dpc_random: " << disable_dpc_random << "\n"
+        << "check_nan: " << check_nan << "\n";
     return oss.str();
 }
 
@@ -203,11 +203,11 @@ std::string HWKernelConfig::to_string() const {
         << "rocm_hipblaslt_config: " << rocm_hipblaslt_config << "\n"
         << "use_swizzleA: " << use_swizzleA << "\n"
         << "enable_cuda_graph: " << enable_cuda_graph << "\n"
-        << "enable_cuda_graph_debug_mode" << enable_cuda_graph_debug_mode << "\n"
+        << "enable_cuda_graph_debug_mode: " << enable_cuda_graph_debug_mode << "\n"
         << "use_aiter_pa: " << use_aiter_pa << "\n"
         << "use_asm_pa: " << use_asm_pa << "\n"
-        << "enable_native_cuda_graph" << enable_native_cuda_graph << "\n"
-        << "num_native_cuda_graph" << num_native_cuda_graph << "\n"
+        << "enable_native_cuda_graph: " << enable_native_cuda_graph << "\n"
+        << "num_native_cuda_graph: " << num_native_cuda_graph << "\n"
         << "prefill_capture_seq_lens size: " << prefill_capture_seq_lens.size() << "\n"
         << "decode_capture_batch_sizes size: " << decode_capture_batch_sizes.size() << "\n";
     return oss.str();
@@ -290,7 +290,7 @@ void ModelSpecificConfig::update_from_env_for_test() {
 std::string ModelSpecificConfig::to_string() const {
     std::ostringstream oss;
     oss << "max_lora_model_size: " << max_lora_model_size << "\n";
-    oss << "load_python_model:" << load_python_model << "\n";
+    oss << "load_python_model: " << load_python_model << "\n";
     return oss.str();
 }
 
@@ -411,13 +411,15 @@ std::string FIFOSchedulerConfig::to_string() const {
 
 // MiscellaneousConfig
 void MiscellaneousConfig::update_from_env_for_test() {
-    disable_pdl = bool_from_env_for_test("DISABLE_PDL", true);
-    aux_string  = autil::EnvUtil::getEnv("AUX_STRING", "");
+    disable_pdl        = bool_from_env_for_test("DISABLE_PDL", true);
+    disable_access_log = bool_from_env_for_test("DISABLE_ACCESS_LOG", false);
+    aux_string         = autil::EnvUtil::getEnv("AUX_STRING", "");
 }
 
 std::string MiscellaneousConfig::to_string() const {
     std::ostringstream oss;
-    oss << "disable_pdl" << disable_pdl << "\n"
+    oss << "disable_pdl: " << disable_pdl << "\n"
+        << "disable_access_log: " << disable_access_log << "\n"
         << "aux_string: " << aux_string << "\n";
     return oss.str();
 }

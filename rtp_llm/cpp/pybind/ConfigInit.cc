@@ -473,10 +473,14 @@ void register_fifo_scheduler_config(pybind11::module& m) {
 // MiscellaneousConfig
 void register_misc_config(pybind11::module& m) {
     pybind11::class_<MiscellaneousConfig>(m, "MiscellaneousConfig")
-        .def(pybind11::init<bool, std::string>(), pybind11::arg("disable_pdl") = true, pybind11::arg("aux_string") = "")
+        .def(pybind11::init<bool, bool, std::string>(),
+             pybind11::arg("disable_pdl")        = true,
+             pybind11::arg("disable_access_log") = false,
+             pybind11::arg("aux_string")         = "")
         .def("to_string", &MiscellaneousConfig::to_string)
         .def("update_from_env", &MiscellaneousConfig::update_from_env_for_test)
         .def_readwrite("disable_pdl", &MiscellaneousConfig::disable_pdl)
+        .def_readwrite("disable_access_log", &MiscellaneousConfig::disable_access_log)
         .def_readwrite("aux_string", &MiscellaneousConfig::aux_string);
 }
 
@@ -671,6 +675,7 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(enable_fast_gen, enable_fast_gen_)                                                                    \
     DEF_PROPERTY(warm_up, warm_up_)                                                                                    \
     DEF_PROPERTY(warm_up_with_loss, warm_up_with_loss_)                                                                \
+    DEF_PROPERTY(engine_async_worker_count, engine_async_worker_count_)                                                \
     DEF_PROPERTY(fast_gen_max_context_len, fast_gen_max_context_len_)                                                  \
     DEF_PROPERTY(is_causal, is_causal_)                                                                                \
     DEF_PROPERTY(nccl_ip, nccl_ip_)                                                                                    \
