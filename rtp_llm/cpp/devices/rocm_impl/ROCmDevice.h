@@ -275,7 +275,8 @@ public:
     ParamsPtr PrepareCKAttn(const AttentionConfigs& configs,
                             int                     kv_block_offset,
                             const BufferPtr&        kv_cache_block_id,
-                            int                     batch_size);
+                            int                     batch_size,
+                            bool                    use_fp8_fmha_);
 
 private:
     hipDeviceProp_t                              rocmDevProp;
