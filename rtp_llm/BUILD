@@ -23,7 +23,12 @@ tensorrt = [
 ]
 
 flashinfer = [
+    "apache-tvm-ffi",
     "flashinfer-python",
+]
+
+deep_gemm = [
+    "deep_gemm",
 ]
 
 xft_dep = select({
@@ -104,7 +109,8 @@ requirement([
     "concurrent_log_handler",
     "aiter",
     "fastsafetensors",
-] + tensorrt + flashinfer)
+    "deep_ep",
+] + tensorrt + flashinfer + deep_gemm)
 
 filegroup(
     name = "cutlass_config",
@@ -216,8 +222,8 @@ py_library(
         "//rtp_llm/model_loader:loader",
         "//rtp_llm/models_py:models",
     ] + arch_dep + select({
-        "@//:using_cuda12_9_x86": tensorrt + flashinfer,
-        "@//:cuda_pre_12_9": tensorrt + flashinfer,
+        "@//:using_cuda12_9_x86": tensorrt + flashinfer + deep_gemm,
+        "@//:cuda_pre_12_9": tensorrt + flashinfer + deep_gemm,
         "//conditions:default": []
     }) + select({
         "@//:using_arm": [],
@@ -465,7 +471,6 @@ py_library(
             "//rtp_llm/tools/convert:convert",
         ],
             }) + select({
-                "@//:using_cuda12": ["@deep_gemm_ext//:deep_gemm"],
                 "//conditions:default": [],
             }),
     data = [
@@ -561,7 +566,7 @@ whl_reqs = [
     "bitsandbytes",
     "portalocker",
     "concurrent_log_handler",
-    "flashinfer-python==0.2.5",
+    "apache-tvm-ffi==0.1.1",
 ] + whl_deps() + platform_deps() + xft_dep
 
 py_wheel(

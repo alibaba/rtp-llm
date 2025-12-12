@@ -55,7 +55,7 @@ cc_library(
         "//rtp_llm/cpp/cuda:cuda_utils_cu",
         "//rtp_llm/cpp/cuda:launch_utils",
     ],
-    copts = any_cuda_copts(), 
+    copts = any_cuda_copts(),
     include_prefix = "src",
     visibility = ["//visibility:public"],
 )
@@ -102,9 +102,11 @@ cc_library(
     name = "cuda_quantization",
     srcs = [
         "per_token_group_quant_8bit.cu",
+        "per_token_group_quant_8bit_v2.cu",
     ],
     hdrs = [
         "per_token_group_quant_8bit.h",
+        "per_token_group_quant_8bit_v2.h",
     ],
     deps = [
         "//rtp_llm/cpp/cuda:cuda_host_utils",

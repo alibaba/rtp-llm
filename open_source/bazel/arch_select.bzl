@@ -142,13 +142,6 @@ def deep_ep_py_deps():
         actual = "//rtp_llm:empty_target",
     )
 
-def deep_gemm_deps():
-    native.alias(
-        name = "deep_gemm",
-        actual = "@deep_gemm_ext//:deep_gemm",
-        visibility = ["//visibility:public"],
-    )
-
 def kernel_so_deps():
     return select({
         "@//:using_cuda": [":libmmha1_so", ":libmmha2_so", ":libdmmha_so", ":libfa_so", ":libfpA_intB_so", ":libint8_gemm_so", ":libmoe_so", ":libmoe_sm90_so", ":libflashinfer_single_prefill_so", ":libflashinfer_single_decode_so", ":libflashinfer_batch_paged_prefill_so", ":libflashinfer_batch_paged_decode_so", ":libflashinfer_batch_ragged_prefill_so", ":libflashinfer_sm90_so", ":libdeepgemm_dpsk_inst_so", ":libdeepgemm_qwen_inst_so"],
