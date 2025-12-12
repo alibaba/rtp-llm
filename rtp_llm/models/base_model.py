@@ -29,9 +29,9 @@ from rtp_llm.utils.base_model_datatypes import (
     GenerateOutputs,
     GenerateResponse,
     ModelConfig,
+    MultimodalInput,
 )
 from rtp_llm.utils.database import CkptDatabase
-from rtp_llm.utils.multimodal_util import MultimodalInput
 from rtp_llm.utils.time_util import timer_wrapper
 from rtp_llm.utils.util import to_torch_dtype
 
@@ -190,8 +190,9 @@ class BaseModel(object):
             self.config.special_tokens.eos_token_id = self.tokenizer.eos_token_id
             self.config.update_task_prompt_tokens_id(self.tokenizer)
 
-    def is_multimodal(self) -> bool:
-        return isinstance(self, MultiModalMixin)
+    @classmethod
+    def is_multimodal(cls) -> bool:
+        return issubclass(cls, MultiModalMixin)
 
     def _init_database(self):
         self.database = CkptDatabase(self.config.ckpt_path, self.config.ptuning_path)
@@ -294,10 +295,16 @@ class BaseModel(object):
             self.is_attn_model,
         )
 
-    @staticmethod
-    def eval_model_size(config: GptInitModelParameters):
-        return config.eval_model_size()
+    @classmethod
+    def eval_model_size(cls, config: GptInitModelParameters):
+        if cls.is_multimodal():
+            return config.eval_model_size() + cls.eval_mm_model_size(config)
+        else:
+            return config.eval_model_size()
 
-    @staticmethod
-    def eval_model_param_count(config: GptInitModelParameters):
-        return config.model_param_count
+    @classmethod
+    def eval_model_param_count(cls, config: GptInitModelParameters):
+        if cls.is_multimodal():
+            return config.model_param_count + cls.eval_mm_model_param_count(config)
+        else:
+            return config.model_param_count

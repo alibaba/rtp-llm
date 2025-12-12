@@ -20,9 +20,9 @@ from rtp_llm.model_loader.model_weight_info import (
 from rtp_llm.model_loader.weight_module import MMAtomicWeight
 from rtp_llm.models.multimodal.multimodal_common import MultiModalEmbeddingInterface
 from rtp_llm.models.multimodal.multimodal_trt_engine import MultiModalTRTEngine
+from rtp_llm.models.multimodal.multimodal_util import get_vit_compute_dtype
 from rtp_llm.ops.comm.nccl_op import NcclOp
 from rtp_llm.utils.model_weight import CkptWeightInfo, identity, sp_id
-from rtp_llm.utils.multimodal_util import MultimodalInput, get_vit_compute_dtype
 
 
 class BaseVitWeights:
@@ -115,6 +115,10 @@ class MultiModalMixin:
     def _init_multimodal(self, config: GptInitModelParameters) -> None:
         raise NotImplementedError
 
+    @classmethod
+    def _get_mm_module(cls, config: GptInitModelParameters):
+        raise NotImplementedError
+
     def _load_mm_weight(self, vit_params: VitParameters, ctype: str, device: str):
         # Load weight only for self.mm_part
 
@@ -136,69 +140,79 @@ class MultiModalMixin:
             param = eval(w_name)
             _safe_load_from_module(param, w, ctype)
 
-    def init_mm_trt(
-        self,
-        ckpt_path: str,
-        vit_params: VitParameters,
-        tp_size: str,
-        tp_rank: int,
-        device: Union[str, torch.device],
-        dtype: torch.dtype,
-    ):
-        # check whether VIT tensorrt exist
-        try:
-            pass
-        except ImportError:
-            raise RuntimeError("tensorrt library not fonnd")
+    @classmethod
+    def eval_mm_model_size(cls, config: GptInitModelParameters):
+        mm_part = cls._get_mm_module(config)
+        return sum([t.numel() for t in mm_part.parameters()]) * 2
 
-        nccl_op_: Optional[NcclOp] = None
-        if tp_size > 1:
-            nccl_op_ = NcclOp()
+    @classmethod
+    def eval_mm_model_param_count(cls, config: GptInitModelParameters):
+        mm_part = cls._get_mm_module(config)
+        return sum([t.numel() for t in mm_part.parameters()])
 
-        try:
-            # TODO(xyz): currently model_name_path is ugly, we should let model_name_path passed by the frontend in
-            # environment variable
-            model_name_path = ckpt_path.replace("/", "_")
+    # def init_mm_trt(
+    #     self,
+    #     ckpt_path: str,
+    #     vit_params: VitParameters,
+    #     tp_size: str,
+    #     tp_rank: int,
+    #     device: Union[str, torch.device],
+    #     dtype: torch.dtype,
+    # ):
+    #     # check whether VIT tensorrt exist
+    #     try:
+    #         pass
+    #     except ImportError:
+    #         raise RuntimeError("tensorrt library not fonnd")
 
-            visual_trt_engine = MultiModalTRTEngine(
-                model_name_path, vit_params.config.get("image_size"), device, dtype
-            )
+    #     nccl_op_: Optional[NcclOp] = None
+    #     if tp_size > 1:
+    #         nccl_op_ = NcclOp()
 
-            # TRT engine doesn't support TP, here we only generate trt engine on rank0 if trt engine is not cached
-            if tp_rank == 0 and (
-                (not MultiModalTRTEngine.trt_engine_cached(model_name_path, dtype))
-                or self.vit_config.trt_cache_enabled == 0
-            ):
-                self._load_mm_weight(vit_params, dtype, device)
+    #     try:
+    #         # TODO(xyz): currently model_name_path is ugly, we should let model_name_path passed by the frontend in
+    #         # environment variable
+    #         model_name_path = ckpt_path.replace("/", "_")
 
-                # create cached dir if not exists
-                output_dir = MultiModalTRTEngine.cache_path(model_name_path, dtype)
-                if not os.path.exists(output_dir):
-                    os.makedirs(output_dir)
+    #         visual_trt_engine = MultiModalTRTEngine(
+    #             model_name_path, vit_params.config.get("image_size"), device, dtype
+    #         )
 
-                visual_trt_engine.export_onnx(self.mm_part.vit, tp_size)
+    #         # TRT engine doesn't support TP, here we only generate trt engine on rank0 if trt engine is not cached
+    #         if tp_rank == 0 and (
+    #             (not MultiModalTRTEngine.trt_engine_cached(model_name_path, dtype))
+    #             or self.vit_config.trt_cache_enabled == 0
+    #         ):
+    #             self._load_mm_weight(vit_params, dtype, device)
 
-                # eagerly gc VIT network, release GPU memory for generating trt engine
-                self.gc_mm_part(vit_params)
+    #             # create cached dir if not exists
+    #             output_dir = MultiModalTRTEngine.cache_path(model_name_path, dtype)
+    #             if not os.path.exists(output_dir):
+    #                 os.makedirs(output_dir)
 
-                visual_trt_engine.generate_trt_engine()
+    #             visual_trt_engine.export_onnx(self.mm_part.vit, tp_size)
 
-                # create a completion file to mark that the trt engine has been generated and cached
-                MultiModalTRTEngine.completion_file_path(model_name_path, dtype).touch()
+    #             # eagerly gc VIT network, release GPU memory for generating trt engine
+    #             self.gc_mm_part(vit_params)
 
-            # for TP > 1, only rank0 will generate trt engine, other ranks will wait rank0 to generate trt engine
-            if tp_size > 1:
-                nccl_op_.barrier(torch.device(device))
+    #             visual_trt_engine.generate_trt_engine()
 
-            self.gc_mm_part(vit_params)
-            # Currently, the multimodel network isn't split between devices. Only Rank 0 loads the weights.
-            # After supporting TP mm network, we will remove the check here.
-            if tp_rank == 0:
-                visual_trt_engine.load_trt_engine()
-                self.mm_part = visual_trt_engine
+    #             # create a completion file to mark that the trt engine has been generated and cached
+    #             MultiModalTRTEngine.completion_file_path(model_name_path, dtype).touch()
 
-        except Exception as e:
-            raise RuntimeError(f"init multimodal trt error: {e}")
+    #         # for TP > 1, only rank0 will generate trt engine, other ranks will wait rank0 to generate trt engine
+    #         if tp_size > 1:
+    #             nccl_op_.barrier(torch.device(device))
+
+    #         self.gc_mm_part(vit_params)
+    #         # Currently, the multimodel network isn't split between devices. Only Rank 0 loads the weights.
+    #         # After supporting TP mm network, we will remove the check here.
+    #         if tp_rank == 0:
+    #             visual_trt_engine.load_trt_engine()
+    #             self.mm_part = visual_trt_engine
+
+    #     except Exception as e:
+    #         raise RuntimeError(f"init multimodal trt error: {e}")
 
     def gc_mm_part(self, vit_params: VitParameters):
         del self.mm_part
@@ -210,13 +224,14 @@ class MultiModalMixin:
     def load_mm_weight(self, ctype: str, tp_size: int, tp_rank: int, device: str):
 
         if StaticConfig.vit_config.vit_trt == 1:
-            self.init_mm_trt(
-                self.config.ckpt_path,
-                self.config.mm_related_params,
-                tp_size,
-                tp_rank,
-                device,
-            )
+            # self.init_mm_trt(
+            #     self.config.ckpt_path,
+            #     self.config.mm_related_params,
+            #     tp_size,
+            #     tp_rank,
+            #     device,
+            # )
+            raise Exception("trt engine is not supported")
             return
 
         # wait rank0 finish loading weight, otherwise gang_server will die
@@ -233,3 +248,6 @@ class MultiModalMixin:
             return
 
         self._load_mm_weight(self.config.mm_related_params, ctype, device)
+
+    def mm_gather_batch(self):
+        raise NotImplementedError("MultiModalMixin.mm_gather_batch is not implemented")

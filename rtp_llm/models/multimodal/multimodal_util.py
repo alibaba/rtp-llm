@@ -12,6 +12,16 @@ import requests
 import torch
 
 from rtp_llm.config.py_config_modules import StaticConfig
+from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
+    MMPreprocessConfigPB,
+    MultimodalInputsPB,
+)
+from rtp_llm.utils.base_model_datatypes import (
+    MMPreprocessConfig,
+    MMUrlType,
+    MultimodalInput,
+)
+from rtp_llm.utils.grpc_util import trans_tensor
 from rtp_llm.utils.lru_dict import LruDict
 from rtp_llm.utils.oss_util import get_bytes_io_from_oss_path
 
@@ -42,7 +52,6 @@ else:
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
     }
 
-BASE64_PREFIX = "data:image/jpeg;base64,"
 URL_CACHE_SIZE = StaticConfig.vit_config.url_cache_item_num
 MM_CACHE_SIZE = StaticConfig.vit_config.mm_cache_item_num
 
@@ -54,45 +63,6 @@ def get_base64_prefix(s):
     return match.end()
 
 
-class MMUrlType(IntEnum):
-    DEFAULT = 0
-    IMAGE = 1
-    VIDEO = 2
-    AUDIO = 3
-    TENSOR = 4
-    IGRAPH = 5
-
-
-@dataclass
-class MMPreprocessConfig:
-    width: int = -1
-    height: int = -1
-    min_pixels: int = -1
-    max_pixels: int = -1
-    fps: int = -1
-    min_frames: int = -1
-    max_frames: int = -1
-
-
-class MultimodalInput:
-    url: str
-    mm_type: MMUrlType
-    config: MMPreprocessConfig
-    tensor: torch.Tensor
-
-    def __init__(
-        self,
-        url: str,
-        mm_type: MMUrlType = MMUrlType.DEFAULT,
-        config: MMPreprocessConfig = MMPreprocessConfig(),
-        tensor: torch.Tensor = torch.empty(1),
-    ):
-        self.url = url
-        self.mm_type = mm_type
-        self.config = config
-        self.tensor = tensor
-
-
 def get_vit_compute_dtype(dtype: str):
     if dtype == "bf16":
         return torch.bfloat16
@@ -101,13 +71,15 @@ def get_vit_compute_dtype(dtype: str):
 
 
 class IgraphItemKeyCountMismatchError(Exception):
-    
+
     def __init__(self, requested_count: int, received_count: int, message: str = None):
         self.requested_count = requested_count
         self.received_count = received_count
         super().__init__(
-            message or f"item number from igraph response ({received_count}) diff with keys number from request({requested_count})"
+            message
+            or f"item number from igraph response ({received_count}) diff with keys number from request({requested_count})"
         )
+
 
 def retry_on_assertion_error(retries: int = 3):
     def decorator(func):
@@ -115,7 +87,11 @@ def retry_on_assertion_error(retries: int = 3):
             for attempt in range(1, retries + 1):
                 try:
                     return func(*args, **kwargs)
-                except (AssertionError, ValueError, IgraphItemKeyCountMismatchError) as e:
+                except (
+                    AssertionError,
+                    ValueError,
+                    IgraphItemKeyCountMismatchError,
+                ) as e:
                     logger.warning(
                         f"[retry_on_assertion_error] AssertionError on attempt {attempt}: {str(e)}"
                     )
@@ -177,7 +153,6 @@ def get_bytes_io_from_url(url: str):
         url_data_cache_.insert_cache(url, res)
         return res
     else:
-        cached_res.seek(0)
         return cached_res
 
 
@@ -206,3 +181,46 @@ class MMDataCache(object):
 
 vit_emb_cache_ = MMDataCache(MM_CACHE_SIZE)
 url_data_cache_ = MMDataCache(URL_CACHE_SIZE)
+
+
+def trans_config(mm_process_config_pb: MMPreprocessConfigPB):
+    return MMPreprocessConfig(
+        width=mm_process_config_pb.width,
+        height=mm_process_config_pb.height,
+        min_pixels=mm_process_config_pb.min_pixels,
+        max_pixels=mm_process_config_pb.max_pixels,
+        fps=mm_process_config_pb.fps,
+        min_frames=mm_process_config_pb.min_frames,
+        max_frames=mm_process_config_pb.max_frames,
+        crop_positions=list(mm_process_config_pb.crop_positions),
+        mm_timeout_ms=mm_process_config_pb.mm_timeout_ms,
+    )
+
+
+def trans_mm_input(multimodal_inputs):
+    # vit sep
+    if isinstance(multimodal_inputs, MultimodalInputsPB):
+        return [
+            MultimodalInput(
+                mm_input.multimodal_url,
+                MMUrlType(mm_input.multimodal_type),
+                trans_tensor(mm_input.multimodal_tensor),
+                trans_config(mm_input.mm_preprocess_config),
+            )
+            for mm_input in multimodal_inputs.multimodal_inputs
+        ]
+    # not sep
+    elif isinstance(multimodal_inputs, list):
+        return [
+            MultimodalInput(
+                mm_input.url,
+                MMUrlType(mm_input.mm_type),
+                mm_input.tensor,
+                mm_input.config,
+            )
+            for mm_input in multimodal_inputs
+        ]
+    else:
+        raise ValueError(
+            f"Unsupported multimodal input type: {type(multimodal_inputs)}"
+        )

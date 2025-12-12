@@ -8,13 +8,21 @@ import pillow_avif
 import pillow_heif
 from PIL import Image, ImageFile
 
+from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.models.multimodal.multimodal_common import ImageEmbeddingInterface
+from rtp_llm.utils.base_model_datatypes import (
+    MMPreprocessConfig,
+    MMUrlType,
+    MultimodalInput,
+)
 
 
 class ImageLoadTest(TestCase):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.image_embedding = ImageEmbeddingInterface()
+        self.image_embedding = ImageEmbeddingInterface(
+            GptInitModelParameters(0, 0, 0, 0, 0)
+        )
 
     def test(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -33,9 +41,33 @@ class ImageLoadTest(TestCase):
             image.save(temp_dir + "/test.heic")
 
             try:
-                self.image_embedding._mm_preprocess(temp_dir + "/test.png")
-                self.image_embedding._mm_preprocess(temp_dir + "/test.avif")
-                self.image_embedding._mm_preprocess(temp_dir + "/test.heic")
+                self.image_embedding.preprocess_input(
+                    [
+                        MultimodalInput(
+                            url=temp_dir + "/test.png",
+                            mm_type=MMUrlType.IMAGE,
+                            config=MMPreprocessConfig(),
+                        )
+                    ]
+                )
+                self.image_embedding.preprocess_input(
+                    [
+                        MultimodalInput(
+                            url=temp_dir + "/test.avif",
+                            mm_type=MMUrlType.IMAGE,
+                            config=MMPreprocessConfig(),
+                        )
+                    ]
+                )
+                self.image_embedding.preprocess_input(
+                    [
+                        MultimodalInput(
+                            url=temp_dir + "/test.heic",
+                            mm_type=MMUrlType.IMAGE,
+                            config=MMPreprocessConfig(),
+                        )
+                    ]
+                )
 
                 self.assertTrue(
                     isinstance(

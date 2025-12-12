@@ -18,7 +18,7 @@ from rtp_llm.openai.renderers.custom_renderer import (
     RenderedInputs,
     RendererParams,
 )
-from rtp_llm.utils.multimodal_util import MMPreprocessConfig, MMUrlType
+from rtp_llm.utils.base_model_datatypes import MMPreprocessConfig, MMUrlType
 
 
 class SeparatorStyle(Enum):
@@ -75,12 +75,27 @@ class Conversation:
             )
 
         def get_preprocess_config(config):
+            if config.crop_positions:
+                crop_positions = [float(x) for x in config.crop_positions.split(":")]
+                if len(crop_positions) == 6:
+                    crop_positions = [
+                        crop_positions[0] / crop_positions[4],
+                        crop_positions[1] / crop_positions[5],
+                        crop_positions[2] / crop_positions[4],
+                        crop_positions[3] / crop_positions[5],
+                    ]
+            else:
+                crop_positions = []
             return MMPreprocessConfig(
                 width=config.resized_width or -1,
                 height=config.resized_height or -1,
                 fps=config.fps or -1,
+                min_pixels=config.min_pixels or -1,
+                max_pixels=config.max_pixels or -1,
                 min_frames=config.min_frames or -1,
                 max_frames=config.max_frames or -1,
+                crop_positions=crop_positions,
+                mm_timeout_ms=config.mm_timeout_ms,
             )
 
         if messages[0].role != RoleEnum.system:
@@ -121,7 +136,7 @@ class Conversation:
             else:
                 prompt += self.seps[0]
         prompt += self.roles[RoleEnum.assistant] + self.connector[1]
-        return PromptWithMMInput(prompt, images, mm_types)
+        return PromptWithMMInput(prompt, images, mm_types, preprocess_configs)
 
 
 conv_llava_v0 = Conversation(
