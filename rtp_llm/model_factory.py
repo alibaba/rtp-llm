@@ -165,6 +165,7 @@ class ModelFactory:
         if propose_model:
             logging.info("set enable_speculative_decoding")
             model.config.enable_speculative_decoding = True
+
         engine = create_engine(model, propose_model, gang_info)
         engine.start()
         if propose_model:

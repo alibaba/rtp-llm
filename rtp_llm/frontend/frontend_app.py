@@ -22,6 +22,7 @@ from rtp_llm.distribute.worker_info import WorkerInfo, g_worker_info
 from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
 from rtp_llm.frontend.frontend_server import FrontendServer
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
+from rtp_llm.utils.grpc_client_wrapper import GrpcClientWrapper
 from rtp_llm.utils.util import AtomicCounter, async_request_server
 from rtp_llm.utils.version_info import VersionInfo
 
@@ -60,6 +61,7 @@ class FrontendApp(object):
             py_env_configs.server_config.frontend_server_id,
         )
         self.separated_frontend = separated_frontend
+        self.grpc_client = GrpcClientWrapper(g_worker_info.rpc_server_port)
         g_worker_info.server_port = WorkerInfo.server_port_offset(
             self.py_env_configs.server_config.rank_id, g_worker_info.server_port
         )
@@ -170,9 +172,7 @@ class FrontendApp(object):
             )
 
             logging.info(f"cache_status request {data}")
-            response = await async_request_server(
-                "post", g_worker_info.backend_server_port, "cache_status", query_params
-            )
+            response = await self.grpc_client.post_request("cache_status", query_params)
             if "error" not in response:
                 response["frontend_available_concurrency"] = (
                     self.frontend_server._global_controller.get_available_concurrency()
@@ -190,24 +190,14 @@ class FrontendApp(object):
             query_params = (
                 dict(request.query_params) if request.method == "GET" else (data or {})
             )
-            response = await async_request_server(
-                "post", g_worker_info.backend_server_port, "worker_status", query_params
+            response = await self.grpc_client.post_request(
+                "worker_status", query_params
             )
             if "error" not in response:
                 response["frontend_available_concurrency"] = (
                     self.frontend_server._global_controller.get_available_concurrency()
                 )
             return response
-
-        # example : {"peft_info": {"lora_info": {"lora_0": "/lora/llama-lora-test/""}}}
-        @app.post("/update")
-        async def update(version_info: VersionInfo):
-            return await async_request_server(
-                "post",
-                g_worker_info.backend_server_port,
-                "update",
-                version_info.model_dump(),
-            )
 
         @app.get("/v1/models")
         async def list_models():
@@ -217,16 +207,14 @@ class FrontendApp(object):
         # request format: {"log_level": "DEBUG"}, {"log_level": "info"}
         @app.post("/set_log_level")
         async def set_log_level(req: Union[str, Dict[Any, Any]]):
-            return await async_request_server(
-                "post", g_worker_info.backend_server_port, "set_log_level", req
-            )
+            result = await self.grpc_client.post_request("set_log_level", req)
+            return result
 
         # request format: {"mode": "NONE", "update_time": 5000}
         @app.post("/update_eplb_config")
-        async def update_eplb_config(req: Dict[Any, Any]):
-            return await async_request_server(
-                "post", g_worker_info.backend_server_port, "update_eplb_config", req
-            )
+        async def update_eplb_config(req: Union[str, Dict[Any, Any]]):
+            result = await self.grpc_client.post_request("update_eplb_config", req)
+            return result
 
         @app.post("/")
         async def inference(req: Union[str, Dict[Any, Any]], raw_request: RawRequest):
@@ -255,9 +243,8 @@ class FrontendApp(object):
 
         @app.post("/update_scheduler_info")
         async def update_scheduler_info(req: Union[str, Dict[Any, Any]]):
-            return await async_request_server(
-                "post", g_worker_info.backend_server_port, "update_scheduler_info", req
-            )
+            result = await self.grpc_client.post_request("update_scheduler_info", req)
+            return result
 
         @app.post("/chat/render")
         @app.post("/v1/chat/render")
