@@ -276,10 +276,12 @@ class MMProcessEngine:
 
             work_items = self._create_work_items(mm_inputs)
             self._wait_for_preprocessing(work_items)
-            emb_res, pos_res, tensor_res = self._compute_embeddings(work_items)
+            emb_res, pos_res, deepstack_embeds_res = self._compute_embeddings(
+                work_items
+            )
 
             kmonitor.report(AccMetrics.VIT_SUCCESS_QPS_METRIC, 1)
-            result = MMEmbeddingRes(emb_res, pos_res, tensor_res)
+            result = MMEmbeddingRes(emb_res, pos_res, deepstack_embeds_res)
             self._access_logger.log_success_access(mm_inputs, str(result))
             return result
         except Exception as e:
@@ -470,9 +472,9 @@ class MMProcessEngine:
 
         # Flatten outputs in original input order.
         for emb, pos, tensor in zip(ordered_emb, ordered_pos, ordered_tensor):
-            emb_res.extend(self._maybe_tensor_to_list(emb))
-            pos_res.extend(self._maybe_tensor_to_list(pos))
-            tensor_res.extend(self._maybe_tensor_to_list(tensor))
+            emb_res.extend(self._maybe_tensor_to_list(emb, dim=2))
+            pos_res.extend(self._maybe_tensor_to_list(pos, dim=2))
+            tensor_res.extend(self._maybe_tensor_to_list(tensor, dim=3))
 
         return emb_res, pos_res, tensor_res
 

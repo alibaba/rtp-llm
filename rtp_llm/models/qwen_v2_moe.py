@@ -144,7 +144,7 @@ class Qwen2Moe(QWenV2):
         Qwen2Moe.load_moe_config(config, config_json)
 
     @classmethod
-    def load_moe_config(cls, ckpt_path: str, config: ModelConfig):
+    def load_moe_config(cls, config: ModelConfig, config_json: Dict[str, Any]):
         config.moe_k = config_json["num_experts_per_tok"]
         config.expert_num = config_json["num_experts"]
         # Set inter_size and moe_inter_size for hybrid MoE
