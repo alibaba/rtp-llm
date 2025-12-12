@@ -24,7 +24,7 @@ except ImportError:
     pass
 
 from rtp_llm.config.py_config_modules import PyEnvConfigs, StaticConfig
-from rtp_llm.distribute.gang_info import members_from_test_env
+from rtp_llm.distribute.distributed_server import members_from_test_env
 from rtp_llm.test.perf_test.batch_decode_test import run_single
 from rtp_llm.test.perf_test.test_util import create_query
 from rtp_llm.test.utils.maga_server_manager import MagaServerManager

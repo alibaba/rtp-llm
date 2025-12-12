@@ -21,7 +21,7 @@ public:
     void stop();
     void startHttpServer(py::object model_weights_loader,
                          py::object lora_infos,
-                         py::object gang_info,
+                         py::object world_info,
                          py::object tokenizer,
                          py::object render);
     void pause();

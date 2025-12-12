@@ -8,7 +8,7 @@ from pydantic import BaseModel as PyBaseModel
 from rtp_llm.config.generate_config import GenerateConfig, RoleAddr, RoleType
 from rtp_llm.config.gpt_init_model_parameters import ConfigMode, GptInitModelParameters
 from rtp_llm.config.task_type import TaskType
-from rtp_llm.distribute.gang_info import get_gang_info
+from rtp_llm.distribute.distributed_server import get_world_info
 from rtp_llm.distribute.worker_info import ParallelInfo, g_parallel_info
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import (
     BaseTokenizer,
@@ -136,7 +136,7 @@ class BaseModel(object):
             ref_module=model_config.ref_module,
             ref_dict=model_config.ref_dict,
             parallel_info=parallel_info,
-            gang_info=get_gang_info(),
+            world_info=get_world_info(),
             config_mode=config_mode,
         )
         cls._update_config(config)

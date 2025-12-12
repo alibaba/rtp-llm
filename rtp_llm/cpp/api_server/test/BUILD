@@ -78,7 +78,6 @@ cc_library(
         "mock/MockEmbeddingEndpoint.h",
         "mock/MockChatRender.h",
         "mock/MockTokenizer.h",
-        "mock/MockGangServer.h",
         "mock/MockOpenaiEndpoint.h",
         "mock/MockLoraManager.h",
         "mock/MockWeightsLoader.h",
@@ -97,8 +96,6 @@ cc_library(
         "InferenceDataTypeTest.cc",
         "ConcurrencyControllerTest.cc",
         "ChatServiceTest.cc",
-        "GangServerTest.cc",
-        "LoraServiceTest.cc",
         "TestMain.cc",
     ],
     deps = test_deps + [

@@ -10,7 +10,7 @@ from math import log
 import requests
 
 from rtp_llm.config.py_config_modules import ServerConfig, StaticConfig
-from rtp_llm.distribute.gang_info import get_gang_info
+from rtp_llm.distribute.distributed_server import get_world_info
 from rtp_llm.ops import ProfilingDebugLoggingConfig, RoleType
 from rtp_llm.tools.api.hf_model_helper import get_hf_model_info
 
@@ -218,14 +218,14 @@ def auto_configure_deepep(args: argparse.Namespace):
 
     # Get number of nodes
     try:
-        gang_info = get_gang_info()
-        num_nodes = gang_info.num_nodes
+        world_info = get_world_info()
+        num_nodes = world_info.num_nodes
     except Exception:
-        # If get_gang_info fails, estimate from world_size
+        # If get_world_info fails, estimate from world_size
         # Assuming 8 GPUs per node
         num_nodes = (world_size + 7) // 8
         logging.info(
-            f"Failed to get gang_info, estimated num_nodes={num_nodes} from world_size={world_size}"
+            f"Failed to get world_info, estimated num_nodes={num_nodes} from world_size={world_size}"
         )
 
     # Determine if PD separation is enabled
