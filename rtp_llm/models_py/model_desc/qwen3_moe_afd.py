@@ -11,14 +11,19 @@ from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.distribute.worker_info import g_parallel_info
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
-from rtp_llm.models_py.modules import SelectTopk
-from rtp_llm.models_py.modules.attention import CausalAttention
-from rtp_llm.models_py.modules.cuda.moe.routers.afd_data_router import AfdDataRouterAttn
-from rtp_llm.models_py.modules.embedding import Embedding
-from rtp_llm.models_py.modules.factory.fused_moe import FusedMoeFactory
-from rtp_llm.models_py.modules.fmha import FMHAImplBase
-from rtp_llm.models_py.modules.linear import Linear
-from rtp_llm.models_py.modules.norm import RMSNorm
+from rtp_llm.models_py.modules import (
+    AttnImplFactory,
+    CausalAttention,
+    Embedding,
+    FMHAImplBase,
+    FusedMoeFactory,
+    LinearFactory,
+    RMSNorm,
+    SelectTopk,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.afd_data_router import (
+    AfdDataRouterAttn,
+)
 from rtp_llm.ops.compute_ops import (
     KVCache,
     PyAttentionInputs,
@@ -27,7 +32,6 @@ from rtp_llm.ops.compute_ops import (
     PyModelOutputs,
 )
 from rtp_llm.utils.model_weight import W
-from rtp_llm.utils.util import check_with_info
 
 
 class Qwen3MoeAfdMlpLayer(nn.Module):
@@ -94,7 +98,9 @@ class Qwen3MoeAfdDecoderLayer(nn.Module):
         self.self_attn = CausalAttention(config, weights)
 
         self.top_k = config.moe_k
-        self.gate = Linear(weights[W.moe_gate], None)
+        self.gate = LinearFactory.create_linear_from_weights(
+            weights, W.moe_gate, None, None, config
+        )
         self.select_topk = SelectTopk(config)
 
         self.num_experts = config.expert_num
@@ -213,7 +219,11 @@ class Qwen3MoeAttnModel(GptModelBase):
 
         for input in mirco_batch_inputs:
             hidden_states_list.append(self.embed_tokens(input.input_ids))
-            fmha_impl_list.append(self.get_fmha_impl(input.attention_inputs))
+            fmha_impl_list.append(
+                AttnImplFactory.get_fmha_impl(
+                    self.config, self.weight, input.attention_inputs
+                )
+            )
 
         for i, layer in enumerate(self.layers):
             next_hidden_states_list = []

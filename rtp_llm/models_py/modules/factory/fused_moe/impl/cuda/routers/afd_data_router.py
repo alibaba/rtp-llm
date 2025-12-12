@@ -4,13 +4,15 @@ import torch
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.models_py.distributed.deepep_initializer import DeepEpInitializer
-from rtp_llm.models_py.modules.common.moe.fused_moe import (
+from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     ExpertForwardPayload,
     ExpertTokensMetadata,
     FusedMoeDataRouter,
 )
-from rtp_llm.models_py.modules.factory.fused_moe.quant_config import FusedMoEQuantConfig
-from rtp_llm.models_py.modules.factory.fused_moe.type import RouterType
+from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
+    FusedMoEQuantConfig,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.defs.type import RouterType
 
 
 class AfdDataRouterAttn(FusedMoeDataRouter):
@@ -27,7 +29,7 @@ class AfdDataRouterAttn(FusedMoeDataRouter):
     @classmethod
     def check_conditions(cls, checker: Any, config: GptInitModelParameters) -> None:
         """Check if AfdDataRouterAttn can handle the configuration"""
-        from rtp_llm.models_py.modules.factory.fused_moe.config_resolver import (
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
             MoeConfigResolver,
         )
 
@@ -170,7 +172,7 @@ class AfdDataRouterFfn(FusedMoeDataRouter):
     @classmethod
     def check_conditions(cls, checker: Any, config: GptInitModelParameters) -> None:
         """Check if AfdDataRouterFfn can handle the configuration"""
-        from rtp_llm.models_py.modules.factory.fused_moe.config_resolver import (
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
             MoeConfigResolver,
         )
 

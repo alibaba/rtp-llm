@@ -25,5 +25,6 @@ __all__ = [
     "CudaFp8PerTensorNoDPStrategy",
     "CudaFp8PerTensorEpLowLatencyStrategy",
     "CudaFp8PerTensorEpNormalStrategy",
+    # AF disaggregate
     "CudaAfDisaggregateStrategy",
 ]
