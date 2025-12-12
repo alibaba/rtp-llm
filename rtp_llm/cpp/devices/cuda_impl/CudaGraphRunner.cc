@@ -156,7 +156,7 @@ PyModelOutputs CudaGraphRunner::forward(PyModelInputs& inputs) {
     PyModelOutputs outputs;
     // decode or embedding model only
     if (canRun(inputs)) {
-        RTP_LLM_LOG_INFO("Replay Start");
+        RTP_LLM_LOG_DEBUG("Replay Start");
         prepareInputs(inputs);
         if (is_prefill_cuda_graph_mode_) {
             replayPrefill(state_.current_real_graph_seq_len);
@@ -169,7 +169,7 @@ PyModelOutputs CudaGraphRunner::forward(PyModelInputs& inputs) {
                 graph_instances_[state_.current_real_graph_bs].mem_hold_.decoder_layer_hidden_states_.slice(
                     0, 0, state_.seq_len_sum);
         }
-        RTP_LLM_LOG_INFO("Replay End");
+        RTP_LLM_LOG_DEBUG("Replay End");
     } else {
         RTP_LLM_LOG_INFO("Normal Cuda Graph Start");
         auto py_outputs_obj = normalForward(inputs);
