@@ -104,6 +104,7 @@ requirement([
     "concurrent_log_handler",
     "aiter",
     "fastsafetensors",
+    "pytorch-triton-rocm",
 ] + tensorrt + flashinfer)
 
 filegroup(
@@ -457,6 +458,7 @@ py_library(
             ":embedding",
             "//rtp_llm/tools/convert:convert",
             ":aiter",
+            ":pytorch-triton-rocm",
         ],
         "//conditions:default": [
             ":models",

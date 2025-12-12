@@ -1161,6 +1161,7 @@ class GptInitModelParameters:
             # default enable since it has better performance in most cases
             self.gpt_init_params.parallelism_distributed_config.use_all_gather
             and self.gpt_init_params.ep_size == self.gpt_init_params.tp_size
+            and self.gpt_init_params.moe_config.use_deepep_low_latency == False
         )
         logging.info(f"use_all_gather: {self.use_all_gather}")
 

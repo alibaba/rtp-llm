@@ -17,8 +17,10 @@ copy_files(
 filegroup(
     name = "copy_aiter",
     srcs = select({
-        "@//:using_aiter_src": [":aiter_src_copy",],
-        "//conditions:default": [":aiter_copy"],
+        "@//:using_rocm_with_aiter_src": [":aiter_src_copy", ":deep_ep_rocm_copy"],
+        "@//:using_aiter_src": [":aiter_src_copy", ":deep_ep_rocm_copy"],
+        "@//:using_rocm": [":aiter_copy", ":deep_ep_rocm_copy"],
+        "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],
 )
@@ -29,6 +31,34 @@ copy_files(
         "//rtp_llm/cpp/devices/cuda_impl:use_accl_ep": ["//3rdparty/accl_ep:accl_ep_shared"],
         "//conditions:default": [],
     }),
+    visibility = ["//visibility:public"],
+)
+
+# Separate genrule for libdeep_ep_rocm.so to avoid conflicts between aiter_src_copy and aiter_copy
+genrule(
+    name = "deep_ep_rocm_copy",
+    srcs = select({
+        "//rtp_llm/cpp/devices/rocm_impl:enable_deep_ep": ["@deep_ep_rocm//:cpp_libraries"],
+        "//conditions:default": [],
+    }),
+    outs = ["libdeep_ep_rocm.so"],
+    cmd = select({
+        "//rtp_llm/cpp/devices/rocm_impl:enable_deep_ep": """
+            # Copy libdeep_ep_rocm.so from @deep_ep_rocm//:cpp_libraries
+            # $(SRCS) contains all files from srcs, filter for .so file
+            for f in $(SRCS); do
+                if [[ "$$f" == *.so ]]; then
+                    cp "$$f" $(location libdeep_ep_rocm.so);
+                    break;
+                fi
+            done
+        """,
+        "//conditions:default": """
+            # Create a minimal valid shared library placeholder when deep_ep is not enabled
+            echo "void dummy() {}" | gcc -shared -fPIC -x c - -o $(location libdeep_ep_rocm.so) || touch $(location libdeep_ep_rocm.so);
+        """,
+    }),
+    tags = ["rocm", "local"],
     visibility = ["//visibility:public"],
 )
 
@@ -47,13 +77,14 @@ genrule(
         "libmodule_smoothquant.so",
         "libmodule_pa.so",
         "libmodule_activation.so",
+        "libmodule_deepgemm.so",
         "libmodule_attention_asm.so",
         "libmodule_mha_fwd.so",
         "libmodule_fmha_v3_varlen_fwd.so",
         "libmodule_norm.so",
         "libmodule_rmsnorm.so",
         "libmodule_gemm_a8w8.so",
-        "libmodule_moe_ck2stages.so"
+        "libmodule_moe_ck2stages.so",
     ],
     cmd = """
        cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_aiter_enum.so $(location libmodule_aiter_enum.so);
@@ -74,8 +105,9 @@ cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_norm.so $(locat
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_rmsnorm.so $(location libmodule_rmsnorm.so);
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_gemm_a8w8.so $(location libmodule_gemm_a8w8.so);
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_moe_ck2stages.so $(location libmodule_moe_ck2stages.so);
+cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_deepgemm.so $(location libmodule_deepgemm.so);
 """,
-tags = ["rocm", "local"],
+    tags = ["rocm", "local"],
 )
 
 genrule(
@@ -100,6 +132,7 @@ genrule(
         "module_rmsnorm.so",
         "module_gemm_a8w8.so",
         "module_moe_ck2stages.so",
+        "module_deepgemm.so",
     ],
     cmd = """
         cp external/aiter/aiter/jit/module_aiter_enum.so $(location module_aiter_enum.so);
@@ -120,8 +153,9 @@ genrule(
         cp external/aiter/aiter/jit/module_rmsnorm.so $(location module_rmsnorm.so);
         cp external/aiter/aiter/jit/module_gemm_a8w8.so $(location module_gemm_a8w8.so);
         cp external/aiter/aiter/jit/module_moe_ck2stages.so $(location module_moe_ck2stages.so);
+        cp external/aiter/aiter/jit/module_deepgemm.so $(location module_deepgemm.so);
 """,
-tags = ["rocm", "local"],
+    tags = ["rocm", "local"],
 )
 
 filegroup(

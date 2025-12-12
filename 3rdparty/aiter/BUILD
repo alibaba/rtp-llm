@@ -104,7 +104,8 @@ genrule(
         "aiter/jit/libmodule_rmsnorm.so",
         "aiter/jit/libmodule_smoothquant.so",
         "aiter/jit/libmodule_gemm_a8w8.so",
-        "aiter/jit/libmodule_moe_ck2stages.so"
+        "aiter/jit/libmodule_moe_ck2stages.so",
+        "aiter/jit/libmodule_deepgemm.so",
     ],
     cmd = """
         cd external/aiter_src;
@@ -113,7 +114,7 @@ genrule(
         /opt/conda310/bin/python -m pip install -r requirements.txt -i https://artifacts.antgroup-inc.cn/simple/ --extra-index-url=https://artlab.alibaba-inc.com/1/PYPI/py-central/ --extra-index-url=https://artlab.alibaba-inc.com/1/PYPI/pytorch/ --extra-index-url=http://artlab.alibaba-inc.com/1/pypi/rtp_diffusion --trusted-host=artlab.alibaba-inc.com;
         /opt/conda310/bin/python -m pip install ninja -i https://artifacts.antgroup-inc.cn/simple/ --extra-index-url=https://artlab.alibaba-inc.com/1/PYPI/py-central/ --extra-index-url=https://artlab.alibaba-inc.com/1/PYPI/pytorch/ --extra-index-url=http://artlab.alibaba-inc.com/1/pypi/rtp_diffusion --trusted-host=artlab.alibaba-inc.com;
         /opt/conda310/bin/python -m pip install packaging -i https://artifacts.antgroup-inc.cn/simple/ --extra-index-url=https://artlab.alibaba-inc.com/1/PYPI/py-central/ --extra-index-url=https://artlab.alibaba-inc.com/1/PYPI/pytorch/ --extra-index-url=http://artlab.alibaba-inc.com/1/pypi/rtp_diffusion --trusted-host=artlab.alibaba-inc.com;
-        AITER_SYMBOL_VISIBLE=1 GPU_ARCHS=gfx942 ROCM_HOME=/opt/rocm LD_LIBRARY_PATH=/opt/amdgpu/lib64 PATH=/opt/rocm/bin:/opt/conda310/bin:$$PATH /opt/conda310/bin/python build_aiter_module.py;
+        LD_LIBRARY_PATH=/opt/amdgpu/lib64:/opt/rocm-6.4.3/lib/llvm/lib/:$$LD_LIBRARY_PATH AITER_SYMBOL_VISIBLE=1 GPU_ARCHS=gfx942 ROCM_HOME=/opt/rocm PATH=/opt/rocm/bin:/opt/conda310/bin:$$PATH /opt/conda310/bin/python build_aiter_module.py;
         
         cd ../..;
         cp external/aiter_src/aiter/jit/module_aiter_enum.so $(location aiter/jit/libmodule_aiter_enum.so);
@@ -128,6 +129,7 @@ genrule(
         cp external/aiter_src/aiter/jit/module_attention_asm.so $(location aiter/jit/libmodule_attention_asm.so);
         cp external/aiter_src/aiter/jit/module_gemm_a8w8_bpreshuffle.so $(location aiter/jit/libmodule_gemm_a8w8_bpreshuffle.so);
         cp external/aiter_src/aiter/jit/module_activation.so $(location aiter/jit/libmodule_activation.so);
+        cp external/aiter_src/aiter/jit/module_deepgemm.so $(location aiter/jit/libmodule_deepgemm.so);
         cp external/aiter_src/aiter/jit/module_norm.so $(location aiter/jit/libmodule_norm.so);
         cp external/aiter_src/aiter/jit/module_rmsnorm.so $(location aiter/jit/libmodule_rmsnorm.so);
         cp external/aiter_src/aiter/jit/module_mha_fwd.so $(location aiter/jit/libmodule_mha_fwd.so);
@@ -137,6 +139,30 @@ genrule(
     """,
     visibility = ["//visibility:public"],
     tags = ["rocm","local"],
+)
+
+# Library for py_itfs_common.h header
+cc_library(
+    name = "py_itfs_common_headers",
+    hdrs = ["csrc/include/py_itfs_common.h"],
+    strip_include_prefix = "csrc/include/",
+    visibility = ["//visibility:public"],
+    tags = ["rocm"],
+)
+
+cc_library(
+    name = "ck_deepgemm_example_headers",
+    hdrs = glob([
+        "3rdparty/composable_kernel/example/ck_tile/18_flatmm/*.hpp",
+    ]),
+    copts = rocm_default_copts() + ["-std=c++20"],
+    deps = [
+        ":ck_headers_real",
+        ":ck_library_headers",
+        ":py_itfs_common_headers",
+    ],
+    strip_include_prefix = "3rdparty/composable_kernel/example/ck_tile/18_flatmm",
+    visibility = ["//visibility:public"],
 )
 
 cc_library(
@@ -150,16 +176,6 @@ cc_library(
     tags = ["rocm","local"],
 )
 
-cc_library(
-    name = "module_quick_all_reduce",
-    srcs = ["aiter/jit/libmodule_quick_all_reduce.so"],
-    hdrs = ["csrc/include/quick_all_reduce.h"],
-    deps = [":cpp_libraries"],
-    copts = [],
-    strip_include_prefix = "csrc/include/",
-    visibility = ["//visibility:public"],
-    tags = ["rocm","local"],
-)
 
 cc_library(
     name = "module_mha_fwd",
@@ -336,6 +352,31 @@ cc_library(
     deps = [":cpp_libraries"],
     copts = [],
     linkopts = [],
+    strip_include_prefix = "csrc/include/",
+    visibility = ["//visibility:public"],
+    tags = ["rocm","local"],
+)
+ 
+cc_library(
+    name = "module_deepgemm",
+    srcs = ["aiter/jit/libmodule_deepgemm.so"],
+    hdrs = ["csrc/ck_deepgemm/include/deepgemm.h"],
+    deps = [
+        ":cpp_libraries",
+        ":ck_deepgemm_example_headers",
+    ],
+    copts = [],
+    strip_include_prefix = "csrc/ck_deepgemm/include",
+    visibility = ["//visibility:public"],
+    tags = ["rocm"],
+)
+
+cc_library(
+    name = "module_quick_all_reduce",
+    srcs = ["aiter/jit/libmodule_quick_all_reduce.so"],
+    hdrs = ["csrc/include/quick_all_reduce.h"],
+    deps = [":cpp_libraries"],
+    copts = [],
     strip_include_prefix = "csrc/include/",
     visibility = ["//visibility:public"],
     tags = ["rocm","local"],

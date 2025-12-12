@@ -1,13 +1,65 @@
 load("//:def.bzl", "rocm_copts")
 load("//bazel:arch_select.bzl", "torch_deps")
 
+config_setting(
+    name = "enable_deep_ep",
+    define_values = {"enable_deep_ep": "true"},
+    visibility = ["//visibility:public"],
+)
+ 
+config_setting(
+    name = "use_accl_ep",
+    define_values = {"use_accl_ep": "true"},
+)
+ 
+cc_library(
+    name = "deep_ep_buffer",
+    hdrs = [
+        "DeepEPDefs.h",
+        "DeepEPBuffer.h",
+    ],
+    srcs = [
+        "DeepEPBuffer.cc",
+    ],
+    deps = [
+        "@local_config_rocm//rocm:rocm_headers",
+        "@local_config_rocm//rocm:hip",
+        "//rtp_llm/cpp/rocm:rocm_types_hdr",
+        "//rtp_llm/cpp/kernels:rocm_utils",
+        "//rtp_llm/cpp/devices:devices_base",
+        "//rtp_llm/cpp/devices:device_utils",
+        "//rtp_llm/cpp/pybind:th_utils",
+        "@nvshmem_rocm//:nvshmem_rocm_hdrs",
+    ] + select({
+        ":use_accl_ep": [
+            "//3rdparty/accl_ep:accl_ep",
+        ],
+        ":enable_deep_ep": ["@deep_ep_rocm//:deep_ep"],
+        "//conditions:default": [],
+    }) + torch_deps(),
+    copts = rocm_copts() + [
+        "-DUSE_ROCM=1",
+        "-DDISABLE_INTERNODE=1",
+        "-DFORCE_NVSHMEM_API=1",
+    ] + select({
+        ":enable_deep_ep": ["-DENABLE_DEEP_EP=1"],
+        "//conditions:default": [],
+    }),
+    visibility = ["//visibility:public"]
+)
+
 cc_library(
     name = "rocm_impl",
     hdrs = glob([
         "*.h",
+    ], exclude = [
+        "DeepEPBuffer.h",
+        "DeepEPDefs.h",
     ]),
     srcs = glob([
         "*.cc",
+    ], exclude = [
+        "DeepEPBuffer.cc",
     ]),
     deps = [
         "@local_config_rocm//rocm:rocm_headers",
@@ -38,6 +90,7 @@ cc_library(
             "@aiter_src//:module_moe_asm",
             "@aiter_src//:module_pa",
             "@aiter_src//:module_activation",
+            "@aiter_src//:module_deepgemm",
             "@aiter_src//:module_rmsnorm",
             "@aiter_src//:module_norm",
             "@aiter_src//:module_mha_fwd",
@@ -60,9 +113,17 @@ cc_library(
             "@aiter//:module_mha_fwd",
             "@aiter//:module_fmha_v3_varlen_fwd",
             "@aiter//:module_moe_ck2stages",
+            "@aiter//:module_deepgemm",
+        ]}) + select({
+        ":enable_deep_ep": [
+            ":deep_ep_buffer",
         ],
+        "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],
-    copts = rocm_copts(),
+    copts = rocm_copts() + [
+        "-DUSE_ROCM=1",
+        "-DDISABLE_INTERNODE=1",
+        "-DFORCE_NVSHMEM_API=1"],
     alwayslink = True,
 )
