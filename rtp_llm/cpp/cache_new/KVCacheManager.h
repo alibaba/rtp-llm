@@ -5,7 +5,6 @@
 #include <thread>
 #include <vector>
 
-#include "autil/LockFreeThreadPool.h"
 #include "rtp_llm/cpp/cache_new/AsyncContext.h"
 #include "rtp_llm/cpp/cache_new/types.h"
 #include "rtp_llm/cpp/cache_new/CacheConfig.h"
@@ -67,8 +66,13 @@ public:
     // async load cache from connector to gpu, for all tp
     std::shared_ptr<AsyncContext> asyncLoadCache(const BatchKVCacheResourcePtr& batch_resource);
 
-    // copy cache between gpu and memory, for single tp
+    // async store cache from gpu to connector, for all tp
+    std::shared_ptr<AsyncContext> asyncStoreCache(const BatchKVCacheResourcePtr& batch_resource);
+
+    // copy cache between gpu and connector, for single tp
     bool copyCache(const CopyCacheRequestPB& request, CopyCacheResponsePB& response);
+
+    // clear local cache, for rank 0
     void clearLocalCache();
 
 private:
@@ -88,8 +92,7 @@ private:
     std::atomic<bool> stop_{false};
     std::thread       metrics_reporter_thread_;
 
-    std::shared_ptr<KVCacheConnector>          memory_connector_;
-    std::shared_ptr<autil::LockFreeThreadPool> wait_cache_thread_pool_;
+    std::shared_ptr<KVCacheConnector> memory_connector_;
 };
 
 }  // namespace rtp_llm

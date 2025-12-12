@@ -204,10 +204,7 @@ void KVCacheManager::insertIntoCache(const InsertInfo& insert_info) {
         FreeInfo free_info{copy_batch_resource, insert_info.complete_token_ids};
         auto deleter = [free_info, allocator = allocator_](KVCacheResourceV1* resource) { allocator->free(free_info); };
         std::shared_ptr<KVCacheResourceV1> resource(&(copy_batch_resource->batch_resource.at(0)), deleter);
-        auto                               context = memory_connector_->asyncWrite(resource, nullptr);
-        if (context) {
-            wait_cache_thread_pool_->pushTask([context]() { context->waitDone(); });
-        }
+        memory_connector_->asyncWrite(resource, nullptr);
     } else {
         FreeInfo free_info{insert_info.batch_kv_cache_resource, insert_info.complete_token_ids};
         allocator_->free(free_info);
@@ -355,13 +352,6 @@ bool KVCacheManager::initMemoryConnector() {
         return false;
     }
 
-    wait_cache_thread_pool_ = std::make_shared<autil::LockFreeThreadPool>(8, 1000, nullptr, "WaitCacheThreadPool");
-    if (!wait_cache_thread_pool_->start()) {
-        RTP_LLM_LOG_ERROR("wait cache thread pool start failed");
-        wait_cache_thread_pool_.reset();
-        return false;
-    }
-
     return true;
 }
 
@@ -376,11 +366,7 @@ std::shared_ptr<AsyncContext> KVCacheManager::asyncLoadCache(const BatchKVCacheR
 
     // TODO(LXQ): only support batch0 now, need to support all batch?
     std::shared_ptr<KVCacheResourceV1> resource(batch_resource, &(batch_resource->batch_resource.at(0)));
-    auto                               context = memory_connector_->asyncRead(resource, nullptr);
-    if (context) {
-        wait_cache_thread_pool_->pushTask([context]() { context->waitDone(); });
-    }
-    return context;
+    return memory_connector_->asyncRead(resource, nullptr);
 }
 
 bool KVCacheManager::copyCache(const CopyCacheRequestPB& request, CopyCacheResponsePB& response) {

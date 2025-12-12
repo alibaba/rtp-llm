@@ -25,10 +25,10 @@ public:
     ~MemoryConnectorAsyncContext() override;
 
 public:
-    void waitDone() override;
-    void cancel() override;
     bool done() const override;
     bool success() const override;
+    void cancel() override;
+    void waitDone();
 
 private:
     std::shared_ptr<TPBroadcastResult<CopyCacheRequestPB, CopyCacheResponsePB>> broadcast_result_;
@@ -103,6 +103,7 @@ private:
     std::shared_ptr<BlockPool> createBlockPool(size_t block_size);
     bool                       ensureEnoughFreeBlocks(const std::shared_ptr<BlockPool>& block_pool, size_t need_blocks);
     void                       printCopyPlan(const std::vector<CopyInfoPerKey>& copy_infos) const;
+    void                       waitContextDoneAsync(const std::shared_ptr<MemoryConnectorAsyncContext>& context);
 
     void reportReadMetrics(
         bool success, int64_t latency_us, int64_t input_block_num, int64_t matched_block_num, int64_t read_block_num);
@@ -120,6 +121,7 @@ private:
     std::map<size_t, std::shared_ptr<BlockPool>> block_pools_;
     std::shared_ptr<MemoryBlockCache>            block_cache_;
     std::shared_ptr<TpBroadcastManager>          tp_broadcast_manager_;
+    std::shared_ptr<autil::LockFreeThreadPool>   wait_done_thread_pool_;
 
     // metrics reporter
     kmonitor::MetricsReporterPtr metrics_reporter_;
