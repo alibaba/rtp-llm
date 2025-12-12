@@ -2,6 +2,9 @@ common --experimental_downloader_config=bazel/bazel_downloader.cfg
 fetch:downloader --experimental_remote_downloader=grpc://com.taobao.search.bazel.server:9092 --remote_cache=grpc://com.taobao.search.bazel.server:9092
 
 
+# Protobuf now requires C++14 or higher for protobuf compilation
+build --cxxopt=-std=c++14 --host_cxxopt=-std=c++14
+
 build --python_top=//:python310 --incompatible_use_python_toolchains=false # force use /opt/conda310/bin/python3
 
 build --spawn_strategy=local # avoid nvcc conflicts
@@ -32,6 +35,19 @@ build --define=xft_use_icx=true
 build --define=frontend=false
 build --linkopt -ldl # exception backtrace
 build --define=NVSHMEM_DIR=/
+build --action_env PATH="/opt/taobao/java/bin/:/bin:/usr/bin:/usr/local/bin:$PATH"
+
+# Java configuration for JDK 21
+build --java_language_version=21
+build --java_runtime_version=remotejdk_21
+build --tool_java_language_version=21
+build --tool_java_runtime_version=remotejdk_21
+
+# Suppress obsolete version warnings
+build --javacopt="-Xlint:-options"
+
+# Disable Java header compilation to fix Turbine + Lombok compatibility
+build --java_header_compilation=false
 
 build:cuda --copt="-DENABLE_BF16=1"
 build:cuda --copt="-DBUILD_CUTLASS_MIXED_GEMM=ON"
