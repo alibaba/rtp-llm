@@ -25,8 +25,6 @@ tensorrt = [
 flashinfer = [
     "apache-tvm-ffi",
     "flashinfer-python",
-    "flashinfer-cubin",
-    "flashinfer-jit-cache",
 ]
 
 xft_dep = select({
