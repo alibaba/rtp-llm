@@ -579,11 +579,16 @@ class ModelRpcClient(object):
 
         try:
             loop = asyncio.get_event_loop()
+            # Calculate server index for load balancing
+            array_length = len(address_list)
+            server_index = input_py.request_id % array_length
+            selected_address: str = address_list[server_index]
+            
             async for response in _handle_grpc_stream_in_executor(
                     loop,
-                    address_list[input_py.request_id % len(address_list)],
-                    input_py,
+                    selected_address,
                     input_pb,
+                    input_py,
                     self.options,
                     grpc_timeout_seconds,
                     stream_state):
