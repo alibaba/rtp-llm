@@ -442,7 +442,7 @@ class Pipeline(object):
         stop_word_id_slices = get_stop_word_slices(stop_word_ids)
 
         stream: AsyncGenerator[GenerateOutputs, None] = (
-            self.backend_rpc_server_visitor.enqueue(input)
+            await self.backend_rpc_server_visitor.enqueue(input)
         )
 
         decoding_states: List[DecodingState] = []
