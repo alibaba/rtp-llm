@@ -57,7 +57,7 @@ def init_distributed_environment(
     
     assert backend in ["nccl"], "backend current only supports nccl"
     ip = parallelism_config.nccl_ip
-    port = parallelism_config.tp_nccl_port
+    port = parallelism_config.th_nccl_port
     world_rank = parallelism_config.world_rank
     world_size = parallelism_config.world_size
     local_rank = parallelism_config.local_rank
