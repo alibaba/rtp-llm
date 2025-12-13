@@ -3,9 +3,18 @@
 namespace cuda_graph {
 using namespace rtp_llm;
 
-void CudaGraphDecodePaddingOp::init(py::object py_instance) {
-    cuda_graph_runner_ = createCudaGraphRunner(std::move(py_instance));
-    // initializeResource();
+void CudaGraphDecodePaddingOp::init(py::object       py_instance,
+                                    int64_t          hidden_size,
+                                    int64_t          max_seq_len,
+                                    int64_t          tokens_per_block,
+                                    int64_t          kv_block_offset,
+                                    std::vector<int> decode_capture_batch_sizes) {
+    cuda_graph_runner_ = createCudaGraphRunner(std::move(py_instance),
+                                               hidden_size,
+                                               max_seq_len,
+                                               tokens_per_block,
+                                               kv_block_offset,
+                                               decode_capture_batch_sizes);
     cuda_graph_runner_->initCapture();
 }
 
@@ -13,7 +22,12 @@ int CudaGraphDecodePaddingOp::getCurrentRealGraphSize() {
     return cuda_graph_runner_->getCurrentRealGraphBs();
 }
 
-CudaGraphRunnerPtr CudaGraphDecodePaddingOp::createCudaGraphRunner(py::object py_instance) {
+CudaGraphRunnerPtr CudaGraphDecodePaddingOp::createCudaGraphRunner(py::object       py_instance,
+                                                                   int64_t          hidden_size,
+                                                                   int64_t          max_seq_len,
+                                                                   int64_t          tokens_per_block,
+                                                                   int64_t          kv_block_offset,
+                                                                   std::vector<int> decode_capture_batch_sizes) {
     DeviceInitParams params;
     params.hw_kernel_config.enable_cuda_graph            = true;
     params.concurrency_config.concurrency_limit          = 128;
@@ -33,22 +47,21 @@ CudaGraphRunnerPtr CudaGraphDecodePaddingOp::createCudaGraphRunner(py::object py
 PyModelInputs CudaGraphDecodePaddingOp::buildInputs(int64_t batch_size,
                                                     int64_t max_seq_len,
                                                     int64_t num_tokens_per_bs,
-                                                    int64_t seq_size_per_block) {
+                                                    int64_t seq_size_per_block,
+                                                    int64_t kv_block_offset) {
     PyModelInputs inputs;
     inputs.attention_inputs.is_prefill = false;
-    // int  hidden_size                   = 896;
-    // int  layer_num                     = 24;
-    // int  block_num                     = 26037;
-    int  max_num_token = batch_size * num_tokens_per_bs;
-    auto options2      = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
-    auto options3      = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
+    int  max_num_token                 = batch_size * num_tokens_per_bs;
+    auto options2 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
+    auto options3 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
     RTP_LLM_LOG_INFO(
-        "buildInputs check, batch_size: %d, max_seq_len: %d, num_tokens_per_bs: %d, seq_size_per_block: %d, max_num_token: %d",
+        "buildInputs check, batch_size: %d, max_seq_len: %d, num_tokens_per_bs: %d, seq_size_per_block: %d, max_num_token: %d, kv_block_offset: %d",
         batch_size,
         max_seq_len,
         num_tokens_per_bs,
         seq_size_per_block,
-        max_num_token);
+        max_num_token,
+        kv_block_offset);
     // input_ids [tokens_nums] = [batch_size * num_tokens_per_bs]
     inputs.input_ids = torch::full({max_num_token}, 10, options3);
     RTP_LLM_LOG_INFO("build input_ids shapes: %d\n", inputs.input_ids.sizes());
@@ -83,10 +96,23 @@ PyModelInputs CudaGraphDecodePaddingOp::buildInputs(int64_t batch_size,
 PYBIND11_MODULE(libtest_cuda_graph_decode_ops, m) {
     py::class_<cuda_graph::CudaGraphDecodePaddingOp>(m, "CudaGraphDecodePaddingOp")
         .def(py::init<>())
-        .def("init", &CudaGraphDecodePaddingOp::init)
+        .def("init",
+             &CudaGraphDecodePaddingOp::init,
+             py::arg("py_instance"),
+             py::arg("hidden_size"),
+             py::arg("max_seq_len"),
+             py::arg("tokens_per_block"),
+             py::arg("kv_block_offset"),
+             py::arg("decode_capture_batch_sizes"))
         .def("forward", &cuda_graph::CudaGraphDecodePaddingOp::forward)
         .def("getCurrentRealGraphSize", &cuda_graph::CudaGraphDecodePaddingOp::getCurrentRealGraphSize)
-        .def("buildInputs", &cuda_graph::CudaGraphDecodePaddingOp::buildInputs);
+        .def("buildInputs",
+             &cuda_graph::CudaGraphDecodePaddingOp::buildInputs,
+             py::arg("batch_size"),
+             py::arg("max_seq_len"),
+             py::arg("num_tokens_per_bs"),
+             py::arg("seq_size_per_block"),
+             py::arg("kv_block_offset"));
 }
 
 }  // namespace cuda_graph
