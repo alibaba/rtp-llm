@@ -77,7 +77,7 @@ namespace rtp_llm {
 grpc::Status PrefillRpcServer::init(const EngineInitParams&                                maga_init_params,
                                     py::object                                             mm_process_engine,
                                     std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params) {
-    RTP_LLM_CHECK_WITH_INFO(maga_init_params.gpt_init_parameter.role_type_ == RoleType::PREFILL,
+    RTP_LLM_CHECK_WITH_INFO(maga_init_params.pd_sep_config.role_type == RoleType::PREFILL,
                             "prefill's role_type must be PREFILL");
     auto ret = RemoteRpcServer::init(maga_init_params, mm_process_engine, std::move(propose_params));
     if (!ret.ok()) {
@@ -87,7 +87,7 @@ grpc::Status PrefillRpcServer::init(const EngineInitParams&                     
 }
 
 ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> stream) {
-    static int max_wait_timeout_us = maga_init_params_.gpt_init_parameter.prefill_max_wait_timeout_ms_ * 1000;
+    static int max_wait_timeout_us = maga_init_params_.pd_sep_config.prefill_max_wait_timeout_ms * 1000;
     auto       begin_time_us       = currentTimeUs();
     while (stream->waiting()) {
         usleep(100);
@@ -130,9 +130,9 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
     }
 
     // If no host specified in request, check if there's a master role
+    char* remote_rpc_server_ip_env = std::getenv("REMOTE_RPC_SERVER_IP");
     bool has_master_role =
-        !maga_init_params_.gpt_init_parameter.service_discovery_config.use_local
-        && !maga_init_params_.gpt_init_parameter.service_discovery_config.remote_rpc_server_ip.empty();
+        (remote_rpc_server_ip_env != nullptr && strlen(remote_rpc_server_ip_env) > 0);
 
     // If no host specified in request and no master role, this is a direct prefill request
     // In this case, we still need to select decode machines as specified in the requirements
@@ -183,7 +183,7 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     RTP_LLM_LOG_DEBUG("request [%ld] start to remote allocate resource", prefill_context.request_id);
     prefill_context.client_context.reset(new ClientContext());
     auto request_timeout_ms = prefill_context.request_timeout_ms;
-    auto max_rpc_timeout_ms = maga_init_params_.gpt_init_parameter.max_rpc_timeout_ms_;
+    auto max_rpc_timeout_ms = maga_init_params_.pd_sep_config.max_rpc_timeout_ms;
     auto final_timeout_ms   = max_rpc_timeout_ms > 0 ? max_rpc_timeout_ms : MAX_GRPC_TIMEOUT_MS;
     final_timeout_ms        = request_timeout_ms > 0 ? request_timeout_ms : final_timeout_ms;
 
@@ -387,8 +387,10 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
                                                   meta_);
     prefill_context.onflight_requests      = onflight_requests_;
     prefill_context.loading_cache_requests = loading_cache_requests_;
-    auto max_retry_times                   = maga_init_params_.gpt_init_parameter.prefill_retry_times_;
-    auto max_retry_timeout_ms              = maga_init_params_.gpt_init_parameter.prefill_retry_timeout_ms_;
+    
+
+    auto max_retry_times                   = maga_init_params_.pd_sep_config.prefill_retry_times;
+    auto max_retry_timeout_ms              = maga_init_params_.pd_sep_config.prefill_retry_timeout_ms;
     int  retry_interval_ms                 = 1;
 
     try {

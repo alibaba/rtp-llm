@@ -1,7 +1,7 @@
 import logging
 from typing import Optional
 
-from rtp_llm.config.task_type import TaskType
+from rtp_llm.ops import TaskType
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.downstream_modules.custom_module import CustomModule
 from rtp_llm.models.downstream_modules.reranker.qwen3_reranker import (
@@ -28,10 +28,10 @@ class QwenV3(QWenV2):
         return config
 
     def _init_custom_module(self) -> Optional[CustomModule]:
-        logging.info(f"task_type : {self.task_type}")
-        if self.task_type == TaskType.RERANKER:
+        logging.info(f"task_type : {self.model_config.task_type}")
+        if self.model_config.task_type == TaskType.RERANKER:
             logging.info("using Qwen3RerankerModule as custom module")
-            return Qwen3RerankerModule(self.config, self.tokenizer)
+            return Qwen3RerankerModule(self.model_config, self.tokenizer)
         return super()._init_custom_module()
 
 

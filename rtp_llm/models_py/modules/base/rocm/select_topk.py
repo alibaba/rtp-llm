@@ -2,11 +2,12 @@ import aiter
 import torch
 from torch import nn
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
+import aiter
 
 
 class SelectTopk(nn.Module):
-    def __init__(self, config: GptInitModelParameters):
+    def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
         self.top_k = config.moe_k

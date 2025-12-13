@@ -5,7 +5,7 @@ from typing import Any, Optional
 import torch
 
 import rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe as mm
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
@@ -62,14 +62,13 @@ class TopKWeightAndReduceNaiveBatched(object):
 
         return output
 
-
 class BatchedDataRouter(mm.FusedMoeDataRouter):
     @classmethod
     def router_type(cls):
         return RouterType.BATCHED_DATA
 
     @classmethod
-    def check_conditions(cls, checker: Any, config: GptInitModelParameters) -> None:
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         """Check if BatchedDataRouter can handle the configuration"""
         from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
             MoeConfigResolver,

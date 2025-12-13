@@ -7,8 +7,9 @@ from torch import dtype as _dtype
 from torch import nn
 from torch.profiler import ProfilerActivity, profile
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.models_py.modules import LinearFactory
+from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.models_py.modules.factory import LinearFactory
+from rtp_llm.ops import ParallelismConfig
 
 from rtp_llm.ops.compute_ops import FusedMoEOp  # isort:skip
 
@@ -106,17 +107,25 @@ class FusedMoEOpTest(TestCase):
         inter_dim: int,
     ):
         torch.manual_seed(0)
-        model_param = GptInitModelParameters(1, 128, 1, 1, 5120)
-        model_param.expert_num = num_expert
-        model_param.moe_k = top_k
-        model_param.has_moe_norm = True
-        model_param.hidden_size = hidden_dim
-        model_param.moe_inter_padding_size = inter_dim
-        model_param.moe_normalize_expert_scale = 0
-        model_param.activation_type = "SiGLU"
-        model_param.ep_size = 1
-        model_param.ep_rank = 0
-        fused_moe_op = FusedMoEOp(model_param)
+        model_config = ModelConfig()
+        model_config.attn_config.head_num = 1
+        model_config.attn_config.size_per_head = 128
+        model_config.num_layers = 1
+        model_config.max_seq_len = 1
+        model_config.vocab_size = 5120
+        model_config.expert_num = num_expert
+        model_config.moe_k = top_k
+        model_config.has_moe_norm = True
+        model_config.hidden_size = hidden_dim
+        model_config.moe_inter_size = inter_dim
+        model_config.moe_normalize_expert_scale = 0
+        model_config.activation_type = "SiGLU"
+        
+        parallelism_config = ParallelismConfig()
+        parallelism_config.ep_size = 1
+        parallelism_config.ep_rank = 0
+        
+        fused_moe_op = FusedMoEOp(model_config, parallelism_config)
 
         hidden_states = (
             torch.rand(num_tokens, hidden_dim, dtype=dtype).to("cuda") * 2 - 1

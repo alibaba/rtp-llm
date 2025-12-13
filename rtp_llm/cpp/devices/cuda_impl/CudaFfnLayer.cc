@@ -465,7 +465,8 @@ FfnLayerOutput CudaDevice::moeFfn(const FfnLayerParams& params, const MoeGateSel
     // note: num_expert is physical expert number, including extra expert
     const auto num_expert             = moe_conf.expert_num + moe_conf.extra_expert_num;
     const auto top_k                  = moe_conf.top_k;
-    const auto moe_inter_size         = moe_conf.moe_inter_padding_size;
+    bool       is_gated_activation    = isGatedActivation(params.configs.activation_type);
+    auto       moe_inter_size         = is_gated_activation ? weights.moe_gate_weight->kernel->shape()[1] / 2 : weights.moe_gate_weight->kernel->shape()[1];
     const auto normalize_expert_scale = moe_conf.normalize_expert_scale;
 
     // TODO group_size

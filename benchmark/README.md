@@ -10,7 +10,6 @@ wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/r
 # INT8_KV_CACHE mean use int8 store kv cache, default fp16
 export TOKENIZER_PATH=/path/to/tokenizer
 export CHECKPOINT_PATH=/path/to/model
-export FT_SERVER_TEST=1
 export GUARANTE_GENERATE_MEM=1
 export WEIGHT_TYPE=fp16
 export INT8_KV_CACHE=0

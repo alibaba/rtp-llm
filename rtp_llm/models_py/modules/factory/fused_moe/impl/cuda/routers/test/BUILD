@@ -3,7 +3,7 @@ py_test(
     srcs = ["deepep_normal_router_test.py"],
     deps = [
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
-        "//rtp_llm/models_py/distributed/test:process_group_state"
+        "//rtp_llm/models_py/distributed:collective_torch"
     ],
     env = {"GPU_COUNT": "2"},
     tags = ["open_skip", "H20"],
@@ -15,7 +15,7 @@ py_test (
     srcs = ["deepep_low_latency_router_test.py"],
     deps = [
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
-        "//rtp_llm/models_py/distributed/test:process_group_state"
+        "//rtp_llm/models_py/distributed:collective_torch"
     ],
     env = {"GPU_COUNT": "2"},
     tags = ["open_skip", "H20"],

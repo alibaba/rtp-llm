@@ -33,12 +33,11 @@ protected:
         mock_metric_reporter_ = std::make_shared<MockApiServerMetricReporter>();
         auto metric_reporter  = std::dynamic_pointer_cast<ApiServerMetricReporter>(mock_metric_reporter_);
 
-        rtp_llm::GptInitParameter params;
         auto                      request_counter = std::make_shared<autil::AtomicCounter>();
         auto                      controller      = std::make_shared<ConcurrencyController>(1, false);
 
         inference_service_ = std::make_shared<InferenceService>(
-            engine, nullptr, request_counter, token_processor, controller, params, metric_reporter);
+            engine, nullptr, request_counter, token_processor, controller, model_config_, metric_reporter);
     }
     void TearDown() override {}
 
@@ -60,30 +59,33 @@ protected:
         input->input_ids = std::make_shared<rtp_llm::Buffer>(
             rtp_llm::MemoryType::MEMORY_CPU, rtp_llm::DataType::TYPE_INT32, shape, data_.data());
 
-        rtp_llm::GptInitParameter param;
-        param.max_seq_len_ = data_.size();
+        ModelConfig model_config;
+        RuntimeConfig runtime_config;
+        model_config.max_seq_len = data_.size();
 
-        auto mock_stream = std::make_shared<MockGenerateStream>(input, param);
+        auto mock_stream = std::make_shared<MockGenerateStream>(input, model_config, runtime_config);
         return mock_stream;
     }
 
     void SetToMaster() {
-        autil::EnvGuard tp_size_env("TP_SIZE", "1");
-        autil::EnvGuard pp_size_env("PP_SIZE", "1");
-        autil::EnvGuard world_rank_env("WORLD_RANK", "0");
-        autil::EnvGuard world_size_env("WORLD_SIZE", "1");
-        autil::EnvGuard local_world_size_env("LOCAL_WORLD_SIZE", "1");
-        auto&           parallel_info = ParallelInfo::globalParallelInfo();
-        parallel_info.reload();
+        auto& parallel_info = ParallelInfo::globalParallelInfo();
+        parallel_info.setTpSize(1);
+        parallel_info.setPpSize(1);
+        parallel_info.setWorldRank(0);
+        parallel_info.setWorldSize(1);
+        parallel_info.setLocalWorldSize(1);
+        parallel_info.setDpSize(1);
+        parallel_info.setEpSize(1);
     }
     void SetToWorker() {
-        autil::EnvGuard tp_size_env("TP_SIZE", "1");
-        autil::EnvGuard pp_size_env("PP_SIZE", "2");
-        autil::EnvGuard world_rank_env("WORLD_RANK", "1");
-        autil::EnvGuard world_size_env("WORLD_SIZE", "2");
-        autil::EnvGuard local_world_size_env("LOCAL_WORLD_SIZE", "1");
-        auto&           parallel_info = ParallelInfo::globalParallelInfo();
-        parallel_info.reload();
+        auto& parallel_info = ParallelInfo::globalParallelInfo();
+        parallel_info.setTpSize(1);
+        parallel_info.setPpSize(2);
+        parallel_info.setWorldRank(1);
+        parallel_info.setWorldSize(2);
+        parallel_info.setLocalWorldSize(1);
+        parallel_info.setDpSize(1);
+        parallel_info.setEpSize(1);
     }
 
 protected:
@@ -93,6 +95,7 @@ protected:
     std::shared_ptr<MockApiServerMetricReporter>         mock_metric_reporter_;
     std::shared_ptr<InferenceService>                    inference_service_;
     std::vector<int>                                     data_;
+    ModelConfig                                          model_config_;
 };
 
 TEST_F(InferenceServiceTest, Inference_IsInternal_IsNotWorker) {
@@ -373,7 +376,7 @@ TEST_F(InferenceServiceTest, iterateStreams) {
 
     autil::StageTime  timer;
     const std::string body = R"({"prompt": "hello"})";
-    auto              req  = InferenceParsedRequest::extractRequest(body, inference_service_->params_, nullptr);
+    auto              req  = InferenceParsedRequest::extractRequest(body, model_config_, nullptr);
     auto [cnt, res]        = inference_service_->iterateStreams(streams, writer_ptr, req, timer);
 
     ASSERT_EQ(cnt, 2);
@@ -400,7 +403,7 @@ TEST_F(InferenceServiceTest, iterateStreams_CancelError) {
 
     autil::StageTime  timer;
     const std::string body = R"({"prompt": "hello"})";
-    auto              req  = InferenceParsedRequest::extractRequest(body, inference_service_->params_, nullptr);
+    auto              req  = InferenceParsedRequest::extractRequest(body, model_config_, nullptr);
     try {
         auto [cnt, res] = inference_service_->iterateStreams(streams, writer_ptr, req, timer);
         FAIL() << "should throw HttpApiServerException::CANCELLED_ERROR";
@@ -458,7 +461,7 @@ TEST_F(InferenceServiceTest, FormatResponse) {
 
 TEST_F(InferenceServiceTest, ExtractRequest_PromptBatch) {
     std::string jsonStr = R"({"prompt_batch": ["prompt1", "prompt2", "prompt3"]})";
-    auto        req     = InferenceParsedRequest::extractRequest(jsonStr, inference_service_->params_, nullptr);
+    auto        req     = InferenceParsedRequest::extractRequest(jsonStr, model_config_, nullptr);
     ASSERT_EQ(req.batch_infer, true);
     ASSERT_EQ(req.is_streaming, false);
     ASSERT_EQ(req.input_texts.size(), 3);
@@ -468,7 +471,7 @@ TEST_F(InferenceServiceTest, ExtractRequest_PromptBatch) {
 
 TEST_F(InferenceServiceTest, ExtractRequest_Prompt) {
     std::string jsonStr = R"({"prompt": "prompt1"})";
-    auto        req     = InferenceParsedRequest::extractRequest(jsonStr, inference_service_->params_, nullptr);
+    auto        req     = InferenceParsedRequest::extractRequest(jsonStr, model_config_, nullptr);
     ASSERT_EQ(req.batch_infer, false);
     ASSERT_EQ(req.is_streaming, false);
     ASSERT_EQ(req.input_texts.size(), 1);
@@ -479,7 +482,7 @@ TEST_F(InferenceServiceTest, ExtractRequest_Prompt) {
 TEST_F(InferenceServiceTest, ExtractRequest_AdapterName) {
     std::string jsonStr =
         R"({"prompt_batch": ["prompt1", "prompt2", "prompt3"], "generate_config": {"adapter_name": ["test0", "test1", "test2"]}})";
-    auto req = InferenceParsedRequest::extractRequest(jsonStr, inference_service_->params_, nullptr);
+    auto req = InferenceParsedRequest::extractRequest(jsonStr, model_config_, nullptr);
     ASSERT_EQ(req.batch_infer, true);
     ASSERT_EQ(req.is_streaming, false);
     ASSERT_EQ(req.input_texts.size(), 3);

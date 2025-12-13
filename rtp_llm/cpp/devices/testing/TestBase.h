@@ -16,7 +16,7 @@
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/core/Buffer.h"
 #include "rtp_llm/cpp/utils/Logger.h"
-#include "rtp_llm/cpp/config/GptInitParameter.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/cache/CacheManager.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
@@ -85,11 +85,37 @@ public:
     }
 
     virtual void initTestDevices() {
-        rtp_llm::GptInitParameter gpt_init_params;
-        gpt_init_params.device_resource_config.device_reserve_memory_bytes = device_reserve_memory_size_;
-        gpt_init_params.device_resource_config.host_reserve_memory_bytes   = host_reserve_memory_size_;
-        gpt_init_params.max_seq_len_                                       = max_seq_len_;
-        rtp_llm::DeviceFactory::initDevices(gpt_init_params);
+        rtp_llm::ParallelismConfig parallelism_config;
+        rtp_llm::ModelConfig model_config;
+        model_config.max_seq_len = max_seq_len_;
+        rtp_llm::EPLBConfig eplb_config;
+        rtp_llm::FMHAConfig fmha_config;
+        rtp_llm::DeviceResourceConfig device_resource_config;
+        device_resource_config.device_reserve_memory_bytes = device_reserve_memory_size_;
+        device_resource_config.host_reserve_memory_bytes   = host_reserve_memory_size_;
+        rtp_llm::MoeConfig moe_config;
+        rtp_llm::SpeculativeExecutionConfig sp_config;
+        rtp_llm::MiscellaneousConfig misc_config;
+        rtp_llm::ProfilingDebugLoggingConfig profiling_debug_logging_config;
+        rtp_llm::HWKernelConfig hw_kernel_config;
+        rtp_llm::ConcurrencyConfig concurrency_config;
+        rtp_llm::FfnDisAggregateConfig ffn_disaggregate_config;
+        rtp_llm::RuntimeConfig runtime_config;
+        
+        rtp_llm::DeviceFactory::initDevices(
+            parallelism_config,
+            model_config,
+            eplb_config,
+            fmha_config,
+            device_resource_config,
+            moe_config,
+            sp_config,
+            misc_config,
+            profiling_debug_logging_config,
+            hw_kernel_config,
+            concurrency_config,
+            ffn_disaggregate_config,
+            runtime_config);
         device_ = rtp_llm::DeviceFactory::getDefaultDevice();
     }
 

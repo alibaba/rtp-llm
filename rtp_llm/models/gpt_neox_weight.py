@@ -19,10 +19,6 @@ from rtp_llm.utils.model_weight import (
 
 
 class GPTNeoxWeight(ModelDeployWeightInfo):
-    def __init__(self, config, tp_size, tp_rank):
-        super().__init__(config, tp_size, tp_rank)
-        self.norm = config.norm_type
-
     def _get_weight_info(self):
         weights = [
             AtomicWeight(
@@ -143,7 +139,7 @@ class GPTNeoxWeight(ModelDeployWeightInfo):
 
             # default use parallel residual: x = x + attn(ln1(x)) + mlp(ln2(x))
 
-            if self.norm == "rmsnorm":
+            if self.model_config.norm == "rmsnorm":
                 weights.extend(
                     [
                         AtomicWeight(
@@ -186,7 +182,7 @@ class GPTNeoxWeight(ModelDeployWeightInfo):
                         ),
                     ]
                 )
-            elif self.norm == "layernorm":
+            elif self.model_config.norm == "layernorm":
                 weights.extend(
                     [
                         AtomicWeight(

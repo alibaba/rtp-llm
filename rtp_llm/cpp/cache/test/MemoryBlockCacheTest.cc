@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/devices/testing/TestBase.h"
 #include "rtp_llm/cpp/core/Buffer.h"
 #include "rtp_llm/cpp/core/Types.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 
 // 定义MemoryBlockCacheOp枚举（如果不存在的话）
 namespace rtp_llm {
@@ -25,15 +26,15 @@ protected:
     void SetUp() override {
         DeviceTestBase::SetUp();
 
-        // 创建单TP的GptInitParameter
-        gpt_init_params_.tp_size_ = 1;
-        gpt_init_params_.tp_rank_ = 0;
+        // 创建单TP的配置
+        parallelism_config_.tp_size = 1;
+        parallelism_config_.tp_rank = 0;
 
         gpu_allocator_ = std::make_unique<KVCacheAllocator>(gpu_config_, device_);
         ASSERT_TRUE(gpu_allocator_->init());
 
-        memory_cache_ =
-            std::make_unique<MemoryBlockCache>(cpu_config_, device_, gpu_allocator_.get(), gpt_init_params_);
+        memory_cache_ = std::make_unique<MemoryBlockCache>(
+            cpu_config_, device_, gpu_allocator_.get(), parallelism_config_, kv_cache_config_, runtime_config_);
         ASSERT_TRUE(memory_cache_->init());
     }
 
@@ -213,7 +214,9 @@ protected:
     CacheConfig                       gpu_config_ = initGPUConfig();
     CacheConfig                       cpu_config_ = initCPUConfig();
     std::unique_ptr<KVCacheAllocator> gpu_allocator_;
-    GptInitParameter                  gpt_init_params_;
+    ParallelismConfig                 parallelism_config_;
+    KVCacheConfig                     kv_cache_config_;
+    RuntimeConfig                     runtime_config_;
     std::unique_ptr<MemoryBlockCache> memory_cache_;
     int64_t                           request_id_ = 0;
 };
@@ -225,8 +228,8 @@ TEST_F(MemoryBlockCacheTest, ConstructorAndInitTest) {
     EXPECT_NE(memory_cache_, nullptr);
 
     // 测试单TP配置
-    EXPECT_EQ(gpt_init_params_.tp_size_, 1);
-    EXPECT_EQ(gpt_init_params_.tp_rank_, 0);
+    EXPECT_EQ(parallelism_config_.tp_size, 1);
+    EXPECT_EQ(parallelism_config_.tp_rank, 0);
     EXPECT_EQ(memory_cache_->size(), 0);
     EXPECT_EQ(memory_cache_->capacity(), 7);
 }
@@ -399,7 +402,7 @@ TEST_F(MemoryBlockCacheTest, LRUEvictionTest) {
     // 创建一个较小的配置来测试淘汰
     CacheConfig small_config(KVCacheParam({2, 4, 4, 64, 1, rtp_llm::TYPE_FP32}));  // 只有3个block
     auto        small_memory_cache =
-        std::make_unique<MemoryBlockCache>(small_config, device_, gpu_allocator_.get(), gpt_init_params_);
+        std::make_unique<MemoryBlockCache>(small_config, device_, gpu_allocator_.get(), parallelism_config_, kv_cache_config_, runtime_config_);
     ASSERT_TRUE(small_memory_cache->init());
     ASSERT_EQ(3, small_memory_cache->capacity());
 

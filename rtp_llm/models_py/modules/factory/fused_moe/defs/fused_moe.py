@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional, Union, final
 
 import torch
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
@@ -44,7 +44,7 @@ class FusedMoeDataRouter(ABC):
         raise NotImplementedError
 
     @classmethod
-    def check_conditions(cls, checker: Any, config: GptInitModelParameters) -> None:
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         """Check if this router can handle the given configuration.
 
         Subclasses should override this method to check router-specific conditions.
@@ -94,7 +94,7 @@ class FusedMoeExpertExecutor(ABC):
         raise NotImplementedError
 
     @classmethod
-    def check_conditions(cls, checker: Any, config: GptInitModelParameters) -> None:
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         """Check if this executor can handle the given configuration.
 
         Subclasses should override this method to check executor-specific conditions.

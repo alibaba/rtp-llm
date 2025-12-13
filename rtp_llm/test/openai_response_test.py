@@ -2,30 +2,30 @@ import asyncio
 import copy
 import functools
 import json
-import logging
 import os
 from contextlib import asynccontextmanager, contextmanager
 from typing import Any, AsyncGenerator, Callable, List
 from unittest import IsolatedAsyncioTestCase, main
 
 import torch
-from transformers import AutoTokenizer
 from typing_extensions import override
 
 from rtp_llm.config.generate_config import GenerateConfig
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.py_config_modules import (
+    GenerateEnvConfig,
+    ModelArgs,
+    PyEnvConfigs,
+    PyMiscellaneousConfig,
+    RenderConfig,
+    VitConfig,
+)
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.frontend.tokenizer_factory.tokenizers.tokenization_qwen import (
     QWenTokenizer,
 )
-from rtp_llm.models.base_model import (
-    AuxInfo,
-    BaseModel,
-    GenerateInput,
-    GenerateOutput,
-    GenerateOutputs,
-)
+from rtp_llm.models.base_model import BaseModel
 from rtp_llm.openai.api_datatype import (
     ChatCompletionExtraOutputs,
     ChatCompletionRequest,
@@ -46,51 +46,18 @@ from rtp_llm.openai.renderers.qwen3_code_renderer import Qwen3CoderRenderer
 from rtp_llm.openai.renderers.qwen_reasoning_tool_renderer import (
     QwenReasoningToolRenderer,
 )
+from rtp_llm.ops import FfnDisAggregateConfig, PDSepConfig, SpecialTokens
+from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.test.utils.stream_util import (
     is_valid_tool_call_chunk,
     merge_stream_responses,
 )
-
-
-@asynccontextmanager
-async def think_mode_context():
-    """异步上下文管理器：临时设置 THINK_MODE = 1"""
-    original_mode = getattr(custom_renderer, "THINK_MODE", 0)
-    try:
-        custom_renderer.THINK_MODE = 1
-        yield
-    finally:
-        custom_renderer.THINK_MODE = original_mode
-
-
-@contextmanager
-def think_mode_context_sync():
-    """同步上下文管理器：临时设置 THINK_MODE = 1"""
-    original_mode = getattr(custom_renderer, "THINK_MODE", 0)
-    try:
-        custom_renderer.THINK_MODE = 1
-        yield
-    finally:
-        custom_renderer.THINK_MODE = original_mode
-
-
-def think_mode(func):
-    """装饰器：在函数执行期间设置 THINK_MODE = 1"""
-
-    @functools.wraps(func)
-    async def async_wrapper(*args, **kwargs):
-        async with think_mode_context():
-            return await func(*args, **kwargs)
-
-    @functools.wraps(func)
-    def sync_wrapper(*args, **kwargs):
-        with think_mode_context_sync():
-            return func(*args, **kwargs)
-
-    if asyncio.iscoroutinefunction(func):
-        return async_wrapper
-    else:
-        return sync_wrapper
+from rtp_llm.utils.base_model_datatypes import (
+    AuxInfo,
+    GenerateInput,
+    GenerateOutput,
+    GenerateOutputs,
+)
 
 
 async def fake_output_generator(
@@ -159,17 +126,6 @@ async def fake_output_generator_once(
 MAX_SEQ_LEN = 1024
 
 
-class FakeModel(BaseModel):
-    def load_tokenizer(self):
-        pass
-
-    def init_misc(self):
-        pass
-
-    def load(self, ckpt_path: str):
-        pass
-
-
 class BaseToolCallTestSuite:
     """工具调用测试的基类，包含通用的测试逻辑"""
 
@@ -194,8 +150,6 @@ class BaseToolCallTestSuite:
         raise NotImplementedError("子类必须实现 _assert_tool_call_response 方法")
 
     # 可选重写的方法
-    def _setup_additional_environment(self):
-        """设置额外的环境变量 - 子类可以重写"""
 
     def _create_tokenizer(self, tokenizer_path):
         """创建tokenizer - 子类可以重写"""
@@ -244,18 +198,40 @@ class BaseToolCallTestSuite:
         """验证流式chunk - 子类可以重写"""
 
     def _setup_environment(self):
-        """设置测试环境"""
-        os.environ["MODEL_TYPE"] = self._get_model_type()
-
-        # 设置额外的环境变量
-        self._setup_additional_environment()
-
         tokenizer_path = f"{self.parent.test_data_path}/{self._get_tokenizer_path()}"
         tokenizer = self._create_tokenizer(tokenizer_path)
 
-        self.parent.model.tokenizer = tokenizer
+        self.parent.tokenizer = tokenizer
+        # Create minimal configs for test
+        generate_env_config = GenerateEnvConfig()
+        render_config = RenderConfig()
+        misc_config = PyMiscellaneousConfig()
+        vit_config = VitConfig()
+        special_tokens = self.parent.model_config.special_tokens
+        
+        # Create ModelConfig object for OpenaiEndpoint
+        model_config = ModelConfig()
+        model_config.generate_env_config = generate_env_config
+        model_config.render_config = render_config
+        model_config.special_tokens = special_tokens
+        model_config.max_seq_len = self.parent.model_config.max_seq_len
+        model_config.template_type = None
+        model_config.model_name = ""
+        model_config.ckpt_path = ""
+        
+        pd_sep_config = PDSepConfig()
+        backend_rpc_server_visitor = BackendRPCServerVisitor(
+            max_seq_len=self.parent.model_config.max_seq_len,
+            seq_size_per_block=64,
+            pd_sep_config=pd_sep_config,
+            addresses=["localhost:8080"],  # Default test address
+        )
         self.parent.endpoint = OpenaiEndpoint(
-            self.parent.model.config, self.parent.model.tokenizer, None
+            model_config=model_config,
+            misc_config=misc_config,
+            vit_config=vit_config,
+            tokenizer=self.parent.tokenizer,
+            backend_rpc_server_visitor=backend_rpc_server_visitor,
         )
 
         return tokenizer
@@ -271,13 +247,22 @@ class BaseToolCallTestSuite:
         stream=True,
         include_stop_word=False,
         stop_words_str=None,
+        think_mode=0,
     ):
         """运行工具调用测试的通用方法"""
         tokenizer = self._setup_environment()
         test_ids = self._get_test_data(include_stop_word)
         render_params = self._create_render_params(tokenizer)
 
-        chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
+        generate_env_config = GenerateEnvConfig()
+        generate_env_config.think_mode = think_mode
+        render_config = RenderConfig()
+        chat_renderer = ChatRendererFactory.get_renderer(
+            tokenizer,
+            render_params,
+            generate_env_config=generate_env_config,
+            render_config=render_config,
+        )
 
         # 子类特定的renderer验证
         self._validate_renderer(chat_renderer)
@@ -334,20 +319,23 @@ class BaseToolCallTestSuite:
         assert delta.role == RoleEnum.assistant
         self._assert_tool_call_response(delta)
 
-    async def test_streaming_case(self, stop_words_str=None):
+    async def test_streaming_case(self, stop_words_str=None, think_mode=0):
         """测试工具调用流式场景"""
         chunk_list = await self._run_tool_call_test(
-            stream=True, stop_words_str=stop_words_str
+            stream=True,
+            stop_words_str=stop_words_str,
+            think_mode=think_mode,
         )
 
         merged_result: ChatCompletionStreamResponse = merge_stream_responses(chunk_list)
         self._validate_merged_result(merged_result)
 
-    async def test_no_stream(self, stop_words_str=None):
+    async def test_no_stream(self, stop_words_str=None, think_mode=0):
         """测试工具调用非流式场景"""
         chunk_list = await self._run_tool_call_test(
             stream=False,
             stop_words_str=stop_words_str,
+            think_mode=think_mode,
         )
 
         # 验证合并结果
@@ -366,22 +354,18 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         self.test_data_path = os.path.join(
             os.getcwd(), "rtp_llm/test/model_test/fake_test/testdata"
         )
-        model_params = GptInitModelParameters(
-            head_num=1024,
-            size_per_head=1024,
-            layer_num=1024,
-            max_seq_len=1024,
-            vocab_size=1024,
-        )
-        self.model = FakeModel(None)
-        self.model.config = model_params
+        self.model_config = ModelConfig()
+        self.model_config.attn_config.head_num = 1024
+        self.model_config.attn_config.size_per_head = 1024
+        self.model_config.num_layers = 1024
+        self.model_config.max_seq_len = 1024
+        self.model_config.vocab_size = 1024
+        self.model_config.special_tokens = SpecialTokens()
 
     async def test_parse_qwen_function_call(self):
         tokenizer = QwenTestTokenizer(
             f"{self.test_data_path}/qwen_7b/tokenizer/qwen.tiktoken"
         )
-        self.model.tokenizer = tokenizer
-        self.endpoint = OpenaiEndpoint(self.model.config, self.model.tokenizer, None)
         test_ids = [
             198,
             84169,
@@ -429,7 +413,14 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             eos_token_id=tokenizer.eos_token_id or 0,
             stop_word_ids_list=[],
         )
-        chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
+        generate_env_config = GenerateEnvConfig()
+        render_config = RenderConfig()
+        chat_renderer = ChatRendererFactory.get_renderer(
+            tokenizer,
+            render_params,
+            generate_env_config=generate_env_config,
+            render_config=render_config,
+        )
         request = ChatCompletionRequest(
             messages=[ChatMessage(role=RoleEnum.user, content="hello")],
             functions=[
@@ -448,7 +439,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         stream_generator = chat_renderer.render_response_stream(
             id_generator, request, GenerateConfig()
         )
-        generate = self.endpoint._complete_stream_response(stream_generator, None)
+        generate = OpenaiEndpoint._complete_stream_response(stream_generator, None)
         response = [x async for x in generate][-1]
         response = await generate.gen_complete_response_once()
         print(response.choices[0].model_dump_json())
@@ -474,8 +465,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         tokenizer = QwenTestTokenizer(
             f"{self.test_data_path}/qwen_7b/tokenizer/qwen.tiktoken"
         )
-        self.model.tokenizer = tokenizer
-        self.endpoint = OpenaiEndpoint(self.model.config, self.model.tokenizer, None)
+        py_env_configs = PyEnvConfigs()
         test_ids = [198, 84169, 25, 49434, 239, 73670, 37029]
         render_params = RendererParams(
             model_type="qwen",
@@ -483,7 +473,14 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             eos_token_id=tokenizer.eos_token_id or 0,
             stop_word_ids_list=[],
         )
-        chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
+        generate_env_config = GenerateEnvConfig()
+        render_config = RenderConfig()
+        chat_renderer = ChatRendererFactory.get_renderer(
+            tokenizer,
+            render_params,
+            generate_env_config=generate_env_config,
+            render_config=render_config,
+        )
         request = ChatCompletionRequest(
             messages=[ChatMessage(role=RoleEnum.user, content="hello")]
         )
@@ -494,7 +491,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         stream_generator = chat_renderer.render_response_stream(
             id_generator, request, GenerateConfig()
         )
-        generate = self.endpoint._complete_stream_response(stream_generator, None)
+        generate = OpenaiEndpoint._complete_stream_response(stream_generator, None)
         response = [x async for x in generate][-1]
         response = await generate.gen_complete_response_once()
         print(response)
@@ -505,8 +502,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         tokenizer = QwenTestTokenizer(
             f"{self.test_data_path}/qwen_7b/tokenizer/qwen.tiktoken"
         )
-        self.model.tokenizer = tokenizer
-        self.endpoint = OpenaiEndpoint(self.model.config, self.model.tokenizer, None)
+        py_env_configs = PyEnvConfigs()
         test_ids = [
             25,
             220,
@@ -564,7 +560,14 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             eos_token_id=tokenizer.eos_token_id or 0,
             stop_word_ids_list=[],
         )
-        chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
+        generate_env_config = GenerateEnvConfig()
+        render_config = RenderConfig()
+        chat_renderer = ChatRendererFactory.get_renderer(
+            tokenizer,
+            render_params,
+            generate_env_config=generate_env_config,
+            render_config=render_config,
+        )
         # function call 格式返回，输入有functions
         functions = [
             GPTFunctionDefinition(
@@ -598,7 +601,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         stream_generator = chat_renderer.render_response_stream(
             id_generator, request, GenerateConfig()
         )
-        generate = self.endpoint._complete_stream_response(stream_generator, None)
+        generate = OpenaiEndpoint._complete_stream_response(stream_generator, None)
         async for x in generate:
             response = x
             response = await generate.gen_complete_response_once()
@@ -631,7 +634,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         stream_generator = chat_renderer.render_response_stream(
             id_generator, request, gen_config
         )
-        generate = self.endpoint._complete_stream_response(stream_generator, None)
+        generate = OpenaiEndpoint._complete_stream_response(stream_generator, None)
         async for x in generate:
             response = x
             response = await generate.gen_complete_response_once()
@@ -654,8 +657,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         tokenizer = QwenTestTokenizer(
             f"{self.test_data_path}/qwen_7b/tokenizer/qwen.tiktoken"
         )
-        self.model.tokenizer = tokenizer
-        self.endpoint = OpenaiEndpoint(self.model.config, self.model.tokenizer, None)
+        py_env_configs = PyEnvConfigs()
         test_ids = [
             25,
             220,
@@ -711,7 +713,14 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             eos_token_id=tokenizer.eos_token_id or 0,
             stop_word_ids_list=[],
         )
-        chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
+        generate_env_config = GenerateEnvConfig()
+        render_config = RenderConfig()
+        chat_renderer = ChatRendererFactory.get_renderer(
+            tokenizer,
+            render_params,
+            generate_env_config=generate_env_config,
+            render_config=render_config,
+        )
         # function call 格式返回，输入有functions
         functions = [
             GPTFunctionDefinition(
@@ -746,7 +755,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         stream_generator = chat_renderer.render_response_stream(
             id_generator, request, GenerateConfig()
         )
-        generate = self.endpoint._complete_stream_response(stream_generator, None)
+        generate = OpenaiEndpoint._complete_stream_response(stream_generator, None)
         # response = [x async for x in generate][-1]
         # response = await generate.gen_complete_response_once()
         # print(response.choices[0].model_dump_json())
@@ -793,7 +802,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         stream_generator = chat_renderer.render_response_stream(
             id_generator, request, gen_config
         )
-        generate = self.endpoint._complete_stream_response(stream_generator, None)
+        generate = OpenaiEndpoint._complete_stream_response(stream_generator, None)
         async for x in generate:
             response = x
             response = await generate.gen_complete_response_once()
@@ -1727,13 +1736,22 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             stream=True,
             include_stop_word=False,
             stop_words_str=None,
+            think_mode=0,
         ):
             """运行工具调用测试的通用方法"""
             tokenizer = self._setup_environment()
             test_ids = self._get_test_data(include_stop_word)
             render_params = self._create_render_params(tokenizer)
 
-            chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
+            generate_env_config = GenerateEnvConfig()
+            generate_env_config.think_mode = think_mode
+            render_config = RenderConfig()
+            chat_renderer = ChatRendererFactory.get_renderer(
+                tokenizer,
+                render_params,
+                generate_env_config=generate_env_config,
+                render_config=render_config,
+            )
 
             # 子类特定的renderer验证
             self._validate_renderer(chat_renderer)
@@ -1762,9 +1780,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             stream_generator = chat_renderer.render_response_stream(
                 id_generator, request, generate_config=generate_config
             )
-            generate = self.parent.endpoint._complete_stream_response(
-                stream_generator, None
-            )
+            generate = OpenaiEndpoint._complete_stream_response(stream_generator, None)
 
             chunk_list = []
             async for chunk in generate:
@@ -1830,29 +1846,25 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         qwen_suite = self.QwenToolTestSuite(self)
         await qwen_suite.test_no_stream()
 
-    @think_mode
     async def test_parse_qwen_think_call_streaming_case(self):
         """测试QwenTool工具思考调用流式场景"""
         qwen_suite = self.QwenThinkTestSuite(self)
-        await qwen_suite.test_streaming_case(stop_words_str=["<im_end>"])
+        await qwen_suite.test_streaming_case(stop_words_str=["<im_end>"], think_mode=1)
 
-    @think_mode
     async def test_parse_qwen_think_call_no_stream(self):
         """测试QwenTool工具思考调用非流式场景"""
         qwen_suite = self.QwenThinkTestSuite(self)
-        await qwen_suite.test_no_stream(stop_words_str=["<im_end>"])
+        await qwen_suite.test_no_stream(stop_words_str=["<im_end>"], think_mode=1)
 
-    @think_mode
     async def test_parse_qwen_force_think_call_streaming_case(self):
         """测试QwenTool工具思考调用流式场景"""
         qwen_suite = self.QwenForceThinkTestSuite(self)
-        await qwen_suite.test_streaming_case(stop_words_str=["<im_end>"])
+        await qwen_suite.test_streaming_case(stop_words_str=["<im_end>"], think_mode=1)
 
-    @think_mode
     async def test_parse_qwen_force_think_call_no_stream(self):
         """测试QwenTool工具思考调用非流式场景"""
         qwen_suite = self.QwenForceThinkTestSuite(self)
-        await qwen_suite.test_no_stream(stop_words_str=["<im_end>"])
+        await qwen_suite.test_no_stream(stop_words_str=["<im_end>"], think_mode=1)
 
     async def test_parse_kimik2_tool_call_streaming_case(self):
         """测试KimiK2工具调用流式场景"""
@@ -1884,15 +1896,13 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         kimi_suite = self.KimiK2AdvancedTestSuite(self)
         await kimi_suite.test_no_stream_stop_words()
 
-    @think_mode
     async def test_parse_chatglm45_tool_call_streaming_case(self):
         suite = self.ChatGLM45TestSuite(self)
-        await suite.test_streaming_case()
+        await suite.test_streaming_case(think_mode=1)
 
-    @think_mode
     async def test_parse_chatglm45_tool_call_no_stream(self):
         suite = self.ChatGLM45TestSuite(self)
-        await suite.test_no_stream()
+        await suite.test_no_stream(think_mode=1)
 
     async def test_parse_qwen3_coder_tool_call_streaming_case(self):
         """测试Qwen3Coder工具调用流式场景"""
@@ -1914,29 +1924,25 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         suite = self.Qwen3CoderComplexTestSuite(self)
         await suite.test_no_stream()
 
-    @think_mode
     async def test_parse_deepseek_v31_tool_call_streaming_case(self):
         """测试deepseek_v31工具调用流式场景, 并且全程打开think_mode"""
         test_suite = self.DeepseekV31TestSuite(self)
-        await test_suite.test_streaming_case()
+        await test_suite.test_streaming_case(think_mode=1)
 
-    @think_mode
     async def test_parse_deepseek_v31_tool_call_no_stream(self):
         """测试deepseek_v31工具调用非流式场景, 并且全程打开think_mode"""
         test_suite = self.DeepseekV31TestSuite(self)
-        await test_suite.test_no_stream()
+        await test_suite.test_no_stream(think_mode=1)
 
-    @think_mode
     async def test_parse_deepseek_v31_think_streaming_case(self):
         """测试deepseek_v31打开思考的流式场景"""
         test_suite = self.DeepseekV31ThinkTestSuite(self)
-        await test_suite.test_streaming_case()
+        await test_suite.test_streaming_case(think_mode=1)
 
-    @think_mode
     async def test_parse_deepseek_v31_think_no_stream(self):
         """测试deepseek_v31打开思考的非流式场景"""
         test_suite = self.DeepseekV31ThinkTestSuite(self)
-        await test_suite.test_no_stream()
+        await test_suite.test_no_stream(think_mode=1)
 
     class QwenMergeLogicTestSuite(QwenToolTestSuite):
         """基于QwenTestSuite，专门测试generate_choice合并逻辑"""
@@ -2046,8 +2052,14 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             tokenizer = self._setup_environment()
             test_ids = self._get_test_data()
             render_params = self._create_render_params(tokenizer)
-
-            chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
+            generate_env_config = GenerateEnvConfig()
+            render_config = RenderConfig()
+            chat_renderer = ChatRendererFactory.get_renderer(
+                tokenizer,
+                render_params,
+                generate_env_config=generate_env_config,
+                render_config=render_config,
+            )
             self._validate_renderer(chat_renderer)
 
             functions, tools = self._create_test_functions_and_tools()
@@ -2094,7 +2106,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
                 for stream_obj in stream_response_objects:
                     yield stream_obj
 
-            generate = self.parent.endpoint._complete_stream_response(
+            generate = OpenaiEndpoint._complete_stream_response(
                 stream_response_objects_to_generator(), None
             )
             chunk_list = [chunk async for chunk in generate]
@@ -2114,9 +2126,34 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         tokenizer = TokenizerFactory.create(
             "", "rtp_llm/test/tokenizer_test/testdata/chatglm3_tokenizer", "chatglm3"
         )
-        self.model.config.py_env_configs.model_config.model_type = "chatglm3"
-        self.model.tokenizer = tokenizer
-        self.endpoint = OpenaiEndpoint(self.model.config, self.model.tokenizer, None)
+        generate_env_config = GenerateEnvConfig()
+        render_config = RenderConfig()
+        misc_config = PyMiscellaneousConfig()
+        vit_config = VitConfig()
+        special_tokens = self.model_config.special_tokens
+        pd_sep_config = PDSepConfig()
+        backend_rpc_server_visitor = BackendRPCServerVisitor(
+            max_seq_len=self.model_config.max_seq_len,
+            seq_size_per_block=64,
+            pd_sep_config=pd_sep_config,
+            addresses=["localhost:8080"],
+        )
+        # Update model_config with test values
+        test_model_config = self.model_config
+        test_model_config.special_tokens = special_tokens
+        test_model_config.generate_env_config = generate_env_config
+        test_model_config.render_config = render_config
+        test_model_config.model_name = ""
+        test_model_config.template_type = None
+        test_model_config.ckpt_path = ""
+        test_model_config.model_type = "chatglm3"
+        self.endpoint = OpenaiEndpoint(
+            model_config=test_model_config,
+            misc_config=misc_config,
+            vit_config=vit_config,
+            tokenizer=tokenizer,
+            backend_rpc_server_visitor=backend_rpc_server_visitor,
+        )
         self.assertEqual(
             sorted(self.endpoint.stop_words_id_list), sorted([[2], [64795], [64797]])
         )
@@ -2125,15 +2162,10 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             sorted(["<|user|>", "<|observation|>"]),
         )
 
-    @think_mode
     async def test_think_label_real_situation_union(self):
-        custom_renderer.THINK_START_TAG = "<think>\n"
-        custom_renderer.THINK_END_TAG = "</think>\n"
         tokenizer = TokenizerFactory.create(
             "", f"{self.test_data_path}/deepseek_r1_qwen_14b_tokenizer", "qwen_2"
         )
-        self.model.tokenizer = tokenizer
-        self.endpoint = OpenaiEndpoint(self.model.config, self.model.tokenizer, None)
 
         test_ids = [151648, 198, 73670, 73670, 73670, 151649, 271, 37029, 37029, 37029]
         render_params = RendererParams(
@@ -2142,7 +2174,19 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             eos_token_id=tokenizer.eos_token_id or 0,
             stop_word_ids_list=[],
         )
-        chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
+
+        generate_env_config = GenerateEnvConfig()
+        generate_env_config.think_mode = 1
+        generate_env_config.think_start_tag = "<think>\n"
+        generate_env_config.think_end_tag = "</think>\n"
+        render_config = RenderConfig()
+
+        chat_renderer = ChatRendererFactory.get_renderer(
+            tokenizer,
+            render_params,
+            generate_env_config=generate_env_config,
+            render_config=render_config,
+        )
         request = ChatCompletionRequest(
             messages=[ChatMessage(role=RoleEnum.user, content="hello")], stream=True
         )
@@ -2153,7 +2197,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         stream_generator = chat_renderer.render_response_stream(
             id_generator, request, GenerateConfig(is_streaming=True)
         )
-        generate = self.endpoint._complete_stream_response(stream_generator, None)
+        generate = OpenaiEndpoint._complete_stream_response(stream_generator, None)
         # response = [x async for x in generate][-1]
         async for x in generate:
             pass

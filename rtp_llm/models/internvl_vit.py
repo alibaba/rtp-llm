@@ -27,7 +27,7 @@ from transformers.configuration_utils import PretrainedConfig
 from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling
 from transformers.modeling_utils import PreTrainedModel
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import VitParameters
 from rtp_llm.models.multimodal.multimodal_common import (
     MultiModalEmbeddingInterface,
     timeout_decorator,
@@ -182,9 +182,9 @@ def load_video(video_path, bound=None, input_size=448, max_num=1, num_segments=3
 
 
 class InternVLImageEmbedding(MultiModalEmbeddingInterface):
-    def __init__(self, config: GptInitModelParameters):
-        self.config = config
-        config = config.mm_related_params.config
+    def __init__(self, mm_related_params: VitParameters):
+        self.mm_related_params = mm_related_params
+        config = mm_related_params.config
         self.select_layer = config["select_layer"]
         self.vision_model = InternVisionModel(InternVisionConfig(**config))
 
@@ -247,7 +247,7 @@ class InternVLImageEmbedding(MultiModalEmbeddingInterface):
     def image_embedding(self, images: List[Image.Image], max_num):
         # hugging face default value
         device = self._device
-        config = self.config.mm_related_params.config
+        config = self.mm_related_params.config
         input_size = config["image_size"]
         transform = build_transform(input_size=config["image_size"])
         res = []

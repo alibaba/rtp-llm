@@ -9,8 +9,6 @@ from typing import Dict, List, Optional, Type
 import torch
 from torch import nn
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-
 from .linear_base import LinearBase
 
 logger = logging.getLogger(__name__)
@@ -47,7 +45,7 @@ class LinearFactory:
         weight_key: str,
         scale_key: Optional[str] = None,
         bias_key: Optional[str] = None,
-        config: Optional[GptInitModelParameters] = None,
+        quant_config: object = None,
     ) -> LinearBase:
         """Create Linear layer from weight dictionary
 
@@ -56,7 +54,7 @@ class LinearFactory:
             weight_key: Key for weight tensor
             scale_key: Key for scale tensor (optional)
             bias_key: Key for bias tensor (optional)
-            config: Model initialization parameters (optional)
+            quant_config: Quantization configuration (required)
 
         Returns:
             Linear module instance
@@ -68,7 +66,7 @@ class LinearFactory:
         weight_scales = weights.get(scale_key) if scale_key else None
         bias = weights.get(bias_key) if bias_key else None
 
-        return cls.create_linear(weight, bias, weight_scales, config)
+        return cls.create_linear(weight, bias, weight_scales, quant_config)
 
     @classmethod
     def create_linear(
@@ -76,12 +74,12 @@ class LinearFactory:
         weight: torch.Tensor,
         bias: Optional[torch.Tensor],
         weight_scales: Optional[torch.Tensor],
-        config: Optional[GptInitModelParameters] = None,
+        quant_config: object,
     ):
         candidates = [
             strategy_class
             for strategy_class in cls._strategies
-            if strategy_class.can_handle(config, weight, weight_scales)
+            if strategy_class.can_handle(quant_config, weight, weight_scales)
         ]
 
         if not candidates:
@@ -89,7 +87,7 @@ class LinearFactory:
                 f"No suitable Linear strategy found for:"
                 f"weight.dtype={weight.dtype}, "
                 f"has_scales={weight_scales is not None}, "
-                f"config={config}"
+                f"quant_config={quant_config}"
             )
 
         # Check uniqueness - should only have one matching strategy
@@ -113,7 +111,7 @@ class LinearFactory:
             weight_scales=weight_scales,
             input_scales=input_scales,
             bias=bias,
-            config=config,
+            quant_config=quant_config,
         )
 
         return instance
@@ -126,12 +124,12 @@ class LinearFactory:
         weight_keys: List[str],
         scale_keys: Optional[List[str]],
         bias_keys: Optional[List[str]],
-        config: GptInitModelParameters,
+        quant_config: object,
         dim: int = -1,
     ) -> nn.Module:
         """Create merged Linear layer (e.g., gate_up_proj)."""
         # Check FP8 usage based on first weight
-        use_fp8 = LinearFactory.should_use_fp8_linear(config, weights, weight_keys[0])
+        use_fp8 = LinearFactory.should_use_fp8_linear(quant_config, weights, weight_keys[0])
 
         # Merge weights
         weight_tensors = [weights[key] for key in weight_keys]
@@ -159,20 +157,20 @@ class LinearFactory:
             weight=merged_weight,
             weight_scales=merged_scales,
             bias=merged_bias,
-            config=config,
+            quant_config=quant_config,
         )
 
     @staticmethod
     def should_use_fp8_linear(
-        config: GptInitModelParameters,
+        quant_config: object,
         weights: Dict[str, torch.Tensor],
         weight_key: str,
     ) -> bool:
         """Check if FP8 linear layer should be used."""
-        # Check quantization method if available
-        if not config.quant_config or not hasattr(config.quant_config, "get_method"):
+        if quant_config is None:
             return False
-        quant_method = config.quant_config.get_method()
+        # Check quantization method if available
+        quant_method = quant_config.get_method()
         fp8_methods = [
             "FP8",
             "FP8_PER_BLOCK",

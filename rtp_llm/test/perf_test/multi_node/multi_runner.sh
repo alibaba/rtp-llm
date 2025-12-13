@@ -162,7 +162,6 @@ multi_test_script() {
   # Export essential environment variables
   export BAZEL_BUILD_ARGS=${BAZEL_BUILD_ARGS:-" --jobs 64 --verbose_failures --config=cuda12_6 "}
   export FRONTEND_SERVER_COUNT=${FRONTEND_SERVER_COUNT:-16}
-  export LOAD_CKPT_NUM_PROCESS=${LOAD_CKPT_NUM_PROCESS:-64}
   export START_PORT=${START_PORT:-12333}
   export WARM_UP=${WARM_UP:-1}
   export RESERVER_RUNTIME_MEM_MB=${RESERVER_RUNTIME_MEM_MB:-0}

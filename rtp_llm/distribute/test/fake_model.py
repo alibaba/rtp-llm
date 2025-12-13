@@ -1,6 +1,6 @@
 from typing import Any, List
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.base_model import BaseModel
 
@@ -32,19 +32,14 @@ class FakeModel(BaseModel):
         pass
 
     @classmethod
-    def create_config(cls, model_config: Any) -> GptInitModelParameters:
-        config = GptInitModelParameters(
-            head_num=2,
-            size_per_head=128,
-            layer_num=2,
-            max_seq_len=2048,
-            vocab_size=500000,
-            multi_task_prompt=None,
-        )
-        config.lora_infos = None
-        config.multi_task_prompt = None
-        config.is_sparse_head = False
-        config.tokenizer_path = model_config.tokenizer_path
+    def _create_config(cls, ckpt_path: str) -> ModelConfig:
+        config = ModelConfig()
+        config.attn_config.head_num = 2
+        config.attn_config.size_per_head = 128
+        config.num_layers = 2
+        config.max_seq_len = 2048
+        config.vocab_size = 500000
+        config.lora_infos = {}
         return config
 
     @classmethod

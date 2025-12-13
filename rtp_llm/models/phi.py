@@ -1,4 +1,4 @@
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, FfnWeight
@@ -119,27 +119,30 @@ class Phi(BaseModel):
         return PhiWeightInfo
 
     @classmethod
-    def _create_config(cls, ckpt_path: str):
+    def _create_config(cls, ckpt_path: str) -> ModelConfig:
         config_dict = get_config_from_path(ckpt_path)
+        if config_dict is None:
+            config_dict = {}
         size_per_head = int(
             config_dict.get("n_embd", 2048) / config_dict.get("n_head", 32)
         )
-        config = GptInitModelParameters(
-            head_num=config_dict.get("n_head", 32),
-            size_per_head=size_per_head,
-            inter_size=4 * config_dict.get("n_embd", 2048),
-            layer_num=config_dict.get("n_layer", 24),
-            max_seq_len=config_dict.get("n_positions", 2048),
-            vocab_size=config_dict.get("vocab_size", 32),
-            rotary_embedding_dim=config_dict.get("rotary_dim", size_per_head),
-            rotary_embedding_style=1,
-            activation_type="gelu",
-            has_positional_encoding=False,
-            has_post_decoder_layernorm=True,
-            has_lm_head_bias=True,
-            tie_word_embeddings=config_dict.get("tie_word_embeddings", False),
-        )
-        config.head_num_kv = config.head_num
+        config = ModelConfig()
+        config.ckpt_path = ckpt_path
+        config.attn_config.head_num = config_dict.get("n_head", 32)
+        config.attn_config.size_per_head = size_per_head
+        config.inter_size = 4 * config_dict.get("n_embd", 2048)
+        config.num_layers = config_dict.get("n_layer", 24)
+        config.max_seq_len = config_dict.get("n_positions", 2048)
+        config.vocab_size = config_dict.get("vocab_size", 32)
+        config.attn_config.rope_config.dim = config_dict.get("rotary_dim", size_per_head)
+        config.attn_config.rope_config.style = 1
+        config.attn_config.kv_head_num = config_dict.get("n_head", 32)
+        config.norm_type = "layernorm"
+        config.activation_type = "gelu"
+        config.has_positional_encoding = False
+        config.has_post_decoder_layernorm = True
+        config.has_lm_head_bias = True
+        config.tie_word_embeddings = config_dict.get("tie_word_embeddings", False)
         config.config_dtype = config_dict.get("torch_dtype", None)
         return config
 

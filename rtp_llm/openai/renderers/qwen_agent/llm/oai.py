@@ -6,8 +6,6 @@ import sys
 from pprint import pformat
 from typing import Dict, Iterator, List, Optional
 
-from rtp_llm.config.py_config_modules import StaticConfig
-
 path_index_list = -1
 path_remove = ""
 for idx, path in enumerate(sys.path):
@@ -52,8 +50,11 @@ class TextChatAtOAI(BaseTextChatModel):
 
         api_key = cfg.get("api_key", "")
         if not api_key:
-            api_key = StaticConfig.model_config.openai_api_key
-        api_key = api_key.strip()
+            # Try to get from misc_config if available in cfg
+            misc_config = cfg.get("misc_config")
+            if misc_config:
+                api_key = misc_config.openai_api_key
+        api_key = api_key.strip() if api_key else ""
 
         if openai.__version__.startswith("0."):
             if api_base:

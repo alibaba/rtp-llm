@@ -12,6 +12,7 @@ from unittest import TestCase, main
 import requests
 from pydantic import BaseModel
 
+from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.distribute.worker_info import g_worker_info
 from rtp_llm.frontend.frontend_app import FrontendApp
 from rtp_llm.frontend.frontend_server import FrontendServer, FrontendWorker
@@ -78,9 +79,10 @@ class ConcurrencyLimitTest(TestCase):
         self.port = random.randint(20000, 30000)
         os.environ["CONCURRENCY_LIMIT"] = "16"
         os.environ["START_PORT"] = str(self.port)
-        g_worker_info.reload()
-        self.frontend_app = FrontendApp()
-        self.backend_app = BackendApp()
+        g_worker_info.reload(self.port)
+        py_env_configs = PyEnvConfigs()
+        self.frontend_app = FrontendApp(py_env_configs)
+        self.backend_app = BackendApp(py_env_configs)
 
     def start_frontend_server(self):
         t = Thread(target=self.frontend_app.start, daemon=True)

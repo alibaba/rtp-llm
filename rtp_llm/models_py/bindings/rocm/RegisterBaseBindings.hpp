@@ -4,12 +4,9 @@
 #include "rtp_llm/models_py/bindings/common/WriteCacheStoreOp.h"
 #include "rtp_llm/models_py/bindings/rocm/Gemm.h"
 #include "rtp_llm/models_py/bindings/rocm/FusedRopeKVCacheOp.h"
-#include "rtp_llm/models_py/bindings/common/RtpProcessGroup.h"
 #include "rtp_llm/models_py/bindings/common/CudaGraphPrefillCopy.h"
 
-using namespace rtp_llm;
-
-namespace torch_ext {
+namespace rtp_llm {
 
 void registerBasicRocmOps(py::module& rtp_ops_m) {
     rtp_ops_m.def("write_cache_store",
@@ -88,7 +85,8 @@ void registerBasicRocmOps(py::module& rtp_ops_m) {
 
 void registerBaseRocmBindings(py::module& rtp_ops_m) {
     registerBasicRocmOps(rtp_ops_m);
-    registerRtpProcessGroup(rtp_ops_m);
+    // RtpProcessGroup is deprecated, use rtp_llm.distribute.collective_torch instead
+    // registerRtpProcessGroup(rtp_ops_m);
 }
 
-}  // namespace torch_ext
+}  // namespace rtp_llm

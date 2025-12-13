@@ -119,7 +119,8 @@ def get_ffn_quant_weight_info(
     ffn_w_name = src_weight.name
     assert weights[0].name.endswith(W_SUFFIX)
     assert ffn_w_name in [W.ffn_w1, W.ffn_w2, W.ffn_w3, W.ffn_w13, W.moe_w1, W.moe_w2]
-    inter_padding_size = src_weight.config.inter_padding_size
+    # Use align_size instead of inter_padding_size for dynamic padding
+    align_size = src_weight.config.align_size
 
     if ffn_w_name in [W.ffn_w1, W.ffn_w2, W.ffn_w3]:
         assert len(weights) == 1
@@ -148,8 +149,8 @@ def get_ffn_quant_weight_info(
                 [CkptWeightInfo(w_name + QW_SUFFIX, identity)],
                 functools.partial(
                     pad,
-                    inter_padding_size=(
-                        inter_padding_size // pad_div if is_gptq else inter_padding_size
+                    align_size=(
+                        align_size // pad_div if is_gptq else align_size
                     ),
                     dim=0,
                 ),
@@ -160,7 +161,7 @@ def get_ffn_quant_weight_info(
                 W.ffn_z2,
                 [CkptWeightInfo(w_name + QZ_SUFFIX, identity)],
                 functools.partial(
-                    pad, inter_padding_size=inter_padding_size // group_size, dim=0
+                    pad, align_size=align_size // group_size, dim=0
                 ),
                 data_type=torch.int32,
                 config=src_weight.config,
@@ -169,7 +170,7 @@ def get_ffn_quant_weight_info(
                 W.ffn_s2,
                 [CkptWeightInfo(w_name + QS_SUFFIX, identity)],
                 functools.partial(
-                    pad, inter_padding_size=inter_padding_size // group_size, dim=0
+                    pad, align_size=align_size // group_size, dim=0
                 ),
                 config=src_weight.config,
             ),
@@ -220,8 +221,8 @@ def get_ffn_quant_weight_info(
                 ],
                 functools.partial(
                     pad_w13,
-                    inter_padding_size=(
-                        inter_padding_size // pad_div if is_awq else inter_padding_size
+                    align_size=(
+                        align_size // pad_div if is_awq else align_size
                     ),
                     dim=1,
                 ),
@@ -236,7 +237,7 @@ def get_ffn_quant_weight_info(
                 ],
                 functools.partial(
                     pad_w13,
-                    inter_padding_size=src_weight.config.inter_padding_size // pad_div,
+                    align_size=align_size // pad_div,
                     dim=1,
                 ),
                 data_type=torch.int32,
@@ -250,7 +251,7 @@ def get_ffn_quant_weight_info(
                 ],
                 functools.partial(
                     pad_w13,
-                    inter_padding_size=src_weight.config.inter_padding_size,
+                    align_size=align_size,
                     dim=1,
                 ),
                 config=src_weight.config,
@@ -269,8 +270,8 @@ def get_ffn_quant_weight_info(
                 [CkptWeightInfo(w_name + QW_SUFFIX, identity)],
                 functools.partial(
                     pad,
-                    inter_padding_size=(
-                        inter_padding_size // pad_div if is_awq else inter_padding_size
+                    align_size=(
+                        align_size // pad_div if is_awq else align_size
                     ),
                     dim=1,
                 ),
@@ -282,7 +283,7 @@ def get_ffn_quant_weight_info(
                 [CkptWeightInfo(w_name + QZ_SUFFIX, identity)],
                 functools.partial(
                     pad,
-                    inter_padding_size=src_weight.config.inter_padding_size // pad_div,
+                    align_size=align_size // pad_div,
                     dim=1,
                 ),
                 data_type=torch.int32,
@@ -292,7 +293,7 @@ def get_ffn_quant_weight_info(
                 s,
                 [CkptWeightInfo(w_name + QS_SUFFIX, identity)],
                 functools.partial(
-                    pad, inter_padding_size=src_weight.config.inter_padding_size, dim=1
+                    pad, align_size=align_size, dim=1
                 ),
                 config=src_weight.config,
             ),

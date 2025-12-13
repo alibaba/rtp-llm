@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from torch import dtype as _dtype
 from torch.profiler import ProfilerActivity, profile
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.config.model_config import ModelConfig
 
 from rtp_llm.ops.compute_ops import SelectTopkOp  # isort:skip
 
@@ -31,11 +31,17 @@ class SelectTopkOpTest(TestCase):
         self, num_tokens: int, num_expert: int, top_k: int, dtype: _dtype
     ):
         torch.manual_seed(1)
-        model_param = GptInitModelParameters(1, 128, 1, 1, 5120)
-        model_param.expert_num = num_expert
-        model_param.moe_k = top_k
-        model_param.has_moe_norm = True
-        select_topk_op = SelectTopkOp(model_param)
+        model_config = ModelConfig()
+        model_config.attn_config.head_num = 1
+        model_config.attn_config.size_per_head = 128
+        model_config.num_layers = 1
+        model_config.max_seq_len = 1
+        model_config.vocab_size = 5120
+        model_config.expert_num = num_expert
+        model_config.moe_k = top_k
+        model_config.has_moe_norm = True
+        # Use default values for fake_balance_expert and dp_rank
+        select_topk_op = SelectTopkOp(model_config, fake_balance_expert=False, dp_rank=0)
 
         router_logits = torch.randn(num_tokens, num_expert, dtype=dtype).to("cuda")
         router_logits_fp32 = router_logits.float()

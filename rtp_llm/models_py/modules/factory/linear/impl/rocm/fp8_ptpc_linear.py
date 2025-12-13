@@ -6,7 +6,6 @@ from typing import Optional
 import aiter
 import torch
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.models_py.modules.factory.linear import LinearBase
 
 logger = logging.getLogger(__name__)
@@ -20,15 +19,12 @@ class RocmFp8PTPCLinear(LinearBase):
     @classmethod
     def can_handle(
         cls,
-        config: Optional[GptInitModelParameters],
+        quant_config: object,
         weight: torch.Tensor,
         weight_scales: Optional[torch.Tensor],
     ) -> bool:
         """Handle FP8_PER_CHANNEL_COMPRESSED"""
-        if weight_scales is None or config is None:
-            return False
-
-        if not hasattr(config, "quant_config") or config.quant_config is None:
+        if weight_scales is None or quant_config is None:
             return False
 
         # Check if weight is FP8 format
@@ -36,11 +32,8 @@ class RocmFp8PTPCLinear(LinearBase):
             return False
 
         # Check quantization method
-        if hasattr(config.quant_config, "get_method"):
-            quant_method = config.quant_config.get_method()
-            return quant_method == "FP8_PER_CHANNEL_COMPRESSED"
-
-        return False
+        quant_method = quant_config.get_method()
+        return quant_method == "FP8_PER_CHANNEL_COMPRESSED"
 
     def __init__(
         self,
@@ -48,9 +41,9 @@ class RocmFp8PTPCLinear(LinearBase):
         weight_scales: Optional[torch.Tensor] = None,
         input_scales: Optional[torch.Tensor] = None,
         bias: Optional[torch.Tensor] = None,
-        config: Optional[GptInitModelParameters] = None,
+        quant_config: object = None,
     ):
-        super().__init__(weight, weight_scales, input_scales, bias, config)
+        super().__init__(weight, weight_scales, input_scales, bias, quant_config)
         self.hidden_size = weight.shape[0]  # k
         self.output_size = weight.shape[1]  # n
         # Reshape weight from [k, n] to [n, k] as done in C++ code

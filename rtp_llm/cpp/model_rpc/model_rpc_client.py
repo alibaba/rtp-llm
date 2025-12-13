@@ -8,7 +8,7 @@ from grpc import StatusCode
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleType
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.ops import EPLBConfig, FfnDisAggregateConfig
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     ErrorDetailsPB,
     GenerateInputPB,
@@ -17,7 +17,6 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     RoleAddrPB,
 )
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import RpcServiceStub
-from rtp_llm.distribute.gang_info import get_gang_info
 from rtp_llm.distribute.worker_info import g_parallel_info, g_worker_info
 from rtp_llm.utils.base_model_datatypes import (
     AuxInfo,
@@ -340,42 +339,24 @@ def trans_output(
 
 
 class ModelRpcClient(object):
-
-    def __init__(self, config: GptInitModelParameters, address: Optional[str] = None):
-        # 创建到服务器的连接
-        if not address:
-            address = f"localhost:{g_worker_info.rpc_server_port}"
-        self._addresses = []
-        # for test usage
-        hack_ep_single_entry = config.py_env_configs.py_eplb_config.hack_ep_single_entry
-        logging.info(f"hack ep single entry: {hack_ep_single_entry}")
-        if (g_parallel_info.dp_size > 1) and (not hack_ep_single_entry):
-            members_info_str = (
-                f"[world_rank: {g_parallel_info.world_rank}]"
-                + f"[tp_size: {g_parallel_info.tp_size}] all members: "
-                + "{"
-            )
-            members = get_gang_info().members
-            for member in members:
-                members_info_str += f"{member}\n"
-                if member.local_rank % g_parallel_info.tp_size == 0:
-                    self._addresses.append(f"{member.ip}:{member.rpc_server_port}")
-            members_info_str += "}"
-            logging.info(f"{members_info_str}")
-        else:
-            self._addresses = [address]
-        # last rank as ffn service, no be entry
-        if config.gpt_init_params.ffn_disaggregate_config.enable_ffn_disaggregate:
-            serving_ranks = (
-                config.gpt_init_params.ffn_disaggregate_config.attention_tp_size
-                * config.gpt_init_params.ffn_disaggregate_config.attention_dp_size
-            )
-            self._addresses = self._addresses[:serving_ranks]
-        logging.info(f"client connect to rpc addresses: {self._addresses}")
-        self.model_config = config
+    def __init__(
+        self,
+        addresses: list[str],
+        client_config,
+        max_rpc_timeout_ms: int = 0,
+        decode_entrance: bool = False,
+    ):
+        """Initialize ModelRpcClient with addresses.
+        
+        Args:
+            addresses: List of RPC addresses for data parallel communication
+            max_rpc_timeout_ms: Maximum RPC timeout in milliseconds
+            decode_entrance: Whether this is a decode entrance
+        """
+        self._addresses = addresses
+        self._max_rpc_timeout_ms = max_rpc_timeout_ms
+        self._decode_entrance = decode_entrance
         self.options = []
-        client_config = config.gpt_init_params.grpc_config.get_client_config()
-
         for key, value in client_config.items():
             self.options.append((key, value))
         logging.info(f"client options: {self.options}")
@@ -385,8 +366,8 @@ class ModelRpcClient(object):
     ) -> AsyncGenerator[GenerateOutputs, None]:
         request_timeout_ms = input_py.generate_config.timeout_ms
         rpc_timeout_ms = (
-            self.model_config.max_rpc_timeout_ms
-            if self.model_config.max_rpc_timeout_ms > 0
+            self._max_rpc_timeout_ms
+            if self._max_rpc_timeout_ms > 0
             else MAX_GRPC_TIMEOUT_SECONDS * 1000
         )
         if request_timeout_ms == None or request_timeout_ms <= 0:
@@ -403,18 +384,21 @@ class ModelRpcClient(object):
         for role_addr in input_py.generate_config.role_addrs:
             if (
                 (
-                    self.model_config.decode_entrance
+                    self._decode_entrance
                     and role_addr.role == RoleType.DECODE
                 )
                 or role_addr.role == RoleType.PDFUSION
                 or (
-                    not self.model_config.decode_entrance
+                    not self._decode_entrance
                     and role_addr.role == RoleType.PREFILL
                 )
             ):
                 if role_addr.ip != "":
                     address_list = [role_addr.ip + ":" + str(role_addr.grpc_port)]
                     break
+        
+        if not address_list:
+            raise ValueError(f"No address found for request: {input_pb.request_id}")
 
         try:
             async with grpc.aio.insecure_channel(

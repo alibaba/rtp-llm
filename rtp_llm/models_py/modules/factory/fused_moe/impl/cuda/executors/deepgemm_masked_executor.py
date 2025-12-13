@@ -1,12 +1,12 @@
+
 from typing import Any, Dict, Optional
 
 import torch
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
     is_deep_gemm_e8m0_used,
     m_grouped_bf16_gemm_nt_masked,
-    m_grouped_fp8_gemm_nt_masked,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     ExpertForwardPayload,
@@ -18,7 +18,6 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
 from rtp_llm.models_py.modules.factory.fused_moe.defs.type import ExecutorType
 from rtp_llm.models_py.triton_kernels.common.activation import (
     silu_mul_bf16_deep_gemm_masked,
-    silu_mul_fp8_quant_deep_gemm_masked,
 )
 from rtp_llm.utils.model_weight import W
 
@@ -33,7 +32,7 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
         return ExecutorType.DEEPGEMM_MASKED
 
     @classmethod
-    def check_conditions(cls, checker: Any, config: GptInitModelParameters) -> None:
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         """Check if DeepGemmMaskedExecutor can handle the configuration"""
         from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import has_deep_gemm
         from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
@@ -48,7 +47,7 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
 
     def __init__(
         self,
-        config: GptInitModelParameters,
+        config: MoEConfigAdapter,
         weights: Dict[str, torch.Tensor],
         quant_config: FusedMoEQuantConfig,
     ):

@@ -1,28 +1,21 @@
 import gc
-import json
 import os
 import re
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 import torch
 
-from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.config.generate_config import RequestFormat
-from rtp_llm.config.gpt_init_model_parameters import (
-    GptInitModelParameters,
-    VitParameters,
-)
-from rtp_llm.config.py_config_modules import StaticConfig
-from rtp_llm.model_loader.model_weight_info import (
-    ModelDeployWeightInfo,
-    ModelWeightInfo,
-)
+from rtp_llm.config.model_config import ModelConfig, VitParameters
+from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.model_loader.weight_module import MMAtomicWeight
+
+if TYPE_CHECKING:
+    from rtp_llm.model_loader.model_weight_info import ModelWeightInfo
+
 from rtp_llm.models.multimodal.multimodal_common import MultiModalEmbeddingInterface
 from rtp_llm.models.multimodal.multimodal_trt_engine import MultiModalTRTEngine
 from rtp_llm.ops.comm.nccl_op import NcclOp
 from rtp_llm.utils.model_weight import CkptWeightInfo, identity, sp_id
-from rtp_llm.utils.multimodal_util import MultimodalInput, get_vit_compute_dtype
 
 
 class BaseVitWeights:
@@ -63,35 +56,27 @@ class BaseVitWeights:
 
 
 class BaseMultiModalWeightInfo:
-    def __init__(self, config: GptInitModelParameters):
-        self.vit_weights: Optional[BaseVitWeights] = (
-            config.mm_related_params.vit_weights
-        )
-        self.vit_separation: int = config.vit_separation
-        self.tp_rank = config.tp_rank
+    def __init__(
+        self,
+        vit_weights: Optional[BaseVitWeights],
+        **kwargs,
+    ):
+        self.vit_weights: Optional[BaseVitWeights] = vit_weights
 
-    def _get_vit_info(self, llm_weights: ModelDeployWeightInfo):
-        # Currently, the multimodel network isn't split between devices. Only Rank 0 loads the weights.
-        # After supporting TP mm network, we will remove the check here.
-        if self.vit_separation == 1:
-            llm_weights = ModelWeightInfo(layer_weights=[], weights=[])
-
-        if self.vit_separation != 2:
-            if self.vit_weights is not None and self.tp_rank == 0:
-                weight_names = self.vit_weights.weight_names
-                ckpt_prefix = self.vit_weights.ckpt_prefix
-
-                for w in weight_names:
-                    w_name = ckpt_prefix + w
-                    llm_weights.weights.append(
-                        MMAtomicWeight(
-                            w,
-                            [CkptWeightInfo(w_name, identity)],
-                            identity,
-                            split_func=sp_id,
-                        )
+    def _get_vit_info(self, llm_weights: "ModelWeightInfo") -> "ModelWeightInfo":
+        if self.vit_weights is not None:
+            weight_names = self.vit_weights.weight_names
+            ckpt_prefix = self.vit_weights.ckpt_prefix
+            for w in weight_names:
+                w_name = ckpt_prefix + w
+                llm_weights.weights.append(
+                    MMAtomicWeight(
+                        w,
+                        [CkptWeightInfo(w_name, identity)],
+                        identity,
+                        split_func=sp_id,
                     )
-
+                )
         return llm_weights
 
 
@@ -99,20 +84,27 @@ class BaseMultiModalWeightInfo:
 class MultiModalMixin:
     mm_part: MultiModalEmbeddingInterface
 
-    @property
-    def vit_data_type(self):
-        return get_vit_compute_dtype(self.config.data_type)
+    def init_multimodal(
+        self,
+        mm_model_config: Any,  # MMModelConfig
+        vit_config: VitConfig,
+        device: str,
+    ) -> None:
+        self.vit_config = vit_config
+        with torch.device(device):
+            torch_default_dtype = torch.get_default_dtype()
+            torch.set_default_dtype(self.model_config.compute_dtype)
+            self._init_multimodal(
+                mm_model_config=mm_model_config,
+                vit_config=vit_config,
+            )
+            torch.set_default_dtype(torch_default_dtype)
 
-    def init_multimodal(self, config: GptInitModelParameters, device: str) -> None:
-        self.vit_config = config.py_env_configs.vit_config
-        if config.vit_separation != 2:
-            with torch.device(device):
-                torch_default_dtype = torch.get_default_dtype()
-                torch.set_default_dtype(self.vit_data_type)
-                self._init_multimodal(config)
-                torch.set_default_dtype(torch_default_dtype)
-
-    def _init_multimodal(self, config: GptInitModelParameters) -> None:
+    def _init_multimodal(
+        self,
+        mm_model_config: Any,  # MMModelConfig
+        vit_config: VitConfig,
+    ) -> None:
         raise NotImplementedError
 
     def _load_mm_weight(self, vit_params: VitParameters, ctype: str, device: str):
@@ -122,13 +114,15 @@ class MultiModalMixin:
         ft_prefix = vit_weight.ft_prefix
         weight_names = vit_weight.weight_names
 
-        def _safe_load_from_module(
-            param: torch.nn.Parameter, fname: str, ctype: torch.dtype
-        ):
+        def _safe_load_from_module(param: torch.nn.Parameter, fname: str, ctype):
+            from rtp_llm.utils.util import to_torch_dtype
+
             t = self.weight.get_global_weight_or_none(fname)
             if t is None:
                 raise Exception(f"failed to get tensor from name {fname}")
-            param.data = t.reshape(param.data.shape).to(ctype).to(device)
+            # Convert ctype (which may be DataType enum or string) to torch.dtype
+            torch_dtype = to_torch_dtype(ctype)
+            param.data = t.reshape(param.data.shape).to(torch_dtype).to(device)
 
         for w in weight_names:
             w_name = ft_prefix + w
@@ -161,7 +155,11 @@ class MultiModalMixin:
             model_name_path = ckpt_path.replace("/", "_")
 
             visual_trt_engine = MultiModalTRTEngine(
-                model_name_path, vit_params.config.get("image_size"), device, dtype
+                model_name_path,
+                vit_params.config.get("image_size"),
+                device,
+                dtype,
+                vit_config=self.vit_config,
             )
 
             # TRT engine doesn't support TP, here we only generate trt engine on rank0 if trt engine is not cached
@@ -172,7 +170,9 @@ class MultiModalMixin:
                 self._load_mm_weight(vit_params, dtype, device)
 
                 # create cached dir if not exists
-                output_dir = MultiModalTRTEngine.cache_path(model_name_path, dtype)
+                output_dir = MultiModalTRTEngine.cache_path(
+                    model_name_path, dtype, self.vit_config
+                )
                 if not os.path.exists(output_dir):
                     os.makedirs(output_dir)
 
@@ -207,12 +207,22 @@ class MultiModalMixin:
         gc.collect()
         torch.cuda.empty_cache()
 
-    def load_mm_weight(self, ctype: str, tp_size: int, tp_rank: int, device: str):
+    def load_mm_weight(
+        self,
+        model_config: ModelConfig,
+        ctype: str,
+        tp_size: int,
+        tp_rank: int,
+        device: str,
+    ):
+        vit_trt = self.vit_config.vit_trt
 
-        if StaticConfig.vit_config.vit_trt == 1:
+        if vit_trt == 1:
+            # mm_related_params is in model_config, not mm_model_config
+            mm_related_params = model_config.mm_related_params
             self.init_mm_trt(
-                self.config.ckpt_path,
-                self.config.mm_related_params,
+                model_config.ckpt_path,
+                mm_related_params,
                 tp_size,
                 tp_rank,
                 device,
@@ -232,4 +242,6 @@ class MultiModalMixin:
         if isinstance(self.mm_part, MultiModalTRTEngine):
             return
 
-        self._load_mm_weight(self.config.mm_related_params, ctype, device)
+        # mm_related_params is in model_config, not mm_model_config
+        mm_related_params = model_config.mm_related_params
+        self._load_mm_weight(mm_related_params, ctype, device)

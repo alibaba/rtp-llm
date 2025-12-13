@@ -7,7 +7,7 @@ test_copts = [
 ] + copts()
 
 test_deps = [
-    "//rtp_llm/cpp/config:gpt_init_params",
+    "//rtp_llm/cpp/config:config_modules",
     "@com_google_googletest//:gtest",
     "@com_google_googletest//:gtest_main",
     "@local_config_cuda//cuda:cuda_headers",
