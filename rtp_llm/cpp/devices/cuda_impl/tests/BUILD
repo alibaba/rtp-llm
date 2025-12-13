@@ -404,19 +404,24 @@ cc_binary(
 #     exec_properties = {'gpu':'A10'},
 # )
 
-# cc_test(
-#     name = "cuda_graph_copy_kernel_test",
-#     srcs = [
-#         "CudaGraphCopyKernelTest.cc",
-#     ],
-#     data = [],
-#     env = {
-#         "TEST_USING_DEVICE": "CUDA",
-#         "HACK_LAYER_NUM" : "1",
-#         "CUDA_LAUNCH_BLOCKING" : "1",
-#         "ENABLE_CUDA_GRAPH_DEBUG_MODE" : "1",
-#     },
-#     copts = copts() + ["-fno-access-control"],
-#     deps = test_deps,
-#     exec_properties = {'gpu':'A10'},
-# )
+py_test(
+    name = "CudaGraphCopyKernelTest",
+    srcs = [
+        "CudaGraphCopyKernelTest.py",
+    ],
+    data = [
+        "//:th_transformer"
+    ],
+    deps = [
+        "//rtp_llm/test/model_test/test_util:test_util",
+    ],
+    env = {
+        "NOT_USE_DEFAULT_STREAM" : "1",
+        "TEST_USING_DEVICE": "CUDA",
+        "HACK_LAYER_NUM" : "1",
+        "CUDA_LAUNCH_BLOCKING" : "1",
+        "ENABLE_CUDA_GRAPH_DEBUG_MODE" : "1",
+    },
+    tags = ['A10'],
+    exec_properties = {'gpu':'A10'},
+)
