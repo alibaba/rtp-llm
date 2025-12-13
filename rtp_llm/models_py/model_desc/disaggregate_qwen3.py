@@ -153,9 +153,9 @@ class Qwen3GemmLayer(nn.Module):
         self.qk_fuse_norm = FusedQKRMSNorm(
             next_layer_weights[W.q_ln_gamma],
             next_layer_weights[W.k_ln_gamma],
-            config.head_num,
-            config.head_num_kv,
-            config.size_per_head,
+            config.attn_config.head_num,
+            config.attn_config.kv_head_num,
+            config.attn_config.size_per_head,
             config.layernorm_eps,
         )
 
@@ -194,9 +194,9 @@ class Qwen3GemmPreLayer(nn.Module):
         self.qk_fuse_norm = FusedQKRMSNorm(
             weights.weights[0][W.q_ln_gamma],
             weights.weights[0][W.k_ln_gamma],
-            config.head_num,
-            config.head_num_kv,
-            config.size_per_head,
+            config.attn_config.head_num,
+            config.attn_config.kv_head_num,
+            config.attn_config.size_per_head,
             config.layernorm_eps,
         )
 
@@ -290,8 +290,8 @@ class Qwen3GemmModel(DisaggregateModelBase):
         t = torch.empty(
             [
                 total_token_num,
-                self.config.head_num
-                * self.config.size_per_head,
+                self.config.attn_config.head_num
+                * self.config.attn_config.size_per_head,
             ],
             device=self.device,
             dtype=torch.half,
@@ -372,10 +372,10 @@ class Qwen3AttnModel(DisaggregateModelBase):
             [
                 token_num,
                 (
-                    self.config.head_num
-                    + self.config.head_num_kv * 2
+                    self.config.attn_config.head_num
+                    + self.config.attn_config.kv_head_num * 2
                 )
-                * self.config.size_per_head,
+                * self.config.attn_config.size_per_head,
             ],
             device=self.device,
             dtype=torch.half,

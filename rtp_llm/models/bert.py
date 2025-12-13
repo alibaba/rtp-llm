@@ -53,19 +53,15 @@ class Bert(BaseModel):
     def _create_python_model(self) -> Optional[GptModelBase]:
         model_config = self.model_config
         parallelism_config = self.parallelism_config
-        device_resource_config = self.device_resource_config
         quant_config = self.model_config.quant_config
-        vocab_size = self.model_config.vocab_size
         fmha_config = self.fmha_config
         py_hw_kernel_config = self.hw_kernel_config
         
         self.py_model = BertModel(
             model_config,
             parallelism_config,
-            device_resource_config,
             self.weight,
             quant_config,
-            vocab_size,
             fmha_config=fmha_config,
             py_hw_kernel_config=py_hw_kernel_config,
         )

@@ -15,7 +15,7 @@ from rtp_llm.ops import KVCacheConfig, KvCacheDataType
 from rtp_llm.ops import ModelConfig as CppModelConfig
 from rtp_llm.ops import TaskType
 from rtp_llm.utils.gemm_utils.cutlass_config import load_cutlass_gemm_config
-from rtp_llm.utils.util import get_config_from_path
+from rtp_llm.utils.util import get_config_from_path, to_torch_dtype
 from rtp_llm.utils.weight_type import WEIGHT_TYPE
 
 
@@ -178,6 +178,15 @@ class ModelConfig(CppModelConfig):
                 # TypeError can occur when property getter returns unregistered C++ type
                 # This means the attribute exists (as a property), so allow setting
                 super().__setattr__(name, value)
+
+    @property
+    def compute_dtype(self) -> torch.dtype:
+        """Get compute dtype as torch.dtype from model_config.data_type.
+        
+        Returns:
+            torch.dtype: The compute dtype converted from data_type
+        """
+        return to_torch_dtype(self.data_type)
 
     def eval_model_weight_size(self) -> float:
         """

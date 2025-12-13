@@ -24,7 +24,6 @@ from rtp_llm.distribute.worker_info import g_parallel_info
 from rtp_llm.utils.multimodal_util import (
     MMUrlType,
     get_bytes_io_from_url,
-    get_vit_compute_dtype,
     vit_emb_cache_,
 )
 
@@ -81,7 +80,7 @@ class ImageTransform:
 class MultiModalEmbeddingInterface:
     @property
     def _data_type(self):
-        return get_vit_compute_dtype(self.config.data_type)
+        return self.model_config.compute_dtype
 
     @property
     def _device(self):

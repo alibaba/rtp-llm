@@ -90,7 +90,7 @@ class Qwen3Moe(Qwen2Moe):
         fmha_config = self.fmha_config
         py_hw_kernel_config = self.hw_kernel_config
         moe_config = self.moe_config
-        max_generate_batch_size = self.runtime_config.max_generate_batch_size
+        max_generate_batch_size = self.max_generate_batch_size
         
         self.py_model = GenericMoeModel(
             model_config,

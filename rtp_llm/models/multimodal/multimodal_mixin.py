@@ -16,7 +16,6 @@ from rtp_llm.models.multimodal.multimodal_common import MultiModalEmbeddingInter
 from rtp_llm.models.multimodal.multimodal_trt_engine import MultiModalTRTEngine
 from rtp_llm.ops.comm.nccl_op import NcclOp
 from rtp_llm.utils.model_weight import CkptWeightInfo, identity, sp_id
-from rtp_llm.utils.multimodal_util import get_vit_compute_dtype
 
 
 class BaseVitWeights:
@@ -85,10 +84,6 @@ class BaseMultiModalWeightInfo:
 class MultiModalMixin:
     mm_part: MultiModalEmbeddingInterface
 
-    @property
-    def vit_data_type(self):
-        return get_vit_compute_dtype(self.model_config.data_type)
-
     def init_multimodal(
         self,
         mm_model_config: Any,  # MMModelConfig
@@ -98,7 +93,7 @@ class MultiModalMixin:
         self.vit_config = vit_config
         with torch.device(device):
             torch_default_dtype = torch.get_default_dtype()
-            torch.set_default_dtype(self.vit_data_type)
+            torch.set_default_dtype(self.model_config.compute_dtype)
             self._init_multimodal(
                 mm_model_config=mm_model_config,
                 vit_config=vit_config,

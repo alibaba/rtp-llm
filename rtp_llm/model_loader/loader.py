@@ -25,7 +25,7 @@ from rtp_llm.utils.database import BaseDatabase, CkptDatabase
 from rtp_llm.utils.model_weight import W, WeightStyle
 from rtp_llm.utils.module_util import has_module
 from rtp_llm.utils.time_util import timer_wrapper
-from rtp_llm.utils.util import check_with_info, to_torch_dtype
+from rtp_llm.utils.util import check_with_info
 
 
 class ModelLoader:
@@ -56,7 +56,7 @@ class ModelLoader:
         )
 
         # Get compute_dtype from model_config
-        compute_dtype = to_torch_dtype(model_config.data_type)
+        compute_dtype = model_config.compute_dtype
         logging.info(f"load use type {compute_dtype}")
 
         # Get is_attn_model flag from weights_info (calculated in ModelDeployWeightInfo constructor)
@@ -546,7 +546,7 @@ class ModelLoader:
 
         model_path = self.model_config.ckpt_path
         ep_lb_database = CkptDatabase(model_path)
-        compute_dtype = to_torch_dtype(self.model_config.data_type)
+        compute_dtype = self.model_config.compute_dtype
 
         py_eplb = None
         if weights_info.enable_eplb_:

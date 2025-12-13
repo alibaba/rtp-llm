@@ -88,14 +88,6 @@ class MultimodalInput:
         self.config = config
         self.tensor = tensor
 
-
-def get_vit_compute_dtype(dtype: str):
-    if dtype == "bf16":
-        return torch.bfloat16
-    else:
-        return torch.half
-
-
 class IgraphItemKeyCountMismatchError(Exception):
     
     def __init__(self, requested_count: int, received_count: int, message: str = None):
