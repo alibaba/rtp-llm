@@ -12,11 +12,11 @@ from unittest import TestCase, main
 import requests
 from pydantic import BaseModel
 
+from rtp_llm.config.py_config_modules import StaticConfig
 from rtp_llm.distribute.worker_info import g_worker_info
 from rtp_llm.frontend.frontend_app import FrontendApp
 from rtp_llm.frontend.frontend_server import FrontendServer, FrontendWorker
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
-from rtp_llm.server.backend_app import BackendApp
 from rtp_llm.server.backend_server import BackendServer
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
@@ -80,14 +80,14 @@ class ConcurrencyLimitTest(TestCase):
         os.environ["START_PORT"] = str(self.port)
         g_worker_info.reload()
         self.frontend_app = FrontendApp()
-        self.backend_app = BackendApp()
+        self.backend_server = BackendServer(StaticConfig)
 
     def start_frontend_server(self):
         t = Thread(target=self.frontend_app.start, daemon=True)
         t.start()
 
     def start_backend_server(self):
-        t = Thread(target=self.backend_app.start, args=(g_worker_info,), daemon=True)
+        t = Thread(target=self.backend_server.start, args=(), daemon=True)
         t.start()
 
     def wait_server_start(self, port):

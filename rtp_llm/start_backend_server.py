@@ -15,12 +15,12 @@ import torch
 from setproctitle import setproctitle
 
 from rtp_llm.config.py_config_modules import GangConfig, PyEnvConfigs, VitConfig
+from rtp_llm.server.backend_server import BackendServer
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
 from rtp_llm.distribute.worker_info import g_parallel_info, g_worker_info
-from rtp_llm.server.backend_app import BackendApp
 from rtp_llm.server.vit_rpc_server import vit_start_server
 from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
@@ -44,14 +44,14 @@ def local_rank_start(global_controller: ConcurrencyController):
             setproctitle(f"rtp_llm_rank-{g_parallel_info.local_rank}")
         logging.info(f"start local {g_worker_info}, {g_parallel_info}")
         set_global_controller(global_controller)
-        app = BackendApp(py_env_configs)
-        app.start(g_worker_info)
+        backend_server = BackendServer(py_env_configs)
+        backend_server.start()
+        logging.info(
+            "All workers ready, entering service loop to keep backend_server alive"
+        )
     except BaseException as e:
         logging.error(f"start server error: {e}, trace: {traceback.format_exc()}")
         raise e
-
-    if not torch.cuda.is_available():
-        logging.info("GPU not found: using CPU")
 
 
 def multi_rank_start(global_controller: ConcurrencyController):

@@ -53,25 +53,10 @@ def start_backend_server_impl(global_controller):
     backend_process.start()
 
     retry_interval_seconds = 5
-    server_config = ServerConfig()
-    server_config.update_from_env()
-    start_port = server_config.start_port
-    backend_server_port = WorkerInfo.backend_server_port_offset(0, start_port)
-    while True:
-        if not backend_process.is_alive():
-            monitor_and_release_process(backend_process, None)
-            raise Exception("backend server is not alive")
-
-        try:
-            if check_server_health(backend_server_port):
-                logging.info(f"backend server is ready")
-                break
-            else:
-                time.sleep(retry_interval_seconds)
-        except Exception as e:
-            logging.info(f"backend server is not ready")
-            time.sleep(retry_interval_seconds)
-
+    time.sleep(retry_interval_seconds)
+    if not backend_process.is_alive():
+        monitor_and_release_process(backend_process, None)
+        raise Exception("backend server is not alive")
     return backend_process
 
 

@@ -58,7 +58,7 @@ class BackendServer(object):
         self.tp_size = g_parallel_info.tp_size
         self.backend_rpc_server_visitor = None
 
-    def start(self, py_env_configs: PyEnvConfigs):
+    def start(self):
         self._distributed_server.start(self.py_env_configs)
         self.engine = ModelFactory.create_from_env(get_world_info())
         logging.info(
@@ -71,6 +71,9 @@ class BackendServer(object):
             self.backend_rpc_server_visitor = BackendRPCServerVisitor(
                 self.engine.config
             )
+        self.wait_all_worker_ready()
+        while True:
+            time.sleep(1)
 
     def stop(self) -> None:
         if isinstance(self.engine, BaseEngine):

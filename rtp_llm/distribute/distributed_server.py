@@ -70,7 +70,7 @@ class DistributedServer(object):
             _g_world_info.master = g_master_info
             _g_world_info.num_nodes = (
                 g_parallel_info.world_size + g_parallel_info.local_world_size - 1
-            ) / g_parallel_info.local_world_size
+            ) // g_parallel_info.local_world_size
 
         if g_parallel_info.world_size == 1:
             logging.info("world_size == 1, do not start distributed_server")
