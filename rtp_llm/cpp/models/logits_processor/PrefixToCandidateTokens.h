@@ -18,12 +18,14 @@ public:
     int32_t                                     end_token_id;
     std::string                                 sep;
     std::map<std::string, std::vector<int32_t>> prefix_dict;
+    std::map<std::string, float>                weight_dict;
 
     void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override {
         json.Jsonize("start_token_id", start_token_id, 225);
         json.Jsonize("end_token_id", end_token_id, 2);
         json.Jsonize("sep", sep, "_");
         json.Jsonize("prefix_dict", prefix_dict, prefix_dict);
+        json.Jsonize("weight_dict", weight_dict, {});
     }
 };
 
@@ -80,6 +82,10 @@ public:
         loadPrefixDict(file_path);
     }
 
+    const std::unordered_map<std::string, float>& getWeightDict() {
+        return weight_dict_;
+    }
+
 public:
     static std::shared_ptr<PrefixToCandidateTokens> instance() {
         static std::shared_ptr<PrefixToCandidateTokens> t(new PrefixToCandidateTokens());
@@ -95,6 +101,7 @@ private:
         std::lock_guard<std::mutex> lock(mutex_);
         init_success_ = false;
         prefix_to_cadicates_.clear();
+        weight_dict_.clear();
         std::ifstream file(file_path);
         if (!file) {
             std::stringstream ss;
@@ -120,6 +127,7 @@ private:
             }
             prefix_to_cadicates_[kv.first] = tmp_set;
         }
+        weight_dict_.insert(config.weight_dict.begin(), config.weight_dict.end());
         file.close();
         init_success_ = true;
         RTP_LLM_LOG_INFO("PrefixToCandidateTokens load [%s] successfully", file_path.c_str());
@@ -129,6 +137,7 @@ private:
     std::mutex                                                   mutex_;
     TreeDecodeConfig                                             config;
     std::unordered_map<std::string, std::unordered_set<int32_t>> prefix_to_cadicates_;
+    std::unordered_map<std::string, float>                       weight_dict_;
     bool                                                         init_success_ = false;
 };
 
