@@ -86,7 +86,7 @@ multi_copy_script() {
         scp -P ${SSH_PORT} ${RUN_USER}@${IP}:${TEST_OUTPUT_PATH}/main_logs/process.log ${TASK_OUTPUT_DIR}/process_logs/process_${TEST_OUTPUT_NAME}.log;
         scp -P ${SSH_PORT} ${RUN_USER}@${IP}:${TEST_OUTPUT_PATH}/normal_* ${TASK_OUTPUT_DIR}/trace_files/;
         if [ $WORLD_RANK -eq 0 ]; then
-          scp -P ${SSH_PORT} ${RUN_USER}@${IP}:${TEST_OUTPUT_PATH}/Decode_Result.json ${TASK_OUTPUT_DIR}/Decode_Result.json;
+          scp -P ${SSH_PORT} ${RUN_USER}@${IP}:${TEST_OUTPUT_PATH}/*Result.json ${TASK_OUTPUT_DIR}/;
         fi
       ) &
       export WORLD_RANK=$((WORLD_RANK + 8));
