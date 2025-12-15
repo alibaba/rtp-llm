@@ -46,7 +46,8 @@ CacheConfig CacheConfigCreator::createBasicConfig(const rtp_llm::GptInitParamete
         spec->local_head_num_kv  = 1;  // mla set local_head_num_kv to 1
 
         config.cache_specs.push_back(spec);
-        config.block_size = static_cast<int>(spec->block_size() * spec->layer_num);
+        config.block_size   = static_cast<int>(spec->block_size() * spec->layer_num);
+        config.block_stride = spec->block_size();
 
         // TODO(chanyin) set k_block_stride as block size for compatibility, fix in future
         config.k_block_stride  = spec->block_size();
@@ -63,8 +64,8 @@ CacheConfig CacheConfigCreator::createBasicConfig(const rtp_llm::GptInitParamete
         spec->size_per_head      = static_cast<uint>(param.size_per_head_);
 
         config.cache_specs.push_back(spec);
-        config.block_size = static_cast<int>(spec->block_size() * spec->layer_num);
-
+        config.block_size   = static_cast<int>(spec->block_size() * spec->layer_num);
+        config.block_stride = spec->block_size();
         // Set block strides for backward compatibility, TODO, fix this
         config.k_block_stride  = spec->block_size();
         config.v_block_stride  = 0;

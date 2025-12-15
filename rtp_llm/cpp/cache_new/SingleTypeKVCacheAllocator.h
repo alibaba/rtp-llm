@@ -18,7 +18,10 @@ public:
     void               insertIntoCache(const InsertInfo& insert_info) override;
     BlockAddrInfo      convertIndexToAddr(int layer_id, int block_id) const override;
     BlockBufferPtrInfo convertIndexToBuffer(int layer_id, int block_id) const override;
-    CacheLayerLayout   layerCacheBase() const override;
+    std::vector<BufferPtr>
+         convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const override;
+    void incrKVCacheRef(KVCacheResourceV1& kvcache_resource, const CacheKeysType& cache_keys) override;
+    CacheLayerLayout layerCacheBase() const override;
 
     bool updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                        const std::vector<int>&        block_src_batch,

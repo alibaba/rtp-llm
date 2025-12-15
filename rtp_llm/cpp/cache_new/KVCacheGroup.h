@@ -43,6 +43,8 @@ public:
     std::unordered_map<int, torch::Tensor> layerCacheBase() const;
     BlockAddrInfo                          convertIndexToAddr(int layer_id, int block_id) const;
     BlockBufferPtrInfo                     convertIndexToBuffer(int layer_id, int block_id) const;
+    std::vector<BufferPtr>
+    convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const;
 
     size_t freeBlocksNum() const;
     bool   ensureFreeBlocks(int need_blocks);

@@ -181,6 +181,11 @@ BlockBufferPtrInfo BlockPool::convertIndexToBuffer(int layer_id, int block_id) c
     return layout_strategy_->convertIndexToBuffer(layer_id, block_id);
 }
 
+std::vector<BufferPtr>
+BlockPool::convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const {
+    return layout_strategy_->convertIndexToBuffer(layer_id, block_id, partition_count, partition_id);
+}
+
 KVCacheBuffer BlockPool::kvCacheBuffer() const {
     return layout_strategy_->kvCacheBuffer();
 }

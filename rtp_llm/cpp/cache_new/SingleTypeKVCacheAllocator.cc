@@ -1,5 +1,7 @@
 #include "rtp_llm/cpp/cache_new/SingleTypeKVCacheAllocator.h"
 
+#include <unordered_map>
+
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache_new/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache_new/BatchKVCacheResource.h"
@@ -168,6 +170,54 @@ BlockAddrInfo SingleTypeKVCacheAllocator::convertIndexToAddr(int layer_id, int b
 
 BlockBufferPtrInfo SingleTypeKVCacheAllocator::convertIndexToBuffer(int layer_id, int block_id) const {
     return full_kv_cache_group_->convertIndexToBuffer(layer_id, block_id);
+}
+
+std::vector<BufferPtr> SingleTypeKVCacheAllocator::convertIndexToBuffer(int layer_id,
+                                                                        int block_id,
+                                                                        int partition_count,
+                                                                        int partition_id) const {
+    return full_kv_cache_group_->convertIndexToBuffer(layer_id, block_id, partition_count, partition_id);
+}
+
+void SingleTypeKVCacheAllocator::incrKVCacheRef(KVCacheResourceV1& kvcache_resource, const CacheKeysType& cache_keys) {
+    if (cache_keys.empty()) {
+        return;
+    }
+
+    RTP_LLM_CHECK_WITH_INFO(
+        kvcache_resource.groupNums() == 1, "incrKVCacheRef expects groupNums==1, got %d", kvcache_resource.groupNums());
+
+    std::unordered_map<CacheKeyType, size_t> key_to_pos;
+    const auto&                              resource_keys = kvcache_resource.cacheKeys();
+    key_to_pos.reserve(resource_keys.size());
+    for (size_t i = 0; i < resource_keys.size(); ++i) {
+        key_to_pos.emplace(resource_keys[i], i);
+    }
+
+    BlockIndicesType blocks_to_ref;
+    blocks_to_ref.reserve(cache_keys.size());
+
+    auto& src_blocks = kvcache_resource.blocks(0);
+
+    for (auto key : cache_keys) {
+        auto it = key_to_pos.find(key);
+        if (it == key_to_pos.end()) {
+            continue;
+        }
+        const size_t pos = it->second;
+        if (pos >= src_blocks.size()) {
+            continue;
+        }
+        const auto block = src_blocks[pos];
+        if (block > 0 && !isNullBlockIdx(block)) {
+            blocks_to_ref.push_back(block);
+        }
+    }
+
+    if (blocks_to_ref.empty()) {
+        return;
+    }
+    block_pool_->blockCacheReference(blocks_to_ref);
 }
 
 // Update kv blocks for beam search or multi-return sequences.
