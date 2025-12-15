@@ -35,6 +35,9 @@ public:
     int rdma_connect_timeout_ms{250};
     int rdma_qp_count_per_connection{2};
 
+    uint32_t rdma_io_thread_count{4};
+    uint32_t rdma_worker_thread_count{2};
+
     bool enable_metric{true};
 
     uint32_t messager_io_thread_count     = 4;

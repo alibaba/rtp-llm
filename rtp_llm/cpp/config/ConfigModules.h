@@ -152,7 +152,7 @@ struct HWKernelConfig {
     // Decode CUDA Graph capture configuration
     // Comma-separated list of batch sizes, e.g., "1,2,4,8,16,32"
     std::vector<int> decode_capture_batch_sizes;
-    bool             disable_dpc_random = false;
+    bool             disable_dpc_random     = false;
     bool             rocm_disable_custom_ag = true;
     std::string      to_string() const;
 };
@@ -209,7 +209,7 @@ struct SpeculativeExecutionConfig {
     std::string     quantization                  = "";
     std::string     checkpoint_path               = "";
     bool            use_new_sp_engine             = false;
-    std::string to_string() const;
+    std::string     to_string() const;
 
     // Helper functions for enum conversion
     static SpeculativeType from_string(const std::string& str);
@@ -228,6 +228,8 @@ struct CacheStoreConfig {
     int         thread_count                 = 16;
     int         rdma_connect_timeout_ms      = 250;
     int         rdma_qp_count_per_connection = 2;
+    int         rdma_io_thread_count         = 4;
+    int         rdma_worker_thread_count     = 2;
     int         messager_io_thread_count     = 2;
     int         messager_worker_thread_count = 16;
     std::string to_string() const;
@@ -241,9 +243,9 @@ struct BatchDecodeSchedulerConfig {
 };
 
 struct FIFOSchedulerConfig {
-    int64_t max_context_batch_size           = 1;
-    int64_t scheduler_reserve_resource_ratio = 5;
-    int64_t max_batch_tokens_size            = 0;
+    int64_t     max_context_batch_size           = 1;
+    int64_t     scheduler_reserve_resource_ratio = 5;
+    int64_t     max_batch_tokens_size            = 0;
     std::string to_string() const;
 };
 

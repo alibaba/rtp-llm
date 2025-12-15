@@ -40,9 +40,9 @@ void RemoteRpcServer::initLocalPeerInfo() {
         return;
     }
     // worker 0 is master (rank 0)
-    resource_.workers = maga_init_params_.runtime_config.worker_addrs;
+    resource_.workers      = maga_init_params_.runtime_config.worker_addrs;
     resource_.grpc_workers = maga_init_params_.runtime_config.worker_grpc_addrs;
-    
+
     string worker_info = "worker address is ";
     for (auto& worker : resource_.workers) {
         worker_info += worker + ", ";
@@ -60,7 +60,8 @@ void RemoteRpcServer::initCacheStore(const EngineInitParams&                init
                                      rtp_llm::ProposeModelEngineInitParams* propose_params) {
     RTP_LLM_LOG_INFO("init_params.role_type : %d", init_params.pd_sep_config.role_type);
 
-    if (init_params.pd_sep_config.role_type != RoleType::PREFILL && init_params.pd_sep_config.role_type != RoleType::DECODE) {
+    if (init_params.pd_sep_config.role_type != RoleType::PREFILL
+        && init_params.pd_sep_config.role_type != RoleType::DECODE) {
         RTP_LLM_FAIL("role_type must be prefill or decode, but it is %d", init_params.pd_sep_config.role_type);
     }
     const_cast<ResourceContext*>(&engine_->resourceContext())->use_cache_store = true;
@@ -75,6 +76,10 @@ void RemoteRpcServer::initCacheStore(const EngineInitParams&                init
     params.queue_size                   = 500;
     params.rdma_connect_timeout_ms      = init_params.cache_store_config.rdma_connect_timeout_ms;
     params.rdma_qp_count_per_connection = init_params.cache_store_config.rdma_qp_count_per_connection;
+    params.rdma_io_thread_count         = init_params.cache_store_config.rdma_io_thread_count;
+    params.rdma_worker_thread_count     = init_params.cache_store_config.rdma_worker_thread_count;
+    params.messager_io_thread_count     = init_params.cache_store_config.messager_io_thread_count;
+    params.messager_worker_thread_count = init_params.cache_store_config.messager_worker_thread_count;
     params.device                       = device;
     params.metrics_reporter             = metrics_reporter_;
     RTP_LLM_LOG_INFO("cache store listen port is [%ld], rdma listen port is [%ld] rdma_mode is [%d]",
