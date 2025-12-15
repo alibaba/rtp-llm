@@ -610,6 +610,66 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefEmptyInputNoEffect) {
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before);
 }
 
+TEST_F(SingleTypeKVCacheAllocatorTest, InitMallocForCommonLenDropLastReusedBlockWhenInputAlignedAndFullyReused) {
+    auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/10, /*seq_size_per_block=*/8);
+    allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config, device_, AllocationType::HOST);
+    ASSERT_TRUE(allocator_->init());
+
+    // 1) Seed cache with 2 blocks for keys {101, 102}
+    {
+        const int seq_len         = 16;  // 2 blocks * 8
+        auto      seed_resource   = createBatchKVCacheResource(/*batch_size=*/1);
+        auto      seed_token_ids  = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/seq_len);
+        auto&     seed_cache_keys = seed_resource->cacheKeys(0);
+        seed_cache_keys           = CacheKeysType{101, 102};
+
+        MallocInfo seed_malloc_info{seed_resource, seed_token_ids};
+        seed_malloc_info.common_seq_len                              = seq_len;
+        seed_malloc_info.total_seq_len                               = seq_len;
+        seed_malloc_info.input_seq_len                               = seq_len;
+        seed_malloc_info.batch_kv_cache_resource->enable_reuse_cache = true;
+
+        auto seed_result = allocator_->malloc(seed_malloc_info);
+        ASSERT_TRUE(seed_result.success);
+        ASSERT_EQ(seed_resource->blocks(0).size(), 2);
+
+        InsertInfo insert_info{seed_resource, seed_token_ids, /*is_resident=*/true};
+        allocator_->insertIntoCache(insert_info);
+
+        // End the request: blocks are freed from the request, but should remain protected by cache residency.
+        FreeInfo free_info{seed_resource, seed_token_ids};
+        allocator_->free(free_info);
+    }
+
+    // 2) New request with the same input length and fully matching keys.
+    const int input_seq_len            = 16;
+    auto      batch_resource           = createBatchKVCacheResource(/*batch_size=*/1);
+    auto      complete_token_ids       = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/input_seq_len);
+    auto&     cache_keys               = batch_resource->cacheKeys(0);
+    cache_keys                         = CacheKeysType{101, 102};
+    batch_resource->enable_reuse_cache = true;
+
+    MallocInfo malloc_info{batch_resource, complete_token_ids};
+    malloc_info.common_seq_len = input_seq_len;
+    malloc_info.total_seq_len  = input_seq_len;
+    malloc_info.input_seq_len  = input_seq_len;
+
+    auto result = allocator_->initMallocForCommonLen(malloc_info);
+    ASSERT_TRUE(result.success);
+
+    // Expected: drop the last matched block => reuse_len reduced by 1 block (8 tokens).
+    EXPECT_EQ(result.reuse_len, 8);
+
+    const auto& blocks_0 = batch_resource->blocks(0);
+    ASSERT_EQ(blocks_0.size(), 2);
+    EXPECT_EQ(blocks_0[0], 1);  // first matched block reused
+    EXPECT_NE(blocks_0[1], 2);  // last matched block should NOT be reused
+
+    auto block_pool = allocator_->getBlockPool();
+    ASSERT_NE(block_pool, nullptr);
+    block_pool->blockCacheFree(BlockIndicesType{1, 2});
+}
+
 TEST_F(SingleTypeKVCacheAllocatorTest, TotalBlocksNums) {
     auto config = createSingleTypeTestConfig(4, 20);
     allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config, device_);
