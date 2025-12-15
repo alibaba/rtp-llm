@@ -95,7 +95,7 @@ public:
     bool enableMemoryBlockCache() const;
     bool enableRemoteCache() const;
     bool enableDeviceCache() const;
-
+    bool syncWaitWrite() const;
     bool asyncLoadCache();
     bool loadCacheDone();
 

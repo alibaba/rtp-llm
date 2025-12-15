@@ -351,14 +351,14 @@ void LocalRpcServer::reportCacheStatusTime(int64_t request_begin_time_us) {
         return grpc::Status(grpc::StatusCode::CANCELLED, "request is cancelled");
     }
     if (!engine_) {
-        RTP_LLM_LOG_WARNING("copy cache failed, engine is null");
-        return grpc::Status(grpc::StatusCode::INTERNAL, "engine is null");
+        RTP_LLM_CHECK_WITH_INFO(false, "copy cache failed, engine is null");
     }
+
     auto cache_manager = engine_->getCacheManager();
     if (!cache_manager) {
-        RTP_LLM_LOG_WARNING("copy cache failed, cache manager is null");
-        return grpc::Status(grpc::StatusCode::INTERNAL, "cache manager is null");
+        RTP_LLM_CHECK_WITH_INFO(false, "copy cache failed, cache manager is null");
     }
+
     if (!cache_manager->copyCache(*request, *response)) {
         RTP_LLM_LOG_WARNING("cache manager copy cache failed, request: [%s]", request->DebugString().c_str());
         const std::string error_msg = "cache manager copy cache failed, request: [" + request->DebugString() + "]";

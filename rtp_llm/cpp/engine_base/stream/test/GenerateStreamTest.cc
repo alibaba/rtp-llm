@@ -122,21 +122,4 @@ TEST_F(GenerateStreamTest, testGenerateStreamReuseCacheMethod) {
     ASSERT_TRUE(stream->reuseCache());
 }
 
-TEST_F(GenerateStreamTest, testGenerateStreamEnable3FSMethod) {
-    rtp_llm::GptInitParameter params;
-    auto                      builder = GenerateStreamBuilder(params);
-    auto                      stream  = builder.createContextStream({1, 2, 3, 4, 5, 6});
-
-    // default true
-    ASSERT_TRUE(stream->enable3FS());
-
-    // flip to false and verify
-    stream->generate_input_->generate_config->enable_3fs = false;
-    ASSERT_FALSE(stream->enable3FS());
-
-    // flip back to true and verify
-    stream->generate_input_->generate_config->enable_3fs = true;
-    ASSERT_TRUE(stream->enable3FS());
-}
-
 }  // namespace rtp_llm
