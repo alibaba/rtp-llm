@@ -59,6 +59,7 @@ class BackendServer(object):
         self.backend_rpc_server_visitor = None
 
     def start(self):
+        """Initialize backend server without entering service loop"""
         self._distributed_server.start(self.py_env_configs)
         self.engine = ModelFactory.create_from_env(get_world_info())
         logging.info(
@@ -71,7 +72,9 @@ class BackendServer(object):
             self.backend_rpc_server_visitor = BackendRPCServerVisitor(
                 self.engine.config
             )
-        self.wait_all_worker_ready()
+
+    def serve_forever(self):
+        """Enter service loop to keep the process alive"""
         while True:
             time.sleep(1)
 
@@ -89,8 +92,3 @@ class BackendServer(object):
     @property
     def role_type(self) -> str:
         return self.engine.role_type if self.engine else "unknown"
-
-    def wait_all_worker_ready(self):
-        # master需要等其他所有机器都ready以后才能起服务，挂vipserver
-        # TODO 用新的rpc方式加回来
-        return True

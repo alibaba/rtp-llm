@@ -29,9 +29,8 @@ from rtp_llm.utils.concurrency_controller import (
 from rtp_llm.utils.util import copy_gemm_config
 
 
-def local_rank_start(global_controller: ConcurrencyController):
+def local_rank_start(global_controller: ConcurrencyController, pipe_writer=None):
     copy_gemm_config()
-    app = None
     ## collect all args and envs.
     py_env_configs = PyEnvConfigs()
     py_env_configs.update_from_env()
@@ -46,15 +45,43 @@ def local_rank_start(global_controller: ConcurrencyController):
         set_global_controller(global_controller)
         backend_server = BackendServer(py_env_configs)
         backend_server.start()
-        logging.info(
-            "All workers ready, entering service loop to keep backend_server alive"
-        )
+        logging.info("Backend server initialized successfully, sending ready status")
+
+        # Send startup success message
+        if pipe_writer is not None:
+            try:
+                pipe_writer.send(
+                    {
+                        "status": "success",
+                        "message": f"Backend server started successfully on rank {g_parallel_info.local_rank}",
+                    }
+                )
+                pipe_writer.close()
+            except Exception as e:
+                logging.warning(f"Failed to send success status via pipe: {e}")
+
+        # Enter service loop to keep the process alive
+        logging.info("Entering service loop to keep backend_server alive")
+        backend_server.serve_forever()
+
     except BaseException as e:
-        logging.error(f"start server error: {e}, trace: {traceback.format_exc()}")
+        error_msg = f"start server error: {e}"
+        error_trace = traceback.format_exc()
+        logging.error(f"{error_msg}, trace: {error_trace}")
+
+        # Send startup failure message
+        if pipe_writer is not None:
+            try:
+                pipe_writer.send(
+                    {"status": "failed", "message": error_msg, "traceback": error_trace}
+                )
+                pipe_writer.close()
+            except Exception as pipe_error:
+                logging.warning(f"Failed to send error status via pipe: {pipe_error}")
         raise e
 
 
-def multi_rank_start(global_controller: ConcurrencyController):
+def multi_rank_start(global_controller: ConcurrencyController, pipe_writer=None):
     try:
         multiprocessing.set_start_method("spawn")
     except RuntimeError as e:
@@ -71,7 +98,10 @@ def multi_rank_start(global_controller: ConcurrencyController):
             f"multi rank starts with default local world size: {local_world_size}, device count = {torch.cuda.device_count()}, world size = {g_parallel_info.world_size}"
         )
     os.environ["LOCAL_WORLD_SIZE"] = str(local_world_size)
+
     procs: List[Process] = []
+    rank_pipe_readers = []  # Create independent pipe reader for each rank
+
     cuda_devices = os.environ.get("CUDA_VISIBLE_DEVICES", None)
     cuda_device_list = (
         cuda_devices.split(",")
@@ -81,46 +111,102 @@ def multi_rank_start(global_controller: ConcurrencyController):
     if g_parallel_info.dp_size > 1:
         # tp must on one device when dp
         assert g_parallel_info.world_rank % g_parallel_info.tp_size == 0
+
+    # Create independent pipe and start process for each rank
     for _, world_rank in enumerate(
         range(g_parallel_info.world_rank, g_parallel_info.world_rank + local_world_size)
     ):
+        reader, writer = multiprocessing.Pipe(duplex=False)
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(cuda_device_list)
         os.environ["WORLD_RANK"] = str(world_rank)
         proc = Process(
             target=local_rank_start,
-            args=(global_controller,),
+            args=(global_controller, writer),
             name=f"rank-{world_rank}",
         )
         proc.start()
         procs.append(proc)
+        rank_pipe_readers.append(reader)
 
     gang_config = GangConfig()
     gang_config.update_from_env()
     if gang_config.fake_gang_env:
         return procs
 
-    first_dead_time = 0
-    timeout_seconds = 50
+    # Wait for all ranks to report startup status via pipe
+    logging.info(
+        f"Waiting for all {local_world_size} ranks to report startup status..."
+    )
+    all_success = True
+    error_messages = []
+
+    for i, reader in enumerate(rank_pipe_readers):
+        try:
+            data = reader.recv()  # Block and wait for status from each rank
+            if data.get("status") == "success":
+                logging.info(
+                    f"Rank {i} started successfully: {data.get('message', '')}"
+                )
+            else:
+                all_success = False
+                error_msg = data.get("message", "Unknown error")
+                error_messages.append(f"Rank {i}: {error_msg}")
+                traceback_info = data.get("traceback", "")
+                if traceback_info:
+                    logging.error(f"Rank {i} traceback: {traceback_info}")
+        except Exception as e:
+            all_success = False
+            error_messages.append(f"Rank {i}: Failed to receive status - {e}")
+            logging.error(f"Failed to receive status from rank {i}: {e}")
+
+    # Report overall status via external pipe
+    if pipe_writer is not None:
+        try:
+            if all_success:
+                pipe_writer.send(
+                    {
+                        "status": "success",
+                        "message": f"All {local_world_size} backend ranks started successfully",
+                    }
+                )
+                logging.info(f"All {local_world_size} ranks started successfully")
+            else:
+                error_msg = "; ".join(error_messages)
+                pipe_writer.send(
+                    {
+                        "status": "failed",
+                        "message": f"Some ranks failed to start: {error_msg}",
+                        "traceback": "",
+                    }
+                )
+                logging.error(f"Some ranks failed: {error_msg}")
+            pipe_writer.close()
+        except Exception as e:
+            logging.warning(f"Failed to send status via pipe: {e}")
+
+    if not all_success:
+        # Terminate all processes if any rank failed
+        logging.error("Terminating all ranks due to startup failures")
+        for proc in procs:
+            if proc.is_alive():
+                proc.terminate()
+        for proc in procs:
+            proc.join(timeout=5)
+        raise Exception(f"Multi-rank startup failed: {'; '.join(error_messages)}")
+
+    # Keep processes running and monitor after successful startup
     while any(proc.is_alive() for proc in procs):
         if not all(proc.is_alive() for proc in procs):
-            if first_dead_time == 0:
-                first_dead_time = time.time()
-            elif (time.time() - first_dead_time) > timeout_seconds:
-                logging.info(
-                    f"wait proc terminate over timeout {timeout_seconds}s, "
-                    f"send SIGKILL to terminate all backend process"
-                )
-                for proc in procs:
-                    if proc.is_alive():
-                        logging.info(f"send kill to {proc}")
-                        os.kill(proc.pid, signal.SIGKILL)
-                time.sleep(5)
-                continue
-            logging.error(f"some backend proc is not alive, terminate!")
-            [proc.terminate() for proc in procs]
+            logging.error("Some backend rank process died, terminating all")
+            for proc in procs:
+                if proc.is_alive():
+                    proc.terminate()
+            break
         time.sleep(1)
-    logging.info(f"current backend procs is {procs}")
-    [proc.join() for proc in procs]
+
+    logging.info(f"All backend procs terminated: {procs}")
+    for proc in procs:
+        proc.join()
 
 
 def load_gpu_nic_affinity():
@@ -178,7 +264,7 @@ def clear_jit_filelock():
             os.remove(file)
 
 
-def start_backend_server(global_controller: ConcurrencyController):
+def start_backend_server(global_controller: ConcurrencyController, pipe_writer):
     setproctitle("rtp_llm_backend_server")
     os.makedirs("logs", exist_ok=True)
     load_gpu_nic_affinity()
@@ -205,9 +291,9 @@ def start_backend_server(global_controller: ConcurrencyController):
         )
 
     if torch.cuda.device_count() > 1 and g_parallel_info.world_size > 1:
-        return multi_rank_start(global_controller)
+        return multi_rank_start(global_controller, pipe_writer)
     else:
-        return local_rank_start(global_controller)
+        return local_rank_start(global_controller, pipe_writer)
 
 
 def main():

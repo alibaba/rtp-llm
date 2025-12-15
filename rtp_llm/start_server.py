@@ -45,19 +45,47 @@ def start_backend_server_impl(global_controller):
     profiling_debug_config.update_from_env()
     # only for debug
     if profiling_debug_config.debug_load_server:
-        start_backend_server(global_controller)
+        start_backend_server(global_controller, None)
         os._exit(-1)
+
+    # Create pipe for subprocess startup status communication
+    pipe_reader, pipe_writer = multiprocessing.Pipe(duplex=False)
+
     backend_process = multiprocessing.Process(
-        target=start_backend_server, args=(global_controller,), name="backend_server"
+        target=start_backend_server,
+        args=(global_controller, pipe_writer),
+        name="backend_server",
     )
     backend_process.start()
+    pipe_writer.close()  # Parent process closes write end
 
-    retry_interval_seconds = 5
-    time.sleep(retry_interval_seconds)
-    if not backend_process.is_alive():
+    # Wait for subprocess to send startup status, maximum 30 seconds
+    max_wait_seconds = 30
+    logging.info(
+        f"Waiting for backend server startup status (timeout: {max_wait_seconds}s)..."
+    )
+
+    try:
+        # Receive status message
+        status_msg = pipe_reader.recv()
+        if status_msg.get("status") == "success":
+            logging.info(
+                f"Backend server started successfully: {status_msg.get('message', '')}"
+            )
+            return backend_process
+
+        # Startup failed
+        error_msg = status_msg.get("message", "Unknown error")
+        traceback_info = status_msg.get("traceback", "")
+        if traceback_info:
+            logging.error(f"Traceback: {traceback_info}")
+
+        # Unified failure handling
+        logging.error(f"Backend server failed to start: {error_msg}")
         monitor_and_release_process(backend_process, None)
-        raise Exception("backend server is not alive")
-    return backend_process
+        raise Exception(f"Backend server start failed: {error_msg}")
+    finally:
+        pipe_reader.close()
 
 
 def start_frontend_server_impl(global_controller, backend_process):
@@ -108,7 +136,7 @@ def start_frontend_server_impl(global_controller, backend_process):
             logging.info(f"frontend server is ready")
             break
         except Exception as e:
-            # 如果连接失败，等待一段时间后重试
+            # If connection fails, wait and retry
             time.sleep(retry_interval_seconds)
 
     return frontend_processes
@@ -346,7 +374,9 @@ def start_server(parser: EnvArgumentParser, args: argparse.Namespace):
         )
         logging.info(f"frontend server process = {frontend_process}")
 
-        logging.info(f"后端RPC 服务监听的ip为 0.0.0.0，ip/ip段可自定义为所需范围")
+        logging.info(
+            f"Backend RPC service is listening on 0.0.0.0, IP/IP range can be customized as needed"
+        )
     except Exception as e:
         logging.error(f"start failed, trace: {traceback.format_exc()}")
     finally:
