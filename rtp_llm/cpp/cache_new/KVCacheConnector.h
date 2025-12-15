@@ -13,18 +13,24 @@ public:
 public:
     class Meta {
     public:
-        virtual ~Meta() = default;
+        virtual ~Meta()                                = default;
+        virtual std::pair<int, int> blockRange() const = 0;  // <start_block_index, size>
+    };
+
+    class AsyncMatchContext: public AsyncContext {
+        virtual size_t matchedBlockCount() const = 0;
     };
 
 public:
-    virtual bool                          init()                                               = 0;
-    virtual std::shared_ptr<AsyncContext> asyncRead(const std::shared_ptr<KVCacheResourceV1>& resource,
-                                                    const std::shared_ptr<Meta>&              meta)         = 0;
-    virtual std::shared_ptr<AsyncContext> asyncWrite(const std::shared_ptr<KVCacheResourceV1>& resource,
-                                                     const std::shared_ptr<Meta>&              meta)        = 0;
-    virtual std::shared_ptr<AsyncContext> asyncWriteByLayer(int                                       layer_id,
-                                                            const std::shared_ptr<KVCacheResourceV1>& resource,
-                                                            const std::shared_ptr<Meta>&              meta) = 0;
+    virtual bool                               init()                                                             = 0;
+    virtual std::shared_ptr<AsyncMatchContext> asyncRead(const std::shared_ptr<KVCacheResourceV1>& resource,
+                                                         const std::shared_ptr<Meta>&              meta,
+                                                         const std::shared_ptr<AsyncMatchContext>& match_context) = 0;
+    virtual std::shared_ptr<AsyncContext>      asyncWrite(const std::shared_ptr<KVCacheResourceV1>& resource,
+                                                          const std::shared_ptr<Meta>&              meta)                      = 0;
+    virtual std::shared_ptr<AsyncContext>      asyncWriteByLayer(int                                       layer_id,
+                                                                 const std::shared_ptr<KVCacheResourceV1>& resource,
+                                                                 const std::shared_ptr<Meta>&              meta)               = 0;
 };
 
 }  // namespace rtp_llm
