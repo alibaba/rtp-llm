@@ -56,7 +56,8 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
                            reuseCache(),
                            enableMemoryBlockCache(),
                            enableRemoteCache(),
-                           enableDeviceCache());
+                           enableDeviceCache(),
+                           syncWaitWrite());
         free_info.request_id = stream_->streamId();
 
         // TODO(chanyin): Handle cache insertion for reuse_cache case
@@ -178,11 +179,6 @@ bool StreamCacheResource::reuseCache() const {
     return resource_context_.reuse_cache && stream_->reuseCache();
 }
 
-bool StreamCacheResource::enable3FS() const {
-    // TODO : delete this
-    return resource_context_.enable_3fs && stream_->enable3FS();
-}
-
 bool StreamCacheResource::enableMemoryBlockCache() const {
     return resource_context_.enable_memory_block_cache && stream_->enableMemoryBlockCache();
 }
@@ -193,6 +189,10 @@ bool StreamCacheResource::enableRemoteCache() const {
 
 bool StreamCacheResource::enableDeviceCache() const {
     return resource_context_.enable_device_cache && stream_->enableDeviceCache();
+}
+
+bool StreamCacheResource::syncWaitWrite() const {
+    return resource_context_.sync_wait_write && stream_->syncWaitWrite();
 }
 
 bool StreamCacheResource::asyncLoadCache() {
@@ -216,8 +216,14 @@ bool StreamCacheResource::loadCacheDone() {
         auto remote_reuse_len =
             std::static_pointer_cast<HybridReadAsyncContext>(load_cache_context_)->remote_reuse_block_num()
             * seqSizePerBlock();
-        auto&     resource      = batch_resource_->batch_resource.at(0);
-        const int all_reuse_len = resource.reuseBlocksNum() * seqSizePerBlock();
+        auto& resource      = batch_resource_->batch_resource.at(0);
+        int   all_reuse_len = resource.reuseBlocksNum() * seqSizePerBlock();
+        if (stream_->inputLength() == all_reuse_len) {
+            all_reuse_len -= seqSizePerBlock();
+            if (remote_reuse_len >= seqSizePerBlock()) {
+                remote_reuse_len -= seqSizePerBlock();
+            }
+        }
         stream_->setInitialReuseLength(all_reuse_len);
         stream_->setReuseLength(all_reuse_len);
         stream_->setLocalReuseLength(device_reuse_len);  // TODO ? 这对吗

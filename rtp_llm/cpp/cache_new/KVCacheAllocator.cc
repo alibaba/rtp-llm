@@ -149,4 +149,10 @@ std::vector<std::pair<BufferPtr, size_t>> KVCacheAllocator::getAllBuffers() cons
     return results;
 }
 
+void KVCacheAllocator::clearCache() {
+    if (block_pool_) {
+        block_pool_->clearCache();
+    }
+}
+
 }  // namespace rtp_llm

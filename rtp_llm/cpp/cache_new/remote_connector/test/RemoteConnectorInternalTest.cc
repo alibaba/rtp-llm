@@ -57,6 +57,11 @@ public:
     CacheLayerLayout layerCacheBase() const override {
         return fake_layout_;
     }
+    std::vector<BufferPtr>
+    convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const override {
+        return {};
+    }
+    void incrKVCacheRef(KVCacheResourceV1& kvcache_resource, const CacheKeysType& cache_keys) override {}
     bool updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                        const std::vector<int>&        block_src_batch,
                        bool                           copy_last_block,
@@ -87,7 +92,9 @@ public:
         return {};
     }
 
-    void clearCache() override {}
+    void clearCache() {
+        return;
+    }
 
 protected:
     MallocResult incrMalloc(const MallocInfo& malloc_info) override {

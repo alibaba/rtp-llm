@@ -317,11 +317,13 @@ remote_connector::ClientWrapper::ConfigMap RemoteConnector::genClientConfig() {
             lora_info_str = lora_adapter_name + '_' + std::to_string(hashString(lora_path));
         }
         std::stringstream instance_id_hash_ss;
-        instance_id_hash_ss << "block_size:" << block_size << ";model_name:" << model_name << ";dtype_str:" << dtype_str
-                            << ";use_mla:" << use_mla << ";tp_size:" << tp_size << ";dp_size:" << dp_size
-                            << ";extra_info:" << extra_info << ";lora_info:" << lora_info_str
+        instance_id_hash_ss << "instance_group: " << instance_group << "block_size:" << block_size
+                            << ";model_name:" << model_name << ";dtype_str:" << dtype_str << ";use_mla:" << use_mla
+                            << ";tp_size:" << tp_size << ";dp_size:" << dp_size << ";extra_info:" << extra_info
+                            << ";lora_info:" << lora_info_str
                             << ";location_spec_info:" << autil::legacy::ToJsonString(location_spec_info_map, true);
-        std::string instance_id_hash = std::to_string(hashString(instance_id_hash_ss.str()));
+        std::string instace_id_hash_str = instance_id_hash_ss.str();
+        std::string instance_id_hash    = std::to_string(hashString(instace_id_hash_str));
         std::string instance_id(instance_id_salt);
         if (instance_id.empty()) {
             instance_id = std::move(instance_id_hash);
@@ -329,7 +331,10 @@ remote_connector::ClientWrapper::ConfigMap RemoteConnector::genClientConfig() {
             instance_id += "_" + instance_id_hash;
         }
 
-        RTP_LLM_LOG_INFO("lora_adapter_name[%s], instance_id[%s]", lora_adapter_name.c_str(), instance_id.c_str());
+        RTP_LLM_LOG_INFO("lora_adapter_name[%s], instance_id[%s], instace_id_hash_str[%s]",
+                         lora_adapter_name.c_str(),
+                         instance_id.c_str(),
+                         instace_id_hash_str.c_str());
         auto config = std::make_shared<RemoteConnectorConfig>(
             enable_vipserver,
             vipserver_domain,
@@ -834,14 +839,17 @@ bool RemoteConnector::Write(const std::string&                 trace_id,
     if (!result.first) {
         return false;
     }
-    if (uri_str_vec.size() != result.second.size()) {
-        RTP_LLM_LOG_WARNING("some internal error happens in saveKvCaches, expectd [%lu], actual [%lu]",
-                            uri_str_vec.size(),
-                            result.second.size());
-        return false;
-    }
-    if (uri_str_vec != result.second) {
-        out_uri_str_vec = std::move(result.second);
+    if (!result.second.empty()) {
+        if (uri_str_vec.size() != result.second.size()) {
+            RTP_LLM_LOG_WARNING("some internal error happens in saveKvCaches, expectd [%lu], actual [%lu]",
+                                uri_str_vec.size(),
+                                result.second.size());
+            return false;
+        }
+
+        if (uri_str_vec != result.second) {
+            out_uri_str_vec = std::move(result.second);
+        }
     }
     helper.collector.remote_sdk_fail_qps = false;
     return true;

@@ -86,7 +86,6 @@ private:
     std::shared_ptr<KVCacheConnector>          memory_connector_;
     std::shared_ptr<KVCacheConnector>          remote_connector_;
     std::shared_ptr<autil::LockFreeThreadPool> wait_cache_thread_pool_;
-    bool                                       sync_wait_write_ = false;
 };
 
 }  // namespace rtp_llm

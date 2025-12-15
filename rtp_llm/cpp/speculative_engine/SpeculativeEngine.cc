@@ -268,12 +268,11 @@ WarmUpResult SpeculativeEngine::warmUp() {
 
 absl::Status SpeculativeEngine::initSystemPrompt() {
     resource_context_.reuse_cache = score_model_params_.gpt_init_parameter.reuse_cache_;
-    resource_context_.enable_3fs  = score_model_params_.gpt_init_parameter.kv_cache_config.enable_3fs;
     resource_context_.enable_memory_block_cache =
         score_model_params_.gpt_init_parameter.kv_cache_config.memory_block_cache_size_mb > 0;
     resource_context_.enable_remote_cache = score_model_params_.gpt_init_parameter.kv_cache_config.enable_remote_cache;
     resource_context_.enable_device_cache = score_model_params_.gpt_init_parameter.kv_cache_config.enable_device_cache;
-
+    resource_context_.sync_wait_write     = score_model_params_.gpt_init_parameter.kv_cache_config.sync_wait_write;
     if (!score_model_params_.gpt_init_parameter.multi_task_prompt_tokens_.empty()) {
         resource_context_.reuse_cache = true;
         CHECK_AND_RETURN_REF(system_prompt_param,

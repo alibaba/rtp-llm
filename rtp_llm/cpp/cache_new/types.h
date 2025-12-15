@@ -86,13 +86,15 @@ struct FreeInfo {
              bool                    reuse_cache         = false,
              bool                    enable_memory_cache = false,
              bool                    enable_remote_cache = false,
-             bool                    enable_device_cache = true):
+             bool                    enable_device_cache = true,
+             bool                    sync_wait_write     = false):
         batch_kv_cache_resource(batch_kv_cache_resource),
         complete_token_ids(complete_token_ids),
         reuse_cache(reuse_cache),
         enable_memory_cache(enable_memory_cache),
         enable_remote_cache(enable_remote_cache),
-        enable_device_cache(enable_device_cache) {}
+        enable_device_cache(enable_device_cache),
+        sync_wait_write(sync_wait_write) {}
     BatchKVCacheResourcePtr batch_kv_cache_resource;
     CompleteTokenIdsPtr     complete_token_ids;
     int64_t                 request_id{0};
@@ -100,6 +102,7 @@ struct FreeInfo {
     bool                    enable_memory_cache{false};
     bool                    enable_remote_cache{false};
     bool                    enable_device_cache{true};
+    bool                    sync_wait_write{false};
 };
 
 struct InsertInfo {
@@ -109,14 +112,16 @@ struct InsertInfo {
                bool                    is_resident,
                bool                    enable_device_cache = true,
                bool                    enable_memory_cache = false,
-               bool                    enable_remote_cache = false):
+               bool                    enable_remote_cache = false,
+               bool                    sync_wait_write     = false):
         request_id(request_id),
         batch_kv_cache_resource(batch_kv_cache_resource),
         complete_token_ids(complete_token_ids),
         is_resident(is_resident),
         enable_device_cache(enable_device_cache),
         enable_memory_cache(enable_memory_cache),
-        enable_remote_cache(enable_remote_cache) {}
+        enable_remote_cache(enable_remote_cache),
+        sync_wait_write(sync_wait_write) {}
 
     int64_t                 request_id;
     BatchKVCacheResourcePtr batch_kv_cache_resource;
@@ -125,6 +130,7 @@ struct InsertInfo {
     bool                    enable_device_cache{true};
     bool                    enable_memory_cache{false};
     bool                    enable_remote_cache{false};
+    bool                    sync_wait_write{false};
 };
 
 }  // namespace rtp_llm

@@ -58,7 +58,6 @@ from rtp_llm.server.server_args.sparse_group_args import init_sparse_group_args
 from rtp_llm.server.server_args.speculative_decoding_group_args import (
     init_speculative_decoding_group_args,
 )
-from rtp_llm.server.server_args.threefs_group_args import init_threefs_group_args
 from rtp_llm.server.server_args.vit_group_args import init_vit_group_args
 from rtp_llm.server.server_args.worker_group_args import init_worker_group_args
 
@@ -258,7 +257,7 @@ def init_all_group_args(parser: EnvArgumentParser) -> None:
     init_generate_group_args(parser)
     init_hw_kernel_group_args(parser)
     init_kv_cache_group_args(parser)
-    init_threefs_group_args(parser)
+    # init_threefs_group_args(parser)
     init_load_group_args(parser)
     init_lora_group_args(parser)
     init_misc_group_args(parser)

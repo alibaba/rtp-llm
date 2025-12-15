@@ -784,25 +784,14 @@ class GptInitModelParameters:
             reuse_cache=get_env_bool("REUSE_CACHE", False),
             multi_task_prompt=get_env_str("MULTI_TASK_PROMPT"),
             multi_task_prompt_str=get_env_str("MULTI_TASK_PROMPT_STR"),
-            enable_3fs=get_env_bool("ENABLE_3FS", False),
-            match_timeout_ms=get_env_int("THREEFS_MATCH_TIMEOUT_MS", 1000),
-            rpc_get_cache_timeout_ms=get_env_int(
-                "THREEFS_RPC_GET_CACHE_TIMEOUT_MS", 3000
-            ),
-            rpc_put_cache_timeout_ms=get_env_int(
-                "THREEFS_RPC_PUT_CACHE_TIMEOUT_MS", 3000
-            ),
-            threefs_read_timeout_ms=get_env_int("THREEFS_READ_TIMEOUT_MS", 1000),
-            threefs_write_timeout_ms=get_env_int("THREEFS_WRITE_TIMEOUT_MS", 2000),
             max_block_size_per_item=get_env_int("MAX_BLOCK_SIZE_PER_ITEM", 16),
-            threefs_read_iov_size=get_env_int("THREEFS_READ_IOV_SIZE", 1 << 32),
-            threefs_write_iov_size=get_env_int("THREEFS_WRITE_IOV_SIZE", 1 << 32),
             memory_block_cache_size_mb=get_env_int("MEMORY_BLOCK_CACHE_SIZE_MB", 0),
             memory_block_cache_sync_timeout_ms=get_env_int(
                 "MEMORY_BLOCK_CACHE_SYNC_TIMEOUT_MS", 10000
             ),
             enable_remote_cache=get_env_bool("ENABLE_REMOTE_CACHE", False),
             enable_device_cache=get_env_bool("ENABLE_DEVICE_CACHE", True),
+            sync_wait_write=get_env_bool("KVCACHE_CONNECTOR_WRITE_SYNC", False),
         )
 
         enable_detail_log = get_env_bool("ENABLE_DETAIL_LOG", False)
