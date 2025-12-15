@@ -1,17 +1,3 @@
-from rtp_llm.utils.model_weight import W
-from rtp_llm.utils.base_model_datatypes import ModelConfig
-from rtp_llm.ops.compute_ops import (
-    KVCache,
-    PyAttentionInputs,
-    PyModelInputs,
-    PyModelOutputs,
-    get_device,
-    get_typemeta,
-    init_device,
-)
-from rtp_llm.model_factory import ModelFactory
-from rtp_llm.config.py_config_modules import StaticConfig
-import rtp_llm.models
 import logging
 import math
 import os
@@ -21,6 +7,21 @@ from typing import Optional
 
 import torch
 from transformers import AutoTokenizer
+
+import rtp_llm.models
+from rtp_llm.config.py_config_modules import StaticConfig
+from rtp_llm.model_factory import ModelFactory
+from rtp_llm.ops.compute_ops import (
+    KVCache,
+    PyAttentionInputs,
+    PyModelInputs,
+    PyModelOutputs,
+    get_device,
+    get_typemeta,
+    init_device,
+)
+from rtp_llm.utils.base_model_datatypes import ModelConfig
+from rtp_llm.utils.model_weight import W
 
 rtp_opensouce_path = Path(__file__).resolve().parent.parent.parent.parent
 sys.path.append(str(rtp_opensouce_path))

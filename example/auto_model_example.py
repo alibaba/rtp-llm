@@ -5,7 +5,7 @@ from pathlib import Path
 rtp_opensouce_path = Path(__file__).resolve().parent.parent
 sys.path.append(str(rtp_opensouce_path))
 print(sys.path)
-from rtp_llm.models_py.standalone.rtp_auto_model import AutoModel
+from rtp_llm.models_py.standalone.auto_model import AutoModel
 
 my_model = AutoModel.from_pretrained("/home/lvjiang.lj/models/qwen3-0.6B")
 messages = [{"role": "user", "content": "你好，请问你是谁？"}]
