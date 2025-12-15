@@ -169,6 +169,41 @@ TEST_F(TreeLogitsProcessorTest, testGenerateVocabMask) {
     }
 }
 
+TEST_F(TreeLogitsProcessorTest, testGenerateVocabWeight) {
+    SamplerDataBuilder     builder;
+    std::string            file_path  = "./rtp_llm/cpp/models/logits_processor/test/gir_prefix_with_weight_dict.json";
+    size_t                 batch_size = 4;
+    size_t                 vocab_size = 1024;
+    size_t                 max_length = 1024;
+    BaseLogitsProcessorPtr processor  = builder.generateLogitsProcessor(true, batch_size, file_path);
+    SamplerInputs sampler_inputs = builder.allocate({batch_size, vocab_size, max_length}, {processor}, {batch_size});
+    std::vector<std::unordered_map<size_t, float>> batch_candidate_token_weights = {{{1, 0.1f}, {5, 0.3f}},
+                                                                                    {{2, 0.1f}, {3, 0.2f}, {4, 0.3f}},
+                                                                                    {{1, 0.1f}, {3, 0.2f}, {5, 0.3f}},
+                                                                                    {{1, 0.1f}, {3, 0.2f}}};
+    rtp_llm::BufferPtr                             vocab_weight =
+        processor->generateVocabWeight(batch_size, vocab_size, batch_candidate_token_weights);
+
+    std::vector<std::vector<float>> expect_vocab_weight(batch_size, std::vector<float>(vocab_size, -INFINITY));
+    expect_vocab_weight[0][1] = 0.1f;
+    expect_vocab_weight[0][5] = 0.3f;
+    expect_vocab_weight[1][2] = 0.1f;
+    expect_vocab_weight[1][3] = 0.2f;
+    expect_vocab_weight[1][4] = 0.3f;
+    expect_vocab_weight[2][1] = 0.1f;
+    expect_vocab_weight[2][3] = 0.2f;
+    expect_vocab_weight[2][5] = 0.3f;
+    expect_vocab_weight[3][1] = 0.1f;
+    expect_vocab_weight[3][3] = 0.2f;
+
+    auto vocab_weight_hosts = getBufferValues<float>(*vocab_weight);
+    for (size_t i = 0; i < batch_size; i++) {
+        for (size_t j = 0; j < vocab_size; j++) {
+            ASSERT_TRUE(vocab_weight_hosts[i * vocab_size + j] == expect_vocab_weight[i][j]);
+        }
+    }
+}
+
 template<typename Dtype>
 void setBuffer(rtp_llm::BufferPtr buf, std::vector<std::vector<Dtype>> content) {
     RTP_LLM_CHECK(buf->shape().size() == 2);
@@ -275,6 +310,46 @@ TEST_F(TreeLogitsProcessorTest, testProcess) {
         auto logits_hosts = getBufferValues<float>(*logits);
         ASSERT_EQ(logits_hosts[64000], 1);
         ASSERT_EQ(logits_hosts[64003], 0);
+        ASSERT_EQ(logits_hosts[64011], 0);
+        ASSERT_TRUE(logits_hosts[64001] == -INFINITY);
+    }
+}
+
+TEST_F(TreeLogitsProcessorTest, testWeightProcess) {
+    {
+        SamplerDataBuilder builder;
+        std::string        file_path  = "./rtp_llm/cpp/models/logits_processor/test/gir_prefix_with_weight_dict.json";
+        size_t             batch_size = 4;
+        size_t             vocab_size = 100000;
+        size_t             max_length = 10;
+        BaseLogitsProcessorPtr processor = builder.generateLogitsProcessor(true, batch_size, file_path);
+        SamplerInputs          sampler_inputs =
+            builder.allocate({batch_size, vocab_size, max_length}, {processor}, {batch_size});
+
+        std::vector<std::vector<int>> token_ids = {{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+                                                   {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
+                                                   {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 51},
+                                                   {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9}};
+        builder.setTokenIds(sampler_inputs, token_ids);
+
+        std::vector<std::vector<float>> logits_list;
+        std::vector<std::vector<float>> logits_index_list = {{64000}, {64003, 64006, 64008}, {64011}, {64001}};
+        for (size_t i = 0; i < batch_size; i++) {
+            auto logits = sampler_inputs.logits->index(i);
+            auto tensor = Buffer2torchTensor(*logits, false);
+            tensor.fill_(0);
+            for (auto index : logits_index_list[i]) {
+                tensor[index] = 1;
+            }
+        }
+        processor->process(sampler_inputs, 0, batch_size);
+
+        auto logits       = sampler_inputs.logits->index(0);
+        auto logits_hosts = getBufferValues<float>(*logits);
+        ASSERT_EQ(logits_hosts[64000], 1.1f);
+        ASSERT_EQ(logits_hosts[64003], 0.15f);
+        ASSERT_EQ(logits_hosts[64006], 0.12f);
+        ASSERT_EQ(logits_hosts[64008], 0.2f);
         ASSERT_EQ(logits_hosts[64011], 0);
         ASSERT_TRUE(logits_hosts[64001] == -INFINITY);
     }
