@@ -573,8 +573,8 @@ decord==0.6.0 ; platform_machine == "x86_64" \
     --hash=sha256:9c20674964fb1490c677bd911d2023d2a09fec7a58a4bb0b7ddf1ccc269f107a \
     --hash=sha256:a0eb1258beade34dceb29d97856a7764d179db1b5182899b61874f3418a1abc8
     # via -r open_source/deps/requirements_base.txt
-deep-gemm @ http://search-ad.oss-cn-hangzhou-zmf.aliyuncs.com/rtp_llm/deep_gemm-1.0.0-py3-none-any.whl \
-    --hash=sha256:472c3cc2d60eefe817b795607f1e5e7a48dc766271fc8244daf50c6211985b2a
+deep-gemm @ http://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu126/deep_gemm-2.2.0%2B9b680f4-cp310-cp310-linux_x86_64.whl \
+    --hash=sha256:dee9f370d55a92363eac56701871fd067a411a9a53dc7dd3284b89de6edca69c
     # via -r open_source/deps/requirements_torch_gpu_cuda12.txt
 dill==0.3.8 \
     --hash=sha256:3ebe3c479ad625c4553aca177444d89b486b1d84982eeacded644afc0cf797ca \

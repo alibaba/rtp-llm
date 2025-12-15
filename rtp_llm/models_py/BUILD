@@ -20,7 +20,9 @@ py_library(
 
 # flashinfer-python is only available for CUDA12
 flashinfer = ["flashinfer-python"]
+deep_gemm = ["deep_gemm"]
 requirement(flashinfer)
+requirement(deep_gemm)
 
 
 filegroup(
@@ -41,7 +43,7 @@ py_library(
         "//rtp_llm/models_py/triton_kernels:triton_kernels",
         ":distributed",
     ] + select({
-        "@//:using_cuda12": flashinfer,
+        "@//:using_cuda12": flashinfer + deep_gemm,
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],

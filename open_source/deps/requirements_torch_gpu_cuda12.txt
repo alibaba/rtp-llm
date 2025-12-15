@@ -10,4 +10,4 @@ tensorrt-cu12-bindings==10.3.0
 tensorrt-cu12-libs==10.3.0
 flashinfer-python==0.2.5
 apache-tvm-ffi==0.1.1
-http://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/deep_gemm-1.0.0-py3-none-any.whl
+http://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu126/deep_gemm-2.2.0%2B9b680f4-cp310-cp310-linux_x86_64.whl
