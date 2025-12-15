@@ -2,8 +2,11 @@ import importlib
 import os
 import sys
 from unittest import TestCase, main
+
+
 class ServerArgsPyEnvConfigsTest(TestCase):
     """Test that environment variables and command line arguments are correctly set to py_env_configs structure."""
+
 
 class ServerArgsSetTest(TestCase):
     def setUp(self):
@@ -84,6 +87,10 @@ class ServerArgsSetTest(TestCase):
             "64",
             "--warm_up",
             "0",
+            "--cache_store_rdma_io_thread_count",
+            "4",
+            "--cache_store_rdma_worker_thread_count",
+            "2",
             # Note: max_seq_len is in ModelConfig, not ModelArgs
             # It will be set when ModelConfig is created from model_args
         ]
@@ -119,6 +126,10 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(py_env_configs.runtime_config.warm_up, False)  # bool in C++
         # Note: max_seq_len is in ModelConfig, not RuntimeConfig or EngineConfig
         # It will be set when ModelConfig is created from model_args
+
+        # Verify cache_store_config
+        self.assertEqual(py_env_configs.cache_store_config.rdma_io_thread_count, 4)
+        self.assertEqual(py_env_configs.cache_store_config.rdma_worker_thread_count, 2)
 
     def test_cmd_args_override_env_vars(self):
         """Test that command line arguments override environment variables."""
