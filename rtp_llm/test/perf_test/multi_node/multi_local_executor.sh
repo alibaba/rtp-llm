@@ -17,13 +17,13 @@ kill_processes() {
   (ps axuww | grep rtp_llm_rank | grep -v run_worker.sh | awk '{print $2}' | xargs kill -9) || true;
   (ps axuww | grep rtp_llm_backend_server | grep -v run_worker.sh | awk '{print $2}' | xargs kill -9) || true;
   (ps axuww | grep rtp_llm_frontend_server_ | grep -v run_worker.sh | awk '{print $2}' | xargs kill -9) || true;
-  (ps axuww | grep /opt/conda310/bin/python | grep -v run_worker.sh | awk '{print $2}' | xargs kill -9) || true;
+  (ps axuww | grep /opt/conda310/bin/python | grep -v run_worker.sh | grep -v multi_benchmark.py | awk '{print $2}' | xargs kill -9) || true;
   # Verify processes have been terminated
   echo "[$(date)] Verifying processes have been terminated on $HOSTNAME";
   (ps axuww | grep rtp_llm_rank | grep -v grep | grep -v run_worker.sh) || true;
   (ps axuww | grep rtp_llm_backend_server | grep -v grep | grep -v run_worker.sh) || true;
   (ps axuww | grep rtp_llm_frontend_server_ | grep -v grep | grep -v run_worker.sh) || true;
-  (ps axuww | grep /opt/conda310/bin/python | grep -v grep | grep -v run_worker.sh) || true;
+  (ps axuww | grep /opt/conda310/bin/python | grep -v run_worker.sh | grep -v multi_benchmark.py | awk '{print $2}' | xargs kill -9) || true;
 }
 
 checkout_code() {
@@ -80,7 +80,11 @@ checkout_code() {
 install_requirements() {
   if [ "${BUILD_FROM_SCRATCH:-2}" -gt 1 ]; then
     # Pip install requirements
-    (/opt/conda310/bin/python3 -m pip install -r ./internal_source/deps/requirements_lock_torch_gpu_cuda12.txt) || exit 1;
+    if [ `uname -m` == "aarch64" ]; then
+      (/opt/conda310/bin/python3 -m pip install -r ./internal_source/deps/requirements_lock_cuda12_arm.txt) || exit 1;
+    else
+      (/opt/conda310/bin/python3 -m pip install -r ./internal_source/deps/requirements_lock_torch_gpu_cuda12.txt) || exit 1;
+    fi
   fi
 }
 
@@ -89,15 +93,20 @@ build_code() {
     # Kill bazel build processes
     (ps axuww | grep 'bazelisk --batch --output_user_root' | grep -v grep | awk '{print $2}' | xargs kill -9) || true;
     # Build with all arguments
-    (bazelisk --batch --output_user_root=$WORK_DIR/bazel_cache build //:th_transformer //rtp_llm:rtp_llm_lib ${BAZEL_BUILD_ARGS}) || exit 1;
+    (bazelisk --batch --output_user_root=$WORK_DIR/bazel_cache build //:th_transformer //rtp_llm:rtp_llm_lib //rtp_llm:rtp_llm_deepgemm_whl ${BAZEL_BUILD_ARGS}) || exit 1;
     if [ $? -ne 0 ]; then
       echo "bazel build failed !";
       exit 1;
     fi
     # Create symbolic links for proto files
-    (ln -sf ../../../../bazel-out/k8-opt/bin/rtp_llm/cpp/model_rpc/proto/model_rpc_service_pb2_grpc.py rtp_llm/cpp/model_rpc/proto/) || exit 1;
-    (ln -sf ../../../../bazel-out/k8-opt/bin/rtp_llm/cpp/model_rpc/proto/model_rpc_service_pb2.py rtp_llm/cpp/model_rpc/proto/) || exit 1;
-    (ln -sf ../../../../bazel-out/k8-opt/bin/rtp_llm/cpp/cuda/deep_gemm/cutlass_hdr rtp_llm/cpp/cuda/deep_gemm/cutlass_hdr) || exit 1;
+    bazel_subdir=k8-opt
+    if [ -d "bazel-out/aarch64-opt" ]; then
+      bazel_subdir=aarch64-opt
+    fi
+    (ln -sf ../../../../bazel-out/${bazel_subdir}/bin/rtp_llm/cpp/model_rpc/proto/model_rpc_service_pb2_grpc.py rtp_llm/cpp/model_rpc/proto/) || exit 1;
+    (ln -sf ../../../../bazel-out/${bazel_subdir}/bin/rtp_llm/cpp/model_rpc/proto/model_rpc_service_pb2.py rtp_llm/cpp/model_rpc/proto/) || exit 1;
+    (ln -sf ../../../../bazel-out/${bazel_subdir}/bin/rtp_llm/cpp/cuda/deep_gemm/cutlass_hdr rtp_llm/cpp/cuda/deep_gemm/cutlass_hdr) || exit 1;
+    (/opt/conda310/bin/python -m pip install bazel-bin/rtp_llm/rtp_llm_deep_gemm-0.2.0-py3-none-any.whl ) || exit 1;
   fi
 }
 
@@ -110,7 +119,7 @@ configure_env() {
   export PYTHON_BIN="/opt/conda310/bin/python";
   export FT_CORE_DUMP_ON_EXCEPTION=1;
   export NCCL_TOPO_DUMP_FILE="/tmp/nccl_topo.xml";
-  export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/usr/lib64:/usr/local/nvidia/lib64/:/usr/local/cuda/lib64/";
+  export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/usr/lib64:/usr/local/nvidia/lib64/:/usr/local/cuda/lib64/:/usr/local/cuda/extras/CUPTI/lib64/";
   # Configure optional environment variables
   echo -e "\nActive environment variables:"
   (printenv | grep -E 'NCCL|ACCL|NVSHMEM' | sort) || exit 1
@@ -131,7 +140,7 @@ find_test_output_path() {
   # Get prefix of result directory
   TEST_OUTPUT_PATH_PREFIX="TEST_OUTPUT_"
   # Search for directories matching the prefix
-  matching_dirs=($(find . -maxdepth 1 -type d -name "${TEST_OUTPUT_PATH_PREFIX}*" 2>/dev/null))
+  matching_dirs=($(ls -rt  | grep ${TEST_OUTPUT_PATH_PREFIX} | tail -n 1 2>/dev/null))
   # Check if any directories were found
   if [ ${#matching_dirs[@]} -eq 0 ]; then
     echo "[$(date)] ERROR: No directory found with prefix: $TEST_OUTPUT_PATH_PREFIX";

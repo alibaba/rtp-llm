@@ -337,8 +337,11 @@ def search_recursive_config(
     ), "dp_size and tp_size must be provided"
     ep_size = dp_size * tp_size
     world_size = ep_size
-    local_world_size = 8 if world_size >= 8 else world_size
-    used_ip_lists = get_used_ip_lists(task_config.pop("ip_lists"), world_size)
+    local_world_size = task_config.get("local_world_size", 8)
+    local_world_size = world_size if world_size < local_world_size else local_world_size
+    used_ip_lists = get_used_ip_lists(
+        task_config.pop("ip_lists"), world_size, local_world_size
+    )
     if world_size % local_world_size != 0:
         raise ValueError(
             f"World size {world_size} must be a multiple of local world size {local_world_size}"
@@ -598,9 +601,11 @@ def multi_test_script(
     log_stage(f"Benchmark Completed: {benchmark_name}\n\n\n\n", stage="BENCHMARK")
 
 
-def get_used_ip_lists(ip_lists: List[str], world_size: int) -> List[str]:
+def get_used_ip_lists(
+    ip_lists: List[str], world_size: int, local_world_size: int
+) -> List[str]:
     num_all_nodes = len(ip_lists)
-    num_used_nodes = math.ceil(world_size / 8)
+    num_used_nodes = math.ceil(world_size / local_world_size)
     assert (
         num_used_nodes <= num_all_nodes
     ), f"Number of used nodes {num_used_nodes} must not be greater than number of all nodes {num_all_nodes}"
