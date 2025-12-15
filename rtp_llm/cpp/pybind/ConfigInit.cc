@@ -21,7 +21,9 @@ void registerFMHAType(py::module m) {
         .value("FLASH_INFER", FMHAType::FLASH_INFER)
         .value("XQA", FMHAType::XQA)
         .value("AITER_PREFILL", FMHAType::AITER_PREFILL)
-        .value("AITER_DECODE", FMHAType::AITER_DECODE);
+        .value("AITER_DECODE", FMHAType::AITER_DECODE)
+        .value("PY_FLASH_INFER_PREFILL", FMHAType::PY_FLASH_INFER_PREFILL)
+        .value("PY_FLASH_INFER_DECODE", FMHAType::PY_FLASH_INFER_DECODE);
 }
 
 void register_parallelism_distributed_config(pybind11::module& m) {
@@ -480,6 +482,38 @@ void register_misc_config(pybind11::module& m) {
         .def_readwrite("aux_string", &MiscellaneousConfig::aux_string);
 }
 
+// LinearAttentionConfig
+void register_linear_attention_config(pybind11::module& m) {
+    pybind11::class_<LinearAttentionConfig>(m, "LinearAttentionConfig")
+        .def(pybind11::init<int, int, int, int, int>(),
+             pybind11::arg("linear_conv_kernel_dim") = 0,
+             pybind11::arg("linear_key_head_dim")    = 0,
+             pybind11::arg("linear_num_key_heads")   = 0,
+             pybind11::arg("linear_num_value_heads") = 0,
+             pybind11::arg("linear_value_head_dim")  = 0)
+        .def("to_string", &LinearAttentionConfig::to_string)
+        .def_readwrite("linear_conv_kernel_dim", &LinearAttentionConfig::linear_conv_kernel_dim)
+        .def_readwrite("linear_key_head_dim", &LinearAttentionConfig::linear_key_head_dim)
+        .def_readwrite("linear_num_key_heads", &LinearAttentionConfig::linear_num_key_heads)
+        .def_readwrite("linear_num_value_heads", &LinearAttentionConfig::linear_num_value_heads)
+        .def_readwrite("linear_value_head_dim", &LinearAttentionConfig::linear_value_head_dim);
+}
+// HybridAttentionConfig
+void register_hybrid_attention_config(pybind11::module& m) {
+    py::enum_<HybridAttentionType>(m, "HybridAttentionType")
+        .value("NONE", HybridAttentionType::NONE)
+        .value("LINEAR", HybridAttentionType::LINEAR)
+        .value("SLIDING_WINDOW", HybridAttentionType::SLIDING_WINDOW);
+
+    pybind11::class_<HybridAttentionConfig>(m, "HybridAttentionConfig")
+        .def(pybind11::init<bool, std::vector<HybridAttentionType>>(),
+             pybind11::arg("enable_hybrid_attention") = false,
+             pybind11::arg("hybrid_attention_types")  = std::vector<HybridAttentionType>{})
+        .def("to_string", &HybridAttentionConfig::to_string)
+        .def_readwrite("enable_hybrid_attention", &HybridAttentionConfig::enable_hybrid_attention)
+        .def_readwrite("hybrid_attention_types", &HybridAttentionConfig::hybrid_attention_types);
+}
+
 void registerGptInitParameter(py::module m) {
     py::enum_<MlaOpsType>(m, "MlaOpsType")
         .value("AUTO", MlaOpsType::AUTO)
@@ -788,7 +822,9 @@ void registerGptInitParameter(py::module m) {
         .def_readwrite("misc_config", &GptInitParameter::misc_config)
         .def_readwrite("arpc_config", &GptInitParameter::arpc_config)
         .def_readwrite("grpc_config", &GptInitParameter::grpc_config)
-        .def_readwrite("ffn_disaggregate_config", &GptInitParameter::ffn_disaggregate_config) REGISTER_PROPERTYS;
+        .def_readwrite("ffn_disaggregate_config", &GptInitParameter::ffn_disaggregate_config)
+        .def_readwrite("linear_attention_config", &GptInitParameter::linear_attention_config)
+        .def_readwrite("hybrid_attention_config", &GptInitParameter::hybrid_attention_config) REGISTER_PROPERTYS;
 }
 
 PYBIND11_MODULE(libth_transformer_config, m) {
@@ -813,6 +849,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     register_grpc_config(m);
     registerFMHAType(m);
     register_ffn_disaggregate_config(m);
+    register_linear_attention_config(m);
+    register_hybrid_attention_config(m);
     registerGptInitParameter(m);
 
     registerCommon(m);

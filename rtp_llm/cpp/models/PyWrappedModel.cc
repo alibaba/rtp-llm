@@ -62,7 +62,18 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
 
     py_attn_inputs.cu_seqlens                = cu_seqlens;
     py_attn_inputs.cu_seqlens_without_prefix = cu_seqlens_without_prefix;
+    torch::Tensor decode_cu_seqlens          = torch::arange(
+        0, py_attn_inputs.sequence_lengths.size(0) + 1, 1, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
+    py_attn_inputs.decode_cu_seqlens_host = decode_cu_seqlens;
+    py_attn_inputs.decode_cu_seqlens_d    = decode_cu_seqlens.cuda();
+    py_attn_inputs.cu_seqlens             = cu_seqlens;
+
     py_attn_inputs.sequence_lengths.pin_memory();
+
+    // create device tensors
+    py_attn_inputs.prefix_lengths_d          = py_attn_inputs.prefix_lengths.cuda();
+    py_attn_inputs.sequence_lengths_plus_1_d = (py_attn_inputs.sequence_lengths + 1).cuda();
+    py_attn_inputs.input_lengths_d           = py_attn_inputs.input_lengths.cuda();
     return py_attn_inputs;
 }
 

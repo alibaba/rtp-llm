@@ -77,7 +77,7 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
         load_block_offset = (sequence_length - 2) // SEQ_SIZE_PER_BLOCK
         write_block_offset = (sequence_length - 1) // SEQ_SIZE_PER_BLOCK
 
-    if T == 0:
+    if T <= 0:
         # no tokens to process for this sequence
         return
 

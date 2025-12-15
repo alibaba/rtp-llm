@@ -37,6 +37,7 @@ class CausalAttention(nn.Module):
         self.o_proj = LinearFactory.create_linear_from_weights(
             weights, W.attn_o_w, W.attn_o_s, W.attn_o_b, config
         )
+        # for qwen3
         self.qk_fuse_norm = None
         if W.q_ln_gamma in weights and W.k_ln_gamma in weights:
             self.qk_fuse_norm = FusedQKRMSNorm(
@@ -54,6 +55,7 @@ class CausalAttention(nn.Module):
         fmha_impl: FMHAImplBase,
         kv_cache: Optional[KVCache],
         need_rope_kv_cache: bool = True,
+        gate: Optional[torch.Tensor] = None,  # for qwen3 next
     ) -> torch.Tensor:
         input_shape = hidden_states.shape[:-1]
         qkv = self.qkv_proj(hidden_states)
@@ -61,6 +63,8 @@ class CausalAttention(nn.Module):
             qkv = self.qk_fuse_norm(qkv)
         attn_output = fmha_impl.forward(qkv, kv_cache, need_rope_kv_cache)
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+        if gate is not None:
+            attn_output = attn_output * torch.sigmoid(gate)
         output = self.o_proj(attn_output)
         if self.config.tp_size > 1:
             output = all_reduce(output, group=Group.TP)

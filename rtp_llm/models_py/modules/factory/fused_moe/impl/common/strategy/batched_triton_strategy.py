@@ -24,9 +24,8 @@ class BatchedTritonStrategy(MoeStrategy):
         return BatchedDataRouter(
             max_num_tokens=max_num_tokens,
             num_local_experts=config.expert_num,
-            num_dispatchers=1,
-            rank=0,
-            num_experts=config.expert_num,
+            ep_rank=config.ep_rank,
+            tp_size=config.tp_size,
         )
 
     def create_executor(

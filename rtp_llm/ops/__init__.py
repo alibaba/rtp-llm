@@ -137,6 +137,9 @@ try:
         ServiceDiscoveryConfig,
         SpecialTokens,
         SpeculativeExecutionConfig,
+        HybridAttentionConfig,
+        HybridAttentionType,
+        LinearAttentionConfig
     )
     from libth_transformer_config import (
         get_block_cache_keys as cpp_get_block_cache_keys,

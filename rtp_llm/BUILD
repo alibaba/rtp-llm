@@ -481,6 +481,7 @@ py_library(
             ":async_model",
             ":embedding",
             "//rtp_llm/tools/convert:convert",
+            "@flash-linear-attention//:fla_lib_py",
         ],
             }) + select({
                 "//conditions:default": [],

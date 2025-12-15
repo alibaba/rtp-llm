@@ -87,10 +87,8 @@ void registerEmbeddingOutput(const py::module& m) {
     py::class_<EmbeddingOutput>(m, "EmbeddingCppOutput")
         .def(py::init<>())
         .def_readwrite("output", &EmbeddingOutput::output)
-        .def_readwrite("error_info", &EmbeddingOutput::error_info)
         .def("setTensorOutput", &EmbeddingOutput::setTensorOutput)
-        .def("setMapOutput", &EmbeddingOutput::setMapOutput)
-        .def("setError", &EmbeddingOutput::setError);
+        .def("setMapOutput", &EmbeddingOutput::setMapOutput);
 }
 
 PYBIND11_MODULE(libth_transformer, m) {

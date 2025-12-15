@@ -1,10 +1,6 @@
 from __future__ import annotations
 import typing
-from typing import Dict, overload
-__all__: list[str] = ['ArpcConfig', 'BatchDecodeSchedulerConfig', 'CacheStoreConfig', 'ConcurrencyConfig', 'DeviceResourceConfig', 'EplbConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'FfnDisAggregateConfig', 'GptInitParameter', 'GrpcConfig', 'HWKernelConfig', 'KVCacheConfig', 'MiscellaneousConfig',
-                      'MlaOpsType', 'ModelSpecificConfig', 'MoeConfig', 'ParallelismDistributedConfig', 'ProfilingDebugLoggingConfig', 'QuantAlgo', 'RoleSpecialTokens', 'RoleType', 'SamplerConfig', 'SchedulerConfig', 'ServiceDiscoveryConfig', 'SpecialTokens', 'SpeculativeExecutionConfig', 'get_block_cache_keys']
-
-
+__all__: list[str] = ['ArpcConfig', 'BatchDecodeSchedulerConfig', 'CacheStoreConfig', 'ConcurrencyConfig', 'DeviceResourceConfig', 'EplbConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'FfnDisAggregateConfig', 'GptInitParameter', 'GrpcConfig', 'HWKernelConfig', 'HybridAttentionConfig', 'HybridAttentionType', 'KVCacheConfig', 'LinearAttentionConfig', 'MiscellaneousConfig', 'MlaOpsType', 'ModelSpecificConfig', 'MoeConfig', 'ParallelismDistributedConfig', 'ProfilingDebugLoggingConfig', 'QuantAlgo', 'RoleSpecialTokens', 'RoleType', 'SamplerConfig', 'SchedulerConfig', 'ServiceDiscoveryConfig', 'SpecialTokens', 'SpeculativeExecutionConfig', 'get_block_cache_keys']
 class ArpcConfig:
     ioThreadNum: int
     queueNum: int
@@ -13,27 +9,10 @@ class ArpcConfig:
         ...
     def to_string(self) -> str:
         ...
-
-class GrpcConfig:
-    def __init__(self) -> None: 
-    
-    def __init__(self, json_str: str) -> None: 
-        ...
-    
-    def to_string(self) -> str: 
-        ...
-        
-    def update_from_env(self) -> None: 
-        ... 
-        
-    def get_client_config(self) -> dict[str, int]: 
-        ...
-    
-    def get_server_config(self) -> dict[str, int]: 
-        ...
-
 class BatchDecodeSchedulerConfig:
     batch_decode_scheduler_batch_size: int
+    def __init__(self, batch_decode_scheduler_batch_size: int = 1, batch_decode_scheduler_warmup_type: int = 0) -> None:
+        ...
     def to_string(self) -> str:
         ...
     def update_from_env(self) -> None:
@@ -184,6 +163,10 @@ class FMHAType:
       AITER_PREFILL
     
       AITER_DECODE
+    
+      PY_FLASH_INFER_PREFILL
+    
+      PY_FLASH_INFER_DECODE
     """
     AITER_DECODE: typing.ClassVar[FMHAType]  # value = <FMHAType.AITER_DECODE: 9>
     AITER_PREFILL: typing.ClassVar[FMHAType]  # value = <FMHAType.AITER_PREFILL: 8>
@@ -192,10 +175,12 @@ class FMHAType:
     OPEN_SOURCE: typing.ClassVar[FMHAType]  # value = <FMHAType.OPEN_SOURCE: 2>
     PAGED_OPEN_SOURCE: typing.ClassVar[FMHAType]  # value = <FMHAType.PAGED_OPEN_SOURCE: 3>
     PAGED_TRT_V2: typing.ClassVar[FMHAType]  # value = <FMHAType.PAGED_TRT_V2: 4>
+    PY_FLASH_INFER_DECODE: typing.ClassVar[FMHAType]  # value = <FMHAType.PY_FLASH_INFER_DECODE: 11>
+    PY_FLASH_INFER_PREFILL: typing.ClassVar[FMHAType]  # value = <FMHAType.PY_FLASH_INFER_PREFILL: 10>
     TRT_V1: typing.ClassVar[FMHAType]  # value = <FMHAType.TRT_V1: 5>
     TRT_V2: typing.ClassVar[FMHAType]  # value = <FMHAType.TRT_V2: 6>
     XQA: typing.ClassVar[FMHAType]  # value = <FMHAType.XQA: 7>
-    __members__: typing.ClassVar[dict[str, FMHAType]]  # value = {'NONE': <FMHAType.NONE: 1>, 'PAGED_TRT_V2': <FMHAType.PAGED_TRT_V2: 4>, 'TRT_V2': <FMHAType.TRT_V2: 6>, 'PAGED_OPEN_SOURCE': <FMHAType.PAGED_OPEN_SOURCE: 3>, 'OPEN_SOURCE': <FMHAType.OPEN_SOURCE: 2>, 'TRT_V1': <FMHAType.TRT_V1: 5>, 'FLASH_INFER': <FMHAType.FLASH_INFER: 0>, 'XQA': <FMHAType.XQA: 7>, 'AITER_PREFILL': <FMHAType.AITER_PREFILL: 8>, 'AITER_DECODE': <FMHAType.AITER_DECODE: 9>}
+    __members__: typing.ClassVar[dict[str, FMHAType]]  # value = {'NONE': <FMHAType.NONE: 1>, 'PAGED_TRT_V2': <FMHAType.PAGED_TRT_V2: 4>, 'TRT_V2': <FMHAType.TRT_V2: 6>, 'PAGED_OPEN_SOURCE': <FMHAType.PAGED_OPEN_SOURCE: 3>, 'OPEN_SOURCE': <FMHAType.OPEN_SOURCE: 2>, 'TRT_V1': <FMHAType.TRT_V1: 5>, 'FLASH_INFER': <FMHAType.FLASH_INFER: 0>, 'XQA': <FMHAType.XQA: 7>, 'AITER_PREFILL': <FMHAType.AITER_PREFILL: 8>, 'AITER_DECODE': <FMHAType.AITER_DECODE: 9>, 'PY_FLASH_INFER_PREFILL': <FMHAType.PY_FLASH_INFER_PREFILL: 10>, 'PY_FLASH_INFER_DECODE': <FMHAType.PY_FLASH_INFER_DECODE: 11>}
     def __eq__(self, other: typing.Any) -> bool:
         ...
     def __getstate__(self) -> int:
@@ -241,7 +226,6 @@ class GptInitParameter:
     activation_type: str
     add_bias_linear: bool
     arpc_config: ArpcConfig
-    grpc_config: GrpcConfig
     batch_decode_scheduler_config: BatchDecodeSchedulerConfig
     block_nums: int
     cache_store_config: CacheStoreConfig
@@ -266,6 +250,7 @@ class GptInitParameter:
     dp_rank: int
     dp_size: int
     dp_tp_nccl_port: int
+    embedding_rpc_port: int
     embedding_size: int
     enable_eplb: bool
     enable_fast_gen: bool
@@ -285,6 +270,7 @@ class GptInitParameter:
     fifo_scheduler_config: FIFOSchedulerConfig
     fmha_config: FMHAConfig
     gen_num_per_circle: int
+    grpc_config: GrpcConfig
     has_lm_head: bool
     has_moe_norm: bool
     has_positional_encoding: bool
@@ -295,6 +281,7 @@ class GptInitParameter:
     hidden_size: int
     http_port: int
     hw_kernel_config: HWKernelConfig
+    hybrid_attention_config: HybridAttentionConfig
     include_sep_tokens: bool
     input_embedding_scalar: float
     input_vocab_size: int
@@ -314,6 +301,7 @@ class GptInitParameter:
     layer_num: int
     layernorm_eps: float
     layernorm_type: str
+    linear_attention_config: LinearAttentionConfig
     load_cache_timeout_ms: int
     local_rank: int
     logit_scale: float
@@ -435,6 +423,25 @@ class GptInitParameter:
         ...
     def showDebugInfo(self) -> None:
         ...
+class GrpcConfig:
+    @typing.overload
+    def __init__(self) -> None:
+        ...
+    @typing.overload
+    def __init__(self, json_str: str) -> None:
+        ...
+    def from_json(self, arg0: str) -> None:
+        """
+        Initialize from JSON string
+        """
+    def get_client_config(self) -> dict[str, int]:
+        ...
+    def get_server_config(self) -> dict[str, int]:
+        ...
+    def to_string(self) -> str:
+        ...
+    def update_from_env(self) -> None:
+        ...
 class HWKernelConfig:
     arm_gemm_use_kai: bool
     decode_capture_batch_sizes: list[int]
@@ -457,6 +464,53 @@ class HWKernelConfig:
         ...
     def update_from_env(self) -> None:
         ...
+class HybridAttentionConfig:
+    enable_hybrid_attention: bool
+    hybrid_attention_types: list[HybridAttentionType]
+    def __init__(self, enable_hybrid_attention: bool = False, hybrid_attention_types: list[HybridAttentionType] = []) -> None:
+        ...
+    def to_string(self) -> str:
+        ...
+class HybridAttentionType:
+    """
+    Members:
+    
+      NONE
+    
+      LINEAR
+    
+      SLIDING_WINDOW
+    """
+    LINEAR: typing.ClassVar[HybridAttentionType]  # value = <HybridAttentionType.LINEAR: 1>
+    NONE: typing.ClassVar[HybridAttentionType]  # value = <HybridAttentionType.NONE: 0>
+    SLIDING_WINDOW: typing.ClassVar[HybridAttentionType]  # value = <HybridAttentionType.SLIDING_WINDOW: 2>
+    __members__: typing.ClassVar[dict[str, HybridAttentionType]]  # value = {'NONE': <HybridAttentionType.NONE: 0>, 'LINEAR': <HybridAttentionType.LINEAR: 1>, 'SLIDING_WINDOW': <HybridAttentionType.SLIDING_WINDOW: 2>}
+    def __eq__(self, other: typing.Any) -> bool:
+        ...
+    def __getstate__(self) -> int:
+        ...
+    def __hash__(self) -> int:
+        ...
+    def __index__(self) -> int:
+        ...
+    def __init__(self, value: int) -> None:
+        ...
+    def __int__(self) -> int:
+        ...
+    def __ne__(self, other: typing.Any) -> bool:
+        ...
+    def __repr__(self) -> str:
+        ...
+    def __setstate__(self, state: int) -> None:
+        ...
+    def __str__(self) -> str:
+        ...
+    @property
+    def name(self) -> str:
+        ...
+    @property
+    def value(self) -> int:
+        ...
 class KVCacheConfig:
     enable_3fs: bool
     match_timeout_ms: int
@@ -477,6 +531,16 @@ class KVCacheConfig:
     def to_string(self) -> str:
         ...
     def update_from_env(self) -> None:
+        ...
+class LinearAttentionConfig:
+    linear_conv_kernel_dim: int
+    linear_key_head_dim: int
+    linear_num_key_heads: int
+    linear_num_value_heads: int
+    linear_value_head_dim: int
+    def __init__(self, linear_conv_kernel_dim: int = 0, linear_key_head_dim: int = 0, linear_num_key_heads: int = 0, linear_num_value_heads: int = 0, linear_value_head_dim: int = 0) -> None:
+        ...
+    def to_string(self) -> str:
         ...
 class MiscellaneousConfig:
     aux_string: str

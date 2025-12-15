@@ -1,5 +1,8 @@
 #include "rtp_llm/models_py/bindings/cuda/FusedMoEOp.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
+#include "rtp_llm/cpp/devices/cuda_impl/CudaDevice.h"
+#include "rtp_llm/cpp/devices/DeviceFactory.h"
+
 #include <cstdint>
 
 namespace rtp_llm {
@@ -64,7 +67,9 @@ void FusedMoEOp::forward(torch::Tensor hidden_states,
         torch::zeros({token_num, top_k, hidden_dim}, hidden_states.options().dtype(hidden_states.dtype()));
     const auto new_expanded_source_row_to_dest =
         torch::zeros({top_k, token_num}, hidden_states.options().dtype(torch::kInt32));
-    cudaStream_t stream = 0;
+
+    auto device = (dynamic_cast<CudaDevice*>(DeviceFactory::getDefaultDevice()));
+    auto stream = device->getStream();
     if (hidden_states.scalar_type() == at::kBFloat16) {
         moe_plugin_->enqueue(hidden_states.data_ptr<at::BFloat16>(),
                              nullptr,  // gate->data<float>(),
@@ -109,6 +114,8 @@ void FusedMoEOp::forward(torch::Tensor hidden_states,
                              new_expanded_source_row_to_dest.data_ptr<int32_t>(),
                              expert_ids.data_ptr<int32_t>(),
                              stream);
+    } else {
+        throw std::runtime_error("Unimplemented dtype for FusedMoEOp");
     }
 }
 

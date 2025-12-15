@@ -166,9 +166,13 @@ void GptInitParameter::showDebugInfo() const {
         << "========== ArpcConfig ==========\n"
         << arpc_config.to_string() << "\n"
         << "========== GrpcConfig ==========\n"
-        << grpc_config.to_string() << "\n"
-        << "========== FfnDisAggregateConfig ==========\n"
-        << ffn_disaggregate_config.to_string() << "\n";
+        << grpc_config.to_string() << "\n";
+    if (ffn_disaggregate_config.enable_ffn_disaggregate) {
+        oss << "========== FfnDisAggregateConfig ==========\n" << ffn_disaggregate_config.to_string() << "\n";
+    }
+    if (linear_attention_config.linear_conv_kernel_dim > 0) {
+        oss << "========== LinearAttentionConfig ==========\n" << linear_attention_config.to_string() << "\n";
+    }
     RTP_LLM_LOG_INFO(oss.str());
 }
 

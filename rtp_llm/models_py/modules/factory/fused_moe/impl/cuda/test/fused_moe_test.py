@@ -105,14 +105,14 @@ class FusedMoeBatchedTest(TestCase):
         model_param.activation_type = "SiGLU"
         model_param.ep_size = 1
         model_param.ep_rank = 0
+        model_param.tp_size = 1
 
         # Create router and experts
         router = BatchedDataRouter(
             max_num_tokens=num_tokens,
-            num_local_experts=num_experts,
-            num_dispatchers=1,
-            rank=0,
-            num_experts=num_experts,
+            num_local_experts=num_experts // model_param.ep_size,
+            ep_rank=model_param.ep_rank,
+            tp_size=model_param.tp_size,
         )
         scaling_factor = 0.1
         # Create test weights

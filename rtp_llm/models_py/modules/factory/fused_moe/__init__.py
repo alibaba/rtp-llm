@@ -61,6 +61,7 @@ else:
         CudaFp8PerTensorEpLowLatencyStrategy,
         CudaFp8PerTensorEpNormalStrategy,
         CudaFp8PerTensorSingleGpuStrategy,
+        CudaNoQuantCppStrategy,
         CudaNoQuantEpLowLatencyStrategy,
     )
 
@@ -72,5 +73,6 @@ else:
     registry.register(CudaFp8PerBlockNoDPStrategy())
     registry.register(CudaFp8PerTensorSingleGpuStrategy())
     registry.register(CudaNoQuantEpLowLatencyStrategy())
+    registry.register(CudaNoQuantCppStrategy())
     registry.register(BatchedTritonStrategy())
     FusedMoeFactory.set_registry(registry)

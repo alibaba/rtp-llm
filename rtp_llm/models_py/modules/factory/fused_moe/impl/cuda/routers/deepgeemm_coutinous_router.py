@@ -38,6 +38,7 @@ class PureTpRouter(FusedMoeDataRouter):
 
         resolver = MoeConfigResolver()
         checker.check(resolver.is_single_gpu(config) or resolver.is_tp_equal_ep(config))
+        checker.check(resolver.use_all_gather(config))
 
     def __init__(
         self,
@@ -45,6 +46,7 @@ class PureTpRouter(FusedMoeDataRouter):
         use_fp8: bool = True,
         async_mode: bool = False,
         expert_alignment: int = 128,
+        need_recompute_topk_ids: bool = True,
     ):
         self.config = config
         self.tp_size = config.tp_size
@@ -60,6 +62,7 @@ class PureTpRouter(FusedMoeDataRouter):
         self.use_fp8 = use_fp8
         self.async_mode = async_mode
         self.expert_alignment = expert_alignment
+        self.need_recompute_topk_ids = need_recompute_topk_ids
         if self.async_mode:
             raise ValueError("DeepEPNormal not supports async mode now")
 
@@ -86,19 +89,27 @@ class PureTpRouter(FusedMoeDataRouter):
         else:
             expert_x = a1
             expert_x_scale = None
-        adjusted_topk_ids, num_recv_tokens_per_expert = (
-            recompute_topk_ids_sum_expert_count(
-                topk_ids, self.expert_start_id, self.expert_num_per_rank
+
+        if self.need_recompute_topk_ids:
+            adjusted_topk_ids, num_recv_tokens_per_expert = (
+                recompute_topk_ids_sum_expert_count(
+                    topk_ids, self.expert_start_id, self.expert_num_per_rank
+                )
             )
-        )
-        return ExpertForwardPayload(
-            expert_x,
-            None,
-            expert_x_scale,
-            ExpertTokensMetadata(num_recv_tokens_per_expert, None),
-            adjusted_topk_ids,
-            topk_weights,
-        )
+            return ExpertForwardPayload(
+                expert_x,
+                None,
+                expert_x_scale,
+                ExpertTokensMetadata(num_recv_tokens_per_expert, None),
+                adjusted_topk_ids,
+                topk_weights,
+            )
+        else:
+            return ExpertForwardPayload(
+                expert_x=expert_x,
+                expert_topk_weights=topk_weights,
+                expert_topk_ids=topk_ids,
+            )
 
     def finalize(
         self,

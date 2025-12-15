@@ -2,7 +2,15 @@ from __future__ import annotations
 import libth_transformer_config
 import torch
 import typing
-__all__: list[str] = ['EngineScheduleInfo', 'EngineTaskInfo', 'KVCacheInfo', 'MultimodalInput', 'RtpEmbeddingOp', 'RtpLLMOp', 'WorkerStatusInfo', 'EmbeddingCppOutput', 'TypedOutput']
+__all__: list[str] = ['EmbeddingCppOutput', 'EngineScheduleInfo', 'EngineTaskInfo', 'KVCacheInfo', 'MultimodalInput', 'RtpEmbeddingOp', 'RtpLLMOp', 'TypedOutput', 'WorkerStatusInfo']
+class EmbeddingCppOutput:
+    output: TypedOutput
+    def __init__(self) -> None:
+        ...
+    def setMapOutput(self, arg0: list[dict[str, torch.Tensor]]) -> None:
+        ...
+    def setTensorOutput(self, arg0: torch.Tensor) -> None:
+        ...
 class EngineScheduleInfo:
     finished_task_info_list: list[EngineTaskInfo]
     last_schedule_delta: int
@@ -42,30 +50,6 @@ class RtpEmbeddingOp:
         ...
     def stop(self) -> None:
         ...
-
-class TypedOutput:
-    isTensor: bool
-    t: torch.Tensor
-    map: list[dict[str, torch.Tensor]]
-    def __init__(self) -> None:
-        ...
-    def setTensorOutput(self, tensor: torch.Tensor) -> None:
-        ...
-    def setMapOutput(self, tensor_map: list[dict[str, torch.Tensor]]) -> None:
-        ...
-        
-class EmbeddingQueryOutput:
-    output: TypedOutput
-    error_info: typing.Any
-    def __init__(self) -> None:
-        ...
-    def setMapOutput(self, output: typing.Any) -> None:
-        ...
-    def setTensorOutput(self, output: typing.Any) -> None:
-        ...
-    def setErrorInfo(self, error_info: typing.Any) -> None:
-        ...
-    
 class RtpLLMOp:
     def __init__(self) -> None:
         ...
@@ -92,6 +76,22 @@ class RtpLLMOp:
     def update_eplb_config(self, config: libth_transformer_config.EplbConfig) -> bool:
         ...
     def update_scheduler_info(self, scheduler_info: str) -> None:
+        ...
+class TypedOutput:
+    isTensor: bool
+    def __init__(self) -> None:
+        ...
+    @property
+    def map(self) -> typing.Any:
+        ...
+    @map.setter
+    def map(self, arg1: list[dict[str, torch.Tensor]]) -> None:
+        ...
+    @property
+    def t(self) -> typing.Any:
+        ...
+    @t.setter
+    def t(self, arg1: torch.Tensor) -> None:
         ...
 class WorkerStatusInfo:
     alive: bool

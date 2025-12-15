@@ -56,6 +56,7 @@ def start_backend_server_impl(global_controller, process_manager=None):
     retry_interval_seconds = 5
     server_config = ServerConfig()
     server_config.update_from_env()
+    logging.info(server_config.to_string())
     start_port = server_config.start_port
     backend_server_port = WorkerInfo.backend_server_port_offset(0, start_port)
     while True:

@@ -6,9 +6,10 @@ void registerPyOpDefs(pybind11::module& m) {
     pybind11::class_<KVCache>(m, "KVCache")
         .def(pybind11::init<>())
         .def_readwrite("k_cache_base", &KVCache::k_cache_base, "Key cache base tensor")
-        .def_readwrite("v_cache_base", &KVCache::v_cache_base, "Value cache base tensor")
-        .def_readwrite("k_scale_base", &KVCache::k_scale_base, "Key cache scale tensor")
-        .def_readwrite("v_scale_base", &KVCache::v_scale_base, "Value cache scale tensor")
+        .def_readonly("v_cache_base", &KVCache::v_cache_base, "Value cache base tensor")
+        .def_readonly("k_scale_base", &KVCache::k_scale_base, "Key cache scale tensor")
+        .def_readonly("v_scale_base", &KVCache::v_scale_base, "Value cache scale tensor")
+        .def_readonly("seq_size_per_block", &KVCache::seq_size_per_block, "Sequence size per block")
         .def_readonly("layer_id", &KVCache::layer_id, "kv cache layer id")
         .def("get_layer_cache", &KVCache::getLayerCache);
 
@@ -78,6 +79,11 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("cu_seqlens", &PyAttentionInputs::cu_seqlens)
         .def_readwrite("cu_seqlens_without_prefix", &PyAttentionInputs::cu_seqlens_without_prefix)
         .def_readwrite("padding_offset", &PyAttentionInputs::padding_offset)
+        .def_readonly("prefix_lengths_d", &PyAttentionInputs::prefix_lengths_d)
+        .def_readonly("sequence_lengths_plus_1_d", &PyAttentionInputs::sequence_lengths_plus_1_d)
+        .def_readonly("input_lengths_d", &PyAttentionInputs::input_lengths_d)
+        .def_readonly("decode_cu_seqlens_d", &PyAttentionInputs::decode_cu_seqlens_d)
+        .def_readonly("decode_cu_seqlens_host", &PyAttentionInputs::decode_cu_seqlens_host)
         .def_readwrite("cache_store_inputs", &PyAttentionInputs::cache_store_inputs)
         .def("__repr__", [](const PyAttentionInputs& self) { return "PyAttentionInputs"; })
         .def_readonly("prefill_cuda_graph_copy_params", &PyAttentionInputs::prefill_cuda_graph_copy_params);

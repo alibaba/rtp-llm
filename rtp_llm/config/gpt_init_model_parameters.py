@@ -48,7 +48,10 @@ from rtp_llm.ops import (
     GptInitParameter,
     GrpcConfig,
     HWKernelConfig,
+    HybridAttentionConfig,
+    HybridAttentionType,
     KVCacheConfig,
+    LinearAttentionConfig,
     MiscellaneousConfig,
     MlaOpsType,
     ModelSpecificConfig,
@@ -385,6 +388,8 @@ class GptInitModelParameters:
     role_type: RoleType
     quant_config: Optional[QuantizationConfig]
 
+    hybrid_attention_config: HybridAttentionConfig
+    linear_attention_config: LinearAttentionConfig
     batch_decode_scheduler_config: BatchDecodeSchedulerConfig
     cache_store_config: CacheStoreConfig
     concurrency_config: ConcurrencyConfig

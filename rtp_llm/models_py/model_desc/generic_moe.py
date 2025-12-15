@@ -2,6 +2,7 @@ import logging
 from typing import Dict, Optional
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
@@ -57,6 +58,17 @@ class GenericMoeLayer(nn.Module):
         ), "Weights w1 and w2 must be provided"
         self.num_local_experts = self.w1.shape[0]
         self.expert_map = self.build_expert_map()
+        self.add_shared_expert = config.moe_style == 2
+        if self.add_shared_expert:
+            self.shared_expert = FusedSiluActDenseMLP(config, weights)
+        else:
+            self.shared_expert = None
+        if weights.get(W.shared_expert_gate, None) is not None:
+            self.shared_expert_gate = LinearFactory.create_linear_from_weights(
+                weights, W.shared_expert_gate, None, None, config
+            )
+        else:
+            self.shared_expert_gate = None
 
         # for group topk
         self.correction_bias = weights.get(W.e_score_correction_b, None)
@@ -81,9 +93,11 @@ class GenericMoeLayer(nn.Module):
             dtype=torch.float32,
             device=hidden_states.device,
         )
+        # different executor may need different topk_ids dtype
+        topk_ids_dtype = self.fused_moe.topk_ids_dtype
         topk_ids = torch.empty(
             (num_tokens, self.top_k),
-            dtype=torch.int64,
+            dtype=topk_ids_dtype,
             device=hidden_states.device,
         )
 
@@ -110,13 +124,23 @@ class GenericMoeLayer(nn.Module):
             # Top-K selection using C++ SelectTopkOp
             self.select_topk(router_logits_fp32, topk_ids, topk_weights)
 
-        return self.fused_moe(
+        self.select_topk(router_logits_fp32, topk_ids, topk_weights)
+        experts_output = self.fused_moe(
             hidden_states=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation="SiGLU",
             expert_map=self.expert_map,
         )
+        if self.shared_expert is not None:
+            shared_expert_output = self.shared_expert(hidden_states)
+            if self.shared_expert_gate is not None:
+                shared_expert_output = (
+                    F.sigmoid(self.shared_expert_gate(hidden_states))
+                    * shared_expert_output
+                )
+            experts_output = experts_output + shared_expert_output
+        return experts_output
 
 
 class GenericMoeDecoderLayer(nn.Module):
@@ -137,24 +161,9 @@ class GenericMoeDecoderLayer(nn.Module):
 
         # Determine if this is a Dense layer (before first MoE layer or dense only)
         if layer_idx not in config.moe_layer_index:
-            self.is_dense_layer = True
+            self.mlp = FusedSiluActDenseMLP(config, weights)
         else:
-            self.is_dense_layer = False
-            self.moe_mlp = GenericMoeLayer(config, weights)
-
-        self.add_shared_expert = getattr(config, "moe_style", 1) == 2
-
-        # Try to create shared_mlp and catch errors if weights don't exist
-        self.shared_mlp = None
-        if self.is_dense_layer or self.add_shared_expert:
-            try:
-                self.shared_mlp = FusedSiluActDenseMLP(config, weights)
-            except (KeyError, AssertionError) as e:
-                # If weights don't exist, shared_mlp remains None
-                logging.warning(
-                    f"[GenericMoeDecoderLayer] Layer {self.layer_idx}: Failed to create shared_mlp: {e}"
-                )
-
+            self.mlp = GenericMoeLayer(config, weights)
         self.input_layernorm = RMSNorm(
             weights[W.pre_ln_gamma], eps=config.layernorm_eps
         )
@@ -180,21 +189,7 @@ class GenericMoeDecoderLayer(nn.Module):
         # MLP (Dense or MoE with optional shared experts)
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
-
-        if self.is_dense_layer:
-            # Dense layer uses shared_mlp (must exist)
-            assert self.shared_mlp is not None, "Dense layer must have shared_mlp"
-            hidden_states = self.shared_mlp(hidden_states)
-        else:
-            # MoE layer
-            experts_output = self.moe_mlp(hidden_states)
-
-            if self.shared_mlp is not None:
-                shared_mlp_output = self.shared_mlp(hidden_states)
-                hidden_states = experts_output + shared_mlp_output
-            else:
-                hidden_states = experts_output
-
+        hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
 
         return hidden_states

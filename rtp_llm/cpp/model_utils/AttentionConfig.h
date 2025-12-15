@@ -14,7 +14,9 @@ enum class FMHAType {
     TRT_V2,
     XQA,
     AITER_PREFILL,
-    AITER_DECODE
+    AITER_DECODE,
+    PY_FLASH_INFER_PREFILL,
+    PY_FLASH_INFER_DECODE
 };
 
 enum AttentionMaskType {

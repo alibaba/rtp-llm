@@ -531,4 +531,21 @@ std::string FfnDisAggregateConfig::to_string() const {
     return oss.str();
 }
 
+// LinearAttentionConfig
+std::string LinearAttentionConfig::to_string() const {
+    std::ostringstream oss;
+    oss << "linear_conv_kernel_dim: " << linear_conv_kernel_dim << "\n"
+        << "linear_key_head_dim: " << linear_key_head_dim << "\n"
+        << "linear_num_key_heads: " << linear_num_key_heads << "\n"
+        << "linear_num_value_heads: " << linear_num_value_heads << "\n"
+        << "linear_value_head_dim: " << linear_value_head_dim;
+    return oss.str();
+}
+// HybridAttentionConfig
+std::string HybridAttentionConfig::to_string() const {
+    std::ostringstream oss;
+    oss << "enable_hybrid_attention: " << enable_hybrid_attention << "\n";
+    return oss.str();
+}
+
 }  // namespace rtp_llm

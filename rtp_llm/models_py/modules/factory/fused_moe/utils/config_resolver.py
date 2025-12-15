@@ -109,3 +109,15 @@ class MoeConfigResolver:
             Whether TP size equals EP size
         """
         return config.tp_size == config.ep_size
+
+    @staticmethod
+    def use_all_gather(config: GptInitModelParameters) -> bool:
+        """Check if all gather is used
+
+        Args:
+            config: Model initialization parameters
+
+        Returns:
+            Whether all gather is used
+        """
+        return config.use_all_gather

@@ -917,7 +917,6 @@ class PyEnvConfigs:
         self.ffn_disaggregate_config.update_from_env()
         self.jit_config.update_from_env()
         self.py_hw_kernel_config.update_from_env()
-        logging.info(self.to_string())
 
     def should_auto_configure_deepep(self) -> bool:
         """
