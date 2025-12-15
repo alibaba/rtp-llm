@@ -62,7 +62,12 @@ cc_library(
         "//rtp_llm/cpp/cuda/cutlass:fp8_group_cu",
         ":cuda_bindings_base",
         ":cuda_attn_bindings_base"
-    ],
+    ] + select({
+        "@//:using_cuda12_arm": [
+            "//rtp_llm/cpp/cuda/cutlass:fp4_gemm_cu",
+        ],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
     alwayslink = 1,
 )
