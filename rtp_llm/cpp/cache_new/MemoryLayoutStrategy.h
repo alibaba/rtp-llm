@@ -25,6 +25,9 @@ public:
 
     virtual BlockBufferPtrInfo convertIndexToBuffer(int layer_id, int block_id) const = 0;
 
+    virtual std::vector<BufferPtr>
+    convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const = 0;
+
     virtual void* getKCacheAddr(int layer_id, int block_id) const = 0;
 
     virtual void* getVCacheAddr(int layer_id, int block_id) const = 0;
@@ -51,28 +54,11 @@ public:
     std::vector<torch::Tensor> getLayerCacheTensors() const override;
     BlockAddrInfo              convertIndexToAddr(int layer_id, int block_id) const override;
     BlockBufferPtrInfo         convertIndexToBuffer(int layer_id, int block_id) const override;
-    void*                      getKCacheAddr(int layer_id, int block_id) const override;
-    void*                      getVCacheAddr(int layer_id, int block_id) const override;
-    const KVCacheBuffer&       kvCacheBuffer() const override;
-};
-
-class KVFirstLayoutStrategy: public MemoryLayoutStrategy {
-public:
-    bool init(const BlockPoolConfig& config,
-              torch::Tensor&         cache_buffer,
-              void*                  cache_base_ptr,
-              rtp_llm::DataType      data_type = rtp_llm::TYPE_INVALID) override;
-
-    std::vector<torch::Tensor> getLayerCacheTensors() const override;
-    BlockAddrInfo              convertIndexToAddr(int layer_id, int block_id) const override;
-    BlockBufferPtrInfo         convertIndexToBuffer(int layer_id, int block_id) const override;
-    void*                      getKCacheAddr(int layer_id, int block_id) const override;
-    void*                      getVCacheAddr(int layer_id, int block_id) const override;
-    const KVCacheBuffer&       kvCacheBuffer() const override;
-
-private:
-    torch::Tensor k_cache_tensor_;
-    torch::Tensor v_cache_tensor_;
+    std::vector<BufferPtr>
+          convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const override;
+    void* getKCacheAddr(int layer_id, int block_id) const override;
+    void* getVCacheAddr(int layer_id, int block_id) const override;
+    const KVCacheBuffer& kvCacheBuffer() const override;
 };
 
 class MemoryLayoutStrategyFactory {

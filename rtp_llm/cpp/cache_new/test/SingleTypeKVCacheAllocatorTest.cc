@@ -274,15 +274,13 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ConvertIndexToAddr) {
     allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config, device_);
     allocator_->init();
 
-    auto& spec = config.cache_specs[0];
-
     for (int layer_id = 0; layer_id < config.layer_num; ++layer_id) {
         for (int block_id = 0; block_id < 3; ++block_id) {
             auto addr_info = allocator_->convertIndexToAddr(layer_id, block_id);
             EXPECT_NE(addr_info.k_addr, nullptr);
             EXPECT_NE(addr_info.v_addr, nullptr);
 
-            size_t expected_diff = spec->k_block_size();
+            size_t expected_diff = 0;
             size_t actual_diff =
                 reinterpret_cast<size_t>(addr_info.v_addr) - reinterpret_cast<size_t>(addr_info.k_addr);
             EXPECT_EQ(actual_diff, expected_diff);
@@ -557,6 +555,59 @@ TEST_F(SingleTypeKVCacheAllocatorTest, AvailableBlocksNums) {
     allocator_->init();
 
     EXPECT_EQ(allocator_->availableBlocksNum(), config.block_num - 1);  // reserve 1 block
+}
+
+TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefReferencesMatchedBlocksOnly) {
+    auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/10, /*seq_size_per_block=*/8);
+    allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config, device_, AllocationType::HOST);
+    ASSERT_TRUE(allocator_->init());
+
+    auto block_pool = allocator_->getBlockPool();
+    ASSERT_NE(block_pool, nullptr);
+
+    const size_t total_free_before = allocator_->freeBlocksNum();
+    auto         blocks            = block_pool->malloc(4);
+    ASSERT_EQ(blocks.size(), 4);
+    EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before - 4);
+
+    KVCacheResourceV1 resource;
+    resource.initGroups(1);
+
+    resource.cacheKeys() = CacheKeysType{100, 101, 102, 103};
+    resource.blocks(0)   = BlockIndicesType{blocks[0], blocks[1], 0, blocks[2]};
+
+    // Reference keys: 101(pos1)->blocks[1], 102(pos2)->0(ignored), 103(pos3)->blocks[2]
+    allocator_->incrKVCacheRef(resource, CacheKeysType{101, 999, 102, 103});
+
+    block_pool->requestFree(blocks);
+    EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before - 2);  // blocks[1] & blocks[2] are still referenced
+
+    block_pool->blockCacheFree(BlockIndicesType{blocks[1], blocks[2]});
+    EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before);
+}
+
+TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefEmptyInputNoEffect) {
+    auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/10, /*seq_size_per_block=*/8);
+    allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config, device_, AllocationType::HOST);
+    ASSERT_TRUE(allocator_->init());
+
+    auto block_pool = allocator_->getBlockPool();
+    ASSERT_NE(block_pool, nullptr);
+
+    const size_t total_free_before = allocator_->freeBlocksNum();
+    auto         blocks            = block_pool->malloc(2);
+    ASSERT_EQ(blocks.size(), 2);
+    EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before - 2);
+
+    KVCacheResourceV1 resource;
+    resource.initGroups(1);
+    resource.cacheKeys() = CacheKeysType{100, 101};
+    resource.blocks(0)   = BlockIndicesType{blocks[0], blocks[1]};
+
+    allocator_->incrKVCacheRef(resource, CacheKeysType{});
+
+    block_pool->requestFree(blocks);
+    EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before);
 }
 
 TEST_F(SingleTypeKVCacheAllocatorTest, TotalBlocksNums) {

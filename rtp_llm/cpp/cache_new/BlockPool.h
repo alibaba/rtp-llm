@@ -49,6 +49,8 @@ public:
     void               deregUserMr();
     BlockAddrInfo      convertIndexToAddr(int layer_id, int block_id) const;
     BlockBufferPtrInfo convertIndexToBuffer(int layer_id, int block_id) const;
+    std::vector<BufferPtr>
+    convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const;
 
     void* getKCacheAddr(int layer_id, int block_id) const;
     void* getVCacheAddr(int layer_id, int block_id) const;

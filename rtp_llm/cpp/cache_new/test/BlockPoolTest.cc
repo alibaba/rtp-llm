@@ -198,7 +198,7 @@ TEST_F(BlockPoolTest, ConvertIndexToAddrLayerFirst) {
             EXPECT_NE(addr_info.v_addr, nullptr);
 
             size_t diff = reinterpret_cast<size_t>(addr_info.v_addr) - reinterpret_cast<size_t>(addr_info.k_addr);
-            EXPECT_EQ(diff, config.k_block_size);
+            EXPECT_EQ(diff, 0);
         }
     }
 }

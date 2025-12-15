@@ -62,6 +62,14 @@ BlockBufferPtrInfo KVCacheGroup::convertIndexToBuffer(int layer_id, int block_id
     return block_pool_->convertIndexToBuffer(local_layer_id, block_id);
 }
 
+std::vector<BufferPtr>
+KVCacheGroup::convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const {
+    auto it = gloabl_layer_to_local_layer.find(layer_id);
+    RTP_LLM_CHECK_WITH_INFO(it != gloabl_layer_to_local_layer.end(), "invalid layer_id: " + std::to_string(layer_id));
+    int local_layer_id = it->second;
+    return block_pool_->convertIndexToBuffer(local_layer_id, block_id, partition_count, partition_id);
+}
+
 MatchResult KVCacheGroup::matchSingleKey(CacheKeyType cache_key) {
     CacheKeysType cache_keys = {cache_key};
     return match(cache_keys);

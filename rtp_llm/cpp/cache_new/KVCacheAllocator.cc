@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/cache_new/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/cache_new/KVCacheAllocator.h"
+#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 
 namespace rtp_llm {
 
@@ -128,6 +129,24 @@ void KVCacheAllocator::regUserMr(size_t model_id) {
     if (block_pool_) {
         block_pool_->regUserMr(model_id);
     }
+}
+
+std::vector<std::pair<BufferPtr, size_t>> KVCacheAllocator::getAllBuffers() const {
+    std::vector<std::pair<BufferPtr, size_t>> results;
+
+    CacheLayerLayout layout = layerCacheBase();
+    results.reserve(layout.layers_to_buffer_ptrs.size());
+
+    for (const auto& tensor : layout.layers_to_buffer_ptrs) {
+        if (!tensor.defined() || tensor.numel() == 0) {
+            continue;
+        }
+        BufferPtr buf                = torchTensor2Buffer(tensor);
+        size_t    block_stride_bytes = config_.block_stride;
+        results.emplace_back(std::move(buf), block_stride_bytes);
+    }
+
+    return results;
 }
 
 }  // namespace rtp_llm

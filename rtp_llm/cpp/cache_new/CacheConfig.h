@@ -112,6 +112,7 @@ struct CacheConfig {
     int    layer_num;
     int    block_num;
     int    block_size;              // including all layers
+    int    block_stride;            // for one layer
     size_t seq_size_per_block = 1;  // for cache_keys generation
 
     // for adpation to MLA

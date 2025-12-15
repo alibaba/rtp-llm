@@ -220,6 +220,16 @@ BlockBufferPtrInfo HybridLayerKVCacheAllocator::convertIndexToBuffer(int layer_i
     return full_kv_cache_group_->convertIndexToBuffer(layer_id, block_id);
 }
 
+std::vector<BufferPtr> HybridLayerKVCacheAllocator::convertIndexToBuffer(int layer_id,
+                                                                         int block_id,
+                                                                         int partition_count,
+                                                                         int partition_id) const {
+    return {};
+}
+
+void HybridLayerKVCacheAllocator::incrKVCacheRef(KVCacheResourceV1& kvcache_resource, const CacheKeysType& cache_keys) {
+}
+
 int HybridLayerKVCacheAllocator::seqSizePerBlock() const {
     return full_kv_cache_group_->seqSizePerBlock();
 }
