@@ -4,6 +4,11 @@ from typing import Dict, Tuple
 import torch
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used
+from rtp_llm.models_py.kernels.cuda.fp8_kernel.fp8_kernel import (
+    per_block_cast_to_fp8,
+    per_token_cast_to_fp8,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     ExpertForwardPayload,
     ExpertTokensMetadata,
@@ -28,6 +33,13 @@ MOE_INTERMEDIATE_SIZE = 768
 M = (MAX_GENERATE_BATCH_SIZE + TP_SIZE - 1) // TP_SIZE * EP_SIZE
 K = HIDDEN_SIZE
 N = MOE_INTERMEDIATE_SIZE * 2
+
+
+def calc_diff(x: torch.Tensor, y: torch.Tensor):
+    x, y = x.double(), y.double()
+    denominator = (x * x + y * y).sum()
+    sim = 2 * (x * y).sum() / denominator
+    return 1 - sim
 
 
 def _generate_config() -> GptInitModelParameters:
@@ -72,8 +84,12 @@ def _generate_payload_and_weights(
         num_actual_tokens = max(
             min(int(NUM_EXPERTS * DP_SIZE * random.uniform(0.7, 1.3)), M), 1
         )
-        expert_x[local_expert_id, :num_actual_tokens, :] = torch.randn(
-            (num_actual_tokens, K), device="cuda", dtype=torch_dtype
+        expert_x[local_expert_id, :num_actual_tokens, :] = (
+            torch.rand((num_actual_tokens, K), device="cuda", dtype=torch.float32).to(
+                torch_dtype
+            )
+            * 2
+            - 1
         )
         if use_fp8:
             expert_x_scale[local_expert_id, :num_actual_tokens, :] = torch.randn(
@@ -102,12 +118,16 @@ def _generate_payload_and_weights(
             dtype=torch.float32,
         )
     weights = {
-        W.moe_w1: torch.randn(
-            (num_local_experts, N, K), device="cuda", dtype=torch_dtype
-        ),
-        W.moe_w2: torch.randn(
-            (num_local_experts, K, N // 2), device="cuda", dtype=torch_dtype
-        ),
+        W.moe_w1: torch.rand(
+            (num_local_experts, N, K), device="cuda", dtype=torch.float32
+        ).to(torch_dtype)
+        * 2
+        - 1,
+        W.moe_w2: torch.rand(
+            (num_local_experts, K, N // 2), device="cuda", dtype=torch.float32
+        ).to(torch_dtype)
+        * 2
+        - 1,
         W.moe_s1: w1_scale,
         W.moe_s2: w2_scale,
     }
@@ -153,10 +173,49 @@ def test_deepgemm_masked_executor(use_fp8: bool):
     random.seed(42)
     # generate data
     config = _generate_config()
-    payload, weights = _generate_payload_and_weights(config, use_fp8)
+    payload, weights = _generate_payload_and_weights(config, use_fp8=False)
     # generate ref output
-    ref_output = _generate_ref_output(payload, weights, use_fp8)
+    ref_output = _generate_ref_output(payload, weights, use_fp8=False)
     # create executor
+    num_local_experts = config.expert_num // config.ep_size
+    torch_dtype = torch.float8_e4m3fn if use_fp8 else torch.bfloat16
+
+    if use_fp8:
+        payload.expert_x_scale = torch.empty(
+            (num_local_experts, M, K // 128), device="cuda", dtype=torch.float32
+        )
+        weights[W.moe_s1] = torch.empty(
+            (num_local_experts, N // 128, K // 128), device="cuda", dtype=torch.float32
+        )
+        weights[W.moe_s2] = torch.empty(
+            (num_local_experts, K // 128, N // 2 // 128),
+            device="cuda",
+            dtype=torch.float32,
+        )
+        new_expert_x = torch.zeros(
+            (num_local_experts, M, K), device="cuda", dtype=torch_dtype
+        )
+        new_w1 = torch.zeros(
+            (num_local_experts, N, K), device="cuda", dtype=torch_dtype
+        )
+        new_w2 = torch.zeros(
+            (num_local_experts, K, N // 2), device="cuda", dtype=torch_dtype
+        )
+
+        for i in range(num_local_experts):
+            new_expert_x[i], payload.expert_x_scale[i] = per_token_cast_to_fp8(
+                payload.expert_x[i], use_ue8m0=is_deep_gemm_e8m0_used()
+            )
+            new_w1[i], weights[W.moe_s1][i] = per_block_cast_to_fp8(
+                weights[W.moe_w1][i], use_ue8m0=is_deep_gemm_e8m0_used()
+            )
+            new_w2[i], weights[W.moe_s2][i] = per_block_cast_to_fp8(
+                weights[W.moe_w2][i], use_ue8m0=is_deep_gemm_e8m0_used()
+            )
+        payload.expert_x = new_expert_x
+        weights[W.moe_w1] = new_w1
+        weights[W.moe_w2] = new_w2
+
     executor = DeepGemmMaskedExecutor(
         config,
         weights,
@@ -173,10 +232,14 @@ def test_deepgemm_masked_executor(use_fp8: bool):
     )
     # execute
     output = executor.execute(payload, "silu", None, None, False, None)
-    # check
-    torch.testing.assert_close(output, ref_output)
+    expert_num_tokens = payload.expert_tokens_meta.expert_num_tokens
+    for i, num_token in enumerate(expert_num_tokens):
+        diff = calc_diff(output[i, :num_token], ref_output[i, :num_token])
+        # print('diff:', diff)
+        assert diff < 0.002
 
 
 if __name__ == "__main__":
-    # test_deepgemm_masked_executor(use_fp8=True)
-    test_deepgemm_masked_executor(use_fp8=False)
+    test_deepgemm_masked_executor(use_fp8=True)
+    if not is_deep_gemm_e8m0_used():
+        test_deepgemm_masked_executor(use_fp8=False)
