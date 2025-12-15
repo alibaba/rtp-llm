@@ -382,6 +382,8 @@ void register_cache_store_config(pybind11::module& m) {
              pybind11::arg("thread_count")                 = 16,
              pybind11::arg("rdma_connect_timeout_ms")      = 250,
              pybind11::arg("rdma_qp_count_per_connection") = 2,
+             pybind11::arg("rdma_io_thread_count")         = 8,
+             pybind11::arg("rdma_worker_thread_count")     = 8,
              pybind11::arg("messager_io_thread_count")     = 2,
              pybind11::arg("messager_worker_thread_count") = 16)
         .def("to_string", &CacheStoreConfig::to_string)
@@ -392,6 +394,8 @@ void register_cache_store_config(pybind11::module& m) {
         .def_readwrite("thread_count", &CacheStoreConfig::thread_count)
         .def_readwrite("rdma_connect_timeout_ms", &CacheStoreConfig::rdma_connect_timeout_ms)
         .def_readwrite("rdma_qp_count_per_connection", &CacheStoreConfig::rdma_qp_count_per_connection)
+        .def_readwrite("rdma_io_thread_count", &CacheStoreConfig::rdma_io_thread_count)
+        .def_readwrite("rdma_worker_thread_count", &CacheStoreConfig::rdma_worker_thread_count)
         .def_readwrite("messager_io_thread_count", &CacheStoreConfig::messager_io_thread_count)
         .def_readwrite("messager_worker_thread_count", &CacheStoreConfig::messager_worker_thread_count);
 }

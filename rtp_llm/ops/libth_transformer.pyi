@@ -79,6 +79,8 @@ class CacheStoreConfig:
     thread_count: int
     rdma_connect_timeout_ms: int
     rdma_qp_count_per_connection: int
+    rdma_io_thread_count: int
+    rdma_worker_thread_count: int
     messager_io_thread_count: int
     messager_worker_thread_count: int
 
@@ -90,6 +92,8 @@ class CacheStoreConfig:
         thread_count: int = 16,
         rdma_connect_timeout_ms: int = 250,
         rdma_qp_count_per_connection: int = 2,
+        rdma_io_thread_count: int = 1,
+        rdma_worker_thread_count: int = 2,
         messager_io_thread_count: int = 2,
         messager_worker_thread_count: int = 16,
     ) -> None: ...

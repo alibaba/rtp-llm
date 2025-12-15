@@ -54,3 +54,19 @@ def init_cache_store_group_args(parser):
         default=2,
         help="为 cache store RDMA 连接设置每个连接的底层QP数量。",
     )
+
+    cache_store_group.add_argument(
+        "--cache_store_rdma_io_thread_count",
+        env_name="CACHE_STORE_RDMA_IO_THREAD_COUNT",
+        type=int,
+        default=8,
+        help="为 cache store RDMA 通信层设置 IO 线程数量。",
+    )
+
+    cache_store_group.add_argument(
+        "--cache_store_rdma_worker_thread_count",
+        env_name="CACHE_STORE_RDMA_WORKER_THREAD_COUNT",
+        type=int,
+        default=8,
+        help="为 cache store RDMA 通信层设置 worker 线程数量。",
+    )

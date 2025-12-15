@@ -535,6 +535,10 @@ class ServerArgsSetTest(TestCase):
             "500",
             "--cache_store_rdma_qp_count_per_connection",
             "8",
+            "--cache_store_rdma_io_thread_count",
+            "8",
+            "--cache_store_rdma_worker_thread_count",
+            "8",
             # 14. 调度器配置
             "--use_batch_decode_scheduler",
             "True",
@@ -859,6 +863,8 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(env["CACHE_STORE_THREAD_COUNT"], "8")
         self.assertEqual(env["CACHE_STORE_RDMA_CONNECT_TIMEOUT_MS"], "500")
         self.assertEqual(env["CACHE_STORE_RDMA_QP_COUNT_PER_CONNECTION"], "8")
+        self.assertEqual(env["CACHE_STORE_RDMA_IO_THREAD_COUNT"], "3")
+        self.assertEqual(env["CACHE_STORE_RDMA_WORKER_THREAD_COUNT"], "6")
 
         # 14. 调度器配置
         self.assertEqual(env["USE_BATCH_DECODE_SCHEDULER"], "1")
@@ -945,8 +951,10 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(env["DASHSCOPE_HTTP_URL"], "http://test.url")
         self.assertEqual(env["DASHSCOPE_WEBSOCKET_URL"], "ws://test.url")
         self.assertEqual(env["OPENAI_API_KEY"], "test_openai_key")
-        self.assertEqual(env["JSON_MODEL_OVERRIDE_ARGS"],
-                         '{"rope_scaling":{"type":"yarn","factor":2.0,"original_max_position_embeddings":32768,"beta_slow":1.0,"beta_fast":1.0,"mscale":1.0,"extrapolation_factor":1.0}}')
+        self.assertEqual(
+            env["JSON_MODEL_OVERRIDE_ARGS"],
+            '{"rope_scaling":{"type":"yarn","factor":2.0,"original_max_position_embeddings":32768,"beta_slow":1.0,"beta_fast":1.0,"mscale":1.0,"extrapolation_factor":1.0}}',
+        )
 
         # 27. Lora Configuration
         self.assertEqual(env["LORA_INFO"], '{"lora1": "/path/to/lora1"}')
@@ -966,9 +974,7 @@ class ServerArgsSetTest(TestCase):
 
         # 30. Miscellaneous Configuration
         self.assertEqual(env["DISABLE_PDL"], "1")
-        self.assertEqual(
-            env["AUX_STRING"], ""
-        )
+        self.assertEqual(env["AUX_STRING"], "")
 
         # 31. PD-Separation Configuration
         self.assertEqual(env["PREFILL_RETRY_TIMES"], "2")

@@ -344,6 +344,8 @@ void CacheStoreConfig::update_from_env_for_test() {
     thread_count                 = autil::EnvUtil::getEnv("CACHE_STORE_THREAD_COUNT", 16);
     rdma_connect_timeout_ms      = autil::EnvUtil::getEnv("CACHE_STORE_RDMA_CONNECT_TIMEOUT_MS", 250);
     rdma_qp_count_per_connection = autil::EnvUtil::getEnv("CACHE_STORE_RDMA_CONNECTION_COUNT_PER_CONNECTION", 2);
+    rdma_io_thread_count         = autil::EnvUtil::getEnv("CACHE_STORE_RDMA_IO_THREAD_COUNT", 8);
+    rdma_worker_thread_count     = autil::EnvUtil::getEnv("CACHE_STORE_RDMA_WORKER_THREAD_COUNT", 8);
     messager_io_thread_count     = autil::EnvUtil::getEnv("MESSAGER_IO_THREAD_COUNT", 2);
     messager_worker_thread_count = autil::EnvUtil::getEnv("MESSAGER_WORKER_THREAD_COUNT", 16);
 }
@@ -357,6 +359,8 @@ std::string CacheStoreConfig::to_string() const {
         << "thread_count: " << thread_count << "\n"
         << "rdma_connect_timeout_ms: " << rdma_connect_timeout_ms << "\n"
         << "rdma_qp_count_per_connection: " << rdma_qp_count_per_connection << "\n"
+        << "rdma_io_thread_count: " << rdma_io_thread_count << "\n"
+        << "rdma_worker_thread_count: " << rdma_worker_thread_count << "\n"
         << "messager_io_thread_count: " << messager_io_thread_count << "\n"
         << "messager_worker_thread_count: " << messager_worker_thread_count << "\n";
     return oss.str();
