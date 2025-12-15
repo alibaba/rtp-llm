@@ -358,27 +358,27 @@ cc_binary(
     visibility = ["//visibility:public"],
 )
 
-#TODO@tuowu: fix this test
-# py_test(
-#     name = "CudaGraphDecodePadding",
-#     srcs = [
-#         "CudaGraphDecodePadding.py",
-#     ],
-#     data = [
-#         ":test_cuda_graph_decode_ops",
-#         "//:th_transformer"
-#     ],
-#     deps = [
-#         "//rtp_llm/test/model_test/test_util:test_util",
-#     ],
-#     env = {
-#         "TEST_USING_DEVICE": "CUDA",
-#         "HACK_LAYER_NUM" : "1",
-#         "CUDA_LAUNCH_BLOCKING" : "1",
-#     },
-#     tags = ['A10'],
-#     exec_properties = {'gpu':'A10'},
-# )
+py_test(
+    name = "CudaGraphDecodePadding",
+    srcs = [
+        "CudaGraphDecodePadding.py",
+    ],
+    data = [
+        ":test_cuda_graph_decode_ops",
+        "//:th_transformer"
+    ],
+    deps = [
+        "//rtp_llm/test/model_test/test_util:test_util",
+    ],
+    env = {
+        "NOT_USE_DEFAULT_STREAM" : "1",
+        "TEST_USING_DEVICE": "CUDA",
+        "HACK_LAYER_NUM" : "1",
+        "CUDA_LAUNCH_BLOCKING" : "1",
+    },
+    tags = ['A10'],
+    exec_properties = {'gpu':'A10'},
+)
 
 # py_test(
 #     name = "CudaGraphPrefill",
