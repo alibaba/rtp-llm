@@ -61,7 +61,7 @@ bool ROCmDevice::initDeepEPBuffer() {
                                               world_size,
                                               num_nvl_bytes,
                                               num_rdma_bytes,
-                                              init_params_.use_deepep_low_latency || init_params_.use_deepep_internode,
+                                              init_params_.use_deepep_low_latency,
                                               num_qps_per_rank));
 #endif
         bool success = deepep_buffer_->init();
@@ -269,7 +269,6 @@ MoeCombineOutput ROCmDevice::deepEpCombine(const MoeCombineParams& params) {
                                                   compute_event,
                                                   true /*async_finish*/,
                                                   false /*allocate_on_comm_stream*/);
-    syncAndCheck();
     RUNTIME_ASSERT_OP_ARG(combine_output.event_overlap, "combine overlap should always exist.");
 
     BufferPtr  all_output;

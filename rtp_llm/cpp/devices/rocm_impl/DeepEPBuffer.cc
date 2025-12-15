@@ -33,13 +33,13 @@ bool DeepEPBuffer::init() {
     std::string root_unique_id;
     if (buffer_->get_num_rdma_ranks() > 1 || low_latency_mode_) {
         // low latency set env
-#if USE_ACCL_EP
         if (low_latency_mode_) {
+#if USE_ACCL_EP
             setLowLatencyEnv();
-        }
 #else
-        setLowLatencyEnv();
+            setLowLatencyEnv();
 #endif
+        }
 
         root_unique_id = getRootUniqueId();
     }
