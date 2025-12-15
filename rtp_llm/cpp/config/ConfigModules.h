@@ -80,6 +80,8 @@ struct ProfilingDebugLoggingConfig {
     bool        disable_dpc_random        = false;
     bool        enable_detail_log         = false;
     bool        check_nan                 = false;
+    bool        viztracer_enable          = false;
+    int         viztracer_min_duration_ms = 100;
 
     std::string to_string() const;
     void        update_from_env_for_test();

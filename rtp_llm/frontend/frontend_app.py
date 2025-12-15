@@ -24,6 +24,7 @@ from rtp_llm.frontend.frontend_server import FrontendServer
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.utils.util import AtomicCounter, async_request_server
 from rtp_llm.utils.version_info import VersionInfo
+from rtp_llm.utils.viztracer_util import trace_func
 
 # make buffer larger to avoid throw exception "RemoteProtocolError Receive buffer too long"
 MAX_INCOMPLETE_EVENT_SIZE = 1024 * 1024
@@ -229,6 +230,10 @@ class FrontendApp(object):
             )
 
         @app.post("/")
+        @trace_func(
+            name="inference",
+            min_duration_ms=StaticConfig.profiling_debug_config.viztracer_min_duration_ms,
+        )
         async def inference(req: Union[str, Dict[Any, Any]], raw_request: RawRequest):
             # compat for huggingface-pipeline request endpoint
             global active_requests
@@ -243,6 +248,10 @@ class FrontendApp(object):
 
         @app.post("/chat/completions")
         @app.post("/v1/chat/completions")
+        @trace_func(
+            name="chat_completion",
+            min_duration_ms=StaticConfig.profiling_debug_config.viztracer_min_duration_ms,
+        )
         async def chat_completion(
             request: ChatCompletionRequest, raw_request: RawRequest
         ):

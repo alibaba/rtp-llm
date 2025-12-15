@@ -104,6 +104,7 @@ requirement([
     "concurrent_log_handler",
     "aiter",
     "fastsafetensors",
+    "viztracer"
 ] + tensorrt + flashinfer)
 
 filegroup(
@@ -133,6 +134,7 @@ py_library(
         ":cpm_kernels",
         ":prettytable",
         ":psutil",
+        ":viztracer",
         "//rtp_llm/aios/kmonitor:kmonitor_py",
     ] + arch_dep + internal_deps()
 )
@@ -371,6 +373,7 @@ py_library(
         ":concurrent_log_handler",
         ":blobfile",
         ":partial_json_parser",
+        ":viztracer",
     ],
     data = jit_deps(),
     imports = ["."],
@@ -562,6 +565,7 @@ whl_reqs = [
     "portalocker",
     "concurrent_log_handler",
     "flashinfer-python==0.2.5",
+    "viztracer>=1.1.1"
 ] + whl_deps() + platform_deps() + xft_dep
 
 py_wheel(
