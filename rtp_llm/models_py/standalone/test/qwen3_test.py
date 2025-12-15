@@ -3,7 +3,7 @@ from unittest import TestCase, main
 
 import torch
 
-from rtp_llm.models_py.standalone.rtp_auto_model import AutoModel
+from rtp_llm.models_py.standalone.auto_model import AutoModel
 
 logging.basicConfig(
     level="INFO",
