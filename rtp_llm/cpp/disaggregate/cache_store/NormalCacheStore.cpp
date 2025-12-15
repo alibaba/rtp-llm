@@ -49,6 +49,8 @@ bool NormalCacheStore::init(const CacheStoreInitParams& params) {
     messager_init_params.rdma_server_port             = params.rdma_listen_port;
     messager_init_params.rdma_connect_timeout_ms      = params.rdma_connect_timeout_ms;
     messager_init_params.rdma_qp_count_per_connection = params.rdma_qp_count_per_connection;
+    messager_init_params.rdma_io_thread_count         = params.rdma_io_thread_count;
+    messager_init_params.rdma_worker_thread_count     = params.rdma_worker_thread_count;
     messager_init_params.io_thread_count              = params.messager_io_thread_count;
     messager_init_params.worker_thread_count          = params.messager_worker_thread_count;
 
@@ -65,13 +67,13 @@ bool NormalCacheStore::init(const CacheStoreInitParams& params) {
     }
 
     auto check_task_readiness = [this]() {
-        while(!thread_pool_close_) {
+        while (!thread_pool_close_) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
             std::unique_lock<std::shared_mutex> lock(store_tasks_mutex_);
             for (auto it = this->store_tasks_.begin(); it != this->store_tasks_.end();) {
-                auto& [buffer, item] = *it;
+                auto& [buffer, item]   = *it;
                 auto& [callback, task] = item;
-                auto event = buffer->getEvent();
+                auto event             = buffer->getEvent();
                 if ((event && event->checkReadiness()) || event == nullptr) {
                     if (this->thread_pool_->pushTask(task) != autil::ThreadPoolBase::ERROR_NONE) {
                         RTP_LLM_LOG_WARNING("normal cache store push store task to thread pool failed");
@@ -80,7 +82,7 @@ bool NormalCacheStore::init(const CacheStoreInitParams& params) {
 
                     it = store_tasks_.erase(it);
                 } else {
-                    ++it; 
+                    ++it;
                 }
             }
         }
@@ -114,7 +116,7 @@ void NormalCacheStore::store(const std::shared_ptr<RequestBlockBuffer>& request_
     auto task = [this, request_block_buffer, callback, collector]() {
         this->runStoreTask(request_block_buffer, callback, collector);
     };
-   
+
     std::unique_lock<std::shared_mutex> lock(store_tasks_mutex_);
     store_tasks_[request_block_buffer] = {callback, task};
 }
@@ -238,10 +240,10 @@ NormalCacheStore::loadBuffers(const std::vector<std::shared_ptr<RequestBlockBuff
 }
 
 std::shared_ptr<RemoteStoreTask>
-NormalCacheStore::submitRemoteStoreTask(const std::shared_ptr<RemoteStoreRequest>& request,
+NormalCacheStore::submitRemoteStoreTask(const std::shared_ptr<RemoteStoreRequest>&                    request,
                                         const std::shared_ptr<CacheStoreRemoteStoreMetricsCollector>& collector,
-                                        RemoteStoreTask::CheckCancelFunc           check_cancel_func) {
-    auto                                task = std::make_shared<RemoteStoreTaskImpl>(request, collector, check_cancel_func);
+                                        RemoteStoreTask::CheckCancelFunc check_cancel_func) {
+    auto task = std::make_shared<RemoteStoreTaskImpl>(request, collector, check_cancel_func);
     std::unique_lock<std::shared_mutex> lock(remote_store_tasks_mutex_);
     auto&                               tasks = remote_store_tasks_[request->request_id];
     tasks.push_back(task);

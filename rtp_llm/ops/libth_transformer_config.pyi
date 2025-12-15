@@ -115,6 +115,8 @@ class CacheStoreConfig:
     rank_factor: int
     rdma_connect_timeout_ms: int
     rdma_qp_count_per_connection: int
+    rdma_io_thread_count: int
+    rdma_worker_thread_count: int
     thread_count: int
     wrr_available_ratio: int
     def __getstate__(self) -> tuple:
@@ -291,6 +293,7 @@ class EplbMode:
     
       ALL
     """
+
     ALL: typing.ClassVar[EplbMode]  # value = <EplbMode.ALL: 3>
     EPLB: typing.ClassVar[EplbMode]  # value = <EplbMode.EPLB: 2>
     NONE: typing.ClassVar[EplbMode]  # value = <EplbMode.NONE: 0>
@@ -393,7 +396,9 @@ class FMHAType:
     FLASH_INFER: typing.ClassVar[FMHAType]  # value = <FMHAType.FLASH_INFER: 0>
     NONE: typing.ClassVar[FMHAType]  # value = <FMHAType.NONE: 1>
     OPEN_SOURCE: typing.ClassVar[FMHAType]  # value = <FMHAType.OPEN_SOURCE: 2>
-    PAGED_OPEN_SOURCE: typing.ClassVar[FMHAType]  # value = <FMHAType.PAGED_OPEN_SOURCE: 3>
+    PAGED_OPEN_SOURCE: typing.ClassVar[
+        FMHAType
+    ]  # value = <FMHAType.PAGED_OPEN_SOURCE: 3>
     PAGED_TRT_V2: typing.ClassVar[FMHAType]  # value = <FMHAType.PAGED_TRT_V2: 4>
     PY_FLASHINFER_DECODE: typing.ClassVar[FMHAType]  # value = <FMHAType.PY_FLASHINFER_DECODE: 13>
     PY_FLASHINFER_PREFILL: typing.ClassVar[FMHAType]  # value = <FMHAType.PY_FLASHINFER_PREFILL: 12>
@@ -688,6 +693,7 @@ class MlaOpsType:
     
       FLASH_MLA
     """
+
     AUTO: typing.ClassVar[MlaOpsType]  # value = <MlaOpsType.AUTO: 0>
     FLASH_INFER: typing.ClassVar[MlaOpsType]  # value = <MlaOpsType.FLASH_INFER: 2>
     FLASH_MLA: typing.ClassVar[MlaOpsType]  # value = <MlaOpsType.FLASH_MLA: 3>
@@ -1092,6 +1098,7 @@ class RoleType:
     
       FRONTEND
     """
+
     DECODE: typing.ClassVar[RoleType]  # value = <RoleType.DECODE: 2>
     FRONTEND: typing.ClassVar[RoleType]  # value = <RoleType.FRONTEND: 4>
     PDFUSION: typing.ClassVar[RoleType]  # value = <RoleType.PDFUSION: 0>
