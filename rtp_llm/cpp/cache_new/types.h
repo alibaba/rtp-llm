@@ -73,6 +73,7 @@ struct MallocInfo {
     // For common/extra blocks allocation strategy
     int common_seq_len = -1;  // -1 means no distinction between common and extra, // TODO, move to complete_token_ids ?
     int total_seq_len  = -1;  // -1 means use complete_token_ids->seqLength(), // TODO, fix this
+    int input_seq_len  = -1;  // -1 means use complete_token_ids->inputLength(), // TODO, fix this
 };
 
 struct MallocResult {
