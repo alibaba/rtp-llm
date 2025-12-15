@@ -87,7 +87,9 @@ public:
         return {};
     }
 
-    void clearCache() override {}
+    void clearCache() {
+        return;
+    }
 
 protected:
     MallocResult incrMalloc(const MallocInfo& malloc_info) override {

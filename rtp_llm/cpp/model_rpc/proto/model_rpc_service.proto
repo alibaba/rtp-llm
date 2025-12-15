@@ -89,13 +89,13 @@ message GenerateConfigPB {
     float frequency_penalty = 45;
     bool do_sample = 46;
     bool reuse_cache = 47;
-    bool enable_3fs = 48;
-    repeated int32 variable_num_beams = 49;
-    google.protobuf.StringValue trace_id = 50;
-    bool return_all_hidden_states = 51;
-    bool enable_memory_block_cache = 52;
-    bool enable_remote_cache = 53;
-    bool enable_device_cache = 54;
+    repeated int32 variable_num_beams = 48;
+    google.protobuf.StringValue trace_id = 49;
+    bool return_all_hidden_states = 50;
+    bool enable_memory_block_cache = 51;
+    bool enable_remote_cache = 52;
+    bool enable_device_cache = 53;
+    bool sync_wait_write = 54;
 }
 
 message MMPreprocessConfigPB {

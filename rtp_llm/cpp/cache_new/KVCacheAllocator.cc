@@ -132,4 +132,10 @@ void KVCacheAllocator::regUserMr(size_t model_id) {
     }
 }
 
+void KVCacheAllocator::clearCache() {
+    if (block_pool_) {
+        block_pool_->clearCache();
+    }
+}
+
 }  // namespace rtp_llm

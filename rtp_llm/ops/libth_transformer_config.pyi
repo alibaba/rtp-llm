@@ -532,24 +532,17 @@ class HWKernelConfig:
 
 
 class KVCacheConfig:
-    enable_3fs: bool
-    match_timeout_ms: int
     max_block_size_per_item: int
     memory_block_cache_size_mb: int
     memory_block_cache_sync_timeout_ms: int
     multi_task_prompt: str
     multi_task_prompt_str: str
     reuse_cache: bool
-    rpc_get_cache_timeout_ms: int
-    rpc_put_cache_timeout_ms: int
-    threefs_read_iov_size: int
-    threefs_read_timeout_ms: int
-    threefs_write_iov_size: int
-    threefs_write_timeout_ms: int
     enable_remote_cache: bool
     enable_device_cache: bool
+    sync_wait_write: bool
 
-    def __init__(self, reuse_cache: bool = False, multi_task_prompt: str = '', multi_task_prompt_str: str = '', enable_3fs: bool = False, match_timeout_ms: int = 1000, rpc_get_cache_timeout_ms: int = 2000, rpc_put_cache_timeout_ms: int = 2000, threefs_read_timeout_ms: int = 1000, threefs_write_timeout_ms: int = 2000, max_block_size_per_item: int = 16, threefs_read_iov_size: int = 4294967296, threefs_write_iov_size: int = 4294967296, memory_block_cache_size_mb: int = 0, memory_block_cache_sync_timeout_ms: int = 10000, enable_remote_cache: bool = False, enable_device_cache: bool = True) -> None:
+    def __init__(self, reuse_cache: bool = False, multi_task_prompt: str = '', multi_task_prompt_str: str = '', max_block_size_per_item: int = 16, memory_block_cache_size_mb: int = 0, memory_block_cache_sync_timeout_ms: int = 10000, enable_remote_cache: bool = False, enable_device_cache: bool = True, sync_wait_write: bool = False) -> None:
         ...
 
     def to_string(self) -> str:
