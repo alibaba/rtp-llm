@@ -43,3 +43,11 @@ py_test (
     exec_properties = {'gpu':'H20'},
 )
 
+py_test (
+    name = "cutlass_fp4_scaled_mm_test",
+    srcs = ["cutlass_fp4_scaled_mm_test.py"],
+    deps = py_test_deps,
+    env = test_envs,
+    tags = ["manual"],
+)
+

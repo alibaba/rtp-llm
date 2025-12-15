@@ -11,6 +11,11 @@ from rtp_llm.models_py.modules.factory.linear import LinearBase
 
 logger = logging.getLogger(__name__)
 
+from rtp_llm.models_py.kernels.cuda.fp4_kernel import (
+    cutlass_scaled_fp4_mm_wrapper,
+    # scaled_fp4_quant_wrapper,
+)
+
 try:
     from flashinfer import (
         mm_fp4,
@@ -83,7 +88,7 @@ class CudaFp4GEMMLinear(LinearBase):
         self.input_scale = input_scales
         self.bias = bias
 
-        self.backend = os.getenv("FLASHINFER_FP4_GEMM_BACKEND", "cutlass")
+        self.backend = os.getenv("RTP_LLM_FP4_GEMM_BACKEND", "cutlass")
 
         if self.backend == "trtllm" and enable_flashinfer_fp4_gemm:
             from flashinfer import shuffle_matrix_a, shuffle_matrix_sf_a
@@ -153,15 +158,25 @@ class CudaFp4GEMMLinear(LinearBase):
         input_fp4, input_scale_interleaved = fp4_quantize(input, self.input_scale_inv)
         assert input_fp4.dtype == torch.uint8
          
-        output = mm_fp4(
-            input_fp4,
-            self.weight,
-            input_scale_interleaved,
-            self.weight_scales,
-            self.alpha,
-            output_dtype,
-            backend=self.backend
-        ).view(*output_shape)
+        if self.backend == "sgl_cutlass":
+            output = cutlass_scaled_fp4_mm_wrapper(
+                input_fp4,
+                self.weight.T,
+                input_scale_interleaved.view(torch.float8_e4m3fn),
+                self.weight_scales.T.view(torch.float8_e4m3fn),
+                self.alpha,
+                output_dtype
+            ).view(*output_shape)
+        else:
+            output = mm_fp4(
+                input_fp4,
+                self.weight,
+                input_scale_interleaved,
+                self.weight_scales,
+                self.alpha,
+                output_dtype,
+                backend=self.backend
+            ).view(*output_shape)
 
         if self.bias is not None:
             output = output + self.bias.to(output.dtype)

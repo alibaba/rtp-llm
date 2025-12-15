@@ -110,6 +110,7 @@ build:cuda12_9_arm --action_env TF_CUDA_COMPUTE_CAPABILITIES="10.0"
 build:cuda12_9_arm --host_action_env TF_CUDA_COMPUTE_CAPABILITIES="10.0"
 build:cuda12_9_arm --copt -DUSE_CUDA_ARM=0
 build:cuda12_9_arm --define=use_3fs=false
+build:cuda12_9_arm --copt="-DENABLE_FP4=1"
 
 build:cpu --copt="-DENABLE_BF16=1"
 build:cpu --define=using_cuda=false --define=using_cuda_nvcc=false --define=using_cpu=true

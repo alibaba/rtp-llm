@@ -68,7 +68,7 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
 
     def test_module_creation(self):
         """Test CudaFp4GEMMLinear module creation"""
-        os.environ["FLASHINFER_FP4_GEMM_BACKEND"] = "cutlass"
+        os.environ["RTP_LLM_FP4_GEMM_BACKEND"] = "cutlass"
         fp4_linear = self._create_fp4_linear(with_bias=True)
         self.assertEqual(fp4_linear.hidden_size, self.hidden_size)
         self.assertEqual(fp4_linear.output_size, self.output_size)
@@ -79,12 +79,19 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
         self.assertIsNotNone(fp4_linear.input_scale)
         self.assertIsNotNone(fp4_linear.bias)
 
-        os.environ["FLASHINFER_FP4_GEMM_BACKEND"] = "trtllm"
+        os.environ["RTP_LLM_FP4_GEMM_BACKEND"] = "trtllm"
         fp4_linear_no_bias = self._create_fp4_linear(with_bias=False)
         self.assertEqual(fp4_linear_no_bias.backend, "trtllm")
         self.assertEqual(fp4_linear_no_bias.hidden_size, self.hidden_size)
         self.assertEqual(fp4_linear_no_bias.output_size, self.output_size)
         self.assertIsNone(fp4_linear_no_bias.bias)
+
+        os.environ["RTP_LLM_FP4_GEMM_BACKEND"] = "sgl_cutlass"
+        fp4_linear_sgl_cutlass = self._create_fp4_linear(with_bias=False)
+        self.assertEqual(fp4_linear_sgl_cutlass.backend, "sgl_cutlass")
+        self.assertEqual(fp4_linear_sgl_cutlass.hidden_size, self.hidden_size)
+        self.assertEqual(fp4_linear_sgl_cutlass.output_size, self.output_size)
+        self.assertIsNone(fp4_linear_sgl_cutlass.bias)
 
     def test_dependency_availability(self):
         """Test dependency availability check"""
@@ -95,7 +102,7 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
     def test_input_dtype_validation(self):
         """Test input dtype validation - bfloat16 and float16 are accepted"""
 
-        os.environ["FLASHINFER_FP4_GEMM_BACKEND"] = "trtllm"
+        os.environ["RTP_LLM_FP4_GEMM_BACKEND"] = "trtllm"
         fp4_linear = self._create_fp4_linear(with_bias=False)
         self.assertEqual(fp4_linear.backend, "trtllm")
 
@@ -198,7 +205,7 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
 
     def test_small_batch_sizes(self):
         """Test small batch size edge cases"""
-        os.environ["FLASHINFER_FP4_GEMM_BACKEND"] = "cutlass"
+        os.environ["RTP_LLM_FP4_GEMM_BACKEND"] = "cutlass"
         fp4_linear = self._create_fp4_linear(with_bias=True)
 
         input_1 = torch.randn(
@@ -216,7 +223,7 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
     def test_reproducibility(self):
         """Test result reproducibility"""
         # cutlass backend
-        os.environ["FLASHINFER_FP4_GEMM_BACKEND"] = "cutlass"
+        os.environ["RTP_LLM_FP4_GEMM_BACKEND"] = "cutlass"
         fp4_linear = self._create_fp4_linear(with_bias=False)
 
         torch.manual_seed(42)
@@ -229,7 +236,7 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
         torch.testing.assert_close(output1, output2, rtol=1e-5, atol=1e-5)
 
         # trtllm backend
-        os.environ["FLASHINFER_FP4_GEMM_BACKEND"] = "trtllm"
+        os.environ["RTP_LLM_FP4_GEMM_BACKEND"] = "trtllm"
         fp4_linear = self._create_fp4_linear(with_bias=True)
 
         torch.manual_seed(42)
@@ -264,7 +271,13 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
     def test_fp4_vs_bf16_accuracy(self):
         """Test accuracy comparison between FP4 linear and BF16 linear"""
         # Create FP4 linear layer, cutlass backend
-        os.environ["FLASHINFER_FP4_GEMM_BACKEND"] = "trtllm"
+        self._test_fp4_vs_bf16_accuracy_backend("cutlass")
+        self._test_fp4_vs_bf16_accuracy_backend("trtllm")
+        self._test_fp4_vs_bf16_accuracy_backend("sgl_cutlass")
+
+    def _test_fp4_vs_bf16_accuracy_backend(self, backend):
+        """Test accuracy comparison between FP4 linear and BF16 linear with different backends"""
+        os.environ["RTP_LLM_FP4_GEMM_BACKEND"] = backend
         fp4_linear = self._create_fp4_linear(with_bias=False)
 
         # Test with various batch sizes
@@ -291,6 +304,8 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
                 bf16_output = (input_tensor.float() @ self.weight_fp16.float().t()).to(
                     torch.bfloat16
                 )
+                print(f"backend: {backend}, fp4_output: {fp4_output.float()}")
+                print(f"backend: {backend}, bf16_output: {bf16_output.float()}")
                 diff = calc_diff(fp4_output, bf16_output)
                 self.assertLess(diff, 0.01)
 
@@ -302,8 +317,12 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
 
     def test_fp4_vs_fp16_accuracy(self):
         """Test accuracy comparison between FP4 linear and BF16 linear"""
-        # Create FP4 linear layer, cutlass backend
-        os.environ["FLASHINFER_FP4_GEMM_BACKEND"] = "cutlass"
+        self._test_fp4_vs_fp16_accuracy_backend("cutlass")
+        self._test_fp4_vs_fp16_accuracy_backend("sgl_cutlass")
+
+    def _test_fp4_vs_fp16_accuracy_backend(self, backend):
+        """Test accuracy comparison between FP4 linear and BF16 linear with different backends"""
+        os.environ["RTP_LLM_FP4_GEMM_BACKEND"] = backend
         fp4_linear = self._create_fp4_linear(with_bias=False)
 
         # Test with various batch sizes
@@ -329,6 +348,8 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
                 fp16_output = (input_tensor.float() @ self.weight_fp16.float().t()).to(
                     torch.float16
                 )
+                print(f"backend: {backend}, fp4_output: {fp4_output.float()}")
+                print(f"backend: {backend}, fp16_output: {fp16_output.float()}")
                 diff = calc_diff(fp4_output, fp16_output)
                 self.assertLess(diff, 0.01)
 

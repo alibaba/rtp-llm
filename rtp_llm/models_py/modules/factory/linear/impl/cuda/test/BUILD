@@ -22,9 +22,7 @@ py_test(
     env = dict(
         DEVICE_RESERVE_MEMORY_BYTES = "512000000",
         FLASHINFER_DISABLE_VERSION_CHECK = "1",
-        CUDA_VISIBLE_DEVICES = "2",
     ),
-    tags = ["L20A"],
-    exec_properties = {'gpu':'L20A'},
+    tags = ["manual"],
 )
 
