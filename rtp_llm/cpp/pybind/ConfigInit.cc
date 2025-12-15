@@ -375,7 +375,7 @@ void register_service_discovery_config(pybind11::module& m) {
 
 void register_cache_store_config(pybind11::module& m) {
     pybind11::class_<CacheStoreConfig>(m, "CacheStoreConfig")
-        .def(pybind11::init<bool, int, int, int, int, int, int, int>(),
+        .def(pybind11::init<bool, int, int, int, int, int, int, int, int, int>(),
              pybind11::arg("cache_store_rdma_mode")        = false,
              pybind11::arg("wrr_available_ratio")          = 80,
              pybind11::arg("rank_factor")                  = 0,
