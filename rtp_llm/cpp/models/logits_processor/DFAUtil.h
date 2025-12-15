@@ -176,6 +176,24 @@ public:
         return token_ids;
     }
 
+    std::unordered_map<size_t, float> getCandidateTokenWeights(const std::vector<size_t>& candidate_token_ids) {
+        std::unordered_map<size_t, float>             token_weights;
+        const std::unordered_map<std::string, float>& weight_dict = prefixToCandidateTokensPtr_->getWeightDict();
+        if (weight_dict.empty()) {
+            return token_weights;
+        }
+        for (auto token_id : candidate_token_ids) {
+            std::string next_status = prefixToCandidateTokensPtr_->generateNextKey(status_, token_id);
+            float       weight      = 0.0f;
+            auto        iter        = weight_dict.find(next_status);
+            if (iter != weight_dict.end()) {
+                weight = iter->second;
+            }
+            token_weights[token_id] = weight;
+        }
+        return token_weights;
+    }
+
 private:
     PrefixToCandidateTokensPtr prefixToCandidateTokensPtr_;
     std::string                status_;
