@@ -38,6 +38,9 @@ TEST_F(DFAUtilTest, testReloadFile) {
     std::unordered_set<int32_t> vec = {3, 4, 5};
     ASSERT_EQ(vec, PrefixToCandidateTokens::instance()->getCandidateTokens("1_2"));
     ASSERT_EQ(vec, PrefixToCandidateTokens::instance()->getCandidateTokens("1_2_3"));
+
+    std::unordered_map<std::string, float> weightMap = {{"1_2_3", 0.2f}, {"1_2_4", 0.3f}, {"1_2_5", 0.5f}};
+    ASSERT_EQ(weightMap, PrefixToCandidateTokens::instance()->getWeightDict());
 }
 
 }  // namespace rtp_llm
