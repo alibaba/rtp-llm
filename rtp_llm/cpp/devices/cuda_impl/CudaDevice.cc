@@ -13,6 +13,7 @@
 #include "rtp_llm/cpp/core/torch_utils/torch_cuda_allocator.h"
 #include "rtp_llm/cpp/core/torch_utils/TorchEvent.h"
 #include "rtp_llm/cpp/kernels/mask_logits.h"
+#include "rtp_llm/cpp/kernels/weight_logits.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
@@ -696,6 +697,22 @@ void CudaDevice::maskLogits(Buffer& logits, const Buffer& mask) {
     } else if (logits.type() == DataType::TYPE_BF16) {
         invokeMaskLogits<__nv_bfloat16>(
             (__nv_bfloat16*)(logits.data()), (const uint8_t*)mask.data(), batch_size, vocab_size, stream_);
+    } else {
+        throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+    }
+}
+
+void CudaDevice::weightLogits(Buffer& logits, const Buffer& weight) {
+    size_t batch_size = logits.shape()[0];
+    size_t vocab_size = logits.shape()[1];
+    if (logits.type() == DataType::TYPE_FP32) {
+        invokeWeightLogits<float>(
+            (float*)(logits.data()), (const float*)weight.data(), batch_size, vocab_size, stream_);
+    } else if (logits.type() == DataType::TYPE_FP16) {
+        invokeWeightLogits<half>((half*)(logits.data()), (const float*)weight.data(), batch_size, vocab_size, stream_);
+    } else if (logits.type() == DataType::TYPE_BF16) {
+        invokeWeightLogits<__nv_bfloat16>(
+            (__nv_bfloat16*)(logits.data()), (const float*)weight.data(), batch_size, vocab_size, stream_);
     } else {
         throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
     }
