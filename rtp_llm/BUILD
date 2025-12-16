@@ -18,8 +18,8 @@ if_rocm = _if_rocm
 
 tensorrt = [
     "tensorrt",
-    "tensorrt-cu12-bindings",
-    "tensorrt-cu12-libs",
+    # "tensorrt-cu12-bindings",
+    # "tensorrt-cu12-libs",
 ]
 
 flashinfer = [
@@ -222,8 +222,7 @@ py_library(
         "//rtp_llm/model_loader:loader",
         "//rtp_llm/models_py:models",
     ] + arch_dep + select({
-        "@//:using_cuda12_9_x86": tensorrt + flashinfer + deep_gemm,
-        "@//:cuda_pre_12_9": tensorrt + flashinfer + deep_gemm,
+        "@//:using_cuda": tensorrt + flashinfer + deep_gemm,
         "//conditions:default": []
     }) + select({
         "@//:using_arm": [],
