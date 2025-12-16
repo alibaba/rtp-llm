@@ -190,9 +190,10 @@ std::vector<BufferPtr> SingleTypeKVCacheAllocator::convertIndexToBuffer(int laye
     return full_kv_cache_group_->convertIndexToBuffer(layer_id, block_id, partition_count, partition_id);
 }
 
-void SingleTypeKVCacheAllocator::incrKVCacheRef(KVCacheResourceV1& kvcache_resource, const CacheKeysType& cache_keys) {
+std::shared_ptr<KVCacheResourceV1> SingleTypeKVCacheAllocator::incrKVCacheRef(KVCacheResourceV1&   kvcache_resource,
+                                                                              const CacheKeysType& cache_keys) {
     if (cache_keys.empty()) {
-        return;
+        return nullptr;
     }
 
     RTP_LLM_CHECK_WITH_INFO(
@@ -205,8 +206,11 @@ void SingleTypeKVCacheAllocator::incrKVCacheRef(KVCacheResourceV1& kvcache_resou
         key_to_pos.emplace(resource_keys[i], i);
     }
 
-    BlockIndicesType blocks_to_ref;
-    blocks_to_ref.reserve(cache_keys.size());
+    auto selected_resource = std::make_shared<KVCacheResourceV1>();
+    selected_resource->initGroups(1);
+
+    CacheKeysType&   selected_cache_keys = selected_resource->cacheKeys();
+    BlockIndicesType selected_blocks;
 
     auto& src_blocks = kvcache_resource.blocks(0);
 
@@ -221,14 +225,29 @@ void SingleTypeKVCacheAllocator::incrKVCacheRef(KVCacheResourceV1& kvcache_resou
         }
         const auto block = src_blocks[pos];
         if (block > 0 && !isNullBlockIdx(block)) {
-            blocks_to_ref.push_back(block);
+            selected_cache_keys.push_back(key);
+            selected_blocks.push_back(block);
         }
     }
 
-    if (blocks_to_ref.empty()) {
-        return;
+    if (selected_blocks.empty()) {
+        return nullptr;
     }
-    block_pool_->blockCacheReference(blocks_to_ref);
+
+    block_pool_->blockCacheReference(selected_blocks);
+    selected_resource->blocks(0) = std::move(selected_blocks);
+
+    return selected_resource;
+}
+
+void SingleTypeKVCacheAllocator::decrKVCacheRef(KVCacheResourceV1& kvcache_resource) {
+    RTP_LLM_CHECK_WITH_INFO(
+        kvcache_resource.groupNums() == 1, "decrKVCacheRef expects groupNums==1, got %d", kvcache_resource.groupNums());
+
+    const auto& blocks_to_free = kvcache_resource.blocks(0);
+    if (!blocks_to_free.empty()) {
+        block_pool_->blockCacheFree(blocks_to_free);
+    }
 }
 
 // Update kv blocks for beam search or multi-return sequences.
