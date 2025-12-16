@@ -93,7 +93,6 @@ absl::StatusOr<int> StreamCacheResource::incrKVBlock(int token_capacity, size_t 
 
     auto seq_len = stream_->isChunkStream() ? stream_->currentChunkLen() : (stream_->seqLength() + (int)reserve_step);
     auto common_seq_len = std::min(seq_len, stream_->adjustedCommonLen());
-    auto input_seq_len  = stream_->inputLength();
 
     MallocInfo malloc_info;
     malloc_info.batch_kv_cache_resource = batch_resource_;
@@ -102,7 +101,6 @@ absl::StatusOr<int> StreamCacheResource::incrKVBlock(int token_capacity, size_t 
     malloc_info.verbose                 = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
     malloc_info.common_seq_len          = common_seq_len;
     malloc_info.total_seq_len           = seq_len;
-    malloc_info.input_seq_len           = input_seq_len;
 
     auto result = resource_context_.cache_manager->malloc(malloc_info);
     if (!result.success) {
