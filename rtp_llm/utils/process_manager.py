@@ -10,14 +10,13 @@ from typing import List
 class ProcessManager:
     """Generic process manager for managing and monitoring processes"""
 
-    DEFAULT_SHUTDOWN_TIMEOUT = 50
-    MONITOR_INTERVAL = 1
-
-    def __init__(self):
+    def __init__(self, shutdown_timeout: int = 50, monitor_interval: int = 1):
         self.processes: List[Process] = []
         self.shutdown_requested = False
         self.terminated = False
         self.first_dead_time = 0
+        self.shutdown_timeout = shutdown_timeout
+        self.monitor_interval = monitor_interval
         self._setup_signal_handlers()
 
     def _setup_signal_handlers(self):
@@ -62,7 +61,7 @@ class ProcessManager:
     def _force_kill_processes(self):
         """Force kill processes after timeout"""
         logging.warning(
-            f"Graceful shutdown timeout ({self.DEFAULT_SHUTDOWN_TIMEOUT}s), force killing..."
+            f"Graceful shutdown timeout ({self.shutdown_timeout}s), force killing..."
         )
         for proc in self.processes:
             if proc.is_alive():
@@ -104,15 +103,16 @@ class ProcessManager:
                 logging.error("Some processes died unexpectedly, terminating all...")
                 self._terminate_processes()
 
-            # Force kill after timeout
+            # Force kill after timeout (only if shutdown_timeout != -1)
             if (
                 self.terminated
-                and (time.time() - self.first_dead_time) > self.DEFAULT_SHUTDOWN_TIMEOUT
+                and self.shutdown_timeout != -1
+                and (time.time() - self.first_dead_time) > self.shutdown_timeout
             ):
                 self._force_kill_processes()
                 break
 
-            time.sleep(self.MONITOR_INTERVAL)
+            time.sleep(self.monitor_interval)
 
     def monitor_and_release_processes(self):
         """Monitor all processes until completion or failure"""

@@ -4,7 +4,7 @@ import os
 import signal
 import time
 import unittest
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import Mock, patch
 
 from rtp_llm.utils.process_manager import ProcessManager
 
@@ -35,7 +35,7 @@ class TestProcessManager(unittest.TestCase):
 
     def setUp(self):
         """Set up test fixtures"""
-        self.manager = ProcessManager()
+        self.manager = ProcessManager(shutdown_timeout=50, monitor_interval=1)
         logging.basicConfig(level=logging.INFO)
 
     def tearDown(self):
@@ -298,7 +298,7 @@ class TestProcessManager(unittest.TestCase):
         self.manager.add_process(mock_proc)
         self.manager.terminated = True
         self.manager.first_dead_time = (
-            time.time() - ProcessManager.DEFAULT_SHUTDOWN_TIMEOUT - 1
+            time.time() - self.manager.shutdown_timeout - 1
         )
 
         # Should force kill

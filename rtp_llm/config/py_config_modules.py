@@ -715,14 +715,26 @@ class PdSeparationConfig:
 class WorkerConfig:
     def __init__(self):
         self.worker_info_port_num: int = MIN_WORKER_INFO_PORT_NUM
+        self.shutdown_timeout: int = 50  # Default timeout in seconds, -1 means wait indefinitely
+        self.monitor_interval: int = 1   # Monitor interval in seconds
 
     def update_from_env(self):
         self.worker_info_port_num = int(
             os.environ.get("WORKER_INFO_PORT_NUM", self.worker_info_port_num)
         )
+        self.shutdown_timeout = int(
+            os.environ.get("SHUTDOWN_TIMEOUT", self.shutdown_timeout)
+        )
+        self.monitor_interval = int(
+            os.environ.get("MONITOR_INTERVAL", self.monitor_interval)
+        )
 
     def to_string(self):
-        return f"worker_info_port_num: {self.worker_info_port_num}"
+        return (
+            f"worker_info_port_num: {self.worker_info_port_num}\n"
+            f"shutdown_timeout: {self.shutdown_timeout}\n"
+            f"monitor_interval: {self.monitor_interval}"
+        )
 
 
 class JITConfig:
