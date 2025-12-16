@@ -4,7 +4,6 @@ from dataclasses import dataclass
 
 import torch
 
-
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
     FMHADecodeImplBase,
 )
@@ -41,12 +40,21 @@ class XQAImpl(FMHADecodeImplBase):
             attn_inputs,
         )
 
+    def create_params(self, attn_inputs: PyAttentionInputs):
+        assert self.fmha_impl is not None
+        self.fmha_params = self.fmha_impl.prepare(attn_inputs)
+        assert self.rope_kvcache_impl is not None
+        self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
+
     @staticmethod
     def fmha_type() -> FMHAType:
         return FMHAType.XQA
 
     def support_cuda_graph(self) -> bool:
         return True
+
+    def prepare(self, attn_inputs: PyAttentionInputs):
+        self._update_trt_params(attn_inputs)
 
 
 class XQADecodeImpl(FMHADecodeImplBase):
