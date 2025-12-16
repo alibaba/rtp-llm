@@ -14,7 +14,7 @@ from typing import List
 import torch
 from setproctitle import setproctitle
 
-from rtp_llm.config.py_config_modules import GangConfig, PyEnvConfigs, VitConfig
+from rtp_llm.config.py_config_modules import GangConfig, PyEnvConfigs, VitConfig, WorkerConfig
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
@@ -144,8 +144,13 @@ def multi_rank_start(global_controller: ConcurrencyController):
     if gang_config.fake_gang_env:
         return processes
 
+    worker_config = WorkerConfig()
+    worker_config.update_from_env()
     # Create manager and monitor processes
-    manager = ProcessManager()
+    manager = ProcessManager(
+        shutdown_timeout=worker_config.shutdown_timeout,
+        monitor_interval=worker_config.monitor_interval
+    )
     manager.set_processes(processes)
     manager.monitor_and_release_processes()
 

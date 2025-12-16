@@ -317,8 +317,15 @@ def start_server(parser: EnvArgumentParser, args: argparse.Namespace):
         logging.warning(str(e))
 
     global_controller = init_controller()
-    process_manager = ProcessManager()
     get_model_type_and_update_env(parser, args)
+
+    worker_config = StaticConfig.worker_config
+
+    # Create process manager with config values
+    process_manager = ProcessManager(
+        shutdown_timeout=worker_config.shutdown_timeout,
+        monitor_interval=worker_config.monitor_interval
+    )
 
     # Auto-configure DeepEP settings based on deployment scenario
     # Check from args to see if user has manually configured
