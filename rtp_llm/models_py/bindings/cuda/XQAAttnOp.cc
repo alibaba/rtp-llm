@@ -84,7 +84,12 @@ XQAAttnOp::forward(const torch::Tensor& input, std::optional<torch_ext::KVCache>
 
 void registerXQAAttnOp(const py::module& m) {
     pybind11::class_<XQAParams, std::shared_ptr<XQAParams>, rtp_llm::ParamsBase>(m, "XQAParams")
-        .def(pybind11::init<>());
+        .def(pybind11::init<>())
+        .def(
+            "__cpp_ptr__",
+            [](XQAParams& self) { return reinterpret_cast<uintptr_t>(&self); },
+            "Get C++ object pointer address")
+        .def_readwrite("kv_cache_offset", &XQAParams::kv_cache_offset);
     pybind11::class_<XQAAttnOp>(m, "XQAAttnOp")
         .def(pybind11::init<const AttentionConfigs&>(), py::arg("attn_configs"))
         .def("support", &XQAAttnOp::support, py::arg("attn_inputs").noconvert())

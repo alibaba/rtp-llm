@@ -76,11 +76,11 @@ class TestPyFlashinferDecodeAttnOp(BaseAttentionDecodeTest):
             block_offset += num_blocks
 
         # Get actual values from mla_params
-        actual_page_indptr = mla_params.decode_page_indptr.cpu().tolist()
-        actual_page_indices = mla_params.page_indice.cpu().tolist()[
+        actual_page_indptr = mla_params.decode_page_indptr_h.tolist()
+        actual_page_indices = mla_params.page_indice_h.tolist()[
             : len(expected_page_indices)
         ]
-        actual_last_page_len = mla_params.paged_kv_last_page_len.cpu().tolist()
+        actual_last_page_len = mla_params.paged_kv_last_page_len_h.tolist()
 
         # Verify each parameter
         if actual_page_indptr != expected_page_indptr:

@@ -114,8 +114,8 @@ class CacheStoreConfig:
     messager_worker_thread_count: int
     rank_factor: int
     rdma_connect_timeout_ms: int
-    rdma_qp_count_per_connection: int
     rdma_io_thread_count: int
+    rdma_qp_count_per_connection: int
     rdma_worker_thread_count: int
     thread_count: int
     wrr_available_ratio: int
@@ -293,7 +293,6 @@ class EplbMode:
     
       ALL
     """
-
     ALL: typing.ClassVar[EplbMode]  # value = <EplbMode.ALL: 3>
     EPLB: typing.ClassVar[EplbMode]  # value = <EplbMode.EPLB: 2>
     NONE: typing.ClassVar[EplbMode]  # value = <EplbMode.NONE: 0>
@@ -395,9 +394,7 @@ class FMHAType:
     FLASH_INFER: typing.ClassVar[FMHAType]  # value = <FMHAType.FLASH_INFER: 0>
     NONE: typing.ClassVar[FMHAType]  # value = <FMHAType.NONE: 1>
     OPEN_SOURCE: typing.ClassVar[FMHAType]  # value = <FMHAType.OPEN_SOURCE: 2>
-    PAGED_OPEN_SOURCE: typing.ClassVar[
-        FMHAType
-    ]  # value = <FMHAType.PAGED_OPEN_SOURCE: 3>
+    PAGED_OPEN_SOURCE: typing.ClassVar[FMHAType]  # value = <FMHAType.PAGED_OPEN_SOURCE: 3>
     PAGED_TRT_V2: typing.ClassVar[FMHAType]  # value = <FMHAType.PAGED_TRT_V2: 4>
     PY_FLASHINFER_DECODE: typing.ClassVar[FMHAType]  # value = <FMHAType.PY_FLASHINFER_DECODE: 13>
     PY_FLASHINFER_PREFILL: typing.ClassVar[FMHAType]  # value = <FMHAType.PY_FLASHINFER_PREFILL: 12>
@@ -482,9 +479,9 @@ class HWKernelConfig:
     ft_disable_custom_ar: bool
     num_native_cuda_graph: int
     prefill_capture_seq_lens: list[int]
+    rocm_disable_custom_ag: bool
     rocm_hipblaslt_config: str
     use_swizzleA: bool
-    rocm_disable_custom_ag: bool
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:
@@ -693,7 +690,6 @@ class MlaOpsType:
     
       FLASH_MLA
     """
-
     AUTO: typing.ClassVar[MlaOpsType]  # value = <MlaOpsType.AUTO: 0>
     FLASH_INFER: typing.ClassVar[MlaOpsType]  # value = <MlaOpsType.FLASH_INFER: 2>
     FLASH_MLA: typing.ClassVar[MlaOpsType]  # value = <MlaOpsType.FLASH_MLA: 3>
@@ -968,6 +964,7 @@ class ProfilingDebugLoggingConfig:
     debug_start_fake_process: bool
     enable_detail_log: bool
     enable_device_perf: bool
+    enable_torch_alloc_profile: bool
     ft_alog_conf_path: str
     ft_core_dump_on_exception: bool
     gen_timeline_sync: bool
@@ -1098,7 +1095,6 @@ class RoleType:
     
       FRONTEND
     """
-
     DECODE: typing.ClassVar[RoleType]  # value = <RoleType.DECODE: 2>
     FRONTEND: typing.ClassVar[RoleType]  # value = <RoleType.FRONTEND: 4>
     PDFUSION: typing.ClassVar[RoleType]  # value = <RoleType.PDFUSION: 0>
