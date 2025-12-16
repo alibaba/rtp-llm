@@ -577,12 +577,13 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefReferencesMatchedBlocksOnly
     resource.blocks(0)   = BlockIndicesType{blocks[0], blocks[1], 0, blocks[2]};
 
     // Reference keys: 101(pos1)->blocks[1], 102(pos2)->0(ignored), 103(pos3)->blocks[2]
-    allocator_->incrKVCacheRef(resource, CacheKeysType{101, 999, 102, 103});
+    auto ref_resource = allocator_->incrKVCacheRef(resource, CacheKeysType{101, 999, 102, 103});
+    ASSERT_NE(ref_resource, nullptr);
 
     block_pool->requestFree(blocks);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before - 2);  // blocks[1] & blocks[2] are still referenced
 
-    block_pool->blockCacheFree(BlockIndicesType{blocks[1], blocks[2]});
+    allocator_->decrKVCacheRef(*ref_resource);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before);
 }
 
@@ -604,7 +605,8 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefEmptyInputNoEffect) {
     resource.cacheKeys() = CacheKeysType{100, 101};
     resource.blocks(0)   = BlockIndicesType{blocks[0], blocks[1]};
 
-    allocator_->incrKVCacheRef(resource, CacheKeysType{});
+    auto ref_resource = allocator_->incrKVCacheRef(resource, CacheKeysType{});
+    ASSERT_EQ(ref_resource, nullptr);
 
     block_pool->requestFree(blocks);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before);

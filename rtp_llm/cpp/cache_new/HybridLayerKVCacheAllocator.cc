@@ -227,8 +227,12 @@ std::vector<BufferPtr> HybridLayerKVCacheAllocator::convertIndexToBuffer(int lay
     return {};
 }
 
-void HybridLayerKVCacheAllocator::incrKVCacheRef(KVCacheResourceV1& kvcache_resource, const CacheKeysType& cache_keys) {
+std::shared_ptr<KVCacheResourceV1> HybridLayerKVCacheAllocator::incrKVCacheRef(KVCacheResourceV1&   kvcache_resource,
+                                                                               const CacheKeysType& cache_keys) {
+    return nullptr;
 }
+
+void HybridLayerKVCacheAllocator::decrKVCacheRef(KVCacheResourceV1& kvcache_resource) {}
 
 int HybridLayerKVCacheAllocator::seqSizePerBlock() const {
     return full_kv_cache_group_->seqSizePerBlock();
