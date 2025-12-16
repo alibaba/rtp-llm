@@ -12,7 +12,8 @@ public:
                             torch::Tensor input_lengths,
                             torch::Tensor kv_cache_block_id_host,
                             int           batch_size,
-                            int           seq_size_per_block) {};
+                            int           seq_size_per_block,
+                            torch::Tensor prefix_lengths = torch::Tensor()) {};
     // check whether the parmas can be recycled automatically.
     virtual bool check_recycle() {
         return false;

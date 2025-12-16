@@ -27,3 +27,34 @@ def remote_debug_breakpoint(host="localhost", port=4444):
     print("Waiting for debugger attach...")
     debugpy.wait_for_client()
     debugpy.breakpoint()
+
+
+import torch
+
+
+def cudagraph_debug_kernel(
+    data: torch.Tensor,
+    info_id: int = 1,
+    m: int = 0,
+    n: int = 0,
+    row_len: int = 0,
+    name: str = "cudagraph_debug_kernel",
+):
+    print(f"{name} shape is {data.shape}")
+    if data.dim() == 1:
+        data = data.unsqueeze(0)
+    data = data.contiguous().to(torch.float32)
+    from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+    row_len = data.size(1) if row_len == 0 else row_len
+    n = data.size(1) if (n == 0 or n > data.size(1)) else n
+    m = data.size(0) if (m == 0 or m > data.size(0)) else m
+    rtp_llm_ops.debug_kernel(
+        data=data,
+        start_row=0,
+        start_col=0,
+        m=m,
+        n=n,
+        row_len=row_len,  # 每行的长度
+        info_id=info_id,
+    )
