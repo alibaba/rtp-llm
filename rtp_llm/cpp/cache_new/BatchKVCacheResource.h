@@ -158,6 +158,10 @@ public:
         return batch_resource[batch_id];
     }
 
+    const KVCacheResourceV1& cacheResource(int batch_id = 0) const {
+        return batch_resource[batch_id];
+    }
+
     void clearBlocks() {
         resizeBlocks(0, 0);
     }

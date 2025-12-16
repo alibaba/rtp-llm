@@ -3,15 +3,14 @@
 #include <utility>
 
 #include "rtp_llm/cpp/cache_new/KVCacheMemoryConnector.h"
+#include "rtp_llm/cpp/cache_new/KVCacheConnectorReadWriteContext.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
 
 namespace rtp_llm {
 
 // --------------------------------- FusedAsyncContext ---------------------------------
 
-FusedAsyncContext::FusedAsyncContext(std::vector<std::shared_ptr<AsyncContext>> contexts,
-                                     std::shared_ptr<KVCacheResourceV1>         resource):
-    contexts_(std::move(contexts)), resource_(std::move(resource)) {}
+FusedAsyncContext::FusedAsyncContext(const std::vector<std::shared_ptr<AsyncContext>>& contexts): contexts_(contexts) {}
 
 bool FusedAsyncContext::done() const {
     for (const auto& context : contexts_) {
@@ -31,12 +30,6 @@ bool FusedAsyncContext::success() const {
     return true;
 }
 
-void FusedAsyncContext::addContext(const std::shared_ptr<AsyncContext>& context) {
-    if (context) {
-        contexts_.push_back(context);
-    }
-}
-
 // --------------------------------- FusedAsyncReadContext ---------------------------------
 
 FusedAsyncReadContext::FusedAsyncReadContext(const std::shared_ptr<FusedAsyncContext>& fused_match_context,
@@ -52,9 +45,9 @@ bool FusedAsyncReadContext::done() const {
     if (!fused_match_context_->done()) {
         return false;
     }
-    // if (!fused_match_context->success()) {
-    //     return false;
-    // }
+    if (!fused_match_context_->success()) {
+        return true;
+    }
     return fused_read_context_ && fused_read_context_->done();
 }
 
@@ -63,10 +56,8 @@ bool FusedAsyncReadContext::success() const {
            && (!fused_read_context_ || fused_read_context_->success());
 }
 
-void FusedAsyncReadContext::addReadContext(const std::shared_ptr<AsyncContext>& context) {
-    if (context && fused_read_context_) {
-        fused_read_context_->addContext(context);
-    }
+void FusedAsyncReadContext::setFusedReadContext(const std::shared_ptr<FusedAsyncContext>& fused_read_context) {
+    fused_read_context_ = fused_read_context;
 }
 
 // --------------------------------- KVCacheConnectorCoordinator ---------------------------------
@@ -94,14 +85,19 @@ KVCacheConnectorCoordinator::KVCacheConnectorCoordinator(const CacheConfig&     
     config_(config), allocator_(allocator), device_(device), params_(params), metrics_reporter_(metrics_reporter) {}
 
 KVCacheConnectorCoordinator::~KVCacheConnectorCoordinator() {
+    stop_.store(true);
+    while (true) {
+        {
+            std::lock_guard<std::mutex> lock(update_mutex_);
+            if (fused_async_read_context_list_.empty() && fused_async_write_context_list_.empty()) {
+                break;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
     if (update_thread_) {
         update_thread_->stop();
         update_thread_.reset();
-    }
-    {
-        std::lock_guard<std::mutex> lock(update_mutex_);
-        fused_async_read_context_list_.clear();
-        fused_async_write_context_list_.clear();
     }
     connectors_.clear();
     memory_connector_.reset();
@@ -122,13 +118,15 @@ bool KVCacheConnectorCoordinator::init() {
 }
 
 std::shared_ptr<AsyncContext>
-KVCacheConnectorCoordinator::asyncRead(const std::shared_ptr<StreamCacheResource>& stream_cache_resource,
-                                       const std::shared_ptr<Meta>&                meta) {
+KVCacheConnectorCoordinator::asyncRead(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context,
+                                       const std::shared_ptr<Meta>&                             meta) {
+    if (stop_.load()) {
+        return nullptr;
+    }
     // save resource for later use
     // auto kv_cache_resource = allocator_->incRef(resource);  // TODO(LXQ)
 
-    auto batch_resource = stream_cache_resource->kvCache();
-    auto resource       = std::make_shared<KVCacheResourceV1>(batch_resource.cacheResource(0));
+    auto resource = std::make_shared<KVCacheResourceV1>(connector_context->kvCacheResource());
 
     std::vector<std::shared_ptr<AsyncContext>> contexts;
     contexts.reserve(connectors_.size());
@@ -136,7 +134,7 @@ KVCacheConnectorCoordinator::asyncRead(const std::shared_ptr<StreamCacheResource
         if (!connector) {
             continue;
         }
-        if (type == KVCacheConnector::ConnectorType::Memory && stream_cache_resource->enableMemoryBlockCache()) {
+        if (type == KVCacheConnector::ConnectorType::Memory && connector_context->enableMemoryCache()) {
             auto match_context = connector->asyncMatch(resource, meta);
             if (match_context) {
                 contexts.emplace_back(match_context);
@@ -147,7 +145,7 @@ KVCacheConnectorCoordinator::asyncRead(const std::shared_ptr<StreamCacheResource
         return nullptr;
     }
 
-    auto fused_match_context = std::make_shared<FusedAsyncContext>(contexts, resource);
+    auto fused_match_context = std::make_shared<FusedAsyncContext>(contexts);
     auto fused_read_context  = std::make_shared<FusedAsyncReadContext>(fused_match_context, resource);
     {
         std::lock_guard<std::mutex> lock(update_mutex_);
@@ -157,12 +155,15 @@ KVCacheConnectorCoordinator::asyncRead(const std::shared_ptr<StreamCacheResource
 }
 
 std::shared_ptr<AsyncContext>
-KVCacheConnectorCoordinator::asyncWrite(const std::shared_ptr<StreamCacheResource>& stream_cache_resource,
-                                        const std::shared_ptr<Meta>&                meta) {
+KVCacheConnectorCoordinator::asyncWrite(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context,
+                                        const std::shared_ptr<Meta>&                             meta) {
+    if (stop_.load()) {
+        return nullptr;
+    }
+
     // auto kv_cache_resource = allocator_->incRef(resource);  // TODO(LXQ)
 
-    auto batch_resource = stream_cache_resource->kvCache();
-    auto resource       = std::make_shared<KVCacheResourceV1>(batch_resource.cacheResource(0));
+    auto resource = std::make_shared<KVCacheResourceV1>(connector_context->kvCacheResource());
 
     std::vector<std::shared_ptr<AsyncContext>> contexts;
     contexts.reserve(connectors_.size());
@@ -170,7 +171,7 @@ KVCacheConnectorCoordinator::asyncWrite(const std::shared_ptr<StreamCacheResourc
         if (!connector) {
             continue;
         }
-        if (type == KVCacheConnector::ConnectorType::Memory && stream_cache_resource->enableMemoryBlockCache()) {
+        if (type == KVCacheConnector::ConnectorType::Memory && connector_context->enableMemoryCache()) {
             auto write_context = connector->asyncWrite(resource, meta);
             if (write_context) {
                 contexts.emplace_back(write_context);
@@ -180,7 +181,7 @@ KVCacheConnectorCoordinator::asyncWrite(const std::shared_ptr<StreamCacheResourc
     if (contexts.empty()) {
         return nullptr;
     }
-    auto fused_write_context = std::make_shared<FusedAsyncContext>(std::move(contexts), resource);
+    auto fused_write_context = std::make_shared<FusedAsyncContext>(std::move(contexts));
     {
         std::lock_guard<std::mutex> lock(update_mutex_);
         fused_async_write_context_list_.push_back(fused_write_context);
@@ -188,13 +189,12 @@ KVCacheConnectorCoordinator::asyncWrite(const std::shared_ptr<StreamCacheResourc
     return fused_write_context;
 }
 
-std::shared_ptr<AsyncContext>
-KVCacheConnectorCoordinator::asyncWriteByLayer(int                                         layer_id,
-                                               const std::shared_ptr<StreamCacheResource>& stream_cache_resource,
-                                               const std::shared_ptr<Meta>&                meta) {
+std::shared_ptr<AsyncContext> KVCacheConnectorCoordinator::asyncWriteByLayer(
+    int                                                      layer_id,
+    const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context,
+    const std::shared_ptr<Meta>&                             meta) {
     // auto kv_cache_resource = allocator_->incRef(resource);  // TODO(LXQ)
-    auto batch_resource = stream_cache_resource->kvCache();
-    auto resource       = std::make_shared<KVCacheResourceV1>(batch_resource.cacheResource(0));
+    auto resource = std::make_shared<KVCacheResourceV1>(connector_context->kvCacheResource());
     return p2p_connector_->asyncWriteByLayer(layer_id, resource, meta);
 }
 
@@ -250,6 +250,7 @@ void KVCacheConnectorCoordinator::updateOnce() {
             // match success, start read
             int  reuse_num      = fused_read_context->resource()->reuseBlocksNum();
             auto match_contexts = fused_read_context->fusedMatchContext()->contexts();
+            std::vector<std::shared_ptr<AsyncContext>> connector_read_contexts;
             for (int i = 0; i < match_contexts.size(); i++) {
                 auto match_context =
                     std::dynamic_pointer_cast<KVCacheConnector::AsyncMatchContext>(match_contexts.at(i));
@@ -265,10 +266,11 @@ void KVCacheConnectorCoordinator::updateOnce() {
                 auto connector_read_context =
                     connector->asyncRead(fused_read_context->resource(), read_meta, match_context);
                 if (connector_read_context) {
-                    fused_read_context->addReadContext(connector_read_context);
+                    connector_read_contexts.emplace_back(connector_read_context);
                     reuse_num = match_context->matchedBlockCount();
                 }
             }
+            fused_read_context->setFusedReadContext(std::make_shared<FusedAsyncContext>(connector_read_contexts));
         }
         it++;
     }

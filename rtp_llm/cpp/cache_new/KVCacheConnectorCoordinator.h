@@ -16,28 +16,24 @@ namespace rtp_llm {
 
 class DeviceBase;
 class KVCacheMemoryConnector;
+class KVCacheConnectorReadWriteContext;
 class StreamCacheResource;
 
 class FusedAsyncContext: public AsyncContext {
 public:
-    FusedAsyncContext(std::vector<std::shared_ptr<AsyncContext>> contexts, std::shared_ptr<KVCacheResourceV1> resource);
+    FusedAsyncContext(const std::vector<std::shared_ptr<AsyncContext>>& contexts);
     ~FusedAsyncContext() override = default;
 
 public:
     bool done() const override;
     bool success() const override;
-    void addContext(const std::shared_ptr<AsyncContext>& context);
 
     const std::vector<std::shared_ptr<AsyncContext>>& contexts() const {
         return contexts_;
     }
-    // const std::shared_ptr<KVCacheResourceV1>& resource() const {
-    //     return resource_;
-    // }
 
 private:
     std::vector<std::shared_ptr<AsyncContext>> contexts_;
-    std::shared_ptr<KVCacheResourceV1>         resource_;
 };
 
 class FusedAsyncReadContext: public AsyncContext {
@@ -49,8 +45,7 @@ public:
 public:
     bool done() const override;
     bool success() const override;
-    void addReadContext(const std::shared_ptr<AsyncContext>& context);
-
+    void setFusedReadContext(const std::shared_ptr<FusedAsyncContext>& fused_read_context);
     const std::shared_ptr<FusedAsyncContext>& fusedMatchContext() const {
         return fused_match_context_;
     }
@@ -80,15 +75,16 @@ public:
     bool init();
 
     using Meta = KVCacheConnector::Meta;
-    std::shared_ptr<AsyncContext> asyncRead(const std::shared_ptr<StreamCacheResource>& stream_cache_resource,
-                                            const std::shared_ptr<Meta>&                meta);
-    std::shared_ptr<AsyncContext> asyncWrite(const std::shared_ptr<StreamCacheResource>& stream_cache_resource,
-                                             const std::shared_ptr<Meta>&                meta);
-    std::shared_ptr<AsyncContext> asyncWriteByLayer(int                                         layer_id,
-                                                    const std::shared_ptr<StreamCacheResource>& stream_cache_resource,
-                                                    const std::shared_ptr<Meta>&                meta);
-    virtual bool                  copyCache(const CopyCacheRequestPB& request, CopyCacheResponsePB& response);
-    virtual void                  clearMemoryCache();
+    std::shared_ptr<AsyncContext> asyncRead(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context,
+                                            const std::shared_ptr<Meta>&                             meta);
+    std::shared_ptr<AsyncContext> asyncWrite(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context,
+                                             const std::shared_ptr<Meta>&                             meta);
+    std::shared_ptr<AsyncContext>
+                 asyncWriteByLayer(int                                                      layer_id,
+                                   const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context,
+                                   const std::shared_ptr<Meta>&                             meta);
+    virtual bool copyCache(const CopyCacheRequestPB& request, CopyCacheResponsePB& response);
+    virtual void clearMemoryCache();
 
 private:
     bool initMemoryConnector();
@@ -113,6 +109,7 @@ private:
     std::list<std::shared_ptr<FusedAsyncContext>>     fused_async_write_context_list_;
     autil::LoopThreadPtr                              update_thread_;
     const int                                         update_interval_ms_{1};
+    std::atomic<bool>                                 stop_{false};
 };
 
 }  // namespace rtp_llm

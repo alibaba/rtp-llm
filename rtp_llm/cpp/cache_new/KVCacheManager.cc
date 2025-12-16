@@ -318,25 +318,27 @@ bool KVCacheManager::initConnectorCoordinator() {
 }
 
 std::shared_ptr<AsyncContext>
-KVCacheManager::asyncLoadCache(const std::shared_ptr<StreamCacheResource>& stream_cache_resource) {
-    if (!connector_coordinator_ || !stream_cache_resource) {
-        RTP_LLM_LOG_WARNING("async load cache failed, coordinator or resource is null, coordinator: %p, resource: %p",
-                            connector_coordinator_.get(),
-                            stream_cache_resource.get());
+KVCacheManager::asyncLoadCache(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context) {
+    if (!connector_coordinator_ || !connector_context) {
+        RTP_LLM_LOG_WARNING(
+            "async load cache failed, coordinator or connector context is null, coordinator: %p, connector context: %p",
+            connector_coordinator_.get(),
+            connector_context.get());
         return nullptr;
     }
-    return connector_coordinator_->asyncRead(stream_cache_resource, nullptr);
+    return connector_coordinator_->asyncRead(connector_context, nullptr);
 }
 
 std::shared_ptr<AsyncContext>
-KVCacheManager::asyncStoreCache(const std::shared_ptr<StreamCacheResource>& stream_cache_resource) {
-    if (!connector_coordinator_ || !stream_cache_resource) {
-        RTP_LLM_LOG_WARNING("async store cache failed, coordinator or resource is null, coordinator: %p, resource: %p",
-                            connector_coordinator_.get(),
-                            stream_cache_resource.get());
+KVCacheManager::asyncStoreCache(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context) {
+    if (!connector_coordinator_ || !connector_context) {
+        RTP_LLM_LOG_WARNING(
+            "async store cache failed, coordinator or connector context is null, coordinator: %p, connector context: %p",
+            connector_coordinator_.get(),
+            connector_context.get());
         return nullptr;
     }
-    return connector_coordinator_->asyncWrite(stream_cache_resource, nullptr);
+    return connector_coordinator_->asyncWrite(connector_context, nullptr);
 }
 
 bool KVCacheManager::copyCache(const CopyCacheRequestPB& request, CopyCacheResponsePB& response) {

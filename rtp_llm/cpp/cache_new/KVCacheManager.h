@@ -16,6 +16,7 @@
 namespace rtp_llm {
 
 class KVCacheConnectorCoordinator;
+class KVCacheConnectorReadWriteContext;
 class StreamCacheResource;
 
 class KVCacheManager {
@@ -65,10 +66,12 @@ public:
     virtual bool setKVBlockValue(int block_index, rtp_llm::Buffer& k_buffer, rtp_llm::Buffer& v_buffer);
 
     // async load cache from connector to gpu, for all rank
-    std::shared_ptr<AsyncContext> asyncLoadCache(const std::shared_ptr<StreamCacheResource>& stream_cache_resource);
+    std::shared_ptr<AsyncContext>
+    asyncLoadCache(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context);
 
     // async store cache from gpu to connector, for all rank
-    std::shared_ptr<AsyncContext> asyncStoreCache(const std::shared_ptr<StreamCacheResource>& stream_cache_resource);
+    std::shared_ptr<AsyncContext>
+    asyncStoreCache(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context);
 
     // copy cache between gpu and connector, for single rank
     bool copyCache(const CopyCacheRequestPB& request, CopyCacheResponsePB& response);

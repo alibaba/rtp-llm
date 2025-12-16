@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/cache_new/KVCacheManager.h"
+#include "rtp_llm/cpp/cache_new/KVCacheConnectorReadWriteContext.h"
 #include "rtp_llm/cpp/utils/HashUtil.h"
 #include "rtp_llm/cpp/core/BufferHelper.h"
 #include "rtp_llm/cpp/cache_new/types.h"
@@ -9,6 +10,24 @@
 using namespace std;
 
 namespace rtp_llm {
+
+class KVCacheConnectorReadWriteContextImpl: public KVCacheConnectorReadWriteContext {
+public:
+    KVCacheConnectorReadWriteContextImpl(const std::shared_ptr<StreamCacheResource>& stream_cache_resource):
+        stream_cache_resource_(stream_cache_resource) {}
+    ~KVCacheConnectorReadWriteContextImpl() override = default;
+
+public:
+    const KVCacheResourceV1& kvCacheResource() const override {
+        return stream_cache_resource_->kvCache().cacheResource(0);
+    }
+    bool enableMemoryCache() const override {
+        return stream_cache_resource_->enableMemoryBlockCache();
+    }
+
+private:
+    std::shared_ptr<StreamCacheResource> stream_cache_resource_;
+};
 
 void StreamCacheResource::init(int batch_size) {
     batch_resource_->resetBatchSize(batch_size);
@@ -188,7 +207,8 @@ bool StreamCacheResource::asyncLoadCache() {
     if (load_cache_context_) {
         return true;
     }
-    load_cache_context_ = resource_context_.cache_manager->asyncLoadCache(shared_from_this());
+    auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(shared_from_this());
+    load_cache_context_    = resource_context_.cache_manager->asyncLoadCache(connector_context);
     return load_cache_context_ != nullptr;
 }
 
@@ -218,7 +238,8 @@ bool StreamCacheResource::asyncStoreCache() {
     if (store_cache_context_) {
         return true;
     }
-    store_cache_context_ = resource_context_.cache_manager->asyncStoreCache(shared_from_this());
+    auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(shared_from_this());
+    store_cache_context_   = resource_context_.cache_manager->asyncStoreCache(connector_context);
     return store_cache_context_ != nullptr;
 }
 
