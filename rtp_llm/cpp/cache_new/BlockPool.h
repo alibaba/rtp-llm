@@ -45,8 +45,11 @@ public:
     void                      blockCacheReference(BlockIdxType block_idx);
     void                      blockCacheReference(const BlockIndicesType& block_indices);
 
-    void               regUserMr(size_t model_id);
-    void               deregUserMr();
+    void    regUserMr(size_t model_id);
+    void    deregUserMr();
+    int64_t getMrCostTimeMs() const {
+        return mr_cost_time_ms_;
+    }
     BlockAddrInfo      convertIndexToAddr(int layer_id, int block_id) const;
     BlockBufferPtrInfo convertIndexToBuffer(int layer_id, int block_id) const;
     std::vector<BufferPtr>

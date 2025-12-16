@@ -49,6 +49,7 @@ public:
     }
 
     void          regUserMr(size_t model_id);
+    int64_t       getMrCostTimeMs() const;
     size_t        freeBlocksNum() const;
     size_t        availableBlocksNum() const;
     size_t        availableTokensNum() const;

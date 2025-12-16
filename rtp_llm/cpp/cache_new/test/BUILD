@@ -137,6 +137,20 @@ cc_test(
 )
 
 cc_test(
+    name = "kv_cache_manager_test",
+    srcs = [
+        "KVCacheManagerTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps + [
+        ":block_pool_test_helper",
+    ],
+    env = {},
+    exec_properties = {'gpu':'A10'},
+)
+
+cc_test(
     name = "tp_broadcast_manager_test",
     srcs = [
         "TpBroadcastManagerTest.cc",
