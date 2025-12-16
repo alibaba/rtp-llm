@@ -3,7 +3,6 @@
 #include "rtp_llm/cpp/cache_new/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/cache_new/KVCacheAllocator.h"
-#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 
 namespace rtp_llm {
 
@@ -105,6 +104,10 @@ size_t KVCacheAllocator::freeBlocksNum() const {
     return block_pool_->freeBlocksNum();
 }
 
+int64_t KVCacheAllocator::getMrCostTimeMs() const {
+    return block_pool_ ? block_pool_->getMrCostTimeMs() : 0;
+}
+
 size_t KVCacheAllocator::availableBlocksNum() const {
     return block_pool_->availableBlocksNum();
 }
@@ -137,13 +140,12 @@ std::vector<std::pair<BufferPtr, size_t>> KVCacheAllocator::getAllBuffers() cons
     CacheLayerLayout layout = layerCacheBase();
     results.reserve(layout.layers_to_buffer_ptrs.size());
 
-    for (const auto& tensor : layout.layers_to_buffer_ptrs) {
-        if (!tensor.defined() || tensor.numel() == 0) {
+    for (const auto& buf : layout.layers_to_buffer_ptrs) {
+        if (!buf || buf->sizeBytes() == 0) {
             continue;
         }
-        BufferPtr buf                = torchTensor2Buffer(tensor);
-        size_t    block_stride_bytes = config_.block_stride;
-        results.emplace_back(std::move(buf), block_stride_bytes);
+        size_t block_stride_bytes = config_.block_stride;
+        results.emplace_back(buf, block_stride_bytes);
     }
 
     return results;

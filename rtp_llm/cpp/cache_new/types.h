@@ -3,8 +3,6 @@
 #include <vector>
 #include <cstdint>
 
-#include <torch/torch.h>
-
 #include "rtp_llm/cpp/core/Buffer.h"
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/cache_new/BatchKVCacheResource.h"
@@ -31,10 +29,9 @@ struct BlockBufferPtrInfo {
     BufferPtr v_addr;
 };
 
-// TODO: change into Buffer Ptr
 struct CacheLayerLayout {
-    std::vector<int>           layer_to_groups;
-    std::vector<torch::Tensor> layers_to_buffer_ptrs;
+    std::vector<int>       layer_to_groups;
+    std::vector<BufferPtr> layers_to_buffer_ptrs;
 };
 
 struct KVCacheInfo {

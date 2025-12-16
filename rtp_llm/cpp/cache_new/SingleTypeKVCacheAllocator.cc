@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/cache_new/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache_new/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
+#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 
 namespace rtp_llm {
 
@@ -164,7 +165,12 @@ CacheLayerLayout SingleTypeKVCacheAllocator::layerCacheBase() const {
     for (const auto& kv : layer_tensors) {
         int layer_id = kv.first;
         if (layer_id >= 0 && layer_id < config_.layer_num) {
-            layout.layers_to_buffer_ptrs[layer_id] = kv.second;
+            const auto& tensor = kv.second;
+            if (tensor.defined() && tensor.numel() > 0) {
+                layout.layers_to_buffer_ptrs[layer_id] = torchTensor2Buffer(tensor);
+            } else {
+                layout.layers_to_buffer_ptrs[layer_id] = nullptr;
+            }
         }
     }
     return layout;
@@ -301,12 +307,13 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& kv
     kv_cache_resource->batch_resource.clear();
     kv_cache_resource->batch_resource.resize(new_batch_size);
 
+    // init for all batch
+    kv_cache_resource->initGroups(1);
+
     for (int new_batch_idx = 0; new_batch_idx < new_batch_size; ++new_batch_idx) {
         const int old_batch_idx = block_src_batch[new_batch_idx];
         auto&     fork_count    = batch_fork_count[old_batch_idx];
         RTP_LLM_CHECK_WITH_INFO(fork_count > 0, "old batch %d has been forked too many times", old_batch_idx);
-
-        kv_cache_resource->initGroups(1);
 
         if (fork_count == 1) {
             auto& br       = kv_cache_resource->batch_resource[new_batch_idx];

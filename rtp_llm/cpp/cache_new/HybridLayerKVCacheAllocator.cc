@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/cache_new/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
+#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 
 namespace rtp_llm {
 
@@ -204,7 +205,12 @@ CacheLayerLayout HybridLayerKVCacheAllocator::layerCacheBase() const {
     for (const auto& kv : layer_tensors) {
         int layer_id = kv.first;
         if (layer_id >= 0 && layer_id < config_.layer_num) {
-            layout.layers_to_buffer_ptrs[layer_id] = kv.second;
+            const auto& tensor = kv.second;
+            if (tensor.defined() && tensor.numel() > 0) {
+                layout.layers_to_buffer_ptrs[layer_id] = torchTensor2Buffer(tensor);
+            } else {
+                layout.layers_to_buffer_ptrs[layer_id] = nullptr;
+            }
         }
     }
     return layout;

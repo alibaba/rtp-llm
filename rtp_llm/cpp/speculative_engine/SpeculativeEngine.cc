@@ -193,7 +193,8 @@ absl::Status SpeculativeEngine::initCacheManager(std::optional<WarmUpResult> war
         auto        proposer_cache_config    = std::get<1>(config);
         scorer_cache_config.mtp_model_type   = "score_model";
         proposer_cache_config.mtp_model_type = "propose_model";
-        resource_context_.cache_manager      = make_shared<KVCacheManager>(scorer_cache_config, device_);
+        resource_context_.cache_manager      = make_shared<KVCacheManager>(
+            scorer_cache_config, device_, false, metrics_reporter_, score_model_params_.gpt_init_parameter);
         if (!resource_context_.cache_manager->init()) {
             return absl::InternalError("init scorer kv cache manager failed");
         }
@@ -205,14 +206,19 @@ absl::Status SpeculativeEngine::initCacheManager(std::optional<WarmUpResult> war
             RTP_LLM_LOG_INFO("mtp cache manager init use layer num : %d", layer_num);
             for (int i = 0; i < layer_num; i++) {
                 RTP_LLM_CHECK(proposer_cache_config.layer_num == 1);
-                auto mtp_cache_manager = std::make_shared<KVCacheManager>(proposer_cache_config, device_);
+                auto mtp_cache_manager = std::make_shared<KVCacheManager>(proposer_cache_config,
+                                                                          device_,
+                                                                          false,
+                                                                          metrics_reporter_,
+                                                                          propose_model_params_->getGptInitParameter());
                 if (!mtp_cache_manager->init()) {
                     return absl::InternalError("init mtp cache manager failed for layer " + std::to_string(i));
                 }
                 resource_context_.mtp_cache_managers.push_back(mtp_cache_manager);
             }
         } else {
-            resource_context_.propose_cache_manager = make_shared<KVCacheManager>(proposer_cache_config, device_);
+            resource_context_.propose_cache_manager = make_shared<KVCacheManager>(
+                proposer_cache_config, device_, false, metrics_reporter_, propose_model_params_->getGptInitParameter());
             if (!resource_context_.propose_cache_manager->init()) {
                 return absl::InternalError("init proposer kv cache manager failed");
             }
@@ -221,7 +227,8 @@ absl::Status SpeculativeEngine::initCacheManager(std::optional<WarmUpResult> war
     } else {
         const auto& config =
             rtp_llm::CacheConfigCreator::createConfig(score_model_params_.gpt_init_parameter, warm_up_result);
-        resource_context_.cache_manager = make_shared<KVCacheManager>(config, device_);
+        resource_context_.cache_manager = make_shared<KVCacheManager>(
+            config, device_, false, metrics_reporter_, score_model_params_.gpt_init_parameter);
         if (!resource_context_.cache_manager->init()) {
             return absl::InternalError("init kv cache manager failed");
         }

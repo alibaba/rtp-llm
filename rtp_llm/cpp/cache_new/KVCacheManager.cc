@@ -16,10 +16,29 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
                                bool                               warmup,
                                const kmonitor::MetricsReporterPtr metrics_reporter,
                                const GptInitParameter&            params):
-    // TODO, warmup metrics_reporter params 都没有用起来
-    config_(config), device_(device), metrics_reporter_(metrics_reporter), params_(params) {}
+    config_(config), device_(device), metrics_reporter_(metrics_reporter), params_(params) {
+    if (warmup) {
+        config_.block_num = 1;
+    } else {
+        allocateAndSync();
+    }
 
-KVCacheManager::~KVCacheManager() {}
+    RTP_LLM_LOG_INFO(
+        "cache config: layer_num=%d, block_num=%d, block_size=%dB, seq_size_per_block=%zu, mtp_model_type=%s",
+        config_.layer_num,
+        config_.block_num,
+        config_.block_size,
+        config_.seq_size_per_block,
+        config_.mtp_model_type.c_str());
+}
+
+KVCacheManager::~KVCacheManager() {
+    stop_.store(true, std::memory_order_relaxed);
+    if (metrics_reporter_thread_.joinable()) {
+        metrics_reporter_thread_.join();
+    }
+    allocator_.reset();
+}
 
 bool KVCacheManager::init() {
     RTP_LLM_CHECK_WITH_INFO(config_.cache_specs.size() == 1, "cache specs size should be 1");
@@ -29,6 +48,10 @@ bool KVCacheManager::init() {
         || spec->type == rtp_llm::KVCacheType::MultiHeadLatentAttention) {
         allocator_ = std::make_shared<rtp_llm::SingleTypeKVCacheAllocator>(config_, device_, AllocationType::DEVICE);
         RTP_LLM_CHECK_WITH_INFO(allocator_->init(), "SingleTypeKVCacheAllocator init failed");
+        if (metrics_reporter_) {
+            stop_.store(false, std::memory_order_relaxed);
+            metrics_reporter_thread_ = std::thread(&KVCacheManager::reportMetricsLoop, this);
+        }
         return true;
     } else {
         RTP_LLM_CHECK_WITH_INFO(false, "SingleTypeKVCacheAllocator only support Full Attention");
@@ -212,6 +235,61 @@ bool KVCacheManager::updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache
                                    bool                           copy_last_block,
                                    std::vector<BlockIdPair>&      block_update_mapping) {
     return allocator_->updateKVBlock(batch_kv_cache_resource, block_src_batch, copy_last_block, block_update_mapping);
+}
+
+void KVCacheManager::allocateAndSync() {
+    const auto properties = device_->getDeviceProperties();
+    size_t     world_size = properties.tp_size * properties.dp_size;
+    if (world_size > 1) {
+        size_t    local_rank = properties.tp_size * properties.dp_rank + properties.tp_rank;
+        BufferPtr block_num_infos =
+            device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {world_size}, rtp_llm::AllocationType::HOST});
+        auto block_num_ptr        = block_num_infos->data<int>();
+        block_num_ptr[local_rank] = config_.block_num;
+        device_->allGather({{block_num_infos}, ParallelMode::DP_AND_TP});
+        device_->syncCommunication(false);
+        device_->syncAndCheck();
+
+        if (properties.ffn_as_service) {
+            config_.block_num = 1;
+        } else {
+            config_.block_num = *std::min_element(block_num_ptr, block_num_ptr + world_size);
+        }
+    }
+    RTP_LLM_LOG_INFO("block_num is %d after tp sync", config_.block_num);
+}
+
+void KVCacheManager::reportMetricsLoop() {
+    kmonitor::MetricsTags tags;
+    tags.AddTag("mtp_model_type", config_.mtp_model_type);
+
+    while (!stop_.load(std::memory_order_relaxed)) {
+        if (!metrics_reporter_ || !allocator_) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            continue;
+        }
+
+        RtpLLMCacheMetricsCollector collector;
+
+        auto block_pool  = allocator_->getBlockPool();
+        auto block_cache = block_pool ? block_pool->blockCache() : nullptr;
+
+        const auto total_blocks     = allocator_->totalBlocksNum();
+        const auto available_blocks = allocator_->availableBlocksNum();
+
+        collector.kv_cache_item_num         = block_cache ? static_cast<int64_t>(block_cache->size()) : 0;
+        collector.kv_cache_left_seq         = static_cast<int64_t>(available_blocks * config_.seq_size_per_block);
+        collector.kv_cache_available_blocks = static_cast<int64_t>(available_blocks);
+        collector.kv_cache_free_blocks      = static_cast<int64_t>(allocator_->freeBlocksNum());
+        collector.kv_cache_used_ratio =
+            (total_blocks == 0) ?
+                0.0f :
+                static_cast<float>(100.0 * (total_blocks - available_blocks) / static_cast<double>(total_blocks));
+        collector.mr_cost_time_ms = allocator_->getMrCostTimeMs();
+
+        metrics_reporter_->report<RtpLLMCacheMetrics, RtpLLMCacheMetricsCollector>(&tags, &collector);
+        std::this_thread::sleep_for(std::chrono::seconds(1));  // 1s
+    }
 }
 
 }  // namespace rtp_llm

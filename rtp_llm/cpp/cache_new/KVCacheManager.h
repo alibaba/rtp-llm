@@ -1,6 +1,8 @@
 #pragma once
 
+#include <atomic>
 #include <cassert>
+#include <thread>
 #include <vector>
 
 #include "rtp_llm/cpp/cache_new/types.h"
@@ -58,12 +60,18 @@ public:
     virtual bool setKVBlockValue(int block_index, rtp_llm::Buffer& k_buffer, rtp_llm::Buffer& v_buffer);
 
 private:
+    void allocateAndSync();
+    void reportMetricsLoop();
+
     CacheConfig          config_;
     rtp_llm::DeviceBase* device_;
     KVCacheAllocatorPtr  allocator_;
 
     const kmonitor::MetricsReporterPtr metrics_reporter_;
-    const GptInitParameter&            params_;
+    const GptInitParameter             params_;
+
+    std::atomic<bool> stop_{false};
+    std::thread       metrics_reporter_thread_;
 };
 
 }  // namespace rtp_llm
