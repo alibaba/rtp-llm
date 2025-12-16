@@ -6,7 +6,6 @@ from typing import Any, Dict, Optional, Type, Union
 
 import torch
 
-from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 from rtp_llm.config.py_config_modules import StaticConfig
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
@@ -151,7 +150,7 @@ class ModelFactory:
         model_config: ModelConfig,
         propose_model_config: Optional[ModelConfig] = None,
         gang_info=None,
-    ) -> BaseEngine:
+    ):
         from rtp_llm.async_decoder_engine.engine_creator import create_engine
 
         model = ModelFactory._create_model(model_config)
@@ -324,7 +323,7 @@ class ModelFactory:
             )
 
     @staticmethod
-    def create_from_env(gang_info=None) -> BaseEngine:
+    def create_from_env(gang_info=None):
         from rtp_llm.distribute.gang_info import get_gang_info
 
         normal_model_config = ModelFactory.create_normal_model_config()
@@ -341,7 +340,7 @@ class ModelFactory:
         return engine
 
     @staticmethod
-    def create_from_module(ref_module: torch.nn.Module) -> BaseEngine:
+    def create_from_module(ref_module: torch.nn.Module):
         normal_model_config = ModelFactory.create_normal_model_config()
         normal_model_config.add_ref_module(ref_module)
         engine = ModelFactory.from_model_config(normal_model_config)
