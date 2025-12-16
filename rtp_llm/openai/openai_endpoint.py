@@ -118,9 +118,20 @@ class OpenaiEndpoint(BaseEndpoint):
         self.stop_words_id_list.extend(extra_stop_word_ids_list)
 
     def _init_stop_words(self) -> None:
+        """Initialize and merge stop words from config and environment."""
         self.stop_words_str_list = self.model_config.special_tokens.stop_words_str_list
 
-        # Merge environment stop words
+        self._merge_env_stop_words()
+        self._sync_stop_words_formats()
+        self._deduplicate_stop_words()
+
+        logging.info(
+            f"use stop_words_str_list [{self.stop_words_str_list}], "
+            f"stop_words_id_list [{self.stop_words_id_list}]"
+        )
+
+    def _merge_env_stop_words(self) -> None:
+        """Merge stop words from environment config."""
         env_config = self.model_config.py_env_configs.generate_env_config
         env_stop_words_str_list = (
             json.loads(env_config.stop_words_str) if env_config.stop_words_str else []
@@ -136,30 +147,30 @@ class OpenaiEndpoint(BaseEndpoint):
             self.stop_words_str_list += env_stop_words_str_list
             self.stop_words_id_list += env_stop_words_id_list
 
-        # Sync between stop word IDs and strings
-        stop_words_str_list_from_id = []
+    def _sync_stop_words_formats(self) -> None:
+        """Synchronize between stop word IDs and string formats."""
+        # Convert IDs to strings
+        stop_words_str_from_ids = []
         for stop_word_ids in self.stop_words_id_list:
             word = self.tokenizer.decode(stop_word_ids)
-            if len(word):
-                stop_words_str_list_from_id.append(word)
+            if word:
+                stop_words_str_from_ids.append(word)
 
-        stop_words_id_list_from_str = []
+        # Convert strings to IDs
+        stop_words_ids_from_str = []
         for stop_word_str in self.stop_words_str_list:
             ids = self.tokenizer.encode(stop_word_str)
-            if len(ids):
-                stop_words_id_list_from_str.append(ids)
+            if ids:
+                stop_words_ids_from_str.append(ids)
 
-        self.stop_words_str_list += stop_words_str_list_from_id
-        self.stop_words_id_list += stop_words_id_list_from_str
+        # Merge results
+        self.stop_words_str_list += stop_words_str_from_ids
+        self.stop_words_id_list += stop_words_ids_from_str
 
-        # Dedup and log
+    def _deduplicate_stop_words(self) -> None:
+        """Remove duplicates from stop word lists."""
         self.stop_words_str_list = list(set(self.stop_words_str_list))
         self.stop_words_id_list = self._dedup_stop_words_list(self.stop_words_id_list)
-
-        logging.info(
-            f"use stop_words_str_list [{self.stop_words_str_list}], "
-            f"stop_words_id_list [{self.stop_words_id_list}]"
-        )
 
     def _check_request(self, request, global_controller: int):
         try:
@@ -261,12 +272,14 @@ class OpenaiEndpoint(BaseEndpoint):
         delta_tool_calls: Optional[List[ToolCall]],
     ) -> Optional[List[ToolCall]]:
         """
-        合并增量的 tool_calls 到现有的 tool_calls 中
+        Merge incremental tool_calls into existing tool_calls.
+
         Args:
-            existing_tool_calls: 现有的 tool_calls 列表
-            delta_tool_calls: 增量的 tool_calls 列表
+            existing_tool_calls: Existing list of tool calls
+            delta_tool_calls: Incremental list of tool calls to merge
+
         Returns:
-            合并后的 tool_calls 列表
+            Merged list of tool calls
         """
         if delta_tool_calls is None:
             return existing_tool_calls
@@ -274,71 +287,80 @@ class OpenaiEndpoint(BaseEndpoint):
             existing_tool_calls = []
 
         for delta_tool_call in delta_tool_calls:
-            # Find existing tool_call with same index
-            existing_tool_call = None
-            if delta_tool_call.index is not None:
-                for tool_call in existing_tool_calls:
-                    if tool_call.index == delta_tool_call.index:
-                        existing_tool_call = tool_call
-                        break
+            existing_tool_call = self._find_tool_call_by_index(
+                existing_tool_calls, delta_tool_call.index
+            )
 
             if existing_tool_call is None:
-                # Add new tool_call
                 self._add_new_tool_call(existing_tool_calls, delta_tool_call)
             else:
-                # Update existing tool_call
-                if delta_tool_call.id:
-                    existing_tool_call.id = delta_tool_call.id
-                if delta_tool_call.type:
-                    existing_tool_call.type = delta_tool_call.type
-                if delta_tool_call.function:
-                    self._update_function_call(
-                        existing_tool_call, delta_tool_call.function
-                    )
+                self._merge_tool_call_fields(existing_tool_call, delta_tool_call)
 
         return existing_tool_calls
+
+    def _find_tool_call_by_index(
+        self, tool_calls: List[ToolCall], index: Optional[int]
+    ) -> Optional[ToolCall]:
+        """Find a tool call by its index."""
+        if index is None:
+            return None
+        for tool_call in tool_calls:
+            if tool_call.index == index:
+                return tool_call
+        return None
+
+    def _merge_tool_call_fields(self, existing: ToolCall, delta: ToolCall) -> None:
+        """Merge delta tool call fields into existing tool call."""
+        if delta.id:
+            existing.id = delta.id
+        if delta.type:
+            existing.type = delta.type
+        if delta.function:
+            self._update_function_call(existing, delta.function)
 
     def _add_new_tool_call(
         self, tool_calls: List[ToolCall], delta_tool_call: ToolCall
     ) -> None:
+        """Add a new tool call to the list."""
+        function_name = (
+            delta_tool_call.function.name if delta_tool_call.function else None
+        )
+        function_args = (
+            delta_tool_call.function.arguments if delta_tool_call.function else None
+        )
+
         new_tool_call = ToolCall(
             index=delta_tool_call.index,
             id=delta_tool_call.id,
             type=delta_tool_call.type,
-            function=FunctionCall(
-                name=(
-                    delta_tool_call.function.name if delta_tool_call.function else None
-                ),
-                arguments=(
-                    delta_tool_call.function.arguments
-                    if delta_tool_call.function
-                    else None
-                ),
-            ),
+            function=FunctionCall(name=function_name, arguments=function_args),
         )
         tool_calls.append(new_tool_call)
 
     def _update_function_call(
         self, tool_call: ToolCall, delta_function: FunctionCall
     ) -> None:
+        """Update function call with delta values, appending arguments incrementally."""
         if tool_call.function is None:
             tool_call.function = FunctionCall(
                 name=delta_function.name,
                 arguments=delta_function.arguments,
             )
-        else:
-            if delta_function.name:
-                tool_call.function.name = delta_function.name
-            if delta_function.arguments:
-                if tool_call.function.arguments is None:
-                    tool_call.function.arguments = delta_function.arguments
-                else:
-                    tool_call.function.arguments += delta_function.arguments
+            return
+
+        if delta_function.name:
+            tool_call.function.name = delta_function.name
+
+        if delta_function.arguments:
+            if tool_call.function.arguments is None:
+                tool_call.function.arguments = delta_function.arguments
+            else:
+                tool_call.function.arguments += delta_function.arguments
 
     def _append_string_field(
         self, existing_value: Optional[str], delta_value: Optional[str]
     ) -> Optional[str]:
-        """拼接字符串字段，处理 None 的情况"""
+        """Append string fields, handling None cases."""
         if existing_value is None:
             return delta_value or None
         return existing_value + (delta_value or "")
@@ -346,8 +368,8 @@ class OpenaiEndpoint(BaseEndpoint):
     def _update_choice_with_delta(
         self, choice: ChatCompletionResponseChoice, delta_choice
     ) -> None:
-        """使用增量数据更新 choice"""
-        # 更新字符串字段
+        """Update choice with incremental delta data."""
+        # Update string fields
         choice.message.content = self._append_string_field(
             choice.message.content, delta_choice.delta.content
         )
@@ -355,21 +377,21 @@ class OpenaiEndpoint(BaseEndpoint):
             choice.message.reasoning_content, delta_choice.delta.reasoning_content
         )
 
-        # 更新其他字段（取最新值）
+        # Update other fields (use latest value)
         choice.message.role = delta_choice.delta.role or choice.message.role
         choice.message.function_call = (
             delta_choice.delta.function_call or choice.message.function_call
         )
 
-        # 合并 tool_calls
+        # Merge tool_calls
         choice.message.tool_calls = self._merge_tool_calls(
             choice.message.tool_calls, delta_choice.delta.tool_calls
         )
 
-        # 更新 finish_reason
+        # Update finish_reason
         choice.finish_reason = delta_choice.finish_reason or choice.finish_reason
 
-        # 处理 logprobs
+        # Handle logprobs
         if choice.logprobs is not None and delta_choice.logprobs is not None:
             choice.logprobs.content += delta_choice.logprobs.content
         elif delta_choice.logprobs is not None:
@@ -378,7 +400,7 @@ class OpenaiEndpoint(BaseEndpoint):
     def _initialize_choices(
         self, response_choices: List
     ) -> List[ChatCompletionResponseChoice]:
-        """从响应的第一批数据初始化 choices"""
+        """Initialize choices from the first batch of response data."""
         return [
             ChatCompletionResponseChoice(
                 index=i,
@@ -399,13 +421,14 @@ class OpenaiEndpoint(BaseEndpoint):
         choice_generator: Optional[AsyncGenerator[StreamResponseObject, None]],
         debug_info: Optional[DebugInfo],
     ) -> ChatCompletionResponse:
+        """Collect and merge all streamed responses into a complete response."""
         all_choices = []
         usage = None
         aux_info = None
         extra_outputs = None
 
         async for response in choice_generator:
-            # 初始化 choices（仅第一次）
+            # Initialize choices on first response
             if not all_choices:
                 all_choices = self._initialize_choices(response.choices)
             elif len(response.choices) != len(all_choices):
@@ -414,16 +437,16 @@ class OpenaiEndpoint(BaseEndpoint):
                     f"[{response.choices}] vs [{all_choices}]."
                 )
             else:
-                # 更新每个 choice
+                # Update each choice with delta
                 for i, delta_choice in enumerate(response.choices):
                     self._update_choice_with_delta(all_choices[i], delta_choice)
 
-            # 更新全局字段
+            # Update global fields
             usage = response.usage or usage
             aux_info = response.aux_info or aux_info
             extra_outputs = response.extra_outputs or extra_outputs
 
-        # 确保 usage 不为 None
+        # Ensure usage is not None
         if usage is None:
             logging.warning("No usage returned from stream response. use empty value.")
             usage = UsageInfo(prompt_tokens=0, total_tokens=0, completion_tokens=0)
@@ -442,17 +465,19 @@ class OpenaiEndpoint(BaseEndpoint):
         choice_generator: AsyncGenerator[StreamResponseObject, None],
         debug_info: Optional[DebugInfo],
     ) -> CompleteResponseAsyncGenerator:
+        """Wrap choice generator to produce complete stream responses."""
+
         async def response_generator():
-            debug_info_responded = False
+            has_sent_debug_info = False
             async for response in choice_generator:
                 yield ChatCompletionStreamResponse(
                     choices=response.choices,
                     usage=response.usage,
                     aux_info=response.aux_info,
-                    debug_info=debug_info if not debug_info_responded else None,
+                    debug_info=debug_info if not has_sent_debug_info else None,
                     extra_outputs=response.extra_outputs,
                 )
-                debug_info_responded = True
+                has_sent_debug_info = True
 
         complete_response_collect_func = partial(
             self._collect_complete_response, debug_info=debug_info
@@ -464,19 +489,20 @@ class OpenaiEndpoint(BaseEndpoint):
     def _get_debug_info(
         self,
         renderer: CustomChatRenderer,
-        renderered_input: RenderedInputs,
+        rendered_input: RenderedInputs,
         gen_config: GenerateConfig,
     ) -> DebugInfo:
-        if renderered_input.rendered_prompt != "":
-            prompt = renderered_input.rendered_prompt
-        else:
-            prompt = self.tokenizer.decode(renderered_input.input_ids)
+        """Create debug info from rendered input and config."""
+        prompt = (
+            rendered_input.rendered_prompt
+            if rendered_input.rendered_prompt
+            else self.tokenizer.decode(rendered_input.input_ids)
+        )
+
         return DebugInfo(
             input_prompt=prompt,
-            input_ids=renderered_input.input_ids,
-            input_urls=[
-                mm_input.url for mm_input in renderered_input.multimodal_inputs
-            ],
+            input_ids=rendered_input.input_ids,
+            input_urls=[mm_input.url for mm_input in rendered_input.multimodal_inputs],
             tokenizer_info=str(self.tokenizer),
             max_seq_len=self.max_seq_len,
             eos_token_id=self.eos_token_id,
@@ -486,18 +512,24 @@ class OpenaiEndpoint(BaseEndpoint):
             generate_config=gen_config,
         )
 
-    def render_chat(self, chat_request: ChatCompletionRequest):
+    def render_chat(self, chat_request: ChatCompletionRequest) -> RenderedInputs:
+        """Render chat messages into model input format."""
         renderer = (
             self.template_renderer if chat_request.user_template else self.chat_renderer
         )
+
+        # Extract and remove partial message if present
         prepopulate_str = ""
-        if len(chat_request.messages) > 0 and chat_request.messages[-1].partial:
+        if chat_request.messages and chat_request.messages[-1].partial:
             prepopulate_str = str(chat_request.messages[-1].content)
             chat_request.messages.pop()
+
+        # Render chat and append prepopulated content
         rendered_input = renderer.render_chat(chat_request)
-        if prepopulate_str != "":
+        if prepopulate_str:
             rendered_input.rendered_prompt += prepopulate_str
             rendered_input.input_ids += self.tokenizer.encode(prepopulate_str)
+
         return rendered_input
 
     def chat_completion(self, **kwargs) -> CompleteResponseAsyncGenerator:

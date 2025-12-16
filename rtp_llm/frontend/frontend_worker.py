@@ -155,19 +155,6 @@ class FrontendWorker(BaseEndpoint):
                 "request is non_stream but use incremental decoder",
             )
 
-        response_generator = self._inference(request, **kwargs)
-
-        complete_response_collect_func = partial(
-            FrontendWorker.collect_complete_response,
-            incremental=request.incremental,
-            batch_infer=request.batch_infer,
-            num_return_sequences=request.num_return_sequences,
-        )
-        return CompleteResponseAsyncGenerator(
-            response_generator, complete_response_collect_func
-        )
-
-    def _inference(self, request: Request, **kwargs: Any):
         if (
             len(request.input_texts) > 1
             or request.batch_infer
@@ -188,13 +175,13 @@ class FrontendWorker(BaseEndpoint):
                         **kwargs,
                     )
                 )
-            return self._parallel_batch_async_generators(
+            response_generator = self._parallel_batch_async_generators(
                 request.incremental,
                 generators,
                 request.batch_infer,
             )
         else:
-            return self._yield_generate(
+            response_generator = self._yield_generate(
                 request.request_id,
                 request.input_texts[0],
                 request.input_urls[0],
@@ -202,49 +189,52 @@ class FrontendWorker(BaseEndpoint):
                 **kwargs,
             )
 
+        complete_response_collect_func = partial(
+            FrontendWorker.collect_complete_response,
+            incremental=request.incremental,
+            batch_infer=request.batch_infer,
+            num_return_sequences=request.num_return_sequences,
+        )
+        return CompleteResponseAsyncGenerator(
+            response_generator, complete_response_collect_func
+        )
+
+    def _to_list_if_enabled(self, tensor, should_convert: bool):
+        """Convert tensor to list if enabled and tensor is not None."""
+        if should_convert and tensor is not None:
+            return tensor.tolist()
+        return None
+
     def _format_response(
         self, gen_responses: GenerateResponse, generate_config: GenerateConfig
     ) -> Dict[str, Any]:
         generate_texts = gen_responses.generate_texts
-        finished = gen_responses.generate_outputs.generate_outputs[0].finished
+        output = gen_responses.generate_outputs.generate_outputs[0]
+
+        # Handle aux_info
+        aux_info_dict = {}
         if generate_config.aux_info:
-            aux_info = gen_responses.generate_outputs.generate_outputs[0].aux_info
+            aux_info = output.aux_info
             if generate_config.has_num_beams():
                 aux_info.beam_responses = generate_texts
-        hidden_states = gen_responses.generate_outputs.generate_outputs[0].hidden_states
-        output_ids = gen_responses.generate_outputs.generate_outputs[0].output_ids
-        input_ids = gen_responses.generate_outputs.generate_outputs[0].input_ids
-        loss = gen_responses.generate_outputs.generate_outputs[0].loss
-        logits = gen_responses.generate_outputs.generate_outputs[0].logits
+            aux_info_dict = asdict(aux_info)
 
         response = PipelineResponse(
             response=generate_texts[0],
-            finished=finished,
-            aux_info=asdict(aux_info) if generate_config.aux_info else {},
-            hidden_states=(
-                hidden_states.tolist()
-                if generate_config.return_hidden_states and hidden_states is not None
-                else None
+            finished=output.finished,
+            aux_info=aux_info_dict,
+            hidden_states=self._to_list_if_enabled(
+                output.hidden_states, generate_config.return_hidden_states
             ),
-            loss=(
-                loss.tolist()
-                if generate_config.calculate_loss and loss is not None
-                else None
+            loss=self._to_list_if_enabled(output.loss, generate_config.calculate_loss),
+            logits=self._to_list_if_enabled(
+                output.logits, generate_config.return_logits
             ),
-            logits=(
-                logits.tolist()
-                if generate_config.return_logits and logits is not None
-                else None
+            output_ids=self._to_list_if_enabled(
+                output.output_ids, generate_config.return_output_ids
             ),
-            output_ids=(
-                output_ids.tolist()
-                if generate_config.return_output_ids and output_ids is not None
-                else None
-            ),
-            input_ids=(
-                input_ids.tolist()
-                if generate_config.return_input_ids and input_ids is not None
-                else None
+            input_ids=self._to_list_if_enabled(
+                output.input_ids, generate_config.return_input_ids
             ),
         )
 
@@ -254,26 +244,23 @@ class FrontendWorker(BaseEndpoint):
         self, gen_responses: GenerateResponse, generate_config: GenerateConfig
     ) -> Dict[str, Any]:
         generate_texts = gen_responses.generate_texts
+
+        # Handle multiple return sequences
         if generate_config.num_return_sequences > 0:
+            outputs = gen_responses.generate_outputs.generate_outputs
+
             aux_info = []
             if generate_config.aux_info:
-                aux_info = [
-                    asdict(seq.aux_info)
-                    for seq in gen_responses.generate_outputs.generate_outputs
-                ]
-            sequences_pipeline_response = MultiSequencesPipelineResponse(
+                aux_info = [asdict(seq.aux_info) for seq in outputs]
+
+            return MultiSequencesPipelineResponse(
                 response=generate_texts,
-                finished=all(
-                    [
-                        seq.finished
-                        for seq in gen_responses.generate_outputs.generate_outputs
-                    ]
-                ),
+                finished=all(seq.finished for seq in outputs),
                 aux_info=aux_info,
             )
-            return sequences_pipeline_response
-        else:
-            return self._format_response(gen_responses, generate_config)
+
+        # Handle single sequence
+        return self._format_response(gen_responses, generate_config)
 
     async def _yield_generate(
         self,
@@ -302,48 +289,42 @@ class FrontendWorker(BaseEndpoint):
         generators: List[AsyncGenerator[Dict[str, Any], None]],
         batch_infer: bool,
     ) -> AsyncGenerator[Dict[str, Any], None]:
+        """Execute multiple async generators in parallel and yield their results."""
         iterators = [gen.__aiter__() for gen in generators]
-        done_idxs: Set[int] = set()
+        completed_indices: Set[int] = set()
         batch_state: List[Any] = [None] * len(iterators)
 
-        while True:
-            # 创建并行任务
-            tasks = []
-            for idx, itr in enumerate(iterators):
-                if idx not in done_idxs:  # 仅为未完成的迭代器创建任务
-                    tasks.append((idx, itr.__anext__()))
+        while len(completed_indices) < len(iterators):
+            # Create tasks for all active iterators
+            active_tasks = [
+                (index, iterator.__anext__())
+                for index, iterator in enumerate(iterators)
+                if index not in completed_indices
+            ]
 
-            # 使用 asyncio.gather() 获取结果
-            if tasks:
+            # Gather results from all active tasks
+            if active_tasks:
                 results = await asyncio.gather(
-                    *(task[1] for task in tasks), return_exceptions=True
+                    *(task[1] for task in active_tasks), return_exceptions=True
                 )
-                for idx, result in zip((task[0] for task in tasks), results):
-                    if isinstance(result, Exception):
-                        # 处理异常情况，如 StopAsyncIteration
-                        if isinstance(result, StopAsyncIteration):
-                            done_idxs.add(idx)
-                            if batch_state[idx] is None:
-                                batch_state[idx] = PipelineResponse()
-                            if incremental:
-                                batch_state[idx] = PipelineResponse()
-                        else:
-                            error_msg = f'ErrorMsg: {str(result)} \n Traceback: {"".join(traceback.format_tb(result.__traceback__))}'
-                            logging.warning(error_msg)
-                            raise result
+
+                for (index, _), result in zip(active_tasks, results):
+                    if isinstance(result, StopAsyncIteration):
+                        completed_indices.add(index)
+                        if batch_state[index] is None or incremental:
+                            batch_state[index] = PipelineResponse()
+                    elif isinstance(result, Exception):
+                        error_msg = f'ErrorMsg: {str(result)} \n Traceback: {"".join(traceback.format_tb(result.__traceback__))}'
+                        logging.warning(error_msg)
+                        raise result
                     else:
-                        batch_state[idx] = result
+                        batch_state[index] = result
 
-            # 检查是否所有迭代器都完成
-            if len(done_idxs) == len(iterators):
-                break
-
-            # 处理 batch 数据
-            batch = batch_state
+            # Yield batch result
             if batch_infer:
-                yield BatchPipelineResponse(response_batch=batch)
+                yield BatchPipelineResponse(response_batch=batch_state)
             else:
-                yield batch[0]
+                yield batch_state[0]
 
     # TODO(xinfei.sxf) 这个函数将逻辑又写了一遍
     @staticmethod
@@ -357,75 +338,87 @@ class FrontendWorker(BaseEndpoint):
         batch_infer: bool,
         num_return_sequences: int,
     ) -> Union[PipelineResponse, MultiSequencesPipelineResponse, BatchPipelineResponse]:
-
+        """Collect and merge incremental responses into a complete response."""
         if not incremental:
             return await CompleteResponseAsyncGenerator.get_last_value(all_responses)
 
         if batch_infer:
-            batch_response_incremental_stream = None
-            async for response in all_responses:
-                if not batch_response_incremental_stream:
-                    batch_response_incremental_stream = [
-                        [_] for _ in response.response_batch
-                    ]
-                else:
-                    for batch_idx, single_response in enumerate(
-                        response.response_batch
-                    ):
-                        batch_response_incremental_stream[batch_idx].append(
-                            single_response
-                        )
-            complete_batch_response = []
-            async for (
-                single_response_incremental_stream
-            ) in CompleteResponseAsyncGenerator.generate_from_list(
-                batch_response_incremental_stream
-            ):
-                single_yield_response = (
-                    CompleteResponseAsyncGenerator.generate_from_list(
-                        single_response_incremental_stream
-                    )
-                )
-                single_complete_response = (
-                    await FrontendWorker.collect_complete_response(
-                        single_yield_response, incremental, False, num_return_sequences
-                    )
-                )
-                complete_batch_response.append(single_complete_response)
-            return BatchPipelineResponse(response_batch=complete_batch_response)
+            return await FrontendWorker._collect_batch_incremental_response(
+                all_responses, num_return_sequences
+            )
 
         if num_return_sequences > 0:
-            complete_multi_seq_response = None
-            complete_multi_seq_finished = None
-            complete_multi_seq_aux_info = None
-            async for response in all_responses:
-                if not complete_multi_seq_response:
-                    complete_multi_seq_response = [_ for _ in response.response]
-                    complete_multi_seq_aux_info = [_ for _ in response.aux_info]
-                    complete_multi_seq_finished = response.finished
-                for seq_idx, seq_reponse in enumerate(response.response):
-                    complete_multi_seq_response[seq_idx] = (
-                        complete_multi_seq_response[seq_idx] + seq_reponse
-                    )
-                    if response.aux_info and response.aux_info[seq_idx]:
-                        complete_multi_seq_aux_info[seq_idx] = response.aux_info[
-                            seq_idx
-                        ]
-                    if response.finished:
-                        complete_multi_seq_finished = True
-            return MultiSequencesPipelineResponse(
-                response=complete_multi_seq_response,
-                aux_info=complete_multi_seq_aux_info,
-                finished=complete_multi_seq_finished,
+            return await FrontendWorker._collect_multi_sequence_response(all_responses)
+
+        return await FrontendWorker._collect_single_sequence_response(all_responses)
+
+    @staticmethod
+    async def _collect_batch_incremental_response(
+        all_responses, num_return_sequences: int
+    ) -> BatchPipelineResponse:
+        """Collect batch incremental responses."""
+        batch_response_streams = None
+        async for response in all_responses:
+            if not batch_response_streams:
+                batch_response_streams = [[item] for item in response.response_batch]
+            else:
+                for batch_idx, single_response in enumerate(response.response_batch):
+                    batch_response_streams[batch_idx].append(single_response)
+
+        complete_batch_response = []
+        async for stream in CompleteResponseAsyncGenerator.generate_from_list(
+            batch_response_streams
+        ):
+            single_response_generator = (
+                CompleteResponseAsyncGenerator.generate_from_list(stream)
             )
+            single_complete = await FrontendWorker.collect_complete_response(
+                single_response_generator, True, False, num_return_sequences
+            )
+            complete_batch_response.append(single_complete)
+
+        return BatchPipelineResponse(response_batch=complete_batch_response)
+
+    @staticmethod
+    async def _collect_multi_sequence_response(
+        all_responses,
+    ) -> MultiSequencesPipelineResponse:
+        """Collect multiple sequence responses."""
+        responses = None
+        aux_infos = None
+        finished = None
+
+        async for response in all_responses:
+            if not responses:
+                responses = list(response.response)
+                aux_infos = list(response.aux_info)
+                finished = response.finished
+
+            for seq_idx, seq_response in enumerate(response.response):
+                responses[seq_idx] += seq_response
+                if response.aux_info and response.aux_info[seq_idx]:
+                    aux_infos[seq_idx] = response.aux_info[seq_idx]
+                if response.finished:
+                    finished = True
+
+        return MultiSequencesPipelineResponse(
+            response=responses, aux_info=aux_infos, finished=finished
+        )
+
+    @staticmethod
+    async def _collect_single_sequence_response(
+        all_responses,
+    ) -> PipelineResponse:
+        """Collect single sequence response."""
         complete_response = ""
         finished = False
         aux_info = None
         output_ids = None
         input_ids = None
         logits = None
+
         async for response in all_responses:
-            complete_response = complete_response + response.response
+            complete_response += response.response
             if response.finished:
                 finished = response.finished
             if response.aux_info:
@@ -436,6 +429,7 @@ class FrontendWorker(BaseEndpoint):
                 input_ids = response.input_ids
             if response.logits:
                 logits = response.logits
+
         return PipelineResponse(
             response=complete_response,
             finished=finished,
@@ -453,11 +447,13 @@ class FrontendWorker(BaseEndpoint):
         tokenizer: BaseTokenizer,
         **kwargs: Any,
     ) -> GenerateConfig:
+        """Create and configure a GenerateConfig object."""
         if isinstance(generate_config, dict):
             config = GenerateConfig.create_generate_config(generate_config, **kwargs)
         else:
-            # 认为是从frontend_worker传递进来的，不需要再处理一遍
+            # Already a GenerateConfig from frontend_worker, no need to process again
             config = generate_config
+
         config.add_special_tokens(special_tokens)
         config.convert_select_tokens(vocab_size, tokenizer)
         config.add_thinking_params(tokenizer)
@@ -572,11 +568,12 @@ class FrontendWorker(BaseEndpoint):
         stop_word_ids: List[List[int]],
         stop_word_id_slices: List[List[int]],
     ):
+        """Truncate tokens based on stop word IDs if print_stop_words is disabled."""
         if not generate_config.print_stop_words:
-            if not generate_output.finished:
-                tokens = truncate_token_with_stop_word_id(tokens, stop_word_id_slices)
-            else:
-                tokens = truncate_token_with_stop_word_id(tokens, stop_word_ids)
+            stop_ids = (
+                stop_word_ids if generate_output.finished else stop_word_id_slices
+            )
+            tokens = truncate_token_with_stop_word_id(tokens, stop_ids)
         return tokens
 
     def process_stop_str(
@@ -590,31 +587,87 @@ class FrontendWorker(BaseEndpoint):
         token_buffer: str,
         **kwargs: Any,
     ):
+        """Process text to handle stop words and token buffering."""
         if generate_config.return_incremental:
             text = token_buffer + text
 
+        # Check for stop words and mark as finished if found
         if stop_word_str_list:
             stop_idx, stop_len = match_stop_words(text, stop_word_str_list)
             if stop_idx != -1:
-                if not generate_config.print_stop_words:
-                    text = text[:stop_idx]
-                else:
-                    text = text[: stop_idx + stop_len]
+                text = (
+                    text[:stop_idx]
+                    if not generate_config.print_stop_words
+                    else text[: stop_idx + stop_len]
+                )
                 token_buffer = ""
                 generate_output.finished = True
+                return text, token_buffer
 
         if generate_output.finished:
             return text, token_buffer
 
+        # Truncate text with stop word slices if needed
         if generate_config.return_incremental or not generate_config.print_stop_words:
-            trunc_text = truncate_response_with_stop_words(
+            truncated_text = truncate_response_with_stop_words(
                 text, stop_word_str_slices, generate_config.is_streaming, True
             )
             if generate_config.return_incremental:
-                token_buffer = text[len(trunc_text) :]
-            text = trunc_text
+                token_buffer = text[len(truncated_text) :]
+            text = truncated_text
 
         return text, token_buffer
+
+    def _prepare_tokens_for_decode(
+        self,
+        generate_config: GenerateConfig,
+        generate_outputs: GenerateOutputs,
+        output_tokens_list: List[torch.Tensor],
+    ) -> Tuple[List[List[int]], List[torch.Tensor]]:
+        """Prepare tokens for decoding by handling EOS and concatenation."""
+        if generate_config.has_num_beams():
+            all_output_ids = torch.cat(
+                [go.output_ids for go in generate_outputs.generate_outputs], dim=0
+            )
+            all_output_ids_np = all_output_ids.cpu().numpy()
+
+            if not generate_config.ignore_eos:
+                processed_tokens_list = batch_remove_padding_eos(
+                    all_output_ids_np, self._special_tokens.eos_token_id
+                )
+                return [
+                    tokens.tolist() for tokens in processed_tokens_list
+                ], output_tokens_list
+            else:
+                return all_output_ids_np.tolist(), output_tokens_list
+
+        # Handle non-beam search case
+        if not output_tokens_list:
+            output_tokens_list = [
+                torch.empty(0, dtype=torch.int32)
+                for _ in range(len(generate_outputs.generate_outputs))
+            ]
+
+        tokens_lists = []
+        for i, generate_output in enumerate(generate_outputs.generate_outputs):
+            if len(output_tokens_list[i]) == 0:
+                output_tokens_list[i] = generate_output.output_ids
+            else:
+                output_tokens_list[i] = torch.cat(
+                    (output_tokens_list[i], generate_output.output_ids), dim=1
+                )
+                generate_output.output_ids = output_tokens_list[i]
+
+            tokens = generate_output.output_ids.cpu().numpy().flatten()
+            if not generate_config.ignore_eos:
+                tokens = remove_padding_eos_with_numpy(
+                    tokens, self._special_tokens.eos_token_id
+                )
+            else:
+                tokens = tokens.reshape(-1)
+            tokens_lists.append(tokens)
+
+        return tokens_lists, output_tokens_list
 
     def decode_non_incremental_tokens(
         self,
@@ -624,50 +677,20 @@ class FrontendWorker(BaseEndpoint):
         stop_word_str_slices: List[str],
         stop_word_ids: List[int],
         stop_word_id_slices: List[int],
-        ouput_tokens_list: List[torch.Tensor],
+        output_tokens_list: List[torch.Tensor],
         **kwargs: Any,
-    ) -> Tuple[List[str], List[int]]:
-        tokens_lists_for_decode_input = []
-        output_lens = []
+    ) -> Tuple[List[str], List[int], List[torch.Tensor]]:
+        """Decode tokens in non-incremental mode."""
+        # Prepare tokens for decoding
+        tokens_lists, output_tokens_list = self._prepare_tokens_for_decode(
+            generate_config, generate_outputs, output_tokens_list
+        )
+
+        # Process stop IDs and prepare for batch decode
         token_lists_to_decode = []
-        if generate_config.has_num_beams():
-            all_output_ids = torch.cat(
-                [go.output_ids for go in generate_outputs.generate_outputs], dim=0
-            )
-            all_output_ids_np = all_output_ids.cpu().numpy()
-            if not generate_config.ignore_eos:
-                processed_tokens_np_list = batch_remove_padding_eos(
-                    all_output_ids_np, self._special_tokens.eos_token_id
-                )
-                tokens_lists_for_decode_input = [
-                    tokens.tolist() for tokens in processed_tokens_np_list
-                ]
-            else:
-                tokens_lists_for_decode_input = all_output_ids_np.tolist()
-        else:
-            if len(ouput_tokens_list) == 0:
-                ouput_tokens_list = [
-                    torch.empty(0, dtype=torch.int32)
-                    for _ in range(len(generate_outputs.generate_outputs))
-                ]
-            for i, generate_output in enumerate(generate_outputs.generate_outputs):
-                if len(ouput_tokens_list[i]) == 0:
-                    ouput_tokens_list[i] = generate_output.output_ids
-                else:
-                    ouput_tokens_list[i] = torch.cat(
-                        (ouput_tokens_list[i], generate_output.output_ids), dim=1
-                    )
-                    generate_output.output_ids = ouput_tokens_list[i]
-                tokens = generate_output.output_ids.cpu().numpy().flatten()
-                if not generate_config.ignore_eos:
-                    tokens = remove_padding_eos_with_numpy(
-                        tokens, self._special_tokens.eos_token_id
-                    )
-                else:
-                    tokens = tokens.reshape(-1)
-                tokens_lists_for_decode_input.append(tokens)
+        output_lens = []
         for i, generate_output in enumerate(generate_outputs.generate_outputs):
-            tokens_list = tokens_lists_for_decode_input[i]
+            tokens_list = tokens_lists[i]
             output_lens.append(len(tokens_list))
             processed_tokens = self.process_stop_id(
                 generate_config,
@@ -678,21 +701,22 @@ class FrontendWorker(BaseEndpoint):
             )
             token_lists_to_decode.append(processed_tokens)
 
+        # Batch decode tokens
         decoded_batch = self.tokenizer.batch_decode(
             token_lists_to_decode,
             skip_special_tokens=generate_config.skip_special_tokens,
             **kwargs,
         )
-        newly_decoded_texts = [text.rstrip("\uFFFD") for text in decoded_batch]
-        all_texts = newly_decoded_texts
+        decoded_texts = [text.rstrip("\uFFFD") for text in decoded_batch]
 
+        # Process stop strings and add prefix
         final_texts = []
-        for i in range(len(all_texts)):
+        for i, text in enumerate(decoded_texts):
             processed_text, _ = self.process_stop_str(
                 generate_config,
                 generate_outputs.generate_outputs[i],
-                newly_decoded_texts[i],
-                all_texts[i],
+                text,
+                text,
                 stop_word_str_list,
                 stop_word_str_slices,
                 "",
@@ -704,7 +728,7 @@ class FrontendWorker(BaseEndpoint):
 
             final_texts.append(processed_text)
 
-        return (final_texts, output_lens, ouput_tokens_list)
+        return final_texts, output_lens, output_tokens_list
 
     def decode_incremental_tokens(
         self,
@@ -716,33 +740,38 @@ class FrontendWorker(BaseEndpoint):
         stop_word_id_slices: List[int],
         decoding_states: List[DecodingState],
         token_buffers: List[str],
-        ouput_tokens_list: List[torch.Tensor],
+        output_tokens_list: List[torch.Tensor],
         **kwargs: Any,
-    ) -> Tuple[List[str], List[int]]:
-        """处理增量解码的逻辑。"""
+    ) -> Tuple[
+        List[str], List[int], List[DecodingState], List[str], List[torch.Tensor]
+    ]:
+        """Decode tokens incrementally with state tracking."""
         num_outputs = len(generate_outputs.generate_outputs)
-        if len(token_buffers) == 0:
+
+        # Initialize state if needed
+        if not token_buffers:
             token_buffers = [""] * num_outputs
-
-        if len(decoding_states) == 0:
+        if not decoding_states:
             decoding_states = [DecodingState() for _ in range(num_outputs)]
-
-        if len(ouput_tokens_list) == 0:
-            ouput_tokens_list = [
+        if not output_tokens_list:
+            output_tokens_list = [
                 torch.empty(0, dtype=torch.int32) for _ in range(num_outputs)
             ]
 
+        # Decode each output incrementally
         newly_decoded_texts = []
         all_texts = []
         output_lens = []
-        ignore_eos = generate_config.ignore_eos
+
         for i, generate_output in enumerate(generate_outputs.generate_outputs):
-            ouput_tokens_list[i] = torch.cat(
-                (ouput_tokens_list[i], generate_output.output_ids), dim=1
+            # Concatenate new tokens
+            output_tokens_list[i] = torch.cat(
+                (output_tokens_list[i], generate_output.output_ids), dim=1
             )
-            full_tokens_tensor = ouput_tokens_list[i]
-            tokens_np = full_tokens_tensor.cpu().numpy().flatten()
-            if not ignore_eos:
+
+            # Process tokens
+            tokens_np = output_tokens_list[i].cpu().numpy().flatten()
+            if not generate_config.ignore_eos:
                 tokens_list = remove_padding_eos_with_numpy(
                     tokens_np, self._special_tokens.eos_token_id
                 ).tolist()
@@ -751,6 +780,7 @@ class FrontendWorker(BaseEndpoint):
 
             output_lens.append(len(tokens_list))
 
+            # Process stop IDs and decode incrementally
             processed_tokens = self.process_stop_id(
                 generate_config,
                 generate_output,
@@ -771,6 +801,7 @@ class FrontendWorker(BaseEndpoint):
             newly_decoded_texts.append(text_to_return)
             all_texts.append(decoding_states[i].all_text)
 
+        # Process stop strings and add prefix
         final_texts = []
         for i in range(len(all_texts)):
             processed_text, token_buffers[i] = self.process_stop_str(
@@ -794,7 +825,7 @@ class FrontendWorker(BaseEndpoint):
             output_lens,
             decoding_states,
             token_buffers,
-            ouput_tokens_list,
+            output_tokens_list,
         )
 
     @torch.inference_mode()
