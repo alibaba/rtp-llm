@@ -201,16 +201,11 @@ TEST_F(KVCacheManagerTest, BlockBatchCopy) {
     }
 }
 
-class MockKVCacheMemoryConnector: public KVCacheMemoryConnector {
-public:
-    MockKVCacheMemoryConnector(const CacheConfig&                       cache_config,
-                               const std::shared_ptr<KVCacheAllocator>& allocator,
-                               rtp_llm::DeviceBase*                     device,
-                               const std::vector<std::string>&          tp_addrs):
-        KVCacheMemoryConnector(cache_config, allocator, device, tp_addrs) {}
-
-    MOCK_METHOD(bool, copyCache, (const MemoryCopyCacheRequestPB&, MemoryCopyCacheResponsePB&), (override));
-};
+// class MockKVCacheCoordinator: public KVCacheConnectorCoordinator {
+// public:
+//     MOCK_METHOD(bool, copyCache, (const CopyCacheRequestPB&, CopyCacheResponsePB&), (override));
+//     MOCK_METHOD(void, clearCache, (), (override));
+// };
 
 // class KVCacheManagerTest: public DeviceTestBase {
 // protected:
@@ -243,6 +238,9 @@ public:
 //     EXPECT_FALSE(kv_cache_manager_->copyCache(request, response));
 //     EXPECT_FALSE(response.mem_response().success());
 // }
+    // EXPECT_FALSE(kv_cache_manager_->copyCache(request, response));
+    // EXPECT_FALSE(response.mem_response().success());
+}
 
 // TEST_F(KVCacheManagerTest, CopyCache_DelegatesToMemoryConnector_AndReturnsTrue) {
 //     CopyCacheRequestPB request;
@@ -263,6 +261,15 @@ public:
 //             resp.set_success(true);
 //             return true;
 //         }));
+    // auto mock_coordinator = std::make_shared<MockKVCacheCoordinator>();
+    // kv_cache_manager_->setConnectorCoordinatorForTest(mock_coordinator);
+
+    // // Expect call
+    // EXPECT_CALL(*mock_coordinator, copyCache(testing::_, testing::_))
+    //     .WillOnce(testing::Invoke([](const CopyCacheRequestPB& req, CopyCacheResponsePB& resp) {
+    //         resp.mutable_mem_response()->set_success(true);
+    //         return true;
+    //     }));
 
 //     EXPECT_TRUE(kv_cache_manager_->copyCache(request, response));
 //     EXPECT_TRUE(response.mem_response().success());
@@ -287,6 +294,15 @@ public:
 //             resp.set_success(false);
 //             return false;
 //         }));
+    // auto mock_coordinator = std::make_shared<MockKVCacheCoordinator>();
+    // kv_cache_manager_->setConnectorCoordinatorForTest(mock_coordinator);
+
+    // // Expect call
+    // EXPECT_CALL(*mock_coordinator, copyCache(testing::_, testing::_))
+    //     .WillOnce(testing::Invoke([](const CopyCacheRequestPB& req, CopyCacheResponsePB& resp) {
+    //         resp.mutable_mem_response()->set_success(false);
+    //         return false;
+    //     }));
 
 //     EXPECT_FALSE(kv_cache_manager_->copyCache(request, response));
 //     EXPECT_FALSE(response.mem_response().success());

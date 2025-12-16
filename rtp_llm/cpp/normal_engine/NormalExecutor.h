@@ -13,6 +13,8 @@
 
 namespace rtp_llm {
 
+class KVCacheManager;
+
 class NormalExecutor: public Executor {
 public:
     explicit NormalExecutor(const EngineInitParams&                   params,

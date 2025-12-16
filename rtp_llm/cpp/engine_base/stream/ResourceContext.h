@@ -1,14 +1,13 @@
 #pragma once
 
 #include <memory>
-#include "absl/status/status.h"
-#include "absl/status/statusor.h"
-#include "rtp_llm/cpp/engine_base/system_prompt/SystemPrompt.h"
-#include "rtp_llm/cpp/cache_new/KVCacheManager.h"
+#include <vector>
 
 namespace rtp_llm {
 
 class GenerateStream;
+class KVCacheManager;
+class SystemPrompt;
 
 struct ResourceContext {
     std::shared_ptr<KVCacheManager>              cache_manager;

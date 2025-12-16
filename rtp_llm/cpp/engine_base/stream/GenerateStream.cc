@@ -1111,4 +1111,8 @@ bool GenerateStream::loadingCache() const {
     return generate_status_->status == StreamState::LOADING_CACHE;
 }
 
+bool GenerateStream::asyncStoreCache() {
+    return stream_cache_resource_->asyncStoreCache();
+}
+
 }  // namespace rtp_llm

@@ -27,7 +27,6 @@ public:
 public:
     bool done() const override;
     bool success() const override;
-    void cancel() override;
     void waitDone();
 
 private:
@@ -46,16 +45,18 @@ public:
     ~KVCacheMemoryConnector() override;
 
 public:
-    bool                                init() override;
-    std:::shared_ptr<AsyncMatchContext> asyncMatch(const std::shared_ptr<KVCacheResourceV1>& resource,
+    bool init();
 
-    std::shared_ptr<AsyncContext> asyncRead(const std::shared_ptr<KVCacheResourceV1>& resource,
-                                            const std::shared_ptr<Meta>&              meta) override;
-    std::shared_ptr<AsyncContext> asyncWrite(const std::shared_ptr<KVCacheResourceV1>& resource,
-                                             const std::shared_ptr<Meta>&              meta) override;
-    std::shared_ptr<AsyncContext> asyncWriteByLayer(int                                       layer_id,
-                                                    const std::shared_ptr<KVCacheResourceV1>& resource,
-                                                    const std::shared_ptr<Meta>&              meta) override {
+    std::shared_ptr<AsyncMatchContext> asyncMatch(const std::shared_ptr<KVCacheResourceV1>& resource,
+                                                  const std::shared_ptr<Meta>&              meta) override;
+    std::shared_ptr<AsyncContext>      asyncRead(const std::shared_ptr<KVCacheResourceV1>& resource,
+                                                 const std::shared_ptr<Meta>&              meta,
+                                                 const std::shared_ptr<AsyncMatchContext>& match_context) override;
+    std::shared_ptr<AsyncContext>      asyncWrite(const std::shared_ptr<KVCacheResourceV1>& resource,
+                                                  const std::shared_ptr<Meta>&              meta) override;
+    std::shared_ptr<AsyncContext>      asyncWriteByLayer(int                                       layer_id,
+                                                         const std::shared_ptr<KVCacheResourceV1>& resource,
+                                                         const std::shared_ptr<Meta>&              meta) override {
         throw std::runtime_error("KVCacheMemoryConnector asyncWriteByLayer is not implemented");
     }
 

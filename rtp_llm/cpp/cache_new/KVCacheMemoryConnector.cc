@@ -33,11 +33,6 @@ bool MemoryConnectorAsyncContext::success() const {
     return true;
 }
 
-void MemoryConnectorAsyncContext::cancel() {
-    // TODO(LXQ): need cancel tp broadcast
-    return;
-}
-
 void MemoryConnectorAsyncContext::waitDone() {
     if (already_done_) {
         return;
@@ -111,8 +106,17 @@ bool KVCacheMemoryConnector::init() {
     return true;
 }
 
-std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::shared_ptr<KVCacheResourceV1>& resource,
-                                                                const std::shared_ptr<Meta>&              meta) {
+std::shared_ptr<KVCacheConnector::AsyncMatchContext>
+KVCacheMemoryConnector::asyncMatch(const std::shared_ptr<KVCacheResourceV1>& resource,
+                                   const std::shared_ptr<Meta>&              meta) {
+    // TODO(LXQ): implement async match
+    return nullptr;
+}
+
+std::shared_ptr<AsyncContext>
+KVCacheMemoryConnector::asyncRead(const std::shared_ptr<KVCacheResourceV1>& resource,
+                                  const std::shared_ptr<Meta>&              meta,
+                                  const std::shared_ptr<AsyncMatchContext>& match_context) {
     autil::ScopedTime2 timer;
 
     if (!checkKVCacheResource(resource)) {

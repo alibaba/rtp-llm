@@ -40,6 +40,7 @@ cc_library(
         ":cache_new_types",
         ":batch_kv_cache_resource",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
+        "//rtp_llm/cpp/engine_base/stream:stream_cache_resource_headers",
         "//rtp_llm/cpp/model_rpc:model_rpc_pool",
         "//rtp_llm/cpp/model_rpc:rpc_error_code",
         "//rtp_llm/cpp/model_rpc:tp_broadcast_manager",

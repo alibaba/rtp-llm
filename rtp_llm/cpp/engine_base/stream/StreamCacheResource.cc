@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
+#include "rtp_llm/cpp/cache_new/KVCacheManager.h"
 #include "rtp_llm/cpp/utils/HashUtil.h"
 #include "rtp_llm/cpp/core/BufferHelper.h"
 #include "rtp_llm/cpp/cache_new/types.h"
@@ -50,11 +51,7 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
 
     if (total_blocks > 0) {
         // TODO(xinfei.sxf) fix it, after finshed and remote running commit.
-        FreeInfo free_info{batch_resource_,
-                           stream_->completeTokenIdsPtr(),
-                           stream_->streamId(),
-                           reuseCache(),
-                           enableMemoryBlockCache()};
+        FreeInfo free_info{batch_resource_, stream_->completeTokenIdsPtr(), stream_->streamId(), reuseCache()};
         resource_context_.cache_manager->free(free_info);
     }
 
@@ -142,6 +139,10 @@ bool StreamCacheResource::updateKVBlock(const std::vector<int>& block_src_batch,
         batch_resource_, block_src_batch, copy_last_block, block_update_mapping_);
 }
 
+int StreamCacheResource::seqSizePerBlock() const {
+    return resource_context_.cache_manager->cacheConfig().seq_size_per_block;
+}
+
 bool StreamCacheResource::hasCacheKeys() const {
     if (batch_resource_->batch_resource.empty()) {
         return false;
@@ -184,7 +185,10 @@ bool StreamCacheResource::asyncLoadCache() {
     if (!enableMemoryBlockCache()) {
         return false;
     }
-    load_cache_context_ = resource_context_.cache_manager->asyncLoadCache(batch_resource_);
+    if (load_cache_context_) {
+        return true;
+    }
+    load_cache_context_ = resource_context_.cache_manager->asyncLoadCache(shared_from_this());
     return load_cache_context_ != nullptr;
 }
 
@@ -205,6 +209,17 @@ bool StreamCacheResource::loadCacheDone() {
     }
     load_cache_context_.reset();
     return true;
+}
+
+bool StreamCacheResource::asyncStoreCache() {
+    if (!enableMemoryBlockCache()) {
+        return false;
+    }
+    if (store_cache_context_) {
+        return true;
+    }
+    store_cache_context_ = resource_context_.cache_manager->asyncStoreCache(shared_from_this());
+    return store_cache_context_ != nullptr;
 }
 
 }  // namespace rtp_llm

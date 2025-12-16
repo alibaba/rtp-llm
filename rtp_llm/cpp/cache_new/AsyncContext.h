@@ -10,7 +10,6 @@ public:
 public:
     virtual bool done() const    = 0;
     virtual bool success() const = 0;
-    virtual void cancel()        = 0;
 };
 
 }  // namespace rtp_llm

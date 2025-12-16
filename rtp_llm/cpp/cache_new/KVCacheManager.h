@@ -15,7 +15,8 @@
 
 namespace rtp_llm {
 
-class KVCacheConnector;
+class KVCacheConnectorCoordinator;
+class StreamCacheResource;
 
 class KVCacheManager {
 public:
@@ -63,20 +64,20 @@ public:
     virtual bool setKVBlockValue(int block_index, int layer_id, rtp_llm::Buffer& k_buffer, rtp_llm::Buffer& v_buffer);
     virtual bool setKVBlockValue(int block_index, rtp_llm::Buffer& k_buffer, rtp_llm::Buffer& v_buffer);
 
-    // async load cache from connector to gpu, for all tp
-    std::shared_ptr<AsyncContext> asyncLoadCache(const BatchKVCacheResourcePtr& batch_resource);
+    // async load cache from connector to gpu, for all rank
+    std::shared_ptr<AsyncContext> asyncLoadCache(const std::shared_ptr<StreamCacheResource>& stream_cache_resource);
 
-    // async store cache from gpu to connector, for all tp
-    std::shared_ptr<AsyncContext> asyncStoreCache(const BatchKVCacheResourcePtr& batch_resource);
+    // async store cache from gpu to connector, for all rank
+    std::shared_ptr<AsyncContext> asyncStoreCache(const std::shared_ptr<StreamCacheResource>& stream_cache_resource);
 
-    // copy cache between gpu and connector, for single tp
+    // copy cache between gpu and connector, for single rank
     bool copyCache(const CopyCacheRequestPB& request, CopyCacheResponsePB& response);
 
     // clear local cache, for rank 0
     void clearLocalCache();
 
 private:
-    bool initMemoryConnector();
+    bool initConnectorCoordinator();
 
 private:
     void allocateAndSync();
@@ -92,7 +93,7 @@ private:
     std::atomic<bool> stop_{false};
     std::thread       metrics_reporter_thread_;
 
-    std::shared_ptr<KVCacheConnector> memory_connector_;
+    std::shared_ptr<KVCacheConnectorCoordinator> connector_coordinator_;
 };
 
 }  // namespace rtp_llm

@@ -58,3 +58,19 @@ cc_library(
     ],
     visibility = ["//visibility:public"],
 )
+
+cc_library(
+    name = "stream_cache_resource_headers",
+    hdrs = [
+        "ResourceContext.h",
+        "StreamCacheResource.h",
+    ],
+    deps = [
+        ":complete_token_ids",
+        "//rtp_llm/cpp/cache_new:batch_kv_cache_resource",
+        "//rtp_llm/cpp/cache_new:cache_new_types",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+    ],
+    visibility = ["//visibility:public"],
+)

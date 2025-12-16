@@ -129,6 +129,8 @@ inline std::string StreamStateToString(StreamState state) {
             return "FINISHED";
         case StreamState::REMOTE_RUNNING:
             return "REMOTE_RUNNING";
+        case StreamState::LOADING_CACHE:
+            return "LOADING_CACHE";
         default:
             return "Error: Unrecognized Generate State";
     }

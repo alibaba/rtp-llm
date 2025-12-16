@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include <cstdlib>
 #include <memory>
+#include "rtp_llm/cpp/cache_new/KVCacheManager.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/models/GptModel.h"
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
@@ -56,12 +57,13 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
         device->initParams().max_batch_size};  // set static max batch size to avoid sampler reset memory
     sampler_.reset(new Sampler(sampler_params));
 
-    GptModelInitParams model_init_params(
-        {device_,
-         params.gpt_weights,
-         genModelDescription(params.gpt_init_parameter),
-         cache_manager ? std::make_optional(cache_manager->kvCacheBuffer()) : std::nullopt,
-         params.model_id});
+    GptModelInitParams model_init_params{
+        device_,
+        params.gpt_weights,
+        genModelDescription(params.gpt_init_parameter),
+        cache_manager ? std::make_optional(cache_manager->kvCacheBuffer()) : std::nullopt,
+        params.model_id,
+    };
 
     if (params.gpt_init_parameter.ffn_disaggregate_config.enable_ffn_disaggregate) {
         RTP_LLM_LOG_INFO("using ffn as service");

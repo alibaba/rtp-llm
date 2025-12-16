@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rtp_llm/cpp/devices/DeviceBase.h"
+#include "rtp_llm/cpp/cache_new/CacheConfig.h"
 #include "rtp_llm/cpp/config/GptInitParameter.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"

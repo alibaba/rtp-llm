@@ -3,14 +3,16 @@
 #include <memory>
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "rtp_llm/cpp/cache_new/types.h"
 #include "rtp_llm/cpp/engine_base/stream/ResourceContext.h"
 #include "rtp_llm/cpp/cache_new/BatchKVCacheResource.h"
 
 namespace rtp_llm {
 
+class AsyncContext;
 class GenerateStream;
 
-class StreamCacheResource {
+class StreamCacheResource: public std::enable_shared_from_this<StreamCacheResource> {
 public:
     StreamCacheResource(GenerateStream*        stream,
                         const ResourceContext& resource_context,
@@ -82,9 +84,7 @@ public:
         return resource_context_;
     }
 
-    int seqSizePerBlock() const {
-        return resource_context_.cache_manager->cacheConfig().seq_size_per_block;
-    }
+    int seqSizePerBlock() const;
 
     void setNeedReleaseResource(bool need_release_resource) {
         need_release_resource_ = need_release_resource;
@@ -96,6 +96,7 @@ public:
 
     bool asyncLoadCache();
     bool loadCacheDone();
+    bool asyncStoreCache();
 
     std::string debugString() const {
         std::stringstream debug_string;
@@ -121,6 +122,8 @@ private:
 
     // for load cache from connector to gpu
     std::shared_ptr<AsyncContext> load_cache_context_;
+    // for store cache from gpu to connector
+    std::shared_ptr<AsyncContext> store_cache_context_;
 };
 
 }  // namespace rtp_llm
