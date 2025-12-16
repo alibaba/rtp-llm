@@ -16,7 +16,7 @@ TEST_F(ROCmMemoryTest, testVmemAllocate) {
 
     auto ptr1 = vmem_allocator->malloc(allocation_size);
     auto ptr2 = vmem_allocator->malloc(allocation_size);
-    auto ptr3 = vmem_allocator->mallocPhysical(allocation_size);
+    auto ptr3 = vmem_allocator->mallocResidentMemory(allocation_size);
 
     EXPECT_EQ(ptr1 != nullptr, true);
     EXPECT_EQ(ptr2 != nullptr, true);

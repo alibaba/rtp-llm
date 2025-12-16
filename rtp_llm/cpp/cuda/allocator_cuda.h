@@ -115,7 +115,7 @@ public:
      *          is invoked.
      */
     void  unmap() override;
-    void* mallocPhysical(size_t size) override;
+    void* mallocResidentMemory(size_t size) override;
 
 private:
     struct VmemBlock {

@@ -66,20 +66,14 @@ public:
     }
 
     /**
-     * @brief Allocate pinned physical memory and optionally mark it as pinned
-     *        in the virtual memory bookkeeping.
-     *
-     * If virtual memory management is not supported on the current device,
-     * this call falls back to a plain device allocation and returns a raw
-     * device pointer. If virtual memory management is enabled, this call
-     * allocates memory via the virtual-memory-aware malloc interface and
-     * marks the corresponding VmemBlock as pinned to prevent it from being
-     * unmapped by unmap().
+     * @brief Allocate resident memory and mark it as pinned
+     *        in the virtual memory managment. prevent it from being
+     *        unmapped by unmap().
      *
      * @param size Number of bytes to allocate.
      * @return Pointer to the allocated memory (virtual or physical).
      */
-    void* mallocPhysical(size_t size) {
+    void* mallocResidentMemory(size_t size) {
         void* p = malloc(size);
         if (!_enable_virtual_mem_allocation)
             return p;

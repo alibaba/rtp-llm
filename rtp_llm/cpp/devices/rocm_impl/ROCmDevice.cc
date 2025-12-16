@@ -172,9 +172,11 @@ ROCmDevice::~ROCmDevice() {
 void ROCmDevice::init() {
     DeviceBase::init();
     RTP_LLM_LOG_INFO("max batch size: %d", init_params_.max_batch_size);
-    curandstate_buf_ = allocateBuffer(
-        {init_params_.max_batch_size * sizeof(curandState_t), AllocationType::DEVICE, false, VmemCtl::ForcePhysical},
-        {"curandstate"});
+    curandstate_buf_ = allocateBuffer({init_params_.max_batch_size * sizeof(curandState_t),
+                                       AllocationType::DEVICE,
+                                       false,
+                                       VmemCtl::ForceMemoryResident},
+                                      {"curandstate"});
 }
 
 DeviceProperties ROCmDevice::getDeviceProperties() {
@@ -760,7 +762,8 @@ BufferPtr ROCmDevice::mhaQKVGemm(const AttentionLayerParams& params) {
         auto lora_linear_params          = LoraLinearParams(qkv_gemm_params, params.common.lora_input.qkv_lora_input);
         qkv = loraLinearWithActivation(LoraLinearWithActivationParams(lora_linear_params, act_params));
     } else {
-        auto qkv_gemm_params = GemmParams(input, *(qkv_weight->kernel), std::nullopt, nullptr, DataType::TYPE_INVALID, params.output->type());
+        auto qkv_gemm_params = GemmParams(
+            input, *(qkv_weight->kernel), std::nullopt, nullptr, DataType::TYPE_INVALID, params.output->type());
         qkv = loraLinear(LoraLinearParams(qkv_gemm_params, params.common.lora_input.qkv_lora_input)).output;
     }
     printBufferData(*qkv, "qkv");
