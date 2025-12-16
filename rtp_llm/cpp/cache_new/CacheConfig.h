@@ -126,6 +126,9 @@ struct CacheConfig {
     size_t v_block_stride  = 0;  // for one layer
     size_t kv_block_stride = 0;  // for one layer
 
+    size_t memory_block_cache_size_mb{0};
+    size_t memory_block_cache_sync_timeout_ms{10000};
+
     CacheConfig() {}
 };
 

@@ -167,6 +167,11 @@ CacheLayerLayout SingleTypeKVCacheAllocator::layerCacheBase() const {
             layout.layers_to_buffer_ptrs[layer_id] = kv.second;
         }
     }
+    layout.layer_to_groups.reserve(config_.layer_num);
+    int group_id = full_kv_cache_group_->group_id();
+    for (int layed_id = 0; layed_id < config_.layer_num; layed_id++) {
+        layout.layer_to_groups.push_back(group_id);
+    }
     return layout;
 }
 
@@ -306,7 +311,7 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& kv
         auto&     fork_count    = batch_fork_count[old_batch_idx];
         RTP_LLM_CHECK_WITH_INFO(fork_count > 0, "old batch %d has been forked too many times", old_batch_idx);
 
-        kv_cache_resource->initGroups(1);
+        kv_cache_resource->initGroups(1, config_.layer_num);
 
         if (fork_count == 1) {
             auto& br       = kv_cache_resource->batch_resource[new_batch_idx];

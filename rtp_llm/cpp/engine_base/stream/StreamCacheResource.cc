@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/utils/HashUtil.h"
 #include "rtp_llm/cpp/core/BufferHelper.h"
 #include "rtp_llm/cpp/cache_new/types.h"
+#include "rtp_llm/cpp/cache_new/HybridReadAsyncContext.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 
 using namespace std;
@@ -11,7 +12,11 @@ namespace rtp_llm {
 
 void StreamCacheResource::init(int batch_size) {
     batch_resource_->resetBatchSize(batch_size);
-    batch_resource_->initGroups(1);
+    int layer_num = 0;
+    if (resource_context_.cache_manager) {
+        layer_num = resource_context_.cache_manager->cacheConfig().layer_num;
+    }
+    batch_resource_->initGroups(1, layer_num);
     batch_resource_->enable_reuse_cache = reuseCache();
 }
 
@@ -41,18 +46,21 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
 
     // NOTE: Currently only support releasing all blocks
     // Partial release (shrink) is not supported yet
-    int total_blocks = maxBlocksNum();
-    RTP_LLM_CHECK(nums == total_blocks);
+    int release_blocks_num = maxBlocksNum();
+    RTP_LLM_CHECK(nums == release_blocks_num);
 
-    if (total_blocks > 0) {
-        // TODO(xinfei.sxf) fix it, after finshed and remote running commit.
-        if (reuseCache()) {
-            InsertInfo insert_info{batch_resource_, stream_->completeTokenIdsPtr(), false};
-            resource_context_.cache_manager->insertIntoCache(insert_info);
-        }
-
-        FreeInfo free_info{batch_resource_, stream_->completeTokenIdsPtr()};
+    if (release_blocks_num > 0 && batch_resource_->batchSize() > 0) {
+        // Free all blocks using KVCacheManager::free
+        FreeInfo free_info(batch_resource_,
+                           stream_->completeTokenIdsPtr(),
+                           reuseCache(),
+                           enableMemoryBlockCache(),
+                           enableRemoteCache(),
+                           enableDeviceCache(),
+                           syncWaitWrite());
         free_info.request_id = stream_->streamId();
+
+        // TODO(chanyin): Handle cache insertion for reuse_cache case
 
         resource_context_.cache_manager->free(free_info);
     }
@@ -61,7 +69,7 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
     if (stream_->enable_fast_gen_) {
         stream_->resetChunkLen(0, stream_->seqLength());
     }
-    return total_blocks;
+    return release_blocks_num;
 }
 
 // TODO, 等待删除。
@@ -171,12 +179,59 @@ bool StreamCacheResource::reuseCache() const {
     return resource_context_.reuse_cache && stream_->reuseCache();
 }
 
-bool StreamCacheResource::enable3FS() const {
-    return resource_context_.enable_3fs && stream_->enable3FS();
-}
-
 bool StreamCacheResource::enableMemoryBlockCache() const {
     return resource_context_.enable_memory_block_cache && stream_->enableMemoryBlockCache();
+}
+
+bool StreamCacheResource::enableRemoteCache() const {
+    return resource_context_.enable_remote_cache && stream_->enableRemoteCache();
+}
+
+bool StreamCacheResource::enableDeviceCache() const {
+    return resource_context_.enable_device_cache && stream_->enableDeviceCache();
+}
+
+bool StreamCacheResource::syncWaitWrite() const {
+    return resource_context_.sync_wait_write && stream_->syncWaitWrite();
+}
+
+bool StreamCacheResource::asyncLoadCache() {
+    if (!(enableMemoryBlockCache() || enableRemoteCache())) {
+        RTP_LLM_LOG_DEBUG("no connector");
+        return false;
+    }
+    load_cache_context_ = resource_context_.cache_manager->asyncLoadCache(stream_->streamId(), batch_resource_);
+    return load_cache_context_ != nullptr;
+}
+
+bool StreamCacheResource::loadCacheDone() {
+    if (!load_cache_context_) {
+        return true;
+    }
+    if (!load_cache_context_->done()) {
+        return false;
+    }
+    if (load_cache_context_->success()) {
+        auto device_reuse_len = stream_->reuseLength();
+        auto remote_reuse_len =
+            std::static_pointer_cast<HybridReadAsyncContext>(load_cache_context_)->remote_reuse_block_num()
+            * seqSizePerBlock();
+        auto& resource      = batch_resource_->batch_resource.at(0);
+        int   all_reuse_len = resource.reuseBlocksNum() * seqSizePerBlock();
+        if (stream_->inputLength() == all_reuse_len) {
+            all_reuse_len -= seqSizePerBlock();
+            if (remote_reuse_len >= seqSizePerBlock()) {
+                remote_reuse_len -= seqSizePerBlock();
+            }
+        }
+        stream_->setInitialReuseLength(all_reuse_len);
+        stream_->setReuseLength(all_reuse_len);
+        stream_->setLocalReuseLength(device_reuse_len);  // TODO ? 这对吗
+        stream_->setMtpTokenIndex(all_reuse_len);
+        stream_->setRemoteReuseLength(remote_reuse_len);
+    }
+    load_cache_context_.reset();
+    return true;
 }
 
 }  // namespace rtp_llm

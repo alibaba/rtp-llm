@@ -63,14 +63,15 @@ CompleteTokenIdsPtr createCompleteTokenIds(int batch_size, int seq_length) {
     return complete_token_ids;
 }
 
-BatchKVCacheResourcePtr createBatchKVCacheResource(int batch_size, int group_nums = 0, int cache_key_nums = 0) {
+BatchKVCacheResourcePtr
+createBatchKVCacheResource(int batch_size, int group_nums = 0, int layer_num = 0, int cache_key_nums = 0) {
     auto resource = std::make_shared<BatchKVCacheResource>();
     resource->batch_resource.resize(batch_size);
     for (int i = 0; i < batch_size; ++i) {
         for (size_t j = 0; j < cache_key_nums; ++j) {
             resource->batch_resource[i].cache_keys.push_back(100 + j);
         }
-        resource->batch_resource[i].initGroups(group_nums);
+        resource->batch_resource[i].initGroups(group_nums, layer_num);
     }
     return resource;
 }
@@ -572,7 +573,7 @@ TEST_F(HybridLayerKVCacheAllocatorTest, InsertIntoCache) {
     auto total_blocks = allocator_->freeBlocksNum();
 
     int  seq_length         = 16;
-    auto batch_resource     = createBatchKVCacheResource(2, 3, 4);
+    auto batch_resource     = createBatchKVCacheResource(2, 3, 1, 4);
     auto complete_token_ids = createCompleteTokenIds(2, seq_length);
 
     MallocInfo malloc_info{batch_resource, complete_token_ids};
@@ -583,7 +584,7 @@ TEST_F(HybridLayerKVCacheAllocatorTest, InsertIntoCache) {
 
     // batch 0: 12个block，9个block可以insert to cache。
     // batch 1: 12个block，在前面都insert to cache过了。
-    InsertInfo insert_info1{batch_resource, complete_token_ids, false};
+    InsertInfo insert_info1(0, batch_resource, complete_token_ids, false);
     allocator_->insertIntoCache(insert_info1);
     ASSERT_EQ(block_cache->size(), 9);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_blocks - (3 * 4));
@@ -592,7 +593,7 @@ TEST_F(HybridLayerKVCacheAllocatorTest, InsertIntoCache) {
     // batch 1: 12个block，在前面都insert to cache过了。
     seq_length                      = 17;
     auto       complete_token_ids_2 = createCompleteTokenIds(2, seq_length);
-    InsertInfo insert_info2{batch_resource, complete_token_ids_2, false};
+    InsertInfo insert_info2(0, batch_resource, complete_token_ids_2, false);
     allocator_->insertIntoCache(insert_info2);
     ASSERT_EQ(block_cache->size(), 12);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_blocks - (3 * 4));
@@ -605,14 +606,14 @@ TEST_F(HybridLayerKVCacheAllocatorTest, InsertIntoCacheAsResident) {
     auto total_blocks = allocator_->freeBlocksNum();
 
     int  seq_length         = 17;
-    auto batch_resource     = createBatchKVCacheResource(2, 3, 4);
+    auto batch_resource     = createBatchKVCacheResource(2, 3, 1, 4);
     auto complete_token_ids = createCompleteTokenIds(2, seq_length);
 
     MallocInfo malloc_info{batch_resource, complete_token_ids};
     malloc_info.common_seq_len = 16;
     allocator_->malloc(malloc_info);
 
-    InsertInfo insert_info{batch_resource, complete_token_ids, true};
+    InsertInfo insert_info(0, batch_resource, complete_token_ids, true);
     allocator_->insertIntoCache(insert_info);
 
     EXPECT_EQ(allocator_->freeBlocksNum(), total_blocks - (3 * 5 + 3 * 1));

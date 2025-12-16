@@ -49,17 +49,8 @@ class ServerArgsDefaultTest(TestCase):
         self.assertIsNone(env.get("MULTI_TASK_PROMPT_STR"))
         self.assertEqual(env.get("INT8_KV_CACHE"), "0")
         self.assertEqual(env.get("KV_CACHE_MEM_MB"), "-1")
-        # self.assertIsNone(env.get("SEQ_SIZE_PER_BLOCK"))
         self.assertEqual(env.get("TEST_BLOCK_NUM"), "0")
-        self.assertEqual(env["ENABLE_3FS"], "0")
-        self.assertEqual(env["THREEFS_MATCH_TIMEOUT_MS"], "1000")
-        self.assertEqual(env.get("THREEFS_RPC_GET_CACHE_TIMEOUT_MS"), "3000")
-        self.assertEqual(env.get("THREEFS_RPC_PUT_CACHE_TIMEOUT_MS"), "3000")
-        self.assertEqual(env.get("THREEFS_READ_TIMEOUT_MS"), "1000")
-        self.assertEqual(env.get("THREEFS_WRITE_TIMEOUT_MS"), "2000")
         self.assertEqual(env.get("MAX_BLOCK_SIZE_PER_ITEM"), "16")
-        self.assertEqual(env.get("THREEFS_READ_IOV_SIZE"), "4294967296")
-        self.assertEqual(env.get("THREEFS_WRITE_IOV_SIZE"), "4294967296")
         self.assertEqual(env.get("MEMORY_BLOCK_CACHE_SIZE_MB"), "0")
         self.assertEqual(env.get("MEMORY_BLOCK_CACHE_SYNC_TIMEOUT_MS"), "10000")
 
@@ -340,22 +331,22 @@ class ServerArgsSetTest(TestCase):
             "64",
             "--test_block_num",
             "128",
-            "--enable_3fs",
-            "True",
-            "--threefs_match_timeout_ms",
-            "5000",
-            "--threefs_rpc_get_cache_timeout_ms",
-            "5000",
-            "--threefs_rpc_put_cache_timeout_ms",
-            "5000",
-            "--threefs_read_timeout_ms",
-            "5000",
-            "--threefs_write_timeout_ms",
-            "5000",
-            "--threefs_read_iov_size",
-            "1073741824",
-            "--threefs_write_iov_size",
-            "1073741824",
+            # "--enable_3fs",
+            # "True",
+            # "--threefs_match_timeout_ms",
+            # "5000",
+            # "--threefs_rpc_get_cache_timeout_ms",
+            # "5000",
+            # "--threefs_rpc_put_cache_timeout_ms",
+            # "5000",
+            # "--threefs_read_timeout_ms",
+            # "5000",
+            # "--threefs_write_timeout_ms",
+            # "5000",
+            # "--threefs_read_iov_size",
+            # "1073741824",
+            # "--threefs_write_iov_size",
+            # "1073741824",
             "--memory_block_cache_size_mb",
             "10",
             "--memory_block_cache_sync_timeout_ms",
@@ -748,14 +739,13 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(env["KV_CACHE_MEM_MB"], "2048")
         self.assertEqual(env["SEQ_SIZE_PER_BLOCK"], "64")
         self.assertEqual(env["TEST_BLOCK_NUM"], "128")
-        self.assertEqual(env["ENABLE_3FS"], "1")
-        self.assertEqual(env.get("THREEFS_MATCH_TIMEOUT_MS"), "5000")
-        self.assertEqual(env.get("THREEFS_RPC_GET_CACHE_TIMEOUT_MS"), "5000")
-        self.assertEqual(env.get("THREEFS_RPC_PUT_CACHE_TIMEOUT_MS"), "5000")
-        self.assertEqual(env.get("THREEFS_READ_TIMEOUT_MS"), "5000")
-        self.assertEqual(env.get("THREEFS_WRITE_TIMEOUT_MS"), "5000")
-        self.assertEqual(env.get("THREEFS_READ_IOV_SIZE"), "1073741824")
-        self.assertEqual(env.get("THREEFS_WRITE_IOV_SIZE"), "1073741824")
+        # self.assertEqual(env.get("THREEFS_MATCH_TIMEOUT_MS"), "5000")
+        # self.assertEqual(env.get("THREEFS_RPC_GET_CACHE_TIMEOUT_MS"), "5000")
+        # self.assertEqual(env.get("THREEFS_RPC_PUT_CACHE_TIMEOUT_MS"), "5000")
+        # self.assertEqual(env.get("THREEFS_READ_TIMEOUT_MS"), "5000")
+        # self.assertEqual(env.get("THREEFS_WRITE_TIMEOUT_MS"), "5000")
+        # self.assertEqual(env.get("THREEFS_READ_IOV_SIZE"), "1073741824")
+        # self.assertEqual(env.get("THREEFS_WRITE_IOV_SIZE"), "1073741824")
         self.assertEqual(env.get("MEMORY_BLOCK_CACHE_SIZE_MB"), "10")
         self.assertEqual(env.get("MEMORY_BLOCK_CACHE_SYNC_TIMEOUT_MS"), "5000")
 
@@ -945,8 +935,10 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(env["DASHSCOPE_HTTP_URL"], "http://test.url")
         self.assertEqual(env["DASHSCOPE_WEBSOCKET_URL"], "ws://test.url")
         self.assertEqual(env["OPENAI_API_KEY"], "test_openai_key")
-        self.assertEqual(env["JSON_MODEL_OVERRIDE_ARGS"],
-                         '{"rope_scaling":{"type":"yarn","factor":2.0,"original_max_position_embeddings":32768,"beta_slow":1.0,"beta_fast":1.0,"mscale":1.0,"extrapolation_factor":1.0}}')
+        self.assertEqual(
+            env["JSON_MODEL_OVERRIDE_ARGS"],
+            '{"rope_scaling":{"type":"yarn","factor":2.0,"original_max_position_embeddings":32768,"beta_slow":1.0,"beta_fast":1.0,"mscale":1.0,"extrapolation_factor":1.0}}',
+        )
 
         # 27. Lora Configuration
         self.assertEqual(env["LORA_INFO"], '{"lora1": "/path/to/lora1"}')
@@ -966,9 +958,7 @@ class ServerArgsSetTest(TestCase):
 
         # 30. Miscellaneous Configuration
         self.assertEqual(env["DISABLE_PDL"], "1")
-        self.assertEqual(
-            env["AUX_STRING"], ""
-        )
+        self.assertEqual(env["AUX_STRING"], "")
 
         # 31. PD-Separation Configuration
         self.assertEqual(env["PREFILL_RETRY_TIMES"], "2")

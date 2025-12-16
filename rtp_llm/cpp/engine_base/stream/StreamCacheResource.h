@@ -91,8 +91,13 @@ public:
     }
 
     bool reuseCache() const;
-    bool enable3FS() const;
+    bool enable3FS() const;  // TODO : delete this
     bool enableMemoryBlockCache() const;
+    bool enableRemoteCache() const;
+    bool enableDeviceCache() const;
+    bool syncWaitWrite() const;
+    bool asyncLoadCache();
+    bool loadCacheDone();
 
     std::string debugString() const {
         std::stringstream debug_string;
@@ -115,6 +120,9 @@ private:
     bool last_block_aligned_    = false;
     int  malloc_failed_times_   = 0;
     bool fake_inited_           = false;
+
+    // for read cache from memory/remote to gpu
+    std::shared_ptr<AsyncContext> load_cache_context_;
 };
 
 }  // namespace rtp_llm

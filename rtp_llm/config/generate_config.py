@@ -128,11 +128,16 @@ class GenerateConfig(BaseModel):
     # 只有开启环境变量 REUSE_CACHE 时才生效
     reuse_cache: bool = True
 
-    # 只有开启环境变量 ENABLE_3FS 时才生效
-    enable_3fs: bool = True
-
     # 是否启用 memory block cache
     enable_memory_block_cache: bool = True
+
+    enable_remote_cache: bool = True
+
+    # close device cache manually, only use memory_cache or remote_cache(only for debug and test)
+    enable_device_cache: bool = True
+
+    # 是否开启同步写入
+    sync_wait_write: bool = True
 
     def gen_hash_value(self):
         cp = copy.copy(self)
