@@ -79,7 +79,11 @@ class FrontendServer(object):
         else:
             # Create frontend worker with dependencies
             self._frontend_worker = FrontendWorker(
-                self._model_config, self._tokenizer, self._backend_rpc_server_visitor
+                self._model_config,
+                self._tokenizer,
+                self._backend_rpc_server_visitor,
+                self.rank_id,
+                self.server_id,
             )
 
             # Initialize endpoints based on task type
@@ -102,6 +106,8 @@ class FrontendServer(object):
                     self._model_config,
                     self._tokenizer,
                     self._backend_rpc_server_visitor,
+                    self.rank_id,
+                    self.server_id,
                 )
 
     def stop(self):
@@ -147,99 +153,30 @@ class FrontendServer(object):
             self._global_controller.decrement()
 
     # use asyncio.sleep(0) to correctly exit when client closed https://github.com/tiangolo/fastapi/issues/4146
-    async def stream_response(
-        self,
-        request: Dict[str, Any],
-        response: CompleteResponseAsyncGenerator,
+
+    async def inference(
+        self, request: Union[str, Dict[Any, Any]], raw_request: RawRequest
     ):
-        is_openai_response = request.get("stream", False)
-        response_data_prefix = "data: " if is_openai_response else "data:"
-        try:
-            async for res in response:
-                data_str = res.model_dump_json(exclude_none=True)
-                yield response_data_prefix + data_str + "\r\n\r\n"
-                await asyncio.sleep(0)
-            if not is_openai_response:
-                yield f"data:[done]\r\n\r\n"
-            await self._collect_complete_response_and_record_access_log(
-                request, response
-            )
-        except asyncio.CancelledError as e:
-            self._access_logger.log_exception_access(request, e)
-            kmonitor.report(
-                AccMetrics.CANCEL_QPS_METRIC,
-                1,
-                {
-                    "rank_id": self.rank_id,
-                    "server_id": self.server_id,
-                    "source": request.get("source", "unkown"),
-                },
-            )
-        except BaseException as e:
-            # 捕获非Cancel以外所有的异常,所以使用BaseException
-            self._access_logger.log_exception_access(request, e)
-            format_e = format_exception(e)
-            kmonitor.report(
-                AccMetrics.ERROR_QPS_METRIC,
-                1,
-                {
-                    "rank_id": self.rank_id,
-                    "server_id": self.server_id,
-                    "source": request.get("source", "unkown"),
-                    "error_code": str(format_e.get("error_code_str", -1)),
-                },
-            )
-            yield response_data_prefix + json.dumps(
-                format_e, ensure_ascii=False
-            ) + "\r\n\r\n"
-        finally:
-            self._global_controller.decrement()
+        assert self._frontend_worker is not None
+        req_id = self._global_controller.increment()
+        request = self._frontend_worker._check_request(request, req_id)
 
-    async def inference(self, req: Union[str, Dict[Any, Any]], raw_request: RawRequest):
         try:
-            if isinstance(req, str):
-                req = json.loads(req)
-            assert isinstance(req, dict)
-            if "master_info" in req:
-                request_id = req["master_info"].get("request_id")
-                check_with_info(
-                    request_id != None and isinstance(request_id, int),
-                    "request_id in master_info is None or not int",
-                )
-                req[request_id_field_name] = request_id
-                self._global_controller.increment()
-            else:
-                req[request_id_field_name] = self._global_controller.increment()
-        except Exception as e:
-            return self._handle_exception(req, e)
-
-        # 直接展开原 _infer_impl 的逻辑
-        try:
-            assert self._frontend_worker is not None
-            kmonitor.report(
-                AccMetrics.QPS_METRIC,
-                1,
-                {
-                    "rank_id": self.rank_id,
-                    "server_id": self.server_id,
-                    "source": req.get("source", "unkown"),
-                },
-            )
-            self._access_logger.log_query_access(req)
-            is_streaming = RequestExtractor.is_streaming(req) or req.get(
-                "stream", False
-            )
+            self._frontend_worker._report_qps_metrics(request)
 
             if await raw_request.is_disconnected():
                 raise asyncio.CancelledError("client disconnects")
 
-            # 直接调用 frontend_worker.inference
-            response_generator = self._frontend_worker.inference(**req)
-            res = await self._call_generate_with_report(lambda: response_generator)
+            response_generator = self._frontend_worker.inference(**request)
 
-            if is_streaming:
+            res = await self._frontend_worker._call_generate_with_report(
+                lambda: response_generator
+            )
+
+            if self._frontend_worker._check_is_streaming(request):
                 return StreamingResponse(
-                    self.stream_response(req, res), media_type="text/event-stream"
+                    self._frontend_worker._stream_response(request, res),
+                    media_type="text/event-stream",
                 )
 
             async for x in res:
@@ -247,65 +184,41 @@ class FrontendServer(object):
                     await res.aclose()
                     raise asyncio.CancelledError("client disconnects")
 
-            complete_response = (
-                await self._collect_complete_response_and_record_access_log(req, res)
+            complete_response = await self._frontend_worker._collect_complete_response_and_record_access_log(
+                request, res
             )
             self._global_controller.decrement()
             return ORJSONResponse(content=complete_response)
 
         except BaseException as e:
             self._global_controller.decrement()
-            return self._handle_exception(req, e)
+            return self._frontend_worker._handle_exception(request, e)
 
     async def chat_completion(
         self, request: ChatCompletionRequest, raw_request: Request
     ):
+        assert self._openai_endpoint != None
+
+        req_id = self._global_controller.increment()
+        request_dict = self._openai_endpoint._check_request(request, req_id)
         try:
-            if request.master_info is not None:
-                request_id = request.master_info.get("request_id")
-                check_with_info(
-                    request_id != None and isinstance(request_id, int),
-                    "request_id in master_info is None or not int",
-                )
-                self._global_controller.increment()
-            else:
-                request_id = self._global_controller.increment()
-        except Exception as e:
-            return self._handle_exception(request, e)
-
-        # 直接展开原 _infer_impl 的逻辑
-        try:
-            request_dict = request.model_dump(exclude_none=True)
-            request_dict[request_id_field_name] = request_id
-
-            assert self._openai_endpoint != None
-            kmonitor.report(
-                AccMetrics.QPS_METRIC,
-                1,
-                {
-                    "rank_id": self.rank_id,
-                    "server_id": self.server_id,
-                    "source": request_dict.get("source", "unkown"),
-                },
-            )
-            self._access_logger.log_query_access(request_dict)
-            is_streaming = RequestExtractor.is_streaming(
-                request_dict
-            ) or request_dict.get("stream", False)
-
+            self._openai_endpoint._report_qps_metrics(request_dict)
             if await raw_request.is_disconnected():
                 raise asyncio.CancelledError("client disconnects")
 
-            # 直接调用 openai_endpoint.chat_completion
             response_generator = self._openai_endpoint.chat_completion(
-                request_id, request, raw_request
+                request_id=request_dict[request_id_field_name],
+                chat_request=request,
+                raw_request=raw_request,
             )
             assert isinstance(
                 response_generator, CompleteResponseAsyncGenerator
             ), f"error type: {type(response_generator)}"
-            res = await self._call_generate_with_report(lambda: response_generator)
+            res = await self._openai_endpoint._call_generate_with_report(
+                lambda: response_generator
+            )
 
-            if is_streaming:
+            if self._openai_endpoint._check_is_streaming(request_dict):
                 return StreamingResponse(
                     self.stream_response(request_dict, res),
                     media_type="text/event-stream",
@@ -316,135 +229,24 @@ class FrontendServer(object):
                     await res.aclose()
                     raise asyncio.CancelledError("client disconnects")
 
-            complete_response = (
-                await self._collect_complete_response_and_record_access_log(
-                    request_dict, res
-                )
+            complete_response = await self._openai_endpoint._collect_complete_response_and_record_access_log(
+                request_dict, res
             )
             self._global_controller.decrement()
             return ORJSONResponse(content=complete_response)
 
         except BaseException as e:
             self._global_controller.decrement()
-            return self._handle_exception(
+            return self._openai_endpoint._handle_exception(
                 request_dict if "request_dict" in locals() else request, e
             )
 
     async def chat_render(self, request: ChatCompletionRequest, raw_request: Request):
+        assert self._openai_endpoint != None
         try:
-            assert self._openai_endpoint != None
             return self._openai_endpoint.chat_render(request)
         except Exception as e:
             return ORJSONResponse(format_exception(e), status_code=500)
-
-    def _handle_exception(self, request: Dict[str, Any], e: BaseException):
-        exception_json = format_exception(e)
-        error_code_str = exception_json.get("error_code_str", "")
-        if isinstance(e, ConcurrencyException):
-            kmonitor.report(AccMetrics.CONFLICT_QPS_METRIC)
-        elif isinstance(e, asyncio.CancelledError):
-            kmonitor.report(
-                AccMetrics.CANCEL_QPS_METRIC,
-                1,
-                {
-                    "rank_id": self.rank_id,
-                    "server_id": self.server_id,
-                    "source": request.get("source", "unknown"),
-                },
-            )
-            self._access_logger.log_exception_access(request, e)
-        else:
-            kmonitor.report(
-                AccMetrics.ERROR_QPS_METRIC,
-                1,
-                {
-                    "rank_id": self.rank_id,
-                    "server_id": self.server_id,
-                    "source": request.get("source", "unknown"),
-                    "error_code": error_code_str,
-                },
-            )
-            self._access_logger.log_exception_access(request, e)
-
-        rep = ORJSONResponse(exception_json, status_code=500)
-        return rep
-
-    async def _call_generate_with_report(
-        self, generate_call: Callable[[], CompleteResponseAsyncGenerator]
-    ):
-        async def __gen_response_with_report(start_time: float, response_generator):
-            last_iterate_time = current_time_ms()
-            first_token = True
-            iter_count = 0
-            async for response in response_generator:
-                end_time = current_time_ms()
-                if first_token:
-                    first_token = False
-                    kmonitor.report(
-                        GaugeMetrics.RESPONSE_FIRST_TOKEN_RT_METRIC,
-                        end_time - last_iterate_time,
-                    )
-                else:
-                    step_output_len = 1
-                    if hasattr(response, "aux_info"):
-                        if isinstance(response.aux_info, list):
-                            step_output_len = 0
-                            for info in response.aux_info:
-                                step_output_len += info.get("step_output_len", 1)
-                        elif isinstance(response.aux_info, dict):
-                            step_output_len = max(
-                                response.aux_info.get("step_output_len", 1),
-                                step_output_len,
-                            )
-
-                    kmonitor.report(
-                        GaugeMetrics.RESPONSE_ITER_RT_METRIC,
-                        (end_time - last_iterate_time) / step_output_len,
-                    )
-                kmonitor.report(
-                    AccMetrics.ITER_QPS_METRIC,
-                    1,
-                    {
-                        "rank_id": self.rank_id,
-                        "server_id": self.server_id,
-                    },
-                )
-                last_iterate_time = end_time
-                iter_count += 1
-                yield response
-            kmonitor.report(GaugeMetrics.RESPONSE_ITERATE_COUNT, iter_count)
-            kmonitor.report(
-                GaugeMetrics.LANTENCY_METRIC, current_time_ms() - start_time
-            )
-            kmonitor.report(
-                AccMetrics.SUCCESS_QPS_METRIC,
-                1,
-                {
-                    "rank_id": self.rank_id,
-                    "server_id": self.server_id,
-                },
-            )
-
-        assert self._frontend_worker is not None
-        start_time = current_time_ms()
-        response_generator = generate_call()
-        return CompleteResponseAsyncGenerator(
-            __gen_response_with_report(start_time, response_generator),
-            response_generator._collect_complete_response_func,
-        )
-
-    async def _collect_complete_response_and_record_access_log(
-        self, req: Dict[Any, Any], res: Any
-    ):
-        complete_response = await res.gen_complete_response_once()
-        complete_response = (
-            complete_response.model_dump(exclude_none=True)
-            if isinstance(complete_response, BaseModel)
-            else complete_response
-        )
-        self._access_logger.log_success_access(req, complete_response)
-
-        return complete_response
 
     def tokenize(self, req: str | Dict[str, Any]):
         try:

@@ -45,7 +45,11 @@ from rtp_llm.frontend.tokenizer_factory.tokenizers.base_tokenizer import BaseTok
 from rtp_llm.metrics import GaugeMetrics, kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
-from rtp_llm.structure.request_extractor import Request, RequestExtractor
+from rtp_llm.structure.request_extractor import (
+    Request,
+    RequestExtractor,
+    request_id_field_name,
+)
 from rtp_llm.utils.base_model_datatypes import (
     GenerateInput,
     GenerateOutput,
@@ -55,9 +59,14 @@ from rtp_llm.utils.base_model_datatypes import (
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
+from rtp_llm.utils.concurrency_controller import (
+    ConcurrencyController,
+    ConcurrencyException,
+    get_global_controller,
+)
 from rtp_llm.utils.multimodal_util import MultimodalInput
 from rtp_llm.utils.time_util import current_time_ms
-from rtp_llm.utils.util import AtomicCounter
+from rtp_llm.utils.util import AtomicCounter, check_with_info
 from rtp_llm.utils.word_util import (
     batch_remove_padding_eos,
     get_stop_word_slices,
@@ -104,14 +113,36 @@ class FrontendWorker(BaseEndpoint):
         model_config,
         tokenizer,
         backend_rpc_server_visitor: BackendRPCServerVisitor,
+        rank_id,
+        server_id,
     ) -> None:
         logging.info("starting frontend worker")
-        super().__init__(model_config, tokenizer, backend_rpc_server_visitor)
+        super().__init__(
+            model_config, tokenizer, backend_rpc_server_visitor, rank_id, server_id
+        )
         self._special_tokens: int = self.model_config.special_tokens
         self._mm_token: str = self.model_config.mm_related_params.special_tokens.get(
             "default_mm_token", ""
         )
         logging.info("frontend worker start done.")
+
+    def _check_request(self, req: Dict[str, Any], req_id: int) -> None:
+        try:
+            if isinstance(req, str):
+                req = json.loads(req)
+            assert isinstance(req, dict)
+            if "master_info" in req:
+                request_id = req["master_info"].get("request_id")
+                check_with_info(
+                    request_id != None and isinstance(request_id, int),
+                    "request_id in master_info is None or not int",
+                )
+                req[request_id_field_name] = request_id
+            else:
+                req[request_id_field_name] = req_id
+            return req
+        except Exception as e:
+            return self._handle_exception(req, e)
 
     def inference(self, **kwargs: Any) -> CompleteResponseAsyncGenerator:
         default_generate_config = GenerateConfig()

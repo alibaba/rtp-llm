@@ -43,9 +43,20 @@ from rtp_llm.openai.renderers.custom_renderer import (
     StreamResponseObject,
 )
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
+from rtp_llm.structure.request_extractor import (
+    Request,
+    RequestExtractor,
+    request_id_field_name,
+)
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
+from rtp_llm.utils.concurrency_controller import (
+    ConcurrencyController,
+    ConcurrencyException,
+    get_global_controller,
+)
+from rtp_llm.utils.util import check_with_info
 
 
 class OpenaiEndpoint(BaseEndpoint):
@@ -54,8 +65,12 @@ class OpenaiEndpoint(BaseEndpoint):
         model_config: GptInitModelParameters,
         tokenizer: BaseTokenizer,
         backend_rpc_server_visitor: BackendRPCServerVisitor,
+        rank_id,
+        server_id,
     ):
-        super().__init__(model_config, tokenizer, backend_rpc_server_visitor)
+        super().__init__(
+            model_config, tokenizer, backend_rpc_server_visitor, rank_id, server_id
+        )
         self._init_basic_attributes(model_config, tokenizer, backend_rpc_server_visitor)
         self._init_renderers()
         self._init_stop_words()
@@ -145,6 +160,22 @@ class OpenaiEndpoint(BaseEndpoint):
             f"use stop_words_str_list [{self.stop_words_str_list}], "
             f"stop_words_id_list [{self.stop_words_id_list}]"
         )
+
+    def _check_request(self, request, global_controller: int):
+        try:
+            if request.master_info is not None:
+                request_id = request.master_info.get("request_id")
+                check_with_info(
+                    request_id != None and isinstance(request_id, int),
+                    "request_id in master_info is None or not int",
+                )
+            else:
+                request_id = global_controller
+            request_dict = request.model_dump(exclude_none=True)
+            request_dict[request_id_field_name] = request_id
+            return request_dict
+        except Exception as e:
+            return self._handle_exception(request, e)
 
     async def list_models(self):
         global model_args
@@ -469,9 +500,9 @@ class OpenaiEndpoint(BaseEndpoint):
             rendered_input.input_ids += self.tokenizer.encode(prepopulate_str)
         return rendered_input
 
-    def chat_completion(
-        self, request_id: int, chat_request: ChatCompletionRequest, raw_request: Request
-    ) -> CompleteResponseAsyncGenerator:
+    def chat_completion(self, **kwargs) -> CompleteResponseAsyncGenerator:
+        request_id = kwargs.get("request_id")
+        chat_request = kwargs.get("chat_request")
         renderer = (
             self.template_renderer if chat_request.user_template else self.chat_renderer
         )
