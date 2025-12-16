@@ -10,16 +10,16 @@
 namespace rtp_llm {
 
 enum class VmemCtl {
-    TryVirtual = 0,
-    ForcePhysical = 1
+    Default             = 0,
+    ForceMemoryResident = 1
 };
 
 struct BufferParams {
     BufferParams(DataType                   type,
                  const std::vector<size_t>& dims,
-                 AllocationType             allocation = AllocationType::DEVICE,
+                 AllocationType             allocation    = AllocationType::DEVICE,
                  bool                       private_alloc = false,
-                 VmemCtl                    vmem_ctl = VmemCtl::TryVirtual):
+                 VmemCtl                    vmem_ctl      = VmemCtl::Default):
         type(type), dims(dims), allocation(allocation), private_alloc(private_alloc), vmem_ctl(vmem_ctl) {}
 
     // for allocating pure buffer space
@@ -29,8 +29,12 @@ struct BufferParams {
     BufferParams(const size_t   size_bytes,
                  AllocationType allocation    = AllocationType::DEVICE,
                  bool           private_alloc = false,
-                 VmemCtl        vmem_ctl = VmemCtl::TryVirtual):
-        type(DataType::TYPE_UINT8), dims({size_bytes}), allocation(allocation), private_alloc(private_alloc), vmem_ctl(vmem_ctl) {}
+                 VmemCtl        vmem_ctl      = VmemCtl::Default):
+        type(DataType::TYPE_UINT8),
+        dims({size_bytes}),
+        allocation(allocation),
+        private_alloc(private_alloc),
+        vmem_ctl(vmem_ctl) {}
 
     size_t sizeInBytes() const {
         if (dims.empty()) {
@@ -44,7 +48,7 @@ struct BufferParams {
     std::vector<size_t> dims;
     AllocationType      allocation;
     bool                private_alloc = false;
-    VmemCtl             vmem_ctl = VmemCtl::TryVirtual;
+    VmemCtl             vmem_ctl      = VmemCtl::Default;
 };
 
 struct BufferStatus {

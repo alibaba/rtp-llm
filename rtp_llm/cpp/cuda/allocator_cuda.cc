@@ -108,8 +108,8 @@ Allocator<AllocatorType::CUDA>::~Allocator() {
     destroy();
 }
 
-void* Allocator<AllocatorType::CUDA>::mallocPhysical(size_t size) {
-    RTP_LLM_LOG_DEBUG("malloc physical memory with size %lu\n", size);
+void* Allocator<AllocatorType::CUDA>::mallocResidentMemory(size_t size) {
+    RTP_LLM_LOG_DEBUG("malloc resident memory with size %lu\n", size);
 
     // malloc memory via super class
     auto address = malloc(size);
@@ -184,7 +184,7 @@ void* Allocator<AllocatorType::CUDA>::doMalloc(size_t size) {
     } else {
         void* ptr;
 
-        RTP_LLM_LOG_DEBUG("Malloc physical memory with size %lu(legacy method)\n", size);
+        RTP_LLM_LOG_DEBUG("Malloc resident memory with size %lu(legacy method)\n", size);
         check_cuda_value(cudaMalloc(&ptr, size));
         return ptr;
     }

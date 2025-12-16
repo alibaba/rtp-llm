@@ -187,9 +187,9 @@ void TrackerAllocator::unmap() {
     }
 }
 
-void* TrackerAllocator::mallocPhysical(size_t size) {
+void* TrackerAllocator::mallocResidentMemory(size_t size) {
     if (auto allocator_ = dynamic_cast<IVirtualMemAllocator*>(real_allocator_)) {
-        return allocator_->mallocPhysical(size);
+        return allocator_->mallocResidentMemory(size);
     } else {
         return real_allocator_->malloc(size);
     }
