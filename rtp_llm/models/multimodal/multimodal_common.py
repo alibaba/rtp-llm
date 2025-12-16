@@ -188,16 +188,14 @@ class CustomMultiModalEmbeddingInterface(MultiModalEmbeddingInterface):
         if configs is None:
             configs = [None] * len(input_urls)
 
-        # Preprocess all inputs with corresponding types and configs
-        def _process_single_item(args):
-            u, t, c = args
-            call_kwargs = kwargs.copy()
-            if c is not None:
-                call_kwargs["config"] = c
-            return self._mm_preprocess(u, t, **call_kwargs)
-
-        # Execute preprocessing in parallel using global executor
-        mm_inputs = list(_GLOBAL_EXECUTOR.map(_process_single_item, zip(input_urls, input_types, configs)))
+        # Preprocess all inputs
+        import json
+        mm_inputs = []
+        for u, t in zip(input_urls, input_types):
+            if t == MMUrlType.CUSTOM_JSON:
+                mm_inputs.append(json.loads(u))
+            else:
+                mm_inputs.append(u)
         
         with mm_lock:
             # Pass the list of inputs to mm_process (user implementation)
