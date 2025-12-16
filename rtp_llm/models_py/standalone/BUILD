@@ -47,6 +47,10 @@ py_library(
             "//rtp_llm:aiter",
             "//rtp_llm:amdsmi",
         ],
+        "@//:using_cuda12": [
+            "//rtp_llm:deep_gemm",
+            "//rtp_llm:flashinfer-python",
+        ],
         "//conditions:default": [],
     }),
     data = [
