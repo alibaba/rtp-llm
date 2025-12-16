@@ -140,6 +140,45 @@ anyio==4.4.0 \
     #   httpx
     #   openai
     #   starlette
+apache-tvm-ffi==0.1.1 \
+    --hash=sha256:039293086d44e7f601bf8231e369198afe7ad38986330969ddb1a5fc7622976b \
+    --hash=sha256:1fe072b55a7949720a792a9d455c0659aa097825e709a16a4667d720137b8b5c \
+    --hash=sha256:231b4c269342660cb09292f58a05bdd6918f42b4773d7b3943dedb89deeff3dc \
+    --hash=sha256:2e0d6d8e0888ee3a3defd2cbe1eff7a65c05900b4e8fa0e18c890048fc6a44a6 \
+    --hash=sha256:31de54ad4e42c0cc8106af07bb4bc7ccaee4688aa93c02defe165ba3ebb8512a \
+    --hash=sha256:33cc35738e0c44f2a67e550457b6b7dc7de9109ca64422a9e7063b1ba43c336e \
+    --hash=sha256:3f6cbd214bee2e52719d5264f05a2685c955ae7b096980f0361d917a5a9f47a6 \
+    --hash=sha256:3fbcfe526b458bc8edeafdc769388782d3bb4321c46a987e50bcece93ae78af8 \
+    --hash=sha256:49792622720421525a18e378d848411731d32fcb05a00b6e54b84d05ff46cc22 \
+    --hash=sha256:549c2150e1c2d7ca7912cad173f62a192aec90cd981c024bd246161283ea5d78 \
+    --hash=sha256:624b4430ca3949f85fffd9ef498ebaf1155ff0ac659fc764eec6c6fd66ec7986 \
+    --hash=sha256:6b8402153c7ba97019ac4e3afa53553e2a133f5095d5ad28b4f0f905f756e1a0 \
+    --hash=sha256:728ce3f4ae02b89a7147b718f7f670afac3c6d1f96df38d488757274643709fc \
+    --hash=sha256:78e75e193d675b9639e6fd0c33c60c3a4259d4c9f848f60baa6a3194df7e1fea \
+    --hash=sha256:7941f82a2ae4549f55c07d82d37c5765628d70f29dace98628393fcea525e870 \
+    --hash=sha256:7943ccdfb3485b4c01ba375ac2550d2eb27092feaec27ee264d88c09807119af \
+    --hash=sha256:7cbf31c472920cdc5b3f75f2d2720b8a6b37ddbdb11d573fa94524815ea5a144 \
+    --hash=sha256:7e62773c5b7a2968afb21fc09ba39d74f7cd010b62ccdea444305873d2b4fba5 \
+    --hash=sha256:7eaafddb9ec410255927ce3ad7ff70f5dec295209e666aca7c765d59daa6f109 \
+    --hash=sha256:807def3039fb336a228c120ca8c32eb794bdfd2d7aff218c8611f287ad913736 \
+    --hash=sha256:892207b2f3446279dca30c2a5a589f90543065c4db02cf37031e7043a6e1673a \
+    --hash=sha256:ac60fe4166bb0dc67b65094b7c3d77f4c427b16d02e911d17b3d5d26361555f8 \
+    --hash=sha256:af0de7bb9581ac9e090276cba37c4e7ffaeed601a2b2b546bf0e2daed3810cec \
+    --hash=sha256:b25178b265903dabd9a35bd767db26928be3b7869f681fe1d6e1aed93d7c0799 \
+    --hash=sha256:b4850ede082029a2a90b70e6aa6d22ec05989eb25300b7f5c7cb450faaf262b7 \
+    --hash=sha256:c102ba5899ce106c8068a3f21155c106790b5b0141fba52a52ed6e9aeb286aff \
+    --hash=sha256:c7bd812058ce9046cb69fd7b3e18538d1d0eefa1719822a1441b00bb841f7af4 \
+    --hash=sha256:c93d9de81c1ba9560fcc696cf84d777f88016eb53f05ee2d6288ddcb95a5e72f \
+    --hash=sha256:d5552af3c625750361d1b7d646d499a28caf94858967e74c9cce6ed7d4629b28 \
+    --hash=sha256:d7602bc37019387a4705677b6e742059c7e1973a899b6918af235febcb3d3b47 \
+    --hash=sha256:e3761b6d0706058d4e2ebd3ecdfdde3d45fd34850e64e6141cf8ddef017e6dd5 \
+    --hash=sha256:e9db6484259120b1bdc600f736084ee3d574775b1f4a3e8fef110323e3a9d2b6 \
+    --hash=sha256:eb7d6828652803cb8c0e13d1f06d01fc6bfb8e79e77e3de7e6fd4b5fae5ee9d2 \
+    --hash=sha256:edf53ee2de6f87a0c370462719eccb1796120dd61ada5d054e27925c90f1edfd \
+    --hash=sha256:f0e0ee5410281e6702a3d1a97d29d18e7f2fb4d8f497939d0f0cfd806b3fdf92 \
+    --hash=sha256:f2c0164a5c6286f9c333ddedeb448b855cbc1225688d0a4c9aeab006ddfa1180 \
+    --hash=sha256:f9e0227179a0ce83384132b34757fd05f492270f1c031eae615870a5641b5039
+    # via -r open_source/deps/requirements_torch_gpu_cuda12.txt
 async-timeout==4.0.3 \
     --hash=sha256:4640d96be84d82d02ed59ea2b7105a0f7b33abe8703703cd0ab0bf87c427522f \
     --hash=sha256:7405140ff1230c310e51dc27b3145b9092d659ce68ff733fb0cefe3ee42be028
@@ -534,6 +573,9 @@ decord==0.6.0 ; platform_machine == "x86_64" \
     --hash=sha256:9c20674964fb1490c677bd911d2023d2a09fec7a58a4bb0b7ddf1ccc269f107a \
     --hash=sha256:a0eb1258beade34dceb29d97856a7764d179db1b5182899b61874f3418a1abc8
     # via -r open_source/deps/requirements_base.txt
+deep-gemm @ http://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu126/deep_gemm-2.2.0%2B9b680f4-cp310-cp310-linux_x86_64.whl \
+    --hash=sha256:dee9f370d55a92363eac56701871fd067a411a9a53dc7dd3284b89de6edca69c
+    # via -r open_source/deps/requirements_torch_gpu_cuda12.txt
 dill==0.3.8 \
     --hash=sha256:3ebe3c479ad625c4553aca177444d89b486b1d84982eeacded644afc0cf797ca \
     --hash=sha256:c36ca9ffb54365bdd2f8eb3eff7d2a21237f8452b57ace88b1ac615b7e815bd7
@@ -3161,6 +3203,7 @@ typing-extensions==4.12.2 \
     # via
     #   -r open_source/deps/requirements_base.txt
     #   anyio
+    #   apache-tvm-ffi
     #   autoawq
     #   fastapi
     #   huggingface-hub
