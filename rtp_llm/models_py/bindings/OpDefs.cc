@@ -47,19 +47,6 @@ void registerPyOpDefs(pybind11::module& m) {
             pybind11::arg("seq_size_per_block"),
             "Fill parameters for CUDA graph execution");
 
-    pybind11::class_<MlaParams, std::shared_ptr<MlaParams>, rtp_llm::ParamsBase>(m, "MlaParams")
-        .def(pybind11::init<>())
-        .def_readonly("batch_indice", &MlaParams::batch_indice)
-        .def_readonly("positions", &MlaParams::positions)
-        .def_readonly("paged_kv_last_page_len", &MlaParams::paged_kv_last_page_len)
-        .def_readonly("kvlen", &MlaParams::kvlen)
-        .def_readonly("page_indice", &MlaParams::page_indice)
-        .def_readonly("reuse_cache_page_indice", &MlaParams::reuse_cache_page_indice)
-        .def_readonly("decode_page_indptr", &MlaParams::decode_page_indptr)
-        .def_readonly("prefill_page_indptr", &MlaParams::prefill_page_indptr)
-        .def_readonly("qo_indptr", &MlaParams::qo_indptr)
-        .def_readonly("batch_reuse_info_vec", &MlaParams::batch_reuse_info_vec);
-
     pybind11::class_<PyPrefillCudaGaphCopyParams>(m, "PyPrefillCudaGaphCopyParams")
         .def(pybind11::init<>())
         .def_readonly("cuda_graph_prefill_batch_size", &PyPrefillCudaGaphCopyParams::cuda_graph_prefill_batch_size)

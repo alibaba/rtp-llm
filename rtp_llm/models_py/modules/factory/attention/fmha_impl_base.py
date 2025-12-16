@@ -32,7 +32,6 @@ class FMHAImplBase(object):
         self.write_cache_store_impl = None
         if self.support_ and init_params:
             self.rope_kvcache_impl = rope_kvcache_impl
-            self.prepare(attn_inputs)
             self.attn_inputs = attn_inputs
             if self.attn_inputs.is_prefill and self.attn_inputs.cache_store_inputs:
                 self.write_cache_store_impl = WriteCacheStoreOp(
@@ -74,6 +73,23 @@ class FMHAImplBase(object):
 
     def support_cuda_graph(self) -> bool:
         return False
+
+    def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
+        self.prepare(attn_inputs)
+
+    def prepare_replay(self, attn_inputs: PyAttentionInputs):
+        raise NotImplementedError("prepare_replay is not implemented")
+
+    def copy_kv_cache_offset(self, old_offset: torch.Tensor, new_offset: torch.Tensor):
+        if new_offset.shape == old_offset.shape:
+            old_offset.copy_(new_offset, non_blocking=True)
+        else:
+            # Build slice indices dynamically
+            slice_indices = [
+                slice(0, new_offset.size(dim)) for dim in range(new_offset.dim())
+            ]
+            target_slice = old_offset[tuple(slice_indices)]
+            target_slice.copy_(new_offset, non_blocking=True)
 
     def prepare(self, attn_inputs: PyAttentionInputs):
         assert self.fmha_impl is not None

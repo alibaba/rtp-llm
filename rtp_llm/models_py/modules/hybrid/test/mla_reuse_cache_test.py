@@ -148,6 +148,7 @@ class MLATest(TestCase):
         fmha_impl = MlaFlashInferPrefillImpl(
             self.config.attn_config, attn_inputs, layer_weights, cos_sin_cache, quant_config=self.config.quant_config
         )
+        fmha_impl.prepare(attn_inputs)
 
         q = torch.randn(
             [
@@ -192,20 +193,20 @@ class MLATest(TestCase):
         page.append_paged_mla_kv_cache(
             compressed_kv,
             k_pe,
-            fmha_impl.rope_params.batch_indice,
-            fmha_impl.rope_params.positions,
+            fmha_impl.rope_params.batch_indice_d,
+            fmha_impl.rope_params.positions_d,
             k_cache,
             v_cache,
-            fmha_impl.rope_params.page_indice,
-            fmha_impl.rope_params.decode_page_indptr,
-            fmha_impl.rope_params.paged_kv_last_page_len,
+            fmha_impl.rope_kvcache_impl.cuda_graph_kv_indices,
+            fmha_impl.rope_params.decode_page_indptr_d,
+            fmha_impl.rope_params.paged_kv_last_page_len_d,
         )
 
         out = fmha_impl.compute_prefill_context(q, compressed_kv, k_pe, kv_cache, 0)
 
         index_list = torch.empty(0, dtype=torch.int32, device=device)
-        if fmha_impl.fmha_params.reuse_cache_page_indice is not None:
-            index_list = fmha_impl.fmha_params.reuse_cache_page_indice.clone()
+        if fmha_impl.fmha_impl.reuse_cache_page_indice is not None:
+            index_list = fmha_impl.fmha_impl.reuse_cache_page_indice.clone()
         selected_blocks = cache[index_list]
         selected_blocks = selected_blocks.view(-1, selected_blocks.size(-1))
 
