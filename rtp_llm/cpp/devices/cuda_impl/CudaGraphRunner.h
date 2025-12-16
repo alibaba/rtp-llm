@@ -39,6 +39,7 @@ public:
         } else {
             max_bs_ = params.concurrency_config.concurrency_limit;
         }
+        py_attn_pyobj_method_  = py_instance_.attr("prepare_fmha_impl");
         py_forward_method_     = py_instance_.attr("forward");
         py_fill_params_method_ = py_instance_.attr("fill_params");
         options_cuda_int32_    = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
@@ -100,6 +101,7 @@ private:
     void                 initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int max_num_token);
     void                 initCaptureAttentionInputsPost();
     py::object           py_forward_method_;
+    py::object           py_attn_pyobj_method_;
     py::object           py_fill_params_method_;
     bool                 enable_cuda_graph_{false};
     bool                 is_prefill_cuda_graph_mode_{false};

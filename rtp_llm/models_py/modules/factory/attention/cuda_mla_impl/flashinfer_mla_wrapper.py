@@ -53,6 +53,8 @@ class MlaFlashInferPrefillImpl(FMHAPrefillImplBase):
                 rope_head_dim=attn_configs.rope_head_dim,
                 token_per_block=attn_configs.tokens_per_block,
                 is_neox_style=False,
+                max_bs=config.concurrency_config.concurrency_limit,
+                max_context_len=config.max_seq_len,
             ),
             attn_inputs,
         )
@@ -62,21 +64,36 @@ class MlaFlashInferPrefillImpl(FMHAPrefillImplBase):
             self.has_reuse_cache = attn_inputs.prefix_lengths.max().item() > 0
 
         self.absorb_opt_len = fmha_config.absorb_opt_len if fmha_config is not None else 1024
-        self.aborb_fmha = MlaFlashInferDecodeOp(
-            attn_configs.head_num,
-            attn_configs.kv_lora_rank,
-            attn_configs.rope_head_dim,
-            attn_configs.nope_head_dim,
-            attn_configs.tokens_per_block,
-            attn_configs.softmax_extra_scale,
-            attn_configs.use_mla,
-            weights,
-        )
-        self.aborb_fmha.plan(self.fmha_params)
+        q_len = attn_inputs.input_lengths.sum().item()
+        self.absorb_fmha = None
+        if q_len < self.absorb_opt_len and self.has_reuse_cache:
+            self.absorb_fmha = MlaFlashInferDecodeOp(
+                attn_configs.head_num,
+                attn_configs.kv_lora_rank,
+                attn_configs.rope_head_dim,
+                attn_configs.nope_head_dim,
+                attn_configs.tokens_per_block,
+                attn_configs.softmax_extra_scale,
+                attn_configs.use_mla,
+                weights,
+                config.concurrency_config.concurrency_limit,
+                config.max_seq_len,
+            )
 
     @staticmethod
     def fmha_type() -> FMHAType:
         return FMHAType.FLASH_INFER
+
+    def prepare(self, attn_inputs: PyAttentionInputs):
+        super().prepare(attn_inputs)
+        self.rope_params = self.fmha_params
+        self.rope_kvcache_impl.cuda_graph_kv_indices[
+            : len(self.fmha_params.page_indice_d)
+        ].copy_(self.fmha_params.page_indice_d, non_blocking=True)
+
+        if self.absorb_fmha is not None:
+            self.absorb_fmha.init_mla_wrapper(self.fmha_params)
+            self.absorb_fmha.plan(self.fmha_params)
 
     def compute_prefill_context(
         self,
@@ -120,13 +137,11 @@ class MlaFlashInferPrefillImpl(FMHAPrefillImplBase):
         # Split query into nope and pe components
         q_nope, q_pe = torch.split(
             q,
-            [self.aborb_fmha.qk_nope_head_dim, self.aborb_fmha.qk_rope_head_dim],
+            [self.absorb_fmha.qk_nope_head_dim, self.absorb_fmha.qk_rope_head_dim],
             dim=-1,
         )
 
-        return self.aborb_fmha.forward(
-            q_nope, q_pe, kv_cache, self.fmha_params, layer_id
-        )
+        return self.absorb_fmha.forward(q_nope, q_pe, kv_cache, layer_id)
 
     def forward(
         self,
@@ -173,6 +188,8 @@ class MlaFlashInferDecodeImpl(FMHADecodeImplBase):
                 attn_configs.softmax_extra_scale,
                 attn_configs.use_mla,
                 weights,
+                config.concurrency_config.concurrency_limit,
+                config.max_seq_len,
             ),
             MlaRotaryEmbeddingOp(
                 head_size=attn_configs.nope_head_dim,
@@ -181,14 +198,59 @@ class MlaFlashInferDecodeImpl(FMHADecodeImplBase):
                 rope_head_dim=attn_configs.rope_head_dim,
                 token_per_block=attn_configs.tokens_per_block,
                 is_neox_style=False,
+                max_bs=config.concurrency_config.concurrency_limit,
+                max_context_len=config.max_seq_len,
             ),
             attn_inputs,
         )
-        self.rope_params = self.fmha_params
+        self.seq_size_per_block = config.seq_size_per_block
 
     @staticmethod
     def fmha_type() -> FMHAType:
         return FMHAType.FLASH_INFER
+
+    def support_cuda_graph(self) -> bool:
+        return True
+
+    def prepare(self, attn_inputs: PyAttentionInputs, use_cuda_graph: bool = False):
+        assert self.fmha_impl is not None
+        self.fmha_params = self.fmha_impl.prepare(attn_inputs, use_cuda_graph)
+        self.rope_params = self.fmha_params
+        self.rope_kvcache_impl.cuda_graph_kv_indices[
+            : len(self.fmha_params.page_indice_d)
+        ].copy_(self.fmha_params.page_indice_d, non_blocking=True)
+
+    def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
+        self.prepare(attn_inputs, True)
+
+    def prepare_replay(self, attn_inputs: PyAttentionInputs):
+        assert self.fmha_impl is not None
+        batch_size = attn_inputs.input_lengths.size(0)
+        self.fmha_params.fill_params(
+            attn_inputs.sequence_lengths,
+            attn_inputs.input_lengths,
+            attn_inputs.kv_cache_block_id_host,
+            batch_size,
+            self.seq_size_per_block,
+        )
+        self.fmha_impl.plan(self.fmha_params)
+
+        assert self.rope_kvcache_impl is not None
+        self.rope_params.positions_d.copy_(
+            self.fmha_params.positions_d, non_blocking=True
+        )
+        self.rope_params.batch_indice_d.copy_(
+            self.fmha_params.batch_indice_d, non_blocking=True
+        )
+        self.rope_kvcache_impl.cuda_graph_kv_indices[
+            : len(self.fmha_params.page_indice_d)
+        ].copy_(self.fmha_params.page_indice_d, non_blocking=True)
+        self.rope_params.decode_page_indptr_d.copy_(
+            self.fmha_params.decode_page_indptr_d, non_blocking=True
+        )
+        self.rope_params.paged_kv_last_page_len_d.copy_(
+            self.fmha_params.paged_kv_last_page_len_d, non_blocking=True
+        )
 
     def forward(
         self,
@@ -216,5 +278,5 @@ class MlaFlashInferDecodeImpl(FMHADecodeImplBase):
             dim=-1,
         )
         assert self.fmha_impl is not None
-        res = self.fmha_impl.forward(q_nope, q_pe, kv_cache, self.fmha_params, layer_id)
+        res = self.fmha_impl.forward(q_nope, q_pe, kv_cache, layer_id)
         return res

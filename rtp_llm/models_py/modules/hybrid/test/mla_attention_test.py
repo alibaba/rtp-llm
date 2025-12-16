@@ -204,6 +204,7 @@ class MLATest(TestCase):
         fmha_impl = MlaFlashInferPrefillImpl(
             attn_configs, attn_inputs, layer_weights, create_cos_sin_cache(), quant_config=self.config.quant_config
         )
+        fmha_impl.prepare(attn_inputs)
         deepseekv2_mla = MlaAttention(
             self.config.attn_config, 
             self.parallelism_config, 

@@ -32,7 +32,7 @@ def get_mla_impl(
             fmha_config=fmha_config,
             quant_config=quant_config,
         )
-        if instance.support():
+        if instance.support() and (not is_cuda_graph or instance.support_cuda_graph()):
             return instance
     raise Exception(f"can not find mla type")
 
@@ -98,7 +98,7 @@ def get_fmha_impl(
             if _is_fmha_type_disabled(fmha_type, fmha_config):
                 continue
                 
-            if instance.support():
+            if instance.support() and (not is_cuda_graph or instance.support_cuda_graph()):
                 return instance
         except Exception as e:
             # If instantiation fails, continue to next impl
@@ -129,12 +129,13 @@ class AttnImplFactory(object):
         weight: ModelWeights,
         attn_inputs: PyAttentionInputs,
         fmha_config: Optional[FMHAConfig] = None,
+        is_cuda_graph: bool = False,
     ) -> FMHAImplBase:
         # Extract AttentionConfigs from ModelConfig
         attn_configs = model_config.getAttentionConfigs(parallelism_config.tp_size)
         key_str = "mla" if attn_configs.use_mla else "mha"
         fmha_impl_method = cls.FMHA_IMPL_REGISTRY[key_str]
-        instance = fmha_impl_method(attn_configs, weight, attn_inputs, fmha_config, model_config.quant_config)
+        instance = fmha_impl_method(attn_configs, weight, attn_inputs, fmha_config, model_config.quant_config, is_cuda_graph)
         logging.debug(f"get fmha impl: {instance.fmha_type()}")
         return instance
 
