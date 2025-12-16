@@ -186,7 +186,7 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
         // if use mla cache, no need to store cache
         bool store_cache = params.common.kv_cache.has_value();
 
-        auto rope_cache = getRopeCacheOnce(params.configs.rope_config, init_params_.max_seq_len);
+        auto rope_cache = getRopeCacheOnce(this, params.configs.rope_config, init_params_.max_seq_len);
 
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(
             datatype,
@@ -383,7 +383,7 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
         q_output = allocateBuffer(
             {params.input.type(), {batch_size, local_head_num, size_per_head}, AllocationType::DEVICE}, {"q_output"});
 
-        auto rope_cache = getRopeCacheOnce(params.configs.rope_config, init_params_.max_seq_len);
+        auto rope_cache = getRopeCacheOnce(this, params.configs.rope_config, init_params_.max_seq_len);
 
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(
             params.input.type(),

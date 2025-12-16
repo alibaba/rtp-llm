@@ -93,7 +93,7 @@ torch::Tensor FusedRopeKVCachePrefillOp::forward(const torch::Tensor&           
     // tmp not use qkv fp8 buffer
     bool use_qkv_fp8 = false;
 
-    auto rope_cache = getRopeCacheOnce(attn_configs_.rope_config, device_->initParams().max_seq_len);
+    auto rope_cache = getRopeCacheOnce(device_, attn_configs_.rope_config, device_->initParams().max_seq_len);
 
     DISPATCH_CUDA_FUNCTION_DATA_TYPE(
         torchDTypeToDataType(qkv.dtype()),
@@ -189,7 +189,7 @@ torch::Tensor FusedRopeKVCacheDecodeOp::forward(const torch::Tensor&            
     torch::Tensor q_output          = torch::empty({token_num, local_head_num, size_per_head},
                                           torch::TensorOptions(qkv.dtype()).device(qkv.device()));
 
-    auto rope_cache = getRopeCacheOnce(attn_configs_.rope_config, device_->initParams().max_seq_len);
+    auto rope_cache = getRopeCacheOnce(device_, attn_configs_.rope_config, device_->initParams().max_seq_len);
 
     RTP_LLM_CHECK_WITH_INFO(params->sequence_lengths.is_pinned(), "sequence_lengths is not pinned memory");
     DISPATCH_CUDA_FUNCTION_DATA_TYPE(

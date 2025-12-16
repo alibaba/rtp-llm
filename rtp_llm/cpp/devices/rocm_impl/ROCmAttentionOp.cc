@@ -733,7 +733,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                                     && !params.configs.fuse_qkv_add_bias);
     RTP_LLM_LOG_DEBUG("skip_add_bias_transpose: %d", skip_add_bias_transpose);
     if (!skip_add_bias_transpose) {
-        auto rope_cache = getRopeCacheOnce(params.configs.rope_config, init_params_.max_seq_len, false);
+        auto rope_cache = getRopeCacheOnce(this, params.configs.rope_config, init_params_.max_seq_len, false);
 
         if (init_params_.use_aiter_pa) {
             if (init_params_.use_asm_pa) {
@@ -1173,7 +1173,7 @@ AttentionModuleOutput ROCmDevice::decoderSelfAttention(const AttentionModulePara
                                         && !params.configs.fuse_qkv_add_bias);
         printBufferData(*params.common.input_lengths, "input_lengths");
         if (!skip_add_bias_transpose) {
-            auto rope_cache = getRopeCacheOnce(params.configs.rope_config, init_params_.max_seq_len, false);
+            auto rope_cache = getRopeCacheOnce(this, params.configs.rope_config, init_params_.max_seq_len, false);
 
             if (init_params_.use_asm_pa) {
                 DISPATCH_CUDA_FUNCTION_DATA_TYPE(

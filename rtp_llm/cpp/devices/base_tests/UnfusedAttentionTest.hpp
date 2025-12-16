@@ -261,7 +261,7 @@ void UnfusedAttentionTest::addFusedQKVBiasTransposeTest(size_t batch_size,
     bool   store_qkv            = false;
     bool   store_q_no_transpose = false;
 
-    auto rope_cache = getRopeCacheOnce(rope_config, max_position_embeddings);
+    auto rope_cache = getRopeCacheOnce(device, rope_config, max_position_embeddings);
 
     if (is_perf) {
         bool store_q     = true;
@@ -556,7 +556,7 @@ void UnfusedAttentionTest::decodeAddFusedQKVBiasTransposeTest(size_t batch_size,
         {params.input.type(), {batch_size, num_key_value_heads, seq_len, head_dim}, AllocationType::DEVICE},
         {"v_output"});
 
-    auto rope_cache = getRopeCacheOnce(rope_config, max_position_embeddings);
+    auto rope_cache = getRopeCacheOnce(device, rope_config, max_position_embeddings);
 
     if (is_perf) {
         bool store_q     = true;
