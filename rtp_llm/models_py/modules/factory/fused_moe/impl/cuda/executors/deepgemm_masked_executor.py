@@ -185,41 +185,34 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
                 M,
                 disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
             )
-            # 老的和新的精度对不齐，新的精度感觉不对，先用老的吧
-            down_input, down_input_scale = silu_mul_fp8_quant_deep_gemm_masked(
-                workspace,
-                expert_num_tokens,
-                group_size=self.DEEPGEMM_BLOCK_SHAPE[1],
-                use_ue8m0=is_deep_gemm_e8m0_used(),
-                eps=1e-10,
+            down_input = torch.empty(
+                (
+                    workspace.shape[0],
+                    workspace.shape[1],
+                    workspace.shape[2] // 2,
+                ),
+                device=workspace.device,
+                dtype=torch.float8_e4m3fn,
             )
-            # down_input = torch.empty(
-            #     (
-            #         workspace.shape[0],
-            #         workspace.shape[1],
-            #         workspace.shape[2] // 2,
-            #     ),
-            #     device=workspace.device,
-            #     dtype=torch.float8_e4m3fn,
-            # )
-            # down_input_scale = torch.empty(
-            #     (
-            #         workspace.shape[0],
-            #         workspace.shape[1],
-            #         workspace.shape[2] // 2 // self.DEEPGEMM_BLOCK_SHAPE[1],
-            #     ),
-            #     device=workspace.device,
-            #     dtype=torch.float32,
-            # )
-
-            # silu_and_mul_masked_post_quant_fwd(
-            #     workspace,
-            #     down_input,
-            #     down_input_scale,
-            #     self.DEEPGEMM_BLOCK_SHAPE[1],
-            #     expert_num_tokens,
-            #     scale_ue8m0=is_deep_gemm_e8m0_used(),
-            # )
+            down_input_scale = torch.empty(
+                (
+                    workspace.shape[0],
+                    workspace.shape[1],
+                    workspace.shape[2] // 2 // self.DEEPGEMM_BLOCK_SHAPE[1],
+                ),
+                device=workspace.device,
+                dtype=torch.float32,
+            )
+            # notice: ours weights is up first and then gate, tmp change load in kernel
+            silu_and_mul_masked_post_quant_fwd(
+                workspace,
+                down_input,
+                down_input_scale,
+                self.DEEPGEMM_BLOCK_SHAPE[1],
+                expert_num_tokens,
+                scale_ue8m0=is_deep_gemm_e8m0_used(),
+            )
+            # some shape can not run, tmp not use
             # down_input, down_input_scale = sgl_per_token_group_quant_fp8(workspace,
             #                                                              group_size=self.DEEPGEMM_BLOCK_SHAPE[1],
             #                                                              column_major_scales=True,

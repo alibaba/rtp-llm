@@ -536,13 +536,14 @@ def _silu_and_mul_post_quant_kernel(
     for token_index in tl.range(
         token_id, token_num_cur_expert, block_num_per_expert, num_stages=NUM_STAGE
     ):
+        # ours weights first up then gate
         gate = tl.load(
-            input_ptr_offs + token_index * stride_input_1,
+            input_ptr_offs + token_index * stride_input_1 + size_n,
             mask=offs_in_d < size_n,
             other=0.0,
         ).to(tl.float32)
         up = tl.load(
-            input_ptr_offs + token_index * stride_input_1 + size_n,
+            input_ptr_offs + token_index * stride_input_1,
             mask=offs_in_d < size_n,
             other=0.0,
         )
