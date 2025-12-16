@@ -89,7 +89,10 @@ torch::Tensor getRopeCache(const RopeConfig& rope_config, const int max_position
     return rope_cache;
 }
 
-RopeCache getRopeCacheOnce(const RopeConfig& rope_config, const int max_position_embeddings, const bool is_cuda) {
+RopeCache getRopeCacheOnce(DeviceBase*       device,
+                           const RopeConfig& rope_config,
+                           const int         max_position_embeddings,
+                           const bool        is_cuda) {
     static std::once_flag rope_cache_flag;
     static RopeCache      rope_cache;
 
