@@ -16,6 +16,7 @@ from rtp_llm.ops.compute_ops import (
     KVCache,
     ParamsBase,
     PyAttentionInputs,
+    fill_mla_params,
 )
 from rtp_llm.utils.util import to_torch_dtype
 
@@ -119,7 +120,7 @@ class PyFlashinferDecodeAttnOp(object):
     def prepare(self, attn_inputs: PyAttentionInputs) -> ParamsBase:
         # from rtp_llm.models_py.utils.debug import set_trace_on_tty
         # set_trace_on_tty()
-        flashinfer_decode_params = rtp_llm_ops.fill_mla_params(
+        flashinfer_decode_params = fill_mla_params(
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,
             attn_inputs.input_lengths,
