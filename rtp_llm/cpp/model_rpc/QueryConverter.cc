@@ -273,6 +273,8 @@ void QueryConverter::transTensorPB(TensorPB* tensor_pb, const torch::Tensor& ten
 
 void QueryConverter::transTensorPB(TensorPB* t, const rtp_llm::Buffer* buffer) {
     RTP_LLM_CHECK(t != nullptr);
+    RTP_LLM_CHECK_WITH_INFO(buffer->where() != rtp_llm::MemoryType::MEMORY_GPU,
+                            "buffer is on gpu, not supported transfer to tensorpb");
     auto shape       = t->mutable_shape();
     auto shape_array = buffer->shape();
     shape->Resize(shape_array.size(), 0);

@@ -1199,6 +1199,7 @@ class SpeculativeExecutionConfig:
     sp_max_token_match: int
     sp_min_token_match: int
     tree_decode_config: str
+    use_new_sp_engine: bool
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:

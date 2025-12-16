@@ -252,6 +252,8 @@ class ParamsBase:
 
 class PyAttentionInputs:
     cache_store_inputs: PyCacheStoreInputs | None
+    context_total_kv_length: int
+    cu_kv_seqlens: torch.Tensor
     cu_seqlens: torch.Tensor
     dtype: TypeMeta
     input_lengths: torch.Tensor
@@ -262,7 +264,7 @@ class PyAttentionInputs:
     padding_offset: torch.Tensor
     prefix_lengths: torch.Tensor
     sequence_lengths: torch.Tensor
-
+    total_tokens: int
     def __init__(self) -> None:
         ...
 
@@ -301,7 +303,7 @@ class PyModelInputs:
         ...
 
     @typing.overload
-    def __init__(self, input_ids: torch.Tensor = ..., attention_inputs: PyAttentionInputs = ..., bert_embedding_inputs: BertEmbeddingInputs = ...) -> None:
+    def __init__(self, input_ids: torch.Tensor = ..., input_hiddens: torch.Tensor = ..., attention_inputs: PyAttentionInputs = ..., bert_embedding_inputs: BertEmbeddingInputs = ...) -> None:
         ...
 
     @property
@@ -322,6 +324,14 @@ class PyModelInputs:
     def bert_embedding_inputs(self, arg0: BertEmbeddingInputs) -> None:
         ...
 
+    @property
+    def input_hiddens(self) -> torch.Tensor:
+        """
+        Input hidden states tensor
+        """
+    @input_hiddens.setter
+    def input_hiddens(self, arg0: torch.Tensor) -> None:
+        ...
     @property
     def input_ids(self) -> torch.Tensor:
         """
