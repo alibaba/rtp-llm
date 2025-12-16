@@ -48,19 +48,14 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     auto& cache_keys     = kv_resource->cacheKeys(0);
     auto& blocks_0       = kv_resource->blocks(0);
 
-    int input_seq_len = malloc_info.input_seq_len;
+    // drop the last cache key of the partial block to avoid reuse it
+    if (!cache_keys.empty()) {
+        cache_keys.pop_back();
+    }
 
     if (kv_resource->enable_reuse_cache) {
         auto match_result = full_kv_cache_group_->match(cache_keys);
         reuse_len         = static_cast<int>(match_result.reuse_length);
-        if (input_seq_len % seqSizePerBlock() == 0 && input_seq_len == static_cast<int>(match_result.reuse_length)) {
-            // drop last matched block to avoid reusing the block that will be written by this request
-            if (!match_result.block_indices.empty()) {
-                match_result.block_indices.pop_back();
-                reuse_len = std::max(0, reuse_len - seqSizePerBlock());
-            }
-        }
-
         full_kv_cache_group_->reference(blocks_0, match_result.block_indices);
     }
 
