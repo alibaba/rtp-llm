@@ -12,7 +12,12 @@ public:
     FMHACudaBase(const GptInitParameter& gpt_init_parameter):
         attn_configs_(gpt_init_parameter.getAttentionConfigs()),
         fmha_config_(gpt_init_parameter.fmha_config),
-        device_(dynamic_cast<CudaDevice*>(DeviceFactory::getDefaultDevice())) {}
+        device_(nullptr) {
+        if (!DeviceFactory::isAlreadyInit()) {
+            DeviceFactory::initDevices(gpt_init_parameter);
+        }
+        device_ = dynamic_cast<CudaDevice*>(DeviceFactory::getDefaultDevice());
+    }
 
 protected:
     AttentionConfigs attn_configs_;

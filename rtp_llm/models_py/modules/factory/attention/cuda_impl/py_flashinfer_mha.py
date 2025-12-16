@@ -1,11 +1,12 @@
 import logging
+import math
 from typing import Optional
 
 import torch
 from flashinfer.prefill import BatchPrefillWithRaggedKVCacheWrapper
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.models_py.modules.fmha import (
+from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
     FMHADecodeImplBase,
     FMHAPrefillImplBase,
     FMHAType,
@@ -19,6 +20,13 @@ from rtp_llm.ops.compute_ops import (
     fill_mla_params,
 )
 from rtp_llm.utils.util import to_torch_dtype
+
+
+# TODO add fp8 check, currently fp8 datatype not in config.data_type
+def determine_use_tensor_core(config: GptInitModelParameters):
+    # rtp_llm/models_py/modules/factory/attention/cuda_impl/test/bench_flashinfer_tensor_cores.py
+    # when head_num // head_num_kv >= 4, use_tensor_core is better in most cases
+    return math.ceil(config.head_num / config.head_num_kv) >= 4
 
 
 class PyFlashinferPrefillAttnOp(object):
@@ -111,9 +119,11 @@ class PyFlashinferDecodeAttnOp(object):
         self.head_dim_qk = config.size_per_head
         self.head_dim_vo = config.size_per_head
         self.seq_size_per_block = config.seq_size_per_block
+        self.use_tensor_core = determine_use_tensor_core(config)
         self.decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
             self.g_workspace_buffer,
             "HND",
+            use_tensor_cores=self.use_tensor_core,
         )
         self.datatype = to_torch_dtype(config.data_type)
 
