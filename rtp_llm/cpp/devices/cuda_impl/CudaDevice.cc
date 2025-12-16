@@ -172,7 +172,7 @@ CudaDevice::CudaDevice(const DeviceInitParams& params): DeviceBase(params) {
     // hijack torch cuda allocator
     origin_torch_cuda_allocator_  = at::cuda::CUDACachingAllocator::allocator;
     managed_torch_cuda_allocator_ = std::make_unique<TorchCudaAllocator>(this);
-    at::cuda::CUDACachingAllocator::allocator.store(managed_torch_cuda_allocator_.get());
+    useRtpAllocator();
 
     cublas_algo_map_.reset(new cublasAlgoMap(GEMM_CONFIG));
     cublas_mm_wrapper_.reset(new cublasMMWrapper(
@@ -935,6 +935,7 @@ void CudaDevice::detachPhysicalMemory() {
         throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
     }
 }
+
 void CudaDevice::attachPhysicalMemory() {
     // Try to allocate physical memory and attach it to a virtual address.
     if (auto allocator = dynamic_cast<rtp_llm::IVirtualMemAllocator*>(getAllocator())) {
@@ -942,6 +943,16 @@ void CudaDevice::attachPhysicalMemory() {
     } else {
         throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
     }
+}
+
+void CudaDevice::useTorchAllocator() {
+    // change the device memory allocator to torch
+    at::cuda::CUDACachingAllocator::allocator.store(origin_torch_cuda_allocator_);
+}
+
+void CudaDevice::useRtpAllocator() {
+    // change the device memory allocator to rtp pool
+    at::cuda::CUDACachingAllocator::allocator.store(managed_torch_cuda_allocator_.get());
 }
 
 };  // namespace rtp_llm

@@ -811,6 +811,15 @@ void ROCmDevice::maskLogits(Buffer& logits, const Buffer& mask) {
     } else {
         throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
     }
+
+void ROCmDevice::useTorchAllocator() {
+    RTP_LLM_LOG_INFO("Rocm does not support change allocator yet");
+    return;
+}
+
+void ROCmDevice::useRtpAllocator() {
+    RTP_LLM_LOG_INFO("Rocm does not support change allocator yet");
+    return;
 }
 
 }  // namespace rtp_llm
