@@ -191,8 +191,8 @@ std::vector<BufferPtr> SingleTypeKVCacheAllocator::convertIndexToBuffer(int laye
     return full_kv_cache_group_->convertIndexToBuffer(layer_id, block_id, partition_count, partition_id);
 }
 
-std::shared_ptr<KVCacheResourceV1> SingleTypeKVCacheAllocator::incrKVCacheRef(KVCacheResourceV1&   kvcache_resource,
-                                                                              const CacheKeysType& cache_keys) {
+std::shared_ptr<KVCacheResourceV1> SingleTypeKVCacheAllocator::incrKVCacheRef(const KVCacheResourceV1& kvcache_resource,
+                                                                              const CacheKeysType&     cache_keys) {
     if (cache_keys.empty()) {
         return nullptr;
     }
@@ -208,12 +208,12 @@ std::shared_ptr<KVCacheResourceV1> SingleTypeKVCacheAllocator::incrKVCacheRef(KV
     }
 
     auto selected_resource = std::make_shared<KVCacheResourceV1>();
-    selected_resource->initGroups(1);
+    selected_resource->initGroups(1, config_.layer_num);
 
     CacheKeysType&   selected_cache_keys = selected_resource->cacheKeys();
     BlockIndicesType selected_blocks;
 
-    auto& src_blocks = kvcache_resource.blocks(0);
+    const auto& src_blocks = kvcache_resource.blocks(0);
 
     for (auto key : cache_keys) {
         auto it = key_to_pos.find(key);
@@ -241,7 +241,7 @@ std::shared_ptr<KVCacheResourceV1> SingleTypeKVCacheAllocator::incrKVCacheRef(KV
     return selected_resource;
 }
 
-void SingleTypeKVCacheAllocator::decrKVCacheRef(KVCacheResourceV1& kvcache_resource) {
+void SingleTypeKVCacheAllocator::decrKVCacheRef(const KVCacheResourceV1& kvcache_resource) {
     RTP_LLM_CHECK_WITH_INFO(
         kvcache_resource.groupNums() == 1, "decrKVCacheRef expects groupNums==1, got %d", kvcache_resource.groupNums());
 

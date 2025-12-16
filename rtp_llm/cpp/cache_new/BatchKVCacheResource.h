@@ -77,6 +77,10 @@ public:
         return cache_keys;
     }
 
+    const CacheKeysType& cacheKeys() const {
+        return cache_keys;
+    }
+
     size_t reuseBlocksNum() const {
         return reuse_blocks_num;
     }

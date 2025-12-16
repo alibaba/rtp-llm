@@ -48,6 +48,28 @@ void MemoryConnectorAsyncContext::waitDone() {
 
 // ----------------------------- KVCacheMemoryConnector ---------------------------------
 
+class MemoryAsyncMatchContext: public KVCacheConnector::AsyncMatchContext {
+public:
+    MemoryAsyncMatchContext(size_t matched_block_count): matched_block_count_(matched_block_count) {}
+    ~MemoryAsyncMatchContext() override = default;
+
+    bool done() const override {
+        return true;
+    }
+    bool success() const override {
+        return true;
+    }
+    size_t matchedBlockCount() const override {
+        return matched_block_count_;
+    }
+    KVCacheConnector::ConnectorType connectorType() const override {
+        return KVCacheConnector::ConnectorType::Memory;
+    }
+
+private:
+    size_t matched_block_count_{0};
+};
+
 KVCacheMemoryConnector::KVCacheMemoryConnector(const CacheConfig&                       cache_config,
                                                const std::shared_ptr<KVCacheAllocator>& allocator,
                                                rtp_llm::DeviceBase*                     device,
@@ -109,8 +131,20 @@ bool KVCacheMemoryConnector::init() {
 std::shared_ptr<KVCacheConnector::AsyncMatchContext>
 KVCacheMemoryConnector::asyncMatch(const std::shared_ptr<KVCacheResourceV1>& resource,
                                    const std::shared_ptr<Meta>&              meta) {
-    // TODO(LXQ): implement async match
-    return nullptr;
+    size_t      matched_num = 0;
+    const auto& cache_keys  = resource->cacheKeys();
+    for (size_t i = 0; i < cache_keys.size(); ++i) {
+        const auto cache_key    = cache_keys.at(i);
+        const auto match_result = block_cache_->match(static_cast<CacheKeyType>(cache_key));
+        if (isNullBlockIdx(match_result.matched_index)) {
+            break;  // 只处理连续前缀
+        }
+        ++matched_num;
+    }
+    if (matched_num == 0) {
+        return nullptr;
+    }
+    return std::make_shared<MemoryAsyncMatchContext>(matched_num);
 }
 
 std::shared_ptr<AsyncContext>

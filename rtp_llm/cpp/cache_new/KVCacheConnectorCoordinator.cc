@@ -123,10 +123,9 @@ KVCacheConnectorCoordinator::asyncRead(const std::shared_ptr<KVCacheConnectorRea
     if (stop_.load()) {
         return nullptr;
     }
-    // save resource for later use
-    // auto kv_cache_resource = allocator_->incRef(resource);  // TODO(LXQ)
 
-    auto resource = std::make_shared<KVCacheResourceV1>(connector_context->kvCacheResource());
+    auto resource = allocator_->incrKVCacheRef(connector_context->kvCacheResource(),
+                                               connector_context->kvCacheResource().cacheKeys());
 
     std::vector<std::shared_ptr<AsyncContext>> contexts;
     contexts.reserve(connectors_.size());
@@ -146,7 +145,12 @@ KVCacheConnectorCoordinator::asyncRead(const std::shared_ptr<KVCacheConnectorRea
     }
 
     auto fused_match_context = std::make_shared<FusedAsyncContext>(contexts);
-    auto fused_read_context  = std::make_shared<FusedAsyncReadContext>(fused_match_context, resource);
+    auto deleter             = [allocator = allocator_](FusedAsyncReadContext* context) {
+        allocator->decrKVCacheRef(*(context->resource()));
+        delete context;
+    };
+    std::shared_ptr<FusedAsyncReadContext> fused_read_context(new FusedAsyncReadContext(fused_match_context, resource),
+                                                              deleter);
     {
         std::lock_guard<std::mutex> lock(update_mutex_);
         fused_async_read_context_list_.push_back(fused_read_context);
@@ -161,12 +165,10 @@ KVCacheConnectorCoordinator::asyncWrite(const std::shared_ptr<KVCacheConnectorRe
         return nullptr;
     }
 
-    // auto kv_cache_resource = allocator_->incRef(resource);  // TODO(LXQ)
+    auto resource = allocator_->incrKVCacheRef(connector_context->kvCacheResource(),
+                                               connector_context->kvCacheResource().cacheKeys());
 
-    auto resource = std::make_shared<KVCacheResourceV1>(connector_context->kvCacheResource());
-
-    std::vector<std::shared_ptr<AsyncContext>> contexts;
-    contexts.reserve(connectors_.size());
+    std::vector<std::shared_ptr<AsyncContext>> write_contexts;
     for (const auto& [type, connector] : connectors_) {
         if (!connector) {
             continue;
@@ -174,14 +176,18 @@ KVCacheConnectorCoordinator::asyncWrite(const std::shared_ptr<KVCacheConnectorRe
         if (type == KVCacheConnector::ConnectorType::Memory && connector_context->enableMemoryCache()) {
             auto write_context = connector->asyncWrite(resource, meta);
             if (write_context) {
-                contexts.emplace_back(write_context);
+                write_contexts.emplace_back(write_context);
             }
         }
     }
-    if (contexts.empty()) {
+    if (write_contexts.empty()) {
         return nullptr;
     }
-    auto fused_write_context = std::make_shared<FusedAsyncContext>(std::move(contexts));
+    auto deleter = [allocator = allocator_, resource](FusedAsyncContext* context) {
+        allocator->decrKVCacheRef(*resource);
+        delete context;
+    };
+    std::shared_ptr<FusedAsyncContext> fused_write_context(new FusedAsyncContext(std::move(write_contexts)), deleter);
     {
         std::lock_guard<std::mutex> lock(update_mutex_);
         fused_async_write_context_list_.push_back(fused_write_context);
@@ -193,9 +199,34 @@ std::shared_ptr<AsyncContext> KVCacheConnectorCoordinator::asyncWriteByLayer(
     int                                                      layer_id,
     const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context,
     const std::shared_ptr<Meta>&                             meta) {
-    // auto kv_cache_resource = allocator_->incRef(resource);  // TODO(LXQ)
-    auto resource = std::make_shared<KVCacheResourceV1>(connector_context->kvCacheResource());
-    return p2p_connector_->asyncWriteByLayer(layer_id, resource, meta);
+    auto resource = allocator_->incrKVCacheRef(connector_context->kvCacheResource(),
+                                               connector_context->kvCacheResource().cacheKeys());
+
+    std::vector<std::shared_ptr<AsyncContext>> write_contexts;
+    for (const auto& [type, connector] : connectors_) {
+        if (!connector) {
+            continue;
+        }
+        if (type == KVCacheConnector::ConnectorType::P2P) {
+            auto write_context = connector->asyncWriteByLayer(layer_id, resource, meta);
+            if (write_context) {
+                write_contexts.emplace_back(write_context);
+            }
+        }
+    }
+    if (write_contexts.empty()) {
+        return nullptr;
+    }
+    auto deleter = [allocator = allocator_, resource](FusedAsyncContext* context) {
+        allocator->decrKVCacheRef(*resource);
+        delete context;
+    };
+    std::shared_ptr<FusedAsyncContext> fused_write_context(new FusedAsyncContext(std::move(write_contexts)), deleter);
+    {
+        std::lock_guard<std::mutex> lock(update_mutex_);
+        fused_async_write_context_list_.push_back(fused_write_context);
+    }
+    return fused_write_context;
 }
 
 bool KVCacheConnectorCoordinator::initMemoryConnector() {
