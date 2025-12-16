@@ -129,6 +129,7 @@ class TestCudaFp8PerBlockNoDPStrategy(unittest.TestCase):
         mock_resolver.is_tp_equal_ep.return_value = False
 
         config = MagicMock()
+        config.hw_kernel_config.enable_cuda_graph = False
         self.assertTrue(self.strategy.can_handle(config))
 
     @patch(
@@ -149,6 +150,7 @@ class TestCudaFp8PerBlockNoDPStrategy(unittest.TestCase):
         mock_resolver.is_tp_equal_ep.return_value = True
 
         config = MagicMock()
+        config.hw_kernel_config.enable_cuda_graph = False
         self.assertTrue(self.strategy.can_handle(config))
 
     @patch(
@@ -169,6 +171,7 @@ class TestCudaFp8PerBlockNoDPStrategy(unittest.TestCase):
         mock_resolver.is_tp_equal_ep.return_value = False
 
         config = MagicMock()
+        config.hw_kernel_config.enable_cuda_graph = False
         self.assertFalse(self.strategy.can_handle(config))
 
     def test_priority(self) -> None:
