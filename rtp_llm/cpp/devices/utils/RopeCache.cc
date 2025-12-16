@@ -94,6 +94,7 @@ RopeCache getRopeCacheOnce(const RopeConfig& rope_config, const int max_position
     static RopeCache      rope_cache;
 
     std::call_once(rope_cache_flag, [&]() {
+        device->useTorchAllocator();
         rope_cache.used = is_cuda ? rope_config.style == RopeStyle::Base || rope_config.style == RopeStyle::Yarn :
                                     rope_config.style == RopeStyle::Base;
         if (rope_cache.used) {
@@ -101,6 +102,7 @@ RopeCache getRopeCacheOnce(const RopeConfig& rope_config, const int max_position
             rope_cache.dim  = rope_config.dim;
             rope_cache.data = getRopeCache(rope_config, max_position_embeddings);
         }
+        device->useRtpAllocator();
     });
 
     return rope_cache;
