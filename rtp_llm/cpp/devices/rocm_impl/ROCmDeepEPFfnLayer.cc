@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/kernels/rocm/experts_stats_kernels.h"
+#include "rtp_llm/cpp/kernels/eplb/experts_stats_kernels.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/devices/OpData.h"
 #include "rtp_llm/cpp/core/Types.h"
