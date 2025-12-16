@@ -51,7 +51,7 @@ class MlaRotaryEmbeddingOp(object):
             q_rope=query,
             k_rope=key.unsqueeze(1),
             cos_sin_cache=self.cos_sin_cache,
-            pos_ids=rope_params.positions,
+            pos_ids=rope_params.positions_d,
             interleave=self.is_neox_style,
         )
 
@@ -63,13 +63,13 @@ class MlaRotaryEmbeddingOp(object):
             page.append_paged_mla_kv_cache(
                 append_ckv_t,
                 key,
-                rope_params.batch_indice,
-                rope_params.positions,
+                rope_params.batch_indice_d,
+                rope_params.positions_d,
                 k_cache,
                 v_cache,
-                rope_params.page_indice,
-                rope_params.decode_page_indptr,
-                rope_params.paged_kv_last_page_len,
+                rope_params.page_indice_d,
+                rope_params.decode_page_indptr_d,
+                rope_params.paged_kv_last_page_len_d,
             )
         else:
             # for warm up jit

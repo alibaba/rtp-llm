@@ -3,7 +3,7 @@ import libth_transformer_config
 import torch
 import typing
 from . import rtp_llm_ops
-__all__: list[str] = ['BertEmbeddingInputs', 'DeviceExporter', 'DeviceType', 'KVCache', 'MlaParams', 'ParamsBase', 'PyAttentionInputs', 'PyCacheStoreInputs', 'PyCaptureMetaData', 'PyModelInitResources', 'PyModelInputs', 'PyModelOutputs', 'PyPrefillCudaGaphCopyParams', 'TypeMeta', 'get_device', 'get_typemeta', 'init_device', 'rtp_llm_ops']
+__all__: list[str] = ['BertEmbeddingInputs', 'DeviceExporter', 'DeviceType', 'KVCache', 'ParamsBase', 'PyAttentionInputs', 'PyCacheStoreInputs', 'PyCaptureMetaData', 'PyModelInitResources', 'PyModelInputs', 'PyModelOutputs', 'PyPrefillCudaGaphCopyParams', 'TypeMeta', 'get_device', 'get_typemeta', 'init_device', 'rtp_llm_ops']
 class BertEmbeddingInputs:
     @typing.overload
     def __init__(self) -> None:
@@ -134,7 +134,6 @@ class KVCache:
     @kv_scale_base.setter
     def kv_scale_base(self, arg0: torch.Tensor) -> None:
         ...
-
     @property
     def layer_id(self) -> int:
         """
@@ -145,52 +144,6 @@ class KVCache:
         """
         Sequence size per block
         """
-    @property
-    def v_cache_base(self) -> torch.Tensor:
-        """
-        Value cache base tensor
-        """
-    @v_cache_base.setter
-    def v_cache_base(self, arg0: torch.Tensor) -> None:
-        ...
-    @property
-    def v_scale_base(self) -> torch.Tensor:
-        """
-        Value cache scale tensor
-        """
-class MlaParams(ParamsBase):
-    def __init__(self) -> None:
-        ...
-    @property
-    def batch_indice(self) -> torch.Tensor:
-        ...
-    @property
-    def batch_reuse_info_vec(self) -> torch.Tensor:
-        ...
-    @property
-    def decode_page_indptr(self) -> torch.Tensor:
-        ...
-    @property
-    def kvlen(self) -> torch.Tensor:
-        ...
-    @property
-    def page_indice(self) -> torch.Tensor:
-        ...
-    @property
-    def paged_kv_last_page_len(self) -> torch.Tensor:
-        ...
-    @property
-    def positions(self) -> torch.Tensor:
-        ...
-    @property
-    def prefill_page_indptr(self) -> torch.Tensor:
-        ...
-    @property
-    def qo_indptr(self) -> torch.Tensor:
-        ...
-    @property
-    def reuse_cache_page_indice(self) -> torch.Tensor:
-        ...
 class ParamsBase:
     def __init__(self) -> None:
         ...
@@ -205,12 +158,14 @@ class PyAttentionInputs:
     cu_seqlens: torch.Tensor
     dtype: TypeMeta
     input_lengths: torch.Tensor
+    is_cuda_graph: bool
     is_prefill: bool
     kv_cache_block_id_device: torch.Tensor
     kv_cache_block_id_host: torch.Tensor
     padding_offset: torch.Tensor
     prefix_lengths: torch.Tensor
     sequence_lengths: torch.Tensor
+    sequence_lengths_plus_1_d: torch.Tensor
     total_tokens: int
     def __init__(self) -> None:
         ...
@@ -230,9 +185,6 @@ class PyAttentionInputs:
         ...
     @property
     def prefix_lengths_d(self) -> torch.Tensor:
-        ...
-    @property
-    def sequence_lengths_plus_1_d(self) -> torch.Tensor:
         ...
 class PyCacheStoreInputs:
     def __init__(self) -> None:

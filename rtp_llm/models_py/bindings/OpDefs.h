@@ -8,22 +8,6 @@
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 namespace torch_ext {
-struct MlaParams: public rtp_llm::ParamsBase {
-    torch::Tensor batch_indice;
-    torch::Tensor positions;
-    torch::Tensor paged_kv_last_page_len;
-    torch::Tensor kvlen;
-    torch::Tensor page_indice;
-    torch::Tensor reuse_cache_page_indice;
-    torch::Tensor decode_page_indptr;
-    torch::Tensor prefill_page_indptr;
-    torch::Tensor qo_indptr;
-    torch::Tensor batch_reuse_info_vec;
-
-    // Hidden field to keep FlashInferMlaAttnParams object alive
-    // This ensures the underlying buffers (buf_d, buf_h) are not deallocated
-    std::shared_ptr<void> _params_holder;
-};
 
 struct KVCache {
     torch::Tensor kv_cache_base;
@@ -102,6 +86,9 @@ struct PyAttentionInputs {
     torch::Tensor sequence_lengths_plus_1_d;
     torch::Tensor input_lengths_d;
     torch::Tensor decode_cu_seqlens_d;
+
+    // CUDA Graph mode flag
+    bool is_cuda_graph = false;
 };
 
 struct BertEmbeddingInputs {

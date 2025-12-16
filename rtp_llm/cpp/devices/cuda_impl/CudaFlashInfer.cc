@@ -142,7 +142,8 @@ void FlashInferAttnParams::fillParams(torch::Tensor sequence_lengths,
                                       torch::Tensor input_lengths,
                                       torch::Tensor kv_cache_block_id_host,
                                       int           batch_size,
-                                      int           seq_size_per_block) {
+                                      int           seq_size_per_block,
+                                      torch::Tensor prefix_lengths) {
     fillFlashInfer(nullptr,
                    torchTensor2Buffer(sequence_lengths),
                    torchTensor2Buffer(input_lengths),

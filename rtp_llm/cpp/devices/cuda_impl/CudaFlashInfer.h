@@ -109,7 +109,8 @@ public:
                                             torch::Tensor input_lengths,
                                             torch::Tensor kv_cache_block_id_host,
                                             int           batch_size,
-                                            int           seq_size_per_block) override;
+                                            int           seq_size_per_block,
+                                            torch::Tensor prefix_lengths = torch::Tensor()) override;
     void                         fillFlashInfer(const BufferPtr& prefix_lengths_host,
                                                 const BufferPtr& sequence_lengths_host,
                                                 const BufferPtr& input_lengths_host,
