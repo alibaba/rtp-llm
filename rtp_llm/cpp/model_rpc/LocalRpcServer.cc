@@ -18,10 +18,12 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
     meta_.reset(new RpcServerRuntimeMeta());
     maga_init_params_ = maga_init_params;
     metrics_reporter_ = maga_init_params.metrics_reporter;
-    RTP_LLM_LOG_WARNING("LocalRpcServer aux_string %s",
-                        maga_init_params_.misc_config.aux_string.c_str());
-    if (propose_params) {
-        propose_maga_init_params_ = propose_params.get();
+    RTP_LLM_LOG_INFO("LocalRpcServer aux_string %s",
+                     maga_init_params_.misc_config.aux_string.c_str());
+    const bool use_new_sp_engine = maga_init_params_.sp_config.use_new_sp_engine;
+    propose_maga_init_params_    = propose_params.get();
+
+    if (propose_params && !use_new_sp_engine) {
         if (!mm_process_engine.is_none()) {
             return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
                                 "Multimodal processing is not supported for speculative engine");
@@ -41,7 +43,7 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
             pybind11::gil_scoped_release release;
             RTP_LLM_CHECK_WITH_INFO(!PyGILState_Check(),
                                     "running engine init with gil held may cause program hang, please check");
-            engine_.reset(new NormalEngine(maga_init_params));
+            engine_.reset(new NormalEngine(maga_init_params, std::move(propose_params)));
         }
         if (!mm_process_engine.is_none()) {
             auto vit_separation = maga_init_params.vit_config.vit_separation;

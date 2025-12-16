@@ -201,18 +201,19 @@ enum SpeculativeType {
 };
 
 struct SpeculativeExecutionConfig {
-    std::string        model_type                 = "";
-    SpeculativeType    type                       = SP_TYPE_NONE;
-    int64_t            sp_min_token_match         = 2;
-    int64_t            sp_max_token_match         = 2;
-    std::string        tree_decode_config         = "";
-    int64_t            gen_num_per_cycle          = 1;
-    bool               force_stream_sample       = false;
-    bool               force_score_context_attention = true;
-    std::string        quantization               = "";
-    std::string        checkpoint_path            = "";
+    std::string     model_type                    = "";
+    SpeculativeType type                          = SP_TYPE_NONE;
+    int64_t         sp_min_token_match            = 2;
+    int64_t         sp_max_token_match            = 2;
+    std::string     tree_decode_config            = "";
+    int64_t         gen_num_per_cycle             = 1;
+    bool            force_stream_sample           = false;
+    bool            force_score_context_attention = true;
+    std::string     quantization                  = "";
+    std::string     checkpoint_path               = "";
+    bool            use_new_sp_engine             = false;
     std::string to_string() const;
-    
+
     // Helper functions for enum conversion
     static SpeculativeType from_string(const std::string& str);
     static std::string to_string(SpeculativeType type);

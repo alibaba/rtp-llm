@@ -208,7 +208,7 @@ class QuantizationConfig:
 
     def get_quantization(self):
         """Get quantization string with compatibility logic.
-        
+
         Returns quantization from self.quantization, or "INT8" if int8_mode == 1
         or weight_type is INT8 (from environment variable).
         """

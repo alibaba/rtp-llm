@@ -109,6 +109,7 @@ struct EngineInitParams {
     rtp_llm::Weights          gpt_weights;
     py::object                py_model;
     py::object                py_eplb;
+    py::object                py_sp_model;
 
     kmonitor::MetricsReporterPtr metrics_reporter = nullptr;
 
@@ -119,7 +120,7 @@ public:
         RTP_LLM_LOG_INFO("ParallelismConfig: tp_size=%ld, ep_size=%ld, dp_size=%ld", parallelism_config.tp_size, parallelism_config.ep_size, parallelism_config.dp_size);
         RTP_LLM_LOG_INFO("RuntimeConfig: %s", runtime_config.to_string().c_str());
     }
-    
+
 };
 
 }  // namespace rtp_llm

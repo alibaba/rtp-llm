@@ -32,7 +32,7 @@ std::unique_ptr<ProposeModelEngineInitParams> prepareMTPEngineInitParams(size_t 
 
     std::unique_ptr<std::vector<std::unique_ptr<EngineInitParams>>> mtp_params =
         std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
-    
+
     // Get model_config from model (only difference between propose and score models)
     auto model_config = sp_model.attr("model_config").cast<ModelConfig>();
 
@@ -65,7 +65,7 @@ std::unique_ptr<ProposeModelEngineInitParams> prepareMTPEngineInitParams(size_t 
     if (py::hasattr(sp_model, "py_eplb")) {
         py_eplb = sp_model.attr("py_eplb");
     }
-    
+
     // Create a temporary ModelConfig with num_layers = 1 for MTP
     ModelConfig temp_model_config = model_config;
     temp_model_config.num_layers = 1;
@@ -118,6 +118,13 @@ void RtpLLMOp::init(py::object model,
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
 
     EngineInitParams params = initModel(model, engine_config, vit_config);
+
+    if (!propose_model.is_none()) {
+        if (!propose_model.attr("model").is_none()) {
+            params.py_sp_model = propose_model.attr("model").attr("py_model");
+        }
+    }
+
     RTP_LLM_LOG_INFO("init engine params success");
 
     params.showDebugInfo();
@@ -139,7 +146,7 @@ EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config,
     try {
         // Get model_config from model
         auto model_config = model.attr("model_config").cast<ModelConfig>();
-        
+
         // Extract individual config members from engine_config
         auto parallelism_config = engine_config.attr("parallelism_config").cast<ParallelismConfig>();
         auto runtime_config = engine_config.attr("runtime_config").cast<RuntimeConfig>();
@@ -157,19 +164,19 @@ EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config,
         auto misc_config = engine_config.attr("misc_config").cast<MiscellaneousConfig>();
         auto arpc_config = engine_config.attr("arpc_config").cast<ArpcConfig>();
         auto grpc_config = engine_config.attr("grpc_config").cast<GrpcConfig>();
-        
+
         // Extract vit_config
         VitConfig vit_config_cpp;
         if (!vit_config.is_none()) {
             vit_config_cpp.vit_separation = vit_config.attr("vit_separation").cast<VitSeparation>();
         }
-        
+
         py::object py_layers_weights = model.attr("weight").attr("weights");
         py::object py_global_weights = model.attr("weight").attr("global_weights");
-        
+
         auto convert    = WeightsConverter(false, model_config.quant_algo);
         auto gpt_weight = convert.createGptWeights(py_layers_weights, py_global_weights);
-        
+
         auto py_model = model.attr("py_model");
         // TODO(wangyin.yx): Only one of `py_model` and `gpt_weight` is actually needed.
 
@@ -228,19 +235,19 @@ std::unique_ptr<ProposeModelEngineInitParams> RtpLLMOp::initProposeModel(py::obj
             py::object sp_model = propose_model.attr("model");
             // Get model_config from model (only difference between propose and score models)
             auto model_config = sp_model.attr("model_config").cast<ModelConfig>();
-            
+
             py::object py_layers_weights = sp_model.attr("weight").attr("weights");
             py::object py_global_weights = sp_model.attr("weight").attr("global_weights");
-            
+
             auto convert    = WeightsConverter(false, model_config.quant_algo);
             auto gpt_weight = convert.createGptWeights(py_layers_weights, py_global_weights);
-            
+
             // Get py_eplb if available (from model)
             py::object py_eplb = py::none();
             if (py::hasattr(sp_model, "py_eplb")) {
                 py_eplb = sp_model.attr("py_eplb");
             }
-            
+
             size_t gen_num_per_cycle = base_params.sp_config.gen_num_per_cycle;
             params = std::make_unique<ProposeModelEngineInitParams>(
                 model_id_, sp_type, gen_num_per_cycle,

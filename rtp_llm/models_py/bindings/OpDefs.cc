@@ -76,6 +76,9 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("dtype", &PyAttentionInputs::dtype)
         .def_readwrite("kv_block_offset", &PyAttentionInputs::kv_block_offset)
         .def_readwrite("cu_seqlens", &PyAttentionInputs::cu_seqlens)
+        .def_readwrite("cu_kv_seqlens", &PyAttentionInputs::cu_kv_seqlens)
+        .def_readwrite("context_total_kv_length", &PyAttentionInputs::context_total_kv_length)
+        .def_readwrite("total_tokens", &PyAttentionInputs::total_tokens)
         .def_readwrite("padding_offset", &PyAttentionInputs::padding_offset)
         .def_readwrite("cache_store_inputs", &PyAttentionInputs::cache_store_inputs)
         .def("__repr__", [](const PyAttentionInputs& self) { return "PyAttentionInputs"; })
@@ -101,11 +104,13 @@ void registerPyOpDefs(pybind11::module& m) {
 
     pybind11::class_<PyModelInputs>(m, "PyModelInputs")
         .def(pybind11::init<>())
-        .def(pybind11::init<torch::Tensor, PyAttentionInputs, BertEmbeddingInputs>(),
+        .def(pybind11::init<torch::Tensor, torch::Tensor, PyAttentionInputs, BertEmbeddingInputs>(),
              pybind11::arg("input_ids")             = torch::empty(0),
+             pybind11::arg("input_hiddens")         = torch::empty(0),
              pybind11::arg("attention_inputs")      = PyAttentionInputs(),
              pybind11::arg("bert_embedding_inputs") = BertEmbeddingInputs())
         .def_readwrite("input_ids", &PyModelInputs::input_ids, "Input token IDs tensor")
+        .def_readwrite("input_hiddens", &PyModelInputs::input_hiddens, "Input hidden states tensor")
         .def_readwrite("attention_inputs", &PyModelInputs::attention_inputs, "Attention inputs structure")
         .def_readwrite(
             "bert_embedding_inputs", &PyModelInputs::bert_embedding_inputs, "BERT embedding inputs structure");

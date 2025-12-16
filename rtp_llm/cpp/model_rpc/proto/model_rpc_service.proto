@@ -226,6 +226,8 @@ message GenerateRequestPB {
     repeated string peer_addrs = 7;
     repeated int32 propose_token_ids = 8;
     repeated int32 position_ids = 9;
+    TensorPB propose_probs = 10;
+    TensorPB propose_hidden = 11;
 }
 
 // in tp case, decode master broadcast to decode worker

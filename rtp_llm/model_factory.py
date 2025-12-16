@@ -6,7 +6,6 @@ from typing import Any, Dict, Optional, Type, Union
 
 import torch
 
-
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
@@ -16,7 +15,6 @@ from rtp_llm.config.engine_config import EngineConfig, finalize_scheduler_config
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_args import ModelArgs
 from rtp_llm.config.model_config import ModelConfig, build_model_config
-from rtp_llm.model_loader.load_config import LoadMethod
 from rtp_llm.config.py_config_modules import (
     EmbeddingConfig,
     GenerateEnvConfig,
@@ -26,6 +24,7 @@ from rtp_llm.config.py_config_modules import (
     VitConfig,
 )
 from rtp_llm.model_factory_register import _model_factory
+from rtp_llm.model_loader.load_config import LoadMethod
 from rtp_llm.models.propose_model.propose_model import ProposeModel
 from rtp_llm.ops import ProfilingDebugLoggingConfig, SpeculativeType, VitSeparation
 from rtp_llm.utils.util import check_with_info
@@ -302,11 +301,11 @@ class ModelFactory:
         model_config.render_config = (
             render_config if render_config is not None else RenderConfig()
         )
-        
+
         # Set eplb_config
         if eplb_config is not None:
             model_config.eplb_config = eplb_config
-        
+
         logging.info("model_config: %s", model_config.to_string())
 
         return model_config
@@ -355,9 +354,19 @@ class ModelFactory:
         sp_config = engine_config.sp_config
         if not sp_config.type or sp_config.type == SpeculativeType.NONE:
             return None
- 
+
         if not sp_config.checkpoint_path:
             return None
+
+        if sp_config.use_new_sp_engine:
+            # only support mtp and eagle
+            if sp_config.type not in [SpeculativeType.MTP, SpeculativeType.EAGLE]:
+                logging.error(
+                    f"use_new_sp_engine only support mtp and eagle, but got {sp_config.type.name}"
+                )
+                raise ValueError(
+                    f"use_new_sp_engine only support mtp and eagle, but got {sp_config.type.name}"
+                )
 
         # Create ModelArgs for propose model (reuse main model args, but override ckpt_path)
         propose_model_args = ModelArgs()
@@ -369,7 +378,9 @@ class ModelFactory:
 
         # Create propose ModelConfig using _create_config
         propose_model_cls = ModelFactory.get_model_cls(sp_config.model_type)
-        propose_model_config = propose_model_cls._create_config(sp_config.checkpoint_path)
+        propose_model_config = propose_model_cls._create_config(
+            sp_config.checkpoint_path
+        )
         # Ensure max_seq_len matches main model
         propose_model_config.max_seq_len = model_config.max_seq_len
         propose_model_config.quantization = sp_config.quantization
