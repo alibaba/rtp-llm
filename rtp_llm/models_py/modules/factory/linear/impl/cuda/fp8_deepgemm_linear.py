@@ -119,7 +119,7 @@ class CudaFp8DeepGEMMLinear(LinearBase):
         self.scale_ue8m0 = is_deep_gemm_e8m0_used()
         # Disable UE8M0 for small tensors due to performance/accuracy trade-offs.
         # TODO: Re-evaluate this threshold after further optimization of UE8M0 kernels.
-        if self.hidden_size < 512 or self.output_size < 128:
+        if self.weight.shape[0] < 128 or self.weight.shape[1] < 256:
             self.scale_ue8m0 = False
         if self.scale_ue8m0:
             w_tmp, self.weight_scales = requant_weight_ue8m0(
@@ -152,7 +152,7 @@ class CudaFp8DeepGEMMLinear(LinearBase):
             eps=1e-4,
             column_major_scales=True,
             scale_tma_aligned=True,
-            scale_ue8m0=self.scale_ue8m0
+            scale_ue8m0=self.scale_ue8m0,
         )
         # Prepare output tensor
         output = torch.empty(M, self.N, dtype=torch.bfloat16, device=input.device)

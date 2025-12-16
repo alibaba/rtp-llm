@@ -5,6 +5,7 @@ load_all_configs()
 from .fp8_kernel import (
     cutlass_moe_mm_fp8_scaled,
     get_best_config_swap_ab,
+    per_block_cast_to_fp8,
     per_token_cast_to_fp8,
     requant_weight_ue8m0,
     scaled_fp8_per_tensor_quant,
@@ -19,5 +20,6 @@ __all__ = [
     "cutlass_moe_mm_fp8_scaled",
     "get_best_config_swap_ab",
     "per_token_cast_to_fp8",
+    "per_block_cast_to_fp8",
     "requant_weight_ue8m0",
 ]
