@@ -88,7 +88,6 @@ void DeviceFactory::initDevices(const GptInitParameter& params) {
     device_params.extra_experts                  = params.phy_exp_num_ - params.expert_num_;
     device_params.fmha_config                    = params.fmha_config;
     device_params.device_resource_config         = params.device_resource_config;
-    device_params.sampler_config                 = params.sampler_config;
     device_params.moe_config                     = params.moe_config;
     device_params.sp_config                      = params.sp_config;
     device_params.fifo_scheduler_config          = params.fifo_scheduler_config;
@@ -97,16 +96,11 @@ void DeviceFactory::initDevices(const GptInitParameter& params) {
     device_params.profile_debug_logging_config   = params.profiling_debug_logging_config;
     device_params.hw_kernel_config               = params.hw_kernel_config;
     device_params.concurrency_config             = params.concurrency_config;
-    size_t max_batch_size                        = params.max_context_batch_size_ + params.max_generate_batch_size_
-                            + std::max((long)0, params.gen_num_per_circle_) * 32;
     device_params.ffn_as_service = params.ffn_disaggregate_config.is_ffn_service();
     device_params.max_seq_len    = params.max_seq_len_;
     RTP_LLM_LOG_INFO("set overlap type to be %d", device_params.device_resource_config.overlap_comm_type);
     device_params.m_split                 = params.device_resource_config.m_split;
     device_params.max_generate_batch_size = params.max_generate_batch_size_;
-    device_params.max_batch_size          = std::max(
-        static_cast<size_t>(params.sampler_config.max_batch_size),
-        std::max((size_t)1024, max_batch_size * 2));  // set static max batch size to avoid sampler reset memory
 
     const auto device_mem_reserve_env = params.device_resource_config.device_reserve_memory_bytes;
     RTP_LLM_LOG_INFO("Device reserve memory bytes from env: %ld", device_mem_reserve_env);

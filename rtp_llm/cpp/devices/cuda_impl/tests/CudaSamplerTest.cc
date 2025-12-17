@@ -12,7 +12,6 @@ protected:
 
 TEST_F(CudaSamplerTest, testFlashinferKernelTopK1) {
     DeviceInitParams device_init_params;
-    device_init_params.sampler_config.enable_flashinfer_sample_kernel = true;
     device_                                                           = new CudaDevice(device_init_params);
     device_->init();
 
@@ -68,7 +67,6 @@ TEST_F(CudaSamplerTest, testFlashinferKernelTopK1) {
 
 TEST_F(CudaSamplerTest, testFlashinferKernelTopK) {
     DeviceInitParams device_init_params;
-    device_init_params.sampler_config.enable_flashinfer_sample_kernel = true;
     device_                                                           = new CudaDevice(device_init_params);
     device_->init();
 
@@ -133,7 +131,6 @@ TEST_F(CudaSamplerTest, testFlashinferKernelTopK) {
 
 TEST_F(CudaSamplerTest, testFlashinferKernelTopP) {
     DeviceInitParams device_init_params;
-    device_init_params.sampler_config.enable_flashinfer_sample_kernel = true;
     device_                                                           = new CudaDevice(device_init_params);
     device_->init();
     size_t    batch_size   = 4;
@@ -200,7 +197,6 @@ TEST_F(CudaSamplerTest, testFlashinferKernelTopP) {
 
 TEST_F(CudaSamplerTest, testFlashinferKernelTopKTopP) {
     DeviceInitParams device_init_params;
-    device_init_params.sampler_config.enable_flashinfer_sample_kernel = true;
     device_                                                           = new CudaDevice(device_init_params);
     device_->init();
 
@@ -268,7 +264,6 @@ TEST_F(CudaSamplerTest, testFlashinferKernelTopKTopP) {
 
 TEST_F(CudaSamplerTest, testFlashinferKernelFailed) {
     DeviceInitParams device_init_params;
-    device_init_params.sampler_config.enable_flashinfer_sample_kernel = true;
     device_                                                           = new CudaDevice(device_init_params);
     device_->init();
 

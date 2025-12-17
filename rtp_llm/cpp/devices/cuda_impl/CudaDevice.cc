@@ -107,7 +107,6 @@ CudaDevice::CudaDevice(const DeviceInitParams& params): DeviceBase(params) {
     }
     checkUseMultiBlockMode();
     checkUseGroupGemm();
-    checkUseFlashinferSampleKernel();
 
     // Initialize custom all reduce communicator
     // Note: custom all reduce communicator will allocate cuda mem through cudaMalloc, it must be called before
@@ -206,7 +205,6 @@ CudaDevice::~CudaDevice() {
         at::cuda::CUDACachingAllocator::allocator.store(origin_torch_cuda_allocator_);
         origin_torch_cuda_allocator_ = nullptr;
     }
-    curandstate_buf_.reset();
     cublas_mm_wrapper_.reset();
     check_cuda_value(cudaStreamDestroy(no_block_copy_stream_));
     check_cuda_value(cublasDestroy(cublas_handle_));
@@ -238,9 +236,6 @@ void CudaDevice::printDebugInfo() {
 void CudaDevice::init() {
     // should init cuda device first to avoid set it in device reserve
     DeviceBase::init();
-
-    RTP_LLM_LOG_INFO("cuda device init max batch size: %d\n", init_params_.max_batch_size);
-    curandstate_buf_ = allocateBuffer({init_params_.max_batch_size * sizeof(curandState_t)}, {"curandstate"});
 }
 
 // pre-allocate buffer before buffer managaer
@@ -661,16 +656,6 @@ bool CudaDevice::useFp8Fmha(const DevicePrepParams& params) const {
     }
 #endif
     return false;
-}
-
-void CudaDevice::checkUseFlashinferSampleKernel() {
-    bool flashinfer_sample_env = init_params_.sampler_config.enable_flashinfer_sample_kernel;
-    if (!flashinfer_sample_env) {
-        RTP_LLM_LOG_WARNING("Flashinfer sample is disabled for by env");
-        return;
-    }
-    RTP_LLM_LOG_INFO("use Flashinfer sample kernel");
-    use_flashinfer_sample_kernel = true;
 }
 
 void CudaDevice::checkUseMultiBlockMode() {
