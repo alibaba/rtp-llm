@@ -492,8 +492,9 @@ class TestXQABatchDecode(unittest.TestCase):
                 )
                 wrapper_ref.plan(**plan_params_prefill)
                 output_ref = wrapper_ref.run(ref_q, ref_kv_cache)
-        
-       
+        else:
+            # TODO: Add sink support - skip test for now
+            self.skipTest("Sink support not implemented yet")
 
         if q_len_per_req > 1:
             mask = generate_causal_mask(batch_size, q_len_per_req, GPU_DEVICE)

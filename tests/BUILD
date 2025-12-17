@@ -487,3 +487,18 @@ py_test(
         "rocm",
     ],
 )
+
+py_test(
+    name = "test_xqa_batch_decode",
+    srcs = [
+        "xqa/test_xqa_batch_decode.py"
+    ],
+    data = op_test_data,
+    deps = op_test_deps + select({
+        "@//:using_cuda12_9_x86": ["//rtp_llm:flashinfer-python"],
+        "@//:cuda_pre_12_9": ["//rtp_llm:flashinfer-python"],
+        "//conditions:default": []
+    }),
+    tags = ["H20"],
+    exec_properties = {'gpu':'H20'},
+)
