@@ -6,6 +6,8 @@ import torch
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.distribute.collective import Group, all_gather
 from rtp_llm.models_py.distributed.deepep_initializer import DeepEpInitializer
+from rtp_llm.models_py.distributed.deepep_wrapper import use_accl_ep
+from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     ExpertForwardPayload,
     ExpertTokensMetadata,
@@ -65,7 +67,7 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         self._return_recv_hook = return_recv_hook
         self._opt_level = int(os.environ.get("ACCL_LOW_LATENCY_OPTIMIZE", 1))
         self._handle: Optional[Tuple[Any, ...]] = None
-        self._use_GB_deepep = "GB200" in torch.cuda.get_device_name(0)
+        self._use_accl_ep = use_accl_ep()
 
     @property
     def handle(self) -> Optional[Tuple[Any, ...]]:
@@ -139,8 +141,11 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
             "return_recv_hook": self._return_recv_hook,
         }
 
-        if not self._use_GB_deepep:
+        if self._use_accl_ep:
             dispatch_args["pertoken_quant"] = quant_config.is_per_act_token
+        if self._use_fp8_dispatch and is_deep_gemm_e8m0_used():
+            dispatch_args["round_scale"] = True
+            dispatch_args["use_ue8m0"] = True
 
         expert_x, expert_num_tokens, self._handle, _, _ = (
             self._buffer.low_latency_dispatch(**dispatch_args)
@@ -190,7 +195,7 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
             "async_finish": self._async_finish,
             "return_recv_hook": self._return_recv_hook,
         }
-        if not self._use_GB_deepep:
+        if self._use_accl_ep:
             combine_args["opt_level"] = self._opt_level
 
         combined_x, _, _ = self._buffer.low_latency_combine(**combine_args)

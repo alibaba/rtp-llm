@@ -35,9 +35,9 @@ PyWrappedModel::~PyWrappedModel() {
 torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptModelInputs& inputs) {
     DevicePerfWrapper            wrapper(device_, "py model buildPyAttentionInputs");
     torch_ext::PyAttentionInputs py_attn_inputs;
-    py_attn_inputs.prefix_lengths   = Buffer2torchTensor(inputs.prefix_lengths);
+    py_attn_inputs.prefix_lengths   = Buffer2torchTensor(inputs.prefix_lengths, false);
     py_attn_inputs.sequence_lengths = Buffer2torchTensor(inputs.sequence_lengths, false);
-    py_attn_inputs.input_lengths    = Buffer2torchTensor(inputs.input_lengths);
+    py_attn_inputs.input_lengths    = Buffer2torchTensor(inputs.input_lengths, false);
 
     if (k_cache_buffer_) {
         py_attn_inputs.kv_cache_block_id_host = Buffer2torchTensor(inputs.kv_cache_block_id);
@@ -45,24 +45,34 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
             k_cache_buffer_ ? k_cache_buffer_->shape()[0] * k_cache_buffer_->shape()[1] : 0;
     }
 
-    py_attn_inputs.dtype      = dataTypeToTorchType(description_.data_type);
-    py_attn_inputs.is_prefill = !py_attn_inputs.sequence_lengths.size(0);
-
     // Calculate cu_seqlens
     int           batch_size = py_attn_inputs.input_lengths.size(0);
     torch::Tensor cu_seqlens = torch::zeros({batch_size + 1}, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
+    torch::Tensor cu_kv_seqlens =
+        torch::zeros({batch_size + 1}, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
     torch::Tensor cu_seqlens_without_prefix =
         torch::zeros({batch_size + 1}, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
 
-    cu_seqlens                = cu_seqlens.cuda();
-    cu_seqlens_without_prefix = cu_seqlens_without_prefix.cuda();
-
-    cu_seqlens.slice(0, 1, batch_size + 1)                = py_attn_inputs.input_lengths.cumsum(0);
-    cu_seqlens_without_prefix.slice(0, 1, batch_size + 1) = py_attn_inputs.input_lengths.cumsum(0);
-
-    py_attn_inputs.cu_seqlens                = cu_seqlens;
-    py_attn_inputs.cu_seqlens_without_prefix = cu_seqlens_without_prefix;
-    py_attn_inputs.sequence_lengths.pin_memory();
+    size_t context_batch_size = py_attn_inputs.prefix_lengths.size(0);
+    size_t decode_batch_size  = py_attn_inputs.sequence_lengths.size(0);
+    py_attn_inputs.dtype      = dataTypeToTorchType(description_.data_type);
+    py_attn_inputs.is_prefill = !decode_batch_size;
+    RTP_LLM_CHECK_WITH_INFO(
+        context_batch_size + decode_batch_size == batch_size,
+        "batch size check failed context_batch_size[%ld] decode_batch_size[%ld] total_batch_size[%ld]",
+        context_batch_size,
+        decode_batch_size,
+        batch_size);
+    if (context_batch_size > 0) {
+        cu_seqlens.slice(0, 1, context_batch_size + 1) = py_attn_inputs.input_lengths.cumsum(0);
+        cu_kv_seqlens.slice(0, 1, context_batch_size + 1) =
+            py_attn_inputs.input_lengths.add(py_attn_inputs.prefix_lengths).cumsum(0);
+        cu_seqlens_without_prefix.slice(0, 1, context_batch_size + 1) = py_attn_inputs.input_lengths.cumsum(0);
+    }
+    py_attn_inputs.context_total_kv_length   = cu_kv_seqlens[context_batch_size].item<int>();
+    py_attn_inputs.cu_seqlens                = cu_seqlens.cuda();
+    py_attn_inputs.cu_kv_seqlens             = cu_kv_seqlens.cuda();
+    py_attn_inputs.cu_seqlens_without_prefix = cu_seqlens_without_prefix.cuda();
     return py_attn_inputs;
 }
 

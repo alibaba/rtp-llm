@@ -321,12 +321,12 @@ def start_server(parser: EnvArgumentParser, args: argparse.Namespace):
 
     # Auto-configure DeepEP settings based on deployment scenario
     # Check from args to see if user has manually configured
-    if should_auto_configure_deepep(args):
-        auto_configure_deepep(args)
-    else:
-        logging.info(
-            "DeepEP configuration already set manually, skipping auto-configuration"
-        )
+    # if should_auto_configure_deepep(args):
+    #     auto_configure_deepep(args)
+    # else:
+    #     logging.info(
+    #         "DeepEP configuration already set manually, skipping auto-configuration"
+    #     )
 
     try:
         backend_process = None
