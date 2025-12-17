@@ -1,8 +1,10 @@
 import gc
 import os
+import platform
 from enum import IntEnum, auto
 from typing import Optional, Tuple
 
+import torch
 from deep_ep import Buffer as DeepEPBuffer
 from deep_ep import Config as DeepEPConfig
 from torch.distributed import ProcessGroup
@@ -17,6 +19,16 @@ __all__ = [
     "get_deepep_wrapper",
     "destroy_deepep_wrapper",
 ]
+
+
+def use_accl_ep():
+    device_type = get_device().get_device_type()
+    return not device_type == DeviceType.ROCm
+
+
+def allow_mnnvl():
+    is_sm_100 = torch.cuda.get_device_capability()[0] in [10]
+    return "aarch64" in platform.machine() and is_sm_100
 
 
 class DeepEPMode(IntEnum):
@@ -52,13 +64,7 @@ class DeepEPWrapper:
         self._num_experts = params.expert_num
         self._num_topk = params.moe_k
         self._num_sms = params.moe_config.deep_ep_num_sm
-        device_type = get_device().get_device_type()
-        if device_type == DeviceType.ROCm:
-            # use deep_ep_rocm in rocm
-            self._use_accl_ep = False
-        else:
-            # use accl_ep in cuda
-            self._use_accl_ep = True
+        self._use_accl_ep = use_accl_ep()
         self._mode, self._buffer = self._init_deepep_buffer(group, params)
 
     @property
@@ -199,7 +205,11 @@ class DeepEPWrapper:
         }
         if self._use_accl_ep:
             init_kwargs["allow_nvlink_for_low_latency_mode"] = True
-            init_kwargs["allow_mnnvl"] = False
+            if allow_mnnvl():
+                init_kwargs["allow_mnnvl"] = True
+                init_kwargs["use_fabric"] = True
+            else:
+                init_kwargs["allow_mnnvl"] = False
         return DeepEPBuffer(**init_kwargs)  # type: ignore
 
     def _init_low_latency_buffer(
@@ -248,10 +258,15 @@ class DeepEPWrapper:
             "num_rdma_bytes": num_rdma_bytes,
             "low_latency_mode": True,
             "num_qps_per_rank": num_qps_per_rank,
+            "allow_mnnvl": True,
         }
         if self._use_accl_ep:
+            os.environ["ACCL_LOW_LATENCY_OPTIMIZE"] = "1"
             init_kwargs["allow_nvlink_for_low_latency_mode"] = True
-            init_kwargs["allow_mnnvl"] = False
+            if allow_mnnvl():
+                init_kwargs["allow_mnnvl"] = True
+            else:
+                init_kwargs["allow_mnnvl"] = False
         return DeepEPBuffer(**init_kwargs)  # type: ignore
 
     def _init_low_latency_m2n_buffer(

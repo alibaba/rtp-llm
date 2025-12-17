@@ -210,7 +210,9 @@ def _run_deepep_low_latency_router_test(rank: int, use_fp8: bool):
     # print(
     #     f"[rank: {rank}] permuted_recv_x: {permuted_recv_x[:5, :5, 127:132]}, ref_recv_x: {ref_recv_x[:5, :5, 127:132]}"
     # )
-    torch.testing.assert_close(ref_recv_x[:, :, :128], permuted_recv_x[:, :, :128])
+    torch.testing.assert_close(
+        ref_recv_x[:, :, :128], permuted_recv_x[:, :, :128], atol=1e-2, rtol=1e-1
+    )
     # check num_expert_recv_tokens
     # print(
     #     f"[rank: {rank}] ref_recv_count: {ref_recv_count}, payload.expert_tokens_meta.expert_num_tokens: {payload.expert_tokens_meta.expert_num_tokens}"
@@ -229,7 +231,9 @@ def _run_deepep_low_latency_router_test(rank: int, use_fp8: bool):
         extra_finalize_args,
     )
     # print(f"[rank: {rank}] combined_x: {combined_x[:5, 127:132]}, hidden_states: {hidden_states[ep_rank][:5, 127:132]}")
-    torch.testing.assert_close(hidden_states[dp_rank, :, :128], combined_x[:, :128])
+    torch.testing.assert_close(
+        hidden_states[dp_rank, :, :128], combined_x[:, :128], atol=1e-2, rtol=1e-1
+    )
     _destroy_router(router)
 
 

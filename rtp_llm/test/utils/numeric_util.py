@@ -34,6 +34,7 @@ def per_token_cast_to_fp8(
 
 
 def per_token_cast_back(x_fp8: torch.Tensor, x_scales: torch.Tensor):
+    x_scales = x_scales.contiguous()
     if x_scales.dtype == torch.int:
         if os.getenv("ACCL_FP8_CAST_LEVEL", "1") == "2":
             x_scales = x_scales << 23

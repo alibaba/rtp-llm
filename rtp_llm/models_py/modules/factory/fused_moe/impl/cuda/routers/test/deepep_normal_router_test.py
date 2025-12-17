@@ -22,6 +22,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_normal_router import (
     DeepepNormalRouter,
 )
+from rtp_llm.test.utils.numeric_util import per_token_cast_back
 from rtp_llm.test.utils.port_util import PortsContext
 
 import rtp_llm.ops  # isort:skip
@@ -119,7 +120,9 @@ def worker_function(rank: int, use_fp8: bool, token_num_per_rank: List[int]):
                 sum(token_num_per_rank)
             ] * (config.expert_num // config.world_size)
             if router.use_fp8:
-                combine_x = dequant_to_bf16(payload.expert_x, payload.expert_x_scale)
+                combine_x = per_token_cast_back(
+                    payload.expert_x, payload.expert_x_scale
+                )
             else:
                 combine_x = payload.expert_x
             # pass token_num to finalize for gather
@@ -129,7 +132,7 @@ def worker_function(rank: int, use_fp8: bool, token_num_per_rank: List[int]):
             )
             if router.use_fp8:
                 x, scale = trt_fp8_quantize_128(a1, False)
-                ref_a2 = dequant_to_bf16(x, scale) * config.world_size
+                ref_a2 = per_token_cast_back(x, scale) * config.world_size
             else:
                 ref_a2 = a1 * config.world_size
             torch.testing.assert_close(ref_a2[:, :128], a2[:, :128])
