@@ -83,7 +83,7 @@ class MasterClient:
                     return None, inter_request_id
                 result = await response.json()
         except Exception as e:
-            route_logger.error(f"Failed to connect to master at {master_addr}: {e}")
+            route_logger.error(f"query master[{master_addr}] failed: {type(e).__name__}: {e}")
             return None, inter_request_id
 
         # check response
