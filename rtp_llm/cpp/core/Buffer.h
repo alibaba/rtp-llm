@@ -7,16 +7,20 @@
 #include <string>
 #include <functional>
 #include <sstream>
+#include <cstring>
 
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 namespace rtp_llm {
+
+constexpr const char* TORCH_ALLOCATED_TAG = "torch_allocated";
 
 class QBuffer;
 
 struct BufferHints {
     BufferHints(const std::string& tag = ""): tag(tag) {}
-
-    std::string tag = "";
+    BufferHints(const std::string& tag, const std::string& stk): tag(tag), stack(stk) {}
+    std::string tag   = "";
+    std::string stack = "";
 };
 
 // Buffer is similar to Tensor, but with more limited functionality.

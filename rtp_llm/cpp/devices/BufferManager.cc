@@ -42,6 +42,7 @@ BufferPtr BufferManager::allocate(const BufferParams& params, const BufferHints&
             params.sizeInBytes(),
             e.what(),
             printAllocationRecords(device_allocator_).c_str());
+        RTP_LLM_STACKTRACE_LOG_INFO(printAllocationRecordsStack(device_allocator_).c_str());
         printStackTrace();
         throw;
     }
@@ -214,6 +215,42 @@ string BufferManager::printAllocationRecords(IAllocator* allocator) {
         return info.str();
     } else {
         RTP_LLM_LOG_WARNING("BufferManager::printAllocationRecords is only effective when using TrackerAllocator!");
+        return "";
+    }
+}
+
+string BufferManager::printAllocationRecordsStack(IAllocator* allocator) {
+    if (auto tracker_allocator = dynamic_cast<TrackerAllocator*>(allocator)) {
+        auto               tracker_status = tracker_allocator->getTrackerStatus();
+        std::ostringstream torch_alloc_stack_info;
+        std::set<void*>    allocated_ptrs;
+        {
+            ReadLock lock(mutex_);
+            for (const auto& [ptr, record] : allocation_records_) {
+                allocated_ptrs.insert(ptr);
+            }
+            size_t torch_record_alloc_size = 0;
+            for (const auto chunk : tracker_status.chunks) {
+                const auto alloc_record = allocation_records_.find(chunk.ptr);
+                if (alloc_record != allocation_records_.end()
+                    && strcmp(alloc_record->second.hints.tag.c_str(), TORCH_ALLOCATED_TAG) == 0) {
+                    allocated_ptrs.erase(chunk.ptr);
+                    torch_alloc_stack_info
+                        << "\n--------------------------------------------------------------------------\n";
+                    torch_alloc_stack_info << "TRACE:" << alloc_record->second.trace_id << " ADDR:" << chunk.ptr
+                                           << " SIZE:" << chunk.size << " at:" << "\n";
+                    torch_alloc_stack_info << alloc_record->second.hints.stack.c_str() << "\n";
+                    torch_record_alloc_size += chunk.size;
+                }
+            }
+            torch_alloc_stack_info << "\n--------------------------------------------------------------------------\n";
+            torch_alloc_stack_info << "Memory Tracker [" << (int32_t)tracker_allocator->type()
+                                   << "] Allocated Torch Tensor total Bytes:" << torch_record_alloc_size << "\n";
+        }
+        return torch_alloc_stack_info.str();
+    } else {
+        RTP_LLM_LOG_WARNING(
+            "BufferManager::printAllocationRecordsStack is only effective when using TrackerAllocator!");
         return "";
     }
 }
