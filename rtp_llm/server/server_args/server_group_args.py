@@ -44,7 +44,7 @@ def init_server_group_args(parser, server_config):
         help="worker的总的端口的数量",
     )
     server_group.add_argument(
-        "--shutdown-timeout",
+        "--shutdown_timeout",
         env_name="SHUTDOWN_TIMEOUT",
         bind_to=(server_config, 'shutdown_timeout'),
         type=int,
@@ -52,7 +52,7 @@ def init_server_group_args(parser, server_config):
         help="Process manager shutdown timeout in seconds. Set to -1 to wait indefinitely for processes to finish (no force kill)",
     )
     server_group.add_argument(
-        "--monitor-interval",
+        "--monitor_interval",
         env_name="MONITOR_INTERVAL",
         bind_to=(server_config, 'monitor_interval'),
         type=int,
