@@ -96,6 +96,7 @@ build:cuda12_9 --copt="-D_GLIBCXX_USE_CXX11_ABI=1"
 
 build:sm10x --config=cuda12_9
 build:sm10x --action_env  TF_CUDA_COMPUTE_CAPABILITIES="10.0"
+build:sm10x --copt="-DENABLE_NVFP4=1"
 
 build:cuda12_9_arm --config=cuda12_9
 build:cuda12_9_arm --config=sm10x
