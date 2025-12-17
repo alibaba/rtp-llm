@@ -48,6 +48,8 @@ class LinearFactory:
         scale_key: Optional[str] = None,
         bias_key: Optional[str] = None,
         config: Optional[GptInitModelParameters] = None,
+        weight_scale_2_key: Optional[str] = None,
+        input_scale_key: Optional[str] = None,
     ) -> LinearBase:
         """Create Linear layer from weight dictionary
 
@@ -57,6 +59,8 @@ class LinearFactory:
             scale_key: Key for scale tensor (optional)
             bias_key: Key for bias tensor (optional)
             config: Model initialization parameters (optional)
+            weight_scale_2_key: Key for second weight scale tensor (for NVFP4, optional)
+            input_scale_key: Key for input scale tensor (for NVFP4, optional)
 
         Returns:
             Linear module instance
@@ -67,8 +71,12 @@ class LinearFactory:
         weight = weights[weight_key]
         weight_scales = weights.get(scale_key) if scale_key else None
         bias = weights.get(bias_key) if bias_key else None
+        weight_scale_2 = weights.get(weight_scale_2_key) if weight_scale_2_key else None
+        input_scale = weights.get(input_scale_key) if input_scale_key else None
 
-        return cls.create_linear(weight, bias, weight_scales, config)
+        return cls.create_linear(
+            weight, bias, weight_scales, config, weight_scale_2, input_scale
+        )
 
     @classmethod
     def create_linear(
@@ -77,11 +85,15 @@ class LinearFactory:
         bias: Optional[torch.Tensor],
         weight_scales: Optional[torch.Tensor],
         config: Optional[GptInitModelParameters] = None,
+        weight_scale_2: Optional[torch.Tensor] = None,
+        input_scale: Optional[torch.Tensor] = None,
     ):
         candidates = [
             strategy_class
             for strategy_class in cls._strategies
-            if strategy_class.can_handle(config, weight, weight_scales)
+            if strategy_class.can_handle(
+                config, weight, weight_scales, weight_scale_2, input_scale
+            )
         ]
 
         if not candidates:
@@ -114,6 +126,7 @@ class LinearFactory:
             input_scales=input_scales,
             bias=bias,
             config=config,
+            weight_scale_2=weight_scale_2,
         )
 
         return instance
@@ -132,14 +145,17 @@ class LinearFactory:
         """Create merged Linear layer (e.g., gate_up_proj)."""
         # Check FP8 usage based on first weight
         use_fp8 = LinearFactory.should_use_fp8_linear(config, weights, weight_keys[0])
+        
+        # Check NVFP4 usage based on first weight
+        use_nvfp4 = LinearFactory.should_use_nvfp4_linear(config, weights, weight_keys[0])
 
         # Merge weights
         weight_tensors = [weights[key] for key in weight_keys]
         merged_weight = torch.cat(weight_tensors, dim=dim)
 
-        # Merge scales if needed
+        # Merge scales if needed (for both FP8 and NVFP4)
         merged_scales = None
-        if use_fp8 and scale_keys:
+        if (use_fp8 or use_nvfp4) and scale_keys:
             scale_tensors = [weights[key] for key in scale_keys]
             merged_scales = torch.cat(scale_tensors, dim=dim)
 
@@ -190,3 +206,25 @@ class LinearFactory:
         return (
             weight.dtype == torch.float8_e4m3fn or weight.dtype == torch.float8_e4m3fnuz
         )
+
+    @staticmethod
+    def should_use_nvfp4_linear(
+        config: GptInitModelParameters,
+        weights: Dict[str, torch.Tensor],
+        weight_key: str,
+    ) -> bool:
+        """Check if NVFP4 linear layer should be used."""
+        # Check quantization method if available
+        if not config.quant_config or not hasattr(config.quant_config, "get_method"):
+            return False
+        quant_method = config.quant_config.get_method()
+        nvfp4_methods = ["NVFP4"]
+        if quant_method not in nvfp4_methods:
+            return False
+
+        # Check if weight is uint8 format (NVFP4 uses uint8 weights)
+        weight = weights.get(weight_key)
+        if weight is None:
+            return False
+
+        return weight.dtype == torch.uint8
