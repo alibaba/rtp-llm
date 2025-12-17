@@ -16,7 +16,7 @@ cc_library(
     name = "aiter_so",
     srcs = glob([
         "aiter/jit/*.so",
-    ]),
+    ], exclude=["aiter/jit/module_deepgemm.so"]),
     visibility = ["//visibility:public"],
     tags = ["rocm"],
 )
