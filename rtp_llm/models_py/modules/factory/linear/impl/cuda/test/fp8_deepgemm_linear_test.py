@@ -5,11 +5,13 @@ import unittest
 
 import torch
 
+from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used
+from rtp_llm.models_py.kernels.cuda.fp8_kernel.fp8_kernel import per_block_cast_to_fp8
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear import (
     CudaFp8DeepGEMMLinear,
 )
 from rtp_llm.test.utils.bench_util import bench
-from rtp_llm.test.utils.numeric_util import calc_diff, per_block_cast_to_fp8
+from rtp_llm.test.utils.numeric_util import calc_diff
 
 
 class CudaFp8DeepGEMMLinearTest(unittest.TestCase):
@@ -120,10 +122,16 @@ class CudaFp8DeepGEMMLinearTest(unittest.TestCase):
             cuda_fp8_deepgemm_linear_with_bias_2d.weight.shape, (self.N, self.K)
         )
         self.assertIsNotNone(cuda_fp8_deepgemm_linear_with_bias_2d.weight_scales)
-        self.assertEqual(
-            cuda_fp8_deepgemm_linear_with_bias_2d.weight_scales.shape,
-            (self.scale_N, self.scale_K),
-        )
+        if is_deep_gemm_e8m0_used():
+            self.assertEqual(
+                cuda_fp8_deepgemm_linear_with_bias_2d.weight_scales.shape,
+                (self.scale_N * 128, self.scale_K // 4),
+            )
+        else:
+            self.assertEqual(
+                cuda_fp8_deepgemm_linear_with_bias_2d.weight_scales.shape,
+                (self.scale_N, self.scale_K),
+            )
         self.assertIsNotNone(cuda_fp8_deepgemm_linear_with_bias_2d.bias)
         self.assertEqual(cuda_fp8_deepgemm_linear_with_bias_2d.bias.dim(), 2)
         # Test with bias 1D
@@ -137,10 +145,16 @@ class CudaFp8DeepGEMMLinearTest(unittest.TestCase):
             cuda_fp8_deepgemm_linear_with_bias_1d.weight.shape, (self.N, self.K)
         )
         self.assertIsNotNone(cuda_fp8_deepgemm_linear_with_bias_1d.weight_scales)
-        self.assertEqual(
-            cuda_fp8_deepgemm_linear_with_bias_1d.weight_scales.shape,
-            (self.scale_N, self.scale_K),
-        )
+        if is_deep_gemm_e8m0_used():
+            self.assertEqual(
+                cuda_fp8_deepgemm_linear_with_bias_1d.weight_scales.shape,
+                (self.scale_N * 128, self.scale_K // 4),
+            )
+        else:
+            self.assertEqual(
+                cuda_fp8_deepgemm_linear_with_bias_1d.weight_scales.shape,
+                (self.scale_N, self.scale_K),
+            )
         self.assertIsNotNone(cuda_fp8_deepgemm_linear_with_bias_1d.bias)
         self.assertEqual(cuda_fp8_deepgemm_linear_with_bias_1d.bias.dim(), 1)
         # Test without bias
@@ -154,10 +168,16 @@ class CudaFp8DeepGEMMLinearTest(unittest.TestCase):
             cuda_fp8_deepgemm_linear_without_bias.weight.shape, (self.N, self.K)
         )
         self.assertIsNotNone(cuda_fp8_deepgemm_linear_without_bias.weight_scales)
-        self.assertEqual(
-            cuda_fp8_deepgemm_linear_without_bias.weight_scales.shape,
-            (self.scale_N, self.scale_K),
-        )
+        if is_deep_gemm_e8m0_used():
+            self.assertEqual(
+                cuda_fp8_deepgemm_linear_without_bias.weight_scales.shape,
+                (self.scale_N * 128, self.scale_K // 4),
+            )
+        else:
+            self.assertEqual(
+                cuda_fp8_deepgemm_linear_without_bias.weight_scales.shape,
+                (self.scale_N, self.scale_K),
+            )
         self.assertIsNone(cuda_fp8_deepgemm_linear_without_bias.bias)
 
     def test_weight_validation(self):
@@ -420,7 +440,9 @@ class CudaFp8DeepGEMMLinearTest(unittest.TestCase):
             dtype=torch.bfloat16,
             device=self.device,
         )
-        weight_fp8, weight_scales = per_block_cast_to_fp8(weight_bf16, use_ue8m0=False)
+        weight_fp8, weight_scales = per_block_cast_to_fp8(
+            weight_bf16, use_ue8m0=is_deep_gemm_e8m0_used()
+        )
         weight_fp8 = weight_fp8.reshape(self.K, self.N)
         weight_scales = weight_scales.reshape(self.scale_K, self.scale_N)
         # Initialize FP8 linear layer
@@ -476,7 +498,9 @@ class CudaFp8DeepGEMMLinearTest(unittest.TestCase):
         weight_bf16 = torch.randn(
             (self.N, self.K), dtype=torch.bfloat16, device=self.device
         )
-        weight_fp8, weight_scales = per_block_cast_to_fp8(weight_bf16, use_ue8m0=False)
+        weight_fp8, weight_scales = per_block_cast_to_fp8(
+            weight_bf16, use_ue8m0=is_deep_gemm_e8m0_used()
+        )
         weight_fp8 = weight_fp8.reshape(self.K, self.N)
         weight_scales = weight_scales.reshape(self.scale_K, self.scale_N)
         bias_bf16 = torch.randn((self.N,), dtype=torch.bfloat16, device=self.device)

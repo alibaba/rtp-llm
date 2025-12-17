@@ -5,7 +5,11 @@ import torch
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.distribute.collective import Group, all_gather
 from rtp_llm.models_py.distributed.deepep_initializer import DeepEpInitializer
-from rtp_llm.models_py.kernels.cuda.fp8_kernel import scaled_fp8_per_token_quant
+from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used
+from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
+    scaled_fp8_per_token_quant,
+    sgl_per_token_group_quant_fp8,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     ExpertForwardPayload,
     ExpertTokensMetadata,
@@ -89,6 +93,14 @@ class DeepepNormalRouter(FusedMoeDataRouter):
                 a1, a1_scale = scaled_fp8_per_token_quant(a1, None)
                 assert a1.shape[1] % 128 == 0
                 a1_scale = a1_scale.repeat(1, a1.shape[1] // 128)
+            elif is_deep_gemm_e8m0_used():
+                a1, a1_scale = sgl_per_token_group_quant_fp8(
+                    a1,
+                    128,
+                    column_major_scales=True,
+                    scale_tma_aligned=True,
+                    scale_ue8m0=True,
+                )
             else:
                 a1, a1_scale = trt_fp8_quantize_128(a1, False)
 

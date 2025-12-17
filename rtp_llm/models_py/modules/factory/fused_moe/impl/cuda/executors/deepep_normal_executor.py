@@ -11,6 +11,10 @@ from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
     is_deep_gemm_e8m0_used,
     m_grouped_fp8_gemm_nt_contiguous,
 )
+from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
+    requant_weight_ue8m0,
+    sgl_per_token_group_quant_fp8,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     ExpertForwardPayload,
     FusedMoeExpertExecutor,
@@ -87,6 +91,20 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
         self.w2_weight_scale_inv = weights[W.moe_s2]
         self.w13_weight_scale = None
         self.w2_weight_scale = None
+        if is_deep_gemm_e8m0_used():
+            w13_weight_tmp, self.w13_weight_scale_inv = requant_weight_ue8m0(
+                self.w13_weight, self.w13_weight_scale_inv
+            )
+            self.w13_weight.copy_(w13_weight_tmp)
+            weights[W.moe_s1] = self.w13_weight_scale_inv
+            del w13_weight_tmp
+            w2_weight_tmp, self.w2_weight_scale_inv = requant_weight_ue8m0(
+                self.w2_weight, self.w2_weight_scale_inv
+            )
+            self.w2_weight.copy_(w2_weight_tmp)
+            weights[W.moe_s2] = self.w2_weight_scale_inv
+            del w2_weight_tmp
+
         self.w13_weight_fp8 = (
             self.w13_weight,
             self.w13_weight_scale_inv,
@@ -193,6 +211,7 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
             input_tensor[1],
             m_indices,
             output_index,
+            scale_ue8m0=is_deep_gemm_e8m0_used(),
         )
         dispose_tensor(hidden_states_fp8)
         gateup_output = torch.empty(
@@ -207,7 +226,7 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
             self.w13_weight_fp8,
             gateup_output,
             m_indices,
-            disable_ue8m0_cast=True,
+            disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
         )
         del input_tensor
         down_input = torch.empty(
@@ -226,7 +245,16 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
             device=hidden_states_fp8_device,
             dtype=torch.bfloat16,
         )
-        down_input_fp8, down_input_scale = trt_fp8_quantize_128(down_input, False)
+        if is_deep_gemm_e8m0_used():
+            down_input_fp8, down_input_scale = sgl_per_token_group_quant_fp8(
+                down_input,
+                group_size=BLOCK_SIZE,
+                column_major_scales=True,
+                scale_tma_aligned=True,
+                scale_ue8m0=is_deep_gemm_e8m0_used(),
+            )
+        else:
+            down_input_fp8, down_input_scale = trt_fp8_quantize_128(down_input, False)
         del down_input
         if not is_deep_gemm_e8m0_used():
             down_input_scale = tma_align_input_scale(down_input_scale)
@@ -235,7 +263,7 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
             self.w2_weight_fp8,
             down_output,
             m_indices,
-            disable_ue8m0_cast=True,
+            disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
         )
         del down_input_fp8, down_input_scale
         gather_out = torch.empty(

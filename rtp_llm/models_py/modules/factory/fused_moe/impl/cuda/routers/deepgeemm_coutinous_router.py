@@ -4,6 +4,11 @@ import torch
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.distribute.collective import Group, all_reduce
+from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used
+from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
+    per_token_cast_to_fp8,
+    sgl_per_token_group_quant_fp8,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     ExpertForwardPayload,
     ExpertTokensMetadata,
@@ -68,7 +73,15 @@ class PureTpRouter(FusedMoeDataRouter):
         quant_config: FusedMoEQuantConfig,
     ) -> ExpertForwardPayload:
         # recompute top_k ids to current expert, mask out of range expert to -1
-        if self.use_fp8:
+        if is_deep_gemm_e8m0_used():
+            expert_x, expert_x_scale = sgl_per_token_group_quant_fp8(
+                a1,
+                128,
+                column_major_scales=True,
+                scale_tma_aligned=True,
+                scale_ue8m0=True,
+            )
+        elif self.use_fp8:
             expert_x, expert_x_scale = trt_fp8_quantize_128(a1, False)
         else:
             expert_x = a1

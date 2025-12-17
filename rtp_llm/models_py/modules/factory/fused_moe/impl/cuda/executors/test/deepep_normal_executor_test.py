@@ -8,12 +8,10 @@ from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_us
 from rtp_llm.models_py.kernels.cuda.fp8_kernel.fp8_kernel import (
     per_block_cast_to_fp8,
     per_token_cast_to_fp8,
+    sgl_per_token_group_quant_fp8,
 )
-from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
-    FusedMoEQuantConfig,
-)
-from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_masked_executor import (
-    DeepGemmMaskedExecutor,
+from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepep_normal_executor import (
+    DeepGemmContinousExecutor,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.test.fused_moe_executor_test_util import (
     generate_payload_and_weights,
@@ -58,7 +56,7 @@ def _generate_config() -> GptInitModelParameters:
     return config
 
 
-def test_deepgemm_masked_executor(use_fp8: bool):
+def test_deepep_normal_executor(use_fp8: bool):
     torch.manual_seed(42)
     torch.cuda.manual_seed(42)
     random.seed(42)
@@ -72,9 +70,14 @@ def test_deepgemm_masked_executor(use_fp8: bool):
     torch_dtype = torch.float8_e4m3fn if use_fp8 else torch.bfloat16
 
     if use_fp8:
-        payload.expert_x_scale = torch.empty(
-            (num_local_experts, M, K // 128), device="cuda", dtype=torch.float32
-        )
+        if is_deep_gemm_e8m0_used():
+            payload.expert_x_scale = torch.empty(
+                (num_local_experts, M, K // 128 // 4), device="cuda", dtype=torch.int
+            )
+        else:
+            payload.expert_x_scale = torch.empty(
+                (num_local_experts, M, K // 128), device="cuda", dtype=torch.float32
+            )
         weights[W.moe_s1] = torch.empty(
             (num_local_experts, N // 128, K // 128), device="cuda", dtype=torch.float32
         )
@@ -94,8 +97,13 @@ def test_deepgemm_masked_executor(use_fp8: bool):
         )
 
         for i in range(num_local_experts):
-            new_expert_x[i], payload.expert_x_scale[i] = per_token_cast_to_fp8(
-                payload.expert_x[i], use_ue8m0=is_deep_gemm_e8m0_used()
+            new_expert_x[i], payload.expert_x_scale[i] = sgl_per_token_group_quant_fp8(
+                payload.expert_x[i],
+                128,
+                column_major_scales=True,
+                scale_tma_aligned=True,
+                # scale_ue8m0=True,
+                scale_ue8m0=is_deep_gemm_e8m0_used(),
             )
             new_w1[i], weights[W.moe_s1][i] = per_block_cast_to_fp8(
                 weights[W.moe_w1][i], use_ue8m0=is_deep_gemm_e8m0_used()
@@ -107,30 +115,51 @@ def test_deepgemm_masked_executor(use_fp8: bool):
         weights[W.moe_w1] = new_w1
         weights[W.moe_w2] = new_w2
 
-    executor = DeepGemmMaskedExecutor(
+    executor = DeepGemmContinousExecutor(
         config,
         weights,
-        (
-            FusedMoEQuantConfig(
-                quant_dtype=torch.float8_e4m3fn,
-                per_act_token_quant=False,
-                per_out_ch_quant=False,
-                block_shape=[128, 128],
-            )
-            if use_fp8
-            else FusedMoEQuantConfig(quant_dtype=None)
-        ),
+    )
+    expert_num_tokens = payload.expert_tokens_meta.expert_num_tokens
+    payload.expert_x = torch.cat(
+        [
+            payload.expert_x[i, :num_token]
+            for i, num_token in enumerate(expert_num_tokens)
+        ],
+        dim=0,
+    )
+    if use_fp8:
+        payload.expert_x_scale = torch.cat(
+            [
+                payload.expert_x_scale[i, :num_token]
+                for i, num_token in enumerate(expert_num_tokens)
+            ],
+            dim=0,
+        )
+    payload.expert_topk_ids = torch.cat(
+        [
+            payload.expert_topk_ids[i, :num_token]
+            for i, num_token in enumerate(expert_num_tokens)
+        ],
+        dim=0,
+    )
+    payload.expert_topk_weights = torch.cat(
+        [
+            payload.expert_topk_weights[i, :num_token]
+            for i, num_token in enumerate(expert_num_tokens)
+        ],
+        dim=0,
     )
     # execute
     output = executor.execute(payload, "silu", None, None, False, None)
-    expert_num_tokens = payload.expert_tokens_meta.expert_num_tokens
+    token_idx = 0
     for i, num_token in enumerate(expert_num_tokens):
-        diff = calc_diff(output[i, :num_token], ref_output[i, :num_token])
-        # print('diff:', diff, output[i, :num_token], ref_output[i, :num_token])
+        diff = calc_diff(
+            output[token_idx : token_idx + num_token], ref_output[i, :num_token]
+        )
+        # print('diff:', diff, output[token_idx : token_idx + num_token], ref_output[i, :num_token])
+        token_idx += num_token
         assert diff < 0.0022
 
 
 if __name__ == "__main__":
-    test_deepgemm_masked_executor(use_fp8=True)
-    if not is_deep_gemm_e8m0_used():
-        test_deepgemm_masked_executor(use_fp8=False)
+    test_deepep_normal_executor(use_fp8=True)

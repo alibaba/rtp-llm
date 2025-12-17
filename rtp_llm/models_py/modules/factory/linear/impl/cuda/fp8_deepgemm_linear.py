@@ -6,8 +6,15 @@ from typing import Optional
 import torch
 
 from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import fp8_gemm_nt, has_deep_gemm
-from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
+from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
+    fp8_gemm_nt,
+    has_deep_gemm,
+    is_deep_gemm_e8m0_used,
+)
+from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
+    requant_weight_ue8m0,
+    sgl_per_token_group_quant_fp8,
+)
 from rtp_llm.models_py.modules.factory.linear import LinearBase
 
 logger = logging.getLogger(__name__)
@@ -40,6 +47,7 @@ class CudaFp8DeepGEMMLinear(LinearBase):
             return quant_method == "FP8_PER_BLOCK"
         return False
 
+    @torch.inference_mode()
     def __init__(
         self,
         weight: torch.Tensor,
@@ -108,6 +116,17 @@ class CudaFp8DeepGEMMLinear(LinearBase):
                 error_msg = f"Bias dtype must be bfloat16, got {self.bias.dtype}"
                 logger.error(error_msg)
                 raise ValueError(error_msg)
+        self.scale_ue8m0 = is_deep_gemm_e8m0_used()
+        # Disable UE8M0 for small tensors due to performance/accuracy trade-offs.
+        # TODO: Re-evaluate this threshold after further optimization of UE8M0 kernels.
+        if self.weight.shape[0] < 128 or self.weight.shape[1] < 256:
+            self.scale_ue8m0 = False
+        if self.scale_ue8m0:
+            w_tmp, self.weight_scales = requant_weight_ue8m0(
+                self.weight, self.weight_scales
+            )
+            self.weight.copy_(w_tmp)
+            del w_tmp
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         # Check input dtype - only accept bfloat16
@@ -133,6 +152,7 @@ class CudaFp8DeepGEMMLinear(LinearBase):
             eps=1e-4,
             column_major_scales=True,
             scale_tma_aligned=True,
+            scale_ue8m0=self.scale_ue8m0,
         )
         # Prepare output tensor
         output = torch.empty(M, self.N, dtype=torch.bfloat16, device=input.device)
@@ -142,7 +162,7 @@ class CudaFp8DeepGEMMLinear(LinearBase):
             (self.weight, self.weight_scales),
             output,
             c=None,
-            disable_ue8m0_cast=True,
+            disable_ue8m0_cast=not self.scale_ue8m0,
         )
         if self.bias is not None:
             output = output + self.bias.to(output.dtype)
