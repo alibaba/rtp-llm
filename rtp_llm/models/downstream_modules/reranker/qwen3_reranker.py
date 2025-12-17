@@ -107,11 +107,15 @@ class Qwen3RerankerHandler(CustomHandler):
         super().__init__(config)
         self.token_false_id = token_false_id
         self.token_true_id = token_true_id
-
+        self.tie_word_embeddings = config.tie_word_embeddings
+        self.lm_head_weight_name = (
+            "model.embed_tokens.weight"
+            if self.tie_word_embeddings
+            else "lm_head.weight"
+        )
+        
     def custom_weight_info(self) -> List[CustomAtomicWeight]:
-        w_list = [
-            "lm_head.weight",
-        ]
+        w_list = [self.lm_head_weight_name]
         weights = []
         for k in w_list:
             weights.append(
@@ -121,7 +125,7 @@ class Qwen3RerankerHandler(CustomHandler):
 
     def init(self, tensor_map: Dict[str, torch.Tensor]):
         data_type = to_torch_dtype(self.config_.data_type)
-        linear_weight = tensor_map["lm_head.weight"]
+        linear_weight = tensor_map[self.lm_head_weight_name]
         self.linear = torch.nn.Linear(linear_weight.shape[1], linear_weight.shape[0])
         self.linear.weight.data = linear_weight
         self.linear = self.linear.to(data_type).eval().to(self.device)

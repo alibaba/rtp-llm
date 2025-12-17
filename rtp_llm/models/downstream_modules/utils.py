@@ -12,6 +12,10 @@ from rtp_llm.models.downstream_modules import (
     RerankerModule,
     SparseEmbeddingModule,
 )
+from rtp_llm.models.downstream_modules.reranker.qwen3_reranker import (
+    Qwen3RerankerModule,
+)
+from rtp_llm.ops import TaskType
 
 
 def create_custom_module(
@@ -33,6 +37,7 @@ def create_custom_module(
 
     if task_type == TaskType.LANGUAGE_MODEL:
         return None
+    model_type = config.model_type
     assert tokenizer is not None, "tokenizer should not be None"
     if task_type == TaskType.DENSE_EMBEDDING:
         return DenseEmbeddingModule(config, tokenizer)
@@ -46,6 +51,8 @@ def create_custom_module(
         return ClassifierModule(config, tokenizer)
     elif task_type == TaskType.BGE_M3:
         return BgeM3EmbeddingModule(config, tokenizer)
+    elif model_type == "qwen_3":
+        return Qwen3RerankerModule(config, tokenizer)
     elif task_type == TaskType.RERANKER:
         return RerankerModule(config, tokenizer)
     raise Exception(f"unknown task_type: {task_type}")
