@@ -28,6 +28,8 @@ class CudaFp8DeepGEMMLinear(LinearBase):
         quant_config: object,
         weight: torch.Tensor,
         weight_scales: Optional[torch.Tensor],
+        weight_scale_2: Optional[torch.Tensor] = None,
+        input_scale: Optional[torch.Tensor] = None,
     ) -> bool:
         """Handle other FP8 methods (FP8, FP8_PER_BLOCK, etc.)"""
         if weight_scales is None or quant_config is None:
@@ -49,8 +51,10 @@ class CudaFp8DeepGEMMLinear(LinearBase):
         input_scales: Optional[torch.Tensor] = None,
         bias: Optional[torch.Tensor] = None,
         quant_config: object = None,
+        weight_scale_2: Optional[torch.Tensor] = None,
     ):
-        super().__init__(weight, weight_scales, input_scales, bias, quant_config)
+        super().__init__(weight, weight_scales, input_scales,
+                         bias, quant_config, weight_scale_2)
         # Initialize parameters
         self.weight = weight
         self.weight_scales = weight_scales
