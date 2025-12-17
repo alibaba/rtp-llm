@@ -283,7 +283,18 @@ class FrontendApp(object):
         @app.post("/update_weight")
         async def update_weight(req: Union[str, Dict[Any, Any]]):
             return await async_request_server(
-                "post", g_worker_info.backend_server_port, "update_weight", req
+                "post", g_worker_info.backend_server_port, "update_weight", req)
+
+        @app.post("/detach_physical_memory")
+        async def detach_physical_memory():
+            return await async_request_server(
+                "post", g_worker_info.backend_server_port, "detach_physical_memory"
+            )
+
+        @app.post("/attach_physical_memory")
+        async def attach_physical_memory():
+            return await async_request_server(
+                "post", g_worker_info.backend_server_port, "attach_physical_memory"
             )
 
         if self.frontend_server.is_embedding:

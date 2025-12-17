@@ -239,6 +239,11 @@ public:
             custom_allreduce_comm_->registerGraphBuffers();
     }
 
+    void detachPhysicalMemory() override;
+    void attachPhysicalMemory() override;
+    void useTorchAllocator() override;
+    void useRtpAllocator() override;
+
 protected:
     void InvokeROCmDeepGemm(const GemmParams& params, BufferPtr output);
     void InvokeROCmPTPCGemm(const GemmParams& params, BufferPtr output);
