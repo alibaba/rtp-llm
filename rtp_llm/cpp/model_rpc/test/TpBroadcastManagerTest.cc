@@ -215,22 +215,6 @@ TEST_F(TpBroadcastManagerTest, Broadcast_ReturnNotNull_AllRequestsTimeout) {
     ASSERT_NE(result, nullptr);
 
     EXPECT_THROW(result->waitDone(), rtp_llm::RTPException);
-    // EXPECT_FALSE(result->success());  // all requests are timeout, so the final result should be false
-
-    // const auto& responses = result->responses();
-    // EXPECT_EQ(responses.size(), server_addrs.size());
-    // for (size_t i = 0; i < responses.size(); ++i) {
-    //     EXPECT_FALSE(responses[i].has_mem_response());
-    //     EXPECT_FALSE(responses[i].mem_response().success());
-
-    //     const auto& ctx = result->worker_contexts_[i];
-    //     EXPECT_EQ(ctx->status.error_code(), grpc::StatusCode::DEADLINE_EXCEEDED);
-    // }
-
-    // manager.reset();
-    // for (auto& server : servers) {
-    //     server->shutdown();
-    // }
 }
 
 TEST_F(TpBroadcastManagerTest, Broadcast_ReturnNotNull_PartialRequestsTimeout) {
@@ -262,27 +246,6 @@ TEST_F(TpBroadcastManagerTest, Broadcast_ReturnNotNull_PartialRequestsTimeout) {
     ASSERT_NE(result, nullptr);
 
     EXPECT_THROW(result->waitDone(), rtp_llm::RTPException);
-    // EXPECT_FALSE(result->success());  // the first request is timeout, so the final result should be false
-
-    // const auto& responses = result->responses();
-    // EXPECT_EQ(responses.size(), server_addrs.size());
-    // for (size_t i = 0; i < responses.size(); ++i) {
-    //     const auto& ctx = result->worker_contexts_[i];
-    //     if (i == 0) {
-    //         EXPECT_EQ(ctx->status.error_code(), grpc::StatusCode::DEADLINE_EXCEEDED);
-    //         EXPECT_FALSE(responses[i].has_mem_response());
-    //         EXPECT_FALSE(responses[i].mem_response().success());
-    //     } else {
-    //         EXPECT_EQ(ctx->status.error_code(), grpc::StatusCode::OK);
-    //         EXPECT_TRUE(responses[i].has_mem_response());
-    //         EXPECT_TRUE(responses[i].mem_response().success());
-    //     }
-    // }
-
-    // manager.reset();
-    // for (auto& server : servers) {
-    //     server->shutdown();
-    // }
 }
 
 TEST_F(TpBroadcastManagerTest, Broadcast_ReturnNotNull_PartialResponseRpcStatusFailed) {

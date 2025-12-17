@@ -107,18 +107,20 @@ public:
 
 enum class StreamState {
     WAITING,
+    LOADING_CACHE,
     RUNNING,
     PAUSED,
     STOPPED,
     FINISHED,
-    REMOTE_RUNNING,
-    LOADING_CACHE
+    REMOTE_RUNNING
 };
 
 inline std::string StreamStateToString(StreamState state) {
     switch (state) {
         case StreamState::WAITING:
             return "WAITING";
+        case StreamState::LOADING_CACHE:
+            return "LOADING_CACHE";
         case StreamState::RUNNING:
             return "RUNNING";
         case StreamState::PAUSED:
@@ -129,8 +131,6 @@ inline std::string StreamStateToString(StreamState state) {
             return "FINISHED";
         case StreamState::REMOTE_RUNNING:
             return "REMOTE_RUNNING";
-        case StreamState::LOADING_CACHE:
-            return "LOADING_CACHE";
         default:
             return "Error: Unrecognized Generate State";
     }

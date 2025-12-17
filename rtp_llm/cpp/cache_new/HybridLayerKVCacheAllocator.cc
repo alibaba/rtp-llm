@@ -253,10 +253,4 @@ bool HybridLayerKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& b
     return true;
 }
 
-void HybridLayerKVCacheAllocator::clearCache() {
-    if (block_pool_) {
-        block_pool_->clearCache();
-    }
-}
-
 }  // namespace rtp_llm
