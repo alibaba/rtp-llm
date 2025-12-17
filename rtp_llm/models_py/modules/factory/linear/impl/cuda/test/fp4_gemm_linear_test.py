@@ -5,6 +5,7 @@ import unittest
 import torch
 import torch.nn.functional as F
 
+from rtp_llm.test.utils.numeric_util import calc_diff
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp4_linear import (
     CudaFp4GEMMLinear,
     has_flashinfer_fp4,
@@ -43,15 +44,15 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
         global_sf_weight = (448 * 6) / weight_fp16.float().abs().nan_to_num().max()
         self.weight_scale_2 = 1.0 / global_sf_weight.to(torch.float32)
         fp4_weight, weight_scale = fp4_quantize(weight_fp16,
-                                                global_scale=global_sf_weight)
+                                                global_scale=global_sf_weight,
+                                                is_sf_swizzled_layout=False)
         self.weight = fp4_weight.T
         self.weight_scales = weight_scale.T
 
         self.bias = torch.randn(
             self.output_size, dtype=torch.bfloat16, device=self.device
         )
-        self.origin_weight_fp16 = weight_fp16
-        self.origin_weight_bf16 = weight_fp16.to(torch.bfloat16)
+        self.weight_fp16 = weight_fp16
         self.input_scale = self.weight_scale_2
 
     def _create_fp4_linear(self, with_bias: bool = True):
@@ -260,26 +261,11 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
         expected_weight_shape = (self.hidden_size // 2, self.output_size)
         self.assertEqual(fp4_linear.weight.shape, expected_weight_shape)
         
-
     def test_fp4_vs_bf16_accuracy(self):
         """Test accuracy comparison between FP4 linear and BF16 linear"""
         # Create FP4 linear layer, cutlass backend
         os.environ["FLASHINFER_FP4_GEMM_BACKEND"] = "trtllm"
         fp4_linear = self._create_fp4_linear(with_bias=False)
-
-        # Create equivalent BF16 linear layer
-        bf16_linear = torch.nn.Linear(
-            self.hidden_size,
-            self.output_size,
-            bias=False,
-            dtype=torch.bfloat16,
-            device=self.device,
-        )
-
-        # Set BF16 linear weights to match FP4 weights
-        with torch.no_grad():
-            bf16_linear.weight.data = self.origin_weight_bf16
-            
 
         # Test with various batch sizes
         test_batch_sizes = [1, 16, 32, 64, 128]
@@ -302,35 +288,23 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
                 fp4_output = fp4_linear(input_tensor)
 
                 # Forward pass through BF16 linear
-                bf16_output = bf16_linear(input_tensor)
-
-                # Compare outputs
-                cos_sim = F.cosine_similarity(bf16_output.reshape(-1), fp4_output.reshape(-1), dim=0)
-                assert cos_sim > 0.93
+                bf16_output = (input_tensor.float() @ self.weight_fp16.float().t()).to(
+                    torch.bfloat16
+                )
+                diff = calc_diff(fp4_output, bf16_output)
+                self.assertLess(diff, 0.01)
 
                 # Both outputs should have the same shape and dtype
                 self.assertEqual(fp4_output.shape, bf16_output.shape)
                 self.assertEqual(fp4_output.dtype, bf16_output.dtype)
+                self.assertFalse(torch.isnan(fp4_output).any())
+                self.assertFalse(torch.isinf(fp4_output).any())
 
     def test_fp4_vs_fp16_accuracy(self):
         """Test accuracy comparison between FP4 linear and BF16 linear"""
         # Create FP4 linear layer, cutlass backend
         os.environ["FLASHINFER_FP4_GEMM_BACKEND"] = "cutlass"
         fp4_linear = self._create_fp4_linear(with_bias=False)
-
-        # Create equivalent BF16 linear layer
-        fp16_linear = torch.nn.Linear(
-            self.hidden_size,
-            self.output_size,
-            bias=False,
-            dtype=torch.float16,
-            device=self.device,
-        )
-
-        # Set BF16 linear weights to match NVFP4 weights
-        with torch.no_grad():
-            fp16_linear.weight.data = self.origin_weight_fp16
-            
 
         # Test with various batch sizes
         test_batch_sizes = [1, 16, 32, 64, 128]
@@ -352,16 +326,17 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
                 fp4_output = fp4_linear(input_tensor)
 
                 # Forward pass through BF16 linear
-                fp16_output = fp16_linear(input_tensor)
-
-                # Compare outputs
-                # The difference should be reasonable (within quantization error)
-                cos_sim = F.cosine_similarity(fp16_output.reshape(-1), fp4_output.reshape(-1), dim=0)
-                assert cos_sim > 0.93
+                fp16_output = (input_tensor.float() @ self.weight_fp16.float().t()).to(
+                    torch.float16
+                )
+                diff = calc_diff(fp4_output, fp16_output)
+                self.assertLess(diff, 0.01)
 
                 # Both outputs should have the same shape and dtype
                 self.assertEqual(fp4_output.shape, fp16_output.shape)
                 self.assertEqual(fp4_output.dtype, fp16_output.dtype)
+                self.assertFalse(torch.isnan(fp4_output).any())
+                self.assertFalse(torch.isinf(fp4_output).any())
 
 
 if __name__ == "__main__":
