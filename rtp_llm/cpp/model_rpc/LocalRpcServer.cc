@@ -156,6 +156,78 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
 }
 
 grpc::Status
+LocalRpcServer::Enqueue(grpc::ServerContext* context, BatchGenerateRequestPB* request, EnqueueResponsePB > *reponse) {
+    AtomicGuard request_guard(onflight_requests_);
+    auto        request_id = request->request_id();
+    RTP_LLM_LOG_DEBUG("receive request %ld", request_id);
+    auto generate_context =
+        GenerateContext(request_id, request->generate_config().timeout_ms(), context, metrics_reporter_, meta_);
+    auto input = QueryConverter::transQuery(request);
+
+    // need to check client has buffer at first
+    if (mm_processor_ != nullptr && input->multimodal_inputs) {
+        auto mm_res = mm_processor_->updateMultimodalFeatures(input);
+        if (!mm_res.ok()) {
+            generate_context.error_status = serializeErrorMsg(generate_context.request_key, mm_res);
+        }
+    }
+    CHECK_ERROR_STATUS(generate_context);
+
+    input->lora_id  = engine_->getLoraManager()->getLoraId(input->generate_config->adapter_name);
+    auto lora_guard = lora::LoraResourceGuard(engine_->getLoraManager(), input->generate_config->adapter_name);
+    RTP_LLM_LOG_DEBUG("request [%ld] trans to stream success", request_id);
+    generate_context.setStream(engine_->enqueue(input));
+
+    RTP_LLM_LOG_DEBUG("request [%ld] enqueue success", request_id);
+    response->set_request_id(generate_context.request_id);
+
+    // 使用 unique_lock 进行写操作
+    {
+        std::unique_lock<std::shared_mutex> lock(context_map_mutex_);
+        if (context_map_.find(generate_context.request_key) != context_map_.end()) {
+            RTP_LLM_LOG_WARNING("request [%s] already exists in context map", generate_context.request_key.c_str());
+            return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "request already exists");
+        }
+        context_map_[generate_context.request_key] = std::make_shared<GenerateContext>(generate_context);
+    }
+
+    return grpc::Status::OK;
+}
+
+grpc::Status LocalRpcServer::FetchResponse(grpc::ServerContext*                   context,
+                                           FetchRequestPB*                        request,
+                                           grpc::ServerWriter<GenerateOutputsPB>* writer) {
+    auto request_id = request->request_id();
+    RTP_LLM_LOG_DEBUG("receive fetch response request %ld", request_id);
+
+    std::shared_ptr<GenerateContext> generate_context;
+
+    // 使用 shared_lock 进行读操作
+    {
+        std::shared_lock<std::shared_mutex> lock(context_map_mutex_);
+        auto                                generate_context_it = context_map_.find(std::to_string(request_id));
+        if (generate_context_it == context_map_.end()) {
+            RTP_LLM_LOG_WARNING("request [%ld] not found in context map", request_id);
+            return grpc::Status(grpc::StatusCode::NOT_FOUND, "request not found");
+        }
+        generate_context = generate_context_it->second;
+    }
+
+    generate_context->error_status =
+        pollStreamOutput(context, generate_context->request_key, writer, generate_context->getStream());
+    meta_->dequeue(generate_context->request_id, generate_context->getStream());
+
+    // 清理 context_map_ 中的资源
+    {
+        std::unique_lock<std::shared_mutex> lock(context_map_mutex_);
+        context_map_.erase(std::to_string(request_id));
+        RTP_LLM_LOG_DEBUG("request [%ld] removed from context map after completion", request_id);
+    }
+
+    return generate_context->error_status;
+}
+
+grpc::Status
 LocalRpcServer::GetCacheStatus(grpc::ServerContext* context, const CacheVersionPB* request, CacheStatusPB* response) {
     RTP_LLM_LOG_DEBUG("receive cacheStatus rpc request from client: %s, request cache version: [%d]",
                       context->peer().c_str(),
