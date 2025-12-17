@@ -90,7 +90,6 @@ class BaseMultiModalWeightInfo:
                         )
                     )
             
-            # [New Feature] Dynamic weight registration from custom modal class
             if self.tp_rank == 0:
                 cls = ModelDeployWeightInfo._load_custom_modal_class_from_config(self.config)
                 if cls:
@@ -279,7 +278,7 @@ class MultiModalMixin:
         if isinstance(self.mm_part, MultiModalTRTEngine):
             return
 
-        # Call custom load_weight if available. This is the correct place as self.weight is now ready.
+        # Call custom load_weight if available. 
         if hasattr(self.mm_part, "load_weight") and callable(self.mm_part.load_weight):
              logging.info("Calling custom mm_part.load_weight() in load_mm_weight...")
              self.mm_part.load_weight(self.weight)
