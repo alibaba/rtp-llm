@@ -308,7 +308,7 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& kv
     kv_cache_resource->batch_resource.resize(new_batch_size);
 
     // init for all batch
-    kv_cache_resource->initGroups(1);
+    kv_cache_resource->initGroups(1, config_.layer_num);
 
     for (int new_batch_idx = 0; new_batch_idx < new_batch_size; ++new_batch_idx) {
         const int old_batch_idx = block_src_batch[new_batch_idx];
