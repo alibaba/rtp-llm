@@ -74,7 +74,11 @@ class FlashInferTRTLLMPrefillOp(object):
         self.workspace_buffer = create_g_workspace_buffer()
 
     def support(self, attention_inputs: PyAttentionInputs):
-        return is_sm_100() and attention_inputs.is_prefill
+        return (
+            is_sm_100()
+            and attention_inputs.is_prefill
+            and attention_inputs.kv_cache_block_id_device is not None
+        )
 
     def prepare(self, attention_inputs: PyAttentionInputs) -> FlashInferTRTLLMParams:
         return FlashInferTRTLLMParams(
