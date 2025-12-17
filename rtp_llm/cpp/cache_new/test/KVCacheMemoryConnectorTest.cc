@@ -2,6 +2,9 @@
 
 #include "gtest/gtest.h"
 
+#include <chrono>
+#include <thread>
+
 #include "rtp_llm/cpp/cache_new/KVCacheMemoryConnector.h"
 #include "rtp_llm/cpp/cache_new/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache_new/BlockPool.h"
@@ -15,6 +18,51 @@
 #include "rtp_llm/cpp/model_rpc/TpBroadcastManager.h"
 
 namespace rtp_llm::test {
+
+namespace {
+void waitAsyncContextDone(const std::shared_ptr<rtp_llm::AsyncContext>& ctx) {
+    ASSERT_NE(ctx, nullptr);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (ctx->done()) {
+            return;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    FAIL() << "AsyncContext timeout waiting done()";
+}
+
+class TestReadMeta: public rtp_llm::KVCacheConnector::Meta {
+public:
+    TestReadMeta(int start_block_index, int size): start_block_index_(start_block_index), size_(size) {}
+    ~TestReadMeta() override = default;
+
+public:
+    std::pair<int, int> blockRange() const override {
+        return {start_block_index_, size_};
+    }
+
+private:
+    int start_block_index_{0};
+    int size_{0};
+};
+
+std::shared_ptr<rtp_llm::AsyncContext> asyncReadMatchedPrefix(const std::shared_ptr<rtp_llm::KVCacheMemoryConnector>& c,
+                                                              const std::shared_ptr<rtp_llm::KVCacheResourceV1>& r) {
+    auto match_ctx = c->asyncMatch(r, nullptr);
+    if (!match_ctx) {
+        return nullptr;
+    }
+    const int reuse_num   = static_cast<int>(r->reuseBlocksNum());
+    const int matched_num = static_cast<int>(match_ctx->matchedBlockCount());
+    const int read_num    = matched_num - reuse_num;
+    if (read_num <= 0) {
+        return nullptr;
+    }
+    auto meta = std::make_shared<TestReadMeta>(reuse_num, read_num);
+    return c->asyncRead(r, meta, match_ctx);
+}
+}  // namespace
 
 class KVCacheMemoryConnectorTest: public ::testing::Test {
 protected:
@@ -339,17 +387,19 @@ TEST_F(KVCacheMemoryConnectorTest, init_Reinit_ClearsBlockPools_And_ResetsBlockC
 
 TEST_F(KVCacheMemoryConnectorTest, asyncRead_ReturnNull_OnInvalidInputs) {
     // resource is nullptr
-    auto ctx_null = connector_->asyncRead(nullptr, nullptr);
+    auto ctx_null = connector_->asyncRead(nullptr, nullptr, nullptr);
     EXPECT_EQ(ctx_null, nullptr);
 
     // empty cache_keys
     auto res_empty_keys = makeCacheResource({}, {{1}});
-    auto ctx1           = connector_->asyncRead(res_empty_keys, nullptr);
+    auto ctx1           = connector_->asyncRead(res_empty_keys, nullptr, nullptr);
     EXPECT_EQ(ctx1, nullptr);
 
     // empty layer_block_ids
-    auto res_empty_lbs = makeCacheResource({1}, {});
-    auto ctx2          = connector_->asyncRead(res_empty_lbs, nullptr);
+    auto res_empty_lbs         = std::make_shared<KVCacheResourceV1>();
+    res_empty_lbs->cacheKeys() = CacheKeysType{1};
+    res_empty_lbs->layerBlockIds().clear();  // make it truly invalid for KVCacheMemoryConnector::checkKVCacheResource
+    auto ctx2 = connector_->asyncRead(res_empty_lbs, nullptr, nullptr);
     EXPECT_EQ(ctx2, nullptr);
 }
 
@@ -359,7 +409,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_ReturnNull_WhenReuseLenGEKeys) {
     std::vector<std::vector<int>> lbs_vec{{1, 1, 1}, {2, 2, 2}};
     auto                          res = makeCacheResource(cache_keys, lbs_vec, N);
 
-    auto ctx = connector_->asyncRead(res, nullptr);
+    auto ctx = asyncReadMatchedPrefix(connector_, res);
     EXPECT_EQ(ctx, nullptr);
     EXPECT_EQ(res->reuseBlocksNum(), N);
 }
@@ -371,7 +421,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_ReturnNull_WhenPlanEmpty) {
     auto                          res = makeCacheResource(cache_keys, lbs_vec);
 
     // 未向 cache 预置命中项
-    auto ctx = connector_->asyncRead(res, nullptr);
+    auto ctx = asyncReadMatchedPrefix(connector_, res);
     EXPECT_EQ(ctx, nullptr);
 }
 
@@ -389,7 +439,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_ReturnNull_WhenSendCopyPlanFails_No
     auto                          res = makeCacheResource(cache_keys, lbs_vec);
 
     connector_->tp_broadcast_manager_->worker_addrs_.clear();
-    auto ctx = connector_->asyncRead(res, nullptr);
+    auto ctx = asyncReadMatchedPrefix(connector_, res);
     EXPECT_EQ(ctx, nullptr);
 }
 
@@ -409,9 +459,9 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_Success_IncrementsReuseLen_ByMatche
     };
     auto res = makeCacheResource(cache_keys, lbs_vec, 1);
 
-    auto ctx = connector_->asyncRead(res, nullptr);
+    auto ctx = asyncReadMatchedPrefix(connector_, res);
     ASSERT_NE(ctx, nullptr);
-    ctx->waitDone();
+    waitAsyncContextDone(ctx);
     EXPECT_TRUE(ctx->success());
     EXPECT_EQ(res->reuseBlocksNum(), 3u);
 }
@@ -443,9 +493,9 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_FailureOnMemResponse_NoReuseLenIncr
     std::vector<std::vector<int>> lbs_vec{{11, 12}, {21, 22}};
     auto                          res = makeCacheResource(cache_keys, lbs_vec);
 
-    auto ctx = connector_->asyncRead(res, nullptr);
+    auto ctx = asyncReadMatchedPrefix(connector_, res);
     ASSERT_NE(ctx, nullptr);
-    ctx->waitDone();
+    waitAsyncContextDone(ctx);
     EXPECT_FALSE(ctx->success());
     EXPECT_EQ(res->reuseBlocksNum(), 0u);
 
@@ -486,9 +536,9 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_FailureOnRpcStatus_NoReuseLenIncrem
     std::vector<std::vector<int>> lbs_vec{{31, 32}, {41, 42}};
     auto                          res = makeCacheResource(cache_keys, lbs_vec);
 
-    auto ctx = connector_->asyncRead(res, nullptr);
+    auto ctx = asyncReadMatchedPrefix(connector_, res);
     ASSERT_NE(ctx, nullptr);
-    ctx->waitDone();
+    waitAsyncContextDone(ctx);
     EXPECT_FALSE(ctx->success());
     EXPECT_EQ(res->reuseBlocksNum(), 0u);
 
@@ -504,9 +554,9 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForRead_ReturnEmpty_WhenNoMatch)
     // block_cache_ 无命中，返回空
     std::vector<int64_t>          cache_keys{1, 2};
     std::vector<std::vector<int>> lbs_vec{{10, 11}, {20, 21}};
-    auto                          lbs             = makeLayerBlockIds(lbs_vec, cache_keys.size());
-    size_t                        cpu_matched_num = 0;
-    auto plan = connector_->buildCopyPlanForRead(cache_keys, lbs, /*gpu_reuse_len=*/0, cpu_matched_num);
+    auto                          lbs  = makeLayerBlockIds(lbs_vec, cache_keys.size());
+    auto                          plan = connector_->buildCopyPlanForRead(
+        cache_keys, lbs, /*start_read_block_index=*/0, /*read_block_num=*/static_cast<int>(cache_keys.size()));
     EXPECT_TRUE(plan.empty());
 }
 
@@ -529,9 +579,15 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForRead_PrefixMatch_StopsOnFirst
         {100, 101, 102},  // layer0
         {200, 201, 202},  // layer1
     };
-    auto   lbs             = makeLayerBlockIds(lbs_vec, cache_keys.size());
-    size_t cpu_matched_num = 0;
-    auto   plan            = connector_->buildCopyPlanForRead(cache_keys, lbs, /*gpu_reuse_len=*/0, cpu_matched_num);
+    auto lbs = makeLayerBlockIds(lbs_vec, cache_keys.size());
+
+    // 注意：buildCopyPlanForRead 的真实签名是 (start_read_block_index, read_block_num)，并且“范围内任一 key
+    // 未命中”会导致返回空。 这里单独验证 miss（只请求 miss 的那个 key），以及 prefix 范围内的成功。
+    auto plan_miss =
+        connector_->buildCopyPlanForRead(cache_keys, lbs, /*start_read_block_index=*/2, /*read_block_num=*/1);
+    EXPECT_TRUE(plan_miss.empty());
+
+    auto plan = connector_->buildCopyPlanForRead(cache_keys, lbs, /*start_read_block_index=*/0, /*read_block_num=*/2);
     ASSERT_EQ(plan.size(), 2u);
 
     // key=10
@@ -571,9 +627,8 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForRead_RespectsGpuReuseLen) {
         {10, 11, 12},  // layer0
         {20, 21, 22},  // layer1
     };
-    auto   lbs             = makeLayerBlockIds(lbs_vec, cache_keys.size());
-    size_t cpu_matched_num = 0;
-    auto   plan            = connector_->buildCopyPlanForRead(cache_keys, lbs, /*gpu_reuse_len=*/2, cpu_matched_num);
+    auto lbs  = makeLayerBlockIds(lbs_vec, cache_keys.size());
+    auto plan = connector_->buildCopyPlanForRead(cache_keys, lbs, /*start_read_block_index=*/2, /*read_block_num=*/1);
     ASSERT_EQ(plan.size(), 1u);
     EXPECT_EQ(plan[0].cache_key, 32u);
     EXPECT_EQ(plan[0].mem_block_size, mem_size);
@@ -598,9 +653,8 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForRead_SkipsNullLayerBlocks) {
         {7},               // layer0
         {NULL_BLOCK_IDX},  // layer1 should be skipped
     };
-    auto   lbs             = makeLayerBlockIds(lbs_vec, cache_keys.size());
-    size_t cpu_matched_num = 0;
-    auto   plan            = connector_->buildCopyPlanForRead(cache_keys, lbs, /*gpu_reuse_len=*/0, cpu_matched_num);
+    auto lbs  = makeLayerBlockIds(lbs_vec, cache_keys.size());
+    auto plan = connector_->buildCopyPlanForRead(cache_keys, lbs, /*start_read_block_index=*/0, /*read_block_num=*/1);
     ASSERT_EQ(plan.size(), 1u);
     EXPECT_EQ(plan[0].cache_key, 40u);
     EXPECT_EQ(plan[0].mem_block_size, mem_size);
@@ -622,9 +676,8 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForRead_AllLayersEmpty_StillRetu
     ASSERT_TRUE(connector_->block_cache_->contains(50));
 
     std::vector<std::vector<int>> empty_layers;
-    auto                          lbs             = makeLayerBlockIds(empty_layers, cache_keys.size());
-    size_t                        cpu_matched_num = 0;
-    auto plan = connector_->buildCopyPlanForRead(cache_keys, lbs, /*gpu_reuse_len=*/0, cpu_matched_num);
+    auto                          lbs = makeLayerBlockIds(empty_layers, cache_keys.size());
+    auto plan = connector_->buildCopyPlanForRead(cache_keys, lbs, /*start_read_block_index=*/0, /*read_block_num=*/1);
     ASSERT_EQ(plan.size(), 1u);
     EXPECT_EQ(plan[0].cache_key, 50u);
     EXPECT_EQ(plan[0].mem_block_size, mem_size);
@@ -647,9 +700,8 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForRead_UsesMemBlockSizeFromCach
     std::vector<std::vector<int>> lbs_vec{
         {1},
     };
-    auto   lbs             = makeLayerBlockIds(lbs_vec, cache_keys.size());
-    size_t cpu_matched_num = 0;
-    auto   plan            = connector_->buildCopyPlanForRead(cache_keys, lbs, /*gpu_reuse_len=*/0, cpu_matched_num);
+    auto lbs  = makeLayerBlockIds(lbs_vec, cache_keys.size());
+    auto plan = connector_->buildCopyPlanForRead(cache_keys, lbs, /*start_read_block_index=*/0, /*read_block_num=*/1);
     ASSERT_EQ(plan.size(), 1u);
     EXPECT_EQ(plan[0].cache_key, 60u);
     EXPECT_EQ(plan[0].mem_block_size, mem_size);
@@ -670,8 +722,10 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnNull_OnInvalidInputs) {
     EXPECT_EQ(ctx1, nullptr);
 
     // empty layer_block_ids
-    auto res_empty_lbs = makeCacheResource({1}, {});
-    auto ctx2          = connector_->asyncWrite(res_empty_lbs, nullptr);
+    auto res_empty_lbs         = std::make_shared<KVCacheResourceV1>();
+    res_empty_lbs->cacheKeys() = CacheKeysType{1};
+    res_empty_lbs->layerBlockIds().clear();  // make it truly invalid for KVCacheMemoryConnector::checkKVCacheResource
+    auto ctx2 = connector_->asyncWrite(res_empty_lbs, nullptr);
     EXPECT_EQ(ctx2, nullptr);
 }
 
@@ -753,7 +807,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_Success_AddsToBlockCache_AndKeepsM
 
     auto ctx = connector_->asyncWrite(res, nullptr);
     ASSERT_NE(ctx, nullptr);
-    ctx->waitDone();
+    waitAsyncContextDone(ctx);
     EXPECT_TRUE(ctx->success());
 
     // block_cache 中应新增 N 个条目
@@ -798,7 +852,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_FailureOnMemResponse_FreesAllocate
 
     auto ctx = connector_->asyncWrite(res, nullptr);
     ASSERT_NE(ctx, nullptr);
-    ctx->waitDone();
+    waitAsyncContextDone(ctx);
     EXPECT_FALSE(ctx->success());
     // 应未插入缓存
     EXPECT_EQ(connector_->block_cache_->size(), cache_before);

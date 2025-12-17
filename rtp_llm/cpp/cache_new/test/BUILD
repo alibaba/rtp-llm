@@ -164,6 +164,7 @@ cc_test(
     data = [],
     copts = test_copts,
     deps = test_deps + [
+        "//rtp_llm/cpp/devices/testing:device_test_utils",
         ":block_pool_test_helper",
     ],
     env = {},
