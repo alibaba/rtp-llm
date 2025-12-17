@@ -118,6 +118,8 @@ BufferPtr DeviceBase::attentionAttn(const AttentionLayerParams& params) {
 #endif
     }
 
+    printBufferData(qkv, "qkv");
+
     auto kv_cache_block_id = layer_kv_cache ? layer_kv_cache->kv_cache_block_id : nullptr;
     if (generate_batch_size) {
         auto generate_qkv    = qkv.view(0, generate_batch_size);

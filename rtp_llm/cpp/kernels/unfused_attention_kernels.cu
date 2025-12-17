@@ -2282,6 +2282,85 @@ void invokeDecodeAddFusedQKVBiasTranspose(T*               q_buf,
 
             FT_SWITCH_KV_CACHE_TYPE_CASE(kv_block_array.cache_type, Tcache, [&] {
                 FT_ROPE_SWITCH(rope_config.style, ROPE_STYLE, [&] {
+                    // Debug print all parameters of decode_add_fusedQKV_bias_transpose_with_rope_cache_kernel launch.
+                    // NOTE: This is host-side printf; to avoid huge logs/timeouts, print only once.
+                    static bool printed_once = false;
+                    if (!printed_once) {
+                        printed_once = true;
+                        printf(
+                            "[DecodeAddFusedQKVBiasTranspose] launch decode_add_fusedQKV_bias_transpose_with_rope_cache_kernel"
+                            " T_size=%zu Tcache_size=%zu ROPE_STYLE=%d\n",
+                            sizeof(T),
+                            sizeof(Tcache),
+                            (int)ROPE_STYLE);
+                        printf(
+                            "  ptrs: q_buf=%p k_buf=%p v_buf=%p kv_block_array(data=%p) QKV=%p position_ids=%p qkv_bias=%p rope_cache=%p stream=%p\n",
+                            (void*)q_buf,
+                            (void*)k_buf,
+                            (void*)v_buf,
+                            (void*)kv_block_array.data,
+                            (void*)QKV,
+                            (void*)position_ids,
+                            (void*)qkv_bias,
+                            (void*)rope_cache,
+                            (void*)stream);
+                        printf("  sizes: batch_size=%d head_num=%d head_num_kv=%d size_per_head=%d\n",
+                               batch_size,
+                               head_num,
+                               head_num_kv,
+                               size_per_head);
+                        printf("  flags: use_logn_attn=%d store_q=%d store_kv=%d store_cache=%d\n",
+                               (int)use_logn_attn,
+                               (int)store_q,
+                               (int)store_kv,
+                               (int)store_cache);
+                        printf("  launch: grid=(%u,%u,%u) block=(%u,%u,%u) smem_size=%zu\n",
+                               grid.x,
+                               grid.y,
+                               grid.z,
+                               block.x,
+                               block.y,
+                               block.z,
+                               smem_size);
+                        // RopeConfig fields are defined in rtp_llm/cpp/model_utils/RopeConfig.h
+                        printf(
+                            "  rope_config: style=%d dim=%d base=%d scale=%g factor1=%g factor2=%g max_pos=%d extrapolation_factor=%g mscale=%g offset=%d index_factor=%d mrope_dim1=%d mrope_dim2=%d mrope_dim3=%d\n",
+                            (int)rope_config.style,
+                            (int)rope_config.dim,
+                            (int)rope_config.base,
+                            (double)rope_config.scale,
+                            (double)rope_config.factor1,
+                            (double)rope_config.factor2,
+                            (int)rope_config.max_pos,
+                            (double)rope_config.extrapolation_factor,
+                            (double)rope_config.mscale,
+                            (int)rope_config.offset,
+                            (int)rope_config.index_factor,
+                            (int)rope_config.mrope_dim1,
+                            (int)rope_config.mrope_dim2,
+                            (int)rope_config.mrope_dim3);
+                        printf(
+                            "  kv_block_array: mMaxSeqs=%d mMaxBlocksPerSeq=%d mTokensPerBlock=%d mTokensPerBlockLog2=%d mBytesPerBlock=%d"
+                            " mPrimaryPoolPtr=%p mSecondaryPoolPtr=%p mMaxAttentionWindow=%d mSinkTokens=%d mCyclicCacheLen=%d mBubbleLen=%d"
+                            " mEnableOneMoreBlock=%d cache_type=%d scale=%p mScaleBytesPerBlock=%d pagedKVBlockOffsetsOnHost=%p\n",
+                            (int)kv_block_array.mMaxSeqs,
+                            (int)kv_block_array.mMaxBlocksPerSeq,
+                            (int)kv_block_array.mTokensPerBlock,
+                            (int)kv_block_array.mTokensPerBlockLog2,
+                            (int)kv_block_array.mBytesPerBlock,
+                            (void*)kv_block_array.mPrimaryPoolPtr,
+                            (void*)kv_block_array.mSecondaryPoolPtr,
+                            (int)kv_block_array.mMaxAttentionWindow,
+                            (int)kv_block_array.mSinkTokens,
+                            (int)kv_block_array.mCyclicCacheLen,
+                            (int)kv_block_array.mBubbleLen,
+                            (int)kv_block_array.mEnableOneMoreBlock,
+                            (int)kv_block_array.cache_type,
+                            (void*)kv_block_array.scale,
+                            (int)kv_block_array.mScaleBytesPerBlock,
+                            (void*)kv_block_array.pagedKVBlockOffsetsOnHost);
+                        fflush(stdout);
+                    }
                     decode_add_fusedQKV_bias_transpose_with_rope_cache_kernel<T, Tcache, ROPE_STYLE>
                         <<<grid, block, smem_size, stream>>>(q_buf,
                                                              k_buf,

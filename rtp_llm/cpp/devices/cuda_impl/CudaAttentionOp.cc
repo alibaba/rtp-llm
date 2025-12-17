@@ -390,6 +390,87 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
             }
         });
 
+        BufferPtr rope_cache_buffer = torchTensor2Buffer(rope_cache);
+        printBufferData(*rope_cache_buffer, "rope_cache");
+
+        // Print all arguments of invokeDecodeAddFusedQKVBiasTranspose (once) for debug.
+        static bool printed_invoke_decode_add_fused_qkv_args = false;
+        if (!printed_invoke_decode_add_fused_qkv_args) {
+            printed_invoke_decode_add_fused_qkv_args = true;
+
+            RTP_LLM_LOG_INFO(
+                "[invokeDecodeAddFusedQKVBiasTranspose] scalar args: batch_size=%zu head_num=%zu head_num_kv=%zu size_per_head=%zu use_logn_attn=%d store_q=%d store_kv=%d store_cache=%d",
+                batch_size,
+                local_head_num,
+                local_kv_head_num,
+                size_per_head,
+                (int)params.configs.use_logn_attn,
+                1,
+                0,
+                1);
+
+            // Buffer/Tensor arguments
+            printBufferData(params.input, "invokeDecodeAddFusedQKVBiasTranspose.QKV_input");
+            printBufferData(*q_output, "invokeDecodeAddFusedQKVBiasTranspose.q_output");
+
+            if (params.common.position_ids) {
+                printBufferData(*params.common.position_ids, "invokeDecodeAddFusedQKVBiasTranspose.position_ids");
+            } else {
+                printBufferData(*params.common.sequence_lengths,
+                                "invokeDecodeAddFusedQKVBiasTranspose.position_ids(sequence_lengths)");
+            }
+
+            if (params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias) {
+                printBufferData(*params.weights.qkv_weight->bias, "invokeDecodeAddFusedQKVBiasTranspose.qkv_bias");
+            } else {
+                RTP_LLM_LOG_INFO(
+                    "[invokeDecodeAddFusedQKVBiasTranspose] qkv_bias is nullptr (fuse_qkv_add_bias=%d, has_bias=%d)",
+                    (int)params.configs.fuse_qkv_add_bias,
+                    (int)(params.weights.qkv_weight->bias != nullptr));
+            }
+
+            if (use_rope_cache && rope_cache.defined()) {
+                printBufferData(*rope_cache_buffer, "invokeDecodeAddFusedQKVBiasTranspose.rope_cache");
+            } else {
+                RTP_LLM_LOG_INFO(
+                    "[invokeDecodeAddFusedQKVBiasTranspose] rope_cache is nullptr (use_rope_cache=%d, defined=%d)",
+                    (int)use_rope_cache,
+                    (int)rope_cache.defined());
+            }
+
+            // Non-buffer arguments (struct/pointers)
+            RTP_LLM_LOG_INFO(
+                "[invokeDecodeAddFusedQKVBiasTranspose] ptr args: q_buf=%p k_buf=%p v_buf=%p kv_block_array(data=%p) QKV=%p position_ids_ptr=%p qkv_bias_ptr=%p rope_cache_ptr=%p stream=%p",
+                (void*)q_output->data(),
+                (void*)nullptr,
+                (void*)nullptr,
+                (void*)kv_block_array.data,
+                (void*)params.input.data(),
+                (void*)(params.common.position_ids ? params.common.position_ids->data<int>() :
+                                                     params.common.sequence_lengths->data<int>()),
+                (void*)(params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias ?
+                            params.weights.qkv_weight->bias->data() :
+                            nullptr),
+                (void*)(use_rope_cache && rope_cache.defined() ? rope_cache.data_ptr<float>() : nullptr),
+                (void*)stream_);
+
+            RTP_LLM_LOG_INFO(
+                "[invokeDecodeAddFusedQKVBiasTranspose] kv_block_array: mMaxSeqs=%d mMaxBlocksPerSeq=%d mTokensPerBlock=%d mTokensPerBlockLog2=%d mBytesPerBlock=%d mPrimaryPoolPtr=%p mSecondaryPoolPtr=%p cache_type=%d scale=%p mScaleBytesPerBlock=%d",
+                (int)kv_block_array.mMaxSeqs,
+                (int)kv_block_array.mMaxBlocksPerSeq,
+                (int)kv_block_array.mTokensPerBlock,
+                (int)kv_block_array.mTokensPerBlockLog2,
+                (int)kv_block_array.mBytesPerBlock,
+                (void*)kv_block_array.mPrimaryPoolPtr,
+                (void*)kv_block_array.mSecondaryPoolPtr,
+                (int)kv_block_array.cache_type,
+                (void*)kv_block_array.scale,
+                (int)kv_block_array.mScaleBytesPerBlock);
+
+            RTP_LLM_LOG_INFO("[invokeDecodeAddFusedQKVBiasTranspose] rope_config: %s",
+                             params.configs.rope_config.DebugRopeConfigStr().c_str());
+        }
+
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(params.input.type(),
                                          invokeDecodeAddFusedQKVBiasTranspose,
                                          q_output->data(),
