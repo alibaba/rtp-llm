@@ -163,22 +163,74 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
         }
         return str_to_dtype[kv_cache_dtype_str]
 
-    def _test_single(self, batch_size: int):
-        num_tokens_per_bs = 1
+    def build_inputs(self, batch_size: int, max_seq_len: int, seq_size_per_block: int):
+        """Build inputs in Python, similar to CudaGraphPrefill.py"""
+        from rtp_llm.ops.compute_ops import PyAttentionInputs, PyModelInputs
 
-        inputs = self.op.buildInputs(
-            batch_size,
-            self.max_seq_len,
-            num_tokens_per_bs,
-            self.tokens_per_block,
-            self.kv_block_offset,
+        num_tokens_per_bs = 1  # decode mode: 1 token per batch
+        max_num_token = batch_size * num_tokens_per_bs
+
+        inputs = PyModelInputs()
+        attention_inputs = PyAttentionInputs()
+
+        # input_ids [tokens_nums] = [batch_size * num_tokens_per_bs]
+        inputs.input_ids = torch.full(
+            (max_num_token,), 10, dtype=torch.int32, device="cuda"
         )
-        inputs2 = self.op.buildInputs(
+
+        # prefix_lengths [batch_size, int32] (for attention `prepare`)
+        attention_inputs.prefix_lengths = torch.empty(0)
+
+        # input_lengths [batch_size, int32] (decode only)
+        attention_inputs.input_lengths = torch.ones(batch_size, dtype=torch.int32)
+
+        # sequence_lengths [batch_size, int32] (decode only), with pin_memory
+        attention_inputs.sequence_lengths = torch.ones(
+            batch_size, dtype=torch.int32
+        ).pin_memory()
+
+        # kv_cache_block_id_device [batch_size, block_num]
+        block_num = (max_seq_len + seq_size_per_block - 1) // seq_size_per_block
+        attention_inputs.kv_cache_block_id_device = torch.zeros(
+            (batch_size, block_num), dtype=torch.int32, device="cuda"
+        )
+        attention_inputs.kv_cache_block_id_host = torch.zeros(
+            (batch_size, block_num), dtype=torch.int32, device="cpu"
+        )
+
+        # padding_offset
+        attention_inputs.padding_offset = torch.zeros(
+            max_seq_len, dtype=torch.int32, device="cuda"
+        )
+
+        # Set attention parameters
+        attention_inputs.is_prefill = False
+        attention_inputs.dtype = get_typemeta(torch.zeros(1, dtype=torch.float16))
+        attention_inputs.kv_block_offset = self.kv_block_offset
+
+        # cu_seqlens
+        cu_len = batch_size + 1
+        cu_seqlens = torch.zeros(cu_len, dtype=torch.int32, device="cpu").pin_memory()
+        cu_seqlens_without_prefix = torch.zeros(
+            cu_len, dtype=torch.int32, device="cpu"
+        ).pin_memory()
+
+        attention_inputs.cu_seqlens = cu_seqlens
+        attention_inputs.cu_seqlens_without_prefix = cu_seqlens_without_prefix
+
+        inputs.attention_inputs = attention_inputs
+        return inputs
+
+    def _test_single(self, batch_size: int):
+        inputs = self.build_inputs(
             batch_size,
             self.max_seq_len,
-            num_tokens_per_bs,
             self.tokens_per_block,
-            self.kv_block_offset,
+        )
+        inputs2 = self.build_inputs(
+            batch_size,
+            self.max_seq_len,
+            self.tokens_per_block,
         )
 
         outputs1 = self.op.forward(inputs)
