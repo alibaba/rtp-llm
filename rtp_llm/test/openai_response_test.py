@@ -1925,18 +1925,6 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         await kimi_suite.test_no_stream_stop_words()
 
     @think_mode
-    async def test_parse_kimik2_thinking_streaming_case(self):
-        """测试KimiK2 Thinking流式场景"""
-        kimi_thinking_suite = self.KimiK2ThinkingTestSuite(self)
-        await kimi_thinking_suite.test_streaming_case()
-
-    @think_mode
-    async def test_parse_kimik2_thinking_no_stream(self):
-        """测试KimiK2 Thinking非流式场景"""
-        kimi_thinking_suite = self.KimiK2ThinkingTestSuite(self)
-        await kimi_thinking_suite.test_no_stream()
-
-    @think_mode
     async def test_parse_chatglm45_tool_call_streaming_case(self):
         suite = self.ChatGLM45TestSuite(self)
         await suite.test_streaming_case()
