@@ -55,8 +55,9 @@ public:
     std::vector<BlockIdxType> steal();
 
 private:
-    size_t       seq_size_per_block_;
-    LRUCacheType lru_cache_;
+    size_t             seq_size_per_block_;
+    LRUCacheType       lru_cache_;
+    mutable std::mutex mutex_;
 };
 
 using BlockCacheV1Ptr = std::shared_ptr<BlockCache>;
