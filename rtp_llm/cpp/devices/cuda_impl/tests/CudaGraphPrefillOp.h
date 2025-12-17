@@ -34,11 +34,7 @@ public:
     PyModelOutputs forward(PyModelInputs inputs) {
         return cuda_graph_runner_->forward(inputs);
     }
-    PyModelInputs buildInputs(int64_t batch_size,
-                              int64_t max_seq_len,
-                              int64_t num_tokens_per_bs,
-                              int64_t seq_size_per_block,
-                              bool    use_max_padded_mode = false);
+
     ~CudaGraphPrefillOp() {
         RTP_LLM_CHECK_WITH_INFO(cuda_graph_runner_ != nullptr, "cuda_graph_runner_ can not be nullptr");
         delete cuda_graph_runner_;
