@@ -143,7 +143,7 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
 
         if self._use_accl_ep:
             dispatch_args["pertoken_quant"] = quant_config.is_per_act_token
-        if is_deep_gemm_e8m0_used():
+        if self._use_fp8_dispatch and is_deep_gemm_e8m0_used():
             dispatch_args["round_scale"] = True
             dispatch_args["use_ue8m0"] = True
 
