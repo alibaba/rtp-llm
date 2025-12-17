@@ -29,24 +29,17 @@ CudaGraphRunnerPtr CudaGraphPrefillOp::createCudaGraphRunner(py::object       py
                                                              int64_t          max_seq_len,
                                                              int64_t          tokens_per_block,
                                                              std::vector<int> prefill_capture_seq_lens) {
-    DeviceInitParams params;
-    params.hw_kernel_config.enable_cuda_graph            = true;
-    params.fifo_scheduler_config.max_context_batch_size  = max_context_batch_size;
-    params.hw_kernel_config.enable_cuda_graph_debug_mode = true;
-    params.hw_kernel_config.prefill_capture_seq_lens     = {
-        6,   10,  14,  15,  20,  25,  30,  35,  40,  45,  50,  55,  60,  65,  70,  75,  77,  80,  85,  90,  95,
-        100, 105, 110, 115, 120, 125, 130, 135, 140, 145, 150, 155, 160, 165, 170, 175, 180, 185, 190, 195, 200,
-        205, 210, 215, 220, 225, 230, 235, 240, 245, 248, 250, 252, 255, 256, 260, 265, 270, 275, 280, 285, 290,
-        295, 300, 305, 310, 311, 315, 317, 320, 321, 325, 330, 335, 340, 345, 350, 355, 356, 360, 365, 370, 375,
-        380, 385, 390, 395, 399, 400, 405, 410, 411, 415, 420, 425, 430, 435, 440, 445, 450, 455, 460, 465, 470,
-        475, 480, 485, 490, 495, 500, 512, 520, 540, 560, 576, 580, 600, 620, 629, 640, 660, 673, 680, 685, 697,
-        700, 703, 720, 740, 760, 780, 793, 797, 800, 820, 837, 840, 844, 856, 860, 880, 889, 900, 920, 940, 960};
-    // int  layer_num                              = 24;
-    // int  block_num                              = 26037;
-    c10::ScalarType    dtype             = torch::kBFloat16;
-    int                num_tokens_per_bs = params.max_seq_len;  // prefill mode
-    CudaGraphRunnerPtr cuda_graph_runner_ptr =
-        new CudaGraphRunner(params, std::move(py_instance), dtype, num_tokens_per_bs, true);
+    GraphParams graph_params;
+    graph_params.enable_cuda_graph            = true;
+    graph_params.enable_cuda_graph_debug_mode = true;
+    graph_params.is_prefill_cuda_graph_mode   = true;
+    graph_params.max_seq_len                  = max_seq_len;
+    graph_params.tokens_per_block             = tokens_per_block;
+    graph_params.kv_cache_block_offset        = 0;
+    graph_params.max_context_batch_size       = max_context_batch_size;
+    graph_params.prefill_capture_seq_lens     = prefill_capture_seq_lens;
+
+    CudaGraphRunnerPtr cuda_graph_runner_ptr = CudaGraphRunner::create(graph_params, std::move(py_instance));
     return cuda_graph_runner_ptr;
 }
 

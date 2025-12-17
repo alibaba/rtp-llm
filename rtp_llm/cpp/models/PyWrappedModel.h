@@ -101,8 +101,27 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             num_tokens_per_bs = params.device->initParams().sp_config.gen_num_per_cycle + 1;
         }
 
-        graph_runner_ = new CudaGraphRunner(
-            params.device->initParams(), py_instance, dtype, num_tokens_per_bs, is_prefill_cuda_graph_mode);
+        // Create GraphParams from DeviceInitParams
+        const auto& device_params = params.device->initParams();
+        GraphParams graph_params;
+        graph_params.enable_cuda_graph            = device_params.hw_kernel_config.enable_cuda_graph;
+        graph_params.enable_cuda_graph_debug_mode = device_params.hw_kernel_config.enable_cuda_graph_debug_mode;
+        graph_params.is_prefill_cuda_graph_mode   = is_prefill_cuda_graph_mode;
+        graph_params.max_seq_len                  = device_params.max_seq_len;
+        graph_params.tokens_per_block             = device_params.tokens_per_block;
+        graph_params.hidden_size                  = device_params.hidden_size;
+        graph_params.max_context_batch_size       = device_params.runtime_config.fifo_scheduler_config.max_context_batch_size;
+        graph_params.concurrency_limit            = device_params.concurrency_config.concurrency_limit;
+        graph_params.prefill_capture_seq_lens     = device_params.hw_kernel_config.prefill_capture_seq_lens;
+        graph_params.decode_capture_batch_sizes   = device_params.hw_kernel_config.decode_capture_batch_sizes;
+        // kv_cache_block_offset will be set later if needed
+        graph_params.kv_cache_block_offset        = 0;
+
+        graph_runner_ = new CudaGraphRunner(graph_params,
+                                            py_instance,
+                                            dtype,
+                                            num_tokens_per_bs,
+                                            is_prefill_cuda_graph_mode);
         RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can't be nullptr in PyWrapper");
 #else
         RTP_LLM_CHECK_WITH_INFO(false, "CUDA Graph is only supported on CUDA platform for now");
