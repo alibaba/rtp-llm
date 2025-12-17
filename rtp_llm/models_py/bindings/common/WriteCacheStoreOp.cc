@@ -4,6 +4,8 @@
 
 namespace rtp_llm {
 
+using namespace torch_ext;
+
 void WriteCacheStoreOp(const torch::Tensor&                         input_lengths,
                        const torch::Tensor&                         prefix_lengths,
                        const torch::Tensor&                         kv_cache_block_id_host,

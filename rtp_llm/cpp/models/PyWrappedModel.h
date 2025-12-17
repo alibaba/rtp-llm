@@ -126,7 +126,6 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
 #else
         RTP_LLM_CHECK_WITH_INFO(false, "CUDA Graph is only supported on CUDA platform for now");
 #endif
-
         if (weights_.position_encoding) {
             graph_runner_->setPositionEncoding(Buffer2torchTensor(weights_.position_encoding->kernel, false).cuda());
         }

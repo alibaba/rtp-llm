@@ -7,7 +7,6 @@
 #include "rtp_llm/cpp/core/Event.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
 #include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
-#include "rtp_llm/cpp/devices/GraphBase.h"
 #include "rtp_llm/cpp/devices/NativeGraphRunnerBase.h"
 
 namespace rtp_llm {
