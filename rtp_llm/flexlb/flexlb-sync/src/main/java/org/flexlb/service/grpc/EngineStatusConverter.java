@@ -20,7 +20,7 @@ public class EngineStatusConverter {
      */
     public static WorkerStatusResponse convertToWorkerStatusResponse(EngineRpcService.WorkerStatusPB workerStatusPB) {
         WorkerStatusResponse response = new WorkerStatusResponse();
-        
+
         // Set role directly as string
         response.setRole(workerStatusPB.getRole());
         response.setAvailableConcurrency(workerStatusPB.getAvailableConcurrency());
@@ -30,16 +30,16 @@ public class EngineStatusConverter {
         response.setIterateCount(workerStatusPB.getIterateCount());
         response.setDpSize(workerStatusPB.getDpSize());
         response.setTpSize(workerStatusPB.getTpSize());
-        response.setVersion(workerStatusPB.getVersion());
+        response.setVersion(workerStatusPB.getStatusVersion());
         response.setStatusVersion(workerStatusPB.getStatusVersion());
         response.setAlive(workerStatusPB.getAlive());
 
         // Convert running task info
         response.setRunningTaskInfo(convertToTaskInfoList(workerStatusPB.getRunningTaskInfoList()));
-        
+
         // Convert finished task list
         response.setFinishedTaskList(convertToTaskInfoList(workerStatusPB.getFinishedTaskListList()));
-        
+
         return response;
     }
 
@@ -65,7 +65,7 @@ public class EngineStatusConverter {
      */
     private static List<TaskInfo> convertToTaskInfoList(List<EngineRpcService.TaskInfoPB> taskInfoPBList) {
         List<TaskInfo> taskInfoList = new ArrayList<>();
-        
+
         for (EngineRpcService.TaskInfoPB taskInfoPB : taskInfoPBList) {
             TaskInfo taskInfo = new TaskInfo();
 
@@ -76,10 +76,10 @@ public class EngineStatusConverter {
             taskInfo.setIterateCount(taskInfoPB.getIterateCount());
             taskInfo.setEndTimeMs(taskInfoPB.getEndTimeMs());
             taskInfo.setDpRank(taskInfoPB.getDpRank());
-            
+
             taskInfoList.add(taskInfo);
         }
-        
+
         return taskInfoList;
     }
 }
