@@ -131,17 +131,31 @@ bool KVCacheMemoryConnector::init() {
 std::shared_ptr<KVCacheConnector::AsyncMatchContext>
 KVCacheMemoryConnector::asyncMatch(const std::shared_ptr<KVCacheResourceV1>& resource,
                                    const std::shared_ptr<Meta>&              meta) {
-    size_t      matched_num = 0;
-    const auto& cache_keys  = resource->cacheKeys();
-    for (size_t i = 0; i < cache_keys.size(); ++i) {
-        const auto cache_key    = cache_keys.at(i);
+    const auto&  cache_keys    = resource->cacheKeys();
+    const size_t gpu_reuse_num = resource->reuseBlocksNum();
+    if (gpu_reuse_num >= cache_keys.size()) {
+        // gpu has already matched all cache keys, no need to match in memory
+        RTP_LLM_LOG_DEBUG(
+            "async match skip, gpu reuse len is greater than cache keys size, cache_keys size: %zu, gpu_reuse_num: %zu",
+            cache_keys.size(),
+            gpu_reuse_num);
+        return nullptr;
+    }
+
+    autil::ScopedTime2 timer;
+
+    size_t matched_num = 0;
+    for (; matched_num < cache_keys.size(); ++matched_num) {
+        const auto cache_key    = cache_keys.at(matched_num);
         const auto match_result = block_cache_->match(static_cast<CacheKeyType>(cache_key));
         if (isNullBlockIdx(match_result.matched_index)) {
             break;  // 只处理连续前缀
         }
-        ++matched_num;
     }
+
     if (matched_num == 0) {
+        RTP_LLM_LOG_DEBUG("not matched cache in memory, cache keys size: %zu", cache_keys.size());
+        reportReadMetrics(true, timer.done_us(), cache_keys.size(), matched_num, 0);
         return nullptr;
     }
     return std::make_shared<MemoryAsyncMatchContext>(matched_num);
@@ -160,33 +174,30 @@ KVCacheMemoryConnector::asyncRead(const std::shared_ptr<KVCacheResourceV1>& reso
         return nullptr;
     }
 
-    const auto&  cache_keys      = resource->cacheKeys();
-    const auto&  layer_block_ids = resource->layerBlockIds();
-    const size_t gpu_reuse_num   = resource->reuseBlocksNum();
-    if (gpu_reuse_num >= cache_keys.size()) {
-        // gpu has already matched all cache keys, no need to read from memory
-        RTP_LLM_LOG_DEBUG(
-            "async read skip, gpu reuse len is greater than cache keys size, cache_keys size: %zu, gpu_reuse_num: %zu",
-            cache_keys.size(),
-            gpu_reuse_num);
-        reportReadMetrics(true, timer.done_us(), cache_keys.size(), 0, 0);
+    const auto& cache_keys                              = resource->cacheKeys();
+    const auto& layer_block_ids                         = resource->layerBlockIds();
+    const auto [start_read_block_index, read_block_num] = meta->blockRange();
+    const auto matched_block_num                        = match_context->matchedBlockCount();
+
+    if (start_read_block_index < 0 || start_read_block_index > cache_keys.size() || read_block_num <= 0
+        || start_read_block_index + read_block_num > cache_keys.size()) {
+        RTP_LLM_LOG_WARNING(
+            "async read failed, invalid block range, start_read_block_index: %d, read_block_num: %d, cache_keys size: %zu",
+            start_read_block_index,
+            read_block_num,
+            cache_keys.size());
+        reportReadMetrics(false, timer.done_us(), cache_keys.size(), matched_block_num, 0);
         return nullptr;
     }
 
-    size_t cpu_matched_num = 0;
-    auto   copy_infos      = buildCopyPlanForRead(cache_keys, layer_block_ids, gpu_reuse_num, cpu_matched_num);
+    auto copy_infos = buildCopyPlanForRead(cache_keys, layer_block_ids, start_read_block_index, read_block_num);
     if (copy_infos.empty()) {
-        if (cpu_matched_num > gpu_reuse_num) {
-            RTP_LLM_LOG_WARNING(
-                "async read failed, memory matched more blocks but build copy plan for read failed, cache_keys size: %zu, gpu_reuse_num: %zu, cpu_matched_num: %zu",
-                cache_keys.size(),
-                gpu_reuse_num,
-                cpu_matched_num);
-            reportReadMetrics(false, timer.done_us(), cache_keys.size(), cpu_matched_num, 0);
-        } else {
-            // not matched, or matched but no need to read
-            reportReadMetrics(true, timer.done_us(), cache_keys.size(), cpu_matched_num, 0);
-        }
+        RTP_LLM_LOG_WARNING(
+            "async read failed, build copy plan for read failed, cache keys size: %zu, start_read_block_index: %d, read_block_num: %d",
+            cache_keys.size(),
+            start_read_block_index,
+            read_block_num);
+        reportReadMetrics(false, timer.done_us(), cache_keys.size(), matched_block_num, 0);
         return nullptr;
     }
 
@@ -197,24 +208,23 @@ KVCacheMemoryConnector::asyncRead(const std::shared_ptr<KVCacheResourceV1>& reso
             auto block_pool = getBlockPool(copy_info.mem_block_size);
             freeBlocks(block_pool, {copy_info.mem_block_index}, /*cache_free=*/true);
         }
-        reportReadMetrics(false, timer.done_us(), cache_keys.size(), cpu_matched_num, 0);
+        reportReadMetrics(false, timer.done_us(), cache_keys.size(), matched_block_num, 0);
         return nullptr;
     }
 
     const auto total_block_num = cache_keys.size();
     auto       read_done =
-        [resource, copy_infos, total_block_num, gpu_reuse_num, cpu_matched_num, timer, self = shared_from_this()](
+        [resource, copy_infos, total_block_num, matched_block_num, read_block_num, timer, self = shared_from_this()](
             bool success) mutable {
             RTP_LLM_LOG_DEBUG("async read done, success: %d", success);
-            const int read_block_num = success ? static_cast<int>(copy_infos.size()) : 0;
             if (success) {
-                resource->setReuseBlocksNum(gpu_reuse_num + read_block_num);
+                resource->setReuseBlocksNum(matched_block_num);
             }
             for (const auto& copy_info : copy_infos) {
                 auto block_pool = self->getBlockPool(copy_info.mem_block_size);
                 self->freeBlocks(block_pool, {copy_info.mem_block_index}, /*cache_free=*/true);
             }
-            self->reportReadMetrics(success, timer.done_us(), total_block_num, cpu_matched_num, read_block_num);
+            self->reportReadMetrics(success, timer.done_us(), total_block_num, matched_block_num, read_block_num);
         };
 
     auto context = std::make_shared<MemoryConnectorAsyncContext>(send_result, read_done);
@@ -225,22 +235,24 @@ KVCacheMemoryConnector::asyncRead(const std::shared_ptr<KVCacheResourceV1>& reso
 std::vector<KVCacheMemoryConnector::CopyInfoPerKey>
 KVCacheMemoryConnector::buildCopyPlanForRead(const std::vector<int64_t>& cache_keys,
                                              const LayerBlockIds&        layer_block_ids,
-                                             size_t                      gpu_matched_num,
-                                             size_t&                     cpu_matched_num) {
+                                             int                         start_read_block_index,
+                                             int                         read_block_num) {
     std::vector<CopyInfoPerKey> copy_infos;
     const auto                  layer_num = cache_config_.layer_num;
+    bool                        success   = true;
 
-    for (size_t i = 0; i < cache_keys.size(); ++i) {
+    for (size_t i = start_read_block_index; i < start_read_block_index + read_block_num; ++i) {
         const auto cache_key    = cache_keys.at(i);
         const auto match_result = block_cache_->match(static_cast<CacheKeyType>(cache_key));
         if (isNullBlockIdx(match_result.matched_index)) {
-            RTP_LLM_LOG_DEBUG("build copy plan for read, found null memory block index, cache key: %zu", cache_key);
-            break;  // 只处理连续前缀
-        }
-
-        ++cpu_matched_num;
-        if (cpu_matched_num <= gpu_matched_num) {
-            continue;
+            RTP_LLM_LOG_WARNING(
+                "build copy plan for read failed, found null memory block index, cache key: %zu, cache key size: %zu, start_read_block_index: %d, read_block_num: %d",
+                cache_key,
+                cache_keys.size(),
+                start_read_block_index,
+                read_block_num);
+            success = false;
+            break;
         }
 
         auto block_pool = getBlockPool(match_result.block_size);
@@ -263,6 +275,14 @@ KVCacheMemoryConnector::buildCopyPlanForRead(const std::vector<int64_t>& cache_k
             copy_info.gpu_layer_blocks.push_back(lb);
         }
         copy_infos.emplace_back(std::move(copy_info));
+    }
+
+    if (!success) {
+        for (const auto& copy_info : copy_infos) {
+            auto block_pool = getBlockPool(copy_info.mem_block_size);
+            freeBlocks(block_pool, {copy_info.mem_block_index}, /*cache_free=*/true);
+        }
+        return {};
     }
     return copy_infos;
 }

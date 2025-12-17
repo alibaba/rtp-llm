@@ -81,8 +81,8 @@ private:
 
     std::vector<CopyInfoPerKey> buildCopyPlanForRead(const std::vector<int64_t>& cache_keys,
                                                      const LayerBlockIds&        layer_block_ids,
-                                                     size_t                      gpu_matched_num,
-                                                     size_t&                     cpu_matched_num);
+                                                     int                         start_read_block_index,
+                                                     int                         read_block_num);
     std::vector<CopyInfoPerKey> buildCopyPlanForWrite(const std::vector<int64_t>& cache_keys,
                                                       const LayerBlockIds&        layer_block_ids,
                                                       size_t                      cpu_matched_num);

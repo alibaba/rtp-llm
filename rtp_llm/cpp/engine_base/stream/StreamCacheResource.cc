@@ -220,12 +220,16 @@ bool StreamCacheResource::loadCacheDone() {
         return false;
     }
     if (load_cache_context_->success()) {
-        auto&     resource  = batch_resource_->batch_resource.at(0);
-        const int reuse_len = resource.reuseBlocksNum() * seqSizePerBlock();
-        stream_->setInitialReuseLength(reuse_len);
-        stream_->setReuseLength(reuse_len);
-        stream_->setLocalReuseLength(reuse_len);
-        stream_->setMtpTokenIndex(reuse_len);
+        auto read_context = std::dynamic_pointer_cast<FusedAsyncReadContext>(load_cache_context_);
+        if (read_context) {
+            const int reuse_len = read_context->resource()->reuseBlocksNum() * seqSizePerBlock();
+            stream_->setInitialReuseLength(reuse_len);
+            stream_->setReuseLength(reuse_len);
+            stream_->setLocalReuseLength(reuse_len);
+            stream_->setMtpTokenIndex(reuse_len);
+        } else {
+            RTP_LLM_LOG_WARNING("load cache success but cast load cache context failed");
+        }
     }
     load_cache_context_.reset();
     return true;
