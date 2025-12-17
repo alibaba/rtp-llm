@@ -45,7 +45,6 @@ def timeout_decorator(timeout_sec):
 
 
 mm_lock = threading.Lock()
-_GLOBAL_EXECUTOR = ThreadPoolExecutor(max_workers=32)
 
 
 class ImageTransform:

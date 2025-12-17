@@ -513,7 +513,6 @@ class ModelDeployWeightInfo:
             self.process_meta_from_ckpt(database.finetune_file_list)
             weight_info = self.get_weight_info()
 
-            # [New Feature] Dynamic weight registration from custom modal class
             if self.tp_rank == 0:
                 cls = self._load_custom_modal_class_from_config(self.config)
                 if cls:
