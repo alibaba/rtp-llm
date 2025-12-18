@@ -115,8 +115,8 @@ cc_library(
     ] + torch_deps(),
     copts = cuda_copts() + [
         "-DCUTLASS_ARCH_MMA_SM100_SUPPORTED",
-        '--cuda-include-ptx=sm_90', '--cuda-gpu-arch=sm_90',
-        '--cuda-include-ptx=sm_90a', '--cuda-gpu-arch=sm_90a',
+        '--cuda-include-ptx=sm_100', '--cuda-gpu-arch=sm_100',
+        '--cuda-include-ptx=sm_100a', '--cuda-gpu-arch=sm_100a',
     ],
     visibility = ["//visibility:public"],
 )
