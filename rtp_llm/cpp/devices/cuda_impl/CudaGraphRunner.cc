@@ -164,6 +164,12 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
                    .data_ptr<int>())) = state_.current_batch_size;
         }
 
+        // Update seq_len_tensor for CUDA Graph replay (max of input_lengths)
+        if (py_model_inputs_.attention_inputs.seq_len_tensor.defined()) {
+            int max_seq_len = inputs.attention_inputs.input_lengths.max().item<int>();
+            py_model_inputs_.attention_inputs.seq_len_tensor.data_ptr<int>()[0] = max_seq_len;
+        }
+
         if (inputs.bert_embedding_inputs.position_encoding.numel() > 0) {
             optimizedCopyAsync(inputs.bert_embedding_inputs.combo_position_ids,
                                py_model_inputs_.bert_embedding_inputs.combo_position_ids,
@@ -320,6 +326,8 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     inputs.attention_inputs.is_s_padded               = true;
     inputs.attention_inputs.sequence_lengths_plus_1_d = torch::zeros({int(max_bs_)}, options_cuda_int32_);
     inputs.attention_inputs.decode_cu_seqlens_d       = torch::zeros({int(max_bs_)}, options_cuda_int32_);
+    // seq_len_tensor [1, int32] for CUDA Graph compatibility
+    inputs.attention_inputs.seq_len_tensor = torch::tensor({0}, options_cpu_int32_).pin_memory();
 }
 
 void CudaGraphRunner::initCaptureAttentionInputsPost() {
@@ -518,9 +526,11 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
         capture_mem_hold_.py_model_inputs_.attention_inputs.sequence_lengths_plus_1_d.slice(0, 0, batch_size);
 
     // Common direct assignments (no slice needed)
-    inputs.attention_inputs.dtype       = capture_mem_hold_.py_model_inputs_.attention_inputs.dtype;
-    inputs.bert_embedding_inputs        = capture_mem_hold_.py_model_inputs_.bert_embedding_inputs;
     inputs.attention_inputs.is_s_padded = true;
+    inputs.attention_inputs.prefix_lengths = capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths;
+    inputs.attention_inputs.dtype          = capture_mem_hold_.py_model_inputs_.attention_inputs.dtype;
+    inputs.bert_embedding_inputs           = capture_mem_hold_.py_model_inputs_.bert_embedding_inputs;
+    inputs.attention_inputs.seq_len_tensor = capture_mem_hold_.py_model_inputs_.attention_inputs.seq_len_tensor;
 }
 
 CaptureMemoryHold CudaGraphRunner::createCaptureMemoryHold(PyModelInputs& inputs, int tokens_count) {
