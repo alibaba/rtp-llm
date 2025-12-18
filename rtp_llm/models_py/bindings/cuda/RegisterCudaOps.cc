@@ -4,7 +4,7 @@
 #include "rtp_llm/cpp/cuda/cutlass/cutlass_kernels/fp8_group_gemm/fp8_group_gemm.h"
 #include "rtp_llm/cpp/kernels/scaled_fp8_quant.h"
 
-#ifdef ENABLE_NVFP4
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000
 #include "rtp_llm/cpp/kernels/scaled_fp4_quant.h"
 #include "rtp_llm/cpp/cuda/cutlass/cutlass_kernels/fp4_gemm/nvfp4_scaled_mm.h"
 #endif
@@ -72,7 +72,7 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
     rtp_ops_m.def(
         "per_token_quant_fp8", &per_token_quant_fp8, py::arg("input"), py::arg("output_q"), py::arg("output_s"));
 
-#ifdef ENABLE_NVFP4
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000
     rtp_ops_m.def("cutlass_scaled_fp4_mm",
                   &cutlass_scaled_fp4_mm_sm100a_sm120a,
                   py::arg("out"),
@@ -106,7 +106,7 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
                   py::arg("input_global_scale"),
                   py::arg("mask"),
                   py::arg("use_silu_and_mul"));
-#endif  // ENABLE_NVFP4
+#endif
 
     rtp_ops_m.def("moe_pre_reorder",
                   &moe_pre_reorder,

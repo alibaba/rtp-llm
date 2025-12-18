@@ -4,7 +4,7 @@
 #include <cuda_runtime_api.h>
 #include <torch/all.h>
 
-#ifdef ENABLE_NVFP4
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000
 
 #include "rtp_llm/cpp/cuda/cutlass/cutlass_kernels/fp4_gemm/nvfp4_quant.cuh"
 #include "rtp_llm/cpp/kernels/util.h"
@@ -741,4 +741,4 @@ void silu_and_mul_scaled_fp4_experts_quant_sm100a(
 
 }  // namespace rtp_llm
 
-#endif  // ENABLE_NVFP4
+#endif
