@@ -1218,7 +1218,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("local_extra_data_path", &ModelConfig::local_extra_data_path)
         .def_readwrite("model_type", &ModelConfig::model_type)
         .def_readwrite("ptuning_path", &ModelConfig::ptuning_path)
-        .def_readwrite("json_model_override_args", &ModelConfig::json_model_override_args)
         .def_readwrite("mm_model_config", &ModelConfig::mm_model_config)
         .def("getAttentionConfigs", &ModelConfig::getAttentionConfigs)
         .def("isGatedActivation", &ModelConfig::isGatedActivation)

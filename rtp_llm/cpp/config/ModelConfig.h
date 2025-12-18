@@ -121,11 +121,10 @@ public:
     MMModelConfig mm_model_config;
 
     // Fields merged from PyModelConfig
-    std::string extra_data_path          = "";
-    std::string local_extra_data_path    = "";
-    std::string model_type               = "";
-    std::string ptuning_path             = "";
-    std::string json_model_override_args = "{}";
+    std::string extra_data_path       = "";
+    std::string local_extra_data_path = "";
+    std::string model_type            = "";
+    std::string ptuning_path          = "";
 
     ModelConfig() = default;
 

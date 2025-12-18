@@ -772,7 +772,6 @@ class ModelConfig:
     hidden_size: int
     input_embedding_scalar: float
     input_vocab_size: int
-    json_model_override_args: str
     layernorm_eps: float
     local_extra_data_path: str
     logit_scale: float

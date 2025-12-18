@@ -107,7 +107,6 @@ class ModelConfig(CppModelConfig):
         "local_extra_data_path",
         "model_type",
         "ptuning_path",
-        "json_model_override_args",
         "mm_model_config",
         "deepseek_rope_mscale",
         "deepseek_mscale_all_dim",
