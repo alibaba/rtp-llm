@@ -1,7 +1,13 @@
 load("//:def.bzl", "copts", "cuda_copts", "rocm_copts", "any_cuda_copts", "gen_cpp_code")
+load("@local_config_cuda//cuda:build_defs.bzl", "cuda_default_copts_without_arch")
 load("//bazel:arch_select.bzl", "torch_deps")
 load("@rules_cc//examples:experimental_cc_shared_library.bzl", "cc_shared_library")
 package(default_visibility = ["//rtp_llm:__subpackages__"])
+
+sm100_cuda_copts = copts() + cuda_default_copts_without_arch() + [
+    '--cuda-include-ptx=sm_100', '--cuda-gpu-arch=sm_100',
+    '--cuda-include-ptx=sm_100a', '--cuda-gpu-arch=sm_100a',
+]
 
 cuda_deps = [
     "//rtp_llm/cpp/cuda:cuda_host_utils",
@@ -113,10 +119,8 @@ cc_library(
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ] + torch_deps(),
-    copts = cuda_copts() + [
+    copts = sm100_cuda_copts() + [
         "-DCUTLASS_ARCH_MMA_SM100_SUPPORTED",
-        '--cuda-include-ptx=sm_100', '--cuda-gpu-arch=sm_100',
-        '--cuda-include-ptx=sm_100a', '--cuda-gpu-arch=sm_100a',
     ],
     visibility = ["//visibility:public"],
 )
