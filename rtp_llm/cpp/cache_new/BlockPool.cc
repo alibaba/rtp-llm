@@ -31,6 +31,13 @@ bool BlockPool::init() {
 
     initFreeBlocks();
 
+    auto kv_cache = kvCacheBuffer();
+
+#if (defined(USING_ROCM) && USING_ROCM) || (defined(USING_CUDA) && USING_CUDA)
+    device_->bufMemset(*kv_cache.k_blocks, 0);
+    device_->bufMemset(*kv_cache.v_blocks, 0);
+#endif
+
     block_cache_ = std::make_shared<BlockCache>();
 
     RTP_LLM_LOG_INFO("block pool init success");
