@@ -1096,6 +1096,12 @@ class W:
     moe_z2 = "partial_moe_weights.intermediate_weight2.zero"
     moe_s2 = "partial_moe_weights.intermediate_weight2.weight_only_quant_scale"
 
+    # fp4 moe
+    moe_w1_scale = "partial_moe_weights.intermediate_weight.weight_scale"
+    moe_w1_scale2 = "partial_moe_weights.intermediate_weight.alpha"
+    moe_w2_scale = "partial_moe_weights.intermediate_weight2.weight_scale"
+    moe_w2_scale2 = "partial_moe_weights.intermediate_weight2.alpha"
+
     # sq
     attn_i_smoother = "self_attention_weights.query_weight.smoother"
     attn_o_smoother = "self_attention_weights.attention_output_weight.smoother"
@@ -1140,6 +1146,10 @@ class W:
     moe_w1_input_sr = "moe_w1_activation.static_quant_reciprocal"
     moe_w2_input_s = "moe_w2_activation.static_quant"
     moe_w2_input_sr = "moe_w2_activation.static_quant_reciprocal"
+
+    # fp4 moe global scales
+    input_global_scale = "moe_w1_activation.input_global_scale"
+    a2_global_scale = "moe_w2_activation.a2_global_scale"
 
     # rotary embedding cos sin cache
     rope_cos_sin_cache = "rotary_embedding.cos_sin_cache"
@@ -1228,11 +1238,17 @@ class W:
         moe_w1: sp_moe_w1,
         moe_z1: sp_moe_w1,
         moe_s1: sp_moe_w1,
+        moe_w1_scale: sp_moe_w1,
+        moe_w1_scale2: sp_moe_w1,
         moe_b1: sp_moe_neg1,
         moe_w2: sp_moe_neg1,
         moe_z2: sp_moe_neg1,
         moe_s2: sp_moe_neg1,
+        moe_w2_scale: sp_moe_neg1,
+        moe_w2_scale2: sp_moe_neg1,
         moe_b2: sp_moe_neg1,
+        input_global_scale: sp_moe_w1,
+        a2_global_scale: sp_moe_neg1,
         e_score_correction_b: sp_id,
         post_ln_beta: sp_id,
         post_ln_gamma: sp_id,
