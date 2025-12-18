@@ -49,7 +49,7 @@ int LinearKVCacheGroup::needBlocksNum(int seq_len, int current_blocks) const {
     return std::max((seq_len + seq_size_per_block_ - 1) / seq_size_per_block_ - current_blocks, 0);
 }
 
-bool LinearKVCacheGroup::malloc(const CacheKeysType& cache_keys, BlockIndicesType& block_indices, int seq_len) {
+bool LinearKVCacheGroup::malloc(BlockIndicesType& block_indices, int seq_len) {
     int new_blocks = needBlocksNum(seq_len, block_indices.size());
     if (new_blocks == 0) {
         return true;

@@ -7,7 +7,7 @@ int FullKVCacheGroup::needBlocksNum(int seq_len, int current_blocks) const {
     return std::max((seq_len + seq_size_per_block_ - 1) / seq_size_per_block_ - current_blocks, 0);
 }
 
-bool FullKVCacheGroup::malloc(const CacheKeysType& cache_keys, BlockIndicesType& block_indices, int seq_len) {
+bool FullKVCacheGroup::malloc(BlockIndicesType& block_indices, int seq_len) {
     int need_blocks_num = needBlocksNum(seq_len, block_indices.size());
     if (need_blocks_num == 0) {
         return true;

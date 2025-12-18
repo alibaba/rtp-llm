@@ -14,7 +14,7 @@ public:
                      int                          group_id):
         KVCacheGroup(layer_ids, kvcache_spec, block_pool, group_id) {}
 
-    bool        malloc(const CacheKeysType& cache_keys, BlockIndicesType& block_indices, int seq_len) override;
+    bool        malloc(BlockIndicesType& block_indices, int seq_len) override;
     MatchResult match(const CacheKeysType& cache_keys) override;
     void        free(const BlockIndicesType& block_indices) override;
     void

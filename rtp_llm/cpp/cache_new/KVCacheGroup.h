@@ -28,7 +28,7 @@ public:
     virtual ~KVCacheGroup() = default;
 
     bool         init();
-    virtual bool malloc(const CacheKeysType& cache_keys, BlockIndicesType& block_indices, int seq_len) = 0;
+    virtual bool malloc(BlockIndicesType& block_indices, int seq_len) = 0;
     // TODO, match的时候热度不增加，最终匹配成功的时候再去增加热度。
     virtual MatchResult match(const CacheKeysType& cache_keys) = 0;
     MatchResult         matchSingleKey(CacheKeyType cache_key);

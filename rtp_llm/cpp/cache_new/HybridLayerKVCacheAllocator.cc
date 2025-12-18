@@ -100,11 +100,9 @@ MallocResult HybridLayerKVCacheAllocator::incrMalloc(const MallocInfo& malloc_in
         return {true, 0};
     }
     for (int batch_id = 0; batch_id < batch_size; ++batch_id) {
-        auto& cache_keys = kv_cache_resource->cacheKeys(batch_id);
-        int   group_nums = kv_cache_resource->groupNums();
+        int group_nums = kv_cache_resource->groupNums();
         for (int group_id = 0; group_id < group_nums; group_id++) {
-            if (!all_kv_cache_groups_[group_id]->malloc(
-                    cache_keys, kv_cache_resource->blocks(batch_id, group_id), seq_len)) {
+            if (!all_kv_cache_groups_[group_id]->malloc(kv_cache_resource->blocks(batch_id, group_id), seq_len)) {
                 // TODO，回滚已经malloc的资源。
                 return {false, 0};
             }
@@ -134,8 +132,7 @@ MallocResult HybridLayerKVCacheAllocator::initMallocForCommonLen(const MallocInf
     }
 
     for (int group_id = 0; group_id < all_kv_cache_groups_.size(); group_id++) {
-        if (!all_kv_cache_groups_[group_id]->malloc(
-                cache_keys_0, kv_cache_resource->blocks(0, group_id), common_seq_len)) {
+        if (!all_kv_cache_groups_[group_id]->malloc(kv_cache_resource->blocks(0, group_id), common_seq_len)) {
             return {false, 0};
         }
     }

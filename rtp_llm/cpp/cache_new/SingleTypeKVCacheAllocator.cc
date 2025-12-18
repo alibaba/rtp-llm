@@ -50,17 +50,14 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     auto& blocks_0       = kv_resource->blocks(0);
 
     // drop the last cache key of the partial block to avoid reuse it
-    if (!cache_keys.empty()) {
-        cache_keys.pop_back();
-    }
-
     if (kv_resource->enable_reuse_cache) {
-        auto match_result = full_kv_cache_group_->match(cache_keys);
-        reuse_len         = static_cast<int>(match_result.reuse_length);
+        CacheKeysType match_keys(cache_keys.begin(), cache_keys.empty() ? cache_keys.end() : cache_keys.end() - 1);
+        auto          match_result = full_kv_cache_group_->match(match_keys);
+        reuse_len                  = static_cast<int>(match_result.reuse_length);
         full_kv_cache_group_->reference(blocks_0, match_result.block_indices);
     }
 
-    if (!full_kv_cache_group_->malloc(cache_keys, blocks_0, common_seq_len)) {
+    if (!full_kv_cache_group_->malloc(blocks_0, common_seq_len)) {
         return {false, 0};
     }
 
@@ -93,9 +90,8 @@ MallocResult SingleTypeKVCacheAllocator::incrMalloc(const MallocInfo& malloc_inf
     bool all_success   = true;
     int  current_batch = 0;
     for (; current_batch < batch_size; ++current_batch) {
-        auto& cache_keys = kv_resource->cacheKeys(current_batch);
-        auto& blocks     = kv_resource->blocks(current_batch);
-        if (!full_kv_cache_group_->malloc(cache_keys, blocks, seq_len)) {
+        auto& blocks = kv_resource->blocks(current_batch);
+        if (!full_kv_cache_group_->malloc(blocks, seq_len)) {
             all_success = false;
             break;
         }
@@ -333,7 +329,7 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& kv
 
                 // allocate exactly one new block via kvCacheGroup
                 int  seq_len_target = (static_cast<int>(blocks.size()) + 1) * full_kv_cache_group_->seqSizePerBlock();
-                bool ok             = full_kv_cache_group_->malloc(cache_keys, blocks, seq_len_target);
+                bool ok             = full_kv_cache_group_->malloc(blocks, seq_len_target);
                 RTP_LLM_CHECK_WITH_INFO(ok, "malloc one block via kvCacheGroup failed during kv cache update");
                 const int new_block = blocks.back();
 

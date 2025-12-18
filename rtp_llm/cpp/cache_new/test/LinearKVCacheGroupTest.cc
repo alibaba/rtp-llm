@@ -32,7 +32,7 @@ TEST_F(LinearKVCacheGroupTest, MallocFreeTest) {
     CacheKeysType    cache_keys = {101, 102, 103};
     BlockIndicesType block_indices;
 
-    ASSERT_TRUE(group1.malloc(cache_keys, block_indices, 7));
+    ASSERT_TRUE(group1.malloc(block_indices, 7));
     ASSERT_EQ(block_pool->freeBlocksNum(), 5);
     ASSERT_EQ(block_indices.size(), 4);
 
@@ -42,7 +42,7 @@ TEST_F(LinearKVCacheGroupTest, MallocFreeTest) {
     group1.free(block_indices);
     ASSERT_EQ(block_pool->freeBlocksNum(), 9);
 
-    ASSERT_FALSE(group1.malloc(cache_keys, block_indices, 180));
+    ASSERT_FALSE(group1.malloc(block_indices, 180));
 }
 
 TEST_F(LinearKVCacheGroupTest, RemoveSkippedBlocksTest) {
@@ -57,7 +57,7 @@ TEST_F(LinearKVCacheGroupTest, RemoveSkippedBlocksTest) {
     CacheKeysType    cache_keys = {101, 102, 103, 104};
     BlockIndicesType block_indices1;
 
-    ASSERT_TRUE(group1.malloc(cache_keys, block_indices1, 8));
+    ASSERT_TRUE(group1.malloc(block_indices1, 8));
     ASSERT_EQ(block_pool->freeBlocksNum(), 5);
     ASSERT_EQ(block_indices1.size(), 4);
 
