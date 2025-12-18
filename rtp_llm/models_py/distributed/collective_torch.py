@@ -291,17 +291,7 @@ def broadcast(
         tensor: Tensor to broadcast (will be modified on non-source ranks)
         src: Source global rank
         group: Process group to use
-    """
-    if group == Group.TP:
-        symm_mem_comm = get_symm_mem_communicator()
-        if (
-            symm_mem_comm is not None
-            and symm_mem_comm.should_torch_symm_mem_allreduce(tensor)
-        ):
-            result = symm_mem_comm.all_reduce(tensor)
-            if result is not None:
-                return result
-                    
+    """             
     process_group = _get_group(group)
     torch.distributed.broadcast(tensor, src, group=process_group)
 
@@ -318,6 +308,14 @@ def all_reduce(
     Returns:
         All-reduced tensor (same as input tensor)
     """
+    if group == Group.TP:
+        symm_mem_comm = get_symm_mem_communicator()
+        if (
+            symm_mem_comm is not None
+            and symm_mem_comm.should_torch_symm_mem_allreduce(tensor)
+        ):
+            return symm_mem_comm.all_reduce(tensor)
+
     process_group = _get_group(group)
     torch.distributed.all_reduce(
         tensor, op=torch.distributed.ReduceOp.SUM, group=process_group
