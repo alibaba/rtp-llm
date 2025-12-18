@@ -48,9 +48,14 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
         RTP_LLM_LOG_WARNING("beam search does not support PERF_TEST for now");
     }
 
-    // Note it is invalid to use currentBatchSize here, because currentBatchSize depends on complete_token_ids_,
-    // which has not been initialized yet
+    // Note it is invalid to use currentBatchSize and nextBatchSize here, because they depend on
+    // complete_token_ids_, which has not been initialized yet
     const size_t init_batch_size = batchSize(0);
+    const size_t next_batch_size = batchSize(1);
+    // due to logits processing following tiling for logits, the batch size of the 2nd step is used here
+    // TODO(zhangjianning.zjn): tiling for logits should be moved after logits processors
+    const size_t logits_processor_init_batch_size =
+        init_batch_size != next_batch_size && !hasNumBeams() ? next_batch_size : init_batch_size;
 
     begin_time_us_ = input->begin_time_us;
     device_        = rtp_llm::DeviceFactory::getDefaultDevice();
@@ -81,6 +86,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     *is_context_stream_      = true;
     generate_status_         = std::make_shared<GenerateStatus>();
     generate_status_->status = StreamState::WAITING;
+    sub_generate_status_.reserve(maxBatchSize());
     sub_generate_status_.clear();
     resizeSubGenerateStatus(init_batch_size);
 
@@ -88,8 +94,10 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
 
     setReturnAllProbs(generate_input_->generate_config->return_all_probs);
 
-    think_logits_processor_ptr_ = ThinkModeLogitsProcessor::fromGenerateInput(device_, generate_input_, maxBatchSize());
-    tree_logits_processor_ptr_  = TreeLogitsProcessor::fromGenerateInput(device_, generate_input_, init_batch_size);
+    think_logits_processor_ptr_ =
+        ThinkModeLogitsProcessor::fromGenerateInput(device_, generate_input_, logits_processor_init_batch_size);
+    tree_logits_processor_ptr_ =
+        TreeLogitsProcessor::fromGenerateInput(device_, generate_input_, logits_processor_init_batch_size);
     multi_seq_logits_processor_ptr_ =
         MultiSeqLogitsProcessor::fromGenerateInput(device_, generate_input_, special_tokens_.eos_token_id_);
 
@@ -230,7 +238,7 @@ int GenerateStream::batchSize(int output_len) const {
     if (generate_input_->generate_config->hasNumBeams()) {
         return numBeams(output_len);
     } else {
-        return std::max(numReturnSequences(), 1);
+        return output_len == 0 && !perf_test_ ? 1 : std::max(numReturnSequences(), 1);
     }
 }
 
@@ -852,7 +860,7 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
         updateLogitProcessorStatus(update_info);
     }
 
-    if (!is_done || reuseCache()) {
+    if (!is_done || stream_cache_resource_->reuseCache()) {
         // kv cache blocks must be updated if REUSE_CACHE is on, even the stream is done
         auto update_res = updateKvCacheBlocks(update_info.src_batch_indices);
         if (!update_res) {
@@ -881,7 +889,7 @@ bool GenerateStream::updateKvCacheBlocks(const rtp_llm::BufferPtr& src_batch_ind
 }
 
 void GenerateStream::updateLogitProcessorMultiSeqStatus(const rtp_llm::BufferPtr& src_batch_indices) {
-    if (src_batch_indices == nullptr || !hasNumBeams()) {
+    if (src_batch_indices == nullptr) {
         return;
     }
 

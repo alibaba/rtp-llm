@@ -216,6 +216,7 @@ public:
     bool    enable_fast_gen_                  = false;
     bool    warm_up_                          = false;
     bool    warm_up_with_loss_                = false;
+    int64_t engine_async_worker_count_        = 0;
     int64_t fast_gen_max_context_len_         = 0;
     bool    reverse_e_h_norm_                 = false;
 
