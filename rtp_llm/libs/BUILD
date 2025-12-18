@@ -14,6 +14,14 @@ copy_files(
     visibility = ["//visibility:public"],
 )
 
+copy_files(
+    name = "copy_remote_kv_cache_manager_client_libs",
+    srcs = [
+        "//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_client_shared",
+    ],
+    visibility = ["//visibility:public"],
+)
+
 filegroup(
     name = "copy_aiter",
     srcs = select({
@@ -139,6 +147,7 @@ filegroup(
         ":copy_hf3fs_libs",
         ":copy_aiter",
         ":copy_acclep_libs",
+        ":copy_remote_kv_cache_manager_client_libs",
     ] + kernel_so_deps()
 )
 
