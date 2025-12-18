@@ -14,8 +14,8 @@ if TYPE_CHECKING:
 
 from rtp_llm.models.multimodal.multimodal_common import MultiModalEmbeddingInterface
 from rtp_llm.models.multimodal.multimodal_trt_engine import MultiModalTRTEngine
-from rtp_llm.ops.comm.nccl_op import NcclOp
 from rtp_llm.utils.model_weight import CkptWeightInfo, identity, sp_id
+from rtp_llm.models_py.distributed.collective_torch import barrier, Group
 
 
 class BaseVitWeights:
@@ -145,10 +145,6 @@ class MultiModalMixin:
         except ImportError:
             raise RuntimeError("tensorrt library not fonnd")
 
-        nccl_op_: Optional[NcclOp] = None
-        if tp_size > 1:
-            nccl_op_ = NcclOp()
-
         try:
             # TODO(xyz): currently model_name_path is ugly, we should let model_name_path passed by the frontend in
             # environment variable
@@ -188,7 +184,7 @@ class MultiModalMixin:
 
             # for TP > 1, only rank0 will generate trt engine, other ranks will wait rank0 to generate trt engine
             if tp_size > 1:
-                nccl_op_.barrier(torch.device(device))
+                barrier(group=Group.TP)
 
             self.gc_mm_part(vit_params)
             # Currently, the multimodel network isn't split between devices. Only Rank 0 loads the weights.
@@ -231,8 +227,7 @@ class MultiModalMixin:
 
         # wait rank0 finish loading weight, otherwise gang_server will die
         if tp_size > 1:
-            nccl_op_ = NcclOp()
-            nccl_op_.barrier(torch.device(device))
+            barrier(group=Group.TP)
         # Currently, the multimodel network isn't split between devices. Only Rank 0 loads the weights.
         # After supporting TP mm network, we will remove the check here.
         if tp_rank >= 1:
