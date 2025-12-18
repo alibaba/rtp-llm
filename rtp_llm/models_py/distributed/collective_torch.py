@@ -351,6 +351,14 @@ def all_gather(
     # torch.distributed.all_gather(tensor_list, tensor, group=process_group)
     # return torch.cat(tensor_list, dim=0)
 
+def barrier(group: Group) -> None:
+    """Barrier all ranks in the group.
+    
+    Args:
+        group: Process group to use
+    """
+    process_group = _get_group(group)
+    torch.distributed.barrier(group=process_group)
 
 __all__ = [
     "Group",
@@ -362,5 +370,6 @@ __all__ = [
     "broadcast",
     "all_reduce",
     "all_gather",
+    "barrier",
 ]
 

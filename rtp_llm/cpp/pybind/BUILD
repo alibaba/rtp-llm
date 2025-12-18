@@ -66,20 +66,8 @@ cc_library(
         "common/InitEngineOps.cc",
         "multi_gpu_gpt/RtpEmbeddingOp.cc",
         "multi_gpu_gpt/RtpLLMOp.cc",
-    ] +  select({
-        "@//:using_cuda12": [
-            "common/NcclOp.cc",
-        ],
-        "@//:using_cuda": [
-            "common/NcclOp.cc",
-        ],
-        "@//:using_rocm": [
-            "common/NcclOp.cc",
-        ],
-        "//conditions:default": [],
-    }),
+    ],
     hdrs = [
-        "common/NcclOp.h",
         "common/InitEngineOps.h",
         "common/blockUtil.h",
         "multi_gpu_gpt/RtpEmbeddingOp.h",
