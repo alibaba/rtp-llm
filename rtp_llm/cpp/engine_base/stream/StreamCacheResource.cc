@@ -112,6 +112,7 @@ absl::StatusOr<int> StreamCacheResource::incrKVBlock(int token_capacity, size_t 
         stream_->setReuseLength(result.reuse_len);
         stream_->setMtpTokenIndex(result.reuse_len);
         stream_->setInitialReuseLength(result.reuse_len);
+        stream_->setLocalReuseLength(result.reuse_len);
     }
 
     return real_occupy;
