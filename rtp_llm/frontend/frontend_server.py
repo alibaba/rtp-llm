@@ -220,7 +220,7 @@ class FrontendServer(object):
 
             if self._openai_endpoint._check_is_streaming(request_dict):
                 return StreamingResponse(
-                    self.stream_response(request_dict, res),
+                    self._openai_endpoint._stream_response(request_dict, res),
                     media_type="text/event-stream",
                 )
 
