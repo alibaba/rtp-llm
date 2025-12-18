@@ -523,6 +523,8 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
                       size_per_head,
                       local_tokens_per_block)) {
 
+        printf("=== CudaAttentionOp before runXqa ===\n");
+
         runXqa(q_output->data(),
                q_output->type() == DataType::TYPE_BF16,
                params.output.data(),
@@ -552,6 +554,9 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
         if (use_fp8_fmha_) {
             f16_out = allocateBuffer({params.input.type(), params.output.shape(), AllocationType::DEVICE}, {"f16_out"});
         }
+
+        printf("=== CudaAttentionOp before flash_infer->run ===\n");
+
         flash_infer->run(params, q_output, f16_out, reinterpret_cast<int64_t>(stream_));
         return;
     }
@@ -578,6 +583,8 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
     float* partial_sum_data   = (partial_sum == nullptr) ? nullptr : partial_sum->data<float>();
     float* partial_max_data   = (partial_max == nullptr) ? nullptr : partial_max->data<float>();
     int*   block_counter_data = (block_counter == nullptr) ? nullptr : block_counter->data<int>();
+
+    printf("=== CudaAttentionOp before selfAttentionwrapper ===\n");
 
     DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
                                      selfAttentionwrapper,

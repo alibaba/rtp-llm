@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/core/BufferHelper.h"
 
 #include <numeric>
+#include <cstdio>
 
 using namespace std;
 
@@ -72,6 +73,11 @@ BufferPtr DeviceBase::attentionQKVGemm(const AttentionLayerParams& params) {
 }
 
 BufferPtr DeviceBase::attentionAttn(const AttentionLayerParams& params) {
+
+    // print input lengths and sequence lengths
+    printBufferData(*params.common.input_lengths, "input_lengths");
+    printBufferData(*params.common.sequence_lengths, "sequence_lengths");
+
     const auto& input_lengths    = *params.common.input_lengths;
     const auto& sequence_lengths = *params.common.sequence_lengths;
 
@@ -97,6 +103,15 @@ BufferPtr DeviceBase::attentionAttn(const AttentionLayerParams& params) {
                                && (layer_cache_shape[4] == params.configs.size_per_head)),
                               "kv cache buffer check shape failed. k_cache_buffer: %s",
                               kv_cache.k_cache_buffer->debugString().c_str());
+
+        printBufferData(*params.common.kv_cache->k_cache_buffer, "k_cache_buffer");
+        printBufferData(*params.common.kv_cache->v_cache_buffer, "v_cache_buffer");
+        printBufferData(*params.common.kv_cache->kv_cache_block_id, "kv_cache_block_id");
+
+        // Print specific sub-buffers of k_cache_buffer [8601, 2, 8, 64, 128]
+        // Using [] operator for better readability
+        printBufferData((*params.common.kv_cache->k_cache_buffer)[1][0][0], "k_cache_buffer[1][0][0]");
+        printBufferData((*params.common.kv_cache->k_cache_buffer)[1][1][0], "k_cache_buffer[1][1][0]");
     }
 
     const auto qkv_hidden_size = params.configs.head_num * params.configs.size_per_head;
@@ -127,6 +142,60 @@ BufferPtr DeviceBase::attentionAttn(const AttentionLayerParams& params) {
         if (layer_kv_cache) {
             params.common.kv_cache->kv_cache_block_id = kv_cache_block_id->slice(0, generate_batch_size);
         }
+
+        // Print params variables before decoderSelfAttention
+        printf("=== AttentionLayerParams before decoderSelfAttention ===\n");
+        printf("layer_id: %d\n", params.layer_id);
+        printf("qscheme: %d\n", static_cast<int>(params.qscheme));
+        printf("compute_type: %d\n", static_cast<int>(params.compute_type));
+        printf("enable_sp: %s\n", params.enable_sp ? "true" : "false");
+        printf("pad_token_num: %zu\n", params.pad_token_num);
+
+        // Print actual parameters passed to decoderSelfAttention
+        printBufferData(generate_qkv, "generate_qkv");
+        printBufferData(generate_output, "generate_output");
+
+        // Print AttentionCommonInputs variables
+        if (params.common.input_lengths) {
+            printBufferData(*params.common.input_lengths, "params.common.input_lengths");
+        }
+        if (params.common.sequence_lengths) {
+            printBufferData(*params.common.sequence_lengths, "params.common.sequence_lengths");
+        }
+        if (params.common.cu_seqlens) {
+            printBufferData(*params.common.cu_seqlens, "params.common.cu_seqlens");
+        }
+        if (params.common.cu_kv_seqlens) {
+            printBufferData(*params.common.cu_kv_seqlens, "params.common.cu_kv_seqlens");
+        }
+        if (params.common.kv_seqlens) {
+            printBufferData(*params.common.kv_seqlens, "params.common.kv_seqlens");
+        }
+        if (params.common.padding_offset) {
+            printBufferData(*params.common.padding_offset, "params.common.padding_offset");
+        }
+        if (params.common.position_ids) {
+            printBufferData(*params.common.position_ids, "params.common.position_ids");
+        }
+        if (params.common.attention_mask) {
+            printBufferData(*params.common.attention_mask, "params.common.attention_mask");
+        }
+        if (params.common.linear_bias_slopes) {
+            printBufferData(*params.common.linear_bias_slopes, "params.common.linear_bias_slopes");
+        }
+        if (params.common.prefix_prompt_lengths) {
+            printBufferData(*params.common.prefix_prompt_lengths, "params.common.prefix_prompt_lengths");
+        }
+
+        // Print other AttentionCommonInputs scalar variables
+        printf("context_batch_size: %zu\n", params.common.context_batch_size);
+        printf("decoder_batch_size: %zu\n", params.common.decoder_batch_size);
+        printf("context_max_seq_len: %zu\n", params.common.context_max_seq_len);
+        printf("decoder_max_seq_len: %zu\n", params.common.decoder_max_seq_len);
+        printf("context_token_num: %zu\n", params.common.context_token_num);
+        printf("context_total_kv_length: %zu\n", params.common.context_total_kv_length);
+        printf("max_prefix_length: %d\n", params.common.max_prefix_length);
+
         decoderSelfAttention({params.layer_id,
                               generate_qkv,
                               generate_output,
