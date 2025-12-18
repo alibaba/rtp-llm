@@ -41,8 +41,6 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
 
     if (k_cache_buffer_) {
         py_attn_inputs.kv_cache_block_id_host = Buffer2torchTensor(inputs.kv_cache_block_id);
-        py_attn_inputs.kv_block_offset =
-            k_cache_buffer_ ? k_cache_buffer_->shape()[0] * k_cache_buffer_->shape()[1] : 0;
     }
 
     py_attn_inputs.dtype      = dataTypeToTorchType(description_.data_type);

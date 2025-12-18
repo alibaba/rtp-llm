@@ -65,10 +65,9 @@ PyModelInputs CudaGraphDecodePaddingOp::buildInputs(int64_t batch_size,
         torch::zeros({int(batch_size), ((max_seq_len + seq_size_per_block - 1) / seq_size_per_block)}, options3);
     inputs.attention_inputs.kv_cache_block_id_host =
         torch::zeros({int(batch_size), ((max_seq_len + seq_size_per_block - 1) / seq_size_per_block)}, options2);
-    inputs.attention_inputs.padding_offset  = torch::zeros({max_seq_len}, options3);
-    inputs.attention_inputs.is_prefill      = false;
-    inputs.attention_inputs.dtype           = torch::kFloat16;
-    inputs.attention_inputs.kv_block_offset = 344864;
+    inputs.attention_inputs.padding_offset = torch::zeros({max_seq_len}, options3);
+    inputs.attention_inputs.is_prefill     = false;
+    inputs.attention_inputs.dtype          = torch::kFloat16;
     // max_bs = 8
     size_t cu_len = batch_size + 1;
 

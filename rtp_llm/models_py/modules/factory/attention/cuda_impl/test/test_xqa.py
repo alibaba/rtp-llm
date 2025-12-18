@@ -21,12 +21,11 @@ class TestXQAAttnOp(BaseAttentionDecodeTest):
         sequence_lengths: List[int],
         seq_size_per_block: int,
     ) -> PyAttentionInputs:
-        """Helper to create PyAttentionInputs for decode with kv_block_offset=1"""
+        """Helper to create PyAttentionInputs for decode"""
         return self._create_attention_inputs_base(
             batch_size=batch_size,
             sequence_lengths=sequence_lengths,
             seq_size_per_block=seq_size_per_block,
-            kv_block_offset=1,
         )
 
     def _test_decode_correctness(

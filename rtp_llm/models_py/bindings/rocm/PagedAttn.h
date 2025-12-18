@@ -43,8 +43,6 @@ public:
                           const CKAttnPtr&                  params);
 
 private:
-    // Offset for KV cache blocks, calculated as num_layers * block_nums
-    size_t kv_block_offset_;
     // Flag to control whether to use AITER paged attention, controlled by USE_AITER_PA env var
     bool use_aiter_pa_ = true;
 };

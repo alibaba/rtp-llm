@@ -23,7 +23,6 @@ ParamsBasePtr TRTPrefillOpBase::prepare(torch_ext::PyAttentionInputs attn_inputs
     auto          run_stream   = at::cuda::getCurrentCUDAStream(at::cuda::current_device()).stream();
     bool          use_fp8_fmha = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
     auto          params       = prepareTrtAttnParams(attn_configs_,
-                                       attn_inputs.kv_block_offset,
                                        kv_cache_block_id_device,
                                        attn_inputs.input_lengths.size(0),
                                        use_fp8_fmha,

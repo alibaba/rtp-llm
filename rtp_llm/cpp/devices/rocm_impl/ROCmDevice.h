@@ -287,7 +287,6 @@ public:
         return &rocmDevProp;
     }
     ParamsPtr PrepareCKAttn(const AttentionConfigs& configs,
-                            int                     kv_block_offset,
                             const BufferPtr&        kv_cache_block_id,
                             int                     batch_size);
     void      maskLogits(Buffer& logits, const Buffer& mask) override;

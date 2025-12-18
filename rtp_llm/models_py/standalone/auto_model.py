@@ -173,7 +173,6 @@ class AutoModel:
             [[i for i in range(1, need_block_nums + 1)]], dtype=torch.int32
         )
         attention_inputs.dtype = get_typemeta(self.kv_cache.k_cache_base)
-        attention_inputs.kv_block_offset = self.layer_num * self.block_nums
         attention_inputs.is_prefill = True
         return attention_inputs
 

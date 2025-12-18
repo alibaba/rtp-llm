@@ -21,9 +21,7 @@
 #include "rtp_llm/cpp/config/GptInitParameter.h"
 #include "rtp_llm/cpp/devices/rocm_impl/ROCmDevice.h"
 namespace rtp_llm {
-PagedAttnDecodeOp::PagedAttnDecodeOp(const GptInitParameter& gpt_init_parameter):
-    FMHARocmBase(gpt_init_parameter),
-    kv_block_offset_(gpt_init_parameter.num_layers_ * gpt_init_parameter.block_nums_) {
+PagedAttnDecodeOp::PagedAttnDecodeOp(const GptInitParameter& gpt_init_parameter): FMHARocmBase(gpt_init_parameter) {
     use_aiter_pa_ = gpt_init_parameter.hw_kernel_config.use_aiter_pa;
 }
 
@@ -42,8 +40,7 @@ CKAttnPtr PagedAttnDecodeOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
     }
 
     CKAttnPtr attn_params;
-    auto      params = device_->PrepareCKAttn(
-        attn_configs_, attn_inputs.kv_block_offset, kv_cache_block_id_device, attn_inputs.sequence_lengths.size(0));
+    auto params = device_->PrepareCKAttn(attn_configs_, kv_cache_block_id_device, attn_inputs.sequence_lengths.size(0));
 
     attn_params              = CKAttnPtr(params, (CKAttn*)params.get());
     attn_params->decode_plan = true;

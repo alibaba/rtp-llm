@@ -122,10 +122,9 @@ PyModelInputs CudaGraphPrefillOp::buildInputs(int64_t batch_size,
     // prefix_lengths [batch_size, int32] (for attention `prepare`)
     inputs.attention_inputs.prefix_lengths = torch::zeros(int(batch_size), options2);
     inputs.attention_inputs.prefix_lengths.pin_memory();
-    inputs.attention_inputs.is_prefill      = true;
-    inputs.attention_inputs.dtype           = torch::kBFloat16;
-    inputs.attention_inputs.kv_block_offset = 0;
-    inputs.attention_inputs.is_s_padded     = use_max_padded_mode;
+    inputs.attention_inputs.is_prefill  = true;
+    inputs.attention_inputs.dtype       = torch::kBFloat16;
+    inputs.attention_inputs.is_s_padded = use_max_padded_mode;
     RTP_LLM_LOG_INFO("kv_cache_block_id_device build success\n");
     // 计算 cu_seqlens
     size_t cu_len = batch_size + 1;

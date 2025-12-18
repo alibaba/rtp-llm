@@ -32,13 +32,8 @@ ParamsBasePtr XQAAttnOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
     // 使用独立的工具函数准备 TRT attention 参数
     auto run_stream   = at::cuda::getCurrentCUDAStream(at::cuda::current_device()).stream();
     bool use_fp8_fmha = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
-    auto trt_params   = prepareTrtAttnParams(attn_configs_,
-                                           attn_inputs.kv_block_offset,
-                                           kv_cache_block_id_device,
-                                           batch_size,
-                                           use_fp8_fmha,
-                                           run_stream,
-                                           false);
+    auto trt_params =
+        prepareTrtAttnParams(attn_configs_, kv_cache_block_id_device, batch_size, use_fp8_fmha, run_stream, false);
 
     params->kv_block_array            = ((TRTAttn*)trt_params.get())->kv_block_array;
     params->kv_cache_offset           = ((TRTAttn*)trt_params.get())->kv_cache_offset.clone();

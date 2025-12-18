@@ -24,8 +24,7 @@ TRTAttnPtr FusedRopeKVCachePrefillOp::prepare(torch_ext::PyAttentionInputs attn_
     auto          cu_seqlens_without_prefix = attn_inputs.cu_seqlens_without_prefix;
     torch::Tensor cu_kv_seqlens             = cu_seqlens;
     TRTAttnPtr    attn_params;
-    auto          params =
-        device_->prepareTrtAttn(attn_configs_, attn_inputs.kv_block_offset, kv_cache_block_id_device, batch_size);
+    auto          params = device_->prepareTrtAttn(attn_configs_, kv_cache_block_id_device, batch_size);
     if (params) {
         attn_params = TRTAttnPtr(params, (TRTAttn*)params.get());
     } else {
@@ -162,8 +161,8 @@ TRTAttnPtr FusedRopeKVCacheDecodeOp::prepare(torch_ext::PyAttentionInputs attn_i
     auto          cu_seqlens_without_prefix                           = attn_inputs.cu_seqlens_without_prefix;
     torch::Tensor cu_kv_seqlens                                       = cu_seqlens;
     TRTAttnPtr    attn_params;
-    auto          params = device_->prepareTrtAttn(
-        attn_configs_, attn_inputs.kv_block_offset, kv_cache_block_id_device, attn_inputs.sequence_lengths.size(0));
+    auto          params =
+        device_->prepareTrtAttn(attn_configs_, kv_cache_block_id_device, attn_inputs.sequence_lengths.size(0));
     RTP_LLM_CHECK_WITH_INFO(params != nullptr, "TRTAttnPtr Build Failed");
     attn_params                            = TRTAttnPtr(params, (TRTAttn*)params.get());
     attn_params->decode_plan               = true;

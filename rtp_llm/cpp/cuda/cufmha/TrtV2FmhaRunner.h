@@ -119,7 +119,6 @@ private:
 };
 
 std::shared_ptr<TRTAttn> prepareTrtAttnParams(const AttentionConfigs& configs,
-                                              int                     kv_block_offset,
                                               const BufferPtr&        kv_cache_block_id,
                                               int                     batch_size,
                                               bool                    use_fp8_fmha,

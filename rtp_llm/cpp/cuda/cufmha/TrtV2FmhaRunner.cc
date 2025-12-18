@@ -211,13 +211,12 @@ void TrtV2FmhaRunner::runTrtV2FmhaPaged(void*        input,
 }
 
 std::shared_ptr<TRTAttn> prepareTrtAttnParams(const AttentionConfigs& configs,
-                                              int                     kv_block_offset,
                                               const BufferPtr&        kv_cache_block_id,
                                               int                     batch_size,
                                               bool                    use_fp8_fmha,
                                               cudaStream_t            stream,
                                               bool                    enable_paged_trt_v2) {
-    if (!kv_block_offset || !kv_cache_block_id || 0 == batch_size) {
+    if (!kv_cache_block_id || 0 == batch_size) {
         return nullptr;
     }
 

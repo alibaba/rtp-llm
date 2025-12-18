@@ -80,7 +80,6 @@ class BaseAttentionDecodeTest(unittest.TestCase):
         batch_size: int,
         sequence_lengths: List[int],
         seq_size_per_block: int,
-        kv_block_offset: int,
     ) -> PyAttentionInputs:
         """Helper to create PyAttentionInputs for decode
 
@@ -129,9 +128,6 @@ class BaseAttentionDecodeTest(unittest.TestCase):
             0, batch_size + 1, dtype=torch.int32, device=self.device
         )
         attn_inputs.cu_seqlens_without_prefix = attn_inputs.cu_seqlens.clone()
-
-        # Set kv_block_offset (subclass-specific)
-        attn_inputs.kv_block_offset = kv_block_offset
 
         return attn_inputs
 
