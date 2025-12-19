@@ -61,8 +61,7 @@ class MMUrlType(IntEnum):
     AUDIO = 3
     TENSOR = 4
     IGRAPH = 5
-    CUSTOM_JSON = 6
-    CUSTOM_RAW = 7
+    CUSTOM = 6
 
 
 @dataclass
@@ -103,13 +102,15 @@ def get_vit_compute_dtype(dtype: str):
 
 
 class IgraphItemKeyCountMismatchError(Exception):
-    
+
     def __init__(self, requested_count: int, received_count: int, message: str = None):
         self.requested_count = requested_count
         self.received_count = received_count
         super().__init__(
-            message or f"item number from igraph response ({received_count}) diff with keys number from request({requested_count})"
+            message
+            or f"item number from igraph response ({received_count}) diff with keys number from request({requested_count})"
         )
+
 
 def retry_on_assertion_error(retries: int = 3):
     def decorator(func):
@@ -117,7 +118,11 @@ def retry_on_assertion_error(retries: int = 3):
             for attempt in range(1, retries + 1):
                 try:
                     return func(*args, **kwargs)
-                except (AssertionError, ValueError, IgraphItemKeyCountMismatchError) as e:
+                except (
+                    AssertionError,
+                    ValueError,
+                    IgraphItemKeyCountMismatchError,
+                ) as e:
                     logger.warning(
                         f"[retry_on_assertion_error] AssertionError on attempt {attempt}: {str(e)}"
                     )

@@ -1,6 +1,7 @@
 import copy
 import json
 import logging
+import os
 from typing import List, Optional
 
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
@@ -14,7 +15,10 @@ from rtp_llm.openai.renderers.custom_renderer import (
     RenderedInputs,
     RendererParams,
 )
+from rtp_llm.utils.custommodal_util import MethodType, load_custom_modal_class
+from rtp_llm.utils.import_util import load_module
 from rtp_llm.utils.multimodal_util import MMPreprocessConfig, MMUrlType, MultimodalInput
+
 
 class CustomModalProxyRenderer(CustomChatRenderer):
     """
@@ -22,12 +26,36 @@ class CustomModalProxyRenderer(CustomChatRenderer):
     custom multimodal data processing capabilities without modifying the
     original renderer's logic.
     """
-    def __init__(self, tokenizer: BaseTokenizer, renderer_params: RendererParams, wrapped_renderer: CustomChatRenderer):
+
+    def __init__(
+        self,
+        tokenizer: BaseTokenizer,
+        renderer_params: RendererParams,
+        wrapped_renderer: CustomChatRenderer,
+    ):
         super().__init__(tokenizer, renderer_params)
         self.wrapped_renderer = wrapped_renderer
-        logging.info(f"CustomModalProxyRenderer wrapping {type(wrapped_renderer).__name__}")
+        self.custom_modal_config = renderer_params.custom_modal_config
+        self.custom_preproceor = self._load_custom_preprocessor()
+        logging.info(
+            f"CustomModalProxyRenderer wrapping {type(wrapped_renderer).__name__}"
+        )
 
-    def _create_mm_preprocess_config(self, part_config: Optional[MMPreprocessConfigPart]) -> MMPreprocessConfig:
+    def _load_custom_preprocessor(self):
+        try:
+            cls = load_custom_modal_class(
+                self.custom_modal_config, self.ckpt_path, MethodType.Preprocess
+            )
+            custom_mm_part = cls(self.custom_modal_config, self.tokenizer)
+            return custom_mm_part.custom_modal_preprocess
+        except Exception as e:
+            logging.warning(f"Failed to load custom_preprocess: {e}")
+            return None
+        return None
+
+    def _create_mm_preprocess_config(
+        self, part_config: Optional[MMPreprocessConfigPart]
+    ) -> MMPreprocessConfig:
         """Helper to convert MMPreprocessConfigPart to MMPreprocessConfig."""
         if not part_config:
             return MMPreprocessConfig()
@@ -43,41 +71,35 @@ class CustomModalProxyRenderer(CustomChatRenderer):
 
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         modified_request = copy.deepcopy(request)
-        
-        # This list will hold the final ordered MultimodalInputs. 
+
+        # This list will hold the final ordered MultimodalInputs.
         # We use None as a placeholder for inputs that the base renderer will handle (Images/Videos).
         final_multimodal_inputs: List[Optional[MultimodalInput]] = []
-        
+
         for message in modified_request.messages:
             if isinstance(message.content, list):
                 new_content_list = []
                 for part in message.content:
                     if part.type == ContentPartTypeEnum.custom:
-                        serialized_data = ""
                         mm_type = MMUrlType.DEFAULT
-                        
-                        try:
-                            if isinstance(part.data, str):
-                                # If it's a string, try to load it to verify if it's valid JSON
-                                json.loads(part.data)
-                                serialized_data = part.data
-                            else:
-                                # For dict, list, or primitives, try to dump it to JSON string
-                                serialized_data = json.dumps(part.data)
-                            mm_type = MMUrlType.CUSTOM_JSON
-                        except (ValueError, TypeError):
-                            # Fallback to Raw if not valid JSON or not serializable
-                            serialized_data = str(part.data)
-                            mm_type = MMUrlType.CUSTOM_RAW
+                        serialized_data = self.custom_preproceor(part.data)
+                        mm_type = MMUrlType.CUSTOM
 
                         mm_input = MultimodalInput(
                             url=serialized_data,
                             mm_type=mm_type,
-                            config=self._create_mm_preprocess_config(part.preprocess_config)
+                            config=self._create_mm_preprocess_config(
+                                part.preprocess_config
+                            ),
                         )
                         final_multimodal_inputs.append(mm_input)
-                    
-                    elif part.type in [ContentPartTypeEnum.image_url, ContentPartTypeEnum.video_url, ContentPartTypeEnum.audio_url, ContentPartTypeEnum.igraph]:
+
+                    elif part.type in [
+                        ContentPartTypeEnum.image_url,
+                        ContentPartTypeEnum.video_url,
+                        ContentPartTypeEnum.audio_url,
+                        ContentPartTypeEnum.igraph,
+                    ]:
                         # Mark a spot for base renderer's output
                         final_multimodal_inputs.append(None)
                         new_content_list.append(part)
@@ -96,10 +118,12 @@ class CustomModalProxyRenderer(CustomChatRenderer):
                 try:
                     completed_inputs.append(next(base_inputs_iter))
                 except StopIteration:
-                    logging.error("Base renderer produced fewer multimodal inputs than expected.")
+                    logging.error(
+                        "Base renderer produced fewer multimodal inputs than expected."
+                    )
             else:
                 completed_inputs.append(item)
-        
+
         # Append any remaining inputs from base renderer (just in case)
         for remaining in base_inputs_iter:
             logging.warning(f"Base renderer produced extra input: {remaining.url}")

@@ -1,9 +1,9 @@
 import gc
 import json
+import logging
 import os
 import re
 from typing import Any, Dict, List, Optional, Tuple, Union
-import logging
 
 import torch
 
@@ -19,12 +19,19 @@ from rtp_llm.model_loader.model_weight_info import (
     ModelWeightInfo,
 )
 from rtp_llm.model_loader.weight_module import MMAtomicWeight
+from rtp_llm.models.downstream_modules.plugin_loader import (  # Import load_module
+    load_module,
+)
 from rtp_llm.models.multimodal.multimodal_common import MultiModalEmbeddingInterface
 from rtp_llm.models.multimodal.multimodal_trt_engine import MultiModalTRTEngine
 from rtp_llm.ops.comm.nccl_op import NcclOp
+from rtp_llm.utils.custommodal_util import MethodType, load_custom_modal_class
 from rtp_llm.utils.model_weight import CkptWeightInfo, identity, sp_id
-from rtp_llm.utils.multimodal_util import MultimodalInput, get_vit_compute_dtype, MMUrlType
-from rtp_llm.models.downstream_modules.plugin_loader import load_module # Import load_module
+from rtp_llm.utils.multimodal_util import (
+    MMUrlType,
+    MultimodalInput,
+    get_vit_compute_dtype,
+)
 
 
 class BaseVitWeights:
@@ -89,19 +96,27 @@ class BaseMultiModalWeightInfo:
                             split_func=sp_id,
                         )
                     )
-            
+
             if self.tp_rank == 0:
-                cls = ModelDeployWeightInfo._load_custom_modal_class_from_config(self.config)
+                cls = ModelDeployWeightInfo.load_custom_modal_class(
+                    self.config.custom_modal, self.config.ckpt, Method.Embedding
+                )
                 if cls:
                     get_weight_info_method = getattr(cls, "get_weight_info", None)
                     if callable(get_weight_info_method):
-                        extra_weights = get_weight_info_method(self.config, self.tp_rank)
+                        extra_weights = get_weight_info_method(
+                            self.config, self.tp_rank
+                        )
                         if extra_weights:
-                            logging.info(f"Registering {len(extra_weights)} extra weights from {cls.__name__}")
+                            logging.info(
+                                f"Registering {len(extra_weights)} extra weights from {cls.__name__}"
+                            )
                             llm_weights.weights.extend(extra_weights)
                     else:
-                        logging.warning(f"Custom modal class '{cls.__name__}' has no callable 'get_weight_info' static method.")
-                        
+                        logging.warning(
+                            f"Custom modal class '{cls.__name__}' has no callable 'get_weight_info' static method."
+                        )
+
         return llm_weights
 
 
@@ -120,41 +135,57 @@ class MultiModalMixin:
                 torch_default_dtype = torch.get_default_dtype()
                 torch.set_default_dtype(self.vit_data_type)
                 self._init_multimodal(config)
-                
                 # Dynamic injection of custom multimodal embedding
                 if hasattr(config, "custom_modal") and config.custom_modal:
-                    cls = ModelDeployWeightInfo._load_custom_modal_class_from_config(config)
+                    cls = load_custom_modal_class(
+                        config.custom_modal, config.ckpt_path, MethodType.Embedding
+                    )
                     if cls:
                         try:
-                            # Assuming the custom class constructor signature is (config, tokenizer, weight)
-                            custom_mm_part = cls(config, self.tokenizer, self.weight)
-                            
+                            # Assuming the custom class constructor signature is (config, tokenizer)
+                            custom_mm_part = cls(config)
+
                             # If a native mm_part already exists (e.g. Qwen-VL), we need to support both.
-                            if hasattr(self, 'mm_part') and self.mm_part is not None:
+                            if hasattr(self, "mm_part") and self.mm_part is not None:
                                 original_mm_part = self.mm_part
                                 original_method = custom_mm_part.mm_embedding
-                                logging.info(f"Native mm_part found: {type(original_mm_part).__name__}. Creating composite router.")
+                                logging.info(
+                                    f"Native mm_part found: {type(original_mm_part).__name__}. Creating composite router."
+                                )
 
                                 def _composite_mm_embedding(url, mm_type, **kwargs):
                                     # Check if it's a custom type (handle both single int and list)
                                     is_custom = False
-                                    target_type = mm_type[0] if isinstance(mm_type, list) and len(mm_type) > 0 else mm_type
-                                    if isinstance(target_type, int): # Enum is int
-                                        is_custom = target_type in [MMUrlType.CUSTOM_JSON, MMUrlType.CUSTOM_RAW]
-                                    
+                                    target_type = (
+                                        mm_type[0]
+                                        if isinstance(mm_type, list)
+                                        and len(mm_type) > 0
+                                        else mm_type
+                                    )
+                                    if isinstance(target_type, int):  # Enum is int
+                                        is_custom = target_type == [MMUrlType.CUSTOM]
+
                                     if is_custom:
                                         return original_method(url, mm_type, **kwargs)
                                     else:
-                                        return original_mm_part.mm_embedding(url, mm_type, **kwargs)
-                                
+                                        return original_mm_part.mm_embedding(
+                                            url, mm_type, **kwargs
+                                        )
+
                                 custom_mm_part.mm_embedding = _composite_mm_embedding
 
                             self.mm_part = custom_mm_part
-                            
-                            logging.info(f"Successfully replaced mm_part with custom implementation: {cls.__name__}")
+
+                            logging.info(
+                                f"Successfully replaced mm_part with custom implementation: {cls.__name__}"
+                            )
                         except Exception as e:
-                            logging.error(f"Failed to instantiate custom embedding module: {e}")
-                            raise RuntimeError(f"Custom embedding module load failure: {e}")
+                            logging.error(
+                                f"Failed to instantiate custom embedding module: {e}"
+                            )
+                            raise RuntimeError(
+                                f"Custom embedding module load failure: {e}"
+                            )
 
                 torch.set_default_dtype(torch_default_dtype)
 
@@ -278,10 +309,10 @@ class MultiModalMixin:
         if isinstance(self.mm_part, MultiModalTRTEngine):
             return
 
-        # Call custom load_weight if available. 
+        # Call custom load_weight if available.
         if hasattr(self.mm_part, "load_weight") and callable(self.mm_part.load_weight):
-             logging.info("Calling custom mm_part.load_weight() in load_mm_weight...")
-             self.mm_part.load_weight(self.weight)
+            logging.info("Calling custom mm_part.load_weight() in load_mm_weight...")
+            self.mm_part.load_weight(self.weight)
 
         if self.config.mm_related_params.vit_weights is None:
             return
