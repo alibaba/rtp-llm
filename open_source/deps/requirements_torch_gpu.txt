@@ -1,9 +1,0 @@
--r requirements_base.txt
-auto_gptq
-autoawq
-datasets
-https://mirrors.aliyun.com/pytorch-wheels/cu118/torch-2.1.2%2Bcu118-cp310-cp310-linux_x86_64.whl#sha256=60396358193f238888540f4a38d78485f161e28ec17fa445f0373b5350ef21f0
-tensorrt==10.3.0
-tensorrt-cu12-bindings==10.3.0
-tensorrt-cu12-libs==10.3.0
-torchvision
