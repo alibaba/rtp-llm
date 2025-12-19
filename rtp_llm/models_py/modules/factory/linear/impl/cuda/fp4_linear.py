@@ -6,7 +6,6 @@ from typing import Optional
 
 import torch
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
 from rtp_llm.models_py.modules.factory.linear import LinearBase
 
 logger = logging.getLogger(__name__)
@@ -38,18 +37,15 @@ class CudaFp4GEMMLinear(LinearBase):
     @classmethod
     def can_handle(
         cls,
-        config: Optional[GptInitModelParameters],
+        quant_config: object,
         weight: torch.Tensor,
         weight_scales: Optional[torch.Tensor],
         weight_scale_2: Optional[torch.Tensor] = None,
         input_scale: Optional[torch.Tensor] = None,
     ) -> bool:
         """Check if this strategy can handle the given configuration"""
-        if weight_scales is None or config is None or \
+        if weight_scales is None or quant_config is None or \
             weight_scale_2 is None or input_scale is None:
-            return False
-
-        if not hasattr(config, "quant_config") or config.quant_config is None:
             return False
 
         if weight.dtype not in (torch.uint8) or \
@@ -57,22 +53,21 @@ class CudaFp4GEMMLinear(LinearBase):
             return False
 
         # Check quantization method
-        if hasattr(config.quant_config, "get_method"):
-            quant_method = config.quant_config.get_method()
-            return quant_method == "modelopt_fp4"
+        quant_method = quant_config.get_method()
+        return quant_method == "modelopt_fp4"
 
-        return False
-
+    @torch.inference_mode()
     def __init__(
         self,
         weight: torch.Tensor,
         weight_scales: Optional[torch.Tensor] = None,
         input_scales: Optional[torch.Tensor] = None,
         bias: Optional[torch.Tensor] = None,
-        config: Optional[GptInitModelParameters] = None,
+        quant_config: object = None,
         weight_scale_2: Optional[torch.Tensor] = None,
     ):
-        super().__init__(weight, weight_scales, input_scales, bias, config, weight_scale_2)
+        super().__init__(weight, weight_scales, input_scales,
+                         bias, quant_config, weight_scale_2)
 
         if not has_flashinfer_fp4():
             raise RuntimeError(

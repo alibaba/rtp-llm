@@ -12,6 +12,7 @@ from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp4_linear import (
 )
 
 from flashinfer import fp4_quantize
+from rtp_llm.config.quant_config import init_quant_config
 
 
 class CudaFp4GEMMLinearTest(unittest.TestCase):
@@ -62,7 +63,7 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
             weight_scales=self.weight_scales,
             input_scales=self.input_scale,
             bias=self.bias if with_bias else None,
-            config=None,
+            quant_config=init_quant_config('modelopt_fp4'),
             weight_scale_2=self.weight_scale_2
         )
 
