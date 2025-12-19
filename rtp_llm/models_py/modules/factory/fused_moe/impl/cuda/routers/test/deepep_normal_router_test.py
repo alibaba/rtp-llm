@@ -4,54 +4,55 @@ from typing import List
 
 import torch
 
-from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.log_config import setup_logging
-from rtp_llm.distribute.worker_info import g_master_info
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models_py.distributed.collective_torch import (
     destroy_distributed_environment,
     init_distributed_environment,
 )
-from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_normal_router import (
     DeepepNormalRouter,
 )
-from rtp_llm.test.utils.numeric_util import per_token_cast_back
 from rtp_llm.ops import MoeConfig, ParallelismConfig
+from rtp_llm.test.utils.numeric_util import per_token_cast_back
 from rtp_llm.test.utils.port_util import PortManager
 
 from rtp_llm.ops.compute_ops import trt_fp8_quantize_128  # isort:skip
 
 
-def init_router(rank: int, use_fp8: bool, parallelism_config: ParallelismConfig, nccl_port: int):
+def init_router(
+    rank: int, use_fp8: bool, parallelism_config: ParallelismConfig, nccl_port: int
+):
     model_config = ModelConfig()
     model_config.expert_num = 16
     model_config.hidden_size = 1024
     model_config.moe_k = 16
-    
+
     # Use the provided parallelism_config directly
     parallelism_config.world_rank = rank
     parallelism_config.local_rank = rank
     parallelism_config.nccl_ip = "0.0.0.0"
     parallelism_config.th_nccl_port = nccl_port
-    
+
     moe_config = MoeConfig()
     moe_config.use_deepep_low_latency = False
-        
+
     config = MoEConfigAdapter(
         model_config=model_config,
         parallelism_config=parallelism_config,
         moe_config=moe_config,
     )
-    
+
     torch.cuda.set_device(parallelism_config.local_rank)
     torch.set_default_device(f"cuda:{parallelism_config.local_rank}")
     init_distributed_environment(
-        parallelism_config=parallelism_config,
-        backend="nccl",
-        timeout=60
+        parallelism_config=parallelism_config, backend="nccl", timeout=60
     )
     router = DeepepNormalRouter(config, use_fp8, expert_alignment=1)
 
@@ -74,7 +75,13 @@ def dequant_to_bf16(expert_x: torch.Tensor, expert_x_scale: torch.Tensor):
     return combine_x.bfloat16()
 
 
-def worker_function(rank: int, use_fp8: bool, token_num_per_rank: List[int], parallelism_config: ParallelismConfig, nccl_port: int):
+def worker_function(
+    rank: int,
+    use_fp8: bool,
+    token_num_per_rank: List[int],
+    parallelism_config: ParallelismConfig,
+    nccl_port: int,
+):
     random.seed(rank)
     config, router = init_router(rank, use_fp8, parallelism_config, nccl_port)
     try:
@@ -146,15 +153,13 @@ def test_single(world_size: int, test_tp_size: int, use_fp8: bool):
     port_manager = PortManager()
     ports, locks = port_manager.get_consecutive_ports(1)
     nccl_port = ports[0]
-    
+
     dp_size = world_size // test_tp_size
     ep_size = world_size  # EP size equals world_size for normal router
-    
+
     # 启动world_size个进程
     processes = []
-    token_num_per_rank = [
-        random.randint(4, 12) // 4 * 4 for _ in range(dp_size)
-    ]
+    token_num_per_rank = [random.randint(4, 12) // 4 * 4 for _ in range(dp_size)]
     for rank in range(world_size):
         # Calculate parallelism config for this rank
         parallelism_config = ParallelismConfig()
@@ -167,7 +172,7 @@ def test_single(world_size: int, test_tp_size: int, use_fp8: bool):
         parallelism_config.world_size = world_size
         parallelism_config.world_rank = rank
         parallelism_config.local_world_size = world_size
-        
+
         # 创建进程
         p = mp.Process(
             target=worker_function,
@@ -176,7 +181,7 @@ def test_single(world_size: int, test_tp_size: int, use_fp8: bool):
         )
         processes.append(p)
         p.start()
-    
+
     # Release locks after all processes start
     for lock in locks:
         lock.__exit__(None, None, None)

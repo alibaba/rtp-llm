@@ -13,7 +13,11 @@ import torch
 import torch.distributed
 from torch.distributed import TCPStore
 
-from rtp_llm.config.py_config_modules import PyEnvConfigs, StaticConfig
+from rtp_llm.config.py_config_modules import (
+    DistributeConfig,
+    PyEnvConfigs,
+    ServerConfig,
+)
 from rtp_llm.distribute.worker_info import (
     WorkerInfo,
     g_master_info,
@@ -48,7 +52,10 @@ _g_world_info = WorldInfo(
 _registry_rank_address_key = "registry_rank_address_"
 
 
-def get_world_info() -> WorldInfo:
+def get_world_info(
+    server_config: ServerConfig,
+    distribute_config: DistributeConfig,
+) -> WorldInfo:
     global _g_world_info
     if _g_world_info is None:
         raise RuntimeError(
@@ -67,64 +74,67 @@ def get_world_info() -> WorldInfo:
 
     # frontend 获取本机信息
     if len(_g_world_info.members) == 0 and not _g_world_info.initialized:
-        return get_local_world_info()
+        return get_local_world_info(server_config, distribute_config)
 
     return _g_world_info
 
 
-def get_local_world_info() -> WorldInfo:
+def get_local_world_info(
+    server_config: ServerConfig,
+    distribute_config: DistributeConfig,
+) -> WorldInfo:
     num_nodes = (
         g_parallel_info.world_size + g_parallel_info.local_world_size - 1
     ) // g_parallel_info.local_world_size
     all_members: List[WorkerInfo] = []
     for local_rank in range(g_parallel_info.local_world_size):
         logging.info(
-            f"get_local_world_info local_world_size: {g_parallel_info.local_world_size} {local_rank}"
+            f"get_local_world_info local_world_size: {g_parallel_info.local_world_size} local_rank: {local_rank}"
         )
         rank = (
             g_parallel_info.world_rank
             // g_parallel_info.local_world_size
             * g_parallel_info.local_world_size
-            + g_parallel_info.local_rank
+            + local_rank
         )
         new_member = WorkerInfo(
             ip=g_worker_info.ip,
             server_port=WorkerInfo.server_port_offset(
-                local_rank, StaticConfig.server_config.start_port
+                local_rank, server_config.start_port, server_config.worker_info_port_num
             ),
             gang_hb_port=WorkerInfo.gang_hb_port_offset(
-                local_rank, StaticConfig.server_config.start_port
+                local_rank, server_config.start_port, server_config.worker_info_port_num
             ),
             http_port=WorkerInfo.http_port_offset(
-                local_rank, StaticConfig.server_config.start_port
+                local_rank, server_config.start_port, server_config.worker_info_port_num
             ),
             rpc_server_port=WorkerInfo.rpc_server_port_offset(
-                local_rank, StaticConfig.server_config.start_port
+                local_rank, server_config.start_port, server_config.worker_info_port_num
             ),
             backend_server_port=WorkerInfo.backend_server_port_offset(
-                local_rank, StaticConfig.server_config.start_port
+                local_rank, server_config.start_port, server_config.worker_info_port_num
             ),
             cache_store_listen_port=WorkerInfo.cache_store_listen_port_offset(
-                local_rank, StaticConfig.server_config.start_port
+                local_rank, server_config.start_port, server_config.worker_info_port_num
             ),
             embedding_rpc_server_port=WorkerInfo.embedding_rpc_server_port_offset(
-                local_rank, StaticConfig.server_config.start_port
+                local_rank, server_config.start_port, server_config.worker_info_port_num
             ),
             cache_store_rdma_listen_port=WorkerInfo.cache_store_rdma_listen_port_offset(
-                local_rank, StaticConfig.server_config.start_port
+                local_rank, server_config.start_port, server_config.worker_info_port_num
             ),
             remote_rpc_server_port=WorkerInfo.rpc_server_port_offset(
-                local_rank, StaticConfig.distribute_config.remote_server_port
+                local_rank, distribute_config.remote_server_port
             ),
             cache_store_connect_port=WorkerInfo.cache_store_listen_port_offset(
-                local_rank, StaticConfig.distribute_config.remote_server_port
+                local_rank, distribute_config.remote_server_port
             ),
             cache_store_rdma_connect_port=WorkerInfo.cache_store_rdma_listen_port_offset(
-                local_rank, StaticConfig.distribute_config.remote_server_port
+                local_rank, distribute_config.remote_server_port
             ),
             info=None,
             local_rank=local_rank,
-            name=f"{StaticConfig.distribute_config.zone_name}_rank_{rank}_{local_rank}",
+            name=f"{distribute_config.zone_name}_rank_{rank}_{local_rank}",
             world_rank=rank,
         )
         all_members.append(new_member)
@@ -144,7 +154,7 @@ class DistributedServer(object):
         py_env_configs: PyEnvConfigs,
         rank: int = -1,
         world_size: int = -1,
-        wait_for_workers=False,
+        wait_for_workers=True,
     ):
         logging.info(
             f"init DistributedServer, rank: {g_parallel_info.world_rank},  size: {g_parallel_info.world_size}"
@@ -172,9 +182,13 @@ class DistributedServer(object):
         self.rank = rank
         self.world_size = world_size
 
-        self.master_ip, master_server_port = get_master()
+        self.master_ip, master_server_port = get_master(
+            self.py_env_configs.distribute_config
+        )
         if master_server_port == "":
-            self.master_server_port = WorkerInfo.server_port_offset(0)
+            self.master_server_port = WorkerInfo.server_port_offset(
+                local_rank=0, server_port=py_env_configs.server_config.start_port
+            )
         else:
             self.master_server_port = int(master_server_port)
 
@@ -183,15 +197,19 @@ class DistributedServer(object):
 
         logging.info(
             f"{g_parallel_info} init tcpstore "
-            f"{self.master_ip}{self.master_server_port - 1}"
+            f"{self.master_ip}:{self.master_server_port - 1}"
         )
 
+        init_process_timeout = py_env_configs.distribute_config.dist_barrier_timeout
+        if init_process_timeout is not None:
+            init_process_timeout = timedelta(seconds=init_process_timeout)
         store = TCPStore(
             host_name=g_master_info.ip,
             port=self.master_server_port - 1,
             world_size=world_size,
             is_master=(rank == 0),
             wait_for_workers=wait_for_workers,
+            timeout=init_process_timeout,
         )
         logging.info(f"{g_parallel_info} init tcpstore done")
         self.store = store
@@ -289,17 +307,17 @@ class DistributedServer(object):
                             server_port=server_port
                         ),
                         remote_rpc_server_port=WorkerInfo.rpc_server_port_offset(
-                            StaticConfig.distribute_config.remote_server_port
+                            self.py_env_configs.distribute_config.remote_server_port
                         ),
                         cache_store_connect_port=WorkerInfo.cache_store_listen_port_offset(
-                            StaticConfig.distribute_config.remote_server_port
+                            self.py_env_configs.distribute_config.remote_server_port
                         ),
                         cache_store_rdma_connect_port=WorkerInfo.cache_store_rdma_listen_port_offset(
-                            StaticConfig.distribute_config.remote_server_port
+                            self.py_env_configs.distribute_config.remote_server_port
                         ),
                         info=None,
                         local_rank=local_rank,
-                        name=f"{StaticConfig.distribute_config.zone_name}_rank_{rank}_{local_rank}",
+                        name=f"{self.py_env_configs.distribute_config.zone_name}_rank_{rank}_{local_rank}",
                         world_rank=rank,
                     )
                     _g_world_info.members.append(new_member)
@@ -320,33 +338,20 @@ class DistributedServer(object):
             time.sleep(sleep_time)
 
     def start(self, py_env_configs: PyEnvConfigs) -> None:
-        logging.info("init_process_group start")
+        logging.info(
+            f"DistributedServer start, rank: {g_parallel_info.world_rank},  size: {g_parallel_info.world_size}"
+        )
         if g_parallel_info.world_size == 1:
             return
         self.bootstrap()
-        logging.info("init_process_group bootstrap done")
-
+        
         master_url = f"tcp://{g_master_info.ip}:{self.master_server_port - 1}"
-        logging.info(f"{g_parallel_info} init_process_group {master_url}")
-
-        init_process_timeout = py_env_configs.distribute_config.dist_barrier_timeout
-        if init_process_timeout is not None:
-            init_process_timeout = timedelta(seconds=init_process_timeout)
-
-        os.environ["TORCH_DIST_INIT_BARRIER"] = "1"
-
-        torch.distributed.init_process_group(
-            backend=torch.distributed.Backend.NCCL,
-            store=self.store,  # type: ignore[arg-type]
-            rank=self.rank,
-            world_size=g_parallel_info.world_size,
-            timeout=init_process_timeout,
+        logging.info(
+            f"DistributedServer bootstrap done, rank: {g_parallel_info.world_rank},  size: {g_parallel_info.world_size}, master {master_url}"
         )
-        # TODO: remove this to all reduce for lately init
-        # some not impl errors happened after engine start, need to fix later
-        if g_parallel_info.tp_size > 1:
-            get_symm_mem_communicator()
-        logging.info("init_process_group done")
+        logging.info(
+            f"DistributedServer started, rank: {g_parallel_info.world_rank},  size: {g_parallel_info.world_size}, master {master_url}"
+        )
 
 
 def get_ip(leader_address: str) -> str:
@@ -379,30 +384,30 @@ def split_ip_port(addr: str):
     return ip, port
 
 
-def get_master() -> (str, str):
+def get_master(distribute_config) -> (str, str):
     port = ""
     if g_parallel_info.local_world_size < g_parallel_info.world_size:
         # from config file
-        if StaticConfig.distribute_config.distribute_config_file:
-            address, port = get_master_from_file()
+        if distribute_config.distribute_config_file:
+            address, port = get_master_from_file(distribute_config)
             logging.info(
-                f"get master address from distribute_config_file {address} {StaticConfig.distribute_config.distribute_config_file}"
+                f"get master address from distribute_config_file {address} {distribute_config.distribute_config_file}"
             )
         # for distributed test
-        elif StaticConfig.distribute_config.gang_config_string:
+        elif distribute_config.gang_config_string:
             address, port = get_master_from_test_env(
-                StaticConfig.distribute_config.gang_config_string
+                distribute_config.gang_config_string
             )
             logging.info(
-                f"get master address from GANG_CONFIG_STRING {address} {StaticConfig.distribute_config.gang_config_string}"
+                f"get master address from GANG_CONFIG_STRING {address} {distribute_config.gang_config_string}"
             )
         # for lws
-        elif StaticConfig.distribute_config.leader_address:
-            address = StaticConfig.distribute_config.leader_address
+        elif distribute_config.leader_address:
+            address = distribute_config.leader_address
             logging.info(f"get master address from LEADER_ADDRESS {address}")
         # from c2 annotation
         else:
-            address, port = get_master_from_c2()
+            address, port = get_master_from_c2(distribute_config)
     else:
         # 单机/特殊分布式场景，这里原先逻辑没有 else 分支，保持空值或自行约定
         address = g_worker_info.ip
@@ -433,15 +438,15 @@ def get_master_from_test_env(env_str: str) -> (str, str):
     return "", ""
 
 
-def get_master_from_file() -> (str, str):
-    file = StaticConfig.distribute_config.distribute_config_file
+def get_master_from_file(distribute_config) -> (str, str):
+    file = distribute_config.distribute_config_file
     with open(file, "r") as reader:
         config_json = json.loads(reader.read())
     return get_master_from_json(config_json)
 
 
-def get_master_from_c2() -> (str, str):
-    file_name = StaticConfig.distribute_config.gang_annocation_path
+def get_master_from_c2(distribute_config) -> (str, str):
+    file_name = distribute_config.gang_annocation_path
     if not os.path.exists(file_name):
         raise Exception(f"not found file: {file_name}")
     with open(file_name, "r") as reader:

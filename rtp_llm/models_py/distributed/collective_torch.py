@@ -53,7 +53,7 @@ def init_distributed_environment(
         logging.warning("Distributed environment already initialized, skipping initialization")
         # Still need to create groups if they don't exist
         if not _group_map:
-            _create_process_groups(parallelism_config, backend, timeout)
+            _create_process_groups(parallelism_config, backend, timedelta(seconds=timeout))
         return
     
     assert backend in ["nccl"], "backend current only supports nccl"
@@ -69,7 +69,7 @@ def init_distributed_environment(
     # we still need to create our process groups
     if torch.distributed.is_initialized():
         logging.info("torch.distributed already initialized, creating process groups")
-        _create_process_groups(parallelism_config, backend, timeout)
+        _create_process_groups(parallelism_config, backend, timedelta(seconds=timeout))
         _parallelism_config = parallelism_config
         _initialized = True
         return

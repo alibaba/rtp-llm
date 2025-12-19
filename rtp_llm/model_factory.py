@@ -23,8 +23,6 @@ from rtp_llm.config.py_config_modules import (
     RenderConfig,
     VitConfig,
 )
-from rtp_llm.distribute.gang_info import get_gang_info
-from rtp_llm.distribute.worker_info import g_parallel_info
 from rtp_llm.model_factory_register import _model_factory
 from rtp_llm.model_loader.load_config import LoadMethod
 from rtp_llm.models.propose_model.propose_model import ProposeModel
@@ -190,7 +188,7 @@ class ModelFactory:
         Args:
             model_config: Model configuration (contains mm_model_config)
             engine_config: Engine configuration
-            gang_info: GangInfo instance from GangServer
+            world_info: WorldInfo instance from DistributedServer
             vit_config: Optional VitConfig (needed for multimodal models)
             merge_lora: Whether to merge LoRA weights
             propose_model_config: Optional propose model configuration
@@ -221,7 +219,7 @@ class ModelFactory:
         propose_model = ModelFactory.get_sp_model(
             model_config=model_config,
             propose_model_config=propose_model_config,
-            engine_config=engine_config
+            engine_config=engine_config,
         )
 
         # Create engine using create_engine function (replaces AsyncModel)
@@ -230,7 +228,7 @@ class ModelFactory:
             model=model,
             engine_config=engine_config,
             alog_conf_path=alog_conf_path,
-            world_info = world_info,
+            world_info=world_info,
             propose_model=propose_model,
         )
         engine.start()

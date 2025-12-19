@@ -7,12 +7,12 @@ from typing import Any, Mapping
 
 import torch
 
+from rtp_llm.distribute.worker_info import g_parallel_info
 from rtp_llm.model_loader.loader import ModelLoader
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 
 # Assuming these imports are from your project and accessible
 from rtp_llm.model_loader.weight_module import WeightModule
-from rtp_llm.distribute.worker_info import g_parallel_info
 
 from .tipc import CudaIpcHelper, SharedMemIpcMeta, SharedMemoryIPCHelper
 
@@ -95,14 +95,23 @@ class WeightManager:
     or Pipeline Parallelism (PP)).
     """
 
-    def __init__(self, device, weight, model_weights_loader) -> None:
+    def __init__(
+        self, device, weight: ModelWeights, model_weights_loader: ModelLoader
+    ) -> None:
         """
-        Initializes the WeightManager with an model's weight, device information, and weight loaders.
+        Initializes the WeightManager with a model's weights, device information, and weight loader.
         """
         self._s_helper = SharedMemoryIPCHelper()
-        self._device: torch.device = torch.device(f"cuda:{g_parallel_info.local_rank}")
-        self._weights: ModelWeights = engine.model.weight
-        self._weights_loader: ModelLoader = engine.model.model_weights_loader
+
+        # Use the explicit device/weights/loader passed in by the caller (e.g. BaseModel),
+        # instead of relying on any global "engine" object.
+        if isinstance(device, torch.device):
+            self._device = device
+        else:
+            self._device = torch.device(device)
+
+        self._weights: ModelWeights = weight
+        self._weights_loader: ModelLoader = model_weights_loader
         self._weight_module = self._weights_loader._model_weights_info
         self._working_stream: torch.cuda.Stream = torch.cuda.Stream(
             device=self._device,

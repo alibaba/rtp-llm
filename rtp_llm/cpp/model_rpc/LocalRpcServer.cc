@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
+#include "rtp_llm/cpp/config/EplbConfig.h"
 
 using namespace std;
 
@@ -49,11 +50,13 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
         if (!mm_process_engine.is_none()) {
             auto vit_separation = maga_init_params.vit_config.vit_separation;
             if (vit_separation == VitSeparation::VIT_SEPARATION_REMOTE) {
-                mm_processor_.reset(
-                    new RemoteMultimodalProcessor(mm_process_engine, maga_init_params.model_config_.mm_model_config, maga_init_params.model_config_.max_seq_len));
+                mm_processor_.reset(new RemoteMultimodalProcessor(mm_process_engine,
+                                                                  maga_init_params.model_config_.mm_model_config,
+                                                                  maga_init_params.model_config_.max_seq_len));
             } else if (vit_separation == VitSeparation::VIT_SEPARATION_LOCAL) {
-                mm_processor_.reset(
-                    new LocalMultimodalProcessor(mm_process_engine, maga_init_params.model_config_.mm_model_config, maga_init_params.model_config_.max_seq_len));
+                mm_processor_.reset(new LocalMultimodalProcessor(mm_process_engine,
+                                                                 maga_init_params.model_config_.mm_model_config,
+                                                                 maga_init_params.model_config_.max_seq_len));
             } else {
                 return grpc::Status(grpc::StatusCode::INTERNAL, "invalid vit separation value in config");
             }
@@ -419,20 +422,20 @@ grpc::Status LocalRpcServer::UpdateEplbConfig(grpc::ServerContext*             c
                                               EmptyPB*                         response) {
     RTP_LLM_LOG_DEBUG("receive cacheStatus rpc request from client: %s", context->peer().c_str());
     const string mode_str = request->mode();
-    EplbConfig   config;
+    EPLBConfig   config;
     if (mode_str == "EPLB" || mode_str == "eplb") {
-        config.mode = EplbMode::EPLB;
+        config.eplb_mode = EplbMode::EPLB;
     } else if (mode_str == "STATS" || mode_str == "stats") {
-        config.mode = EplbMode::STATS;
+        config.eplb_mode = EplbMode::STATS;
     } else if (mode_str == "NONE" || mode_str == "none") {
-        config.mode = EplbMode::NONE;
+        config.eplb_mode = EplbMode::NONE;
     } else if (mode_str == "ALL" || mode_str == "all") {
-        config.mode = EplbMode::ALL;
+        config.eplb_mode = EplbMode::ALL;
     } else {
         RTP_LLM_LOG_WARNING("set eplb mode failed, unknown mode : %s", mode_str.c_str());
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "Invalid eplb mode");
     }
-    config.update_time = request->update_time();
+    config.eplb_update_time = request->update_time();
     engine_->updateEplbConfig(config);
     return grpc::Status::OK;
 }
