@@ -1,10 +1,67 @@
 from __future__ import annotations
 import typing
-from typing import Dict, overload
-__all__: list[str] = ['ArpcConfig', 'BatchDecodeSchedulerConfig', 'CacheStoreConfig', 'ConcurrencyConfig', 'DeviceResourceConfig', 'EplbConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'FfnDisAggregateConfig', 'GptInitParameter', 'GrpcConfig', 'HWKernelConfig', 'KVCacheConfig', 'MiscellaneousConfig',
-                      'MlaOpsType', 'ModelSpecificConfig', 'MoeConfig', 'ParallelismDistributedConfig', 'ProfilingDebugLoggingConfig', 'QuantAlgo', 'RoleSpecialTokens', 'RoleType', 'SamplerConfig', 'SchedulerConfig', 'ServiceDiscoveryConfig', 'SpecialTokens', 'SpeculativeExecutionConfig', 'get_block_cache_keys']
-
-
+__all__: list[str] = ['ActivationType', 'ArpcConfig', 'AttentionConfigs', 'BatchDecodeSchedulerConfig', 'CacheStoreConfig', 'ConcurrencyConfig', 'DataType', 'DeviceResourceConfig', 'EPLBConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'FfnDisAggregateConfig', 'GrpcConfig', 'HWKernelConfig', 'KVCacheConfig', 'KvCacheDataType', 'LayerNormType', 'MMModelConfig', 'MiscellaneousConfig', 'MlaOpsType', 'ModelConfig', 'ModelSpecificConfig', 'MoeConfig', 'NormType', 'PDSepConfig', 'ParallelismConfig', 'ProfilingDebugLoggingConfig', 'QuantAlgo', 'QuantMethod', 'RoleSpecialTokens', 'RoleType', 'RopeConfig', 'RopeStyle', 'RuntimeConfig', 'SamplerConfig', 'SpecialTokens', 'SpeculativeExecutionConfig', 'SpeculativeType', 'TaskType', 'VitConfig', 'VitSeparation', 'get_block_cache_keys']
+class ActivationType:
+    """
+    Members:
+    
+      Gelu
+    
+      Relu
+    
+      Silu
+    
+      Swiglu
+    
+      Geglu
+    
+      Identity
+    
+      GeluNoneApproximate
+    
+      GeGluNoneApproximate
+    
+      Sigmoid
+    
+      InvalidType
+    """
+    GeGluNoneApproximate: typing.ClassVar[ActivationType]  # value = <ActivationType.GeGluNoneApproximate: 7>
+    Geglu: typing.ClassVar[ActivationType]  # value = <ActivationType.Geglu: 4>
+    Gelu: typing.ClassVar[ActivationType]  # value = <ActivationType.Gelu: 0>
+    GeluNoneApproximate: typing.ClassVar[ActivationType]  # value = <ActivationType.GeluNoneApproximate: 6>
+    Identity: typing.ClassVar[ActivationType]  # value = <ActivationType.Identity: 5>
+    InvalidType: typing.ClassVar[ActivationType]  # value = <ActivationType.InvalidType: 9>
+    Relu: typing.ClassVar[ActivationType]  # value = <ActivationType.Relu: 1>
+    Sigmoid: typing.ClassVar[ActivationType]  # value = <ActivationType.Sigmoid: 8>
+    Silu: typing.ClassVar[ActivationType]  # value = <ActivationType.Silu: 2>
+    Swiglu: typing.ClassVar[ActivationType]  # value = <ActivationType.Swiglu: 3>
+    __members__: typing.ClassVar[dict[str, ActivationType]]  # value = {'Gelu': <ActivationType.Gelu: 0>, 'Relu': <ActivationType.Relu: 1>, 'Silu': <ActivationType.Silu: 2>, 'Swiglu': <ActivationType.Swiglu: 3>, 'Geglu': <ActivationType.Geglu: 4>, 'Identity': <ActivationType.Identity: 5>, 'GeluNoneApproximate': <ActivationType.GeluNoneApproximate: 6>, 'GeGluNoneApproximate': <ActivationType.GeGluNoneApproximate: 7>, 'Sigmoid': <ActivationType.Sigmoid: 8>, 'InvalidType': <ActivationType.InvalidType: 9>}
+    def __eq__(self, other: typing.Any) -> bool:
+        ...
+    def __getstate__(self) -> int:
+        ...
+    def __hash__(self) -> int:
+        ...
+    def __index__(self) -> int:
+        ...
+    def __init__(self, value: int) -> None:
+        ...
+    def __int__(self) -> int:
+        ...
+    def __ne__(self, other: typing.Any) -> bool:
+        ...
+    def __repr__(self) -> str:
+        ...
+    def __setstate__(self, state: int) -> None:
+        ...
+    def __str__(self) -> str:
+        ...
+    @property
+    def name(self) -> str:
+        ...
+    @property
+    def value(self) -> int:
+        ...
 class ArpcConfig:
     ioThreadNum: int
     queueNum: int
@@ -17,25 +74,27 @@ class ArpcConfig:
         ...
     def to_string(self) -> str:
         ...
-
-class GrpcConfig:
-    def __init__(self) -> None: 
-    
-    def __init__(self, json_str: str) -> None: 
+class AttentionConfigs:
+    fuse_qkv_add_bias: bool
+    head_num: int
+    is_causal: bool
+    kv_cache_dtype: KvCacheDataType
+    kv_head_num: int
+    kv_lora_rank: int
+    nope_head_dim: int
+    q_lora_rank: int
+    q_scaling: float
+    rope_config: RopeConfig
+    rope_head_dim: int
+    size_per_head: int
+    skip_append_kv_cache: bool
+    softmax_extra_scale: float
+    tokens_per_block: int
+    use_logn_attn: bool
+    use_mla: bool
+    v_head_dim: int
+    def __init__(self) -> None:
         ...
-    
-    def to_string(self) -> str: 
-        ...
-        
-    def update_from_env(self) -> None: 
-        ... 
-        
-    def get_client_config(self) -> dict[str, int]: 
-        ...
-    
-    def get_server_config(self) -> dict[str, int]: 
-        ...
-
 class BatchDecodeSchedulerConfig:
     batch_decode_scheduler_batch_size: int
     batch_decode_scheduler_warmup_type: int
@@ -56,12 +115,6 @@ class CacheStoreConfig:
     rdma_qp_count_per_connection: int
     thread_count: int
     wrr_available_ratio: int
-        ...
-class ConcurrencyConfig:
-    concurrency_limit: int
-    concurrency_with_block: bool
-    def __init__(self, concurrency_with_block: bool = False, concurrency_limit: int = 32) -> None:
-        ...
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:
@@ -177,7 +230,6 @@ class DataType:
         ...
     @property
     def value(self) -> int:
->>>>>>> 817bf47bd (refactor: migrate to new config architecture (EngineConfig, ModelConfig, ModelArgs))
         ...
 class DeviceResourceConfig:
     device_reserve_memory_bytes: int
@@ -201,7 +253,6 @@ class EPLBConfig:
     eplb_balance_layer_per_step: int
     eplb_control_step: int
     eplb_force_repack: int
-    eplb_mode: EplbMode
     eplb_stats_window_size: int
     eplb_test_mode: bool
     eplb_update_time: int
@@ -220,7 +271,12 @@ class EPLBConfig:
         """
         Get physical expert number
         """
-
+    @property
+    def eplb_mode(self) -> EplbMode:
+        ...
+    @eplb_mode.setter
+    def eplb_mode(self, arg1: typing.Any) -> None:
+        ...
 class EplbMode:
     """
     Members:
@@ -280,8 +336,8 @@ class FIFOSchedulerConfig:
         ...
     def to_string(self) -> str:
         ...
-
 class FMHAConfig:
+    absorb_opt_len: int
     disable_flash_infer: bool
     enable_fmha: bool
     enable_open_source_fmha: bool
@@ -290,6 +346,8 @@ class FMHAConfig:
     enable_trt_fmha: bool
     enable_trtv1_fmha: bool
     enable_xqa: bool
+    use_aiter_pa: bool
+    use_asm_pa: bool
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:
@@ -298,32 +356,37 @@ class FMHAConfig:
         ...
     def to_string(self) -> str:
         ...
-
 class FMHAType:
     """
     Members:
     
+      FLASH_INFER
+    
       NONE
-    
-      PAGED_TRT_V2
-    
-      TRT_V2
-    
-      PAGED_OPEN_SOURCE
     
       OPEN_SOURCE
     
+      PAGED_OPEN_SOURCE
+    
+      PAGED_TRT_V2
+    
       TRT_V1
     
-      FLASH_INFER
+      TRT_V2
     
       XQA
     
       AITER_PREFILL
     
+      AITER_ASM_PREFILL
+    
       AITER_DECODE
+    
+      AITER_ASM_DECODE
     """
-    AITER_DECODE: typing.ClassVar[FMHAType]  # value = <FMHAType.AITER_DECODE: 9>
+    AITER_ASM_DECODE: typing.ClassVar[FMHAType]  # value = <FMHAType.AITER_ASM_DECODE: 11>
+    AITER_ASM_PREFILL: typing.ClassVar[FMHAType]  # value = <FMHAType.AITER_ASM_PREFILL: 9>
+    AITER_DECODE: typing.ClassVar[FMHAType]  # value = <FMHAType.AITER_DECODE: 10>
     AITER_PREFILL: typing.ClassVar[FMHAType]  # value = <FMHAType.AITER_PREFILL: 8>
     FLASH_INFER: typing.ClassVar[FMHAType]  # value = <FMHAType.FLASH_INFER: 0>
     NONE: typing.ClassVar[FMHAType]  # value = <FMHAType.NONE: 1>
@@ -333,7 +396,7 @@ class FMHAType:
     TRT_V1: typing.ClassVar[FMHAType]  # value = <FMHAType.TRT_V1: 5>
     TRT_V2: typing.ClassVar[FMHAType]  # value = <FMHAType.TRT_V2: 6>
     XQA: typing.ClassVar[FMHAType]  # value = <FMHAType.XQA: 7>
-    __members__: typing.ClassVar[dict[str, FMHAType]]  # value = {'FLASH_INFER': <FMHAType.FLASH_INFER: 0>, 'NONE': <FMHAType.NONE: 1>, 'OPEN_SOURCE': <FMHAType.OPEN_SOURCE: 2>, 'PAGED_OPEN_SOURCE': <FMHAType.PAGED_OPEN_SOURCE: 3>, 'PAGED_TRT_V2': <FMHAType.PAGED_TRT_V2: 4>, 'TRT_V1': <FMHAType.TRT_V1: 5>, 'TRT_V2': <FMHAType.TRT_V2: 6>, 'XQA': <FMHAType.XQA: 7>, 'AITER_PREFILL': <FMHAType.AITER_PREFILL: 8>, 'AITER_DECODE': <FMHAType.AITER_DECODE: 9>}
+    __members__: typing.ClassVar[dict[str, FMHAType]]  # value = {'FLASH_INFER': <FMHAType.FLASH_INFER: 0>, 'NONE': <FMHAType.NONE: 1>, 'OPEN_SOURCE': <FMHAType.OPEN_SOURCE: 2>, 'PAGED_OPEN_SOURCE': <FMHAType.PAGED_OPEN_SOURCE: 3>, 'PAGED_TRT_V2': <FMHAType.PAGED_TRT_V2: 4>, 'TRT_V1': <FMHAType.TRT_V1: 5>, 'TRT_V2': <FMHAType.TRT_V2: 6>, 'XQA': <FMHAType.XQA: 7>, 'AITER_PREFILL': <FMHAType.AITER_PREFILL: 8>, 'AITER_ASM_PREFILL': <FMHAType.AITER_ASM_PREFILL: 9>, 'AITER_DECODE': <FMHAType.AITER_DECODE: 10>, 'AITER_ASM_DECODE': <FMHAType.AITER_ASM_DECODE: 11>}
     def __eq__(self, other: typing.Any) -> bool:
         ...
     def __getstate__(self) -> int:
@@ -367,7 +430,6 @@ class FfnDisAggregateConfig:
     ffn_dp_size: int
     ffn_tp_size: int
     is_ffn_rank: bool
-
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:
@@ -378,208 +440,27 @@ class FfnDisAggregateConfig:
         ...
     def to_string(self) -> str:
         ...
-
-    def update_from_env(self) -> None:
+class GrpcConfig:
+    def __getstate__(self) -> tuple:
         ...
-class GptInitParameter:
-    activation_type: str
-    add_bias_linear: bool
-    arpc_config: ArpcConfig
-    grpc_config: GrpcConfig
-    batch_decode_scheduler_config: BatchDecodeSchedulerConfig
-    block_nums: int
-    cache_store_config: CacheStoreConfig
-    cache_store_connect_port: int
-    cache_store_listen_port: int
-    cache_store_rdma_connect_port: int
-    cache_store_rdma_listen_port: int
-    cache_store_rdma_mode: bool
-    ckpt_path: str
-    concurrency_config: ConcurrencyConfig
-    cross_attn_input_len: int
-    data_type: str
-    decode_entrance: bool
-    decode_polling_call_prefill_ms: int
-    decode_polling_kv_cache_step_ms: int
-    decode_retry_interval_ms: int
-    decode_retry_timeout_ms: int
-    decode_retry_times: int
-    deepseek_mscale_all_dim: float
-    deepseek_rope_mscale: float
-    device_resource_config: DeviceResourceConfig
-    dp_rank: int
-    dp_size: int
-    dp_tp_nccl_port: int
-    embedding_size: int
-    enable_eplb: bool
-    enable_fast_gen: bool
-    enable_partial_fallback: bool
-    enable_sp: bool
-    enable_speculative_decoding: bool
-    ep_rank: int
-    ep_size: int
-    eplb_mode: EplbMode
-    eplb_update_time: int
-    expert_num: int
-    fast_gen_max_context_len: int
-    ffn_disaggregate_config: FfnDisAggregateConfig
-    ffn_tp_nccl_port: int
-    ffn_tp_rank: int
-    ffn_tp_size: int
-    fifo_scheduler_config: FIFOSchedulerConfig
-    fmha_config: FMHAConfig
-    gen_num_per_circle: int
-    has_lm_head: bool
-    has_moe_norm: bool
-    has_positional_encoding: bool
-    has_post_decoder_layernorm: bool
-    has_pre_decoder_layernorm: bool
-    head_num: int
-    head_num_kv: int
-    hidden_size: int
-    http_port: int
-    hw_kernel_config: HWKernelConfig
-    include_sep_tokens: bool
-    input_embedding_scalar: float
-    input_vocab_size: int
-    inter_padding_size: int
-    inter_size: int
-    is_causal: bool
-    is_multimodal: bool
-    is_sparse_head: bool
-    kv_cache_config: KVCacheConfig
-    kv_cache_data_type: str
-    kv_cache_mem_mb: int
-    kv_lora_rank: int
-    layer_head_num: list[int]
-    layer_head_num_kv: list[int]
-    layer_inter_padding_size: list[int]
-    layer_inter_size: list[int]
-    layer_num: int
-    layernorm_eps: float
-    layernorm_type: str
-    load_cache_timeout_ms: int
-    local_rank: int
-    logit_scale: float
-    max_batch_tokens_size: int
-    max_block_size_per_item: int
-    max_context_batch_size: int
-    max_generate_batch_size: int
-    max_rpc_timeout_ms: int
-    max_seq_len: int
-    misc_config: MiscellaneousConfig
-    mla_ops_type: MlaOpsType
-    mm_position_ids_style: int
-    mm_sep_tokens: list[list[int]]
-    model_name: str
-    model_rpc_port: int
-    model_specific_config: ModelSpecificConfig
-    moe_config: MoeConfig
-    moe_inter_padding_size: int
-    moe_k: int
-    moe_layer_index: list[int]
-    moe_n_group: int
-    moe_normalize_expert_scale: bool
-    moe_style: int
-    moe_topk_group: int
-    mrope_section: list[int]
-    nccl_ip: str
-    nope_head_dim: int
-    norm_type: str
-    num_layers: int
-    num_valid_layer: int
-    org_embedding_max_pos: int
-    parallelism_distributed_config: ParallelismDistributedConfig
-    partial_rotary_factor: float
-    phy_exp_num: int
-    position_id_len_factor: int
-    position_ids_style: int
-    pre_allocate_op_mem: bool
-    pre_seq_len: int
-    prefill_max_wait_timeout_ms: int
-    prefill_retry_timeout_ms: int
-    prefill_retry_times: int
-    prefix_projection: bool
-    profiling_debug_logging_config: ProfilingDebugLoggingConfig
-    py_eplb: typing.Any
-    q_lora_rank: int
-    q_scaling: float
-    qk_norm: bool
-    quant_algo: QuantAlgo
-    rdma_connect_retry_times: int
-    remote_rpc_server_port: int
-    reserve_runtime_mem_mb: int
-    residual_scalar: float
-    reuse_cache: bool
-    reverse_e_h_norm: bool
-    role_type: RoleType
-    rope_head_dim: int
-    rotary_embedding_base: float
-    rotary_embedding_dim: int
-    rotary_embedding_extrapolation_factor: float
-    rotary_embedding_mscale: float
-    rotary_embedding_offset: int
-    rotary_embedding_scale: float
-    rotary_embedding_style: int
-    rotary_factor1: float
-    rotary_factor2: float
-    routed_scaling_factor: float
-    sampler_config: SamplerConfig
-    scheduler_config: SchedulerConfig
-    scoring_func: int
-    seq_size_per_block: int
-    service_discovery_config: ServiceDiscoveryConfig
-    size_per_head: int
-    softmax_extra_scale: float
-    sp_config: SpeculativeExecutionConfig
-    special_tokens: SpecialTokens
-    tokenizer_path: str
-    tp_nccl_port: int
-    tp_rank: int
-    tp_size: int
-    type_vocab_size: int
-    use_all_gather: bool
-    use_attention_linear_bias: bool
-    use_cross_attn: bool
-    use_fp32_to_compute_logit: bool
-    use_kvcache: bool
-    use_logn_attn: bool
-    use_mla: bool
-    use_norm_attn_out_residual: bool
-    use_norm_input_residual: bool
-    using_hf_sampling: bool
-    v_head_dim: int
-    vit_separation: int
-    vocab_size: int
-    warm_up: bool
-    warm_up_with_loss: bool
-    worker_addrs: list[str]
-    worker_grpc_addrs: list[str]
-    worker_port_offset: int
-    world_size: int
-    def __init__(self, head_num: int, size_per_head: int, num_layers: int, max_seq_len: int, vocab_size: int, hidden_size: int) -> None:
+    @typing.overload
+    def __init__(self) -> None:
         ...
-    def insertMultiTaskPromptTokens(self, task_id: str, tokens_id: list[int]) -> None:
+    @typing.overload
+    def __init__(self, json_str: str) -> None:
         ...
-    def isGatedActivation(self) -> bool:
+    def __setstate__(self, arg0: tuple) -> None:
         ...
-    def isKvCacheQuant(self) -> bool:
+    def from_json(self, arg0: str) -> None:
+        """
+        Initialize from JSON string
+        """
+    def get_client_config(self) -> dict[str, int]:
         ...
-    def setActivationType(self) -> None:
+    def get_server_config(self) -> dict[str, int]:
         ...
-    def setDataType(self) -> None:
+    def to_string(self) -> str:
         ...
-    def setKvCacheDataType(self) -> None:
-        ...
-    def setLayerNormType(self) -> None:
-        ...
-    def setNormType(self) -> None:
-        ...
-    def setTaskType(self, task: str) -> None:
-        ...
-    def showDebugInfo(self) -> None:
-        ...
-
 class HWKernelConfig:
     arm_gemm_use_kai: bool
     decode_capture_batch_sizes: list[int]
@@ -594,12 +475,7 @@ class HWKernelConfig:
     num_native_cuda_graph: int
     prefill_capture_seq_lens: list[int]
     rocm_hipblaslt_config: str
-    use_aiter_pa: bool
-    use_asm_pa: bool
     use_swizzleA: bool
-
-    def __init__(self, deep_gemm_num_sm: int = -1, arm_gemm_use_kai: bool = False, enable_stable_scatter_add: bool = False, enable_multi_block_mode: bool = True, ft_disable_custom_ar: bool = True, rocm_hipblaslt_config: str = 'gemm_config.csv', use_swizzleA: bool = False, enable_cuda_graph: bool = False, enable_cuda_graph_debug_mode: bool = False, use_aiter_pa: bool = True, use_asm_pa: bool = True, enable_native_cuda_graph: bool = False, num_native_cuda_graph: int = 200, prefill_capture_seq_lens: list[int] = ...) -> None:
-        ...
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:
@@ -608,9 +484,7 @@ class HWKernelConfig:
         ...
     def to_string(self) -> str:
         ...
-
 class KVCacheConfig:
-    blockwise_use_fp8_kv_cache: int
     enable_3fs: bool
     fp8_kv_cache: int
     int8_kv_cache: int
@@ -682,13 +556,52 @@ class KvCacheDataType:
     @property
     def value(self) -> int:
         ...
+class LayerNormType:
+    """
+    Members:
+    
+      pre_layernorm
+    
+      post_layernorm
+    
+      invalid_type
+    """
+    __members__: typing.ClassVar[dict[str, LayerNormType]]  # value = {'pre_layernorm': <LayerNormType.pre_layernorm: 0>, 'post_layernorm': <LayerNormType.post_layernorm: 1>, 'invalid_type': <LayerNormType.invalid_type: 2>}
+    invalid_type: typing.ClassVar[LayerNormType]  # value = <LayerNormType.invalid_type: 2>
+    post_layernorm: typing.ClassVar[LayerNormType]  # value = <LayerNormType.post_layernorm: 1>
+    pre_layernorm: typing.ClassVar[LayerNormType]  # value = <LayerNormType.pre_layernorm: 0>
+    def __eq__(self, other: typing.Any) -> bool:
+        ...
+    def __getstate__(self) -> int:
+        ...
+    def __hash__(self) -> int:
+        ...
+    def __index__(self) -> int:
+        ...
+    def __init__(self, value: int) -> None:
+        ...
+    def __int__(self) -> int:
+        ...
+    def __ne__(self, other: typing.Any) -> bool:
+        ...
+    def __repr__(self) -> str:
+        ...
+    def __setstate__(self, state: int) -> None:
+        ...
+    def __str__(self) -> str:
+        ...
+    @property
+    def name(self) -> str:
+        ...
+    @property
+    def value(self) -> int:
+        ...
 class MMModelConfig:
     include_sep_tokens: bool
     is_multimodal: bool
     mm_position_ids_style: int
     mm_sep_tokens: list[list[int]]
     def __init__(self) -> None:
->>>>>>> 817bf47bd (refactor: migrate to new config architecture (EngineConfig, ModelConfig, ModelArgs))
         ...
 class MiscellaneousConfig:
     aux_string: str
@@ -744,16 +657,6 @@ class MlaOpsType:
     @property
     def value(self) -> int:
         ...
-
-class ModelSpecificConfig:
-    load_python_model: bool
-    max_lora_model_size: int
-    def __init__(self, max_lora_model_size: int = -1, load_python_model: bool = False) -> None:
-        ...
-    def to_string(self) -> str:
-        ...
-
-
 class ModelConfig:
     add_bias_linear: bool
     attn_config: AttentionConfigs
@@ -761,7 +664,7 @@ class ModelConfig:
     deepseek_mscale_all_dim: float
     deepseek_rope_mscale: float
     embedding_size: int
-    eplb_config: ...
+    eplb_config: EPLBConfig
     expert_num: int
     extra_data_path: str
     has_lm_head: bool
@@ -777,7 +680,7 @@ class ModelConfig:
     logit_scale: float
     lora_infos: dict[str, str]
     max_seq_len: int
-    mm_model_config: ...
+    mm_model_config: MMModelConfig
     model_type: str
     moe_k: int
     moe_layer_index: list[int]
@@ -829,7 +732,7 @@ class ModelConfig:
     def data_type(self, arg1: str) -> None:
         ...
     @property
-    def layernorm_type(self) -> ...:
+    def layernorm_type(self) -> LayerNormType:
         ...
     @layernorm_type.setter
     def layernorm_type(self, arg1: str) -> None:
@@ -841,7 +744,7 @@ class ModelConfig:
     def mla_ops_type(self, arg1: str) -> None:
         ...
     @property
-    def norm_type(self) -> ...:
+    def norm_type(self) -> NormType:
         ...
     @norm_type.setter
     def norm_type(self, arg1: str) -> None:
@@ -850,7 +753,7 @@ class ModelConfig:
     def task_type(self) -> TaskType:
         ...
     @task_type.setter
-    def task_type(self, arg1: str) -> None:
+    def task_type(self, arg1: typing.Any) -> None:
         ...
 class ModelSpecificConfig:
     load_python_model: bool
@@ -873,14 +776,94 @@ class MoeConfig:
     use_deepep_low_latency: bool
     use_deepep_moe: bool
     use_deepep_p2p_low_latency: bool
-    def __init__(self, use_deepep_moe: bool = False, use_deepep_internode: bool = False, use_deepep_low_latency: bool = True, use_deepep_p2p_low_latency: bool = False, fake_balance_expert: bool = False, eplb_control_step: int = 100, eplb_test_mode: bool = False, hack_moe_expert: bool = False, eplb_balance_layer_per_step: int = 1, deep_ep_num_sm: int = 0, max_moe_normal_masked_token_num: int = 1024) -> None:
+    def __getstate__(self) -> tuple:
+        ...
+    def __init__(self) -> None:
+        ...
+    def __setstate__(self, arg0: tuple) -> None:
         ...
     def to_string(self) -> str:
         ...
-
-class ParallelismDistributedConfig:
+class NormType:
+    """
+    Members:
+    
+      layernorm
+    
+      rmsnorm
+    
+      alphanorm
+    
+      add_bias
+    
+      invalid_type
+    """
+    __members__: typing.ClassVar[dict[str, NormType]]  # value = {'layernorm': <NormType.layernorm: 0>, 'rmsnorm': <NormType.rmsnorm: 1>, 'alphanorm': <NormType.alphanorm: 2>, 'add_bias': <NormType.add_bias: 3>, 'invalid_type': <NormType.invalid_type: 4>}
+    add_bias: typing.ClassVar[NormType]  # value = <NormType.add_bias: 3>
+    alphanorm: typing.ClassVar[NormType]  # value = <NormType.alphanorm: 2>
+    invalid_type: typing.ClassVar[NormType]  # value = <NormType.invalid_type: 4>
+    layernorm: typing.ClassVar[NormType]  # value = <NormType.layernorm: 0>
+    rmsnorm: typing.ClassVar[NormType]  # value = <NormType.rmsnorm: 1>
+    def __eq__(self, other: typing.Any) -> bool:
+        ...
+    def __getstate__(self) -> int:
+        ...
+    def __hash__(self) -> int:
+        ...
+    def __index__(self) -> int:
+        ...
+    def __init__(self, value: int) -> None:
+        ...
+    def __int__(self) -> int:
+        ...
+    def __ne__(self, other: typing.Any) -> bool:
+        ...
+    def __repr__(self) -> str:
+        ...
+    def __setstate__(self, state: int) -> None:
+        ...
+    def __str__(self) -> str:
+        ...
+    @property
+    def name(self) -> str:
+        ...
+    @property
+    def value(self) -> int:
+        ...
+class PDSepConfig:
+    cache_store_connect_port: int
+    cache_store_listen_port: int
+    cache_store_rdma_connect_port: int
+    cache_store_rdma_listen_port: int
+    cache_store_rdma_mode: bool
+    decode_entrance: bool
+    decode_polling_call_prefill_ms: int
+    decode_polling_kv_cache_step_ms: int
+    decode_retry_interval_ms: int
+    decode_retry_timeout_ms: int
+    decode_retry_times: int
+    load_cache_timeout_ms: int
+    max_rpc_timeout_ms: int
+    prefill_max_wait_timeout_ms: int
+    prefill_retry_timeout_ms: int
+    prefill_retry_times: int
+    rdma_connect_retry_times: int
+    remote_rpc_server_port: int
+    role_type: RoleType
+    worker_port_offset: int
+    def __getstate__(self) -> tuple:
+        ...
+    def __init__(self) -> None:
+        ...
+    def __setstate__(self, arg0: tuple) -> None:
+        ...
+    def to_string(self) -> str:
+        ...
+class ParallelismConfig:
+    dp_rank: int
     dp_size: int
     dp_tp_nccl_port: int
+    embedding_rpc_server_port: int
     enable_sp: bool
     ep_rank: int
     ep_size: int
@@ -899,7 +882,6 @@ class ParallelismDistributedConfig:
     tp_nccl_port: int
     tp_rank: int
     tp_size: int
-    use_all_gather: bool
     world_rank: int
     world_size: int
     def __getstate__(self) -> tuple:
@@ -921,8 +903,6 @@ class ProfilingDebugLoggingConfig:
     gen_timeline_sync: bool
     hack_layer_num: int
     log_file_backup_count: int
-    log_level: str
-    log_path: str
     torch_cuda_profiler_dir: str
     trace_malloc_stack: bool
     trace_memory: bool
@@ -939,15 +919,14 @@ class QuantAlgo:
     def __init__(self) -> None:
         ...
     @typing.overload
-    def __init__(self, method: ..., bits: int, group_size: int) -> None:
+    def __init__(self, method: QuantMethod, bits: int, group_size: int) -> None:
         ...
     def getActivationBits(self) -> int:
         ...
     def getGroupSize(self) -> int:
         ...
-    def getQuantMethod(self) -> ...:
+    def getQuantMethod(self) -> QuantMethod:
         ...
->>>>>>> 817bf47bd (refactor: migrate to new config architecture (EngineConfig, ModelConfig, ModelArgs))
     def getWeightBits(self) -> int:
         ...
     def isAwq(self) -> bool:
@@ -1029,7 +1008,6 @@ class QuantMethod:
         ...
     @property
     def value(self) -> int:
->>>>>>> 817bf47bd (refactor: migrate to new config architecture (EngineConfig, ModelConfig, ModelArgs))
         ...
 class RoleSpecialTokens:
     eos_token_ids: list[int]
@@ -1074,11 +1052,6 @@ class RoleType:
         ...
     def __setstate__(self, state: int) -> None:
         ...
-<<<<<<< HEAD
-    @typing.overload
-    def __str__(self) -> str:
-        ...
-    @typing.overload
     def __str__(self) -> str:
         ...
     @property
@@ -1086,18 +1059,6 @@ class RoleType:
         ...
     @property
     def value(self) -> int:
-        ...
-class SamplerConfig:
-    decode_cm2_config: str
-    multimodal_part_cm2_config: str
-    remote_rpc_server_ip: str
-    remote_vit_server_ip: str
-    use_local: bool
-    def __init__(self, use_local: bool = False, remote_rpc_server_ip: str = '', decode_cm2_config: str = '', remote_vit_server_ip: str = '', multimodal_part_cm2_config: str = '') -> None:
-        ...
-    def to_string(self) -> str:
-        ...
-    def update_from_env(self) -> None:
         ...
 class RopeConfig:
     dim: int
@@ -1242,7 +1203,6 @@ class SpeculativeExecutionConfig:
     sp_max_token_match: int
     sp_min_token_match: int
     tree_decode_config: str
-    type: str
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:
@@ -1250,6 +1210,12 @@ class SpeculativeExecutionConfig:
     def __setstate__(self, arg0: tuple) -> None:
         ...
     def to_string(self) -> str:
+        ...
+    @property
+    def type(self) -> SpeculativeType:
+        ...
+    @type.setter
+    def type(self, arg1: typing.Any) -> None:
         ...
 class SpeculativeType:
     """
@@ -1407,7 +1373,6 @@ class VitSeparation:
         ...
     @property
     def value(self) -> int:
->>>>>>> 817bf47bd (refactor: migrate to new config architecture (EngineConfig, ModelConfig, ModelArgs))
         ...
 def get_block_cache_keys(token_ids_list: list[list[int]]) -> list[int]:
     ...

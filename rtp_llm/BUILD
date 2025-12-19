@@ -111,6 +111,7 @@ requirement([
     "fastsafetensors",
     "deep_ep",
     "pytorch-triton-rocm",
+    "pybind11_stubgen",
 ] + tensorrt + flashinfer + deep_gemm)
 
 filegroup(
