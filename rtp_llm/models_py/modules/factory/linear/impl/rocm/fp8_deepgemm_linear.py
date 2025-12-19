@@ -22,6 +22,8 @@ class RocmFp8DeepGEMMLinear(LinearBase):
         quant_config: object,
         weight: torch.Tensor,
         weight_scales: Optional[torch.Tensor],
+        weight_scale_2: Optional[torch.Tensor] = None,
+        input_scale: Optional[torch.Tensor] = None,
     ) -> bool:
         """Handle other FP8 methods (not PTPC)"""
         if weight_scales is None or quant_config is None:
@@ -42,8 +44,10 @@ class RocmFp8DeepGEMMLinear(LinearBase):
         input_scales: Optional[torch.Tensor] = None,
         bias: Optional[torch.Tensor] = None,
         quant_config: object = None,
+        weight_scale_2: Optional[torch.Tensor] = None,
     ):
-        super().__init__(weight, weight_scales, input_scales, bias, quant_config)
+        super().__init__(weight, weight_scales, input_scales,
+                         bias, quant_config, weight_scale_2)
         self.hidden_size = weight.shape[0]  # k
         self.output_size = weight.shape[1]  # n
         self.weight = weight.reshape([weight.shape[1], weight.shape[0]])

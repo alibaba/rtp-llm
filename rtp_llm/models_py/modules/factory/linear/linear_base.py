@@ -24,6 +24,8 @@ class LinearBase(nn.Module, ABC):
         quant_config: object,
         weight: torch.Tensor,
         weight_scales: Optional[torch.Tensor],
+        weight_scale_2: Optional[torch.Tensor] = None,
+        input_scale: Optional[torch.Tensor] = None,
     ) -> bool:
         """Determine whether this strategy can handle the given configuration
 
@@ -31,6 +33,8 @@ class LinearBase(nn.Module, ABC):
             quant_config: Quantization configuration (required)
             weight: Weight tensor
             weight_scales: Weight scales tensor (None for non-FP8)
+            weight_scale_2: Second weight scale tensor (for NVFP4, can be None)
+            input_scale: Input scale tensor (for NVFP4, can be None)
 
         Returns:
             Whether this configuration can be handled
@@ -45,6 +49,7 @@ class LinearBase(nn.Module, ABC):
         input_scales: Optional[torch.Tensor] = None,
         bias: Optional[torch.Tensor] = None,
         quant_config: object = None,
+        weight_scale_2: Optional[torch.Tensor] = None,
     ):
         """Initialize the Linear module with weights
 
@@ -53,7 +58,8 @@ class LinearBase(nn.Module, ABC):
             weight_scales: Weight scales tensor
             input_scales: Input scales tensor
             bias: Bias tensor
-            quant_config: Quantization configuration (required)
+            quant_config: Quantization configuration (required)ers
+            weight_scale_2: Second weight scale tensor (for FP4, can be None)
         """
         super().__init__()
 
