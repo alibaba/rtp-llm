@@ -14,13 +14,14 @@ from flashinfer import (
 from flashinfer.jit import gen_batch_mla_module, gen_batch_prefill_module
 from flashinfer.utils import is_sm90a_supported
 
-from rtp_llm.models_py.utils.arch import is_cuda
 from rtp_llm.models_py.modules.factory.linear.factory import LinearFactory
-from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
+from rtp_llm.models_py.utils.arch import is_cuda
 from rtp_llm.ops import AttentionConfigs
+from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
 from rtp_llm.utils.model_weight import W
 
 g_workspace_buffer = None
+
 
 def warmup_flashinfer_python():
     modules = []
@@ -58,7 +59,6 @@ def warmup_flashinfer_python():
                 False,
             )
         )
-
 
 
 def check_attention_inputs(attention_inputs: PyAttentionInputs) -> None:
@@ -341,13 +341,15 @@ class MlaFlashInferPrefillOp(object):
 
         k_pe = k_pe.view(-1, 1, self.qk_rope_head_dim)
         self.k_nope_proj = LinearFactory.create_linear_from_weights(
-            self.weights[layer_id], W.mla_k_nope_w, W.mla_k_nope_s, None, 
-            self.quant_config
+            self.weights[layer_id],
+            W.mla_k_nope_w,
+            W.mla_k_nope_s,
+            None,
+            self.quant_config,
         )
 
         self.v_proj = LinearFactory.create_linear_from_weights(
-            self.weights[layer_id], W.mla_v_w, W.mla_v_s, None,
-            self.quant_config
+            self.weights[layer_id], W.mla_v_w, W.mla_v_s, None, self.quant_config
         )
 
         k_nope = self.k_nope_proj(compressed_kv)
@@ -399,8 +401,8 @@ class MlaFlashInferDecodeOp(object):
         softmax_extra_scale: float,
         use_mla: bool,
         weights: List[Dict[str, torch.Tensor]] | None = None,
-        max_bs: int = 128,
-        max_context_len: int = 1024,
+        max_bs: int = 0,
+        max_context_len: int = 0,
     ):
         super().__init__()
         if weights is None:
@@ -416,7 +418,7 @@ class MlaFlashInferDecodeOp(object):
         self.use_mla = use_mla
         global g_workspace_buffer
         self.cuda_graph_kv_indices = torch.empty(
-            (max_bs * max_context_len,),
+            (max_bs * max_context_len // token_per_block),
             dtype=torch.int32,
             device="cuda",
         )
@@ -434,7 +436,11 @@ class MlaFlashInferDecodeOp(object):
             use_cuda_graph=use_cuda_graph,
             qo_indptr=fmha_params.qo_indptr_h,
             kv_indptr=fmha_params.decode_page_indptr_h,
-            kv_indices=self.cuda_graph_kv_indices,
+            kv_indices=(
+                self.cuda_graph_kv_indices
+                if use_cuda_graph
+                else fmha_params.page_indice_d
+            ),
             kv_len_arr=fmha_params.kvlen_h,
         )
 
@@ -547,10 +553,10 @@ class TrtV2PrefillAttentionOp(object):
         self.attn_configs = attn_configs
         self.quant_config = quant_config
         self.weights = weights
-        self.use_mla = use_mla   
+        self.use_mla = use_mla
         # Get FMHAConfig - will check in support() method
         self.fmha_config = fmha_config
-        
+
         from rtp_llm.ops.compute_ops import TRTAttnOp
 
         self.fmha_impl = TRTAttnOp(attn_configs)
@@ -578,7 +584,7 @@ class TrtV2PrefillAttentionOp(object):
     ) -> torch.Tensor:
         k_pe = k_pe.view(-1, 1, self.qk_rope_head_dim)
         self.k_nope_proj = LinearFactory.create_linear_from_weights(
-            self.weights[layer_id], W.mla_k_nope_w, W.mla_k_nope_s, None, 
+            self.weights[layer_id], W.mla_k_nope_w, W.mla_k_nope_s, None,
             self.quant_config
         )
 
