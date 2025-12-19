@@ -2588,6 +2588,10 @@ pyarrow==21.0.0 \
     --hash=sha256:fc0d2f88b81dcf3ccf9a6ae17f89183762c8a94a5bdcfa09e05cfe413acf0503 \
     --hash=sha256:fee33b0ca46f4c85443d6c450357101e47d53e6c3f008d658c27a2d020d44c79
     # via pyodps
+pybind11-stubgen==2.5.5 \
+    --hash=sha256:10824cd2fc5cbbee032b8fb39e6f6c08de232deb309bc66d786a6c6e8a4601bd \
+    --hash=sha256:758d6d6bbeefc62ad7f78d5e5bbf357ccf6af83cd4504f5f549403f452942708
+    # via -r open_source/deps/requirements_base.txt
 pycparser==2.23 \
     --hash=sha256:78816d4f24add8f10a06d6f05b4d424ad9e96cfebf68a4ddc99c65c0720d00c2 \
     --hash=sha256:e5c6e8d3fbad53479cab09ac03729e0a9faf2bee3db8208a550daf5af81a5934
