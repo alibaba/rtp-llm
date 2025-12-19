@@ -257,7 +257,6 @@ struct SchedulerConfig {
     bool use_batch_decode_scheduler = false;
     bool use_gather_batch_scheduler = false;
     std::string to_string() const;
-    void update_from_env();
 };
 
 struct RuntimeConfig {
