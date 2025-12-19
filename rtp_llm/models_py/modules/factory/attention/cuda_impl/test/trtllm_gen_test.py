@@ -20,7 +20,7 @@ from rtp_llm.test.utils.numeric_util import assert_close_with_mismatch_tolerance
 
 device = torch.device("cuda")
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
+from rtp_llm.ops import AttentionConfigs, KvCacheDataType
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs
 
 
@@ -71,18 +71,18 @@ class FlashInferPythonMHATest(TestCase):
         self.kv_cache.k_cache_base = torch.stack([self.k_cache, self.v_cache], dim=1)
         self.kv_cache.v_cache_base = self.v_cache
 
-    def _create_config(self) -> GptInitModelParameters:
-        """Create a standard GptInitModelParameters config for testing."""
-        config = GptInitModelParameters(self.num_heads, self.head_dim, 12, 2048, 102400)
+    def _create_config(self) -> AttentionConfigs:
+        """Create a standard AttentionConfigs config for testing."""
+        config = AttentionConfigs()
         config.head_num = self.num_heads
-        config.head_num_kv = self.num_kv_heads
-        config.hidden_size = self.head_dim * self.num_heads
-        config.seq_size_per_block = self.page_size
+        config.kv_head_num = self.num_kv_heads
         config.size_per_head = self.head_dim
-        config.data_type = "bf16"
-        config.kv_cache_data_type = "fp8"
+        config.tokens_per_block = self.page_size
+        config.kv_cache_dtype = KvCacheDataType.FP8
         config.use_mla = False
-        config.tp_size = 1
+        config.is_causal = True
+        config.fuse_qkv_add_bias = True
+        config.q_scaling = 1.0
         return config
 
     def test_flashinfer_trtllm_prefill(self):
@@ -97,11 +97,12 @@ class FlashInferPythonMHATest(TestCase):
         attn_inputs = gen_attention_inputs(
             self.page_size, self.num_pages, input_lengths=input_lengths
         )
+        hidden_size = self.head_dim * self.num_heads
         qkv = (
             torch.rand(
                 [
                     num_tokens,
-                    config.hidden_size + 2 * self.num_kv_heads * self.head_dim,
+                    hidden_size + 2 * self.num_kv_heads * self.head_dim,
                 ],
                 dtype=torch.bfloat16,
                 device=self.device,
@@ -176,11 +177,12 @@ class FlashInferPythonMHATest(TestCase):
         attn_inputs = gen_attention_inputs(
             self.page_size, self.num_pages, sequence_lengths=sequence_lengths
         )
+        hidden_size = self.head_dim * self.num_heads
         qkv = (
             torch.rand(
                 [
                     num_tokens,
-                    config.hidden_size + 2 * self.num_kv_heads * self.head_dim,
+                    hidden_size + 2 * self.num_kv_heads * self.head_dim,
                 ],
                 dtype=torch.bfloat16,
                 device=self.device,
