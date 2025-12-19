@@ -85,3 +85,26 @@ py_test(
     ],
     exec_properties = {'gpu':'A10'}
 )
+
+load("//bazel:arch_select.bzl", "requirement")
+
+requirement([
+    "grpcio",
+])
+
+py_test(
+    name = "grpc_host_channel_pool_test",
+    srcs = [
+        "grpc_host_channel_pool_test.py",
+    ],
+    deps = [
+        "//rtp_llm:utils",
+        ":grpcio",
+    ],
+    data = [
+        "//:th_transformer",
+        "//:th_transformer_config",
+        "//:rtp_compute_ops",
+    ],
+    exec_properties = {'gpu':'A10'}
+)
