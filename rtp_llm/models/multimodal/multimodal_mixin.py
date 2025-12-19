@@ -1,4 +1,6 @@
 import gc
+import json
+import logging
 import os
 import re
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -9,10 +11,14 @@ from rtp_llm.config.model_config import ModelConfig, VitParameters
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeightInfo
 from rtp_llm.model_loader.weight_module import MMAtomicWeight
+from rtp_llm.models.downstream_modules.plugin_loader import (  # Import load_module
+    load_module,
+)
 from rtp_llm.models.multimodal.multimodal_common import MultiModalEmbeddingInterface
 from rtp_llm.models.multimodal.multimodal_trt_engine import MultiModalTRTEngine
 from rtp_llm.models_py.distributed.collective_torch import Group, barrier
 from rtp_llm.ops import ParallelismConfig, VitSeparation
+from rtp_llm.utils.custommodal_util import MethodType, load_custom_modal_class
 from rtp_llm.utils.model_weight import CkptWeightInfo, identity, sp_id
 from rtp_llm.utils.multimodal_util import MultimodalInput, get_vit_compute_dtype
 
@@ -95,16 +101,15 @@ class MultiModalMixin:
                 torch_default_dtype = torch.get_default_dtype()
                 torch.set_default_dtype(self.vit_data_type)
                 self._init_multimodal(config)
-
                 # Dynamic injection of custom multimodal embedding
                 if hasattr(config, "custom_modal") and config.custom_modal:
-                    cls = ModelDeployWeightInfo._load_custom_modal_class_from_config(
-                        config
+                    cls = load_custom_modal_class(
+                        config.custom_modal, config.ckpt_path, MethodType.Embedding
                     )
                     if cls:
                         try:
-                            # Assuming the custom class constructor signature is (config, tokenizer, weight)
-                            custom_mm_part = cls(config, self.tokenizer, self.weight)
+                            # Assuming the custom class constructor signature is (config, tokenizer)
+                            custom_mm_part = cls(config)
 
                             # If a native mm_part already exists (e.g. Qwen-VL), we need to support both.
                             if hasattr(self, "mm_part") and self.mm_part is not None:
@@ -124,10 +129,7 @@ class MultiModalMixin:
                                         else mm_type
                                     )
                                     if isinstance(target_type, int):  # Enum is int
-                                        is_custom = target_type in [
-                                            MMUrlType.CUSTOM_JSON,
-                                            MMUrlType.CUSTOM_RAW,
-                                        ]
+                                        is_custom = target_type == [MMUrlType.CUSTOM]
 
                                     if is_custom:
                                         return original_method(url, mm_type, **kwargs)
@@ -139,6 +141,17 @@ class MultiModalMixin:
                                 custom_mm_part.mm_embedding = _composite_mm_embedding
 
                             self.mm_part = custom_mm_part
+
+                            logging.info(
+                                f"Successfully replaced mm_part with custom implementation: {cls.__name__}"
+                            )
+                        except Exception as e:
+                            logging.error(
+                                f"Failed to instantiate custom embedding module: {e}"
+                            )
+                            raise RuntimeError(
+                                f"Custom embedding module load failure: {e}"
+                            )
 
                             logging.info(
                                 f"Successfully replaced mm_part with custom implementation: {cls.__name__}"

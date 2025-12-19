@@ -32,8 +32,7 @@ class MMUrlType(IntEnum):
     AUDIO = 3
     TENSOR = 4
     IGRAPH = 5
-    CUSTOM_JSON = 6
-    CUSTOM_RAW = 7
+    CUSTOM = 6
 
 
 @dataclass

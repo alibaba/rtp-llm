@@ -523,25 +523,6 @@ class ModelDeployWeightInfo:
             self.process_meta_from_ckpt(database.pretrain_file_list)
             self.process_meta_from_ckpt(database.finetune_file_list)
             weight_info = self.get_weight_info()
-
-            if self.tp_rank == 0:
-                cls = self._load_custom_modal_class_from_config(self.config)
-                if cls:
-                    get_weight_info_method = getattr(cls, "get_weight_info", None)
-                    if callable(get_weight_info_method):
-                        extra_weights = get_weight_info_method(
-                            self.config, self.tp_rank
-                        )
-                        if extra_weights:
-                            logging.info(
-                                f"Registering {len(extra_weights)} extra weights from {cls.__name__}"
-                            )
-                            weight_info.weights.extend(extra_weights)
-                    else:
-                        logging.warning(
-                            f"Custom modal class '{cls.__name__}' has no callable 'get_weight_info' static method."
-                        )
-
             return weight_info
         elif database.is_ft_style:
             return None

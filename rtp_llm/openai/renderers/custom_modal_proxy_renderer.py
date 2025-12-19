@@ -1,6 +1,7 @@
 import copy
 import json
 import logging
+import os
 from typing import List, Optional
 
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
@@ -14,6 +15,8 @@ from rtp_llm.openai.renderers.custom_renderer import (
     RenderedInputs,
     RendererParams,
 )
+from rtp_llm.utils.custommodal_util import MethodType, load_custom_modal_class
+from rtp_llm.utils.import_util import load_module
 from rtp_llm.utils.multimodal_util import MMPreprocessConfig, MMUrlType, MultimodalInput
 
 
@@ -32,9 +35,23 @@ class CustomModalProxyRenderer(CustomChatRenderer):
     ):
         super().__init__(tokenizer, renderer_params)
         self.wrapped_renderer = wrapped_renderer
+        self.custom_modal_config = renderer_params.custom_modal_config
+        self.custom_preproceor = self._load_custom_preprocessor()
         logging.info(
             f"CustomModalProxyRenderer wrapping {type(wrapped_renderer).__name__}"
         )
+
+    def _load_custom_preprocessor(self):
+        try:
+            cls = load_custom_modal_class(
+                self.custom_modal_config, self.ckpt_path, MethodType.Preprocess
+            )
+            custom_mm_part = cls(self.custom_modal_config, self.tokenizer)
+            return custom_mm_part.custom_modal_preprocess
+        except Exception as e:
+            logging.warning(f"Failed to load custom_preprocess: {e}")
+            return None
+        return None
 
     def _create_mm_preprocess_config(
         self, part_config: Optional[MMPreprocessConfigPart]
@@ -64,22 +81,9 @@ class CustomModalProxyRenderer(CustomChatRenderer):
                 new_content_list = []
                 for part in message.content:
                     if part.type == ContentPartTypeEnum.custom:
-                        serialized_data = ""
                         mm_type = MMUrlType.DEFAULT
-
-                        try:
-                            if isinstance(part.data, str):
-                                # If it's a string, try to load it to verify if it's valid JSON
-                                json.loads(part.data)
-                                serialized_data = part.data
-                            else:
-                                # For dict, list, or primitives, try to dump it to JSON string
-                                serialized_data = json.dumps(part.data)
-                            mm_type = MMUrlType.CUSTOM_JSON
-                        except (ValueError, TypeError):
-                            # Fallback to Raw if not valid JSON or not serializable
-                            serialized_data = str(part.data)
-                            mm_type = MMUrlType.CUSTOM_RAW
+                        serialized_data = self.custom_preproceor(part.data)
+                        mm_type = MMUrlType.CUSTOM
 
                         mm_input = MultimodalInput(
                             url=serialized_data,
