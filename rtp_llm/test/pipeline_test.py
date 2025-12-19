@@ -107,7 +107,7 @@ class PipelineDecodeTest(unittest.TestCase):
                 stop_word_str_slices=[],
                 stop_word_ids=[],
                 stop_word_id_slices=[],
-                ouput_tokens_list=[],
+                output_tokens_list=[],
             )
         )
 
@@ -145,7 +145,7 @@ class PipelineDecodeTest(unittest.TestCase):
                 stop_word_str_slices=["C"],
                 stop_word_ids=[],
                 stop_word_id_slices=[],
-                ouput_tokens_list=[],
+                output_tokens_list=[],
             )
         )
 
@@ -185,7 +185,7 @@ class PipelineDecodeTest(unittest.TestCase):
                 stop_word_str_slices=[],
                 stop_word_ids=[],
                 stop_word_id_slices=[],
-                ouput_tokens_list=[],
+                output_tokens_list=[],
             )
         )
 
@@ -222,7 +222,7 @@ class PipelineDecodeTest(unittest.TestCase):
                 stop_word_id_slices=[],
                 decoding_states=[],
                 token_buffers=[],
-                ouput_tokens_list=[],
+                output_tokens_list=[],
             )
         )
 
@@ -262,7 +262,7 @@ class PipelineDecodeTest(unittest.TestCase):
                 stop_word_id_slices=[],
                 decoding_states=[],
                 token_buffers=[],
-                ouput_tokens_list=[],
+                output_tokens_list=[],
             )
         )
 
@@ -283,7 +283,7 @@ class PipelineDecodeTest(unittest.TestCase):
                 stop_word_id_slices=[],
                 decoding_states=decoding_states,
                 token_buffers=token_buffers,
-                ouput_tokens_list=output_tokens_list,
+                output_tokens_list=output_tokens_list,
             )
         )
 
@@ -325,7 +325,7 @@ class PipelineDecodeTest(unittest.TestCase):
                 stop_word_id_slices=[],
                 decoding_states=[],
                 token_buffers=[],
-                ouput_tokens_list=[],
+                output_tokens_list=[],
             )
         )
 
@@ -416,7 +416,7 @@ class PipelineDecodeTest(unittest.TestCase):
                 stop_word_str_slices=[],
                 stop_word_ids=[],
                 stop_word_id_slices=[],
-                ouput_tokens_list=[],
+                output_tokens_list=[],
             )
         )
 
@@ -454,7 +454,7 @@ class PipelineDecodeTest(unittest.TestCase):
                 stop_word_id_slices=[],
                 decoding_states=[],
                 token_buffers=[],
-                ouput_tokens_list=[],
+                output_tokens_list=[],
             )
         )
 

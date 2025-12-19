@@ -65,8 +65,8 @@ class OpenaiEndpoint(BaseEndpoint):
         model_config: GptInitModelParameters,
         tokenizer: BaseTokenizer,
         backend_rpc_server_visitor: BackendRPCServerVisitor,
-        rank_id,
-        server_id,
+        rank_id=0,
+        server_id=0,
     ):
         super().__init__(
             model_config, tokenizer, backend_rpc_server_visitor, rank_id, server_id

@@ -47,8 +47,8 @@ class BaseEndpoint(object):
         model_config: GptInitModelParameters,
         tokenizer,
         backend_rpc_server_visitor: BackendRPCServerVisitor,
-        rank_id,
-        server_id,
+        rank_id=0,
+        server_id=0,
     ):
         self.model_config = model_config
         self.tokenizer = tokenizer
@@ -59,13 +59,13 @@ class BaseEndpoint(object):
         self.rank_id = rank_id
         self.server_id = server_id
 
-        # Initialize dependencies
-        self._model_config = ModelFactory.create_frontend_config(
-            ModelFactory.create_normal_model_config()
-        )
-        self._tokenizer = TokenizerFactory.create_from_env()
-        self._model_config.update_task_prompt_tokens_id(self._tokenizer)
-        self._model_config.update_tokenizer_special_tokens(self._tokenizer)
+        # # Initialize dependencies
+        # self._model_config = ModelFactory.create_frontend_config(
+        #     ModelFactory.create_normal_model_config()
+        # )
+        # self._tokenizer = TokenizerFactory.create_from_env()
+        # self._model_config.update_task_prompt_tokens_id(self.tokenizer)
+        # self._model_config.update_tokenizer_special_tokens(self.tokenizer)
 
         kmonitor.init()
 

@@ -113,8 +113,8 @@ class FrontendWorker(BaseEndpoint):
         model_config,
         tokenizer,
         backend_rpc_server_visitor: BackendRPCServerVisitor,
-        rank_id,
-        server_id,
+        rank_id=0,
+        server_id=0,
     ) -> None:
         logging.info("starting frontend worker")
         super().__init__(
