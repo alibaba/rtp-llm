@@ -18,10 +18,13 @@ from rtp_llm.config.model_config import ModelConfig, build_model_config
 from rtp_llm.config.py_config_modules import (
     MIN_WORKER_INFO_PORT_NUM,
     QuantizationConfig,
+    VitConfig,
 )
 from rtp_llm.distribute.worker_info import ParallelInfo
 from rtp_llm.model_factory import ModelFactory
+from rtp_llm.model_loader.load_config import LoadMethod
 from rtp_llm.ops import (
+    DeviceResourceConfig,
     FMHAConfig,
     HWKernelConfig,
     MoeConfig,
@@ -228,6 +231,8 @@ class WeightConverter:
         hw_kernel_config = HWKernelConfig()
         fmha_config = FMHAConfig()
         moe_config = MoeConfig()
+        device_resource_config = DeviceResourceConfig()
+        vit_config = VitConfig()
 
         model = self.model_cls.from_config(
             model_config=model_config,
@@ -237,7 +242,11 @@ class WeightConverter:
             fmha_config=fmha_config,
             moe_config=moe_config,
             load_python_model=False,
+            load_method=LoadMethod.AUTO,
             max_generate_batch_size=0,
+            vit_config=vit_config,
+            merge_lora=False,
+            device_resource_config=device_resource_config,
         )
         loader = model.create_model_loader()
         device_str = f"cuda:{parallelism_config.local_rank}"
