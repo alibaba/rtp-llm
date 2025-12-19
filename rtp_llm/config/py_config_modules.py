@@ -2,9 +2,8 @@ import logging
 import os
 from typing import Optional
 
-from rtp_llm.config.model_args import ModelArgs
 from rtp_llm.config.kv_cache_config import KVCacheConfig
-
+from rtp_llm.config.model_args import ModelArgs
 from rtp_llm.ops import (
     ArpcConfig,
     CacheStoreConfig,
@@ -18,8 +17,8 @@ from rtp_llm.ops import (
     MiscellaneousConfig,
     ModelSpecificConfig,
     MoeConfig,
-    PDSepConfig,
     ParallelismConfig,
+    PDSepConfig,
     ProfilingDebugLoggingConfig,
     RoleType,
     RuntimeConfig,
@@ -42,8 +41,10 @@ class ServerConfig:
         self.frontend_server_id = 0
         self.rank_id = 0
         self.worker_info_port_num: int = MIN_WORKER_INFO_PORT_NUM
-        self.shutdown_timeout: int = 50  # Default timeout in seconds, -1 means wait indefinitely
-        self.monitor_interval: int = 1   # Monitor interval in seconds
+        self.shutdown_timeout: int = (
+            50  # Default timeout in seconds, -1 means wait indefinitely
+        )
+        self.monitor_interval: int = 1  # Monitor interval in seconds
 
     # update_from_args 方法已不再需要
     # 配置绑定现在通过声明式 bind_to 参数在 add_argument 时自动处理
@@ -63,6 +64,7 @@ class ServerConfig:
 
 class PyMiscellaneousConfig:
     """Python wrapper for C++ MiscellaneousConfig with additional Python-only fields."""
+
     def __init__(self):
         self.misc_config = MiscellaneousConfig()
         # Additional Python-only fields
@@ -82,6 +84,7 @@ class PyMiscellaneousConfig:
             f"dashscope_websocket_url: {self.dashscope_websocket_url}"
         )
 
+
 class LoraConfig:
     def __init__(self):
         self.lora_info: str = "{}"
@@ -96,9 +99,7 @@ class LoadConfig:
         self.load_method: str = "auto"
 
     def to_string(self):
-        return (
-            f"load_method: {self.load_method}"
-        )
+        return f"load_method: {self.load_method}"
 
 
 class RenderConfig:
@@ -131,32 +132,6 @@ class DistributeConfig:
         self.leader_address: Optional[str] = None
         self.remote_server_port: int = 0
 
-    def update_from_env(self):
-        self.fake_gang_env = get_env_bool("FAKE_GANG_ENV", self.fake_gang_env)
-        self.gang_annocation_path = os.environ.get(
-            "GANG_ANNOCATION_PATH", self.gang_annocation_path
-        )
-        self.gang_config_string = os.environ.get(
-            "GANG_CONFIG_STRING", self.gang_config_string
-        )
-        self.zone_name = os.environ.get("ZONE_NAME", self.zone_name)
-        self.distribute_config_file = os.environ.get(
-            "DISTRIBUTE_CONFIG_FILE", self.distribute_config_file
-        )
-        dist_barrier_timeout_env = os.environ.get("DIST_BARRIER_TIMEOUT")
-        self.dist_barrier_timeout = (
-            int(dist_barrier_timeout_env) if dist_barrier_timeout_env else None
-        )
-        self.gang_sleep_time = int(
-            os.environ.get("GANG_SLEEP_TIME", self.gang_sleep_time)
-        )
-        self.gang_timeout_min = int(
-            os.environ.get("GANG_TIMEOUT_MIN", self.gang_timeout_min)
-        )
-        self.json_gang_parts = os.environ.get("JSON_GANG_PARTS", self.json_gang_parts)
-        self.leader_address = os.environ.get("LEADER_ADDRESS", self.leader_address)
-        self.remote_server_port = int(os.environ.get("REMOTE_SERVER_PORT", self.remote_server_port))
-
     def to_string(self):
         return (
             f"fake_gang_env: {self.fake_gang_env}\n"
@@ -171,6 +146,7 @@ class DistributeConfig:
             f"lead_address: {self.leader_address}\n"
             f"remote_server_port: {self.remote_server_port}\n"
         )
+
 
 class VitConfig:
     def __init__(self):
@@ -227,6 +203,7 @@ class GenerateEnvConfig:
             f"generation_config_path: {self.generation_config_path}"
         )
 
+
 class QuantizationConfig:
     def __init__(self):
         self.int8_mode: int = 0
@@ -247,6 +224,7 @@ class QuantizationConfig:
             return "INT8"
         # Check weight_type from environment variable (compatibility logic)
         import os
+
         weight_type = os.environ.get("WEIGHT_TYPE", "").upper()
         if weight_type == "INT8":
             return "INT8"
@@ -282,7 +260,9 @@ class RoleConfig:
         elif isinstance(value, RoleType):
             self._role_type = value
         else:
-            raise TypeError(f"role_type must be RoleType enum or str, got {type(value)}")
+            raise TypeError(
+                f"role_type must be RoleType enum or str, got {type(value)}"
+            )
 
     def to_string(self):
         return f"role_type: {self._role_type.name}"
@@ -303,6 +283,7 @@ class RoleConfig:
         else:
             return RoleType.PDFUSION
 
+
 class JITConfig:
     def __init__(self):
         self.remote_jit_dir: str = ""
@@ -318,6 +299,7 @@ class DeepEPConfig:
     If all are None, auto_configure_deepep will be called.
     Otherwise, these values will be copied to moe_config.
     """
+
     def __init__(self):
         self.use_deepep_moe: Optional[bool] = None
         self.use_deepep_internode: Optional[bool] = None
@@ -355,9 +337,7 @@ class PyEnvConfigs:
         self.embedding_config: EmbeddingConfig = EmbeddingConfig()
         self.role_config: RoleConfig = RoleConfig()
         self.pd_separation_config: PDSepConfig = PDSepConfig()
-        self.parallelism_config: ParallelismConfig = (
-            ParallelismConfig()
-        )
+        self.parallelism_config: ParallelismConfig = ParallelismConfig()
         self.ffn_disaggregate_config: FfnDisAggregateConfig = FfnDisAggregateConfig()
         self.model_specific_config = ModelSpecificConfig()
         self.fmha_config = FMHAConfig()
@@ -372,7 +352,6 @@ class PyEnvConfigs:
         self.sampler_config = SamplerConfig()
         self.grpc_config = GrpcConfig()
         self.deep_ep_config = DeepEPConfig()
-        # self.distribute_config.update_from_env()
 
     def to_string(self):
         return (
@@ -381,9 +360,7 @@ class PyEnvConfigs:
             + self.profiling_debug_logging_config.to_string()
             + "\n\n"
             "[model_config]\n" + self.model_config.to_string() + "\n\n"
-            "[sp_config]\n"
-            + self.sp_config.to_string()
-            + "\n\n"
+            "[sp_config]\n" + self.sp_config.to_string() + "\n\n"
             "[lora_config]\n" + self.lora_config.to_string() + "\n\n"
             "[load_config]\n" + self.load_config.to_string() + "\n\n"
             "[render_config]\n" + self.render_config.to_string() + "\n\n"
@@ -416,7 +393,11 @@ class PyEnvConfigs:
             "[sampler_config]\n" + self.sampler_config.to_string() + "\n\n"
             "[cache_store_config]\n" + self.cache_store_config.to_string() + "\n\n"
             "[runtime_config]\n" + self.runtime_config.to_string() + "\n\n"
-            "[batch_decode_scheduler_config]\n" + self.runtime_config.batch_decode_scheduler_config.to_string() + "\n\n"
-            "[fifo_scheduler_config]\n" + self.runtime_config.fifo_scheduler_config.to_string() + "\n\n"
+            "[batch_decode_scheduler_config]\n"
+            + self.runtime_config.batch_decode_scheduler_config.to_string()
+            + "\n\n"
+            "[fifo_scheduler_config]\n"
+            + self.runtime_config.fifo_scheduler_config.to_string()
+            + "\n\n"
             "[grpc_config]\n" + self.grpc_config.to_string() + "\n\n"
         )

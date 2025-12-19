@@ -14,21 +14,20 @@ from typing import List
 import torch
 from setproctitle import setproctitle
 
-from rtp_llm.config.py_config_modules import (
-    DistributeConfig,
-    PyEnvConfigs,
-    VitConfig,
-    WorkerConfig,
-)
+from rtp_llm.config.py_config_modules import DistributeConfig, PyEnvConfigs, VitConfig
 from rtp_llm.server.backend_manager import BackendManager
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
+from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.distribute.worker_info import (
+    g_parallel_info,
+    g_worker_info,
+    update_worker_info,
+)
 from rtp_llm.ops import VitSeparation
-from rtp_llm.distribute.worker_info import g_parallel_info, g_worker_info, update_worker_info
-from rtp_llm.server.backend_app import BackendApp
 from rtp_llm.server.vit_rpc_server import vit_start_server
 from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
@@ -36,11 +35,15 @@ from rtp_llm.utils.concurrency_controller import (
 )
 from rtp_llm.utils.process_manager import ProcessManager
 from rtp_llm.utils.util import copy_gemm_config
-from rtp_llm.config.log_config import setup_logging
+
 setup_logging()
 
 
-def local_rank_start(global_controller: ConcurrencyController, py_env_configs: PyEnvConfigs, pipe_writer=None):
+def local_rank_start(
+    global_controller: ConcurrencyController,
+    py_env_configs: PyEnvConfigs,
+    pipe_writer=None,
+):
     """Start local rank with proper signal handling for graceful shutdown"""
     app = None
 
@@ -62,7 +65,11 @@ def local_rank_start(global_controller: ConcurrencyController, py_env_configs: P
 
     try:
         # avoid multiprocessing load failed
-        update_worker_info(py_env_configs.server_config.start_port, py_env_configs.server_config.worker_info_port_num)
+        update_worker_info(
+            py_env_configs.server_config.start_port,
+            py_env_configs.server_config.worker_info_port_num,
+            py_env_configs.distribute_config.remote_server_port,
+        )
         if g_parallel_info.world_size > 1:
             setproctitle(f"rtp_llm_rank-{g_parallel_info.local_rank}")
         logging.info(f"start local {g_worker_info}, {g_parallel_info}")
@@ -139,7 +146,9 @@ def _validate_dp_configuration():
         assert g_parallel_info.world_rank % g_parallel_info.tp_size == 0
 
 
-def _create_rank_processes(global_controller: ConcurrencyController, py_env_configs: PyEnvConfigs, pipe_writer=None):
+def _create_rank_processes(
+    global_controller: ConcurrencyController, py_env_configs: PyEnvConfigs
+):
     """Create and start rank processes, returns (processes, rank_pipe_readers)"""
     local_world_size = _get_local_world_size()
     cuda_device_list = _get_cuda_device_list()
@@ -156,7 +165,7 @@ def _create_rank_processes(global_controller: ConcurrencyController, py_env_conf
         os.environ["WORLD_RANK"] = str(world_rank)
         proc = Process(
             target=local_rank_start,
-            args=(global_controller, py_env_configs writer),
+            args=(global_controller, py_env_configs, writer),
             name=f"rank-{world_rank}",
         )
         proc.start()
@@ -167,16 +176,20 @@ def _create_rank_processes(global_controller: ConcurrencyController, py_env_conf
     return processes, rank_pipe_readers
 
 
-def multi_rank_start(global_controller: ConcurrencyController, py_env_configs: PyEnvConfigs, pipe_writer=None):
+def multi_rank_start(
+    global_controller: ConcurrencyController,
+    py_env_configs: PyEnvConfigs,
+    pipe_writer=None,
+):
     """Start multi-rank backend server with proper process management"""
     try:
         multiprocessing.set_start_method("spawn")
     except RuntimeError as e:
-        logging.warn(str(e))
+        logging.warning(str(e))
 
     # Create processes and get pipe readers
     processes, rank_pipe_readers = _create_rank_processes(
-        global_controller, py_env_configs, pipe_writer
+        global_controller, py_env_configs
     )
     local_world_size = len(processes)
 
@@ -249,7 +262,7 @@ def multi_rank_start(global_controller: ConcurrencyController, py_env_configs: P
     # After successful startup, monitor processes
     manager = ProcessManager(
         shutdown_timeout=py_env_configs.server_config.shutdown_timeout,
-        monitor_interval=py_env_configs.server_config.monitor_interval
+        monitor_interval=py_env_configs.server_config.monitor_interval,
     )
     manager.set_processes(processes)
     manager.monitor_and_release_processes()
@@ -312,14 +325,22 @@ def clear_jit_filelock():
             os.remove(file)
 
 
-def start_backend_server(global_controller: ConcurrencyController, py_env_configs: PyEnvConfigs, pipe_writer=None):
+def start_backend_server(
+    global_controller: ConcurrencyController,
+    py_env_configs: PyEnvConfigs,
+    pipe_writer=None,
+):
     setproctitle("rtp_llm_backend_server")
     os.makedirs("logs", exist_ok=True)
     load_gpu_nic_affinity()
 
     clear_jit_filelock()
 
-    update_worker_info(py_env_configs.server_config.start_port, py_env_configs.server_config.worker_info_port_num)
+    update_worker_info(
+        py_env_configs.server_config.start_port,
+        py_env_configs.server_config.worker_info_port_num,
+        py_env_configs.distribute_config.remote_server_port,
+    )
 
     # TODO(xinfei.sxf) fix this
     if py_env_configs.vit_config.vit_separation == VitSeparation.VIT_SEPARATION_ROLE:
