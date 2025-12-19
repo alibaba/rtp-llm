@@ -137,17 +137,13 @@ def multi_rank_start(global_controller: ConcurrencyController, py_env_configs: P
     processes = _create_rank_processes(global_controller, py_env_configs)
 
     # Check for fake gang environment
-    gang_config = GangConfig()
-    gang_config.update_from_env()
-    if gang_config.fake_gang_env:
+    if py_env_configs.gang_config.fake_gang_env:
         return processes
 
-    worker_config = WorkerConfig()
-    worker_config.update_from_env()
     # Create manager and monitor processes
     manager = ProcessManager(
-        shutdown_timeout=worker_config.shutdown_timeout,
-        monitor_interval=worker_config.monitor_interval
+        shutdown_timeout=py_env_configs.server_config.shutdown_timeout,
+        monitor_interval=py_env_configs.server_config.monitor_interval
     )
     manager.set_processes(processes)
     manager.monitor_and_release_processes()
