@@ -74,12 +74,16 @@ PyModelInputs CudaGraphDecodePaddingOp::buildInputs(int64_t batch_size,
 
     // 使用 torch 创建 cu_seqlens tensor
     torch::Tensor cu_seqlens_tensor                = torch::zeros({int(cu_len)}, options2).pin_memory();
+    torch::Tensor cu_kv_seqlens_tensor             = torch::zeros({int(cu_len)}, options2).pin_memory();
     torch::Tensor cu_seqlens_without_prefix_tensor = torch::zeros({int(cu_len)}, options2).pin_memory();
 
     // 将 torch tensor 转换为 BufferPtr
-    BufferPtr cu_seqlens_buf                          = torchTensor2Buffer(cu_seqlens_tensor);
-    inputs.attention_inputs.cu_seqlens                = Buffer2torchTensor(cu_seqlens_buf, false);
-    BufferPtr cu_seqlens_without_prefix_buf           = torchTensor2Buffer(cu_seqlens_without_prefix_tensor);
+    BufferPtr cu_seqlens_buf                = torchTensor2Buffer(cu_seqlens_tensor);
+    BufferPtr cu_kv_seqlens_buf             = torchTensor2Buffer(cu_kv_seqlens_tensor);
+    inputs.attention_inputs.cu_seqlens      = Buffer2torchTensor(cu_seqlens_buf, false);
+    inputs.attention_inputs.cu_kv_seqlens   = Buffer2torchTensor(cu_kv_seqlens_buf, false);
+    BufferPtr cu_seqlens_without_prefix_buf = torchTensor2Buffer(cu_seqlens_without_prefix_tensor);
+
     inputs.attention_inputs.cu_seqlens_without_prefix = Buffer2torchTensor(cu_seqlens_without_prefix_buf, false);
     return inputs;
 }

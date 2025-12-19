@@ -25,6 +25,7 @@ public:
         py_model_inputs_.attention_inputs.prefix_lengths            = inputs.attention_inputs.prefix_lengths;
         py_model_inputs_.input_ids                                  = inputs.input_ids;
         py_model_inputs_.attention_inputs.cu_seqlens                = inputs.attention_inputs.cu_seqlens;
+        py_model_inputs_.attention_inputs.cu_kv_seqlens             = inputs.attention_inputs.cu_kv_seqlens;
         py_model_inputs_.attention_inputs.cu_seqlens_without_prefix = inputs.attention_inputs.cu_seqlens_without_prefix;
         py_model_inputs_.attention_inputs.padding_offset            = inputs.attention_inputs.padding_offset;
         py_model_inputs_.attention_inputs.is_prefill                = is_embedding;
@@ -39,6 +40,7 @@ public:
 public:
     // for attention params
     rtp_llm::ParamsBasePtr params_ptr{nullptr};
+    py::object             py_attn_params{py::none()};
     // for output
     at::Tensor decoder_layer_hidden_states_;
     // for input
