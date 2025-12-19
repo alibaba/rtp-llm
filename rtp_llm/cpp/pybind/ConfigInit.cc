@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/model_utils/MlaConfig.h"
 #include "rtp_llm/cpp/model_utils/QuantInfo.h"
 #include "rtp_llm/cpp/model_utils/activation_types.h"
+#include "rtp_llm/cpp/model_utils/layernorm_types.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
 #include "pybind11/pybind11.h"
@@ -58,6 +59,20 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("MHA", MlaOpsType::MHA)
         .value("FLASH_INFER", MlaOpsType::FLASH_INFER)
         .value("FLASH_MLA", MlaOpsType::FLASH_MLA);
+
+    // Register LayerNormType enum
+    py::enum_<LayerNormType>(m, "LayerNormType")
+        .value("pre_layernorm", LayerNormType::pre_layernorm)
+        .value("post_layernorm", LayerNormType::post_layernorm)
+        .value("invalid_type", LayerNormType::invalid_type);
+
+    // Register NormType enum
+    py::enum_<NormType>(m, "NormType")
+        .value("layernorm", NormType::layernorm)
+        .value("rmsnorm", NormType::rmsnorm)
+        .value("alphanorm", NormType::alphanorm)
+        .value("add_bias", NormType::add_bias)
+        .value("invalid_type", NormType::invalid_type);
 
     // Register ActivationType enum
     py::enum_<ActivationType>(m, "ActivationType")
@@ -761,6 +776,18 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("stop_words_id_list", &SpecialTokens::stop_words_id_list)
         .def_readwrite("stop_words_str_list", &SpecialTokens::stop_words_str_list);
 
+    // Register QuantMethod enum
+    py::enum_<QuantMethod>(m, "QuantMethod")
+        .value("None", QuantMethod::None)
+        .value("WeightOnlyPerCol", QuantMethod::WeightOnlyPerCol)
+        .value("GptQ", QuantMethod::GptQ)
+        .value("Awq", QuantMethod::Awq)
+        .value("SmoothQuant", QuantMethod::SmoothQuant)
+        .value("OmniQuant", QuantMethod::OmniQuant)
+        .value("PerTensorQuant", QuantMethod::PerTensorQuant)
+        .value("FP8Quant", QuantMethod::FP8Quant)
+        .value("FP8PTPC", QuantMethod::FP8PTPC);
+
     // Register QuantAlgo
     py::class_<QuantAlgo>(m, "QuantAlgo")
         .def(py::init<>())
@@ -781,17 +808,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def("getActivationBits", &QuantAlgo::getActivationBits)
         .def("setQuantAlgo", &QuantAlgo::setQuantAlgo);
 
-    // Register QuantMethod enum
-    py::enum_<QuantMethod>(m, "QuantMethod")
-        .value("None", QuantMethod::None)
-        .value("WeightOnlyPerCol", QuantMethod::WeightOnlyPerCol)
-        .value("GptQ", QuantMethod::GptQ)
-        .value("Awq", QuantMethod::Awq)
-        .value("SmoothQuant", QuantMethod::SmoothQuant)
-        .value("OmniQuant", QuantMethod::OmniQuant)
-        .value("PerTensorQuant", QuantMethod::PerTensorQuant)
-        .value("FP8Quant", QuantMethod::FP8Quant)
-        .value("FP8PTPC", QuantMethod::FP8PTPC);
 
     // Register ParallelismConfig
     py::class_<ParallelismConfig>(m, "ParallelismConfig")
@@ -1121,6 +1137,76 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("kv_cache_dtype", &AttentionConfigs::kv_cache_dtype)
         .def_readwrite("skip_append_kv_cache", &AttentionConfigs::skip_append_kv_cache);
 
+        py::class_<EPLBConfig>(m, "EPLBConfig")
+        .def(py::init<>())
+        .def_readwrite("eplb_update_time", &EPLBConfig::eplb_update_time)
+        .def_property(
+            "eplb_mode",
+            [](const EPLBConfig& self) { return self.eplb_mode; },
+            [](EPLBConfig& self, py::object value) {
+                if (py::isinstance<py::str>(value)) {
+                    self.eplb_mode = EPLBConfig::from_string(value.cast<std::string>());
+                } else if (py::isinstance<EplbMode>(value)) {
+                    self.eplb_mode = value.cast<EplbMode>();
+                } else {
+                    throw py::type_error("eplb_mode must be a string or EplbMode enum");
+                }
+            })
+        .def_readwrite("redundant_expert", &EPLBConfig::redundant_expert)
+        .def_readwrite("balance_method", &EPLBConfig::balance_method)
+        .def_readwrite("eplb_force_repack", &EPLBConfig::eplb_force_repack)
+        .def_readwrite("eplb_stats_window_size", &EPLBConfig::eplb_stats_window_size)
+        .def_readwrite("eplb_control_step", &EPLBConfig::eplb_control_step)
+        .def_readwrite("eplb_test_mode", &EPLBConfig::eplb_test_mode)
+        .def_readwrite("eplb_balance_layer_per_step", &EPLBConfig::eplb_balance_layer_per_step)
+        .def("enable_eplb", &EPLBConfig::enable_eplb, "Get enable_eplb status")
+        .def("phy_exp_num", &EPLBConfig::phy_exp_num, py::arg("expert_num"), "Get physical expert number")
+        .def(py::pickle(
+            [](const EPLBConfig& self) {
+                return py::make_tuple(self.eplb_update_time,
+                                      EPLBConfig::to_string(self.eplb_mode),
+                                      self.redundant_expert,
+                                      self.balance_method,
+                                      self.eplb_force_repack,
+                                      self.eplb_stats_window_size,
+                                      self.eplb_control_step,
+                                      self.eplb_test_mode,
+                                      self.eplb_balance_layer_per_step);
+            },
+            [](py::tuple t) {
+                if (t.size() != 9)
+                    throw std::runtime_error("Invalid state!");
+                EPLBConfig c;
+                try {
+                    c.eplb_update_time = t[0].cast<int64_t>();
+                    if (py::isinstance<py::str>(t[1])) {
+                        c.eplb_mode = EPLBConfig::from_string(t[1].cast<std::string>());
+                    } else {
+                        c.eplb_mode = t[1].cast<EplbMode>();
+                    }
+                    c.redundant_expert            = t[2].cast<int64_t>();
+                    c.balance_method              = t[3].cast<std::string>();
+                    c.eplb_force_repack           = t[4].cast<int64_t>();
+                    c.eplb_stats_window_size      = t[5].cast<int64_t>();
+                    c.eplb_control_step           = t[6].cast<int>();
+                    c.eplb_test_mode              = t[7].cast<bool>();
+                    c.eplb_balance_layer_per_step = t[8].cast<int>();
+                } catch (const std::exception& e) {
+                    throw std::runtime_error(std::string("EPLBConfig unpickle error: ") + e.what());
+                }
+                return c;
+            }));
+
+
+    // Register MMModelConfig
+    py::class_<MMModelConfig>(m, "MMModelConfig")
+        .def(py::init<>())
+        .def_readwrite("is_multimodal", &MMModelConfig::is_multimodal)
+        .def_readwrite("mm_sep_tokens", &MMModelConfig::mm_sep_tokens)
+        .def_readwrite("include_sep_tokens", &MMModelConfig::include_sep_tokens)
+        .def_readwrite("mm_position_ids_style", &MMModelConfig::mm_position_ids_style);
+
+
     // Register ModelConfig
     py::class_<ModelConfig>(m, "ModelConfig")
         .def(py::init<>())
@@ -1224,14 +1310,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def("isKvCacheQuant", &ModelConfig::isKvCacheQuant)
         .def("to_string", &ModelConfig::to_string);
 
-    // Register MMModelConfig
-    py::class_<MMModelConfig>(m, "MMModelConfig")
-        .def(py::init<>())
-        .def_readwrite("is_multimodal", &MMModelConfig::is_multimodal)
-        .def_readwrite("mm_sep_tokens", &MMModelConfig::mm_sep_tokens)
-        .def_readwrite("include_sep_tokens", &MMModelConfig::include_sep_tokens)
-        .def_readwrite("mm_position_ids_style", &MMModelConfig::mm_position_ids_style);
-
     // Register VitConfig
     py::class_<VitConfig>(m, "VitConfig")
         .def(py::init<>())
@@ -1328,64 +1406,5 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 return c;
             }));
 
-    py::class_<EPLBConfig>(m, "EPLBConfig")
-        .def(py::init<>())
-        .def_readwrite("eplb_update_time", &EPLBConfig::eplb_update_time)
-        .def_property(
-            "eplb_mode",
-            [](const EPLBConfig& self) { return self.eplb_mode; },
-            [](EPLBConfig& self, py::object value) {
-                if (py::isinstance<py::str>(value)) {
-                    self.eplb_mode = EPLBConfig::from_string(value.cast<std::string>());
-                } else if (py::isinstance<EplbMode>(value)) {
-                    self.eplb_mode = value.cast<EplbMode>();
-                } else {
-                    throw py::type_error("eplb_mode must be a string or EplbMode enum");
-                }
-            })
-        .def_readwrite("redundant_expert", &EPLBConfig::redundant_expert)
-        .def_readwrite("balance_method", &EPLBConfig::balance_method)
-        .def_readwrite("eplb_force_repack", &EPLBConfig::eplb_force_repack)
-        .def_readwrite("eplb_stats_window_size", &EPLBConfig::eplb_stats_window_size)
-        .def_readwrite("eplb_control_step", &EPLBConfig::eplb_control_step)
-        .def_readwrite("eplb_test_mode", &EPLBConfig::eplb_test_mode)
-        .def_readwrite("eplb_balance_layer_per_step", &EPLBConfig::eplb_balance_layer_per_step)
-        .def("enable_eplb", &EPLBConfig::enable_eplb, "Get enable_eplb status")
-        .def("phy_exp_num", &EPLBConfig::phy_exp_num, py::arg("expert_num"), "Get physical expert number")
-        .def(py::pickle(
-            [](const EPLBConfig& self) {
-                return py::make_tuple(self.eplb_update_time,
-                                      EPLBConfig::to_string(self.eplb_mode),
-                                      self.redundant_expert,
-                                      self.balance_method,
-                                      self.eplb_force_repack,
-                                      self.eplb_stats_window_size,
-                                      self.eplb_control_step,
-                                      self.eplb_test_mode,
-                                      self.eplb_balance_layer_per_step);
-            },
-            [](py::tuple t) {
-                if (t.size() != 9)
-                    throw std::runtime_error("Invalid state!");
-                EPLBConfig c;
-                try {
-                    c.eplb_update_time = t[0].cast<int64_t>();
-                    if (py::isinstance<py::str>(t[1])) {
-                        c.eplb_mode = EPLBConfig::from_string(t[1].cast<std::string>());
-                    } else {
-                        c.eplb_mode = t[1].cast<EplbMode>();
-                    }
-                    c.redundant_expert            = t[2].cast<int64_t>();
-                    c.balance_method              = t[3].cast<std::string>();
-                    c.eplb_force_repack           = t[4].cast<int64_t>();
-                    c.eplb_stats_window_size      = t[5].cast<int64_t>();
-                    c.eplb_control_step           = t[6].cast<int>();
-                    c.eplb_test_mode              = t[7].cast<bool>();
-                    c.eplb_balance_layer_per_step = t[8].cast<int>();
-                } catch (const std::exception& e) {
-                    throw std::runtime_error(std::string("EPLBConfig unpickle error: ") + e.what());
-                }
-                return c;
-            }));
 
 }  // namespace rtp_llm
