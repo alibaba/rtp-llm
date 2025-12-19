@@ -31,9 +31,11 @@ class BaseEngine:
         return self.started
 
     @property
-    def task_type(self) -> TaskType:
-        return self.model.task_type
+    def task_type(self):
+        # Task type is stored on ModelConfig; use config to avoid depending on
+        # model implementations exposing a `task_type` attribute.
+        return self.config.task_type
 
     @property
-    def default_generate_config(self) -> GenerateConfig:
+    def default_generate_config(self):
         return self.model.default_generate_config

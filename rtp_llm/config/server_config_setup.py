@@ -1,14 +1,15 @@
+import json
 import logging
 import os
-import json
+
 import torch
 
-from rtp_llm.model_factory_register import ModelDict
 from rtp_llm.config.py_config_modules import PyEnvConfigs
-from rtp_llm.ops import RoleType
 from rtp_llm.distribute.worker_info import g_parallel_info, update_worker_info
-from rtp_llm.utils.fuser import fetch_remote_file_to_local
+from rtp_llm.model_factory_register import ModelDict
 from rtp_llm.models_py.utils.arch import is_hip
+from rtp_llm.ops import RoleType
+from rtp_llm.utils.fuser import fetch_remote_file_to_local
 
 
 def auto_configure_deepep(
@@ -19,7 +20,7 @@ def auto_configure_deepep(
 ):
     """
     Automatically configure DeepEP settings based on deployment scenario.
-    
+
     If user has explicitly set any DeepEP configuration values (in deep_ep_config),
     those values will be used. Otherwise, automatic configuration will be applied
     based on the deployment scenario.
@@ -48,10 +49,12 @@ def auto_configure_deepep(
     tp_size = g_parallel_info.tp_size
     ep_size = g_parallel_info.ep_size
 
-    moe_config.use_all_gather = (moe_config.use_all_gather and
-                                 not deep_ep_config.use_deepep_low_latency and
-                                 ep_size == tp_size and
-                                 not is_hip())
+    moe_config.use_all_gather = (
+        moe_config.use_all_gather
+        and not deep_ep_config.use_deepep_low_latency
+        and ep_size == tp_size
+        and not is_hip()
+    )
 
     if moe_config.use_all_gather:
         moe_config.use_deepep_moe = False
@@ -64,9 +67,11 @@ def auto_configure_deepep(
         return
 
     # Check if user has explicitly set DeepEP configuration
-    if (deep_ep_config.use_deepep_moe is None and 
-        deep_ep_config.use_deepep_internode is None and 
-        deep_ep_config.use_deepep_low_latency is None):
+    if (
+        deep_ep_config.use_deepep_moe is None
+        and deep_ep_config.use_deepep_internode is None
+        and deep_ep_config.use_deepep_low_latency is None
+    ):
         # All are None, use auto configuration
         _apply_auto_deepep_config(
             moe_config=moe_config,
@@ -182,9 +187,13 @@ def setup_default_args(py_env_configs):
         )
 
     if not py_env_configs.model_args.model_type:
-        py_env_configs.model_args.model_type = ModelDict.get_ft_model_type_by_config(py_env_configs.model_args.ckpt_path)
+        py_env_configs.model_args.model_type = ModelDict.get_ft_model_type_by_config(
+            py_env_configs.model_args.ckpt_path
+        )
     if not py_env_configs.model_args.model_type:
-        raise ValueError(f"model_type is not set and could not be inferred from checkpoint path: {py_env_configs.model_args.ckpt_path}. Please provide --model_type or MODEL_TYPE environment variable.")
+        raise ValueError(
+            f"model_type is not set and could not be inferred from checkpoint path: {py_env_configs.model_args.ckpt_path}. Please provide --model_type or MODEL_TYPE environment variable."
+        )
 
     if py_env_configs.py_hw_kernel_config.enable_cuda_graph:
         py_env_configs.device_resource_config.not_use_default_stream = True
@@ -204,9 +213,7 @@ def setup_default_args(py_env_configs):
         )
     if os.path.exists("/dev/alixpu") and os.getenv("SEQ_SIZE_PER_BLOCK") is None:
         py_env_configs.kv_cache_config.seq_size_per_block = 256
-        logging.info(
-            "set SEQ_SIZE_PER_BLOCK 256 by default"
-        )
+        logging.info("set SEQ_SIZE_PER_BLOCK 256 by default")
 
     # Set NCCL_P2P_DISABLE for RTX GPUs or when CUDA is not available
     # Frontend doesn't need this setting
@@ -227,33 +234,25 @@ def fetch_model_files_to_local(py_env_configs: PyEnvConfigs):
     # Fetch checkpoint_path from model_args
     model_args = py_env_configs.model_args
     if model_args.ckpt_path:
-        model_args.ckpt_path = fetch_remote_file_to_local(
-            model_args.ckpt_path
-        )
-    
+        model_args.ckpt_path = fetch_remote_file_to_local(model_args.ckpt_path)
+
     # Fetch tokenizer_path from model_args
     tokenizer_path = model_args.tokenizer_path
     if tokenizer_path:
         model_args.tokenizer_path = fetch_remote_file_to_local(tokenizer_path)
-    
+
     # Fetch extra_data_path from model_args
     if model_args.extra_data_path:
-        local_extra_data_path = fetch_remote_file_to_local(
-            model_args.extra_data_path
-        )
+        local_extra_data_path = fetch_remote_file_to_local(model_args.extra_data_path)
         model_args.local_extra_data_path = local_extra_data_path
-    
+
     # Fetch ptuning_path from model_args
     if model_args.ptuning_path:
-        model_args.ptuning_path = fetch_remote_file_to_local(
-            model_args.ptuning_path
-        )
-    
+        model_args.ptuning_path = fetch_remote_file_to_local(model_args.ptuning_path)
+
     if model_args.phy2log_path:
-        model_args.phy2log_path = fetch_remote_file_to_local(
-            model_args.phy2log_path
-        )
-    
+        model_args.phy2log_path = fetch_remote_file_to_local(model_args.phy2log_path)
+
     # Fetch lora paths
     lora_config = py_env_configs.lora_config
     if lora_config.lora_info:
@@ -264,15 +263,17 @@ def fetch_model_files_to_local(py_env_configs: PyEnvConfigs):
             # Update lora_info back to string format
             lora_config.lora_info = json.dumps(lora_infos)
         except (json.JSONDecodeError, TypeError) as e:
-            logging.warning(f"Failed to parse lora_info: {e}, skipping lora path fetching")
-    
+            logging.warning(
+                f"Failed to parse lora_info: {e}, skipping lora path fetching"
+            )
+
     # Fetch checkpoint_path if exists
     sp_config = py_env_configs.sp_config
     if sp_config.checkpoint_path:
         sp_config.checkpoint_path = fetch_remote_file_to_local(
             sp_config.checkpoint_path
         )
-    
+
     logging.info(
         f"Fetched model files - checkpoint_path: {model_args.ckpt_path}, "
         f"tokenizer_path: {model_args.tokenizer_path}, "
@@ -285,13 +286,13 @@ def fetch_model_files_to_local(py_env_configs: PyEnvConfigs):
 def setup_and_configure_server(py_env_configs: PyEnvConfigs):
     """
     Setup default arguments, fetch model files, update worker info, and configure DeepEP.
-    
+
     This function encapsulates the common server initialization steps:
     1. Setup default arguments
     2. Fetch model files to local
     3. Update worker info
     4. Auto-configure DeepEP settings
-    
+
     Args:
         py_env_configs: PyEnvConfigs object to configure
     """
@@ -299,13 +300,13 @@ def setup_and_configure_server(py_env_configs: PyEnvConfigs):
     fetch_model_files_to_local(py_env_configs)
     update_worker_info(
         py_env_configs.server_config.start_port,
-        py_env_configs.server_config.worker_info_port_num
+        py_env_configs.server_config.worker_info_port_num,
+        py_env_configs.distribute_config.remote_server_port,
     )
-    
+
     auto_configure_deepep(
         moe_config=py_env_configs.moe_config,
         deep_ep_config=py_env_configs.deep_ep_config,
         g_parallel_info=g_parallel_info,
         role_type=py_env_configs.role_config.role_type,
     )
-
