@@ -1,4 +1,5 @@
-from typing import Any, List, Tuple, Union, Optional
+import logging
+from typing import Any, List, Optional, Tuple, Union
 
 import torch
 
@@ -14,6 +15,7 @@ from pillow_heif import register_heif_opener
 
 register_heif_opener()
 
+import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from functools import wraps
@@ -168,14 +170,20 @@ class VideoEmbeddingInterface(MultiModalEmbeddingInterface):
 
 class CustomMultiModalEmbeddingInterface(MultiModalEmbeddingInterface):
     @torch.inference_mode()
-    def mm_embedding(self, url: Union[str, List[str]], mm_type: Union[MMUrlType, List[MMUrlType]] = MMUrlType.DEFAULT, tensors: Optional[List[torch.Tensor]] = None, **kwargs: Any):
+    def mm_embedding(
+        self,
+        url: Union[str, List[str]],
+        mm_type: Union[MMUrlType, List[MMUrlType]] = MMUrlType.DEFAULT,
+        tensors: Optional[List[torch.Tensor]] = None,
+        **kwargs: Any,
+    ):
         dtype = self._data_type
         if g_parallel_info.tp_rank > 0:
             return (torch.Tensor([]), None)
-        
+
         # Normalize input to list for unified processing
         input_urls = url if isinstance(url, list) else [url]
-        
+
         # Handle mm_type list vs single
         if isinstance(mm_type, list):
             input_types = mm_type
@@ -188,23 +196,22 @@ class CustomMultiModalEmbeddingInterface(MultiModalEmbeddingInterface):
             configs = [None] * len(input_urls)
 
         # Preprocess all inputs
-        import json
+        import orjson
+
         mm_inputs = []
         for u, t in zip(input_urls, input_types):
-            if t == MMUrlType.CUSTOM_JSON:
-                mm_inputs.append(json.loads(u))
+            if t == MMUrlType.CUSTOM:
+                mm_inputs.append(orjson.loads(u))
             else:
                 mm_inputs.append(u)
-        
+
         with mm_lock:
             # Pass the list of inputs to mm_process (user implementation)
             # User code is expected to handle List[Data] and return List[Result]
             features_batch = self.mm_process(mm_inputs, mm_type=mm_type, **kwargs)
-        
         # Ensure output is a list
         if not isinstance(features_batch, list):
             features_batch = [features_batch]
-            
         processed_results = []
         for feat in features_batch:
             # Handle case where a single block result is a list of tensors (items) -> Concatenate
@@ -212,32 +219,36 @@ class CustomMultiModalEmbeddingInterface(MultiModalEmbeddingInterface):
                 tensor = torch.cat(feat, dim=0)
             else:
                 tensor = feat
-            
+
             # Convert dtype and ensure contiguous
             if isinstance(tensor, torch.Tensor):
                 tensor = tensor.to(dtype).contiguous()
             processed_results.append(tensor)
 
-        # Return based on original input type
         if isinstance(url, list):
             return (processed_results, None)
         else:
             # Return tuple format for single input compatibility with existing backend logic
             if not processed_results:
-                 return (torch.tensor([]).to(dtype), None)
+                return (torch.tensor([]).to(dtype), None)
             return (processed_results[0], None)
 
     @timeout_decorator(30)
     def _mm_preprocess(self, data: str, mm_type: MMUrlType, **kwargs: Any):
         # data here is the string passed from frontend (serialized JSON or raw string)
         import json
-        if mm_type == MMUrlType.CUSTOM_JSON:
+
+        if mm_type == MMUrlType.CUSTOM:
             return json.loads(data)
         return data
 
     @torch.inference_mode()
     def mm_process(self, mm_input, **kwargs):
         return self.custom_modal_embedding(mm_input)
+
+    @torch.inference_mode()
+    def mm_preprocess(self, mm_input, **kwargs):
+        return self.custom_modal_preprocess(mm_input)
 
     @torch.inference_mode()
     def custom_modal_embedding(self, batch_data: Any):
