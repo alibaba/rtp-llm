@@ -16,6 +16,7 @@ from rtp_llm.config.engine_config import EngineConfig, finalize_scheduler_config
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_args import ModelArgs
 from rtp_llm.config.model_config import ModelConfig, build_model_config
+from rtp_llm.model_loader.load_config import LoadMethod
 from rtp_llm.config.py_config_modules import (
     EmbeddingConfig,
     GenerateEnvConfig,
@@ -88,6 +89,7 @@ class ModelFactory:
             fmha_config=engine_config.fmha_config,
             moe_config=engine_config.moe_config,
             load_python_model=engine_config.model_specific_config.load_python_model,
+            load_method=engine_config.load_config.load_method,
             max_generate_batch_size=engine_config.runtime_config.max_generate_batch_size,
             vit_config=vit_config,
             merge_lora=merge_lora,
@@ -144,6 +146,7 @@ class ModelFactory:
             model_cls = ModelFactory.get_model_cls(propose_model_config.model_type)
             # propose model's max seq len must be equal to score model's max seq len
             propose_model_config.max_seq_len = model_config.max_seq_len
+
             gpt_model = model_cls.from_config(
                 model_config=propose_model_config,
                 parallelism_config=engine_config.parallelism_config,
@@ -152,7 +155,9 @@ class ModelFactory:
                 fmha_config=engine_config.fmha_config,
                 moe_config=engine_config.moe_config,
                 load_python_model=engine_config.model_specific_config.load_python_model,
+                load_method=engine_config.load_config.load_method,
                 max_generate_batch_size=engine_config.runtime_config.max_generate_batch_size,
+                device_resource_config=engine_config.device_resource_config,
                 vit_config=None,  # Propose model doesn't need vit_config
                 merge_lora=False,  # Propose model doesn't need merge_lora
             )

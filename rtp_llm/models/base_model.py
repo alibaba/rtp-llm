@@ -50,12 +50,12 @@ class BaseModel(object):
         kv_cache_config: KVCacheConfig,
         fmha_config: FMHAConfig,
         moe_config: MoeConfig,
-        load_python_model: bool = False,
-        max_generate_batch_size: int = 0,
-        load_method: LoadMethod = LoadMethod.AUTO,
-        vit_config: Optional[VitConfig] = None,
-        merge_lora: bool = False,
-        device_resource_config: Optional[DeviceResourceConfig] = None,
+        load_python_model: bool,
+        max_generate_batch_size: int,
+        load_method: LoadMethod,
+        vit_config: Optional[VitConfig],
+        merge_lora: bool,
+        device_resource_config: Optional[DeviceResourceConfig],
     ) -> None:
         """Initialize BaseModel with independent configuration objects.
         Args:
@@ -182,11 +182,12 @@ class BaseModel(object):
         kv_cache_config: KVCacheConfig,
         fmha_config: FMHAConfig,
         moe_config: MoeConfig,
-        load_python_model: bool = False,
-        max_generate_batch_size: int = 0,
-        vit_config: Optional[VitConfig] = None,
-        merge_lora: bool = False,
-        device_resource_config: Optional[DeviceResourceConfig] = None,
+        load_python_model: bool,
+        load_method: LoadMethod,
+        max_generate_batch_size: int,
+        vit_config: VitConfig,
+        merge_lora: bool,
+        device_resource_config: DeviceResourceConfig,
     ) -> "BaseModel":
         """Create model from independent configuration objects.
         
@@ -199,9 +200,9 @@ class BaseModel(object):
             moe_config: MoE configuration
             load_python_model: Whether to load Python model (instead of C++ GptModel)
             max_generate_batch_size: Maximum batch size for generation
-            vit_config: Optional VitConfig (needed for multimodal models)
+            vit_config: VitConfig (needed for multimodal models)
             merge_lora: Whether to merge LoRA weights
-            device_resource_config: Optional DeviceResourceConfig for device resource configuration
+            device_resource_config: DeviceResourceConfig for device resource configuration
         """
         # All metadata is in model_config
         model = cls(
@@ -212,6 +213,7 @@ class BaseModel(object):
             fmha_config=fmha_config,
             moe_config=moe_config,
             load_python_model=load_python_model,
+            load_method=load_method,
             max_generate_batch_size=max_generate_batch_size,
             vit_config=vit_config,
             merge_lora=merge_lora,

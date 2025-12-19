@@ -3,7 +3,7 @@ from typing import Any, Dict, Optional
 import logging
 
 from rtp_llm.config.kv_cache_config import KVCacheConfig
-from rtp_llm.config.py_config_modules import PyEnvConfigs, WORKER_INFO_PORT_NUM
+from rtp_llm.config.py_config_modules import LoadConfig, PyEnvConfigs, WORKER_INFO_PORT_NUM
 from rtp_llm.distribute.worker_info import (
     g_master_info,
     g_parallel_info,
@@ -57,6 +57,7 @@ class EngineConfig:
     misc_config: MiscellaneousConfig
     arpc_config: ArpcConfig
     grpc_config: GrpcConfig
+    load_config: LoadConfig
     
     def to_string(self) -> str:
         """Return a formatted string representation of EngineConfig for debugging.
@@ -161,6 +162,12 @@ class EngineConfig:
         else:
             lines.append(str(self.arpc_config))
         
+        lines.append("\n[LoadConfig]")
+        if hasattr(self.load_config, 'to_string'):
+            lines.append(self.load_config.to_string())
+        else:
+            lines.append(str(self.load_config))
+        
         lines.append("\n" + "=" * 80)
         return "\n".join(lines)
     
@@ -207,6 +214,7 @@ class EngineConfig:
         cache_store_config = py_env_configs.cache_store_config
         arpc_config = py_env_configs.arpc_config
         grpc_config = py_env_configs.grpc_config
+        load_config = py_env_configs.load_config
         
         # Setup pd_sep_config role_type based on vit_separation
         if py_env_configs.vit_config.vit_separation == VitSeparation.VIT_SEPARATION_ROLE:
@@ -233,6 +241,7 @@ class EngineConfig:
             misc_config=misc_config,
             arpc_config=arpc_config,
             grpc_config=grpc_config,
+            load_config=load_config,
         )
         
         runtime_config.max_generate_batch_size = concurrency_config.concurrency_limit
