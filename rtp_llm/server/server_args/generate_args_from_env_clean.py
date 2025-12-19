@@ -114,7 +114,8 @@ def generate_args_list(only_env_vars: bool = False) -> List[str]:
     # 使用统一的函数初始化所有参数组
     from rtp_llm.server.server_args.server_args import init_all_group_args
 
-    init_all_group_args(parser)
+    py_env_configs = PyEnvConfigs()
+    init_all_group_args(parser, py_env_configs)
 
     # 获取所有参数信息
     all_args = get_all_arguments_from_parser(parser)
