@@ -1,31 +1,29 @@
 # type: ignore
-import os
 import logging
+import os
 
 import torch
-import torch.multiprocessing as mp
 import torch.distributed
+import torch.multiprocessing as mp
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.distribute.worker_info import g_master_info
-
 from rtp_llm.models_py.distributed.collective_torch import (
     destroy_distributed_environment,
     init_distributed_environment,
 )
 from rtp_llm.models_py.distributed.deepep_wrapper import init_deepep_wrapper
-from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_low_latency_router import (
     DeepEpLowLatencyRouter,
 )
-
-from rtp_llm.test.utils.numeric_util import per_token_cast_back
-from rtp_llm.test.utils.port_util import PortsContext, PortManager
 from rtp_llm.ops import MoeConfig, ParallelismConfig, RuntimeConfig
-
+from rtp_llm.test.utils.numeric_util import per_token_cast_back
+from rtp_llm.test.utils.port_util import PortManager, PortsContext
 
 NUM_TOKEN_PER_RANK = 64
 HIDDEN_SIZE = 7168
@@ -33,12 +31,12 @@ TOPK = 8
 NUM_EXPERTS = 128
 
 
-def _init_router(rank: int, use_fp8: bool, parallelism_config: ParallelismConfig, nccl_port: int):
+def _init_router(
+    rank: int, use_fp8: bool, parallelism_config: ParallelismConfig, nccl_port: int
+):
     # set env
     world_size = parallelism_config.world_size
-    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(
-        str(i) for i in range(world_size)
-    )
+    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in range(world_size))
     os.environ["ACCL_DISPATCH_NUM_WARP_GROUPS"] = "4"
     os.environ["ACCL_COMBINE_NUM_WARP_GROUPS"] = "4"
     os.environ["ACCL_LOW_LATENCY_OPTIMIZE"] = "1"
@@ -54,31 +52,29 @@ def _init_router(rank: int, use_fp8: bool, parallelism_config: ParallelismConfig
     model_config.moe_k = TOPK
     model_config.expert_num = NUM_EXPERTS
     model_config.hidden_size = HIDDEN_SIZE
-    
+
     # Use the provided parallelism_config directly
     parallelism_config.nccl_ip = "127.0.0.1"
     parallelism_config.th_nccl_port = nccl_port
-    
+
     moe_config = MoeConfig()
     moe_config.use_deepep_low_latency = True
     moe_config.use_deepep_internode = False
-    
+
     runtime_config = RuntimeConfig()
     runtime_config.max_generate_batch_size = NUM_TOKEN_PER_RANK
-    
+
     config = MoEConfigAdapter(
         model_config=model_config,
         parallelism_config=parallelism_config,
         moe_config=moe_config,
         max_generate_batch_size=NUM_TOKEN_PER_RANK,
     )
-    
+
     torch.cuda.set_device(parallelism_config.local_rank)
     torch.set_default_device(f"cuda:{parallelism_config.local_rank}")
     init_distributed_environment(
-        parallelism_config=parallelism_config,
-        backend="nccl",
-        timeout=60
+        parallelism_config=parallelism_config, backend="nccl", timeout=60
     )
     init_deepep_wrapper(
         group=torch.distributed.group.WORLD,
@@ -101,7 +97,9 @@ def _destroy_router(router: DeepEpLowLatencyRouter):
     destroy_distributed_environment()
 
 
-def _run_deepep_low_latency_router_test(rank: int, use_fp8: bool, parallelism_config: ParallelismConfig, nccl_port: int):
+def _run_deepep_low_latency_router_test(
+    rank: int, use_fp8: bool, parallelism_config: ParallelismConfig, nccl_port: int
+):
     config, router = _init_router(rank, use_fp8, parallelism_config, nccl_port)
     # construct data
     torch.manual_seed(42)
@@ -248,11 +246,13 @@ def _run_deepep_low_latency_router_test(rank: int, use_fp8: bool, parallelism_co
     _destroy_router(router)
 
 
-def _spawn_wrapper(rank: int, use_fp8: bool, world_size: int, test_tp_size: int, nccl_port: int):
+def _spawn_wrapper(
+    rank: int, use_fp8: bool, world_size: int, test_tp_size: int, nccl_port: int
+):
     """Wrapper function for mp.spawn that calculates parallelism config."""
     dp_size = world_size // test_tp_size
     ep_size = world_size  # EP size equals world_size for low latency router
-    
+
     # Calculate parallelism config for this rank
     parallelism_config = ParallelismConfig()
     parallelism_config.tp_size = test_tp_size
@@ -272,20 +272,22 @@ def test_deepep_low_latency_router():
     port_manager = PortManager()
     ports, locks = port_manager.get_consecutive_ports(1)
     nccl_port = ports[0]
-    
+
     world_size = 2
     test_tp_sizes = [1, 2]
 
     for use_fp8 in [True, False]:
         for test_tp_size in test_tp_sizes:
-            logging.info(f"test_deepep_low_latency_router: use_fp8: {use_fp8}, test_tp_size: {test_tp_size}, world_size: {world_size}")
+            logging.info(
+                f"test_deepep_low_latency_router: use_fp8: {use_fp8}, test_tp_size: {test_tp_size}, world_size: {world_size}"
+            )
             mp.spawn(  # pyright: ignore[reportPrivateImportUsage]
                 _spawn_wrapper,
                 args=(use_fp8, world_size, test_tp_size, nccl_port),
                 nprocs=world_size,
                 join=True,
             )
-    
+
     # Release locks after all tests complete
     for lock in locks:
         lock.__exit__(None, None, None)

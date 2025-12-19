@@ -37,7 +37,7 @@ from rtp_llm.utils.fuser import fetch_remote_file_to_local
 def wait_master_done(env_dict: Dict[str, str] = {}, world_rank: int = 0) -> None:
     # Get gang_config_string from environment variable or env_dict
     dist_config_str = env_dict.get(
-        "GANG_CONFIG_STRING", StaticConfig.distribute_config.gang_config_string
+        "GANG_CONFIG_STRING", PyEnvConfigs.distribute_config.gang_config_string
     )
     if not dist_config_str:
         raise RuntimeError("no gang config string, unexpected!")
