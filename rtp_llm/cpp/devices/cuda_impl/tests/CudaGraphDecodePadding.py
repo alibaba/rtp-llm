@@ -47,7 +47,6 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
 
         # Get model parameters for CudaGraphRunner
         self.hidden_size = self.model_config.gpt_init_params.hidden_size
-        self.kv_block_offset = self._calculate_kv_block_offset()
 
         self.op = CudaGraphDecodePaddingOp()
         self.op.init(
@@ -55,20 +54,12 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
             self.hidden_size,
             self.max_seq_len,
             self.tokens_per_block,
-            self.kv_block_offset,
             self.decode_capture_batch_sizes,
         )
         logging.info(
             f"CUDA Graph initialized with batch sizes: 1 to {self.max_batch_size}"
         )
         self.normal_model = self.build_model()
-
-    def _calculate_kv_block_offset(self) -> int:
-        """Calculate kv_block_offset based on model config"""
-        # kv_block_offset = layer_num * block_nums
-        max_total_tokens = 4096
-        block_nums = math.ceil(max_total_tokens / self.tokens_per_block) + 1
-        return self.layer_num * block_nums
 
     def build_model(self) -> GptModelBase:
         """Build model using ModelFactory, similar to rtp_auto_model.py"""
@@ -206,17 +197,12 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
         # Set attention parameters
         attention_inputs.is_prefill = False
         attention_inputs.dtype = get_typemeta(torch.zeros(1, dtype=torch.float16))
-        attention_inputs.kv_block_offset = self.kv_block_offset
 
         # cu_seqlens
         cu_len = batch_size + 1
         cu_seqlens = torch.zeros(cu_len, dtype=torch.int32, device="cpu").pin_memory()
-        cu_seqlens_without_prefix = torch.zeros(
-            cu_len, dtype=torch.int32, device="cpu"
-        ).pin_memory()
 
         attention_inputs.cu_seqlens = cu_seqlens
-        attention_inputs.cu_seqlens_without_prefix = cu_seqlens_without_prefix
 
         inputs.attention_inputs = attention_inputs
         return inputs

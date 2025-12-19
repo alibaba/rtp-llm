@@ -13,7 +13,6 @@ struct GraphParams {
     bool             is_prefill_cuda_graph_mode   = false;
     int              max_seq_len                  = 0;
     int              tokens_per_block             = 0;
-    int              kv_cache_block_offset        = 0;
     size_t           max_context_batch_size       = 1;    // for prefill mode
     size_t           concurrency_limit            = 128;  // for decode mode
     std::size_t      hidden_size                  = 0;

@@ -114,8 +114,6 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_params.concurrency_limit            = device_params.concurrency_config.concurrency_limit;
         graph_params.prefill_capture_seq_lens     = device_params.hw_kernel_config.prefill_capture_seq_lens;
         graph_params.decode_capture_batch_sizes   = device_params.hw_kernel_config.decode_capture_batch_sizes;
-        // kv_cache_block_offset will be set later if needed
-        graph_params.kv_cache_block_offset        = 0;
 
         graph_runner_ = new CudaGraphRunner(graph_params,
                                             py_instance,

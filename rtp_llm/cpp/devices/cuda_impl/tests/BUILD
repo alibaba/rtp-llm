@@ -307,6 +307,19 @@ cc_test(
 )
 
 cc_library(
+    name = "test_cuda_graph_op_utils",
+    hdrs = [
+        "CudaGraphOpUtils.h"
+    ],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/pybind:py_utils",
+        "//rtp_llm/cpp/pybind:th_compute_lib",
+    ] + torch_deps(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "test_cuda_graph_decode_libs",
     srcs = glob([
         "CudaGraphDecodePaddingOp.cc"
@@ -316,6 +329,7 @@ cc_library(
     ],
     copts = copts(),
     deps = [
+        ":test_cuda_graph_op_utils",
         "//rtp_llm/cpp/pybind:py_utils",
         "//rtp_llm/cpp/pybind:th_compute_lib",
     ] + torch_deps(),
@@ -333,6 +347,7 @@ cc_library(
     ],
     copts = copts(),
     deps = [
+        ":test_cuda_graph_op_utils",
         "//rtp_llm/cpp/pybind:py_utils",
         "//rtp_llm/cpp/pybind:th_compute_lib",
     ] + torch_deps(),
