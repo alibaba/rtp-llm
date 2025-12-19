@@ -25,6 +25,7 @@ from rtp_llm.utils.base_model_datatypes import (
     GenerateOutput,
     GenerateOutputs,
 )
+from rtp_llm.utils.grpc_host_channel_pool import GrpcHostChannelPool
 from rtp_llm.utils.grpc_util import trans_option, trans_option_cast, trans_tensor
 
 MAX_GRPC_TIMEOUT_SECONDS = 3600
@@ -297,6 +298,15 @@ class ModelRpcClient(object):
             self._addresses = self._addresses[:serving_ranks]
         logging.info(f"client connect to rpc addresses: {self._addresses}")
         self.model_config = config
+        self._options = [
+            ("grpc.max_metadata_size", 1024 * 1024 * 1024),
+        ]
+        logging.info(f"client options: {self._options}")
+
+        # Initialize the channel pool
+        self._channel_pool = GrpcHostChannelPool(
+            options=self._options, cleanup_interval=60  # clean up every minute
+        )
 
     async def enqueue(
         self, input_py: GenerateInput
@@ -335,21 +345,19 @@ class ModelRpcClient(object):
                     break
 
         try:
-            options = [
-                ("grpc.max_metadata_size", 1024 * 1024 * 1024),
-            ]
-            async with grpc.aio.insecure_channel(
-                address_list[input_py.request_id % len(address_list)], options=options
-            ) as channel:
-                stub = RpcServiceStub(channel)
-                response_iterator = stub.GenerateStreamCall(
-                    input_pb, timeout=grpc_timeout_seconds
-                )
-                # 调用服务器方法并接收流式响应
-                count = 0
-                async for response in response_iterator.__aiter__():
-                    count += 1
-                    yield trans_output(input_py, response, stream_state)
+            # Select target address
+            target_address = address_list[input_py.request_id % len(address_list)]
+
+            # Get channel from pool
+            channel = await self._channel_pool.get(target_address)
+            stub = RpcServiceStub(channel)
+
+            response_iterator = stub.GenerateStreamCall(
+                input_pb, timeout=grpc_timeout_seconds
+            )
+            # 调用服务器方法并接收流式响应
+            async for response in response_iterator.__aiter__():
+                yield trans_output(input_py, response, stream_state)
         except grpc.RpcError as e:
             # TODO(xinfei.sxf) 非流式的请求无法取消了
             if response_iterator:
