@@ -21,3 +21,15 @@ py_test (
     tags = ["open_skip", "H20"],
     exec_properties = {'gpu':'H20', 'gpu_count':'2'},
 )
+
+py_test (
+    name = "deepep_low_latency_router_test_sm100",
+    srcs = ["deepep_low_latency_router_test_sm100.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        "//rtp_llm/models_py/distributed:collective_torch"
+    ],
+    env = {"GPU_COUNT": "2"},
+    tags = ["open_skip", "SM100_ARM"],
+    exec_properties = {'gpu':'SM100_ARM', 'gpu_count':'2'},
+)

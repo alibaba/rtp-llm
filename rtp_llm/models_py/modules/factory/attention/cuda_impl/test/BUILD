@@ -17,6 +17,6 @@ py_test (
         "//rtp_llm:testlib",
     ],
     env = {"GPU_COUNT": "1"},
-    tags = ["open_skip", "B200"],
-    exec_properties = {'gpu':'B200', 'gpu_count':'1'},
+    tags = ["open_skip", "SM100"],
+    exec_properties = {'gpu':'SM100', 'gpu_count':'1'}
 )
