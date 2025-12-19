@@ -47,7 +47,6 @@ py_library(
             "//rtp_llm:aiter",
             "//rtp_llm:pytorch-triton-rocm",
             "//rtp_llm:amdsmi",
-            "//rtp_llm:pytorch-triton-rocm",
         ],
         "@//:using_cuda12": [
             "//rtp_llm:deep_gemm",
