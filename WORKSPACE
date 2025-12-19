@@ -14,6 +14,13 @@ load("//deps:http.bzl", "http_deps")
 
 http_deps()
 
+# Rules Java for FlexLB
+load("@rules_java//java:repositories.bzl", "rules_java_dependencies", "rules_java_toolchains")
+
+rules_java_dependencies()
+
+rules_java_toolchains()
+
 load("//deps:git.bzl", "git_deps")
 
 git_deps()

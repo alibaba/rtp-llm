@@ -1,0 +1,400 @@
+# Copyright 2025 FlexLB Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+load("@bazel_skylib//rules:common_settings.bzl", "string_flag")
+load("@rules_java//java:defs.bzl", "java_binary", "java_library", "java_test")
+load(":maven_rules.bzl", "maven_jar", "maven_test")
+
+# ============================================================================
+# FlexLB - Flexible Load Balancer for AI Model Inference
+# ============================================================================
+# FlexLB provides intelligent load balancing, caching, and request batching
+# for AI/ML workloads, designed to optimize inference performance and resource
+# utilization in distributed model serving environments.
+#
+# This BUILD file provides Bazel integration for the existing Maven project
+# structure, allowing seamless build system interoperability.
+# ============================================================================
+
+package(
+    default_visibility = ["//visibility:public"],
+)
+
+# License file for distribution
+exports_files(
+    ["LICENSE"],
+    visibility = ["//visibility:public"],
+)
+
+# ============================================================================
+# Build Configuration Flags
+# ============================================================================
+
+string_flag(
+    name = "flexlb_version",
+    build_setting_default = "1.0.0-SNAPSHOT",
+    visibility = ["//visibility:public"],
+)
+
+string_flag(
+    name = "java_version",
+    build_setting_default = "8",
+    visibility = ["//visibility:public"],
+)
+
+# ============================================================================
+# Java Toolchain Configuration
+# ============================================================================
+
+java_runtime(
+    name = "flexlb_java_runtime",
+    java_home = select({
+        "@platforms//os:linux": "/opt/taobao/install/ajdk21_21.0.6.0.6",
+        "//conditions:default": None,
+    }),
+    visibility = ["//visibility:public"],
+)
+
+# ============================================================================
+# Common Definitions and Macros
+# ============================================================================
+
+FLEXLB_VERSION = "1.0.0-SNAPSHOT"
+MAVEN_COORDINATES_PREFIX = "org.flexlb:"
+
+# ============================================================================
+# Module Build Targets
+# ============================================================================
+# The modules are built in dependency order:
+# flexlb-common -> flexlb-cache -> flexlb-grpc -> flexlb-sync -> flexlb-api
+
+# flexlb-common: Core utilities and shared components
+maven_jar(
+    name = "flexlb-common",
+    srcs = glob([
+        "flexlb-common/src/**/*.java",
+        "flexlb-common/pom.xml",
+    ]),
+    deps = [],
+    jar_name = "flexlb-common-{}.jar".format(FLEXLB_VERSION),
+    module_dir = "flexlb-common",
+    modules = ["flexlb-common"],
+    pom = "pom.xml",
+    visibility = ["//visibility:public"],
+)
+
+# flexlb-cache: Distributed caching layer
+maven_jar(
+    name = "flexlb-cache",
+    srcs = glob([
+        "flexlb-cache/src/**/*.java",
+        "flexlb-cache/pom.xml",
+    ]),
+    deps = [":flexlb-common"],
+    jar_name = "flexlb-cache-{}.jar".format(FLEXLB_VERSION),
+    module_dir = "flexlb-cache",
+    modules = ["flexlb-common", "flexlb-cache"],
+    pom = "pom.xml",
+    visibility = ["//visibility:public"],
+)
+
+# flexlb-grpc: gRPC client implementation
+maven_jar(
+    name = "flexlb-grpc",
+    srcs = glob([
+        "flexlb-grpc/src/**/*.java",
+        "flexlb-grpc/src/main/resources/proto/**/*.proto",
+        "flexlb-grpc/pom.xml",
+    ]),
+    deps = [
+        ":flexlb-common",
+        ":flexlb-cache",
+    ],
+    jar_name = "flexlb-grpc-{}.jar".format(FLEXLB_VERSION),
+    module_dir = "flexlb-grpc",
+    modules = ["flexlb-common", "flexlb-cache", "flexlb-grpc"],
+    pom = "pom.xml",
+    visibility = ["//visibility:public"],
+)
+
+# flexlb-sync: Core load balancing and synchronization
+maven_jar(
+    name = "flexlb-sync",
+    srcs = glob([
+        "flexlb-sync/src/**/*.java",
+        "flexlb-sync/pom.xml",
+    ]),
+    deps = [
+        ":flexlb-common",
+        ":flexlb-cache",
+        ":flexlb-grpc",
+    ],
+    jar_name = "flexlb-sync-{}.jar".format(FLEXLB_VERSION),
+    module_dir = "flexlb-sync",
+    modules = ["flexlb-common", "flexlb-cache", "flexlb-grpc", "flexlb-sync"],
+    pom = "pom.xml",
+    visibility = ["//visibility:public"],
+)
+
+# flexlb-api: RESTful API and web layer
+maven_jar(
+    name = "flexlb-api",
+    srcs = glob([
+        "flexlb-api/src/**/*.java",
+        "flexlb-api/src/main/resources/**/*",
+        "flexlb-api/pom.xml",
+    ]),
+    deps = [
+        ":flexlb-common",
+        ":flexlb-cache",
+        ":flexlb-grpc",
+        ":flexlb-sync",
+    ],
+    jar_name = "flexlb-api-{}.jar".format(FLEXLB_VERSION),
+    module_dir = "flexlb-api",
+    modules = ["flexlb-common", "flexlb-cache", "flexlb-grpc", "flexlb-sync", "flexlb-api"],
+    pom = "pom.xml",
+    visibility = ["//visibility:public"],
+)
+
+# ============================================================================
+# Aggregate Targets
+# ============================================================================
+
+# Build all modules
+filegroup(
+    name = "all",
+    srcs = [
+        ":flexlb-api",
+        ":flexlb-cache",
+        ":flexlb-common",
+        ":flexlb-grpc",
+        ":flexlb-sync",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+# Distribution package including all JARs and documentation
+filegroup(
+    name = "flexlb-dist",
+    srcs = [
+        ":all",
+        "LICENSE",
+        "README.md",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+# ============================================================================
+# Test Targets
+# ============================================================================
+
+# Test targets for each module
+maven_test(
+    name = "flexlb-common-test",
+    srcs = glob([
+        "flexlb-common/src/**/*.java",
+        "flexlb-common/pom.xml",
+    ]),
+    deps = [],
+    module_dir = "flexlb-common",
+    modules = ["flexlb-common"],
+    pom = "pom.xml",
+    visibility = ["//visibility:public"],
+)
+
+maven_test(
+    name = "flexlb-cache-test",
+    srcs = glob([
+        "flexlb-cache/src/**/*.java",
+        "flexlb-cache/pom.xml",
+    ]),
+    deps = [":flexlb-common"],
+    module_dir = "flexlb-cache",
+    modules = ["flexlb-common", "flexlb-cache"],
+    pom = "pom.xml",
+    visibility = ["//visibility:public"],
+)
+
+maven_test(
+    name = "flexlb-grpc-test",
+    srcs = glob([
+        "flexlb-grpc/src/**/*.java",
+        "flexlb-grpc/src/main/resources/proto/**/*.proto",
+        "flexlb-grpc/pom.xml",
+    ]),
+    deps = [
+        ":flexlb-common",
+        ":flexlb-cache",
+    ],
+    module_dir = "flexlb-grpc",
+    modules = ["flexlb-common", "flexlb-cache", "flexlb-grpc"],
+    pom = "pom.xml",
+    visibility = ["//visibility:public"],
+)
+
+maven_test(
+    name = "flexlb-sync-test",
+    srcs = glob([
+        "flexlb-sync/src/**/*.java",
+        "flexlb-sync/pom.xml",
+    ]),
+    deps = [
+        ":flexlb-common",
+        ":flexlb-cache",
+        ":flexlb-grpc",
+    ],
+    module_dir = "flexlb-sync",
+    modules = ["flexlb-common", "flexlb-cache", "flexlb-grpc", "flexlb-sync"],
+    pom = "pom.xml",
+    visibility = ["//visibility:public"],
+)
+
+maven_test(
+    name = "flexlb-api-test",
+    srcs = glob([
+        "flexlb-api/src/**/*.java",
+        "flexlb-api/src/main/resources/**/*",
+        "flexlb-api/pom.xml",
+    ]),
+    deps = [
+        ":flexlb-common",
+        ":flexlb-cache",
+        ":flexlb-grpc",
+        ":flexlb-sync",
+    ],
+    module_dir = "flexlb-api",
+    modules = ["flexlb-common", "flexlb-cache", "flexlb-grpc", "flexlb-sync", "flexlb-api"],
+    pom = "pom.xml",
+    visibility = ["//visibility:public"],
+)
+
+# Run all tests
+test_suite(
+    name = "test",
+    tests = [
+        ":flexlb-api-test",
+        ":flexlb-cache-test",
+        ":flexlb-common-test",
+        ":flexlb-grpc-test",
+        ":flexlb-sync-test",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+# ============================================================================
+# Documentation and Analysis Targets
+# ============================================================================
+
+genrule(
+    name = "generate-docs",
+    srcs = glob([
+        "*/src/main/java/**/*.java",
+        "*/pom.xml",
+        "pom.xml",
+    ]),
+    outs = ["flexlb-docs.tar.gz"],
+    cmd = """
+        set -euo pipefail
+        POM_FILE=$$(dirname $(location pom.xml))
+        cd $$POM_FILE
+        ./mvnw javadoc:aggregate -B -q
+        tar czf $(location flexlb-docs.tar.gz) -C target/site/apidocs .
+    """,
+    message = "Generating API documentation",
+    visibility = ["//visibility:public"],
+)
+
+genrule(
+    name = "dependency-report",
+    srcs = ["pom.xml"],
+    outs = ["dependency-report.txt"],
+    cmd = """
+        set -euo pipefail
+        POM_FILE=$$(dirname $(location pom.xml))
+        cd $$POM_FILE
+        ./mvnw dependency:tree -B > $(location dependency-report.txt)
+    """,
+    message = "Generating dependency report",
+    visibility = ["//visibility:public"],
+)
+
+# ============================================================================
+# CI/CD Integration Targets
+# ============================================================================
+
+# Target for continuous integration builds
+alias(
+    name = "ci",
+    actual = ":all",
+    visibility = ["//visibility:public"],
+)
+
+# Target for continuous integration tests
+alias(
+    name = "ci-test",
+    actual = ":test",
+    visibility = ["//visibility:public"],
+)
+
+# ============================================================================
+# Developer Convenience Targets
+# ============================================================================
+
+# Quick build without tests
+alias(
+    name = "build",
+    actual = ":all",
+    visibility = ["//visibility:public"],
+)
+
+# Clean build (handled by Bazel's clean command)
+# Run: bazel clean
+
+# ============================================================================
+# Platform-Specific Configurations
+# ============================================================================
+
+config_setting(
+    name = "linux",
+    constraint_values = ["@platforms//os:linux"],
+    visibility = ["//visibility:public"],
+)
+
+config_setting(
+    name = "darwin",
+    constraint_values = ["@platforms//os:osx"],
+    visibility = ["//visibility:public"],
+)
+
+# ============================================================================
+# Release Targets
+# ============================================================================
+
+genrule(
+    name = "prepare-release",
+    srcs = [":all"],
+    outs = ["flexlb-{version}.tar.gz".format(version = FLEXLB_VERSION)],
+    cmd = """
+        set -euo pipefail
+        VERSION="{version}"
+        mkdir -p flexlb-$$VERSION/lib
+        for jar in $$(echo $(SRCS)); do
+            cp $$jar flexlb-$$VERSION/lib/
+        done
+        tar czf $(location flexlb-{version}.tar.gz) flexlb-$$VERSION
+    """.format(version = FLEXLB_VERSION),
+    message = "Preparing release package",
+    visibility = ["//visibility:public"],
+)
