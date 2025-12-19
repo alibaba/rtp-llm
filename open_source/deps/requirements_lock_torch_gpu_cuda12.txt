@@ -612,8 +612,7 @@ filelock==3.20.0 \
 flash-attn @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/flash_attn-2.7.4.post1%2Bcu12torch2.6cxx11abiTRUE-cp310-cp310-linux_x86_64.whl \
     --hash=sha256:bfdb0f290cc3d21d0810ba49a360ef91090f62cdc1345ec6900447e0d12d99af
     # via -r open_source/deps/requirements_torch_gpu_cuda12.txt
-flashinfer-python==0.2.5 \
-    --hash=sha256:990aa090ef781783e76b836696ece4efd23956f72b5696d622fc619a61162aef
+flashinfer-python @ http://search-ad.oss-cn-hangzhou-zmf.aliyuncs.com/jingrong/flashinfer_python-0.2.5%2Bcu126torch2.6.mla384-cp38-abi3-linux_x86_64.whl ; platform_machine == "x86_64"
     # via -r open_source/deps/requirements_torch_gpu_cuda12.txt
 fonttools==4.53.1 \
     --hash=sha256:02569e9a810f9d11f4ae82c391ebc6fb5730d95a0657d24d754ed7763fb2d122 \
@@ -1622,7 +1621,7 @@ ninja==1.13.0 \
     --hash=sha256:fa2a8bfc62e31b08f83127d1613d10821775a0eb334197154c4d6067b7068ff1 \
     --hash=sha256:fb46acf6b93b8dd0322adc3a4945452a4e774b75b91293bafcc7b7f8e6517dfa \
     --hash=sha256:fb8ee8719f8af47fed145cced4a85f0755dd55d45b2bddaf7431fa89803c5f3e
-    # via flashinfer-python
+    # via flashinfer-python @ http://search-ad.oss-cn-hangzhou-zmf.aliyuncs.com/jingrong/flashinfer_python-0.2.5%2Bcu126torch2.6.mla384-cp38-abi3-linux_x86_64.whl ; platform_machine == "x86_64"
 numba==0.60.0 \
     --hash=sha256:01ef4cd7d83abe087d644eaa3d95831b777aa21d441a23703d649e06b8e06b74 \
     --hash=sha256:0b983bd6ad82fe868493012487f34eae8bf7dd94654951404114f23c3466d34b \
@@ -1691,7 +1690,7 @@ numpy==1.26.4 \
     #   contourpy
     #   datasets
     #   decord
-    #   flashinfer-python
+    #   flashinfer-python @ http://search-ad.oss-cn-hangzhou-zmf.aliyuncs.com/jingrong/flashinfer_python-0.2.5%2Bcu126torch2.6.mla384-cp38-abi3-linux_x86_64.whl ; platform_machine == "x86_64"
     #   gekko
     #   librosa
     #   matplotlib
@@ -3161,7 +3160,7 @@ torch @ https://mirrors.aliyun.com/pytorch-wheels/cu126/torch-2.6.0%2Bcu126-cp31
     #   autoawq
     #   bitsandbytes
     #   flash-attn
-    #   flashinfer-python
+    #   flashinfer-python @ http://search-ad.oss-cn-hangzhou-zmf.aliyuncs.com/jingrong/flashinfer_python-0.2.5%2Bcu126torch2.6.mla384-cp38-abi3-linux_x86_64.whl ; platform_machine == "x86_64"
     #   peft
     #   sentence-transformers
     #   timm
