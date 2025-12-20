@@ -2,7 +2,7 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/utils/HashUtil.h"
 #include "rtp_llm/cpp/core/BufferHelper.h"
-#include "rtp_llm/cpp/cache_new/types.h"
+#include "rtp_llm/cpp/cache/types.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 
 using namespace std;

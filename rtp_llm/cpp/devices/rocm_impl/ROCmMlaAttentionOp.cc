@@ -65,13 +65,13 @@ void ROCmDevice::mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params
                                      params.kv_offset);
 
     if (params.common.kv_cache.has_value()) {
-        const auto& k_cache_shape = params.common.kv_cache->k_cache_buffer->shape();
+        const auto& k_cache_shape = params.common.kv_cache->kv_cache_buffer->shape();
         auto        k_cache       = Buffer2torchTensorWithStride(
-            *params.common.kv_cache->k_cache_buffer,
+            *params.common.kv_cache->kv_cache_buffer,
             {(int64_t)k_cache_shape[0], (int64_t)k_cache_shape[1], (int64_t)params.configs.kv_lora_rank},
             0);
         auto v_cache = Buffer2torchTensorWithStride(
-            *params.common.kv_cache->k_cache_buffer,
+            *params.common.kv_cache->kv_cache_buffer,
             {(int64_t)k_cache_shape[0], (int64_t)k_cache_shape[1], (int64_t)params.configs.rope_head_dim},
             params.configs.kv_lora_rank);
         if (params.is_decode) {
@@ -136,7 +136,7 @@ void ROCmDevice::mlaAbsorbAttention(const MlaAttentionModuleParams& params) {
     if (!flash_infer_attn) {
         throw std::runtime_error("flash_infer_attn must be setting when using mla");
     }
-    const auto& ckv_cache_shape = params.common.kv_cache->k_cache_buffer->shape();
+    const auto& ckv_cache_shape = params.common.kv_cache->kv_cache_buffer->shape();
     auto        datatype        = params.q.type();
     at::Tensor  attn_out_t;
     BufferPtr   attn_out;
@@ -152,7 +152,7 @@ void ROCmDevice::mlaAbsorbAttention(const MlaAttentionModuleParams& params) {
     const int64_t num_heads         = fused_q_input_t.size(1);
     const float   softmax_scale     = params.configs.softmax_extra_scale / sqrtf(params.configs.size_per_head * 1.0f);
     const int64_t kv_lora_rank      = params.configs.kv_lora_rank;
-    auto          ckv_cache_reshape = params.common.kv_cache->k_cache_buffer->reshape({
+    auto          ckv_cache_reshape = params.common.kv_cache->kv_cache_buffer->reshape({
         ckv_cache_shape[0],
         ckv_cache_shape[1],
         1,

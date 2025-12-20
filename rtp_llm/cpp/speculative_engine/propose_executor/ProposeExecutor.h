@@ -3,7 +3,7 @@
 #include "absl/status/status.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
-#include "rtp_llm/cpp/cache_new/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/Executor.h"
 #include "rtp_llm/cpp/models/lora/LoraManager.h"
@@ -28,11 +28,11 @@ protected:
 };
 
 std::unique_ptr<ProposeExecutor>
-createProposeExecutor(const EngineInitParams&                              score_model_engine_init_params,
-                      std::unique_ptr<ProposeModelEngineInitParams>&       propose_model_engine_init_params,
-                      rtp_llm::DeviceBase*                                 device,
-                      const std::shared_ptr<KVCacheManager>&               cache_manager,
+createProposeExecutor(const EngineInitParams&                             score_model_engine_init_params,
+                      std::unique_ptr<ProposeModelEngineInitParams>&      propose_model_engine_init_params,
+                      rtp_llm::DeviceBase*                                device,
+                      const std::shared_ptr<KVCacheManager>&              cache_manager,
                       const std::vector<std::shared_ptr<KVCacheManager>>& mtp_cache_managers,
-                      const std::shared_ptr<lora::LoraManager>&            lora_manager);
+                      const std::shared_ptr<lora::LoraManager>&           lora_manager);
 
 }  // namespace rtp_llm

@@ -84,9 +84,9 @@ torch::Tensor TRTPagedPrefillOp::forward(const torch::Tensor&              input
         throw std::runtime_error("kv_cache must be provided for trt v2 fmha paged");
     }
     kv_block_array                 = params->kv_block_array;
-    kv_block_array.mPrimaryPoolPtr = kv_cache.value().k_cache_base.data_ptr();
-    if (kv_cache.value().k_scale_base.defined() && kv_cache.value().k_scale_base.numel() > 0) {
-        kv_block_array.scale = kv_cache.value().k_scale_base.data_ptr();
+    kv_block_array.mPrimaryPoolPtr = kv_cache.value().kv_cache_base.data_ptr();
+    if (kv_cache.value().kv_scale_base.defined() && kv_cache.value().kv_scale_base.numel() > 0) {
+        kv_block_array.scale = kv_cache.value().kv_scale_base.data_ptr();
     }
 
     const int            local_head_num = attn_configs_.head_num;
@@ -141,9 +141,9 @@ torch::Tensor TRTNormalPrefillOp::forward(const torch::Tensor&              inpu
     KVBlockArray kv_block_array;
     if (kv_cache.has_value()) {
         kv_block_array                 = params->kv_block_array;
-        kv_block_array.mPrimaryPoolPtr = kv_cache.value().k_cache_base.data_ptr();
-        if (kv_cache.value().k_scale_base.defined() && kv_cache.value().k_scale_base.numel() > 0) {
-            kv_block_array.scale = kv_cache.value().k_scale_base.data_ptr();
+        kv_block_array.mPrimaryPoolPtr = kv_cache.value().kv_cache_base.data_ptr();
+        if (kv_cache.value().kv_scale_base.defined() && kv_cache.value().kv_scale_base.numel() > 0) {
+            kv_block_array.scale = kv_cache.value().kv_scale_base.data_ptr();
         }
     }
 
