@@ -41,11 +41,12 @@ CacheConfig CacheConfigCreator::createBasicConfig(const rtp_llm::GptInitParamete
         spec->kv_lora_rank      = static_cast<uint32_t>(param.kv_lora_rank_);
         spec->rope_head_dim     = static_cast<uint32_t>(param.rope_head_dim_);
         spec->local_head_num_kv = 1;  // mla set local_head_num_kv to 1
+        spec->seq_size_per_block = static_cast<uint32_t>(param.seq_size_per_block_);
 
         config.cache_specs.push_back(spec);
-        config.block_size         = static_cast<size_t>(spec->layer_num) * spec->block_size();
+        config.block_size         = static_cast<size_t>(config.layer_num) * spec->block_size();
         config.block_stride       = spec->block_size();
-        config.block_size_bytes   = static_cast<size_t>(spec->layer_num) * spec->block_size_bytes();
+        config.block_size_bytes   = static_cast<size_t>(config.layer_num) * spec->block_size_bytes();
         config.block_stride_bytes = spec->block_size_bytes();
     } else {
         auto spec               = std::make_shared<MHAKVCacheSpec>();
@@ -53,11 +54,12 @@ CacheConfig CacheConfigCreator::createBasicConfig(const rtp_llm::GptInitParamete
         spec->dtype             = dtype;
         spec->local_head_num_kv = static_cast<uint32_t>(std::max(1, local_head_num_kv));
         spec->size_per_head     = static_cast<uint32_t>(param.size_per_head_);
+        spec->seq_size_per_block = static_cast<uint32_t>(param.seq_size_per_block_);
 
         config.cache_specs.push_back(spec);
-        config.block_size         = static_cast<size_t>(spec->layer_num) * spec->block_size();
+        config.block_size         = static_cast<size_t>(config.layer_num) * spec->block_size();
         config.block_stride       = spec->block_size();
-        config.block_size_bytes   = static_cast<size_t>(spec->layer_num) * spec->block_size_bytes();
+        config.block_size_bytes   = static_cast<size_t>(config.layer_num) * spec->block_size_bytes();
         config.block_stride_bytes = spec->block_size_bytes();
     }
 
@@ -167,12 +169,16 @@ CacheConfig CacheConfigCreator::createConfig(const rtp_llm::GptInitParameter&   
         block_nums = static_cast<uint32_t>(param.block_nums_);
     } else {
         const auto kv_cache_mem_size = getKVCacheMemorySize(param, warm_up_result);
-        block_nums = static_cast<uint32_t>(kv_cache_mem_size / static_cast<size_t>(config.block_size));
+        // print kv_cache_mem_size 
+        RTP_LLM_LOG_INFO("kv_cache_mem_size is %ld MiB", kv_cache_mem_size / 1024 / 1024);
+        RTP_LLM_LOG_INFO("config.block_size_bytes is %ld MiB", config.block_size_bytes / 1024 / 1024);
+
+        block_nums = static_cast<uint32_t>(kv_cache_mem_size / static_cast<size_t>(config.block_size_bytes));
     }
     RTP_LLM_CHECK_WITH_INFO(block_nums > 0,
                             "kv cache needs at least 1 block but %ld, each block needs %ld MiB memory",
                             block_nums,
-                            static_cast<long>(config.block_size / 1024 / 1024));
+                            static_cast<long>(config.block_size_bytes / 1024 / 1024));
 
     const auto kv_cache_seq_len = static_cast<size_t>(block_nums) * config.seq_size_per_block;
     config.block_num            = static_cast<int>(block_nums);
@@ -208,12 +214,12 @@ CacheConfigCreator::createSpConfig(const rtp_llm::GptInitParameter&   score_para
             }
 
             block_nums = kv_cache_mem_size
-                         / (static_cast<size_t>(score_config.block_size)
-                            + static_cast<size_t>(propose_config.block_size) * static_cast<size_t>(cache_num));
+                         / (static_cast<size_t>(score_config.block_size_bytes)
+                            + static_cast<size_t>(propose_config.block_size_bytes) * static_cast<size_t>(cache_num));
         } else {
             block_nums =
                 kv_cache_mem_size
-                / (static_cast<size_t>(score_config.block_size) + static_cast<size_t>(propose_config.block_size));
+                / (static_cast<size_t>(score_config.block_size_bytes) + static_cast<size_t>(propose_config.block_size));
         }
     }
     RTP_LLM_CHECK_WITH_INFO(block_nums > 0, "kv cache needs at least 1 block but %ld", block_nums);
