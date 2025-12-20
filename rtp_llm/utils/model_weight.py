@@ -550,6 +550,22 @@ def sp_head_s_gemm_a8(t: torch.Tensor, **kwargs: Any) -> torch.Tensor:
     return sp_head_s(t, **kwargs)
 
 
+def sp_attn_gate(
+    t: torch.Tensor,
+    tp: int,
+    tp_rank: int,
+    head_num: int,
+    hidden_size: int,
+    size_per_head: int,
+    **kwargs: Any,
+):
+    local_head_num = head_num // tp
+    start_idx = local_head_num * tp_rank
+    end_idx = local_head_num * (tp_rank + 1)
+    t = t[:, start_idx * size_per_head : end_idx * size_per_head]
+    return t
+
+
 def trans_qkv(
     ts: List[torch.Tensor], hidden_size: int, head_num: int, size_per_head: int = -1
 ) -> torch.Tensor:
@@ -1102,6 +1118,19 @@ class W:
     post_ln_gamma = "post_layernorm_weights.gamma"
     post_ln_beta = "post_layernorm_weights.beta"
     linear_bias_slopes = "linear_bias_slopes"
+    attn_gate_w = "self_attention_weights.gate.weight"
+    attn_gate_s = "self_attention_weights.gate.scale"
+
+    # linear_attn_weights
+    linear_attn_qkvz_w = "linear_attn.in_proj_qkvz.weight"
+    linear_attn_qkvz_s = "linear_attn.in_proj_qkvz.scale"
+    linear_attn_ba_w = "linear_attn.in_proj_ba.weight"
+    linear_attn_norm_w = "linear_attn.norm.weight"
+    linear_attn_dt_b = "linear_attn.dt_bias"
+    linear_attn_conv1d_w = "linear_attn.conv1d.weight"
+    linear_attn_alog = "linear_attn.A_log"
+    linear_attn_out_w = "linear_attn.out_proj.weight"
+    linear_attn_out_s = "linear_attn.out_proj.scale"
 
     # jina_bert
     q_ln_gamma = "self_attention_weights.q_layernorm.gamma"
@@ -1294,6 +1323,7 @@ class W:
         attn_i_smoother: sp_0,
         attn_o_smoother: sp_0,
         attn_o_shift: sp_0,
+        attn_gate_w: sp_attn_gate,
         # mla
         mla_q_b_w: sp_neg1,
         mla_fusedqkrope_w: sp_id,

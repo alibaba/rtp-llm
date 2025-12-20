@@ -15,6 +15,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.common.router.batched_data
 )
 from rtp_llm.ops import MoeConfig, ParallelismConfig, RuntimeConfig
 
+
 def torch_sparse_block_forward(
     hidden_states: torch.Tensor,
     up_proj: torch.Tensor,
@@ -98,10 +99,12 @@ class FusedMoeBatchedTest(TestCase):
         model_config.hidden_size = hidden_size
         model_config.expert_num = num_experts
         model_config.moe_k = top_k
-        model_config.inter_size = inter_size  # Use inter_size instead of moe_inter_padding_size
+        model_config.inter_size = (
+            inter_size  # Use inter_size instead of moe_inter_padding_size
+        )
         model_config.has_moe_norm = True
         model_config.activation_type = "SiGLU"
-        
+
         parallelism_config = ParallelismConfig()
         parallelism_config.ep_size = 1
         parallelism_config.ep_rank = 0
@@ -112,7 +115,7 @@ class FusedMoeBatchedTest(TestCase):
         parallelism_config.world_size = 1
         parallelism_config.world_rank = 0
         parallelism_config.local_world_size = 1
-        
+
         moe_config = MoeConfig()
         runtime_config = RuntimeConfig()
         runtime_config.max_generate_batch_size = num_tokens
@@ -120,10 +123,9 @@ class FusedMoeBatchedTest(TestCase):
         # Create router and experts
         router = BatchedDataRouter(
             max_num_tokens=num_tokens,
-            num_local_experts=num_experts,
-            num_dispatchers=1,
-            rank=0,
-            num_experts=num_experts,
+            num_local_experts=num_experts // model_param.ep_size,
+            ep_rank=model_param.ep_rank,
+            tp_size=model_param.tp_size,
         )
         scaling_factor = 0.1
         # Create test weights

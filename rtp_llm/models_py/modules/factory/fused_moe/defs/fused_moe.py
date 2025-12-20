@@ -1,10 +1,13 @@
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Union, final
 
 import torch
 
-from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
@@ -109,6 +112,10 @@ class FusedMoeExpertExecutor(ABC):
     def local_num_experts(self) -> int:
         raise NotImplementedError
 
+    @property
+    def topk_ids_dtype(self) -> torch.dtype:
+        return torch.int64
+
     @abstractmethod
     def execute(
         self,
@@ -134,6 +141,10 @@ class FusedMoe(torch.nn.Module):
         self.router = router
         self.fused_experts = fused_experts
         self.expert_num = expert_num
+
+    @property
+    def topk_ids_dtype(self) -> torch.dtype:
+        return self.fused_experts.topk_ids_dtype
 
     def forward(
         self,
