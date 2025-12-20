@@ -13,12 +13,21 @@ BlockPoolConfig createTestConfig(MemoryLayout layout               = LAYER_FIRST
                                  size_t       k_block_stride_bytes = 512,
                                  size_t       v_block_stride_bytes = 512) {
     BlockPoolConfig config;
-    config.layer_num          = 4;
-    config.block_num          = 10;
-    config.block_stride_bytes = k_block_stride_bytes + v_block_stride_bytes;
-    config.layout             = layout;
+    config.layer_num             = 4;
+    config.block_num             = 10;
+    config.kv_block_stride_bytes = k_block_stride_bytes + v_block_stride_bytes;
+    config.kv_scale_stride_bytes = 0;
+    config.block_stride_bytes    = config.kv_block_stride_bytes;
+    config.layout                = layout;
 
-    config.total_size_bytes   = config.layer_num * config.block_num * config.block_stride_bytes;
+    config.kv_block_pool_size_bytes = config.layer_num * config.block_num * config.kv_block_stride_bytes;
+    config.kv_scale_offset_bytes    = config.kv_block_pool_size_bytes;
+    config.total_size_bytes         = config.kv_block_pool_size_bytes;
+    config.total_size               = config.total_size_bytes;
+
+    config.k_block_stride_bytes = k_block_stride_bytes;
+    config.v_block_stride_bytes = v_block_stride_bytes;
+
     config.k_block_size_bytes = config.k_block_stride_bytes * config.layer_num;
     config.v_block_size_bytes = config.v_block_stride_bytes * config.layer_num;
     return config;
