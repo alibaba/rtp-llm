@@ -195,8 +195,8 @@ class AiterDecodeAttnOpAsm(AiterDecodeAttnOpBase):
         self, query: torch.Tensor, kv_cache: Optional[KVCache], fmha_params
     ) -> torch.Tensor:
         seq_lens = fmha_params.seq_lens
-        key_cache = kv_cache.k_cache_base.select(1, 0)
-        value_cache = kv_cache.k_cache_base.select(1, 1)
+        key_cache = kv_cache.kv_cache_base.select(1, 0)
+        value_cache = kv_cache.kv_cache_base.select(1, 1)
         block_tables_id_device = fmha_params.kv_cache_block_id_device
         max_num_blocks = block_tables_id_device.shape[1]
         

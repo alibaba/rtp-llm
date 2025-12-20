@@ -210,6 +210,36 @@ TEST_F(BlockPoolTest, ConvertIndexToBuffer) {
     EXPECT_NE(buffer_info.kv_addr, nullptr);
 }
 
+TEST_F(BlockPoolTest, ConvertIndexToAddrAndBufferWithScale) {
+    auto config = createTestConfig(LAYER_FIRST);
+    // Enable kv scale pool and make sizes consistent with layout:
+    config.enable_kv_scale      = true;
+    config.local_head_num_kv    = 2;
+    config.seq_size_per_block   = 4;
+    config.kv_scale_block_bytes = config.local_head_num_kv * config.seq_size_per_block * sizeof(float);  // ONE of {K,V}
+    config.kv_scale_stride_bytes = 2 * config.kv_scale_block_bytes;  // K+V together for one block
+    config.kv_scale_stride       = config.kv_scale_stride_bytes / sizeof(float);
+    config.kv_scale_pool_size_bytes =
+        static_cast<size_t>(config.layer_num) * static_cast<size_t>(config.block_num) * config.kv_scale_stride_bytes;
+    config.kv_scale_offset_bytes = config.kv_block_pool_size_bytes;
+    config.total_size_bytes      = config.kv_block_pool_size_bytes + config.kv_scale_pool_size_bytes;
+    config.total_size            = config.total_size_bytes;
+
+    block_pool_ = std::make_shared<BlockPool>(config, device_);
+    ASSERT_TRUE(block_pool_->init());
+
+    const int layer = 0;
+    const int block = 0;
+    auto      addr  = block_pool_->convertIndexToAddr(layer, block);
+    EXPECT_NE(addr.kv_addr, nullptr);
+    EXPECT_NE(addr.kv_scale_addr, nullptr);
+
+    auto buf = block_pool_->convertIndexToBuffer(layer, block);
+    EXPECT_NE(buf.kv_addr, nullptr);
+    EXPECT_NE(buf.kv_scale_addr, nullptr);
+    EXPECT_EQ(buf.kv_scale_addr->sizeBytes(), config.kv_scale_stride_bytes);
+}
+
 // LayerCache Base Test
 TEST_F(BlockPoolTest, LayerCacheBaseLayerFirst) {
     auto config = createTestConfig(LAYER_FIRST);
