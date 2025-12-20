@@ -60,12 +60,11 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
         model_input.text_tokens_mask = CACHED_HOST_BUF(TYPE_INT32, {current_tokens_size});
         model_input.mm_features_locs = CACHED_HOST_BUF(TYPE_INT32, {multimodal_features_len});
     }
-    model_input.k_block_size       = k_block_size_;
-    model_input.v_block_size       = v_block_size_;
-    model_input.seq_size_per_block = seq_size_per_block_;
-    model_input.pd_separation      = role_type_ == RoleType::PREFILL;
-    model_input.warmup             = warm_up_;
-    model_input.decode_entrance    = decode_entrance_;
+    model_input.kv_block_stride_bytes = block_stride_bytes_;
+    model_input.seq_size_per_block    = seq_size_per_block_;
+    model_input.pd_separation         = role_type_ == RoleType::PREFILL;
+    model_input.warmup                = warm_up_;
+    model_input.decode_entrance       = decode_entrance_;
 
     int* merged_tokens      = (int*)model_input.combo_tokens->data();
     int* input_lengths      = (int*)model_input.input_lengths->data();

@@ -7,7 +7,7 @@
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
-#include "rtp_llm/cpp/cache_new/types.h"
+#include "rtp_llm/cpp/cache/types.h"
 
 using namespace std;
 

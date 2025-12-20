@@ -1,6 +1,6 @@
 #pragma once
 
-#include "rtp_llm/cpp/cache_new/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/cpp/models/GptModel.h"
 #include "rtp_llm/cpp/speculative_engine/propose_executor/ProposeExecutor.h"

@@ -102,19 +102,19 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
     PrefixPromptBatchWeightsParam prefix_prompt_param{};
     if (kv_cache.has_value()) {
         // 验证KV cache指针有效性
-        if (!kv_cache.value().k_cache_base.defined() || kv_cache.value().k_cache_base.numel() == 0) {
+        if (!kv_cache.value().kv_cache_base.defined() || kv_cache.value().kv_cache_base.numel() == 0) {
             throw std::runtime_error("FusedRopeKVCachePrefillOp: k_cache_base is not defined or empty");
         }
 
         auto  kv_block_array = params->kv_block_array;
-        void* k_cache_ptr    = kv_cache.value().k_cache_base.data_ptr();
+        void* k_cache_ptr    = kv_cache.value().kv_cache_base.data_ptr();
         if (k_cache_ptr == nullptr) {
             throw std::runtime_error("FusedRopeKVCachePrefillOp: k_cache_base data pointer is null");
         }
 
         kv_block_array.mPrimaryPoolPtr = k_cache_ptr;
-        if (kv_cache.value().k_scale_base.defined() && kv_cache.value().k_scale_base.numel() > 0) {
-            void* scale_ptr = kv_cache.value().k_scale_base.data_ptr();
+        if (kv_cache.value().kv_scale_base.defined() && kv_cache.value().kv_scale_base.numel() > 0) {
+            void* scale_ptr = kv_cache.value().kv_scale_base.data_ptr();
             if (scale_ptr != nullptr) {
                 kv_block_array.scale = scale_ptr;
             }
@@ -349,9 +349,9 @@ torch::Tensor FusedRopeKVCacheDecodeOpBase::forward(const torch::Tensor&        
     assert(kv_cache.has_value() && "decode should have kv cache.");
 
     auto kv_block_array            = params->kv_block_array;
-    kv_block_array.mPrimaryPoolPtr = kv_cache.value().k_cache_base.data_ptr();
-    if (kv_cache.value().k_scale_base.defined() && kv_cache.value().k_scale_base.numel()) {
-        kv_block_array.scale = kv_cache.value().k_scale_base.data_ptr();
+    kv_block_array.mPrimaryPoolPtr = kv_cache.value().kv_cache_base.data_ptr();
+    if (kv_cache.value().kv_scale_base.defined() && kv_cache.value().kv_scale_base.numel()) {
+        kv_block_array.scale = kv_cache.value().kv_scale_base.data_ptr();
     }
 
     const int     local_head_num    = attn_configs_.head_num;

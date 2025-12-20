@@ -61,8 +61,11 @@ void printParams(const AttentionModuleParams& params,
 
             for (int i = 0; i < kv_cache_block_id_host->size(); ++i) {
                 int32_t   block_id = *kv_cache_block_id_host->dataWithOffset<int32_t>(i);
-                BufferPtr k_block  = kv_cache->k_cache_buffer->index(block_id);
-                BufferPtr v_block  = kv_cache->v_cache_buffer->index(block_id);
+                BufferPtr kv_block = kv_cache->kv_cache_buffer->index(block_id);
+                BufferPtr k_block =
+                    (kv_block && kv_block->dim() > 0 && kv_block->shape()[0] >= 1) ? kv_block->index(0) : kv_block;
+                BufferPtr v_block =
+                    (kv_block && kv_block->dim() > 0 && kv_block->shape()[0] >= 2) ? kv_block->index(1) : kv_block;
                 saveOneKVBlock(k_block, dump_dir, "k", block_id);
                 saveOneKVBlock(v_block, dump_dir, "v", block_id);
             }
@@ -82,11 +85,11 @@ void printParams(const AttentionModuleParams& params,
         printf("❌ params.common.kv_cache->kv_cache_block_id is nullptr\n");
     }
 
-    // k_cache_buffer
-    if (params.common.kv_cache && params.common.kv_cache->k_cache_buffer) {
-        printf("params.common.k_cache_buffer\n%s\n", params.common.kv_cache->k_cache_buffer->debugString().c_str());
+    // kv_cache_buffer
+    if (params.common.kv_cache && params.common.kv_cache->kv_cache_buffer) {
+        printf("params.common.kv_cache_buffer\n%s\n", params.common.kv_cache->kv_cache_buffer->debugString().c_str());
     } else {
-        printf("params.common.k_cache_buffer is nullptr\n");
+        printf("params.common.kv_cache_buffer is nullptr\n");
     }
 
     // input_lengths
@@ -315,29 +318,29 @@ void prepareContextMLAFlashInferAttnParamsImpl(FlashInferAttnParams*            
     params->page_indptr_t              = Buffer2torchTensor(params->page_indptr, false);
 }
 
-void prepareDecodeAiterAttnParamsImpl(AiterAttnParams*     params,
-                                      rtp_llm::DeviceBase* device,
-                                      const BufferPtr&     sequence_lengths_host,
+void prepareDecodeAiterAttnParamsImpl(AiterAttnParams*        params,
+                                      rtp_llm::DeviceBase*    device,
+                                      const BufferPtr&        sequence_lengths_host,
                                       const AttentionConfigs& configs,
-                                      const BufferPtr&     kv_cache_block_id,
-                                      const int            kv_cache_offset,
-                                      const uint64_t       batch_size) {
+                                      const BufferPtr&        kv_cache_block_id,
+                                      const int               kv_cache_offset,
+                                      const uint64_t          batch_size) {
     if (device->nativeGraphCapturing()) {
         params->sequence_lengths_host = nullptr;
         params->sequence_lengths      = device->clone({*sequence_lengths_host, AllocationType::DEVICE});
         params->sequence_lengths_t    = Buffer2torchTensor(params->sequence_lengths, false);
         params->sequence_lengths_t += 1;
     } else {
-        params->sequence_lengths_host =
-            device->allocateBuffer({DataType::TYPE_INT32, {batch_size}, AllocationType::HOST}, {"sequence_lengths_host"});
+        params->sequence_lengths_host = device->allocateBuffer(
+            {DataType::TYPE_INT32, {batch_size}, AllocationType::HOST}, {"sequence_lengths_host"});
         for (int i = 0; i < int(batch_size); i++) {
             params->sequence_lengths_host->data<int>()[i] = sequence_lengths_host->data<int>()[i] + 1;
         }
-        params->sequence_lengths = device->clone({*params->sequence_lengths_host, AllocationType::DEVICE});
+        params->sequence_lengths   = device->clone({*params->sequence_lengths_host, AllocationType::DEVICE});
         params->sequence_lengths_t = Buffer2torchTensor(params->sequence_lengths, false);
     }
 
-    int ele_size   = 2;
+    int             ele_size   = 2;
     KvCacheDataType cache_type = KvCacheDataType::BASE;
 #ifdef ENABLE_FP8
     if (use_fp8_fmha_) {
@@ -345,7 +348,7 @@ void prepareDecodeAiterAttnParamsImpl(AiterAttnParams*     params,
         ele_size   = 1;
     } else
 #endif
-    if (configs.kv_cache_dtype == KvCacheDataType::INT8) {
+        if (configs.kv_cache_dtype == KvCacheDataType::INT8) {
         cache_type = KvCacheDataType::INT8;
         ele_size   = 1;
     } else if (configs.kv_cache_dtype == KvCacheDataType::FP8) {
@@ -354,10 +357,10 @@ void prepareDecodeAiterAttnParamsImpl(AiterAttnParams*     params,
     }
 
     const size_t max_blocks_per_batch = kv_cache_block_id->shape()[1];
-    params->kv_cache_offset =
-      device->allocateBuffer({DataType::TYPE_INT32, {size_t(batch_size), 1, 2, max_blocks_per_batch}, AllocationType::DEVICE},
-                      {"kv_cache_offset"});
-    params->kv_block_array = KVBlockArray(batch_size,
+    params->kv_cache_offset           = device->allocateBuffer(
+        {DataType::TYPE_INT32, {size_t(batch_size), 1, 2, max_blocks_per_batch}, AllocationType::DEVICE},
+        {"kv_cache_offset"});
+    params->kv_block_array                     = KVBlockArray(batch_size,
                                           max_blocks_per_batch,
                                           configs.tokens_per_block,
                                           configs.kv_head_num * configs.size_per_head * ele_size,
@@ -466,11 +469,11 @@ ParamsPtr FlashInferAttnParams::prepareDecodeFlashInferAttnParams(rtp_llm::Devic
     return ret;
 }
 
-ParamsPtr AiterAttnParams::prepareDecodeAiterAttnParams(rtp_llm::DeviceBase* device,
-                                                        const BufferPtr& sequence_lengths_host,
+ParamsPtr AiterAttnParams::prepareDecodeAiterAttnParams(rtp_llm::DeviceBase*    device,
+                                                        const BufferPtr&        sequence_lengths_host,
                                                         const AttentionConfigs& configs,
-                                                        const int kv_cache_offset,
-                                                        const BufferPtr& kv_cache_block_id) {
+                                                        const int               kv_cache_offset,
+                                                        const BufferPtr&        kv_cache_block_id) {
 
     if (!device->initParams().use_aiter_pa) {
         return nullptr;
@@ -484,7 +487,8 @@ ParamsPtr AiterAttnParams::prepareDecodeAiterAttnParams(rtp_llm::DeviceBase* dev
     auto ret    = ParamsPtr(new AiterAttnParams, aiterAttnParamsDeleter);
     auto params = (AiterAttnParams*)ret.get();
 
-    prepareDecodeAiterAttnParamsImpl(params, device, sequence_lengths_host, configs, kv_cache_block_id, kv_cache_offset, batch_size);
+    prepareDecodeAiterAttnParamsImpl(
+        params, device, sequence_lengths_host, configs, kv_cache_block_id, kv_cache_offset, batch_size);
     return ret;
 }
 
@@ -495,28 +499,27 @@ KVBlockArray ROCmDevice::getKVBlockArray(const AttentionModuleParams& params,
                                          bool                         use_offset_array) {
     const auto& kv_cache         = params.common.kv_cache;
     const auto& kv_blocks_offset = *(kv_cache->kv_cache_block_id);
-    const auto& kv_block_offset  = (kv_cache->k_cache_buffer)->shape()[0] * kv_cache->layer_num;
+    const auto& kv_block_offset  = (kv_cache->kv_cache_buffer)->shape()[0] * kv_cache->layer_num;
     RUNTIME_ASSERT_OP_ARG(kv_blocks_offset.shape()[0] == batch_size,
                           "context attention kv blocks batch size expected [%d] but buffer[%s]",
                           (int)batch_size,
                           kv_blocks_offset.debugString().c_str());
     const auto  max_blocks_per_batch = kv_blocks_offset.shape()[1];
-    const auto& k_cache              = *(kv_cache->k_cache_buffer);
-    const auto& v_cache              = *(kv_cache->v_cache_buffer);
-    auto const  elemSize = kv_cache->k_scale_buffer || use_fp8_fmha ? sizeof(int8_t) : 2;  // 2 for kv cache fp16
+    const auto& kv_cache_buf         = *(kv_cache->kv_cache_buffer);
+    auto const  elemSize = kv_cache->kv_scale_buffer || use_fp8_fmha ? sizeof(int8_t) : 2;  // 2 for kv cache fp16
     // RTP_LLM_LOG_INFO("kv_cache[0].typeSize():%d", kv_cache[0].typeSize());
-    RTP_LLM_LOG_DEBUG("kv_blocks_offset size:%d, k_cache:%p, v_cache:%p, "
-                      "k_cache[0].sizeBytes():%d, params.configs.tokens_per_block:%d, "
-                      "kv_block_offset:%d, k_cache (int): %lu, v_cache (int): %lu, "
+    RTP_LLM_LOG_DEBUG("kv_blocks_offset size:%d, kv_cache:%p, v_cache:%p, "
+                      "kv_cache[0].sizeBytes():%d, params.configs.tokens_per_block:%d, "
+                      "kv_block_offset:%d, kv_cache (int): %lu, v_cache (int): %lu, "
                       "max_blocks_per_batch:%d",
                       kv_blocks_offset.size(),
-                      static_cast<void*>(k_cache.data()),  // for %p
-                      static_cast<void*>(v_cache.data()),  // for %p
-                      k_cache[0].sizeBytes(),
+                      static_cast<void*>(kv_cache_buf.data()),  // for %p
+                      static_cast<void*>(kv_cache_buf.data()),  // for %p
+                      kv_cache_buf[0].sizeBytes(),
                       params.configs.tokens_per_block,
                       kv_block_offset,
-                      static_cast<unsigned long>(reinterpret_cast<uintptr_t>(k_cache.data())),  // for %lu
-                      static_cast<unsigned long>(reinterpret_cast<uintptr_t>(v_cache.data())),
+                      static_cast<unsigned long>(reinterpret_cast<uintptr_t>(kv_cache_buf.data())),  // for %lu
+                      static_cast<unsigned long>(reinterpret_cast<uintptr_t>(kv_cache_buf.data())),
                       max_blocks_per_batch);
     auto const   sizePerToken = params.configs.kv_head_num * params.configs.size_per_head * elemSize;
     KVBlockArray kv_cache_buffer =
@@ -526,7 +529,7 @@ KVBlockArray ROCmDevice::getKVBlockArray(const AttentionModuleParams& params,
                      sizePerToken,
                      0,
                      0,
-                     (uint64_t*)k_cache.data(),
+                     (uint64_t*)kv_cache_buf.data(),
                      nullptr,
                      (rtp_llm::KVBlockArrayForContextFMHA::DataType*)kv_cache_offset_pointers.data());
 
@@ -538,10 +541,8 @@ KVBlockArray ROCmDevice::getKVBlockArray(const AttentionModuleParams& params,
                                             stream_);
     }
     check_cuda_error();
-    if (kv_cache->k_scale_buffer) {
-        RUNTIME_ASSERT_OP_ARG(kv_cache->v_scale_buffer,
-                              "v scale buffer should has value when use k scale buffer has value");
-        const auto& k_scale                 = *(kv_cache->k_scale_buffer);
+    if (kv_cache->kv_scale_buffer) {
+        const auto& k_scale                 = *(kv_cache->kv_scale_buffer);
         kv_cache_buffer.scale               = k_scale.data();
         kv_cache_buffer.mScaleBytesPerBlock = k_scale[0].sizeBytes();
     }
@@ -553,7 +554,7 @@ KVBlockArray ROCmDevice::getKVBlockArray(const AttentionModuleParams& params,
 #endif
         if (use_fp8_fmha) {
         cache_type = KvCacheDataType::FP8;
-    } else if (kv_cache->k_scale_buffer && params.configs.kv_cache_dtype == KvCacheDataType::INT8) {
+    } else if (kv_cache->kv_scale_buffer && params.configs.kv_cache_dtype == KvCacheDataType::INT8) {
         RTP_LLM_LOG_DEBUG("now use kv_cache int8");
         cache_type = KvCacheDataType::INT8;
     }
@@ -596,7 +597,7 @@ ParamsPtr ROCmDevice::PrepareCKAttn(const AttentionConfigs& configs,
                                            configs.kv_head_num * configs.size_per_head * elemSize,
                                            0,
                                            0,
-                                           nullptr,  // (uint64_t*)k_cache.data(),
+                                           nullptr,  // (uint64_t*)kv_cache.data(),
                                            nullptr,
                                            (rtp_llm::KVCacheIndex*)ck_attn->kv_cache_offset->data<int>());
     ck_attn->kv_block_array.cache_type          = cache_type;
@@ -644,7 +645,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
         kv_block_array                     = getKVBlockArray(params,
                                          *kv_cache_block_id,
                                          batch_size,
-                                         params.common.kv_cache->k_cache_buffer->type() == DataType::TYPE_FP8_E4M3);
+                                         params.common.kv_cache->kv_cache_buffer->type() == DataType::TYPE_FP8_E4M3);
         prefix_prompt_param.kv_block_array = kv_block_array;
 
         if (params.common.prefix_prompt_lengths) {
@@ -991,10 +992,8 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                 params.common.prefix_prompt_lengths ?
                     clone({*params.common.prefix_prompt_lengths, AllocationType::HOST}) :
                     BufferPtr(new Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_INVALID, {0}, nullptr));
-            auto attention_mask    = attentionMask({*lengths_host,
-                                                    *prefix_lengths_host,
-                                                    q_output->type(),
-                                                    params.configs.is_causal});
+            auto attention_mask =
+                attentionMask({*lengths_host, *prefix_lengths_host, q_output->type(), params.configs.is_causal});
             auto softmax_qk_output = softmax({std::move(qk_output), *attention_mask, nullopt, scale, datatype});
             softmax_qk_output->updateShape(
                 {batch_size, kv_head_num, (head_num / kv_head_num) * seq_len, seq_len_with_prefix});
@@ -1156,7 +1155,7 @@ AttentionModuleOutput ROCmDevice::decoderSelfAttention(const AttentionModulePara
             getKVBlockArray(params,
                             *kv_cache_offset,
                             batch_size,
-                            params.common.kv_cache->k_cache_buffer->type() == DataType::TYPE_FP8_E4M3);
+                            params.common.kv_cache->kv_cache_buffer->type() == DataType::TYPE_FP8_E4M3);
         prefix_prompt_param.kv_block_array = kv_block_array;
 
         auto   token_num          = params.input.shape()[0];
@@ -1268,7 +1267,7 @@ AttentionModuleOutput ROCmDevice::decoderSelfAttention(const AttentionModulePara
             getKVBlockArray(params,
                             *kv_cache_offset,
                             batch_size,
-                            params.common.kv_cache->k_cache_buffer->type() == DataType::TYPE_FP8_E4M3);
+                            params.common.kv_cache->kv_cache_buffer->type() == DataType::TYPE_FP8_E4M3);
 
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
                                          selfAttentionwrapper,

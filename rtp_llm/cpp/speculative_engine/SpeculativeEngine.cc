@@ -7,7 +7,7 @@
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/speculative_engine/propose_executor/MTPStream.h"
-#include "rtp_llm/cpp/cache_new/CacheConfigCreator.h"
+#include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/speculative_engine/SpeculativeScheduler.h"
 #include "rtp_llm/cpp/speculative_engine/SpeculativeGatherBatchScheduler.h"
 #include "rtp_llm/cpp/speculative_engine/propose_executor/VanillaExecutor.h"
@@ -73,10 +73,8 @@ std::shared_ptr<GenerateStream> SpeculativeEngine::createMinFakeStream(int32_t m
                                          {1, (size_t)score_model_params_.model_config_.hidden_size * 3},
                                          rtp_llm::AllocationType::DEVICE});
         } else {
-            fake_hidden_states =
-                device_->allocateBuffer({dtype,
-                                         {1, (size_t)score_model_params_.model_config_.hidden_size},
-                                         rtp_llm::AllocationType::DEVICE});
+            fake_hidden_states = device_->allocateBuffer(
+                {dtype, {1, (size_t)score_model_params_.model_config_.hidden_size}, rtp_llm::AllocationType::DEVICE});
         }
         // avoid logits nan
         device_->bufMemset(*fake_hidden_states, 0);
@@ -135,26 +133,24 @@ absl::Status SpeculativeEngine::init() {
 
     if (score_model_params_.runtime_config.use_gather_batch_scheduler) {
         RTP_LLM_LOG_INFO("create speculative gather batch scheduler");
-        scheduler_.reset(new SpeculativeGatherBatchScheduler(
-            score_model_params_.runtime_config,
-            score_model_params_.model_config_,
-            score_model_params_.pd_sep_config,
-            score_model_params_.parallelism_config,
-            score_model_params_.model_specific_config,
-            resource_context_.cache_manager,
-            metrics_reporter_,
-            propose_model_params_->genNumPerCircle() + 1));
+        scheduler_.reset(new SpeculativeGatherBatchScheduler(score_model_params_.runtime_config,
+                                                             score_model_params_.model_config_,
+                                                             score_model_params_.pd_sep_config,
+                                                             score_model_params_.parallelism_config,
+                                                             score_model_params_.model_specific_config,
+                                                             resource_context_.cache_manager,
+                                                             metrics_reporter_,
+                                                             propose_model_params_->genNumPerCircle() + 1));
     } else {
         RTP_LLM_LOG_INFO("create speculative scheduler");
-        scheduler_.reset(new SpeculativeScheduler(
-            score_model_params_.runtime_config,
-            score_model_params_.model_config_,
-            score_model_params_.pd_sep_config,
-            score_model_params_.parallelism_config,
-            score_model_params_.model_specific_config,
-            resource_context_.cache_manager,
-            metrics_reporter_,
-            propose_model_params_->genNumPerCircle() + 1));
+        scheduler_.reset(new SpeculativeScheduler(score_model_params_.runtime_config,
+                                                  score_model_params_.model_config_,
+                                                  score_model_params_.pd_sep_config,
+                                                  score_model_params_.parallelism_config,
+                                                  score_model_params_.model_specific_config,
+                                                  resource_context_.cache_manager,
+                                                  metrics_reporter_,
+                                                  propose_model_params_->genNumPerCircle() + 1));
     }
     speculative_sampler_ = std::make_unique<SpeculativeSampler>(device_);
     RTP_LLM_LOG_INFO("create speculative sampler");
@@ -195,9 +191,8 @@ absl::StatusOr<GenerateStreamPtr> SpeculativeEngine::preRun(const std::shared_pt
 
 absl::Status SpeculativeEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) {
     if (propose_model_params_->draftModel()) {
-        const auto& propose_params = propose_model_params_->getEngineInitParams();
-        const auto& config                 = CacheConfigCreator::createSpConfig(
-                                                                score_model_params_.model_config_,
+        const auto& propose_params           = propose_model_params_->getEngineInitParams();
+        const auto& config                   = CacheConfigCreator::createSpConfig(score_model_params_.model_config_,
                                                                 propose_params.model_config_,
                                                                 score_model_params_.parallelism_config,
                                                                 score_model_params_.runtime_config,
@@ -206,12 +201,20 @@ absl::Status SpeculativeEngine::initCacheManager(std::optional<WarmUpResult> war
                                                                 warm_up_result,
                                                                 isMTPEagle(),
                                                                 isEagle());
-        auto        scorer_cache_config    = std::get<0>(config);
-        auto        proposer_cache_config  = std::get<1>(config);
-        scorer_cache_config.mtp_model_type = "score_model";
+        auto        scorer_cache_config      = std::get<0>(config);
+        auto        proposer_cache_config    = std::get<1>(config);
+        scorer_cache_config.mtp_model_type   = "score_model";
         proposer_cache_config.mtp_model_type = "propose_model";
-        resource_context_.cache_manager      = make_shared<KVCacheManager>(
-            scorer_cache_config, device_, false, metrics_reporter_, score_model_params_.kv_cache_config, score_model_params_.parallelism_config, score_model_params_.runtime_config);
+        resource_context_.cache_manager      = make_shared<KVCacheManager>(scorer_cache_config,
+                                                                      device_,
+                                                                      false,
+                                                                      metrics_reporter_,
+                                                                      score_model_params_.kv_cache_config,
+                                                                      score_model_params_.parallelism_config,
+                                                                      score_model_params_.runtime_config);
+        if (!resource_context_.cache_manager->init()) {
+            RTP_LLM_FAIL("init kv cache manager failed");
+        }
         if (isMTPEagle()) {
             auto layer_num = propose_model_params_->genNumPerCircle();
             if (isEagle()) {
@@ -220,38 +223,65 @@ absl::Status SpeculativeEngine::initCacheManager(std::optional<WarmUpResult> war
             RTP_LLM_LOG_INFO("mtp cache manager init use layer num : %d", layer_num);
             for (int i = 0; i < layer_num; i++) {
                 RTP_LLM_CHECK(proposer_cache_config.layer_num == 1);
-                resource_context_.mtp_cache_managers.push_back(std::make_shared<KVCacheManager>(
-                    proposer_cache_config, device_, false, metrics_reporter_, score_model_params_.kv_cache_config, score_model_params_.parallelism_config, score_model_params_.runtime_config));
+                resource_context_.mtp_cache_managers.push_back(
+                    std::make_shared<KVCacheManager>(proposer_cache_config,
+                                                     device_,
+                                                     false,
+                                                     metrics_reporter_,
+                                                     score_model_params_.kv_cache_config,
+                                                     score_model_params_.parallelism_config,
+                                                     score_model_params_.runtime_config));
+                if (!resource_context_.mtp_cache_managers.back()->init()) {
+                    RTP_LLM_FAIL("init mtp kv cache manager failed");
+                }
             }
         } else {
-            resource_context_.propose_cache_manager = make_shared<KVCacheManager>(
-                proposer_cache_config, device_, false, metrics_reporter_, score_model_params_.kv_cache_config, score_model_params_.parallelism_config, score_model_params_.runtime_config);
+            resource_context_.propose_cache_manager =
+                make_shared<KVCacheManager>(proposer_cache_config,
+                                            device_,
+                                            false,
+                                            metrics_reporter_,
+                                            score_model_params_.kv_cache_config,
+                                            score_model_params_.parallelism_config,
+                                            score_model_params_.runtime_config);
+            if (!resource_context_.propose_cache_manager->init()) {
+                RTP_LLM_FAIL("init propose kv cache manager failed");
+            }
         }
 
     } else {
-        const auto& config = CacheConfigCreator::createConfig(
-                                    score_model_params_.model_config_,
-                                    score_model_params_.parallelism_config,
-                                    score_model_params_.runtime_config,
-                                    score_model_params_.kv_cache_config,
-                                    warm_up_result,
-                                    score_model_params_.sp_config);
-        resource_context_.cache_manager = make_shared<KVCacheManager>(
-            config, device_, false, metrics_reporter_, score_model_params_.kv_cache_config, score_model_params_.parallelism_config, score_model_params_.runtime_config);
+        const auto& config              = CacheConfigCreator::createConfig(score_model_params_.model_config_,
+                                                              score_model_params_.parallelism_config,
+                                                              score_model_params_.runtime_config,
+                                                              score_model_params_.kv_cache_config,
+                                                              warm_up_result,
+                                                              score_model_params_.sp_config);
+        resource_context_.cache_manager = make_shared<KVCacheManager>(config,
+                                                                      device_,
+                                                                      false,
+                                                                      metrics_reporter_,
+                                                                      score_model_params_.kv_cache_config,
+                                                                      score_model_params_.parallelism_config,
+                                                                      score_model_params_.runtime_config);
+        if (!resource_context_.cache_manager->init()) {
+            RTP_LLM_FAIL("init kv cache manager failed");
+        }
     }
     return absl::OkStatus();
 }
 
 WarmUpResult SpeculativeEngine::warmUp() {
-    std::shared_ptr<GenerateInput>   fake_input       = make_shared<GenerateInput>();
-    fake_input->input_ids                             = device_->allocateBuffer(
-        {rtp_llm::DataType::TYPE_INT32, {(size_t)score_model_params_.model_config_.max_seq_len - 1}, rtp_llm::AllocationType::HOST});
+    std::shared_ptr<GenerateInput> fake_input = make_shared<GenerateInput>();
+    fake_input->input_ids                     = device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32,
+                                                                         {(size_t)score_model_params_.model_config_.max_seq_len - 1},
+                                                                         rtp_llm::AllocationType::HOST});
     std::memset(fake_input->input_ids->data(), 0, fake_input->input_ids->sizeBytes());
-    fake_input->generate_config                       = make_shared<GenerateConfig>();
-    fake_input->generate_config->num_return_sequences = score_model_params_.runtime_config.fifo_scheduler_config.max_context_batch_size;
-    fake_input->generate_config->calculate_loss       = int(score_model_params_.runtime_config.warm_up_with_loss);
-    fake_input->generate_config->top_k                = 2;
-    fake_input->begin_time_us                         = autil::TimeUtility::currentTimeInMicroSeconds();
+    fake_input->generate_config = make_shared<GenerateConfig>();
+    fake_input->generate_config->num_return_sequences =
+        score_model_params_.runtime_config.fifo_scheduler_config.max_context_batch_size;
+    fake_input->generate_config->calculate_loss = int(score_model_params_.runtime_config.warm_up_with_loss);
+    fake_input->generate_config->top_k          = 2;
+    fake_input->begin_time_us                   = autil::TimeUtility::currentTimeInMicroSeconds();
     device_->setTraceMemory(true);
 
     score_executor_.reset(new ScoreExecutor(score_model_params_, device_, nullptr, nullptr, true));
@@ -279,10 +309,9 @@ WarmUpResult SpeculativeEngine::warmUp() {
 }
 
 absl::Status SpeculativeEngine::initSystemPrompt() {
-    resource_context_.reuse_cache = score_model_params_.kv_cache_config.reuse_cache;
-    resource_context_.enable_3fs  = score_model_params_.kv_cache_config.enable_3fs;
-    resource_context_.enable_memory_block_cache =
-        score_model_params_.kv_cache_config.memory_block_cache_size_mb > 0;
+    resource_context_.reuse_cache               = score_model_params_.kv_cache_config.reuse_cache;
+    resource_context_.enable_3fs                = score_model_params_.kv_cache_config.enable_3fs;
+    resource_context_.enable_memory_block_cache = score_model_params_.kv_cache_config.memory_block_cache_size_mb > 0;
 
     if (!score_model_params_.kv_cache_config.multi_task_prompt_tokens.empty()) {
         resource_context_.reuse_cache = true;

@@ -18,10 +18,10 @@
 #include "rtp_llm/cpp/core/Buffer.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
-#include "rtp_llm/cpp/cache_new/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
-#include "rtp_llm/cpp/cache_new/BatchKVCacheResource.h"
-#include "rtp_llm/cpp/cache_new/CacheConfig.h"
+#include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateConfig.h"
@@ -140,7 +140,6 @@ protected:
         config.seq_size_per_block = static_cast<size_t>(tokens_per_block);
         auto spec                 = std::make_shared<rtp_llm::MHAKVCacheSpec>();
         spec->layer_num           = layer_num;
-        spec->block_nums          = block_num;
         spec->local_head_num_kv   = local_head_num_kv;
         spec->size_per_head       = size_per_head;
         spec->seq_size_per_block  = tokens_per_block;
