@@ -49,26 +49,40 @@ protected:
 
         // NOTE:
         // - This test uses int8 cache buffer, so "bytes" == "elements".
-        // - LayerFirstLayoutStrategy reshapes cache_buffer by config.block_size_bytes.
+        // - LayerFirstLayoutStrategy reshapes cache_buffer by config.kv_block_stride_bytes.
         config.dtype = rtp_llm::TYPE_INT8;
 
-        config.k_block_size = k_block_bytes;
-        config.v_block_size = v_block_bytes;
-        config.block_size   = k_block_bytes + v_block_bytes;
+        config.k_block_size          = k_block_bytes;
+        config.v_block_size          = v_block_bytes;
+        config.kv_block_stride_bytes = k_block_bytes + v_block_bytes;
+        config.kv_scale_stride_bytes = 0;
 
         config.k_block_stride       = config.k_block_size;
         config.v_block_stride       = config.v_block_size;
-        config.block_stride         = config.block_size;
         config.k_block_stride_bytes = k_block_bytes;
         config.v_block_stride_bytes = v_block_bytes;
-        config.block_stride_bytes   = config.block_size;
 
-        config.k_block_size_bytes = k_block_bytes;
-        config.v_block_size_bytes = v_block_bytes;
-        config.block_size_bytes   = config.block_size;
+        config.kv_block_stride     = config.k_block_stride + config.v_block_stride;
+        config.kv_block_size       = config.kv_block_stride * static_cast<size_t>(layer_num);
+        config.kv_block_size_bytes = config.kv_block_stride_bytes * static_cast<size_t>(layer_num);
+        config.kv_scale_stride     = 0;
+        config.kv_scale_size       = 0;
+        config.kv_scale_size_bytes = 0;
 
-        config.total_size =
-            static_cast<size_t>(config.layer_num) * static_cast<size_t>(config.block_num) * config.block_size_bytes;
+        config.block_stride       = config.kv_block_stride;
+        config.block_stride_bytes = config.kv_block_stride_bytes;
+        config.block_size         = config.kv_block_size;
+        config.block_size_bytes   = config.kv_block_size_bytes;
+
+        config.k_block_size_bytes = k_block_bytes * static_cast<size_t>(layer_num);
+        config.v_block_size_bytes = v_block_bytes * static_cast<size_t>(layer_num);
+
+        config.kv_block_pool_size_bytes = static_cast<size_t>(config.layer_num) * static_cast<size_t>(config.block_num)
+                                          * config.kv_block_stride_bytes;
+        config.kv_scale_offset_bytes    = config.kv_block_pool_size_bytes;
+        config.kv_scale_pool_size_bytes = 0;
+        config.total_size_bytes         = config.kv_block_pool_size_bytes;
+        config.total_size               = config.total_size_bytes;
 
         // Make kvCacheBuffer() shape construction deterministic for tests.
         config.is_mla             = false;
@@ -136,19 +150,54 @@ class LayerFirstLayoutStrategyTest: public MemoryLayoutStrategyTest {};
 TEST_F(LayerFirstLayoutStrategyTest, Initialization) {
     auto ctx = createTestContext(LAYER_FIRST);
 
-    auto strategy    = std::make_unique<LayerFirstLayoutStrategy>();
-    bool init_result = strategy->init(ctx.config, ctx.cache_buffer, ctx.cache_ptr, ctx.config.dtype);
+    auto          strategy = std::make_unique<LayerFirstLayoutStrategy>();
+    torch::Tensor empty_scale;
+    bool init_result = strategy->init(ctx.config, ctx.cache_buffer, empty_scale, ctx.cache_ptr, ctx.config.dtype);
 
     EXPECT_TRUE(init_result);
+}
+
+TEST_F(LayerFirstLayoutStrategyTest, InitializationWithScaleTensor) {
+    auto config                  = createTestConfig(LAYER_FIRST);
+    config.enable_kv_scale       = true;
+    config.local_head_num_kv     = 2;
+    config.seq_size_per_block    = 4;
+    config.k_token_size          = 1;
+    config.v_token_size          = 1;
+    config.kv_scale_block_bytes  = config.local_head_num_kv * config.seq_size_per_block * sizeof(float);
+    config.kv_scale_stride_bytes = 2 * config.kv_scale_block_bytes;
+    config.kv_scale_stride       = config.kv_scale_stride_bytes / sizeof(float);
+    config.kv_scale_pool_size_bytes =
+        static_cast<size_t>(config.layer_num) * static_cast<size_t>(config.block_num) * config.kv_scale_stride_bytes;
+    config.kv_scale_offset_bytes = config.kv_block_pool_size_bytes;
+    config.total_size_bytes      = config.kv_block_pool_size_bytes + config.kv_scale_pool_size_bytes;
+    config.total_size            = config.total_size_bytes;
+
+    auto  kv_cache_tensor = torch::zeros({static_cast<int64_t>(config.kv_block_pool_size_bytes)}, torch::kInt8);
+    auto  kv_scale_tensor = torch::zeros({static_cast<int64_t>(config.kv_scale_pool_size_bytes)}, torch::kInt8);
+    void* cache_ptr       = kv_cache_tensor.data_ptr();
+
+    auto strategy = std::make_unique<LayerFirstLayoutStrategy>();
+    ASSERT_TRUE(strategy->init(config, kv_cache_tensor, kv_scale_tensor, cache_ptr, config.dtype));
+
+    auto addr_info = strategy->convertIndexToAddr(0, 0);
+    EXPECT_NE(addr_info.kv_addr, nullptr);
+    EXPECT_NE(addr_info.kv_scale_addr, nullptr);
+
+    auto buf_info = strategy->convertIndexToBuffer(0, 0);
+    EXPECT_NE(buf_info.kv_addr, nullptr);
+    EXPECT_NE(buf_info.kv_scale_addr, nullptr);
+    EXPECT_EQ(buf_info.kv_scale_addr->sizeBytes(), config.kv_scale_stride_bytes);
 }
 
 TEST_F(LayerFirstLayoutStrategyTest, InitWithEmptyBuffer) {
     auto          config = createTestConfig(LAYER_FIRST);
     torch::Tensor empty_buffer;
+    torch::Tensor empty_scale;
     void*         cache_ptr = nullptr;
 
     auto strategy    = std::make_unique<LayerFirstLayoutStrategy>();
-    bool init_result = strategy->init(config, empty_buffer, cache_ptr, config.dtype);
+    bool init_result = strategy->init(config, empty_buffer, empty_scale, cache_ptr, config.dtype);
 
     EXPECT_FALSE(init_result);
 }
@@ -156,8 +205,9 @@ TEST_F(LayerFirstLayoutStrategyTest, InitWithEmptyBuffer) {
 TEST_F(LayerFirstLayoutStrategyTest, GetLayerCacheTensors) {
     auto ctx = createTestContext(LAYER_FIRST);
 
-    auto strategy = std::make_unique<LayerFirstLayoutStrategy>();
-    ASSERT_TRUE(strategy->init(ctx.config, ctx.cache_buffer, ctx.cache_ptr, ctx.config.dtype));
+    auto          strategy = std::make_unique<LayerFirstLayoutStrategy>();
+    torch::Tensor empty_scale;
+    ASSERT_TRUE(strategy->init(ctx.config, ctx.cache_buffer, empty_scale, ctx.cache_ptr, ctx.config.dtype));
 
     auto layer_tensors = strategy->getLayerCacheTensors();
     EXPECT_EQ(layer_tensors.size(), ctx.config.layer_num);
@@ -166,15 +216,16 @@ TEST_F(LayerFirstLayoutStrategyTest, GetLayerCacheTensors) {
         EXPECT_TRUE(layer_tensors[i].defined());
         EXPECT_EQ(layer_tensors[i].dim(), 2);
         EXPECT_EQ(layer_tensors[i].size(0), ctx.config.block_num);
-        EXPECT_EQ(layer_tensors[i].size(1), static_cast<int64_t>(ctx.config.block_size_bytes));
+        EXPECT_EQ(layer_tensors[i].size(1), static_cast<int64_t>(ctx.config.kv_block_stride_bytes));
     }
 }
 
 TEST_F(LayerFirstLayoutStrategyTest, ConvertIndexToAddr) {
     auto ctx = createTestContext(LAYER_FIRST);
 
-    auto strategy = std::make_unique<LayerFirstLayoutStrategy>();
-    ASSERT_TRUE(strategy->init(ctx.config, ctx.cache_buffer, ctx.cache_ptr, ctx.config.dtype));
+    auto          strategy = std::make_unique<LayerFirstLayoutStrategy>();
+    torch::Tensor empty_scale;
+    ASSERT_TRUE(strategy->init(ctx.config, ctx.cache_buffer, empty_scale, ctx.cache_ptr, ctx.config.dtype));
 
     for (int layer = 0; layer < static_cast<int>(ctx.config.layer_num); ++layer) {
         for (int block = 0; block < static_cast<int>(ctx.config.block_num); ++block) {
@@ -188,8 +239,9 @@ TEST_F(LayerFirstLayoutStrategyTest, ConvertIndexToAddr) {
 TEST_F(LayerFirstLayoutStrategyTest, ConvertIndexToAddrOutOfRange) {
     auto ctx = createTestContext(LAYER_FIRST);
 
-    auto strategy = std::make_unique<LayerFirstLayoutStrategy>();
-    ASSERT_TRUE(strategy->init(ctx.config, ctx.cache_buffer, ctx.cache_ptr, ctx.config.dtype));
+    auto          strategy = std::make_unique<LayerFirstLayoutStrategy>();
+    torch::Tensor empty_scale;
+    ASSERT_TRUE(strategy->init(ctx.config, ctx.cache_buffer, empty_scale, ctx.cache_ptr, ctx.config.dtype));
 
     auto addr_info = strategy->convertIndexToAddr(static_cast<int>(ctx.config.layer_num) + 1, 0);
     EXPECT_EQ(addr_info.kv_addr, nullptr);
@@ -198,8 +250,9 @@ TEST_F(LayerFirstLayoutStrategyTest, ConvertIndexToAddrOutOfRange) {
 TEST_F(LayerFirstLayoutStrategyTest, GetKVCacheAddr) {
     auto ctx = createTestContext(LAYER_FIRST);
 
-    auto strategy = std::make_unique<LayerFirstLayoutStrategy>();
-    ASSERT_TRUE(strategy->init(ctx.config, ctx.cache_buffer, ctx.cache_ptr, ctx.config.dtype));
+    auto          strategy = std::make_unique<LayerFirstLayoutStrategy>();
+    torch::Tensor empty_scale;
+    ASSERT_TRUE(strategy->init(ctx.config, ctx.cache_buffer, empty_scale, ctx.cache_ptr, ctx.config.dtype));
 
     int layer = 1;
     int block = 2;
@@ -217,8 +270,9 @@ TEST_F(LayerFirstLayoutStrategyTest, GetKVCacheAddr) {
 TEST_F(LayerFirstLayoutStrategyTest, ConvertIndexToBuffer) {
     auto ctx = createTestContext(LAYER_FIRST);
 
-    auto strategy = std::make_unique<LayerFirstLayoutStrategy>();
-    ASSERT_TRUE(strategy->init(ctx.config, ctx.cache_buffer, ctx.cache_ptr, ctx.config.dtype));
+    auto          strategy = std::make_unique<LayerFirstLayoutStrategy>();
+    torch::Tensor empty_scale;
+    ASSERT_TRUE(strategy->init(ctx.config, ctx.cache_buffer, empty_scale, ctx.cache_ptr, ctx.config.dtype));
 
     int layer = 0;
     int block = 0;
@@ -237,8 +291,9 @@ TEST_F(LayerFirstLayoutStrategyTest, ConvertIndexToBufferPartitionedByHead) {
 
     auto ctx = createTestContext(std::move(config), torch::kCPU, BufferInitMode::Arange);
 
-    auto strategy = std::make_unique<LayerFirstLayoutStrategy>();
-    ASSERT_TRUE(strategy->init(ctx.config, ctx.cache_buffer, ctx.cache_ptr, ctx.config.dtype));
+    auto          strategy = std::make_unique<LayerFirstLayoutStrategy>();
+    torch::Tensor empty_scale;
+    ASSERT_TRUE(strategy->init(ctx.config, ctx.cache_buffer, empty_scale, ctx.cache_ptr, ctx.config.dtype));
 
     const int layer = 1;
     const int block = 3;
@@ -246,7 +301,7 @@ TEST_F(LayerFirstLayoutStrategyTest, ConvertIndexToBufferPartitionedByHead) {
     auto full_block_tensor = strategy->getLayerCacheTensors()[layer][block];
     ASSERT_TRUE(full_block_tensor.defined());
     ASSERT_EQ(full_block_tensor.dim(), 1);
-    ASSERT_EQ(static_cast<size_t>(full_block_tensor.numel()), ctx.config.block_size_bytes);
+    ASSERT_EQ(static_cast<size_t>(full_block_tensor.numel()), ctx.config.kv_block_stride_bytes);
 
     const uintptr_t base_ptr = reinterpret_cast<uintptr_t>(full_block_tensor.data_ptr());
 
@@ -302,8 +357,9 @@ TEST_F(LayerFirstLayoutStrategyTest, ConvertIndexToBufferPartitionedLayerOutOfRa
     config.v_token_size       = 1;
     auto ctx                  = createTestContext(std::move(config), torch::kCPU, BufferInitMode::Zeros);
 
-    auto strategy = std::make_unique<LayerFirstLayoutStrategy>();
-    ASSERT_TRUE(strategy->init(ctx.config, ctx.cache_buffer, ctx.cache_ptr, ctx.config.dtype));
+    auto          strategy = std::make_unique<LayerFirstLayoutStrategy>();
+    torch::Tensor empty_scale;
+    ASSERT_TRUE(strategy->init(ctx.config, ctx.cache_buffer, empty_scale, ctx.cache_ptr, ctx.config.dtype));
 
     auto buffers = strategy->convertIndexToBuffer(static_cast<int>(ctx.config.layer_num) + 1, 0, 2, 0);
     EXPECT_TRUE(buffers.empty());
@@ -318,8 +374,9 @@ TEST_F(LayerFirstLayoutStrategyTest, ConvertIndexToBufferPartitionedInvalidArgsT
     config.v_token_size       = 1;
     auto ctx                  = createTestContext(std::move(config), torch::kCPU, BufferInitMode::Zeros);
 
-    auto strategy = std::make_unique<LayerFirstLayoutStrategy>();
-    ASSERT_TRUE(strategy->init(ctx.config, ctx.cache_buffer, ctx.cache_ptr, ctx.config.dtype));
+    auto          strategy = std::make_unique<LayerFirstLayoutStrategy>();
+    torch::Tensor empty_scale;
+    ASSERT_TRUE(strategy->init(ctx.config, ctx.cache_buffer, empty_scale, ctx.cache_ptr, ctx.config.dtype));
 
     const int layer = 0;
     const int block = 0;
@@ -335,8 +392,9 @@ TEST_F(LayerFirstLayoutStrategyTest, ConvertIndexToBufferPartitionedInvalidArgsT
 TEST_F(LayerFirstLayoutStrategyTest, AddressSequentiality) {
     auto ctx = createTestContext(LAYER_FIRST);
 
-    auto strategy = std::make_unique<LayerFirstLayoutStrategy>();
-    ASSERT_TRUE(strategy->init(ctx.config, ctx.cache_buffer, ctx.cache_ptr, ctx.config.dtype));
+    auto          strategy = std::make_unique<LayerFirstLayoutStrategy>();
+    torch::Tensor empty_scale;
+    ASSERT_TRUE(strategy->init(ctx.config, ctx.cache_buffer, empty_scale, ctx.cache_ptr, ctx.config.dtype));
 
     int  layer = 0;
     auto addr1 = strategy->convertIndexToAddr(layer, 0);
@@ -345,7 +403,7 @@ TEST_F(LayerFirstLayoutStrategyTest, AddressSequentiality) {
     size_t addr1_val = reinterpret_cast<size_t>(addr1.kv_addr);
     size_t addr2_val = reinterpret_cast<size_t>(addr2.kv_addr);
 
-    EXPECT_EQ(addr2_val - addr1_val, ctx.config.block_size_bytes);
+    EXPECT_EQ(addr2_val - addr1_val, ctx.config.kv_block_stride_bytes);
 }
 
 // Layout Comparison Test
@@ -359,8 +417,9 @@ TEST_F(MemoryLayoutStrategyTest, SingleLayerSingleBlock) {
                                                   /*k_block_bytes=*/256,
                                                   /*v_block_bytes=*/256));
 
-    auto strategy = std::make_unique<LayerFirstLayoutStrategy>();
-    EXPECT_TRUE(strategy->init(ctx.config, ctx.cache_buffer, ctx.cache_ptr, ctx.config.dtype));
+    auto          strategy = std::make_unique<LayerFirstLayoutStrategy>();
+    torch::Tensor empty_scale;
+    EXPECT_TRUE(strategy->init(ctx.config, ctx.cache_buffer, empty_scale, ctx.cache_ptr, ctx.config.dtype));
 
     auto layer_tensors = strategy->getLayerCacheTensors();
     EXPECT_EQ(layer_tensors.size(), 1);
@@ -376,8 +435,9 @@ TEST_F(MemoryLayoutStrategyTest, LargeConfiguration) {
                                                   /*k_block_bytes=*/2048,
                                                   /*v_block_bytes=*/2048));
 
-    auto strategy = std::make_unique<LayerFirstLayoutStrategy>();
-    EXPECT_TRUE(strategy->init(ctx.config, ctx.cache_buffer, ctx.cache_ptr, ctx.config.dtype));
+    auto          strategy = std::make_unique<LayerFirstLayoutStrategy>();
+    torch::Tensor empty_scale;
+    EXPECT_TRUE(strategy->init(ctx.config, ctx.cache_buffer, empty_scale, ctx.cache_ptr, ctx.config.dtype));
 
     auto layer_tensors = strategy->getLayerCacheTensors();
     EXPECT_EQ(layer_tensors.size(), ctx.config.layer_num);

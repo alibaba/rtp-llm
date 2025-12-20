@@ -22,7 +22,7 @@ public:
         position_id_len_factor_(params.position_id_len_factor_),
         role_type_(params.role_type_),
         decode_entrance_(params.decode_entrance_),
-        block_stride_bytes_(cache_config.block_stride_bytes),
+        block_stride_bytes_(cache_config.kv_block_stride_bytes),
         seq_size_per_block_(cache_config.seq_size_per_block),
         warm_up_(warm_up),
         enable_detail_log_(params.profiling_debug_logging_config.enable_detail_log),
