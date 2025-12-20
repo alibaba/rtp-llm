@@ -5,9 +5,13 @@ namespace rtp_llm {
 
 bool KVCacheGroup::init() {
     auto layer_tensors = block_pool_->layerCacheBase();
+    auto scale_tensors = block_pool_->layerScaleCacheBase();
 
     for (int i = 0; i < layer_ids_.size(); ++i) {
-        gloabl_layer_to_kv_tensors[layer_ids_[i]]  = layer_tensors[i];
+        gloabl_layer_to_kv_tensors[layer_ids_[i]] = layer_tensors[i];
+        if (!scale_tensors.empty()) {
+            gloabl_layer_to_kv_scale_tensors[layer_ids_[i]] = scale_tensors[i];
+        }
         gloabl_layer_to_local_layer[layer_ids_[i]] = i;
     }
 
@@ -46,6 +50,10 @@ int KVCacheGroup::seqSizePerBlock() const {
 
 std::unordered_map<int, torch::Tensor> KVCacheGroup::layerCacheBase() const {
     return gloabl_layer_to_kv_tensors;
+}
+
+std::unordered_map<int, torch::Tensor> KVCacheGroup::layerScaleCacheBase() const {
+    return gloabl_layer_to_kv_scale_tensors;
 }
 
 BlockAddrInfo KVCacheGroup::convertIndexToAddr(int layer_id, int block_id) const {

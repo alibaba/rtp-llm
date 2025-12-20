@@ -94,6 +94,13 @@ void KVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, const BlockI
             }
 
             copy_params.add(dst_addr_info.kv_addr, src_addr_info.kv_addr, kv_block_size_bytes, copy_type);
+
+            if (src_addr_info.kv_scale_addr && dst_addr_info.kv_scale_addr) {
+                copy_params.add(dst_addr_info.kv_scale_addr,
+                                src_addr_info.kv_scale_addr,
+                                static_cast<size_t>(config_.kv_scale_stride_bytes),
+                                copy_type);
+            }
         }
     }
 
@@ -144,8 +151,16 @@ std::vector<std::pair<BufferPtr, size_t>> KVCacheAllocator::getAllBuffers() cons
         if (!buf || buf->sizeBytes() == 0) {
             continue;
         }
-        size_t block_stride_bytes = config_.block_stride;
-        results.emplace_back(buf, block_stride_bytes);
+        const size_t kv_block_stride_bytes = config_.kv_block_stride_bytes;
+        results.emplace_back(buf, kv_block_stride_bytes);
+    }
+
+    for (const auto& buf : layout.layers_to_scale_buffer_ptrs) {
+        if (!buf || buf->sizeBytes() == 0) {
+            continue;
+        }
+        const size_t kv_scale_stride_bytes = config_.kv_scale_stride_bytes;
+        results.emplace_back(buf, kv_scale_stride_bytes);
     }
 
     return results;
