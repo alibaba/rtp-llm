@@ -2,7 +2,7 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/utils/HashUtil.h"
 #include "rtp_llm/cpp/core/BufferHelper.h"
-#include "rtp_llm/cpp/cache_new/types.h"
+#include "rtp_llm/cpp/cache/types.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 
 using namespace std;
@@ -70,8 +70,8 @@ int StreamCacheResource::singleBatchNeedBlocks(int seq_len) const {
 }
 
 // TODO(xinfei.sxf) 保证这个函数的原子性
-absl::StatusOr<int> StreamCacheResource::initKVBlock(int token_capacity, size_t reserve_step) {
-    return incrKVBlock(token_capacity, reserve_step);
+absl::StatusOr<int> StreamCacheResource::initKVBlock(size_t reserve_step) {
+    return incrKVBlock(reserve_step);
 }
 
 absl::Status StreamCacheResource::incrKVBlock(size_t reserve_step) {
@@ -79,18 +79,8 @@ absl::Status StreamCacheResource::incrKVBlock(size_t reserve_step) {
     if (fake_inited_) {
         return absl::InternalError("fake inited not allow to incr block");
     }
-    int real_occupy = 0;
-    if (stream_->enable_fast_gen_) {
-        if (stream_->isChunkStream() || !stream_->isContextStream()) {
-            auto result = stream_->acquireCapacity(token_capacity);
-            if (!result.ok()) {
-                return result;
-            }
-            real_occupy = result.value();
-        }
-    }
 
-    auto seq_len = stream_->isChunkStream() ? stream_->currentChunkLen() : (stream_->seqLength() + (int)reserve_step);
+    auto seq_len            = stream_->seqLength() + (int)reserve_step;
     auto common_seq_len = std::min(seq_len, stream_->adjustedCommonLen());
 
     MallocInfo malloc_info;

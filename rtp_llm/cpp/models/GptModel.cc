@@ -28,8 +28,7 @@ GptModel::GptModel(const GptModelInitParams& params):
     weights_(params.weights),
     model_id_(params.model_id) {
     if (params.kv_cache_buffer) {
-        k_cache_buffer_ = params.kv_cache_buffer->k_blocks;
-        v_cache_buffer_ = params.kv_cache_buffer->v_blocks;
+        kv_cache_buffer_ = params.kv_cache_buffer->kv_blocks;
     }
     if (abs(description_.residual_scalar - 1.0) > 1e-6) {
         vector<float> residual_scale_vec = {(float)description_.residual_scalar};
@@ -223,7 +222,7 @@ rtp_llm::AttentionCommonInputs GptModel::prepareAttentionInputs(const GptModelIn
                                   inputs.input_lengths,
                                   inputs.kv_cache_block_id,
                                   attention_inputs.kv_cache ? attention_inputs.kv_cache->kv_cache_block_id : nullptr,
-                                  k_cache_buffer_,
+                                  kv_cache_buffer_,
                                   attn_dtype,
                                   context_batch_size,
                                   decoder_batch_size,
@@ -253,8 +252,7 @@ rtp_llm::AttentionCommonInputs GptModel::prepareAttentionInputs(const GptModelIn
             inputs.request_pd_separation,
             transVectorToString(cache_keys_vec),
             inputs.seq_size_per_block,
-            inputs.k_block_size,
-            inputs.v_block_size,
+            inputs.kv_block_stride_bytes,
             0,
             inputs.pd_separation,
             model_id_,
@@ -1361,12 +1359,10 @@ AttentionBlockOutputs GptModel::forwardAttentionBlock(const GptLayerInputs&     
 
     printBufferData(*hidden, "pre layer norm hidden");
 
-    if (k_cache_buffer_ && attention_common_inputs.kv_cache) {
-        attention_common_inputs.kv_cache->k_cache_buffer = k_cache_buffer_->index(layer_id);
-        attention_common_inputs.kv_cache->v_cache_buffer = v_cache_buffer_->index(layer_id);
-        if (k_scale_buffer_) {
-            attention_common_inputs.kv_cache->k_scale_buffer = k_scale_buffer_->index(layer_id);
-            attention_common_inputs.kv_cache->v_scale_buffer = v_scale_buffer_->index(layer_id);
+    if (kv_cache_buffer_ && attention_common_inputs.kv_cache) {
+        attention_common_inputs.kv_cache->kv_cache_buffer = kv_cache_buffer_->index(layer_id);
+        if (kv_scale_buffer_) {
+            attention_common_inputs.kv_cache->kv_scale_buffer = kv_scale_buffer_->index(layer_id);
         }
     }
     if (lora_model_input) {

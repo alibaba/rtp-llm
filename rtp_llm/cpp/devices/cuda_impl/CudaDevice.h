@@ -216,7 +216,7 @@ public:
     ParamsPtr prepareTrtAttn(const AttentionConfigs& configs, const BufferPtr& kv_cache_block_id, int batch_size);
 
     ParamsPtr prepareTrtAttn(const AttentionConfigs& configs,
-                             const BufferPtr&        k_cache,
+                             const BufferPtr&        kv_cache,
                              const BufferPtr&        kv_cache_block_id,
                              int                     batch_size);
 

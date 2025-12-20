@@ -457,7 +457,7 @@ DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
     } else if (params.context_batch_size) {
         selectCuFMHARunner(params.configs, params.attn_dtype, params.has_alibi_slopes);
         bool paged_kv_fmha =
-            params.diff_qkv_len && params.k_cache && (params.configs.kv_cache_dtype != KvCacheDataType::INT8);
+            params.diff_qkv_len && params.kv_cache && (params.configs.kv_cache_dtype != KvCacheDataType::INT8);
 
         if (!params.configs.use_mla && checkSpecDecode(params)) {
 #ifdef USING_CUDA12
@@ -537,9 +537,9 @@ DevicePrepOutput CudaDevice::prepareModelRunCommon(const DevicePrepParams& param
         prefill_kv_cache_block_id_d,
         params.attn_dtype);
     output.decode_trt_attn =
-        prepareTrtAttn(params.configs, params.k_cache, decode_kv_cache_block_id_d, params.decoder_batch_size);
+        prepareTrtAttn(params.configs, params.kv_cache, decode_kv_cache_block_id_d, params.decoder_batch_size);
     output.prefill_trt_attn =
-        prepareTrtAttn(params.configs, params.k_cache, prefill_kv_cache_block_id_d, params.context_batch_size);
+        prepareTrtAttn(params.configs, params.kv_cache, prefill_kv_cache_block_id_d, params.context_batch_size);
     return output;
 }
 

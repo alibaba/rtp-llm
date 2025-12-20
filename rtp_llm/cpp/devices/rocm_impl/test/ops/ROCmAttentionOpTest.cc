@@ -2,7 +2,7 @@
 #include "rtp_llm/cpp/devices/rocm_impl/ROCmDevice.h"
 #include "rtp_llm/cpp/rocm/hip_host_utils.h"
 
-#include "rtp_llm/cpp/cache_new/CacheConfig.h"
+#include "rtp_llm/cpp/cache/CacheConfig.h"
 #include <torch/torch.h>
 #include "rtp_llm/cpp/devices/testing/TestBase.h"
 #include "rtp_llm/cpp/devices/base_tests/AttentionOpTest.hpp"

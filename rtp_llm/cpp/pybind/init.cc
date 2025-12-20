@@ -1,5 +1,5 @@
 #include "rtp_llm/cpp/multimodal_processor/MultimodalTypes.h"
-#include "rtp_llm/cpp/cache_new/types.h"
+#include "rtp_llm/cpp/cache/types.h"
 #include "rtp_llm/cpp/pybind/multi_gpu_gpt/RtpLLMOp.h"
 #include "rtp_llm/cpp/pybind/multi_gpu_gpt/RtpEmbeddingOp.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"

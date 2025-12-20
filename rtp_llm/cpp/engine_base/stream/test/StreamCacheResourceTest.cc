@@ -3,8 +3,8 @@
 
 #define private public
 #define protected public
-#include "rtp_llm/cpp/cache_new/KVCacheManager.h"
-#include "rtp_llm/cpp/cache_new/CacheConfig.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
@@ -33,7 +33,6 @@ protected:
 
         auto spec                = std::make_shared<MHAKVCacheSpec>();
         spec->layer_num          = 3;
-        spec->block_nums         = 9;
         spec->local_head_num_kv  = 1;
         spec->size_per_head      = 1;
         spec->seq_size_per_block = 2;

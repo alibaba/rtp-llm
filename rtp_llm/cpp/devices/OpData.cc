@@ -69,8 +69,7 @@ std::string GptModelInputs::debugString(bool force) const {
     if (cache_keys) {
         debug_string << ", cache_keys: " << cache_keys->debugStringWithData<int64_t>();
     }
-    debug_string << ", k block_size: " << k_block_size;
-    debug_string << ", v block_size: " << v_block_size;
+    debug_string << ", kv_block_stride_bytes: " << kv_block_stride_bytes;
     debug_string << ", pd_separation: " << pd_separation;
     debug_string << "}";
     return debug_string.str();

@@ -24,8 +24,8 @@ void runAiterAsmPA(const AttentionModuleParams& params, rtp_llm::DeviceBase* dev
     int64_t partition_size = 256;
     int64_t max_seq_len    = params.common.decoder_max_seq_len + 1;
 
-    auto key_cache   = Buffer2torchTensor(params.common.kv_cache->k_cache_buffer, false).select(1, 0);
-    auto value_cache = Buffer2torchTensor(params.common.kv_cache->k_cache_buffer, false).select(1, 1);
+    auto key_cache   = Buffer2torchTensor(params.common.kv_cache->kv_cache_buffer, false).select(1, 0);
+    auto value_cache = Buffer2torchTensor(params.common.kv_cache->kv_cache_buffer, false).select(1, 1);
 
     auto block_tables = Buffer2torchTensor(params.common.kv_cache->kv_cache_block_id, false);
 
@@ -37,8 +37,8 @@ void runAiterAsmPA(const AttentionModuleParams& params, rtp_llm::DeviceBase* dev
     std::optional<torch::Tensor> V_QScale       = std::nullopt;
     std::optional<torch::Tensor> out_opt        = out;
     if (key_cache.dtype() == at::kFloat8_e4m3fnuz) {
-        K_QScale = Buffer2torchTensor(params.common.kv_cache->k_scale_buffer, false);
-        V_QScale = Buffer2torchTensor(params.common.kv_cache->v_scale_buffer, false);
+        K_QScale = Buffer2torchTensor(params.common.kv_cache->kv_scale_buffer, false);
+        V_QScale = K_QScale;
         pa_fwd(query,
                key_cache,
                value_cache,
@@ -97,13 +97,13 @@ void runAiterPA(const AttentionModuleParams& params, rtp_llm::DeviceBase* device
         {datatype, {num_seqs, num_heads, max_num_partitions, head_size}, AllocationType::DEVICE}, {"tmp_out"});
     auto tmp_out = Buffer2torchTensor(tmp_out_buffer, false);
 
-    auto key_cache   = Buffer2torchTensor(params.common.kv_cache->k_cache_buffer, false).select(1, 0);
-    auto value_cache = Buffer2torchTensor(params.common.kv_cache->k_cache_buffer, false).select(1, 1);
-    /*size_t v_cache_offset = params.common.kv_cache->k_cache_buffer->sizeBytes();
-    auto value_cache = Buffer2torchTensorCustom(*params.common.kv_cache->k_cache_buffer,
-                                               {(int64_t)params.common.kv_cache->k_cache_buffer->shape()[0],
-                                                (int64_t)params.common.kv_cache->k_cache_buffer->shape()[1],
-                                                (int64_t)params.common.kv_cache->k_cache_buffer->shape()[2]},
+    auto key_cache   = Buffer2torchTensor(params.common.kv_cache->kv_cache_buffer, false).select(1, 0);
+    auto value_cache = Buffer2torchTensor(params.common.kv_cache->kv_cache_buffer, false).select(1, 1);
+    /*size_t v_cache_offset = params.common.kv_cache->kv_cache_buffer->sizeBytes();
+    auto value_cache = Buffer2torchTensorCustom(*params.common.kv_cache->kv_cache_buffer,
+                                               {(int64_t)params.common.kv_cache->kv_cache_buffer->shape()[0],
+                                                (int64_t)params.common.kv_cache->kv_cache_buffer->shape()[1],
+                                                (int64_t)params.common.kv_cache->kv_cache_buffer->shape()[2]},
                                                v_cache_offset);*/
 
     int64_t num_kv_heads = params.configs.kv_head_num;

@@ -7,7 +7,7 @@
 #include "rtp_llm/cpp/devices/Weights.h"
 #include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
-#include "rtp_llm/cpp/cache_new/types.h"
+#include "rtp_llm/cpp/cache/types.h"
 #include <string>
 #include <utility>
 
@@ -270,10 +270,8 @@ protected:
     const rtp_llm::DeviceProperties device_props_;
     const size_t                    layer_num_;
     const GptModelDescription       description_;
-    rtp_llm::BufferPtr              k_cache_buffer_;
-    rtp_llm::BufferPtr              v_cache_buffer_;
-    rtp_llm::BufferPtr              k_scale_buffer_;
-    rtp_llm::BufferPtr              v_scale_buffer_;
+    rtp_llm::BufferPtr              kv_cache_buffer_;
+    rtp_llm::BufferPtr              kv_scale_buffer_;
     rtp_llm::BufferPtr              residual_scale_fp32_;
     rtp_llm::BufferPtr              residual_scale_;
 

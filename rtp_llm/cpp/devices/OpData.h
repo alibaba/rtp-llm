@@ -138,8 +138,7 @@ struct GptModelInputs {
     rtp_llm::BufferPtr request_id;             // int64, [context_batch_size]
     rtp_llm::BufferPtr request_pd_separation;  // bool, [context_batch_size]
     rtp_llm::BufferPtr cache_keys;             // [context_batch_size]
-    size_t             k_block_size;
-    size_t             v_block_size;
+    size_t             kv_block_stride_bytes;
     size_t             scale_block_size;
     size_t             seq_size_per_block;
     bool               pd_separation   = false;
@@ -523,10 +522,11 @@ struct EmbeddingLookupParams {
 struct KvCacheInfo {
     int       layer_num;
     BufferPtr kv_cache_block_id;  // [batch_size, block_nums], kv cache block offset
-    BufferPtr k_cache_buffer;     // [block_nums, head, seq_size_per_block, size_per_head]
-    BufferPtr v_cache_buffer;     // [block_nums, head, seq_size_per_block, size_per_head]
-    BufferPtr k_scale_buffer;     // [block_nums, head, seq_size_per_block]
-    BufferPtr v_scale_buffer;     // [block_nums, head, seq_size_per_block]
+    // Base buffer for kv cache blocks. For current cache layout, this represents the base (K) address of kv blocks.
+    // V address can be derived by offset/stride when needed.
+    BufferPtr kv_cache_buffer;
+    // Optional scale buffer for kv cache quantization (int8/fp8). If set, it should match kv_cache_buffer layout.
+    BufferPtr kv_scale_buffer;
 };
 
 struct MultimodalEmbeddingParams {
@@ -555,12 +555,11 @@ struct CacheStoreInputs {
     BufferPtr                request_pd_separation;  // [context_batch_size]
     std::vector<std::string> cache_keys;             // [context_batch_size]
     size_t                   tokens_per_block;
-    size_t                   k_block_size     = 0;
-    size_t                   v_block_size     = 0;
-    size_t                   scale_block_size = 0;
-    bool                     pd_separation    = false;
-    size_t                   model_id         = 0;
-    bool                     decode_entrance  = false;
+    size_t                   kv_block_stride_bytes = 0;
+    size_t                   scale_block_size      = 0;
+    bool                     pd_separation         = false;
+    size_t                   model_id              = 0;
+    bool                     decode_entrance       = false;
     bool                     warmup;
 
     int layer_id = 0;
@@ -1074,7 +1073,7 @@ struct DevicePrepParams {
     const BufferPtr& input_lengths;
     const BufferPtr& kv_cache_block_id;
     const BufferPtr& kv_cache_block_id_d;
-    const BufferPtr& k_cache;
+    const BufferPtr& kv_cache;
 
     DataType attn_dtype         = DataType::TYPE_INVALID;
     size_t   context_batch_size = 0;

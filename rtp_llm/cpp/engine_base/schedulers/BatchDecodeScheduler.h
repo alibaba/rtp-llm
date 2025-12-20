@@ -3,8 +3,8 @@
 #include "autil/legacy/jsonizable.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h"
 #include "rtp_llm/cpp/devices/DeviceBase.h"
-#include "rtp_llm/cpp/cache_new/KVCacheManager.h"
-#include "rtp_llm/cpp/cache_new/types.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/types.h"
 #include <mutex>
 #include <condition_variable>
 #include <list>

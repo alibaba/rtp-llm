@@ -97,20 +97,18 @@ void AttentionLayerTest<T>::testAttentionLayer(const CacheConfig&          cache
     auto kv_cache                  = torch::empty(0);
     model_inputs.kv_cache_block_id = allocateKVBlocks(cache_conf, input_lengths, kv_cache);
     auto kv_cache_buffer           = cache_manager_->kvCacheBuffer();
-    // model_inputs.k_cache_buffer = kv_cache_buffer.k_blocks;
-    // model_inputs.v_cache_buffer = kv_cache_buffer.v_blocks;
+    // model_inputs.kv_cache_buffer = kv_cache_buffer.kv_blocks;
 
     auto input_lengths_device    = device_->clone({*model_inputs.input_lengths});
     auto sequence_lengths_device = device_->clone({*model_inputs.sequence_lengths});
     auto common_inputs           = model.prepareAttentionInputs(model_inputs, dtype, nullptr);
 
-    auto layer_k_cache_buffer = kv_cache_buffer.k_blocks->index(0);
-    auto layer_v_cache_buffer = kv_cache_buffer.v_blocks->index(0);
-    common_inputs.kv_cache    = KvCacheInfo({
-        (int)kv_cache_buffer.k_blocks->shape()[0],
+    auto layer_kv_cache_buffer = kv_cache_buffer.kv_blocks->index(0);
+    common_inputs.kv_cache     = KvCacheInfo({
+        (int)kv_cache_buffer.kv_blocks->shape()[0],
         model_inputs.kv_cache_block_id,
-        layer_k_cache_buffer,
-        layer_v_cache_buffer,
+        layer_kv_cache_buffer,
+        nullptr,
     });
 
     printBufferData(*model_inputs.kv_cache_block_id, "kv_cache_block_id");
@@ -135,7 +133,7 @@ void AttentionLayerTest<T>::testAttentionLayer(const CacheConfig&          cache
     auto                 attention_weights = getAttentionWeights(gpt_attention);
     AttentionLayerParams params{-1, *input_buffer, nullptr, attention_conf, attention_weights, common_inputs};
     params.common.prefill_trt_attn =
-        prepareTrtAttn(attention_conf, layer_k_cache_buffer, model_inputs.kv_cache_block_id, input_lengths.size());
+        prepareTrtAttn(attention_conf, layer_kv_cache_buffer, model_inputs.kv_cache_block_id, input_lengths.size());
     auto attn_output   = device_->attentionLayer(params);
     auto output_tensor = bufferToTensor(*attn_output.hidden_states);
     assertTensorClose(output_tensor, torch_output, 1e-3, 2);
