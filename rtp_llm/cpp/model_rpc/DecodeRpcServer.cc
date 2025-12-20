@@ -88,9 +88,9 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
     auto generate_stream              = engine_->makeStream(input);
     decode_context.request_timeout_ms = generate_stream->getTimeoutMs();
 
-    auto cache_manager = engine_->resourceContext().cache_manager;
-    auto reserve_block_num =
-        maga_init_params_.runtime_config.fifo_scheduler_config.scheduler_reserve_resource_ratio * cache_manager->totalBlocksNum() / 100;
+    auto cache_manager     = engine_->resourceContext().cache_manager;
+    auto reserve_block_num = maga_init_params_.runtime_config.fifo_scheduler_config.scheduler_reserve_resource_ratio
+                             * cache_manager->totalBlocksNum() / 100;
     auto current_blocks = cache_manager->availableBlocksNum();
     if (current_blocks < reserve_block_num) {
         string error_msg = "request: [" + decode_context.request_key + "] malloc kv cache block failed at decode node, "
@@ -553,15 +553,15 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     const auto& request_key   = load_context.request_key;
     auto        cache_manager = engine_->resourceContext().cache_manager;
     const auto& cache_config  = cache_manager->cacheConfig();
-    auto        k_block_size  = cache_config.kv_block_stride;
-    auto        layer_num     = maga_init_params_.gpt_init_parameter.num_layers_;
+    auto        kv_block_size = cache_config.kv_block_stride_bytes;
+    auto        layer_num     = maga_init_params_.model_config_.num_layers;
 
-    if (k_block_size % load_context.peer_addrs.size() != 0) {
+    if (kv_block_size % load_context.peer_addrs.size() != 0) {
         RTP_LLM_LOG_WARNING(
-            "k block size [%d] is not divisible by peer ips size [%d]", k_block_size, load_context.peer_addrs.size());
+            "k block size [%d] is not divisible by peer ips size [%d]", kv_block_size, load_context.peer_addrs.size());
         return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "block size is not divisible by peer ips size");
     }
-    k_block_size = k_block_size / load_context.peer_addrs.size();
+    kv_block_size = kv_block_size / load_context.peer_addrs.size();
 
     auto cancel_check_func  = [&load_context]() -> bool { return load_context.server_context->IsCancelled(); };
     auto start_load_time_us = currentTimeUs();
@@ -583,9 +583,9 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                 // FT_LOG_DEBUG("large model load cache_key %s", cache_key.c_str());
                 auto                  block_id  = load_context.block_ids[block_pos];
                 auto                  addr_info = cache_manager->convertIndexToAddr(block_id, layer_id);
-                void*                 k_addr    = (void*)((int64_t)addr_info.k_addr + i * k_block_size);
-                std::shared_ptr<void> k_block_addr(k_addr, [](void* p) {});
-                load_layer_cache->addBlock("k_" + cache_key, k_block_addr, k_block_size, true, true);
+                void*                 kv_addr   = (void*)((int64_t)addr_info.kv_addr + i * kv_block_size);
+                std::shared_ptr<void> kv_block_addr(kv_addr, [](void* p) {});
+                load_layer_cache->addBlock("k_" + cache_key, kv_block_addr, kv_block_size, true, true);
             }
             layer_caches.push_back(load_layer_cache);
         }
@@ -597,7 +597,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                     propose_maga_init_params_->mtp_model_params_->at(mtp_model_id).get();
                 const auto& sp_cache_manager = engine_->resourceContext().mtp_cache_managers[mtp_model_id];
                 const auto& cache_config     = sp_cache_manager->cacheConfig();
-                const auto  sp_k_block_size  = cache_config.kv_block_stride / load_context.peer_addrs.size();
+                const auto  sp_kv_block_size = cache_config.kv_block_stride_bytes / load_context.peer_addrs.size();
                 size_t      layer_num        = mtp_engine_init_params->model_config_.num_layers;
                 for (size_t layer_id = 0; layer_id < layer_num; layer_id++) {
                     auto request_key = std::to_string(load_context.request_id) + "-" + std::to_string(layer_id);
@@ -612,9 +612,9 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                         // FT_LOG_DEBUG("small model load cache_key %s", cache_key.c_str());
                         auto                  block_id  = load_context.block_ids[block_pos];
                         auto                  addr_info = sp_cache_manager->convertIndexToAddr(block_id, layer_id);
-                        void*                 k_addr    = (void*)((int64_t)addr_info.k_addr + i * sp_k_block_size);
-                        std::shared_ptr<void> k_block_addr(k_addr, [](void* p) {});
-                        load_layer_cache->addBlock("k_" + cache_key, k_block_addr, sp_k_block_size, true, true);
+                        void*                 kv_addr   = (void*)((int64_t)addr_info.kv_addr + i * sp_kv_block_size);
+                        std::shared_ptr<void> kv_block_addr(kv_addr, [](void* p) {});
+                        load_layer_cache->addBlock("k_" + cache_key, kv_block_addr, sp_kv_block_size, true, true);
                     }
                     layer_caches.push_back(load_layer_cache);
                 }
