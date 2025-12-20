@@ -1,8 +1,8 @@
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/utils/Logger.h"
-#include "rtp_llm/cpp/cache_new/KVCacheManager.h"
-#include "rtp_llm/cpp/cache_new/types.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/types.h"
 #include <chrono>
 #include <memory>
 #include <mutex>
@@ -25,7 +25,8 @@ FIFOScheduler::FIFOScheduler(const rtp_llm::GptInitParameter&       params,
     need_fill_fake_stream_(params.dp_size_ > 1 && params.tp_rank_ == 0),
     fast_gen_max_context_len_(params.fast_gen_max_context_len_),
     metrics_reporter_(metrics_reporter) {
-    reserve_block_num_ = params.fifo_scheduler_config.scheduler_reserve_resource_ratio * cache_manager->availableBlocksNum() / 100;
+    reserve_block_num_ =
+        params.fifo_scheduler_config.scheduler_reserve_resource_ratio * cache_manager->availableBlocksNum() / 100;
     RTP_LLM_LOG_INFO("max_generate_batch_size is [%d], max_batch_tokens_size is [%d], reserve_block_num is [%d]",
                      max_generate_batch_size_,
                      max_batch_tokens_size_,

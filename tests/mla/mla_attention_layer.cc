@@ -132,7 +132,7 @@ torch::Tensor MlaAttnLayerOp::forward(torch::Tensor              hidden,
         attn_common_inputs.context_batch_size = 0;
         attn_common_inputs.decoder_batch_size = hidden.size(0);
         attn_common_inputs.kv_cache           = std::make_optional<KvCacheInfo>(
-            {1, kvcache_block_id_host, k_cache_buffer, v_cache_buffer, nullptr, nullptr});
+            {1, kvcache_block_id_host, kv_cache_buffer, nullptr});
         attn_common_inputs.prefill_flash_infer_attn = context_flash_infer_attn;
         attn_common_inputs.decode_flash_infer_attn  = decode_flash_infer_attn;
         attn_common_inputs.input_lengths            = input_lengths_host;

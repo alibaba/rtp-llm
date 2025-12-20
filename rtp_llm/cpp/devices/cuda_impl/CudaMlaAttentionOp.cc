@@ -67,13 +67,13 @@ void CudaDevice::mlaAbsorbAttention(const MlaAttentionModuleParams& params) {
     QInputBatchMatmulWrapper(fused_q_input_t, params);
     printBufferData(*fused_q_input, "fused_q_input");
 
-    auto ckv              = Buffer2torchTensor(params.common.kv_cache->k_cache_buffer, false);
+    auto ckv              = Buffer2torchTensor(params.common.kv_cache->kv_cache_buffer, false);
     auto flash_infer_attn = params.is_prefill ? (FlashInferAttnParams*)params.common.prefill_flash_infer_attn.get() :
                                                 (FlashInferAttnParams*)params.common.decode_flash_infer_attn.get();
     if (!flash_infer_attn) {
         throw std::runtime_error("flash_infer_attn must be setting when using mla");
     }
-    const auto& ckv_cache_shape = params.common.kv_cache->k_cache_buffer->shape();
+    const auto& ckv_cache_shape = params.common.kv_cache->kv_cache_buffer->shape();
     auto        datatype        = params.q.type();
     at::Tensor  attn_out_t;
     BufferPtr   attn_out;
@@ -98,7 +98,7 @@ void CudaDevice::mlaAbsorbAttention(const MlaAttentionModuleParams& params) {
         // [batch_size, 1, num_heads, kv_lora_rank + rope_head_dim]
         printBufferData(*torchTensor2Buffer(fused_q_input_t), "fused_q_input_t");
 
-        auto ckv_cache_reshape   = params.common.kv_cache->k_cache_buffer->reshape({
+        auto ckv_cache_reshape   = params.common.kv_cache->kv_cache_buffer->reshape({
             ckv_cache_shape[0],
             ckv_cache_shape[1],
             1,
@@ -142,11 +142,11 @@ void CudaDevice::mlaAbsorbAttention(const MlaAttentionModuleParams& params) {
         attn_out_t = Buffer2torchTensor(attn_out, false);
 
         auto ckv_nope_cache = Buffer2torchTensorWithStride(
-            *params.common.kv_cache->k_cache_buffer,
+            *params.common.kv_cache->kv_cache_buffer,
             {(int64_t)ckv_cache_shape[0], (int64_t)ckv_cache_shape[1], (int64_t)params.configs.kv_lora_rank},
             0);
         auto k_rope_cache = Buffer2torchTensorWithStride(
-            *params.common.kv_cache->k_cache_buffer,
+            *params.common.kv_cache->kv_cache_buffer,
             {(int64_t)ckv_cache_shape[0], (int64_t)ckv_cache_shape[1], (int64_t)params.configs.rope_head_dim},
             params.configs.kv_lora_rank);
 
@@ -292,13 +292,13 @@ void CudaDevice::mlaRotaryWriteKVCache(const MlaRotaryWriteKVCacheParams& params
                                      params.kv_offset);
 
     if (params.common.kv_cache.has_value()) {
-        const auto& k_cache_shape = params.common.kv_cache->k_cache_buffer->shape();
+        const auto& k_cache_shape = params.common.kv_cache->kv_cache_buffer->shape();
         auto        k_cache       = Buffer2torchTensorWithStride(
-            *params.common.kv_cache->k_cache_buffer,
+            *params.common.kv_cache->kv_cache_buffer,
             {(int64_t)k_cache_shape[0], (int64_t)k_cache_shape[1], (int64_t)params.configs.kv_lora_rank},
             0);
         auto v_cache = Buffer2torchTensorWithStride(
-            *params.common.kv_cache->k_cache_buffer,
+            *params.common.kv_cache->kv_cache_buffer,
             {(int64_t)k_cache_shape[0], (int64_t)k_cache_shape[1], (int64_t)params.configs.rope_head_dim},
             params.configs.kv_lora_rank);
         append_paged_mla_kv_cache(append_ckv_t,

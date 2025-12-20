@@ -5,7 +5,7 @@
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
-#include "rtp_llm/cpp/cache_new/types.h"
+#include "rtp_llm/cpp/cache/types.h"
 #include "rtp_llm/cpp/models/eplb/EplbConfig.h"
 #include "rtp_llm/cpp/models/lora/LoraManager.h"
 #include "rtp_llm/cpp/devices/DeviceBase.h"

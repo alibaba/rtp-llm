@@ -367,8 +367,8 @@ grpc::Status PrefillRpcServerNew::RemoteStore(grpc::ServerContext*        server
 
     auto        cache_manager = engine_->resourceContext().cache_manager;
     const auto& cache_config  = cache_manager->cacheConfig();
-    auto        k_block_size  = cache_config.k_block_stride;
-    auto        v_block_size  = cache_config.v_block_stride;
+    auto        k_block_size  = cache_config.block_stride;
+    auto        v_block_size  = cache_config.block_stride;
     auto        layer_num     = maga_init_params_.gpt_init_parameter.num_layers_;
 
     auto remote_addr_size = request->partition_infos_size();
