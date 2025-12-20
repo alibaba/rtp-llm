@@ -119,52 +119,51 @@ MlaDecoderAttnOp::MlaDecoderAttnOp(int64_t mla_ops_type,
     rtp_llm::initLogger();
 
     ParallelismConfig parallelism_config;
-    ModelConfig model_config;
+    ModelConfig       model_config;
     model_config.mla_ops_type = MlaOpsType(mla_ops_type);
-    EPLBConfig eplb_config;
-    FMHAConfig fmha_config;
-    DeviceResourceConfig device_resource_config;
-    MoeConfig moe_config;
-    SpeculativeExecutionConfig sp_config;
-    MiscellaneousConfig misc_config;
+    EPLBConfig                  eplb_config;
+    FMHAConfig                  fmha_config;
+    DeviceResourceConfig        device_resource_config;
+    MoeConfig                   moe_config;
+    SpeculativeExecutionConfig  sp_config;
+    MiscellaneousConfig         misc_config;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
-    HWKernelConfig hw_kernel_config;
-    ConcurrencyConfig concurrency_config;
-    FfnDisAggregateConfig ffn_disaggregate_config;
-    RuntimeConfig runtime_config;
+    HWKernelConfig              hw_kernel_config;
+    ConcurrencyConfig           concurrency_config;
+    FfnDisAggregateConfig       ffn_disaggregate_config;
+    RuntimeConfig               runtime_config;
 
-    rtp_llm::DeviceFactory::initDevices(
-        parallelism_config,
-        model_config,
-        eplb_config,
-        fmha_config,
-        device_resource_config,
-        moe_config,
-        sp_config,
-        misc_config,
-        profiling_debug_logging_config,
-        hw_kernel_config,
-        concurrency_config,
-        ffn_disaggregate_config,
-        runtime_config);
-    device_      = rtp_llm::DeviceFactory::getDefaultDevice();
+    rtp_llm::DeviceFactory::initDevices(parallelism_config,
+                                        model_config,
+                                        eplb_config,
+                                        fmha_config,
+                                        device_resource_config,
+                                        moe_config,
+                                        sp_config,
+                                        misc_config,
+                                        profiling_debug_logging_config,
+                                        hw_kernel_config,
+                                        concurrency_config,
+                                        ffn_disaggregate_config,
+                                        runtime_config);
+    device_ = rtp_llm::DeviceFactory::getDefaultDevice();
 
-    attn_configs.head_num = static_cast<size_t>(head_num);
-    attn_configs.kv_head_num = static_cast<size_t>(head_num);
-    attn_configs.size_per_head = static_cast<size_t>(nope_head_dim + rope_head_dim);
-    attn_configs.tokens_per_block = 64;
-    attn_configs.q_scaling = 1.0f;
-    attn_configs.fuse_qkv_add_bias = true;
-    attn_configs.use_logn_attn = false;
-    attn_configs.is_causal = true;
-    attn_configs.use_mla = true;
-    attn_configs.q_lora_rank = static_cast<size_t>(q_lora_rank);
-    attn_configs.kv_lora_rank = static_cast<size_t>(kv_lora_rank);
-    attn_configs.nope_head_dim = static_cast<size_t>(nope_head_dim);
-    attn_configs.rope_head_dim = static_cast<size_t>(rope_head_dim);
-    attn_configs.v_head_dim = static_cast<size_t>(v_head_dim);
+    attn_configs.head_num            = static_cast<size_t>(head_num);
+    attn_configs.kv_head_num         = static_cast<size_t>(head_num);
+    attn_configs.size_per_head       = static_cast<size_t>(nope_head_dim + rope_head_dim);
+    attn_configs.tokens_per_block    = 64;
+    attn_configs.q_scaling           = 1.0f;
+    attn_configs.fuse_qkv_add_bias   = true;
+    attn_configs.use_logn_attn       = false;
+    attn_configs.is_causal           = true;
+    attn_configs.use_mla             = true;
+    attn_configs.q_lora_rank         = static_cast<size_t>(q_lora_rank);
+    attn_configs.kv_lora_rank        = static_cast<size_t>(kv_lora_rank);
+    attn_configs.nope_head_dim       = static_cast<size_t>(nope_head_dim);
+    attn_configs.rope_head_dim       = static_cast<size_t>(rope_head_dim);
+    attn_configs.v_head_dim          = static_cast<size_t>(v_head_dim);
     attn_configs.softmax_extra_scale = static_cast<float>(softmax_extra_scale);
-    attn_configs.kv_cache_dtype = KvCacheDataType::BASE;
+    attn_configs.kv_cache_dtype      = KvCacheDataType::BASE;
 }
 
 c10::intrusive_ptr<FlashInferParams> MlaDecoderAttnOp::createContextFlashInferParams(torch::Tensor prefix_length,
@@ -297,8 +296,7 @@ torch::Tensor MlaDecoderAttnOp::forward(torch::Tensor q,
         auto kc_dense_weight = std::make_shared<DenseWeights>(kc_weight_b);
         auto vc_dense_weight = std::make_shared<DenseWeights>(vc_t_weight_b);
 
-        auto k_cache_buffer = torchTensor2Buffer(ckv_cache);
-        auto v_cache_buffer = torchTensor2Buffer(kpe_caches);
+        auto kv_cache_buffer = torchTensor2Buffer(ckv_cache);
 
         auto cos_sin_cache_buffer = torchTensor2Buffer(cos_sin_cache);
 
@@ -309,8 +307,7 @@ torch::Tensor MlaDecoderAttnOp::forward(torch::Tensor q,
         auto attn_common_inputs               = AttentionCommonInputs();
         attn_common_inputs.context_batch_size = 0;
         attn_common_inputs.decoder_batch_size = q.size(0);
-        attn_common_inputs.kv_cache =
-            std::make_optional<KvCacheInfo>({1, nullptr, k_cache_buffer, v_cache_buffer, nullptr, nullptr});
+        attn_common_inputs.kv_cache           = std::make_optional<KvCacheInfo>({1, nullptr, kv_cache_buffer, nullptr});
         attn_common_inputs.decode_flash_infer_attn = flash_infer_attn_params;
 
         auto mla_params = MlaAttentionModuleParams{0,
@@ -333,7 +330,6 @@ torch::Tensor MlaDecoderAttnOp::forward(torch::Tensor q,
     }
 }
 
-
 static auto FlashInferParamsReg =
     torch::jit::class_<FlashInferParams>("unittest", "FlashInferParams")
         .def(torch::jit::init<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>())
@@ -350,5 +346,4 @@ static auto MlaDecoderAttnOpClass =
         .def("createContextFlashInferParams", &MlaDecoderAttnOp::createContextFlashInferParams)
         .def("forward", &MlaDecoderAttnOp::forward);
 
-} 
-
+}  // namespace rtp_llm
