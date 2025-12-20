@@ -1,8 +1,8 @@
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/utils/Logger.h"
-#include "rtp_llm/cpp/cache_new/KVCacheManager.h"
-#include "rtp_llm/cpp/cache_new/types.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/types.h"
 #include <chrono>
 #include <memory>
 #include <mutex>
@@ -10,14 +10,14 @@
 using namespace std;
 namespace rtp_llm {
 
-FIFOScheduler::FIFOScheduler(const RuntimeConfig&                 runtime_config,
-                             const ModelConfig&                   model_config,
-                             const PDSepConfig&                  pd_sep_config,
-                             const ParallelismConfig&            parallelism_config,
-                             const ModelSpecificConfig&          model_specific_config,
+FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_config,
+                             const ModelConfig&                     model_config,
+                             const PDSepConfig&                     pd_sep_config,
+                             const ParallelismConfig&               parallelism_config,
+                             const ModelSpecificConfig&             model_specific_config,
                              const std::shared_ptr<KVCacheManager>& cache_manager,
-                             const kmonitor::MetricsReporterPtr   metrics_reporter,
-                             const int                            max_score_len):
+                             const kmonitor::MetricsReporterPtr     metrics_reporter,
+                             const int                              max_score_len):
     pd_sep_config_(pd_sep_config),
     model_specific_config_(model_specific_config),
     cache_manager_(cache_manager),
@@ -26,7 +26,8 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                 runtime_config
     max_generate_batch_size_(runtime_config.max_generate_batch_size),
     need_fill_fake_stream_(parallelism_config.dp_size > 1 && parallelism_config.tp_rank == 0),
     metrics_reporter_(metrics_reporter) {
-    reserve_block_num_ = runtime_config.fifo_scheduler_config.scheduler_reserve_resource_ratio * cache_manager->availableBlockNums() / 100;
+    reserve_block_num_ = runtime_config.fifo_scheduler_config.scheduler_reserve_resource_ratio
+                         * cache_manager->availableBlocksNum() / 100;
     RTP_LLM_LOG_INFO("max_generate_batch_size is [%d], max_batch_tokens_size is [%d], reserve_block_num is [%d]",
                      max_generate_batch_size_,
                      max_batch_tokens_size_,

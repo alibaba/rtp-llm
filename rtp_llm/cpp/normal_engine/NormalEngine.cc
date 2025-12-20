@@ -8,7 +8,7 @@
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/GatherBatchScheduler.h"
-#include "rtp_llm/cpp/cache_new/CacheConfigCreator.h"
+#include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -200,10 +200,11 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
 
     auto cache_config               = CacheConfigCreator::createBasicConfig(model_config_, parallelism_config);
     cache_config.seq_size_per_block = model_config_.attn_config.tokens_per_block;
-    cache_config.block_nums         = 5;
+    cache_config.block_num          = 5;
     ParallelismConfig temp_parallelism_config;
-    RuntimeConfig temp_runtime_config;
-    auto cache_manager              = make_shared<KVCacheManager>(cache_config, device_, true, nullptr, KVCacheConfig{}, temp_parallelism_config, temp_runtime_config);
+    RuntimeConfig     temp_runtime_config;
+    auto              cache_manager = make_shared<KVCacheManager>(
+        cache_config, device_, true, nullptr, KVCacheConfig{}, temp_parallelism_config, temp_runtime_config);
     if (!cache_manager->init()) {
         RTP_LLM_FAIL("init kv cache manager failed in decodeWarmUp");
     }
@@ -251,6 +252,11 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                                     kv_cache_config,
                                                                     parallelism_config,
                                                                     runtime_config);
+
+        if (!resource_context_.cache_manager->init()) {
+            RTP_LLM_FAIL("init kv cache manager failed");
+        }
+
         if (isMTPEagle()) {
             auto layer_num = propose_params_->genNumPerCircle();
             if (isEagle()) {
@@ -266,6 +272,9 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                                                               kv_cache_config,
                                                                                               parallelism_config,
                                                                                               runtime_config));
+                if (!resource_context_.mtp_cache_managers.back()->init()) {
+                    RTP_LLM_FAIL("init mtp kv cache manager failed");
+                }
             }
         } else {
             resource_context_.propose_cache_manager = make_shared<KVCacheManager>(proposer_cache_config,
@@ -275,14 +284,20 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                                                 kv_cache_config,
                                                                                 parallelism_config,
                                                                                 runtime_config);
+            if (!resource_context_.propose_cache_manager->init()) {
+                RTP_LLM_FAIL("init propose kv cache manager failed");
+            }
         }
     } else {
         auto result = CacheConfigCreator::createConfig(
             model_config_, parallelism_config, runtime_config, kv_cache_config, warm_up_result);
         RTP_LLM_LOG_INFO(
-            "create cache manager with block nums %d, block size %ld KB", result.block_nums, result.block_size / 1024);
+            "create cache manager with block nums %d, block size %ld KB", result.block_num, result.block_size / 1024);
         resource_context_.cache_manager = make_shared<KVCacheManager>(
             result, device_, false, metrics_reporter_, kv_cache_config, parallelism_config, runtime_config);
+        if (!resource_context_.cache_manager->init()) {
+            RTP_LLM_FAIL("init kv cache manager failed");
+        }
     }
 }
 

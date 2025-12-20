@@ -52,7 +52,7 @@ cc_library(
         ":complete_token_ids",
         "//rtp_llm/cpp/engine_base/system_prompt:system_prompt",
         "//rtp_llm/cpp/models:models",
-        "//rtp_llm/cpp/cache_new:cache_new",
+        "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/utils:hash_util",
         "//rtp_llm/cpp/models:dfa_utils",
         "@havenask//aios/autil:synchronized_queue",

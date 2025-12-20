@@ -4,7 +4,7 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "rtp_llm/cpp/engine_base/stream/ResourceContext.h"
-#include "rtp_llm/cpp/cache_new/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 
 namespace rtp_llm {
 
