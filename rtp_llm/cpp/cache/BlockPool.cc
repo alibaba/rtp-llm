@@ -21,13 +21,30 @@ bool BlockPool::init() {
         RTP_LLM_LOG_ERROR("block pool allocate cache aligned buffer is null");
         return false;
     }
-    torch::Tensor kv_cache_tensor = Buffer2torchTensor(cache_aligned_buffer_, false);
+    torch::Tensor full_tensor   = Buffer2torchTensor(cache_aligned_buffer_, false);
+    const int64_t kv_pool_bytes = static_cast<int64_t>(
+        config_.kv_block_pool_size_bytes > 0 ? config_.kv_block_pool_size_bytes : config_.total_size_bytes);
+    torch::Tensor kv_cache_tensor =
+        (kv_pool_bytes < full_tensor.numel()) ? full_tensor.narrow(0, 0, kv_pool_bytes) : full_tensor;
+
+    torch::Tensor kv_scale_tensor;
+    if (config_.enable_kv_scale && config_.kv_scale_pool_size_bytes > 0) {
+        const int64_t scale_off   = static_cast<int64_t>(config_.kv_scale_offset_bytes);
+        const int64_t scale_bytes = static_cast<int64_t>(config_.kv_scale_pool_size_bytes);
+        RTP_LLM_CHECK_WITH_INFO(scale_off + scale_bytes <= full_tensor.numel(),
+                                "kv_scale tensor out of range: off=%ld bytes=%ld full=%ld",
+                                scale_off,
+                                scale_bytes,
+                                full_tensor.numel());
+        kv_scale_tensor = full_tensor.narrow(0, scale_off, scale_bytes);
+    }
 
     layout_strategy_ = MemoryLayoutStrategyFactory::create(config_.layout);
     RTP_LLM_CHECK_WITH_INFO(layout_strategy_ != nullptr, "Failed to create memory layout strategy");
 
-    RTP_LLM_CHECK_WITH_INFO(layout_strategy_->init(config_, kv_cache_tensor, cache_base_ptr_, config_.dtype),
-                            "Failed to initialize memory layout strategy");
+    RTP_LLM_CHECK_WITH_INFO(
+        layout_strategy_->init(config_, kv_cache_tensor, kv_scale_tensor, cache_base_ptr_, config_.dtype),
+        "Failed to initialize memory layout strategy");
 
     initFreeBlocks();
 
@@ -60,6 +77,10 @@ void BlockPool::initFreeBlocks() {
 
 std::vector<torch::Tensor> BlockPool::layerCacheBase() const {
     return layout_strategy_->getLayerCacheTensors();
+}
+
+std::vector<torch::Tensor> BlockPool::layerScaleCacheBase() const {
+    return layout_strategy_->getLayerScaleCacheTensors();
 }
 
 BlockIndicesType BlockPool::malloc(int num_blocks) {
@@ -132,7 +153,8 @@ void BlockPool::regUserMr(size_t model_id) {
 
         auto start_time_us = currentTimeUs();
 
-        if (!memory_util->regUserMr(cache_base_ptr_, config_.total_size_bytes, true, config_.block_stride_bytes)) {
+        // aligned_size should match kv block stride bytes (not including separated scale pool).
+        if (!memory_util->regUserMr(cache_base_ptr_, config_.total_size_bytes, true, config_.kv_block_stride_bytes)) {
             RTP_LLM_FAIL("register user mr for block pool cache buffer failed");
         }
 
@@ -143,6 +165,26 @@ void BlockPool::regUserMr(size_t model_id) {
             cache_base_ptr_,
             config_.total_size);
         mr_cost_time_ms_ += cost_time_ms;
+
+        // Register scale pool mr separately when enabled.
+        if (config_.enable_kv_scale && config_.kv_scale_pool_size_bytes > 0 && config_.kv_scale_block_bytes > 0) {
+            void* scale_base_ptr      = static_cast<void*>(static_cast<char*>(cache_base_ptr_)
+                                                      + static_cast<ptrdiff_t>(config_.kv_scale_offset_bytes));
+            auto  start_scale_time_us = currentTimeUs();
+            // aligned_size should match one scale block bytes (ONE of {K,V}).
+            if (!memory_util->regUserMr(
+                    scale_base_ptr, config_.kv_scale_pool_size_bytes, true, config_.kv_scale_block_bytes)) {
+                RTP_LLM_FAIL("register user mr for block pool kv scale buffer failed");
+            }
+            auto scale_cost_time_ms = (currentTimeUs() - start_scale_time_us) / 1000;
+            RTP_LLM_LOG_INFO(
+                "register user mr for block pool kv scale buffer success: cost %ld ms, scale base address %p, len %lu",
+                scale_cost_time_ms,
+                scale_base_ptr,
+                config_.kv_scale_pool_size_bytes);
+            mr_cost_time_ms_ += scale_cost_time_ms;
+        }
+
         kvcache_reg_mr_ = true;
     }
 }
@@ -151,6 +193,13 @@ void BlockPool::deregUserMr() {
     if (device_->cacheStore() && kvcache_reg_mr_) {
         RTP_LLM_LOG_INFO("start to deregister user mr");
         auto memory_util = std::static_pointer_cast<NormalCacheStore>(device_->cacheStore())->getMemoryUtil();
+        if (config_.enable_kv_scale && config_.kv_scale_pool_size_bytes > 0 && config_.kv_scale_block_bytes > 0) {
+            void* scale_base_ptr = static_cast<void*>(static_cast<char*>(cache_base_ptr_)
+                                                      + static_cast<ptrdiff_t>(config_.kv_scale_offset_bytes));
+            if (!memory_util->deregUserMr(scale_base_ptr, true)) {
+                RTP_LLM_FAIL("deregister user mr for block pool kv scale buffer failed");
+            }
+        }
         if (!memory_util->deregUserMr(cache_base_ptr_, true)) {
             RTP_LLM_FAIL("deregister user mr for block pool cache buffer failed");
         }

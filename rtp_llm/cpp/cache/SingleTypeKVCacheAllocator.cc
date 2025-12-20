@@ -156,19 +156,26 @@ void SingleTypeKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) 
 CacheLayerLayout SingleTypeKVCacheAllocator::layerCacheBase() const {
     CacheLayerLayout layout;
     auto             layer_tensors = full_kv_cache_group_->layerCacheBase();
+    auto             scale_tensors = full_kv_cache_group_->layerScaleCacheBase();
+
     layout.layers_to_buffer_ptrs.clear();
     layout.layers_to_buffer_ptrs.resize(config_.layer_num);
-    for (const auto& kv : layer_tensors) {
-        int layer_id = kv.first;
-        if (layer_id >= 0 && layer_id < config_.layer_num) {
-            const auto& tensor = kv.second;
-            if (tensor.defined() && tensor.numel() > 0) {
-                layout.layers_to_buffer_ptrs[layer_id] = torchTensor2Buffer(tensor);
-            } else {
-                layout.layers_to_buffer_ptrs[layer_id] = nullptr;
-            }
+    layout.layers_to_scale_buffer_ptrs.clear();
+    layout.layers_to_scale_buffer_ptrs.resize(config_.layer_num);
+
+    for (int layer_id = 0; layer_id < config_.layer_num; ++layer_id) {
+        if (layer_tensors[layer_id].defined() && layer_tensors[layer_id].numel() > 0) {
+            layout.layers_to_buffer_ptrs[layer_id] = torchTensor2Buffer(layer_tensors[layer_id]);
+        } else {
+            layout.layers_to_buffer_ptrs[layer_id] = nullptr;
+        }
+        if (scale_tensors[layer_id].defined() && scale_tensors[layer_id].numel() > 0) {
+            layout.layers_to_scale_buffer_ptrs[layer_id] = torchTensor2Buffer(scale_tensors[layer_id]);
+        } else {
+            layout.layers_to_scale_buffer_ptrs[layer_id] = nullptr;
         }
     }
+
     return layout;
 }
 
