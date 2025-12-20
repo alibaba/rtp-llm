@@ -11,8 +11,8 @@ import torch
 
 from rtp_llm.config.quant_config import QuantizationConfig
 from rtp_llm.model_loader.load_config import LoadConfig
-from rtp_llm.utils.database import BaseDatabase
 from rtp_llm.model_loader.tensor_source import TensorSource
+from rtp_llm.utils.database import BaseDatabase
 from rtp_llm.utils.model_weight import CkptWeightInfo, W, WeightStyle, identity, sp_id
 
 
@@ -158,7 +158,9 @@ class WeightModule(ABC):
         device: str,
         load_config: LoadConfig,
     ):
-        raw_tensors = self._load_raw_tensor(tensor_source, layer_id, device, load_config)
+        raw_tensors = self._load_raw_tensor(
+            tensor_source, layer_id, device, load_config
+        )
 
         if load_config.merge_lora:
             merged_tensors = self._merge_lora(
@@ -184,16 +186,20 @@ class WeightModule(ABC):
         return flat_res
 
     @torch.inference_mode()
-    def update(self, tensor: torch.Tensor, device: str, load_config: LoadConfig, **kwargs):
+    def update(
+        self, tensor: torch.Tensor, device: str, load_config: LoadConfig, **kwargs
+    ):
         split_tensors = self._split(tensor, load_config)
         processed_tensors = self._postprocess(split_tensors, device, load_config)
         flat_res = {}
+
         def __extract_tensor(tensors):
             for k, v in tensors.items():
                 if isinstance(v, dict):
                     __extract_tensor(v)
                 else:
                     flat_res.update({k: v.to(device)})
+
         __extract_tensor(processed_tensors)
         shape_info = {k: (v.shape, v.dtype) for k, v in flat_res.items()}
         return flat_res
@@ -345,7 +351,14 @@ class AtomicWeight(WeightModule):
             try:
                 before_merge_tensors.append(
                     ckpt_weight.merge_fun(
-                        [x.unsqueeze(-1).to(device) if "scale" in name and x.dim() == 1 else x.to(device) for x in tensor_source.load_tensor(name, convert_type)]
+                        [
+                            (
+                                x.unsqueeze(-1).to(device)
+                                if "scale" in name and x.dim() == 1
+                                else x.to(device)
+                            )
+                            for x in tensor_source.load_tensor(name, convert_type)
+                        ]
                     )
                 )
             except Exception as e:
@@ -409,7 +422,7 @@ class AtomicWeight(WeightModule):
 
     def __split_tensor(
         self, split_func: Callable, tensor: torch.Tensor, load_config: LoadConfig
-    ) -> torch:
+    ) -> torch.Tensor:
         return split_func(
             t=tensor,
             tp=load_config.tp_size,

@@ -242,12 +242,13 @@ class ModelLoader:
             f"load method: {load_method}, finally choose load method: {load_method}"
         )
 
-        if load_method == LoadMethod.FASTSAFETENSORS:
-            return self._load_from_fastsafetensor(device)
-        elif load_method == LoadMethod.SCRATCH:
-            return self._load_from_scratch(device)
-        else:
-            raise ValueError(f"Unknown load method: {load_method}")
+        return self._load_from_fastsafetensor(device)
+        # if load_method == LoadMethod.FASTSAFETENSORS:
+        #     return self._load_from_fastsafetensor(device)
+        # elif load_method == LoadMethod.SCRATCH:
+        #     return self._load_from_scratch(device)
+        # else:
+        #     raise ValueError(f"Unknown load method: {load_method}")
 
     def _is_memory_enough_for_fastsafetensor(self):
         model_size = self._weights_info.model_config.eval_model_weight_size()
@@ -527,8 +528,12 @@ class ModelLoader:
 
     def create_eplb(self):
         weights_info = self._weights_info
-        
-        logging.info("create eplb: expert_num: %d, phy_exp_num: %d", weights_info.expert_num_, weights_info.phy_exp_num_)
+
+        logging.info(
+            "create eplb: expert_num: %d, phy_exp_num: %d",
+            weights_info.expert_num_,
+            weights_info.phy_exp_num_,
+        )
 
         # static expert placement info
         phy2log_path = self.model_config.phy2log_path

@@ -54,6 +54,7 @@ cc_library(
         ":config_modules",
         "//rtp_llm/cpp/model_utils:model_utils",
         "//rtp_llm/cpp/core:types",
+        "//rtp_llm/cpp/core:buffer_torch"
     ],
     visibility = ["//visibility:public"],
     copts = copts(),
