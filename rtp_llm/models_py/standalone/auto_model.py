@@ -8,7 +8,10 @@ from typing import Optional
 import torch
 from transformers import AutoTokenizer
 
-from rtp_llm.utils.model_weight import W
+import rtp_llm.models
+from rtp_llm.config.engine_config import EngineConfig
+from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.model_factory import ModelFactory
 from rtp_llm.ops.compute_ops import (
     KVCache,
     PyAttentionInputs,
@@ -19,10 +22,8 @@ from rtp_llm.ops.compute_ops import (
     init_device,
 )
 from rtp_llm.tools.api.hf_model_helper import get_model_info_from_hf
-from rtp_llm.config.py_config_modules import PyEnvConfigs
-from rtp_llm.config.engine_config import EngineConfig
-from rtp_llm.model_factory import ModelFactory
-import rtp_llm.models
+from rtp_llm.utils.model_weight import W
+
 
 
 class AutoModel:
@@ -97,7 +98,7 @@ class AutoModel:
             ffn_disaggregate_config=engine_config.parallelism_config.ffn_disaggregate_config,
             runtime_config=engine_config.runtime_config,
         )
-        self.device = 'cuda:0'
+        self.device = "cuda:0"
 
         # init kv cache and bind it to py model
         self.tokens_per_block = self.model_config.attn_config.tokens_per_block
@@ -138,7 +139,9 @@ class AutoModel:
         # Set DeviceResourceConfig.device_reserve_memory_bytes (equivalent to DEVICE_RESERVE_MEMORY_BYTES)
         # Default: 2GB = 2 * 1024 * 1024 * 1024 bytes
         if self.py_env_configs.device_resource_config.device_reserve_memory_bytes == 0:
-            self.py_env_configs.device_resource_config.device_reserve_memory_bytes = 2 * 1024 * 1024 * 1024
+            self.py_env_configs.device_resource_config.device_reserve_memory_bytes = (
+                2 * 1024 * 1024 * 1024
+            )
 
     def _init_kv_cache(self):
         self.kv_cache = KVCache()
@@ -155,7 +158,9 @@ class AutoModel:
             self.size_per_head,
         ]
 
-        kv_cache_total = torch.zeros(kv_shape, dtype=self.compute_dtype, device=self.device)
+        kv_cache_total = torch.zeros(
+            kv_shape, dtype=self.compute_dtype, device=self.device
+        )
         k_cache_base = kv_cache_total
         v_cache_base = torch.empty(
             self.layer_num,
@@ -190,7 +195,6 @@ class AutoModel:
             [[i for i in range(1, need_block_nums + 1)]], dtype=torch.int32
         )
         attention_inputs.dtype = get_typemeta(self.kv_cache.k_cache_base)
-        attention_inputs.kv_block_offset = self.layer_num * self.block_nums
         attention_inputs.is_prefill = True
         return attention_inputs
 
