@@ -6,10 +6,10 @@ namespace rtp_llm {
 
 class AttentionLayerTestFp16: public AttentionLayerTest<half> {
     ParamsPtr prepareTrtAttn(const AttentionConfigs& configs,
-                             const BufferPtr&        k_cache,
+                             const BufferPtr&        kv_cache,
                              const BufferPtr&        kv_cache_block_id,
                              int                     batch_size) override {
-        return dynamic_cast<CudaDevice*>(device_)->prepareTrtAttn(configs, k_cache, kv_cache_block_id, batch_size);
+        return dynamic_cast<CudaDevice*>(device_)->prepareTrtAttn(configs, kv_cache, kv_cache_block_id, batch_size);
     }
 };
 
