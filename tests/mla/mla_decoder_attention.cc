@@ -310,7 +310,7 @@ torch::Tensor MlaDecoderAttnOp::forward(torch::Tensor q,
         attn_common_inputs.context_batch_size = 0;
         attn_common_inputs.decoder_batch_size = q.size(0);
         attn_common_inputs.kv_cache =
-            std::make_optional<KvCacheInfo>({1, nullptr, k_cache_buffer, v_cache_buffer, nullptr, nullptr});
+            std::make_optional<KvCacheInfo>({1, nullptr, kv_cache_buffer, nullptr});
         attn_common_inputs.decode_flash_infer_attn = flash_infer_attn_params;
 
         auto mla_params = MlaAttentionModuleParams{0,

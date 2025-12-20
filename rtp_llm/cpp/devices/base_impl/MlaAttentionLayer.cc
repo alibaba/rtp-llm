@@ -31,13 +31,13 @@ AttentionLayerOutput DeviceBase::mlaAttentionLayer(const AttentionLayerParams& p
                               "kv_cache_block_id shape in attention layer should be [batch_size, block_length]"
                               ", but got %s",
                               kv_cache_block_id.debugString().c_str());
-        RUNTIME_ASSERT_OP_ARG(kv_cache.k_cache_buffer, "k_cache_buffer should has value when use kv_cache_block_id");
-        const auto& layer_cache_shape = kv_cache.k_cache_buffer->shape();
+        RUNTIME_ASSERT_OP_ARG(kv_cache.kv_cache_buffer, "kv cache buffer should has value when use kv_cache_block_id");
+        const auto& layer_cache_shape = kv_cache.kv_cache_buffer->shape();
         RUNTIME_ASSERT_OP_ARG(((layer_cache_shape.size() == 3)
                                && (layer_cache_shape[1] == params.configs.tokens_per_block)
                                && (layer_cache_shape[2] == params.configs.kv_lora_rank + params.configs.rope_head_dim)),
                               "mla kv cache buffer check shape failed. layer_cache: %s",
-                              kv_cache.k_cache_buffer->debugString().c_str());
+                              kv_cache.kv_cache_buffer->debugString().c_str());
     }
     BufferPtr         fused_qkv = nullptr;
     BufferPtr         q         = nullptr;
