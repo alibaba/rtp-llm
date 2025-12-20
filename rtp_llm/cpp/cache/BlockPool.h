@@ -34,6 +34,7 @@ public:
 
     MemoryType                 where() const;
     std::vector<torch::Tensor> layerCacheBase() const;
+    std::vector<torch::Tensor> layerScaleCacheBase() const;
 
     std::vector<BlockIdxType> malloc(int num_blocks);
     void                      requestFree(BlockIdxType block_idx);

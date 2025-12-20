@@ -39,6 +39,22 @@ CacheConfig createSingleTypeTestConfig(int layer_num = 4, int block_num = 10, in
     }
     config.layer_ids.push_back(layer_ids);
 
+    // Fill derived size/stride fields for smoke tests (kv_scale is disabled for FP16).
+    config.kv_block_stride       = mha_spec->block_size();
+    config.kv_block_stride_bytes = mha_spec->block_size_bytes();
+    config.kv_block_size         = static_cast<size_t>(layer_num) * config.kv_block_stride;
+    config.kv_block_size_bytes   = static_cast<size_t>(layer_num) * config.kv_block_stride_bytes;
+
+    config.kv_scale_stride       = 0;
+    config.kv_scale_stride_bytes = 0;
+    config.kv_scale_size         = 0;
+    config.kv_scale_size_bytes   = 0;
+
+    config.block_stride       = config.kv_block_stride;
+    config.block_stride_bytes = config.kv_block_stride_bytes;
+    config.block_size         = config.kv_block_size;
+    config.block_size_bytes   = config.kv_block_size_bytes;
+
     return config;
 }
 
@@ -299,6 +315,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, LayerCacheBase) {
 
     auto layout = allocator_->layerCacheBase();
     EXPECT_EQ(layout.layers_to_buffer_ptrs.size(), config.layer_num);
+    EXPECT_EQ(layout.layers_to_scale_buffer_ptrs.size(), config.layer_num);
 
     for (size_t i = 0; i < layout.layers_to_buffer_ptrs.size(); ++i) {
         EXPECT_NE(layout.layers_to_buffer_ptrs[i], nullptr);

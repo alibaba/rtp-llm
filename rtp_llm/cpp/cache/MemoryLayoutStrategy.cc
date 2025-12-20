@@ -6,22 +6,22 @@ namespace rtp_llm {
 
 // LayerFirstLayoutStrategy
 bool LayerFirstLayoutStrategy::init(const BlockPoolConfig& config,
-                                    torch::Tensor&         cache_buffer,
+                                    torch::Tensor&         kv_cache_buffer,
+                                    torch::Tensor&         kv_scale_buffer,
                                     void*                  cache_base_ptr,
                                     rtp_llm::DataType      data_type) {
     config_         = config;
     cache_base_ptr_ = cache_base_ptr;
     data_type_      = data_type;
 
-    if (cache_buffer.numel() == 0) {
+    if (kv_cache_buffer.numel() == 0) {
         RTP_LLM_LOG_ERROR("Cache buffer tensor is empty, cannot split by layers");
         return false;
     }
 
-    torch::Tensor reshaped_tensor = cache_buffer.reshape({static_cast<int64_t>(config_.layer_num),
-                                                          static_cast<int64_t>(config_.block_num),
-                                                          static_cast<int64_t>(config_.block_stride_bytes)});
-
+    torch::Tensor reshaped_tensor = kv_cache_buffer.reshape({static_cast<int64_t>(config_.layer_num),
+                                                             static_cast<int64_t>(config_.block_num),
+                                                             static_cast<int64_t>(config_.kv_block_stride_bytes)});
     layer_kv_tensors_.clear();
     layer_kv_tensors_.reserve(config_.layer_num);
 
@@ -56,9 +56,49 @@ bool LayerFirstLayoutStrategy::init(const BlockPoolConfig& config,
         kv_shape = {layer_num, block_num, 2, local_head_num_kv, seq_size_per_block, k_token_size};
     }
 
-    auto memory_type = cache_buffer.is_cuda() ? rtp_llm::MEMORY_GPU : rtp_llm::MEMORY_CPU;
+    auto memory_type = kv_cache_buffer.is_cuda() ? rtp_llm::MEMORY_GPU : rtp_llm::MEMORY_CPU;
 
     kv_cache_buffer_.kv_blocks = std::make_shared<rtp_llm::Buffer>(memory_type, data_type_, kv_shape, cache_base_ptr_);
+
+    if (config_.enable_kv_scale && config_.kv_scale_pool_size_bytes > 0 && config_.kv_scale_block_bytes > 0) {
+        RTP_LLM_CHECK_WITH_INFO(kv_scale_buffer.defined() && kv_scale_buffer.numel() > 0,
+                                "kv_scale_buffer must be provided when enable_kv_scale is true");
+        RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(kv_scale_buffer.numel()) == config_.kv_scale_pool_size_bytes,
+                                "kv_scale_buffer bytes mismatch: got=%ld expect=%zu",
+                                kv_scale_buffer.numel(),
+                                config_.kv_scale_pool_size_bytes);
+
+        kv_scale_base_ptr_ = kv_scale_buffer.data_ptr();
+
+        // Keep a buffer view for kernels / model (FP32 scale blocks).
+        std::vector<size_t> scale_shape  = {layer_num, block_num * 2, local_head_num_kv, seq_size_per_block};
+        kv_cache_buffer_.kv_scale_blocks = std::make_shared<rtp_llm::Buffer>(
+            memory_type, rtp_llm::DataType::TYPE_FP32, scale_shape, kv_scale_base_ptr_);
+
+        torch::Tensor reshaped_scale_tensor =
+            kv_scale_buffer.reshape({static_cast<int64_t>(config_.layer_num),
+                                     static_cast<int64_t>(config_.block_num),
+                                     static_cast<int64_t>(config_.kv_scale_stride_bytes)});
+
+        layer_kv_scale_tensors_.clear();
+        layer_kv_scale_tensors_.reserve(config_.layer_num);
+
+        for (uint32_t layer_id = 0; layer_id < config_.layer_num; ++layer_id) {
+            torch::Tensor layer_tensor = reshaped_scale_tensor[layer_id];
+            layer_kv_scale_tensors_.push_back(layer_tensor);
+
+            RTP_LLM_LOG_DEBUG("Layer %d scale tensor shape: [%s], elements: %ld",
+                              layer_id,
+                              torch::str(layer_tensor.sizes()).c_str(),
+                              layer_tensor.numel());
+        }
+
+#ifdef ENABLE_FP8
+        if (data_type_ == rtp_llm::TYPE_FP8_E4M3) {
+            Buffer2torchTensor(kv_cache_buffer_.kv_scale_blocks, false).fill_(1.0);
+        }
+#endif
+    }
 
     RTP_LLM_LOG_INFO("LayerFirstLayoutStrategy initialized successfully");
     return true;
@@ -68,25 +108,44 @@ std::vector<torch::Tensor> LayerFirstLayoutStrategy::getLayerCacheTensors() cons
     return layer_kv_tensors_;
 }
 
+std::vector<torch::Tensor> LayerFirstLayoutStrategy::getLayerScaleCacheTensors() const {
+    return layer_kv_scale_tensors_;
+}
+
 BlockAddrInfo LayerFirstLayoutStrategy::convertIndexToAddr(int layer_id, int block_id) const {
-    if (layer_id >= layer_kv_tensors_.size()) {
+    if (layer_id < 0 || static_cast<size_t>(layer_id) >= layer_kv_tensors_.size()) {
         RTP_LLM_LOG_ERROR("Layer ID %d out of range (max: %zu)", layer_id, layer_kv_tensors_.size());
         return {nullptr};
     }
 
-    torch::Tensor tensor = layer_kv_tensors_[layer_id][block_id];
-    return {tensor.data_ptr()};
+    torch::Tensor tensor  = layer_kv_tensors_[layer_id][block_id];
+    void*         kv_addr = tensor.data_ptr();
+
+    if (config_.enable_kv_scale) {
+        torch::Tensor scale_tensor  = layer_kv_scale_tensors_[layer_id][block_id];
+        void*         kv_scale_addr = scale_tensor.data_ptr();
+        return {kv_addr, kv_scale_addr};
+    }
+
+    return {kv_addr, nullptr};
 }
 
 BlockBufferPtrInfo LayerFirstLayoutStrategy::convertIndexToBuffer(int layer_id, int block_id) const {
     if (layer_id >= layer_kv_tensors_.size()) {
         RTP_LLM_LOG_ERROR("Layer ID %d out of range (max: %zu)", layer_id, layer_kv_tensors_.size());
-        return {nullptr};
+        return {nullptr, nullptr};
     }
 
     torch::Tensor tensor = layer_kv_tensors_[layer_id][block_id];
     BufferPtr     buffer = torchTensor2Buffer(tensor);
-    return {buffer};
+
+    if (config_.enable_kv_scale) {
+        torch::Tensor scale_tensor = layer_kv_scale_tensors_[layer_id][block_id];
+        BufferPtr     scale_buffer = torchTensor2Buffer(scale_tensor);
+        return {buffer, scale_buffer};
+    }
+
+    return {buffer, nullptr};
 }
 
 std::vector<BufferPtr> LayerFirstLayoutStrategy::convertIndexToBuffer(int layer_id,
@@ -100,8 +159,8 @@ std::vector<BufferPtr> LayerFirstLayoutStrategy::convertIndexToBuffer(int layer_
 
     torch::Tensor tensor = layer_kv_tensors_[layer_id][block_id];
 
-    const size_t k_total_bytes = static_cast<size_t>(config_.k_block_size_bytes);
-    const size_t v_total_bytes = static_cast<size_t>(config_.v_block_size_bytes);
+    const size_t k_total_bytes = static_cast<size_t>(config_.k_block_stride_bytes);
+    const size_t v_total_bytes = static_cast<size_t>(config_.v_block_stride_bytes);
     const int    heads         = static_cast<int>(config_.local_head_num_kv);
 
     RTP_LLM_CHECK_WITH_INFO(partition_count > 0, "partition_count must be > 0");
