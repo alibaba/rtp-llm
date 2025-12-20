@@ -41,6 +41,7 @@ public:
 
     void                                   reference(const BlockIndicesType& new_block_indices);
     std::unordered_map<int, torch::Tensor> layerCacheBase() const;
+    std::unordered_map<int, torch::Tensor> layerScaleCacheBase() const;
     BlockAddrInfo                          convertIndexToAddr(int layer_id, int block_id) const;
     BlockBufferPtrInfo                     convertIndexToBuffer(int layer_id, int block_id) const;
     std::vector<BufferPtr>
@@ -59,6 +60,7 @@ protected:
 
     int                                    seq_size_per_block_;
     std::unordered_map<int, torch::Tensor> gloabl_layer_to_kv_tensors;
+    std::unordered_map<int, torch::Tensor> gloabl_layer_to_kv_scale_tensors;
     std::unordered_map<int, int>           gloabl_layer_to_local_layer;
 };
 

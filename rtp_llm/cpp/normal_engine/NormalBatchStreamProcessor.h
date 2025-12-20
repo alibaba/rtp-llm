@@ -26,7 +26,7 @@ public:
         position_id_len_factor_(model_config.attn_config.rope_config.index_factor),
         role_type_(pd_sep_config.role_type),
         decode_entrance_(pd_sep_config.decode_entrance),
-        block_stride_bytes_(cache_config.block_stride_bytes),
+        block_stride_bytes_(cache_config.kv_block_stride_bytes),
         seq_size_per_block_(cache_config.seq_size_per_block),
         warm_up_(warm_up),
         enable_detail_log_(profiling_debug_logging_config.enable_detail_log),

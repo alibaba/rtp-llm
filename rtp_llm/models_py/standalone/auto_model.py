@@ -158,21 +158,9 @@ class AutoModel:
             self.size_per_head,
         ]
 
-        kv_cache_total = torch.zeros(
-            kv_shape, dtype=self.compute_dtype, device=self.device
-        )
-        k_cache_base = kv_cache_total
-        v_cache_base = torch.empty(
-            self.layer_num,
-            0,
-            self.kv_head_num,
-            self.tokens_per_block,
-            self.size_per_head,
-            device=self.device,
-        )
-
-        self.kv_cache.k_cache_base = k_cache_base
-        self.kv_cache.v_cache_base = v_cache_base
+        kv_cache_total = torch.zeros(kv_shape, dtype=self.compute_dtype, device=self.device)
+        kv_cache_base = kv_cache_total
+        self.kv_cache.kv_cache_base = kv_cache_base
 
     def _prepare_prefill_attention_inputs(self, input_length: int) -> PyAttentionInputs:
         need_block_nums = self._check_block_nums(input_length)
@@ -194,7 +182,7 @@ class AutoModel:
         attention_inputs.kv_cache_block_id_host = torch.tensor(
             [[i for i in range(1, need_block_nums + 1)]], dtype=torch.int32
         )
-        attention_inputs.dtype = get_typemeta(self.kv_cache.k_cache_base)
+        attention_inputs.dtype = get_typemeta(self.kv_cache.kv_cache_base)
         attention_inputs.is_prefill = True
         return attention_inputs
 

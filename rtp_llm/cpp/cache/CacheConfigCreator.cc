@@ -49,10 +49,10 @@ CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model
         spec->seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
 
         config.cache_specs.push_back(spec);
-        config.block_size         = static_cast<size_t>(config.layer_num) * spec->block_size();
-        config.block_stride       = spec->block_size();
-        config.block_size_bytes   = static_cast<size_t>(config.layer_num) * spec->block_size_bytes();
-        config.block_stride_bytes = spec->block_size_bytes();
+        config.kv_block_stride       = spec->block_size();
+        config.kv_block_stride_bytes = spec->block_size_bytes();
+        config.kv_block_size         = static_cast<size_t>(config.layer_num) * config.kv_block_stride;
+        config.kv_block_size_bytes   = static_cast<size_t>(config.layer_num) * config.kv_block_stride_bytes;
     } else {
         auto spec                = std::make_shared<MHAKVCacheSpec>();
         spec->type               = KVCacheType::MultiHeadAttention;
@@ -62,11 +62,33 @@ CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model
         spec->seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
 
         config.cache_specs.push_back(spec);
-        config.block_size         = static_cast<size_t>(config.layer_num) * spec->block_size();
-        config.block_stride       = spec->block_size();
-        config.block_size_bytes   = static_cast<size_t>(config.layer_num) * spec->block_size_bytes();
-        config.block_stride_bytes = spec->block_size_bytes();
+        config.kv_block_stride       = spec->block_size();
+        config.kv_block_stride_bytes = spec->block_size_bytes();
+        config.kv_block_size         = static_cast<size_t>(config.layer_num) * config.kv_block_stride;
+        config.kv_block_size_bytes   = static_cast<size_t>(config.layer_num) * config.kv_block_stride_bytes;
     }
+
+    // kv scale stride (K+V scales together) for int8/fp8
+    if (dtype == rtp_llm::TYPE_INT8 || dtype == rtp_llm::TYPE_FP8_E4M3) {
+        const size_t local_head_num_kv        = static_cast<size_t>(config.cache_specs[0]->local_head_num_kv);
+        const size_t seq_size_per_block       = static_cast<size_t>(config.seq_size_per_block);
+        const size_t kv_scale_kv_stride       = local_head_num_kv * seq_size_per_block;
+        const size_t kv_scale_kv_stride_bytes = kv_scale_kv_stride * sizeof(float);
+        config.kv_scale_stride                = 2 * kv_scale_kv_stride;
+        config.kv_scale_stride_bytes          = 2 * kv_scale_kv_stride_bytes;
+        config.kv_scale_size                  = static_cast<size_t>(config.layer_num) * config.kv_scale_stride;
+        config.kv_scale_size_bytes            = static_cast<size_t>(config.layer_num) * config.kv_scale_stride_bytes;
+    } else {
+        config.kv_scale_stride       = 0;
+        config.kv_scale_stride_bytes = 0;
+        config.kv_scale_size         = 0;
+        config.kv_scale_size_bytes   = 0;
+    }
+
+    config.block_stride       = config.kv_block_stride + config.kv_scale_stride;
+    config.block_stride_bytes = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;
+    config.block_size         = config.kv_block_size + config.kv_scale_size;
+    config.block_size_bytes   = config.kv_block_size_bytes + config.kv_scale_size_bytes;
 
     config.layer_ids.push_back(all_layer_ids);
     return config;

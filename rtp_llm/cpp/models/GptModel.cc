@@ -29,6 +29,7 @@ GptModel::GptModel(const GptModelInitParams& params):
     model_id_(params.model_id) {
     if (params.kv_cache_buffer) {
         kv_cache_buffer_ = params.kv_cache_buffer->kv_blocks;
+        kv_scale_buffer_ = params.kv_cache_buffer->kv_scale_blocks;
     }
     if (abs(description_.residual_scalar - 1.0) > 1e-6) {
         vector<float> residual_scale_vec = {(float)description_.residual_scalar};
