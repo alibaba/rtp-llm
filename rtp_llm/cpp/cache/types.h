@@ -20,16 +20,19 @@ inline bool isNullBlockIdx(BlockIdxType block_idx) {
 }
 
 struct BlockAddrInfo {
-    void* kv_addr = nullptr;
+    void* kv_addr       = nullptr;
+    void* kv_scale_addr = nullptr;
 };
 
 struct BlockBufferPtrInfo {
-    BufferPtr kv_addr = nullptr;
+    BufferPtr kv_addr       = nullptr;
+    BufferPtr kv_scale_addr = nullptr;
 };
 
 struct CacheLayerLayout {
     std::vector<int>       layer_to_groups;
     std::vector<BufferPtr> layers_to_buffer_ptrs;
+    std::vector<BufferPtr> layers_to_scale_buffer_ptrs;
 };
 
 struct KVCacheInfo {
@@ -42,7 +45,10 @@ struct KVCacheInfo {
 
 // For backward compatibility with old cache system (same as GptModel.h definition)
 struct KVCacheBuffer {
+    // Layout convention: [layer_num, block_num, local_head_num_kv, seq_size_per_block, hidden_size_per_head], INT8
     rtp_llm::BufferPtr kv_blocks = nullptr;
+    // Layout convention: [layer_num, block_num * 2, local_head_num_kv, seq_size_per_block], FP32.
+    rtp_llm::BufferPtr kv_scale_blocks = nullptr;
 };
 
 // TODO, 和KVCacheBuffer类似的有好几个结构体，需要简化。
