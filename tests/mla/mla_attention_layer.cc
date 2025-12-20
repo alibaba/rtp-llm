@@ -40,51 +40,50 @@ MlaAttnLayerOp::MlaAttnLayerOp(int64_t head_num,
                                double  softmax_extra_scale) {
     rtp_llm::initLogger();
 
-    ParallelismConfig parallelism_config;
-    ModelConfig model_config;
-    EPLBConfig eplb_config;
-    FMHAConfig fmha_config;
-    DeviceResourceConfig device_resource_config;
-    MoeConfig moe_config;
-    SpeculativeExecutionConfig sp_config;
-    MiscellaneousConfig misc_config;
+    ParallelismConfig           parallelism_config;
+    ModelConfig                 model_config;
+    EPLBConfig                  eplb_config;
+    FMHAConfig                  fmha_config;
+    DeviceResourceConfig        device_resource_config;
+    MoeConfig                   moe_config;
+    SpeculativeExecutionConfig  sp_config;
+    MiscellaneousConfig         misc_config;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
-    HWKernelConfig hw_kernel_config;
-    ConcurrencyConfig concurrency_config;
-    FfnDisAggregateConfig ffn_disaggregate_config;
-    RuntimeConfig runtime_config;
+    HWKernelConfig              hw_kernel_config;
+    ConcurrencyConfig           concurrency_config;
+    FfnDisAggregateConfig       ffn_disaggregate_config;
+    RuntimeConfig               runtime_config;
 
-    rtp_llm::DeviceFactory::initDevices(
-        parallelism_config,
-        model_config,
-        eplb_config,
-        fmha_config,
-        device_resource_config,
-        moe_config,
-        sp_config,
-        misc_config,
-        profiling_debug_logging_config,
-        hw_kernel_config,
-        concurrency_config,
-        ffn_disaggregate_config,
-        runtime_config);
-    device_      = rtp_llm::DeviceFactory::getDefaultDevice();
-    attn_configs.head_num = static_cast<size_t>(head_num);
-    attn_configs.kv_head_num = static_cast<size_t>(head_num);
-    attn_configs.size_per_head = static_cast<size_t>(nope_head_dim + rope_head_dim);
-    attn_configs.tokens_per_block = 64;
-    attn_configs.q_scaling = 1.0f;
-    attn_configs.fuse_qkv_add_bias = true;
-    attn_configs.use_logn_attn = false;
-    attn_configs.is_causal = true;
-    attn_configs.use_mla = true;
-    attn_configs.q_lora_rank = static_cast<size_t>(q_lora_rank);
-    attn_configs.kv_lora_rank = static_cast<size_t>(kv_lora_rank);
-    attn_configs.nope_head_dim = static_cast<size_t>(nope_head_dim);
-    attn_configs.rope_head_dim = static_cast<size_t>(rope_head_dim);
-    attn_configs.v_head_dim = static_cast<size_t>(v_head_dim);
+    rtp_llm::DeviceFactory::initDevices(parallelism_config,
+                                        model_config,
+                                        eplb_config,
+                                        fmha_config,
+                                        device_resource_config,
+                                        moe_config,
+                                        sp_config,
+                                        misc_config,
+                                        profiling_debug_logging_config,
+                                        hw_kernel_config,
+                                        concurrency_config,
+                                        ffn_disaggregate_config,
+                                        runtime_config);
+    device_                          = rtp_llm::DeviceFactory::getDefaultDevice();
+    attn_configs.head_num            = static_cast<size_t>(head_num);
+    attn_configs.kv_head_num         = static_cast<size_t>(head_num);
+    attn_configs.size_per_head       = static_cast<size_t>(nope_head_dim + rope_head_dim);
+    attn_configs.tokens_per_block    = 64;
+    attn_configs.q_scaling           = 1.0f;
+    attn_configs.fuse_qkv_add_bias   = true;
+    attn_configs.use_logn_attn       = false;
+    attn_configs.is_causal           = true;
+    attn_configs.use_mla             = true;
+    attn_configs.q_lora_rank         = static_cast<size_t>(q_lora_rank);
+    attn_configs.kv_lora_rank        = static_cast<size_t>(kv_lora_rank);
+    attn_configs.nope_head_dim       = static_cast<size_t>(nope_head_dim);
+    attn_configs.rope_head_dim       = static_cast<size_t>(rope_head_dim);
+    attn_configs.v_head_dim          = static_cast<size_t>(v_head_dim);
     attn_configs.softmax_extra_scale = static_cast<float>(softmax_extra_scale);
-    attn_configs.kv_cache_dtype = KvCacheDataType::BASE;
+    attn_configs.kv_cache_dtype      = KvCacheDataType::BASE;
 }
 torch::Tensor MlaAttnLayerOp::forward(torch::Tensor              hidden,
                                       std::vector<torch::Tensor> weights,
@@ -137,8 +136,7 @@ torch::Tensor MlaAttnLayerOp::forward(torch::Tensor              hidden,
             {"output"});
         auto kc_dense_weight        = std::make_shared<DenseWeights>(kc_weight_b);
         auto vc_dense_weight        = std::make_shared<DenseWeights>(vc_t_weight_b);
-        auto k_cache_buffer         = torchTensor2Buffer(ckv_cache);
-        auto v_cache_buffer         = torchTensor2Buffer(kpe_caches);
+        auto kv_cache_buffer        = torchTensor2Buffer(ckv_cache);
         auto attn_layer_weight      = AttentionLayerWeights();
         attn_layer_weight.kc_weight = kc_dense_weight;
         attn_layer_weight.vc_weight = vc_dense_weight;
@@ -153,8 +151,8 @@ torch::Tensor MlaAttnLayerOp::forward(torch::Tensor              hidden,
         auto attn_common_inputs               = AttentionCommonInputs();
         attn_common_inputs.context_batch_size = 0;
         attn_common_inputs.decoder_batch_size = hidden.size(0);
-        attn_common_inputs.kv_cache           = std::make_optional<KvCacheInfo>(
-            {1, kvcache_block_id_host, k_cache_buffer, v_cache_buffer, nullptr, nullptr});
+        attn_common_inputs.kv_cache =
+            std::make_optional<KvCacheInfo>({1, kvcache_block_id_host, kv_cache_buffer, nullptr});
         attn_common_inputs.prefill_flash_infer_attn = context_flash_infer_attn;
         attn_common_inputs.decode_flash_infer_attn  = decode_flash_infer_attn;
         attn_common_inputs.input_lengths            = input_lengths_host;
@@ -185,11 +183,9 @@ void MlaAttnLayerOp::reset_head_num(int64_t head_num) {
     attn_configs.kv_head_num = static_cast<size_t>(head_num);
 }
 
-static auto _op_ =
-    torch::jit::class_<MlaAttnLayerOp>("unittest", "MlaAttnLayerOp")
-        .def(torch::jit::init<int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, double>())
-        .def("forward", &MlaAttnLayerOp::forward)
-        .def("reset_head_num", &MlaAttnLayerOp::reset_head_num);
+static auto _op_ = torch::jit::class_<MlaAttnLayerOp>("unittest", "MlaAttnLayerOp")
+                       .def(torch::jit::init<int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, double>())
+                       .def("forward", &MlaAttnLayerOp::forward)
+                       .def("reset_head_num", &MlaAttnLayerOp::reset_head_num);
 
-}
-
+}  // namespace rtp_llm

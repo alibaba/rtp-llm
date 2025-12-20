@@ -4,7 +4,7 @@
 #include <tuple>
 #include <vector>
 #include <atomic>
-#include "rtp_llm/cpp/cache_new/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h"
 #include "kmonitor/client/MetricsReporter.h"
