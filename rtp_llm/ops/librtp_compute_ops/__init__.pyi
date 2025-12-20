@@ -119,20 +119,20 @@ class KVCache:
     def get_layer_cache(self, arg0: int) -> KVCache:
         ...
     @property
-    def k_cache_base(self) -> torch.Tensor:
+    def kv_cache_base(self) -> torch.Tensor:
         """
         Key cache base tensor
         """
-    @k_cache_base.setter
-    def k_cache_base(self, arg0: torch.Tensor) -> None:
+    @kv_cache_base.setter
+    def kv_cache_base(self, arg0: torch.Tensor) -> None:
         ...
     @property
-    def k_scale_base(self) -> torch.Tensor:
+    def kv_scale_base(self) -> torch.Tensor:
         """
         Key cache scale tensor
         """
-    @k_scale_base.setter
-    def k_scale_base(self, arg0: torch.Tensor) -> None:
+    @kv_scale_base.setter
+    def kv_scale_base(self, arg0: torch.Tensor) -> None:
         ...
     @property
     def layer_id(self) -> int:

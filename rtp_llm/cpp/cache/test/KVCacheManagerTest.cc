@@ -35,10 +35,24 @@ makeSimpleMhaCacheConfig(int layer_num, int block_num, size_t tokens_per_block, 
     }
     config.layer_ids.push_back(layer_ids);
 
-    config.block_stride       = static_cast<size_t>(spec->block_size());
-    config.block_size         = static_cast<size_t>(spec->block_size() * spec->layer_num);
-    config.block_stride       = spec->block_size();
-    config.block_stride_bytes = spec->block_size_bytes();
+    config.kv_block_stride       = static_cast<size_t>(spec->block_size());
+    config.kv_block_stride_bytes = spec->block_size_bytes();
+    config.kv_block_size         = static_cast<size_t>(spec->block_size() * spec->layer_num);
+    config.kv_block_size_bytes   = static_cast<size_t>(spec->block_size_bytes() * spec->layer_num);
+
+    if (dtype == rtp_llm::TYPE_INT8 || dtype == rtp_llm::TYPE_FP8_E4M3) {
+        const size_t kv_scale_kv_stride       = static_cast<size_t>(spec->local_head_num_kv) * tokens_per_block;
+        const size_t kv_scale_kv_stride_bytes = kv_scale_kv_stride * sizeof(float);
+        config.kv_scale_stride                = 2 * kv_scale_kv_stride;
+        config.kv_scale_stride_bytes          = 2 * kv_scale_kv_stride_bytes;
+        config.kv_scale_size                  = static_cast<size_t>(layer_num) * config.kv_scale_stride;
+        config.kv_scale_size_bytes            = static_cast<size_t>(layer_num) * config.kv_scale_stride_bytes;
+    }
+
+    config.block_stride       = config.kv_block_stride + config.kv_scale_stride;
+    config.block_stride_bytes = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;
+    config.block_size         = config.kv_block_size + config.kv_scale_size;
+    config.block_size_bytes   = config.kv_block_size_bytes + config.kv_scale_size_bytes;
 
     return config;
 }
@@ -60,14 +74,54 @@ static void assertBlockBytesEq(rtp_llm::DeviceBase*                            d
                                int                                             layer_id,
                                int                                             block_id,
                                const std::vector<int8_t>&                      expected) {
-    auto buf_info = cache_manager->allocator_->convertIndexToBuffer(layer_id, block_id);
-    ASSERT_NE(buf_info.kv_addr, nullptr);
-    auto host_buf = device->clone({*buf_info.kv_addr, rtp_llm::AllocationType::HOST});
+    auto addr_info = cache_manager->convertIndexToAddr(block_id, layer_id);
+    ASSERT_NE(addr_info.kv_addr, nullptr);
+    rtp_llm::Buffer dev_view(rtp_llm::MemoryType::MEMORY_GPU,
+                             rtp_llm::DataType::TYPE_INT8,
+                             {expected.size()},
+                             static_cast<int8_t*>(addr_info.kv_addr));
+    auto            host_buf = device->clone({dev_view, rtp_llm::AllocationType::HOST});
     ASSERT_NE(host_buf, nullptr);
     ASSERT_EQ(host_buf->sizeBytes(), expected.size());
     const auto* ptr = host_buf->data<int8_t>();
     for (size_t i = 0; i < expected.size(); ++i) {
         ASSERT_EQ(ptr[i], expected[i]) << "mismatch at byte " << i << " layer=" << layer_id << " block=" << block_id;
+    }
+}
+
+static void assertScaleEq(rtp_llm::DeviceBase*                            device,
+                          const std::shared_ptr<rtp_llm::KVCacheManager>& cache_manager,
+                          int                                             layer_id,
+                          int                                             block_id,
+                          const std::vector<float>&                       expected_k,
+                          const std::vector<float>&                       expected_v) {
+    auto addr_info = cache_manager->convertIndexToAddr(block_id, layer_id);
+    ASSERT_NE(addr_info.kv_scale_addr, nullptr);
+    ASSERT_EQ(expected_k.size(), expected_v.size());
+
+    // kv_scale_addr points to K-scale, and V-scale follows by kv_scale_block_bytes (= kv_scale_stride_bytes / 2).
+    const size_t kv_scale_stride_bytes = cache_manager->cacheConfig().kv_scale_stride_bytes;
+    ASSERT_GT(kv_scale_stride_bytes, 0u);
+    const size_t kv_scale_block_bytes = kv_scale_stride_bytes / 2;
+    void*        v_scale_addr = static_cast<void*>(static_cast<char*>(addr_info.kv_scale_addr) + kv_scale_block_bytes);
+
+    rtp_llm::Buffer dev_k(
+        rtp_llm::MemoryType::MEMORY_GPU, rtp_llm::DataType::TYPE_FP32, {expected_k.size()}, addr_info.kv_scale_addr);
+    rtp_llm::Buffer dev_v(
+        rtp_llm::MemoryType::MEMORY_GPU, rtp_llm::DataType::TYPE_FP32, {expected_v.size()}, v_scale_addr);
+
+    auto host_k = device->clone({dev_k, rtp_llm::AllocationType::HOST});
+    auto host_v = device->clone({dev_v, rtp_llm::AllocationType::HOST});
+    ASSERT_NE(host_k, nullptr);
+    ASSERT_NE(host_v, nullptr);
+
+    const float* k_ptr = host_k->data<float>();
+    const float* v_ptr = host_v->data<float>();
+    for (size_t i = 0; i < expected_k.size(); ++i) {
+        ASSERT_FLOAT_EQ(k_ptr[i], expected_k[i])
+            << "k scale mismatch i=" << i << " layer=" << layer_id << " block=" << block_id;
+        ASSERT_FLOAT_EQ(v_ptr[i], expected_v[i])
+            << "v scale mismatch i=" << i << " layer=" << layer_id << " block=" << block_id;
     }
 }
 
@@ -148,6 +202,58 @@ TEST_F(KVCacheManagerTest, SetKVBlockValueAndBlockCopy) {
     std::fill(expected_layer0.begin() + k_bytes, expected_layer0.end(), 2);
     assertBlockBytesEq(device_, cache_manager, /*layer_id=*/0, block_dst, expected_layer0);
     assertBlockBytesEq(device_, cache_manager, /*layer_id=*/1, block_dst, expected_block);
+}
+
+TEST_F(KVCacheManagerTest, BlockCopyAlsoCopiesScaleWhenQuantized) {
+    auto cache_config = makeSimpleMhaCacheConfig(
+        /*layer_num=*/2, /*block_num=*/6, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_INT8);
+    auto cache_manager = std::make_shared<KVCacheManager>(cache_config, device_, /*warmup=*/false);
+    ASSERT_TRUE(cache_manager->init());
+
+    auto kv_buf = cache_manager->kvCacheBuffer();
+    ASSERT_NE(kv_buf.kv_scale_blocks, nullptr);
+
+    const int    block_src   = 1;
+    const int    block_dst   = 4;
+    const size_t scale_elems = 2;  // local_head_num_kv(=1) * tokens_per_block(=2)
+
+    std::vector<float> src_k = {0.5f, 0.6f};
+    std::vector<float> src_v = {1.5f, 1.6f};
+    ASSERT_EQ(src_k.size(), scale_elems);
+    ASSERT_EQ(src_v.size(), scale_elems);
+
+    for (int layer_id = 0; layer_id < 2; ++layer_id) {
+        auto addr = cache_manager->convertIndexToAddr(block_src, layer_id);
+        ASSERT_NE(addr.kv_scale_addr, nullptr);
+
+        auto host_k = rtp_llm::vector2Buffer(src_k);
+        auto host_v = rtp_llm::vector2Buffer(src_v);
+
+        const size_t kv_scale_stride_bytes = cache_manager->cacheConfig().kv_scale_stride_bytes;
+        ASSERT_GT(kv_scale_stride_bytes, 0u);
+        const size_t kv_scale_block_bytes = kv_scale_stride_bytes / 2;
+        void*        v_scale_addr = static_cast<void*>(static_cast<char*>(addr.kv_scale_addr) + kv_scale_block_bytes);
+
+        rtp_llm::Buffer dst_k(
+            rtp_llm::MemoryType::MEMORY_GPU, rtp_llm::DataType::TYPE_FP32, {scale_elems}, addr.kv_scale_addr);
+        rtp_llm::Buffer dst_v(
+            rtp_llm::MemoryType::MEMORY_GPU, rtp_llm::DataType::TYPE_FP32, {scale_elems}, v_scale_addr);
+
+        rtp_llm::Buffer src_k_view(host_k->where(), host_k->type(), {scale_elems}, host_k->data());
+        rtp_llm::Buffer src_v_view(host_v->where(), host_v->type(), {scale_elems}, host_v->data());
+
+        device_->copy({dst_k, src_k_view});
+        device_->copy({dst_v, src_v_view});
+    }
+    device_->syncAndCheck();
+
+    // Copy should include both K/V scales.
+    cache_manager->blockCopy(block_src, block_dst);
+    device_->syncAndCheck();
+
+    for (int layer_id = 0; layer_id < 2; ++layer_id) {
+        assertScaleEq(device_, cache_manager, layer_id, block_dst, src_k, src_v);
+    }
 }
 
 TEST_F(KVCacheManagerTest, BlockBatchCopy) {

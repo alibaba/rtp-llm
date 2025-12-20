@@ -211,7 +211,7 @@ class MLABenchmark(TestCase):
         )
 
         kv_cache: Optional[KVCache] = KVCache()
-        kv_cache.k_cache_base = cache
+        kv_cache.kv_cache_base = cache
 
         # 创建cos_sin_cache
         cos_sin_cache = create_cos_sin_cache()
