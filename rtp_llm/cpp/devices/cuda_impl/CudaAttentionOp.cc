@@ -28,14 +28,12 @@ ParamsPtr CudaDevice::prepareTrtAttn(const AttentionConfigs& configs,
                                      const BufferPtr&        layer_cache,
                                      const BufferPtr&        kv_cache_block_id,
                                      int                     batch_size) {
-    return prepareTrtAttn(configs, 1, kv_cache_block_id, batch_size);
+    return prepareTrtAttn(configs, kv_cache_block_id, batch_size);
 }
 
-ParamsPtr CudaDevice::prepareTrtAttn(const AttentionConfigs& configs,
-                                     int                     kv_block_offset,
-                                     const BufferPtr&        kv_cache_block_id,
-                                     int                     batch_size) {
-    if (!kv_block_offset || !kv_cache_block_id || 0 == batch_size) {
+ParamsPtr
+CudaDevice::prepareTrtAttn(const AttentionConfigs& configs, const BufferPtr& kv_cache_block_id, int batch_size) {
+    if (!kv_cache_block_id || 0 == batch_size) {
         return nullptr;
     }
 

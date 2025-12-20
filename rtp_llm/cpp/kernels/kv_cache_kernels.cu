@@ -45,7 +45,6 @@ namespace rtp_llm {
 // │ batch1_K: [3,4,5]  batch1_V: [3+Δ,4+Δ,5+Δ] │
 // │ batch2_K: [6,7,8]  batch2_V: [6+Δ,7+Δ,8+Δ] │
 // └─────────────────────────────────────────---┘
-// Δ is kv_block_offset (layer_num * block_num_per_layer).
 
 __global__ void ConvertOffsetToBlockArrayData(int32_t*   offset_addr,
                                               const int* offset,  // [b, m]

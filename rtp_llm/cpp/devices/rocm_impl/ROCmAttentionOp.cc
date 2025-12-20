@@ -496,7 +496,6 @@ KVBlockArray ROCmDevice::getKVBlockArray(const AttentionModuleParams& params,
                                          bool                         use_offset_array) {
     const auto& kv_cache         = params.common.kv_cache;
     const auto& kv_blocks_offset = *(kv_cache->kv_cache_block_id);
-    const auto& kv_block_offset  = (kv_cache->k_cache_buffer)->shape()[0] * kv_cache->layer_num;
     RUNTIME_ASSERT_OP_ARG(kv_blocks_offset.shape()[0] == batch_size,
                           "context attention kv blocks batch size expected [%d] but buffer[%s]",
                           (int)batch_size,
@@ -508,14 +507,13 @@ KVBlockArray ROCmDevice::getKVBlockArray(const AttentionModuleParams& params,
     // RTP_LLM_LOG_INFO("kv_cache[0].typeSize():%d", kv_cache[0].typeSize());
     RTP_LLM_LOG_DEBUG("kv_blocks_offset size:%d, k_cache:%p, v_cache:%p, "
                       "k_cache[0].sizeBytes():%d, params.configs.tokens_per_block:%d, "
-                      "kv_block_offset:%d, k_cache (int): %lu, v_cache (int): %lu, "
+                      "k_cache (int): %lu, v_cache (int): %lu, "
                       "max_blocks_per_batch:%d",
                       kv_blocks_offset.size(),
                       static_cast<void*>(k_cache.data()),  // for %p
                       static_cast<void*>(v_cache.data()),  // for %p
                       k_cache[0].sizeBytes(),
                       params.configs.tokens_per_block,
-                      kv_block_offset,
                       static_cast<unsigned long>(reinterpret_cast<uintptr_t>(k_cache.data())),  // for %lu
                       static_cast<unsigned long>(reinterpret_cast<uintptr_t>(v_cache.data())),
                       max_blocks_per_batch);
@@ -564,7 +562,6 @@ KVBlockArray ROCmDevice::getKVBlockArray(const AttentionModuleParams& params,
 }
 
 ParamsPtr ROCmDevice::PrepareCKAttn(const AttentionConfigs& configs,
-                                    int                     kv_block_offset,
                                     const BufferPtr&        kv_cache_block_id,
                                     int                     batch_size,
                                     bool                    use_fp8_fmha) {
@@ -572,7 +569,7 @@ ParamsPtr ROCmDevice::PrepareCKAttn(const AttentionConfigs& configs,
                       kv_block_offset,
                       batch_size,
                       kv_cache_block_id ? kv_cache_block_id->debugString().c_str() : "nullptr");
-    if (kv_block_offset <= 0 || batch_size <= 0 || !kv_cache_block_id) {
+    if (batch_size <= 0 || !kv_cache_block_id) {
         return nullptr;
     }
     auto            ck_attn    = std::make_shared<CKAttn>();
