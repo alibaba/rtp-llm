@@ -421,7 +421,7 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
     if (use_xqa
         && supportXqa(params.input.type(),
                       params.output.type(),
-                      params.common.kv_cache->k_cache_buffer->type(),
+                      params.common.kv_cache->kv_cache_buffer->type(),
                       local_head_num / local_kv_head_num,
                       size_per_head,
                       local_tokens_per_block)) {
@@ -438,7 +438,7 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
                local_tokens_per_block,
                kv_block_array.mPrimaryPoolPtr,
                reinterpret_cast<int32_t*>(const_cast<KVCacheIndex*>(kv_block_array.data)),
-               params.common.kv_cache->k_cache_buffer->type() == DataType::TYPE_FP8_E4M3,
+               params.common.kv_cache->kv_cache_buffer->type() == DataType::TYPE_FP8_E4M3,
                reinterpret_cast<uint32_t*>(params.common.sequence_lengths->data()),
                params.output.type() == DataType::TYPE_FP8_E4M3 ?
                    reinterpret_cast<float*>(params.weights.static_scale_reciprocal_weight->kernel->data()) :

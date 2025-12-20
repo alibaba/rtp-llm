@@ -57,9 +57,9 @@ forward_param PagedAttnDecodeOp::forward(const torch::Tensor&              qkv,
                                          std::optional<torch_ext::KVCache> kv_cache,
                                          const CKAttnPtr&                  params) {
     auto kv_block_array            = params->kv_block_array;
-    kv_block_array.mPrimaryPoolPtr = kv_cache.value().k_cache_base.data_ptr();
-    if (kv_cache.value().k_scale_base.defined() && kv_cache.value().k_scale_base.numel()) {
-        kv_block_array.scale = kv_cache.value().k_scale_base.data_ptr();
+    kv_block_array.mPrimaryPoolPtr = kv_cache.value().kv_cache_base.data_ptr();
+    if (kv_cache.value().kv_scale_base.defined() && kv_cache.value().kv_scale_base.numel()) {
+        kv_block_array.scale = kv_cache.value().kv_scale_base.data_ptr();
     }
 
     const int local_head_num    = attn_configs_.head_num;

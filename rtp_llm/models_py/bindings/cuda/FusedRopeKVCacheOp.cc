@@ -59,9 +59,9 @@ torch::Tensor FusedRopeKVCachePrefillOp::forward(const torch::Tensor&           
     PrefixPromptBatchWeightsParam prefix_prompt_param;
     if (kv_cache.has_value()) {
         auto kv_block_array            = params->kv_block_array;
-        kv_block_array.mPrimaryPoolPtr = kv_cache.value().k_cache_base.data_ptr();
-        if (kv_cache.value().k_scale_base.defined() && kv_cache.value().k_scale_base.numel()) {
-            kv_block_array.scale = kv_cache.value().k_scale_base.data_ptr();
+        kv_block_array.mPrimaryPoolPtr = kv_cache.value().kv_cache_base.data_ptr();
+        if (kv_cache.value().kv_scale_base.defined() && kv_cache.value().kv_scale_base.numel()) {
+            kv_block_array.scale = kv_cache.value().kv_scale_base.data_ptr();
         }
         prefix_prompt_param.kv_block_array = kv_block_array;
         if (params->max_prefix_length > 0) {
@@ -173,9 +173,9 @@ torch::Tensor FusedRopeKVCacheDecodeOp::forward(const torch::Tensor&            
                                                 const TRTAttnPtr&                 params) {
     RTP_LLM_CHECK_WITH_INFO(kv_cache.has_value(), "decode should have kv cache.");
     auto kv_block_array            = params->kv_block_array;
-    kv_block_array.mPrimaryPoolPtr = kv_cache.value().k_cache_base.data_ptr();
-    if (kv_cache.value().k_scale_base.defined() && kv_cache.value().k_scale_base.numel()) {
-        kv_block_array.scale = kv_cache.value().k_scale_base.data_ptr();
+    kv_block_array.mPrimaryPoolPtr = kv_cache.value().kv_cache_base.data_ptr();
+    if (kv_cache.value().kv_scale_base.defined() && kv_cache.value().kv_scale_base.numel()) {
+        kv_block_array.scale = kv_cache.value().kv_scale_base.data_ptr();
     }
 
     const int     local_head_num    = attn_configs_.head_num;

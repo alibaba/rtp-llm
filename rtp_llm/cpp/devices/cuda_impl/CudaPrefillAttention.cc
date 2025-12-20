@@ -56,7 +56,7 @@ void CudaDevice::prefillAttention(const AttentionModuleParams& params,
                    params.configs.tokens_per_block,
                    kv_block_array.mPrimaryPoolPtr,
                    reinterpret_cast<int32_t*>(const_cast<KVCacheIndex*>(kv_block_array.data)),
-                   params.common.kv_cache->k_cache_buffer->type() == DataType::TYPE_FP8_E4M3,
+                   params.common.kv_cache->kv_cache_buffer->type() == DataType::TYPE_FP8_E4M3,
                    params.common.kv_seqlens->data<uint32_t>(),
                    params.output.type() == DataType::TYPE_FP8_E4M3 ?
                        reinterpret_cast<float*>(params.weights.static_scale_reciprocal_weight->kernel->data()) :
@@ -221,13 +221,13 @@ void CudaDevice::prefillAttention(const AttentionModuleParams& params,
             auto ws =
                 allocateBuffer({DataType::TYPE_INT8, {ws_size}, AllocationType::DEVICE}, {"open_source_paged_fmha_ws"});
             // head_num * seq_size_per_block * size_per_head
-            auto kv_offset = params.common.kv_cache->k_cache_buffer->shape()[2]
-                             * params.common.kv_cache->k_cache_buffer->shape()[3]
-                             * params.common.kv_cache->k_cache_buffer->shape()[4];
+            auto kv_offset = params.common.kv_cache->kv_cache_buffer->shape()[2]
+                             * params.common.kv_cache->kv_cache_buffer->shape()[3]
+                             * params.common.kv_cache->kv_cache_buffer->shape()[4];
             cufmha_runner->runOpenSourceFmhaPaged(
                 params.input.data(),
-                params.common.kv_cache->k_cache_buffer->data(),
-                params.common.kv_cache->k_cache_buffer->dataWithOffset(kv_offset),
+                params.common.kv_cache->kv_cache_buffer->data(),
+                params.common.kv_cache->kv_cache_buffer->dataWithOffset(kv_offset),
                 params.output.data(),
                 params.common.cu_seqlens->data<int>(),
                 params.common.cu_kv_seqlens->data<int>(),

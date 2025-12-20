@@ -173,7 +173,7 @@ void DeviceBase::writeCacheStore(const CacheStoreInputs& cache_store_inputs,
     const auto max_blocks_per_batch = param.host_kv_cache_offset->shape()[1];
     const auto seq_size_per_block   = param.tokens_per_block;
     auto       offset_addr          = param.host_kv_cache_offset->data<int32_t>();
-    auto       k_cache_data         = (uint64_t*)kv_cache.k_cache_buffer->data();
+    auto       kv_cache_data        = (uint64_t*)kv_cache.kv_cache_buffer->data();
 
     RTP_LLM_CHECK_WITH_INFO(param.context_batch_size == param.request_pd_separation->size(), "size not same");
     RTP_LLM_CHECK_WITH_INFO(param.context_batch_size == param.request_id->size(),
@@ -207,9 +207,9 @@ void DeviceBase::writeCacheStore(const CacheStoreInputs& cache_store_inputs,
                     param.model_id, param.cache_keys[batch_id * max_blocks_per_batch + index], param.layer_id);
             }
             // FT_LOG_DEBUG("write kv cache_key %s", cache_key.c_str());
-            void*                 k_addr = (void*)((int8_t*)k_cache_data + block_id * param.k_block_size);
+            void*                 k_addr = (void*)((int8_t*)kv_cache_data + block_id * param.kv_block_stride_bytes);
             std::shared_ptr<void> k_block_addr(k_addr, [](void* p) {});
-            request_blocks->addBlock("k_" + cache_key, k_block_addr, param.k_block_size, true, true);
+            request_blocks->addBlock("k_" + cache_key, k_block_addr, param.kv_block_stride_bytes, true, true);
         }
         auto storeCallback = [layer_id = param.layer_id, request_id](bool success, CacheStoreErrorCode ec) {
             if (!success) {

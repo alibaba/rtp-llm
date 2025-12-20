@@ -65,9 +65,9 @@ XQAAttnOp::forward(const torch::Tensor& input, std::optional<torch_ext::KVCache>
     KVBlockArray kv_block_array;
     if (kv_cache.has_value()) {
         kv_block_array                 = params->kv_block_array;
-        kv_block_array.mPrimaryPoolPtr = kv_cache.value().k_cache_base.data_ptr();
-        if (kv_cache.value().k_scale_base.defined() && kv_cache.value().k_scale_base.numel() > 0) {
-            kv_block_array.scale = kv_cache.value().k_scale_base.data_ptr();
+        kv_block_array.mPrimaryPoolPtr = kv_cache.value().kv_cache_base.data_ptr();
+        if (kv_cache.value().kv_scale_base.defined() && kv_cache.value().kv_scale_base.numel() > 0) {
+            kv_block_array.scale = kv_cache.value().kv_scale_base.data_ptr();
         }
     }
 
@@ -83,7 +83,7 @@ XQAAttnOp::forward(const torch::Tensor& input, std::optional<torch_ext::KVCache>
            static_cast<size_t>(kv_block_array.mMaxBlocksPerSeq),
            params->max_seq_len + 1,
            attn_configs_.tokens_per_block,
-           kv_cache.value().k_cache_base.data_ptr(),  // params->kv_block_array.mPrimaryPoolPtr,
+           kv_cache.value().kv_cache_base.data_ptr(),  // params->kv_block_array.mPrimaryPoolPtr,
            reinterpret_cast<int32_t*>((KVCacheIndex*)(params->kv_cache_offset.data_ptr())),
            kv_block_array.cache_type == KvCacheDataType::FP8,
            reinterpret_cast<uint32_t*>(params->sequence_lengths.data_ptr()));
