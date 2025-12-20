@@ -283,7 +283,7 @@ class MlaFlashInferPrefillOp(object):
             final_k_pe,
             compressed_kv,
             k_pe,
-            kv_cache.k_cache_base,
+            kv_cache.kv_cache_base,
             reuse_cache_page_indice,
             batch_reuse_info,
             qo_indptr,
@@ -459,7 +459,7 @@ class MlaFlashInferDecodeOp(object):
         k_weight = self.weights[layer_id].get(W.mla_kc, None)
         v_weight = self.weights[layer_id].get(W.mla_vc, None)
 
-        compressed_kv = kv_cache.k_cache_base
+        compressed_kv = kv_cache.kv_cache_base
 
         q_nope = q_nope.view(-1, self.num_heads, self.qk_nope_head_dim)
         q_pe = q_pe.view(-1, self.num_heads, self.qk_rope_head_dim)

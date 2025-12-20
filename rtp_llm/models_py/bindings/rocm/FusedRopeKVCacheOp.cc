@@ -88,13 +88,13 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
     if (kv_cache.has_value()) {
         // 验证KV cache指针有效性
         if (!kv_cache.value().kv_cache_base.defined() || kv_cache.value().kv_cache_base.numel() == 0) {
-            throw std::runtime_error("FusedRopeKVCachePrefillOp: k_cache_base is not defined or empty");
+            throw std::runtime_error("FusedRopeKVCachePrefillOp: kv_cache_base is not defined or empty");
         }
 
         auto  kv_block_array = params->kv_block_array;
         void* k_cache_ptr    = kv_cache.value().kv_cache_base.data_ptr();
         if (k_cache_ptr == nullptr) {
-            throw std::runtime_error("FusedRopeKVCachePrefillOp: k_cache_base data pointer is null");
+            throw std::runtime_error("FusedRopeKVCachePrefillOp: kv_cache_base data pointer is null");
         }
 
         kv_block_array.mPrimaryPoolPtr = k_cache_ptr;
