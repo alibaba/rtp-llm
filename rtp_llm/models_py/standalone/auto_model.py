@@ -124,17 +124,8 @@ class AutoModel:
         ]
         kv_cache_dtype = self._get_kv_cache_dtype(self.factory_model_config)
         kv_cache_total = torch.zeros(kv_shape, dtype=kv_cache_dtype, device=self.device)
-        k_cache_base = kv_cache_total
-        v_cache_base = torch.empty(
-            self.layer_num,
-            0,
-            self.kv_head_num,
-            self.tokens_per_block,
-            self.size_per_head,
-            device=self.device,
-        )
-        self.kv_cache.k_cache_base = k_cache_base
-        self.kv_cache.v_cache_base = v_cache_base
+        kv_cache_base = kv_cache_total
+        self.kv_cache.kv_cache_base = kv_cache_base
 
     def _get_kv_cache_dtype(self, factory_model_config: ModelConfig) -> torch.dtype:
         kv_cache_dtype_str = factory_model_config.kv_cache_type
@@ -172,7 +163,7 @@ class AutoModel:
         attention_inputs.kv_cache_block_id_host = torch.tensor(
             [[i for i in range(1, need_block_nums + 1)]], dtype=torch.int32
         )
-        attention_inputs.dtype = get_typemeta(self.kv_cache.k_cache_base)
+        attention_inputs.dtype = get_typemeta(self.kv_cache.kv_cache_base)
         attention_inputs.kv_block_offset = self.layer_num * self.block_nums
         attention_inputs.is_prefill = True
         return attention_inputs

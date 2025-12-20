@@ -46,10 +46,8 @@ class GptModelBase(nn.Module):
         if self.kv_cache is not None:
             logging.info(
                 f"GptModelBase initialized with "
-                f"k_cache_base={self.kv_cache.k_cache_base.shape if self.kv_cache.k_cache_base is not None else None}, "
-                f"v_cache_base={self.kv_cache.v_cache_base.shape if self.kv_cache.v_cache_base is not None else None}"
-                f"k_scale_base={self.kv_cache.k_scale_base.shape if self.kv_cache.k_scale_base is not None else None}"
-                f"v_scale_base={self.kv_cache.v_scale_base.shape if self.kv_cache.v_scale_base is not None else None}"
+                f"kv_cache_base={self.kv_cache.kv_cache_base.shape if self.kv_cache.kv_cache_base is not None else None}, "
+                f"kv_scale_base={self.kv_cache.kv_scale_base.shape if self.kv_cache.kv_scale_base is not None else None}, "
             )
         return True
 

@@ -141,8 +141,17 @@ struct CacheConfig {
     uint32_t layer_num;
     uint32_t block_num;
 
-    size_t block_size;  // including all layers
-    size_t block_size_bytes;
+    // ---- Per-block sizes (all layers) ----
+    // kv_block_*: kv cache only
+    size_t kv_block_size       = 0;
+    size_t kv_block_size_bytes = 0;
+    // kv_scale_*: kv cache scale only (int8/fp8) (K+V together).
+    size_t kv_scale_size       = 0;
+    size_t kv_scale_size_bytes = 0;
+    // block_*: kv cache + scale, for one logical "block" across all layers. (K+V scales together).
+    size_t block_size       = 0;
+    size_t block_size_bytes = 0;
+
     size_t seq_size_per_block = 1;  // for cache_keys generation
 
     // for adpation to MLA
@@ -150,8 +159,16 @@ struct CacheConfig {
 
     // mtp
     std::string mtp_model_type = "default_model";
-    // for backward compatibility with old NormalBatchStreamProcessor, TODO, fix this
-    size_t block_stride       = 0;  // for one layer
+
+    // ---- Per-block strides (one layer) ----
+    // kv_block_stride_*: one-layer kv cache block stride (K+V together).
+    size_t kv_block_stride       = 0;
+    size_t kv_block_stride_bytes = 0;
+    // kv_scale_stride_*: one-layer kv cache scale stride for one logical block (K+V scales together).
+    size_t kv_scale_stride       = 0;
+    size_t kv_scale_stride_bytes = 0;
+    // block_stride_*: one-layer total stride (kv + scale)
+    size_t block_stride       = 0;
     size_t block_stride_bytes = 0;
 
     CacheConfig() {}
@@ -167,20 +184,38 @@ struct BlockPoolConfig {
     size_t total_size;
     size_t total_size_bytes;
 
-    // for kv first layout only, delete these fields in future
-    size_t block_size;
-    size_t k_block_size;
-    size_t v_block_size;
+    // ---- Per-block sizes (all layers) ----
+    // kv_block_*: kv cache only
+    size_t kv_block_size       = 0;
+    size_t kv_block_size_bytes = 0;
+    // kv_scale_*: scale only (includes BOTH K and V scales)
+    size_t kv_scale_size       = 0;
+    size_t kv_scale_size_bytes = 0;
+    // block_*: kv cache + scale (logical block across all layers)
+    size_t block_size       = 0;
+    size_t block_size_bytes = 0;
 
-    size_t block_stride   = 0;
+    // for kv first layout only, keep these meta for partitioning / kernels
+    size_t k_block_size = 0;
+    size_t v_block_size = 0;
+
+    // ---- Per-block strides (one layer) ----
+    // kv_block_stride_*: one-layer kv cache block stride (K+V together)
+    size_t kv_block_stride       = 0;
+    size_t kv_block_stride_bytes = 0;
+    // kv_scale_stride_*: one-layer scale stride for one logical block (K+V scales together)
+    size_t kv_scale_stride       = 0;
+    size_t kv_scale_stride_bytes = 0;
+    // block_stride_*: one-layer total stride (kv + scale)
+    size_t block_stride       = 0;
+    size_t block_stride_bytes = 0;
+
     size_t k_block_stride = 0;
     size_t v_block_stride = 0;
 
-    size_t block_size_bytes   = 0;
     size_t k_block_size_bytes = 0;
     size_t v_block_size_bytes = 0;
 
-    size_t block_stride_bytes   = 0;
     size_t k_block_stride_bytes = 0;
     size_t v_block_stride_bytes = 0;
 
@@ -189,10 +224,14 @@ struct BlockPoolConfig {
 
     bool is_mla = false;
 
-    // extra meta for exposing logical shape to kernels
-    // valid for KV_FIRST layout, TODO check this
     size_t local_head_num_kv  = 0;
     size_t seq_size_per_block = 0;
+
+    bool   enable_kv_scale          = false;
+    size_t kv_block_pool_size_bytes = 0;
+    size_t kv_scale_offset_bytes    = 0;
+    size_t kv_scale_block_bytes     = 0;
+    size_t kv_scale_pool_size_bytes = 0;
 };
 
 }  // namespace rtp_llm

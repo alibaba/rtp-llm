@@ -537,7 +537,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     const auto& request_key   = load_context.request_key;
     auto        cache_manager = engine_->resourceContext().cache_manager;
     const auto& cache_config  = cache_manager->cacheConfig();
-    auto        kv_block_size = cache_config.block_stride;
+    auto        kv_block_size = cache_config.kv_block_stride_bytes;
     auto        layer_num     = maga_init_params_.gpt_init_parameter.num_layers_;
 
     if (kv_block_size % load_context.peer_addrs.size() != 0) {
@@ -581,7 +581,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                     propose_maga_init_params_->mtp_model_params_->at(mtp_model_id).get();
                 const auto& sp_cache_manager = engine_->resourceContext().mtp_cache_managers[mtp_model_id];
                 const auto& cache_config     = sp_cache_manager->cacheConfig();
-                const auto  sp_kv_block_size = cache_config.block_stride / load_context.peer_addrs.size();
+                const auto  sp_kv_block_size = cache_config.kv_block_stride_bytes / load_context.peer_addrs.size();
                 size_t      layer_num        = mtp_engine_init_params->gpt_init_parameter.num_layers_;
                 for (size_t layer_id = 0; layer_id < layer_num; layer_id++) {
                     auto request_key = std::to_string(load_context.request_id) + "-" + std::to_string(layer_id);
