@@ -7,7 +7,7 @@
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/speculative_engine/propose_executor/MTPStream.h"
-#include "rtp_llm/cpp/cache_new/CacheConfigCreator.h"
+#include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/speculative_engine/SpeculativeScheduler.h"
 #include "rtp_llm/cpp/speculative_engine/SpeculativeGatherBatchScheduler.h"
 #include "rtp_llm/cpp/speculative_engine/propose_executor/VanillaExecutor.h"

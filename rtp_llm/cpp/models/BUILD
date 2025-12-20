@@ -98,7 +98,7 @@ cc_library(
         ":dfa_utils",
         "//:rtp_compute_ops",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
-        "//rtp_llm/cpp/cache_new:cache_new_types",
+        "//rtp_llm/cpp/cache:cache_types",
     ],
     visibility = ["//visibility:public"],
 )
@@ -136,7 +136,7 @@ cc_library(
         ":models",
         ":dfa_utils",
         "//rtp_llm/cpp/pybind:py_utils",
-        "//rtp_llm/cpp/cache_new:cache_new_types",
+        "//rtp_llm/cpp/cache:cache_types",
     ],
     visibility = ["//visibility:public"],
 )

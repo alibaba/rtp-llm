@@ -22,8 +22,7 @@ public:
         position_id_len_factor_(params.position_id_len_factor_),
         role_type_(params.role_type_),
         decode_entrance_(params.decode_entrance_),
-        k_block_size_(cache_config.k_block_stride),
-        v_block_size_(cache_config.v_block_stride),
+        block_stride_bytes_(cache_config.block_stride_bytes),
         seq_size_per_block_(cache_config.seq_size_per_block),
         warm_up_(warm_up),
         enable_detail_log_(params.profiling_debug_logging_config.enable_detail_log),
@@ -57,8 +56,7 @@ protected:
     size_t           position_id_len_factor_;
     RoleType         role_type_;
     bool             decode_entrance_;
-    size_t           k_block_size_;
-    size_t           v_block_size_;
+    size_t           block_stride_bytes_;
     size_t           seq_size_per_block_;
     bool             warm_up_;
     bool             enable_detail_log_;
