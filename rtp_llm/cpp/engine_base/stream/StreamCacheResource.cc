@@ -37,6 +37,7 @@ void StreamCacheResource::freeBatchBlocks(size_t batch_id, vector<int>& blocks) 
                                          loss,
                                          adapter_name_,
                                          enable3FS(),
+                                         enableGpuBlockCache(),
                                          enableMemoryBlockCache());
         resource_context_.cache_manager->freeWithCache(free_info);
     } else {
@@ -124,6 +125,7 @@ absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
                                                      false,
                                                      adapter_name_,
                                                      enable3FS(),
+                                                     enableGpuBlockCache(),
                                                      enableMemoryBlockCache());
         auto                             match_info = resource_context_.cache_manager->mallocWithCache(malloc_info);
         if (stream_->calculateLoss() && match_info.loss.empty()) {
@@ -414,6 +416,10 @@ bool StreamCacheResource::enable3FS() const {
 
 bool StreamCacheResource::enableMemoryBlockCache() const {
     return resource_context_.enable_memory_block_cache && stream_->enableMemoryBlockCache();
+}
+
+bool StreamCacheResource::enableGpuBlockCache() const {
+    return stream_->enableGpuBlockCache();
 }
 
 }  // namespace rtp_llm
