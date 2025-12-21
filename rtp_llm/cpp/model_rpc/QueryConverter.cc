@@ -86,6 +86,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->inter_request_id          = config_proto->inter_request_id();
     generate_config->reuse_cache               = config_proto->reuse_cache();
     generate_config->enable_3fs                = config_proto->enable_3fs();
+    generate_config->enable_gpu_block_cache    = config_proto->enable_gpu_block_cache();
     generate_config->enable_memory_block_cache = config_proto->enable_memory_block_cache();
     TRANS_OPTIONAL(trace_id);
 
@@ -415,9 +416,31 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
             aux_info->set_output_len(response.aux_info.output_len);
             aux_info->set_step_output_len(response.aux_info.step_output_len);
             aux_info->set_pd_sep(response.aux_info.pd_sep);
+
             aux_info->set_total_reuse_len(response.aux_info.reuse_len);
             aux_info->set_local_reuse_len(response.aux_info.local_reuse_len);
+            aux_info->set_gpu_reuse_len(response.aux_info.gpu_reuse_len);
+            aux_info->set_memory_reuse_len(response.aux_info.memory_reuse_len);
             aux_info->set_remote_reuse_len(response.aux_info.remote_reuse_len);
+
+        // aux_info->set_total_reuse_len(response.aux_info.reuse_len);
+        // aux_info->set_local_reuse_len(response.aux_info.local_reuse_len);
+        // aux_info->set_gpu_reuse_len(response.aux_info.gpu_reuse_len);
+        // aux_info->set_memory_reuse_len(response.aux_info.memory_reuse_len);
+        // aux_info->set_remote_reuse_len(response.aux_info.remote_reuse_len);
+
+        // aux_info->set_prefill_total_reuse_len(response.aux_info.prefill_total_reuse_len);
+        // aux_info->set_prefill_local_reuse_len(response.aux_info.prefill_local_reuse_len);
+        // aux_info->set_prefill_gpu_reuse_len(response.aux_info.prefill_gpu_reuse_len);
+        // aux_info->set_prefill_memory_reuse_len(response.aux_info.prefill_memory_reuse_len);
+        // aux_info->set_prefill_remote_reuse_len(response.aux_info.prefill_remote_reuse_len);
+
+        // aux_info->set_decode_total_reuse_len(response.aux_info.decode_total_reuse_len);
+        // aux_info->set_decode_local_reuse_len(response.aux_info.decode_local_reuse_len);
+        // aux_info->set_decode_gpu_reuse_len(response.aux_info.decode_gpu_reuse_len);
+        // aux_info->set_decode_memory_reuse_len(response.aux_info.decode_memory_reuse_len);
+        // aux_info->set_decode_remote_reuse_len(response.aux_info.decode_remote_reuse_len);
+
             aux_info->set_aux_string(aux_string);
             if (response.aux_info.cum_log_probs.has_value()) {
                 transTensorPB(aux_info->mutable_cum_log_probs(), response.aux_info.cum_log_probs.value().get());

@@ -71,14 +71,21 @@ struct AuxInfo {
     bool                                   pd_sep                   = false;
     int32_t                                first_token_cost_time_us = 0;
     int32_t                                wait_time_us             = 0;
+
     int32_t                                local_reuse_len          = 0;
+    int32_t                                gpu_reuse_len            = 0;
+    int32_t                                memory_reuse_len         = 0;
     int32_t                                remote_reuse_len         = 0;
-    int32_t                                prefill_total_reuse_len  = 0;
-    int32_t                                prefill_local_reuse_len  = 0;
-    int32_t                                prefill_remote_reuse_len = 0;
-    int32_t                                decode_total_reuse_len   = 0;
-    int32_t                                decode_local_reuse_len   = 0;
-    int32_t                                decode_remote_reuse_len  = 0;
+    // int32_t                                prefill_total_reuse_len  = 0;
+    // int32_t                                prefill_local_reuse_len  = 0;
+    // int32_t                                prefill_remote_reuse_len = 0;
+    // int32_t                                decode_total_reuse_len   = 0;
+    // int32_t                                decode_local_reuse_len   = 0;
+    // int32_t                                decode_remote_reuse_len  = 0;
+    // int32_t                                prefill_gpu_reuse_len    = 0;
+    // int32_t                                prefill_memory_reuse_len = 0;
+    // int32_t                                decode_gpu_reuse_len     = 0;
+    // int32_t                                decode_memory_reuse_len  = 0;
     std::optional<rtp_llm::ConstBufferPtr> cum_log_probs;
     std::optional<rtp_llm::ConstBufferPtr> all_probs;
     std::optional<rtp_llm::ConstBufferPtr> softmax_probs;
