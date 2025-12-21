@@ -1,7 +1,7 @@
 #pragma once
 
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
-#include "rtp_llm/cpp/cache/WarmUpResult.h"
+#include "rtp_llm/cpp/cache_new/WarmUpResult.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/speculative_engine/propose_executor/MTPStream.h"
 #include "rtp_llm/cpp/speculative_engine/propose_executor/EagleStream.h"

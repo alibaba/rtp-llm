@@ -8,7 +8,7 @@
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/GatherBatchScheduler.h"
-#include "rtp_llm/cpp/cache/CacheConfigCreator.h"
+#include "rtp_llm/cpp/cache_new/CacheConfigCreator.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -202,9 +202,11 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     cache_config.seq_size_per_block = model_config_.attn_config.tokens_per_block;
     cache_config.block_nums         = 5;
     ParallelismConfig temp_parallelism_config;
-    RuntimeConfig     temp_runtime_config;
-    auto              cache_manager = make_shared<CacheManager>(
-        cache_config, device_, true, nullptr, KVCacheConfig{}, temp_parallelism_config, temp_runtime_config);
+    RuntimeConfig temp_runtime_config;
+    auto cache_manager              = make_shared<KVCacheManager>(cache_config, device_, true, nullptr, KVCacheConfig{}, temp_parallelism_config, temp_runtime_config);
+    if (!cache_manager->init()) {
+        RTP_LLM_FAIL("init kv cache manager failed in decodeWarmUp");
+    }
     executor_.reset(new NormalExecutor(params, cache_manager, device_, nullptr, true));
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
     const auto device_status = device_->getDeviceStatus();
@@ -242,7 +244,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
         scorer_cache_config.mtp_model_type   = "score_model";
         proposer_cache_config.mtp_model_type = "propose_model";
 
-        resource_context_.cache_manager = make_shared<CacheManager>(scorer_cache_config,
+        resource_context_.cache_manager = make_shared<KVCacheManager>(scorer_cache_config,
                                                                     device_,
                                                                     false,
                                                                     metrics_reporter_,
@@ -257,7 +259,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
             RTP_LLM_LOG_INFO("mtp cache manager init use layer num : %d", layer_num);
             for (int i = 0; i < layer_num; i++) {
                 RTP_LLM_CHECK(proposer_cache_config.layer_num == 1);
-                resource_context_.mtp_cache_managers.push_back(std::make_shared<CacheManager>(proposer_cache_config,
+                resource_context_.mtp_cache_managers.push_back(std::make_shared<KVCacheManager>(proposer_cache_config,
                                                                                               device_,
                                                                                               false,
                                                                                               metrics_reporter_,
@@ -266,7 +268,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                                                               runtime_config));
             }
         } else {
-            resource_context_.propose_cache_manager = make_shared<CacheManager>(proposer_cache_config,
+            resource_context_.propose_cache_manager = make_shared<KVCacheManager>(proposer_cache_config,
                                                                                 device_,
                                                                                 false,
                                                                                 metrics_reporter_,
@@ -279,7 +281,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
             model_config_, parallelism_config, runtime_config, kv_cache_config, warm_up_result);
         RTP_LLM_LOG_INFO(
             "create cache manager with block nums %d, block size %ld KB", result.block_nums, result.block_size / 1024);
-        resource_context_.cache_manager = make_shared<CacheManager>(
+        resource_context_.cache_manager = make_shared<KVCacheManager>(
             result, device_, false, metrics_reporter_, kv_cache_config, parallelism_config, runtime_config);
     }
 }

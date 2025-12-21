@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
+#include "rtp_llm/cpp/cache_new/types.h"
 
 using namespace std;
 
@@ -331,56 +332,6 @@ EngineScheduleInfo LocalRpcServer::getEngineScheduleInfo(int64_t latest_finished
     return info;
 }
 
-::grpc::Status LocalRpcServer::DistKvCache(::grpc::ServerContext*        context,
-                                           const ::DistKvCacheRequestPB* request,
-                                           ::DistKvCacheResponsePB*      response) {
-    RTP_LLM_LOG_DEBUG("receive dist kvcache request from client: %s, request: [%s]",
-                      context->peer().c_str(),
-                      request->DebugString().c_str());
-
-    const int64_t request_id = request->request_id();
-    const auto    op_code    = request->op();
-    if (op_code == ::DistKvCacheOp::UNKNOWN) {
-        RTP_LLM_LOG_WARNING("dist kvcache failed, op code is unknown, request: %ld", request_id);
-        return grpc::Status(grpc::StatusCode::INTERNAL, "op code is unknown");
-    }
-
-    if (!engine_) {
-        RTP_LLM_LOG_WARNING("dist kvcache failed, engine is null, request: %ld", request_id);
-        return grpc::Status(grpc::StatusCode::INTERNAL, "engine is null");
-    }
-    auto cache_manager = engine_->getCacheManager();
-    if (!cache_manager) {
-        RTP_LLM_LOG_WARNING("dist kvcache failed, cache manager is null, request: %ld, op: %s",
-                            request_id,
-                            ::DistKvCacheOp_Name(op_code).c_str());
-        return grpc::Status(grpc::StatusCode::INTERNAL, "cache manager is null");
-    }
-
-    std::vector<int64_t>               cache_keys(request->cache_keys().begin(), request->cache_keys().end());
-    std::vector<int32_t>               block_ids(request->block_ids().begin(), request->block_ids().end());
-    const auto                         ignore_block_num = request->ignore_block_num();
-    std::map<std::string, std::string> extra_metas;
-    for (const auto& meta : request->extra_metas()) {
-        extra_metas[meta.key()] = meta.value();
-    }
-
-    bool result = false;
-    if (op_code == ::DistKvCacheOp::GET) {
-        result = cache_manager->getCacheForRank(cache_keys, block_ids, ignore_block_num, request_id, extra_metas);
-    } else {
-        result = cache_manager->putCacheForRank(cache_keys, block_ids, ignore_block_num, request_id, extra_metas);
-    }
-
-    if (!result) {
-        RTP_LLM_LOG_WARNING(
-            "dist kvcache failed, %s cache failed, request: %ld", ::DistKvCacheOp_Name(op_code).c_str(), request_id);
-        const std::string error_msg = "cache manager " + ::DistKvCacheOp_Name(op_code) + " failed";
-        return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
-    }
-    return grpc::Status::OK;
-}
-
 grpc::Status LocalRpcServer::UpdateSchedulerInfo(grpc::ServerContext*                context,
                                                  const UpdateSchedulerInfoRequestPB* request,
                                                  EmptyPB*                            response) {
@@ -458,56 +409,27 @@ void LocalRpcServer::reportCacheStatusTime(int64_t request_begin_time_us) {
     }
 }
 
-::grpc::Status LocalRpcServer::MemoryBlockCache(::grpc::ServerContext*             context,
-                                                const ::MemoryBlockCacheRequestPB* request,
-                                                ::MemoryBlockCacheResponsePB*      response) {
-    const int64_t request_id = request->request_id();
-    const auto    op_code    = request->op();
+::grpc::Status LocalRpcServer::BroadcastTp(::grpc::ServerContext*        context,
+                                           const ::BroadcastTpRequestPB* request,
+                                           ::BroadcastTpResponsePB*      response) {
+    RTP_LLM_LOG_DEBUG("receive broadcast tp request from client: %s, request: [%s]",
+                      context->peer().c_str(),
+                      request->DebugString().c_str());
+    if (context->IsCancelled()) {
+        RTP_LLM_LOG_WARNING("broadcast tp failed, request is cancelled");
+        return grpc::Status(grpc::StatusCode::CANCELLED, "request is cancelled");
+    }
     if (!engine_) {
-        RTP_LLM_LOG_WARNING("memory block service failed, engine is null, request: %ld", request_id);
-        response->set_success(false);
-        return grpc::Status::OK;
+        RTP_LLM_LOG_WARNING("broadcast tp failed, engine is null");
+        return grpc::Status(grpc::StatusCode::INTERNAL, "engine is null");
     }
     auto cache_manager = engine_->getCacheManager();
     if (!cache_manager) {
-        RTP_LLM_LOG_WARNING("memory block service failed, cache manager is null, request: %ld, op: %s",
-                            request_id,
-                            ::MemoryBlockCacheOp_Name(op_code).c_str());
-        response->set_success(false);
-        return grpc::Status::OK;
+        RTP_LLM_LOG_WARNING("broadcast tp failed, cache manager is null");
+        return grpc::Status(grpc::StatusCode::INTERNAL, "cache manager is null");
     }
-    auto memory_block_cache = cache_manager->memoryBlockCache();
-    if (!memory_block_cache) {
-        response->set_success(false);
-        RTP_LLM_LOG_WARNING("memory block service failed, memory block cache is null, request: %ld", request_id);
-        return grpc::Status::OK;
-    }
-
-    std::vector<int32_t> gpu_block_ids(request->gpu_block_ids().begin(), request->gpu_block_ids().end());
-    std::vector<int32_t> memory_block_ids(request->memory_block_ids().begin(), request->memory_block_ids().end());
-    if (gpu_block_ids.empty() || memory_block_ids.empty() || gpu_block_ids.size() != memory_block_ids.size()) {
-        response->set_success(false);
-        RTP_LLM_LOG_WARNING("memory block cache failed, gpu block ids or memory block ids is empty, request: %ld",
-                            request_id);
-        return grpc::Status::OK;
-    }
-
-    bool result = false;
-    if (op_code == ::MemoryBlockCacheOp::MEMORY_CACHE_COPY_FROM_GPU) {
-        result = memory_block_cache->copyKVData(
-            memory_block_ids, gpu_block_ids, MemoryBlockCache::CopyDirection::FROM_GPU, request_id);
-    } else {
-        result = memory_block_cache->copyKVData(
-            memory_block_ids, gpu_block_ids, MemoryBlockCache::CopyDirection::TO_GPU, request_id);
-    }
-    response->set_success(result);
-
-    if (!result) {
-        RTP_LLM_LOG_WARNING("memory block cache failed, %s copy failed, request: %ld",
-                            ::MemoryBlockCacheOp_Name(op_code).c_str(),
-                            request_id);
-    }
-    return grpc::Status::OK;
+    // TODO(LXQ): need to call corresponding function in cache manager
+    return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "broadcast tp is not implemented");
 }
 
 grpc::Status LocalRpcServer::SetPause(grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response) {

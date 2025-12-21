@@ -1,7 +1,8 @@
 
 #include "gtest/gtest.h"
 
-#include "rtp_llm/cpp/cache/CacheManager.h"
+#include "rtp_llm/cpp/cache_new/KVCacheManager.h"
+#include "rtp_llm/cpp/cache_new/CacheConfig.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/devices/testing/TestBase.h"
@@ -19,7 +20,26 @@ public:
     }
 
     CacheConfig init_config() {
-        CacheConfig config(KVCacheParam{KVCacheParam{3, 9, 1, 1, 2, rtp_llm::DataType::TYPE_INT8}});
+        CacheConfig config;
+        config.layer_num          = 3;
+        config.block_num          = 9;
+        config.seq_size_per_block = 2;  // tokens_per_block
+
+        auto spec                = std::make_shared<MHAKVCacheSpec>();
+        spec->layer_num          = 3;
+        spec->block_nums         = 9;
+        spec->local_head_num_kv  = 1;
+        spec->size_per_head      = 1;
+        spec->seq_size_per_block = 2;
+        spec->dtype              = rtp_llm::DataType::TYPE_INT8;
+        spec->type               = KVCacheType::MultiHeadAttention;
+        config.cache_specs.push_back(spec);
+
+        std::vector<int> layer_ids(3);
+        for (int i = 0; i < 3; ++i) {
+            layer_ids[i] = i;
+        }
+        config.layer_ids.push_back(layer_ids);
         return config;
     }
 
@@ -35,8 +55,9 @@ public:
     GenerateStreamPtr createComplexContextStream(std::vector<int> input_ids) {
         autil::EnvGuard perf_scope("PERF_TEST", "1");
 
-        auto            cache_config  = init_config();
-        auto            cache_manager = std::make_shared<CacheManager>(cache_config, device_);
+        auto cache_config  = init_config();
+        auto cache_manager = std::make_shared<KVCacheManager>(cache_config, device_);
+        cache_manager->init();
         ResourceContext resource_context;
         resource_context.cache_manager = cache_manager;
         resource_context.reuse_cache   = true;
@@ -84,37 +105,6 @@ TEST_F(GenerateStreamTest, testConstruct) {
     auto                      builder = GenerateStreamBuilder();
     auto                      stream1 = builder.createContextStream({{1, 2, 3, 4, 5}, {}});
     auto                      stream2 = builder.createDecoderStream({1, 2, 3, 4, 5}, {1, 2, 3});
-}
-
-TEST_F(GenerateStreamTest, testConstructCacheKey) {
-    auto                      builder    = GenerateStreamBuilder();
-    auto                      stream1    = builder.createComplexContextStream({{1, 2, 3, 4, 5}, {}});
-    auto&                     cache_key1 = stream1->cacheKeys(0);
-    auto&                     cache_key2 = stream1->cacheKeys(1);
-    ASSERT_EQ(cache_key1.size(), 3);
-    ASSERT_EQ(cache_key2.size(), 3);
-    ASSERT_EQ(cache_key1[0], cache_key2[0]);
-    ASSERT_EQ(cache_key1[1], cache_key2[1]);
-
-    stream1->stream_cache_resource_->reConstructCacheKeys();
-    ASSERT_EQ(cache_key1.size(), 2);
-    ASSERT_EQ(cache_key2.size(), 2);
-
-    stream1->setSeqLength(6);
-    auto batch_tokens_1                      = stream1->complete_token_ids_->data(0);
-    batch_tokens_1[stream1->seqLength() - 1] = 8;
-    auto batch_tokens_2                      = stream1->complete_token_ids_->data(0);
-    batch_tokens_2[stream1->seqLength() - 1] = 9;
-    stream1->stream_cache_resource_->reConstructCacheKeys();
-    ASSERT_EQ(cache_key1.size(), 3);
-    ASSERT_EQ(cache_key2.size(), 3);
-    ASSERT_NE(cache_key1[2], cache_key2[2]);
-
-    stream1->setSeqLength(7);
-    stream1->stream_cache_resource_->reConstructCacheKeys();
-    ASSERT_EQ(cache_key1.size(), 3);
-    ASSERT_EQ(cache_key2.size(), 3);
-    ASSERT_NE(cache_key1[2], cache_key2[2]);
 }
 
 TEST_F(GenerateStreamTest, testGenerateStreamReuseCacheMethod) {

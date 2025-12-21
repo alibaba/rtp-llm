@@ -35,12 +35,6 @@ public:
         return local_server_->GenerateStreamCall(context, request, writer);
     }
 
-    ::grpc::Status DistKvCache(::grpc::ServerContext*        context,
-                               const ::DistKvCacheRequestPB* request,
-                               ::DistKvCacheResponsePB*      response) override {
-        return local_server_->DistKvCache(context, request, response);
-    }
-
     ::grpc::Status
     GetWorkerStatus(::grpc::ServerContext* context, const StatusVersionPB* request, WorkerStatusPB* response) override {
         return local_server_->GetWorkerStatus(context, request, response);
@@ -126,10 +120,10 @@ public:
         }
     }
 
-    ::grpc::Status MemoryBlockCache(::grpc::ServerContext*             context,
-                                    const ::MemoryBlockCacheRequestPB* request,
-                                    ::MemoryBlockCacheResponsePB*      response) override {
-        return local_server_->MemoryBlockCache(context, request, response);
+    ::grpc::Status BroadcastTp(::grpc::ServerContext*        context,
+                               const ::BroadcastTpRequestPB* request,
+                               ::BroadcastTpResponsePB*      response) override {
+        return local_server_->BroadcastTp(context, request, response);
     }
 
 protected:

@@ -1,6 +1,8 @@
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/cache_new/KVCacheManager.h"
+#include "rtp_llm/cpp/cache_new/types.h"
 #include <chrono>
 #include <memory>
 #include <mutex>
@@ -13,7 +15,7 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                 runtime_config
                              const PDSepConfig&                  pd_sep_config,
                              const ParallelismConfig&            parallelism_config,
                              const ModelSpecificConfig&          model_specific_config,
-                             const std::shared_ptr<CacheManager>& cache_manager,
+                             const std::shared_ptr<KVCacheManager>& cache_manager,
                              const kmonitor::MetricsReporterPtr   metrics_reporter,
                              const int                            max_score_len):
     pd_sep_config_(pd_sep_config),
@@ -158,18 +160,28 @@ bool FIFOScheduler::evaluateNewStream(const list<GenerateStreamPtr>& streams,
         return false;
     }
 
+<<<<<<< HEAD
     auto old_blocks = new_stream->maxBlockSize();
     auto result     = new_stream->initKVBlock(reserve_step);
+=======
+    auto old_blocks = new_stream->maxBlocksNum();
+    auto result     = new_stream->initKVBlock(token_capacity_, reserve_step);
+    if (result.ok() && enable_fast_gen_) {
+        token_capacity_ -= result.value();
+        RTP_LLM_LOG_DEBUG(
+            "after stream [%ld] acquireCapacity, token_capacity is %d", new_stream->streamId(), token_capacity_);
+    }
+>>>>>>> feat: refactor KVCacheManager
     if (result.ok()) {
-        if (cache_manager_->availableBlockNums() >= reserve_block_num_) {
+        if (cache_manager_->availableBlocksNum() >= reserve_block_num_) {
             return true;
         } else {
             RTP_LLM_LOG_INFO(
-                "current availableBlockNums is [%ld], reserve_block_num is [%ld], so stream [%ld] malloc failed",
-                cache_manager_->availableBlockNums(),
+                "current availableBlocksNum is [%ld], reserve_block_num is [%ld], so stream [%ld] malloc failed",
+                cache_manager_->availableBlocksNum(),
                 reserve_block_num_,
                 new_stream->streamId());
-            new_stream->tryReleaseKVBlock(new_stream->maxBlockSize() - old_blocks);
+            new_stream->tryReleaseKVBlock(new_stream->maxBlocksNum() - old_blocks);
             return false;
         }
     }
@@ -194,11 +206,11 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
         } else if (running_streams_.empty() && new_streams.empty() && remote_running_streams_.empty()) {
             // TODO(xinfei.sxf) At this time, we can also release the blocks held by other waiting streams
             RTP_LLM_LOG_WARNING("stream [%ld] can not add to new queue", stream->streamId());
-            if (stream->inputLength() > cache_manager_->maxSeqLen()) {
+            if (stream->inputLength() > cache_manager_->maxAvailableTokensNum()) {
                 stream->stopAndRelease(ErrorCode::EXCEEDS_KV_CACHE_MAX_LEN,
                                        "input len " + std::to_string(stream->inputLength())
-                                           + " is greater than kv cache max seq len "
-                                           + std::to_string(cache_manager_->maxSeqLen()));
+                                           + " is greater than kv cache max available tokens num "
+                                           + std::to_string(cache_manager_->maxAvailableTokensNum()));
             } else if ((size_t)stream->inputLength() * stream->currentBatchSize() > max_batch_tokens_size_) {
                 auto error_info =
                     autil::StringUtil::formatString("input len [%d] * batch size [%d] > max_batch_tokens_size [%d]",

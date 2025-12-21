@@ -7,7 +7,7 @@
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/speculative_engine/propose_executor/MTPStream.h"
-#include "rtp_llm/cpp/cache/CacheConfigCreator.h"
+#include "rtp_llm/cpp/cache_new/CacheConfigCreator.h"
 #include "rtp_llm/cpp/speculative_engine/SpeculativeScheduler.h"
 #include "rtp_llm/cpp/speculative_engine/SpeculativeGatherBatchScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
@@ -209,13 +209,8 @@ absl::Status SpeculativeEngine::initCacheManager(std::optional<WarmUpResult> war
         auto        proposer_cache_config    = std::get<1>(config);
         scorer_cache_config.mtp_model_type   = "score_model";
         proposer_cache_config.mtp_model_type = "propose_model";
-        resource_context_.cache_manager      = make_shared<CacheManager>(scorer_cache_config,
-                                                                    device_,
-                                                                    false,
-                                                                    metrics_reporter_,
-                                                                    score_model_params_.kv_cache_config,
-                                                                    score_model_params_.parallelism_config,
-                                                                    score_model_params_.runtime_config);
+        resource_context_.cache_manager      = make_shared<KVCacheManager>(
+            scorer_cache_config, device_, false, metrics_reporter_, score_model_params_.kv_cache_config, score_model_params_.parallelism_config, score_model_params_.runtime_config);
         if (isMTPEagle()) {
             auto layer_num = propose_model_params_->genNumPerCircle();
             if (isEagle()) {
@@ -224,39 +219,24 @@ absl::Status SpeculativeEngine::initCacheManager(std::optional<WarmUpResult> war
             RTP_LLM_LOG_INFO("mtp cache manager init use layer num : %d", layer_num);
             for (int i = 0; i < layer_num; i++) {
                 RTP_LLM_CHECK(proposer_cache_config.layer_num == 1);
-                resource_context_.mtp_cache_managers.push_back(
-                    std::make_shared<CacheManager>(proposer_cache_config,
-                                                   device_,
-                                                   false,
-                                                   metrics_reporter_,
-                                                   score_model_params_.kv_cache_config,
-                                                   score_model_params_.parallelism_config,
-                                                   score_model_params_.runtime_config));
+                resource_context_.mtp_cache_managers.push_back(std::make_shared<KVCacheManager>(
+                    proposer_cache_config, device_, false, metrics_reporter_, score_model_params_.kv_cache_config, score_model_params_.parallelism_config, score_model_params_.runtime_config));
             }
         } else {
-            resource_context_.propose_cache_manager = make_shared<CacheManager>(proposer_cache_config,
-                                                                                device_,
-                                                                                false,
-                                                                                metrics_reporter_,
-                                                                                score_model_params_.kv_cache_config,
-                                                                                score_model_params_.parallelism_config,
-                                                                                score_model_params_.runtime_config);
+            resource_context_.propose_cache_manager = make_shared<KVCacheManager>(
+                proposer_cache_config, device_, false, metrics_reporter_, score_model_params_.kv_cache_config, score_model_params_.parallelism_config, score_model_params_.runtime_config);
         }
 
     } else {
-        const auto& config              = CacheConfigCreator::createConfig(score_model_params_.model_config_,
-                                                              score_model_params_.parallelism_config,
-                                                              score_model_params_.runtime_config,
-                                                              score_model_params_.kv_cache_config,
-                                                              warm_up_result,
-                                                              score_model_params_.sp_config);
-        resource_context_.cache_manager = make_shared<CacheManager>(config,
-                                                                    device_,
-                                                                    false,
-                                                                    metrics_reporter_,
-                                                                    score_model_params_.kv_cache_config,
-                                                                    score_model_params_.parallelism_config,
-                                                                    score_model_params_.runtime_config);
+        const auto& config = CacheConfigCreator::createConfig(
+                                    score_model_params_.model_config_,
+                                    score_model_params_.parallelism_config,
+                                    score_model_params_.runtime_config,
+                                    score_model_params_.kv_cache_config,
+                                    warm_up_result,
+                                    score_model_params_.sp_config);
+        resource_context_.cache_manager = make_shared<KVCacheManager>(
+            config, device_, false, metrics_reporter_, score_model_params_.kv_cache_config, score_model_params_.parallelism_config, score_model_params_.runtime_config);
     }
     return absl::OkStatus();
 }

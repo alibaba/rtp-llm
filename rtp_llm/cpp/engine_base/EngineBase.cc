@@ -59,7 +59,7 @@ std::shared_ptr<lora::LoraManager> EngineBase::getLoraManager() {
     return lora_manager_;
 }
 
-std::shared_ptr<CacheManager> EngineBase::getCacheManager() const {
+std::shared_ptr<KVCacheManager> EngineBase::getCacheManager() const {
     return resource_context_.cache_manager;
 }
 
