@@ -28,7 +28,6 @@ public:
         decode_entrance_(pd_sep_config.decode_entrance),
         k_block_size_(cache_config.k_block_stride),
         v_block_size_(cache_config.v_block_stride),
-        scale_block_size_(cache_config.kv_scale_block_stride),
         seq_size_per_block_(cache_config.seq_size_per_block),
         warm_up_(warm_up),
         enable_detail_log_(profiling_debug_logging_config.enable_detail_log),
@@ -62,13 +61,11 @@ protected:
     size_t           position_id_len_factor_;
     RoleType         role_type_;
     bool             decode_entrance_;
-    // size_t           block_size_;
-    size_t k_block_size_;
-    size_t v_block_size_;
-    size_t scale_block_size_;
-    size_t seq_size_per_block_;
-    bool   warm_up_;
-    bool   enable_detail_log_;
+    size_t           k_block_size_;
+    size_t           v_block_size_;
+    size_t           seq_size_per_block_;
+    bool             warm_up_;
+    bool             enable_detail_log_;
 
     rtp_llm::DeviceBase* device_;
 };

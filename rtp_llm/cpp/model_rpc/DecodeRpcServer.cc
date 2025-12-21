@@ -90,8 +90,8 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
 
     auto cache_manager = engine_->resourceContext().cache_manager;
     auto reserve_block_num =
-        maga_init_params_.runtime_config.fifo_scheduler_config.scheduler_reserve_resource_ratio * cache_manager->totalBlocks() / 100;
-    auto current_blocks = cache_manager->availableBlockNums();
+        maga_init_params_.runtime_config.fifo_scheduler_config.scheduler_reserve_resource_ratio * cache_manager->totalBlocksNum() / 100;
+    auto current_blocks = cache_manager->availableBlocksNum();
     if (current_blocks < reserve_block_num) {
         string error_msg = "request: [" + decode_context.request_key + "] malloc kv cache block failed at decode node, "
                            + "current_blocks = " + std::to_string(current_blocks)
@@ -272,7 +272,7 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
 ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_context) {
     auto* generate_stream = decode_context.getStream().get();
     auto& cache_keys      = generate_stream->cacheKeys(0);
-    auto& block_ids       = generate_stream->kvCache().blocks(0);
+    auto& block_ids       = generate_stream->kvCachePtr()->blocks(0);
 
     if (cache_keys.size() != block_ids.size()) {
         return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED,
@@ -534,22 +534,18 @@ ErrorInfo DecodeRpcServer::loadCacheSyncForTp(DecodeGenerateContext& decode_cont
 
 ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     AtomicGuard request_guard(onflight_load_cache_requests_);
-    const auto& request_key      = load_context.request_key;
-    auto        cache_manager    = engine_->resourceContext().cache_manager;
-    const auto& cache_config     = cache_manager->cacheConfig();
-    auto        k_block_size     = cache_config.k_block_stride;
-    auto        scale_block_size = cache_config.kv_scale_block_stride;
-    auto        layer_num        = maga_init_params_.model_config_.num_layers;
+    const auto& request_key   = load_context.request_key;
+    auto        cache_manager = engine_->resourceContext().cache_manager;
+    const auto& cache_config  = cache_manager->cacheConfig();
+    auto        k_block_size  = cache_config.kv_block_stride;
+    auto        layer_num     = maga_init_params_.gpt_init_parameter.num_layers_;
 
-    if (k_block_size % load_context.peer_addrs.size() != 0 || scale_block_size % load_context.peer_addrs.size() != 0) {
-        RTP_LLM_LOG_WARNING("k block size [%d] or scale block size [%d] is not divisible by peer ips size [%d]",
-                            k_block_size,
-                            scale_block_size,
-                            load_context.peer_addrs.size());
+    if (k_block_size % load_context.peer_addrs.size() != 0) {
+        RTP_LLM_LOG_WARNING(
+            "k block size [%d] is not divisible by peer ips size [%d]", k_block_size, load_context.peer_addrs.size());
         return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "block size is not divisible by peer ips size");
     }
-    k_block_size     = k_block_size / load_context.peer_addrs.size();
-    scale_block_size = scale_block_size / load_context.peer_addrs.size();
+    k_block_size = k_block_size / load_context.peer_addrs.size();
 
     auto cancel_check_func  = [&load_context]() -> bool { return load_context.server_context->IsCancelled(); };
     auto start_load_time_us = currentTimeUs();
@@ -585,7 +581,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                     propose_maga_init_params_->mtp_model_params_->at(mtp_model_id).get();
                 const auto& sp_cache_manager = engine_->resourceContext().mtp_cache_managers[mtp_model_id];
                 const auto& cache_config     = sp_cache_manager->cacheConfig();
-                const auto  sp_k_block_size  = cache_config.k_block_stride / load_context.peer_addrs.size();
+                const auto  sp_k_block_size  = cache_config.kv_block_stride / load_context.peer_addrs.size();
                 size_t      layer_num        = mtp_engine_init_params->model_config_.num_layers;
                 for (size_t layer_id = 0; layer_id < layer_num; layer_id++) {
                     auto request_key = std::to_string(load_context.request_id) + "-" + std::to_string(layer_id);
@@ -658,9 +654,9 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
         return grpc::Status::OK;
     }
 
-    std::vector<int64_t>     cache_keys(request->cache_keys().begin(), request->cache_keys().end());
-    std::vector<int32_t>     block_ids(request->block_ids().begin(), request->block_ids().end());
-    std::vector<std::string> peer_addrs(request->peer_addrs().begin(), request->peer_addrs().end());
+    std::vector<CacheKeyType> cache_keys(request->cache_keys().begin(), request->cache_keys().end());
+    std::vector<BlockIdxType> block_ids(request->block_ids().begin(), request->block_ids().end());
+    std::vector<std::string>  peer_addrs(request->peer_addrs().begin(), request->peer_addrs().end());
 
     // TODO(xinfei.sxf) add retry
     auto error_info = loadCache({request->request_id(),

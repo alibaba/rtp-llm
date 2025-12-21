@@ -30,10 +30,6 @@ GptModel::GptModel(const GptModelInitParams& params):
     if (params.kv_cache_buffer) {
         k_cache_buffer_ = params.kv_cache_buffer->k_blocks;
         v_cache_buffer_ = params.kv_cache_buffer->v_blocks;
-        if (params.kv_cache_buffer->k_scale) {
-            k_scale_buffer_ = params.kv_cache_buffer->k_scale;
-            v_scale_buffer_ = params.kv_cache_buffer->v_scale;
-        }
     }
     if (abs(description_.residual_scalar - 1.0) > 1e-6) {
         vector<float> residual_scale_vec = {(float)description_.residual_scalar};
@@ -155,7 +151,8 @@ rtp_llm::AttentionCommonInputs GptModel::prepareAttentionInputs(const GptModelIn
 
     BufferPtr cu_seqlens_host =
         device_->allocateBuffer({DataType::TYPE_INT32, {context_batch_size + 1}, AllocationType::HOST});
-    BufferPtr cu_seqlens_without_prefix_data_host = device_->allocateBuffer({DataType::TYPE_INT32, {context_batch_size + 1}, AllocationType::HOST});
+    BufferPtr cu_seqlens_without_prefix_data_host =
+        device_->allocateBuffer({DataType::TYPE_INT32, {context_batch_size + 1}, AllocationType::HOST});
     BufferPtr padding_offset_host =
         device_->allocateBuffer({DataType::TYPE_INT32, {inputs.combo_tokens->shape()[0]}, AllocationType::HOST});
     getPaddingOffsetAndCuSeqLens(padding_offset_host->data<int32_t>(),
@@ -176,7 +173,8 @@ rtp_llm::AttentionCommonInputs GptModel::prepareAttentionInputs(const GptModelIn
     //     cu_seqlens_data[context_batch_size], decoder_batch_size, inputs.combo_tokens->shape()[0]);
 
     attention_inputs.cu_seqlens = device_->clone({*cu_seqlens_host, AllocationType::DEVICE, {"cu_seqlens"}});
-    attention_inputs.cu_seqlens_without_prefix = device_->clone({*cu_seqlens_without_prefix_data_host, AllocationType::DEVICE, {"cu_seqlens_without_prefix"}});
+    attention_inputs.cu_seqlens_without_prefix =
+        device_->clone({*cu_seqlens_without_prefix_data_host, AllocationType::DEVICE, {"cu_seqlens_without_prefix"}});
     if (attention_inputs.max_prefix_length) {
         attention_inputs.prefix_prompt_lengths = device_->clone(*prefix_lengths);
         BufferPtr cu_kv_seqlens_host =
@@ -189,7 +187,7 @@ rtp_llm::AttentionCommonInputs GptModel::prepareAttentionInputs(const GptModelIn
                                      context_batch_size,
                                      max_context_seq_len);
 
-        BufferPtr             kv_seqlens_host =
+        BufferPtr kv_seqlens_host =
             device_->allocateBuffer({DataType::TYPE_UINT32, {context_batch_size}, AllocationType::HOST});
         for (int i = 0; i < context_batch_size; i++) {
             kv_seqlens_host->data<uint32_t>()[i] =
@@ -275,7 +273,7 @@ rtp_llm::AttentionCommonInputs GptModel::prepareAttentionInputs(const GptModelIn
             inputs.seq_size_per_block,
             inputs.k_block_size,
             inputs.v_block_size,
-            inputs.scale_block_size,
+            0,
             inputs.pd_separation,
             model_id_,
             inputs.decode_entrance,
@@ -625,7 +623,7 @@ GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
         inputs.multimodal_features ?
             device_->clone({*inputs.text_tokens_mask, AllocationType::DEVICE, {"text_tokens_mask"}}) :
             nullptr;
-    const BufferPtr mm_features_locs       = inputs.mm_features_locs ? inputs.mm_features_locs : nullptr;
+    const BufferPtr mm_features_locs      = inputs.mm_features_locs ? inputs.mm_features_locs : nullptr;
     const BufferPtr input_embeddings_locs = inputs.input_embeddings_locs ? inputs.input_embeddings_locs : nullptr;
 
     // word embedding lookup
@@ -686,8 +684,9 @@ GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
 
     if (inputs.multimodal_features) {
         printBufferData(*hidden, "before multimodalEmbedding hidden");
-        hidden = device_->multimodalEmbedding({hidden, (OptionalConstVecBufferPtrRef)inputs.multimodal_features,
-            mm_features_locs ? (OptionalConstBufferRef)*mm_features_locs : nullopt});
+        hidden = device_->multimodalEmbedding({hidden,
+                                               (OptionalConstVecBufferPtrRef)inputs.multimodal_features,
+                                               mm_features_locs ? (OptionalConstBufferRef)*mm_features_locs : nullopt});
         device_->checkError();
     }
 
@@ -696,18 +695,20 @@ GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
         pre_decoder_residual = hidden;
     }
 
-    if ((description_.act_qscheme == QScheme::Qint8PerTensor ||
-         description_.act_qscheme == QScheme::Qfp8PerTensor) && !(hidden->isQBuffer()) &&
-         weights_.pre_decoder_layernorm) {
-        auto norm_weight = weights_.pre_decoder_layernorm;
+    if ((description_.act_qscheme == QScheme::Qint8PerTensor || description_.act_qscheme == QScheme::Qfp8PerTensor)
+        && !(hidden->isQBuffer()) && weights_.pre_decoder_layernorm) {
+        auto norm_weight             = weights_.pre_decoder_layernorm;
         auto static_scale_reciprocal = norm_weight->static_scale_reciprocal;
-        auto static_scale = norm_weight->static_scale;
-        hidden = device_->quantize(
-                     {*hidden, description_.act_qscheme == QScheme::Qint8PerTensor ?
-                          DataType::TYPE_INT8 : DataType::TYPE_FP8_E4M3, 1,
-                      description_.act_qscheme, nullopt, nullopt,
-                      static_scale ? (OptionalConstBufferRef)*static_scale : nullopt,
-                      static_scale_reciprocal ? (OptionalConstBufferRef)*static_scale_reciprocal : nullopt});
+        auto static_scale            = norm_weight->static_scale;
+        hidden                       = device_->quantize(
+            {*hidden,
+             description_.act_qscheme == QScheme::Qint8PerTensor ? DataType::TYPE_INT8 : DataType::TYPE_FP8_E4M3,
+                                   1,
+                                   description_.act_qscheme,
+                                   nullopt,
+                                   nullopt,
+             static_scale ? (OptionalConstBufferRef)*static_scale : nullopt,
+             static_scale_reciprocal ? (OptionalConstBufferRef)*static_scale_reciprocal : nullopt});
     }
 
     device_->checkError();

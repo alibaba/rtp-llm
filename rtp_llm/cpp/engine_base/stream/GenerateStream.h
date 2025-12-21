@@ -124,7 +124,7 @@ public:
     void                        setNeedReleaseResource(bool need_release_resource);
     void                        incrFallbackBlock(int fallback_blocks);
     bool                        hasCacheKeys() const;
-    const std::vector<int64_t>& cacheKeys(int32_t batch_id = 0) const;
+    const CacheKeysType&        cacheKeys(int32_t batch_id = 0) const;
 
     std::shared_ptr<GenerateInput>   generateInput() const;
     std::shared_ptr<GenerateConfig>& generateConfig() const;
@@ -189,11 +189,14 @@ public:
     bool                      isChunkStream() const;
     const rtp_llm::BufferPtr& cumLogProbs() const;
 
-    const rtp_llm::BufferPtr& completeTokenIds();
-    std::vector<int>          completeTokenIdsVec(int batch_idx = 0);
-    std::vector<int>          commonCompleteTokenIdsVec(int batch_idx = 0);
-    int                       currentExecuteTokenSize();
-    std::vector<int>          currentExecuteTokens(int batch_idx = 0) const;
+    const rtp_llm::BufferPtr&         completeTokenIds();
+    std::shared_ptr<CompleteTokenIds> completeTokenIdsPtr() const {
+        return complete_token_ids_;
+    }
+    std::vector<int> completeTokenIdsVec(int batch_idx = 0);
+    std::vector<int> commonCompleteTokenIdsVec(int batch_idx = 0);
+    int              currentExecuteTokenSize();
+    std::vector<int> currentExecuteTokens(int batch_idx = 0) const;
 
     void step();
     void spStep();
@@ -234,7 +237,9 @@ public:
     void                        setLoss(const rtp_llm::Buffer& loss);
     void                        setSoftmaxProbs(const rtp_llm::Buffer& softmax_probs, int start_pos);
     const BatchKVCacheResource& kvCache() const;
-    size_t                      maxBlockSize() const;
+    BatchKVCacheResource&       kvCacheMutable();
+    BatchKVCacheResourcePtr     kvCachePtr();
+    size_t                      maxBlocksNum() const;
 
     bool needFinish();
     bool needFinishBySPTokens();
@@ -259,10 +264,6 @@ public:
     rtp_llm::BufferPtr   getSoftmaxProbs();
     StreamCacheResource& streamCacheResource();
     void                 setPerfTest(bool perf_test_);
-
-    absl::Status releaseSequenceKVCache(size_t total_seq_len, size_t release_seq_len) {
-        return stream_cache_resource_->releaseSequenceKVCache(total_seq_len, release_seq_len);
-    }
 
     void CopyOnWrite(const GenerateStream& other_stream, bool copy_loss = true, bool share = false);
 

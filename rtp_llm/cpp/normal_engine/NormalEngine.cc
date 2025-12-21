@@ -8,7 +8,7 @@
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/GatherBatchScheduler.h"
-#include "rtp_llm/cpp/cache/CacheConfigCreator.h"
+#include "rtp_llm/cpp/cache_new/CacheConfigCreator.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -164,7 +164,10 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     cache_config.block_nums         = 5;
     ParallelismConfig temp_parallelism_config;
     RuntimeConfig temp_runtime_config;
-    auto cache_manager              = make_shared<CacheManager>(cache_config, device_, true, nullptr, KVCacheConfig{}, temp_parallelism_config, temp_runtime_config);
+    auto cache_manager              = make_shared<KVCacheManager>(cache_config, device_, true, nullptr, KVCacheConfig{}, temp_parallelism_config, temp_runtime_config);
+    if (!cache_manager->init()) {
+        RTP_LLM_FAIL("init kv cache manager failed in decodeWarmUp");
+    }
     executor_.reset(new NormalExecutor(params, cache_manager, device_, nullptr, true));
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
     const auto device_status = device_->getDeviceStatus();
@@ -190,7 +193,10 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
     auto result = CacheConfigCreator::createConfig(model_config_, parallelism_config, runtime_config, kv_cache_config, warm_up_result);
     RTP_LLM_LOG_INFO(
         "create cache manager with block nums %d, block size %ld KB", result.block_nums, result.block_size / 1024);
-    resource_context_.cache_manager = make_shared<CacheManager>(result, device_, false, metrics_reporter_, kv_cache_config, parallelism_config, runtime_config);
+    resource_context_.cache_manager = make_shared<KVCacheManager>(result, device_, false, metrics_reporter_, kv_cache_config, parallelism_config, runtime_config);
+    if (!resource_context_.cache_manager->init()) {
+        RTP_LLM_FAIL("init kv cache manager failed");
+    }
 }
 
 absl::Status NormalEngine::initSystemPrompt() {

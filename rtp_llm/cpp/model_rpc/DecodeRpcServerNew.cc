@@ -83,7 +83,7 @@ void DecodeRpcServerNew::makeRemoteGenerateRequest(DecodeGenerateContextNew& dec
     }
 
     auto  generate_stream = decode_context.getStream();
-    auto& block_ids       = generate_stream->kvCache().blocks(0);
+    auto& block_ids       = generate_stream->kvCachePtr()->blocks(0);
     for (auto& block_id : block_ids) {
         request.add_block_ids(block_id);
     }
