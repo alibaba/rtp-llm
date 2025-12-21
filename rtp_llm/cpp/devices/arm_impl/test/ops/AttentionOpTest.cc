@@ -223,9 +223,13 @@ void ArmAttentionOpTest::selfAttentionOpTest(size_t batch_size,
     auto rope_config = RopeConfig({RopeStyle::No, (int)head_dim, 10000, 1, 2048, 1, 1});
 
     // cache manager need one block for preserve and every seq need one block for preserve.
-    auto                 block_num = 2 * batch_size * ((kv_seq_len + tokensPerBlock - 1) / tokensPerBlock + 1) + 1;
-    rtp_llm::CacheConfig cache_conf(rtp_llm::KVCacheParam{
-        1, (uint)block_num, (uint)num_heads, (uint)head_dim, (uint)tokensPerBlock, rtp_llm::TYPE_FP32});
+    auto block_num            = 2 * batch_size * ((kv_seq_len + tokensPerBlock - 1) / tokensPerBlock + 1) + 1;
+    auto cache_conf           = makeMhaCacheConfig(1,
+                                         static_cast<uint>(block_num),
+                                         static_cast<uint>(num_heads),
+                                         static_cast<uint>(head_dim),
+                                         static_cast<uint>(tokensPerBlock),
+                                         rtp_llm::TYPE_FP32);
     cache_manager_            = nullptr;
     auto kv_cache_block_id    = allocateKVBlocks(cache_conf, input_lengths, kvcache_pad);
     auto kv_cache_buffer      = cache_manager_->kvCacheBuffer();
