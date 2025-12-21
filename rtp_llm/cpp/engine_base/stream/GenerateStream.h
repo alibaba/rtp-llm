@@ -173,8 +173,12 @@ public:
     void   setReuseLength(int reuse_length);
     void   setLocalReuseLength(int length);
     void   setRemoteReuseLength(int length);
+    void   setGpuReuseLength(int length);
+    void   setMemoryReuseLength(int length);
     int    localReuseLength() const;
     int    remoteReuseLength() const;
+    int    gpuReuseLength() const;
+    int    memoryReuseLength() const;
     void   setInitialReuseLength(int initial_reuse_length);
     int    fallbackPrefixLength() const;
     void   setFallbackPrefixLength(int fallback_prefix_length);
@@ -485,6 +489,10 @@ public:
         return generate_input_->generate_config->enable_memory_block_cache;
     }
 
+    bool enableGpuBlockCache() const {
+        return generate_input_->generate_config->enable_gpu_block_cache;
+    }
+
     void fillSubGenerateStatus(StreamState state);
     void resizeSubGenerateStatus(size_t new_size);
 
@@ -519,6 +527,8 @@ protected:
     int                                  reuse_length_           = 0;
     int                                  local_reuse_length_     = 0;
     int                                  remote_reuse_length_    = 0;
+    int                                  gpu_reuse_length_       = 0;
+    int                                  memory_reuse_length_    = 0;
     int                                  reuse_mm_length_        = 0;
     int                                  fallback_blocks_        = 0;
     int                                  fallback_times_         = 0;

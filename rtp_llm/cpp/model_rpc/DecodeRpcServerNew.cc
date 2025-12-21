@@ -239,6 +239,8 @@ ErrorInfo DecodeRpcServerNew::writeAppendFirstToken(DecodeGenerateContextNew& de
     auto  decode_total_reuse_len  = decode_context.getStream()->initialReuseLength();
     auto  decode_local_reuse_len  = decode_context.getStream()->localReuseLength();
     auto  decode_remote_reuse_len = decode_context.getStream()->remoteReuseLength();
+    auto  decode_gpu_reuse_len    = decode_context.getStream()->gpuReuseLength();
+    auto  decode_memory_reuse_len = decode_context.getStream()->memoryReuseLength();
 
     auto    first_token_rt_us = response.first_token_rt_us();
     int64_t cost_time_us      = currentTimeUs() - decode_context.request_begin_time_us;
@@ -255,6 +257,10 @@ ErrorInfo DecodeRpcServerNew::writeAppendFirstToken(DecodeGenerateContextNew& de
             response_output->generate_outputs(i).aux_info().local_reuse_len());
         response_output->mutable_generate_outputs(i)->mutable_aux_info()->set_prefill_remote_reuse_len(
             response_output->generate_outputs(i).aux_info().remote_reuse_len());
+        response_output->mutable_generate_outputs(i)->mutable_aux_info()->set_prefill_gpu_reuse_len(
+            response_output->generate_outputs(i).aux_info().gpu_reuse_len());
+        response_output->mutable_generate_outputs(i)->mutable_aux_info()->set_prefill_memory_reuse_len(
+            response_output->generate_outputs(i).aux_info().memory_reuse_len());
 
         response_output->mutable_generate_outputs(i)->mutable_aux_info()->set_decode_total_reuse_len(
             decode_total_reuse_len);
@@ -262,6 +268,10 @@ ErrorInfo DecodeRpcServerNew::writeAppendFirstToken(DecodeGenerateContextNew& de
             decode_local_reuse_len);
         response_output->mutable_generate_outputs(i)->mutable_aux_info()->set_decode_remote_reuse_len(
             decode_remote_reuse_len);
+        response_output->mutable_generate_outputs(i)->mutable_aux_info()->set_decode_gpu_reuse_len(
+            decode_gpu_reuse_len);
+        response_output->mutable_generate_outputs(i)->mutable_aux_info()->set_decode_memory_reuse_len(
+            decode_memory_reuse_len);
     }
 
     if (!decode_context.response_writer->Write(*response_output)) {

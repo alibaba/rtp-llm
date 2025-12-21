@@ -37,6 +37,7 @@ void StreamCacheResource::freeBatchBlocks(size_t batch_id, vector<int>& blocks) 
                                          loss,
                                          adapter_name_,
                                          enable3FS(),
+                                         enableGpuBlockCache(),
                                          enableMemoryBlockCache());
         resource_context_.cache_manager->freeWithCache(free_info);
     } else {
@@ -130,14 +131,17 @@ absl::StatusOr<int> StreamCacheResource::initKVBlock(int token_capacity, size_t 
                                                      false,
                                                      adapter_name_,
                                                      enable3FS(),
+                                                     enableGpuBlockCache(),
                                                      enableMemoryBlockCache());
         auto                             match_info = resource_context_.cache_manager->mallocWithCache(malloc_info);
         if (stream_->calculateLoss() && match_info.loss.empty()) {
             match_info = CacheManager::MatchInfo{0, {}, {}};
         }
         stream_->setReuseLength(match_info.reuse_length);
-        stream_->setLocalReuseLength(match_info.local_reuse_length);
+        stream_->setLocalReuseLength(match_info.gpu_reuse_length + match_info.memory_reuse_length);
         stream_->setRemoteReuseLength(match_info.remote_reuse_length);
+        stream_->setGpuReuseLength(match_info.gpu_reuse_length);
+        stream_->setMemoryReuseLength(match_info.memory_reuse_length);
         stream_->setMtpTokenIndex(match_info.reuse_length);
         stream_->setInitialReuseLength(match_info.reuse_length);
         if (!match_info.loss.empty()) {
@@ -431,6 +435,10 @@ bool StreamCacheResource::enable3FS() const {
 
 bool StreamCacheResource::enableMemoryBlockCache() const {
     return resource_context_.enable_memory_block_cache && stream_->enableMemoryBlockCache();
+}
+
+bool StreamCacheResource::enableGpuBlockCache() const {
+    return stream_->enableGpuBlockCache();
 }
 
 }  // namespace rtp_llm

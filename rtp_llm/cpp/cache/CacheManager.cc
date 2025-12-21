@@ -58,15 +58,11 @@ CacheManager::CacheManager(const CacheConfig&                 config,
         }
     }
 
-    if (params_.kv_cache_config.memory_block_cache_size_mb > 0) {
-        int64_t block_nums =
-            (int64_t)params_.kv_cache_config.memory_block_cache_size_mb * 1024 * 1024 / config_.block_size;
-        RTP_LLM_LOG_INFO("init memory block cache, size: %d MB, block nums: %ld",
-                         params_.kv_cache_config.memory_block_cache_size_mb,
-                         block_nums);
+    if (config_.memory_block_nums > 0) {
+        RTP_LLM_LOG_INFO("init memory block cache, memory block nums: %lu", config_.memory_block_nums);
 
         auto memory_block_cache_config       = config_;
-        memory_block_cache_config.block_nums = block_nums;
+        memory_block_cache_config.block_nums = config_.memory_block_nums;
         memory_block_cache_config.refresh();
 
         memory_block_cache_ = std::make_shared<MemoryBlockCache>(
@@ -168,6 +164,7 @@ size_t CacheManager::availableBlockNumsWithoutLock() {
 KVCacheInfo CacheManager::getKVCacheInfo(int64_t latest_version, bool need_cache_keys) {
     auto                 snapshot = block_cache_.cacheSnapshot(latest_version);
     std::vector<int64_t> cachekeys;
+
     if (need_cache_keys) {
         std::unordered_set<int64_t> seen_keys;
         for (const auto& cacheItem : snapshot.values) {
@@ -177,7 +174,17 @@ KVCacheInfo CacheManager::getKVCacheInfo(int64_t latest_version, bool need_cache
                 }
             }
         }
+
+        if (memory_block_cache_) {
+            auto memory_snapshot = memory_block_cache_->cacheSnapshot(latest_version);
+            for (const auto& cacheItem : memory_snapshot.values) {
+                if (seen_keys.insert(cacheItem->cache_key).second) {
+                    cachekeys.push_back(cacheItem->cache_key);
+                }
+            }
+        }
     }
+
     KVCacheInfo info{(size_t)availableBlockNums() * seq_size_per_block_,
                      (size_t)totalBlocks() * seq_size_per_block_,
                      (size_t)seq_size_per_block_,
@@ -211,9 +218,10 @@ CacheManager::MatchInfo CacheManager::mallocWithCache(const AdvancedMallocInfo& 
         RtpLLMCacheReuseMetricsCollector collector;
         collector.kv_cache_reuse_length = match_info.reuse_length;
         collector.match_cost_time_us    = match_cost_time_us;
-        collector.gpu_input_length   = static_cast<int32_t>(malloc_info.cache_keys.size()) * config_.seq_size_per_block;
-        collector.gpu_reuse_length   = match_info.local_reuse_length;
-        collector.gpu_cache_hit_rate = collector.gpu_reuse_length * 100 / collector.gpu_input_length;
+        collector.gpu_input_length = static_cast<int32_t>(malloc_info.cache_keys.size()) * config_.seq_size_per_block;
+        collector.gpu_reuse_length = match_info.gpu_reuse_length;
+        collector.memory_reuse_length = match_info.memory_reuse_length;
+        collector.gpu_cache_hit_rate  = collector.gpu_reuse_length * 100 / collector.gpu_input_length;
         kmonitor::MetricsTags tags;
         tags.AddTag("mtp_model_type", config_.mtp_model_type);
         metrics_reporter_->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(&tags, &collector);
@@ -224,20 +232,26 @@ CacheManager::MatchInfo CacheManager::mallocWithCache(const AdvancedMallocInfo& 
 // This function must not hold mutex_
 CacheManager::MatchInfo CacheManager::matchImpl(const AdvancedMallocInfo& malloc_info) {
     // match in gpu
-    auto match_result = block_cache_.match(malloc_info.cache_keys);
+    BlockCache::MatchResult match_result;
+    if (malloc_info.enable_gpu_block_cache) {
+        match_result = block_cache_.match(malloc_info.cache_keys);
+    }
+
     incrRefCounter(match_result.block_indices);
-    auto local_match_blocks = match_result.block_indices.size();
+    auto gpu_match_blocks = match_result.block_indices.size();
 
     if (memory_block_cache_ && malloc_info.enable_memory_block_cache
-        && local_match_blocks < malloc_info.cache_keys.size()) {
+        && gpu_match_blocks < malloc_info.cache_keys.size()) {
         matchInMemoryBlockCache(malloc_info, match_result);
     }
 
+    auto memory_match_blocks = match_result.block_indices.size() - gpu_match_blocks;
+
     // match in dist kvcache if cache keys not fully matched
-    if (enable_dist_kvcache_ && malloc_info.enable_3fs && !malloc_info.need_loss
-        && local_match_blocks < malloc_info.cache_keys.size()) {
-        matchInDistKvCache(malloc_info, match_result);
-    }
+    // if (enable_dist_kvcache_ && malloc_info.enable_3fs && !malloc_info.need_loss
+    //     && local_match_blocks < malloc_info.cache_keys.size()) {
+    //     matchInDistKvCache(malloc_info, match_result);
+    // }
 
     int cache_block_num = match_result.block_indices.size();
     int reuse_block_num =
@@ -269,13 +283,14 @@ CacheManager::MatchInfo CacheManager::matchImpl(const AdvancedMallocInfo& malloc
                             match_result.loss.size(),
                             reuse_length);
 
-    local_match_blocks          = local_match_blocks <= reuse_block_num ? local_match_blocks : reuse_block_num;
-    const auto local_reuse_len  = local_match_blocks * config_.seq_size_per_block;
-    const auto remote_reuse_len = (reuse_block_num - local_match_blocks) * config_.seq_size_per_block;
+    // local_match_blocks          = local_match_blocks <= reuse_block_num ? local_match_blocks : reuse_block_num;
+    // const auto local_reuse_len  = local_match_blocks * config_.seq_size_per_block;
+    // const auto remote_reuse_len = (reuse_block_num - local_match_blocks) * config_.seq_size_per_block;
 
     return {(size_t)reuse_length,
-            local_reuse_len,
-            remote_reuse_len,
+            gpu_match_blocks * config_.seq_size_per_block,
+            memory_match_blocks * config_.seq_size_per_block,
+            0,
             vector<int>(match_result.block_indices.begin(), match_result.block_indices.begin() + reuse_block_num),
             vector<float>(match_result.loss.begin(),
                           match_result.loss.begin() + std::min((int)match_result.loss.size(), reuse_length))};
@@ -391,15 +406,13 @@ void CacheManager::insertIntoCache(FreeInfo& free_info) {
         size_t block_len = std::min(std::min(free_info.block_indices.size(), free_info.cache_keys.size()),
                                     token_len / seq_size_per_block_);
         token_len        = block_len * seq_size_per_block_;
-        CacheItem        item{{free_info.token_ids.begin(), free_info.token_ids.begin() + token_len},
-                              {free_info.block_indices.begin(), free_info.block_indices.begin() + block_len},
-                              {free_info.cache_keys.begin(), free_info.cache_keys.begin() + block_len},
+        CacheItem item{{free_info.token_ids.begin(), free_info.token_ids.begin() + token_len},
+                       {free_info.block_indices.begin(), free_info.block_indices.begin() + block_len},
+                       {free_info.cache_keys.begin(), free_info.cache_keys.begin() + block_len},
                        free_info.loss.empty() ?
-                                  free_info.loss :
-                                  std::vector<float>{free_info.loss.begin(), free_info.loss.begin() + token_len},
+                           free_info.loss :
+                           std::vector<float>{free_info.loss.begin(), free_info.loss.begin() + token_len},
                        free_info.is_resident};
-        std::vector<int> indices = block_cache_.put(item);
-
         // put into memory block cache, can not put in block cache pop cause may block malloc
         if (memory_block_cache_ && free_info.enable_memory_block_cache) {
             putToMemoryBlockCache(item, free_info);
@@ -408,8 +421,15 @@ void CacheManager::insertIntoCache(FreeInfo& free_info) {
         if (enable_dist_kvcache_ && free_info.enable_3fs && free_info.loss.empty()) {
             putToDistKvCache(item.cache_key, item.block_indices, 0, free_info.request_id, free_info.adapter_name);
         }
-        allocator_->free(indices);
-        allocator_->free(std::vector<int>(free_info.block_indices.begin() + block_len, free_info.block_indices.end()));
+
+        if (free_info.enable_gpu_block_cache) {
+            std::vector<int> indices = block_cache_.put(item);
+            allocator_->free(indices);
+            allocator_->free(
+                std::vector<int>(free_info.block_indices.begin() + block_len, free_info.block_indices.end()));
+        } else {
+            allocator_->free(free_info.block_indices);
+        }
     } else {
         allocator_->free(free_info.block_indices);
     }

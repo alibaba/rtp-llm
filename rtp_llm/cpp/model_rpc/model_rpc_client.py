@@ -138,6 +138,9 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.ignore_eos = input_py.generate_config.ignore_eos
     generate_config_pb.reuse_cache = input_py.generate_config.reuse_cache
     generate_config_pb.enable_3fs = input_py.generate_config.enable_3fs
+    generate_config_pb.enable_gpu_block_cache = (
+        input_py.generate_config.enable_gpu_block_cache
+    )
     generate_config_pb.enable_memory_block_cache = (
         input_py.generate_config.enable_memory_block_cache
     )
@@ -215,12 +218,18 @@ def trans_output(
             pd_sep=output_pb.aux_info.pd_sep,
             reuse_len=output_pb.aux_info.total_reuse_len,
             local_reuse_len=output_pb.aux_info.local_reuse_len,
+            gpu_reuse_len=output_pb.aux_info.gpu_reuse_len,
+            memory_reuse_len=output_pb.aux_info.memory_reuse_len,
             remote_reuse_len=output_pb.aux_info.remote_reuse_len,
             prefill_total_reuse_len=output_pb.aux_info.prefill_total_reuse_len,
             prefill_local_reuse_len=output_pb.aux_info.prefill_local_reuse_len,
+            prefill_gpu_reuse_len=output_pb.aux_info.prefill_gpu_reuse_len,
+            prefill_memory_reuse_len=output_pb.aux_info.prefill_memory_reuse_len,
             prefill_remote_reuse_len=output_pb.aux_info.prefill_remote_reuse_len,
             decode_total_reuse_len=output_pb.aux_info.decode_total_reuse_len,
             decode_local_reuse_len=output_pb.aux_info.decode_local_reuse_len,
+            decode_gpu_reuse_len=output_pb.aux_info.decode_gpu_reuse_len,
+            decode_memory_reuse_len=output_pb.aux_info.decode_memory_reuse_len,
             decode_remote_reuse_len=output_pb.aux_info.decode_remote_reuse_len,
             aux_string=output_pb.aux_info.aux_string,
             role_addrs=input_py.generate_config.role_addrs,

@@ -70,14 +70,20 @@ class AuxInfo(PyBaseModel):
 
     reuse_len: int = 0
     local_reuse_len: int = 0
+    gpu_reuse_len: int = 0
+    memory_reuse_len: int = 0
     remote_reuse_len: int = 0
 
     prefill_total_reuse_len: int = 0
     prefill_local_reuse_len: int = 0
+    prefill_gpu_reuse_len: int = 0
+    prefill_memory_reuse_len: int = 0
     prefill_remote_reuse_len: int = 0
 
     decode_total_reuse_len: int = 0
     decode_local_reuse_len: int = 0
+    decode_gpu_reuse_len: int = 0
+    decode_memory_reuse_len: int = 0
     decode_remote_reuse_len: int = 0
 
     role_addrs: List[RoleAddr] = []
