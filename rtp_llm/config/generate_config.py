@@ -6,9 +6,9 @@ from pydantic import BaseModel, ConfigDict, field_serializer, field_validator
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.ops import RoleType
 from rtp_llm.utils.check_util import *
 from rtp_llm.utils.util import check_with_info
-from rtp_llm.ops import RoleType
 
 
 class RequestFormat:
@@ -18,13 +18,13 @@ class RequestFormat:
 
 class RoleAddr(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
-    
+
     role: RoleType
     ip: str
     http_port: int
     grpc_port: int
-    
-    @field_validator('role', mode='before')
+
+    @field_validator("role", mode="before")
     @classmethod
     def validate_role(cls, v):
         """Convert string to RoleType enum for deserialization."""
@@ -33,9 +33,11 @@ class RoleAddr(BaseModel):
         elif isinstance(v, RoleType):
             return v
         else:
-            raise ValueError(f"RoleType must be a string or RoleType enum, got {type(v)}")
-    
-    @field_serializer('role')
+            raise ValueError(
+                f"RoleType must be a string or RoleType enum, got {type(v)}"
+            )
+
+    @field_serializer("role")
     def serialize_role(self, role: RoleType, _info) -> str:
         """Serialize RoleType enum to its name string for JSON serialization."""
         return role.name
@@ -140,6 +142,9 @@ class GenerateConfig(BaseModel):
     # 只有开启环境变量 ENABLE_3FS 时才生效
     enable_3fs: bool = True
 
+    # 是否启用 gpu block cache
+    enable_gpu_block_cache: bool = True
+
     # 是否启用 memory block cache
     enable_memory_block_cache: bool = True
 
@@ -212,12 +217,12 @@ class GenerateConfig(BaseModel):
 
     def add_thinking_params(self, tokenizer, generate_env_config):
         """Add thinking parameters from generate_env_config.
-        
+
         Args:
             tokenizer: Tokenizer instance.
             generate_env_config: GenerateEnvConfig object.
         """
-        
+
         end_think_token_id = generate_env_config.think_end_token_id
         self.end_think_token_ids = (
             [end_think_token_id] if end_think_token_id != -1 else []
@@ -235,8 +240,7 @@ class GenerateConfig(BaseModel):
             )
             self.end_think_token_ids = tokenized_result
         self.in_think_mode = (
-            bool(generate_env_config.think_mode)
-            and len(self.end_think_token_ids) >= 0
+            bool(generate_env_config.think_mode) and len(self.end_think_token_ids) >= 0
         )
 
     def add_stop_ids_from_str(self, tokenizer):

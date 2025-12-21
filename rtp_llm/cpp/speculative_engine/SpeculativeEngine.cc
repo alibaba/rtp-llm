@@ -233,6 +233,9 @@ absl::Status SpeculativeEngine::initCacheManager(std::optional<WarmUpResult> war
                                                    score_model_params_.parallelism_config,
                                                    score_model_params_.runtime_config));
             }
+            resource_context_.cache_manager->setSpBlockCache(
+                resource_context_.mtp_cache_managers[0]->memory_block_cache_);
+
         } else {
             resource_context_.propose_cache_manager = make_shared<CacheManager>(proposer_cache_config,
                                                                                 device_,

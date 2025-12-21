@@ -59,14 +59,11 @@ CacheManager::CacheManager(const CacheConfig&                 config,
         }
     }
 
-    if (kv_cache_config_.memory_block_cache_size_mb > 0) {
-        int64_t block_nums = (int64_t)kv_cache_config_.memory_block_cache_size_mb * 1024 * 1024 / config_.block_size;
-        RTP_LLM_LOG_INFO("init memory block cache, size: %d MB, block nums: %ld",
-                         kv_cache_config_.memory_block_cache_size_mb,
-                         block_nums);
+    if (config_.memory_block_nums > 0) {
+        RTP_LLM_LOG_INFO("init memory block cache, memory block nums: %lu", config_.memory_block_nums);
 
         auto memory_block_cache_config       = config_;
-        memory_block_cache_config.block_nums = block_nums;
+        memory_block_cache_config.block_nums = config_.memory_block_nums;
         memory_block_cache_config.refresh();
 
         memory_block_cache_ = std::make_shared<MemoryBlockCache>(memory_block_cache_config,
@@ -224,7 +221,11 @@ CacheManager::MatchInfo CacheManager::mallocWithCache(const AdvancedMallocInfo& 
 // This function must not hold mutex_
 CacheManager::MatchInfo CacheManager::matchImpl(const AdvancedMallocInfo& malloc_info) {
     // match in gpu
-    auto match_result = block_cache_.match(malloc_info.cache_keys);
+    BlockCache::MatchResult match_result;
+    if (malloc_info.enable_gpu_block_cache) {
+        match_result = block_cache_.match(malloc_info.cache_keys);
+    }
+
     incrRefCounter(match_result.block_indices);
     auto local_match_blocks = match_result.block_indices.size();
 
@@ -391,15 +392,13 @@ void CacheManager::insertIntoCache(FreeInfo& free_info) {
         size_t block_len = std::min(std::min(free_info.block_indices.size(), free_info.cache_keys.size()),
                                     token_len / seq_size_per_block_);
         token_len        = block_len * seq_size_per_block_;
-        CacheItem        item{{free_info.token_ids.begin(), free_info.token_ids.begin() + token_len},
-                              {free_info.block_indices.begin(), free_info.block_indices.begin() + block_len},
-                              {free_info.cache_keys.begin(), free_info.cache_keys.begin() + block_len},
+        CacheItem item{{free_info.token_ids.begin(), free_info.token_ids.begin() + token_len},
+                       {free_info.block_indices.begin(), free_info.block_indices.begin() + block_len},
+                       {free_info.cache_keys.begin(), free_info.cache_keys.begin() + block_len},
                        free_info.loss.empty() ?
-                                  free_info.loss :
-                                  std::vector<float>{free_info.loss.begin(), free_info.loss.begin() + token_len},
+                           free_info.loss :
+                           std::vector<float>{free_info.loss.begin(), free_info.loss.begin() + token_len},
                        free_info.is_resident};
-        std::vector<int> indices = block_cache_.put(item);
-
         // put into memory block cache, can not put in block cache pop cause may block malloc
         if (memory_block_cache_ && free_info.enable_memory_block_cache) {
             putToMemoryBlockCache(item, free_info);
@@ -408,8 +407,15 @@ void CacheManager::insertIntoCache(FreeInfo& free_info) {
         if (enable_dist_kvcache_ && free_info.enable_3fs && free_info.loss.empty()) {
             putToDistKvCache(item.cache_key, item.block_indices, 0, free_info.request_id, free_info.adapter_name);
         }
-        allocator_->free(indices);
-        allocator_->free(std::vector<int>(free_info.block_indices.begin() + block_len, free_info.block_indices.end()));
+
+        if (free_info.enable_gpu_block_cache) {
+            std::vector<int> indices = block_cache_.put(item);
+            allocator_->free(indices);
+            allocator_->free(
+                std::vector<int>(free_info.block_indices.begin() + block_len, free_info.block_indices.end()));
+        } else {
+            allocator_->free(free_info.block_indices);
+        }
     } else {
         allocator_->free(free_info.block_indices);
     }

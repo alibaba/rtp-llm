@@ -99,6 +99,8 @@ MemoryMatchResult MemoryBlockCache::match(const std::vector<int64_t>& cache_keys
     // 使用BlockLRUCache进行匹配
     auto match_result = block_lru_cache_->match(cache_keys);
 
+    RTP_LLM_LOG_INFO("memory block cache math result matched len = %ld\n", match_result.matched_len);
+
     // 没有匹配到任何block
     if (match_result.matched_len <= 0) {
         recordMatchMetrics(true, result, timer.done_us(), static_cast<int64_t>(cache_keys.size()));
@@ -192,6 +194,14 @@ bool MemoryBlockCache::copyKVData(const std::vector<int>& memory_block_indices,
                                   const std::vector<int>& gpu_block_indices,
                                   CopyDirection           direction,
                                   int64_t                 request_id) {
+    if (sp_block_cache_) {
+        RTP_LLM_LOG_INFO("sp block cache copy data here1, direction = %d", toString(direction).c_str());
+        auto result = sp_block_cache_->copyKVData(memory_block_indices, gpu_block_indices, direction, request_id);
+        if (!result) {
+            return false;
+        }
+    }
+
     autil::ScopedTime2 timer;
 
     // 检查参数有效性
@@ -374,7 +384,8 @@ bool MemoryBlockCache::syncRpcCallForAllRank(const std::vector<int>& gpu_block_i
     const int                                     worker_size = static_cast<int>(grpc_workers.size());
     std::vector<MemoryBlockCacheWorkerRpcContext> worker_rpc_contexts(worker_size);
 
-    std::chrono::system_clock::time_point deadline      = std::chrono::system_clock::now() + std::chrono::milliseconds(timeout_ms);
+    std::chrono::system_clock::time_point deadline =
+        std::chrono::system_clock::now() + std::chrono::milliseconds(timeout_ms);
 
     for (int rank = 0; rank < worker_size; ++rank) {
         const auto& worker_addr    = grpc_workers[rank];
