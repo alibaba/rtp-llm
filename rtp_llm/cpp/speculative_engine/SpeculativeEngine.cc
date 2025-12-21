@@ -206,6 +206,9 @@ absl::Status SpeculativeEngine::initCacheManager(std::optional<WarmUpResult> war
                 resource_context_.mtp_cache_managers.push_back(std::make_shared<CacheManager>(
                     proposer_cache_config, device_, false, metrics_reporter_, score_model_params_.gpt_init_parameter));
             }
+            resource_context_.cache_manager->setSpBlockCache(
+                resource_context_.mtp_cache_managers[0]->memory_block_cache_);
+
         } else {
             resource_context_.propose_cache_manager = make_shared<CacheManager>(
                 proposer_cache_config, device_, false, metrics_reporter_, score_model_params_.gpt_init_parameter);

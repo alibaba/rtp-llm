@@ -67,6 +67,17 @@ public:
         TO_GPU     // 从内存拷贝到GPU
     };
 
+    std::string toString(CopyDirection dir) {
+        switch (dir) {
+            case CopyDirection::FROM_GPU:
+                return "FROM_GPU";
+            case CopyDirection::TO_GPU:
+                return "TO_GPU";
+            default:
+                return "UNKNOWN";
+        }
+    }
+
     // 拷贝KV数据（单TP）
     bool copyKVData(const std::vector<int>& memory_block_indices,
                     const std::vector<int>& gpu_block_indices,
@@ -95,6 +106,9 @@ private:
     void recordPutMetrics(bool success, int64_t latency_us, int64_t input_block_count, int64_t put_block_count);
     void recordCopyMetrics(bool success, int64_t latency_us, CopyDirection direction);
     void reportMetricsLoop();
+
+public:
+    std::shared_ptr<MemoryBlockCache> sp_block_cache_;
 
 private:
     std::unique_ptr<BlockLRUCache> block_lru_cache_;  // 使用新的BlockLRUCache类
