@@ -352,6 +352,7 @@ bool RtpLLMCacheReuseMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_reuse_length, "rtp_llm_kv_cache_reuse_length");
     REGISTER_GAUGE_MUTABLE_METRIC(gpu_input_length, "rtp_llm_gpu_input_length");
     REGISTER_GAUGE_MUTABLE_METRIC(gpu_reuse_length, "rtp_llm_gpu_reuse_length");
+    REGISTER_GAUGE_MUTABLE_METRIC(memory_reuse_length, "rtp_llm_memory_reuse_length");
     REGISTER_GAUGE_MUTABLE_METRIC(gpu_cache_hit_rate, "rtp_llm_gpu_cache_hit_rate");
     return true;
 }
@@ -361,6 +362,7 @@ void RtpLLMCacheReuseMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCa
     REPORT_MUTABLE_METRIC(kv_cache_reuse_length, collector->kv_cache_reuse_length);
     REPORT_MUTABLE_METRIC(gpu_input_length, collector->gpu_input_length);
     REPORT_MUTABLE_METRIC(gpu_reuse_length, collector->gpu_reuse_length);
+    REPORT_MUTABLE_METRIC(memory_reuse_length, collector->memory_reuse_length);
     REPORT_MUTABLE_METRIC(gpu_cache_hit_rate, collector->gpu_cache_hit_rate);
 }
 
