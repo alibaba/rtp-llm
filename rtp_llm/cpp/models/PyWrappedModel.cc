@@ -167,7 +167,7 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
                                               inputs.seq_size_per_block,
                                               inputs.k_block_size,
                                               inputs.v_block_size,
-                                              inputs.scale_block_size,
+                                              0,
                                               inputs.pd_separation,
                                               model_id_,
                                               inputs.decode_entrance,

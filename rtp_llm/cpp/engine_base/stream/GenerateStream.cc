@@ -116,7 +116,7 @@ bool GenerateStream::hasCacheKeys() const {
     return stream_cache_resource_->hasCacheKeys();
 }
 
-const std::vector<int64_t>& GenerateStream::cacheKeys(int32_t batch_id) const {
+const CacheKeysType& GenerateStream::cacheKeys(int32_t batch_id) const {
     return stream_cache_resource_->cacheKeys(batch_id);
 }
 
@@ -656,12 +656,22 @@ const BatchKVCacheResource& GenerateStream::kvCache() const {
     return stream_cache_resource_->kvCache();
 }
 
+BatchKVCacheResource& GenerateStream::kvCacheMutable() {
+    return stream_cache_resource_->kvCacheMutable();
+}
+
+BatchKVCacheResourcePtr GenerateStream::kvCachePtr() {
+    // TODO: set deleter if use BatchKVCacheResource to manager life cycles of kv cache automatically
+    return std::shared_ptr<BatchKVCacheResource>(&stream_cache_resource_->kvCacheMutable(),
+                                                 [](BatchKVCacheResource*) {});
+}
+
 const ResourceContext& GenerateStream::resourceContext() const {
     return stream_cache_resource_->resourceContext();
 }
 
-size_t GenerateStream::maxBlockSize() const {
-    return stream_cache_resource_->maxBlockSize();
+size_t GenerateStream::maxBlocksNum() const {
+    return stream_cache_resource_->maxBlocksNum();
 }
 
 size_t GenerateStream::maxTokenNum() const {
