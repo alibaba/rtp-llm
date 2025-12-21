@@ -128,8 +128,9 @@ size_t CacheConfigCreator::getKVCacheMemorySize(const rtp_llm::GptInitParameter&
 
 CacheConfig CacheConfigCreator::createConfig(const rtp_llm::GptInitParameter&   param,
                                              const std::optional<WarmUpResult>& warm_up_result) {
-    CacheConfig config     = CacheConfigCreator::createBasicConfig(param);
-    uint32_t    block_nums = 0;
+    CacheConfig config            = CacheConfigCreator::createBasicConfig(param);
+    uint32_t    block_nums        = 0;
+    uint32_t    memory_block_nums = 0;
 
     if (param.block_nums_ > 0) {
         RTP_LLM_LOG_INFO("GptInitParameter explicitly specified kv cache block num %d", param.block_nums_);
@@ -138,14 +139,23 @@ CacheConfig CacheConfigCreator::createConfig(const rtp_llm::GptInitParameter&   
         const auto kv_cache_mem_size = getKVCacheMemorySize(param, warm_up_result);
         block_nums                   = kv_cache_mem_size / config.block_size;
     }
+
     RTP_LLM_CHECK_WITH_INFO(block_nums > 0,
                             "kv cache needs at least 1 block but %ld, each block needs %ld MiB memory",
                             block_nums,
                             config.block_size / 1024 / 1024);
 
+    auto memory_kv_cache_mem_size = param.kv_cache_config.memory_block_cache_size_mb * 1024 * 1024;
+    memory_block_nums             = memory_kv_cache_mem_size / config.block_size;
+
     const auto kv_cache_seq_len = block_nums * config.seq_size_per_block;
     config.block_nums           = block_nums;
-    RTP_LLM_LOG_INFO("kv cache block nums is %u, allows storing %ld tokens", block_nums, kv_cache_seq_len);
+    config.memory_block_nums    = memory_block_nums;
+
+    RTP_LLM_LOG_INFO("kv cache block nums is %u, memory blocks num is %u, allows storing %ld tokens",
+                     block_nums,
+                     memory_block_nums,
+                     kv_cache_seq_len);
     if (kv_cache_seq_len < param.max_seq_len_) {
         RTP_LLM_LOG_WARNING("kv cache block nums %u can only store %ld tokens, less than max_seq_len %ld, "
                             "this is dangerous, consider decrease max_seq_len",
@@ -164,28 +174,39 @@ CacheConfigCreator::createSpConfig(const rtp_llm::GptInitParameter&   score_para
                                    bool                               is_eagle = false) {
     CacheConfig score_config = CacheConfigCreator::createBasicConfig(score_param);
 
-    CacheConfig propose_config = CacheConfigCreator::createBasicConfig(propose_param, is_mtp);
-    size_t      block_nums     = 0;
+    CacheConfig propose_config    = CacheConfigCreator::createBasicConfig(propose_param, is_mtp);
+    size_t      block_nums        = 0;
+    size_t      memory_block_nums = 0;
+
     if (score_param.block_nums_ > 0) {
         block_nums = score_param.block_nums_;
     } else {
-        const auto kv_cache_mem_size = CacheConfigCreator::getKVCacheMemorySize(score_param, warm_up_result);
+        const auto kv_cache_mem_size        = CacheConfigCreator::getKVCacheMemorySize(score_param, warm_up_result);
+        auto       memory_kv_cache_mem_size = score_param.kv_cache_config.memory_block_cache_size_mb * 1024 * 1024;
+
         if (is_mtp) {
             auto cache_num = propose_param.gen_num_per_circle_;
             if (is_eagle) {
                 cache_num = 1;
             }
 
-            block_nums = kv_cache_mem_size / (score_config.block_size + propose_config.block_size * cache_num);
+            auto total_block_size = score_config.block_size + propose_config.block_size * cache_num;
+            block_nums            = kv_cache_mem_size / total_block_size;
+            memory_block_nums     = memory_kv_cache_mem_size / total_block_size;
         } else {
-            block_nums = kv_cache_mem_size / (score_config.block_size + propose_config.block_size);
+            auto total_block_size = score_config.block_size + propose_config.block_size;
+            block_nums            = kv_cache_mem_size / total_block_size;
+            memory_block_nums     = memory_kv_cache_mem_size / total_block_size;
         }
     }
     RTP_LLM_CHECK_WITH_INFO(block_nums > 0, "kv cache needs at least 1 block but %ld", block_nums);
 
-    score_config.block_nums   = block_nums;
-    propose_config.block_nums = block_nums;
-    RTP_LLM_LOG_INFO("kv cache block nums is %u", block_nums);
+    score_config.block_nums          = block_nums;
+    score_config.memory_block_nums   = memory_block_nums;
+    propose_config.block_nums        = block_nums;
+    propose_config.memory_block_nums = memory_block_nums;
+
+    RTP_LLM_LOG_INFO("kv cache block nums is %u, memory_block_nums = %u", block_nums, memory_block_nums);
     return std::make_tuple(score_config, propose_config);
 }
 

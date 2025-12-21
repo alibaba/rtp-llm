@@ -84,6 +84,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->inter_request_id          = config_proto->inter_request_id();
     generate_config->reuse_cache               = config_proto->reuse_cache();
     generate_config->enable_3fs                = config_proto->enable_3fs();
+    generate_config->enable_gpu_block_cache    = config_proto->enable_gpu_block_cache();
     generate_config->enable_memory_block_cache = config_proto->enable_memory_block_cache();
     TRANS_OPTIONAL(trace_id);
 
