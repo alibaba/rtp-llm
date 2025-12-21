@@ -108,7 +108,7 @@ torch::Tensor MlaContextAttnOp::forward(torch::Tensor q,
 
     BufferPtr kv_cache_block_id_host;
     BufferPtr kv_cache_block_id_device;
-    BufferPtr k_cache_buffer;
+    BufferPtr kv_cache_buffer;
 
     auto device_prep_params = DevicePrepParams({
         attn_configs,
@@ -117,7 +117,7 @@ torch::Tensor MlaContextAttnOp::forward(torch::Tensor q,
         input_lengths,
         kv_cache_block_id_host,
         kv_cache_block_id_device,
-        k_cache_buffer,
+        kv_cache_buffer,
         datatype,
         batch_size,
         0,

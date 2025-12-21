@@ -95,7 +95,7 @@ BufferPtr DeviceBase::attentionAttn(const AttentionLayerParams& params) {
                                && (layer_cache_shape[2] == params.configs.kv_head_num)
                                && (layer_cache_shape[3] == params.configs.tokens_per_block)
                                && (layer_cache_shape[4] == params.configs.size_per_head)),
-                              "kv cache buffer check shape failed. k_cache_buffer: %s",
+                              "kv cache buffer check shape failed. kv_cache_buffer: %s",
                               kv_cache.kv_cache_buffer->debugString().c_str());
     }
 
