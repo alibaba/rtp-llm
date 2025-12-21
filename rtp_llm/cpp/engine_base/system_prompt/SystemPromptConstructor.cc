@@ -3,7 +3,8 @@
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateConfig.h"
-#include "rtp_llm/cpp/cache/CacheManager.h"
+#include "rtp_llm/cpp/cache_new/KVCacheManager.h"
+#include "rtp_llm/cpp/cache_new/types.h"
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPrompt.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
@@ -12,7 +13,7 @@
 namespace rtp_llm {
 
 absl::StatusOr<std::unordered_map<std::string, SystemPromptParams>> SystemPromptConstructor::construct(
-    const KVCacheConfig& kv_cache_config, EngineBase* engine, CacheManager* cache_manager, bool insert_kv_cache) {
+    const KVCacheConfig& kv_cache_config, EngineBase* engine, KVCacheManager* cache_manager, bool insert_kv_cache) {
     std::unordered_map<std::string, SystemPromptParams> multi_task_prompt_args;
     for (const auto& item : kv_cache_config.multi_task_prompt_tokens) {
         const auto& task_id   = item.first;
@@ -25,19 +26,19 @@ absl::StatusOr<std::unordered_map<std::string, SystemPromptParams>> SystemPrompt
         generate_input->request_id      = 0;
         generate_input->input_ids       = std::make_unique<rtp_llm::Buffer>(
             rtp_llm::MEMORY_CPU, rtp_llm::TYPE_INT32, shape, (void*)(tokens_id.data()));
-        generate_input->generate_config       = generate_config;
+        generate_input->generate_config = generate_config;
+        // TODO(chanyin): last partial block will be wasted when need_release_resource is false
         generate_input->need_release_resource = false;
 
         CHECK_AND_RETURN_REF(stream, engine->preRun(generate_input, preRunMode::build_system_prompt));
 
         if (insert_kv_cache) {
-            const auto& kv_cache   = stream->kvCache();
-            const auto& cache_keys = stream->cacheKeys(0);
-            const auto& all_blocks = kv_cache.batch_block_id;
-            const auto& blocks     = all_blocks[0];
+            auto& kv_cache = stream->kvCacheMutable();
+            auto& blocks   = kv_cache.blocks(0, 0);
             RTP_LLM_CHECK(blocks.size() > 0);
-            CacheManager::FreeInfo free_info(stream->streamId(), tokens_id, cache_keys, blocks);
-            cache_manager->insertResidentCache(free_info);
+            // is resident in lru cache for system prompt
+            rtp_llm::InsertInfo insert_info{stream->kvCachePtr(), stream->completeTokenIdsPtr(), true};
+            cache_manager->insertIntoCache(insert_info);
             multi_task_prompt_args[task_id] = SystemPromptParams(tokens_id, blocks);
         }
     }

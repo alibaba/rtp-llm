@@ -4,7 +4,7 @@
 #include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 #include "rtp_llm/cpp/devices/utils/RopeCache.h"
 #include "rtp_llm/cpp/devices/testing/TestBase.h"
-#include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache_new/CacheConfig.h"
 #include "rtp_llm/cpp/kernels/unfused_attention_kernels.h"
 
 #ifdef USING_CUDA12
@@ -183,9 +183,9 @@ void UnfusedAttentionTest::addFusedQKVBiasTransposeTest(size_t batch_size,
     auto rope_config = RopeConfig({RopeStyle::Base, rope_dim, rope_theta, 1., 0., 0., max_position_embeddings});
 
     // cache manager need one block for preserve and every seq need one block for preserve.
-    auto                 block_num = 2 * batch_size * ((seq_len + tokens_per_block - 1) / tokens_per_block + 1) + 1;
-    rtp_llm::CacheConfig cache_conf(rtp_llm::KVCacheParam(
-        {1, (uint)block_num, (uint)num_key_value_heads, (uint)head_dim, (uint)tokens_per_block, DataType::TYPE_BF16}));
+    auto block_num  = 2 * batch_size * ((seq_len + tokens_per_block - 1) / tokens_per_block + 1) + 1;
+    auto cache_conf = makeMhaCacheConfig(
+        1, (uint)block_num, (uint)num_key_value_heads, (uint)head_dim, (uint)tokens_per_block, DataType::TYPE_BF16);
     cache_manager_            = nullptr;
     auto kv_cache_block_id    = allocateKVBlocks(cache_conf, input_lengths, kvcache_pad);
     auto kv_cache_buffer      = cache_manager_->kvCacheBuffer();
@@ -245,7 +245,7 @@ void UnfusedAttentionTest::addFusedQKVBiasTransposeTest(size_t batch_size,
     auto seq_len_with_prefix = seq_len + params.common.max_prefix_length;
 
     auto qkv_buf_fp8 =
-        cache_conf.dtype == DataType::TYPE_FP8_E4M3 ?
+        cache_conf.cache_specs[0]->dtype == DataType::TYPE_FP8_E4M3 ?
             device->allocateBuffer({DataType::TYPE_FP8_E4M3,
                                     {batch_size, (num_heads + num_key_value_heads * 2), seq_len_with_prefix, head_dim},
                                     AllocationType::DEVICE},
@@ -504,9 +504,9 @@ void UnfusedAttentionTest::decodeAddFusedQKVBiasTransposeTest(size_t batch_size,
     auto rope_config = RopeConfig({RopeStyle::Base, rope_dim, rope_theta, 1., 0., 0., max_position_embeddings});
 
     // cache manager need one block for preserve and every seq need one block for preserve.
-    auto block_num = 2 * batch_size * ((kv_seq_len + seq_len + tokens_per_block - 1) / tokens_per_block + 1) + 1;
-    rtp_llm::CacheConfig cache_conf(rtp_llm::KVCacheParam(
-        {1, (uint)block_num, (uint)num_key_value_heads, (uint)head_dim, (uint)tokens_per_block, DataType::TYPE_BF16}));
+    auto block_num  = 2 * batch_size * ((kv_seq_len + seq_len + tokens_per_block - 1) / tokens_per_block + 1) + 1;
+    auto cache_conf = makeMhaCacheConfig(
+        1, (uint)block_num, (uint)num_key_value_heads, (uint)head_dim, (uint)tokens_per_block, DataType::TYPE_BF16);
     cache_manager_            = nullptr;
     auto kv_cache_block_id    = allocateKVBlocks(cache_conf, input_lengths, kvcache_pad);
     auto kv_cache_buffer      = cache_manager_->kvCacheBuffer();

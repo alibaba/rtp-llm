@@ -64,8 +64,7 @@ void RemoteRpcServer::initCacheStore(const EngineInitParams&                init
         && init_params.pd_sep_config.role_type != RoleType::DECODE) {
         RTP_LLM_FAIL("role_type must be prefill or decode, but it is %d", init_params.pd_sep_config.role_type);
     }
-    const_cast<ResourceContext*>(&engine_->resourceContext())->use_cache_store = true;
-    auto device                                                                = engine_->getDevice();
+    auto device        = engine_->getDevice();
     auto cache_manager = engine_->resourceContext().cache_manager;
 
     CacheStoreInitParams params;
@@ -95,8 +94,7 @@ void RemoteRpcServer::initCacheStore(const EngineInitParams&                init
     if (propose_params) {
         if (propose_params->mtp_model_params_) {
             for (size_t mtp_model_id = 0; mtp_model_id < propose_params->mtp_model_params_->size(); mtp_model_id++) {
-                const std::shared_ptr<CacheManager>& mtp_cache_manager =
-                    engine_->resourceContext().mtp_cache_managers[mtp_model_id];
+                const auto& mtp_cache_manager = engine_->resourceContext().mtp_cache_managers[mtp_model_id];
                 mtp_cache_manager->regUserMr(propose_params->mtp_model_params_->at(mtp_model_id)->model_id);
             }
         }

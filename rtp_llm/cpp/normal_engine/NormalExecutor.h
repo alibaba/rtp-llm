@@ -16,7 +16,7 @@ namespace rtp_llm {
 class NormalExecutor: public Executor {
 public:
     explicit NormalExecutor(const EngineInitParams&                   params,
-                            const std::shared_ptr<CacheManager>&      cache_manager,
+                            const std::shared_ptr<KVCacheManager>&    cache_manager,
                             rtp_llm::DeviceBase*                      device,
                             const std::shared_ptr<lora::LoraManager>& lora_manager = nullptr,
                             bool                                      warm_up      = false);
@@ -42,7 +42,7 @@ private:
     std::unique_ptr<GptModel>                                                model_;
     std::unique_ptr<Sampler>                                                 sampler_;
     std::unique_ptr<NormalBatchStreamProcessor>                              batch_stream_processor_;
-    std::shared_ptr<CacheManager>                                            cache_manager_;
+    std::shared_ptr<KVCacheManager>                                          cache_manager_;
     std::shared_ptr<lora::LoraManager>                                       lora_manager_;
     std::shared_ptr<ExpertBalancer>                                          expert_balancer_;
     bool                                                                     warm_up_;
