@@ -93,7 +93,8 @@ message GenerateConfigPB {
     repeated int32 variable_num_beams = 49;
     google.protobuf.StringValue trace_id = 50;
     bool return_all_hidden_states = 51;
-    bool enable_memory_block_cache = 52;
+    bool enable_gpu_block_cache = 52;
+    bool enable_memory_block_cache = 53;
 }
 
 message MMPreprocessConfigPB {
@@ -150,14 +151,22 @@ message AuxInfoPB {
     int32 wait_time_us = 14;
 
     int32 local_reuse_len = 15;
-    int32 remote_reuse_len = 16;
-    int32 prefill_total_reuse_len = 17;
-    int32 prefill_local_reuse_len = 18;
-    int32 prefill_remote_reuse_len = 19;
-    int32 decode_total_reuse_len = 20;
-    int32 decode_local_reuse_len = 21;
-    int32 decode_remote_reuse_len = 22;
-    string aux_string = 23;
+    int32 gpu_reuse_len = 16;
+    int32 memory_reuse_len = 17;
+    int32 remote_reuse_len = 18;
+
+    int32 prefill_total_reuse_len = 19;
+    int32 prefill_local_reuse_len = 20;
+    int32 prefill_gpu_reuse_len = 21;
+    int32 prefill_memory_reuse_len = 22;
+    int32 prefill_remote_reuse_len = 23;
+
+    int32 decode_total_reuse_len = 24;
+    int32 decode_local_reuse_len = 25;
+    int32 decode_gpu_reuse_len = 26;
+    int32 decode_memory_reuse_len = 27;
+    int32 decode_remote_reuse_len = 28;
+    string aux_string = 29;
 }
 
 message FlattenOutputPB {

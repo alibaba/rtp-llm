@@ -192,6 +192,13 @@ bool MemoryBlockCache::copyKVData(const std::vector<int>& memory_block_indices,
                                   const std::vector<int>& gpu_block_indices,
                                   CopyDirection           direction,
                                   int64_t                 request_id) {
+    if (sp_block_cache_) {
+        auto result = sp_block_cache_->copyKVData(memory_block_indices, gpu_block_indices, direction, request_id);
+        if (!result) {
+            return false;
+        }
+    }
+
     autil::ScopedTime2 timer;
 
     // 检查参数有效性
@@ -374,7 +381,8 @@ bool MemoryBlockCache::syncRpcCallForAllRank(const std::vector<int>& gpu_block_i
     const int                                     worker_size = static_cast<int>(grpc_workers.size());
     std::vector<MemoryBlockCacheWorkerRpcContext> worker_rpc_contexts(worker_size);
 
-    std::chrono::system_clock::time_point deadline      = std::chrono::system_clock::now() + std::chrono::milliseconds(timeout_ms);
+    std::chrono::system_clock::time_point deadline =
+        std::chrono::system_clock::now() + std::chrono::milliseconds(timeout_ms);
 
     for (int rank = 0; rank < worker_size; ++rank) {
         const auto& worker_addr    = grpc_workers[rank];

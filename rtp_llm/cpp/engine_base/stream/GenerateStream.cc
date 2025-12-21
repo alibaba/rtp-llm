@@ -373,6 +373,14 @@ void GenerateStream::setLocalReuseLength(int length) {
     local_reuse_length_ = length;
 }
 
+void GenerateStream::setGpuReuseLength(int length) {
+    gpu_reuse_length_ = length;
+}
+
+void GenerateStream::setMemoryReuseLength(int length) {
+    memory_reuse_length_ = length;
+}
+
 void GenerateStream::setRemoteReuseLength(int length) {
     remote_reuse_length_ = length;
 }
@@ -383,6 +391,14 @@ int GenerateStream::localReuseLength() const {
 
 int GenerateStream::remoteReuseLength() const {
     return remote_reuse_length_;
+}
+
+int GenerateStream::gpuReuseLength() const {
+    return gpu_reuse_length_;
+}
+
+int GenerateStream::memoryReuseLength() const {
+    return memory_reuse_length_;
 }
 
 void GenerateStream::setInitialReuseLength(int initial_reuse_length) {
