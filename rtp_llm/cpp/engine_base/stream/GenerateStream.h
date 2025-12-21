@@ -485,6 +485,10 @@ public:
         return generate_input_->generate_config->enable_memory_block_cache;
     }
 
+    bool enableGpuBlockCache() const {
+        return generate_input_->generate_config->enable_gpu_block_cache;
+    }
+
     void fillSubGenerateStatus(StreamState state);
     void resizeSubGenerateStatus(size_t new_size);
 
