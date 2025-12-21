@@ -1,6 +1,6 @@
 #pragma once
 
-#include "rtp_llm/cpp/cache/CacheManager.h"
+#include "rtp_llm/cpp/cache_new/KVCacheManager.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/cpp/models/GptModel.h"
 #include "rtp_llm/cpp/speculative_engine/propose_executor/ProposeExecutor.h"
@@ -12,7 +12,7 @@ class VanillaExecutor: public ProposeExecutor {
 public:
     explicit VanillaExecutor(std::unique_ptr<ProposeModelEngineInitParams>& propose_model_engine_init_params,
                              rtp_llm::DeviceBase*                           device,
-                             const std::shared_ptr<CacheManager>&           cache_manager,
+                             const std::shared_ptr<KVCacheManager>&         cache_manager,
                              const std::shared_ptr<lora::LoraManager>&      lora_manager,
                              bool                                           warm_up = false):
         ProposeExecutor(device),
