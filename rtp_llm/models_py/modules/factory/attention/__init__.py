@@ -52,10 +52,16 @@ else:
             TRTMHAImpl,
             TRTPagedMHAImpl,
         )
+        from rtp_llm.models_py.modules.factory.attention.cuda_impl.trtllm_gen import (
+            FlashInferTRTLLMDecodeImpl,
+            FlashInferTRTLLMPrefillImpl,
+        )
         from rtp_llm.models_py.modules.factory.attention.cuda_impl.xqa import XQAImpl
 
-        PREFILL_MHA_IMPS.extend([TRTMHAImpl, TRTPagedMHAImpl])
-        DECODE_MHA_IMPS.append(XQAImpl)
+        PREFILL_MHA_IMPS.extend(
+            [FlashInferTRTLLMPrefillImpl, TRTMHAImpl, TRTPagedMHAImpl]
+        )
+        DECODE_MHA_IMPS.extend([FlashInferTRTLLMDecodeImpl, XQAImpl])
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla_wrapper import (
             MlaFlashInferDecodeImpl,
             MlaFlashInferPrefillImpl,

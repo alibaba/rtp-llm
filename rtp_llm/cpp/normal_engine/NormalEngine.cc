@@ -37,7 +37,8 @@ NormalEngine::NormalEngine(const EngineInitParams& params):
     gen_timeline_sync_(params.profiling_debug_logging_config.gen_timeline_sync) {
     RTP_LLM_LOG_INFO(__PRETTY_FUNCTION__);
     std::optional<WarmUpResult> warm_up_result = std::nullopt;
-    if (runtime_config.warm_up && (!model_config_.mm_model_config.is_multimodal) && !ffn_disaggregate_config.enable_ffn_disaggregate) {
+    if (runtime_config.warm_up && (!model_config_.mm_model_config.is_multimodal)
+        && !ffn_disaggregate_config.enable_ffn_disaggregate) {
         // warm up
         RTP_LLM_LOG_INFO("warm up (max_context_batch_size %d, max_seq_len %d calculate_loss %d) query begin",
                          runtime_config.fifo_scheduler_config.max_context_batch_size,
@@ -67,14 +68,22 @@ void NormalEngine::initScheduler() {
             new BatchDecodeScheduler(runtime_config, resource_context_.cache_manager, metrics_reporter_, device_));
         RTP_LLM_LOG_INFO("create batch decode scheduler done");
     } else if (runtime_config.use_gather_batch_scheduler) {
-        scheduler_.reset(new GatherBatchScheduler(
-            runtime_config, model_config_, pd_sep_config, parallelism_config, model_specific_config,
-            resource_context_.cache_manager, metrics_reporter_));
+        scheduler_.reset(new GatherBatchScheduler(runtime_config,
+                                                  model_config_,
+                                                  pd_sep_config,
+                                                  parallelism_config,
+                                                  model_specific_config,
+                                                  resource_context_.cache_manager,
+                                                  metrics_reporter_));
         RTP_LLM_LOG_INFO("create gather batch scheduler done");
     } else {
-        scheduler_.reset(new FIFOScheduler(
-            runtime_config, model_config_, pd_sep_config, parallelism_config, model_specific_config,
-            resource_context_.cache_manager, metrics_reporter_));
+        scheduler_.reset(new FIFOScheduler(runtime_config,
+                                           model_config_,
+                                           pd_sep_config,
+                                           parallelism_config,
+                                           model_specific_config,
+                                           resource_context_.cache_manager,
+                                           metrics_reporter_));
         RTP_LLM_LOG_INFO("create fifo scheduler done");
     }
 }
@@ -86,8 +95,13 @@ NormalEngine::~NormalEngine() {
 
 absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<GenerateInput>& generate_input,
                                                        preRunMode                            mode) {
-    auto stream = std::make_shared<NormalGenerateStream>(
-        generate_input, model_config_, runtime_config, resource_context_, nullptr, 0, mode == preRunMode::prefill_warm_up);
+    auto stream = std::make_shared<NormalGenerateStream>(generate_input,
+                                                         model_config_,
+                                                         runtime_config,
+                                                         resource_context_,
+                                                         nullptr,
+                                                         0,
+                                                         mode == preRunMode::prefill_warm_up);
     if (mode == preRunMode::decode_warm_up) {
         stream->setIsContextStream(false);
         stream->fakeInitKVBlock();
@@ -128,9 +142,10 @@ std::shared_ptr<GenerateInput> NormalEngine::makeFakeInput(size_t seq_len) {
         device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {seq_len}, rtp_llm::AllocationType::HOST});
     fake_input->begin_time_us          = autil::TimeUtility::currentTimeInMicroSeconds();
     fake_input->generate_config->top_k = 1;
-    std::default_random_engine generator;
-    size_t                     token_size =
-        model_config_.embedding_size ? std::min(model_config_.embedding_size, model_config_.vocab_size) : model_config_.vocab_size;
+    std::default_random_engine         generator;
+    size_t                             token_size = model_config_.embedding_size ?
+                                                        std::min(model_config_.embedding_size, model_config_.vocab_size) :
+                                                        model_config_.vocab_size;
     std::uniform_int_distribution<int> distribution(0, token_size - 1);
     for (size_t i = 0; i < fake_input->input_ids->size(); ++i) {
         *fake_input->input_ids->dataWithOffset<int32_t>(i) = distribution(generator);
@@ -141,7 +156,7 @@ std::shared_ptr<GenerateInput> NormalEngine::makeFakeInput(size_t seq_len) {
 
 WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
     auto fake_input                                   = makeFakeInput((size_t)model_config_.max_seq_len - 1);
-        fake_input->generate_config->num_return_sequences = runtime_config.fifo_scheduler_config.max_context_batch_size;
+    fake_input->generate_config->num_return_sequences = runtime_config.fifo_scheduler_config.max_context_batch_size;
     fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
     device_->setTraceMemory(true);
     executor_.reset(new NormalExecutor(params, nullptr, device_, nullptr, true));
@@ -163,8 +178,9 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     cache_config.seq_size_per_block = model_config_.attn_config.tokens_per_block;
     cache_config.block_nums         = 5;
     ParallelismConfig temp_parallelism_config;
-    RuntimeConfig temp_runtime_config;
-    auto cache_manager              = make_shared<CacheManager>(cache_config, device_, true, nullptr, KVCacheConfig{}, temp_parallelism_config, temp_runtime_config);
+    RuntimeConfig     temp_runtime_config;
+    auto              cache_manager = make_shared<CacheManager>(
+        cache_config, device_, true, nullptr, KVCacheConfig{}, temp_parallelism_config, temp_runtime_config);
     executor_.reset(new NormalExecutor(params, cache_manager, device_, nullptr, true));
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
     const auto device_status = device_->getDeviceStatus();
@@ -183,14 +199,25 @@ std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_ne
     stream->setIsDummyStream(true);
     stream->setMetricsReporter(nullptr);
     stream->fakeInitKVBlock();
+    if (pd_sep_config.role_type == RoleType::PDFUSION || pd_sep_config.role_type == RoleType::DECODE) {
+        BufferPtr new_tokens =
+            device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {1, 1}, rtp_llm::AllocationType::HOST});
+        *new_tokens->dataWithOffset<int32_t>(0) = 0;
+
+        StreamUpdateInfo update_info{
+            new_tokens, 1, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, false};
+        stream->update(update_info);
+    }
     return stream;
 }
 
 void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) {
-    auto result = CacheConfigCreator::createConfig(model_config_, parallelism_config, runtime_config, kv_cache_config, warm_up_result);
+    auto result = CacheConfigCreator::createConfig(
+        model_config_, parallelism_config, runtime_config, kv_cache_config, warm_up_result);
     RTP_LLM_LOG_INFO(
         "create cache manager with block nums %d, block size %ld KB", result.block_nums, result.block_size / 1024);
-    resource_context_.cache_manager = make_shared<CacheManager>(result, device_, false, metrics_reporter_, kv_cache_config, parallelism_config, runtime_config);
+    resource_context_.cache_manager = make_shared<CacheManager>(
+        result, device_, false, metrics_reporter_, kv_cache_config, parallelism_config, runtime_config);
 }
 
 absl::Status NormalEngine::initSystemPrompt() {
@@ -200,10 +227,11 @@ absl::Status NormalEngine::initSystemPrompt() {
 
     if (!kv_cache_config.multi_task_prompt_tokens.empty()) {
         resource_context_.reuse_cache = true;
-        CHECK_AND_RETURN_REF(
-            system_prompt_param,
-            SystemPromptConstructor::construct(
-                kv_cache_config, this, resource_context_.cache_manager.get(), device_->getDeviceProperties().tp_rank == 0));
+        CHECK_AND_RETURN_REF(system_prompt_param,
+                             SystemPromptConstructor::construct(kv_cache_config,
+                                                                this,
+                                                                resource_context_.cache_manager.get(),
+                                                                device_->getDeviceProperties().tp_rank == 0));
         resource_context_.system_prompt.reset(new SystemPrompt(system_prompt_param));
     }
 
@@ -249,8 +277,8 @@ absl::Status NormalEngine::trySaveStepError() const {
 }
 
 std::shared_ptr<GenerateStream> NormalEngine::makeStream(const std::shared_ptr<GenerateInput>& input) {
-    std::shared_ptr<GenerateStream> stream =
-        std::make_shared<NormalGenerateStream>(input, model_config_, runtime_config, resource_context_, metrics_reporter_);
+    std::shared_ptr<GenerateStream> stream = std::make_shared<NormalGenerateStream>(
+        input, model_config_, runtime_config, resource_context_, metrics_reporter_);
     return stream;
 }
 
@@ -259,8 +287,8 @@ void NormalEngine::enqueue(std::shared_ptr<GenerateStream>& stream) {
 }
 
 std::shared_ptr<GenerateStream> NormalEngine::enqueue(const std::shared_ptr<GenerateInput>& input) {
-    std::shared_ptr<GenerateStream> stream =
-        std::make_shared<NormalGenerateStream>(input, model_config_, runtime_config, resource_context_, metrics_reporter_);
+    std::shared_ptr<GenerateStream> stream = std::make_shared<NormalGenerateStream>(
+        input, model_config_, runtime_config, resource_context_, metrics_reporter_);
     (void)scheduler_->enqueue(stream);
     return stream;
 }
@@ -270,7 +298,8 @@ NormalEngine::batchEnqueue(const std::vector<std::shared_ptr<GenerateInput>>& in
     std::vector<std::shared_ptr<GenerateStream>> streams;
     streams.reserve(inputs.size());
     for (auto& inp : inputs) {
-        auto stream = std::make_shared<NormalGenerateStream>(inp, model_config_, runtime_config, resource_context_, metrics_reporter_);
+        auto stream = std::make_shared<NormalGenerateStream>(
+            inp, model_config_, runtime_config, resource_context_, metrics_reporter_);
         streams.push_back(stream);
     }
     (void)scheduler_->batchEnqueue(streams);
@@ -330,8 +359,8 @@ absl::Status NormalEngine::step() {
                                                                stream_group.totalModelBatchSize(),
                                                                stream_group.maxSeqLen(),
                                                                int(stream_group.totalContextBatchSize() > 0));
-        profiler_            = std::make_shared<CudaProfiler>(profiler_prefix,
-                                                   profiling_debug_logging_config.torch_cuda_profiler_dir);
+        profiler_ =
+            std::make_shared<CudaProfiler>(profiler_prefix, profiling_debug_logging_config.torch_cuda_profiler_dir);
         profiler_->start();
     }
     int64_t      step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -353,7 +382,6 @@ absl::Status NormalEngine::step() {
 
     return status;
 }
-
 
 bool NormalEngine::updateEplbConfig(const EPLBConfig& config) {
     if (executor_) {
