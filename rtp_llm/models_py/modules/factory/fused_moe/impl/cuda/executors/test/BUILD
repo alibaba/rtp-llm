@@ -48,3 +48,18 @@ py_test (
     },
     tags = ["manual"],
 )
+
+py_test (
+    name = "cutedsl_fp4_executor_test",
+    srcs = ["cutedsl_fp4_executor_test.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:config",
+        "//rtp_llm:testlib",
+        "//rtp_llm:flashinfer-python",
+    ],
+    env = {"GPU_COUNT": "1", "FLASHINFER_DISABLE_VERSION_CHECK":"1"},
+    tags = ["manual"],
+    exec_properties = {'gpu_count':'1'},
+    
+)

@@ -27,3 +27,4 @@ class ExecutorType(Enum):
     CUTLASS_FP8 = 3  # Cutlass FP8 executor (specialized)
     CUTLASS_BATCHED_FP8 = 4  # Cutlass batched FP8 (most optimized)
     TRTLLM_FP4 = 5  # TRTLLM FP4 executor (specialized)
+    CUTEDSL_FP4 = 6  # CuteDSL FP4 executor (FP4 optimized)
