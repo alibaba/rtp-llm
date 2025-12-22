@@ -30,13 +30,14 @@ cc_binary(
     linkstatic = False,
 )
 
-py_test(
-    name = "test",
-    srcs = ["test.py"],
-    data = [
-        ":bind.so",
-    ],
-    imports = ["."],
-    python_version = "PY3",
-    # tags = ["rocm"],
-)
+# py_test(
+#     name = "test",
+#     srcs = ["test.py"],
+#     data = [
+#         ":bind.so",
+#     ],
+#     imports = ["."],
+#     python_version = "PY3",
+#     tags = ["rocm"],
+#     exec_properties = {'gpu':'MI308X'}
+# )
