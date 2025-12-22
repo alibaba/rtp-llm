@@ -190,6 +190,13 @@ void DeviceFactory::initDevices(const ParallelismConfig&           parallelism_c
     RTP_LLM_LOG_INFO("init devices done");
 }
 
+void DeviceFactory::releaseDevices() {
+    for (auto device : getCurrentDevices()) {
+        device->release();
+    }
+    RTP_LLM_LOG_INFO("release devices done");
+}
+
 unordered_map<DeviceType, DeviceCreatorType>& DeviceFactory::getRegistrationMap() {
     static unordered_map<DeviceType, DeviceCreatorType> registrationMap;
     return registrationMap;

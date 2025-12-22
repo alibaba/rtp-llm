@@ -12,7 +12,10 @@ EngineBase::EngineBase(const EngineInitParams& params) {
     lora_manager_ = std::make_shared<lora::LoraManager>(params.model_specific_config.max_lora_model_size);
 }
 
-EngineBase::~EngineBase() {}
+EngineBase::~EngineBase() {
+    DeviceFactory::releaseDevices();
+    RTP_LLM_LOG_INFO("engine base destrutor done");
+}
 
 std::vector<GenerateStreamPtr> EngineBase::batchEnqueue(const std::vector<std::shared_ptr<GenerateInput>>& inputs) {
     throw std::runtime_error("not implemeted");

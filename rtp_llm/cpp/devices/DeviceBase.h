@@ -74,6 +74,7 @@ public:
 
     virtual void                         init();
     std::shared_ptr<rtp_llm::CacheStore> cacheStore();
+    virtual void                         release();
 
     // Init and preRun(NormalEngine::loop()) are executed in two different threads, some environments
     // needs to be reset again in a new thread(such as cudaSetDevice,
