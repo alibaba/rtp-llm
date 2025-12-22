@@ -343,7 +343,7 @@ class FMHAConfig:
     enable_trtv1_fmha: bool
     enable_xqa: bool
     use_aiter_pa: bool
-    use_asm_pa: bool
+    aiter_pa_type: str
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:

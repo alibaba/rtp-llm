@@ -7,6 +7,16 @@ from rtp_llm.ops import AttentionConfigs, FMHAType, FMHAConfig
 from rtp_llm.ops.compute_ops import PyAttentionInputs
 from rtp_llm.utils.model_weight import W
 
+
+def should_use_asm_pa(aiter_pa_type: str, batch_size: int) -> bool:
+    if aiter_pa_type in ("asm", "asm_pa"):
+        return True
+    if aiter_pa_type in ("hip", "hip_pa"):
+        return False
+    # auto mode: use ASM when batch_size > 4
+    return batch_size > 4
+
+
 # Lists to store registered implementations
 PREFILL_MHA_IMPS: List[type[FMHAImplBase]] = []
 DECODE_MHA_IMPS: List[type[FMHAImplBase]] = []
@@ -39,14 +49,15 @@ def get_mla_impl(
 
 def _is_fmha_type_disabled(
     fmha_type: FMHAType, 
-    fmha_config: Optional[FMHAConfig]
+    fmha_config: Optional[FMHAConfig],
+    batch_size: int = 0
 ) -> bool:
     """Check if a FMHA type is disabled in fmha_config.
     
     Args:
         fmha_type: The FMHA type to check
         fmha_config: The FMHA config, if None, assume not disabled
-        impl_class_name: The implementation class name, used to distinguish between ASM and NonAsm variants
+        batch_size: The batch size, used for AITER PA type selection
         
     Returns:
         True if the FMHA type is disabled, False otherwise
@@ -69,10 +80,13 @@ def _is_fmha_type_disabled(
     elif fmha_type == FMHAType.FLASH_INFER:
         return fmha_config.disable_flash_infer
     elif fmha_type == FMHAType.AITER_ASM_DECODE or fmha_type == FMHAType.AITER_ASM_PREFILL:
-        return not fmha_config.use_asm_pa
+        if not fmha_config.use_aiter_pa:
+            return True
+        return not should_use_asm_pa(fmha_config.aiter_pa_type, batch_size)
     elif fmha_type == FMHAType.AITER_DECODE or fmha_type == FMHAType.AITER_PREFILL:
-        return not fmha_config.use_aiter_pa
-    # FMHAType.NONE
+        if not fmha_config.use_aiter_pa:
+            return True
+        return should_use_asm_pa(fmha_config.aiter_pa_type, batch_size)
     return False
 
 
@@ -84,6 +98,7 @@ def get_fmha_impl(
     quant_config: Optional[object] = None,
 ) -> FMHAImplBase:
     mha_impls = PREFILL_MHA_IMPS if attn_inputs.is_prefill else DECODE_MHA_IMPS
+    batch_size = attn_inputs.input_lengths.shape[0] if attn_inputs.input_lengths is not None else 0
     for impl in mha_impls:
         # Check if this FMHA type is disabled before creating instance
         # We need to create a temporary instance to get its fmha_type
@@ -95,7 +110,7 @@ def get_fmha_impl(
             fmha_type = instance.fmha_type()
             
             # Skip if this FMHA type is disabled in config
-            if _is_fmha_type_disabled(fmha_type, fmha_config):
+            if _is_fmha_type_disabled(fmha_type, fmha_config, batch_size):
                 continue
                 
             if instance.support():

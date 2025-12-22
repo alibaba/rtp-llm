@@ -82,7 +82,7 @@ struct FMHAConfig {
     bool        disable_flash_infer           = false;
     bool        enable_xqa                    = true;
     bool        use_aiter_pa                 = true;
-    bool        use_asm_pa                   = true;
+    std::string aiter_pa_type                = "auto";
     int64_t     absorb_opt_len               = 1024;
     std::string to_string() const;
 };

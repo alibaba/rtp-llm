@@ -214,7 +214,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("disable_flash_infer", &FMHAConfig::disable_flash_infer)
         .def_readwrite("enable_xqa", &FMHAConfig::enable_xqa)
         .def_readwrite("use_aiter_pa", &FMHAConfig::use_aiter_pa)
-        .def_readwrite("use_asm_pa", &FMHAConfig::use_asm_pa)
+        .def_readwrite("aiter_pa_type", &FMHAConfig::aiter_pa_type)
         .def_readwrite("absorb_opt_len", &FMHAConfig::absorb_opt_len)
         .def("to_string", &FMHAConfig::to_string)
         .def(py::pickle(
@@ -228,7 +228,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.disable_flash_infer,
                                       self.enable_xqa,
                                       self.use_aiter_pa,
-                                      self.use_asm_pa,
+                                      self.aiter_pa_type,
                                       self.absorb_opt_len);
             },
             [](py::tuple t) {
@@ -245,7 +245,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.disable_flash_infer           = t[6].cast<bool>();
                     c.enable_xqa                    = t[7].cast<bool>();
                     c.use_aiter_pa                  = t[8].cast<bool>();
-                    c.use_asm_pa                    = t[9].cast<bool>();
+                    c.aiter_pa_type                 = t[9].cast<std::string>();
                     c.absorb_opt_len                = t[10].cast<int64_t>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("FMHAConfig unpickle error: ") + e.what());

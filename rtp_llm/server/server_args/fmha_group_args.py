@@ -79,12 +79,12 @@ def init_fmha_group_args(parser, fmha_config):
         help="Rocm是否使用AITER Attention",
     )
     fmha_group.add_argument(
-        "--use_asm_pa",
-        env_name="USE_ASM_PA",
-        bind_to=(fmha_config, 'use_asm_pa'),
-        type=str2bool,
-        default=True,
-        help="Rocm是否使用AITER ASM Attention",
+        "--aiter_pa_type",
+        env_name="AITER_PA_TYPE",
+        bind_to=(fmha_config, 'aiter_pa_type'),
+        type=str,
+        default="auto",
+        help="Rocm使用的AITER Paged Attention 类型",
     )
     fmha_group.add_argument(
         "--absorb_opt_len",
