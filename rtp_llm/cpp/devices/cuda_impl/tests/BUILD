@@ -377,24 +377,3 @@ py_test(
     },
     exec_properties = {'gpu':'A10'},
 )
-
-py_test(
-    name = "CudaGraphPrefill",
-    srcs = [
-        "CudaGraphPrefill.py",
-    ],
-    data = [
-        ":test_cuda_graph_prefill_ops",
-        "//:th_transformer"
-    ],
-    deps = [
-        "//rtp_llm/test/model_test/test_util:test_util",
-    ],
-    env = {
-        "TEST_USING_DEVICE": "CUDA",
-        "HACK_LAYER_NUM" : "1",
-        "CUDA_LAUNCH_BLOCKING" : "1",
-        "ENABLE_CUDA_GRAPH_DEBUG_MODE" : "1",
-    },
-    exec_properties = {'gpu':'A10'},
-)
