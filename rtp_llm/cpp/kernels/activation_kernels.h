@@ -115,4 +115,14 @@ void invokeScaledDot(T* out, const T* input, const T* scale, const int m, const 
 template<typename T>
 void invokeSigmoid(T* data, const int size, const float scale, cudaStream_t stream);
 
+template<typename T>
+void invokeAddBiasSoftMax(T*           logits,
+                          const T*     bias,
+                          const int*   end_ids,
+                          const bool*  finished,
+                          const int    m,
+                          const int    n_padded,
+                          const int    n,
+                          cudaStream_t stream);
+
 }  // namespace rtp_llm
