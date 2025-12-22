@@ -33,8 +33,9 @@ class Qwen3DecoderLayer(nn.Module):
         quant_config: Optional[object] = None,
     ):
         super().__init__()
+        attn_configs = config.getAttentionConfigs(parallelism_config.tp_size)
         self.self_attn = CausalAttention(
-            config, parallelism_config, weights, quant_config
+            attn_configs, parallelism_config, weights, config.layernorm_eps, quant_config
         )
         self.mlp = DenseMLP(
             config.activation_type, parallelism_config, weights, quant_config

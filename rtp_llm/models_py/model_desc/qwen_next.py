@@ -33,7 +33,7 @@ from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
     fused_recurrent_gated_delta_rule,
 )
 from rtp_llm.models_py.triton_kernels.fla.gdn_gating import fused_gdn_gating
-from rtp_llm.ops import HybridAttentionType, ParallelismConfig
+from rtp_llm.ops import HybridAttentionType, ParallelismConfig, LinearAttentionConfig, AttentionConfigs
 from rtp_llm.ops.compute_ops import (
     KVCache,
     PyAttentionInputs,
@@ -54,28 +54,28 @@ class Qwen3NextMetadata(object):
 class Qwen3NextGatedDeltaNetBase(torch.nn.Module):
     def __init__(
         self,
-        config: ModelConfig,
+        linear_attn_config: LinearAttentionConfig,
         parallelism_config: ParallelismConfig,
         weights: Dict[str, torch.Tensor],
     ):
         super().__init__()
-        self.config = config
+        self.linear_attn_config = linear_attn_config
         self.parallelism_config = parallelism_config
         self.weights = weights
         # params
-        self.head_k_dim: int = config.linear_attention_config.linear_key_head_dim
-        self.head_v_dim: int = config.linear_attention_config.linear_value_head_dim
+        self.head_k_dim: int = linear_attn_config.linear_key_head_dim
+        self.head_v_dim: int = linear_attn_config.linear_value_head_dim
         self.local_num_k_heads: int = (
-            config.linear_attention_config.linear_num_key_heads
+            linear_attn_config.linear_num_key_heads
             // parallelism_config.tp_size
         )
         self.local_num_v_heads: int = (
-            config.linear_attention_config.linear_num_value_heads
+            linear_attn_config.linear_num_value_heads
             // parallelism_config.tp_size
         )
         self.num_key_value_heads: int = self.local_num_v_heads // self.local_num_k_heads
         self.linear_conv_kernel_dim: int = (
-            self.config.linear_attention_config.linear_conv_kernel_dim
+            self.linear_attn_config.linear_conv_kernel_dim
         )
         self.ssm_state_size: int = (
             self.local_num_v_heads * self.head_k_dim * self.head_v_dim
@@ -142,11 +142,11 @@ class Qwen3NextGatedDeltaNetBase(torch.nn.Module):
 class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
     def __init__(
         self,
-        config: ModelConfig,
+        linear_attn_config: LinearAttentionConfig,
         parallelism_config: ParallelismConfig,
         weights: Dict[str, torch.Tensor],
     ):
-        super().__init__(config, parallelism_config, weights)
+        super().__init__(linear_attn_config, parallelism_config, weights)
 
     def _conv1d(
         self,
@@ -358,12 +358,13 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
 class Qwen3NextAttention(CausalAttention):
     def __init__(
         self,
-        config: ModelConfig,
+        attn_config: AttentionConfigs,
         parallelism_config: ParallelismConfig,
         weights: Dict[str, torch.Tensor],
+        layernorm_eps: float,
+        quant_config: Optional[object] = None,
     ):
-        quant_config = config.quant_config
-        super().__init__(config, parallelism_config, weights, quant_config)
+        super().__init__(attn_config, parallelism_config, weights, layernorm_eps, quant_config)
         # maybe fuse gate in qkv_proj later
         self.gate = LinearFactory.create_linear_from_weights(
             weights, W.attn_gate_w, W.attn_gate_s, None, quant_config
@@ -385,15 +386,17 @@ class Qwen3NextAttention(CausalAttention):
 class Qwen3NextGatedDeltaNet(nn.Module):
     def __init__(
         self,
-        config: ModelConfig,
+        linear_attn_config: LinearAttentionConfig,
         parallelism_config: ParallelismConfig,
         weights: Dict[str, torch.Tensor],
+        layernorm_eps: float,
+        quant_config: Optional[object] = None,
     ):
         super().__init__()
-        self.config = config
+        self.linear_attn_config = linear_attn_config
         self.parallelism_config = parallelism_config
         self.weights = weights
-        quant_config = config.quant_config
+        self.quant_config = quant_config
         # in_proj_qkvz is bf16 / fp8
         self.in_proj_qkvz = LinearFactory.create_linear_from_weights(
             weights, W.linear_attn_qkvz_w, W.linear_attn_qkvz_s, None, quant_config
@@ -402,28 +405,28 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         self.in_proj_ba = LinearFactory.create_linear_from_weights(
             weights, W.linear_attn_ba_w, None, None, quant_config
         )
-        self.head_k_dim = config.linear_attention_config.linear_key_head_dim
-        self.head_v_dim = config.linear_attention_config.linear_value_head_dim
+        self.head_k_dim = linear_attn_config.linear_key_head_dim
+        self.head_v_dim = linear_attn_config.linear_value_head_dim
         self.local_num_k_heads = (
-            config.linear_attention_config.linear_num_key_heads
+            linear_attn_config.linear_num_key_heads
             // parallelism_config.tp_size
         )
         self.local_num_v_heads = (
-            config.linear_attention_config.linear_num_value_heads
+            linear_attn_config.linear_num_value_heads
             // parallelism_config.tp_size
         )
         self.num_key_value_heads = self.local_num_v_heads // self.local_num_k_heads
 
         self.prefill_gdn = Qwen3NextGatedDeltaNetPrefill(
-            config, parallelism_config, weights
+            linear_attn_config, parallelism_config, weights
         )
         self.decode_gdn = Qwen3NextGatedDeltaNetDecode(
-            config, parallelism_config, weights
+            linear_attn_config, parallelism_config, weights
         )
         self.norm = RmsNormGated(
             weights[W.linear_attn_norm_w],
-            eps=config.layernorm_eps,
-            group_size=config.linear_attention_config.linear_value_head_dim,
+            eps=layernorm_eps,
+            group_size=linear_attn_config.linear_value_head_dim,
         )
         self.out_proj = LinearFactory.create_linear_from_weights(
             weights, W.linear_attn_out_w, W.linear_attn_out_s, None, quant_config
@@ -508,9 +511,10 @@ class Qwen3NextDecoderLayer(nn.Module):
             layer_idx
         ]
         if self.layer_type == HybridAttentionType.LINEAR:
-            self.self_attn = Qwen3NextGatedDeltaNet(config, parallelism_config, weights)
+            self.self_attn = Qwen3NextGatedDeltaNet(config.linear_attention_config, parallelism_config, weights, config.layernorm_eps, config.quant_config)
         else:
-            self.self_attn = Qwen3NextAttention(config, parallelism_config, weights)
+            attn_configs = config.getAttentionConfigs(parallelism_config.tp_size)
+            self.self_attn = Qwen3NextAttention(attn_configs, parallelism_config, weights, config.layernorm_eps, config.quant_config)
         self.mlp = GenericMoeLayer(
             config,
             parallelism_config,
