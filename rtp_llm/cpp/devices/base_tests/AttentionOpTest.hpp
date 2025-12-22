@@ -268,7 +268,7 @@ void AttentionOpTest::contextAttentionOpTest(size_t        batch_size,
     auto output_data_type = qscheme == QScheme::Qfp8PerTensor ? DataType::TYPE_FP8_E4M3 : qkv_input_device->type();
     auto qkv_output       = device_->allocateBuffer({output_data_type, {batch_size, seq_len, num_heads, head_dim}});
 #ifdef USING_ROCM
-    device_->initParamsRef().use_asm_pa  = true;
+    device_->initParamsRef().aiter_pa_type = "auto";
     device_->initParamsRef().max_seq_len = 150000;
     device_->contextAttention({0,
                                *qkv_input_device,
@@ -441,7 +441,7 @@ void AttentionOpTest::selfAttentionOpTest(size_t batch_size,
 
     auto qkv_output = device_->allocateBuffer({qkv_states_device->type(), {token_num, num_heads, head_dim}});
 #ifdef USING_ROCM
-    device_->initParamsRef().use_asm_pa  = true;
+    device_->initParamsRef().aiter_pa_type = "auto";
     device_->initParamsRef().max_seq_len = 150000;
     device_->decoderSelfAttention({0,
                                    *qkv_states_device,

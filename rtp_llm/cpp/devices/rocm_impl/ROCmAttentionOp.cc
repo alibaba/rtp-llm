@@ -1184,7 +1184,8 @@ AttentionModuleOutput ROCmDevice::decoderSelfAttention(const AttentionModulePara
                 stream_);
             check_cuda_error();
             DEBUG_PRINT_PARAMS(params, this, "decode_writeKVCache", q_output);
-            if (init_params_.use_asm_pa) {
+            bool use_asm_pa = shouldUseAsmPA(init_params_.aiter_pa_type, batch_size);
+            if (use_asm_pa) {
                 runAiterAsmPA(params, this, *q_output);
             } else {
                 aiter_wrapper_->runHipPA(params, this, *q_output, stream_);

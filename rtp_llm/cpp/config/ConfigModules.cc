@@ -60,7 +60,7 @@ std::string FMHAConfig::to_string() const {
         << "disable_flash_infer: " << disable_flash_infer << "\n"
         << "enable_xqa: " << enable_xqa << "\n"
         << "use_aiter_pa: " << use_aiter_pa << "\n"
-        << "use_asm_pa: " << use_asm_pa << "\n"
+        << "aiter_pa_type: " << aiter_pa_type << "\n"
         << "absorb_opt_len: " << absorb_opt_len << "\n";
     return oss.str();
 }
