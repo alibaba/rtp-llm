@@ -1,6 +1,6 @@
 #pragma once
 
-#include "rtp_llm/cpp/cache/CacheManager.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/cpp/models/GptModel.h"
 #include "rtp_llm/cpp/models/MTPModel.h"
@@ -13,12 +13,12 @@ namespace rtp_llm {
 
 class MTPExecutor: public ProposeExecutor {
 public:
-    explicit MTPExecutor(const std::string&                                sp_type,
-                         std::unique_ptr<ProposeModelEngineInitParams>&    propose_model_engine_init_params,
-                         rtp_llm::DeviceBase*                              device,
-                         const std::vector<std::shared_ptr<CacheManager>>& mtp_cache_managers,
-                         const std::shared_ptr<lora::LoraManager>&         lora_manager,
-                         bool                                              warm_up = false):
+    explicit MTPExecutor(const std::string&                                  sp_type,
+                         std::unique_ptr<ProposeModelEngineInitParams>&      propose_model_engine_init_params,
+                         rtp_llm::DeviceBase*                                device,
+                         const std::vector<std::shared_ptr<KVCacheManager>>& mtp_cache_managers,
+                         const std::shared_ptr<lora::LoraManager>&           lora_manager,
+                         bool                                                warm_up = false):
         ProposeExecutor(device), sp_type_(sp_type) {
 
         if (sp_type_ == "eagle") {
@@ -43,15 +43,21 @@ public:
             auto norm_executor =
                 std::make_shared<NormalExecutor>(*mtp_params, cache_manager, device_, lora_manager, warm_up);
             const auto& cache_config = cache_manager ? cache_manager->cacheConfig() : CacheConfig();
-            executor->setBatchProcessor(std::move(
-                std::make_unique<MTPBatchStreamProcessor>(mtp_params->model_config_, mtp_params->pd_sep_config, mtp_params->profiling_debug_logging_config, cache_config, warm_up)));
-            auto model_params = GptModelInitParams(
-                {device_,
-                 mtp_params->gpt_weights,
-                 Executor::genModelDescription(mtp_params->model_config_, mtp_params->parallelism_config, mtp_params->eplb_config, mtp_params->moe_config),
-                 cache_manager ? ((std::optional<KVCacheAllocator::KVCacheBuffer>)cache_manager->kvCacheBuffer()) :
-                                 std::nullopt,
-                 mtp_params->model_id});
+            executor->setBatchProcessor(
+                std::move(std::make_unique<MTPBatchStreamProcessor>(mtp_params->model_config_,
+                                                                    mtp_params->pd_sep_config,
+                                                                    mtp_params->profiling_debug_logging_config,
+                                                                    cache_config,
+                                                                    warm_up)));
+            auto model_params =
+                GptModelInitParams{device_,
+                                   mtp_params->gpt_weights,
+                                   Executor::genModelDescription(mtp_params->model_config_,
+                                                                 mtp_params->parallelism_config,
+                                                                 mtp_params->eplb_config,
+                                                                 mtp_params->moe_config),
+                                   cache_manager ? std::make_optional(cache_manager->kvCacheBuffer()) : std::nullopt,
+                                   mtp_params->model_id};
             std::unique_ptr<GptModel> new_model;
             if (sp_type_ == "mtp" || sp_type_ == "eagle") {
                 RTP_LLM_LOG_INFO("prepare mtp model");

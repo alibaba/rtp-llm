@@ -188,17 +188,16 @@ void UnfusedAttentionTest::addFusedQKVBiasTransposeTest(size_t batch_size,
     auto rope_config = RopeConfig({RopeStyle::Base, rope_dim, rope_theta, 1., 0., 0., max_position_embeddings});
 
     // cache manager need one block for preserve and every seq need one block for preserve.
-    auto                 block_num = 2 * batch_size * ((seq_len + tokens_per_block - 1) / tokens_per_block + 1) + 1;
-    rtp_llm::CacheConfig cache_conf(rtp_llm::KVCacheParam(
-        {1, (uint)block_num, (uint)num_key_value_heads, (uint)head_dim, (uint)tokens_per_block, DataType::TYPE_BF16}));
-    cache_manager_            = nullptr;
-    auto kv_cache_block_id    = allocateKVBlocks(cache_conf, input_lengths, kvcache_pad);
-    auto kv_cache_buffer      = cache_manager_->kvCacheBuffer();
-    auto common_inputs        = AttentionCommonInputs({input_lengths_device, sequence_lengths_device});
-    auto layer_k_cache_buffer = kv_cache_buffer.k_blocks->index(0);
-    auto layer_v_cache_buffer = kv_cache_buffer.v_blocks->index(0);
-    common_inputs.kv_cache    = KvCacheInfo(
-        {(int)kv_cache_buffer.k_blocks->shape()[0], kv_cache_block_id, layer_k_cache_buffer, layer_v_cache_buffer});
+    auto block_num  = 2 * batch_size * ((seq_len + tokens_per_block - 1) / tokens_per_block + 1) + 1;
+    auto cache_conf = makeMhaCacheConfig(
+        1, (uint)block_num, (uint)num_key_value_heads, (uint)head_dim, (uint)tokens_per_block, DataType::TYPE_BF16);
+    cache_manager_             = nullptr;
+    auto kv_cache_block_id     = allocateKVBlocks(cache_conf, input_lengths, kvcache_pad);
+    auto kv_cache_buffer       = cache_manager_->kvCacheBuffer();
+    auto common_inputs         = AttentionCommonInputs({input_lengths_device, sequence_lengths_device});
+    auto layer_kv_cache_buffer = kv_cache_buffer.kv_blocks->index(0);
+    common_inputs.kv_cache =
+        KvCacheInfo({(int)kv_cache_buffer.kv_blocks->shape()[0], kv_cache_block_id, layer_kv_cache_buffer, nullptr});
     common_inputs.cu_seqlens                = cu_seqlens_device;
     common_inputs.cu_seqlens_without_prefix = cu_seqlens_without_prefix_device;
     common_inputs.padding_offset            = padding_offset_device;
@@ -227,7 +226,7 @@ void UnfusedAttentionTest::addFusedQKVBiasTransposeTest(size_t batch_size,
         0, *qkv_states_device, *qkv_output, common_inputs, attention_weight, attention_config};
 
     auto attn = device->prepareTrtAttn(
-        attention_config, kv_cache_buffer.k_blocks, params.common.kv_cache->kv_cache_block_id, batch_size);
+        attention_config, kv_cache_buffer.kv_blocks, params.common.kv_cache->kv_cache_block_id, batch_size);
     auto trt_attn = reinterpret_cast<TRTAttn*>(attn.get());
     TRTAttn::setKvCache(trt_attn->kv_block_array, *common_inputs.kv_cache);
 
@@ -251,7 +250,7 @@ void UnfusedAttentionTest::addFusedQKVBiasTransposeTest(size_t batch_size,
     auto seq_len_with_prefix = seq_len + params.common.max_prefix_length;
 
     auto qkv_buf_fp8 =
-        cache_conf.dtype == DataType::TYPE_FP8_E4M3 ?
+        cache_conf.cache_specs[0]->dtype == DataType::TYPE_FP8_E4M3 ?
             device->allocateBuffer({DataType::TYPE_FP8_E4M3,
                                     {batch_size, (num_heads + num_key_value_heads * 2), seq_len_with_prefix, head_dim},
                                     AllocationType::DEVICE},
@@ -513,17 +512,16 @@ void UnfusedAttentionTest::decodeAddFusedQKVBiasTransposeTest(size_t batch_size,
     auto rope_config = RopeConfig({RopeStyle::Base, rope_dim, rope_theta, 1., 0., 0., max_position_embeddings});
 
     // cache manager need one block for preserve and every seq need one block for preserve.
-    auto block_num = 2 * batch_size * ((kv_seq_len + seq_len + tokens_per_block - 1) / tokens_per_block + 1) + 1;
-    rtp_llm::CacheConfig cache_conf(rtp_llm::KVCacheParam(
-        {1, (uint)block_num, (uint)num_key_value_heads, (uint)head_dim, (uint)tokens_per_block, DataType::TYPE_BF16}));
-    cache_manager_            = nullptr;
-    auto kv_cache_block_id    = allocateKVBlocks(cache_conf, input_lengths, kvcache_pad);
-    auto kv_cache_buffer      = cache_manager_->kvCacheBuffer();
-    auto common_inputs        = AttentionCommonInputs({input_lengths_device, sequence_lengths_device});
-    auto layer_k_cache_buffer = kv_cache_buffer.k_blocks->index(0);
-    auto layer_v_cache_buffer = kv_cache_buffer.v_blocks->index(0);
-    common_inputs.kv_cache    = KvCacheInfo(
-        {(int)kv_cache_buffer.k_blocks->shape()[0], kv_cache_block_id, layer_k_cache_buffer, layer_v_cache_buffer});
+    auto block_num  = 2 * batch_size * ((kv_seq_len + seq_len + tokens_per_block - 1) / tokens_per_block + 1) + 1;
+    auto cache_conf = makeMhaCacheConfig(
+        1, (uint)block_num, (uint)num_key_value_heads, (uint)head_dim, (uint)tokens_per_block, DataType::TYPE_BF16);
+    cache_manager_             = nullptr;
+    auto kv_cache_block_id     = allocateKVBlocks(cache_conf, input_lengths, kvcache_pad);
+    auto kv_cache_buffer       = cache_manager_->kvCacheBuffer();
+    auto common_inputs         = AttentionCommonInputs({input_lengths_device, sequence_lengths_device});
+    auto layer_kv_cache_buffer = kv_cache_buffer.kv_blocks->index(0);
+    common_inputs.kv_cache =
+        KvCacheInfo({(int)kv_cache_buffer.kv_blocks->shape()[0], kv_cache_block_id, layer_kv_cache_buffer, nullptr});
     common_inputs.cu_seqlens          = cu_seqlens_device;
     common_inputs.position_ids        = position_ids_device;
     common_inputs.attention_mask      = attention_mask_device;
@@ -550,7 +548,7 @@ void UnfusedAttentionTest::decodeAddFusedQKVBiasTransposeTest(size_t batch_size,
         0, *qkv_states_device, *qkv_output, common_inputs, attention_weight, attention_config};
 
     auto attn = device->prepareTrtAttn(
-        attention_config, kv_cache_buffer.k_blocks, params.common.kv_cache->kv_cache_block_id, batch_size);
+        attention_config, kv_cache_buffer.kv_blocks, params.common.kv_cache->kv_cache_block_id, batch_size);
     auto trt_attn = reinterpret_cast<TRTAttn*>(attn.get());
     TRTAttn::setKvCache(trt_attn->kv_block_array, *common_inputs.kv_cache);
 

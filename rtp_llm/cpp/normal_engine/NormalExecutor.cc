@@ -13,7 +13,7 @@ using namespace std;
 namespace rtp_llm {
 
 NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
-                               const std::shared_ptr<CacheManager>&      cache_manager,
+                               const std::shared_ptr<KVCacheManager>&    cache_manager,
                                rtp_llm::DeviceBase*                      device,
                                const std::shared_ptr<lora::LoraManager>& lora_manager,
                                bool                                      warm_up):
@@ -32,9 +32,10 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
         int  first_moe_layer = params.model_config_.moe_layer_index.front();
         auto moe_weight_type = params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->type();
         bool is_gated_activation = params.model_config_.isGatedActivation();
-        auto moe_inter_size = is_gated_activation ?
-            params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->shape()[1] / 2 :
-            params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->shape()[1];
+        auto moe_inter_size =
+            is_gated_activation ?
+                params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->shape()[1] / 2 :
+                params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->shape()[1];
 
         expert_balancer_ = make_shared<ExpertBalancer>(params.model_config_.expert_num,
                                                        params.eplb_config.phy_exp_num(params.model_config_.expert_num),
@@ -62,7 +63,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
         {device_,
          params.gpt_weights,
          genModelDescription(params.model_config_, params.parallelism_config, params.eplb_config, params.moe_config),
-         cache_manager ? ((optional<KVCacheAllocator::KVCacheBuffer>)cache_manager->kvCacheBuffer()) : nullopt,
+         cache_manager ? std::make_optional(cache_manager->kvCacheBuffer()) : std::nullopt,
          params.model_id});
 
     if (params.ffn_disaggregate_config.enable_ffn_disaggregate) {

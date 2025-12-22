@@ -1,198 +1,237 @@
 #pragma once
 
 #include "rtp_llm/cpp/core/Types.h"
-#include <sstream>
+#include "rtp_llm/cpp/cache/types.h"
 #include <string>
+#include <memory>
+#include <vector>
 
 namespace rtp_llm {
 
-struct KVCacheParam {
-    uint              layer_num;
-    uint              block_nums;
-    uint              local_head_num_kv;
-    uint              size_per_head;
-    uint              seq_size_per_block = 1;
-    rtp_llm::DataType dtype;
+enum KVCacheType {
+    MultiHeadAttention,
+    MultiHeadLatentAttention,
+    LinearAttention,
 };
 
-struct MlaCacheParam {
-    uint              layer_num;
-    uint              block_nums;
-    uint              kv_lora_rank;
-    uint              rope_head_dim;
-    uint              seq_size_per_block = 1;
+enum MemoryLayout {
+    LAYER_FIRST,  // [layer_num, num_blocks, block_size] -> hybrid attention
+};
+
+struct KVCacheSpec {
+    uint32_t layer_num;
+    uint32_t local_head_num_kv;
+    uint32_t seq_size_per_block = 1;
+
+    KVCacheType       type;
     rtp_llm::DataType dtype;
+
+    virtual size_t block_size() const   = 0;
+    virtual size_t k_block_size() const = 0;
+    virtual size_t v_block_size() const = 0;
+    virtual size_t k_token_size() const = 0;
+    virtual size_t v_token_size() const = 0;
+
+    virtual size_t block_size_bytes() const   = 0;
+    virtual size_t k_block_size_bytes() const = 0;
+    virtual size_t v_block_size_bytes() const = 0;
+};
+
+typedef std::shared_ptr<KVCacheSpec> KVCacheSpecPtr;
+
+struct MHAKVCacheSpec: public KVCacheSpec {
+    uint32_t size_per_head;
+
+    size_t block_size() const override {
+        return 2 * local_head_num_kv * size_per_head * seq_size_per_block;
+    }
+    size_t k_block_size() const override {
+        return local_head_num_kv * size_per_head * seq_size_per_block;
+    }
+    size_t v_block_size() const override {
+        return local_head_num_kv * size_per_head * seq_size_per_block;
+    }
+
+    size_t block_size_bytes() const {
+        return block_size() * rtp_llm::getTypeSize(dtype);
+    }
+    size_t k_block_size_bytes() const {
+        return k_block_size() * rtp_llm::getTypeSize(dtype);
+    }
+    size_t v_block_size_bytes() const {
+        return v_block_size() * rtp_llm::getTypeSize(dtype);
+    }
+
+    size_t k_token_size() const override {
+        return size_per_head;
+    }
+    size_t v_token_size() const override {
+        return size_per_head;
+    }
+};
+
+struct MLAKVCacheSpec: public KVCacheSpec {
+    uint32_t kv_lora_rank;
+    uint32_t rope_head_dim;
+
+    size_t block_size() const {
+        return local_head_num_kv * (kv_lora_rank + rope_head_dim) * seq_size_per_block;
+    }
+    size_t k_block_size() const {
+        return local_head_num_kv * kv_lora_rank * seq_size_per_block;
+    }
+    size_t v_block_size() const {
+        return local_head_num_kv * rope_head_dim * seq_size_per_block;
+    }
+
+    size_t block_size_bytes() const override {
+        return block_size() * rtp_llm::getTypeSize(dtype);
+    }
+    size_t k_block_size_bytes() const override {
+        return k_block_size() * rtp_llm::getTypeSize(dtype);
+    }
+    size_t v_block_size_bytes() const override {
+        return v_block_size() * rtp_llm::getTypeSize(dtype);
+    }
+
+    size_t k_token_size() const override {
+        return kv_lora_rank;
+    }
+    size_t v_token_size() const override {
+        return rope_head_dim;
+    }
+};
+
+struct LinearKVCacheSpec: public KVCacheSpec {
+    uint32_t conv_state_size;
+    uint32_t temporal_state_size;
+
+    size_t block_size() const override {
+        return (conv_state_size + temporal_state_size) * seq_size_per_block;
+    }
+    size_t k_block_size() const override {
+        return conv_state_size * seq_size_per_block;
+    }
+    size_t v_block_size() const override {
+        return temporal_state_size * seq_size_per_block;
+    }
+
+    size_t block_size_bytes() const override {
+        return block_size() * rtp_llm::getTypeSize(dtype);
+    }
+    size_t k_block_size_bytes() const override {
+        return k_block_size() * rtp_llm::getTypeSize(dtype);
+    }
+    size_t v_block_size_bytes() const override {
+        return v_block_size() * rtp_llm::getTypeSize(dtype);
+    }
+
+    size_t k_token_size() const override {
+        return conv_state_size;
+    }
+    size_t v_token_size() const override {
+        return temporal_state_size;
+    }
 };
 
 struct CacheConfig {
-    uint32_t          layer_num          = 0;
-    uint32_t          block_nums         = 0;
-    uint32_t          local_head_num_kv  = 0;
-    uint32_t          size_per_head      = 0;
-    uint32_t          seq_size_per_block = 1;
-    rtp_llm::DataType dtype              = rtp_llm::TYPE_INVALID;
+    std::vector<KVCacheSpecPtr>   cache_specs;
+    std::vector<std::vector<int>> layer_ids;
 
-    size_t block_size   = 0;
+    uint32_t layer_num;
+    uint32_t block_num;
+
+    // ---- Per-block sizes (all layers) ----
+    // kv_block_*: kv cache only
+    size_t kv_block_size       = 0;
+    size_t kv_block_size_bytes = 0;
+    // kv_scale_*: kv cache scale only (int8/fp8) (K+V together).
+    size_t kv_scale_size       = 0;
+    size_t kv_scale_size_bytes = 0;
+    // block_*: kv cache + scale, for one logical "block" across all layers. (K+V scales together).
+    size_t block_size       = 0;
+    size_t block_size_bytes = 0;
+
+    size_t seq_size_per_block = 1;  // for cache_keys generation
+
+    // for adpation to MLA
+    bool use_mla = false;
+
+    // mtp
+    std::string mtp_model_type = "default_model";
+
+    // ---- Per-block strides (one layer) ----
+    // kv_block_stride_*: one-layer kv cache block stride (K+V together).
+    size_t kv_block_stride       = 0;
+    size_t kv_block_stride_bytes = 0;
+    // kv_scale_stride_*: one-layer kv cache scale stride for one logical block (K+V scales together).
+    size_t kv_scale_stride       = 0;
+    size_t kv_scale_stride_bytes = 0;
+    // block_stride_*: one-layer total stride (kv + scale)
+    size_t block_stride       = 0;
+    size_t block_stride_bytes = 0;
+
+    CacheConfig() {}
+};
+
+struct BlockPoolConfig {
+    uint32_t layer_num;
+    uint32_t block_num;
+
+    MemoryLayout      layout = LAYER_FIRST;
+    rtp_llm::DataType dtype  = rtp_llm::TYPE_INVALID;
+
+    size_t total_size;
+    size_t total_size_bytes;
+
+    // ---- Per-block sizes (all layers) ----
+    // kv_block_*: kv cache only
+    size_t kv_block_size       = 0;
+    size_t kv_block_size_bytes = 0;
+    // kv_scale_*: scale only (includes BOTH K and V scales)
+    size_t kv_scale_size       = 0;
+    size_t kv_scale_size_bytes = 0;
+    // block_*: kv cache + scale (logical block across all layers)
+    size_t block_size       = 0;
+    size_t block_size_bytes = 0;
+
+    // for kv first layout only, keep these meta for partitioning / kernels
     size_t k_block_size = 0;
     size_t v_block_size = 0;
 
-    size_t kv_block_size         = 0;
-    size_t kv_scale_block_size   = 0;
-    size_t k_block_stride        = 0;
-    size_t v_block_stride        = 0;
-    size_t kv_scale_block_stride = 0;
-    size_t total_size            = 0;
-    size_t k_total_size          = 0;
-    size_t v_total_size          = 0;
-    size_t scale_size            = 0;
+    // ---- Per-block strides (one layer) ----
+    // kv_block_stride_*: one-layer kv cache block stride (K+V together)
+    size_t kv_block_stride       = 0;
+    size_t kv_block_stride_bytes = 0;
+    // kv_scale_stride_*: one-layer scale stride for one logical block (K+V scales together)
+    size_t kv_scale_stride       = 0;
+    size_t kv_scale_stride_bytes = 0;
+    // block_stride_*: one-layer total stride (kv + scale)
+    size_t block_stride       = 0;
+    size_t block_stride_bytes = 0;
 
-    bool        use_mla        = false;
-    uint32_t    kv_lora_rank   = 0;
-    uint32_t    rope_head_dim  = 0;
-    std::string mtp_model_type = "default_model";
+    size_t k_block_stride = 0;
+    size_t v_block_stride = 0;
 
-    CacheConfig() {}
+    size_t k_block_size_bytes = 0;
+    size_t v_block_size_bytes = 0;
 
-    CacheConfig(const KVCacheParam& param):
-        layer_num(param.layer_num),
-        block_nums(param.block_nums),
-        local_head_num_kv(param.local_head_num_kv),
-        size_per_head(param.size_per_head),
-        seq_size_per_block(param.seq_size_per_block),
-        dtype(param.dtype) {
+    size_t k_block_stride_bytes = 0;
+    size_t v_block_stride_bytes = 0;
 
-        auto dtype_size = rtp_llm::getTypeSize(dtype);
-        if (dtype == rtp_llm::TYPE_INT8 || dtype == rtp_llm::TYPE_FP8_E4M3) {
-            scale_size = 4;
-        }
+    size_t k_token_size = 0;
+    size_t v_token_size = 0;
 
-        block_size = layer_num * local_head_num_kv * (size_per_head + scale_size) * seq_size_per_block * dtype_size * 2;
-        kv_block_size       = layer_num * local_head_num_kv * size_per_head * seq_size_per_block * dtype_size * 2;
-        kv_scale_block_size = layer_num * local_head_num_kv * scale_size * seq_size_per_block * dtype_size;
+    bool is_mla = false;
 
-        // k_block_stride/v_block_stride is the size of a single block in a single layer
-        k_block_stride        = kv_block_size / layer_num;
-        v_block_stride        = 0;
-        kv_scale_block_stride = kv_scale_block_size / layer_num;
+    size_t local_head_num_kv  = 0;
+    size_t seq_size_per_block = 0;
 
-        k_block_size = kv_block_size;
-        v_block_size = 0;
-
-        refresh();
-    }
-
-    CacheConfig(const MlaCacheParam& param):
-        CacheConfig(KVCacheParam{
-            param.layer_num, param.block_nums, 1, param.kv_lora_rank, param.seq_size_per_block, param.dtype}) {
-        use_mla       = true;
-        kv_lora_rank  = param.kv_lora_rank;
-        rope_head_dim = param.rope_head_dim;
-
-        auto dtype_size = rtp_llm::getTypeSize(dtype);
-        block_size = layer_num * local_head_num_kv * (kv_lora_rank + rope_head_dim) * seq_size_per_block * dtype_size;
-
-        k_block_stride =
-            local_head_num_kv * (kv_lora_rank + rope_head_dim + scale_size) * seq_size_per_block * dtype_size;
-        v_block_stride = 0;
-
-        k_block_size = layer_num * k_block_stride;
-        v_block_size = layer_num * v_block_stride;
-
-        refresh();
-    }
-
-    void refresh() {
-        total_size   = block_size * block_nums;
-        k_total_size = k_block_size * block_nums;
-        v_total_size = v_block_size * block_nums;
-    }
-
-    virtual size_t getKeyBlockStride() const {
-        return k_block_stride;
-    }
-
-    virtual size_t getValueBlockStride() const {
-        return v_block_stride;
-    }
-
-    virtual size_t getKVScaleBlockStride() const {
-        return kv_scale_block_stride;
-    }
-
-    size_t getKeyLayerStride() const {
-        return block_nums * getKeyBlockStride();
-    }
-
-    size_t getValueLayerStride() const {
-        return block_nums * getValueBlockStride();
-    }
-
-    size_t getKVScaleLayerStride() const {
-        return block_nums * getKVScaleBlockStride();
-    }
-
-    size_t getKeyOffset(int block_index, int layer_id) const {
-        auto const block_stride = getKeyBlockStride();
-        auto const layer_stride = getKeyLayerStride();
-        return layer_id * layer_stride + block_index * block_stride;
-    }
-
-    size_t getValueOffset(int block_index, int layer_id) const {
-        auto const block_stride = getValueBlockStride();
-        auto const layer_stride = getValueLayerStride();
-        return layer_id * layer_stride + block_index * block_stride;
-    }
-
-    size_t getKVScaleOffset(int block_index, int layer_id) const {
-        auto const block_stride = getKVScaleBlockStride();
-        auto const layer_stride = getKVScaleLayerStride();
-        return layer_id * layer_stride + block_index * block_stride;
-    }
-
-    size_t getKeyShape() const {
-        return getKeyBlockStride() / rtp_llm::getTypeSize(dtype);
-    }
-
-    size_t getValueShape() const {
-        return getValueBlockStride() / rtp_llm::getTypeSize(dtype);
-    }
-
-    size_t getKVScaleShape() const {
-        return getKVScaleBlockStride() / rtp_llm::getTypeSize(dtype);
-    }
-
-    size_t getKBlockSize() const {
-        if (use_mla) {
-            return rtp_llm::getTypeSize(dtype) * (size_t)layer_num * (size_t)block_nums * (size_t)seq_size_per_block
-                   * (size_t)kv_lora_rank;
-        } else {
-            return rtp_llm::getTypeSize(dtype) * (size_t)layer_num * (size_t)block_nums * (size_t)local_head_num_kv
-                   * (size_t)seq_size_per_block * (size_t)size_per_head;
-        }
-    }
-
-    size_t getVBlockSize() const {
-        if (use_mla) {
-            return rtp_llm::getTypeSize(dtype) * (size_t)layer_num * (size_t)block_nums * (size_t)seq_size_per_block
-                   * (size_t)rope_head_dim;
-        } else {
-            return rtp_llm::getTypeSize(dtype) * (size_t)layer_num * (size_t)block_nums * (size_t)local_head_num_kv
-                   * (size_t)seq_size_per_block * (size_t)size_per_head;
-        }
-    }
-
-    std::string debugString() const {
-        std::stringstream debug_string;
-        debug_string << "CacheConfig { "
-                     << "layer_num: " << layer_num << ", block_nums: " << block_nums << ", block_size: " << block_size
-                     << ", local_head_num_kv: " << local_head_num_kv << ", size_per_head: " << size_per_head
-                     << ", seq_size_per_block: " << seq_size_per_block << ", dtype: " << int(dtype)
-                     << ", k_block_stride: " << k_block_stride << ", v_block_stride: " << v_block_stride
-                     << ", k_block_size: " << k_block_size << ", v_block_size: " << v_block_size
-                     << ", kv_scale_block_stride: " << kv_scale_block_stride << ", k_total_size: " << k_total_size
-                     << ", v_total_size: " << v_total_size << ", total_size: " << total_size << "}";
-        return debug_string.str();
-    }
+    bool   enable_kv_scale          = false;
+    size_t kv_block_pool_size_bytes = 0;
+    size_t kv_scale_offset_bytes    = 0;
+    size_t kv_scale_block_bytes     = 0;
+    size_t kv_scale_pool_size_bytes = 0;
 };
 
 }  // namespace rtp_llm

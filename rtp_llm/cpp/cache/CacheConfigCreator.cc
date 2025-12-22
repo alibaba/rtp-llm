@@ -1,44 +1,102 @@
-#include "rtp_llm/cpp/devices/DeviceFactory.h"
-#include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
+
+#include "rtp_llm/cpp/devices/DeviceFactory.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 
-CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig& model_config,
+CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model_config,
                                                   const ParallelismConfig& parallelism_config,
-                                                  bool is_mtp) {
-    int        local_head_num_kv = (model_config.attn_config.kv_head_num > 1) ? model_config.attn_config.kv_head_num / parallelism_config.tp_size : model_config.attn_config.kv_head_num;
+                                                  bool                     is_mtp) {
+    int        local_head_num_kv = (model_config.attn_config.kv_head_num > 1) ?
+                                       model_config.attn_config.kv_head_num / parallelism_config.tp_size :
+                                       model_config.attn_config.kv_head_num;
     const auto device_prop       = rtp_llm::DeviceFactory::getDefaultDevice()->getDeviceProperties();
-    auto       dtype             = model_config.attn_config.kv_cache_dtype == KvCacheDataType::INT8 ? rtp_llm::DataType::TYPE_INT8 : (model_config.attn_config.kv_cache_dtype == KvCacheDataType::FP8 ? rtp_llm::DataType::TYPE_FP8_E4M3 : model_config.data_type);
+    auto       dtype =
+        model_config.attn_config.kv_cache_dtype == KvCacheDataType::INT8 ?
+                  rtp_llm::DataType::TYPE_INT8 :
+                  (model_config.attn_config.kv_cache_dtype == KvCacheDataType::FP8 ? rtp_llm::DataType::TYPE_FP8_E4M3 :
+                                                                                     model_config.data_type);
     if (device_prop.type == rtp_llm::DeviceType::ArmCpu) {
         // Arm attention operator support FP32 data type only
-        dtype = model_config.attn_config.kv_cache_dtype == KvCacheDataType::INT8 ? rtp_llm::TYPE_INT8 : rtp_llm::TYPE_FP32;
+        dtype =
+            model_config.attn_config.kv_cache_dtype == KvCacheDataType::INT8 ? rtp_llm::TYPE_INT8 : rtp_llm::TYPE_FP32;
     }
     auto layer_num = model_config.num_layers;
     if (is_mtp) {
         layer_num = 1;
     }
 
-    if (model_config.attn_config.use_mla && model_config.mla_ops_type != rtp_llm::MlaOpsType::MHA) {
-        return CacheConfig(MlaCacheParam{(uint)model_config.num_layers,
-                                         (uint)0,
-                                         (uint)model_config.attn_config.kv_lora_rank,
-                                         (uint)model_config.attn_config.rope_head_dim,
-                                         (uint)model_config.attn_config.tokens_per_block,
-                                         dtype});
+    std::vector<int> all_layer_ids(layer_num);
+    for (int i = 0; i < layer_num; ++i) {
+        all_layer_ids[i] = i;
     }
 
-    return CacheConfig(KVCacheParam{(uint)layer_num,
-                                    (uint)0,
-                                    (uint)local_head_num_kv,
-                                    (uint)model_config.attn_config.size_per_head,
-                                    (uint)model_config.attn_config.tokens_per_block,
-                                    dtype});
+    CacheConfig config;
+    config.layer_num          = static_cast<uint32_t>(layer_num);
+    config.block_num          = 0;
+    config.seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
+
+    config.use_mla = model_config.attn_config.use_mla;
+
+    if (model_config.attn_config.use_mla && model_config.mla_ops_type != rtp_llm::MlaOpsType::MHA) {
+        auto spec                = std::make_shared<MLAKVCacheSpec>();
+        spec->type               = KVCacheType::MultiHeadLatentAttention;
+        spec->dtype              = dtype;
+        spec->kv_lora_rank       = static_cast<uint32_t>(model_config.attn_config.kv_lora_rank);
+        spec->rope_head_dim      = static_cast<uint32_t>(model_config.attn_config.rope_head_dim);
+        spec->local_head_num_kv  = 1;  // mla set local_head_num_kv to 1
+        spec->seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
+
+        config.cache_specs.push_back(spec);
+        config.kv_block_stride       = spec->block_size();
+        config.kv_block_stride_bytes = spec->block_size_bytes();
+        config.kv_block_size         = static_cast<size_t>(config.layer_num) * config.kv_block_stride;
+        config.kv_block_size_bytes   = static_cast<size_t>(config.layer_num) * config.kv_block_stride_bytes;
+    } else {
+        auto spec                = std::make_shared<MHAKVCacheSpec>();
+        spec->type               = KVCacheType::MultiHeadAttention;
+        spec->dtype              = dtype;
+        spec->local_head_num_kv  = static_cast<uint32_t>(std::max(1, local_head_num_kv));
+        spec->size_per_head      = static_cast<uint32_t>(model_config.attn_config.size_per_head);
+        spec->seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
+
+        config.cache_specs.push_back(spec);
+        config.kv_block_stride       = spec->block_size();
+        config.kv_block_stride_bytes = spec->block_size_bytes();
+        config.kv_block_size         = static_cast<size_t>(config.layer_num) * config.kv_block_stride;
+        config.kv_block_size_bytes   = static_cast<size_t>(config.layer_num) * config.kv_block_stride_bytes;
+    }
+
+    // kv scale stride (K+V scales together) for int8/fp8
+    if (dtype == rtp_llm::TYPE_INT8 || dtype == rtp_llm::TYPE_FP8_E4M3) {
+        const size_t local_head_num_kv        = static_cast<size_t>(config.cache_specs[0]->local_head_num_kv);
+        const size_t seq_size_per_block       = static_cast<size_t>(config.seq_size_per_block);
+        const size_t kv_scale_kv_stride       = local_head_num_kv * seq_size_per_block;
+        const size_t kv_scale_kv_stride_bytes = kv_scale_kv_stride * sizeof(float);
+        config.kv_scale_stride                = 2 * kv_scale_kv_stride;
+        config.kv_scale_stride_bytes          = 2 * kv_scale_kv_stride_bytes;
+        config.kv_scale_size                  = static_cast<size_t>(config.layer_num) * config.kv_scale_stride;
+        config.kv_scale_size_bytes            = static_cast<size_t>(config.layer_num) * config.kv_scale_stride_bytes;
+    } else {
+        config.kv_scale_stride       = 0;
+        config.kv_scale_stride_bytes = 0;
+        config.kv_scale_size         = 0;
+        config.kv_scale_size_bytes   = 0;
+    }
+
+    config.block_stride       = config.kv_block_stride + config.kv_scale_stride;
+    config.block_stride_bytes = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;
+    config.block_size         = config.kv_block_size + config.kv_scale_size;
+    config.block_size_bytes   = config.kv_block_size_bytes + config.kv_scale_size_bytes;
+
+    config.layer_ids.push_back(all_layer_ids);
+    return config;
 }
 
-size_t CacheConfigCreator::getDefaultRuntimeMemorySize(const RuntimeConfig& runtime_config,
+size_t CacheConfigCreator::getDefaultRuntimeMemorySize(const RuntimeConfig&     runtime_config,
                                                        const ParallelismConfig& parallelism_config,
-                                                       const ModelConfig& model_config,
+                                                       const ModelConfig&       model_config,
                                                        const std::optional<SpeculativeExecutionConfig>& sp_config) {
     auto reserve_runtime_mem_bytes = runtime_config.reserve_runtime_mem_mb * 1024 * 1024;
     RTP_LLM_LOG_INFO("RuntimeConfig has reserve_runtime_mem_mb=%ld", runtime_config.reserve_runtime_mem_mb);
@@ -78,23 +136,25 @@ size_t CacheConfigCreator::getDefaultRuntimeMemorySize(const RuntimeConfig& runt
     return reserve_runtime_mem_bytes;
 }
 
-size_t CacheConfigCreator::getKVCacheMemorySize(const RuntimeConfig& runtime_config,
-                                                const KVCacheConfig& kv_cache_config,
-                                                const ModelConfig& model_config,
-                                                const ParallelismConfig& parallelism_config,
-                                                const std::optional<WarmUpResult>& warm_up_result,
+size_t CacheConfigCreator::getKVCacheMemorySize(const RuntimeConfig&                             runtime_config,
+                                                const KVCacheConfig&                             kv_cache_config,
+                                                const ModelConfig&                               model_config,
+                                                const ParallelismConfig&                         parallelism_config,
+                                                const std::optional<WarmUpResult>&               warm_up_result,
                                                 const std::optional<SpeculativeExecutionConfig>& sp_config) {
     const auto device                       = rtp_llm::DeviceFactory::getDefaultDevice();
     size_t     device_reserved_memory_bytes = device->getDeviceStatus().device_memory_status.preserved_bytes;
     size_t     runtime_required_bytes       = 0;
 
     if (kv_cache_config.kv_cache_mem_mb > 0) {
-        RTP_LLM_LOG_INFO("KVCacheConfig explicitly specified kv cache memory size %ld MiB", kv_cache_config.kv_cache_mem_mb);
+        RTP_LLM_LOG_INFO("KVCacheConfig explicitly specified kv cache memory size %ld MiB",
+                         kv_cache_config.kv_cache_mem_mb);
         return kv_cache_config.kv_cache_mem_mb * 1024 * 1024;
     }
 
     // Unified call to getDefaultRuntimeMemorySize
-    size_t env_runtime_required_bytes = getDefaultRuntimeMemorySize(runtime_config, parallelism_config, model_config, sp_config);
+    size_t env_runtime_required_bytes =
+        getDefaultRuntimeMemorySize(runtime_config, parallelism_config, model_config, sp_config);
 
     if (warm_up_result) {
         if (device_reserved_memory_bytes != warm_up_result->device_reserved_bytes) {
@@ -137,11 +197,11 @@ size_t CacheConfigCreator::getKVCacheMemorySize(const RuntimeConfig& runtime_con
     return kv_cache_mem_size;
 }
 
-CacheConfig CacheConfigCreator::createConfig(const ModelConfig& model_config,
-                                             const ParallelismConfig& parallelism_config,
-                                             const RuntimeConfig& runtime_config,
-                                             const KVCacheConfig& kv_cache_config,
-                                             const std::optional<WarmUpResult>& warm_up_result,
+CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                               model_config,
+                                             const ParallelismConfig&                         parallelism_config,
+                                             const RuntimeConfig&                             runtime_config,
+                                             const KVCacheConfig&                             kv_cache_config,
+                                             const std::optional<WarmUpResult>&               warm_up_result,
                                              const std::optional<SpeculativeExecutionConfig>& sp_config) {
     CacheConfig config     = CacheConfigCreator::createBasicConfig(model_config, parallelism_config);
     uint32_t    block_nums = 0;
@@ -150,16 +210,17 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig& model_config,
         RTP_LLM_LOG_INFO("KVCacheConfig explicitly specified kv cache block num %d", kv_cache_config.test_block_num);
         block_nums = kv_cache_config.test_block_num;
     } else {
-        const auto kv_cache_mem_size = getKVCacheMemorySize(runtime_config, kv_cache_config, model_config, parallelism_config, warm_up_result, sp_config);
-        block_nums                   = kv_cache_mem_size / config.block_size;
+        const auto kv_cache_mem_size = getKVCacheMemorySize(
+            runtime_config, kv_cache_config, model_config, parallelism_config, warm_up_result, sp_config);
+        block_nums = kv_cache_mem_size / config.block_size_bytes;
     }
     RTP_LLM_CHECK_WITH_INFO(block_nums > 0,
                             "kv cache needs at least 1 block but %ld, each block needs %ld MiB memory",
                             block_nums,
-                            config.block_size / 1024 / 1024);
+                            static_cast<long>(config.block_size_bytes / 1024 / 1024));
 
-    const auto kv_cache_seq_len = block_nums * config.seq_size_per_block;
-    config.block_nums           = block_nums;
+    const auto kv_cache_seq_len = static_cast<size_t>(block_nums) * config.seq_size_per_block;
+    config.block_num            = static_cast<int>(block_nums);
     RTP_LLM_LOG_INFO("kv cache block nums is %u, allows storing %ld tokens", block_nums, kv_cache_seq_len);
     if (kv_cache_seq_len < model_config.max_seq_len) {
         RTP_LLM_LOG_WARNING("kv cache block nums %u can only store %ld tokens, less than max_seq_len %ld, "
@@ -172,39 +233,44 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig& model_config,
 }
 
 std::tuple<CacheConfig, CacheConfig>
-CacheConfigCreator::createSpConfig(const ModelConfig& score_model_config,
-                                   const ModelConfig& propose_model_config,
-                                   const ParallelismConfig& parallelism_config,
-                                   const RuntimeConfig& runtime_config,
-                                   const KVCacheConfig& kv_cache_config,
-                                   const SpeculativeExecutionConfig& sp_config,
+CacheConfigCreator::createSpConfig(const ModelConfig&                 score_model_config,
+                                   const ModelConfig&                 propose_model_config,
+                                   const ParallelismConfig&           parallelism_config,
+                                   const RuntimeConfig&               runtime_config,
+                                   const KVCacheConfig&               kv_cache_config,
+                                   const SpeculativeExecutionConfig&  sp_config,
                                    const std::optional<WarmUpResult>& warm_up_result,
-                                   bool is_mtp,
-                                   bool is_eagle) {
+                                   bool                               is_mtp,
+                                   bool                               is_eagle) {
     CacheConfig score_config = CacheConfigCreator::createBasicConfig(score_model_config, parallelism_config);
-
-    CacheConfig propose_config = CacheConfigCreator::createBasicConfig(propose_model_config, parallelism_config, is_mtp);
-    size_t      block_nums     = 0;
+    CacheConfig propose_config =
+        CacheConfigCreator::createBasicConfig(propose_model_config, parallelism_config, is_mtp);
+    size_t block_nums = 0;
     if (kv_cache_config.test_block_num > 0) {
         block_nums = kv_cache_config.test_block_num;
     } else {
-        const auto kv_cache_mem_size = CacheConfigCreator::getKVCacheMemorySize(runtime_config, kv_cache_config, score_model_config, parallelism_config, warm_up_result, sp_config);
+        const auto kv_cache_mem_size = CacheConfigCreator::getKVCacheMemorySize(
+            runtime_config, kv_cache_config, score_model_config, parallelism_config, warm_up_result, sp_config);
         if (is_mtp) {
             auto cache_num = sp_config.gen_num_per_cycle;
             if (is_eagle) {
                 cache_num = 1;
             }
 
-            block_nums = kv_cache_mem_size / (score_config.block_size + propose_config.block_size * cache_num);
+            block_nums = kv_cache_mem_size
+                         / (static_cast<size_t>(score_config.block_size_bytes)
+                            + static_cast<size_t>(propose_config.block_size_bytes) * static_cast<size_t>(cache_num));
         } else {
-            block_nums = kv_cache_mem_size / (score_config.block_size + propose_config.block_size);
+            block_nums = kv_cache_mem_size
+                         / (static_cast<size_t>(score_config.block_size_bytes)
+                            + static_cast<size_t>(propose_config.block_size_bytes));
         }
     }
     RTP_LLM_CHECK_WITH_INFO(block_nums > 0, "kv cache needs at least 1 block but %ld", block_nums);
 
-    score_config.block_nums   = block_nums;
-    propose_config.block_nums = block_nums;
-    RTP_LLM_LOG_INFO("kv cache block nums is %u", block_nums);
+    score_config.block_num   = static_cast<int>(block_nums);
+    propose_config.block_num = static_cast<int>(block_nums);
+    RTP_LLM_LOG_INFO("kv cache block nums is %u", static_cast<unsigned>(block_nums));
     return std::make_tuple(score_config, propose_config);
 }
 

@@ -35,7 +35,9 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     GenerateStreamPtr stream1             = make_shared<NormalGenerateStream>(query1, model_config, runtime_config, resource_context, nullptr);
     query1->input_ids                     = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
     BatchKVCacheResource addr1;
-    addr1.batch_block_id = {{1, 2, 3, 4}};
+    addr1.resetBatchSize(1);
+    addr1.initGroups(1);
+    addr1.blocks(0) = {1, 2, 3, 4};
     stream1->setKVCache(addr1);
     stream1->setIsContextStream(false);
 
@@ -45,7 +47,9 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     GenerateStreamPtr stream2             = make_shared<NormalGenerateStream>(query2, model_config, runtime_config, resource_context, nullptr);
     query2->input_ids                     = createBuffer<int32_t>({2}, {1, 2}, AllocationType::HOST);
     BatchKVCacheResource addr2;
-    addr2.batch_block_id = {{5, 6, 7, 8}};
+    addr2.resetBatchSize(1);
+    addr2.initGroups(1);
+    addr2.blocks(0) = {5, 6, 7, 8};
     stream2->setKVCache(addr2);
     stream2->setIsContextStream(false);
 
@@ -54,7 +58,9 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     query3->generate_config               = make_shared<GenerateConfig>();
     GenerateStreamPtr    stream3          = make_shared<NormalGenerateStream>(query3, model_config, runtime_config, resource_context, nullptr);
     BatchKVCacheResource addr3;
-    addr3.batch_block_id = {{9, 10}};
+    addr3.resetBatchSize(1);
+    addr3.initGroups(1);
+    addr3.blocks(0) = {9, 10};
     stream3->setKVCache(addr3);
 
     std::shared_ptr<GenerateInput> query4 = make_shared<GenerateInput>();
@@ -62,7 +68,9 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     query4->generate_config               = make_shared<GenerateConfig>();
     GenerateStreamPtr    stream4          = make_shared<NormalGenerateStream>(query4, model_config, runtime_config, resource_context, nullptr);
     BatchKVCacheResource addr4;
-    addr4.batch_block_id = {{11, 12, 13, 14}};
+    addr4.resetBatchSize(1);
+    addr4.initGroups(1);
+    addr4.blocks(0) = {11, 12, 13, 14};
     stream4->setKVCache(addr4);
     stream4->setReuseLength(1);
 
@@ -124,7 +132,9 @@ TEST_F(NormalBatchStreamProcessorTest, testSoftmaxProbs) {
     // query1->generate_config->is_streaming   = true;
     GenerateStreamPtr    stream1 = make_shared<NormalGenerateStream>(query1, model_config, runtime_config, resource_context, nullptr);
     BatchKVCacheResource addr1;
-    addr1.batch_block_id = {{1}};
+    addr1.resetBatchSize(1);
+    addr1.initGroups(1);
+    addr1.blocks(0) = {1};
     stream1->setKVCache(addr1);
 
     std::list<GenerateStreamPtr> streams;
@@ -169,7 +179,9 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
     query1->generate_config->calculate_loss = 1;
     GenerateStreamPtr    stream1 = make_shared<NormalGenerateStream>(query1, model_config, runtime_config, resource_context, nullptr);
     BatchKVCacheResource addr1;
-    addr1.batch_block_id = {{1}};
+    addr1.resetBatchSize(1);
+    addr1.initGroups(1);
+    addr1.blocks(0) = {1};
     stream1->setKVCache(addr1);
 
     std::shared_ptr<GenerateInput> query3   = make_shared<GenerateInput>();
@@ -178,7 +190,9 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
     query3->generate_config->calculate_loss = 2;
     GenerateStreamPtr    stream3 = make_shared<NormalGenerateStream>(query3, model_config, runtime_config, resource_context, nullptr);
     BatchKVCacheResource addr3;
-    addr3.batch_block_id = {{9}};
+    addr3.resetBatchSize(1);
+    addr3.initGroups(1);
+    addr3.blocks(0) = {9};
     stream3->setKVCache(addr3);
 
     std::shared_ptr<GenerateInput> query4   = make_shared<GenerateInput>();
@@ -187,7 +201,9 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
     query4->generate_config->calculate_loss = 1;
     GenerateStreamPtr    stream4 = make_shared<NormalGenerateStream>(query4, model_config, runtime_config, resource_context, nullptr);
     BatchKVCacheResource addr4;
-    addr4.batch_block_id = {{11, 12}};
+    addr4.resetBatchSize(1);
+    addr4.initGroups(1);
+    addr4.blocks(0) = {11, 12};
     stream4->setKVCache(addr4);
 
     std::list<GenerateStreamPtr> streams;

@@ -8,14 +8,14 @@
 namespace rtp_llm {
 
 std::unique_ptr<ProposeExecutor>
-createProposeExecutor(const EngineInitParams&                           score_model_engine_init_params,
-                      std::unique_ptr<ProposeModelEngineInitParams>&    propose_model_engine_init_params,
-                      rtp_llm::DeviceBase*                              device,
-                      const std::shared_ptr<CacheManager>&              cache_manager,
-                      const std::vector<std::shared_ptr<CacheManager>>& mtp_cache_manager,
-                      const std::shared_ptr<lora::LoraManager>&         lora_manager) {
-    SpeculativeType sp_type_enum = propose_model_engine_init_params->sp_type;
-    std::string sp_type = SpeculativeExecutionConfig::to_string(sp_type_enum);
+createProposeExecutor(const EngineInitParams&                             score_model_engine_init_params,
+                      std::unique_ptr<ProposeModelEngineInitParams>&      propose_model_engine_init_params,
+                      rtp_llm::DeviceBase*                                device,
+                      const std::shared_ptr<KVCacheManager>&              cache_manager,
+                      const std::vector<std::shared_ptr<KVCacheManager>>& mtp_cache_manager,
+                      const std::shared_ptr<lora::LoraManager>&           lora_manager) {
+    SpeculativeType                  sp_type_enum     = propose_model_engine_init_params->sp_type;
+    std::string                      sp_type          = SpeculativeExecutionConfig::to_string(sp_type_enum);
     std::unique_ptr<ProposeExecutor> propose_executor = nullptr;
     if (sp_type_enum == SP_TYPE_VANILLA) {
         propose_executor.reset(

@@ -26,18 +26,14 @@ struct MlaParams: public rtp_llm::ParamsBase {
 };
 
 struct KVCache {
-    torch::Tensor k_cache_base;
-    torch::Tensor v_cache_base;
-    torch::Tensor k_scale_base;
-    torch::Tensor v_scale_base;
+    torch::Tensor kv_cache_base;
+    torch::Tensor kv_scale_base;
     int           layer_id = -1;
     KVCache       getLayerCache(int idx) {
         KVCache layer_cache;
-        layer_cache.k_cache_base = k_cache_base[idx];
-        layer_cache.v_cache_base = v_cache_base[idx];
-        if (k_scale_base.defined() && k_scale_base.numel() > 0) {
-            layer_cache.k_scale_base = k_scale_base[idx];
-            layer_cache.v_scale_base = v_scale_base[idx];
+        layer_cache.kv_cache_base = kv_cache_base[idx];
+        if (kv_scale_base.defined() && kv_scale_base.numel() > 0) {
+            layer_cache.kv_scale_base = kv_scale_base[idx];
         }
         layer_cache.layer_id = idx;
         return layer_cache;
@@ -55,8 +51,7 @@ struct PyCacheStoreInputs {
     torch::Tensor            request_pd_separation;
     std::vector<std::string> cache_keys;  // [context_batch_size]
     size_t                   tokens_per_block;
-    size_t                   k_block_size;
-    size_t                   v_block_size;
+    size_t                   kv_block_stride_bytes;
     size_t                   scale_block_size;
     bool                     pd_separation   = false;
     size_t                   model_id        = 0;
@@ -96,7 +91,7 @@ struct PyAttentionInputs {
     std::optional<PyCacheStoreInputs> cache_store_inputs;
 
     std::optional<PyPrefillCudaGaphCopyParams> prefill_cuda_graph_copy_params;
-    bool                              is_s_padded = false;
+    bool                                       is_s_padded = false;
 };
 
 struct BertEmbeddingInputs {

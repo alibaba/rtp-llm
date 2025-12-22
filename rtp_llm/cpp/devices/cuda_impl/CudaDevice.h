@@ -213,8 +213,8 @@ public:
     MoeCombineOutput  deepEpLLCombine(const MoeCombineParams& params);
     FfnLayerOutput    deepEpLLMoeFfn(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs);
 
-    void                              prepareCommBuffer(const PrepareCommBufferParams& params) override;
-    void                              maskLogits(Buffer& logits, const Buffer& mask) override;
+    void prepareCommBuffer(const PrepareCommBufferParams& params) override;
+    void maskLogits(Buffer& logits, const Buffer& mask) override;
 
     void perfRangePush(const std::string& name) const override;
     void perfRangePop() const override;
@@ -226,7 +226,7 @@ public:
                              int                     batch_size);
 
     ParamsPtr prepareTrtAttn(const AttentionConfigs& configs,
-                             const BufferPtr&        k_cache,
+                             const BufferPtr&        kv_cache,
                              const BufferPtr&        kv_cache_block_id,
                              int                     batch_size);
 
