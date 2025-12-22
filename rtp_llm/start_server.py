@@ -18,7 +18,7 @@ CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
 from rtp_llm.distribute.worker_info import WorkerInfo, g_parallel_info
-from rtp_llm.server.server_args.server_args import setup_args, EnvArgumentParser
+from rtp_llm.server.server_args.server_args import EnvArgumentParser, setup_args
 from rtp_llm.utils.concurrency_controller import init_controller
 from rtp_llm.utils.process_manager import ProcessManager
 
@@ -132,7 +132,7 @@ def start_frontend_server_impl(
     return frontend_processes
 
 
-def should_auto_configure_deepep() -> bool:
+def should_auto_configure_deepep(args: argparse.Namespace) -> bool:
     """
     Check if DeepEP should be auto-configured.
     Returns True if all DeepEP arguments are None (not set), meaning user hasn't manually configured.
@@ -272,11 +272,21 @@ def auto_configure_deepep(args: argparse.Namespace):
 
 
 def get_model_type_and_update_env(parser: EnvArgumentParser, args: argparse.Namespace):
-    if hasattr(args, 'checkpoint_path') and args.checkpoint_path is not None and args.checkpoint_path != "":
+    if (
+        hasattr(args, "checkpoint_path")
+        and args.checkpoint_path is not None
+        and args.checkpoint_path != ""
+    ):
         model_path = args.checkpoint_path
-        current_model_type = os.environ.get("MODEL_TYPE", StaticConfig.model_config.model_type)
+        current_model_type = os.environ.get(
+            "MODEL_TYPE", StaticConfig.model_config.model_type
+        )
         if current_model_type is None or current_model_type == "":
-            if hasattr(args, 'model_type') and args.model_type is not None and args.model_type != "":
+            if (
+                hasattr(args, "model_type")
+                and args.model_type is not None
+                and args.model_type != ""
+            ):
                 config_model_type = args.model_type
             else:
                 model_info = get_hf_model_info(model_path)
@@ -304,7 +314,6 @@ def start_server(parser: EnvArgumentParser, args: argparse.Namespace):
     worker_config = StaticConfig.worker_config
     # Check if DeepEP should be auto-configured before get_model_type_and_update_env
     # because get_model_type_and_update_env may update environment variables
-    should_auto_config = should_auto_configure_deepep()
 
     get_model_type_and_update_env(parser, args)
 
@@ -319,7 +328,7 @@ def start_server(parser: EnvArgumentParser, args: argparse.Namespace):
     # Create process manager with config values
     process_manager = ProcessManager(
         shutdown_timeout=worker_config.shutdown_timeout,
-        monitor_interval=worker_config.monitor_interval
+        monitor_interval=worker_config.monitor_interval,
     )
 
     try:

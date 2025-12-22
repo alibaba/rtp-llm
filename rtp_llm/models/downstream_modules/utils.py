@@ -15,7 +15,6 @@ from rtp_llm.models.downstream_modules import (
 from rtp_llm.models.downstream_modules.reranker.qwen3_reranker import (
     Qwen3RerankerModule,
 )
-from rtp_llm.ops import TaskType
 
 
 def create_custom_module(
