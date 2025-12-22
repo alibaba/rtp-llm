@@ -182,8 +182,9 @@ class GenericMoeDecoderLayer(nn.Module):
                 quant_config,
             )
         else:
+            attn_configs = config.getAttentionConfigs(parallelism_config.tp_size)
             self.self_attn = CausalAttention(
-                config, parallelism_config, weights, quant_config
+                attn_configs, parallelism_config, weights, config.layernorm_eps, quant_config
             )
 
         # Determine if this is a Dense layer (before first MoE layer or dense only)
