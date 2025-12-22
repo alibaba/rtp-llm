@@ -71,7 +71,7 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
         auto&               nccl_param = tp_nccl_param_;
         std::vector<size_t> tp_ranks   = fcNcclGatherRanks(nccl_param, stream_);
         // Initialization may fail, and the variable will still be nullptr. When allreduce is called, it will fall back to the normal allreduce.
-        custom_allreduce_comm_         = initCustomAllReduceComm(nccl_param, tp_ranks, stream_);
+        custom_allreduce_comm_         = initCustomAllReduceComm(nccl_param, tp_ranks, stream_, params.hw_kernel_config);
         quick_allreduce_comm_          = initQuickAllReduceComm(nccl_param, tp_ranks, stream_);
     }
 

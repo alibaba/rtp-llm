@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/cuda/nccl/nccl_utils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 
 // aiter custom all reduce kernel
 #include "custom_all_reduce.h"
@@ -18,7 +19,7 @@
 namespace rtp_llm {
 class CustomAllReduceComm {
 public:
-    CustomAllReduceComm(const std::vector<size_t>& tp_ranks, size_t rank, size_t rank_index);
+    CustomAllReduceComm(const std::vector<size_t>& tp_ranks, size_t rank, size_t rank_index, const HWKernelConfig& hw_kernel_config);
 
     ~CustomAllReduceComm();
 
@@ -26,9 +27,14 @@ public:
 
     void allReduce(torch::Tensor& input_tensor, torch::Tensor& output_tensor);
 
+    // NOTE(liyangcheng.lyc): the implementation of custom all gather is placed together with custom all reduce
+    void allGather(torch::Tensor& input_tensor, torch::Tensor& output_tensor);
+
     bool checkAllReduceAvailable(size_t elts_total_num, DataType data_type, size_t world_size);
 
-    static bool shouldCustomAR(const std::vector<size_t>& tp_ranks, size_t rank);
+    bool checkAllGatherAvailable();
+
+    static bool shouldCustomAR(const std::vector<size_t>& tp_ranks, size_t rank, const HWKernelConfig& hw_kernel_config);
 
     void registerGraphBuffers();
 
@@ -55,9 +61,11 @@ private:
     torch::Tensor       rank_data_;
     int64_t             fa_;
     NcclParam           nccl_para_;
+    bool                ft_disable_custom_ar_ = true;
+    bool                rocm_disable_custom_ag_ = true;
 };
 
 std::unique_ptr<CustomAllReduceComm>
-initCustomAllReduceComm(const NcclParam& nccl_para, const std::vector<size_t>& tp_ranks, hipStream_t stream);
+initCustomAllReduceComm(const NcclParam& nccl_para, const std::vector<size_t>& tp_ranks, hipStream_t stream, const HWKernelConfig& hw_kernel_config);
 
 }  // namespace rtp_llm
