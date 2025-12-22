@@ -191,6 +191,7 @@ cc_library(
         "layernorm/fusedQkRmsNorm.cpp",
         "deepep/rocm_ffn_moe_fp8_ll_test.cc",
         "custom_ar/rocm_custom_ar_test.cc",
+        "custom_ar/rocm_custom_ag_test.cc",
     ]),
     deps = torch_deps() + [
         "//rtp_llm/cpp/devices/rocm_impl:rocm_impl",
@@ -526,4 +527,25 @@ py_test(
 #         "rocm",
 #     ],
 #     timeout = "eternal"
+# )
+
+# py_test(
+#     name = "rocm_custom_ag_test",
+#     srcs = [
+#          "custom_ar/rocm_custom_ag_test.py",
+#     ],
+#     data = [
+#         "//:th_transformer",
+#         ":rocm_test_ops",
+#     ],
+#     deps = [
+#         "//rtp_llm:torch",
+#         "//rtp_llm:rtp_llm_lib",
+#     ],
+#     env = {
+#         "DEVICE_RESERVE_MEMORY_BYTES": "1024000",
+#     },
+#     tags = [
+#         "rocm",
+#     ],
 # )
