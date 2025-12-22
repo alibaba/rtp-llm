@@ -1,7 +1,5 @@
 #include "rtp_llm/cpp/devices/rocm_impl/ROCmDevice.h"
 #include "rtp_llm/cpp/devices/CommonDefines.h"
-#include "rtp_llm/cpp/kernels/sampling_topk_kernels.h"
-#include "rtp_llm/cpp/kernels/sampling_topp_kernels.h"
 #include "rtp_llm/cpp/kernels/sampling_penalty_kernels.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/kernels/rocm/sampling/sampling.h"
