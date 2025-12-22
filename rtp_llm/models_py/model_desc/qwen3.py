@@ -29,7 +29,10 @@ class Qwen3DecoderLayer(nn.Module):
         self, config: ModelConfig, parallelism_config: ParallelismConfig, weights: Dict[str, torch.Tensor], quant_config: Optional[object] = None
     ):
         super().__init__()
-        self.self_attn = CausalAttention(config, parallelism_config, weights, quant_config)
+        attn_configs = config.getAttentionConfigs(parallelism_config.tp_size)
+        self.self_attn = CausalAttention(
+            attn_configs, parallelism_config, weights, config.layernorm_eps, quant_config
+        )
         self.mlp = FusedSiluActDenseMLP(config.activation_type, parallelism_config, weights, quant_config)
         self.input_layernorm = RMSNorm(
             weights[W.pre_ln_gamma], eps=config.layernorm_eps
