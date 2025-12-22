@@ -573,7 +573,6 @@ struct AttentionCommonInputs {
     std::optional<CacheStoreInputs> cache_store_inputs;
 
     ConstBufferPtr cu_seqlens;
-    ConstBufferPtr cu_seqlens_without_prefix;
     ConstBufferPtr cu_kv_seqlens;
     ConstBufferPtr kv_seqlens;
     ConstBufferPtr padding_offset;

@@ -24,6 +24,7 @@ from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.model_factory import ModelFactory
 import rtp_llm.models
 
+
 class AutoModel:
     def __init__(
         self,
@@ -36,7 +37,7 @@ class AutoModel:
     ):
         # set configs instead of environment variables
         self._set_configs()
-        
+
         model_path, model_type = get_model_info_from_hf(model_path_or_name, revision)
         self.py_env_configs.model_args.model_type = model_type
         self.py_env_configs.model_args.ckpt_path = model_path
@@ -47,7 +48,7 @@ class AutoModel:
 
         # Create EngineConfig from py_env_configs
         engine_config = EngineConfig.create(self.py_env_configs)
-        
+
         # Create model configs
         model_config = ModelFactory.create_model_config(
             model_args=self.py_env_configs.model_args,
@@ -59,13 +60,13 @@ class AutoModel:
             quantization_config=self.py_env_configs.quantization_config,
             render_config=self.py_env_configs.render_config,
         )
-        
+
         # Update engine_config based on model_config
         ModelFactory.update_engine_config_from_model_config(
             engine_config=engine_config,
             model_config=model_config,
         )
-        
+
         # Create model using ModelFactory
         self.gpt_model = ModelFactory._create_model(
             model_config=model_config,
@@ -73,7 +74,7 @@ class AutoModel:
             vit_config=None,
             merge_lora=False,
         )
-        
+
         # Load the model
         self.gpt_model.load()
         self.compute_dtype = self.gpt_model.weight.dtype
@@ -130,10 +131,10 @@ class AutoModel:
         """Set configuration structures instead of environment variables."""
         # Create PyEnvConfigs to hold all configurations
         self.py_env_configs = PyEnvConfigs()
-        
+
         # Set ModelSpecificConfig.load_python_model = True (equivalent to LOAD_PYTHON_MODEL=1)
         self.py_env_configs.model_specific_config.load_python_model = True
-        
+
         # Set DeviceResourceConfig.device_reserve_memory_bytes (equivalent to DEVICE_RESERVE_MEMORY_BYTES)
         # Default: 2GB = 2 * 1024 * 1024 * 1024 bytes
         if self.py_env_configs.device_resource_config.device_reserve_memory_bytes == 0:
@@ -168,16 +169,12 @@ class AutoModel:
         self.kv_cache.k_cache_base = k_cache_base
         self.kv_cache.v_cache_base = v_cache_base
 
-
     def _prepare_prefill_attention_inputs(self, input_length: int) -> PyAttentionInputs:
         need_block_nums = self._check_block_nums(input_length)
         attention_inputs = PyAttentionInputs()
         attention_inputs.input_lengths = torch.tensor([input_length], dtype=torch.int32)
         attention_inputs.sequence_lengths = torch.tensor([], dtype=torch.int32)
         attention_inputs.cu_seqlens = torch.tensor(
-            [0, input_length], dtype=torch.int32, device=self.device
-        )
-        attention_inputs.cu_seqlens_without_prefix = torch.tensor(
             [0, input_length], dtype=torch.int32, device=self.device
         )
         attention_inputs.prefix_lengths = torch.tensor([0], dtype=torch.int32)

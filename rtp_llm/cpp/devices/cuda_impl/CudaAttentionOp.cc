@@ -206,7 +206,6 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
                 nullptr,
             params.common.padding_offset->data<int>(),
             params.common.cu_seqlens->data<int>(),
-            params.common.cu_seqlens_without_prefix->data<int>(),
             rope_cache.used,
             checkRopeCache(params.configs.rope_config, rope_cache) ? rope_cache.data.data_ptr<float>() : nullptr,
             batch_size,

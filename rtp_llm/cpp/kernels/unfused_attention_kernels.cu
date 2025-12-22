@@ -952,7 +952,6 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
                                                                             const T* __restrict qkv_bias,
                                                                             const int*   padding_offset,
                                                                             const int*   cu_seqlens,
-                                                                            const int*   cu_seqlens_without_prefix,
                                                                             const float* rope_cache,
                                                                             const int    threads_per_token,
                                                                             const int    tokens_per_block,
@@ -1000,10 +999,10 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
         return;
     }
 
-    const int pre_len_without_prefix = cu_seqlens_without_prefix[batch_idx];
-    const int curr_seq_len           = cu_seqlens_without_prefix[batch_idx + 1] - pre_len_without_prefix;
-    const int block_token_idx        = tidx / threads_per_token;
-    const int curr_token_idx         = blockIdx.y * tokens_per_block + block_token_idx;
+    const int pre_len         = cu_seqlens[batch_idx];
+    const int curr_seq_len    = cu_seqlens[batch_idx + 1] - pre_len;
+    const int block_token_idx = tidx / threads_per_token;
+    const int curr_token_idx  = blockIdx.y * tokens_per_block + block_token_idx;
     if (curr_token_idx >= curr_seq_len) {
         return;
     }
@@ -1016,7 +1015,7 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
         return;
     }
 
-    const int token_idx            = pre_len_without_prefix + curr_token_idx;
+    const int token_idx            = pre_len + curr_token_idx;
     const int token_padding_offset = padding_offset == nullptr ? 0 : padding_offset[token_idx];
     const int tgt_token_idx        = token_idx + token_padding_offset;
     const int seq_idx              = tgt_token_idx % seq_len;
@@ -1049,11 +1048,10 @@ __global__ void add_fusedQKV_bias_transpose_non_int8_with_rope_cache_kernel(T* q
         int    q_store_idx = 0;
         int    q_idx_off   = 1;
 
-        const int pre_len        = cu_seqlens[batch_idx];
-        int       head_idx       = bidz * HEAD_Q_BLOCK_NUM;
-        size_t    hidden_idx     = head_idx * size_per_head + lane_id * vec_size;
-        size_t    src_q_idx      = token_idx * (n + 2 * kv_n) + hidden_idx;
-        size_t    src_q_last_idx = 0;
+        int    head_idx       = bidz * HEAD_Q_BLOCK_NUM;
+        size_t hidden_idx     = head_idx * size_per_head + lane_id * vec_size;
+        size_t src_q_idx      = token_idx * (n + 2 * kv_n) + hidden_idx;
+        size_t src_q_last_idx = 0;
 
         size_t hidden_permuted_idx     = hidden_idx + rope_config.dim / 2;
         size_t src_q_permuted_idx      = src_q_idx + rope_config.dim / 2;
@@ -2155,7 +2153,6 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
                                                      qkv_bias,                                                         \
                                                      padding_offset,                                                   \
                                                      cu_seqlens,                                                       \
-                                                     cu_seqlens_without_prefix,                                        \
                                                      rope_cache,                                                       \
                                                      threads_per_token,                                                \
                                                      tokens_per_block,                                                 \
@@ -2188,7 +2185,6 @@ void invokeAddFusedQKVBiasTranspose(T*                             q_no_transpos
                                     const T*                       qkv_bias,
                                     const int*                     padding_offset,
                                     const int*                     cu_seqlens,
-                                    const int*                     cu_seqlens_without_prefix,
                                     const bool                     use_rope_cache,
                                     const float*                   rope_cache,
                                     const int                      batch_size,
@@ -5082,7 +5078,6 @@ INSTANTIATESPLITQKV(__nv_bfloat16);
                                                  const T*                       qkv_bias,                              \
                                                  const int*                     padding_offset,                        \
                                                  const int*                     cu_seqlens,                            \
-                                                 const int*                     cu_seqlens_without_prefix,             \
                                                  const bool                     use_rope_cache,                        \
                                                  const float*                   rope_cache,                            \
                                                  const int                      batch_size,                            \
