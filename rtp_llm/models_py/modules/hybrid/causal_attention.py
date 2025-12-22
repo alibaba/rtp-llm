@@ -3,11 +3,10 @@ from typing import Dict, Optional
 import torch
 import torch.nn as nn
 
-from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
-from rtp_llm.ops import ParallelismConfig
+from rtp_llm.ops import ParallelismConfig, AttentionConfigs
 from rtp_llm.ops.compute_ops import DeviceType, KVCache, get_device
 from rtp_llm.utils.model_weight import W
 
@@ -23,25 +22,20 @@ class CausalAttention(nn.Module):
 
     def __init__(
         self,
-        config: ModelConfig,
+        attn_config: AttentionConfigs,
         parallelism_config: ParallelismConfig,
         weights: Dict[str, torch.Tensor],
+        layernorm_eps: float,
         quant_config: Optional[object] = None,
     ):
         super().__init__()
-        self.config = config
         self.parallelism_config = parallelism_config
-        self.head_dim = config.hidden_size // config.attn_config.head_num
-        self.head_num = config.attn_config.head_num
-        self.num_key_value_groups = (
-            config.attn_config.head_num // config.attn_config.kv_head_num
-        )
-        self.q_size = config.attn_config.head_num * self.head_dim
+        self.head_num = attn_config.head_num
+        self.num_key_value_groups = attn_config.head_num // attn_config.kv_head_num
+        self.head_dim = attn_config.size_per_head
+        self.q_size = attn_config.head_num * self.head_dim
 
         # Create linear layers using LinearFactory
-        # Get quant_config from parameter or config
-        if quant_config is None:
-            quant_config = config.quant_config
         self.qkv_proj = LinearFactory.create_linear_from_weights(
             weights, W.attn_qkv_w, W.attn_qkv_s, W.attn_qkv_b, quant_config=quant_config
         )
@@ -54,10 +48,10 @@ class CausalAttention(nn.Module):
             self.qk_fuse_norm = FusedQKRMSNorm(
                 weights[W.q_ln_gamma],
                 weights[W.k_ln_gamma],
-                config.attn_config.head_num // parallelism_config.tp_size,
-                config.attn_config.kv_head_num // parallelism_config.tp_size,
-                config.attn_config.size_per_head,
-                config.layernorm_eps,
+                attn_config.head_num,
+                attn_config.kv_head_num,
+                attn_config.size_per_head,
+                layernorm_eps,
             )
 
     def forward(
