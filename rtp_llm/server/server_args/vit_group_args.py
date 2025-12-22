@@ -27,7 +27,7 @@ def init_vit_group_args(parser, vit_config):
         env_name="VIT_SEPARATION",
         bind_to=(vit_config, "vit_separation"),
         type=_convert_vit_separation,
-        default=VitSeparation.VIT_SEPARATION_LOCAL,
+        default=0,
         help="VIT是否和主进程进行分离",
     )
     vit_group.add_argument(
