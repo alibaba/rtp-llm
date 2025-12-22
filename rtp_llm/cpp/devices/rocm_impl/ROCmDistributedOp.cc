@@ -162,6 +162,31 @@ void ROCmDevice::allGather(const AllGatherParams& params) {
                               "Buffer size %ld must be divisible by world size %d",
                               recv_buffer->size(),
                               nccl_param.world_size_);
+
+        // invoke aiter custom all-gather
+        // custom all-gather is integrated into custom all-reduce
+        bool use_custom_ag =
+            params.mode == ParallelMode::TP
+            and custom_allreduce_comm_
+            and custom_allreduce_comm_->checkAllGatherAvailable();
+
+        if (use_custom_ag) {
+            torch::Tensor input_tensor;
+
+            if (params.inplace) {
+                auto option_ = torch::dtype(dataTypeToTorchType(recv_buffer->type())).device(memoryTypeToTorchDevice(recv_buffer->where())).requires_grad(false);
+                std::vector<int64_t> shape_{static_cast<int64_t>(data_num)};
+                input_tensor = torch::from_blob(recv_buffer->dataWithOffset(nccl_param.rank_ * data_num), shape_, option_);
+            } else {
+                input_tensor = Buffer2torchTensor(*(params.send_buffers[i]), false);
+            }
+            torch::Tensor output_tensor = Buffer2torchTensor(*recv_buffer, false);
+
+            custom_allreduce_comm_->allGather(input_tensor, output_tensor);
+
+            continue;
+        }
+
         if (params.inplace) {
             const auto data_size = data_num * recv_buffer->typeSize();
             NCCLCHECK(ncclAllGather((char*)(recv_buffer->data()) + nccl_param.rank_ * data_size,
