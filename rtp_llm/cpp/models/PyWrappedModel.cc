@@ -51,17 +51,10 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     // Calculate cu_seqlens
     int           batch_size = py_attn_inputs.input_lengths.size(0);
     torch::Tensor cu_seqlens = torch::zeros({batch_size + 1}, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
-    torch::Tensor cu_seqlens_without_prefix =
-        torch::zeros({batch_size + 1}, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
+    cu_seqlens               = cu_seqlens.cuda();
+    cu_seqlens.slice(0, 1, batch_size + 1) = py_attn_inputs.input_lengths.cumsum(0);
 
-    cu_seqlens                = cu_seqlens.cuda();
-    cu_seqlens_without_prefix = cu_seqlens_without_prefix.cuda();
-
-    cu_seqlens.slice(0, 1, batch_size + 1)                = py_attn_inputs.input_lengths.cumsum(0);
-    cu_seqlens_without_prefix.slice(0, 1, batch_size + 1) = py_attn_inputs.input_lengths.cumsum(0);
-
-    py_attn_inputs.cu_seqlens                = cu_seqlens;
-    py_attn_inputs.cu_seqlens_without_prefix = cu_seqlens_without_prefix;
+    py_attn_inputs.cu_seqlens = cu_seqlens;
     py_attn_inputs.sequence_lengths.pin_memory();
     return py_attn_inputs;
 }
@@ -199,7 +192,8 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
     } else {
         hidden_states =
             device_->allocateBuffer({description_.data_type,
-                                     {inputs.combo_tokens->shape()[0], description_.attention_conf.head_num * description_.attention_conf.size_per_head},
+                                     {inputs.combo_tokens->shape()[0],
+                                      description_.attention_conf.head_num * description_.attention_conf.size_per_head},
                                      AllocationType::DEVICE});
         int offset = 0;
         for (int i = 0; i < py_model_outputs.size(); i++) {

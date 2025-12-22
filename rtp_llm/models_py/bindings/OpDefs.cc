@@ -76,7 +76,6 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("dtype", &PyAttentionInputs::dtype)
         .def_readwrite("kv_block_offset", &PyAttentionInputs::kv_block_offset)
         .def_readwrite("cu_seqlens", &PyAttentionInputs::cu_seqlens)
-        .def_readwrite("cu_seqlens_without_prefix", &PyAttentionInputs::cu_seqlens_without_prefix)
         .def_readwrite("padding_offset", &PyAttentionInputs::padding_offset)
         .def_readwrite("cache_store_inputs", &PyAttentionInputs::cache_store_inputs)
         .def("__repr__", [](const PyAttentionInputs& self) { return "PyAttentionInputs"; })
