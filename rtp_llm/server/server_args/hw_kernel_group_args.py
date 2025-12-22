@@ -146,6 +146,14 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
         help="控制是否禁用 DPC 的随机性",
     )
 
+    hw_kernel_group.add_argument(
+        "--rocm_disable_custom_ag",
+        env_name="ROCM_DISABLE_CUSTOM_AG",
+        bind_to=(hw_kernel_config, 'rocm_disable_custom_ag'),
+        type=str2bool,
+        default=None,
+        help="设置为 `True` 时，禁用ROCm平台自定义的 AllGather (AG) 实现，可能回退到标准库（如 RCCL）的 AllGather。",
+    )
 
 def _parse_comma_separated_ints(
     config: str, config_name: str, item_name: str, raise_on_empty: bool = True
