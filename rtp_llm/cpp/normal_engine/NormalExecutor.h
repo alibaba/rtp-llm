@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/engine_base/Executor.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
@@ -18,8 +19,10 @@ public:
     explicit NormalExecutor(const EngineInitParams&                   params,
                             const std::shared_ptr<KVCacheManager>&    cache_manager,
                             rtp_llm::DeviceBase*                      device,
-                            const std::shared_ptr<lora::LoraManager>& lora_manager = nullptr,
-                            bool                                      warm_up      = false);
+                            const std::shared_ptr<lora::LoraManager>& lora_manager        = nullptr,
+                            bool                                      warm_up             = false,
+                            bool                                      is_propose          = false,
+                            int                                       propose_model_index = 0);
     ~NormalExecutor() {
         device_->profileStop();
     }
@@ -51,6 +54,9 @@ private:
     MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector> tps_reporter_;
     bool                                                                     enable_ffn_disaggregate_ = false;
     bool                                                                     enable_detail_log_       = false;
+
+    bool is_propose_          = false;
+    int  propose_model_index_ = 0;
 };
 
 }  // namespace rtp_llm

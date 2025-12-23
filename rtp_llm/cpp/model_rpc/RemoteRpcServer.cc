@@ -91,14 +91,6 @@ void RemoteRpcServer::initCacheStore(const EngineInitParams&                init
 
     device->setCacheStore(cache_store_);
     cache_manager->regUserMr(maga_init_params_.model_id);
-    if (propose_params) {
-        if (propose_params->mtp_model_params_) {
-            for (size_t mtp_model_id = 0; mtp_model_id < propose_params->mtp_model_params_->size(); mtp_model_id++) {
-                const auto& mtp_cache_manager = engine_->resourceContext().mtp_cache_managers[mtp_model_id];
-                mtp_cache_manager->regUserMr(propose_params->mtp_model_params_->at(mtp_model_id)->model_id);
-            }
-        }
-    }
 
     resource_.cache_store = std::dynamic_pointer_cast<NormalCacheStore>(cache_store_);
 }

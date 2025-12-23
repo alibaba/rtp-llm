@@ -23,7 +23,7 @@ bool HybridLayerKVCacheAllocator::init() {
         return false;
     }
 
-    std::vector<int> layer_ids(config_.layer_ids[0]);
+    std::vector<int> layer_ids(config_.global_layer_ids[0]);
     if (config_.cache_specs.empty()) {
         RTP_LLM_LOG_ERROR("no cache_specs found in CacheConfig");
         return false;

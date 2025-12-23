@@ -5,11 +5,11 @@
 namespace rtp_llm {
 
 // LayerFirstLayoutStrategy
-bool LayerFirstLayoutStrategy::init(const BlockPoolConfig& config,
-                                    torch::Tensor&         kv_cache_buffer,
-                                    torch::Tensor&         kv_scale_buffer,
-                                    void*                  cache_base_ptr,
-                                    rtp_llm::DataType      data_type) {
+bool LayerFirstLayoutStrategy::init(const MemoryLayoutConfig& config,
+                                    torch::Tensor&            kv_cache_buffer,
+                                    torch::Tensor&            kv_scale_buffer,
+                                    void*                     cache_base_ptr,
+                                    rtp_llm::DataType         data_type) {
     config_         = config;
     cache_base_ptr_ = cache_base_ptr;
     data_type_      = data_type;
@@ -71,7 +71,7 @@ bool LayerFirstLayoutStrategy::init(const BlockPoolConfig& config,
         kv_scale_base_ptr_ = kv_scale_buffer.data_ptr();
 
         // Keep a buffer view for kernels / model (FP32 scale blocks).
-        std::vector<size_t> scale_shape  = {layer_num, block_num * 2, local_head_num_kv, seq_size_per_block};
+        std::vector<size_t> scale_shape  = {layer_num, block_num, 2, local_head_num_kv, seq_size_per_block};
         kv_cache_buffer_.kv_scale_blocks = std::make_shared<rtp_llm::Buffer>(
             memory_type, rtp_llm::DataType::TYPE_FP32, scale_shape, kv_scale_base_ptr_);
 
@@ -93,11 +93,9 @@ bool LayerFirstLayoutStrategy::init(const BlockPoolConfig& config,
                               layer_tensor.numel());
         }
 
-#ifdef ENABLE_FP8
         if (data_type_ == rtp_llm::TYPE_FP8_E4M3) {
             Buffer2torchTensor(kv_cache_buffer_.kv_scale_blocks, false).fill_(1.0);
         }
-#endif
     }
 
     RTP_LLM_LOG_INFO("LayerFirstLayoutStrategy initialized successfully");

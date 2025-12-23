@@ -7,10 +7,20 @@ bool KVCacheGroup::init() {
     auto layer_tensors = block_pool_->layerCacheBase();
     auto scale_tensors = block_pool_->layerScaleCacheBase();
 
-    for (int i = 0; i < layer_ids_.size(); ++i) {
-        gloabl_layer_to_kv_tensors[layer_ids_[i]] = layer_tensors[i];
+    for (int i = 0; i < static_cast<int>(layer_ids_.size()); ++i) {
+        const int global_layer_id = layer_ids_[i];
+        RTP_LLM_CHECK_WITH_INFO(global_layer_id >= 0 && static_cast<size_t>(global_layer_id) < layer_tensors.size(),
+                                "global_layer_id out of range in KVCacheGroup::init: id=%d tensors_size=%zu",
+                                global_layer_id,
+                                layer_tensors.size());
+        gloabl_layer_to_kv_tensors[global_layer_id] = layer_tensors[static_cast<size_t>(global_layer_id)];
+
         if (!scale_tensors.empty()) {
-            gloabl_layer_to_kv_scale_tensors[layer_ids_[i]] = scale_tensors[i];
+            RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(global_layer_id) < scale_tensors.size(),
+                                    "global_layer_id out of range in scale_tensors: id=%d tensors_size=%zu",
+                                    global_layer_id,
+                                    scale_tensors.size());
+            gloabl_layer_to_kv_scale_tensors[global_layer_id] = scale_tensors[static_cast<size_t>(global_layer_id)];
         }
         gloabl_layer_to_local_layer[layer_ids_[i]] = i;
     }
