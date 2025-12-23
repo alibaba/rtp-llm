@@ -78,8 +78,8 @@ public:
     std::shared_ptr<AsyncContext>
     asyncStoreCache(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context);
 
-    // broadcast tp for single rank
-    bool broadcastTp(const BroadcastTpRequestPB& request, BroadcastTpResponsePB& response);
+    // for every single rank
+    bool executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response);
 
 private:
     bool initConnectorCoordinator();
