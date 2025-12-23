@@ -12,7 +12,8 @@ from typing import Optional
 import torch
 import triton
 import triton.language as tl
-from fla.ops.utils.op import exp
+
+from rtp_llm.models_py.triton_kernels.fla.op import exp
 
 
 @triton.heuristics(

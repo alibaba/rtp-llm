@@ -1,7 +1,8 @@
 import torch
 import triton
 import triton.language as tl
-from fla.ops.utils.index import prepare_chunk_indices
+
+from rtp_llm.models_py.triton_kernels.fla.index import prepare_chunk_indices
 
 
 @triton.jit

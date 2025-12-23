@@ -242,9 +242,9 @@ class ModelLoader:
             f"load method: {load_method}, finally choose load method: {load_method}"
         )
 
-        if load_method == LoadMethod.FASTSAFETENSORS:
+        if load_method.lower() == LoadMethod.FASTSAFETENSORS:
             return self._load_from_fastsafetensor(device)
-        elif load_method == LoadMethod.SCRATCH:
+        elif load_method.lower() == LoadMethod.SCRATCH:
             return self._load_from_scratch(device)
         else:
             raise ValueError(f"Unknown load method: {load_method}")
