@@ -18,9 +18,7 @@ from rtp_llm.ops.compute_ops import (
 class FlashInferPrefillImpl(FMHAPrefillImplBase):
 
     def __init__(
-        self, 
-        attn_configs: AttentionConfigs,
-        attn_inputs: PyAttentionInputs
+        self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> None:
         super().__init__(
             FlashInferPrefillOp(attn_configs),
@@ -40,16 +38,14 @@ class FlashInferPrefillImpl(FMHAPrefillImplBase):
 class FlashInferDecodeImpl(FMHADecodeImplBase):
 
     def __init__(
-        self,
-        attn_configs: AttentionConfigs,
-        attn_inputs: PyAttentionInputs
+        self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> None:
         super().__init__(
             FlashInferDecodeOp(attn_configs),
             FusedRopeKVCacheDecodeOp(attn_configs),
             attn_inputs,
         )
-        self.seq_size_per_block = config.seq_size_per_block
+        self.seq_size_per_block = attn_configs.tokens_per_block
         self.support_ = self.support_ and (not attn_configs.use_mla)
 
     @staticmethod

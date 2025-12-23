@@ -17,12 +17,12 @@ from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models.rotary_embedding.deepseek_rotary_embedding import (
     DeepseekV3YarnRotaryEmbedding,
 )
-from rtp_llm.ops import ParallelismConfig
 from rtp_llm.models_py.modules import LinearFactory
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla_wrapper import (
     MlaFlashInferPrefillImpl,
 )
 from rtp_llm.models_py.modules.hybrid.test.mla_attention_ref import attention_ref
+from rtp_llm.ops import ParallelismConfig
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs
 from rtp_llm.utils.model_weight import W
 
@@ -115,8 +115,11 @@ class MLATest(TestCase):
         self.config.attn_config.softmax_extra_scale = 1.0
         self.config.attn_config.use_mla = True
         self.config.attn_config.size_per_head = 192
-        self.scaling = (self.config.attn_config.nope_head_dim + self.config.attn_config.rope_head_dim) ** (-0.5)
-        
+        self.scaling = (
+            self.config.attn_config.nope_head_dim
+            + self.config.attn_config.rope_head_dim
+        ) ** (-0.5)
+
         self.parallelism_config = ParallelismConfig()
         self.parallelism_config.tp_size = 1
         self.parallelism_config.tp_rank = 0
@@ -146,7 +149,11 @@ class MLATest(TestCase):
         cos_sin_cache = create_cos_sin_cache()
 
         fmha_impl = MlaFlashInferPrefillImpl(
-            self.config.attn_config, attn_inputs, layer_weights, cos_sin_cache, quant_config=self.config.quant_config
+            self.config.attn_config,
+            attn_inputs,
+            layer_weights,
+            cos_sin_cache,
+            quant_config=self.config.quant_config,
         )
         fmha_impl.prepare(attn_inputs)
 
@@ -154,7 +161,8 @@ class MLATest(TestCase):
             [
                 num_tokens,
                 self.config.attn_config.head_num,
-                self.config.attn_config.nope_head_dim + self.config.attn_config.rope_head_dim,
+                self.config.attn_config.nope_head_dim
+                + self.config.attn_config.rope_head_dim,
             ],
             dtype=torch.bfloat16,
             device=device,
@@ -176,7 +184,8 @@ class MLATest(TestCase):
             [
                 mock_page_num,
                 page_size,
-                self.config.attn_config.kv_lora_rank + self.config.attn_config.rope_head_dim,
+                self.config.attn_config.kv_lora_rank
+                + self.config.attn_config.rope_head_dim,
             ],
             dtype=torch.bfloat16,
             device=device,
@@ -187,7 +196,10 @@ class MLATest(TestCase):
 
         k_cache, v_cache = torch.split(
             kv_cache.k_cache_base,
-            [self.config.attn_config.kv_lora_rank, self.config.attn_config.rope_head_dim],
+            [
+                self.config.attn_config.kv_lora_rank,
+                self.config.attn_config.rope_head_dim,
+            ],
             dim=-1,
         )
         page.append_paged_mla_kv_cache(
@@ -197,7 +209,7 @@ class MLATest(TestCase):
             fmha_impl.rope_params.positions_d,
             k_cache,
             v_cache,
-            fmha_impl.rope_kvcache_impl.cuda_graph_kv_indices,
+            fmha_impl.rope_params.page_indice_d,
             fmha_impl.rope_params.decode_page_indptr_d,
             fmha_impl.rope_params.paged_kv_last_page_len_d,
         )
@@ -228,7 +240,9 @@ class MLATest(TestCase):
         k_nope = self.k_nope_proj(compressed_kv)
         value_states = self.v_proj(compressed_kv)
 
-        k_nope = k_nope.view(-1, self.config.attn_config.head_num, self.config.attn_config.nope_head_dim)
+        k_nope = k_nope.view(
+            -1, self.config.attn_config.head_num, self.config.attn_config.nope_head_dim
+        )
         value_states = value_states.view(
             -1, self.config.attn_config.head_num, self.config.attn_config.v_head_dim
         )
@@ -236,7 +250,8 @@ class MLATest(TestCase):
         k = k_pe.new_empty(
             k_pe.size(0),
             self.config.attn_config.head_num,
-            self.config.attn_config.rope_head_dim + self.config.attn_config.nope_head_dim,
+            self.config.attn_config.rope_head_dim
+            + self.config.attn_config.nope_head_dim,
         )
         k[..., : self.config.attn_config.nope_head_dim] = k_nope
         k[..., self.config.attn_config.nope_head_dim :] = k_pe
@@ -285,13 +300,21 @@ class MLATest(TestCase):
         )
 
         weights[W.mla_kc] = torch.randn(
-            [config.attn_config.head_num, config.attn_config.nope_head_dim, config.attn_config.kv_lora_rank],
+            [
+                config.attn_config.head_num,
+                config.attn_config.nope_head_dim,
+                config.attn_config.kv_lora_rank,
+            ],
             dtype=torch.bfloat16,
             device=device,
         )
 
         weights[W.mla_vc] = torch.randn(
-            [config.attn_config.head_num, config.attn_config.kv_lora_rank, config.attn_config.v_head_dim],
+            [
+                config.attn_config.head_num,
+                config.attn_config.kv_lora_rank,
+                config.attn_config.v_head_dim,
+            ],
             dtype=torch.bfloat16,
             device=device,
         )
@@ -310,13 +333,21 @@ class MLATest(TestCase):
 
         weights[W.mla_kc] = (
             weights[W.mla_k_nope_w]
-            .view(config.attn_config.kv_lora_rank, config.attn_config.head_num, config.attn_config.nope_head_dim)
+            .view(
+                config.attn_config.kv_lora_rank,
+                config.attn_config.head_num,
+                config.attn_config.nope_head_dim,
+            )
             .transpose(0, 1)
             .transpose(1, 2)
         )
         weights[W.mla_vc] = (
             weights[W.mla_v_w]
-            .view(config.attn_config.kv_lora_rank, config.attn_config.head_num, config.attn_config.v_head_dim)
+            .view(
+                config.attn_config.kv_lora_rank,
+                config.attn_config.head_num,
+                config.attn_config.v_head_dim,
+            )
             .transpose(0, 1)
         )
 
