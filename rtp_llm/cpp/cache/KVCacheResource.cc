@@ -43,6 +43,10 @@ const GroupBlockIds& KVCacheResource::groupBlocks() const {
     return group_block_ids;
 }
 
+const LayerBlockIds& KVCacheResource::layerBlocks() const {
+    return layer_block_ids;
+}
+
 CacheKeysType& KVCacheResource::cacheKeys() {
     return cache_keys;
 }
