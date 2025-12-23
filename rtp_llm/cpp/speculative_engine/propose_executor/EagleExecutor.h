@@ -14,13 +14,13 @@ namespace rtp_llm {
 
 class EagleExecutor: public MTPExecutor {
 public:
-    explicit EagleExecutor(const std::string&                                  sp_type,
-                           std::unique_ptr<ProposeModelEngineInitParams>&      propose_model_engine_init_params,
-                           rtp_llm::DeviceBase*                                device,
-                           const std::vector<std::shared_ptr<KVCacheManager>>& mtp_cache_managers,
-                           const std::shared_ptr<lora::LoraManager>&           lora_manager,
-                           bool                                                warm_up = false):
-        MTPExecutor(sp_type, propose_model_engine_init_params, device, mtp_cache_managers, lora_manager, warm_up) {}
+    explicit EagleExecutor(const std::string&                             sp_type,
+                           std::unique_ptr<ProposeModelEngineInitParams>& propose_model_engine_init_params,
+                           rtp_llm::DeviceBase*                           device,
+                           const std::shared_ptr<KVCacheManager>&         cache_manager,
+                           const std::shared_ptr<lora::LoraManager>&      lora_manager,
+                           bool                                           warm_up = false):
+        MTPExecutor(sp_type, propose_model_engine_init_params, device, cache_manager, lora_manager, warm_up) {}
 
     absl::Status propose(const std::list<GenerateStreamPtr>& streams, bool skip_check) override;
 };
