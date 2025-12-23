@@ -17,8 +17,12 @@ public:
                              bool                                           warm_up = false):
         ProposeExecutor(device),
         propose_step_(propose_model_engine_init_params->gen_num_per_circle),
-        normal_executor_(
-            *propose_model_engine_init_params->vanilla_model_params, cache_manager, device_, lora_manager, warm_up) {
+        normal_executor_(*propose_model_engine_init_params->vanilla_model_params,
+                         cache_manager,
+                         device_,
+                         lora_manager,
+                         warm_up,
+                         true) {
         RTP_LLM_LOG_INFO("VanillaExecutor propose step is %ld", propose_step_);
     }
 
