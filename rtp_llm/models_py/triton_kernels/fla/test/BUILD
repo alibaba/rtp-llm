@@ -9,7 +9,6 @@ py_test(
     ],
     deps = [
         "//rtp_llm/models_py/triton_kernels:fla",
-        "@flash-linear-attention//:fla_lib_py"
     ] + [":triton", ":torch", ":numpy", ":einops", ":packaging"],
     visibility = ["//visibility:public"],
     exec_properties = {'gpu':'H20'},
@@ -22,7 +21,6 @@ py_test(
     ],
     deps = [
         "//rtp_llm/models_py/triton_kernels:fla",
-        "@flash-linear-attention//:fla_lib_py"
     ] + [":triton", ":torch", ":numpy", ":einops", ":packaging"],
     visibility = ["//visibility:public"],
     exec_properties = {'gpu':'H20'},
@@ -35,7 +33,6 @@ py_test(
     ],
     deps = [
         "//rtp_llm/models_py/triton_kernels:fla",
-        "@flash-linear-attention//:fla_lib_py"
     ] + [":triton", ":torch", ":numpy", ":einops", ":packaging"],
     visibility = ["//visibility:public"],
     exec_properties = {'gpu':'H20'},
