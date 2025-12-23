@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <unordered_set>
 #include <unistd.h>
 #include "rtp_llm/cpp/cache/CacheManager.h"
 #include "rtp_llm/cpp/cache/DistKvCache.h"
@@ -175,6 +176,18 @@ KVCacheInfo CacheManager::getKVCacheInfo(int64_t latest_version, bool need_cache
     // Use lightweight method to avoid copying all CacheItems
     auto [version, cachekeys] =
         block_cache_.getVersionAndCacheKeys(need_cache_keys ? latest_version : std::numeric_limits<int64_t>::max());
+
+    // Also collect cache keys from memory block cache if it exists
+    if (need_cache_keys && memory_block_cache_) {
+        std::unordered_set<int64_t> seen_keys(cachekeys.begin(), cachekeys.end());
+        auto                        memory_snapshot = memory_block_cache_->cacheSnapshot(latest_version);
+        for (const auto& cacheItem : memory_snapshot.values) {
+            if (seen_keys.insert(cacheItem->cache_key).second) {
+                cachekeys.push_back(cacheItem->cache_key);
+            }
+        }
+    }
+
     KVCacheInfo info{(size_t)availableBlockNums() * seq_size_per_block_,
                      (size_t)totalBlocks() * seq_size_per_block_,
                      (size_t)seq_size_per_block_,
