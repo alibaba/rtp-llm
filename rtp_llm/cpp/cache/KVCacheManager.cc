@@ -5,6 +5,7 @@
 
 #include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/devices/DeviceBase.h"
@@ -62,11 +63,18 @@ bool KVCacheManager::init() {
             stop_.store(false, std::memory_order_relaxed);
             metrics_reporter_thread_ = std::thread(&KVCacheManager::reportMetricsLoop, this);
         }
-        return true;
     } else {
         RTP_LLM_CHECK_WITH_INFO(false, "SingleTypeKVCacheAllocator only support Full Attention");
         return false;
     }
+
+    if (kv_cache_config_.memory_block_cache_size_mb > 0) {
+        if (!initConnectorCoordinator()) {
+            RTP_LLM_LOG_ERROR("init connector coordinator failed");
+            return false;
+        }
+    }
+    return true;
 }
 
 size_t KVCacheManager::availableTokensNum() const {
@@ -301,5 +309,34 @@ void KVCacheManager::reportMetricsLoop() {
         std::this_thread::sleep_for(std::chrono::seconds(1));  // 1s
     }
 }
+
+bool KVCacheManager::initConnectorCoordinator() {
+    RTP_LLM_LOG_INFO("init connector coordinator, cache config: [%s], kv cache config: [%s], runtime config: [%s]",
+                     config_.to_string().c_str(),
+                     kv_cache_config_.to_string().c_str(),
+                     runtime_config_.to_string().c_str());
+    connector_coordinator_ = std::make_shared<KVCacheConnectorCoordinator>(
+        config_, kv_cache_config_, runtime_config_, allocator_, device_, metrics_reporter_);
+    if (!connector_coordinator_->init()) {
+        RTP_LLM_LOG_WARNING("connector coordinator init failed");
+        connector_coordinator_.reset();
+        return false;
+    }
+    return true;
+}
+
+bool KVCacheManager::broadcastTp(const BroadcastTpRequestPB& request, BroadcastTpResponsePB& response) {
+    if (!request.has_mem_request()) {
+        RTP_LLM_LOG_WARNING("broadcast tp failed, request is invalid, request: [%s]", request.DebugString().c_str());
+        return false;
+    }
+    if (!connector_coordinator_) {
+        RTP_LLM_LOG_WARNING("broadcast tp failed, coordinator is null, request: [%s]", request.DebugString().c_str());
+        response.mutable_mem_response()->set_success(false);
+        return false;
+    }
+    return connector_coordinator_->broadcastTp(request, response);
+}
+
 
 }  // namespace rtp_llm

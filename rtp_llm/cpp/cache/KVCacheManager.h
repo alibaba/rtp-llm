@@ -7,11 +7,15 @@
 
 #include "rtp_llm/cpp/cache/types.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/connector/AsyncContext.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "kmonitor/client/MetricsReporter.h"
 
 namespace rtp_llm {
+
+class KVCacheConnectorCoordinator;
 
 class KVCacheManager {
 public:
@@ -61,6 +65,12 @@ public:
     virtual bool setKVBlockValue(int block_index, int layer_id, rtp_llm::Buffer& k_buffer, rtp_llm::Buffer& v_buffer);
     virtual bool setKVBlockValue(int block_index, rtp_llm::Buffer& k_buffer, rtp_llm::Buffer& v_buffer);
 
+    // broadcast tp for single rank
+    bool broadcastTp(const BroadcastTpRequestPB& request, BroadcastTpResponsePB& response);
+
+private:
+    bool initConnectorCoordinator();
+
 private:
     void allocateAndSync();
     void reportMetricsLoop();
@@ -76,6 +86,8 @@ private:
 
     std::atomic<bool> stop_{false};
     std::thread       metrics_reporter_thread_;
+
+    std::shared_ptr<KVCacheConnectorCoordinator> connector_coordinator_;
 };
 
 }  // namespace rtp_llm
