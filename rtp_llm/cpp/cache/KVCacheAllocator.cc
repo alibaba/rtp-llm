@@ -166,4 +166,13 @@ std::vector<std::pair<BufferPtr, size_t>> KVCacheAllocator::getAllBuffers() cons
     return results;
 }
 
+KVCacheBuffer KVCacheAllocator::getMTPModuleKVCacheBuffer(int mtp_module_id) const {
+    if (!block_pool_) {
+        RTP_LLM_LOG_ERROR("BlockPool is null");
+        return KVCacheBuffer{};
+    }
+    // layer 0 is main
+    return block_pool_->getMemoryLayoutKVCacheBuffer(mtp_module_id + 1);
+}
+
 }  // namespace rtp_llm

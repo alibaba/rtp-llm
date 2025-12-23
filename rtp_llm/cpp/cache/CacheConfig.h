@@ -18,6 +18,60 @@ enum MemoryLayout {
     LAYER_FIRST,  // [layer_num, num_blocks, block_size] -> hybrid attention
 };
 
+struct MemoryLayoutConfig {
+    uint32_t layer_num = 0;
+    uint32_t block_num = 0;
+
+    MemoryLayout      layout = LAYER_FIRST;
+    rtp_llm::DataType dtype  = rtp_llm::TYPE_INVALID;
+
+    // ---- Offsets within BlockPool global buffer ----
+    // kv cache pool base offset
+    size_t kv_cache_offset_bytes = 0;
+    // kv scale pool base offset (valid only when enable_kv_scale == true)
+    size_t kv_scale_offset_bytes = 0;
+
+    // ---- Pool sizes ----
+    size_t kv_block_pool_size_bytes = 0;
+    size_t kv_scale_pool_size_bytes = 0;
+    size_t total_size_bytes         = 0;
+
+    // ---- Per-block sizes (all layers) ----
+    size_t kv_block_size       = 0;
+    size_t kv_block_size_bytes = 0;
+    size_t kv_scale_size       = 0;
+    size_t kv_scale_size_bytes = 0;
+    size_t block_size          = 0;
+    size_t block_size_bytes    = 0;
+
+    // ---- Per-block strides (one layer) ----
+    size_t kv_block_stride       = 0;
+    size_t kv_block_stride_bytes = 0;
+    size_t kv_scale_stride       = 0;
+    size_t kv_scale_stride_bytes = 0;
+    size_t block_stride          = 0;
+    size_t block_stride_bytes    = 0;
+
+    // For partitioning / kernels (KV separation info)
+    size_t k_block_size         = 0;
+    size_t v_block_size         = 0;
+    size_t k_block_stride       = 0;
+    size_t v_block_stride       = 0;
+    size_t k_block_size_bytes   = 0;
+    size_t v_block_size_bytes   = 0;
+    size_t k_block_stride_bytes = 0;
+    size_t v_block_stride_bytes = 0;
+    size_t k_token_size         = 0;
+    size_t v_token_size         = 0;
+
+    bool   is_mla             = false;
+    size_t local_head_num_kv  = 0;
+    size_t seq_size_per_block = 0;
+
+    bool   enable_kv_scale      = false;
+    size_t kv_scale_block_bytes = 0;
+};
+
 struct KVCacheSpec {
     uint32_t layer_num;
     uint32_t local_head_num_kv;
@@ -138,7 +192,10 @@ struct CacheConfig {
     std::vector<KVCacheSpecPtr>   cache_specs;
     std::vector<std::vector<int>> layer_ids;
 
-    uint32_t layer_num;
+    rtp_llm::DataType dtype;
+    uint32_t          layer_num;      // the number of main model layers
+    uint32_t          layer_all_num;  // the number of all layers including mtp modules
+
     uint32_t block_num;
 
     // ---- Per-block sizes (all layers) ----
@@ -160,6 +217,8 @@ struct CacheConfig {
     // mtp
     std::string mtp_model_type = "default_model";
 
+    std::vector<std::shared_ptr<CacheConfig>> mtp_sub_configs;
+
     // ---- Per-block strides (one layer) ----
     // kv_block_stride_*: one-layer kv cache block stride (K+V together).
     size_t kv_block_stride       = 0;
@@ -175,63 +234,13 @@ struct CacheConfig {
 };
 
 struct BlockPoolConfig {
-    uint32_t layer_num;
-    uint32_t block_num;
+    // all memory layouts share the same block id space
+    uint32_t block_num = 0;
 
-    MemoryLayout      layout = LAYER_FIRST;
-    rtp_llm::DataType dtype  = rtp_llm::TYPE_INVALID;
+    size_t total_size       = 0;
+    size_t total_size_bytes = 0;
 
-    size_t total_size;
-    size_t total_size_bytes;
-
-    // ---- Per-block sizes (all layers) ----
-    // kv_block_*: kv cache only
-    size_t kv_block_size       = 0;
-    size_t kv_block_size_bytes = 0;
-    // kv_scale_*: scale only (includes BOTH K and V scales)
-    size_t kv_scale_size       = 0;
-    size_t kv_scale_size_bytes = 0;
-    // block_*: kv cache + scale (logical block across all layers)
-    size_t block_size       = 0;
-    size_t block_size_bytes = 0;
-
-    // for kv first layout only, keep these meta for partitioning / kernels
-    size_t k_block_size = 0;
-    size_t v_block_size = 0;
-
-    // ---- Per-block strides (one layer) ----
-    // kv_block_stride_*: one-layer kv cache block stride (K+V together)
-    size_t kv_block_stride       = 0;
-    size_t kv_block_stride_bytes = 0;
-    // kv_scale_stride_*: one-layer scale stride for one logical block (K+V scales together)
-    size_t kv_scale_stride       = 0;
-    size_t kv_scale_stride_bytes = 0;
-    // block_stride_*: one-layer total stride (kv + scale)
-    size_t block_stride       = 0;
-    size_t block_stride_bytes = 0;
-
-    size_t k_block_stride = 0;
-    size_t v_block_stride = 0;
-
-    size_t k_block_size_bytes = 0;
-    size_t v_block_size_bytes = 0;
-
-    size_t k_block_stride_bytes = 0;
-    size_t v_block_stride_bytes = 0;
-
-    size_t k_token_size = 0;
-    size_t v_token_size = 0;
-
-    bool is_mla = false;
-
-    size_t local_head_num_kv  = 0;
-    size_t seq_size_per_block = 0;
-
-    bool   enable_kv_scale          = false;
-    size_t kv_block_pool_size_bytes = 0;
-    size_t kv_scale_offset_bytes    = 0;
-    size_t kv_scale_block_bytes     = 0;
-    size_t kv_scale_pool_size_bytes = 0;
+    std::vector<MemoryLayoutConfig> memory_layouts;
 };
 
 }  // namespace rtp_llm
