@@ -207,9 +207,10 @@ CacheManager::MatchInfo CacheManager::mallocWithCache(const AdvancedMallocInfo& 
         RtpLLMCacheReuseMetricsCollector collector;
         collector.kv_cache_reuse_length = match_info.reuse_length;
         collector.match_cost_time_us    = match_cost_time_us;
-        collector.gpu_input_length   = static_cast<int32_t>(malloc_info.cache_keys.size()) * config_.seq_size_per_block;
-        collector.gpu_reuse_length   = match_info.local_reuse_length;
-        collector.gpu_cache_hit_rate = collector.gpu_reuse_length * 100 / collector.gpu_input_length;
+        collector.gpu_input_length = static_cast<int32_t>(malloc_info.cache_keys.size()) * config_.seq_size_per_block;
+        collector.gpu_reuse_length = match_info.gpu_reuse_length;
+        collector.memory_reuse_length = match_info.memory_reuse_length;
+        collector.gpu_cache_hit_rate  = collector.gpu_reuse_length * 100 / collector.gpu_input_length;
         kmonitor::MetricsTags tags;
         tags.AddTag("mtp_model_type", config_.mtp_model_type);
         metrics_reporter_->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(&tags, &collector);
@@ -226,18 +227,20 @@ CacheManager::MatchInfo CacheManager::matchImpl(const AdvancedMallocInfo& malloc
     }
 
     incrRefCounter(match_result.block_indices);
-    auto local_match_blocks = match_result.block_indices.size();
+    auto gpu_match_blocks = match_result.block_indices.size();
 
     if (memory_block_cache_ && malloc_info.enable_memory_block_cache
-        && local_match_blocks < malloc_info.cache_keys.size()) {
+        && gpu_match_blocks < malloc_info.cache_keys.size()) {
         matchInMemoryBlockCache(malloc_info, match_result);
     }
 
+    auto memory_match_blocks = match_result.block_indices.size() - gpu_match_blocks;
+
     // match in dist kvcache if cache keys not fully matched
-    if (enable_dist_kvcache_ && malloc_info.enable_3fs && !malloc_info.need_loss
-        && local_match_blocks < malloc_info.cache_keys.size()) {
-        matchInDistKvCache(malloc_info, match_result);
-    }
+    // if (enable_dist_kvcache_ && malloc_info.enable_3fs && !malloc_info.need_loss
+    //     && local_match_blocks < malloc_info.cache_keys.size()) {
+    //     matchInDistKvCache(malloc_info, match_result);
+    // }
 
     int cache_block_num = match_result.block_indices.size();
     int reuse_block_num =
@@ -269,13 +272,14 @@ CacheManager::MatchInfo CacheManager::matchImpl(const AdvancedMallocInfo& malloc
                             match_result.loss.size(),
                             reuse_length);
 
-    local_match_blocks          = local_match_blocks <= reuse_block_num ? local_match_blocks : reuse_block_num;
-    const auto local_reuse_len  = local_match_blocks * config_.seq_size_per_block;
-    const auto remote_reuse_len = (reuse_block_num - local_match_blocks) * config_.seq_size_per_block;
+    // local_match_blocks          = local_match_blocks <= reuse_block_num ? local_match_blocks : reuse_block_num;
+    // const auto local_reuse_len  = local_match_blocks * config_.seq_size_per_block;
+    // const auto remote_reuse_len = (reuse_block_num - local_match_blocks) * config_.seq_size_per_block;
 
     return {(size_t)reuse_length,
-            local_reuse_len,
-            remote_reuse_len,
+            gpu_match_blocks * config_.seq_size_per_block,
+            memory_match_blocks * config_.seq_size_per_block,
+            0,
             vector<int>(match_result.block_indices.begin(), match_result.block_indices.begin() + reuse_block_num),
             vector<float>(match_result.loss.begin(),
                           match_result.loss.begin() + std::min((int)match_result.loss.size(), reuse_length))};
