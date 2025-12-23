@@ -4,6 +4,8 @@
 namespace rtp_llm {
 
 BlockCache::MatchResult BlockCache::match(size_t cache_key, int group_id) {
+    std::unique_lock<std::mutex> lock(mutex_);
+
     CacheKeyGroupPair key{cache_key, group_id};
     auto [success, item] = lru_cache_.get(key);
     if (success) {
@@ -14,12 +16,16 @@ BlockCache::MatchResult BlockCache::match(size_t cache_key, int group_id) {
 }
 
 bool BlockCache::contains(size_t cache_key, int group_id) const {
+    std::unique_lock<std::mutex> lock(mutex_);
+
     CacheKeyGroupPair key{cache_key, group_id};
     return lru_cache_.contains(key);
 }
 
 bool BlockCache::put(CacheItem& item) {
     RTP_LLM_CHECK_WITH_INFO(!isNullBlockIdx(item.block_index), "put block id should not be null block");
+
+    std::unique_lock<std::mutex> lock(mutex_);
 
     CacheKeyGroupPair key{item.cache_key, item.group_id};
 
@@ -37,6 +43,8 @@ BlockIndicesType BlockCache::pop(int nums) {
     RTP_LLM_CHECK_WITH_INFO(nums > 0, "pop nums should > 0, nums = " + std::to_string(nums));
     BlockIndicesType pop_blocks;
 
+    std::unique_lock<std::mutex> lock(mutex_);
+
     auto cond = [&](const CacheKeyGroupPair& key, const CacheItem& item) { return !item.is_resident; };
 
     while (nums > 0 && !lru_cache_.empty()) {
@@ -51,14 +59,17 @@ BlockIndicesType BlockCache::pop(int nums) {
 }
 
 bool BlockCache::empty() const {
+    std::unique_lock<std::mutex> lock(mutex_);
     return lru_cache_.empty();
 }
 
 size_t BlockCache::size() const {
+    std::unique_lock<std::mutex> lock(mutex_);
     return lru_cache_.size();
 }
 
 BlockCache::CacheSnapshot BlockCache::cacheSnapshot(int64_t latest_version) const {
+    std::unique_lock<std::mutex> lock(mutex_);
     return lru_cache_.cacheSnapshot(latest_version);
 }
 
