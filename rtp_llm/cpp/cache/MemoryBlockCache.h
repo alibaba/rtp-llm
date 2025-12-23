@@ -111,6 +111,11 @@ private:
     void reportMetricsLoop();
 
 public:
+    auto cacheSnapshot(int64_t latest_version) const {
+        return block_lru_cache_->cacheSnapshot(latest_version);
+    }
+
+public:
     std::shared_ptr<MemoryBlockCache> sp_block_cache_;
 
 private:
