@@ -66,11 +66,14 @@ cc_library(
 
 cc_library(
     name = "cache",
-    hdrs = ["KVCacheManager.h"],
-    srcs = ["KVCacheManager.cc"],
+    hdrs = [
+        "KVCacheManager.h",
+    ],
+    srcs = [
+        "KVCacheManager.cc",
+    ],
     deps = [
         ":cache_core",
-        ":cache_types",
         "//rtp_llm/cpp/cache/connector:connector",
     ] + torch_deps(),
     copts = copts(),
