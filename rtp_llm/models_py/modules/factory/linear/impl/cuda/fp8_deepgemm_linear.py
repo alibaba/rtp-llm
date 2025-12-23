@@ -15,6 +15,7 @@ from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     sgl_per_token_group_quant_fp8,
 )
 from rtp_llm.models_py.modules.factory.linear import LinearBase
+from rtp_llm.ops import HWKernelConfig
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,7 @@ class CudaFp8DeepGEMMLinear(LinearBase):
         quant_config: object,
         weight: torch.Tensor,
         weight_scales: Optional[torch.Tensor],
+        hw_kernel_config: Optional['HWKernelConfig'] = None,
         weight_scale_2: Optional[torch.Tensor] = None,
         input_scale: Optional[torch.Tensor] = None,
     ) -> bool:
