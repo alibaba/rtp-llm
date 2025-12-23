@@ -170,6 +170,10 @@ public:
         return false;
     }
 
+    void addResource(const KVCacheResource& resource) {
+        batch_resource.push_back(resource);
+    }
+
 public:
     bool enable_reuse_cache = true;
     bool last_block_aligned = true;

@@ -16,6 +16,7 @@
 namespace rtp_llm {
 
 class KVCacheConnectorCoordinator;
+class KVCacheConnectorReadWriteContext;
 
 class KVCacheManager {
 public:
@@ -68,6 +69,14 @@ public:
     // Write one KV block (optionally per-layer) from host/device buffers for test
     virtual bool setKVBlockValue(int block_index, int layer_id, rtp_llm::Buffer& k_buffer, rtp_llm::Buffer& v_buffer);
     virtual bool setKVBlockValue(int block_index, rtp_llm::Buffer& k_buffer, rtp_llm::Buffer& v_buffer);
+
+    // async load cache from connector to gpu, for all rank
+    std::shared_ptr<AsyncContext>
+    asyncLoadCache(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context);
+
+    // async store cache from gpu to connector, for all rank
+    std::shared_ptr<AsyncContext>
+    asyncStoreCache(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context);
 
     // broadcast tp for single rank
     bool broadcastTp(const BroadcastTpRequestPB& request, BroadcastTpResponsePB& response);
