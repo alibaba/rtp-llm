@@ -1,5 +1,6 @@
 #pragma once
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
+#include "rtp_llm/cpp/devices/utils/DebugUtils.h"
 #include <cstdint>
 
 namespace rtp_llm {

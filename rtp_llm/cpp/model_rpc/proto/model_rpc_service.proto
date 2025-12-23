@@ -94,6 +94,9 @@ message GenerateConfigPB {
     google.protobuf.StringValue trace_id = 50;
     bool return_all_hidden_states = 51;
     bool enable_memory_block_cache = 52;
+    bool return_mtp_hidden_states = 53;
+    int32 mtp_input_len = 54;
+    string mtp_hidden_states_saved_path = 55;
 }
 
 message MMPreprocessConfigPB {
