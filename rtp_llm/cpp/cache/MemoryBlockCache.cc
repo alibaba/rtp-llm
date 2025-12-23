@@ -195,7 +195,7 @@ bool MemoryBlockCache::copyKVData(const std::vector<int>& memory_block_indices,
                                   CopyDirection           direction,
                                   int64_t                 request_id) {
     if (sp_block_cache_) {
-        RTP_LLM_LOG_INFO("sp block cache copy data here1, direction = %d", toString(direction).c_str());
+        RTP_LLM_LOG_INFO("sp block cache copy data here1, direction = %s", toString(direction).c_str());
         auto result = sp_block_cache_->copyKVData(memory_block_indices, gpu_block_indices, direction, request_id);
         if (!result) {
             return false;
