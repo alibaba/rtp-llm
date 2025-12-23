@@ -17,16 +17,6 @@ py_test(
     exec_properties = {'gpu':'A10'},
 )
 
-py_test(
-    name = "frontend_server_test",
-    srcs = [
-        "frontend_server_test.py",
-    ],
-    deps = [
-        "//rtp_llm:testlib",
-    ],
-    exec_properties = {'gpu':'A10'},
-)
 
 py_test(
     name = "token_processor_test",

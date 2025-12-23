@@ -10,9 +10,17 @@ ACCESS_LOGGER_NAME = "access_logger"
 QUERY_ACCESS_LOGGER_NAME = "query_access_logger"
 
 
-def init_access_logger(log_path: str, backup_count: int, rank_id: Optional[int] = None, server_id: Optional[int] = None, async_mode: bool = True) -> None:
+def init_access_logger(
+    log_path: str,
+    backup_count: int,
+    rank_id: Optional[int] = None,
+    server_id: Optional[int] = None,
+    async_mode: bool = True,
+) -> None:
     access_logger = logging.getLogger(ACCESS_LOGGER_NAME)
-    handler = get_handler("access.log", log_path, backup_count, rank_id, server_id, async_mode)
+    handler = get_handler(
+        "access.log", log_path, backup_count, rank_id, server_id, async_mode
+    )
     formatter = logging.Formatter("%(message)s")
     access_logger.handlers.clear()
     access_logger.parent = None
@@ -21,9 +29,17 @@ def init_access_logger(log_path: str, backup_count: int, rank_id: Optional[int] 
         access_logger.addHandler(handler)
 
 
-def init_query_access_logger(log_path: str, backup_count: int, rank_id: Optional[int] = None, server_id: Optional[int] = None, async_mode: bool = True) -> None:
+def init_query_access_logger(
+    log_path: str,
+    backup_count: int,
+    rank_id: Optional[int] = None,
+    server_id: Optional[int] = None,
+    async_mode: bool = True,
+) -> None:
     access_logger = logging.getLogger(QUERY_ACCESS_LOGGER_NAME)
-    handler = get_handler("query_access.log", log_path, backup_count, rank_id, server_id, async_mode)
+    handler = get_handler(
+        "query_access.log", log_path, backup_count, rank_id, server_id, async_mode
+    )
     formatter = logging.Formatter("%(message)s")
     access_logger.handlers.clear()
     access_logger.parent = None
@@ -33,7 +49,14 @@ def init_query_access_logger(log_path: str, backup_count: int, rank_id: Optional
 
 
 class AccessLogger:
-    def __init__(self, log_path: str, backup_count: int, rank_id: Optional[int] = None, server_id: Optional[int] = None, async_mode: bool = True) -> None:
+    def __init__(
+        self,
+        log_path: str,
+        backup_count: int,
+        rank_id: Optional[int] = None,
+        server_id: Optional[int] = None,
+        async_mode: bool = True,
+    ) -> None:
         init_access_logger(log_path, backup_count, rank_id, server_id, async_mode)
         init_query_access_logger(log_path, backup_count, rank_id, server_id, async_mode)
         self.logger = logging.getLogger(ACCESS_LOGGER_NAME)
@@ -41,7 +64,9 @@ class AccessLogger:
         self.async_mode = async_mode
         self.rank_id = rank_id
         self.server_id = server_id
-        logging.info(f"AccessLogger created: async_mode={async_mode}, rank_id={rank_id}, server_id={server_id}")
+        logging.info(
+            f"AccessLogger created: async_mode={async_mode}, rank_id={rank_id}, server_id={server_id}"
+        )
 
     @staticmethod
     def is_private_request(request: Dict[str, Any]):
@@ -50,7 +75,9 @@ class AccessLogger:
     def log_access(self, request: Dict[str, Any], response: ResponseLog) -> None:
         request_log = RequestLog.from_request(request)
         access_log = PyAccessLog(
-            request=request_log, response=response, id=request[request_id_field_name]
+            request=request_log,
+            response=response,
+            id=request.get(request_id_field_name, -1),
         )
         self.logger.info(dump_json(access_log))
 
@@ -61,7 +88,7 @@ class AccessLogger:
             access_log = PyAccessLog(
                 request=request_log,
                 response=response_log,
-                id=request[request_id_field_name],
+                id=request.get(request_id_field_name, -1),
             )
             self.query_logger.info(dump_json(access_log))
 
@@ -80,5 +107,6 @@ class AccessLogger:
             self.log_access(request, response_log)
         else:
             self.log_access(
-                {request_id_field_name: request[request_id_field_name]}, response_log
+                {request_id_field_name: request.get(request_id_field_name, -1)},
+                response_log,
             )

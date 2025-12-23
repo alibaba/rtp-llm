@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.distribute.worker_info import g_worker_info
 from rtp_llm.frontend.frontend_app import FrontendApp
-from rtp_llm.frontend.frontend_server import FrontendServer, FrontendWorker
+from rtp_llm.frontend.frontend_server import FrontendWorker
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.server.backend_manager import BackendManager
 from rtp_llm.utils.complete_response_async_generator import (
@@ -195,30 +195,6 @@ class ConcurrencyLimitTest(TestCase):
         logging.info(f"self.get_worker_status() = {self.get_worker_status()}")
         logging.info(f"excepted = {excepted}")
         self.assertEqual(self.get_worker_status(), excepted)
-
-    @unittest.skip("Temporarily disabled test case")
-    def test_exception(self):
-        self.start_frontend_server()
-        self.start_backend_server()
-        time.sleep(6)
-        self.wait_server_start(g_worker_info.server_port)
-        self.wait_server_start(g_worker_info.backend_server_port)
-
-        origin_func = FrontendServer._infer_impl
-        FrontendServer._infer_impl = _exception_infer_impl
-        self.curl_exception(False)
-        self.curl_exception(True)
-        self.assertEqual(self.get_available_concurrency(), 16)
-        FrontendServer._infer_impl = origin_func
-
-        origin_func = FrontendServer._collect_complete_response_and_record_access_log
-        FrontendServer._collect_complete_response_and_record_access_log = (
-            _exception_func
-        )
-        self.curl_exception(False)
-        self.curl_exception(True)
-        self.assertEqual(self.get_available_concurrency(), 16)
-        FrontendServer._collect_complete_response_and_record_access_log = origin_func
 
 
 if __name__ == "__main__":

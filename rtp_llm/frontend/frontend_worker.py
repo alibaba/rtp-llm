@@ -1,12 +1,13 @@
 import asyncio
 import json
 import logging
-import os
 import pathlib
 import sys
 import traceback
 from functools import partial
 from typing import Any, AsyncGenerator, Dict, List, Optional, Set, Tuple, Union
+
+from rtp_llm.structure.request_extractor import request_id_field_name
 
 current_file_path = pathlib.Path(__file__).parent.absolute()
 sys.path.append(str(current_file_path.parent.absolute()))
@@ -15,23 +16,17 @@ from dataclasses import asdict
 
 from pydantic import BaseModel
 
-from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
-from rtp_llm.config.model_config import (
-    update_stop_words_from_env,
-    update_tokenizer_special_tokens,
-)
-from rtp_llm.distribute.distributed_server import WorldInfo, get_world_info
-from rtp_llm.distribute.worker_info import ParallelInfo, g_parallel_info, g_worker_info
-from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
-from rtp_llm.ops import ParallelismConfig, SpecialTokens, VitSeparation
-from rtp_llm.pipeline.pipeline import Pipeline
+from rtp_llm.frontend.base_endpoint import BaseEndpoint
+from rtp_llm.frontend.generation.orchestrator import GenerationOrchestrator
+from rtp_llm.ops import ParallelismConfig
 from rtp_llm.structure.request_extractor import Request, RequestExtractor
 from rtp_llm.utils.base_model_datatypes import GenerateResponse
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
+from rtp_llm.utils.util import check_with_info
 
 
 class PipelineResponse(BaseModel):
@@ -97,6 +92,7 @@ def get_dp_addrs_from_world_info(
         ]
 
     addresses = [f"{member.ip}:{member.rpc_server_port}" for member in members]
+    addresses = [f"{member.ip}:{member.rpc_server_port}" for member in members]
     logging.info(
         f"[world_rank: {parallelism_config.world_rank}] "
         f"using addresses from world_info: {addresses}"
@@ -105,59 +101,68 @@ def get_dp_addrs_from_world_info(
     return addresses
 
 
-class FrontendWorker:
-    def __init__(self, py_env_configs, model_config, special_tokens) -> None:
+class FrontendWorker(BaseEndpoint):
+    def __init__(
+        self,
+        tokenizer,
+        backend_rpc_server_visitor,
+        generate_env_config,
+        orchestrator: GenerationOrchestrator,
+        global_controller,
+        model_config=None,
+        rank_id=0,
+        server_id=0,
+    ) -> None:
         logging.info("starting frontend worker")
 
-        self.tokenizer = TokenizerFactory.create(
-            model_config.ckpt_path, model_config.tokenizer_path, model_config.model_type
+        # 调用父类初始化
+        super().__init__(
+            model_config=model_config,
+            tokenizer=tokenizer,
+            global_controller=global_controller,
+            rank_id=rank_id,
+            server_id=server_id,
         )
 
-        # Create engine_config with world_info
-        engine_config = EngineConfig.create(py_env_configs)
-
-        # Get world_info from distribute_config
-        world_info = get_world_info(
-            server_config=py_env_configs.server_config,
-            distribute_config=py_env_configs.distribute_config,
-        )
-
-        # Get addresses from distribute_info
-        addresses = get_dp_addrs_from_world_info(
-            world_info=world_info,
-            parallelism_config=engine_config.parallelism_config,
-        )
-
-        vit_separation = None
-        if py_env_configs.vit_config:
-            vit_separation = py_env_configs.vit_config.vit_separation
-
-        self.pipeline = Pipeline(
-            special_tokens=special_tokens,
-            pd_sep_config=engine_config.pd_sep_config,
-            addresses=addresses,
-            max_seq_len=model_config.max_seq_len,
-            seq_size_per_block=model_config.attn_config.tokens_per_block,
-            tokenizer=self.tokenizer,
-            sp_config=py_env_configs.sp_config,
-            mm_related_params=None,  # Frontend doesn't need mm_related_params
-            grpc_config=py_env_configs.grpc_config,
-            vit_separation=vit_separation,
-        )
-        self.backend_rpc_server_visitor = self.pipeline.backend_rpc_server_visitor
-        self.generate_env_config = py_env_configs.generate_env_config
+        self.backend_rpc_server_visitor = backend_rpc_server_visitor
+        self.generate_env_config = generate_env_config
+        self.orchestrator = orchestrator
 
         logging.info("frontend worker start done.")
 
+    def _check_request(self, request: Any, req_id: int) -> Dict[str, Any]:
+        """检查并处理请求"""
+        # 添加 request_id 到请求中
+        if isinstance(request, str):
+            request = json.loads(request)
+        assert isinstance(request, dict)
+        if "master_info" in request:
+            request_id = request["master_info"].get("request_id")
+            check_with_info(
+                request_id != None and isinstance(request_id, int),
+                "request_id in master_info is None or not int",
+            )
+            request[request_id_field_name] = request_id
+            self._global_controller.increment()
+        else:
+            request[request_id_field_name] = self._global_controller.increment()
+        return request
+
+    def inference_request(
+        self, request: Dict[str, Any]
+    ) -> CompleteResponseAsyncGenerator:
+        """实现父类的抽象方法，处理推理请求"""
+        return self.inference(**request)
+
     def tokenizer_offset_mapping(self, prompt: str) -> Any:
-        return self.pipeline.tokenizer(
+        return self.tokenizer(
             prompt, return_offsets_mapping=True, return_attention_mask=False
         )
 
     def tokenizer_encode(self, prompt: str) -> Tuple[List[int], List[str]]:
-        token_ids = self.pipeline.encode(prompt)
+        token_ids = self.tokenizer.encode(prompt)
         token_ids = [int(id) for id in token_ids]
-        tokens = [self.pipeline.decode(id) for id in token_ids]
+        tokens = [self.tokenizer.decode([id]) for id in token_ids]
         return token_ids, tokens
 
     def inference(self, **kwargs: Any) -> CompleteResponseAsyncGenerator:
@@ -171,7 +176,7 @@ class FrontendWorker:
                 "request is non_stream but use incremental decoder",
             )
 
-        response_generator = self._inference(request, **kwargs)
+        response_generator = self.generate(request, **kwargs)
 
         complete_response_collect_func = partial(
             FrontendWorker.collect_complete_response,
@@ -183,7 +188,24 @@ class FrontendWorker:
             response_generator, complete_response_collect_func
         )
 
-    def _inference(self, request: Request, **kwargs: Any):
+    def _build_stream(
+        self,
+        request_id: int,
+        text: str,
+        urls: List[str],
+        generate_config: GenerateConfig,
+        **kwargs: Any,
+    ):
+        return self.orchestrator.pipeline_async(
+            prompt=text,
+            request_id=request_id,
+            urls=urls,
+            generate_config=generate_config,
+            generate_env_config=self.generate_env_config,
+            **kwargs,
+        )
+
+    def generate(self, request: Request, **kwargs: Any):
         if (
             len(request.input_texts) > 1
             or request.batch_infer
@@ -196,7 +218,7 @@ class FrontendWorker:
                 zip(request.input_texts, request.input_urls, request.generate_configs)
             ):
                 generators.append(
-                    self._yield_generate(
+                    self._single_generate_stream(
                         request.request_id + i * 10000,
                         text,
                         urls,
@@ -210,7 +232,7 @@ class FrontendWorker:
                 request.batch_infer,
             )
         else:
-            return self._yield_generate(
+            return self._single_generate_stream(
                 request.request_id,
                 request.input_texts[0],
                 request.input_urls[0],
@@ -291,7 +313,7 @@ class FrontendWorker:
         else:
             return self._format_response(gen_responses, generate_config)
 
-    async def _yield_generate(
+    async def _single_generate_stream(
         self,
         request_id: int,
         text: str,
@@ -299,12 +321,11 @@ class FrontendWorker:
         generate_config: GenerateConfig,
         **kwargs: Any,
     ) -> AsyncGenerator[Dict[str, Any], None]:
-        stream = self.pipeline.pipeline_async(
-            prompt=text,
+        stream = self._build_stream(
             request_id=request_id,
+            text=text,
             urls=urls,
             generate_config=generate_config,
-            generate_env_config=self.generate_env_config,
             **kwargs,
         )
         async for generate_response in stream:

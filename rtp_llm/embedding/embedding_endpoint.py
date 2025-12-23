@@ -1,19 +1,27 @@
 import asyncio
 import json
 import logging
+import time
 from typing import Any, Dict, Optional, Tuple
 
 import grpc
 import numpy as np
 import torch
+from fastapi import Request
+from fastapi.responses import ORJSONResponse, StreamingResponse
 
 import rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 as pb2
 import rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc as pb2_grpc
 from rtp_llm.async_decoder_engine.embedding.interface import EngineInputs, EngineOutputs
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.distribute.worker_info import g_worker_info
+from rtp_llm.frontend.base_endpoint import BaseEndpoint
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
+from rtp_llm.metrics import AccMetrics, GaugeMetrics
 from rtp_llm.models.downstream_modules.utils import create_custom_module
+from rtp_llm.structure.request_extractor import request_id_field_name
+
+USAGE_HEADER = "USAGE"
 
 
 def tensor_pb_to_torch(tensor_pb) -> Optional[torch.Tensor]:
@@ -45,11 +53,26 @@ def tensor_pb_to_torch(tensor_pb) -> Optional[torch.Tensor]:
         return None
 
 
-class EmbeddingEndpoint(object):
-    def __init__(self, model_config, grpc_config, tokenizer: BaseTokenizer):
-        self.renderer = create_custom_module(
-            model_config, tokenizer
-        ).renderer
+class EmbeddingEndpoint(BaseEndpoint):
+    def __init__(
+        self,
+        model_config,
+        grpc_config,
+        tokenizer: BaseTokenizer,
+        global_controller,
+        rank_id=0,
+        server_id=0,
+    ):
+        # 调用父类构造函数
+        super().__init__(
+            model_config=model_config,
+            tokenizer=tokenizer,
+            global_controller=global_controller,
+            rank_id=rank_id,
+            server_id=server_id,
+        )
+
+        self.renderer = create_custom_module(model_config, tokenizer).renderer
         # 创建到服务器的连接
 
         self.address = f"localhost:{g_worker_info.embedding_rpc_server_port}"
@@ -60,6 +83,33 @@ class EmbeddingEndpoint(object):
             for key, value in client_config.items():
                 self.options.append((key, value))
         logging.info(f"embedding endpoint grpc options: {self.options}")
+
+    async def handle_request(self, request: Dict[str, Any], raw_request: Request):
+        try:
+            start_time = time.time()
+            if isinstance(request, str):
+                request = json.loads(request)
+            self._report_qps_metrics(request)
+            request[request_id_field_name] = self._global_controller.increment()
+            result, logable_result = await self.embedding(request)
+            # do not log result since too big
+            if logable_result is not None:
+                self._access_logger.log_success_access(request, logable_result)
+            end_time = time.time()
+            self._report_metric(
+                GaugeMetrics.LANTENCY_METRIC, (end_time - start_time) * 1000
+            )
+            self._report_metric(
+                AccMetrics.SUCCESS_QPS_METRIC, source=request.get("source", "unknown")
+            )
+            usage = result.get("usage", {})
+            if not isinstance(usage, dict):
+                usage = {}
+            return ORJSONResponse(result, headers={USAGE_HEADER: json.dumps(usage)})
+        except BaseException as e:
+            return self._handle_exception(request, e)
+        finally:
+            self._global_controller.decrement()
 
     async def embedding(
         self, request: Dict[str, Any]

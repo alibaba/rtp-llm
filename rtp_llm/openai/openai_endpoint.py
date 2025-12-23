@@ -2,19 +2,20 @@ import itertools
 import json
 import logging
 from functools import partial
-from typing import Any, AsyncGenerator, List, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from fastapi import Request
 
 from rtp_llm.config.generate_config import GenerateConfig
-from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.model_args import ModelArgs
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import (
     GenerateEnvConfig,
     PyMiscellaneousConfig,
     RenderConfig,
     VitConfig,
 )
+from rtp_llm.frontend.base_endpoint import BaseEndpoint
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
@@ -40,12 +41,14 @@ from rtp_llm.openai.renderers.custom_renderer import (
 )
 from rtp_llm.ops import SpecialTokens
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
+from rtp_llm.structure.request_extractor import request_id_field_name
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
+from rtp_llm.utils.util import check_with_info
 
 
-class OpenaiEndpoint(object):
+class OpenaiEndpoint(BaseEndpoint):
     def __init__(
         self,
         model_config: ModelConfig,
@@ -53,7 +56,19 @@ class OpenaiEndpoint(object):
         vit_config: VitConfig,
         tokenizer: BaseTokenizer,
         backend_rpc_server_visitor: BackendRPCServerVisitor,
+        global_controller,
+        rank_id: int = 0,
+        server_id: int = 0,
     ):
+        super().__init__(
+            model_config=model_config,
+            tokenizer=tokenizer,
+            global_controller=global_controller,
+            rank_id=rank_id,
+            server_id=server_id,
+        )
+        self.backend_rpc_server_visitor = backend_rpc_server_visitor
+
         # Get values from model_config
         self.generate_env_config = model_config.generate_env_config
         self.max_seq_len = model_config.max_seq_len
@@ -65,8 +80,6 @@ class OpenaiEndpoint(object):
 
         if tokenizer == None:
             raise AttributeError(f"tokenizer is none!")
-        self.tokenizer: BaseTokenizer = tokenizer
-        self.backend_rpc_server_visitor = backend_rpc_server_visitor
 
         self.eos_token_id = tokenizer.eos_token_id
         if self.eos_token_id == None:
@@ -153,6 +166,26 @@ class OpenaiEndpoint(object):
             f"use stop_words_str_list [{self.stop_words_str_list}], "
             f"stop_words_id_list [{self.stop_words_id_list}]"
         )
+
+    def _check_request(self, request, req_id: int) -> Dict[str, Any]:
+        if request.master_info is not None:
+            request_id = request.master_info.get("request_id")
+            check_with_info(
+                request_id != None and isinstance(request_id, int),
+                "request_id in master_info is None or not int",
+            )
+            self._global_controller.increment()
+        else:
+            request_id = self._global_controller.increment()
+        request_dict = request.model_dump(exclude_none=True)
+        request_dict[request_id_field_name] = request_id
+        request_dict["__request__"] = request
+        return request_dict
+
+    def inference_request(self, request_dict: Any) -> CompleteResponseAsyncGenerator:
+        request_id = request_dict.get(request_id_field_name, 0)
+        request: ChatCompletionRequest = request_dict.get("__request__")
+        return self.chat_completion(request_id, request)
 
     async def list_models(self):
         model_card = ModelCard(id=self.model_name)
@@ -441,7 +474,10 @@ class OpenaiEndpoint(object):
         return rendered_input
 
     def chat_completion(
-        self, request_id: int, chat_request: ChatCompletionRequest, raw_request: Request
+        self,
+        request_id: int,
+        chat_request: ChatCompletionRequest,
+        raw_request: Request = None,
     ) -> CompleteResponseAsyncGenerator:
         renderer = (
             self.template_renderer if chat_request.user_template else self.chat_renderer
