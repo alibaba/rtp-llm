@@ -83,10 +83,7 @@ bool KVCacheManager::init() {
     }
 
     if (kv_cache_config_.memory_block_cache_size_mb > 0) {
-        if (!initConnectorCoordinator()) {
-            RTP_LLM_LOG_ERROR("init connector coordinator failed");
-            return false;
-        }
+        RTP_LLM_CHECK_WITH_INFO(initConnectorCoordinator(), "init connector coordinator failed");
     }
     return true;
 }
@@ -382,17 +379,14 @@ KVCacheManager::asyncStoreCache(const std::shared_ptr<KVCacheConnectorReadWriteC
     return connector_coordinator_->asyncWrite(connector_context, nullptr);
 }
 
-bool KVCacheManager::broadcastTp(const BroadcastTpRequestPB& request, BroadcastTpResponsePB& response) {
-    if (!request.has_mem_request()) {
-        RTP_LLM_LOG_WARNING("broadcast tp failed, request is invalid, request: [%s]", request.DebugString().c_str());
-        return false;
-    }
-    if (!connector_coordinator_) {
-        RTP_LLM_LOG_WARNING("broadcast tp failed, coordinator is null, request: [%s]", request.DebugString().c_str());
+bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response) {
+    if (!coordinator_) {
+        RTP_LLM_LOG_WARNING("execute function failed, coordinator is null, request: [%s]",
+                            request.DebugString().c_str());
         response.mutable_mem_response()->set_success(false);
         return false;
     }
-    return connector_coordinator_->broadcastTp(request, response);
+    return coordinator_->executeFunction(request, response);
 }
 
 }  // namespace rtp_llm
