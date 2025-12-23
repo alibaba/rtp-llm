@@ -11,7 +11,7 @@ from rtp_llm.models_py.modules.factory.linear import LinearBase
 logger = logging.getLogger(__name__)
 
 from rtp_llm.models_py.kernels.rocm.fp8_kernel import rocm_per_token_group_quant_fp8
-
+from rtp_llm.ops import HWKernelConfig
 
 class RocmFp8DeepGEMMLinear(LinearBase):
     """ROCm FP8 DeepGEMM quantized Linear"""
@@ -22,6 +22,7 @@ class RocmFp8DeepGEMMLinear(LinearBase):
         quant_config: object,
         weight: torch.Tensor,
         weight_scales: Optional[torch.Tensor],
+        hw_kernel_config: Optional['HWKernelConfig'] = None,
         weight_scale_2: Optional[torch.Tensor] = None,
         input_scale: Optional[torch.Tensor] = None,
     ) -> bool:
