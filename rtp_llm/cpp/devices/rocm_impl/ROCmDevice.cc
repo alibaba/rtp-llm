@@ -178,9 +178,11 @@ ROCmDevice::~ROCmDevice() {
 void ROCmDevice::init() {
     DeviceBase::init();
     RTP_LLM_LOG_INFO("max batch size: %d", init_params_.max_batch_size);
-    curandstate_buf_ = allocateBuffer(
-        {init_params_.max_batch_size * sizeof(curandState_t), AllocationType::DEVICE, false, VmemCtl::ForcePhysical},
-        {"curandstate"});
+    curandstate_buf_ = allocateBuffer({init_params_.max_batch_size * sizeof(curandState_t),
+                                       AllocationType::DEVICE,
+                                       false,
+                                       VmemCtl::ForceMemoryResident},
+                                      {"curandstate"});
 #ifdef ENABLE_DEEP_EP
     if (init_params_.use_deepep_moe) {
         if (!initDeepEPBuffer()) {
@@ -815,15 +817,16 @@ void ROCmDevice::maskLogits(Buffer& logits, const Buffer& mask) {
     } else {
         throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
     }
+}
 
-    void ROCmDevice::restoreTorchAllocator() {
-        RTP_LLM_LOG_INFO("Rocm does not support change allocator yet");
-        return;
-    }
+void ROCmDevice::restoreTorchAllocator() {
+    RTP_LLM_LOG_INFO("Rocm does not support change allocator yet");
+    return;
+}
 
-    void ROCmDevice::replaceTorchAllocator() {
-        RTP_LLM_LOG_INFO("Rocm does not support change allocator yet");
-        return;
-    }
+void ROCmDevice::replaceTorchAllocator() {
+    RTP_LLM_LOG_INFO("Rocm does not support change allocator yet");
+    return;
+}
 
 }  // namespace rtp_llm
