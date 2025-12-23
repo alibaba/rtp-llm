@@ -172,7 +172,7 @@ CudaDevice::CudaDevice(const DeviceInitParams& params): DeviceBase(params) {
     // hijack torch cuda allocator
     origin_torch_cuda_allocator_  = at::cuda::CUDACachingAllocator::allocator;
     managed_torch_cuda_allocator_ = std::make_unique<TorchCudaAllocator>(this);
-    useRtpAllocator();
+    replaceTorchAllocator();
 
     cublas_algo_map_.reset(new cublasAlgoMap(GEMM_CONFIG));
     cublas_mm_wrapper_.reset(new cublasMMWrapper(
@@ -945,12 +945,12 @@ void CudaDevice::attachPhysicalMemory() {
     }
 }
 
-void CudaDevice::useTorchAllocator() {
+void CudaDevice::restoreTorchAllocator() {
     // change the device memory allocator to torch
     at::cuda::CUDACachingAllocator::allocator.store(origin_torch_cuda_allocator_);
 }
 
-void CudaDevice::useRtpAllocator() {
+void CudaDevice::replaceTorchAllocator() {
     // change the device memory allocator to rtp pool
     at::cuda::CUDACachingAllocator::allocator.store(managed_torch_cuda_allocator_.get());
 }

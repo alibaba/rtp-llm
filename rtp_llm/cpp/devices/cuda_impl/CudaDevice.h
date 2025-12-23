@@ -89,8 +89,8 @@ public:
     bool             useGroupGemm() const;
     void             detachPhysicalMemory() override;
     void             attachPhysicalMemory() override;
-    void             useTorchAllocator() override;
-    void             useRtpAllocator() override;
+    void             restoreTorchAllocator() override;
+    void             replaceTorchAllocator() override;
     GraphBase*       getDeviceGraphRunner(const DeviceInitParams& params,
                                           py::object              py_instance,
                                           int                     kv_cache_block_offset,

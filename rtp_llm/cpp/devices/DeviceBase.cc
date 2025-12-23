@@ -538,13 +538,13 @@ void DeviceBase::attachPhysicalMemory() {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-void DeviceBase::useRtpAllocator() {
-    RTP_LLM_LOG_ERROR("Rtp memory allocator is not available");
+void DeviceBase::restoreTorchAllocator() {
+    RTP_LLM_LOG_ERROR("Torch memory allocator is not available");
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-void DeviceBase::useTorchAllocator() {
-    RTP_LLM_LOG_ERROR("Torch memory allocator is not available");
+void DeviceBase::replaceTorchAllocator() {
+    RTP_LLM_LOG_ERROR("Rtp memory allocator is not available");
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 

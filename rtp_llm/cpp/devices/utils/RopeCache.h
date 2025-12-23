@@ -30,10 +30,7 @@ torch::Tensor getRopeCache(const RopeConfig& rope_config, const int max_position
  * @param is_cuda
  * @return RopeCache
  */
-RopeCache getRopeCacheOnce(DeviceBase*       device,
-                           const RopeConfig& rope_config,
-                           const int         max_position_embeddings,
-                           const bool        is_cuda = true);
+RopeCache getRopeCacheOnce(const RopeConfig& rope_config, const int max_position_embeddings, const bool is_cuda = true);
 
 /**
  * @brief
