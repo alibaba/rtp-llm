@@ -46,11 +46,11 @@ CompleteTokenIdsPtr createCompleteTokenIds(int batch_size, int seq_length, int s
     return complete_token_ids;
 }
 
-BatchKVCacheResourcePtr createBatchKVCacheResource(int batch_size, int block_num_per_batch = 0) {
+BatchKVCacheResourcePtr createBatchKVCacheResource(int batch_size, int layer_num, int block_num_per_batch = 0) {
     auto resource = std::make_shared<BatchKVCacheResource>();
     resource->resetBatchSize(batch_size);
     for (int i = 0; i < batch_size; ++i) {
-        resource->initBatchGroups(i, 1);
+        resource->initBatchGroups(i, 1, layer_num);
         resource->setBatchBlocks(i, 0, std::vector<int>(block_num_per_batch));
         resource->setBatchCacheKeys(i, CacheKeysType(block_num_per_batch, static_cast<CacheKeyType>(i * 100)));
     }
@@ -101,7 +101,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MallocSingleBatch) {
     allocator_->init();
 
     int  seq_length         = 16;
-    auto batch_resource     = createBatchKVCacheResource(1);
+    auto batch_resource     = createBatchKVCacheResource(1, config.layer_num);
     auto complete_token_ids = createCompleteTokenIds(1, seq_length);
 
     MallocInfo malloc_info{batch_resource, complete_token_ids};
@@ -222,7 +222,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MallocMultipleBatches) {
 
     int  batch_size         = 3;
     int  seq_length         = 17;
-    auto batch_resource     = createBatchKVCacheResource(batch_size);
+    auto batch_resource     = createBatchKVCacheResource(batch_size, config.layer_num);
     auto complete_token_ids = createCompleteTokenIds(batch_size, seq_length);
 
     MallocInfo malloc_info{batch_resource, complete_token_ids};
@@ -243,7 +243,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MallocMultipleBatches) {
 
 //     int batch_size = 3;
 //     int seq_length = 16;  // 3 batches * 2 blocks
-//     auto batch_resource = createBatchKVCacheResource(batch_size);
+//     auto batch_resource = createBatchKVCacheResource(batch_size, config.layer_num);
 //     auto complete_token_ids = createCompleteTokenIds(batch_size, seq_length);
 
 //     MallocInfo malloc_info{batch_resource, complete_token_ids};
@@ -259,7 +259,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, FreeSingleBatch) {
     allocator_->init();
 
     int  seq_length         = 16;
-    auto batch_resource     = createBatchKVCacheResource(1);
+    auto batch_resource     = createBatchKVCacheResource(1, config.layer_num);
     auto complete_token_ids = createCompleteTokenIds(1, seq_length);
 
     MallocInfo malloc_info{batch_resource, complete_token_ids};
@@ -279,7 +279,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, FreeMultipleBatches) {
 
     int  batch_size         = 3;
     int  seq_length         = 16;
-    auto batch_resource     = createBatchKVCacheResource(batch_size);
+    auto batch_resource     = createBatchKVCacheResource(batch_size, config.layer_num);
     auto complete_token_ids = createCompleteTokenIds(batch_size, seq_length);
 
     MallocInfo malloc_info{batch_resource, complete_token_ids};
@@ -298,7 +298,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MallocFreeCycle) {
 
     for (int i = 0; i < 5; ++i) {
         int  seq_length         = 16;
-        auto batch_resource     = createBatchKVCacheResource(1);
+        auto batch_resource     = createBatchKVCacheResource(1, config.layer_num);
         auto complete_token_ids = createCompleteTokenIds(1, seq_length);
 
         MallocInfo malloc_info{batch_resource, complete_token_ids};
@@ -319,7 +319,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InsertIntoCache) {
     allocator_->init();
 
     int  seq_length         = 16;
-    auto batch_resource     = createBatchKVCacheResource(1);
+    auto batch_resource     = createBatchKVCacheResource(1, config.layer_num);
     auto complete_token_ids = createCompleteTokenIds(1, seq_length);
 
     MallocInfo malloc_info{batch_resource, complete_token_ids};
@@ -335,7 +335,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InsertIntoCacheAsResident) {
     allocator_->init();
 
     int  seq_length         = 16;
-    auto batch_resource     = createBatchKVCacheResource(1);
+    auto batch_resource     = createBatchKVCacheResource(1, config.layer_num);
     auto complete_token_ids = createCompleteTokenIds(1, seq_length);
 
     MallocInfo malloc_info{batch_resource, complete_token_ids};
@@ -641,7 +641,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefReferencesMatchedBlocksOnly
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before - 4);
 
     KVCacheResource resource;
-    resource.initGroups(1);
+    resource.initGroups(1, config.layer_num);
 
     resource.cacheKeys() = CacheKeysType{100, 101, 102, 103};
     resource.blocks(0)   = BlockIndicesType{blocks[0], blocks[1], 0, blocks[2]};
@@ -671,7 +671,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefEmptyInputNoEffect) {
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before - 2);
 
     KVCacheResource resource;
-    resource.initGroups(1);
+    resource.initGroups(1, config.layer_num);
     resource.cacheKeys() = CacheKeysType{100, 101};
     resource.blocks(0)   = BlockIndicesType{blocks[0], blocks[1]};
 
@@ -705,7 +705,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MallocWithZeroSeqLength) {
     allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config, device_);
     allocator_->init();
 
-    auto batch_resource     = createBatchKVCacheResource(1);
+    auto batch_resource     = createBatchKVCacheResource(1, config.layer_num);
     auto complete_token_ids = createCompleteTokenIds(1, 0);
 
     MallocInfo malloc_info{batch_resource, complete_token_ids};
@@ -719,7 +719,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, FreeEmptyBatchResource) {
     allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config, device_);
     allocator_->init();
 
-    auto batch_resource     = createBatchKVCacheResource(0);
+    auto batch_resource     = createBatchKVCacheResource(0, config.layer_num);
     auto complete_token_ids = createCompleteTokenIds(0, 0);
 
     FreeInfo free_info{batch_resource, complete_token_ids};
@@ -731,7 +731,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InitMallocRollbackWhenInitMallocForCommon
     allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config, device_, AllocationType::HOST);
     ASSERT_TRUE(allocator_->init());
 
-    auto seed_resource = createBatchKVCacheResource(/*batch_size=*/1);
+    auto seed_resource = createBatchKVCacheResource(/*batch_size=*/1, config.layer_num);
     seed_resource->setBatchCacheKeys(0, CacheKeysType{100, 101, 102, 103});  // 4 keys for 4 blocks
     auto seed_token_ids = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/16, /*seq_size_per_block=*/4);
 
@@ -755,7 +755,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InitMallocRollbackWhenInitMallocForCommon
     ASSERT_EQ(allocator_->freeBlocksNum(), 1u);
     ASSERT_EQ(allocator_->availableBlocksNum(), 5u);
 
-    auto batch_resource = createBatchKVCacheResource(/*batch_size=*/2);
+    auto batch_resource = createBatchKVCacheResource(/*batch_size=*/2, config.layer_num);
     batch_resource->setBatchCacheKeys(0, CacheKeysType{100, 101});  // match_keys -> {100}
     batch_resource->setBatchCacheKeys(1, CacheKeysType{200, 201});
     batch_resource->enable_reuse_cache = true;
@@ -791,7 +791,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrMallocRollback) {
     EXPECT_EQ(initial_free_blocks, 7);
 
     int  batch_size         = 3;
-    auto batch_resource     = createBatchKVCacheResource(batch_size);
+    auto batch_resource     = createBatchKVCacheResource(batch_size, config.layer_num);
     auto complete_token_ids = createCompleteTokenIds(batch_size, 4, 4);  // 4 seq length = 1 block per batch
 
     // First, do a common allocation for all batches (1 block each)
@@ -836,7 +836,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InitMallocRollbackWhenIncrMallocFails) {
     ASSERT_EQ(free_before, 4u);
     ASSERT_EQ(available_before, 4u);
 
-    auto batch_resource     = createBatchKVCacheResource(/*batch_size=*/3);
+    auto batch_resource     = createBatchKVCacheResource(/*batch_size=*/3, config.layer_num);
     auto complete_token_ids = createCompleteTokenIds(/*batch_size=*/3, /*seq_length=*/17, /*seq_size_per_block=*/8);
     batch_resource->enable_reuse_cache = false;  // keep this case purely capacity-driven
 
@@ -865,7 +865,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MixedOperations) {
     std::vector<CompleteTokenIdsPtr>     token_ids_list;
 
     for (int i = 0; i < 5; ++i) {
-        auto batch_resource     = createBatchKVCacheResource(2);
+        auto batch_resource     = createBatchKVCacheResource(2, config.layer_num);
         auto complete_token_ids = createCompleteTokenIds(2, 16);
 
         MallocInfo malloc_info{batch_resource, complete_token_ids};
@@ -882,7 +882,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MixedOperations) {
     }
 
     for (int i = 0; i < 2; ++i) {
-        auto batch_resource     = createBatchKVCacheResource(1);
+        auto batch_resource     = createBatchKVCacheResource(1, config.layer_num);
         auto complete_token_ids = createCompleteTokenIds(1, 16);
 
         MallocInfo malloc_info{batch_resource, complete_token_ids};
