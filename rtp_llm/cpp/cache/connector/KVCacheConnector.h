@@ -1,9 +1,10 @@
 #pragma once
 
-#include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/connector/AsyncContext.h"
 
 namespace rtp_llm {
+
+class KVCacheResource;
 
 class KVCacheConnector {
 public:
