@@ -438,6 +438,7 @@ public:
     int64_t kv_cache_reuse_length = 0;
     int64_t gpu_input_length      = 0;
     int64_t gpu_reuse_length      = 0;
+    int64_t memory_reuse_length   = 0;
     float   gpu_cache_hit_rate    = 0;
 };
 
@@ -451,6 +452,7 @@ public:
     kmonitor::MutableMetric* kv_cache_reuse_length = nullptr;
     kmonitor::MutableMetric* gpu_input_length      = nullptr;
     kmonitor::MutableMetric* gpu_reuse_length      = nullptr;
+    kmonitor::MutableMetric* memory_reuse_length   = nullptr;
     kmonitor::MutableMetric* gpu_cache_hit_rate    = nullptr;
 
 private:

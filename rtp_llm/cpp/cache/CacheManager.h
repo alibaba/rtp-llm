@@ -27,7 +27,8 @@ class CacheManager {
 public:
     struct MatchInfo {
         size_t             reuse_length        = 0;
-        size_t             local_reuse_length  = 0;
+        size_t             gpu_reuse_length    = 0;
+        size_t             memory_reuse_length = 0;
         size_t             remote_reuse_length = 0;
         std::vector<int>   cache_blocks;
         std::vector<float> loss;
