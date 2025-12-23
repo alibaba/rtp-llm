@@ -507,6 +507,11 @@ public:
         return generate_input_->generate_config->enable_memory_block_cache;
     }
 
+    bool asyncLoadCache();
+    bool loadCacheDone() const;
+    bool loadingCache() const;
+    bool asyncStoreCache();
+
     void fillSubGenerateStatus(StreamState state);
     void resizeSubGenerateStatus(size_t new_size);
 
@@ -595,7 +600,7 @@ protected:
     TreeLogitsProcessorPtr              tree_logits_processor_ptr_;
     MultiSeqLogitsProcessorPtr          multi_seq_logits_processor_ptr_;
     std::vector<BaseLogitsProcessorPtr> logits_processor_list_;
-    at::Generator   generator_;
+    at::Generator                       generator_;
 
     // just for bool test
     bool perf_test_ = false;
