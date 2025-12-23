@@ -522,8 +522,7 @@ class ModelDeployWeightInfo:
         if isinstance(database, CkptDatabase) and not database.is_ft_style:
             self.process_meta_from_ckpt(database.pretrain_file_list)
             self.process_meta_from_ckpt(database.finetune_file_list)
-            weight_info = self.get_weight_info()
-            return weight_info
+            return self.get_weight_info()
         elif database.is_ft_style:
             return None
         else:

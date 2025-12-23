@@ -95,6 +95,7 @@ class MultiModalMixin:
         return get_vit_compute_dtype(self.config.data_type)
 
     def init_multimodal(self, config: GptInitModelParameters, device: str) -> None:
+        self.mm_part = None
         self.vit_config = config.py_env_configs.vit_config
         if config.vit_separation != 2:
             with torch.device(device):
@@ -108,42 +109,59 @@ class MultiModalMixin:
                     )
                     if cls:
                         try:
-                            # Assuming the custom class constructor signature is (config, tokenizer)
                             custom_mm_part = cls(config)
 
-                            # If a native mm_part already exists (e.g. Qwen-VL), we need to support both.
                             if hasattr(self, "mm_part") and self.mm_part is not None:
                                 original_mm_part = self.mm_part
-                                original_method = custom_mm_part.mm_embedding
+                                original_custom_method = custom_mm_part.mm_embedding
                                 logging.info(
-                                    f"Native mm_part found: {type(original_mm_part).__name__}. Creating composite router."
+                                    f"Native mm_part found: {type(original_mm_part).__name__}. "
+                                    f"Creating composite router."
                                 )
 
-                                def _composite_mm_embedding(url, mm_type, **kwargs):
-                                    # Check if it's a custom type (handle both single int and list)
-                                    is_custom = False
+                                def _composite_mm_embedding(
+                                    url=None,
+                                    mm_type=MMUrlType.DEFAULT,
+                                    data=None,
+                                    tensors=None,
+                                    configs=None,
+                                    **kwargs,
+                                ):
                                     target_type = (
                                         mm_type[0]
-                                        if isinstance(mm_type, list)
-                                        and len(mm_type) > 0
+                                        if isinstance(mm_type, list) and mm_type
                                         else mm_type
                                     )
-                                    if isinstance(target_type, int):  # Enum is int
-                                        is_custom = target_type == [MMUrlType.CUSTOM]
 
-                                    if is_custom:
-                                        return original_method(url, mm_type, **kwargs)
-                                    else:
-                                        return original_mm_part.mm_embedding(
-                                            url, mm_type, **kwargs
+                                    if target_type == MMUrlType.CUSTOM:
+                                        return original_custom_method(
+                                            url=url,
+                                            mm_type=mm_type,
+                                            data=data,
+                                            tensors=tensors,
+                                            configs=configs,
+                                            **kwargs,
                                         )
+
+                                    if url is None:
+                                        raise ValueError(
+                                            f"Native mm_part (type={target_type}) requires 'url' parameter"
+                                        )
+                                    return original_mm_part.mm_embedding(
+                                        url,
+                                        target_type,
+                                        data=data,
+                                        tensors=tensors,
+                                        configs=configs,
+                                        **kwargs,
+                                    )
 
                                 custom_mm_part.mm_embedding = _composite_mm_embedding
 
                             self.mm_part = custom_mm_part
 
                             logging.info(
-                                f"Successfully replaced mm_part with custom implementation: {cls.__name__}"
+                                f"Successfully loaded custom mm_part: {cls.__name__}"
                             )
                         except Exception as e:
                             logging.error(

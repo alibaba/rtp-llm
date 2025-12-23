@@ -112,7 +112,7 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
             for (const auto& crop_position : mm_preprocess_config->crop_positions()) {
                 crop_positions.push_back(crop_position);
             }
-            mm_inputs.emplace_back(mm_input->multimodal_data(),
+            mm_inputs.emplace_back(mm_input->multimodal_url(),
                                    torch::empty(1),
                                    mm_input->multimodal_type(),
                                    mm_preprocess_config->width(),
@@ -124,6 +124,7 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
                                    mm_preprocess_config->max_frames(),
                                    crop_positions,
                                    mm_preprocess_config->mm_timeout_ms());
+                                   mm_input->multimodal_data());
         }
         generate_input->multimodal_inputs = std::move(mm_inputs);
     }
@@ -153,7 +154,7 @@ std::vector<MultimodalInput> QueryConverter::transMMInput(const MultimodalInputs
 
         // tensor should also converted from input pb, however it is only used in some embedding model, so just empty
         // for now
-        inputs_vec.emplace_back(mm_input->multimodal_data(),
+        inputs_vec.emplace_back(mm_input->multimodal_url(),
                                 torch::empty(1),
                                 mm_input->multimodal_type(),
                                 mm_preprocess_config->width(),
@@ -165,6 +166,9 @@ std::vector<MultimodalInput> QueryConverter::transMMInput(const MultimodalInputs
                                 mm_preprocess_config->max_frames(),
                                 crop_positions,
                                 mm_preprocess_config->mm_timeout_ms());
+                                -1,
+                                -1,
+                                mm_input->multimodal_data());
     }
     return inputs_vec;
 }
@@ -173,7 +177,8 @@ MultimodalInputsPB QueryConverter::transMMInputsPB(const std::vector<MultimodalI
     MultimodalInputsPB mm_inputs_pb;
     for (auto& mm_input : mm_inputs) {
         auto now_input = mm_inputs_pb.add_multimodal_inputs();
-        now_input->set_multimodal_data(mm_input.url);
+        now_input->set_multimodal_url(mm_input.url);
+        now_input->set_multimodal_data(mm_input.data);
         now_input->set_multimodal_type(mm_input.mm_type);
         transTensorPB(now_input->mutable_multimodal_tensor(), rtp_llm::torchTensor2Buffer(mm_input.tensor).get());
         transMMPreprocessConfig(now_input->mutable_mm_preprocess_config(), mm_input.mm_preprocess_config);

@@ -14,9 +14,11 @@ private:
         if (mm_inputs.size() == 0) {
             return MultimodalOutput();
         } else if (!mm_process_engine_.is_none()) {
-            std::vector<std::string>   urls;
-            std::vector<int32_t>       types;
-            std::vector<torch::Tensor> tensors;
+            std::vector<std::string>          urls;
+            std::vector<int32_t>              types;
+            std::vector<torch::Tensor>        tensors;
+            std::vector<std::vector<int32_t>> mm_preprocess_configs;
+            std::vector<std::string>          datas;
             for (auto& mm_input : mm_inputs) {
                 urls.push_back(mm_input.url);
                 tensors.push_back(mm_input.tensor);
@@ -43,8 +45,12 @@ private:
                     mm_preprocess_config.append(mm_input.mm_preprocess_config.mm_timeout_ms);
                     mm_preprocess_configs.push_back(mm_preprocess_config);
                 }
-
-                auto res = mm_process_engine_.attr("mm_embedding_cpp")(urls, types, tensors, mm_preprocess_configs);
+                py::list py_datas;
+                for (auto& data : datas) {
+                    py_datas.append(py::bytes(data));
+                }
+                auto res =
+                    mm_process_engine_.attr("mm_embedding_cpp")(urls, types, tensors, mm_preprocess_configs, py_datas);
                 auto mm_embedding_vec = convertPyObjectToVec(res.attr("embeddings"));
 
                 MultimodalOutput           mm_embedding_res;

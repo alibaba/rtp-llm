@@ -251,6 +251,7 @@ class RenderedInputs:
         input_urls: List[str] = [],
         input_urls_type: List[MMUrlType] = [],
         preprocess_configs: List[MMPreprocessConfig] = [],
+        input_datas: List[bytes] = [],
     ):
         self.input_ids = input_ids
         self.rendered_prompt = rendered_prompt
@@ -269,8 +270,19 @@ class RenderedInputs:
                 f"the number of multimodal preprocess config must match url, now types {len(preprocess_configs)} urls {len(input_urls)}"
             )
 
-        for url, type, config in zip(input_urls, input_urls_type, preprocess_configs):
-            self.multimodal_inputs.append(MultimodalInput(url, type, None, config))
+        if len(input_datas) == 0:
+            input_datas = [b""] * len(input_urls)
+        elif len(input_datas) != len(input_urls):
+            raise Exception(
+                f"the number of multimodal input data must match url, now datas {len(input_datas)} urls {len(input_urls)}"
+            )
+
+        for url, type, config, data in zip(
+            input_urls, input_urls_type, preprocess_configs, input_datas
+        ):
+            self.multimodal_inputs.append(
+                MultimodalInput(url, type, None, config, data=data)
+            )
 
 
 class CustomChatRenderer:
