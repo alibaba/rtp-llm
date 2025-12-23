@@ -427,8 +427,12 @@ void LocalRpcServer::reportCacheStatusTime(int64_t request_begin_time_us) {
         RTP_LLM_LOG_WARNING("broadcast tp failed, cache manager is null");
         return grpc::Status(grpc::StatusCode::INTERNAL, "cache manager is null");
     }
-    // TODO(LXQ): need to call corresponding function in cache manager
-    return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "broadcast tp is not implemented");
+    if (!cache_manager->broadcastTp(*request, *response)) {
+        RTP_LLM_LOG_WARNING("broadcast tp failed, request: [%s]", request->DebugString().c_str());
+        const std::string error_msg = "broadcast tp failed, request: [" + request->DebugString() + "]";
+        return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
+    }
+    return grpc::Status::OK;
 }
 
 grpc::Status LocalRpcServer::SetPause(grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response) {

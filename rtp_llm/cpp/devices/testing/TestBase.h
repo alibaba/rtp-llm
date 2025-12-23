@@ -319,7 +319,7 @@ protected:
 
         auto batch_kv_cache = std::make_shared<rtp_llm::BatchKVCacheResource>();
         batch_kv_cache->resetBatchSize(batch_size);
-        batch_kv_cache->initGroups(1);
+        batch_kv_cache->initGroups(1, cache_config.layer_num);
 
         auto complete_token_ids =
             std::make_shared<rtp_llm::CompleteTokenIds>(device_,
