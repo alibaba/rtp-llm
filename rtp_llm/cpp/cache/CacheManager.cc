@@ -164,6 +164,7 @@ size_t CacheManager::availableBlockNumsWithoutLock() {
 KVCacheInfo CacheManager::getKVCacheInfo(int64_t latest_version, bool need_cache_keys) {
     auto                 snapshot = block_cache_.cacheSnapshot(latest_version);
     std::vector<int64_t> cachekeys;
+
     if (need_cache_keys) {
         std::unordered_set<int64_t> seen_keys;
         for (const auto& cacheItem : snapshot.values) {
@@ -173,7 +174,17 @@ KVCacheInfo CacheManager::getKVCacheInfo(int64_t latest_version, bool need_cache
                 }
             }
         }
+
+        if (memory_block_cache_) {
+            auto memory_snapshot = memory_block_cache_->cacheSnapshot(latest_version);
+            for (const auto& cacheItem : memory_snapshot.values) {
+                if (seen_keys.insert(cacheItem->cache_key).second) {
+                    cachekeys.push_back(cacheItem->cache_key);
+                }
+            }
+        }
     }
+
     KVCacheInfo info{(size_t)availableBlockNums() * seq_size_per_block_,
                      (size_t)totalBlocks() * seq_size_per_block_,
                      (size_t)seq_size_per_block_,
