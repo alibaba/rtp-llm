@@ -56,6 +56,7 @@ public:
     size_t        totalBlocksNum() const;
     size_t        maxAvailableTokensNum() const;
     KVCacheBuffer kvCacheBuffer() const;
+    KVCacheBuffer getMTPModuleKVCacheBuffer(int mtp_module_id) const;   
 
 protected:
     MallocResult         initMalloc(const MallocInfo& malloc_info);
