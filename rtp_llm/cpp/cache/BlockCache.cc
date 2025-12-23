@@ -70,4 +70,16 @@ BlockCache::CacheSnapshot BlockCache::cacheSnapshot(int64_t latest_version) cons
     return lru_cache_.cacheSnapshot(latest_version);
 }
 
+std::vector<BlockCache::CacheItem> BlockCache::steal() {
+    std::lock_guard<std::mutex> lock(mu_);
+
+    std::vector<CacheItem> items;
+    items.reserve(lru_cache_.size());
+    for (const auto& item : lru_cache_.items()) {
+        items.push_back(item.second);
+    }
+    lru_cache_.clear();
+    return items;
+}
+
 }  // namespace rtp_llm
