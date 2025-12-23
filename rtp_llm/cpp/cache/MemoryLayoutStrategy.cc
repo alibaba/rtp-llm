@@ -5,11 +5,11 @@
 namespace rtp_llm {
 
 // LayerFirstLayoutStrategy
-bool LayerFirstLayoutStrategy::init(const BlockPoolConfig& config,
-                                    torch::Tensor&         kv_cache_buffer,
-                                    torch::Tensor&         kv_scale_buffer,
-                                    void*                  cache_base_ptr,
-                                    rtp_llm::DataType      data_type) {
+bool LayerFirstLayoutStrategy::init(const MemoryLayoutConfig& config,
+                                    torch::Tensor&            kv_cache_buffer,
+                                    torch::Tensor&            kv_scale_buffer,
+                                    void*                     cache_base_ptr,
+                                    rtp_llm::DataType         data_type) {
     config_         = config;
     cache_base_ptr_ = cache_base_ptr;
     data_type_      = data_type;
@@ -93,11 +93,9 @@ bool LayerFirstLayoutStrategy::init(const BlockPoolConfig& config,
                               layer_tensor.numel());
         }
 
-#ifdef ENABLE_FP8
         if (data_type_ == rtp_llm::TYPE_FP8_E4M3) {
             Buffer2torchTensor(kv_cache_buffer_.kv_scale_blocks, false).fill_(1.0);
         }
-#endif
     }
 
     RTP_LLM_LOG_INFO("LayerFirstLayoutStrategy initialized successfully");
