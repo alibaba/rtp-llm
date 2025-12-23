@@ -1068,4 +1068,37 @@ void GenerateStream::resizeSubGenerateStatus(size_t new_size) {
     }
 }
 
+bool GenerateStream::asyncLoadCache() {
+    if (!waiting()) {
+        return false;
+    }
+
+    if (!stream_cache_resource_->asyncLoadCache()) {
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(*output_mutex_);
+        if (stoppedWithoutLock()) {
+            // TODO(LXQ): should cancel load cache if stream is stopped
+            RTP_LLM_LOG_WARNING("stream [%ld] stopped after async load cache, should cannel load cache!", streamId());
+        }
+        generate_status_->status = StreamState::LOADING_CACHE;
+    }
+    return true;
+}
+
+bool GenerateStream::loadCacheDone() const {
+    return stream_cache_resource_->loadCacheDone();
+}
+
+bool GenerateStream::loadingCache() const {
+    std::lock_guard<std::mutex> lock(*output_mutex_);
+    return generate_status_->status == StreamState::LOADING_CACHE;
+}
+
+bool GenerateStream::asyncStoreCache() {
+    return stream_cache_resource_->asyncStoreCache();
+}
+
 }  // namespace rtp_llm

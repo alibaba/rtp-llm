@@ -3,11 +3,38 @@
 #include "rtp_llm/cpp/utils/HashUtil.h"
 #include "rtp_llm/cpp/core/BufferHelper.h"
 #include "rtp_llm/cpp/cache/Types.h"
+#include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
+#include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 
 using namespace std;
 
 namespace rtp_llm {
+
+class KVCacheConnectorReadWriteContextImpl: public KVCacheConnectorReadWriteContext {
+public:
+    KVCacheConnectorReadWriteContextImpl(const std::shared_ptr<BatchKVCacheResource>&   batch_resource,
+                                         const std::shared_ptr<KVCacheConnector::Meta>& meta,
+                                         bool                                           enable_memory_cache):
+        batch_resource_(batch_resource), meta_(meta), enable_memory_cache_(enable_memory_cache) {}
+    ~KVCacheConnectorReadWriteContextImpl() override = default;
+
+public:
+    const KVCacheResource& kvCacheResource() const override {
+        return batch_resource_->cacheResource(0);
+    }
+    const std::shared_ptr<KVCacheConnector::Meta>& meta() const override {
+        return meta_;
+    }
+    bool enableMemoryCache() const override {
+        return enable_memory_cache_;
+    }
+
+private:
+    std::shared_ptr<BatchKVCacheResource>   batch_resource_;
+    std::shared_ptr<KVCacheConnector::Meta> meta_;
+    bool                                    enable_memory_cache_{false};
+};
 
 void StreamCacheResource::init(int batch_size) {
     batch_kv_cache_resource_->resetBatchSize(batch_size);
@@ -126,6 +153,10 @@ bool StreamCacheResource::updateKVBlock(const std::vector<int>& block_src_batch,
         batch_kv_cache_resource_, block_src_batch, copy_last_block, block_update_mapping_);
 }
 
+int StreamCacheResource::seqSizePerBlock() const {
+    return resource_context_.cache_manager->cacheConfig().seq_size_per_block;
+}
+
 bool StreamCacheResource::hasCacheKeys() const {
     return batch_kv_cache_resource_->hasCacheKeys();
 }
@@ -154,6 +185,69 @@ bool StreamCacheResource::enable3FS() const {
 
 bool StreamCacheResource::enableMemoryBlockCache() const {
     return resource_context_.enable_memory_block_cache && stream_->enableMemoryBlockCache();
+}
+
+bool StreamCacheResource::asyncLoadCache() {
+    if (!enableMemoryBlockCache()) {
+        return false;
+    }
+    if (load_cache_context_) {
+        return true;
+    }
+    auto new_batch_resource = batch_kv_cache_resource_;
+    if (!new_batch_resource->last_block_aligned) {
+        new_batch_resource                     = std::make_shared<BatchKVCacheResource>();
+        new_batch_resource->last_block_aligned = false;
+        new_batch_resource->addResource(batch_kv_cache_resource_->cacheResource(0));
+        dropLastPartialBlock(new_batch_resource);
+    }
+    auto connector_context =
+        std::make_shared<KVCacheConnectorReadWriteContextImpl>(new_batch_resource, nullptr, enableMemoryCache());
+    load_cache_context_ = resource_context_.cache_manager->asyncLoadCache(connector_context);
+    return load_cache_context_ != nullptr;
+}
+
+bool StreamCacheResource::loadCacheDone() {
+    if (!load_cache_context_) {
+        return true;
+    }
+    if (!load_cache_context_->done()) {
+        return false;
+    }
+    if (load_cache_context_->success()) {
+        auto read_context = std::dynamic_pointer_cast<FusedAsyncReadContext>(load_cache_context_);
+        if (read_context) {
+            const int reuse_len = read_context->resource()->reuseBlocksNum() * seqSizePerBlock();
+            stream_->setInitialReuseLength(reuse_len);
+            stream_->setReuseLength(reuse_len);
+            stream_->setLocalReuseLength(reuse_len);
+            stream_->setMtpTokenIndex(reuse_len);
+        } else {
+            RTP_LLM_LOG_WARNING("load cache success but cast load cache context failed");
+        }
+    }
+    load_cache_context_.reset();
+    return true;
+}
+
+bool StreamCacheResource::asyncStoreCache() {
+    if (!enableMemoryBlockCache()) {
+        return false;
+    }
+    if (store_cache_context_) {
+        return true;
+    }
+    auto new_batch_resource = batch_kv_cache_resource_;
+    if (!new_batch_resource->last_block_aligned) {
+        new_batch_resource                     = std::make_shared<BatchKVCacheResource>();
+        new_batch_resource->last_block_aligned = false;
+        new_batch_resource->addResource(batch_kv_cache_resource_->cacheResource(0));
+        dropLastPartialBlock(new_batch_resource);
+    }
+    auto connector_context =
+        std::make_shared<KVCacheConnectorReadWriteContextImpl>(new_batch_resource, nullptr, enableMemoryCache());
+    store_cache_context_ = resource_context_.cache_manager->asyncStoreCache(connector_context);
+    return store_cache_context_ != nullptr;
 }
 
 }  // namespace rtp_llm

@@ -247,6 +247,7 @@ public:
     int64_t wait_stream_size           = 0;
     int64_t running_stream_size        = 0;
     int64_t remote_running_stream_size = 0;
+    int64_t loading_cache_stream_size  = 0;
 };
 
 class RtpLLMSchedulerMetrics: public kmonitor::MetricsGroup {
@@ -258,6 +259,7 @@ public:
     kmonitor::MutableMetric* wait_stream_size_metric           = nullptr;
     kmonitor::MutableMetric* running_stream_size_metric        = nullptr;
     kmonitor::MutableMetric* remote_running_stream_size_metric = nullptr;
+    kmonitor::MutableMetric* loading_cache_stream_size_metric  = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
