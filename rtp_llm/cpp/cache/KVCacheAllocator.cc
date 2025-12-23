@@ -200,4 +200,10 @@ KVCacheBuffer KVCacheAllocator::getMTPModuleKVCacheBuffer(int mtp_module_id) con
     return block_pool_->getMemoryLayoutKVCacheBuffer(mtp_module_id + 1);
 }
 
+void KVCacheAllocator::clearCache() {
+    if (block_pool_) {
+        block_pool_->clearCache();
+    }
+}
+
 }  // namespace rtp_llm
