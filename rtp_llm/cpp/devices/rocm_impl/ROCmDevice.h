@@ -181,6 +181,7 @@ public:
         return hostAllocator_.get();
     }
     void                  copy(const CopyParams& params) override;
+    void                  multiMergeCopy(const MultiMergeCopyParams& params) override;
     void                  noBlockCopy(const CopyParams& params) override;
     void                  bufMemset(Buffer& buf, int val, DeviceStream stream = DeviceStream::DEFAULT) override;
     TransposeOutput       transpose(const TransposeParams& params) override;
@@ -201,6 +202,7 @@ public:
     AttentionModuleOutput contextAttention(const AttentionModuleParams& params) override;
     AttentionModuleOutput mlaContextAttention(const MlaAttentionModuleParams& params) override;
     AttentionModuleOutput decoderSelfAttention(const AttentionModuleParams& params) override;
+    void                  chainSpeculativeSampling(const SpeculativeSamplingParams& params) override;
     MoeGateSelectOutput   moeGateSelect(const FfnLayerParams& params) override;
     FfnLayerOutput        moeFfn(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs) override;
     FfnLayerOutput        ffnLayer(const FfnLayerParams& params) override;
