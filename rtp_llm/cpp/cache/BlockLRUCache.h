@@ -44,6 +44,8 @@ struct BlockLRUMatchResult {
 
 class BlockLRUCache {
 public:
+    using CacheSnapshot = typename LRUCache<int64_t, std::shared_ptr<MemoryCacheValue>>::CacheSnapshot;
+
     explicit BlockLRUCache(size_t capacity, size_t seq_size_per_block):
         lru_cache_(capacity),
         seq_size_per_block_(seq_size_per_block),
@@ -74,6 +76,11 @@ public:
 
     void incrBlockRefCounter(const std::vector<int>& block_ids);
     void decrBlockRefCounter(const std::vector<int>& block_ids);
+
+    CacheSnapshot cacheSnapshot(int64_t latest_version) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return lru_cache_.cacheSnapshot(latest_version);
+    }
 
 private:
     // 根据block_index从losses中提取对应的losses片段
