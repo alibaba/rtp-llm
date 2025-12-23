@@ -248,8 +248,8 @@ std::vector<BufferPtr> SingleTypeKVCacheAllocator::convertIndexToBuffer(int laye
     return full_kv_cache_group_->convertIndexToBuffer(layer_id, block_id, partition_count, partition_id);
 }
 
-std::shared_ptr<KVCacheResource> SingleTypeKVCacheAllocator::incrKVCacheRef(KVCacheResource&     kvcache_resource,
-                                                                            const CacheKeysType& cache_keys) {
+std::shared_ptr<KVCacheResource> SingleTypeKVCacheAllocator::incrKVCacheRef(const KVCacheResource& kvcache_resource,
+                                                                            const CacheKeysType&   cache_keys) {
     if (cache_keys.empty()) {
         return nullptr;
     }
@@ -265,12 +265,12 @@ std::shared_ptr<KVCacheResource> SingleTypeKVCacheAllocator::incrKVCacheRef(KVCa
     }
 
     auto selected_resource = std::make_shared<KVCacheResource>();
-    selected_resource->initGroups(1);
+    selected_resource->initGroups(1, config_.layer_num);
 
     CacheKeysType&   selected_cache_keys = selected_resource->cacheKeys();
     BlockIndicesType selected_blocks;
 
-    auto& src_blocks = kvcache_resource.blocks(0);
+    const auto& src_blocks = kvcache_resource.blocks(0);
 
     for (auto key : cache_keys) {
         auto it = key_to_pos.find(key);
@@ -298,7 +298,7 @@ std::shared_ptr<KVCacheResource> SingleTypeKVCacheAllocator::incrKVCacheRef(KVCa
     return selected_resource;
 }
 
-void SingleTypeKVCacheAllocator::decrKVCacheRef(KVCacheResource& kvcache_resource) {
+void SingleTypeKVCacheAllocator::decrKVCacheRef(const KVCacheResource& kvcache_resource) {
     RTP_LLM_CHECK_WITH_INFO(
         kvcache_resource.groupNums() == 1, "decrKVCacheRef expects groupNums==1, got %d", kvcache_resource.groupNums());
 
@@ -363,7 +363,7 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& kv
     kv_cache_resource->resetAndReturnOldResources(new_batch_size, old_resources);
 
     // init for all batch
-    kv_cache_resource->initGroups(1);
+    kv_cache_resource->initGroups(1, config_.layer_num);
 
     for (int new_batch_idx = 0; new_batch_idx < new_batch_size; ++new_batch_idx) {
         const int old_batch_idx = block_src_batch[new_batch_idx];
