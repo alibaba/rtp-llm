@@ -8,7 +8,7 @@ from typing import Optional
 
 import torch
 from torch import nn
-
+from rtp_llm.ops import HWKernelConfig
 
 class LinearBase(nn.Module, ABC):
     """Linear strategy base class
@@ -24,6 +24,7 @@ class LinearBase(nn.Module, ABC):
         quant_config: object,
         weight: torch.Tensor,
         weight_scales: Optional[torch.Tensor],
+        hw_kernel_config: Optional['HWKernelConfig'] = None,
         weight_scale_2: Optional[torch.Tensor] = None,
         input_scale: Optional[torch.Tensor] = None,
     ) -> bool:

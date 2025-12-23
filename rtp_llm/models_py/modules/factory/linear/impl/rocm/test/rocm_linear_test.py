@@ -10,6 +10,8 @@ from torch.nn import functional as F
 
 from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.utils.swizzle_utils import swizzle_tensor
+from rtp_llm.ops import HWKernelConfig
+
 
 class LinearTorch(nn.Module):
     def __init__(
@@ -40,12 +42,13 @@ class LinearTest(TestCase):
         (2048, 5120),
     ]
     HAS_BIAS = [True, False]
+    HAS_SWIZZLE = [True, False]
     def setUp(self) -> None:
         if not torch.cuda.is_available():
             raise SkipTest("CUDA is not available")
         torch.set_default_device("cuda")
 
-    def _run_linear_test(self, num_tokens: int, k: int, n: int, dtype: _dtype, has_bias: bool):
+    def _run_linear_test(self, num_tokens: int, k: int, n: int, dtype: _dtype, has_bias: bool, has_swizzle: bool):
         torch.manual_seed(0)
         w = torch.randn(k, n, dtype=dtype)
         torch.nn.init.xavier_uniform_(w)
@@ -59,17 +62,18 @@ class LinearTest(TestCase):
         
         linear_torch = LinearTorch(w, bias)
         torch_output = linear_torch(x)
-        
-        swizzle = os.environ.get("USE_SWIZZLEA", None) == "1"
-        if swizzle:
+        hw_kernel_config=HWKernelConfig()
+        if has_swizzle:
             # Follow aiter's approach: transpose to (n, k), shuffle, then transpose back to (k, n)
             # This matches the format expected by hipb_mm with bpreshuffle=True
             w_swizzled = swizzle_tensor(w.t(), False, MiM=16).t()  # (n, k) swizzled
             w_dict = {"weight": w_swizzled, "bias": bias}
+            hw_kernel_config.use_swizzleA = True
         else:
             w_dict = {"weight": w, "bias": bias}
+        
         linear = LinearFactory.create_linear_from_weights(
-            w_dict, "weight", None, "bias", None
+            w_dict, "weight", None, "bias", None, hw_kernel_config
         )
         my_output = linear(x)
         self.assertTrue(torch.allclose(torch_output, my_output, atol=1e-2, rtol=1e-2))
@@ -80,12 +84,13 @@ class LinearTest(TestCase):
             self.K_N_PAIRS,
             self.DTYPES,
             self.HAS_BIAS,
+            self.HAS_SWIZZLE,
         ):
-            num_tokens, (k, n), dtype, has_bias = params
+            num_tokens, (k, n), dtype, has_bias, has_swizzle = params
             with self.subTest(
-                num_tokens=num_tokens, k=k, n=n, dtype=dtype, has_bias=has_bias
+                num_tokens=num_tokens, k=k, n=n, dtype=dtype, has_bias=has_bias, has_swizzle=has_swizzle,
             ):
-                self._run_linear_test(num_tokens, k, n, dtype, has_bias)
+                self._run_linear_test(num_tokens, k, n, dtype, has_bias, has_swizzle)
 
 
 if __name__ == "__main__":

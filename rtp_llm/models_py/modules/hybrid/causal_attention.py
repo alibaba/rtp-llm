@@ -9,6 +9,7 @@ from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplB
 from rtp_llm.ops import ParallelismConfig, AttentionConfigs
 from rtp_llm.ops.compute_ops import DeviceType, KVCache, get_device
 from rtp_llm.utils.model_weight import W
+from rtp_llm.ops import HWKernelConfig
 
 # Import device-specific FusedQKRMSNorm
 device_type = get_device().get_device_type()
@@ -27,6 +28,7 @@ class CausalAttention(nn.Module):
         weights: Dict[str, torch.Tensor],
         layernorm_eps: float,
         quant_config: Optional[object] = None,
+        hw_kernel_config: Optional['HWKernelConfig'] = None,
     ):
         super().__init__()
         self.parallelism_config = parallelism_config
@@ -37,10 +39,10 @@ class CausalAttention(nn.Module):
 
         # Create linear layers using LinearFactory
         self.qkv_proj = LinearFactory.create_linear_from_weights(
-            weights, W.attn_qkv_w, W.attn_qkv_s, W.attn_qkv_b, quant_config=quant_config
+            weights, W.attn_qkv_w, W.attn_qkv_s, W.attn_qkv_b, quant_config=quant_config, hw_kernel_config=hw_kernel_config
         )
         self.o_proj = LinearFactory.create_linear_from_weights(
-            weights, W.attn_o_w, W.attn_o_s, W.attn_o_b, quant_config=quant_config
+            weights, W.attn_o_w, W.attn_o_s, W.attn_o_b, quant_config=quant_config, hw_kernel_config=hw_kernel_config
         )
         # for qwen3
         self.qk_fuse_norm = None
