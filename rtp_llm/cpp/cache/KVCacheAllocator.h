@@ -70,6 +70,8 @@ public:
     KVCacheBuffer kvCacheBuffer() const;
     KVCacheBuffer getMTPModuleKVCacheBuffer(int mtp_module_id) const;
 
+    virtual void clearCache();
+
 protected:
     MallocResult         initMalloc(const MallocInfo& malloc_info);
     virtual MallocResult incrMalloc(const MallocInfo& malloc_info)             = 0;
