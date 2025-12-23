@@ -24,21 +24,15 @@ from rtp_llm.models_py.triton_kernels.causal_conv1d import (
     prepare_causal_conv1d_metadata,
 )
 from rtp_llm.models_py.triton_kernels.common.layernorm_gated import RmsNormGated
-from rtp_llm.models_py.utils.arch import is_cuda
-
-if is_cuda():
-    from rtp_llm.models_py.triton_kernels.fla.block import (
-        load_initial_state_from_block_map,
-        store_ssm_state_to_block_map,
-    )
-    from rtp_llm.models_py.triton_kernels.fla.chunk_new import (
-        chunk_gated_delta_rule_new,
-    )
-    from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
-        fused_recurrent_gated_delta_rule,
-    )
-    from rtp_llm.models_py.triton_kernels.fla.gdn_gating import fused_gdn_gating
-
+from rtp_llm.models_py.triton_kernels.fla.block import (
+    load_initial_state_from_block_map,
+    store_ssm_state_to_block_map,
+)
+from rtp_llm.models_py.triton_kernels.fla.chunk import chunk_gated_delta_rule
+from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
+    fused_recurrent_gated_delta_rule,
+)
+from rtp_llm.models_py.triton_kernels.fla.gdn_gating import fused_gdn_gating
 from rtp_llm.ops import HybridAttentionType, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     KVCache,
@@ -218,21 +212,15 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             ],
             dim=-1,
         )
-        query = query.reshape(
-            1, query.shape[0], self.local_num_k_heads, self.head_k_dim
-        ).repeat_interleave(self.num_key_value_heads, dim=2)
-        key = key.reshape(
-            1, key.shape[0], self.local_num_k_heads, self.head_k_dim
-        ).repeat_interleave(self.num_key_value_heads, dim=2)
-        value = value.reshape(
-            1, value.shape[0], self.local_num_v_heads, self.head_v_dim
-        ).contiguous()
-        attn_out, h, final_state = chunk_gated_delta_rule_new(
+        query = query.view(1, query.shape[0], self.local_num_k_heads, self.head_k_dim)
+        key = key.view(1, key.shape[0], self.local_num_k_heads, self.head_k_dim)
+        value = value.view(1, value.shape[0], self.local_num_v_heads, self.head_v_dim)
+        attn_out, h, final_state = chunk_gated_delta_rule(
             query,
             key,
             value,
             g,
-            b,
+            beta,
             initial_state=initial_states,
             output_final_state=True,
             cu_seqlens=cu_seqlens_without_padding,
@@ -322,13 +310,9 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         )
         g, beta = fused_gdn_gating(self.alog, a, b, self.dt_bias)
 
-        # TODO: fix query,key,value tensor with strided, do not memcpy
-        query = query.view(
-            1, seq_len, self.local_num_k_heads, self.head_k_dim
-        ).repeat_interleave(self.num_key_value_heads, dim=2)
-        key = key.view(
-            1, seq_len, self.local_num_k_heads, self.head_k_dim
-        ).repeat_interleave(self.num_key_value_heads, dim=2)
+        # contiguous will be applyed when call fused_recurrent_gated_delta_rule
+        query = query.view(1, seq_len, self.local_num_k_heads, self.head_k_dim)
+        key = key.view(1, seq_len, self.local_num_k_heads, self.head_k_dim)
         value = value.view(1, seq_len, self.local_num_v_heads, self.head_v_dim)
         ssm_states = self._get_ssm_states(kv_cache_tensor)
         core_attn_out, _ = fused_recurrent_gated_delta_rule(
@@ -477,6 +461,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         (b, a) = torch.split(mixed_ba, split_arg_list_ba, dim=2)
 
         # reshape to [token, v_head_num, v_head_dim]
+        # b,a should be contiguous for fused_gdn_gating
         b = b.reshape(b.size(0), self.local_num_v_heads)
         a = a.reshape(a.size(0), self.local_num_v_heads)
 
