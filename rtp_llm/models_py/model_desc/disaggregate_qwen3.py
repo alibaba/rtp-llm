@@ -26,6 +26,7 @@ from rtp_llm.ops.compute_ops import (
 )
 from rtp_llm.utils.model_weight import W
 from rtp_llm.utils.util import check_with_info
+from rtp_llm.ops import HWKernelConfig
 
 
 class CausalAttentionPure(nn.Module):
@@ -116,6 +117,7 @@ class Qwen3GemmLayer(nn.Module):
         layer_idx: int,
         is_last_layer: bool,
         quant_config: Optional[object],
+        hw_kernel_config: Optional['HWKernelConfig'] = None,
     ):
         super().__init__()
         self.config = config
@@ -131,7 +133,7 @@ class Qwen3GemmLayer(nn.Module):
             else weights.weights[layer_idx + 1]
         )
         self.o_proj = LinearFactory.create_linear_from_weights(
-            curent_layer_weights, W.attn_o_w, None, W.attn_o_b, quant_config
+            curent_layer_weights, W.attn_o_w, None, W.attn_o_b, quant_config, hw_kernel_config
         )
         self.post_attention_layernorm = RMSNorm(
             curent_layer_weights[W.post_ln_gamma], eps=config.layernorm_eps
@@ -141,6 +143,7 @@ class Qwen3GemmLayer(nn.Module):
             parallelism_config,
             curent_layer_weights,
             quant_config,
+            hw_kernel_config,
         )
 
         # if last layer, then all weights are setted to None
@@ -156,7 +159,7 @@ class Qwen3GemmLayer(nn.Module):
             next_layer_weights[W.pre_ln_gamma], eps=config.layernorm_eps
         )
         self.qkv_proj = LinearFactory.create_linear_from_weights(
-            next_layer_weights, W.attn_qkv_w, None, W.attn_qkv_b, quant_config
+            next_layer_weights, W.attn_qkv_w, None, W.attn_qkv_b, quant_config, hw_kernel_config
         )
         check_with_info(W.q_ln_gamma in next_layer_weights, "q_ln_gamma not found")
         check_with_info(W.k_ln_gamma in next_layer_weights, "k_ln_gamma not found")
@@ -195,6 +198,7 @@ class Qwen3GemmPreLayer(nn.Module):
         config: ModelConfig,
         parallelism_config: ParallelismConfig,
         weights: ModelWeights,
+        hw_kernel_config: Optional['HWKernelConfig'] = None,
     ):
         super().__init__()
         self.config = config
@@ -207,7 +211,7 @@ class Qwen3GemmPreLayer(nn.Module):
         )
         quant_config = config.quant_config
         self.qkv_proj = LinearFactory.create_linear_from_weights(
-            weights.weights[0], W.attn_qkv_w, None, W.attn_qkv_b, quant_config
+            weights.weights[0], W.attn_qkv_w, None, W.attn_qkv_b, quant_config, hw_kernel_config
         )
         self.qk_fuse_norm = FusedQKRMSNorm(
             weights.weights[0][W.q_ln_gamma],
@@ -256,6 +260,7 @@ class Qwen3GemmModel(DisaggregateModelBase):
                     idx,
                     idx == self.layer_num - 1,
                     quant_config,
+                    self.py_hw_kernel_config,
                 )
                 for idx in range(self.layer_num)
             ]
@@ -273,7 +278,7 @@ class Qwen3GemmModel(DisaggregateModelBase):
         # Get quant_config from model_config
         quant_config = config.quant_config
         self.lm_head = LinearFactory.create_linear_from_weights(
-            lm_head_weights, W.lm_head, None, None, quant_config
+            lm_head_weights, W.lm_head, None, None, quant_config, self.py_hw_kernel_config
         )
 
     def recv_micro_batch_split_info(self) -> Tuple[List[torch.Tensor], BatchSplitInfo]:
@@ -515,7 +520,7 @@ class Qwen3DisaggregateModel(GptModelBase):
         lm_head_weights = {W.lm_head: weights.get_global_weight(W.lm_head)}
         quant_config = config.quant_config
         self.lm_head = LinearFactory.create_linear_from_weights(
-            lm_head_weights, W.lm_head, None, None, quant_config
+            lm_head_weights, W.lm_head, None, None, quant_config, py_hw_kernel_config
         )
 
     def initialize(self, init_resource: PyModelInitResources) -> bool:

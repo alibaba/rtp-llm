@@ -23,6 +23,7 @@ from rtp_llm.ops.compute_ops import (
     PyModelOutputs,
 )
 from rtp_llm.utils.model_weight import W
+from rtp_llm.ops import HWKernelConfig
 
 
 class BertDecoderLayer(nn.Module):
@@ -32,14 +33,15 @@ class BertDecoderLayer(nn.Module):
         parallelism_config: ParallelismConfig,
         weights: Dict[str, torch.Tensor],
         quant_config: Optional[object] = None,
+        hw_kernel_config: Optional['HWKernelConfig'] = None,
     ):
         super().__init__()
         attn_configs = config.getAttentionConfigs(parallelism_config.tp_size)
         self.self_attn = CausalAttention(
-            attn_configs, parallelism_config, weights, config.layernorm_eps, quant_config
+            attn_configs, parallelism_config, weights, config.layernorm_eps, quant_config, hw_kernel_config
         )
         self.mlp = DenseMLP(
-            config.activation_type, parallelism_config, weights, quant_config
+            config.activation_type, parallelism_config, weights, quant_config, hw_kernel_config
         )
         self.input_layernorm = AddBiasResLayerNorm(
             weights[W.post_ln_gamma],
@@ -109,7 +111,7 @@ class BertModel(GptModelBase):
         self.layers = nn.ModuleList(
             [
                 BertDecoderLayer(
-                    config, parallelism_config, weights.weights[idx], quant_config
+                    config, parallelism_config, weights.weights[idx], quant_config, py_hw_kernel_config
                 )
                 for idx in range(self.layer_num)
             ]

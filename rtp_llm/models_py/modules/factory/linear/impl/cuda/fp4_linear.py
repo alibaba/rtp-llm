@@ -14,6 +14,7 @@ from rtp_llm.models_py.kernels.cuda.fp4_kernel import (
     cutlass_scaled_fp4_mm_wrapper,
     # scaled_fp4_quant_wrapper,
 )
+from rtp_llm.ops import HWKernelConfig
 
 try:
     from flashinfer import (
@@ -40,6 +41,7 @@ class CudaFp4GEMMLinear(LinearBase):
         quant_config: object,
         weight: torch.Tensor,
         weight_scales: Optional[torch.Tensor],
+        hw_kernel_config: Optional['HWKernelConfig'] = None,
         weight_scale_2: Optional[torch.Tensor] = None,
         input_scale: Optional[torch.Tensor] = None,
     ) -> bool:
