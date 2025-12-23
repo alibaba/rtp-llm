@@ -126,7 +126,7 @@ void registerPyOpDefs(pybind11::module& m) {
                      params_ptr = pybind11::cast<std::shared_ptr<rtp_llm::ParamsBase>>(params_obj);
                  } catch (const pybind11::cast_error& e) {
                      // Conversion failed, params_ptr remains nullptr
-                     RTP_LLM_LOG_INFO("Failed to cast params_obj to shared_ptr<ParamsBase>: %s", e.what());
+                    //  RTP_LLM_LOG_INFO("Failed to cast params_obj to shared_ptr<ParamsBase>: %s", e.what());
                      py_attn_params = params_obj;
                  }
                  return PyModelOutputs(hidden_states, params_ptr, py_attn_params);

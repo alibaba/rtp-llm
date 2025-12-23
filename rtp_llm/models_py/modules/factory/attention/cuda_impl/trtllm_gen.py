@@ -35,16 +35,22 @@ class FlashInferTRTLLMParams(object):
     def __init__(
         self,
         batch_size: int,
-        max_seq_len: int,
+        max_q_len: int = 0,
+        max_kv_len: int = 0,
+        max_seq_len: int = 0,
         seq_lens: Optional[torch.Tensor] = None,
+        input_lens: Optional[torch.Tensor] = None,
         block_tables: Optional[torch.Tensor] = None,
         cu_seqlens: Optional[torch.Tensor] = None,
         cu_kv_seqlens: Optional[torch.Tensor] = None,
     ):
 
         self.batch_size = batch_size
-        self.max_seq_len = max_seq_len
+        self.max_q_len = max_q_len     # for prefill
+        self.max_kv_len = max_kv_len   # for prefill
+        self.max_seq_len = max_seq_len # for decode
         self.seq_lens = seq_lens
+        self.input_lens = input_lens
         self.block_tables = block_tables
         self.cu_seqlens = cu_seqlens
         self.cu_kv_seqlens = cu_kv_seqlens
@@ -77,13 +83,26 @@ class FlashInferTRTLLMPrefillOp(object):
         return is_sm_100() and attention_inputs.is_prefill
 
     def prepare(self, attention_inputs: PyAttentionInputs) -> FlashInferTRTLLMParams:
+        sequence_lengths = attention_inputs.input_lengths + attention_inputs.prefix_lengths
+        page_size = self.config.seq_size_per_block
+        page_per_seq = (sequence_lengths + page_size - 1) // page_size
+        cu_kv_seqlens = torch.cat(
+            [
+                torch.tensor([0], dtype=torch.int32),
+                torch.cumsum(page_per_seq, dim=0, dtype=torch.int32),
+            ]
+        ).to(attention_inputs.cu_seqlens.device)
+
+
         return FlashInferTRTLLMParams(
             batch_size=attention_inputs.input_lengths.size(0),
-            max_seq_len=attention_inputs.input_lengths.max().item(),
-            seq_lens=attention_inputs.input_lengths,
+            max_q_len=attention_inputs.input_lengths.max().item(),
+            max_kv_len=sequence_lengths.max().item(),
+            seq_lens=sequence_lengths,
+            input_lens=attention_inputs.input_lengths,
             block_tables=attention_inputs.kv_cache_block_id_device,
             cu_seqlens=attention_inputs.cu_seqlens,
-            cu_kv_seqlens=attention_inputs.cu_kv_seqlens,
+            cu_kv_seqlens=cu_kv_seqlens,
         )
 
     def forward(
@@ -106,8 +125,8 @@ class FlashInferTRTLLMPrefillOp(object):
             workspace_buffer=self.workspace_buffer,
             block_tables=fmha_params.block_tables,
             seq_lens=fmha_params.seq_lens,
-            max_q_len=fmha_params.max_seq_len,
-            max_kv_len=fmha_params.max_seq_len,
+            max_q_len=fmha_params.max_q_len,
+            max_kv_len=fmha_params.max_kv_len,
             bmm1_scale=bmm1_scale,
             bmm2_scale=bmm2_scale,
             batch_size=fmha_params.batch_size,
