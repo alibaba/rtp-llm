@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <mutex>
 #include <vector>
 
 #include "rtp_llm/cpp/model_rpc/RPCPool.h"
@@ -93,11 +94,13 @@ public:
     }
 
     bool success() const {
+        std::unique_lock<std::mutex> lock(wait_done_mutex_);
         return all_request_success_;
     }
 
     std::vector<ResponsePB> responses() const {
-        std::vector<ResponsePB> responses;
+        std::unique_lock<std::mutex> lock(wait_done_mutex_);
+        std::vector<ResponsePB>      responses;
         responses.reserve(worker_contexts_.size());
         for (const auto& worker_rpc_context : worker_contexts_) {
             responses.push_back(worker_rpc_context->response);

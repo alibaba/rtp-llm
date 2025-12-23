@@ -396,7 +396,7 @@ service EmbeddingRpcService {
     rpc health(EmbeddingHealthRequestPB) returns (EmptyPB);
 }
 
-message MemoryBroadcastTpRequestPB {
+message MemoryOperationRequestPB {
     message GpuBlock {
         message LayerBlock {
             int32 layer_id = 1;
@@ -414,19 +414,19 @@ message MemoryBroadcastTpRequestPB {
     CopyDirection copy_direction = 4;
 }
 
-message MemoryBroadcastTpResponsePB {
+message MemoryOperationResponsePB {
     bool success = 1;
 }
 
-message BroadcastTpRequestPB {
+message FunctionRequestPB {
     oneof request {
-        MemoryBroadcastTpRequestPB mem_request = 1;
+        MemoryOperationRequestPB mem_request = 1;
     }
 }
 
-message BroadcastTpResponsePB {
+message FunctionResponsePB {
     oneof response {
-        MemoryBroadcastTpResponsePB mem_response = 1;
+        MemoryOperationResponsePB mem_response = 1;
     }
 }
 
@@ -450,7 +450,7 @@ service RpcService {
     rpc RemoteGenerateNew(RemoteGenerateRequestPBNew) returns (RemoteGenerateResponsePBNew);
     rpc RemoteStore(RemoteStoreRequestPB) returns (RemoteStoreResponsePB);
 
-    rpc BroadcastTp(BroadcastTpRequestPB) returns (BroadcastTpResponsePB);
+    rpc ExecuteFunction(FunctionRequestPB) returns (FunctionResponsePB);
 }
 
 service MultimodalRpcService {

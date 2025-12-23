@@ -174,8 +174,12 @@ public:
         batch_resource.push_back(resource);
     }
 
+    void setReuseBlocksNum(int batch_id, size_t reuse_blocks_num) {
+        RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
+        batch_resource[batch_id].setReuseBlocksNum(reuse_blocks_num);
+    }
+
 public:
-    bool enable_reuse_cache = true;
     bool last_block_aligned = true;
 
 private:

@@ -28,7 +28,7 @@ public:
                                 const std::shared_ptr<KVCacheAllocator>& allocator,
                                 rtp_llm::DeviceBase*                     device,
                                 const kmonitor::MetricsReporterPtr&      metrics_reporter = nullptr);
-    ~KVCacheConnectorCoordinator();
+    virtual ~KVCacheConnectorCoordinator();
 
 public:
     bool init();
@@ -45,6 +45,9 @@ private:
     bool initMemoryConnector();
     bool initUpdateThread();
     void updateOnce();
+    void processReadContexts();
+    void processWriteContexts();
+    void asyncReadAfterMatch(std::shared_ptr<FusedAsyncReadContext> fused_read_context);
 
 private:
     const CacheConfig                 cache_config_;

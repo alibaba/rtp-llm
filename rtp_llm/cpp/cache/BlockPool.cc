@@ -241,6 +241,11 @@ void BlockPool::blockCacheReference(const BlockIndicesType& block_ids) {
     all_ref_counter_.incrementRefCounter(block_ids);
 }
 
+int BlockPool::getAllRefCount(BlockIdxType block_idx) const {
+    std::lock_guard<std::mutex> ref_lock(ref_mu_);
+    return all_ref_counter_.getRefCounter(block_idx);
+}
+
 void BlockPool::regUserMr(size_t model_id) {
     if (device_->cacheStore() && !kvcache_reg_mr_) {
         RTP_LLM_LOG_INFO("start to register user mr");

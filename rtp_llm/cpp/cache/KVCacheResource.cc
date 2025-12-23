@@ -19,6 +19,13 @@ void KVCacheResource::resizeBlocks(int reserver_blocks, int value) {
     for (auto& group : group_block_ids) {
         group->resize(reserver_blocks, value);
     }
+    if (group_block_ids.empty()) {
+        layer_block_ids.clear();
+    } else {
+        for (auto& layer : layer_block_ids) {
+            layer = group_block_ids.front();
+        }
+    }
 }
 
 int KVCacheResource::blocksNum(int group_id) const {
@@ -41,6 +48,10 @@ GroupBlockIds& KVCacheResource::groupBlocks() {
 
 const GroupBlockIds& KVCacheResource::groupBlocks() const {
     return group_block_ids;
+}
+
+const LayerBlockIds& KVCacheResource::layerBlocks() const {
+    return layer_block_ids;
 }
 
 CacheKeysType& KVCacheResource::cacheKeys() {
