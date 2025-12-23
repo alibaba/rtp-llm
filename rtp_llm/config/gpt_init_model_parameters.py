@@ -521,7 +521,6 @@ class GptInitModelParameters:
             token_id = custom_config["custom_modal_token_id"]
             if isinstance(token_id, int):
                 # Append to existing mm_sep_tokens.
-                # Note: Need to get, modify, and set back to ensure C++ binding updates if it's a property.
                 current_sep_tokens = self.gpt_init_params.mm_sep_tokens
                 # Avoid duplicates
                 if [token_id] not in current_sep_tokens:

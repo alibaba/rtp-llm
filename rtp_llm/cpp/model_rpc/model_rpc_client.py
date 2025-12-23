@@ -175,8 +175,10 @@ def trans_multimodal_input(
             resized_shape = generate_config.resized_shape
     for mm_input in input_py.mm_inputs:
         mm_input_pb = MultimodalInputPB()
-        mm_input_pb.multimodal_data = mm_input.url
+        mm_input_pb.multimodal_url = mm_input.url
         mm_input_pb.multimodal_type = mm_input.mm_type
+        mm_input_pb.multimodal_data = mm_input.data
+
         mm_preprocess_config_pb = mm_input_pb.mm_preprocess_config
         mm_preprocess_config_pb.width = (
             mm_input.config.width if mm_input.config.width != -1 else resized_shape[0]

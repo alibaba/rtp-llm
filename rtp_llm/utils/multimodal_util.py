@@ -80,6 +80,7 @@ class MultimodalInput:
     mm_type: MMUrlType
     config: MMPreprocessConfig
     tensor: torch.Tensor
+    data: bytes
 
     def __init__(
         self,
@@ -87,11 +88,13 @@ class MultimodalInput:
         mm_type: MMUrlType = MMUrlType.DEFAULT,
         config: MMPreprocessConfig = MMPreprocessConfig(),
         tensor: torch.Tensor = torch.empty(1),
+        data: bytes = b"",
     ):
         self.url = url
         self.mm_type = mm_type
         self.config = config
         self.tensor = tensor
+        self.data = data
 
 
 def get_vit_compute_dtype(dtype: str):
