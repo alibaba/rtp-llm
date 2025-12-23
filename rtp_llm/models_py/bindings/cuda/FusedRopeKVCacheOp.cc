@@ -112,6 +112,7 @@ TRTAttnPtr FusedRopeKVCachePrefillOpBase::prepare(torch_ext::PyAttentionInputs a
     attn_params->cu_seqlens_without_prefix = attn_inputs.cu_seqlens_without_prefix;
     attn_params->max_seq_len               = attn_inputs.input_lengths.max().item<int32_t>();
     attn_params->max_prefix_length         = attn_inputs.prefix_lengths.max().item<int32_t>();
+    attn_params->prefix_lengths            = attn_inputs.prefix_lengths;
     attn_params->kv_block_array.cache_type = attn_configs_.kv_cache_dtype;
     attn_params->padding_offset            = attn_inputs.padding_offset;
     return attn_params;
