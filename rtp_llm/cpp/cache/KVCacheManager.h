@@ -15,9 +15,7 @@ namespace rtp_llm {
 
 class KVCacheManager {
 public:
-    bool               init();
-    const CacheConfig& cacheConfig() const;
-
+    bool             init();
     CacheLayerLayout layerCacheBase() const;
 
     KVCacheManager(const CacheConfig&                 config,
@@ -36,8 +34,13 @@ public:
     size_t      maxAvailableTokensNum() const;
     KVCacheInfo getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
 
-    // For backward compatibility with old code
-    KVCacheBuffer kvCacheBuffer() const;
+    // for main model
+    KVCacheBuffer      kvCacheBuffer() const;
+    const CacheConfig& cacheConfig() const;
+
+    // for mtp module
+    KVCacheBuffer      getMTPModuleKVCacheBuffer(int mtp_module_id) const;
+    const CacheConfig& getMTPModuleCacheConfig(int mtp_module_id) const;
 
     MallocResult malloc(const MallocInfo& malloc_info);
     void         free(const FreeInfo& free_info);

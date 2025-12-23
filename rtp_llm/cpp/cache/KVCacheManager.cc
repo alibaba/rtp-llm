@@ -302,4 +302,12 @@ void KVCacheManager::reportMetricsLoop() {
     }
 }
 
+KVCacheBuffer KVCacheManager::getMTPModuleKVCacheBuffer(int mtp_module_id) const {
+    return allocator_->getMTPModuleKVCacheBuffer(mtp_module_id);
+}
+
+const CacheConfig& KVCacheManager::getMTPModuleCacheConfig(int mtp_module_id) const {
+    return *config_.mtp_sub_configs[mtp_module_id];
+}
+
 }  // namespace rtp_llm
