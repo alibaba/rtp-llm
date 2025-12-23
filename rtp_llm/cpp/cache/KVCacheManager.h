@@ -81,6 +81,9 @@ public:
     // broadcast tp for single rank
     bool broadcastTp(const BroadcastTpRequestPB& request, BroadcastTpResponsePB& response);
 
+    // clear local cache, for rank 0
+    void clearLocalCache();
+
 private:
     bool initConnectorCoordinator();
 

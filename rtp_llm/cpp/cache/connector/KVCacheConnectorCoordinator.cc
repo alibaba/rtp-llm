@@ -370,4 +370,12 @@ bool KVCacheConnectorCoordinator::broadcastTp(const BroadcastTpRequestPB& reques
     }
 }
 
+void KVCacheConnectorCoordinator::clearMemoryCache() {
+    if (!memory_connector_) {
+        RTP_LLM_LOG_WARNING("clear memory cache failed, memory connector is null");
+        return;
+    }
+    memory_connector_->clearCache();
+}
+
 }  // namespace rtp_llm
