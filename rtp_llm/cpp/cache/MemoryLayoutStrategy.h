@@ -14,7 +14,7 @@ class MemoryLayoutStrategy {
 public:
     virtual ~MemoryLayoutStrategy() = default;
 
-    virtual bool init(const BlockPoolConfig& config,
+    virtual bool init(const MemoryLayoutConfig& config,
                       torch::Tensor&         kv_cache_buffer,
                       torch::Tensor&         kv_scale_buffer,
                       void*                  cache_base_ptr,
@@ -39,7 +39,7 @@ public:
     virtual const KVCacheBuffer& kvCacheBuffer() const = 0;
 
 protected:
-    BlockPoolConfig            config_;
+    MemoryLayoutConfig         config_;
     void*                      cache_base_ptr_    = nullptr;
     void*                      kv_scale_base_ptr_ = nullptr;
     rtp_llm::DataType          data_type_         = rtp_llm::TYPE_INVALID;
@@ -50,7 +50,7 @@ protected:
 
 class LayerFirstLayoutStrategy: public MemoryLayoutStrategy {
 public:
-    bool init(const BlockPoolConfig& config,
+    bool init(const MemoryLayoutConfig& config,
               torch::Tensor&         kv_cache_buffer,
               torch::Tensor&         kv_scale_buffer,
               void*                  cache_base_ptr,

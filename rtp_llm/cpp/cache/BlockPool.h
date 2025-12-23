@@ -59,8 +59,8 @@ public:
     void* getKCacheAddr(int layer_id, int block_id) const;
     void* getVCacheAddr(int layer_id, int block_id) const;
 
-    // For backward compatibility with old cache system, TODO, 这里可以删除吗？
     KVCacheBuffer kvCacheBuffer() const;
+    KVCacheBuffer getMemoryLayoutKVCacheBuffer(int layout_id) const;
 
     void incrBlockRefCounter(const BlockIndicesType& blocks) {}
     void decrBlockRefCounter(const BlockIndicesType& blocks) {}
@@ -68,11 +68,12 @@ public:
 private:
     void initFreeBlocks();
     void freeImpl(const BlockIndicesType& block_indices);
+    // global_layer_id -> {layout_index, local_layer_id}
+    std::pair<int, int> mapGlobalLayerIdToLocal(int global_layer_id) const;
 
 private:
     BlockPoolConfig                        config_;
     std::set<BlockIdxType>                 free_block_ids_;
-    std::unordered_map<int, torch::Tensor> layer_kv_tensors_;  // global_layer_id -> kv cache addresses
     BlockRefCounter                        all_ref_counter_;
     BlockRefCounter                        request_ref_counter_;
     rtp_llm::DeviceBase*                   device_;
@@ -85,7 +86,12 @@ private:
     bool               kvcache_reg_mr_  = false;
     int64_t            mr_cost_time_ms_ = 0;
 
-    std::unique_ptr<MemoryLayoutStrategy> layout_strategy_;
+    std::vector<std::unique_ptr<MemoryLayoutStrategy>> layout_strategies_;
+
+    std::vector<std::pair<int, int>> global_layer_to_local_;
+
+    std::vector<torch::Tensor> global_layer_kv_tensors_;
+    std::vector<torch::Tensor> global_layer_kv_scale_tensors_;
 };
 
 using BlockPoolPtr = std::shared_ptr<BlockPool>;
