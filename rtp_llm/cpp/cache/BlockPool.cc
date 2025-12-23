@@ -146,6 +146,30 @@ void BlockPool::blockCacheReference(const BlockIndicesType& block_ids) {
     all_ref_counter_.incrementRefCounter(block_ids);
 }
 
+int BlockPool::getBlockCacheRefCount(BlockIdxType block_idx) const {
+    return all_ref_counter_.getRefCounter(block_idx);
+}
+
+void BlockPool::clearCache() {
+    if (!block_cache_) {
+        return;
+    }
+    auto                      items = block_cache_->steal();
+    std::vector<BlockIdxType> blocks_to_free;
+    // Iterate in reverse order to preserve relative order in cache
+    for (auto it = items.rbegin(); it != items.rend(); ++it) {
+        if (request_ref_counter_.getRefCounter(it->block_index) > 0) {
+            // Block is currently in use, keep it in cache
+            block_cache_->put(*it);
+        } else {
+            blocks_to_free.push_back(it->block_index);
+        }
+    }
+    if (!blocks_to_free.empty()) {
+        blockCacheFree(blocks_to_free);
+    }
+}
+
 void BlockPool::regUserMr(size_t model_id) {
     if (device_->cacheStore() && !kvcache_reg_mr_) {
         RTP_LLM_LOG_INFO("start to register user mr");

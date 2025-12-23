@@ -362,5 +362,15 @@ bool KVCacheManager::broadcastTp(const BroadcastTpRequestPB& request, BroadcastT
     return connector_coordinator_->broadcastTp(request, response);
 }
 
+void KVCacheManager::clearLocalCache() {
+    // clear gpu cache
+    if (allocator_) {
+        allocator_->clearCache();
+    }
+    // clear cpu cache
+    if (connector_coordinator_) {
+        connector_coordinator_->clearMemoryCache();
+    }
+}
 
 }  // namespace rtp_llm

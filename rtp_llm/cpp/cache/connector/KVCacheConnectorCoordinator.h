@@ -43,6 +43,7 @@ public:
                            const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context,
                            const std::shared_ptr<Meta>&                             meta);
     bool broadcastTp(const BroadcastTpRequestPB& request, BroadcastTpResponsePB& response);
+    void clearMemoryCache();
 
 private:
     bool initMemoryConnector();
