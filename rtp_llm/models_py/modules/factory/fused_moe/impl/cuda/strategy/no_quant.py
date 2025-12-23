@@ -4,7 +4,9 @@ from typing import Any, Dict
 
 import torch
 
-from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.priority_attributes import (
     StrategyAttributes,
 )
@@ -66,4 +68,40 @@ class CudaNoQuantEpLowLatencyStrategy(MoeStrategy):
         return StrategyAttributes(
             router_class=DeepEpLowLatencyRouter,
             executor_class=DeepGemmMaskedExecutor,
+        )
+
+
+class CudaNoQuantDpNormalStrategy(MoeStrategy):
+    """CUDA CPP mode without quantization strategy and dp normal mode"""
+
+    def create_router(self, config: MoEConfigAdapter) -> Any:
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_normal_router import (
+            DeepepNormalRouter,
+        )
+
+        return DeepepNormalRouter(config, use_fp8=False)
+
+    def create_executor(
+        self, config: MoEConfigAdapter, weights: Dict[str, torch.Tensor]
+    ) -> Any:
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.f16_cpp_executor import (
+            CppMoeExecutor,
+        )
+
+        return CppMoeExecutor(
+            config,
+            weights,
+        )
+
+    def get_attributes(self) -> StrategyAttributes:
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.f16_cpp_executor import (
+            CppMoeExecutor,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_normal_router import (
+            DeepepNormalRouter,
+        )
+
+        return StrategyAttributes(
+            router_class=DeepepNormalRouter,
+            executor_class=CppMoeExecutor,
         )
