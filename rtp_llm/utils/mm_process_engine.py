@@ -6,6 +6,7 @@ import torch
 
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
+from rtp_llm.utils.debug_trace import trace_func
 from rtp_llm.utils.multimodal_util import MMPreprocessConfig, MMUrlType
 from rtp_llm.utils.time_util import Timer
 from rtp_llm.utils.util import check_with_info
@@ -34,12 +35,14 @@ class MMProcessEngine:
         else:
             return [tensor]
 
+    @trace_func()
     def submit(
         self,
         urls: List[str],
         types: Optional[List[MMUrlType]] = None,
         tensors: Optional[List[torch.Tensor]] = None,
         preprocess_configs: Optional[List[List[int]]] = None,
+        datas: Optional[List[Optional[bytes]]] = None,
     ):
         if self.run_batch:
             with Timer() as route_timer:
@@ -54,11 +57,14 @@ class MMProcessEngine:
             configs = [MMPreprocessConfig()] * len(urls)
         else:
             configs = [MMPreprocessConfig(*config) for config in preprocess_configs]
+        
+        if datas is None or len(datas) == 0:
+            datas = [None] * len(urls)
 
         if self.run_batch:
             with Timer() as route_timer:
                 res, pos = self.model.mm_part.mm_embedding(
-                    urls, types, tensors=tensors, configs=configs
+                    urls, types, tensors=tensors, configs=configs, data=datas
                 )
             kmonitor.report(
                 GaugeMetrics.VIT_PREPROCESS_RT_METRIC, route_timer.cost_ms()
@@ -72,7 +78,8 @@ class MMProcessEngine:
                     url=urls[index], 
                     mm_type=types[index], 
                     download_headers=self.download_headers,
-                    configs=configs[index]
+                    configs=configs[index],
+                    data=datas[index]
                 )
                 res.extend(self._maybe_tensor_to_list(embedding))
                 if self.contains_pos:
