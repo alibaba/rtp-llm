@@ -10,6 +10,7 @@ from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.ops import ParallelismConfig
 from rtp_llm.ops.compute_ops import DeviceType, KVCache, get_device
 from rtp_llm.utils.model_weight import W
+from rtp_llm.ops import HWKernelConfig
 
 # Import device-specific FusedQKRMSNorm
 device_type = get_device().get_device_type()
@@ -22,7 +23,7 @@ else:
 class CausalAttention(nn.Module):
 
     def __init__(
-        self, config: ModelConfig, parallelism_config: ParallelismConfig, weights: Dict[str, torch.Tensor], quant_config: Optional[object] = None
+        self, config: ModelConfig, parallelism_config: ParallelismConfig, weights: Dict[str, torch.Tensor], quant_config: Optional[object] = None, hw_kernel_config: Optional['HWKernelConfig'] = None,
     ):
         super().__init__()
         self.config = config
@@ -37,10 +38,10 @@ class CausalAttention(nn.Module):
         if quant_config is None:
             quant_config = config.quant_config
         self.qkv_proj = LinearFactory.create_linear_from_weights(
-            weights, W.attn_qkv_w, W.attn_qkv_s, W.attn_qkv_b, quant_config=quant_config
+            weights, W.attn_qkv_w, W.attn_qkv_s, W.attn_qkv_b, quant_config=quant_config, hw_kernel_config=hw_kernel_config
         )
         self.o_proj = LinearFactory.create_linear_from_weights(
-            weights, W.attn_o_w, W.attn_o_s, W.attn_o_b, quant_config=quant_config
+            weights, W.attn_o_w, W.attn_o_s, W.attn_o_b, quant_config=quant_config, hw_kernel_config=hw_kernel_config
         )
         self.qk_fuse_norm = None
         if W.q_ln_gamma in weights and W.k_ln_gamma in weights:

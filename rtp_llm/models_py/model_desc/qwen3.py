@@ -22,15 +22,16 @@ from rtp_llm.ops.compute_ops import (
 )
 from rtp_llm.ops import ParallelismConfig
 from rtp_llm.utils.model_weight import W
+from rtp_llm.ops import HWKernelConfig
 
 
 class Qwen3DecoderLayer(nn.Module):
     def __init__(
-        self, config: ModelConfig, parallelism_config: ParallelismConfig, weights: Dict[str, torch.Tensor], quant_config: Optional[object] = None
+        self, config: ModelConfig, parallelism_config: ParallelismConfig, weights: Dict[str, torch.Tensor], quant_config: Optional[object] = None, hw_kernel_config: Optional['HWKernelConfig'] = None,
     ):
         super().__init__()
-        self.self_attn = CausalAttention(config, parallelism_config, weights, quant_config)
-        self.mlp = FusedSiluActDenseMLP(config.activation_type, parallelism_config, weights, quant_config)
+        self.self_attn = CausalAttention(config, parallelism_config, weights, quant_config, hw_kernel_config)
+        self.mlp = FusedSiluActDenseMLP(config.activation_type, parallelism_config, weights, quant_config, hw_kernel_config)
         self.input_layernorm = RMSNorm(
             weights[W.pre_ln_gamma], eps=config.layernorm_eps
         )
@@ -87,7 +88,7 @@ class Qwen3Model(GptModelBase):
         self.embed_tokens = Embedding(config, parallelism_config, weights.get_global_weight(W.embedding))
         self.layers = nn.ModuleList(
             [
-                Qwen3DecoderLayer(config, parallelism_config, weights.weights[idx], quant_config)
+                Qwen3DecoderLayer(config, parallelism_config, weights.weights[idx], quant_config, py_hw_kernel_config)
                 for idx in range(self.layer_num)
             ]
         )

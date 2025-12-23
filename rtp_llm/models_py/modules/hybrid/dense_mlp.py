@@ -7,22 +7,23 @@ from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.ops import ParallelismConfig, ActivationType, rtp_llm_ops
 from rtp_llm.utils.model_weight import W
+from rtp_llm.ops import HWKernelConfig
 
 class DenseMLP(nn.Module):
     def __init__(
-        self, activation_type: ActivationType, parallelism_config: ParallelismConfig, weights: Dict[str, torch.Tensor], quant_config: object
+        self, activation_type: ActivationType, parallelism_config: ParallelismConfig, weights: Dict[str, torch.Tensor], quant_config: object, hw_kernel_config: Optional['HWKernelConfig'] = None
     ):
         super().__init__()
 
         # Create linear layers using LinearFactory
         self.gate_proj = LinearFactory.create_linear_from_weights(
-            weights, W.ffn_w1, W.ffn_s1, W.ffn_b1, quant_config=quant_config
+            weights, W.ffn_w1, W.ffn_s1, W.ffn_b1, quant_config=quant_config, hw_kernel_config=hw_kernel_config
         )
         self.up_proj = LinearFactory.create_linear_from_weights(
-            weights, W.ffn_w3, W.ffn_s3, W.ffn_b3, quant_config=quant_config
+            weights, W.ffn_w3, W.ffn_s3, W.ffn_b3, quant_config=quant_config, hw_kernel_config=hw_kernel_config
         )
         self.down_proj = LinearFactory.create_linear_from_weights(
-            weights, W.ffn_w2, W.ffn_s2, W.ffn_b2, quant_config=quant_config
+            weights, W.ffn_w2, W.ffn_s2, W.ffn_b2, quant_config=quant_config, hw_kernel_config=hw_kernel_config
         )
 
         if activation_type == ActivationType.Swiglu:
@@ -41,7 +42,7 @@ class DenseMLP(nn.Module):
 
 class FusedSiluActDenseMLP(nn.Module):
     def __init__(
-        self, activation_type: ActivationType, parallelism_config: ParallelismConfig, weights: Dict[str, torch.Tensor], quant_config: object
+        self, activation_type: ActivationType, parallelism_config: ParallelismConfig, weights: Dict[str, torch.Tensor], quant_config: object, hw_kernel_config: Optional['HWKernelConfig'] = None
     ):
         super().__init__()
 
@@ -52,10 +53,10 @@ class FusedSiluActDenseMLP(nn.Module):
         # Handle merged or separate weights
         if W.ffn_w13 in weights:
             self.gate_up_proj = LinearFactory.create_linear_from_weights(
-                weights, W.ffn_w13, W.ffn_s13, W.ffn_b13, quant_config=quant_config
+                weights, W.ffn_w13, W.ffn_s13, W.ffn_b13, quant_config=quant_config, hw_kernel_config=hw_kernel_config
             )
             self.down_proj = LinearFactory.create_linear_from_weights(
-                weights, W.ffn_w2, W.ffn_s2, W.ffn_b2, quant_config=quant_config
+                weights, W.ffn_w2, W.ffn_s2, W.ffn_b2, quant_config=quant_config, hw_kernel_config=hw_kernel_config
             )
         else:
             self.gate_up_proj = LinearFactory.create_merged_linear(
@@ -65,9 +66,10 @@ class FusedSiluActDenseMLP(nn.Module):
                 bias_keys=[W.ffn_b1, W.ffn_b3],
                 quant_config=quant_config,
                 dim=-1,
+                hw_kernel_config=hw_kernel_config,
             )
             self.down_proj = LinearFactory.create_linear_from_weights(
-                weights, W.ffn_w2, W.ffn_s2, W.ffn_b2, quant_config=quant_config
+                weights, W.ffn_w2, W.ffn_s2, W.ffn_b2, quant_config=quant_config, hw_kernel_config=hw_kernel_config
             )
 
     def forward(self, x: torch.Tensor):
@@ -86,17 +88,17 @@ class FusedSiluActDenseMLP(nn.Module):
 
 class BertGeluActDenseMLP(nn.Module):
     def __init__(
-        self, activation_type: ActivationType, parallelism_config: ParallelismConfig, weights: Dict[str, torch.Tensor], quant_config: object
+        self, activation_type: ActivationType, parallelism_config: ParallelismConfig, weights: Dict[str, torch.Tensor], quant_config: object, hw_kernel_config: Optional['HWKernelConfig'] = None
     ):
         super().__init__()
 
         # For BERT model, use traditional FFN structure with GeLU activation
         # BERT uses: intermediate_weight3 -> GeLU -> intermediate_weight2
         self.intermediate_proj = LinearFactory.create_linear_from_weights(
-            weights, W.ffn_w3, W.ffn_s3, W.ffn_b3, quant_config=quant_config
+            weights, W.ffn_w3, W.ffn_s3, W.ffn_b3, quant_config=quant_config, hw_kernel_config=hw_kernel_config
         )
         self.output_proj = LinearFactory.create_linear_from_weights(
-            weights, W.ffn_w2, W.ffn_s2, W.ffn_b2, quant_config=quant_config
+            weights, W.ffn_w2, W.ffn_s2, W.ffn_b2, quant_config=quant_config, hw_kernel_config=hw_kernel_config
         )
 
         # Use GeLU activation

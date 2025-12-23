@@ -31,6 +31,7 @@ from rtp_llm.ops.compute_ops import (
     PyModelOutputs,
 )
 from rtp_llm.utils.model_weight import W
+from rtp_llm.ops import HWKernelConfig
 
 
 class GenericMoeLayer(nn.Module):
@@ -44,6 +45,7 @@ class GenericMoeLayer(nn.Module):
         moe_config: MoeConfig,
         max_generate_batch_size: int = 0,
         enable_cuda_graph: bool = False,
+        hw_kernel_config: Optional['HWKernelConfig'] = None,
     ):
         super().__init__()
         self.config = config
@@ -57,7 +59,7 @@ class GenericMoeLayer(nn.Module):
         # Get quant_config from model_config
         quant_config = config.quant_config
         self.gate = LinearFactory.create_linear_from_weights(
-            weights, W.moe_gate, None, None, quant_config
+            weights, W.moe_gate, None, None, quant_config, hw_kernel_config
         )
         self.select_topk = SelectTopk(
             config, moe_config.fake_balance_expert, parallelism_config.dp_rank
@@ -141,6 +143,7 @@ class GenericMoeDecoderLayer(nn.Module):
         moe_config: MoeConfig,
         max_generate_batch_size: int = 0,
         enable_cuda_graph: bool = False,
+        hw_kernel_config: Optional['HWKernelConfig'] = None,
     ):
         super().__init__()
         self.layer_idx = layer_idx
@@ -155,10 +158,11 @@ class GenericMoeDecoderLayer(nn.Module):
                 layer_idx,
                 config.layernorm_eps,
                 quant_config,
+                hw_kernel_config,
             )
         else:
             self.self_attn = CausalAttention(
-                config, parallelism_config, weights, quant_config
+                config, parallelism_config, weights, quant_config, hw_kernel_config
             )
 
         # Determine if this is a Dense layer (before first MoE layer or dense only)
@@ -182,7 +186,7 @@ class GenericMoeDecoderLayer(nn.Module):
         if self.is_dense_layer or self.add_shared_expert:
             try:
                 self.shared_mlp = FusedSiluActDenseMLP(
-                    config.activation_type, parallelism_config, weights, quant_config
+                    config.activation_type, parallelism_config, weights, quant_config, hw_kernel_config
                 )
             except (KeyError, AssertionError) as e:
                 # If weights don't exist, shared_mlp remains None
@@ -278,6 +282,7 @@ class GenericMoeModel(GptModelBase):
                     moe_config,
                     max_generate_batch_size,
                     enable_cuda_graph=enable_cuda_graph,
+                    hw_kernel_config=py_hw_kernel_config
                 )
                 for idx in range(self.layer_num)
             ]
