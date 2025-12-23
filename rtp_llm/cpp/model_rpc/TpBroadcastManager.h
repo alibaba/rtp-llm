@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <mutex>
 #include <vector>
 
 #include "rtp_llm/cpp/model_rpc/RPCPool.h"
@@ -29,12 +30,14 @@ public:
 
 public:
     void waitDone() {
-        bool              all_request_success = true;
-        const int         worker_size         = worker_contexts_.size();
-        std::vector<bool> finished(worker_size, false);
+        std::unique_lock<std::mutex> lock(wait_done_mutex_);
+        bool                         all_request_success = true;
+        const int                    worker_size         = worker_contexts_.size();
+        std::vector<bool>            finished(worker_size, false);
 
         while (true) {
             if (finished_count_ == worker_size) {
+                all_request_success_ = all_request_success;
                 break;
             }
             const int  once_timeout_ms = 1;
@@ -77,15 +80,16 @@ public:
                 }
             }
         }
-        all_request_success_ = all_request_success;
     }
 
     bool success() const {
+        std::unique_lock<std::mutex> lock(wait_done_mutex_);
         return all_request_success_;
     }
 
     std::vector<ResponsePB> responses() const {
-        std::vector<ResponsePB> responses;
+        std::unique_lock<std::mutex> lock(wait_done_mutex_);
+        std::vector<ResponsePB>      responses;
         responses.reserve(worker_contexts_.size());
         for (const auto& worker_rpc_context : worker_contexts_) {
             responses.push_back(worker_rpc_context->response);
@@ -104,6 +108,7 @@ private:
     std::vector<std::shared_ptr<WorkerRpcContext>> worker_contexts_;
     bool                                           all_request_success_{false};
     int                                            finished_count_{0};
+    mutable std::mutex                             wait_done_mutex_;
 };
 
 class TpBroadcastManager {

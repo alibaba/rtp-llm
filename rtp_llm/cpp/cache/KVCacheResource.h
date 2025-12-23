@@ -50,6 +50,8 @@ public:
     GroupBlockIds&       groupBlocks();
     const GroupBlockIds& groupBlocks() const;
 
+    const LayerBlockIds& layerBlocks() const;
+
     CacheKeysType&       cacheKeys();
     const CacheKeysType& cacheKeys() const;
 
