@@ -27,10 +27,10 @@ public:
     virtual BlockAddrInfo      convertIndexToAddr(int layer_id, int block_id) const   = 0;
     virtual BlockBufferPtrInfo convertIndexToBuffer(int layer_id, int block_id) const = 0;
     virtual std::vector<BufferPtr>
-    convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const = 0;
-    virtual std::shared_ptr<KVCacheResource> incrKVCacheRef(KVCacheResource&     kvcache_resource,
-                                                            const CacheKeysType& cache_keys)      = 0;
-    virtual void                             decrKVCacheRef(KVCacheResource& kvcache_resource)    = 0;
+    convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const    = 0;
+    virtual std::shared_ptr<KVCacheResource> incrKVCacheRef(const KVCacheResource& kvcache_resource,
+                                                            const CacheKeysType&   cache_keys)         = 0;
+    virtual void                             decrKVCacheRef(const KVCacheResource& kvcache_resource) = 0;
 
     virtual CacheLayerLayout allLayerCacheBase() const                                                           = 0;
     virtual bool             updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
