@@ -13,7 +13,8 @@ rtp_opensouce_path = Path(__file__).resolve().parent.parent.parent.parent.parent
 sys.path.append(str(rtp_opensouce_path))
 
 import rtp_llm.models
-from rtp_llm.config.py_config_modules import StaticConfig
+from rtp_llm.config.engine_config import EngineConfig
+from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.cpp.devices.cuda_impl.tests.libtest_cuda_graph_prefill_ops import (
     CudaGraphPrefillOp,
 )
@@ -27,12 +28,17 @@ from rtp_llm.ops.compute_ops import (
     get_typemeta,
     init_device,
 )
+from rtp_llm.tools.api.hf_model_helper import get_model_info_from_hf
 
 
 class TestCudaGraphPrefill(unittest.TestCase):
     def __init__(self, methodName: str = "runTest") -> None:
         super().__init__(methodName)
         os.environ["RESERVER_RUNTIME_MEM_MB"] = "10240"
+
+        # Set device first to ensure all tensors are created on the correct device
+        self.device = "cuda:0"
+        torch.cuda.set_device(self.device)
 
         # Test parameters (can be configured)
         self.max_seq_len = 64
@@ -45,27 +51,23 @@ class TestCudaGraphPrefill(unittest.TestCase):
 
         # Build model using ModelFactory (similar to rtp_auto_model.py)
         model = self.build_model()
-        logging.info("build model successfully")
-
-        # Get model parameters for CudaGraphRunner
-        self.hidden_size = self.model_config.gpt_init_params.hidden_size
+        print("build model successfully")
 
         self.op = CudaGraphPrefillOp()
         self.op.init(
             model,
             self.max_context_batch_size,
-            self.hidden_size,
             self.max_seq_len,
             self.tokens_per_block,
             self.max_prefill_cuda_graph_len,
             self.prefill_capture_seq_lens,
         )
-        logging.info(
-            f"CudaGraphPrefillOp initialized with hidden_size={self.hidden_size}, "
-            f"max_prefill_cuda_graph_len={self.max_prefill_cuda_graph_len}"
+        torch.cuda.synchronize()
+        print(
+            f"CudaGraphPrefillOp initialized with max_prefill_cuda_graph_len={self.max_prefill_cuda_graph_len}"
         )
 
-        self.normal_model = self.build_model()
+        self.normal_model = model
 
     def _generate_prefill_capture_seq_lens(self) -> list:
         """Generate prefill capture sequence lengths"""
@@ -85,47 +87,96 @@ class TestCudaGraphPrefill(unittest.TestCase):
             128,
             448,
             512,
+            786,
             960,
         ]
         return seq_lens
 
     def build_model(self) -> GptModelBase:
-        """Build model using ModelFactory, similar to rtp_auto_model.py"""
-        model_path = "/mnt/nas1/hf/gte-Qwen2-7B-instruct"
+        """Build model using ModelFactory, similar to auto_model.py"""
+        model_path = "/data1/tanboyu.tby/gte-Qwen2-7B-instruct/"
 
-        # Set environment variables
-        self._set_env()
+        # Set configs (similar to auto_model.py)
+        self._set_configs(model_path)
 
-        # Set config
-        StaticConfig.model_config.checkpoint_path = model_path
-        StaticConfig.update_from_env()
+        # Create EngineConfig from py_env_configs
+        engine_config = EngineConfig.create(self.py_env_configs)
 
-        # Create model config and load model
-        factory_model_config = ModelFactory.create_normal_model_config()
-        self.gpt_model = ModelFactory.creat_standalone_py_model_from_huggingface(
-            model_path_or_name=model_path,
-            revision=None,
-            model_config=factory_model_config,
+        # Create model configs
+        model_config = ModelFactory.create_model_config(
+            model_args=self.py_env_configs.model_args,
+            lora_config=self.py_env_configs.lora_config,
+            kv_cache_config=engine_config.kv_cache_config,
+            profiling_debug_logging_config=engine_config.profiling_debug_logging_config,
+            generate_env_config=self.py_env_configs.generate_env_config,
+            embedding_config=self.py_env_configs.embedding_config,
+            quantization_config=self.py_env_configs.quantization_config,
+            render_config=self.py_env_configs.render_config,
         )
 
-        self.compute_dtype = self.gpt_model.compute_dtype
+        # Update engine_config based on model_config
+        ModelFactory.update_engine_config_from_model_config(
+            engine_config=engine_config,
+            model_config=model_config,
+        )
+
+        # Create model using ModelFactory
+        self.gpt_model = ModelFactory._create_model(
+            model_config=model_config,
+            engine_config=engine_config,
+            vit_config=None,
+            merge_lora=False,
+        )
+
+        # Load the model
+        self.gpt_model.load()
+        self.compute_dtype = self.gpt_model.weight.dtype
         model = self.gpt_model.py_model
         self.model_config = model.config
 
-        # Init device
-        init_device(self.gpt_model.config)
-        self.device = get_device().get_device_type().name.lower()
+        # Init device with new API
+        init_device(
+            parallelism_config=engine_config.parallelism_config,
+            model_config=model_config,
+            eplb_config=model_config.eplb_config,
+            fmha_config=engine_config.fmha_config,
+            device_resource_config=engine_config.device_resource_config,
+            moe_config=engine_config.moe_config,
+            sp_config=engine_config.sp_config,
+            misc_config=engine_config.misc_config,
+            profiling_debug_logging_config=engine_config.profiling_debug_logging_config,
+            hw_kernel_config=engine_config.hw_kernel_config,
+            concurrency_config=engine_config.concurrency_config,
+            ffn_disaggregate_config=engine_config.parallelism_config.ffn_disaggregate_config,
+            runtime_config=engine_config.runtime_config,
+        )
 
         return model
 
-    def _set_env(self):
-        """Set environment variables for standalone model loading"""
-        os.environ["LOAD_PYTHON_MODEL"] = "1"
+    def _set_configs(self, model_path: str):
+        """Set configuration structures instead of environment variables."""
+        # Create PyEnvConfigs to hold all configurations
+        self.py_env_configs = PyEnvConfigs()
 
-        if os.getenv("ACT_TYPE") is None:
-            os.environ["ACT_TYPE"] = "BF16"
-        if os.getenv("DEVICE_RESERVE_MEMORY_BYTES") is None:
-            os.environ["DEVICE_RESERVE_MEMORY_BYTES"] = str(-536870912)
+        # Get model info from HuggingFace
+        model_path, model_type = get_model_info_from_hf(model_path, None)
+        self.py_env_configs.model_args.model_type = model_type
+        self.py_env_configs.model_args.act_type = "BF16"
+        self.py_env_configs.model_args.ckpt_path = model_path
+        self.py_env_configs.model_args.max_seq_len = 4096
+        self.py_env_configs.kv_cache_config.seq_size_per_block = self.tokens_per_block
+        self.py_env_configs.profiling_debug_logging_config.hack_layer_num = 1
+        if not self.py_env_configs.model_args.tokenizer_path:
+            self.py_env_configs.model_args.tokenizer_path = model_path
+
+        # Set ModelSpecificConfig.load_python_model = True
+        self.py_env_configs.model_specific_config.load_python_model = True
+        self.py_env_configs.device_resource_config.not_use_default_stream = True
+        # Set DeviceResourceConfig.device_reserve_memory_bytes
+        if self.py_env_configs.device_resource_config.device_reserve_memory_bytes == 0:
+            self.py_env_configs.device_resource_config.device_reserve_memory_bytes = (
+                -4294967296
+            )
 
     def _calculate_padding_offset(
         self, input_lengths: torch.Tensor, cu_seqlens: torch.Tensor
@@ -264,7 +315,7 @@ class TestCudaGraphPrefill(unittest.TestCase):
         search_values = outputs1[10]
         target_tensor = outputs2[64:]
         tolerance = 1e-3
-        logging.info("Exact matching:")
+        print("Exact matching:")
         for i, value in enumerate(search_values):
             matches = torch.abs(target_tensor - value) < tolerance
             if len(search_values.shape) > 0:
@@ -275,35 +326,34 @@ class TestCudaGraphPrefill(unittest.TestCase):
             positions = torch.nonzero(full_matches).squeeze()
 
             if len(positions) == 0:  # 或者 positions.numel() == 0
-                logging.info(f"Value {i}: {value:.6f} -> NOT FOUND")
+                print(f"Value {i}: {value:.6f} -> NOT FOUND")
             else:
-                logging.info(
-                    f"Value {i}: {value:.6f} -> found at positions: {positions}"
-                )
+                print(f"Value {i}: {value:.6f} -> found at positions: {positions}")
 
     def _test_single(self, batch_size: int):
         max_seq_len = self.max_seq_len
         seq_size_per_block = self.tokens_per_block
-
-        # Use Python build_inputs instead of C++ op.buildInputs
+        # # Use Python build_inputs instead of C++ op.buildInputs
         inputs1 = self.build_inputs(batch_size, max_seq_len, seq_size_per_block, False)
 
         outputs1 = self.normal_model.forward(inputs1)
-        logging.info(f"outputs1 success for batch size {batch_size}")
+        torch.cuda.synchronize()
+        print(f"outputs1 success for batch size {batch_size}")
 
         inputs2 = self.build_inputs(batch_size, max_seq_len, seq_size_per_block, True)
         outputs2 = self.normal_model.forward(inputs2)
-        logging.info(f"outputs2 success for batch size {batch_size}")
-        logging.info(f"inputs1: {inputs1.input_ids}")
-        logging.info(f"inputs2: {inputs2.input_ids}")
-        logging.info(
+        torch.cuda.synchronize()
+        print(f"outputs2 success for batch size {batch_size}")
+        print(f"inputs1: {inputs1.input_ids}")
+        print(f"inputs2: {inputs2.input_ids}")
+        print(
             f"outputs1.shape: {outputs1.hidden_states.shape}, outputs2.shape: {outputs2.hidden_states.shape}"
         )
 
         # 从 padded 的 outputs2 中提取有效位置来与 outputs1 比较
         # 根据 cu_seqlens 来提取每个 batch 的有效输出
         cu_seqlens = inputs2.attention_inputs.cu_seqlens.cpu().numpy()
-        logging.info(f"cu_seqlens: {cu_seqlens}")
+        print(f"cu_seqlens: {cu_seqlens}")
 
         # 在 padded 模式下，每个 batch 都有 max_seq_len 个输出，但只有前面的部分是有效的
         # 需要根据实际的有效长度来提取
@@ -320,30 +370,36 @@ class TestCudaGraphPrefill(unittest.TestCase):
 
         # 拼接所有有效输出
         valid_outputs2_tensor = torch.cat(valid_outputs2, dim=0)
-        logging.info(f"valid_outputs2.shape: {valid_outputs2_tensor.shape}")
+        print(f"valid_outputs2.shape: {valid_outputs2_tensor.shape}")
         ## batch invariance: https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/
         # 允许最多 0.1% 的元素不符合精度要求
         close_mask = torch.isclose(
             outputs1.hidden_states, valid_outputs2_tensor, rtol=1e-2, atol=1e-2
         )
+        print(f"outputs1: {outputs1}")
+        print(f"valid_outputs2_tensor: {valid_outputs2_tensor}")
         pass_ratio = close_mask.float().mean().item()
         assert (
             pass_ratio >= 0.999
         ), f"Only {pass_ratio*100:.2f}% elements pass, expected >= 99.9%"
 
-        logging.info(f"trt padded mode success for batch: {batch_size}!!")
+        print(f"trt padded mode success for batch: {batch_size}!!")
 
         # Use Python build_inputs instead of C++ op.buildInputs
         inputs3 = self.build_inputs(batch_size, max_seq_len, seq_size_per_block, False)
 
         outputs3 = self.op.forward(inputs3)
+
+        # Explicit CUDA sync to ensure all async operations are complete before accessing tensor data
+        torch.cuda.synchronize()
+
         current_real_graph_size = self.op.getCurrentRealGraphSize()
-        logging.info(
+        print(
             f"current_real_graph_size: {current_real_graph_size}, batch_size: {batch_size}"
         )
 
-        logging.info(f"outputs1.hidden_states: {outputs1.hidden_states}")
-        logging.info(f"outputs3.hidden_states: {outputs3.hidden_states}")
+        print(f"outputs1.hidden_states: {outputs1.hidden_states}")
+        print(f"outputs3.hidden_states: {outputs3.hidden_states}")
 
         ## batch invariance: https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/
         # 允许最多 0.001% 的元素不符合精度要求
@@ -362,13 +418,14 @@ class TestCudaGraphPrefill(unittest.TestCase):
             2,
             7,
             8,
-            15,
+            10,
         ]
         for bs in batch_range:
+            print(f"start test for batch size: {bs}")
             self._test_single(bs)
-            logging.info(f"success for batch size: {bs}")
+            print(f"success for batch size: {bs}")
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=print)
     unittest.main()

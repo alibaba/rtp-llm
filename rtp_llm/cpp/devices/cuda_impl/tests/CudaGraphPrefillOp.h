@@ -9,7 +9,6 @@ class CudaGraphPrefillOp: public torch::jit::CustomClassHolder {
 public:
     void init(py::object       py_instance,
               int64_t          max_context_batch_size,
-              int64_t          hidden_size,
               int64_t          max_seq_len,
               int64_t          tokens_per_block,
               int64_t          max_prefill_cuda_graph_len,

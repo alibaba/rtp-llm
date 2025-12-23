@@ -5,22 +5,24 @@ import sys
 import unittest
 from pathlib import Path
 
+import torch
 
 from rtp_llm.models.base_model import BaseModel
-import torch
 
 # Add rtp_llm root path
 rtp_opensouce_path = Path(__file__).resolve().parent.parent.parent.parent.parent.parent
 sys.path.append(str(rtp_opensouce_path))
 
 import rtp_llm.models
-from rtp_llm.config.py_config_modules import StaticConfig
+from rtp_llm.config.engine_config import EngineConfig
+from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.cpp.devices.cuda_impl.tests.libtest_cuda_graph_decode_ops import (
     CudaGraphDecodePaddingOp,
 )
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.ops.compute_ops import KVCache, get_device, get_typemeta, init_device
+from rtp_llm.tools.api.hf_model_helper import get_model_info_from_hf
 
 
 class TestCudaGraphDecodePadding(unittest.TestCase):
@@ -62,51 +64,99 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
         self.normal_model = self.build_model()
 
     def build_model(self) -> GptModelBase:
-        """Build model using ModelFactory, similar to rtp_auto_model.py"""
+        """Build model using ModelFactory, similar to auto_model.py"""
         model_path = "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct"
 
-        # Set environment variables
-        self._set_env()
+        # Set configs (similar to auto_model.py)
+        self._set_configs(model_path)
 
-        # Set config
-        StaticConfig.model_config.checkpoint_path = model_path
-        StaticConfig.update_from_env()
+        # Create EngineConfig from py_env_configs
+        engine_config = EngineConfig.create(self.py_env_configs)
 
-        # Create model config and load model
-        factory_model_config = ModelFactory.create_normal_model_config()
-        self.gpt_model = ModelFactory.creat_standalone_py_model_from_huggingface(
-            model_path_or_name=model_path,
-            revision=None,
-            model_config=factory_model_config,
+        # Create model configs
+        model_config = ModelFactory.create_model_config(
+            model_args=self.py_env_configs.model_args,
+            lora_config=self.py_env_configs.lora_config,
+            kv_cache_config=engine_config.kv_cache_config,
+            profiling_debug_logging_config=engine_config.profiling_debug_logging_config,
+            generate_env_config=self.py_env_configs.generate_env_config,
+            embedding_config=self.py_env_configs.embedding_config,
+            quantization_config=self.py_env_configs.quantization_config,
+            render_config=self.py_env_configs.render_config,
         )
 
-        self.compute_dtype = self.gpt_model.compute_dtype
+        # Update engine_config based on model_config
+        ModelFactory.update_engine_config_from_model_config(
+            engine_config=engine_config,
+            model_config=model_config,
+        )
+
+        # Create model using ModelFactory
+        self.gpt_model = ModelFactory._create_model(
+            model_config=model_config,
+            engine_config=engine_config,
+            vit_config=None,
+            merge_lora=False,
+        )
+
+        # Load the model
+        self.gpt_model.load()
+        self.compute_dtype = self.gpt_model.weight.dtype
         model = self.gpt_model.py_model
         self.model_config = model.config
 
-        # Init device
-        init_device(self.gpt_model.config)
-        self.device = get_device().get_device_type().name.lower()
+        # Init device with new API
+        init_device(
+            parallelism_config=engine_config.parallelism_config,
+            model_config=model_config,
+            eplb_config=model_config.eplb_config,
+            fmha_config=engine_config.fmha_config,
+            device_resource_config=engine_config.device_resource_config,
+            moe_config=engine_config.moe_config,
+            sp_config=engine_config.sp_config,
+            misc_config=engine_config.misc_config,
+            profiling_debug_logging_config=engine_config.profiling_debug_logging_config,
+            hw_kernel_config=engine_config.hw_kernel_config,
+            concurrency_config=engine_config.concurrency_config,
+            ffn_disaggregate_config=engine_config.parallelism_config.ffn_disaggregate_config,
+            runtime_config=engine_config.runtime_config,
+        )
+        self.device = "cuda:0"
 
         # Init kv cache
-        self._init_kv_cache(factory_model_config)
+        self._init_kv_cache()
         model.kv_cache = self.kv_cache
 
         return model
 
-    def _set_env(self):
-        """Set environment variables for standalone model loading"""
-        os.environ["LOAD_PYTHON_MODEL"] = "1"
+    def _set_configs(self, model_path: str):
+        """Set configuration structures instead of environment variables."""
+        # Create PyEnvConfigs to hold all configurations
+        self.py_env_configs = PyEnvConfigs()
 
-        if os.getenv("ACT_TYPE") is None:
-            os.environ["ACT_TYPE"] = "FP16"
-        if os.getenv("DEVICE_RESERVE_MEMORY_BYTES") is None:
-            os.environ["DEVICE_RESERVE_MEMORY_BYTES"] = str(-536870912)
+        # Get model info from HuggingFace
+        model_path, model_type = get_model_info_from_hf(model_path, None)
+        self.py_env_configs.model_args.model_type = model_type
+        self.py_env_configs.model_args.ckpt_path = model_path
+        self.py_env_configs.model_args.max_seq_len = 4096
+        self.py_env_configs.profiling_debug_logging_config.hack_layer_num = 1
+        self.py_env_configs.kv_cache_config.seq_size_per_block = self.tokens_per_block
+        if not self.py_env_configs.model_args.tokenizer_path:
+            self.py_env_configs.model_args.tokenizer_path = model_path
 
-    def _init_kv_cache(self, factory_model_config):
-        """Initialize KV cache, similar to rtp_auto_model.py"""
+        # Set ModelSpecificConfig.load_python_model = True
+        self.py_env_configs.model_specific_config.load_python_model = True
+        self.py_env_configs.device_resource_config.not_use_default_stream = True
+        # Set DeviceResourceConfig.device_reserve_memory_bytes
+        if self.py_env_configs.device_resource_config.device_reserve_memory_bytes == 0:
+            self.py_env_configs.device_resource_config.device_reserve_memory_bytes = (
+                -536870912
+            )
+
+    def _init_kv_cache(self):
+        """Initialize KV cache, similar to auto_model.py"""
         max_total_tokens = 4096
-        tokens_per_block = 64
+        tokens_per_block = self.tokens_per_block
 
         self.kv_cache = KVCache()
         self.layer_num = self.model_config.gpt_init_params.layer_num
@@ -115,7 +165,6 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
         self.size_per_head = self.model_config.gpt_init_params.size_per_head
 
         block_nums = math.ceil(max_total_tokens / tokens_per_block) + 1
-        self.tokens_per_block = tokens_per_block
 
         kv_shape = [
             self.layer_num,
@@ -126,8 +175,10 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
             self.size_per_head,
         ]
 
-        kv_cache_dtype = self._get_kv_cache_dtype(factory_model_config)
-        kv_cache_total = torch.zeros(kv_shape, dtype=kv_cache_dtype, device=self.device)
+        # Use compute_dtype for KV cache
+        kv_cache_total = torch.zeros(
+            kv_shape, dtype=self.compute_dtype, device=self.device
+        )
         k_cache_base = kv_cache_total
         v_cache_base = torch.empty(
             self.layer_num,
@@ -139,20 +190,6 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
         )
         self.kv_cache.k_cache_base = k_cache_base
         self.kv_cache.v_cache_base = v_cache_base
-
-    def _get_kv_cache_dtype(self, factory_model_config) -> torch.dtype:
-        """Get KV cache dtype from config"""
-        kv_cache_dtype_str = factory_model_config.kv_cache_type
-        if kv_cache_dtype_str == "auto":
-            return self.compute_dtype
-        if kv_cache_dtype_str not in ["FP16", "BF16", "FP32"]:
-            raise ValueError(f"Invalid kv cache dtype: {kv_cache_dtype_str}")
-        str_to_dtype = {
-            "FP16": torch.float16,
-            "BF16": torch.bfloat16,
-            "FP32": torch.float32,
-        }
-        return str_to_dtype[kv_cache_dtype_str]
 
     def build_inputs(self, batch_size: int, max_seq_len: int, seq_size_per_block: int):
         """Build inputs in Python, similar to CudaGraphPrefill.py"""

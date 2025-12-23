@@ -5,7 +5,6 @@ using namespace rtp_llm;
 
 void CudaGraphPrefillOp::init(py::object       py_instance,
                               int64_t          max_context_batch_size,
-                              int64_t          hidden_size,
                               int64_t          max_seq_len,
                               int64_t          tokens_per_block,
                               int64_t          max_prefill_cuda_graph_len,
@@ -35,7 +34,6 @@ PYBIND11_MODULE(libtest_cuda_graph_prefill_ops, m) {
              &CudaGraphPrefillOp::init,
              py::arg("py_instance"),
              py::arg("max_context_batch_size"),
-             py::arg("hidden_size"),
              py::arg("max_seq_len"),
              py::arg("tokens_per_block"),
              py::arg("max_prefill_cuda_graph_len"),
