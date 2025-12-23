@@ -28,26 +28,33 @@ public:
                                 const std::shared_ptr<KVCacheAllocator>& allocator,
                                 rtp_llm::DeviceBase*                     device,
                                 const kmonitor::MetricsReporterPtr&      metrics_reporter = nullptr);
-    ~KVCacheConnectorCoordinator();
+    virtual ~KVCacheConnectorCoordinator();
 
 public:
     bool init();
 
+    // virtual for test
     using Meta = KVCacheConnector::Meta;
-    std::shared_ptr<AsyncContext> asyncRead(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context,
-                                            const std::shared_ptr<Meta>&                             meta);
-    std::shared_ptr<AsyncContext> asyncWrite(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context,
-                                             const std::shared_ptr<Meta>&                             meta);
-    std::shared_ptr<AsyncContext>
-         asyncWriteByLayer(int                                                      layer_id,
-                           const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context,
-                           const std::shared_ptr<Meta>&                             meta);
-    bool broadcastTp(const BroadcastTpRequestPB& request, BroadcastTpResponsePB& response);
+    virtual std::shared_ptr<AsyncContext>
+    asyncRead(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context,
+              const std::shared_ptr<Meta>&                             meta);
+    virtual std::shared_ptr<AsyncContext>
+    asyncWrite(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context,
+               const std::shared_ptr<Meta>&                             meta);
+    virtual std::shared_ptr<AsyncContext>
+                 asyncWriteByLayer(int                                                      layer_id,
+                                   const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context,
+                                   const std::shared_ptr<Meta>&                             meta);
+    virtual bool broadcastTp(const BroadcastTpRequestPB& request, BroadcastTpResponsePB& response);
+    virtual void clearMemoryCache();
 
 private:
     bool initMemoryConnector();
     bool initUpdateThread();
     void updateOnce();
+    void processReadContexts();
+    void processWriteContexts();
+    void asyncReadAfterMatch(std::shared_ptr<FusedAsyncReadContext> fused_read_context);
 
 private:
     const CacheConfig                 cache_config_;
@@ -57,9 +64,9 @@ private:
     rtp_llm::DeviceBase*              device_{nullptr};
     kmonitor::MetricsReporterPtr      metrics_reporter_;
 
-    std::shared_ptr<KVCacheConnector> memory_connector_;
-    std::shared_ptr<KVCacheConnector> remote_connector_;
-    std::shared_ptr<KVCacheConnector> p2p_connector_;
+    std::shared_ptr<KVCacheMemoryConnector> memory_connector_;
+    std::shared_ptr<KVCacheConnector>       remote_connector_;
+    std::shared_ptr<KVCacheConnector>       p2p_connector_;
 
     std::map<KVCacheConnector::ConnectorType, std::shared_ptr<KVCacheConnector>> connectors_;
 
