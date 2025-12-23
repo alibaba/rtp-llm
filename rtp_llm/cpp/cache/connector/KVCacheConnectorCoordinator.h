@@ -57,9 +57,9 @@ private:
     rtp_llm::DeviceBase*              device_{nullptr};
     kmonitor::MetricsReporterPtr      metrics_reporter_;
 
-    std::shared_ptr<KVCacheConnector> memory_connector_;
-    std::shared_ptr<KVCacheConnector> remote_connector_;
-    std::shared_ptr<KVCacheConnector> p2p_connector_;
+    std::shared_ptr<KVCacheMemoryConnector> memory_connector_;
+    std::shared_ptr<KVCacheConnector>       remote_connector_;
+    std::shared_ptr<KVCacheConnector>       p2p_connector_;
 
     std::map<KVCacheConnector::ConnectorType, std::shared_ptr<KVCacheConnector>> connectors_;
 

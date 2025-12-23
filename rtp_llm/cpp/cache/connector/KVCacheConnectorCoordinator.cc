@@ -4,6 +4,7 @@
 
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
+#include "rtp_llm/cpp/cache/connector/memory/KVCacheMemoryConnector.h"
 
 namespace rtp_llm {
 
@@ -245,7 +246,13 @@ bool KVCacheConnectorCoordinator::initMemoryConnector() {
         return false;
     }
 
-    // TODO(LXQ): init memory connector
+    memory_connector_ = std::make_shared<KVCacheMemoryConnector>(
+        cache_config_, kv_cache_config_, allocator_, device_, runtime_config_.worker_grpc_addrs, metrics_reporter_);
+    if (!memory_connector_->init()) {
+        RTP_LLM_LOG_ERROR("memory connector init failed");
+        memory_connector_.reset();
+        return false;
+    }
 
     connectors_[KVCacheConnector::ConnectorType::Memory] = memory_connector_;
     return true;
@@ -316,7 +323,7 @@ bool KVCacheConnectorCoordinator::broadcastTp(const BroadcastTpRequestPB& reques
             response.mutable_mem_response()->set_success(false);
             return false;
         }
-        // TODO(LXQ): broadcast tp for memory connector
+        return memory_connector_->copyCache(request.mem_request(), *(response.mutable_mem_response()));
         return false;
     } else {
         RTP_LLM_LOG_WARNING("broadcast tp failed, request is invalid, request: [%s]", request.DebugString().c_str());

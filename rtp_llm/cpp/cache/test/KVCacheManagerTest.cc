@@ -2,12 +2,12 @@
 
 #include <chrono>
 #include <memory>
+#include <optional>
 #include <thread>
 
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
-#include "rtp_llm/cpp/core/BufferHelper.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -302,6 +302,108 @@ TEST_F(KVCacheManagerTest, BlockBatchCopy) {
         assertBlockBytesEq(device_, cache_manager, /*layer_id=*/1, dst_block, expected);
     }
 }
+
+// class MockKVCacheCoordinator: public KVCacheConnectorCoordinator {
+// public:
+//     MockKVCacheCoordinator(const CacheConfig&       config,
+//                            rtp_llm::DeviceBase*     device,
+//                            const KVCacheConfig&     kv_cache_config    = KVCacheConfig{},
+//                            const ParallelismConfig& parallelism_config = ParallelismConfig{},
+//                            const RuntimeConfig&     runtime_config     = RuntimeConfig{}):
+//         KVCacheConnectorCoordinator(config, kv_cache_config, runtime_config, /*allocator=*/nullptr, device, nullptr)
+//         {}
+
+//     bool broadcastTp(const BroadcastTpRequestPB& request, BroadcastTpResponsePB& response) override {
+//         ++copy_cache_call_count;
+//         last_request = request;
+//         if (set_mem_response_success) {
+//             response.mutable_mem_response()->set_success(*set_mem_response_success);
+//         }
+//         return return_value;
+//     }
+
+//     void clearMemoryCache() override {
+//         ++clear_memory_cache_call_count;
+//     }
+
+// public:
+//     int                  copy_cache_call_count{0};
+//     int                  clear_memory_cache_call_count{0};
+//     BroadcastTpRequestPB last_request;
+//     bool                 return_value{false};
+//     std::optional<bool>  set_mem_response_success;
+// };
+
+// class KVCacheManagerBroadcastTpTest: public ::testing::Test {
+// protected:
+//     void SetUp() override {
+//         rtp_llm::initLogger();
+//         device_ = createDevice();
+//         ASSERT_NE(device_, nullptr);
+
+//         CacheConfig config;
+//         kv_cache_manager_ = std::make_shared<KVCacheManager>(config, device_);
+//     }
+
+//     rtp_llm::DeviceBase*            device_{nullptr};
+//     std::shared_ptr<KVCacheManager> kv_cache_manager_;
+// };
+
+// TEST_F(KVCacheManagerBroadcastTpTest, BroadcastTp_ReturnFalse_WhenNoMemRequest) {
+//     BroadcastTpRequestPB  request;
+//     BroadcastTpResponsePB response;
+
+//     // Request has no mem_request
+//     // Should return false and log warning
+//     EXPECT_FALSE(kv_cache_manager_->broadcastTp(request, response));
+// }
+
+// TEST_F(KVCacheManagerBroadcastTpTest, BroadcastTp_ReturnFalse_WhenCoordinatorIsNull) {
+//     BroadcastTpRequestPB request;
+//     request.mutable_mem_request();  // Add mem_request
+//     BroadcastTpResponsePB response;
+
+//     kv_cache_manager_->connector_coordinator_.reset();
+
+//     EXPECT_FALSE(kv_cache_manager_->broadcastTp(request, response));
+//     EXPECT_FALSE(response.mem_response().success());
+//     EXPECT_FALSE(kv_cache_manager_->broadcastTp(request, response));
+//     EXPECT_FALSE(response.mem_response().success());
+// }
+
+// TEST_F(KVCacheManagerBroadcastTpTest, BroadcastTp_DelegatesToCoordinator_AndReturnsTrue) {
+//     BroadcastTpRequestPB request;
+//     request.mutable_mem_request();
+//     BroadcastTpResponsePB response;
+
+//     CacheConfig config;
+//     auto        mock_coordinator               = std::make_shared<MockKVCacheCoordinator>(config, device_);
+//     mock_coordinator->return_value             = true;
+//     mock_coordinator->set_mem_response_success = true;
+//     kv_cache_manager_->connector_coordinator_ =
+//     std::static_pointer_cast<KVCacheConnectorCoordinator>(mock_coordinator);
+
+//     EXPECT_TRUE(kv_cache_manager_->broadcastTp(request, response));
+//     EXPECT_TRUE(response.mem_response().success());
+//     EXPECT_EQ(mock_coordinator->copy_cache_call_count, 1);
+// }
+
+// TEST_F(KVCacheManagerBroadcastTpTest, BroadcastTp_DelegatesToCoordinator_AndReturnsFalse) {
+//     BroadcastTpRequestPB request;
+//     request.mutable_mem_request();
+//     BroadcastTpResponsePB response;
+
+//     CacheConfig config;
+//     auto        mock_coordinator               = std::make_shared<MockKVCacheCoordinator>(config, device_);
+//     mock_coordinator->return_value             = false;
+//     mock_coordinator->set_mem_response_success = false;
+//     kv_cache_manager_->connector_coordinator_ =
+//     std::static_pointer_cast<KVCacheConnectorCoordinator>(mock_coordinator);
+
+//     EXPECT_FALSE(kv_cache_manager_->broadcastTp(request, response));
+//     EXPECT_FALSE(response.mem_response().success());
+//     EXPECT_EQ(mock_coordinator->copy_cache_call_count, 1);
+// }
 
 }  // namespace test
 }  // namespace rtp_llm
