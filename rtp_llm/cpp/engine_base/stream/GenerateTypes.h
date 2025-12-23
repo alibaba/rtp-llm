@@ -105,6 +105,7 @@ public:
 
 enum class StreamState {
     WAITING,
+    LOADING_CACHE,
     RUNNING,
     PAUSED,
     STOPPED,
@@ -116,6 +117,8 @@ inline std::string StreamStateToString(StreamState state) {
     switch (state) {
         case StreamState::WAITING:
             return "WAITING";
+        case StreamState::LOADING_CACHE:
+            return "LOADING_CACHE";
         case StreamState::RUNNING:
             return "RUNNING";
         case StreamState::PAUSED:
