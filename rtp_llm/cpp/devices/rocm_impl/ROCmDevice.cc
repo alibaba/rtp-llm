@@ -9,6 +9,7 @@
 
 #include "rtp_llm/cpp/kernels/rmsnormKernels.h"
 #include "rtp_llm/cpp/kernels/activation_kernels.h"
+#include "rtp_llm/cpp/kernels/copy_utils.h"
 #include "rtp_llm/cpp/kernels/tensor_ops_kernels.h"
 #include "rtp_llm/cpp/kernels/embedding_kernels.h"
 #include "rtp_llm/cpp/cuda/nccl/nccl_utils_torch.h"
@@ -295,6 +296,16 @@ void ROCmDevice::copy(const CopyParams& params) {
     if (copyType == hipMemcpyDeviceToHost) {
         ROCM_CHECK(hipStreamSynchronize(stream_));
     }
+}
+
+void ROCmDevice::multiMergeCopy(const MultiMergeCopyParams& params) {
+    std::vector<void*>  multi_src_ptrs(params.src_ptrs.size());
+    std::vector<size_t> multi_src_copy_sizes(params.src_ptrs.size());
+    for (size_t i = 0; i < params.src_ptrs.size(); i++) {
+        multi_src_ptrs[i]       = params.src_ptrs[i];
+        multi_src_copy_sizes[i] = params.copy_size[i];
+    }
+    InvokeMultiMergeCopyKernel(params.dst_ptr, multi_src_ptrs, multi_src_copy_sizes, params.dst_offsets, stream_);
 }
 
 void ROCmDevice::noBlockCopy(const CopyParams& params) {
