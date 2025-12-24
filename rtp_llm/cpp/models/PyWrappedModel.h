@@ -133,8 +133,6 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         }
         graph_runner_->setInputEmbeddingScalar(description_.input_embedding_scalar);
         RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can't be null");
-        auto py_initialize_method = py_instance.attr("initialize");
-        py_init_result            = py_initialize_method(init_resources);
         graph_runner_->initCapture();
     }
 
