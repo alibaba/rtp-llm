@@ -446,25 +446,11 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         ]
 
         mixed_qkv, z = torch.split(mixed_qkvz, split_arg_list_qkvz, dim=1)
-        new_tensor_shape_ba = mixed_ba.size()[:-1] + (
-            self.local_num_k_heads,
-            2 * self.num_key_value_heads,
+        b, a = torch.split(
+            mixed_ba, [self.local_num_v_heads, self.local_num_v_heads], dim=1
         )
-
-        mixed_ba = mixed_ba.view(*new_tensor_shape_ba)
-
-        split_arg_list_ba = [
-            self.num_key_value_heads,
-            self.num_key_value_heads,
-        ]
-        # (query, key, value, z) = torch.split(mixed_qkvz, split_arg_list_qkvz, dim=2)
-        (b, a) = torch.split(mixed_ba, split_arg_list_ba, dim=2)
-
         # reshape to [token, v_head_num, v_head_dim]
         # b,a should be contiguous for fused_gdn_gating
-        b = b.reshape(b.size(0), self.local_num_v_heads)
-        a = a.reshape(a.size(0), self.local_num_v_heads)
-
         return mixed_qkv, z, b, a
 
     def forward(
