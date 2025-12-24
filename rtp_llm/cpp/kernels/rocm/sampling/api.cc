@@ -14,7 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#include <ATen/hip/HIPGeneratorImpl.h>
+#include <ATen/cuda/CUDAGeneratorImpl.h>
 
 #include "sampling.h"
 #include "utils.h"
