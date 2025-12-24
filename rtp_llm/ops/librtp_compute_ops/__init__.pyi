@@ -258,7 +258,6 @@ class PyAttentionInputs:
     dtype: TypeMeta
     input_lengths: torch.Tensor
     is_prefill: bool
-    kv_block_offset: int
     kv_cache_block_id_device: torch.Tensor
     kv_cache_block_id_host: torch.Tensor
     padding_offset: torch.Tensor

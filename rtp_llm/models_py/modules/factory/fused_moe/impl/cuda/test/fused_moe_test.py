@@ -123,9 +123,9 @@ class FusedMoeBatchedTest(TestCase):
         # Create router and experts
         router = BatchedDataRouter(
             max_num_tokens=num_tokens,
-            num_local_experts=num_experts // model_param.ep_size,
-            ep_rank=model_param.ep_rank,
-            tp_size=model_param.tp_size,
+            num_local_experts=num_experts // parallelism_config.ep_size,
+            ep_rank=parallelism_config.ep_rank,
+            tp_size=parallelism_config.tp_size,
         )
         scaling_factor = 0.1
         # Create test weights

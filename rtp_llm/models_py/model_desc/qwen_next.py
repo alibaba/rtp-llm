@@ -1,8 +1,4 @@
 import sys
-
-sys.path.append(
-    "/data2/baowending.bwd/RTP-LLM/github-opensource/bazel-github-opensource/external/flash-linear-attention"
-)
 from typing import Dict, Optional
 
 import torch
@@ -28,15 +24,21 @@ from rtp_llm.models_py.triton_kernels.causal_conv1d import (
     prepare_causal_conv1d_metadata,
 )
 from rtp_llm.models_py.triton_kernels.common.layernorm_gated import RmsNormGated
-from rtp_llm.models_py.triton_kernels.fla.block import (
-    load_initial_state_from_block_map,
-    store_ssm_state_to_block_map,
-)
-from rtp_llm.models_py.triton_kernels.fla.chunk_new import chunk_gated_delta_rule_new
-from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
-    fused_recurrent_gated_delta_rule,
-)
-from rtp_llm.models_py.triton_kernels.fla.gdn_gating import fused_gdn_gating
+from rtp_llm.models_py.utils.arch import is_cuda
+
+if is_cuda():
+    from rtp_llm.models_py.triton_kernels.fla.block import (
+        load_initial_state_from_block_map,
+        store_ssm_state_to_block_map,
+    )
+    from rtp_llm.models_py.triton_kernels.fla.chunk_new import (
+        chunk_gated_delta_rule_new,
+    )
+    from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
+        fused_recurrent_gated_delta_rule,
+    )
+    from rtp_llm.models_py.triton_kernels.fla.gdn_gating import fused_gdn_gating
+
 from rtp_llm.ops import HybridAttentionType, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     KVCache,

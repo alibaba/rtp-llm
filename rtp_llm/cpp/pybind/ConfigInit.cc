@@ -101,20 +101,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("LINEAR_SOFTMAX", TaskType::LINEAR_SOFTMAX)
         .value("BGE_M3", TaskType::BGE_M3);
 
-    // Register LayerNormType enum
-    py::enum_<LayerNormType>(m, "LayerNormType")
-        .value("pre_layernorm", LayerNormType::pre_layernorm)
-        .value("post_layernorm", LayerNormType::post_layernorm)
-        .value("invalid_type", LayerNormType::invalid_type);
-
-    // Register NormType enum
-    py::enum_<NormType>(m, "NormType")
-        .value("layernorm", NormType::layernorm)
-        .value("rmsnorm", NormType::rmsnorm)
-        .value("alphanorm", NormType::alphanorm)
-        .value("add_bias", NormType::add_bias)
-        .value("invalid_type", NormType::invalid_type);
-
     // Register ArpcConfig
     py::class_<ArpcConfig>(m, "ArpcConfig")
         .def(py::init<>())

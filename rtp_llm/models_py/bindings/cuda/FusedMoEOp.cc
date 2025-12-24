@@ -1,8 +1,6 @@
 #include "rtp_llm/models_py/bindings/cuda/FusedMoEOp.h"
-#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/model_utils/activation_types.h"
-#include "rtp_llm/cpp/devices/cuda_impl/CudaDevice.h"
-#include "rtp_llm/cpp/devices/DeviceFactory.h"
+#include "rtp_llm/models_py/bindings/common/Torch_ext.h"
 
 #include <cstdint>
 
@@ -33,6 +31,7 @@ FusedMoEOp::FusedMoEOp(const ModelConfig& model_config, const ParallelismConfig&
     ep_size_(parallelism_config.ep_size),
     ep_rank_(parallelism_config.ep_rank),
     moe_plugin_(std::make_unique<trt_plugins::MixtureOfExpertsPlugin>()) {}
+
 void FusedMoEOp::forward(torch::Tensor hidden_states,
                          torch::Tensor up_proj,
                          torch::Tensor down_proj,
@@ -76,8 +75,7 @@ void FusedMoEOp::forward(torch::Tensor hidden_states,
     const auto new_expanded_source_row_to_dest =
         torch::zeros({top_k, token_num}, hidden_states.options().dtype(torch::kInt32));
 
-    auto device = (dynamic_cast<CudaDevice*>(DeviceFactory::getDefaultDevice()));
-    auto stream = device->getStream();
+    StreamType stream = GET_CURRENT_STREAM();
     if (hidden_states.scalar_type() == at::kBFloat16) {
         moe_plugin_->enqueue(hidden_states.data_ptr<at::BFloat16>(),
                              nullptr,  // gate->data<float>(),

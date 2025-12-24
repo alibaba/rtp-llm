@@ -153,7 +153,6 @@ class BaseAttentionDecodeTest(unittest.TestCase):
         attn_inputs.cu_seqlens = torch.arange(
             0, batch_size + 1, dtype=torch.int32, device=self.device
         )
-        attn_inputs.cu_seqlens_without_prefix = attn_inputs.cu_seqlens.clone()
 
         return attn_inputs
 
