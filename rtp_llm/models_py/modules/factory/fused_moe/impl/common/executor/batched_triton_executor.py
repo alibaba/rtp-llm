@@ -3,8 +3,14 @@ from typing import Any, Optional
 import torch
 import triton.language as tl
 
-import rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe as mm
-from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
+    CombineForwardPayload,
+    ExpertForwardPayload,
+    FusedMoeExpertExecutor,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
@@ -15,7 +21,7 @@ from rtp_llm.models_py.triton_kernels.moe.grouped_gemm import (
 )
 
 
-class BatchedTritonExperts(mm.FusedMoeExpertExecutor):
+class BatchedTritonExperts(FusedMoeExpertExecutor):
     """
     A Triton based MoE expert class that operates on expert batched format,
     i.e. E x max_num_tokens x K.  This is the format that the pplx
@@ -63,13 +69,13 @@ class BatchedTritonExperts(mm.FusedMoeExpertExecutor):
 
     def execute(
         self,
-        payload: mm.ExpertForwardPayload,
+        payload: ExpertForwardPayload,
         activation: str,
         expert_map: Optional[torch.Tensor],
         a2_scale: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         extra_expert_args: Optional[dict[str, Any]],
-    ) -> torch.Tensor:
+    ) -> CombineForwardPayload:
         # Check constraints.
         assert payload.expert_x.size(-1) == self.w1.size(
             2
@@ -141,4 +147,8 @@ class BatchedTritonExperts(mm.FusedMoeExpertExecutor):
             compute_type=compute_type,
         )
 
-        return output
+        return CombineForwardPayload(
+            fused_expert_output=output,
+            fused_expert_output_rounds=None,
+            expert_done_events=None,
+        )

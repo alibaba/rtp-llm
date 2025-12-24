@@ -5,8 +5,11 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
+    CombineForwardPayload,
     ExpertForwardPayload,
     FusedMoeExpertExecutor,
 )
@@ -132,7 +135,7 @@ class FusedMoeExecutor(FusedMoeExpertExecutor):
         a2_scale: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         extra_expert_args: Optional[dict[str, Any]],
-    ) -> torch.Tensor:
+    ) -> CombineForwardPayload:
 
         # === 输入验证 ===
         assert payload.expert_x is not None, "expert_x is None"
@@ -145,7 +148,13 @@ class FusedMoeExecutor(FusedMoeExpertExecutor):
 
         M, topk = topk_ids.shape
         if M == 0:
-            return torch.empty((0, a1.shape[-1]), dtype=a1.dtype, device=a1.device)
+            return CombineForwardPayload(
+                fused_expert_output=torch.empty(
+                    (0, a1.shape[-1]), dtype=a1.dtype, device=a1.device
+                ),
+                fused_expert_output_rounds=None,
+                expert_done_events=None,
+            )
 
         dtype = a1.dtype
         device = topk_ids.device
@@ -227,7 +236,11 @@ class FusedMoeExecutor(FusedMoeExpertExecutor):
             sorted_weights=sorted_weights if not apply_router_weight_on_input else None,
         )
 
-        return moe_buf
+        return CombineForwardPayload(
+            fused_expert_output=moe_buf,
+            fused_expert_output_rounds=None,
+            expert_done_events=None,
+        )
 
 
 def torch_moe_ref(
