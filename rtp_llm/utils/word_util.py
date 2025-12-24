@@ -4,12 +4,17 @@ import numpy as np
 import torch
 
 
-def remove_padding_eos_with_numpy(token_ids: np.ndarray, eos_token_id: int) -> np.ndarray:
+def remove_padding_eos_with_numpy(
+    token_ids: np.ndarray, eos_token_id: int
+) -> np.ndarray:
     # token_ids shape: [max_length]
     return token_ids[token_ids != eos_token_id]
 
+
 def remove_padding_eos(token_ids: torch.Tensor, eos_token_id: int) -> torch.Tensor:
-    return torch.IntTensor(remove_padding_eos_with_numpy(token_ids.cpu().numpy(), eos_token_id).tolist())
+    return torch.IntTensor(
+        remove_padding_eos_with_numpy(token_ids.cpu().numpy(), eos_token_id).tolist()
+    )
 
 
 def remove_padding_eos_for_list(
@@ -80,7 +85,7 @@ def get_stop_word_slices(
     return result
 
 
-def is_truncated(
+def ends_with_partial_stop_word(
     input_str: str, trunc_strs: List[str], is_streaming: bool, slice: bool = False
 ):
     if len(input_str) > 0 and len(
@@ -102,8 +107,12 @@ def truncate_response_with_stop_words(
         for stop_word in stop_word_strs:
             if stop_word:
                 if slice:
-                    if response.endswith(stop_word):
-                        response = response[: (-len(stop_word))]
+                    # Check if response ends with any prefix of stop_word (partial match)
+                    for i in range(1, len(stop_word) + 1):
+                        if response.endswith(stop_word[:i]):
+                            response = response[:-i]
+                            break
+                    if len(response) < first_pos:
                         break
                 else:
                     pos = response.find(stop_word)
@@ -125,7 +134,7 @@ def truncate_response_with_stop_words(
     return response
 
 
-def truncate_token_with_stop_word_id(tokens: List[int], stop_word_ids: List[int]):
+def truncate_token_with_stop_word_id(tokens: List[int], stop_word_ids: List[List[int]]):
     for stop_word_id in stop_word_ids:
         if stop_word_id and tokens[-len(stop_word_id) :] == stop_word_id:
             tokens = tokens[: (-len(stop_word_id))]

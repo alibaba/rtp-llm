@@ -34,7 +34,7 @@ from rtp_llm.openai.renderers.qwen_reasoning_tool_renderer import (
     QwenReasoningToolRenderer,
 )
 from rtp_llm.utils.base_model_datatypes import GenerateOutput
-from rtp_llm.utils.word_util import is_truncated, truncate_response_with_stop_words
+from rtp_llm.utils.word_util import truncate_response_with_stop_words
 
 TOOL_DESC = """{name_for_model}: Call this tool to interact with the {name_for_human} API. What is the {name_for_human} API useful for? {description_for_model} Parameters: {parameters}"""
 
@@ -439,18 +439,35 @@ class QwenRenderer(CustomChatRenderer):
             return await self._create_empty_delta(output.aux_info)
         if status.generating_function_call:
             return await self._create_empty_delta(output.aux_info)
-        if is_truncated(status.total_output_string, stop_words_str, is_streaming):
-            status.finish_reason = FinisheReason.stop
-            return await self._create_empty_delta(output.aux_info)
+
+        # Process stop words on total_output_string
+        status.total_output_string, _ = self._process_stop_words(
+            status.total_output_string,
+            stop_words_str,
+            stop_word_slice_list,
+            is_streaming,
+            status,
+        )
+
         if len(status.total_output_string) > status.responded_length + len("\nAction:"):
             status.delta_output_string = status.total_output_string[
                 status.responded_length : status.output_length - len("\nAction:")
             ]
-            if is_truncated(
-                status.delta_output_string, stop_word_slice_list, is_streaming, True
-            ):
+
+            # Check delta for partial stop word buffering
+            _, should_buffer = self._process_stop_words(
+                status.delta_output_string,
+                stop_words_str,
+                stop_word_slice_list,
+                is_streaming,
+                status,
+            )
+
+            if should_buffer:
                 return await self._create_empty_delta(output.aux_info)
-            else:
+
+            # Build delta output
+            if len(status.delta_output_string) > 0:
                 status.update_result()
                 return OutputDelta(
                     status.delta_output_string,
@@ -578,18 +595,35 @@ class QwenRenderer(CustomChatRenderer):
             return self._create_empty_delta_sync(input_len, output_len, reuse_len)
         if status.generating_function_call:
             return self._create_empty_delta_sync(input_len, output_len, reuse_len)
-        if is_truncated(status.total_output_string, stop_words_str, is_streaming):
-            status.finish_reason = FinisheReason.stop
-            return self._create_empty_delta_sync(input_len, output_len, reuse_len)
+
+        # Process stop words on total_output_string
+        status.total_output_string, _ = self._process_stop_words(
+            status.total_output_string,
+            stop_words_str,
+            stop_word_slice_list,
+            is_streaming,
+            status,
+        )
+
         if len(status.total_output_string) > status.responded_length + len("\nAction:"):
             status.delta_output_string = status.total_output_string[
                 status.responded_length : status.output_length - len("\nAction:")
             ]
-            if is_truncated(
-                status.delta_output_string, stop_word_slice_list, is_streaming, True
-            ):
+
+            # Check delta for partial stop word buffering
+            _, should_buffer = self._process_stop_words(
+                status.delta_output_string,
+                stop_words_str,
+                stop_word_slice_list,
+                is_streaming,
+                status,
+            )
+
+            if should_buffer:
                 return self._create_empty_delta_sync(input_len, output_len, reuse_len)
-            else:
+
+            # Build delta output
+            if len(status.delta_output_string) > 0:
                 status.update_result()
                 return OutputDelta(
                     output_str=status.delta_output_string,
