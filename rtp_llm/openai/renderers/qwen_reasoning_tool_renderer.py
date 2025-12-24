@@ -1,3 +1,4 @@
+import logging
 from typing import Optional
 
 from typing_extensions import override
@@ -34,8 +35,8 @@ class QwenReasoningToolRenderer(ReasoningToolBaseRenderer):
                 rendered_result = self.render_chat(request)
                 if rendered_result.rendered_prompt.endswith(self.think_start_tag):
                     detector.tool_call_separator = "\n\n"
-            except Exception:
-                pass
+            except Exception as e:
+                logging.error(f"Failed to render chat in _create_detector: {e}")
             return detector
         else:
             return None
@@ -53,8 +54,8 @@ class QwenReasoningToolRenderer(ReasoningToolBaseRenderer):
             rendered_result = self.render_chat(request)
             if rendered_result.rendered_prompt.endswith(self.think_start_tag):
                 model_type = "qwen3-thinking"
-        except Exception:
-            pass
+        except Exception as e:
+            logging.error(f"Failed to render chat in _create_reasoning_parser: {e}")
         return ReasoningParser(model_type=model_type)
 
 
