@@ -11,15 +11,8 @@ from fastapi.responses import ORJSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from rtp_llm.access_logger.access_logger import AccessLogger
-from rtp_llm.config.generate_config import RoleType
-from rtp_llm.config.gpt_init_model_parameters import ConfigMode, GptInitModelParameters
-from rtp_llm.config.py_config_modules import StaticConfig
-from rtp_llm.config.task_type import TaskType
-from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
-from rtp_llm.model_factory import ModelFactory
-from rtp_llm.model_factory_register import _model_factory
-from rtp_llm.openai.api_datatype import ChatCompletionRequest
+from rtp_llm.ops import TaskType
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.server.misc import format_exception
 from rtp_llm.structure.request_extractor import (
@@ -44,7 +37,7 @@ USAGE_HEADER = "USAGE"
 class BaseEndpoint(object):
     def __init__(
         self,
-        model_config: GptInitModelParameters,
+        model_config,
         tokenizer,
         backend_rpc_server_visitor: BackendRPCServerVisitor,
         rank_id=0,
