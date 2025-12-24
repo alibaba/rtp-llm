@@ -8,7 +8,12 @@ import torch
 
 from rtp_llm.config.quant_config import QuantizationConfig, Fp8PerTensorQuantConfig
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, AttnConfig
-from rtp_llm.model_loader.ffn_weight import FfnConfig, FfnWeight, MoeWithSharedWeight
+from rtp_llm.model_loader.ffn_weight import (
+    FfnConfig,
+    FfnWeight,
+    MoeAtomicWeight,
+    MoeWithSharedWeight,
+)
 from rtp_llm.model_loader.load_config import LoadConfig, LoadMethod
 from rtp_llm.model_loader.weight_module import (
     AtomicWeight,
@@ -25,6 +30,7 @@ from rtp_llm.utils.model_weight import (
     choose_available,
     identity,
     tolerate_failed,
+    transpose,
 )
 from rtp_llm.utils.weight_type import WEIGHT_TYPE
 
@@ -92,6 +98,52 @@ class ModelWeightInfo:
                     layer_weights.append(weight.create(weight, quant_config))
 
         return ModelWeightInfo(weights, layer_weights)
+
+    def afd_remove_weights(self, config: GptInitModelParameters):
+        """
+        remove useless layer weights for AF disaggregate
+        """
+
+        def remove_ffn_weights():
+            if config.moe_style == 0:
+                # for dense AFD, atten rank only do pure attention
+                self.layer_weights = []
+            else:
+                # for moe AFD, atten rank don't do mlp(experts) compute
+                for layer_idx, layer_item in enumerate(self.layer_weights):
+                    assert isinstance(layer_item, list)
+                    for weight_idx, layer_weight in enumerate(layer_item):
+                        if layer_weight.name == W.moe:
+                            self.layer_weights[layer_idx][weight_idx] = MoeAtomicWeight(
+                                W.moe_gate,
+                                [
+                                    CkptWeightInfo(
+                                        "model.layers.{i}.mlp.gate.weight", identity
+                                    )
+                                ],
+                                transpose,
+                                config=layer_weight.config,
+                            )
+
+        def remove_attn_weights():
+            # for moe AFD, ffn(i.e. experts) only do mlp
+            if config.moe_style != 0:
+                filtered_layer_weights = []
+                for layer_item in self.layer_weights:
+                    assert isinstance(layer_item, list)
+                    filtered = [w for w in layer_item if w.name == W.moe]
+                    for w in filtered:
+                        del w.sub_weights[W.moe_gate]
+                    if filtered:
+                        filtered_layer_weights.append(filtered)
+
+                self.layer_weights = filtered_layer_weights
+
+        if config.ffn_disaggregate_config.enable_ffn_disaggregate:
+            if config.ffn_disaggregate_config.is_ffn_service():
+                remove_attn_weights()
+            else:
+                remove_ffn_weights()
 
 
 class ModelDeployWeightInfo:

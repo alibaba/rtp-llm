@@ -69,6 +69,9 @@ class ModelLoader:
             exported_device=get_current_device(),
         )
 
+        # AF disaggregate: only load useful weights
+        self._model_weights_info.afd_remove_weights(self._weights_info.config)
+
     def get_load_config(self) -> LoadConfig:
         return self._load_config
 
@@ -317,7 +320,7 @@ class ModelLoader:
     def prepare_weights(self, device: str):
         if (
             self._load_config.vit_separation != 1
-            and not self._is_attn_model
+            and self._model_weights_info.layer_weights
         ):
             for id in range(self._load_config.num_layers):
                 results = self._load_layer_weights(id, device)
@@ -351,7 +354,10 @@ class ModelLoader:
         WeightInfo = ModelLoader.WeightInfo
         tensor_to_weight_map: Dict[str, WeightInfo] = {}
         weight_info_list: List[WeightInfo] = []
-        if self._load_config.vit_separation != VitSeparation.VIT_SEPARATION_ROLE:
+        if (
+            self._load_config.vit_separation != VitSeparation.VIT_SEPARATION_ROLE
+            and self._model_weights_info.layer_weights
+        ):
             for layer_id in range(self._load_config.num_layers):
                 layer_weights = self._model_weights_info.layer_weights[layer_id]
                 if isinstance(layer_weights, WeightModule):
