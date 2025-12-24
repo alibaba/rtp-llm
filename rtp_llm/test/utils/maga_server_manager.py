@@ -169,6 +169,43 @@ class MagaServerManager(object):
             self._file_stream = open(self._log_file, "w")
         logging.info(f"smoke_args_str: {self._smoke_args_str}")
         parsed_args = shlex.split(self._smoke_args_str)
+
+        # 调用 extract_args.sh 生成额外的启动参数
+        try:
+            extract_result = subprocess.run(
+                [
+                    "/opt/conda310/bin/python3",
+                    "-m",
+                    "rtp_llm.server.server_args.generate_args_from_env_clean",
+                    "--quiet",
+                    "--output-file",
+                    "generate_env.txt",
+                    "--export-env",
+                ],
+                env=current_env,
+                capture_output=True,
+                text=True,
+                cwd=cwd_path,
+            )
+            if extract_result.returncode == 0:
+                # 获取最后一行输出，格式类似 export env_args="..."
+                output_lines = extract_result.stdout.strip().split("\n")
+                if output_lines:
+                    last_line = output_lines[-1]
+                    # 解析 export env_args="..." 格式
+                    if last_line.startswith("export env_args="):
+                        env_args_value = last_line.replace("export env_args=", "", 1)
+                        # 去掉引号
+                        env_args_value = env_args_value.strip("\"'")
+                        if env_args_value:
+                            extra_args = shlex.split(env_args_value)
+                            parsed_args.extend(extra_args)
+                            logging.info(f"从环境变量生成的额外参数: {extra_args}")
+            else:
+                logging.warning(f"生成额外参数失败: {extract_result.stderr}")
+        except Exception as e:
+            logging.warning(f"调用 generate_args_from_env_clean 失败: {e}")
+        logging.info(f"all parsed_args: {parsed_args}")
         p = subprocess.Popen(
             ["/opt/conda310/bin/python", "-m", "rtp_llm.start_server"] + parsed_args,
             env=current_env,
