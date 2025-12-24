@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/core/BufferHelper.h"
 #include "rtp_llm/cpp/cache/types.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
+#include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 
 using namespace std;
@@ -249,6 +250,7 @@ bool StreamCacheResource::asyncStoreCache() {
     if (store_cache_context_) {
         return true;
     }
+    dropLastPartialBlock(batch_resource_);
     auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(shared_from_this());
     store_cache_context_   = resource_context_.cache_manager->asyncStoreCache(connector_context);
     return store_cache_context_ != nullptr;

@@ -35,6 +35,7 @@ private:
     std::shared_ptr<TPBroadcastResult<BroadcastTpRequestPB, BroadcastTpResponsePB>> broadcast_result_;
     std::function<void(bool)>                                                       done_callback_;
     bool                                                                            already_done_{false};
+    std::once_flag                                                                  wait_done_once_;
 };
 
 class KVCacheMemoryConnector: public KVCacheConnector, public std::enable_shared_from_this<KVCacheMemoryConnector> {
@@ -63,8 +64,9 @@ public:
         throw std::runtime_error("KVCacheMemoryConnector asyncWriteByLayer is not implemented");
     }
 
+    // virtual for test
     virtual bool copyCache(const MemoryBroadcastTpRequestPB& request, MemoryBroadcastTpResponsePB& response);
-    void         clearCache();
+    virtual void clearCache();
 
 private:
     struct LayerBlock {
@@ -104,13 +106,13 @@ private:
     bool
     freeBlocks(const std::shared_ptr<BlockPool>& block_pool, const std::vector<int>& blocks, bool cache_free = true);
     void referenceBlocks(const std::shared_ptr<BlockPool>& block_pool, const std::vector<int>& blocks);
-    std::shared_ptr<BlockPool> getOrCreateMemoryBlockPool(size_t block_size, bool create = false);
     std::shared_ptr<BlockPool> getBlockPool(size_t block_size) const;
     std::shared_ptr<BlockPool> createBlockPool(size_t block_size);
     void                       putToCache(const MemoryBlockCache::CacheItem& item);
     bool                       ensureEnoughFreeBlocks(const std::shared_ptr<BlockPool>& block_pool, size_t need_blocks);
+    bool                       waitContextDoneAsync(const std::shared_ptr<MemoryConnectorAsyncContext>& context);
+    bool                       isThreadPoolFull() const;
     void                       printCopyPlan(const std::vector<CopyInfoPerKey>& copy_infos) const;
-    void                       waitContextDoneAsync(const std::shared_ptr<MemoryConnectorAsyncContext>& context);
 
     void reportReadMetrics(
         bool success, int64_t latency_us, int64_t input_block_num, int64_t matched_block_num, int64_t read_block_num);

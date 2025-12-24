@@ -33,10 +33,6 @@ cc_library(
     hdrs = glob([
         "*.h",
     ], exclude = [
-        "types.h", 
-        "CacheConfig.h", 
-        "KVCacheResource.h", 
-        "BatchKVCacheResource.h", 
         "KVCacheManager.h"
     ]),
     srcs = glob([

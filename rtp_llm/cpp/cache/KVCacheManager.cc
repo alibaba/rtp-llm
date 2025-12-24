@@ -69,10 +69,7 @@ bool KVCacheManager::init() {
     }
 
     if (kv_cache_config_.memory_block_cache_size_mb > 0) {
-        if (!initConnectorCoordinator()) {
-            RTP_LLM_LOG_ERROR("init connector coordinator failed");
-            return false;
-        }
+        RTP_LLM_CHECK_WITH_INFO(initConnectorCoordinator(), "init connector coordinator failed");
     }
     return true;
 }

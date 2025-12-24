@@ -36,13 +36,15 @@ void MemoryConnectorAsyncContext::waitDone() {
     if (already_done_) {
         return;
     }
-    if (broadcast_result_) {
-        broadcast_result_->waitDone();
-    }
-    if (done_callback_) {
-        done_callback_(success());
-    }
-    already_done_ = true;
+    std::call_once(wait_done_once_, [this]() {
+        if (broadcast_result_) {
+            broadcast_result_->waitDone();
+        }
+        if (done_callback_) {
+            done_callback_(success());
+        }
+        already_done_ = true;
+    });
 }
 
 // ----------------------------- KVCacheMemoryConnector ---------------------------------
@@ -191,6 +193,13 @@ KVCacheMemoryConnector::asyncRead(const std::shared_ptr<KVCacheResourceV1>& reso
         return nullptr;
     }
 
+    // 因为下文会在线程池中push wait done任务, 所以这里提前检查线程池是否已满
+    if (isThreadPoolFull()) {
+        RTP_LLM_LOG_WARNING("async read failed, thread pool is full");
+        reportReadMetrics(false, timer.done_us(), cache_keys.size(), matched_block_num, 0);
+        return nullptr;
+    }
+
     auto copy_infos = buildCopyPlanForRead(cache_keys, layer_block_ids, start_read_block_index, read_block_num);
     if (copy_infos.empty()) {
         RTP_LLM_LOG_WARNING(
@@ -332,6 +341,13 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
             cpu_matched_num,
             cache_keys.size());
         reportWriteMetrics(true, timer.done_us(), static_cast<int64_t>(cache_keys.size()), 0);
+        return nullptr;
+    }
+
+    // 因为下文会在线程池中push wait done任务, 所以这里提前检查线程池是否已满
+    if (isThreadPoolFull()) {
+        RTP_LLM_LOG_WARNING("async write failed, thread pool is full");
+        reportWriteMetrics(false, timer.done_us(), static_cast<int64_t>(cache_keys.size()), 0);
         return nullptr;
     }
 
@@ -731,30 +747,6 @@ void KVCacheMemoryConnector::referenceBlocks(const std::shared_ptr<BlockPool>& b
     block_pool->blockCacheReference(blocks);
 }
 
-std::shared_ptr<BlockPool> KVCacheMemoryConnector::getOrCreateMemoryBlockPool(size_t block_size, bool create) {
-    auto it = block_pools_.find(block_size);
-    if (it != block_pools_.end()) {
-        return it->second;
-    }
-    if (!create) {
-        return nullptr;
-    }
-
-    const int64_t block_nums = kv_cache_config_.memory_block_cache_size_mb * 1024 * 1024 / block_size;
-    RTP_LLM_LOG_INFO("init memory block pool, size: %ld MB, block nums: %ld",
-                     kv_cache_config_.memory_block_cache_size_mb,
-                     block_nums);
-    const auto pool_config = BlockPoolConfigHelper::createLayerFirstConfig(
-        /*layer_num=*/1, static_cast<uint32_t>(block_nums), static_cast<uint32_t>(block_size));
-    auto pool = std::make_shared<BlockPool>(pool_config, device_, AllocationType::HOST);
-    if (!pool->init()) {
-        RTP_LLM_LOG_WARNING("create memory block pool failed, block_size=%zu", block_size);
-        return nullptr;
-    }
-    block_pools_[block_size] = pool;
-    return pool;
-}
-
 std::shared_ptr<BlockPool> KVCacheMemoryConnector::getBlockPool(size_t block_size) const {
     if (auto it = block_pools_.find(block_size); it != block_pools_.end()) {
         return it->second;
@@ -803,20 +795,27 @@ bool KVCacheMemoryConnector::ensureEnoughFreeBlocks(const std::shared_ptr<BlockP
     return block_pool->freeBlocksNum() >= need_blocks;
 }
 
-void KVCacheMemoryConnector::printCopyPlan(const std::vector<CopyInfoPerKey>& copy_infos) const {
-    RTP_LLM_LOG_INFO("print copy plan, copy infos size: %zu", copy_infos.size());
-    for (int i = 0; i < copy_infos.size(); ++i) {
-        const auto&        copy_info = copy_infos.at(i);
-        std::ostringstream oss;
-        oss << "copy info " << i << ": cache key: " << copy_info.cache_key
-            << ", mem block size: " << copy_info.mem_block_size << ", mem block index: " << copy_info.mem_block_index
-            << ", gpu layer blocks: [";
-        for (const auto& gpu_layer_block : copy_info.gpu_layer_blocks) {
-            oss << "(layer " << gpu_layer_block.layer_id << ", block " << gpu_layer_block.block_id << "), ";
-        }
-        oss << "]";
-        RTP_LLM_LOG_INFO(oss.str().c_str());
+bool KVCacheMemoryConnector::waitContextDoneAsync(const std::shared_ptr<MemoryConnectorAsyncContext>& context) {
+    if (!wait_done_thread_pool_) {
+        RTP_LLM_LOG_WARNING("push async context to thread pool failed, wait done thread pool is null");
+        return false;
     }
+    auto code = wait_done_thread_pool_->pushTask([context]() { context->waitDone(); });
+    if (code != autil::ThreadPoolBase::ERROR_NONE) {
+        RTP_LLM_LOG_WARNING("push async context to thread pool failed, push task failed, code: %d, size: %zu",
+                            code,
+                            wait_done_thread_pool_->getItemCount());
+        return false;
+    }
+    return true;
+}
+
+bool KVCacheMemoryConnector::isThreadPoolFull() const {
+    if (!wait_done_thread_pool_) {
+        RTP_LLM_LOG_WARNING("wait done thread pool is null!");
+        return true;
+    }
+    return wait_done_thread_pool_->isFull();
 }
 
 void KVCacheMemoryConnector::clearCache() {
@@ -852,17 +851,19 @@ void KVCacheMemoryConnector::clearCache() {
     }
 }
 
-void KVCacheMemoryConnector::waitContextDoneAsync(const std::shared_ptr<MemoryConnectorAsyncContext>& context) {
-    if (!wait_done_thread_pool_) {
-        RTP_LLM_LOG_WARNING("push async context to thread pool failed, wait done thread pool is null");
-        return;
-    }
-    auto code = wait_done_thread_pool_->pushTask([context]() { context->waitDone(); });
-    if (code != autil::ThreadPoolBase::ERROR_NONE) {
-        RTP_LLM_LOG_WARNING("push async context to thread pool failed, push task failed, code: %d, size: %zu",
-                            code,
-                            wait_done_thread_pool_->getItemCount());
-        return;
+void KVCacheMemoryConnector::printCopyPlan(const std::vector<CopyInfoPerKey>& copy_infos) const {
+    RTP_LLM_LOG_INFO("print copy plan, copy infos size: %zu", copy_infos.size());
+    for (int i = 0; i < copy_infos.size(); ++i) {
+        const auto&        copy_info = copy_infos.at(i);
+        std::ostringstream oss;
+        oss << "copy info " << i << ": cache key: " << copy_info.cache_key
+            << ", mem block size: " << copy_info.mem_block_size << ", mem block index: " << copy_info.mem_block_index
+            << ", gpu layer blocks: [";
+        for (const auto& gpu_layer_block : copy_info.gpu_layer_blocks) {
+            oss << "(layer " << gpu_layer_block.layer_id << ", block " << gpu_layer_block.block_id << "), ";
+        }
+        oss << "]";
+        RTP_LLM_LOG_INFO(oss.str().c_str());
     }
 }
 

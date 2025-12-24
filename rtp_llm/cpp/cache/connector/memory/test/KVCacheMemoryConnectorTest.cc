@@ -21,18 +21,165 @@
 
 namespace rtp_llm::test {
 
-namespace {
-void waitAsyncContextDone(const std::shared_ptr<rtp_llm::AsyncContext>& ctx) {
-    ASSERT_NE(ctx, nullptr);
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
-    while (std::chrono::steady_clock::now() < deadline) {
-        if (ctx->done()) {
-            return;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    FAIL() << "AsyncContext timeout waiting done()";
+// --------------------------------- MemoryConnectorAsyncContextTest ---------------------------------
+
+class MemoryConnectorAsyncContextTest: public ::testing::Test {};
+
+TEST_F(MemoryConnectorAsyncContextTest, success_ReturnFalse_WhenBroadcastResultNotSuccess) {
+    using ResultT = rtp_llm::TPBroadcastResult<BroadcastTpRequestPB, BroadcastTpResponsePB>;
+    using CtxT    = typename ResultT::WorkerRpcContext;
+
+    auto worker0 = std::make_shared<CtxT>();
+    worker0->response.mutable_mem_response()->set_success(true);
+
+    auto result                  = std::make_shared<ResultT>(std::vector<std::shared_ptr<CtxT>>{worker0});
+    result->all_request_success_ = false;
+
+    auto ctx = std::make_shared<rtp_llm::MemoryConnectorAsyncContext>(result, /*done_callback=*/nullptr);
+    // Avoid blocking in ~MemoryConnectorAsyncContext()->waitDone() since this TPBroadcastResult can never complete.
+    ctx->already_done_ = true;
+    EXPECT_FALSE(ctx->success());
 }
+
+TEST_F(MemoryConnectorAsyncContextTest, success_ReturnFalse_WhenAnyResponseMissingMemResponse) {
+    using ResultT = rtp_llm::TPBroadcastResult<BroadcastTpRequestPB, BroadcastTpResponsePB>;
+    using CtxT    = typename ResultT::WorkerRpcContext;
+
+    auto worker0                 = std::make_shared<CtxT>();  // default: no mem_response
+    auto result                  = std::make_shared<ResultT>(std::vector<std::shared_ptr<CtxT>>{worker0});
+    result->all_request_success_ = true;
+
+    auto ctx = std::make_shared<rtp_llm::MemoryConnectorAsyncContext>(result, /*done_callback=*/nullptr);
+    // Avoid blocking in ~MemoryConnectorAsyncContext()->waitDone() since this TPBroadcastResult can never complete.
+    ctx->already_done_ = true;
+    EXPECT_FALSE(ctx->success());
+}
+
+TEST_F(MemoryConnectorAsyncContextTest, success_ReturnFalse_WhenAnyMemResponseFailed) {
+    using ResultT = rtp_llm::TPBroadcastResult<BroadcastTpRequestPB, BroadcastTpResponsePB>;
+    using CtxT    = typename ResultT::WorkerRpcContext;
+
+    auto worker0 = std::make_shared<CtxT>();
+    worker0->response.mutable_mem_response()->set_success(true);
+    auto worker1 = std::make_shared<CtxT>();
+    worker1->response.mutable_mem_response()->set_success(false);
+
+    auto result                  = std::make_shared<ResultT>(std::vector<std::shared_ptr<CtxT>>{worker0, worker1});
+    result->all_request_success_ = true;
+
+    auto ctx = std::make_shared<rtp_llm::MemoryConnectorAsyncContext>(result, /*done_callback=*/nullptr);
+    // Avoid blocking in ~MemoryConnectorAsyncContext()->waitDone() since this TPBroadcastResult can never complete.
+    ctx->already_done_ = true;
+    EXPECT_FALSE(ctx->success());
+}
+
+TEST_F(MemoryConnectorAsyncContextTest, success_ReturnTrue_WhenAllResponsesSuccess) {
+    using ResultT = rtp_llm::TPBroadcastResult<BroadcastTpRequestPB, BroadcastTpResponsePB>;
+    using CtxT    = typename ResultT::WorkerRpcContext;
+
+    auto worker0 = std::make_shared<CtxT>();
+    worker0->response.mutable_mem_response()->set_success(true);
+    auto worker1 = std::make_shared<CtxT>();
+    worker1->response.mutable_mem_response()->set_success(true);
+
+    auto result                  = std::make_shared<ResultT>(std::vector<std::shared_ptr<CtxT>>{worker0, worker1});
+    result->all_request_success_ = true;
+
+    auto ctx = std::make_shared<rtp_llm::MemoryConnectorAsyncContext>(result, /*done_callback=*/nullptr);
+    // Avoid blocking in ~MemoryConnectorAsyncContext()->waitDone() since this TPBroadcastResult can never complete.
+    ctx->already_done_ = true;
+    EXPECT_TRUE(ctx->success());
+}
+
+TEST_F(MemoryConnectorAsyncContextTest, waitDone_ReturnVoid_WhenBroadcastResultNullAndCallbackCalledOnce) {
+    int  callback_cnt = 0;
+    bool last_ok      = true;
+    auto cb           = [&](bool ok) {
+        callback_cnt++;
+        last_ok = ok;
+    };
+
+    auto ctx = std::make_shared<rtp_llm::MemoryConnectorAsyncContext>(
+        /*broadcast_result=*/nullptr, /*done_callback=*/cb);
+    EXPECT_FALSE(ctx->done());
+    EXPECT_FALSE(ctx->success());
+
+    ctx->waitDone();
+    EXPECT_TRUE(ctx->done());
+    EXPECT_EQ(callback_cnt, 1);
+    EXPECT_FALSE(last_ok);
+
+    // Second call should be no-op.
+    ctx->waitDone();
+    EXPECT_EQ(callback_cnt, 1);
+    EXPECT_TRUE(ctx->done());
+}
+
+TEST_F(MemoryConnectorAsyncContextTest, waitDone_ReturnVoid_WhenBroadcastResultNonNullAndCallbackReceivesSuccess) {
+    using ResultT = rtp_llm::TPBroadcastResult<BroadcastTpRequestPB, BroadcastTpResponsePB>;
+    using CtxT    = typename ResultT::WorkerRpcContext;
+
+    // Empty worker contexts => TPBroadcastResult::waitDone() returns immediately and sets all_request_success_ = true.
+    auto result = std::make_shared<ResultT>(std::vector<std::shared_ptr<CtxT>>{});
+
+    int  callback_cnt = 0;
+    bool last_ok      = false;
+    auto cb           = [&](bool ok) {
+        callback_cnt++;
+        last_ok = ok;
+    };
+
+    auto ctx = std::make_shared<rtp_llm::MemoryConnectorAsyncContext>(result, cb);
+    EXPECT_FALSE(ctx->done());
+    EXPECT_FALSE(ctx->success());  // default all_request_success_ is false before waitDone().
+
+    ctx->waitDone();
+    EXPECT_TRUE(ctx->done());
+    EXPECT_TRUE(ctx->success());
+    EXPECT_EQ(callback_cnt, 1);
+    EXPECT_TRUE(last_ok);
+
+    // Second call should be no-op.
+    ctx->waitDone();
+    EXPECT_EQ(callback_cnt, 1);
+    EXPECT_TRUE(ctx->done());
+}
+
+TEST_F(MemoryConnectorAsyncContextTest, waitDone_ReturnVoid_WhenBroadcastResultNonNullAndDoneCallbackNull) {
+    using ResultT = rtp_llm::TPBroadcastResult<BroadcastTpRequestPB, BroadcastTpResponsePB>;
+    using CtxT    = typename ResultT::WorkerRpcContext;
+
+    auto result = std::make_shared<ResultT>(std::vector<std::shared_ptr<CtxT>>{});
+    auto ctx    = std::make_shared<rtp_llm::MemoryConnectorAsyncContext>(result, /*done_callback=*/nullptr);
+
+    EXPECT_FALSE(ctx->done());
+    EXPECT_FALSE(ctx->success());
+
+    ctx->waitDone();
+    EXPECT_TRUE(ctx->done());
+    EXPECT_TRUE(ctx->success());
+}
+
+TEST_F(MemoryConnectorAsyncContextTest, waitDone_ReturnVoid_WhenAlreadyDone_ReturnsEarlyWithoutCallback) {
+    using ResultT = rtp_llm::TPBroadcastResult<BroadcastTpRequestPB, BroadcastTpResponsePB>;
+    using CtxT    = typename ResultT::WorkerRpcContext;
+
+    auto result = std::make_shared<ResultT>(std::vector<std::shared_ptr<CtxT>>{});
+
+    int  callback_cnt = 0;
+    auto cb           = [&](bool /*ok*/) { callback_cnt++; };
+
+    auto ctx           = std::make_shared<rtp_llm::MemoryConnectorAsyncContext>(result, cb);
+    ctx->already_done_ = true;
+
+    ctx->waitDone();
+    EXPECT_EQ(callback_cnt, 0);
+    EXPECT_TRUE(ctx->done());
+    EXPECT_FALSE(ctx->success());                // broadcast_result_ was not waited.
+    EXPECT_FALSE(result->all_request_success_);  // TPBroadcastResult::waitDone() not invoked.
+}
+
+// --------------------------------- KVCacheMemoryConnectorTest ---------------------------------
 
 class TestReadMeta: public rtp_llm::KVCacheConnector::Meta {
 public:
@@ -48,23 +195,6 @@ private:
     int start_block_index_{0};
     int size_{0};
 };
-
-std::shared_ptr<rtp_llm::AsyncContext> asyncReadMatchedPrefix(const std::shared_ptr<rtp_llm::KVCacheMemoryConnector>& c,
-                                                              const std::shared_ptr<rtp_llm::KVCacheResourceV1>& r) {
-    auto match_ctx = c->asyncMatch(r, nullptr);
-    if (!match_ctx) {
-        return nullptr;
-    }
-    const int reuse_num   = static_cast<int>(r->reuseBlocksNum());
-    const int matched_num = static_cast<int>(match_ctx->matchedBlockCount());
-    const int read_num    = matched_num - reuse_num;
-    if (read_num <= 0) {
-        return nullptr;
-    }
-    auto meta = std::make_shared<TestReadMeta>(reuse_num, read_num);
-    return c->asyncRead(r, meta, match_ctx);
-}
-}  // namespace
 
 class KVCacheMemoryConnectorTest: public ::testing::Test {
 protected:
@@ -106,6 +236,9 @@ private:
         ConcurrencyConfig           concurrency_config;
         FfnDisAggregateConfig       ffn_disaggregate_config;
         RuntimeConfig               runtime_config;
+
+        device_resource_config.device_reserve_memory_bytes = 1024L * 1024 * 1024;  // 1GB
+        device_resource_config.host_reserve_memory_bytes   = 1024L * 1024 * 1024;  // 1GB
 
         DeviceFactory::initDevices(parallelism_config,
                                    model_config,
@@ -325,7 +458,7 @@ private:
         }
 
         for (size_t i = 0; i < keys.size(); ++i) {
-            auto blocks = pool->malloc(1);
+            auto blocks = pool->malloc(1);  // will increase request ref
             if (blocks.size() != 1u) {
                 ADD_FAILURE() << "malloc memory block failed, block_size=" << mem_block_size;
                 break;
@@ -341,6 +474,9 @@ private:
             connector_->block_cache_->put(item);
 
             pool->blockCacheReference({block_idx});
+
+            // malloc会增加request ref, 所以这里需要requestFree减少request ref
+            pool->requestFree({block_idx});
         }
 
         return block_indices;
@@ -374,6 +510,20 @@ TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_NoWorkerAddrs) {
     ASSERT_NE(conn->block_cache_, nullptr);
     ASSERT_NE(conn->tp_broadcast_manager_, nullptr);
     EXPECT_EQ(conn->tp_broadcast_manager_->workerNum(), 0u);
+}
+
+TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_WhenMemoryCacheSizeMbZero) {
+    auto kv_cfg                               = kv_cache_config_;
+    kv_cfg.memory_block_cache_size_mb         = 0;
+    kv_cfg.memory_block_cache_sync_timeout_ms = 1000;
+
+    auto conn = std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cfg, allocator_, device_, server_addrs_);
+    auto ok   = conn->init();
+    EXPECT_FALSE(ok);
+    // Init fails early, nothing should be created.
+    EXPECT_EQ(conn->block_cache_, nullptr);
+    EXPECT_EQ(conn->tp_broadcast_manager_, nullptr);
+    EXPECT_EQ(conn->wait_done_thread_pool_, nullptr);
 }
 
 TEST_F(KVCacheMemoryConnectorTest, init_ReturnTrue_WithWorkerAddrs) {
@@ -417,6 +567,50 @@ TEST_F(KVCacheMemoryConnectorTest, init_Reinit_ClearsBlockPools_And_ResetsBlockC
     EXPECT_FALSE(connector_->block_cache_->contains(item.cache_key));
 }
 
+TEST_F(KVCacheMemoryConnectorTest, asyncMatch_ReturnNull_WhenGpuReuseLenGEKeysSize) {
+    const size_t                  N = 3;
+    std::vector<int64_t>          cache_keys{70001, 70002, 70003};
+    std::vector<std::vector<int>> lbs_vec{{1, 1, 1}, {2, 2, 2}};
+    auto                          res = makeCacheResource(cache_keys, lbs_vec, /*reuse_len=*/N);
+
+    // Even if memory has matches, asyncMatch should skip when gpu reuse covers all keys.
+    const auto   buf      = allocator_->convertIndexToBuffer(0, 0);
+    const size_t mem_size = buf.kv_addr->sizeBytes();
+    putItemsToCache(cache_keys, mem_size);
+
+    auto match_ctx = connector_->asyncMatch(res, /*meta=*/nullptr);
+    EXPECT_EQ(match_ctx, nullptr);
+}
+
+TEST_F(KVCacheMemoryConnectorTest, asyncMatch_ReturnNull_WhenNoPrefixMatched) {
+    std::vector<int64_t>          cache_keys{71001, 71002};
+    std::vector<std::vector<int>> lbs_vec{{1, 1}};
+    auto                          res = makeCacheResource(cache_keys, lbs_vec, /*reuse_len=*/0);
+
+    // No cache prefill => matched_num == 0
+    auto match_ctx = connector_->asyncMatch(res, /*meta=*/nullptr);
+    EXPECT_EQ(match_ctx, nullptr);
+}
+
+TEST_F(KVCacheMemoryConnectorTest, asyncMatch_ReturnMatchedNum_WhenPrefixMatchedAndStopAtFirstMiss) {
+    std::vector<int64_t>          cache_keys{72001, 72002, 72003};
+    std::vector<std::vector<int>> lbs_vec{{1, 1, 1}};
+    auto                          res = makeCacheResource(cache_keys, lbs_vec, /*reuse_len=*/0);
+
+    const auto   buf      = allocator_->convertIndexToBuffer(0, 0);
+    const size_t mem_size = buf.kv_addr->sizeBytes();
+
+    // Only prefill first 2 keys in cache; 3rd miss => matched_num should be 2.
+    putItemsToCache({cache_keys[0], cache_keys[1]}, mem_size);
+
+    auto match_ctx = connector_->asyncMatch(res, /*meta=*/nullptr);
+    ASSERT_NE(match_ctx, nullptr);
+    EXPECT_TRUE(match_ctx->done());
+    EXPECT_TRUE(match_ctx->success());
+    EXPECT_EQ(match_ctx->matchedBlockCount(), 2u);
+    EXPECT_EQ(match_ctx->connectorType(), rtp_llm::KVCacheConnector::ConnectorType::Memory);
+}
+
 TEST_F(KVCacheMemoryConnectorTest, asyncRead_ReturnNull_OnInvalidInputs) {
     // resource is nullptr
     auto ctx_null = connector_->asyncRead(nullptr, nullptr, nullptr);
@@ -441,19 +635,43 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_ReturnNull_WhenReuseLenGEKeys) {
     std::vector<std::vector<int>> lbs_vec{{1, 1, 1}, {2, 2, 2}};
     auto                          res = makeCacheResource(cache_keys, lbs_vec, N);
 
-    auto ctx = asyncReadMatchedPrefix(connector_, res);
-    EXPECT_EQ(ctx, nullptr);
+    // With reuse_len == keys size, asyncMatch should skip and there is nothing to read.
+    auto match_ctx = connector_->asyncMatch(res, nullptr);
+    EXPECT_EQ(match_ctx, nullptr);
     EXPECT_EQ(res->reuseBlocksNum(), N);
 }
 
 TEST_F(KVCacheMemoryConnectorTest, asyncRead_ReturnNull_WhenPlanEmpty) {
-    // 不命中任何 key，copy plan 为空，返回 nullptr
+    // Simulate mismatch between match result and current cache state:
+    // asyncRead does NOT call asyncMatch any more, so it relies on match_context + meta.
+    // Here cache has no items, so buildCopyPlanForRead should fail and asyncRead returns nullptr.
     std::vector<int64_t>          cache_keys{20001, 20002};
     std::vector<std::vector<int>> lbs_vec{{3, 3}, {4, 4}};
     auto                          res = makeCacheResource(cache_keys, lbs_vec);
 
-    // 未向 cache 预置命中项
-    auto ctx = asyncReadMatchedPrefix(connector_, res);
+    class TestMatchContext: public rtp_llm::KVCacheConnector::AsyncMatchContext {
+    public:
+        explicit TestMatchContext(size_t matched): matched_(matched) {}
+        bool done() const override {
+            return true;
+        }
+        bool success() const override {
+            return true;
+        }
+        size_t matchedBlockCount() const override {
+            return matched_;
+        }
+        KVCacheConnector::ConnectorType connectorType() const override {
+            return KVCacheConnector::ConnectorType::Memory;
+        }
+
+    private:
+        size_t matched_{0};
+    };
+
+    auto match_ctx = std::make_shared<TestMatchContext>(/*matched=*/1);
+    auto meta      = std::make_shared<TestReadMeta>(/*start_block_index=*/0, /*size=*/1);
+    auto ctx       = connector_->asyncRead(res, meta, match_ctx);
     EXPECT_EQ(ctx, nullptr);
 }
 
@@ -471,7 +689,10 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_ReturnNull_WhenSendCopyPlanFails_No
     auto                          res = makeCacheResource(cache_keys, lbs_vec);
 
     connector_->tp_broadcast_manager_->worker_addrs_.clear();
-    auto ctx = asyncReadMatchedPrefix(connector_, res);
+    auto match_ctx = connector_->asyncMatch(res, nullptr);
+    ASSERT_NE(match_ctx, nullptr);
+    auto meta = std::make_shared<TestReadMeta>(/*start_block_index=*/0, /*size=*/(int)match_ctx->matchedBlockCount());
+    auto ctx  = connector_->asyncRead(res, meta, match_ctx);
     EXPECT_EQ(ctx, nullptr);
 }
 
@@ -491,9 +712,17 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_Success_IncrementsReuseLen_ByMatche
     };
     auto res = makeCacheResource(cache_keys, lbs_vec, 1);
 
-    auto ctx = asyncReadMatchedPrefix(connector_, res);
+    auto match_ctx = connector_->asyncMatch(res, nullptr);
+    ASSERT_NE(match_ctx, nullptr);
+    const int reuse_num = static_cast<int>(res->reuseBlocksNum());
+    const int read_num  = static_cast<int>(match_ctx->matchedBlockCount()) - reuse_num;
+    ASSERT_GT(read_num, 0);
+    auto meta = std::make_shared<TestReadMeta>(reuse_num, read_num);
+    auto ctx  = connector_->asyncRead(res, meta, match_ctx);
     ASSERT_NE(ctx, nullptr);
-    waitAsyncContextDone(ctx);
+    auto mem_ctx = std::dynamic_pointer_cast<rtp_llm::MemoryConnectorAsyncContext>(ctx);
+    ASSERT_NE(mem_ctx, nullptr);
+    mem_ctx->waitDone();
     EXPECT_TRUE(ctx->success());
     EXPECT_EQ(res->reuseBlocksNum(), 3u);
 }
@@ -525,9 +754,14 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_FailureOnMemResponse_NoReuseLenIncr
     std::vector<std::vector<int>> lbs_vec{{11, 12}, {21, 22}};
     auto                          res = makeCacheResource(cache_keys, lbs_vec);
 
-    auto ctx = asyncReadMatchedPrefix(connector_, res);
+    auto match_ctx = connector_->asyncMatch(res, nullptr);
+    ASSERT_NE(match_ctx, nullptr);
+    auto meta = std::make_shared<TestReadMeta>(/*start_block_index=*/0, /*size=*/(int)match_ctx->matchedBlockCount());
+    auto ctx  = connector_->asyncRead(res, meta, match_ctx);
     ASSERT_NE(ctx, nullptr);
-    waitAsyncContextDone(ctx);
+    auto mem_ctx = std::dynamic_pointer_cast<rtp_llm::MemoryConnectorAsyncContext>(ctx);
+    ASSERT_NE(mem_ctx, nullptr);
+    mem_ctx->waitDone();
     EXPECT_FALSE(ctx->success());
     EXPECT_EQ(res->reuseBlocksNum(), 0u);
 
@@ -568,9 +802,14 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_FailureOnRpcStatus_NoReuseLenIncrem
     std::vector<std::vector<int>> lbs_vec{{31, 32}, {41, 42}};
     auto                          res = makeCacheResource(cache_keys, lbs_vec);
 
-    auto ctx = asyncReadMatchedPrefix(connector_, res);
+    auto match_ctx = connector_->asyncMatch(res, nullptr);
+    ASSERT_NE(match_ctx, nullptr);
+    auto meta = std::make_shared<TestReadMeta>(/*start_block_index=*/0, /*size=*/(int)match_ctx->matchedBlockCount());
+    auto ctx  = connector_->asyncRead(res, meta, match_ctx);
     ASSERT_NE(ctx, nullptr);
-    waitAsyncContextDone(ctx);
+    auto mem_ctx = std::dynamic_pointer_cast<rtp_llm::MemoryConnectorAsyncContext>(ctx);
+    ASSERT_NE(mem_ctx, nullptr);
+    mem_ctx->waitDone();
     EXPECT_FALSE(ctx->success());
     EXPECT_EQ(res->reuseBlocksNum(), 0u);
 
@@ -580,6 +819,58 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_FailureOnRpcStatus_NoReuseLenIncrem
     }
     servers.clear();
     addrs.clear();
+}
+
+TEST_F(KVCacheMemoryConnectorTest, asyncRead_ReturnNull_WhenThreadPoolFull) {
+    // Make thread pool full, asyncRead should fail early before building copy plan / sending RPC.
+    auto old_pool = connector_->wait_done_thread_pool_;
+
+    connector_->wait_done_thread_pool_ = std::make_shared<autil::LockFreeThreadPool>(/*thread_num=*/1,
+                                                                                     /*queue_size=*/1,
+                                                                                     /*thread_init_func=*/nullptr,
+                                                                                     /*name=*/"AsyncReadFullTP");
+    ASSERT_TRUE(connector_->wait_done_thread_pool_->start());
+
+    std::atomic<bool> block_worker{true};
+    std::atomic<bool> first_task_started{false};
+    ASSERT_EQ(connector_->wait_done_thread_pool_->pushTask([&]() {
+        first_task_started.store(true);
+        while (block_worker.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }),
+              autil::ThreadPoolBase::ERROR_NONE);
+    const auto started_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (std::chrono::steady_clock::now() < started_deadline && !first_task_started.load()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_TRUE(first_task_started.load());
+    (void)connector_->wait_done_thread_pool_->pushTask([&]() {
+        while (block_worker.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    });
+    const auto full_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (std::chrono::steady_clock::now() < full_deadline && !connector_->isThreadPoolFull()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_TRUE(connector_->isThreadPoolFull());
+
+    std::vector<int64_t> cache_keys{70001, 70002};
+    const auto           buf      = allocator_->convertIndexToBuffer(0, 0);
+    const size_t         mem_size = buf.kv_addr->sizeBytes();
+    putItemsToCache(cache_keys, mem_size);
+    auto res       = makeCacheResource(cache_keys, {{1, 2}, {3, 4}});
+    auto match_ctx = connector_->asyncMatch(res, nullptr);
+    ASSERT_NE(match_ctx, nullptr);
+    auto meta = std::make_shared<TestReadMeta>(/*start_block_index=*/0, /*size=*/(int)match_ctx->matchedBlockCount());
+    auto ctx  = connector_->asyncRead(res, meta, match_ctx);
+    EXPECT_EQ(ctx, nullptr);
+
+    block_worker.store(false);
+    connector_->wait_done_thread_pool_->stop();
+    connector_->wait_done_thread_pool_.reset();
+    connector_->wait_done_thread_pool_ = old_pool;
 }
 
 TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForRead_ReturnEmpty_WhenNoMatch) {
@@ -785,6 +1076,96 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnNull_WhenAllKeysInCache) {
     EXPECT_EQ(connector_->block_cache_->size(), cache_size_before);
 }
 
+TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnSuccess_WhenPrefixInCacheOnlyWriteSuffix) {
+    const int                     layer0 = 0;
+    std::vector<int64_t>          cache_keys{60001, 60002, 60003};
+    std::vector<std::vector<int>> lbs_vec{{1, 2, 3}};
+    auto                          res = makeCacheResource(cache_keys, lbs_vec);
+
+    const auto buf = allocator_->convertIndexToBuffer(layer0, /*block_id=*/1);
+    ASSERT_NE(buf.kv_addr, nullptr);
+    const size_t total = buf.kv_addr->sizeBytes();
+    auto         pool  = ensureBlockPool(total);
+    ASSERT_NE(pool, nullptr);
+
+    const size_t free_before  = pool->freeBlocksNum();
+    const size_t cache_before = connector_->block_cache_->size();
+
+    // Pre-insert only the first key, so cpu_matched_num should be 1 and only suffix gets written.
+    auto pre_blocks = putItemsToCache({cache_keys[0]}, total);
+    ASSERT_EQ(pre_blocks.size(), 1u);
+    ASSERT_TRUE(connector_->block_cache_->contains(cache_keys[0]));
+
+    auto ctx = connector_->asyncWrite(res, nullptr);
+    ASSERT_NE(ctx, nullptr);
+    auto mem_ctx = std::dynamic_pointer_cast<rtp_llm::MemoryConnectorAsyncContext>(ctx);
+    ASSERT_NE(mem_ctx, nullptr);
+    mem_ctx->waitDone();
+    EXPECT_TRUE(ctx->success());
+
+    // Only 2 new items inserted.
+    EXPECT_EQ(connector_->block_cache_->size(), cache_before + 3);
+    EXPECT_TRUE(connector_->block_cache_->contains(cache_keys[0]));
+    EXPECT_TRUE(connector_->block_cache_->contains(cache_keys[1]));
+    EXPECT_TRUE(connector_->block_cache_->contains(cache_keys[2]));
+    // Net: we kept 3 cached blocks in pool.
+    EXPECT_EQ(pool->freeBlocksNum(), free_before - 3);
+}
+
+TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnSuccess_WhenKeyInsertedDuringWriteDone) {
+    // Delay RPC so we can insert a key into block_cache_ while asyncWrite is in flight.
+    std::vector<std::unique_ptr<TestRpcServer>> servers;
+    std::vector<std::string>                    addrs;
+    for (int i = 0; i < 2; ++i) {
+        auto service = std::make_unique<TestRpcService>();
+        service->setSleepMillis(200);
+        auto server = std::make_unique<TestRpcServer>(std::move(service));
+        ASSERT_TRUE(server->start());
+        addrs.push_back("127.0.0.1:" + std::to_string(server->listenPort()));
+        servers.push_back(std::move(server));
+    }
+    auto broadcast_manager = std::make_shared<TpBroadcastManager>(addrs);
+    ASSERT_TRUE(broadcast_manager->init());
+    connector_->tp_broadcast_manager_ = broadcast_manager;
+
+    const int                     layer0 = 0;
+    std::vector<int64_t>          cache_keys{61001, 61002};
+    std::vector<std::vector<int>> lbs_vec{{1, 2}};
+    auto                          res = makeCacheResource(cache_keys, lbs_vec);
+
+    const auto buf = allocator_->convertIndexToBuffer(layer0, /*block_id=*/1);
+    ASSERT_NE(buf.kv_addr, nullptr);
+    const size_t total = buf.kv_addr->sizeBytes();
+    auto         pool  = ensureBlockPool(total);
+    ASSERT_NE(pool, nullptr);
+    const size_t free_before = pool->freeBlocksNum();
+
+    auto ctx = connector_->asyncWrite(res, nullptr);
+    ASSERT_NE(ctx, nullptr);
+
+    // While in flight, insert the first key so write_done should skip inserting it.
+    auto pre_blocks = putItemsToCache({cache_keys[0]}, total);
+    ASSERT_EQ(pre_blocks.size(), 1u);
+    ASSERT_TRUE(connector_->block_cache_->contains(cache_keys[0]));
+
+    auto mem_ctx = std::dynamic_pointer_cast<rtp_llm::MemoryConnectorAsyncContext>(ctx);
+    ASSERT_NE(mem_ctx, nullptr);
+    mem_ctx->waitDone();
+    EXPECT_TRUE(ctx->success());
+
+    EXPECT_TRUE(connector_->block_cache_->contains(cache_keys[0]));
+    EXPECT_TRUE(connector_->block_cache_->contains(cache_keys[1]));
+    // Only 2 cached blocks should remain in pool.
+    EXPECT_EQ(pool->freeBlocksNum(), free_before - 2);
+
+    connector_->tp_broadcast_manager_.reset();
+    for (auto& s : servers) {
+        s->shutdown();
+    }
+    servers.clear();
+    addrs.clear();
+}
+
 TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnNull_WhenBuildPlanEmpty) {
     // 所有 layer 对于第一个未命中 key 的 blockIdx 都为 NULL，导致 plan 为空
     std::vector<int64_t> cache_keys{100, 101};
@@ -839,7 +1220,9 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_Success_AddsToBlockCache_AndKeepsM
 
     auto ctx = connector_->asyncWrite(res, nullptr);
     ASSERT_NE(ctx, nullptr);
-    waitAsyncContextDone(ctx);
+    auto mem_ctx = std::dynamic_pointer_cast<rtp_llm::MemoryConnectorAsyncContext>(ctx);
+    ASSERT_NE(mem_ctx, nullptr);
+    mem_ctx->waitDone();
     EXPECT_TRUE(ctx->success());
 
     // block_cache 中应新增 N 个条目
@@ -884,7 +1267,9 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_FailureOnMemResponse_FreesAllocate
 
     auto ctx = connector_->asyncWrite(res, nullptr);
     ASSERT_NE(ctx, nullptr);
-    waitAsyncContextDone(ctx);
+    auto mem_ctx = std::dynamic_pointer_cast<rtp_llm::MemoryConnectorAsyncContext>(ctx);
+    ASSERT_NE(mem_ctx, nullptr);
+    mem_ctx->waitDone();
     EXPECT_FALSE(ctx->success());
     // 应未插入缓存
     EXPECT_EQ(connector_->block_cache_->size(), cache_before);
@@ -897,6 +1282,64 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_FailureOnMemResponse_FreesAllocate
     }
     servers.clear();
     addrs.clear();
+}
+
+TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnNull_WhenThreadPoolFull) {
+    // Make thread pool full, asyncWrite should fail early before building write plan / allocating blocks.
+    auto old_pool = connector_->wait_done_thread_pool_;
+
+    connector_->wait_done_thread_pool_ = std::make_shared<autil::LockFreeThreadPool>(/*thread_num=*/1,
+                                                                                     /*queue_size=*/1,
+                                                                                     /*thread_init_func=*/nullptr,
+                                                                                     /*name=*/"AsyncWriteFullTP");
+    ASSERT_TRUE(connector_->wait_done_thread_pool_->start());
+
+    std::atomic<bool> block_worker{true};
+    std::atomic<bool> first_task_started{false};
+    ASSERT_EQ(connector_->wait_done_thread_pool_->pushTask([&]() {
+        first_task_started.store(true);
+        while (block_worker.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }),
+              autil::ThreadPoolBase::ERROR_NONE);
+    const auto started_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (std::chrono::steady_clock::now() < started_deadline && !first_task_started.load()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_TRUE(first_task_started.load());
+    (void)connector_->wait_done_thread_pool_->pushTask([&]() {
+        while (block_worker.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    });
+    const auto full_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (std::chrono::steady_clock::now() < full_deadline && !connector_->isThreadPoolFull()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_TRUE(connector_->isThreadPoolFull());
+
+    const int                     layer0 = 0;
+    std::vector<int64_t>          cache_keys{71001, 71002, 71003};
+    std::vector<std::vector<int>> lbs_vec{{1, 2, 3}};
+    auto                          res = makeCacheResource(cache_keys, lbs_vec);
+
+    // Pre-insert one key so cpu_matched_num < cache_keys.size() and it reaches the thread-pool-full check.
+    const auto   buf      = allocator_->convertIndexToBuffer(layer0, /*block_id=*/1);
+    const size_t total    = buf.kv_addr->sizeBytes();
+    auto         pool     = ensureBlockPool(total);
+    const size_t free_bef = pool->freeBlocksNum();
+    (void)putItemsToCache({cache_keys[0]}, total);
+
+    auto ctx = connector_->asyncWrite(res, nullptr);
+    EXPECT_EQ(ctx, nullptr);
+    // Should not allocate any new blocks when failing early.
+    EXPECT_EQ(pool->freeBlocksNum(), free_bef - 1);
+
+    block_worker.store(false);
+    connector_->wait_done_thread_pool_->stop();
+    connector_->wait_done_thread_pool_.reset();
+    connector_->wait_done_thread_pool_ = old_pool;
 }
 
 TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_ReturnEmpty_WhenMatchLenEqualsSize) {
@@ -1764,6 +2207,59 @@ TEST_F(KVCacheMemoryConnectorTest, prepareCopyBuffers_ReturnTrue_D2H_MultiLayerW
     EXPECT_EQ(dst[1]->sizeBytes(), buf1.kv_addr->sizeBytes());
 }
 
+TEST_F(KVCacheMemoryConnectorTest, checkKVCacheResource_ReturnFalse_WhenResourceNull) {
+    EXPECT_FALSE(connector_->checkKVCacheResource(nullptr));
+}
+
+TEST_F(KVCacheMemoryConnectorTest, checkKVCacheResource_ReturnFalse_WhenCacheKeysEmpty) {
+    auto res = makeCacheResource(/*cache_keys=*/{}, /*per_layer_block_indices=*/{{}});
+    EXPECT_FALSE(connector_->checkKVCacheResource(res));
+}
+
+TEST_F(KVCacheMemoryConnectorTest, checkKVCacheResource_ReturnFalse_WhenLayerBlockIdsEmpty) {
+    auto res             = std::make_shared<KVCacheResourceV1>();
+    res->cacheKeys()     = CacheKeysType{1};
+    res->layerBlockIds() = LayerBlockIds{};  // empty
+    EXPECT_FALSE(connector_->checkKVCacheResource(res));
+}
+
+TEST_F(KVCacheMemoryConnectorTest, checkKVCacheResource_ReturnFalse_WhenLayerBlockIdsSizeMismatch) {
+    auto res         = std::make_shared<KVCacheResourceV1>();
+    res->cacheKeys() = CacheKeysType{1, 2};
+
+    // Provide non-empty but size != layer_num.
+    LayerBlockIds lbs;
+    auto          ptr = std::make_shared<BlockIds>();
+    ptr->blocks()     = {1, 1};
+    lbs.emplace_back(ptr);
+    res->layerBlockIds() = std::move(lbs);
+
+    EXPECT_FALSE(connector_->checkKVCacheResource(res));
+}
+
+TEST_F(KVCacheMemoryConnectorTest, checkKVCacheResource_ReturnFalse_WhenBlocksNumLessThanCacheKeysSize) {
+    auto res         = std::make_shared<KVCacheResourceV1>();
+    res->cacheKeys() = CacheKeysType{1, 2};
+
+    LayerBlockIds lbs;
+    lbs.reserve(cache_config_.layer_num);
+    for (int i = 0; i < cache_config_.layer_num; ++i) {
+        auto ptr      = std::make_shared<BlockIds>();
+        ptr->blocks() = {1};  // size 1 < cache_keys.size() (2)
+        lbs.emplace_back(std::move(ptr));
+    }
+    res->layerBlockIds() = std::move(lbs);
+
+    EXPECT_FALSE(connector_->checkKVCacheResource(res));
+}
+
+TEST_F(KVCacheMemoryConnectorTest, checkKVCacheResource_ReturnTrue_WhenResourceValid) {
+    std::vector<int64_t>          cache_keys{1, 2};
+    std::vector<std::vector<int>> lbs_vec{{1, 2}};  // other layers auto filled with NULL_BLOCK_IDX
+    auto                          res = makeCacheResource(cache_keys, lbs_vec);
+    EXPECT_TRUE(connector_->checkKVCacheResource(res));
+}
+
 TEST_F(KVCacheMemoryConnectorTest, mallocBlocks_ReturnFalse_BlockPoolNull) {
     std::vector<BlockIdxType> blocks;
     auto                      ok = connector_->mallocBlocks(nullptr, 1, blocks);
@@ -1897,42 +2393,149 @@ TEST_F(KVCacheMemoryConnectorTest, freeBlocks_ReturnFalse_PoolNotExist_WithValid
     EXPECT_FALSE(ok);
 }
 
-// TEST_F(KVCacheMemoryConnectorTest, getOrCreateMemoryBlockPool_ReturnNull_CreateFalse_NotExist) {
-//     const size_t block_size = 4096;
-//     auto         pool       = connector_->getBlockPool(block_size);
-//     EXPECT_EQ(pool, nullptr);
-// }
+TEST_F(KVCacheMemoryConnectorTest, referenceBlocks_ReturnVoid_WhenBlocksEmpty) {
+    const auto   buf        = allocator_->convertIndexToBuffer(0, 0);
+    const size_t block_size = buf.kv_addr->sizeBytes();
+    auto         pool       = ensureBlockPool(block_size);
+    ASSERT_NE(pool, nullptr);
+    auto blocks = pool->malloc(1);
+    ASSERT_EQ(blocks.size(), 1u);
+    const int block_idx = blocks[0];
 
-// TEST_F(KVCacheMemoryConnectorTest, getOrCreateMemoryBlockPool_ReturnNull_BlockPoolInitFailed) {
-//     const size_t block_size = 0;  // invalid block size
-//     auto         pool       = ensureBlockPool(block_size);
-//     EXPECT_EQ(pool, nullptr);
-// }
+    const int ref_before = pool->getBlockCacheRefCount(block_idx);
+    connector_->referenceBlocks(pool, /*blocks=*/{});
+    EXPECT_EQ(pool->getBlockCacheRefCount(block_idx), ref_before);
+}
 
-// TEST_F(KVCacheMemoryConnectorTest, getOrCreateMemoryBlockPool_ReturnNotNull_CreateTrue) {
-//     const size_t block_size = 4096;
-//     auto         pool       = ensureBlockPool(block_size);
-//     ASSERT_NE(pool, nullptr);
-// }
+TEST_F(KVCacheMemoryConnectorTest, referenceBlocks_ReturnVoid_WhenBlockPoolNull) {
+    ASSERT_NO_FATAL_FAILURE(connector_->referenceBlocks(nullptr, /*blocks=*/{1, 2}));
+}
 
-// TEST_F(KVCacheMemoryConnectorTest, getOrCreateMemoryBlockPool_ReturnSameInstance_ForSameSize) {
-//     const size_t block_size = 8192;
-//     auto         pool1      = ensureBlockPool(block_size);
-//     ASSERT_NE(pool1, nullptr);
-//     auto pool2 = connector_->getBlockPool(block_size);
-//     ASSERT_NE(pool2, nullptr);
-//     EXPECT_EQ(pool1.get(), pool2.get());
-// }
+TEST_F(KVCacheMemoryConnectorTest, getBlockPool_ReturnNull_WhenNotExists) {
+    // Use a size that should not be created by other tests.
+    EXPECT_EQ(connector_->getBlockPool(/*block_size=*/1234567), nullptr);
+}
 
-// TEST_F(KVCacheMemoryConnectorTest, getOrCreateMemoryBlockPool_ReturnDifferentInstances_ForDifferentSizes) {
-//     const size_t block_size_a = 2048;
-//     const size_t block_size_b = 4096;
-//     auto         pool_a       = ensureBlockPool(block_size_a);
-//     auto         pool_b       = ensureBlockPool(block_size_b);
-//     ASSERT_NE(pool_a, nullptr);
-//     ASSERT_NE(pool_b, nullptr);
-//     EXPECT_NE(pool_a.get(), pool_b.get());
-// }
+TEST_F(KVCacheMemoryConnectorTest, createBlockPool_ReturnNonNull_WhenValidBlockSize) {
+    const auto   buf        = allocator_->convertIndexToBuffer(0, 0);
+    const size_t block_size = buf.kv_addr->sizeBytes();
+    auto         pool       = connector_->createBlockPool(block_size);
+    ASSERT_NE(pool, nullptr);
+
+    // `createBlockPool` should register it for later lookup.
+    EXPECT_EQ(connector_->getBlockPool(block_size), pool);
+}
+
+TEST_F(KVCacheMemoryConnectorTest, putToCache_ReturnVoid_WhenCachePutFails_DuplicateKey) {
+    // Prepare a pool and 2 allocated blocks with same block_size.
+    const auto   buf        = allocator_->convertIndexToBuffer(0, 0);
+    const size_t block_size = buf.kv_addr->sizeBytes();
+    auto         pool       = ensureBlockPool(block_size);
+    ASSERT_NE(pool, nullptr);
+
+    auto blocks1 = pool->malloc(1);
+    auto blocks2 = pool->malloc(1);
+    ASSERT_EQ(blocks1.size(), 1u);
+    ASSERT_EQ(blocks2.size(), 1u);
+    const int idx1 = blocks1[0];
+    const int idx2 = blocks2[0];
+
+    MemoryBlockCache::CacheItem item1;
+    item1.cache_key   = 1;
+    item1.block_index = idx1;
+    item1.block_size  = block_size;
+    item1.is_resident = false;
+
+    // First insert success => referenceBlocks called (all_ref increases by 1).
+    connector_->putToCache(item1);
+    EXPECT_EQ(pool->getBlockCacheRefCount(idx1), 2);
+
+    // Mimic request finished: drop request ref so only cache ref remains (all_ref back to 1).
+    pool->requestFree(std::vector<int>{idx1});
+    EXPECT_EQ(pool->getBlockCacheRefCount(idx1), 1);
+
+    // Duplicate cache_key should make MemoryBlockCache::put return false, and putToCache should do nothing for idx2.
+    MemoryBlockCache::CacheItem item_dup = item1;
+    item_dup.block_index                 = idx2;
+    connector_->putToCache(item_dup);
+    EXPECT_EQ(pool->getBlockCacheRefCount(idx2), 1);  // unchanged (only request ref from malloc)
+
+    // Cleanup request refs for idx2 to avoid leaking state.
+    pool->requestFree(std::vector<int>{idx2});
+}
+
+TEST_F(KVCacheMemoryConnectorTest, putToCache_ReturnVoid_WhenCacheFull_EvictsAndFreesPoppedBlock) {
+    // Force cache capacity to 1 so we can test eviction.
+    connector_->block_cache_->lru_cache_ = LRUCache<int64_t, MemoryBlockCache::CacheItem>(1);
+
+    const auto   buf        = allocator_->convertIndexToBuffer(0, 0);
+    const size_t block_size = buf.kv_addr->sizeBytes();
+    auto         pool       = ensureBlockPool(block_size);
+    ASSERT_NE(pool, nullptr);
+
+    auto blocks1 = pool->malloc(1);
+    auto blocks2 = pool->malloc(1);
+    ASSERT_EQ(blocks1.size(), 1u);
+    ASSERT_EQ(blocks2.size(), 1u);
+    const int idx1 = blocks1[0];
+    const int idx2 = blocks2[0];
+
+    const auto free_before = pool->freeBlocksNum();
+
+    MemoryBlockCache::CacheItem item1;
+    item1.cache_key   = 100;
+    item1.block_index = idx1;
+    item1.block_size  = block_size;
+    item1.is_resident = false;
+    connector_->putToCache(item1);
+    EXPECT_EQ(pool->getBlockCacheRefCount(idx1), 2);
+
+    // Drop request ref, keep cache ref only.
+    pool->requestFree(std::vector<int>{idx1});
+    EXPECT_EQ(pool->getBlockCacheRefCount(idx1), 1);
+    const auto free_mid = pool->freeBlocksNum();
+    EXPECT_EQ(free_mid, free_before);
+
+    MemoryBlockCache::CacheItem item2;
+    item2.cache_key   = 101;
+    item2.block_index = idx2;
+    item2.block_size  = block_size;
+    item2.is_resident = false;
+    connector_->putToCache(item2);  // should evict item1 and free idx1 via cache_free path
+
+    EXPECT_FALSE(connector_->block_cache_->contains(100));
+    EXPECT_TRUE(connector_->block_cache_->contains(101));
+
+    // idx1 should become free again after eviction (request ref already dropped).
+    EXPECT_EQ(pool->getBlockCacheRefCount(idx1), 0);
+    EXPECT_EQ(pool->freeBlocksNum(), free_mid + 1);
+
+    // Cleanup request ref for idx2 (keep cache ref).
+    pool->requestFree(std::vector<int>{idx2});
+}
+
+TEST_F(KVCacheMemoryConnectorTest, clearCache_ReturnVoid_WhenBlockCacheNull) {
+    connector_->block_cache_.reset();
+    ASSERT_NO_FATAL_FAILURE(connector_->clearCache());
+}
+
+TEST_F(KVCacheMemoryConnectorTest, clearCache_ReturnVoid_WhenBlockPoolMissingAndFreeBlocksFailed) {
+    // Put one item into block_cache_ with a block_size that does not have a corresponding pool.
+    const int64_t bad_block_size  = 1234567;
+    const int     bad_block_index = 1;
+
+    MemoryBlockCache::CacheItem item;
+    item.cache_key   = 99001;
+    item.block_index = bad_block_index;
+    item.block_size  = bad_block_size;
+    item.is_resident = false;
+    ASSERT_TRUE(connector_->block_cache_->put(item).first);
+    ASSERT_TRUE(connector_->block_cache_->contains(item.cache_key));
+
+    connector_->clearCache();
+    EXPECT_FALSE(connector_->block_cache_->contains(item.cache_key));
+    EXPECT_TRUE(connector_->block_cache_->empty());
+}
 
 TEST_F(KVCacheMemoryConnectorTest, ensureEnoughFreeBlocks_ReturnTrue_WhenEnoughFree) {
     const size_t block_size = 4096;
@@ -1981,6 +2584,146 @@ TEST_F(KVCacheMemoryConnectorTest, ensureEnoughFreeBlocks_ReturnTrue_FreeBlocksF
     EXPECT_TRUE(ok);
     EXPECT_EQ(pool->freeBlocksNum(), free_num - 2);
     EXPECT_EQ(connector_->block_cache_->size(), 2);
+}
+
+TEST_F(KVCacheMemoryConnectorTest, waitContextDoneAsync_ReturnFalse_WhenThreadPoolNull) {
+    connector_->wait_done_thread_pool_.reset();
+
+    bool callback_called = false;
+    auto ctx             = std::make_shared<rtp_llm::MemoryConnectorAsyncContext>(
+        /*broadcast_result=*/nullptr, /*done_callback=*/[&](bool) { callback_called = true; });
+    ASSERT_FALSE(ctx->done());
+
+    EXPECT_FALSE(connector_->waitContextDoneAsync(ctx));
+    // Should not execute callback since no thread pool.
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    EXPECT_FALSE(callback_called);
+    EXPECT_FALSE(ctx->done());
+}
+
+TEST_F(KVCacheMemoryConnectorTest, waitContextDoneAsync_ReturnFalse_WhenPushTaskFails) {
+    // Stop thread pool so pushTask is expected to fail.
+    ASSERT_NE(connector_->wait_done_thread_pool_, nullptr);
+    connector_->wait_done_thread_pool_->stop();
+
+    bool callback_called = false;
+    auto ctx             = std::make_shared<rtp_llm::MemoryConnectorAsyncContext>(
+        /*broadcast_result=*/nullptr, /*done_callback=*/[&](bool) { callback_called = true; });
+    ASSERT_FALSE(ctx->done());
+
+    EXPECT_FALSE(connector_->waitContextDoneAsync(ctx));
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    EXPECT_FALSE(callback_called);
+    EXPECT_FALSE(ctx->done());
+
+    // Re-create a thread pool for remaining tests in this process.
+    connector_->wait_done_thread_pool_ = std::make_shared<autil::LockFreeThreadPool>(8, 1000, nullptr, "WaitDoneTP");
+    ASSERT_TRUE(connector_->wait_done_thread_pool_->start());
+}
+
+TEST_F(KVCacheMemoryConnectorTest, waitContextDoneAsync_ReturnTrue_WhenPushTaskSucceeds) {
+    ASSERT_NE(connector_->wait_done_thread_pool_, nullptr);
+
+    std::atomic<bool> callback_called{false};
+    auto              ctx = std::make_shared<rtp_llm::MemoryConnectorAsyncContext>(
+        /*broadcast_result=*/nullptr, /*done_callback=*/[&](bool) { callback_called.store(true); });
+    ASSERT_FALSE(ctx->done());
+
+    EXPECT_TRUE(connector_->waitContextDoneAsync(ctx));
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (std::chrono::steady_clock::now() < deadline && !ctx->done()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_TRUE(ctx->done());
+    EXPECT_TRUE(callback_called.load());
+}
+
+TEST_F(KVCacheMemoryConnectorTest, isThreadPoolFull_ReturnTrue_WhenThreadPoolNull) {
+    connector_->wait_done_thread_pool_.reset();
+    EXPECT_TRUE(connector_->isThreadPoolFull());
+}
+
+TEST_F(KVCacheMemoryConnectorTest, isThreadPoolFull_ReturnFalse_WhenThreadPoolNotFull) {
+    ASSERT_NE(connector_->wait_done_thread_pool_, nullptr);
+    EXPECT_FALSE(connector_->isThreadPoolFull());
+}
+
+TEST_F(KVCacheMemoryConnectorTest, isThreadPoolFull_ReturnTrue_WhenThreadPoolFull) {
+    // Use a tiny thread pool and block its single worker, then fill the queue.
+    connector_->wait_done_thread_pool_.reset();
+    connector_->wait_done_thread_pool_ = std::make_shared<autil::LockFreeThreadPool>(/*thread_num=*/1,
+                                                                                     /*queue_size=*/1,
+                                                                                     /*thread_init_func=*/nullptr,
+                                                                                     /*name=*/"IsFullTP");
+    ASSERT_TRUE(connector_->wait_done_thread_pool_->start());
+
+    std::atomic<bool> block_worker{true};
+    std::atomic<bool> first_task_started{false};
+
+    // Occupy the only worker thread.
+    ASSERT_EQ(connector_->wait_done_thread_pool_->pushTask([&]() {
+        first_task_started.store(true);
+        while (block_worker.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }),
+              autil::ThreadPoolBase::ERROR_NONE);
+
+    // Wait until the worker actually starts executing the first task.
+    const auto started_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (std::chrono::steady_clock::now() < started_deadline && !first_task_started.load()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_TRUE(first_task_started.load());
+
+    // Fill the queue with a second blocking task.
+    (void)connector_->wait_done_thread_pool_->pushTask([&]() {
+        while (block_worker.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    });
+
+    // Eventually the pool should be full (queue_size=1, worker busy).
+    const auto full_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (std::chrono::steady_clock::now() < full_deadline && !connector_->isThreadPoolFull()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_TRUE(connector_->isThreadPoolFull());
+
+    // Unblock and stop to avoid leaking threads.
+    block_worker.store(false);
+    connector_->wait_done_thread_pool_->stop();
+    connector_->wait_done_thread_pool_.reset();
+}
+
+TEST_F(KVCacheMemoryConnectorTest, clearCache_ReturnKeepReferencedItems_WhenRefCountGT1) {
+    const int  layer0        = 0;
+    const int  gpu_block_idx = 0;
+    const auto buf           = allocator_->convertIndexToBuffer(layer0, gpu_block_idx);
+    ASSERT_NE(buf.kv_addr, nullptr);
+    const size_t block_size = buf.kv_addr->sizeBytes();
+
+    std::vector<int64_t> keys{90001, 90002};
+    auto                 block_indices = putItemsToCache(keys, block_size);
+    ASSERT_EQ(block_indices.size(), 2u);
+    ASSERT_TRUE(connector_->block_cache_->contains(keys[0]));
+    ASSERT_TRUE(connector_->block_cache_->contains(keys[1]));
+
+    auto pool = requireExistingBlockPool(block_size);
+    ASSERT_NE(pool, nullptr);
+
+    // Make first block ref count > 1 so clearCache() should keep it.
+    pool->blockCacheReference({block_indices[0]});
+    ASSERT_GT(pool->getBlockCacheRefCount(block_indices[0]), 1);
+
+    const auto free_before = pool->freeBlocksNum();
+    connector_->clearCache();
+
+    EXPECT_TRUE(connector_->block_cache_->contains(keys[0]));
+    EXPECT_FALSE(connector_->block_cache_->contains(keys[1]));
+    // One block should have been freed back.
+    EXPECT_EQ(pool->freeBlocksNum(), free_before + 1);
 }
 
 }  // namespace rtp_llm::test
