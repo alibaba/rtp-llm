@@ -1,6 +1,7 @@
 from __future__ import annotations
+import torch
 import typing
-__all__: list[str] = ['ActivationType', 'ArpcConfig', 'AttentionConfigs', 'BatchDecodeSchedulerConfig', 'CacheStoreConfig', 'ConcurrencyConfig', 'DataType', 'DeviceResourceConfig', 'EPLBConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'FfnDisAggregateConfig', 'GrpcConfig', 'HWKernelConfig', 'KVCacheConfig', 'KvCacheDataType', 'LayerNormType', 'MMModelConfig', 'MiscellaneousConfig', 'MlaOpsType', 'ModelConfig', 'ModelSpecificConfig', 'MoeConfig', 'NormType', 'PDSepConfig', 'ParallelismConfig', 'ProfilingDebugLoggingConfig', 'QuantAlgo', 'QuantMethod', 'RoleSpecialTokens', 'RoleType', 'RopeConfig', 'RopeStyle', 'RuntimeConfig', 'SamplerConfig', 'SpecialTokens', 'SpeculativeExecutionConfig', 'SpeculativeType', 'TaskType', 'VitConfig', 'VitSeparation', 'get_block_cache_keys']
+__all__: list[str] = ['ActivationType', 'ArpcConfig', 'AttentionConfigs', 'BatchDecodeSchedulerConfig', 'CacheStoreConfig', 'ConcurrencyConfig', 'DataType', 'DeviceResourceConfig', 'EPLBConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'FfnDisAggregateConfig', 'GrpcConfig', 'HWKernelConfig', 'HybridAttentionConfig', 'HybridAttentionType', 'KVCacheConfig', 'KvCacheDataType', 'LayerNormType', 'LinearAttentionConfig', 'MMModelConfig', 'MiscellaneousConfig', 'MlaOpsType', 'ModelConfig', 'ModelSpecificConfig', 'MoeConfig', 'NormType', 'PDSepConfig', 'ParallelismConfig', 'ProfilingDebugLoggingConfig', 'QuantAlgo', 'QuantMethod', 'RoleSpecialTokens', 'RoleType', 'RopeConfig', 'RopeStyle', 'RuntimeConfig', 'SamplerConfig', 'SpecialTokens', 'SpeculativeExecutionConfig', 'SpeculativeType', 'TaskType', 'VitConfig', 'VitSeparation', 'get_block_cache_keys']
 class ActivationType:
     """
     Members:
@@ -75,6 +76,7 @@ class ArpcConfig:
     def to_string(self) -> str:
         ...
 class AttentionConfigs:
+    dtype: torch.dtype
     fuse_qkv_add_bias: bool
     head_num: int
     is_causal: bool
@@ -379,6 +381,10 @@ class FMHAType:
       AITER_DECODE
     
       AITER_ASM_DECODE
+    
+      PY_FLASHINFER_PREFILL
+    
+      PY_FLASHINFER_DECODE
     """
     AITER_ASM_DECODE: typing.ClassVar[FMHAType]  # value = <FMHAType.AITER_ASM_DECODE: 11>
     AITER_ASM_PREFILL: typing.ClassVar[FMHAType]  # value = <FMHAType.AITER_ASM_PREFILL: 9>
@@ -389,10 +395,12 @@ class FMHAType:
     OPEN_SOURCE: typing.ClassVar[FMHAType]  # value = <FMHAType.OPEN_SOURCE: 2>
     PAGED_OPEN_SOURCE: typing.ClassVar[FMHAType]  # value = <FMHAType.PAGED_OPEN_SOURCE: 3>
     PAGED_TRT_V2: typing.ClassVar[FMHAType]  # value = <FMHAType.PAGED_TRT_V2: 4>
+    PY_FLASHINFER_DECODE: typing.ClassVar[FMHAType]  # value = <FMHAType.PY_FLASHINFER_DECODE: 13>
+    PY_FLASHINFER_PREFILL: typing.ClassVar[FMHAType]  # value = <FMHAType.PY_FLASHINFER_PREFILL: 12>
     TRT_V1: typing.ClassVar[FMHAType]  # value = <FMHAType.TRT_V1: 5>
     TRT_V2: typing.ClassVar[FMHAType]  # value = <FMHAType.TRT_V2: 6>
     XQA: typing.ClassVar[FMHAType]  # value = <FMHAType.XQA: 7>
-    __members__: typing.ClassVar[dict[str, FMHAType]]  # value = {'FLASH_INFER': <FMHAType.FLASH_INFER: 0>, 'NONE': <FMHAType.NONE: 1>, 'OPEN_SOURCE': <FMHAType.OPEN_SOURCE: 2>, 'PAGED_OPEN_SOURCE': <FMHAType.PAGED_OPEN_SOURCE: 3>, 'PAGED_TRT_V2': <FMHAType.PAGED_TRT_V2: 4>, 'TRT_V1': <FMHAType.TRT_V1: 5>, 'TRT_V2': <FMHAType.TRT_V2: 6>, 'XQA': <FMHAType.XQA: 7>, 'AITER_PREFILL': <FMHAType.AITER_PREFILL: 8>, 'AITER_ASM_PREFILL': <FMHAType.AITER_ASM_PREFILL: 9>, 'AITER_DECODE': <FMHAType.AITER_DECODE: 10>, 'AITER_ASM_DECODE': <FMHAType.AITER_ASM_DECODE: 11>}
+    __members__: typing.ClassVar[dict[str, FMHAType]]  # value = {'FLASH_INFER': <FMHAType.FLASH_INFER: 0>, 'NONE': <FMHAType.NONE: 1>, 'OPEN_SOURCE': <FMHAType.OPEN_SOURCE: 2>, 'PAGED_OPEN_SOURCE': <FMHAType.PAGED_OPEN_SOURCE: 3>, 'PAGED_TRT_V2': <FMHAType.PAGED_TRT_V2: 4>, 'TRT_V1': <FMHAType.TRT_V1: 5>, 'TRT_V2': <FMHAType.TRT_V2: 6>, 'XQA': <FMHAType.XQA: 7>, 'AITER_PREFILL': <FMHAType.AITER_PREFILL: 8>, 'AITER_ASM_PREFILL': <FMHAType.AITER_ASM_PREFILL: 9>, 'AITER_DECODE': <FMHAType.AITER_DECODE: 10>, 'AITER_ASM_DECODE': <FMHAType.AITER_ASM_DECODE: 11>, 'PY_FLASHINFER_PREFILL': <FMHAType.PY_FLASHINFER_PREFILL: 12>, 'PY_FLASHINFER_DECODE': <FMHAType.PY_FLASHINFER_DECODE: 13>}
     def __eq__(self, other: typing.Any) -> bool:
         ...
     def __getstate__(self) -> int:
@@ -479,6 +487,53 @@ class HWKernelConfig:
     def __setstate__(self, arg0: tuple) -> None:
         ...
     def to_string(self) -> str:
+        ...
+class HybridAttentionConfig:
+    enable_hybrid_attention: bool
+    hybrid_attention_types: list[HybridAttentionType]
+    def __init__(self, enable_hybrid_attention: bool = False, hybrid_attention_types: list[HybridAttentionType] = []) -> None:
+        ...
+    def to_string(self) -> str:
+        ...
+class HybridAttentionType:
+    """
+    Members:
+    
+      NONE
+    
+      LINEAR
+    
+      SLIDING_WINDOW
+    """
+    LINEAR: typing.ClassVar[HybridAttentionType]  # value = <HybridAttentionType.LINEAR: 1>
+    NONE: typing.ClassVar[HybridAttentionType]  # value = <HybridAttentionType.NONE: 0>
+    SLIDING_WINDOW: typing.ClassVar[HybridAttentionType]  # value = <HybridAttentionType.SLIDING_WINDOW: 2>
+    __members__: typing.ClassVar[dict[str, HybridAttentionType]]  # value = {'NONE': <HybridAttentionType.NONE: 0>, 'LINEAR': <HybridAttentionType.LINEAR: 1>, 'SLIDING_WINDOW': <HybridAttentionType.SLIDING_WINDOW: 2>}
+    def __eq__(self, other: typing.Any) -> bool:
+        ...
+    def __getstate__(self) -> int:
+        ...
+    def __hash__(self) -> int:
+        ...
+    def __index__(self) -> int:
+        ...
+    def __init__(self, value: int) -> None:
+        ...
+    def __int__(self) -> int:
+        ...
+    def __ne__(self, other: typing.Any) -> bool:
+        ...
+    def __repr__(self) -> str:
+        ...
+    def __setstate__(self, state: int) -> None:
+        ...
+    def __str__(self) -> str:
+        ...
+    @property
+    def name(self) -> str:
+        ...
+    @property
+    def value(self) -> int:
         ...
 class KVCacheConfig:
     enable_3fs: bool
@@ -592,6 +647,16 @@ class LayerNormType:
     @property
     def value(self) -> int:
         ...
+class LinearAttentionConfig:
+    linear_conv_kernel_dim: int
+    linear_key_head_dim: int
+    linear_num_key_heads: int
+    linear_num_value_heads: int
+    linear_value_head_dim: int
+    def __init__(self, linear_conv_kernel_dim: int = 0, linear_key_head_dim: int = 0, linear_num_key_heads: int = 0, linear_num_value_heads: int = 0, linear_value_head_dim: int = 0) -> None:
+        ...
+    def to_string(self) -> str:
+        ...
 class MMModelConfig:
     include_sep_tokens: bool
     is_multimodal: bool
@@ -669,9 +734,11 @@ class ModelConfig:
     has_post_decoder_layernorm: bool
     has_pre_decoder_layernorm: bool
     hidden_size: int
+    hybrid_attention_config: HybridAttentionConfig
     input_embedding_scalar: float
     input_vocab_size: int
     layernorm_eps: float
+    linear_attention_config: LinearAttentionConfig
     local_extra_data_path: str
     logit_scale: float
     lora_infos: dict[str, str]
