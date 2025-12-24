@@ -242,13 +242,12 @@ class ModelLoader:
             f"load method: {load_method}, finally choose load method: {load_method}"
         )
 
-        return self._load_from_fastsafetensor(device)
-        # if load_method == LoadMethod.FASTSAFETENSORS:
-        #     return self._load_from_fastsafetensor(device)
-        # elif load_method == LoadMethod.SCRATCH:
-        #     return self._load_from_scratch(device)
-        # else:
-        #     raise ValueError(f"Unknown load method: {load_method}")
+        if load_method == LoadMethod.FASTSAFETENSORS:
+            return self._load_from_fastsafetensor(device)
+        elif load_method == LoadMethod.SCRATCH:
+            return self._load_from_scratch(device)
+        else:
+            raise ValueError(f"Unknown load method: {load_method}")
 
     def _is_memory_enough_for_fastsafetensor(self):
         model_size = self._weights_info.model_config.eval_model_weight_size()

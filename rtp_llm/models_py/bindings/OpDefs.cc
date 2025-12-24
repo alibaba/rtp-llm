@@ -6,7 +6,7 @@ void registerPyOpDefs(pybind11::module& m) {
     pybind11::class_<KVCache>(m, "KVCache")
         .def(pybind11::init<>())
         .def_readwrite("k_cache_base", &KVCache::k_cache_base, "Key cache base tensor")
-        .def_readonly("v_cache_base", &KVCache::v_cache_base, "Value cache base tensor")
+        .def_readwrite("v_cache_base", &KVCache::v_cache_base, "Value cache base tensor")
         .def_readonly("k_scale_base", &KVCache::k_scale_base, "Key cache scale tensor")
         .def_readonly("v_scale_base", &KVCache::v_scale_base, "Value cache scale tensor")
         .def_readonly("seq_size_per_block", &KVCache::seq_size_per_block, "Sequence size per block")

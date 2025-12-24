@@ -78,7 +78,7 @@ class GenericMoeLayer(nn.Module):
         assert (
             self.w1 is not None and self.w2 is not None
         ), "Weights w1 and w2 must be provided"
-        self.num_local_experts = self.w1.shape[0]        
+        self.num_local_experts = self.w1.shape[0]
         self.add_shared_expert = config.moe_style == 2
         if self.add_shared_expert:
             self.shared_expert = FusedSiluActDenseMLP(
@@ -137,7 +137,6 @@ class GenericMoeLayer(nn.Module):
             # Top-K selection using C++ SelectTopkOp
             self.select_topk(router_logits_fp32, topk_ids, topk_weights)
 
-        self.select_topk(router_logits_fp32, topk_ids, topk_weights)
         experts_output = self.fused_moe(
             hidden_states=hidden_states,
             topk_weights=topk_weights,
