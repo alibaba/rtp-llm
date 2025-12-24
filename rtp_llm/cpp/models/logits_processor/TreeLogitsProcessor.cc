@@ -22,15 +22,18 @@ void TreeLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx,
         if (!info.in_tree_mode) {
             continue;
         }
-        const auto& candidate_token_ids     = info.dfa_ptr->getCandidateTokenIds();
-        batch_candidate_token_ids[i]        = candidate_token_ids;
-        const auto& candidate_token_weights = info.dfa_ptr->getCandidateTokenWeights(candidate_token_ids);
-        batch_candidate_token_weights[i]    = candidate_token_weights;
+        const auto& candidate_token_ids = info.dfa_ptr->getCandidateTokenIds();
+        batch_candidate_token_ids[i]    = candidate_token_ids;
         if (candidate_token_ids.size() > 0) {
             need_process = true;
         }
-        if (candidate_token_weights.size() > 0) {
-            need_weight_process = true;
+
+        if (info.dfa_ptr->hasWeightDict()) {
+            const auto& candidate_token_weights = info.dfa_ptr->getCandidateTokenWeights(candidate_token_ids);
+            batch_candidate_token_weights[i]    = candidate_token_weights;
+            if (candidate_token_weights.size() > 0) {
+                need_weight_process = true;
+            }
         }
     }
     // If no beams need processing, return early
