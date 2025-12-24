@@ -82,7 +82,11 @@ class GrpcHostChannelPool:
         try:
             while not self._stopped:
                 await asyncio.sleep(self._cleanup_interval)
-                await self._cleanup_closed()
+                try:
+                    await self._cleanup_closed()
+                except Exception as e:
+                    # Catch all exceptions to prevent loop from stopping
+                    logging.error(f"Error in channel cleanup: {e}", exc_info=True)
         except asyncio.CancelledError:
             logging.info("Channel cleanup loop cancelled")
         finally:
@@ -90,28 +94,42 @@ class GrpcHostChannelPool:
 
     async def _cleanup_closed(self):
         """
-        Find closed channels, remove them from the pool, and close them.
+        Find closed channels (including offline peers), remove them from the pool, and close them.
+        This prevents memory leak when peers go offline and are no longer accessed via get().
         """
-        async with self._lock:
-            to_close: List[GrpcHostChannel] = [_ for _ in self._closed_channels]
-            self._closed_channels.clear()
-            total_channels = len(self._channels)
-            for target, entry in list(self._channels.items()):
-                # Check if channel is closed
-                if self._is_channel_closed(entry):
-                    logging.info(f"Channel {entry.host} is closed, marking for cleanup")
-                    to_close.append(entry)
-                    del self._channels[target]  # remove reference
+        to_close: List[GrpcHostChannel] = []
+        try:
+            async with self._lock:
+                to_close = [_ for _ in self._closed_channels]
+                self._closed_channels.clear()
+                total_channels = len(self._channels)
+                for target, entry in list(self._channels.items()):
+                    try:
+                        # Check if channel is closed
+                        if self._is_channel_closed(entry, try_to_connect=True):
+                            logging.info(
+                                f"Channel {entry.host} is closed/offline, marking for cleanup"
+                            )
+                            to_close.append(entry)
+                            del self._channels[
+                                target
+                            ]  # remove reference to prevent memory leak
+                    except Exception as e:
+                        # Log error but continue checking other channels
+                        logging.warning(f"Error checking channel {entry.host}: {e}")
 
-            remaining_channels = len(self._channels)
-            if to_close:
-                logging.info(
-                    f"Channel cleanup: closing {len(to_close)} closed channels, {remaining_channels} channels remaining (was {total_channels})"
-                )
-            elif total_channels > 0:
-                logging.debug(
-                    f"Channel cleanup: no closed channels found, {total_channels} active channels"
-                )
+                remaining_channels = len(self._channels)
+                if to_close:
+                    logging.info(
+                        f"Channel cleanup: closing {len(to_close)} closed/offline channels, {remaining_channels} channels remaining (was {total_channels})"
+                    )
+                elif total_channels > 0:
+                    logging.debug(
+                        f"Channel cleanup: no closed channels found, {total_channels} active channels"
+                    )
+        except Exception as e:
+            # Log error but don't re-raise to prevent cleanup loop from stopping
+            logging.error(f"Error in _cleanup_closed: {e}", exc_info=True)
 
         # Close outside lock
         closed_count = 0
@@ -133,14 +151,21 @@ class GrpcHostChannelPool:
                 f"Channel cleanup completed: {closed_count} channels closed successfully, {failed_count} failed"
             )
 
-    def _is_channel_closed(self, entry: GrpcHostChannel) -> bool:
+    def _is_channel_closed(
+        self, entry: GrpcHostChannel, try_to_connect: bool = False
+    ) -> bool:
         """
         check if the gRPC channel is closed
         """
         try:
-            state = entry.channel.get_state(try_to_connect=False)
+            state = entry.channel.get_state(try_to_connect=try_to_connect)
             if state == grpc.ChannelConnectivity.SHUTDOWN:
                 logging.info(f"channel for [{entry.host}] is shutdown")
+                return True
+            elif state == grpc.ChannelConnectivity.TRANSIENT_FAILURE:
+                logging.info(
+                    f"channel for [{entry.host}] is in TRANSIENT_FAILURE state (peer is offline/closed)"
+                )
                 return True
             return False
         except Exception as e:
