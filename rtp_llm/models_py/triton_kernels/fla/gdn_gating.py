@@ -15,17 +15,20 @@ def fused_gdn_gating_kernel(
     dt_bias,
     seq_len,
     NUM_HEADS: tl.constexpr,
+    stride_ab: tl.constexpr,  # stride for a and b batch dimension
     beta: tl.constexpr,
     threshold: tl.constexpr,
     BLK_HEADS: tl.constexpr,
 ):
     i_b, i_s, i_d = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     head_off = i_d * BLK_HEADS + tl.arange(0, BLK_HEADS)
+
     off = i_b * seq_len * NUM_HEADS + i_s * NUM_HEADS + head_off
+    ba_off = i_b * seq_len * stride_ab + i_s * stride_ab + head_off
     mask = head_off < NUM_HEADS
     blk_A_log = tl.load(A_log + head_off, mask=mask)
-    blk_a = tl.load(a + off, mask=mask)
-    blk_b = tl.load(b + off, mask=mask)
+    blk_a = tl.load(a + ba_off, mask=mask)
+    blk_b = tl.load(b + ba_off, mask=mask)
     blk_bias = tl.load(dt_bias + head_off, mask=mask)
     # If the model is loaded in fp16, without the .float() here, A might be -inf
     x = blk_a.to(tl.float32) + blk_bias.to(tl.float32)
@@ -57,6 +60,19 @@ def fused_gdn_gating(
     """
     batch, num_heads = a.shape
     seq_len = 1
+
+    # Get strides for a and b to support non-contiguous tensors
+    # Expected shape: [batch, num_heads]
+    stride_ab = a.stride(0)  # batch dimension stride
+    stride_ah = a.stride(1)  # heads dimension stride
+    stride_bb = b.stride(0)
+    stride_bh = b.stride(1)
+
+    assert (
+        stride_ah == 1 and stride_bh == 1
+    ), f"stride_ah must be 1 and stride_bh must be 1"
+    assert stride_ab == stride_bb, f"stride_ab must be equal to stride_bb"
+
     grid = (batch, seq_len, triton.cdiv(num_heads, 8))
     g = torch.empty(1, batch, num_heads, dtype=torch.float32, device=a.device)
     beta_output = torch.empty(1, batch, num_heads, dtype=b.dtype, device=b.device)
@@ -69,6 +85,7 @@ def fused_gdn_gating(
         dt_bias,
         seq_len,
         num_heads,
+        stride_ab,
         beta,
         threshold,
         8,

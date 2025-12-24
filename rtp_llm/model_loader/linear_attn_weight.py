@@ -83,21 +83,20 @@ def split_qkvz_t(
     return t.transpose(0, 1).contiguous()
 
 
-# ba layout: [hidden_size, head_k, 2 + 2]
+# ba layout: [hidden_size, head_v + head_v]
 def split_ba(
     t: torch.Tensor, load_config: LoadConfig, linear_config: LinearAttnConfig
 ) -> torch.Tensor:
-    local_head_num_k = linear_config.linear_num_key_heads // load_config.tp_size
-    start_head_num_k = local_head_num_k * load_config.tp_rank
-    end_head_num_k = start_head_num_k + local_head_num_k
-    ba = (
-        t.view(t.size(0), linear_config.linear_num_key_heads, -1)[
-            :, start_head_num_k:end_head_num_k, :
-        ]
-        .reshape(t.size(0), -1)
-        .contiguous()
-    )
-    return ba
+    pack_head_num = t.shape[1]
+    assert pack_head_num % 2 == 0, "pack_head_num must be even"
+    b, a = torch.split(t, [pack_head_num // 2, pack_head_num // 2], dim=1)
+    b = b.split(b.shape[1] // load_config.tp_size, dim=1)[
+        load_config.tp_rank
+    ].contiguous()
+    a = a.split(a.shape[1] // load_config.tp_size, dim=1)[
+        load_config.tp_rank
+    ].contiguous()
+    return torch.cat([b, a], dim=1)
 
 
 # layout [head_num_v]

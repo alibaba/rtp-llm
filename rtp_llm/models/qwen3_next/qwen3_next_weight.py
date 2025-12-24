@@ -52,6 +52,19 @@ def plus_one(ts: List[torch.Tensor]):
     return ts[0] + 1
 
 
+# origin ba shape: [head_num_k, 2 + 2, hidden_size]
+# dest ba shape: [head_num_k * 2 + head_num_k * 2, hidden_size]
+def reorder_ba(ts: List[torch.Tensor], linear_attention_config: LinearAttentionConfig):
+    t = ts[0]
+    hidden_size = t.shape[-1]
+    head_num_k = linear_attention_config.linear_num_key_heads
+    head_num_v = linear_attention_config.linear_num_value_heads
+    group_v = head_num_v // head_num_k
+    t = t.reshape(head_num_k, group_v * 2, t.shape[-1])
+    b, a = t.split([group_v, group_v], dim=1)
+    return torch.cat([b.reshape(-1, hidden_size), a.reshape(-1, hidden_size)], dim=0)
+
+
 # origin qkvz shape: [token, head_num_k, dim_q, dim_k, dim_v * group_v, dim_v * group_v]
 # dest qkvz shape: [token, head_num_k * dim_q, head_num_k * dim_k, head_k * group_v * dim_v, head_k * group_v * dim_v]
 def reorder_qkvz(
@@ -299,7 +312,11 @@ class Qwen3NextWeight(ModelDeployWeightInfo):
                 W.linear_attn_ba_w,
                 [
                     CkptWeightInfo(
-                        "model.layers.{i}.linear_attn.in_proj_ba.weight", identity
+                        "model.layers.{i}.linear_attn.in_proj_ba.weight",
+                        functools.partial(
+                            reorder_ba,
+                            linear_attention_config=self.model_config.linear_attention_config,
+                        ),
                     )
                 ],
                 transpose,
