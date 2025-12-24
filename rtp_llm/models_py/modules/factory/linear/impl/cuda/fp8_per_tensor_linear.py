@@ -36,6 +36,7 @@ class CudaFp8PerTensorLinear(LinearBase):
         return quant_method in [
             "FP8_PER_TENSOR_COMPRESSED",
             "FP8_DYNAMIC_PER_TENSOR",
+            "FP8",
         ]
 
     def __init__(
@@ -47,8 +48,9 @@ class CudaFp8PerTensorLinear(LinearBase):
         quant_config: object = None,
         weight_scale_2: Optional[torch.Tensor] = None,
     ):
-        super().__init__(weight, weight_scales, input_scales,
-                         bias, quant_config, weight_scale_2)
+        super().__init__(
+            weight, weight_scales, input_scales, bias, quant_config, weight_scale_2
+        )
         self.weight = weight.T
         self.weight_scale = weight_scales
         self.input_scale = input_scales
