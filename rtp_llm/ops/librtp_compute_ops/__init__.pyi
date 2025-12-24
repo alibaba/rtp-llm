@@ -252,6 +252,8 @@ class ParamsBase:
 
 class PyAttentionInputs:
     cache_store_inputs: PyCacheStoreInputs | None
+    context_total_kv_length: int
+    cu_kv_seqlens: torch.Tensor
     cu_seqlens: torch.Tensor
     dtype: TypeMeta
     input_lengths: torch.Tensor
@@ -262,7 +264,7 @@ class PyAttentionInputs:
     padding_offset: torch.Tensor
     prefix_lengths: torch.Tensor
     sequence_lengths: torch.Tensor
-
+    total_tokens: int
     def __init__(self) -> None:
         ...
 

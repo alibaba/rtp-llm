@@ -25,6 +25,7 @@ public:
         py_model_inputs_.attention_inputs.prefix_lengths           = inputs.attention_inputs.prefix_lengths;
         py_model_inputs_.input_ids                                 = inputs.input_ids;
         py_model_inputs_.attention_inputs.cu_seqlens               = inputs.attention_inputs.cu_seqlens;
+        py_model_inputs_.attention_inputs.cu_kv_seqlens            = inputs.attention_inputs.cu_kv_seqlens;
         py_model_inputs_.attention_inputs.padding_offset           = inputs.attention_inputs.padding_offset;
         py_model_inputs_.attention_inputs.is_prefill               = is_embedding;
         py_model_inputs_.attention_inputs.dtype                    = inputs.attention_inputs.dtype;
