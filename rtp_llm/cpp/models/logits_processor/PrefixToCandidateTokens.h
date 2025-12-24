@@ -64,6 +64,9 @@ public:
     int32_t endTokenId() {
         return config.end_token_id;
     }
+    std::string getSep() {
+        return config.sep;
+    }
     std::string generateNextKey(std::string old_key, int next) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!old_key.empty()) {
