@@ -475,6 +475,7 @@ struct GemmParams {
     QScheme qscheme = QScheme::NoQuantize;
 
     void     check() const;
+    void     check_mk_nk_style() const;
     GemmType dispatch() const;
 };
 

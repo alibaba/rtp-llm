@@ -346,10 +346,14 @@ void CudaDevice::InvokeDeepGemm(const GemmParams& params, CudaGemmArguments argu
 ///          B [b, ..., k, n]
 ///          C [b, ..., m, n]
 BufferPtr CudaDevice::gemm(const GemmParams& params) {
-    params.check();
-    CudaGemmArguments arguments(params);
-
     auto is_fp8_blockwise_gemm = (params.qscheme == QScheme::Qfp8PerTokenBlock);
+    if (!is_fp8_blockwise_gemm) {
+        params.check();
+    } else {
+        // currently only deepgemm do w8a8 check
+        params.check_mk_nk_style();
+    }
+    CudaGemmArguments arguments(params);
 
     BufferPtr output;
     if (!is_fp8_blockwise_gemm) {

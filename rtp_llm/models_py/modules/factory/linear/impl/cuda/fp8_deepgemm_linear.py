@@ -53,8 +53,9 @@ class CudaFp8DeepGEMMLinear(LinearBase):
         quant_config: object = None,
         weight_scale_2: Optional[torch.Tensor] = None,
     ):
-        super().__init__(weight, weight_scales, input_scales,
-                         bias, quant_config, weight_scale_2)
+        super().__init__(
+            weight, weight_scales, input_scales, bias, quant_config, weight_scale_2
+        )
         # Initialize parameters
         self.weight = weight
         self.weight_scales = weight_scales
@@ -72,10 +73,8 @@ class CudaFp8DeepGEMMLinear(LinearBase):
             logger.error(error_msg)
             raise ValueError(error_msg)
         # Reshape weight and weight scale
-        self.K, self.N = self.weight.shape
-        self.scale_K, self.scale_N = self.weight_scales.shape
-        self.weight = self.weight.reshape(self.N, self.K)
-        self.weight_scales = self.weight_scales.reshape(self.scale_N, self.scale_K)
+        self.N, self.K = self.weight.shape
+        self.scale_N, self.scale_K = self.weight_scales.shape
         # Check weight scale sizes
         if (self.N + 127) // 128 != self.scale_N or (
             self.K + 127

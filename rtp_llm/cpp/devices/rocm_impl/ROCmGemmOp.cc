@@ -152,9 +152,9 @@ struct ROCmGemmArguments {
         compute_type = (params.compute_type == DataType::TYPE_INVALID) ? DataType::TYPE_FP32 : params.compute_type;
         if (params.D) {
             DDtype = params.D->type();
-        } else if (params.A.type() == DataType::TYPE_INT8 || params.A.type() == DataType::TYPE_QINT8){
+        } else if (params.A.type() == DataType::TYPE_INT8 || params.A.type() == DataType::TYPE_QINT8) {
             DDtype = DataType::TYPE_FP16;
-        } else if (params.D_type){
+        } else if (params.D_type) {
             DDtype = params.D_type;
         } else {
             DDtype = params.compute_type == DataType::TYPE_INVALID ? ADtype : compute_type;
@@ -176,9 +176,9 @@ struct ROCmGemmArguments {
         stride_b = k * n;
         ldc      = n;
         stride_c = m * n;
-        
+
         alpha = params.alpha;
-        beta = params.beta;
+        beta  = params.beta;
     }
 
     void dump() {
@@ -211,7 +211,7 @@ void ROCmDevice::InvokeROCmDeepGemm(const GemmParams& params, BufferPtr output) 
 
     const size_t m = params.A.shape()[0];
     const size_t k = params.A.shape()[1];
-    const size_t n = W_kernel->shape()[1];
+    const size_t n = W_kernel->shape()[0];
 
     QBufferPtr q_hidden = std::dynamic_pointer_cast<QBuffer>(
         quantize(QuantizeParams(params.A, DataType::TYPE_QFP8_E4M3, 1, QScheme::Qfp8PerTokenBlock, 128, 0)));
@@ -221,9 +221,6 @@ void ROCmDevice::InvokeROCmDeepGemm(const GemmParams& params, BufferPtr output) 
 
     torch::Tensor W_kernel_tensor = Buffer2torchTensor(W_kernel, false);
     torch::Tensor W_scale_tensor  = Buffer2torchTensor(W_scales, false);
-
-    W_kernel_tensor = W_kernel_tensor.view({(int)W_kernel->shape()[1], (int)W_kernel->shape()[0]});
-    W_scale_tensor  = W_scale_tensor.view({(int)W_scales->shape()[1], (int)W_scales->shape()[0]});
 
     torch::Tensor output_tensor = Buffer2torchTensor(output, false);
 
@@ -242,8 +239,8 @@ void ROCmDevice::InvokeROCmPTPCGemm(const GemmParams& params, BufferPtr output) 
     const size_t k = params.A.shape()[1];
     const size_t n = W_kernel->shape()[1];
 
-    BufferPtr  A_quant_buffer;
-    BufferPtr  A_scales;
+    BufferPtr A_quant_buffer;
+    BufferPtr A_scales;
     if (params.A.isQBuffer()) {
         RTP_LLM_LOG_DEBUG("aiter ptpc gemm: A is already QBuffer, skip quantize.");
         A_quant_buffer = reinterpret_cast<const QBuffer&>(params.A).kernelPtr();
@@ -254,7 +251,6 @@ void ROCmDevice::InvokeROCmPTPCGemm(const GemmParams& params, BufferPtr output) 
         A_quant_buffer = q_hidden->kernelPtr();
         A_scales       = q_hidden->scalesPtr();
     }
-
 
     torch::Tensor A_quant_tensor       = Buffer2torchTensor(A_quant_buffer, false);
     torch::Tensor A_quant_scale_tensor = Buffer2torchTensor(A_scales, false);
@@ -274,8 +270,8 @@ void ROCmDevice::InvokeROCmPTPCGemm(const GemmParams& params, BufferPtr output) 
 void ROCmDevice::HipblasltPTPCGemm(const GemmParams& params, BufferPtr output) {
     RTP_LLM_LOG_DEBUG("use hipBLASLt ptpc gemm.");
     ROCmGemmArguments arguments(params);
-    BufferPtr  A_quant_buffer;
-    BufferPtr  A_scales;
+    BufferPtr         A_quant_buffer;
+    BufferPtr         A_scales;
     if (params.A.isQBuffer()) {
         RTP_LLM_LOG_DEBUG("hipBLASLt ptpc gemm: A is already QBuffer, skip quantize.");
         A_quant_buffer = reinterpret_cast<const QBuffer&>(params.A).kernelPtr();
@@ -290,30 +286,47 @@ void ROCmDevice::HipblasltPTPCGemm(const GemmParams& params, BufferPtr output) {
     BufferPtr W_kernel = reinterpret_cast<const QBuffer&>(params.B).kernelPtr();
     BufferPtr W_scales = reinterpret_cast<const QBuffer&>(params.B).scalesPtr();
 
-    auto A    = A_quant_buffer->data();
-    auto B    = W_kernel->data();
-    auto D    = output->data();
-    auto a_op = opConvert(params.transA);
-    auto b_op = opConvert(params.transB);
+    auto A        = A_quant_buffer->data();
+    auto B        = W_kernel->data();
+    auto D        = output->data();
+    auto a_op     = opConvert(params.transA);
+    auto b_op     = opConvert(params.transB);
     bool has_bias = (params.C != std::nullopt && params.C->get().data() != nullptr);
     auto epilogue = epilogueConvert(params.activationType, has_bias);
-    RTP_LLM_CHECK_WITH_INFO(epilogue == HIPBLASLT_EPILOGUE_BIAS || epilogue == HIPBLASLT_EPILOGUE_DEFAULT, 
-        "epilogue should be HIPBLASLT_EPILOGUE_BIAS or HIPBLASLT_EPILOGUE_DEFAULT in HipblasltPTPCGemm, but got %d", epilogue);
-    
-    hipblas_mm_wrapper_->setStream(current_stream_);
-    hipblas_mm_wrapper_->setGemmConfig(dtypeConvert(A_quant_buffer->type()), dtypeConvert(W_kernel->type()), 
-                                       dtypeConvert(output->type()), dtypeConvert(arguments.compute_type));
+    RTP_LLM_CHECK_WITH_INFO(
+        epilogue == HIPBLASLT_EPILOGUE_BIAS || epilogue == HIPBLASLT_EPILOGUE_DEFAULT,
+        "epilogue should be HIPBLASLT_EPILOGUE_BIAS or HIPBLASLT_EPILOGUE_DEFAULT in HipblasltPTPCGemm, but got %d",
+        epilogue);
 
-    hipblas_mm_wrapper_->FP8_Gemm(b_op, a_op, arguments.n, arguments.m, arguments.k, B, arguments.ldb, 
-                            A, arguments.lda, D, arguments.ldc, reinterpret_cast<const float*>(W_scales->data()),
-                            reinterpret_cast<const float*>(A_scales->data()), has_bias ? params.C->get().data() : nullptr, 
-                            epilogue, arguments.alpha, arguments.beta);
+    hipblas_mm_wrapper_->setStream(current_stream_);
+    hipblas_mm_wrapper_->setGemmConfig(dtypeConvert(A_quant_buffer->type()),
+                                       dtypeConvert(W_kernel->type()),
+                                       dtypeConvert(output->type()),
+                                       dtypeConvert(arguments.compute_type));
+
+    hipblas_mm_wrapper_->FP8_Gemm(b_op,
+                                  a_op,
+                                  arguments.n,
+                                  arguments.m,
+                                  arguments.k,
+                                  B,
+                                  arguments.ldb,
+                                  A,
+                                  arguments.lda,
+                                  D,
+                                  arguments.ldc,
+                                  reinterpret_cast<const float*>(W_scales->data()),
+                                  reinterpret_cast<const float*>(A_scales->data()),
+                                  has_bias ? params.C->get().data() : nullptr,
+                                  epilogue,
+                                  arguments.alpha,
+                                  arguments.beta);
 }
 
-void ROCmDevice::InvokeROCmDeepGemmWi8Ai8(const GemmParams& params,
-                                          BufferPtr         output){
+void ROCmDevice::InvokeROCmDeepGemmWi8Ai8(const GemmParams& params, BufferPtr output) {
     RTP_LLM_LOG_DEBUG("use rocm deep gemm.");
-    RTP_LLM_CHECK_WITH_INFO(params.activationType == ActivationType::Identity, "rocm deep gemm activation type should be identity");
+    RTP_LLM_CHECK_WITH_INFO(params.activationType == ActivationType::Identity,
+                            "rocm deep gemm activation type should be identity");
     BufferPtr A_kernel = reinterpret_cast<const QBuffer&>(params.A).kernelPtr();
     BufferPtr A_scales = reinterpret_cast<const QBuffer&>(params.A).scalesPtr();
     BufferPtr W_kernel = reinterpret_cast<const QBuffer&>(params.B).kernelPtr();
@@ -324,13 +337,13 @@ void ROCmDevice::InvokeROCmDeepGemmWi8Ai8(const GemmParams& params,
     const int n = W_kernel->shape()[1];
 
     torch::Tensor A_kernel_tensor = Buffer2torchTensor(A_kernel, false);
-    torch::Tensor A_scale_tensor = Buffer2torchTensor(A_scales, false);
+    torch::Tensor A_scale_tensor  = Buffer2torchTensor(A_scales, false);
     torch::Tensor W_kernel_tensor = Buffer2torchTensor(W_kernel, false);
-    torch::Tensor W_scale_tensor = Buffer2torchTensor(W_scales, false);
+    torch::Tensor W_scale_tensor  = Buffer2torchTensor(W_scales, false);
 
     // view from [k,n] to [n,k]
-    W_kernel_tensor = W_kernel_tensor.view({(int)W_kernel->shape()[1],(int)W_kernel->shape()[0]}); 
-    W_scale_tensor = W_scale_tensor.view({n, 1});
+    W_kernel_tensor = W_kernel_tensor.view({(int)W_kernel->shape()[1], (int)W_kernel->shape()[0]});
+    W_scale_tensor  = W_scale_tensor.view({n, 1});
 
     torch::Tensor output_tensor;
 
@@ -342,10 +355,10 @@ void ROCmDevice::InvokeROCmDeepGemmWi8Ai8(const GemmParams& params,
     // bias process
     std::optional<torch::Tensor> bias_opt = std::nullopt;
     if (params.C != std::nullopt) {
-        const Buffer& bias_buf = params.C->get();
+        const Buffer& bias_buf    = params.C->get();
         torch::Tensor bias_tensor = Buffer2torchTensor(const_cast<Buffer&>(bias_buf), false).contiguous();
-        bias_tensor = bias_tensor.view({n});
-        bias_opt = bias_tensor;
+        bias_tensor               = bias_tensor.view({n});
+        bias_opt                  = bias_tensor;
     }
     int splitK = 0;
     gemm_a8w8(A_kernel_tensor, W_kernel_tensor, A_scale_tensor, W_scale_tensor, output_tensor, bias_opt, splitK);
@@ -357,18 +370,24 @@ void ROCmDevice::InvokeROCmDeepGemmWi8Ai8(const GemmParams& params,
 ///          B [b, ..., k, n]
 ///          C [b, ..., m, n]
 BufferPtr ROCmDevice::gemm(const GemmParams& params) {
-    params.check();
+    auto use_deepgemm = params.qscheme == QScheme::Qfp8PerTokenBlock;
+    if (!use_deepgemm) {
+        params.check();
+    } else {
+        // currently only deepgemm do mk_nk check
+        params.check_mk_nk_style();
+    }
 
     using GemmImplementType = ROCmGemmDispatch::GemmImplementType;
     ROCmGemmArguments arguments(params);
-    BufferPtr output;
+    BufferPtr         output;
     if (params.D) {
         output = params.D;
         RUNTIME_ASSERT_OP_ARG((arguments.DDtype == params.D->type()) && (arguments.Dshape == params.D->shape()),
                               "Gemm output D shape and dtype mismatch: expected [%d][%s] but got [%s]",
                               arguments.DDtype,
                               autil::StringUtil::toString(arguments.Dshape).c_str(),
-                              params.D->debugString().c_str());                         
+                              params.D->debugString().c_str());
     } else {
         output = allocateBuffer({arguments.DDtype, arguments.Dshape, AllocationType::DEVICE}, {"gemm_output"});
     }
@@ -467,10 +486,9 @@ BufferPtr ROCmDevice::gemm(const GemmParams& params) {
             if (kernel_K == scale_K * 128) {
                 InvokeROCmDeepGemm(params, output);
             } else if ((1 == scale_K && scale_N == kernel_N) || (1 == scale_N && scale_K == kernel_K)) {
-                if (hipblas_mm_wrapper_->use_swizzleA() || hipblas_mm_wrapper_->test_swizzleA()){
+                if (hipblas_mm_wrapper_->use_swizzleA() || hipblas_mm_wrapper_->test_swizzleA()) {
                     HipblasltPTPCGemm(params, output);
-                }
-                else {
+                } else {
                     InvokeROCmPTPCGemm(params, output);
                 }
             } else {
@@ -488,7 +506,7 @@ BufferPtr ROCmDevice::gemm(const GemmParams& params) {
     }
 
     if (params.dispatch() == GemmType::QBufferA_QBufferB_BufferC_2DGemm) {
-        if ((params.A.type() == DataType::TYPE_INT8 || params.A.type() == DataType::TYPE_QINT8)){
+        if ((params.A.type() == DataType::TYPE_INT8 || params.A.type() == DataType::TYPE_QINT8)) {
             BUFFER_DTYPE_CHECK(params.A, {DataType::TYPE_INT8, DataType::TYPE_QINT8});
             BUFFER_DTYPE_CHECK(params.B, {DataType::TYPE_INT8, DataType::TYPE_QINT8});
             InvokeROCmDeepGemmWi8Ai8(params, output);
@@ -501,10 +519,9 @@ BufferPtr ROCmDevice::gemm(const GemmParams& params) {
             size_t kernel_K = qB_kernel.shape()[0], kernel_N = qB_kernel.shape()[1];
             size_t scale_K = qB_scales.shape()[0], scale_N = qB_scales.shape()[1];
             if (1 == scale_K && scale_N == kernel_N) {
-                if (hipblas_mm_wrapper_->use_swizzleA() || hipblas_mm_wrapper_->test_swizzleA()){
+                if (hipblas_mm_wrapper_->use_swizzleA() || hipblas_mm_wrapper_->test_swizzleA()) {
                     HipblasltPTPCGemm(params, output);
-                }
-                else {
+                } else {
                     InvokeROCmPTPCGemm(params, output);
                 }
             } else {
@@ -515,7 +532,7 @@ BufferPtr ROCmDevice::gemm(const GemmParams& params) {
                     scale_K,
                     scale_N);
             }
-            return std::move(output);            
+            return std::move(output);
 
         } else {
             ROCM_FAIL("[GEMM]: Other weight quantization not implemented");

@@ -545,8 +545,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
                     ],
                     functools.partial(
                         pad_w13,
-                        align_size=src_weight_info.config.align_size
-                        // group_size,
+                        align_size=src_weight_info.config.align_size // group_size,
                         dim=0,
                     ),
                     data_type=torch.float32,
@@ -577,8 +576,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
                 [CkptWeightInfo(w_name + QS_SUFFIX, identity)],
                 functools.partial(
                     pad,
-                    align_size=src_weight_info.config.align_size
-                    // group_size,
+                    align_size=src_weight_info.config.align_size // group_size,
                     dim=0,
                 ),
                 data_type=torch.float32,
@@ -604,8 +602,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
                 [CkptWeightInfo(w_name + QS_SUFFIX, identity)],
                 functools.partial(
                     pad,
-                    align_size=src_weight_info.config.align_size
-                    // group_size,
+                    align_size=src_weight_info.config.align_size // group_size,
                     dim=1,
                 ),
                 data_type=torch.float32,
@@ -674,28 +671,14 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         # need reshape for kernel weight
         processed_res = super()._postprocess(tensor, device, load_config)
         kernel_weight = processed_res[self.kernel.name]
-        kernel_weight = (
-            kernel_weight.reshape(kernel_weight.shape[-1], -1)
-            if kernel_weight.dim() == 2
-            else kernel_weight
+        kernel_weight = load_config.exported_device.maybe_rewrite_weight_by_key(
+            "weight", kernel_weight
         )
-        processed_res[self.kernel.name] = kernel_weight
         if self.scale is not None:
             scale_weight = processed_res[self.scale.name]
-            scale_weight = (
-                scale_weight.reshape(scale_weight.shape[-1], -1)
-                if scale_weight.dim() == 2
-                else scale_weight
-            )
-            kernel_weight = load_config.exported_device.maybe_rewrite_weight_by_key(
-                "weight", kernel_weight
-            )
             scale_weight = load_config.exported_device.maybe_rewrite_weight_by_key(
                 "scale", scale_weight
             )
-            # kernel_weight, scale_weight = load_config.exported_device.convert_fp8_weight_params(kernel_weight, scale_weight)
-            processed_res[self.scale.name] = scale_weight
-            processed_res[self.kernel.name] = kernel_weight
 
         return processed_res
 
