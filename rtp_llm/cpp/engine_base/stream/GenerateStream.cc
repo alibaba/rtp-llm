@@ -691,8 +691,10 @@ bool GenerateStream::needFinishBySPTokens() {
         fillSubGenerateStatus(StreamState::RUNNING);
     }
 
-    matchEosToken();
-    matchStopWordsList();
+    if (seqLength() >= generate_input_->generate_config->min_new_tokens + inputLength()) {
+        matchEosToken();
+        matchStopWordsList();
+    }
 
     // check if all batch finished
     return std::all_of(sub_generate_status_.begin(), sub_generate_status_.end(), [](GenerateStatus& generate_status) {
@@ -735,9 +737,6 @@ std::vector<int> GenerateStream::getLatestTokens(size_t token_num) {
 }
 
 void GenerateStream::matchStopWordsList() {
-    if (seqLength() < generate_input_->generate_config->min_new_tokens + inputLength()) {
-        return;
-    }
     if (seqLength() == inputLength()) {
         return;
     }
