@@ -16,7 +16,7 @@ from rtp_llm.models_py.distributed.test.process_group_state import (
     destroy_distributed_environment,
     init_distributed_environment,
 )
-from rtp_llm.models_py.modules.cuda.moe.routers.afd_data_router import (
+from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.afd_data_router import (
     AfdDataRouterAttn,
     AfdDataRouterFfn,
 )

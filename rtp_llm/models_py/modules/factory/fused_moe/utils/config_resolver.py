@@ -145,4 +145,4 @@ class MoeConfigResolver:
         Returns:
             Whether AF disaggregate FFN rank
         """
-        return config.ffn_disaggregate_config.is_ffn_service
+        return config.ffn_disaggregate_config.is_ffn_service()
