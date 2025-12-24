@@ -650,18 +650,18 @@ GptLayerInputs GptModel::forwardPreLayers(const GptModelInputs& inputs) {
     // pre layernorm
     printBufferData(*hidden, "before decoder layernorm hidden");
     if (weights_.pre_decoder_layernorm) {
-        auto decoder_input = device_->layernorm(LayernormParams(hidden,
-                                                                nullptr,
-                                                                *weights_.pre_decoder_layernorm,
-                                                                nullopt,
-                                                                nullopt,
-                                                                nullopt,
-                                                                0.f,
-                                                                description_.layernorm_eps,
-                                                                true,
-                                                                false,
-                                                                description_.norm_type,
-                                                                QScheme::NoQuantize));
+        auto decoder_input = device_->layernormWithStride(
+            LayernormWithStrideParams({
+                hidden,
+                mayGetRef(weights_.pre_decoder_layernorm),
+                description_.layernorm_eps,
+                description_.norm_type,
+                0,                   // offset
+                hidden->shape()[1],  // norm_group_size
+                QScheme::NoQuantize, // qscheme
+                true                 // is_inplace
+            })
+        );
         hidden             = std::move(decoder_input.output);
         device_->checkError();
     }
