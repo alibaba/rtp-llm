@@ -1,14 +1,19 @@
 import os
+from functools import partial
 from typing import Any, Optional, Tuple
 
 import torch
+from numpy import int32
 
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.distributed.deepep_initializer import DeepEpInitializer
 from rtp_llm.models_py.distributed.deepep_wrapper import use_accl_ep
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used
-from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
+    CombineForwardPayload,
     ExpertForwardPayload,
     ExpertTokensMetadata,
     FusedMoeDataRouter,
@@ -17,6 +22,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.type import RouterType
+from rtp_llm.models_py.utils.arch import get_num_device_sms
 
 # DeepEP kernels quantize dispatch inputs in 128 element chunks.
 DEEPEP_QUANT_BLOCK_SIZE = 128
@@ -73,6 +79,23 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
     def handle(self) -> Optional[Tuple[Any, ...]]:
         return self._handle
 
+    def _normal_prepare(
+        self, dispatch_args: dict[str, Any], expert_payload: ExpertForwardPayload
+    ):
+        """Normal prepare for DeepEP Low-Latency.
+        Args:
+            dispatch_args (dict[str, Any]): Arguments for dispatching tokens to experts.
+            expert_payload (ExpertForwardPayload): Payload for expert computation.
+        """
+        # Normal prepare
+        expert_x, expert_num_tokens, self._handle, _, _ = (
+            self._buffer.low_latency_dispatch(**dispatch_args)
+        )
+        # Save data
+        expert_payload.expert_x = expert_x[0] if self._use_fp8_dispatch else expert_x
+        expert_payload.expert_x_scale = expert_x[1] if self._use_fp8_dispatch else None
+        expert_payload.expert_tokens_meta.expert_num_tokens = expert_num_tokens
+
     def prepare(
         self,
         a1: torch.Tensor,
@@ -85,7 +108,7 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         """
         Dispatches tokens to experts across all ep ranks.
         """
-        # assert
+        # Check input data
         assert a1.dim() == 2 and topk_ids.dim() == 2
         assert a1.size(0) == topk_ids.size(0)
         num_tokens = a1.size(0)
@@ -115,22 +138,20 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
             self._handle is None
         ), "DeepEP Low-latency dispatch handle should be clean before prepare()."
 
-        # dispatch
+        # Convert topk_ids to int64
         topk_ids = topk_ids.to(torch.int64)
-
-        # scatter by tp
+        # Scatter by tp
         tp_size = self._config.tp_size
         tp_rank = self._config.tp_rank
         token_num = a1.size(0)
         tp_token_size = (token_num + tp_size - 1) // tp_size
-
         slice_begin = min(tp_token_size * tp_rank, token_num)
         slice_size = min(token_num - slice_begin, tp_token_size)
-
         tp_expert_input = torch.narrow(a1, 0, slice_begin, slice_size)
         tp_expert_ids = torch.narrow(topk_ids, 0, slice_begin, slice_size)
         tp_expert_scales = torch.narrow(topk_weights, 0, slice_begin, slice_size)
 
+        # Prepare dispatch basic arguments
         dispatch_args = {
             "x": tp_expert_input,
             "topk_idx": tp_expert_ids,
@@ -140,36 +161,86 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
             "async_finish": self._async_finish,
             "return_recv_hook": self._return_recv_hook,
         }
+        # Select quantization of DeepEP low latency dispatch
+        if self._use_fp8_dispatch:
+            dispatch_args.update({"use_fp8": True})
+            if quant_config.is_block_quantized:
+                if is_deep_gemm_e8m0_used():
+                    dispatch_args.update({"round_scale": True, "use_ue8m0": True})
+            elif quant_config.is_per_act_token:
+                if self._use_accl_ep:
+                    dispatch_args.update({"pertoken_quant": True})
+                else:
+                    raise NotImplementedError(
+                        "Only ACCL-EP supports fp8 per_act_token quantization"
+                    )
+            else:
+                raise NotImplementedError(
+                    "DeepEpLowLatencyRouter only supports fp8 block or per_act_token quantization"
+                )
+        else:
+            dispatch_args.update({"use_fp8": False})
 
-        if self._use_accl_ep:
-            dispatch_args["pertoken_quant"] = quant_config.is_per_act_token
-        if self._use_fp8_dispatch and is_deep_gemm_e8m0_used():
-            dispatch_args["round_scale"] = True
-            dispatch_args["use_ue8m0"] = True
-
-        expert_x, expert_num_tokens, self._handle, _, _ = (
-            self._buffer.low_latency_dispatch(**dispatch_args)
-        )
-
-        if quant_config.is_per_act_token:
-            assert expert_x[0].shape[1] == expert_x[1].shape[1]
-            assert expert_x[1].shape[-1] == 1
-
-        # return payload
-        return ExpertForwardPayload(
-            expert_x=expert_x[0] if self._use_fp8_dispatch else expert_x,
-            expert_x_scale=expert_x[1] if self._use_fp8_dispatch else None,
+        # Initialize expert payload
+        expert_payload = ExpertForwardPayload(
             expert_x_origin_dtype=a1.dtype,
             expert_topk_weights=tp_expert_scales,
             expert_topk_ids=tp_expert_ids,
             expert_tokens_meta=ExpertTokensMetadata(
-                expert_num_tokens=expert_num_tokens, expert_num_tokens_cpu=None
+                expected_m=max(
+                    1,
+                    int(
+                        token_num
+                        * self._config.dp_size
+                        * self._config.moe_k
+                        // self._num_experts
+                    ),
+                )
             ),
         )
 
+        # Normal prepare
+        self._normal_prepare(dispatch_args, expert_payload)
+
+        # Check scale shape for DeepEP low latency dispatch
+        E, M, K = expert_payload.expert_x.shape
+        if self._use_fp8_dispatch:
+            assert expert_payload.expert_x_scale is not None
+            assert expert_payload.expert_x_scale.shape[0] == E
+            assert expert_payload.expert_x_scale.shape[1] == M
+            if quant_config.is_block_quantized:
+                if is_deep_gemm_e8m0_used():
+                    assert expert_payload.expert_x_scale.dtype == torch.int32
+                    assert (
+                        expert_payload.expert_x_scale.shape[2]
+                        == (K // DEEPEP_QUANT_BLOCK_SIZE + 3) // 4
+                    )
+                else:
+                    assert expert_payload.expert_x_scale.dtype == torch.float32
+                    assert (
+                        expert_payload.expert_x_scale.shape[2]
+                        == K // DEEPEP_QUANT_BLOCK_SIZE
+                    )
+            elif quant_config.is_per_act_token:
+                if self._use_accl_ep:
+                    assert expert_payload.expert_x_scale.dtype == torch.float32
+                    assert expert_payload.expert_x_scale.shape[2] == 1
+                else:
+                    raise RuntimeError(
+                        "Only ACCL-EP supports fp8 per_act_token quantization"
+                    )
+            else:
+                raise RuntimeError(
+                    "DeepEpLowLatencyRouter only supports fp8 block or per_act_token quantization"
+                )
+        else:
+            assert expert_payload.expert_x_scale is None
+
+        return expert_payload
+
     def finalize(
         self,
-        fused_expert_output: torch.Tensor,
+        payload: CombineForwardPayload,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
@@ -179,15 +250,17 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         Combines expert outputs back to all original ranks.
         Weight application and reduction happens in the combine kernel.
         """
-        # assert
+        # Check handle
         assert (
             self._handle is not None
         ), "DeepEP Low-latency combine handle is missing for finalize()."
 
-        # combine
+        # Convert topk_ids to int64
         topk_ids = topk_ids.to(torch.int64)
+
+        # Prepare combine basic arguments
         combine_args = {
-            "x": fused_expert_output,
+            "x": payload.fused_expert_output,
             "topk_idx": topk_ids,
             "topk_weights": topk_weights,
             "handle": self._handle,
@@ -196,31 +269,32 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
             "return_recv_hook": self._return_recv_hook,
         }
         if self._use_accl_ep:
-            combine_args["opt_level"] = self._opt_level
+            combine_args.update({"opt_level": self._opt_level})
 
+        # Normal finalize
         combined_x, _, _ = self._buffer.low_latency_combine(**combine_args)
-        # reset handle
-        self._handle = None
 
-        # gather
+        # Gather by tp
         tp_size = self._config.tp_size
         original_num_tokens = extra_finalize_args["original_num_tokens"]
         tp_token_size = (original_num_tokens + tp_size - 1) // tp_size
-
         if tp_size > 1:
             # combine_x.size(0) might be 0
             if combined_x.size(0) < tp_token_size:
+                # Pad combined output if needed
                 padding_combined_x = torch.empty(
                     size=(tp_token_size - combined_x.size(0), combined_x.size(1)),
                     device=combined_x.device,
                     dtype=combined_x.dtype,
                 )
                 combined_x = torch.cat([combined_x, padding_combined_x], dim=0)
-
+            # Gather combined output from all tp ranks
             gatherd_output = all_gather(combined_x, group=Group.TP).reshape(
                 tp_size * tp_token_size, -1
             )
-            gatherd_output = gatherd_output[:original_num_tokens, :]
-            return gatherd_output
+            combined_x = gatherd_output[:original_num_tokens, :]
+
+        # reset handle
+        self._handle = None
 
         return combined_x

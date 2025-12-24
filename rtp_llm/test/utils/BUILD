@@ -17,6 +17,12 @@ py_library(
     srcs = ["numeric_util.py"],
 )
 
+py_library(
+    name = "cuda_graph_util",
+    deps = [],
+    srcs = ["cuda_graph_util.py"],
+)
+
 py_binary(
     name = "gpu_lock",
     deps = [":torch"],

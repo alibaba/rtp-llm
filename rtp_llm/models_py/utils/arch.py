@@ -1,3 +1,5 @@
+import torch
+
 from rtp_llm.ops.compute_ops import DeviceType, get_device
 
 
@@ -15,3 +17,13 @@ def is_hip():
         return True
     else:
         return False
+
+
+def get_num_device_sms():
+    if is_cuda():
+        assert torch.cuda.is_available()
+        device = torch.cuda.current_device()
+        props = torch.cuda.get_device_properties(device)
+        return props.multi_processor_count
+    else:
+        raise NotImplementedError("Only cuda is supported get_num_device_sms yet")

@@ -3,11 +3,15 @@ from typing import Any, Callable, Optional
 
 import torch
 
-import rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe as mm
 import rtp_llm.ops.compute_ops as compute_ops
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     cutlass_moe_mm_fp8_scaled,
     get_best_config_swap_ab,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
+    CombineForwardPayload,
+    ExpertForwardPayload,
+    FusedMoeExpertExecutor,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
@@ -25,7 +29,7 @@ from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
 from .util import moe_kernel_quantize_input, resize_cache
 
 
-class CutlassExpertsFp8(mm.FusedMoeExpertExecutor):
+class CutlassExpertsFp8(FusedMoeExpertExecutor):
     @classmethod
     def executor_type(cls):
         return ExecutorType.CUTLASS_FP8
@@ -93,13 +97,13 @@ class CutlassExpertsFp8(mm.FusedMoeExpertExecutor):
 
     def execute(
         self,
-        payload: mm.ExpertForwardPayload,
+        payload: ExpertForwardPayload,
         activation: str,
         expert_map: Optional[torch.Tensor],
         a2_scale: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         extra_expert_args: Optional[dict[str, Any]],
-    ) -> torch.Tensor:
+    ) -> CombineForwardPayload:
         assert payload.expert_topk_ids is not None
         assert payload.expert_topk_weights is not None
 
@@ -271,10 +275,14 @@ class CutlassExpertsFp8(mm.FusedMoeExpertExecutor):
             hidden_size=K,
             BLOCK_SIZE=512,
         )
-        return output
+        return CombineForwardPayload(
+            fused_expert_output=output,
+            fused_expert_output_rounds=None,
+            expert_done_events=None,
+        )
 
 
-class CutlassBatchedExpertsFp8(mm.FusedMoeExpertExecutor):
+class CutlassBatchedExpertsFp8(FusedMoeExpertExecutor):
     @classmethod
     def executor_type(cls):
         return ExecutorType.CUTLASS_BATCHED_FP8
@@ -344,13 +352,13 @@ class CutlassBatchedExpertsFp8(mm.FusedMoeExpertExecutor):
 
     def execute(
         self,
-        payload: mm.ExpertForwardPayload,
+        payload: ExpertForwardPayload,
         activation: str,
         expert_map: Optional[torch.Tensor],
         a2_scale: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         extra_expert_args: Optional[dict[str, Any]],
-    ) -> torch.Tensor:
+    ) -> CombineForwardPayload:
         topk_ids = payload.expert_topk_ids
         expert_num_tokens = payload.expert_tokens_meta.expert_num_tokens
         E, _, _ = self.w1.size()
@@ -496,4 +504,8 @@ class CutlassBatchedExpertsFp8(mm.FusedMoeExpertExecutor):
             elements_m,
             swap_ab_gemm2,
         )
-        return output
+        return CombineForwardPayload(
+            fused_expert_output=output,
+            fused_expert_output_rounds=None,
+            expert_done_events=None,
+        )

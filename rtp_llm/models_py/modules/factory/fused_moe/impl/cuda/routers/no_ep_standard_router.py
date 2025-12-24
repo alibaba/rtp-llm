@@ -2,8 +2,15 @@ from typing import Any, Optional
 
 import torch
 
-import rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe as mm
-from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
+    CombineForwardPayload,
+    ExpertForwardPayload,
+    ExpertTokensMetadata,
+    FusedMoeDataRouter,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
@@ -13,7 +20,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.util import
 )
 
 
-class DataRouterNoEPStandard(mm.FusedMoeDataRouter):
+class DataRouterNoEPStandard(FusedMoeDataRouter):
     @classmethod
     def router_type(cls):
         """Return the router type for this class"""
@@ -49,7 +56,7 @@ class DataRouterNoEPStandard(mm.FusedMoeDataRouter):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         quant_config: FusedMoEQuantConfig,
-    ) -> mm.ExpertForwardPayload:
+    ) -> ExpertForwardPayload:
 
         a1q, a1q_scale = moe_kernel_quantize_input(
             a1,
@@ -59,19 +66,19 @@ class DataRouterNoEPStandard(mm.FusedMoeDataRouter):
             quant_config.block_shape,
         )
 
-        return mm.ExpertForwardPayload(
+        return ExpertForwardPayload(
             expert_x_origin_dtype=a1.dtype,
             expert_x=a1q,
             expert_x_scale=a1q_scale,
-            expert_tokens_meta=mm.ExpertTokensMetadata(None, None),
+            expert_tokens_meta=ExpertTokensMetadata(None, None),
         )
 
     def finalize(
         self,
-        fused_expert_output: torch.Tensor,
+        payload: CombineForwardPayload,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         extra_finalize_args: Optional[dict[str, Any]],
     ) -> torch.Tensor:
-        return fused_expert_output
+        return payload.fused_expert_output

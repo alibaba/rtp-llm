@@ -39,6 +39,7 @@ py_library(
         "//rtp_llm:transformers",
         "//rtp_llm/test/utils:bench_util",
         "//rtp_llm/test/utils:numeric_util",
+        "//rtp_llm/test/utils:cuda_graph_util",
         "//rtp_llm/test/utils:port_util",
         "//rtp_llm/test/utils:device_resource",
         "//rtp_llm/test/utils:stream_util",

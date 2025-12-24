@@ -1,6 +1,7 @@
 import functools
 import importlib
-from typing import Any, Callable, List, NoReturn, Optional, Tuple
+from contextlib import contextmanager
+from typing import Any, Callable, Generator, List, NoReturn, Optional, Tuple
 
 import deep_gemm
 import torch
@@ -16,6 +17,7 @@ __all__ = [
     "m_grouped_bf16_gemm_nt_masked",
     "has_deep_gemm",
     "is_deep_gemm_e8m0_used",
+    "configure_deep_gemm_num_sms",
 ]
 
 _deep_gemm_impl_new_map = {
@@ -54,6 +56,28 @@ def has_deep_gemm() -> bool:
 @functools.cache
 def is_deep_gemm_e8m0_used() -> bool:
     return torch.cuda.get_device_capability()[0] in [10, 12]
+
+
+@contextmanager
+def configure_deep_gemm_num_sms(num_sms: int) -> Generator[None, None, None]:
+    """Configure the number of sms for deep gemm."""
+    if not has_deep_gemm():
+        # deep_gemm is not available
+        yield
+    # import deep_gemm
+    try:
+        _dg = importlib.import_module("deep_gemm")
+    except ImportError:
+        yield
+    # get original num sms
+    original_num_sms = resolve_symbol(_dg, "get_num_sms", "get_num_sms")()
+    # set num sms
+    resolve_symbol(_dg, "set_num_sms", "set_num_sms")(num_sms)
+    try:
+        yield
+    finally:
+        # restore original num sms
+        resolve_symbol(_dg, "set_num_sms", "set_num_sms")(original_num_sms)
 
 
 def _missing_deep_gemm() -> NoReturn:
