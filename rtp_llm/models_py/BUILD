@@ -85,6 +85,7 @@ py_library(
         ":kernels",
         ":configs",
         "//rtp_llm/model_loader:loader",
+        "@flash-linear-attention//:fla_lib_py",
     ] + select({
         "@//:using_cuda12": [
             ":modules_cuda",
