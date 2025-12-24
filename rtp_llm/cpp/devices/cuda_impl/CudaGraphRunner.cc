@@ -49,11 +49,6 @@ void optimizedCopyAsync(const torch::Tensor& src, torch::Tensor& dst, size_t siz
     }
 }
 
-py::object CudaGraphRunner::normalForward(PyModelInputs& inputs) {
-    auto attn_pyobj = py_attn_pyobj_method_(inputs, false);
-    return py_forward_method_(inputs, attn_pyobj);
-}
-
 // column dimension
 void CudaGraphRunner::copySmallerIntoLarger(const torch::Tensor& source_tensor, torch::Tensor& target_tensor) {
     if (source_tensor.dim() != target_tensor.dim()) {
@@ -204,7 +199,6 @@ PyModelOutputs CudaGraphRunner::forward(PyModelInputs& inputs) {
     // record forward done event
     forward_event_.record(stream);
     RTP_LLM_LOG_DEBUG("Replay End");
-
     return outputs;
 }
 
@@ -426,6 +420,7 @@ void CudaGraphRunner::initCapture() {
 
         if (is_prefill_cuda_graph_mode_) {
             RTP_LLM_LOG_INFO("initCapture forward post check start for prefill");
+            // stable running cuda graph environment for cuda graph, otherwise it will cause kernel error!!!
             capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens.data_ptr<int>()[1]    = max_num_token_;
             capture_mem_hold_.py_model_inputs_.attention_inputs.cu_kv_seqlens.data_ptr<int>()[1] = max_num_token_;
             capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths.data_ptr<int>()[0] = max_num_token_;
@@ -447,13 +442,6 @@ void CudaGraphRunner::replayGraph(int key) {
 
 void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
     auto inputs = graph_instances_[key].mem_hold_.py_model_inputs_;
-    // WarmUp twice
-    RTP_LLM_LOG_INFO("WarmUp for %s %d start.", key_type, key);
-    auto attn_pyobj = graph_instances_[key].mem_hold_.attn_pyobj_;
-    attn_pyobj.attr("prepare")(inputs.attention_inputs);
-    py_forward_method_(inputs, attn_pyobj);
-    py_forward_method_(inputs, attn_pyobj);
-    RTP_LLM_LOG_INFO("WarmUp for %s %d successfully.", key_type, key);
 
     {
         // sync before capture

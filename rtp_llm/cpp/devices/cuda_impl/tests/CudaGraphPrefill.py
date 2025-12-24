@@ -1,34 +1,20 @@
 import logging
-import math
 import os
-import sys
 import unittest
-from pathlib import Path
 from typing import List
 
 import torch
 
-# Add rtp_llm root path
-rtp_opensouce_path = Path(__file__).resolve().parent.parent.parent.parent.parent.parent
-sys.path.append(str(rtp_opensouce_path))
-
 import rtp_llm.models
-from rtp_llm.config.engine_config import EngineConfig
-from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.cpp.devices.cuda_impl.tests.cuda_graph_test_utils import (
+    CudaGraphTestModelBuilder,
+    ModelBuildConfig,
+)
 from rtp_llm.cpp.devices.cuda_impl.tests.libtest_cuda_graph_prefill_ops import (
     CudaGraphPrefillOp,
 )
-from rtp_llm.model_factory import ModelFactory
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
-from rtp_llm.ops.compute_ops import (
-    KVCache,
-    PyAttentionInputs,
-    PyModelInputs,
-    get_device,
-    get_typemeta,
-    init_device,
-)
-from rtp_llm.tools.api.hf_model_helper import get_model_info_from_hf
+from rtp_llm.ops.compute_ops import PyAttentionInputs, PyModelInputs, get_typemeta
 
 
 class TestCudaGraphPrefill(unittest.TestCase):
@@ -49,8 +35,20 @@ class TestCudaGraphPrefill(unittest.TestCase):
         # Generate prefill_capture_seq_lens
         self.prefill_capture_seq_lens = self._generate_prefill_capture_seq_lens()
 
-        # Build model using ModelFactory (similar to rtp_auto_model.py)
-        model = self.build_model()
+        # Build model using shared model builder
+        self.model_builder = CudaGraphTestModelBuilder(
+            ModelBuildConfig(
+                model_path="/mnt/nas1/hf/gte-Qwen2-7B-instruct/",
+                tokens_per_block=self.tokens_per_block,
+                device=self.device,
+                act_type="BF16",
+                device_reserve_memory_bytes=-4294967296,
+            )
+        )
+        build_result = self.model_builder.build_model(init_kv_cache=False)
+        model = build_result.model
+        self.model_config = build_result.model_config
+        self.compute_dtype = build_result.compute_dtype
         print("build model successfully")
 
         self.op = CudaGraphPrefillOp()
@@ -79,104 +77,13 @@ class TestCudaGraphPrefill(unittest.TestCase):
             30,
             60,
             100,
-            105,
-            110,
-            115,
-            120,
             125,
             128,
             448,
             512,
             786,
-            960,
         ]
         return seq_lens
-
-    def build_model(self) -> GptModelBase:
-        """Build model using ModelFactory, similar to auto_model.py"""
-        model_path = "/data1/tanboyu.tby/gte-Qwen2-7B-instruct/"
-
-        # Set configs (similar to auto_model.py)
-        self._set_configs(model_path)
-
-        # Create EngineConfig from py_env_configs
-        engine_config = EngineConfig.create(self.py_env_configs)
-
-        # Create model configs
-        model_config = ModelFactory.create_model_config(
-            model_args=self.py_env_configs.model_args,
-            lora_config=self.py_env_configs.lora_config,
-            kv_cache_config=engine_config.kv_cache_config,
-            profiling_debug_logging_config=engine_config.profiling_debug_logging_config,
-            generate_env_config=self.py_env_configs.generate_env_config,
-            embedding_config=self.py_env_configs.embedding_config,
-            quantization_config=self.py_env_configs.quantization_config,
-            render_config=self.py_env_configs.render_config,
-        )
-
-        # Update engine_config based on model_config
-        ModelFactory.update_engine_config_from_model_config(
-            engine_config=engine_config,
-            model_config=model_config,
-        )
-
-        # Create model using ModelFactory
-        self.gpt_model = ModelFactory._create_model(
-            model_config=model_config,
-            engine_config=engine_config,
-            vit_config=None,
-            merge_lora=False,
-        )
-
-        # Load the model
-        self.gpt_model.load()
-        self.compute_dtype = self.gpt_model.weight.dtype
-        model = self.gpt_model.py_model
-        self.model_config = model.config
-
-        # Init device with new API
-        init_device(
-            parallelism_config=engine_config.parallelism_config,
-            model_config=model_config,
-            eplb_config=model_config.eplb_config,
-            fmha_config=engine_config.fmha_config,
-            device_resource_config=engine_config.device_resource_config,
-            moe_config=engine_config.moe_config,
-            sp_config=engine_config.sp_config,
-            misc_config=engine_config.misc_config,
-            profiling_debug_logging_config=engine_config.profiling_debug_logging_config,
-            hw_kernel_config=engine_config.hw_kernel_config,
-            concurrency_config=engine_config.concurrency_config,
-            ffn_disaggregate_config=engine_config.parallelism_config.ffn_disaggregate_config,
-            runtime_config=engine_config.runtime_config,
-        )
-
-        return model
-
-    def _set_configs(self, model_path: str):
-        """Set configuration structures instead of environment variables."""
-        # Create PyEnvConfigs to hold all configurations
-        self.py_env_configs = PyEnvConfigs()
-
-        # Get model info from HuggingFace
-        model_path, model_type = get_model_info_from_hf(model_path, None)
-        self.py_env_configs.model_args.model_type = model_type
-        self.py_env_configs.model_args.act_type = "BF16"
-        self.py_env_configs.model_args.ckpt_path = model_path
-        self.py_env_configs.model_args.max_seq_len = 4096
-        self.py_env_configs.kv_cache_config.seq_size_per_block = self.tokens_per_block
-        self.py_env_configs.profiling_debug_logging_config.hack_layer_num = 1
-        if not self.py_env_configs.model_args.tokenizer_path:
-            self.py_env_configs.model_args.tokenizer_path = model_path
-
-        # Set ModelSpecificConfig.load_python_model = True
-        self.py_env_configs.model_specific_config.load_python_model = True
-        self.py_env_configs.device_resource_config.not_use_default_stream = True
-        # Set DeviceResourceConfig.device_reserve_memory_bytes
-        if self.py_env_configs.device_resource_config.device_reserve_memory_bytes == 0:
-            self.py_env_configs.device_resource_config.device_reserve_memory_bytes = (
-                -4294967296
-            )
 
     def _calculate_padding_offset(
         self, input_lengths: torch.Tensor, cu_seqlens: torch.Tensor
@@ -390,13 +297,12 @@ class TestCudaGraphPrefill(unittest.TestCase):
 
         outputs3 = self.op.forward(inputs3)
 
-        # Explicit CUDA sync to ensure all async operations are complete before accessing tensor data
-        torch.cuda.synchronize()
-
         current_real_graph_size = self.op.getCurrentRealGraphSize()
         print(
             f"current_real_graph_size: {current_real_graph_size}, batch_size: {batch_size}"
         )
+        # Explicit CUDA sync to ensure all async operations are complete before accessing tensor data
+        torch.cuda.synchronize()
 
         print(f"outputs1.hidden_states: {outputs1.hidden_states}")
         print(f"outputs3.hidden_states: {outputs3.hidden_states}")

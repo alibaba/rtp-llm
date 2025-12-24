@@ -13,6 +13,7 @@ void CudaGraphDecodePaddingOp::init(py::object       py_instance,
     config.enable_debug_mode          = false;
     config.max_seq_len                = max_seq_len;
     config.tokens_per_block           = tokens_per_block;
+    config.hidden_size                = hidden_size;
     config.concurrency_limit          = 128;
     config.decode_capture_batch_sizes = decode_capture_batch_sizes;
     config.data_type                  = torch::kFloat16;
@@ -35,7 +36,7 @@ PYBIND11_MODULE(libtest_cuda_graph_decode_ops, m) {
              py::arg("max_seq_len"),
              py::arg("tokens_per_block"),
              py::arg("decode_capture_batch_sizes"))
-        .def("forward", &cuda_graph::CudaGraphDecodePaddingOp::forward)
+        .def("forward", &CudaGraphDecodePaddingOp::forward)
         .def("getCurrentRealGraphSize", &cuda_graph::CudaGraphDecodePaddingOp::getCurrentRealGraphSize);
 }
 

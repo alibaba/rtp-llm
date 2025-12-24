@@ -12,6 +12,7 @@ struct CudaGraphRunnerConfig {
     bool              enable_debug_mode          = false;
     int64_t           max_seq_len                = 0;
     int64_t           tokens_per_block           = 0;
+    int64_t           hidden_size                = 0;
     int64_t           max_context_batch_size     = 1;
     int64_t           concurrency_limit          = 128;
     std::vector<int>  decode_capture_batch_sizes = {};
@@ -26,6 +27,7 @@ inline CudaGraphRunnerPtr createCudaGraphRunner(py::object py_instance, const Cu
     graph_params.is_prefill_cuda_graph_mode   = config.is_prefill_mode;
     graph_params.max_seq_len                  = config.max_seq_len;
     graph_params.tokens_per_block             = config.tokens_per_block;
+    graph_params.hidden_size                  = config.hidden_size;
     graph_params.concurrency_limit            = config.concurrency_limit;
     graph_params.max_context_batch_size       = config.max_context_batch_size;
     graph_params.decode_capture_batch_sizes   = config.decode_capture_batch_sizes;

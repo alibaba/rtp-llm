@@ -16,8 +16,9 @@ public:
 
     int getCurrentRealGraphSize();
 
-    PyModelOutputs forward(PyModelInputs inputs) {
-        return cuda_graph_runner_->forward(inputs);
+    PyModelOutputs forward(PyModelInputs& inputs) {
+        bool executed = false;
+        return cuda_graph_runner_->forward(inputs, executed);
     }
 
     ~CudaGraphPrefillOp() {

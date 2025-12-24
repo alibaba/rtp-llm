@@ -373,6 +373,15 @@ cc_binary(
     visibility = ["//visibility:public"],
 )
 
+py_library(
+    name = "cuda_graph_test_utils",
+    srcs = ["cuda_graph_test_utils.py"],
+    deps = [
+        "//rtp_llm/test/model_test/test_util:test_util",
+    ],
+    visibility = ["//visibility:public"],
+)
+
 py_test(
     name = "CudaGraphDecodePadding",
     srcs = [
@@ -383,9 +392,11 @@ py_test(
         "//:th_transformer"
     ],
     deps = [
+        ":cuda_graph_test_utils",
         "//rtp_llm/test/model_test/test_util:test_util",
     ],
     env = {
+        "LOAD_METHOD" : "scratch",
         "NOT_USE_DEFAULT_STREAM" : "1",
         "TEST_USING_DEVICE": "CUDA",
         "HACK_LAYER_NUM" : "1",
@@ -405,11 +416,17 @@ py_test(
         "//:th_transformer"
     ],
     deps = [
+        ":cuda_graph_test_utils",
         "//rtp_llm/test/model_test/test_util:test_util",
     ],
     env = {
         "LOAD_METHOD" : "scratch",
         "NOT_USE_DEFAULT_STREAM" : "1",
+        # CUDA coredump settings for debugging
+        # "CUDA_ENABLE_COREDUMP_ON_EXCEPTION" : "1",
+        # "CUDA_COREDUMP_SHOW_PROGRESS" : "1",
+        # "CUDA_COREDUMP_GENERATION_FLAGS" : "skip_nonrelocated_elf_images,skip_global_memory,skip_shared_memory,skip_local_memory,skip_constbank_memory",
+        # "CUDA_COREDUMP_FILE" : "rtp_llm/cpp/devices/cuda_impl/tests/CudaGraphPrefill/cuda_coredump_%h.%p.%t",
         "TEST_USING_DEVICE": "CUDA",
         "HACK_LAYER_NUM" : "1",
         "CUDA_LAUNCH_BLOCKING" : "1",

@@ -38,7 +38,7 @@ PYBIND11_MODULE(libtest_cuda_graph_prefill_ops, m) {
              py::arg("tokens_per_block"),
              py::arg("max_prefill_cuda_graph_len"),
              py::arg("prefill_capture_seq_lens"))
-        .def("forward", &cuda_graph::CudaGraphPrefillOp::forward)
+        .def("forward", &CudaGraphPrefillOp::forward)
         .def("getCurrentRealGraphSize", &cuda_graph::CudaGraphPrefillOp::getCurrentRealGraphSize);
 }
 
