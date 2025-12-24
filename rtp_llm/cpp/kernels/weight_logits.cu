@@ -17,26 +17,6 @@
 
 namespace rtp_llm {
 
-#if USING_CUDA
-#ifndef CUDART_INF_FP16
-#define CUDART_INF_FP16 __ushort_as_half((unsigned short)0x7C00U)
-#endif
-#ifndef CUDART_INF_BF16
-#define CUDART_INF_BF16 __ushort_as_bfloat16((unsigned short)0x7F80U)
-#endif
-#endif
-
-#if USING_ROCM
-#ifndef HIP_INF_FP16
-#define HIP_INF_FP16 __ushort_as_half((unsigned short)0x7C00U)
-#endif
-#ifndef HIP_INF_BF16
-#define HIP_INF_BF16 __ushort_as_bfloat16((unsigned short)0x7F80U)
-#endif
-#define CUDART_INF_FP16 HIP_INF_FP16
-#define CUDART_INF_BF16 HIP_INF_BF16
-#endif
-
 template<typename T>
 __device__ T addWeight(T logits, float weight) {
     return logits + weight;
@@ -45,18 +25,12 @@ __device__ T addWeight(T logits, float weight) {
 template<>
 __device__ __half addWeight<__half>(__half logits, float weight) {
     __half weight_half = __float2half(weight);
-    if (__hisinf(weight_half)) {
-        return weight_half;
-    }
     return logits + weight_half;
 }
 
 template<>
 __device__ __nv_bfloat16 addWeight<__nv_bfloat16>(__nv_bfloat16 logits, float weight) {
     __nv_bfloat16 weight_bf16 = __float2bfloat16(weight);
-    if (__hisinf(weight_bf16)) {
-        return weight_bf16;
-    }
     return logits + weight_bf16;
 }
 
