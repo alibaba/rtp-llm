@@ -49,7 +49,6 @@ class FMHAParams(ParamsBase):
             )
             self.cu_seqlens_q[1:] = torch.cumsum(input_lengths, 0)
 
-            kv_lengths = torch.zeros_like(input_lengths)
             # Create cu_seqlens_k for key/value (includes prefix_lengths)
             if prefix_lengths is not None and prefix_lengths.numel() > 0:
                 kv_lengths = input_lengths + prefix_lengths
@@ -63,6 +62,8 @@ class FMHAParams(ParamsBase):
                 )
                 self.max_seqlen_k = self.max_seq_len + max_prefix_length
             else:
+                # No prefix, kv_lengths equals input_lengths
+                kv_lengths = input_lengths
                 self.cu_seqlens_k = self.cu_seqlens_q.clone()
                 self.max_seqlen_k = self.max_seq_len
 
@@ -119,49 +120,58 @@ class AiterPrefillAttnOp:
         self.head_num = attn_configs.head_num
         self.head_dim = attn_configs.size_per_head
         self.head_num_kv = attn_configs.kv_head_num
+        self.is_causal = attn_configs.is_causal
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
         return True
 
     def prepare(self, attn_inputs: PyAttentionInputs):
-        fmha_params = FMHAParams(
+        self.fmha_params = FMHAParams(
             attn_inputs=attn_inputs,
             is_prefill=True,
         )
-        return fmha_params
-
-    def advanced_qkv_split(self, qkv, head_num, head_num_kv, size_per_head):
-        token_num = qkv.shape[0]
-        qkv_reshaped = qkv.reshape(token_num, head_num + 2 * head_num_kv, size_per_head)
-        q = qkv_reshaped[:, :head_num, :]
-        k = qkv_reshaped[:, head_num : head_num + head_num_kv, :]
-        v = qkv_reshaped[:, head_num + head_num_kv : head_num + 2 * head_num_kv, :]
-        return q, k, v
+        return self.fmha_params
 
     def reshape_qkv(self, qkv):
-        q_contiguous = qkv[0].permute(1, 0, 2).contiguous()
-        k_contiguous = qkv[1].permute(1, 0, 2).contiguous()
-        v_contiguous = qkv[2].permute(1, 0, 2).contiguous()
-        return q_contiguous, k_contiguous, v_contiguous
+        """Reshape qkv tensor(s) to the format expected by flash attention.
+        Returns:
+            Tuple of (q, k, v) tensors, each with shape (total_tokens, num_heads, head_dim).
+        """
+        if isinstance(qkv, (tuple, list)) and len(qkv) == 3 and qkv[0].dim() == 3:
+
+            # 3D case: (head_num, tokens, head_dim) - need to permute
+            q_contiguous = qkv[0].permute(1, 0, 2).contiguous()
+            k_contiguous = qkv[1].permute(1, 0, 2).contiguous()
+            v_contiguous = qkv[2].permute(1, 0, 2).contiguous()
+
+            # Apply slicing based on fmha_params
+            q_contiguous = q_contiguous[: self.fmha_params.token_q_num]
+            k_contiguous = k_contiguous[: self.fmha_params.token_kv_num]
+            v_contiguous = v_contiguous[: self.fmha_params.token_kv_num]
+
+            return q_contiguous, k_contiguous, v_contiguous
+
+        if isinstance(qkv, (tuple, list)) and len(qkv) == 3 and qkv[0].dim() == 2:
+            qkv = qkv[0]  # specific for fp8 attention
+
+        tokens = qkv.size(0)
+        q_size = self.head_num * self.head_dim
+        kv_size = self.head_num_kv * self.head_dim
+        # Split qkv into q, k, v
+        q, k, v = torch.split(qkv, [q_size, kv_size, kv_size], dim=-1)
+        # Reshape to (tokens, num_heads, head_dim)
+        q = q.view(tokens, self.head_num, self.head_dim)
+        k = k.view(tokens, self.head_num_kv, self.head_dim)
+        v = v.view(tokens, self.head_num_kv, self.head_dim)
+        # Apply slicing based on fmha_params
+        q = q[: self.fmha_params.token_q_num]
+        k = k[: self.fmha_params.token_kv_num]
+        v = v[: self.fmha_params.token_kv_num]
+        return q.contiguous(), k.contiguous(), v.contiguous()
 
     def forward(self, qkv, kv_cache, fmha_params):
-        has_prefix = (
-            fmha_params.prefix_lengths is not None
-            and fmha_params.prefix_lengths.numel() > 0
-            and fmha_params.prefix_lengths.max().item() > 0
-        )
-        if has_prefix:
-            q_tensor, k_tensor, v_tensor = self.reshape_qkv(qkv)
-            q_tensor = q_tensor[: fmha_params.token_q_num]
-            k_tensor = k_tensor[: fmha_params.token_kv_num]
-            v_tensor = v_tensor[: fmha_params.token_kv_num]
-        else:
-            q_tensor, k_tensor, v_tensor = self.advanced_qkv_split(
-                qkv[0],
-                self.head_num,
-                self.head_num_kv,
-                self.head_dim,
-            )
+        q_tensor, k_tensor, v_tensor = self.reshape_qkv(qkv)
+
         cu_seqlens_q = fmha_params.cu_seqlens_q.to(q_tensor.device)
         cu_seqlens_k = fmha_params.cu_seqlens_k.to(k_tensor.device)
         max_seqlen_q = fmha_params.max_seqlen_q
@@ -180,7 +190,7 @@ class AiterPrefillAttnOp:
                 cu_seqlens_k,
                 max_seqlen_q,
                 max_seqlen_k,
-                causal=True,
+                causal=self.is_causal,
             )
         else:
             res = aiter.flash_attn_varlen_func(
@@ -192,7 +202,7 @@ class AiterPrefillAttnOp:
                 max_seqlen_q,  # 批次中最大query序列长度
                 max_seqlen_k,  # 批次中最大key序列长度
                 dropout_p=0.0,  # Dropout概率 - 评估时应设为0.0
-                causal=True,  # 因果注意力掩码 - 用于自回归建模，每个位置只能关注自己和之前的位置
+                causal=self.is_causal,  # 因果注意力掩码 - 用于自回归建模，每个位置只能关注自己和之前的位置
             )
         token_num = fmha_params.token_q_num
         final_result = res.reshape(token_num, self.head_num * self.head_dim)

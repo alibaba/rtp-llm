@@ -242,9 +242,6 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
     if (use_fmha_fp8) {
         return std::make_tuple(qkv_buf_fp8, torch::Tensor(), torch::Tensor());
     }
-    if (prefix_prompt_param.max_prefix_prompt_length <= 0) {
-        return std::make_tuple(qkv, torch::Tensor(), torch::Tensor());
-    }
     // local_head_num, seq_len * batch_size, size_per_head
     torch::Tensor q_contiguous = torch::zeros({local_head_num, seq_len * batch_size, size_per_head},
                                               torch::TensorOptions(qkv.dtype()).device(qkv.device()));
