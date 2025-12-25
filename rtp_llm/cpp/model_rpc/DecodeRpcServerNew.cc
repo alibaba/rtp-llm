@@ -264,9 +264,9 @@ ErrorInfo DecodeRpcServerNew::writeAppendFirstToken(DecodeGenerateContextNew& de
             decode_local_reuse_len);
         response_output->mutable_flatten_output()->mutable_aux_info(i)->set_decode_remote_reuse_len(
             decode_remote_reuse_len);
-        response_output->mutable_generate_outputs(i)->mutable_aux_info()->set_decode_gpu_reuse_len(
+        response_output->mutable_flatten_output()->mutable_aux_info(i)->set_decode_gpu_reuse_len(
             decode_gpu_reuse_len);
-        response_output->mutable_generate_outputs(i)->mutable_aux_info()->set_decode_memory_reuse_len(
+        response_output->mutable_flatten_output()->mutable_aux_info(i)->set_decode_memory_reuse_len(
             decode_memory_reuse_len);
     }
 

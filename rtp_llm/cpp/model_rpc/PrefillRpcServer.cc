@@ -365,16 +365,16 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
                 prefill_total_reuse_len);
             response.mutable_flatten_output()->mutable_aux_info(i)->set_prefill_local_reuse_len(
                 prefill_local_reuse_len);
-            response.mutable_generate_outputs(i)->mutable_aux_info()->set_prefill_gpu_reuse_len(prefill_gpu_reuse_len);
-            response.mutable_generate_outputs(i)->mutable_aux_info()->set_prefill_memory_reuse_len(
+            response.mutable_flatten_output()->mutable_aux_info(i)->set_prefill_gpu_reuse_len(prefill_gpu_reuse_len);
+            response.mutable_flatten_output()->mutable_aux_info(i)->set_prefill_memory_reuse_len(
                 prefill_memory_reuse_len);
             response.mutable_flatten_output()->mutable_aux_info(i)->set_prefill_remote_reuse_len(
                 prefill_remote_reuse_len);
 
             response.mutable_flatten_output()->mutable_aux_info(i)->set_decode_total_reuse_len(decode_total_reuse_len);
             response.mutable_flatten_output()->mutable_aux_info(i)->set_decode_local_reuse_len(decode_local_reuse_len);
-            response.mutable_generate_outputs(i)->mutable_aux_info()->set_decode_gpu_reuse_len(decode_gpu_reuse_len);
-            response.mutable_generate_outputs(i)->mutable_aux_info()->set_decode_memory_reuse_len(
+            response.mutable_flatten_output()->mutable_aux_info(i)->set_decode_gpu_reuse_len(decode_gpu_reuse_len);
+            response.mutable_flatten_output()->mutable_aux_info(i)->set_decode_memory_reuse_len(
                 decode_memory_reuse_len);
             response.mutable_flatten_output()->mutable_aux_info(i)->set_decode_remote_reuse_len(
                 decode_remote_reuse_len);

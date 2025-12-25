@@ -160,7 +160,7 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig& model_config,
                             block_nums,
                             config.block_size / 1024 / 1024);
 
-    auto memory_kv_cache_mem_size = param.kv_cache_config.memory_block_cache_size_mb * 1024 * 1024;
+    auto memory_kv_cache_mem_size = kv_cache_config.memory_block_cache_size_mb * 1024 * 1024;
     memory_block_nums             = memory_kv_cache_mem_size / config.block_size;
 
     const auto kv_cache_seq_len = block_nums * config.seq_size_per_block;
@@ -192,11 +192,13 @@ CacheConfigCreator::createSpConfig(const ModelConfig& score_model_config,
 
     CacheConfig propose_config = CacheConfigCreator::createBasicConfig(propose_model_config, parallelism_config, is_mtp);
     size_t      block_nums     = 0;
+    size_t      memory_block_nums     = 0;
+
     if (kv_cache_config.test_block_num > 0) {
         block_nums = kv_cache_config.test_block_num;
     } else {
         const auto kv_cache_mem_size = CacheConfigCreator::getKVCacheMemorySize(runtime_config, kv_cache_config, score_model_config, parallelism_config, warm_up_result, sp_config);
-        auto       memory_kv_cache_mem_size = score_param.kv_cache_config.memory_block_cache_size_mb * 1024 * 1024;
+        auto       memory_kv_cache_mem_size = kv_cache_config.memory_block_cache_size_mb * 1024 * 1024;
         if (is_mtp) {
             auto cache_num = sp_config.gen_num_per_cycle;
             if (is_eagle) {
