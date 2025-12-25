@@ -1,3 +1,4 @@
+import csv
 import itertools
 from unittest import SkipTest, TestCase, main
 
@@ -95,7 +96,7 @@ class FusedQKRMSNormTest(TestCase):
         torch.set_default_device("cuda")
 
         # Test configurations
-        num_tokens_list = [4000]
+        num_tokens_list = [2, 4, 8, 16, 32, 64, 128, 4000, 8000, 16000, 32000]
         head_num = 32
         kv_head_num = 4
         size_per_head = 128
@@ -109,6 +110,9 @@ class FusedQKRMSNormTest(TestCase):
             f"{'Latency (us)':<15} {'Throughput (GB/s)':<20} {'Bandwidth (GB/s)':<20}"
         )
         print("=" * 150)
+
+        # Store results for CSV export
+        results = []
 
         for num_tokens in num_tokens_list:
             for dtype in dtypes:
@@ -203,6 +207,47 @@ class FusedQKRMSNormTest(TestCase):
                     f"{latency_us_flashinfer_knorm:<15.2f} {throughput_gb_s_flashinfer_knorm:<20.3f} {bandwidth_gb_s_flashinfer_knorm:<20.3f}"
                 )
 
+                # Calculate total for qnorm + knorm
+                latency_us_flashinfer_total = latency_us_flashinfer_qnorm + latency_us_flashinfer_knorm
+                total_elements_flashinfer_total = (
+                    q_input.numel() * 2 + k_input.numel() * 2 + q_weight.numel() + k_weight.numel()
+                )
+                total_bytes_flashinfer_total = total_elements_flashinfer_total * x.element_size()
+                throughput_gb_s_flashinfer_total = total_bytes_flashinfer_total / (latency_us_flashinfer_total * 1e-3) * 1e-9
+                io_bytes_flashinfer_total = (q_input.numel() + k_input.numel()) * x.element_size() * 2
+                bandwidth_gb_s_flashinfer_total = io_bytes_flashinfer_total / (latency_us_flashinfer_total * 1e-3) * 1e-9
+
+                print(
+                    f"{num_tokens:<12} {dtype_str:<12} {'flashinfer qnorm+knorm':<30} "
+                    f"{latency_us_flashinfer_total:<15.2f} {throughput_gb_s_flashinfer_total:<20.3f} {bandwidth_gb_s_flashinfer_total:<20.3f}"
+                )
+
+                # Store results
+                results.append({
+                    'num_tokens': num_tokens,
+                    'dtype': dtype_str,
+                    'operator': 'flashinfer qnorm',
+                    'latency_us': latency_us_flashinfer_qnorm,
+                    'throughput_gb_s': throughput_gb_s_flashinfer_qnorm,
+                    'bandwidth_gb_s': bandwidth_gb_s_flashinfer_qnorm,
+                })
+                results.append({
+                    'num_tokens': num_tokens,
+                    'dtype': dtype_str,
+                    'operator': 'flashinfer knorm',
+                    'latency_us': latency_us_flashinfer_knorm,
+                    'throughput_gb_s': throughput_gb_s_flashinfer_knorm,
+                    'bandwidth_gb_s': bandwidth_gb_s_flashinfer_knorm,
+                })
+                results.append({
+                    'num_tokens': num_tokens,
+                    'dtype': dtype_str,
+                    'operator': 'flashinfer qnorm+knorm',
+                    'latency_us': latency_us_flashinfer_total,
+                    'throughput_gb_s': throughput_gb_s_flashinfer_total,
+                    'bandwidth_gb_s': bandwidth_gb_s_flashinfer_total,
+                })
+
                 # Benchmark rtp-llm QKRMSNorm
                 # QKRMSNorm returns a new tensor, so no need to clone
                 @torch.cuda.nvtx.range(
@@ -236,6 +281,15 @@ class FusedQKRMSNormTest(TestCase):
                     f"{latency_us_qkrmsnorm:<15.2f} {throughput_gb_s_qkrmsnorm:<20.3f} {bandwidth_gb_s_qkrmsnorm:<20.3f}"
                 )
 
+                results.append({
+                    'num_tokens': num_tokens,
+                    'dtype': dtype_str,
+                    'operator': 'rtp-llm QKRMSNorm',
+                    'latency_us': latency_us_qkrmsnorm,
+                    'throughput_gb_s': throughput_gb_s_qkrmsnorm,
+                    'bandwidth_gb_s': bandwidth_gb_s_qkrmsnorm,
+                })
+
                 @torch.cuda.nvtx.range(
                     f"rtp_llm_fused_qkrmsnorm num_tokens={num_tokens}, dtype={dtype_str}"
                 )
@@ -266,10 +320,29 @@ class FusedQKRMSNormTest(TestCase):
                     f"{latency_us_fused:<15.2f} {throughput_gb_s_fused:<20.3f} {bandwidth_gb_s_fused:<20.3f}"
                 )
 
+                results.append({
+                    'num_tokens': num_tokens,
+                    'dtype': dtype_str,
+                    'operator': 'rtp-llm FusedQKRMSNorm',
+                    'latency_us': latency_us_fused,
+                    'throughput_gb_s': throughput_gb_s_fused,
+                    'bandwidth_gb_s': bandwidth_gb_s_fused,
+                })
+
             print("-" * 150)
 
         print("=" * 150)
         print("Benchmark completed!")
+
+        # Save results to CSV
+        csv_filename = "fusedqkrmsnorm_benchmark_results.csv"
+        with open(csv_filename, 'w', newline='') as csvfile:
+            fieldnames = ['num_tokens', 'dtype', 'operator', 'latency_us', 'throughput_gb_s', 'bandwidth_gb_s']
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            writer.writeheader()
+            for result in results:
+                writer.writerow(result)
+        print(f"Results saved to {csv_filename}")
 
 
 if __name__ == "__main__":
