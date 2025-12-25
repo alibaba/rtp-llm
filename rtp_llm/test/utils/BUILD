@@ -47,6 +47,24 @@ py_library(
 py_library(
     name = "maga_server_manager",
     srcs = ["maga_server_manager.py"],
+    deps = [":base_server_manager"],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "base_server_manager",
+    srcs = ["base_server_manager.py"],
+    deps = [":port_util"],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "flexlb_server_manager",
+    srcs = ["flexlb_server_manager.py"],
+    deps = [
+        ":base_server_manager",
+        "//rtp_llm:requests",
+    ],
     visibility = ["//visibility:public"],
 )
 

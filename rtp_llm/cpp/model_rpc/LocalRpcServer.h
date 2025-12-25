@@ -40,6 +40,11 @@ public:
                                     const GenerateInputPB*                 request,
                                     grpc::ServerWriter<GenerateOutputsPB>* writer);
 
+    grpc::Status Enqueue(grpc::ServerContext* context, BatchGenerateRequestPB* request, EnqueueResponsePB* response);
+
+    grpc::Status
+    FetchResponse(grpc::ServerContext* context, FetchRequestPB* request, grpc::ServerWriter<GenerateOutputsPB>* writer);
+
     ::grpc::Status DistKvCache(::grpc::ServerContext*        context,
                                const ::DistKvCacheRequestPB* request,
                                ::DistKvCacheResponsePB*      response);
@@ -92,13 +97,15 @@ protected:
                                   std::shared_ptr<GenerateStream>& stream);
 
 protected:
-    std::shared_ptr<EngineBase>           engine_;
-    std::shared_ptr<MultimodalProcessor>  mm_processor_;
-    EngineInitParams                      maga_init_params_;
-    ProposeModelEngineInitParams*         propose_maga_init_params_;
-    kmonitor::MetricsReporterPtr          metrics_reporter_;
-    std::atomic<size_t>                   onflight_requests_{0};
-    std::shared_ptr<RpcServerRuntimeMeta> meta_;
+    std::shared_ptr<EngineBase>                             engine_;
+    std::shared_ptr<MultimodalProcessor>                    mm_processor_;
+    EngineInitParams                                        maga_init_params_;
+    ProposeModelEngineInitParams*                           propose_maga_init_params_;
+    kmonitor::MetricsReporterPtr                            metrics_reporter_;
+    std::atomic<size_t>                                     onflight_requests_{0};
+    std::shared_ptr<RpcServerRuntimeMeta>                   meta_;
+    mutable std::shared_mutex                               context_map_mutex_;  // 使用读写锁
+    std::map<std::string, std::shared_ptr<GenerateContext>> context_map_;
 };
 
 }  // namespace rtp_llm

@@ -28,6 +28,17 @@ public:
         return local_server_->GenerateStreamCall(context, request, writer);
     }
 
+    grpc::Status
+    Enqueue(grpc::ServerContext* context, BatchGenerateRequestPB* request, ::EnqueueResponsePB* response) override {
+        return local_server_->Enqueue(context, request, writer);
+    }
+
+    grpc::Status FetchResponse(grpc::ServerContext*                   context,
+                               FetchRequestPB*                        request,
+                               grpc::ServerWriter<GenerateOutputsPB>* writer) override {
+        return local_server_->FetchResponse(context, request, writer);
+    }
+
     ::grpc::Status DistKvCache(::grpc::ServerContext*        context,
                                const ::DistKvCacheRequestPB* request,
                                ::DistKvCacheResponsePB*      response) override {
