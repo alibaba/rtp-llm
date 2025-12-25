@@ -1,4 +1,7 @@
+
 """Attention factory module - handles different attention implementations."""
+
+import logging
 
 # Import the factory after lists are defined to avoid circular imports
 from rtp_llm.models_py.modules.factory.attention.attn_factory import AttnImplFactory
@@ -52,10 +55,11 @@ else:
             TRTMHAImpl,
             TRTPagedMHAImpl,
         )
-        from rtp_llm.models_py.modules.factory.attention.cuda_impl.xqa import XQAImpl
+        from rtp_llm.models_py.modules.factory.attention.cuda_impl.xqa import get_xqa_impl
 
         PREFILL_MHA_IMPS.extend([TRTMHAImpl, TRTPagedMHAImpl])
-        DECODE_MHA_IMPS.append(XQAImpl)
+        DECODE_MHA_IMPS.append(get_xqa_impl())
+        
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla_wrapper import (
             MlaFlashInferDecodeImpl,
             MlaFlashInferPrefillImpl,
