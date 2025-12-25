@@ -9,6 +9,9 @@ from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     scaled_fp8_per_token_quant,
     sgl_per_token_group_quant_fp8,
 )
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     ExpertForwardPayload,
     ExpertTokensMetadata,
@@ -19,7 +22,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.type import RouterType
 from rtp_llm.ops.compute_ops import trt_fp8_quantize_128
-from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
+
 
 class DeepepNormalRouter(FusedMoeDataRouter):
     @classmethod
@@ -157,12 +160,21 @@ class DeepepNormalRouter(FusedMoeDataRouter):
             num_recv_tokens_per_expert_list, device=expert_x.device, dtype=torch.int32
         )
 
+        if recv_topk_idx.numel() != 0 and (not self.use_fp8):
+            expert_topk_ids = torch.where(
+                recv_topk_idx == -1,
+                self.expert_num - 1 if self.rank_expert_offset == 0 else 0,
+                recv_topk_idx + self.rank_expert_offset,
+            )
+        else:
+            expert_topk_ids = recv_topk_idx
+
         return ExpertForwardPayload(
             expert_x,
             act_dtype,
             expert_x_scale,
             ExpertTokensMetadata(expert_num_tokens, num_recv_tokens_per_expert_list),
-            recv_topk_idx,
+            expert_topk_ids,
             recv_topk_weights,
         )
 

@@ -37,12 +37,11 @@ public:
     }
 
 public:
-    // for attention params
-    rtp_llm::ParamsBasePtr params_ptr{nullptr};
     // for output
     at::Tensor decoder_layer_hidden_states_;
     // for input
     PyModelInputs py_model_inputs_;
+    py::object    attn_pyobj_;
 };
 
 class GraphInstance {

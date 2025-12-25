@@ -14,13 +14,14 @@ from flashinfer import (
 from flashinfer.jit import gen_batch_mla_module, gen_batch_prefill_module
 from flashinfer.utils import is_sm90a_supported
 
-from rtp_llm.models_py.utils.arch import is_cuda
 from rtp_llm.models_py.modules.factory.linear.factory import LinearFactory
-from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
+from rtp_llm.models_py.utils.arch import is_cuda
 from rtp_llm.ops import AttentionConfigs
+from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
 from rtp_llm.utils.model_weight import W
 
 g_workspace_buffer = None
+
 
 def warmup_flashinfer_python():
     modules = []
@@ -60,15 +61,14 @@ def warmup_flashinfer_python():
         )
 
 
-
 def check_attention_inputs(attention_inputs: PyAttentionInputs) -> None:
     device = attention_inputs.input_lengths.device
     dtype = torch.int32
 
     default_tensors = {
-        "prefix_lengths": torch.zeros(0, dtype=dtype, device=device),
-        "sequence_lengths": torch.zeros(0, dtype=dtype, device=device),
-        "kv_cache_block_id_host": torch.zeros(0, dtype=dtype, device=device),
+        "prefix_lengths": torch.empty(0, dtype=dtype, device=device),
+        "sequence_lengths": torch.empty(0, dtype=dtype, device=device),
+        "kv_cache_block_id_host": torch.empty(0, dtype=dtype, device=device),
     }
 
     for attr_name, default_tensor in default_tensors.items():
@@ -197,8 +197,14 @@ class MlaFlashInferPrefillOp(object):
             self.prefill_wrapper = TRTAttnOp(attn_configs)
             return
 
+    def init_prefill_wrapper(self, mla_params: Any):
         self.prefill_wrapper = BatchPrefillWithRaggedKVCacheWrapper(
-            g_workspace_buffer, "NHD", backend="auto"
+            g_workspace_buffer,
+            "NHD",
+            backend="auto",
+            use_cuda_graph=False,
+            qo_indptr_buf=mla_params.qo_indptr_h,
+            kv_indptr_buf=mla_params.prefill_page_indptr_h,
         )
 
     def support(self, attention_inputs: PyAttentionInputs):
@@ -206,26 +212,27 @@ class MlaFlashInferPrefillOp(object):
 
     def prepare(self, attention_inputs: PyAttentionInputs):
         check_attention_inputs(attention_inputs)
-        mla_params = rtp_llm_ops.fill_mla_params(
-            attention_inputs.prefix_lengths,
-            attention_inputs.sequence_lengths,
+        mla_params = rtp_llm_ops.fill_prefill_mla_params(
             attention_inputs.input_lengths,
+            attention_inputs.prefix_lengths,
             attention_inputs.kv_cache_block_id_host,
+            attention_inputs.input_lengths.size(0),
             self.token_per_block,
         )
+        self.init_prefill_wrapper(mla_params)
         self.plan(mla_params)
         # for reuse cache indexed batched
-        self.reuse_cache_page_indice = mla_params.reuse_cache_page_indice
-        self.qo_indptr = mla_params.qo_indptr
-        self.batch_reuse_info_vec = mla_params.batch_reuse_info_vec
+        self.reuse_cache_page_indice = mla_params.reuse_cache_page_indice_d
+        self.qo_indptr = mla_params.qo_indptr_d
+        self.batch_reuse_info_vec = mla_params.batch_reuse_info_vec_d
         if self.use_trt_fmha:
             return self.prefill_wrapper.prepare(attention_inputs)
         return mla_params
 
     def plan(self, mla_params: Any):
         self.prefill_wrapper.plan(
-            mla_params.qo_indptr,
-            mla_params.prefill_page_indptr,
+            mla_params.qo_indptr_h,
+            mla_params.prefill_page_indptr_h,
             self.num_heads,
             self.num_heads,
             self.qk_rope_head_dim + self.qk_nope_head_dim,
@@ -334,13 +341,15 @@ class MlaFlashInferPrefillOp(object):
 
         k_pe = k_pe.view(-1, 1, self.qk_rope_head_dim)
         self.k_nope_proj = LinearFactory.create_linear_from_weights(
-            self.weights[layer_id], W.mla_k_nope_w, W.mla_k_nope_s, None, 
-            self.quant_config
+            self.weights[layer_id],
+            W.mla_k_nope_w,
+            W.mla_k_nope_s,
+            None,
+            self.quant_config,
         )
 
         self.v_proj = LinearFactory.create_linear_from_weights(
-            self.weights[layer_id], W.mla_v_w, W.mla_v_s, None,
-            self.quant_config
+            self.weights[layer_id], W.mla_v_w, W.mla_v_s, None, self.quant_config
         )
 
         k_nope = self.k_nope_proj(compressed_kv)
@@ -392,6 +401,8 @@ class MlaFlashInferDecodeOp(object):
         softmax_extra_scale: float,
         use_mla: bool,
         weights: List[Dict[str, torch.Tensor]] | None = None,
+        max_bs: int = 0,
+        max_context_len: int = 0,
     ):
         super().__init__()
         if weights is None:
@@ -406,37 +417,56 @@ class MlaFlashInferDecodeOp(object):
         self.weights = weights
         self.use_mla = use_mla
         global g_workspace_buffer
+        self.cuda_graph_kv_indices = torch.empty(
+            (max_bs * max_context_len // token_per_block),
+            dtype=torch.int32,
+            device="cuda",
+        )
         if g_workspace_buffer is None:
             g_workspace_buffer = torch.empty(
                 512 * 1024 * 1024,
                 dtype=torch.int8,
                 device=self.weights[0].get(W.mla_vc).device,
             )
+
+    def init_mla_wrapper(self, fmha_params: Any, use_cuda_graph: bool = False):
         self.mla_wrapper = BatchMLAPagedAttentionWrapper(
-            g_workspace_buffer, backend="auto"
+            g_workspace_buffer,
+            backend="auto",
+            use_cuda_graph=use_cuda_graph,
+            qo_indptr=fmha_params.qo_indptr_h,
+            kv_indptr=fmha_params.decode_page_indptr_h,
+            kv_indices=(
+                self.cuda_graph_kv_indices
+                if use_cuda_graph
+                else fmha_params.page_indice_d
+            ),
+            kv_len_arr=fmha_params.kvlen_h,
         )
 
     def support(self, attention_inputs: PyAttentionInputs):
         return self.use_mla
 
-    def prepare(self, attention_inputs: PyAttentionInputs):
+    def prepare(
+        self, attention_inputs: PyAttentionInputs, use_cuda_graph: bool = False
+    ):
         check_attention_inputs(attention_inputs)
-        fmha_params = rtp_llm_ops.fill_mla_params(
-            attention_inputs.prefix_lengths,
+        fmha_params = rtp_llm_ops.fill_decode_mla_params(
             attention_inputs.sequence_lengths,
-            attention_inputs.input_lengths,
             attention_inputs.kv_cache_block_id_host,
+            attention_inputs.input_lengths.size(0),
             self.token_per_block,
         )
+        self.init_mla_wrapper(fmha_params, use_cuda_graph)
         self.plan(fmha_params)
         return fmha_params
 
     def plan(self, fmha_params: Any):
         self.mla_wrapper.plan(
-            fmha_params.qo_indptr,
-            fmha_params.decode_page_indptr,
-            fmha_params.page_indice,
-            fmha_params.kvlen,
+            fmha_params.qo_indptr_h,
+            fmha_params.decode_page_indptr_h,
+            fmha_params.page_indice_d,
+            fmha_params.kvlen_h,
             self.num_heads,
             self.kv_lora_rank,
             self.qk_rope_head_dim,
@@ -452,7 +482,6 @@ class MlaFlashInferDecodeOp(object):
         q_nope: torch.Tensor,
         q_pe: torch.Tensor,
         kv_cache: Optional[KVCache],
-        fmha_params: Any,
         layer_id: int,
     ) -> torch.Tensor:
 
@@ -524,10 +553,10 @@ class TrtV2PrefillAttentionOp(object):
         self.attn_configs = attn_configs
         self.quant_config = quant_config
         self.weights = weights
-        self.use_mla = use_mla   
+        self.use_mla = use_mla
         # Get FMHAConfig - will check in support() method
         self.fmha_config = fmha_config
-        
+
         from rtp_llm.ops.compute_ops import TRTAttnOp
 
         self.fmha_impl = TRTAttnOp(attn_configs)
@@ -555,7 +584,7 @@ class TrtV2PrefillAttentionOp(object):
     ) -> torch.Tensor:
         k_pe = k_pe.view(-1, 1, self.qk_rope_head_dim)
         self.k_nope_proj = LinearFactory.create_linear_from_weights(
-            self.weights[layer_id], W.mla_k_nope_w, W.mla_k_nope_s, None, 
+            self.weights[layer_id], W.mla_k_nope_w, W.mla_k_nope_s, None,
             self.quant_config
         )
 
