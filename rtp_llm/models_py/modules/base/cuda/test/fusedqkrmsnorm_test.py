@@ -335,7 +335,7 @@ class FusedQKRMSNormTest(TestCase):
         print("Benchmark completed!")
 
         # Save results to CSV
-        csv_filename = "fusedqkrmsnorm_benchmark_results.csv"
+        csv_filename = "/home/xiebaijie.xbj/fusedqkrmsnorm_benchmark_results.csv"
         with open(csv_filename, 'w', newline='') as csvfile:
             fieldnames = ['num_tokens', 'dtype', 'operator', 'latency_us', 'throughput_gb_s', 'bandwidth_gb_s']
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
