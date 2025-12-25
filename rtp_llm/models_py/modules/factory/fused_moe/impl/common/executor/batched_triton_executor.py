@@ -147,8 +147,4 @@ class BatchedTritonExperts(FusedMoeExpertExecutor):
             compute_type=compute_type,
         )
 
-        return CombineForwardPayload(
-            fused_expert_output=output,
-            fused_expert_output_rounds=None,
-            expert_done_events=None,
-        )
+        return CombineForwardPayload(fused_expert_output=output)

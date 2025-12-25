@@ -275,11 +275,7 @@ class CutlassExpertsFp8(FusedMoeExpertExecutor):
             hidden_size=K,
             BLOCK_SIZE=512,
         )
-        return CombineForwardPayload(
-            fused_expert_output=output,
-            fused_expert_output_rounds=None,
-            expert_done_events=None,
-        )
+        return CombineForwardPayload(fused_expert_output=output)
 
 
 class CutlassBatchedExpertsFp8(FusedMoeExpertExecutor):
@@ -504,8 +500,4 @@ class CutlassBatchedExpertsFp8(FusedMoeExpertExecutor):
             elements_m,
             swap_ab_gemm2,
         )
-        return CombineForwardPayload(
-            fused_expert_output=output,
-            fused_expert_output_rounds=None,
-            expert_done_events=None,
-        )
+        return CombineForwardPayload(fused_expert_output=output)

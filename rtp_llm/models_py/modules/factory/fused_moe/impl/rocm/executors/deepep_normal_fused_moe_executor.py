@@ -151,9 +151,7 @@ class FusedMoeExecutor(FusedMoeExpertExecutor):
             return CombineForwardPayload(
                 fused_expert_output=torch.empty(
                     (0, a1.shape[-1]), dtype=a1.dtype, device=a1.device
-                ),
-                fused_expert_output_rounds=None,
-                expert_done_events=None,
+                )
             )
 
         dtype = a1.dtype
@@ -236,11 +234,7 @@ class FusedMoeExecutor(FusedMoeExpertExecutor):
             sorted_weights=sorted_weights if not apply_router_weight_on_input else None,
         )
 
-        return CombineForwardPayload(
-            fused_expert_output=moe_buf,
-            fused_expert_output_rounds=None,
-            expert_done_events=None,
-        )
+        return CombineForwardPayload(fused_expert_output=moe_buf)
 
 
 def torch_moe_ref(
