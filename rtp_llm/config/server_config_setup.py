@@ -7,7 +7,6 @@ import torch
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.distribute.worker_info import g_parallel_info, update_worker_info
 from rtp_llm.model_factory_register import ModelDict
-from rtp_llm.models_py.utils.arch import is_hip
 from rtp_llm.ops import RoleType
 from rtp_llm.utils.fuser import fetch_remote_file_to_local
 
@@ -52,9 +51,7 @@ def auto_configure_deepep(
     moe_config.use_all_gather = (
         moe_config.use_all_gather
         and not deep_ep_config.use_deepep_low_latency
-        and ep_size == tp_size
-        and not is_hip()
-    )
+        and ep_size == tp_size)
 
     if moe_config.use_all_gather:
         moe_config.use_deepep_moe = False
