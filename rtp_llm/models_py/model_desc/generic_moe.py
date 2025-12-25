@@ -10,10 +10,10 @@ from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
     AttnImplFactory,
     CausalAttention,
+    DenseMLP,
     Embedding,
     FMHAImplBase,
     FusedMoeFactory,
-    FusedSiluActDenseMLP,
     GroupTopK,
     LinearFactory,
     MlaAttention,
@@ -181,7 +181,7 @@ class GenericMoeDecoderLayer(nn.Module):
         self.shared_mlp = None
         if self.is_dense_layer or self.add_shared_expert:
             try:
-                self.shared_mlp = FusedSiluActDenseMLP(
+                self.shared_mlp = DenseMLP(
                     config.activation_type, parallelism_config, weights, quant_config
                 )
             except (KeyError, AssertionError) as e:
