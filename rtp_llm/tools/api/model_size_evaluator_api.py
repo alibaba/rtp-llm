@@ -2,11 +2,11 @@ import json
 import logging
 from typing import Any, Dict, Union
 
-from rtp_llm.config.model_config import ModelConfig, build_model_config
+from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_args import ModelArgs
+from rtp_llm.config.model_config import ModelConfig, build_model_config
 from rtp_llm.config.py_config_modules import QuantizationConfig
 from rtp_llm.config.quant_config import init_quant_config
-from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.ops import ProfilingDebugLoggingConfig
 from rtp_llm.tools.api.hf_model_helper import HfStyleModelInfo, get_hf_model_info
@@ -16,28 +16,28 @@ from rtp_llm.utils.fuser import fetch_remote_file_to_local, umount_file
 
 def _get_quantization_from_env_params(env_params: Dict[str, str]) -> str:
     """Get quantization setting from environment parameters.
-    
+
     Compatibility function for tools that need to extract quantization from env_params.
-    
+
     Args:
         env_params: Dictionary of environment parameters
-        
+
     Returns:
         Quantization string or empty string
     """
     QUANTIZATION_KEY = "QUANTIZATION"
     WEIGHT_TYPE = "WEIGHT_TYPE"
     INT8_MODE = "INT8_MODE"
-    
+
     quantization = env_params.get(QUANTIZATION_KEY, "")
-    
+
     # Compatibility logic: if int8_mode == 1 or weight_type is INT8, set quantization to INT8
     if not quantization:
         int8_mode = env_params.get(INT8_MODE, "0")
         weight_type = env_params.get(WEIGHT_TYPE, "").upper()
         if int(int8_mode) == 1 or weight_type == "INT8":
             quantization = "INT8"
-    
+
     return quantization or ""
 
 
@@ -46,7 +46,7 @@ def eval_model_size(env_params, model_type, model_path, ptuning_path):
     quantization = _get_quantization_from_env_params(env_params)
     logging.info(f"env_params: {env_params}, quantization: {quantization}")
     # Use _create_config to get base config from C++
-    config: ModelConfig = model_cls._create_config(model_path)
+    config: ModelConfig = model_cls.create_config(model_path)
     # Apply settings from env_params
     model_args = ModelArgs()
     model_args.model_type = model_type
@@ -54,7 +54,7 @@ def eval_model_size(env_params, model_type, model_path, ptuning_path):
     model_args.tokenizer_path = model_path
     model_args.ptuning_path = ptuning_path
     model_args.max_seq_len = int(env_params.get("MAX_SEQ_LEN", "0"))
-    
+
     quantization_config = QuantizationConfig()
     quantization_config.quantization = quantization
 
@@ -62,11 +62,13 @@ def eval_model_size(env_params, model_type, model_path, ptuning_path):
     kv_cache_config.int8_kv_cache = int(env_params.get("INT8_KV_CACHE", "0")) == 1
     kv_cache_config.fp8_kv_cache = int(env_params.get("FP8_KV_CACHE", "0")) == 1
 
-    build_model_config(config,
-                       model_args=model_args,
-                       kv_cache_config=kv_cache_config,
-                       profiling_debug_logging_config=ProfilingDebugLoggingConfig(),
-                       quantization_config=quantization_config)
+    build_model_config(
+        config,
+        model_args=model_args,
+        kv_cache_config=kv_cache_config,
+        profiling_debug_logging_config=ProfilingDebugLoggingConfig(),
+        quantization_config=quantization_config,
+    )
 
     return config.eval_model_size(), config.model_param_count()
 

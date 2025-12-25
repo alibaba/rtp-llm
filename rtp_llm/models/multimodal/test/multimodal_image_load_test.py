@@ -8,7 +8,13 @@ import pillow_avif
 import pillow_heif
 from PIL import Image, ImageFile
 
+from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.models.multimodal.multimodal_common import ImageEmbeddingInterface
+from rtp_llm.utils.base_model_datatypes import (
+    MMPreprocessConfig,
+    MMUrlType,
+    MultimodalInput,
+)
 
 
 class ImageLoadTest(TestCase):
@@ -33,9 +39,36 @@ class ImageLoadTest(TestCase):
             image.save(temp_dir + "/test.heic")
 
             try:
-                self.image_embedding._mm_preprocess(temp_dir + "/test.png")
-                self.image_embedding._mm_preprocess(temp_dir + "/test.avif")
-                self.image_embedding._mm_preprocess(temp_dir + "/test.heic")
+                self.image_embedding.preprocess_input(
+                    [
+                        MultimodalInput(
+                            url=temp_dir + "/test.png",
+                            mm_type=MMUrlType.IMAGE,
+                            config=MMPreprocessConfig(),
+                        )
+                    ],
+                    VitConfig(),
+                )
+                self.image_embedding.preprocess_input(
+                    [
+                        MultimodalInput(
+                            url=temp_dir + "/test.avif",
+                            mm_type=MMUrlType.IMAGE,
+                            config=MMPreprocessConfig(),
+                        )
+                    ],
+                    VitConfig(),
+                )
+                self.image_embedding.preprocess_input(
+                    [
+                        MultimodalInput(
+                            url=temp_dir + "/test.heic",
+                            mm_type=MMUrlType.IMAGE,
+                            config=MMPreprocessConfig(),
+                        )
+                    ],
+                    VitConfig(),
+                )
 
                 self.assertTrue(
                     isinstance(
