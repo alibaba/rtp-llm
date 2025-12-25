@@ -160,6 +160,8 @@ class OpenaiEndpoint(object):
         ):
             config.max_thinking_tokens = request.extra_configs.max_thinking_tokens
         config.add_thinking_params(self.tokenizer)
+        if request.debug_info:
+            config.return_output_ids = True
         return config
 
     def _merge_tool_calls(
@@ -313,6 +315,18 @@ class OpenaiEndpoint(object):
         if usage == None:
             logging.warning(f"No usage returned from stream response. use empty value.")
             usage = UsageInfo(prompt_tokens=0, total_tokens=0, completion_tokens=0)
+
+        if (
+            debug_info is not None
+            and extra_outputs is not None
+            and extra_outputs.output_ids is not None
+        ):
+            debug_info.output_ids = extra_outputs.output_ids
+            debug_info.raw_output = [
+                self.tokenizer.decode(output_ids)
+                for output_ids in extra_outputs.output_ids
+            ]
+
         return ChatCompletionResponse(
             choices=all_choices,
             usage=usage,
@@ -330,11 +344,24 @@ class OpenaiEndpoint(object):
         async def response_generator():
             debug_info_responded = False
             async for response in choice_generator:
+                output = None
+                if (
+                    debug_info is not None
+                    and response.extra_outputs is not None
+                    and response.extra_outputs.output_ids is not None
+                ):
+                    output = DebugInfo()
+                    output.output_ids = response.extra_outputs.output_ids
+                    output.raw_output = [
+                        self.tokenizer.decode(output_ids)
+                        for output_ids in response.extra_outputs.output_ids
+                    ]
+
                 yield ChatCompletionStreamResponse(
                     choices=response.choices,
                     usage=response.usage,
                     aux_info=response.aux_info,
-                    debug_info=debug_info if not debug_info_responded else None,
+                    debug_info=debug_info if not debug_info_responded else output,
                     extra_outputs=response.extra_outputs,
                 )
                 debug_info_responded = True

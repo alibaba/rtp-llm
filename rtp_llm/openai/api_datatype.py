@@ -232,16 +232,18 @@ class RendererInfo(BaseModel):
 
 
 class DebugInfo(BaseModel):
-    input_prompt: str
-    input_ids: List[int]
-    input_urls: List[str]
-    tokenizer_info: str
-    max_seq_len: int
-    eos_token_id: Optional[int]
-    stop_word_ids_list: List[List[int]]
-    stop_words_list: List[str]
-    renderer_info: RendererInfo
-    generate_config: GenerateConfig
+    input_prompt: Optional[str] = None
+    input_ids: Optional[List[int]] = None
+    input_urls: Optional[List[str]] = None
+    tokenizer_info: Optional[str] = None
+    max_seq_len: Optional[int] = None
+    eos_token_id: Optional[int] = None
+    stop_word_ids_list: Optional[List[List[int]]] = None
+    stop_words_list: Optional[List[str]] = None
+    renderer_info: Optional[RendererInfo] = None
+    generate_config: Optional[GenerateConfig] = None
+    output_ids: Optional[List[List[int]]] = None
+    raw_output: Optional[List[str]] = None
 
 
 class ChatCompletionResponseChoice(BaseModel):
