@@ -160,6 +160,8 @@ class OpenaiEndpoint(object):
         ):
             config.max_thinking_tokens = request.extra_configs.max_thinking_tokens
         config.add_thinking_params(self.tokenizer)
+        if request.debug_info:
+            config.return_output_ids = True
         return config
 
     def _merge_tool_calls(
@@ -313,6 +315,18 @@ class OpenaiEndpoint(object):
         if usage == None:
             logging.warning(f"No usage returned from stream response. use empty value.")
             usage = UsageInfo(prompt_tokens=0, total_tokens=0, completion_tokens=0)
+
+        if (
+            debug_info is not None
+            and extra_outputs is not None
+            and extra_outputs.output_ids is not None
+        ):
+            debug_info.output_ids = extra_outputs.output_ids
+            debug_info.raw_output = [
+                self.tokenizer.decode(output_ids)
+                for output_ids in extra_outputs.output_ids
+            ]
+
         return ChatCompletionResponse(
             choices=all_choices,
             usage=usage,
