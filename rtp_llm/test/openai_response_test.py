@@ -208,7 +208,7 @@ class BaseToolCallTestSuite:
         misc_config = PyMiscellaneousConfig()
         vit_config = VitConfig()
         special_tokens = self.parent.model_config.special_tokens
-        
+
         # Create ModelConfig object for OpenaiEndpoint
         model_config = ModelConfig()
         model_config.generate_env_config = generate_env_config
@@ -218,7 +218,7 @@ class BaseToolCallTestSuite:
         model_config.template_type = None
         model_config.model_name = ""
         model_config.ckpt_path = ""
-        
+
         pd_sep_config = PDSepConfig()
         backend_rpc_server_visitor = BackendRPCServerVisitor(
             max_seq_len=self.parent.model_config.max_seq_len,
@@ -314,7 +314,9 @@ class BaseToolCallTestSuite:
     def _validate_merged_result(self, merged_result):
         """验证合并后的结果 - 通用验证逻辑"""
         choice = merged_result.choices[0]
-        assert choice.finish_reason == FinisheReason.tool_calls, f"got finish_reason: {choice.finish_reason}"
+        assert (
+            choice.finish_reason == FinisheReason.tool_calls
+        ), f"got finish_reason: {choice.finish_reason}"
         delta = choice.delta
         assert delta.role == RoleEnum.assistant
         self._assert_tool_call_response(delta)
@@ -346,6 +348,8 @@ class BaseToolCallTestSuite:
 class QwenTestTokenizer(BaseTokenizer):
     def init_tokenizer(self, tokenizer_path: str, config_json={}):
         self.tokenizer = QWenTokenizer(tokenizer_path)
+        self.im_start_id = self.tokenizer.im_start_id
+        self.im_end_id = self.tokenizer.im_end_id
 
 
 class OpenaiResponseTest(IsolatedAsyncioTestCase):
@@ -2291,6 +2295,54 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         )
 
         await return_output_ids_test_suite.test_no_stream()
+
+    async def test_debug_info_with_output_ids_and_raw_output(self):
+        """Test that debug_info includes output_ids and raw_output when debug_info=True"""
+        tokenizer = QwenTestTokenizer(
+            f"{self.test_data_path}/qwen_7b/tokenizer/qwen.tiktoken"
+        )
+        test_ids = [198, 84169, 25, 49434, 239, 73670, 37029]
+
+        generate_env_config = GenerateEnvConfig()
+        render_config = RenderConfig()
+        render_params = RendererParams(
+            model_type="qwen",
+            max_seq_len=MAX_SEQ_LEN,
+            eos_token_id=tokenizer.eos_token_id or 0,
+            stop_word_ids_list=[],
+        )
+        chat_renderer = ChatRendererFactory.get_renderer(
+            tokenizer,
+            render_params,
+            generate_env_config=generate_env_config,
+            render_config=render_config,
+        )
+        request = ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="hello")],
+            stream=False,
+        )
+        input_length = 314
+        id_generator = fake_output_generator_once(
+            test_ids, MAX_SEQ_LEN, tokenizer.eos_token_id or 0, input_length
+        )
+
+        generate_config = GenerateConfig(is_streaming=False, return_output_ids=True)
+        stream_generator = chat_renderer.render_response_stream(
+            id_generator, request, generate_config
+        )
+
+        debug_info = None
+        generate = OpenaiEndpoint._complete_stream_response(
+            stream_generator, debug_info, tokenizer
+        )
+        async for x in generate:
+            pass
+        response = await generate.gen_complete_response_once()
+
+        self.assertIsNotNone(response.extra_outputs)
+        self.assertIsNotNone(response.extra_outputs.output_ids)
+        self.assertEqual(len(response.extra_outputs.output_ids), 1)
+        self.assertEqual(response.extra_outputs.output_ids[0], test_ids)
 
 
 if __name__ == "__main__":
