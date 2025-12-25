@@ -215,7 +215,11 @@ class MlaFlashInferDecodeImpl(FMHADecodeImplBase):
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
         self.fmha_impl.cuda_graph_kv_indices = torch.empty(
-            (self.bs * self.max_context_len // self.seq_size_per_block),
+            (
+                (self.max_context_len + self.seq_size_per_block - 1)
+                // self.seq_size_per_block
+            )
+            * self.bs,
             dtype=torch.int32,
             device="cuda",
         )
