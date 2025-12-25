@@ -1,7 +1,7 @@
 import json
 import logging
 import os
-from typing import Any, Optional, Union
+from typing import Any, Optional, Type, Union
 
 import torch
 
@@ -9,8 +9,6 @@ from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import VitConfig
-from rtp_llm.distribute.distributed_server import get_world_info
-from rtp_llm.distribute.worker_info import ParallelInfo, g_parallel_info
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import (
     BaseTokenizer,
     TokenizerFactory,
@@ -236,7 +234,7 @@ class BaseModel(object):
         return model
 
     @staticmethod
-    def get_weight_cls() -> ModelDeployWeightInfo:
+    def get_weight_cls() -> Type[ModelDeployWeightInfo]:
         raise NotImplementedError
 
     @property
