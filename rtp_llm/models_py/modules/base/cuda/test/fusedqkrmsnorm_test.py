@@ -158,15 +158,15 @@ class FusedQKRMSNormTest(TestCase):
                 latency_us_flashinfer = latency_ms_flashinfer * 1e3
 
                 # Calculate throughput for flashinfer
-                # Input: q_reshaped + k_reshaped, weights: q_weight + k_weight, output: q_out + k_out
+                # Input: q_input + k_input, weights: q_weight + k_weight, output: q_out + k_out
                 total_elements_flashinfer = (
-                    q_reshaped.numel() * 2 + k_reshaped.numel() * 2 + q_weight.numel() + k_weight.numel()
+                    q_input.numel() * 2 + k_input.numel() * 2 + q_weight.numel() + k_weight.numel()
                 )
                 total_bytes_flashinfer = total_elements_flashinfer * x.element_size()
                 throughput_gb_s_flashinfer = total_bytes_flashinfer / (latency_ms_flashinfer * 1e-3) * 1e-9
 
                 # Effective bandwidth (read + write)
-                io_bytes_flashinfer = (q_reshaped.numel() + k_reshaped.numel()) * x.element_size() * 2
+                io_bytes_flashinfer = (q_input.numel() + k_input.numel()) * x.element_size() * 2
                 bandwidth_gb_s_flashinfer = io_bytes_flashinfer / (latency_ms_flashinfer * 1e-3) * 1e-9
 
                 print(
