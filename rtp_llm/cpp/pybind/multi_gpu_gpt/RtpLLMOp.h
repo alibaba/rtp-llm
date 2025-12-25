@@ -35,6 +35,8 @@ public:
     bool updateEplbConfig(const EPLBConfig& config);
     void pause();
     void restart();
+    void detachPhysicalMemory();
+    void attachPhysicalMemory();
 
 private:
     void                                                   _init(int64_t                                                model_rpc_port,

@@ -172,7 +172,7 @@ CudaDevice::CudaDevice(const DeviceInitParams& params): DeviceBase(params) {
     // hijack torch cuda allocator
     origin_torch_cuda_allocator_  = at::cuda::CUDACachingAllocator::allocator;
     managed_torch_cuda_allocator_ = std::make_unique<TorchCudaAllocator>(this);
-    at::cuda::CUDACachingAllocator::allocator.store(managed_torch_cuda_allocator_.get());
+    replaceTorchAllocator();
 
     cublas_algo_map_.reset(new cublasAlgoMap(GEMM_CONFIG));
     cublas_mm_wrapper_.reset(new cublasMMWrapper(
@@ -240,7 +240,11 @@ void CudaDevice::init() {
     DeviceBase::init();
 
     RTP_LLM_LOG_INFO("cuda device init max batch size: %d\n", init_params_.max_batch_size);
-    curandstate_buf_ = allocateBuffer({init_params_.max_batch_size * sizeof(curandState_t)}, {"curandstate"});
+    curandstate_buf_ = allocateBuffer({init_params_.max_batch_size * sizeof(curandState_t),
+                                       AllocationType::DEVICE,
+                                       false,
+                                       VmemCtl::ForceMemoryResident},
+                                      {"curandstate"});
 }
 
 // pre-allocate buffer before buffer managaer
@@ -922,4 +926,33 @@ void CudaDevice::chainSpeculativeSampling(const SpeculativeSamplingParams& param
                                false,
                                int64_t(stream_));
 }
+
+void CudaDevice::detachPhysicalMemory() {
+    // Attempt to detach and clear physical memory.
+    if (auto allocator = dynamic_cast<rtp_llm::IVirtualMemAllocator*>(getAllocator())) {
+        return allocator->unmap();
+    } else {
+        throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+    }
+}
+
+void CudaDevice::attachPhysicalMemory() {
+    // Try to allocate physical memory and attach it to a virtual address.
+    if (auto allocator = dynamic_cast<rtp_llm::IVirtualMemAllocator*>(getAllocator())) {
+        return allocator->map();
+    } else {
+        throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+    }
+}
+
+void CudaDevice::restoreTorchAllocator() {
+    // change the device memory allocator to torch
+    at::cuda::CUDACachingAllocator::allocator.store(origin_torch_cuda_allocator_);
+}
+
+void CudaDevice::replaceTorchAllocator() {
+    // change the device memory allocator to rtp pool
+    at::cuda::CUDACachingAllocator::allocator.store(managed_torch_cuda_allocator_.get());
+}
+
 };  // namespace rtp_llm

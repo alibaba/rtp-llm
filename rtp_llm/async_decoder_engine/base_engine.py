@@ -79,3 +79,50 @@ class BaseEngine:
         """Restarts the engine's execution."""
         raise NotImplementedError()
 
+    @property
+    def task_type(self) -> TaskType:
+        return self.model.task_type
+
+    @property
+    def default_generate_config(self) -> GenerateConfig:
+        return self.model.default_generate_config
+
+    @abstractmethod
+    def detach_physical_memory(self) -> bool:
+        """
+        Release physical GPU memory while retaining the virtual address space.
+        This method is intended for engines that support virtual memory. It
+        immediately unmaps and frees all **physical** backing memory without
+        releasing the reserved **virtual** addresses.  If any requests are still
+        in flight, the engine **must** wait for them to complete before
+        performing the detach operation.
+        Returns
+        -------
+        bool
+            ``True``  – physical memory was successfully released.
+            ``False`` – the engine does not support virtual memory **or** the
+            detach operation failed.
+        Notes
+        -----
+        After a successful detach, the virtual addresses remain valid but
+        accessing them will raise a device page-fault until
+        :meth:`attach_physical_memory` is called.
+        """
+        raise NotImplementedError()
+
+    @abstractmethod
+    def attach_physical_memory(self) -> bool:
+        """
+        Re-attach / map physical memory to previously reserved virtual addresses.
+        For every virtual address range that was **reserved but not mapped**
+        (e.g., after :meth:`detach_physical_memory`), this method allocates
+        physical GPU memory and binds it to those ranges.  Virtual addresses that
+        already have physical backing are **not** re-allocated.
+        Returns
+        -------
+        bool
+            ``True``  – physical memory was successfully (re-)mapped.
+            ``False`` – the engine lacks virtual-memory support **or** the
+            mapping operation failed.
+        """
+        raise NotImplementedError()

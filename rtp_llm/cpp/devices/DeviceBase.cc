@@ -78,8 +78,12 @@ BufferStatus DeviceBase::queryBufferStatus() {
 }
 
 BufferPtr DeviceBase::allocateBuffer(const BufferParams& params, const BufferHints& hints) {
-    return buffer_manager_->allocate(
-        {params.type, params.dims, params.allocation, nativeGraphCapturing() ? true : params.private_alloc}, hints);
+    return buffer_manager_->allocate({params.type,
+                                      params.dims,
+                                      params.allocation,
+                                      nativeGraphCapturing() ? true : params.private_alloc,
+                                      params.vmem_ctl},
+                                     hints);
 }
 
 BufferPtr DeviceBase::allocateBufferLike(const Buffer& buffer, const AllocationType atype, const BufferHints& hints) {
@@ -522,6 +526,26 @@ void DeviceBase::profileStart() {
 
 void DeviceBase::profileStop() {
     return;
+}
+
+void DeviceBase::detachPhysicalMemory() {
+    RTP_LLM_LOG_ERROR("detach physical memory is not available");
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
+void DeviceBase::attachPhysicalMemory() {
+    RTP_LLM_LOG_ERROR("attach physical memory is not available");
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
+void DeviceBase::restoreTorchAllocator() {
+    RTP_LLM_LOG_ERROR("Torch memory allocator is not available");
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
+void DeviceBase::replaceTorchAllocator() {
+    RTP_LLM_LOG_ERROR("Rtp memory allocator is not available");
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
 }  // namespace rtp_llm

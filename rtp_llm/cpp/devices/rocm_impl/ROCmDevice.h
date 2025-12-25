@@ -40,11 +40,11 @@ struct AiterAttnParams {
     KVBlockArray kv_block_array;
     BufferPtr    kv_cache_offset;
 
-    static ParamsPtr prepareDecodeAiterAttnParams(rtp_llm::DeviceBase* device,
-                                              const BufferPtr& sequence_lengths_host,
-                                              const AttentionConfigs& configs,
-                                              const int kv_cache_offset,
-                                              const BufferPtr& kv_cache_block_id);
+    static ParamsPtr prepareDecodeAiterAttnParams(rtp_llm::DeviceBase*    device,
+                                                  const BufferPtr&        sequence_lengths_host,
+                                                  const AttentionConfigs& configs,
+                                                  const int               kv_cache_offset,
+                                                  const BufferPtr&        kv_cache_block_id);
 };
 
 struct FlashInferAttnParams {
@@ -179,39 +179,39 @@ public:
     IAllocator* getHostAllocator() override {
         return hostAllocator_.get();
     }
-    void                   copy(const CopyParams& params) override;
-    void                   noBlockCopy(const CopyParams& params) override;
-    void                   bufMemset(Buffer& buf, int val, DeviceStream stream = DeviceStream::DEFAULT) override;
-    TransposeOutput        transpose(const TransposeParams& params) override;
-    void                   checkError() override;
-    void                   syncAndCheck() override;
-    void                   overlappedCommBarrier() override;
-    DeviceHookPtr          createCommHook() override;
-    void                   overlappedComputeBarrier() override;
-    DevicePrepOutput       prepareModelRun(const DevicePrepParams& params) override;
-    BufferPtr              gemm(const GemmParams& params) override;
-    SelectOutput           select(const SelectParams& params) override;
-    MultiplyOutput         multiply(const MultiplyParams& params) override;
-    BufferPtr              embeddingLookup(const EmbeddingLookupParams& params) override;
-    LayernormOutput        layernorm(const LayernormParams& params) override;
-    LayernormOutput        layernormWithStride(const LayernormWithStrideParams& params) override;
-    QkRmsNormOutput        qkRmsNorm(const QkRmsNormParams& params) override;
-    BufferPtr              activation(const ActivationParams& params) override;
-    AttentionModuleOutput  contextAttention(const AttentionModuleParams& params) override;
-    AttentionModuleOutput  mlaContextAttention(const MlaAttentionModuleParams& params) override;
-    AttentionModuleOutput  decoderSelfAttention(const AttentionModuleParams& params) override;
-    MoeGateSelectOutput    moeGateSelect(const FfnLayerParams& params) override;
-    FfnLayerOutput         moeFfn(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs) override;
-    FfnLayerOutput         ffnLayer(const FfnLayerParams& params) override;
-    MoeDispatchOutput      epDispatch(const MoeDispatchParams& params) override;
-    MoeCombineOutput       epCombine(const MoeCombineParams& params) override;
-    FfnLayerOutput         gatherCombineOutput(const MoeCombineOutput& params) override;
+    void                  copy(const CopyParams& params) override;
+    void                  noBlockCopy(const CopyParams& params) override;
+    void                  bufMemset(Buffer& buf, int val, DeviceStream stream = DeviceStream::DEFAULT) override;
+    TransposeOutput       transpose(const TransposeParams& params) override;
+    void                  checkError() override;
+    void                  syncAndCheck() override;
+    void                  overlappedCommBarrier() override;
+    DeviceHookPtr         createCommHook() override;
+    void                  overlappedComputeBarrier() override;
+    DevicePrepOutput      prepareModelRun(const DevicePrepParams& params) override;
+    BufferPtr             gemm(const GemmParams& params) override;
+    SelectOutput          select(const SelectParams& params) override;
+    MultiplyOutput        multiply(const MultiplyParams& params) override;
+    BufferPtr             embeddingLookup(const EmbeddingLookupParams& params) override;
+    LayernormOutput       layernorm(const LayernormParams& params) override;
+    LayernormOutput       layernormWithStride(const LayernormWithStrideParams& params) override;
+    QkRmsNormOutput       qkRmsNorm(const QkRmsNormParams& params) override;
+    BufferPtr             activation(const ActivationParams& params) override;
+    AttentionModuleOutput contextAttention(const AttentionModuleParams& params) override;
+    AttentionModuleOutput mlaContextAttention(const MlaAttentionModuleParams& params) override;
+    AttentionModuleOutput decoderSelfAttention(const AttentionModuleParams& params) override;
+    MoeGateSelectOutput   moeGateSelect(const FfnLayerParams& params) override;
+    FfnLayerOutput        moeFfn(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs) override;
+    FfnLayerOutput        ffnLayer(const FfnLayerParams& params) override;
+    MoeDispatchOutput     epDispatch(const MoeDispatchParams& params) override;
+    MoeCombineOutput      epCombine(const MoeCombineParams& params) override;
+    FfnLayerOutput        gatherCombineOutput(const MoeCombineOutput& params) override;
 #ifdef ENABLE_DEEP_EP
     MoeDispatchOutput deepEpDispatch(const MoeDispatchParams& params);
-    MoeCombineOutput deepEpCombine(const MoeCombineParams& params);
+    MoeCombineOutput  deepEpCombine(const MoeCombineParams& params);
     MoeDispatchOutput deepEpLLDispatch(const MoeDispatchParams& params);
-    MoeCombineOutput deepEpLLCombine(const MoeCombineParams& params);
-    FfnLayerOutput deepEpLLMoeFfn(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs) override;
+    MoeCombineOutput  deepEpLLCombine(const MoeCombineParams& params);
+    FfnLayerOutput    deepEpLLMoeFfn(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs) override;
 #endif
     BufferPtr              softmax(const SoftmaxParams& params) override;
     GreedyOutput           sampleGreedy(const GreedyParams& params) override;
@@ -257,6 +257,11 @@ public:
             custom_allreduce_comm_->registerGraphBuffers();
     }
 
+    void detachPhysicalMemory() override;
+    void attachPhysicalMemory() override;
+    void restoreTorchAllocator() override;
+    void replaceTorchAllocator() override;
+
 protected:
     void InvokeROCmDeepGemm(const GemmParams& params, BufferPtr output);
     void InvokeROCmPTPCGemm(const GemmParams& params, BufferPtr output);
@@ -301,12 +306,12 @@ private:
 
     std::unique_ptr<at::hip::HIPStreamMasqueradingAsCUDA> torch_default_stream_;
     std::unique_ptr<at::hip::HIPStreamMasqueradingAsCUDA> torch_comm_stream_;
-    hipStream_t     stream_ = nullptr;
-    hipStream_t     no_block_copy_stream_;
-    hipStream_t     communication_stream_;
-    hipStream_t     assist_stream_  = nullptr;
-    hipStream_t     current_stream_ = nullptr;
-    hipDeviceProp_t device_prop_;
+    hipStream_t                                           stream_ = nullptr;
+    hipStream_t                                           no_block_copy_stream_;
+    hipStream_t                                           communication_stream_;
+    hipStream_t                                           assist_stream_  = nullptr;
+    hipStream_t                                           current_stream_ = nullptr;
+    hipDeviceProp_t                                       device_prop_;
 
     BufferPtr curandstate_buf_;  // for sampler use.
 
@@ -338,7 +343,7 @@ private:
     // moe
     // std::unique_ptr<rocmMoeWrapper> moe_runner_;
 #ifdef ENABLE_DEEP_EP
-    bool initDeepEPBuffer();
+    bool                          initDeepEPBuffer();
     std::unique_ptr<DeepEPBuffer> deepep_buffer_ = nullptr;  // for deep_ep use
 #endif
     uint32_t ll_num_max_token_per_rank = 0;

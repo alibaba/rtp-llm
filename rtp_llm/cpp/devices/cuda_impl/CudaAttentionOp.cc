@@ -383,7 +383,9 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
         q_output = allocateBuffer(
             {params.input.type(), {batch_size, local_head_num, size_per_head}, AllocationType::DEVICE}, {"q_output"});
 
+        this->restoreTorchAllocator();
         auto rope_cache = getRopeCacheOnce(params.configs.rope_config, init_params_.max_seq_len);
+        this->replaceTorchAllocator();
 
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(
             params.input.type(),

@@ -87,6 +87,10 @@ public:
     DeviceEventPtr   createEvent() override;
     DeviceEventPtr   createTorchEvent() override;
     bool             useGroupGemm() const;
+    void             detachPhysicalMemory() override;
+    void             attachPhysicalMemory() override;
+    void             restoreTorchAllocator() override;
+    void             replaceTorchAllocator() override;
     GraphBase*       getDeviceGraphRunner(const DeviceInitParams& params,
                                           py::object              py_instance,
                                           int                     kv_cache_block_offset,
@@ -213,8 +217,8 @@ public:
     MoeCombineOutput  deepEpLLCombine(const MoeCombineParams& params);
     FfnLayerOutput    deepEpLLMoeFfn(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs);
 
-    void                              prepareCommBuffer(const PrepareCommBufferParams& params) override;
-    void                              maskLogits(Buffer& logits, const Buffer& mask) override;
+    void prepareCommBuffer(const PrepareCommBufferParams& params) override;
+    void maskLogits(Buffer& logits, const Buffer& mask) override;
 
     void perfRangePush(const std::string& name) const override;
     void perfRangePop() const override;
@@ -344,6 +348,7 @@ protected:
     // for local perf
     bool                                        hack_moe_expert_ = false;
     std::shared_ptr<c10::cuda::CUDAStreamGuard> guard_;
+    BufferPtr                                   rope_;
 };
 
 }  // namespace rtp_llm
