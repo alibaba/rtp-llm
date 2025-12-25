@@ -37,9 +37,21 @@ def get_cuda_info():
     result = subprocess.run(
         [sys.executable, "-c", python_code], capture_output=True, text=True, check=False
     )
-    cuda_info = json.loads(result.stdout)
-    if not cuda_info:
-        return None
+    logging.info("result.stdout = ", result.stdout)
+    try:
+        cuda_info = json.loads(result.stdout)
+        if not cuda_info:
+            return None
+    except Exception as e:
+        # fallback to get device count when subprocess execute failed
+        import torch
+
+        if torch.cuda.is_available():
+            device_info = {torch.cuda.get_device_name(0): torch.cuda.device_count()}
+        else:
+            device_info = {}
+        cuda_info = device_info
+
     name = list(cuda_info.keys())[0]
     count = cuda_info[name]
     return name, count
