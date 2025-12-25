@@ -57,6 +57,17 @@ GptModelInputs NativeGraphRunnerBase<GptModelInputs, GptModelOutputs>::prepareIn
                                      nullptr;
     auto combo_position_ids =
         old.combo_position_ids ? device_->allocateBufferLike(*old.combo_position_ids, AllocationType::HOST) : nullptr;
+    auto prefill_cp_padding_lengths =
+        old.prefill_cp_padding_lengths ?
+            device_->allocateBufferLike(*old.prefill_cp_padding_lengths, AllocationType::HOST) :
+            nullptr;
+    auto prefill_cp_chunk_lengths =
+        old.prefill_cp_chunk_lengths ?
+            device_->allocateBufferLike(*old.prefill_cp_chunk_lengths, AllocationType::HOST) :
+            nullptr;
+    auto prefill_shuffle_indices = old.prefill_shuffle_indices ?
+                                       device_->allocateBufferLike(*old.prefill_shuffle_indices, AllocationType::HOST) :
+                                       nullptr;
     auto last_hidden_states =
         old.last_hidden_states ? device_->allocateBufferLike(*old.last_hidden_states, AllocationType::HOST) : nullptr;
     auto lora_ids = old.lora_ids ? device_->allocateBufferLike(*old.lora_ids, AllocationType::HOST) : nullptr;
@@ -92,6 +103,9 @@ GptModelInputs NativeGraphRunnerBase<GptModelInputs, GptModelOutputs>::prepareIn
             prefix_lengths,
             combo_tokens_type_ids,
             combo_position_ids,
+            prefill_cp_padding_lengths,
+            prefill_cp_chunk_lengths,
+            prefill_shuffle_indices,
             last_hidden_states,
             lora_ids,
             lora_input_lengths,
@@ -134,6 +148,12 @@ void NativeGraphRunnerBase<GptModelInputs, GptModelOutputs>::copy(GptModelInputs
         device_->copy({*dst->combo_tokens_type_ids, *src.combo_tokens_type_ids});
     if (src.combo_position_ids)
         device_->copy({*dst->combo_position_ids, *src.combo_position_ids});
+    if (src.prefill_cp_padding_lengths)
+        device_->copy({*dst->prefill_cp_padding_lengths, *src.prefill_cp_padding_lengths});
+    if (src.prefill_cp_chunk_lengths)
+        device_->copy({*dst->prefill_cp_chunk_lengths, *src.prefill_cp_chunk_lengths});
+    if (src.prefill_shuffle_indices)
+        device_->copy({*dst->prefill_shuffle_indices, *src.prefill_shuffle_indices});
     if (src.last_hidden_states)
         device_->copy({*dst->last_hidden_states, *src.last_hidden_states});
     if (src.lora_ids)

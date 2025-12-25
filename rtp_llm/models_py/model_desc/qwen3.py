@@ -46,7 +46,6 @@ class Qwen3DecoderLayer(nn.Module):
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-
         # Self Attention
         hidden_states = self.self_attn(
             hidden_states=hidden_states, fmha_impl=fmha_impl, kv_cache=kv_cache
@@ -111,6 +110,8 @@ class Qwen3Model(GptModelBase):
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
             )
         hidden_states = self.norm(hidden_states)
+        from rtp_llm import ForkedPdb
+        ForkedPdb().set_trace()
         return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
 
 

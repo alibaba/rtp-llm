@@ -58,9 +58,15 @@ class DeviceExporter:
         ...
     def get_device_type(self) -> DeviceType:
         ...
+    def pack_int8_tensor_to_packed_int4(self, weight: torch.Tensor) -> torch.Tensor:
+        ...
     def preprocess_gemm_weight_by_key(self, key: str, weight: torch.Tensor, user_arm_gemm_use_kai: bool) -> torch.Tensor:
         ...
     def preprocess_weight_scale(self, weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+        ...
+    def preprocess_weights_for_mixed_gemm(self, weight: torch.Tensor, quant_type: typing.Any, arch: str) -> torch.Tensor:
+        ...
+    def symmetric_quantize_last_axis_of_batched_matrix(self, weight: torch.Tensor, quant_type: typing.Any, arch: str) -> list[torch.Tensor]:
         ...
     def update_current_torch_stream(self) -> None:
         ...
@@ -131,6 +137,9 @@ class KVCache:
         """
         Key cache scale tensor
         """
+    @k_scale_base.setter
+    def k_scale_base(self, arg0: torch.Tensor) -> None:
+        ...
     @property
     def layer_id(self) -> int:
         """
@@ -154,7 +163,10 @@ class KVCache:
         """
         Value cache scale tensor
         """
-class MlaParams(ParamsBase):
+    @v_scale_base.setter
+    def v_scale_base(self, arg0: torch.Tensor) -> None:
+        ...
+class MlaParams:
     def __init__(self) -> None:
         ...
     @property
@@ -207,28 +219,12 @@ class PyAttentionInputs:
     padding_offset: torch.Tensor
     prefix_lengths: torch.Tensor
     sequence_lengths: torch.Tensor
-    total_tokens: int
     def __init__(self) -> None:
         ...
     def __repr__(self) -> str:
         ...
     @property
-    def decode_cu_seqlens_d(self) -> torch.Tensor:
-        ...
-    @property
-    def decode_cu_seqlens_host(self) -> torch.Tensor:
-        ...
-    @property
-    def input_lengths_d(self) -> torch.Tensor:
-        ...
-    @property
     def prefill_cuda_graph_copy_params(self) -> PyPrefillCudaGaphCopyParams | None:
-        ...
-    @property
-    def prefix_lengths_d(self) -> torch.Tensor:
-        ...
-    @property
-    def sequence_lengths_plus_1_d(self) -> torch.Tensor:
         ...
 class PyCacheStoreInputs:
     def __init__(self) -> None:
@@ -266,14 +262,6 @@ class PyModelInputs:
         """
     @bert_embedding_inputs.setter
     def bert_embedding_inputs(self, arg0: BertEmbeddingInputs) -> None:
-        ...
-    @property
-    def input_hiddens(self) -> torch.Tensor:
-        """
-        Input hidden states tensor
-        """
-    @input_hiddens.setter
-    def input_hiddens(self, arg0: torch.Tensor) -> None:
         ...
     @property
     def input_ids(self) -> torch.Tensor:
@@ -346,5 +334,5 @@ def get_typemeta(arg0: torch.Tensor) -> TypeMeta:
     """
     Convert tensor dtype to TypeMeta
     """
-def init_device(parallelism_config: libth_transformer_config.ParallelismConfig, model_config: libth_transformer_config.ModelConfig, eplb_config: libth_transformer_config.EPLBConfig, fmha_config: libth_transformer_config.FMHAConfig, device_resource_config: libth_transformer_config.DeviceResourceConfig, moe_config: libth_transformer_config.MoeConfig, sp_config: libth_transformer_config.SpeculativeExecutionConfig, misc_config: libth_transformer_config.MiscellaneousConfig, profiling_debug_logging_config: libth_transformer_config.ProfilingDebugLoggingConfig, hw_kernel_config: libth_transformer_config.HWKernelConfig, concurrency_config: libth_transformer_config.ConcurrencyConfig, ffn_disaggregate_config: libth_transformer_config.FfnDisAggregateConfig, runtime_config: libth_transformer_config.RuntimeConfig) -> None:
+def init_device(params: libth_transformer_config.GptInitParameter) -> None:
     ...

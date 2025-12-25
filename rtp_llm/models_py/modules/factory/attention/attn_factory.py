@@ -9,6 +9,7 @@ from rtp_llm.utils.model_weight import W
 
 # Lists to store registered implementations
 PREFILL_MHA_IMPS: List[type[FMHAImplBase]] = []
+PREFILL_CP_MHA_IMPS: List[type[FMHAImplBase]] = []
 DECODE_MHA_IMPS: List[type[FMHAImplBase]] = []
 PREFILL_MLA_IMPS: List[type[FMHAImplBase]] = []
 DECODE_MLA_IMPS: List[type[FMHAImplBase]] = []
@@ -83,7 +84,10 @@ def get_fmha_impl(
     fmha_config: Optional[FMHAConfig] = None,
     quant_config: Optional[object] = None,
 ) -> FMHAImplBase:
-    mha_impls = PREFILL_MHA_IMPS if attn_inputs.is_prefill else DECODE_MHA_IMPS
+    if config.cp_size > 1:
+        mha_impls = PREFILL_CP_MHA_IMPS
+    else:
+        mha_impls = PREFILL_MHA_IMPS if attn_inputs.is_prefill else DECODE_MHA_IMPS
     for impl in mha_impls:
         # Check if this FMHA type is disabled before creating instance
         # We need to create a temporary instance to get its fmha_type

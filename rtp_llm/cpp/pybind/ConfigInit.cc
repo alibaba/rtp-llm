@@ -54,7 +54,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("AITER_DECODE", FMHAType::AITER_DECODE)
         .value("AITER_ASM_DECODE", FMHAType::AITER_ASM_DECODE)
         .value("PY_FLASHINFER_PREFILL", FMHAType::PY_FLASHINFER_PREFILL)
-        .value("PY_FLASHINFER_DECODE", FMHAType::PY_FLASHINFER_DECODE);
+        .value("PY_FLASHINFER_DECODE", FMHAType::PY_FLASHINFER_DECODE)
+        .value("CP_FLASH_INFER", FMHAType::CP_FLASH_INFER);   
 
     py::enum_<MlaOpsType>(m, "MlaOpsType")
         .value("AUTO", MlaOpsType::AUTO)
@@ -846,6 +847,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("tp_size", &ParallelismConfig::tp_size)
         .def_readwrite("ep_size", &ParallelismConfig::ep_size)
         .def_readwrite("dp_size", &ParallelismConfig::dp_size)
+        .def_readwrite("cp_size", &ParallelismConfig::cp_size)
         .def_readwrite("pp_size", &ParallelismConfig::pp_size)
         .def_readwrite("world_size", &ParallelismConfig::world_size)
         .def_readwrite("world_rank", &ParallelismConfig::world_rank)
@@ -855,11 +857,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("tp_rank", &ParallelismConfig::tp_rank)
         .def_readwrite("ep_rank", &ParallelismConfig::ep_rank)
         .def_readwrite("dp_rank", &ParallelismConfig::dp_rank)
+        .def_readwrite("cp_rank", &ParallelismConfig::cp_rank)
         .def_readwrite("ffn_tp_size", &ParallelismConfig::ffn_tp_size)
         .def_readwrite("ffn_tp_rank", &ParallelismConfig::ffn_tp_rank)
         .def_readwrite("enable_sp", &ParallelismConfig::enable_sp)
         .def_readwrite("nccl_ip", &ParallelismConfig::nccl_ip)
         .def_readwrite("tp_nccl_port", &ParallelismConfig::tp_nccl_port)
+        .def_readwrite("cp_nccl_port", &ParallelismConfig::cp_nccl_port)
         .def_readwrite("dp_tp_nccl_port", &ParallelismConfig::dp_tp_nccl_port)
         .def_readwrite("ffn_tp_nccl_port", &ParallelismConfig::ffn_tp_nccl_port)
         .def_readwrite("th_nccl_port", &ParallelismConfig::th_nccl_port)
@@ -873,6 +877,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 return py::make_tuple(self.tp_size,
                                       self.ep_size,
                                       self.dp_size,
+                                      self.cp_size,
                                       self.pp_size,
                                       self.world_size,
                                       self.world_rank,
@@ -881,11 +886,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.tp_rank,
                                       self.ep_rank,
                                       self.dp_rank,
+                                      self.cp_rank,
                                       self.ffn_tp_size,
                                       self.ffn_tp_rank,
                                       self.enable_sp,
                                       self.nccl_ip,
                                       self.tp_nccl_port,
+                                      self.cp_nccl_port,
                                       self.dp_tp_nccl_port,
                                       self.ffn_tp_nccl_port,
                                       self.th_nccl_port,
@@ -902,6 +909,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.tp_size                   = t[0].cast<int64_t>();
                     c.ep_size                   = t[1].cast<int64_t>();
                     c.dp_size                   = t[2].cast<int64_t>();
+                    c.cp_size                   = t[3].cast<int64_t>();
                     c.pp_size                   = t[3].cast<int64_t>();
                     c.world_size                = t[4].cast<int64_t>();
                     c.world_rank                = t[5].cast<int64_t>();
@@ -910,11 +918,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.tp_rank                   = t[8].cast<int64_t>();
                     c.ep_rank                   = t[9].cast<int64_t>();
                     c.dp_rank                   = t[10].cast<int64_t>();
+                    c.cp_rank                   = t[11].cast<int64_t>();
                     c.ffn_tp_size               = t[11].cast<int64_t>();
                     c.ffn_tp_rank               = t[12].cast<int64_t>();
                     c.enable_sp                 = t[13].cast<bool>();
                     c.nccl_ip                   = t[14].cast<std::string>();
                     c.tp_nccl_port              = t[15].cast<int64_t>();
+                    c.cp_nccl_port              = t[16].cast<int64_t>();
                     c.dp_tp_nccl_port           = t[16].cast<int64_t>();
                     c.ffn_tp_nccl_port          = t[17].cast<int64_t>();
                     c.th_nccl_port              = t[18].cast<int64_t>();

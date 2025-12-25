@@ -11,10 +11,10 @@ namespace rtp_llm {
 
 // ParallelismConfig
 std::string ParallelismConfig::to_string() const {
-    std::ostringstream oss;
     oss << "tp_size: " << tp_size << "\n"
         << "ep_size: " << ep_size << "\n"
         << "dp_size: " << dp_size << "\n"
+        << "cp_size: " << cp_size << "\n"
         << "world_size: " << world_size << "\n"
         << "world_rank: " << world_rank << "\n"
         << "pp_size: " << pp_size << "\n"
@@ -24,11 +24,13 @@ std::string ParallelismConfig::to_string() const {
         << "tp_rank: " << tp_rank << "\n"
         << "ep_rank: " << ep_rank << "\n"
         << "dp_rank: " << dp_rank << "\n"
+        << "cp_rank: " << cp_rank << "\n"
         << "ffn_tp_size: " << ffn_tp_size << "\n"
         << "ffn_tp_rank: " << ffn_tp_rank << "\n"
         << "enable_sp: " << enable_sp << "\n"
         << "nccl_ip: " << nccl_ip << "\n"
         << "tp_nccl_port: " << tp_nccl_port << "\n"
+        << "cp_nccl_port: " << cp_nccl_port << "\n"
         << "dp_tp_nccl_port: " << dp_tp_nccl_port << "\n"
         << "ffn_tp_nccl_port: " << ffn_tp_nccl_port << "\n"
         << "th_nccl_port: " << th_nccl_port << "\n"

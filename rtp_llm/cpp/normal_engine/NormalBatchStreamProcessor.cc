@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
+#include "rtp_llm/cpp/normal_engine/ContextParallelBatchStreamProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
@@ -19,6 +20,20 @@
 using namespace std;
 
 namespace rtp_llm {
+
+std::unique_ptr<NormalBatchStreamProcessor> NormalBatchStreamProcessor::create(
+    const rtp_llm::ParallelismConfig& parallelism_config,
+    const rtp_llm::ModelConfig& model_config,
+                                                                               const rtp_llm::PDSepConfig& pd_sep_config,
+                                                                               const rtp_llm::ProfilingDebugLoggingConfig& profiling_debug_logging_config,
+                                                                               const CacheConfig& cache_config,
+                                                                               bool               warm_up) {
+
+    if (parallelism_config.cp_size > 1) {
+        return std::make_unique<ContextParallelBatchStreamProcessor>(model_config, pd_sep_config, profiling_debug_logging_config, cache_config, warm_up);
+    }
+    return std::make_unique<NormalBatchStreamProcessor>(model_config, pd_sep_config, profiling_debug_logging_config, cache_config, warm_up);
+}
 
 absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(const StreamGroups& stream_groups) const {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
