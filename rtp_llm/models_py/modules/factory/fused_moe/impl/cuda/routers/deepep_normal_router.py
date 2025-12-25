@@ -162,12 +162,15 @@ class DeepepNormalRouter(FusedMoeDataRouter):
         )
 
         return ExpertForwardPayload(
-            expert_x,
-            act_dtype,
-            expert_x_scale,
-            ExpertTokensMetadata(expert_num_tokens, num_recv_tokens_per_expert_list),
-            recv_topk_idx,
-            recv_topk_weights,
+            expert_x=expert_x,
+            expert_x_scale=expert_x_scale,
+            expert_x_origin_dtype=act_dtype,
+            expert_topk_ids=recv_topk_idx,
+            expert_topk_weights=recv_topk_weights,
+            expert_tokens_meta=ExpertTokensMetadata(
+                expert_num_tokens=expert_num_tokens,
+                expert_num_tokens_cpu=num_recv_tokens_per_expert_list,
+            ),
         )
 
     def finalize(

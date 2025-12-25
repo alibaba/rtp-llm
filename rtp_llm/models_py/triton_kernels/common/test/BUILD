@@ -2,6 +2,7 @@ py_test (
     name = "silu_mul_masked_test",
     srcs = ["silu_mul_masked_test.py"],
     deps = [
+        "//rtp_llm:matplotlib",
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
     ],
     env = {"GPU_COUNT": "1"},
