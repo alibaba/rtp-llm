@@ -4,9 +4,9 @@ from unittest import SkipTest, TestCase, main
 import torch
 from torch import dtype as _dtype
 
-from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.models_py.modules.hybrid.dense_mlp import DenseMLP, FusedSiluActDenseMLP
-from rtp_llm.ops import ParallelismConfig
+from rtp_llm.models_py.modules.hybrid.dense_mlp import DenseMLP
+from rtp_llm.models_py.modules.hybrid.test.dense_mlp_ref import DenseMLP as DenseMLPRef
+from rtp_llm.ops import ActivationType, ParallelismConfig
 from rtp_llm.utils.model_weight import W
 
 
@@ -28,18 +28,10 @@ class MLPTest(TestCase):
 
     def _run_mlp_test(self, num_tokens: int, hidden_size: int, dtype: _dtype):
         torch.manual_seed(0)
-        model_config = ModelConfig()
-        model_config.attn_config.head_num = 1
-        model_config.attn_config.size_per_head = 128
-        model_config.num_layers = 1
-        model_config.max_seq_len = 1
-        model_config.vocab_size = 5120
-        model_config.activation_type = "SiGLU"
-        
         parallelism_config = ParallelismConfig()
         parallelism_config.tp_size = 1
         parallelism_config.tp_rank = 0
-        
+
         weights = {}
         weights[W.ffn_w1] = torch.randn(hidden_size, 4 * hidden_size, dtype=dtype)
         torch.nn.init.xavier_uniform_(weights[W.ffn_w1])
@@ -48,8 +40,15 @@ class MLPTest(TestCase):
         weights[W.ffn_w2] = torch.randn(4 * hidden_size, hidden_size, dtype=dtype)
         torch.nn.init.xavier_uniform_(weights[W.ffn_w2])
 
-        qwen3_mlp = DenseMLP(model_config, parallelism_config, weights)
-        qwen3_mlp_fused = FusedSiluActDenseMLP(model_config, parallelism_config, weights)
+        qwen3_mlp = DenseMLPRef(
+            weights[W.ffn_w1],
+            weights[W.ffn_w3],
+            weights[W.ffn_w2],
+            ActivationType.Swiglu,
+        )
+        qwen3_mlp_fused = DenseMLP(
+            ActivationType.Swiglu, parallelism_config, weights, quant_config=None
+        )
 
         x = torch.randn(num_tokens, hidden_size, dtype=dtype)
 

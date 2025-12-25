@@ -91,16 +91,13 @@ Hybrid modules are higher-level compositions that assemble base and factory modu
 ```
 hybrid/
 ├── causal_attention.py    # Standard causal attention implementation
-├── dense_mlp.py           # Dense MLP with various activation functions
-├── fused_silu_mlp.py      # Fused SiLU activation MLP
+├── dense_mlp.py           # Unified dense MLP with multiple activation types (SiGLU, GELU)
 └── mla_attention.py       # Multi-head latent attention
 ```
 
 **Examples:**
 - `CausalAttention`: Combines attention factory with normalization and residual connections
-- `DenseMLP`: Composes linear layers from factory with activation functions
-- `BertGeluActDenseMLP`: BERT-style feed-forward network with GeLU activation
-- `FusedSiluActDenseMLP`: Optimized SiLU-activated MLP with fused operations
+- `DenseMLP`: Unified MLP implementation supporting both SiGLU and GELU activations
 - `MlaAttention`: Multi-head latent attention mechanism
 
 ## Development Guidelines
