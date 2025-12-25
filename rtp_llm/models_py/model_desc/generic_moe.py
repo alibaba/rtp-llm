@@ -11,10 +11,10 @@ from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
     AttnImplFactory,
     CausalAttention,
+    DenseMLP,
     Embedding,
     FMHAImplBase,
     FusedMoeFactory,
-    FusedSiluActDenseMLP,
     GroupTopK,
     LinearFactory,
     MlaAttention,
@@ -81,7 +81,7 @@ class GenericMoeLayer(nn.Module):
         self.num_local_experts = self.w1.shape[0]
         self.add_shared_expert = config.moe_style == 2
         if self.add_shared_expert:
-            self.shared_expert = FusedSiluActDenseMLP(
+            self.shared_expert = DenseMLP(
                 config.activation_type, parallelism_config, weights, quant_config
             )
         else:
@@ -188,7 +188,7 @@ class GenericMoeDecoderLayer(nn.Module):
 
         # Determine if this is a Dense layer (before first MoE layer or dense only)
         if layer_idx not in config.moe_layer_index:
-            self.mlp = FusedSiluActDenseMLP(
+            self.mlp = DenseMLP(
                 config.activation_type, parallelism_config, weights, quant_config
             )
         else:

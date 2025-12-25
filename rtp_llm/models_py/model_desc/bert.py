@@ -9,29 +9,37 @@ from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
     AddBiasResLayerNorm,
     AttnImplFactory,
-    BertGeluActDenseMLP,
     CausalAttention,
+    DenseMLP,
     EmbeddingBert,
     FMHAImplBase,
     LayerNorm,
 )
+from rtp_llm.ops import ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     KVCache,
     PyAttentionInputs,
     PyModelInputs,
     PyModelOutputs,
 )
-from rtp_llm.ops import ParallelismConfig
 from rtp_llm.utils.model_weight import W
 
 
 class BertDecoderLayer(nn.Module):
     def __init__(
-        self, config: ModelConfig, parallelism_config: ParallelismConfig, weights: Dict[str, torch.Tensor], quant_config: Optional[object] = None
+        self,
+        config: ModelConfig,
+        parallelism_config: ParallelismConfig,
+        weights: Dict[str, torch.Tensor],
+        quant_config: Optional[object] = None,
     ):
         super().__init__()
-        self.self_attn = CausalAttention(config, parallelism_config, weights, quant_config)
-        self.mlp = BertGeluActDenseMLP(config, parallelism_config, weights, quant_config)
+        self.self_attn = CausalAttention(
+            config, parallelism_config, weights, quant_config
+        )
+        self.mlp = DenseMLP(
+            config.activation_type, parallelism_config, weights, quant_config
+        )
         self.input_layernorm = AddBiasResLayerNorm(
             weights[W.post_ln_gamma],
             beta=weights[W.post_ln_beta],
@@ -70,10 +78,10 @@ class BertDecoderLayer(nn.Module):
 
 class BertModel(GptModelBase):
     def __init__(
-        self, 
-        config: ModelConfig, 
+        self,
+        config: ModelConfig,
         parallelism_config: ParallelismConfig,
-        weights: ModelWeights, 
+        weights: ModelWeights,
         max_generate_batch_size: int,
         quant_config: Optional[object] = None,
         fmha_config=None,
@@ -81,11 +89,11 @@ class BertModel(GptModelBase):
         device_resource_config=None,
     ):
         super().__init__(
-            config, 
-            parallelism_config, 
+            config,
+            parallelism_config,
             weights,
             max_generate_batch_size=max_generate_batch_size,
-            fmha_config=fmha_config, 
+            fmha_config=fmha_config,
             py_hw_kernel_config=py_hw_kernel_config,
             device_resource_config=device_resource_config,
         )
@@ -99,7 +107,9 @@ class BertModel(GptModelBase):
         )
         self.layers = nn.ModuleList(
             [
-                BertDecoderLayer(config, parallelism_config, weights.weights[idx], quant_config)
+                BertDecoderLayer(
+                    config, parallelism_config, weights.weights[idx], quant_config
+                )
                 for idx in range(self.layer_num)
             ]
         )
@@ -118,7 +128,11 @@ class BertModel(GptModelBase):
         hidden_states = self.pre_decoder_layernorm(inputs_embeds)
         attention_inputs: PyAttentionInputs = inputs.attention_inputs
         fmha_impl = AttnImplFactory.get_fmha_impl(
-            self.config, self.parallelism_config, self.weight, attention_inputs, self.fmha_config
+            self.config,
+            self.parallelism_config,
+            self.weight,
+            attention_inputs,
+            self.fmha_config,
         )
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
             hidden_states = decoder_layer(
