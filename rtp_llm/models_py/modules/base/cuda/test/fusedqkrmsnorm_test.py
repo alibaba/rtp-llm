@@ -141,37 +141,66 @@ class FusedQKRMSNormTest(TestCase):
                 q_input = x_flashinfer[:, :q_size].reshape(-1, size_per_head)
                 k_input = x_flashinfer[:, q_size:q_size + kv_size].reshape(-1, size_per_head)
 
+                # Benchmark flashinfer qnorm
                 @torch.cuda.nvtx.range(
-                    f"flashinfer_rmsnorm num_tokens={num_tokens}, dtype={dtype_str}"
+                    f"flashinfer_qnorm num_tokens={num_tokens}, dtype={dtype_str}"
                 )
-                def fn_flashinfer() -> None:
-                    # Use fresh input for each iteration from the cloned x
-                    flashinfer.norm.rmsnorm(q_input, q_weight, enable_pdl = True)
-                    flashinfer.norm.rmsnorm(k_input, k_weight, enable_pdl = True)
+                def fn_flashinfer_qnorm() -> None:
+                    flashinfer.norm.rmsnorm(q_input, q_weight, enable_pdl=True)
 
-                measurements_flashinfer = bench_gpu_time(
-                    fn_flashinfer,
+                measurements_flashinfer_qnorm = bench_gpu_time(
+                    fn_flashinfer_qnorm,
                     dry_run_time_ms=dry_run_time_ms,
                     repeat_time_ms=repeat_time_ms,
                 )
-                latency_ms_flashinfer = np.median(measurements_flashinfer)
-                latency_us_flashinfer = latency_ms_flashinfer * 1e3
+                latency_ms_flashinfer_qnorm = np.median(measurements_flashinfer_qnorm)
+                latency_us_flashinfer_qnorm = latency_ms_flashinfer_qnorm * 1e3
 
-                # Calculate throughput for flashinfer
-                # Input: q_input + k_input, weights: q_weight + k_weight, output: q_out + k_out
-                total_elements_flashinfer = (
-                    q_input.numel() * 2 + k_input.numel() * 2 + q_weight.numel() + k_weight.numel()
+                # Calculate throughput for flashinfer qnorm
+                total_elements_flashinfer_qnorm = (
+                    q_input.numel() * 2 + q_weight.numel()
                 )
-                total_bytes_flashinfer = total_elements_flashinfer * x.element_size()
-                throughput_gb_s_flashinfer = total_bytes_flashinfer / (latency_ms_flashinfer * 1e-3) * 1e-9
+                total_bytes_flashinfer_qnorm = total_elements_flashinfer_qnorm * x.element_size()
+                throughput_gb_s_flashinfer_qnorm = total_bytes_flashinfer_qnorm / (latency_ms_flashinfer_qnorm * 1e-3) * 1e-9
 
                 # Effective bandwidth (read + write)
-                io_bytes_flashinfer = (q_input.numel() + k_input.numel()) * x.element_size() * 2
-                bandwidth_gb_s_flashinfer = io_bytes_flashinfer / (latency_ms_flashinfer * 1e-3) * 1e-9
+                io_bytes_flashinfer_qnorm = q_input.numel() * x.element_size() * 2
+                bandwidth_gb_s_flashinfer_qnorm = io_bytes_flashinfer_qnorm / (latency_ms_flashinfer_qnorm * 1e-3) * 1e-9
 
                 print(
-                    f"{num_tokens:<12} {dtype_str:<12} {'flashinfer rmsnorm':<30} "
-                    f"{latency_us_flashinfer:<15.2f} {throughput_gb_s_flashinfer:<20.3f} {bandwidth_gb_s_flashinfer:<20.3f}"
+                    f"{num_tokens:<12} {dtype_str:<12} {'flashinfer qnorm':<30} "
+                    f"{latency_us_flashinfer_qnorm:<15.2f} {throughput_gb_s_flashinfer_qnorm:<20.3f} {bandwidth_gb_s_flashinfer_qnorm:<20.3f}"
+                )
+
+                # Benchmark flashinfer knorm
+                @torch.cuda.nvtx.range(
+                    f"flashinfer_knorm num_tokens={num_tokens}, dtype={dtype_str}"
+                )
+                def fn_flashinfer_knorm() -> None:
+                    flashinfer.norm.rmsnorm(k_input, k_weight, enable_pdl=True)
+
+                measurements_flashinfer_knorm = bench_gpu_time(
+                    fn_flashinfer_knorm,
+                    dry_run_time_ms=dry_run_time_ms,
+                    repeat_time_ms=repeat_time_ms,
+                )
+                latency_ms_flashinfer_knorm = np.median(measurements_flashinfer_knorm)
+                latency_us_flashinfer_knorm = latency_ms_flashinfer_knorm * 1e3
+
+                # Calculate throughput for flashinfer knorm
+                total_elements_flashinfer_knorm = (
+                    k_input.numel() * 2 + k_weight.numel()
+                )
+                total_bytes_flashinfer_knorm = total_elements_flashinfer_knorm * x.element_size()
+                throughput_gb_s_flashinfer_knorm = total_bytes_flashinfer_knorm / (latency_ms_flashinfer_knorm * 1e-3) * 1e-9
+
+                # Effective bandwidth (read + write)
+                io_bytes_flashinfer_knorm = k_input.numel() * x.element_size() * 2
+                bandwidth_gb_s_flashinfer_knorm = io_bytes_flashinfer_knorm / (latency_ms_flashinfer_knorm * 1e-3) * 1e-9
+
+                print(
+                    f"{num_tokens:<12} {dtype_str:<12} {'flashinfer knorm':<30} "
+                    f"{latency_us_flashinfer_knorm:<15.2f} {throughput_gb_s_flashinfer_knorm:<20.3f} {bandwidth_gb_s_flashinfer_knorm:<20.3f}"
                 )
 
                 # Benchmark rtp-llm QKRMSNorm
