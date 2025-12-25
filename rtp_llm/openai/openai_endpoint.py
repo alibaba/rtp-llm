@@ -7,8 +7,8 @@ from typing import Any, AsyncGenerator, List, Optional
 from fastapi import Request
 
 from rtp_llm.config.generate_config import GenerateConfig
-from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.model_args import ModelArgs
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import (
     GenerateEnvConfig,
     PyMiscellaneousConfig,
@@ -213,6 +213,8 @@ class OpenaiEndpoint(object):
             config.max_thinking_tokens = request.extra_configs.max_thinking_tokens
         # add_thinking_params now accepts generate_env_config parameter
         config.add_thinking_params(self.tokenizer, self.generate_env_config)
+        if request.debug_info:
+            config.return_output_ids = True
         return config
 
     @staticmethod
@@ -292,6 +294,7 @@ class OpenaiEndpoint(object):
     async def _collect_complete_response(
         choice_generator: Optional[AsyncGenerator[StreamResponseObject, None]],
         debug_info: Optional[DebugInfo],
+        tokenizer: Optional[Any] = None,
     ) -> ChatCompletionResponse:
         all_choices = []
         usage = None
@@ -368,6 +371,19 @@ class OpenaiEndpoint(object):
         if usage == None:
             logging.warning(f"No usage returned from stream response. use empty value.")
             usage = UsageInfo(prompt_tokens=0, total_tokens=0, completion_tokens=0)
+
+        if (
+            debug_info is not None
+            and extra_outputs is not None
+            and extra_outputs.output_ids is not None
+        ):
+            debug_info.output_ids = extra_outputs.output_ids
+            if tokenizer:
+                debug_info.raw_output = [
+                    tokenizer.decode(output_ids)
+                    for output_ids in extra_outputs.output_ids
+                ]
+
         return ChatCompletionResponse(
             choices=all_choices,
             usage=usage,
@@ -381,6 +397,7 @@ class OpenaiEndpoint(object):
     def _complete_stream_response(
         choice_generator: AsyncGenerator[StreamResponseObject, None],
         debug_info: Optional[DebugInfo],
+        tokenizer: Optional[Any] = None,
     ) -> CompleteResponseAsyncGenerator:
         async def response_generator():
             debug_info_responded = False
@@ -395,7 +412,9 @@ class OpenaiEndpoint(object):
                 debug_info_responded = True
 
         complete_response_collect_func = partial(
-            OpenaiEndpoint._collect_complete_response, debug_info=debug_info
+            OpenaiEndpoint._collect_complete_response,
+            debug_info=debug_info,
+            tokenizer=tokenizer,
         )
         return CompleteResponseAsyncGenerator(
             response_generator(), complete_response_collect_func
@@ -471,7 +490,9 @@ class OpenaiEndpoint(object):
             chat_request,
         )
 
-        return self._complete_stream_response(choice_generator, debug_info)
+        return self._complete_stream_response(
+            choice_generator, debug_info, self.tokenizer
+        )
 
     def chat_render(self, chat_request: ChatCompletionRequest) -> DebugInfo:
         renderer = (
