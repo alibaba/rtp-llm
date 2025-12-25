@@ -1,9 +1,7 @@
 import os
-from functools import partial
-from typing import Any, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import torch
-from numpy import int32
 
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.distributed.deepep_initializer import DeepEpInitializer
@@ -238,13 +236,55 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
 
         return expert_payload
 
+    def _normal_finalize(self, combine_args: dict[str, Any]) -> torch.Tensor:
+        """Normal finalize for DeepEP Low-Latency.
+        Args:
+            combine_args (dict[str, Any]): Arguments for combining expert outputs.
+        """
+        # Normal finalize
+        combined_x, _, _ = self._buffer.low_latency_combine(**combine_args)
+        return combined_x
+
+    def _finalize_post_tp_gather(
+        self, combined_x: torch.Tensor, extra_finalize_args: Optional[Dict[str, Any]]
+    ) -> torch.Tensor:
+        """Finalize post tp gather for DeepEP Low-Latency.
+        Args:
+            combined_x (torch.Tensor): Combined output from all tp ranks.
+            extra_finalize_args (Optional[Dict[str, Any]]): Extra finalize arguments.
+        """
+        # Check input data
+        assert combined_x.dim() == 2
+        assert extra_finalize_args is not None
+        assert "original_num_tokens" in extra_finalize_args
+        # Get original number of tokens
+        tp_size = self._config.tp_size
+        original_num_tokens = extra_finalize_args["original_num_tokens"]
+        tp_token_size = (original_num_tokens + tp_size - 1) // tp_size
+        if tp_size > 1:
+            # combine_x.size(0) might be 0
+            if combined_x.size(0) < tp_token_size:
+                # Pad combined output if needed
+                padding_combined_x = torch.empty(
+                    size=(tp_token_size - combined_x.size(0), combined_x.size(1)),
+                    device=combined_x.device,
+                    dtype=combined_x.dtype,
+                )
+                combined_x = torch.cat([combined_x, padding_combined_x], dim=0)
+            # Gather combined output from all tp ranks
+            gatherd_output = all_gather(combined_x, group=Group.TP).reshape(
+                tp_size * tp_token_size, -1
+            )
+            combined_x = gatherd_output[:original_num_tokens, :]
+        return combined_x
+
     def finalize(
         self,
         payload: CombineForwardPayload,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
-        extra_finalize_args: Optional[dict[str, Any]],
+        extra_finalize_args: Optional[Dict[str, Any]],
     ) -> torch.Tensor:
         """
         Combines expert outputs back to all original ranks.
@@ -272,28 +312,10 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
             combine_args.update({"opt_level": self._opt_level})
 
         # Normal finalize
-        combined_x, _, _ = self._buffer.low_latency_combine(**combine_args)
+        combined_x = self._normal_finalize(combine_args)
 
-        # Gather by tp
-        tp_size = self._config.tp_size
-        original_num_tokens = extra_finalize_args["original_num_tokens"]
-        tp_token_size = (original_num_tokens + tp_size - 1) // tp_size
-        if tp_size > 1:
-            # combine_x.size(0) might be 0
-            if combined_x.size(0) < tp_token_size:
-                # Pad combined output if needed
-                padding_combined_x = torch.empty(
-                    size=(tp_token_size - combined_x.size(0), combined_x.size(1)),
-                    device=combined_x.device,
-                    dtype=combined_x.dtype,
-                )
-                combined_x = torch.cat([combined_x, padding_combined_x], dim=0)
-            # Gather combined output from all tp ranks
-            gatherd_output = all_gather(combined_x, group=Group.TP).reshape(
-                tp_size * tp_token_size, -1
-            )
-            combined_x = gatherd_output[:original_num_tokens, :]
-
+        # Finalize post tp gather
+        combined_x = self._finalize_post_tp_gather(combined_x, extra_finalize_args)
         # reset handle
         self._handle = None
 

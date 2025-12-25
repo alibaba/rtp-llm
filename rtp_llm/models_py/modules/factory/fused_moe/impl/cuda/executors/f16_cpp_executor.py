@@ -5,9 +5,13 @@ from typing import Any, Dict, Optional
 
 import torch
 
-import rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe as mm
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
+    CombineForwardPayload,
+    ExpertForwardPayload,
+    FusedMoeExpertExecutor,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
@@ -20,7 +24,7 @@ from rtp_llm.ops.compute_ops import FusedMoEOp
 from rtp_llm.utils.model_weight import W
 
 
-class CppMoeExecutor(mm.FusedMoeExpertExecutor):
+class CppMoeExecutor(FusedMoeExpertExecutor):
     @classmethod
     def executor_type(cls):
         return ExecutorType.FUSED_MOE
@@ -65,13 +69,13 @@ class CppMoeExecutor(mm.FusedMoeExpertExecutor):
 
     def execute(
         self,
-        payload: mm.ExpertForwardPayload,
+        payload: ExpertForwardPayload,
         activation: str,
         expert_map: Optional[torch.Tensor],
         a2_scale: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         extra_expert_args: Optional[dict[str, Any]],
-    ) -> torch.Tensor:
+    ) -> CombineForwardPayload:
         output = torch.zeros_like(payload.expert_x)
         assert payload.expert_topk_weights is not None, "expert_topk_weights is None"
         assert payload.expert_topk_ids is not None, "expert_topk_ids is None"
@@ -83,4 +87,4 @@ class CppMoeExecutor(mm.FusedMoeExpertExecutor):
             payload.expert_topk_ids,
             output,
         )
-        return output
+        return CombineForwardPayload(fused_expert_output=output)

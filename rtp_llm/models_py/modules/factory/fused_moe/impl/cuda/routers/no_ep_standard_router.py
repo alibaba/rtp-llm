@@ -67,10 +67,14 @@ class DataRouterNoEPStandard(FusedMoeDataRouter):
         )
 
         return ExpertForwardPayload(
-            expert_x_origin_dtype=a1.dtype,
             expert_x=a1q,
             expert_x_scale=a1q_scale,
-            expert_tokens_meta=ExpertTokensMetadata(None, None),
+            expert_x_origin_dtype=a1.dtype,
+            expert_topk_ids=None,
+            expert_topk_weights=None,
+            expert_tokens_meta=ExpertTokensMetadata(
+                expert_num_tokens=None, expert_num_tokens_cpu=None
+            ),
         )
 
     def finalize(

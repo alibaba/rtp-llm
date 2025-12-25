@@ -161,10 +161,12 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
         ]
         all_tokens: int = sum(num_recv_tokens_per_expert)
         if all_tokens <= 0:
-            return torch.zeros(
-                hidden_states_fp8.shape,
-                device=hidden_states_fp8.device,
-                dtype=torch.bfloat16,
+            return CombineForwardPayload(
+                fused_expert_output=torch.zeros(
+                    hidden_states_fp8.shape,
+                    device=hidden_states_fp8.device,
+                    dtype=torch.bfloat16,
+                ),
             )
         _, K = hidden_states_fp8.size()
         N = self.w13_weight.size(1)
@@ -272,8 +274,4 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
             dtype=torch.bfloat16,
         )
         ep_gather(down_output, topk_idx, topk_weights, output_index, gather_out)
-        return CombineForwardPayload(
-            fused_expert_output=gather_out,
-            fused_expert_output_rounds=None,
-            expert_done_events=None,
-        )
+        return CombineForwardPayload(fused_expert_output=gather_out)

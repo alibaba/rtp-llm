@@ -103,18 +103,21 @@ class PureTpRouter(FusedMoeDataRouter):
                 )
             )
             return ExpertForwardPayload(
-                expert_x,
-                a1.dtype,
-                expert_x_scale,
-                ExpertTokensMetadata(num_recv_tokens_per_expert, None),
-                adjusted_topk_ids,
-                topk_weights,
+                expert_x=expert_x,
+                expert_x_scale=expert_x_scale,
+                expert_x_origin_dtype=a1.dtype,
+                expert_topk_ids=adjusted_topk_ids,
+                expert_topk_weights=topk_weights,
+                expert_tokens_meta=ExpertTokensMetadata(expert_num_tokens=num_recv_tokens_per_expert, expert_num_tokens_cpu=None),
             )
         else:
             return ExpertForwardPayload(
                 expert_x=expert_x,
-                expert_topk_weights=topk_weights,
+                expert_x_scale=None,
+                expert_x_origin_dtype=None,
                 expert_topk_ids=topk_ids,
+                expert_topk_weights=topk_weights,
+                expert_tokens_meta=None,
             )
 
     def finalize(
@@ -126,7 +129,7 @@ class PureTpRouter(FusedMoeDataRouter):
         extra_finalize_args: Optional[dict[str, Any]],
     ) -> torch.Tensor:
         if self.tp_size > 1:
-            fused_expert_output = all_reduce(
+            payload.fused_expert_output = all_reduce(
                 payload.fused_expert_output, group=Group.TP
             )
-        return fused_expert_output
+        return payload.fused_expert_output
