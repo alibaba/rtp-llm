@@ -143,14 +143,14 @@ class FusedMoEOp:
 class FusedRopeKVCacheDecodeOp:
     def __init__(self, attn_configs: libth_transformer_config.AttentionConfigs) -> None:
         ...
-    def forward(self, qkv: torch.Tensor, fmha_type: libth_transformer_config.FMHAType, kv_cache: librtp_compute_ops.KVCache | None, params: TRTAttn) -> torch.Tensor:
+    def forward(self, qkv: torch.Tensor, position_ids: torch.Tensor | None = None, fmha_type: libth_transformer_config.FMHAType, kv_cache: librtp_compute_ops.KVCache | None, params: TRTAttn) -> torch.Tensor:
         ...
     def prepare(self, attn_inputs: librtp_compute_ops.PyAttentionInputs) -> TRTAttn:
         ...
 class FusedRopeKVCachePrefillOp:
     def __init__(self, attn_configs: libth_transformer_config.AttentionConfigs) -> None:
         ...
-    def forward(self, qkv: torch.Tensor, fmha_type: libth_transformer_config.FMHAType, kv_cache: librtp_compute_ops.KVCache | None, params: TRTAttn) -> torch.Tensor:
+    def forward(self, qkv: torch.Tensor, position_ids: torch.Tensor | None = None, fmha_type: libth_transformer_config.FMHAType, kv_cache: librtp_compute_ops.KVCache | None, params: TRTAttn) -> torch.Tensor:
         ...
     def prepare(self, attn_inputs: librtp_compute_ops.PyAttentionInputs) -> TRTAttn:
         ...
@@ -230,7 +230,7 @@ def debug_kernel(data: torch.Tensor, start_row: int, start_col: int, m: int, n: 
     """
     Debug kernel to print 2D data blocks from GPU tensor
     """
-def embedding(output: torch.Tensor, input: torch.Tensor, weight: torch.Tensor) -> None:
+def embedding(output: torch.Tensor, input: torch.Tensor, weight: torch.Tensor, position_ids: torch.Tensor | None = None, token_type_ids: torch.Tensor | None = None, text_tokens_mask: torch.Tensor | None = None) -> None:
     """
     Embedding lookup kernel
     """

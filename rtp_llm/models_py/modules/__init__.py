@@ -9,6 +9,8 @@ from rtp_llm.models_py.modules.base import (
     GroupTopK,
     LayerNorm,
     LayerNormTorch,
+    MultimodalDeepstackInjector,
+    MultimodalEmbeddingInjector,
     QKRMSNorm,
     RMSNorm,
     RMSNormTorch,
@@ -56,4 +58,6 @@ __all__ = [
     "CausalAttention",
     "MlaAttention",
     "DenseMLP",
+    "MultimodalDeepstackInjector",
+    "MultimodalEmbeddingInjector",
 ]

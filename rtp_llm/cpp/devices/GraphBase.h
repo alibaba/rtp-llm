@@ -14,6 +14,8 @@ public:
     virtual void           setTokenTypeEmbedding(torch::Tensor token_type_embedding) = 0;
     virtual void           setInputEmbeddingScalar(float input_embedding_scalar)     = 0;
     virtual bool           canRun(PyModelInputs& inputs)                             = 0;
+    virtual void           setPositionIdLenFactor(int position_id_len_factor)        = 0;
+    virtual void           setNeedComboPositionIds(bool need_combo_position_ids)     = 0;
     py::object             py_instance_;
 };
 }  // namespace rtp_llm
