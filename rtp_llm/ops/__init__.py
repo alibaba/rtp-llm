@@ -140,7 +140,6 @@ try:
         QuantAlgo,
         RoleType,
         RuntimeConfig,
-        SamplerConfig,
         SpecialTokens,
         SpeculativeExecutionConfig,
         SpeculativeType,

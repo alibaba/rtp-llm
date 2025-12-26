@@ -32,8 +32,7 @@ TEST_F(SpeculativeNormalEngineTest, testSimple) {
         query->generate_config->max_new_tokens = 3;
         query->generate_config->is_streaming   = true;
         query->generate_config->top_k          = 1;
-        // use this to disable flashinfer sampler
-        query->generate_config->return_cum_log_probs = true;
+
         shared_ptr<GenerateStream> stream            = engine->enqueue(query);
 
         ASSERT_TRUE(stream != nullptr);

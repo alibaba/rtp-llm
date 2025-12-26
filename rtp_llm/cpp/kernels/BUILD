@@ -255,6 +255,7 @@ cc_library(
     deps = [
         ":rocm_basic",
         ":rocm_mla",
+        "//rtp_llm/cpp/kernels/rocm/sampling:sampling",
     ],
     visibility = ["//visibility:public"],
 )
@@ -310,18 +311,12 @@ cc_library(
 cc_library(
     name = "kernels_sampling",
     srcs = [
-        "sampling_topk_kernels.cu",
-        "sampling_topp_kernels.cu",
         "sampling_penalty_kernels.cu",
-        "ban_bad_words.cu",
         "banRepeatNgram.cu",
         "mask_logits.cu",
     ],
     hdrs = [
-        "sampling_topk_kernels.h",
-        "sampling_topp_kernels.h",
         "sampling_penalty_kernels.h",
-        "ban_bad_words.h",
         "banRepeatNgram.h",
         "mask_logits.h",
         "penalty_types.h",
