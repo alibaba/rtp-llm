@@ -1,3 +1,4 @@
+import logging
 from typing import Dict, Optional, Tuple, Type
 
 
@@ -63,10 +64,16 @@ class BaseReasoningFormatDetector:
         If stream_reasoning is True:
             Streams reasoning content as it arrives
         """
+        logging.info(
+            f"[REASONING_DEBUG] parse_streaming_increment: buffer={repr(self._buffer)}, new_text={repr(new_text)}"
+        )
         self._buffer += new_text
         current_text = self._buffer
 
         # If the current text is a prefix of the think token, keep buffering
+        logging.info(
+            f"[REASONING_DEBUG] parse_streaming_increment: current_text={repr(current_text)}, in_reasoning={self._in_reasoning}"
+        )
         if any(
             token.startswith(current_text) and token != current_text
             for token in [self.think_start_token, self.think_end_token]
