@@ -22,6 +22,7 @@
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateConfig.h"
@@ -90,36 +91,35 @@ public:
 
     virtual void initTestDevices() {
         rtp_llm::ParallelismConfig parallelism_config;
-        rtp_llm::ModelConfig model_config;
+        rtp_llm::ModelConfig       model_config;
         model_config.max_seq_len = max_seq_len_;
-        rtp_llm::EPLBConfig eplb_config;
-        rtp_llm::FMHAConfig fmha_config;
+        rtp_llm::EPLBConfig           eplb_config;
+        rtp_llm::FMHAConfig           fmha_config;
         rtp_llm::DeviceResourceConfig device_resource_config;
         device_resource_config.device_reserve_memory_bytes = device_reserve_memory_size_;
         device_resource_config.host_reserve_memory_bytes   = host_reserve_memory_size_;
-        rtp_llm::MoeConfig moe_config;
-        rtp_llm::SpeculativeExecutionConfig sp_config;
-        rtp_llm::MiscellaneousConfig misc_config;
+        rtp_llm::MoeConfig                   moe_config;
+        rtp_llm::SpeculativeExecutionConfig  sp_config;
+        rtp_llm::MiscellaneousConfig         misc_config;
         rtp_llm::ProfilingDebugLoggingConfig profiling_debug_logging_config;
-        rtp_llm::HWKernelConfig hw_kernel_config;
-        rtp_llm::ConcurrencyConfig concurrency_config;
-        rtp_llm::FfnDisAggregateConfig ffn_disaggregate_config;
-        rtp_llm::RuntimeConfig runtime_config;
-        
-        rtp_llm::DeviceFactory::initDevices(
-            parallelism_config,
-            model_config,
-            eplb_config,
-            fmha_config,
-            device_resource_config,
-            moe_config,
-            sp_config,
-            misc_config,
-            profiling_debug_logging_config,
-            hw_kernel_config,
-            concurrency_config,
-            ffn_disaggregate_config,
-            runtime_config);
+        rtp_llm::HWKernelConfig              hw_kernel_config;
+        rtp_llm::ConcurrencyConfig           concurrency_config;
+        rtp_llm::FfnDisAggregateConfig       ffn_disaggregate_config;
+        rtp_llm::RuntimeConfig               runtime_config;
+
+        rtp_llm::DeviceFactory::initDevices(parallelism_config,
+                                            model_config,
+                                            eplb_config,
+                                            fmha_config,
+                                            device_resource_config,
+                                            moe_config,
+                                            sp_config,
+                                            misc_config,
+                                            profiling_debug_logging_config,
+                                            hw_kernel_config,
+                                            concurrency_config,
+                                            ffn_disaggregate_config,
+                                            runtime_config);
         device_ = rtp_llm::DeviceFactory::getDefaultDevice();
     }
 
@@ -133,23 +133,14 @@ protected:
                                                    uint              size_per_head,
                                                    uint              tokens_per_block,
                                                    rtp_llm::DataType dtype) {
-        rtp_llm::CacheConfig config;
-        config.layer_num          = static_cast<int>(layer_num);
-        config.block_num          = static_cast<int>(block_num);
-        config.seq_size_per_block = static_cast<size_t>(tokens_per_block);
-        auto spec                 = std::make_shared<rtp_llm::MHAKVCacheSpec>();
-        spec->layer_num           = layer_num;
-        spec->local_head_num_kv   = local_head_num_kv;
-        spec->size_per_head       = size_per_head;
-        spec->seq_size_per_block  = tokens_per_block;
-        spec->dtype               = dtype;
-        spec->type                = rtp_llm::KVCacheType::MultiHeadAttention;
-        config.cache_specs.push_back(spec);
-        std::vector<int> layer_ids(layer_num);
-        for (uint i = 0; i < layer_num; ++i)
-            layer_ids[i] = static_cast<int>(i);
-        config.layer_ids.push_back(layer_ids);
-        return config;
+        // Delegate to the unified cache/test helper so derived fields (stride/bytes, layer_all_num, etc.)
+        // are always initialized consistently.
+        return rtp_llm::test::makeSimpleMhaCacheConfig(/*layer_num=*/static_cast<int>(layer_num),
+                                                       /*block_num=*/static_cast<int>(block_num),
+                                                       /*tokens_per_block=*/static_cast<size_t>(tokens_per_block),
+                                                       dtype,
+                                                       /*local_head_num_kv=*/static_cast<uint32_t>(local_head_num_kv),
+                                                       /*size_per_head=*/static_cast<uint32_t>(size_per_head));
     }
 
     template<typename T>
