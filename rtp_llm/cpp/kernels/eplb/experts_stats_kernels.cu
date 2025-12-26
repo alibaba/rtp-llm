@@ -35,7 +35,9 @@ __global__ void euqal_expert_balance_kernel(T*         experts_ids,
     int phy_exp_id = log2phy[idx];
     experts_ids[i] = phy_exp_id;
 
-    atomicAdd(&log_stats[log_exp_id], 1);
+    if (log_stats != nullptr) {
+        atomicAdd(&log_stats[log_exp_id], 1);
+    }
 }
 
 __global__ void

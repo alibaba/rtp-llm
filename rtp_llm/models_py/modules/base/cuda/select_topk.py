@@ -2,14 +2,16 @@ import torch
 from torch import nn
 
 import rtp_llm.ops.compute_ops as compute_ops
-
 from rtp_llm.config.model_config import ModelConfig
+
 
 class SelectTopk(nn.Module):
     def __init__(self, config: ModelConfig, fake_balance_expert: bool, dp_rank: int):
         super().__init__()
         self.config = config
-        self.select_topk_op = compute_ops.SelectTopkOp(self.config, fake_balance_expert, dp_rank)
+        self.select_topk_op = compute_ops.SelectTopkOp(
+            self.config, fake_balance_expert, dp_rank
+        )
 
     def forward(
         self,
@@ -17,7 +19,14 @@ class SelectTopk(nn.Module):
         topk_ids: torch.Tensor,
         topk_weights: torch.Tensor,
     ):
-        self.select_topk_op.forward(router_logits_fp32, topk_ids, topk_weights)
+        # EPLB parameters (log2phy, logic_expert_cnt, phy_exp_num, ep_rank) are no longer needed here
+        # as log2phy conversion is now handled in Python after select_topk call
+        self.select_topk_op.forward(
+            router_logits_fp32,
+            topk_ids,
+            topk_weights,
+        )
+
 
 class GroupTopK(nn.Module):
     def __init__(self):

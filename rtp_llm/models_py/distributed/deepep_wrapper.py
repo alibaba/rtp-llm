@@ -123,7 +123,7 @@ class DeepepWrapperConfig:
             world_size=parallelism_config.world_size,
             # Model parameters
             hidden_size=model_config.hidden_size,
-            expert_num=model_config.expert_num,
+            expert_num=config_adapter.phy_exp_num,
             moe_k=model_config.moe_k,
             # MoE-specific parameters
             deep_ep_num_sm=moe_config.deep_ep_num_sm,
@@ -388,6 +388,16 @@ class DeepEPWrapper:
         """Check if ACCL EP is used."""
         return self._use_accl_ep
 
+    def query_active_ranks(self) -> torch.Tensor:
+        ep_size: int = self.ep_size
+        mask_status = torch.zeros((ep_size,), dtype=torch.int, device="cuda")
+        torch.cuda.synchronize()
+        self.buffer.low_latency_query_mask_buffer(mask_status)
+        active_ranks = 1 - mask_status
+        # print("DeepEPWrapper: mask_status =", mask_status)
+        torch.cuda.synchronize()
+        return active_ranks
+
     def _init_deepep_buffer(
         self, group: ProcessGroup
     ) -> Tuple[DeepEPMode, DeepEPBuffer]:
@@ -489,6 +499,7 @@ class DeepEPWrapper:
             )
 
         num_qps_per_rank = config.expert_num / config.ep_size
+        allgather_intput_ints = 10
 
         init_kwargs = {
             "group": group,
@@ -497,6 +508,8 @@ class DeepEPWrapper:
             "low_latency_mode": True,
             "num_qps_per_rank": num_qps_per_rank,
             "allow_mnnvl": True,
+            "enable_shrink": True,
+            "num_coll_buffer_bytes": 4 * allgather_intput_ints * config.ep_size,
         }
 
         if self._use_accl_ep:
@@ -628,3 +641,11 @@ def init_deepep_wrapper(
             "DeepEP is not supported on this device, skipping initialization"
         )
         return None
+
+
+def get_deepep_wrapper_if_initialized() -> Optional[DeepEPWrapper]:
+    """Get the DeepEP wrapper instance."""
+    if DeepEPWrapper.is_initialized():
+        assert DeepEPWrapper._instance is not None
+        return DeepEPWrapper._instance
+    return None

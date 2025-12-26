@@ -42,6 +42,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
                 params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->shape()[1] / 2 :
                 params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->shape()[1];
 
+        printf("DEBUG: params.model_config_.num_layers = %ld\n", params.model_config_.num_layers);
         expert_balancer_ = make_shared<ExpertBalancer>(params.model_config_.expert_num,
                                                        params.eplb_config.phy_exp_num(params.model_config_.expert_num),
                                                        params.model_config_.num_layers,
@@ -76,6 +77,9 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
     if (!params.py_model.is_none()) {
         RTP_LLM_LOG_INFO("init executor with python model");
         model_.reset(new PyWrappedModel(model_init_params, params.py_model));
+        if (params.moe_config.use_deepep_low_latency) {  // fault tolerance only support in pymodel low-latency mode now
+            elastic_ep_manager_ = make_shared<ElasticEPManager>(params.parallelism_config.ep_size);
+        }
     } else if (device_->initParams().hw_kernel_config.enable_native_cuda_graph) {
         RTP_LLM_LOG_INFO("init legacy c++ gpt model with native cuda graph");
         model_.reset(new NativeDeviceGraphModel(model_init_params));
@@ -146,9 +150,18 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         executor_collector.model_forward_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
         RTP_LLM_LOG_DEBUG("model forward done");
     }
+    bool          is_downscale = false;
+    torch::Tensor active_ranks_tensor;
+    int           active_ranks_num;
+    if (elastic_ep_manager_) {
+        is_downscale        = elastic_ep_manager_->is_active_ranks_decrease();
+        active_ranks_tensor = elastic_ep_manager_->get_active_ranks_tensor();
+        active_ranks_num    = elastic_ep_manager_->get_active_ranks_cnt();
+    }
+
     if (expert_balancer_) {
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        expert_balancer_->stepForward(*model_, executor_collector);
+        expert_balancer_->stepForward(*model_, executor_collector, is_downscale, active_ranks_tensor, active_ranks_num);
         executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
     if (device_->getDeviceProperties().tp_rank > 0 || warm_up_ || streams.size() == 0) {

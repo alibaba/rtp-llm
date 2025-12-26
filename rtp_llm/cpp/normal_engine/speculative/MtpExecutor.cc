@@ -309,8 +309,10 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
 
     // eplb
     if (expert_balancer_) {
-        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        expert_balancer_->stepForward(*model_, executor_collector);
+        int64_t       start_time_us       = autil::TimeUtility::currentTimeInMicroSeconds();
+        torch::Tensor active_ranks_tensor = torch::zeros({1}, torch::kInt32);
+        int           active_ranks_num    = 1;
+        expert_balancer_->stepForward(*model_, executor_collector, false, active_ranks_tensor, active_ranks_num);
         executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
@@ -542,8 +544,10 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     // eplb
     if (expert_balancer_) {
-        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        expert_balancer_->stepForward(*model_, executor_collector);
+        int64_t       start_time_us       = autil::TimeUtility::currentTimeInMicroSeconds();
+        torch::Tensor active_ranks_tensor = torch::zeros({1}, torch::kInt32);
+        int           active_ranks_num    = 1;
+        expert_balancer_->stepForward(*model_, executor_collector, false, active_ranks_tensor, active_ranks_num);
         executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
