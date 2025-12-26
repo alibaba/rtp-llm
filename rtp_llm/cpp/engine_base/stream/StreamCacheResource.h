@@ -28,8 +28,8 @@ public:
     void                 init(int batch_size);
     bool                 hasCacheKeys() const;
     const CacheKeysType& cacheKeys(int32_t batch_id) const;
-    absl::StatusOr<int>  initKVBlock(int token_capacity, size_t reserve_step = 0);
-    absl::StatusOr<int>  incrKVBlock(int token_capacity, size_t reserve_step = 0);
+    absl::Status         initKVBlock(size_t reserve_step = 0);
+    absl::Status         incrKVBlock(size_t reserve_step = 0);
     void                 fakeInitKVBlock();
     int                  tryReleaseKVBlock(size_t nums);
     void                 freeBatchBlocks(size_t batch_id, std::vector<int>& blocks);
