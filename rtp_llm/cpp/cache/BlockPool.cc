@@ -106,7 +106,7 @@ bool BlockPool::init() {
                                 "Failed to create memory layout strategy for layout[%zu]",
                                 layout_idx);
 
-        const auto dtype = (layout_cfg.dtype != rtp_llm::TYPE_INVALID) ? layout_cfg.dtype : rtp_llm::TYPE_INVALID;
+        const auto dtype = layout_cfg.dtype;
         RTP_LLM_CHECK_WITH_INFO(layout_strategies_[layout_idx]->init(
                                     layout_cfg, kv_cache_tensor, kv_scale_tensor, layout_cache_base_ptr, dtype),
                                 "Failed to initialize memory layout strategy for layout[%zu]",

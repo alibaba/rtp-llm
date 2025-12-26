@@ -575,32 +575,60 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         }
 
         if (engine_->isMTPEagle()) {
-            for (size_t mtp_model_id = 0; mtp_model_id < propose_maga_init_params_->mtp_model_params_->size();
-                 mtp_model_id++) {
-                EngineInitParams* mtp_engine_init_params =
-                    propose_maga_init_params_->mtp_model_params_->at(mtp_model_id).get();
-                const auto& sp_cache_manager = engine_->resourceContext().mtp_cache_managers[mtp_model_id];
-                const auto& cache_config     = sp_cache_manager->cacheConfig();
-                const auto  sp_kv_block_size = cache_config.kv_block_stride_bytes / load_context.peer_addrs.size();
-                size_t      layer_num        = mtp_engine_init_params->model_config_.num_layers;
-                for (size_t layer_id = 0; layer_id < layer_num; layer_id++) {
-                    auto request_key = std::to_string(load_context.request_id) + "-" + std::to_string(layer_id);
-                    auto load_layer_cache =
-                        std::make_shared<RequestBlockBuffer>(std::to_string(load_context.request_id), request_key);
-                    auto   block_num = load_context.block_ids.size();
-                    size_t model_id  = mtp_engine_init_params->model_id;
-
-                    for (size_t block_pos = load_context.reuse_block_size; block_pos < block_num; block_pos++) {
-                        auto cache_key =
-                            makeCacheKey(model_id, std::to_string(load_context.cache_keys[block_pos]), layer_id);
-                        // FT_LOG_DEBUG("small model load cache_key %s", cache_key.c_str());
-                        auto                  block_id  = load_context.block_ids[block_pos];
-                        auto                  addr_info = sp_cache_manager->convertIndexToAddr(block_id, layer_id);
-                        void*                 kv_addr   = (void*)((int64_t)addr_info.kv_addr + i * sp_kv_block_size);
-                        std::shared_ptr<void> kv_block_addr(kv_addr, [](void* p) {});
-                        load_layer_cache->addBlock("k_" + cache_key, kv_block_addr, sp_kv_block_size, true, true);
+            if (propose_maga_init_params_ && propose_maga_init_params_->mtp_model_params_
+                && !propose_maga_init_params_->mtp_model_params_->empty()) {
+                for (size_t mtp_model_id = 0; mtp_model_id < propose_maga_init_params_->mtp_model_params_->size();
+                     mtp_model_id++) {
+                    EngineInitParams* mtp_engine_init_params =
+                        propose_maga_init_params_->mtp_model_params_->at(mtp_model_id).get();
+                    if (mtp_engine_init_params == nullptr) {
+                        return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED,
+                                         "mtp_model_params_[" + std::to_string(mtp_model_id) + "] is nullptr");
                     }
-                    layer_caches.push_back(load_layer_cache);
+
+                    const auto& mtp_cache_cfg = cache_manager->getMTPModuleCacheConfig(static_cast<int>(mtp_model_id));
+                    const auto  sp_kv_block_size = mtp_cache_cfg.kv_block_stride_bytes / load_context.peer_addrs.size();
+                    const size_t layer_num       = mtp_engine_init_params->model_config_.num_layers;
+                    if (layer_num != mtp_cache_cfg.layer_num) {
+                        return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED,
+                                         "mtp layer_num mismatch: engine=" + std::to_string(layer_num)
+                                             + " cache_cfg=" + std::to_string(mtp_cache_cfg.layer_num)
+                                             + " (mtp_model_id=" + std::to_string(mtp_model_id) + ")");
+                    }
+                    if (mtp_cache_cfg.global_layer_ids.empty()) {
+                        return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED,
+                                         "mtp_cache_cfg.global_layer_ids is empty (mtp_model_id="
+                                             + std::to_string(mtp_model_id) + ")");
+                    }
+                    if (mtp_cache_cfg.global_layer_ids[0].size() != layer_num) {
+                        return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED,
+                                         "mtp_cache_cfg.global_layer_ids[0].size mismatch: got="
+                                             + std::to_string(mtp_cache_cfg.global_layer_ids[0].size())
+                                             + " expect=" + std::to_string(layer_num)
+                                             + " (mtp_model_id=" + std::to_string(mtp_model_id) + ")");
+                    }
+
+                    for (size_t layer_id = 0; layer_id < layer_num; layer_id++) {
+                        auto request_key = std::to_string(load_context.request_id) + "-" + std::to_string(layer_id);
+                        auto load_layer_cache =
+                            std::make_shared<RequestBlockBuffer>(std::to_string(load_context.request_id), request_key);
+                        auto   block_num = load_context.block_ids.size();
+                        size_t model_id  = mtp_engine_init_params->model_id;
+
+                        // Use per-module global_layer_ids for address lookup.
+                        const int global_layer_id = mtp_cache_cfg.global_layer_ids[0][layer_id];
+
+                        for (size_t block_pos = load_context.reuse_block_size; block_pos < block_num; block_pos++) {
+                            auto cache_key =
+                                makeCacheKey(model_id, std::to_string(load_context.cache_keys[block_pos]), layer_id);
+                            auto  block_id  = load_context.block_ids[block_pos];
+                            auto  addr_info = cache_manager->convertIndexToAddr(block_id, global_layer_id);
+                            void* kv_addr   = (void*)((int64_t)addr_info.kv_addr + i * sp_kv_block_size);
+                            std::shared_ptr<void> kv_block_addr(kv_addr, [](void* p) {});
+                            load_layer_cache->addBlock("k_" + cache_key, kv_block_addr, sp_kv_block_size, true, true);
+                        }
+                        layer_caches.push_back(load_layer_cache);
+                    }
                 }
             }
         }
