@@ -28,6 +28,11 @@ def w_half1(ts: List[torch.Tensor], inter_size: int):
 def w_half2(ts: List[torch.Tensor], inter_size: int):
     return ts[0][inter_size:, ...].contiguous()
 
+def max_scalar(ts: List[torch.Tensor])-> torch.Tensor:
+    if len(ts) == 1:
+        return ts[0]
+    stacked = torch.stack(ts)
+    return torch.max(stacked)
 
 def concat_0(ts: List[torch.Tensor]) -> torch.Tensor:
     if len(ts) == 1:
@@ -417,6 +422,15 @@ def stack_moe_w1(ts: List[torch.Tensor]):
     x = stack_0(ws)
     return x
 
+def stack_moe_w1_s2(ts: List[torch.Tensor]):
+    gate = ts[: len(ts) // 2]
+    up = ts[len(ts) // 2 :]
+    ws = []
+    for w1, w3 in zip(gate, up):
+        ws.append(max_scalar([w1, w3]))
+    x = stack_0(ws)
+    return x
+
 
 def get_sp_tensor(
     t: torch.Tensor,
@@ -548,6 +562,12 @@ def sp_head_s_gemm_a8_channel(t: torch.Tensor, **kwargs: Any) -> torch.Tensor:
 
 def sp_head_s_gemm_a8(t: torch.Tensor, **kwargs: Any) -> torch.Tensor:
     return sp_head_s(t, **kwargs)
+
+def sp_head_s_gemm_a4(t: torch.Tensor, **kwargs: Any) -> torch.Tensor:
+    return sp_head_s(t, **kwargs)
+
+def sp_head_s_gemm_a4_group(t: torch.Tensor, **kwargs: Any) -> torch.Tensor:
+    return sp_head_s(t.T, **kwargs).T
 
 
 def sp_attn_gate(
@@ -1222,21 +1242,37 @@ class W:
     # gptq
     attn_qkv_z = "self_attention_weights.query_weight.zero"
     attn_qkv_s = "self_attention_weights.query_weight.weight_only_quant_scale"
+    attn_qkv_s2 = "self_attention_weights.query_weight.weight_scale_2"
+    attn_qkv_i_s = "self_attention_weights.query_weight.input_scale"
     attn_o_z = "self_attention_weights.attention_output_weight.zero"
     attn_o_s = "self_attention_weights.attention_output_weight.weight_only_quant_scale"
+    attn_o_s2 = "self_attention_weights.attention_output_weight.weight_scale_2"
+    attn_o_i_s = "self_attention_weights.attention_output_weight.input_scale"
     ffn_z1 = "ffn_weights.intermediate_weight.zero"
     ffn_s1 = "ffn_weights.intermediate_weight.weight_only_quant_scale"
+    ffn_w1_s2 = "ffn_weights.intermediate_weight.weight_scale_2"
+    ffn_w1_i_s = "ffn_weights.intermediate_weight.input_scale"
     ffn_z3 = "ffn_weights.intermediate_weight3.zero"
     ffn_s3 = "ffn_weights.intermediate_weight3.weight_only_quant_scale"
+    ffn_w3_s2 = "ffn_weights.intermediate_weight3.weight_scale_2"
+    ffn_w3_i_s = "ffn_weights.intermediate_weight3.input_scale"
     ffn_z13 = "ffn_weights.intermediate_weight13.zero"
     ffn_s13 = "ffn_weights.intermediate_weight13.weight_only_quant_scale"
     ffn_act_s = "ffn_weights.intermediate_weight2.act_quant_scale"  # gpt_xx model awq quant act need div scales
+    ffn_w13_s2 = "ffn_weights.intermediate_weight13.weight_scale_2"
+    ffn_w13_i_s = "ffn_weights.intermediate_weight13.input_scale"
     ffn_z2 = "ffn_weights.intermediate_weight2.zero"
     ffn_s2 = "ffn_weights.intermediate_weight2.weight_only_quant_scale"
+    ffn_w2_s2 = "ffn_weights.intermediate_weight2.weight_scale_2"
+    ffn_w2_i_s = "ffn_weights.intermediate_weight2.input_scale"
     moe_z1 = "partial_moe_weights.intermediate_weight.zero"
     moe_s1 = "partial_moe_weights.intermediate_weight.weight_only_quant_scale"
+    moe_w1_s2 = "partial_moe_weights.intermediate_weight.weight_scale_2"
+    moe_w1_i_s = "partial_moe_weights.intermediate_weight.input_scale"
     moe_z2 = "partial_moe_weights.intermediate_weight2.zero"
     moe_s2 = "partial_moe_weights.intermediate_weight2.weight_only_quant_scale"
+    moe_w2_s2 = "partial_moe_weights.intermediate_weight2.weight_scale_2"
+    moe_w2_i_s = "partial_moe_weights.intermediate_weight2.input_scale"
 
     # sq
     attn_i_smoother = "self_attention_weights.query_weight.smoother"
