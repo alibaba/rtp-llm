@@ -1,3 +1,4 @@
+import asyncio
 import glob
 import logging
 import logging.config
@@ -9,7 +10,7 @@ import sys
 import time
 import traceback
 from multiprocessing import Process
-from typing import List
+from typing import Any, Dict, List
 
 import torch
 from setproctitle import setproctitle
@@ -23,6 +24,7 @@ sys.path.append(os.path.join(str(CUR_PATH), ".."))
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.distribute.worker_info import (
+    WorkerInfo,
     g_parallel_info,
     g_worker_info,
     update_worker_info,
@@ -42,7 +44,6 @@ setup_logging()
 def local_rank_start(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
-    pipe_writer=None,
 ):
     """Start local rank with proper signal handling for graceful shutdown"""
     backend_manager = None
@@ -76,21 +77,7 @@ def local_rank_start(
         set_global_controller(global_controller)
         backend_manager = BackendManager(py_env_configs)
         backend_manager.start()
-        logging.info("Backend server initialized successfully, sending ready status")
-
-        # Send startup success message
-        if pipe_writer is not None:
-            try:
-                pipe_writer.send(
-                    {
-                        "status": "success",
-                        "message": f"Backend server started successfully on rank {g_parallel_info.local_rank}",
-                    }
-                )
-                pipe_writer.close()
-            except Exception as e:
-                logging.warning(f"Failed to send success status via pipe: {e}")
-
+        logging.info("Backend server initialized successfully")
         # Enter service loop to keep the process alive
         logging.info("Entering service loop to keep backend_manager alive")
         backend_manager.serve_forever()
@@ -99,16 +86,6 @@ def local_rank_start(
         error_msg = f"start server error: {e}"
         error_trace = traceback.format_exc()
         logging.error(f"{error_msg}, trace: {error_trace}")
-
-        # Send startup failure message
-        if pipe_writer is not None:
-            try:
-                pipe_writer.send(
-                    {"status": "failed", "message": error_msg, "traceback": error_trace}
-                )
-                pipe_writer.close()
-            except Exception as pipe_error:
-                logging.warning(f"Failed to send error status via pipe: {pipe_error}")
         raise e
 
 
@@ -149,37 +126,32 @@ def _validate_dp_configuration():
 def _create_rank_processes(
     global_controller: ConcurrencyController, py_env_configs: PyEnvConfigs
 ):
-    """Create and start rank processes, returns (processes, rank_pipe_readers)"""
+    """Create and start rank processes, returns processes list"""
     local_world_size = _get_local_world_size()
     cuda_device_list = _get_cuda_device_list()
     _validate_dp_configuration()
 
     processes = []
-    rank_pipe_readers = []  # Store pipe readers for each rank
 
     for _, world_rank in enumerate(
         range(g_parallel_info.world_rank, g_parallel_info.world_rank + local_world_size)
     ):
-        reader, writer = multiprocessing.Pipe(duplex=False)
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(cuda_device_list)
         os.environ["WORLD_RANK"] = str(world_rank)
         proc = Process(
             target=local_rank_start,
-            args=(global_controller, py_env_configs, writer),
+            args=(global_controller, py_env_configs),
             name=f"rank-{world_rank}",
         )
-        proc.start()
-        writer.close()  # Parent process closes write end
         processes.append(proc)
-        rank_pipe_readers.append(reader)
+        proc.start()
 
-    return processes, rank_pipe_readers
+    return processes
 
 
 def multi_rank_start(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
-    pipe_writer=None,
 ):
     """Start multi-rank backend server with proper process management"""
     try:
@@ -187,77 +159,10 @@ def multi_rank_start(
     except RuntimeError as e:
         logging.warning(str(e))
 
-    # Create processes and get pipe readers
-    processes, rank_pipe_readers = _create_rank_processes(
-        global_controller, py_env_configs
-    )
-    local_world_size = len(processes)
-
+    # Create processes
+    processes = _create_rank_processes(global_controller, py_env_configs)
     if py_env_configs.distribute_config.fake_gang_env:
         return processes
-
-    # Wait for all ranks to report startup status via pipe
-    logging.info(
-        f"Waiting for all {local_world_size} ranks to report startup status..."
-    )
-    all_success = True
-    error_messages = []
-
-    for i, reader in enumerate(rank_pipe_readers):
-        try:
-            data = reader.recv()  # Block and wait for status from each rank
-            if data.get("status") == "success":
-                logging.info(
-                    f"Rank {i} started successfully: {data.get('message', '')}"
-                )
-            else:
-                all_success = False
-                error_msg = data.get("message", "Unknown error")
-                error_messages.append(f"Rank {i}: {error_msg}")
-                traceback_info = data.get("traceback", "")
-                if traceback_info:
-                    logging.error(f"Rank {i} traceback: {traceback_info}")
-        except Exception as e:
-            all_success = False
-            error_messages.append(f"Rank {i}: Failed to receive status - {e}")
-            logging.error(f"Failed to receive status from rank {i}: {e}")
-        finally:
-            reader.close()
-
-    # Report overall status via external pipe
-    if pipe_writer is not None:
-        try:
-            if all_success:
-                pipe_writer.send(
-                    {
-                        "status": "success",
-                        "message": f"All {local_world_size} backend ranks started successfully",
-                    }
-                )
-                logging.info(f"All {local_world_size} ranks started successfully")
-            else:
-                error_msg = "; ".join(error_messages)
-                pipe_writer.send(
-                    {
-                        "status": "failed",
-                        "message": f"Some ranks failed to start: {error_msg}",
-                        "traceback": "",
-                    }
-                )
-                logging.error(f"Some ranks failed: {error_msg}")
-            pipe_writer.close()
-        except Exception as e:
-            logging.warning(f"Failed to send status via pipe: {e}")
-
-    if not all_success:
-        # Terminate all processes if any rank failed
-        logging.error("Terminating all ranks due to startup failures")
-        for proc in processes:
-            if proc.is_alive():
-                proc.terminate()
-        for proc in processes:
-            proc.join(timeout=5)
-        raise Exception(f"Multi-rank startup failed: {'; '.join(error_messages)}")
 
     # After successful startup, monitor processes
     manager = ProcessManager(
@@ -328,7 +233,6 @@ def clear_jit_filelock():
 def start_backend_server(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
-    pipe_writer=None,
 ):
     setproctitle("rtp_llm_backend_server")
     os.makedirs("logs", exist_ok=True)
@@ -359,9 +263,9 @@ def start_backend_server(
         )
 
     if torch.cuda.device_count() > 1 and g_parallel_info.world_size > 1:
-        return multi_rank_start(global_controller, py_env_configs, pipe_writer)
+        return multi_rank_start(global_controller, py_env_configs)
     else:
-        return local_rank_start(global_controller, py_env_configs, pipe_writer)
+        return local_rank_start(global_controller, py_env_configs)
 
 
 def main():
