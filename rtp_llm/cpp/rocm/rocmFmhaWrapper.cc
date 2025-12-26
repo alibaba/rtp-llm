@@ -12,6 +12,22 @@
 
 namespace rtp_llm {
 
+inline std::string getFmhaDataTypeStr(const DataType& data_type) {
+    std::string type_str;
+    if (data_type == TYPE_FP16) {
+        type_str = "fp16";
+    } else if (data_type == TYPE_BF16) {
+        type_str = "bf16";
+    } else if (data_type == TYPE_FP32) {
+        type_str = "fp32";
+    } else if (data_type == TYPE_FP8_E4M3) {
+        type_str = "fp8bf16";
+    } else {
+        throw std::runtime_error("wrong data type");
+    }
+    return type_str;
+}
+    
 static void throwCKError(const char* const file, int const line, std::string const& info = "") {
     auto error_msg =
         std::string("[CK][ERROR] ") + info + " Assertion fail: " + file + ":" + std::to_string(line) + " \n";
@@ -40,7 +56,7 @@ uint32_t rocmFmhaWrapper::runCKFmha(void*  q,
 
     // map parms from FT to CK
     mode_enum mode      = mode_enum::group;
-    auto      data_type = getDataTypeStr(dtype_);
+    auto      data_type = getFmhaDataTypeStr(dtype_);
     auto      batch     = static_cast<ck_tile::index_t>(batch_size);
     auto      nhead     = static_cast<ck_tile::index_t>(head_num_);
     auto      nhead_k   = static_cast<ck_tile::index_t>(kv_head_num_);
@@ -311,7 +327,7 @@ uint32_t rocmFmhaWrapper::runCKFmhaV2(void*  q,
 
     // map parms from FT to CK
     mode_enum mode      = mode_enum::group;
-    auto      data_type = getDataTypeStr(dtype_);
+    auto      data_type = getFmhaDataTypeStr(dtype_);
     auto      batch     = static_cast<ck_tile::index_t>(batch_size);
     auto      nhead     = static_cast<ck_tile::index_t>(head_num_);
     auto      nhead_k   = static_cast<ck_tile::index_t>(kv_head_num_);
@@ -573,7 +589,7 @@ uint32_t rocmFmhaWrapper::runCKFmhaMLA(void*  q,
 
     // map parms from FT to CK
     mode_enum mode      = mode_enum::group;
-    auto      data_type = getDataTypeStr(dtype_);
+    auto      data_type = getFmhaDataTypeStr(dtype_);
     auto      batch     = static_cast<ck_tile::index_t>(batch_size);
     auto      nhead     = static_cast<ck_tile::index_t>(head_num_);
     auto      nhead_k   = static_cast<ck_tile::index_t>(kv_head_num_);
