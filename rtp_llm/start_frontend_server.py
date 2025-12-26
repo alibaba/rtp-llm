@@ -29,24 +29,30 @@ def start_frontend_server(
     py_env_configs: PyEnvConfigs,
 ):
     # Set rank_id and server_id on the passed config
+    logging.info(
+        f"Starting frontend server with rank_id={rank_id}, server_id={server_id}"
+    )
     py_env_configs.server_config.frontend_server_id = server_id
     py_env_configs.server_config.rank_id = rank_id
     setproctitle(f"rtp_llm_frontend_server_rank_{rank_id}_server_{server_id}")
-    app = None
     g_frontend_server_info = FrontendServerInfo(
         py_env_configs.server_config.frontend_server_id
     )
+    logging.info(f"g_frontend_server_info before update: {g_frontend_server_info}")
     update_worker_info(
         py_env_configs.server_config.start_port,
         py_env_configs.server_config.worker_info_port_num,
         py_env_configs.distribute_config.remote_server_port,
     )
+    logging.info(f"g_frontend_server_info after update: {g_frontend_server_info}")
     try:
         logging.info(f"g_frontend_server_info = {g_frontend_server_info}")
         set_global_controller(global_controller)
         separated_frontend = py_env_configs.role_config.role_type == RoleType.FRONTEND
         app = FrontendApp(py_env_configs, separated_frontend)
+        logging.info("Frontend server initialized successfully")
         app.start()
+        logging.info("Entering service loop to keep frontend server alive")
     except BaseException as e:
         logging.error(
             f"start frontend server error: {e}, trace: {traceback.format_exc()}"

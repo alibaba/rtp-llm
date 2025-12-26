@@ -12,6 +12,7 @@ from fastapi import Request as RawRequest
 from fastapi import status
 from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import ORJSONResponse
 from typing_extensions import override
 from uvicorn import Config, Server
 from uvicorn.loops.auto import auto_loop_setup
@@ -61,7 +62,9 @@ class FrontendApp(object):
             py_env_configs,
         )
         self.separated_frontend = separated_frontend
+        logging.info(f"separated_frontend = {self.separated_frontend}")
         self.grpc_client = GrpcClientWrapper(g_worker_info.rpc_server_port)
+        logging.info("grpc_client init finished")
         g_worker_info.server_port = WorkerInfo.server_port_offset(
             self.server_config.rank_id, g_worker_info.server_port
         )
@@ -99,10 +102,13 @@ class FrontendApp(object):
             timeout_keep_alive=timeout_keep_alive,
             h11_max_incomplete_event_size=MAX_INCOMPLETE_EVENT_SIZE,
         )
-
+        logging.info(
+            f"Starting Uvicorn server on port {g_worker_info.server_port} with timeout_keep_alive={timeout_keep_alive}"
+        )
         try:
             server = GracefulShutdownServer(config)
             server.set_server(self.frontend_server)
+            logging.info("Uvicorn server initialized successfully")
             server.run()
         except BaseException as e:
             raise e
@@ -147,8 +153,15 @@ class FrontendApp(object):
             if self.separated_frontend:
                 await check_all_health()
                 return "ok"
-            return await async_request_server(
-                "post", g_worker_info.backend_server_port, "health_check", {}
+            response = await self.grpc_client.post_request("health_check", {})
+            if response.get("status", "") == "ok":
+                return ORJSONResponse(
+                    status_code=200,
+                    content={"status": "ok"},
+                )
+            return ORJSONResponse(
+                status_code=400,
+                content={"error": f" HTTP health check failed"},
             )
 
         @app.get("/")
@@ -156,8 +169,15 @@ class FrontendApp(object):
             if self.separated_frontend:
                 await check_all_health()
                 return {"status": "home"}
-            return await async_request_server(
-                "get", g_worker_info.backend_server_port, "", {}
+            response = await self.grpc_client.post_request("health_check", {})
+            if response.get("status", "") == "ok":
+                return ORJSONResponse(
+                    status_code=200,
+                    content={"status": "ok"},
+                )
+            return ORJSONResponse(
+                status_code=400,
+                content={"error": f"HTTP health check failed"},
             )
 
         @app.get("/cache_status")
@@ -266,12 +286,6 @@ class FrontendApp(object):
         @app.post("/tokenize")
         async def encode(req: Union[str, Dict[Any, Any]]):
             return self.frontend_server.tokenize(req)
-
-        @app.post("/update_weight")
-        async def update_weight(req: Union[str, Dict[Any, Any]]):
-            return await async_request_server(
-                "post", g_worker_info.backend_server_port, "update_weight", req
-            )
 
         if self.frontend_server.is_embedding:
             # embedding

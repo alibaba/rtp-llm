@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import multiprocessing
@@ -32,16 +33,14 @@ setup_logging()
 def check_server_health(server_port):
     try:
         response = requests.get(f"http://localhost:{server_port}/health", timeout=60)
-        logging.info(
-            f"response status_code = {response.status_code}, text = {response.text}, len = {len(response.text)}"
-        )
-        if response.status_code == 200 and response.text.strip() == '"ok"':
+        if response.status_code == 200 and response.json().get("status", "") == "ok":
+            logging.info(
+                f"{server_port}/health, response status_code = {response.status_code}, text = {response.text}, len = {len(response.text)}"
+            )
             return True
         else:
-            logging.info(f"health check is not ready")
             return False
     except BaseException as e:
-        logging.debug("health check is not ready, %s", str(e))
         return False
 
 
@@ -54,56 +53,16 @@ def start_backend_server_impl(
 
     # only for debug
     if py_env_configs.profiling_debug_logging_config.debug_load_server:
-        start_backend_server(global_controller, py_env_configs, None)
+        start_backend_server(global_controller, py_env_configs)
         os._exit(-1)
-
-    # Create pipe for subprocess startup status communication
-    pipe_reader, pipe_writer = multiprocessing.Pipe(duplex=False)
 
     backend_process = multiprocessing.Process(
         target=start_backend_server,
-        args=(global_controller, py_env_configs, pipe_writer),
+        args=(global_controller, py_env_configs),
         name="backend_manager",
     )
     backend_process.start()
-    pipe_writer.close()  # Parent process closes write end
-
-    # Wait for subprocess to send startup status, maximum 3600 seconds
-    max_wait_seconds = 60 * 60
-    logging.info(
-        f"Waiting for backend server startup status (timeout: {max_wait_seconds}s)..."
-    )
-    try:
-        # 使用 poll 检查是否有数据可读，设置超时
-        if pipe_reader.poll(timeout=max_wait_seconds):
-            status_msg = pipe_reader.recv()
-            if status_msg.get("status") == "success":
-                logging.info(
-                    f"Backend server started successfully: {status_msg.get('message', '')}"
-                )
-                return backend_process
-
-            # Startup failed
-            error_msg = status_msg.get("message", "Unknown error")
-            traceback_info = status_msg.get("traceback", "")
-            if traceback_info:
-                logging.error(f"Traceback: {traceback_info}")
-
-            # Unified failure handling
-            logging.error(f"Backend server failed to start: {error_msg}")
-            process_manager.monitor_and_release_processes()
-            raise Exception(f"Backend server start failed: {error_msg}")
-        else:
-            # 超时情况
-            logging.error(
-                f"Backend server startup timeout after {max_wait_seconds} seconds"
-            )
-            process_manager.monitor_and_release_processes()
-            raise Exception(
-                f"Backend server startup timeout after {max_wait_seconds} seconds"
-            )
-    finally:
-        pipe_reader.close()
+    process_manager.monitor_and_release_processes()
 
 
 def start_frontend_server_impl(
@@ -147,19 +106,23 @@ def start_frontend_server_impl(
     retry_interval_seconds = 1
     start_port = py_env_configs.server_config.start_port
 
-    while True:
-        if not all(proc.is_alive() for proc in frontend_processes):
-            logging.error("Frontend server is not alive")
-            raise Exception("frontend server is not alive")
+    # Check ProcessManager availability (includes shutdown signal and process health)
+    if process_manager and not process_manager.is_available():
+        logging.info("ProcessManager is not available, aborting startup")
+        raise Exception("ProcessManager not available during startup")
 
-        try:
-            check_server_health(start_port)
-            logging.info(f"frontend server is ready")
-            break
-        except Exception as e:
-            # If connection fails, wait and retry
-            time.sleep(retry_interval_seconds)
-
+    # Set timeout to 1 hour (3600 seconds)
+    timeout_seconds = 3600
+    start_time = time.time()
+    while not check_server_health(start_port):
+        elapsed_time = time.time() - start_time
+        if elapsed_time >= timeout_seconds:
+            raise TimeoutError(
+                f"Frontend server health check timeout after {timeout_seconds} seconds "
+                f"({timeout_seconds // 60} minutes). Server at port {start_port} did not become healthy."
+            )
+        time.sleep(retry_interval_seconds)
+    logging.info(f"frontend server is ready")
     return frontend_processes
 
 

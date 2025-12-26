@@ -46,9 +46,7 @@ def tensor_pb_to_torch(tensor_pb) -> Optional[torch.Tensor]:
 
 class EmbeddingEndpoint(object):
     def __init__(self, model_config, grpc_config, tokenizer: BaseTokenizer):
-        self.renderer = create_custom_module(
-            model_config, tokenizer
-        ).renderer
+        self.renderer = create_custom_module(model_config, tokenizer).renderer
         # 创建到服务器的连接
 
         self.address = f"localhost:{g_worker_info.embedding_rpc_server_port}"
