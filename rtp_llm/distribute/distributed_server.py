@@ -26,6 +26,7 @@ from rtp_llm.distribute.worker_info import (
     update_master_info,
 )
 from rtp_llm.models_py.distributed.symm_mem import get_symm_mem_communicator
+from rtp_llm.ops import ParallelismConfig, SpecialTokens, VitSeparation
 
 
 @dataclass
@@ -146,6 +147,49 @@ def get_local_world_info(
         num_nodes=num_nodes,
         initialized=True,
     )
+
+
+def get_dp_addrs_from_world_info(
+    world_info: WorldInfo, parallelism_config: ParallelismConfig
+) -> list[str]:
+    """Get data parallel addresses from world_info.
+
+    Args:
+        world_info: WorldInfo containing all worker members
+        parallelism_config: ParallelismConfig containing parallelism configuration
+        address: Optional address to use when dp_size == 1 (defaults to localhost:rpc_server_port)
+
+    Returns:
+        List of RPC addresses for data parallel communication
+    """
+    addresses = []
+
+    ffn_disaggregate_config = parallelism_config.ffn_disaggregate_config
+    # If FFN disaggregate is enabled, limit addresses to serving ranks
+    if ffn_disaggregate_config.enable_ffn_disaggregate:
+        serving_ranks = (
+            ffn_disaggregate_config.attention_tp_size
+            * ffn_disaggregate_config.attention_dp_size
+        )
+        members = world_info.members[:serving_ranks]
+        logging.info(
+            f"FFN disaggregate enabled, limiting addresses to {serving_ranks} serving ranks: {members}"
+        )
+    else:
+        # Get all addresses from world_info members with tp_rank == 0
+        members = [
+            member
+            for member in world_info.members
+            if (member.world_rank % parallelism_config.tp_size) == 0
+        ]
+
+    addresses = [f"{member.ip}:{member.rpc_server_port}" for member in members]
+    logging.info(
+        f"[world_rank: {parallelism_config.world_rank}] "
+        f"using addresses from world_info: {addresses}"
+    )
+
+    return addresses
 
 
 class DistributedServer(object):
@@ -344,7 +388,7 @@ class DistributedServer(object):
         if g_parallel_info.world_size == 1:
             return
         self.bootstrap()
-        
+
         master_url = f"tcp://{g_master_info.ip}:{self.master_server_port - 1}"
         logging.info(
             f"DistributedServer bootstrap done, rank: {g_parallel_info.world_rank},  size: {g_parallel_info.world_size}, master {master_url}"

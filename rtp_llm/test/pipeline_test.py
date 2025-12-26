@@ -5,10 +5,10 @@ import torch
 
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.frontend.generation.orchestrator import GenerationOrchestrator
 from rtp_llm.frontend.tokenizer_factory.tokenizer_utils import DecodingState
 from rtp_llm.frontend.tokenizer_factory.tokenizers.base_tokenizer import BaseTokenizer
 from rtp_llm.ops import PDSepConfig, SpecialTokens
-from rtp_llm.pipeline.pipeline import Pipeline
 from rtp_llm.utils.base_model_datatypes import GenerateOutput, GenerateOutputs
 
 
@@ -65,7 +65,7 @@ class PipelineDecodeTest(unittest.TestCase):
         self.tokenizer = MockTokenizer()
 
         # Create pipeline instance
-        self.pipeline = Pipeline(
+        self.pipeline = GenerationOrchestrator(
             special_tokens=SpecialTokens(),
             pd_sep_config=PDSepConfig(),
             addresses=[],

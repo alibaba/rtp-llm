@@ -3,8 +3,8 @@ from unittest import TestCase, main, mock
 
 import torch
 
+from rtp_llm.frontend.generation.orchestrator import GenerationOrchestrator
 from rtp_llm.ops import PDSepConfig
-from rtp_llm.pipeline.pipeline import Pipeline
 from rtp_llm.test.model_test.test_util.fake_model_loader import FakeModelLoader
 from rtp_llm.utils.base_model_datatypes import GenerateOutput, GenerateOutputs
 
@@ -17,7 +17,7 @@ class SliceStopWordListTest(TestCase):
             "rtp_llm/test/model_test/fake_test/testdata/llama/fake/hf_source",
         )
         pd_sep_config = PDSepConfig()
-        self.pipeline = Pipeline(
+        self.pipeline = GenerationOrchestrator(
             special_tokens=None,
             pd_sep_config=pd_sep_config,
             addresses=["localhost:8080"],  # Default test address
