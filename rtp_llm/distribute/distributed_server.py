@@ -200,7 +200,7 @@ class DistributedServer(object):
             f"{self.master_ip}:{self.master_server_port - 1}"
         )
 
-        init_process_timeout = py_env_configs.distribute_config.dist_barrier_timeout
+        init_process_timeout = py_env_configs.distribute_config.dist_comm_timeout
         if init_process_timeout is not None:
             init_process_timeout = timedelta(seconds=init_process_timeout)
         store = TCPStore(
@@ -344,7 +344,7 @@ class DistributedServer(object):
         if g_parallel_info.world_size == 1:
             return
         self.bootstrap()
-        
+
         master_url = f"tcp://{g_master_info.ip}:{self.master_server_port - 1}"
         logging.info(
             f"DistributedServer bootstrap done, rank: {g_parallel_info.world_rank},  size: {g_parallel_info.world_size}, master {master_url}"

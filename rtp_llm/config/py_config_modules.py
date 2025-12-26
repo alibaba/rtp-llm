@@ -125,7 +125,7 @@ class DistributeConfig:
         self.gang_config_string: Optional[str] = None
         self.zone_name: str = ""
         self.distribute_config_file: str = ""
-        self.dist_barrier_timeout: Optional[int] = None
+        self.dist_comm_timeout: Optional[int] = None
         self.gang_sleep_time: int = 10
         self.gang_timeout_min: int = 30
         self.json_gang_parts: Optional[str] = None
@@ -139,7 +139,7 @@ class DistributeConfig:
             f"gang_config_string: {self.gang_config_string}\n"
             f"zone_name: {self.zone_name}\n"
             f"distribute_config_file: {self.distribute_config_file}\n"
-            f"dist_barrier_timeout: {self.dist_barrier_timeout}\n"
+            f"dist_comm_timeout: {self.dist_comm_timeout}\n"
             f"gang_sleep_time: {self.gang_sleep_time}\n"
             f"gang_timeout_min: {self.gang_timeout_min}\n"
             f"json_gang_parts: {self.json_gang_parts}\n"

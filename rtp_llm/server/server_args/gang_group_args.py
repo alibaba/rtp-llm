@@ -47,9 +47,9 @@ def init_gang_group_args(parser, distribute_config):
         help="分布式的配置文件路径",
     )
     gang_group.add_argument(
-        "--dist_barrier_timeout",
-        env_name="DIST_BARRIER_TIMEOUT",
-        bind_to=(distribute_config, "dist_barrier_timeout"),
+        "--dist_comm_timeout",
+        env_name="dist_comm_timeout",
+        bind_to=(distribute_config, "dist_comm_timeout"),
         type=int,
         default=1800,
         help="心跳检测的超时时间",

@@ -24,7 +24,6 @@ import rtp_llm.distribute.distributed_server as ds
 from rtp_llm.config.server_config_setup import setup_and_configure_server
 from rtp_llm.distribute.distributed_server import get_world_info
 from rtp_llm.distribute.test.fake_model import FakeModel
-
 from rtp_llm.distribute.worker_info import (
     WorkerInfo,
     g_master_info,
@@ -32,7 +31,6 @@ from rtp_llm.distribute.worker_info import (
     g_worker_info,
     update_worker_info,
 )
-
 from rtp_llm.frontend.frontend_server import FrontendWorker
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
@@ -412,7 +410,7 @@ class DistributedServerTest(unittest.TestCase):
 #            "LOCAL_WORLD_SIZE": "2",
 #            "WORKER_INFO_PORT_NUM": "8",
 #            "START_PORT": "20000",
-#            "DIST_BARRIER_TIMEOUT": "3",
+#            "dist_comm_timeout": "3",
 #            "GANG_SLEEP_TIME": "1",
 #            "FAKE_GANG_ENV": "1",
 #            "MODEL_TYPE": "fake_model",
@@ -422,7 +420,7 @@ class DistributedServerTest(unittest.TestCase):
 #            "CHECKPOINT_PATH": os.path.join(
 #                os.getcwd(), "rtp_llm/distribute/test/testdata/cpt"
 #            ),
-#            "DIST_BARRIER_TIMEOUT": "10",
+#            "dist_comm_timeout": "10",
 #            "CUDA_VISIBLE_DEVICES": "0,1",
 #        },
 #    )
