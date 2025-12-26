@@ -1,4 +1,5 @@
-
+import time
+st = time.time()
 # load th_transformer.so
 from .ops import *
 from rtp_llm.utils.torch_patch import *
@@ -8,3 +9,6 @@ try:
     import internal_source.rtp_llm.models_py
 except ImportError:
     logging.warning("Failed to import internal_source models")
+
+consume_s = time.time() - st
+print(f"import in __init__ took {consume_s:.2f}s")
