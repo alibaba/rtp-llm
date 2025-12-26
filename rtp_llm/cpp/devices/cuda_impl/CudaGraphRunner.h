@@ -18,7 +18,8 @@ public:
                     py::object              py_instance,
                     int                     kv_cache_block_offset,
                     at::cuda::CUDAStream    capture_stream,
-                    bool                    is_prefill_cuda_graph_mode = false):
+                    bool                    is_prefill_cuda_graph_mode = false,
+                    int                     num_tokens_per_bs          = 1):
         GraphBase(std::move(py_instance)),
         enable_cuda_graph_(params.hw_kernel_config.enable_cuda_graph),
         is_prefill_cuda_graph_mode_(is_prefill_cuda_graph_mode),
@@ -31,6 +32,7 @@ public:
         prefill_capture_seq_lens_(params.hw_kernel_config.prefill_capture_seq_lens),
         decode_capture_batch_sizes_(params.hw_kernel_config.decode_capture_batch_sizes) {
         py::gil_scoped_acquire gil;
+        RTP_LLM_LOG_INFO("Initialize CudaGraphRunner with parameters below:");
         if (!py_instance_ || py_instance_.is_none()) {
             throw std::runtime_error("CudaGraphRunner constructor: Python instance is null or none.");
         }
@@ -43,15 +45,18 @@ public:
         py_fill_params_method_ = py_instance_.attr("fill_params");
         options_cuda_int32_    = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
         options_cpu_int32_     = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
+        // support spec model decode cudagraph
+        num_tokens_per_bs_ = num_tokens_per_bs;
         RTP_LLM_LOG_INFO("Initialize CudaGraphRunner with parameters below: \n \
-            enable_cuda_graph_: %d, concurrency_limit_: %d, enable_cuda_graph_debug_mode_: %d, max_seq_len_: %d, seq_size_per_block_: %d, kv_cache_block_offset_: %d, is_prefill_cuda_graph_mode_: %d",
+            enable_cuda_graph_: %d, concurrency_limit_: %d, enable_cuda_graph_debug_mode_: %d, max_seq_len_: %d, seq_size_per_block_: %d, kv_cache_block_offset_: %d, is_prefill_cuda_graph_mode_: %d, num_tokens_per_bs_: %d",
                          enable_cuda_graph_,
                          max_bs_,
                          enable_cuda_graph_debug_mode_,
                          max_seq_len_,
                          seq_size_per_block_,
                          kv_cache_block_offset_,
-                         is_prefill_cuda_graph_mode_);
+                         is_prefill_cuda_graph_mode_,
+                         num_tokens_per_bs_);
     }
 
     ~CudaGraphRunner() {

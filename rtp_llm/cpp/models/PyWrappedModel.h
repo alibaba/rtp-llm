@@ -12,10 +12,19 @@ namespace py = pybind11;
 
 namespace rtp_llm {
 
+enum class CudaGraphMode {
+    AUTO    = 0,
+    NONE    = 1,
+    PREFILL = 2,
+    DECODE  = 3
+};
+
 class PyWrappedModel: public GptModel {
 public:
     // py_instance is `py_model` indeedly.
-    PyWrappedModel(const GptModelInitParams& params, py::object py_instance, bool is_prefill_cuda_graph_mode = false);
+    PyWrappedModel(const GptModelInitParams& params,
+                   py::object                py_instance,
+                   CudaGraphMode             cuda_graph_model = CudaGraphMode::AUTO);
     ~PyWrappedModel();
 
     GptModelOutputs forward(const GptModelInputs& inputs) override;
@@ -46,10 +55,18 @@ private:
 // NOTE(wangyin): constructor can not be compiled correctly when placed in cc file.
 inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                       py::object                py_instance,
-                                      bool                      is_prefill_cuda_graph_mode):
-    GptModel(params),
-    enable_cuda_graph_(params.device->initParams().hw_kernel_config.enable_cuda_graph),
-    is_prefill_cuda_graph_mode_(is_prefill_cuda_graph_mode) {
+                                      CudaGraphMode             cuda_graph_model):
+    GptModel(params) {
+    if (cuda_graph_model == CudaGraphMode::PREFILL) {
+        enable_cuda_graph_          = true;
+        is_prefill_cuda_graph_mode_ = true;
+    } else if (cuda_graph_model == CudaGraphMode::NONE) {
+        enable_cuda_graph_ = false;
+    } else if (cuda_graph_model == CudaGraphMode::DECODE) {
+        enable_cuda_graph_ = true;
+    } else {
+        enable_cuda_graph_ = params.device->initParams().hw_kernel_config.enable_cuda_graph;
+    }
     if (setenv("PYTHONUNBUFFERED", "TRUE", 1) != 0) {
         RTP_LLM_LOG_WARNING("Failed to set PYTHONUNBUFFERED environment variable on POSIX.");
     } else {
@@ -79,9 +96,14 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     py::object py_init_result;
     if (enable_cuda_graph_) {
         int kv_cache_offset =
-            is_prefill_cuda_graph_mode ? 0 : k_cache_buffer_->shape()[0] * k_cache_buffer_->shape()[1];
+            is_prefill_cuda_graph_mode_ ? 0 : k_cache_buffer_->shape()[0] * k_cache_buffer_->shape()[1];
+        int num_tokens_per_bs = 1;
+        // when use spec, model cuda graph need use decode mode and num_tokens_per_bs be gen_num_per_cycle + 1
+        if (params.device->initParams().sp_config.gen_num_per_cycle > 1) {
+            num_tokens_per_bs = params.model_id ? 1 : params.device->initParams().sp_config.gen_num_per_cycle + 1;
+        }
         graph_runner_ = device_->getDeviceGraphRunner(
-            params.device->initParams(), py_instance, kv_cache_offset, is_prefill_cuda_graph_mode);
+            params.device->initParams(), py_instance, kv_cache_offset, is_prefill_cuda_graph_mode_, num_tokens_per_bs);
         if (weights_.position_encoding) {
             graph_runner_->setPositionEncoding(Buffer2torchTensor(weights_.position_encoding->kernel, false).cuda());
         }
@@ -96,11 +118,11 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         auto py_initialize_method = py_instance.attr("initialize");
         py_init_result            = py_initialize_method(init_resources);
         graph_runner_->initCapture();
-    } else {
-        py_model_                 = std::move(py_instance);
-        auto py_initialize_method = py_model_.attr("initialize");
-        py_init_result            = py_initialize_method(init_resources);
     }
+    // need init py_model when use cuda graph, support init cuda graph but not use
+    py_model_                 = std::move(py_instance);
+    auto py_initialize_method = py_model_.attr("initialize");
+    py_init_result            = py_initialize_method(init_resources);
 
     auto py_init_success = py_init_result.cast<bool>();
     if (!py_init_success) {

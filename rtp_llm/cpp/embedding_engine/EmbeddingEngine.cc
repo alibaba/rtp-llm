@@ -11,22 +11,23 @@ EmbeddingEngine::EmbeddingEngine(const EngineInitParams& params, py::object hand
     parallelism_config(params.parallelism_config),
     concurrency_config(params.concurrency_config),
     metrics_reporter_(params.metrics_reporter) {
-    rtp_llm::DeviceFactory::initDevices(
-        params.parallelism_config,
-        params.model_config_,
-        params.eplb_config,
-        params.fmha_config,
-        params.device_resource_config,
-        params.moe_config,
-        params.sp_config,
-        params.misc_config,
-        params.profiling_debug_logging_config,
-        params.hw_kernel_config,
-        params.concurrency_config,
-        params.ffn_disaggregate_config,
-        params.runtime_config);
+    rtp_llm::DeviceFactory::initDevices(params.parallelism_config,
+                                        params.model_config_,
+                                        params.eplb_config,
+                                        params.fmha_config,
+                                        params.device_resource_config,
+                                        params.moe_config,
+                                        params.sp_config,
+                                        params.misc_config,
+                                        params.profiling_debug_logging_config,
+                                        params.hw_kernel_config,
+                                        params.concurrency_config,
+                                        params.ffn_disaggregate_config,
+                                        params.runtime_config,
+                                        params.model_specific_config);
     executor_.reset(new EmbeddingExecutor(params, rtp_llm::DeviceFactory::getDefaultDevice(), handler));
-    scheduler_.reset(new EmbeddingScheduler(model_config_, concurrency_config, params.runtime_config, metrics_reporter_));
+    scheduler_.reset(
+        new EmbeddingScheduler(model_config_, concurrency_config, params.runtime_config, metrics_reporter_));
     gen_timeline_ = params.profiling_debug_logging_config.gen_timeline_sync;
 
     (void)startLoop();
@@ -36,7 +37,6 @@ EmbeddingEngine::~EmbeddingEngine() {
     RTP_LLM_LOG_INFO("destory embedding engine");
     (void)stop();
 }
-
 
 absl::Status EmbeddingEngine::startLoop() {
     RTP_LLM_LOG_INFO("start embedding engine");

@@ -43,9 +43,9 @@ void CudaGraphRunner::captureDecode() {
         // Prepare common inputs using shared function
         prepareCaptureInputs(inputs, bs, bs * num_tokens_per_bs_);
 
-        graph_instances_[bs].mem_hold_ = createCaptureMemoryHold(inputs, bs * num_tokens_per_bs_);
-        captureDecodeOneBatchSize(bs);
-        replayAndSyncCheck(bs, "batch size");
+        graph_instances_[bs * num_tokens_per_bs_].mem_hold_ = createCaptureMemoryHold(inputs, bs * num_tokens_per_bs_);
+        captureDecodeOneBatchSize(bs * num_tokens_per_bs_);
+        replayAndSyncCheck(bs * num_tokens_per_bs_, "batch size");
         RTP_LLM_LOG_INFO("capture success for batch size: %d", bs);
     }
     RTP_LLM_LOG_INFO("Capture Decode End");

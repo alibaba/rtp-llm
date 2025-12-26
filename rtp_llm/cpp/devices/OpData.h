@@ -152,6 +152,7 @@ struct GptModelInputs {
 
     // not sync to other tp rank
     std::vector<std::string> trace_ids;
+    bool                     disable_cuda_graph = false;
 
 public:
     std::string debugString(bool force = false) const;

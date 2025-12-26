@@ -69,7 +69,7 @@ EmbeddingExecutor::EmbeddingExecutor(const EngineInitParams& params, rtp_llm::De
 
     if (!params.py_model.is_none()) {
         RTP_LLM_LOG_INFO("init executor with python model");
-        model_.reset(new PyWrappedModel(model_init_params, params.py_model, true));
+        model_.reset(new PyWrappedModel(model_init_params, params.py_model, CudaGraphMode::PREFILL));
     } else {
         RTP_LLM_LOG_INFO("init legacy c++ gpt model");
         model_.reset(new GptModel(model_init_params));
@@ -168,7 +168,9 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
             int seqLen = stream->embeddingInput()->input_lengths->data<int32_t>()[i];
             RTP_LLM_CHECK_WITH_INFO(seqLen + position_bias <= int(max_position_ids_buf_->shape()[0]),
                                     "seqlen(%d) + position_bias(%d) exceed max_position_length(%d)",
-                                    int(seqLen), int(position_bias), int(max_position_ids_buf_->shape()[0]));
+                                    int(seqLen),
+                                    int(position_bias),
+                                    int(max_position_ids_buf_->shape()[0]));
             memcpy(merged_positon_ids + token_idx + length_idx,
                    max_position_ids_buf_->data<int32_t>() + position_bias,
                    seqLen * sizeof(int32_t));

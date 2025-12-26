@@ -90,7 +90,8 @@ public:
     GraphBase*       getDeviceGraphRunner(const DeviceInitParams& params,
                                           py::object              py_instance,
                                           int                     kv_cache_block_offset,
-                                          bool                    is_prefill_cuda_graph_mode = false) override;
+                                          bool                    is_prefill_cuda_graph_mode = false,
+                                          int                     num_tokens_per_bs          = 1) override;
 
 private:
     void         checkUseOpenSourceFMHA();
@@ -213,8 +214,8 @@ public:
     MoeCombineOutput  deepEpLLCombine(const MoeCombineParams& params);
     FfnLayerOutput    deepEpLLMoeFfn(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs);
 
-    void                              prepareCommBuffer(const PrepareCommBufferParams& params) override;
-    void                              maskLogits(Buffer& logits, const Buffer& mask) override;
+    void prepareCommBuffer(const PrepareCommBufferParams& params) override;
+    void maskLogits(Buffer& logits, const Buffer& mask) override;
 
     void perfRangePush(const std::string& name) const override;
     void perfRangePop() const override;
@@ -306,7 +307,8 @@ private:
     NcclParam dp_tp_nccl_param_;
     NcclParam ffn_tp_nccl_param_;
 
-    GraphBase* graph_runner_{nullptr};
+    GraphBase*                              graph_runner_{nullptr};
+    std::vector<std::unique_ptr<GraphBase>> graph_runners_;
 
     BufferPtr curandstate_buf_;  // for sampler use.
 

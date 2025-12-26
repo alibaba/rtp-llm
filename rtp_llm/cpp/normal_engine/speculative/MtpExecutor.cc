@@ -182,7 +182,12 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                           param
 
     if (!params.py_model.is_none()) {
         RTP_LLM_LOG_INFO("init executor with python model");
-        model_.reset(new PyWrappedModel(model_init_params, params.py_model));
+        // use decode mode when cuda graph
+        model_.reset(new PyWrappedModel(model_init_params,
+                                        params.py_model,
+                                        model_init_params.device->initParams().hw_kernel_config.enable_cuda_graph ?
+                                            CudaGraphMode::DECODE :
+                                            CudaGraphMode::NONE));
     } else if (device_->initParams().hw_kernel_config.enable_native_cuda_graph) {
         RTP_LLM_LOG_INFO("init legacy c++ gpt model with native cuda graph");
         model_.reset(new NativeDeviceGraphModel(model_init_params));
@@ -218,7 +223,11 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                           param
                   mtp_params->model_id});
         if (!params.py_sp_model.is_none()) {
             RTP_LLM_LOG_INFO("[speculative decoding] using py model");
-            draft_model_.reset(new PyWrappedModel(model_params, params.py_sp_model));
+            draft_model_.reset(new PyWrappedModel(
+                model_params,
+                params.py_sp_model,
+                model_init_params.device->initParams().hw_kernel_config.enable_cuda_graph ? CudaGraphMode::DECODE :
+                                                                                            CudaGraphMode::NONE));
         } else {
             RTP_LLM_LOG_INFO("[speculative decoding] legacy c++ gpt model");
             draft_model_.reset(new MTPModel(model_params));
@@ -280,7 +289,6 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     SamplerOutput   sampler_output;
     GptModelOutputs draft_model_output;
     SamplerOutput   draft_sampler_output;
-
     // placeholder for some tensors
     torch::Tensor draft_probs;
     torch::Tensor draft_token_ids;
@@ -292,6 +300,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         model_input                              = std::move(model_input_status.value());
         executor_collector.gather_model_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
+    // tmp disable prefill cuda graph when not pd sep
+    model_input.disable_cuda_graph = true;
     {
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         model_input.skip_run  = streams.empty() && !enable_ffn_disaggregate_;
@@ -341,8 +351,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         maybePrintModelInput(model_input, "prefill post draft model");
         model_input.k_block_size = mtp_cache_managers_[0]->cacheConfig().k_block_size;
         model_input.v_block_size = mtp_cache_managers_[0]->cacheConfig().v_block_size;
-
-        draft_model_output = std::move(draft_model_->forward(model_input));
+        draft_model_output       = std::move(draft_model_->forward(model_input));
     }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {

@@ -113,7 +113,8 @@ public:
     virtual GraphBase*       getDeviceGraphRunner(const DeviceInitParams& params,
                                                   py::object              py_instance,
                                                   int                     kv_cache_block_offset,
-                                                  bool                    is_prefill_cuda_graph_mode = false) {
+                                                  bool                    is_prefill_cuda_graph_mode = false,
+                                                  int                     num_tokens_per_bs          = 1) {
         throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
     }
     void setCacheStore(std::shared_ptr<rtp_llm::CacheStore> cache_store);
