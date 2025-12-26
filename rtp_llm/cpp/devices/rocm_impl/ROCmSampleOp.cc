@@ -18,7 +18,25 @@ using SamplerT = float;
 // where "x" are skipped.
 // topk should has higher proirity than topp.
 
+inline void _saveTorchDataTofile(const torch::Tensor& tensor, const std::string& fileName) {
+    auto          tensor_cpu = tensor.contiguous().cpu();
+    auto          pickled    = torch::pickle_save(tensor_cpu);
+    std::ofstream fout(fileName, std::ios::out | std::ios::binary);
+    fout.write(pickled.data(), pickled.size());
+    fout.close();
+}
 GreedyOutput ROCmDevice::sampleGreedy(const GreedyParams& params) {
+
+    static int cnt = 0;
+    const char* env_dir = std::getenv("XBJ_DUMP");
+    if (env_dir != nullptr) {
+        ++cnt;
+        std::ostringstream oss;
+        oss << env_dir << "/logits_" << cnt << ".pt";
+        _saveTorchDataTofile(Buffer2torchTensor(params.logits, false), oss.str());
+    }
+
+    
     const auto& logits     = params.logits;
     const auto  batch_size = logits.shape()[0];
     RUNTIME_ASSERT_OP_ARG(batch_size < init_params_.max_batch_size,

@@ -82,7 +82,7 @@ genrule(
 genrule(
     name = "generated_sm90",
     tools = [":aot_build_utils_generate_sm90"],
-    cmd = "loc=$(locations @flashinfer//:aot_build_utils_generate_sm90); loc=$${loc%/*};loc=$${loc%/*}; PYTHONPATH=$$loc /opt/conda310/bin/python -m aot_build_utils.generate_sm90 --enable_f16 true --use_fp16_qk_reductions false --enable_bf16 true --mask_modes 1 --path $(RULEDIR) --head_dims 64,64 128,128 --pos_encoding_modes 0",
+    cmd = "loc=$(locations :aot_build_utils_generate_sm90); loc=$${loc%/*};loc=$${loc%/*}; PYTHONPATH=$$loc /opt/conda310/bin/python -m aot_build_utils.generate_sm90 --enable_f16 true --use_fp16_qk_reductions false --enable_bf16 true --mask_modes 1 --path $(RULEDIR) --head_dims 64,64 128,128 --pos_encoding_modes 0",
     outs = [
         'batch_paged_prefill_head_qk_128_head_vo_128_posenc_0_fp16qkred_0_mask_1_dtypeq_bf16_dtypekv_bf16_dtypeout_bf16_idtype_i32_sm90.cu',
         'batch_paged_prefill_head_qk_128_head_vo_128_posenc_0_fp16qkred_0_mask_1_dtypeq_f16_dtypekv_f16_dtypeout_f16_idtype_i32_sm90.cu',
