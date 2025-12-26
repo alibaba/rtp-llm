@@ -40,9 +40,9 @@ void RemoteRpcServer::initLocalPeerInfo() {
         return;
     }
     // worker 0 is master (rank 0)
-    resource_.workers = maga_init_params_.runtime_config.worker_addrs;
+    resource_.workers      = maga_init_params_.runtime_config.worker_addrs;
     resource_.grpc_workers = maga_init_params_.runtime_config.worker_grpc_addrs;
-    
+
     string worker_info = "worker address is ";
     for (auto& worker : resource_.workers) {
         worker_info += worker + ", ";
@@ -60,7 +60,8 @@ void RemoteRpcServer::initCacheStore(const EngineInitParams&                init
                                      rtp_llm::ProposeModelEngineInitParams* propose_params) {
     RTP_LLM_LOG_INFO("init_params.role_type : %d", init_params.pd_sep_config.role_type);
 
-    if (init_params.pd_sep_config.role_type != RoleType::PREFILL && init_params.pd_sep_config.role_type != RoleType::DECODE) {
+    if (init_params.pd_sep_config.role_type != RoleType::PREFILL
+        && init_params.pd_sep_config.role_type != RoleType::DECODE) {
         RTP_LLM_FAIL("role_type must be prefill or decode, but it is %d", init_params.pd_sep_config.role_type);
     }
     auto device        = engine_->getDevice();
@@ -86,14 +87,6 @@ void RemoteRpcServer::initCacheStore(const EngineInitParams&                init
 
     device->setCacheStore(cache_store_);
     cache_manager->regUserMr(maga_init_params_.model_id);
-    if (propose_params) {
-        if (propose_params->mtp_model_params_) {
-            for (size_t mtp_model_id = 0; mtp_model_id < propose_params->mtp_model_params_->size(); mtp_model_id++) {
-                const auto& mtp_cache_manager = engine_->resourceContext().mtp_cache_managers[mtp_model_id];
-                mtp_cache_manager->regUserMr(propose_params->mtp_model_params_->at(mtp_model_id)->model_id);
-            }
-        }
-    }
 
     resource_.cache_store = std::dynamic_pointer_cast<NormalCacheStore>(cache_store_);
 }
