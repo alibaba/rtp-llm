@@ -72,7 +72,7 @@ py_library(
 genrule(
     name = "generate_dispatch",
     tools = [":dispatch_generate_py"],
-    cmd = "loc=$(locations @flashinfer//:dispatch_generate_py); loc=$${loc%/*};loc=$${loc%/*}; PYTHONPATH=$$loc /opt/conda310/bin/python -m aot_build_utils.generate_dispatch_inc --use_fp16_qk_reductions false --mask_modes 1 --path $(RULEDIR)/dispatch.inc --head_dims_sm90 64,64 128,128 --head_dims 64 128 --pos_encoding_modes 0",
+    cmd = "loc=$(locations :dispatch_generate_py); loc=$${loc%/*};loc=$${loc%/*}; PYTHONPATH=$$loc /opt/conda310/bin/python -m aot_build_utils.generate_dispatch_inc --use_fp16_qk_reductions false --mask_modes 1 --path $(RULEDIR)/dispatch.inc --head_dims_sm90 64,64 128,128 --head_dims 64 128 --pos_encoding_modes 0",
     outs =[
         "dispatch.inc",
     ],
