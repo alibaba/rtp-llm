@@ -86,7 +86,7 @@ def _init_router(
 
     router = DeepEpLowLatencyRouter(
         config,
-        use_fp8_dispatch=use_fp8,
+        use_fp8=use_fp8,
         zero_copy=False,
         async_finish=False,
         return_recv_hook=False,
