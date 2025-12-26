@@ -756,8 +756,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                 store_q_mtp,
                 store_kv,
                 store_cache,
-                rope_cache.used && rope_cache.data.defined() ? static_cast<float2*>(rope_cache.data.data_ptr()) :
-                                                               nullptr,
+                nullptr,
                 stream_);
             check_cuda_error();
         } else {
@@ -780,7 +779,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                 params.common.padding_offset->data<int>(),
                 params.common.cu_seqlens->data<int>(),
                 rope_cache.used,
-                checkRopeCache(params.configs.rope_config, rope_cache) ? rope_cache.data.data_ptr<float>() : nullptr,
+		nullptr,
                 batch_size,
                 seq_len,
                 token_num,
@@ -1173,8 +1172,7 @@ AttentionModuleOutput ROCmDevice::decoderSelfAttention(const AttentionModulePara
                 store_q,
                 store_kv,
                 store_cache,
-                rope_cache.used && rope_cache.data.defined() ? static_cast<float2*>(rope_cache.data.data_ptr()) :
-                                                               nullptr,
+		nullptr,
                 stream_);
             check_cuda_error();
             DEBUG_PRINT_PARAMS(params, this, "decode_writeKVCache", q_output);
