@@ -9,9 +9,10 @@ from deep_ep import Buffer as DeepEPBuffer
 from deep_ep import Config as DeepEPConfig
 from torch.distributed import ProcessGroup
 
-from typing import Optional
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
+)
 from rtp_llm.ops.compute_ops import DeviceType, get_device
-from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
 
 __all__ = [
     "DeepEPBuffer",
@@ -64,7 +65,7 @@ class DeepEPWrapper:
         config_adapter: MoEConfigAdapter,
     ) -> None:
         """Initialize DeepEPWrapper with ProcessGroup and MoEConfigAdapter.
-        
+
         Args:
             group: ProcessGroup for distributed communication
             config_adapter: MoEConfigAdapter containing all necessary configuration
@@ -73,7 +74,7 @@ class DeepEPWrapper:
         model_config = config_adapter.model_config
         parallelism_config = config_adapter.parallelism_config
         moe_config = config_adapter.moe_config
-        
+
         self._ep_rank = parallelism_config.ep_rank
         self._ep_size = parallelism_config.ep_size
         self._hidden_size = model_config.hidden_size
@@ -86,7 +87,7 @@ class DeepEPWrapper:
         self._moe_config = moe_config
         self._max_generate_batch_size = config_adapter.max_generate_batch_size
         self._ffn_disaggregate_config = parallelism_config.ffn_disaggregate_config
-        
+
         self._mode, self._buffer = self._init_deepep_buffer(group)
 
     @property
@@ -130,6 +131,15 @@ class DeepEPWrapper:
     def use_accl_ep(self) -> bool:
         return self._use_accl_ep
 
+    def query_mask_buffer(self) -> torch.Tensor:
+        ep_size: int = self._ep_size
+        mask_status = torch.zeros((ep_size,), dtype=torch.int, device="cuda")
+        torch.cuda.synchronize()
+        self._buffer.low_latency_query_mask_buffer(mask_status)
+        # print("DeepEPWrapper: mask_status =", mask_status)
+        torch.cuda.synchronize()
+        return mask_status
+
     def _init_deepep_buffer(
         self, group: ProcessGroup
     ) -> Tuple[DeepEPMode, DeepEPBuffer]:
@@ -143,7 +153,9 @@ class DeepEPWrapper:
         )
         if use_deepep_low_latency and enable_ffn_disaggregate:
             if self._use_accl_ep:
-                return DeepEPMode.LOW_LATENCY_M2N, self._init_low_latency_m2n_buffer(group)
+                return DeepEPMode.LOW_LATENCY_M2N, self._init_low_latency_m2n_buffer(
+                    group
+                )
             else:
                 raise RuntimeError(
                     f"[rank: {ep_rank}] init deep_ep buffer failed, current deep_ep provider "
@@ -192,9 +204,7 @@ class DeepEPWrapper:
                 return ll_num_max_token_per_rank
         return 128
 
-    def _init_normal_buffer(
-        self, group: ProcessGroup
-    ) -> DeepEPBuffer:
+    def _init_normal_buffer(self, group: ProcessGroup) -> DeepEPBuffer:
         num_nvl_bytes = 0
         num_rdma_bytes = 0
         num_qps_per_rank = 1
@@ -234,9 +244,7 @@ class DeepEPWrapper:
                 init_kwargs["allow_mnnvl"] = False
         return DeepEPBuffer(**init_kwargs)  # type: ignore
 
-    def _init_low_latency_buffer(
-        self, group: ProcessGroup
-    ) -> DeepEPBuffer:
+    def _init_low_latency_buffer(self, group: ProcessGroup) -> DeepEPBuffer:
         max_generate_batch_size: int = self._max_generate_batch_size
         tp_size: int = self._parallelism_config.tp_size
         assert (
@@ -273,6 +281,7 @@ class DeepEPWrapper:
                 flush=True,
             )
         num_qps_per_rank = num_experts / ep_size
+        allgather_intput_ints = 10
 
         init_kwargs = {
             "group": group,
@@ -281,6 +290,8 @@ class DeepEPWrapper:
             "low_latency_mode": True,
             "num_qps_per_rank": num_qps_per_rank,
             "allow_mnnvl": True,
+            "enable_shrink": True,
+            "num_coll_buffer_bytes": 4 * allgather_intput_ints * ep_size,
         }
         if self._use_accl_ep:
             os.environ["ACCL_LOW_LATENCY_OPTIMIZE"] = "1"
@@ -291,12 +302,12 @@ class DeepEPWrapper:
                 init_kwargs["allow_mnnvl"] = False
         return DeepEPBuffer(**init_kwargs)  # type: ignore
 
-    def _init_low_latency_m2n_buffer(
-        self, group: ProcessGroup
-    ) -> DeepEPBuffer:
+    def _init_low_latency_m2n_buffer(self, group: ProcessGroup) -> DeepEPBuffer:
         if self._ffn_disaggregate_config is None:
-            raise RuntimeError("ffn_disaggregate_config is required for low-latency m2n mode")
-        
+            raise RuntimeError(
+                "ffn_disaggregate_config is required for low-latency m2n mode"
+            )
+
         max_generate_batch_size: int = self._max_generate_batch_size
         attention_tp_size: int = self._ffn_disaggregate_config.attention_tp_size
         assert (
@@ -379,7 +390,7 @@ def init_deepep_wrapper(
     config_adapter: MoEConfigAdapter,
 ) -> None:
     """Initialize DeepEP wrapper with ProcessGroup and MoEConfigAdapter.
-    
+
     Args:
         group: ProcessGroup for distributed communication
         config_adapter: MoEConfigAdapter containing all necessary configuration

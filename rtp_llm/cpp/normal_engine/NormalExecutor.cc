@@ -32,9 +32,10 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
         int  first_moe_layer = params.model_config_.moe_layer_index.front();
         auto moe_weight_type = params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->type();
         bool is_gated_activation = params.model_config_.isGatedActivation();
-        auto moe_inter_size = is_gated_activation ?
-            params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->shape()[1] / 2 :
-            params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->shape()[1];
+        auto moe_inter_size =
+            is_gated_activation ?
+                params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->shape()[1] / 2 :
+                params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->shape()[1];
 
         expert_balancer_ = make_shared<ExpertBalancer>(params.model_config_.expert_num,
                                                        params.eplb_config.phy_exp_num(params.model_config_.expert_num),
@@ -72,6 +73,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
     if (!params.py_model.is_none()) {
         RTP_LLM_LOG_INFO("init executor with python model");
         model_.reset(new PyWrappedModel(model_init_params, params.py_model));
+        elastic_ep_manager_ = make_shared<ElasticEPManager>(params.parallelism_config.ep_size);
     } else if (device_->initParams().hw_kernel_config.enable_native_cuda_graph) {
         RTP_LLM_LOG_INFO("init legacy c++ gpt model with native cuda graph");
         model_.reset(new NativeDeviceGraphModel(model_init_params));
@@ -138,6 +140,9 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         model_output                        = std::move(model_->forward(model_input));
         executor_collector.model_forward_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
         RTP_LLM_LOG_DEBUG("model forward done");
+    }
+    if (elastic_ep_manager_) {
+        elastic_ep_manager_->query_deepep_mask_buffer();
     }
     if (expert_balancer_) {
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();

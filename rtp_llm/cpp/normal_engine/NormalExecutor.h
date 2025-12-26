@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/models/lora/LoraManager.h"
 #include "rtp_llm/cpp/models/eplb/ExpertBalancer.h"
+#include "rtp_llm/cpp/models/elastic_ep_manager/ElasticEPManager.h"
 
 namespace rtp_llm {
 
@@ -45,6 +46,7 @@ private:
     std::shared_ptr<CacheManager>                                            cache_manager_;
     std::shared_ptr<lora::LoraManager>                                       lora_manager_;
     std::shared_ptr<ExpertBalancer>                                          expert_balancer_;
+    std::shared_ptr<ElasticEPManager>                                        elastic_ep_manager_;
     bool                                                                     warm_up_;
     bool                                                                     use_all_gather_;
     kmonitor::MetricsReporterPtr                                             metrics_reporter_ = nullptr;
