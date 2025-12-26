@@ -17,7 +17,12 @@ public:
     RtpLLMOp();
     ~RtpLLMOp();
 
-    void init(py::object model, py::object engine_config, py::object vit_config, py::object mm_process_engine, py::object propose_model, py::object token_processor);
+    void init(py::object model,
+              py::object engine_config,
+              py::object vit_config,
+              py::object mm_process_engine,
+              py::object propose_model,
+              py::object token_processor);
     void stop();
     void startHttpServer(py::object model_weights_loader,
                          py::object lora_infos,
@@ -28,41 +33,6 @@ public:
     void restart();
 
 private:
-<<<<<<< HEAD
-<<<<<<< HEAD
-    void                                          _init(int64_t                                       model_rpc_port,
-                                                        int64_t                                       http_port,
-                                                        const EngineInitParams                        maga_init_params,
-                                                        py::object                                    mm_process_engine,
-                                                        std::unique_ptr<ProposeModelEngineInitParams> propose_params,
-                                                        py::object                                    token_processor);
-    EngineInitParams                              initModel(py::object model, py::object engine_config, py::object vit_config);
-    std::unique_ptr<ProposeModelEngineInitParams> initProposeModel(py::object propose_model, const EngineInitParams& base_params);
-=======
-<<<<<<< HEAD
-    void                                                   _init(int64_t                                                model_rpc_port,
-                                                                 int64_t                                                http_port,
-                                                                 const EngineInitParams                        maga_init_params,
-                                                                 py::object                                             mm_process_engine,
-                                                                 std::unique_ptr<ProposeModelEngineInitParams> propose_params,
-                                                                 py::object                                             token_processor);
-    EngineInitParams                              initModel(py::object model, py::object engine_config, py::object vit_config);
-    std::unique_ptr<ProposeModelEngineInitParams> initProposeModel(py::object propose_model, const EngineInitParams& base_params);
-    void initRPCServer(const EngineInitParams                        maga_init_params,
-                       py::object                                             mm_process_engine,
-                       std::unique_ptr<ProposeModelEngineInitParams> propose_params,
-                       py::object                                             token_processor);
-=======
-    void                                          _init(int64_t                                       model_rpc_port,
-                                                        int64_t                                       http_port,
-                                                        const EngineInitParams                        maga_init_params,
-                                                        py::object                                    mm_process_engine,
-                                                        std::unique_ptr<ProposeModelEngineInitParams> propose_params,
-                                                        py::object                                    token_processor);
-    EngineInitParams                              initModel(py::object model);
-    std::unique_ptr<ProposeModelEngineInitParams> initProposeModel(py::object propose_model);
->>>>>>> feat: refactor KVCacheManager
-=======
     void             _init(int64_t                                       model_rpc_port,
                            int64_t                                       http_port,
                            const EngineInitParams                        maga_init_params,
@@ -72,18 +42,10 @@ private:
     EngineInitParams initModel(py::object model, py::object engine_config, py::object vit_config);
     std::unique_ptr<ProposeModelEngineInitParams> initProposeModel(py::object              propose_model,
                                                                    const EngineInitParams& base_params);
->>>>>>> fix: refine kvcache
     void                                          initRPCServer(const EngineInitParams                        maga_init_params,
                                                                 py::object                                    mm_process_engine,
                                                                 std::unique_ptr<ProposeModelEngineInitParams> propose_params,
                                                                 py::object                                    token_processor);
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
->>>>>>> feat: refactor KVCacheManager
->>>>>>> feat: refactor KVCacheManager
-=======
->>>>>>> fix: refine kvcache
 
 private:
     std::unique_ptr<RpcServiceImpl> model_rpc_service_;
