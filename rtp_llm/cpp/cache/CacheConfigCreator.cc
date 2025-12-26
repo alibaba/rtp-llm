@@ -34,6 +34,7 @@ CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model
 
     CacheConfig config;
     config.layer_num          = static_cast<uint32_t>(layer_num);
+    config.layer_all_num      = static_cast<uint32_t>(layer_num);
     config.block_num          = 0;
     config.seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
 
@@ -91,6 +92,8 @@ CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model
     config.block_size         = config.kv_block_size + config.kv_scale_size;
     config.block_size_bytes   = config.kv_block_size_bytes + config.kv_scale_size_bytes;
 
+    // Global layer ids are the indices used by BlockPool::convertIndexToAddr (0..N-1 in a single-model case).
+    config.global_layer_ids.push_back(all_layer_ids);
     config.layer_ids.push_back(all_layer_ids);
     return config;
 }
@@ -284,19 +287,34 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     config.block_size       = config.block_size_bytes / rtp_llm::getTypeSize(config.dtype);
     config.block_num        = block_num;
 
-    config.mtp_sub_configs.resize(num_mtp_modules);
-    auto propose_config_ptr       = std::make_shared<CacheConfig>(propose_config);
-    propose_config_ptr->block_num = block_num;
-
-    for (int i = 0; i < num_mtp_modules; ++i) {
-        config.mtp_sub_configs[i] = propose_config_ptr;
+    // Record global layer ids for BlockPool address lookup.
+    // - Main model global_layer_ids[0] covers all layers across main + mtp modules: [0 .. total_layer_num-1].
+    // - Each mtp_sub_config has its own global_layer_ids[0] range for its local layers.
+    config.global_layer_ids.clear();
+    config.global_layer_ids.resize(1);
+    config.global_layer_ids[0].resize(total_layer_num);
+    for (uint32_t i = 0; i < total_layer_num; ++i) {
+        config.global_layer_ids[0][i] = static_cast<int>(i);
     }
 
-    auto base_layer_id      = config.layer_ids[0].back() + 1;
-    auto propose_layer_nums = propose_config.layer_num;
+    const uint32_t main_layer_num = score_config.layer_num;
+    const uint32_t mtp_layer_num  = propose_config.layer_num;
 
-    for (int i = 0; i < num_mtp_modules * propose_layer_nums; ++i) {
-        config.layer_ids[0].push_back(base_layer_id + i);
+    // Each sub-model needs an independent CacheConfig because global_layer_ids differs per module.
+    config.mtp_sub_configs.clear();
+    config.mtp_sub_configs.reserve(num_mtp_modules);
+    for (int m = 0; m < num_mtp_modules; ++m) {
+        auto sub_cfg           = std::make_shared<CacheConfig>(propose_config);
+        sub_cfg->block_num     = block_num;
+        sub_cfg->layer_all_num = sub_cfg->layer_num;
+
+        sub_cfg->global_layer_ids.clear();
+        sub_cfg->global_layer_ids.resize(1);
+        sub_cfg->global_layer_ids[0].resize(mtp_layer_num);
+        for (uint32_t l = 0; l < mtp_layer_num; ++l) {
+            sub_cfg->global_layer_ids[0][l] = static_cast<int>(main_layer_num + m * mtp_layer_num + l);
+        }
+        config.mtp_sub_configs.push_back(sub_cfg);
     }
 
     const auto kv_cache_seq_len = static_cast<size_t>(block_num) * config.seq_size_per_block;
@@ -311,6 +329,16 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                      score_config.block_size_bytes,
                      num_mtp_modules,
                      propose_config.block_size_bytes);
+
+    RTP_LLM_LOG_INFO("CacheConfig debugString(main_score_model):\n%s", score_config.debugString().c_str());
+    for (size_t i = 0; i < config.mtp_sub_configs.size(); ++i) {
+        const auto& sub = config.mtp_sub_configs[i];
+        if (!sub) {
+            RTP_LLM_LOG_INFO("CacheConfig debugString(sub_propose_model[%zu]): null", i);
+            continue;
+        }
+        RTP_LLM_LOG_INFO("CacheConfig debugString(sub_propose_model[%zu]):\n%s", i, sub->debugString().c_str());
+    }
 
     return config;
 }

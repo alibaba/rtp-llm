@@ -68,7 +68,7 @@ makeMtpCacheConfigByCreateSpConfig(uint32_t main_layers, int mtp_module_num, uin
     sp_config.type              = SP_TYPE_MTP;
     sp_config.gen_num_per_cycle = mtp_module_num;
 
-    // NOTE: createSpConfig will extend main layer_ids[0] to include MTP layers (score + N*propose).
+    // NOTE: createSpConfig will fill global_layer_ids for main + MTP sub-models.
     auto cfg = rtp_llm::CacheConfigCreator::createSpConfig(score_model_config,
                                                            propose_model_config,
                                                            parallelism_config,
@@ -96,16 +96,13 @@ TEST_F(BlockPoolTest, ConstructorAndInit) {
 }
 
 TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
-    // Use createSpConfig logic so that main layer_ids includes sub-model layers naturally.
+    // Use createSpConfig logic so that global_layer_ids is filled for main + sub-model layers.
     // main(2 layers) + mtp1(1 layer) + mtp2(1 layer)
     auto cache_cfg = makeMtpCacheConfigByCreateSpConfig(/*main_layers=*/2, /*mtp_module_num=*/2, /*block_num=*/4);
 
-    // 1) 主模型 layer_ids 覆盖主+子模型层数
-    ASSERT_FALSE(cache_cfg.layer_ids.empty());
-    ASSERT_EQ(cache_cfg.layer_ids[0].size(),
-              static_cast<size_t>(cache_cfg.layer_num + cache_cfg.mtp_sub_configs.size()));
+    ASSERT_FALSE(cache_cfg.global_layer_ids.empty());
+    ASSERT_EQ(cache_cfg.global_layer_ids[0].size(), static_cast<size_t>(cache_cfg.layer_all_num));
 
-    // 2) mtp_module 模型结构一致（同样的 CacheSpec/stride）
     ASSERT_EQ(cache_cfg.mtp_sub_configs.size(), 2u);
     ASSERT_NE(cache_cfg.mtp_sub_configs[0], nullptr);
     ASSERT_NE(cache_cfg.mtp_sub_configs[1], nullptr);
@@ -113,6 +110,13 @@ TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
     ASSERT_EQ(cache_cfg.mtp_sub_configs[1]->cache_specs.size(), 1u);
     EXPECT_EQ(cache_cfg.mtp_sub_configs[0]->cache_specs[0]->block_size_bytes(),
               cache_cfg.mtp_sub_configs[1]->cache_specs[0]->block_size_bytes());
+
+    ASSERT_FALSE(cache_cfg.mtp_sub_configs[0]->global_layer_ids.empty());
+    ASSERT_FALSE(cache_cfg.mtp_sub_configs[1]->global_layer_ids.empty());
+    ASSERT_EQ(cache_cfg.mtp_sub_configs[0]->global_layer_ids[0].size(), 1u);
+    ASSERT_EQ(cache_cfg.mtp_sub_configs[1]->global_layer_ids[0].size(), 1u);
+    EXPECT_EQ(cache_cfg.mtp_sub_configs[0]->global_layer_ids[0][0], 2);
+    EXPECT_EQ(cache_cfg.mtp_sub_configs[1]->global_layer_ids[0][0], 3);
 
     auto pool_cfg = rtp_llm::BlockPoolConfigHelper::createLayerFirstConfig(cache_cfg);
     ASSERT_EQ(pool_cfg.memory_layouts.size(), 3u);
