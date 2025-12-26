@@ -1,4 +1,6 @@
 import asyncio
+import logging
+import os
 import struct
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -222,12 +224,7 @@ class ModelRpcClientTest(TestCase):
         mock_channel = MagicMock()
 
         # Create client and mock the channel pool
-        client = ModelRpcClient(
-            addresses=["localhost:50051"],
-            client_config={},
-            max_rpc_timeout_ms=10000,
-            decode_entrance=False,
-        )
+        client = FakeModelRpcClient()
 
         # Mock the channel pool get method
         async def mock_get_channel(target):
@@ -311,12 +308,7 @@ class ModelRpcClientTest(TestCase):
         mock_channel = MagicMock()
 
         # Create client and mock the channel pool
-        client = ModelRpcClient(
-            addresses=["localhost:50051"],
-            client_config={},
-            max_rpc_timeout_ms=10000,
-            decode_entrance=False,
-        )
+        client = FakeModelRpcClient()
 
         # Mock the channel pool get method
         async def mock_get_channel(target):
@@ -400,12 +392,7 @@ class ModelRpcClientTest(TestCase):
         mock_channel = MagicMock()
 
         # Create client and mock the channel pool
-        client = ModelRpcClient(
-            addresses=["localhost:50051"],
-            client_config={},
-            max_rpc_timeout_ms=10000,
-            decode_entrance=False,
-        )
+        client = FakeModelRpcClient()
 
         # Mock the channel pool get method
         async def mock_get_channel(target):
