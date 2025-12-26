@@ -34,6 +34,7 @@ makeSimpleMhaCacheConfig(int layer_num, int block_num, size_t tokens_per_block, 
         layer_ids[i] = i;
     }
     config.layer_ids.push_back(layer_ids);
+    config.global_layer_ids.push_back(layer_ids);
 
     config.kv_block_stride       = static_cast<size_t>(spec->block_size());
     config.kv_block_stride_bytes = spec->block_size_bytes();

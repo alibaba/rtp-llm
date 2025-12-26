@@ -36,6 +36,7 @@ CacheConfig createHybridLayerTestConfig(int layer_num = 4, int block_num = 10, i
         layer_ids[i] = i;
     }
     config.layer_ids.push_back(layer_ids);
+    config.global_layer_ids.push_back(layer_ids);
 
     return config;
 }
