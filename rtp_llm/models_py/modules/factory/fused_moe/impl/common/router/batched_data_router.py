@@ -142,14 +142,13 @@ class BatchedDataRouter(FusedMoeDataRouter):
             rhs = a1[topks]
             b_a1[idx, :rows, :] = rhs
 
-        expert_tokens_meta = ExpertTokensMetadata(
-            expert_num_tokens=tokens_per_expert, expert_num_tokens_cpu=None
-        )
-
         return ExpertForwardPayload(
             expert_x=b_a1,
             expert_x_scale=None,
-            expert_tokens_meta=expert_tokens_meta,
+            expert_tokens_meta=ExpertTokensMetadata(
+                expert_num_tokens=tokens_per_expert,
+                expert_num_tokens_cpu=None,
+            ),
         )
 
     def finalize(

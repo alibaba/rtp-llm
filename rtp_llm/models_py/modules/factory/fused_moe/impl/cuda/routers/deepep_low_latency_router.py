@@ -20,7 +20,6 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.type import RouterType
-from rtp_llm.models_py.utils.arch import get_num_device_sms
 
 # DeepEP kernels quantize dispatch inputs in 128 element chunks.
 DEEPEP_QUANT_BLOCK_SIZE = 128
@@ -54,7 +53,7 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
     def __init__(
         self,
         config: MoEConfigAdapter,
-        use_fp8_dispatch: bool = True,
+        use_fp8: bool = True,
         zero_copy: bool = False,
         async_finish: bool = False,
         return_recv_hook: bool = False,
@@ -64,8 +63,9 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         self._num_experts = config.expert_num
         wrapper = DeepEpInitializer.get_deepep_wrapper(self._config)
         self._buffer = wrapper.buffer
+        self._num_topk = wrapper.num_topk
         self._num_max_dispatch_tokens_per_rank = wrapper.ll_num_max_token_per_rank
-        self._use_fp8_dispatch = use_fp8_dispatch
+        self._use_fp8 = use_fp8
         self._zero_copy = zero_copy
         self._async_finish = async_finish
         self._return_recv_hook = return_recv_hook
@@ -77,22 +77,72 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
     def handle(self) -> Optional[Tuple[Any, ...]]:
         return self._handle
 
+    def _prepare_pre_tp_slice(
+        self,
+        a1: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Slice the dispatch activation, topk_ids and topk_weights by tp.
+        Args:
+            a1 (torch.Tensor): The dispatch activation tensor.
+            topk_ids (torch.Tensor): The topk ids tensor.
+            topk_weights (torch.Tensor): The topk weights tensor.
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor, torch.Tensor]: The sliced dispatch activation, topk_ids and topk_weights.
+        """
+        # Convert topk_ids to int64
+        topk_ids = topk_ids.to(torch.int64)
+        # Slice by tp
+        tp_size = self._config.tp_size
+        tp_rank = self._config.tp_rank
+        token_num = a1.size(0)
+        tp_token_size = (token_num + tp_size - 1) // tp_size
+        slice_begin = min(tp_token_size * tp_rank, token_num)
+        slice_size = min(token_num - slice_begin, tp_token_size)
+        tp_dispatch_input = torch.narrow(a1, 0, slice_begin, slice_size)
+        tp_topk_ids = torch.narrow(topk_ids, 0, slice_begin, slice_size)
+        tp_topk_weights = torch.narrow(topk_weights, 0, slice_begin, slice_size)
+
+        return tp_dispatch_input, tp_topk_ids, tp_topk_weights
+
     def _normal_prepare(
-        self, dispatch_args: dict[str, Any], expert_payload: ExpertForwardPayload
+        self, dispatch_args: dict[str, Any], tp_topk_weights: torch.Tensor
     ):
         """Normal prepare for DeepEP Low-Latency.
         Args:
             dispatch_args (dict[str, Any]): Arguments for dispatching tokens to experts.
-            expert_payload (ExpertForwardPayload): Payload for expert computation.
+            tp_topk_weights (torch.Tensor): Topk weights tensor for this tp rank.
         """
-        # Normal prepare
+        # Calculate expected_m
+        tp_num_tokens = dispatch_args["x"].size(0)
+        expected_m = max(
+            1,
+            int(
+                tp_num_tokens
+                * self._config.ep_size
+                * self._num_topk
+                // self._num_experts
+            ),
+        )
+
+        # Dispatch tokens
         expert_x, expert_num_tokens, self._handle, _, _ = (
             self._buffer.low_latency_dispatch(**dispatch_args)
         )
-        # Save data
-        expert_payload.expert_x = expert_x[0] if self._use_fp8_dispatch else expert_x
-        expert_payload.expert_x_scale = expert_x[1] if self._use_fp8_dispatch else None
-        expert_payload.expert_tokens_meta.expert_num_tokens = expert_num_tokens
+
+        # Return expert forward payload
+        return ExpertForwardPayload(
+            expert_x=expert_x[0] if self._use_fp8 else expert_x,
+            expert_x_scale=expert_x[1] if self._use_fp8 else None,
+            expert_x_origin_dtype=dispatch_args["x"].dtype,
+            expert_topk_ids=dispatch_args["topk_idx"],
+            expert_topk_weights=tp_topk_weights,
+            expert_tokens_meta=ExpertTokensMetadata(
+                expected_m=expected_m,
+                expert_num_tokens=expert_num_tokens,
+            ),
+        )
 
     def prepare(
         self,
@@ -106,133 +156,52 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         """
         Dispatches tokens to experts across all ep ranks.
         """
-        # Check input data
-        assert a1.dim() == 2 and topk_ids.dim() == 2
-        assert a1.size(0) == topk_ids.size(0)
-        num_tokens = a1.size(0)
-        num_dispatch_tokens_per_rank = (
-            num_tokens + self._config.tp_size - 1
-        ) // self._config.tp_size
+        # Check payload data
+        num_tokens, hidden_size = a1.size()
         assert (
-            num_dispatch_tokens_per_rank <= self._num_max_dispatch_tokens_per_rank
-        ), f"Number of dispatch tokens {num_dispatch_tokens_per_rank} exceeds the maximum number of dispatch tokens per rank {self._num_max_dispatch_tokens_per_rank}."
-        hidden_dim = a1.size(1)
-        assert (
-            hidden_dim in SUPPORTED_HIDDEN_SIZES
-        ), f"Hidden Size {hidden_dim} not in supported list of hidden sizes: {SUPPORTED_HIDDEN_SIZES}."
-        if self._use_fp8_dispatch:
-            assert (
-                hidden_dim % DEEPEP_QUANT_BLOCK_SIZE == 0
-            ), f"DeepEP Low-Latency only supports hidden sizes that are divisible by {DEEPEP_QUANT_BLOCK_SIZE}."
-        has_per_token_scales = (
-            a1_scale.numel() != 1
-            if a1_scale is not None
-            else (a2_scale.numel() != 1 if a2_scale is not None else False)
+            hidden_size in SUPPORTED_HIDDEN_SIZES
+            and hidden_size % DEEPEP_QUANT_BLOCK_SIZE == 0
         )
+        tp_num_tokens = (num_tokens + self._config.tp_size - 1) // self._config.tp_size
+        assert tp_num_tokens <= self._num_max_dispatch_tokens_per_rank
+        assert topk_ids.size(0) == num_tokens and topk_weights.size(0) == num_tokens
         assert (
-            not has_per_token_scales
-        ), "DeepEP Low-Latency kernels doesn't support dispatching per-token scales."
-        assert (
-            self._handle is None
-        ), "DeepEP Low-latency dispatch handle should be clean before prepare()."
+            topk_ids.size(1) == self._num_topk
+            and topk_weights.size(1) == self._num_topk
+        )
+        # Check quantization
+        if self._use_fp8:
+            assert quant_config.is_block_quantized or (
+                quant_config.is_per_act_token and self._use_accl_ep
+            ), "DeepEP Low-Latency only supports fp8 block quantization or per_act_token quantization with ACCL-EP"
+        else:
+            assert not quant_config.is_quantized
+        # Check handle
+        assert self._handle is None
 
-        # Convert topk_ids to int64
-        topk_ids = topk_ids.to(torch.int64)
-        # Scatter by tp
-        tp_size = self._config.tp_size
-        tp_rank = self._config.tp_rank
-        token_num = a1.size(0)
-        tp_token_size = (token_num + tp_size - 1) // tp_size
-        slice_begin = min(tp_token_size * tp_rank, token_num)
-        slice_size = min(token_num - slice_begin, tp_token_size)
-        tp_expert_input = torch.narrow(a1, 0, slice_begin, slice_size)
-        tp_expert_ids = torch.narrow(topk_ids, 0, slice_begin, slice_size)
-        tp_expert_scales = torch.narrow(topk_weights, 0, slice_begin, slice_size)
+        # Slice dispatch activation, topk_ids and topk_weights by tp
+        tp_dispatch_input, tp_topk_ids, tp_topk_weights = self._prepare_pre_tp_slice(
+            a1, topk_ids, topk_weights
+        )
 
         # Prepare dispatch basic arguments
         dispatch_args = {
-            "x": tp_expert_input,
-            "topk_idx": tp_expert_ids,
+            "x": tp_dispatch_input,
+            "topk_idx": tp_topk_ids,
             "num_max_dispatch_tokens_per_rank": self._num_max_dispatch_tokens_per_rank,
             "num_experts": self._num_experts,
-            "use_fp8": self._use_fp8_dispatch,
+            "use_fp8": self._use_fp8,
             "async_finish": self._async_finish,
             "return_recv_hook": self._return_recv_hook,
         }
-        # Select quantization of DeepEP low latency dispatch
-        if self._use_fp8_dispatch:
-            dispatch_args.update({"use_fp8": True})
-            if quant_config.is_block_quantized:
-                if is_deep_gemm_e8m0_used():
-                    dispatch_args.update({"round_scale": True, "use_ue8m0": True})
-            elif quant_config.is_per_act_token:
-                if self._use_accl_ep:
-                    dispatch_args.update({"pertoken_quant": True})
-                else:
-                    raise NotImplementedError(
-                        "Only ACCL-EP supports fp8 per_act_token quantization"
-                    )
-            else:
-                raise NotImplementedError(
-                    "DeepEpLowLatencyRouter only supports fp8 block or per_act_token quantization"
-                )
-        else:
-            dispatch_args.update({"use_fp8": False})
-
-        # Initialize expert payload
-        expert_payload = ExpertForwardPayload(
-            expert_x_origin_dtype=a1.dtype,
-            expert_topk_weights=tp_expert_scales,
-            expert_topk_ids=tp_expert_ids,
-            expert_tokens_meta=ExpertTokensMetadata(
-                expected_m=max(
-                    1,
-                    int(
-                        token_num
-                        * self._config.dp_size
-                        * self._config.moe_k
-                        // self._num_experts
-                    ),
-                )
-            ),
-        )
+        # Set quantization config for DeepEP low latency dispatch
+        if quant_config.is_block_quantized and is_deep_gemm_e8m0_used():
+            dispatch_args.update({"round_scale": True, "use_ue8m0": True})
+        elif quant_config.is_per_act_token:
+            dispatch_args.update({"pertoken_quant": True})
 
         # Normal prepare
-        self._normal_prepare(dispatch_args, expert_payload)
-
-        # Check scale shape for DeepEP low latency dispatch
-        E, M, K = expert_payload.expert_x.shape
-        if self._use_fp8_dispatch:
-            assert expert_payload.expert_x_scale is not None
-            assert expert_payload.expert_x_scale.shape[0] == E
-            assert expert_payload.expert_x_scale.shape[1] == M
-            if quant_config.is_block_quantized:
-                if is_deep_gemm_e8m0_used():
-                    assert expert_payload.expert_x_scale.dtype == torch.int32
-                    assert (
-                        expert_payload.expert_x_scale.shape[2]
-                        == (K // DEEPEP_QUANT_BLOCK_SIZE + 3) // 4
-                    )
-                else:
-                    assert expert_payload.expert_x_scale.dtype == torch.float32
-                    assert (
-                        expert_payload.expert_x_scale.shape[2]
-                        == K // DEEPEP_QUANT_BLOCK_SIZE
-                    )
-            elif quant_config.is_per_act_token:
-                if self._use_accl_ep:
-                    assert expert_payload.expert_x_scale.dtype == torch.float32
-                    assert expert_payload.expert_x_scale.shape[2] == 1
-                else:
-                    raise RuntimeError(
-                        "Only ACCL-EP supports fp8 per_act_token quantization"
-                    )
-            else:
-                raise RuntimeError(
-                    "DeepEpLowLatencyRouter only supports fp8 block or per_act_token quantization"
-                )
-        else:
-            assert expert_payload.expert_x_scale is None
+        expert_payload = self._normal_prepare(dispatch_args, tp_topk_weights)
 
         return expert_payload
 
@@ -243,6 +212,7 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         """
         # Normal finalize
         combined_x, _, _ = self._buffer.low_latency_combine(**combine_args)
+
         return combined_x
 
     def _finalize_post_tp_gather(

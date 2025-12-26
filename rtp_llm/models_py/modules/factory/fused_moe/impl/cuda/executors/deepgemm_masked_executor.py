@@ -1,4 +1,3 @@
-from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 import torch
@@ -29,22 +28,6 @@ from rtp_llm.models_py.triton_kernels.common.activation import (
 from rtp_llm.models_py.utils.arch import get_num_device_sms
 from rtp_llm.models_py.utils.memory import dispose_tensor
 from rtp_llm.utils.model_weight import W
-
-
-@dataclass
-class MaskedGroupedFFNForwardPayload:
-    expert_x: torch.Tensor
-    masked_m: torch.Tensor
-    expected_m: int
-    upgate_output: torch.Tensor
-    down_input: torch.Tensor
-    down_output: torch.Tensor
-    w1: torch.Tensor
-    w2: torch.Tensor
-    expert_x_scale: Optional[torch.Tensor] = (None,)
-    down_input_scale: Optional[torch.Tensor] = (None,)
-    w1_scale: Optional[torch.Tensor] = (None,)
-    w2_scale: Optional[torch.Tensor] = (None,)
 
 
 class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
@@ -98,7 +81,7 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
         # Initialize w1 and w2 scale
         self._w1_scale = self._weights.get(W.moe_s1, None)
         self._w2_scale = self._weights.get(W.moe_s2, None)
-        # Check fp8 block quantization
+        # Check quantization
         self._use_fp8 = True
         if self.quant_config.is_quantized:
             assert self._w1_scale is not None and self._w2_scale is not None
@@ -109,7 +92,8 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
             ):
                 # Confirm to use fp8 block quantization
                 self._use_fp8 = True
-                self._num_squeeze_values = 1
+                self._num_packed_scales = 1
+                self._scale_dtype = torch.float32
                 # Whether use fp8 block quantization with UE8M0 scale
                 if is_deep_gemm_e8m0_used():
                     self._w1, self._w1_scale = requant_weight_ue8m0(
@@ -118,8 +102,13 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
                     self._w2, self._w2_scale = requant_weight_ue8m0(
                         self._w2, self._w2_scale
                     )
-                    self._num_squeeze_values = 4
-                # Check w1_scale and w2_scale shape
+                    self._num_packed_scales = 1
+                    self._scale_dtype = torch.float32
+                # Check w1_scale and w2_scale
+                assert (
+                    self._w1_scale.dtype == self._scale_dtype
+                    and self._w2_scale.dtype == self._scale_dtype
+                )
                 assert (
                     self._w1_scale.size(0) == self._E
                     and self._w2_scale.size(0) == self._E
@@ -128,26 +117,26 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
                     self._w1_scale.size(1)
                     == self._N
                     // self.DEEPGEMM_BLOCK_SHAPE[0]
-                    // self._num_squeeze_values
+                    // self._num_packed_scales
                 )
                 assert (
                     self._w1_scale.size(2)
                     == self._K
                     // self.DEEPGEMM_BLOCK_SHAPE[1]
-                    // self._num_squeeze_values
+                    // self._num_packed_scales
                 )
                 assert (
                     self._w2_scale.size(1)
                     == self._K
                     // self.DEEPGEMM_BLOCK_SHAPE[1]
-                    // self._num_squeeze_values
+                    // self._num_packed_scales
                 )
                 assert (
                     self._w2_scale.size(2)
                     == self._N
                     // 2
                     // self.DEEPGEMM_BLOCK_SHAPE[0]
-                    // self._num_squeeze_values
+                    // self._num_packed_scales
                 )
             else:
                 raise NotImplementedError(
@@ -167,96 +156,212 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
 
     def _forward_masked_grouped_ffn(
         self,
-        payload: MaskedGroupedFFNForwardPayload,
         start_idx: int,
         end_idx: int,
-    ) -> None:
+        expert_x: torch.Tensor,
+        masked_m: torch.Tensor,
+        expected_m: int,
+        expert_x_scale: Optional[torch.Tensor] = None,
+        down_output: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """Forward masked grouped FFN.
         Args:
-            payload (MaskedGroupedFFNForwardPayload): Payload for masked grouped FFN forward.
             start_idx (int): Start index of the expert.
             end_idx (int): End index of the expert.
+            expert_x (torch.Tensor): Expert input.
+            masked_m (torch.Tensor): Masked input.
+            expected_m (int): Expected output.
+            expert_x_scale (Optional[torch.Tensor]): Expert input scale.
+            down_output (Optional[torch.Tensor]): Down output tensor. If None, a new tensor will be allocated.
+        Returns:
+            torch.Tensor: Down output.
         """
+        # Get metadata
+        device = expert_x.device
+        num_tokens, hidden_size = expert_x.size(1), expert_x.size(2)
+        num_slice_experts = end_idx - start_idx
+
+        # Set number of SMs for DeepGEMM
         with configure_deep_gemm_num_sms(self._num_gemm_sms):
             if self._use_fp8:
+                # Check expert_x_scale is not None for fp8
+                assert expert_x_scale is not None
+                # Allocate upgate_output
+                upgate_output = torch.empty(
+                    (num_slice_experts, num_tokens, self._N),
+                    device=device,
+                    dtype=torch.bfloat16,
+                )
+
                 # Gate and Up GroupGEMM-0
                 m_grouped_fp8_gemm_nt_masked(
                     (
-                        payload.expert_x[start_idx:end_idx],
-                        payload.expert_x_scale[start_idx:end_idx],
+                        expert_x[start_idx:end_idx],
+                        expert_x_scale[start_idx:end_idx],
                     ),
                     (
-                        payload.w1[start_idx:end_idx],
-                        payload.w1_scale[start_idx:end_idx],
+                        self._w1[start_idx:end_idx],
+                        self._w1_scale[start_idx:end_idx],
                     ),
-                    payload.upgate_output[start_idx:end_idx],
-                    payload.masked_m[start_idx:end_idx],
-                    payload.expected_m,
+                    upgate_output,
+                    masked_m[start_idx:end_idx],
+                    expected_m,
                 )
+
+                # Free expert_x and expert_x_scale
+                if end_idx == self._E:
+                    dispose_tensor(expert_x)
+                    dispose_tensor(expert_x_scale)
+                # Allocate down_input and down_input_scale
+                down_input = torch.empty(
+                    (num_slice_experts, num_tokens, self._N // 2),
+                    device=device,
+                    dtype=torch.float8_e4m3fn,
+                )
+                down_input_scale = torch.empty(
+                    (
+                        num_slice_experts,
+                        num_tokens,
+                        (
+                            self._N // 2 // self.DEEPGEMM_BLOCK_SHAPE[0]
+                            + self._num_packed_scales
+                            - 1
+                        )
+                        // self._num_packed_scales,
+                    ),
+                    device=device,
+                    dtype=self._scale_dtype,
+                )
+
                 # SiLU Activation
                 silu_mul_masked_fp8_post_quant_fwd(
-                    input=payload.upgate_output[start_idx:end_idx],
-                    output=payload.down_input[start_idx:end_idx],
-                    output_scale=payload.down_input_scale[start_idx:end_idx],
+                    input=upgate_output,
+                    output=down_input,
+                    output_scale=down_input_scale,
                     quant_group_size=self.DEEPGEMM_BLOCK_SHAPE[0],
-                    masked_m=payload.masked_m[start_idx:end_idx],
-                    expected_m=payload.expected_m,
+                    masked_m=masked_m[start_idx:end_idx],
+                    expected_m=expected_m,
                     scale_ue8m0=is_deep_gemm_e8m0_used(),
                 )
+
+                # Free upgate_output
+                dispose_tensor(upgate_output)
+                # Allocate down_output if it is None
+                if down_output is None:
+                    down_output = torch.empty(
+                        (num_slice_experts, num_tokens, hidden_size),
+                        device=device,
+                        dtype=torch.bfloat16,
+                    )
+
                 # Down GroupGEMM-1
                 m_grouped_fp8_gemm_nt_masked(
                     (
-                        payload.down_input[start_idx:end_idx],
-                        payload.down_input_scale[start_idx:end_idx],
+                        down_input,
+                        down_input_scale,
                     ),
                     (
-                        payload.w2[start_idx:end_idx],
-                        payload.w2_scale[start_idx:end_idx],
+                        self._w2[start_idx:end_idx],
+                        self._w2_scale[start_idx:end_idx],
                     ),
-                    payload.down_output[start_idx:end_idx],
-                    payload.masked_m[start_idx:end_idx],
-                    payload.expected_m,
+                    down_output[start_idx:end_idx],
+                    masked_m[start_idx:end_idx],
+                    expected_m,
                 )
+
+                # Free down_input and down_input_scale
+                dispose_tensor(down_input)
+                dispose_tensor(down_input_scale)
+
             else:
+                # Check expert_x_scale is None for bf16
+                assert expert_x_scale is None
+                # Allocate upgate_output
+                upgate_output = torch.empty(
+                    (num_slice_experts, num_tokens, self._N),
+                    device=device,
+                    dtype=torch.bfloat16,
+                )
+
                 # Gate and Up GroupGEMM-0
                 m_grouped_bf16_gemm_nt_masked(
-                    payload.expert_x[start_idx:end_idx],
-                    payload.w1[start_idx:end_idx],
-                    payload.upgate_output[start_idx:end_idx],
-                    payload.masked_m[start_idx:end_idx],
-                    payload.expected_m,
+                    expert_x[start_idx:end_idx],
+                    self._w1[start_idx:end_idx],
+                    upgate_output,
+                    masked_m[start_idx:end_idx],
+                    expected_m,
                 )
+                # Free expert_x
+                if end_idx == self._E:
+                    dispose_tensor(expert_x)
+                # Allocate down_input
+                down_input = torch.empty(
+                    (num_slice_experts, num_tokens, self._N // 2),
+                    device=device,
+                    dtype=torch.bfloat16,
+                )
+
                 # SiLU Activation
                 silu_mul_masked_bf16_no_post_quant_fwd(
-                    input=payload.upgate_output[start_idx:end_idx],
-                    output=payload.down_input[start_idx:end_idx],
-                    masked_m=payload.masked_m[start_idx:end_idx],
-                    expected_m=payload.expected_m,
+                    input=upgate_output,
+                    output=down_input,
+                    masked_m=masked_m[start_idx:end_idx],
+                    expected_m=expected_m,
                     group_size=self.DEEPGEMM_BLOCK_SHAPE[0],
                 )
+
+                # Free upgate_output
+                dispose_tensor(upgate_output)
+                # Allocate down_output if it is None
+                if down_output is None:
+                    down_output = torch.empty(
+                        (num_slice_experts, num_tokens, hidden_size),
+                        device=device,
+                        dtype=torch.bfloat16,
+                    )
+
                 # Down GroupGEMM-1
                 m_grouped_bf16_gemm_nt_masked(
-                    payload.down_input[start_idx:end_idx],
-                    payload.w2[start_idx:end_idx],
-                    payload.down_output[start_idx:end_idx],
-                    payload.masked_m[start_idx:end_idx],
-                    payload.expected_m,
+                    down_input,
+                    self._w2[start_idx:end_idx],
+                    down_output[start_idx:end_idx],
+                    masked_m[start_idx:end_idx],
+                    expected_m,
                 )
+
+                # Free down_input
+                dispose_tensor(down_input)
+        return down_output
 
     def _normal_execute(
         self,
-        ffn_payload: MaskedGroupedFFNForwardPayload,
-        combine_payload: CombineForwardPayload,
-    ):
+        expert_x: torch.Tensor,
+        masked_m: torch.Tensor,
+        expected_m: int,
+        expert_x_scale: Optional[torch.Tensor] = None,
+    ) -> CombineForwardPayload:
         """Execute normal masked grouped FFN.
         Args:
-            ffn_payload (MaskedGroupedFFNForwardPayload): Payload for masked grouped FFN forward.
-            combine_payload (CombineForwardPayload): Payload for combining expert outputs.
+            expert_x (torch.Tensor): Expert input.
+            masked_m (torch.Tensor): Masked input.
+            expected_m (int): Expected output.
+            expert_x_scale (Optional[torch.Tensor]): Expert input scale.
+        Returns:
+            CombineForwardPayload: Combine forward payload.
         """
         # Execute masked grouped FFN
-        self._forward_masked_grouped_ffn(ffn_payload, 0, self._E)
-        # Save expert output
-        combine_payload.fused_expert_output = ffn_payload.down_output
+        down_output = self._forward_masked_grouped_ffn(
+            0,
+            self._E,
+            expert_x,
+            masked_m,
+            expected_m,
+            expert_x_scale=expert_x_scale,
+            down_output=None,
+        )
+
+        # Return combine forward payload
+        return CombineForwardPayload(fused_expert_output=down_output)
 
     def _execute_fp8(
         self,
@@ -276,14 +381,14 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
             apply_router_weight_on_input (bool): Whether to apply router weight on input.
             extra_expert_args (Optional[dict[str, Any]]): Extra expert arguments.
         """
-        # Check and prepare payload data
+        # Check payload data
         expert_x = payload.expert_x
         E, M, K = expert_x.size()
         assert E == self._E and K == self._K
         masked_m = payload.expert_tokens_meta.expert_num_tokens
         assert len(masked_m) == self._E
         expected_m = (
-            payload.expert_tokens_meta.expected_m
+            min(M, payload.expert_tokens_meta.expected_m)
             if payload.expert_tokens_meta.expected_m is not None
             else M
         )
@@ -291,52 +396,17 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
         assert expert_x_scale is not None
         assert expert_x_scale.size(0) == E
         assert expert_x_scale.size(1) == M
-        assert expert_x_scale.size(2) == K // self.DEEPGEMM_BLOCK_SHAPE[1]
+        assert (
+            expert_x_scale.size(2)
+            == (K // self.DEEPGEMM_BLOCK_SHAPE[1] + self._num_packed_scales - 1)
+            // self._num_packed_scales
+        )
+        assert expert_x_scale.dtype == self._scale_dtype
 
-        # Initialize intermediate tensors
-        current_device = expert_x.device
-        upgate_output = torch.empty(
-            (E, M, self._N), device=current_device, dtype=torch.bfloat16
+        # Normal execution
+        combine_payload = self._normal_execute(
+            expert_x, masked_m, expected_m, expert_x_scale
         )
-        down_input = torch.empty(
-            (E, M, self._N // 2), device=current_device, dtype=torch.float8_e4m3fn
-        )
-        down_input_scale = torch.empty(
-            (E, M, self._N // 2 // self.DEEPGEMM_BLOCK_SHAPE[0]),
-            device=current_device,
-            dtype=torch.float32,
-        )
-        down_output = torch.empty(
-            (E, M, K), device=current_device, dtype=torch.bfloat16
-        )
-
-        # Initialize ffn payload
-        ffn_payload = MaskedGroupedFFNForwardPayload(
-            expert_x=expert_x,
-            masked_m=masked_m,
-            expected_m=expected_m,
-            upgate_output=upgate_output,
-            down_input=down_input,
-            down_output=down_output,
-            w1=self._w1,
-            w2=self._w2,
-            expert_x_scale=expert_x_scale,
-            down_input_scale=down_input_scale,
-            w1_scale=self._w1_scale,
-            w2_scale=self._w2_scale,
-        )
-        # Initialize combine payload
-        combine_payload = CombineForwardPayload()
-
-        # Execute masked grouped FFN
-        self._normal_execute(ffn_payload, combine_payload)
-
-        # Free intermediate tensors
-        dispose_tensor(expert_x)
-        dispose_tensor(expert_x_scale)
-        del upgate_output
-        del down_input
-        del down_input_scale
 
         return combine_payload
 
@@ -358,50 +428,20 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
             apply_router_weight_on_input (bool): Whether to apply router weight on input.
             extra_expert_args (Optional[dict[str, Any]]): Extra expert arguments.
         """
-        # Check and prepare payload data
+        # Check payload data
         expert_x = payload.expert_x
         E, M, K = expert_x.size()
         assert E == self._E and K == self._K
         masked_m = payload.expert_tokens_meta.expert_num_tokens
         assert len(masked_m) == self._E
         expected_m = (
-            payload.expert_tokens_meta.expected_m
+            min(M, payload.expert_tokens_meta.expected_m)
             if payload.expert_tokens_meta.expected_m is not None
             else M
         )
 
-        # Initialize intermediate tensors
-        current_device = expert_x.device
-        upgate_output = torch.empty(
-            (E, M, self._N), device=current_device, dtype=torch.bfloat16
-        )
-        down_input = torch.empty(
-            (E, M, self._N // 2), device=current_device, dtype=torch.bfloat16
-        )
-        down_output = torch.empty(
-            (E, M, K), device=current_device, dtype=torch.bfloat16
-        )
-        # Initialize ffn payload
-        ffn_payload = MaskedGroupedFFNForwardPayload(
-            expert_x=expert_x,
-            masked_m=masked_m,
-            expected_m=expected_m,
-            upgate_output=upgate_output,
-            down_input=down_input,
-            down_output=down_output,
-            w1=self._w1,
-            w2=self._w2,
-        )
-        # Initialize combine payload
-        combine_payload = CombineForwardPayload()
-
-        # Execute masked grouped FFN
-        self._normal_execute(ffn_payload, combine_payload)
-
-        # Free intermediate tensors
-        dispose_tensor(expert_x)
-        del upgate_output
-        del down_input
+        # Normal execution
+        combine_payload = self._normal_execute(expert_x, masked_m, expected_m)
 
         return combine_payload
 
