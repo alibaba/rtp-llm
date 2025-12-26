@@ -33,7 +33,7 @@ class CudaNoQuantEpLowLatencyStrategy(MoeStrategy):
 
         return DeepEpLowLatencyRouter(
             config,
-            use_fp8_dispatch=False,
+            use_fp8=False,
             zero_copy=False,
             async_finish=False,
             return_recv_hook=False,
