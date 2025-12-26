@@ -98,3 +98,9 @@ class GptModelBase(nn.Module):
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         raise NotImplementedError("forward method must be implemented in subclass")
+
+    def get_position_id_len_factor(self) -> int:
+        return self.config.attn_config.rope_config.index_factor
+
+    def need_combo_position_ids(self) -> bool:
+        return False
