@@ -1,4 +1,3 @@
-import logging
 import platform
 
 from .base_tokenizer import BaseTokenizer
@@ -17,8 +16,7 @@ if platform.processor() != "aarch64":
     from .internvl_tokenizer import InternVLTokenizer
     from .minicpmv_embedding_tokenizer import MiniCPMVEmbeddingTokenizer
 
-try:
-    from internal_source.rtp_llm.tokenizers import internal_init
-except ImportError as e:
-    logging.info(f"import internal source failed, error: {str(e)}")
-    pass
+from rtp_llm.utils.import_util import has_internal_source
+
+if has_internal_source():
+    import internal_source.rtp_llm.tokenizers.internal_init
