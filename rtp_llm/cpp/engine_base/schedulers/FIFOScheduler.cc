@@ -161,18 +161,8 @@ bool FIFOScheduler::evaluateNewStream(const list<GenerateStreamPtr>& streams,
         return false;
     }
 
-<<<<<<< HEAD
-    auto old_blocks = new_stream->maxBlockSize();
-    auto result     = new_stream->initKVBlock(reserve_step);
-=======
     auto old_blocks = new_stream->maxBlocksNum();
-    auto result     = new_stream->initKVBlock(token_capacity_, reserve_step);
-    if (result.ok() && enable_fast_gen_) {
-        token_capacity_ -= result.value();
-        RTP_LLM_LOG_DEBUG(
-            "after stream [%ld] acquireCapacity, token_capacity is %d", new_stream->streamId(), token_capacity_);
-    }
->>>>>>> feat: refactor KVCacheManager
+    auto result     = new_stream->initKVBlock(reserve_step);
     if (result.ok()) {
         if (cache_manager_->availableBlocksNum() >= reserve_block_num_) {
             return true;

@@ -5,6 +5,7 @@
 #define protected public
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
@@ -26,26 +27,10 @@ protected:
     StreamCacheResourceTest(): perf_scope("PERF_TEST", "1") {}
 
     CacheConfig init_config() {
-        CacheConfig config;
-        config.layer_num          = 3;
-        config.block_num          = 9;
-        config.seq_size_per_block = 2;  // tokens_per_block
-
-        auto spec                = std::make_shared<MHAKVCacheSpec>();
-        spec->layer_num          = 3;
-        spec->local_head_num_kv  = 1;
-        spec->size_per_head      = 1;
-        spec->seq_size_per_block = 2;
-        spec->dtype              = TYPE_INT8;
-        spec->type               = KVCacheType::MultiHeadAttention;
-        config.cache_specs.push_back(spec);
-
-        std::vector<int> layer_ids(3);
-        for (int i = 0; i < 3; ++i) {
-            layer_ids[i] = i;
-        }
-        config.layer_ids.push_back(layer_ids);
-        return config;
+        return test::makeSimpleMhaCacheConfig(/*layer_num=*/3,
+                                              /*block_num=*/9,
+                                              /*tokens_per_block=*/2,
+                                              rtp_llm::DataType::TYPE_INT8);
     }
 
     void prepareResource(bool reuse_cache = false) {
@@ -65,10 +50,11 @@ protected:
         generate_input->input_ids =
             std::make_unique<rtp_llm::Buffer>(rtp_llm::MEMORY_CPU, rtp_llm::TYPE_INT32, shape, (void*)(vec.data()));
         generate_input->generate_config = generate_config;
-        ModelConfig model_config;
+        ModelConfig   model_config;
         RuntimeConfig runtime_config;
         model_config.max_seq_len = 2048;
-        stream_             = std::make_shared<NormalGenerateStream>(generate_input, model_config, runtime_config, resource_context, nullptr);
+        stream_                  = std::make_shared<NormalGenerateStream>(
+            generate_input, model_config, runtime_config, resource_context, nullptr);
         stream_->setRunning();
     }
 
@@ -96,8 +82,7 @@ TEST_F(StreamCacheResourceTest, testAllocateResource) {
 
     auto& resource = stream_->streamCacheResource();
 
-    int token_capacity = 1000;
-    ASSERT_TRUE(resource.initKVBlock(token_capacity).ok());
+    ASSERT_TRUE(resource.initKVBlock().ok());
     ASSERT_EQ(cache_manager_->freeBlocksNum(), 5);
     ASSERT_EQ(resource.maxBlocksNum(), 3);
     auto& blocks = resource.kvCacheMutable();
@@ -105,7 +90,7 @@ TEST_F(StreamCacheResourceTest, testAllocateResource) {
 
     stream_->setSeqLength(7);
     stream_->setIsContextStream(false);
-    ASSERT_TRUE(resource.incrKVBlock(token_capacity).ok());
+    ASSERT_TRUE(resource.incrKVBlock().ok());
     ASSERT_EQ(cache_manager_->freeBlocksNum(), 3);
 
     CHECK_BLOCK(blocks, 2, 4);
@@ -114,36 +99,6 @@ TEST_F(StreamCacheResourceTest, testAllocateResource) {
     ASSERT_EQ(cache_manager_->freeBlocksNum(), 8);
 
     CHECK_BLOCK(blocks, 2, 0);
-}
-
-TEST_F(StreamCacheResourceTest, testFallback) {
-    prepareResource();
-    ASSERT_EQ(cache_manager_->freeBlocksNum(), 8);
-    auto& resource = stream_->streamCacheResource();
-
-    int token_capacity = 1000;
-    ASSERT_TRUE(resource.initKVBlock(token_capacity).ok());
-    ASSERT_EQ(cache_manager_->freeBlocksNum(), 5);
-    ASSERT_EQ(resource.maxBlocksNum(), 3);
-    auto& blocks = resource.kvCacheMutable();
-    CHECK_BLOCK(blocks, 2, 3);
-
-    stream_->setSeqLength(7);
-    stream_->setIsContextStream(false);
-    ASSERT_TRUE(resource.incrKVBlock(token_capacity).ok());
-    CHECK_BLOCK(blocks, 2, 4);
-    ASSERT_EQ(cache_manager_->freeBlocksNum(), 3);
-
-    int old_max_blocks = resource.maxBlocksNum();
-    stream_->setFallbackPrefixLength(4);
-    ASSERT_EQ(stream_->fallbackPrefixLength(), 4);
-
-    int released_blocks = resource.tryReleaseKVBlock(old_max_blocks);
-    stream_->setPaused();
-
-    ASSERT_EQ(released_blocks, old_max_blocks);
-    ASSERT_EQ(cache_manager_->freeBlocksNum(), 8);
-    ASSERT_EQ(stream_->fallbackPrefixLength(), 0);
 }
 
 // TEST_F(StreamCacheResourceTest, testFallbackWithFastGen) {

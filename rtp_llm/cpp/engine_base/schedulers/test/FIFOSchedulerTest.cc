@@ -132,7 +132,7 @@ TEST_F(FIFOSchedulerTest, testIncrKVCacheLackMem) {
     ASSERT_EQ(streams_status2.value().size(), 0);
     ASSERT_TRUE(stream->stopped());
     ASSERT_EQ(stream->stopReason(), "incrKVBlock failed: LACK MEM");
-    ASSERT_EQ(cache_manager->freeBlockNums(), 2);
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 2);
 }
 
 TEST_F(FIFOSchedulerTest, testReuseCache) {
@@ -140,7 +140,9 @@ TEST_F(FIFOSchedulerTest, testReuseCache) {
     std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config, device_);
     ASSERT_TRUE(cache_manager->init());
     ASSERT_EQ(cache_manager->freeBlocksNum(), 10);
-    ResourceContext resource_context = {cache_manager, nullptr, {}, nullptr, true};
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+    resource_context.reuse_cache = true;
 
     ModelConfig model_config;
     model_config.max_seq_len = 8192;
@@ -196,7 +198,9 @@ TEST_F(FIFOSchedulerTest, testMaxContextBatchSize) {
     std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config, device_);
     ASSERT_TRUE(cache_manager->init());
     ASSERT_EQ(cache_manager->freeBlocksNum(), 20);
-    ResourceContext resource_context = {cache_manager, nullptr, {}, nullptr, true};
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+    resource_context.reuse_cache = true;
 
     ModelConfig model_config;
     model_config.max_seq_len = 100;

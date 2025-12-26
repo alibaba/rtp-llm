@@ -57,10 +57,6 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
         resource_context_.cache_manager->free(free_info);
     }
 
-    stream_->setFallbackPrefixLength(0);
-    if (stream_->enable_fast_gen_) {
-        stream_->resetChunkLen(0, stream_->seqLength());
-    }
     return total_blocks;
 }
 
@@ -70,7 +66,7 @@ int StreamCacheResource::singleBatchNeedBlocks(int seq_len) const {
 }
 
 // TODO(xinfei.sxf) 保证这个函数的原子性
-absl::StatusOr<int> StreamCacheResource::initKVBlock(size_t reserve_step) {
+absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
     return incrKVBlock(reserve_step);
 }
 
@@ -80,7 +76,7 @@ absl::Status StreamCacheResource::incrKVBlock(size_t reserve_step) {
         return absl::InternalError("fake inited not allow to incr block");
     }
 
-    auto seq_len            = stream_->seqLength() + (int)reserve_step;
+    auto seq_len        = stream_->seqLength() + (int)reserve_step;
     auto common_seq_len = std::min(seq_len, stream_->adjustedCommonLen());
 
     MallocInfo malloc_info;

@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 
@@ -16,45 +17,12 @@ namespace rtp_llm {
 namespace test {
 
 CacheConfig createSingleTypeTestConfig(int layer_num = 4, int block_num = 10, int seq_size_per_block = 8) {
-    CacheConfig config;
-
-    config.layer_num          = layer_num;
-    config.block_num          = block_num;
-    config.seq_size_per_block = seq_size_per_block;
-
-    auto mha_spec                = std::make_shared<MHAKVCacheSpec>();
-    mha_spec->layer_num          = layer_num;
-    mha_spec->local_head_num_kv  = 8;
-    mha_spec->size_per_head      = 128;
-    mha_spec->seq_size_per_block = seq_size_per_block;
-    mha_spec->dtype              = rtp_llm::DataType::TYPE_FP16;
-    mha_spec->type               = KVCacheType::MultiHeadAttention;
-
-    config.cache_specs.push_back(mha_spec);
-
-    std::vector<int> layer_ids(layer_num);
-    for (int i = 0; i < layer_num; ++i) {
-        layer_ids[i] = i;
-    }
-    config.layer_ids.push_back(layer_ids);
-
-    // Fill derived size/stride fields for smoke tests (kv_scale is disabled for FP16).
-    config.kv_block_stride       = mha_spec->block_size();
-    config.kv_block_stride_bytes = mha_spec->block_size_bytes();
-    config.kv_block_size         = static_cast<size_t>(layer_num) * config.kv_block_stride;
-    config.kv_block_size_bytes   = static_cast<size_t>(layer_num) * config.kv_block_stride_bytes;
-
-    config.kv_scale_stride       = 0;
-    config.kv_scale_stride_bytes = 0;
-    config.kv_scale_size         = 0;
-    config.kv_scale_size_bytes   = 0;
-
-    config.block_stride       = config.kv_block_stride;
-    config.block_stride_bytes = config.kv_block_stride_bytes;
-    config.block_size         = config.kv_block_size;
-    config.block_size_bytes   = config.kv_block_size_bytes;
-
-    return config;
+    return makeSimpleMhaCacheConfig(/*layer_num=*/layer_num,
+                                    /*block_num=*/block_num,
+                                    /*tokens_per_block=*/static_cast<size_t>(seq_size_per_block),
+                                    rtp_llm::DataType::TYPE_FP16,
+                                    /*local_head_num_kv=*/8,
+                                    /*size_per_head=*/128);
 }
 
 CompleteTokenIdsPtr createCompleteTokenIds(int batch_size, int seq_length) {
