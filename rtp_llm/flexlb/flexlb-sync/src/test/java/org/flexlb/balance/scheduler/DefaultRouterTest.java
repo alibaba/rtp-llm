@@ -1,16 +1,16 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.strategy.LoadBalanceStrategyFactory;
 import org.flexlb.balance.strategy.LoadBalancer;
+import org.flexlb.config.ConfigService;
 import org.flexlb.config.WhaleMasterConfig;
-import org.flexlb.dao.RequestContext;
 import org.flexlb.dao.loadbalance.MasterRequest;
 import org.flexlb.dao.loadbalance.MasterResponse;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.domain.balance.BalanceContext;
+import org.flexlb.dao.BalanceContext;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
-import org.flexlb.service.config.ConfigService;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.sync.status.ModelWorkerStatus;
 import org.flexlb.trace.WhaleSpan;
@@ -40,7 +40,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
-class DefaultSchedulerTest {
+class DefaultRouterTest {
 
     @Mock
     private ConfigService configService;
@@ -67,32 +67,33 @@ class DefaultSchedulerTest {
     private MasterRequest masterRequest;
 
     @Mock
-    private RequestContext requestContext;
-
-    @Mock
     private WhaleSpan span;
 
     @Mock
     private ModelWorkerStatus modelWorkerStatus;
 
-    private DefaultScheduler defaultScheduler;
+    private DefaultRouter defaultRouter;
 
     @BeforeEach
     void setUp() {
         // Mock config service
         when(configService.loadBalanceConfig()).thenReturn(loadBalanceConfig);
-        when(loadBalanceConfig.getLoadBalanceStrategy()).thenReturn(LoadBalanceStrategyEnum.RANDOM);
+        when(loadBalanceConfig.getLoadBalanceStrategy()).thenReturn(LoadBalanceStrategyEnum.SHORTEST_TTFT);
+
+        LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.SHORTEST_TTFT, prefillLoadBalancer);
+        LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.WEIGHTED_CACHE, decodeLoadBalancer);
+        LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.SHORTEST_TTFT, vitLoadBalancer);
+        LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.RANDOM, fusionLoadBalancer);
 
         // Create scheduler instance
-        defaultScheduler = new DefaultScheduler(configService);
+        defaultRouter = new DefaultRouter(configService);
 
         // Mock LoadBalanceStrategyFactory to return our mock load balancers
         mockStaticLoadBalanceStrategyFactory();
 
         // Mock balance context
         lenient().when(balanceContext.getMasterRequest()).thenReturn(masterRequest);
-        lenient().when(balanceContext.getRequestContext()).thenReturn(requestContext);
-        lenient().when(requestContext.getSpan()).thenReturn(span);
+        lenient().when(balanceContext.getSpan()).thenReturn(span);
         lenient().when(balanceContext.getInterRequestId()).thenReturn(12345L);
 
         // Mock master request
@@ -113,31 +114,21 @@ class DefaultSchedulerTest {
     // Helper method to mock the static LoadBalanceStrategyFactory
     private void mockStaticLoadBalanceStrategyFactory() {
         try {
-            // Use reflection to set the private fields in DefaultScheduler
-            Field prefillField = DefaultScheduler.class.getDeclaredField("prefillLoadBalancer");
-            prefillField.setAccessible(true);
-            prefillField.set(defaultScheduler, prefillLoadBalancer);
+            // Use reflection to set the loadBalancerMap in DefaultRouter
+            Field loadBalancerMapField = DefaultRouter.class.getDeclaredField("loadBalancerMap");
+            loadBalancerMapField.setAccessible(true);
 
-            Field decodeField = DefaultScheduler.class.getDeclaredField("decodeLoadBalancer");
-            decodeField.setAccessible(true);
-            decodeField.set(defaultScheduler, decodeLoadBalancer);
+            @SuppressWarnings("unchecked")
+            Map<RoleType, LoadBalancer> loadBalancerMap = (Map<RoleType, LoadBalancer>) loadBalancerMapField.get(defaultRouter);
 
-            Field vitField = DefaultScheduler.class.getDeclaredField("vitLoadBalancer");
-            vitField.setAccessible(true);
-            vitField.set(defaultScheduler, vitLoadBalancer);
-
-            Field fusionField = DefaultScheduler.class.getDeclaredField("fusionLoadBalancer");
-            fusionField.setAccessible(true);
-            fusionField.set(defaultScheduler, fusionLoadBalancer);
+            // 将 mock 的 LoadBalancer 放入 map 中
+            loadBalancerMap.put(RoleType.PREFILL, prefillLoadBalancer);
+            loadBalancerMap.put(RoleType.DECODE, decodeLoadBalancer);
+            loadBalancerMap.put(RoleType.VIT, vitLoadBalancer);
+            loadBalancerMap.put(RoleType.PDFUSION, fusionLoadBalancer);
         } catch (Exception e) {
             fail("Failed to mock LoadBalanceStrategyFactory: " + e.getMessage());
         }
-    }
-
-    @Test
-    void should_create_scheduler_with_non_null_prefillLoadBalancer_when_initialized() {
-        assertNotNull(defaultScheduler, "DefaultScheduler should be created");
-        assertNotNull(defaultScheduler.getPrefillLoadBalancer(), "prefillLoadBalancer should not be null");
     }
 
     @Test
@@ -146,7 +137,7 @@ class DefaultSchedulerTest {
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP.clear();
 
         // Execute
-        MasterResponse response = defaultScheduler.select(balanceContext);
+        MasterResponse response = defaultRouter.route(balanceContext);
 
         // Verify
         assertNotNull(response, "Response should not be null");
@@ -161,7 +152,7 @@ class DefaultSchedulerTest {
         when(masterRequest.getModel()).thenReturn("nonExistentModel");
 
         // Execute
-        MasterResponse response = defaultScheduler.select(balanceContext);
+        MasterResponse response = defaultRouter.route(balanceContext);
 
         // Verify
         assertNotNull(response, "Response should not be null");
@@ -175,6 +166,7 @@ class DefaultSchedulerTest {
         // Setup
         List<RoleType> roleTypes = new ArrayList<>();
         roleTypes.add(RoleType.PREFILL);
+        roleTypes.add(RoleType.DECODE);
         when(modelWorkerStatus.getRoleTypeList()).thenReturn(roleTypes);
 
         ServerStatus prefillServerStatus = new ServerStatus();
@@ -191,7 +183,7 @@ class DefaultSchedulerTest {
         when(decodeLoadBalancer.select(any(BalanceContext.class), eq(RoleType.DECODE), anyString())).thenReturn(decodeServerStatus);
 
         // Execute
-        MasterResponse response = defaultScheduler.select(balanceContext);
+        MasterResponse response = defaultRouter.route(balanceContext);
 
         // Verify
         assertTrue(response.isSuccess(), "Response should be successful");
@@ -214,12 +206,12 @@ class DefaultSchedulerTest {
         when(prefillLoadBalancer.select(any(BalanceContext.class), eq(RoleType.PREFILL), isNull())).thenReturn(prefillServerStatus);
 
         // Execute
-        MasterResponse response = defaultScheduler.select(balanceContext);
+        MasterResponse response = defaultRouter.route(balanceContext);
 
         // Verify
         assertFalse(response.isSuccess(), "Response should not be successful");
         assertEquals(StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(), response.getCode(), "Error code should match");
-        assertNotNull(response.getErrorCode(), "Error message should not be null");
+        assertNotNull(response.getErrorMessage(), "Error message should not be null");
     }
 
     @Test
@@ -238,14 +230,14 @@ class DefaultSchedulerTest {
         when(fusionLoadBalancer.select(any(BalanceContext.class), eq(RoleType.PDFUSION), isNull())).thenReturn(fusionServerStatus);
 
         // Execute
-        MasterResponse response = defaultScheduler.select(balanceContext);
+        MasterResponse response = defaultRouter.route(balanceContext);
 
         // Verify
         assertTrue(response.isSuccess(), "Response should be successful");
         assertNotNull(response.getServerStatus(), "Server status list should not be null");
         assertEquals(1, response.getServerStatus().size(), "Should have 1 server status");
-        assertEquals(54321L, response.getInterRequestId(), "Inter request ID should match");
-        verify(span).setAttribute("fusion_server_ip", "192.168.1.3");
+        assertEquals(12345L, response.getInterRequestId(), "Inter request ID should match");
+        verify(span).setAttribute("pdfusion_server_ip", "192.168.1.3");
     }
 
     @Test
@@ -261,12 +253,12 @@ class DefaultSchedulerTest {
         when(fusionLoadBalancer.select(any(BalanceContext.class), eq(RoleType.PDFUSION), isNull())).thenReturn(fusionServerStatus);
 
         // Execute
-        MasterResponse response = defaultScheduler.select(balanceContext);
+        MasterResponse response = defaultRouter.route(balanceContext);
 
         // Verify
         assertFalse(response.isSuccess(), "Response should not be successful");
         assertEquals(StrategyErrorType.NO_PDFUSION_WORKER.getErrorCode(), response.getCode(), "Error code should match");
-        assertNotNull(response.getErrorCode(), "Error message should not be null");
+        assertNotNull(response.getErrorMessage(), "Error message should not be null");
     }
 
     @Test
@@ -291,13 +283,13 @@ class DefaultSchedulerTest {
         when(vitLoadBalancer.select(any(BalanceContext.class), eq(RoleType.VIT), anyString())).thenReturn(vitServerStatus);
 
         // Execute
-        MasterResponse response = defaultScheduler.select(balanceContext);
+        MasterResponse response = defaultRouter.route(balanceContext);
 
         // Verify
         assertTrue(response.isSuccess(), "Response should be successful");
         assertNotNull(response.getServerStatus(), "Server status list should not be null");
         assertEquals(2, response.getServerStatus().size(), "Should have 2 server statuses");
-        verify(span).setAttribute("fusion_server_ip", "192.168.1.3");
+        verify(span).setAttribute("pdfusion_server_ip", "192.168.1.3");
         verify(span).setAttribute("vit_server_ip", "192.168.1.4");
     }
 
@@ -322,12 +314,12 @@ class DefaultSchedulerTest {
         when(vitLoadBalancer.select(any(BalanceContext.class), eq(RoleType.VIT), anyString())).thenReturn(vitServerStatus);
 
         // Execute
-        MasterResponse response = defaultScheduler.select(balanceContext);
+        MasterResponse response = defaultRouter.route(balanceContext);
 
         // Verify
         assertFalse(response.isSuccess(), "Response should not be successful");
         assertEquals(StrategyErrorType.NO_VIT_WORKER.getErrorCode(), response.getCode(), "Error code should match");
-        assertNotNull(response.getErrorCode(), "Error message should not be null");
+        assertNotNull(response.getErrorMessage(), "Error message should not be null");
     }
 
     @Test
@@ -336,7 +328,7 @@ class DefaultSchedulerTest {
         when(balanceContext.getMasterRequest()).thenReturn(null);
 
         // Execute
-        MasterResponse response = defaultScheduler.select(balanceContext);
+        MasterResponse response = defaultRouter.route(balanceContext);
 
         // Verify
         assertNotNull(response, "Response should not be null");
@@ -347,6 +339,7 @@ class DefaultSchedulerTest {
         // Setup
         List<RoleType> roleTypes = new ArrayList<>();
         roleTypes.add(RoleType.PREFILL);
+        roleTypes.add(RoleType.DECODE);
         when(modelWorkerStatus.getRoleTypeList()).thenReturn(roleTypes);
 
         ServerStatus prefillServerStatus = new ServerStatus();
@@ -362,12 +355,12 @@ class DefaultSchedulerTest {
         when(decodeLoadBalancer.select(any(BalanceContext.class), eq(RoleType.DECODE), anyString())).thenReturn(decodeServerStatus);
 
         // Execute
-        MasterResponse response = defaultScheduler.select(balanceContext);
+        MasterResponse response = defaultRouter.route(balanceContext);
 
         // Verify
         assertFalse(response.isSuccess(), "Response should not be successful");
         assertEquals(StrategyErrorType.NO_DECODE_WORKER.getErrorCode(), response.getCode(), "Error code should match NO_DECODE_WORKER");
-        verify(prefillLoadBalancer).releaseLocalCache(eq("testModel"), eq("192.168.1.1:8080"), any());
+        verify(prefillLoadBalancer).rollBack(eq("testModel"), eq("192.168.1.1:8080"), any());
     }
 
     @Test
@@ -384,7 +377,7 @@ class DefaultSchedulerTest {
         when(vitLoadBalancer.select(any(BalanceContext.class), eq(RoleType.VIT), isNull())).thenReturn(vitServerStatus);
 
         // Execute
-        MasterResponse response = defaultScheduler.select(balanceContext);
+        MasterResponse response = defaultRouter.route(balanceContext);
 
         // Verify
         assertTrue(response.isSuccess(), "Response should be successful");
@@ -406,12 +399,12 @@ class DefaultSchedulerTest {
         when(vitLoadBalancer.select(any(BalanceContext.class), eq(RoleType.VIT), isNull())).thenReturn(vitServerStatus);
 
         // Execute
-        MasterResponse response = defaultScheduler.select(balanceContext);
+        MasterResponse response = defaultRouter.route(balanceContext);
 
         // Verify
         assertFalse(response.isSuccess(), "Response should not be successful");
         assertEquals(StrategyErrorType.NO_VIT_WORKER.getErrorCode(), response.getCode(), "Error code should match");
-        assertNotNull(response.getErrorCode(), "Error message should not be null");
+        assertNotNull(response.getErrorMessage(), "Error message should not be null");
     }
 
     @Test
@@ -437,14 +430,14 @@ class DefaultSchedulerTest {
         when(vitLoadBalancer.select(any(BalanceContext.class), eq(RoleType.VIT), anyString())).thenReturn(vitServerStatus);
 
         // Execute
-        MasterResponse response = defaultScheduler.select(balanceContext);
+        MasterResponse response = defaultRouter.route(balanceContext);
 
         // Verify
         assertTrue(response.isSuccess(), "Response should be successful");
         assertNotNull(response.getServerStatus(), "Server status list should not be null");
         assertEquals(2, response.getServerStatus().size(), "Should have 2 server statuses");
-        assertEquals(54321L, response.getInterRequestId(), "Inter request ID should match");
-        verify(span).setAttribute("fusion_server_ip", "192.168.1.3");
+        assertEquals(12345L, response.getInterRequestId(), "Inter request ID should match");
+        verify(span).setAttribute("pdfusion_server_ip", "192.168.1.3");
         verify(span).setAttribute("vit_server_ip", "192.168.1.4");
     }
 
@@ -453,6 +446,7 @@ class DefaultSchedulerTest {
         // Setup
         List<RoleType> roleTypes = new ArrayList<>();
         roleTypes.add(RoleType.PREFILL);
+        roleTypes.add(RoleType.DECODE);
         roleTypes.add(RoleType.VIT);
         when(modelWorkerStatus.getRoleTypeList()).thenReturn(roleTypes);
 
@@ -476,7 +470,7 @@ class DefaultSchedulerTest {
         when(vitLoadBalancer.select(any(BalanceContext.class), eq(RoleType.VIT), anyString())).thenReturn(vitServerStatus);
 
         // Execute
-        MasterResponse response = defaultScheduler.select(balanceContext);
+        MasterResponse response = defaultRouter.route(balanceContext);
 
         // Verify
         assertTrue(response.isSuccess(), "Response should be successful");

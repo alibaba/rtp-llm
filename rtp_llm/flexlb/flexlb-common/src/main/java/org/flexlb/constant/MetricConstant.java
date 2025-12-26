@@ -207,4 +207,31 @@ public class MetricConstant {
      * gRPC连接池中的连接数量
      */
     public static final String GRPC_CHANNEL_POOL_SIZE = "app.grpc.channel.pool.size";
+
+    /* ------------------------ 请求排队监控 -------------------------- */
+
+    /**
+     * 当前队列长度
+     */
+    public static final String ROUTING_QUEUE_LENGTH = "app.routing.queue.length";
+
+    /**
+     * 超时 QPS
+     */
+    public static final String ROUTING_QUEUE_TIMEOUT_QPS = "app.routing.queue.timeout.qps";
+
+    /**
+     * 队列满拒绝 QPS
+     */
+    public static final String ROUTING_QUEUE_REJECTED_QPS = "app.routing.queue.rejected.qps";
+
+    /**
+     * 取消 QPS
+     */
+    public static final String ROUTING_QUEUE_CANCELLED_QPS = "app.routing.queue.cancelled.qps";
+
+    /**
+     * 等待时间（毫秒）
+     */
+    public static final String ROUTING_QUEUE_WAIT_TIME_MS = "app.routing.queue.wait.time.ms";
 }

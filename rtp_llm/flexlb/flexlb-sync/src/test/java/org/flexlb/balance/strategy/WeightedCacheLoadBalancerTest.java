@@ -1,18 +1,20 @@
 package org.flexlb.balance.strategy;
 
 import lombok.extern.slf4j.Slf4j;
+import org.flexlb.balance.resource.ResourceMeasureFactory;
+import org.flexlb.config.ConfigService;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.loadbalance.MasterRequest;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.domain.balance.BalanceContext;
-import org.flexlb.service.config.SystemEnvConfigService;
+import org.flexlb.dao.BalanceContext;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.sync.status.ModelWorkerStatus;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -20,11 +22,11 @@ import java.util.Map;
 @Slf4j
 class WeightedCacheLoadBalancerTest {
 
-    private SystemEnvConfigService systemEnvConfigService;
+    private ConfigService configService;
 
     @BeforeEach
     void setUp() {
-        systemEnvConfigService = new SystemEnvConfigService();
+        configService = new ConfigService();
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP.clear();
     }
 
@@ -42,7 +44,8 @@ class WeightedCacheLoadBalancerTest {
     @Test
     void should_handle_empty_worker_map_when_no_workers_available() {
         EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig());
-        WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(systemEnvConfigService, engineWorkerStatus);
+        ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
+        WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(configService, engineWorkerStatus, resourceMeasureFactory);
 
         MasterRequest req = new MasterRequest();
         req.setModel("test-model");
@@ -80,7 +83,8 @@ class WeightedCacheLoadBalancerTest {
         req.setModel("test-model");
         req.setSeqLen(1000);
 
-        WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(systemEnvConfigService, engineWorkerStatus);
+        ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
+        WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(configService, engineWorkerStatus, resourceMeasureFactory);
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setMasterRequest(req);
@@ -119,7 +123,8 @@ class WeightedCacheLoadBalancerTest {
         req.setModel("test-model");
         req.setSeqLen(1000);
 
-        WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(systemEnvConfigService, engineWorkerStatus);
+        ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
+        WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(configService, engineWorkerStatus, resourceMeasureFactory);
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setMasterRequest(req);
@@ -149,7 +154,8 @@ class WeightedCacheLoadBalancerTest {
         req.setModel("test-model");
         req.setSeqLen(1000);
 
-        WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(systemEnvConfigService, engineWorkerStatus);
+        ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
+        WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(configService, engineWorkerStatus, resourceMeasureFactory);
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setMasterRequest(req);
@@ -183,7 +189,8 @@ class WeightedCacheLoadBalancerTest {
         req.setModel("test-model");
         req.setSeqLen(1000);
 
-        WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(systemEnvConfigService, engineWorkerStatus);
+        ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
+        WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(configService, engineWorkerStatus, resourceMeasureFactory);
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setMasterRequest(req);

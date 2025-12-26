@@ -1,13 +1,12 @@
 package org.flexlb.balance.strategy;
 
-import org.flexlb.balance.LoadBalanceStrategyFactory;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.loadbalance.MasterRequest;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.domain.balance.BalanceContext;
+import org.flexlb.dao.BalanceContext;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.sync.status.ModelWorkerStatus;
@@ -222,7 +221,7 @@ class RandomStrategyTest {
         // Given: RandomStrategy is instantiated
         // When: Check if it's registered in the factory
         // Then: Should be able to get it from the factory
-        RandomStrategy strategyFromFactory = (RandomStrategy) LoadBalanceStrategyFactory.getLoadBalanceStrategy(LoadBalanceStrategyEnum.RANDOM);
+        RandomStrategy strategyFromFactory = (RandomStrategy) LoadBalanceStrategyFactory.getLoadBalancer(LoadBalanceStrategyEnum.RANDOM);
         assertNotNull(strategyFromFactory);
         assertSame(randomStrategy, strategyFromFactory);
     }
