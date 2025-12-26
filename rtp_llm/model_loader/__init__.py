@@ -19,3 +19,4 @@ from .static_fp8_quant_weight import (
     StaticPerTensorFp8Weight,
 )
 from .weight_only_quant_weight import WeightOnlyPerColWeight
+from .per_group_fp4_quant_weight import PerGroupFp4Weight
