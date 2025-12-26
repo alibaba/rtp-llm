@@ -50,8 +50,7 @@ def auto_configure_deepep(
 
     moe_config.use_all_gather = (moe_config.use_all_gather and
                                  not deep_ep_config.use_deepep_low_latency and
-                                 ep_size == tp_size and
-                                 not is_hip())
+                                 ep_size == tp_size)
 
     if moe_config.use_all_gather:
         moe_config.use_deepep_moe = False
