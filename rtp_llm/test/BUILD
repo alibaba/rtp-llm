@@ -89,7 +89,6 @@ py_test(
         "//rtp_llm:psutil",
         "//rtp_llm:tiktoken",
         "//rtp_llm:testlib",
-        "//deps:extension_lib",
     ],
     imports = ["aios/kmonitor/python_client"],
     tags = ["manual"],
