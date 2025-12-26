@@ -229,6 +229,7 @@ class GenericMoeDecoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         residual: torch.Tensor,
+        position_ids: Optional[torch.Tensor],
         fmha_impl: FMHAImplBase,
         kv_cache: Optional[KVCache] = None,
     ) -> DecodeLayerOutput:
@@ -238,7 +239,10 @@ class GenericMoeDecoderLayer(nn.Module):
         hidden_states = self.input_layernorm(hidden_states, residual)
 
         hidden_states = self.self_attn(
-            hidden_states=hidden_states, fmha_impl=fmha_impl, kv_cache=kv_cache
+            hidden_states=hidden_states,
+            position_ids=position_ids,
+            fmha_impl=fmha_impl,
+            kv_cache=kv_cache,
         )
 
         # Fused: residual = residual + hidden_states, hidden_states = RMSNorm(residual)
@@ -308,6 +312,7 @@ class GenericMoeModel(GptModelBase):
         inputs_embeds = self.embed_tokens(input_ids)
         hidden_states = inputs_embeds
         attention_inputs: PyAttentionInputs = inputs.attention_inputs
+        position_ids = attention_inputs.combo_position_ids
         fmha_impl = AttnImplFactory.get_fmha_impl(
             self.config,
             self.parallelism_config,
@@ -321,6 +326,7 @@ class GenericMoeModel(GptModelBase):
             output = decoder_layer(
                 hidden_states,
                 residual,
+                position_ids,
                 fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
             )

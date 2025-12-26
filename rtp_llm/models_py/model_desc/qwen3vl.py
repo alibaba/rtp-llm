@@ -6,12 +6,12 @@ from torch import nn
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
+from rtp_llm.models_py.model_desc.qwen3 import Qwen3DecoderLayer
 from rtp_llm.models_py.modules import (
     AttnImplFactory,
-    CausalAttention,
-    DenseMLP,
     Embedding,
-    FMHAImplBase,
+    MultimodalDeepstackInjector,
+    MultimodalEmbeddingInjector,
     RMSNorm,
 )
 from rtp_llm.ops import ParallelismConfig
@@ -22,62 +22,10 @@ from rtp_llm.ops.compute_ops import (
     PyModelOutputs,
 )
 from rtp_llm.utils.model_weight import W
-from rtp_llm.ops import HWKernelConfig
 
 
-class Qwen3DecoderLayer(nn.Module):
-    def __init__(
-        self,
-        config: ModelConfig,
-        parallelism_config: ParallelismConfig,
-        weights: Dict[str, torch.Tensor],
-        quant_config: Optional[object] = None,
-        hw_kernel_config: Optional['HWKernelConfig'] = None,
-    ):
-        super().__init__()
-        attn_configs = config.getAttentionConfigs(parallelism_config.tp_size)
-        self.self_attn = CausalAttention(
-            attn_configs, parallelism_config, weights, config.layernorm_eps, quant_config, hw_kernel_config
-        )
-        self.mlp = DenseMLP(
-            config.activation_type, parallelism_config, weights, quant_config, hw_kernel_config
-        )
-        self.input_layernorm = RMSNorm(
-            weights[W.pre_ln_gamma], eps=config.layernorm_eps
-        )
-        self.post_attention_layernorm = RMSNorm(
-            weights[W.post_ln_gamma], eps=config.layernorm_eps
-        )
+class Qwen3VLModel(GptModelBase):
 
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        position_ids: torch.Tensor,
-        fmha_impl: FMHAImplBase,
-        kv_cache: Optional[KVCache] = None,
-    ) -> torch.Tensor:
-        residual = hidden_states
-        hidden_states = self.input_layernorm(hidden_states)
-
-        # Self Attention
-        hidden_states = self.self_attn(
-            hidden_states=hidden_states,
-            position_ids=position_ids,
-            fmha_impl=fmha_impl,
-            kv_cache=kv_cache,
-        )
-        hidden_states = residual + hidden_states
-
-        # Fully Connected
-        residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states
-
-        return hidden_states
-
-
-class Qwen3Model(GptModelBase):
     def __init__(
         self,
         config: ModelConfig,
@@ -102,10 +50,12 @@ class Qwen3Model(GptModelBase):
         self.embed_tokens = Embedding(
             config, parallelism_config, weights.get_global_weight(W.embedding)
         )
+        self.multimodal_embedding_injector = MultimodalEmbeddingInjector()
+        self.multimodal_deepstack_injector = MultimodalDeepstackInjector()
         self.layers = nn.ModuleList(
             [
                 Qwen3DecoderLayer(
-                    config, parallelism_config, weights.weights[idx], quant_config, py_hw_kernel_config
+                    config, parallelism_config, weights.weights[idx], quant_config
                 )
                 for idx in range(self.layer_num)
             ]
@@ -116,9 +66,6 @@ class Qwen3Model(GptModelBase):
 
     def forward(self, inputs: PyModelInputs) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
-        inputs_embeds = self.embed_tokens(input_ids)
-        hidden_states = inputs_embeds
-
         attention_inputs: PyAttentionInputs = inputs.attention_inputs
         fmha_impl = AttnImplFactory.get_fmha_impl(
             self.config,
@@ -127,7 +74,21 @@ class Qwen3Model(GptModelBase):
             attention_inputs,
             self.fmha_config,
         )
+
         position_ids = attention_inputs.combo_position_ids
+        token_type_ids = attention_inputs.combo_tokens_type_ids
+        text_tokens_mask = attention_inputs.text_tokens_mask
+        mm_features = attention_inputs.multimodal_features
+        mm_feature_locs = attention_inputs.mm_features_locs
+        mm_deepstack_embeds = attention_inputs.mm_deepstack_embeds
+
+        inputs_embeds = self.embed_tokens(
+            input_ids, position_ids, token_type_ids, text_tokens_mask
+        )
+        hidden_states = self.multimodal_embedding_injector(
+            inputs_embeds, mm_features, mm_feature_locs
+        )
+
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
             hidden_states = decoder_layer(
                 hidden_states,
@@ -135,10 +96,13 @@ class Qwen3Model(GptModelBase):
                 fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
             )
+            hidden_states = self.multimodal_deepstack_injector(
+                hidden_states, mm_deepstack_embeds, mm_feature_locs, i
+            )
         hidden_states = self.norm(hidden_states)
         return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
 
 
 __all__ = [
-    "Qwen3Model",
+    "Qwen3VLModel",
 ]
