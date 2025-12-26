@@ -75,12 +75,8 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
 void NormalEngine::initExecutor(const EngineInitParams&                        params,
                                 std::unique_ptr<ProposeModelEngineInitParams>& propose_params) {
     if (propose_params_) {
-        executor_.reset(new MtpExecutor(params,
-                                        propose_params,
-                                        resource_context_.cache_manager,
-                                        resource_context_.mtp_cache_managers,
-                                        device_,
-                                        getLoraManager()));
+        executor_.reset(
+            new MtpExecutor(params, propose_params, resource_context_.cache_manager, device_, getLoraManager()));
     } else {
         executor_.reset(new NormalExecutor(params, resource_context_.cache_manager, device_, getLoraManager()));
     }
@@ -231,63 +227,22 @@ std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_ne
 
 void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) {
     if (propose_params_ && propose_params_->draftModel()) {
-        const auto& config                   = CacheConfigCreator::createSpConfig(model_config_,
-                                                                propose_params_->getEngineInitParams().model_config_,
-                                                                parallelism_config,
-                                                                runtime_config,
-                                                                kv_cache_config,
-                                                                sp_config,
-                                                                warm_up_result,
-                                                                isMTPEagle(),
-                                                                isEagle());
-        auto        scorer_cache_config      = std::get<0>(config);
-        auto        proposer_cache_config    = std::get<1>(config);
-        scorer_cache_config.mtp_model_type   = "score_model";
-        proposer_cache_config.mtp_model_type = "propose_model";
+        auto config = CacheConfigCreator::createSpConfig(model_config_,
+                                                         propose_params_->getEngineInitParams().model_config_,
+                                                         parallelism_config,
+                                                         runtime_config,
+                                                         kv_cache_config,
+                                                         sp_config,
+                                                         warm_up_result,
+                                                         isMTPEagle(),
+                                                         isEagle());
 
-        resource_context_.cache_manager = make_shared<KVCacheManager>(scorer_cache_config,
-                                                                    device_,
-                                                                    false,
-                                                                    metrics_reporter_,
-                                                                    kv_cache_config,
-                                                                    parallelism_config,
-                                                                    runtime_config);
-
+        resource_context_.cache_manager = make_shared<KVCacheManager>(
+            config, device_, false, metrics_reporter_, kv_cache_config, parallelism_config, runtime_config);
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
         }
 
-        if (isMTPEagle()) {
-            auto layer_num = propose_params_->genNumPerCircle();
-            if (isEagle()) {
-                layer_num = 1;
-            }
-            RTP_LLM_LOG_INFO("mtp cache manager init use layer num : %d", layer_num);
-            for (int i = 0; i < layer_num; i++) {
-                RTP_LLM_CHECK(proposer_cache_config.layer_num == 1);
-                resource_context_.mtp_cache_managers.push_back(std::make_shared<KVCacheManager>(proposer_cache_config,
-                                                                                              device_,
-                                                                                              false,
-                                                                                              metrics_reporter_,
-                                                                                              kv_cache_config,
-                                                                                              parallelism_config,
-                                                                                              runtime_config));
-                if (!resource_context_.mtp_cache_managers.back()->init()) {
-                    RTP_LLM_FAIL("init mtp kv cache manager failed");
-                }
-            }
-        } else {
-            resource_context_.propose_cache_manager = make_shared<KVCacheManager>(proposer_cache_config,
-                                                                                device_,
-                                                                                false,
-                                                                                metrics_reporter_,
-                                                                                kv_cache_config,
-                                                                                parallelism_config,
-                                                                                runtime_config);
-            if (!resource_context_.propose_cache_manager->init()) {
-                RTP_LLM_FAIL("init propose kv cache manager failed");
-            }
-        }
     } else {
         auto result = CacheConfigCreator::createConfig(
             model_config_, parallelism_config, runtime_config, kv_cache_config, warm_up_result);

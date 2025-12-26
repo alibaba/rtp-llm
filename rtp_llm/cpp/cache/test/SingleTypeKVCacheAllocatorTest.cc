@@ -37,6 +37,7 @@ CacheConfig createSingleTypeTestConfig(int layer_num = 4, int block_num = 10, in
         layer_ids[i] = i;
     }
     config.layer_ids.push_back(layer_ids);
+    config.global_layer_ids.push_back(layer_ids);
 
     // Fill derived size/stride fields for smoke tests (kv_scale is disabled for FP16).
     config.kv_block_stride       = mha_spec->block_size();
