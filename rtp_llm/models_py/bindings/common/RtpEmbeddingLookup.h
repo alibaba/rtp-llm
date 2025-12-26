@@ -1,7 +1,12 @@
 #pragma once
 namespace rtp_llm {
 
-void embedding(at::Tensor& output, at::Tensor& input, at::Tensor& weight);
+void embedding(at::Tensor&               output,
+               at::Tensor&               input,
+               at::Tensor&               weight,
+               std::optional<at::Tensor> position_ids,
+               std::optional<at::Tensor> token_type_ids,
+               std::optional<at::Tensor> text_tokens_mask);
 void embeddingBert(at::Tensor& output,
                    at::Tensor& input,
                    at::Tensor& weight,

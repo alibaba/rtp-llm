@@ -36,14 +36,14 @@ class FusedMoEOp:
 class FusedRopeKVCacheDecodeOp:
     def __init__(self, attn_configs: libth_transformer_config.AttentionConfigs) -> None:
         ...
-    def forward(self, qkv: torch.Tensor, fmha_type: libth_transformer_config.FMHAType, kv_cache: librtp_compute_ops.KVCache | None, params: TRTAttn) -> torch.Tensor:
+    def forward(self, qkv: torch.Tensor, position_ids: torch.Tensor | None = None, fmha_type: libth_transformer_config.FMHAType, kv_cache: librtp_compute_ops.KVCache | None, params: TRTAttn) -> torch.Tensor:
         ...
     def prepare(self, attn_inputs: librtp_compute_ops.PyAttentionInputs) -> TRTAttn:
         ...
 class FusedRopeKVCachePrefillOp:
     def __init__(self, attn_configs: libth_transformer_config.AttentionConfigs) -> None:
         ...
-    def forward(self, qkv: torch.Tensor, fmha_type: libth_transformer_config.FMHAType, kv_cache: librtp_compute_ops.KVCache | None, params: TRTAttn) -> torch.Tensor:
+    def forward(self, qkv: torch.Tensor, position_ids: torch.Tensor | None = None, fmha_type: libth_transformer_config.FMHAType, kv_cache: librtp_compute_ops.KVCache | None, params: TRTAttn) -> torch.Tensor:
         ...
     def prepare(self, attn_inputs: librtp_compute_ops.PyAttentionInputs) -> TRTAttn:
         ...
@@ -103,7 +103,7 @@ def cuda_graph_copy_small2large(input_tensor: torch.Tensor, output_tensor: torch
     """
 def cutlass_moe_mm(out_tensors: torch.Tensor, a_tensors: torch.Tensor, b_tensors: torch.Tensor, a_scales: torch.Tensor, b_scales: torch.Tensor, expert_offsets: torch.Tensor, problem_sizes: torch.Tensor, a_strides: torch.Tensor, b_strides: torch.Tensor, c_strides: torch.Tensor, per_act_token: bool, per_out_ch: bool, profile: bool = False, m_tile: int = 0, n_tile: int = 0, k_tile: int = 0, cluster_m: int = 0, cluster_n: int = 0, cluster_k: int = 0, swap_ab: bool = False) -> None:
     ...
-def embedding(output: torch.Tensor, input: torch.Tensor, weight: torch.Tensor) -> None:
+def embedding(output: torch.Tensor, input: torch.Tensor, weight: torch.Tensor, position_ids: torch.Tensor | None = None, token_type_ids: torch.Tensor | None = None, text_tokens_mask: torch.Tensor | None = None) -> None:
     """
     Embedding lookup kernel
     """

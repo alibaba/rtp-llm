@@ -88,11 +88,17 @@ struct PyAttentionInputs {
     caffe2::TypeMeta dtype;
     int              kv_block_offset = 0;
     // for `FusedRopeKVCacheDecodeOp`.
-    torch::Tensor cu_seqlens;
-    torch::Tensor cu_kv_seqlens;
-    int           context_total_kv_length;
-    int           total_tokens = 0;
-    torch::Tensor padding_offset;
+    torch::Tensor                             cu_seqlens;
+    torch::Tensor                             cu_kv_seqlens;
+    int                                       context_total_kv_length;
+    int                                       total_tokens = 0;
+    torch::Tensor                             padding_offset;
+    torch::Tensor                             combo_position_ids;
+    torch::Tensor                             combo_tokens_type_ids;
+    torch::Tensor                             text_tokens_mask;
+    std::optional<std::vector<torch::Tensor>> multimodal_features;
+    std::optional<torch::Tensor>              mm_features_locs;
+    std::optional<std::vector<torch::Tensor>> mm_deepstack_embeds;
 
     // for write cache store
     std::optional<PyCacheStoreInputs> cache_store_inputs;

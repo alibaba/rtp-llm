@@ -3,22 +3,16 @@ import libth_transformer_config
 import torch
 import typing
 from . import rtp_llm_ops
-__all__: list[str] = ['BertEmbeddingInputs', 'DeviceExporter', 'DeviceType', 'KVCache', 'MlaParams', 'ParamsBase', 'PyAttentionInputs', 'PyCacheStoreInputs', 'PyCaptureMetaData',
-                      'PyModelInitResources', 'PyModelInputs', 'PyModelOutputs', 'PyPrefillCudaGaphCopyParams', 'TypeMeta', 'get_device', 'get_typemeta', 'init_device', 'rtp_llm_ops']
-
-
+__all__: list[str] = ['BertEmbeddingInputs', 'DeviceExporter', 'DeviceType', 'KVCache', 'MlaParams', 'ParamsBase', 'PyAttentionInputs', 'PyCacheStoreInputs', 'PyCaptureMetaData', 'PyModelInitResources', 'PyModelInputs', 'PyModelOutputs', 'PyPrefillCudaGaphCopyParams', 'TypeMeta', 'get_device', 'get_typemeta', 'init_device', 'rtp_llm_ops']
 class BertEmbeddingInputs:
     @typing.overload
     def __init__(self) -> None:
         ...
-
     @typing.overload
     def __init__(self, combo_position_ids: torch.Tensor = ..., position_encoding: torch.Tensor = ..., combo_tokens_type_ids: torch.Tensor = ..., token_type_embedding: torch.Tensor = ..., input_embedding_scalar: float = 1.0) -> None:
         ...
-
     def __repr__(self) -> str:
         ...
-
     @property
     def combo_position_ids(self) -> torch.Tensor:
         """
@@ -27,7 +21,6 @@ class BertEmbeddingInputs:
     @combo_position_ids.setter
     def combo_position_ids(self, arg0: torch.Tensor) -> None:
         ...
-
     @property
     def combo_tokens_type_ids(self) -> torch.Tensor:
         """
@@ -36,7 +29,6 @@ class BertEmbeddingInputs:
     @combo_tokens_type_ids.setter
     def combo_tokens_type_ids(self, arg0: torch.Tensor) -> None:
         ...
-
     @property
     def input_embedding_scalar(self) -> float:
         """
@@ -45,7 +37,6 @@ class BertEmbeddingInputs:
     @input_embedding_scalar.setter
     def input_embedding_scalar(self, arg0: float) -> None:
         ...
-
     @property
     def position_encoding(self) -> torch.Tensor:
         """
@@ -54,7 +45,6 @@ class BertEmbeddingInputs:
     @position_encoding.setter
     def position_encoding(self, arg0: torch.Tensor) -> None:
         ...
-
     @property
     def token_type_embedding(self) -> torch.Tensor:
         """
@@ -63,39 +53,31 @@ class BertEmbeddingInputs:
     @token_type_embedding.setter
     def token_type_embedding(self, arg0: torch.Tensor) -> None:
         ...
-
-
 class DeviceExporter:
     def get_device_id(self) -> int:
         ...
-
     def get_device_type(self) -> DeviceType:
         ...
-
     def preprocess_gemm_weight_by_key(self, key: str, weight: torch.Tensor, user_arm_gemm_use_kai: bool) -> torch.Tensor:
         ...
-
     def preprocess_weight_scale(self, weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
         ...
-
     def update_current_torch_stream(self) -> None:
         ...
-
-
 class DeviceType:
     """
     Members:
-
+    
       Cpu
-
+    
       Cuda
-
+    
       Yitian
-
+    
       ArmCpu
-
+    
       ROCm
-
+    
       Ppu
     """
     ArmCpu: typing.ClassVar[DeviceType]  # value = <DeviceType.ArmCpu: 3>
@@ -104,55 +86,38 @@ class DeviceType:
     Ppu: typing.ClassVar[DeviceType]  # value = <DeviceType.Ppu: 5>
     ROCm: typing.ClassVar[DeviceType]  # value = <DeviceType.ROCm: 4>
     Yitian: typing.ClassVar[DeviceType]  # value = <DeviceType.Yitian: 2>
-    # value = {'Cpu': <DeviceType.Cpu: 0>, 'Cuda': <DeviceType.Cuda: 1>, 'Yitian': <DeviceType.Yitian: 2>, 'ArmCpu': <DeviceType.ArmCpu: 3>, 'ROCm': <DeviceType.ROCm: 4>, 'Ppu': <DeviceType.Ppu: 5>}
-    __members__: typing.ClassVar[dict[str, DeviceType]]
-
+    __members__: typing.ClassVar[dict[str, DeviceType]]  # value = {'Cpu': <DeviceType.Cpu: 0>, 'Cuda': <DeviceType.Cuda: 1>, 'Yitian': <DeviceType.Yitian: 2>, 'ArmCpu': <DeviceType.ArmCpu: 3>, 'ROCm': <DeviceType.ROCm: 4>, 'Ppu': <DeviceType.Ppu: 5>}
     def __eq__(self, other: typing.Any) -> bool:
         ...
-
     def __getstate__(self) -> int:
         ...
-
     def __hash__(self) -> int:
         ...
-
     def __index__(self) -> int:
         ...
-
     def __init__(self, value: int) -> None:
         ...
-
     def __int__(self) -> int:
         ...
-
     def __ne__(self, other: typing.Any) -> bool:
         ...
-
     def __repr__(self) -> str:
         ...
-
     def __setstate__(self, state: int) -> None:
         ...
-
     def __str__(self) -> str:
         ...
-
     @property
     def name(self) -> str:
         ...
-
     @property
     def value(self) -> int:
         ...
-
-
 class KVCache:
     def __init__(self) -> None:
         ...
-
     def get_layer_cache(self, arg0: int) -> KVCache:
         ...
-
     @property
     def k_cache_base(self) -> torch.Tensor:
         """
@@ -161,7 +126,6 @@ class KVCache:
     @k_cache_base.setter
     def k_cache_base(self, arg0: torch.Tensor) -> None:
         ...
-
     @property
     def k_scale_base(self) -> torch.Tensor:
         """
@@ -170,7 +134,6 @@ class KVCache:
     @k_scale_base.setter
     def k_scale_base(self, arg0: torch.Tensor) -> None:
         ...
-
     @property
     def layer_id(self) -> int:
         """
@@ -184,7 +147,6 @@ class KVCache:
     @v_cache_base.setter
     def v_cache_base(self, arg0: torch.Tensor) -> None:
         ...
-
     @property
     def v_scale_base(self) -> torch.Tensor:
         """
@@ -193,65 +155,50 @@ class KVCache:
     @v_scale_base.setter
     def v_scale_base(self, arg0: torch.Tensor) -> None:
         ...
-
-
 class MlaParams(ParamsBase):
     def __init__(self) -> None:
         ...
-
     @property
     def batch_indice(self) -> torch.Tensor:
         ...
-
     @property
     def batch_reuse_info_vec(self) -> torch.Tensor:
         ...
-
     @property
     def decode_page_indptr(self) -> torch.Tensor:
         ...
-
     @property
     def kvlen(self) -> torch.Tensor:
         ...
-
     @property
     def page_indice(self) -> torch.Tensor:
         ...
-
     @property
     def paged_kv_last_page_len(self) -> torch.Tensor:
         ...
-
     @property
     def positions(self) -> torch.Tensor:
         ...
-
     @property
     def prefill_page_indptr(self) -> torch.Tensor:
         ...
-
     @property
     def qo_indptr(self) -> torch.Tensor:
         ...
-
     @property
     def reuse_cache_page_indice(self) -> torch.Tensor:
         ...
-
-
 class ParamsBase:
     def __init__(self) -> None:
         ...
-
     def fill_params(self, sequence_lengths: torch.Tensor, input_lengths: torch.Tensor, kv_cache_block_id_host: torch.Tensor, batch_size: int, seq_size_per_block: int) -> None:
         """
         Fill parameters for CUDA graph execution
         """
-
-
 class PyAttentionInputs:
     cache_store_inputs: PyCacheStoreInputs | None
+    combo_position_ids: torch.Tensor
+    combo_tokens_type_ids: torch.Tensor
     context_total_kv_length: int
     cu_kv_seqlens: torch.Tensor
     cu_seqlens: torch.Tensor
@@ -261,51 +208,42 @@ class PyAttentionInputs:
     kv_block_offset: int
     kv_cache_block_id_device: torch.Tensor
     kv_cache_block_id_host: torch.Tensor
+    mm_deepstack_embeds: list[torch.Tensor] | None
+    mm_features_locs: torch.Tensor | None
+    multimodal_features: list[torch.Tensor] | None
     padding_offset: torch.Tensor
     prefix_lengths: torch.Tensor
     sequence_lengths: torch.Tensor
+    text_tokens_mask: torch.Tensor
     total_tokens: int
     def __init__(self) -> None:
         ...
-
     def __repr__(self) -> str:
         ...
-
     @property
     def prefill_cuda_graph_copy_params(self) -> PyPrefillCudaGaphCopyParams | None:
         ...
-
-
 class PyCacheStoreInputs:
     def __init__(self) -> None:
         ...
-
-
 class PyCaptureMetaData:
     def __init__(self) -> None:
         ...
-
-
 class PyModelInitResources:
     def __init__(self) -> None:
         ...
-
     @property
     def kv_cache(self) -> KVCache | None:
         """
         kv cache
         """
-
-
 class PyModelInputs:
     @typing.overload
     def __init__(self) -> None:
         ...
-
     @typing.overload
     def __init__(self, input_ids: torch.Tensor = ..., input_hiddens: torch.Tensor = ..., attention_inputs: PyAttentionInputs = ..., bert_embedding_inputs: BertEmbeddingInputs = ...) -> None:
         ...
-
     @property
     def attention_inputs(self) -> PyAttentionInputs:
         """
@@ -314,7 +252,6 @@ class PyModelInputs:
     @attention_inputs.setter
     def attention_inputs(self, arg0: PyAttentionInputs) -> None:
         ...
-
     @property
     def bert_embedding_inputs(self) -> BertEmbeddingInputs:
         """
@@ -323,7 +260,6 @@ class PyModelInputs:
     @bert_embedding_inputs.setter
     def bert_embedding_inputs(self, arg0: BertEmbeddingInputs) -> None:
         ...
-
     @property
     def input_hiddens(self) -> torch.Tensor:
         """
@@ -340,8 +276,6 @@ class PyModelInputs:
     @input_ids.setter
     def input_ids(self, arg0: torch.Tensor) -> None:
         ...
-
-
 class PyModelOutputs:
     @typing.overload
     def __init__(self) -> None:
@@ -376,7 +310,6 @@ class PyModelOutputs:
     @hidden_states.setter
     def hidden_states(self, arg0: torch.Tensor) -> None:
         ...
-
     @property
     def params_ptr(self) -> ParamsBase:
         """
@@ -385,39 +318,26 @@ class PyModelOutputs:
     @params_ptr.setter
     def params_ptr(self, arg0: ParamsBase) -> None:
         ...
-
-
 class PyPrefillCudaGaphCopyParams:
     def __init__(self) -> None:
         ...
-
     @property
     def cuda_graph_prefill_batch_size(self) -> torch.Tensor:
         ...
-
     @property
     def max_batch_size(self) -> int:
         ...
-
     @property
     def max_seq_len(self) -> int:
         ...
-
-
 class TypeMeta:
     def __init__(self) -> None:
         ...
-
-
 def get_device() -> DeviceExporter:
     ...
-
-
 def get_typemeta(arg0: torch.Tensor) -> TypeMeta:
     """
     Convert tensor dtype to TypeMeta
     """
-
-
 def init_device(parallelism_config: libth_transformer_config.ParallelismConfig, model_config: libth_transformer_config.ModelConfig, eplb_config: libth_transformer_config.EPLBConfig, fmha_config: libth_transformer_config.FMHAConfig, device_resource_config: libth_transformer_config.DeviceResourceConfig, moe_config: libth_transformer_config.MoeConfig, sp_config: libth_transformer_config.SpeculativeExecutionConfig, misc_config: libth_transformer_config.MiscellaneousConfig, profiling_debug_logging_config: libth_transformer_config.ProfilingDebugLoggingConfig, hw_kernel_config: libth_transformer_config.HWKernelConfig, concurrency_config: libth_transformer_config.ConcurrencyConfig, ffn_disaggregate_config: libth_transformer_config.FfnDisAggregateConfig, runtime_config: libth_transformer_config.RuntimeConfig) -> None:
     ...

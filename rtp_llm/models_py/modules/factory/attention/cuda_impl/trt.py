@@ -2,7 +2,6 @@ from typing import Optional
 
 import torch
 
-
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
     FMHAPrefillImplBase,
 )
@@ -21,9 +20,7 @@ from rtp_llm.ops.compute_ops import (
 class TRTMHAImpl(FMHAPrefillImplBase):
 
     def __init__(
-        self,
-        attn_configs: AttentionConfigs,
-        attn_inputs: PyAttentionInputs
+        self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> None:
         super().__init__(
             TRTAttnOp(attn_configs),
@@ -43,13 +40,18 @@ class TRTMHAImpl(FMHAPrefillImplBase):
     def forward(
         self,
         qkv: torch.Tensor,
-        kv_cache: Optional[KVCache],
+        position_ids: Optional[torch.Tensor] = None,
+        kv_cache: Optional[KVCache] = None,
         need_rope_kv_cache: bool = True,
     ) -> torch.Tensor:
         assert self.rope_kvcache_impl is not None and self.rope_params is not None
         if need_rope_kv_cache:
             fmha_input = self.rope_kvcache_impl.forward(
-                qkv, self.fmha_type(), kv_cache, self.rope_params
+                qkv,
+                position_ids=position_ids,
+                fmha_type=self.fmha_type(),
+                kv_cache=kv_cache,
+                params=self.rope_params,
             )
         else:
             fmha_input = qkv
@@ -108,9 +110,7 @@ class TRTMHAImpl(FMHAPrefillImplBase):
 class TRTPagedMHAImpl(FMHAPrefillImplBase):
 
     def __init__(
-        self,
-        attn_configs: AttentionConfigs,
-        attn_inputs: PyAttentionInputs
+        self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> None:
         super().__init__(
             TRTPagedAttnOp(attn_configs),

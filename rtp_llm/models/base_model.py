@@ -141,8 +141,10 @@ class BaseModel(object):
         self.py_eplb = self.model_weights_loader._py_eplb
         device_str = self._get_device_str()
         self._load(device_str)
-
-        if self.load_python_model:
+        vit_separation = self.vit_config.vit_separation
+        if self.load_python_model and (
+            vit_separation != VitSeparation.VIT_SEPARATION_ROLE
+        ):
             logging.info(
                 f"Creating python model for {self.model_config.ckpt_path} on {device_str}"
             )
