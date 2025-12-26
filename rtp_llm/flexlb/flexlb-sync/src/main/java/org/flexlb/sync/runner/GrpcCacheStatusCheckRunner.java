@@ -1,5 +1,6 @@
 package org.flexlb.sync.runner;
 
+import org.flexlb.balance.resource.ResourceMonitor;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.cache.service.DynamicCacheIntervalService;
@@ -34,6 +35,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
     private final EngineHealthReporter engineHealthReporter;
     private final EngineGrpcService engineGrpcService;
     private final CacheAwareService cacheAwareService;
+    private final ResourceMonitor resourceMonitor;
     private final String ip;
     private final int port;
     private final int grpcPort;
@@ -49,6 +51,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                                       EngineHealthReporter engineHealthReporter,
                                       EngineGrpcService engineGrpcService,
                                       CacheAwareService cacheAwareService,
+                                      ResourceMonitor resourceMonitor,
                                       long requestTimeoutMs,
                                       LongAdder syncCount,
                                       Long syncEngineStatusInterval) {
@@ -65,6 +68,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
         this.engineHealthReporter = engineHealthReporter;
         this.engineGrpcService = engineGrpcService;
         this.cacheAwareService = cacheAwareService;
+        this.resourceMonitor = resourceMonitor;
         this.debug = Optional.ofNullable(System.getenv("WHALE_CACHE_DEBUG_MODE"))
                 .map(Boolean::parseBoolean)
                 .orElse(false);
@@ -147,6 +151,9 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                 updateLocalKvCache(workerStatus);
                 logCacheStatusUpdate(newCacheStatus, startTime);
             }
+
+            // 触发资源检查
+            resourceMonitor.checkSingleResourceAvailable(workerStatus);
 
             engineHealthReporter.reportCacheStatusCheckerSuccess(modelName, workerStatus);
             workerStatus.getCacheLastUpdateTime().set(System.nanoTime() / 1000);

@@ -185,6 +185,11 @@ public class MetricConstant {
      * KV缓存Token总量
      */
     public static final String CACHE_TOTAL_KV_CACHE_TOKENS = "app.cache.total.kv.cache.tokens";
+
+    /**
+     * KV缓存已使用比例（已使用Token / 总Token）
+     */
+    public static final String CACHE_USED_KV_CACHE_RATIO = "app.cache.used.kv.cache.ratio";
     
     /**
      * 缓存diff计算中新增块的数量
@@ -207,4 +212,46 @@ public class MetricConstant {
      * gRPC连接池中的连接数量
      */
     public static final String GRPC_CHANNEL_POOL_SIZE = "app.grpc.channel.pool.size";
+
+    /* ------------------------ 请求排队监控 -------------------------- */
+
+    /**
+     * 当前队列长度
+     */
+    public static final String ROUTING_QUEUE_LENGTH = "app.routing.queue.length";
+
+    /**
+     * 超时 QPS
+     */
+    public static final String ROUTING_QUEUE_TIMEOUT_QPS = "app.routing.queue.timeout.qps";
+
+    /**
+     * 队列满拒绝 QPS
+     */
+    public static final String ROUTING_QUEUE_REJECTED_QPS = "app.routing.queue.rejected.qps";
+
+    /**
+     * 取消 QPS
+     */
+    public static final String ROUTING_QUEUE_CANCELLED_QPS = "app.routing.queue.cancelled.qps";
+
+    /**
+     * 等待时间（毫秒）
+     */
+    public static final String ROUTING_QUEUE_WAIT_TIME_MS = "app.routing.queue.wait.time.ms";
+
+    /**
+     * 路由成功 QPS
+     */
+    public static final String ROUTING_SUCCESS_QPS = "app.routing.success.qps";
+
+    /**
+     * 路由失败 QPS
+     */
+    public static final String ROUTING_FAILURE_QPS = "app.routing.failure.qps";
+
+    /**
+     * 路由重试 QPS
+     */
+    public static final String ROUTING_RETRY_QPS = "app.routing.retry.qps";
 }
