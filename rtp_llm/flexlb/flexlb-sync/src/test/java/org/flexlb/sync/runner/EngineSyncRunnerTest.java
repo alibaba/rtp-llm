@@ -1,5 +1,6 @@
 package org.flexlb.sync.runner;
 
+import org.flexlb.balance.resource.ResourceMonitor;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
@@ -34,6 +35,9 @@ class EngineSyncRunnerTest {
 
     @Mock
     private ExecutorService statusCheckExecutor;
+
+    @Mock
+    private ResourceMonitor resourceMonitor;
 
     @Mock
     private EngineHealthReporter engineHealthReporter;
@@ -71,7 +75,8 @@ class EngineSyncRunnerTest {
                 localKvCacheAwareManager,
                 syncRequestTimeoutMs,
                 syncCount,
-                syncEngineStatusInterval
+                syncEngineStatusInterval,
+                resourceMonitor
         );
     }
 
@@ -98,7 +103,8 @@ class EngineSyncRunnerTest {
                 localKvCacheAwareManager,
                 syncRequestTimeoutMs,
                 syncCount,
-                syncEngineStatusInterval
+                syncEngineStatusInterval,
+                resourceMonitor
         );
 
         // Execute

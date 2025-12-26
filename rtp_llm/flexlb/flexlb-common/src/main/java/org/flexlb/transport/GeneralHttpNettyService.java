@@ -71,7 +71,6 @@ public class GeneralHttpNettyService {
         return Mono.just(request)
                 .map(ctx -> HttpNettyChannelContext.<Result>builder()
                         .request(request)
-                        .requestCtx(null)
                         .readCallback((resultHttpNettyChannelContext, httpObject)
                                 -> handleNettyMessage(resultHttpNettyChannelContext, httpObject, responseClz))
                         .errorCallback(this::handlerNettyError)

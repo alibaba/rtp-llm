@@ -57,7 +57,13 @@ public class WorkerStatus {
         localTaskMap.put(requestId, taskInfo);
         taskInfo.updateTaskState(TaskStateEnum.IN_TRANSIT);
 
-        addRunningQueueTime(taskInfo.estimatePrefillTime());
+        // 本地增量更新排队时间
+        this.addRunningQueueTime(taskInfo.estimatePrefillTime());
+        // 本地增量更新KcCache Tokens
+        long needNewKvCacheLen = taskInfo.getInputLength() - taskInfo.getPrefixLength();
+        this.decKvCacheFree(needNewKvCacheLen);
+        this.addKvCacheUsed(needNewKvCacheLen);
+
         lastSelectedTime.set(System.nanoTime() / 1000);
         LoggingUtils.debug("Task {} added to local queue with state: {}", requestId, TaskStateEnum.IN_TRANSIT);
     }
@@ -70,6 +76,9 @@ public class WorkerStatus {
         TaskInfo taskInfo = localTaskMap.get(requestId);
         if (taskInfo != null) {
             addRunningQueueTime(-1 * taskInfo.estimatePrefillTime());
+            long needNewKvCacheLen = taskInfo.getInputLength() - taskInfo.getPrefixLength();
+            decKvCacheFree(-needNewKvCacheLen);
+            addKvCacheUsed(-needNewKvCacheLen);
             localTaskMap.remove(requestId);
         }
     }

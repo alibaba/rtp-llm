@@ -1,5 +1,6 @@
 package org.flexlb.sync.runner;
 
+import org.flexlb.balance.resource.ResourceMonitor;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.domain.worker.WorkerStatusResponse;
@@ -31,6 +32,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
     private final Map<String/*ipPort*/, WorkerStatus> workerStatuses;
     private final EngineHealthReporter engineHealthReporter;
     private final EngineGrpcService engineGrpcService;
+    private final ResourceMonitor resourceMonitor;
     private final String ip;
     private final int port;
     private final int grpcPort;
@@ -42,6 +44,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                                   Map<String/*ip*/, WorkerStatus> workerStatuses,
                                   EngineHealthReporter engineHealthReporter,
                                   EngineGrpcService engineGrpcService,
+                                  ResourceMonitor resourceMonitor,
                                   long syncRequestTimeoutMs) {
         this.ipPort = ipPort;
         String[] split = ipPort.split(":");
@@ -54,6 +57,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
         this.group = group;
         this.engineHealthReporter = engineHealthReporter;
         this.engineGrpcService = engineGrpcService;
+        this.resourceMonitor = resourceMonitor;
         this.syncRequestTimeoutMs = syncRequestTimeoutMs;
     }
 
@@ -148,6 +152,9 @@ public class GrpcWorkerStatusRunner implements Runnable {
 
             // 纠偏运行队列总排队时间
             workerStatus.updateRunningQueueTime();
+
+            // 触发资源检查
+            resourceMonitor.checkSingleResourceAvailable(workerStatus);
 
             engineHealthReporter.reportStatusCheckerSuccess(modelName, workerStatus,
                     Optional.ofNullable(runningTaskInfo).map(List::size).orElse(0),
