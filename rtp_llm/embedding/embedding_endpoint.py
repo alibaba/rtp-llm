@@ -89,7 +89,9 @@ class EmbeddingEndpoint(BaseEndpoint):
             start_time = time.time()
             if isinstance(request, str):
                 request = json.loads(request)
-            self._report_qps_metrics(request)
+            self._report_metric(
+                AccMetrics.QPS_METRIC, source=request.get("source", "unkown")
+            )
             request[request_id_field_name] = self._global_controller.increment()
             result, logable_result = await self.embedding(request)
             # do not log result since too big
