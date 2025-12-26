@@ -73,6 +73,9 @@ class Qwen3VLMoeModel(GptModelBase):
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
 
+    def need_combo_position_ids(self) -> bool:
+        return True
+
     def forward(self, inputs: PyModelInputs) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
         attention_inputs: PyAttentionInputs = inputs.attention_inputs

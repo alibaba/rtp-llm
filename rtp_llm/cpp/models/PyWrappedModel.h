@@ -92,6 +92,12 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_runner_->setInputEmbeddingScalar(description_.input_embedding_scalar);
         caffe2::TypeMeta dtype = torch::scalarTypeToTypeMeta(dataTypeToTorchType(description_.data_type));
         graph_runner_->setModelDataType(dtype);
+        auto py_get_factor          = py_instance.attr("get_position_id_len_factor");
+        int  position_id_len_factor = py_get_factor().cast<int>();
+        graph_runner_->setPositionIdLenFactor(position_id_len_factor);
+        auto py_need_combo_position_ids = py_instance.attr("need_combo_position_ids");
+        bool need_combo_position_ids    = py_need_combo_position_ids().cast<bool>();
+        graph_runner_->setNeedComboPositionIds(need_combo_position_ids);
         RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can't be null");
         auto py_initialize_method = py_instance.attr("initialize");
         py_init_result            = py_initialize_method(init_resources);

@@ -6,6 +6,7 @@ from torch import Tensor, nn
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.symm_mem import get_symm_mem_communicator
+from rtp_llm.ops import DeviceResourceConfig
 from rtp_llm.ops.compute_ops import (
     DeviceType,
     KVCache,
@@ -13,22 +14,23 @@ from rtp_llm.ops.compute_ops import (
     PyModelInitResources,
     PyModelInputs,
     PyModelOutputs,
+    get_device,
 )
-from rtp_llm.ops.compute_ops import DeviceType, KVCache, get_device
-from rtp_llm.ops import DeviceResourceConfig
 from rtp_llm.utils.model_weight import W
 
 
 class GptModelBase(nn.Module):
     def __init__(
-        self, 
-        config: ModelConfig, 
+        self,
+        config: ModelConfig,
         parallelism_config,
         weight: ModelWeights,
         max_generate_batch_size: int,
         fmha_config=None,  # Optional FMHAConfig
         py_hw_kernel_config=None,  # Optional HWKernelConfig
-        device_resource_config: Optional[DeviceResourceConfig] = None,  # Optional DeviceResourceConfig
+        device_resource_config: Optional[
+            DeviceResourceConfig
+        ] = None,  # Optional DeviceResourceConfig
     ) -> None:
         super().__init__()
         self.config = config
@@ -37,7 +39,10 @@ class GptModelBase(nn.Module):
         self.fmha_config = fmha_config
         self.py_hw_kernel_config = py_hw_kernel_config
         self.micro_batch_size: int = (
-            1 if device_resource_config and device_resource_config.enable_layer_micro_batch == 0 else 2
+            1
+            if device_resource_config
+            and device_resource_config.enable_layer_micro_batch == 0
+            else 2
         )
         self.layer_num: int = config.num_layers
         self.vocab_size: int = config.vocab_size
@@ -47,7 +52,6 @@ class GptModelBase(nn.Module):
 
         ## (batch_size -> fmha_params)
         self.params_dict: dict[int, Any] = {}
-
 
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         self.kv_cache = init_resource.kv_cache
@@ -84,3 +88,9 @@ class GptModelBase(nn.Module):
 
     def forward(self, inputs: PyModelInputs) -> PyModelOutputs:
         raise NotImplementedError("forward method must be implemented in subclass")
+
+    def get_position_id_len_factor(self) -> int:
+        return self.config.attn_config.rope_config.index_factor
+
+    def need_combo_position_ids(self) -> bool:
+        return False
