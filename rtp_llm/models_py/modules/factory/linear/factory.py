@@ -11,6 +11,9 @@ from torch import nn
 
 from .linear_base import LinearBase
 
+from rtp_llm.ops import HWKernelConfig
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -46,6 +49,7 @@ class LinearFactory:
         scale_key: Optional[str] = None,
         bias_key: Optional[str] = None,
         quant_config: object = None,
+        hw_kernel_config: Optional['HWKernelConfig'] = None,
         weight_scale_2_key: Optional[str] = None,
         input_scale_key: Optional[str] = None,
     ) -> LinearBase:
@@ -72,7 +76,7 @@ class LinearFactory:
         weight_scale_2 = weights.get(weight_scale_2_key) if weight_scale_2_key else None
         input_scale = weights.get(input_scale_key) if input_scale_key else None
 
-        return cls.create_linear(weight, bias, weight_scales, quant_config,
+        return cls.create_linear(weight, bias, weight_scales, quant_config, hw_kernel_config,
                                  weight_scale_2, input_scale)
 
     @classmethod
@@ -82,13 +86,14 @@ class LinearFactory:
         bias: Optional[torch.Tensor],
         weight_scales: Optional[torch.Tensor],
         quant_config: object,
+        hw_kernel_config: Optional['HWKernelConfig'] = None,
         weight_scale_2: Optional[torch.Tensor] = None,
         input_scale: Optional[torch.Tensor] = None,
     ):
         candidates = [
             strategy_class
             for strategy_class in cls._strategies
-            if strategy_class.can_handle(quant_config, weight, weight_scales,
+            if strategy_class.can_handle(quant_config, weight, weight_scales, hw_kernel_config,
                                          weight_scale_2, input_scale)
         ]
 
@@ -137,6 +142,7 @@ class LinearFactory:
         bias_keys: Optional[List[str]],
         quant_config: object,
         dim: int = -1,
+        hw_kernel_config: Optional['HWKernelConfig'] = None,
     ) -> nn.Module:
         """Create merged Linear layer (e.g., gate_up_proj)."""
         # Check FP8 usage based on first weight
@@ -172,6 +178,7 @@ class LinearFactory:
             weight_scales=merged_scales,
             bias=merged_bias,
             quant_config=quant_config,
+            hw_kernel_config=hw_kernel_config,
         )
 
     @staticmethod

@@ -10,6 +10,7 @@ from rtp_llm.models_py.modules.base import FusedSiluAndMul
 from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.ops import ActivationType, ParallelismConfig
 from rtp_llm.utils.model_weight import W
+from rtp_llm.ops import HWKernelConfig
 
 
 class FusedSiluActDenseMLP(nn.Module):
@@ -19,7 +20,7 @@ class FusedSiluActDenseMLP(nn.Module):
     """
 
     def __init__(
-        self, activation_type: ActivationType, parallelism_config: ParallelismConfig, weights: Dict[str, torch.Tensor], quant_config: object
+        self, activation_type: ActivationType, parallelism_config: ParallelismConfig, weights: Dict[str, torch.Tensor], quant_config: object, hw_kernel_config: Optional['HWKernelConfig'] = None
     ):
         super().__init__()
 
@@ -36,17 +37,18 @@ class FusedSiluActDenseMLP(nn.Module):
                 bias_keys=[W.ffn_b1, W.ffn_b3],
                 quant_config=quant_config,
                 dim=-1,
+                hw_kernel_config=hw_kernel_config,
             )
             self.down_proj = LinearFactory.create_linear_from_weights(
-                weights, W.ffn_w2, W.ffn_s2, W.ffn_b2, quant_config=quant_config
+                weights, W.ffn_w2, W.ffn_s2, W.ffn_b2, quant_config=quant_config, hw_kernel_config=hw_kernel_config
             )
 
         else:
             self.gate_up_proj = LinearFactory.create_linear_from_weights(
-                weights, W.ffn_w13, W.ffn_s13, W.ffn_b13, quant_config=quant_config
+                weights, W.ffn_w13, W.ffn_s13, W.ffn_b13, quant_config=quant_config, hw_kernel_config=hw_kernel_config
             )
             self.down_proj = LinearFactory.create_linear_from_weights(
-                weights, W.ffn_w2, W.ffn_s2, W.ffn_b2, quant_config=quant_config
+                weights, W.ffn_w2, W.ffn_s2, W.ffn_b2, quant_config=quant_config, hw_kernel_config=hw_kernel_config
             )
 
         # Get device-specific silu_and_mul implementation
