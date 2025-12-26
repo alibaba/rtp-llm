@@ -15,6 +15,8 @@ cc_test(
     deps = [
         "//rtp_llm/cpp/devices/testing:device_test_utils",
         "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
+        "//rtp_llm/cpp/cache:cache",
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
         "//rtp_llm/cpp/normal_engine:normal_engine",
         "//rtp_llm/cpp/models:models",
         "//rtp_llm/cpp/config:config_modules",
