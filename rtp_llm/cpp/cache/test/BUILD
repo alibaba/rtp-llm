@@ -11,6 +11,7 @@ test_deps = [
     "//rtp_llm/cpp/config:model_config",
     "//rtp_llm/cpp/cache",
     "//rtp_llm/cpp/utils:core_utils",
+    ":cache_config_test_utils",
     "@com_google_googletest//:gtest",
     "@com_google_googletest//:gtest_main",
     "@local_config_cuda//cuda:cuda_headers",
@@ -30,6 +31,18 @@ block_cache_test_deps = [
     "@local_config_cuda//cuda:cudart",
 ] + torch_deps()
 
+
+cc_library(
+    name = "cache_config_test_utils",
+    hdrs = [
+        "CacheConfigTestUtils.h",
+    ],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache:cache_types",
+    ],
+    visibility = ["//visibility:public"],
+)
 
 cc_library(
     name = "block_pool_test_helper",
