@@ -1,6 +1,6 @@
 import json
 import os
-from typing import Any, List
+from typing import Any, List, Optional
 
 import torch
 
@@ -19,6 +19,8 @@ from rtp_llm.models.qwen3_vl.qwen3_vl import (
 )
 from rtp_llm.models.qwen_v2_moe import Qwen2Moe
 from rtp_llm.models.qwen_v3_moe import Qwen3Moe, QWenV3MoeWeight
+from rtp_llm.models_py.model_desc.module_base import GptModelBase
+from rtp_llm.models_py.model_desc.qwen3vl_moe import Qwen3VLMoeModel
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
@@ -105,6 +107,23 @@ class QWen3_VL_MOE(Qwen3Moe, MultiModalMixin):
         self.mm_part = Qwen3_VLImageEmbedding(self.model_config)
         self.model_config.mm_related_params.vit_weights = Qwen3VLVitWeight(
             {"vit": self.mm_part.visual}
+        )
+
+    def _create_python_model(self) -> Optional[GptModelBase]:
+        model_config = self.model_config
+        parallelism_config = self.parallelism_config
+        fmha_config = self.fmha_config
+        py_hw_kernel_config = self.hw_kernel_config
+        moe_config = self.moe_config
+        self.py_model = Qwen3VLMoeModel(
+            model_config,
+            parallelism_config,
+            self.weight,
+            moe_config,
+            max_generate_batch_size=self.max_generate_batch_size,
+            fmha_config=fmha_config,
+            py_hw_kernel_config=py_hw_kernel_config,
+            device_resource_config=self.device_resource_config,
         )
 
     @classmethod

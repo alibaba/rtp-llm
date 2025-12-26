@@ -1,11 +1,8 @@
 import json
 import os
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import torch
-
-from typing import List
-
 import torch.library as tl
 from PIL import Image
 from transformers import AutoProcessor, Qwen3VLConfig, Qwen3VLVisionModel
@@ -139,6 +136,23 @@ class QWen3_VL(QwenV3, MultiModalMixin):
         self.mm_part = Qwen3_VLImageEmbedding(self.model_config)
         self.model_config.mm_related_params.vit_weights = Qwen3VLVitWeight(
             {"vit": self.mm_part.visual}
+        )
+
+    def _create_python_model(self) -> Optional[GptModelBase]:
+        model_config = self.model_config
+        parallelism_config = self.parallelism_config
+        fmha_config = self.fmha_config
+        py_hw_kernel_config = self.hw_kernel_config
+        quant_config = self.model_config.quant_config
+        self.py_model = Qwen3VLModel(
+            model_config,
+            parallelism_config,
+            self.weight,
+            max_generate_batch_size=self.max_generate_batch_size,
+            quant_config=quant_config,
+            fmha_config=fmha_config,
+            py_hw_kernel_config=py_hw_kernel_config,
+            device_resource_config=self.device_resource_config,
         )
 
     @classmethod
