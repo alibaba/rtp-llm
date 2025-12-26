@@ -315,28 +315,28 @@ class DeepGEMMTest(TestCase):
                     f"{m=}, {n=}, {k=}, {kernel_opt}, {accumulate=}, {out_dtype=}, "
                     f"{diff:.5f}, alias={test_alias}"
                 )
-            a, b, c, d, ref_d = generate_normal(
-                m, n, k, accumulate, out_dtype, use_ue8m0=use_ue8m0
-            )
+            # a, b, c, d, ref_d = generate_normal(
+            #     m, n, k, accumulate, out_dtype, use_ue8m0=use_ue8m0
+            # )
 
-            # Test launch overhead
-            launch_start_t = time.time_ns()
-            fp8_gemm_nt(a, b, d, c=c, disable_ue8m0_cast=disable_ue8m0_cast)
-            launch_end_t = time.time_ns()
-            torch.cuda.synchronize()
+            # # Test launch overhead
+            # launch_start_t = time.time_ns()
+            # fp8_gemm_nt(a, b, d, c=c, disable_ue8m0_cast=disable_ue8m0_cast)
+            # launch_end_t = time.time_ns()
+            # torch.cuda.synchronize()
 
-            # noinspection PyShadowingNames
-            def test_func():
-                fp8_gemm_nt(a, b, d, c=c, disable_ue8m0_cast=disable_ue8m0_cast)
+            # # noinspection PyShadowingNames
+            # def test_func():
+            #     fp8_gemm_nt(a, b, d, c=c, disable_ue8m0_cast=disable_ue8m0_cast)
 
-            t = bench_kineto(test_func, "fp8_gemm", suppress_kineto_output=True)
-            print(
-                f" > Perf (m={m:5}, n={n:5}, k={k:5}, {kernel_opt}, {out_opt}, {acc_opt}): "
-                f"launch {(launch_end_t - launch_start_t) / 1e3:4.0f} us | {t * 1e6:4.0f} us | "
-                f"{2 * m * n * k / t / 1e12:4.0f} TFLOPS | "
-                f"{(count_bytes(a, b, d) + count_bytes(c) * int(accumulate)) / 1e9 / t:4.0f} GB/s",
-                flush=True,
-            )
+            # t = bench_kineto(test_func, "fp8_gemm", suppress_kineto_output=True)
+            # print(
+            #     f" > Perf (m={m:5}, n={n:5}, k={k:5}, {kernel_opt}, {out_opt}, {acc_opt}): "
+            #     f"launch {(launch_end_t - launch_start_t) / 1e3:4.0f} us | {t * 1e6:4.0f} us | "
+            #     f"{2 * m * n * k / t / 1e12:4.0f} TFLOPS | "
+            #     f"{(count_bytes(a, b, d) + count_bytes(c) * int(accumulate)) / 1e9 / t:4.0f} GB/s",
+            #     flush=True,
+            # )
         print(flush=True)
 
     def test_m_grouped_fp8_gemm_nt_contiguous(self) -> None:
@@ -367,24 +367,24 @@ class DeepGEMMTest(TestCase):
                 assert (
                     diff < 0.001
                 ), f"{m=}, {n=}, {k=}, {kernel_opt}, {diff:.5f}, alias={test_alias}"
-            m, a, b, m_indices, d, ref_d = generate_m_grouped_contiguous(
-                num_groups, expected_m_per_group, n, k, use_ue8m0=use_ue8m0
-            )
+            # m, a, b, m_indices, d, ref_d = generate_m_grouped_contiguous(
+            #     num_groups, expected_m_per_group, n, k, use_ue8m0=use_ue8m0
+            # )
 
-            # noinspection PyShadowingNames
-            def test_func():
-                m_grouped_fp8_gemm_nt_contiguous(
-                    a, b, d, m_indices, disable_ue8m0_cast=disable_ue8m0_cast
-                )
+            # # noinspection PyShadowingNames
+            # def test_func():
+            #     m_grouped_fp8_gemm_nt_contiguous(
+            #         a, b, d, m_indices, disable_ue8m0_cast=disable_ue8m0_cast
+            #     )
 
-            t = bench_kineto(test_func, "fp8_gemm", suppress_kineto_output=True)
-            print(
-                f" > Perf ({num_groups=}, m={m:5}, n={n:5}, k={k:5}, {kernel_opt}): "
-                f"{t * 1e6:4.0f} us | "
-                f"{2 * m * n * k / t / 1e12:4.0f} TFLOPS | "
-                f"{count_bytes(a, b, d) / 1e9 / t:4.0f} GB/s",
-                flush=True,
-            )
+            # t = bench_kineto(test_func, "fp8_gemm", suppress_kineto_output=True)
+            # print(
+            #     f" > Perf ({num_groups=}, m={m:5}, n={n:5}, k={k:5}, {kernel_opt}): "
+            #     f"{t * 1e6:4.0f} us | "
+            #     f"{2 * m * n * k / t / 1e12:4.0f} TFLOPS | "
+            #     f"{count_bytes(a, b, d) / 1e9 / t:4.0f} GB/s",
+            #     flush=True,
+            # )
         print(flush=True)
 
     def test_m_grouped_fp8_gemm_nt_masked(self) -> None:
@@ -424,32 +424,32 @@ class DeepGEMMTest(TestCase):
                         diff < 0.001
                     ), f"{max_m=}, {n=}, {k=}, {j=}, masked_m={masked_m[j]}, {kernel_opt}, {num_groups=}, {diff:.5f}"
 
-            # Construct full cases
-            a, b, masked_m, d, ref_d = generate_m_grouped_masked(
-                num_groups, max_m, expected_m_per_group, n, k, use_ue8m0=use_ue8m0
-            )
+            # # Construct full cases
+            # a, b, masked_m, d, ref_d = generate_m_grouped_masked(
+            #     num_groups, max_m, expected_m_per_group, n, k, use_ue8m0=use_ue8m0
+            # )
 
-            # noinspection PyShadowingNames
-            def test_func():
-                m_grouped_fp8_gemm_nt_masked(
-                    a,
-                    b,
-                    d,
-                    masked_m,
-                    expected_m_per_group,
-                    disable_ue8m0_cast=disable_ue8m0_cast,
-                )
+            # # noinspection PyShadowingNames
+            # def test_func():
+            #     m_grouped_fp8_gemm_nt_masked(
+            #         a,
+            #         b,
+            #         d,
+            #         masked_m,
+            #         expected_m_per_group,
+            #         disable_ue8m0_cast=disable_ue8m0_cast,
+            #     )
 
-            # Test performance with fixed shapes
-            valid_m = masked_m.sum().item()
-            t = bench_kineto(test_func, "fp8_gemm", suppress_kineto_output=True)
-            print(
-                f" > Perf ({num_groups=}, expected_m_per_group={expected_m_per_group:4}, n={n:4}, k={k:4}, {kernel_opt}): "
-                f"{t * 1e6:4.0f} us | "
-                f"{2 * valid_m * n * k / t / 1e12:4.0f} TFLOPS | "
-                f"{(count_bytes(a, d) * valid_m / (max_m * num_groups) + count_bytes(b)) / 1e9 / t:4.0f} GB/s",
-                flush=True,
-            )
+            # # Test performance with fixed shapes
+            # valid_m = masked_m.sum().item()
+            # t = bench_kineto(test_func, "fp8_gemm", suppress_kineto_output=True)
+            # print(
+            #     f" > Perf ({num_groups=}, expected_m_per_group={expected_m_per_group:4}, n={n:4}, k={k:4}, {kernel_opt}): "
+            #     f"{t * 1e6:4.0f} us | "
+            #     f"{2 * valid_m * n * k / t / 1e12:4.0f} TFLOPS | "
+            #     f"{(count_bytes(a, d) * valid_m / (max_m * num_groups) + count_bytes(b)) / 1e9 / t:4.0f} GB/s",
+            #     flush=True,
+            # )
         print(flush=True)
 
     def test_bf16_gemm_nt(self) -> None:
@@ -470,32 +470,32 @@ class DeepGEMMTest(TestCase):
                     f"{m=}, {n=}, {k=}, {accumulate=}, {out_dtype=}, "
                     f"{diff:.5f}, alias={test_alias}"
                 )
-            a, b, c, d, ref_d = generate_normal(
-                m, n, k, accumulate, out_dtype, use_bf16=True
-            )
+            # a, b, c, d, ref_d = generate_normal(
+            #     m, n, k, accumulate, out_dtype, use_bf16=True
+            # )
 
-            cublas_t = 0
-            t = bench_kineto(
-                lambda: bf16_gemm_nt(a, b, d, c=c),
-                "bf16_gemm",
-                suppress_kineto_output=True,
-            )
-            if accumulate == 0 and out_dtype == torch.bfloat16:
-                # noinspection PyBroadException
-                try:
-                    cublas_t = bench_kineto(
-                        lambda: a @ b.T, "nvjet", suppress_kineto_output=True
-                    )
-                except Exception:
-                    pass
-            print(
-                f" > Perf (m={m:5}, n={n:5}, k={k:5}, {out_opt}, {acc_opt}): "
-                f"{t * 1e6:4.0f} us | "
-                f"{2 * m * n * k / t / 1e12:4.0f} TFLOPS | "
-                f"{(count_bytes(a, b, d) + count_bytes(c) * int(accumulate)) / 1e9 / t:4.0f} GB/s | "
-                f"{cublas_t / t:.2f}x cuBLAS",
-                flush=True,
-            )
+            # cublas_t = 0
+            # t = bench_kineto(
+            #     lambda: bf16_gemm_nt(a, b, d, c=c),
+            #     "bf16_gemm",
+            #     suppress_kineto_output=True,
+            # )
+            # if accumulate == 0 and out_dtype == torch.bfloat16:
+            #     # noinspection PyBroadException
+            #     try:
+            #         cublas_t = bench_kineto(
+            #             lambda: a @ b.T, "nvjet", suppress_kineto_output=True
+            #         )
+            #     except Exception:
+            #         pass
+            # print(
+            #     f" > Perf (m={m:5}, n={n:5}, k={k:5}, {out_opt}, {acc_opt}): "
+            #     f"{t * 1e6:4.0f} us | "
+            #     f"{2 * m * n * k / t / 1e12:4.0f} TFLOPS | "
+            #     f"{(count_bytes(a, b, d) + count_bytes(c) * int(accumulate)) / 1e9 / t:4.0f} GB/s | "
+            #     f"{cublas_t / t:.2f}x cuBLAS",
+            #     flush=True,
+            # )
         print(flush=True)
 
     def test_m_grouped_bf16_gemm_nt_contiguous(self) -> None:
@@ -514,22 +514,22 @@ class DeepGEMMTest(TestCase):
                 d = torch.where((m_indices == -1).unsqueeze(1), torch.zeros_like(d), d)
                 diff = calc_diff(d, ref_d)
                 assert diff < 0.001, f"{m=}, {n=}, {k=}, {diff:.5f}, alias={test_alias}"
-            m, a, b, m_indices, d, ref_d = generate_m_grouped_contiguous(
-                num_groups, expected_m_per_group, n, k, use_bf16=True
-            )
+            # m, a, b, m_indices, d, ref_d = generate_m_grouped_contiguous(
+            #     num_groups, expected_m_per_group, n, k, use_bf16=True
+            # )
 
-            # noinspection PyShadowingNames
-            def test_func():
-                m_grouped_bf16_gemm_nt_contiguous(a, b, d, m_indices)
+            # # noinspection PyShadowingNames
+            # def test_func():
+            #     m_grouped_bf16_gemm_nt_contiguous(a, b, d, m_indices)
 
-            t = bench_kineto(test_func, "bf16_gemm", suppress_kineto_output=True)
-            print(
-                f" > Perf ({num_groups=}, m={m:5}, n={n:5}, k={k:5}): "
-                f"{t * 1e6:4.0f} us | "
-                f"{2 * m * n * k / t / 1e12:4.0f} TFLOPS | "
-                f"{count_bytes(a, b, d) / 1e9 / t:4.0f} GB/s",
-                flush=True,
-            )
+            # t = bench_kineto(test_func, "bf16_gemm", suppress_kineto_output=True)
+            # print(
+            #     f" > Perf ({num_groups=}, m={m:5}, n={n:5}, k={k:5}): "
+            #     f"{t * 1e6:4.0f} us | "
+            #     f"{2 * m * n * k / t / 1e12:4.0f} TFLOPS | "
+            #     f"{count_bytes(a, b, d) / 1e9 / t:4.0f} GB/s",
+            #     flush=True,
+            # )
         print(flush=True)
 
     def test_m_grouped_bf16_gemm_nt_masked(self) -> None:
@@ -558,25 +558,25 @@ class DeepGEMMTest(TestCase):
                         diff < 0.001
                     ), f"{max_m=}, {n=}, {k=}, {j=}, masked_m={masked_m[j]}, {num_groups=}, {diff:.5f}"
 
-            # Construct full cases
-            a, b, masked_m, d, ref_d = generate_m_grouped_masked(
-                num_groups, max_m, expected_m_per_group, n, k, use_bf16=True
-            )
+            # # Construct full cases
+            # a, b, masked_m, d, ref_d = generate_m_grouped_masked(
+            #     num_groups, max_m, expected_m_per_group, n, k, use_bf16=True
+            # )
 
-            # noinspection PyShadowingNames
-            def test_func():
-                m_grouped_bf16_gemm_nt_masked(a, b, d, masked_m, expected_m_per_group)
+            # # noinspection PyShadowingNames
+            # def test_func():
+            #     m_grouped_bf16_gemm_nt_masked(a, b, d, masked_m, expected_m_per_group)
 
-            # Test performance with fixed shapes
-            valid_m = masked_m.sum().item()
-            t = bench_kineto(test_func, "bf16_gemm", suppress_kineto_output=True)
-            print(
-                f" > Perf ({num_groups=}, expected_m_per_group={expected_m_per_group:4}, n={n:4}, k={k:4}): "
-                f"{t * 1e6:4.0f} us | "
-                f"{2 * valid_m * n * k / t / 1e12:4.0f} TFLOPS | "
-                f"{(count_bytes(a, d) * valid_m / (max_m * num_groups) + count_bytes(b)) / 1e9 / t:4.0f} GB/s",
-                flush=True,
-            )
+            # # Test performance with fixed shapes
+            # valid_m = masked_m.sum().item()
+            # t = bench_kineto(test_func, "bf16_gemm", suppress_kineto_output=True)
+            # print(
+            #     f" > Perf ({num_groups=}, expected_m_per_group={expected_m_per_group:4}, n={n:4}, k={k:4}): "
+            #     f"{t * 1e6:4.0f} us | "
+            #     f"{2 * valid_m * n * k / t / 1e12:4.0f} TFLOPS | "
+            #     f"{(count_bytes(a, d) * valid_m / (max_m * num_groups) + count_bytes(b)) / 1e9 / t:4.0f} GB/s",
+            #     flush=True,
+            # )
         print(flush=True)
 
 
