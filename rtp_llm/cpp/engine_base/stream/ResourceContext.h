@@ -11,10 +11,8 @@ namespace rtp_llm {
 class GenerateStream;
 
 struct ResourceContext {
-    std::shared_ptr<KVCacheManager>              cache_manager;
-    std::shared_ptr<KVCacheManager>              propose_cache_manager;
-    std::vector<std::shared_ptr<KVCacheManager>> mtp_cache_managers;
-    std::shared_ptr<SystemPrompt>                system_prompt;
+    std::shared_ptr<KVCacheManager> cache_manager;
+    std::shared_ptr<SystemPrompt>   system_prompt;
 
     bool reuse_cache{false};
     bool enable_3fs{false};
