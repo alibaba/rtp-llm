@@ -46,6 +46,7 @@ class Qwen3DecoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
+        position_ids: torch.Tensor,
         fmha_impl: FMHAImplBase,
         kv_cache: Optional[KVCache] = None,
     ) -> torch.Tensor:
@@ -54,7 +55,10 @@ class Qwen3DecoderLayer(nn.Module):
 
         # Self Attention
         hidden_states = self.self_attn(
-            hidden_states=hidden_states, fmha_impl=fmha_impl, kv_cache=kv_cache
+            hidden_states=hidden_states,
+            position_ids=position_ids,
+            fmha_impl=fmha_impl,
+            kv_cache=kv_cache,
         )
         hidden_states = residual + hidden_states
 
@@ -111,9 +115,11 @@ class Qwen3Model(GptModelBase):
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
             fmha_impl.prepare(inputs.attention_inputs)
+        position_ids = inputs.attention_inputs.combo_position_ids
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
             hidden_states = decoder_layer(
                 hidden_states,
+                position_ids,
                 fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
             )
