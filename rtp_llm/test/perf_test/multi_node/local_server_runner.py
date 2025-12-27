@@ -24,7 +24,7 @@ except ImportError:
     pass
 
 from rtp_llm.config.py_config_modules import PyEnvConfigs
-from rtp_llm.distribute.gang_info import members_from_test_env
+from rtp_llm.distribute.distributed_server import members_from_test_env
 from rtp_llm.test.perf_test.batch_decode_test import run_single
 from rtp_llm.test.perf_test.test_util import create_query
 from rtp_llm.test.utils.maga_server_manager import MagaServerManager
@@ -37,7 +37,7 @@ from rtp_llm.utils.fuser import fetch_remote_file_to_local
 def wait_master_done(env_dict: Dict[str, str] = {}, world_rank: int = 0) -> None:
     # Get gang_config_string from environment variable or env_dict
     dist_config_str = env_dict.get(
-        "GANG_CONFIG_STRING", os.environ.get("GANG_CONFIG_STRING", None)
+        "GANG_CONFIG_STRING", PyEnvConfigs.distribute_config.gang_config_string
     )
     if not dist_config_str:
         raise RuntimeError("no gang config string, unexpected!")

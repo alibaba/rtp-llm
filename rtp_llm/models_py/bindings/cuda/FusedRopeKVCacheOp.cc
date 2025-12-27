@@ -19,11 +19,8 @@ TRTAttnPtr FusedRopeKVCachePrefillOp::prepare(torch_ext::PyAttentionInputs attn_
         kv_cache_block_id_host   = torchTensor2Buffer(attn_inputs.kv_cache_block_id_host);
         kv_cache_block_id_device = torchTensor2Buffer(attn_inputs.kv_cache_block_id_device);
     }
-    // not support has_alibi_slopes
-    auto          cu_seqlens    = attn_inputs.cu_seqlens;
-    torch::Tensor cu_kv_seqlens = cu_seqlens;
-    TRTAttnPtr    attn_params;
-    auto          params =
+    TRTAttnPtr attn_params;
+    auto       params =
         device_->prepareTrtAttn(attn_configs_, attn_inputs.kv_block_offset, kv_cache_block_id_device, batch_size);
     if (params) {
         attn_params = TRTAttnPtr(params, (TRTAttn*)params.get());
@@ -31,9 +28,11 @@ TRTAttnPtr FusedRopeKVCachePrefillOp::prepare(torch_ext::PyAttentionInputs attn_
         attn_params = std::make_shared<TRTAttn>();
     }
     attn_params->attn_type                 = torchDTypeToDataType(attn_inputs.dtype);
-    attn_params->cu_seqlens                = cu_seqlens;
-    attn_params->cu_kv_seqlens             = cu_kv_seqlens;
+    attn_params->cu_seqlens                = attn_inputs.cu_seqlens;
+    attn_params->cu_kv_seqlens             = attn_inputs.cu_kv_seqlens;
     attn_params->max_seq_len               = attn_inputs.input_lengths.max().item<int32_t>();
+    attn_params->max_prefix_length         = attn_inputs.prefix_lengths.max().item<int32_t>();
+    attn_params->prefix_lengths            = attn_inputs.prefix_lengths;
     attn_params->kv_block_array.cache_type = attn_configs_.kv_cache_dtype;
     attn_params->padding_offset            = attn_inputs.padding_offset;
     return attn_params;
@@ -51,11 +50,7 @@ torch::Tensor FusedRopeKVCachePrefillOp::forward(const torch::Tensor&           
     const int     batch_size            = params->cu_seqlens.size(0) - 1;
     torch::Tensor q_no_transpose_output = torch::empty({token_num, local_head_num, size_per_head},
                                                        torch::TensorOptions(qkv.dtype()).device(qkv.device()));
-    torch::Tensor q_output              = torch::empty({token_num, local_head_num, size_per_head},
-                                          torch::TensorOptions(qkv.dtype()).device(qkv.device()));
-    torch::Tensor k_output              = torch::empty({token_num, local_head_num_kv, size_per_head},
-                                          torch::TensorOptions(qkv.dtype()).device(qkv.device()));
-    torch::Tensor v_output              = torch::empty({token_num, local_head_num_kv, size_per_head},
+    torch::Tensor q_output              = torch::empty({local_head_num, token_num, size_per_head},
                                           torch::TensorOptions(qkv.dtype()).device(qkv.device()));
 
     torch::Tensor qkv_fp8 = torch::empty({token_num, (local_head_num + 2 * local_head_num_kv), size_per_head},
@@ -69,13 +64,17 @@ torch::Tensor FusedRopeKVCachePrefillOp::forward(const torch::Tensor&           
             kv_block_array.scale = kv_cache.value().k_scale_base.data_ptr();
         }
         prefix_prompt_param.kv_block_array = kv_block_array;
-        // if (attn_inputs.prefix_lengths.size(0)) {
-        //     prefix_prompt_param.d_prefix_prompt_lengths  = attn_inputs.prefix_lengths.data_ptr<int>();
-        //     prefix_prompt_param.max_prefix_prompt_length = attn_inputs.prefix_lengths.max().item<int>();
-        //     prefix_prompt_param.count_length             = 1;
-        // }
+        if (params->max_prefix_length > 0) {
+            prefix_prompt_param.d_prefix_prompt_lengths  = params->prefix_lengths.data_ptr<int>();
+            prefix_prompt_param.max_prefix_prompt_length = params->max_prefix_length;
+            prefix_prompt_param.count_length             = 1;
+        }
     }
     // not support fp8 now
+    if (fmha_type == FMHAType::TRT_V2 && params->max_prefix_length > 0 && kv_cache.has_value()
+        && prefix_prompt_param.kv_block_array.cache_type == KvCacheDataType::BASE) {
+        fmha_type = FMHAType::PAGED_TRT_V2;
+    }
 
     bool store_qkv =
         fmha_type != FMHAType::PAGED_TRT_V2 && fmha_type != FMHAType::NONE && fmha_type != FMHAType::FLASH_INFER;
@@ -100,8 +99,8 @@ torch::Tensor FusedRopeKVCachePrefillOp::forward(const torch::Tensor&           
         invokeAddFusedQKVBiasTranspose,
         q_no_transpose_output.data_ptr(),
         q_output.data_ptr(),
-        k_output.data_ptr(),
-        v_output.data_ptr(),
+        nullptr,  // k_output.data_ptr(),
+        nullptr,  // v_output.data_ptr(),
         &prefix_prompt_param,
         qkv.data_ptr(),
         use_qkv_fp8 ? qkv_fp8.data_ptr() : nullptr,
@@ -152,21 +151,19 @@ TRTAttnPtr FusedRopeKVCacheDecodeOp::prepare(torch_ext::PyAttentionInputs attn_i
         kv_cache_block_id_host   = torchTensor2Buffer(attn_inputs.kv_cache_block_id_host);
         kv_cache_block_id_device = torchTensor2Buffer(attn_inputs.kv_cache_block_id_device);
     }
-    // not support has_alibi_slopes
-    attn_inputs.cu_seqlens.slice(0, 1, batch_size + 1) = attn_inputs.input_lengths.cumsum(0);
-    auto          cu_seqlens                           = attn_inputs.cu_seqlens;
-    torch::Tensor cu_kv_seqlens                        = cu_seqlens;
-    TRTAttnPtr    attn_params;
-    auto          params = device_->prepareTrtAttn(
+
+    TRTAttnPtr attn_params;
+    auto       params = device_->prepareTrtAttn(
         attn_configs_, attn_inputs.kv_block_offset, kv_cache_block_id_device, attn_inputs.sequence_lengths.size(0));
     RTP_LLM_CHECK_WITH_INFO(params != nullptr, "TRTAttnPtr Build Failed");
     attn_params                            = TRTAttnPtr(params, (TRTAttn*)params.get());
     attn_params->decode_plan               = true;
     attn_params->attn_type                 = torchDTypeToDataType(attn_inputs.dtype);
-    attn_params->cu_seqlens                = cu_seqlens;
-    attn_params->cu_kv_seqlens             = cu_kv_seqlens;
+    attn_params->cu_seqlens                = attn_inputs.cu_seqlens;
+    attn_params->cu_kv_seqlens             = attn_inputs.cu_kv_seqlens;
     attn_params->sequence_lengths          = attn_inputs.sequence_lengths;
     attn_params->kv_block_array.cache_type = attn_configs_.kv_cache_dtype;
+
     return attn_params;
 }
 

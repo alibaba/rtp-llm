@@ -28,21 +28,8 @@ CKAttnPtr FusedRopeKVCachePrefillOpBase::prepare(torch_ext::PyAttentionInputs at
         kv_cache_block_id_host   = torchTensor2Buffer(attn_inputs.kv_cache_block_id_host);
         kv_cache_block_id_device = torchTensor2Buffer(attn_inputs.kv_cache_block_id_device);
     }
-    // 计算累积序列长度
-    torch::Tensor cu_seqlens = torch::zeros({batch_size + 1}, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
-    cu_seqlens.slice(0, 1, batch_size + 1) = attn_inputs.input_lengths.cumsum(0);
-    cu_seqlens                             = cu_seqlens.cuda();
 
-    // 计算包含前缀的累积序列长度
-    torch::Tensor kv_lengths = attn_inputs.input_lengths.clone();
-    bool          has_prefix = attn_inputs.prefix_lengths.defined() && attn_inputs.prefix_lengths.numel() > 0;
-    if (has_prefix) {
-        kv_lengths = kv_lengths + attn_inputs.prefix_lengths;
-    }
-    torch::Tensor cu_kv_seqlens =
-        torch::zeros({batch_size + 1}, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
-    cu_kv_seqlens.slice(0, 1, batch_size + 1) = kv_lengths.cumsum(0);
-    cu_kv_seqlens                             = cu_kv_seqlens.cuda();
+    bool has_prefix = attn_inputs.prefix_lengths.defined() && attn_inputs.prefix_lengths.numel() > 0;
 
     bool use_fmha_fp8 = false;
     use_fmha_fp8 = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
@@ -55,9 +42,8 @@ CKAttnPtr FusedRopeKVCachePrefillOpBase::prepare(torch_ext::PyAttentionInputs at
         attn_params = std::make_shared<CKAttn>();
     }
     attn_params->attn_type      = torchDTypeToDataType(attn_inputs.dtype);
-    attn_params->cu_seqlens     = cu_seqlens;
-    attn_params->cu_kv_seqlens  = cu_kv_seqlens;
-    attn_params->attn_type      = torchDTypeToDataType(attn_inputs.dtype);
+    attn_params->cu_seqlens     = attn_inputs.cu_seqlens;
+    attn_params->cu_kv_seqlens  = attn_inputs.cu_kv_seqlens;
     attn_params->max_seq_len    = attn_inputs.input_lengths.max().item<int32_t>();
     attn_params->padding_offset = attn_inputs.padding_offset;
     // 处理 prefix_lengths：确保在 CUDA 上且连续
@@ -306,20 +292,6 @@ CKAttnPtr FusedRopeKVCacheDecodeOpBase::prepare(torch_ext::PyAttentionInputs att
         kv_cache_block_id_host   = torchTensor2Buffer(attn_inputs.kv_cache_block_id_host);
         kv_cache_block_id_device = torchTensor2Buffer(attn_inputs.kv_cache_block_id_device);
     }
-    // not support has_alibi_slopes
-    attn_inputs.cu_seqlens.slice(0, 1, batch_size + 1) = attn_inputs.input_lengths.cumsum(0);
-    auto cu_seqlens                                    = attn_inputs.cu_seqlens;
-
-    // 计算包含前缀的累积序列长度
-    torch::Tensor kv_lengths = attn_inputs.input_lengths;
-    if (attn_inputs.prefix_lengths.defined() && attn_inputs.prefix_lengths.numel() > 0) {
-        kv_lengths = kv_lengths + attn_inputs.prefix_lengths;
-    }
-
-    torch::Tensor cu_kv_seqlens =
-        torch::zeros({batch_size + 1}, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
-    cu_kv_seqlens.slice(0, 1, batch_size + 1) = kv_lengths.cumsum(0);
-    cu_kv_seqlens                             = cu_kv_seqlens.cuda();
 
     CKAttnPtr attn_params;
     bool use_fmha_fp8 = false;
@@ -336,8 +308,9 @@ CKAttnPtr FusedRopeKVCacheDecodeOpBase::prepare(torch_ext::PyAttentionInputs att
 
     attn_params                            = CKAttnPtr(params, (CKAttn*)params.get());
     attn_params->decode_plan               = true;
-    attn_params->cu_seqlens                = cu_seqlens;
-    attn_params->cu_kv_seqlens             = cu_kv_seqlens;
+    attn_params->attn_type                 = torchDTypeToDataType(attn_inputs.dtype);
+    attn_params->cu_seqlens                = attn_inputs.cu_seqlens;
+    attn_params->cu_kv_seqlens             = attn_inputs.cu_kv_seqlens;
     attn_params->sequence_lengths          = attn_inputs.sequence_lengths;
     attn_params->kv_block_array.cache_type = attn_configs_.kv_cache_dtype;
     attn_params->input_lengths             = attn_inputs.input_lengths;
@@ -477,7 +450,7 @@ torch::Tensor FusedRopeKVCacheDecodeOpBase::forward(const torch::Tensor&        
 void registerFusedRopeKVCacheOp(const py::module& m) {
     pybind11::class_<KVBlockArray>(m, "KVBlockArray").def(pybind11::init<>());
     pybind11::class_<CKAttn, std::shared_ptr<CKAttn>>(m, "CKAttn").def(pybind11::init<>());
-    
+
     // Prefill ASM
     pybind11::class_<FusedRopeKVCachePrefillOpAsm>(m, "FusedRopeKVCachePrefillOpAsm")
         .def(pybind11::init<const AttentionConfigs&>(),
@@ -489,7 +462,7 @@ void registerFusedRopeKVCacheOp(const py::module& m) {
              py::arg("fmha_type"),
              py::arg("kv_cache"),
              py::arg("params"));
-    
+
     // Prefill Non-ASM
     pybind11::class_<FusedRopeKVCachePrefillOpNonAsm>(m, "FusedRopeKVCachePrefillOpNonAsm")
         .def(pybind11::init<const AttentionConfigs&>(),
@@ -501,7 +474,7 @@ void registerFusedRopeKVCacheOp(const py::module& m) {
              py::arg("fmha_type"),
              py::arg("kv_cache"),
              py::arg("params"));
-    
+
     // Decode ASM
     pybind11::class_<FusedRopeKVCacheDecodeOpAsm>(m, "FusedRopeKVCacheDecodeOpAsm")
         .def(pybind11::init<const AttentionConfigs&>(),
@@ -513,7 +486,7 @@ void registerFusedRopeKVCacheOp(const py::module& m) {
              py::arg("fmha_type"),
              py::arg("kv_cache"),
              py::arg("params"));
-    
+
     // Decode Non-ASM
     pybind11::class_<FusedRopeKVCacheDecodeOpNonAsm>(m, "FusedRopeKVCacheDecodeOpNonAsm")
         .def(pybind11::init<const AttentionConfigs&>(),

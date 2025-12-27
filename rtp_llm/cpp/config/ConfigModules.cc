@@ -232,7 +232,8 @@ std::string SpeculativeExecutionConfig::to_string() const {
         << "force_stream_sample: " << force_stream_sample << "\n"
         << "force_score_context_attention: " << force_score_context_attention << "\n"
         << "quantization: " << quantization << "\n"
-        << "checkpoint_path: " << checkpoint_path;
+        << "checkpoint_path: " << checkpoint_path << "\n"
+        << "use_new_sp_engine: " << use_new_sp_engine;
     return oss.str();
 }
 

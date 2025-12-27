@@ -752,6 +752,63 @@ void GenerateStream::matchStopWordsList(int batch_id) {
     }
 }
 
+void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
+    std::lock_guard<std::mutex> lock(*output_mutex_);
+    RTP_LLM_LOG_DEBUG("stream [%ld] spec update", streamId());
+    *is_context_stream_ = false;
+    if (stoppedWithoutLock() && !update_info.force_update_info) {
+        return;
+    }
+
+    const auto& new_tokens = update_info.new_tokens;
+
+    if (isPerfTest()) {
+        device_->bufMemset(*new_tokens, 0);
+    }
+
+    auto num_new_tokens = update_info.num_new_tokens;
+
+    int error_token_id = 0;
+    if (!complete_token_ids_->update(new_tokens,
+                                     begin_time_us_,
+                                     num_new_tokens,
+                                     generate_input_->inputLength(),
+                                     maxTokenNum(),
+                                     vocab_size_,
+                                     hasNumBeams(),
+                                     streamId(),
+                                     error_token_id)) {
+        setStopWithoutLock(ErrorCode::OUT_OF_VOCAB_RANGE,
+                           "output token id:" + std::to_string(error_token_id)
+                               + " out of vocab size: " + std::to_string(vocab_size_));
+        return;
+    }
+
+    // update speculative output buffer
+    int  target_last_token = new_tokens->data<int>()[num_new_tokens - 1];
+    int* spec_tokens       = sp_output_buffer_->tokens->data<int>();
+    spec_tokens[0]         = target_last_token;
+    spec_tokens[1]         = update_info.draft_token;
+    propose_token_         = {target_last_token, update_info.draft_token};
+
+    sp_output_buffer_->hidden_states = update_info.draft_hidden_states;
+    sp_output_buffer_->all_probs     = update_info.draft_token_probs;
+
+    // update normal output buffer
+    updateOutput({new_tokens,
+                  num_new_tokens,
+                  nullptr,
+                  nullptr,
+                  nullptr,
+                  nullptr,
+                  nullptr,
+                  nullptr,
+                  nullptr,
+                  nullptr,
+                  update_info.update_remote_generate,
+                  update_info.force_update_info});
+}
+
 void GenerateStream::update(const StreamUpdateInfo& update_info) {
     std::lock_guard<std::mutex> lock(*output_mutex_);
     RTP_LLM_LOG_DEBUG("stream [%ld] update", streamId());

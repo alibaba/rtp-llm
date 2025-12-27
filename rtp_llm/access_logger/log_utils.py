@@ -45,7 +45,9 @@ def copy_aggregate_logs_script(log_path: str) -> None:
         logging.warning(f"Failed to copy aggregate_logs.py to log directory: {e}")
 
 
-def get_process_log_filename(base_filename: str, rank_id: Optional[int] = None, server_id: Optional[int] = None) -> str:
+def get_process_log_filename(
+    base_filename: str, rank_id: Optional[int] = None, server_id: Optional[int] = None
+) -> str:
     """
     Generate process-specific log filename.
 
@@ -63,7 +65,7 @@ def get_process_log_filename(base_filename: str, rank_id: Optional[int] = None, 
         server_id = 0
 
     # Split base filename and extension
-    name_parts = base_filename.rsplit('.', 1)
+    name_parts = base_filename.rsplit(".", 1)
     if len(name_parts) == 2:
         name, ext = name_parts
         return f"{name}_r{rank_id}_s{server_id}.{ext}"
@@ -71,7 +73,14 @@ def get_process_log_filename(base_filename: str, rank_id: Optional[int] = None, 
         return f"{base_filename}_r{rank_id}_s{server_id}"
 
 
-def get_handler(file_name: str, log_path: str, backup_count: int, rank_id: Optional[int] = None, server_id: Optional[int] = None, async_mode: bool = True) -> Optional[logging.Handler]:
+def get_handler(
+    file_name: str,
+    log_path: str,
+    backup_count: int,
+    rank_id: Optional[int] = None,
+    server_id: Optional[int] = None,
+    async_mode: bool = True,
+) -> Optional[logging.Handler]:
     """
     Create log handler with process-specific filename.
 
@@ -87,6 +96,9 @@ def get_handler(file_name: str, log_path: str, backup_count: int, rank_id: Optio
     if log_path == "":
         return None
 
+    # Ensure log directory exists
+    os.makedirs(log_path, exist_ok=True)
+
     # Copy aggregate_logs.py to log directory during first handler creation
     copy_aggregate_logs_script(log_path)
 
@@ -100,13 +112,14 @@ def get_handler(file_name: str, log_path: str, backup_count: int, rank_id: Optio
             mode="a",
             max_bytes=100 * 1024 * 1024,
             backup_count=backup_count,
-            encoding='utf-8',
+            encoding="utf-8",
             max_queue_size=100000,  # Large queue to handle bursts
-            flush_interval=1.0     # Flush every second
+            flush_interval=1.0,  # Flush every second
         )
     else:
         # Use synchronous handler
         from logging.handlers import RotatingFileHandler
+
         return RotatingFileHandler(
             filename=f"{log_path}/{process_filename}",
             mode="a",
