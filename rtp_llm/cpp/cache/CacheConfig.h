@@ -172,6 +172,30 @@ struct CacheConfig {
     size_t block_stride_bytes = 0;
 
     CacheConfig() {}
+
+    std::string to_string() const {
+        std::ostringstream oss;
+        oss << "cache_specs size: " << cache_specs.size() << "\n"
+            << "layer_ids size: " << layer_ids.size() << "\n"
+            << "layer_num: " << layer_num << "\n"
+            << "block_num: " << block_num << "\n"
+            << "kv_block_size: " << kv_block_size << "\n"
+            << "kv_block_size_bytes: " << kv_block_size_bytes << "\n"
+            << "kv_scale_size: " << kv_scale_size << "\n"
+            << "kv_scale_size_bytes: " << kv_scale_size_bytes << "\n"
+            << "block_size: " << block_size << "\n"
+            << "block_size_bytes: " << block_size_bytes << "\n"
+            << "seq_size_per_block: " << seq_size_per_block << "\n"
+            << "use_mla: " << use_mla << "\n"
+            << "mtp_model_type: " << mtp_model_type << "\n"
+            << "kv_block_stride: " << kv_block_stride << "\n"
+            << "kv_block_stride_bytes: " << kv_block_stride_bytes << "\n"
+            << "kv_scale_stride: " << kv_scale_stride << "\n"
+            << "kv_scale_stride_bytes: " << kv_scale_stride_bytes << "\n"
+            << "block_stride: " << block_stride << "\n"
+            << "block_stride_bytes: " << block_stride_bytes;
+        return oss.str();
+    }
 };
 
 struct BlockPoolConfig {

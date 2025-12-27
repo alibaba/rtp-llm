@@ -12,6 +12,7 @@ test_deps = [
     "//rtp_llm/cpp/devices/testing:device_test_utils",
     "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
     "//rtp_llm/cpp/config:config_modules",
+    "//rtp_llm/cpp/cache/connector/test/mock:connector_mock_files_lib",
 ] + torch_deps()
 
 cc_test(

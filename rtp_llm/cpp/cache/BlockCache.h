@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <mutex>
 #include <vector>
 
 #include "rtp_llm/cpp/utils/LRUCache.h"
@@ -52,9 +53,12 @@ public:
 
     CacheSnapshot cacheSnapshot(int64_t latest_version) const;
 
+    std::vector<CacheItem> steal();
+
 private:
-    size_t       seq_size_per_block_;
-    LRUCacheType lru_cache_;
+    size_t             seq_size_per_block_;
+    LRUCacheType       lru_cache_;
+    mutable std::mutex mutex_;
 };
 
 using BlockCacheV1Ptr = std::shared_ptr<BlockCache>;

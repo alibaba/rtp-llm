@@ -21,9 +21,9 @@ public:
     BlockBufferPtrInfo convertIndexToBuffer(int layer_id, int block_id) const override;
     std::vector<BufferPtr>
     convertIndexToBuffer(int layer_id, int block_id, int partition_count = 1, int partition_id = 0) const override;
-    std::shared_ptr<KVCacheResourceV1> incrKVCacheRef(KVCacheResourceV1&   kvcache_resource,
-                                                      const CacheKeysType& cache_keys) override;
-    void                               decrKVCacheRef(KVCacheResourceV1& kvcache_resource) override;
+    std::shared_ptr<KVCacheResourceV1> incrKVCacheRef(const KVCacheResourceV1& kvcache_resource,
+                                                      const CacheKeysType&     cache_keys) override;
+    void                               decrKVCacheRef(const KVCacheResourceV1& kvcache_resource) override;
     CacheLayerLayout                   layerCacheBase() const override;
 
     bool updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,

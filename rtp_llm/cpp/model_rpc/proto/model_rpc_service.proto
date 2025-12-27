@@ -374,17 +374,21 @@ service EmbeddingRpcService {
 }
 
 message MemoryBroadcastTpRequestPB {
-    message Group {
-        int32 group_id = 1;
-        repeated int32 gpu_block_ids = 2;
-        repeated int32 memory_block_ids = 3;
+    message GpuBlock {
+        message LayerBlock {
+            int32 layer_id = 1;
+            int32 block_id = 2;
+        }
+        repeated LayerBlock layer_blocks = 1;
     }
-    enum Direction {
+    enum CopyDirection {
         H2D = 0;
         D2H = 1;
     }
-    repeated Group groups = 1;
-    Direction direction = 2;
+    repeated GpuBlock gpu_blocks = 1;
+    repeated int32 mem_block_ids = 2;
+    repeated int64 mem_block_sizes = 3;
+    CopyDirection copy_direction = 4;
 }
 
 message MemoryBroadcastTpResponsePB {
