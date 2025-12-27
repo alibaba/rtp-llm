@@ -14,30 +14,25 @@ namespace py = pybind11;
 namespace rtp_llm {
 class CudaGraphRunner: public GraphBase {
 public:
-    CudaGraphRunner(const DeviceInitParams& params,
-                    py::object              py_instance,
-                    int                     kv_cache_block_offset,
-                    at::cuda::CUDAStream    capture_stream,
-                    bool                    is_prefill_cuda_graph_mode = false):
+    CudaGraphRunner(const GraphParams& params, py::object py_instance, at::cuda::CUDAStream capture_stream):
         GraphBase(std::move(py_instance)),
-        enable_cuda_graph_(params.hw_kernel_config.enable_cuda_graph),
-        is_prefill_cuda_graph_mode_(is_prefill_cuda_graph_mode),
+        enable_cuda_graph_(params.enable_cuda_graph),
+        is_prefill_cuda_graph_mode_(params.is_prefill_cuda_graph_mode),
         capture_stream_(capture_stream),
-        enable_cuda_graph_debug_mode_(params.hw_kernel_config.enable_cuda_graph_debug_mode),
+        enable_cuda_graph_debug_mode_(params.enable_cuda_graph_debug_mode),
         max_seq_len_(params.max_seq_len),
         seq_size_per_block_(params.tokens_per_block),
-        kv_cache_block_offset_(kv_cache_block_offset),
-        hidden_size_(params.hidden_size),
-        prefill_capture_seq_lens_(params.hw_kernel_config.prefill_capture_seq_lens),
-        decode_capture_batch_sizes_(params.hw_kernel_config.decode_capture_batch_sizes) {
+        kv_cache_block_offset_(params.kv_cache_block_offset),
+        prefill_capture_seq_lens_(params.prefill_capture_seq_lens),
+        decode_capture_batch_sizes_(params.decode_capture_batch_sizes) {
         py::gil_scoped_acquire gil;
         if (!py_instance_ || py_instance_.is_none()) {
             throw std::runtime_error("CudaGraphRunner constructor: Python instance is null or none.");
         }
-        if (is_prefill_cuda_graph_mode) {
-            max_bs_ = params.runtime_config.fifo_scheduler_config.max_context_batch_size;
+        if (is_prefill_cuda_graph_mode_) {
+            max_bs_ = params.max_context_batch_size;
         } else {
-            max_bs_ = params.concurrency_config.concurrency_limit;
+            max_bs_ = params.concurrency_limit;
         }
         py_forward_method_     = py_instance_.attr("forward");
         py_fill_params_method_ = py_instance_.attr("fill_params");
@@ -52,6 +47,12 @@ public:
                          seq_size_per_block_,
                          kv_cache_block_offset_,
                          is_prefill_cuda_graph_mode_);
+    }
+
+    // Static factory method for creating CudaGraphRunner
+    static CudaGraphRunner* create(const GraphParams& params, py::object py_instance) {
+        at::cuda::CUDAStream capture_stream = at::cuda::getCurrentCUDAStream(at::cuda::current_device());
+        return new CudaGraphRunner(params, std::move(py_instance), capture_stream);
     }
 
     ~CudaGraphRunner() {
@@ -70,9 +71,8 @@ public:
     void           replayDecode(int bs);
     void           replayPrefill(int seq_len);
     void           setMaxPrefillCudaGraphLen(int max_prefill_cuda_graph_len);
-    py::object     normalForward(PyModelInputs& inputs);
     int            getCurrentRealGraphBs();
-    PyModelOutputs forward(PyModelInputs& inputs) override;
+    PyModelOutputs forward(PyModelInputs& inputs, bool& executed) override;
     void           setModelDataType(caffe2::TypeMeta data_type) override;
     void           initCapture() override;
 

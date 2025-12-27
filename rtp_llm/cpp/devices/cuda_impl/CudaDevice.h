@@ -87,10 +87,6 @@ public:
     DeviceEventPtr   createEvent() override;
     DeviceEventPtr   createTorchEvent() override;
     bool             useGroupGemm() const;
-    GraphBase*       getDeviceGraphRunner(const DeviceInitParams& params,
-                                          py::object              py_instance,
-                                          int                     kv_cache_block_offset,
-                                          bool                    is_prefill_cuda_graph_mode = false) override;
 
 private:
     void         checkUseOpenSourceFMHA();
@@ -213,8 +209,8 @@ public:
     MoeCombineOutput  deepEpLLCombine(const MoeCombineParams& params);
     FfnLayerOutput    deepEpLLMoeFfn(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs);
 
-    void                              prepareCommBuffer(const PrepareCommBufferParams& params) override;
-    void                              maskLogits(Buffer& logits, const Buffer& mask) override;
+    void prepareCommBuffer(const PrepareCommBufferParams& params) override;
+    void maskLogits(Buffer& logits, const Buffer& mask) override;
 
     void perfRangePush(const std::string& name) const override;
     void perfRangePop() const override;
@@ -305,8 +301,6 @@ private:
     NcclParam tp_nccl_param_;
     NcclParam dp_tp_nccl_param_;
     NcclParam ffn_tp_nccl_param_;
-
-    GraphBase* graph_runner_{nullptr};
 
     BufferPtr curandstate_buf_;  // for sampler use.
 

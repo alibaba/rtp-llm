@@ -19,11 +19,11 @@ namespace rtp_llm {
 PyWrappedModel::~PyWrappedModel() {
     try {
         py::gil_scoped_acquire gil;
-        if (!device_->initParams().hw_kernel_config.enable_cuda_graph) {
-            py_model_.release();  // Release the Python object
-        } else {
-            RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can not be nullptr");
+        // Always release py_model_ since it's always initialized now
+        py_model_.release();
+        if (graph_runner_ != nullptr) {
             delete graph_runner_;
+            graph_runner_ = nullptr;
         }
         RTP_LLM_LOG_INFO("PyWrappedModel destroyed, Python object instance released.");
     } catch (const py::error_already_set& e) {
@@ -65,17 +65,14 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
             torch::zeros({batch_size + 1}, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
         torch::Tensor cu_kv_seqlens =
             torch::zeros({batch_size + 1}, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
-        torch::Tensor cu_seqlens_without_prefix =
-            torch::zeros({batch_size + 1}, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
 
         cu_seqlens.slice(0, 1, context_batch_size + 1) = py_attn_inputs.input_lengths.cumsum(0);
         cu_kv_seqlens.slice(0, 1, context_batch_size + 1) =
             py_attn_inputs.input_lengths.add(py_attn_inputs.prefix_lengths).cumsum(0);
-        cu_seqlens_without_prefix.slice(0, 1, context_batch_size + 1) = py_attn_inputs.input_lengths.cumsum(0);
-        py_attn_inputs.context_total_kv_length                        = cu_kv_seqlens[context_batch_size].item<int>();
-        py_attn_inputs.total_tokens                                   = cu_seqlens[batch_size].item<int>();
-        py_attn_inputs.cu_seqlens                                     = cu_seqlens.cuda();
-        py_attn_inputs.cu_kv_seqlens                                  = cu_kv_seqlens.cuda();
+        py_attn_inputs.context_total_kv_length = cu_kv_seqlens[context_batch_size].item<int>();
+        py_attn_inputs.total_tokens            = cu_seqlens[batch_size].item<int>();
+        py_attn_inputs.cu_seqlens              = cu_seqlens.cuda();
+        py_attn_inputs.cu_kv_seqlens           = cu_kv_seqlens.cuda();
     } else {
         py_attn_inputs.total_tokens = 0;
         py_attn_inputs.cu_seqlens =
@@ -282,17 +279,21 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         PyModelOutputs py_model_outputs;
         BufferPtr      hidden_states;
         // Cast the Python object to PyModelOutputs and extract hidden states
-        if (enable_cuda_graph_) {
+        // Try CUDA graph forward, fall back to normal forward if not executed
+        bool graph_executed = false;
+        if (enable_cuda_graph_ && graph_runner_) {
             DevicePerfWrapper wrapper(device_, "cuda graph python forward");
             py_model_inputs.attention_inputs.is_s_padded = true;
-            py_model_outputs                             = graph_runner_->forward(py_model_inputs);
-            hidden_states                                = torchTensor2Buffer(py_model_outputs.hidden_states);
-        } else {
+            py_model_outputs                             = graph_runner_->forward(py_model_inputs, graph_executed);
+        }
+        if (!graph_executed) {
             DevicePerfWrapper wrapper(device_, "normal forward");
             auto              py_model_forward = py_model_.attr("forward");
             auto              outputs          = py_model_forward(py_model_inputs);
             py_model_outputs                   = outputs.cast<PyModelOutputs>();
             hidden_states                      = device_->clone({*torchTensor2Buffer(py_model_outputs.hidden_states)});
+        } else {
+            hidden_states = torchTensor2Buffer(py_model_outputs.hidden_states);
         }
 
         RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");

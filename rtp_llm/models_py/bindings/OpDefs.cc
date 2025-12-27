@@ -80,7 +80,9 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("context_total_kv_length", &PyAttentionInputs::context_total_kv_length)
         .def_readwrite("total_tokens", &PyAttentionInputs::total_tokens)
         .def_readwrite("padding_offset", &PyAttentionInputs::padding_offset)
+        .def_readwrite("seq_len_tensor", &PyAttentionInputs::seq_len_tensor)
         .def_readwrite("cache_store_inputs", &PyAttentionInputs::cache_store_inputs)
+        .def_readwrite("is_s_padded", &PyAttentionInputs::is_s_padded)
         .def("__repr__", [](const PyAttentionInputs& self) { return "PyAttentionInputs"; })
         .def_readonly("prefill_cuda_graph_copy_params", &PyAttentionInputs::prefill_cuda_graph_copy_params);
 

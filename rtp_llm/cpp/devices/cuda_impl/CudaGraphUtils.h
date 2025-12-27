@@ -32,8 +32,9 @@ public:
         py_model_inputs_.attention_inputs.kv_block_offset           = kv_cache_block_offset;
         py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params =
             inputs.attention_inputs.prefill_cuda_graph_copy_params;
-        py_model_inputs_.bert_embedding_inputs        = inputs.bert_embedding_inputs;
-        py_model_inputs_.attention_inputs.is_s_padded = inputs.attention_inputs.is_s_padded;
+        py_model_inputs_.bert_embedding_inputs           = inputs.bert_embedding_inputs;
+        py_model_inputs_.attention_inputs.is_s_padded    = inputs.attention_inputs.is_s_padded;
+        py_model_inputs_.attention_inputs.seq_len_tensor = inputs.attention_inputs.seq_len_tensor;
     }
 
 public:
