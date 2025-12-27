@@ -142,6 +142,8 @@ private:
 
     bool updateEplbConfig(const EPLBConfig& config) override;
 
+    bool checkStopAndSetError(const GenerateStreamPtr& check_stream, const GenerateStreamPtr& target_stream);
+
 private:
     kmonitor::MetricsReporterPtr                  metrics_reporter_ = nullptr;
     std::unique_ptr<ProposeModelEngineInitParams> propose_model_params_;
