@@ -9,9 +9,10 @@ namespace rtp_llm {
 // SingleTypedKVCacheAllocator is used for model with full attentions only
 class SingleTypeKVCacheAllocator: public KVCacheAllocator {
 public:
-    SingleTypeKVCacheAllocator(const CacheConfig&   config,
-                               rtp_llm::DeviceBase* device,
-                               AllocationType       allocation_type = AllocationType::DEVICE);
+    SingleTypeKVCacheAllocator(const CacheConfig&                 config,
+                               rtp_llm::DeviceBase*               device,
+                               AllocationType                     allocation_type  = AllocationType::DEVICE,
+                               const kmonitor::MetricsReporterPtr metrics_reporter = nullptr);
 
     bool               init() override;
     void               free(const FreeInfo& free_info) override;
