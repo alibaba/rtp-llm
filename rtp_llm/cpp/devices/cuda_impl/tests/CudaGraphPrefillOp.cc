@@ -120,8 +120,8 @@ PyModelInputs CudaGraphPrefillOp::buildInputs(int64_t batch_size,
     inputs.attention_inputs.kv_cache_block_id_host =
         torch::zeros({int(batch_size), ((max_seq_len + seq_size_per_block - 1) / seq_size_per_block)}, options2);
     // prefix_lengths [batch_size, int32] (for attention `prepare`)
-    inputs.attention_inputs.prefix_lengths = torch::zeros(int(batch_size), options2);
-    inputs.attention_inputs.prefix_lengths.pin_memory();
+    inputs.attention_inputs.prefix_lengths  = torch::zeros(int(batch_size), options2);
+    inputs.attention_inputs.prefix_lengths  = inputs.attention_inputs.prefix_lengths.pin_memory();
     inputs.attention_inputs.is_prefill      = true;
     inputs.attention_inputs.dtype           = torch::kBFloat16;
     inputs.attention_inputs.kv_block_offset = 0;
@@ -148,12 +148,14 @@ PyModelInputs CudaGraphPrefillOp::buildInputs(int64_t batch_size,
             total_seq_len += input_lengths_data[i];
         }
     }
-    cu_seqlens_data[batch_size] = total_seq_len;
-
-    // 将 torch tensor 转换为 BufferPtr
-    BufferPtr cu_seqlens_buf = torchTensor2Buffer(cu_seqlens_tensor);
+    cu_seqlens_data[batch_size]                = total_seq_len;
+    cu_seqlens_without_prefix_data[batch_size] = total_seq_len_without_prefix;
     RTP_LLM_LOG_INFO("cu_seqlens_data build success\n");
-    inputs.attention_inputs.cu_seqlens = Buffer2torchTensor(cu_seqlens_buf, false);
+
+    inputs.attention_inputs.cu_seqlens                = cu_seqlens_tensor;
+    inputs.attention_inputs.cu_kv_seqlens             = cu_seqlens_tensor.clone().pin_memory();
+    inputs.attention_inputs.context_total_kv_length   = total_seq_len;
+    inputs.attention_inputs.total_tokens              = total_seq_len;
     if (!use_max_padded_mode) {
         calculatePaddingOffset(inputs.attention_inputs);
     }

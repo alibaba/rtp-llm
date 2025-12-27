@@ -150,7 +150,7 @@ protected:
 
 TEST_F(LoraNormalEngineTest, testSimple) {
     EngineInitParams params = createMockEngineInitParams(device_);
-    NormalEngine     engine = NormalEngine(params);
+    NormalEngine     engine = NormalEngine(params, nullptr);
     EXPECT_NE(engine.getLoraManager(), nullptr);
 }
 

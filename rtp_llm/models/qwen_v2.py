@@ -2,13 +2,12 @@ import functools
 import json
 import logging
 import os
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import torch
 from transformers import AutoTokenizer
 
-from rtp_llm.config.model_config import VitParameters
-from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.model_config import ModelConfig, VitParameters
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, AttnConfig
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, FfnConfig, FfnWeight
@@ -18,6 +17,8 @@ from rtp_llm.model_loader.model_weight_info import (
 )
 from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
 from rtp_llm.models.qwen import QWen
+from rtp_llm.models_py.model_desc.module_base import GptModelBase
+from rtp_llm.models_py.model_desc.qwen2_mtp import Qwen2MtpModel
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
@@ -87,9 +88,7 @@ class QWenV2Weight(ModelDeployWeightInfo):
                                 identity,
                             )
                         ],
-                        functools.partial(
-                            transpose_pad, align_size=align_size, dim=0
-                        ),
+                        functools.partial(transpose_pad, align_size=align_size, dim=0),
                         config=ffn_config,
                         lora_a_process_func=transpose,
                         lora_b_process_func=functools.partial(
@@ -107,9 +106,7 @@ class QWenV2Weight(ModelDeployWeightInfo):
                                 identity,
                             )
                         ],
-                        functools.partial(
-                            transpose_pad, align_size=align_size, dim=0
-                        ),
+                        functools.partial(transpose_pad, align_size=align_size, dim=0),
                         config=ffn_config,
                         lora_a_process_func=transpose,
                         lora_b_process_func=functools.partial(
@@ -127,9 +124,7 @@ class QWenV2Weight(ModelDeployWeightInfo):
                                 identity,
                             )
                         ],
-                        functools.partial(
-                            transpose_pad, align_size=align_size, dim=1
-                        ),
+                        functools.partial(transpose_pad, align_size=align_size, dim=1),
                         config=ffn_config,
                         lora_a_process_func=functools.partial(
                             transpose_pad, align_size=align_size, dim=1
@@ -383,7 +378,9 @@ class QWenV2(QWen):
         # config.activation_type = config_json["hidden_act"]
         config.inter_size = config_json["intermediate_size"]
         config.attn_config.head_num = config_json["num_attention_heads"]
-        config.attn_config.kv_head_num = config_json.get("num_key_value_heads", config.attn_config.head_num)
+        config.attn_config.kv_head_num = config_json.get(
+            "num_key_value_heads", config.attn_config.head_num
+        )
         config.attn_config.size_per_head = (
             int(config_json.get("head_dim"))
             if "head_dim" in config_json
@@ -392,7 +389,9 @@ class QWenV2(QWen):
         if config_json.get("hidden_size") is not None:
             config.hidden_size = config_json["hidden_size"]
         config.num_layers = config_json["num_hidden_layers"]
-        config.attn_config.rope_config.base = int(config_json.get("rope_theta", config.attn_config.rope_config.base))
+        config.attn_config.rope_config.base = int(
+            config_json.get("rope_theta", config.attn_config.rope_config.base)
+        )
         config.vocab_size = config_json["vocab_size"]
         config.attn_config.rope_config.dim = config.attn_config.size_per_head
         config.layernorm_eps = config_json.get("rms_norm_eps", 1e-06)
@@ -490,6 +489,24 @@ class QwenV2MTP(QWenV2):
         config.moe_layer_index = [i for i in range(config.num_layers)]
         config.is_mtp = True
         return config
+
+    def _create_python_model(self) -> Optional[GptModelBase]:
+        model_config = self.model_config
+        parallelism_config = self.parallelism_config
+        ffn_disaggregate_config = parallelism_config.ffn_disaggregate_config
+        fmha_config = self.fmha_config
+        py_hw_kernel_config = self.hw_kernel_config
+        quant_config = self.model_config.quant_config
+        self.py_model = Qwen2MtpModel(
+            model_config,
+            parallelism_config,
+            self.weight,
+            max_generate_batch_size=self.max_generate_batch_size,
+            quant_config=quant_config,
+            fmha_config=fmha_config,
+            py_hw_kernel_config=py_hw_kernel_config,
+            device_resource_config=self.device_resource_config,
+        )
 
     @staticmethod
     def get_weight_cls():

@@ -27,6 +27,7 @@ public:
         max_seq_len_(params.max_seq_len),
         seq_size_per_block_(params.tokens_per_block),
         kv_cache_block_offset_(kv_cache_block_offset),
+        hidden_size_(params.hidden_size),
         prefill_capture_seq_lens_(params.hw_kernel_config.prefill_capture_seq_lens),
         decode_capture_batch_sizes_(params.hw_kernel_config.decode_capture_batch_sizes) {
         py::gil_scoped_acquire gil;
@@ -111,6 +112,7 @@ private:
     int                  max_seq_len_{0};
     int                  seq_size_per_block_{0};
     int                  kv_cache_block_offset_{0};
+    int                  hidden_size_{0};
     CudaGraphState       state_;
     std::vector<int>     capture_range_;
     std::vector<int>     prefill_capture_seq_lens_;    // Pre-configured sequence lengths from Python

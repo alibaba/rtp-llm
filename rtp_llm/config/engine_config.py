@@ -186,7 +186,7 @@ class EngineConfig:
         PD separation config setup.
 
         Note: Worker address updates (via update_worker_addrs) should be called
-        separately after this method, when gang_info is available.
+        separately after this method, when world is available.
 
         Args:
             py_env_configs: PyEnvConfigs instance containing all configuration
@@ -343,19 +343,19 @@ def setup_parallelism_config(
 
 
 def update_worker_addrs(
-    runtime_config: RuntimeConfig, parallelism_config: ParallelismConfig, gang_info
+    runtime_config: RuntimeConfig, parallelism_config: ParallelismConfig, world_info
 ) -> None:
     """Update worker addresses in runtime_config based on gang info."""
-    if gang_info is None:
+    if world_info is None:
         # For standalone mode, skip worker address updates
         logging.warning(
-            "gang_info is None, skipping worker address updates (standalone mode)"
+            "world_info is None, skipping worker address updates (standalone mode)"
         )
         return
     worker_addrs = []
     worker_grpc_addrs = []
     local_rank = parallelism_config.local_rank
-    for member in gang_info.members:
+    for member in world_info.members:
         if (
             int(
                 (member.world_rank / parallelism_config.tp_size)

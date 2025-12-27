@@ -23,7 +23,7 @@ namespace rtp_llm {
 
 class NormalEngine: public EngineBase {
 public:
-    NormalEngine(const EngineInitParams& params);
+    NormalEngine(const EngineInitParams& params, std::unique_ptr<ProposeModelEngineInitParams> propose_params);
     ~NormalEngine();
 
     std::shared_ptr<GenerateStream>   makeStream(const std::shared_ptr<GenerateInput>& input) override;
@@ -57,25 +57,33 @@ private:
     void                            initCacheManager(std::optional<WarmUpResult> warm_up_result);
     absl::Status                    initSystemPrompt();
     std::shared_ptr<GenerateInput>  makeFakeInput(size_t seq_len);
+    void                            mayAddFakeStream(std::list<GenerateStreamPtr>& streams);
+
+    void initExecutor(const EngineInitParams& params, std::unique_ptr<ProposeModelEngineInitParams>& propose_params);
+
+    bool isMTPEagle() override;
+    bool isEagle() override;
 
 private:
-    autil::ThreadPtr                loop_thread_;
-    std::atomic<bool>               running_{false};
-    std::unique_ptr<Executor>       executor_;
-    ModelConfig                     model_config_;
-    ParallelismConfig               parallelism_config;
-    RuntimeConfig                   runtime_config;
-    EPLBConfig                      eplb_config;
-    PDSepConfig                     pd_sep_config;
-    ProfilingDebugLoggingConfig     profiling_debug_logging_config;
-    KVCacheConfig                   kv_cache_config;
-    FfnDisAggregateConfig           ffn_disaggregate_config;
-    ModelSpecificConfig             model_specific_config;
-    SpeculativeExecutionConfig      sp_config;
-    kmonitor::MetricsReporterPtr    metrics_reporter_;
-    std::shared_ptr<CudaProfiler>   profiler_;
-    int                             profiler_step_     = 0;
-    bool                            gen_timeline_sync_ = false;
+    autil::ThreadPtr                              loop_thread_;
+    std::atomic<bool>                             running_{false};
+    std::unique_ptr<Executor>                     executor_;
+    ModelConfig                                   model_config_;
+    ParallelismConfig                             parallelism_config;
+    RuntimeConfig                                 runtime_config;
+    EPLBConfig                                    eplb_config;
+    PDSepConfig                                   pd_sep_config;
+    ProfilingDebugLoggingConfig                   profiling_debug_logging_config;
+    KVCacheConfig                                 kv_cache_config;
+    FfnDisAggregateConfig                         ffn_disaggregate_config;
+    ModelSpecificConfig                           model_specific_config;
+    SpeculativeExecutionConfig                    sp_config;
+    kmonitor::MetricsReporterPtr                  metrics_reporter_;
+    std::unique_ptr<ProposeModelEngineInitParams> propose_params_;
+    std::shared_ptr<CudaProfiler>                 profiler_;
+    int                                           profiler_step_     = 0;
+    bool                                          gen_timeline_sync_ = false;
+    int                                           reserve_step_      = 0;
 };
 
 }  // namespace rtp_llm

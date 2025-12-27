@@ -1794,6 +1794,10 @@ void tpSyncModelInputs(GptModelInputs& inputs, rtp_llm::DeviceBase* device) {
     shape_hints_ptr[GptModelInputIndex::mtpHiddenStatesDtype] =
         shape_hints_ptr[GptModelInputIndex::mtpHiddenStates] ? (std::uint8_t)inputs.last_hidden_states->type() : 0;
     shape_hints_ptr[GptModelInputIndex::skipRun] = inputs.skip_run;
+    shape_hints_ptr[GptModelInputIndex::gptModelRequestLength] =
+        inputs.request_id.get() ? inputs.request_id->size() : 0;
+    shape_hints_ptr[GptModelInputIndex::isFakeStream] = inputs.is_fake_stream;
+
     device->broadcast({{shape_hints}, 0});
     device->syncCommunication(false);
     device->syncAndCheck();
@@ -1803,6 +1807,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, rtp_llm::DeviceBase* device) {
     int32_t*           mm_features_shape_ptr = nullptr;
     inputs.need_all_logits                   = shape_hints_ptr[GptModelInputIndex::needAllLogits];
     inputs.skip_run                          = shape_hints_ptr[GptModelInputIndex::skipRun];
+    inputs.is_fake_stream                    = shape_hints_ptr[GptModelInputIndex::isFakeStream];
     if (inputs.skip_run) {
         return;
     }
@@ -1821,11 +1826,12 @@ void tpSyncModelInputs(GptModelInputs& inputs, rtp_llm::DeviceBase* device) {
         device->syncAndCheck();
     }
 
-    auto max_blocks              = (size_t)shape_hints_ptr[GptModelInputIndex::maxBlocksPerBatch];
-    auto combo_position_ids_size = shape_hints_ptr[GptModelInputIndex::comboPositionIds];
-    auto text_tokens_mask_size   = shape_hints_ptr[GptModelInputIndex::textTokensMask];
-    auto mm_features_locs_size   = shape_hints_ptr[GptModelInputIndex::mmFeaturesLocs];
-    auto hidden_states_size      = shape_hints_ptr[GptModelInputIndex::mtpHiddenStates];
+    auto   max_blocks              = (size_t)shape_hints_ptr[GptModelInputIndex::maxBlocksPerBatch];
+    auto   combo_position_ids_size = shape_hints_ptr[GptModelInputIndex::comboPositionIds];
+    auto   text_tokens_mask_size   = shape_hints_ptr[GptModelInputIndex::textTokensMask];
+    auto   mm_features_locs_size   = shape_hints_ptr[GptModelInputIndex::mmFeaturesLocs];
+    auto   hidden_states_size      = shape_hints_ptr[GptModelInputIndex::mtpHiddenStates];
+    size_t request_length          = shape_hints_ptr[GptModelInputIndex::gptModelRequestLength];
 
     if (device->getDeviceProperties().tp_rank) {
         auto context_batch_size = (size_t)shape_hints_ptr[GptModelInputIndex::prefixLengths];
@@ -1856,10 +1862,10 @@ void tpSyncModelInputs(GptModelInputs& inputs, rtp_llm::DeviceBase* device) {
                                         {(size_t)shape_hints_ptr[GptModelInputIndex::kvCacheUpdateCopyNum], 2},
                                         rtp_llm::AllocationType::HOST});
         }
-        inputs.request_id = device->allocateBuffer(
-            {rtp_llm::DataType::TYPE_INT64, {context_batch_size}, rtp_llm::AllocationType::HOST});
+        inputs.request_id =
+            device->allocateBuffer({rtp_llm::DataType::TYPE_INT64, {request_length}, rtp_llm::AllocationType::HOST});
         inputs.request_pd_separation =
-            device->allocateBuffer({rtp_llm::DataType::TYPE_BOOL, {context_batch_size}, rtp_llm::AllocationType::HOST});
+            device->allocateBuffer({rtp_llm::DataType::TYPE_BOOL, {request_length}, rtp_llm::AllocationType::HOST});
         inputs.lm_output_indexes =
             device->allocateBuffer({rtp_llm::DataType::TYPE_INT32,
                                     {(size_t)shape_hints_ptr[GptModelInputIndex::lmOutputIndexes]},
@@ -1948,6 +1954,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, rtp_llm::DeviceBase* device) {
     if (hidden_states_size) {
         buffers.emplace_back(inputs.last_hidden_states);
     }
+
     device->broadcast({buffers, 0});
     device->syncAndCheck();
 }

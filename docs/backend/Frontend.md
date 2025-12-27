@@ -133,7 +133,7 @@ Frontend defaults use localhost:start_port+1 for gRPC call.
 Mock a backend server to return output ids:
 
 ``` python
-# backend_server.py
+# backend_manager.py
 import grpc
 import torch
 from concurrent import futures
