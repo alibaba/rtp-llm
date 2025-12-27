@@ -77,7 +77,9 @@ struct MallocInfo {
 
 struct MallocResult {
     bool success;
-    int  reuse_len;  // TODO, move reuse len to batch_kv_cache_resource ？
+    int  reuse_len;
+
+    int64_t match_cost_time_us = 0;
 };
 
 struct FreeInfo {
