@@ -3,6 +3,7 @@
 #include <memory>
 #include <vector>
 
+#include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/devices/DeviceBase.h"
 #include "rtp_llm/cpp/cache/types.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
@@ -12,10 +13,11 @@ namespace rtp_llm {
 
 class KVCacheAllocator {
 public:
-    KVCacheAllocator(const CacheConfig&   config,
-                     rtp_llm::DeviceBase* device,
-                     AllocationType       allocation_type = AllocationType::DEVICE):
-        config_(config), device_(device), allocation_type_(allocation_type) {}
+    KVCacheAllocator(const CacheConfig&                 config,
+                     rtp_llm::DeviceBase*               device,
+                     AllocationType                     allocation_type  = AllocationType::DEVICE,
+                     const kmonitor::MetricsReporterPtr metrics_reporter = nullptr):
+        config_(config), device_(device), allocation_type_(allocation_type), metrics_reporter_(metrics_reporter) {}
 
     virtual ~KVCacheAllocator() = default;
 
@@ -56,17 +58,18 @@ public:
     size_t        totalBlocksNum() const;
     size_t        maxAvailableTokensNum() const;
     KVCacheBuffer kvCacheBuffer() const;
-    KVCacheBuffer getMTPModuleKVCacheBuffer(int mtp_module_id) const;   
+    KVCacheBuffer getMTPModuleKVCacheBuffer(int mtp_module_id) const;
 
 protected:
     MallocResult         initMalloc(const MallocInfo& malloc_info);
     virtual MallocResult incrMalloc(const MallocInfo& malloc_info)             = 0;
     virtual MallocResult initMallocForCommonLen(const MallocInfo& malloc_info) = 0;
 
-    CacheConfig          config_;
-    rtp_llm::DeviceBase* device_;
-    AllocationType       allocation_type_;
-    BlockPoolPtr         block_pool_;
+    CacheConfig                        config_;
+    rtp_llm::DeviceBase*               device_;
+    AllocationType                     allocation_type_;
+    BlockPoolPtr                       block_pool_;
+    const kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;
 };
 
 using KVCacheAllocatorPtr = std::shared_ptr<KVCacheAllocator>;

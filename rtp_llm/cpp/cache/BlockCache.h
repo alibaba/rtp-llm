@@ -1,5 +1,6 @@
 #pragma once
 
+#include <mutex>
 #include <memory>
 #include <vector>
 
@@ -55,6 +56,9 @@ public:
 private:
     size_t       seq_size_per_block_;
     LRUCacheType lru_cache_;
+    // NOTE: BlockCache/LRUCache is accessed from multiple RPC/engine threads.
+    // LRUCache is NOT thread-safe (unordered_map + list). Guard all accesses here.
+    mutable std::mutex mu_;
 };
 
 using BlockCacheV1Ptr = std::shared_ptr<BlockCache>;

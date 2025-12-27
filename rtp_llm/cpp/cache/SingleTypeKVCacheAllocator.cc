@@ -10,10 +10,11 @@
 
 namespace rtp_llm {
 
-SingleTypeKVCacheAllocator::SingleTypeKVCacheAllocator(const CacheConfig&   config,
-                                                       rtp_llm::DeviceBase* device,
-                                                       AllocationType       allocation_type):
-    KVCacheAllocator(config, device, allocation_type) {}
+SingleTypeKVCacheAllocator::SingleTypeKVCacheAllocator(const CacheConfig&                 config,
+                                                       rtp_llm::DeviceBase*               device,
+                                                       AllocationType                     allocation_type,
+                                                       const kmonitor::MetricsReporterPtr metrics_reporter):
+    KVCacheAllocator(config, device, allocation_type, metrics_reporter) {}
 
 bool SingleTypeKVCacheAllocator::init() {
     auto& spec = config_.cache_specs[0];
@@ -45,17 +46,20 @@ bool SingleTypeKVCacheAllocator::init() {
 }
 
 MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo& malloc_info) {
-    auto& kv_resource    = malloc_info.batch_kv_cache_resource;
-    int   reuse_len      = 0;
-    int   common_seq_len = malloc_info.common_seq_len >= 0 ? malloc_info.common_seq_len : malloc_info.total_seq_len;
-    auto& cache_keys     = kv_resource->cacheKeys(0);
-    auto& blocks_0       = kv_resource->blocks(0);
+    auto&   kv_resource    = malloc_info.batch_kv_cache_resource;
+    int     reuse_len      = 0;
+    int     common_seq_len = malloc_info.common_seq_len >= 0 ? malloc_info.common_seq_len : malloc_info.total_seq_len;
+    auto&   cache_keys     = kv_resource->cacheKeys(0);
+    auto&   blocks_0       = kv_resource->blocks(0);
+    int64_t match_cost_time_us = 0;
 
     // drop the last cache key of the partial block to avoid reuse it
     if (kv_resource->enable_reuse_cache) {
         CacheKeysType match_keys(cache_keys.begin(), cache_keys.empty() ? cache_keys.end() : cache_keys.end() - 1);
-        auto          match_result = full_kv_cache_group_->match(match_keys);
-        reuse_len                  = static_cast<int>(match_result.reuse_length);
+        auto          match_begin_time_us = currentTimeUs();
+        auto          match_result        = full_kv_cache_group_->match(match_keys);
+        match_cost_time_us                = currentTimeUs() - match_begin_time_us;
+        reuse_len                         = static_cast<int>(match_result.reuse_length);
         full_kv_cache_group_->reference(blocks_0, match_result.block_indices);
     }
 
@@ -68,7 +72,7 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
         full_kv_cache_group_->reference(kv_resource->blocks(batch_id), blocks_0);
     }
 
-    return {true, reuse_len};
+    return {true, reuse_len, match_cost_time_us};
 }
 
 MallocResult SingleTypeKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {

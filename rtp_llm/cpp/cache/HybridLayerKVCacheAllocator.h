@@ -10,9 +10,10 @@ namespace rtp_llm {
 
 class HybridLayerKVCacheAllocator: public KVCacheAllocator {
 public:
-    HybridLayerKVCacheAllocator(const CacheConfig&   config,
-                                rtp_llm::DeviceBase* device,
-                                AllocationType       allocation_type = AllocationType::DEVICE);
+    HybridLayerKVCacheAllocator(const CacheConfig&                 config,
+                                rtp_llm::DeviceBase*               device,
+                                AllocationType                     allocation_type  = AllocationType::DEVICE,
+                                const kmonitor::MetricsReporterPtr metrics_reporter = nullptr);
 
     bool               init() override;
     void               free(const FreeInfo& free_info) override;
