@@ -11,14 +11,15 @@
 
 namespace rtp_llm {
 
-PagedAttnDecodeOp::PagedAttnDecodeOp(const AttentionConfigs& attn_configs, int layer_num, int64_t block_nums, const FMHAConfig& fmha_config):
+PagedAttnDecodeOp::PagedAttnDecodeOp(const AttentionConfigs& attn_configs,
+                                     int                     layer_num,
+                                     int64_t                 block_nums,
+                                     const FMHAConfig&       fmha_config):
     attn_configs_(attn_configs),
     layer_num_(layer_num),
     fmha_config_(fmha_config),
     device_(dynamic_cast<ROCmDevice*>(DeviceFactory::getDefaultDevice())),
-    kv_block_offset_(layer_num * block_nums),
-    use_aiter_pa_(fmha_config.use_aiter_pa) {
-}
+    use_aiter_pa_(fmha_config.use_aiter_pa) {}
 
 bool PagedAttnDecodeOp::support(torch_ext::PyAttentionInputs attn_inputs) {
     return true;
@@ -37,7 +38,7 @@ CKAttnPtr PagedAttnDecodeOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
     CKAttnPtr attn_params;
     bool use_fmha_fp8 = false;
     auto      params = device_->PrepareCKAttn(
-        attn_configs_, attn_inputs.kv_block_offset, kv_cache_block_id_device, attn_inputs.sequence_lengths.size(0), use_fmha_fp8);
+        attn_configs_, kv_cache_block_id_device, attn_inputs.sequence_lengths.size(0), use_fmha_fp8);
 
     attn_params              = CKAttnPtr(params, (CKAttn*)params.get());
     attn_params->decode_plan = true;
@@ -145,7 +146,10 @@ forward_param PagedAttnDecodeOp::forward(const torch::Tensor&              qkv,
 void registerPagedAttnDecodeOp(py::module& m) {
     py::class_<PagedAttnDecodeOp>(m, "PagedAttnDecodeOp")
         .def(py::init<const AttentionConfigs&, int, int64_t, const FMHAConfig&>(),
-             py::arg("attn_configs"), py::arg("layer_num"), py::arg("block_nums"), py::arg("fmha_config"))
+             py::arg("attn_configs"),
+             py::arg("layer_num"),
+             py::arg("block_nums"),
+             py::arg("fmha_config"))
         .def("support", &PagedAttnDecodeOp::support, py::arg("attn_inputs"))
 
         .def("prepare",

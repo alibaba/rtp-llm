@@ -181,7 +181,7 @@ class ModelConfig(CppModelConfig):
     @property
     def compute_dtype(self) -> torch.dtype:
         """Get compute dtype as torch.dtype from model_config.data_type.
-        
+
         Returns:
             torch.dtype: The compute dtype converted from data_type
         """
@@ -649,7 +649,7 @@ class ModelConfig(CppModelConfig):
 
 
 def get_task_type_from_ckpt_path(
-    task_type: TaskType,
+    task_type: Optional[TaskType],
     ckpt_path: str,
     embedding_config: Optional[Any] = None,
 ) -> TaskType:

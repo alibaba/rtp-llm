@@ -9,9 +9,7 @@ using namespace torch_ext;
 
 namespace rtp_llm {
 
-
-TRTPrefillOpBase::TRTPrefillOpBase(const AttentionConfigs& attn_configs):
-    attn_configs_(attn_configs) {}
+TRTPrefillOpBase::TRTPrefillOpBase(const AttentionConfigs& attn_configs): attn_configs_(attn_configs) {}
 
 bool TRTPrefillOpBase::support(torch_ext::PyAttentionInputs attn_inputs) {
     // FMHAConfig check will be done in Python layer
@@ -31,7 +29,6 @@ ParamsBasePtr TRTPrefillOpBase::prepare(torch_ext::PyAttentionInputs attn_inputs
     auto          run_stream   = GET_CURRENT_STREAM();
     bool          use_fp8_fmha = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
     auto          params       = prepareTrtAttnParams(attn_configs_,
-                                       attn_inputs.kv_block_offset,
                                        kv_cache_block_id_device,
                                        attn_inputs.input_lengths.size(0),
                                        use_fp8_fmha,
@@ -162,9 +159,9 @@ torch::Tensor TRTNormalPrefillOp::forward(const torch::Tensor&              inpu
     const int size_per_head  = attn_configs_.size_per_head;
     const int token_num      = input.size(0);
     const int batch_size     = params->input_lengths.size(0);
-    auto* device = dynamic_cast<CudaDevice*>(DeviceFactory::getDefaultDevice());
-    const int max_token_num =
-        device->initParams().runtime_config.fifo_scheduler_config.max_context_batch_size * device->initParams().max_seq_len;
+    auto*     device         = dynamic_cast<CudaDevice*>(DeviceFactory::getDefaultDevice());
+    const int max_token_num  = device->initParams().runtime_config.fifo_scheduler_config.max_context_batch_size
+                              * device->initParams().max_seq_len;
     torch::TensorOptions options = torch::TensorOptions(input.dtype()).device(input.device());
 
     static torch::Tensor static_output = torch::zeros({max_token_num, local_head_num * size_per_head}, options);

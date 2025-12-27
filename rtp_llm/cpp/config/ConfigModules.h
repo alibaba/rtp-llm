@@ -69,7 +69,9 @@ enum class FMHAType {
     AITER_PREFILL,
     AITER_ASM_PREFILL,
     AITER_DECODE,
-    AITER_ASM_DECODE
+    AITER_ASM_DECODE,
+    PY_FLASHINFER_PREFILL,
+    PY_FLASHINFER_DECODE,
 };
 
 struct FMHAConfig {
@@ -440,6 +442,27 @@ struct GrpcConfig {
     std::map<std::string, int> get_server_config() const {
         return server_config;
     }
+};
+
+struct LinearAttentionConfig {
+    int         linear_conv_kernel_dim = 0;
+    int         linear_key_head_dim    = 0;
+    int         linear_num_key_heads   = 0;
+    int         linear_num_value_heads = 0;
+    int         linear_value_head_dim  = 0;
+    std::string to_string() const;
+};
+
+enum class HybridAttentionType {
+    NONE,
+    LINEAR,
+    SLIDING_WINDOW,
+};
+
+struct HybridAttentionConfig {
+    bool                             enable_hybrid_attention = false;
+    std::vector<HybridAttentionType> hybrid_attention_types;
+    std::string                      to_string() const;
 };
 
 }  // namespace rtp_llm

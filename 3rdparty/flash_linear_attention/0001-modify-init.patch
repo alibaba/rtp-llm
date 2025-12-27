@@ -174,15 +174,4 @@ index e45884b6..539d191e 100644
 -]
 +from .gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
 \ No newline at end of file
-diff --git tests/ops/test_gated_delta.py tests/ops/test_gated_delta.py
-index 44e1ae15..ca4e6647 100644
---- tests/ops/test_gated_delta.py
-+++ tests/ops/test_gated_delta.py
-@@ -8,6 +8,7 @@ import torch
- import torch.nn.functional as F
- from einops import rearrange, repeat
- 
-+import sys; sys.path.append("/home/baowending.bwd/flash-linear-attention")
- from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
- from fla.utils import assert_close, device, is_intel_alchemist
  

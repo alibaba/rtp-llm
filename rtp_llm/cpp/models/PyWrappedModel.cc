@@ -43,8 +43,6 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
 
     if (k_cache_buffer_) {
         py_attn_inputs.kv_cache_block_id_host = Buffer2torchTensor(inputs.kv_cache_block_id);
-        py_attn_inputs.kv_block_offset =
-            k_cache_buffer_ ? k_cache_buffer_->shape()[0] * k_cache_buffer_->shape()[1] : 0;
     }
 
     // Calculate cu_seqlens
@@ -82,8 +80,16 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
             torch::zeros({batch_size + 1}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
         py_attn_inputs.cu_kv_seqlens =
             torch::zeros({batch_size + 1}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
+        torch::Tensor decode_cu_seqlens          = torch::arange(
+                0, py_attn_inputs.sequence_lengths.size(0) + 1, 1, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
+        py_attn_inputs.decode_cu_seqlens_host = decode_cu_seqlens;
+        py_attn_inputs.decode_cu_seqlens_d    = decode_cu_seqlens.cuda();
     }
 
+    // create device tensors
+    py_attn_inputs.prefix_lengths_d          = py_attn_inputs.prefix_lengths.cuda();
+    py_attn_inputs.sequence_lengths_plus_1_d = (py_attn_inputs.sequence_lengths + 1).cuda();
+    py_attn_inputs.input_lengths_d           = py_attn_inputs.input_lengths.cuda();
     return py_attn_inputs;
 }
 

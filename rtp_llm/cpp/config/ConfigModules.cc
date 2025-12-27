@@ -9,7 +9,6 @@
 
 namespace rtp_llm {
 
-
 // ParallelismConfig
 std::string ParallelismConfig::to_string() const {
     std::ostringstream oss;
@@ -36,7 +35,8 @@ std::string ParallelismConfig::to_string() const {
         << "http_port: " << http_port << "\n"
         << "model_rpc_port: " << model_rpc_port << "\n"
         << "embedding_rpc_server_port: " << embedding_rpc_server_port << "\n"
-        << "ffn_disaggregate_config: {\n" << ffn_disaggregate_config.to_string() << "\n}";
+        << "ffn_disaggregate_config: {\n"
+        << ffn_disaggregate_config.to_string() << "\n}";
     return oss.str();
 }
 
@@ -116,6 +116,23 @@ std::string ProfilingDebugLoggingConfig::to_string() const {
         << "debug_start_fake_process: " << debug_start_fake_process << "\n"
         << "enable_detail_log: " << enable_detail_log << "\n"
         << "check_nan: " << check_nan << "\n";
+    return oss.str();
+}
+
+// LinearAttentionConfig
+std::string LinearAttentionConfig::to_string() const {
+    std::ostringstream oss;
+    oss << "linear_conv_kernel_dim: " << linear_conv_kernel_dim << "\n"
+        << "linear_key_head_dim: " << linear_key_head_dim << "\n"
+        << "linear_num_key_heads: " << linear_num_key_heads << "\n"
+        << "linear_num_value_heads: " << linear_num_value_heads << "\n"
+        << "linear_value_head_dim: " << linear_value_head_dim;
+    return oss.str();
+}
+// HybridAttentionConfig
+std::string HybridAttentionConfig::to_string() const {
+    std::ostringstream oss;
+    oss << "enable_hybrid_attention: " << enable_hybrid_attention << "\n";
     return oss.str();
 }
 
@@ -240,7 +257,7 @@ std::string SpeculativeExecutionConfig::to_string() const {
 // VitConfig
 std::string VitConfig::to_string() const {
     std::ostringstream oss;
-    std::string vit_sep_str;
+    std::string        vit_sep_str;
     switch (vit_separation) {
         case VitSeparation::VIT_SEPARATION_LOCAL:
             vit_sep_str = "LOCAL";
@@ -317,19 +334,23 @@ std::string RuntimeConfig::to_string() const {
         << "warm_up_with_loss: " << warm_up_with_loss << "\n"
         << "use_batch_decode_scheduler: " << use_batch_decode_scheduler << "\n"
         << "use_gather_batch_scheduler: " << use_gather_batch_scheduler << "\n"
-        << "batch_decode_scheduler_config: {\n" << batch_decode_scheduler_config.to_string() << "\n}\n"
-        << "fifo_scheduler_config: {\n" << fifo_scheduler_config.to_string() << "\n}\n"
+        << "batch_decode_scheduler_config: {\n"
+        << batch_decode_scheduler_config.to_string() << "\n}\n"
+        << "fifo_scheduler_config: {\n"
+        << fifo_scheduler_config.to_string() << "\n}\n"
         << "model_name: " << model_name << "\n"
         << "worker_grpc_addrs: [";
     for (size_t i = 0; i < worker_grpc_addrs.size(); ++i) {
         oss << worker_grpc_addrs[i];
-        if (i < worker_grpc_addrs.size() - 1) oss << ", ";
+        if (i < worker_grpc_addrs.size() - 1)
+            oss << ", ";
     }
     oss << "]\n"
         << "worker_addrs: [";
     for (size_t i = 0; i < worker_addrs.size(); ++i) {
         oss << worker_addrs[i];
-        if (i < worker_addrs.size() - 1) oss << ", ";
+        if (i < worker_addrs.size() - 1)
+            oss << ", ";
     }
     oss << "]\n"
         << "specify_gpu_arch: " << specify_gpu_arch << "\n"
@@ -367,7 +388,6 @@ std::string GrpcConfig::to_string() const {
 
     return oss.str();
 }
-
 
 void GrpcConfig::from_json(const std::string& json_str) {
     if (json_str.empty()) {
