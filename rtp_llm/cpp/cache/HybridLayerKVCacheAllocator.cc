@@ -4,13 +4,15 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
 
-HybridLayerKVCacheAllocator::HybridLayerKVCacheAllocator(const CacheConfig&   config,
-                                                         rtp_llm::DeviceBase* device,
-                                                         AllocationType       allocation_type):
-    KVCacheAllocator(config, device, allocation_type) {}
+HybridLayerKVCacheAllocator::HybridLayerKVCacheAllocator(const CacheConfig&                 config,
+                                                         rtp_llm::DeviceBase*               device,
+                                                         AllocationType                     allocation_type,
+                                                         const kmonitor::MetricsReporterPtr metrics_reporter):
+    KVCacheAllocator(config, device, allocation_type, metrics_reporter) {}
 
 bool HybridLayerKVCacheAllocator::init() {
     auto            block_stride_bytes = config_.cache_specs[0]->block_size_bytes();
