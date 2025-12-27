@@ -9,7 +9,11 @@ from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     scaled_fp8_per_token_quant,
     sgl_per_token_group_quant_fp8,
 )
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
+    CombineForwardPayload,
     ExpertForwardPayload,
     ExpertTokensMetadata,
     FusedMoeDataRouter,
@@ -19,7 +23,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.type import RouterType
 from rtp_llm.ops.compute_ops import trt_fp8_quantize_128
-from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
+
 
 class DeepepNormalRouter(FusedMoeDataRouter):
     @classmethod
@@ -158,25 +162,28 @@ class DeepepNormalRouter(FusedMoeDataRouter):
         )
 
         return ExpertForwardPayload(
-            expert_x,
-            act_dtype,
-            expert_x_scale,
-            ExpertTokensMetadata(expert_num_tokens, num_recv_tokens_per_expert_list),
-            recv_topk_idx,
-            recv_topk_weights,
+            expert_x=expert_x,
+            expert_x_scale=expert_x_scale,
+            expert_x_origin_dtype=act_dtype,
+            expert_topk_ids=recv_topk_idx,
+            expert_topk_weights=recv_topk_weights,
+            expert_tokens_meta=ExpertTokensMetadata(
+                expert_num_tokens=expert_num_tokens,
+                expert_num_tokens_cpu=num_recv_tokens_per_expert_list,
+            ),
         )
 
     def finalize(
         self,
-        fused_expert_output: torch.Tensor,
+        payload: CombineForwardPayload,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         extra_finalize_args: Optional[Dict[str, Any]],
     ) -> torch.Tensor:
         assert self.handle is not None, "handler is None"
-        out_token, _, event = self.deepep_buffer_wrapper.buffer.combine(
-            fused_expert_output, self.handle
+        out_token, _, _ = self.deepep_buffer_wrapper.buffer.combine(
+            payload.fused_expert_output, self.handle
         )
         self.handle = None
 

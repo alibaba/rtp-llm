@@ -4,7 +4,9 @@ from typing import Any, Dict
 
 import torch
 
-from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.priority_attributes import (
     StrategyAttributes,
 )
@@ -31,7 +33,7 @@ class CudaNoQuantEpLowLatencyStrategy(MoeStrategy):
 
         return DeepEpLowLatencyRouter(
             config,
-            use_fp8_dispatch=False,
+            use_fp8=False,
             zero_copy=False,
             async_finish=False,
             return_recv_hook=False,

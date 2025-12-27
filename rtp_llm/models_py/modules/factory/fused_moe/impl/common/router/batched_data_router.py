@@ -4,8 +4,15 @@ from typing import Any, Optional
 
 import torch
 
-import rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe as mm
-from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
+    CombineForwardPayload,
+    ExpertForwardPayload,
+    ExpertTokensMetadata,
+    FusedMoeDataRouter,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
@@ -62,7 +69,8 @@ class TopKWeightAndReduceNaiveBatched(object):
 
         return output
 
-class BatchedDataRouter(mm.FusedMoeDataRouter):
+
+class BatchedDataRouter(FusedMoeDataRouter):
     @classmethod
     def router_type(cls):
         return RouterType.BATCHED_DATA
@@ -102,7 +110,7 @@ class BatchedDataRouter(mm.FusedMoeDataRouter):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         quant_config: FusedMoEQuantConfig,
-    ) -> mm.ExpertForwardPayload:
+    ) -> ExpertForwardPayload:
         assert a1.dim() == 2
         assert topk_ids.dim() == 2
         assert a1.size(0) == topk_ids.size(0)
@@ -156,11 +164,11 @@ class BatchedDataRouter(mm.FusedMoeDataRouter):
 
         assert b_a1_scale is None or b_a1_scale.ndim == 3
 
-        expert_tokens_meta = mm.ExpertTokensMetadata(
+        expert_tokens_meta = ExpertTokensMetadata(
             expert_num_tokens=tokens_per_expert, expert_num_tokens_cpu=None
         )
 
-        return mm.ExpertForwardPayload(
+        return ExpertForwardPayload(
             expert_x=b_a1,
             expert_x_scale=b_a1_scale,
             expert_tokens_meta=expert_tokens_meta,
@@ -168,7 +176,7 @@ class BatchedDataRouter(mm.FusedMoeDataRouter):
 
     def finalize(
         self,
-        fused_expert_output: torch.Tensor,
+        payload: CombineForwardPayload,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
@@ -176,7 +184,7 @@ class BatchedDataRouter(mm.FusedMoeDataRouter):
     ) -> torch.Tensor:
         weight_and_reduce_impl = TopKWeightAndReduceNaiveBatched(self.rank)
         return weight_and_reduce_impl.apply(
-            fused_expert_output=fused_expert_output,
+            fused_expert_output=payload.fused_expert_output,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             apply_router_weight_on_input=apply_router_weight_on_input,

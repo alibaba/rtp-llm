@@ -2,13 +2,17 @@ from typing import Any, Optional
 
 import torch
 
+from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
-    per_token_cast_to_fp8,
+    scaled_fp8_per_token_quant,
     sgl_per_token_group_quant_fp8,
 )
-from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
+    CombineForwardPayload,
     ExpertForwardPayload,
     ExpertTokensMetadata,
     FusedMoeDataRouter,
@@ -17,12 +21,9 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.type import RouterType
-
-from rtp_llm.models_py.kernels.cuda.fp8_kernel import scaled_fp8_per_token_quant
 from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
     recompute_topk_ids_sum_expert_count,
 )
-from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
 from rtp_llm.ops.compute_ops import trt_fp8_quantize_128
 
 
@@ -97,22 +98,26 @@ class PureTpRouter(FusedMoeDataRouter):
             )
         )
         return ExpertForwardPayload(
-            expert_x,
-            a1.dtype,
-            expert_x_scale,
-            ExpertTokensMetadata(num_recv_tokens_per_expert, None),
-            adjusted_topk_ids,
-            topk_weights,
+            expert_x=expert_x,
+            expert_x_scale=expert_x_scale,
+            expert_x_origin_dtype=a1.dtype,
+            expert_topk_ids=adjusted_topk_ids,
+            expert_topk_weights=topk_weights,
+            expert_tokens_meta=ExpertTokensMetadata(
+                expert_num_tokens=num_recv_tokens_per_expert, expert_num_tokens_cpu=None
+            ),
         )
 
     def finalize(
         self,
-        fused_expert_output: torch.Tensor,
+        payload: CombineForwardPayload,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         extra_finalize_args: Optional[dict[str, Any]],
     ) -> torch.Tensor:
         if self.tp_size > 1:
-            fused_expert_output = all_reduce(fused_expert_output, group=Group.TP)
-        return fused_expert_output
+            payload.fused_expert_output = all_reduce(
+                payload.fused_expert_output, group=Group.TP
+            )
+        return payload.fused_expert_output

@@ -4,7 +4,9 @@ from typing import Any, Dict
 
 import torch
 
-from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.priority_attributes import (
     StrategyAttributes,
 )
@@ -20,7 +22,7 @@ class CudaFp8PerTensorEpLowLatencyStrategy(MoeStrategy):
             DeepEpLowLatencyRouter,
         )
 
-        return DeepEpLowLatencyRouter(config, use_fp8_dispatch=True)
+        return DeepEpLowLatencyRouter(config, use_fp8=True)
 
     def create_executor(
         self, config: MoEConfigAdapter, weights: Dict[str, torch.Tensor]
@@ -103,6 +105,7 @@ class CudaFp8PerTensorNoDPStrategy(MoeStrategy):
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepgeemm_coutinous_router import (
             PureTpRouter,
         )
+
         return PureTpRouter(config=config, expert_alignment=1)
 
     def create_executor(

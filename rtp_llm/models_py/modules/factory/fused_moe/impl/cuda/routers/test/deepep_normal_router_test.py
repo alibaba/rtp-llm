@@ -13,6 +13,9 @@ from rtp_llm.models_py.distributed.collective_torch import (
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
+from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
+    CombineForwardPayload,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
@@ -134,10 +137,11 @@ def worker_function(
                 )
             else:
                 combine_x = payload.expert_x
+            combine_payload = CombineForwardPayload(fused_expert_output=combine_x)
             # pass token_num to finalize for gather
             extra_finalize_args = {"original_num_tokens": token_num}
             a2 = router.finalize(
-                combine_x, topk_weights, topk_ids, False, extra_finalize_args
+                combine_payload, topk_weights, topk_ids, False, extra_finalize_args
             )
             if router.use_fp8:
                 x, scale = trt_fp8_quantize_128(a1, False)
