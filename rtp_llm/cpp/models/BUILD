@@ -36,6 +36,7 @@ cc_library(
     ],
     deps = [
         "//:rtp_compute_ops",
+        "@rapidjson//:rapidjson",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
