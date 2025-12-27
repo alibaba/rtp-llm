@@ -5,10 +5,21 @@
 #include <fstream>
 #include <sstream>
 #include <iostream>
+#include <memory>
 #include <mutex>
+#include <map>
+#include <unordered_map>
+#include <unordered_set>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include "autil/legacy/jsonizable.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rapidjson/reader.h"
+#include "rapidjson/filereadstream.h"
+#include "rapidjson/error/en.h"
 
 namespace rtp_llm {
 
@@ -25,6 +36,142 @@ public:
         json.Jsonize("sep", sep, "_");
         json.Jsonize("prefix_dict", prefix_dict, prefix_dict);
     }
+};
+
+// SAX handler for streaming JSON parsing
+class PrefixDictHandler: public rapidjson::BaseReaderHandler<rapidjson::UTF8<>, PrefixDictHandler> {
+public:
+    PrefixDictHandler(TreeDecodeConfig& cfg, std::unordered_map<std::string, std::unordered_set<int32_t>>& prefix_map):
+        config_(cfg),
+        prefix_map_(prefix_map),
+        in_prefix_dict_(false),
+        in_array_(false),
+        current_key_(),
+        dict_key_(),
+        current_array_(),
+        depth_(0) {
+        config_.start_token_id = 225;  // default
+        config_.end_token_id   = 2;    // default
+        config_.sep            = "_";  // default
+    }
+
+    bool Null() {
+        return true;
+    }
+    bool Bool(bool) {
+        return true;
+    }
+
+    bool Int(int i) {
+        return handleNumber(static_cast<int32_t>(i));
+    }
+
+    bool Uint(unsigned u) {
+        return handleNumber(static_cast<int32_t>(u));
+    }
+
+    bool Int64(int64_t i) {
+        return handleNumber(static_cast<int32_t>(i));
+    }
+
+    bool Uint64(uint64_t u) {
+        return handleNumber(static_cast<int32_t>(u));
+    }
+
+    bool Double(double) {
+        return true;
+    }
+
+    bool String(const char* str, rapidjson::SizeType length, bool) {
+        if (in_array_) {
+            // String in array - shouldn't happen for token IDs, but handle gracefully
+            return true;
+        } else if (current_key_ == "sep") {
+            config_.sep = std::string(str, length);
+            current_key_.clear();
+        } else if (in_prefix_dict_ && !dict_key_.empty()) {
+            // String value in prefix_dict - shouldn't happen, but handle gracefully
+            return true;
+        }
+        return true;
+    }
+
+    bool StartObject() {
+        depth_++;
+        if (current_key_ == "prefix_dict") {
+            in_prefix_dict_ = true;
+        }
+        return true;
+    }
+
+    bool Key(const char* str, rapidjson::SizeType length, bool) {
+        current_key_ = std::string(str, length);
+        if (in_prefix_dict_) {
+            // This is a key in prefix_dict (e.g., "key1", "key2")
+            dict_key_ = current_key_;
+        }
+        return true;
+    }
+
+    bool EndObject(rapidjson::SizeType) {
+        depth_--;
+        if (in_prefix_dict_ && depth_ == 1) {
+            // Finished prefix_dict object (depth 1 is root object)
+            in_prefix_dict_ = false;
+        }
+        if (!in_prefix_dict_) {
+            current_key_.clear();
+        }
+        return true;
+    }
+
+    bool StartArray() {
+        if (in_prefix_dict_ && !dict_key_.empty()) {
+            in_array_ = true;
+            current_array_.clear();
+        }
+        return true;
+    }
+
+    bool EndArray(rapidjson::SizeType) {
+        if (in_array_ && !dict_key_.empty()) {
+            // Finished one prefix_dict entry array
+            if (!current_array_.empty()) {
+                std::unordered_set<int32_t> tmp_set;
+                for (auto token_id : current_array_) {
+                    tmp_set.insert(token_id);
+                }
+                prefix_map_[dict_key_] = std::move(tmp_set);
+            }
+            current_array_.clear();
+            dict_key_.clear();
+        }
+        in_array_ = false;
+        return true;
+    }
+
+private:
+    bool handleNumber(int32_t value) {
+        if (in_array_) {
+            current_array_.push_back(value);
+        } else if (current_key_ == "start_token_id") {
+            config_.start_token_id = value;
+            current_key_.clear();
+        } else if (current_key_ == "end_token_id") {
+            config_.end_token_id = value;
+            current_key_.clear();
+        }
+        return true;
+    }
+
+    TreeDecodeConfig&                                             config_;
+    std::unordered_map<std::string, std::unordered_set<int32_t>>& prefix_map_;
+    bool                                                          in_prefix_dict_;
+    bool                                                          in_array_;
+    std::string                                                   current_key_;
+    std::string                                                   dict_key_;
+    std::vector<int32_t>                                          current_array_;
+    int                                                           depth_;
 };
 
 class PrefixToCandidateTokens {
@@ -69,14 +216,14 @@ public:
         }
         return old_key + std::to_string(next);
     }
-    void reloadPrefixDictWithPrefix(std::string dir_path, std::string tree_decode_config) {
+    void reloadPrefixDictWithPrefix(const std::string& dir_path, const std::string& tree_decode_config) {
         RTP_LLM_LOG_INFO("PrefixToCandidateTokens load filepath : %s", tree_decode_config.c_str());
         if (tree_decode_config.size() > 0) {
             std::string prefix_dict_path = dir_path + "/" + tree_decode_config;
             reloadPrefixDict(prefix_dict_path);
         }
     }
-    void reloadPrefixDict(std::string file_path) {
+    void reloadPrefixDict(const std::string& file_path) {
         loadPrefixDict(file_path);
     }
 
@@ -91,10 +238,20 @@ private:
     PrefixToCandidateTokens(PrefixToCandidateTokens&)                  = delete;
     PrefixToCandidateTokens(PrefixToCandidateTokens&&)                 = delete;
     PrefixToCandidateTokens& operator=(const PrefixToCandidateTokens&) = delete;
-    void                     loadPrefixDict(std::string file_path) {
+    void                     loadPrefixDict(const std::string& file_path) {
         std::lock_guard<std::mutex> lock(mutex_);
         init_success_ = false;
         prefix_to_cadicates_.clear();
+
+        // Try optimized streaming parser first for large files
+        if (loadPrefixDictStreaming(file_path)) {
+            init_success_ = true;
+            RTP_LLM_LOG_INFO("PrefixToCandidateTokens load [%s] successfully (streaming)", file_path.c_str());
+            return;
+        }
+
+        // Fallback to original method for compatibility
+        RTP_LLM_LOG_INFO("PrefixToCandidateTokens falling back to legacy parser");
         std::ifstream file(file_path);
         if (!file) {
             std::stringstream ss;
@@ -123,6 +280,35 @@ private:
         file.close();
         init_success_ = true;
         RTP_LLM_LOG_INFO("PrefixToCandidateTokens load [%s] successfully", file_path.c_str());
+    }
+
+    bool loadPrefixDictStreaming(const std::string& file_path) {
+        FILE* fp = fopen(file_path.c_str(), "rb");
+        if (!fp) {
+            return false;
+        }
+
+        // Use a reasonable buffer size (1MB) for streaming
+        const size_t buffer_size = 1024 * 1024;
+        char*        buffer      = new char[buffer_size];
+
+        rapidjson::FileReadStream is(fp, buffer, buffer_size);
+        PrefixDictHandler         handler(config, prefix_to_cadicates_);
+        rapidjson::Reader         reader;
+
+        bool success = false;
+        if (reader.Parse(is, handler)) {
+            success = true;
+        } else {
+            rapidjson::ParseErrorCode e = reader.GetParseErrorCode();
+            size_t                    o = reader.GetErrorOffset();
+            RTP_LLM_LOG_WARNING(
+                "PrefixToCandidateTokens streaming parse error at offset %zu: %s", o, rapidjson::GetParseError_En(e));
+        }
+
+        delete[] buffer;
+        fclose(fp);
+        return success;
     }
 
 private:
