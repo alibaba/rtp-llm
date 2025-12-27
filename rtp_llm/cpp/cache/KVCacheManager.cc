@@ -56,7 +56,8 @@ bool KVCacheManager::init() {
     auto& spec = config_.cache_specs[0];
     if (spec->type == rtp_llm::KVCacheType::MultiHeadAttention
         || spec->type == rtp_llm::KVCacheType::MultiHeadLatentAttention) {
-        allocator_ = std::make_shared<rtp_llm::SingleTypeKVCacheAllocator>(config_, device_, AllocationType::DEVICE);
+        allocator_ = std::make_shared<rtp_llm::SingleTypeKVCacheAllocator>(
+            config_, device_, AllocationType::DEVICE, metrics_reporter_);
         RTP_LLM_CHECK_WITH_INFO(allocator_->init(), "SingleTypeKVCacheAllocator init failed");
         if (metrics_reporter_) {
             stop_.store(false, std::memory_order_relaxed);
