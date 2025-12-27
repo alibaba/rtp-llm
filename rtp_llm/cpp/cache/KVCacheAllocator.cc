@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 
 namespace rtp_llm {
 
@@ -16,6 +17,27 @@ MallocResult KVCacheAllocator::initMalloc(const MallocInfo& malloc_info) {
     if (!incr_result.success) {
         return incr_result;
     } else {
+        if (metrics_reporter_ && malloc_info.batch_kv_cache_resource->enable_reuse_cache) {
+            int64_t gpu_input_length = 0;
+            if (malloc_info.batch_kv_cache_resource) {
+                auto&  cache_keys      = malloc_info.batch_kv_cache_resource->cacheKeys(0);
+                size_t match_keys_size = cache_keys.size();
+                gpu_input_length       = static_cast<int64_t>(match_keys_size) * config_.seq_size_per_block;
+            }
+
+            if (gpu_input_length > 0) {
+                RtpLLMCacheReuseMetricsCollector collector;
+                collector.kv_cache_reuse_length = init_result.reuse_len;
+                collector.match_cost_time_us    = init_result.match_cost_time_us;
+                collector.gpu_input_length      = gpu_input_length;
+                collector.gpu_reuse_length      = init_result.reuse_len;
+                collector.gpu_cache_hit_rate = static_cast<float>(static_cast<int64_t>(collector.gpu_reuse_length) * 100
+                                                                  / collector.gpu_input_length);
+                kmonitor::MetricsTags tags;
+                tags.AddTag("mtp_model_type", config_.mtp_model_type);
+                metrics_reporter_->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(&tags, &collector);
+            }
+        }
         return init_result;
     }
 }
