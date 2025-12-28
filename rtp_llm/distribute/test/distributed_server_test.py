@@ -410,7 +410,7 @@ class DistributedServerTest(unittest.TestCase):
 #            "LOCAL_WORLD_SIZE": "2",
 #            "WORKER_INFO_PORT_NUM": "8",
 #            "START_PORT": "20000",
-#            "dist_comm_timeout": "3",
+#            "DIST_COMM_TIMEOUT": "3",
 #            "GANG_SLEEP_TIME": "1",
 #            "FAKE_GANG_ENV": "1",
 #            "MODEL_TYPE": "fake_model",
@@ -420,7 +420,7 @@ class DistributedServerTest(unittest.TestCase):
 #            "CHECKPOINT_PATH": os.path.join(
 #                os.getcwd(), "rtp_llm/distribute/test/testdata/cpt"
 #            ),
-#            "dist_comm_timeout": "10",
+#            "DIST_COMM_TIMEOUT": "10",
 #            "CUDA_VISIBLE_DEVICES": "0,1",
 #        },
 #    )
