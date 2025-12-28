@@ -1,7 +1,7 @@
 #include <thread>
 #include <chrono>
 #include "MockKVCMClient.h"
-#include "rtp_llm/cpp/cache_new/remote_connector/ClientWrapper.h"
+#include "rtp_llm/cpp/cache/connector/remote_connector/ClientWrapper.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 using namespace ::testing;

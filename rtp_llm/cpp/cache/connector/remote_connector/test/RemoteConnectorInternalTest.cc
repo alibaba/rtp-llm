@@ -1,10 +1,9 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
-#include "rtp_llm/cpp/cache_new/remote_connector/RemoteConnector.h"
-#include "rtp_llm/cpp/cache_new/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/connector/remote_connector/RemoteConnector.h"
+#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/utils/Logger.h"
-#include "rtp_llm/cpp/config/GptInitParameter.h"
 #include "rtp_llm/cpp/devices/DeviceBase.h"
 #include "autil/EnvUtil.h"
 
@@ -61,7 +60,13 @@ public:
     convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const override {
         return {};
     }
-    void incrKVCacheRef(KVCacheResourceV1& kvcache_resource, const CacheKeysType& cache_keys) override {}
+    std::shared_ptr<KVCacheResourceV1> incrKVCacheRef(const KVCacheResourceV1& kvcache_resource,
+                                                      const CacheKeysType&     cache_keys) {
+        return nullptr;
+    }
+    void decrKVCacheRef(const KVCacheResourceV1& kvcache_resource) {
+        return;
+    }
     bool updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                        const std::vector<int>&        block_src_batch,
                        bool                           copy_last_block,
@@ -112,18 +117,18 @@ class RemoteConnectorInternalTest: public ::testing::Test {
 public:
     void SetUp() override {
         rtp_llm::initLogger();
-        auto mha_spec                = std::make_shared<MHAKVCacheSpec>();
-        mha_spec->layer_num          = layer_num_;
-        mha_spec->block_nums         = 8;
+        auto mha_spec       = std::make_shared<MHAKVCacheSpec>();
+        mha_spec->layer_num = layer_num_;
+        // mha_spec->block_nums         = 8;
         mha_spec->local_head_num_kv  = 8;
         mha_spec->size_per_head      = 128;
         mha_spec->seq_size_per_block = 8;
         mha_spec->dtype              = rtp_llm::DataType::TYPE_FP16;
         mha_spec->type               = KVCacheType::MultiHeadAttention;
-
+        cache_config_.block_num      = 8;
         cache_config_.cache_specs.push_back(mha_spec);
-        byte_size_per_block_     = static_cast<size_t>(mha_spec->block_size() * mha_spec->layer_num);
-        cache_config_.block_size = byte_size_per_block_;
+        byte_size_per_block_           = static_cast<size_t>(mha_spec->block_size_bytes() * mha_spec->layer_num);
+        cache_config_.block_size_bytes = byte_size_per_block_;
     }
 
     void TearDown() override {}
@@ -133,7 +138,9 @@ private:
         auto allocator =
             std::make_shared<FakeKVCacheAllocator>(cache_config_, full_group_ids_, linear_group_ids_, layer_num_);
         return std::shared_ptr<RemoteConnector>(new RemoteConnector(cache_config_,
-                                                                    gpt_init_params_,
+                                                                    kv_cache_config_,
+                                                                    runtime_config_,
+                                                                    parallelism_config_,
                                                                     nullptr,
                                                                     nullptr,
                                                                     0,
@@ -146,7 +153,9 @@ private:
     }
 
     CacheConfig                              cache_config_;
-    GptInitParameter                         gpt_init_params_;
+    KVCacheConfig                            kv_cache_config_;
+    RuntimeConfig                            runtime_config_;
+    ParallelismConfig                        parallelism_config_;
     size_t                                   byte_size_per_block_ = 0;
     constexpr static int                     layer_num_           = 10;
     inline static const std::vector<int32_t> full_group_ids_      = {0};
