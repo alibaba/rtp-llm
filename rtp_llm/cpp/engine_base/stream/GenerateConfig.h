@@ -217,6 +217,8 @@ public:
         JSONIZE(gen_timeline);
         JSONIZE(profile_step);
         JSONIZE(reuse_cache);
+        JSONIZE(enable_remote_cache);
+        JSONIZE(enable_device_cache);
         JSONIZE(enable_memory_block_cache);
         JSONIZE(aux_info);
 #undef JSONIZE

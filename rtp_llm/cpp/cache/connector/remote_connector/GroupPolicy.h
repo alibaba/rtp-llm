@@ -6,7 +6,7 @@
 #include <map>
 #include <unordered_map>
 #include "kvcm_client/common.h"
-#include "rtp_llm/cpp/cache_new/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 
 namespace rtp_llm {
 

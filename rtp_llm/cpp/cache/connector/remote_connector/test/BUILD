@@ -7,7 +7,7 @@ test_copts = [
 
 test_deps = [
     "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
-    "//rtp_llm/cpp/config:gpt_init_params",
+    "//rtp_llm/cpp/config:config_modules",
     "@com_google_googletest//:gtest",
     "@com_google_googletest//:gtest_main",
     "@local_config_cuda//cuda:cuda_headers",
@@ -25,7 +25,7 @@ cc_test(
     ],
     copts = test_copts,
     deps = test_deps + [
-        "//rtp_llm/cpp/cache_new/remote_connector",
+        "//rtp_llm/cpp/cache/connector/remote_connector",
     ],
 )
 
@@ -36,7 +36,7 @@ cc_test(
     ],
     copts = test_copts,
     deps = test_deps + [
-        "//rtp_llm/cpp/cache_new/remote_connector",
+        "//rtp_llm/cpp/cache/connector/remote_connector",
     ],
 )
 
@@ -80,7 +80,7 @@ cc_library(
     ],
     deps = test_deps + [
         ":mock",
-        "//rtp_llm/cpp/cache_new/remote_connector",
+        "//rtp_llm/cpp/cache/connector/remote_connector",
     ],
 )
 
@@ -90,7 +90,7 @@ cc_library(
         "MockKVCMClient.h",
     ],
     deps = [
-        "//rtp_llm/cpp/cache_new/remote_connector:client",
+        "//rtp_llm/cpp/cache/connector/remote_connector:client",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],
