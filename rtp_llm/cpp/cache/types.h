@@ -97,8 +97,12 @@ struct FreeInfo {
         sync_wait_write(sync_wait_write) {}
     BatchKVCacheResourcePtr batch_kv_cache_resource;
     CompleteTokenIdsPtr     complete_token_ids;
-
-    int64_t request_id = 0;
+    int64_t                 request_id{0};
+    bool                    reuse_cache{false};
+    bool                    enable_memory_cache{false};
+    bool                    enable_remote_cache{false};
+    bool                    enable_device_cache{true};
+    bool                    sync_wait_write{false};
 };
 
 struct InsertInfo {
@@ -122,7 +126,11 @@ struct InsertInfo {
     int64_t                 request_id;
     BatchKVCacheResourcePtr batch_kv_cache_resource;
     CompleteTokenIdsPtr     complete_token_ids;
-    bool                    is_resident;
+    bool                    is_resident{0};
+    bool                    enable_device_cache{true};
+    bool                    enable_memory_cache{false};
+    bool                    enable_remote_cache{false};
+    bool                    sync_wait_write{false};
 };
 
 }  // namespace rtp_llm

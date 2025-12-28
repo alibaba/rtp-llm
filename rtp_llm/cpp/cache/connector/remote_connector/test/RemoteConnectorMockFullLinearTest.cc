@@ -1,5 +1,5 @@
-#include "rtp_llm/cpp/cache_new/HybridLayerKVCacheAllocator.h"
-#include "rtp_llm/cpp/cache_new/remote_connector/test/RemoteConnectorMockTestBase.h"
+#include "rtp_llm/cpp/cache/HybridLayerKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/connector/remote_connector/test/RemoteConnectorMockTestBase.h"
 
 using namespace kv_cache_manager;
 using namespace ::testing;
@@ -8,6 +8,32 @@ using namespace rtp_llm::remote_connector;
 
 namespace rtp_llm {
 namespace test {
+void waitAsyncContextDone(const std::shared_ptr<rtp_llm::AsyncContext>& ctx) {
+    ASSERT_NE(ctx, nullptr);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (ctx->done()) {
+            return;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    FAIL() << "AsyncContext timeout waiting done()";
+}
+
+class TestReadMeta: public rtp_llm::KVCacheConnector::Meta {
+public:
+    TestReadMeta(int start_block_index, int size): start_block_index_(start_block_index), size_(size) {}
+    ~TestReadMeta() override = default;
+
+public:
+    std::pair<int, int> blockRange() const override {
+        return {start_block_index_, size_};
+    }
+
+private:
+    int start_block_index_{0};
+    int size_{0};
+};
 
 // TODO : remove this, use ture HybridLayerKVCacheAllocator
 class FakeHybridLayerKVCacheAllocator: public HybridLayerKVCacheAllocator {
@@ -77,7 +103,9 @@ private:
             ASSERT_TRUE(allocator->init());
             remote_connectors_.push_back(
                 std::make_shared<RemoteConnector>(cache_config_,
-                                                  gpt_init_params_,
+                                                  kv_cache_config_,
+                                                  runtime_config_,
+                                                  parallelism_config_,
                                                   device_,
                                                   nullptr,
                                                   0,
@@ -97,9 +125,9 @@ private:
         cache_config_.block_num          = block_num;
         cache_config_.seq_size_per_block = seq_size_per_block;
 
-        auto mha_spec                = std::make_shared<MHAKVCacheSpec>();
-        mha_spec->layer_num          = layer_num;
-        mha_spec->block_nums         = block_num;
+        auto mha_spec       = std::make_shared<MHAKVCacheSpec>();
+        mha_spec->layer_num = layer_num;
+        // mha_spec->block_nums         = block_num;
         mha_spec->local_head_num_kv  = 8;
         mha_spec->size_per_head      = 128;
         mha_spec->seq_size_per_block = seq_size_per_block;
@@ -107,7 +135,7 @@ private:
         mha_spec->type               = KVCacheType::MultiHeadAttention;
 
         cache_config_.cache_specs.push_back(mha_spec);
-        cache_config_.block_size = static_cast<int>(mha_spec->block_size() * mha_spec->layer_num);
+        cache_config_.block_size_bytes = static_cast<size_t>(mha_spec->block_size_bytes() * mha_spec->layer_num);
 
         std::vector<int> layer_ids(layer_num);
         for (int i = 0; i < layer_num; ++i) {
@@ -117,7 +145,8 @@ private:
     }
 };
 
-TEST_F(RemoteConnectorMockFullLinearTest, test_read_success_broadcast_success_match_all) {
+TEST_F(RemoteConnectorMockFullLinearTest, test_async_match_and_async_read_with_gpu_reuse_len_zero) {
+    // match
     auto kv_cache_resouce        = std::make_shared<KVCacheResourceV1>();
     kv_cache_resouce->cache_keys = {1, 2, 3};
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({1, 2, 3}));
@@ -126,6 +155,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_read_success_broadcast_success_ma
     auto      meta               = std::make_shared<RemoteConnectorMeta>("", "trace_1");
     size_t    tp_rank            = 0;
     Locations expected_locations = genFullotherLocations(kv_cache_resouce->cache_keys, {0, 1, 2});
+
     EXPECT_CALL(*meta_clients_[tp_rank],
                 MatchLocation(Eq("match_trace_1"),                    // trace_id
                               _,                                      // query_type
@@ -136,18 +166,55 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_read_success_broadcast_success_ma
                               _                                       // location_spec_names
                               ))
         .WillOnce(Return(MatchLocationReturnType({ClientErrorCode::ER_OK, expected_locations})));
-    UriStrVec          expected_uris        = genUris({1, 2, 3}, {2});
-    BlockBuffersExpect block_buffers_expect = {5, kFakeLayerNum, kFakeIovSize};
-    EXPECT_CALL(*transfer_client_, LoadKvCaches(Eq(expected_uris), BlockBuffersMatcher(block_buffers_expect)))
-        .WillOnce(Return(ClientErrorCode::ER_OK));
+    auto match_context = remote_connectors_[tp_rank]->asyncMatch(kv_cache_resouce, meta);
+    waitAsyncContextDone(match_context);
+    ASSERT_TRUE(match_context->success());
+    ASSERT_EQ(match_context->matchedBlockCount(), 3);
 
-    auto async_context = remote_connectors_[tp_rank]->asyncRead(kv_cache_resouce, meta);
-    async_context->waitDone();
-    ASSERT_TRUE(async_context->success());
-    ASSERT_EQ(3, kv_cache_resouce->reuseBlocksNum());
+    // read
+    {
+        UriStrVec          expected_uris        = genUris({1, 2, 3}, {2});
+        BlockBuffersExpect block_buffers_expect = {5, kFakeLayerNum * 2, kFakeIovSize};
+        EXPECT_CALL(*transfer_client_, LoadKvCaches(Eq(expected_uris), BlockBuffersMatcher(block_buffers_expect)))
+            .WillOnce(Return(ClientErrorCode::ER_OK));
+
+        const int gpu_reuse_num = static_cast<int>(kv_cache_resouce->reuseBlocksNum());  // 0
+        const int matched_num   = static_cast<int>(match_context->matchedBlockCount());  // 3
+        auto      read_meta     = std::make_shared<TestReadMeta>(gpu_reuse_num, matched_num - gpu_reuse_num);
+
+        auto read_context = remote_connectors_[tp_rank]->asyncRead(kv_cache_resouce, read_meta, match_context);
+        waitAsyncContextDone(read_context);
+        ASSERT_TRUE(read_context->success());
+        kv_cache_resouce->setReuseBlocksNum(0);
+    }
+    {
+        UriStrVec          expected_uris        = genUris({2, 3}, {1});
+        BlockBuffersExpect block_buffers_expect = {4, kFakeLayerNum * 2, kFakeIovSize};
+        EXPECT_CALL(*transfer_client_, LoadKvCaches(Eq(expected_uris), BlockBuffersMatcher(block_buffers_expect)))
+            .WillOnce(Return(ClientErrorCode::ER_OK));
+
+        const int gpu_reuse_num = static_cast<int>(kv_cache_resouce->reuseBlocksNum());  // 0
+        const int matched_num   = static_cast<int>(match_context->matchedBlockCount());  // 3
+        auto      read_meta     = std::make_shared<TestReadMeta>(gpu_reuse_num + 1, matched_num - gpu_reuse_num - 1);
+
+        auto read_context = remote_connectors_[tp_rank]->asyncRead(kv_cache_resouce, read_meta, match_context);
+        waitAsyncContextDone(read_context);
+        ASSERT_TRUE(read_context->success());
+        kv_cache_resouce->setReuseBlocksNum(0);
+    }
+    {
+        const int gpu_reuse_num = static_cast<int>(kv_cache_resouce->reuseBlocksNum());  // 0
+        const int matched_num   = static_cast<int>(match_context->matchedBlockCount());  // 3
+        auto      read_meta     = std::make_shared<TestReadMeta>(gpu_reuse_num + 4, matched_num - gpu_reuse_num - 4);
+
+        auto read_context = remote_connectors_[tp_rank]->asyncRead(kv_cache_resouce, read_meta, match_context);
+        waitAsyncContextDone(read_context);
+        ASSERT_TRUE(read_context->success());
+    }
 }
 
-TEST_F(RemoteConnectorMockFullLinearTest, test_read_success_broadcast_success_with_block_mask) {
+TEST_F(RemoteConnectorMockFullLinearTest, test_async_match_and_async_read_with_gpu_reuse_len_not_zero) {
+    // match
     auto kv_cache_resouce        = std::make_shared<KVCacheResourceV1>();
     kv_cache_resouce->cache_keys = {1, 2, 3};
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({1, 2, 3}));
@@ -167,16 +234,49 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_read_success_broadcast_success_wi
                               _                                       // location_spec_names
                               ))
         .WillOnce(Return(MatchLocationReturnType({ClientErrorCode::ER_OK, expected_locations})));
+    auto match_context = remote_connectors_[tp_rank]->asyncMatch(kv_cache_resouce, meta);
+    waitAsyncContextDone(match_context);
+    ASSERT_TRUE(match_context->success());
+    ASSERT_EQ(match_context->matchedBlockCount(), 3);
+    {
+        UriStrVec          expected_uris        = genUris({2, 3}, {1});
+        BlockBuffersExpect block_buffers_expect = {4, kFakeLayerNum * 2, kFakeIovSize};
+        EXPECT_CALL(*transfer_client_, LoadKvCaches(Eq(expected_uris), BlockBuffersMatcher(block_buffers_expect)))
+            .WillOnce(Return(ClientErrorCode::ER_OK));
 
-    UriStrVec          expected_uris        = genUris({2, 3}, {1});
-    BlockBuffersExpect block_buffers_expect = {4, kFakeLayerNum, kFakeIovSize};
-    EXPECT_CALL(*transfer_client_, LoadKvCaches(Eq(expected_uris), BlockBuffersMatcher(block_buffers_expect)))
-        .WillOnce(Return(ClientErrorCode::ER_OK));
+        const int gpu_reuse_num = static_cast<int>(kv_cache_resouce->reuseBlocksNum());  // 1
+        const int matched_num   = static_cast<int>(match_context->matchedBlockCount());  // 3
+        auto      read_meta     = std::make_shared<TestReadMeta>(gpu_reuse_num, matched_num - gpu_reuse_num);
 
-    auto async_context = remote_connectors_[tp_rank]->asyncRead(kv_cache_resouce, meta);
-    async_context->waitDone();
-    ASSERT_TRUE(async_context->success());
-    ASSERT_EQ(3, kv_cache_resouce->reuseBlocksNum());
+        auto read_context = remote_connectors_[tp_rank]->asyncRead(kv_cache_resouce, read_meta, match_context);
+        waitAsyncContextDone(read_context);
+        ASSERT_TRUE(read_context->success());
+        kv_cache_resouce->setReuseBlocksNum(1);
+    }
+    {
+        UriStrVec          expected_uris        = genUris({3}, {0});
+        BlockBuffersExpect block_buffers_expect = {3, kFakeLayerNum * 2, kFakeIovSize};
+        EXPECT_CALL(*transfer_client_, LoadKvCaches(Eq(expected_uris), BlockBuffersMatcher(block_buffers_expect)))
+            .WillOnce(Return(ClientErrorCode::ER_OK));
+
+        const int gpu_reuse_num = static_cast<int>(kv_cache_resouce->reuseBlocksNum());  // 1
+        const int matched_num   = static_cast<int>(match_context->matchedBlockCount());  // 3
+        auto      read_meta     = std::make_shared<TestReadMeta>(gpu_reuse_num + 1, matched_num - gpu_reuse_num - 1);
+
+        auto read_context = remote_connectors_[tp_rank]->asyncRead(kv_cache_resouce, read_meta, match_context);
+        waitAsyncContextDone(read_context);
+        ASSERT_TRUE(read_context->success());
+        kv_cache_resouce->setReuseBlocksNum(1);
+    }
+    {
+        const int gpu_reuse_num = static_cast<int>(kv_cache_resouce->reuseBlocksNum());  // 1
+        const int matched_num   = static_cast<int>(match_context->matchedBlockCount());  // 3
+        auto      read_meta     = std::make_shared<TestReadMeta>(gpu_reuse_num + 3, matched_num - gpu_reuse_num - 3);
+
+        auto read_context = remote_connectors_[tp_rank]->asyncRead(kv_cache_resouce, read_meta, match_context);
+        waitAsyncContextDone(read_context);
+        ASSERT_TRUE(read_context->success());
+    }
 }
 
 TEST_F(RemoteConnectorMockFullLinearTest, test_read_success_broadcast_success_with_part_empty_linear) {
@@ -201,14 +301,22 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_read_success_broadcast_success_wi
         .WillOnce(Return(MatchLocationReturnType({ClientErrorCode::ER_OK, expected_locations})));
 
     UriStrVec          expected_uris        = genUris({2, 3}, {1});
-    BlockBuffersExpect block_buffers_expect = {4, kFakeLayerNum, kFakeIovSize};
+    BlockBuffersExpect block_buffers_expect = {4, kFakeLayerNum * 2, kFakeIovSize};
     EXPECT_CALL(*transfer_client_, LoadKvCaches(Eq(expected_uris), BlockBuffersMatcher(block_buffers_expect)))
         .WillOnce(Return(ClientErrorCode::ER_OK));
 
-    auto async_context = remote_connectors_[tp_rank]->asyncRead(kv_cache_resouce, meta);
-    async_context->waitDone();
-    ASSERT_TRUE(async_context->success());
-    ASSERT_EQ(3, kv_cache_resouce->reuseBlocksNum());
+    auto match_context = remote_connectors_[tp_rank]->asyncMatch(kv_cache_resouce, meta);
+    waitAsyncContextDone(match_context);
+    ASSERT_TRUE(match_context->success());
+    ASSERT_EQ(match_context->matchedBlockCount(), 4);
+
+    const int gpu_reuse_num = static_cast<int>(kv_cache_resouce->reuseBlocksNum());  // 1
+    const int matched_num   = static_cast<int>(match_context->matchedBlockCount());  // 4
+    auto      read_meta     = std::make_shared<TestReadMeta>(gpu_reuse_num, matched_num - gpu_reuse_num);
+
+    auto read_context = remote_connectors_[tp_rank]->asyncRead(kv_cache_resouce, read_meta, match_context);
+    waitAsyncContextDone(read_context);
+    ASSERT_TRUE(read_context->success());
 }
 
 TEST_F(RemoteConnectorMockFullLinearTest, test_read_success_broadcast_success_with_all_empty_linear) {
@@ -234,10 +342,18 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_read_success_broadcast_success_wi
 
     EXPECT_CALL(*transfer_client_, LoadKvCaches(_, _)).Times(0);
 
-    auto async_context = remote_connectors_[tp_rank]->asyncRead(kv_cache_resouce, meta);
-    async_context->waitDone();
-    ASSERT_TRUE(async_context->success());
-    ASSERT_EQ(1, kv_cache_resouce->reuseBlocksNum());
+    auto match_context = remote_connectors_[tp_rank]->asyncMatch(kv_cache_resouce, meta);
+    waitAsyncContextDone(match_context);
+    ASSERT_TRUE(match_context->success());
+    ASSERT_EQ(match_context->matchedBlockCount(), 4);
+
+    const int gpu_reuse_num = static_cast<int>(kv_cache_resouce->reuseBlocksNum());  // 1
+    const int matched_num   = static_cast<int>(match_context->matchedBlockCount());  // 4
+    auto      read_meta     = std::make_shared<TestReadMeta>(gpu_reuse_num, matched_num - gpu_reuse_num);
+
+    auto read_context = remote_connectors_[tp_rank]->asyncRead(kv_cache_resouce, read_meta, match_context);
+    waitAsyncContextDone(read_context);
+    ASSERT_TRUE(read_context->success());
 }
 
 TEST_F(RemoteConnectorMockFullLinearTest, test_write_success_broadcast_success_actual_locations_different) {
@@ -263,7 +379,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_write_success_broadcast_success_a
     UriStrVec expected_uris = genUris({1, 2, 3}, {0, 1, 2});
     UriStrVec actual_uris   = genUris({1, 2, 3}, {0, 1, 2}, "actual_");
 
-    BlockBuffersExpect block_buffers_expect = {9, kFakeLayerNum, kFakeIovSize};
+    BlockBuffersExpect block_buffers_expect = {9, kFakeLayerNum * 2, kFakeIovSize};
     EXPECT_CALL(*transfer_client_, SaveKvCaches(Eq(expected_uris), BlockBuffersMatcher(block_buffers_expect)))
         .WillOnce(Return(SaveKvCachesReturnType({ClientErrorCode::ER_OK, actual_uris})));
 
@@ -277,7 +393,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_write_success_broadcast_success_a
         .WillOnce(Return(ClientErrorCode::ER_OK));
 
     auto async_context = remote_connectors_[tp_rank]->asyncWrite(kv_cache_resouce, meta);
-    async_context->waitDone();
+    waitAsyncContextDone(async_context);
     ASSERT_TRUE(async_context->success());
 }
 
@@ -306,7 +422,7 @@ TEST_F(RemoteConnectorMockFullLinearTest,
     UriStrVec expected_uris = genUris({2, 3}, {0, 1});
     UriStrVec actual_uris   = genUris({2, 3}, {0, 1}, "actual_");
 
-    BlockBuffersExpect block_buffers_expect = {6, kFakeLayerNum, kFakeIovSize};
+    BlockBuffersExpect block_buffers_expect = {6, kFakeLayerNum * 2, kFakeIovSize};
     EXPECT_CALL(*transfer_client_, SaveKvCaches(Eq(expected_uris), BlockBuffersMatcher(block_buffers_expect)))
         .WillOnce(Return(SaveKvCachesReturnType({ClientErrorCode::ER_OK, actual_uris})));
 
@@ -320,7 +436,7 @@ TEST_F(RemoteConnectorMockFullLinearTest,
         .WillOnce(Return(ClientErrorCode::ER_OK));
 
     auto async_context = remote_connectors_[tp_rank]->asyncWrite(kv_cache_resouce, meta);
-    async_context->waitDone();
+    waitAsyncContextDone(async_context);
     ASSERT_TRUE(async_context->success());
 }
 
@@ -350,7 +466,7 @@ TEST_F(RemoteConnectorMockFullLinearTest,
     EXPECT_CALL(*meta_clients_[tp_rank], FinishWrite(_, _, _, _)).Times(0);
 
     auto async_context = remote_connectors_[tp_rank]->asyncWrite(kv_cache_resouce, meta);
-    async_context->waitDone();
+    waitAsyncContextDone(async_context);
     ASSERT_TRUE(async_context->success());
 }
 
@@ -379,7 +495,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_write_success_broadcast_success_w
     UriStrVec expected_uris = genUris({2, 3, 4}, {1, 2});
     UriStrVec actual_uris   = genUris({2, 3, 4}, {1, 2}, "actual_");
 
-    BlockBuffersExpect block_buffers_expect = {7, kFakeLayerNum, kFakeIovSize};
+    BlockBuffersExpect block_buffers_expect = {7, kFakeLayerNum * 2, kFakeIovSize};
     EXPECT_CALL(*transfer_client_, SaveKvCaches(Eq(expected_uris), BlockBuffersMatcher(block_buffers_expect)))
         .WillOnce(Return(SaveKvCachesReturnType({ClientErrorCode::ER_OK, actual_uris})));
 
@@ -393,7 +509,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_write_success_broadcast_success_w
         .WillOnce(Return(ClientErrorCode::ER_OK));
 
     auto async_context = remote_connectors_[tp_rank]->asyncWrite(kv_cache_resouce, meta);
-    async_context->waitDone();
+    waitAsyncContextDone(async_context);
     ASSERT_TRUE(async_context->success());
 }
 
@@ -422,7 +538,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_write_success_broadcast_success_w
     UriStrVec expected_uris = genUris({2, 3, 4}, {});
     UriStrVec actual_uris   = genUris({2, 3, 4}, {}, "actual_");
 
-    BlockBuffersExpect block_buffers_expect = {3, kFakeLayerNum, kFakeIovSize};
+    BlockBuffersExpect block_buffers_expect = {3, kFakeLayerNum * 2, kFakeIovSize};
     EXPECT_CALL(*transfer_client_, SaveKvCaches(Eq(expected_uris), BlockBuffersMatcher(block_buffers_expect)))
         .WillOnce(Return(SaveKvCachesReturnType({ClientErrorCode::ER_OK, actual_uris})));
 
@@ -436,7 +552,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_write_success_broadcast_success_w
         .WillOnce(Return(ClientErrorCode::ER_OK));
 
     auto async_context = remote_connectors_[tp_rank]->asyncWrite(kv_cache_resouce, meta);
-    async_context->waitDone();
+    waitAsyncContextDone(async_context);
     ASSERT_TRUE(async_context->success());
 }
 
@@ -462,7 +578,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_write_success_broadcast_success_a
 
     UriStrVec expected_uris = genUris({1, 2, 3}, {0, 1, 2});
 
-    BlockBuffersExpect block_buffers_expect = {9, kFakeLayerNum, kFakeIovSize};
+    BlockBuffersExpect block_buffers_expect = {9, kFakeLayerNum * 2, kFakeIovSize};
     EXPECT_CALL(*transfer_client_, SaveKvCaches(Eq(expected_uris), BlockBuffersMatcher(block_buffers_expect)))
         .WillOnce(Return(SaveKvCachesReturnType({ClientErrorCode::ER_OK, expected_uris})));
 
@@ -475,7 +591,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_write_success_broadcast_success_a
         .WillOnce(Return(ClientErrorCode::ER_OK));
 
     auto async_context = remote_connectors_[tp_rank]->asyncWrite(kv_cache_resouce, meta);
-    async_context->waitDone();
+    waitAsyncContextDone(async_context);
     ASSERT_TRUE(async_context->success());
 }
 
@@ -499,12 +615,13 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_match_fail) {
         .WillOnce(Return(MatchLocationReturnType({ClientErrorCode::ER_INVALID_GRPCSTATUS, {}})));
 
     EXPECT_CALL(*transfer_client_, LoadKvCaches(_, _)).Times(0);
-    auto async_context = remote_connectors_[tp_rank]->asyncRead(kv_cache_resouce, meta);
-    async_context->waitDone();
-    ASSERT_TRUE(async_context->success());
-    auto remote_async_context = std::dynamic_pointer_cast<RemoteConnectorAsyncContext>(async_context);
-    ASSERT_NE(nullptr, remote_async_context);
-    ASSERT_EQ(RemoteConnectorAsyncContext::State::RCS_READ_MATCH_ERROR, remote_async_context->state());
+
+    auto match_context = remote_connectors_[tp_rank]->asyncMatch(kv_cache_resouce, meta);
+    waitAsyncContextDone(match_context);
+    ASSERT_TRUE(match_context->success());
+    auto context = std::dynamic_pointer_cast<RemoteAsyncMatchContext>(match_context);
+    ASSERT_NE(nullptr, context);
+    ASSERT_EQ(RemoteConnectorAsyncContext::State::RCS_READ_MATCH_ERROR, context->state());
 }
 
 TEST_F(RemoteConnectorMockFullLinearTest, test_match_success_load_fail) {
@@ -527,16 +644,25 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_match_success_load_fail) {
                               ))
         .WillOnce(Return(MatchLocationReturnType({ClientErrorCode::ER_OK, expected_locations})));
     UriStrVec          expected_uris        = genUris({1, 2, 3}, {2});
-    BlockBuffersExpect block_buffers_expect = {5, kFakeLayerNum, kFakeIovSize};
+    BlockBuffersExpect block_buffers_expect = {5, kFakeLayerNum * 2, kFakeIovSize};
     EXPECT_CALL(*transfer_client_, LoadKvCaches(Eq(expected_uris), BlockBuffersMatcher(block_buffers_expect)))
         .WillOnce(Return(ClientErrorCode::ER_SDK_TIMEOUT));
 
-    auto async_context = remote_connectors_[tp_rank]->asyncRead(kv_cache_resouce, meta);
-    async_context->waitDone();
-    ASSERT_FALSE(async_context->success());
-    auto remote_async_context = std::dynamic_pointer_cast<RemoteConnectorAsyncContext>(async_context);
-    ASSERT_NE(nullptr, remote_async_context);
-    ASSERT_EQ(RemoteConnectorAsyncContext::State::RCS_ERROR, remote_async_context->state());
+    auto match_context = remote_connectors_[tp_rank]->asyncMatch(kv_cache_resouce, meta);
+    waitAsyncContextDone(match_context);
+    ASSERT_TRUE(match_context->success());
+    ASSERT_EQ(match_context->matchedBlockCount(), 3);
+
+    const int gpu_reuse_num = static_cast<int>(kv_cache_resouce->reuseBlocksNum());  // 0
+    const int matched_num   = static_cast<int>(match_context->matchedBlockCount());  // 3
+    auto      read_meta     = std::make_shared<TestReadMeta>(gpu_reuse_num, matched_num - gpu_reuse_num);
+
+    auto read_context = remote_connectors_[tp_rank]->asyncRead(kv_cache_resouce, read_meta, match_context);
+    waitAsyncContextDone(read_context);
+    ASSERT_FALSE(read_context->success());
+    auto context = std::dynamic_pointer_cast<RemoteConnectorAsyncContext>(read_context);
+    ASSERT_NE(nullptr, context);
+    ASSERT_EQ(RemoteConnectorAsyncContext::State::RCS_ERROR, context->state());
 }
 
 TEST_F(RemoteConnectorMockFullLinearTest, test_match_success_broadcast_grpc_fail) {
@@ -561,12 +687,19 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_match_success_broadcast_grpc_fail
     EXPECT_CALL(*transfer_client_, LoadKvCaches(_, _)).Times(0);
 
     servers_[tp_rank]->hack_grpc_status(true);
-    auto async_context = remote_connectors_[tp_rank]->asyncRead(kv_cache_resouce, meta);
-    async_context->waitDone();
-    ASSERT_FALSE(async_context->success());
-    auto remote_async_context = std::dynamic_pointer_cast<RemoteConnectorAsyncContext>(async_context);
-    ASSERT_NE(nullptr, remote_async_context);
-    ASSERT_EQ(RemoteConnectorAsyncContext::State::RCS_ERROR, remote_async_context->state());
+    auto match_context = remote_connectors_[tp_rank]->asyncMatch(kv_cache_resouce, meta);
+    waitAsyncContextDone(match_context);
+    ASSERT_TRUE(match_context->success());
+    ASSERT_EQ(match_context->matchedBlockCount(), 3);
+    const int gpu_reuse_num = static_cast<int>(kv_cache_resouce->reuseBlocksNum());  // 0
+    const int matched_num   = static_cast<int>(match_context->matchedBlockCount());  // 3
+    auto      read_meta     = std::make_shared<TestReadMeta>(gpu_reuse_num, matched_num - gpu_reuse_num);
+    auto      read_context  = remote_connectors_[tp_rank]->asyncRead(kv_cache_resouce, read_meta, match_context);
+    waitAsyncContextDone(read_context);
+    ASSERT_FALSE(read_context->success());
+    auto context = std::dynamic_pointer_cast<RemoteConnectorAsyncContext>(read_context);
+    ASSERT_NE(nullptr, context);
+    ASSERT_EQ(RemoteConnectorAsyncContext::State::RCS_ERROR, context->state());
 }
 
 TEST_F(RemoteConnectorMockFullLinearTest, test_start_write_fail) {
@@ -593,7 +726,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_start_write_fail) {
     EXPECT_CALL(*meta_clients_[tp_rank], FinishWrite(_, _, _, _)).Times(0);
 
     auto async_context = remote_connectors_[tp_rank]->asyncWrite(kv_cache_resouce, meta);
-    async_context->waitDone();
+    waitAsyncContextDone(async_context);
     ASSERT_FALSE(async_context->success());
     auto remote_async_context = std::dynamic_pointer_cast<RemoteConnectorAsyncContext>(async_context);
     ASSERT_NE(nullptr, remote_async_context);
@@ -613,7 +746,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_write_invalid_block_ids) {
     EXPECT_CALL(*meta_clients_[tp_rank], FinishWrite(_, _, _, _)).Times(0);
 
     auto async_context = remote_connectors_[tp_rank]->asyncWrite(kv_cache_resouce, meta);
-    async_context->waitDone();
+    waitAsyncContextDone(async_context);
     ASSERT_FALSE(async_context->success());
     auto remote_async_context = std::dynamic_pointer_cast<RemoteConnectorAsyncContext>(async_context);
     ASSERT_NE(nullptr, remote_async_context);
@@ -641,7 +774,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_start_write_success_broadcast_suc
         .WillOnce(Return(StartWriteReturnType({ClientErrorCode::ER_OK, write_location})));
 
     UriStrVec          expected_uris        = genUris({1, 2, 3}, {0, 1, 2});
-    BlockBuffersExpect block_buffers_expect = {9, kFakeLayerNum, kFakeIovSize};
+    BlockBuffersExpect block_buffers_expect = {9, kFakeLayerNum * 2, kFakeIovSize};
     EXPECT_CALL(*transfer_client_, SaveKvCaches(Eq(expected_uris), BlockBuffersMatcher(block_buffers_expect)))
         .WillOnce(Return(SaveKvCachesReturnType({ClientErrorCode::ER_OK, expected_uris})));
 
@@ -654,7 +787,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_start_write_success_broadcast_suc
         .WillOnce(Return(ClientErrorCode::ER_INVALID_GRPCSTATUS));
 
     auto async_context = remote_connectors_[tp_rank]->asyncWrite(kv_cache_resouce, meta);
-    async_context->waitDone();
+    waitAsyncContextDone(async_context);
     ASSERT_FALSE(async_context->success());
     auto remote_async_context = std::dynamic_pointer_cast<RemoteConnectorAsyncContext>(async_context);
     ASSERT_NE(nullptr, remote_async_context);
@@ -682,7 +815,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_start_write_success_broadcast_suc
         .WillOnce(Return(StartWriteReturnType({ClientErrorCode::ER_OK, write_location})));
 
     UriStrVec          expected_uris        = genUris({1, 2, 3}, {0, 1, 2});
-    BlockBuffersExpect block_buffers_expect = {9, kFakeLayerNum, kFakeIovSize};
+    BlockBuffersExpect block_buffers_expect = {9, kFakeLayerNum * 2, kFakeIovSize};
     EXPECT_CALL(*transfer_client_, SaveKvCaches(Eq(expected_uris), BlockBuffersMatcher(block_buffers_expect)))
         .WillOnce(Return(SaveKvCachesReturnType({ClientErrorCode::ER_SDK_TIMEOUT, UriStrVec({})})));
 
@@ -695,7 +828,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_start_write_success_broadcast_suc
         .WillOnce(Return(ClientErrorCode::ER_OK));
 
     auto async_context = remote_connectors_[tp_rank]->asyncWrite(kv_cache_resouce, meta);
-    async_context->waitDone();
+    waitAsyncContextDone(async_context);
     ASSERT_FALSE(async_context->success());
     auto remote_async_context = std::dynamic_pointer_cast<RemoteConnectorAsyncContext>(async_context);
     ASSERT_NE(nullptr, remote_async_context);
@@ -734,7 +867,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_start_write_success_broadcast_grp
 
     servers_[tp_rank]->hack_grpc_status(true);
     auto async_context = remote_connectors_[tp_rank]->asyncWrite(kv_cache_resouce, meta);
-    async_context->waitDone();
+    waitAsyncContextDone(async_context);
     ASSERT_FALSE(async_context->success());
     auto remote_async_context = std::dynamic_pointer_cast<RemoteConnectorAsyncContext>(async_context);
     ASSERT_NE(nullptr, remote_async_context);
@@ -757,7 +890,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_threadpool_full) {
 
     EXPECT_CALL(*meta_clients_[tp_rank], MatchLocation(_, _, _, _, _, _, _)).Times(0);
     EXPECT_CALL(*transfer_client_, LoadKvCaches(_, _)).Times(0);
-    ASSERT_EQ(nullptr, remote_connectors_[tp_rank]->asyncRead(kv_cache_resouce, meta));
+    ASSERT_EQ(nullptr, remote_connectors_[tp_rank]->asyncMatch(kv_cache_resouce, meta));
 
     EXPECT_CALL(*meta_clients_[tp_rank], StartWrite(_, _, _, _, _)).Times(0);
     EXPECT_CALL(*transfer_client_, SaveKvCaches(_, _)).Times(0);

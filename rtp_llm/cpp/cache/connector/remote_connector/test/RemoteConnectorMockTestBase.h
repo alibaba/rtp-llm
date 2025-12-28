@@ -1,12 +1,11 @@
 #pragma once
 
 #include "MockKVCMClient.h"
-#include "rtp_llm/cpp/cache_new/remote_connector/RemoteConnector.h"
+#include "rtp_llm/cpp/cache/connector/remote_connector/RemoteConnector.h"
 #include "rtp_llm/cpp/utils/Logger.h"
-#include "rtp_llm/cpp/config/GptInitParameter.h"
 #include "rtp_llm/cpp/devices/DeviceBase.h"
 #include "rtp_llm/cpp/devices/DeviceFactory.h"
-#include "rtp_llm/cpp/cache_new/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "autil/EnvUtil.h"
 
 using namespace kv_cache_manager;
@@ -24,9 +23,9 @@ constexpr static size_t kFakeIovSize  = 1024;
 
 class FakeRpcService final: public RpcService::Service {
 public:
-    ::grpc::Status CopyCache(::grpc::ServerContext*      context,
-                             const ::CopyCacheRequestPB* request,
-                             ::CopyCacheResponsePB*      response) override {
+    ::grpc::Status BroadcastTp(::grpc::ServerContext*        context,
+                               const ::BroadcastTpRequestPB* request,
+                               ::BroadcastTpResponsePB*      response) override {
         if (hack_) {
             return ::grpc::Status(::grpc::StatusCode::INTERNAL, "grpc_error");
         }
@@ -129,9 +128,35 @@ protected:
     }
 
     void initDevice() {
-        gpt_init_params_.device_resource_config.device_reserve_memory_bytes = device_reserve_memory_size_;
-        gpt_init_params_.device_resource_config.host_reserve_memory_bytes   = host_reserve_memory_size_;
-        rtp_llm::DeviceFactory::initDevices(gpt_init_params_);
+        ParallelismConfig    parallelism_config;
+        ModelConfig          model_config;
+        EPLBConfig           eplb_config;
+        FMHAConfig           fmha_config;
+        DeviceResourceConfig device_resource_config;
+        device_resource_config.device_reserve_memory_bytes = device_reserve_memory_size_;
+        device_resource_config.host_reserve_memory_bytes   = host_reserve_memory_size_;
+        MoeConfig                   moe_config;
+        SpeculativeExecutionConfig  sp_config;
+        MiscellaneousConfig         misc_config;
+        ProfilingDebugLoggingConfig profiling_debug_logging_config;
+        HWKernelConfig              hw_kernel_config;
+        ConcurrencyConfig           concurrency_config;
+        FfnDisAggregateConfig       ffn_disaggregate_config;
+        RuntimeConfig               runtime_config;
+
+        DeviceFactory::initDevices(parallelism_config,
+                                   model_config,
+                                   eplb_config,
+                                   fmha_config,
+                                   device_resource_config,
+                                   moe_config,
+                                   sp_config,
+                                   misc_config,
+                                   profiling_debug_logging_config,
+                                   hw_kernel_config,
+                                   concurrency_config,
+                                   ffn_disaggregate_config,
+                                   runtime_config);
         device_ = rtp_llm::DeviceFactory::getDefaultDevice();
     }
     void initServer() {
@@ -142,7 +167,7 @@ protected:
             server_addrs_.push_back("127.0.0.1:" + std::to_string(server->listenPort()));
             servers_.push_back(std::move(server));
         }
-        gpt_init_params_.worker_grpc_addrs_ = server_addrs_;
+        runtime_config_.worker_grpc_addrs = server_addrs_;
     }
 
     UriStrVec genUris(const CacheKeysType&       cache_keys,
@@ -213,7 +238,9 @@ protected:
     }
 
     CacheConfig                                         cache_config_;
-    GptInitParameter                                    gpt_init_params_;
+    KVCacheConfig                                       kv_cache_config_;
+    RuntimeConfig                                       runtime_config_;
+    ParallelismConfig                                   parallelism_config_;
     DeviceBase*                                         device_ = nullptr;
     std::vector<std::shared_ptr<RemoteConnector>>       remote_connectors_;
     std::vector<std::unique_ptr<FakeRpcServer>>         servers_;

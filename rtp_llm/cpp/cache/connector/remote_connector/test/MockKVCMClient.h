@@ -2,8 +2,8 @@
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
-#include "rtp_llm/cpp/cache_new/remote_connector/ClientFactory.h"
-#include "rtp_llm/cpp/cache_new/remote_connector/DirectSubscriber.h"
+#include "rtp_llm/cpp/cache/connector/remote_connector/ClientFactory.h"
+#include "rtp_llm/cpp/cache/connector/remote_connector/DirectSubscriber.h"
 
 namespace kv_cache_manager {
 

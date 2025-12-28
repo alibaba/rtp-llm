@@ -104,6 +104,14 @@ public:
         this->reuse_blocks_num = reuse_blocks_num;
     }
 
+    size_t remoteReuseBlocksNum() const {
+        return reuse_blocks_num;
+    }
+
+    void setRemoteReuseBlocksNum(size_t remote_reuse_blocks_num) {
+        this->remote_reuse_blocks_num = remote_reuse_blocks_num;
+    }
+
     std::string debugString() const {
         std::stringstream debug_string;
         for (int group_id = 0; group_id < group_block_ids.size(); group_id++) {
@@ -126,6 +134,8 @@ private:
     CacheKeysType cache_keys;
     // reuse blocks num
     size_t reuse_blocks_num{0};
+    // remote reuse blocks num
+    size_t remote_reuse_blocks_num{0};
 };
 
 class BatchKVCacheResource {

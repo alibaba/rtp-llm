@@ -2,9 +2,9 @@
 #include <bitset>
 #include <algorithm>
 #include <typeinfo>
-#include "rtp_llm/cpp/cache_new/remote_connector/GroupPolicy.h"
-#include "rtp_llm/cpp/cache_new/types.h"
-#include "rtp_llm/cpp/cache_new/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/connector/remote_connector/GroupPolicy.h"
+#include "rtp_llm/cpp/cache/types.h"
+#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -141,17 +141,19 @@ bool DefaultLayerGroupPolicy::genBlockBuffers(const std::vector<int32_t>&     gr
         iovs.reserve(layer_ids.size() * 2);
         for (size_t j = 0; j < layer_ids.size(); ++j) {
             const auto& buffer = allocator_->convertIndexToBuffer(layer_ids[j], block_ids[i]);
-            if (buffer.k_addr == nullptr || buffer.v_addr == nullptr || buffer.k_addr->data() == nullptr
-                || buffer.v_addr->data() == nullptr) {
+            if (buffer.kv_addr == nullptr || buffer.kv_addr->data() == nullptr) {
                 RTP_LLM_LOG_WARNING(
                     "convertIndexToBuffer failed layer_id [%d] block_id[%d]", layer_ids[j], block_ids[i]);
                 return false;
             }
             iovs.push_back(
-                {kv_cache_manager::MemoryType::GPU, buffer.k_addr->data(), buffer.k_addr->sizeBytes(), false});
-            if (buffer.v_addr->data() != buffer.k_addr->data()) {
-                iovs.push_back(
-                    {kv_cache_manager::MemoryType::GPU, buffer.v_addr->data(), buffer.v_addr->sizeBytes(), false});
+                {kv_cache_manager::MemoryType::GPU, buffer.kv_addr->data(), buffer.kv_addr->sizeBytes(), false});
+
+            if (buffer.kv_scale_addr != nullptr && buffer.kv_scale_addr->data() != nullptr) {
+                iovs.push_back({kv_cache_manager::MemoryType::GPU,
+                                buffer.kv_scale_addr->data(),
+                                buffer.kv_scale_addr->sizeBytes(),
+                                false});
             }
         }
     }

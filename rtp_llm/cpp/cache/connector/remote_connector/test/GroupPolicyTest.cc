@@ -2,8 +2,8 @@
 #include <gtest/gtest.h>
 
 #include "rtp_llm/cpp/utils/Logger.h"
-#include "rtp_llm/cpp/cache_new/KVCacheAllocator.h"
-#include "rtp_llm/cpp/cache_new/remote_connector/GroupPolicy.h"
+#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/connector/remote_connector/GroupPolicy.h"
 
 using namespace rtp_llm;
 using namespace rtp_llm::remote_connector;
@@ -64,11 +64,17 @@ public:
     convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const override {
         return {};
     }
-    void incrKVCacheRef(KVCacheResourceV1& kvcache_resource, const CacheKeysType& cache_keys) override {}
+    std::shared_ptr<KVCacheResourceV1> incrKVCacheRef(const KVCacheResourceV1& kvcache_resource,
+                                                      const CacheKeysType&     cache_keys) {
+        return nullptr;
+    }
+    void decrKVCacheRef(const KVCacheResourceV1& kvcache_resource) {
+        return;
+    }
     bool updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                        const std::vector<int>&        block_src_batch,
                        bool                           copy_last_block,
-                       std::vector<BlockIdPair>&      block_update_mapping) override {
+                       std::vector<BlockIdPair>&      block_update_mapping) {
         return false;
     }
     int seqSizePerBlock() const override {

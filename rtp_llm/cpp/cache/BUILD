@@ -93,16 +93,14 @@ cc_library(
 )
 
 cc_library(
-    name = "cache",
+    name = "cache_core",
     srcs = [
         "CacheConfigCreator.cc",
         "KVCacheHashUtil.cc",
-        "KVCacheManager.cc",
     ],
     hdrs = [
         "CacheConfigCreator.h",
         "KVCacheHashUtil.h",
-        "KVCacheManager.h",
         "WarmUpResult.h",
     ],
     copts = copts(),
@@ -111,13 +109,14 @@ cc_library(
         ":batch_kv_cache_resource",
         ":cache_types",
         ":kv_cache_allocator",
-        "//rtp_llm/cpp/cache/connector",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/config:model_config",
         "//rtp_llm/cpp/core:buffer",
         "//rtp_llm/cpp/core:buffer_torch",
         "//rtp_llm/cpp/disaggregate/cache_store",
         "//rtp_llm/cpp/metrics",
+        "//rtp_llm/cpp/model_rpc:model_rpc_pool",
+        "//rtp_llm/cpp/model_rpc:rpc_error_code",
         "//rtp_llm/cpp/utils:hash_util",
         "//rtp_llm/cpp/utils:kv_cache_utils",
         "@com_google_absl//absl/status",
@@ -140,4 +139,20 @@ cc_library(
     deps = [
         "//3rdparty/3fs:hf3fs",
     ],
+)
+
+cc_library(
+    name = "cache",
+    srcs = [
+        "KVCacheManager.cc",
+    ],
+    hdrs = [
+        "KVCacheManager.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":cache_core",
+        "//rtp_llm/cpp/cache/connector",
+    ] + torch_deps(),
 )

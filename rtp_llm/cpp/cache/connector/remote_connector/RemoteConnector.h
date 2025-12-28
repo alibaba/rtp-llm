@@ -10,11 +10,11 @@
 #include <future>
 
 #include "autil/LockFreeThreadPool.h"
-#include "rtp_llm/cpp/cache_new/BatchKVCacheResource.h"
-#include "rtp_llm/cpp/cache_new/CacheConfig.h"
-#include "rtp_llm/cpp/cache_new/KVCacheConnector.h"
-#include "rtp_llm/cpp/cache_new/remote_connector/ClientWrapper.h"
-#include "rtp_llm/cpp/cache_new/remote_connector/GroupPolicy.h"
+#include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
+#include "rtp_llm/cpp/cache/connector/remote_connector/ClientWrapper.h"
+#include "rtp_llm/cpp/cache/connector/remote_connector/GroupPolicy.h"
 #include "rtp_llm/cpp/model_rpc/TpBroadcastManager.h"
 #include "kmonitor/client/MetricsReporter.h"
 
@@ -22,7 +22,6 @@ namespace rtp_llm {
 
 class KVCacheAllocator;
 class DeviceBase;
-class GptInitParameter;
 class RemoteAsyncMatchContext;
 class RemoteConnectorAsyncContext;
 
@@ -48,7 +47,9 @@ struct RemoteConnectorMeta: public KVCacheConnector::Meta {
 class RemoteConnector: public KVCacheConnector {
 public:
     RemoteConnector(const CacheConfig&                 cache_config,
-                    const GptInitParameter&            model_parameter,
+                    const KVCacheConfig&               kv_cache_config,
+                    const RuntimeConfig&               runtime_config,
+                    const ParallelismConfig&           parallelism_config,
                     DeviceBase*                        device,
                     void*                              register_buffer_addr,
                     size_t                             register_buffer_size,
@@ -63,7 +64,7 @@ public:
                     const std::map<std::string, std::string>& lora_info_map = {});
     ~RemoteConnector() override;
 
-    bool init() override;
+    bool init();
 
     // for rank_0:
     std::shared_ptr<AsyncMatchContext> asyncMatch(const std::shared_ptr<KVCacheResourceV1>& resource,
@@ -78,7 +79,7 @@ public:
                                                          const std::shared_ptr<Meta>&              meta) override;
 
     // for all rank:
-    bool copyCache(const RemoteCopyCacheRequestPB& request, RemoteCopyCacheResponsePB& response);
+    bool copyCache(const RemoteBroadcastTpRequestPB& request, RemoteBroadcastTpResponsePB& response);
 
 private:
     // for rank_0:
@@ -99,14 +100,14 @@ private:
                         const kv_cache_manager::BlockMaskOffset&  block_mask,
                         const std::string&                        trace_id,
                         const std::shared_ptr<KVCacheResourceV1>& resource,
-                        std::vector<CopyCacheRequestPB>&          requests,
+                        std::vector<BroadcastTpRequestPB>&        requests,
                         size_t&                                   new_reuse_block_num) const;
     bool genWriteRequest(size_t                                    tp_size,
                          const kv_cache_manager::Locations&        locations,
                          const kv_cache_manager::BlockMask&        block_mask,
                          const std::string&                        trace_id,
                          const std::shared_ptr<KVCacheResourceV1>& resource,
-                         std::vector<CopyCacheRequestPB>&          requests,
+                         std::vector<BroadcastTpRequestPB>&        requests,
                          ActualUriGather&                          actual_uri_gather) const;
     // for all_rank:
     bool Read(const std::string&                 trace_id,
@@ -129,7 +130,9 @@ private:
 private:
     struct InitParams {
         const CacheConfig&                 cache_config;
-        const GptInitParameter&            model_parameter;
+        const KVCacheConfig&               kv_cache_config;
+        const RuntimeConfig&               runtime_config;
+        const ParallelismConfig&           parallelism_config;
         DeviceBase*                        device;
         void*                              register_buffer_addr;
         size_t                             register_buffer_size;
@@ -194,7 +197,9 @@ public:
 
     bool   done() const override;
     bool   success() const override;
-    size_t matchedBlockCount() const override;
+    size_t matchedBlockCount() const override {
+        return matched_block_count_;
+    }
 
     KVCacheConnector::ConnectorType connectorType() const override {
         return KVCacheConnector::ConnectorType::Remote;
@@ -218,8 +223,12 @@ private:
     inline size_t prev_reuse_blocks_num() const {
         return prev_reuse_blocks_num_;
     }
+    inline void set_matched_block_count(size_t matched_block_count) {
+        matched_block_count_ = matched_block_count;
+    }
 
     size_t                                       prev_reuse_blocks_num_ = 0;
+    size_t                                       matched_block_count_   = 0;
     std::shared_ptr<kv_cache_manager::Locations> locations_ptr_ = std::make_shared<kv_cache_manager::Locations>();
     std::string                                  trace_id_;
 };

@@ -5,8 +5,7 @@
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
 #include "rtp_llm/cpp/cache/connector/memory/KVCacheMemoryConnector.h"
-#include "rtp_llm/cpp/cache/remote_connector/RemoteConnector.h"
-#include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
+#include "rtp_llm/cpp/cache/connector/remote_connector/RemoteConnector.h"
 
 namespace rtp_llm {
 
@@ -32,12 +31,14 @@ private:
 KVCacheConnectorCoordinator::KVCacheConnectorCoordinator(const CacheConfig&                       cache_config,
                                                          const KVCacheConfig&                     kv_cache_config,
                                                          const RuntimeConfig&                     runtime_config,
+                                                         const ParallelismConfig&                 parallelism_config,
                                                          const std::shared_ptr<KVCacheAllocator>& allocator,
                                                          rtp_llm::DeviceBase*                     device,
                                                          const kmonitor::MetricsReporterPtr&      metrics_reporter):
     cache_config_(cache_config),
     kv_cache_config_(kv_cache_config),
     runtime_config_(runtime_config),
+    parallelism_config_(parallelism_config),
     allocator_(allocator),
     device_(device),
     metrics_reporter_(metrics_reporter) {}
@@ -69,7 +70,7 @@ bool KVCacheConnectorCoordinator::init() {
             return false;
         }
     }
-    if (params_.kv_cache_config.enable_remote_cache) {
+    if (kv_cache_config_.enable_remote_cache) {
         if (!initRemoteConnector()) {
             RTP_LLM_LOG_ERROR("init remote connector failed");
             return false;
@@ -307,8 +308,10 @@ bool KVCacheConnectorCoordinator::initRemoteConnector() {
     // TODO : get register buffer base + size
     // TODO : get lora info map
     // TODO : support different group mode
-    remote_connector_ = std::make_shared<RemoteConnector>(config_,
-                                                          params_,
+    remote_connector_ = std::make_shared<RemoteConnector>(cache_config_,
+                                                          kv_cache_config_,
+                                                          runtime_config_,
+                                                          parallelism_config_,
                                                           device_,
                                                           nullptr,
                                                           0,
@@ -322,6 +325,8 @@ bool KVCacheConnectorCoordinator::initRemoteConnector() {
         remote_connector_.reset();
         return false;
     }
+
+    connectors_[KVCacheConnector::ConnectorType::Remote] = remote_connector_;
     return true;
 }
 
@@ -422,7 +427,7 @@ bool KVCacheConnectorCoordinator::broadcastTp(const BroadcastTpRequestPB& reques
     } else if (request.has_remote_request()) {
         if (!remote_connector_) {
             RTP_LLM_CHECK_WITH_INFO(
-                false, "copy cache failed, remote connector is null, request: [%s]", request.DebugString().c_str());
+                false, "broadcast failed, remote connector is null, request: [%s]", request.DebugString().c_str());
         }
         auto remote_connector = std::static_pointer_cast<RemoteConnector>(remote_connector_);
         return remote_connector->copyCache(request.remote_request(), *(response.mutable_remote_response()));

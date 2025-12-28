@@ -26,6 +26,7 @@ public:
     KVCacheConnectorCoordinator(const CacheConfig&                       cache_config,
                                 const KVCacheConfig&                     kv_cache_config,
                                 const RuntimeConfig&                     runtime_config,
+                                const ParallelismConfig&                 parallelism_config,
                                 const std::shared_ptr<KVCacheAllocator>& allocator,
                                 rtp_llm::DeviceBase*                     device,
                                 const kmonitor::MetricsReporterPtr&      metrics_reporter = nullptr);
@@ -62,6 +63,7 @@ private:
     const CacheConfig                 cache_config_;
     const KVCacheConfig               kv_cache_config_;
     const RuntimeConfig               runtime_config_;
+    const ParallelismConfig           parallelism_config_;
     std::shared_ptr<KVCacheAllocator> allocator_;
     rtp_llm::DeviceBase*              device_{nullptr};
     kmonitor::MetricsReporterPtr      metrics_reporter_;

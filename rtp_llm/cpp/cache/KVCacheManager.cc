@@ -314,7 +314,7 @@ bool KVCacheManager::initConnectorCoordinator() {
                      kv_cache_config_.to_string().c_str(),
                      runtime_config_.to_string().c_str());
     connector_coordinator_ = std::make_shared<KVCacheConnectorCoordinator>(
-        config_, kv_cache_config_, runtime_config_, allocator_, device_, metrics_reporter_);
+        config_, kv_cache_config_, runtime_config_, parallelism_config_, allocator_, device_, metrics_reporter_);
     if (!connector_coordinator_->init()) {
         RTP_LLM_LOG_WARNING("connector coordinator init failed");
         connector_coordinator_.reset();
@@ -348,7 +348,7 @@ KVCacheManager::asyncStoreCache(const std::shared_ptr<KVCacheConnectorReadWriteC
 }
 
 bool KVCacheManager::broadcastTp(const BroadcastTpRequestPB& request, BroadcastTpResponsePB& response) {
-    if (!request.has_mem_request()) {
+    if (!request.has_mem_request() && !request.has_remote_request()) {
         RTP_LLM_LOG_WARNING("broadcast tp failed, request is invalid, request: [%s]", request.DebugString().c_str());
         return false;
     }

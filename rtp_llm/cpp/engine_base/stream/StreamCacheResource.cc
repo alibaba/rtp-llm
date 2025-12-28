@@ -25,6 +25,9 @@ public:
     bool enableMemoryCache() const override {
         return stream_cache_resource_->enableMemoryBlockCache();
     }
+    bool enableRemoteCache() const override {
+        return stream_cache_resource_->enableRemoteCache();
+    }
 
 private:
     std::shared_ptr<StreamCacheResource> stream_cache_resource_;
@@ -71,8 +74,8 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
 
     if (total_blocks > 0) {
         // TODO(xinfei.sxf) fix it, after finshed and remote running commit.
-        if (reuseCache()) {
-            InsertInfo insert_info{batch_resource_, stream_->completeTokenIdsPtr(), false};
+        if (reuseCache() && enableDeviceCache()) {
+            InsertInfo insert_info{stream_->streamId(), batch_resource_, stream_->completeTokenIdsPtr(), false};
             resource_context_.cache_manager->insertIntoCache(insert_info);
         }
 
@@ -238,6 +241,7 @@ bool StreamCacheResource::loadCacheDone() {
     if (!load_cache_context_->done()) {
         return false;
     }
+    // TODO(zhoushipei.zsp) reuse_len to be fixed
     if (load_cache_context_->success()) {
         auto read_context = std::dynamic_pointer_cast<FusedAsyncReadContext>(load_cache_context_);
         if (read_context) {
@@ -246,7 +250,8 @@ bool StreamCacheResource::loadCacheDone() {
             stream_->setReuseLength(reuse_len);
             stream_->setLocalReuseLength(reuse_len);
             stream_->setMtpTokenIndex(reuse_len);
-            // TODO : set remote reuse len
+            const int remote_reuse_len = read_context->resource()->remoteReuseBlocksNum() * seqSizePerBlock();
+            stream_->setRemoteReuseLength(remote_reuse_len);
         } else {
             RTP_LLM_LOG_WARNING("load cache success but cast load cache context failed");
         }
@@ -256,7 +261,7 @@ bool StreamCacheResource::loadCacheDone() {
 }
 
 bool StreamCacheResource::asyncStoreCache() {
-    if (!enableMemoryBlockCache()) {
+    if (!enableMemoryBlockCache() && !enableRemoteCache()) {
         return false;
     }
     if (store_cache_context_) {

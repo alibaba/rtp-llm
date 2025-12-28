@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/cache_new/remote_connector/RemoteConnector.h"
+#include "rtp_llm/cpp/cache/connector/remote_connector/RemoteConnector.h"
 
 #include <atomic>
 #include <algorithm>
@@ -6,8 +6,7 @@
 #include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
-#include "rtp_llm/cpp/cache_new/KVCacheAllocator.h"
-#include "rtp_llm/cpp/config/GptInitParameter.h"
+#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/devices/DeviceBase.h"
 
 namespace rtp_llm {
@@ -158,12 +157,10 @@ bool RemoteAsyncMatchContext::success() const {
     return successImpl();
 }
 
-size_t RemoteAsyncMatchContext::matchedBlockCount() const {
-    return prev_reuse_blocks_num_ + locations_ptr_->size();
-}
-
 RemoteConnector::RemoteConnector(const CacheConfig&                        cache_config,
-                                 const GptInitParameter&                   model_parameter,
+                                 const KVCacheConfig&                      kv_cache_config,
+                                 const RuntimeConfig&                      runtime_config,
+                                 const ParallelismConfig&                  parallelism_config,
                                  DeviceBase*                               device,
                                  void*                                     register_buffer_addr,
                                  size_t                                    register_buffer_size,
@@ -177,8 +174,14 @@ RemoteConnector::RemoteConnector(const CacheConfig&                        cache
                                  size_t                                    sw_size,
                                  const std::map<std::string, std::string>& lora_info_map):
     metrics_reporter_(metrics_reporter) {
-    RemoteConnector::InitParams init_params{
-        cache_config, model_parameter, device, register_buffer_addr, register_buffer_size, lora_info_map};
+    RemoteConnector::InitParams init_params{cache_config,
+                                            kv_cache_config,
+                                            runtime_config,
+                                            parallelism_config,
+                                            device,
+                                            register_buffer_addr,
+                                            register_buffer_size,
+                                            lora_info_map};
     init_params_ = std::make_shared<RemoteConnector::InitParams>(std::move(init_params));
     switch (group_mode) {
         case RemoteConnectorGroupMode::RCGM_LAYER_DEFAULT: {
@@ -222,7 +225,8 @@ RemoteConnector::genLocationSpecInfoMapAndGroups(int64_t tp_size) {
     auto location_spec_info_map_ptr = std::make_shared<RemoteConnectorConfig::LocationSpecInfoMap>();
     // TODO : support different byte_size_per_block (transfer client not support now)
     // TODO : is this correct ?
-    size_t                   byte_size_per_block = init_params_->cache_config.block_size;
+    // TODO(zhoushipei.zsp) is this correct ? block_size --> block_size_bytes
+    size_t                   byte_size_per_block = init_params_->cache_config.block_size_bytes;
     std::vector<std::string> all_group_names;
     std::vector<uint64_t>    all_group_name_bithashs;
     all_group_names.reserve(group_size);
@@ -292,7 +296,7 @@ remote_connector::ClientWrapper::ConfigMap RemoteConnector::genClientConfig() {
     auto instance_group      = autil::EnvUtil::getEnv("RECO_INSTANCE_GROUP", std::string("default"));
     auto meta_channel_config = std::make_shared<MetaChannelConfig>(
         autil::EnvUtil::getEnv("RECO_META_CHANNEL_RETRY_TIME", (uint32_t)3),
-        autil::EnvUtil::getEnv("RECO_META_CHANNEL_CONNECTION_TIMEOUT", (uint32_t)1000),
+        autil::EnvUtil::getEnv("RECO_META_CHANNEL_CONNECTION_TIMEOUT", (uint32_t)6000),
         autil::EnvUtil::getEnv("RECO_META_CHANNEL_CALL_TIMEOUT", (uint32_t)100));
 
     auto sdk_wrapper_config =
@@ -307,13 +311,15 @@ remote_connector::ClientWrapper::ConfigMap RemoteConnector::genClientConfig() {
     uint32_t block_size = init_params_->cache_config.seq_size_per_block;
 
     // ModelDeployment
-    const auto& model_name = init_params_->model_parameter.model_name_;
-    const auto& dtype_str  = init_params_->model_parameter.data_type_str_;
-    bool        use_mla    = init_params_->model_parameter.use_mla_;
-    int64_t     tp_size    = init_params_->model_parameter.tp_size_;
-    int64_t     dp_size    = init_params_->model_parameter.dp_size_;
-    auto        user_data  = autil::EnvUtil::getEnv("RECO_MODEL_USER_DATA", std::string(""));
-    auto        extra_info = autil::EnvUtil::getEnv("RECO_MODEL_EXTRA_INFO", std::string(""));
+    const auto& model_name = init_params_->runtime_config.model_name;
+    const auto& dtype_str =
+        getDataTypeStr(init_params_->cache_config.cache_specs[0]->dtype);  // TODO(zhoushipei.zsp) is this right?
+    bool    use_mla      = init_params_->cache_config.use_mla;
+    int64_t tp_size      = init_params_->parallelism_config.tp_size;
+    int64_t dp_size      = init_params_->parallelism_config.dp_size;
+    int     fp8_kv_cache = init_params_->kv_cache_config.fp8_kv_cache;
+    auto    user_data    = autil::EnvUtil::getEnv("RECO_MODEL_USER_DATA", std::string(""));
+    auto    extra_info   = autil::EnvUtil::getEnv("RECO_MODEL_EXTRA_INFO", std::string(""));
     if (extra_info.empty()) {
         // legacy info
         auto biz_name  = autil::EnvUtil::getEnv("BIZ_NAME", std::string(""));
@@ -338,8 +344,8 @@ remote_connector::ClientWrapper::ConfigMap RemoteConnector::genClientConfig() {
         std::stringstream instance_id_hash_ss;
         instance_id_hash_ss << "instance_group: " << instance_group << "block_size:" << block_size
                             << ";model_name:" << model_name << ";dtype_str:" << dtype_str << ";use_mla:" << use_mla
-                            << ";tp_size:" << tp_size << ";dp_size:" << dp_size << ";extra_info:" << extra_info
-                            << ";lora_info:" << lora_info_str
+                            << ";fp8_kv_cache:" << fp8_kv_cache << ";tp_size:" << tp_size << ";dp_size:" << dp_size
+                            << ";extra_info:" << extra_info << ";lora_info:" << lora_info_str
                             << ";location_spec_info:" << autil::legacy::ToJsonString(location_spec_info_map, true);
         std::string instace_id_hash_str = instance_id_hash_ss.str();
         std::string instance_id_hash    = std::to_string(hashString(instace_id_hash_str));
@@ -413,7 +419,7 @@ bool RemoteConnector::init() {
     }
     get_broadcast_timeout_ = autil::EnvUtil::getEnv("RECO_GET_BROADCAST_TIMEOUT", get_broadcast_timeout_);
     put_broadcast_timeout_ = autil::EnvUtil::getEnv("RECO_PUT_BROADCAST_TIMEOUT", put_broadcast_timeout_);
-    broadcaster_           = std::make_shared<TpBroadcastManager>(init_params_->model_parameter.worker_grpc_addrs_);
+    broadcaster_           = std::make_shared<TpBroadcastManager>(init_params_->runtime_config.worker_grpc_addrs);
     if (!broadcaster_->init()) {
         RTP_LLM_LOG_ERROR("failed to init broadcast manager");
         return false;
@@ -506,20 +512,20 @@ std::shared_ptr<AsyncContext> RemoteConnector::asyncWriteByLayer(int            
     return nullptr;
 }
 
-bool RemoteConnector::copyCache(const RemoteCopyCacheRequestPB& request, RemoteCopyCacheResponsePB& response) {
+bool RemoteConnector::copyCache(const RemoteBroadcastTpRequestPB& request, RemoteBroadcastTpResponsePB& response) {
     const auto&                 trace_id = request.trace_id();
     std::vector<int32_t>        group_ids(request.group_ids().begin(), request.group_ids().end());
     std::vector<int32_t>        block_ids(request.block_ids().begin(), request.block_ids().end());
     kv_cache_manager::UriStrVec uris(request.uris().begin(), request.uris().end());
     switch (request.op()) {
-        case ::RemoteCopyCacheOp::REMOTE_BROADCAST_READ: {
+        case ::RemoteBroadcastTpOp::REMOTE_BROADCAST_READ: {
             if (!Read(trace_id, group_ids, block_ids, uris)) {
                 RTP_LLM_LOG_WARNING("broadcastTp Read failed");
                 return false;
             }
             break;
         }
-        case ::RemoteCopyCacheOp::REMOTE_BROADCAST_WRITE: {
+        case ::RemoteBroadcastTpOp::REMOTE_BROADCAST_WRITE: {
             kv_cache_manager::UriStrVec out_uris;
             if (!Write(trace_id, group_ids, block_ids, uris, out_uris)) {
                 RTP_LLM_LOG_WARNING("broadcastTp Write failed");
@@ -587,6 +593,8 @@ void RemoteConnector::asyncMatchTask(const std::shared_ptr<KVCacheResourceV1>&  
     CHECK_AND_LOG(match_result.first, RCS_READ_MATCH_ERROR, "asyncGet match failed, [%s]", match_trace_id.c_str());
     async_context->set_trace_id(match_trace_id);
     async_context->set_locations(std::move(match_result.second));
+    async_context->set_matched_block_count(async_context->locations_ptr()->size()
+                                           + async_context->prev_reuse_blocks_num());  // gpu + remote
     async_context->setState(RemoteConnectorAsyncContext::State::RCS_SUCCESS);
 }
 
@@ -597,6 +605,7 @@ void RemoteConnector::asyncReadTask(const std::shared_ptr<KVCacheResourceV1>&   
     RTP_LLM_LOG_DEBUG("asyncReadTask, [%d] [%zu]", resource->reuseBlocksNum(), resource->cacheKeys().size());
     const std::string& match_trace_id    = match_context->trace_id();
     auto [start_block_index, reuse_size] = meta->blockRange();
+    RTP_LLM_LOG_DEBUG("start_block_index:[%d], reuse_size:[%d]", start_block_index, reuse_size);
     assert(start_block_index >= match_context->prev_reuse_blocks_num());
     auto start_location_index =
         start_block_index - match_context->prev_reuse_blocks_num();  // prev_reuse_blocks_num only include gpu now
@@ -604,8 +613,8 @@ void RemoteConnector::asyncReadTask(const std::shared_ptr<KVCacheResourceV1>&   
     ReadMetricsHelper helper(match_trace_id, metrics_reporter_);
     RETURN_IF(start_location_index >= locations_ptr->size(), read);
 
-    std::vector<CopyCacheRequestPB> requests;
-    size_t                          new_reuse_block_num = 0;
+    std::vector<BroadcastTpRequestPB> requests;
+    size_t                            new_reuse_block_num = 0;
     CHECK_AND_LOG(genReadRequest(broadcaster_->workerNum(),
                                  *locations_ptr,
                                  start_block_index,
@@ -620,18 +629,20 @@ void RemoteConnector::asyncReadTask(const std::shared_ptr<KVCacheResourceV1>&   
     async_context->setState(RemoteConnectorAsyncContext::State::RCS_READ_BROADCAST);
     auto rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
                        const std::shared_ptr<grpc::ClientContext>& context,
-                       const CopyCacheRequestPB&                   request,
+                       const BroadcastTpRequestPB&                 request,
                        grpc::CompletionQueue*                      completion_queue) {
-        return stub->AsyncCopyCache(context.get(), request, completion_queue);
+        return stub->AsyncBroadcastTp(context.get(), request, completion_queue);
     };
-    auto broadcast_result =
-        broadcaster_->broadcast<CopyCacheRequestPB, CopyCacheResponsePB>(requests, get_broadcast_timeout_, rpc_call);
+    auto broadcast_result = broadcaster_->broadcast<BroadcastTpRequestPB, BroadcastTpResponsePB>(
+        requests, get_broadcast_timeout_, rpc_call);
     broadcast_result->waitDone();
     CHECK_AND_LOG(
         broadcast_result->success(), RCS_ERROR, "Read failed for grpc status, trace_id [%s]", match_trace_id.c_str());
     // TODO : maybe not all locations are loaded successfuly
     helper.collector.remote_read_fail_qps = false;
     async_context->setState(RemoteConnectorAsyncContext::State::RCS_SUCCESS);
+    resource->setRemoteReuseBlocksNum(new_reuse_block_num);
+    resource->setReuseBlocksNum(start_block_index + new_reuse_block_num);  // TODO(zhoushipei.zsp) reuse_len to be fixed
 }
 
 void RemoteConnector::asyncWriteTask(const std::shared_ptr<KVCacheResourceV1>&           resource,
@@ -677,8 +688,8 @@ void RemoteConnector::asyncWriteTask(const std::shared_ptr<KVCacheResourceV1>&  
         }
     };
     // 2. sync call all rank write
-    std::vector<CopyCacheRequestPB> requests;
-    ActualUriGather                 actual_uri_gather;
+    std::vector<BroadcastTpRequestPB> requests;
+    ActualUriGather                   actual_uri_gather;
     CHECK_AND_LOG_WITH_DEFER(genWriteRequest(broadcaster_->workerNum(),
                                              write_location.locations,
                                              write_location.block_mask,
@@ -693,13 +704,13 @@ void RemoteConnector::asyncWriteTask(const std::shared_ptr<KVCacheResourceV1>&  
     async_context->setState(RemoteConnectorAsyncContext::State::RCS_WRITE_BROADCAST);
     auto rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
                        const std::shared_ptr<grpc::ClientContext>& context,
-                       const CopyCacheRequestPB&                   request,
+                       const BroadcastTpRequestPB&                 request,
                        grpc::CompletionQueue*                      completion_queue) {
-        return stub->AsyncCopyCache(context.get(), request, completion_queue);
+        return stub->AsyncBroadcastTp(context.get(), request, completion_queue);
     };
     int64_t broadcast_begin_us = currentTimeUs();
-    auto    broadcast_result =
-        broadcaster_->broadcast<CopyCacheRequestPB, CopyCacheResponsePB>(requests, put_broadcast_timeout_, rpc_call);
+    auto    broadcast_result   = broadcaster_->broadcast<BroadcastTpRequestPB, BroadcastTpResponsePB>(
+        requests, put_broadcast_timeout_, rpc_call);
     broadcast_result->waitDone();
     helper.collector.remote_write_broadcast_time_us = currentTimeUs() - broadcast_begin_us;
     CHECK_AND_LOG_WITH_DEFER(broadcast_result->success(),
@@ -736,11 +747,11 @@ bool RemoteConnector::genReadRequest(size_t                                    t
                                      const kv_cache_manager::BlockMaskOffset&  block_mask,
                                      const std::string&                        trace_id,
                                      const std::shared_ptr<KVCacheResourceV1>& resource,
-                                     std::vector<CopyCacheRequestPB>&          requests,
+                                     std::vector<BroadcastTpRequestPB>&        requests,
                                      size_t&                                   new_reuse_block_num) const {
     requests.resize(tp_size, {});
     for (size_t i = 0; i < tp_size; ++i) {
-        requests[i].mutable_remote_request()->set_op(::RemoteCopyCacheOp::REMOTE_BROADCAST_READ);
+        requests[i].mutable_remote_request()->set_op(::RemoteBroadcastTpOp::REMOTE_BROADCAST_READ);
         requests[i].mutable_remote_request()->set_trace_id(trace_id);
     }
     remote_connector::LocationsView locations_view;
@@ -748,9 +759,12 @@ bool RemoteConnector::genReadRequest(size_t                                    t
         RTP_LLM_LOG_WARNING("trace_id [%s], filterNeedLoadLocations failed");
         return false;
     }
-    new_reuse_block_num           = locations_view.size();
+    new_reuse_block_num           = locations_view.size() - block_mask;  // only contains remote
     const auto& spec_name_to_info = group_policy_->spec_info_map();
     for (const auto& location_view : locations_view) {
+        if (location_view.empty()) {
+            continue;
+        }
         for (const auto& location_spec : location_view) {
             const auto iter = spec_name_to_info.find(location_spec.spec_name);
             if (iter == spec_name_to_info.end()) {
@@ -764,10 +778,11 @@ bool RemoteConnector::genReadRequest(size_t                                    t
             remote_request->add_group_ids(spec_info.group_id);
             const auto& block_indices = resource->groupBlocks().at(spec_info.group_id)->blocks();
             if (block_indices.size() <= block_idx) {
-                RTP_LLM_LOG_ERROR("trace_id [%s], group_id [%d] bad block_indices size[%lu]",
+                RTP_LLM_LOG_ERROR("trace_id [%s], group_id [%d] bad block_indices size[%lu], block_idx [%zu]",
                                   trace_id.c_str(),
                                   spec_info.group_id,
-                                  block_indices.size());
+                                  block_indices.size(),
+                                  block_idx);
                 return false;
             }
             auto block_id = block_indices.at(block_idx);
@@ -784,12 +799,12 @@ bool RemoteConnector::genWriteRequest(size_t                                    
                                       const kv_cache_manager::BlockMask&        block_mask,
                                       const std::string&                        trace_id,
                                       const std::shared_ptr<KVCacheResourceV1>& resource,
-                                      std::vector<CopyCacheRequestPB>&          requests,
+                                      std::vector<BroadcastTpRequestPB>&        requests,
                                       ActualUriGather&                          actual_uri_gather) const {
     requests.resize(tp_size, {});
     actual_uri_gather.resize(tp_size, {});
     for (size_t i = 0; i < tp_size; ++i) {
-        requests[i].mutable_remote_request()->set_op(::RemoteCopyCacheOp::REMOTE_BROADCAST_WRITE);
+        requests[i].mutable_remote_request()->set_op(::RemoteBroadcastTpOp::REMOTE_BROADCAST_WRITE);
         requests[i].mutable_remote_request()->set_trace_id(trace_id);
         actual_uri_gather[i].reserve(locations.size() * 1.2);
     }
