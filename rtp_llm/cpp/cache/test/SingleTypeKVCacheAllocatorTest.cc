@@ -25,10 +25,11 @@ CacheConfig createSingleTypeTestConfig(int layer_num = 4, int block_num = 10, in
                                     /*size_per_head=*/128);
 }
 
-CompleteTokenIdsPtr createCompleteTokenIds(int batch_size, int seq_length) {
+CompleteTokenIdsPtr createCompleteTokenIds(int batch_size, int seq_length, int seq_size_per_block = 8) {
     auto device = createDevice();
     // CompleteTokenIds(device, batch_size, max_batch_size, max_seq_len, seq_size_per_block)
-    auto complete_token_ids = std::make_shared<CompleteTokenIds>(device, batch_size, batch_size, seq_length + 100, 8);
+    auto complete_token_ids =
+        std::make_shared<CompleteTokenIds>(device, batch_size, batch_size, seq_length + 100, seq_size_per_block);
 
     auto input_ids = device->allocateBuffer(
         {rtp_llm::DataType::TYPE_INT32, {(size_t)seq_length}, rtp_llm::AllocationType::HOST}, {});
@@ -42,6 +43,7 @@ CompleteTokenIdsPtr createCompleteTokenIds(int batch_size, int seq_length) {
     generate_input->generate_config = std::make_shared<GenerateConfig>();
 
     complete_token_ids->init(generate_input);
+    complete_token_ids->setStreamMaxBatchSizeForCommonLen(std::max(batch_size, 1));
 
     return complete_token_ids;
 }
@@ -129,8 +131,8 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MallocMultipleBatches) {
     auto complete_token_ids = createCompleteTokenIds(batch_size, seq_length);
 
     MallocInfo malloc_info{batch_resource, complete_token_ids};
-    malloc_info.common_seq_len = seq_length;
-    malloc_info.total_seq_len  = seq_length + 1;
+    complete_token_ids->setStreamMaxBatchSizeForCommonLen(batch_size);
+    complete_token_ids->setReserveStep(1);
 
     auto result = allocator_->malloc(malloc_info);
 
@@ -643,13 +645,13 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrMallocRollback) {
 
     int  batch_size         = 3;
     auto batch_resource     = createBatchKVCacheResource(batch_size);
-    auto complete_token_ids = createCompleteTokenIds(batch_size, 4);  // 4 seq length = 1 block per batch
+    auto complete_token_ids = createCompleteTokenIds(batch_size, 4, /*seq_size_per_block=*/4);  // 1 block per batch
 
     // First, do a common allocation for all batches (1 block each)
     MallocInfo common_malloc_info{batch_resource, complete_token_ids};
-    common_malloc_info.common_seq_len = 4;
-    common_malloc_info.total_seq_len  = 4;
-    auto common_result                = allocator_->initMallocForCommonLen(common_malloc_info);
+    complete_token_ids->setStreamMaxBatchSizeForCommonLen(batch_size);
+    complete_token_ids->setReserveStep(0);
+    auto common_result = allocator_->initMallocForCommonLen(common_malloc_info);
     EXPECT_TRUE(common_result.success);
 
     // 1 block allocated and shared by all batches
@@ -662,7 +664,8 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrMallocRollback) {
     }
 
     MallocInfo incr_malloc_info{batch_resource, complete_token_ids};
-    incr_malloc_info.total_seq_len = 16;  // 3 more blocks for a batch, will rollback at batch 3
+    // Target total seq len 16 => reserve_step = 16 - current_seq_len(4) = 12
+    complete_token_ids->setReserveStep(12);
 
     auto incr_result = allocator_->incrMalloc(incr_malloc_info);
     EXPECT_FALSE(incr_result.success);

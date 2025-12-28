@@ -53,6 +53,17 @@ public:
 
     std::string showStatus(int batch_id);
 
+    struct MallocSeqLens {
+        int common_seq_len = -1;
+        int total_seq_len  = -1;
+    };
+
+    // reserve_step is used to pre-allocate KV cache blocks for upcoming decode steps.
+    void setReserveStep(size_t reserve_step);
+    // Used for adjusted common length semantics (aligned common length for multi-batch/beam cases).
+    void          setStreamMaxBatchSizeForCommonLen(int stream_max_batch_size);
+    MallocSeqLens calcMallocSeqLens() const;
+
 private:
     rtp_llm::DeviceBase* device_;
 
@@ -64,8 +75,11 @@ private:
     int     seq_length_;
     int     common_len_;
     int     start_check_seq_length_;
-    int64_t first_token_time_us_    = 0;
-    int64_t first_token_latency_us_ = 0;
+    int     input_length_                         = 0;
+    size_t  reserve_step_                         = 0;
+    int     stream_max_batch_size_for_common_len_ = 1;
+    int64_t first_token_time_us_                  = 0;
+    int64_t first_token_latency_us_               = 0;
 
     rtp_llm::BufferPtr complete_token_ids_;
 };

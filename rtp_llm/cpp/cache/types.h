@@ -43,7 +43,6 @@ struct KVCacheInfo {
     int64_t                   version = -1;
 };
 
-// For backward compatibility with old cache system (same as GptModel.h definition)
 struct KVCacheBuffer {
     // Layout convention: [layer_num, block_num, local_head_num_kv, seq_size_per_block, hidden_size_per_head], INT8
     rtp_llm::BufferPtr kv_blocks = nullptr;
@@ -69,10 +68,6 @@ struct MallocInfo {
     CompleteTokenIdsPtr     complete_token_ids;
     int64_t                 request_id = 0;
     bool                    verbose    = true;  // for failed log
-
-    // For common/extra blocks allocation strategy
-    int common_seq_len = -1;  // -1 means no distinction between common and extra, // TODO, move to complete_token_ids ?
-    int total_seq_len  = -1;  // -1 means use complete_token_ids->seqLength(), // TODO, fix this
 };
 
 struct MallocResult {

@@ -21,6 +21,9 @@ CompleteTokenIds::CompleteTokenIds(const CompleteTokenIds& other, bool share, in
     seq_length_(other.seq_length_),
     common_len_(other.common_len_),
     start_check_seq_length_(other.start_check_seq_length_),
+    input_length_(other.input_length_),
+    reserve_step_(other.reserve_step_),
+    stream_max_batch_size_for_common_len_(other.stream_max_batch_size_for_common_len_),
     first_token_time_us_(other.first_token_time_us_),
     first_token_latency_us_(other.first_token_latency_us_) {
     if (share) {
@@ -43,7 +46,8 @@ CompleteTokenIds::CompleteTokenIds(const CompleteTokenIds& other, bool share, in
 void CompleteTokenIds::init(const std::shared_ptr<GenerateInput>& generate_input, size_t extra_reserve_token_num) {
     RTP_LLM_CHECK(device_ != nullptr && generate_input != nullptr);
 
-    seq_length_ = generate_input->inputLength();
+    input_length_ = generate_input->inputLength();
+    seq_length_   = input_length_;
     RTP_LLM_CHECK_WITH_INFO(
         (seq_length_ <= max_seq_len_), "seq_length[%d] must be less than max_seq_len[%d]", seq_length_, max_seq_len_);
 
@@ -63,6 +67,26 @@ void CompleteTokenIds::init(const std::shared_ptr<GenerateInput>& generate_input
     }
 
     RTP_LLM_LOG_DEBUG("complete tokenids init done, %s", showStatus(0).c_str());
+}
+
+void CompleteTokenIds::setReserveStep(size_t reserve_step) {
+    reserve_step_ = reserve_step;
+}
+
+void CompleteTokenIds::setStreamMaxBatchSizeForCommonLen(int stream_max_batch_size) {
+    stream_max_batch_size_for_common_len_ = std::max(stream_max_batch_size, 1);
+}
+
+CompleteTokenIds::MallocSeqLens CompleteTokenIds::calcMallocSeqLens() const {
+    MallocSeqLens out;
+    const int     total_seq_len       = seq_length_ + static_cast<int>(reserve_step_);
+    const int     adjusted_common_len = (stream_max_batch_size_for_common_len_ == 1) ?
+                                            seq_length_ :
+                                            (input_length_ / seq_size_per_block_) * seq_size_per_block_;
+
+    out.total_seq_len  = total_seq_len;
+    out.common_seq_len = std::min(total_seq_len, adjusted_common_len);
+    return out;
 }
 
 int CompleteTokenIds::maxBatchSize() {

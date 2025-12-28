@@ -76,16 +76,13 @@ absl::Status StreamCacheResource::incrKVBlock(size_t reserve_step) {
         return absl::InternalError("fake inited not allow to incr block");
     }
 
-    auto seq_len        = stream_->seqLength() + (int)reserve_step;
-    auto common_seq_len = std::min(seq_len, stream_->adjustedCommonLen());
-
     MallocInfo malloc_info;
     malloc_info.batch_kv_cache_resource = batch_resource_;
     malloc_info.complete_token_ids      = stream_->completeTokenIdsPtr();
     malloc_info.request_id              = stream_->streamId();
     malloc_info.verbose                 = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
-    malloc_info.common_seq_len          = common_seq_len;
-    malloc_info.total_seq_len           = seq_len;
+    malloc_info.complete_token_ids->setReserveStep(reserve_step);
+    malloc_info.complete_token_ids->setStreamMaxBatchSizeForCommonLen(stream_->maxBatchSize());
 
     auto result = resource_context_.cache_manager->malloc(malloc_info);
     if (!result.success) {
