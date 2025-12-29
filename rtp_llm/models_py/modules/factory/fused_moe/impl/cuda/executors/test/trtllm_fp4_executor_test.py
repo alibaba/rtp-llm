@@ -1554,7 +1554,7 @@ def run_moe_test(
         quant_data["gemm2_scales"],
         quant_data["gemm2_scales_global"],
         permute_info,
-        use_routing_scales_on_input,
+        routing_method_type == RoutingMethodType.Llama4,
         gated_act_type,
     )
 
