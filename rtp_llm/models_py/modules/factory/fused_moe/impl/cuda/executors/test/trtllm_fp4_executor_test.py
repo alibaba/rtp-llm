@@ -595,10 +595,10 @@ class FP4Moe(Moe):
         )
 
         return {
-            "gemm1_weights_fp4_shuffled": gemm1_weights_fp4,
-            "gemm1_scales_fp4_shuffled": gemm1_scales_linear_fp4,
-            "gemm2_weights_fp4_shuffled": gemm2_weights_fp4,
-            "gemm2_scales_fp4_shuffled": gemm2_scales_linear_fp4,
+            "gemm1_weights_fp4_shuffled": gemm1_weights_fp4_shuffled,
+            "gemm1_scales_fp4_shuffled": gemm1_scales_fp4_shuffled,
+            "gemm2_weights_fp4_shuffled": gemm2_weights_fp4_shuffled,
+            "gemm2_scales_fp4_shuffled": gemm2_scales_fp4_shuffled,
             "scale_c_fc1": scale_c_fc1,
             "scale_gate_fc1": scale_gate_fc1,
             "scale_c_fc2": scale_c_fc2,
@@ -657,6 +657,41 @@ class FP4Moe(Moe):
         return {"atol": 0.1, "rtol": 0.85, "percent": 0.925}
 
 class FP4MoeExecutor(FP4Moe):
+    def prepare_static_weights_for_kernel(
+        self,
+        args_dequant,
+        args,
+        gemm1_weights_orig,
+        gemm2_weights_orig,
+        hidden_size,
+        intermediate_size,
+        num_experts,
+        weight_processing,
+    ):
+        # Convert quantized weights to proper formats
+        gemm1_weights_fp4 = args.gemm1_weights.view(torch.float8_e4m3fn).reshape(
+            num_experts, 2 * intermediate_size, hidden_size // 2
+        )  # packed fp4
+        gemm1_scales_linear_fp4 = gemm1_scales_linear_fp4_bytes.view(
+            torch.float8_e4m3fn
+        ).reshape(
+            num_experts, 2 * intermediate_size, hidden_size // self.sf_vec_size
+        )  # fp8 scaling factors
+
+        gemm2_weights_fp4 = args.gemm2_weights.view(torch.float8_e4m3fn).reshape(
+            num_experts, hidden_size, intermediate_size // 2
+        )  # packed fp4
+        gemm2_scales_linear_fp4 = gemm2_scales_linear_fp4_bytes.view(
+            torch.float8_e4m3fn
+        ).reshape(
+            num_experts, hidden_size, intermediate_size // self.sf_vec_size
+        )  # fp8 scaling factors
+        return {
+            "gemm1_weights_fp4_shuffled": gemm1_weights_fp4,
+            "gemm1_scales_fp4_shuffled": gemm1_scales_linear_fp4,
+            "gemm2_weights_fp4_shuffled": gemm2_weights_fp4,
+            "gemm2_scales_fp4_shuffled": gemm2_scales_linear_fp4,
+        }
     def call_moe(
         self, static_data, hidden_states_orig, hidden_states_scale_global, **kwargs
     ):
