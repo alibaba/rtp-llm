@@ -16,6 +16,7 @@ from rtp_llm.utils.model_weight import W
 
 from flashinfer import (
     fp4_quantize,
+    e2m1_and_ufp8sf_scale_to_float,
 )
 from flashinfer.fused_moe import (
     RoutingMethodType,
@@ -219,45 +220,45 @@ def _generate_ref_output(
     weights: Dict[str, torch.Tensor],
     extra_kwargs: Dict[str, torch.Tensor],
 ) -> torch.Tensor:
-    g1_alphas = weights["w13_input_scale"] * weights["w13_weight_scale_2"]
-    g2_alphas = weights["w2_input_scale"] * weights["w2_weight_scale_2"]
-    g1_scale_c = g1_alphas / weights["w2_input_scale"]
-    hidden_states, hidden_states_scale = fp4_quantize(
-        payload.expert_x, 1 / weights["w13_input_scale"], is_sf_swizzled_layout=False)
-    ref_output = trtllm_fp4_block_scale_moe(
-        extra_kwargs["routing_logits"],
-        None,  # routing_bias
-        hidden_states,
-        hidden_states_scale.view(torch.float8_e4m3fn),
-        weights[W.moe_w1],
-        weights[W.moe_s1],
-        None,  # w13_bias
-        None,  # gemm1_alpha
-        None,  # gemm1_beta
-        None,  # gemm1_clamp_limit
-        weights[W.moe_w2],
-        weights[W.moe_s2],
-        None,  # w2_bias
-        g1_scale_c,
-        g1_alphas,
-        g2_alphas,
-        config.expert_num,
-        config.moe_k,
-        None,  # n_group
-        None,  # topk_group
-        config.model_config.moe_inter_size,
-        0,  # local_expert_offset
-        config.expert_num,
-        None,  # routed_scaling_factor
-        None,  # tile_tokens_dim
-        RoutingMethodType.Renormalize.value,
-        True,  # do_finalize
-        device_support_pdl(payload.expert_x.device),
-        GatedActType.SwiGlu.value,  # gated_act_type
-        None,
-    )[0]
+    # g1_alphas = weights["w13_input_scale"] * weights["w13_weight_scale_2"]
+    # g2_alphas = weights["w2_input_scale"] * weights["w2_weight_scale_2"]
+    # g1_scale_c = g1_alphas / weights["w2_input_scale"]
+    # hidden_states, hidden_states_scale = fp4_quantize(
+    #     payload.expert_x, 1 / weights["w13_input_scale"], is_sf_swizzled_layout=False)
+    # ref_output = trtllm_fp4_block_scale_moe(
+    #     extra_kwargs["routing_logits"],
+    #     None,  # routing_bias
+    #     hidden_states,
+    #     hidden_states_scale.view(torch.float8_e4m3fn),
+    #     weights[W.moe_w1],
+    #     weights[W.moe_s1],
+    #     None,  # w13_bias
+    #     None,  # gemm1_alpha
+    #     None,  # gemm1_beta
+    #     None,  # gemm1_clamp_limit
+    #     weights[W.moe_w2],
+    #     weights[W.moe_s2],
+    #     None,  # w2_bias
+    #     g1_scale_c,
+    #     g1_alphas,
+    #     g2_alphas,
+    #     config.expert_num,
+    #     config.moe_k,
+    #     None,  # n_group
+    #     None,  # topk_group
+    #     config.model_config.moe_inter_size,
+    #     0,  # local_expert_offset
+    #     config.expert_num,
+    #     None,  # routed_scaling_factor
+    #     None,  # tile_tokens_dim
+    #     RoutingMethodType.Renormalize.value,
+    #     True,  # do_finalize
+    #     device_support_pdl(payload.expert_x.device),
+    #     GatedActType.SwiGlu.value,  # gated_act_type
+    #     None,
+    # )[0]
 
-    return ref_output
+    # return ref_output
 
     hidden_states = payload.expert_x
     topk_ids = payload.expert_topk_ids
@@ -326,9 +327,6 @@ def _generate_ref_output(
             token_output += expert_output / expert_weight
         ref_output[token_idx] = token_output[0]
 
-    print(output)
-    print(ref_output)
-    torch.testing.assert_close(output, ref_output, rtol=2e-2, atol=1e-5)
     return ref_output
 
 def test_trtllm_fp4_executor():
