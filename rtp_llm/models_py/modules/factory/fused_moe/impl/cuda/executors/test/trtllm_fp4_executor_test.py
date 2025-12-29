@@ -1693,8 +1693,8 @@ if __name__ == "__main__":
         num_tokens=3072,
         hidden_size=1024,
         intermediate_size=768,
-        moe_impl=FP4Moe(quant_mode=QuantMode.FP4_NVFP4_NVFP4),
-        # moe_impl=FP4MoeExecutor(quant_mode=QuantMode.FP4_NVFP4_NVFP4),
+        # moe_impl=FP4Moe(quant_mode=QuantMode.FP4_NVFP4_NVFP4),
+        moe_impl=FP4MoeExecutor(quant_mode=QuantMode.FP4_NVFP4_NVFP4),
         routing_config={
                 "num_experts": 128,
                 "top_k": 8,
