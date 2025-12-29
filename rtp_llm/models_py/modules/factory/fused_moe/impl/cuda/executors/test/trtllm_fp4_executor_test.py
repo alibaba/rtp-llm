@@ -307,10 +307,7 @@ class FP4Moe(Moe):
     def __init__(self, quant_mode: QuantMode):
         super().__init__()
         self.quant_mode = quant_mode
-        self.is_mxfp4 = (
-            quant_mode == QuantMode.FP4_MXFP4_MXFP8
-            or quant_mode == QuantMode.FP4_MXFP4_Bf16
-        )
+        self.is_mxfp4 = False
         self.sf_vec_size = 32 if self.is_mxfp4 else 16
 
     def quantize_weights(self, gemm1_weights, gemm2_weights, hidden_states_sample):
@@ -350,19 +347,7 @@ class FP4Moe(Moe):
     def quantize_inputs(
         self, hidden_states, hidden_states_scale_global, is_swizzling=True
     ):
-        if self.quant_mode == QuantMode.FP4_MXFP4_MXFP8:
-            """Quantize hidden states to MxFP8 format."""
-            hidden_states_quant, hidden_states_scale = mxfp8_quantize(
-                hidden_states, is_swizzling
-            )
-            hidden_states_scale = hidden_states_scale.view(torch.float8_e4m3fn).reshape(
-                *hidden_states.shape[:-1], -1
-            )
-            return {
-                "hidden_states": hidden_states_quant,
-                "hidden_states_scale": hidden_states_scale,
-            }
-        elif self.quant_mode == QuantMode.FP4_NVFP4_NVFP4:
+        if self.quant_mode == QuantMode.FP4_NVFP4_NVFP4:
             """Quantize hidden states to NvFP4 format using pre-computed global scale."""
             (
                 hidden_states_fp4_bytes,
@@ -1251,25 +1236,6 @@ def run_moe_dequant(args, quant_mode: QuantMode):
         )
         activation_output = activation_output.to(torch.float)
         args.c_global_sf = c_global_sf
-    elif quant_mode == QuantMode.FP8_PER_TENSOR:
-        activation_output, c_global_sf = quant_dequant_per_tensor_fp8(
-            activation_output.to(torch.bfloat16)
-        )
-        activation_output = activation_output.to(torch.float)
-        args.c_global_sf = c_global_sf
-    elif quant_mode == QuantMode.FP4_MXFP4_MXFP8:
-        activation_output, scale_bytes = mxfp8_quantize(
-            activation_output.to(torch.bfloat16), True
-        )
-        scale_bytes = scale_bytes.view(torch.uint8).reshape(-1).cpu()
-        activation_output = (
-            mxfp8_dequantize_host(
-                activation_output.cpu().view(torch.uint8), scale_bytes
-            )
-            .cuda()
-            .to(torch.float)
-        )
-        args.c_global_sf = 1.0
     elif quant_mode == QuantMode.BF16:
         activation_output = activation_output.to(torch.bfloat16).to(torch.float)
         args.c_global_sf = 1.0
@@ -1330,12 +1296,6 @@ def run_moe_reference_fp4(args, quant_mode: QuantMode):
             (1 / args.hidden_states_scale_global).cpu(),
             sf_vec_size,
             ufp8_type_weights,
-            True,  # is_sf_swizzled_layout
-        ).cuda()
-    elif quant_mode == QuantMode.FP4_MXFP4_MXFP8:
-        hidden_states_dequant = mxfp8_dequantize_host(
-            args.hidden_states.cpu().view(torch.uint8),
-            args.hidden_states_scale.cpu().view(torch.uint8).reshape(-1),
             True,  # is_sf_swizzled_layout
         ).cuda()
     else:
