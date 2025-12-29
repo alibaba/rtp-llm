@@ -346,19 +346,21 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
         for (size_t i = 0; i < response.flatten_output().aux_info_size(); i++) {
             auto decode_total_reuse_len  = response.flatten_output().aux_info(i).total_reuse_len();
             auto decode_local_reuse_len  = response.flatten_output().aux_info(i).local_reuse_len();
-            auto decode_remote_reuse_len = response.flatten_output().aux_info(i).remote_reuse_len();
             auto decode_gpu_reuse_len    = response.flatten_output().aux_info(i).gpu_reuse_len();
             auto decode_memory_reuse_len = response.flatten_output().aux_info(i).memory_reuse_len();
+            auto decode_remote_reuse_len = response.flatten_output().aux_info(i).remote_reuse_len();
 
             response.mutable_flatten_output()->mutable_aux_info(i)->set_first_token_cost_time_us(first_token_rt_us);
             response.mutable_flatten_output()->mutable_aux_info(i)->set_cost_time_us(cost_time_us);
 
+            // Set reuse lengths
             response.mutable_flatten_output()->mutable_aux_info(i)->set_total_reuse_len(prefill_total_reuse_len);
             response.mutable_flatten_output()->mutable_aux_info(i)->set_local_reuse_len(prefill_local_reuse_len);
             response.mutable_flatten_output()->mutable_aux_info(i)->set_gpu_reuse_len(prefill_gpu_reuse_len);
             response.mutable_flatten_output()->mutable_aux_info(i)->set_memory_reuse_len(prefill_memory_reuse_len);
             response.mutable_flatten_output()->mutable_aux_info(i)->set_remote_reuse_len(prefill_remote_reuse_len);
 
+            // Set prefill reuse lengths
             response.mutable_flatten_output()->mutable_aux_info(i)->set_prefill_total_reuse_len(
                 prefill_total_reuse_len);
             response.mutable_flatten_output()->mutable_aux_info(i)->set_prefill_local_reuse_len(
@@ -386,6 +388,7 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
     CLIENT_GRPC_RET_IF_ERROR(
         prefill_context, prefill_context.closeGrpcStream().ok(), ErrorCode::REMOTE_GENERATE_FAILED);
     prefill_context.getStream()->setFinishedWithoutLock();
+    RTP_LLM_LOG_DEBUG("request [%ld] setFinishedWithoutLock", request_id);
 }
 
 grpc::Status PrefillRpcServer::prepareAllocateResource(PrefillGenerateContext& prefill_context) {

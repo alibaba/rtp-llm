@@ -21,12 +21,12 @@ using namespace std;
 namespace rtp_llm {
 
 GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
-                               const ModelConfig&                model_config,
-                               const RuntimeConfig&               runtime_config,
-                               const ResourceContext&            resource_context,
-                               kmonitor::MetricsReporterPtr      metrics_reporter,
-                               size_t                             extra_reserve_token_num,
-                               bool                               perf_test):
+                               const ModelConfig&               model_config,
+                               const RuntimeConfig&             runtime_config,
+                               const ResourceContext&           resource_context,
+                               kmonitor::MetricsReporterPtr     metrics_reporter,
+                               size_t                           extra_reserve_token_num,
+                               bool                             perf_test):
     generate_input_(input),
     max_seq_len_(model_config.max_seq_len),
     vocab_size_(model_config.vocab_size),
@@ -661,6 +661,7 @@ bool GenerateStream::setRemoteGenerate() {
         return false;
     }
     generate_status_->status = StreamState::REMOTE_RUNNING;
+    cv_->notify_one();
     return true;
 }
 
@@ -735,17 +736,17 @@ bool GenerateStream::waitForRemoteGenerate() {
     std::unique_lock<std::mutex> lock(*output_mutex_);
     // Wait until need_remote_generate_ is true or stream status -> done
     cv_->wait(lock, [this] {
-        return need_remote_generate_ || generate_status_->status == StreamState::STOPPED
-               || generate_status_->status == StreamState::FINISHED;
+        return generate_status_->status == StreamState::REMOTE_RUNNING
+               || generate_status_->status == StreamState::STOPPED || generate_status_->status == StreamState::FINISHED;
     });
     // If stream status is abnormal, log the error info
-    if (!need_remote_generate_ && generate_status_->status == StreamState::STOPPED) {
+    if (generate_status_->status == StreamState::STOPPED) {
         RTP_LLM_LOG_WARNING("waitForRemoteGenerate exits due to stream [%ld] stopped, error: %s",
                             streamId(),
                             generate_status_->error_info.ToString().c_str());
     }
 
-    return need_remote_generate_;
+    return generate_status_->status == StreamState::REMOTE_RUNNING;
 }
 
 std::vector<int> GenerateStream::getLatestTokens(size_t token_num) {

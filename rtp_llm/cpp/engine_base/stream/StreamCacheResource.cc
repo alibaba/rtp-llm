@@ -21,25 +21,31 @@ void StreamCacheResource::freeBatchBlocks(size_t batch_id, vector<int>& blocks) 
     bool should_reuse_cache =
         reuseCache() && (!stream_->hasNumBeams() || (!stream_->stoppedWithoutLock() && batch_id == 0));
     // TODO(zhangjianning.zjn) cache all beams of beam search
-    if (blocks.size() == batch_resource_.blockSize(batch_id) && should_reuse_cache
-        && (stream_->finishedWithoutLock() || stream_->isRemoteRunningWithoutLock())) {
-        reConstructCacheKeys();
-        auto          tokens_id  = stream_->completeTokenIdsVec(batch_id);
-        const auto&   cache_keys = stream_->cacheKeys(batch_id);
-        vector<float> loss;
-        if (stream_->getLoss()) {
-            loss = rtp_llm::buffer2vector<float>(*(stream_->getLoss()));
+    if (blocks.size() == batch_resource_.blockSize(batch_id) && should_reuse_cache) {
+        if (stream_->finishedWithoutLock() || stream_->isRemoteRunningWithoutLock()) {
+            reConstructCacheKeys();
+            auto          tokens_id  = stream_->completeTokenIdsVec(batch_id);
+            const auto&   cache_keys = stream_->cacheKeys(batch_id);
+            vector<float> loss;
+            if (stream_->getLoss()) {
+                loss = rtp_llm::buffer2vector<float>(*(stream_->getLoss()));
+            }
+            CacheManager::FreeInfo free_info(stream_->streamId(),
+                                             tokens_id,
+                                             cache_keys,
+                                             blocks,
+                                             loss,
+                                             adapter_name_,
+                                             enable3FS(),
+                                             enableGpuBlockCache(),
+                                             enableMemoryBlockCache());
+            RTP_LLM_LOG_DEBUG("stream [%ld] free with cache", stream_->streamId());
+            resource_context_.cache_manager->freeWithCache(free_info);
+        } else {
+            RTP_LLM_LOG_INFO("stream id [%ld], state is %s, so not insert to cache",
+                             stream_->streamId(),
+                             stream_->stateString().c_str());
         }
-        CacheManager::FreeInfo free_info(stream_->streamId(),
-                                         tokens_id,
-                                         cache_keys,
-                                         blocks,
-                                         loss,
-                                         adapter_name_,
-                                         enable3FS(),
-                                         enableGpuBlockCache(),
-                                         enableMemoryBlockCache());
-        resource_context_.cache_manager->freeWithCache(free_info);
     } else {
         resource_context_.cache_manager->free(blocks);
     }
@@ -131,6 +137,8 @@ absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
         if (stream_->calculateLoss() && match_info.loss.empty()) {
             match_info = CacheManager::MatchInfo{0, {}, {}};
         }
+        RTP_LLM_LOG_DEBUG(
+            "stream [%ld] match info reuse length is [%ld]", stream_->streamId(), match_info.reuse_length);
         stream_->setReuseLength(match_info.reuse_length);
         stream_->setLocalReuseLength(match_info.gpu_reuse_length + match_info.memory_reuse_length);
         stream_->setRemoteReuseLength(match_info.remote_reuse_length);
