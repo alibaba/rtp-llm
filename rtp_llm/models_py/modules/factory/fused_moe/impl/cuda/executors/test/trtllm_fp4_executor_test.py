@@ -286,6 +286,7 @@ class CUDAGraphMoE:
             local_expert_offset=0,
             local_num_experts=self.config["num_experts"],
             routed_scaling_factor=self.config["routed_scaling"],
+            tile_tokens_dim=None,
             routing_method_type=self.config["routing_method_type"],
             gated_act_type=self.config["gated_act_type"],
             do_finalize=True,
