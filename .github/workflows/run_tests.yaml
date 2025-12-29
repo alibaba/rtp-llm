@@ -100,9 +100,11 @@ jobs:
           ${{ github.workspace }}/rocm_benchmark/rtp_llm_benchmark/ci/run_rtp_unittest.sh
 
     - name: Compress unit tests logs
+      if: ${{ always() && !cancelled() }}
       run: tar -czf logs_unit_tests.tar.gz -C logs .
 
     - name: Upload unit tests logs
+      if: ${{ always() && !cancelled() }}
       uses: actions/upload-artifact@v4
       with:
         name: logs_unit_tests
