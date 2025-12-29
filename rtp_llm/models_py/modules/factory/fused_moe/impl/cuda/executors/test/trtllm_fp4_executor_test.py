@@ -4,6 +4,9 @@ from typing import Dict
 import torch
 from cuda.bindings import runtime
 from torch.nn import functional as F
+import os
+import json
+from pathlib import Path
 
 from flashinfer import (
     RoutingMethodType,
@@ -47,6 +50,68 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.trtllm_fp4_
     TrtllmFp4Executor,
 )
 from rtp_llm.utils.model_weight import W
+
+
+def dump_trtllm_fp4_params(**kwargs):
+    """Dump trtllm_fp4_block_scale_moe function parameters to JSON and save tensors as .pt files.
+    
+    If DUMP_FP4 environment variable is set, this function will:
+    1. Save torch tensors as .pt files and record their absolute paths
+    2. Convert other types to strings
+    3. Save all information to a JSON file specified by DUMP_FP4
+    
+    Args:
+        **kwargs: All parameters passed to trtllm_fp4_block_scale_moe
+    """
+    dump_file = os.getenv("DUMP_FP4")
+    if not dump_file:
+        return
+    
+    dump_file = os.path.abspath(dump_file)
+    dump_dir = os.path.dirname(dump_file)
+    os.makedirs(dump_dir, exist_ok=True)
+    
+    # Create a directory for tensor files (same directory as JSON file, with _tensors suffix)
+    tensor_dir = os.path.join(dump_dir, os.path.splitext(os.path.basename(dump_file))[0] + "_tensors")
+    os.makedirs(tensor_dir, exist_ok=True)
+    
+    dumped_params = {}
+    
+    for param_name, param_value in kwargs.items():
+        if isinstance(param_value, torch.Tensor):
+            # Save tensor as .pt file
+            tensor_filename = f"{param_name}.pt"
+            tensor_path = os.path.join(tensor_dir, tensor_filename)
+            tensor_abs_path = os.path.abspath(tensor_path)
+            torch.save(param_value, tensor_abs_path)
+            
+            # Record tensor info in JSON
+            dumped_params[param_name] = {
+                "type": "torch.Tensor",
+                "file_path": tensor_abs_path,
+                "shape": list(param_value.shape),
+                "dtype": str(param_value.dtype),
+                "device": str(param_value.device),
+            }
+        elif param_value is None:
+            dumped_params[param_name] = None
+        else:
+            # Convert other types to string
+            try:
+                # Try to convert to JSON-serializable format
+                if isinstance(param_value, (int, float, bool, str)):
+                    dumped_params[param_name] = param_value
+                elif hasattr(param_value, "value"):  # Enum types
+                    dumped_params[param_name] = str(param_value)
+                else:
+                    dumped_params[param_name] = str(param_value)
+            except Exception:
+                dumped_params[param_name] = str(param_value)
+    
+    # Save to JSON file
+    with open(dump_file, "w") as f:
+        json.dump(dumped_params, f, indent=2, ensure_ascii=False)
+
 
 class QuantMode(IntEnum):
     """Supported quantization modes for MoE testing."""
@@ -184,36 +249,43 @@ class CUDAGraphMoE:
             is_swizzling=False,
         )
 
-        output = trtllm_fp4_block_scale_moe(
-            routing_logits=runtime_args["expert_logits"],
-            routing_bias=runtime_args["routing_bias"],
-            hidden_states=input_quantized["hidden_states"],
-            hidden_states_scale=input_quantized["hidden_states_scale"],
-            gemm1_weights=self.static_data["gemm1_weights_fp4_shuffled"],
-            gemm1_weights_scale=self.static_data["gemm1_scales_fp4_shuffled"],
-            gemm1_bias=None,
-            gemm1_alpha=None,
-            gemm1_beta=None,
-            gemm1_clamp_limit=None,
-            gemm2_weights=self.static_data["gemm2_weights_fp4_shuffled"],
-            gemm2_weights_scale=self.static_data["gemm2_scales_fp4_shuffled"],
-            gemm2_bias=None,
-            output1_scale_scalar=self.static_data["scale_c_fc1"],
-            output1_scale_gate_scalar=self.static_data["scale_gate_fc1"],
-            output2_scale_scalar=self.static_data["scale_c_fc2"],
-            num_experts=self.config["num_experts"],
-            top_k=self.config["top_k"],
-            n_group=self.config["n_groups"],
-            topk_group=self.config["top_k_groups"],
-            intermediate_size=self.config["intermediate_size"],
-            local_expert_offset=0,
-            local_num_experts=self.config["num_experts"],
-            routed_scaling_factor=self.config["routed_scaling"],
-            tile_tokens_dim=None,
-            routing_method_type=self.config["routing_method_type"],
-            gated_act_type=self.config["gated_act_type"],
-            do_finalize=True,
-        )
+        # Prepare all parameters for the function call
+        func_params = {
+            "routing_logits": runtime_args["expert_logits"],
+            "routing_bias": runtime_args["routing_bias"],
+            "hidden_states": input_quantized["hidden_states"],
+            "hidden_states_scale": input_quantized["hidden_states_scale"],
+            "gemm1_weights": self.static_data["gemm1_weights_fp4_shuffled"],
+            "gemm1_weights_scale": self.static_data["gemm1_scales_fp4_shuffled"],
+            "gemm1_bias": None,
+            "gemm1_alpha": None,
+            "gemm1_beta": None,
+            "gemm1_clamp_limit": None,
+            "gemm2_weights": self.static_data["gemm2_weights_fp4_shuffled"],
+            "gemm2_weights_scale": self.static_data["gemm2_scales_fp4_shuffled"],
+            "gemm2_bias": None,
+            "output1_scale_scalar": self.static_data["scale_c_fc1"],
+            "output1_scale_gate_scalar": self.static_data["scale_gate_fc1"],
+            "output2_scale_scalar": self.static_data["scale_c_fc2"],
+            "num_experts": self.config["num_experts"],
+            "top_k": self.config["top_k"],
+            "n_group": self.config["n_groups"],
+            "topk_group": self.config["top_k_groups"],
+            "intermediate_size": self.config["intermediate_size"],
+            "local_expert_offset": 0,
+            "local_num_experts": self.config["num_experts"],
+            "routed_scaling_factor": self.config["routed_scaling"],
+            "tile_tokens_dim": None,
+            "routing_method_type": self.config["routing_method_type"],
+            "gated_act_type": self.config["gated_act_type"],
+            "do_finalize": True,
+        }
+        
+        # Dump parameters if DUMP_FP4 environment variable is set
+        dump_trtllm_fp4_params(**func_params)
+        
+        # Call the function with all parameters
+        output = trtllm_fp4_block_scale_moe(**func_params)
         return output  # Extract tensor from tuple
 
 

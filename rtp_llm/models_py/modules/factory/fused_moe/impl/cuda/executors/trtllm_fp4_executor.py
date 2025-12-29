@@ -167,20 +167,20 @@ class TrtllmFp4Executor(FusedMoeExpertExecutor):
         self.w2 = weights.get(W.moe_w2, None)
         self.w1_scale = weights.get(W.moe_s1, None)
         self.w2_scale = weights.get(W.moe_s2, None)
-        (
-            self.w1,
-            self.w1_scale,
-            self.w2,
-            self.w2_scale,
-        ) = prepare_static_weights_for_trtllm_fp4_moe(
-            self.w1,
-            self.w2,
-            self.w1_scale,
-            self.w2_scale,
-            self.hidden_size,
-            self.intermediate_size,
-            self.local_num_experts,
-        )
+        # (
+        #     self.w1,
+        #     self.w1_scale,
+        #     self.w2,
+        #     self.w2_scale,
+        # ) = prepare_static_weights_for_trtllm_fp4_moe(
+        #     self.w1,
+        #     self.w2,
+        #     self.w1_scale,
+        #     self.w2_scale,
+        #     self.hidden_size,
+        #     self.intermediate_size,
+        #     self.local_num_experts,
+        # )
         w13_input_scale = weights.get("w13_input_scale", None)
         w13_weight_scale_2 = weights.get("w13_weight_scale_2", None)
         w2_input_scale = weights.get("w2_input_scale", None)
