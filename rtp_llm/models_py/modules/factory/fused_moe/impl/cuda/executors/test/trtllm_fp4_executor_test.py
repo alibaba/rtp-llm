@@ -2703,7 +2703,6 @@ def test_llama4_routing(
 _cache_permute_indices = {}
 
 if __name__ == "__main__":
-    global _cache_permute_indices
     test_renormalize_routing(
         num_tokens=3072,
         hidden_size=1024,
