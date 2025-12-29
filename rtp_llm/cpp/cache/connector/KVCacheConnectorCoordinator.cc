@@ -102,8 +102,9 @@ KVCacheConnectorCoordinator::asyncRead(const std::shared_ptr<KVCacheConnectorRea
                             kvcache_resource.debugString().c_str());
         return nullptr;
     }
-
-    auto resource = allocator_->incrKVCacheRef(kvcache_resource, kvcache_resource.cacheKeys());
+    const auto&   cache_keys = kvcache_resource.cacheKeys();
+    CacheKeysType match_keys(cache_keys.begin(), cache_keys.empty() ? cache_keys.end() : cache_keys.end() - 1);
+    auto          resource = allocator_->incrKVCacheRef(kvcache_resource, match_keys);
     if (!resource) {
         RTP_LLM_LOG_WARNING("async read failed, incr kvcache ref failed, resource: [%s]",
                             kvcache_resource.debugString().c_str());
