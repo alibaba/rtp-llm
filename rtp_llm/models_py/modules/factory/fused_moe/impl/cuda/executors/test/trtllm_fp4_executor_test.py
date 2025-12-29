@@ -67,13 +67,15 @@ def dump_trtllm_fp4_params(**kwargs):
     if not dump_file:
         return
     
-    dump_file = os.path.abspath(dump_file)
-    dump_dir = os.path.dirname(dump_file)
-    os.makedirs(dump_dir, exist_ok=True)
+    # Use pathlib for path operations
+    dump_path = Path(dump_file).resolve()
+    dump_dir = dump_path.parent
     
+    # Create directory for JSON file (with proper error handling)
+    dump_dir.mkdir(parents=True, exist_ok=True)
     # Create a directory for tensor files (same directory as JSON file, with _tensors suffix)
-    tensor_dir = os.path.join(dump_dir, os.path.splitext(os.path.basename(dump_file))[0] + "_tensors")
-    os.makedirs(tensor_dir, exist_ok=True)
+    tensor_dir = dump_dir / f"{dump_path.stem}_tensors"
+    tensor_dir.mkdir(parents=True, exist_ok=True)
     
     dumped_params = {}
     
@@ -81,14 +83,20 @@ def dump_trtllm_fp4_params(**kwargs):
         if isinstance(param_value, torch.Tensor):
             # Save tensor as .pt file
             tensor_filename = f"{param_name}.pt"
-            tensor_path = os.path.join(tensor_dir, tensor_filename)
-            tensor_abs_path = os.path.abspath(tensor_path)
-            torch.save(param_value, tensor_abs_path)
+            tensor_path = tensor_dir / tensor_filename
+            tensor_abs_path = tensor_path.resolve()
+            
+            try:
+                torch.save(param_value, str(tensor_abs_path))
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to save tensor {param_name} to {tensor_abs_path}: {e}"
+                ) from e
             
             # Record tensor info in JSON
             dumped_params[param_name] = {
                 "type": "torch.Tensor",
-                "file_path": tensor_abs_path,
+                "file_path": str(tensor_abs_path),
                 "shape": list(param_value.shape),
                 "dtype": str(param_value.dtype),
                 "device": str(param_value.device),
@@ -109,8 +117,14 @@ def dump_trtllm_fp4_params(**kwargs):
                 dumped_params[param_name] = str(param_value)
     
     # Save to JSON file
-    with open(dump_file, "w") as f:
-        json.dump(dumped_params, f, indent=2, ensure_ascii=False)
+    try:
+        with open(dump_path, "w") as f:
+            json.dump(dumped_params, f, indent=2, ensure_ascii=False)
+    except PermissionError as e:
+        raise PermissionError(
+            f"Cannot write to {dump_path}: {e}. "
+            f"Please ensure you have write permissions or use a different path."
+        ) from e
 
 
 class QuantMode(IntEnum):
