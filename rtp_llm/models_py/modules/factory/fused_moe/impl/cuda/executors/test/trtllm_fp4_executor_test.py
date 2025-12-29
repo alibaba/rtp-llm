@@ -1,19 +1,3 @@
-"""
-Copyright (c) 2025 by FlashInfer team.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-  http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
-
 import pytest
 from abc import ABC, abstractmethod
 from typing import Dict
@@ -49,87 +33,26 @@ from flashinfer.fused_moe.core import (
 from enum import IntEnum
 from flashinfer.utils import get_compute_capability
 
+# Import RTP-LLM specific modules for Fp4Executor backend
+from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.ops import ParallelismConfig
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
+from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
+    ExpertForwardPayload,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
+    FusedMoEQuantConfig,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.trtllm_fp4_executor import (
+    TrtllmFp4Executor,
+)
+from rtp_llm.utils.model_weight import W
 
 class QuantMode(IntEnum):
     """Supported quantization modes for MoE testing."""
 
     FP4_NVFP4_NVFP4 = 1
-    FP4_MXFP4_MXFP8 = 2
-    FP4_MXFP4_Bf16 = 3
-    FP8_BLOCK_SCALE = 4
-    FP8_PER_TENSOR = 5
-    BF16 = 6
-
-
-def skip_checks(
-    moe_impl,
-    routing_config,
-    weight_processing,
-    gated_act_type,
-    num_tokens,
-    hidden_size,
-    intermediate_size,
-):
-    """Common skip logic for all tests."""
-    compute_capability = get_compute_capability(torch.device(device="cuda"))
-    if compute_capability[0] not in [10]:
-        pytest.skip("These tests are only guaranteed to work on SM100 and SM103 GPUs.")
-
-    # Check if moe_impl is FP4Moe by class name to avoid circular imports
-    is_fp4_moe = type(moe_impl).__name__ == "FP4Moe"
-
-    # Skip incompatible combinations
-    if gated_act_type == GatedActType.GeGlu and (
-        not is_fp4_moe
-        or moe_impl.quant_mode != QuantMode.FP4_NVFP4_NVFP4
-        or routing_config["routing_method_type"] != RoutingMethodType.TopK
-        or num_tokens > 128
-    ):
-        pytest.skip(
-            f"Incompatible: {moe_impl.name} + {gated_act_type} + {routing_config['routing_method_type']} + {num_tokens}"
-        )
-    elif gated_act_type == GatedActType.SwiGlu and (
-        hidden_size > 1024 or intermediate_size > 1024
-    ):
-        pytest.skip(
-            f"Skip for testing speed: {gated_act_type} + {hidden_size} + {intermediate_size}"
-        )
-
-    # Skip large intermediate sizes for configurations with many experts
-    if routing_config["num_experts"] >= 512 and intermediate_size > 512:
-        pytest.skip(
-            f"Skipping for testing speed: intermediate_size={intermediate_size} with {routing_config['num_experts']} experts"
-        )
-
-    if type(moe_impl) not in routing_config["compatible_moe_impls"]:
-        pytest.skip(
-            f"Incompatible: {moe_impl.name} + {routing_config['routing_method_type'].name}"
-        )
-    if type(moe_impl) not in weight_processing["compatible_moe_impls"]:
-        pytest.skip(
-            f"Incompatible: {moe_impl.name} + {weight_processing['use_shuffled_weight']} + {weight_processing['layout']}"
-        )
-    if intermediate_size not in routing_config["compatible_intermediate_size"]:
-        pytest.skip(
-            f"Incompatible: intermediate_size={intermediate_size} with {routing_config['routing_method_type'].name} routing ({routing_config['num_experts']} experts)"
-        )
-
-    # TODO(jimmzhou): enable MxFP4xBf16 on SM103
-    if (
-        is_fp4_moe
-        and moe_impl.quant_mode == QuantMode.FP4_MXFP4_Bf16
-        and compute_capability[0] == 10
-        and compute_capability[1] == 3
-    ):
-        pytest.xfail(
-            "Note(jimmzhou): Make MxFP4xBf16 nonfunctional on SM103 to avoid B200 regression"
-        )
-
-
-
-# Max num tokens to tune for trtllm-gen fused moe
-TUNE_MAX_NUM_TOKENS = 4096
-
+    BF16 = 2
 
 def check_cuda(err):
     """Unified CUDA error checking function used throughout the file."""
@@ -290,7 +213,6 @@ class CUDAGraphMoE:
             routing_method_type=self.config["routing_method_type"],
             gated_act_type=self.config["gated_act_type"],
             do_finalize=True,
-            tune_max_num_tokens=TUNE_MAX_NUM_TOKENS,
         )
         return output  # Extract tensor from tuple
 
@@ -661,404 +583,43 @@ class FP4Moe(Moe):
         """Get FP4-specific accuracy tolerances."""
         return {"atol": 0.1, "rtol": 0.85, "percent": 0.925}
 
-
-# ====================================================================================
-# FP8 Block Scale Quantization Implementation
-# ====================================================================================
-
-
-class FP8BlockScaleMoe(Moe):
-    """FP8 MoE implementation with block scaling (DeepSeek style)."""
-
-    def quantize_weights(self, gemm1_weights, gemm2_weights, hidden_states_sample):
-        """Quantize weights to FP8 with block scaling."""
-        num_experts = gemm1_weights.shape[0]
-        intermediate_size = gemm1_weights.shape[1] // 2
-        hidden_size = gemm1_weights.shape[
-            2
-        ]  # [num_experts, 2*intermediate_size, hidden_size]
-
-        # Quantize weights to FP8
-        gemm1_weights_fp8 = gemm1_weights.to(torch.float8_e4m3fn)
-        gemm1_scales = 2 * torch.rand(
-            (num_experts, 2 * intermediate_size // 128, hidden_size // 128),
-            device="cuda",
-        ).to(torch.float)
-
-        gemm2_weights_fp8 = gemm2_weights.to(torch.float8_e4m3fn)
-        gemm2_scales = 2 * torch.rand(
-            (num_experts, hidden_size // 128, intermediate_size // 128), device="cuda"
-        ).to(torch.float)
-
-        return {
-            "hidden_states_scale_global": None,  # Block scales computed at runtime
-            "gemm1_weights": gemm1_weights_fp8,
-            "gemm1_scales": gemm1_scales,
-            "gemm1_scales_global": None,
-            "gemm2_weights": gemm2_weights_fp8,
-            "gemm2_scales": gemm2_scales,
-            "gemm2_scales_global": None,
-        }
-
-    def quantize_inputs(self, hidden_states: torch.Tensor, hidden_states_scale_global):
-        """For FP8 block scaling, no pre-quantization - everything happens at runtime."""
-
-        def to_float8_blockwise(
-            x,
-            block_size_m=128,
-            block_size_n=128,
-            dtype=torch.float8_e4m3fn,
-            transpose_scale=True,
-            is_blockm=False,
-            is_blockn=True,
-        ):
-            assert x.dtype == torch.bfloat16
-            x = x.contiguous()
-            assert x.dim() == 2
-            m, n = x.shape
-
-            m_tile = block_size_m if is_blockm else 1
-            n_tile = block_size_n if is_blockn else 1
-            num_blocks_m = m // m_tile
-            num_blocks_n = n // n_tile
-
-            # Initialize output tensors
-            quantized_x = torch.empty_like(x, dtype=dtype, device=x.device)
-            scales = torch.empty(
-                (num_blocks_m, num_blocks_n), dtype=torch.float32, device=x.device
-            )
-
-            # Quantize tensor in blocks
-            finfo = torch.finfo(dtype)
-            for i in range(num_blocks_m):
-                for j in range(num_blocks_n):
-                    # Determine block slices
-                    start_m, end_m = i * m_tile, min((i + 1) * m_tile, m)
-                    start_n, end_n = j * n_tile, min((j + 1) * n_tile, n)
-
-                    # Extract the block
-                    block = x[start_m:end_m, start_n:end_n]
-
-                    # Per-block quantization logic
-                    min_val, max_val = block.aminmax()
-                    amax = torch.maximum(min_val.abs(), max_val.abs()).clamp(min=1e-12)
-                    scale = finfo.max / amax
-
-                    # Quantize the block and store the scale
-                    quantized_block = (block * scale).clamp(
-                        min=finfo.min, max=finfo.max
-                    )
-                    quantized_x[start_m:end_m, start_n:end_n] = quantized_block.to(
-                        dtype
-                    )
-                    scales[i, j] = scale.float().reciprocal()
-
-            if transpose_scale:
-                scales = scales.t()
-
-            return quantized_x, scales
-
-        # todo(Yingyi):quantize bf16 to fp8
-        hidden_states_quant, hidden_states_scale = to_float8_blockwise(hidden_states)
-        return {
-            "hidden_states": hidden_states_quant,
-            "hidden_states_scale": hidden_states_scale,
-        }
-
-    def prepare_static_weights_for_kernel(
-        self,
-        args_dequant,
-        args,
-        gemm1_weights_orig,
-        gemm2_weights_orig,
-        hidden_size,
-        intermediate_size,
-        num_experts,
-        weight_processing,
-    ):
-        """Prepare quantized weights for kernel (done offline with weights)."""
-
-        # Use shuffled weights with BlockMajorK layout for better performance
-        use_shuffled_weight = weight_processing["use_shuffled_weight"]
-        weight_layout = weight_processing["layout"]
-
-        if use_shuffled_weight:
-            # FIXME: this depends on the kernel internals
-            epilogue_tile_m = 64
-
-            gemm1_weights_fp8_shuffled = []
-            gemm2_weights_fp8_shuffled = []
-            for i in range(num_experts):
-                tmp_weights1 = shuffle_matrix_a(
-                    args.gemm1_weights[i].view(torch.uint8), epilogue_tile_m
-                )
-                tmp_weights2 = shuffle_matrix_a(
-                    args.gemm2_weights[i].view(torch.uint8), epilogue_tile_m
-                )
-
-                if weight_layout == WeightLayout.BlockMajorK:
-                    block_k = 128
-                    tmp_weights1 = convert_to_block_layout(tmp_weights1, block_k)
-                    tmp_weights2 = convert_to_block_layout(tmp_weights2, block_k)
-
-                gemm1_weights_fp8_shuffled.append(tmp_weights1)
-                gemm2_weights_fp8_shuffled.append(tmp_weights2)
-
-            kernel_gemm1_weights = torch.stack(gemm1_weights_fp8_shuffled).view(
-                torch.float8_e4m3fn
-            )
-            kernel_gemm2_weights = torch.stack(gemm2_weights_fp8_shuffled).view(
-                torch.float8_e4m3fn
-            )
-        else:
-            kernel_gemm1_weights = args.gemm1_weights
-            kernel_gemm2_weights = args.gemm2_weights
-
-        return {
-            "gemm1_weights": kernel_gemm1_weights,
-            "gemm1_scales": args.gemm1_scales,
-            "gemm2_weights": kernel_gemm2_weights,
-            "gemm2_scales": args.gemm2_scales,
-            "use_shuffled_weight": use_shuffled_weight,
-            "weight_layout": weight_layout,
-        }
-
+class FP4MoeExecutor(FP4Moe):
     def call_moe(
         self, static_data, hidden_states_orig, hidden_states_scale_global, **kwargs
     ):
-        """Call MoE with runtime block scale generation + kernel execution."""
-        expert_logits = kwargs["expert_logits"]
-        routing_bias = kwargs["routing_bias"]
-        num_experts = kwargs["num_experts"]
-        top_k = kwargs["top_k"]
-        n_groups = kwargs["n_groups"]
-        top_k_groups = kwargs["top_k_groups"]
-        intermediate_size = kwargs["intermediate_size"]
-        routed_scaling = kwargs["routed_scaling"]
-        routing_method_type = kwargs["routing_method_type"]
-        enable_autotune = kwargs.get("enable_autotune", True)
-        enable_pdl = kwargs.get("enable_pdl")
-        hidden_states_scale = kwargs["hidden_states_scale"]
-        hidden_states_quant = kwargs["hidden_states_quant"]
-
-        # Generate block scales and quantize hidden states at runtime
-        hidden_states_fp8 = hidden_states_quant.to(torch.float8_e4m3fn)
-        assert not torch.isnan(hidden_states_fp8.float()).any(), (
-            "NaN detected in hidden_states_fp8"
+        model_config = ModelConfig()
+        model_config.expert_num = kwargs["num_experts"]
+        model_config.hidden_size = kwargs["hidden_size"]
+        model_config.moe_inter_size = kwargs["intermediate_size"]
+        model_config.moe_k = kwargs["top_k"]
+        parallelism_config = ParallelismConfig()
+        parallelism_config.dp_size = 1
+        parallelism_config.tp_size = 1
+        parallelism_config.ep_size = 1
+        config = MoEConfigAdapter(
+            model_config=model_config,
+            parallelism_config=parallelism_config,
         )
+        payload = ExpertForwardPayload(
+            expert_x=hidden_states_orig,
+            expert_x_origin_dtype=torch.bfloat16,
+            expert_topk_ids=kwargs["topk_ids"],
+            expert_topk_weights=kwargs["topk_weights"],
+        )
+        weights = {
+            W.moe_w1: static_data["gemm1_weights_fp4_shuffled"],
+            W.moe_w2: static_data["gemm2_weights_fp4_shuffled"],
+            W.moe_s1: static_data["gemm1_scales_fp4_shuffled"],
+            W.moe_s2: static_data["gemm2_scales_fp4_shuffled"],
+            "w13_input_scale": kwargs["w13_input_scale"],
+            "w13_weight_scale_2": kwargs["w13_weight_scale_2"],
+            "w2_input_scale": kwargs["w2_input_scale"],
+            "w2_weight_scale_2": kwargs["w2_weight_scale_2"],
+        }
 
-        # Use autotuner for optimal kernel selection
-        with autotune(enable_autotune):
-            output = trtllm_fp8_block_scale_moe(
-                expert_logits,
-                routing_bias,
-                hidden_states_fp8,
-                hidden_states_scale,
-                static_data["gemm1_weights"],
-                static_data["gemm1_scales"],
-                static_data["gemm2_weights"],
-                static_data["gemm2_scales"],
-                num_experts,
-                top_k,
-                n_groups,
-                top_k_groups,
-                intermediate_size,
-                0,
-                num_experts,
-                routed_scaling,
-                routing_method_type,
-                use_shuffled_weight=static_data["use_shuffled_weight"],
-                weight_layout=static_data["weight_layout"],
-                enable_pdl=enable_pdl,
-                tune_max_num_tokens=TUNE_MAX_NUM_TOKENS,
-            )
+        executor = TrtllmFp4Executor(config, weights, FusedMoEQuantConfig())
+        output = executor.execute(payload, "silu", None, None, False, None)
         return output.to(torch.float)
-
-    def compute_reference(self, args):
-        """FP8 block-scale reference implementation."""
-        return run_moe_reference_dsfp8(args)
-
-    def get_tolerances(self):
-        """Get FP8 block-scale accuracy tolerances."""
-        return {"atol": 0.1, "rtol": 0.85, "percent": 0.8}
-
-
-# ====================================================================================
-# FP8 Per-Tensor Quantization Implementation
-# ====================================================================================
-
-
-class FP8PerTensorMoe(Moe):
-    """FP8 MoE implementation with per-tensor scaling (Llama4 style)."""
-
-    def quantize_weights(self, gemm1_weights, gemm2_weights, hidden_states_sample):
-        """Quantize weights to FP8 per-tensor and compute global scale factors."""
-        # Compute global scale factor for hidden states (offline calibration)
-        hidden_states_global_scale = calculate_fp8_global_scale_factor(
-            hidden_states_sample
-        )
-
-        # Quantize to FP8 per-tensor
-        gemm1_weights_quant, gemm1_global_scales = quant_fp8_per_tensor_batches(
-            gemm1_weights
-        )
-        gemm2_weights_quant, gemm2_global_scales = quant_fp8_per_tensor_batches(
-            gemm2_weights
-        )
-
-        return {
-            "hidden_states_scale_global": hidden_states_global_scale,
-            "gemm1_weights": gemm1_weights_quant,
-            "gemm1_scales": None,
-            "gemm1_scales_global": gemm1_global_scales,
-            "gemm2_weights": gemm2_weights_quant,
-            "gemm2_scales": None,
-            "gemm2_scales_global": gemm2_global_scales,
-        }
-
-    def quantize_inputs(self, hidden_states, hidden_states_scale_global):
-        """Quantize hidden states to FP8 per-tensor using pre-computed global scale."""
-        # Quantize to FP8 per-tensor using pre-computed global scale factor
-        hidden_states_quant, _ = quant_fp8_per_tensor(
-            hidden_states, hidden_states_scale_global
-        )
-
-        return {
-            "hidden_states": hidden_states_quant,
-            "hidden_states_scale": None,
-        }
-
-    def prepare_static_weights_for_kernel(
-        self,
-        args_dequant,
-        args,
-        gemm1_weights_orig,
-        gemm2_weights_orig,
-        hidden_size,
-        intermediate_size,
-        num_experts,
-        weight_processing,
-    ):
-        """Prepare quantized weights for kernel (done offline with weights)."""
-        # FIXME: this depends on the kernel internals
-        epilogue_tile_m = 128
-
-        # Reorder rows of W1 for fused gated activation
-        gemm1_weights_fp8_interleaved = []
-        for i in range(num_experts):
-            gemm1_weights_fp8_interleaved.append(
-                reorder_rows_for_gated_act_gemm(args.gemm1_weights[i].clone())
-            )
-
-        # Stack weights and scales for all experts
-        gemm1_weights_fp8_interleaved = torch.stack(
-            gemm1_weights_fp8_interleaved
-        ).reshape(num_experts, 2 * intermediate_size, hidden_size)
-
-        # Shuffle weights and scaling factors for transposed mma output
-        gemm1_weights_fp8_shuffled = []
-        gemm2_weights_fp8_shuffled = []
-        for i in range(num_experts):
-            gemm1_weights_fp8_shuffled.append(
-                shuffle_matrix_a(
-                    gemm1_weights_fp8_interleaved[i].view(torch.uint8), epilogue_tile_m
-                )
-            )
-
-            gemm2_weights_fp8_shuffled.append(
-                shuffle_matrix_a(
-                    args.gemm2_weights[i].view(torch.uint8), epilogue_tile_m
-                )
-            )
-
-        # Stack weights for all experts
-        gemm1_weights_fp8_shuffled = torch.stack(gemm1_weights_fp8_shuffled).view(
-            torch.float8_e4m3fn
-        )
-        gemm2_weights_fp8_shuffled = torch.stack(gemm2_weights_fp8_shuffled).view(
-            torch.float8_e4m3fn
-        )
-
-        # Calculate scaling factors that depend on weights
-        scale_c_fc1 = (
-            args_dequant.c_global_sf
-            * (1.0 / args.gemm1_scales_global)
-            * (1.0 / args.hidden_states_scale_global)
-        )
-        scale_gate_fc1 = (1.0 / args.gemm1_scales_global) * (
-            1.0 / args.hidden_states_scale_global
-        )
-        scale_c_fc2 = (1.0 / args_dequant.c_global_sf) * (
-            1.0 / args.gemm2_scales_global
-        )
-
-        return {
-            "gemm1_weights": gemm1_weights_fp8_shuffled,
-            "gemm2_weights": gemm2_weights_fp8_shuffled,
-            "scale_c_fc1": scale_c_fc1,
-            "scale_gate_fc1": scale_gate_fc1,
-            "scale_c_fc2": scale_c_fc2,
-        }
-
-    def call_moe(
-        self, static_data, hidden_states_orig, hidden_states_scale_global, **kwargs
-    ):
-        """Call MoE with runtime input quantization + kernel execution (done at runtime)."""
-        expert_logits = kwargs["expert_logits"]
-        routing_bias = kwargs["routing_bias"]
-        num_experts = kwargs["num_experts"]
-        top_k = kwargs["top_k"]
-        n_groups = kwargs["n_groups"]
-        top_k_groups = kwargs["top_k_groups"]
-        intermediate_size = kwargs["intermediate_size"]
-        routed_scaling = kwargs["routed_scaling"]
-        routing_method_type = kwargs["routing_method_type"]
-        enable_autotune = kwargs.get("enable_autotune", True)
-
-        # Quantize to FP8 per-tensor using pre-computed global scale factor
-        hidden_states_fp8, _ = quant_fp8_per_tensor(
-            hidden_states_orig, hidden_states_scale_global
-        )
-
-        # Use autotuner for optimal kernel selection
-        with autotune(enable_autotune):
-            output = trtllm_fp8_per_tensor_scale_moe(
-                (
-                    expert_logits.to(torch.bfloat16)
-                    if routing_method_type == RoutingMethodType.Llama4
-                    else expert_logits
-                ),
-                routing_bias,
-                hidden_states_fp8,
-                static_data["gemm1_weights"],
-                static_data["scale_c_fc1"],
-                static_data["scale_gate_fc1"],
-                static_data["gemm2_weights"],
-                static_data["scale_c_fc2"],
-                num_experts,
-                top_k,
-                n_groups,
-                top_k_groups,
-                intermediate_size,
-                0,
-                num_experts,
-                routed_scaling,
-                routing_method_type
-                == RoutingMethodType.Llama4,  # Use_routing_scales_on_input
-                routing_method_type,
-                tune_max_num_tokens=TUNE_MAX_NUM_TOKENS,
-            )
-
-        return output.to(torch.float)
-
-    def compute_reference(self, args):
-        """FP8 per-tensor reference implementation."""
-        return run_moe_reference_per_tensor_scale_fp8(args)
-
-    def get_tolerances(self):
-        """Get FP8 per-tensor accuracy tolerances."""
-        return {"atol": 0.1, "rtol": 0.85, "percent": 0.925}
-
 
 # ====================================================================================
 # BF16 Implementation
@@ -1198,7 +759,6 @@ class BF16Moe(Moe):
                 use_shuffled_weight=static_data["use_shuffled_weight"],
                 weight_layout=static_data["weight_layout"],
                 routing_method_type=routing_method_type,
-                tune_max_num_tokens=TUNE_MAX_NUM_TOKENS,
             )
         return output.to(torch.float)
 
@@ -1212,17 +772,8 @@ class BF16Moe(Moe):
 
 
 # ====================================================================================
-# Quantizer Factory
+# Fp4Executor Implementation (using TrtllmFp4Executor as backend)
 # ====================================================================================
-def get_moe_impl(quant_mode: QuantMode):
-    """Factory function to get the appropriate MoE implementation."""
-    if quant_mode == QuantMode.FP8_BLOCK_SCALE:
-        return FP8BlockScaleMoe()
-    elif quant_mode == QuantMode.FP8_PER_TENSOR:
-        return FP8PerTensorMoe()
-    else:
-        return FP4Moe(quant_mode)
-
 
 class moe_args:
     """Arguments container for MoE operations."""
@@ -1617,93 +1168,6 @@ def quant_dequant_fp4(a, use_ue8m0=False, is_sf_swizzled_layout=True):
 
 
 # ====================================================================================
-# FP8 Quantization Functions
-# ====================================================================================
-
-
-def calculate_fp8_global_scale_factor(tensor):
-    """
-    Calculate FP8 global scale factor for a tensor.
-
-    NOTE: In production, global scale factors are typically obtained offline during:
-    - Post-Training Quantization (PTQ) calibration process
-    - Quantization-Aware Training (QAT) process
-
-    This function is used here for testing/reference purposes.
-    Formula: 448 represents max representable value in FP8 E4M3 format.
-    """
-    return 448 / tensor.float().abs().nan_to_num().max()
-
-
-def quant_fp8_per_tensor(a, a_global_sf):
-    """
-    Quantize FP8 per-tensor with pre-computed global scale factor.
-
-    This function expects global scale factors that have been pre-computed offline
-    during PTQ/QAT calibration process. The global scale factor should NOT be
-    computed at runtime to avoid performance overhead.
-
-    Pure function - same inputs always produce same outputs.
-    """
-    a_fp8 = (a * a_global_sf).to(torch.float8_e4m3fn)
-    return a_fp8, a_global_sf
-
-
-def quant_fp8_per_tensor_batches(a):
-    """FP8 per-tensor batch quantization function with centralized global scale factor calculation."""
-    num_batches = a.size(0)
-    a_quant = []
-    a_scales = []
-
-    for i in range(num_batches):
-        # Use centralized global scale factor calculation
-        a_global_sf = calculate_fp8_global_scale_factor(a[i])
-        a_fp8, _ = quant_fp8_per_tensor(a[i], a_global_sf)
-        a_quant.append(a_fp8)
-        a_scales.append(a_global_sf)
-
-    result_a_quant = torch.stack(a_quant)
-    result_a_scales = torch.stack(a_scales)
-
-    return result_a_quant, result_a_scales
-
-
-def quant_dequant_per_tensor_fp8(a):
-    """FP8 per-tensor quantize-dequantize roundtrip function with centralized global scale factor calculation."""
-    # Use centralized global scale factor calculation
-    a_global_sf = calculate_fp8_global_scale_factor(a)
-    a_fp8, _ = quant_fp8_per_tensor(a, a_global_sf)
-    a_pt = a_fp8.to(torch.float) / a_global_sf
-    return a_pt.cuda(), a_global_sf
-
-
-def dequant_reference_dsfp8(input, scale, transpose_scale, block_m, block_n):
-    """Reference FP8 block-scale dequantization."""
-    input = input.to(torch.float)
-    scale = scale.to(torch.float)
-    if transpose_scale:
-        scale = scale.t()
-
-    m, n = input.shape
-    m_tile = 128 if block_m else 1
-    n_tile = 128 if block_n else 1
-
-    assert m % m_tile == 0
-    assert n % n_tile == 0
-    assert scale.shape == (m // m_tile, n // n_tile)
-
-    # Expand scale to match input dimensions using tensor operations
-    if m_tile > 1:
-        scale = torch.repeat_interleave(scale, m_tile, dim=0)
-    if n_tile > 1:
-        scale = torch.repeat_interleave(scale, n_tile, dim=1)
-
-    # Element-wise multiplication (equivalent to the nested loop logic)
-    output = input * scale
-    return output
-
-
-# ====================================================================================
 # Common MoE Reference Implementation
 # ====================================================================================
 
@@ -1911,109 +1375,6 @@ def run_moe_reference_fp4(args, quant_mode: QuantMode):
 
     return run_moe_dequant(args_dequant, quant_mode), args_dequant
 
-
-def run_moe_reference_dsfp8(args):
-    """FP8 block-scale reference implementation."""
-    # Generate block scales at runtime for FP8 block scaling
-
-    def dequant_reference_dsfp8(input, scale, transpose_scale, block_m, block_n):
-        """Reference FP8 block-scale dequantization."""
-        input = input.to(torch.float)
-        scale = scale.to(torch.float)
-        if transpose_scale:
-            scale = scale.t()
-
-        m, n = input.shape
-        m_tile = 128 if block_m else 1
-        n_tile = 128 if block_n else 1
-
-        assert m % m_tile == 0
-        assert n % n_tile == 0
-        assert scale.shape == (m // m_tile, n // n_tile)
-
-        # Expand scale to match input dimensions using tensor operations
-        if m_tile > 1:
-            scale = torch.repeat_interleave(scale, m_tile, dim=0)
-        if n_tile > 1:
-            scale = torch.repeat_interleave(scale, n_tile, dim=1)
-
-        # Element-wise multiplication (equivalent to the nested loop logic)
-        output = input * scale
-        return output
-
-    # todo(Yingyi): use original hidden_states??
-    hidden_states_dequant = dequant_reference_dsfp8(
-        args.hidden_states, args.hidden_states_scale, True, False, True
-    )
-
-    gemm1_weights_dequant = {}
-    for i in range(args.num_experts):
-        gemm1_weights_dequant[i] = dequant_reference_dsfp8(
-            args.gemm1_weights[i], args.gemm1_scales[i], False, True, True
-        )
-
-    gemm2_weights_dequant = {}
-    for i in range(args.num_experts):
-        gemm2_weights_dequant[i] = dequant_reference_dsfp8(
-            args.gemm2_weights[i], args.gemm2_scales[i], False, True, True
-        )
-
-    args_dequant = moe_args_dequant(
-        args.num_tokens,
-        args.num_experts,
-        args.hidden_size,
-        args.intermediate_size,
-        args.top_k,
-        args.padding,
-        hidden_states_dequant,
-        args.expert_logits,
-        gemm1_weights_dequant,
-        gemm2_weights_dequant,
-        args.permute_info,
-        args.use_routing_scales_on_input,
-        GatedActType.SwiGlu.value,  # gated_act_type
-    )
-
-    return run_moe_dequant(args_dequant, QuantMode.FP8_BLOCK_SCALE), args_dequant
-
-
-def run_moe_reference_per_tensor_scale_fp8(args):
-    """FP8 per-tensor reference implementation."""
-    hidden_states_dequant = (
-        args.hidden_states.to(torch.float) / args.hidden_states_scale_global
-    )
-
-    gemm1_weights_dequant = {}
-    for i in range(args.num_experts):
-        gemm1_weights_dequant[i] = (
-            args.gemm1_weights[i].to(torch.float) / args.gemm1_scales_global[i]
-        )
-
-    gemm2_weights_dequant = {}
-    for i in range(args.num_experts):
-        gemm2_weights_dequant[i] = (
-            args.gemm2_weights[i].to(torch.float) / args.gemm2_scales_global[i]
-        )
-
-    args_dequant = moe_args_dequant(
-        args.num_tokens,
-        args.num_experts,
-        args.hidden_size,
-        args.intermediate_size,
-        args.top_k,
-        args.padding,
-        hidden_states_dequant,
-        args.expert_logits,
-        gemm1_weights_dequant,
-        gemm2_weights_dequant,
-        args.permute_info,
-        args.use_routing_scales_on_input,
-        GatedActType.SwiGlu.value,  # gated_act_type
-    )
-
-    return run_moe_dequant(args_dequant, QuantMode.FP8_PER_TENSOR), args_dequant
-
-
 def run_moe_reference_bf16(args):
     """BF16 reference implementation."""
 
@@ -2044,7 +1405,6 @@ def run_moe_reference_bf16(args):
 
     return run_moe_dequant(args_dequant, QuantMode.BF16), args_dequant
 
-
 def _compute_moe_actual_unified(moe_impl, args_dequant, args, **kwargs):
     """Unified actual computation that delegates to implementation-specific methods."""
     # 1. Prepare static weights for the kernel (offline processing)
@@ -2059,6 +1419,7 @@ def _compute_moe_actual_unified(moe_impl, args_dequant, args, **kwargs):
         kwargs["weight_processing"],
     )
 
+    topk_ids = args.permute_info["topKIndices"].to(torch.int32)
     # 2. Call MoE with runtime input quantization + kernel execution
     kernel_kwargs = {
         "expert_logits": kwargs["expert_logits"],
@@ -2077,6 +1438,14 @@ def _compute_moe_actual_unified(moe_impl, args_dequant, args, **kwargs):
         "hidden_states_scale": args.hidden_states_scale,
         "hidden_states_quant": kwargs["hidden_states_quant"],
         "enable_autotune": kwargs.get("enable_autotune", True),
+        "topk_weights": args.expert_logits.view(args.num_tokens, args.num_experts)[
+            torch.arange(args.num_tokens).unsqueeze(1), topk_ids
+        ].to(torch.bfloat16),
+        "topk_ids": topk_ids,
+        "w13_weight_scale_2": 1.0 / args.gemm1_scales_global,
+        "w2_weight_scale_2": 1.0 / args.gemm2_scales_global,
+        "w13_input_scale": 1.0 / args.hidden_states_scale_global,
+        "w2_input_scale": 1.0 / args.hidden_states_scale_global,
     }
 
     return moe_impl.call_moe(
@@ -2085,13 +1454,6 @@ def _compute_moe_actual_unified(moe_impl, args_dequant, args, **kwargs):
         args.hidden_states_scale_global,
         **kernel_kwargs,
     )
-
-
-@pytest.fixture(scope="module")
-def cache_permute_indices():
-    # The cache key is now a tuple of (weight_type, shape)
-    _cache_permute_indices: Dict[tuple, torch.Tensor] = {}
-    return _cache_permute_indices
 
 
 def run_moe_test(
@@ -2105,15 +1467,6 @@ def run_moe_test(
     cache_permute_indices,
 ):
     """Common test logic for all routing methods."""
-    skip_checks(
-        moe_impl,
-        routing_config,
-        weight_processing,
-        gated_act_type,
-        num_tokens,
-        hidden_size,
-        intermediate_size,
-    )
 
     torch.cuda.synchronize()
 
@@ -2170,9 +1523,6 @@ def run_moe_test(
         dtype=torch.bfloat16,
     )
 
-    # Generate routing info
-    use_routing_scales_on_input = routing_method_type == RoutingMethodType.Llama4
-
     if routing_method_type == RoutingMethodType.DeepSeekV3:
         permute_info, scores = routing_reference_no_aux(
             expert_logits,
@@ -2182,7 +1532,7 @@ def run_moe_test(
             top_k_groups,
             routed_scaling,
             padding,
-            use_routing_scales_on_input,
+            False,
         )
     elif routing_method_type == RoutingMethodType.Renormalize:
         permute_info, scores = routing_reference_renormalize(
@@ -2277,6 +1627,8 @@ def run_moe_test(
 
     # Compare outputs
     tolerances = moe_impl.get_tolerances()
+    print(output_dequant_reference)
+    print(output_dequant_actual)
     check_accuracy(
         output_dequant_reference,
         output_dequant_actual,
@@ -2286,425 +1638,10 @@ def run_moe_test(
     )
 
 
-# Test: Renormalize routing
-@pytest.mark.parametrize("num_tokens", [8, 768, 3072])
-@pytest.mark.parametrize("hidden_size", [1024])
-@pytest.mark.parametrize("intermediate_size", [1024, 768, 512, 384])
-@pytest.mark.parametrize(
-    "moe_impl",
-    [
-        pytest.param(BF16Moe(), id="BF16xBF16"),
-        pytest.param(FP8BlockScaleMoe(), id="FP8_Block"),
-        pytest.param(FP8PerTensorMoe(), id="FP8_Tensor"),
-        pytest.param(FP4Moe(quant_mode=QuantMode.FP4_NVFP4_NVFP4), id="NvFP4xNvFP4"),
-        pytest.param(FP4Moe(quant_mode=QuantMode.FP4_MXFP4_MXFP8), id="MxFP4xMxFP8"),
-        pytest.param(FP4Moe(quant_mode=QuantMode.FP4_MXFP4_Bf16), id="MxFP4xBf16"),
-    ],
-)
-@pytest.mark.parametrize(
-    "routing_config",
-    [
-        pytest.param(
-            {
-                "num_experts": 128,
-                "top_k": 8,
-                "padding": 8,
-                "n_groups": None,
-                "top_k_groups": None,
-                "routed_scaling": None,
-                "has_routing_bias": False,
-                "routing_method_type": RoutingMethodType.Renormalize,
-                "compatible_moe_impls": [
-                    FP8PerTensorMoe,
-                    FP8BlockScaleMoe,
-                    FP4Moe,
-                    BF16Moe,
-                ],
-                "compatible_intermediate_size": [384, 768, 1024],
-                "enable_autotune": True,
-            },
-            id="Qwen3_MOE",
-        ),
-        pytest.param(
-            {
-                "num_experts": 256,
-                "top_k": 8,
-                "padding": 8,
-                "n_groups": None,
-                "top_k_groups": None,
-                "routed_scaling": None,
-                "has_routing_bias": False,
-                "routing_method_type": RoutingMethodType.Renormalize,
-                "compatible_moe_impls": [
-                    FP8PerTensorMoe,
-                    FP8BlockScaleMoe,
-                    FP4Moe,
-                    BF16Moe,
-                ],
-                "compatible_intermediate_size": [384, 1024],
-                "enable_autotune": False,
-            },
-            id="Renorm",
-        ),
-        pytest.param(
-            {
-                "num_experts": 512,
-                "top_k": 10,
-                "padding": 8,
-                "n_groups": None,
-                "top_k_groups": None,
-                "routed_scaling": None,
-                "has_routing_bias": False,
-                "routing_method_type": RoutingMethodType.Renormalize,
-                "compatible_moe_impls": [
-                    FP8PerTensorMoe,
-                    FP8BlockScaleMoe,
-                    FP4Moe,
-                    BF16Moe,
-                ],
-                "compatible_intermediate_size": [512],
-                "enable_autotune": True,
-            },
-            id="Qwen3_next",
-        ),
-    ],
-)
-@pytest.mark.parametrize(
-    "weight_processing",
-    [
-        pytest.param(
-            {
-                "use_shuffled_weight": False,
-                "layout": WeightLayout.MajorK,
-                "compatible_moe_impls": [FP8BlockScaleMoe],
-            },
-            id="NoShuffle_MajorK",
-        ),
-        pytest.param(
-            {
-                "use_shuffled_weight": True,
-                "layout": WeightLayout.MajorK,
-                "compatible_moe_impls": [FP4Moe, FP8PerTensorMoe, FP8BlockScaleMoe],
-            },
-            id="Shuffled_MajorK",
-        ),
-        pytest.param(
-            {
-                "use_shuffled_weight": True,
-                "layout": WeightLayout.BlockMajorK,
-                "compatible_moe_impls": [FP8BlockScaleMoe, BF16Moe],
-            },
-            id="Shuffled_BlockMajorK",
-        ),
-    ],
-)
-@pytest.mark.parametrize(
-    "gated_act_type",
-    [
-        pytest.param(GatedActType.SwiGlu, id="SwiGlu"),
-        pytest.param(GatedActType.GeGlu, id="GeGlu"),
-    ],
-)
-def test_renormalize_routing(
-    num_tokens,
-    hidden_size,
-    intermediate_size,
-    moe_impl,
-    routing_config,
-    weight_processing,
-    gated_act_type,
-    cache_permute_indices,
-):
-    """Test Renormalize routing configurations."""
-    run_moe_test(
-        num_tokens,
-        hidden_size,
-        intermediate_size,
-        moe_impl,
-        routing_config,
-        weight_processing,
-        gated_act_type,
-        cache_permute_indices,
-    )
-
-
-# Test: DeepSeekV3 routing
-@pytest.mark.parametrize("num_tokens", [8, 768, 3072])
-@pytest.mark.parametrize("hidden_size", [1024])
-@pytest.mark.parametrize("intermediate_size", [2048, 1024, 768, 512, 384])
-@pytest.mark.parametrize(
-    "moe_impl",
-    [
-        pytest.param(FP8BlockScaleMoe(), id="FP8_Block"),
-        pytest.param(FP4Moe(quant_mode=QuantMode.FP4_NVFP4_NVFP4), id="NvFP4xNvFP4"),
-        pytest.param(FP4Moe(quant_mode=QuantMode.FP4_MXFP4_MXFP8), id="MxFP4xMxFP8"),
-        pytest.param(FP4Moe(quant_mode=QuantMode.FP4_MXFP4_Bf16), id="MxFP4xBf16"),
-    ],
-)
-@pytest.mark.parametrize(
-    "routing_config",
-    [
-        pytest.param(
-            {
-                "num_experts": 384,
-                "top_k": 8,
-                "padding": 8,
-                "n_groups": 1,
-                "top_k_groups": 1,
-                "routed_scaling": 2.5,
-                "has_routing_bias": True,
-                "routing_method_type": RoutingMethodType.DeepSeekV3,
-                "compatible_moe_impls": [FP4Moe, FP8BlockScaleMoe],
-                "compatible_intermediate_size": [1024, 2048],
-                "enable_autotune": True,
-            },
-            id="kimi_k2",
-        ),
-        pytest.param(
-            {
-                "num_experts": 256,
-                "top_k": 8,
-                "padding": 8,
-                "n_groups": 8,
-                "top_k_groups": 4,
-                "routed_scaling": 2.5,
-                "has_routing_bias": True,
-                "routing_method_type": RoutingMethodType.DeepSeekV3,
-                "compatible_moe_impls": [FP4Moe, FP8BlockScaleMoe],
-                "compatible_intermediate_size": [512, 1024, 2048],
-                "enable_autotune": True,
-            },
-            id="DSv3",
-        ),
-        pytest.param(
-            {
-                "num_experts": 72,
-                "top_k": 6,
-                "padding": 8,
-                "n_groups": 1,
-                "top_k_groups": 1,
-                "routed_scaling": 2.5,
-                "has_routing_bias": True,
-                "routing_method_type": RoutingMethodType.DeepSeekV3,
-                "compatible_moe_impls": [FP4Moe, FP8BlockScaleMoe],
-                "compatible_intermediate_size": [384, 768],
-                "enable_autotune": False,
-            },
-            id="DSLite",
-        ),
-    ],
-)
-@pytest.mark.parametrize(
-    "weight_processing",
-    [
-        pytest.param(
-            {
-                "use_shuffled_weight": False,
-                "layout": WeightLayout.MajorK,
-                "compatible_moe_impls": [FP8BlockScaleMoe],
-            },
-            id="NoShuffle_MajorK",
-        ),
-        pytest.param(
-            {
-                "use_shuffled_weight": True,
-                "layout": WeightLayout.MajorK,
-                "compatible_moe_impls": [FP4Moe, FP8PerTensorMoe, FP8BlockScaleMoe],
-            },
-            id="Shuffled_MajorK",
-        ),
-        pytest.param(
-            {
-                "use_shuffled_weight": True,
-                "layout": WeightLayout.BlockMajorK,
-                "compatible_moe_impls": [FP8BlockScaleMoe],
-            },
-            id="Shuffled_BlockMajorK",
-        ),
-    ],
-)
-@pytest.mark.parametrize(
-    "gated_act_type",
-    [
-        pytest.param(GatedActType.SwiGlu, id="SwiGlu"),
-        pytest.param(GatedActType.GeGlu, id="GeGlu"),
-    ],
-)
-def test_deepseekv3_routing(
-    num_tokens,
-    hidden_size,
-    intermediate_size,
-    moe_impl,
-    routing_config,
-    weight_processing,
-    gated_act_type,
-    cache_permute_indices,
-):
-    """Test DeepSeekV3 routing configurations."""
-    run_moe_test(
-        num_tokens,
-        hidden_size,
-        intermediate_size,
-        moe_impl,
-        routing_config,
-        weight_processing,
-        gated_act_type,
-        cache_permute_indices,
-    )
-
-
-# Test: TopK routing
-@pytest.mark.parametrize("num_tokens", [8, 128])  # Limited for GeGlu
-@pytest.mark.parametrize("hidden_size", [1024])
-@pytest.mark.parametrize("intermediate_size", [384, 512, 768, 1024])
-@pytest.mark.parametrize(
-    "moe_impl",
-    [
-        pytest.param(FP4Moe(quant_mode=QuantMode.FP4_NVFP4_NVFP4), id="NvFP4xNvFP4"),
-        pytest.param(FP4Moe(quant_mode=QuantMode.FP4_MXFP4_MXFP8), id="MxFP4xMxFP8"),
-    ],
-)
-@pytest.mark.parametrize(
-    "routing_config",
-    [
-        pytest.param(
-            {
-                "num_experts": 16,
-                "top_k": 2,
-                "padding": 8,
-                "n_groups": None,
-                "top_k_groups": None,
-                "routed_scaling": None,
-                "has_routing_bias": False,
-                "routing_method_type": RoutingMethodType.TopK,
-                "compatible_moe_impls": [FP4Moe],
-                "compatible_intermediate_size": [512, 768, 1024],
-                "enable_autotune": True,
-            },
-            id="TopK",
-        ),
-    ],
-)
-@pytest.mark.parametrize(
-    "weight_processing",
-    [
-        pytest.param(
-            {
-                "use_shuffled_weight": True,
-                "layout": WeightLayout.MajorK,
-                "compatible_moe_impls": [FP4Moe, FP8PerTensorMoe, FP8BlockScaleMoe],
-            },
-            id="Shuffled_MajorK",
-        ),
-    ],
-)
-@pytest.mark.parametrize(
-    "gated_act_type",
-    [
-        pytest.param(GatedActType.SwiGlu, id="SwiGlu"),
-        pytest.param(GatedActType.GeGlu, id="GeGlu"),
-    ],
-)
-def test_topk_routing(
-    num_tokens,
-    hidden_size,
-    intermediate_size,
-    moe_impl,
-    routing_config,
-    weight_processing,
-    gated_act_type,
-    cache_permute_indices,
-):
-    """Test TopK routing configuration."""
-    run_moe_test(
-        num_tokens,
-        hidden_size,
-        intermediate_size,
-        moe_impl,
-        routing_config,
-        weight_processing,
-        gated_act_type,
-        cache_permute_indices,
-    )
-
-
-# Test: Llama4 routing
-@pytest.mark.parametrize("num_tokens", [8, 768, 3072])
-@pytest.mark.parametrize("hidden_size", [1024])
-@pytest.mark.parametrize("intermediate_size", [1024, 2048])
-@pytest.mark.parametrize(
-    "moe_impl",
-    [
-        pytest.param(FP8PerTensorMoe(), id="FP8_Tensor"),
-    ],
-)
-@pytest.mark.parametrize(
-    "routing_config",
-    [
-        pytest.param(
-            {
-                "num_experts": 128,
-                "top_k": 1,
-                "padding": 8,
-                "n_groups": 0,
-                "top_k_groups": 0,
-                "routed_scaling": 2.5,
-                "has_routing_bias": True,
-                "routing_method_type": RoutingMethodType.Llama4,
-                "compatible_moe_impls": [FP8PerTensorMoe],
-                "compatible_intermediate_size": [1024, 2048],
-                "enable_autotune": True,
-            },
-            id="Llama4",
-        ),
-    ],
-)
-@pytest.mark.parametrize(
-    "weight_processing",
-    [
-        pytest.param(
-            {
-                "use_shuffled_weight": True,
-                "layout": WeightLayout.MajorK,
-                "compatible_moe_impls": [FP4Moe, FP8PerTensorMoe, FP8BlockScaleMoe],
-            },
-            id="Shuffled_MajorK",
-        ),
-    ],
-)
-@pytest.mark.parametrize(
-    "gated_act_type",
-    [
-        pytest.param(GatedActType.SwiGlu, id="SwiGlu"),
-    ],
-)
-def test_llama4_routing(
-    num_tokens,
-    hidden_size,
-    intermediate_size,
-    moe_impl,
-    routing_config,
-    weight_processing,
-    gated_act_type,
-    cache_permute_indices,
-):
-    """Test Llama4 routing configuration with FP8 per-tensor."""
-    run_moe_test(
-        num_tokens,
-        hidden_size,
-        intermediate_size,
-        moe_impl,
-        routing_config,
-        weight_processing,
-        gated_act_type,
-        cache_permute_indices,
-    )
-
-
 _cache_permute_indices = {}
 
 if __name__ == "__main__":
-    test_renormalize_routing(
+    run_moe_test(
         num_tokens=3072,
         hidden_size=1024,
         intermediate_size=768,
@@ -2719,8 +1656,6 @@ if __name__ == "__main__":
                 "has_routing_bias": False,
                 "routing_method_type": RoutingMethodType.Renormalize,
                 "compatible_moe_impls": [
-                    FP8PerTensorMoe,
-                    FP8BlockScaleMoe,
                     FP4Moe,
                     BF16Moe,
                 ],
@@ -2730,7 +1665,7 @@ if __name__ == "__main__":
         weight_processing={
                 "use_shuffled_weight": True,
                 "layout": WeightLayout.MajorK,
-                "compatible_moe_impls": [FP4Moe, FP8PerTensorMoe, FP8BlockScaleMoe],
+                "compatible_moe_impls": [FP4Moe],
             },
         gated_act_type=GatedActType.SwiGlu,
         cache_permute_indices=_cache_permute_indices,
