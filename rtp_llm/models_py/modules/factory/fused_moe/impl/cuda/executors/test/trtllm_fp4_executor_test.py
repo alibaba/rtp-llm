@@ -669,12 +669,14 @@ class FP4MoeExecutor(FP4Moe):
         weight_processing,
     ):
         use_ue8m0 = self.is_mxfp4
-        _, gemm1_scales_linear_fp4_bytes, _ = quant_fp4_batches(
-            gemm1_weights_orig, num_experts, use_ue8m0, False
-        )
-        _, gemm2_scales_linear_fp4_bytes, _ = quant_fp4_batches(
-            gemm2_weights_orig, num_experts, use_ue8m0, False
-        )
+        gemm1_scales_linear_fp4_bytes = args.gemm1_scales
+        gemm2_scales_linear_fp4_bytes = args.gemm2_scales
+        # _, gemm1_scales_linear_fp4_bytes, _ = quant_fp4_batches(
+        #     gemm1_weights_orig, num_experts, use_ue8m0, False
+        # )
+        # _, gemm2_scales_linear_fp4_bytes, _ = quant_fp4_batches(
+        #     gemm2_weights_orig, num_experts, use_ue8m0, False
+        # )
         # Convert quantized weights to proper formats
         gemm1_weights_fp4 = args.gemm1_weights.view(torch.float8_e4m3fn).reshape(
             num_experts, 2 * intermediate_size, hidden_size // 2
