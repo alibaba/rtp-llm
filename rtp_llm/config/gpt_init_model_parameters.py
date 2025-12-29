@@ -222,6 +222,7 @@ class GptInitModelParameters:
         "py_env_configs",
         "config_dtype",
         "th_nccl_port",
+        "model_type",
     }
 
     # copy from rtp_llm/ops/libth_transformer.pyi for python intelligence
@@ -1000,6 +1001,7 @@ class GptInitModelParameters:
             self.max_seq_len = 8192
         logging.info(f"max_seq_len: {self.max_seq_len}")
 
+        self.model_type = StaticConfig.model_config.model_type
         self.update_task_type_use_kvcache()
 
         if StaticConfig.ffn_disaggregate_config.enable_ffn_disaggregate:
