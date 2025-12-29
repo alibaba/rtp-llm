@@ -1493,7 +1493,7 @@ def _compute_moe_actual_unified(moe_impl, args_dequant, args, **kwargs):
         "w13_weight_scale_2": 1.0 / args.gemm1_scales_global,
         "w2_weight_scale_2": 1.0 / args.gemm2_scales_global,
         "w13_input_scale": 1.0 / args.hidden_states_scale_global,
-        "w2_input_scale": 1.0 / args.hidden_states_scale_global,
+        "w2_input_scale": 1.0 / args_dequant.c_global_sf,
     }
 
     return moe_impl.call_moe(
