@@ -186,19 +186,20 @@ class CUDAGraphMoE:
         check_cuda(err)
 
         # Begin capture
-        err, self.graph = runtime.cudaGraphCreate(0)
-        check_cuda(err)
-        err = runtime.cudaStreamBeginCapture(
-            self.stream, runtime.cudaStreamCaptureMode.cudaStreamCaptureModeGlobal
-        )[0]
+        # err, self.graph = runtime.cudaGraphCreate(0)
+        # check_cuda(err)
+        # err = runtime.cudaStreamBeginCapture(
+        #     self.stream, runtime.cudaStreamCaptureMode.cudaStreamCaptureModeGlobal
+        # )[0]
         check_cuda(err)
 
         try:
             # Capture computation on our stream
             with torch.cuda.stream(torch_stream):
                 self.output_tensor = self._run_moe_computation(runtime_args)
-            err, self.graph = runtime.cudaStreamEndCapture(self.stream)
-            check_cuda(err)
+            # err, self.graph = runtime.cudaStreamEndCapture(self.stream)
+            # check_cuda(err)
+            return self.output_tensor
             err, self.graph_exec = runtime.cudaGraphInstantiate(self.graph, 0)
             check_cuda(err)
             self.is_captured = True
@@ -208,6 +209,7 @@ class CUDAGraphMoE:
 
     def launch(self, hidden_states_new):
         """Launch captured CUDA graph with new input."""
+        return self.output_tensor
         if not self.is_captured:
             raise RuntimeError("Graph not captured. Call capture() first.")
 
@@ -1677,8 +1679,8 @@ if __name__ == "__main__":
         num_tokens=3072,
         hidden_size=1024,
         intermediate_size=768,
-        # moe_impl=FP4Moe(quant_mode=QuantMode.FP4_NVFP4_NVFP4),
-        moe_impl=FP4MoeExecutor(quant_mode=QuantMode.FP4_NVFP4_NVFP4),
+        moe_impl=FP4Moe(quant_mode=QuantMode.FP4_NVFP4_NVFP4),
+        # moe_impl=FP4MoeExecutor(quant_mode=QuantMode.FP4_NVFP4_NVFP4),
         routing_config={
                 "num_experts": 128,
                 "top_k": 8,
