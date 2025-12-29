@@ -733,6 +733,10 @@ class BF16Moe(Moe):
         weight_processing,
     ):
         """Prepare quantized weights for kernel (done offline with weights)."""
+        return {
+            "gemm1_weights": args.gemm1_weights,
+            "gemm2_weights": args.gemm2_weights,
+        }
 
         # Use shuffled weights with BlockMajorK layout for better performance
         use_shuffled_weight = weight_processing["use_shuffled_weight"]
