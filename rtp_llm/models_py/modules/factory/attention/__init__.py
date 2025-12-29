@@ -60,6 +60,11 @@ else:
         DECODE_MLA_IMPS.append(MlaFlashInferDecodeImpl)
         PREFILL_MLA_IMPS.append(MlaFlashInferPrefillImpl)
 
+    from rtp_llm.models_py.modules.factory.attention.cuda_impl.prefill_cp_flashinfer import (
+        PrefillContextParallelFlashInferImpl,
+    )
+
+    PREFILL_CP_MHA_IMPS.append(PrefillContextParallelFlashInferImpl)
 
     from rtp_llm.models_py.modules.factory.attention.cuda_impl.flash_infer import (
         FlashInferDecodeImpl,
@@ -74,9 +79,3 @@ else:
     )
 
     DECODE_MHA_IMPS.append(PyFlashinferDecodeImpl)
-
-    from rtp_llm.models_py.modules.factory.attention.cuda_impl.prefill_cp_flashinfer import (
-        PrefillContextParallelFlashInferImpl,
-    )
-
-    PREFILL_CP_MHA_IMPS.append(PrefillContextParallelFlashInferImpl)

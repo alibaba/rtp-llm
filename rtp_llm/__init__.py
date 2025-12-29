@@ -1,6 +1,7 @@
 # load th_transformer.so
-from .ops import *
 from rtp_llm.utils.torch_patch import *
+
+from .ops import *
 
 # Import internal models to register them
 try:
@@ -8,12 +9,10 @@ try:
 except ImportError:
     logging.warning("Failed to import internal_source models")
 
+
 import os
 import pdb
 import sys
-
-from rtp_llm.config.log_config import LOGGING_CONFIG
-from rtp_llm.utils.torch_patch import *
 
 
 class ForkedPdb(pdb.Pdb):

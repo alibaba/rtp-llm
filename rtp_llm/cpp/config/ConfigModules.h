@@ -34,6 +34,7 @@ struct ParallelismConfig {
     int64_t tp_rank          = 0;
     int64_t ep_rank          = 0;
     int64_t dp_rank          = 0;
+    int64_t cp_rank          = 0;
     int64_t ffn_tp_size      = 1;
     int64_t ffn_tp_rank      = 0;
     bool    enable_sp        = false;
@@ -49,7 +50,7 @@ struct ParallelismConfig {
     int64_t     embedding_rpc_server_port = 0;
 
     FfnDisAggregateConfig ffn_disaggregate_config;  // FFN disaggregate configuration
-    std::string to_string() const;
+    std::string           to_string() const;
 };
 
 struct ConcurrencyConfig {
@@ -216,7 +217,7 @@ struct SpeculativeExecutionConfig {
     std::string     quantization                  = "";
     std::string     checkpoint_path               = "";
     bool            use_new_sp_engine             = false;
-    std::string to_string() const;
+    std::string     to_string() const;
 
     // Helper functions for enum conversion
     static SpeculativeType from_string(const std::string& str);
@@ -248,9 +249,9 @@ struct BatchDecodeSchedulerConfig {
 };
 
 struct FIFOSchedulerConfig {
-    int64_t max_context_batch_size           = 1;
-    int64_t scheduler_reserve_resource_ratio = 5;
-    int64_t max_batch_tokens_size            = 0;
+    int64_t     max_context_batch_size           = 1;
+    int64_t     scheduler_reserve_resource_ratio = 5;
+    int64_t     max_batch_tokens_size            = 0;
     std::string to_string() const;
 };
 

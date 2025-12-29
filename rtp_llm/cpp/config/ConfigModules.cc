@@ -11,6 +11,7 @@ namespace rtp_llm {
 
 // ParallelismConfig
 std::string ParallelismConfig::to_string() const {
+    std::ostringstream oss;
     oss << "tp_size: " << tp_size << "\n"
         << "ep_size: " << ep_size << "\n"
         << "dp_size: " << dp_size << "\n"

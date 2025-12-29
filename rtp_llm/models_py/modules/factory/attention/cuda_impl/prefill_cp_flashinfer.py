@@ -1,15 +1,14 @@
 import logging
 from enum import Enum, auto
+from functools import cached_property
 from typing import Any, Dict, Optional
 
 import torch
 
-from rtp_llm.config.gpt_init_model_parameters import GptInitModelParameters
-from rtp_llm.distribute.collective import Group, all_gather, recv, send
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
     FMHAPrefillImplBase,
 )
-from rtp_llm.ops import FMHAType
+from rtp_llm.ops import AttentionConfigs, FMHAType
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCachePrefillOp,
     KVCache,
@@ -23,6 +22,26 @@ logger = logging.getLogger(__name__)
 # Global workspace buffer shared across all wrappers
 _g_workspace_buffer = None
 _g_workspace_size = 512 * 1024 * 1024  # 512MB
+
+
+def _generate_half_q_indices(cp_chunk_lengths):
+    half_q_indices = []
+    offset = 0
+    for chunk_len in cp_chunk_lengths:
+        assert chunk_len % 2 == 0
+        half_q_indices.extend(range(offset + (chunk_len) // 2, offset + chunk_len))
+        offset += chunk_len
+    return half_q_indices
+
+
+def _generate_half_kv_indices(cp_chunk_lengths):
+    half_kv_indices = []
+    offset = 0
+    for chunk_len in cp_chunk_lengths:
+        assert chunk_len % 2 == 0
+        half_kv_indices.extend(range(offset, offset + (chunk_len) // 2))
+        offset += chunk_len
+    return half_kv_indices
 
 
 class CPRotateMethod(Enum):
@@ -60,7 +79,7 @@ class ContextParallelFlashInferRaggedPrefillOp:
 
     def __init__(
         self,
-        config: GptInitModelParameters,
+        attn_configs: AttentionConfigs,
         attn_inputs: PyAttentionInputs,
         backend: str = "auto",  # "auto", "fa2", or "fa3"
         causal: bool = True,
@@ -79,26 +98,70 @@ class ContextParallelFlashInferRaggedPrefillOp:
             kv_layout: KV cache layout ("NHD" or "HND")
         """
         super().__init__()
-        self.config = config
-        self.num_qo_heads = config.head_num
-        self.num_kv_heads = config.head_num_kv
-        self.head_dim = config.size_per_head
+        self.attn_configs = attn_configs
+        self.num_qo_heads = attn_configs.head_num
+        self.num_kv_heads = attn_configs.kv_head_num
+        self.head_dim = attn_configs.size_per_head
         self.backend = backend
         self.causal = causal
         self.kv_layout = kv_layout
 
-        self.device = torch.cuda.current_device()
-        self.workspace_buffer = get_workspace_buffer(self.device)
-        self.cp_size = config.cp_size
-        self.cp_rank = config.cp_rank
+        # Delay CUDA object creation to avoid serialization issues
+        self._workspace_buffer = None
+        self._communication_stream = None
+        self._comm_events = None
+        self.cp_size = 1
+        self.cp_rank = 0
 
         self.rotate_method = CPRotateMethod.ALLTOALL
         self.context_parallel_info: PyContextParallelParams = (
             attn_inputs.context_parallel_info
         )
         self.prefill_wrappers = {}
-        self.communication_stream = torch.cuda.Stream(device=self.device)
-        self.comm_events = [torch.cuda.Event() for _ in range(self.cp_size)]
+
+        # Delay wrapper initialization
+        self._wrappers_initialized = False
+
+        self._is_warmed_up = False
+
+    @property
+    def workspace_buffer(self):
+        """Lazy initialization of workspace buffer."""
+        if self._workspace_buffer is None:
+            self._workspace_buffer = get_workspace_buffer(torch.cuda.current_device())
+        return self._workspace_buffer
+
+    @property
+    def communication_stream(self):
+        """Lazy initialization of communication stream."""
+        if self._communication_stream is None:
+            self._communication_stream = torch.cuda.Stream(
+                device=torch.cuda.current_device()
+            )
+        return self._communication_stream
+
+    @property
+    def comm_events(self):
+        """Lazy initialization of communication events."""
+        if self._comm_events is None:
+            self._comm_events = [torch.cuda.Event() for _ in range(self.cp_size)]
+        return self._comm_events
+
+    def _ensure_wrappers_initialized(self):
+        """Ensure FlashInfer wrappers are initialized (lazy initialization)."""
+        if self._wrappers_initialized:
+            return
+
+        backend = self.backend
+        kv_layout = self.kv_layout
+
+    def _ensure_wrappers_initialized(self):
+        """Ensure FlashInfer wrappers are initialized (lazy initialization)."""
+        if self._wrappers_initialized:
+            return
+
+        backend = self.backend
+        kv_layout = self.kv_layout
 
         # init flashinfer attention wrapper
         if self.rotate_method == CPRotateMethod.ALL_GATHER:
@@ -168,11 +231,23 @@ class ContextParallelFlashInferRaggedPrefillOp:
         else:
             raise ValueError(f"Unsupported rotate method: {self.rotate_method}")
 
-        self._is_warmed_up = False
+        self._wrappers_initialized = True
+
+    @cached_property
+    def _collective_ops(self):
+        """Lazy import collective operations to avoid serialization issues."""
+        from rtp_llm.models_py.distributed.collective_torch import (
+            Group,
+            all_gather,
+            recv,
+            send,
+        )
+
+        return {"Group": Group, "recv": recv, "send": send, "all_gather": all_gather}
 
     def support(self, attention_inputs: PyAttentionInputs) -> bool:
         """Check if this operator supports the given attention inputs."""
-        return attention_inputs.is_prefill and self.config.cp_size > 1
+        return attention_inputs.is_prefill
 
     def prepare(self, attention_inputs: PyAttentionInputs) -> ParamsBase:
         """
@@ -211,6 +286,9 @@ class ContextParallelFlashInferRaggedPrefillOp:
            rank_i_part_0: q_len=chunk_size, kv_len=chunk_size*(rank_id + 1)
            rank_i_part_1: q_len=chunk_size, kv_len=chunk_size*(2 * cp_size - rank_id)
         """
+        # Ensure CUDA objects are initialized
+        self._ensure_wrappers_initialized()
+
         # Get batch information
         batch_size = attention_inputs.input_lengths.size(0)
         device = attention_inputs.input_lengths.device
@@ -443,6 +521,9 @@ class ContextParallelFlashInferRaggedPrefillOp:
     ) -> torch.Tensor:
         # all gather key and value across all CP ranks
         # Note: all_gather concatenates on dim=1, so we need to reshape to concatenate on dim=0
+        Group = self._collective_ops["Group"]
+        all_gather = self._collective_ops["all_gather"]
+
         cp_info = self.context_parallel_info
         cp_rank = self.cp_rank
         cp_size = self.cp_size
@@ -513,26 +594,9 @@ class ContextParallelFlashInferRaggedPrefillOp:
         k: torch.Tensor,
         v: torch.Tensor,
     ) -> torch.Tensor:
-
-        def _generate_half_q_indices(cp_chunk_lengths):
-            half_q_indices = []
-            offset = 0
-            for chunk_len in cp_chunk_lengths:
-                assert chunk_len % 2 == 0
-                half_q_indices.extend(
-                    range(offset + (chunk_len) // 2, offset + chunk_len)
-                )
-                offset += chunk_len
-            return half_q_indices
-
-        def _generate_half_kv_indices(cp_chunk_lengths):
-            half_kv_indices = []
-            offset = 0
-            for chunk_len in cp_chunk_lengths:
-                assert chunk_len % 2 == 0
-                half_kv_indices.extend(range(offset, offset + (chunk_len) // 2))
-                offset += chunk_len
-            return half_kv_indices
+        Group = self._collective_ops["Group"]
+        recv = self._collective_ops["recv"]
+        send = self._collective_ops["send"]
 
         # TODO: use cpu tensor
         cp_info = self.context_parallel_info
@@ -649,6 +713,9 @@ class ContextParallelFlashInferRaggedPrefillOp:
     def forward_all_gather_with_overlap(
         self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor
     ) -> torch.Tensor:
+        Group = self._collective_ops["Group"]
+        all_gather = self._collective_ops["all_gather"]
+
         cp_info = self.context_parallel_info
         cp_chunk_lengths = cp_info.prefill_cp_chunk_lengths
         cp_shuffle_indices = cp_info.prefill_shuffle_indices
@@ -772,14 +839,14 @@ class ContextParallelFlashInferRaggedPrefillOp:
 class PrefillContextParallelFlashInferImpl(FMHAPrefillImplBase):
     def __init__(
         self,
-        config: GptInitModelParameters,
+        attn_configs: AttentionConfigs,
         attn_inputs: PyAttentionInputs,
     ):
         super().__init__(
             fmha_impl=ContextParallelFlashInferRaggedPrefillOp(
-                config.gpt_init_params, attn_inputs
+                attn_configs, attn_inputs
             ),
-            rope_kvcache_impl=FusedRopeKVCachePrefillOp(config.gpt_init_params),
+            rope_kvcache_impl=FusedRopeKVCachePrefillOp(attn_configs),
             attn_inputs=attn_inputs,
         )
         self.attn_inputs = attn_inputs
@@ -793,3 +860,19 @@ class PrefillContextParallelFlashInferImpl(FMHAPrefillImplBase):
 
     def support_cuda_graph(self) -> bool:
         return False
+
+    @property
+    def cp_rank(self) -> int:
+        return self.fmha_impl.cp_rank
+
+    @cp_rank.setter
+    def cp_rank(self, value: int):
+        self.fmha_impl.cp_rank = value
+
+    @property
+    def cp_size(self) -> int:
+        return self.fmha_impl.cp_size
+
+    @cp_size.setter
+    def cp_size(self, value: int):
+        self.fmha_impl.cp_size = value

@@ -12,16 +12,11 @@ namespace rtp_llm {
 
 class NormalBatchStreamProcessor {
 public:
-
-    // Factory method: creates appropriate processor based on params
-    static std::unique_ptr<NormalBatchStreamProcessor>
-    create(const rtp_llm::ParallelismConfig& parallelism_config, const rtp_llm::ModelConfig& model_config, const rtp_llm::PDSepConfig& pd_sep_config, const rtp_llm::ProfilingDebugLoggingConfig& profiling_debug_logging_config, const rtp_llm::CacheConfig& cache_config, bool warm_up);
-
-    NormalBatchStreamProcessor(const ModelConfig& model_config,
-                               const PDSepConfig& pd_sep_config,
+    NormalBatchStreamProcessor(const ModelConfig&                 model_config,
+                               const PDSepConfig&                 pd_sep_config,
                                const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
-                               const CacheConfig& cache_config,
-                               bool warm_up):
+                               const CacheConfig&                 cache_config,
+                               bool                               warm_up):
         num_layers_(model_config.num_layers),
         vocab_size_(model_config.vocab_size),
         input_vocab_size_(model_config.input_vocab_size),

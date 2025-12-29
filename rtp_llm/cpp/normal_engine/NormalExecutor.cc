@@ -12,7 +12,6 @@
 
 #include <iostream>
 
-
 using namespace std;
 
 namespace rtp_llm {
@@ -37,9 +36,10 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
         int  first_moe_layer = params.model_config_.moe_layer_index.front();
         auto moe_weight_type = params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->type();
         bool is_gated_activation = params.model_config_.isGatedActivation();
-        auto moe_inter_size = is_gated_activation ?
-            params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->shape()[1] / 2 :
-            params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->shape()[1];
+        auto moe_inter_size =
+            is_gated_activation ?
+                params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->shape()[1] / 2 :
+                params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->shape()[1];
 
         expert_balancer_ = make_shared<ExpertBalancer>(params.model_config_.expert_num,
                                                        params.eplb_config.phy_exp_num(params.model_config_.expert_num),
@@ -87,7 +87,6 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
 
     // when warmup, cache manager maybe nullptr
     const auto& cache_config = cache_manager ? cache_manager->cacheConfig() : CacheConfig();
-    batch_stream_processor_  = NormalBatchStreamProcessor::create(params.parallelism_config, params.model_config_, params.pd_sep_config, params.profiling_debug_logging_config, cache_config, warm_up_);
     batch_stream_processor_.reset(new NormalBatchStreamProcessor(
         params.model_config_, params.pd_sep_config, params.profiling_debug_logging_config, cache_config, warm_up_));
     PrefixToCandidateTokens::instance()->reloadPrefixDictWithPrefix(params.model_config_.ckpt_path,
@@ -163,7 +162,8 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
-    if (device_->getDeviceProperties().tp_rank > 0 || device_->getDeviceProperties().cp_rank > 0 || warm_up_ || streams.size() == 0) {
+    if (device_->getDeviceProperties().tp_rank > 0 || device_->getDeviceProperties().cp_rank > 0 || warm_up_
+        || streams.size() == 0) {
         device_->syncAndCheck();
         model_->releaseBuffers();
         return absl::OkStatus();
@@ -277,7 +277,6 @@ void NormalExecutor::handleContextParallelInputs(GptModelInputs& model_input, in
     // update model_input combo tokens
     model_input.combo_tokens = std::move(cp_split_input_tokens);
 }
-
 
 bool NormalExecutor::updateEplbConfig(const EPLBConfig& config) {
     if (expert_balancer_) {

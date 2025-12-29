@@ -71,9 +71,6 @@ class ParallelInfo(object):
             self.world_size == self.tp_size * self.dp_size * self.pp_size * self.cp_size
         ), f"world_size:{self.world_size} != tp_size:{self.tp_size} * dp_size:{self.dp_size} * pp_size:{self.pp_size} * cp_size:{self.cp_size}"
 
-
-
-
     @property
     def tp_rank(self) -> int:
         return self.world_rank % self.tp_size
@@ -194,6 +191,7 @@ class ParallelInfo(object):
         new_info = self.from_env(worker_info_port_num)
         self.tp_size = new_info.tp_size
         self.pp_size = new_info.pp_size
+        self.cp_size = new_info.cp_size
         self.world_size = new_info.world_size
         self.world_rank = new_info.world_rank
         self.local_world_size = new_info.local_world_size
@@ -201,7 +199,7 @@ class ParallelInfo(object):
         logging.info(f"ParallelInfo reload: {self}")
 
     def __str__(self):
-        return f"ParallelInfo:[ tp_size={self.tp_size} pp_size={self.pp_size} world_size={self.world_size} world_rank={self.world_rank} local_world_size={self.local_world_size} tp_rank={self.tp_rank} dp_rank={self.dp_rank} ep_size={self.ep_size} dp_size={self.dp_size} ep_rank={self.ep_rank} local_rank={self.local_rank} ffn_sp_size={self.ffn_sp_size} worker_info_port_num={self.worker_info_port_num}]"
+        return f"ParallelInfo:[ tp_size={self.tp_size} pp_size={self.pp_size} cp_size={self.cp_size} world_size={self.world_size} world_rank={self.world_rank} local_world_size={self.local_world_size} tp_rank={self.tp_rank} dp_rank={self.dp_rank} ep_size={self.ep_size} dp_size={self.dp_size} ep_rank={self.ep_rank} local_rank={self.local_rank} ffn_sp_size={self.ffn_sp_size} worker_info_port_num={self.worker_info_port_num}]"
 
 
 class WorkerInfo(object):
