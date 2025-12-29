@@ -19,7 +19,7 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
     maga_init_params_ = maga_init_params;
     metrics_reporter_ = maga_init_params.metrics_reporter;
     RTP_LLM_LOG_INFO("LocalRpcServer aux_string %s",
-                        maga_init_params_.gpt_init_parameter.misc_config.aux_string.c_str());
+                     maga_init_params_.gpt_init_parameter.misc_config.aux_string.c_str());
     if (propose_params) {
         propose_maga_init_params_ = propose_params.get();
         if (!mm_process_engine.is_none()) {
@@ -105,9 +105,6 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
             stream->cancel();
             RTP_LLM_LOG_WARNING("request [%s] write outputs pb failed", request_key.c_str());
             return grpc::Status(grpc::StatusCode::INTERNAL, "request write outputs pb failed");
-        }
-        if (stream->needRemoteGenerate()) {
-            break;
         }
         if (stream->queryPdSep()) {
             stream->waitForRemoteGenerate();

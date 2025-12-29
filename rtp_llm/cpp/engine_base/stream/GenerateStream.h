@@ -506,6 +506,10 @@ public:
     TimeInfo getTimeInfo();
     bool     queryPdSep() const;
 
+    std::string stateString() const {
+        return StreamStateToString(generate_status_->status);
+    }
+
 protected:
     rtp_llm::DeviceBase*                 device_;
     std::shared_ptr<GenerateInput>       generate_input_;
