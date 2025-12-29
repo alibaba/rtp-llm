@@ -45,7 +45,6 @@ py_test (
     ],
     env = {
         "GPU_COUNT": "1",
-        "CUDA_VISIBLE_DEVICES": "1",
     },
     tags = ["manual"],
 )
