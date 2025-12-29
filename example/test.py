@@ -27,7 +27,7 @@ async def main():
         pipeline = Pipeline(model.config, model.tokenizer)
 
         # usual request
-        for res in pipeline(
+        async for res in pipeline.pipeline_async(
             "<|im_start|>user\nhello, what's your name<|im_end|>\n<|im_start|>assistant\n",
             max_new_tokens=100,
         ):
