@@ -2725,7 +2725,7 @@ if __name__ == "__main__":
                     BF16Moe,
                 ],
                 "compatible_intermediate_size": [384, 768, 1024],
-                "enable_autotune": True,
+                "enable_autotune": False,
             },
         weight_processing={
                 "use_shuffled_weight": True,
