@@ -218,8 +218,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                           param
                                            mtp_params->parallelism_config,
                                            mtp_params->eplb_config,
                                            mtp_params->moe_config),
-             cache_manager ? ((std::optional<KVCacheAllocator::KVCacheBuffer>)cache_manager->kvCacheBuffer()) :
-                                  std::nullopt,
+             mtp_cache_manager ? ((std::optional<KVCacheAllocator::KVCacheBuffer>)mtp_cache_manager->kvCacheBuffer()) :
+                                      std::nullopt,
                   mtp_params->model_id});
         if (!params.py_sp_model.is_none()) {
             RTP_LLM_LOG_INFO("[speculative decoding] using py model");
