@@ -132,8 +132,8 @@ absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
             match_info = CacheManager::MatchInfo{0, {}, {}};
         }
         stream_->setReuseLength(match_info.reuse_length);
-        stream_->setLocalReuseLength(match_info.gpu_reuse_length);
-        stream_->setRemoteReuseLength(match_info.memory_reuse_length);
+        stream_->setLocalReuseLength(match_info.local_reuse_length);
+        stream_->setRemoteReuseLength(match_info.remote_reuse_length);
         stream_->setMtpTokenIndex(match_info.reuse_length);
         stream_->setInitialReuseLength(match_info.reuse_length);
         if (!match_info.loss.empty()) {
