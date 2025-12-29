@@ -140,7 +140,7 @@ absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
         RTP_LLM_LOG_DEBUG(
             "stream [%ld] match info reuse length is [%ld]", stream_->streamId(), match_info.reuse_length);
         stream_->setReuseLength(match_info.reuse_length);
-        stream_->setLocalReuseLength(match_info.gpu_reuse_length + match_info.memory_reuse_length);
+        stream_->setLocalReuseLength(match_info.local_reuse_length);
         stream_->setRemoteReuseLength(match_info.remote_reuse_length);
         stream_->setGpuReuseLength(match_info.gpu_reuse_length);
         stream_->setMemoryReuseLength(match_info.memory_reuse_length);

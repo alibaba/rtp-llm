@@ -251,12 +251,14 @@ CacheManager::MatchInfo CacheManager::matchImpl(const AdvancedMallocInfo& malloc
     }
 
     auto memory_match_blocks = match_result.block_indices.size() - gpu_match_blocks;
+    auto local_match_blocks  = gpu_match_blocks + memory_match_blocks;
 
     // match in dist kvcache if cache keys not fully matched
-    // if (enable_dist_kvcache_ && malloc_info.enable_3fs && !malloc_info.need_loss
-    //     && local_match_blocks < malloc_info.cache_keys.size()) {
-    //     matchInDistKvCache(malloc_info, match_result);
-    // }
+    if (enable_dist_kvcache_ && malloc_info.enable_3fs && !malloc_info.need_loss
+        && local_match_blocks < malloc_info.cache_keys.size()) {
+        matchInDistKvCache(malloc_info, match_result);
+    }
+    auto remote_match_blocks = match_result.block_indices.size() - (gpu_match_blocks + memory_match_blocks);
 
     int cache_block_num = match_result.block_indices.size();
     int reuse_block_num =
@@ -265,6 +267,7 @@ CacheManager::MatchInfo CacheManager::matchImpl(const AdvancedMallocInfo& malloc
     if ((!match_result.loss.empty()) && reuse_block_num) {
         reuse_block_num -= 1;
     }
+
     int reuse_length = reuse_block_num * config_.seq_size_per_block;
     for (int i = malloc_info.mm_bounds.size() - 1; i >= 0; --i) {
         auto& bound = malloc_info.mm_bounds[i];
@@ -279,6 +282,17 @@ CacheManager::MatchInfo CacheManager::matchImpl(const AdvancedMallocInfo& malloc
         freeWithoutLock(need_decref_blocks);
     }
 
+    if (reuse_block_num <= gpu_match_blocks) {
+        memory_match_blocks = 0;
+        remote_match_blocks = 0;
+        gpu_match_blocks    = reuse_block_num;
+    } else if (reuse_block_num <= gpu_match_blocks + memory_match_blocks) {
+        memory_match_blocks = reuse_block_num - gpu_match_blocks;
+        remote_match_blocks = 0;
+    } else {
+        remote_match_blocks = reuse_block_num - (gpu_match_blocks + memory_match_blocks);
+    }
+
     RTP_LLM_CHECK_WITH_INFO((reuse_block_num <= cache_block_num),
                             "reuse block nums[%d] is greater than need block nums[%d]",
                             reuse_block_num,
@@ -288,14 +302,12 @@ CacheManager::MatchInfo CacheManager::matchImpl(const AdvancedMallocInfo& malloc
                             match_result.loss.size(),
                             reuse_length);
 
-    // local_match_blocks          = local_match_blocks <= reuse_block_num ? local_match_blocks : reuse_block_num;
-    // const auto local_reuse_len  = local_match_blocks * config_.seq_size_per_block;
-    // const auto remote_reuse_len = (reuse_block_num - local_match_blocks) * config_.seq_size_per_block;
-
+    local_match_blocks = gpu_match_blocks + memory_match_blocks;
     return {(size_t)reuse_length,
+            local_match_blocks * config_.seq_size_per_block,
             gpu_match_blocks * config_.seq_size_per_block,
             memory_match_blocks * config_.seq_size_per_block,
-            0,
+            remote_match_blocks * config_.seq_size_per_block,
             vector<int>(match_result.block_indices.begin(), match_result.block_indices.begin() + reuse_block_num),
             vector<float>(match_result.loss.begin(),
                           match_result.loss.begin() + std::min((int)match_result.loss.size(), reuse_length))};
