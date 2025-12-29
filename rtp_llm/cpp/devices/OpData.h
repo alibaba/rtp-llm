@@ -42,7 +42,8 @@ enum class ParallelMode {
     DP_AND_TP = 2,
     FFN_TP    = 3,
     EP        = 4,
-    EPLB      = 5
+    EPLB      = 5,
+    CP        = 6,
 };
 
 enum class DeviceStream {
@@ -110,6 +111,11 @@ struct GptModelInputs {
 
     rtp_llm::BufferPtr combo_tokens_type_ids;  // [cumulated_seq_len]
     rtp_llm::BufferPtr combo_position_ids;     // [cumulated_seq_len]
+
+    // for context parallel
+    rtp_llm::BufferPtr prefill_cp_padding_lengths;  // [context_batch_size]
+    rtp_llm::BufferPtr prefill_cp_chunk_lengths;    // [context_batch_size]
+    rtp_llm::BufferPtr prefill_shuffle_indices;     // [current_tokens_size]
 
     // for mtp model
     rtp_llm::BufferPtr last_hidden_states;

@@ -78,13 +78,14 @@ void DeviceFactory::initDevices(const ParallelismConfig& parallelism_config,
     }
     auto  global_params                          = getDefaultGlobalDeviceParams();
     auto& device_params                          = global_params.device_params[0].second;
-
     device_params.tp_size                        = parallelism_config.tp_size;
     device_params.dp_size                        = parallelism_config.dp_size;
+    device_params.cp_size                        = parallelism_config.cp_size;
     device_params.ep_size                        = parallelism_config.ep_size;
     device_params.ep_rank                        = parallelism_config.ep_rank;
     device_params.tp_rank                        = parallelism_config.tp_rank;
     device_params.dp_rank                        = parallelism_config.dp_rank;
+    device_params.cp_rank                        = parallelism_config.cp_rank;
     device_params.ffn_tp_size                    = parallelism_config.ffn_tp_size;
     device_params.ffn_tp_rank                    = parallelism_config.ffn_tp_rank;
     device_params.enable_sp                      = parallelism_config.enable_sp;
@@ -96,6 +97,7 @@ void DeviceFactory::initDevices(const ParallelismConfig& parallelism_config,
     device_params.device_id                      = parallelism_config.world_rank % parallelism_config.local_world_size;
     device_params.master_ip                      = parallelism_config.nccl_ip;
     device_params.tp_master_port                 = parallelism_config.tp_nccl_port;
+    device_params.cp_master_port                 = parallelism_config.cp_nccl_port;
     device_params.dp_tp_master_port              = parallelism_config.dp_tp_nccl_port;
     device_params.ffn_tp_master_port             = parallelism_config.ffn_tp_nccl_port;
     device_params.tokens_per_block               = model_config.attn_config.tokens_per_block;
@@ -114,6 +116,7 @@ void DeviceFactory::initDevices(const ParallelismConfig& parallelism_config,
     device_params.parallelism_config.tp_size = parallelism_config.tp_size;
     device_params.parallelism_config.ep_size = parallelism_config.ep_size;
     device_params.parallelism_config.dp_size = parallelism_config.dp_size;
+    device_params.parallelism_config.cp_size = parallelism_config.cp_size;
     device_params.parallelism_config.pp_size = parallelism_config.pp_size;
     device_params.parallelism_config.world_size = parallelism_config.world_size;
     device_params.parallelism_config.world_rank = parallelism_config.world_rank;

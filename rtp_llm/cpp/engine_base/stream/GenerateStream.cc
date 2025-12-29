@@ -72,6 +72,20 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
 
     last_output_pos_ = seqLength();
 
+    // Initialize context parallel parameters
+    cp_size_ = device_->getDeviceProperties().cp_size;
+    if (cp_size_ > 1) {
+        int seq_len      = seqLength();
+        int pad_multiple = cp_size_ * 2;
+        // When seq_len < cp_size, pad to cp_size multiple，When seq_len >= cp_size, pad to cp_size*2 multiple
+        if (seq_len < cp_size_) {
+            pad_multiple = cp_size_;
+        }
+        int padded_seq_len       = ((seq_len + pad_multiple - 1) / pad_multiple) * pad_multiple;
+        cp_prefill_padding_size_ = padded_seq_len - seq_len;
+        cp_prefill_chunk_size_   = padded_seq_len / cp_size_;
+    }
+
     cum_log_probs_ =
         device_->allocateBuffer({rtp_llm::DataType::TYPE_FP32, {init_batch_size}, rtp_llm::AllocationType::HOST}, {});
     memset(cum_log_probs_->data(), 0, cum_log_probs_->sizeBytes());
@@ -315,7 +329,9 @@ int GenerateStream::seqLength() const {
 }
 
 int GenerateStream::adjustedCommonLen() const {
-    return maxBatchSize() == 1 ? seqLength() : inputLength() / seqSizePerBlock() * seqSizePerBlock();
+    int input_len =
+        isContextParallelStream() ? contextParallelChunkSize() : (maxBatchSize() == 1 ? seqLength() : inputLength());
+    return input_len / seqSizePerBlock() * seqSizePerBlock();
 }
 
 int GenerateStream::seqSizePerBlock() const {
@@ -383,6 +399,22 @@ void GenerateStream::incLastOutputPos() {
 
 bool GenerateStream::isContextStream() const {
     return *is_context_stream_;
+}
+
+bool GenerateStream::isContextParallelStream() const {
+    return cp_size_ > 1;
+}
+
+int GenerateStream::contextParallelChunkSize() const {
+    return cp_prefill_chunk_size_;
+}
+
+int GenerateStream::contextParallelPaddedSeqLen() const {
+    return cp_prefill_padding_size_ + seqLength();
+}
+
+int GenerateStream::contextParallelPrefillPaddingSize() const {
+    return cp_prefill_padding_size_;
 }
 
 const rtp_llm::BufferPtr& GenerateStream::cumLogProbs() const {

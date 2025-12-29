@@ -37,6 +37,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
 
     const bool has_multimodal_input = is_multimodal_ && stream_groups.has_multimodal_input();
     const bool need_cal_position_id = (mm_position_ids_style_ != PositionIdsStyle::DEFAULT) || has_positional_encoding_;
+    const bool need_prefill_cp      = stream_groups.needPrefillCP();
 
     model_input.combo_tokens = CACHED_HOST_BUF(TYPE_INT32, {current_tokens_size});
     if (max_block_size) {
@@ -53,6 +54,12 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     model_input.lm_output_indexes     = CACHED_HOST_BUF(TYPE_INT32, {total_batch_size});
     model_input.lm_output_lengths     = CACHED_HOST_BUF(TYPE_INT32, {total_batch_size});
     model_input.prefix_lengths        = CACHED_HOST_BUF(TYPE_INT32, {total_context_batch_size});
+    if (need_prefill_cp) {
+        model_input.prefill_cp_padding_lengths = CACHED_HOST_BUF(TYPE_INT32, {total_context_batch_size});
+        model_input.prefill_cp_chunk_lengths   = CACHED_HOST_BUF(TYPE_INT32, {total_context_batch_size});
+        model_input.prefill_shuffle_indices =
+            CACHED_HOST_BUF(TYPE_INT32, {current_tokens_size});  // reserve for later use
+    }
     if (need_cal_position_id) {
         model_input.combo_position_ids = CACHED_HOST_BUF(TYPE_INT32, {current_tokens_size * position_id_len_factor_});
     }
@@ -82,6 +89,9 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     int* mm_features_locs   = has_multimodal_input ? (int*)model_input.mm_features_locs->data() : nullptr;
     int  batch_idx          = 0;
     int  input_vocab_size   = input_vocab_size_ ? input_vocab_size_ : vocab_size_;
+
+    int* prefill_cp_padding_lengths = need_prefill_cp ? (int*)model_input.prefill_cp_padding_lengths->data() : nullptr;
+    int* prefill_cp_chunk_lengths   = need_prefill_cp ? (int*)model_input.prefill_cp_chunk_lengths->data() : nullptr;
 
     auto* kv_cache_update_mapping =
         model_input.kv_cache_update_mapping ? (BlockIdPair*)model_input.kv_cache_update_mapping->data() : nullptr;
@@ -177,8 +187,13 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
 
             input_lengths[batch_idx]                            = input_tokens.size();
             prefix_lengths[batch_idx - total_decode_batch_size] = stream->prefixLength();
-            lm_output_indexes[batch_idx]                        = cum_output_seq_len - 1;
-            lm_output_lengths[batch_idx]                        = 1;
+            if (need_prefill_cp) {
+                prefill_cp_padding_lengths[batch_idx - total_decode_batch_size] =
+                    stream->contextParallelPrefillPaddingSize();
+                prefill_cp_chunk_lengths[batch_idx - total_decode_batch_size] = stream->contextParallelChunkSize();
+            }
+            lm_output_indexes[batch_idx] = cum_output_seq_len - 1;
+            lm_output_lengths[batch_idx] = 1;
 
             if (has_multimodal_input) {
                 std::vector<torch::Tensor> mm_features = stream->multimodalFeatures();
@@ -239,6 +254,10 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     if (is_multimodal_ && gathered_mm_features.size() > 0) {
         model_input.multimodal_features = std::move(gathered_mm_features);
     }
+
+    // debug print
+    // auto str_0 = model_input.debugString(true);
+    // std::cout << "construct model_input in normalbatchstreamprocessor: " << str_0 << std::endl;
     return model_input;
 }
 

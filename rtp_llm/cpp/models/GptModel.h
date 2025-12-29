@@ -64,7 +64,10 @@ enum GptModelInputIndex : size_t {
     skipRun,
     gptModelRequestLength,  // length of request id & pd_separation
     isFakeStream,
-    gptModelInputLength,
+    cpPaddingLengths,  // for context parallel
+    cpChunkLengths,
+    cpShuffleIndices,
+    gptModelInputLength
 };
 
 void tpSyncModelInputs(GptModelInputs& inputs, rtp_llm::DeviceBase* device);

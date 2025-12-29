@@ -23,6 +23,7 @@ struct ParallelismConfig {
     int tp_size = 1;
     int ep_size = 1;
     int dp_size = 1;
+    int cp_size = 1;
     int pp_size = 1;
     int world_size = 1;
     int world_rank = 0;

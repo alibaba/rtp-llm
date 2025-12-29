@@ -22,6 +22,9 @@ public:
             }
             if (stream->isContextStream()) {
                 context_streams_.push_back(stream);
+                if (stream->isContextParallelStream()) {
+                    need_prefill_cp_ = true;
+                }
                 total_context_batch_size_ += cur_batch_size;
                 max_context_seq_len_ = std::max(max_context_seq_len_, (size_t)stream->contextLength());
                 max_reuse_length_    = std::max(max_reuse_length_, (size_t)stream->reuseLength());
@@ -95,6 +98,9 @@ public:
     }
     size_t totalScoreBatchSize() const {
         return total_score_batch_size_;
+    }
+    bool needPrefillCP() const {
+        return need_prefill_cp_;
     }
 
     bool empty() const {
@@ -212,6 +218,7 @@ private:
     size_t                       multimodal_features_len_      = 0;
     size_t                       total_score_batch_size_       = 0;
     bool                         has_multimodal_input_         = false;
+    bool                         need_prefill_cp_              = false;
     bool                         gen_timeline_                 = false;
     bool                         is_fake_stream_               = false;
     std::list<std::string>       adapter_names;
