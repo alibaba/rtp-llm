@@ -46,7 +46,7 @@ py_test (
     env = {
         "GPU_COUNT": "1",
         "CUDA_VISIBLE_DEVICES": "1",
-        "DUMP_FP4": "/home/xiebaijie.xbj",
+        "DUMP_FP4": "/home/xiebaijie.xbj/",
     },
     tags = ["manual"],
 )
