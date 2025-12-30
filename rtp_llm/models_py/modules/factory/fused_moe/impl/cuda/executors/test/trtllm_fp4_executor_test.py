@@ -100,25 +100,15 @@ class FP4Moe:
             quant_nvfp4_batches(gemm2_weights, num_experts, False)
         )
 
-        # TODO: why swizzling=False?
-        _, gemm1_scales_linear_fp4_bytes, _ = (
-            quant_nvfp4_batches(gemm1_weights, num_experts, False)
-        )
-        _, gemm2_scales_linear_fp4_bytes, _ = (
-            quant_nvfp4_batches(gemm2_weights, num_experts, False)
-        )
-
         return {
             "hidden_states_scale_global": hidden_states_scale_global,
             "gemm1_weights": gemm1_weights_fp4_bytes,
             "gemm1_scales": gemm1_scales_fp4_bytes,
             "gemm1_scales_global": gemm1_scales_global,
-            "gemm1_scales_linear": gemm1_scales_linear_fp4_bytes,
             "gemm1_weights_orig": gemm1_weights,
             "gemm2_weights": gemm2_weights_fp4_bytes,
             "gemm2_scales": gemm2_scales_fp4_bytes,
             "gemm2_scales_global": gemm2_scales_global,
-            "gemm2_scales_linear": gemm2_scales_linear_fp4_bytes,
             "gemm2_weights_orig": gemm2_weights,
         }
 
@@ -145,9 +135,9 @@ class FP4Moe:
         epilogue_tile_m = 128
 
         gemm1_weights_fp4 = args.gemm1_weights.view(torch.float8_e4m3fn)
-        gemm1_scales_linear_fp4 = args.gemm1_scales_linear.view(torch.float8_e4m3fn)
+        gemm1_scales_linear_fp4 = args.gemm1_scales.view(torch.float8_e4m3fn)
         gemm2_weights_fp4 = args.gemm2_weights.view(torch.float8_e4m3fn)
-        gemm2_scales_linear_fp4 = args.gemm2_scales_linear.view(torch.float8_e4m3fn)
+        gemm2_scales_linear_fp4 = args.gemm2_scales.view(torch.float8_e4m3fn)
 
         gemm1_weights_fp4_shuffled = []
         gemm1_scales_fp4_shuffled = []
@@ -849,9 +839,7 @@ def test_moe(
             f"Routing method {routing_method_type} not implemented"
         )
 
-    weights_data = moe_impl.quantize_weights(
-        gemm1_weights, gemm2_weights, hidden_states
-    )
+    weights_data = moe_impl.quantize_weights(gemm1_weights, gemm2_weights, hidden_states)
 
     topk_ids = permute_info["topKIndices"].to(torch.int32)
     moe_info = {
