@@ -281,7 +281,7 @@ class FP4Moe:
         ufp8_type_weights = 1
 
         inputs_data = self.quantize_inputs(
-            args.hidden_states_orig, args.hidden_states_scale_global, is_swizzling=True
+            args.hidden_states_orig, args.hidden_states_scale_global, is_swizzling=False
         )
         args.hidden_states = inputs_data["hidden_states"]
         args.hidden_states_scale = inputs_data["hidden_states_scale"]
@@ -291,7 +291,7 @@ class FP4Moe:
             (1 / args.hidden_states_scale_global).cpu(),
             sf_vec_size,
             ufp8_type_weights,
-            True,  # is_sf_swizzled_layout
+            False,  # is_sf_swizzled_layout
         ).cuda()
 
         args.gemm1_weights_dequant = e2m1_and_ufp8_scale_batches(
