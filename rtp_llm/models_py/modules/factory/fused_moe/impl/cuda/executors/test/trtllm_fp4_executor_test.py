@@ -1,40 +1,27 @@
-from dataclasses import dataclass
-from abc import ABC, abstractmethod
-from typing import Dict
-import torch
-from cuda.bindings import runtime
-from torch.nn import functional as F
 import os
 import json
 from pathlib import Path
+from dataclasses import dataclass
+from abc import ABC, abstractmethod
+from cuda.bindings import runtime
+import torch
+from torch.nn import functional as F
 
 from flashinfer import (
     RoutingMethodType,
     GatedActType,
     e2m1_and_ufp8sf_scale_to_float,
     fp4_quantize,
-    mxfp8_dequantize_host,
-    mxfp8_quantize,
-    reorder_rows_for_gated_act_gemm,
-    shuffle_matrix_a,
 )
-from flashinfer.autotuner import autotune
 from flashinfer.fp4_quantization import block_scale_interleave
 from flashinfer.fused_moe import (
     WeightLayout,
-    convert_to_block_layout,
     trtllm_fp4_block_scale_moe,
-    trtllm_fp8_block_scale_moe,
-    trtllm_fp8_per_tensor_scale_moe,
-    trtllm_bf16_moe,
 )
 from flashinfer.fused_moe.core import (
     get_w2_permute_indices_with_cache,
     _maybe_get_cached_w3_w1_permute_indices,
 )
-
-from enum import IntEnum
-from flashinfer.utils import get_compute_capability
 
 # Import RTP-LLM specific modules for Fp4Executor backend
 from rtp_llm.config.model_config import ModelConfig
@@ -52,261 +39,12 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.trtllm_fp4_
 from rtp_llm.utils.model_weight import W
 
 
-def dump_trtllm_fp4_params(**kwargs):
-    """Dump trtllm_fp4_block_scale_moe function parameters to JSON and save tensors as .pt files.
-    
-    If DUMP_FP4 environment variable is set, this function will:
-    1. Save torch tensors as .pt files and record their absolute paths
-    2. Convert other types to strings
-    3. Save all information to a JSON file specified by DUMP_FP4
-    
-    Args:
-        **kwargs: All parameters passed to trtllm_fp4_block_scale_moe
-    """
-    dump_file = os.getenv("DUMP_FP4")
-    if not dump_file:
-        return
-    
-    # Use pathlib for path operations
-    dump_path = Path(dump_file).resolve()
-    dump_dir = dump_path.parent
-    
-    # Create directory for JSON file (with proper error handling)
-    dump_dir.mkdir(parents=True, exist_ok=True)
-    # Create a directory for tensor files (same directory as JSON file, with _tensors suffix)
-    tensor_dir = dump_dir / f"{dump_path.stem}_tensors"
-    tensor_dir.mkdir(parents=True, exist_ok=True)
-    
-    dumped_params = {}
-    
-    for param_name, param_value in kwargs.items():
-        if isinstance(param_value, torch.Tensor):
-            # Save tensor as .pt file
-            tensor_filename = f"{param_name}.pt"
-            tensor_path = tensor_dir / tensor_filename
-            tensor_abs_path = tensor_path.resolve()
-            
-            try:
-                torch.save(param_value, str(tensor_abs_path))
-            except Exception as e:
-                raise RuntimeError(
-                    f"Failed to save tensor {param_name} to {tensor_abs_path}: {e}"
-                ) from e
-            
-            # Record tensor info in JSON
-            dumped_params[param_name] = {
-                "type": "torch.Tensor",
-                "file_path": str(tensor_abs_path),
-                "shape": list(param_value.shape),
-                "dtype": str(param_value.dtype),
-                "device": str(param_value.device),
-            }
-        elif param_value is None:
-            dumped_params[param_name] = None
-        else:
-            # Convert other types to string
-            try:
-                # Try to convert to JSON-serializable format
-                if isinstance(param_value, (int, float, bool, str)):
-                    dumped_params[param_name] = param_value
-                elif hasattr(param_value, "value"):  # Enum types
-                    dumped_params[param_name] = str(param_value)
-                else:
-                    dumped_params[param_name] = str(param_value)
-            except Exception:
-                dumped_params[param_name] = str(param_value)
-    
-    # Save to JSON file
-    try:
-        with open(dump_path, "w") as f:
-            json.dump(dumped_params, f, indent=2, ensure_ascii=False)
-    except PermissionError as e:
-        raise PermissionError(
-            f"Cannot write to {dump_path}: {e}. "
-            f"Please ensure you have write permissions or use a different path."
-        ) from e
-
-
-class QuantMode(IntEnum):
-    """Supported quantization modes for MoE testing."""
-
-    FP4_NVFP4_NVFP4 = 1
-
 def check_cuda(err):
     """Unified CUDA error checking function used throughout the file."""
     if err != runtime.cudaError_t.cudaSuccess:
         error_name = runtime.cudaGetErrorName(err)
         error_string = runtime.cudaGetErrorString(err)
         raise RuntimeError(f"CUDA error: {error_name[1]}: {error_string[1]}")
-
-
-class CUDAGraphMoE:
-    """
-    Simple CUDA Graph wrapper for MoE operations.
-
-    The graph captures tensor references and automatically updates them during execution.
-
-    Three core methods: capture(), launch(), cleanup()
-
-    Usage:
-        cuda_graph = CUDAGraphMoE(moe_impl, static_data, **config)
-        cuda_graph.capture(hidden_states_sample, expert_logits=logits, routing_bias=bias)
-        output = cuda_graph.launch(new_hidden_states)  # Repeat as needed
-        cuda_graph.cleanup()
-    """
-
-    def __init__(self, moe_impl, static_data, **config):
-        self.moe_impl = moe_impl
-        self.static_data = static_data
-        self.config = config
-        self.enable_autotune = config.get("enable_autotune", True)
-        self.graph = None
-        self.graph_exec = None
-        self.stream = None
-        self.input_tensor = None
-        self.output_tensor = None
-        self.is_captured = False
-
-    def capture(self, hidden_states_sample, **runtime_args):
-        """Capture CUDA graph with the given sample input."""
-        if self.is_captured:
-            raise RuntimeError(
-                "Graph already captured. Call cleanup() first to re-capture."
-            )
-        if not isinstance(self.moe_impl, FP4Moe):
-            raise NotImplementedError(
-                f"CUDA graph capture not yet implemented for {type(self.moe_impl)}"
-            )
-
-        # Create stream
-        err, self.stream = runtime.cudaStreamCreate()
-        check_cuda(err)
-
-        # Get the raw stream pointer for PyTorch
-        stream_ptr = int(self.stream)
-        torch_stream = torch.cuda.ExternalStream(stream_ptr)
-
-        # Store input tensor reference (will be updated in place during launch)
-        self.input_tensor = hidden_states_sample.clone()
-
-        # Warmup
-        with torch.cuda.stream(torch_stream), autotune(self.enable_autotune):
-            for _ in range(1):
-                self._run_moe_computation(runtime_args)
-
-        # Synchronize our stream after warmup
-        err = runtime.cudaStreamSynchronize(self.stream)[0]
-        check_cuda(err)
-
-        # Begin capture
-        # err, self.graph = runtime.cudaGraphCreate(0)
-        # check_cuda(err)
-        # err = runtime.cudaStreamBeginCapture(
-        #     self.stream, runtime.cudaStreamCaptureMode.cudaStreamCaptureModeGlobal
-        # )[0]
-        check_cuda(err)
-
-        try:
-            # Capture computation on our stream
-            with torch.cuda.stream(torch_stream):
-                self.output_tensor = self._run_moe_computation(runtime_args)
-            # err, self.graph = runtime.cudaStreamEndCapture(self.stream)
-            # check_cuda(err)
-            return self.output_tensor
-            err, self.graph_exec = runtime.cudaGraphInstantiate(self.graph, 0)
-            check_cuda(err)
-            self.is_captured = True
-        except Exception as e:
-            self.cleanup()
-            raise RuntimeError(f"CUDA graph capture failed: {e}") from e
-
-    def launch(self, hidden_states_new):
-        """Launch captured CUDA graph with new input."""
-        return self.output_tensor
-        if not self.is_captured:
-            raise RuntimeError("Graph not captured. Call capture() first.")
-
-        # Update input tensor in place
-        self.input_tensor.copy_(hidden_states_new)
-
-        # Launch graph
-        err = runtime.cudaGraphLaunch(self.graph_exec, self.stream)[0]
-        check_cuda(err)
-        err = runtime.cudaStreamSynchronize(self.stream)[0]
-        check_cuda(err)
-
-        # Return output tensor (automatically updated by graph execution)
-        return self.output_tensor
-
-    def cleanup(self):
-        """Clean up all CUDA graph resources."""
-        if self.graph_exec is not None:
-            err = runtime.cudaGraphExecDestroy(self.graph_exec)[0]
-            check_cuda(err)
-            self.graph_exec = None
-        if self.graph is not None:
-            err = runtime.cudaGraphDestroy(self.graph)[0]
-            check_cuda(err)
-            self.graph = None
-        if self.stream is not None:
-            err = runtime.cudaStreamDestroy(self.stream)[0]
-            check_cuda(err)
-            self.stream = None
-        self.input_tensor = None
-        self.output_tensor = None
-        self.is_captured = False
-
-    def _run_moe_computation(self, runtime_args):
-        """Run the MoE computation."""
-        input_quantized = self.moe_impl.quantize_inputs(
-            self.input_tensor,
-            self.config["hidden_states_scale_global"],
-            is_swizzling=False,
-        )
-
-        # Prepare all parameters for the function call
-        func_params = {
-            "routing_logits": runtime_args["expert_logits"],
-            "routing_bias": runtime_args["routing_bias"],
-            "hidden_states": input_quantized["hidden_states"],
-            "hidden_states_scale": input_quantized["hidden_states_scale"],
-            "gemm1_weights": self.static_data["gemm1_weights_fp4_shuffled"],
-            "gemm1_weights_scale": self.static_data["gemm1_scales_fp4_shuffled"],
-            "gemm1_bias": None,
-            "gemm1_alpha": None,
-            "gemm1_beta": None,
-            "gemm1_clamp_limit": None,
-            "gemm2_weights": self.static_data["gemm2_weights_fp4_shuffled"],
-            "gemm2_weights_scale": self.static_data["gemm2_scales_fp4_shuffled"],
-            "gemm2_bias": None,
-            "output1_scale_scalar": self.static_data["scale_c_fc1"],
-            "output1_scale_gate_scalar": self.static_data["scale_gate_fc1"],
-            "output2_scale_scalar": self.static_data["scale_c_fc2"],
-            "num_experts": self.config["num_experts"],
-            "top_k": self.config["top_k"],
-            "n_group": self.config["n_groups"],
-            "topk_group": self.config["top_k_groups"],
-            "intermediate_size": self.config["intermediate_size"],
-            "local_expert_offset": 0,
-            "local_num_experts": self.config["num_experts"],
-            "routed_scaling_factor": self.config["routed_scaling"],
-            "tile_tokens_dim": None,
-            "routing_method_type": self.config["routing_method_type"],
-            "gated_act_type": self.config["gated_act_type"],
-            "do_finalize": True,
-        }
-        
-        # Dump parameters if DUMP_FP4 environment variable is set
-        dump_trtllm_fp4_params(**func_params)
-        
-        # Call the function with all parameters
-        output = trtllm_fp4_block_scale_moe(**func_params)
-        return output  # Extract tensor from tuple
-
-
-# ====================================================================================
-# Abstract Base Class for MoE Implementations
-# ====================================================================================
 
 
 class Moe(ABC):
@@ -356,11 +94,6 @@ class Moe(ABC):
     def compute_production(self, args):
         self.prepare_static_weights_for_kernel(args)
 
-        topk_ids = args.permute_info["topKIndices"].to(torch.int32)
-        args.topk_weights = args.expert_logits.view(args.num_tokens, args.num_experts)[
-            torch.arange(args.num_tokens).unsqueeze(1), topk_ids
-        ].to(torch.bfloat16)
-        args.topk_ids = topk_ids
         args.w13_weight_scale_2 = 1.0 / args.gemm1_scales_global
         args.w2_weight_scale_2 = 1.0 / args.gemm2_scales_global
         args.w13_input_scale = 1.0 / args.hidden_states_scale_global
@@ -384,9 +117,8 @@ class FP4Moe(Moe):
             If True, the activation is quantized to MxFP8, else the activation is quantized to NvFP4
     """
 
-    def __init__(self, quant_mode: QuantMode):
+    def __init__(self):
         super().__init__()
-        self.quant_mode = quant_mode
         self.sf_vec_size = 16
 
     def quantize_weights(self, gemm1_weights, gemm2_weights, hidden_states_sample):
@@ -576,53 +308,15 @@ class FP4Moe(Moe):
 
     def call_moe(self, args):
         # Prepare parameters for dumping
-        torch.save(args.hidden_states_orig, Path.home() / "hidden_states_orig.pt")
-        torch.save(args.hidden_states_scale_global, Path.home() / "hidden_states_scale_global.pt")
         input_quantized = self.quantize_inputs(
             args.hidden_states_orig,
             args.hidden_states_scale_global,
             is_swizzling=False,
         )
-        torch.save(input_quantized["hidden_states"], Path.home() / "hidden_states.pt")
-        torch.save(input_quantized["hidden_states_scale"], Path.home() / "hidden_states_scale.pt")
 
         args.hidden_states = input_quantized["hidden_states"]
         args.hidden_states_scale = input_quantized["hidden_states_scale"]
         # Dump parameters if DUMP_FP4 environment variable is set
-        func_params = {
-            "routing_logits": args.expert_logits,
-            "routing_bias": args.routing_bias,
-            "hidden_states": args.hidden_states,
-            "hidden_states_scale": args.hidden_states_scale,
-            "gemm1_weights": args.gemm1_weights_fp4_shuffled,
-            "gemm1_weights_scale": args.gemm1_scales_fp4_shuffled,
-            "gemm1_bias": None,
-            "gemm1_alpha": None,
-            "gemm1_beta": None,
-            "gemm1_clamp_limit": None,
-            "gemm2_weights": args.gemm2_weights_fp4_shuffled,
-            "gemm2_weights_scale": args.gemm2_scales_fp4_shuffled,
-            "gemm2_bias": None,
-            "output1_scale_scalar": args.scale_c_fc1,
-            "output1_scale_gate_scalar": args.scale_gate_fc1,
-            "output2_scale_scalar": args.scale_c_fc2,
-            "num_experts": args.num_experts,
-            "top_k": args.top_k,
-            "n_group": args.n_groups,
-            "topk_group": args.top_k_groups,
-            "intermediate_size": args.intermediate_size,
-            "local_expert_offset": 0,
-            "local_num_experts": args.num_experts,
-            "routed_scaling_factor": args.routed_scaling,
-            "tile_tokens_dim": None,
-            "routing_method_type": args.routing_method_type,
-            "gated_act_type": args.gated_act_type,
-            "do_finalize": True,
-            "tune_max_num_tokens": 4096,
-        }
-        
-        dump_trtllm_fp4_params(**func_params)
-        
         output = trtllm_fp4_block_scale_moe(
             routing_logits=args.expert_logits,
             routing_bias=args.routing_bias,
@@ -655,46 +349,6 @@ class FP4Moe(Moe):
             tune_max_num_tokens=4096,
         )
         return output[0].to(torch.float)
-        # Extract runtime arguments
-        expert_logits = kwargs["expert_logits"]
-        routing_bias = kwargs["routing_bias"]
-        num_experts = kwargs["num_experts"]
-        top_k = kwargs["top_k"]
-        n_groups = kwargs["n_groups"]
-        top_k_groups = kwargs["top_k_groups"]
-        intermediate_size = kwargs["intermediate_size"]
-        routed_scaling = kwargs["routed_scaling"]
-        gated_act_type = kwargs["gated_act_type"]
-        routing_method_type = kwargs["routing_method_type"]
-        enable_autotune = kwargs.get("enable_autotune", True)
-
-        # Create CUDA graph configuration
-        config = {
-            "hidden_states_scale_global": hidden_states_scale_global,
-            "num_experts": num_experts,
-            "top_k": top_k,
-            "n_groups": n_groups,
-            "top_k_groups": top_k_groups,
-            "intermediate_size": intermediate_size,
-            "routed_scaling": routed_scaling,
-            "gated_act_type": gated_act_type,
-            "routing_method_type": routing_method_type,
-            "enable_autotune": enable_autotune,
-        }
-
-        runtime_args = {
-            "expert_logits": expert_logits,
-            "routing_bias": routing_bias,
-        }
-
-        # Create, capture and launch CUDA graph in one shot
-        cuda_graph = CUDAGraphMoE(self, static_data, **config)
-        try:
-            cuda_graph.capture(hidden_states_orig, **runtime_args)
-            output = cuda_graph.launch(hidden_states_orig)
-            return output[0].to(torch.float)
-        finally:
-            cuda_graph.cleanup()
 
     def compute_reference(self, args):
         sf_vec_size = 16
@@ -792,10 +446,6 @@ class FP4MoeExecutor(FP4Moe):
         executor = TrtllmFp4Executor(config, weights, FusedMoEQuantConfig())
         output = executor.execute(payload, "silu", None, None, False, None)
         return output.to(torch.float)
-
-# ====================================================================================
-# Fp4Executor Implementation (using TrtllmFp4Executor as backend)
-# ====================================================================================
 
 @dataclass(frozen=False, slots=True)
 class moe_args:
@@ -1284,9 +934,9 @@ def test_moe(
     # Extract routing configuration
     top_k = routing_config["top_k"]
     padding = routing_config["padding"]
-    n_groups = routing_config["n_groups"]
-    top_k_groups = routing_config["top_k_groups"]
-    routed_scaling = routing_config["routed_scaling"]
+    n_groups = routing_config.get("n_groups")
+    top_k_groups = routing_config.get("top_k_groups")
+    routed_scaling = routing_config.get("routed_scaling")
     num_experts = routing_config["num_experts"]
     routing_method_type = routing_config["routing_method_type"]
 
@@ -1310,7 +960,7 @@ def test_moe(
             torch.bfloat16
         )
 
-    if routing_config["has_routing_bias"]:
+    if routing_config.get("has_routing_bias"):
         routing_bias = torch.randn(num_experts, device="cuda", dtype=torch.bfloat16)
     else:
         routing_bias = None
@@ -1378,7 +1028,7 @@ def test_moe(
         hidden_states, weights_data["hidden_states_scale_global"]
     )
 
-    # Create arguments for reference computation
+    topk_ids = permute_info["topKIndices"].to(torch.int32)
     moe_info = {
         "num_tokens": num_tokens,
         "num_experts": num_experts,
@@ -1387,6 +1037,10 @@ def test_moe(
         "top_k": top_k,
         "padding": padding,
         "expert_logits": expert_logits,
+        "topk_ids": topk_ids,
+        "topk_weights": scores.view(num_tokens, num_experts)[
+            torch.arange(num_tokens).unsqueeze(1), topk_ids
+        ].to(torch.bfloat16),
         "permute_info": permute_info,
         "use_routing_scales_on_input": routing_method_type == RoutingMethodType.Llama4,
         "gated_act_type": gated_act_type,
@@ -1398,9 +1052,6 @@ def test_moe(
     output_dequant_reference = moe_impl.compute_reference(args)
 
     assert output_dequant_reference is not None, "Reference computation failed to produce output"
-
-    # Compute actual output
-    enable_autotune = routing_config.get("enable_autotune", False)
 
     output_dequant_actual = moe_impl.compute_production(args)
 
@@ -1420,32 +1071,22 @@ def test_moe(
 _cache_permute_indices = {}
 
 if __name__ == "__main__":
-    test_moe(
-        num_tokens=3072,
-        hidden_size=1024,
-        intermediate_size=768,
-        moe_impl=FP4Moe(quant_mode=QuantMode.FP4_NVFP4_NVFP4),
-        # moe_impl=FP4MoeExecutor(quant_mode=QuantMode.FP4_NVFP4_NVFP4),
-        routing_config={
-                "num_experts": 128,
-                "top_k": 8,
-                "padding": 8,
-                "n_groups": None,
-                "top_k_groups": None,
-                "routed_scaling": None,
-                "has_routing_bias": False,
-                "routing_method_type": RoutingMethodType.Renormalize,
-                "compatible_moe_impls": [
-                    FP4Moe,
-                ],
-                "compatible_intermediate_size": [384, 768, 1024],
-                "enable_autotune": False,
-            },
-        weight_processing={
-                "use_shuffled_weight": True,
-                "layout": WeightLayout.MajorK,
-                "compatible_moe_impls": [FP4Moe],
-            },
-        gated_act_type=GatedActType.SwiGlu,
-        cache_permute_indices=_cache_permute_indices,
-    )
+    for cls in [FP4Moe, FP4MoeExecutor]:
+        test_moe(
+            num_tokens=3072,
+            hidden_size=1024,
+            intermediate_size=768,
+            moe_impl=cls(),
+            routing_config={
+                    "num_experts": 128,
+                    "top_k": 8,
+                    "padding": 8,
+                    "routing_method_type": RoutingMethodType.Renormalize,
+                },
+            weight_processing={
+                    "use_shuffled_weight": True,
+                    "layout": WeightLayout.MajorK,
+                },
+            gated_act_type=GatedActType.SwiGlu,
+            cache_permute_indices=_cache_permute_indices,
+        )
