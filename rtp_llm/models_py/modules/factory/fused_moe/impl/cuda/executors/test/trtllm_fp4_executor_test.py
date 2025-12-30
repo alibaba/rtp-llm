@@ -576,6 +576,19 @@ class FP4Moe(Moe):
 
     def call_moe(self, args):
         # Prepare parameters for dumping
+        torch.save(args.hidden_states_orig, Path.home() / "hidden_states_orig.pt")
+        torch.save(args.hidden_states_scale_global, Path.home() / "hidden_states_scale_global.pt")
+        input_quantized = self.quantize_inputs(
+            args.hidden_states_orig,
+            args.hidden_states_scale_global,
+            is_swizzling=False,
+        )
+        torch.save(input_quantized["hidden_states"], Path.home() / "hidden_states.pt")
+        torch.save(input_quantized["hidden_states_scale"], Path.home() / "hidden_states_scale.pt")
+
+        args.hidden_states = input_quantized["hidden_states"]
+        args.hidden_states_scale = input_quantized["hidden_states_scale"]
+        # Dump parameters if DUMP_FP4 environment variable is set
         func_params = {
             "routing_logits": args.expert_logits,
             "routing_bias": args.routing_bias,
@@ -608,26 +621,13 @@ class FP4Moe(Moe):
             "tune_max_num_tokens": 4096,
         }
         
-        torch.save(args.hidden_states_orig, Path.home() / "hidden_states_orig.pt")
-        torch.save(args.hidden_states_scale_global, Path.home() / "hidden_states_scale_global.pt")
-        input_quantized = self.quantize_inputs(
-            args.hidden_states_orig,
-            args.hidden_states_scale_global,
-            is_swizzling=False,
-        )
-        torch.save(input_quantized["hidden_states"], Path.home() / "hidden_states.pt")
-        torch.save(input_quantized["hidden_states_scale"], Path.home() / "hidden_states_scale.pt")
-
-        args.hidden_states = input_quantized["hidden_states"]
-        args.hidden_states_scale = input_quantized["hidden_states_scale"]
-        # Dump parameters if DUMP_FP4 environment variable is set
         dump_trtllm_fp4_params(**func_params)
         
         output = trtllm_fp4_block_scale_moe(
             routing_logits=args.expert_logits,
             routing_bias=args.routing_bias,
-            hidden_states=input_quantized["hidden_states"],
-            hidden_states_scale=input_quantized["hidden_states_scale"],
+            hidden_states=args.hidden_states,
+            hidden_states_scale=args.hidden_states_scale,
             gemm1_weights=args.gemm1_weights_fp4_shuffled,
             gemm1_weights_scale=args.gemm1_scales_fp4_shuffled,
             gemm1_bias=None,
