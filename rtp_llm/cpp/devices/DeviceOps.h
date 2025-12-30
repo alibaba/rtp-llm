@@ -42,7 +42,7 @@ public:
     virtual MaskOutput        attentionMask(const MaskParams& params);
     virtual BufferPtr         loraLinearWithActivation(const LoraLinearWithActivationParams& params);
     virtual void              maskLogits(Buffer& logits, const Buffer& mask);
-    virtual void              weightLogits(Buffer& logits, const Buffer& weigth);
+    virtual void weightLogits(Buffer& logits, const Buffer& batch_idx, const Buffer& vocab_idx, const Buffer& weight);
 
     // QKV ops
     virtual BufferPtr mhaQKVGemm(const AttentionLayerParams& params);
@@ -113,7 +113,7 @@ public:
     // for device-specific weights preprocess
     static torch::Tensor
     preprocessGemmWeightByKey(const std::string& key, torch::Tensor weight, bool user_arm_gemm_use_kai);
-    static torch::Tensor              preprocessWeightScale(torch::Tensor weight, torch::Tensor scale);
+    static torch::Tensor preprocessWeightScale(torch::Tensor weight, torch::Tensor scale);
 
     virtual void prepareCommBuffer(const PrepareCommBufferParams& params);
 };
