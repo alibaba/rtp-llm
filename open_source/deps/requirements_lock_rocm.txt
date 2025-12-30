@@ -2905,16 +2905,16 @@ tokenizers==0.22.1 \
     # via
     #   autoawq
     #   transformers
-torch @ https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/home/bill/rtpllm/rocm643/20251126/torch-2.4.1%2Bgit783fafb-cp310-cp310-linux_x86_64.whl \
-    --hash=sha256:b16eecfc5041bf8b2561e6b0d41e8fe99c321cad6f9524700b0398a35d0e5a8f
+torch @ https://siwei-zm.oss-cn-hangzhou-zmf.aliyuncs.com/MI308X/deps/torch-2.7.1%2Brocm6.4.3.git9015dfd-cp310-cp310-linux_x86_64.whl \
+    --hash=sha256:2b3f53e7cf53df7f89b8af1f139fe1aa8c0085b3ad654d0a44cbc125b4fbe66d
     # via
     #   -r open_source/deps/requirements_rocm.txt
     #   bitsandbytes
     #   sentence-transformers
     #   timm
     #   torchvision
-torchvision @ https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/home/bill/rtpllm/rocm643/torchvision-0.19.0%2Brocm6.4.3.gitbbf1b41e-cp310-cp310-linux_x86_64.whl \
-    --hash=sha256:ddb20fa3afca37bd7cca4ff23b7aabdc78254bd0219a3fe102aefb69277528eb
+torchvision @ https://siwei-zm.oss-cn-hangzhou-zmf.aliyuncs.com/MI308X/deps/torchvision-0.22.1%2Brocm6.4.3.git59a3e1f-cp310-cp310-linux_x86_64.whl \
+    --hash=sha256:1bd5ef9dfb53a3f4249b6708ed0aa21d038e3b2707574118b2cb355c3cffdefc
     # via
     #   -r open_source/deps/requirements_rocm.txt
     #   timm
