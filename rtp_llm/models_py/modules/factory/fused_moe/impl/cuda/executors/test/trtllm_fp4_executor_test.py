@@ -259,11 +259,15 @@ class CUDAGraphMoE:
 
     def _run_moe_computation(self, runtime_args):
         """Run the MoE computation."""
+        torch.save(self.input_tensor, Path.home() / "input_tensor.pt")
+        torch.save(self.config["hidden_states_scale_global"], Path.home() / "hidden_states_scale_global.pt")
         input_quantized = self.moe_impl.quantize_inputs(
             self.input_tensor,
             self.config["hidden_states_scale_global"],
             is_swizzling=False,
         )
+        torch.save(input_quantized["hidden_states"], Path.home() / "hidden_states.pt")
+        torch.save(input_quantized["hidden_states_scale"], Path.home() / "hidden_states_scale.pt")
 
         # Prepare all parameters for the function call
         func_params = {
