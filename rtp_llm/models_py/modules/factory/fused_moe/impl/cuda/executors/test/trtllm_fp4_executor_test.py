@@ -94,18 +94,16 @@ class FP4Moe:
         )
 
         gemm1_weights_fp4_bytes, gemm1_scales_fp4_bytes, gemm1_scales_global = (
-            quant_nvfp4_batches(gemm1_weights, num_experts, True)
+            quant_nvfp4_batches(gemm1_weights, num_experts, False)
         )
-        torch.save(gemm1_scales_fp4_bytes, Path.home() / "gemm1_scales_fp4_bytes.pt")
         gemm2_weights_fp4_bytes, gemm2_scales_fp4_bytes, gemm2_scales_global = (
-            quant_nvfp4_batches(gemm2_weights, num_experts, True)
+            quant_nvfp4_batches(gemm2_weights, num_experts, False)
         )
 
         # TODO: why swizzling=False?
         _, gemm1_scales_linear_fp4_bytes, _ = (
             quant_nvfp4_batches(gemm1_weights, num_experts, False)
         )
-        torch.save(gemm1_scales_linear_fp4_bytes, Path.home() / "gemm1_scales_linear_fp4_bytes.pt")
         _, gemm2_scales_linear_fp4_bytes, _ = (
             quant_nvfp4_batches(gemm2_weights, num_experts, False)
         )
@@ -594,7 +592,7 @@ def e2m1_and_ufp8_scale_batches(
             global_scale_tensor[b].cpu(),
             sf_vec_size,
             ufp8_type,
-            True,  # is_sf_swizzled_layout
+            False,  # is_sf_swizzled_layout
         )
         for b in range(num_batches)
     ]
