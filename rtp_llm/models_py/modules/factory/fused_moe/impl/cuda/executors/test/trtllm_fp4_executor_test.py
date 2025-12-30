@@ -758,6 +758,8 @@ class moe_args:
     padding: int = None
     n_groups : int = None
     top_k_groups : int = None
+    routed_scaling: float = None
+    routing_method_type: RoutingMethodType = None
     permute_info: torch.Tensor = None
     use_routing_scales_on_input: bool = None
     gated_act_type: GatedActType = None
