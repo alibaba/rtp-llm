@@ -112,15 +112,15 @@ class FP4Moe:
 
         return {
             "hidden_states_scale_global": hidden_states_scale_global,
-            "gemm1_weights": gemm1_weights_fp4_bytes.view(torch.float8_e4m3fn),
+            "gemm1_weights": gemm1_weights_fp4_bytes,
             "gemm1_scales": gemm1_scales_fp4_bytes,
             "gemm1_scales_global": gemm1_scales_global,
-            "gemm1_scales_linear": gemm1_scales_linear_fp4_bytes.view(torch.float8_e4m3fn),
+            "gemm1_scales_linear": gemm1_scales_linear_fp4_bytes,
             "gemm1_weights_orig": gemm1_weights,
-            "gemm2_weights": gemm2_weights_fp4_bytes.view(torch.float8_e4m3fn),
+            "gemm2_weights": gemm2_weights_fp4_bytes,
             "gemm2_scales": gemm2_scales_fp4_bytes,
             "gemm2_scales_global": gemm2_scales_global,
-            "gemm2_scales_linear": gemm2_scales_linear_fp4_bytes.view(torch.float8_e4m3fn),
+            "gemm2_scales_linear": gemm2_scales_linear_fp4_bytes,
             "gemm2_weights_orig": gemm2_weights,
         }
 
@@ -182,10 +182,10 @@ class FP4Moe:
         # tensor_info(args.gemm2_scales_linear, "gemm2_scales_linear")
         # tensor_info(args.gemm2_scales_fp4_shuffled, "gemm2_scales_fp4_shuffled")
         # assert 0
-        args.gemm1_weights_fp4_shuffled = args.gemm1_weights
-        args.gemm1_scales_fp4_shuffled = args.gemm1_scales_linear
-        args.gemm2_weights_fp4_shuffled = args.gemm2_weights
-        args.gemm2_scales_fp4_shuffled = args.gemm2_scales_linear
+        args.gemm1_weights_fp4_shuffled = args.gemm1_weights.view(torch.float8_e4m3fn)
+        args.gemm1_scales_fp4_shuffled = args.gemm1_scales_linear.view(torch.float8_e4m3fn)
+        args.gemm2_weights_fp4_shuffled = args.gemm2_weights.view(torch.float8_e4m3fn)
+        args.gemm2_scales_fp4_shuffled = args.gemm2_scales_linear.view(torch.float8_e4m3fn)
         
         self.swizzle_weights(args)
 
@@ -944,7 +944,7 @@ def test_moe(
 
 
 if __name__ == "__main__":
-    for cls in [FP4Moe, FP4MoeExecutor]:
+    for cls in [FP4MoeExecutor]:
         test_moe(
             num_tokens=3072,
             hidden_size=1024,
