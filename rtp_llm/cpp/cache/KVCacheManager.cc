@@ -196,6 +196,16 @@ KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cac
         return info;
     }
 
+    if (need_cache_keys) {
+        auto block_cache = allocator_->getBlockPool()->blockCache();
+        auto snapshot    = block_cache->cacheSnapshot(latest_version);
+        info.cached_keys.clear();
+        info.cached_keys.reserve(snapshot.values.size());
+        for (const auto& cacheItem : snapshot.values) {
+            info.cached_keys.push_back(cacheItem.cache_key);
+        }
+    }
+
     const size_t block_size_tokens = config_.seq_size_per_block;
     const size_t total_blocks      = allocator_->totalBlocksNum();
     const size_t available_blocks  = allocator_->availableBlocksNum();
