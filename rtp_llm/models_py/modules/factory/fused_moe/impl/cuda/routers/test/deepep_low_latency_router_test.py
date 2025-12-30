@@ -15,6 +15,9 @@ from rtp_llm.models_py.distributed.deepep_wrapper import init_deepep_wrapper
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
+from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
+    CombineForwardPayload,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
@@ -83,7 +86,7 @@ def _init_router(
 
     router = DeepEpLowLatencyRouter(
         config,
-        use_fp8_dispatch=use_fp8,
+        use_fp8=use_fp8,
         zero_copy=False,
         async_finish=False,
         return_recv_hook=False,
@@ -233,7 +236,7 @@ def _run_deepep_low_latency_router_test(
     extra_finalize_args = {"original_num_tokens": num_token_per_rank}
     # router finalize
     combined_x = router.finalize(
-        recv_x,
+        CombineForwardPayload(fused_expert_output=recv_x),
         payload.expert_topk_weights,
         payload.expert_topk_ids,
         False,

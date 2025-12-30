@@ -4,12 +4,14 @@ from typing import Any, Dict
 
 import torch
 
-from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
+from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.priority_attributes import (
     StrategyAttributes,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.strategy_base import MoeStrategy
-from rtp_llm.config.model_config import ModelConfig
 
 
 class CudaFp8PerBlockNoDPStrategy(MoeStrategy):
@@ -59,7 +61,6 @@ class CudaFp8PerBlockEpLowLatencyStrategy(MoeStrategy):
         quant_method = resolver.get_quant_method(config)
         checker.check(quant_method == "FP8_PER_BLOCK")
 
-
     def create_router(self, config: MoEConfigAdapter) -> Any:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_low_latency_router import (
             DeepEpLowLatencyRouter,
@@ -67,7 +68,7 @@ class CudaFp8PerBlockEpLowLatencyStrategy(MoeStrategy):
 
         return DeepEpLowLatencyRouter(
             config,
-            use_fp8_dispatch=True,
+            use_fp8=True,
             zero_copy=False,
             async_finish=False,
             return_recv_hook=False,

@@ -66,7 +66,7 @@ class BackendManager(object):
             init_distributed_environment(
                 engine_config.parallelism_config,
                 backend="nccl",
-                timeout=self.py_env_configs.distribute_config.dist_barrier_timeout,
+                timeout=self.py_env_configs.distribute_config.dist_comm_timeout,
             )
         world_info = get_world_info(
             self.py_env_configs.server_config, self.py_env_configs.distribute_config

@@ -71,22 +71,21 @@ bool TrtV2FmhaRunner::initTrtV2FmhaPagedAndCheckSupport() {
 
 tensorrt_llm::kernels::MHARunnerFixedParams TrtV2FmhaRunner::createMHARunnerFixedParams(bool paged) {
     tensorrt_llm::kernels::MHARunnerFixedParams fixedParams;
-    fixedParams.dataType                  = trtDtypeConvert(attn_dtype_);
-    fixedParams.dataTypeKv                = trtDtypeConvert(attn_dtype_);
-    fixedParams.dataTypeOut               = trtDtypeConvert(attn_dtype_);
-    fixedParams.forceFp32Acc              = false;
-    fixedParams.attentionMaskType         = config_.is_causal ?
-                                                tensorrt_llm::kernels::ContextAttentionMaskType::CAUSAL :
-                                                tensorrt_llm::kernels::ContextAttentionMaskType::PADDING;
-    fixedParams.attentionInputLayout      = paged ? tensorrt_llm::kernels::AttentionInputLayout::Q_PAGED_KV :
-                                                    tensorrt_llm::kernels::AttentionInputLayout::PACKED_QKV;
-    fixedParams.isSPadded                 = is_s_padded_;
-    fixedParams.numQHeads                 = config_.head_num;
-    fixedParams.numKvHeads                = config_.kv_head_num;
-    fixedParams.numTokensPerBlock         = config_.tokens_per_block;
-    fixedParams.headSize                  = config_.size_per_head;
-    fixedParams.headSizeV                 = config_.size_per_head;
-    fixedParams.qScaling                  = q_scaling_;
+    fixedParams.dataType             = trtDtypeConvert(attn_dtype_);
+    fixedParams.dataTypeKv           = trtDtypeConvert(attn_dtype_);
+    fixedParams.dataTypeOut          = trtDtypeConvert(attn_dtype_);
+    fixedParams.forceFp32Acc         = false;
+    fixedParams.attentionMaskType    = config_.is_causal ? tensorrt_llm::kernels::ContextAttentionMaskType::CAUSAL :
+                                                           tensorrt_llm::kernels::ContextAttentionMaskType::PADDING;
+    fixedParams.attentionInputLayout = paged ? tensorrt_llm::kernels::AttentionInputLayout::Q_PAGED_KV :
+                                               tensorrt_llm::kernels::AttentionInputLayout::PACKED_QKV;
+    fixedParams.isSPadded            = is_s_padded_;
+    fixedParams.numQHeads            = config_.head_num;
+    fixedParams.numKvHeads           = config_.kv_head_num;
+    fixedParams.numTokensPerBlock    = config_.tokens_per_block;
+    fixedParams.headSize             = config_.size_per_head;
+    fixedParams.headSizeV            = config_.size_per_head;
+    fixedParams.qScaling             = q_scaling_;
     fixedParams.attnLogitSoftcappingScale = 0.f;
     fixedParams.hasAlibi                  = false;
     fixedParams.scaleAlibi                = false;
@@ -168,8 +167,7 @@ void TrtV2FmhaRunner::runTrtV2Fmha(void*        input,
                                                   custom_mask);
         trtv2_fmha_runner_->run(runnerParams);
     } else if (trtv2_sm70_fmha_runner_) {
-        trtv2_sm70_fmha_runner_->setup_flags(
-            false, false, config_.is_causal, config_.kv_head_num);
+        trtv2_sm70_fmha_runner_->setup_flags(false, false, config_.is_causal, config_.kv_head_num);
         trtv2_sm70_fmha_runner_->setup(batch_size, max_seq_len, max_seq_len, token_num, false, false, 1, 0);
         trtv2_sm70_fmha_runner_->run(input, cu_seqlens, output, stream_);
     }
@@ -207,13 +205,12 @@ void TrtV2FmhaRunner::runTrtV2FmhaPaged(void*        input,
 }
 
 std::shared_ptr<TRTAttn> prepareTrtAttnParams(const AttentionConfigs& configs,
-                                              int                     kv_block_offset,
                                               const BufferPtr&        kv_cache_block_id,
                                               int                     batch_size,
                                               bool                    use_fp8_fmha,
                                               cudaStream_t            stream,
                                               bool                    enable_paged_trt_v2) {
-    if (!kv_block_offset || !kv_cache_block_id || 0 == batch_size) {
+    if (!kv_cache_block_id || 0 == batch_size) {
         return nullptr;
     }
 

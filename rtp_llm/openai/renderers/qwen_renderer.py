@@ -187,8 +187,8 @@ def make_context(
 
 class QwenRenderer(CustomChatRenderer):
     def __init__(
-        self, 
-        tokenizer: BaseTokenizer, 
+        self,
+        tokenizer: BaseTokenizer,
         renderer_params: RendererParams,
         generate_env_config,
         render_config=None,
@@ -196,11 +196,25 @@ class QwenRenderer(CustomChatRenderer):
         misc_config=None,
         vit_config=None,
     ):
-        super().__init__(tokenizer, renderer_params, generate_env_config, render_config, ckpt_path, misc_config, vit_config)
+        super().__init__(
+            tokenizer,
+            renderer_params,
+            generate_env_config,
+            render_config,
+            ckpt_path,
+            misc_config,
+            vit_config,
+        )
         self.add_extra_stop_word_ids([[37763, 367, 25], [151643]])  # Observation:
 
         self.qwen_reasoning_tool_renderer = QwenReasoningToolRenderer(
-            tokenizer, renderer_params, generate_env_config, render_config, ckpt_path, misc_config, vit_config
+            tokenizer,
+            renderer_params,
+            generate_env_config,
+            render_config,
+            ckpt_path,
+            misc_config,
+            vit_config,
         )
 
         self.template_chat_renderer: Optional[BasicRenderer] = None
@@ -210,7 +224,15 @@ class QwenRenderer(CustomChatRenderer):
                     f"qwen model has chat_template [{tokenizer.chat_template}], "
                     "which will be used for non-function call dialogue."
                 )
-                self.template_chat_renderer = BasicRenderer(tokenizer, renderer_params, generate_env_config, render_config, ckpt_path, misc_config, vit_config)
+                self.template_chat_renderer = BasicRenderer(
+                    tokenizer,
+                    renderer_params,
+                    generate_env_config,
+                    render_config,
+                    ckpt_path,
+                    misc_config,
+                    vit_config,
+                )
         except AttributeError:
             pass
 
@@ -702,3 +724,4 @@ register_renderer("qwen_13b", QwenRenderer)
 register_renderer("qwen_1b8", QwenRenderer)
 register_renderer("qwen_2", QwenRenderer)
 register_renderer("qwen_2_moe", QwenRenderer)
+register_renderer("qwen3_next", QwenRenderer)

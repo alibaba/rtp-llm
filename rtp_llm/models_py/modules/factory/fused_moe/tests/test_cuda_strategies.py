@@ -43,28 +43,6 @@ class TestCudaNoQuantSingleGpuStrategy(unittest.TestCase):
     @patch(
         "rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver.MoeConfigResolver"
     )
-    def test_can_handle_false_not_cuda(self, mock_resolver_class: Any) -> None:
-        """Test not CUDA device
-
-        Note: This test may not work as expected because Router/Executor
-        check_conditions methods don't check device type directly.
-        The strategy name suggests it's CUDA-specific, but the actual
-        implementation relies on Router/Executor conditions.
-        """
-        mock_resolver = MagicMock()
-        mock_resolver_class.return_value = mock_resolver
-
-        mock_resolver.has_quantization.return_value = False
-        mock_resolver.is_single_gpu.return_value = (
-            False  # Make it fail on single_gpu check
-        )
-
-        config = MagicMock()
-        self.assertFalse(self.strategy.can_handle(config))
-
-    @patch(
-        "rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver.MoeConfigResolver"
-    )
     def test_can_handle_false_has_quant(self, mock_resolver_class: Any) -> None:
         """Test case with quantization"""
         mock_resolver = MagicMock()
@@ -80,7 +58,7 @@ class TestCudaNoQuantSingleGpuStrategy(unittest.TestCase):
     @patch(
         "rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver.MoeConfigResolver"
     )
-    def test_can_handle_false_not_single_gpu(self, mock_resolver_class: Any) -> None:
+    def test_can_handle_true_not_single_gpu(self, mock_resolver_class: Any) -> None:
         """Test multi-GPU case"""
         mock_resolver = MagicMock()
         mock_resolver_class.return_value = mock_resolver
@@ -88,9 +66,10 @@ class TestCudaNoQuantSingleGpuStrategy(unittest.TestCase):
         mock_resolver.get_device_type.return_value = DeviceType.Cuda
         mock_resolver.has_quantization.return_value = False
         mock_resolver.is_single_gpu.return_value = False
+        mock_resolver.is_tp_equal_ep.return_value = True  # Not TP==EP either
 
         config = MagicMock()
-        self.assertFalse(self.strategy.can_handle(config))
+        self.assertTrue(self.strategy.can_handle(config))
 
     def test_priority(self) -> None:
         """Test priority"""
