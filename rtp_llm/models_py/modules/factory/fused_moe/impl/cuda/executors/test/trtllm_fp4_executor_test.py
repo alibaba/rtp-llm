@@ -757,6 +757,10 @@ class moe_args:
     scale_c_fc1: torch.Tensor = None
     scale_gate_fc1: torch.Tensor = None
     scale_c_fc2: torch.Tensor = None
+    w13_weight_scale_2: torch.Tensor = None
+    w2_weight_scale_2: torch.Tensor = None
+    w13_input_scale: torch.Tensor = None
+    w2_input_scale: torch.Tensor = None
 
 
 def routing_reference(expertLogits, topK, padding):
