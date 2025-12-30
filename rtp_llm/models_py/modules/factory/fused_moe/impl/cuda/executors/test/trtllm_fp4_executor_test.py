@@ -608,11 +608,16 @@ class FP4Moe(Moe):
             "tune_max_num_tokens": 4096,
         }
         
+        torch.save(args.hidden_states_orig, Path.home() / "hidden_states_orig.pt")
+        torch.save(args.hidden_states_scale_global, Path.home() / "hidden_states_scale_global.pt")
         input_quantized = self.quantize_inputs(
             args.hidden_states_orig,
             args.hidden_states_scale_global,
             is_swizzling=False,
         )
+        torch.save(input_quantized["hidden_states"], Path.home() / "hidden_states.pt")
+        torch.save(input_quantized["hidden_states_scale"], Path.home() / "hidden_states_scale.pt")
+
         args.hidden_states = input_quantized["hidden_states"]
         args.hidden_states_scale = input_quantized["hidden_states_scale"]
         # Dump parameters if DUMP_FP4 environment variable is set
