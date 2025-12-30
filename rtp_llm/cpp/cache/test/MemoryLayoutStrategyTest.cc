@@ -144,9 +144,7 @@ protected:
         auto pool_cfg   = BlockPoolConfigHelper::createLayerFirstConfig(layer_num, block_num, spec);
         auto layout_cfg = pool_cfg.memory_layouts[0];
 
-        // Most tests don't want scale; disable it explicitly (even though TYPE_INT8 would enable it by default).
         layout_cfg.enable_kv_scale          = false;
-        layout_cfg.kv_scale_block_bytes     = 0;
         layout_cfg.kv_scale_stride          = 0;
         layout_cfg.kv_scale_stride_bytes    = 0;
         layout_cfg.kv_scale_pool_size_bytes = 0;
@@ -418,6 +416,105 @@ TEST_F(LayerFirstLayoutStrategyTest, ConvertIndexToBufferPartitionedByHead) {
         auto actual_v   = torch::from_blob(buffers[1]->data(), {static_cast<int64_t>(v_sz)}, options);
         EXPECT_TRUE(torch::equal(expected_k, actual_k));
         EXPECT_TRUE(torch::equal(expected_v, actual_v));
+    }
+}
+
+TEST_F(LayerFirstLayoutStrategyTest, ConvertIndexToBufferPartitionedByHeadWithScale) {
+    // Create an int8 config with kv-scale enabled, and verify both kv-cache and kv-scale are partitioned.
+    auto spec     = createTestKvCacheSpec(/*layer_num=*/4,
+                                      /*dtype=*/rtp_llm::DataType::TYPE_INT8,
+                                      /*local_head_num_kv=*/8,
+                                      /*seq_size_per_block=*/64,
+                                      /*k_block_stride_bytes=*/512,
+                                      /*v_block_stride_bytes=*/512);
+    auto pool_cfg = BlockPoolConfigHelper::createLayerFirstConfig(/*layer_num=*/4, /*block_num=*/8, spec);
+    auto config   = pool_cfg.memory_layouts[0];  // keep enable_kv_scale=true
+
+    auto options = torch::TensorOptions().dtype(torch::kInt8).device(torch::kCPU);
+    auto kv_cache_tensor =
+        torch::arange(0, static_cast<int64_t>(config.kv_block_pool_size_bytes), options).contiguous();
+    auto kv_scale_tensor =
+        torch::arange(0, static_cast<int64_t>(config.kv_scale_pool_size_bytes), options).contiguous();
+    void* cache_ptr = kv_cache_tensor.data_ptr();
+
+    auto strategy = std::make_unique<LayerFirstLayoutStrategy>();
+    ASSERT_TRUE(strategy->init(config, kv_cache_tensor, kv_scale_tensor, cache_ptr, config.dtype));
+
+    const int layer = 1;
+    const int block = 3;
+
+    auto full_block_tensor = strategy->getLayerCacheTensors()[layer][block];
+    ASSERT_TRUE(full_block_tensor.defined());
+    ASSERT_EQ(full_block_tensor.dim(), 1);
+    ASSERT_EQ(static_cast<size_t>(full_block_tensor.numel()), config.kv_block_stride_bytes);
+
+    auto full_scale_tensor = strategy->getLayerScaleCacheTensors()[layer][block];
+    ASSERT_TRUE(full_scale_tensor.defined());
+    ASSERT_EQ(full_scale_tensor.dim(), 1);
+    ASSERT_EQ(static_cast<size_t>(full_scale_tensor.numel()), config.kv_scale_stride_bytes);
+
+    const uintptr_t kv_base_ptr = reinterpret_cast<uintptr_t>(full_block_tensor.data_ptr());
+    const uintptr_t sc_base_ptr = reinterpret_cast<uintptr_t>(full_scale_tensor.data_ptr());
+
+    const int    partition_count = 4;
+    const size_t k_total_bytes   = static_cast<size_t>(config.k_block_stride_bytes);
+    const size_t v_total_bytes   = static_cast<size_t>(config.v_block_stride_bytes);
+    const size_t sc_bytes        = static_cast<size_t>(config.k_scale_stride_bytes);  // K or V plane bytes (all heads)
+    const int    heads           = static_cast<int>(config.local_head_num_kv);
+
+    ASSERT_EQ(k_total_bytes % static_cast<size_t>(heads), 0);
+    ASSERT_EQ(v_total_bytes % static_cast<size_t>(heads), 0);
+    ASSERT_EQ(sc_bytes % static_cast<size_t>(heads), 0);
+    ASSERT_EQ(heads % partition_count, 0);
+
+    const size_t k_bytes_per_head  = k_total_bytes / static_cast<size_t>(heads);
+    const size_t v_bytes_per_head  = v_total_bytes / static_cast<size_t>(heads);
+    const size_t sc_bytes_per_head = sc_bytes / static_cast<size_t>(heads);
+    const int    head_cnt          = heads / partition_count;
+
+    for (int partition_id = 0; partition_id < partition_count; ++partition_id) {
+        auto buffers = strategy->convertIndexToBuffer(layer, block, partition_count, partition_id);
+        ASSERT_EQ(buffers.size(), 4u);
+        ASSERT_NE(buffers[0], nullptr);
+        ASSERT_NE(buffers[1], nullptr);
+        ASSERT_NE(buffers[2], nullptr);
+        ASSERT_NE(buffers[3], nullptr);
+
+        const int    head_begin = partition_id * head_cnt;
+        const size_t k_off      = static_cast<size_t>(head_begin) * k_bytes_per_head;
+        const size_t v_off      = k_total_bytes + static_cast<size_t>(head_begin) * v_bytes_per_head;
+        const size_t k_sz       = static_cast<size_t>(head_cnt) * k_bytes_per_head;
+        const size_t v_sz       = static_cast<size_t>(head_cnt) * v_bytes_per_head;
+
+        const size_t sc_k_off = static_cast<size_t>(head_begin) * sc_bytes_per_head;
+        const size_t sc_v_off = sc_bytes + static_cast<size_t>(head_begin) * sc_bytes_per_head;
+        const size_t sc_k_sz  = static_cast<size_t>(head_cnt) * sc_bytes_per_head;
+        const size_t sc_v_sz  = static_cast<size_t>(head_cnt) * sc_bytes_per_head;
+
+        EXPECT_EQ(buffers[0]->sizeBytes(), k_sz);
+        EXPECT_EQ(buffers[1]->sizeBytes(), v_sz);
+        EXPECT_EQ(buffers[2]->sizeBytes(), sc_k_sz);
+        EXPECT_EQ(buffers[3]->sizeBytes(), sc_v_sz);
+
+        EXPECT_EQ(reinterpret_cast<uintptr_t>(buffers[0]->data()), kv_base_ptr + k_off);
+        EXPECT_EQ(reinterpret_cast<uintptr_t>(buffers[1]->data()), kv_base_ptr + v_off);
+        EXPECT_EQ(reinterpret_cast<uintptr_t>(buffers[2]->data()), sc_base_ptr + sc_k_off);
+        EXPECT_EQ(reinterpret_cast<uintptr_t>(buffers[3]->data()), sc_base_ptr + sc_v_off);
+
+        auto expected_k    = full_block_tensor.narrow(0, static_cast<int64_t>(k_off), static_cast<int64_t>(k_sz));
+        auto expected_v    = full_block_tensor.narrow(0, static_cast<int64_t>(v_off), static_cast<int64_t>(v_sz));
+        auto expected_sc_k = full_scale_tensor.narrow(0, static_cast<int64_t>(sc_k_off), static_cast<int64_t>(sc_k_sz));
+        auto expected_sc_v = full_scale_tensor.narrow(0, static_cast<int64_t>(sc_v_off), static_cast<int64_t>(sc_v_sz));
+
+        auto actual_k    = torch::from_blob(buffers[0]->data(), {static_cast<int64_t>(k_sz)}, options);
+        auto actual_v    = torch::from_blob(buffers[1]->data(), {static_cast<int64_t>(v_sz)}, options);
+        auto actual_sc_k = torch::from_blob(buffers[2]->data(), {static_cast<int64_t>(sc_k_sz)}, options);
+        auto actual_sc_v = torch::from_blob(buffers[3]->data(), {static_cast<int64_t>(sc_v_sz)}, options);
+
+        EXPECT_TRUE(torch::equal(expected_k, actual_k));
+        EXPECT_TRUE(torch::equal(expected_v, actual_v));
+        EXPECT_TRUE(torch::equal(expected_sc_k, actual_sc_k));
+        EXPECT_TRUE(torch::equal(expected_sc_v, actual_sc_v));
     }
 }
 
