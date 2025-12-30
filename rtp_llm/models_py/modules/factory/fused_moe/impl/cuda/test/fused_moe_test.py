@@ -6,7 +6,13 @@ import torch.nn.functional as F
 from torch import dtype as _dtype
 
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import FusedMoe
+from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
+    FusedMoEQuantConfig,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.impl.common.executor.batched_triton_executor import (
     BatchedTritonExperts,
 )
@@ -14,6 +20,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.common.router.batched_data
     BatchedDataRouter,
 )
 from rtp_llm.ops import MoeConfig, ParallelismConfig, RuntimeConfig
+from rtp_llm.utils.model_weight import W
 
 
 def torch_sparse_block_forward(
@@ -122,10 +129,13 @@ class FusedMoeBatchedTest(TestCase):
 
         # Create router and experts
         router = BatchedDataRouter(
-            max_num_tokens=num_tokens,
-            num_local_experts=num_experts // parallelism_config.ep_size,
-            ep_rank=parallelism_config.ep_rank,
-            tp_size=parallelism_config.tp_size,
+            config=MoEConfigAdapter(
+                model_config=model_config,
+                parallelism_config=parallelism_config,
+                moe_config=moe_config,
+                max_generate_batch_size=num_tokens,
+            ),
+            quant_config=FusedMoEQuantConfig(),
         )
         scaling_factor = 0.1
         # Create test weights
@@ -143,7 +153,14 @@ class FusedMoeBatchedTest(TestCase):
         )
 
         experts = BatchedTritonExperts(
-            max_num_tokens=num_tokens, num_dispatchers=1, w1=w1, w2=w2
+            config=MoEConfigAdapter(
+                model_config=model_config,
+                parallelism_config=parallelism_config,
+                moe_config=moe_config,
+                max_generate_batch_size=num_tokens,
+            ),
+            quant_config=FusedMoEQuantConfig(),
+            weights={W.moe_w1: w1, W.moe_w2: w2},
         )
 
         fused_moe = FusedMoe(router, experts, num_experts)

@@ -68,22 +68,26 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
     def __init__(
         self,
         config: MoEConfigAdapter,
+        quant_config: FusedMoEQuantConfig,
         weights: Dict[str, torch.Tensor],
     ):
-        super().__init__(FusedMoEQuantConfig())
-        self.config = config
+        super().__init__(config, quant_config, weights)
+
         self.ep_size = config.ep_size
         self.ep_rank = config.ep_rank
         self.num_experts = config.expert_num
+
         assert self.num_experts % self.ep_size == 0
         self.num_experts_per_partition = self.num_experts // self.ep_size
         self.start_expert_id = self.ep_rank * self.num_experts_per_partition
         self.end_expert_id = self.start_expert_id + self.num_experts_per_partition - 1
+
         self.top_k = config.moe_k
         self.activation = config.activation_type
         self.renormalize = True
         self.use_fp8_w8a8 = True
         self.use_block_quant = True
+
         # 权重初始化
         self.w13_weight = weights[W.moe_w1]
         self.w2_weight = weights[W.moe_w2]
@@ -91,6 +95,7 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
         self.w2_weight_scale_inv = weights[W.moe_s2]
         self.w13_weight_scale = None
         self.w2_weight_scale = None
+
         if is_deep_gemm_e8m0_used():
             w13_weight_tmp, self.w13_weight_scale_inv = requant_weight_ue8m0(
                 self.w13_weight, self.w13_weight_scale_inv
@@ -114,14 +119,10 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
             self.w2_weight_scale_inv,
         )
 
-    @property
-    def local_num_experts(self) -> int:
-        return self.num_experts_per_partition
-
     def execute(
         self,
         payload: ExpertForwardPayload,
-        activation: ActivationType,
+        activation: str,
         expert_map: Optional[torch.Tensor],
         a2_scale: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,

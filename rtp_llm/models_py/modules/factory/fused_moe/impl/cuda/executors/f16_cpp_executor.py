@@ -37,10 +37,11 @@ class CppMoeExecutor(FusedMoeExpertExecutor):
     def __init__(
         self,
         config: MoEConfigAdapter,
+        quant_config: FusedMoEQuantConfig,
         weights: Dict[str, torch.Tensor],
     ):
-        super().__init__(FusedMoEQuantConfig())
-        self.config = config
+        super().__init__(config, quant_config, weights)
+
         self.ep_size = config.ep_size
         self.ep_rank = config.ep_rank
         self.num_experts = config.expert_num
@@ -54,6 +55,7 @@ class CppMoeExecutor(FusedMoeExpertExecutor):
         self.renormalize = True
         self.use_fp8_w8a8 = True
         self.use_block_quant = True
+
         # 权重初始化
         self.w13_weight = weights[W.moe_w1]
         self.w2_weight = weights[W.moe_w2]
@@ -62,10 +64,6 @@ class CppMoeExecutor(FusedMoeExpertExecutor):
     @property
     def topk_ids_dtype(self) -> torch.dtype:
         return torch.int32
-
-    @property
-    def local_num_experts(self) -> int:
-        return self.num_experts_per_partition
 
     def execute(
         self,

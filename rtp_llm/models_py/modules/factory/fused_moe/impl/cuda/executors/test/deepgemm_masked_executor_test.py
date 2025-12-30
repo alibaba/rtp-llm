@@ -128,7 +128,6 @@ def test_deepgemm_masked_executor(use_fp8: bool):
 
     executor = DeepGemmMaskedExecutor(
         config,
-        weights,
         (
             FusedMoEQuantConfig(
                 quant_dtype=torch.float8_e4m3fn,
@@ -139,6 +138,7 @@ def test_deepgemm_masked_executor(use_fp8: bool):
             if use_fp8
             else FusedMoEQuantConfig(quant_dtype=None)
         ),
+        weights,
     )
     # execute
     combine_payload = executor.execute(payload, "silu", None, None, False, None)
