@@ -575,7 +575,37 @@ class FP4Moe(Moe):
         args.scale_c_fc2 = scale_c_fc2
 
     def call_moe(self, args):
-        """Call MoE using CUDA graph for maximum performance (create, capture, launch)."""
+        output = trtllm_fp4_block_scale_moe(
+            routing_logits=args.expert_logits,
+            routing_bias=args.routing_bias,
+            hidden_states=args.hidden_states,
+            hidden_states_scale=args.hidden_states_scale,
+            gemm1_weights=args.gemm1_weights_fp4_shuffled,
+            gemm1_weights_scale=args.gemm1_scales_fp4_shuffled,
+            gemm1_bias=None,
+            gemm1_alpha=None,
+            gemm1_beta=None,
+            gemm1_clamp_limit=None,
+            gemm2_weights=args.gemm2_weights_fp4_shuffled,
+            gemm2_weights_scale=args.gemm2_scales_fp4_shuffled,
+            gemm2_bias=None,
+            output1_scale_scalar=args.scale_c_fc1,
+            output1_scale_gate_scalar=args.scale_gate_fc1,
+            output2_scale_scalar=args.scale_c_fc2,
+            num_experts=args.num_experts,
+            top_k=args.top_k,
+            n_group=args.n_groups,
+            topk_group=args.top_k_groups,
+            intermediate_size=args.intermediate_size,
+            local_expert_offset=0,
+            local_num_experts=args.num_experts,
+            routed_scaling_factor=args.routed_scaling,
+            routing_method_type=args.routing_method_type,
+            gated_act_type=args.gated_act_type,
+            do_finalize=True,
+            tune_max_num_tokens=4096,
+        )
+        return output
         # Extract runtime arguments
         expert_logits = kwargs["expert_logits"]
         routing_bias = kwargs["routing_bias"]
@@ -1339,8 +1369,8 @@ if __name__ == "__main__":
         num_tokens=3072,
         hidden_size=1024,
         intermediate_size=768,
-        # moe_impl=FP4Moe(quant_mode=QuantMode.FP4_NVFP4_NVFP4),
-        moe_impl=FP4MoeExecutor(quant_mode=QuantMode.FP4_NVFP4_NVFP4),
+        moe_impl=FP4Moe(quant_mode=QuantMode.FP4_NVFP4_NVFP4),
+        # moe_impl=FP4MoeExecutor(quant_mode=QuantMode.FP4_NVFP4_NVFP4),
         routing_config={
                 "num_experts": 128,
                 "top_k": 8,
