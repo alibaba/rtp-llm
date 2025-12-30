@@ -212,7 +212,7 @@ public:
 
     void prepareCommBuffer(const PrepareCommBufferParams& params) override;
     void maskLogits(Buffer& logits, const Buffer& mask) override;
-    void weightLogits(Buffer& logits, const Buffer& weight) override;
+    void weightLogits(Buffer& logits, const Buffer& batch_idx, const Buffer& vocab_idx, const Buffer& weight) override;
 
     void perfRangePush(const std::string& name) const override;
     void perfRangePop() const override;

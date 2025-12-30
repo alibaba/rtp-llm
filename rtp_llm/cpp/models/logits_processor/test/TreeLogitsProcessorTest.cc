@@ -173,30 +173,25 @@ TEST_F(TreeLogitsProcessorTest, testGenerateVocabWeight) {
     size_t                 max_length = 1024;
     BaseLogitsProcessorPtr processor  = builder.generateLogitsProcessor(true, batch_size, file_path);
     SamplerInputs sampler_inputs = builder.allocate({batch_size, vocab_size, max_length}, {processor}, {batch_size});
-    std::vector<std::unordered_map<size_t, float>> batch_candidate_token_weights = {{{1, 0.1f}, {5, 0.3f}},
-                                                                                    {{2, 0.1f}, {3, 0.2f}, {4, 0.3f}},
-                                                                                    {{1, 0.1f}, {3, 0.2f}, {5, 0.3f}},
-                                                                                    {{1, 0.1f}, {3, 0.2f}}};
-    rtp_llm::BufferPtr                             vocab_weight =
+    std::vector<std::vector<std::pair<size_t, float>>> batch_candidate_token_weights = {
+        {{1, 0.1f}, {5, 0.3f}},
+        {{2, 0.1f}, {3, 0.2f}, {4, 0.3f}},
+        {{1, 0.1f}, {3, 0.2f}, {5, 0.3f}},
+        {{1, 0.1f}, {3, 0.2f}}};
+    std::vector<rtp_llm::BufferPtr> vocab_weight =
         processor->generateVocabWeight(batch_size, vocab_size, batch_candidate_token_weights);
 
-    std::vector<std::vector<float>> expect_vocab_weight(batch_size, std::vector<float>(vocab_size, -INFINITY));
-    expect_vocab_weight[0][1] = 0.1f;
-    expect_vocab_weight[0][5] = 0.3f;
-    expect_vocab_weight[1][2] = 0.1f;
-    expect_vocab_weight[1][3] = 0.2f;
-    expect_vocab_weight[1][4] = 0.3f;
-    expect_vocab_weight[2][1] = 0.1f;
-    expect_vocab_weight[2][3] = 0.2f;
-    expect_vocab_weight[2][5] = 0.3f;
-    expect_vocab_weight[3][1] = 0.1f;
-    expect_vocab_weight[3][3] = 0.2f;
+    std::vector<int>   expect_batch_idx = {0, 0, 1, 1, 1, 2, 2, 2, 3, 3};
+    std::vector<int>   expect_token_idx = {1, 5, 2, 3, 4, 1, 3, 5, 1, 3};
+    std::vector<float> expect_weight    = {0.1f, 0.3f, 0.1f, 0.2f, 0.3f, 0.1f, 0.2f, 0.3f, 0.1f, 0.2f};
 
-    auto vocab_weight_hosts = getBufferValues<float>(*vocab_weight);
-    for (size_t i = 0; i < batch_size; i++) {
-        for (size_t j = 0; j < vocab_size; j++) {
-            ASSERT_TRUE(vocab_weight_hosts[i * vocab_size + j] == expect_vocab_weight[i][j]);
-        }
+    auto h_batch_indices = getBufferValues<int>(*vocab_weight[0]);
+    auto h_token_indices = getBufferValues<int>(*vocab_weight[1]);
+    auto h_weights       = getBufferValues<float>(*vocab_weight[2]);
+    for (size_t i = 0; i < h_batch_indices.size(); i++) {
+        EXPECT_EQ(expect_batch_idx[i], h_batch_indices[i]);
+        EXPECT_EQ(expect_token_idx[i], h_token_indices[i]);
+        EXPECT_EQ(expect_weight[i], h_weights[i]);
     }
 }
 
