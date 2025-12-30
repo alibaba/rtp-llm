@@ -2,7 +2,10 @@ from typing import Any, Dict, Optional
 
 import torch
 
-from rtp_llm.models_py.distributed.deepep_initializer import DeepEpInitializer
+from rtp_llm.models_py.distributed.deepep_wrapper import (
+    DeepEPWrapper,
+    DeepepWrapperConfig,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -33,7 +36,7 @@ class DeepepNormalRouter(FusedMoeDataRouter):
         resolver = MoeConfigResolver()
         checker.check(resolver.is_ep_enabled(config))
         checker.check(not resolver.use_low_latency(config))
-        checker.check(DeepEpInitializer.supported())
+        checker.check(DeepEPWrapper.supported())
 
     def __init__(
         self,
@@ -51,7 +54,8 @@ class DeepepNormalRouter(FusedMoeDataRouter):
         self.expert_num = config.expert_num
         self.expert_num_per_rank = self.expert_num // self.ep_size
         self.top_k = config.moe_topk_group
-        self.deepep_buffer_wrapper = DeepEpInitializer.get_deepep_wrapper(self.config)
+        deepep_config = DeepepWrapperConfig.from_config_adapter(self.config)
+        self.deepep_buffer_wrapper = DeepEPWrapper.get_instance(deepep_config)
         self.use_fp8 = True
         self.async_mode = False
         self.expert_alignment = 128

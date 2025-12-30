@@ -20,9 +20,8 @@ from rtp_llm.models_py.distributed.collective_torch import (
 from rtp_llm.models_py.distributed.deepep_wrapper import (
     DeepEPBuffer,
     DeepEPConfig,
-    destroy_deepep_wrapper,
-    get_deepep_wrapper,
-    init_deepep_wrapper,
+    DeepEPWrapper,
+    DeepepWrapperConfig,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
@@ -52,6 +51,22 @@ def inplace_unique(x: torch.Tensor, num_slots: int):
     x[:, :].fill_(-1)
     valid_len = min(num_slots, x.size(1))
     x[:, :valid_len] = sorted_bin_idx[:, :valid_len]
+
+
+def calc_ll_num_max_token_per_rank(max_generate_batch_size: int, tp_size: int) -> int:
+    """Calculate ll_num_max_token_per_rank with alignment to 8.
+
+    Args:
+        max_generate_batch_size: Maximum generation batch size
+        tp_size: Tensor parallelism size
+
+    Returns:
+        ll_num_max_token_per_rank aligned to 8
+    """
+    ll_num_max_token_per_rank = (max_generate_batch_size + tp_size - 1) // tp_size
+    # Align to 8
+    ll_num_max_token_per_rank = (ll_num_max_token_per_rank + 7) // 8 * 8
+    return ll_num_max_token_per_rank
 
 
 class DeepEPTest(TestCase):
@@ -1892,12 +1907,10 @@ class DeepEPTest(TestCase):
             backend="nccl",
             timeout=60,
         )
-        init_deepep_wrapper(
-            group=dist.group.WORLD,
-            config_adapter=config_adapter,
+        deepep_config = DeepepWrapperConfig.from_config_adapter(config_adapter)
+        deep_ep_wrapper = DeepEPWrapper.get_instance(
+            deepep_config, group=dist.group.WORLD
         )
-
-        deep_ep_wrapper = get_deepep_wrapper()
         buffer = deep_ep_wrapper.buffer
         # run test
         DeepEPTest._test_intranode_main(
@@ -1912,7 +1925,7 @@ class DeepEPTest(TestCase):
             buffer,
             dist.group.WORLD,
         )
-        destroy_deepep_wrapper()
+        DeepEPWrapper.reset()
         destroy_distributed_environment()
 
     @staticmethod
@@ -1942,12 +1955,16 @@ class DeepEPTest(TestCase):
             backend="nccl",
             timeout=60,
         )
-        init_deepep_wrapper(
-            group=dist.group.WORLD,
-            config_adapter=config_adapter,
+        # Calculate ll_num_max_token_per_rank
+        ll_num_max_token_per_rank = (
+            args["max_generate_batch_size"] + config_adapter.tp_size - 1
+        ) // config_adapter.tp_size
+        deepep_config = DeepepWrapperConfig.from_config_adapter(
+            config_adapter, ll_num_max_token_per_rank
         )
-
-        deep_ep_wrapper = get_deepep_wrapper()
+        deep_ep_wrapper = DeepEPWrapper.get_instance(
+            deepep_config, group=dist.group.WORLD
+        )
         buffer = deep_ep_wrapper.buffer
         # run test
         DeepEPTest._test_low_latency_main(
@@ -1962,7 +1979,7 @@ class DeepEPTest(TestCase):
             buffer,
             seed=1,
         )
-        destroy_deepep_wrapper()
+        DeepEPWrapper.reset()
         destroy_distributed_environment()
 
     @staticmethod
@@ -1992,12 +2009,19 @@ class DeepEPTest(TestCase):
             backend="nccl",
             timeout=60,
         )
-        init_deepep_wrapper(
-            group=dist.group.WORLD,
-            config_adapter=config_adapter,
+        # Calculate ll_num_max_token_per_rank for M2N mode
+        ffn_disaggregate_config = (
+            config_adapter.parallelism_config.ffn_disaggregate_config
         )
-
-        deep_ep_wrapper = get_deepep_wrapper()
+        ll_num_max_token_per_rank = calc_ll_num_max_token_per_rank(
+            args["max_generate_batch_size"], ffn_disaggregate_config.attention_tp_size
+        )
+        deepep_config = DeepepWrapperConfig.from_config_adapter(
+            config_adapter, ll_num_max_token_per_rank
+        )
+        deep_ep_wrapper = DeepEPWrapper.get_instance(
+            deepep_config, group=dist.group.WORLD
+        )
         buffer = deep_ep_wrapper.buffer
         # run test
         ffn_disaggregate_config = (
@@ -2027,7 +2051,7 @@ class DeepEPTest(TestCase):
             buffer,
             seed=1,
         )
-        destroy_deepep_wrapper()
+        DeepEPWrapper.reset()
         destroy_distributed_environment()
 
     @staticmethod
@@ -2052,12 +2076,10 @@ class DeepEPTest(TestCase):
             backend="nccl",
             timeout=60,
         )
-        init_deepep_wrapper(
-            group=dist.group.WORLD,
-            config_adapter=config_adapter,
+        deepep_config = DeepepWrapperConfig.from_config_adapter(config_adapter)
+        deep_ep_wrapper = DeepEPWrapper.get_instance(
+            deepep_config, group=dist.group.WORLD
         )
-
-        deep_ep_wrapper = get_deepep_wrapper()
         buffer = deep_ep_wrapper.buffer
         # run test
         DeepEPTest._test_intranode_expert_alignment_main(
@@ -2071,7 +2093,7 @@ class DeepEPTest(TestCase):
             group=dist.group.WORLD,
             seed=777,
         )
-        destroy_deepep_wrapper()
+        DeepEPWrapper.reset()
         destroy_distributed_environment()
 
     @staticmethod
@@ -2102,11 +2124,16 @@ class DeepEPTest(TestCase):
             backend="nccl",
             timeout=60,
         )
-        init_deepep_wrapper(
-            group=dist.group.WORLD,
-            config_adapter=config_adapter,
+        # Calculate ll_num_max_token_per_rank
+        ll_num_max_token_per_rank = calc_ll_num_max_token_per_rank(
+            args["max_generate_batch_size"], config_adapter.tp_size
         )
-        deep_ep_wrapper = get_deepep_wrapper()
+        deepep_config = DeepepWrapperConfig.from_config_adapter(
+            config_adapter, ll_num_max_token_per_rank
+        )
+        deep_ep_wrapper = DeepEPWrapper.get_instance(
+            deepep_config, group=dist.group.WORLD
+        )
         buffer = deep_ep_wrapper.buffer
         # run test
         DeepEPTest._test_low_latency_per_token_quant_main(
@@ -2122,7 +2149,7 @@ class DeepEPTest(TestCase):
             use_logfmt=False,
             seed=1,
         )
-        destroy_deepep_wrapper()
+        DeepEPWrapper.reset()
         destroy_distributed_environment()
 
     def test_deepep_normal(self):
