@@ -757,6 +757,7 @@ class moe_args:
     top_k: int = None
     padding: int = None
     n_groups : int = None
+    top_k_groups : int = None
     permute_info: torch.Tensor = None
     use_routing_scales_on_input: bool = None
     gated_act_type: GatedActType = None
