@@ -1302,7 +1302,7 @@ def test_moe(
         "padding": padding,
         "expert_logits": scores,
         "permute_info": permute_info,
-        "using_routing_scales_on_input": routing_method_type == RoutingMethodType.Llama4,
+        "use_routing_scales_on_input": routing_method_type == RoutingMethodType.Llama4,
         "gated_act_type": gated_act_type,
         "hidden_states_orig": hidden_states,
     }
