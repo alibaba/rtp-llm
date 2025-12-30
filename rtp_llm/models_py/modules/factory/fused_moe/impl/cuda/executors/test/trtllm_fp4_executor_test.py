@@ -928,7 +928,7 @@ def test_moe(
 
 
 if __name__ == "__main__":
-    for cls in [FP4Moe, FP4MoeExecutor]:
+    for cls in [FP4MoeExecutor]:
         test_moe(
             num_tokens=3072,
             hidden_size=1024,
