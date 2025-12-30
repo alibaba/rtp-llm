@@ -45,32 +45,50 @@ void BaseLogitsProcessor::maskLogits(const rtp_llm::BufferPtr& new_tokens_logits
     device_->maskLogits(*new_tokens_logits, *vocab_mask);
 }
 
-rtp_llm::BufferPtr BaseLogitsProcessor::generateVocabWeight(
-    size_t                                                batch_size,
-    size_t                                                vocab_size,
-    const std::vector<std::unordered_map<size_t, float>>& batch_candidate_token_weights) {
+std::vector<rtp_llm::BufferPtr> BaseLogitsProcessor::generateVocabWeight(
+    size_t                                                    batch_size,
+    size_t                                                    vocab_size,
+    const std::vector<std::vector<std::pair<size_t, float>>>& batch_candidate_token_weights) {
     RTP_LLM_CHECK(batch_candidate_token_weights.size() == batch_size);
-    std::vector<float> vocab_weight_cpu(batch_size * vocab_size, -INFINITY);
+    std::vector<rtp_llm::BufferPtr> result;
 
+    int total_num = 0;
     for (size_t batch_idx = 0; batch_idx < batch_size; ++batch_idx) {
-        const std::unordered_map<size_t, float>& candidate_token_weight = batch_candidate_token_weights[batch_idx];
-        for (auto it = candidate_token_weight.begin(); it != candidate_token_weight.end(); ++it) {
-            vocab_weight_cpu[batch_idx * vocab_size + it->first] = it->second;
+        total_num += batch_candidate_token_weights[batch_idx].size();
+    }
+    std::vector<int>   h_batch_indices(total_num);  // batch id
+    std::vector<int>   h_vocab_indices(total_num);  // vocab index
+    std::vector<float> h_vocab_weight(total_num);   // weight value
+
+    int offset = 0;
+    for (size_t batch_idx = 0; batch_idx < batch_size; ++batch_idx) {
+        const std::vector<std::pair<size_t, float>>& candidate_token_weight = batch_candidate_token_weights[batch_idx];
+        for (const auto& token_weight : candidate_token_weight) {
+            h_batch_indices[offset] = batch_idx;
+            h_vocab_indices[offset] = token_weight.first;
+            h_vocab_weight[offset]  = token_weight.second;
+            offset++;
         }
     }
+    BufferPtr d_batch_indices = vector2Buffer(h_batch_indices);
+    BufferPtr d_vocab_indices = vector2Buffer(h_vocab_indices);
+    BufferPtr d_vocab_weight  = vector2Buffer(h_vocab_weight);
 
-    BufferPtr vocab_weight_buffer_cpu = vector2Buffer(vocab_weight_cpu);
-    auto      buffer_reshape          = vocab_weight_buffer_cpu->reshape({batch_size, vocab_size});
-    return device_->clone({buffer_reshape, rtp_llm::AllocationType::DEVICE});
+    result.push_back(device_->clone({*d_batch_indices, rtp_llm::AllocationType::DEVICE}));
+    result.push_back(device_->clone({*d_vocab_indices, rtp_llm::AllocationType::DEVICE}));
+    result.push_back(device_->clone({*d_vocab_weight, rtp_llm::AllocationType::DEVICE}));
+    return result;
 }
 
 void BaseLogitsProcessor::weightLogits(const rtp_llm::BufferPtr& new_tokens_logits,
+                                       const rtp_llm::BufferPtr& batch_idx,
+                                       const rtp_llm::BufferPtr& vocab_idx,
                                        const rtp_llm::BufferPtr& vocab_weight) {
     RTP_LLM_CHECK(new_tokens_logits->shape().size() == 2);
-    RTP_LLM_CHECK(vocab_weight->shape().size() == 2);
-    RTP_LLM_CHECK(new_tokens_logits->shape()[0] == vocab_weight->shape()[0]);
-    RTP_LLM_CHECK(new_tokens_logits->shape()[1] == vocab_weight->shape()[1]);
-    device_->weightLogits(*new_tokens_logits, *vocab_weight);
+    RTP_LLM_CHECK(batch_idx->shape().size() == 1);
+    RTP_LLM_CHECK(vocab_idx->shape().size() == batch_idx->shape().size());
+    RTP_LLM_CHECK(vocab_weight->shape().size() == batch_idx->shape().size());
+    device_->weightLogits(*new_tokens_logits, *batch_idx, *vocab_idx, *vocab_weight);
 }
 
 }  // namespace rtp_llm

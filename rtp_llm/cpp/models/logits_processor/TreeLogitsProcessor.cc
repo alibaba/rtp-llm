@@ -13,10 +13,10 @@ TreeLogitsProcessor::TreeLogitsProcessor(rtp_llm::DeviceBase* device, std::vecto
 void TreeLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) {
     auto batch_size = size();
     RTP_LLM_CHECK(batch_size == finish_idx - start_idx);
-    bool                                           need_process        = false;
-    bool                                           need_weight_process = false;
-    std::vector<std::vector<size_t>>               batch_candidate_token_ids(batch_size);
-    std::vector<std::unordered_map<size_t, float>> batch_candidate_token_weights(batch_size);
+    bool                                               need_process        = false;
+    bool                                               need_weight_process = false;
+    std::vector<std::vector<size_t>>                   batch_candidate_token_ids(batch_size);
+    std::vector<std::vector<std::pair<size_t, float>>> batch_candidate_token_weights(batch_size);
     for (size_t i = 0; i < size(); ++i) {
         auto& info = tree_infos_[i];
         if (!info.in_tree_mode) {
@@ -29,9 +29,8 @@ void TreeLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx,
         }
 
         if (info.dfa_ptr->hasWeightDict()) {
-            const auto& candidate_token_weights = info.dfa_ptr->getCandidateTokenWeights(candidate_token_ids);
-            batch_candidate_token_weights[i]    = candidate_token_weights;
-            if (candidate_token_weights.size() > 0) {
+            info.dfa_ptr->getCandidateTokenWeights(candidate_token_ids, batch_candidate_token_weights[i]);
+            if (batch_candidate_token_weights[i].size() > 0) {
                 need_weight_process = true;
             }
         }
@@ -41,14 +40,15 @@ void TreeLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx,
         return;
     }
 
-    auto   batch_logits = inputs.logits->slice(start_idx, batch_size);
-    size_t vocab_size   = batch_logits->shape()[1];
+    auto   batch_logits     = inputs.logits->slice(start_idx, batch_size);
+    size_t vocab_size       = batch_logits->shape()[1];
+    auto   batch_vocab_mask = generateVocabMask(batch_size, vocab_size, batch_candidate_token_ids);
+    maskLogits(batch_logits, batch_vocab_mask);
     if (need_weight_process) {
         auto batch_vocab_weight = generateVocabWeight(batch_size, vocab_size, batch_candidate_token_weights);
-        weightLogits(batch_logits, batch_vocab_weight);
-    } else {
-        auto batch_vocab_mask = generateVocabMask(batch_size, vocab_size, batch_candidate_token_ids);
-        maskLogits(batch_logits, batch_vocab_mask);
+        if (batch_vocab_weight.size() == 3) {
+            weightLogits(batch_logits, batch_vocab_weight[0], batch_vocab_weight[1], batch_vocab_weight[2]);
+        }
     }
 }
 
