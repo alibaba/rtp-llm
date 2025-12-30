@@ -654,25 +654,25 @@ class FP4Moe(Moe):
 
 class FP4MoeExecutor(FP4Moe):
     def prepare_static_weights_for_kernel(self, args):
-        gemm1_scales_linear_fp4_bytes = args.gemm1_scales
-        gemm2_scales_linear_fp4_bytes = args.gemm2_scales
+        gemm1_scales_linear_fp4_bytes = args.gemm1_scales_linear
+        gemm2_scales_linear_fp4_bytes = args.gemm2_scales_linear
         # Convert quantized weights to proper formats
         gemm1_weights_fp4 = args.gemm1_weights.view(torch.float8_e4m3fn).reshape(
-            num_experts, 2 * intermediate_size, hidden_size // 2
+            args.num_experts, 2 * args.intermediate_size, args.hidden_size // 2
         )  # packed fp4
         gemm1_scales_linear_fp4 = gemm1_scales_linear_fp4_bytes.view(
             torch.float8_e4m3fn
         ).reshape(
-            num_experts, 2 * intermediate_size, hidden_size // self.sf_vec_size
+            args.num_experts, 2 * args.intermediate_size, args.hidden_size // self.sf_vec_size
         )  # fp8 scaling factors
 
         gemm2_weights_fp4 = args.gemm2_weights.view(torch.float8_e4m3fn).reshape(
-            num_experts, hidden_size, intermediate_size // 2
+            args.num_experts, args.hidden_size, args.intermediate_size // 2
         )  # packed fp4
         gemm2_scales_linear_fp4 = gemm2_scales_linear_fp4_bytes.view(
             torch.float8_e4m3fn
         ).reshape(
-            num_experts, hidden_size, intermediate_size // self.sf_vec_size
+            args.num_experts, args.hidden_size, args.intermediate_size // self.sf_vec_size
         )  # fp8 scaling factors
         args.gemm1_weights_fp4_shuffled = gemm1_weights_fp4
         args.gemm1_scales_fp4_shuffled = gemm1_scales_linear_fp4
