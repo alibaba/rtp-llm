@@ -170,12 +170,17 @@ TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
     const auto& mtp_layout_cfg = pool_cfg.memory_layouts[1];
     auto        addr_mtp1      = block_pool_->convertIndexToAddr(global_mtp1, block_id);
     ASSERT_NE(addr_mtp1.kv_addr, nullptr);
+    ASSERT_NE(addr_mtp1.kv_scale_addr, nullptr);
     auto parts = block_pool_->convertIndexToBuffer(global_mtp1, block_id, /*partition_count=*/2, /*partition_id=*/1);
-    ASSERT_EQ(parts.size(), 2u);
+    ASSERT_EQ(parts.size(), 4u);
     ASSERT_NE(parts[0], nullptr);
     ASSERT_NE(parts[1], nullptr);
+    ASSERT_NE(parts[2], nullptr);
+    ASSERT_NE(parts[3], nullptr);
     EXPECT_EQ(parts[0]->sizeBytes(), mtp_layout_cfg.k_block_stride_bytes / 2);
     EXPECT_EQ(parts[1]->sizeBytes(), mtp_layout_cfg.v_block_stride_bytes / 2);
+    EXPECT_EQ(parts[2]->sizeBytes(), mtp_layout_cfg.k_scale_stride_bytes / 2);
+    EXPECT_EQ(parts[3]->sizeBytes(), mtp_layout_cfg.v_scale_stride_bytes / 2);
 
     const size_t k_bytes_per_head = mtp_layout_cfg.k_block_stride_bytes / 2;
     const size_t v_bytes_per_head = mtp_layout_cfg.v_block_stride_bytes / 2;
@@ -183,6 +188,14 @@ TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
     const size_t v_off            = mtp_layout_cfg.k_block_stride_bytes + v_bytes_per_head;
     EXPECT_EQ(reinterpret_cast<uintptr_t>(parts[0]->data()) - reinterpret_cast<uintptr_t>(addr_mtp1.kv_addr), k_off);
     EXPECT_EQ(reinterpret_cast<uintptr_t>(parts[1]->data()) - reinterpret_cast<uintptr_t>(addr_mtp1.kv_addr), v_off);
+
+    const size_t sc_bytes_per_head = mtp_layout_cfg.k_scale_stride_bytes / 2;
+    const size_t sc_k_off          = sc_bytes_per_head;
+    const size_t sc_v_off          = mtp_layout_cfg.k_scale_stride_bytes + sc_bytes_per_head;
+    EXPECT_EQ(reinterpret_cast<uintptr_t>(parts[2]->data()) - reinterpret_cast<uintptr_t>(addr_mtp1.kv_scale_addr),
+              sc_k_off);
+    EXPECT_EQ(reinterpret_cast<uintptr_t>(parts[3]->data()) - reinterpret_cast<uintptr_t>(addr_mtp1.kv_scale_addr),
+              sc_v_off);
 }
 
 // Allocation Test

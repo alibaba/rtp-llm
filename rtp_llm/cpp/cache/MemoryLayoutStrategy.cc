@@ -4,6 +4,74 @@
 
 namespace rtp_llm {
 
+namespace {
+
+// for p2p connector when TP settings of prefill & decode are different.
+struct KVPartition {
+    torch::Tensor k_partition;
+    torch::Tensor v_partition;
+};
+
+inline KVPartition splitKVPartition(const torch::Tensor& tensor,
+                                    size_t               k_block_stride_bytes,
+                                    size_t               v_block_stride_bytes,
+                                    int                  heads,
+                                    int                  partition_count,
+                                    int                  partition_id,
+                                    const char*          debug_name) {
+    RTP_LLM_CHECK_WITH_INFO(partition_count > 0, "partition_count must be > 0");
+    RTP_LLM_CHECK_WITH_INFO(partition_id >= 0 && partition_id < partition_count,
+                            "partition_id out of range: %d / %d",
+                            partition_id,
+                            partition_count);
+    RTP_LLM_CHECK_WITH_INFO(heads > 0, "heads must be > 0, got=%d (%s)", heads, debug_name);
+    RTP_LLM_CHECK_WITH_INFO(tensor.defined(), "tensor is not defined (%s)", debug_name);
+    RTP_LLM_CHECK_WITH_INFO(tensor.dim() == 1, "tensor must be 1-D, got dim=%ld (%s)", tensor.dim(), debug_name);
+
+    const size_t full_bytes = static_cast<size_t>(tensor.numel());
+    RTP_LLM_CHECK_WITH_INFO(k_block_stride_bytes + v_block_stride_bytes == full_bytes,
+                            "block bytes mismatch (%s): full=%zu k_partition=%zu v_partition=%zu",
+                            debug_name,
+                            full_bytes,
+                            k_block_stride_bytes,
+                            v_block_stride_bytes);
+    RTP_LLM_CHECK_WITH_INFO(k_block_stride_bytes % static_cast<size_t>(heads) == 0,
+                            "k_block_stride_bytes must be divisible by heads (%s): k_partition=%zu heads=%d",
+                            debug_name,
+                            k_block_stride_bytes,
+                            heads);
+    RTP_LLM_CHECK_WITH_INFO(v_block_stride_bytes % static_cast<size_t>(heads) == 0,
+                            "v_block_stride_bytes must be divisible by heads (%s): v_partition=%zu heads=%d",
+                            debug_name,
+                            v_block_stride_bytes,
+                            heads);
+    RTP_LLM_CHECK_WITH_INFO(heads % partition_count == 0,
+                            "heads must be divisible by partition_count (%s): heads=%d partition_count=%d",
+                            debug_name,
+                            heads,
+                            partition_count);
+
+    const size_t k_partition_bytes_per_head = k_block_stride_bytes / static_cast<size_t>(heads);
+    const size_t v_partition_bytes_per_head = v_block_stride_bytes / static_cast<size_t>(heads);
+
+    // Compute [head_begin, head_cnt] for this partition_id (equal split).
+    const int head_cnt   = heads / partition_count;
+    const int head_begin = partition_id * head_cnt;
+
+    const size_t k_partition_off = static_cast<size_t>(head_begin) * k_partition_bytes_per_head;
+    const size_t v_partition_off = k_block_stride_bytes + static_cast<size_t>(head_begin) * v_partition_bytes_per_head;
+    const size_t k_partition_sz  = static_cast<size_t>(head_cnt) * k_partition_bytes_per_head;
+    const size_t v_partition_sz  = static_cast<size_t>(head_cnt) * v_partition_bytes_per_head;
+
+    auto k_partition_part =
+        tensor.narrow(0, static_cast<int64_t>(k_partition_off), static_cast<int64_t>(k_partition_sz));
+    auto v_partition_part =
+        tensor.narrow(0, static_cast<int64_t>(v_partition_off), static_cast<int64_t>(v_partition_sz));
+    return {k_partition_part, v_partition_part};
+}
+
+}  // namespace
+
 // LayerFirstLayoutStrategy
 bool LayerFirstLayoutStrategy::init(const MemoryLayoutConfig& config,
                                     torch::Tensor&            kv_cache_buffer,
@@ -60,7 +128,8 @@ bool LayerFirstLayoutStrategy::init(const MemoryLayoutConfig& config,
 
     kv_cache_buffer_.kv_blocks = std::make_shared<rtp_llm::Buffer>(memory_type, data_type_, kv_shape, cache_base_ptr_);
 
-    if (config_.enable_kv_scale && config_.kv_scale_pool_size_bytes > 0 && config_.kv_scale_block_bytes > 0) {
+    if (config_.enable_kv_scale && config_.kv_scale_pool_size_bytes > 0 && config_.k_scale_stride_bytes > 0
+        && config_.v_scale_stride_bytes > 0) {
         RTP_LLM_CHECK_WITH_INFO(kv_scale_buffer.defined() && kv_scale_buffer.numel() > 0,
                                 "kv_scale_buffer must be provided when enable_kv_scale is true");
         RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(kv_scale_buffer.numel()) == config_.kv_scale_pool_size_bytes,
@@ -157,45 +226,33 @@ std::vector<BufferPtr> LayerFirstLayoutStrategy::convertIndexToBuffer(int layer_
 
     torch::Tensor tensor = layer_kv_tensors_[layer_id][block_id];
 
+    if (config_.is_mla) {
+        if (config_.enable_kv_scale) {
+            torch::Tensor scale_tensor = layer_kv_scale_tensors_[layer_id][block_id];
+            return {torchTensor2Buffer(tensor), torchTensor2Buffer(scale_tensor)};
+        }
+        return {torchTensor2Buffer(tensor)};
+    }
+
     const size_t k_total_bytes = static_cast<size_t>(config_.k_block_stride_bytes);
     const size_t v_total_bytes = static_cast<size_t>(config_.v_block_stride_bytes);
     const int    heads         = static_cast<int>(config_.local_head_num_kv);
 
-    RTP_LLM_CHECK_WITH_INFO(partition_count > 0, "partition_count must be > 0");
-    RTP_LLM_CHECK_WITH_INFO(partition_id >= 0 && partition_id < partition_count,
-                            "partition_id out of range: %d / %d",
-                            partition_id,
-                            partition_count);
-    RTP_LLM_CHECK_WITH_INFO(tensor.defined(), "tensor is not defined");
-    RTP_LLM_CHECK_WITH_INFO(tensor.dim() == 1, "tensor must be 1-D, got dim=%ld", tensor.dim());
+    auto kv_parts =
+        splitKVPartition(tensor, k_total_bytes, v_total_bytes, heads, partition_count, partition_id, "kv_cache");
+    std::vector<BufferPtr> out = {torchTensor2Buffer(kv_parts.k_partition), torchTensor2Buffer(kv_parts.v_partition)};
 
-    const size_t full_bytes = static_cast<size_t>(tensor.numel());
-    RTP_LLM_CHECK_WITH_INFO(k_total_bytes + v_total_bytes == full_bytes,
-                            "block bytes mismatch: full=%zu k=%zu v=%zu",
-                            full_bytes,
-                            k_total_bytes,
-                            v_total_bytes);
+    if (config_.enable_kv_scale) {
+        torch::Tensor scale_tensor  = layer_kv_scale_tensors_[layer_id][block_id];
+        const size_t  k_scale_bytes = static_cast<size_t>(config_.k_scale_stride_bytes);
+        const size_t  v_scale_bytes = static_cast<size_t>(config_.v_scale_stride_bytes);
+        auto          sc_parts      = splitKVPartition(
+            scale_tensor, k_scale_bytes, v_scale_bytes, heads, partition_count, partition_id, "kv_cache_scale");
+        out.push_back(torchTensor2Buffer(sc_parts.k_partition));
+        out.push_back(torchTensor2Buffer(sc_parts.v_partition));
+    }
 
-    const size_t k_bytes_per_head = k_total_bytes / static_cast<size_t>(heads);
-    const size_t v_bytes_per_head = v_total_bytes / static_cast<size_t>(heads);
-
-    RTP_LLM_CHECK_WITH_INFO(heads % partition_count == 0,
-                            "heads must be divisible by partition_count, heads=%d partition_count=%d",
-                            heads,
-                            partition_count);
-
-    // Compute [head_begin, head_cnt] for this partition_id (equal split).
-    const int head_cnt   = heads / partition_count;
-    const int head_begin = partition_id * head_cnt;
-
-    const size_t k_off = static_cast<size_t>(head_begin) * k_bytes_per_head;
-    const size_t v_off = k_total_bytes + static_cast<size_t>(head_begin) * v_bytes_per_head;
-    const size_t k_sz  = static_cast<size_t>(head_cnt) * k_bytes_per_head;
-    const size_t v_sz  = static_cast<size_t>(head_cnt) * v_bytes_per_head;
-
-    auto k_part = tensor.narrow(0, static_cast<int64_t>(k_off), static_cast<int64_t>(k_sz));
-    auto v_part = tensor.narrow(0, static_cast<int64_t>(v_off), static_cast<int64_t>(v_sz));
-    return {torchTensor2Buffer(k_part), torchTensor2Buffer(v_part)};
+    return out;
 }
 
 void* LayerFirstLayoutStrategy::getKCacheAddr(int layer_id, int block_id) const {
