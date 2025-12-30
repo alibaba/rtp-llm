@@ -9,7 +9,7 @@ def init_load_group_args(parser, load_config, model_args):
     load_group.add_argument(
         "--load_method",
         env_name="LOAD_METHOD",
-        bind_to=(load_config, 'load_method'),
+        bind_to=(load_config, "load_method"),
         type=str,
         default="auto",
         help="模型权重加载方法",

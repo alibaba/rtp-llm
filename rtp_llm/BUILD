@@ -518,7 +518,6 @@ py_package(
     ] + jit_deps(),
     packages = [
         "rtp_llm",
-        "fla",
     ] + select({
         "@//:using_cuda12": ["deep_gemm"],
         "//conditions:default": [],
@@ -687,6 +686,7 @@ py_library(
         ":rtp_llm_lib",
         "//rtp_llm/test/utils:bench_util",
         "//rtp_llm/test/utils:numeric_util",
+        "//rtp_llm/test/utils:cuda_graph_util",
         "//rtp_llm/test/utils:port_util",
         "//rtp_llm/test/utils:device_resource",
         "//rtp_llm/test/utils:stream_util",

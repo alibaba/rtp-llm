@@ -24,13 +24,13 @@ namespace rtp_llm {
 struct KVBlockArray;
 
 struct TrtV2FmhaRunnerConfig {
-    size_t            head_num;
-    size_t            kv_head_num;
-    size_t            size_per_head;
-    size_t            tokens_per_block;
-    bool              is_causal;
-    float             q_scaling;
-    float             softmax_extra_scale;
+    size_t head_num;
+    size_t kv_head_num;
+    size_t size_per_head;
+    size_t tokens_per_block;
+    bool   is_causal;
+    float  q_scaling;
+    float  softmax_extra_scale;
 
     // 从 AttentionConfigs 创建配置
     static TrtV2FmhaRunnerConfig fromAttentionConfigs(const AttentionConfigs& configs) {
@@ -119,7 +119,6 @@ private:
 };
 
 std::shared_ptr<TRTAttn> prepareTrtAttnParams(const AttentionConfigs& configs,
-                                              int                     kv_block_offset,
                                               const BufferPtr&        kv_cache_block_id,
                                               int                     batch_size,
                                               bool                    use_fp8_fmha,

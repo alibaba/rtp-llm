@@ -1,19 +1,19 @@
-
 from typing import Any, Dict, Optional
 
 import torch
 
-from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
+    configure_deep_gemm_num_sms,
     is_deep_gemm_e8m0_used,
     m_grouped_bf16_gemm_nt_masked,
     m_grouped_fp8_gemm_nt_masked,
 )
-from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
-    requant_weight_ue8m0,
-    sgl_per_token_group_quant_fp8,
+from rtp_llm.models_py.kernels.cuda.fp8_kernel import requant_weight_ue8m0
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
+    CombineForwardPayload,
     ExpertForwardPayload,
     FusedMoeExpertExecutor,
 )
@@ -22,10 +22,11 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.type import ExecutorType
 from rtp_llm.models_py.triton_kernels.common.activation import (
-    silu_and_mul_masked_post_quant_fwd,
-    silu_mul_bf16_deep_gemm_masked,
-    silu_mul_fp8_quant_deep_gemm_masked,
+    silu_mul_masked_bf16_no_post_quant_fwd,
+    silu_mul_masked_fp8_post_quant_fwd,
 )
+from rtp_llm.models_py.utils.arch import get_num_device_sms
+from rtp_llm.models_py.utils.memory import dispose_tensor
 from rtp_llm.utils.model_weight import W
 
 
@@ -67,45 +68,382 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
         super().__init__(quant_config=quant_config)
         self._config = config
         self._weights = weights
-        # init weights
+        # Initialize w1 and w2
         self._w1 = self._weights.get(W.moe_w1, None)
         self._w2 = self._weights.get(W.moe_w2, None)
+        assert self._w1 is not None and self._w2 is not None
+        # Check w1 and w2 shape
+        self._E, self._N, self._K = self._w1.size()
+        assert self._N % 2 == 0
+        assert self._w2.size(0) == self._E
+        assert self._w2.size(1) == self._K
+        assert self._w2.size(2) == self._N // 2
+        # Initialize w1 and w2 scale
         self._w1_scale = self._weights.get(W.moe_s1, None)
         self._w2_scale = self._weights.get(W.moe_s2, None)
-        assert self._w1 is not None and self._w2 is not None
-        # check fp8 block quantization
+        # Check quantization
+        self._use_fp8 = True
         if self.quant_config.is_quantized:
+            assert self._w1_scale is not None and self._w2_scale is not None
             if (
                 self.quant_config.quant_dtype == torch.float8_e4m3fn
                 and self.quant_config.is_block_quantized
+                and self.quant_config.block_shape == self.DEEPGEMM_BLOCK_SHAPE
             ):
-                if self.quant_config.block_shape != self.DEEPGEMM_BLOCK_SHAPE:
-                    raise NotImplementedError(
-                        "DeepGemmMaskedExecutor only supports fp8 block quantization with block shape 128x128"
-                    )
+                # Confirm to use fp8 block quantization
                 self._use_fp8 = True
-                assert self._w1_scale is not None and self._w2_scale is not None
+                self._num_packed_scales = 1
+                self._scale_dtype = torch.float32
+                # Whether use fp8 block quantization with UE8M0 scale
+                if is_deep_gemm_e8m0_used():
+                    self._w1, self._w1_scale = requant_weight_ue8m0(
+                        self._w1, self._w1_scale
+                    )
+                    self._w2, self._w2_scale = requant_weight_ue8m0(
+                        self._w2, self._w2_scale
+                    )
+                    self._num_packed_scales = 1
+                    self._scale_dtype = torch.float32
+                # Check w1_scale and w2_scale
+                assert (
+                    self._w1_scale.dtype == self._scale_dtype
+                    and self._w2_scale.dtype == self._scale_dtype
+                )
+                assert (
+                    self._w1_scale.size(0) == self._E
+                    and self._w2_scale.size(0) == self._E
+                )
+                assert (
+                    self._w1_scale.size(1)
+                    == self._N
+                    // self.DEEPGEMM_BLOCK_SHAPE[0]
+                    // self._num_packed_scales
+                )
+                assert (
+                    self._w1_scale.size(2)
+                    == self._K
+                    // self.DEEPGEMM_BLOCK_SHAPE[1]
+                    // self._num_packed_scales
+                )
+                assert (
+                    self._w2_scale.size(1)
+                    == self._K
+                    // self.DEEPGEMM_BLOCK_SHAPE[1]
+                    // self._num_packed_scales
+                )
+                assert (
+                    self._w2_scale.size(2)
+                    == self._N
+                    // 2
+                    // self.DEEPGEMM_BLOCK_SHAPE[0]
+                    // self._num_packed_scales
+                )
             else:
                 raise NotImplementedError(
-                    "DeepGemmMaskedExecutor only supports fp8 block quantization or bf16"
+                    "DeepGemmMaskedExecutor only supports fp8 block quantization with block shape 128x128"
                 )
         else:
+            # Confirm to use bf16
             self._use_fp8 = False
-
-        if self._use_fp8 and is_deep_gemm_e8m0_used():
-            w1_tmp, self._w1_scale = requant_weight_ue8m0(self._w1, self._w1_scale)
-            self._w1.copy_(w1_tmp)
-            self._weights[W.moe_s1] = self._w1_scale
-            del w1_tmp
-            w2_tmp, self._w2_scale = requant_weight_ue8m0(self._w2, self._w2_scale)
-            self._w2.copy_(w2_tmp)
-            self._weights[W.moe_s2] = self._w2_scale
-            del w2_tmp
+            assert self._w1_scale is None and self._w2_scale is None
+        # Initialize number of SMs for DeepGEMM
+        self._num_gemm_sms = get_num_device_sms()
 
     @property
     def local_num_experts(self) -> int:
         assert self._w1 is not None
         return self._w1.size(0)
+
+    def _forward_masked_grouped_ffn(
+        self,
+        start_idx: int,
+        end_idx: int,
+        expert_x: torch.Tensor,
+        masked_m: torch.Tensor,
+        expected_m: int,
+        expert_x_scale: Optional[torch.Tensor] = None,
+        down_output: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Forward masked grouped FFN.
+        Args:
+            start_idx (int): Start index of the expert.
+            end_idx (int): End index of the expert.
+            expert_x (torch.Tensor): Expert input.
+            masked_m (torch.Tensor): Masked input.
+            expected_m (int): Expected output.
+            expert_x_scale (Optional[torch.Tensor]): Expert input scale.
+            down_output (Optional[torch.Tensor]): Down output tensor. If None, a new tensor will be allocated.
+        Returns:
+            torch.Tensor: Down output.
+        """
+        # Get metadata
+        device = expert_x.device
+        num_tokens, hidden_size = expert_x.size(1), expert_x.size(2)
+        num_slice_experts = end_idx - start_idx
+
+        # Set number of SMs for DeepGEMM
+        with configure_deep_gemm_num_sms(self._num_gemm_sms):
+            if self._use_fp8:
+                # Check expert_x_scale is not None for fp8
+                assert expert_x_scale is not None
+                # Allocate upgate_output
+                upgate_output = torch.empty(
+                    (num_slice_experts, num_tokens, self._N),
+                    device=device,
+                    dtype=torch.bfloat16,
+                )
+
+                # Gate and Up GroupGEMM-0
+                m_grouped_fp8_gemm_nt_masked(
+                    (
+                        expert_x[start_idx:end_idx],
+                        expert_x_scale[start_idx:end_idx],
+                    ),
+                    (
+                        self._w1[start_idx:end_idx],
+                        self._w1_scale[start_idx:end_idx],
+                    ),
+                    upgate_output,
+                    masked_m[start_idx:end_idx],
+                    expected_m,
+                )
+
+                # Free expert_x and expert_x_scale
+                if end_idx == self._E:
+                    dispose_tensor(expert_x)
+                    dispose_tensor(expert_x_scale)
+                # Allocate down_input and down_input_scale
+                down_input = torch.empty(
+                    (num_slice_experts, num_tokens, self._N // 2),
+                    device=device,
+                    dtype=torch.float8_e4m3fn,
+                )
+                down_input_scale = torch.empty(
+                    (
+                        num_slice_experts,
+                        num_tokens,
+                        (
+                            self._N // 2 // self.DEEPGEMM_BLOCK_SHAPE[0]
+                            + self._num_packed_scales
+                            - 1
+                        )
+                        // self._num_packed_scales,
+                    ),
+                    device=device,
+                    dtype=self._scale_dtype,
+                )
+
+                # SiLU Activation
+                silu_mul_masked_fp8_post_quant_fwd(
+                    input=upgate_output,
+                    output=down_input,
+                    output_scale=down_input_scale,
+                    quant_group_size=self.DEEPGEMM_BLOCK_SHAPE[0],
+                    masked_m=masked_m[start_idx:end_idx],
+                    expected_m=expected_m,
+                    scale_ue8m0=is_deep_gemm_e8m0_used(),
+                )
+
+                # Free upgate_output
+                dispose_tensor(upgate_output)
+                # Allocate down_output if it is None
+                if down_output is None:
+                    down_output = torch.empty(
+                        (num_slice_experts, num_tokens, hidden_size),
+                        device=device,
+                        dtype=torch.bfloat16,
+                    )
+
+                # Down GroupGEMM-1
+                m_grouped_fp8_gemm_nt_masked(
+                    (
+                        down_input,
+                        down_input_scale,
+                    ),
+                    (
+                        self._w2[start_idx:end_idx],
+                        self._w2_scale[start_idx:end_idx],
+                    ),
+                    down_output[start_idx:end_idx],
+                    masked_m[start_idx:end_idx],
+                    expected_m,
+                )
+
+                # Free down_input and down_input_scale
+                dispose_tensor(down_input)
+                dispose_tensor(down_input_scale)
+
+            else:
+                # Check expert_x_scale is None for bf16
+                assert expert_x_scale is None
+                # Allocate upgate_output
+                upgate_output = torch.empty(
+                    (num_slice_experts, num_tokens, self._N),
+                    device=device,
+                    dtype=torch.bfloat16,
+                )
+
+                # Gate and Up GroupGEMM-0
+                m_grouped_bf16_gemm_nt_masked(
+                    expert_x[start_idx:end_idx],
+                    self._w1[start_idx:end_idx],
+                    upgate_output,
+                    masked_m[start_idx:end_idx],
+                    expected_m,
+                )
+                # Free expert_x
+                if end_idx == self._E:
+                    dispose_tensor(expert_x)
+                # Allocate down_input
+                down_input = torch.empty(
+                    (num_slice_experts, num_tokens, self._N // 2),
+                    device=device,
+                    dtype=torch.bfloat16,
+                )
+
+                # SiLU Activation
+                silu_mul_masked_bf16_no_post_quant_fwd(
+                    input=upgate_output,
+                    output=down_input,
+                    masked_m=masked_m[start_idx:end_idx],
+                    expected_m=expected_m,
+                    group_size=self.DEEPGEMM_BLOCK_SHAPE[0],
+                )
+
+                # Free upgate_output
+                dispose_tensor(upgate_output)
+                # Allocate down_output if it is None
+                if down_output is None:
+                    down_output = torch.empty(
+                        (num_slice_experts, num_tokens, hidden_size),
+                        device=device,
+                        dtype=torch.bfloat16,
+                    )
+
+                # Down GroupGEMM-1
+                m_grouped_bf16_gemm_nt_masked(
+                    down_input,
+                    self._w2[start_idx:end_idx],
+                    down_output[start_idx:end_idx],
+                    masked_m[start_idx:end_idx],
+                    expected_m,
+                )
+
+                # Free down_input
+                dispose_tensor(down_input)
+        return down_output
+
+    def _normal_execute(
+        self,
+        expert_x: torch.Tensor,
+        masked_m: torch.Tensor,
+        expected_m: int,
+        expert_x_scale: Optional[torch.Tensor] = None,
+    ) -> CombineForwardPayload:
+        """Execute normal masked grouped FFN.
+        Args:
+            expert_x (torch.Tensor): Expert input.
+            masked_m (torch.Tensor): Masked input.
+            expected_m (int): Expected output.
+            expert_x_scale (Optional[torch.Tensor]): Expert input scale.
+        Returns:
+            CombineForwardPayload: Combine forward payload.
+        """
+        # Execute masked grouped FFN
+        down_output = self._forward_masked_grouped_ffn(
+            0,
+            self._E,
+            expert_x,
+            masked_m,
+            expected_m,
+            expert_x_scale=expert_x_scale,
+            down_output=None,
+        )
+
+        # Return combine forward payload
+        return CombineForwardPayload(fused_expert_output=down_output)
+
+    def _execute_fp8(
+        self,
+        payload: ExpertForwardPayload,
+        activation: str,
+        expert_map: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor],
+        apply_router_weight_on_input: bool,
+        extra_expert_args: Optional[dict[str, Any]],
+    ) -> CombineForwardPayload:
+        """Execute FP8 experts computation.
+        Args:
+            payload (ExpertForwardPayload): Payload for expert computation.
+            activation (str): Activation function.
+            expert_map (Optional[torch.Tensor]): Expert map.
+            a2_scale (Optional[torch.Tensor]): Scale for a2.
+            apply_router_weight_on_input (bool): Whether to apply router weight on input.
+            extra_expert_args (Optional[dict[str, Any]]): Extra expert arguments.
+        """
+        # Check payload data
+        expert_x = payload.expert_x
+        E, M, K = expert_x.size()
+        assert E == self._E and K == self._K
+        masked_m = payload.expert_tokens_meta.expert_num_tokens
+        assert len(masked_m) == self._E
+        expected_m = (
+            min(M, payload.expert_tokens_meta.expected_m)
+            if payload.expert_tokens_meta.expected_m is not None
+            else M
+        )
+        expert_x_scale = payload.expert_x_scale
+        assert expert_x_scale is not None
+        assert expert_x_scale.size(0) == E
+        assert expert_x_scale.size(1) == M
+        assert (
+            expert_x_scale.size(2)
+            == (K // self.DEEPGEMM_BLOCK_SHAPE[1] + self._num_packed_scales - 1)
+            // self._num_packed_scales
+        )
+        assert expert_x_scale.dtype == self._scale_dtype
+
+        # Normal execution
+        combine_payload = self._normal_execute(
+            expert_x, masked_m, expected_m, expert_x_scale
+        )
+
+        return combine_payload
+
+    def _execute_bf16(
+        self,
+        payload: ExpertForwardPayload,
+        activation: str,
+        expert_map: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor],
+        apply_router_weight_on_input: bool,
+        extra_expert_args: Optional[dict[str, Any]],
+    ) -> CombineForwardPayload:
+        """Execute Bf16 experts computation.
+        Args:
+            payload (ExpertForwardPayload): Payload for expert computation.
+            activation (str): Activation function.
+            expert_map (Optional[torch.Tensor]): Expert map.
+            a2_scale (Optional[torch.Tensor]): Scale for a2.
+            apply_router_weight_on_input (bool): Whether to apply router weight on input.
+            extra_expert_args (Optional[dict[str, Any]]): Extra expert arguments.
+        """
+        # Check payload data
+        expert_x = payload.expert_x
+        E, M, K = expert_x.size()
+        assert E == self._E and K == self._K
+        masked_m = payload.expert_tokens_meta.expert_num_tokens
+        assert len(masked_m) == self._E
+        expected_m = (
+            min(M, payload.expert_tokens_meta.expected_m)
+            if payload.expert_tokens_meta.expected_m is not None
+            else M
+        )
+
+        # Normal execution
+        combine_payload = self._normal_execute(expert_x, masked_m, expected_m)
+
+        return combine_payload
 
     def execute(
         self,
@@ -115,127 +453,22 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
         a2_scale: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         extra_expert_args: Optional[dict[str, Any]],
-    ) -> torch.Tensor:
-
-        assert self._w1 is not None and self._w2 is not None
-        assert payload.expert_x is not None
-        assert payload.expert_tokens_meta is not None
-
-        expert_x = payload.expert_x
-        expert_num_tokens = payload.expert_tokens_meta.expert_num_tokens
-        assert expert_num_tokens is not None
-
-        assert expert_x.ndim == 3
-        E, M, K = expert_x.size()
-
-        _, N, _ = self._w1.size()
-        assert N % 2 == 0
-        assert self._w1.size(0) == E
-        assert self._w1.size(2) == K
-        assert self._w2.size(0) == E
-        assert self._w2.size(1) == K
-        assert self._w2.size(2) == N // 2
-
-        workspace = torch.empty((E, M, N), device=expert_x.device, dtype=torch.bfloat16)
-        output = torch.empty((E, M, K), device=expert_x.device, dtype=torch.bfloat16)
-
-        if self._use_fp8 and not is_deep_gemm_e8m0_used():
-            assert self._w1_scale is not None and self._w2_scale is not None
-            assert payload.expert_x_scale is not None
-
-            expert_x_scale = payload.expert_x_scale
-
-            assert expert_x_scale.size(0) == E
-            assert expert_x_scale.size(1) == M
-            assert expert_x_scale.size(2) == K // self.DEEPGEMM_BLOCK_SHAPE[1]
-
-            m_grouped_fp8_gemm_nt_masked(
-                (expert_x, expert_x_scale),
-                (self._w1, self._w1_scale),
-                workspace,
-                expert_num_tokens,
-                M,
-            )
-            a2q, a2q_scale = silu_mul_fp8_quant_deep_gemm_masked(
-                workspace,
-                expert_num_tokens,
-                group_size=self.DEEPGEMM_BLOCK_SHAPE[1],
-                use_ue8m0=is_deep_gemm_e8m0_used(),
-                eps=1e-10,
-            )
-            m_grouped_fp8_gemm_nt_masked(
-                (a2q, a2q_scale),
-                (self._w2, self._w2_scale),
-                output,
-                expert_num_tokens,
-                M,
-            )
-        elif self._use_fp8 and is_deep_gemm_e8m0_used():
-            assert self._w1_scale is not None and self._w2_scale is not None
-            assert payload.expert_x_scale is not None
-
-            expert_x_scale = payload.expert_x_scale
-            assert expert_x_scale.size(0) == E
-            assert expert_x_scale.size(1) == M
-            # assert expert_x_scale.size(2) == K // self.DEEPGEMM_BLOCK_SHAPE[1]
-            m_grouped_fp8_gemm_nt_masked(
-                (expert_x, expert_x_scale),
-                (self._w1, self._w1_scale),
-                workspace,
-                expert_num_tokens,
-                M,
-                disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
-            )
-            down_input = torch.empty(
-                (
-                    workspace.shape[0],
-                    workspace.shape[1],
-                    workspace.shape[2] // 2,
-                ),
-                device=workspace.device,
-                dtype=torch.float8_e4m3fn,
-            )
-            down_input_scale = torch.empty(
-                (
-                    workspace.shape[0],
-                    workspace.shape[1],
-                    workspace.shape[2] // 2 // self.DEEPGEMM_BLOCK_SHAPE[1],
-                ),
-                device=workspace.device,
-                dtype=torch.float32,
-            )
-            # notice: ours weights is up first and then gate, tmp change load in kernel
-            silu_and_mul_masked_post_quant_fwd(
-                workspace,
-                down_input,
-                down_input_scale,
-                self.DEEPGEMM_BLOCK_SHAPE[1],
-                expert_num_tokens,
-                scale_ue8m0=is_deep_gemm_e8m0_used(),
-            )
-            # some shape can not run, tmp not use
-            # down_input, down_input_scale = sgl_per_token_group_quant_fp8(workspace,
-            #                                                              group_size=self.DEEPGEMM_BLOCK_SHAPE[1],
-            #                                                              column_major_scales=True,
-            #                                                              scale_tma_aligned=True,
-            #                                                              scale_ue8m0=is_deep_gemm_e8m0_used(),
-            #                                                              fuse_silu_and_mul=True,
-            #                                                              masked_m=expert_num_tokens)
-            m_grouped_fp8_gemm_nt_masked(
-                (down_input, down_input_scale),
-                (self._w2, self._w2_scale),
-                output,
-                expert_num_tokens,
-                M,
-                disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
+    ) -> CombineForwardPayload:
+        if self._use_fp8:
+            return self._execute_fp8(
+                payload,
+                activation,
+                expert_map,
+                a2_scale,
+                apply_router_weight_on_input,
+                extra_expert_args,
             )
         else:
-            m_grouped_bf16_gemm_nt_masked(
-                expert_x, self._w1, workspace, expert_num_tokens, M
+            return self._execute_bf16(
+                payload,
+                activation,
+                expert_map,
+                a2_scale,
+                apply_router_weight_on_input,
+                extra_expert_args,
             )
-            a2q = silu_mul_bf16_deep_gemm_masked(
-                workspace, expert_num_tokens, group_size=256
-            )
-            m_grouped_bf16_gemm_nt_masked(a2q, self._w2, output, expert_num_tokens, M)
-
-        return output

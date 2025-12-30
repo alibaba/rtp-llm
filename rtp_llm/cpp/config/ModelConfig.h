@@ -44,7 +44,9 @@ public:
     int64_t hidden_size = 0;
 
     // Attention configuration - contains all attention-related params
-    AttentionConfigs attn_config;
+    AttentionConfigs      attn_config;
+    LinearAttentionConfig linear_attention_config;
+    HybridAttentionConfig hybrid_attention_config;
 
     // mla ops type (not in AttentionConfigs)
     MlaOpsType mla_ops_type = MlaOpsType::AUTO;

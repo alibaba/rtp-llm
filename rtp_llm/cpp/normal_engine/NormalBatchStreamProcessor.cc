@@ -404,6 +404,7 @@ void NormalBatchStreamProcessor::setCommonSamplerInputs(SamplerInputs&          
                    cum_log_probs->data(),
                    cum_log_probs->sizeBytes());
         }
+        // TODO(youyunhong.yyh): does this for loop necessary?
         for (int i = 0; i < sampler_batch_size; ++i) {
             input_lengths[batch_idx]      = stream->inputLength();
             sequence_lengths[batch_idx]   = stream->seqLength() + propose_step;

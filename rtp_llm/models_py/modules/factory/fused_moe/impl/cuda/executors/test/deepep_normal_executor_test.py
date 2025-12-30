@@ -10,7 +10,9 @@ from rtp_llm.models_py.kernels.cuda.fp8_kernel.fp8_kernel import (
     per_token_cast_to_fp8,
     sgl_per_token_group_quant_fp8,
 )
-from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepep_normal_executor import (
     DeepGemmContinousExecutor,
 )
@@ -46,7 +48,7 @@ def _generate_config() -> MoEConfigAdapter:
     model_config.expert_num = NUM_EXPERTS
     model_config.hidden_size = HIDDEN_SIZE
     model_config.moe_inter_size = MOE_INTERMEDIATE_SIZE
-    
+
     parallelism_config = ParallelismConfig()
     parallelism_config.world_size = DP_SIZE * EP_SIZE
     parallelism_config.dp_size = DP_SIZE
@@ -57,9 +59,9 @@ def _generate_config() -> MoEConfigAdapter:
     parallelism_config.ep_rank = 0
     parallelism_config.world_rank = 0
     parallelism_config.local_world_size = 1
-    
+
     moe_config = MoeConfig()
-    
+
     return MoEConfigAdapter(
         model_config=model_config,
         parallelism_config=parallelism_config,
@@ -162,11 +164,12 @@ def test_deepep_normal_executor(use_fp8: bool):
         dim=0,
     )
     # execute
-    output = executor.execute(payload, "silu", None, None, False, None)
+    combine_payload = executor.execute(payload, "silu", None, None, False, None)
     token_idx = 0
     for i, num_token in enumerate(expert_num_tokens):
         diff = calc_diff(
-            output[token_idx : token_idx + num_token], ref_output[i, :num_token]
+            combine_payload.fused_expert_output[token_idx : token_idx + num_token],
+            ref_output[i, :num_token],
         )
         # print('diff:', diff, output[token_idx : token_idx + num_token], ref_output[i, :num_token])
         token_idx += num_token

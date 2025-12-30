@@ -1,5 +1,5 @@
 import os
-from typing import Any, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 
@@ -7,8 +7,11 @@ from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.distributed.deepep_initializer import DeepEpInitializer
 from rtp_llm.models_py.distributed.deepep_wrapper import use_accl_ep
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used
-from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
+    CombineForwardPayload,
     ExpertForwardPayload,
     ExpertTokensMetadata,
     FusedMoeDataRouter,
@@ -50,7 +53,7 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
     def __init__(
         self,
         config: MoEConfigAdapter,
-        use_fp8_dispatch: bool = True,
+        use_fp8: bool = True,
         zero_copy: bool = False,
         async_finish: bool = False,
         return_recv_hook: bool = False,
@@ -60,8 +63,9 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         self._num_experts = config.expert_num
         wrapper = DeepEpInitializer.get_deepep_wrapper(self._config)
         self._buffer = wrapper.buffer
+        self._num_topk = wrapper.num_topk
         self._num_max_dispatch_tokens_per_rank = wrapper.ll_num_max_token_per_rank
-        self._use_fp8_dispatch = use_fp8_dispatch
+        self._use_fp8 = use_fp8
         self._zero_copy = zero_copy
         self._async_finish = async_finish
         self._return_recv_hook = return_recv_hook
@@ -72,6 +76,73 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
     @property
     def handle(self) -> Optional[Tuple[Any, ...]]:
         return self._handle
+
+    def _prepare_pre_tp_slice(
+        self,
+        a1: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Slice the dispatch activation, topk_ids and topk_weights by tp.
+        Args:
+            a1 (torch.Tensor): The dispatch activation tensor.
+            topk_ids (torch.Tensor): The topk ids tensor.
+            topk_weights (torch.Tensor): The topk weights tensor.
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor, torch.Tensor]: The sliced dispatch activation, topk_ids and topk_weights.
+        """
+        # Convert topk_ids to int64
+        topk_ids = topk_ids.to(torch.int64)
+        # Slice by tp
+        tp_size = self._config.tp_size
+        tp_rank = self._config.tp_rank
+        token_num = a1.size(0)
+        tp_token_size = (token_num + tp_size - 1) // tp_size
+        slice_begin = min(tp_token_size * tp_rank, token_num)
+        slice_size = min(token_num - slice_begin, tp_token_size)
+        tp_dispatch_input = torch.narrow(a1, 0, slice_begin, slice_size)
+        tp_topk_ids = torch.narrow(topk_ids, 0, slice_begin, slice_size)
+        tp_topk_weights = torch.narrow(topk_weights, 0, slice_begin, slice_size)
+
+        return tp_dispatch_input, tp_topk_ids, tp_topk_weights
+
+    def _normal_prepare(
+        self, dispatch_args: dict[str, Any], tp_topk_weights: torch.Tensor
+    ):
+        """Normal prepare for DeepEP Low-Latency.
+        Args:
+            dispatch_args (dict[str, Any]): Arguments for dispatching tokens to experts.
+            tp_topk_weights (torch.Tensor): Topk weights tensor for this tp rank.
+        """
+        # Calculate expected_m
+        tp_num_tokens = dispatch_args["x"].size(0)
+        expected_m = max(
+            1,
+            int(
+                tp_num_tokens
+                * self._config.ep_size
+                * self._num_topk
+                // self._num_experts
+            ),
+        )
+
+        # Dispatch tokens
+        expert_x, expert_num_tokens, self._handle, _, _ = (
+            self._buffer.low_latency_dispatch(**dispatch_args)
+        )
+
+        # Return expert forward payload
+        return ExpertForwardPayload(
+            expert_x=expert_x[0] if self._use_fp8 else expert_x,
+            expert_x_scale=expert_x[1] if self._use_fp8 else None,
+            expert_x_origin_dtype=dispatch_args["x"].dtype,
+            expert_topk_ids=dispatch_args["topk_idx"],
+            expert_topk_weights=tp_topk_weights,
+            expert_tokens_meta=ExpertTokensMetadata(
+                expected_m=expected_m,
+                expert_num_tokens=expert_num_tokens,
+            ),
+        )
 
     def prepare(
         self,
@@ -85,109 +156,121 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         """
         Dispatches tokens to experts across all ep ranks.
         """
-        # assert
-        assert a1.dim() == 2 and topk_ids.dim() == 2
-        assert a1.size(0) == topk_ids.size(0)
-        num_tokens = a1.size(0)
-        num_dispatch_tokens_per_rank = (
-            num_tokens + self._config.tp_size - 1
-        ) // self._config.tp_size
+        # Check payload data
+        num_tokens, hidden_size = a1.size()
         assert (
-            num_dispatch_tokens_per_rank <= self._num_max_dispatch_tokens_per_rank
-        ), f"Number of dispatch tokens {num_dispatch_tokens_per_rank} exceeds the maximum number of dispatch tokens per rank {self._num_max_dispatch_tokens_per_rank}."
-        hidden_dim = a1.size(1)
-        assert (
-            hidden_dim in SUPPORTED_HIDDEN_SIZES
-        ), f"Hidden Size {hidden_dim} not in supported list of hidden sizes: {SUPPORTED_HIDDEN_SIZES}."
-        if self._use_fp8_dispatch:
-            assert (
-                hidden_dim % DEEPEP_QUANT_BLOCK_SIZE == 0
-            ), f"DeepEP Low-Latency only supports hidden sizes that are divisible by {DEEPEP_QUANT_BLOCK_SIZE}."
-        has_per_token_scales = (
-            a1_scale.numel() != 1
-            if a1_scale is not None
-            else (a2_scale.numel() != 1 if a2_scale is not None else False)
+            hidden_size in SUPPORTED_HIDDEN_SIZES
+            and hidden_size % DEEPEP_QUANT_BLOCK_SIZE == 0
         )
+        tp_num_tokens = (num_tokens + self._config.tp_size - 1) // self._config.tp_size
+        assert tp_num_tokens <= self._num_max_dispatch_tokens_per_rank
+        assert topk_ids.size(0) == num_tokens and topk_weights.size(0) == num_tokens
         assert (
-            not has_per_token_scales
-        ), "DeepEP Low-Latency kernels doesn't support dispatching per-token scales."
-        assert (
-            self._handle is None
-        ), "DeepEP Low-latency dispatch handle should be clean before prepare()."
+            topk_ids.size(1) == self._num_topk
+            and topk_weights.size(1) == self._num_topk
+        )
+        # Check quantization
+        if self._use_fp8:
+            assert quant_config.is_block_quantized or (
+                quant_config.is_per_act_token and self._use_accl_ep
+            ), "DeepEP Low-Latency only supports fp8 block quantization or per_act_token quantization with ACCL-EP"
+        else:
+            assert not quant_config.is_quantized
+        # Check handle
+        assert self._handle is None
 
-        # dispatch
-        topk_ids = topk_ids.to(torch.int64)
+        # Slice dispatch activation, topk_ids and topk_weights by tp
+        tp_dispatch_input, tp_topk_ids, tp_topk_weights = self._prepare_pre_tp_slice(
+            a1, topk_ids, topk_weights
+        )
 
-        # scatter by tp
-        tp_size = self._config.tp_size
-        tp_rank = self._config.tp_rank
-        token_num = a1.size(0)
-        tp_token_size = (token_num + tp_size - 1) // tp_size
-
-        slice_begin = min(tp_token_size * tp_rank, token_num)
-        slice_size = min(token_num - slice_begin, tp_token_size)
-
-        tp_expert_input = torch.narrow(a1, 0, slice_begin, slice_size)
-        tp_expert_ids = torch.narrow(topk_ids, 0, slice_begin, slice_size)
-        tp_expert_scales = torch.narrow(topk_weights, 0, slice_begin, slice_size)
-
+        # Prepare dispatch basic arguments
         dispatch_args = {
-            "x": tp_expert_input,
-            "topk_idx": tp_expert_ids,
+            "x": tp_dispatch_input,
+            "topk_idx": tp_topk_ids,
             "num_max_dispatch_tokens_per_rank": self._num_max_dispatch_tokens_per_rank,
             "num_experts": self._num_experts,
-            "use_fp8": self._use_fp8_dispatch,
+            "use_fp8": self._use_fp8,
             "async_finish": self._async_finish,
             "return_recv_hook": self._return_recv_hook,
         }
+        # Set quantization config for DeepEP low latency dispatch
+        if quant_config.is_block_quantized and is_deep_gemm_e8m0_used():
+            dispatch_args.update({"round_scale": True, "use_ue8m0": True})
+        elif quant_config.is_per_act_token:
+            dispatch_args.update({"pertoken_quant": True})
 
-        if self._use_accl_ep:
-            dispatch_args["pertoken_quant"] = quant_config.is_per_act_token
-        if self._use_fp8_dispatch and is_deep_gemm_e8m0_used():
-            dispatch_args["round_scale"] = True
-            dispatch_args["use_ue8m0"] = True
+        # Normal prepare
+        expert_payload = self._normal_prepare(dispatch_args, tp_topk_weights)
 
-        expert_x, expert_num_tokens, self._handle, _, _ = (
-            self._buffer.low_latency_dispatch(**dispatch_args)
-        )
+        return expert_payload
 
-        if quant_config.is_per_act_token:
-            assert expert_x[0].shape[1] == expert_x[1].shape[1]
-            assert expert_x[1].shape[-1] == 1
+    def _normal_finalize(self, combine_args: dict[str, Any]) -> torch.Tensor:
+        """Normal finalize for DeepEP Low-Latency.
+        Args:
+            combine_args (dict[str, Any]): Arguments for combining expert outputs.
+        """
+        # Normal finalize
+        combined_x, _, _ = self._buffer.low_latency_combine(**combine_args)
 
-        # return payload
-        return ExpertForwardPayload(
-            expert_x=expert_x[0] if self._use_fp8_dispatch else expert_x,
-            expert_x_scale=expert_x[1] if self._use_fp8_dispatch else None,
-            expert_x_origin_dtype=a1.dtype,
-            expert_topk_weights=tp_expert_scales,
-            expert_topk_ids=tp_expert_ids,
-            expert_tokens_meta=ExpertTokensMetadata(
-                expert_num_tokens=expert_num_tokens, expert_num_tokens_cpu=None
-            ),
-        )
+        return combined_x
+
+    def _finalize_post_tp_gather(
+        self, combined_x: torch.Tensor, extra_finalize_args: Optional[Dict[str, Any]]
+    ) -> torch.Tensor:
+        """Finalize post tp gather for DeepEP Low-Latency.
+        Args:
+            combined_x (torch.Tensor): Combined output from all tp ranks.
+            extra_finalize_args (Optional[Dict[str, Any]]): Extra finalize arguments.
+        """
+        # Check input data
+        assert combined_x.dim() == 2
+        assert extra_finalize_args is not None
+        assert "original_num_tokens" in extra_finalize_args
+        # Get original number of tokens
+        tp_size = self._config.tp_size
+        original_num_tokens = extra_finalize_args["original_num_tokens"]
+        tp_token_size = (original_num_tokens + tp_size - 1) // tp_size
+        if tp_size > 1:
+            # combine_x.size(0) might be 0
+            if combined_x.size(0) < tp_token_size:
+                # Pad combined output if needed
+                padding_combined_x = torch.empty(
+                    size=(tp_token_size - combined_x.size(0), combined_x.size(1)),
+                    device=combined_x.device,
+                    dtype=combined_x.dtype,
+                )
+                combined_x = torch.cat([combined_x, padding_combined_x], dim=0)
+            # Gather combined output from all tp ranks
+            gatherd_output = all_gather(combined_x, group=Group.TP).reshape(
+                tp_size * tp_token_size, -1
+            )
+            combined_x = gatherd_output[:original_num_tokens, :]
+        return combined_x
 
     def finalize(
         self,
-        fused_expert_output: torch.Tensor,
+        payload: CombineForwardPayload,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
-        extra_finalize_args: Optional[dict[str, Any]],
+        extra_finalize_args: Optional[Dict[str, Any]],
     ) -> torch.Tensor:
         """
         Combines expert outputs back to all original ranks.
         Weight application and reduction happens in the combine kernel.
         """
-        # assert
+        # Check handle
         assert (
             self._handle is not None
         ), "DeepEP Low-latency combine handle is missing for finalize()."
 
-        # combine
+        # Convert topk_ids to int64
         topk_ids = topk_ids.to(torch.int64)
+
+        # Prepare combine basic arguments
         combine_args = {
-            "x": fused_expert_output,
+            "x": payload.fused_expert_output,
             "topk_idx": topk_ids,
             "topk_weights": topk_weights,
             "handle": self._handle,
@@ -196,31 +279,14 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
             "return_recv_hook": self._return_recv_hook,
         }
         if self._use_accl_ep:
-            combine_args["opt_level"] = self._opt_level
+            combine_args.update({"opt_level": self._opt_level})
 
-        combined_x, _, _ = self._buffer.low_latency_combine(**combine_args)
+        # Normal finalize
+        combined_x = self._normal_finalize(combine_args)
+
+        # Finalize post tp gather
+        combined_x = self._finalize_post_tp_gather(combined_x, extra_finalize_args)
         # reset handle
         self._handle = None
-
-        # gather
-        tp_size = self._config.tp_size
-        original_num_tokens = extra_finalize_args["original_num_tokens"]
-        tp_token_size = (original_num_tokens + tp_size - 1) // tp_size
-
-        if tp_size > 1:
-            # combine_x.size(0) might be 0
-            if combined_x.size(0) < tp_token_size:
-                padding_combined_x = torch.empty(
-                    size=(tp_token_size - combined_x.size(0), combined_x.size(1)),
-                    device=combined_x.device,
-                    dtype=combined_x.dtype,
-                )
-                combined_x = torch.cat([combined_x, padding_combined_x], dim=0)
-
-            gatherd_output = all_gather(combined_x, group=Group.TP).reshape(
-                tp_size * tp_token_size, -1
-            )
-            gatherd_output = gatherd_output[:original_num_tokens, :]
-            return gatherd_output
 
         return combined_x

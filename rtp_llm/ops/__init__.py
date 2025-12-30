@@ -148,6 +148,9 @@ try:
         ActivationType,
         KvCacheDataType,
         ModelConfig,
+        HybridAttentionConfig,
+        HybridAttentionType,
+        LinearAttentionConfig
     )
     # Alias for backward compatibility
     EplbConfig = EPLBConfig
