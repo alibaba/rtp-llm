@@ -642,7 +642,7 @@ class FP4Moe(Moe):
             do_finalize=True,
             tune_max_num_tokens=4096,
         )
-        return output
+        return output[0].to(torch.float)
         # Extract runtime arguments
         expert_logits = kwargs["expert_logits"]
         routing_bias = kwargs["routing_bias"]
