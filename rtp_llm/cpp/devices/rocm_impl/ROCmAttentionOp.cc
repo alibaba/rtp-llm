@@ -516,7 +516,6 @@ KVBlockArray ROCmDevice::getKVBlockArray(const AttentionModuleParams& params,
                       static_cast<void*>(kv_cache_buf.data()),  // for %p
                       kv_cache_buf[0].sizeBytes(),
                       params.configs.tokens_per_block,
-                      kv_block_offset,
                       static_cast<unsigned long>(reinterpret_cast<uintptr_t>(kv_cache_buf.data())),  // for %lu
                       static_cast<unsigned long>(reinterpret_cast<uintptr_t>(kv_cache_buf.data())),
                       max_blocks_per_batch);

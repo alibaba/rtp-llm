@@ -42,7 +42,6 @@ CompleteTokenIdsPtr createCompleteTokenIds(int batch_size, int seq_length) {
     generate_input->generate_config = std::make_shared<GenerateConfig>();
 
     complete_token_ids->init(generate_input);
-
     return complete_token_ids;
 }
 

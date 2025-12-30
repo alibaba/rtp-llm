@@ -269,8 +269,8 @@ class AiterDecodeAttnOpNonAsm(AiterDecodeAttnOpBase):
         self, query: torch.Tensor, kv_cache: Optional[KVCache], fmha_params
     ) -> torch.Tensor:
         seq_lens = fmha_params.seq_lens
-        key_cache = kv_cache.k_cache_base.select(1, 0)
-        value_cache = kv_cache.k_cache_base.select(1, 1)
+        key_cache = kv_cache.kv_cache_base.select(1, 0)
+        value_cache = kv_cache.kv_cache_base.select(1, 1)
 
         key_scale = kv_cache.kv_scale_base.select(1, 0)
         value_scale = kv_cache.kv_scale_base.select(1, 0)

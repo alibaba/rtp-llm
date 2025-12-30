@@ -287,13 +287,13 @@ void BlockPool::regUserMr(size_t model_id) {
                              kv_cost_ms);
 
             if (layout_cfg.enable_kv_scale && layout_cfg.kv_scale_pool_size_bytes > 0
-                && layout_cfg.kv_scale_block_bytes > 0) {
+                && layout_cfg.k_scale_stride_bytes > 0 && layout_cfg.v_scale_stride_bytes > 0) {
                 void*  scale_base_ptr = static_cast<void*>(static_cast<char*>(cache_base_ptr_)
                                                           + static_cast<ptrdiff_t>(layout_cfg.kv_scale_offset_bytes));
                 auto   start_scale_us = currentTimeUs();
                 size_t scale_bytes    = layout_cfg.kv_scale_pool_size_bytes;
 
-                if (!memory_util->regUserMr(scale_base_ptr, scale_bytes, true, layout_cfg.kv_scale_block_bytes)) {
+                if (!memory_util->regUserMr(scale_base_ptr, scale_bytes, true, layout_cfg.k_scale_stride_bytes)) {
                     RTP_LLM_FAIL("register user mr for block pool layout[%zu] kv scale buffer failed", layout_idx);
                 }
                 auto scale_cost_ms = (currentTimeUs() - start_scale_us) / 1000;
@@ -302,7 +302,7 @@ void BlockPool::regUserMr(size_t model_id) {
                                  layout_idx,
                                  scale_base_ptr,
                                  scale_bytes,
-                                 layout_cfg.kv_scale_block_bytes,
+                                 layout_cfg.k_scale_stride_bytes,
                                  scale_cost_ms);
             }
         }
@@ -319,7 +319,7 @@ void BlockPool::deregUserMr() {
         for (size_t layout_idx = 0; layout_idx < config_.memory_layouts.size(); ++layout_idx) {
             const auto& layout_cfg = config_.memory_layouts[layout_idx];
             if (layout_cfg.enable_kv_scale && layout_cfg.kv_scale_pool_size_bytes > 0
-                && layout_cfg.kv_scale_block_bytes > 0) {
+                && layout_cfg.k_scale_stride_bytes > 0 && layout_cfg.v_scale_stride_bytes > 0) {
                 void* scale_base_ptr = static_cast<void*>(static_cast<char*>(cache_base_ptr_)
                                                           + static_cast<ptrdiff_t>(layout_cfg.kv_scale_offset_bytes));
                 if (!memory_util->deregUserMr(scale_base_ptr, true)) {

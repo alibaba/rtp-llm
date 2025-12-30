@@ -161,15 +161,15 @@ private:
 
         if (needKvScale(spec->dtype)) {
             cfg.enable_kv_scale       = true;
-            cfg.kv_scale_block_bytes  = local_head_num_kv * seq_size_per_block * sizeof(float);
-            cfg.kv_scale_stride_bytes = 2 * cfg.kv_scale_block_bytes;
+            cfg.k_scale_stride_bytes  = local_head_num_kv * seq_size_per_block * sizeof(float);
+            cfg.v_scale_stride_bytes  = cfg.k_scale_stride_bytes;
+            cfg.kv_scale_stride_bytes = 2 * cfg.k_scale_stride_bytes;
             cfg.kv_scale_stride       = 2 * local_head_num_kv * seq_size_per_block;
             cfg.kv_scale_pool_size_bytes =
                 static_cast<size_t>(layer_num) * static_cast<size_t>(block_num) * cfg.kv_scale_stride_bytes;
             cfg.kv_scale_size_bytes = static_cast<size_t>(layer_num) * cfg.kv_scale_stride_bytes;
             cfg.kv_scale_size       = static_cast<size_t>(layer_num) * cfg.kv_scale_stride;
         } else {
-            cfg.kv_scale_block_bytes     = 0;
             cfg.kv_scale_pool_size_bytes = 0;
             cfg.kv_scale_stride          = 0;
             cfg.kv_scale_stride_bytes    = 0;

@@ -62,6 +62,8 @@ struct MemoryLayoutConfig {
     size_t v_block_size_bytes   = 0;
     size_t k_block_stride_bytes = 0;
     size_t v_block_stride_bytes = 0;
+    size_t k_scale_stride_bytes = 0;
+    size_t v_scale_stride_bytes = 0;
     size_t k_token_size         = 0;
     size_t v_token_size         = 0;
 
@@ -69,8 +71,7 @@ struct MemoryLayoutConfig {
     size_t local_head_num_kv  = 0;
     size_t seq_size_per_block = 0;
 
-    bool   enable_kv_scale      = false;
-    size_t kv_scale_block_bytes = 0;
+    bool enable_kv_scale = false;
 };
 
 struct KVCacheSpec {
