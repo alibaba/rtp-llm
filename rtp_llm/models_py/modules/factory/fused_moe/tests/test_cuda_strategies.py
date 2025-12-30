@@ -226,9 +226,7 @@ class TestCudaFp8PerBlockEpNormalStrategy(unittest.TestCase):
 
     @patch("rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.has_deep_gemm")
     @patch("rtp_llm.models_py.utils.arch.get_sm")
-    @patch(
-        "rtp_llm.models_py.distributed.deepep_initializer.DeepEpInitializer.supported"
-    )
+    @patch("rtp_llm.models_py.distributed.deepep_wrapper.DeepEPWrapper.supported")
     def test_can_handle_ep_enabled(
         self, mock_supported: Any, mock_get_sm: Any, mock_has_deep_gemm: Any
     ) -> None:
@@ -251,9 +249,7 @@ class TestCudaFp8PerBlockEpNormalStrategy(unittest.TestCase):
 
     @patch("rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.has_deep_gemm")
     @patch("rtp_llm.models_py.utils.arch.get_sm")
-    @patch(
-        "rtp_llm.models_py.distributed.deepep_initializer.DeepEpInitializer.supported"
-    )
+    @patch("rtp_llm.models_py.distributed.deepep_wrapper.DeepEPWrapper.supported")
     def test_can_handle_tp_dp_ep(
         self, mock_supported: Any, mock_get_sm: Any, mock_has_deep_gemm: Any
     ) -> None:
@@ -276,9 +272,7 @@ class TestCudaFp8PerBlockEpNormalStrategy(unittest.TestCase):
 
     @patch("rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.has_deep_gemm")
     @patch("rtp_llm.models_py.utils.arch.get_sm")
-    @patch(
-        "rtp_llm.models_py.distributed.deepep_initializer.DeepEpInitializer.supported"
-    )
+    @patch("rtp_llm.models_py.distributed.deepep_wrapper.DeepEPWrapper.supported")
     def test_can_handle_false_cuda_graph(
         self, mock_supported: Any, mock_get_sm: Any, mock_has_deep_gemm: Any
     ) -> None:
@@ -305,9 +299,7 @@ class TestCudaFp8PerBlockEpNormalStrategy(unittest.TestCase):
 
     @patch("rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.has_deep_gemm")
     @patch("rtp_llm.models_py.utils.arch.get_sm")
-    @patch(
-        "rtp_llm.models_py.distributed.deepep_initializer.DeepEpInitializer.supported"
-    )
+    @patch("rtp_llm.models_py.distributed.deepep_wrapper.DeepEPWrapper.supported")
     def test_can_handle_false_low_latency(
         self, mock_supported: Any, mock_get_sm: Any, mock_has_deep_gemm: Any
     ) -> None:
@@ -352,9 +344,7 @@ class TestCudaFp8PerBlockEpNormalStrategy(unittest.TestCase):
         strategy = CudaFp8PerBlockEpNormalStrategy()
         self.assertFalse(strategy.can_handle(config))
 
-    @patch(
-        "rtp_llm.models_py.distributed.deepep_initializer.DeepEpInitializer.supported"
-    )
+    @patch("rtp_llm.models_py.distributed.deepep_wrapper.DeepEPWrapper.supported")
     @patch(
         "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_normal_router.get_sm"
     )

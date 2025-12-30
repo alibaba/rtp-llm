@@ -4,8 +4,11 @@ from typing import Any, Dict, Optional, Tuple
 import torch
 
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
-from rtp_llm.models_py.distributed.deepep_initializer import DeepEpInitializer
-from rtp_llm.models_py.distributed.deepep_wrapper import use_accl_ep
+from rtp_llm.models_py.distributed.deepep_wrapper import (
+    DeepEPMode,
+    DeepEPWrapper,
+    DeepepWrapperConfig,
+)
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
@@ -50,7 +53,7 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         checker.check(get_sm()[0] >= 9)
         checker.check(resolver.is_ep_enabled(config))
         checker.check(resolver.use_low_latency(config))
-        checker.check(DeepEpInitializer.supported())
+        checker.check(DeepEPWrapper.supported())
 
     def __init__(
         self,
@@ -67,7 +70,16 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
 
         # DeepEpLowLatency-specific initialization
         self._num_experts = config.expert_num
-        wrapper = DeepEpInitializer.get_deepep_wrapper(self.config)
+        self._ll_num_max_token_per_rank = self._calc_low_latency_max_token_per_rank(
+            config.max_generate_batch_size, config.tp_size, quant_config
+        )
+        deepep_config = DeepepWrapperConfig.from_config_adapter(
+            self.config, self._ll_num_max_token_per_rank
+        )
+        wrapper = DeepEPWrapper.get_instance(deepep_config)
+        assert (
+            wrapper.mode == DeepEPMode.LOW_LATENCY
+        ), "DeepEP mode should be LOW_LATENCY"
         self._buffer = wrapper.buffer
         self._num_topk = wrapper.num_topk
         self._num_max_dispatch_tokens_per_rank = wrapper.ll_num_max_token_per_rank
@@ -77,7 +89,7 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         self._return_recv_hook = False
         self._opt_level = int(os.environ.get("ACCL_LOW_LATENCY_OPTIMIZE", 1))
         self._handle: Optional[Tuple[Any, ...]] = None
-        self._use_accl_ep = use_accl_ep()
+        self._use_accl_ep = wrapper.use_accl_ep
 
     @property
     def handle(self) -> Optional[Tuple[Any, ...]]:
@@ -175,7 +187,9 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
             and hidden_size % DEEPEP_QUANT_BLOCK_SIZE == 0
         )
         tp_num_tokens = (num_tokens + self.config.tp_size - 1) // self.config.tp_size
-        assert tp_num_tokens <= self._num_max_dispatch_tokens_per_rank
+        assert (
+            tp_num_tokens <= self._num_max_dispatch_tokens_per_rank
+        ), f"tp_num_tokens {tp_num_tokens} > self._num_max_dispatch_tokens_per_rank {self._num_max_dispatch_tokens_per_rank}"
         assert topk_ids.size(0) == num_tokens and topk_weights.size(0) == num_tokens
         assert (
             topk_ids.size(1) == self._num_topk
@@ -302,3 +316,42 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         self._handle = None
 
         return combined_x
+
+    def _calc_low_latency_max_token_per_rank(
+        self,
+        max_generate_batch_size: int,
+        tp_size: int,
+        quant_config: FusedMoEQuantConfig,
+    ) -> int:
+        ll_num_max_token_per_rank = (max_generate_batch_size + tp_size - 1) // tp_size
+        # deepgemm masked with max_m < 64 get incorrect result, related: https://github.com/deepseek-ai/DeepGEMM/issues/268
+        if not quant_config.is_quantized or quant_config.is_block_quantized:
+            matched_tokens = [64, 128]
+        elif quant_config.is_per_act_token:
+            matched_tokens = [
+                16,
+                24,
+                32,
+                40,
+                48,
+                56,
+                64,
+                72,
+                80,
+                88,
+                96,
+                104,
+                112,
+                120,
+                128,
+            ]
+        else:
+            raise ValueError("Unsupported quantization config")
+        if ll_num_max_token_per_rank > 128:
+            ll_num_max_token_per_rank = ((ll_num_max_token_per_rank + 127) // 128) * 128
+            return ll_num_max_token_per_rank
+        for t in matched_tokens:
+            if ll_num_max_token_per_rank <= t:
+                ll_num_max_token_per_rank = t
+                return ll_num_max_token_per_rank
+        return 128

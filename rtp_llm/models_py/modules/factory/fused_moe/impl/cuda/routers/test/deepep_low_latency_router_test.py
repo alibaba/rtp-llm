@@ -11,7 +11,7 @@ from rtp_llm.models_py.distributed.collective_torch import (
     destroy_distributed_environment,
     init_distributed_environment,
 )
-from rtp_llm.models_py.distributed.deepep_wrapper import init_deepep_wrapper
+from rtp_llm.models_py.distributed.deepep_wrapper import DeepEPWrapper
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -79,10 +79,7 @@ def _init_router(
     init_distributed_environment(
         parallelism_config=parallelism_config, backend="nccl", timeout=60
     )
-    init_deepep_wrapper(
-        group=torch.distributed.group.WORLD,
-        config_adapter=config,
-    )
+    # DeepEPWrapper will be initialized by router with correct ll_num_max_token_per_rank
 
     router = DeepEpLowLatencyRouter(
         config,
@@ -99,6 +96,7 @@ def _init_router(
 
 def _destroy_router(router: DeepEpLowLatencyRouter):
     del router
+    DeepEPWrapper.reset()
     destroy_distributed_environment()
 
 

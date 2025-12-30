@@ -3,7 +3,11 @@ from typing import Any, Dict, Optional, Tuple
 import torch
 
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
-from rtp_llm.models_py.distributed.deepep_initializer import DeepEpInitializer
+from rtp_llm.models_py.distributed.deepep_wrapper import (
+    DeepEPMode,
+    DeepEPWrapper,
+    DeepepWrapperConfig,
+)
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     scaled_fp8_per_token_quant,
@@ -43,7 +47,7 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
         checker.check(get_sm()[0] >= 9)
         checker.check(resolver.is_ep_enabled(config))
         checker.check(not resolver.use_low_latency(config))
-        checker.check(DeepEpInitializer.supported())
+        checker.check(DeepEPWrapper.supported())
 
     def __init__(
         self,
@@ -64,7 +68,11 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
         self.num_dispatchers = config.world_size // config.tp_size
         self.rank_expert_offset = self.ep_rank * self.expert_num_per_rank
         self.top_k = config.moe_topk_group
-        self.deepep_buffer_wrapper = DeepEpInitializer.get_deepep_wrapper(self.config)
+        deepep_config = DeepepWrapperConfig.from_config_adapter(self.config)
+        self.deepep_buffer_wrapper = DeepEPWrapper.get_instance(deepep_config)
+        assert (
+            self.deepep_buffer_wrapper.mode == DeepEPMode.NORMAL
+        ), "DeepEP mode should be NORMAL"
         self.async_mode = False
         self.expert_alignment = expert_alignment
         self.handle: Any = None
