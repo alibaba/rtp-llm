@@ -1176,9 +1176,6 @@ def run_moe_dequant(args):
 # ====================================================================================
 
 
-def _compute_moe_actual_unified(moe_impl, args_dequant, args, **kwargs):
-
-
 def test_moe(
     num_tokens,
     hidden_size,
