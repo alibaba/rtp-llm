@@ -600,6 +600,7 @@ class FP4Moe(Moe):
             local_expert_offset=0,
             local_num_experts=args.num_experts,
             routed_scaling_factor=args.routed_scaling,
+            tile_tokens_dim=None,  # tile_tokens_dim
             routing_method_type=args.routing_method_type,
             gated_act_type=args.gated_act_type,
             do_finalize=True,
