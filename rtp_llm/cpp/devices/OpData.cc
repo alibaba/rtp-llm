@@ -45,6 +45,15 @@ std::string GptModelInputs::debugString(bool force) const {
                  << ", input_lengths: " << input_lengths->debugStringWithData<int32_t>()
                  << ", sequence_lengths: " << sequence_lengths->debugStringWithData<int32_t>()
                  << ", prefix_lengths: " << prefix_lengths->debugStringWithData<int32_t>();
+    if (prefill_cp_padding_lengths) {
+        debug_string << ", prefill_cp_padding_lengths: " << prefill_cp_padding_lengths->debugStringWithData<int32_t>();
+    }
+    if (prefill_cp_chunk_lengths) {
+        debug_string << ", prefill_cp_chunk_lengths: " << prefill_cp_chunk_lengths->debugStringWithData<int32_t>();
+    }
+    if (prefill_shuffle_indices) {
+        debug_string << ", prefill_shuffle_indices: " << prefill_shuffle_indices->debugStringWithData<int32_t>();
+    }
     if (combo_position_ids) {
         debug_string << ", combo_position_ids: " << combo_position_ids->debugStringWithData<int32_t>();
     }

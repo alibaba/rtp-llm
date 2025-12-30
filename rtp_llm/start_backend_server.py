@@ -143,7 +143,11 @@ def _validate_dp_configuration():
     """Validate data parallelism configuration"""
     if g_parallel_info.dp_size > 1:
         # tp must on one device when dp
-        assert g_parallel_info.world_rank % g_parallel_info.tp_size == 0
+        assert (
+            g_parallel_info.world_rank
+            % (g_parallel_info.tp_size * g_parallel_info.cp_size)
+            == 0
+        )
 
 
 def _create_rank_processes(

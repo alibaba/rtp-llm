@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include "rtp_llm/cpp/devices/DeviceBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
@@ -11,11 +12,11 @@ namespace rtp_llm {
 
 class NormalBatchStreamProcessor {
 public:
-    NormalBatchStreamProcessor(const ModelConfig& model_config,
-                               const PDSepConfig& pd_sep_config,
+    NormalBatchStreamProcessor(const ModelConfig&                 model_config,
+                               const PDSepConfig&                 pd_sep_config,
                                const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
-                               const CacheConfig& cache_config,
-                               bool warm_up):
+                               const CacheConfig&                 cache_config,
+                               bool                               warm_up):
         num_layers_(model_config.num_layers),
         vocab_size_(model_config.vocab_size),
         input_vocab_size_(model_config.input_vocab_size),
@@ -33,6 +34,9 @@ public:
         warm_up_(warm_up),
         enable_detail_log_(profiling_debug_logging_config.enable_detail_log),
         device_(rtp_llm::DeviceFactory::getDefaultDevice()) {}
+
+    virtual ~NormalBatchStreamProcessor() = default;
+
     virtual absl::Status dispatch(const StreamGroups& stream_groups, const MergedOutput& merge_outputs) const;
     virtual absl::StatusOr<GptModelInputs> gatherModelInput(const StreamGroups& stream_groups) const;
     virtual absl::StatusOr<SamplerInputs>  gatherSamplerInput(const StreamGroups&    stream_groups,

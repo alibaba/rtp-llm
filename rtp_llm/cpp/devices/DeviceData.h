@@ -39,11 +39,15 @@ struct DeviceInitParams {
     size_t ffn_tp_size    = 1;
     bool   use_all_gather = false;
 
+    size_t cp_rank = 0;
+    size_t cp_size = 1;
+
     // this ip:port pair should be unused, typically provided by gang,
     // to create temporary torch::TcpStore for exchanging communication id.
     // they are only needed when tp_size > 1.
     std::string master_ip          = "";
     int64_t     tp_master_port     = 0;
+    int64_t     cp_master_port     = 0;
     int64_t     dp_tp_master_port  = 0;
     int64_t     ffn_tp_master_port = 0;
 
@@ -69,27 +73,27 @@ struct DeviceInitParams {
     int64_t extra_experts  = 0;
     bool    ffn_as_service = false;
 
-    bool                         use_deepep_moe         = false;
-    int                          user_deep_gemm_num_sm  = -1;
-    bool                         use_aiter_pa           = true;
-    bool                         use_asm_pa             = true;
-    bool                         use_deepep_internode   = false;
-    bool                         use_deepep_low_latency = false;
-    bool                         is_mtp                 = false;
-    bool                         is_eagle3              = false;
-    FMHAConfig                   fmha_config;
-    HWKernelConfig               hw_kernel_config;
-    DeviceResourceConfig         device_resource_config;
-    SamplerConfig                sampler_config;
-    MoeConfig                    moe_config;
-    SpeculativeExecutionConfig   sp_config;
+    bool                       use_deepep_moe         = false;
+    int                        user_deep_gemm_num_sm  = -1;
+    bool                       use_aiter_pa           = true;
+    bool                       use_asm_pa             = true;
+    bool                       use_deepep_internode   = false;
+    bool                       use_deepep_low_latency = false;
+    bool                       is_mtp                 = false;
+    bool                       is_eagle3              = false;
+    FMHAConfig                 fmha_config;
+    HWKernelConfig             hw_kernel_config;
+    DeviceResourceConfig       device_resource_config;
+    SamplerConfig              sampler_config;
+    MoeConfig                  moe_config;
+    SpeculativeExecutionConfig sp_config;
     // FIFOSchedulerConfig fields are now in RuntimeConfig
-    RuntimeConfig                runtime_config;
-    MiscellaneousConfig          misc_config;
-    ParallelismConfig parallelism_config;
-    ProfilingDebugLoggingConfig  profile_debug_logging_config;
-    ModelSpecificConfig          model_specific_config;
-    ConcurrencyConfig            concurrency_config;
+    RuntimeConfig               runtime_config;
+    MiscellaneousConfig         misc_config;
+    ParallelismConfig           parallelism_config;
+    ProfilingDebugLoggingConfig profile_debug_logging_config;
+    ModelSpecificConfig         model_specific_config;
+    ConcurrencyConfig           concurrency_config;
 };
 
 // immutable device properties. Can not change since device is initialized.
@@ -105,6 +109,9 @@ struct DeviceProperties {
     size_t dp_size     = 1;
     size_t ffn_tp_rank = 0;
     size_t ffn_tp_size = 1;
+
+    size_t cp_rank = 0;
+    size_t cp_size = 1;
 
     bool   enable_sp             = false;
     size_t overlap_math_sm_count = 0;

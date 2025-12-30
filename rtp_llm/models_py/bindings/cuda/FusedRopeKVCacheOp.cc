@@ -20,8 +20,7 @@ TRTAttnPtr FusedRopeKVCachePrefillOp::prepare(torch_ext::PyAttentionInputs attn_
         kv_cache_block_id_device = torchTensor2Buffer(attn_inputs.kv_cache_block_id_device);
     }
     TRTAttnPtr attn_params;
-    auto       params =
-        device_->prepareTrtAttn(attn_configs_, kv_cache_block_id_device, batch_size);
+    auto       params = device_->prepareTrtAttn(attn_configs_, kv_cache_block_id_device, batch_size);
     if (params) {
         attn_params = TRTAttnPtr(params, (TRTAttn*)params.get());
     } else {
@@ -35,6 +34,9 @@ TRTAttnPtr FusedRopeKVCachePrefillOp::prepare(torch_ext::PyAttentionInputs attn_
     attn_params->prefix_lengths            = attn_inputs.prefix_lengths;
     attn_params->kv_block_array.cache_type = attn_configs_.kv_cache_dtype;
     attn_params->padding_offset            = attn_inputs.padding_offset;
+    if (attn_inputs.position_ids.defined()) {
+        attn_params->cp_position_ids = attn_inputs.position_ids;
+    }
     return attn_params;
 }
 
@@ -94,6 +96,11 @@ torch::Tensor FusedRopeKVCachePrefillOp::forward(const torch::Tensor&           
 
     auto rope_cache = getRopeCacheOnce(attn_configs_.rope_config, device_->initParams().max_seq_len);
 
+    int* position_ids = nullptr;
+    if (params->cp_position_ids.defined()) {
+        position_ids = params->cp_position_ids.data_ptr<int>();
+    }
+
     DISPATCH_CUDA_FUNCTION_DATA_TYPE(
         torchDTypeToDataType(qkv.dtype()),
         invokeAddFusedQKVBiasTranspose,
@@ -104,10 +111,11 @@ torch::Tensor FusedRopeKVCachePrefillOp::forward(const torch::Tensor&           
         &prefix_prompt_param,
         qkv.data_ptr(),
         use_qkv_fp8 ? qkv_fp8.data_ptr() : nullptr,
-        nullptr,  // params.common.position_ids ? params.common.position_ids->dataWithOffset<int>(decoder_batch_size *
-                  // params.configs.rope_config.index_factor): nullptr,
-        nullptr,  // params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias ?
-                  // params.weights.qkv_weight->bias->data() : nullptr,
+        position_ids,  // params.common.position_ids ?
+                       // params.common.position_ids->dataWithOffset<int>(decoder_batch_size *
+                       // params.configs.rope_config.index_factor): nullptr,
+        nullptr,       // params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias ?
+                       // params.weights.qkv_weight->bias->data() : nullptr,
         padding_offset,
         params->cu_seqlens.data_ptr<int>(),
         rope_cache.used,
@@ -153,8 +161,8 @@ TRTAttnPtr FusedRopeKVCacheDecodeOp::prepare(torch_ext::PyAttentionInputs attn_i
     }
 
     TRTAttnPtr attn_params;
-    auto       params = device_->prepareTrtAttn(
-        attn_configs_, kv_cache_block_id_device, attn_inputs.sequence_lengths.size(0));
+    auto       params =
+        device_->prepareTrtAttn(attn_configs_, kv_cache_block_id_device, attn_inputs.sequence_lengths.size(0));
     RTP_LLM_CHECK_WITH_INFO(params != nullptr, "TRTAttnPtr Build Failed");
     attn_params                            = TRTAttnPtr(params, (TRTAttn*)params.get());
     attn_params->decode_plan               = true;
@@ -162,6 +170,7 @@ TRTAttnPtr FusedRopeKVCacheDecodeOp::prepare(torch_ext::PyAttentionInputs attn_i
     attn_params->cu_seqlens                = attn_inputs.cu_seqlens;
     attn_params->cu_kv_seqlens             = attn_inputs.cu_kv_seqlens;
     attn_params->sequence_lengths          = attn_inputs.sequence_lengths;
+    attn_params->cp_position_ids           = attn_inputs.position_ids;
     attn_params->kv_block_array.cache_type = attn_configs_.kv_cache_dtype;
 
     return attn_params;

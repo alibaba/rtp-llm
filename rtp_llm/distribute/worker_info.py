@@ -29,6 +29,7 @@ class ParallelInfo(object):
         ep_size: int,
         pp_size: int,
         dp_size: int,
+        cp_size: int,
         ffn_sp_size: int,
         world_size: int,
         world_rank: int,
@@ -39,6 +40,7 @@ class ParallelInfo(object):
         self.ep_size = ep_size
         self.pp_size = pp_size
         self.dp_size = dp_size
+        self.cp_size = cp_size
         self.ffn_sp_size = ffn_sp_size
         self.ffn_tp_size = self.tp_size // self.ffn_sp_size
         self.world_size = world_size
@@ -54,14 +56,20 @@ class ParallelInfo(object):
                 f"is smaller than min worker info port num {MIN_WORKER_INFO_PORT_NUM}"
             )
         logging.info(
-            f"ParallelInfo:[ tp_size={self.tp_size} ep_size={self.ep_size} pp_size={self.pp_size} world_size={self.world_size} world_rank={self.world_rank} local_world_size={self.local_world_size} ffn_sp_size={self.ffn_sp_size} ffn_tp_size={self.ffn_tp_size}]"
+            f"ParallelInfo:[ tp_size={self.tp_size} ep_size={self.ep_size} pp_size={self.pp_size} cp_size={self.cp_size} world_size={self.world_size} world_rank={self.world_rank} local_world_size={self.local_world_size} ffn_sp_size={self.ffn_sp_size} ffn_tp_size={self.ffn_tp_size}]"
         )
         assert (
             ep_size <= world_size and world_size % ep_size == 0
         ), f"ep_size:{self.ep_size} <= world_size:{self.world_size} and world_size:{self.world_size} % ep_size:{self.ep_size} != 0"
+
+        """=============== dp and tp and cp ===============================================
+       |-----dp0-------|-----dp1-------|
+       |--cp0--|--cp1--|--cp0--|--cp1--|
+       |tp0|tp1|tp0|tp1|tp0|tp1|tp0|tp1|
+       ===================================================================================="""
         assert (
-            self.world_size == self.tp_size * self.dp_size * self.pp_size
-        ), f"world_size:{self.world_size} != tp_size:{self.tp_size} * dp_size:{self.dp_size} * pp_size:{self.pp_size}"
+            self.world_size == self.tp_size * self.dp_size * self.pp_size * self.cp_size
+        ), f"world_size:{self.world_size} != tp_size:{self.tp_size} * dp_size:{self.dp_size} * pp_size:{self.pp_size} * cp_size:{self.cp_size}"
 
     @property
     def tp_rank(self) -> int:
@@ -69,7 +77,11 @@ class ParallelInfo(object):
 
     @property
     def dp_rank(self) -> int:
-        return self.world_rank // self.tp_size
+        return self.world_rank // (self.tp_size * self.cp_size)
+
+    @property
+    def cp_rank(self) -> int:
+        return (self.world_rank // self.tp_size) % self.cp_size
 
     # ep_rank只在MOE plugin生效
     @property
@@ -108,6 +120,7 @@ class ParallelInfo(object):
             ep_size=int(params.get("EP_SIZE", params.get("WORLD_SIZE", "1"))),
             pp_size=int(params.get("PP_SIZE", "1")),
             dp_size=int(params.get("DP_SIZE", 1)),
+            cp_size=int(params.get("CP_SIZE", 1)),
             ffn_sp_size=int(params.get("FFN_SP_SIZE", "1")),
             world_size=world_size,
             world_rank=int(params.get("WORLD_RANK", "0")),
@@ -125,12 +138,12 @@ class ParallelInfo(object):
                 f"local_world_size:{info.local_world_size} > cuda device count:{torch.cuda.device_count()}"
             )
         if (
-            info.tp_size * info.pp_size * info.dp_size != info.world_size
+            info.tp_size * info.pp_size * info.dp_size * info.cp_size != info.world_size
             or info.world_rank >= info.world_size
             or (info.tp_size % info.ffn_sp_size != 0)
         ):
             raise Exception(
-                f"tp_size:{info.tp_size}, ep_size:{info.ep_size}, pp_size:{info.pp_size}, world_size:{info.world_size}, world_rank:{info.world_rank} ffn_sp_size: {info.ffn_sp_size} invalid world config"
+                f"tp_size:{info.tp_size}, ep_size:{info.ep_size}, dp_size:{info.dp_size}, cp_size:{info.cp_size}, pp_size:{info.pp_size}, world_size:{info.world_size}, world_rank:{info.world_rank} ffn_sp_size: {info.ffn_sp_size} invalid world config"
             )
         # 假设 GPU 均匀分布，可以整除
         if info.world_size % info.local_world_size != 0:
@@ -178,6 +191,7 @@ class ParallelInfo(object):
         new_info = self.from_env(worker_info_port_num)
         self.tp_size = new_info.tp_size
         self.pp_size = new_info.pp_size
+        self.cp_size = new_info.cp_size
         self.world_size = new_info.world_size
         self.world_rank = new_info.world_rank
         self.local_world_size = new_info.local_world_size
@@ -185,7 +199,7 @@ class ParallelInfo(object):
         logging.info(f"ParallelInfo reload: {self}")
 
     def __str__(self):
-        return f"ParallelInfo:[ tp_size={self.tp_size} pp_size={self.pp_size} world_size={self.world_size} world_rank={self.world_rank} local_world_size={self.local_world_size} tp_rank={self.tp_rank} dp_rank={self.dp_rank} ep_size={self.ep_size} dp_size={self.dp_size} ep_rank={self.ep_rank} local_rank={self.local_rank} ffn_sp_size={self.ffn_sp_size} worker_info_port_num={self.worker_info_port_num}]"
+        return f"ParallelInfo:[ tp_size={self.tp_size} pp_size={self.pp_size} cp_size={self.cp_size} world_size={self.world_size} world_rank={self.world_rank} local_world_size={self.local_world_size} tp_rank={self.tp_rank} dp_rank={self.dp_rank} ep_size={self.ep_size} dp_size={self.dp_size} ep_rank={self.ep_rank} local_rank={self.local_rank} ffn_sp_size={self.ffn_sp_size} worker_info_port_num={self.worker_info_port_num}]"
 
 
 class WorkerInfo(object):
@@ -403,6 +417,7 @@ class MasterInfo:
     sp_gpt_nccl_port: int
     dp_tp_nccl_port: int
     ffn_tp_nccl_port: int
+    cp_nccl_port: int
 
 
 g_master_info = MasterInfo(
@@ -413,6 +428,7 @@ g_master_info = MasterInfo(
     sp_gpt_nccl_port=0,
     dp_tp_nccl_port=0,
     ffn_tp_nccl_port=0,
+    cp_nccl_port=0,
 )
 
 
@@ -420,6 +436,7 @@ def update_master_info(ip: str, base_port: int):
     g_master_info.ip = ip
     g_master_info.dp_tp_nccl_port = base_port - 10
     g_master_info.th_nccl_port = base_port - 11
+    g_master_info.cp_nccl_port = base_port - 12
     base_port -= g_parallel_info.dp_rank * MASTER_INFO_PORT_NUM
     g_master_info.tp_nccl_port = base_port - 2
     g_master_info.nccl_op_port = base_port - 3

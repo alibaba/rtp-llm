@@ -1,5 +1,7 @@
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
+#include "rtp_llm/cpp/normal_engine/ContextParallelUtils.h"
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/models/GptModel.h"
@@ -7,6 +9,8 @@
 #include "rtp_llm/cpp/models/NativeDeviceGraphModel.h"
 #include "rtp_llm/cpp/models/Sampler.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
+
+#include <iostream>
 
 using namespace std;
 
@@ -32,9 +36,10 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
         int  first_moe_layer = params.model_config_.moe_layer_index.front();
         auto moe_weight_type = params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->type();
         bool is_gated_activation = params.model_config_.isGatedActivation();
-        auto moe_inter_size = is_gated_activation ?
-            params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->shape()[1] / 2 :
-            params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->shape()[1];
+        auto moe_inter_size =
+            is_gated_activation ?
+                params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->shape()[1] / 2 :
+                params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->shape()[1];
 
         expert_balancer_ = make_shared<ExpertBalancer>(params.model_config_.expert_num,
                                                        params.eplb_config.phy_exp_num(params.model_config_.expert_num),
@@ -110,6 +115,18 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         if (model_input.skip_run) {
             return absl::OkStatus();
         }
+
+        if (device_->getDeviceProperties().cp_size > 1) {
+            // handle context parallel inputs, do padding and shuffle and slice
+            int cp_rank = device_->getDeviceProperties().cp_rank;
+            int cp_size = device_->getDeviceProperties().cp_size;
+            RTP_LLM_LOG_INFO("[cp_rank: %d], model_input: %s", cp_rank, model_input.debugString().c_str());
+            std::cout << "[cp_rank: " << cp_rank << "], model_input: " << model_input.debugString().c_str() << endl;
+            handleContextParallelInputs(model_input, cp_rank, cp_size);
+            std::cout << "[cp_rank: " << cp_rank << "], model_input after slice: " << model_input.debugString().c_str()
+                      << endl;
+            RTP_LLM_LOG_INFO("[cp_rank: %d], model_input after slice: %s", cp_rank, model_input.debugString().c_str());
+        }
         executor_collector.tp_sync_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
@@ -144,7 +161,9 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         expert_balancer_->stepForward(*model_, executor_collector);
         executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
-    if (device_->getDeviceProperties().tp_rank > 0 || warm_up_ || streams.size() == 0) {
+
+    if (device_->getDeviceProperties().tp_rank > 0 || device_->getDeviceProperties().cp_rank > 0 || warm_up_
+        || streams.size() == 0) {
         device_->syncAndCheck();
         model_->releaseBuffers();
         return absl::OkStatus();
@@ -173,7 +192,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
 void NormalExecutor::reportMetrics(const StreamGroups&             stream_groups,
                                    RtpLLMExecutorMetricsCollector& executor_collector,
                                    RtpLLMTokenPSMetricsCollector&  tps_collector) {
-    if (device_->getDeviceProperties().tp_rank > 0) {
+    if (device_->getDeviceProperties().tp_rank > 0 || device_->getDeviceProperties().cp_rank > 0) {
         return;
     }
     if (metrics_reporter_) {
@@ -194,6 +213,69 @@ void NormalExecutor::reportMetrics(const StreamGroups&             stream_groups
         tps_collector.total_tps    = stream_groups.modelExecuteTokenSize();
         tps_reporter_.report(&tps_collector);
     }
+}
+
+void NormalExecutor::handleContextParallelInputs(GptModelInputs& model_input, int cp_rank, int cp_size) {
+    auto& total_input_tokens = model_input.combo_tokens;
+    auto& input_lengths      = model_input.input_lengths;
+    auto& sequence_lengths   = model_input.sequence_lengths;
+    // auto& prefix_lengths = model_input.prefix_lengths;
+    auto& prefill_cp_padding_lengths = model_input.prefill_cp_padding_lengths;
+    auto& prefill_cp_chunk_lengths   = model_input.prefill_cp_chunk_lengths;
+    auto& prefill_shuffle_indices    = model_input.prefill_shuffle_indices;
+
+    int num_decode_stream  = sequence_lengths->shape()[0];
+    int num_prefill_stream = input_lengths->shape()[0] - num_decode_stream;
+
+    size_t cp_split_tokens_size = num_decode_stream;
+    for (int p = 0; p < num_prefill_stream; ++p) {
+        cp_split_tokens_size += static_cast<size_t>(prefill_cp_chunk_lengths->data<int>()[p]);
+    }
+
+    auto cp_split_input_tokens = CACHED_HOST_BUF(TYPE_INT32, {cp_split_tokens_size});
+
+    int* input_token_ptr             = (int*)cp_split_input_tokens->data();
+    int* input_length_ptr            = (int*)input_lengths->data();
+    int* prefill_shuffle_indices_ptr = (int*)prefill_shuffle_indices->data();
+
+    int input_token_idx       = 0;
+    int total_input_token_idx = 0;
+    // handle decode stream, directly memcpy input tokens
+    if (num_decode_stream > 0) {
+        std::memcpy(input_token_ptr,
+                    total_input_tokens->dataWithOffset<int>(total_input_token_idx),
+                    num_decode_stream * sizeof(int));
+        input_token_idx += num_decode_stream;
+        total_input_token_idx += num_decode_stream;
+    }
+    // handle prefill stream
+    for (int p = 0; p < num_prefill_stream; ++p) {
+        int input_chunk_length   = prefill_cp_chunk_lengths->data<int>()[p];
+        int input_padding_length = prefill_cp_padding_lengths->data<int>()[p];
+        int input_length         = input_lengths->data<int>()[p + num_decode_stream];
+        // Copy input tokens for this prefill stream
+        int*             src_tokens = total_input_tokens->dataWithOffset<int>(total_input_token_idx);
+        std::vector<int> total_input_token_vec(src_tokens, src_tokens + input_length);
+        std::vector<int> chunk_input_token(input_chunk_length, 0);
+        std::vector<int> shuffle_index(input_chunk_length, -1);
+        bool             success = contextParallelLoadBalanceSplit(total_input_token_vec,
+                                                       chunk_input_token,
+                                                       shuffle_index,
+                                                       cp_rank,
+                                                       cp_size,
+                                                       input_chunk_length,
+                                                       input_padding_length);
+        RTP_LLM_CHECK_WITH_INFO(success, "contextParallelLoadBalanceSplit failed for prefill stream %d", p);
+        // 写回新构造的input输入
+        input_length_ptr[p + num_decode_stream] = input_chunk_length;
+        std::memcpy(input_token_ptr + input_token_idx, chunk_input_token.data(), input_chunk_length * sizeof(int));
+        std::memcpy(
+            prefill_shuffle_indices_ptr + input_token_idx, shuffle_index.data(), input_chunk_length * sizeof(int));
+        input_token_idx += input_chunk_length;
+        total_input_token_idx += input_length;
+    }
+    // update model_input combo tokens
+    model_input.combo_tokens = std::move(cp_split_input_tokens);
 }
 
 bool NormalExecutor::updateEplbConfig(const EPLBConfig& config) {

@@ -80,8 +80,8 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
             torch::zeros({batch_size + 1}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
         py_attn_inputs.cu_kv_seqlens =
             torch::zeros({batch_size + 1}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
-        torch::Tensor decode_cu_seqlens          = torch::arange(
-                0, py_attn_inputs.sequence_lengths.size(0) + 1, 1, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
+        torch::Tensor decode_cu_seqlens = torch::arange(
+            0, py_attn_inputs.sequence_lengths.size(0) + 1, 1, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
         py_attn_inputs.decode_cu_seqlens_host = decode_cu_seqlens;
         py_attn_inputs.decode_cu_seqlens_d    = decode_cu_seqlens.cuda();
     }
@@ -154,6 +154,24 @@ GptModelOutputs PyWrappedModel::callForwardPostLayers(BufferPtr             hidd
                              inputs,
                              nullptr,
                              skip_final_layernorm);
+}
+
+std::optional<PyContextParallelParams> PyWrappedModel::prepareContextParallelParams(const GptModelInputs& inputs) {
+    std::optional<PyContextParallelParams> params;
+    if (inputs.prefill_cp_padding_lengths) {
+        auto prefill_cp_padding_lengths = Buffer2torchTensor(inputs.prefill_cp_padding_lengths);
+        auto prefill_cp_chunk_lengths   = Buffer2torchTensor(inputs.prefill_cp_chunk_lengths);
+        auto prefill_shuffle_indices    = Buffer2torchTensor(inputs.prefill_shuffle_indices);
+
+        int total_chunk_size    = prefill_cp_chunk_lengths.sum().item<int64_t>();
+        prefill_shuffle_indices = prefill_shuffle_indices.slice(0, 0, total_chunk_size);
+        params                  = PyContextParallelParams{
+            prefill_cp_padding_lengths.cuda(),
+            prefill_cp_chunk_lengths.cuda(),
+            prefill_shuffle_indices.cuda(),
+        };
+    }
+    return params;
 }
 
 std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const GptModelInputs& inputs) {
@@ -279,6 +297,11 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         BufferPtr kv_cache_block_id_device;
         if (!inputs.warmup && inputs.pd_separation) {
             attention_inputs.cache_store_inputs = prepareWriteCacheParams(inputs);
+        }
+        if (inputs.prefill_cp_padding_lengths) {
+            attention_inputs.context_parallel_info = prepareContextParallelParams(inputs);
+            // FIXME: Handle position_ids calculation in prefix cache scenario
+            attention_inputs.position_ids = attention_inputs.context_parallel_info->prefill_shuffle_indices;
         }
         setupKVCacheForAttentionInputs(attention_inputs, inputs, kv_cache_block_id_device);
 

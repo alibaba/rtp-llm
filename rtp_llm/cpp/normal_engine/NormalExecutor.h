@@ -39,6 +39,9 @@ public:
     bool updateEplbConfig(const EPLBConfig& config) override;
 
 private:
+    void handleContextParallelInputs(GptModelInputs& model_input, int cp_rank, int cp_size);
+
+private:
     std::unique_ptr<GptModel>                                                model_;
     std::unique_ptr<Sampler>                                                 sampler_;
     std::unique_ptr<NormalBatchStreamProcessor>                              batch_stream_processor_;
