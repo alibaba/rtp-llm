@@ -759,6 +759,7 @@ class moe_args:
     permute_info: torch.Tensor = None
     use_routing_scales_on_input: bool = None
     gated_act_type: GatedActType = None
+    routing_bias: torch.Tensor = None
     topk_ids: torch.Tensor = None
     topk_weights: torch.Tensor = None
     hidden_states: torch.Tensor = None
