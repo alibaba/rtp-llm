@@ -96,7 +96,7 @@ class FP4Moe:
         gemm1_weights_fp4_bytes, gemm1_scales_fp4_bytes, gemm1_scales_global = (
             quant_nvfp4_batches(gemm1_weights, num_experts, True)
         )
-        torch.save(gemm1_weights_fp4_bytes, Path.home() / "gemm1_weights_fp4_bytes.pt")
+        torch.save(gemm1_scales_fp4_bytes, Path.home() / "gemm1_scales_fp4_bytes.pt")
         gemm2_weights_fp4_bytes, gemm2_scales_fp4_bytes, gemm2_scales_global = (
             quant_nvfp4_batches(gemm2_weights, num_experts, True)
         )
