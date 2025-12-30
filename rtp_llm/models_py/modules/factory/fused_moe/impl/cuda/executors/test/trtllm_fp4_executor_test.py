@@ -1069,7 +1069,7 @@ def run_moe_dequant(args):
     for i in range(args.num_tokens):
         for j in range(args.top_k):
             permuted_idx = expanded_idx_to_permuted_idx[i * args.top_k + j]
-            permute_output[permuted_idx] = args.hidden_states[i]
+            permute_output[permuted_idx] = args.hidden_states_dequant[i]
 
     # Gemm1
     gemm1_output = torch.full(
@@ -1083,7 +1083,7 @@ def run_moe_dequant(args):
         if my_num_tokens == 0:
             continue
         my_a = permute_output[i : i + my_num_tokens]
-        my_b = args.gemm1_weights[expert_idx]
+        my_b = args.gemm1_weights_dequant[expert_idx]
         my_c = my_a @ my_b.t()
         gemm1_output[i : i + my_num_tokens] = my_c
         i += my_num_tokens
@@ -1143,7 +1143,7 @@ def run_moe_dequant(args):
         if my_num_tokens == 0:
             continue
         my_a = activation_output[i : i + my_num_tokens]
-        my_b = args.gemm2_weights[expert_idx]
+        my_b = args.gemm2_weights_dequant[expert_idx]
         my_c = my_a @ my_b.t()
         gemm2_output[i : i + my_num_tokens] = my_c
         i += my_num_tokens
