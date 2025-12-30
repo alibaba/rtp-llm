@@ -440,7 +440,6 @@ class FP4Moe(Moe):
         return {
             "hidden_states": hidden_states_fp4_bytes,
             "hidden_states_scale": hidden_states_scale_fp4_bytes,
-            "hidden_states_org": hidden_states,
         }
 
     def prepare_static_weights_for_kernel(self, args):
