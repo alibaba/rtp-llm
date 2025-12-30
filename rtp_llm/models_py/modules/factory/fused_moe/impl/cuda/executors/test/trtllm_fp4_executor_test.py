@@ -654,7 +654,6 @@ class FP4Moe(Moe):
 
 class FP4MoeExecutor(FP4Moe):
     def prepare_static_weights_for_kernel(self, args):
-        use_ue8m0 = self.is_mxfp4
         gemm1_scales_linear_fp4_bytes = args.gemm1_scales
         gemm2_scales_linear_fp4_bytes = args.gemm2_scales
         # Convert quantized weights to proper formats
