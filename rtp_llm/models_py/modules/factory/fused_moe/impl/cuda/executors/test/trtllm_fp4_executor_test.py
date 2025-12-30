@@ -122,7 +122,7 @@ class moe_args:
 
 cache_permute_indices = dict()
 
-class FP4Moe(Moe):
+class FP4Moe:
     def __init__(self):
         super().__init__()
         self.sf_vec_size = 16
