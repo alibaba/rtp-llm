@@ -141,64 +141,15 @@ class FP4Moe:
         }
 
     def prepare_static_weights_for_kernel(self, args):
-        # hidden_size = args.hidden_size
-        # intermediate_size = args.intermediate_size
-        # num_experts = args.num_experts
-        # epilogue_tile_m = 128
-
-        # gemm1_scales_linear_fp4_bytes = args.gemm1_scales_linear
-        # gemm2_scales_linear_fp4_bytes = args.gemm2_scales_linear
-
-        # gemm1_weights_fp4 = args.gemm1_weights.view(torch.float8_e4m3fn).reshape(
-        #     num_experts, 2 * intermediate_size, hidden_size // 2
-        # )
-        # gemm1_scales_linear_fp4 = gemm1_scales_linear_fp4_bytes.view(
-        #     torch.float8_e4m3fn
-        # ).reshape(
-        #     num_experts, 2 * intermediate_size, hidden_size // self.sf_vec_size
-        # )
-
-        # gemm2_weights_fp4 = args.gemm2_weights.view(torch.float8_e4m3fn).reshape(
-        #     num_experts, hidden_size, intermediate_size // 2
-        # )
-        # gemm2_scales_linear_fp4 = gemm2_scales_linear_fp4_bytes.view(
-        #     torch.float8_e4m3fn
-        # ).reshape(
-        #     num_experts, hidden_size, intermediate_size // self.sf_vec_size
-        # )
-
-        # def tensor_info(t, name):
-        #     print(name, t.shape, t.dtype)
-        # args.gemm1_weights_fp4_shuffled = gemm1_weights_fp4
-        # args.gemm1_scales_fp4_shuffled = gemm1_scales_linear_fp4
-        # args.gemm2_weights_fp4_shuffled = gemm2_weights_fp4
-        # args.gemm2_scales_fp4_shuffled = gemm2_scales_linear_fp4
-        # tensor_info(args.gemm1_weights, "gemm1_weights")
-        # tensor_info(args.gemm1_weights_fp4_shuffled, "gemm1_weights_fp4_shuffled")
-        # tensor_info(args.gemm1_scales_linear, "gemm1_scales_linear")
-        # tensor_info(args.gemm1_scales_fp4_shuffled, "gemm1_scales_fp4_shuffled")
-        # tensor_info(args.gemm2_weights, "gemm2_weights")
-        # tensor_info(args.gemm2_weights_fp4_shuffled, "gemm2_weights_fp4_shuffled")
-        # tensor_info(args.gemm2_scales_linear, "gemm2_scales_linear")
-        # tensor_info(args.gemm2_scales_fp4_shuffled, "gemm2_scales_fp4_shuffled")
-        # assert 0
-        args.gemm1_weights_fp4_shuffled = args.gemm1_weights.view(torch.float8_e4m3fn)
-        args.gemm1_scales_fp4_shuffled = args.gemm1_scales_linear.view(torch.float8_e4m3fn)
-        args.gemm2_weights_fp4_shuffled = args.gemm2_weights.view(torch.float8_e4m3fn)
-        args.gemm2_scales_fp4_shuffled = args.gemm2_scales_linear.view(torch.float8_e4m3fn)
-        
-        self.swizzle_weights(args)
-
-    def swizzle_weights(self, args):
         hidden_size = args.hidden_size
         intermediate_size = args.intermediate_size
         num_experts = args.num_experts
         epilogue_tile_m = 128
 
-        gemm1_weights_fp4 = args.gemm1_weights_fp4_shuffled 
-        gemm1_scales_linear_fp4 = args.gemm1_scales_fp4_shuffled
-        gemm2_weights_fp4 = args.gemm2_weights_fp4_shuffled
-        gemm2_scales_linear_fp4 = args.gemm2_scales_fp4_shuffled
+        gemm1_weights_fp4 = args.gemm1_weights.view(torch.float8_e4m3fn)
+        gemm1_scales_linear_fp4 = args.gemm1_scales_linear.view(torch.float8_e4m3fn)
+        gemm2_weights_fp4 = args.gemm2_weights.view(torch.float8_e4m3fn)
+        gemm2_scales_linear_fp4 = args.gemm2_scales_linear.view(torch.float8_e4m3fn)
 
         gemm1_weights_fp4_shuffled = []
         gemm1_scales_fp4_shuffled = []
@@ -378,7 +329,7 @@ class FP4Moe:
         return {"atol": 0.1, "rtol": 0.85, "percent": 0.925}
 
 class FP4MoeExecutor(FP4Moe):
-    def swizzle_weights(self, args):
+    def prepare_static_weights_for_kernel(self, args):
         pass
 
     def call_moe(self, args):
@@ -402,10 +353,10 @@ class FP4MoeExecutor(FP4Moe):
             expert_topk_weights=args.topk_weights,
         )
         weights = {
-            W.moe_w1: args.gemm1_weights_fp4_shuffled,
-            W.moe_w2: args.gemm2_weights_fp4_shuffled,
-            W.moe_s1: args.gemm1_scales_fp4_shuffled,
-            W.moe_s2: args.gemm2_scales_fp4_shuffled,
+            W.moe_w1: args.gemm1_weights.view(torch.float8_e4m3fn),
+            W.moe_w2: args.gemm2_weights.view(torch.float8_e4m3fn),
+            W.moe_s1: args.gemm1_scales_linear.view(torch.float8_e4m3fn),
+            W.moe_s2: args.gemm2_scales_linear.view(torch.float8_e4m3fn),
             "w13_input_scale": 1.0 / args.hidden_states_scale_global,
             "w13_weight_scale_2": 1.0 / args.gemm1_scales_global,
             "w2_input_scale": 1.0 / args.c_global_sf,
@@ -944,7 +895,7 @@ def test_moe(
 
 
 if __name__ == "__main__":
-    for cls in [FP4MoeExecutor]:
+    for cls in [FP4Moe, FP4MoeExecutor]:
         test_moe(
             num_tokens=3072,
             hidden_size=1024,
