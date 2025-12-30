@@ -38,91 +38,98 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.trtllm_fp4_
 )
 from rtp_llm.utils.model_weight import W
 
+@dataclass(frozen=False, slots=True)
+class moe_args:
+    num_tokens: int = None
+    num_experts: int = None
+    hidden_size: int = None
+    intermediate_size: int = None
+    top_k: int = None
+    padding: int = None
+    n_groups : int = None
+    top_k_groups : int = None
+    routed_scaling: float = None
+    routing_method_type: RoutingMethodType = None
+    permute_info: torch.Tensor = None
+    use_routing_scales_on_input: bool = None
+    gated_act_type: GatedActType = None
+    routing_bias: torch.Tensor = None
+    topk_ids: torch.Tensor = None
+    topk_weights: torch.Tensor = None
+    hidden_states: torch.Tensor = None
+    hidden_states_scale: torch.Tensor = None
+    hidden_states_scale_global: torch.Tensor = None
+    hidden_states_dequant: torch.Tensor = None
+    hidden_states_orig: torch.Tensor = None
+    expert_logits: torch.Tensor = None
+    gemm1_weights: torch.Tensor = None
+    gemm1_scales: torch.Tensor = None
+    gemm1_scales_global: torch.Tensor = None
+    gemm1_scales_linear: torch.Tensor = None
+    gemm1_weights_dequant: torch.Tensor = None
+    gemm1_weights_orig: torch.Tensor = None
+    gemm1_weights_fp4_shuffled: torch.Tensor = None
+    gemm1_scales_fp4_shuffled: torch.Tensor = None
+    gemm2_weights: torch.Tensor = None
+    gemm2_scales: torch.Tensor = None
+    gemm2_scales_global: torch.Tensor = None
+    gemm2_scales_linear: torch.Tensor = None
+    gemm2_weights_dequant: torch.Tensor = None
+    gemm2_weights_orig: torch.Tensor = None
+    gemm2_weights_fp4_shuffled: torch.Tensor = None
+    gemm2_scales_fp4_shuffled: torch.Tensor = None
+    c_global_sf: torch.Tensor = None
+    scale_c_fc1: torch.Tensor = None
+    scale_gate_fc1: torch.Tensor = None
+    scale_c_fc2: torch.Tensor = None
 
-def check_cuda(err):
-    """Unified CUDA error checking function used throughout the file."""
-    if err != runtime.cudaError_t.cudaSuccess:
-        error_name = runtime.cudaGetErrorName(err)
-        error_string = runtime.cudaGetErrorString(err)
-        raise RuntimeError(f"CUDA error: {error_name[1]}: {error_string[1]}")
+# class Moe(ABC):
+#     """Abstract base class for MoE implementations."""
 
+#     def __init__(self):
+#         self.name = self.__class__.__name__
 
-class Moe(ABC):
-    """Abstract base class for MoE implementations."""
+#     @abstractmethod
+#     def quantize_weights(self, gemm1_weights, gemm2_weights, hidden_states_sample):
+#         pass
 
-    def __init__(self):
-        self.name = self.__class__.__name__
+#     @abstractmethod
+#     def quantize_inputs(self, hidden_states, hidden_states_scale_global):
+#         pass
 
-    @abstractmethod
-    def quantize_weights(self, gemm1_weights, gemm2_weights, hidden_states_sample):
-        """Quantize static weights and compute global scale factors (done offline)."""
-        pass
+#     @abstractmethod
+#     def prepare_static_weights_for_kernel(self, args):
+#         pass
 
-    @abstractmethod
-    def quantize_inputs(self, hidden_states, hidden_states_scale_global):
-        """Quantize dynamic inputs/hidden states using pre-computed global scale (done at runtime)."""
-        pass
+#     @abstractmethod
+#     def call_moe(self, args):
+#         pass
 
-    @abstractmethod
-    def prepare_static_weights_for_kernel(self, args):
-        """
-        Prepare quantized weights for kernel (done offline with weights).
+#     @abstractmethod
+#     def compute_reference(self, args):
+#         pass
 
-        Args:
-            args_dequant: Contains c_global_sf and other dequantization parameters
-            args: Contains already quantized weights (gemm1_weights, gemm2_weights) and scales
-            gemm1_weights_orig: Original unquantized FC1 weights (used by FP4 for re-quantization)
-            gemm2_weights_orig: Original unquantized FC2 weights (used by FP4 for re-quantization)
+#     def compute_production(self, args):
+#         self.prepare_static_weights_for_kernel(args)
+#         return self.call_moe(args)
 
-        Note:
-            - FP4 implementations use both original weights (for linear layout quantization)
-              and args.gemm*_weights (for swizzled layout)
-            - FP8 implementations typically only use args.gemm*_weights (already quantized)
-        """
-        pass
+#     @abstractmethod
+#     def get_tolerances(self):
+#         pass
 
-    @abstractmethod
-    def call_moe(self, args):
-        """Call MoE with runtime input quantization + kernel execution (done at runtime)."""
-        pass
+#     def __str__(self):
+#         return self.name
 
-    @abstractmethod
-    def compute_reference(self, args):
-        """Compute reference output using dequantized operations."""
-        pass
-
-    def compute_production(self, args):
-        self.prepare_static_weights_for_kernel(args)
-
-        args.w13_weight_scale_2 = 1.0 / args.gemm1_scales_global
-        args.w2_weight_scale_2 = 1.0 / args.gemm2_scales_global
-        args.w13_input_scale = 1.0 / args.hidden_states_scale_global
-        args.w2_input_scale = 1.0 / args.c_global_sf
-
-        return self.call_moe(args)
-
-    @abstractmethod
-    def get_tolerances(self):
-        """Get accuracy tolerances for this quantization mode."""
-        pass
-
-    def __str__(self):
-        return self.name
+cache_permute_indices = dict()
 
 class FP4Moe(Moe):
-    """
-    FP4 NvFP4 / MxFP4 MoE implementation with block scaling.
-    Args:
-        is_mxfp4: Whether to use MxFP4 or NvFP4 weight quantization
-            If True, the activation is quantized to MxFP8, else the activation is quantized to NvFP4
-    """
-
     def __init__(self):
         super().__init__()
         self.sf_vec_size = 16
+        global cache_permute_indices
+        self._cache_permute_indices = cache_permute_indices
 
     def quantize_weights(self, gemm1_weights, gemm2_weights, hidden_states_sample):
-        """Quantize weights to FP4 format and compute global scale factors."""
         num_experts = gemm1_weights.shape[0]
         hidden_states_scale_global = calculate_fp4_global_scale_factor(
             hidden_states_sample,
@@ -132,13 +139,16 @@ class FP4Moe(Moe):
         gemm1_weights_fp4_bytes, gemm1_scales_fp4_bytes, gemm1_scales_global = (
             quant_nvfp4_batches(gemm1_weights, num_experts, True)
         )
+        torch.save(gemm1_weights_fp4_bytes, Path.home() / "gemm1_weights_fp4_bytes.pt")
         gemm2_weights_fp4_bytes, gemm2_scales_fp4_bytes, gemm2_scales_global = (
             quant_nvfp4_batches(gemm2_weights, num_experts, True)
         )
 
+        # TODO: why swizzling=False?
         _, gemm1_scales_linear_fp4_bytes, _ = (
             quant_nvfp4_batches(gemm1_weights, num_experts, False)
         )
+        torch.save(gemm1_scales_linear_fp4_bytes, Path.home() / "gemm1_scales_linear_fp4_bytes.pt")
         _, gemm2_scales_linear_fp4_bytes, _ = (
             quant_nvfp4_batches(gemm2_weights, num_experts, False)
         )
@@ -160,7 +170,6 @@ class FP4Moe(Moe):
     def quantize_inputs(
         self, hidden_states, hidden_states_scale_global, is_swizzling=True
     ):
-        """Quantize hidden states to NvFP4 format using pre-computed global scale."""
         (
             hidden_states_fp4_bytes,
             hidden_states_scale_fp4_bytes,
@@ -175,45 +184,54 @@ class FP4Moe(Moe):
         }
 
     def prepare_static_weights_for_kernel(self, args):
-        """Prepare quantized weights for kernel (done offline with weights)."""
         hidden_size = args.hidden_size
         intermediate_size = args.intermediate_size
         num_experts = args.num_experts
-
-        epilogue_tile_m = 128  # FIXME: this depends on the kernel internals
+        epilogue_tile_m = 128
 
         gemm1_scales_linear_fp4_bytes = args.gemm1_scales_linear
         gemm2_scales_linear_fp4_bytes = args.gemm2_scales_linear
 
-        # Convert quantized weights to proper formats
         gemm1_weights_fp4 = args.gemm1_weights.view(torch.float8_e4m3fn).reshape(
             num_experts, 2 * intermediate_size, hidden_size // 2
-        )  # packed fp4
+        )
         gemm1_scales_linear_fp4 = gemm1_scales_linear_fp4_bytes.view(
             torch.float8_e4m3fn
         ).reshape(
             num_experts, 2 * intermediate_size, hidden_size // self.sf_vec_size
-        )  # fp8 scaling factors
+        )
 
         gemm2_weights_fp4 = args.gemm2_weights.view(torch.float8_e4m3fn).reshape(
             num_experts, hidden_size, intermediate_size // 2
-        )  # packed fp4
+        )
         gemm2_scales_linear_fp4 = gemm2_scales_linear_fp4_bytes.view(
             torch.float8_e4m3fn
         ).reshape(
             num_experts, hidden_size, intermediate_size // self.sf_vec_size
-        )  # fp8 scaling factors
+        )
 
-        # Using cached permute index calculation can speed up weights preprocessing
+        args.gemm1_weights_fp4_shuffled = gemm1_weights_fp4
+        args.gemm1_scales_fp4_shuffled = gemm1_scales_linear_fp4
+        args.gemm2_weights_fp4_shuffled = gemm2_weights_fp4
+        args.gemm2_scales_fp4_shuffled = gemm2_scales_linear_fp4
+        self.swizzle_weights(args)
+
+    def swizzle_weights(self, args):
+        hidden_size = args.hidden_size
+        intermediate_size = args.intermediate_size
+        num_experts = args.num_experts
+        epilogue_tile_m = 128
+
+        gemm1_weights_fp4 = args.gemm1_weights_fp4_shuffled 
+        gemm1_scales_linear_fp4 = args.gemm1_scales_fp4_shuffled
+        gemm2_weights_fp4 = args.gemm2_weights_fp4_shuffled
+        gemm2_scales_linear_fp4 = args.gemm2_scales_fp4_shuffled
+
         gemm1_weights_fp4_shuffled = []
         gemm1_scales_fp4_shuffled = []
         gemm2_weights_fp4_shuffled = []
         gemm2_scales_fp4_shuffled = []
         for i in range(num_experts):
-            # Calculate the permute indices for the following:
-            # 1. Reorder rows of W1 and scales for fused gated activation
-            # 2. Shuffle weights and scaling factors for transposed mma output
-            # for both w3_w1 and w2 weights and scale factors
             permute_indices = _maybe_get_cached_w3_w1_permute_indices(
                 self._cache_permute_indices,
                 gemm1_weights_fp4[i].view(torch.uint8),
@@ -268,7 +286,6 @@ class FP4Moe(Moe):
                 )
             )
 
-        # Stack weights for all experts
         gemm1_weights_fp4_shuffled = torch.stack(gemm1_weights_fp4_shuffled)
         gemm1_scales_fp4_shuffled = (
             torch.stack(gemm1_scales_fp4_shuffled)
@@ -285,7 +302,6 @@ class FP4Moe(Moe):
             .reshape(num_experts, hidden_size, intermediate_size // self.sf_vec_size)
         )
 
-        # Calculate scaling factors that depend on weights
         scale_c_fc1 = (
             args.c_global_sf
             * (1.0 / args.gemm1_scales_global)
@@ -307,7 +323,6 @@ class FP4Moe(Moe):
         args.scale_c_fc2 = scale_c_fc2
 
     def call_moe(self, args):
-        # Prepare parameters for dumping
         input_quantized = self.quantize_inputs(
             args.hidden_states_orig,
             args.hidden_states_scale_global,
@@ -316,7 +331,6 @@ class FP4Moe(Moe):
 
         args.hidden_states = input_quantized["hidden_states"]
         args.hidden_states_scale = input_quantized["hidden_states_scale"]
-        # Dump parameters if DUMP_FP4 environment variable is set
         output = trtllm_fp4_block_scale_moe(
             routing_logits=args.expert_logits,
             routing_bias=args.routing_bias,
@@ -354,6 +368,11 @@ class FP4Moe(Moe):
         sf_vec_size = 16
         ufp8_type_weights = 1
 
+        inputs_data = self.quantize_inputs(
+            args.hidden_states_orig, args.hidden_states_scale_global, is_swizzling=True
+        )
+        args.hidden_states = inputs_data["hidden_states"]
+        args.hidden_states_scale = inputs_data["hidden_states_scale"]
         args.hidden_states_dequant = e2m1_and_ufp8sf_scale_to_float(
             args.hidden_states.cpu(),
             args.hidden_states_scale.cpu().view(torch.uint8).reshape(-1),
@@ -386,31 +405,8 @@ class FP4Moe(Moe):
         return {"atol": 0.1, "rtol": 0.85, "percent": 0.925}
 
 class FP4MoeExecutor(FP4Moe):
-    def prepare_static_weights_for_kernel(self, args):
-        gemm1_scales_linear_fp4_bytes = args.gemm1_scales_linear
-        gemm2_scales_linear_fp4_bytes = args.gemm2_scales_linear
-        # Convert quantized weights to proper formats
-        gemm1_weights_fp4 = args.gemm1_weights.view(torch.float8_e4m3fn).reshape(
-            args.num_experts, 2 * args.intermediate_size, args.hidden_size // 2
-        )  # packed fp4
-        gemm1_scales_linear_fp4 = gemm1_scales_linear_fp4_bytes.view(
-            torch.float8_e4m3fn
-        ).reshape(
-            args.num_experts, 2 * args.intermediate_size, args.hidden_size // self.sf_vec_size
-        )  # fp8 scaling factors
-
-        gemm2_weights_fp4 = args.gemm2_weights.view(torch.float8_e4m3fn).reshape(
-            args.num_experts, args.hidden_size, args.intermediate_size // 2
-        )  # packed fp4
-        gemm2_scales_linear_fp4 = gemm2_scales_linear_fp4_bytes.view(
-            torch.float8_e4m3fn
-        ).reshape(
-            args.num_experts, args.hidden_size, args.intermediate_size // self.sf_vec_size
-        )  # fp8 scaling factors
-        args.gemm1_weights_fp4_shuffled = gemm1_weights_fp4
-        args.gemm1_scales_fp4_shuffled = gemm1_scales_linear_fp4
-        args.gemm2_weights_fp4_shuffled = gemm2_weights_fp4
-        args.gemm2_scales_fp4_shuffled = gemm2_scales_linear_fp4
+    def swizzle_weights(self, args):
+        pass
 
     def call_moe(self, args):
         model_config = ModelConfig()
@@ -437,64 +433,16 @@ class FP4MoeExecutor(FP4Moe):
             W.moe_w2: args.gemm2_weights_fp4_shuffled,
             W.moe_s1: args.gemm1_scales_fp4_shuffled,
             W.moe_s2: args.gemm2_scales_fp4_shuffled,
-            "w13_input_scale": args.w13_input_scale,
-            "w13_weight_scale_2": args.w13_weight_scale_2,
-            "w2_input_scale": args.w2_input_scale,
-            "w2_weight_scale_2": args.w2_weight_scale_2,
+            "w13_input_scale": 1.0 / args.hidden_states_scale_global,
+            "w13_weight_scale_2": 1.0 / args.gemm1_scales_global,
+            "w2_input_scale": 1.0 / args.c_global_sf,
+            "w2_weight_scale_2": 1.0 / args.gemm2_scales_global,
         }
 
         executor = TrtllmFp4Executor(config, weights, FusedMoEQuantConfig())
         output = executor.execute(payload, "silu", None, None, False, None)
         return output.to(torch.float)
 
-@dataclass(frozen=False, slots=True)
-class moe_args:
-    num_tokens: int = None
-    num_experts: int = None
-    hidden_size: int = None
-    intermediate_size: int = None
-    top_k: int = None
-    padding: int = None
-    n_groups : int = None
-    top_k_groups : int = None
-    routed_scaling: float = None
-    routing_method_type: RoutingMethodType = None
-    permute_info: torch.Tensor = None
-    use_routing_scales_on_input: bool = None
-    gated_act_type: GatedActType = None
-    routing_bias: torch.Tensor = None
-    topk_ids: torch.Tensor = None
-    topk_weights: torch.Tensor = None
-    hidden_states: torch.Tensor = None
-    hidden_states_scale: torch.Tensor = None
-    hidden_states_scale_global: torch.Tensor = None
-    hidden_states_dequant: torch.Tensor = None
-    hidden_states_orig: torch.Tensor = None
-    expert_logits: torch.Tensor = None
-    gemm1_weights: torch.Tensor = None
-    gemm1_scales: torch.Tensor = None
-    gemm1_scales_global: torch.Tensor = None
-    gemm1_scales_linear: torch.Tensor = None
-    gemm1_weights_dequant: torch.Tensor = None
-    gemm1_weights_orig: torch.Tensor = None
-    gemm1_weights_fp4_shuffled: torch.Tensor = None
-    gemm1_scales_fp4_shuffled: torch.Tensor = None
-    gemm2_weights: torch.Tensor = None
-    gemm2_scales: torch.Tensor = None
-    gemm2_scales_global: torch.Tensor = None
-    gemm2_scales_linear: torch.Tensor = None
-    gemm2_weights_dequant: torch.Tensor = None
-    gemm2_weights_orig: torch.Tensor = None
-    gemm2_weights_fp4_shuffled: torch.Tensor = None
-    gemm2_scales_fp4_shuffled: torch.Tensor = None
-    c_global_sf: torch.Tensor = None
-    scale_c_fc1: torch.Tensor = None
-    scale_gate_fc1: torch.Tensor = None
-    scale_c_fc2: torch.Tensor = None
-    w13_weight_scale_2: torch.Tensor = None
-    w2_weight_scale_2: torch.Tensor = None
-    w13_input_scale: torch.Tensor = None
-    w2_input_scale: torch.Tensor = None
 
 
 def routing_reference(expertLogits, topK, padding):
@@ -697,22 +645,7 @@ def check_accuracy(a, b, atol, rtol, percent):
         )
 
 
-# ====================================================================================
-# FP4 Quantization Functions
-# ====================================================================================
-
-
 def calculate_fp4_global_scale_factor(tensor, use_ue8m0=False):
-    """
-    Calculate FP4 global scale factor for a tensor.
-
-    NOTE: In production, global scale factors are typically obtained offline during:
-    - Post-Training Quantization (PTQ) calibration process
-    - Quantization-Aware Training (QAT) process
-
-    This function is used here for testing/reference purposes.
-    Formula: (448 * 6) represents max representable value in FP4 format.
-    """
     if use_ue8m0:
         return torch.tensor(1.0, dtype=torch.float32)
     else:
@@ -747,7 +680,6 @@ def e2m1_and_ufp8_scale_batches(
 
 
 def quant_nvfp4_batches(a, num_experts, is_sf_swizzled_layout=True):
-    """FP4 batch quantization function with centralized global scale factor calculation."""
     quant_a = []
     sfs = []
     global_sfs = []
@@ -785,12 +717,6 @@ def quant_dequant_fp4(a, use_ue8m0=False, is_sf_swizzled_layout=True):
     )
 
     return a_pt.cuda(), a_global_sf
-
-
-# ====================================================================================
-# Common MoE Reference Implementation
-# ====================================================================================
-
 
 def run_moe_dequant(args):
     """Common dequantized MoE reference implementation."""
@@ -906,12 +832,6 @@ def run_moe_dequant(args):
         finalize_output[i] = acc
     return finalize_output
 
-
-# ====================================================================================
-# Quantization-Specific Reference Implementations
-# ====================================================================================
-
-
 def test_moe(
     num_tokens,
     hidden_size,
@@ -920,18 +840,12 @@ def test_moe(
     routing_config,
     weight_processing,
     gated_act_type,
-    cache_permute_indices,
 ):
-    """Common test logic for all routing methods."""
-
     torch.cuda.synchronize()
-
-    moe_impl._cache_permute_indices = cache_permute_indices
 
     seed = 0
     torch.random.manual_seed(seed)
 
-    # Extract routing configuration
     top_k = routing_config["top_k"]
     padding = routing_config["padding"]
     n_groups = routing_config.get("n_groups")
@@ -940,7 +854,6 @@ def test_moe(
     num_experts = routing_config["num_experts"]
     routing_method_type = routing_config["routing_method_type"]
 
-    # Validation checks
     assert top_k <= num_experts
     assert top_k <= 10
     if (top_k_groups is not None) and (n_groups is not None) and (n_groups > 0):
@@ -950,15 +863,11 @@ def test_moe(
         assert num_experts % 4 == 0
         assert top_k < (top_k_groups * num_experts / n_groups)
 
-    # Create test data based on routing method
+    expert_logits = torch.randn((num_tokens, num_experts), device="cuda")
     if routing_method_type == RoutingMethodType.DeepSeekV3:
-        expert_logits = torch.randn((num_tokens, num_experts), device="cuda").to(
-            torch.float
-        )
+        expert_logits = expert_logits.to(torch.float)
     else:
-        expert_logits = torch.randn((num_tokens, num_experts), device="cuda").to(
-            torch.bfloat16
-        )
+        expert_logits = expert_logits.to(torch.bfloat16)
 
     if routing_config.get("has_routing_bias"):
         routing_bias = torch.randn(num_experts, device="cuda", dtype=torch.bfloat16)
@@ -1024,9 +933,11 @@ def test_moe(
     )
 
     # 2. Quantize inputs at runtime
-    inputs_data = moe_impl.quantize_inputs(
-        hidden_states, weights_data["hidden_states_scale_global"]
-    )
+    # TODO
+    # inputs_data = moe_impl.quantize_inputs(
+    #     hidden_states, weights_data["hidden_states_scale_global"]
+    # )
+    inputs_data = dict()
 
     topk_ids = permute_info["topKIndices"].to(torch.int32)
     moe_info = {
@@ -1050,10 +961,8 @@ def test_moe(
     args = moe_args(**moe_info, **weights_data, **inputs_data)
 
     output_dequant_reference = moe_impl.compute_reference(args)
-
-    assert output_dequant_reference is not None, "Reference computation failed to produce output"
-
-    output_dequant_actual = moe_impl.compute_production(args)
+    moe_impl.prepare_static_weights_for_kernel(args)
+    output_dequant_actual = moe_impl.call_moe(args)
 
     # Compare outputs
     tolerances = moe_impl.get_tolerances()
@@ -1067,8 +976,6 @@ def test_moe(
         percent=tolerances["percent"],
     )
 
-
-_cache_permute_indices = {}
 
 if __name__ == "__main__":
     for cls in [FP4Moe, FP4MoeExecutor]:
@@ -1088,5 +995,4 @@ if __name__ == "__main__":
                     "layout": WeightLayout.MajorK,
                 },
             gated_act_type=GatedActType.SwiGlu,
-            cache_permute_indices=_cache_permute_indices,
         )
