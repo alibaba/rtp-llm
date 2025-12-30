@@ -1307,7 +1307,7 @@ def test_moe(
     }
     args = moe_args(**moe_info, **weights_data, **inputs_data)
 
-    output_dequant_reference, args_dequant = moe_impl.compute_reference(args)
+    output_dequant_reference = moe_impl.compute_reference(args)
 
     assert output_dequant_reference is not None, "Reference computation failed to produce output"
 
