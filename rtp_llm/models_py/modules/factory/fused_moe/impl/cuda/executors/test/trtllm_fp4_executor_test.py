@@ -364,7 +364,7 @@ class Moe(ABC):
         args.w13_weight_scale_2 = 1.0 / args.gemm1_scales_global
         args.w2_weight_scale_2 = 1.0 / args.gemm2_scales_global
         args.w13_input_scale = 1.0 / args.hidden_states_scale_global
-        args.w2_input_scale = 1.0 / args_dequant.c_global_sf
+        args.w2_input_scale = 1.0 / args.c_global_sf
 
         return self.call_moe(args)
 
