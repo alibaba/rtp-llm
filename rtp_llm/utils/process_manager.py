@@ -82,9 +82,19 @@ class ProcessManager:
 
     def _join_all_processes(self):
         """Join all processes"""
+        deadline = None
+        if self.shutdown_timeout != -1:
+            if self.first_dead_time > 0:
+                deadline = self.first_dead_time + self.shutdown_timeout
+            else:
+                deadline = time.time() + self.shutdown_timeout
+
         for proc in self.processes:
             try:
-                proc.join()
+                timeout = None
+                if deadline is not None:
+                    timeout = max(0.1, deadline - time.time())
+                proc.join(timeout)
             except Exception as e:
                 logging.error(f"Error joining process {proc.pid}: {e}")
         logging.info("All processes joined")
