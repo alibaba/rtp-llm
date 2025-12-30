@@ -25,7 +25,7 @@ from rtp_llm.models_py.triton_kernels.common.activation import (
     silu_mul_masked_bf16_no_post_quant_fwd,
     silu_mul_masked_fp8_post_quant_fwd,
 )
-from rtp_llm.models_py.utils.arch import get_num_device_sms
+from rtp_llm.models_py.utils.arch import get_num_device_sms, get_sm
 from rtp_llm.models_py.utils.memory import dispose_tensor
 from rtp_llm.utils.model_weight import W
 
@@ -52,26 +52,24 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
         checker.check(resolver.is_bf16(config))
         quant_method = resolver.get_quant_method(config)
         checker.check(quant_method in [None, "FP8_PER_BLOCK"])
+        checker.check(get_sm()[0] >= 9)
 
     def __init__(
         self,
         config: MoEConfigAdapter,
-        weights: Dict[str, torch.Tensor],
         quant_config: FusedMoEQuantConfig,
+        weights: Dict[str, torch.Tensor],
     ):
         """Initialize the DeepGemmMaskedExecutor.
         Args:
             config: Model configuration.
-            weights: Dictionary containing model weights.
             quant_config: Quantization configuration.
+            weights: Dictionary containing model weights.
         """
-        super().__init__(quant_config=quant_config)
-        self._config = config
-        self._weights = weights
+        super().__init__(config, quant_config, weights)
         # Initialize w1 and w2
-        self._w1 = self._weights.get(W.moe_w1, None)
-        self._w2 = self._weights.get(W.moe_w2, None)
-        assert self._w1 is not None and self._w2 is not None
+        self._w1 = weights[W.moe_w1]
+        self._w2 = weights[W.moe_w2]
         # Check w1 and w2 shape
         self._E, self._N, self._K = self._w1.size()
         assert self._N % 2 == 0
@@ -79,11 +77,10 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
         assert self._w2.size(1) == self._K
         assert self._w2.size(2) == self._N // 2
         # Initialize w1 and w2 scale
-        self._w1_scale = self._weights.get(W.moe_s1, None)
-        self._w2_scale = self._weights.get(W.moe_s2, None)
-        # Check quantization
-        self._use_fp8 = True
-        if self.quant_config.is_quantized:
+        self._w1_scale = weights.get(W.moe_s1, None)
+        self._w2_scale = weights.get(W.moe_s2, None)
+        self._use_fp8 = self.quant_config.is_quantized
+        if self._use_fp8:
             assert self._w1_scale is not None and self._w2_scale is not None
             if (
                 self.quant_config.quant_dtype == torch.float8_e4m3fn
@@ -91,7 +88,6 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
                 and self.quant_config.block_shape == self.DEEPGEMM_BLOCK_SHAPE
             ):
                 # Confirm to use fp8 block quantization
-                self._use_fp8 = True
                 self._num_packed_scales = 1
                 self._scale_dtype = torch.float32
                 # Whether use fp8 block quantization with UE8M0 scale
@@ -144,15 +140,9 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
                 )
         else:
             # Confirm to use bf16
-            self._use_fp8 = False
             assert self._w1_scale is None and self._w2_scale is None
         # Initialize number of SMs for DeepGEMM
         self._num_gemm_sms = get_num_device_sms()
-
-    @property
-    def local_num_experts(self) -> int:
-        assert self._w1 is not None
-        return self._w1.size(0)
 
     def _forward_masked_grouped_ffn(
         self,
@@ -186,6 +176,9 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
             if self._use_fp8:
                 # Check expert_x_scale is not None for fp8
                 assert expert_x_scale is not None
+                assert (
+                    self._w1_scale is not None and self._w2_scale is not None
+                ), "w1 and w2 scales are not initialized"
                 # Allocate upgate_output
                 upgate_output = torch.empty(
                     (num_slice_experts, num_tokens, self._N),
@@ -382,6 +375,10 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
             extra_expert_args (Optional[dict[str, Any]]): Extra expert arguments.
         """
         # Check payload data
+        assert (
+            payload.expert_tokens_meta is not None
+            and payload.expert_tokens_meta.expert_num_tokens is not None
+        )
         expert_x = payload.expert_x
         E, M, K = expert_x.size()
         assert E == self._E and K == self._K
@@ -429,6 +426,10 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
             extra_expert_args (Optional[dict[str, Any]]): Extra expert arguments.
         """
         # Check payload data
+        assert (
+            payload.expert_tokens_meta is not None
+            and payload.expert_tokens_meta.expert_num_tokens is not None
+        )
         expert_x = payload.expert_x
         E, M, K = expert_x.size()
         assert E == self._E and K == self._K

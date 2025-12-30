@@ -38,11 +38,10 @@ class DeepepNormalRouter(FusedMoeDataRouter):
     def __init__(
         self,
         config: MoEConfigAdapter,
-        use_fp8: bool = True,
-        async_mode: bool = False,
-        expert_alignment: int = 128,
+        quant_config: FusedMoEQuantConfig,
     ):
-        self.config = config
+        super().__init__(config, quant_config)
+
         self.tp_size = config.tp_size
         self.tp_rank = config.tp_rank
         self.dp_size = config.dp_size
@@ -53,11 +52,9 @@ class DeepepNormalRouter(FusedMoeDataRouter):
         self.expert_num_per_rank = self.expert_num // self.ep_size
         self.top_k = config.moe_topk_group
         self.deepep_buffer_wrapper = DeepEpInitializer.get_deepep_wrapper(self.config)
-        self.use_fp8 = use_fp8
-        self.async_mode = async_mode
-        self.expert_alignment = expert_alignment
-        if self.async_mode:
-            raise ValueError("DeepEPNormal not supports async mode now")
+        self.use_fp8 = True
+        self.async_mode = False
+        self.expert_alignment = 128
         self.handle: Any = None
 
     def prepare(
@@ -67,7 +64,6 @@ class DeepepNormalRouter(FusedMoeDataRouter):
         a2_scale: Optional[torch.Tensor],
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        quant_config: FusedMoEQuantConfig,
     ) -> ExpertForwardPayload:
         if a1_scale is not None or a2_scale is not None:
             raise ValueError("DeepEPNormal a1_scale or a2_scale should be None")

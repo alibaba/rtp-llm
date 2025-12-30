@@ -12,6 +12,9 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     ExpertForwardPayload,
 )
+from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
+    FusedMoEQuantConfig,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.executors.deepep_normal_fused_moe_executor import (
     FusedMoeExecutor,
     torch_moe_ref,
@@ -118,7 +121,9 @@ class FusedMoeTest(TestCase):
 
         weights = {W.moe_w1: w1, W.moe_w2: w2}
 
-        fused_moe_executors = FusedMoeExecutor(config_adapter, weights)
+        fused_moe_executors = FusedMoeExecutor(
+            config_adapter, FusedMoEQuantConfig(), weights
+        )
 
         combine_payload = fused_moe_executors.execute(
             payload=payload,

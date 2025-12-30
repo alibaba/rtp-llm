@@ -20,7 +20,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_normal_router import (
-    DeepepNormalRouter,
+    DeepepNormalRouterBase,
 )
 from rtp_llm.ops import MoeConfig, ParallelismConfig
 from rtp_llm.test.utils.numeric_util import per_token_cast_back
@@ -57,7 +57,13 @@ def init_router(
     init_distributed_environment(
         parallelism_config=parallelism_config, backend="nccl", timeout=60
     )
-    router = DeepepNormalRouter(config, use_fp8, expert_alignment=1)
+    quant_config = FusedMoEQuantConfig(
+        quant_dtype=torch.float8_e4m3fn,
+        per_act_token_quant=False,
+        per_out_ch_quant=False,
+        block_shape=[128, 128],
+    )
+    router = DeepepNormalRouterBase(config, quant_config, expert_alignment=1)
 
     return config, router
 
@@ -126,12 +132,16 @@ def worker_function(
                 None,
                 topk_weights,
                 topk_ids,
-                quant_config,
             )
             assert payload.expert_tokens_meta.expert_num_tokens_cpu == [
                 sum(token_num_per_rank)
             ] * (config.expert_num // config.world_size)
-            if router.use_fp8:
+            # Determine if fp8 is used based on quant_config
+            use_fp8_actual = (
+                quant_config.is_quantized
+                and quant_config.quant_dtype == torch.float8_e4m3fn
+            )
+            if use_fp8_actual:
                 combine_x = per_token_cast_back(
                     payload.expert_x, payload.expert_x_scale
                 )
@@ -143,7 +153,7 @@ def worker_function(
             a2 = router.finalize(
                 combine_payload, topk_weights, topk_ids, False, extra_finalize_args
             )
-            if router.use_fp8:
+            if use_fp8_actual:
                 x, scale = trt_fp8_quantize_128(a1, False)
                 ref_a2 = per_token_cast_back(x, scale) * config.world_size
             else:

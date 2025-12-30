@@ -1,4 +1,3 @@
-import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union, final
@@ -34,7 +33,7 @@ class ExpertForwardPayload:
     Represents the data payload dispatched to experts for computation.
     """
 
-    expert_x: Optional[torch.Tensor] = None
+    expert_x: torch.Tensor
     expert_x_origin_dtype: Optional[torch.dtype] = None
     expert_x_scale: Optional[torch.Tensor] = None
     expert_tokens_meta: Optional[ExpertTokensMetadata] = None
@@ -48,10 +47,24 @@ class CombineForwardPayload:
     Represents the data payload for combining the expert outputs.
     """
 
-    fused_expert_output: Optional[torch.Tensor] = None
+    fused_expert_output: torch.Tensor
 
 
 class FusedMoeDataRouter(ABC):
+    def __init__(
+        self,
+        config: MoEConfigAdapter,
+        quant_config: FusedMoEQuantConfig,
+    ):
+        """Initialize FusedMoeDataRouter with standard parameters.
+
+        Args:
+            config: MOE configuration adapter
+            quant_config: Quantization configuration
+        """
+        self.config = config
+        self.quant_config = quant_config
+
     @classmethod
     def router_type(cls) -> RouterType:
         raise NotImplementedError
@@ -76,7 +89,6 @@ class FusedMoeDataRouter(ABC):
         a2_scale: Optional[torch.Tensor],
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        quant_config: FusedMoEQuantConfig,
     ) -> ExpertForwardPayload:
         raise NotImplementedError
 
@@ -95,12 +107,20 @@ class FusedMoeDataRouter(ABC):
 class FusedMoeExpertExecutor(ABC):
     def __init__(
         self,
-        quant_config: Optional[FusedMoEQuantConfig],
+        config: MoEConfigAdapter,
+        quant_config: FusedMoEQuantConfig,
+        weights: Dict[str, torch.Tensor],
     ):
-        if quant_config is not None:
-            self.quant_config = quant_config
-        else:
-            self.quant_config = FusedMoEQuantConfig()
+        """Initialize FusedMoeExpertExecutor with standard parameters.
+
+        Args:
+            config: MOE configuration adapter
+            quant_config: Quantization configuration
+            weights: Model weights dictionary
+        """
+        self.config = config
+        self.quant_config = quant_config
+        self.weights = weights
 
     @classmethod
     def executor_type(cls) -> ExecutorType:
@@ -117,10 +137,6 @@ class FusedMoeExpertExecutor(ABC):
             config: Model initialization parameters
         """
         pass
-
-    @property
-    def local_num_experts(self) -> int:
-        raise NotImplementedError
 
     @property
     def topk_ids_dtype(self) -> torch.dtype:
@@ -179,15 +195,12 @@ class FusedMoe(torch.nn.Module):
             a2_scale,
             topk_weights,
             topk_ids,
-            self.fused_experts.quant_config,
         )
 
         if expert_payload.expert_topk_ids is None:
             expert_payload.expert_topk_ids = topk_ids
         if expert_payload.expert_topk_weights is None:
             expert_payload.expert_topk_weights = topk_weights
-
-        combine_payload = CombineForwardPayload()
 
         if expert_payload.expert_x.numel() == 0:
             # This happens when none of the tokens from the all2all reach this
@@ -196,9 +209,11 @@ class FusedMoe(torch.nn.Module):
             # kernels. CUDAGraph compatible all2all kernels like the pplx
             # kernels and the DeepEP low-latency kernels are always batched
             # and can never run into the tensor.numel() == 0 case.
-            combine_payload.fused_expert_output = torch.empty_like(
-                expert_payload.expert_x
-            ).to(dtype=a1.dtype)
+            combine_payload = CombineForwardPayload(
+                fused_expert_output=torch.empty_like(
+                    expert_payload.expert_x, dtype=a1.dtype
+                )
+            )
         else:
             combine_payload = self.fused_experts.execute(
                 expert_payload,

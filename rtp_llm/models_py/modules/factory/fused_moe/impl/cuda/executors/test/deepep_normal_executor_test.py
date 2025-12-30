@@ -13,7 +13,10 @@ from rtp_llm.models_py.kernels.cuda.fp8_kernel.fp8_kernel import (
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
-from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepep_normal_executor import (
+from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
+    FusedMoEQuantConfig,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_continous_executor import (
     DeepGemmContinousExecutor,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.test.fused_moe_executor_test_util import (
@@ -131,6 +134,12 @@ def test_deepep_normal_executor(use_fp8: bool):
 
     executor = DeepGemmContinousExecutor(
         config,
+        FusedMoEQuantConfig(
+            quant_dtype=torch.float8_e4m3fn if use_fp8 else None,
+            per_act_token_quant=False,
+            per_out_ch_quant=False,
+            block_shape=[128, 128] if use_fp8 else None,
+        ),
         weights,
     )
     expert_num_tokens = payload.expert_tokens_meta.expert_num_tokens
