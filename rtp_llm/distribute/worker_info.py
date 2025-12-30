@@ -173,7 +173,6 @@ class ParallelInfo(object):
         logging.info(f"ParallelInfo from_params: {info}")
         return info
 
-    # used for ut
     def reload(self, worker_info_port_num: int):
         new_info = self.from_env(worker_info_port_num)
         self.tp_size = new_info.tp_size
@@ -183,6 +182,21 @@ class ParallelInfo(object):
         self.local_world_size = new_info.local_world_size
         self.worker_info_port_num = new_info.worker_info_port_num
         logging.info(f"ParallelInfo reload: {self}")
+
+    def __eq__(self, other):
+        if not isinstance(other, ParallelInfo):
+            return False
+        return (
+            self.tp_size == other.tp_size
+            and self.ep_size == other.ep_size
+            and self.pp_size == other.pp_size
+            and self.dp_size == other.dp_size
+            and self.ffn_sp_size == other.ffn_sp_size
+            and self.world_size == other.world_size
+            and self.world_rank == other.world_rank
+            and self.local_world_size == other.local_world_size
+            and self.worker_info_port_num == other.worker_info_port_num
+        )
 
     def __str__(self):
         return f"ParallelInfo:[ tp_size={self.tp_size} pp_size={self.pp_size} world_size={self.world_size} world_rank={self.world_rank} local_world_size={self.local_world_size} tp_rank={self.tp_rank} dp_rank={self.dp_rank} ep_size={self.ep_size} dp_size={self.dp_size} ep_rank={self.ep_rank} local_rank={self.local_rank} ffn_sp_size={self.ffn_sp_size} worker_info_port_num={self.worker_info_port_num}]"
@@ -227,6 +241,28 @@ class WorkerInfo(object):
 
     def equals(self, other: "WorkerInfo") -> bool:
         return self.ip == other.ip and self.server_port == other.server_port
+
+    def __eq__(self, other):
+        if not isinstance(other, WorkerInfo):
+            return False
+        return (
+            self.ip == other.ip
+            and self.server_port == other.server_port
+            and self.gang_hb_port == other.gang_hb_port
+            and self.http_port == other.http_port
+            and self.rpc_server_port == other.rpc_server_port
+            and self.embedding_rpc_server_port == other.embedding_rpc_server_port
+            and self.remote_rpc_server_port == other.remote_rpc_server_port
+            and self.cache_store_listen_port == other.cache_store_listen_port
+            and self.cache_store_connect_port == other.cache_store_connect_port
+            and self.cache_store_rdma_listen_port == other.cache_store_rdma_listen_port
+            and self.cache_store_rdma_connect_port
+            == other.cache_store_rdma_connect_port
+            and self.backend_server_port == other.backend_server_port
+            and self.local_rank == other.local_rank
+            and self.world_rank == other.world_rank
+            and self.name == other.name
+        )
 
     @staticmethod
     def from_env(start_port, remote_server_port):
@@ -350,7 +386,6 @@ class WorkerInfo(object):
             + 7
         )
 
-    # used for ut
     def reload(self, start_port, remote_server_port):
         # Use g_parallel_info.local_rank and g_parallel_info.world_rank instead of
         # self.local_rank/self.world_rank, because in multi-process scenarios,
@@ -367,6 +402,8 @@ class WorkerInfo(object):
         self.remote_rpc_server_port = new_info.remote_rpc_server_port
         self.cache_store_listen_port = new_info.cache_store_listen_port
         self.cache_store_connect_port = new_info.cache_store_connect_port
+        self.cache_store_rdma_listen_port = new_info.cache_store_rdma_listen_port
+        self.cache_store_rdma_connect_port = new_info.cache_store_rdma_connect_port
         self.rpc_server_port = new_info.rpc_server_port
         self.backend_server_port = new_info.backend_server_port
         self.embedding_rpc_server_port = new_info.embedding_rpc_server_port
