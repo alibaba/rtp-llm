@@ -45,17 +45,17 @@ def local_rank_start(
     pipe_writer=None,
 ):
     """Start local rank with proper signal handling for graceful shutdown"""
-    app = None
+    backend_manager = None
 
     def signal_handler(signum, frame):
         logging.info(
             f"Local rank received signal {signum}, shutting down gracefully..."
         )
-        if app and hasattr(app, "shutdown"):
+        if backend_manager is not None:
             try:
-                app.shutdown()
+                backend_manager.request_shutdown()
             except Exception as e:
-                logging.error(f"Error during app shutdown: {e}")
+                logging.error(f"Error during backend manager shutdown: {e}")
 
     # Setup signal handlers for graceful shutdown
     signal.signal(signal.SIGTERM, signal_handler)
