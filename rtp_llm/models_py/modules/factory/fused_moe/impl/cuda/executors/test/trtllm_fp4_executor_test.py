@@ -167,10 +167,22 @@ class FP4Moe:
             num_experts, hidden_size, intermediate_size // self.sf_vec_size
         )
 
+        def tensor_info(t, name):
+            print(name, t.shape, t.dtype)
         args.gemm1_weights_fp4_shuffled = gemm1_weights_fp4
         args.gemm1_scales_fp4_shuffled = gemm1_scales_linear_fp4
         args.gemm2_weights_fp4_shuffled = gemm2_weights_fp4
         args.gemm2_scales_fp4_shuffled = gemm2_scales_linear_fp4
+        tensor_info(args.gemm1_weights, "gemm1_weights")
+        tensor_info(args.gemm1_weights_fp4_shuffled, "gemm1_weights_fp4_shuffled")
+        tensor_info(args.gemm1_scales_linear, "gemm1_scales_linear")
+        tensor_info(args.gemm1_scales_fp4_shuffled, "gemm1_scales_fp4_shuffled")
+        tensor_info(args.gemm2_weights, "gemm2_weights")
+        tensor_info(args.gemm2_weights_fp4_shuffled, "gemm2_weights_fp4_shuffled")
+        tensor_info(args.gemm2_scales_linear, "gemm2_scales_linear")
+        tensor_info(args.gemm2_scales_fp4_shuffled, "gemm2_scales_fp4_shuffled")
+        assert 0
+        
         self.swizzle_weights(args)
 
     def swizzle_weights(self, args):
