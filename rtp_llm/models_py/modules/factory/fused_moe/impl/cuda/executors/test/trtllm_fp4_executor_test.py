@@ -626,8 +626,8 @@ class FP4Moe(Moe):
         output = trtllm_fp4_block_scale_moe(
             routing_logits=args.expert_logits,
             routing_bias=args.routing_bias,
-            hidden_states=args.hidden_states,
-            hidden_states_scale=args.hidden_states_scale,
+            hidden_states=input_quantized["hidden_states"],
+            hidden_states_scale=input_quantized["hidden_states_scale"],
             gemm1_weights=args.gemm1_weights_fp4_shuffled,
             gemm1_weights_scale=args.gemm1_scales_fp4_shuffled,
             gemm1_bias=None,
