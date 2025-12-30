@@ -343,8 +343,8 @@ class FP4MoeExecutor(FP4Moe):
         weights = {
             W.moe_w1: args.gemm1_weights.view(torch.float8_e4m3fn),
             W.moe_w2: args.gemm2_weights.view(torch.float8_e4m3fn),
-            W.moe_s1: args.gemm1_scales_linear.view(torch.float8_e4m3fn),
-            W.moe_s2: args.gemm2_scales_linear.view(torch.float8_e4m3fn),
+            W.moe_s1: args.gemm1_scales.view(torch.float8_e4m3fn),
+            W.moe_s2: args.gemm2_scales.view(torch.float8_e4m3fn),
             "w13_input_scale": 1.0 / args.hidden_states_scale_global,
             "w13_weight_scale_2": 1.0 / args.gemm1_scales_global,
             "w2_input_scale": 1.0 / args.c_global_sf,
