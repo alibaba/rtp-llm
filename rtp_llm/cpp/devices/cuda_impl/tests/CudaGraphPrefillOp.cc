@@ -18,15 +18,15 @@ int CudaGraphPrefillOp::getCurrentRealGraphSize() {
 
 CudaGraphRunnerPtr CudaGraphPrefillOp::createCudaGraphRunner(py::object py_instance) {
     DeviceInitParams params;
-    DeviceBase*      device                              = rtp_llm::DeviceFactory::getDefaultDevice();
-    params.hw_kernel_config.enable_cuda_graph            = true;
-    params.fifo_scheduler_config.max_context_batch_size  = 128;
-    params.hw_kernel_config.enable_cuda_graph_debug_mode = false;
-    params.hidden_size                                   = 3584;
-    params.max_seq_len                                   = 64;
-    params.tokens_per_block                              = 64;
-    params.hw_kernel_config.enable_cuda_graph_debug_mode = true;
-    params.hw_kernel_config.prefill_capture_seq_lens     = {
+    DeviceBase*      device                                            = rtp_llm::DeviceFactory::getDefaultDevice();
+    params.hw_kernel_config.enable_cuda_graph                          = true;
+    params.runtime_config.fifo_scheduler_config.max_context_batch_size = 128;
+    params.hw_kernel_config.enable_cuda_graph_debug_mode               = false;
+    params.hidden_size                                                 = 3584;
+    params.max_seq_len                                                 = 64;
+    params.tokens_per_block                                            = 64;
+    params.hw_kernel_config.enable_cuda_graph_debug_mode               = true;
+    params.hw_kernel_config.prefill_capture_seq_lens                   = {
         6,   10,  14,  15,  20,  25,  30,  35,  40,  45,  50,  55,  60,  65,  70,  75,  77,  80,  85,  90,  95,
         100, 105, 110, 115, 120, 125, 130, 135, 140, 145, 150, 155, 160, 165, 170, 175, 180, 185, 190, 195, 200,
         205, 210, 215, 220, 225, 230, 235, 240, 245, 248, 250, 252, 255, 256, 260, 265, 270, 275, 280, 285, 290,
@@ -147,14 +147,13 @@ PyModelInputs CudaGraphPrefillOp::buildInputs(int64_t batch_size,
             total_seq_len += input_lengths_data[i];
         }
     }
-    cu_seqlens_data[batch_size]                = total_seq_len;
-    cu_seqlens_without_prefix_data[batch_size] = total_seq_len_without_prefix;
+    cu_seqlens_data[batch_size] = total_seq_len;
     RTP_LLM_LOG_INFO("cu_seqlens_data build success\n");
 
-    inputs.attention_inputs.cu_seqlens                = cu_seqlens_tensor;
-    inputs.attention_inputs.cu_kv_seqlens             = cu_seqlens_tensor.clone().pin_memory();
-    inputs.attention_inputs.context_total_kv_length   = total_seq_len;
-    inputs.attention_inputs.total_tokens              = total_seq_len;
+    inputs.attention_inputs.cu_seqlens              = cu_seqlens_tensor;
+    inputs.attention_inputs.cu_kv_seqlens           = cu_seqlens_tensor.clone().pin_memory();
+    inputs.attention_inputs.context_total_kv_length = total_seq_len;
+    inputs.attention_inputs.total_tokens            = total_seq_len;
     if (!use_max_padded_mode) {
         calculatePaddingOffset(inputs.attention_inputs);
     }
