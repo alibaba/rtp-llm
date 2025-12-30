@@ -1343,6 +1343,7 @@ def test_moe(
         "use_routing_scales_on_input": routing_method_type == RoutingMethodType.Llama4,
         "gated_act_type": gated_act_type,
         "hidden_states_orig": hidden_states,
+        "routing_method_type": routing_method_type.value,
     }
     args = moe_args(**moe_info, **weights_data, **inputs_data)
 
