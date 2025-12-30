@@ -1,9 +1,5 @@
-import os
-import json
 from pathlib import Path
 from dataclasses import dataclass
-from abc import ABC, abstractmethod
-from cuda.bindings import runtime
 import torch
 from torch.nn import functional as F
 
@@ -23,7 +19,6 @@ from flashinfer.fused_moe.core import (
     _maybe_get_cached_w3_w1_permute_indices,
 )
 
-# Import RTP-LLM specific modules for Fp4Executor backend
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.ops import ParallelismConfig
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
@@ -83,48 +78,10 @@ class moe_args:
     scale_gate_fc1: torch.Tensor = None
     scale_c_fc2: torch.Tensor = None
 
-# class Moe(ABC):
-#     """Abstract base class for MoE implementations."""
-
-#     def __init__(self):
-#         self.name = self.__class__.__name__
-
-#     @abstractmethod
-#     def quantize_weights(self, gemm1_weights, gemm2_weights, hidden_states_sample):
-#         pass
-
-#     @abstractmethod
-#     def quantize_inputs(self, hidden_states, hidden_states_scale_global):
-#         pass
-
-#     @abstractmethod
-#     def prepare_static_weights_for_kernel(self, args):
-#         pass
-
-#     @abstractmethod
-#     def call_moe(self, args):
-#         pass
-
-#     @abstractmethod
-#     def compute_reference(self, args):
-#         pass
-
-#     def compute_production(self, args):
-#         self.prepare_static_weights_for_kernel(args)
-#         return self.call_moe(args)
-
-#     @abstractmethod
-#     def get_tolerances(self):
-#         pass
-
-#     def __str__(self):
-#         return self.name
-
 cache_permute_indices = dict()
 
 class FP4Moe:
     def __init__(self):
-        super().__init__()
         self.sf_vec_size = 16
         global cache_permute_indices
         self._cache_permute_indices = cache_permute_indices
@@ -927,17 +884,9 @@ def test_moe(
             f"Routing method {routing_method_type} not implemented"
         )
 
-    # 1. Quantize weights offline
     weights_data = moe_impl.quantize_weights(
         gemm1_weights, gemm2_weights, hidden_states
     )
-
-    # 2. Quantize inputs at runtime
-    # TODO
-    # inputs_data = moe_impl.quantize_inputs(
-    #     hidden_states, weights_data["hidden_states_scale_global"]
-    # )
-    inputs_data = dict()
 
     topk_ids = permute_info["topKIndices"].to(torch.int32)
     moe_info = {
@@ -958,7 +907,7 @@ def test_moe(
         "hidden_states_orig": hidden_states,
         "routing_method_type": routing_method_type.value,
     }
-    args = moe_args(**moe_info, **weights_data, **inputs_data)
+    args = moe_args(**moe_info, **weights_data)
 
     output_dequant_reference = moe_impl.compute_reference(args)
     moe_impl.prepare_static_weights_for_kernel(args)
@@ -966,8 +915,9 @@ def test_moe(
 
     # Compare outputs
     tolerances = moe_impl.get_tolerances()
-    print(output_dequant_reference)
-    print(output_dequant_actual)
+    print(moe_impl)
+    print("ref", output_dequant_reference)
+    print("actual", output_dequant_actual)
     check_accuracy(
         output_dequant_reference,
         output_dequant_actual,
