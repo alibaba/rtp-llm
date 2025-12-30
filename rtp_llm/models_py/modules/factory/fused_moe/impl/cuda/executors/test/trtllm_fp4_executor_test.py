@@ -1350,7 +1350,6 @@ if __name__ == "__main__":
                 "routing_method_type": RoutingMethodType.Renormalize,
                 "compatible_moe_impls": [
                     FP4Moe,
-                    BF16Moe,
                 ],
                 "compatible_intermediate_size": [384, 768, 1024],
                 "enable_autotune": False,
