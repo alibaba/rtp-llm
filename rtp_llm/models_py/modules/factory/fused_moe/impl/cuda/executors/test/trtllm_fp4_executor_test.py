@@ -1386,7 +1386,7 @@ def test_moe(
         "intermediate_size": intermediate_size,
         "top_k": top_k,
         "padding": padding,
-        "expert_logits": scores,
+        "expert_logits": expert_logits,
         "permute_info": permute_info,
         "use_routing_scales_on_input": routing_method_type == RoutingMethodType.Llama4,
         "gated_act_type": gated_act_type,
