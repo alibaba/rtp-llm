@@ -10,27 +10,33 @@
 namespace rtp_llm {
 
 struct MMPreprocessConfig {
-    int32_t width      = -1;
-    int32_t height     = -1;
-    int32_t min_pixels = -1;
-    int32_t max_pixels = -1;
-    int32_t fps        = -1;
-    int32_t min_frames = -1;
-    int32_t max_frames = -1;
-    MMPreprocessConfig(int32_t width      = -1,
-                       int32_t height     = -1,
-                       int32_t min_pixels = -1,
-                       int32_t max_pixels = -1,
-                       int32_t fps        = -1,
-                       int32_t min_frames = -1,
-                       int32_t max_frames = -1):
+    int32_t            width          = -1;
+    int32_t            height         = -1;
+    int32_t            min_pixels     = -1;
+    int32_t            max_pixels     = -1;
+    int32_t            fps            = -1;
+    int32_t            min_frames     = -1;
+    int32_t            max_frames     = -1;
+    std::vector<float> crop_positions = {};
+    int32_t            mm_timeout_ms  = 30000;
+    MMPreprocessConfig(int32_t            width          = -1,
+                       int32_t            height         = -1,
+                       int32_t            min_pixels     = -1,
+                       int32_t            max_pixels     = -1,
+                       int32_t            fps            = -1,
+                       int32_t            min_frames     = -1,
+                       int32_t            max_frames     = -1,
+                       std::vector<float> crop_positions = {},
+                       int32_t            mm_timeout_ms  = 30000):
         width(width),
         height(height),
         min_pixels(min_pixels),
         max_pixels(max_pixels),
         fps(fps),
         min_frames(min_frames),
-        max_frames(max_frames) {}
+        max_frames(max_frames),
+        crop_positions(crop_positions),
+        mm_timeout_ms(mm_timeout_ms) {}
 };
 
 struct MultimodalInput {
@@ -39,20 +45,23 @@ struct MultimodalInput {
     torch::Tensor      tensor               = torch::empty({0});
     int32_t            mm_type              = 0;
     MMPreprocessConfig mm_preprocess_config = MMPreprocessConfig();
-    MultimodalInput(std::string   url,
-                    torch::Tensor t,
-                    int32_t       mm_type    = 0,
-                    int32_t       width      = -1,
-                    int32_t       height     = -1,
-                    int32_t       min_pixels = -1,
-                    int32_t       max_pixels = -1,
-                    int32_t       fps        = -1,
-                    int32_t       min_frames = -1,
-                    int32_t       max_frames = -1):
+    MultimodalInput(std::string        url,
+                    torch::Tensor      t,
+                    int32_t            mm_type        = 0,
+                    int32_t            width          = -1,
+                    int32_t            height         = -1,
+                    int32_t            min_pixels     = -1,
+                    int32_t            max_pixels     = -1,
+                    int32_t            fps            = -1,
+                    int32_t            min_frames     = -1,
+                    int32_t            max_frames     = -1,
+                    std::vector<float> crop_positions = {},
+                    int32_t            mm_timeout_ms  = 30000):
         url(url),
         tensor(t),
         mm_type(mm_type),
-        mm_preprocess_config(MMPreprocessConfig(width, height, min_pixels, max_pixels, fps, min_frames, max_frames)) {}
+        mm_preprocess_config(MMPreprocessConfig(
+            width, height, min_pixels, max_pixels, fps, min_frames, max_frames, crop_positions, mm_timeout_ms)) {}
     MultimodalInput(std::string url): url(url), tensor(torch::empty(0)) {}
 };
 

@@ -8,6 +8,7 @@ from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 from rtp_llm.async_decoder_engine.embedding.embedding_engine import EmbeddingCppEngine
 from rtp_llm.async_decoder_engine.rpc_engine import LanguageCppEngine
 from rtp_llm.config.engine_config import EngineConfig
+from rtp_llm.config.py_config_modules import ProfilingDebugLoggingConfig
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.propose_model.propose_model import ProposeModel
 from rtp_llm.ops import TaskType

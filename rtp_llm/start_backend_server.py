@@ -28,7 +28,7 @@ from rtp_llm.distribute.worker_info import (
     update_worker_info,
 )
 from rtp_llm.ops import VitSeparation
-from rtp_llm.server.vit_rpc_server import vit_start_server
+from rtp_llm.server.vit_app import VitEndpointApp
 from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
     set_global_controller,
@@ -37,6 +37,17 @@ from rtp_llm.utils.process_manager import ProcessManager
 from rtp_llm.utils.util import copy_gemm_config
 
 setup_logging()
+
+
+def vit_start_server(py_env_configs: PyEnvConfigs):
+    setproctitle("rtp_llm_vit_server")
+    update_worker_info(
+        py_env_configs.server_config.start_port,
+        py_env_configs.server_config.worker_info_port_num,
+        py_env_configs.distribute_config.remote_server_port,
+    )
+    app = VitEndpointApp(py_env_configs)
+    app.start(g_worker_info)
 
 
 def local_rank_start(
@@ -341,10 +352,6 @@ def start_backend_server(
         py_env_configs.server_config.worker_info_port_num,
         py_env_configs.distribute_config.remote_server_port,
     )
-
-    # TODO(xinfei.sxf) fix this
-    if py_env_configs.vit_config.vit_separation == VitSeparation.VIT_SEPARATION_ROLE:
-        return vit_start_server()
 
     if not torch.cuda.is_available():
         return local_rank_start(global_controller, py_env_configs)
