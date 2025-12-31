@@ -153,7 +153,6 @@ ROCmDevice::~ROCmDevice() {
     ROCM_CHECK(hipStreamDestroy(assist_stream_));
     ROCM_CHECK(hipblasDestroy(hipblas_handle_));
     ROCM_CHECK(hipblasLtDestroy(hipblaslt_handle_));
-    curandstate_buf_.reset();
 
     if (stream_ != nullptr) {
         ROCM_CHECK(hipStreamDestroy(stream_));
@@ -175,8 +174,6 @@ ROCmDevice::~ROCmDevice() {
 
 void ROCmDevice::init() {
     DeviceBase::init();
-    RTP_LLM_LOG_INFO("max batch size: %d", init_params_.max_batch_size);
-    curandstate_buf_ = allocateBuffer({init_params_.max_batch_size * sizeof(curandState_t)}, {"curandstate"});
 #ifdef ENABLE_DEEP_EP
     if (init_params_.use_deepep_moe) {
         if (!initDeepEPBuffer()) {

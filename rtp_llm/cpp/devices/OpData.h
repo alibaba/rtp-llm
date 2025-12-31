@@ -21,6 +21,7 @@
 #include <memory>
 #include <torch/extension.h>
 #include <torch/python.h>
+#include <ATen/Generator.h>
 #include <type_traits>
 
 namespace rtp_llm {
@@ -890,10 +891,8 @@ struct GreedyParams {
     const Buffer&     top_k;
     const Buffer&     top_p;
     const Buffer&     temperature;
-    OptionalBufferRef random_seed;
+
     OptionalBufferRef repetition_penalty;
-    OptionalBufferRef min_lengths;
-    OptionalBufferRef eos_ids;
     OptionalBufferRef no_repeat_ngram_size;
 
     OptionalBufferRef cum_log_probs;
@@ -903,6 +902,8 @@ struct GreedyParams {
     OptionalBufferRef presence_penalty;
     OptionalBufferRef frequency_penalty;
     OptionalBufferRef do_sample;
+
+    std::vector<at::Generator> generator;
 };
 
 struct GreedyOutput {

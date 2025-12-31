@@ -444,6 +444,10 @@ public:
         return logits_processor_list_;
     }
 
+    at::Generator getGenerator() {
+        return generator_;
+    }
+
     rtp_llm::BufferPtr getProposeTokens() const {
         if (propose_stream_ && propose_stream_->sp_output_buffer_->tokens > 0) {
             return propose_stream_->sp_output_buffer_->tokens;
@@ -590,6 +594,7 @@ protected:
     TreeLogitsProcessorPtr              tree_logits_processor_ptr_;
     MultiSeqLogitsProcessorPtr          multi_seq_logits_processor_ptr_;
     std::vector<BaseLogitsProcessorPtr> logits_processor_list_;
+    at::Generator   generator_;
 
     // just for bool test
     bool perf_test_ = false;

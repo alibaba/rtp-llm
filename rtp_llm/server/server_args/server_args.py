@@ -51,7 +51,6 @@ from rtp_llm.server.server_args.role_group_args import init_role_group_args
 from rtp_llm.server.server_args.rpc_discovery_group_args import (
     init_rpc_discovery_group_args,
 )
-from rtp_llm.server.server_args.sampling_group_args import init_sampling_group_args
 from rtp_llm.server.server_args.scheduler_group_args import init_scheduler_group_args
 from rtp_llm.server.server_args.server_group_args import init_server_group_args
 from rtp_llm.server.server_args.speculative_decoding_group_args import (
@@ -472,7 +471,6 @@ def init_all_group_args(
     init_render_group_args(parser, py_env_configs.render_config)
     init_role_group_args(parser, py_env_configs.role_config)
     init_rpc_discovery_group_args(parser)
-    init_sampling_group_args(parser, py_env_configs.sampler_config)
     init_scheduler_group_args(parser, py_env_configs.runtime_config)
     init_server_group_args(parser, py_env_configs.server_config)
     init_speculative_decoding_group_args(parser, py_env_configs.sp_config)
