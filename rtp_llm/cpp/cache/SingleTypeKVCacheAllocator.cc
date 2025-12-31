@@ -46,11 +46,13 @@ bool SingleTypeKVCacheAllocator::init() {
 }
 
 MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo& malloc_info) {
-    auto&   kv_resource    = malloc_info.batch_kv_cache_resource;
-    int     reuse_len      = 0;
-    int     common_seq_len = malloc_info.common_seq_len >= 0 ? malloc_info.common_seq_len : malloc_info.total_seq_len;
-    auto&   cache_keys     = kv_resource->cacheKeys(0);
-    auto&   blocks_0       = kv_resource->blocks(0);
+    auto& kv_resource = malloc_info.batch_kv_cache_resource;
+    int   reuse_len   = 0;
+    int   common_seq_len =
+        std::min(malloc_info.complete_token_ids->commonSeqLength(), malloc_info.complete_token_ids->totalSeqLength());
+
+    auto&   cache_keys         = kv_resource->cacheKeys(0);
+    auto&   blocks_0           = kv_resource->blocks(0);
     int64_t match_cost_time_us = 0;
 
     // drop the last cache key of the partial block to avoid reuse it
@@ -79,8 +81,7 @@ MallocResult SingleTypeKVCacheAllocator::incrMalloc(const MallocInfo& malloc_inf
     auto& kv_resource    = malloc_info.batch_kv_cache_resource;
     int   batch_size     = kv_resource->batchSize();
     int   current_blocks = kv_resource->maxBlocksNum();
-    int   seq_len =
-        (malloc_info.total_seq_len >= 0) ? malloc_info.total_seq_len : malloc_info.complete_token_ids->seqLength();
+    int   seq_len        = malloc_info.complete_token_ids->totalSeqLength();
 
     auto need_blocks = full_kv_cache_group_->needBlocksNum(seq_len, current_blocks);
     if (need_blocks == 0) {
