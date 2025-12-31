@@ -40,7 +40,10 @@ public:
     void appendTokens(int batch_id, size_t token_num, const rtp_llm::Buffer& src);
 
     int  seqLength() const;
+    int  totalSeqLength() const;
+    int  commonSeqLength() const;
     void setSeqLength(int seq_length);
+    void setReserveStep(int reserve_step);
 
     const rtp_llm::BufferPtr& completeTokenIds();
 
@@ -64,6 +67,7 @@ private:
     int     seq_length_;
     int     common_len_;
     int     start_check_seq_length_;
+    int     reserve_step_           = 0;
     int64_t first_token_time_us_    = 0;
     int64_t first_token_latency_us_ = 0;
 

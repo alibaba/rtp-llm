@@ -334,12 +334,11 @@ protected:
                 {rtp_llm::TYPE_INT32, {static_cast<size_t>(0)}, rtp_llm::AllocationType::HOST}, {});
             generate_input->input_ids = empty_ids;
             complete_token_ids->init(generate_input);
+            complete_token_ids->setSeqLength(batch_layer_kv_block_num * tokensPerBlock);
         }
 
         rtp_llm::MallocInfo malloc_info{batch_kv_cache, complete_token_ids};
-        malloc_info.common_seq_len = 0;
-        malloc_info.total_seq_len  = static_cast<int>(batch_layer_kv_block_num * tokensPerBlock - 1);
-        auto malloc_result         = cache_manager_->malloc(malloc_info);
+        auto                malloc_result = cache_manager_->malloc(malloc_info);
         EXPECT_TRUE(malloc_result.success);
 
         for (size_t i = 0; i < batch_size; i++) {

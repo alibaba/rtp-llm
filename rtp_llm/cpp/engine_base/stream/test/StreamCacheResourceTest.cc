@@ -50,7 +50,8 @@ protected:
         generate_input->input_ids =
             std::make_unique<rtp_llm::Buffer>(rtp_llm::MEMORY_CPU, rtp_llm::TYPE_INT32, shape, (void*)(vec.data()));
         generate_input->generate_config = generate_config;
-        ModelConfig   model_config;
+        ModelConfig model_config;
+        model_config.attn_config.tokens_per_block = 2;
         RuntimeConfig runtime_config;
         model_config.max_seq_len = 2048;
         stream_                  = std::make_shared<NormalGenerateStream>(
