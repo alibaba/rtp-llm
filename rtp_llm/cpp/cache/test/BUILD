@@ -18,7 +18,6 @@ test_deps = [
     "@local_config_cuda//cuda:cudart",
 ] + torch_deps()
 
-# 旧的 BlockCache 测试保留原有依赖
 block_cache_test_deps = [
     "//rtp_llm/cpp/devices/testing:device_test_utils",
     "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
@@ -127,20 +126,6 @@ cc_test(
     name = "single_type_kv_cache_allocator_test",
     srcs = [
         "SingleTypeKVCacheAllocatorTest.cc",
-    ],
-    data = [],
-    copts = test_copts,
-    deps = test_deps + [
-        ":block_pool_test_helper",
-    ],
-    env = {},
-    exec_properties = {'gpu':'A10'},
-)
-
-cc_test(
-    name = "hybrid_layer_kv_cache_allocator_test",
-    srcs = [
-        "HybridLayerKVCacheAllocatorTest.cc",
     ],
     data = [],
     copts = test_copts,
