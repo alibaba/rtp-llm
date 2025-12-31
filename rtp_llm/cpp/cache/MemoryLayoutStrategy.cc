@@ -128,6 +128,10 @@ bool LayerFirstLayoutStrategy::init(const MemoryLayoutConfig& config,
 
     kv_cache_buffer_.kv_blocks = std::make_shared<rtp_llm::Buffer>(memory_type, data_type_, kv_shape, cache_base_ptr_);
 
+#if (defined(USING_ROCM) && USING_ROCM) || (defined(USING_CUDA) && USING_CUDA)
+    Buffer2torchTensor(kv_cache_buffer_.kv_blocks, false).fill_(0);
+#endif
+
     if (config_.enable_kv_scale && config_.kv_scale_pool_size_bytes > 0 && config_.k_scale_stride_bytes > 0
         && config_.v_scale_stride_bytes > 0) {
         RTP_LLM_CHECK_WITH_INFO(kv_scale_buffer.defined() && kv_scale_buffer.numel() > 0,
