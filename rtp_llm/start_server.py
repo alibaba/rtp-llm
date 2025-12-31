@@ -148,9 +148,10 @@ def start_frontend_server_impl(
     start_port = py_env_configs.server_config.start_port
 
     while True:
-        if not all(proc.is_alive() for proc in frontend_processes):
-            logging.error("Frontend server is not alive")
-            raise Exception("frontend server is not alive")
+        # Check ProcessManager availability (includes shutdown signal and process health)
+        if process_manager and not process_manager.is_available():
+            logging.info("ProcessManager is not available, aborting startup")
+            raise Exception("ProcessManager not available during startup")
 
         try:
             check_server_health(start_port)
