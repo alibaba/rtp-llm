@@ -18,7 +18,6 @@ int CudaGraphPrefillOp::getCurrentRealGraphSize() {
 
 CudaGraphRunnerPtr CudaGraphPrefillOp::createCudaGraphRunner(py::object py_instance) {
     DeviceInitParams params;
-    DeviceBase*      device                              = rtp_llm::DeviceFactory::getDefaultDevice();
     params.hw_kernel_config.enable_cuda_graph            = true;
     params.fifo_scheduler_config.max_context_batch_size  = 128;
     params.hw_kernel_config.enable_cuda_graph_debug_mode = false;
@@ -36,9 +35,11 @@ CudaGraphRunnerPtr CudaGraphPrefillOp::createCudaGraphRunner(py::object py_insta
         700, 703, 720, 740, 760, 780, 793, 797, 800, 820, 837, 840, 844, 856, 860, 880, 889, 900, 920, 940, 960};
     // int  layer_num                              = 24;
     // int  block_num                              = 26037;
-    auto               runner_ptr            = device->getDeviceGraphRunner(params, std::move(py_instance), 0, true);
-    CudaGraphRunnerPtr cuda_graph_runner_ptr = dynamic_cast<CudaGraphRunner*>(runner_ptr);
-    cuda_graph_runner_ptr->setModelDataType(torch::scalarTypeToTypeMeta(torch::kBFloat16));
+    at::cuda::CUDAStream capture_stream    = at::cuda::getCurrentCUDAStream(at::cuda::current_device());
+    caffe2::TypeMeta     dtype             = torch::scalarTypeToTypeMeta(torch::kBFloat16);
+    int                  num_tokens_per_bs = params.max_seq_len;  // prefill mode
+    CudaGraphRunnerPtr   cuda_graph_runner_ptr =
+        new CudaGraphRunner(params, std::move(py_instance), 0, capture_stream, dtype, num_tokens_per_bs, true);
     return cuda_graph_runner_ptr;
 }
 
@@ -151,10 +152,10 @@ PyModelInputs CudaGraphPrefillOp::buildInputs(int64_t batch_size,
     cu_seqlens_without_prefix_data[batch_size] = total_seq_len_without_prefix;
     RTP_LLM_LOG_INFO("cu_seqlens_data build success\n");
 
-    inputs.attention_inputs.cu_seqlens                = cu_seqlens_tensor;
-    inputs.attention_inputs.cu_kv_seqlens             = cu_seqlens_tensor.clone().pin_memory();
-    inputs.attention_inputs.context_total_kv_length   = total_seq_len;
-    inputs.attention_inputs.total_tokens              = total_seq_len;
+    inputs.attention_inputs.cu_seqlens              = cu_seqlens_tensor;
+    inputs.attention_inputs.cu_kv_seqlens           = cu_seqlens_tensor.clone().pin_memory();
+    inputs.attention_inputs.context_total_kv_length = total_seq_len;
+    inputs.attention_inputs.total_tokens            = total_seq_len;
     if (!use_max_padded_mode) {
         calculatePaddingOffset(inputs.attention_inputs);
     }
