@@ -10,9 +10,9 @@ using namespace std;
 namespace rtp_llm {
 
 void StreamCacheResource::init(int batch_size) {
-    batch_resource_->resetBatchSize(batch_size);
-    batch_resource_->initGroups(1);
-    batch_resource_->enable_reuse_cache = reuseCache();
+    batch_kv_cache_resource_->resetBatchSize(batch_size);
+    batch_kv_cache_resource_->initGroups(1);
+    batch_kv_cache_resource_->enable_reuse_cache = reuseCache();
 }
 
 void StreamCacheResource::releaseResource() {
@@ -24,7 +24,7 @@ void StreamCacheResource::releaseResource() {
         return;
     }
     tryReleaseKVBlock(maxBlocksNum());
-    batch_resource_->clearBlocks();
+    batch_kv_cache_resource_->clearBlocks();
 }
 
 int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
@@ -32,9 +32,9 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
 
     if (fake_inited_) {
         int max_blocks_num = maxBlocksNum();
-        int batch_size     = batch_resource_->batchSize();
-        batch_resource_->clearBlocks();
-        batch_resource_->resetBatchSize(batch_size);
+        int batch_size     = batch_kv_cache_resource_->batchSize();
+        batch_kv_cache_resource_->clearBlocks();
+        batch_kv_cache_resource_->resetBatchSize(batch_size);
         fake_inited_ = false;
         return max_blocks_num;
     }
@@ -47,11 +47,11 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
     if (total_blocks > 0) {
         // TODO(xinfei.sxf) fix it, after finshed and remote running commit.
         if (reuseCache()) {
-            InsertInfo insert_info{batch_resource_, stream_->completeTokenIdsPtr(), false};
+            InsertInfo insert_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false};
             resource_context_.cache_manager->insertIntoCache(insert_info);
         }
 
-        FreeInfo free_info{batch_resource_, stream_->completeTokenIdsPtr()};
+        FreeInfo free_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr()};
         free_info.request_id = stream_->streamId();
 
         resource_context_.cache_manager->free(free_info);
@@ -77,7 +77,7 @@ absl::Status StreamCacheResource::incrKVBlock(size_t reserve_step) {
     }
 
     MallocInfo malloc_info;
-    malloc_info.batch_kv_cache_resource = batch_resource_;
+    malloc_info.batch_kv_cache_resource = batch_kv_cache_resource_;
     malloc_info.complete_token_ids      = stream_->completeTokenIdsPtr();
     malloc_info.request_id              = stream_->streamId();
     malloc_info.verbose                 = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
@@ -101,48 +101,40 @@ absl::Status StreamCacheResource::incrKVBlock(size_t reserve_step) {
 
 // TODO, delete it soon
 int StreamCacheResource::maxBlocksNum() const {
-    return batch_resource_->maxBlocksNum();
+    return batch_kv_cache_resource_->maxBlocksNum();
 }
 
 const BatchKVCacheResource& StreamCacheResource::kvCache() const {
-    batch_resource_->check();
-    return *batch_resource_;
+    batch_kv_cache_resource_->check();
+    return *batch_kv_cache_resource_;
 }
 
 BatchKVCacheResource& StreamCacheResource::kvCacheMutable() {
-    batch_resource_->check();
-    return *batch_resource_;
+    batch_kv_cache_resource_->check();
+    return *batch_kv_cache_resource_;
 }
 
 void StreamCacheResource::setKVCache(const BatchKVCacheResource& kv_cache_resource) {
-    *batch_resource_ = kv_cache_resource;
+    *batch_kv_cache_resource_ = kv_cache_resource;
 }
 
 bool StreamCacheResource::updateKVBlock(const std::vector<int>& block_src_batch, bool copy_last_block) {
     return resource_context_.cache_manager->updateKVBlock(
-        batch_resource_, block_src_batch, copy_last_block, block_update_mapping_);
+        batch_kv_cache_resource_, block_src_batch, copy_last_block, block_update_mapping_);
 }
 
 bool StreamCacheResource::hasCacheKeys() const {
-    if (batch_resource_->batch_resource.empty()) {
-        return false;
-    }
-    for (auto& resource : batch_resource_->batch_resource) {
-        if (!resource.cacheKeys().empty()) {
-            return true;
-        }
-    }
-    return false;
+    return batch_kv_cache_resource_->hasCacheKeys();
 }
 
 const CacheKeysType& StreamCacheResource::cacheKeys(int32_t batch_id) const {
-    return batch_resource_->cacheKeys(batch_id);
+    return batch_kv_cache_resource_->cacheKeys(batch_id);
 }
 
 void StreamCacheResource::fakeInitKVBlock() {
     fake_inited_ = true;
-    batch_resource_->resetBatchSize(stream_->maxBatchSize());
-    batch_resource_->resizeBlocks(stream_->seqLength(), 0);
+    batch_kv_cache_resource_->resetBatchSize(stream_->maxBatchSize());
+    batch_kv_cache_resource_->resizeBlocks(stream_->seqLength(), 0);
 }
 
 int StreamCacheResource::mallocFailedTimes() const {

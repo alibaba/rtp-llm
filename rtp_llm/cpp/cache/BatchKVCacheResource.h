@@ -64,7 +64,15 @@ public:
         return group_block_ids;
     }
 
+    const GroupBlockIds& groupBlocks() const {
+        return group_block_ids;
+    }
+
     CacheKeysType& cacheKeys() {
+        return cache_keys;
+    }
+
+    const CacheKeysType& cacheKeys() const {
         return cache_keys;
     }
 
@@ -128,17 +136,22 @@ public:
         return batch_resource.empty() ? 0 : batch_resource[0].blocksNum();
     }
 
-    BlockIndicesType& blocks(int batch_id, int group_id = 0) {
+    const BlockIndicesType& blocks(int batch_id, int group_id = 0) const {
         RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
         return batch_resource[batch_id].blocks(group_id);
     }
 
-    GroupBlockIds& groupBlocks(int batch_id = 0) {
+    BlockIndicesType& mutableBlocks(int batch_id, int group_id = 0) {
+        RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
+        return batch_resource[batch_id].blocks(group_id);
+    }
+
+    const GroupBlockIds& groupBlocks(int batch_id = 0) const {
         RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
         return batch_resource[batch_id].groupBlocks();
     }
 
-    KVCacheResourceV1& cacheResource(int batch_id = 0) {
+    const KVCacheResourceV1& cacheResource(int batch_id = 0) const {
         RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
         return batch_resource[batch_id];
     }
@@ -147,9 +160,51 @@ public:
         resizeBlocks(0, 0);
     }
 
-    CacheKeysType& cacheKeys(int batch_id = 0) {
+    const CacheKeysType& cacheKeys(int batch_id = 0) const {
         RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
         return batch_resource[batch_id].cacheKeys();
+    }
+
+    void popBackCacheKey(int batch_id = 0) {
+        RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
+        auto& keys = batch_resource[batch_id].cacheKeys();
+        if (!keys.empty()) {
+            keys.pop_back();
+        }
+    }
+
+    void popBackAllBatchCacheKeys() {
+        for (auto& resource : batch_resource) {
+            auto& keys = resource.cacheKeys();
+            if (!keys.empty()) {
+                keys.pop_back();
+            }
+        }
+    }
+
+    void clearCacheKeys(int batch_id = 0) {
+        RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
+        batch_resource[batch_id].cacheKeys().clear();
+    }
+
+    void pushBackCacheKey(int batch_id, CacheKeyType key) {
+        RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
+        batch_resource[batch_id].cacheKeys().push_back(key);
+    }
+
+    void initBatchGroups(int batch_id, int group_nums) {
+        RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
+        batch_resource[batch_id].initGroups(group_nums);
+    }
+
+    void setBatchBlocks(int batch_id, int group_id, const BlockIndicesType& blocks) {
+        RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
+        batch_resource[batch_id].blocks(group_id) = blocks;
+    }
+
+    void setBatchCacheKeys(int batch_id, const CacheKeysType& keys) {
+        RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
+        batch_resource[batch_id].cacheKeys() = keys;
     }
 
     void check() const {
@@ -171,10 +226,44 @@ public:
         return debug_string.str();
     }
 
+    void resetAndReturnOldResources(int new_batch_size, std::vector<KVCacheResourceV1>& old_resources) {
+        old_resources = std::move(batch_resource);
+        batch_resource.clear();
+        batch_resource.resize(new_batch_size);
+    }
+
+    void moveBatchResource(int batch_idx, KVCacheResourceV1&& resource) {
+        RTP_LLM_CHECK(batch_idx >= 0 && static_cast<size_t>(batch_idx) < batch_resource.size());
+        batch_resource[batch_idx] = std::move(resource);
+    }
+
+    std::vector<BlockIndicesType> getAllBatchBlocks(int group_id = 0) const {
+        std::vector<BlockIndicesType> all_blocks;
+        all_blocks.reserve(batch_resource.size());
+        for (const auto& resource : batch_resource) {
+            all_blocks.push_back(resource.blocks(group_id));
+        }
+        return all_blocks;
+    }
+
+    bool hasCacheKeys() const {
+        if (batch_resource.empty()) {
+            return false;
+        }
+        for (const auto& resource : batch_resource) {
+            if (!resource.cacheKeys().empty()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
 public:
-    bool                           enable_reuse_cache  = true;
-    bool                           first_fill_finished = false;
-    bool                           last_block_aligned  = true;
+    bool enable_reuse_cache  = true;
+    bool first_fill_finished = false;
+    bool last_block_aligned  = true;
+
+private:
     std::vector<KVCacheResourceV1> batch_resource;
 };
 

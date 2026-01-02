@@ -20,9 +20,9 @@ MallocResult KVCacheAllocator::initMalloc(const MallocInfo& malloc_info) {
         if (metrics_reporter_ && malloc_info.batch_kv_cache_resource->enable_reuse_cache) {
             int64_t gpu_input_length = 0;
             if (malloc_info.batch_kv_cache_resource) {
-                auto&  cache_keys      = malloc_info.batch_kv_cache_resource->cacheKeys(0);
-                size_t match_keys_size = cache_keys.size();
-                gpu_input_length       = static_cast<int64_t>(match_keys_size) * config_.seq_size_per_block;
+                const auto& cache_keys      = malloc_info.batch_kv_cache_resource->cacheKeys(0);
+                size_t      match_keys_size = cache_keys.size();
+                gpu_input_length            = static_cast<int64_t>(match_keys_size) * config_.seq_size_per_block;
             }
 
             if (gpu_input_length > 0) {
