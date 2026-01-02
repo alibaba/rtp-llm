@@ -35,7 +35,7 @@ public:
         // New (refactored) BatchKVCacheResource: [batch_id][group_id] -> block_indices
         addr.resetBatchSize(1);
         addr.initGroups(1);
-        addr.blocks(/*batch_id=*/0, /*group_id=*/0) = {block_id};
+        addr.setBatchBlocks(0, 0, {block_id});
         stream->setKVCache(addr);
 
         auto        sp_output_buffer = std::make_shared<SpeculativeExecutorStreamOutput>();

@@ -16,8 +16,7 @@ void initCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
     const int desired_blocks = (seq_len + seq_size_per_block - 1) / seq_size_per_block;  // ceil
 
     for (int i = 0; i < batch_size; ++i) {
-        auto& keys = batch_kv_cache_resource->cacheKeys(i);
-        keys.clear();
+        batch_kv_cache_resource->clearCacheKeys(i);
 
         int64_t rolling_hash = 0;
         auto*   token_ids    = complete_token_ids->data(i);
@@ -25,7 +24,7 @@ void initCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
             const int pos       = index * seq_size_per_block;
             const int block_len = std::min(seq_size_per_block, seq_len - pos);
             rolling_hash        = rtp_llm::hashInt64Array(rolling_hash, token_ids + pos, token_ids + pos + block_len);
-            keys.push_back(rolling_hash);
+            batch_kv_cache_resource->pushBackCacheKey(i, rolling_hash);
         }
     }
 
@@ -39,13 +38,13 @@ void updateCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
     const int seq_len    = complete_token_ids->seqLength();
 
     for (int i = 0; i < batch_size; ++i) {
-        auto&     keys         = batch_kv_cache_resource->cacheKeys(i);
-        const int total_blocks = seq_len / seq_size_per_block;  // floor, only full blocks
+        const auto& keys         = batch_kv_cache_resource->cacheKeys(i);
+        const int   total_blocks = seq_len / seq_size_per_block;  // floor, only full blocks
 
         // If last_block_aligned was false previously, the last cache key corresponds to a partial block.
         // Drop it before we append new full-block cache keys.
         if (!batch_kv_cache_resource->last_block_aligned && !keys.empty()) {
-            keys.pop_back();
+            batch_kv_cache_resource->popBackCacheKey(i);
         }
 
         auto*   token_ids = complete_token_ids->data(i);
@@ -55,7 +54,7 @@ void updateCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
         for (int index = start_idx; index < total_blocks; ++index) {
             const int pos = index * seq_size_per_block;
             hash          = rtp_llm::hashInt64Array(hash, token_ids + pos, token_ids + pos + (int)seq_size_per_block);
-            keys.push_back(hash);
+            batch_kv_cache_resource->pushBackCacheKey(i, hash);
         }
     }
 
@@ -67,9 +66,7 @@ void dropLastPartialBlock(BatchKVCacheResourcePtr batch_kv_cache_resource) {
     if (batch_kv_cache_resource->last_block_aligned) {
         return;
     }
-    for (auto& resource : batch_kv_cache_resource->batch_resource) {
-        resource.cacheKeys().pop_back();
-    }
+    batch_kv_cache_resource->popBackAllBatchCacheKeys();
     batch_kv_cache_resource->last_block_aligned = true;
 }
 
