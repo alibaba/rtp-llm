@@ -87,10 +87,6 @@ public:
     DeviceEventPtr   createEvent() override;
     DeviceEventPtr   createTorchEvent() override;
     bool             useGroupGemm() const;
-    GraphBase*       getDeviceGraphRunner(const DeviceInitParams& params,
-                                          py::object              py_instance,
-                                          int                     kv_cache_block_offset,
-                                          bool                    is_prefill_cuda_graph_mode = false) override;
 
 private:
     void         checkUseOpenSourceFMHA();

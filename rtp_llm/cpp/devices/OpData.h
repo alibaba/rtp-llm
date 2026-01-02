@@ -153,6 +153,8 @@ struct GptModelInputs {
 
     // not sync to other tp rank
     std::vector<std::string> trace_ids;
+    // for now, the draft model's first step is prefill, we need to avoid cuda graph.
+    bool disable_cuda_graph = false;
 
 public:
     std::string debugString(bool force = false) const;
