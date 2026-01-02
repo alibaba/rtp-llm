@@ -19,11 +19,11 @@ namespace rtp_llm {
 PyWrappedModel::~PyWrappedModel() {
     try {
         py::gil_scoped_acquire gil;
-        if (!device_->initParams().hw_kernel_config.enable_cuda_graph) {
-            py_model_.release();  // Release the Python object
-        } else {
-            RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can not be nullptr");
+        // Always release py_model_ since it's always initialized now
+        py_model_.release();
+        if (graph_runner_ != nullptr) {
             delete graph_runner_;
+            graph_runner_ = nullptr;
         }
         RTP_LLM_LOG_INFO("PyWrappedModel destroyed, Python object instance released.");
     } catch (const py::error_already_set& e) {
@@ -287,8 +287,9 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         auto py_model_inputs = PyModelInputs({token_ids, input_hiddens, attention_inputs, bert_embedding_inputs});
         PyModelOutputs py_model_outputs;
         BufferPtr      hidden_states;
+
         // Cast the Python object to PyModelOutputs and extract hidden states
-        if (enable_cuda_graph_) {
+        if (enable_cuda_graph_ && !inputs.disable_cuda_graph) {
             DevicePerfWrapper wrapper(device_, "cuda graph python forward");
             py_model_inputs.attention_inputs.is_s_padded = true;
             py_model_outputs                             = graph_runner_->forward(py_model_inputs);
