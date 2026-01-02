@@ -48,11 +48,11 @@ CompleteTokenIdsPtr createCompleteTokenIds(int batch_size, int seq_length, int s
 
 BatchKVCacheResourcePtr createBatchKVCacheResource(int batch_size, int block_num_per_batch = 0) {
     auto resource = std::make_shared<BatchKVCacheResource>();
-    resource->batch_resource.resize(batch_size);
+    resource->resetBatchSize(batch_size);
     for (int i = 0; i < batch_size; ++i) {
-        resource->batch_resource[i].initGroups(1);
-        resource->batch_resource[i].group_block_ids[0]->block_indices = std::vector<int>(block_num_per_batch);
-        resource->batch_resource[i].cache_keys = CacheKeysType(block_num_per_batch, static_cast<CacheKeyType>(i * 100));
+        resource->initBatchGroups(i, 1);
+        resource->setBatchBlocks(i, 0, std::vector<int>(block_num_per_batch));
+        resource->setBatchCacheKeys(i, CacheKeysType(block_num_per_batch, static_cast<CacheKeyType>(i * 100)));
     }
     return resource;
 }
@@ -108,7 +108,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MallocSingleBatch) {
     auto       result = allocator_->malloc(malloc_info);
 
     EXPECT_TRUE(result.success);
-    EXPECT_EQ(batch_resource->batch_resource[0].group_block_ids[0]->block_indices.size(), 2);
+    EXPECT_EQ(batch_resource->blocksNum(0, 0), 2);
     EXPECT_LT(allocator_->freeBlocksNum(), config.block_num);
 
     seq_length         = 160;
@@ -134,7 +134,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MallocMultipleBatches) {
 
     EXPECT_TRUE(result.success);
     for (int i = 0; i < batch_size; ++i) {
-        EXPECT_EQ(batch_resource->batch_resource[i].group_block_ids[0]->block_indices.size(), 3);
+        EXPECT_EQ(batch_resource->blocksNum(i, 0), 3);
     }
     EXPECT_EQ(allocator_->freeBlocksNum(), config.block_num - 6);  // 2 shared + 3 batches * 1 blocks + 1 reserved
 }
@@ -654,7 +654,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrMallocRollback) {
 
     // Verify each batch has 1 block
     for (int i = 0; i < batch_size; ++i) {
-        EXPECT_EQ(batch_resource->batch_resource[i].group_block_ids[0]->block_indices.size(), 1);
+        EXPECT_EQ(batch_resource->blocksNum(i, 0), 1);
     }
 
     // update complete_token_ids to 16 tokens
@@ -668,7 +668,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrMallocRollback) {
     EXPECT_EQ(after_rollback_free_blocks, 6);
 
     for (int i = 0; i < batch_size; ++i) {
-        EXPECT_EQ(batch_resource->batch_resource[i].group_block_ids[0]->block_indices.size(), 1);
+        EXPECT_EQ(batch_resource->blocksNum(i, 0), 1);
     }
 
     // Verify that no extra blocks were allocated and left unfreed

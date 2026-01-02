@@ -17,7 +17,7 @@ public:
                         bool                   need_release_resource = true,
                         const std::string&     adapter_name          = ""):
         stream_(stream),
-        batch_resource_(std::make_shared<BatchKVCacheResource>()),
+        batch_kv_cache_resource_(std::make_shared<BatchKVCacheResource>()),
         resource_context_(resource_context),
         need_release_resource_(need_release_resource) {}
 
@@ -99,7 +99,7 @@ public:
         debug_string << "StreamCacheResource {"
                      << "need_release_resource: " << need_release_resource_ << ", batch_resource: ";
 
-        debug_string << batch_resource_->debugString();
+        debug_string << batch_kv_cache_resource_->debugString();
 
         debug_string << "}";
         return debug_string.str();
@@ -107,7 +107,7 @@ public:
 
 private:
     GenerateStream*          stream_;
-    BatchKVCacheResourcePtr  batch_resource_;
+    BatchKVCacheResourcePtr  batch_kv_cache_resource_;
     ResourceContext          resource_context_;
     std::vector<BlockIdPair> block_update_mapping_;
 
