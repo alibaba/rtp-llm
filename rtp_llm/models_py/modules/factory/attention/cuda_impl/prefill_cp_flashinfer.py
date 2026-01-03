@@ -9,7 +9,7 @@ from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, re
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
     FMHAPrefillImplBase,
 )
-from rtp_llm.ops import AttentionConfigs, FMHAType
+from rtp_llm.ops import AttentionConfigs, FMHAType, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCachePrefillOp,
     KVCache,
@@ -17,6 +17,42 @@ from rtp_llm.ops.compute_ops import (
     PyAttentionInputs,
     PyContextParallelParams,
 )
+
+
+def merge_state_torch(
+    prefix_output: torch.Tensor,  # [NUM_TOKENS, NUM_HEADS, HEAD_SIZE]
+    prefix_lse: torch.Tensor,  # [NUM_TOKENS, NUM_HEADS]
+    suffix_output: torch.Tensor,  # [NUM_TOKENS, NUM_HEADS, HEAD_SIZE]
+    suffix_lse: torch.Tensor,  # [NUM_TOKENS, NUM_HEADS]
+    output: Optional[torch.Tensor] = None,  # [NUM_TOKENS, NUM_HEADS, HEAD_SIZE]
+    output_lse: Optional[torch.Tensor] = None,  # [NUM_TOKENS, NUM_HEADS]
+):
+    # Avoid creating new tensors if they are already provided
+    if output is None:
+        output = torch.empty_like(prefix_output)
+    if output_lse is None:
+        output_lse = torch.empty_like(prefix_lse)
+    p_lse = prefix_lse
+    s_lse = suffix_lse
+    # inf -> -inf
+    p_lse[p_lse == torch.inf] = -torch.inf
+    s_lse[s_lse == torch.inf] = -torch.inf
+    # max_lse [NUM_HEADS, NUM_TOKENS]
+    max_lse = torch.maximum(p_lse, s_lse)
+    p_lse = p_lse - max_lse
+    s_lse = s_lse - max_lse
+    p_lse_exp = torch.exp(p_lse)
+    s_lse_exp = torch.exp(s_lse)
+    out_se = p_lse_exp + s_lse_exp
+    if output_lse is not None:
+        output_lse = torch.log(out_se) + max_lse
+    p_scale = p_lse_exp / out_se
+    s_scale = s_lse_exp / out_se
+    p_scale = p_scale.unsqueeze(2)  # [NUM_TOKENS, NUM_HEADS, 1]
+    s_scale = s_scale.unsqueeze(2)  # [NUM_TOKENS, NUM_HEADS, 1]
+    output = prefix_output * p_scale + suffix_output * s_scale
+    return output.to(torch.bfloat16), output_lse
+
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +98,7 @@ class ContextParallelFlashInferRaggedPrefillOp:
         self,
         attn_configs: AttentionConfigs,
         attn_inputs: PyAttentionInputs,
+        parallelism_config: Optional[ParallelismConfig] = None,
         backend: str = "auto",  # "auto", "fa2", or "fa3"
         causal: bool = True,
         kv_layout: str = "NHD",  # "NHD" or "HND"
@@ -89,24 +126,24 @@ class ContextParallelFlashInferRaggedPrefillOp:
 
         self.device = torch.cuda.current_device()
         self.workspace_buffer = get_workspace_buffer(self.device)
-        self.cp_size = 1
-        self.cp_rank = 0
-
         self.rotate_method = CPRotateMethod.ALLTOALL
         self.context_parallel_info: PyContextParallelParams = (
             attn_inputs.context_parallel_info
         )
         self.prefill_wrappers = {}
 
+        if parallelism_config is not None:
+            self.cp_rank = parallelism_config.cp_rank
+            self.cp_size = parallelism_config.cp_size
+        else:
+            self.cp_rank = 0
+            self.cp_size = 1
+
         self.communication_stream = torch.cuda.Stream(device=self.device)
         self.comm_events = [torch.cuda.Event() for _ in range(self.cp_size)]
 
         # init flashinfer attention wrapper
         if self.rotate_method == CPRotateMethod.ALL_GATHER:
-            # Zig-zag load balancing: when using all_gather, each CP rank's workload
-            # is split into two causal attention computations for better load distribution.
-            # Part0: wrapper for first portion of the computation
-            # Part1: wrapper for second portion of the computation
             self.prefill_wrappers["part0"] = BatchPrefillWithRaggedKVCacheWrapper(
                 self.workspace_buffer,
                 kv_layout=kv_layout,
@@ -118,7 +155,6 @@ class ContextParallelFlashInferRaggedPrefillOp:
                 backend=backend,
             )
         elif self.rotate_method == CPRotateMethod.ALLTOALL:
-            # ring attention impl: Multi round send/recv for prefill
             self.prefill_wrappers["causal"] = BatchPrefillWithRaggedKVCacheWrapper(
                 self.workspace_buffer,
                 kv_layout=kv_layout,
@@ -139,7 +175,6 @@ class ContextParallelFlashInferRaggedPrefillOp:
                 )
             )
         elif self.rotate_method == CPRotateMethod.ALL_GATHER_WITH_OVERLAP:
-            # using all_gather with partial overlap: split to local attention and non-local attention
             self.prefill_wrappers["causal"] = BatchPrefillWithRaggedKVCacheWrapper(
                 self.workspace_buffer,
                 kv_layout=kv_layout,
@@ -315,11 +350,8 @@ class ContextParallelFlashInferRaggedPrefillOp:
         elif self.rotate_method == CPRotateMethod.ALL_GATHER_WITH_OVERLAP:
             # Plan for both part0 and part1 wrappers
             qo_indptr = cu_seqlens // 2
-            kv_indptr_part0 = qo_indptr * (self.cp_rank + 1) - cu_seqlens // 2
-            kv_indptr_part1 = (
-                qo_indptr * (2 * self.cp_size - self.cp_rank) - cu_seqlens // 2
-            )
-
+            kv_indptr_part0 = qo_indptr * self.cp_rank
+            kv_indptr_part1 = qo_indptr * (2 * self.cp_size - self.cp_rank - 1)
             # local attention
             self.prefill_wrappers["causal"].plan(
                 qo_indptr=cu_seqlens,
@@ -359,14 +391,15 @@ class ContextParallelFlashInferRaggedPrefillOp:
     ):
         input_length = sum(cp_chunk_lengths).item()
         all_cp_indices_cpu = all_cp_indices.tolist()
+        all_cp_indices = all_cp_indices.reshape(-1)
 
         for i in range(cp_size):
             start_offset = i * input_length
+            chunk_offset = 0
             for chunk_len in cp_chunk_lengths:
-                chunk_offset = 0
                 for j in range(chunk_len):
-                    all_cp_indices[start_offset + chunk_offset + j] = (
-                        all_cp_indices[start_offset + chunk_offset + j]
+                    all_cp_indices[start_offset + chunk_offset + j - 1] = (
+                        all_cp_indices[start_offset + chunk_offset + j - 1]
                         + chunk_offset * cp_size
                     )
                 chunk_offset += chunk_len
@@ -491,11 +524,7 @@ class ContextParallelFlashInferRaggedPrefillOp:
 
         attn_output_part0 = self.prefill_wrappers["part0"].run(q0, k0, v0)
         attn_output_part1 = self.prefill_wrappers["part1"].run(q1, k1, v1)
-
-        attn_output_part0 = attn_output_part0.reshape(attn_output_part0.shape[0], -1)
-        attn_output_part1 = attn_output_part1.reshape(attn_output_part1.shape[0], -1)
         attn_output = torch.cat([attn_output_part0, attn_output_part1], dim=0)
-        attn_output = attn_output.reshape(attn_output.shape[0], -1)
         return attn_output
 
     def forward_all_to_all(
@@ -533,8 +562,7 @@ class ContextParallelFlashInferRaggedPrefillOp:
         kv_buffer = torch.cat([k, v], dim=0)
         remote_kv_buffer = torch.empty_like(kv_buffer)
 
-        for round_id in range(0, self.cp_size - 1):
-
+        for round_id in range(0, self.cp_size):
             out_buffer = torch.zeros(
                 [q.shape[0], self.num_qo_heads, self.head_dim],
                 dtype=q.dtype,
@@ -549,7 +577,7 @@ class ContextParallelFlashInferRaggedPrefillOp:
 
             if round_id < self.cp_size - 1:
                 with torch.cuda.stream(self.communication_stream):
-                    prev_rank_id = (self.cp_rank - round_id + 1) % self.cp_size
+                    prev_rank_id = (self.cp_rank - round_id - 1) % self.cp_size
                     next_rank_id = (self.cp_rank + round_id + 1) % self.cp_size
 
                     # TODO: avoid deadlock...
@@ -640,8 +668,6 @@ class ContextParallelFlashInferRaggedPrefillOp:
     def forward_all_gather_with_overlap(
         self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor
     ) -> torch.Tensor:
-        Group = self._collective_ops["Group"]
-        all_gather = self._collective_ops["all_gather"]
 
         cp_info = self.context_parallel_info
         cp_chunk_lengths = cp_info.prefill_cp_chunk_lengths
@@ -649,7 +675,6 @@ class ContextParallelFlashInferRaggedPrefillOp:
         cp_rank = self.cp_rank
         cp_size = self.cp_size
 
-        # Use communication stream for all_gather
         with torch.cuda.stream(self.communication_stream):
             all_cp_indices = all_gather(
                 cp_shuffle_indices.unsqueeze(0), group=Group.CP
@@ -657,15 +682,14 @@ class ContextParallelFlashInferRaggedPrefillOp:
             all_keys = all_gather(k, group=Group.CP).reshape(k.shape[0] * cp_size, -1)
             all_values = all_gather(v, group=Group.CP).reshape(k.shape[0] * cp_size, -1)
 
-        merged_out, merged_lse = self.prefill_wrappers["causal"].run(
+        output, lse = self.prefill_wrappers["causal"].run(
             q.reshape(-1, self.num_qo_heads, self.head_dim),
             k.reshape(-1, self.num_kv_heads, self.head_dim),
             v.reshape(-1, self.num_kv_heads, self.head_dim),
             return_lse=True,
         )
-
-        # Wait for communication to complete before using all_gather results
         torch.cuda.current_stream().wait_stream(self.communication_stream)
+
         kv_restore_indices = self._generate_kv_restore_indices(
             cp_chunk_lengths, all_cp_indices, cp_rank, cp_size
         )
@@ -707,31 +731,36 @@ class ContextParallelFlashInferRaggedPrefillOp:
             .contiguous()
             .reshape(-1, self.num_kv_heads, self.head_dim)
         )
+        out_buffer = torch.zeros(
+            [q.shape[0], self.num_qo_heads, self.head_dim],
+            dtype=q.dtype,
+            device=q.device,
+        )
+        lse_buffer = torch.full(
+            [q.shape[0], self.num_qo_heads],
+            float("-inf"),
+            dtype=torch.float32,
+            device=q.device,
+        )
         if k0.numel() > 0:
-            out_part0, lse_part0 = self.prefill_wrappers["non_causal_part_0"].run(
-                q=q0, k=k0, v=v0, return_lse=True
-            )
-            merged_out[q_part_0_indices, :, :], lse_out[q_part_0_indices, :] = (
-                merge_state(
-                    v_a=merged_out[q_part_0_indices, :, :],
-                    s_a=merged_lse[q_part_0_indices, :],
-                    v_b=out_part0,
-                    s_b=lse_part0,
+            out_buffer[q_part_0_indices, :, :], lse_buffer[q_part_0_indices, :] = (
+                self.prefill_wrappers["non_causal_part_0"].run(
+                    q=q0, k=k0, v=v0, return_lse=True
                 )
             )
         if k1.numel() > 0:
-            out_part1, lse_part1 = self.prefill_wrappers["non_causal_part_1"].run(
-                q=q1, k=k1, v=v1, return_lse=True
-            )
-            merged_out[q_part_1_indices, :, :], lse_out[q_part_1_indices, :] = (
-                merge_state(
-                    v_a=merged_out[q_part_1_indices, :, :],
-                    s_a=merged_lse[q_part_1_indices, :],
-                    v_b=out_part1,
-                    s_b=lse_part1,
+            out_buffer[q_part_1_indices, :, :], lse_buffer[q_part_1_indices, :] = (
+                self.prefill_wrappers["non_causal_part_1"].run(
+                    q=q1, k=k1, v=v1, return_lse=True
                 )
             )
-        return merged_out.reshape(attn_output.shape[0], -1)
+        merged_output, merged_lse = merge_state(
+            v_a=output,
+            s_a=lse,
+            v_b=out_buffer,
+            s_b=lse_buffer,
+        )
+        return merged_output
 
     def forward(
         self,
@@ -768,10 +797,11 @@ class PrefillContextParallelFlashInferImpl(FMHAPrefillImplBase):
         self,
         attn_configs: AttentionConfigs,
         attn_inputs: PyAttentionInputs,
+        parallelism_config: Optional[ParallelismConfig] = None,
     ):
         super().__init__(
             fmha_impl=ContextParallelFlashInferRaggedPrefillOp(
-                attn_configs, attn_inputs
+                attn_configs, attn_inputs, parallelism_config
             ),
             rope_kvcache_impl=FusedRopeKVCachePrefillOp(attn_configs),
             attn_inputs=attn_inputs,

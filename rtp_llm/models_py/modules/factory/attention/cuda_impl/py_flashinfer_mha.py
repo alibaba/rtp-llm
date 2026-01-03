@@ -84,8 +84,8 @@ class PyFlashinferPrefillImpl(FMHAPrefillImplBase):
     def __init__(
         self,
         attn_configs: AttentionConfigs,
-        parallelism_config: ParallelismConfig,
         attn_inputs: PyAttentionInputs,
+        parallelism_config: Optional[ParallelismConfig] = None,
         cos_sin_cache: Optional[torch.Tensor] = None,
     ) -> None:
         super().__init__(
@@ -174,6 +174,7 @@ class PyFlashinferDecodeImpl(FMHADecodeImplBase):
         self,
         attn_configs: AttentionConfigs,
         attn_inputs: PyAttentionInputs,
+        parallelism_config: Optional[ParallelismConfig] = None,
         cos_sin_cache: Optional[torch.Tensor] = None,
     ) -> None:
         super().__init__(

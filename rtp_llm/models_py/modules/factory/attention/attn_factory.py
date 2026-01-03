@@ -99,7 +99,7 @@ def get_fmha_impl(
         try:
             # Try to get fmha_type without full instantiation if possible
             # For now, we'll create the instance and check both disabled status and support
-            instance = impl(attn_configs, attn_inputs)
+            instance = impl(attn_configs, attn_inputs, parallelism_config)
             fmha_type = instance.fmha_type()
 
             # Skip if this FMHA type is disabled in config
@@ -107,9 +107,6 @@ def get_fmha_impl(
                 continue
 
             if instance.support():
-                if parallelism_config.cp_size > 1:
-                    instance.cp_rank = parallelism_config.cp_rank
-                    instance.cp_size = parallelism_config.cp_size
                 return instance
 
         except Exception as e:
