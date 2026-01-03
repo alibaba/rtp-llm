@@ -28,6 +28,10 @@ void DeviceBase::init() {
     enable_device_perf_ = init_params_.profile_debug_logging_config.enable_device_perf;
 }
 
+void DeviceBase::release() {
+    cache_store_.reset();
+}
+
 void DeviceBase::setTraceMemory(bool trace_memory) {
     buffer_manager_->setTraceMemory(trace_memory);
 }
