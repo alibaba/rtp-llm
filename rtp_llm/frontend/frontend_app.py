@@ -1,4 +1,5 @@
 import asyncio
+import gc
 import logging
 import socket
 import threading
@@ -102,6 +103,9 @@ class FrontendApp(object):
 
         try:
             server = GracefulShutdownServer(config)
+            # freeze all current tracked objects to reduce gc cost
+            gc.collect()
+            gc.freeze()
             server.set_server(self.frontend_server)
             server.run()
         except BaseException as e:
