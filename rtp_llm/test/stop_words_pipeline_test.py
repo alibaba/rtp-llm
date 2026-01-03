@@ -3,8 +3,8 @@ from unittest import TestCase, main
 
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.model_config import ModelConfig as PyModelConfig
+from rtp_llm.frontend.generation.orchestrator import GenerationOrchestrator
 from rtp_llm.ops import FfnDisAggregateConfig, ModelConfig, PDSepConfig, RuntimeConfig
-from rtp_llm.pipeline import Pipeline
 from rtp_llm.utils.base_model_datatypes import GenerateOutput
 from rtp_llm.utils.word_util import get_stop_word_slices
 
@@ -27,7 +27,7 @@ class StopWordTest(TestCase):
         generate_output = GenerateOutput(finished=is_final_response)
         stop_word_str_slices = get_stop_word_slices(stop_word_str_list)
 
-        actual_text, actual_token_buffer = Pipeline.process_stop_str(
+        actual_text, actual_token_buffer = GenerationOrchestrator.process_stop_str(
             generate_config,
             generate_output,
             text,
