@@ -158,16 +158,6 @@ bool BlockPool::init() {
     }
 
     initFreeBlocks();
-
-#if (defined(USING_ROCM) && USING_ROCM) || (defined(USING_CUDA) && USING_CUDA)
-    for (size_t layout_idx = 0; layout_idx < layout_strategies_.size(); ++layout_idx) {
-        auto kv_cache = getMemoryLayoutKVCacheBuffer(static_cast<int>(layout_idx));
-        if (kv_cache.kv_blocks) {
-            device_->bufMemset(*kv_cache.kv_blocks, 0);
-        }
-    }
-#endif
-
     block_cache_ = std::make_shared<BlockCache>();
 
     RTP_LLM_LOG_INFO("BlockPool init success: memory_layouts=%zu, total_layers=%zu, total_size=%zu bytes",
