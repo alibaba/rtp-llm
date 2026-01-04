@@ -1,18 +1,19 @@
 import glob
+import json
 import logging
 import logging.config
 import multiprocessing
 import os
-import select
 import signal
 import subprocess
 import sys
 import time
 import traceback
 from multiprocessing import Process
-from typing import List
+from typing import List, Optional
 
 import torch
+import zmq
 from setproctitle import setproctitle
 
 from rtp_llm.config.py_config_modules import DistributeConfig, PyEnvConfigs, VitConfig
@@ -43,7 +44,7 @@ setup_logging()
 def local_rank_start(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
-    pipe_writer=None,
+    zmq_address: Optional[str] = None,
 ):
     """Start local rank with proper signal handling for graceful shutdown"""
     backend_manager = None
@@ -78,25 +79,29 @@ def local_rank_start(
         backend_manager = BackendManager(py_env_configs)
         backend_manager.start()
         logging.info("Backend server initialized successfully, sending ready status")
-        if pipe_writer is not None and pipe_writer.closed:
-            logging.warning(
-                f"[Child-{g_parallel_info.local_rank}] ERROR: Pipe already closed"
-            )
-            return
-        # Send startup success message
-        if pipe_writer is not None:
+
+        # Send startup success message via ZMQ
+        if zmq_address is not None:
             try:
-                logging.info(f"send ready status to pipe_writer")
-                pipe_writer.send(
+                context = zmq.Context()
+                push_socket = context.socket(zmq.PUSH)
+                push_socket.connect(zmq_address)
+                logging.info(f"send ready status to ZMQ address: {zmq_address}")
+
+                message = json.dumps(
                     {
                         "status": "success",
-                        "message": f"rank {g_parallel_info.local_rank}started successfully",
+                        "rank_id": g_parallel_info.local_rank,
+                        "message": f"rank {g_parallel_info.local_rank} started successfully",
                     }
                 )
+                push_socket.send_string(message)
+                push_socket.close()
+                context.term()
+                logging.info("Successfully sent ready status via ZMQ")
             except Exception as e:
-                logging.warning(f"Failed to send success status via pipe: {e}")
-            finally:
-                pipe_writer.close()
+                logging.warning(f"Failed to send success status via ZMQ: {e}")
+
         # Enter service loop to keep the process alive
         logging.info("Entering service loop to keep backend_manager alive")
         backend_manager.serve_forever()
@@ -106,14 +111,26 @@ def local_rank_start(
         error_trace = traceback.format_exc()
         logging.error(f"{error_msg}, trace: {error_trace}")
 
-        # Send startup failure message
-        if pipe_writer is not None:
+        # Send startup failure message via ZMQ
+        if zmq_address is not None:
             try:
-                pipe_writer.send(
-                    {"status": "failed", "message": error_msg, "traceback": error_trace}
+                context = zmq.Context()
+                push_socket = context.socket(zmq.PUSH)
+                push_socket.connect(zmq_address)
+
+                message = json.dumps(
+                    {
+                        "status": "failed",
+                        "rank_id": g_parallel_info.local_rank,
+                        "message": error_msg,
+                        "traceback": error_trace,
+                    }
                 )
-            except Exception as pipe_error:
-                logging.warning(f"Failed to send error status via pipe: {pipe_error}")
+                push_socket.send_string(message)
+                push_socket.close()
+                context.term()
+            except Exception as zmq_error:
+                logging.warning(f"Failed to send error status via ZMQ: {zmq_error}")
         raise e
 
 
@@ -152,39 +169,37 @@ def _validate_dp_configuration():
 
 
 def _create_rank_processes(
-    global_controller: ConcurrencyController, py_env_configs: PyEnvConfigs
+    global_controller: ConcurrencyController,
+    py_env_configs: PyEnvConfigs,
+    zmq_address: Optional[str] = None,
 ):
-    """Create and start rank processes, returns (processes, rank_pipe_readers)"""
+    """Create and start rank processes, returns processes list"""
     local_world_size = _get_local_world_size()
     cuda_device_list = _get_cuda_device_list()
     _validate_dp_configuration()
 
     processes = []
-    rank_pipe_readers = []  # Store pipe readers for each rank
 
     for _, world_rank in enumerate(
         range(g_parallel_info.world_rank, g_parallel_info.world_rank + local_world_size)
     ):
-        reader, writer = multiprocessing.Pipe(duplex=False)
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(cuda_device_list)
         os.environ["WORLD_RANK"] = str(world_rank)
         proc = Process(
             target=local_rank_start,
-            args=(global_controller, py_env_configs, writer),
+            args=(global_controller, py_env_configs, zmq_address),
             name=f"rank-{world_rank}",
         )
         processes.append(proc)
-        rank_pipe_readers.append(reader)
         proc.start()
-        writer.close()
 
-    return processes, rank_pipe_readers
+    return processes
 
 
 def multi_rank_start(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
-    pipe_writer=None,
+    zmq_address: Optional[str] = None,
 ):
     """Start multi-rank backend server with proper process management"""
     try:
@@ -192,16 +207,35 @@ def multi_rank_start(
     except RuntimeError as e:
         logging.warning(str(e))
 
-    # Create processes and get pipe readers
-    processes, rank_pipe_readers = _create_rank_processes(
-        global_controller, py_env_configs
+    # Create ZMQ PULL socket to receive status from rank processes
+    context = None
+    pull_socket = None
+    if zmq_address is not None:
+        context = zmq.Context()
+        pull_socket = context.socket(zmq.PULL)
+        # Find an available port for rank communication
+        pull_socket.bind("tcp://127.0.0.1:0")
+        rank_zmq_port = (
+            pull_socket.getsockopt(zmq.LAST_ENDPOINT).decode().split(":")[-1]
+        )
+        rank_zmq_address = f"tcp://127.0.0.1:{rank_zmq_port}"
+        logging.info(f"ZMQ PULL socket for ranks bound to {rank_zmq_address}")
+    else:
+        rank_zmq_address = None
+
+    # Create processes
+    processes = _create_rank_processes(
+        global_controller, py_env_configs, rank_zmq_address
     )
     local_world_size = len(processes)
 
     if py_env_configs.distribute_config.fake_gang_env:
+        if pull_socket:
+            pull_socket.close()
+            context.term()
         return processes
 
-    # Wait for all ranks to report startup status via pipe
+    # Wait for all ranks to report startup status via ZMQ
     logging.info(
         f"Waiting for all {local_world_size} ranks to report startup status..."
     )
@@ -209,57 +243,76 @@ def multi_rank_start(
     error_messages = []
     timeout = 3600
     start_time = time.time()
-    fd_map = {
-        reader.fileno(): (i, reader) for i, reader in enumerate(rank_pipe_readers)
-    }
-    fds = list(fd_map.keys())
-
     ready_count = 0
     results = {}
 
+    if pull_socket:
+        pull_socket.setsockopt(zmq.RCVTIMEO, 100)  # 100ms timeout for polling
+
     while ready_count < local_world_size and (time.time() - start_time) < timeout:
-        # 检查可读管道
-        ready_fds, _, _ = select.select(fds, [], [], 0.1)
-
-        for fd in ready_fds:
-            process_id, reader = fd_map[fd]
-            if reader.closed:
-                continue
-
+        if pull_socket:
             try:
-                msg = reader.recv()
-                if msg.get("status") == "success":
-                    logging.info(f"[Parent] Received {msg} from child-{process_id}")
+                message = pull_socket.recv_string(zmq.NOBLOCK)
+                status_msg = json.loads(message)
+                process_id = status_msg.get("rank_id", ready_count)
+
+                if status_msg.get("status") == "success":
+                    logging.info(f"[Parent] Received success from rank-{process_id}")
                     results[process_id] = True
                     ready_count += 1
-                    reader.close()
-                    fds.remove(fd)
-            except EOFError:
-                logging.info(f"[Parent] Pipe closed for child-{process_id}")
-                reader.close()
-                fds.remove(fd)
+                else:
+                    error_msg = status_msg.get("message", "Unknown error")
+                    error_messages.append(f"Rank {process_id}: {error_msg}")
+                    results[process_id] = False
+                    ready_count += 1
+            except zmq.Again:
+                # No message available, continue polling
+                time.sleep(0.1)
+            except Exception as e:
+                logging.error(f"Error receiving ZMQ message: {e}")
+                time.sleep(0.1)
+        else:
+            # No ZMQ, just wait a bit
+            time.sleep(5)
 
-    # 验证结果
-    all_success = ready_count == local_world_size
+    # Verify results
+    all_success = ready_count == local_world_size and all(results.values())
 
-    if all_success:
-        pipe_writer.send(
-            {
-                "status": "success",
-                "message": f"All {local_world_size} backend ranks started successfully",
-            }
-        )
-        logging.info(f"All {local_world_size} ranks started successfully")
-    else:
-        error_msg = "; ".join(error_messages)
-        pipe_writer.send(
-            {
-                "status": "failed",
-                "message": f"Some ranks failed to start: {error_msg}",
-                "traceback": "",
-            }
-        )
-        logging.error(f"Some ranks failed: {error_msg}")
+    # Send overall status to parent process via ZMQ
+    if zmq_address is not None:
+        try:
+            push_context = zmq.Context()
+            push_socket = push_context.socket(zmq.PUSH)
+            push_socket.connect(zmq_address)
+
+            if all_success:
+                message = json.dumps(
+                    {
+                        "status": "success",
+                        "message": f"All {local_world_size} backend ranks started successfully",
+                    }
+                )
+                logging.info(f"All {local_world_size} ranks started successfully")
+            else:
+                error_msg = (
+                    "; ".join(error_messages) if error_messages else "Some ranks failed"
+                )
+                message = json.dumps(
+                    {
+                        "status": "failed",
+                        "message": f"Some ranks failed to start: {error_msg}",
+                        "traceback": "",
+                    }
+                )
+                logging.error(f"Some ranks failed: {error_msg}")
+
+            push_socket.send_string(message)
+            push_socket.close()
+            push_context.term()
+        except Exception as e:
+            logging.warning(f"Failed to send status via ZMQ to parent: {e}")
+
+    if not all_success:
         # Terminate all processes if any rank failed
         logging.error("Terminating all ranks due to startup failures")
         for proc in processes:
@@ -267,7 +320,14 @@ def multi_rank_start(
                 proc.terminate()
         for proc in processes:
             proc.join(timeout=5)
-        raise Exception(f"Multi-rank startup failed: {'; '.join(error_messages)}")
+        error_msg = "; ".join(error_messages) if error_messages else "Unknown error"
+        raise Exception(f"Multi-rank startup failed: {error_msg}")
+
+    # Clean up ZMQ socket
+    if pull_socket:
+        pull_socket.close()
+    if context:
+        context.term()
 
     # After successful startup, monitor processes
     manager = ProcessManager(
@@ -338,7 +398,7 @@ def clear_jit_filelock():
 def start_backend_server(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
-    pipe_writer=None,
+    zmq_address: Optional[str] = None,
 ):
     setproctitle("rtp_llm_backend_server")
     os.makedirs("logs", exist_ok=True)
@@ -357,7 +417,7 @@ def start_backend_server(
         return vit_start_server()
 
     if not torch.cuda.is_available():
-        return local_rank_start(global_controller, py_env_configs)
+        return local_rank_start(global_controller, py_env_configs, zmq_address)
 
     if (
         g_parallel_info.world_size % torch.cuda.device_count() != 0
@@ -369,9 +429,9 @@ def start_backend_server(
         )
 
     if torch.cuda.device_count() > 1 and g_parallel_info.world_size > 1:
-        return multi_rank_start(global_controller, py_env_configs, pipe_writer)
+        return multi_rank_start(global_controller, py_env_configs, zmq_address)
     else:
-        return local_rank_start(global_controller, py_env_configs, pipe_writer)
+        return local_rank_start(global_controller, py_env_configs, zmq_address)
 
 
 def main():

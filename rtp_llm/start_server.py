@@ -3,12 +3,14 @@ import logging
 import multiprocessing
 import os
 import signal
+import socket
 import sys
 import time
 import traceback
 
 import requests
 import torch
+import zmq
 
 from rtp_llm.distribute.distributed_server import get_world_info
 from rtp_llm.ops import ProfilingDebugLoggingConfig, RoleType
@@ -57,25 +59,37 @@ def start_backend_server_impl(
         start_backend_server(global_controller, py_env_configs, None)
         os._exit(-1)
 
-    # Create pipe for subprocess startup status communication
-    pipe_reader, pipe_writer = multiprocessing.Pipe(duplex=False)
+    # Create ZMQ PULL socket for subprocess startup status communication
+    context = zmq.Context()
+    pull_socket = context.socket(zmq.PULL)
+
+    # Find an available port
+    pull_socket.bind("tcp://127.0.0.1:0")
+    zmq_port = pull_socket.getsockopt(zmq.LAST_ENDPOINT).decode().split(":")[-1]
+    zmq_address = f"tcp://127.0.0.1:{zmq_port}"
+    logging.info(f"ZMQ PULL socket bound to {zmq_address}")
 
     backend_process = multiprocessing.Process(
         target=start_backend_server,
-        args=(global_controller, py_env_configs, pipe_writer),
+        args=(global_controller, py_env_configs, zmq_address),
         name="backend_manager",
     )
     backend_process.start()
-    pipe_writer.close()
+
     # Wait for subprocess to send startup status, maximum 3600 seconds
     max_wait_seconds = 60 * 60
     logging.info(
         f"Waiting for backend manager startup status (timeout: {max_wait_seconds}s)..."
     )
     try:
-        # 使用 poll 检查是否有数据可读，设置超时
-        if pipe_reader.poll(timeout=max_wait_seconds):
-            status_msg = pipe_reader.recv()
+        # Set socket timeout
+        pull_socket.setsockopt(zmq.RCVTIMEO, max_wait_seconds * 1000)  # milliseconds
+
+        # Receive message from subprocess
+        try:
+            message = pull_socket.recv_string()
+            status_msg = json.loads(message)
+
             if status_msg.get("status") == "success":
                 logging.info(
                     f"Backend manager started successfully: {status_msg.get('message', '')}"
@@ -92,8 +106,8 @@ def start_backend_server_impl(
             logging.error(f"Backend manager failed to start: {error_msg}")
             process_manager.monitor_and_release_processes()
             raise Exception(f"Backend manager start failed: {error_msg}")
-        else:
-            # 超时情况
+        except zmq.Again:
+            # Timeout
             logging.error(
                 f"Backend manager startup timeout after {max_wait_seconds} seconds"
             )
@@ -102,7 +116,8 @@ def start_backend_server_impl(
                 f"Backend manager startup timeout after {max_wait_seconds} seconds"
             )
     finally:
-        pipe_reader.close()
+        pull_socket.close()
+        context.term()
 
 
 def start_frontend_server_impl(

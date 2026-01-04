@@ -560,6 +560,7 @@ whl_reqs = [
     # "xfastertransformer_devel==1.8.1.1",
     # "xfastertransformer_devel_icx==1.8.1.1",
     "grpcio==1.62.0",
+    "pyzmq",
     #"decord==0.6.0",
     "oss2",
     "orjson",
