@@ -160,7 +160,7 @@ void CKGemmW8A8GeluImpl(const ckW8A8GemmParam& params)
     std::size_t workspace_size = gemm.GetWorkSpaceSize(&argument);
     if(workspace_size!=0)
     {
-        DeviceMem gemm_desc_workspace(workspace_size);
+        ck::DeviceMem gemm_desc_workspace(workspace_size);
         gemm.SetWorkSpacePointer(&argument, gemm_desc_workspace.GetDeviceBuffer());
     }
     invoker.Run(argument, StreamConfig{params.stream, false});
