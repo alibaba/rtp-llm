@@ -166,7 +166,7 @@ class PyFlashinferDecodeAttnOp(object):
     ) -> torch.Tensor:
         assert kv_cache is not None, "kv_cache is required"
         q = q.reshape(q.shape[0], self.local_head_num, self.head_dim_qk)
-        return self.decode_wrapper.run(q, kv_cache.k_cache_base)
+        return self.decode_wrapper.run(q, kv_cache.kv_cache_base)
 
 
 class PyFlashinferDecodeImpl(FMHADecodeImplBase):

@@ -23,7 +23,6 @@ cc_library(
     deps = [
         "//rtp_llm/cpp/engine_base:engine_base",
         "//rtp_llm/cpp/engine_base/stream:generate_config",
-        "//rtp_llm/cpp/cache",
     ],
     visibility = ["//visibility:public"],
 )

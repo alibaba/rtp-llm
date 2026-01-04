@@ -47,7 +47,8 @@ void CompleteTokenIds::init(const std::shared_ptr<GenerateInput>& generate_input
     RTP_LLM_CHECK_WITH_INFO(
         (seq_length_ <= max_seq_len_), "seq_length[%d] must be less than max_seq_len[%d]", seq_length_, max_seq_len_);
 
-    common_len_             = seq_length_;
+    common_len_ = max_batch_size_ == 1 ? seq_length_ : seq_length_ / seq_size_per_block_ * seq_size_per_block_;
+
     start_check_seq_length_ = seq_length_;
 
     size_t max_token_num = max_seq_len_ + extra_reserve_token_num;
@@ -202,6 +203,10 @@ bool CompleteTokenIds::update(const rtp_llm::BufferPtr& new_tokens,
     return true;
 }
 
+void CompleteTokenIds::setReserveStep(int reserve_step) {
+    reserve_step_ = reserve_step;
+}
+
 void CompleteTokenIds::setSeqLength(int seq_length) {
     RTP_LLM_CHECK(seq_length <= complete_token_ids_->shape()[1]);
     if (seq_length > seq_length_) {
@@ -214,6 +219,14 @@ void CompleteTokenIds::setSeqLength(int seq_length) {
     if (batch_size_ == 1) {  // reset common len
         common_len_ = seq_length_;
     }
+}
+
+int CompleteTokenIds::totalSeqLength() const {
+    return seq_length_ + (int)reserve_step_;
+}
+
+int CompleteTokenIds::commonSeqLength() const {
+    return common_len_;
 }
 
 int CompleteTokenIds::seqLength() const {
