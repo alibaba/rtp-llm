@@ -131,8 +131,7 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
 
     // If no host specified in request, check if there's a master role
     char* remote_rpc_server_ip_env = std::getenv("REMOTE_RPC_SERVER_IP");
-    bool has_master_role =
-        (remote_rpc_server_ip_env != nullptr && strlen(remote_rpc_server_ip_env) > 0);
+    bool  has_master_role          = (remote_rpc_server_ip_env != nullptr && strlen(remote_rpc_server_ip_env) > 0);
 
     // If no host specified in request and no master role, this is a direct prefill request
     // In this case, we still need to select decode machines as specified in the requirements
@@ -326,6 +325,8 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
     GenerateOutputsPB response;
     auto              prefill_total_reuse_len  = prefill_context.getStream()->initialReuseLength();
     auto              prefill_local_reuse_len  = prefill_context.getStream()->localReuseLength();
+    auto              prefill_gpu_reuse_len    = prefill_context.getStream()->gpuReuseLength();
+    auto              prefill_memory_reuse_len = prefill_context.getStream()->memoryReuseLength();
     auto              prefill_remote_reuse_len = prefill_context.getStream()->remoteReuseLength();
 
     auto first_token_rt_us = prefill_context.getStream()->getTimeInfo().first_token_rt_us;
@@ -346,24 +347,36 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
         for (size_t i = 0; i < response.flatten_output().aux_info_size(); i++) {
             auto decode_total_reuse_len  = response.flatten_output().aux_info(i).total_reuse_len();
             auto decode_local_reuse_len  = response.flatten_output().aux_info(i).local_reuse_len();
+            auto decode_gpu_reuse_len    = response.flatten_output().aux_info(i).gpu_reuse_len();
+            auto decode_memory_reuse_len = response.flatten_output().aux_info(i).memory_reuse_len();
             auto decode_remote_reuse_len = response.flatten_output().aux_info(i).remote_reuse_len();
 
             response.mutable_flatten_output()->mutable_aux_info(i)->set_first_token_cost_time_us(first_token_rt_us);
             response.mutable_flatten_output()->mutable_aux_info(i)->set_cost_time_us(cost_time_us);
 
+            // Set reuse lengths
             response.mutable_flatten_output()->mutable_aux_info(i)->set_total_reuse_len(prefill_total_reuse_len);
             response.mutable_flatten_output()->mutable_aux_info(i)->set_local_reuse_len(prefill_local_reuse_len);
+            response.mutable_flatten_output()->mutable_aux_info(i)->set_gpu_reuse_len(prefill_gpu_reuse_len);
+            response.mutable_flatten_output()->mutable_aux_info(i)->set_memory_reuse_len(prefill_memory_reuse_len);
             response.mutable_flatten_output()->mutable_aux_info(i)->set_remote_reuse_len(prefill_remote_reuse_len);
 
+            // Set prefill reuse lengths
             response.mutable_flatten_output()->mutable_aux_info(i)->set_prefill_total_reuse_len(
                 prefill_total_reuse_len);
             response.mutable_flatten_output()->mutable_aux_info(i)->set_prefill_local_reuse_len(
                 prefill_local_reuse_len);
+            response.mutable_flatten_output()->mutable_aux_info(i)->set_prefill_gpu_reuse_len(prefill_gpu_reuse_len);
+            response.mutable_flatten_output()->mutable_aux_info(i)->set_prefill_memory_reuse_len(
+                prefill_memory_reuse_len);
             response.mutable_flatten_output()->mutable_aux_info(i)->set_prefill_remote_reuse_len(
                 prefill_remote_reuse_len);
 
             response.mutable_flatten_output()->mutable_aux_info(i)->set_decode_total_reuse_len(decode_total_reuse_len);
             response.mutable_flatten_output()->mutable_aux_info(i)->set_decode_local_reuse_len(decode_local_reuse_len);
+            response.mutable_flatten_output()->mutable_aux_info(i)->set_decode_gpu_reuse_len(decode_gpu_reuse_len);
+            response.mutable_flatten_output()->mutable_aux_info(i)->set_decode_memory_reuse_len(
+                decode_memory_reuse_len);
             response.mutable_flatten_output()->mutable_aux_info(i)->set_decode_remote_reuse_len(
                 decode_remote_reuse_len);
         }
@@ -376,6 +389,7 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
     CLIENT_GRPC_RET_IF_ERROR(
         prefill_context, prefill_context.closeGrpcStream().ok(), ErrorCode::REMOTE_GENERATE_FAILED);
     prefill_context.getStream()->setFinishedWithoutLock();
+    RTP_LLM_LOG_DEBUG("request [%ld] setFinishedWithoutLock", request_id);
 }
 
 grpc::Status PrefillRpcServer::prepareAllocateResource(PrefillGenerateContext& prefill_context) {
@@ -407,11 +421,10 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
                                                   meta_);
     prefill_context.onflight_requests      = onflight_requests_;
     prefill_context.loading_cache_requests = loading_cache_requests_;
-    
 
-    auto max_retry_times                   = maga_init_params_.pd_sep_config.prefill_retry_times;
-    auto max_retry_timeout_ms              = maga_init_params_.pd_sep_config.prefill_retry_timeout_ms;
-    int  retry_interval_ms                 = 1;
+    auto max_retry_times      = maga_init_params_.pd_sep_config.prefill_retry_times;
+    auto max_retry_timeout_ms = maga_init_params_.pd_sep_config.prefill_retry_timeout_ms;
+    int  retry_interval_ms    = 1;
 
     try {
         EXECUTE_WITH_RETRY(
