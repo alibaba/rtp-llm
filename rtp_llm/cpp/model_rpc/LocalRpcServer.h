@@ -30,6 +30,7 @@ public:
     virtual grpc::Status init(const EngineInitParams&                                maga_init_params,
                               py::object                                             mm_process_engine,
                               std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params);
+
     grpc::Status
     GetWorkerStatus(grpc::ServerContext* context, const ::StatusVersionPB* request, ::WorkerStatusPB* response);
 
@@ -43,6 +44,22 @@ public:
     ::grpc::Status DistKvCache(::grpc::ServerContext*        context,
                                const ::DistKvCacheRequestPB* request,
                                ::DistKvCacheResponsePB*      response);
+
+    grpc::Status CheckHealth(grpc::ServerContext* context, const EmptyPB* request, CheckHealthResponsePB* response);
+
+    grpc::Status UpdateWeights(grpc::ServerContext* context, const UpdateWeightsRequestPB* request, EmptyPB* response);
+
+    grpc::Status
+    UpdateEplbConfig(grpc::ServerContext* context, const UpdateEplbConfigRequestPB* request, EmptyPB* response);
+
+    grpc::Status SetPause(grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response);
+
+    grpc::Status SetRestart(grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response);
+
+    grpc::Status SetLogLevel(grpc::ServerContext* context, const SetLogLevelRequestPB* request, EmptyPB* response);
+
+    grpc::Status
+    UpdateSchedulerInfo(grpc::ServerContext* context, const UpdateSchedulerInfoRequestPB* request, EmptyPB* response);
 
     KVCacheInfo getCacheStatusInfo(int64_t latest_cache_version, bool need_cache_keys);
 
@@ -99,6 +116,7 @@ protected:
     kmonitor::MetricsReporterPtr          metrics_reporter_;
     std::atomic<size_t>                   onflight_requests_{0};
     std::shared_ptr<RpcServerRuntimeMeta> meta_;
+    py::object                            weight_manager_;
 };
 
 }  // namespace rtp_llm

@@ -10,6 +10,9 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     FusedMoeDataRouter,
     FusedMoeExpertExecutor,
 )
+from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
+    FusedMoEQuantConfig,
+)
 
 
 class StrategyAttributes:
@@ -35,17 +38,18 @@ class StrategyAttributes:
         self,
         router_class: Type[FusedMoeDataRouter],
         executor_class: Type[FusedMoeExpertExecutor],
+        quant_config: FusedMoEQuantConfig,
     ):
         """Initialize strategy attributes
 
         Args:
-            router_type: Router implementation type (optional, will be obtained from router_class if not provided)
-            executor_type: Executor implementation type (optional, will be obtained from executor_class if not provided)
-            router_class: Actual router class (required if router_type is not provided)
-            executor_class: Actual executor class (required if executor_type is not provided)
+            router_class: Actual router class
+            executor_class: Actual executor class
+            quant_config: Quantization configuration
         """
-        self.router_class = router_class
-        self.executor_class = executor_class
+        self.router_class: Type[FusedMoeDataRouter] = router_class
+        self.executor_class: Type[FusedMoeExpertExecutor] = executor_class
+        self.quant_config: FusedMoEQuantConfig = quant_config
 
     def calculate_priority(self) -> int:
         """Calculate priority based on Router and Executor types

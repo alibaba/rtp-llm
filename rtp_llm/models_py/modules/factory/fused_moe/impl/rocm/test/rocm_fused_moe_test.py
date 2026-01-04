@@ -6,15 +6,20 @@ from aiter.ops.shuffle import shuffle_weight
 from torch import dtype as _dtype
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     ExpertForwardPayload,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
+    FusedMoEQuantConfig,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.executors.deepep_normal_fused_moe_executor import (
     FusedMoeExecutor,
     torch_moe_ref,
 )
-from rtp_llm.ops import ParallelismConfig, MoeConfig
+from rtp_llm.ops import MoeConfig, ParallelismConfig
 from rtp_llm.utils.model_weight import W
 
 
@@ -84,7 +89,7 @@ class FusedMoeTest(TestCase):
         model_config.num_layers = 2
         model_config.max_seq_len = 2048
         model_config.vocab_size = 32000
-        model_config.expert_num = expert_num        
+        model_config.expert_num = expert_num
         model_config.moe_k = top_k
         model_config.inter_size = inter_dim
         model_config.activation_type = "silu"
@@ -116,9 +121,11 @@ class FusedMoeTest(TestCase):
 
         weights = {W.moe_w1: w1, W.moe_w2: w2}
 
-        fused_moe_executors = FusedMoeExecutor(config_adapter, weights)
+        fused_moe_executors = FusedMoeExecutor(
+            config_adapter, FusedMoEQuantConfig(), weights
+        )
 
-        exec_out = fused_moe_executors.execute(
+        combine_payload = fused_moe_executors.execute(
             payload=payload,
             activation="silu",
             expert_map=None,
@@ -128,7 +135,9 @@ class FusedMoeTest(TestCase):
         )
 
         # 数值比对
-        torch.testing.assert_close(exec_out, ref_out, atol=1e-3, rtol=1e-3)
+        torch.testing.assert_close(
+            combine_payload.fused_expert_output, ref_out, atol=1e-3, rtol=1e-3
+        )
 
     def test_fused_moe(self):
         for params in itertools.product(

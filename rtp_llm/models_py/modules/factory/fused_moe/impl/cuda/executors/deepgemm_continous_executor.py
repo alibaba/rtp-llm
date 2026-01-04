@@ -6,7 +6,6 @@ from typing import Any, Dict, Optional
 
 import torch
 
-
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
     is_deep_gemm_e8m0_used,
     m_grouped_fp8_gemm_nt_contiguous,
@@ -19,6 +18,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
+    CombineForwardPayload,
     ExpertForwardPayload,
     FusedMoeExpertExecutor,
 )
@@ -33,9 +33,10 @@ from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
     tma_align_input_scale,
 )
 from rtp_llm.models_py.utils.math import ceil_div
+from rtp_llm.models_py.utils.memory import dispose_tensor
+from rtp_llm.ops import ActivationType
 from rtp_llm.ops.compute_ops import trt_fp8_quantize_128
 from rtp_llm.utils.model_weight import W
-from rtp_llm.ops import ActivationType
 
 BLOCK_SIZE = 128
 EXPERT_ALIGNMENT = 128
@@ -43,10 +44,6 @@ EXPERT_ALIGNMENT = 128
 
 def align_up_math(n: int, alignment: int = 128) -> int:
     return int(math.ceil(n / alignment)) * alignment
-
-
-def dispose_tensor(x: torch.Tensor):
-    x.set_(torch.empty((0,), device=x.device, dtype=x.dtype))  # type: ignore
 
 
 class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
@@ -71,22 +68,26 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
     def __init__(
         self,
         config: MoEConfigAdapter,
+        quant_config: FusedMoEQuantConfig,
         weights: Dict[str, torch.Tensor],
     ):
-        super().__init__(FusedMoEQuantConfig())
-        self.config = config
+        super().__init__(config, quant_config, weights)
+
         self.ep_size = config.ep_size
         self.ep_rank = config.ep_rank
         self.num_experts = config.expert_num
+
         assert self.num_experts % self.ep_size == 0
         self.num_experts_per_partition = self.num_experts // self.ep_size
         self.start_expert_id = self.ep_rank * self.num_experts_per_partition
         self.end_expert_id = self.start_expert_id + self.num_experts_per_partition - 1
+
         self.top_k = config.moe_k
         self.activation = config.activation_type
         self.renormalize = True
         self.use_fp8_w8a8 = True
         self.use_block_quant = True
+
         # 权重初始化
         self.w13_weight = weights[W.moe_w1]
         self.w2_weight = weights[W.moe_w2]
@@ -94,6 +95,7 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
         self.w2_weight_scale_inv = weights[W.moe_s2]
         self.w13_weight_scale = None
         self.w2_weight_scale = None
+
         if is_deep_gemm_e8m0_used():
             w13_weight_tmp, self.w13_weight_scale_inv = requant_weight_ue8m0(
                 self.w13_weight, self.w13_weight_scale_inv
@@ -117,19 +119,15 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
             self.w2_weight_scale_inv,
         )
 
-    @property
-    def local_num_experts(self) -> int:
-        return self.num_experts_per_partition
-
     def execute(
         self,
         payload: ExpertForwardPayload,
-        activation: ActivationType,
+        activation: str,
         expert_map: Optional[torch.Tensor],
         a2_scale: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         extra_expert_args: Optional[dict[str, Any]],
-    ) -> torch.Tensor:
+    ) -> CombineForwardPayload:
         assert payload.expert_x is not None, "hidden_states_fp8 is not initialized"
         assert (
             payload.expert_x_scale is not None
@@ -164,10 +162,12 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
         ]
         all_tokens: int = sum(num_recv_tokens_per_expert)
         if all_tokens <= 0:
-            return torch.zeros(
-                hidden_states_fp8.shape,
-                device=hidden_states_fp8.device,
-                dtype=torch.bfloat16,
+            return CombineForwardPayload(
+                fused_expert_output=torch.zeros(
+                    hidden_states_fp8.shape,
+                    device=hidden_states_fp8.device,
+                    dtype=torch.bfloat16,
+                ),
             )
         _, K = hidden_states_fp8.size()
         N = self.w13_weight.size(1)
@@ -275,4 +275,4 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
             dtype=torch.bfloat16,
         )
         ep_gather(down_output, topk_idx, topk_weights, output_index, gather_out)
-        return gather_out
+        return CombineForwardPayload(fused_expert_output=gather_out)

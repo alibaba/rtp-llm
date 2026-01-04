@@ -174,7 +174,7 @@ class ModelFactory:
     def from_model_configs(
         model_config: ModelConfig,
         engine_config: EngineConfig,
-        gang_info,
+        world_info,
         vit_config: Optional[VitConfig] = None,
         merge_lora: bool = False,
         propose_model_config: Optional[ModelConfig] = None,
@@ -188,7 +188,7 @@ class ModelFactory:
         Args:
             model_config: Model configuration (contains mm_model_config)
             engine_config: Engine configuration
-            gang_info: GangInfo instance from GangServer
+            world_info: WorldInfo instance from DistributedServer
             vit_config: Optional VitConfig (needed for multimodal models)
             merge_lora: Whether to merge LoRA weights
             propose_model_config: Optional propose model configuration
@@ -228,7 +228,7 @@ class ModelFactory:
             model=model,
             engine_config=engine_config,
             alog_conf_path=alog_conf_path,
-            gang_info=gang_info,
+            world_info=world_info,
             propose_model=propose_model,
         )
         engine.start()

@@ -20,6 +20,30 @@ class FusedMoEQuantConfig:
             not self.per_act_token_quant or self.block_shape is None
         ), "illegal quantization"
 
+    def __str__(self) -> str:
+        if not self.is_quantized:
+            return "FusedMoEQuantConfig(no_quant)"
+
+        # Format quant_dtype
+        if isinstance(self.quant_dtype, torch.dtype):
+            dtype_str = str(self.quant_dtype).replace("torch.", "")
+        else:
+            dtype_str = str(self.quant_dtype)
+
+        # Determine quantization type
+        quant_type_parts = [dtype_str]
+        if self.per_act_token_quant:
+            quant_type_parts.append("per_token")
+        elif self.is_block_quantized:
+            quant_type_parts.append(f"per_block{self.block_shape}")
+        else:
+            quant_type_parts.append("per_tensor")
+
+        if self.per_out_ch_quant:
+            quant_type_parts.append("per_out_ch")
+
+        return f"FusedMoEQuantConfig({', '.join(quant_type_parts)})"
+
     @property
     def is_quantized(self) -> bool:
         return self.quant_dtype is not None

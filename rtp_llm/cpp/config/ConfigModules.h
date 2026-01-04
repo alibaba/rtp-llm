@@ -21,29 +21,29 @@ struct FfnDisAggregateConfig {
 };
 
 struct ParallelismConfig {
-    int64_t     tp_size          = 1;
-    int64_t     ep_size          = 1;
-    int64_t     dp_size          = 1;
-    int64_t     pp_size          = 1;
-    int64_t     world_size       = 1;
-    int64_t     world_rank       = 0;
-    int64_t     local_world_size = 1;
-    int64_t     local_rank       = 0;
-    int64_t     ffn_sp_size      = 1;
-    int64_t     tp_rank          = 0;
-    int64_t     ep_rank          = 0;
-    int64_t     dp_rank          = 0;
-    int64_t     ffn_tp_size      = 1;
-    int64_t     ffn_tp_rank      = 0;
-    bool        enable_sp        = false;
+    int64_t tp_size          = 1;
+    int64_t ep_size          = 1;
+    int64_t dp_size          = 1;
+    int64_t pp_size          = 1;
+    int64_t world_size       = 1;
+    int64_t world_rank       = 0;
+    int64_t local_world_size = 1;
+    int64_t local_rank       = 0;
+    int64_t ffn_sp_size      = 1;
+    int64_t tp_rank          = 0;
+    int64_t ep_rank          = 0;
+    int64_t dp_rank          = 0;
+    int64_t ffn_tp_size      = 1;
+    int64_t ffn_tp_rank      = 0;
+    bool    enable_sp        = false;
 
-    std::string nccl_ip          = "";
-    int64_t     tp_nccl_port     = 0;
-    int64_t     dp_tp_nccl_port  = 0;
-    int64_t     ffn_tp_nccl_port = 0;
-    int64_t     th_nccl_port     = 0;  // General NCCL port for compatibility
-    int64_t     http_port        = 0;
-    int64_t     model_rpc_port   = 0;
+    std::string nccl_ip                   = "";
+    int64_t     tp_nccl_port              = 0;
+    int64_t     dp_tp_nccl_port           = 0;
+    int64_t     ffn_tp_nccl_port          = 0;
+    int64_t     th_nccl_port              = 0;  // General NCCL port for compatibility
+    int64_t     http_port                 = 0;
+    int64_t     model_rpc_port            = 0;
     int64_t     embedding_rpc_server_port = 0;
 
     FfnDisAggregateConfig ffn_disaggregate_config;  // FFN disaggregate configuration
@@ -69,7 +69,9 @@ enum class FMHAType {
     AITER_PREFILL,
     AITER_ASM_PREFILL,
     AITER_DECODE,
-    AITER_ASM_DECODE
+    AITER_ASM_DECODE,
+    PY_FLASHINFER_PREFILL,
+    PY_FLASHINFER_DECODE,
 };
 
 struct FMHAConfig {
@@ -81,35 +83,35 @@ struct FMHAConfig {
     bool        enable_trtv1_fmha             = true;
     bool        disable_flash_infer           = false;
     bool        enable_xqa                    = true;
-    bool        use_aiter_pa                 = true;
-    bool        use_asm_pa                   = true;
-    int64_t     absorb_opt_len               = 1024;
+    bool        use_aiter_pa                  = true;
+    bool        use_asm_pa                    = true;
+    int64_t     absorb_opt_len                = 1024;
     std::string to_string() const;
 };
 
 struct KVCacheConfig {
-    bool        reuse_cache                        = false;
-    std::string multi_task_prompt                  = "";
-    std::string multi_task_prompt_str              = "";
+    bool                                    reuse_cache           = false;
+    std::string                             multi_task_prompt     = "";
+    std::string                             multi_task_prompt_str = "";
     std::map<std::string, std::vector<int>> multi_task_prompt_tokens;
-    bool        enable_3fs                         = false;
-    int         match_timeout_ms                   = 1000;
-    int         rpc_get_cache_timeout_ms           = 2000;
-    int         rpc_put_cache_timeout_ms           = 2000;
-    int         threefs_read_timeout_ms            = 1000;
-    int         threefs_write_timeout_ms           = 2000;
-    int         max_block_size_per_item            = 16;
-    int64_t     threefs_read_iov_size              = 1LL << 32;  // 4GB
-    int64_t     threefs_write_iov_size             = 1LL << 32;  // 4GB
-    int64_t     memory_block_cache_size_mb         = 0;
-    int64_t     memory_block_cache_sync_timeout_ms = 10000;
+    bool                                    enable_3fs                         = false;
+    int                                     match_timeout_ms                   = 1000;
+    int                                     rpc_get_cache_timeout_ms           = 2000;
+    int                                     rpc_put_cache_timeout_ms           = 2000;
+    int                                     threefs_read_timeout_ms            = 1000;
+    int                                     threefs_write_timeout_ms           = 2000;
+    int                                     max_block_size_per_item            = 16;
+    int64_t                                 threefs_read_iov_size              = 1LL << 32;  // 4GB
+    int64_t                                 threefs_write_iov_size             = 1LL << 32;  // 4GB
+    int64_t                                 memory_block_cache_size_mb         = 0;
+    int64_t                                 memory_block_cache_sync_timeout_ms = 10000;
     // Fields merged from PyKvCacheConfig
-    int         int8_kv_cache                      = 0;
-    int         fp8_kv_cache                      = 0;
-    int64_t     kv_cache_mem_mb                    = -1;
-    int         seq_size_per_block                 = 64;
-    int         test_block_num                     = 0;
-    int         use_block_cache                    = -1;  // -1 means not set, use Optional<int> equivalent
+    int         int8_kv_cache      = 0;
+    int         fp8_kv_cache       = 0;
+    int64_t     kv_cache_mem_mb    = -1;
+    int         seq_size_per_block = 64;
+    int         test_block_num     = 0;
+    int         use_block_cache    = -1;  // -1 means not set, use Optional<int> equivalent
     void        insertMultiTaskPromptTokens(std::string task_id, std::vector<int64_t> tokens_id);
     std::string to_string() const;
 };
@@ -150,7 +152,7 @@ struct HWKernelConfig {
     // Decode CUDA Graph capture configuration
     // Comma-separated list of batch sizes, e.g., "1,2,4,8,16,32"
     std::vector<int> decode_capture_batch_sizes;
-    bool        disable_dpc_random           = false;
+    bool             disable_dpc_random = false;
     std::string      to_string() const;
 };
 
@@ -192,12 +194,12 @@ struct ModelSpecificConfig {
 };
 
 enum SpeculativeType {
-    SP_TYPE_NONE         = 0,  // Not enabled (empty string or "none")
-    SP_TYPE_VANILLA      = 1,  // Classic speculative sampling
-    SP_TYPE_MTP          = 2,  // Multi-token prediction (DeepSeek-V3)
-    SP_TYPE_EAGLE3       = 3,  // EAGLE-3
-    SP_TYPE_EAGLE        = 4,  // EAGLE
-    SP_TYPE_DETERMINISTIC = 5  // Deterministic (Prompt-Lookup)
+    SP_TYPE_NONE          = 0,  // Not enabled (empty string or "none")
+    SP_TYPE_VANILLA       = 1,  // Classic speculative sampling
+    SP_TYPE_MTP           = 2,  // Multi-token prediction (DeepSeek-V3)
+    SP_TYPE_EAGLE3        = 3,  // EAGLE-3
+    SP_TYPE_EAGLE         = 4,  // EAGLE
+    SP_TYPE_DETERMINISTIC = 5   // Deterministic (Prompt-Lookup)
 };
 
 struct SpeculativeExecutionConfig {
@@ -216,12 +218,12 @@ struct SpeculativeExecutionConfig {
 
     // Helper functions for enum conversion
     static SpeculativeType from_string(const std::string& str);
-    static std::string to_string(SpeculativeType type);
+    static std::string     to_string(SpeculativeType type);
 };
 
 struct VitConfig {
     VitSeparation vit_separation = VitSeparation::VIT_SEPARATION_LOCAL;
-    std::string to_string() const;
+    std::string   to_string() const;
 };
 
 struct CacheStoreConfig {
@@ -239,7 +241,7 @@ struct CacheStoreConfig {
 struct BatchDecodeSchedulerConfig {
     int64_t batch_decode_scheduler_batch_size = 1;
     // 0: use decode warmup, others: use prefill warmup
-    int64_t batch_decode_scheduler_warmup_type = 0;
+    int64_t     batch_decode_scheduler_warmup_type = 0;
     std::string to_string() const;
 };
 
@@ -251,8 +253,8 @@ struct FIFOSchedulerConfig {
 };
 
 struct SchedulerConfig {
-    bool use_batch_decode_scheduler = false;
-    bool use_gather_batch_scheduler = false;
+    bool        use_batch_decode_scheduler = false;
+    bool        use_gather_batch_scheduler = false;
     std::string to_string() const;
 };
 
@@ -262,19 +264,19 @@ struct RuntimeConfig {
     bool    pre_allocate_op_mem     = true;
     int64_t max_block_size_per_item = 16;
 
-    int64_t reserve_runtime_mem_mb           = 0;
-    bool    warm_up                          = false;
-    bool    warm_up_with_loss                = false;
+    int64_t reserve_runtime_mem_mb = 0;
+    bool    warm_up                = false;
+    bool    warm_up_with_loss      = false;
 
     // Scheduler configuration
-    bool    use_batch_decode_scheduler = false;
-    bool    use_gather_batch_scheduler = false;
+    bool                       use_batch_decode_scheduler = false;
+    bool                       use_gather_batch_scheduler = false;
     BatchDecodeSchedulerConfig batch_decode_scheduler_config;
-    FIFOSchedulerConfig fifo_scheduler_config;
+    FIFOSchedulerConfig        fifo_scheduler_config;
 
-    std::string                  model_name                  = "";
-    std::vector<std::string>    worker_grpc_addrs;
-    std::vector<std::string>    worker_addrs;
+    std::string              model_name = "";
+    std::vector<std::string> worker_grpc_addrs;
+    std::vector<std::string> worker_addrs;
 
     // Fields merged from PyDeviceResourceConfig
     std::string specify_gpu_arch      = "";
@@ -442,5 +444,25 @@ struct GrpcConfig {
     }
 };
 
+struct LinearAttentionConfig {
+    int         linear_conv_kernel_dim = 0;
+    int         linear_key_head_dim    = 0;
+    int         linear_num_key_heads   = 0;
+    int         linear_num_value_heads = 0;
+    int         linear_value_head_dim  = 0;
+    std::string to_string() const;
+};
+
+enum class HybridAttentionType {
+    NONE,
+    LINEAR,
+    SLIDING_WINDOW,
+};
+
+struct HybridAttentionConfig {
+    bool                             enable_hybrid_attention = false;
+    std::vector<HybridAttentionType> hybrid_attention_types;
+    std::string                      to_string() const;
+};
 
 }  // namespace rtp_llm

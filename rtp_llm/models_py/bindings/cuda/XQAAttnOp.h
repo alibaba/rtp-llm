@@ -23,7 +23,6 @@ public:
 
 protected:
     AttentionConfigs attn_configs_;
-    CudaDevice*      device_;
 };
 
 void registerXQAAttnOp(const py::module& m);
