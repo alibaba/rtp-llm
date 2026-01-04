@@ -46,6 +46,32 @@ py_test(
 )
 
 py_test(
+    name = "renderer_stop_words_test",
+    srcs = [
+        "renderer_stop_words_test.py",
+    ],
+    data = [],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    imports = [],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "reasoning_tool_parsing_test",
+    srcs = [
+        "reasoning_tool_parsing_test.py",
+    ],
+    data = [],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    imports = [],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
     name = "stop_words_pipeline_test",
     srcs = [
         "stop_words_pipeline_test.py",

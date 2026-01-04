@@ -25,7 +25,6 @@ from rtp_llm.openai.renderers.llava_renderer import Conversation, SeparatorStyle
 from rtp_llm.utils.base_model_datatypes import GenerateOutput
 from rtp_llm.utils.fuser import fetch_remote_file_to_local
 from rtp_llm.utils.multimodal_util import MMUrlType
-from rtp_llm.utils.word_util import is_truncated
 
 
 class InternVLConversation(Conversation):
@@ -120,10 +119,11 @@ from typing import Any, Optional
 
 from rtp_llm.config.py_config_modules import GenerateEnvConfig, RenderConfig
 
+
 class InternVLRenderer(CustomChatRenderer):
     def __init__(
-        self, 
-        tokenizer: BaseTokenizer, 
+        self,
+        tokenizer: BaseTokenizer,
         renderer_params: RendererParams,
         generate_env_config: GenerateEnvConfig,
         render_config: Optional[RenderConfig] = None,
@@ -131,7 +131,15 @@ class InternVLRenderer(CustomChatRenderer):
         misc_config: Optional[Any] = None,
         vit_config: Optional[Any] = None,
     ):
-        super().__init__(tokenizer, renderer_params, generate_env_config, render_config, ckpt_path, misc_config, vit_config)
+        super().__init__(
+            tokenizer,
+            renderer_params,
+            generate_env_config,
+            render_config,
+            ckpt_path,
+            misc_config,
+            vit_config,
+        )
         self.roles = {RoleEnum.user: "USER", RoleEnum.assistant: "ASSISTANT"}
         self.video_frame_num = 8
 
@@ -192,12 +200,21 @@ class InternVLRenderer(CustomChatRenderer):
             status.delta_output_string = decoded_string[len(decoded_prev_token) + 1 :]
         else:
             status.delta_output_string = decoded_string[len(decoded_prev_token) :]
-        if is_truncated(status.delta_output_string, stop_words_str, is_streaming):
-            status.finish_reason = FinisheReason.stop
+
+        # Process stop words: truncate complete stop words, detect partial stop words
+        status.delta_output_string, should_buffer = self._process_stop_words(
+            status.delta_output_string,
+            stop_words_str,
+            stop_word_slice_list,
+            is_streaming,
+            status,
+        )
+
+        if should_buffer:
             return await self._create_empty_delta(output.aux_info)
-        if not is_truncated(
-            status.delta_output_string, stop_word_slice_list, is_streaming, True
-        ):
+
+        # Build delta output
+        if len(status.delta_output_string) > 0:
             status.update_result()
             delta = OutputDelta(
                 output_str=status.delta_output_string,
