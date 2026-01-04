@@ -135,8 +135,6 @@ GreedyOutput ROCmDevice::sampleGreedy(const GreedyParams& params) {
     auto offset_h = allocateBuffer({DataType::TYPE_INT64, {batch_size}, AllocationType::HOST});
     for (int i = 0; i < batch_size; i++) {
         auto [sd, ofst] = get_seed_and_offset(batch_size * 32,
-                                              params.generator[i].defined() ?
-                                              std::make_optional(params.generator[i]) :
                                               std::nullopt);
         seed_h->data<int64_t>()[i]   = static_cast<int64_t>(sd);
         offset_h->data<int64_t>()[i] = static_cast<int64_t>(ofst);

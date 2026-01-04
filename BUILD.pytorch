@@ -34,7 +34,7 @@ cc_library(
             "torch/lib/libtorch_hip.so",
             "torch/lib/libc10_hip.so",
         ] +  glob([
-            "torch/lib/libaotriton_v2.so*",
+            # "torch/lib/libaotriton_v2.so*",
             # "torch/lib/libmagma*.so*",
             # "torch/lib/libtinfo.so*",
             # "torch/lib/libsuitesparseconfig.so*",
