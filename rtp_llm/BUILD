@@ -60,6 +60,7 @@ requirement([
     "tiktoken",
     "protobuf",
     "grpcio-tools",
+    "pyzmq",
     "setuptools",
     "Pillow",
     "pillow-heif",
@@ -387,6 +388,7 @@ py_library(
         ":setproctitle",
         ":portalocker",
         ":concurrent_log_handler",
+        ":pyzmq",
         ":blobfile",
         ":partial_json_parser",
     ],
@@ -579,6 +581,7 @@ whl_reqs = [
     "bitsandbytes",
     "portalocker",
     "concurrent_log_handler",
+    "pyzmq",
     "apache-tvm-ffi==0.1.1",
 ] + whl_deps() + platform_deps() + xft_dep
 

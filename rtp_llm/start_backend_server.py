@@ -214,11 +214,9 @@ def multi_rank_start(
         context = zmq.Context()
         pull_socket = context.socket(zmq.PULL)
         # Find an available port for rank communication
-        pull_socket.bind("tcp://127.0.0.1:0")
-        rank_zmq_port = (
-            pull_socket.getsockopt(zmq.LAST_ENDPOINT).decode().split(":")[-1]
-        )
+        rank_zmq_port = py_env_configs.server_config.start_port + 6
         rank_zmq_address = f"tcp://127.0.0.1:{rank_zmq_port}"
+        pull_socket.bind(rank_zmq_address)
         logging.info(f"ZMQ PULL socket for ranks bound to {rank_zmq_address}")
     else:
         rank_zmq_address = None
