@@ -79,7 +79,9 @@ def local_rank_start(
         backend_manager.start()
         logging.info("Backend server initialized successfully, sending ready status")
         if pipe_writer is not None and pipe_writer.closed:
-            print(f"[Child-{g_parallel_info.local_rank}] ERROR: Pipe already closed")
+            logging.warning(
+                f"[Child-{g_parallel_info.local_rank}] ERROR: Pipe already closed"
+            )
             return
         # Send startup success message
         if pipe_writer is not None:
@@ -205,7 +207,8 @@ def multi_rank_start(
     )
     all_success = True
     error_messages = []
-
+    timeout = 3600
+    start_time = time.time()
     fd_map = {
         reader.fileno(): (i, reader) for i, reader in enumerate(rank_pipe_readers)
     }
@@ -214,7 +217,7 @@ def multi_rank_start(
     ready_count = 0
     results = {}
 
-    while ready_count < local_world_size:
+    while ready_count < local_world_size and (time.time() - start_time) < timeout:
         # 检查可读管道
         ready_fds, _, _ = select.select(fds, [], [], 0.1)
 
