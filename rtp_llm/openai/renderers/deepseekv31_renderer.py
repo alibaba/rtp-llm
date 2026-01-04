@@ -194,7 +194,8 @@ class DeepseekV31Renderer(ReasoningToolBaseRenderer):
             rendered_result = self.render_chat(request)
             if rendered_result.rendered_prompt.endswith("<think>"):
                 return ReasoningParser(model_type="deepseek-v3", force_reasoning=True)
-        except Exception:
+        except Exception as e:
+            logging.error(f"Failed to render chat in _create_reasoning_parser: {e}")
             return None
 
         return None
