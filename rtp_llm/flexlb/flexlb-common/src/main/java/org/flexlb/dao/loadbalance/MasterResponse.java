@@ -6,11 +6,6 @@ import lombok.Data;
 
 import java.util.List;
 
-/**
- * @author zjw
- * description:
- * date: 2025/3/11
- */
 @JsonIgnoreProperties(ignoreUnknown = true)
 @Data
 public class MasterResponse {
@@ -27,8 +22,8 @@ public class MasterResponse {
     @JsonProperty("code")
     private int code = 200;
 
-    @JsonProperty("error_code")
-    private String errorCode;
+    @JsonProperty("error_message")
+    private String errorMessage;
 
     @JsonProperty("real_master_host")
     private String realMasterHost;
@@ -40,4 +35,11 @@ public class MasterResponse {
         return result;
     }
 
+    public static MasterResponse error(StrategyErrorType strategyErrorType) {
+        MasterResponse result = new MasterResponse();
+        result.setSuccess(false);
+        result.setCode(strategyErrorType.getErrorCode());
+        result.setErrorMessage(strategyErrorType.getErrorMsg());
+        return result;
+    }
 }

@@ -2,13 +2,12 @@ package org.flexlb.balance.strategy;
 
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.collections4.MapUtils;
-import org.flexlb.balance.LoadBalanceStrategyFactory;
 import org.flexlb.dao.loadbalance.MasterRequest;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.domain.balance.BalanceContext;
+import org.flexlb.dao.BalanceContext;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.util.CommonUtils;
@@ -20,11 +19,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
 
-/**
- * @author zjw
- * description:
- * date: 2025/3/20
- */
 @Component("randomStrategy")
 public class RandomStrategy implements LoadBalancer {
 
@@ -36,7 +30,7 @@ public class RandomStrategy implements LoadBalancer {
     }
 
     @Override
-    public void releaseLocalCache(String modelName, String ip, Long interRequestId) {
+    public void rollBack(String modelName, String ipPort, Long interRequestId) {
     }
 
     @Override

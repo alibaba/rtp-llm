@@ -1,27 +1,25 @@
 package org.flexlb.httpserver;
 
 import lombok.extern.slf4j.Slf4j;
-import org.flexlb.balance.LoadBalanceWrapper;
 import org.flexlb.consistency.LBStatusConsistencyService;
-import org.flexlb.dao.RequestContext;
 import org.flexlb.dao.loadbalance.LogLevelUpdateRequest;
 import org.flexlb.dao.loadbalance.MasterRequest;
 import org.flexlb.dao.loadbalance.MasterResponse;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.pv.PvLogData;
-import org.flexlb.domain.balance.BalanceContext;
+import org.flexlb.dao.BalanceContext;
 import org.flexlb.domain.consistency.MasterChangeNotifyReq;
 import org.flexlb.domain.consistency.MasterChangeNotifyResp;
 import org.flexlb.domain.consistency.SyncLBStatusReq;
 import org.flexlb.domain.consistency.SyncLBStatusResp;
 import org.flexlb.listener.OnlineListener;
 import org.flexlb.listener.ShutdownListener;
+import org.flexlb.service.RouteService;
 import org.flexlb.service.grace.GracefulShutdownService;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.trace.WhaleSpanUtils;
 import org.flexlb.transport.GeneralHttpNettyService;
 import org.flexlb.util.HttpRequestUtils;
-import org.flexlb.util.IdUtils;
 import org.flexlb.util.JsonUtils;
 import org.flexlb.util.LoggingUtils;
 import org.slf4j.Logger;
@@ -56,17 +54,17 @@ import static org.springframework.web.reactive.function.server.RouterFunctions.r
 public class HttpMasterLoadBalanceServer implements ShutdownListener, OnlineListener {
     private static final Logger pvLogger = LoggerFactory.getLogger("pvLogger");
     private final GeneralHttpNettyService generalHttpNettyService;
-    private final LoadBalanceWrapper loadBalanceWrapper;
+    private final RouteService routeService;
     private final LBStatusConsistencyService lbStatusConsistencyService;
     private final EngineHealthReporter engineHealthReporter;
     private static final long FORWARD_TIMEOUT_MS = 300;
 
     public HttpMasterLoadBalanceServer(GeneralHttpNettyService generalHttpNettyService,
-                                       LoadBalanceWrapper loadBalanceWrapper,
+                                       RouteService routeService,
                                        LBStatusConsistencyService lbStatusConsistencyService,
                                        AppStateHookServer appStateHookServer, EngineHealthReporter engineHealthReporter) {
         this.generalHttpNettyService = generalHttpNettyService;
-        this.loadBalanceWrapper = loadBalanceWrapper;
+        this.routeService = routeService;
         this.lbStatusConsistencyService = lbStatusConsistencyService;
         this.engineHealthReporter = engineHealthReporter;
         appStateHookServer.addOnlineHandler(this);
@@ -162,50 +160,51 @@ public class HttpMasterLoadBalanceServer implements ShutdownListener, OnlineList
     }
 
     public Mono<ServerResponse> selectRole(ServerRequest request) {
-        BalanceContext balanceContext = new BalanceContext();
-        RequestContext ctx = buildRequestContext(request);
-        balanceContext.setRequestContext(ctx);
+        BalanceContext ctx = buildBalanceContext(request);
         whaleSpanUtils.buildTraceSpan(ctx);
         return request.bodyToMono(MasterRequest.class)
                 .flatMap((Function<MasterRequest, Mono<ServerResponse>>) req -> {
-                    balanceContext.setMasterRequest(req);
+                    ctx.setMasterRequest(req);
                     if (!lbStatusConsistencyService.isMaster()) {
                         String master = lbStatusConsistencyService.getMasterHostIpPort();
                         ctx.getSpan().addEvent("forward_to_master: " + master);
                         URI uri = URI.create("http://" + master);
                         return forward2Master(uri, req);
                     }
-                    // role list
-                    MasterResponse result = loadBalanceWrapper.selectEngineWorker(balanceContext);
-                    result.setRealMasterHost(lbStatusConsistencyService.getMasterHostIpPort());
-                    if (result.isSuccess()) {
-                        balanceContext.setPvLogData(PvLogData.success(req, result));
-                        return ServerResponse.ok()
-                                .contentType(MediaType.APPLICATION_JSON)
-                                .body(Mono.just(result), MasterResponse.class);
-                    } else {
-                        LoggingUtils.error("selectBestWorker error_code:{}", result.getErrorCode());
-                        balanceContext.setSuccess(false);
-                        balanceContext.setPvLogData(PvLogData.error(req, "error_code:" + result.getErrorCode()));
-                        return ServerResponse.status(500)
-                                .contentType(MediaType.APPLICATION_JSON)
-                                .body(Mono.just(result.getErrorCode()), String.class);
-                    }
+
+                    return Mono.fromCallable(() -> routeService.route(ctx))
+                            .doOnCancel(() -> routeService.cancelRequest(ctx))
+                            .flatMap(result -> {
+                                result.setRealMasterHost(lbStatusConsistencyService.getMasterHostIpPort());
+                                if (result.isSuccess()) {
+                                    ctx.setPvLogData(PvLogData.success(req, result));
+                                    return ServerResponse.ok()
+                                            .contentType(MediaType.APPLICATION_JSON)
+                                            .body(Mono.just(result), MasterResponse.class);
+                                } else {
+                                    LoggingUtils.error("selectBestWorker error_code:{}", result.getErrorMessage());
+                                    ctx.setSuccess(false);
+                                    ctx.setPvLogData(PvLogData.error(req, "error_code:" + result.getErrorMessage()));
+                                    return ServerResponse.status(500)
+                                            .contentType(MediaType.APPLICATION_JSON)
+                                            .body(Mono.just(result.getErrorMessage()), String.class);
+                                }
+                            });
                 }).onErrorResume(e -> {
                     LoggingUtils.error("selectBestWorker error", e);
                     ctx.getSpan().addEvent("selectBestWorker error");
-                    balanceContext.setSuccess(false);
-                    MasterRequest req = balanceContext.getMasterRequest();
-                    balanceContext.setPvLogData(PvLogData.error(req, e.getMessage()));
+                    ctx.setSuccess(false);
+                    MasterRequest req = ctx.getMasterRequest();
+                    ctx.setPvLogData(PvLogData.error(req, e.getMessage()));
                     return ServerResponse.status(500)
                             .contentType(MediaType.APPLICATION_JSON)
                             .body(Mono.just(e.getMessage()), String.class);
                 })
                 .doFinally(s -> {
                     // 汇报监控
-                    engineHealthReporter.reportBalancingService(balanceContext);
+                    engineHealthReporter.reportBalancingService(ctx);
                     // 记录PV日志
-                    PvLogData pvLogData = balanceContext.getPvLogData();
+                    PvLogData pvLogData = ctx.getPvLogData();
                     //关闭span确保可以上报
                     ctx.getSpan().endSpan();
                     if (pvLogData != null) {
@@ -274,8 +273,8 @@ public class HttpMasterLoadBalanceServer implements ShutdownListener, OnlineList
         return 3;
     }
 
-    private RequestContext buildRequestContext(ServerRequest request) {
-        RequestContext ctx = new RequestContext();
+    private BalanceContext buildBalanceContext(ServerRequest request) {
+        BalanceContext ctx = new BalanceContext();
         ServerRequest.Headers httpHeaders = request.headers();
         for (Map.Entry<String, List<String>> entry : httpHeaders.asHttpHeaders().entrySet()) {
             String headerName = entry.getKey();
@@ -285,12 +284,11 @@ public class HttpMasterLoadBalanceServer implements ShutdownListener, OnlineList
             }
             String headerValue = values.getFirst();
             String lowerCaseHeaderName = headerName.toLowerCase();
-            BiConsumer<RequestContext, String> processor = HttpRequestUtils.HEADER_PROCESSORS.get(lowerCaseHeaderName);
+            BiConsumer<BalanceContext, String> processor = HttpRequestUtils.HEADER_PROCESSORS.get(lowerCaseHeaderName);
             if (processor != null) {
                 processor.accept(ctx, headerValue);
             }
         }
-        ctx.setRequestId(IdUtils.fastUuid());
         return ctx;
     }
 }

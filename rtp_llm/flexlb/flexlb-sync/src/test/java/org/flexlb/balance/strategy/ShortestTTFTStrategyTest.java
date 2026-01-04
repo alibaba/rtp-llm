@@ -1,6 +1,8 @@
 package org.flexlb.balance.strategy;
 
+import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.config.ConfigService;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.config.WhaleMasterConfig;
 import org.flexlb.dao.loadbalance.MasterRequest;
@@ -9,8 +11,7 @@ import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.domain.balance.BalanceContext;
-import org.flexlb.service.config.ConfigService;
+import org.flexlb.dao.BalanceContext;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.sync.status.ModelWorkerStatus;
@@ -36,15 +37,17 @@ class ShortestTTFTStrategyTest {
         EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig());
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP.put("test-model", new ModelWorkerStatus());
         Map<String/*ip*/, WorkerStatus> prefillStatusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP.get("test-model").getPrefillStatusMap();
+        List<TaskInfo> waitingTaskList = new ArrayList<>();
         List<TaskInfo> runningTaskList = new ArrayList<>();
         List<TaskInfo> finishedTaskList = new ArrayList<>();
         ConcurrentHashMap<Long, TaskInfo> localTaskList = new ConcurrentHashMap<>();
-        WorkerStatus workerStatus = createWorkerStatus("127.0.0.1", 200, runningTaskList, finishedTaskList, localTaskList);
+        WorkerStatus workerStatus = createWorkerStatus("127.0.0.1", 200, waitingTaskList, runningTaskList, finishedTaskList, localTaskList);
 
+        List<TaskInfo> waitingTaskList1 = new ArrayList<>();
         List<TaskInfo> runningTaskList1 = new ArrayList<>();
         List<TaskInfo> finishedTaskList1 = new ArrayList<>();
         ConcurrentHashMap<Long, TaskInfo> localTaskList1 = new ConcurrentHashMap<>();
-        WorkerStatus workerStatus1 = createWorkerStatus("127.0.0.2", 100, runningTaskList1, finishedTaskList1, localTaskList1);
+        WorkerStatus workerStatus1 = createWorkerStatus("127.0.0.2", 100, waitingTaskList1, runningTaskList1, finishedTaskList1, localTaskList1);
 
         prefillStatusMap.put("127.0.0.1:8080", workerStatus);
         prefillStatusMap.put("127.0.0.2:8080", workerStatus1);
@@ -58,11 +61,12 @@ class ShortestTTFTStrategyTest {
 
         EngineHealthReporter engineHealthReporter = Mockito.mock(EngineHealthReporter.class);
         CacheAwareService cacheAwareService = Mockito.mock(CacheAwareService.class);
+        ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         ConfigService configService = Mockito.mock(ConfigService.class);
         Mockito.when(configService.loadBalanceConfig()).thenReturn(new WhaleMasterConfig());
 
         ShortestTTFTStrategy staticCacheLoadBalancer =
-                new ShortestTTFTStrategy(engineWorkerStatus, engineHealthReporter, cacheAwareService);
+                new ShortestTTFTStrategy(engineWorkerStatus, engineHealthReporter, cacheAwareService, resourceMeasureFactory);
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setConfig(new WhaleMasterConfig());
@@ -74,6 +78,7 @@ class ShortestTTFTStrategyTest {
 
     WorkerStatus createWorkerStatus(String ip,
                                     long runningQueueTime,
+                                    List<TaskInfo> waitingTaskInfo,
                                     List<TaskInfo> finishedTaskList,
                                     List<TaskInfo> runningTaslList,
                                     ConcurrentHashMap<Long, TaskInfo> localTaskList) {
@@ -87,7 +92,7 @@ class ShortestTTFTStrategyTest {
         cacheStatus.setAvailableKvCache(10000);
         workerStatus.setCacheStatus(cacheStatus);
         workerStatus.getRunningQueueTime().getAndSet(runningQueueTime);
-        workerStatus.updateTaskStates(runningTaslList, finishedTaskList);
+        workerStatus.updateTaskStates(waitingTaskInfo, runningTaslList, finishedTaskList);
         workerStatus.setRunningTaskList(runningTaslList);
         workerStatus.setLocalTaskMap(localTaskList);
         return workerStatus;
