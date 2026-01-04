@@ -273,6 +273,8 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         attn_inputs: PyAttentionInputs,
     ) -> torch.Tensor:
         conv_states = self._get_conv_states(kv_cache_tensor)
+        # (batch, dim) -> # (batch, dim, 1)
+        mixed_qkv = mixed_qkv.unsqueeze(1).transpose(1, 2)
         out = causal_conv1d_update(
             mixed_qkv,
             conv_states.transpose(1, 2),
@@ -284,10 +286,8 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             seq_size_per_block=seq_size_per_block,
             sequence_lengths=attn_inputs.sequence_lengths_plus_1_d,
             num_accepted_tokens=None,
-            max_query_len=1,
-            query_start_loc=attn_inputs.decode_cu_seqlens_d,
         )
-        return out
+        return out.transpose(1, 2).squeeze(1)
 
     def _fla(
         self,
