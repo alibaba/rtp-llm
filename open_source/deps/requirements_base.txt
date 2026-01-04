@@ -3,7 +3,7 @@ av
 blobfile
 bitsandbytes>=0.41.0
 concurrent_log_handler
-pyzmq
+pyzmq==27.1.0
 cpm_kernels
 dacite
 dashscope>=1.11.0
