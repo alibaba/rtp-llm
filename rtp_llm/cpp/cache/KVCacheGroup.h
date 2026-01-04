@@ -59,9 +59,9 @@ protected:
     int             group_id_ = 0;
 
     int                                    seq_size_per_block_;
-    std::unordered_map<int, torch::Tensor> gloabl_layer_to_kv_tensors;
-    std::unordered_map<int, torch::Tensor> gloabl_layer_to_kv_scale_tensors;
-    std::unordered_map<int, int>           gloabl_layer_to_local_layer;
+    std::unordered_map<int, torch::Tensor> global_layer_to_kv_tensors;
+    std::unordered_map<int, torch::Tensor> global_layer_to_kv_scale_tensors;
+    std::unordered_map<int, int>           global_layer_to_local_layer;
 };
 
 using KVCacheGroupPtr = std::shared_ptr<KVCacheGroup>;
