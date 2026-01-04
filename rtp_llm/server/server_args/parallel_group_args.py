@@ -1,4 +1,5 @@
-from rtp_llm.server.server_args.util import str2bool
+from rtp_llm.ops import CPRotateMethod
+from rtp_llm.server.server_args.util import str2_cp_rotate_method, str2bool
 
 
 def init_parallel_group_args(parser, parallelism_config, ffn_disaggregate_config):
@@ -79,4 +80,12 @@ def init_parallel_group_args(parser, parallelism_config, ffn_disaggregate_config
         type=str2bool,
         default=False,
         help="启用AF分离功能。",
+    )
+    parallel_group.add_argument(
+        "--cp_rotate_method",
+        env_name="CP_ROTATE_METHOD",
+        bind_to=(parallelism_config, "cp_rotate_method"),
+        type=str2_cp_rotate_method,
+        default=CPRotateMethod.ALL_GATHER,
+        help="指定用于上下文并行通信方法。可选值: ALL_GATHER, ALL_GATHER_WITH_OVERLAP, ALLTOALL",
     )

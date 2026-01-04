@@ -7,6 +7,13 @@
 
 namespace rtp_llm {
 
+enum class CPRotateMethod {
+    ALL_GATHER              = 0,
+    ALL_GATHER_WITH_OVERLAP = 1,
+    ALLTOALL                = 2
+};
+std::string cpRotateMethodToString(CPRotateMethod method);
+
 struct FfnDisAggregateConfig {
     bool        enable_ffn_disaggregate = false;
     int         attention_tp_size       = 1;
@@ -48,6 +55,9 @@ struct ParallelismConfig {
     int64_t     http_port                 = 0;
     int64_t     model_rpc_port            = 0;
     int64_t     embedding_rpc_server_port = 0;
+
+    // Context Parallel configuration
+    CPRotateMethod cp_rotate_method = CPRotateMethod::ALL_GATHER;
 
     FfnDisAggregateConfig ffn_disaggregate_config;  // FFN disaggregate configuration
     std::string           to_string() const;

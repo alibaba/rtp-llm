@@ -40,6 +40,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("EPLB", EplbMode::EPLB)
         .value("ALL", EplbMode::ALL);
 
+    py::enum_<CPRotateMethod>(m, "CPRotateMethod")
+        .value("ALL_GATHER", CPRotateMethod::ALL_GATHER)
+        .value("ALL_GATHER_WITH_OVERLAP", CPRotateMethod::ALL_GATHER_WITH_OVERLAP)
+        .value("ALLTOALL", CPRotateMethod::ALLTOALL)
+        .export_values();
+
     py::enum_<FMHAType>(m, "FMHAType")
         .value("FLASH_INFER", FMHAType::FLASH_INFER)
         .value("NONE", FMHAType::NONE)
@@ -896,6 +902,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("http_port", &ParallelismConfig::http_port)
         .def_readwrite("model_rpc_port", &ParallelismConfig::model_rpc_port)
         .def_readwrite("embedding_rpc_server_port", &ParallelismConfig::embedding_rpc_server_port)
+        .def_readwrite("cp_rotate_method", &ParallelismConfig::cp_rotate_method)
         .def_readwrite("ffn_disaggregate_config", &ParallelismConfig::ffn_disaggregate_config)
         .def("to_string", &ParallelismConfig::to_string)
         .def(py::pickle(
