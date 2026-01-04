@@ -198,7 +198,9 @@ private:
 
 public:
     void setSpBlockCache(std::shared_ptr<MemoryBlockCache>& sp_block_cache) {
-        memory_block_cache_->sp_block_cache_ = sp_block_cache;
+        if (memory_block_cache_) {
+            memory_block_cache_->sp_block_cache_ = sp_block_cache;
+        }
     }
 
 public:
