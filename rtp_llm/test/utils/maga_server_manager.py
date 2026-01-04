@@ -197,7 +197,15 @@ class MagaServerManager(object):
                 for child in alive:
                     child.kill()  # 强制终止未退出的进程
                 parent.terminate()
-                parent.wait()
+                # 添加超时机制，避免永久阻塞
+                try:
+                    parent.wait(timeout=10)
+                except psutil.TimeoutExpired:
+                    logging.warning(
+                        "Parent process did not exit gracefully, force killing"
+                    )
+                    parent.kill()
+                    parent.wait(timeout=5)
                 self._server_process = None
             except Exception as e:
                 logging.warning("failed to get process with: " + str(e))
