@@ -122,6 +122,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                           param
     metrics_reporter_(params.metrics_reporter),
     mtp_cache_managers_(mtp_cache_managers),
     speculative_sampler_(new speculative::SpeculativeSampler(device, propose_params->gen_num_per_circle)),
+    fast_topk_sampler_(new speculative::FastTopKSampler()),
     warm_up_(warm_up),
     role_type_(params.pd_sep_config.role_type) {
     data_type_          = params.model_config_.data_type;
@@ -353,7 +354,9 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     }
 
     // draft model sample
-    draftModelSample(draft_model_output.logits, draft_sampler_output, draft_probs, draft_token_ids);
+    auto fast_topk_sampler_output  = fast_topk_sampler_->forward(Buffer2torchTensor(*draft_model_output.logits, false));
+    draft_sampler_output.all_probs = torchTensor2Buffer(fast_topk_sampler_output.all_probs);
+    draft_sampler_output.token_ids = torchTensor2Buffer(fast_topk_sampler_output.token_ids);
 
     // collect metrics
     if (metrics_reporter_) {
@@ -430,12 +433,17 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         |
         v
 +-------------------------------+
-|    target model forward       |
+|     draft model forward       |
 +-------------------------------+
         |
         v
 +-------------------------------+
-|     target model sample       |
+|      draft model sample       |
++-------------------------------+
+        |
+        v
++-------------------------------+
+|   dispatch output to streams  |
 +-------------------------------+
 */
 
@@ -592,7 +600,10 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     }
 
     // draft model sample
-    draftModelSample(draft_prefill_model_output.logits, draft_prefill_sampler_output, draft_probs_t, draft_token_ids_t);
+    auto fast_topk_sampler_output =
+        fast_topk_sampler_->forward(Buffer2torchTensor(*draft_prefill_model_output.logits, false));
+    draft_prefill_sampler_output.all_probs = torchTensor2Buffer(fast_topk_sampler_output.all_probs);
+    draft_prefill_sampler_output.token_ids = torchTensor2Buffer(fast_topk_sampler_output.token_ids);
 
     // collect metrics
     if (metrics_reporter_) {
@@ -702,27 +713,6 @@ bool MtpExecutor::updateEplbConfig(const EPLBConfig& config) {
     return true;
 }
 
-std::tuple<torch::Tensor, torch::Tensor> MtpExecutor::fastTopK(const torch::Tensor& probs, int top_k, int dim) {
-    if (top_k == 1) {
-        return torch::max(probs, dim, true);
-    } else {
-        return torch::topk(probs, top_k, dim);
-    }
-}
-
-void MtpExecutor::draftModelSample(const BufferPtr& logits,
-                                   SamplerOutput&   sampler_output,
-                                   torch::Tensor&   draft_probs,
-                                   torch::Tensor&   draft_token_ids) {
-    // hold draft_probs and draft_token_ids to avoid tensor destruction
-    draft_probs           = torch::softmax(Buffer2torchTensor(*logits, false), -1);
-    auto draft_sample_res = fastTopK(draft_probs, 1, -1);
-    draft_token_ids       = std::get<1>(draft_sample_res);
-
-    sampler_output.all_probs = torchTensor2Buffer(draft_probs);
-    sampler_output.token_ids = torchTensor2Buffer(draft_token_ids);
-}
-
 void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
                                    const StreamGroups&         stream_groups,
                                    std::vector<torch::Tensor>& draft_probs_list,
@@ -768,9 +758,11 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         draft_decode_model_output = std::move(draft_model_->forward(model_input));
 
         // sample
-        auto draft_probs         = torch::softmax(Buffer2torchTensor(*draft_decode_model_output.logits, false), -1);
+        auto fast_topk_sampler_output =
+            fast_topk_sampler_->forward(Buffer2torchTensor(*draft_decode_model_output.logits, false), 1);
+        auto draft_probs         = fast_topk_sampler_output.all_probs;
         auto draft_probs_reshape = draft_probs.reshape({(int)batch_size, 1, -1});
-        auto [draft_token_probs, draft_token_ids] = fastTopK(draft_probs, 1, -1);
+        auto draft_token_ids     = fast_topk_sampler_output.token_ids;
 
         if (model_input.is_fake_stream) {
             draft_token_ids.zero_();
