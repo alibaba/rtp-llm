@@ -92,34 +92,34 @@ def l2norm_fwd(
 
     # Not use this path since different batch will always go into compile， since T is different,
     # and compile time is too long (70ms) compared to kernel execution time (under 1ms)
-    # if D <= 512:
-    #     NB = triton.cdiv(T, 2048)
+    if D <= 512 and T <= 128:
+        NB = triton.cdiv(T, 2048)
 
-    #     def grid(meta):
-    #         return (triton.cdiv(T, meta["BT"]),)
+        def grid(meta):
+            return (triton.cdiv(T, meta["BT"]),)
 
-    #     l2norm_fwd_kernel[grid](
-    #         x,
-    #         y,
-    #         eps,
-    #         NB=NB,
-    #         T=T,
-    #         D=D,
-    #         BD=BD,
-    #         BT=16,
-    #         num_warps=8,
-    #         num_stages=3,
-    #     )
-    # else:
-    l2norm_fwd_kernel1[(T,)](
-        x,
-        y,
-        eps=eps,
-        D=D,
-        BD=BD,
-        num_warps=8,
-        num_stages=3,
-    )
+        l2norm_fwd_kernel[grid](
+            x,
+            y,
+            eps,
+            NB=NB,
+            T=T,
+            D=D,
+            BD=BD,
+            BT=16,
+            num_warps=8,
+            num_stages=3,
+        )
+    else:
+        l2norm_fwd_kernel1[(T,)](
+            x,
+            y,
+            eps=eps,
+            D=D,
+            BD=BD,
+            num_warps=8,
+            num_stages=3,
+        )
 
     return y.view(x_shape_og)
 
