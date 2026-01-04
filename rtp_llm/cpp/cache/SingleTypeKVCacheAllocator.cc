@@ -55,7 +55,9 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     auto&       blocks_0           = kv_resource->mutableBlocks(0);
     int64_t     match_cost_time_us = 0;
 
-    // drop the last cache key of the partial block to avoid reuse it
+    // drop the last cache key of the partial block to avoid reuse it for two reasons:
+    // 1. if the last block is partial, it actually cannot be reused, because only full blocks will be inserted into the cache.
+    // 2. if the last block is full and matched, the reuse length will be equal to the seq_len, which causes core dump in computing ops.
     if (kv_resource->enable_reuse_cache) {
         CacheKeysType match_keys(cache_keys.begin(), cache_keys.empty() ? cache_keys.end() : cache_keys.end() - 1);
         auto          match_begin_time_us = currentTimeUs();
