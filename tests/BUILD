@@ -136,6 +136,7 @@ py_test(
     data = op_test_data,
     deps = op_test_deps + [
         "//rtp_llm:device",
+        "//rtp_llm:fastapi",
     ],
     exec_properties = {'gpu':'A10'},
 )

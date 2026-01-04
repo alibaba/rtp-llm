@@ -1,18 +1,14 @@
-import json
 import logging
 import multiprocessing
 import os
-import signal
 import sys
 import time
 import traceback
 
 import requests
-import torch
 
 from rtp_llm.distribute.distributed_server import get_world_info
-from rtp_llm.ops import ProfilingDebugLoggingConfig, RoleType
-from rtp_llm.tools.api.hf_model_helper import get_hf_model_info
+from rtp_llm.utils.time_util import timer_wrapper
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
@@ -45,6 +41,7 @@ def check_server_health(server_port):
         return False
 
 
+@timer_wrapper(description="start backend server")
 def start_backend_server_impl(
     global_controller,
     py_env_configs: PyEnvConfigs,
@@ -59,6 +56,7 @@ def start_backend_server_impl(
 
     # Create pipe for subprocess startup status communication
     pipe_reader, pipe_writer = multiprocessing.Pipe(duplex=False)
+    logging.info(f"[PROCESS_SPAWN]Start backend server process outer")
 
     backend_process = multiprocessing.Process(
         target=start_backend_server,
@@ -68,47 +66,63 @@ def start_backend_server_impl(
     backend_process.start()
     pipe_writer.close()  # Parent process closes write end
 
-    # Wait for subprocess to send startup status, maximum 3600 seconds
+    # Create check_ready_fn for pipe-based health check
     max_wait_seconds = 60 * 60
-    logging.info(
-        f"Waiting for backend server startup status (timeout: {max_wait_seconds}s)..."
-    )
-    try:
-        # 使用 poll 检查是否有数据可读，设置超时
-        if pipe_reader.poll(timeout=max_wait_seconds):
-            status_msg = pipe_reader.recv()
-            if status_msg.get("status") == "success":
-                logging.info(
-                    f"Backend server started successfully: {status_msg.get('message', '')}"
-                )
-                return backend_process
+    startup_status = {"ready": False, "error": None}
 
-            # Startup failed
-            error_msg = status_msg.get("message", "Unknown error")
-            traceback_info = status_msg.get("traceback", "")
-            if traceback_info:
-                logging.error(f"Traceback: {traceback_info}")
+    def check_backend_ready():
+        """Check if backend server is ready via pipe communication"""
+        if startup_status["ready"]:
+            return True
 
-            # Unified failure handling
-            logging.error(f"Backend server failed to start: {error_msg}")
-            process_manager.monitor_and_release_processes()
-            raise Exception(f"Backend server start failed: {error_msg}")
-        else:
-            # 超时情况
-            logging.error(
-                f"Backend server startup timeout after {max_wait_seconds} seconds"
-            )
-            process_manager.monitor_and_release_processes()
-            raise Exception(
-                f"Backend server startup timeout after {max_wait_seconds} seconds"
-            )
-    finally:
-        pipe_reader.close()
+        if startup_status["error"]:
+            raise Exception(startup_status["error"])
+
+        # Non-blocking check if data is available
+        if pipe_reader.poll(timeout=0):
+            try:
+                status_msg = pipe_reader.recv()
+                if status_msg.get("status") == "success":
+                    logging.info(
+                        f"Backend server started successfully: {status_msg.get('message', '')}"
+                    )
+                    startup_status["ready"] = True
+                    pipe_reader.close()
+                    return True
+                else:
+                    # Startup failed
+                    error_msg = status_msg.get("message", "Unknown error")
+                    traceback_info = status_msg.get("traceback", "")
+                    if traceback_info:
+                        logging.error(f"Traceback: {traceback_info}")
+
+                    error = f"Backend server start failed: {error_msg}"
+                    startup_status["error"] = error
+                    pipe_reader.close()
+                    raise Exception(error)
+            except EOFError:
+                error = "Backend server pipe closed unexpectedly"
+                startup_status["error"] = error
+                pipe_reader.close()
+                raise Exception(error)
+
+        return False
+
+    # Register health check with ProcessManager using custom check_ready_fn
+    if process_manager:
+        process_manager.register_health_check(
+            processes=[backend_process],
+            process_name="backend_server",
+            check_ready_fn=check_backend_ready,
+            retry_interval_seconds=0.1,
+        )
+
+    return backend_process
 
 
+@timer_wrapper(description="start frontend server")
 def start_frontend_server_impl(
     global_controller,
-    backend_process,
     py_env_configs: PyEnvConfigs,
     process_manager=None,
 ):
@@ -136,6 +150,9 @@ def start_frontend_server_impl(
 
     for rank in range(local_world_size):
         for i in range(frontend_server_count):
+            logging.info(
+                f"[PROCESS_SPAWN]Start frontend server process rank_{rank}_server_{i} outer"
+            )
             process = multiprocessing.Process(
                 target=start_frontend_server,
                 args=(rank, i, global_controller, py_env_configs),
@@ -144,22 +161,17 @@ def start_frontend_server_impl(
             frontend_processes.append(process)
             process.start()
 
-    retry_interval_seconds = 1
-    start_port = py_env_configs.server_config.start_port
+    if process_manager and frontend_processes:
+        # Register health check with ProcessManager for the first frontend server
+        def check_frontend_ready():
+            return check_server_health(py_env_configs.server_config.start_port)
 
-    while True:
-        # Check ProcessManager availability (includes shutdown signal and process health)
-        if process_manager and not process_manager.is_available():
-            logging.info("ProcessManager is not available, aborting startup")
-            raise Exception("ProcessManager not available during startup")
-
-        try:
-            check_server_health(start_port)
-            logging.info(f"frontend server is ready")
-            break
-        except Exception as e:
-            # If connection fails, wait and retry
-            time.sleep(retry_interval_seconds)
+        process_manager.register_health_check(
+            processes=frontend_processes,
+            process_name="frontend_server",
+            check_ready_fn=check_frontend_ready,
+            retry_interval_seconds=0.1,
+        )
 
     return frontend_processes
 
@@ -171,6 +183,8 @@ def main():
 
 
 def start_server(py_env_configs: PyEnvConfigs):
+    logging.info(f"[PROCESS_START]Start server")
+    start_time = time.time()
     try:
         multiprocessing.set_start_method("spawn")
     except RuntimeError as e:
@@ -212,13 +226,20 @@ def start_server(py_env_configs: PyEnvConfigs):
 
         logging.info("start frontend server")
         frontend_process = start_frontend_server_impl(
-            global_controller, backend_process, py_env_configs, process_manager
+            global_controller, py_env_configs, process_manager
         )
         process_manager.add_processes(frontend_process)
+
+        # Start parallel health checks and wait for completion
+        if not process_manager.run_health_checks():
+            logging.error("Health checks failed")
+            raise Exception("Health checks failed")
 
         logging.info(
             f"Backend RPC service is listening on 0.0.0.0, IP/IP range can be customized as needed"
         )
+        consume_s = time.time() - start_time
+        logging.info(f"start server took {consume_s:.2f}s")
     except Exception as e:
         logging.error(f"start failed, trace: {traceback.format_exc()}")
         # Trigger graceful shutdown on any exception

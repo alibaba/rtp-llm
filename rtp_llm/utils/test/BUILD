@@ -45,6 +45,7 @@ py_test(
         "//rtp_llm:_ft_pickler",
         "//rtp_llm:pynvml",
         "//rtp_llm:psutil",
+        "//rtp_llm:fastapi",
     ],
 )
 

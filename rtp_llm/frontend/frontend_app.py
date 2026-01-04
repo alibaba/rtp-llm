@@ -12,6 +12,7 @@ from fastapi import Request as RawRequest
 from fastapi import status
 from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import ORJSONResponse
 from typing_extensions import override
 from uvicorn import Config, Server
 from uvicorn.loops.auto import auto_loop_setup
@@ -147,18 +148,26 @@ class FrontendApp(object):
             if self.separated_frontend:
                 await check_all_health()
                 return "ok"
-            return await async_request_server(
-                "post", g_worker_info.backend_server_port, "health_check", {}
-            )
+            response = await self.grpc_client.post_request("health_check", {})
+            if response.get("status", "") != "ok":
+                return ORJSONResponse(
+                    status_code=400,
+                    content={"error": f" HTTP health check failed"},
+                )
+            return "ok"
 
         @app.get("/")
         async def health():
             if self.separated_frontend:
                 await check_all_health()
                 return {"status": "home"}
-            return await async_request_server(
-                "get", g_worker_info.backend_server_port, "", {}
-            )
+            response = await self.grpc_client.post_request("health_check", {})
+            if response.get("status", "") != "ok":
+                return ORJSONResponse(
+                    status_code=400,
+                    content={"error": f" HTTP health check failed"},
+                )
+            return "ok"
 
         @app.get("/cache_status")
         @app.post("/cache_status")
@@ -266,12 +275,6 @@ class FrontendApp(object):
         @app.post("/tokenize")
         async def encode(req: Union[str, Dict[Any, Any]]):
             return self.frontend_server.tokenize(req)
-
-        @app.post("/update_weight")
-        async def update_weight(req: Union[str, Dict[Any, Any]]):
-            return await async_request_server(
-                "post", g_worker_info.backend_server_port, "update_weight", req
-            )
 
         if self.frontend_server.is_embedding:
             # embedding
