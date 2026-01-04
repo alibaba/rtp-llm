@@ -39,7 +39,7 @@ CudaGraphRunnerPtr CudaGraphPrefillOp::createCudaGraphRunner(py::object py_insta
     caffe2::TypeMeta     dtype             = torch::scalarTypeToTypeMeta(torch::kBFloat16);
     int                  num_tokens_per_bs = params.max_seq_len;  // prefill mode
     CudaGraphRunnerPtr   cuda_graph_runner_ptr =
-        new CudaGraphRunner(params, std::move(py_instance), 0, capture_stream, dtype, num_tokens_per_bs, true);
+        new CudaGraphRunner(params, std::move(py_instance), capture_stream, dtype, num_tokens_per_bs, true);
     return cuda_graph_runner_ptr;
 }
 
@@ -121,11 +121,11 @@ PyModelInputs CudaGraphPrefillOp::buildInputs(int64_t batch_size,
     inputs.attention_inputs.kv_cache_block_id_host =
         torch::zeros({int(batch_size), ((max_seq_len + seq_size_per_block - 1) / seq_size_per_block)}, options2);
     // prefix_lengths [batch_size, int32] (for attention `prepare`)
-    inputs.attention_inputs.prefix_lengths  = torch::zeros(int(batch_size), options2);
-    inputs.attention_inputs.prefix_lengths  = inputs.attention_inputs.prefix_lengths.pin_memory();
-    inputs.attention_inputs.is_prefill      = true;
-    inputs.attention_inputs.dtype           = torch::kBFloat16;
-    inputs.attention_inputs.is_s_padded     = use_max_padded_mode;
+    inputs.attention_inputs.prefix_lengths = torch::zeros(int(batch_size), options2);
+    inputs.attention_inputs.prefix_lengths = inputs.attention_inputs.prefix_lengths.pin_memory();
+    inputs.attention_inputs.is_prefill     = true;
+    inputs.attention_inputs.dtype          = torch::kBFloat16;
+    inputs.attention_inputs.is_s_padded    = use_max_padded_mode;
     RTP_LLM_LOG_INFO("kv_cache_block_id_device build success\n");
     // 计算 cu_seqlens
     size_t cu_len = batch_size + 1;

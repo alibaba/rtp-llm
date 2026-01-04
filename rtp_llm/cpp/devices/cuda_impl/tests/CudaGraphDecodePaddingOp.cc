@@ -27,7 +27,7 @@ CudaGraphRunnerPtr CudaGraphDecodePaddingOp::createCudaGraphRunner(py::object py
     caffe2::TypeMeta     dtype             = torch::scalarTypeToTypeMeta(torch::kFloat16);
     int                  num_tokens_per_bs = 1;  // decode mode
     CudaGraphRunnerPtr   cuda_graph_runner_ptr =
-        new CudaGraphRunner(params, std::move(py_instance), 344864, capture_stream, dtype, num_tokens_per_bs, false);
+        new CudaGraphRunner(params, std::move(py_instance), capture_stream, dtype, num_tokens_per_bs, false);
     return cuda_graph_runner_ptr;
 }
 
