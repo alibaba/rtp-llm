@@ -3,6 +3,7 @@ import logging
 import logging.config
 import multiprocessing
 import os
+import select
 import signal
 import subprocess
 import sys
@@ -77,20 +78,23 @@ def local_rank_start(
         backend_manager = BackendManager(py_env_configs)
         backend_manager.start()
         logging.info("Backend server initialized successfully, sending ready status")
-
+        if pipe_writer is not None and pipe_writer.closed:
+            print(f"[Child-{g_parallel_info.local_rank}] ERROR: Pipe already closed")
+            return
         # Send startup success message
         if pipe_writer is not None:
             try:
+                logging.info(f"send ready status to pipe_writer")
                 pipe_writer.send(
                     {
                         "status": "success",
-                        "message": f"Backend server started successfully on rank {g_parallel_info.local_rank}",
+                        "message": f"rank {g_parallel_info.local_rank}started successfully",
                     }
                 )
-                pipe_writer.close()
             except Exception as e:
                 logging.warning(f"Failed to send success status via pipe: {e}")
-
+            finally:
+                pipe_writer.close()
         # Enter service loop to keep the process alive
         logging.info("Entering service loop to keep backend_manager alive")
         backend_manager.serve_forever()
@@ -106,7 +110,6 @@ def local_rank_start(
                 pipe_writer.send(
                     {"status": "failed", "message": error_msg, "traceback": error_trace}
                 )
-                pipe_writer.close()
             except Exception as pipe_error:
                 logging.warning(f"Failed to send error status via pipe: {pipe_error}")
         raise e
@@ -168,10 +171,10 @@ def _create_rank_processes(
             args=(global_controller, py_env_configs, writer),
             name=f"rank-{world_rank}",
         )
-        proc.start()
-        writer.close()  # Parent process closes write end
         processes.append(proc)
         rank_pipe_readers.append(reader)
+        proc.start()
+        writer.close()
 
     return processes, rank_pipe_readers
 
@@ -203,53 +206,57 @@ def multi_rank_start(
     all_success = True
     error_messages = []
 
-    for i, reader in enumerate(rank_pipe_readers):
-        try:
-            data = reader.recv()  # Block and wait for status from each rank
-            if data.get("status") == "success":
-                logging.info(
-                    f"Rank {i} started successfully: {data.get('message', '')}"
-                )
-            else:
-                all_success = False
-                error_msg = data.get("message", "Unknown error")
-                error_messages.append(f"Rank {i}: {error_msg}")
-                traceback_info = data.get("traceback", "")
-                if traceback_info:
-                    logging.error(f"Rank {i} traceback: {traceback_info}")
-        except Exception as e:
-            all_success = False
-            error_messages.append(f"Rank {i}: Failed to receive status - {e}")
-            logging.error(f"Failed to receive status from rank {i}: {e}")
-        finally:
-            reader.close()
+    fd_map = {
+        reader.fileno(): (i, reader) for i, reader in enumerate(rank_pipe_readers)
+    }
+    fds = list(fd_map.keys())
 
-    # Report overall status via external pipe
-    if pipe_writer is not None:
-        try:
-            if all_success:
-                pipe_writer.send(
-                    {
-                        "status": "success",
-                        "message": f"All {local_world_size} backend ranks started successfully",
-                    }
-                )
-                logging.info(f"All {local_world_size} ranks started successfully")
-            else:
-                error_msg = "; ".join(error_messages)
-                pipe_writer.send(
-                    {
-                        "status": "failed",
-                        "message": f"Some ranks failed to start: {error_msg}",
-                        "traceback": "",
-                    }
-                )
-                logging.error(f"Some ranks failed: {error_msg}")
-            pipe_writer.close()
-        except Exception as e:
-            logging.warning(f"Failed to send status via pipe: {e}")
+    ready_count = 0
+    results = {}
 
-    if not all_success:
+    while ready_count < local_world_size:
+        # 检查可读管道
+        ready_fds, _, _ = select.select(fds, [], [], 0.1)
+
+        for fd in ready_fds:
+            process_id, reader = fd_map[fd]
+            if reader.closed:
+                continue
+
+            try:
+                msg = reader.recv()
+                if msg.get("status") == "success":
+                    logging.info(f"[Parent] Received {msg} from child-{process_id}")
+                    results[process_id] = True
+                    ready_count += 1
+                    reader.close()
+                    fds.remove(fd)
+            except EOFError:
+                logging.info(f"[Parent] Pipe closed for child-{process_id}")
+                reader.close()
+                fds.remove(fd)
+
+    # 验证结果
+    all_success = ready_count == local_world_size
+
+    if all_success:
+        pipe_writer.send(
+            {
+                "status": "success",
+                "message": f"All {local_world_size} backend ranks started successfully",
+            }
+        )
+        logging.info(f"All {local_world_size} ranks started successfully")
+    else:
+        error_msg = "; ".join(error_messages)
+        pipe_writer.send(
+            {
+                "status": "failed",
+                "message": f"Some ranks failed to start: {error_msg}",
+                "traceback": "",
+            }
+        )
+        logging.error(f"Some ranks failed: {error_msg}")
         # Terminate all processes if any rank failed
         logging.error("Terminating all ranks due to startup failures")
         for proc in processes:
