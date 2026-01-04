@@ -16,7 +16,6 @@ class CudaGraphRunner: public GraphBase {
 public:
     CudaGraphRunner(const DeviceInitParams& params,
                     py::object              py_instance,
-                    int                     kv_cache_block_offset,
                     at::cuda::CUDAStream    capture_stream,
                     caffe2::TypeMeta        model_data_type,
                     int                     num_tokens_per_bs,
@@ -29,7 +28,6 @@ public:
         num_tokens_per_bs_(num_tokens_per_bs),
         max_seq_len_(params.max_seq_len),
         seq_size_per_block_(params.tokens_per_block),
-        kv_cache_block_offset_(kv_cache_block_offset),
         hidden_size_(params.hidden_size),
         prefill_capture_seq_lens_(params.hw_kernel_config.prefill_capture_seq_lens),
         decode_capture_batch_sizes_(params.hw_kernel_config.decode_capture_batch_sizes),
@@ -50,13 +48,12 @@ public:
         options_cuda_float_ = torch::TensorOptions().dtype(model_data_type).device(torch::kCUDA).requires_grad(false);
         RTP_LLM_LOG_INFO("Initialize CudaGraphRunner with parameters below: \n \
             enable_cuda_graph_: %d, max_bs_: %d, enable_cuda_graph_debug_mode_: %d, max_seq_len_: %d, seq_size_per_block_: %d, \
-            kv_cache_block_offset_: %d, hidden_size_: %d, num_tokens_per_bs_: %d, is_prefill_cuda_graph_mode_: %d",
+            hidden_size_: %d, num_tokens_per_bs_: %d, is_prefill_cuda_graph_mode_: %d",
                          enable_cuda_graph_,
                          max_bs_,
                          enable_cuda_graph_debug_mode_,
                          max_seq_len_,
                          seq_size_per_block_,
-                         kv_cache_block_offset_,
                          hidden_size_,
                          num_tokens_per_bs_,
                          is_prefill_cuda_graph_mode_);
@@ -118,7 +115,6 @@ private:
     int                  max_perfill_cuda_graph_len_{160};
     int                  max_seq_len_{0};
     int                  seq_size_per_block_{0};
-    int                  kv_cache_block_offset_{0};
     int                  hidden_size_{0};
     CudaGraphState       state_;
     std::vector<int>     capture_range_;
