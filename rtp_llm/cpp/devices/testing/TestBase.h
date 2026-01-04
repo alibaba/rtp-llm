@@ -86,36 +86,35 @@ public:
 
     virtual void initTestDevices() {
         rtp_llm::ParallelismConfig parallelism_config;
-        rtp_llm::ModelConfig model_config;
+        rtp_llm::ModelConfig       model_config;
         model_config.max_seq_len = max_seq_len_;
-        rtp_llm::EPLBConfig eplb_config;
-        rtp_llm::FMHAConfig fmha_config;
+        rtp_llm::EPLBConfig           eplb_config;
+        rtp_llm::FMHAConfig           fmha_config;
         rtp_llm::DeviceResourceConfig device_resource_config;
         device_resource_config.device_reserve_memory_bytes = device_reserve_memory_size_;
         device_resource_config.host_reserve_memory_bytes   = host_reserve_memory_size_;
-        rtp_llm::MoeConfig moe_config;
-        rtp_llm::SpeculativeExecutionConfig sp_config;
-        rtp_llm::MiscellaneousConfig misc_config;
+        rtp_llm::MoeConfig                   moe_config;
+        rtp_llm::SpeculativeExecutionConfig  sp_config;
+        rtp_llm::MiscellaneousConfig         misc_config;
         rtp_llm::ProfilingDebugLoggingConfig profiling_debug_logging_config;
-        rtp_llm::HWKernelConfig hw_kernel_config;
-        rtp_llm::ConcurrencyConfig concurrency_config;
-        rtp_llm::FfnDisAggregateConfig ffn_disaggregate_config;
-        rtp_llm::RuntimeConfig runtime_config;
-        
-        rtp_llm::DeviceFactory::initDevices(
-            parallelism_config,
-            model_config,
-            eplb_config,
-            fmha_config,
-            device_resource_config,
-            moe_config,
-            sp_config,
-            misc_config,
-            profiling_debug_logging_config,
-            hw_kernel_config,
-            concurrency_config,
-            ffn_disaggregate_config,
-            runtime_config);
+        rtp_llm::HWKernelConfig              hw_kernel_config;
+        rtp_llm::ConcurrencyConfig           concurrency_config;
+        rtp_llm::FfnDisAggregateConfig       ffn_disaggregate_config;
+        rtp_llm::RuntimeConfig               runtime_config;
+
+        rtp_llm::DeviceFactory::initDevices(parallelism_config,
+                                            model_config,
+                                            eplb_config,
+                                            fmha_config,
+                                            device_resource_config,
+                                            moe_config,
+                                            sp_config,
+                                            misc_config,
+                                            profiling_debug_logging_config,
+                                            hw_kernel_config,
+                                            concurrency_config,
+                                            ffn_disaggregate_config,
+                                            runtime_config);
         device_ = rtp_llm::DeviceFactory::getDefaultDevice();
     }
 
@@ -146,7 +145,8 @@ protected:
                                     const std::vector<T>&      data,
                                     rtp_llm::AllocationType    alloc_type = rtp_llm::AllocationType::DEVICE) {
         const auto num_elements = std::accumulate(shape.begin(), shape.end(), 1, std::multiplies<size_t>());
-        RTP_LLM_CHECK(num_elements == data.size());
+        RTP_LLM_CHECK_WITH_INFO(
+            num_elements == data.size(), "num_elements %ld != data.size %ld", num_elements, data.size());
         if (alloc_type == rtp_llm::AllocationType::DEVICE) {
             return createDeviceBuffer<T>(shape, data.data());
         } else {
