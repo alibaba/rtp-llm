@@ -66,12 +66,11 @@ def start_backend_server_impl(
         name="backend_manager",
     )
     backend_process.start()
-    pipe_writer.close()  # Parent process closes write end
-
+    pipe_writer.close()
     # Wait for subprocess to send startup status, maximum 3600 seconds
     max_wait_seconds = 60 * 60
     logging.info(
-        f"Waiting for backend server startup status (timeout: {max_wait_seconds}s)..."
+        f"Waiting for backend manager startup status (timeout: {max_wait_seconds}s)..."
     )
     try:
         # 使用 poll 检查是否有数据可读，设置超时
@@ -79,7 +78,7 @@ def start_backend_server_impl(
             status_msg = pipe_reader.recv()
             if status_msg.get("status") == "success":
                 logging.info(
-                    f"Backend server started successfully: {status_msg.get('message', '')}"
+                    f"Backend manager started successfully: {status_msg.get('message', '')}"
                 )
                 return backend_process
 
@@ -90,17 +89,17 @@ def start_backend_server_impl(
                 logging.error(f"Traceback: {traceback_info}")
 
             # Unified failure handling
-            logging.error(f"Backend server failed to start: {error_msg}")
+            logging.error(f"Backend manager failed to start: {error_msg}")
             process_manager.monitor_and_release_processes()
-            raise Exception(f"Backend server start failed: {error_msg}")
+            raise Exception(f"Backend manager start failed: {error_msg}")
         else:
             # 超时情况
             logging.error(
-                f"Backend server startup timeout after {max_wait_seconds} seconds"
+                f"Backend manager startup timeout after {max_wait_seconds} seconds"
             )
             process_manager.monitor_and_release_processes()
             raise Exception(
-                f"Backend server startup timeout after {max_wait_seconds} seconds"
+                f"Backend manager startup timeout after {max_wait_seconds} seconds"
             )
     finally:
         pipe_reader.close()
