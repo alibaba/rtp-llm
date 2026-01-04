@@ -91,6 +91,9 @@ struct PyAttentionInputs {
     torch::Tensor sequence_lengths_plus_1_d;
     torch::Tensor input_lengths_d;
     torch::Tensor decode_cu_seqlens_d;
+
+    // CUDA Graph mode flag
+    bool is_cuda_graph = false;
 };
 
 struct BertEmbeddingInputs {

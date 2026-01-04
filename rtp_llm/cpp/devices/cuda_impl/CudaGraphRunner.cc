@@ -125,14 +125,14 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
         copySmallerIntoLarger(inputs.attention_inputs.kv_cache_block_id_device,
                               py_model_inputs_.attention_inputs.kv_cache_block_id_device);
 
-        optimizedCopy(inputs.attention_inputs.sequence_lengths_plus_1_d,
-                      py_model_inputs_.attention_inputs.sequence_lengths_plus_1_d,
-                      state_.current_batch_size * sizeof(int));
-        optimizedCopy(inputs.attention_inputs.decode_cu_seqlens_d,
-                      py_model_inputs_.attention_inputs.decode_cu_seqlens_d,
-                      (state_.current_batch_size + 1) * sizeof(int));
+        optimizedCopyAsync(inputs.attention_inputs.sequence_lengths_plus_1_d,
+                           py_model_inputs_.attention_inputs.sequence_lengths_plus_1_d,
+                           state_.current_batch_size * sizeof(int));
+        optimizedCopyAsync(inputs.attention_inputs.decode_cu_seqlens_d,
+                           py_model_inputs_.attention_inputs.decode_cu_seqlens_d,
+                           (state_.current_batch_size + 1) * sizeof(int));
         auto attn_pyobj = graph_instances_[state_.current_real_graph_bs].mem_hold_.attn_pyobj_;
-        attn_pyobj.attr("prepare_replay")(inputs.attention_inputs);
+        attn_pyobj.attr("prepare")(inputs.attention_inputs);
     } else {
         auto& py_model_inputs_ = graph_instances_[state_.current_real_graph_seq_len].mem_hold_.py_model_inputs_;
         // clear kv_cache_block_id_device, otherwise it will cause the cache block pollution
@@ -401,7 +401,7 @@ void CudaGraphRunner::initCapture() {
         initKernelInternalMemory();
         // get real output data type
         auto attn_pyobj = py_attn_pyobj_method_(capture_mem_hold_.py_model_inputs_, true);
-        attn_pyobj.attr("prepare_cuda_graph")(capture_mem_hold_.py_model_inputs_.attention_inputs);
+        attn_pyobj.attr("prepare")(capture_mem_hold_.py_model_inputs_.attention_inputs);
         RTP_LLM_LOG_INFO("initCapture forward for output datatype start");
         auto py_outputs_obj = py_forward_method_(capture_mem_hold_.py_model_inputs_, attn_pyobj);
         RTP_LLM_LOG_INFO("initCapture forward for output datatype end");
@@ -434,7 +434,7 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
     // WarmUp twice
     RTP_LLM_LOG_INFO("WarmUp for %s %d start.", key_type, key);
     auto attn_pyobj = graph_instances_[key].mem_hold_.attn_pyobj_;
-    attn_pyobj.attr("prepare_cuda_graph")(inputs.attention_inputs);
+    attn_pyobj.attr("prepare")(inputs.attention_inputs);
     py_forward_method_(inputs, attn_pyobj);
     py_forward_method_(inputs, attn_pyobj);
     RTP_LLM_LOG_INFO("WarmUp for %s %d successfully.", key_type, key);

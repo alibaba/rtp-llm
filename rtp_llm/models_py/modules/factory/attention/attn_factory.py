@@ -23,6 +23,9 @@ def get_mla_impl(
     is_cuda_graph: bool = False,
     max_seq_len: int = 0,
 ) -> FMHAImplBase:
+    # Set is_cuda_graph as dynamic attribute on attn_inputs for base class to read
+    attn_inputs.is_cuda_graph = is_cuda_graph
+
     mla_impls = PREFILL_MLA_IMPS if attn_inputs.is_prefill else DECODE_MLA_IMPS
     for impl in mla_impls:
         cos_sin_cache = weight.get_global_weight(W.rope_cos_sin_cache)
@@ -34,6 +37,7 @@ def get_mla_impl(
             fmha_config=fmha_config,
             quant_config=quant_config,
             max_seq_len=max_seq_len,
+            is_cuda_graph=is_cuda_graph,
         )
         if instance.support() and (not is_cuda_graph or instance.support_cuda_graph()):
             return instance
@@ -90,6 +94,9 @@ def get_fmha_impl(
     is_cuda_graph: bool = False,
     max_seq_len: int = 0,
 ) -> FMHAImplBase:
+    # Set is_cuda_graph as dynamic attribute on attn_inputs for base class to read
+    attn_inputs.is_cuda_graph = is_cuda_graph
+
     mha_impls = PREFILL_MHA_IMPS if attn_inputs.is_prefill else DECODE_MHA_IMPS
     for impl in mha_impls:
         # Check if this FMHA type is disabled before creating instance

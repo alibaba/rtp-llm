@@ -200,16 +200,13 @@ class MlaFlashInferPrefillOp(object):
 
             self.prefill_wrapper = TRTAttnOp(attn_configs)
             return
-
-    def init_prefill_wrapper(self, mla_params: Any):
-        self.prefill_wrapper = BatchPrefillWithRaggedKVCacheWrapper(
-            g_workspace_buffer,
-            "NHD",
-            backend="auto",
-            use_cuda_graph=False,
-            qo_indptr_buf=mla_params.qo_indptr_h,
-            kv_indptr_buf=mla_params.prefill_page_indptr_h,
-        )
+        else:
+            self.prefill_wrapper = BatchPrefillWithRaggedKVCacheWrapper(
+                g_workspace_buffer,
+                "NHD",
+                backend="auto",
+                use_cuda_graph=False,
+            )
 
     def support(self, attention_inputs: PyAttentionInputs):
         return self.use_mla and attention_inputs.is_prefill
@@ -223,7 +220,6 @@ class MlaFlashInferPrefillOp(object):
             attention_inputs.input_lengths.size(0),
             self.token_per_block,
         )
-        self.init_prefill_wrapper(mla_params)
         self.plan(mla_params)
         # for reuse cache indexed batched
         self.reuse_cache_page_indice = mla_params.reuse_cache_page_indice_d
@@ -407,6 +403,8 @@ class MlaFlashInferDecodeOp(object):
         weights: List[Dict[str, torch.Tensor]] | None = None,
         max_bs: int = 0,
         max_context_len: int = 0,
+        num_tokens: int = 0,
+        is_cuda_graph: bool = False,
     ):
         super().__init__()
         if weights is None:
@@ -421,13 +419,32 @@ class MlaFlashInferDecodeOp(object):
         self.weights = weights
         self.use_mla = use_mla
         global g_workspace_buffer
-        self.cuda_graph_kv_indices = None
+        self.kv_indices_d = torch.empty(
+            ((max_context_len + self.token_per_block - 1) // self.token_per_block)
+            * max_bs,
+            dtype=torch.int32,
+            device="cuda",
+        )
+        self.qo_indptr_h = torch.arange(0, max_bs + 1, dtype=torch.int32, device="cpu")
+        self.kv_indptr_h = torch.zeros((max_bs + 1,), dtype=torch.int32, device="cpu")
+        self.kv_len_arr_h = torch.ones((max_bs,), dtype=torch.int32, device="cpu")
+
         if g_workspace_buffer is None:
             g_workspace_buffer = torch.empty(
                 512 * 1024 * 1024,
                 dtype=torch.int8,
                 device=self.weights[0].get(W.mla_vc).device,
             )
+
+        self.mla_wrapper = BatchMLAPagedAttentionWrapper(
+            g_workspace_buffer,
+            backend="auto",
+            use_cuda_graph=is_cuda_graph,
+            qo_indptr=self.qo_indptr_h,
+            kv_indptr=self.kv_indptr_h,
+            kv_indices=self.kv_indices_d,
+            kv_len_arr=self.kv_len_arr_h,
+        )
 
     def init_mla_wrapper(self, fmha_params: Any, use_cuda_graph: bool = False):
         self.mla_wrapper = BatchMLAPagedAttentionWrapper(
@@ -447,9 +464,7 @@ class MlaFlashInferDecodeOp(object):
     def support(self, attention_inputs: PyAttentionInputs):
         return self.use_mla
 
-    def prepare(
-        self, attention_inputs: PyAttentionInputs, use_cuda_graph: bool = False
-    ):
+    def prepare(self, attention_inputs: PyAttentionInputs):
         check_attention_inputs(attention_inputs)
         fmha_params = rtp_llm_ops.fill_decode_mla_params(
             attention_inputs.sequence_lengths,
@@ -457,7 +472,6 @@ class MlaFlashInferDecodeOp(object):
             attention_inputs.input_lengths.size(0),
             self.token_per_block,
         )
-        self.init_mla_wrapper(fmha_params, use_cuda_graph)
         self.plan(fmha_params)
         return fmha_params
 

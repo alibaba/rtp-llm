@@ -34,8 +34,8 @@ class MlaRotaryEmbeddingOp(object):
         self.kv_lora_rank = kv_lora_rank
         self.rope_head_dim = rope_head_dim
         self.token_per_block = token_per_block
-        self.cuda_graph_kv_indices = torch.empty(
-            (max_bs * max_context_len // token_per_block),
+        self.kv_indices_d = torch.empty(
+            0,
             dtype=torch.int32,
             device="cuda",
         )
@@ -75,8 +75,8 @@ class MlaRotaryEmbeddingOp(object):
                 k_cache,
                 v_cache,
                 (
-                    self.cuda_graph_kv_indices
-                    if self.cuda_graph_kv_indices.size(0) > 0
+                    self.kv_indices_d
+                    if self.kv_indices_d.size(0) > 0
                     else rope_params.page_indice_d
                 ),
                 rope_params.decode_page_indptr_d,

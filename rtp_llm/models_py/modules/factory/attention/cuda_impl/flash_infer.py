@@ -55,19 +55,35 @@ class FlashInferDecodeImpl(FMHADecodeImplBase):
     def support_cuda_graph(self) -> bool:
         return True
 
-    def prepare_replay(self, attn_inputs: PyAttentionInputs):
-        assert self.fmha_impl is not None
-        batch_size = attn_inputs.input_lengths.size(0)
-        self.fmha_params.fill_params(
-            attn_inputs.sequence_lengths,
-            attn_inputs.input_lengths,
-            attn_inputs.kv_cache_block_id_host,
-            batch_size,
-            self.seq_size_per_block,
-        )
+    def prepare(self, attn_inputs: PyAttentionInputs):
+        """Unified prepare method supporting initial preparation and replay.
 
+        Automatically detects whether this is first-time preparation or replay
+        based on whether fmha_params exists.
+        """
+        assert self.fmha_impl is not None
         assert self.rope_kvcache_impl is not None
-        new_rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
-        new_offset = new_rope_params.kv_cache_offset
-        old_offset = self.rope_params.kv_cache_offset
-        self.copy_kv_cache_offset(old_offset, new_offset)
+
+        # Detect if this is first call or replay
+        is_first_call = self.fmha_params is None
+
+        if is_first_call:
+            # First-time: create new params
+            self.fmha_params = self.fmha_impl.prepare(attn_inputs)
+            self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
+        else:
+            # Replay: update existing params
+            batch_size = attn_inputs.input_lengths.size(0)
+            self.fmha_params.fill_params(
+                attn_inputs.sequence_lengths,
+                attn_inputs.input_lengths,
+                attn_inputs.kv_cache_block_id_host,
+                batch_size,
+                self.seq_size_per_block,
+            )
+
+            # Update rope params by copying offsets
+            new_rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
+            new_offset = new_rope_params.kv_cache_offset
+            old_offset = self.rope_params.kv_cache_offset
+            self.copy_kv_cache_offset(old_offset, new_offset)

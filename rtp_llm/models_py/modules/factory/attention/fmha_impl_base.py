@@ -41,6 +41,12 @@ class FMHAImplBase(object):
                     self.attn_inputs.cache_store_inputs,
                 )
 
+            # Auto-prepare in non-CUDA Graph mode
+            # Read is_cuda_graph from dynamic attribute set by factory layer
+            is_cuda_graph = getattr(attn_inputs, "is_cuda_graph", False)
+            if not is_cuda_graph:
+                self.prepare(attn_inputs)
+
     def forward(
         self,
         qkv: torch.Tensor,
@@ -73,12 +79,6 @@ class FMHAImplBase(object):
 
     def support_cuda_graph(self) -> bool:
         return False
-
-    def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
-        self.prepare(attn_inputs)
-
-    def prepare_replay(self, attn_inputs: PyAttentionInputs):
-        raise NotImplementedError("prepare_replay is not implemented")
 
     def copy_kv_cache_offset(self, old_offset: torch.Tensor, new_offset: torch.Tensor):
         if new_offset.shape == old_offset.shape:

@@ -297,7 +297,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         } else {
             DevicePerfWrapper wrapper(device_, "normal forward");
             auto              attn_pyobj = py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
-            attn_pyobj.attr("prepare")(py_model_inputs.attention_inputs);
+            // attn_pyobj.attr("prepare")(py_model_inputs.attention_inputs);
             auto py_model_forward = py_model_.attr("forward");
             auto outputs          = py_model_forward(py_model_inputs, attn_pyobj);
             py_model_outputs      = outputs.cast<PyModelOutputs>();

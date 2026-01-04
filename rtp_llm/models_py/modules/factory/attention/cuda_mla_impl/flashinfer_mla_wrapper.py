@@ -30,6 +30,7 @@ class MlaFlashInferPrefillImpl(FMHAPrefillImplBase):
         use_trt_fmha: bool = False,
         quant_config: Optional[object] = None,
         max_seq_len: int = 0,
+        is_cuda_graph: bool = False,
     ) -> None:
         # trt prefill not support reuse cache yet
         warmup_flashinfer_python()
@@ -78,6 +79,7 @@ class MlaFlashInferPrefillImpl(FMHAPrefillImplBase):
                 attn_configs.use_mla,
                 weights,
             )
+            self.absorb_fmha.plan(self.fmha_params)
 
     @staticmethod
     def fmha_type() -> FMHAType:
@@ -86,10 +88,6 @@ class MlaFlashInferPrefillImpl(FMHAPrefillImplBase):
     def prepare(self, attn_inputs: PyAttentionInputs):
         super().prepare(attn_inputs)
         self.rope_params = self.fmha_params
-
-        if self.absorb_fmha is not None:
-            self.absorb_fmha.init_mla_wrapper(self.fmha_params)
-            self.absorb_fmha.plan(self.fmha_params)
 
     def compute_prefill_context(
         self,
@@ -170,6 +168,7 @@ class MlaFlashInferDecodeImpl(FMHADecodeImplBase):
         fmha_config: Optional[FMHAConfig] = None,
         quant_config: Optional[object] = None,
         max_seq_len: int = 0,
+        is_cuda_graph: bool = False,
     ) -> None:
         warmup_flashinfer_python()
         super().__init__(
@@ -182,6 +181,10 @@ class MlaFlashInferDecodeImpl(FMHADecodeImplBase):
                 attn_configs.softmax_extra_scale,
                 attn_configs.use_mla,
                 weights,
+                max_bs=attn_inputs.sequence_lengths.size(0),
+                max_context_len=max_seq_len,
+                num_tokens=attn_inputs.sequence_lengths.sum().item(),
+                is_cuda_graph=is_cuda_graph,
             ),
             MlaRotaryEmbeddingOp(
                 head_size=attn_configs.nope_head_dim,
@@ -194,8 +197,6 @@ class MlaFlashInferDecodeImpl(FMHADecodeImplBase):
             attn_inputs,
         )
         self.seq_size_per_block = attn_configs.tokens_per_block
-        self.bs = attn_inputs.input_lengths.size(0)
-        self.max_context_len = max_seq_len
 
     @staticmethod
     def fmha_type() -> FMHAType:
@@ -204,28 +205,41 @@ class MlaFlashInferDecodeImpl(FMHADecodeImplBase):
     def support_cuda_graph(self) -> bool:
         return True
 
-    def prepare(self, attn_inputs: PyAttentionInputs, use_cuda_graph: bool = False):
-        assert self.fmha_impl is not None
-        self.fmha_params = self.fmha_impl.prepare(attn_inputs, use_cuda_graph)
-        self.rope_params = self.fmha_params
+    def prepare(self, attn_inputs: PyAttentionInputs):
+        """Unified prepare method supporting initial preparation and replay.
 
-    def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
-        self.fmha_impl.cuda_graph_kv_indices = torch.empty(
-            (
-                (self.max_context_len + self.seq_size_per_block - 1)
-                // self.seq_size_per_block
-            )
-            * self.bs,
-            dtype=torch.int32,
-            device="cuda",
-        )
-        self.rope_kvcache_impl.cuda_graph_kv_indices = (
-            self.fmha_impl.cuda_graph_kv_indices
-        )
-        self.prepare(attn_inputs, True)
-
-    def prepare_replay(self, attn_inputs: PyAttentionInputs):
+        Automatically detects whether this is first-time preparation or replay
+        based on whether fmha_params exists.
+        """
         assert self.fmha_impl is not None
+
+        # Setup shared kv_indices_d reference (needed for both init and replay)
+        self.rope_kvcache_impl.kv_indices_d = self.fmha_impl.kv_indices_d
+
+        # Detect if this is first call or replay
+        is_first_call = self.fmha_params is None
+
+        if is_first_call:
+            # First-time: create new params
+            self.fmha_params = self.fmha_impl.prepare(attn_inputs)
+            # Share reference: rope_params and fmha_params point to same object
+            self.rope_params = self.fmha_params
+        else:
+            # Replay: update existing params
+            self._update_params(attn_inputs)
+
+        # Sync page indices to pre-allocated buffer (needed for both init and replay)
+        # This copies the latest page_indice_d to the fixed kv_indices_d buffer
+        self.rope_kvcache_impl.kv_indices_d[
+            : len(self.fmha_params.page_indice_d)
+        ].copy_(self.fmha_params.page_indice_d, non_blocking=True)
+
+    def _update_params(self, attn_inputs: PyAttentionInputs):
+        """Update existing fmha_params for CUDA Graph replay.
+
+        Note: Since rope_params and fmha_params share the same object reference,
+        updating fmha_params automatically reflects in rope_params.
+        """
         batch_size = attn_inputs.input_lengths.size(0)
         self.fmha_params.fill_params(
             attn_inputs.sequence_lengths,
@@ -235,23 +249,6 @@ class MlaFlashInferDecodeImpl(FMHADecodeImplBase):
             self.seq_size_per_block,
         )
         self.fmha_impl.plan(self.fmha_params)
-
-        assert self.rope_kvcache_impl is not None
-        self.rope_params.positions_d.copy_(
-            self.fmha_params.positions_d, non_blocking=True
-        )
-        self.rope_params.batch_indice_d.copy_(
-            self.fmha_params.batch_indice_d, non_blocking=True
-        )
-        self.rope_kvcache_impl.cuda_graph_kv_indices[
-            : len(self.fmha_params.page_indice_d)
-        ].copy_(self.fmha_params.page_indice_d, non_blocking=True)
-        self.rope_params.decode_page_indptr_d.copy_(
-            self.fmha_params.decode_page_indptr_d, non_blocking=True
-        )
-        self.rope_params.paged_kv_last_page_len_d.copy_(
-            self.fmha_params.paged_kv_last_page_len_d, non_blocking=True
-        )
 
     def forward(
         self,

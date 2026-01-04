@@ -1,5 +1,5 @@
 import sys
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import torch
 from torch import nn
@@ -33,7 +33,12 @@ from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
     fused_recurrent_gated_delta_rule,
 )
 from rtp_llm.models_py.triton_kernels.fla.gdn_gating import fused_gdn_gating
-from rtp_llm.ops import HybridAttentionType, ParallelismConfig, LinearAttentionConfig, AttentionConfigs
+from rtp_llm.ops import (
+    AttentionConfigs,
+    HybridAttentionType,
+    LinearAttentionConfig,
+    ParallelismConfig,
+)
 from rtp_llm.ops.compute_ops import (
     KVCache,
     PyAttentionInputs,
@@ -66,12 +71,10 @@ class Qwen3NextGatedDeltaNetBase(torch.nn.Module):
         self.head_k_dim: int = linear_attn_config.linear_key_head_dim
         self.head_v_dim: int = linear_attn_config.linear_value_head_dim
         self.local_num_k_heads: int = (
-            linear_attn_config.linear_num_key_heads
-            // parallelism_config.tp_size
+            linear_attn_config.linear_num_key_heads // parallelism_config.tp_size
         )
         self.local_num_v_heads: int = (
-            linear_attn_config.linear_num_value_heads
-            // parallelism_config.tp_size
+            linear_attn_config.linear_num_value_heads // parallelism_config.tp_size
         )
         self.num_key_value_heads: int = self.local_num_v_heads // self.local_num_k_heads
         self.linear_conv_kernel_dim: int = (
@@ -364,7 +367,9 @@ class Qwen3NextAttention(CausalAttention):
         layernorm_eps: float,
         quant_config: Optional[object] = None,
     ):
-        super().__init__(attn_config, parallelism_config, weights, layernorm_eps, quant_config)
+        super().__init__(
+            attn_config, parallelism_config, weights, layernorm_eps, quant_config
+        )
         # maybe fuse gate in qkv_proj later
         self.gate = LinearFactory.create_linear_from_weights(
             weights, W.attn_gate_w, W.attn_gate_s, None, quant_config
@@ -408,12 +413,10 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         self.head_k_dim = linear_attn_config.linear_key_head_dim
         self.head_v_dim = linear_attn_config.linear_value_head_dim
         self.local_num_k_heads = (
-            linear_attn_config.linear_num_key_heads
-            // parallelism_config.tp_size
+            linear_attn_config.linear_num_key_heads // parallelism_config.tp_size
         )
         self.local_num_v_heads = (
-            linear_attn_config.linear_num_value_heads
-            // parallelism_config.tp_size
+            linear_attn_config.linear_num_value_heads // parallelism_config.tp_size
         )
         self.num_key_value_heads = self.local_num_v_heads // self.local_num_k_heads
 
@@ -511,10 +514,22 @@ class Qwen3NextDecoderLayer(nn.Module):
             layer_idx
         ]
         if self.layer_type == HybridAttentionType.LINEAR:
-            self.self_attn = Qwen3NextGatedDeltaNet(config.linear_attention_config, parallelism_config, weights, config.layernorm_eps, config.quant_config)
+            self.self_attn = Qwen3NextGatedDeltaNet(
+                config.linear_attention_config,
+                parallelism_config,
+                weights,
+                config.layernorm_eps,
+                config.quant_config,
+            )
         else:
             attn_configs = config.getAttentionConfigs(parallelism_config.tp_size)
-            self.self_attn = Qwen3NextAttention(attn_configs, parallelism_config, weights, config.layernorm_eps, config.quant_config)
+            self.self_attn = Qwen3NextAttention(
+                attn_configs,
+                parallelism_config,
+                weights,
+                config.layernorm_eps,
+                config.quant_config,
+            )
         self.mlp = GenericMoeLayer(
             config,
             parallelism_config,
@@ -606,7 +621,7 @@ class Qwen3NextModel(GptModelBase):
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
 
-    def forward(self, inputs: PyModelInputs) -> PyModelOutputs:
+    def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
         inputs_embeds = self.embed_tokens(input_ids)
         hidden_states = inputs_embeds
@@ -623,13 +638,11 @@ class Qwen3NextModel(GptModelBase):
                 device=hidden_states.device,
             )
         attn_meta = Qwen3NextMetadata(prefill_conv1d_meta)
-        fmha_impl = AttnImplFactory.get_fmha_impl(
-            self.config,
-            self.parallelism_config,
-            self.weight,
-            attention_inputs,
-            self.fmha_config,
-        )
+        if fmha_impl is None:
+            fmha_impl = self.prepare_fmha_impl(
+                inputs
+            )  # pyright: ignore[reportUnreachable]
+            fmha_impl.prepare(inputs.attention_inputs)
         for i, decoder_layer in enumerate(self.layers):
             hidden_states = decoder_layer(
                 hidden_states,
