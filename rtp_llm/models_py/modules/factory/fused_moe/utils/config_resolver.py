@@ -122,3 +122,15 @@ class MoeConfigResolver:
             Whether use_all_gather is enabled
         """
         return config.moe_config.use_all_gather if config.moe_config else True
+
+    @staticmethod
+    def enable_peo(config: MoEConfigAdapter) -> bool:
+        """Check if PEO is enabled
+
+        Args:
+            config:MOE configuration adapter
+
+        Returns:
+            Whether PEO is enabled
+        """
+        return config.moe_config.enable_peo_level > 0

@@ -101,12 +101,14 @@ class PureTpRouterBase(FusedMoeDataRouter):
                 )
             )
         return ExpertForwardPayload(
-            expert_x,
-            a1.dtype,
-            expert_x_scale,
-            ExpertTokensMetadata(None, num_recv_tokens_per_expert, None),
-            adjusted_topk_ids,
-            topk_weights,
+            expert_x=expert_x,
+            expert_x_origin_dtype=a1.dtype,
+            expert_x_scale=expert_x_scale,
+            expert_topk_ids=adjusted_topk_ids,
+            expert_topk_weights=topk_weights,
+            expert_tokens_meta=ExpertTokensMetadata(
+                None, num_recv_tokens_per_expert, None
+            ),
         )
 
     def finalize(

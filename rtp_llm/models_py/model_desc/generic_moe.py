@@ -41,6 +41,7 @@ class GenericMoeLayer(nn.Module):
         max_generate_batch_size: int = 0,
         enable_cuda_graph: bool = False,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
+        enable_comm_overlap: bool = False,
     ):
         super().__init__()
         self.config = config
@@ -66,6 +67,7 @@ class GenericMoeLayer(nn.Module):
             max_generate_batch_size=max_generate_batch_size,
             quant_config=quant_config,
             enable_cuda_graph=enable_cuda_graph,
+            enable_comm_overlap=enable_comm_overlap,
         )
         self.fused_moe = FusedMoeFactory().create_fused_moe(config_adapter, weights)
 
@@ -169,6 +171,7 @@ class GenericMoeDecoderLayer(nn.Module):
         max_generate_batch_size: int = 0,
         enable_cuda_graph: bool = False,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
+        enable_comm_overlap: bool = False,
     ):
         super().__init__()
         self.layer_idx = layer_idx
@@ -203,12 +206,14 @@ class GenericMoeDecoderLayer(nn.Module):
             )
         else:
             self.mlp = GenericMoeLayer(
-                config,
-                parallelism_config,
-                weights,
-                moe_config,
-                max_generate_batch_size,
+                config=config,
+                parallelism_config=parallelism_config,
+                weights=weights,
+                moe_config=moe_config,
+                max_generate_batch_size=max_generate_batch_size,
                 enable_cuda_graph=enable_cuda_graph,
+                hw_kernel_config=hw_kernel_config,
+                enable_comm_overlap=enable_comm_overlap,
             )
 
         # 使用 RMSResNorm 来 fuse residual add 和 layernorm
@@ -289,6 +294,7 @@ class GenericMoeModel(GptModelBase):
                     max_generate_batch_size,
                     enable_cuda_graph=enable_cuda_graph,
                     hw_kernel_config=py_hw_kernel_config,
+                    enable_comm_overlap=device_resource_config.enable_comm_overlap,
                 )
                 for idx in range(self.layer_num)
             ]

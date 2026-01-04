@@ -64,6 +64,7 @@ class DeepGemmContinousExecutor(FusedMoeExpertExecutor):
         checker.check(quant_method == "FP8_PER_BLOCK")
         checker.check(has_deep_gemm())
         checker.check(not config.enable_cuda_graph)
+        checker.check(not resolver.enable_peo(config))
 
     def __init__(
         self,

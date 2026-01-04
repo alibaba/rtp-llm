@@ -1,4 +1,5 @@
 import os
+from functools import partial
 from typing import Any, Dict, Optional, Tuple
 
 import torch
@@ -23,7 +24,10 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.type import RouterType
-from rtp_llm.models_py.utils.arch import get_sm
+from rtp_llm.models_py.modules.factory.fused_moe.utils.deepep_configure import (
+    calc_low_latency_max_token_per_rank,
+)
+from rtp_llm.models_py.utils.arch import get_num_device_sms, get_sm
 
 # DeepEP kernels quantize dispatch inputs in 128 element chunks.
 DEEPEP_QUANT_BLOCK_SIZE = 128
@@ -70,30 +74,62 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
 
         # DeepEpLowLatency-specific initialization
         self._num_experts = config.expert_num
-        self._ll_num_max_token_per_rank = self._calc_low_latency_max_token_per_rank(
+        self._ll_num_max_token_per_rank = calc_low_latency_max_token_per_rank(
             config.max_generate_batch_size, config.tp_size, quant_config
         )
         deepep_config = DeepepWrapperConfig.from_config_adapter(
             self.config, self._ll_num_max_token_per_rank
         )
-        wrapper = DeepEPWrapper.get_instance(deepep_config)
+        self._wrapper = DeepEPWrapper.get_instance(deepep_config)
         assert (
-            wrapper.mode == DeepEPMode.LOW_LATENCY
+            self._wrapper.mode == DeepEPMode.LOW_LATENCY
         ), "DeepEP mode should be LOW_LATENCY"
-        self._buffer = wrapper.buffer
-        self._num_topk = wrapper.num_topk
-        self._num_max_dispatch_tokens_per_rank = wrapper.ll_num_max_token_per_rank
+        self._buffer = self._wrapper.buffer
+        self._num_topk = self._wrapper.num_topk
+        self._num_max_dispatch_tokens_per_rank = self._wrapper.ll_num_max_token_per_rank
+        self._comm_stream = self._wrapper.buffer.get_comm_stream()
         self._use_fp8_dispatch = use_fp8_dispatch
         self._zero_copy = False
-        self._async_finish = False
-        self._return_recv_hook = False
-        self._opt_level = int(os.environ.get("ACCL_LOW_LATENCY_OPTIMIZE", 1))
+        self._return_recv_hook = config.enable_comm_overlap
+        self._async_finish = not self._return_recv_hook
         self._handle: Optional[Tuple[Any, ...]] = None
-        self._use_accl_ep = wrapper.use_accl_ep
+        self._use_accl_ep = self._wrapper.use_accl_ep
+        # PEO level
+        self._enable_peo_level = config.moe_config.enable_peo_level
+        if self._enable_peo_level > 0:
+            # Number of PEO rounds
+            self._num_peo_rounds = config.moe_config.num_peo_rounds
+            # Number of comm sms
+            self._num_comm_sms = config.moe_config.deep_ep_num_sm
+            self._num_device_total_sms = get_num_device_sms()
+            # Check parameters
+            if self._enable_peo_level not in [1, 2, 3, 4]:
+                raise ValueError(
+                    f"Invalid PEO level: {self._enable_peo_level} , only support 1, 2, 3, 4"
+                )
+            if self._num_peo_rounds < 2:
+                raise ValueError(
+                    f"num_peo_rounds must be greater than 1, but got {self._num_peo_rounds}"
+                )
+            if (
+                self._num_comm_sms < 2
+                or self._num_comm_sms >= self._num_device_total_sms
+            ):
+                raise ValueError(
+                    f"num_comm_sms must be greater than 1 and less than num_device_total_sms: {self._num_device_total_sms}, but got {self._num_comm_sms}"
+                )
+
+    @property
+    def deepep_wrapper(self) -> DeepEPWrapper:
+        return self._wrapper
 
     @property
     def handle(self) -> Optional[Tuple[Any, ...]]:
         return self._handle
+
+    @property
+    def comm_stream(self) -> torch.cuda.Stream:
+        return self._comm_stream
 
     def _prepare_pre_tp_slice(
         self,
@@ -124,13 +160,290 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
 
         return tp_dispatch_input, tp_topk_ids, tp_topk_weights
 
+    def _calc_comm_send_recv_sms(
+        self,
+        num_comm_sms: int,
+        num_device_total_sms: int,
+        round_id: int,
+        num_peo_rounds: int,
+        is_dispatch: bool,
+        peo_level: int,
+    ) -> Tuple[int, int]:
+        """
+        Calculate the number of send and recv sms for the given round of PEO.
+        """
+        # Check if the parameters are valid
+        if peo_level == 4 and is_dispatch:
+            raise ValueError(
+                f"PEO level 4 is not supported in _calc_comm_send_recv_sms for dispatch"
+            )
+        # Calculate number of send sms
+        num_comm_send_sms = num_comm_sms
+        if peo_level == 1:
+            if is_dispatch:
+                num_comm_send_sms = num_device_total_sms
+            else:
+                num_comm_send_sms = (
+                    num_device_total_sms
+                    if round_id == (num_peo_rounds - 1)
+                    else num_comm_sms
+                )
+        elif peo_level == 2:
+            if is_dispatch:
+                num_comm_send_sms = (
+                    num_device_total_sms if round_id == 0 else num_comm_sms
+                )
+            else:
+                num_comm_send_sms = (
+                    num_device_total_sms
+                    if round_id == (num_peo_rounds - 1)
+                    else num_comm_sms
+                )
+        elif peo_level == 3:
+            if is_dispatch:
+                num_comm_send_sms = (
+                    num_device_total_sms if round_id == 0 else num_comm_sms // 2
+                )
+            else:
+                num_comm_send_sms = (
+                    num_device_total_sms
+                    if round_id == (num_peo_rounds - 1)
+                    else num_comm_sms // 2
+                )
+        else:
+            num_comm_send_sms = (
+                num_device_total_sms
+                if round_id == (num_peo_rounds - 1)
+                else num_comm_sms
+            )
+        # Calculate number of recv sms
+        num_comm_recv_sms = num_comm_sms
+        if not is_dispatch:
+            num_comm_recv_sms = num_device_total_sms
+        else:
+            if peo_level == 1:
+                num_comm_recv_sms = (
+                    num_device_total_sms if round_id == 0 else num_comm_sms
+                )
+            elif peo_level == 2:
+                num_comm_recv_sms = (
+                    num_device_total_sms if round_id == 0 else num_comm_sms
+                )
+            else:
+                num_comm_recv_sms = (
+                    (num_device_total_sms + num_comm_sms // 2)
+                    if round_id == 0
+                    else num_comm_sms // 2
+                )
+        return num_comm_send_sms, num_comm_recv_sms
+
+    def _peo_prepare(
+        self, dispatch_args: Dict[str, Any], tp_topk_weights: torch.Tensor
+    ) -> ExpertForwardPayload:
+        """Dispatch tokens to experts with Per-Expert Overlap (PEO) level 1, 2, 3.
+
+        Args:
+            dispatch_args (Dict[str, Any]): Arguments for dispatching tokens to experts.
+            tp_topk_weights (torch.Tensor): Topk weights tensor for this tp rank.
+        Returns:
+            ExpertForwardPayload: Expert forward payload.
+        """
+        # Calculate expected_m
+        tp_num_tokens = dispatch_args["x"].size(0)
+        expected_m = max(
+            1,
+            int(
+                tp_num_tokens
+                * self.config.ep_size
+                * self._num_topk
+                // self._num_experts
+            ),
+        )
+        # Initialize expert forward payload
+        expert_payload = ExpertForwardPayload(
+            expert_x=None,
+            expert_x_origin_dtype=dispatch_args["x"].dtype,
+            expert_topk_ids=dispatch_args["topk_idx"],
+            expert_topk_weights=tp_topk_weights,
+            expert_tokens_meta=ExpertTokensMetadata(expected_m=expected_m),
+        )
+        # Updata dispatch common arguments for all PEO levels
+        dispatch_args.update(
+            {
+                "async_finish": False,
+                "return_recv_hook": True,
+                "use_expert_overlap": True,
+                "num_rounds": self._num_peo_rounds,
+                "hook_use_comm_stream": False,
+            }
+        )
+        # Prepare _calc_comm_send_recv_sms partial function for all PEO levels
+        _calc_comm_send_recv_sms_partial = partial(
+            self._calc_comm_send_recv_sms,
+            num_comm_sms=self._num_comm_sms,
+            num_device_total_sms=self._num_device_total_sms,
+            num_peo_rounds=self._num_peo_rounds,
+            is_dispatch=True,
+            peo_level=self._enable_peo_level,
+        )
+        # Dispatch for PEO level 1,2,3
+        if self._enable_peo_level == 1:
+            dispatch_recv_hooks = []
+            dispatch_recv_events = []
+            for round_id in range(self._num_peo_rounds):
+                # Calculate number of send and recv sms
+                send_num_sms, recv_num_sms = _calc_comm_send_recv_sms_partial(
+                    round_id=round_id
+                )
+                # Update dispatch arguments
+                dispatch_args.update(
+                    {
+                        "round_id": round_id,
+                        "send_num_sms": send_num_sms,
+                        "recv_num_sms": recv_num_sms,
+                    }
+                )
+                # Dispatch send
+                packed_recv_x, packed_recv_count, tmp_handle, _, hook = (
+                    self._buffer.low_latency_dispatch(**dispatch_args)
+                )
+                # Save data for first round
+                if round_id == 0:
+                    expert_payload.expert_x = (
+                        packed_recv_x[0] if self._use_fp8_dispatch else packed_recv_x
+                    )
+                    expert_payload.expert_x_scale = (
+                        packed_recv_x[1] if self._use_fp8_dispatch else None
+                    )
+                    expert_payload.expert_tokens_meta.expert_num_tokens = (
+                        packed_recv_count
+                    )
+                    self._handle = tmp_handle
+                # Save hook for all rounds
+                dispatch_recv_hooks.append(hook)
+            for hook in dispatch_recv_hooks:
+                # Execute dispatch recv hook
+                hook()
+                # Record dispatch recv event
+                dispatch_recv_event = torch.cuda.Event()
+                torch.cuda.current_stream().record_event(dispatch_recv_event)
+                dispatch_recv_events.append(dispatch_recv_event)
+            expert_payload.dispatch_recv_events = dispatch_recv_events
+        elif self._enable_peo_level == 2:
+            dispatch_recv_events = []
+            for round_id in range(self._num_peo_rounds):
+                # Calculate number of send and recv sms
+                send_num_sms, recv_num_sms = _calc_comm_send_recv_sms_partial(
+                    round_id=round_id
+                )
+                # Update dispatch arguments
+                dispatch_args.update(
+                    {
+                        "round_id": round_id,
+                        "send_num_sms": send_num_sms,
+                        "recv_num_sms": recv_num_sms,
+                    }
+                )
+                # Dispatch send
+                packed_recv_x, packed_recv_count, tmp_handle, _, hook = (
+                    self._buffer.low_latency_dispatch(**dispatch_args)
+                )
+                # Execute dispatch recv hook
+                hook()
+                # Record dispatch recv event
+                dispatch_recv_event = torch.cuda.Event()
+                torch.cuda.current_stream().record_event(dispatch_recv_event)
+                dispatch_recv_events.append(dispatch_recv_event)
+                # Save data for first round
+                if round_id == 0:
+                    expert_payload.expert_x = (
+                        packed_recv_x[0] if self._use_fp8_dispatch else packed_recv_x
+                    )
+                    expert_payload.expert_x_scale = (
+                        packed_recv_x[1] if self._use_fp8_dispatch else None
+                    )
+                    expert_payload.expert_tokens_meta.expert_num_tokens = (
+                        packed_recv_count
+                    )
+                    self._handle = tmp_handle
+            expert_payload.dispatch_recv_events = dispatch_recv_events
+        elif self._enable_peo_level == 3:
+            dispatch_send_hooks = []
+            dispatch_send_events = []
+            dispatch_recv_events = []
+            for round_id in range(self._num_peo_rounds):
+                # Calculate number of send and recv sms
+                send_num_sms, recv_num_sms = _calc_comm_send_recv_sms_partial(
+                    round_id=round_id
+                )
+                # Update dispatch arguments
+                dispatch_args.update(
+                    {
+                        "round_id": round_id,
+                        "send_num_sms": send_num_sms,
+                        "recv_num_sms": recv_num_sms,
+                        "hook_use_comm_stream": (
+                            True if round_id < (self._num_peo_rounds - 1) else False
+                        ),
+                    }
+                )
+                # Dispatch send
+                packed_recv_x, packed_recv_count, tmp_handle, _, hook = (
+                    self._buffer.low_latency_dispatch(**dispatch_args)
+                )
+                # Save hook for all rounds
+                dispatch_send_hooks.append(hook)
+                # Record dispatch send event
+                if round_id < (self._num_peo_rounds - 1):
+                    dispatch_send_event = torch.cuda.Event()
+                    torch.cuda.current_stream().record_event(dispatch_send_event)
+                    dispatch_send_events.append(dispatch_send_event)
+                # Save data for first round
+                if round_id == 0:
+                    expert_payload.expert_x = (
+                        packed_recv_x[0] if self._use_fp8_dispatch else packed_recv_x
+                    )
+                    expert_payload.expert_x_scale = (
+                        packed_recv_x[1] if self._use_fp8_dispatch else None
+                    )
+                    expert_payload.expert_tokens_meta.expert_num_tokens = (
+                        packed_recv_count
+                    )
+                    self._handle = tmp_handle
+            # Solve CUDA Graph leads to a large number of CUDA streams problem, related to:
+            # https://github.com/pytorch/pytorch/issues/155679
+            # https://github.com/pytorch/pytorch/issues/152114
+            for round_id, hook in enumerate(dispatch_send_hooks):
+                # Communication stream wait for dispatch send event
+                if round_id < (self._num_peo_rounds - 1):
+                    self._comm_stream.wait_event(dispatch_send_events[round_id])
+                else:
+                    torch.cuda.current_stream().wait_event(
+                        dispatch_recv_events[self._num_peo_rounds - 2]
+                    )
+                # Execute dispatch recv hook
+                hook()
+                # Record dispatch recv event
+                dispatch_recv_event = torch.cuda.Event()
+                self._comm_stream.record_event(dispatch_recv_event)
+                dispatch_recv_events.append(dispatch_recv_event)
+            expert_payload.dispatch_recv_events = dispatch_recv_events
+        else:
+            raise ValueError(
+                f"Invalid PEO level for dispatch: {self._enable_peo_level}"
+            )
+
+        return expert_payload
+
     def _normal_prepare(
-        self, dispatch_args: dict[str, Any], tp_topk_weights: torch.Tensor
-    ):
+        self, dispatch_args: Dict[str, Any], tp_topk_weights: torch.Tensor
+    ) -> ExpertForwardPayload:
         """Normal prepare for DeepEP Low-Latency.
         Args:
-            dispatch_args (dict[str, Any]): Arguments for dispatching tokens to experts.
+            dispatch_args (Dict[str, Any]): Arguments for dispatching tokens to experts.
             tp_topk_weights (torch.Tensor): Topk weights tensor for this tp rank.
+        Returns:
+            ExpertForwardPayload: Expert forward payload.
         """
         # Calculate expected_m
         tp_num_tokens = dispatch_args["x"].size(0)
@@ -145,9 +458,11 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         )
 
         # Dispatch tokens
-        expert_x, expert_num_tokens, self._handle, _, _ = (
+        expert_x, expert_num_tokens, self._handle, event, hook = (
             self._buffer.low_latency_dispatch(**dispatch_args)
         )
+        hook() if self._return_recv_hook else event.current_stream_wait()
+
         if self._use_fp8_dispatch:
             assert isinstance(expert_x, tuple), "expert_x should be a tuple"
             expert_x, expert_x_scale = expert_x[0], expert_x[1]
@@ -220,24 +535,89 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
             "async_finish": self._async_finish,
             "return_recv_hook": self._return_recv_hook,
         }
+
         # Set quantization config for DeepEP low latency dispatch
         if self.quant_config.is_block_quantized and is_deep_gemm_e8m0_used():
             dispatch_args.update({"round_scale": True, "use_ue8m0": True})
         elif self.quant_config.is_per_act_token:
             dispatch_args.update({"pertoken_quant": True})
 
-        # Normal prepare
-        expert_payload = self._normal_prepare(dispatch_args, tp_topk_weights)
+        if self._enable_peo_level > 0 and self._enable_peo_level < 4:
+            # PEO prepare for level 1, 2, 3
+            expert_payload = self._peo_prepare(dispatch_args, tp_topk_weights)
+        else:
+            # Normal prepare
+            expert_payload = self._normal_prepare(dispatch_args, tp_topk_weights)
 
         return expert_payload
 
-    def _normal_finalize(self, combine_args: dict[str, Any]) -> torch.Tensor:
+    def _peo_finalize(
+        self, payload: CombineForwardPayload, combine_args: Dict[str, Any]
+    ) -> torch.Tensor:
+        """Combine expert outputs back to all original ranks with Per-Expert Overlap (PEO) level 1, 2, 3.
+        Args:
+            payload (CombineForwardPayload): Payload for combining expert outputs.
+            combine_args (Dict[str, Any]): Arguments for combining expert outputs.
+        Returns:
+            torch.Tensor: Combined output tensor.
+        """
+        # Check payload
+        assert (
+            payload.expert_executions is not None
+        ), "Expert executions are missing for PEO finalize()."
+        # Updata combine common arguments for all PEO levels
+        combine_args.update(
+            {
+                "async_finish": False,
+                "return_recv_hook": True,
+                "use_expert_overlap": True,
+                "num_rounds": self._num_peo_rounds,
+                "hook_use_comm_stream": False,
+            }
+        )
+        # Prepare _calc_comm_send_recv_sms partial function for all PEO levels
+        _calc_comm_send_recv_sms_partial = partial(
+            self._calc_comm_send_recv_sms,
+            num_comm_sms=self._num_comm_sms,
+            num_device_total_sms=self._num_device_total_sms,
+            num_peo_rounds=self._num_peo_rounds,
+            is_dispatch=False,
+            peo_level=self._enable_peo_level,
+        )
+        # Combine for PEO level 1, 2, 3, 4
+        for round_id in range(self._num_peo_rounds):
+            # Calculate number of send and recv sms
+            send_num_sms, recv_num_sms = _calc_comm_send_recv_sms_partial(
+                round_id=round_id
+            )
+            # Update combine arguments
+            combine_args.update(
+                {
+                    "round_id": round_id,
+                    "send_num_sms": send_num_sms,
+                    "recv_num_sms": recv_num_sms,
+                }
+            )
+            # Execute expert execution
+            payload.expert_executions[round_id]()
+            # Combine send
+            combined_x, _, hook = self._buffer.low_latency_combine(**combine_args)
+
+        # Execute combine recv hook
+        hook()
+
+        return combined_x
+
+    def _normal_finalize(self, combine_args: Dict[str, Any]) -> torch.Tensor:
         """Normal finalize for DeepEP Low-Latency.
         Args:
-            combine_args (dict[str, Any]): Arguments for combining expert outputs.
+            combine_args (Dict[str, Any]): Arguments for combining expert outputs.
+        Returns:
+            torch.Tensor: Combined output tensor.
         """
         # Normal finalize
-        combined_x, _, _ = self._buffer.low_latency_combine(**combine_args)
+        combined_x, event, hook = self._buffer.low_latency_combine(**combine_args)
+        hook() if self._return_recv_hook else event.current_stream_wait()
 
         return combined_x
 
@@ -248,6 +628,8 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         Args:
             combined_x (torch.Tensor): Combined output from all tp ranks.
             extra_finalize_args (Optional[Dict[str, Any]]): Extra finalize arguments.
+        Returns:
+            torch.Tensor: Post tp gathered combined output tensor.
         """
         # Check input data
         assert combined_x.dim() == 2
@@ -272,6 +654,7 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
                 tp_size * tp_token_size, -1
             )
             combined_x = gatherd_output[:original_num_tokens, :]
+
         return combined_x
 
     def finalize(
@@ -304,54 +687,18 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
             "async_finish": self._async_finish,
             "return_recv_hook": self._return_recv_hook,
         }
-        if self._use_accl_ep:
-            combine_args.update({"opt_level": self._opt_level})
 
-        # Normal finalize
-        combined_x = self._normal_finalize(combine_args)
+        if self._enable_peo_level > 0:
+            # PEO finalize for level 1, 2, 3, 4
+            combined_x = self._peo_finalize(payload, combine_args)
+        else:
+            # Normal finalize
+            combined_x = self._normal_finalize(combine_args)
 
         # Finalize post tp gather
         combined_x = self._finalize_post_tp_gather(combined_x, extra_finalize_args)
-        # reset handle
+
+        # Reset handle
         self._handle = None
 
         return combined_x
-
-    def _calc_low_latency_max_token_per_rank(
-        self,
-        max_generate_batch_size: int,
-        tp_size: int,
-        quant_config: FusedMoEQuantConfig,
-    ) -> int:
-        ll_num_max_token_per_rank = (max_generate_batch_size + tp_size - 1) // tp_size
-        # deepgemm masked with max_m < 64 get incorrect result, related: https://github.com/deepseek-ai/DeepGEMM/issues/268
-        if not quant_config.is_quantized or quant_config.is_block_quantized:
-            matched_tokens = [64, 128]
-        elif quant_config.is_per_act_token:
-            matched_tokens = [
-                16,
-                24,
-                32,
-                40,
-                48,
-                56,
-                64,
-                72,
-                80,
-                88,
-                96,
-                104,
-                112,
-                120,
-                128,
-            ]
-        else:
-            raise ValueError("Unsupported quantization config")
-        if ll_num_max_token_per_rank > 128:
-            ll_num_max_token_per_rank = ((ll_num_max_token_per_rank + 127) // 128) * 128
-            return ll_num_max_token_per_rank
-        for t in matched_tokens:
-            if ll_num_max_token_per_rank <= t:
-                ll_num_max_token_per_rank = t
-                return ll_num_max_token_per_rank
-        return 128

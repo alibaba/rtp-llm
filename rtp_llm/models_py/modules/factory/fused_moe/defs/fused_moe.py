@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union, final
+from typing import Any, Callable, Dict, List, Optional, Union, final
 
 import torch
 
@@ -36,9 +36,10 @@ class ExpertForwardPayload:
     expert_x: torch.Tensor
     expert_x_origin_dtype: Optional[torch.dtype] = None
     expert_x_scale: Optional[torch.Tensor] = None
-    expert_tokens_meta: Optional[ExpertTokensMetadata] = None
     expert_topk_ids: Optional[torch.Tensor] = None
     expert_topk_weights: Optional[torch.Tensor] = None
+    expert_tokens_meta: Optional[ExpertTokensMetadata] = None
+    dispatch_recv_events: Optional[List[torch.cuda.Event]] = None
 
 
 @dataclass
@@ -48,6 +49,7 @@ class CombineForwardPayload:
     """
 
     fused_expert_output: torch.Tensor
+    expert_executions: Optional[List[Callable]] = None
 
 
 class FusedMoeDataRouter(ABC):
@@ -215,6 +217,14 @@ class FusedMoe(torch.nn.Module):
                 )
             )
         else:
+            # Provide comm_stream for expert executors that need DeepEP comm stream (e.g. PEO overlap).
+            comm_stream = getattr(self.router, "comm_stream", None)
+            if comm_stream is not None:
+                if extra_expert_args is None:
+                    extra_expert_args = {}
+                extra_expert_args.update({"comm_stream": comm_stream})
+
+            # Execute expert executor.
             combine_payload = self.fused_experts.execute(
                 expert_payload,
                 activation=activation,

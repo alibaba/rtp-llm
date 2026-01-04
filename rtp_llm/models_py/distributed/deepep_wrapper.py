@@ -78,6 +78,7 @@ class DeepepWrapperConfig:
     deep_ep_num_sm: int
     use_deepep_low_latency: bool
     use_deepep_internode: bool
+    enable_peo_level: int
 
     # Generation parameters
     max_generate_batch_size: int
@@ -122,6 +123,7 @@ class DeepepWrapperConfig:
             deep_ep_num_sm=moe_config.deep_ep_num_sm,
             use_deepep_low_latency=moe_config.use_deepep_low_latency,
             use_deepep_internode=moe_config.use_deepep_internode,
+            enable_peo_level=moe_config.enable_peo_level,
             # Generation parameters
             max_generate_batch_size=config_adapter.max_generate_batch_size,
             # FFN disaggregate parameters
@@ -446,7 +448,8 @@ class DeepEPWrapper:
         }
 
         if self._use_accl_ep:
-            os.environ["ACCL_LOW_LATENCY_OPTIMIZE"] = "1"
+            os.environ.setdefault("ACCL_LOW_LATENCY_OPTIMIZE", "1")
+            os.environ.setdefault("ACCL_LOW_LATENCY_USE_COMPUTE_STREAM", "1")
             init_kwargs["allow_nvlink_for_low_latency_mode"] = True
             if allow_mnnvl():
                 init_kwargs["allow_mnnvl"] = True

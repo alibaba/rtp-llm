@@ -48,6 +48,7 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
         checker.check(resolver.is_ep_enabled(config))
         checker.check(not resolver.use_low_latency(config))
         checker.check(DeepEPWrapper.supported())
+        checker.check(not resolver.enable_peo(config))
 
     def __init__(
         self,
@@ -70,9 +71,7 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
         self.top_k = config.moe_topk_group
         deepep_config = DeepepWrapperConfig.from_config_adapter(self.config)
         self.deepep_buffer_wrapper = DeepEPWrapper.get_instance(deepep_config)
-        assert (
-            self.deepep_buffer_wrapper.mode == DeepEPMode.NORMAL
-        ), "DeepEP mode should be NORMAL"
+        assert self.deepep_buffer_wrapper.mode == DeepEPMode.NORMAL, "DeepEP mode should be NORMAL"
         self.async_mode = False
         self.expert_alignment = expert_alignment
         self.handle: Any = None
@@ -99,17 +98,12 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
         slice_size = min(token_num - slice_begin, tp_token_size)
 
         # Apply quantization
-        use_fp8 = (
-            self.quant_config.is_quantized
-            and self.quant_config.quant_dtype == torch.float8_e4m3fn
-        )
+        use_fp8 = self.quant_config.is_quantized and self.quant_config.quant_dtype == torch.float8_e4m3fn
         if use_fp8:
             a1_quant, a1_scale_quant = self._do_quant(a1)
             assert a1_scale_quant is not None
             tp_expert_a1 = torch.narrow(a1_quant, 0, slice_begin, slice_size)
-            tp_expert_a1_scale = torch.narrow(
-                a1_scale_quant, 0, slice_begin, slice_size
-            )
+            tp_expert_a1_scale = torch.narrow(a1_scale_quant, 0, slice_begin, slice_size)
             tp_expert_input = (tp_expert_a1, tp_expert_a1_scale)
         else:
             tp_expert_a1 = torch.narrow(a1, 0, slice_begin, slice_size)
@@ -127,9 +121,7 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
             num_tokens_per_expert,
             is_token_in_rank,
             _,
-        ) = self.deepep_buffer_wrapper.buffer.get_dispatch_layout(
-            tp_expert_ids, self.expert_num
-        )
+        ) = self.deepep_buffer_wrapper.buffer.get_dispatch_layout(tp_expert_ids, self.expert_num)
 
         # dispatch
         (
@@ -163,9 +155,7 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
             assert isinstance(output, torch.Tensor), "output should be a tensor"
             expert_x = output
 
-        expert_num_tokens = torch.tensor(
-            num_recv_tokens_per_expert_list, device=expert_x.device, dtype=torch.int32
-        )
+        expert_num_tokens = torch.tensor(num_recv_tokens_per_expert_list, device=expert_x.device, dtype=torch.int32)
 
         if recv_topk_idx.numel() != 0 and (not use_fp8):
             expert_topk_ids = torch.where(
@@ -198,9 +188,7 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
     ) -> torch.Tensor:
         assert self.handle is not None, "handler is None"
         assert payload.fused_expert_output is not None, "fused_expert_output is None"
-        out_token, _, _ = self.deepep_buffer_wrapper.buffer.combine(
-            payload.fused_expert_output, self.handle
-        )
+        out_token, _, _ = self.deepep_buffer_wrapper.buffer.combine(payload.fused_expert_output, self.handle)
         self.handle = None
 
         # gather
@@ -219,42 +207,28 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
                 )
                 out_token = torch.cat([out_token, padding_out_token], dim=0)
 
-            gatherd_output = all_gather(out_token, group=Group.TP).reshape(
-                tp_size * tp_token_size, -1
-            )
+            gatherd_output = all_gather(out_token, group=Group.TP).reshape(tp_size * tp_token_size, -1)
             gatherd_output = gatherd_output[:original_num_tokens, :]
             return gatherd_output
 
         # out_token should be a tensor with shape and dtype like a1
         return out_token
 
-    def _do_quant(
-        self, a1: torch.Tensor
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        if (
-            self.quant_config.quant_dtype == torch.float8_e4m3fn
-            and self.quant_config.is_per_act_token
-        ):
+    def _do_quant(self, a1: torch.Tensor) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        if self.quant_config.quant_dtype == torch.float8_e4m3fn and self.quant_config.is_per_act_token:
             return self._do_quant_fp8_per_token(a1)
-        elif (
-            self.quant_config.quant_dtype == torch.float8_e4m3fn
-            and self.quant_config.is_block_quantized
-        ):
+        elif self.quant_config.quant_dtype == torch.float8_e4m3fn and self.quant_config.is_block_quantized:
             return self._do_quant_fp8_per_block(a1)
         else:
             raise ValueError(f"Unsupported quant config: {self.quant_config}")
 
-    def _do_quant_fp8_per_token(
-        self, a1: torch.Tensor
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    def _do_quant_fp8_per_token(self, a1: torch.Tensor) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         a1, a1_scale = scaled_fp8_per_token_quant(a1, None)
         assert a1.shape[1] % 128 == 0
         a1_scale = a1_scale.repeat(1, a1.shape[1] // 128)
         return a1, a1_scale
 
-    def _do_quant_fp8_per_block(
-        self, a1: torch.Tensor
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    def _do_quant_fp8_per_block(self, a1: torch.Tensor) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         if is_deep_gemm_e8m0_used():
             return sgl_per_token_group_quant_fp8(
                 a1,
@@ -302,9 +276,7 @@ class DeepepNormalRouterFp8PerTensor(DeepepNormalRouterBase):
         super().check_conditions(checker, config)
         resolver = MoeConfigResolver()
         quant_method = resolver.get_quant_method(config)
-        checker.check(
-            quant_method in ["FP8_PER_TENSOR_COMPRESSED", "FP8_DYNAMIC_PER_TENSOR"]
-        )
+        checker.check(quant_method in ["FP8_PER_TENSOR_COMPRESSED", "FP8_DYNAMIC_PER_TENSOR"])
 
 
 class DeepepNormalRouterFp8PerBlock(DeepepNormalRouterBase):
