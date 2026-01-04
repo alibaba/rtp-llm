@@ -559,7 +559,9 @@ FfnLayerOutput ROCmDevice::moeFfn(const FfnLayerParams& params, const MoeGateSel
                 /*block_m*/ unit_size,
                 /*sorted_weights*/ std::nullopt,
                 /*quant_type*/ static_cast<int>(aiterQscheme),
-                /*activation*/ static_cast<int>(::ActivationType::Silu));
+                /*activation*/ static_cast<int>(::ActivationType::Silu), 
+                /*splitk*/ 1,
+                /*dst_type*/ std::nullopt);
         } else {
             moe_stage1_g1u1(
                 /*input*/ hidden_tensor,
@@ -601,7 +603,9 @@ FfnLayerOutput ROCmDevice::moeFfn(const FfnLayerParams& params, const MoeGateSel
             /*block_m*/ unit_size,
             /*sorted_weights*/ sorted_weights_tensor,
             /*quant_type*/ static_cast<int>(aiterQscheme),
-            /*activation*/ static_cast<int>(::ActivationType::Silu));
+            /*activation*/ static_cast<int>(::ActivationType::Silu),
+            /*splitk*/ 1,
+            /*dst_type*/ std::nullopt);
     }
     return {moe_out_final};
 }
