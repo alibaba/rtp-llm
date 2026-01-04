@@ -19,8 +19,10 @@ public:
         last_active_ranks_(ep_size, 0),
         active_ranks_cnt_(ep_size),
         last_active_ranks_cnt_(ep_size) {};
+
     void query_active_ranks();
     bool is_active_ranks_decrease();
+
     // todo: mask tp rank
     void update_deepep_mask_buffer();
 };

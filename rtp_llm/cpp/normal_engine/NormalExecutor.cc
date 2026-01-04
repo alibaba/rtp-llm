@@ -73,7 +73,9 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
     if (!params.py_model.is_none()) {
         RTP_LLM_LOG_INFO("init executor with python model");
         model_.reset(new PyWrappedModel(model_init_params, params.py_model));
-        elastic_ep_manager_ = make_shared<ElasticEPManager>(params.parallelism_config.ep_size);
+        if (params.moe_config.use_deepep_low_latency) {  // fault tolerance only support in pymodel low-latency mode now
+            elastic_ep_manager_ = make_shared<ElasticEPManager>(params.parallelism_config.ep_size);
+        }
     } else if (device_->initParams().hw_kernel_config.enable_native_cuda_graph) {
         RTP_LLM_LOG_INFO("init legacy c++ gpt model with native cuda graph");
         model_.reset(new NativeDeviceGraphModel(model_init_params));
