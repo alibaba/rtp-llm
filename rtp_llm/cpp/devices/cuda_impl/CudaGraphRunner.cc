@@ -469,6 +469,7 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
         capture_mem_hold_.py_model_inputs_.attention_inputs.padding_offset.slice(0, 0, seq_len_or_tokens);
 
     // Common slice operations for attention inputs
+    inputs.attention_inputs.is_prefill = capture_mem_hold_.py_model_inputs_.attention_inputs.is_prefill;
     inputs.attention_inputs.sequence_lengths =
         capture_mem_hold_.py_model_inputs_.attention_inputs.sequence_lengths.slice(0, 0, batch_size);
     inputs.attention_inputs.kv_cache_block_id_device =
