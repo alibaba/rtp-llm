@@ -1,6 +1,7 @@
 from __future__ import annotations
 import torch
 import typing
+
 __all__: list[str] = ['ActivationType', 'ArpcConfig', 'AttentionConfigs', 'BatchDecodeSchedulerConfig', 'CacheStoreConfig', 'ConcurrencyConfig', 'DataType', 'DeviceResourceConfig', 'EPLBConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'FfnDisAggregateConfig', 'GrpcConfig', 'HWKernelConfig', 'HybridAttentionConfig', 'HybridAttentionType', 'KVCacheConfig', 'KvCacheDataType', 'LayerNormType', 'LinearAttentionConfig', 'MMModelConfig', 'MiscellaneousConfig', 'MlaOpsType', 'ModelConfig', 'ModelSpecificConfig', 'MoeConfig', 'NormType', 'PDSepConfig', 'ParallelismConfig', 'ProfilingDebugLoggingConfig', 'QuantAlgo', 'QuantMethod', 'RoleSpecialTokens', 'RoleType', 'RopeConfig', 'RopeStyle', 'RuntimeConfig', 'SamplerConfig', 'SpecialTokens', 'SpeculativeExecutionConfig', 'SpeculativeType', 'TaskType', 'VitConfig', 'VitSeparation', 'get_block_cache_keys']
 class ActivationType:
     """
@@ -101,6 +102,7 @@ class BatchDecodeSchedulerConfig:
     batch_decode_scheduler_batch_size: int
     batch_decode_scheduler_warmup_type: int
     def __getstate__(self) -> tuple:
+
         ...
     def __init__(self) -> None:
         ...
@@ -464,6 +466,25 @@ class GrpcConfig:
     def get_server_config(self) -> dict[str, int]:
         ...
     def to_string(self) -> str:
+        ...
+class GrpcConfig:
+    @typing.overload
+    def __init__(self) -> None:
+        ...
+    @typing.overload
+    def __init__(self, json_str: str) -> None:
+        ...
+    def from_json(self, arg0: str) -> None:
+        """
+        Initialize from JSON string
+        """
+    def get_client_config(self) -> dict[str, int]:
+        ...
+    def get_server_config(self) -> dict[str, int]:
+        ...
+    def to_string(self) -> str:
+        ...
+    def update_from_env(self) -> None:
         ...
 class HWKernelConfig:
     arm_gemm_use_kai: bool

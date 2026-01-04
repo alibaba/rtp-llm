@@ -289,6 +289,8 @@ def setup_parallelism_config(
     parallelism_config.ep_rank = parallel_info.ep_rank
     parallelism_config.dp_size = parallel_info.dp_size
     parallelism_config.dp_rank = parallel_info.dp_rank
+    parallelism_config.cp_size = parallel_info.cp_size
+    parallelism_config.cp_rank = parallel_info.cp_rank
     parallelism_config.ffn_tp_rank = parallel_info.ffn_tp_rank
     parallelism_config.ffn_tp_size = parallel_info.ffn_tp_size
     parallelism_config.enable_sp = parallel_info.ffn_sp_size > 1
@@ -303,6 +305,7 @@ def setup_parallelism_config(
     # Set port and IP related fields
     parallelism_config.nccl_ip = g_master_info.ip
     parallelism_config.tp_nccl_port = g_master_info.tp_nccl_port
+    parallelism_config.cp_nccl_port = g_master_info.cp_nccl_port
     parallelism_config.dp_tp_nccl_port = g_master_info.dp_tp_nccl_port
     parallelism_config.ffn_tp_nccl_port = g_master_info.ffn_tp_nccl_port
     parallelism_config.model_rpc_port = g_worker_info.rpc_server_port
@@ -358,7 +361,11 @@ def update_worker_addrs(
     for member in world_info.members:
         if (
             int(
-                (member.world_rank / parallelism_config.tp_size)
+                (
+                    member.world_rank
+                    / parallelism_config.tp_size
+                    / parallelism_config.cp_size
+                )
                 % parallelism_config.dp_size
             )
             == parallelism_config.dp_rank

@@ -80,8 +80,8 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
             torch::zeros({batch_size + 1}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
         py_attn_inputs.cu_kv_seqlens =
             torch::zeros({batch_size + 1}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
-        torch::Tensor decode_cu_seqlens          = torch::arange(
-                0, py_attn_inputs.sequence_lengths.size(0) + 1, 1, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
+        torch::Tensor decode_cu_seqlens = torch::arange(
+            0, py_attn_inputs.sequence_lengths.size(0) + 1, 1, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
         py_attn_inputs.decode_cu_seqlens_host = decode_cu_seqlens;
         py_attn_inputs.decode_cu_seqlens_d    = decode_cu_seqlens.cuda();
     }
@@ -91,6 +91,91 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     py_attn_inputs.sequence_lengths_plus_1_d = (py_attn_inputs.sequence_lengths + 1).cuda();
     py_attn_inputs.input_lengths_d           = py_attn_inputs.input_lengths.cuda();
     return py_attn_inputs;
+}
+
+void PyWrappedModel::handleContextParallelInputs(GptModelInputs& model_input, PyContextParallelParams& cp_params) {
+    int cp_rank       = device_->getDeviceProperties().cp_rank;
+    int cp_size       = device_->getDeviceProperties().cp_size;
+    int cp_align_size = cp_size * 2;
+
+    auto& total_input_tokens = model_input.combo_tokens;
+    auto& input_lengths      = model_input.input_lengths;     // prefill + decode
+    auto& sequence_lengths   = model_input.sequence_lengths;  // decode
+    // auto& prefix_lengths = model_input.prefix_lengths; TODO
+
+    size_t num_decode_stream  = sequence_lengths->shape()[0];
+    size_t num_prefill_stream = input_lengths->shape()[0] - num_decode_stream;
+
+    auto prefill_cp_padding_lengths = CACHED_HOST_BUF(TYPE_INT32, {num_prefill_stream});
+    auto prefill_cp_chunk_lengths   = CACHED_HOST_BUF(TYPE_INT32, {num_prefill_stream});
+    int* padding_lengths            = (int*)prefill_cp_padding_lengths->data();
+    int* chunk_lengths              = (int*)prefill_cp_chunk_lengths->data();
+
+    size_t prefill_cp_split_tokens_size = 0;
+    for (int p = 0; p < num_prefill_stream; ++p) {
+        int num_prefill_token = input_lengths->data<int>()[num_decode_stream + p];
+
+        int padded_seq_len = ((num_prefill_token + cp_align_size - 1) / cp_align_size) * cp_align_size;
+        int padding_size   = padded_seq_len - num_prefill_token;
+        int chunk_size     = padded_seq_len / cp_size;
+
+        prefill_cp_split_tokens_size += chunk_size;
+        padding_lengths[p] = padding_size;
+        chunk_lengths[p]   = chunk_size;
+    }
+
+    auto cp_split_input_tokens   = CACHED_HOST_BUF(TYPE_INT32, {num_decode_stream + prefill_cp_split_tokens_size});
+    auto prefill_shuffle_indices = CACHED_HOST_BUF(TYPE_INT32, {prefill_cp_split_tokens_size});
+
+    int* input_token_ptr             = (int*)cp_split_input_tokens->data();
+    int* input_length_ptr            = (int*)input_lengths->data();
+    int* prefill_shuffle_indices_ptr = (int*)prefill_shuffle_indices->data();
+
+    int input_token_idx       = 0;
+    int total_input_token_idx = 0;
+
+    // directly memcpy decode stream input tokens
+    if (num_decode_stream > 0) {
+        std::memcpy(input_token_ptr,
+                    total_input_tokens->dataWithOffset<int>(total_input_token_idx),
+                    num_decode_stream * sizeof(int));
+        input_token_idx += num_decode_stream;
+        total_input_token_idx += num_decode_stream;
+    }
+
+    // handle prefill stream
+    for (int p = 0; p < num_prefill_stream; ++p) {
+        int input_chunk_length   = prefill_cp_chunk_lengths->data<int>()[p];
+        int input_padding_length = prefill_cp_padding_lengths->data<int>()[p];
+        int input_length         = input_lengths->data<int>()[num_decode_stream + p];
+        // Copy input tokens for this prefill stream
+        int*             src_tokens = total_input_tokens->dataWithOffset<int>(total_input_token_idx);
+        std::vector<int> total_input_token_vec(src_tokens, src_tokens + input_length);
+        std::vector<int> chunk_input_token(input_chunk_length, 0);
+        std::vector<int> shuffle_index(input_chunk_length, -1);
+        bool             success = contextParallelLoadBalanceSplit(total_input_token_vec,
+                                                       chunk_input_token,
+                                                       shuffle_index,
+                                                       cp_rank,
+                                                       cp_size,
+                                                       input_chunk_length,
+                                                       input_padding_length);
+        RTP_LLM_CHECK_WITH_INFO(success, "contextParallelLoadBalanceSplit failed for prefill stream %d", p);
+
+        input_length_ptr[p + num_decode_stream] = input_chunk_length;
+        std::memcpy(input_token_ptr + input_token_idx, chunk_input_token.data(), input_chunk_length * sizeof(int));
+        std::memcpy(
+            prefill_shuffle_indices_ptr + input_token_idx, shuffle_index.data(), input_chunk_length * sizeof(int));
+        input_token_idx += input_chunk_length;
+        total_input_token_idx += input_length;
+    }
+    model_input.combo_tokens             = std::move(cp_split_input_tokens);
+    auto cp_padding_lengths              = Buffer2torchTensor(prefill_cp_padding_lengths);
+    auto cp_chunk_lengths                = Buffer2torchTensor(prefill_cp_chunk_lengths);
+    auto shuffle_indices                 = Buffer2torchTensor(prefill_shuffle_indices);
+    cp_params.prefill_cp_padding_lengths = cp_padding_lengths.cuda();
+    cp_params.prefill_cp_chunk_lengths   = cp_chunk_lengths.cuda();
+    cp_params.prefill_shuffle_indices    = shuffle_indices.cuda();
 }
 
 // Helper function to setup KV cache for attention inputs
@@ -264,6 +349,12 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         if (int(device_props_.enable_layer_micro_batch)) {
             return forwardMicroBatched(inputs);
         }
+        // handle context parallel inputs
+        PyContextParallelParams cp_params;
+        if (device_->getDeviceProperties().cp_size > 1) {
+            handleContextParallelInputs(const_cast<GptModelInputs&>(inputs), cp_params);
+        }
+
         torch::Tensor token_ids;
         if (inputs.combo_tokens->where() == MEMORY_GPU) {
             token_ids = Buffer2torchTensor(inputs.combo_tokens, false).clone();
@@ -274,12 +365,15 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         torch::Tensor input_hiddens =
             inputs.last_hidden_states ? Buffer2torchTensor(inputs.last_hidden_states, false) : torch::empty({0});
 
-        auto      attention_inputs      = buildPyAttentionInputs(inputs);
+        auto attention_inputs                  = buildPyAttentionInputs(inputs);
+        attention_inputs.context_parallel_info = cp_params;
+
         auto      bert_embedding_inputs = buildBertEmbeddingInputs(inputs);
         BufferPtr kv_cache_block_id_device;
         if (!inputs.warmup && inputs.pd_separation) {
             attention_inputs.cache_store_inputs = prepareWriteCacheParams(inputs);
         }
+
         setupKVCacheForAttentionInputs(attention_inputs, inputs, kv_cache_block_id_device);
 
         calculatePaddingOffset(attention_inputs);

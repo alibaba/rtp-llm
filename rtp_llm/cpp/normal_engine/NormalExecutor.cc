@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/models/GptModel.h"
@@ -7,6 +8,8 @@
 #include "rtp_llm/cpp/models/NativeDeviceGraphModel.h"
 #include "rtp_llm/cpp/models/Sampler.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
+
+#include <iostream>
 
 using namespace std;
 
@@ -32,9 +35,10 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                   params,
         int  first_moe_layer = params.model_config_.moe_layer_index.front();
         auto moe_weight_type = params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->type();
         bool is_gated_activation = params.model_config_.isGatedActivation();
-        auto moe_inter_size = is_gated_activation ?
-            params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->shape()[1] / 2 :
-            params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->shape()[1];
+        auto moe_inter_size =
+            is_gated_activation ?
+                params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->shape()[1] / 2 :
+                params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel->shape()[1];
 
         expert_balancer_ = make_shared<ExpertBalancer>(params.model_config_.expert_num,
                                                        params.eplb_config.phy_exp_num(params.model_config_.expert_num),
@@ -144,7 +148,9 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         expert_balancer_->stepForward(*model_, executor_collector);
         executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
-    if (device_->getDeviceProperties().tp_rank > 0 || warm_up_ || streams.size() == 0) {
+
+    if (device_->getDeviceProperties().tp_rank > 0 || device_->getDeviceProperties().cp_rank > 0 || warm_up_
+        || streams.size() == 0) {
         device_->syncAndCheck();
         model_->releaseBuffers();
         return absl::OkStatus();
@@ -173,7 +179,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
 void NormalExecutor::reportMetrics(const StreamGroups&             stream_groups,
                                    RtpLLMExecutorMetricsCollector& executor_collector,
                                    RtpLLMTokenPSMetricsCollector&  tps_collector) {
-    if (device_->getDeviceProperties().tp_rank > 0) {
+    if (device_->getDeviceProperties().tp_rank > 0 || device_->getDeviceProperties().cp_rank > 0) {
         return;
     }
     if (metrics_reporter_) {

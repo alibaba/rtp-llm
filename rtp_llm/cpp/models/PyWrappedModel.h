@@ -9,6 +9,7 @@
 #include <pybind11/embed.h>
 #include "rtp_llm/models_py/bindings/OpDefsUtils.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
+#include "rtp_llm/cpp/models/context_parallel/ContextParallelUtils.h"
 namespace py = pybind11;
 
 namespace rtp_llm {
@@ -24,6 +25,7 @@ public:
 
 private:
     std::optional<PyCacheStoreInputs> prepareWriteCacheParams(const GptModelInputs& inputs);
+    void handleContextParallelInputs(GptModelInputs& model_input, PyContextParallelParams& cp_params);
 
 private:
     // Helper functions to reduce code duplication
