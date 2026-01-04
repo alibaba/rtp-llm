@@ -110,12 +110,12 @@ void CudaGraphRunner::prepareInputs(PyModelInputs& inputs) {
         copySmallerIntoLarger(inputs.attention_inputs.kv_cache_block_id_device,
                               py_model_inputs_.attention_inputs.kv_cache_block_id_device);
 
-        optimizedCopy(inputs.attention_inputs.sequence_lengths_plus_1_d,
-                      py_model_inputs_.attention_inputs.sequence_lengths_plus_1_d,
-                      state_.current_batch_size * sizeof(int));
-        optimizedCopy(inputs.attention_inputs.decode_cu_seqlens_d,
-                      py_model_inputs_.attention_inputs.decode_cu_seqlens_d,
-                      (state_.current_batch_size + 1) * sizeof(int));
+        optimizedCopyAsync(inputs.attention_inputs.sequence_lengths_plus_1_d,
+                           py_model_inputs_.attention_inputs.sequence_lengths_plus_1_d,
+                           state_.current_batch_size * sizeof(int));
+        optimizedCopyAsync(inputs.attention_inputs.decode_cu_seqlens_d,
+                           py_model_inputs_.attention_inputs.decode_cu_seqlens_d,
+                           (state_.current_batch_size + 1) * sizeof(int));
         if (graph_instances_[state_.current_real_graph_bs].mem_hold_.params_ptr) {
             graph_instances_[state_.current_real_graph_bs].mem_hold_.params_ptr->fillParams(
                 inputs.attention_inputs.sequence_lengths,
@@ -382,7 +382,7 @@ void CudaGraphRunner::initCapture() {
         initCaptureBertEmbeddingInputs(inputs, max_bs_, max_num_token_);
 
         torch::Tensor output;
-        capture_mem_hold_ = CaptureMemoryHold(output, inputs, kv_cache_block_offset_, is_prefill_cuda_graph_mode_);
+        capture_mem_hold_ = CaptureMemoryHold(output, inputs, is_prefill_cuda_graph_mode_);
         initKernelInternalMemory();
         // do warm up here to get stable environment, otherwise it will cause kernel error.
         RTP_LLM_LOG_INFO("initCapture forward for output datatype start");
@@ -493,10 +493,8 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
 }
 
 CaptureMemoryHold CudaGraphRunner::createCaptureMemoryHold(PyModelInputs& inputs, int tokens_count) {
-    return CaptureMemoryHold(capture_mem_hold_.decoder_layer_hidden_states_.slice(0, 0, tokens_count),
-                             inputs,
-                             kv_cache_block_offset_,
-                             is_prefill_cuda_graph_mode_);
+    return CaptureMemoryHold(
+        capture_mem_hold_.decoder_layer_hidden_states_.slice(0, 0, tokens_count), inputs, is_prefill_cuda_graph_mode_);
 }
 
 }  // namespace rtp_llm
