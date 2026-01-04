@@ -142,7 +142,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         RTP_LLM_LOG_DEBUG("model forward done");
     }
     if (elastic_ep_manager_) {
-        elastic_ep_manager_->query_deepep_mask_buffer();
+        elastic_ep_manager_->is_active_ranks_decrease();
     }
     if (expert_balancer_) {
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();

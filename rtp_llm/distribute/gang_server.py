@@ -341,11 +341,11 @@ class GangServer:
             self.broadcast_failure(failed_member)
             self._delay_exit_loops += 1
 
-        if self._delay_exit_loops > self._max_delay_times:
-            logging.info(
-                f"member [world rank {failed_member.world_rank}] heartbeat exception, do abort!"
-            )
-            os._exit(-1)
+        # if self._delay_exit_loops > self._max_delay_times:
+        #    logging.info(
+        #        f"member [world rank {failed_member.world_rank}] heartbeat exception, do abort!"
+        #    )
+        #    os._exit(-1)
 
     # use base model type, python3
     def broadcast_failure(self, failed_member: WorkerInfo):

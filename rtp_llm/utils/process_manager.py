@@ -101,7 +101,7 @@ class ProcessManager:
                 if self.first_dead_time == 0:
                     self.first_dead_time = time.time()
                 logging.error("Some processes died unexpectedly, terminating all...")
-                self._terminate_processes()
+                # self._terminate_processes()
 
             # Force kill after timeout (only if shutdown_timeout != -1)
             if (
@@ -109,7 +109,7 @@ class ProcessManager:
                 and self.shutdown_timeout != -1
                 and (time.time() - self.first_dead_time) > self.shutdown_timeout
             ):
-                self._force_kill_processes()
+                # self._force_kill_processes()
                 break
 
             time.sleep(self.monitor_interval)
