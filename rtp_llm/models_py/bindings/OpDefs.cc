@@ -68,8 +68,8 @@ void registerPyOpDefs(pybind11::module& m) {
 
     pybind11::class_<PyContextParallelParams>(m, "PyContextParallelParams")
         .def(pybind11::init<>())
-        .def_readwrite("prefill_cp_padding_lengths", &PyContextParallelParams::prefill_cp_padding_lengths)
-        .def_readwrite("prefill_cp_chunk_lengths", &PyContextParallelParams::prefill_cp_chunk_lengths)
+        .def_readwrite("prefill_cp_padding_lengths_cpu", &PyContextParallelParams::prefill_cp_padding_lengths_cpu)
+        .def_readwrite("prefill_cp_chunk_lengths_cpu", &PyContextParallelParams::prefill_cp_chunk_lengths_cpu)
         .def_readwrite("prefill_shuffle_indices", &PyContextParallelParams::prefill_shuffle_indices);
 
     pybind11::class_<PyAttentionInputs>(m, "PyAttentionInputs")

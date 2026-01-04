@@ -40,6 +40,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("EPLB", EplbMode::EPLB)
         .value("ALL", EplbMode::ALL);
 
+    py::enum_<CPRotateMethod>(m, "CPRotateMethod")
+        .value("ALL_GATHER", CPRotateMethod::ALL_GATHER)
+        .value("ALL_GATHER_WITH_OVERLAP", CPRotateMethod::ALL_GATHER_WITH_OVERLAP)
+        .value("ALLTOALL", CPRotateMethod::ALLTOALL)
+        .export_values();
+
     py::enum_<FMHAType>(m, "FMHAType")
         .value("FLASH_INFER", FMHAType::FLASH_INFER)
         .value("NONE", FMHAType::NONE)
@@ -896,6 +902,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("http_port", &ParallelismConfig::http_port)
         .def_readwrite("model_rpc_port", &ParallelismConfig::model_rpc_port)
         .def_readwrite("embedding_rpc_server_port", &ParallelismConfig::embedding_rpc_server_port)
+        .def_readwrite("cp_rotate_method", &ParallelismConfig::cp_rotate_method)
         .def_readwrite("ffn_disaggregate_config", &ParallelismConfig::ffn_disaggregate_config)
         .def("to_string", &ParallelismConfig::to_string)
         .def(py::pickle(
@@ -926,10 +933,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.http_port,
                                       self.model_rpc_port,
                                       self.embedding_rpc_server_port,
+                                      self.cp_rotate_method,
                                       self.ffn_disaggregate_config);
             },
             [](py::tuple t) {
-                if (t.size() != 27)
+                if (t.size() != 28)
                     throw std::runtime_error(
                         "ParallelismConfig pickle deserialization failed: expected 27 fields but got "
                         + std::to_string(t.size()) + " fields.");
@@ -961,7 +969,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.http_port                 = t[23].cast<int64_t>();
                     c.model_rpc_port            = t[24].cast<int64_t>();
                     c.embedding_rpc_server_port = t[25].cast<int64_t>();
-                    c.ffn_disaggregate_config   = t[26].cast<FfnDisAggregateConfig>();
+                    c.cp_rotate_method          = t[26].cast<CPRotateMethod>();
+                    c.ffn_disaggregate_config   = t[27].cast<FfnDisAggregateConfig>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("ParallelismConfig unpickle error: ") + e.what());
                 }

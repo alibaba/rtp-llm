@@ -121,6 +121,7 @@ void DeviceFactory::initDevices(const ParallelismConfig&           parallelism_c
     device_params.parallelism_config.world_rank       = parallelism_config.world_rank;
     device_params.parallelism_config.local_world_size = parallelism_config.local_world_size;
     device_params.parallelism_config.ffn_sp_size      = parallelism_config.ffn_sp_size;
+    device_params.parallelism_config.cp_rotate_method = parallelism_config.cp_rotate_method;
     device_params.profile_debug_logging_config        = profiling_debug_logging_config;
     device_params.hw_kernel_config                    = hw_kernel_config;
     device_params.concurrency_config                  = concurrency_config;

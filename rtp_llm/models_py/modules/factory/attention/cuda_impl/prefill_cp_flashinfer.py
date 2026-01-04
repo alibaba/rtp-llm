@@ -5,11 +5,17 @@ from typing import Any, Dict, Optional
 
 import torch
 
-from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, recv, send
+from rtp_llm.models_py.distributed.collective_torch import (
+    Group,
+    all_gather,
+    barrier,
+    recv,
+    send,
+)
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
     FMHAPrefillImplBase,
 )
-from rtp_llm.ops import AttentionConfigs, FMHAType, ParallelismConfig
+from rtp_llm.ops import AttentionConfigs, CPRotateMethod, FMHAType, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCachePrefillOp,
     KVCache,
@@ -18,56 +24,11 @@ from rtp_llm.ops.compute_ops import (
     PyContextParallelParams,
 )
 
-
-def merge_state_torch(
-    prefix_output: torch.Tensor,  # [NUM_TOKENS, NUM_HEADS, HEAD_SIZE]
-    prefix_lse: torch.Tensor,  # [NUM_TOKENS, NUM_HEADS]
-    suffix_output: torch.Tensor,  # [NUM_TOKENS, NUM_HEADS, HEAD_SIZE]
-    suffix_lse: torch.Tensor,  # [NUM_TOKENS, NUM_HEADS]
-    output: Optional[torch.Tensor] = None,  # [NUM_TOKENS, NUM_HEADS, HEAD_SIZE]
-    output_lse: Optional[torch.Tensor] = None,  # [NUM_TOKENS, NUM_HEADS]
-):
-    # Avoid creating new tensors if they are already provided
-    if output is None:
-        output = torch.empty_like(prefix_output)
-    if output_lse is None:
-        output_lse = torch.empty_like(prefix_lse)
-    p_lse = prefix_lse
-    s_lse = suffix_lse
-    # inf -> -inf
-    p_lse[p_lse == torch.inf] = -torch.inf
-    s_lse[s_lse == torch.inf] = -torch.inf
-    # max_lse [NUM_HEADS, NUM_TOKENS]
-    max_lse = torch.maximum(p_lse, s_lse)
-    p_lse = p_lse - max_lse
-    s_lse = s_lse - max_lse
-    p_lse_exp = torch.exp(p_lse)
-    s_lse_exp = torch.exp(s_lse)
-    out_se = p_lse_exp + s_lse_exp
-    if output_lse is not None:
-        output_lse = torch.log(out_se) + max_lse
-    p_scale = p_lse_exp / out_se
-    s_scale = s_lse_exp / out_se
-    p_scale = p_scale.unsqueeze(2)  # [NUM_TOKENS, NUM_HEADS, 1]
-    s_scale = s_scale.unsqueeze(2)  # [NUM_TOKENS, NUM_HEADS, 1]
-    output = prefix_output * p_scale + suffix_output * s_scale
-    return output.to(torch.bfloat16), output_lse
-
-
 logger = logging.getLogger(__name__)
 
 # Global workspace buffer shared across all wrappers
 _g_workspace_buffer = None
 _g_workspace_size = 512 * 1024 * 1024  # 512MB
-
-
-class CPRotateMethod(Enum):
-    """Context Parallel rotation method for attention computation."""
-
-    ALL_GATHER = auto()  # Use all_gather with zig-zag load balancing
-    ALL_GATHER_WITH_OVERLAP = auto()  # Use all_gather with overlap
-    ALLTOALL = auto()  # Use alltoall communication with zig-zag load balancing
-    # reference: https://github.com/pytorch/pytorch/blob/main/torch/distributed/tensor/experimental/_context_parallel/_attention.py
 
 
 def get_workspace_buffer(device: torch.device) -> torch.Tensor:
@@ -88,7 +49,99 @@ from flashinfer.cascade import merge_state, merge_state_in_place
 
 class ContextParallelFlashInferRaggedPrefillOp:
     """
-    FlashInfer Ragged KV Cache Prefill Attention Operator for standard MHA.
+    FlashInfer Ragged KV Cache Prefill Attention Operator for Context Parallel MHA.
+
+    This operator supports three context parallel rotation methods for distributed attention computation
+    with zig-zag load balancing to optimize causal attention patterns.
+
+    ## Context Parallel Rotation Methods
+
+    ### 1. ALL_GATHER Method
+
+    Zig-zag Attention Partitioning for Causal Attention:
+    For a sequence of length N distributed across cp_size ranks:
+
+    1. Tokens are split using zig-zag shuffle: alternating chunks from start/end
+       Example (cp_size=4, N=16, chunk=2): [0,1, 14,15, 2,3, 12,13, 4,5, 10,11, 6,7, 8,9]
+                                             └─┘  └──┘  └─┘  └──┘  └─┘  └──┘  └─┘  └─┘
+                                       rank0(r0)   r0  r1   r1    r2   r2    r3   r3
+
+    2. Each rank holds a subset of Q and KV:
+       - Rank i has Q_i (queries for its token chunk)
+       - Rank i has KV_i (keys/values for its token chunk)
+
+    3. Causal Attention Matrix (Q attends to KV where token_j <= token_i):
+
+                  KV0  KV1  KV2  KV3  KV4  KV5  KV6  KV7  KV8  KV9  KV10 KV11 KV12 KV13 KV14 KV15
+       Q0   (r0) [ C   ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗   ]
+       Q1   (r0) [ C   C    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗   ] 2
+       Q2   (r1) [ C   C    C    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗   ]
+       Q3   (r1) [ C   C    C    C    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗   ] 4
+       Q4   (r2) [ C   C    C    C    C    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗   ]
+       Q5   (r2) [ C   C    C    C    C    C    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗   ] 6
+       Q6   (r3) [ C   C    C    C    C    C    C    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗   ]
+       Q7   (r3) [ C   C    C    C    C    C    C    C    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗   ] 8
+       Q8   (r3) [ C   C    C    C    C    C    C    C    C    ✗    ✗    ✗    ✗    ✗    ✗    ✗   ]
+       Q9   (r3) [ C   C    C    C    C    C    C    C    C    C    ✗    ✗    ✗    ✗    ✗    ✗   ] 10
+       Q10  (r2) [ C   C    C    C    C    C    C    C    C    C    C    ✗    ✗    ✗    ✗    ✗   ]
+       Q11  (r2) [ C   C    C    C    C    C    C    C    C    C    C    C    ✗    ✗    ✗    ✗   ] 12
+       Q12  (r1) [ C   C    C    C    C    C    C    C    C    C    C    C    C    ✗    ✗    ✗   ]
+       Q13  (r1) [ C   C    C    C    C    C    C    C    C    C    C    C    C    C    ✗    ✗   ] 14
+       Q14  (r0) [ C   C    C    C    C    C    C    C    C    C    C    C    C    C    C    ✗   ]
+       Q15  (r0) [ C   C    C    C    C    C    C    C    C    C    C    C    C    C    C    C   ] 16
+
+    4. All gather without overlap:
+       - rank_i_part_0: q_len=chunk_size, kv_len=chunk_size*(rank_id + 1)
+       - rank_i_part_1: q_len=chunk_size, kv_len=chunk_size*(2 * cp_size - rank_id)
+
+    ### 2. ALLTOALL Method (Ring Attention)
+
+    Ring attention with zig-zag load balancing: KV chunks rotate across ranks while Q stays local.
+    Each rank computes attention between its local Q and the received KV chunks.
+
+    Example (cp_size=4, N=16, chunk_size=4):
+
+                  rank0                rank1                     rank2                 rank3
+    --------------------------------------------------------------------------------------------------
+    iter0: Calculate local causal attention
+                     kv0 kv1 kv14 kv15      kv2 kv3 kv12 kv13       kv4 kv5 kv10 kv11      kv6 kv7 kv8 kv9
+               [q0    Y   X   X    X ][q2    Y   X   X    X ][q4    Y   X   X    X ][q6    Y   X   X    X ]
+               [q1    Y   Y   X    X ][q3    Y   Y   X    X ][q5    Y   Y   X    X ][q7    Y   Y   X    X ]
+               [q14   Y   Y   Y    X ][q12   Y   Y   Y    X ][q10   Y   Y   Y    X ][q8    Y   Y   Y    X ]
+               [q15   Y   Y   Y    Y ][q13   Y   Y   Y    Y ][q11   Y   Y   Y    Y ][q9    Y   Y   Y    Y ]
+    ---------------------------------------------------------------------------------------------------
+    iter1: KV rotates right (rank0->rank1, rank1->rank2, rank2->rank3, rank3->rank0)
+                     kv6 kv7 kv8 kv9        kv0 kv1 kv14 kv15      kv2 kv3 kv12 kv13     kv4 kv5 kv10 kv11
+               [q0    X   X   X    X ][q2    Y   Y   X    X ][q4    Y   Y   X    X ][q6    Y   Y   X    X ]
+               [q1    X   X   X    X ][q3    Y   Y   X    X ][q5    Y   Y   X    X ][q7    Y   Y   X    X ]
+               [q14   Y   Y   Y    Y ][q12   Y   Y   X    X ][q10   Y   Y   X    X ][q8    Y   Y   X    X ]
+               [q15   Y   Y   Y    Y ][q13   Y   Y   X    X ][q11   Y   Y   X    X ][q9    Y   Y   X    X ]
+    ---------------------------------------------------------------------------------------------------
+    iter2: KV rotates right again
+                     kv4 kv5 kv10 kv11       kv6 kv7 kv8 kv9        kv0 kv1 kv14 kv15     kv2 kv3 kv12 kv13
+               [q0    X   X   X    X ][q2    X   X   X    X ][q4    Y   Y   X    X ][q6    Y   Y   X    X ]
+               [q1    X   X   X    X ][q3    X   X   X    X ][q5    Y   Y   X    X ][q7    Y   Y   X    X ]
+               [q14   Y   Y   Y    Y ][q12   Y   Y   Y    Y ][q10   Y   Y   X    X ][q8    Y   Y   X    X ]
+               [q15   Y   Y   Y    Y ][q13   Y   Y   Y    Y ][q11   Y   Y   X    X ][q9    Y   Y   X    X ]
+    ---------------------------------------------------------------------------------------------------
+    iter3: KV rotates right again (final iteration)
+                     kv2 kv3 kv12 kv13      kv4 kv5 kv10 kv11       kv6 kv7 kv8 kv9      kv0 kv1 kv14 kv15
+               [q0    X   X   X    X ][q2    X   X   X    X ][q4    X   X   X    X ][q6    Y   Y   X    X ]
+               [q1    X   X   X    X ][q3    X   X   X    X ][q5    X   X   X    X ][q7    Y   Y   X    X ]
+               [q14   Y   Y   Y    Y ][q12   Y   Y   Y    Y ][q10   Y   Y   Y    Y ][q8    Y   Y   X    X ]
+               [q15   Y   Y   Y    Y ][q13   Y   Y   Y    Y ][q11   Y   Y   Y    Y ][q9    Y   Y   X    X ]
+    ---------------------------------------------------------------------------------------------------
+
+    All chunk attention has 3 patterns:
+    1. Local rank (i.e. iter=0): all ranks compute causal attention
+    2. iter_i <= cp_rank: compute non-causal attention with half of the chunk kv
+    3. iter_i > cp_rank: compute non-causal attention with half of the chunk q
+
+    ### 3. ALL_GATHER_WITH_OVERLAP Method
+
+    Similar to ALL_GATHER but overlaps communication with computation for better performance.
+
+    Reference: https://github.com/pytorch/pytorch/blob/main/torch/distributed/tensor/experimental/_context_parallel/_attention.py
     """
 
     def __init__(
@@ -121,7 +174,15 @@ class ContextParallelFlashInferRaggedPrefillOp:
 
         self.device = torch.cuda.current_device()
         self.workspace_buffer = get_workspace_buffer(self.device)
-        self.rotate_method = CPRotateMethod.ALLTOALL
+
+        # Set rotate method from parallelism_config or use default
+        if parallelism_config is not None and hasattr(
+            parallelism_config, "cp_rotate_method"
+        ):
+            self.rotate_method = parallelism_config.cp_rotate_method
+        else:
+            self.rotate_method = CPRotateMethod.ALLTOALL
+
         self.context_parallel_info: PyContextParallelParams = (
             attn_inputs.context_parallel_info
         )
@@ -136,112 +197,60 @@ class ContextParallelFlashInferRaggedPrefillOp:
 
         self.communication_stream = torch.cuda.Stream(device=self.device)
         self.comm_events = [torch.cuda.Event() for _ in range(self.cp_size)]
+        self.math_events = [torch.cuda.Event() for _ in range(self.cp_size)]
+
+        self.all_shuffle_indices = None
+        self.kv_restore_indices = None
+        self.q_part_0_indices = self.q_part_1_indices = None
+        self.kv_part_0_indices = self.kv_part_1_indices = None
+        self.half_q_indices = self.half_kv_indices = None
 
         # init flashinfer attention wrapper
-        if self.rotate_method == CPRotateMethod.ALL_GATHER:
-            self.prefill_wrappers["part0"] = BatchPrefillWithRaggedKVCacheWrapper(
-                self.workspace_buffer,
-                kv_layout=kv_layout,
-                backend=backend,
-            )
-            self.prefill_wrappers["part1"] = BatchPrefillWithRaggedKVCacheWrapper(
-                self.workspace_buffer,
-                kv_layout=kv_layout,
-                backend=backend,
-            )
-        elif self.rotate_method == CPRotateMethod.ALLTOALL:
-            self.prefill_wrappers["causal"] = BatchPrefillWithRaggedKVCacheWrapper(
-                self.workspace_buffer,
-                kv_layout=kv_layout,
-                backend=backend,
-            )
-            self.prefill_wrappers["non_causal_pattern_0"] = (
-                BatchPrefillWithRaggedKVCacheWrapper(
-                    self.workspace_buffer,
-                    kv_layout=kv_layout,
-                    backend=backend,
-                )
-            )
-            self.prefill_wrappers["non_causal_pattern_1"] = (
-                BatchPrefillWithRaggedKVCacheWrapper(
-                    self.workspace_buffer,
-                    kv_layout=kv_layout,
-                    backend=backend,
-                )
-            )
-        elif self.rotate_method == CPRotateMethod.ALL_GATHER_WITH_OVERLAP:
-            self.prefill_wrappers["causal"] = BatchPrefillWithRaggedKVCacheWrapper(
-                self.workspace_buffer,
-                kv_layout=kv_layout,
-                backend=backend,
-            )
-            self.prefill_wrappers["non_causal_part_0"] = (
-                BatchPrefillWithRaggedKVCacheWrapper(
-                    self.workspace_buffer,
-                    kv_layout=kv_layout,
-                    backend=backend,
-                )
-            )
-            self.prefill_wrappers["non_causal_part_1"] = (
-                BatchPrefillWithRaggedKVCacheWrapper(
-                    self.workspace_buffer,
-                    kv_layout=kv_layout,
-                    backend=backend,
-                )
-            )
-        else:
+        wrapper_configs = {
+            CPRotateMethod.ALL_GATHER: ["part0", "part1"],
+            CPRotateMethod.ALLTOALL: [
+                "causal",
+                "non_causal_pattern_0",
+                "non_causal_pattern_1",
+            ],
+            CPRotateMethod.ALL_GATHER_WITH_OVERLAP: [
+                "causal",
+                "non_causal_part_0",
+                "non_causal_part_1",
+            ],
+        }
+        if self.rotate_method not in wrapper_configs:
             raise ValueError(f"Unsupported rotate method: {self.rotate_method}")
+
+        for wrapper_name in wrapper_configs[self.rotate_method]:
+            self.prefill_wrappers[wrapper_name] = BatchPrefillWithRaggedKVCacheWrapper(
+                self.workspace_buffer,
+                kv_layout=kv_layout,
+                backend=backend,
+            )
 
     def support(self, attention_inputs: PyAttentionInputs) -> bool:
         return attention_inputs.is_prefill
 
     def prepare(self, attention_inputs: PyAttentionInputs) -> ParamsBase:
-        """
-        Prepare context parallel attention computation with zig-zag load balancing.
-        Zig-zag Attention Partitioning for Causal Attention:
-        For a sequence of length N distributed across cp_size ranks:
-        1. Tokens are split using zig-zag shuffle: alternating chunks from start/end
-           Example (cp_size=4, N=16, chunk=2): [0,1, 14,15, 2,3, 12,13, 4,5, 10,11, 6,7, 8,9]
-                                                 └─┘  └──┘  └─┘  └──┘  └─┘  └──┘  └─┘  └─┘
-                                           rank0(r0)   r0  r1   r1    r2   r2    r3   r3
-        2. Each rank holds a subset of Q and KV:
-           - Rank i has Q_i (queries for its token chunk)
-           - Rank i has KV_i (keys/values for its token chunk)
-
-        3. Causal Attention Matrix (Q attends to KV where token_j <= token_i):
-
-                      KV0  KV1  KV2  KV3  KV4  KV5  KV6  KV7  KV8  KV9  KV10 KV11 KV12 KV13 KV14 KV15
-           Q0   (r0) [ C   ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗   ]
-           Q1   (r0) [ C   C    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗   ] 2
-           Q2   (r1) [ C   C    C    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗   ]
-           Q3   (r1) [ C   C    C    C    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗   ] 4
-           Q4   (r2) [ C   C    C    C    C    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗   ]
-           Q5   (r2) [ C   C    C    C    C    C    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗   ] 6
-           Q6   (r3) [ C   C    C    C    C    C    C    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗   ]
-           Q7   (r3) [ C   C    C    C    C    C    C    C    ✗    ✗    ✗    ✗    ✗    ✗    ✗    ✗   ]  8
-           Q8   (r3) [ C   C    C    C    C    C    C    C    C    ✗    ✗    ✗    ✗    ✗    ✗    ✗   ]
-           Q9   (r3) [ C   C    C    C    C    C    C    C    C    C    ✗    ✗    ✗    ✗    ✗    ✗   ] 10
-           Q10  (r2) [ C   C    C    C    C    C    C    C    C    C    C    ✗    ✗    ✗    ✗    ✗   ]
-           Q11  (r2) [ C   C    C    C    C    C    C    C    C    C    C    C    ✗    ✗    ✗    ✗   ] 12
-           Q12  (r1) [ C   C    C    C    C    C    C    C    C    C    C    C    C    ✗    ✗    ✗   ]
-           Q13  (r1) [ C   C    C    C    C    C    C    C    C    C    C    C    C    C    ✗    ✗   ] 14
-           Q14  (r0) [ C   C    C    C    C    C    C    C    C    C    C    C    C    C    C    ✗   ]
-           Q15  (r0) [ C   C    C    C    C    C    C    C    C    C    C    C    C    C    C    C   ] 16
-        4.
-        - all gather without overlap:
-           rank_i_part_0: q_len=chunk_size, kv_len=chunk_size*(rank_id + 1)
-           rank_i_part_1: q_len=chunk_size, kv_len=chunk_size*(2 * cp_size - rank_id)
-        """
         # Get batch information
         batch_size = attention_inputs.input_lengths.size(0)
-        device = attention_inputs.input_lengths.device
+        device = torch.cuda.current_device()
         cu_seqlens = attention_inputs.cu_seqlens[
             : attention_inputs.input_lengths.size(0) + 1
         ]
         cp_info = attention_inputs.context_parallel_info
-        prefill_cp_chunk_lengths = cp_info.prefill_cp_chunk_lengths
+        prefill_cp_chunk_lengths = cp_info.prefill_cp_chunk_lengths_cpu
         prefill_shuffle_indices = cp_info.prefill_shuffle_indices
-        cp_padding_lengths = cp_info.prefill_cp_padding_lengths
+        self.all_shuffle_indices = all_gather(
+            prefill_shuffle_indices.unsqueeze(0), group=Group.CP
+        ).squeeze(0)
+        self.kv_restore_indices = self._generate_kv_restore_indices(
+            prefill_cp_chunk_lengths,
+            self.all_shuffle_indices,
+            self.cp_rank,
+            self.cp_size,
+        )
 
         if self.rotate_method == CPRotateMethod.ALL_GATHER:
             # Plan for both part0 and part1 wrappers
@@ -268,49 +277,18 @@ class ContextParallelFlashInferRaggedPrefillOp:
                 causal=True,
                 q_data_type=torch.bfloat16,
             )
+            q_part_0_indices, q_part_1_indices = self._generate_q_indices(
+                prefill_cp_chunk_lengths
+            )
+            kv_part_0_indices, kv_part_1_indices = self._generate_kv_indices(
+                prefill_cp_chunk_lengths, self.cp_rank, self.cp_size
+            )
+            self.kv_part_0_indices = self.kv_restore_indices[kv_part_0_indices]
+            self.kv_part_1_indices = self.kv_restore_indices[kv_part_1_indices]
+            self.q_part_0_indices = torch.tensor(q_part_0_indices, device=device)
+            self.q_part_1_indices = torch.tensor(q_part_1_indices, device=device)
+
         elif self.rotate_method == CPRotateMethod.ALLTOALL:
-            # Use ring attention with multi-round compute and send/recv pass kv with zig-zag load balancing
-            """example: cp_size=4, N=16, chunk_size=4
-            Ring attention with zig-zag load balancing: KV chunks rotate across ranks while Q stays local.
-            Each rank computes attention between its local Q and the received KV chunks.
-
-                      rank0                rank1                     rank2                 rank3
-            --------------------------------------------------------------------------------------------------
-            iter0: Caculate local causal attention
-                         kv0 kv1 kv14 kv15      kv2 kv3 kv12 kv13       kv4 kv5 kv10 kv11      kv6 kv7 kv8 kv9
-                   [q0    Y   X   X    X ][q2    Y   X   X    X ][q4    Y   X   X    X ][q6    Y   X   X    X ]
-                   [q1    Y   Y   X    X ][q3    Y   Y   X    X ][q5    Y   Y   X    X ][q7    Y   Y   X    X ]
-                   [q14   Y   Y   Y    X ][q12   Y   Y   Y    X ][q10   Y   Y   Y    X ][q8    Y   Y   Y    X ]
-                   [q15   Y   Y   Y    Y ][q13   Y   Y   Y    Y ][q11   Y   Y   Y    Y ][q9    Y   Y   Y    Y ]
-            ---------------------------------------------------------------------------------------------------
-            iter1: KV rotates right (rank0->rank1, rank1->rank2, rank2->rank3, rank3->rank0)
-                         kv6 kv7 kv8 kv9        kv0 kv1 kv14 kv15      kv2 kv3 kv12 kv13     kv4 kv5 kv10 kv11
-                   [q0    X   X   X    X ][q2    Y   Y   X    X ][q4    Y   Y   X    X ][q6    Y   Y   X    X ]
-                   [q1    X   X   X    X ][q3    Y   Y   X    X ][q5    Y   Y   X    X ][q7    Y   Y   X    X ]
-                   [q14   Y   Y   Y    Y ][q12   Y   Y   X    X ][q10   Y   Y   X    X ][q8    Y   Y   X    X ]
-                   [q15   Y   Y   Y    Y ][q13   Y   Y   X    X ][q11   Y   Y   X    X ][q9    Y   Y   X    X ]
-            ---------------------------------------------------------------------------------------------------
-            iter2: KV rotates right again
-                         kv4 kv5 kv10 kv11       kv6 kv7 kv8 kv9        kv0 kv1 kv14 kv15     kv2 kv3 kv12 kv13
-                   [q0    X   X   X    X ][q2    X   X   X    X ][q4    Y   Y   X    X ][q6    Y   Y   X    X ]
-                   [q1    X   X   X    X ][q3    X   X   X    X ][q5    Y   Y   X    X ][q7    Y   Y   X    X ]
-                   [q14   Y   Y   Y    Y ][q12   Y   Y   Y    Y ][q10   Y   Y   X    X ][q8    Y   Y   X    X ]
-                   [q15   Y   Y   Y    Y ][q13   Y   Y   Y    Y ][q11   Y   Y   X    X ][q9    Y   Y   X    X ]
-            ---------------------------------------------------------------------------------------------------
-            iter3: KV rotates right again (final iteration)
-                         kv2 kv3 kv12 kv13      kv4 kv5 kv10 kv11       kv6 kv7 kv8 kv9      kv0 kv1 kv14 kv15
-                   [q0    X   X   X    X ][q2    X   X   X    X ][q4    X   X   X    X ][q6    Y   Y   X    X ]
-                   [q1    X   X   X    X ][q3    X   X   X    X ][q5    X   X   X    X ][q7    Y   Y   X    X ]
-                   [q14   Y   Y   Y    Y ][q12   Y   Y   Y    Y ][q10   Y   Y   Y    Y ][q8    Y   Y   X    X ]
-                   [q15   Y   Y   Y    Y ][q13   Y   Y   Y    Y ][q11   Y   Y   Y    Y ][q9    Y   Y   X    X ]
-            ---------------------------------------------------------------------------------------------------
-
-            All chunk attention has 3 pattern:
-            1. local rank(i.e. iter=0), all rank compute causal attention
-            2. iter_i <= cp_rank: compute non-causal attention with half of the chunk kv
-            3. iter_i > cp_rank: compute non-causal attention with half of the chunk q
-            """
-
             # local attention
             self.prefill_wrappers["causal"].plan(
                 qo_indptr=cu_seqlens,
@@ -341,6 +319,12 @@ class ContextParallelFlashInferRaggedPrefillOp:
                 causal=False,
                 q_data_type=torch.bfloat16,
             )
+            half_q_indices = self._generate_half_q_indices(prefill_cp_chunk_lengths)
+            half_kv_indices = self._generate_half_kv_indices(prefill_cp_chunk_lengths)
+
+            self.half_q_indices = torch.tensor(half_q_indices, device=self.device)
+            self.half_kv_indices = torch.tensor(half_kv_indices, device=self.device)
+
         elif self.rotate_method == CPRotateMethod.ALL_GATHER_WITH_OVERLAP:
             # Plan for both part0 and part1 wrappers
             qo_indptr = cu_seqlens // 2
@@ -376,9 +360,37 @@ class ContextParallelFlashInferRaggedPrefillOp:
                 causal=False,
                 q_data_type=torch.bfloat16,
             )
+            q_part_0_indices, q_part_1_indices = self._generate_q_indices(
+                prefill_cp_chunk_lengths
+            )
+            kv_part_0_indices, kv_part_1_indices = self._generate_kv_indices(
+                prefill_cp_chunk_lengths, self.cp_rank, self.cp_size, is_non_local=True
+            )
+            self.q_part_0_indices = torch.tensor(q_part_0_indices, device=device)
+            self.q_part_1_indices = torch.tensor(q_part_1_indices, device=device)
+            self.kv_part_0_indices = self.kv_restore_indices[kv_part_0_indices]
+            self.kv_part_1_indices = self.kv_restore_indices[kv_part_1_indices]
         else:
             raise ValueError(f"Unsupported rotate method: {self.rotate_method}")
         return ParamsBase()
+
+    def _generate_half_q_indices(self, cp_chunk_lengths):
+        half_q_indices = []
+        offset = 0
+        for chunk_len in cp_chunk_lengths:
+            assert chunk_len % 2 == 0
+            half_q_indices.extend(range(offset + (chunk_len) // 2, offset + chunk_len))
+            offset += chunk_len
+        return half_q_indices
+
+    def _generate_half_kv_indices(self, cp_chunk_lengths):
+        half_kv_indices = []
+        offset = 0
+        for chunk_len in cp_chunk_lengths:
+            assert chunk_len % 2 == 0
+            half_kv_indices.extend(range(offset, offset + (chunk_len) // 2))
+            offset += chunk_len
+        return half_kv_indices
 
     def _generate_kv_restore_indices(
         self, cp_chunk_lengths, all_cp_indices, cp_rank, cp_size
@@ -460,61 +472,20 @@ class ContextParallelFlashInferRaggedPrefillOp:
         k: torch.Tensor,
         v: torch.Tensor,
     ) -> torch.Tensor:
-        # all gather key and value across all CP ranks
-        cp_info = self.context_parallel_info
-        cp_rank = self.cp_rank
-        cp_size = self.cp_size
+        all_keys = all_gather(k, group=Group.CP).reshape(
+            k.shape[0] * self.cp_size, self.num_kv_heads, self.head_dim
+        )
+        all_values = all_gather(v, group=Group.CP).reshape(
+            v.shape[0] * self.cp_size, self.num_kv_heads, self.head_dim
+        )
+        q_reshaped = q.reshape(-1, self.num_qo_heads, self.head_dim)
 
-        all_keys = all_gather(k, group=Group.CP).reshape(k.shape[0] * cp_size, -1)
-        all_values = all_gather(v, group=Group.CP).reshape(k.shape[0] * cp_size, -1)
-
-        # Restore key and value to original order
-        cp_chunk_lengths = cp_info.prefill_cp_chunk_lengths
-        cp_shuffle_indices = cp_info.prefill_shuffle_indices
-        all_cp_indices = all_gather(
-            cp_shuffle_indices.unsqueeze(0), group=Group.CP
-        ).squeeze(0)
-        kv_restore_indices = self._generate_kv_restore_indices(
-            cp_chunk_lengths, all_cp_indices, cp_rank, cp_size
-        )
-        retore_keys = all_keys[kv_restore_indices]
-        retore_values = all_values[kv_restore_indices]
-        # generate q indices
-        q_part_0_indices, q_part_1_indices = self._generate_q_indices(cp_chunk_lengths)
-        kv_part_0_indices, kv_part_1_indices = self._generate_kv_indices(
-            cp_chunk_lengths, cp_rank, cp_size
-        )
-
-        q0 = (
-            q[q_part_0_indices]
-            .contiguous()
-            .reshape(-1, self.num_qo_heads, self.head_dim)
-        )
-        q1 = (
-            q[q_part_1_indices]
-            .contiguous()
-            .reshape(-1, self.num_qo_heads, self.head_dim)
-        )
-        k0 = (
-            retore_keys[kv_part_0_indices]
-            .contiguous()
-            .reshape(-1, self.num_kv_heads, self.head_dim)
-        )
-        k1 = (
-            retore_keys[kv_part_1_indices]
-            .contiguous()
-            .reshape(-1, self.num_kv_heads, self.head_dim)
-        )
-        v0 = (
-            retore_values[kv_part_0_indices]
-            .contiguous()
-            .reshape(-1, self.num_kv_heads, self.head_dim)
-        )
-        v1 = (
-            retore_values[kv_part_1_indices]
-            .contiguous()
-            .reshape(-1, self.num_kv_heads, self.head_dim)
-        )
+        q0 = torch.index_select(q_reshaped, 0, self.q_part_0_indices).contiguous()
+        q1 = torch.index_select(q_reshaped, 0, self.q_part_1_indices).contiguous()
+        k0 = torch.index_select(all_keys, 0, self.kv_part_0_indices).contiguous()
+        k1 = torch.index_select(all_keys, 0, self.kv_part_1_indices).contiguous()
+        v0 = torch.index_select(all_values, 0, self.kv_part_0_indices).contiguous()
+        v1 = torch.index_select(all_values, 0, self.kv_part_1_indices).contiguous()
 
         attn_output_part0 = self.prefill_wrappers["part0"].run(q0, k0, v0)
         attn_output_part1 = self.prefill_wrappers["part1"].run(q1, k1, v1)
@@ -528,60 +499,41 @@ class ContextParallelFlashInferRaggedPrefillOp:
         v: torch.Tensor,
     ) -> torch.Tensor:
 
-        def _generate_half_q_indices(cp_chunk_lengths):
-            half_q_indices = []
-            offset = 0
-            for chunk_len in cp_chunk_lengths:
-                assert chunk_len % 2 == 0
-                half_q_indices.extend(
-                    range(offset + (chunk_len) // 2, offset + chunk_len)
-                )
-                offset += chunk_len
-            return half_q_indices
-
-        def _generate_half_kv_indices(cp_chunk_lengths):
-            half_kv_indices = []
-            offset = 0
-            for chunk_len in cp_chunk_lengths:
-                assert chunk_len % 2 == 0
-                half_kv_indices.extend(range(offset, offset + (chunk_len) // 2))
-                offset += chunk_len
-            return half_kv_indices
-
         # TODO: use cpu tensor
         cp_info = self.context_parallel_info
-        cp_chunk_lengths = cp_info.prefill_cp_chunk_lengths.tolist()
-
+        cp_chunk_lengths = cp_info.prefill_cp_chunk_lengths_cpu.tolist()
+        math_stream = torch.cuda.current_stream()
         # init kv buffer
         kv_buffer = torch.cat([k, v], dim=0)
         remote_kv_buffer = torch.empty_like(kv_buffer)
-
+        out_buffer = torch.empty(
+            [q.shape[0], self.num_qo_heads, self.head_dim],
+            dtype=q.dtype,
+            device=q.device,
+        )
+        lse_buffer = torch.empty(
+            [q.shape[0], self.num_qo_heads],
+            dtype=torch.float32,
+            device=q.device,
+        )
         for round_id in range(0, self.cp_size):
-            out_buffer = torch.zeros(
-                [q.shape[0], self.num_qo_heads, self.head_dim],
-                dtype=q.dtype,
-                device=q.device,
-            )
-            lse_buffer = torch.full(
-                [q.shape[0], self.num_qo_heads],
-                float("-inf"),
-                dtype=torch.float32,
-                device=q.device,
-            )
+
+            if round_id > 0:
+                out_buffer.zero_()
+                lse_buffer.fill_(float("-inf"))
 
             if round_id < self.cp_size - 1:
                 with torch.cuda.stream(self.communication_stream):
+                    torch.cuda.current_stream().wait_stream(math_stream)
                     prev_rank_id = (self.cp_rank - round_id - 1) % self.cp_size
                     next_rank_id = (self.cp_rank + round_id + 1) % self.cp_size
-
-                    # TODO: avoid deadlock...
-                    if self.cp_rank % 2 == 0:
+                    if self.cp_rank < next_rank_id:
                         send(kv_buffer, dst=next_rank_id, group=Group.CP)
                         recv(remote_kv_buffer, src=prev_rank_id, group=Group.CP)
                     else:
                         recv(remote_kv_buffer, src=prev_rank_id, group=Group.CP)
                         send(kv_buffer, dst=next_rank_id, group=Group.CP)
-                    self.comm_events[round_id].record(self.communication_stream)
+                    self.comm_events[round_id].record()
 
             if round_id == 0:  # local attention
                 merged_out, merged_lse = self.prefill_wrappers["causal"].run(
@@ -590,18 +542,17 @@ class ContextParallelFlashInferRaggedPrefillOp:
                     v.reshape(-1, self.num_kv_heads, self.head_dim),
                     return_lse=True,
                 )
+                self.math_events[round_id].record()
             else:
                 torch.cuda.current_stream().wait_event(self.comm_events[round_id - 1])
-
                 remote_k, remote_v = torch.split(
                     remote_kv_buffer, [k.shape[0], v.shape[0]], dim=0
                 )
 
                 if round_id > self.cp_rank:
                     # half q and full kv
-                    q_indices = _generate_half_q_indices(cp_chunk_lengths)
                     q_split = (
-                        q[q_indices]
+                        torch.index_select(q, 0, self.half_q_indices)
                         .contiguous()
                         .reshape(-1, self.num_qo_heads, self.head_dim)
                     )
@@ -611,15 +562,17 @@ class ContextParallelFlashInferRaggedPrefillOp:
                     v_split = remote_v.contiguous().reshape(
                         -1, self.num_kv_heads, self.head_dim
                     )
+
                     (
-                        out_buffer[q_indices, :, :],
-                        lse_buffer[q_indices, :],
+                        out_buffer[self.half_q_indices, :, :],
+                        lse_buffer[self.half_q_indices, :],
                     ) = self.prefill_wrappers["non_causal_pattern_1"].run(
                         q=q_split,
                         k=k_split,
                         v=v_split,
                         return_lse=True,
                     )
+                    self.math_events[round_id].record()
                     merged_out, lse_out = merge_state(
                         v_a=merged_out,
                         s_a=merged_lse,
@@ -628,14 +581,13 @@ class ContextParallelFlashInferRaggedPrefillOp:
                     )
                 else:
                     # half kv and full q
-                    k_indices = _generate_half_kv_indices(cp_chunk_lengths)
                     k_split = (
-                        remote_k[k_indices]
+                        torch.index_select(remote_k, 0, self.half_kv_indices)
                         .contiguous()
                         .reshape(-1, self.num_kv_heads, self.head_dim)
                     )
                     v_split = (
-                        remote_v[k_indices]
+                        torch.index_select(remote_v, 0, self.half_kv_indices)
                         .contiguous()
                         .reshape(-1, self.num_kv_heads, self.head_dim)
                     )
@@ -650,6 +602,7 @@ class ContextParallelFlashInferRaggedPrefillOp:
                         v=v_split,
                         return_lse=True,
                     )
+                    self.math_events[round_id].record()
                     merged_out, lse_out = merge_state(
                         v_a=merged_out,
                         s_a=merged_lse,
@@ -662,69 +615,31 @@ class ContextParallelFlashInferRaggedPrefillOp:
     def forward_all_gather_with_overlap(
         self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor
     ) -> torch.Tensor:
-
-        cp_info = self.context_parallel_info
-        cp_chunk_lengths = cp_info.prefill_cp_chunk_lengths
-        cp_shuffle_indices = cp_info.prefill_shuffle_indices
-        cp_rank = self.cp_rank
-        cp_size = self.cp_size
-
+        self.communication_stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(self.communication_stream):
-            all_cp_indices = all_gather(
-                cp_shuffle_indices.unsqueeze(0), group=Group.CP
-            ).squeeze(0)
-            all_keys = all_gather(k, group=Group.CP).reshape(k.shape[0] * cp_size, -1)
-            all_values = all_gather(v, group=Group.CP).reshape(k.shape[0] * cp_size, -1)
+            all_keys = all_gather(k, group=Group.CP).reshape(
+                k.shape[0] * self.cp_size, self.num_kv_heads, self.head_dim
+            )
+            all_values = all_gather(v, group=Group.CP).reshape(
+                k.shape[0] * self.cp_size, self.num_kv_heads, self.head_dim
+            )
 
+        q_reshaped = q.reshape(-1, self.num_qo_heads, self.head_dim)
         output, lse = self.prefill_wrappers["causal"].run(
-            q.reshape(-1, self.num_qo_heads, self.head_dim),
+            q_reshaped,
             k.reshape(-1, self.num_kv_heads, self.head_dim),
             v.reshape(-1, self.num_kv_heads, self.head_dim),
             return_lse=True,
         )
         torch.cuda.current_stream().wait_stream(self.communication_stream)
 
-        kv_restore_indices = self._generate_kv_restore_indices(
-            cp_chunk_lengths, all_cp_indices, cp_rank, cp_size
-        )
-        retore_keys = all_keys[kv_restore_indices]
-        retore_values = all_values[kv_restore_indices]
-        # generate q indices
-        q_part_0_indices, q_part_1_indices = self._generate_q_indices(cp_chunk_lengths)
-        kv_part_0_indices, kv_part_1_indices = self._generate_kv_indices(
-            cp_chunk_lengths, cp_rank, cp_size, is_non_local=True
-        )
+        q0 = torch.index_select(q_reshaped, 0, self.q_part_0_indices).contiguous()
+        q1 = torch.index_select(q_reshaped, 0, self.q_part_1_indices).contiguous()
+        k0 = torch.index_select(all_keys, 0, self.kv_part_0_indices).contiguous()
+        k1 = torch.index_select(all_keys, 0, self.kv_part_1_indices).contiguous()
+        v0 = torch.index_select(all_values, 0, self.kv_part_0_indices).contiguous()
+        v1 = torch.index_select(all_values, 0, self.kv_part_1_indices).contiguous()
 
-        q0 = (
-            q[q_part_0_indices]
-            .contiguous()
-            .reshape(-1, self.num_qo_heads, self.head_dim)
-        )
-        q1 = (
-            q[q_part_1_indices]
-            .contiguous()
-            .reshape(-1, self.num_qo_heads, self.head_dim)
-        )
-        k0 = (
-            retore_keys[kv_part_0_indices]
-            .contiguous()
-            .reshape(-1, self.num_kv_heads, self.head_dim)
-        )
-        k1 = (
-            retore_keys[kv_part_1_indices]
-            .contiguous()
-            .reshape(-1, self.num_kv_heads, self.head_dim)
-        )
-        v0 = (
-            retore_values[kv_part_0_indices]
-            .contiguous()
-            .reshape(-1, self.num_kv_heads, self.head_dim)
-        )
-        v1 = (
-            retore_values[kv_part_1_indices]
-            .contiguous()
-            .reshape(-1, self.num_kv_heads, self.head_dim)
-        )
         out_buffer = torch.zeros(
             [q.shape[0], self.num_qo_heads, self.head_dim],
             dtype=q.dtype,
@@ -737,16 +652,18 @@ class ContextParallelFlashInferRaggedPrefillOp:
             device=q.device,
         )
         if k0.numel() > 0:
-            out_buffer[q_part_0_indices, :, :], lse_buffer[q_part_0_indices, :] = (
-                self.prefill_wrappers["non_causal_part_0"].run(
-                    q=q0, k=k0, v=v0, return_lse=True
-                )
+            (
+                out_buffer[self.q_part_0_indices, :, :],
+                lse_buffer[self.q_part_0_indices, :],
+            ) = self.prefill_wrappers["non_causal_part_0"].run(
+                q=q0, k=k0, v=v0, return_lse=True
             )
         if k1.numel() > 0:
-            out_buffer[q_part_1_indices, :, :], lse_buffer[q_part_1_indices, :] = (
-                self.prefill_wrappers["non_causal_part_1"].run(
-                    q=q1, k=k1, v=v1, return_lse=True
-                )
+            (
+                out_buffer[self.q_part_1_indices, :, :],
+                lse_buffer[self.q_part_1_indices, :],
+            ) = self.prefill_wrappers["non_causal_part_1"].run(
+                q=q1, k=k1, v=v1, return_lse=True
             )
         merged_output, merged_lse = merge_state(
             v_a=output,

@@ -9,6 +9,20 @@
 
 namespace rtp_llm {
 
+// Helper function for CPRotateMethod enum conversion
+std::string cpRotateMethodToString(CPRotateMethod method) {
+    switch (method) {
+        case CPRotateMethod::ALL_GATHER:
+            return "ALL_GATHER";
+        case CPRotateMethod::ALL_GATHER_WITH_OVERLAP:
+            return "ALL_GATHER_WITH_OVERLAP";
+        case CPRotateMethod::ALLTOALL:
+            return "ALLTOALL";
+        default:
+            return "UNKNOWN";
+    }
+}
+
 // ParallelismConfig
 std::string ParallelismConfig::to_string() const {
     std::ostringstream oss;
@@ -38,6 +52,7 @@ std::string ParallelismConfig::to_string() const {
         << "http_port: " << http_port << "\n"
         << "model_rpc_port: " << model_rpc_port << "\n"
         << "embedding_rpc_server_port: " << embedding_rpc_server_port << "\n"
+        << "cp_rotate_method: " << cpRotateMethodToString(cp_rotate_method) << "\n"
         << "ffn_disaggregate_config: {\n"
         << ffn_disaggregate_config.to_string() << "\n}";
     return oss.str();

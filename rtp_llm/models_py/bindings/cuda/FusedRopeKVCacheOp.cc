@@ -7,6 +7,8 @@
 #include "rtp_llm/cpp/devices/utils/RopeCache.h"
 #include "rtp_llm/cpp/core/BufferHelper.h"
 
+#include <iostream>
+
 namespace rtp_llm {
 
 FusedRopeKVCachePrefillOp::FusedRopeKVCachePrefillOp(const AttentionConfigs& attn_configs):
@@ -34,8 +36,9 @@ TRTAttnPtr FusedRopeKVCachePrefillOp::prepare(torch_ext::PyAttentionInputs attn_
     attn_params->prefix_lengths            = attn_inputs.prefix_lengths;
     attn_params->kv_block_array.cache_type = attn_configs_.kv_cache_dtype;
     attn_params->padding_offset            = attn_inputs.padding_offset;
-    if (attn_inputs.position_ids.defined()) {
-        attn_params->cp_position_ids = attn_inputs.position_ids;
+    if (attn_inputs.context_parallel_info.has_value()
+        && attn_inputs.context_parallel_info->prefill_shuffle_indices.defined()) {
+        attn_params->cp_position_ids = attn_inputs.context_parallel_info->prefill_shuffle_indices;
     }
     return attn_params;
 }
@@ -99,6 +102,7 @@ torch::Tensor FusedRopeKVCachePrefillOp::forward(const torch::Tensor&           
     int* position_ids = nullptr;
     if (params->cp_position_ids.defined()) {
         position_ids = params->cp_position_ids.data_ptr<int>();
+        store_cache  = false;
     }
 
     DISPATCH_CUDA_FUNCTION_DATA_TYPE(

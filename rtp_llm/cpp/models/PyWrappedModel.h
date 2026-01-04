@@ -25,7 +25,10 @@ public:
 
 private:
     std::optional<PyCacheStoreInputs> prepareWriteCacheParams(const GptModelInputs& inputs);
-    void handleContextParallelInputs(GptModelInputs& model_input, PyContextParallelParams& cp_params);
+    void   handleContextParallelInputs(GptModelInputs& model_input, PyContextParallelParams& cp_params);
+    size_t handleContextParallelOutputs(BufferPtr&                     hidden_states,
+                                        const GptModelInputs&          inputs,
+                                        const PyContextParallelParams& cp_params);
 
 private:
     // Helper functions to reduce code duplication
@@ -34,16 +37,18 @@ private:
     void                           setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_attn_inputs,
                                                                   const GptModelInputs&         inputs,
                                                                   BufferPtr&                    kv_cache_block_id_device);
-    GptModelOutputs
-                  callForwardPostLayers(BufferPtr hidden_states, const GptModelInputs& inputs, bool is_forward_method);
-    GraphBase*    graph_runner_{nullptr};
-    py::object    py_model_;
-    bool          enable_cuda_graph_{false};
-    bool          is_prefill_cuda_graph_mode_{false};
-    torch::Tensor k_cache_base_tensor_;
-    torch::Tensor v_cache_base_tensor_;
-    torch::Tensor k_scale_base_tensor_;
-    torch::Tensor v_scale_base_tensor_;
+    GptModelOutputs                callForwardPostLayers(BufferPtr             hidden_states,
+                                                         const GptModelInputs& inputs,
+                                                         bool                  is_forward_method,
+                                                         size_t                num_valid_tokens = -1);
+    GraphBase*                     graph_runner_{nullptr};
+    py::object                     py_model_;
+    bool                           enable_cuda_graph_{false};
+    bool                           is_prefill_cuda_graph_mode_{false};
+    torch::Tensor                  k_cache_base_tensor_;
+    torch::Tensor                  v_cache_base_tensor_;
+    torch::Tensor                  k_scale_base_tensor_;
+    torch::Tensor                  v_scale_base_tensor_;
 };
 
 // NOTE(wangyin): constructor can not be compiled correctly when placed in cc file.
