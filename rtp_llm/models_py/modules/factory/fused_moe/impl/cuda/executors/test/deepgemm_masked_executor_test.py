@@ -3,13 +3,15 @@ from typing import Dict, Tuple
 
 import torch
 
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used
 from rtp_llm.models_py.kernels.cuda.fp8_kernel.fp8_kernel import (
     per_block_cast_to_fp8,
     per_token_cast_to_fp8,
 )
-from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     ExpertForwardPayload,
     ExpertTokensMetadata,
@@ -24,8 +26,8 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.test.fused_
     generate_payload_and_weights,
     generate_ref_output,
 )
-from rtp_llm.test.utils.numeric_util import calc_diff
 from rtp_llm.ops import MoeConfig, ParallelismConfig, RuntimeConfig
+from rtp_llm.test.utils.numeric_util import calc_diff
 from rtp_llm.utils.model_weight import W
 
 DP_SIZE = 4
@@ -52,8 +54,8 @@ def _generate_config() -> MoEConfigAdapter:
     model_config.expert_num = NUM_EXPERTS
     model_config.hidden_size = HIDDEN_SIZE
     model_config.moe_inter_size = MOE_INTERMEDIATE_SIZE
-    model_config.moe_k = TOPK if 'TOPK' in globals() else 8
-    
+    model_config.moe_k = TOPK if "TOPK" in globals() else 8
+
     parallelism_config = ParallelismConfig()
     parallelism_config.world_size = DP_SIZE * EP_SIZE
     parallelism_config.dp_size = DP_SIZE
@@ -64,9 +66,9 @@ def _generate_config() -> MoEConfigAdapter:
     parallelism_config.ep_rank = 0
     parallelism_config.world_rank = 0
     parallelism_config.local_world_size = 1
-    
+
     moe_config = MoeConfig()
-  
+
     return MoEConfigAdapter(
         model_config=model_config,
         parallelism_config=parallelism_config,
@@ -126,7 +128,6 @@ def test_deepgemm_masked_executor(use_fp8: bool):
 
     executor = DeepGemmMaskedExecutor(
         config,
-        weights,
         (
             FusedMoEQuantConfig(
                 quant_dtype=torch.float8_e4m3fn,
@@ -137,12 +138,16 @@ def test_deepgemm_masked_executor(use_fp8: bool):
             if use_fp8
             else FusedMoEQuantConfig(quant_dtype=None)
         ),
+        weights,
     )
     # execute
-    output = executor.execute(payload, "silu", None, None, False, None)
+    combine_payload = executor.execute(payload, "silu", None, None, False, None)
     expert_num_tokens = payload.expert_tokens_meta.expert_num_tokens
     for i, num_token in enumerate(expert_num_tokens):
-        diff = calc_diff(output[i, :num_token], ref_output[i, :num_token])
+        diff = calc_diff(
+            combine_payload.fused_expert_output[i, :num_token],
+            ref_output[i, :num_token],
+        )
         # print('diff:', diff, output[i, :num_token], ref_output[i, :num_token])
         assert diff < 0.0022
 

@@ -833,30 +833,6 @@ msgid "5"
 msgstr ""
 
 #: ../../backend/server_arguments.md
-msgid "`--enable-fast-gen`"
-msgstr ""
-
-#: ../../backend/server_arguments.md
-msgid "Enables long request chunking processing"
-msgstr ""
-
-#: ../../backend/server_arguments.md
-msgid "`--fast-gen-context-budget`"
-msgstr ""
-
-#: ../../backend/server_arguments.md
-msgid "Chunk processing size"
-msgstr ""
-
-#: ../../backend/server_arguments.md
-msgid "`--enable-partial-fallback`"
-msgstr ""
-
-#: ../../backend/server_arguments.md
-msgid "Allows partial resource reclamation"
-msgstr ""
-
-#: ../../backend/server_arguments.md
 msgid "`--batch-decode-scheduler-batch-size`"
 msgstr ""
 

@@ -24,8 +24,15 @@ py_package(
 )
 
 py_library(
+    name = "extension_frontend_lib",
+    deps = [],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
     name = "extension_lib",
     deps = [],
+    visibility = ["//visibility:public"],
 )
 
 compile_pip_requirements(

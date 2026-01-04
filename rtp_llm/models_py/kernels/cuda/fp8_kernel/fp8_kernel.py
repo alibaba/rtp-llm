@@ -365,10 +365,9 @@ def quant_weight_ue8m0(
 def requant_weight_ue8m0(
     weight: torch.Tensor,
     weight_scale_inv: torch.Tensor,
-):
+) -> Tuple[torch.Tensor, torch.Tensor]:
     weight_block_size = [128, 128]
 
-    *_, n, k = weight.shape
     weight_dequant = block_quant_dequant(
         weight,
         weight_scale_inv,

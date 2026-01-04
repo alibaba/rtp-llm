@@ -59,8 +59,6 @@ class AuxInfo:
     input_len: int = 0
     output_len: int = 0
     step_output_len: int = 0
-    fallback_tokens: int = 0
-    fallback_times: int = 0
     first_token_cost_time: float = 0
     wait_time: float = 0
     pd_sep: bool = False

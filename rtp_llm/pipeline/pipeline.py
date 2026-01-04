@@ -50,6 +50,7 @@ class Pipeline(object):
         mm_related_params: Optional[
             Any
         ] = None,  # mm_related_params from ModelConfig (optional)
+        grpc_config: Optional[Any] = None,  # grpc_config from PyEnvConfigs (optional)
         vit_separation: Optional[VitSeparation] = None,  # Optional VitSeparation
     ):
         self.pd_sep_config = pd_sep_config
@@ -67,6 +68,7 @@ class Pipeline(object):
             pd_sep_config=pd_sep_config,
             addresses=addresses,
             sp_config=sp_config,
+            grpc_config=grpc_config,
             vit_separation=vit_separation,
         )
 

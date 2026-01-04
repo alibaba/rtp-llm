@@ -67,7 +67,6 @@ private:
     void handleBounsToken() {
         if (acceped_bouns_token_) {
             setReuseLength(seqLength() - 2);
-            setFallbackPrefixLength(reuseLength());
             setIsContextStream(true);
         }
     }

@@ -7,11 +7,9 @@ from typing import List
 import torch
 import torch.nn.functional as F
 from einops import rearrange, repeat
-from fla.ops.gated_delta_rule import (
-    chunk_gated_delta_rule,
-    fused_recurrent_gated_delta_rule,
-)
-from fla.utils import assert_close, device, is_intel_alchemist
+
+from rtp_llm.models_py.triton_kernels.fla.chunk import chunk_gated_delta_rule
+from rtp_llm.models_py.triton_kernels.fla.utils import assert_close, device
 
 logging.basicConfig(
     level="INFO",
@@ -176,7 +174,7 @@ def test_chunk_varlen(
     do = torch.randn_like(v)
     dht = torch.rand_like(h0)
 
-    tri, tri_ht = chunk_gated_delta_rule(
+    tri, _, tri_ht = chunk_gated_delta_rule(
         q=q.clone(),
         k=k.clone(),
         v=v.clone(),

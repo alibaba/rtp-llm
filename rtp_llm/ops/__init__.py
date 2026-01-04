@@ -148,6 +148,9 @@ try:
         ActivationType,
         KvCacheDataType,
         ModelConfig,
+        HybridAttentionConfig,
+        HybridAttentionType,
+        LinearAttentionConfig
     )
     # Alias for backward compatibility
     EplbConfig = EPLBConfig
@@ -192,14 +195,13 @@ except BaseException as e:
 
 try:
 
-    from libth_transformer import EngineScheduleInfo, KVCacheInfo
     from libth_transformer import MultimodalInput as MultimodalInputCpp
-    from libth_transformer import RtpEmbeddingOp, RtpLLMOp, WorkerStatusInfo
+    from libth_transformer import RtpEmbeddingOp, RtpLLMOp
     from libth_transformer import EmbeddingCppOutput
 
     libth_transformer_imported = True
 except BaseException as e:
-    MultimodalInputCpp = EngineScheduleInfo = KVCacheInfo = WorkerStatusInfo = EmbeddingCppOutput = (
+    MultimodalInputCpp = EmbeddingCppOutput = (
         EmptyClass
     )
     RtpEmbeddingOp = RtpLLMOp = EmptyClass

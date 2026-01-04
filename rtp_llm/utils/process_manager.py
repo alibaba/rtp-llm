@@ -8,7 +8,7 @@ from typing import List
 
 
 class ProcessManager:
-    """Generic process manager for managing and monitoring processes"""
+    """Process manager for managing and monitoring processes"""
 
     def __init__(self, shutdown_timeout: int = 50, monitor_interval: int = 1):
         self.processes: List[Process] = []
@@ -80,11 +80,34 @@ class ProcessManager:
         """Check if all processes are still alive"""
         return all(proc.is_alive() for proc in self.processes)
 
+    def is_available(self) -> bool:
+        """
+        Check if ProcessManager is available.
+        Returns False if:
+        - Shutdown has been requested
+        - Any managed process has died
+        """
+        if self.shutdown_requested:
+            return False
+        if self.processes and not self._is_all_processes_alive():
+            return False
+        return True
+
     def _join_all_processes(self):
         """Join all processes"""
+        deadline = None
+        if self.shutdown_timeout != -1:
+            if self.first_dead_time > 0:
+                deadline = self.first_dead_time + self.shutdown_timeout
+            else:
+                deadline = time.time() + self.shutdown_timeout
+
         for proc in self.processes:
             try:
-                proc.join()
+                timeout = None
+                if deadline is not None:
+                    timeout = max(0.1, deadline - time.time())
+                proc.join(timeout)
             except Exception as e:
                 logging.error(f"Error joining process {proc.pid}: {e}")
         logging.info("All processes joined")

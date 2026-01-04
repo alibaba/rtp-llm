@@ -83,6 +83,11 @@ void SpeculativeSampler::updateSampleStream(SpeculativeExecutorStreamOutputPtr& 
 
     stream->step();
     stream->spStep();
+
+    if (stream->isPerfTest()) {
+        device_->bufMemset(*accept_tokens, 0);
+    }
+
     StreamUpdateInfo update_info{std::move(accept_tokens),
                                  (int)accept_len,
                                  hidden_states,
@@ -96,7 +101,6 @@ void SpeculativeSampler::updateSampleStream(SpeculativeExecutorStreamOutputPtr& 
 
     stream->update(update_info);
     stream->setReuseLength(stream->seqLength() - 1);
-    stream->setFallbackPrefixLength(stream->reuseLength());
     stream->setAccepedBounsToken(accept_len > propose_step);
     stream->incSpEditSearchIndex(accept_len - 1);
     stream->setSpEditRun(false);
@@ -139,7 +143,7 @@ void SpeculativeSampler::streamSample(SpeculativeSamplerOutput&           sample
             }
         }
 
-        if (!stream->isDummyStream() && propose_step != 0) {
+        if (!stream->isFakeStream() && propose_step != 0) {
             sample_output.propose_token_num += propose_step;
             sample_output.accept_token_num += accept_len;
             sample_output.stream_num++;
@@ -277,10 +281,14 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
         size_t                             propose_step          = num_speculate_tokens;
         size_t                             accept_len            = output_emitted_token_num_h[i].item<int32_t>();
 
-        if (!stream->isDummyStream()) {
+        if (!stream->isFakeStream()) {
             sample_output.propose_token_num += propose_step;
             sample_output.accept_token_num += accept_len;
             sample_output.stream_num++;
+        }
+
+        if (stream->forceSpAccept()) {
+            accept_len = propose_step + 1;
         }
 
         rtp_llm::BufferPtr accept_tokens = device_->allocateBuffer(

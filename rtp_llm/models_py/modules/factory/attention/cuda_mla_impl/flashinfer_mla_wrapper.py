@@ -8,7 +8,7 @@ from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
     FMHADecodeImplBase,
     FMHAPrefillImplBase,
 )
-from rtp_llm.ops import AttentionConfigs, FMHAType, FMHAConfig
+from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs
 
 from .flashinfer_mla import (
@@ -18,7 +18,6 @@ from .flashinfer_mla import (
 )
 from .rotary_emb import MlaRotaryEmbeddingOp
 
-warm_up_done = False
 
 class MlaFlashInferPrefillImpl(FMHAPrefillImplBase):
     def __init__(
@@ -32,6 +31,7 @@ class MlaFlashInferPrefillImpl(FMHAPrefillImplBase):
         quant_config: Optional[object] = None,
     ) -> None:
         # trt prefill not support reuse cache yet
+        warmup_flashinfer_python()
         super().__init__(
             MlaFlashInferPrefillOp(
                 attn_configs,
@@ -61,7 +61,9 @@ class MlaFlashInferPrefillImpl(FMHAPrefillImplBase):
         if attn_inputs.prefix_lengths is not None:
             self.has_reuse_cache = attn_inputs.prefix_lengths.max().item() > 0
 
-        self.absorb_opt_len = fmha_config.absorb_opt_len if fmha_config is not None else 1024
+        self.absorb_opt_len = (
+            fmha_config.absorb_opt_len if fmha_config is not None else 1024
+        )
         self.aborb_fmha = MlaFlashInferDecodeOp(
             attn_configs.head_num,
             attn_configs.kv_lora_rank,
@@ -87,10 +89,6 @@ class MlaFlashInferPrefillImpl(FMHAPrefillImplBase):
         layer_id: int,
     ):
         """Compute prefill context with optimized cache reuse logic."""
-        global warm_up_done
-        if not warm_up_done:
-            warmup_flashinfer_python()
-            warm_up_done = True
 
         if q.size(0) < self.absorb_opt_len and self.has_reuse_cache:
             return self._handle_short_sequence(q, kv_cache, layer_id)
@@ -163,6 +161,7 @@ class MlaFlashInferDecodeImpl(FMHADecodeImplBase):
         fmha_config: Optional[FMHAConfig] = None,
         quant_config: Optional[object] = None,
     ) -> None:
+        warmup_flashinfer_python()
         super().__init__(
             MlaFlashInferDecodeOp(
                 attn_configs.head_num,

@@ -128,7 +128,7 @@ createEngineInitParams(DeviceBase* device, const CustomConfig& config,
     auto                      convert = rtp_llm::WeightsConverter(false);
     auto                      weights = convert.createGptWeights(std::make_unique<ConstBufferPtrMaps>(layer_weights),
                                             std::make_unique<ConstBufferPtrMap>(global_weights));
-    
+
     // Create all config objects with defaults
     rtp_llm::MMModelConfig mm_model_config;
     model_config.mm_model_config = mm_model_config;
@@ -148,8 +148,8 @@ createEngineInitParams(DeviceBase* device, const CustomConfig& config,
     rtp_llm::GrpcConfig grpc_config;
     rtp_llm::FfnDisAggregateConfig ffn_disaggregate_config;
     rtp_llm::VitConfig vit_config;
-    
-    rtp_llm::EngineInitParams rtp_llm_params(0, 
+
+    rtp_llm::EngineInitParams rtp_llm_params(0,
                                              model_config,
                                              parallelism_config,
                                              runtime_config,
@@ -179,7 +179,7 @@ createMockEngine(DeviceBase* device, const CustomConfig& config) {
     rtp_llm::RuntimeConfig runtime_config;
     rtp_llm::KVCacheConfig kv_cache_config;
     EngineInitParams              rtp_llm_params = createEngineInitParams(device, config, model_config, runtime_config, kv_cache_config);
-    std::shared_ptr<NormalEngine> engine         = make_shared<NormalEngine>(rtp_llm_params);
+    std::shared_ptr<NormalEngine> engine         = make_shared<NormalEngine>(rtp_llm_params, nullptr);
     return engine;
 }
 

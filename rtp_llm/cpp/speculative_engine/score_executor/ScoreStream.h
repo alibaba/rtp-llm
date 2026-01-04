@@ -41,7 +41,6 @@ public:
         if (score_len_ > 1 || device_->initParams().sp_config.force_score_context_attention) {
             setIsContextStream(true);
             setReuseLength(stream.reuseLength());
-            setFallbackPrefixLength(stream.reuseLength());
         }
         history_max_score_len_ = std::max(history_max_score_len_, score_len_);
     }

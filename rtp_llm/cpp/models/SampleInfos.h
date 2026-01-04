@@ -22,11 +22,13 @@ public:
         std::stringstream debug_string;
         debug_string << "SamplerInputs { "
                      << "batch_size: " << batch_size << ", step: " << step
-                     << ", logits: " << logits->debugStringWithData<int32_t>()
-                     << ", token_ids: " << token_ids->debugStringWithData<int32_t>()
-                     << ", input_lengths: " << input_lengths->debugStringWithData<int32_t>()
-                     << ", sequence_lengths: " << sequence_lengths->debugStringWithData<int32_t>()
-                     << ", cum_log_probs: " << cum_log_probs->debugStringWithData<float>() << "}";
+                     << ", logits: " << (logits ? logits->debugStringWithData<int32_t>() : "null")
+                     << ", token_ids: " << (token_ids ? token_ids->debugStringWithData<int32_t>() : "null")
+                     << ", input_lengths: " << (input_lengths ? input_lengths->debugStringWithData<int32_t>() : "null")
+                     << ", sequence_lengths: "
+                     << (sequence_lengths ? sequence_lengths->debugStringWithData<int32_t>() : "null")
+                     << ", cum_log_probs: " << (cum_log_probs ? cum_log_probs->debugStringWithData<float>() : "null")
+                     << "}";
         return debug_string.str();
     }
 

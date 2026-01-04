@@ -1,10 +1,12 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Union, final
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union, final
 
 import torch
 
-from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
@@ -20,8 +22,9 @@ class ExpertTokensMetadata:
     Metadata regarding expert-token routing.
     """
 
-    expert_num_tokens: Optional[torch.Tensor]
-    expert_num_tokens_cpu: Optional[Union[List[int], torch.Tensor]]
+    expected_m: Optional[int] = None
+    expert_num_tokens: Optional[torch.Tensor] = None
+    expert_num_tokens_cpu: Optional[Union[List[int], torch.Tensor]] = None
 
 
 @dataclass
@@ -38,7 +41,30 @@ class ExpertForwardPayload:
     expert_topk_weights: Optional[torch.Tensor] = None
 
 
+@dataclass
+class CombineForwardPayload:
+    """
+    Represents the data payload for combining the expert outputs.
+    """
+
+    fused_expert_output: torch.Tensor
+
+
 class FusedMoeDataRouter(ABC):
+    def __init__(
+        self,
+        config: MoEConfigAdapter,
+        quant_config: FusedMoEQuantConfig,
+    ):
+        """Initialize FusedMoeDataRouter with standard parameters.
+
+        Args:
+            config: MOE configuration adapter
+            quant_config: Quantization configuration
+        """
+        self.config = config
+        self.quant_config = quant_config
+
     @classmethod
     def router_type(cls) -> RouterType:
         raise NotImplementedError
@@ -63,14 +89,13 @@ class FusedMoeDataRouter(ABC):
         a2_scale: Optional[torch.Tensor],
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        quant_config: FusedMoEQuantConfig,
     ) -> ExpertForwardPayload:
         raise NotImplementedError
 
     @abstractmethod
     def finalize(
         self,
-        fused_expert_output: torch.Tensor,
+        payload: CombineForwardPayload,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
@@ -82,12 +107,20 @@ class FusedMoeDataRouter(ABC):
 class FusedMoeExpertExecutor(ABC):
     def __init__(
         self,
-        quant_config: Optional[FusedMoEQuantConfig],
+        config: MoEConfigAdapter,
+        quant_config: FusedMoEQuantConfig,
+        weights: Dict[str, torch.Tensor],
     ):
-        if quant_config is not None:
-            self.quant_config = quant_config
-        else:
-            self.quant_config = FusedMoEQuantConfig()
+        """Initialize FusedMoeExpertExecutor with standard parameters.
+
+        Args:
+            config: MOE configuration adapter
+            quant_config: Quantization configuration
+            weights: Model weights dictionary
+        """
+        self.config = config
+        self.quant_config = quant_config
+        self.weights = weights
 
     @classmethod
     def executor_type(cls) -> ExecutorType:
@@ -106,8 +139,8 @@ class FusedMoeExpertExecutor(ABC):
         pass
 
     @property
-    def local_num_experts(self) -> int:
-        raise NotImplementedError
+    def topk_ids_dtype(self) -> torch.dtype:
+        return torch.int64
 
     @abstractmethod
     def execute(
@@ -118,7 +151,7 @@ class FusedMoeExpertExecutor(ABC):
         a2_scale: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         extra_expert_args: Optional[dict[str, Any]],
-    ) -> torch.Tensor:
+    ) -> CombineForwardPayload:
         raise NotImplementedError
 
 
@@ -134,6 +167,10 @@ class FusedMoe(torch.nn.Module):
         self.router = router
         self.fused_experts = fused_experts
         self.expert_num = expert_num
+
+    @property
+    def topk_ids_dtype(self) -> torch.dtype:
+        return self.fused_experts.topk_ids_dtype
 
     def forward(
         self,
@@ -152,33 +189,34 @@ class FusedMoe(torch.nn.Module):
 
         a1 = hidden_states
 
-        payload = self.router.prepare(
+        expert_payload = self.router.prepare(
             a1,
             a1_scale,
             a2_scale,
             topk_weights,
             topk_ids,
-            self.fused_experts.quant_config,
         )
 
-        if payload.expert_topk_ids is None:
-            payload.expert_topk_ids = topk_ids
-        if payload.expert_topk_weights is None:
-            payload.expert_topk_weights = topk_weights
+        if expert_payload.expert_topk_ids is None:
+            expert_payload.expert_topk_ids = topk_ids
+        if expert_payload.expert_topk_weights is None:
+            expert_payload.expert_topk_weights = topk_weights
 
-        fused_out = None
-
-        if payload.expert_x.numel() == 0:
+        if expert_payload.expert_x.numel() == 0:
             # This happens when none of the tokens from the all2all reach this
             # EP rank. Also, note that this is only relevant for CUDAGraph
             # incompatible all2all kernels like the DeepEP high-throughput
             # kernels. CUDAGraph compatible all2all kernels like the pplx
             # kernels and the DeepEP low-latency kernels are always batched
             # and can never run into the tensor.numel() == 0 case.
-            fused_out = torch.empty_like(payload.expert_x).to(dtype=a1.dtype)
+            combine_payload = CombineForwardPayload(
+                fused_expert_output=torch.empty_like(
+                    expert_payload.expert_x, dtype=a1.dtype
+                )
+            )
         else:
-            fused_out = self.fused_experts.execute(
-                payload,
+            combine_payload = self.fused_experts.execute(
+                expert_payload,
                 activation=activation,
                 expert_map=expert_map,
                 a2_scale=a2_scale,
@@ -195,9 +233,9 @@ class FusedMoe(torch.nn.Module):
         extra_finalize_args.update({"original_num_tokens": hidden_states.size(0)})
 
         output = self.router.finalize(
-            fused_out,
-            payload.expert_topk_weights,
-            payload.expert_topk_ids,
+            combine_payload,
+            expert_payload.expert_topk_weights,
+            expert_payload.expert_topk_ids,
             apply_router_weight_on_input,
             extra_finalize_args,
         )

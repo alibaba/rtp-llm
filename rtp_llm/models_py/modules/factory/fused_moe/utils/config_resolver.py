@@ -6,7 +6,9 @@ from typing import Optional
 
 import torch
 
-from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
+)
 from rtp_llm.ops.compute_ops import DeviceType, get_device
 from rtp_llm.utils.util import to_torch_dtype
 
@@ -108,3 +110,15 @@ class MoeConfigResolver:
             Whether TP size equals EP size
         """
         return config.parallelism_config.tp_size == config.parallelism_config.ep_size
+
+    @staticmethod
+    def use_all_gather(config: MoEConfigAdapter) -> bool:
+        """Check if use_all_gather is enabled
+
+        Args:
+            config: MOE configuration adapter
+
+        Returns:
+            Whether use_all_gather is enabled
+        """
+        return config.moe_config.use_all_gather if config.moe_config else True

@@ -76,6 +76,18 @@ Learn more about RTP-LLM's performance in our benchmark reports:
 ## Acknowledgments
 Our project is mainly based on [FasterTransformer](https://github.com/NVIDIA/FasterTransformer), and on this basis, we have integrated some kernel implementations from [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM). We also draw inspiration from [vllm](https://github.com/vllm-project/vllm), [transformers](https://github.com/huggingface/transformers), [llava](https://github.com/haotian-liu/LLaVA), and [qwen-vl](https://github.com/QwenLM/Qwen-VL). We thank these projects for their inspiration and help.
 
+## Citation
+If you find RTP-LLM useful in your research or project, please consider citing:
+
+```bibtex
+@Misc{rtp-llm,
+  author       = {Alibaba},
+  title        = {RTP-LLM: A High-Performance LLM Inference Engine},
+  howpublished = {\url{https://github.com/alibaba/rtp-llm}},
+  year         = {2025},
+}
+```
+
 ## Contact Us
 
 ### DingTalk Group

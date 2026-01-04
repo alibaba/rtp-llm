@@ -102,6 +102,10 @@ public:
         return false;
     }
 
+    virtual bool isEagle() {
+        return false;
+    }
+
     virtual bool updateEplbConfig(const EPLBConfig& config) {
         return false;
     }

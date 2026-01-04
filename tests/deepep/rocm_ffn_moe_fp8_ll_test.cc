@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/devices/OpData.h"
 #include "rtp_llm/cpp/devices/Weights.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "autil/EnvUtil.h"
 
 using namespace rtp_llm;
 
@@ -61,6 +62,12 @@ ROCmFfnMoeFp8Test::ROCmFfnMoeFp8Test(int64_t ep_rank, int64_t ep_size) {
     
     DeviceResourceConfig device_resource_config;
     device_resource_config.enable_comm_overlap = false;
+    // Read DEVICE_RESERVE_MEMORY_BYTES from environment variable
+    // If not set, use the default value from DeviceResourceConfig (-1GB)
+    auto device_reserve_memory_bytes_env = autil::EnvUtil::getEnv("DEVICE_RESERVE_MEMORY_BYTES", 0LL);
+    if (device_reserve_memory_bytes_env != 0) {
+        device_resource_config.device_reserve_memory_bytes = device_reserve_memory_bytes_env;
+    }
     
     MoeConfig moe_config;
     moe_config.use_deepep_moe = true;

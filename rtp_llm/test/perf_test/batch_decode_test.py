@@ -24,6 +24,11 @@ class RunningConfig(BaseModel):
     input_len_list: List[int]
     input_query_dict: Dict[int, str]
     env: Dict[str, Any]
+    result_dir: str
+    decode_test_length: int
+    is_speculative: bool
+    propose_step: int = 0
+    generate_config: Dict[str, Any]
 
 
 def write_odps_wrapper(
@@ -89,8 +94,13 @@ def run_single(
     is_decode: bool = True,
     dump_json_path: str = ".",
     decode_test_length: int = 10,
+    is_speculative: bool = False,
+    propose_step: int = 0,
+    generate_config: Dict[str, Any] = {},
 ) -> List[MetricState]:
+    title_prefix = f"Speculative(step={propose_step}) " if is_speculative else ""
     title = "Decode Result" if is_decode else "Prefill Result"
+    title = f"{title_prefix}{title}"
     batch_size_list = [1] if not is_decode else batch_size_list
     base_port = port
     logging.info(
@@ -107,6 +117,7 @@ def run_single(
         1000,
         decode_test_length,
         False,
+        generate_config,
     ).run()
     logging.info(f"start to run perf test")
     metrics_list: List[MetricState] = []
@@ -131,6 +142,8 @@ def run_single(
                     is_decode,
                     500,
                     decode_test_length,
+                    True,
+                    generate_config,
                 ).run()
                 metrics_list.append(MetricState(input_len, batch_size, metric))
 
@@ -142,6 +155,8 @@ def run_single(
         metrics_list,
         dump_json_path,
         {"dp_size": dp_size, "tp_size": tp_size},
+        title,
+        generate_config,
     )
     logging.info("metrics_table: \n" + str(metrics_table))
     return metrics_list
@@ -180,6 +195,8 @@ def parse_args():
     parser.add_argument("--disaggregate", type=int, default=0)
     # partial test, 0: test all, 1: test decode only, 2: test prefill only
     parser.add_argument("--partial", type=int, default=0)
+    parser.add_argument("--result_dir", type=str, default=".")
+    parser.add_argument("--generate_config", type=str, default="{}")
     args = parser.parse_args()
     return args
 
@@ -218,6 +235,11 @@ def run_normal_test(args: argparse.Namespace, running_config: RunningConfig):
             running_config.input_len_list,
             running_config.input_query_dict,
             True,
+            dump_json_path=running_config.result_dir,
+            decode_test_length=running_config.decode_test_length,
+            is_speculative=running_config.is_speculative,
+            propose_step=running_config.propose_step,
+            generate_config=running_config.generate_config,
         )
     if args.partial == 0 or args.partial == 2:
         prefill_result = run_single(
@@ -228,6 +250,11 @@ def run_normal_test(args: argparse.Namespace, running_config: RunningConfig):
             running_config.input_len_list,
             running_config.input_query_dict,
             False,
+            dump_json_path=running_config.result_dir,
+            decode_test_length=running_config.decode_test_length,
+            is_speculative=running_config.is_speculative,
+            propose_step=running_config.propose_step,
+            generate_config=running_config.generate_config,
         )
     server.stop_server()
     return decode_result, prefill_result
@@ -247,6 +274,11 @@ def run_disaggregate_test(args: argparse.Namespace, running_config: RunningConfi
         running_config.input_len_list,
         running_config.input_query_dict,
         True,
+        dump_json_path=running_config.result_dir,
+        decode_test_length=running_config.decode_test_length,
+        is_speculative=running_config.is_speculative,
+        propose_step=running_config.propose_step,
+        generate_config=running_config.generate_config,
     )
     decode_server.stop_server()
     prefill_env = json.loads(os.environ.get("PREFILL_CONFIG", "{}"))
@@ -265,6 +297,11 @@ def run_disaggregate_test(args: argparse.Namespace, running_config: RunningConfi
         running_config.input_len_list,
         running_config.input_query_dict,
         False,
+        dump_json_path=running_config.result_dir,
+        decode_test_length=running_config.decode_test_length,
+        is_speculative=running_config.is_speculative,
+        propose_step=running_config.propose_step,
+        generate_config=running_config.generate_config,
     )
     prefill_server.stop_server()
     return decode_result, prefill_result
@@ -286,7 +323,7 @@ def create_test_env(max_len: int, max_concurrency: int, partial: int):
 
 
 def main():
-    print("current path: ", os.getcwd())
+    print("current path: ", os.getcwd(), flush=True)
 
     args = parse_args()
     if args.world_size != 0:
@@ -299,7 +336,13 @@ def main():
     batch_size_list = [int(x) for x in args.batch_size.split(",")]
     input_len_list = [int(x) for x in args.input_len.split(",")]
 
-    test_env = create_test_env(max(input_len_list), max(batch_size_list), args.partial)
+    is_speculative = bool(os.environ.get("SP_TYPE", ""))
+    decode_test_length = int(os.environ.get("DECODE_TEST_LENGTH", 10))
+    propose_step = int(os.environ.get("GEN_NUM_PER_CIRCLE", 1))
+
+    test_env = create_test_env(
+        max(input_len_list) + decode_test_length, max(batch_size_list), args.partial
+    )
 
     input_query_dict = create_query(
         args.model_type, args.tokenizer_path, input_len_list
@@ -310,6 +353,11 @@ def main():
         input_len_list=input_len_list,
         input_query_dict=input_query_dict,
         env=test_env,
+        result_dir=args.result_dir,
+        decode_test_length=decode_test_length,
+        is_speculative=is_speculative,
+        propose_step=propose_step,
+        generate_config=json.loads(args.generate_config),
     )
 
     if args.disaggregate == 0:
