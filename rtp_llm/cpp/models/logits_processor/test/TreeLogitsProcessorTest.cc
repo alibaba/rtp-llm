@@ -169,6 +169,36 @@ TEST_F(TreeLogitsProcessorTest, testGenerateVocabMask) {
     }
 }
 
+TEST_F(TreeLogitsProcessorTest, testGenerateVocabWeight) {
+    SamplerDataBuilder     builder;
+    std::string            file_path  = "./rtp_llm/cpp/models/logits_processor/test/gir_prefix_with_weight_dict.json";
+    size_t                 batch_size = 4;
+    size_t                 vocab_size = 1024;
+    size_t                 max_length = 1024;
+    BaseLogitsProcessorPtr processor  = builder.generateLogitsProcessor(true, batch_size, file_path);
+    SamplerInputs sampler_inputs = builder.allocate({batch_size, vocab_size, max_length}, {processor}, {batch_size});
+    std::vector<std::vector<std::pair<size_t, float>>> batch_candidate_token_weights = {
+        {{1, 0.1f}, {5, 0.3f}},
+        {{2, 0.1f}, {3, 0.2f}, {4, 0.3f}},
+        {{1, 0.1f}, {3, 0.2f}, {5, 0.3f}},
+        {{1, 0.1f}, {3, 0.2f}}};
+    std::vector<rtp_llm::BufferPtr> vocab_weight =
+        processor->generateVocabWeight(batch_size, vocab_size, batch_candidate_token_weights);
+
+    std::vector<int>   expect_batch_idx = {0, 0, 1, 1, 1, 2, 2, 2, 3, 3};
+    std::vector<int>   expect_token_idx = {1, 5, 2, 3, 4, 1, 3, 5, 1, 3};
+    std::vector<float> expect_weight    = {0.1f, 0.3f, 0.1f, 0.2f, 0.3f, 0.1f, 0.2f, 0.3f, 0.1f, 0.2f};
+
+    auto h_batch_indices = getBufferValues<int>(*vocab_weight[0]);
+    auto h_token_indices = getBufferValues<int>(*vocab_weight[1]);
+    auto h_weights       = getBufferValues<float>(*vocab_weight[2]);
+    for (size_t i = 0; i < h_batch_indices.size(); i++) {
+        EXPECT_EQ(expect_batch_idx[i], h_batch_indices[i]);
+        EXPECT_EQ(expect_token_idx[i], h_token_indices[i]);
+        EXPECT_EQ(expect_weight[i], h_weights[i]);
+    }
+}
+
 template<typename Dtype>
 void setBuffer(rtp_llm::BufferPtr buf, std::vector<std::vector<Dtype>> content) {
     RTP_LLM_CHECK(buf->shape().size() == 2);
@@ -275,6 +305,46 @@ TEST_F(TreeLogitsProcessorTest, testProcess) {
         auto logits_hosts = getBufferValues<float>(*logits);
         ASSERT_EQ(logits_hosts[64000], 1);
         ASSERT_EQ(logits_hosts[64003], 0);
+        ASSERT_EQ(logits_hosts[64011], 0);
+        ASSERT_TRUE(logits_hosts[64001] == -INFINITY);
+    }
+}
+
+TEST_F(TreeLogitsProcessorTest, testWeightProcess) {
+    {
+        SamplerDataBuilder builder;
+        std::string        file_path  = "./rtp_llm/cpp/models/logits_processor/test/gir_prefix_with_weight_dict.json";
+        size_t             batch_size = 4;
+        size_t             vocab_size = 100000;
+        size_t             max_length = 10;
+        BaseLogitsProcessorPtr processor = builder.generateLogitsProcessor(true, batch_size, file_path);
+        SamplerInputs          sampler_inputs =
+            builder.allocate({batch_size, vocab_size, max_length}, {processor}, {batch_size});
+
+        std::vector<std::vector<int>> token_ids = {{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+                                                   {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
+                                                   {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 51},
+                                                   {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9}};
+        builder.setTokenIds(sampler_inputs, token_ids);
+
+        std::vector<std::vector<float>> logits_list;
+        std::vector<std::vector<float>> logits_index_list = {{64000}, {64003, 64006, 64008}, {64011}, {64001}};
+        for (size_t i = 0; i < batch_size; i++) {
+            auto logits = sampler_inputs.logits->index(i);
+            auto tensor = Buffer2torchTensor(*logits, false);
+            tensor.fill_(0);
+            for (auto index : logits_index_list[i]) {
+                tensor[index] = 1;
+            }
+        }
+        processor->process(sampler_inputs, 0, batch_size);
+
+        auto logits       = sampler_inputs.logits->index(0);
+        auto logits_hosts = getBufferValues<float>(*logits);
+        ASSERT_EQ(logits_hosts[64000], 1.1f);
+        ASSERT_EQ(logits_hosts[64003], 0.15f);
+        ASSERT_EQ(logits_hosts[64006], 0.12f);
+        ASSERT_EQ(logits_hosts[64008], 0.2f);
         ASSERT_EQ(logits_hosts[64011], 0);
         ASSERT_TRUE(logits_hosts[64001] == -INFINITY);
     }
