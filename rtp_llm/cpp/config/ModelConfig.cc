@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/model_utils/layernorm_types.h"
 #include "rtp_llm/cpp/model_utils/activation_types.h"
 #include "rtp_llm/cpp/core/Types.h"
+#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include <sstream>
 #include <string>
 
@@ -155,6 +156,10 @@ AttentionConfigs ModelConfig::getAttentionConfigs(int64_t tp_size) const {
 
     // if qk_norm or use embedding model, fuse add bias in gemm
     config.fuse_qkv_add_bias = qk_norm || (config.rope_config.style == RopeStyle::No && !use_kvcache) ? false : true;
+
+    // Set dtype from model data type
+    config.dtype = dataTypeToTorchType(data_type);
+
     return config;
 }
 
@@ -275,7 +280,8 @@ std::string ModelConfig::to_string() const {
     }
     oss << "]\n}\n"
         << "extra_data_path: " << extra_data_path << "\n"
-        << "local_extra_data_path: " << local_extra_data_path << "\n"
+        << "local_extra_data_path: " << local_extra_data_path
+        << "\n"
         //<< "act_type: " << act_type << "\n"
         << "model_type: " << model_type << "\n"
         << "ptuning_path: " << ptuning_path;

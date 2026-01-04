@@ -150,8 +150,6 @@ bool RtpLLMStreamMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(timeout_latency_us_metric, "rtp_llm_timeout_lantency_us");
     REGISTER_GAUGE_MUTABLE_METRIC(query_batch_size_metric, "rtp_llm_query_batch_size");
 
-    REGISTER_GAUGE_MUTABLE_METRIC(fallback_tokens_metric, "rtp_llm_fallback_tokens");
-    REGISTER_GAUGE_MUTABLE_METRIC(fallback_times_metric, "rtp_llm_fallback_times");
     REGISTER_GAUGE_MUTABLE_METRIC(batch_with_prefill_times_metric, "rtp_llm_batch_with_prefill_times");
     REGISTER_GAUGE_MUTABLE_METRIC(batch_with_prefill_len_metric, "rtp_llm_batch_with_prefill_len");
 
@@ -178,8 +176,6 @@ void RtpLLMStreamMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMStream
     REPORT_GAUGE(timeout_latency_us);
     REPORT_GAUGE(query_batch_size);
 
-    REPORT_GAUGE(fallback_tokens);
-    REPORT_GAUGE(fallback_times);
     REPORT_GAUGE(batch_with_prefill_times);
     REPORT_GAUGE(batch_with_prefill_len);
 
@@ -224,7 +220,6 @@ bool RtpLLMSchedulerMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(wait_stream_size_metric, "rtp_llm_wait_stream_size");
     REGISTER_GAUGE_MUTABLE_METRIC(running_stream_size_metric, "rtp_llm_running_stream_size");
     REGISTER_GAUGE_MUTABLE_METRIC(remote_running_stream_size_metric, "rtp_llm_remote_running_stream_size");
-    REGISTER_GAUGE_MUTABLE_METRIC(fallback_stream_size_metric, "rtp_llm_fallback_stream_size");
     return true;
 }
 
@@ -232,7 +227,6 @@ void RtpLLMSchedulerMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMSch
     REPORT_MUTABLE_METRIC(wait_stream_size_metric, collector->wait_stream_size);
     REPORT_MUTABLE_METRIC(running_stream_size_metric, collector->running_stream_size);
     REPORT_MUTABLE_METRIC(remote_running_stream_size_metric, collector->remote_running_stream_size);
-    REPORT_MUTABLE_METRIC(fallback_stream_size_metric, collector->fallback_stream_size);
 }
 
 bool RtpLLMEngineMetrics::init(kmonitor::MetricsGroupManager* manager) {

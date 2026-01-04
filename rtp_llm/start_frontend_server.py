@@ -10,17 +10,24 @@ from rtp_llm.config.py_config_modules import PyEnvConfigs
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
+from rtp_llm.config.log_config import setup_logging
 from rtp_llm.distribute.worker_info import FrontendServerInfo, update_worker_info
 from rtp_llm.frontend.frontend_app import FrontendApp
+from rtp_llm.ops import RoleType
 from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
     set_global_controller,
 )
-from rtp_llm.config.log_config import setup_logging
-from rtp_llm.ops import RoleType
+
 setup_logging()
 
-def start_frontend_server(rank_id: int, server_id: int, global_controller: ConcurrencyController, py_env_configs: PyEnvConfigs):
+
+def start_frontend_server(
+    rank_id: int,
+    server_id: int,
+    global_controller: ConcurrencyController,
+    py_env_configs: PyEnvConfigs,
+):
     # Set rank_id and server_id on the passed config
     py_env_configs.server_config.frontend_server_id = server_id
     py_env_configs.server_config.rank_id = rank_id
@@ -29,7 +36,11 @@ def start_frontend_server(rank_id: int, server_id: int, global_controller: Concu
     g_frontend_server_info = FrontendServerInfo(
         py_env_configs.server_config.frontend_server_id
     )
-    update_worker_info(py_env_configs.server_config.start_port, py_env_configs.server_config.worker_info_port_num)
+    update_worker_info(
+        py_env_configs.server_config.start_port,
+        py_env_configs.server_config.worker_info_port_num,
+        py_env_configs.distribute_config.remote_server_port,
+    )
     try:
         logging.info(f"g_frontend_server_info = {g_frontend_server_info}")
         set_global_controller(global_controller)

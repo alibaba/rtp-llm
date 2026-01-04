@@ -9,9 +9,7 @@ using namespace torch_ext;
 
 namespace rtp_llm {
 
-
-TRTPrefillOpBase::TRTPrefillOpBase(const AttentionConfigs& attn_configs):
-    attn_configs_(attn_configs) {}
+TRTPrefillOpBase::TRTPrefillOpBase(const AttentionConfigs& attn_configs): attn_configs_(attn_configs) {}
 
 bool TRTPrefillOpBase::support(torch_ext::PyAttentionInputs attn_inputs) {
     // FMHAConfig check will be done in Python layer
@@ -27,13 +25,10 @@ ParamsBasePtr TRTPrefillOpBase::prepare(torch_ext::PyAttentionInputs attn_inputs
         kv_cache_block_id_device = torchTensor2Buffer(attn_inputs.kv_cache_block_id_device);
     }
 
-    auto          cu_seqlens    = attn_inputs.cu_seqlens;
-    torch::Tensor cu_kv_seqlens = cu_seqlens;
     TRTAttnPtr    attn_params;
     auto          run_stream   = GET_CURRENT_STREAM();
     bool          use_fp8_fmha = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
     auto          params       = prepareTrtAttnParams(attn_configs_,
-                                       attn_inputs.kv_block_offset,
                                        kv_cache_block_id_device,
                                        attn_inputs.input_lengths.size(0),
                                        use_fp8_fmha,
@@ -44,11 +39,13 @@ ParamsBasePtr TRTPrefillOpBase::prepare(torch_ext::PyAttentionInputs attn_inputs
     } else {
         attn_params = std::make_shared<TRTAttn>();
     }
-    attn_params->attn_type     = torchDTypeToDataType(attn_inputs.dtype);
-    attn_params->cu_seqlens    = cu_seqlens;
-    attn_params->cu_kv_seqlens = cu_kv_seqlens;
-    attn_params->max_seq_len   = attn_inputs.input_lengths.max().item<int32_t>();
-    attn_params->input_lengths = attn_inputs.input_lengths;
+    attn_params->attn_type               = torchDTypeToDataType(attn_inputs.dtype);
+    attn_params->cu_seqlens              = attn_inputs.cu_seqlens;
+    attn_params->cu_kv_seqlens           = attn_inputs.cu_kv_seqlens;
+    attn_params->max_seq_len             = attn_inputs.input_lengths.max().item<int32_t>();
+    attn_params->max_prefix_length       = attn_inputs.prefix_lengths.max().item<int32_t>();
+    attn_params->context_total_kv_length = attn_inputs.context_total_kv_length;
+    attn_params->input_lengths           = attn_inputs.input_lengths;
 
     // 创建 TRT V2 FMHA Runner
     DataType attn_dtype = use_fp8_fmha ? DataType::TYPE_FP8_E4M3 : torchDTypeToDataType(attn_inputs.dtype);
@@ -101,7 +98,7 @@ torch::Tensor TRTPagedPrefillOp::forward(const torch::Tensor&              input
 
     const int            local_head_num = attn_configs_.head_num;
     const int            size_per_head  = attn_configs_.size_per_head;
-    const int            token_num      = input.size(0);
+    const int            token_num      = input.size(1);
     const int            batch_size     = params->input_lengths.size(0);
     torch::TensorOptions options        = torch::TensorOptions(input.dtype()).device(input.device());
 
@@ -118,9 +115,9 @@ torch::Tensor TRTPagedPrefillOp::forward(const torch::Tensor&              input
                                       attention_output_orig_quant_scale,
                                       batch_size,  // batch_size,
                                       params->max_seq_len,
-                                      params->max_seq_len,  // seq_len_with_prefix,
+                                      params->max_seq_len + params->max_prefix_length,  // seq_len_with_prefix,
                                       token_num,
-                                      token_num,  // token_num_kv,
+                                      params->context_total_kv_length,  // token_num_kv,
                                       kv_block_array);
     return output;
 }
@@ -162,9 +159,9 @@ torch::Tensor TRTNormalPrefillOp::forward(const torch::Tensor&              inpu
     const int size_per_head  = attn_configs_.size_per_head;
     const int token_num      = input.size(0);
     const int batch_size     = params->input_lengths.size(0);
-    auto* device = dynamic_cast<CudaDevice*>(DeviceFactory::getDefaultDevice());
-    const int max_token_num =
-        device->initParams().runtime_config.fifo_scheduler_config.max_context_batch_size * device->initParams().max_seq_len;
+    auto*     device         = dynamic_cast<CudaDevice*>(DeviceFactory::getDefaultDevice());
+    const int max_token_num  = device->initParams().runtime_config.fifo_scheduler_config.max_context_batch_size
+                              * device->initParams().max_seq_len;
     torch::TensorOptions options = torch::TensorOptions(input.dtype()).device(input.device());
 
     static torch::Tensor static_output = torch::zeros({max_token_num, local_head_num * size_per_head}, options);

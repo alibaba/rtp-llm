@@ -5,19 +5,19 @@ import torch
 from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.ops import ParallelismConfig
-from rtp_llm.models_py.distributed.collective_torch import Group, recv, send
 from rtp_llm.model_loader.model_weight_info import ModelWeights
+from rtp_llm.models_py.distributed.collective_torch import Group, recv, send
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
     AttnImplFactory,
+    DenseMLP,
     Embedding,
     FMHAImplBase,
     FusedQKRMSNorm,
-    FusedSiluActDenseMLP,
     LinearFactory,
     RMSNorm,
 )
+from rtp_llm.ops import ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     KVCache,
     PyModelInitResources,
@@ -30,7 +30,10 @@ from rtp_llm.utils.util import check_with_info
 
 class CausalAttentionPure(nn.Module):
     def __init__(
-        self, config: ModelConfig, parallelism_config: ParallelismConfig, weights: Dict[str, torch.Tensor]
+        self,
+        config: ModelConfig,
+        parallelism_config: ParallelismConfig,
+        weights: Dict[str, torch.Tensor],
     ):
         super().__init__()
         self.config = config
@@ -70,16 +73,16 @@ class BatchSplitInfo:
 
 class DisaggregateModelBase(GptModelBase):
     def __init__(
-        self, 
-        config: ModelConfig, 
+        self,
+        config: ModelConfig,
         parallelism_config: ParallelismConfig,
         weights: ModelWeights,
         max_generate_batch_size: int,
         device_resource_config=None,
     ):
         super().__init__(
-            config, 
-            parallelism_config, 
+            config,
+            parallelism_config,
             weights,
             max_generate_batch_size=max_generate_batch_size,
             device_resource_config=device_resource_config,
@@ -98,15 +101,10 @@ class DisaggregateModelBase(GptModelBase):
             "ffn_dp_size must be 1",
         )
         self.attn_dp_rank: List[int] = [
-            i
-            for i in range(
-                ffn_disaggregate_config.attention_dp_size
-            )
+            i for i in range(ffn_disaggregate_config.attention_dp_size)
         ]
-        self.attn_world_size = (
-            ffn_disaggregate_config.attention_dp_size
-        )
-        self.device = 'cuda:' + str(parallelism_config.local_rank)
+        self.attn_world_size = ffn_disaggregate_config.attention_dp_size
+        self.device = "cuda:" + str(parallelism_config.local_rank)
 
 
 class Qwen3GemmLayer(nn.Module):
@@ -138,7 +136,12 @@ class Qwen3GemmLayer(nn.Module):
         self.post_attention_layernorm = RMSNorm(
             curent_layer_weights[W.post_ln_gamma], eps=config.layernorm_eps
         )
-        self.mlp = FusedSiluActDenseMLP(config.activation_type, parallelism_config, curent_layer_weights, quant_config)
+        self.mlp = DenseMLP(
+            config.activation_type,
+            parallelism_config,
+            curent_layer_weights,
+            quant_config,
+        )
 
         # if last layer, then all weights are setted to None
         self.qkv_proj = None
@@ -187,11 +190,18 @@ class Qwen3GemmLayer(nn.Module):
 
 
 class Qwen3GemmPreLayer(nn.Module):
-    def __init__(self, config: ModelConfig, parallelism_config: ParallelismConfig, weights: ModelWeights):
+    def __init__(
+        self,
+        config: ModelConfig,
+        parallelism_config: ParallelismConfig,
+        weights: ModelWeights,
+    ):
         super().__init__()
         self.config = config
         self.parallelism_config = parallelism_config
-        self.embed_tokens = Embedding(config, parallelism_config, weights.get_global_weight(W.embedding))
+        self.embed_tokens = Embedding(
+            config, parallelism_config, weights.get_global_weight(W.embedding)
+        )
         self.input_layernorm = RMSNorm(
             weights.weights[0][W.pre_ln_gamma], eps=config.layernorm_eps
         )
@@ -220,29 +230,40 @@ class Qwen3GemmPreLayer(nn.Module):
 
 class Qwen3GemmModel(DisaggregateModelBase):
     def __init__(
-        self, 
-        config: ModelConfig, 
+        self,
+        config: ModelConfig,
         parallelism_config: ParallelismConfig,
         weights: ModelWeights,
         max_generate_batch_size: int,
         device_resource_config=None,
     ):
-        super().__init__(config, parallelism_config, weights, max_generate_batch_size=max_generate_batch_size, device_resource_config=device_resource_config)
+        super().__init__(
+            config,
+            parallelism_config,
+            weights,
+            max_generate_batch_size=max_generate_batch_size,
+            device_resource_config=device_resource_config,
+        )
         ffn_disaggregate_config = parallelism_config.ffn_disaggregate_config
         # Get quant_config from model_config
         quant_config = config.quant_config
         self.layers = nn.ModuleList(
             [
-                Qwen3GemmLayer(config, parallelism_config, weights, idx, idx == self.layer_num - 1, quant_config)
+                Qwen3GemmLayer(
+                    config,
+                    parallelism_config,
+                    weights,
+                    idx,
+                    idx == self.layer_num - 1,
+                    quant_config,
+                )
                 for idx in range(self.layer_num)
             ]
         )
         self.pre_layer = Qwen3GemmPreLayer(config, parallelism_config, weights)
         self.dp_rank = [
             ffn_disaggregate_config.attention_tp_size * i
-            for i in range(
-                ffn_disaggregate_config.attention_dp_size
-            )
+            for i in range(ffn_disaggregate_config.attention_dp_size)
         ]
 
         self.norm = RMSNorm(
@@ -345,14 +366,20 @@ class Qwen3GemmModel(DisaggregateModelBase):
 
 class Qwen3AttnModel(DisaggregateModelBase):
     def __init__(
-        self, 
-        config: ModelConfig, 
+        self,
+        config: ModelConfig,
         parallelism_config: ParallelismConfig,
         weights: ModelWeights,
         max_generate_batch_size: int,
         device_resource_config=None,
     ):
-        super().__init__(config, parallelism_config, weights, max_generate_batch_size=max_generate_batch_size, device_resource_config=device_resource_config)
+        super().__init__(
+            config,
+            parallelism_config,
+            weights,
+            max_generate_batch_size=max_generate_batch_size,
+            device_resource_config=device_resource_config,
+        )
         ffn_disaggregate_config = parallelism_config.ffn_disaggregate_config
         self.attention_layers = nn.ModuleList(
             [
@@ -420,7 +447,11 @@ class Qwen3AttnModel(DisaggregateModelBase):
                     mirco_batch_input.input_ids.shape[0]
                 )
                 fmha_impl = AttnImplFactory.get_fmha_impl(
-                    self.config, self.parallelism_config, self.weight, mirco_batch_input.attention_inputs, self.fmha_config
+                    self.config,
+                    self.parallelism_config,
+                    self.weight,
+                    mirco_batch_input.attention_inputs,
+                    self.fmha_config,
                 )
                 out = layer(
                     hidden_states=inputs,
@@ -441,35 +472,41 @@ class Qwen3AttnModel(DisaggregateModelBase):
 
 class Qwen3DisaggregateModel(GptModelBase):
     def __init__(
-        self, 
-        config: ModelConfig, 
+        self,
+        config: ModelConfig,
         parallelism_config: ParallelismConfig,
-        weights: ModelWeights, 
+        weights: ModelWeights,
         max_generate_batch_size: int,
         fmha_config=None,
         py_hw_kernel_config=None,
         device_resource_config=None,
     ):
         super().__init__(
-            config, 
-            parallelism_config, 
+            config,
+            parallelism_config,
             weights,
             max_generate_batch_size=max_generate_batch_size,
-            fmha_config=fmha_config, 
+            fmha_config=fmha_config,
             py_hw_kernel_config=py_hw_kernel_config,
             device_resource_config=device_resource_config,
         )
         ffn_disaggregate_config = parallelism_config.ffn_disaggregate_config
-        self.is_ffn_model = (
-            ffn_disaggregate_config.is_ffn_service()
-        )
+        self.is_ffn_model = ffn_disaggregate_config.is_ffn_service()
         if self.is_ffn_model:
             self.model = Qwen3GemmModel(
-                config, parallelism_config, weights, max_generate_batch_size=max_generate_batch_size, device_resource_config=device_resource_config
+                config,
+                parallelism_config,
+                weights,
+                max_generate_batch_size=max_generate_batch_size,
+                device_resource_config=device_resource_config,
             )
         else:
             self.model = Qwen3AttnModel(
-                config, parallelism_config, weights, max_generate_batch_size=max_generate_batch_size, device_resource_config=device_resource_config
+                config,
+                parallelism_config,
+                weights,
+                max_generate_batch_size=max_generate_batch_size,
+                device_resource_config=device_resource_config,
             )
 
         self.norm = RMSNorm(

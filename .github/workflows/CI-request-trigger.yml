@@ -31,20 +31,39 @@ jobs:
 
       # Runs trigger CI
       - name: Make the script files executable
-        run: chmod +x trigger-CI.sh get-CI-result.sh get-branch-info.sh
-      - name: trigger a CI
+        run: chmod +x pre-check-CI-result.sh trigger-CI.sh get-CI-result.sh get-branch-info.sh
+
+      # Pre-check if CI already completed
+      - name: Pre-check CI status
+        id: pre-check
         run: |
+          echo "=== Task started at: $(date '+%Y-%m-%d %H:%M:%S') ==="
+          COMMIT_ID=$([ "${{ github.event_name }}" == "pull_request" ] && echo "${{ github.event.pull_request.head.sha }}" || echo "${{ github.sha }}")
+          echo "Pre-checking CI status for Commit ID: $COMMIT_ID"
+          
+          if ./pre-check-CI-result.sh "$COMMIT_ID" "${{ secrets.CI_SECRET }}"; then
+            echo "skip_ci=true" >> $GITHUB_OUTPUT
+            echo "CI already completed, will skip trigger"
+          else
+            echo "skip_ci=false" >> $GITHUB_OUTPUT
+            echo "CI not completed, will trigger new CI"
+          fi
+      - name: trigger a CI
+        if: steps.pre-check.outputs.skip_ci != 'true'
+        run: |
+          echo "=== Task started at: $(date '+%Y-%m-%d %H:%M:%S') ==="
           COMMIT_ID=$([ "${{ github.event_name }}" == "pull_request" ] && echo "${{ github.event.pull_request.head.sha }}" || echo "${{ github.sha }}")
           echo "Using Commit ID: $COMMIT_ID"
           echo "$GITHUB_REF"
           PR_ID=$(echo "$GITHUB_REF" | sed 's@refs/pull/\([0-9]\+\)/.*@\1@')
           echo "PR ID is $PR_ID"
-          ./trigger-CI.sh "$COMMIT_ID" "${{ secrets.CI_SECRET }}" "${{ github.event.pull_request.head.repo.clone_url }}" "$PR_ID"
+          ./trigger-CI.sh "$COMMIT_ID" "${{ secrets.CI_SECRET }}" "${{ github.event.pull_request.head.repo.clone_url }}" "$PR_ID" "${{ github.run_id }}"
       - name: Add comment via REST API
         continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          echo "=== Task started at: $(date '+%Y-%m-%d %H:%M:%S') ==="
           set +e
           PR_ID=${{ github.event.pull_request.number }}
           BRANCH_NAME="open_merge/${PR_ID}"
@@ -75,7 +94,9 @@ jobs:
           fi
       # Runs get CI result
       - name: Get CI result
+        if: steps.pre-check.outputs.skip_ci != 'true'
         run: |
+          echo "=== Task started at: $(date '+%Y-%m-%d %H:%M:%S') ==="
           COMMIT_ID=$([ "${{ github.event_name }}" == "pull_request" ] && echo "${{ github.event.pull_request.head.sha }}" || echo "${{ github.sha }}")
           echo "Using Commit ID: $COMMIT_ID"
           ./get-CI-result.sh "$COMMIT_ID" "${{ secrets.CI_SECRET }}"

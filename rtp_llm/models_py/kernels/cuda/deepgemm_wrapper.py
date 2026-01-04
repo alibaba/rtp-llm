@@ -1,8 +1,7 @@
 import functools
-import importlib
-from typing import Any, Callable, List, NoReturn, Optional, Tuple
+from contextlib import contextmanager
+from typing import Any, Callable, Generator, List, NoReturn, Optional, Tuple
 
-import deep_gemm
 import torch
 
 from rtp_llm.utils.module_util import has_module, resolve_symbol
@@ -16,6 +15,7 @@ __all__ = [
     "m_grouped_bf16_gemm_nt_masked",
     "has_deep_gemm",
     "is_deep_gemm_e8m0_used",
+    "configure_deep_gemm_num_sms",
 ]
 
 _deep_gemm_impl_new_map = {
@@ -56,6 +56,26 @@ def is_deep_gemm_e8m0_used() -> bool:
     return torch.cuda.get_device_capability()[0] in [10, 12]
 
 
+@contextmanager
+def configure_deep_gemm_num_sms(num_sms: int) -> Generator[None, None, None]:
+    """Configure the number of sms for deep gemm."""
+    if not has_deep_gemm():
+        raise RuntimeError(
+            "DeepGEMM is not available. Please install the `deep_gemm` package to enable DeepGEMM kernels."
+        )
+    import deep_gemm
+
+    # get original num sms
+    original_num_sms = deep_gemm.get_num_sms()
+    # set num sms
+    deep_gemm.set_num_sms(num_sms)
+    try:
+        yield
+    finally:
+        # restore original num sms
+        deep_gemm.set_num_sms(original_num_sms)
+
+
 def _missing_deep_gemm() -> NoReturn:
     """Placeholder for unavailable DeepGEMM package."""
     raise RuntimeError(
@@ -82,17 +102,16 @@ def _lazy_init_deep_gemm(symbols: List[str]) -> None:
         # deep_gemm is not available
         return
 
-    # import deep_gemm
-    try:
-        _dg = importlib.import_module("deep_gemm")
-    except ImportError:
-        return
+    import deep_gemm
+
     # resolve symbols
     for i, symbol in enumerate(symbols):
         symbol_impl = symbol_impls[i]
         try:
             globals()[symbol_impl] = resolve_symbol(
-                _dg, _deep_gemm_impl_new_map[symbol], _deep_gemm_impl_old_map[symbol]
+                deep_gemm,
+                _deep_gemm_impl_new_map[symbol],
+                _deep_gemm_impl_old_map[symbol],
             )
         except AttributeError:
             raise RuntimeError(

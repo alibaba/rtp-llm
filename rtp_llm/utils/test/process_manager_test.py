@@ -17,6 +17,14 @@ def dummy_worker(duration=1, should_crash=False):
     time.sleep(duration)
 
 
+def forever_worker(queue):
+    # Signal that we are ready
+    queue.put("ready")
+
+    while True:
+        time.sleep(0.1)
+
+
 def signal_handler_worker(queue):
     """Worker that handles signals and reports back"""
     running = True
@@ -297,9 +305,7 @@ class TestProcessManager(unittest.TestCase):
 
         self.manager.add_process(mock_proc)
         self.manager.terminated = True
-        self.manager.first_dead_time = (
-            time.time() - self.manager.shutdown_timeout - 1
-        )
+        self.manager.first_dead_time = time.time() - self.manager.shutdown_timeout - 1
 
         # Should force kill
         with patch("os.kill") as mock_kill:
@@ -345,6 +351,47 @@ class TestProcessManager(unittest.TestCase):
         with patch("logging.error") as mock_error:
             self.manager._join_all_processes()
             mock_error.assert_called()
+
+    def test_forever_process_shutdown(self):
+        """Test shutting down a process that runs forever"""
+        queue = multiprocessing.Queue()
+        proc1 = multiprocessing.Process(target=forever_worker, args=(queue,))
+        proc1.start()
+        self.manager.add_process(proc1)
+
+        proc2 = multiprocessing.Process(target=forever_worker, args=(queue,))
+        proc2.start()
+        self.manager.add_process(proc2)
+
+        self.manager.shutdown_timeout = 2
+        # Wait for process to be ready
+        self.assertEqual(queue.get(timeout=5), "ready")
+
+        # Ensure it's running
+        self.assertTrue(proc1.is_alive())
+        self.assertTrue(proc2.is_alive())
+
+        # Start monitoring in thread
+        import threading
+
+        monitor_thread = threading.Thread(
+            target=self.manager.monitor_and_release_processes
+        )
+        monitor_thread.start()
+
+        # Give it a moment
+        time.sleep(0.1)
+
+        # Request shutdown
+        self.manager.graceful_shutdown()
+
+        # Wait for monitoring to complete
+        monitor_thread.join()
+
+        # Process should be terminated
+        self.assertFalse(proc1.is_alive())
+        self.assertFalse(proc2.is_alive())
+        self.assertTrue(self.manager.terminated)
 
 
 if __name__ == "__main__":

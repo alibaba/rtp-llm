@@ -32,18 +32,16 @@ if platform.processor() != "aarch64":
     from .minicpmv.minicpmv import MiniCPMV
     from .minicpmv_embedding.minicpmv_embedding import MiniCPMVEmbedding
 
-import logging
+from rtp_llm.utils.import_util import has_internal_source
 
 from .bert import Bert
 from .glm4_moe import Glm4Moe
 from .jina_bert.jina_bert import JinaBert
 from .megatron_bert import MegatronBert
 from .mixtral import Mixtral
+from .qwen3_next.qwen3_next import Qwen3Next
 from .qwen_v2_moe import Qwen2Moe
 from .qwen_v3_moe import Qwen3Moe
 
-try:
-    from internal_source.rtp_llm.models import internal_init
-except ImportError as e:
-    logging.info(f"import internal source failed, error: {str(e)}")
-    pass
+if has_internal_source():
+    import internal_source.rtp_llm.models.internal_init

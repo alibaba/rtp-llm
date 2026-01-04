@@ -17,6 +17,9 @@ public:
         for (auto& stream : streams) {
             auto cur_batch_size  = stream->currentBatchSize();
             auto next_batch_size = stream->nextBatchSize();
+            if (stream->isFakeStream()) {
+                is_fake_stream_ = true;
+            }
             if (stream->isContextStream()) {
                 context_streams_.push_back(stream);
                 total_context_batch_size_ += cur_batch_size;
@@ -44,6 +47,8 @@ public:
             adapter_names.push_back(stream->adapterName());
             gen_timeline_ |= stream->genTimeline();
         }
+        RTP_LLM_CHECK_WITH_INFO(
+            !(streams.size() > 1 && is_fake_stream_), "streams.size()[%d] > 1 && is_fake_stream_", streams.size());
     }
 
     size_t totalDecodeBatchSize() const {
@@ -147,6 +152,14 @@ public:
         return gen_timeline_;
     }
 
+    bool isFakeStream() const {
+        return is_fake_stream_;
+    }
+
+    void setFakeStream(bool is_fake_stream) {
+        is_fake_stream_ = is_fake_stream;
+    }
+
     std::string debugString() const {
         std::stringstream debug_string, context_stream_ids, decode_stream_ids;
         for (auto& stream : context_streams_) {
@@ -166,8 +179,20 @@ public:
                      << ", total_block_update_copy_num: " << total_block_update_copy_num_
                      << ", max_block_size: " << max_block_size_
                      << ", model_execute_token_size: " << model_execute_token_size_ << ", max_seq_len: " << max_seq_len_
-                     << "}";
+                     << ", is_fake_stream: " << is_fake_stream_ << "}";
         return debug_string.str();
+    }
+
+    void updateStreams(const std::vector<StreamSpecUpdateInfo>& spec_update_infos) const {
+        int stream_idx = 0;
+        for (auto& stream : decode_streams_) {
+            stream->specUpdate(spec_update_infos[stream_idx]);
+            stream_idx++;
+        }
+        for (auto& stream : context_streams_) {
+            stream->specUpdate(spec_update_infos[stream_idx]);
+            stream_idx++;
+        }
     }
 
 private:
@@ -188,6 +213,7 @@ private:
     size_t                       total_score_batch_size_       = 0;
     bool                         has_multimodal_input_         = false;
     bool                         gen_timeline_                 = false;
+    bool                         is_fake_stream_               = false;
     std::list<std::string>       adapter_names;
 };
 

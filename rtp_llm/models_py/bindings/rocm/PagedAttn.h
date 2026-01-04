@@ -31,7 +31,10 @@ struct forward_param {
 };
 class PagedAttnDecodeOp {
 public:
-    PagedAttnDecodeOp(const AttentionConfigs& attn_configs, int layer_num, int64_t block_nums, const FMHAConfig& fmha_config);
+    PagedAttnDecodeOp(const AttentionConfigs& attn_configs,
+                      int                     layer_num,
+                      int64_t                 block_nums,
+                      const FMHAConfig&       fmha_config);
     bool support(torch_ext::PyAttentionInputs attn_inputs);
 
     CKAttnPtr     prepare(torch_ext::PyAttentionInputs attn_inputs);
@@ -46,7 +49,6 @@ private:
     FMHAConfig       fmha_config_;
     ROCmDevice*      device_;
     // Offset for KV cache blocks, calculated as num_layers * block_nums
-    size_t kv_block_offset_;
     // Flag to control whether to use AITER paged attention, controlled by USE_AITER_PA env var
     bool use_aiter_pa_ = true;
 };

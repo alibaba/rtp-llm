@@ -14,8 +14,5 @@ from .per_block_fp8_quant_weight import PerBlockFp8Weight
 from .per_channel_fp8_quant_weight import PerChannelFp8Weight
 from .per_tensor_int8_quant_weight import PerTensorInt8QuantWeight
 from .smooth_quant_weight import SmoothQuantWeightInfo
-from .static_fp8_quant_weight import (
-    Fp8PerTensorCompressedWeight,
-    StaticPerTensorFp8Weight,
-)
+from .static_fp8_quant_weight import Fp8PerTensorCompressedWeight
 from .weight_only_quant_weight import WeightOnlyPerColWeight

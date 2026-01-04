@@ -5,18 +5,20 @@ from typing import List
 import torch
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.ops import ParallelismConfig, MoeConfig
 from rtp_llm.models_py.distributed.collective_torch import (
     destroy_distributed_environment,
     init_distributed_environment,
 )
-from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.routers.deepep_normal_router import (
     DeepepNormalRouter,
 )
+from rtp_llm.ops import MoeConfig, ParallelismConfig
 from rtp_llm.test.utils.port_util import PortManager
 
 import rtp_llm.ops.compute_ops as compute_ops  # isort:skip
@@ -24,18 +26,20 @@ import rtp_llm.ops.compute_ops as compute_ops  # isort:skip
 # from libth_transformer.rtp_llm_ops import trt_fp8_quantize_128  # isort:skip
 
 
-def init_router(rank: int, use_fp8: bool, parallelism_config: ParallelismConfig, nccl_port: int):
+def init_router(
+    rank: int, use_fp8: bool, parallelism_config: ParallelismConfig, nccl_port: int
+):
     # Create configuration objects
     model_config = ModelConfig()
     model_config.expert_num = 16
     model_config.hidden_size = 1024
-    
+
     # Use the provided parallelism_config directly
     parallelism_config.world_rank = rank
     parallelism_config.local_rank = rank
     parallelism_config.nccl_ip = "127.0.0.1"
     parallelism_config.th_nccl_port = nccl_port
-    
+
     moe_config = MoeConfig()
     moe_config.use_deepep_low_latency = False
 
@@ -46,8 +50,14 @@ def init_router(rank: int, use_fp8: bool, parallelism_config: ParallelismConfig,
         moe_config=moe_config,
         max_generate_batch_size=0,
     )
-    
-    init_distributed_environment(parallelism_config, nccl_ip="127.0.0.1", th_nccl_port=nccl_port, backend="nccl", timeout=60)
+
+    init_distributed_environment(
+        parallelism_config,
+        nccl_ip="127.0.0.1",
+        th_nccl_port=nccl_port,
+        backend="nccl",
+        timeout=60,
+    )
     router = DeepepNormalRouter(config_adapter, use_fp8, expert_alignment=1)
     return config_adapter, router
 
@@ -68,7 +78,13 @@ def dequant_to_bf16(expert_x: torch.Tensor, expert_x_scale: torch.Tensor):
     return combine_x.bfloat16()
 
 
-def worker_function(rank: int, use_fp8: bool, token_num_per_rank: List[int], parallelism_config: ParallelismConfig, nccl_port: int):
+def worker_function(
+    rank: int,
+    use_fp8: bool,
+    token_num_per_rank: List[int],
+    parallelism_config: ParallelismConfig,
+    nccl_port: int,
+):
     random.seed(rank)
     config, router = init_router(rank, use_fp8, parallelism_config, nccl_port)
     try:
@@ -98,8 +114,6 @@ def worker_function(rank: int, use_fp8: bool, token_num_per_rank: List[int], par
                 None,
                 topk_weights,
                 topk_ids,
-                config.expert_num,
-                quant_config,
             )
             assert payload.expert_tokens_meta.expert_num_tokens_cpu == [
                 sum(token_num_per_rank)
@@ -124,11 +138,11 @@ def test_single(world_size: int, use_fp8: bool):
     port_manager = PortManager()
     ports, locks = port_manager.get_consecutive_ports(1)
     nccl_port = ports[0]
-    
+
     tp_size = world_size  # TP size equals world_size for ROCm normal router
     dp_size = 1
     ep_size = world_size  # EP size equals world_size for normal router
-    
+
     # 启动world_size个进程
     processes = []
     token_num_per_rank = [random.randint(4, 12) // 4 * 4 for _ in range(world_size)]
@@ -144,7 +158,7 @@ def test_single(world_size: int, use_fp8: bool):
         parallelism_config.world_size = world_size
         parallelism_config.world_rank = rank
         parallelism_config.local_world_size = world_size
-        
+
         # 创建进程
         p = mp.Process(
             target=worker_function,
@@ -153,7 +167,7 @@ def test_single(world_size: int, use_fp8: bool):
         )
         processes.append(p)
         p.start()
-    
+
     # Release locks after all processes start
     for lock in locks:
         lock.__exit__(None, None, None)
