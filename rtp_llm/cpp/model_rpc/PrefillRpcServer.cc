@@ -131,8 +131,7 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
 
     // If no host specified in request, check if there's a master role
     char* remote_rpc_server_ip_env = std::getenv("REMOTE_RPC_SERVER_IP");
-    bool has_master_role =
-        (remote_rpc_server_ip_env != nullptr && strlen(remote_rpc_server_ip_env) > 0);
+    bool  has_master_role          = (remote_rpc_server_ip_env != nullptr && strlen(remote_rpc_server_ip_env) > 0);
 
     // If no host specified in request and no master role, this is a direct prefill request
     // In this case, we still need to select decode machines as specified in the requirements
@@ -293,7 +292,6 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
     generate_request.mutable_propose_token_ids()->CopyFrom(
         {stream->getProposeToken().begin(), stream->getProposeToken().end()});
 
-    // TODO(yinzhi): trans propose probs and hidden states
     auto sp_output_buffer = stream->getSPOutputBuffer();
 
     if (sp_output_buffer) {
@@ -407,11 +405,10 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
                                                   meta_);
     prefill_context.onflight_requests      = onflight_requests_;
     prefill_context.loading_cache_requests = loading_cache_requests_;
-    
 
-    auto max_retry_times                   = maga_init_params_.pd_sep_config.prefill_retry_times;
-    auto max_retry_timeout_ms              = maga_init_params_.pd_sep_config.prefill_retry_timeout_ms;
-    int  retry_interval_ms                 = 1;
+    auto max_retry_times      = maga_init_params_.pd_sep_config.prefill_retry_times;
+    auto max_retry_timeout_ms = maga_init_params_.pd_sep_config.prefill_retry_timeout_ms;
+    int  retry_interval_ms    = 1;
 
     try {
         EXECUTE_WITH_RETRY(
